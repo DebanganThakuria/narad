@@ -1,0 +1,8 @@
+.idea
+
+bin/
+
+data/
+*.data
+
+requirements.md
