@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -9,14 +8,12 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker"
 )
 
-// Consume handles GET /topics/{topic}/consume?partition=<n>&offset=<n>&wait=<duration>.
+// Consume handles GET /v1/topics/{topic}/consume.
 //
-// Behaviour:
-//   - No offset: queue-style pull.
-//   - Offset set: replay mode (partition required).
-//   - wait > 0: long-poll up to MaxConsumeWait.
-//   - 200 with body when a message is available.
-//   - 204 when no message materialises within wait.
+// Query params: partition, offset, wait. No offset = queue-style
+// pull. Offset set = replay (partition required). wait > 0 =
+// long-poll up to MaxConsumeWait. Returns 204 if no message
+// materialises within wait.
 func (s *Set) Consume(w http.ResponseWriter, r *http.Request) {
 	topicName := r.PathValue("topic")
 	if topicName == "" {
@@ -30,24 +27,17 @@ func (s *Set) Consume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	msg, found, err := s.deps.Broker.Consume(r.Context(), topicName, opts)
-	switch {
-	case errors.Is(err, broker.ErrTopicNotFound):
-		s.writeError(w, http.StatusNotFound, "topic not found")
-	case errors.Is(err, broker.ErrInvalidArgument), errors.Is(err, broker.ErrPartitionRequired):
-		s.writeError(w, http.StatusBadRequest, err.Error())
-	case err != nil:
-		s.deps.Logger.Error("consume", "err", err, "topic", topicName)
-		s.writeError(w, http.StatusInternalServerError, "consume failed")
-	case !found:
-		w.WriteHeader(http.StatusNoContent)
-	default:
-		s.writeJSON(w, http.StatusOK, msg)
+	if err != nil {
+		s.writeBrokerError(w, "consume", err)
+		return
 	}
+	if !found {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, msg)
 }
 
-// parseConsumeQuery extracts ConsumeOpts from the request's query
-// string. On error it has already responded to the client and returns
-// ok=false.
 func (s *Set) parseConsumeQuery(w http.ResponseWriter, r *http.Request) (broker.ConsumeOpts, bool) {
 	q := r.URL.Query()
 	opts := broker.ConsumeOpts{}

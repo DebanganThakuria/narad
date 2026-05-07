@@ -46,6 +46,54 @@ func (c *Config) Validate() error {
 	default:
 		errs = append(errs, fmt.Sprintf("storage.fsync %q is not one of [per_write, batched]", c.Storage.Fsync))
 	}
+	switch strings.ToLower(c.Storage.Codec) {
+	case "zstd", "none":
+	default:
+		errs = append(errs, fmt.Sprintf("storage.codec %q is not one of [zstd, none]", c.Storage.Codec))
+	}
+	switch strings.ToLower(c.Storage.CompressionLevel) {
+	case "fastest", "default", "better", "best":
+	default:
+		errs = append(errs, fmt.Sprintf("storage.compression_level %q is not one of [fastest, default, better, best]", c.Storage.CompressionLevel))
+	}
+	if c.Storage.FlushBytes < 0 {
+		errs = append(errs, "storage.flush_bytes must be >= 0")
+	}
+	if c.Storage.FlushRecords < 0 {
+		errs = append(errs, "storage.flush_records must be >= 0")
+	}
+	if c.Storage.FlushIntervalMs <= 0 {
+		errs = append(errs, "storage.flush_interval_ms must be > 0")
+	}
+	if c.Storage.FlushBytes == 0 && c.Storage.FlushRecords == 0 {
+		errs = append(errs, "at least one of storage.flush_bytes or storage.flush_records must be > 0")
+	}
+	if c.Storage.SegmentBytes < 4096 {
+		errs = append(errs, fmt.Sprintf("storage.segment_bytes (%d) must be >= 4096", c.Storage.SegmentBytes))
+	}
+	if c.Storage.RetentionCheckIntervalMs <= 0 {
+		errs = append(errs, "storage.retention_check_interval_ms must be > 0")
+	}
+
+	if c.Topic.DefaultPartitions <= 0 {
+		errs = append(errs, "topic.default_partitions must be > 0")
+	}
+	if c.Topic.MaxPartitions <= 0 {
+		errs = append(errs, "topic.max_partitions must be > 0")
+	}
+	if c.Topic.DefaultPartitions > c.Topic.MaxPartitions {
+		errs = append(errs, fmt.Sprintf("topic.default_partitions (%d) must not exceed topic.max_partitions (%d)",
+			c.Topic.DefaultPartitions, c.Topic.MaxPartitions))
+	}
+	if c.Topic.DefaultReplicationFactor <= 0 {
+		errs = append(errs, "topic.default_replication_factor must be > 0")
+	}
+	if c.Topic.DefaultRetentionAgeMs < 0 {
+		errs = append(errs, "topic.default_retention_age_ms must be >= 0")
+	}
+	if c.Topic.DefaultRetentionBytes < 0 {
+		errs = append(errs, "topic.default_retention_bytes must be >= 0")
+	}
 
 	switch strings.ToLower(c.Log.Level) {
 	case "debug", "info", "warn", "error":

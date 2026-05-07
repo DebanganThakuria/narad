@@ -7,17 +7,15 @@ import (
 	"github.com/debanganthakuria/narad/internal/storage"
 )
 
-// impl is the default Broker implementation. It is unexported because
-// transports should depend on the Broker interface, not the type.
 type impl struct {
 	deps Deps
 
-	mu    sync.RWMutex
-	logs  map[string]*storage.Log // partKey -> log
-	locks map[string]*sync.Mutex  // partKey -> per-partition write lock
+	// mu protects the logs map for lazy open. Once a *storage.Log
+	// is in the map, the log itself is internally synchronized.
+	mu   sync.RWMutex
+	logs map[string]*storage.Log
 }
 
-// New constructs the default Broker.
 func New(d Deps) (Broker, error) {
 	if d.DataDir == "" {
 		return nil, fmt.Errorf("%w: data_dir empty", ErrInvalidArgument)
@@ -26,10 +24,15 @@ func New(d Deps) (Broker, error) {
 		d.Offsets == nil || d.Replicator == nil || d.Logger == nil {
 		return nil, fmt.Errorf("%w: missing dependency", ErrInvalidArgument)
 	}
+	if d.TopicPolicy.DefaultPartitions <= 0 {
+		return nil, fmt.Errorf("%w: TopicPolicy.DefaultPartitions must be > 0", ErrInvalidArgument)
+	}
+	if d.TopicPolicy.DefaultReplicationFactor <= 0 {
+		return nil, fmt.Errorf("%w: TopicPolicy.DefaultReplicationFactor must be > 0", ErrInvalidArgument)
+	}
 
 	return &impl{
-		deps:  d,
-		logs:  map[string]*storage.Log{},
-		locks: map[string]*sync.Mutex{},
+		deps: d,
+		logs: map[string]*storage.Log{},
 	}, nil
 }

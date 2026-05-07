@@ -10,7 +10,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
+
+	"github.com/klauspost/compress/zstd"
 
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/config"
@@ -22,6 +26,8 @@ import (
 	"github.com/debanganthakuria/narad/internal/partition"
 	"github.com/debanganthakuria/narad/internal/replication"
 	"github.com/debanganthakuria/narad/internal/schema"
+	"github.com/debanganthakuria/narad/internal/storage"
+	"github.com/debanganthakuria/narad/internal/topic"
 )
 
 func runServe(args []string) error {
@@ -99,8 +105,23 @@ func runServe(args []string) error {
 		}
 	}()
 
+	logOpts, err := storageOptions(cfg.Storage)
+	if err != nil {
+		return fmt.Errorf("storage options: %w", err)
+	}
+
 	br, err := broker.New(broker.Deps{
 		DataDir:    cfg.Storage.DataDir,
+		LogOptions: logOpts,
+		TopicPolicy: broker.TopicPolicy{
+			DefaultPartitions:        cfg.Topic.DefaultPartitions,
+			MaxPartitions:            cfg.Topic.MaxPartitions,
+			DefaultReplicationFactor: cfg.Topic.DefaultReplicationFactor,
+			DefaultRetention: topic.Retention{
+				MaxAgeMs: cfg.Topic.DefaultRetentionAgeMs,
+				MaxBytes: cfg.Topic.DefaultRetentionBytes,
+			},
+		},
 		Metastore:  ms,
 		Partitions: partition.NewHashRoundRobin(),
 		Schemas:    schema.NewAlwaysValid(),
@@ -139,4 +160,51 @@ func runServe(args []string) error {
 	}
 	log.Info("narad serve stopped")
 	return nil
+}
+
+func storageOptions(sc config.StorageConfig) (storage.Options, error) {
+	var codec storage.Codec
+	switch strings.ToLower(sc.Codec) {
+	case "none":
+		codec = storage.NewNoopCodec()
+	case "zstd", "":
+		level, err := zstdLevelFromString(sc.CompressionLevel)
+		if err != nil {
+			return storage.Options{}, err
+		}
+		codec, err = storage.NewZstdCodec(level)
+		if err != nil {
+			return storage.Options{}, err
+		}
+	default:
+		return storage.Options{}, fmt.Errorf("unknown codec %q", sc.Codec)
+	}
+	return storage.Options{
+		Codec:         codec,
+		FlushBytes:    sc.FlushBytes,
+		FlushRecords:  sc.FlushRecords,
+		FlushInterval: time.Duration(sc.FlushIntervalMs) * time.Millisecond,
+		SegmentBytes:  sc.SegmentBytes,
+		// Per-topic MaxAge/MaxBytes get filled in by the broker per
+		// partition (see broker/partition_log.go). Only the
+		// operational dial comes from storage config.
+		Retention: storage.RetentionConfig{
+			CheckInterval: time.Duration(sc.RetentionCheckIntervalMs) * time.Millisecond,
+		},
+	}, nil
+}
+
+func zstdLevelFromString(s string) (zstd.EncoderLevel, error) {
+	switch strings.ToLower(s) {
+	case "fastest":
+		return zstd.SpeedFastest, nil
+	case "default", "":
+		return zstd.SpeedDefault, nil
+	case "better":
+		return zstd.SpeedBetterCompression, nil
+	case "best":
+		return zstd.SpeedBestCompression, nil
+	default:
+		return 0, fmt.Errorf("unknown compression level %q", s)
+	}
 }

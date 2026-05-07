@@ -66,7 +66,7 @@ func (b *impl) replayRead(topicName string, partitionIdx int, offset int64, tota
 	if partitionIdx < 0 || partitionIdx >= totalPartitions {
 		return topic.Message{}, false, fmt.Errorf("%w: partition out of range", ErrInvalidArgument)
 	}
-	log, _, err := b.partitionLog(topicName, partitionIdx)
+	log, err := b.partitionLog(topicName, partitionIdx)
 	if err != nil {
 		return topic.Message{}, false, err
 	}
@@ -91,7 +91,7 @@ func (b *impl) replayRead(topicName string, partitionIdx int, offset int64, tota
 // block — callers handle long-polling.
 func (b *impl) tryQueueRead(ctx context.Context, topicName string, partitions []int) (topic.Message, bool, error) {
 	for _, idx := range partitions {
-		log, _, err := b.partitionLog(topicName, idx)
+		log, err := b.partitionLog(topicName, idx)
 		if err != nil {
 			return topic.Message{}, false, err
 		}
@@ -122,7 +122,7 @@ func (b *impl) tryQueueRead(ctx context.Context, topicName string, partitions []
 func (b *impl) waitForActivity(ctx context.Context, topicName string, partitions []int, timeout time.Duration) error {
 	cases := make([]reflect.SelectCase, 0, len(partitions)+2)
 	for _, idx := range partitions {
-		log, _, err := b.partitionLog(topicName, idx)
+		log, err := b.partitionLog(topicName, idx)
 		if err != nil {
 			return err
 		}
