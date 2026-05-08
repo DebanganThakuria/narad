@@ -1,0 +1,6 @@
+README.md
+  5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T09:34:14.694Z 8-14,27-29,35-37,43,45,47-73,106,109,112-113,115,120,123,128-131,133-135,137-138,144-145,147-148,153-155,180,214,219-220,243,246,316,323,325-328,330-333,336-338,342-344,346-356,358-359,362-364,366,369,372-377,380-381,387-391,393,395-399,401-423,425-428,430-436,438-440,442-444,446,448-453,455-462,464,466-467,469-471,473-475,477,479-492,494,498-504
+narad.example.json
+  5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T09:34:40.073Z 27,37-39
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T09:34:14.694Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 211, "overriden_lines": 0}, "5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T09:34:40.073Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 4, "overriden_lines": 0}}}
