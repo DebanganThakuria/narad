@@ -123,6 +123,7 @@ func (s *SQLiteStore) Close() error {
 // -- cache key helpers --
 
 func topicCacheKey(name string) string { return "t:" + name }
+
 func schemaCacheKey(topic string, ver int) string {
 	return "s:" + topic + ":" + fmt.Sprint(ver)
 }
