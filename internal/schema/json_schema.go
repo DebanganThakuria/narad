@@ -14,7 +14,7 @@ import (
 // Schemas are pre-compiled on Register for fast repeated validation.
 type JSONSchema struct {
 	mu       sync.RWMutex
-	versions map[string]int                       // topic → latest version number
+	versions map[string]int                        // topic → latest version number
 	schemas  map[string]map[int]*jsonschema.Schema // topic → version → compiled schema
 }
 

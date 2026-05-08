@@ -80,12 +80,18 @@ func (f *flusher) writeBatch(records [][]byte, baseOffset int64) error {
 	}
 	active := f.log.segments[len(f.log.segments)-1]
 
+	flushStart := time.Now()
 	pos, n, err := active.writeFrame(records, baseOffset, f.log.codec)
 	if err != nil {
 		return err
 	}
+
+	syncStart := time.Now()
 	if err := active.sync(); err != nil {
 		return fmt.Errorf("storage: flusher fsync: %w", err)
+	}
+	if m := f.log.opts.Metrics; m != nil {
+		m.ObserveFsync(time.Since(syncStart))
 	}
 
 	for i := range records {
@@ -97,12 +103,19 @@ func (f *flusher) writeBatch(records [][]byte, baseOffset int64) error {
 		}
 	}
 
+	if m := f.log.opts.Metrics; m != nil {
+		m.ObserveFlush(time.Since(flushStart), int64(n))
+	}
+
 	if active.sizeBytes >= f.log.opts.SegmentBytes {
 		newActive, err := createSegment(f.log.dir, active.nextOffset)
 		if err != nil {
 			return fmt.Errorf("storage: flusher roll: %w", err)
 		}
 		f.log.segments = append(f.log.segments, newActive)
+		if m := f.log.opts.Metrics; m != nil {
+			m.IncSegmentRolled()
+		}
 	}
 
 	select {

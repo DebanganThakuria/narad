@@ -106,6 +106,12 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Sprintf("log.format %q is not one of [json, text]", c.Log.Format))
 	}
 
+	if pprof := strings.TrimSpace(c.Debug.PProfAddr); pprof != "" {
+		if pprof == c.HTTP.Addr || pprof == c.Cluster.Addr {
+			errs = append(errs, "debug.pprof_addr must differ from http.addr and cluster.addr")
+		}
+	}
+
 	if len(errs) == 0 {
 		return nil
 	}

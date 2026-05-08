@@ -5,6 +5,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/metastore"
+	"github.com/debanganthakuria/narad/internal/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/partition"
 	"github.com/debanganthakuria/narad/internal/replication"
 	"github.com/debanganthakuria/narad/internal/schema"
@@ -22,6 +23,10 @@ type Deps struct {
 	Offsets     consumer.OffsetTracker
 	Replicator  replication.Replicator
 	Logger      *slog.Logger
+
+	// Metrics is optional. When nil, instrumentation short-circuits to
+	// noops. Tests typically pass nil; serve.go wires a real instance.
+	Metrics *metrics.Metrics
 }
 
 // TopicPolicy supplies CreateTopic's defaults and bounds. Lives in the

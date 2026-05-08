@@ -207,4 +207,3 @@ func TestStoreUpdatesExistingEntry(t *testing.T) {
 		t.Fatalf("list should contain one element after update, got %d", c.ll.Len())
 	}
 }
-

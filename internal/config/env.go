@@ -132,6 +132,10 @@ func applyEnv(cfg *Config) error {
 		cfg.Worker.Enabled = b
 	}
 
+	if v, ok := os.LookupEnv("NARAD_DEBUG_PPROF_ADDR"); ok {
+		cfg.Debug.PProfAddr = v
+	}
+
 	return nil
 }
 

@@ -22,8 +22,7 @@ func (s *SQLiteStore) CreateTopic(ctx context.Context, t topic.Topic) error {
 		return ErrAlreadyExists
 	}
 
-	record := TopicRecord{}.FromTopic(t)
-	if err := s.db.WithContext(ctx).Create(&record).Error; err != nil {
+	if err := s.db.WithContext(ctx).Create(new(TopicRecord{}.FromTopic(t))).Error; err != nil {
 		return err
 	}
 	s.cache.delete(listTopicsKey)

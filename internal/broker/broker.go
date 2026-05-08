@@ -9,6 +9,7 @@ package broker
 import (
 	"context"
 
+	"github.com/debanganthakuria/narad/internal/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/topic"
 )
 
@@ -26,6 +27,10 @@ type Broker interface {
 	Produce(ctx context.Context, topicName, key string, payload []byte) (offset int64, partition int, err error)
 	Consume(ctx context.Context, topicName string, opts ConsumeOpts) (msg topic.Message, found bool, err error)
 	Ack(ctx context.Context, topicName string, partition int, offset int64) error
+
+	// Snapshot returns the current runtime state of every topic and
+	// partition. Used by the metrics poller; safe to call frequently.
+	Snapshot(ctx context.Context) ([]metrics.TopicSnapshot, error)
 
 	Ready(ctx context.Context) error
 	Close() error
