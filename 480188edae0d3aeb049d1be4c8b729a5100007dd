@@ -1,0 +1,22 @@
+internal/broker/broker.go
+  5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:36:38.792Z 12,21-24,26-30,34-36
+internal/broker/snapshot.go
+  5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:38:00.715Z 6,26-28
+internal/broker/topics.go
+  5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:37:37.605Z 19-23,46-49,55,74-76,81-98,229-231,233-244,246-249,251-254,256-257,259-264,266-280,282-289,291-296,298
+internal/broker/topics_test.go
+  5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:41:33.370Z 19,52-53,57-60,63-65,71-72,79-83,91,98-101,103-105,107-118,120-122,124-127,134,138,148,158,181,194,207,211,230-232,234-236,238-242,244-250,252-258,260-265,267-269,271-281,283-285,287-291,297,331,337,367,370,400-402,404-408,410-423,425-435,437-448,450-452,454-458,460-470
+internal/httpserver/handlers/alter_topic.go
+  5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:39:20.698Z 7,10-16,18-19,23-30,36-37,50-59
+internal/httpserver/handlers/create_topic.go
+  5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:38:39.621Z 3-4,6-7,10-13,22
+internal/httpserver/handlers/list_topics.go
+  5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:38:59.251Z 5,7,11-14,16-27,29-33,35-38,47-51,53-66
+internal/httpserver/router.go
+  5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:43:50.788Z 26,30
+internal/metastore/metastore.go
+  5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:35:27.740Z 17,28-43
+internal/metastore/topics.go
+  5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:35:51.547Z 101-116,118,120,125,135-136,138-144,146-149,151-154,156-159,161-165
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:36:38.792Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 13, "overriden_lines": 0}, "5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:38:00.715Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 4, "overriden_lines": 0}, "5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:37:37.605Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 92, "overriden_lines": 0}, "5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:41:33.370Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 174, "overriden_lines": 0}, "5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:39:20.698Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 30, "overriden_lines": 0}, "5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:38:39.621Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 9, "overriden_lines": 0}, "5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:38:59.251Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 46, "overriden_lines": 0}, "5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:43:50.788Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 2, "overriden_lines": 0}, "5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:35:27.740Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 17, "overriden_lines": 0}, "5841538e-ab71-4f71-bc14-936b0fe7df3a:2026-05-08T07:35:51.547Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 45, "overriden_lines": 0}}}
