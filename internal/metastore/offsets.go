@@ -2,36 +2,14 @@ package metastore
 
 import "context"
 
-// GetConsumerOffset returns the last committed offset for a partition.
-// Returns ErrNotFound if no commit has been recorded yet — callers
-// should treat that as "start from offset 0".
-func (s *JSONFileStore) GetConsumerOffset(_ context.Context, topic string, partition int) (int64, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	parts, ok := s.state.Offsets[topic]
-	if !ok {
-		return 0, ErrNotFound
+func (s *SQLiteStore) GetConsumerOffset(_ context.Context, topicName string, partition int) (int64, error) {
+	if v, ok := s.offsets.get(topicName, partition); ok {
+		return v, nil
 	}
-	off, ok := parts[partition]
-	if !ok {
-		return 0, ErrNotFound
-	}
-	return off, nil
+	return 0, ErrNotFound
 }
 
-// SetConsumerOffset records the committed offset for a partition. The
-// caller is responsible for monotonicity; this method overwrites
-// blindly.
-func (s *JSONFileStore) SetConsumerOffset(_ context.Context, topic string, partition int, offset int64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	parts, ok := s.state.Offsets[topic]
-	if !ok {
-		parts = map[int]int64{}
-		s.state.Offsets[topic] = parts
-	}
-	parts[partition] = offset
-	return s.flush()
+func (s *SQLiteStore) SetConsumerOffset(_ context.Context, topicName string, partition int, offset int64) error {
+	s.offsets.set(topicName, partition, offset)
+	return nil
 }

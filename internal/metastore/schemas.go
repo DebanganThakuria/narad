@@ -1,35 +1,55 @@
 package metastore
 
-import "context"
+import (
+	"context"
+	"errors"
 
-// PutSchema stores the raw schema bytes under (topic, version). The
-// payload is copied so the caller is free to mutate the slice afterward.
-func (s *JSONFileStore) PutSchema(_ context.Context, topic string, version int, schema []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
 
-	versions, ok := s.state.Schemas[topic]
-	if !ok {
-		versions = map[int][]byte{}
-		s.state.Schemas[topic] = versions
+func (s *SQLiteStore) PutSchema(ctx context.Context, topicName string, version int, schema []byte) error {
+	copied := make([]byte, len(schema))
+	copy(copied, schema)
+
+	if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		UpdateAll: true,
+	}).Create(&SchemaRecord{
+		Topic:   topicName,
+		Version: version,
+		Schema:  copied,
+	}).Error; err != nil {
+		return err
 	}
-	versions[version] = append([]byte(nil), schema...) // detach from caller
-	return s.flush()
+	s.cache.delete(schemaCacheKey(topicName, version))
+	return nil
 }
 
-// GetSchema returns the raw schema bytes for (topic, version). Returns
-// ErrNotFound if no such schema exists.
-func (s *JSONFileStore) GetSchema(_ context.Context, topic string, version int) ([]byte, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *SQLiteStore) GetSchema(ctx context.Context, topicName string, version int) ([]byte, error) {
+	key := schemaCacheKey(topicName, version)
+	if v, ok := s.cache.get(key); ok {
+		// Defensive copy: the cache holds the canonical bytes and must
+		// not be mutated by callers. Cheap relative to the SQLite read
+		// we just avoided.
+		cached := v.([]byte)
+		out := make([]byte, len(cached))
+		copy(out, cached)
+		return out, nil
+	}
 
-	versions, ok := s.state.Schemas[topic]
-	if !ok {
-		return nil, ErrNotFound
+	var record SchemaRecord
+	if err := s.db.WithContext(ctx).Where("topic = ? AND version = ?", topicName, version).First(&record).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
 	}
-	schema, ok := versions[version]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	return append([]byte(nil), schema...), nil
+	// Two copies: one stays in the cache, the other goes to the caller.
+	cached := make([]byte, len(record.Schema))
+	copy(cached, record.Schema)
+	s.cache.store(key, cached, topicName)
+
+	out := make([]byte, len(cached))
+	copy(out, cached)
+	return out, nil
 }

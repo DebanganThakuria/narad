@@ -1,8 +1,8 @@
 // Package schema is the contract for per-topic JSON Schema validation.
 //
-// The wiring pass ships an AlwaysValid stub so produce requests aren't
-// blocked. A real draft-07 (or later) validator will land here, also
-// hand-rolled to keep the zero-dep policy.
+// The wiring pass ships a JSON Schema validator backed by
+// github.com/santhosh-tekuri/jsonschema. A permissive AlwaysValid
+// stub is available for tests.
 package schema
 
 import "context"

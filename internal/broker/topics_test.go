@@ -23,7 +23,7 @@ import (
 func newTestBroker(t *testing.T, policy broker.TopicPolicy) (broker.Broker, string) {
 	t.Helper()
 	dir := t.TempDir()
-	ms, err := metastore.NewJSONFileStore(filepath.Join(dir, "metadata.json"))
+	ms, err := metastore.NewSQLiteStore(filepath.Join(dir, "metadata.db"))
 	if err != nil {
 		t.Fatalf("metastore: %v", err)
 	}

@@ -95,7 +95,7 @@ func runServe(args []string) error {
 		return fmt.Errorf("data dir: %w", err)
 	}
 
-	ms, err := metastore.NewJSONFileStore(filepath.Join(cfg.Storage.DataDir, "metadata.json"))
+	ms, err := metastore.NewSQLiteStore(filepath.Join(cfg.Storage.DataDir, "metadata.db"))
 	if err != nil {
 		return fmt.Errorf("metastore: %w", err)
 	}
@@ -124,7 +124,7 @@ func runServe(args []string) error {
 		},
 		Metastore:  ms,
 		Partitions: partition.NewHashRoundRobin(),
-		Schemas:    schema.NewAlwaysValid(),
+		Schemas:    schema.NewJSONSchema(),
 		Offsets:    consumer.NewMetastoreBacked(ms),
 		Replicator: replication.NewLocal(),
 		Logger:     log,

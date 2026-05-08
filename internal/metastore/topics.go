@@ -4,78 +4,117 @@ import (
 	"context"
 	"errors"
 
+	"gorm.io/gorm"
+
 	"github.com/debanganthakuria/narad/internal/topic"
 )
 
-func (s *JSONFileStore) CreateTopic(_ context.Context, t topic.Topic) error {
+func (s *SQLiteStore) CreateTopic(ctx context.Context, t topic.Topic) error {
 	if t.Name == "" {
 		return errors.New("metastore: topic name required")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	if _, exists := s.state.Topics[t.Name]; exists {
+	var count int64
+	if err := s.db.WithContext(ctx).Model(&TopicRecord{}).Where("name = ?", t.Name).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
 		return ErrAlreadyExists
 	}
-	s.state.Topics[t.Name] = t
-	return s.flush()
+
+	record := TopicRecord{}.FromTopic(t)
+	if err := s.db.WithContext(ctx).Create(&record).Error; err != nil {
+		return err
+	}
+	s.cache.delete(listTopicsKey)
+	return nil
 }
 
-// UpdateTopic replaces an existing topic record. Returns ErrNotFound
-// if no topic with that name is registered. Callers (the broker)
-// validate business rules; the metastore enforces only existence and
-// persistence.
-func (s *JSONFileStore) UpdateTopic(_ context.Context, t topic.Topic) error {
+func (s *SQLiteStore) UpdateTopic(ctx context.Context, t topic.Topic) error {
 	if t.Name == "" {
 		return errors.New("metastore: topic name required")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	if _, exists := s.state.Topics[t.Name]; !exists {
+	updates := map[string]any{
+		"partitions":         t.Partitions,
+		"replication_factor": t.ReplicationFactor,
+		"max_age_ms":         t.Retention.MaxAgeMs,
+		"max_bytes":          t.Retention.MaxBytes,
+	}
+	result := s.db.WithContext(ctx).Model(&TopicRecord{}).Where("name = ?", t.Name).Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
 		return ErrNotFound
 	}
-	s.state.Topics[t.Name] = t
-	return s.flush()
+	s.cache.delete(topicCacheKey(t.Name))
+	s.cache.delete(listTopicsKey)
+	return nil
 }
 
-// DeleteTopic removes the topic record, all consumer offsets, and all
-// schema versions. Callers must stop in-flight traffic and remove
-// on-disk segment data BEFORE calling this; we only delete metadata.
-func (s *JSONFileStore) DeleteTopic(_ context.Context, name string) error {
+func (s *SQLiteStore) DeleteTopic(ctx context.Context, name string) error {
 	if name == "" {
 		return errors.New("metastore: topic name required")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	if _, exists := s.state.Topics[name]; !exists {
-		return ErrNotFound
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Where("name = ?", name).Delete(&TopicRecord{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		tx.Where("topic = ?", name).Delete(&SchemaRecord{})
+		tx.Where("topic = ?", name).Delete(&ConsumerOffsetRecord{})
+		return nil
+	})
+	if err != nil {
+		return err
 	}
-	delete(s.state.Topics, name)
-	delete(s.state.Offsets, name)
-	delete(s.state.Schemas, name)
-	return s.flush()
+	// Surgical: drop only this topic's entries (topic record + every
+	// cached schema version), then explicitly invalidate the topics list.
+	s.cache.deleteTopicScope(name)
+	s.cache.delete(listTopicsKey)
+	s.offsets.deleteTopic(name)
+	return nil
 }
 
-func (s *JSONFileStore) GetTopic(_ context.Context, name string) (topic.Topic, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	t, ok := s.state.Topics[name]
-	if !ok {
-		return topic.Topic{}, ErrNotFound
+func (s *SQLiteStore) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
+	key := topicCacheKey(name)
+	if v, ok := s.cache.get(key); ok {
+		return v.(topic.Topic), nil
 	}
+
+	var record TopicRecord
+	if err := s.db.WithContext(ctx).Where("name = ?", name).First(&record).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return topic.Topic{}, ErrNotFound
+		}
+		return topic.Topic{}, err
+	}
+	t := record.ToTopic()
+	s.cache.store(key, t, name)
 	return t, nil
 }
 
-func (s *JSONFileStore) ListTopics(_ context.Context) ([]topic.Topic, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	out := make([]topic.Topic, 0, len(s.state.Topics))
-	for _, t := range s.state.Topics {
-		out = append(out, t)
+func (s *SQLiteStore) ListTopics(ctx context.Context) ([]topic.Topic, error) {
+	if v, ok := s.cache.get(listTopicsKey); ok {
+		return v.([]topic.Topic), nil
 	}
+
+	var records []TopicRecord
+	if err := s.db.WithContext(ctx).Order("name").Find(&records).Error; err != nil {
+		return nil, err
+	}
+
+	out := make([]topic.Topic, 0, len(records))
+	for _, r := range records {
+		out = append(out, r.ToTopic())
+	}
+	// listTopicsKey is global, not scoped to one topic — we invalidate
+	// it explicitly on Create/Update/Delete.
+	s.cache.store(listTopicsKey, out, "")
 	return out, nil
 }
