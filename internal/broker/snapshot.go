@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 
+	"github.com/debanganthakuria/narad/internal/metastore"
 	"github.com/debanganthakuria/narad/internal/observability/metrics"
 )
 
@@ -22,7 +23,9 @@ import (
 // already (for Deps.Metrics) so the dependency direction is
 // preserved.
 func (b *impl) Snapshot(ctx context.Context) ([]metrics.TopicSnapshot, error) {
-	topics, err := b.deps.Metastore.ListTopics(ctx)
+	// Limit=0 is the unpaginated, cached path — appropriate for the
+	// poller, which always wants every topic in one shot.
+	topics, _, err := b.deps.Metastore.ListTopics(ctx, metastore.ListOptions{})
 	if err != nil {
 		return nil, err
 	}

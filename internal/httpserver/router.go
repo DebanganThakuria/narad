@@ -23,11 +23,11 @@ func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prome
 
 	// Create and list topics
 	mux.HandleFunc("POST /v1/topics", h.CreateTopic)
-	mux.HandleFunc("GET /v1/topics", h.ListTopics) // TODO Add pagination
+	mux.HandleFunc("GET /v1/topics", h.ListTopics)
 
 	// Topic specific actions
 	mux.HandleFunc("GET /v1/topics/{topic}", h.GetTopic)
-	mux.HandleFunc("PATCH /v1/topics/{topic}", h.AlterTopic) // TODO Add schema update with backwards compatability, Also update retention MS
+	mux.HandleFunc("PATCH /v1/topics/{topic}", h.AlterTopic) // TODO Add schema update with backwards compatibility
 	mux.HandleFunc("DELETE /v1/topics/{topic}", h.DeleteTopic)
 
 	// Produce, Consume and Ack
