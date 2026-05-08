@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/topic"
@@ -24,7 +25,11 @@ func (b *impl) Consume(ctx context.Context, topicName string, opts ConsumeOpts) 
 	}
 
 	if opts.Offset != nil {
-		return b.replayRead(topicName, *opts.Partition, *opts.Offset, t.Partitions)
+		msg, found, err := b.replayRead(topicName, *opts.Partition, *opts.Offset, t.Partitions)
+		if found {
+			b.recordConsumed(topicName, msg.Partition, len(msg.Payload))
+		}
+		return msg, found, err
 	}
 
 	scan := allPartitions(t.Partitions)
@@ -35,28 +40,73 @@ func (b *impl) Consume(ctx context.Context, topicName string, opts ConsumeOpts) 
 		scan = []int{*opts.Partition}
 	}
 
-	deadline := time.Now().Add(opts.Wait)
+	start := time.Now()
+	deadline := start.Add(opts.Wait)
 	for {
 		msg, found, err := b.tryQueueRead(ctx, topicName, scan)
-		if err != nil || found {
-			return msg, found, err
+		if err != nil {
+			b.deps.Metrics.IncError("broker", "consume")
+			return msg, false, err
+		}
+		if found {
+			b.recordConsumed(topicName, msg.Partition, len(msg.Payload))
+			b.recordConsumeWait(topicName, "hit", time.Since(start))
+			return msg, true, nil
 		}
 
 		if opts.Wait <= 0 {
+			b.recordConsumeEmpty(topicName, "no_wait", time.Since(start))
 			return topic.Message{}, false, nil
 		}
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
+			b.recordConsumeEmpty(topicName, "timeout", time.Since(start))
 			return topic.Message{}, false, nil
 		}
 		if err := b.waitForActivity(ctx, topicName, scan, remaining); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				outcome := "timeout"
+				if errors.Is(err, context.Canceled) {
+					outcome = "cancelled"
+				}
+				b.recordConsumeEmpty(topicName, outcome, time.Since(start))
 				return topic.Message{}, false, nil
 			}
+			b.deps.Metrics.IncError("broker", "consume_wait")
 			return topic.Message{}, false, err
 		}
 	}
+}
+
+// recordConsumed bumps the per-partition delivered counters.
+func (b *impl) recordConsumed(topicName string, partition, payloadBytes int) {
+	if b.deps.Metrics == nil {
+		return
+	}
+	partLabel := strconv.Itoa(partition)
+	b.deps.Metrics.MessagesConsumedTotal.WithLabelValues(topicName, partLabel).Inc()
+	b.deps.Metrics.BytesConsumedTotal.WithLabelValues(topicName, partLabel).Add(float64(payloadBytes))
+}
+
+// recordConsumeWait observes the long-poll histogram for a hit
+// outcome (a message was returned).
+func (b *impl) recordConsumeWait(topicName, outcome string, dur time.Duration) {
+	if b.deps.Metrics == nil {
+		return
+	}
+	b.deps.Metrics.ConsumeWaitSeconds.WithLabelValues(topicName, outcome).Observe(dur.Seconds())
+}
+
+// recordConsumeEmpty observes the histogram for a no-message outcome
+// (timeout, cancellation, or wait<=0 with empty queue) and increments
+// the empty-consume counter.
+func (b *impl) recordConsumeEmpty(topicName, outcome string, dur time.Duration) {
+	if b.deps.Metrics == nil {
+		return
+	}
+	b.deps.Metrics.ConsumeWaitSeconds.WithLabelValues(topicName, outcome).Observe(dur.Seconds())
+	b.deps.Metrics.ConsumeEmptyTotal.WithLabelValues(topicName).Inc()
 }
 
 // replayRead serves a Consume request that pinned an exact (partition,
@@ -89,6 +139,7 @@ func (b *impl) replayRead(topicName string, partitionIdx int, offset int64, tota
 // tryQueueRead scans the given partitions in order and returns the first
 // message available beyond each partition's committed offset. It does not
 // block — callers handle long-polling.
+// TODO Need to implement message invisibility if a consumer is consuming it
 func (b *impl) tryQueueRead(ctx context.Context, topicName string, partitions []int) (topic.Message, bool, error) {
 	for _, idx := range partitions {
 		log, err := b.partitionLog(topicName, idx)

@@ -43,6 +43,7 @@ func (b *impl) partitionLog(topicName string, idx int) (*storage.Log, error) {
 	} else if !errors.Is(err, metastore.ErrNotFound) {
 		return nil, fmt.Errorf("broker: lookup topic for retention: %w", err)
 	}
+	opts.Metrics = b.deps.Metrics.StorageRecorder(topicName, idx)
 
 	partitionDir := filepath.Join(b.deps.DataDir, "topics", topicName, fmt.Sprintf("p%05d", idx))
 

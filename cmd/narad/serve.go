@@ -5,16 +5,20 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/config"
@@ -23,6 +27,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/httpserver/handlers"
 	"github.com/debanganthakuria/narad/internal/metastore"
 	"github.com/debanganthakuria/narad/internal/observability/logger"
+	"github.com/debanganthakuria/narad/internal/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/partition"
 	"github.com/debanganthakuria/narad/internal/replication"
 	"github.com/debanganthakuria/narad/internal/schema"
@@ -31,6 +36,101 @@ import (
 )
 
 func runServe(args []string) error {
+	bootStart := time.Now()
+
+	cfg, err := loadServeConfig(args)
+	if err != nil || cfg == nil {
+		return err
+	}
+
+	log, err := logger.New(cfg.Log.Format, cfg.Log.Level)
+	if err != nil {
+		return fmt.Errorf("logger: %w", err)
+	}
+
+	reg, m := buildMetrics()
+
+	if err := os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil {
+		return fmt.Errorf("data dir: %w", err)
+	}
+
+	ms, err := metastore.NewSQLiteStore(filepath.Join(cfg.Storage.DataDir, "/metastore/metadata.db"))
+	if err != nil {
+		return fmt.Errorf("metastore: %w", err)
+	}
+	defer closeWithLog(log, "metastore", ms.Close)
+
+	br, err := buildBroker(cfg, ms, m, log)
+	if err != nil {
+		return err
+	}
+	defer closeWithLog(log, "broker", br.Close)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	var wg sync.WaitGroup
+	if cfg.Debug.PProfAddr != "" {
+		wg.Go(func() {
+			if err := httpserver.RunPProf(ctx, cfg.Debug.PProfAddr, log); err != nil {
+				log.Error("pprof server", "err", err)
+			}
+		})
+	}
+
+	poller := metrics.NewPoller(m, br, log)
+	wg.Go(func() { poller.Run(ctx) })
+
+	log.Info("narad serve starting",
+		"addr", cfg.HTTP.Addr,
+		"cluster_addr", cfg.Cluster.Addr,
+		"data_dir", cfg.Storage.DataDir,
+		"pprof_addr", cfg.Debug.PProfAddr,
+		"version", versionString())
+
+	srv := buildAPIServer(cfg, br, m, reg, log)
+	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())
+
+	if err := srv.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("server: %w", err)
+	}
+	wg.Wait()
+	log.Info("narad serve stopped")
+	return nil
+}
+
+// buildMetrics constructs the Prometheus registry plus runtime
+// collectors and returns both. The registry is what /metrics scrapes;
+// the *Metrics struct is what every instrumented call site reads
+// from. Splitting them this way means tests can swap a fresh registry
+// without touching the rest of the wiring.
+func buildMetrics() (*prometheus.Registry, *metrics.Metrics) {
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
+	return reg, metrics.New(reg)
+}
+
+// serveFlags holds the values parsed from the `narad serve` flag set
+// before they are overlaid onto the loaded config. Keeping them in one
+// struct lets us pass parsed flags around without long parameter lists.
+type serveFlags struct {
+	configPath  string
+	port        int
+	addr        string
+	clusterPort int
+	dataDir     string
+	logLevel    string
+	logFormat   string
+	pprofAddr   string
+}
+
+// loadServeConfig parses CLI flags, loads the config (file + env), and
+// applies CLI overlays. Returns (nil, nil) when --help was printed so
+// the caller can exit cleanly without doing further work.
+func loadServeConfig(args []string) (*config.Config, error) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.Usage = func() {
 		out := fs.Output()
@@ -42,72 +142,64 @@ func runServe(args []string) error {
 		fs.PrintDefaults()
 	}
 
-	configPath := fs.String("config", "", "path to JSON config file (optional)")
-	port := fs.Int("port", 0, "API listen port (overrides http.addr; e.g. --port 7942)")
-	addr := fs.String("addr", "", "API listen address (overrides http.addr; e.g. --addr 0.0.0.0:7942)")
-	clusterPort := fs.Int("cluster-port", 0, "cluster listen port (overrides cluster.addr)")
-	dataDir := fs.String("data-dir", "", "storage directory (overrides storage.data_dir)")
-	logLevel := fs.String("log-level", "", "log level: debug|info|warn|error (overrides log.level)")
-	logFormat := fs.String("log-format", "", "log format: json|text (overrides log.format)")
+	var f serveFlags
+	fs.StringVar(&f.configPath, "config", "", "path to JSON config file (optional)")
+	fs.IntVar(&f.port, "port", 0, "API listen port (overrides http.addr; e.g. --port 7942)")
+	fs.StringVar(&f.addr, "addr", "", "API listen address (overrides http.addr; e.g. --addr 0.0.0.0:7942)")
+	fs.IntVar(&f.clusterPort, "cluster-port", 0, "cluster listen port (overrides cluster.addr)")
+	fs.StringVar(&f.dataDir, "data-dir", "", "storage directory (overrides storage.data_dir)")
+	fs.StringVar(&f.logLevel, "log-level", "", "log level: debug|info|warn|error (overrides log.level)")
+	fs.StringVar(&f.logFormat, "log-format", "", "log format: json|text (overrides log.format)")
+	fs.StringVar(&f.pprofAddr, "pprof-addr", "", "enable pprof on this address (e.g. 127.0.0.1:6060); empty disables")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.Load(f.configPath)
 	if err != nil {
-		return fmt.Errorf("config: %w", err)
+		return nil, fmt.Errorf("config: %w", err)
 	}
-
-	// CLI flags overlay LAST — highest precedence.
-	if *port != 0 {
-		cfg.HTTP.Addr = ":" + strconv.Itoa(*port)
-	}
-	if *addr != "" {
-		cfg.HTTP.Addr = *addr
-	}
-	if *clusterPort != 0 {
-		cfg.Cluster.Addr = ":" + strconv.Itoa(*clusterPort)
-	}
-	if *dataDir != "" {
-		cfg.Storage.DataDir = *dataDir
-	}
-	if *logLevel != "" {
-		cfg.Log.Level = *logLevel
-	}
-	if *logFormat != "" {
-		cfg.Log.Format = *logFormat
-	}
-
+	f.applyTo(cfg)
 	if err := cfg.Validate(); err != nil {
-		return err
+		return nil, err
 	}
+	return cfg, nil
+}
 
-	log, err := logger.New(cfg.Log.Format, cfg.Log.Level)
-	if err != nil {
-		return fmt.Errorf("logger: %w", err)
+// applyTo overlays CLI-flag values onto cfg. Only non-zero fields take
+// effect, preserving values from the config file and environment.
+func (f *serveFlags) applyTo(cfg *config.Config) {
+	if f.port != 0 {
+		cfg.HTTP.Addr = ":" + strconv.Itoa(f.port)
 	}
-
-	if err := os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil {
-		return fmt.Errorf("data dir: %w", err)
+	if f.addr != "" {
+		cfg.HTTP.Addr = f.addr
 	}
-
-	ms, err := metastore.NewSQLiteStore(filepath.Join(cfg.Storage.DataDir, "metadata.db"))
-	if err != nil {
-		return fmt.Errorf("metastore: %w", err)
+	if f.clusterPort != 0 {
+		cfg.Cluster.Addr = ":" + strconv.Itoa(f.clusterPort)
 	}
-	defer func() {
-		if err := ms.Close(); err != nil {
-			log.Error("metastore close", "err", err)
-		}
-	}()
+	if f.dataDir != "" {
+		cfg.Storage.DataDir = f.dataDir
+	}
+	if f.logLevel != "" {
+		cfg.Log.Level = f.logLevel
+	}
+	if f.logFormat != "" {
+		cfg.Log.Format = f.logFormat
+	}
+	if f.pprofAddr != "" {
+		cfg.Debug.PProfAddr = f.pprofAddr
+	}
+}
 
+func buildBroker(cfg *config.Config, ms *metastore.SQLiteStore, m *metrics.Metrics, log *slog.Logger) (broker.Broker, error) {
 	logOpts, err := storageOptions(cfg.Storage)
 	if err != nil {
-		return fmt.Errorf("storage options: %w", err)
+		return nil, fmt.Errorf("storage options: %w", err)
 	}
 
 	br, err := broker.New(broker.Deps{
@@ -128,56 +220,36 @@ func runServe(args []string) error {
 		Offsets:    consumer.NewMetastoreBacked(ms),
 		Replicator: replication.NewLocal(),
 		Logger:     log,
+		Metrics:    m,
 	})
 	if err != nil {
-		return fmt.Errorf("broker: %w", err)
+		return nil, fmt.Errorf("broker: %w", err)
 	}
-	defer func() {
-		if err := br.Close(); err != nil {
-			log.Error("broker close", "err", err)
-		}
-	}()
+	return br, nil
+}
 
+func buildAPIServer(cfg *config.Config, br broker.Broker, m *metrics.Metrics, reg *prometheus.Registry, log *slog.Logger) *httpserver.Server {
 	handlerSet := handlers.New(handlers.Deps{
 		Broker:         br,
 		Logger:         log,
 		MaxConsumeWait: cfg.HTTP.MaxConsumeWait.D(),
 	})
-	router := httpserver.NewRouter(handlerSet, log)
-	srv := httpserver.New(cfg.HTTP, router, log)
+	return httpserver.New(cfg.HTTP, httpserver.NewRouter(handlerSet, log, m, reg), log)
+}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	log.Info("narad serve starting",
-		"addr", cfg.HTTP.Addr,
-		"cluster_addr", cfg.Cluster.Addr,
-		"data_dir", cfg.Storage.DataDir,
-		"version", versionString())
-
-	if err := srv.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("server: %w", err)
+// closeWithLog invokes close and logs any error under the given label.
+// Useful as a defer where we don't want to drop the error but also
+// don't want it to mask the function's primary return.
+func closeWithLog(log *slog.Logger, what string, close func() error) {
+	if err := close(); err != nil {
+		log.Error(what+" close", "err", err)
 	}
-	log.Info("narad serve stopped")
-	return nil
 }
 
 func storageOptions(sc config.StorageConfig) (storage.Options, error) {
-	var codec storage.Codec
-	switch strings.ToLower(sc.Codec) {
-	case "none":
-		codec = storage.NewNoopCodec()
-	case "zstd", "":
-		level, err := zstdLevelFromString(sc.CompressionLevel)
-		if err != nil {
-			return storage.Options{}, err
-		}
-		codec, err = storage.NewZstdCodec(level)
-		if err != nil {
-			return storage.Options{}, err
-		}
-	default:
-		return storage.Options{}, fmt.Errorf("unknown codec %q", sc.Codec)
+	codec, err := buildCodec(sc)
+	if err != nil {
+		return storage.Options{}, err
 	}
 	return storage.Options{
 		Codec:         codec,
@@ -192,6 +264,21 @@ func storageOptions(sc config.StorageConfig) (storage.Options, error) {
 			CheckInterval: time.Duration(sc.RetentionCheckIntervalMs) * time.Millisecond,
 		},
 	}, nil
+}
+
+func buildCodec(sc config.StorageConfig) (storage.Codec, error) {
+	switch strings.ToLower(sc.Codec) {
+	case "none":
+		return storage.NewNoopCodec(), nil
+	case "zstd", "":
+		level, err := zstdLevelFromString(sc.CompressionLevel)
+		if err != nil {
+			return nil, err
+		}
+		return storage.NewZstdCodec(level)
+	default:
+		return nil, fmt.Errorf("unknown codec %q", sc.Codec)
+	}
 }
 
 func zstdLevelFromString(s string) (zstd.EncoderLevel, error) {

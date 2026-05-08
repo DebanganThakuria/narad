@@ -63,6 +63,13 @@ func (r *reaper) run() {
 // sweep picks candidates under RLock, then deletes under Lock. The
 // active segment is never a candidate.
 func (r *reaper) sweep() {
+	start := time.Now()
+	defer func() {
+		if m := r.log.opts.Metrics; m != nil {
+			m.ObserveRetentionRun(time.Since(start))
+		}
+	}()
+
 	r.log.rwmu.RLock()
 	if len(r.log.segments) <= 1 {
 		r.log.rwmu.RUnlock()
@@ -85,21 +92,15 @@ func (r *reaper) sweep() {
 	}
 	active := r.log.segments[len(r.log.segments)-1]
 
-	deleteSet := make(map[*segment]struct{}, len(toDelete))
-	for _, s := range toDelete {
-		if s == active {
-			continue
-		}
-		deleteSet[s] = struct{}{}
-	}
-	if len(deleteSet) == 0 {
+	delete(toDelete, active)
+	if len(toDelete) == 0 {
 		return
 	}
 
 	kept := make([]*segment, 0, len(r.log.segments))
 	for _, s := range r.log.segments {
-		if _, drop := deleteSet[s]; drop {
-			r.deleteSegmentLocked(s)
+		if reason, drop := toDelete[s]; drop {
+			r.deleteSegmentLocked(s, reason)
 			continue
 		}
 		kept = append(kept, s)
@@ -107,15 +108,19 @@ func (r *reaper) sweep() {
 	r.log.segments = kept
 }
 
-func (r *reaper) candidatesForDeletion(sealed []*segment) []*segment {
+// candidatesForDeletion returns the sealed segments that should be
+// removed, keyed by reason ("age" or "bytes"). Age picks win over byte
+// picks when a segment matches both — that's the more informative
+// label and the one operators usually care about.
+func (r *reaper) candidatesForDeletion(sealed []*segment) map[*segment]string {
 	now := r.cfg.Now()
-	var picks []*segment
+	picks := make(map[*segment]string)
 
 	if r.cfg.MaxAge > 0 {
 		threshold := now.Add(-r.cfg.MaxAge)
 		for _, s := range sealed {
 			if mt, err := segmentMTime(s); err == nil && mt.Before(threshold) {
-				picks = append(picks, s)
+				picks[s] = "age"
 			}
 		}
 	}
@@ -126,19 +131,17 @@ func (r *reaper) candidatesForDeletion(sealed []*segment) []*segment {
 			total += s.sizeBytes
 		}
 		if total > r.cfg.MaxBytes {
-			already := make(map[*segment]struct{}, len(picks))
-			for _, p := range picks {
-				already[p] = struct{}{}
-				total -= p.sizeBytes
+			for s := range picks {
+				total -= s.sizeBytes
 			}
 			for _, s := range sealed {
 				if total <= r.cfg.MaxBytes {
 					break
 				}
-				if _, ok := already[s]; ok {
+				if _, ok := picks[s]; ok {
 					continue
 				}
-				picks = append(picks, s)
+				picks[s] = "bytes"
 				total -= s.sizeBytes
 			}
 		}
@@ -147,7 +150,10 @@ func (r *reaper) candidatesForDeletion(sealed []*segment) []*segment {
 	return picks
 }
 
-func (r *reaper) deleteSegmentLocked(s *segment) {
+func (r *reaper) deleteSegmentLocked(s *segment, reason string) {
+	bytes := s.sizeBytes
+	messages := s.nextOffset - s.baseOffset
+
 	_ = s.close()
 	_ = os.Remove(s.path)
 	for off := s.baseOffset; off < s.nextOffset; off++ {
@@ -160,6 +166,10 @@ func (r *reaper) deleteSegmentLocked(s *segment) {
 		r.log.cacheRec = nil
 	}
 	r.log.cacheMu.Unlock()
+
+	if m := r.log.opts.Metrics; m != nil {
+		m.IncRetentionDeletion(reason, bytes, messages)
+	}
 }
 
 func (r *reaper) requestStop() {

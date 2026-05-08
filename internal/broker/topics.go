@@ -23,22 +23,26 @@ func (b *impl) CreateTopic(ctx context.Context, name string, partitions, replica
 	if name == "" {
 		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalidArgument)
 	}
-	if partitions < 0 {
-		return topic.Topic{}, fmt.Errorf("%w: partitions must be >= 0 (0 = use default)", ErrInvalidArgument)
-	}
-	if replicationFactor < 0 {
-		return topic.Topic{}, fmt.Errorf("%w: replication_factor must be >= 0 (0 = use default)", ErrInvalidArgument)
-	}
+
 	if partitions == 0 {
 		partitions = b.deps.TopicPolicy.DefaultPartitions
 	}
+	if partitions < 0 {
+		return topic.Topic{}, fmt.Errorf("%w: partitions must be >= 0 (0 = use default)", ErrInvalidArgument)
+	}
+	if maximum := b.deps.TopicPolicy.MaxPartitions; maximum > 0 && partitions > maximum {
+		return topic.Topic{}, fmt.Errorf("%w: partitions (%d) exceeds topic.max_partitions (%d)",
+			ErrInvalidArgument, partitions, maximum)
+	}
+
 	if replicationFactor == 0 {
 		replicationFactor = b.deps.TopicPolicy.DefaultReplicationFactor
 	}
-	if max := b.deps.TopicPolicy.MaxPartitions; max > 0 && partitions > max {
-		return topic.Topic{}, fmt.Errorf("%w: partitions (%d) exceeds topic.max_partitions (%d)",
-			ErrInvalidArgument, partitions, max)
+	if replicationFactor < 2 {
+		return topic.Topic{}, fmt.Errorf("%w: replication_factor must be >= 2 (0 = use default)", ErrInvalidArgument)
 	}
+
+	// TODO Accept retention MS from user
 
 	t := topic.Topic{
 		Name:              name,
@@ -48,6 +52,11 @@ func (b *impl) CreateTopic(ctx context.Context, name string, partitions, replica
 		CreatedAt:         time.Now().UTC(),
 	}
 
+	dir := filepath.Join(b.deps.DataDir, "topics", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return topic.Topic{}, fmt.Errorf("broker: create topic dir: %w", err)
+	}
+
 	if err := b.deps.Metastore.CreateTopic(ctx, t); err != nil {
 		if errors.Is(err, metastore.ErrAlreadyExists) {
 			return topic.Topic{}, ErrTopicAlreadyExists
@@ -55,15 +64,11 @@ func (b *impl) CreateTopic(ctx context.Context, name string, partitions, replica
 		return topic.Topic{}, err
 	}
 
-	dir := filepath.Join(b.deps.DataDir, "topics", name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return topic.Topic{}, fmt.Errorf("broker: create topic dir: %w", err)
-	}
-
 	b.deps.Logger.Info("topic created",
 		"topic", name,
 		"partitions", partitions,
 		"replication_factor", replicationFactor)
+
 	return t, nil
 }
 
@@ -92,15 +97,15 @@ func (b *impl) DeleteTopic(ctx context.Context, name string) error {
 	}
 	b.mu.Unlock()
 
-	dir := filepath.Join(b.deps.DataDir, "topics", name)
-	if err := os.RemoveAll(dir); err != nil && firstErr == nil {
-		firstErr = fmt.Errorf("broker: remove topic dir: %w", err)
-	}
-
 	if err := b.deps.Metastore.DeleteTopic(ctx, name); err != nil {
 		if !errors.Is(err, metastore.ErrNotFound) && firstErr == nil {
 			firstErr = err
 		}
+	}
+
+	dir := filepath.Join(b.deps.DataDir, "topics", name)
+	if err := os.RemoveAll(dir); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("broker: remove topic dir: %w", err)
 	}
 
 	if firstErr == nil {
@@ -152,9 +157,9 @@ func (b *impl) IncreaseTopicPartitions(ctx context.Context, name string, newPart
 	if newPartitions <= 0 {
 		return topic.Topic{}, fmt.Errorf("%w: partitions must be > 0", ErrInvalidArgument)
 	}
-	if max := b.deps.TopicPolicy.MaxPartitions; max > 0 && newPartitions > max {
+	if maximum := b.deps.TopicPolicy.MaxPartitions; maximum > 0 && newPartitions > maximum {
 		return topic.Topic{}, fmt.Errorf("%w: partitions (%d) exceeds topic.max_partitions (%d)",
-			ErrInvalidArgument, newPartitions, max)
+			ErrInvalidArgument, newPartitions, maximum)
 	}
 
 	current, err := b.GetTopic(ctx, name)
@@ -169,7 +174,7 @@ func (b *impl) IncreaseTopicPartitions(ctx context.Context, name string, newPart
 	updated := current
 	updated.Partitions = newPartitions
 
-	if err := b.deps.Metastore.UpdateTopic(ctx, updated); err != nil {
+	if err = b.deps.Metastore.UpdateTopic(ctx, updated); err != nil {
 		if errors.Is(err, metastore.ErrNotFound) {
 			return topic.Topic{}, ErrTopicNotFound
 		}
@@ -180,6 +185,7 @@ func (b *impl) IncreaseTopicPartitions(ctx context.Context, name string, newPart
 		"topic", name,
 		"old_partitions", current.Partitions,
 		"new_partitions", newPartitions)
+
 	return updated, nil
 }
 

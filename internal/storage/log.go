@@ -47,6 +47,10 @@ type Options struct {
 	SegmentBytes int64
 
 	Retention RetentionConfig
+
+	// Metrics is an optional observability plug. When nil, every
+	// instrumented call site short-circuits to a noop.
+	Metrics MetricsRecorder
 }
 
 func DefaultOptions() Options {
@@ -183,4 +187,31 @@ func (l *Log) OldestSegmentAt() (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return mt, true
+}
+
+// SegmentMTimeForOffset returns the file mtime of the segment that
+// contains the given offset. ok=false when the offset is past the
+// flushed tail (caller is caught up) or before LogStartOffset (data
+// was retention-deleted).
+//
+// Note: per-message timestamps are not stored on disk. A segment's
+// mtime is the time of its last write — within a segment, individual
+// records may be older than the mtime by up to the segment's
+// lifetime. Treat the returned time as an upper bound on "when the
+// consumer's next message was last touched", not an exact produce
+// timestamp.
+func (l *Log) SegmentMTimeForOffset(offset int64) (time.Time, bool) {
+	l.rwmu.RLock()
+	defer l.rwmu.RUnlock()
+	for i := len(l.segments) - 1; i >= 0; i-- {
+		s := l.segments[i]
+		if offset >= s.baseOffset && offset < s.nextOffset {
+			mt, err := segmentMTime(s)
+			if err != nil {
+				return time.Time{}, false
+			}
+			return mt, true
+		}
+	}
+	return time.Time{}, false
 }
