@@ -5,11 +5,13 @@ JSON messages to topics; consumers pull (with optional long-polling) and
 acknowledge to advance their offset. Replay is supported via explicit
 offsets.
 
-> **Status:** early — initial wiring only. The append-only log, HTTP API,
-> single-binary CLI, and metadata store are functional; replication, JSON
-> Schema validation, partitioning across multiple node members, and
-> segment rotation are stubbed behind interfaces and will land in
-> follow-up work.
+> **Status:** single-node, production-shaped surface. The HTTP API,
+> append-only segmented log, SQLite metastore, JSON-Schema validation,
+> per-topic retention, partitioning, Prometheus metrics, and a debug
+> pprof listener are all functional. Multi-node leader/follower
+> replication, cross-node partition rebalancing, message-visibility
+> timeouts (SQS-style in-flight tracking), and schema-update with
+> backwards-compatibility checks are the next big chunks.
 
 ## Architecture (current)
 
@@ -22,34 +24,53 @@ HTTP Consumers ◀── pull ─┤             │                 ▲
                                 │                        │  notify
                                 │  metadata               on append
                                 ▼
-                       JSON-on-disk Metastore
-                       (topics, schemas, offsets)
+                          SQLite Metastore
+                       (topics, schemas, offsets,
+                        in-process LRU cache)
 ```
 
 Cluster traffic (replication, follower fetch, membership) will run on
 port 7943 once `narad worker` lands real replication.
 
+A separate, opt-in pprof listener (`--pprof-addr 127.0.0.1:6060`) and
+a `/metrics` Prometheus endpoint on the public port round out the
+operator surface.
+
 ## Layout
 
 ```
 cmd/
-  narad/             single binary with subcommands (serve/worker/cli/version)
+  narad/                single binary with subcommands (serve/worker/client/version)
 internal/
-  config/             defaults + JSON file + env + flag layering
+  config/               defaults + JSON file + env + flag layering
   observability/
-    logger/           thin log/slog wrapper
-  httpserver/         http.Server, router, middleware
-    handlers/         request handlers
-  broker/             orchestrator over the ports below
-  storage/            append-only Log: in-memory buffer + async flusher
-                       per partition, zstd-compressed batched frames,
-                       per-frame CRC32C, skip-and-continue corruption recovery
-  metastore/          Metastore interface + JSON-on-disk implementation
-  topic/              shared value types (Topic, Partition, Message)
-  partition/          partition selection (FNV hash + round-robin)
-  replication/        Replicator interface + single-node Local stub
-  schema/             SchemaRegistry interface + AlwaysValid stub
-  consumer/           OffsetTracker interface + metastore-backed impl
+    logger/             thin log/slog wrapper
+    metrics/            Prometheus collectors, HTTP middleware, lag poller,
+                          pprof-safe /metrics endpoint
+  httpserver/           http.Server, router, middleware (Recover, RequestID,
+                          metrics middleware, AccessLog), pprof listener
+    handlers/           request handlers
+  broker/               orchestrator: produce / consume / ack / topic CRUD,
+                          plus Snapshot used by the metrics poller
+  storage/              append-only Log: in-memory buffer + async flusher
+                          per partition, zstd-compressed batched frames,
+                          per-frame CRC32C, segment rotation, retention
+                          reaper, skip-and-continue corruption recovery
+  metastore/            SQLite-backed metadata store (gorm + glebarez/sqlite,
+                          pure-Go) with byte-bounded LRU read cache
+  topic/                shared value types (Topic, Retention, Message,
+                          Details, PartitionStats)
+  partition/            partition selection (FNV hash + round-robin)
+  replication/          Replicator interface + single-node Local stub
+  schema/               SchemaRegistry interface, JSON-Schema impl
+                          (santhosh-tekuri/jsonschema), AlwaysValid stub
+  consumer/             OffsetTracker interface + metastore-backed impl
+                          with batched flushes and per-topic eviction
+tests/
+  e2e/                  HTTP-level end-to-end tests (httptest + real
+                          broker), split by feature surface
+.github/
+  workflows/ci.yml      build / unit-tests / e2e-tests jobs (race-enabled)
 ```
 
 ## Quickstart
@@ -82,37 +103,56 @@ narad client topics alter --partitions 16 orders
 narad client topics delete orders
 ```
 
-Or hit the HTTP API directly (all routes live under `/v1`):
+Or hit the HTTP API directly (all data routes live under `/v1`):
 
 ```sh
+# Create with explicit retention.
 curl -X POST localhost:7942/v1/topics \
   -H 'Content-Type: application/json' \
-  -d '{"name":"orders","partitions":8}'
+  -d '{"name":"orders","partitions":8,"replication_factor":2,
+       "retention":{"max_age_ms":3600000,"max_bytes":1073741824}}'
 
+# Produce.
 curl -X POST localhost:7942/v1/topics/orders/produce \
   -H 'Content-Type: application/json' \
   -d '{"key":"customer-42","message":{"id":1,"amount":1500}}'
 
+# Consume with long-poll.
 curl 'localhost:7942/v1/topics/orders/consume?wait=5s'
 
+# Ack.
 curl -X POST localhost:7942/v1/topics/orders/ack \
   -H 'Content-Type: application/json' \
   -d '{"partition":0,"offset":0}'
+
+# Update retention without restart.
+curl -X PATCH localhost:7942/v1/topics/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"retention":{"max_age_ms":86400000,"max_bytes":0}}'
+
+# List with pagination.
+curl 'localhost:7942/v1/topics?limit=50'
+curl 'localhost:7942/v1/topics?limit=50&page_token=<from previous response>'
+
+# Scrape metrics.
+curl localhost:7942/metrics
 ```
 
 API routes:
 
 ```
-POST    /v1/topics                          create
-GET     /v1/topics                          list
+POST    /v1/topics                          create (accepts retention overrides)
+GET     /v1/topics?limit=&page_token=       list (keyset pagination by name)
 GET     /v1/topics/{topic}                  get single + per-partition stats
-PATCH   /v1/topics/{topic}                  alter (increase partitions)
+PATCH   /v1/topics/{topic}                  alter partitions OR retention
+                                              (exactly one per request)
 DELETE  /v1/topics/{topic}                  delete topic and all data
 POST    /v1/topics/{topic}/produce
 GET     /v1/topics/{topic}/consume
 POST    /v1/topics/{topic}/ack
-GET     /healthz
-GET     /readyz
+GET     /healthz                            liveness
+GET     /readyz                             readiness (broker.Ready)
+GET     /metrics                            Prometheus exposition
 ```
 
 ## CLI surface
@@ -137,6 +177,7 @@ Common `narad serve` flags:
 --data-dir ./data            storage directory
 --log-level info             debug | info | warn | error
 --log-format json            json | text
+--pprof-addr 127.0.0.1:6060  enable pprof on this address; empty disables
 ```
 
 ## Configuration
@@ -170,12 +211,13 @@ A starting template lives in [`narad.example.json`](./narad.example.json):
   "topic": {
     "default_partitions": 8,
     "max_partitions": 1024,
-    "default_replication_factor": 1,
+    "default_replication_factor": 2,
     "default_retention_age_ms": 604800000,
     "default_retention_bytes": 0
   },
   "log":     { "level": "info", "format": "json" },
-  "worker":  { "enabled": false }
+  "worker":  { "enabled": false },
+  "debug":   { "pprof_addr": "" }
 }
 ```
 
@@ -198,22 +240,13 @@ Useful environment overrides:
 | `NARAD_STORAGE_RETENTION_CHECK_INTERVAL_MS` | retention reaper sweep period |
 | `NARAD_TOPIC_DEFAULT_PARTITIONS` | default partition count when omitted from CreateTopic |
 | `NARAD_TOPIC_MAX_PARTITIONS` | upper bound for partition count |
-| `NARAD_TOPIC_DEFAULT_REPLICATION_FACTOR` | default replication factor when omitted |
+| `NARAD_TOPIC_DEFAULT_REPLICATION_FACTOR` | default replication factor when omitted (must be ≥ 2) |
 | `NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS` | default retention age (default: 7 days) |
 | `NARAD_TOPIC_DEFAULT_RETENTION_BYTES` | default retention size cap (default: 0 = disabled) |
+| `NARAD_DEBUG_PPROF_ADDR` | pprof listener address; empty disables |
 | `NARAD_ADDR` | (client only) base URL for `narad client` |
 
 See `internal/config/config.go` for the full list and the matching JSON keys.
-
-## Design decisions
-
-* **Single third-party Go dependency.** Everything is built on the
-  standard library except for `github.com/klauspost/compress` (pure Go,
-  used for zstd compression of partition log frames). All other tooling
-  is hand-rolled.
-* **Single binary with subcommands.** `narad serve|worker|cli|version`
-  follows the kubectl/etcd/consul convention and keeps the install
-  story to one drop-in binary.
 
 ## Storage layer
 
@@ -280,58 +313,193 @@ data/topics/orders/p00007/
 
 Segment filenames encode the segment's first offset (20-digit
 zero-padded). Sealed segments are kept open for reads but never
-written to. A future retention/compaction pass can delete or rewrite
-sealed segments without affecting the active write path.
+written to.
 
 ## Retention
 
 A per-partition reaper deletes sealed segments past the topic's
 retention bounds. Defaults: 7 days, no size cap. Both bounds are
 configurable globally (`topic.default_retention_age_ms`,
-`topic.default_retention_bytes`) and per-topic via the topic record
-(zero = disabled). The active segment is never deleted, regardless of
-its age. Records in deleted segments become permanent gaps; reads
-return `404`/`ErrOffsetNotFound`.
+`topic.default_retention_bytes`) and per-topic via:
+
+* the `retention` field on `POST /v1/topics`, and
+* `PATCH /v1/topics/{name}` with a `retention` body — the broker
+  closes cached partition logs so the next access reopens with the
+  new bounds (storage folds retention in at log-open time).
+
+Zero in either field inherits the policy default; negatives are
+rejected. The active segment is never deleted, regardless of its age.
+Records in deleted segments become permanent gaps; reads return
+`404`/`ErrOffsetNotFound`.
 
 The reaper sweeps every `storage.retention_check_interval_ms` (default
-1 minute). Age is measured by segment-file mtime, which is a proxy for
-"time of last write" — a sealed segment's mtime stops advancing.
+1 minute). Age is measured by segment-file mtime — a sealed segment's
+mtime stops advancing, so it's a stable proxy for "time of last write
+to that segment".
 
 ## Topics
 
-Topics are created via `POST /v1/topics`. `partitions` and
-`replication_factor` are optional; omitting them (or sending `0`)
-applies the configured defaults.
+Topics are created via `POST /v1/topics`. `partitions`,
+`replication_factor`, and `retention` are optional; omitting them (or
+sending zero) applies the configured defaults.
 
-`PATCH /v1/topics/{name}` raises the partition count of an existing
-topic:
-
-```sh
-curl -X PATCH localhost:7942/v1/topics/orders \
-  -H 'Content-Type: application/json' \
-  -d '{"partitions": 32}'
+```jsonc
+{
+  "name": "orders",
+  "partitions": 8,                    // 0 = use default
+  "replication_factor": 2,            // 0 = use default; must be >= 2
+  "retention": {                      // omit to use defaults
+    "max_age_ms": 86400000,           // 0 = use default
+    "max_bytes":  1073741824          // 0 = use default
+  }
+}
 ```
 
-This is *increase-only*; requests at or below the current count return
-400. Existing records are not moved — they stay in the partitions they
-were originally written to. Future records' partition assignment uses
-`hash(key) % newCount`, so an existing key may now hash to a different
-partition than its prior records. Consumers that depend on per-key
-ordering should be aware. Decreasing the partition count is not
-supported (offsets are immutable).
+`PATCH /v1/topics/{name}` accepts **exactly one** of `partitions` or
+`retention` per request:
+
+```sh
+# Increase partitions (increase-only; decrease/equal returns 400).
+curl -X PATCH localhost:7942/v1/topics/orders \
+  -H 'Content-Type: application/json' -d '{"partitions": 32}'
+
+# Update retention (no restart needed; cached logs reopen on next access).
+curl -X PATCH localhost:7942/v1/topics/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"retention":{"max_age_ms":3600000}}'
+```
+
+Existing records are not moved when partitions increase — they stay in
+the partitions they were originally written to. Future records'
+partition assignment uses `hash(key) % newCount`, so an existing key
+may now hash to a different partition than its prior records.
+Consumers that depend on per-key ordering should be aware. Decreasing
+the partition count is not supported (offsets are immutable).
 
 `DELETE /v1/topics/{name}` removes a topic, its on-disk segments, and
-its consumer offsets. Irreversible.
+its consumer offsets. Irreversible. The topic name can be reused
+immediately afterwards — a fresh produce starts at offset 0 again.
 
 `GET /v1/topics/{name}` returns the topic record plus per-partition
 runtime stats (segment count, oldest/next offset, bytes, oldest
 segment mtime).
 
-## Roadmap (deferred from V1 wiring)
+`GET /v1/topics` returns topics in lexicographic order by name.
+Pagination is keyset by name (cursor in `next_page_token`), robust
+against inserts and deletes between pages. `limit` defaults to 100,
+caps at 1000. `limit=0` is rejected at the HTTP layer; the
+broker-internal "no limit" path is reserved for the metrics poller.
+
+## Observability
+
+**`/metrics` (Prometheus exposition).** Mounted on the public API
+listener. Strict cardinality budget — labels are limited to
+`{topic}`, `{topic, partition}`, and `{route, method, status}` (where
+`route` is the matched ServeMux pattern, never the literal path).
+Highlights:
+
+* `narad_http_*` — requests by route/method/status, duration histogram,
+  bytes in/out, in-flight gauge.
+* `narad_messages_{produced,consumed}_total{topic,partition}` and the
+  matching `bytes_*_total` counters.
+* `narad_consume_wait_seconds{topic,outcome}` and
+  `narad_consume_empty_total{topic}` for tuning long-poll behaviour.
+* `narad_consumer_lag_messages{topic,partition}` and
+  `narad_oldest_unconsumed_message_age_seconds{topic,partition}` for
+  autoscaling consumer worker counts. The age metric uses the segment
+  mtime containing the committed offset — Narad's on-disk frame
+  doesn't carry per-message timestamps, so this is documented as an
+  upper bound on "time since the consumer's next message was last
+  touched", not exact produce time.
+* `narad_consumer_dropped_messages{topic,partition}` — count of
+  unacknowledged messages already deleted by retention. Non-zero
+  means data was lost before the consumer caught up.
+* `narad_storage_{flush,fsync,retention_run}_duration_seconds`,
+  `narad_storage_segments_rolled_total`,
+  `narad_storage_retention_{deletions,bytes_deleted,messages_deleted}_total`.
+* Inventory gauges: `narad_topics_total`, `narad_partitions_total`,
+  `narad_topic_bytes{topic}`, `narad_segments{topic,partition}`.
+* Boot: `narad_boot_duration_seconds`,
+  `narad_storage_segments_scanned_at_boot_total{topic,partition}`.
+
+A 5-second background poller refreshes the gauge-style metrics
+(inventory + lag) by calling `Broker.Snapshot`. Counters and
+histograms update inline at each call site. Series for deleted topics
+are pruned on the next tick so `DeleteTopic` doesn't leak series.
+
+**pprof.** Enable with `--pprof-addr 127.0.0.1:6060` (or
+`NARAD_DEBUG_PPROF_ADDR=...`). Disabled by default. Handlers are
+registered explicitly on a private mux (no `DefaultServeMux` leak),
+and only `ReadHeaderTimeout` is set so `/debug/pprof/profile?seconds=N`
+isn't truncated. Bind to loopback in production — pprof exposes
+goroutine and heap details. The listener logs a warning if it sees a
+non-loopback address.
+
+```sh
+go tool pprof http://127.0.0.1:6060/debug/pprof/heap
+```
+
+**Healthz / readyz.** `GET /healthz` is a fixed-200 liveness probe.
+`GET /readyz` returns 200 if `broker.Ready` succeeds, 503 otherwise —
+intended for Kubernetes-style traffic gating.
+
+## Testing
+
+```sh
+make test                          # full suite, race detector on
+go test ./internal/...             # unit tests only
+go test ./tests/e2e/... -race      # HTTP-level e2e against a real broker
+go test ./tests/e2e/... -run TestConsume   # one feature
+```
+
+Unit tests live next to the code they cover. End-to-end HTTP tests
+under `tests/e2e/` are split by feature surface — one file per
+endpoint plus `lifecycle_test.go` for cross-cutting flows and
+`metrics_test.go` for the observability layer. The e2e harness
+(`helpers_test.go`) builds a real broker (SQLite metastore + temp
+partition logs) per test and exposes it via `httptest`. `envOpts`
+let individual tests override the policy, long-poll cap, or enable
+`/metrics` without bloating a fat constructor.
+
+## CI
+
+`.github/workflows/ci.yml` runs three jobs in parallel on every push
+to master and every PR:
+
+* **build** — `go vet ./...` + `go build ./...`
+* **unit-tests** — `go test -race -count=1` for everything except `tests/e2e`
+* **e2e-tests** — `go test -race -count=1 ./tests/e2e/...`
+
+Go version is pinned via `go-version-file: go.mod` so bumping the
+toolchain happens in one place. Each job has a 10-minute timeout
+(generous for the current ~30s local runtime).
+
+## Design decisions
+
+* **Pure-Go dependencies.** SQLite is pulled in via
+  `glebarez/sqlite` (modernc/sqlite under the hood — no CGO).
+  Compression is `klauspost/compress`. JSON-Schema validation is
+  `santhosh-tekuri/jsonschema`. Metrics use `prometheus/client_golang`.
+  All four are pure Go; the binary builds and tests on any
+  CGO-disabled environment that supports `go test -race`.
+* **Single binary with subcommands.** `narad serve|worker|client|version`
+  follows the kubectl/etcd/consul convention and keeps the install
+  story to one drop-in binary.
+* **Operator endpoints separated from data endpoints.** `/metrics`
+  shares the public listener (standard Prometheus convention), but
+  pprof is a separate, opt-in listener so its leak surface
+  (goroutine stacks, heap layout, profile DoS) is firewall-isolated
+  by default.
+
+## Roadmap
 
 * Real leader/follower replication (`internal/replication`).
-* Hand-rolled JSON Schema (draft-07 subset) validator.
-* Multi-segment partition logs with rotation.
 * Cross-node partition assignment & rebalancing.
-* Observability metrics (`/metrics`).
+* Message-visibility timeouts (SQS-style in-flight tracking) so
+  multiple consumers can pull from one topic without redelivery
+  during processing.
+* Schema-update with backwards-compatibility checking
+  (`PATCH /v1/topics/{name}` extension).
+* HTTP endpoints for schema registration (currently broker-internal
+  via the `schema.Registry` interface).
 * Auth, rate limiting.
