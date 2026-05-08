@@ -1,47 +1,42 @@
 package storage
 
-import (
-	"encoding/binary"
-	"io"
-)
-
-// Append writes data to the end of the log and returns the assigned
-// offset. The write is fsynced before returning, then any waiting
-// long-poller is woken via NotifyC.
+// Append pushes a single record into the in-memory buffer and returns
+// the offset assigned to it. The disk write is deferred to the
+// flusher goroutine; if a threshold is now crossed the flusher is
+// signalled to flush ASAP.
 func (l *Log) Append(data []byte) (int64, error) {
-	offset := l.nextOffset
-
-	pos, err := l.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return -1, err
+	if l.closed.Load() {
+		return -1, ErrLogClosed
 	}
-
-	length := int32(len(data))
-
-	if err = binary.Write(l.file, binary.BigEndian, length); err != nil {
-		return -1, err
-	}
-	if _, err = l.file.Write(data); err != nil {
-		return -1, err
-	}
-	if err = l.file.Sync(); err != nil {
-		return -1, err
-	}
-
-	l.index[offset] = pos
-	l.nextOffset++
+	offset, crossed := l.buffer.push(data)
 
 	select {
 	case l.notify <- struct{}{}:
 	default:
 	}
 
+	if crossed {
+		l.flusher.signal()
+	}
 	return offset, nil
 }
 
-// NotifyC returns a channel that emits a value whenever a new record is
-// appended. The channel is shared and buffered (size 1) — wake-ups
-// coalesce; treat each receive as "something new, go check".
-func (l *Log) NotifyC() <-chan struct{} {
-	return l.notify
+func (l *Log) AppendBatch(records [][]byte) (firstOffset, lastOffset int64, err error) {
+	if l.closed.Load() {
+		return -1, -1, ErrLogClosed
+	}
+	if len(records) == 0 {
+		return 0, -1, nil
+	}
+	first, last, crossed := l.buffer.pushBatch(records)
+
+	select {
+	case l.notify <- struct{}{}:
+	default:
+	}
+
+	if crossed {
+		l.flusher.signal()
+	}
+	return first, last, nil
 }

@@ -6,9 +6,7 @@ import (
 )
 
 // Produce validates the payload, picks a partition, appends to the
-// partition log, then asks the replicator to fan the record out. A
-// replication failure aborts the produce: at-least-once requires quorum
-// durability before we ACK the producer.
+// partition log, then asks the replicator to fan the record out.
 func (b *impl) Produce(ctx context.Context, topicName, key string, payload []byte) (int64, int, error) {
 	t, err := b.GetTopic(ctx, topicName)
 	if err != nil {
@@ -20,17 +18,14 @@ func (b *impl) Produce(ctx context.Context, topicName, key string, payload []byt
 	}
 
 	partIdx := b.deps.Partitions.Pick(topicName, key, t.Partitions)
-	log, lock, err := b.partitionLog(topicName, partIdx)
+	log, err := b.partitionLog(topicName, partIdx)
 	if err != nil {
 		return 0, 0, err
 	}
 
-	lock.Lock()
-	offset, appendErr := log.Append(payload)
-	lock.Unlock()
-
-	if appendErr != nil {
-		return 0, 0, fmt.Errorf("broker: append: %w", appendErr)
+	offset, err := log.Append(payload)
+	if err != nil {
+		return 0, 0, fmt.Errorf("broker: append: %w", err)
 	}
 
 	if err := b.deps.Replicator.Replicate(ctx, topicName, partIdx, offset, payload); err != nil {

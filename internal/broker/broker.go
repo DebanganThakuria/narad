@@ -3,9 +3,7 @@
 // metastore, partition manager, schema registry, replicator, and offset
 // tracker together.
 //
-// Concurrency: a Broker is safe for concurrent use. Per the PRD, each
-// partition log has at most one writer at a time — this is enforced by
-// a per-partition mutex inside the broker.
+// Concurrency: a Broker is safe for concurrent use.
 package broker
 
 import (
@@ -19,7 +17,10 @@ import (
 // the sentinels in this package.
 type Broker interface {
 	CreateTopic(ctx context.Context, name string, partitions, replicationFactor int) (topic.Topic, error)
+	IncreaseTopicPartitions(ctx context.Context, name string, newPartitions int) (topic.Topic, error)
+	DeleteTopic(ctx context.Context, name string) error
 	GetTopic(ctx context.Context, name string) (topic.Topic, error)
+	GetTopicDetails(ctx context.Context, name string) (topic.Details, error)
 	ListTopics(ctx context.Context) ([]topic.Topic, error)
 
 	Produce(ctx context.Context, topicName, key string, payload []byte) (offset int64, partition int, err error)

@@ -5,11 +5,37 @@ package topic
 
 import "time"
 
-// Topic is the user-facing logical stream. Partitions and
-// ReplicationFactor are fixed at create time per the PRD.
+// Topic is the user-facing logical stream. ReplicationFactor is fixed
+// at create time; Partitions can grow via IncreaseTopicPartitions
+// (never shrink); Retention can be altered post-create (future) without
+// affecting existing data.
 type Topic struct {
 	Name              string    `json:"name"`
 	Partitions        int       `json:"partitions"`
 	ReplicationFactor int       `json:"replication_factor"`
+	Retention         Retention `json:"retention"`
 	CreatedAt         time.Time `json:"created_at"`
+}
+
+// Retention is the per-topic policy for deleting sealed segment files.
+// Zero in either field disables that bound.
+type Retention struct {
+	MaxAgeMs int64 `json:"max_age_ms"`
+	MaxBytes int64 `json:"max_bytes"`
+}
+
+// Details is the response shape for "describe a topic": the topic
+// record plus per-partition runtime stats.
+type Details struct {
+	Topic
+	Partitions []PartitionStats `json:"partition_stats"`
+}
+
+type PartitionStats struct {
+	Index           int       `json:"index"`
+	Segments        int       `json:"segments"`
+	OldestOffset    int64     `json:"oldest_offset"`
+	NextOffset      int64     `json:"next_offset"`
+	SizeBytes       int64     `json:"size_bytes"`
+	OldestSegmentAt time.Time `json:"oldest_segment_at,omitzero"`
 }

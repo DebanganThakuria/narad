@@ -1,7 +1,21 @@
 package storage
 
-// Close flushes and releases the underlying file handle. After Close,
-// further Append/Read calls return errors from the OS layer.
+// Close stops the reaper and the flusher (the latter does one final
+// drain), then closes every segment file. Idempotent.
 func (l *Log) Close() error {
-	return l.file.Close()
+	if !l.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	l.reaper.requestStop()
+	l.reaper.waitDone()
+	l.flusher.requestStop()
+	l.flusher.waitDone()
+
+	var firstErr error
+	for _, s := range l.segments {
+		if err := s.close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

@@ -3,7 +3,7 @@
 //
 //	narad serve     run the HTTP API server
 //	narad worker    run the cluster worker (replication, etc.)
-//	narad cli       interactive REPL over a single append-only log file
+//	narad client    interact with a running narad serve over HTTP
 //	narad version   print build version
 //	narad help      print this help (also: -h, --help)
 //
@@ -28,7 +28,7 @@ var commands = map[string]struct {
 	run   subcommand
 	short string
 }{
-	"cli":     {runCLI, "interactive REPL over a single append-only log file"},
+	"client":  {runClient, "interact with a running narad serve over HTTP"},
 	"serve":   {runServe, "run the HTTP API server (default port 7942)"},
 	"version": {runVersion, "print build version and exit"},
 	"worker":  {runWorker, "run the cluster worker (default port 7943)"},
@@ -68,7 +68,7 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "Subcommands:")
 
 	// Sorted iteration so help output is stable.
-	names := []string{"serve", "worker", "cli", "version"}
+	names := []string{"serve", "worker", "client", "version"}
 	for _, n := range names {
 		c := commands[n]
 		fmt.Fprintf(w, "  %-9s  %s\n", n, c.short)

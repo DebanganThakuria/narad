@@ -8,16 +8,28 @@ import (
 	"github.com/debanganthakuria/narad/internal/partition"
 	"github.com/debanganthakuria/narad/internal/replication"
 	"github.com/debanganthakuria/narad/internal/schema"
+	"github.com/debanganthakuria/narad/internal/storage"
+	"github.com/debanganthakuria/narad/internal/topic"
 )
 
-// Deps is the constructor input. Passing the dependencies as a struct
-// keeps the call site readable as the list grows.
 type Deps struct {
-	DataDir    string
-	Metastore  metastore.Metastore
-	Partitions partition.Manager
-	Schemas    schema.Registry
-	Offsets    consumer.OffsetTracker
-	Replicator replication.Replicator
-	Logger     *slog.Logger
+	DataDir     string
+	LogOptions  storage.Options
+	TopicPolicy TopicPolicy
+	Metastore   metastore.Metastore
+	Partitions  partition.Manager
+	Schemas     schema.Registry
+	Offsets     consumer.OffsetTracker
+	Replicator  replication.Replicator
+	Logger      *slog.Logger
+}
+
+// TopicPolicy supplies CreateTopic's defaults and bounds. Lives in the
+// broker package so the broker stays decoupled from internal/config;
+// serve.go translates config.TopicConfig → TopicPolicy at startup.
+type TopicPolicy struct {
+	DefaultPartitions        int
+	MaxPartitions            int
+	DefaultReplicationFactor int
+	DefaultRetention         topic.Retention
 }

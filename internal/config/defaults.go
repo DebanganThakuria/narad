@@ -25,8 +25,22 @@ func Default() *Config {
 			Addr: ":7943",
 		},
 		Storage: StorageConfig{
-			DataDir: "data",
-			Fsync:   FsyncPerWrite,
+			DataDir:                  "data",
+			Fsync:                    FsyncPerWrite,
+			Codec:                    "zstd",
+			CompressionLevel:         "best",
+			FlushBytes:               1 << 20, // 1 MiB
+			FlushRecords:             1000,
+			FlushIntervalMs:          100,
+			SegmentBytes:             64 << 20, // 64 MiB
+			RetentionCheckIntervalMs: 60_000,   // 1 minute
+		},
+		Topic: TopicConfig{
+			DefaultPartitions:        8,
+			MaxPartitions:            1024,
+			DefaultReplicationFactor: 1,
+			DefaultRetentionAgeMs:    7 * 24 * 60 * 60 * 1000, // 7 days
+			DefaultRetentionBytes:    0,                       // no size cap
 		},
 		Log: LogConfig{
 			Level:  "info",

@@ -11,23 +11,18 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker"
 )
 
-// Deps is the constructor input for the handler set.
 type Deps struct {
 	Broker         broker.Broker
 	Logger         *slog.Logger
 	MaxConsumeWait time.Duration
 }
 
-// Set bundles the configured handlers. Methods on Set return http.Handler
-// values that the router wires to specific (method, path) patterns.
 type Set struct {
 	deps Deps
 }
 
-// New constructs a handler Set. It panics if a required dependency is nil
-// — handlers are only constructed once, at startup, so failing here keeps
-// callers honest rather than letting nil deref happen on the first
-// request.
+// New panics on missing required deps — handlers are constructed once
+// at startup, so failing here surfaces wiring bugs immediately.
 func New(d Deps) *Set {
 	if d.Broker == nil {
 		panic("handlers: Broker is required")
@@ -38,8 +33,6 @@ func New(d Deps) *Set {
 	return &Set{deps: d}
 }
 
-// writeJSON serialises v at the given status. On encode failure it logs
-// and falls back to a minimal text 500.
 func (s *Set) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -51,13 +44,12 @@ func (s *Set) writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 }
 
-// writeError emits {"error": msg} at the given status.
 func (s *Set) writeError(w http.ResponseWriter, status int, msg string) {
 	s.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// decodeJSON reads a JSON body with strict mode (unknown fields rejected).
-// Returns false on failure, having already responded to the client.
+// decodeJSON reads a JSON body in strict mode (unknown fields
+// rejected). Responds to the client on failure and returns false.
 func (s *Set) decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	dec.DisallowUnknownFields()

@@ -1,10 +1,5 @@
 // Package metastore is the contract for Narad's persistent metadata:
 // topics, schemas, and committed consumer offsets.
-//
-// The PRD calls for SQLite, but Narad keeps a strict zero-third-party-dep
-// policy. The default implementation (jsonfile.go) is a JSON-on-disk
-// store behind this interface; a SQLite-backed implementation can drop
-// in later without touching callers.
 package metastore
 
 import (
@@ -16,6 +11,8 @@ import (
 // Metastore is the broker's view of durable metadata.
 type Metastore interface {
 	CreateTopic(ctx context.Context, t topic.Topic) error
+	UpdateTopic(ctx context.Context, t topic.Topic) error
+	DeleteTopic(ctx context.Context, name string) error
 	GetTopic(ctx context.Context, name string) (topic.Topic, error)
 	ListTopics(ctx context.Context) ([]topic.Topic, error)
 
