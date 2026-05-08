@@ -16,6 +16,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/replication"
 	"github.com/debanganthakuria/narad/internal/schema"
 	"github.com/debanganthakuria/narad/internal/storage"
+	"github.com/debanganthakuria/narad/internal/topic"
 )
 
 // newTestBroker constructs a broker backed by a per-test temp data dir
@@ -48,27 +49,38 @@ func newTestBroker(t *testing.T, policy broker.TopicPolicy) (broker.Broker, stri
 }
 
 // Default policy used by tests that aren't exercising bounds. Mirrors
-// the production defaults from internal/config.
+// the production defaults from internal/config (RF >= 2 is enforced
+// at create time).
 var defaultPolicy = broker.TopicPolicy{
 	DefaultPartitions:        8,
 	MaxPartitions:            1024,
-	DefaultReplicationFactor: 1,
+	DefaultReplicationFactor: 2,
+	DefaultRetention: topic.Retention{
+		MaxAgeMs: 7 * 24 * 60 * 60 * 1000, // 7 days
+	},
 }
+
+// noRetention is the test convenience for "use whatever the policy
+// defaults give me", since CreateTopic now takes a retention struct.
+var noRetention = topic.Retention{}
 
 func TestCreateTopicAppliesDefaultPartitions(t *testing.T) {
 	br, _ := newTestBroker(t, defaultPolicy)
 	ctx := context.Background()
 
-	// partitions = 0 → use default (8).
-	got, err := br.CreateTopic(ctx, "orders", 0, 0)
+	// partitions = 0 → use default (8). RF = 0 → use default (2).
+	got, err := br.CreateTopic(ctx, "orders", 0, 0, noRetention)
 	if err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	if got.Partitions != 8 {
 		t.Fatalf("partitions: got %d want 8", got.Partitions)
 	}
-	if got.ReplicationFactor != 1 {
-		t.Fatalf("replication_factor: got %d want 1", got.ReplicationFactor)
+	if got.ReplicationFactor != 2 {
+		t.Fatalf("replication_factor: got %d want 2", got.ReplicationFactor)
+	}
+	if got.Retention.MaxAgeMs != defaultPolicy.DefaultRetention.MaxAgeMs {
+		t.Fatalf("retention.max_age_ms: got %d want %d", got.Retention.MaxAgeMs, defaultPolicy.DefaultRetention.MaxAgeMs)
 	}
 }
 
@@ -76,12 +88,42 @@ func TestCreateTopicRespectsExplicitValues(t *testing.T) {
 	br, _ := newTestBroker(t, defaultPolicy)
 	ctx := context.Background()
 
-	got, err := br.CreateTopic(ctx, "orders", 16, 1)
+	got, err := br.CreateTopic(ctx, "orders", 16, 2, topic.Retention{MaxAgeMs: 60_000, MaxBytes: 1 << 20})
 	if err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	if got.Partitions != 16 {
 		t.Fatalf("partitions: got %d want 16", got.Partitions)
+	}
+	if got.Retention.MaxAgeMs != 60_000 || got.Retention.MaxBytes != 1<<20 {
+		t.Fatalf("retention: got %+v want {60000, 1MiB}", got.Retention)
+	}
+}
+
+func TestCreateTopicRetentionFallsBackToDefault(t *testing.T) {
+	br, _ := newTestBroker(t, defaultPolicy)
+	ctx := context.Background()
+
+	// Only MaxBytes set; MaxAgeMs zero → inherit policy default for age.
+	got, err := br.CreateTopic(ctx, "orders", 4, 2, topic.Retention{MaxBytes: 4096})
+	if err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	if got.Retention.MaxAgeMs != defaultPolicy.DefaultRetention.MaxAgeMs {
+		t.Fatalf("MaxAgeMs: got %d want default %d", got.Retention.MaxAgeMs, defaultPolicy.DefaultRetention.MaxAgeMs)
+	}
+	if got.Retention.MaxBytes != 4096 {
+		t.Fatalf("MaxBytes: got %d want 4096", got.Retention.MaxBytes)
+	}
+}
+
+func TestCreateTopicRejectsNegativeRetention(t *testing.T) {
+	br, _ := newTestBroker(t, defaultPolicy)
+	ctx := context.Background()
+
+	_, err := br.CreateTopic(ctx, "bad", 4, 2, topic.Retention{MaxAgeMs: -1})
+	if !errors.Is(err, broker.ErrInvalidArgument) {
+		t.Fatalf("want ErrInvalidArgument for negative max_age_ms, got %v", err)
 	}
 }
 
@@ -89,11 +131,11 @@ func TestCreateTopicRejectsAboveMax(t *testing.T) {
 	br, _ := newTestBroker(t, broker.TopicPolicy{
 		DefaultPartitions:        4,
 		MaxPartitions:            8,
-		DefaultReplicationFactor: 1,
+		DefaultReplicationFactor: 2,
 	})
 	ctx := context.Background()
 
-	_, err := br.CreateTopic(ctx, "too-big", 9, 1)
+	_, err := br.CreateTopic(ctx, "too-big", 9, 2, noRetention)
 	if !errors.Is(err, broker.ErrInvalidArgument) {
 		t.Fatalf("want ErrInvalidArgument, got %v", err)
 	}
@@ -103,7 +145,7 @@ func TestCreateTopicRejectsNegativePartitions(t *testing.T) {
 	br, _ := newTestBroker(t, defaultPolicy)
 	ctx := context.Background()
 
-	_, err := br.CreateTopic(ctx, "neg", -1, 1)
+	_, err := br.CreateTopic(ctx, "neg", -1, 2, noRetention)
 	if !errors.Is(err, broker.ErrInvalidArgument) {
 		t.Fatalf("want ErrInvalidArgument, got %v", err)
 	}
@@ -113,7 +155,7 @@ func TestIncreaseTopicPartitionsHappyPath(t *testing.T) {
 	br, _ := newTestBroker(t, defaultPolicy)
 	ctx := context.Background()
 
-	if _, err := br.CreateTopic(ctx, "orders", 4, 1); err != nil {
+	if _, err := br.CreateTopic(ctx, "orders", 4, 2, noRetention); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	updated, err := br.IncreaseTopicPartitions(ctx, "orders", 16)
@@ -136,7 +178,7 @@ func TestIncreaseTopicPartitionsRejectsDecrease(t *testing.T) {
 	br, _ := newTestBroker(t, defaultPolicy)
 	ctx := context.Background()
 
-	if _, err := br.CreateTopic(ctx, "t", 16, 1); err != nil {
+	if _, err := br.CreateTopic(ctx, "t", 16, 2, noRetention); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	_, err := br.IncreaseTopicPartitions(ctx, "t", 8)
@@ -149,7 +191,7 @@ func TestIncreaseTopicPartitionsRejectsEqual(t *testing.T) {
 	br, _ := newTestBroker(t, defaultPolicy)
 	ctx := context.Background()
 
-	if _, err := br.CreateTopic(ctx, "t", 8, 1); err != nil {
+	if _, err := br.CreateTopic(ctx, "t", 8, 2, noRetention); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	_, err := br.IncreaseTopicPartitions(ctx, "t", 8)
@@ -162,11 +204,11 @@ func TestIncreaseTopicPartitionsRejectsAboveMax(t *testing.T) {
 	br, _ := newTestBroker(t, broker.TopicPolicy{
 		DefaultPartitions:        4,
 		MaxPartitions:            16,
-		DefaultReplicationFactor: 1,
+		DefaultReplicationFactor: 2,
 	})
 	ctx := context.Background()
 
-	if _, err := br.CreateTopic(ctx, "t", 4, 1); err != nil {
+	if _, err := br.CreateTopic(ctx, "t", 4, 2, noRetention); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	_, err := br.IncreaseTopicPartitions(ctx, "t", 32)
@@ -185,11 +227,74 @@ func TestIncreaseTopicPartitionsTopicNotFound(t *testing.T) {
 	}
 }
 
+func TestUpdateTopicRetentionHappyPath(t *testing.T) {
+	br, _ := newTestBroker(t, defaultPolicy)
+	ctx := context.Background()
+
+	if _, err := br.CreateTopic(ctx, "orders", 4, 2, topic.Retention{MaxAgeMs: 60_000, MaxBytes: 1024}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// Open a partition log via Produce so we can verify it gets reopened
+	// with the new retention bounds.
+	if _, _, err := br.Produce(ctx, "orders", "k1", []byte(`{"x":1}`)); err != nil {
+		t.Fatalf("Produce: %v", err)
+	}
+
+	updated, err := br.UpdateTopicRetention(ctx, "orders", topic.Retention{MaxAgeMs: 600_000, MaxBytes: 4096})
+	if err != nil {
+		t.Fatalf("UpdateTopicRetention: %v", err)
+	}
+	if updated.Retention.MaxAgeMs != 600_000 || updated.Retention.MaxBytes != 4096 {
+		t.Fatalf("retention: got %+v want {600000, 4096}", updated.Retention)
+	}
+
+	got, err := br.GetTopic(ctx, "orders")
+	if err != nil {
+		t.Fatalf("GetTopic: %v", err)
+	}
+	if got.Retention.MaxAgeMs != 600_000 {
+		t.Fatalf("persisted MaxAgeMs: %d, want 600000", got.Retention.MaxAgeMs)
+	}
+
+	// A subsequent produce must succeed — the previously-cached log was
+	// closed by UpdateTopicRetention, so this exercises the reopen path.
+	if _, _, err := br.Produce(ctx, "orders", "k2", []byte(`{"x":2}`)); err != nil {
+		t.Fatalf("Produce after retention update: %v", err)
+	}
+}
+
+func TestUpdateTopicRetentionFallsBackToDefault(t *testing.T) {
+	br, _ := newTestBroker(t, defaultPolicy)
+	ctx := context.Background()
+
+	if _, err := br.CreateTopic(ctx, "orders", 4, 2, topic.Retention{MaxAgeMs: 60_000}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	updated, err := br.UpdateTopicRetention(ctx, "orders", topic.Retention{}) // both zero
+	if err != nil {
+		t.Fatalf("UpdateTopicRetention: %v", err)
+	}
+	if updated.Retention.MaxAgeMs != defaultPolicy.DefaultRetention.MaxAgeMs {
+		t.Fatalf("MaxAgeMs not defaulted: got %d want %d", updated.Retention.MaxAgeMs, defaultPolicy.DefaultRetention.MaxAgeMs)
+	}
+}
+
+func TestUpdateTopicRetentionTopicNotFound(t *testing.T) {
+	br, _ := newTestBroker(t, defaultPolicy)
+	ctx := context.Background()
+
+	_, err := br.UpdateTopicRetention(ctx, "missing", topic.Retention{MaxAgeMs: 1000})
+	if !errors.Is(err, broker.ErrTopicNotFound) {
+		t.Fatalf("want ErrTopicNotFound, got %v", err)
+	}
+}
+
 func TestDeleteTopicWipesEverything(t *testing.T) {
 	br, dir := newTestBroker(t, defaultPolicy)
 	ctx := context.Background()
 
-	if _, err := br.CreateTopic(ctx, "orders", 4, 1); err != nil {
+	if _, err := br.CreateTopic(ctx, "orders", 4, 2, noRetention); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 	if _, _, err := br.Produce(ctx, "orders", "k1", []byte(`{"x":1}`)); err != nil {
@@ -223,13 +328,13 @@ func TestGetTopicDetailsReportsStats(t *testing.T) {
 	br, _ := newTestBroker(t, defaultPolicy)
 	ctx := context.Background()
 
-	if _, err := br.CreateTopic(ctx, "orders", 4, 1); err != nil {
+	if _, err := br.CreateTopic(ctx, "orders", 4, 2, noRetention); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 
 	// Produce 3 records on the same key so they all land on the same
 	// partition (HashRoundRobin keyed mode is deterministic).
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, _, err := br.Produce(ctx, "orders", "fixed-key", []byte(`{"v":1}`)); err != nil {
 			t.Fatalf("Produce %d: %v", i, err)
 		}
@@ -259,10 +364,10 @@ func TestMultipleTopicsAreIndependent(t *testing.T) {
 	br, _ := newTestBroker(t, defaultPolicy)
 	ctx := context.Background()
 
-	if _, err := br.CreateTopic(ctx, "a", 4, 1); err != nil {
+	if _, err := br.CreateTopic(ctx, "a", 4, 2, noRetention); err != nil {
 		t.Fatalf("create a: %v", err)
 	}
-	if _, err := br.CreateTopic(ctx, "b", 0, 0); err != nil {
+	if _, err := br.CreateTopic(ctx, "b", 0, 0, noRetention); err != nil {
 		t.Fatalf("create b: %v", err)
 	}
 
@@ -289,5 +394,77 @@ func TestMultipleTopicsAreIndependent(t *testing.T) {
 	}
 	if off1 != 0 || off2 != 0 {
 		t.Fatalf("each topic's first record should be offset 0; got a=%d b=%d", off1, off2)
+	}
+}
+
+func TestListTopicsPagination(t *testing.T) {
+	br, _ := newTestBroker(t, defaultPolicy)
+	ctx := context.Background()
+
+	for _, name := range []string{"a", "b", "c", "d", "e"} {
+		if _, err := br.CreateTopic(ctx, name, 1, 2, noRetention); err != nil {
+			t.Fatalf("CreateTopic %q: %v", name, err)
+		}
+	}
+
+	// First page: limit 2.
+	page1, nextToken, err := br.ListTopics(ctx, metastore.ListOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("ListTopics page 1: %v", err)
+	}
+	if got, want := len(page1), 2; got != want {
+		t.Fatalf("page 1 len: got %d want %d", got, want)
+	}
+	if nextToken != "b" {
+		t.Fatalf("page 1 next_token: got %q want %q", nextToken, "b")
+	}
+	if page1[0].Name != "a" || page1[1].Name != "b" {
+		t.Fatalf("page 1 names: got [%s, %s]", page1[0].Name, page1[1].Name)
+	}
+
+	// Second page picks up after "b".
+	page2, nextToken, err := br.ListTopics(ctx, metastore.ListOptions{Limit: 2, PageToken: nextToken})
+	if err != nil {
+		t.Fatalf("ListTopics page 2: %v", err)
+	}
+	if page2[0].Name != "c" || page2[1].Name != "d" {
+		t.Fatalf("page 2 names: got [%s, %s]", page2[0].Name, page2[1].Name)
+	}
+	if nextToken != "d" {
+		t.Fatalf("page 2 next_token: got %q want %q", nextToken, "d")
+	}
+
+	// Third page returns the final row and signals no-more via empty token.
+	page3, nextToken, err := br.ListTopics(ctx, metastore.ListOptions{Limit: 2, PageToken: nextToken})
+	if err != nil {
+		t.Fatalf("ListTopics page 3: %v", err)
+	}
+	if len(page3) != 1 || page3[0].Name != "e" {
+		t.Fatalf("page 3: got %d topics, want 1 (e)", len(page3))
+	}
+	if nextToken != "" {
+		t.Fatalf("page 3 next_token: got %q want empty (no more pages)", nextToken)
+	}
+}
+
+func TestListTopicsUnpaginatedReturnsAll(t *testing.T) {
+	br, _ := newTestBroker(t, defaultPolicy)
+	ctx := context.Background()
+
+	for _, name := range []string{"a", "b", "c"} {
+		if _, err := br.CreateTopic(ctx, name, 1, 2, noRetention); err != nil {
+			t.Fatalf("CreateTopic %q: %v", name, err)
+		}
+	}
+
+	all, nextToken, err := br.ListTopics(ctx, metastore.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListTopics: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("len: got %d want 3", len(all))
+	}
+	if nextToken != "" {
+		t.Fatalf("next_token: got %q want empty (limit=0 = no pagination)", nextToken)
 	}
 }

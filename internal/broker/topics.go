@@ -16,10 +16,11 @@ import (
 // CreateTopic registers a new topic and prepares its on-disk
 // directory. Partition log files are opened lazily on first use.
 //
-// partitions == 0 (or replicationFactor == 0) → use the configured
-// default. Negative values are rejected; partitions exceeding
-// TopicPolicy.MaxPartitions are rejected.
-func (b *impl) CreateTopic(ctx context.Context, name string, partitions, replicationFactor int) (topic.Topic, error) {
+// Zero values for partitions, replicationFactor, retention.MaxAgeMs,
+// and retention.MaxBytes inherit from TopicPolicy defaults. Negative
+// values are rejected; partitions exceeding TopicPolicy.MaxPartitions
+// are rejected.
+func (b *impl) CreateTopic(ctx context.Context, name string, partitions, replicationFactor int, retention topic.Retention) (topic.Topic, error) {
 	if name == "" {
 		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalidArgument)
 	}
@@ -42,13 +43,16 @@ func (b *impl) CreateTopic(ctx context.Context, name string, partitions, replica
 		return topic.Topic{}, fmt.Errorf("%w: replication_factor must be >= 2 (0 = use default)", ErrInvalidArgument)
 	}
 
-	// TODO Accept retention MS from user
+	retention, err := b.resolveRetention(retention)
+	if err != nil {
+		return topic.Topic{}, err
+	}
 
 	t := topic.Topic{
 		Name:              name,
 		Partitions:        partitions,
 		ReplicationFactor: replicationFactor,
-		Retention:         b.deps.TopicPolicy.DefaultRetention,
+		Retention:         retention,
 		CreatedAt:         time.Now().UTC(),
 	}
 
@@ -67,9 +71,30 @@ func (b *impl) CreateTopic(ctx context.Context, name string, partitions, replica
 	b.deps.Logger.Info("topic created",
 		"topic", name,
 		"partitions", partitions,
-		"replication_factor", replicationFactor)
+		"replication_factor", replicationFactor,
+		"retention_age_ms", retention.MaxAgeMs,
+		"retention_bytes", retention.MaxBytes)
 
 	return t, nil
+}
+
+// resolveRetention applies the same zero-value-inherits-default rule
+// used for partitions and replication factor. Negative values are
+// rejected; positive values pass through.
+func (b *impl) resolveRetention(r topic.Retention) (topic.Retention, error) {
+	if r.MaxAgeMs < 0 {
+		return r, fmt.Errorf("%w: retention.max_age_ms must be >= 0 (0 = use default)", ErrInvalidArgument)
+	}
+	if r.MaxBytes < 0 {
+		return r, fmt.Errorf("%w: retention.max_bytes must be >= 0 (0 = use default)", ErrInvalidArgument)
+	}
+	if r.MaxAgeMs == 0 {
+		r.MaxAgeMs = b.deps.TopicPolicy.DefaultRetention.MaxAgeMs
+	}
+	if r.MaxBytes == 0 {
+		r.MaxBytes = b.deps.TopicPolicy.DefaultRetention.MaxBytes
+	}
+	return r, nil
 }
 
 // DeleteTopic removes a topic and all of its data: closes cached
@@ -201,6 +226,74 @@ func (b *impl) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
 	return t, nil
 }
 
-func (b *impl) ListTopics(ctx context.Context) ([]topic.Topic, error) {
-	return b.deps.Metastore.ListTopics(ctx)
+func (b *impl) ListTopics(ctx context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error) {
+	return b.deps.Metastore.ListTopics(ctx, opts)
+}
+
+// UpdateTopicRetention changes the retention policy of an existing
+// topic. Cached partition logs are closed so the next access reopens
+// them with the new bounds (storage.Options.Retention is folded in at
+// log-open time, not on every operation).
+//
+// Closing flushes the in-memory buffer synchronously, so no in-flight
+// records are lost. The cost is a brief reopen on the next produce or
+// consume — acceptable for an operator-driven change.
+func (b *impl) UpdateTopicRetention(ctx context.Context, name string, retention topic.Retention) (topic.Topic, error) {
+	if name == "" {
+		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalidArgument)
+	}
+
+	current, err := b.GetTopic(ctx, name)
+	if err != nil {
+		return topic.Topic{}, err
+	}
+
+	resolved, err := b.resolveRetention(retention)
+	if err != nil {
+		return topic.Topic{}, err
+	}
+
+	updated := current
+	updated.Retention = resolved
+
+	if err := b.deps.Metastore.UpdateTopic(ctx, updated); err != nil {
+		if errors.Is(err, metastore.ErrNotFound) {
+			return topic.Topic{}, ErrTopicNotFound
+		}
+		return topic.Topic{}, err
+	}
+
+	// Close cached logs so subsequent partitionLog() calls reopen with
+	// the updated retention bounds. Same scoping pattern as DeleteTopic.
+	prefix := name + "/"
+	b.mu.Lock()
+	var firstCloseErr error
+	for k, l := range b.logs {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		if err := l.Close(); err != nil && firstCloseErr == nil {
+			firstCloseErr = err
+		}
+		delete(b.logs, k)
+	}
+	b.mu.Unlock()
+
+	if firstCloseErr != nil {
+		// The metastore update succeeded; report the close error but
+		// the new retention is in effect for any subsequently opened
+		// log. Returning the topic record so the caller knows the
+		// state landed.
+		b.deps.Logger.Error("update retention: close cached logs", "topic", name, "err", firstCloseErr)
+		return updated, fmt.Errorf("broker: close partition logs after retention update: %w", firstCloseErr)
+	}
+
+	b.deps.Logger.Info("topic retention updated",
+		"topic", name,
+		"old_age_ms", current.Retention.MaxAgeMs,
+		"new_age_ms", resolved.MaxAgeMs,
+		"old_bytes", current.Retention.MaxBytes,
+		"new_bytes", resolved.MaxBytes)
+
+	return updated, nil
 }
