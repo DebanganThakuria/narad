@@ -2,7 +2,6 @@ package topic
 
 import (
 	"encoding/json"
-	"time"
 )
 
 // Message is a single record returned to consumers. Payload is the
@@ -14,5 +13,5 @@ type Message struct {
 	Offset    int64           `json:"offset"`
 	Key       string          `json:"key,omitempty"`
 	Payload   json.RawMessage `json:"payload"`
-	Timestamp time.Time       `json:"timestamp"`
+	Timestamp int64           `json:"timestamp"`
 }

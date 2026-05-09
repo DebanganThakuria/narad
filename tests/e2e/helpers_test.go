@@ -31,23 +31,23 @@ import (
 
 // envOpts lets tests override broker policy values without a fat constructor.
 type envOpts struct {
-	dataDir          string
-	defaultParts     int
-	maxParts         int
-	defaultRF        int
-	defaultRetention topic.Retention
-	maxConsumeWait   time.Duration
-	metrics          bool // when true, wire real Prometheus metrics and /metrics endpoint
-	logOptions       storage.Options
+	dataDir            string
+	defaultParts       int
+	maxParts           int
+	defaultRF          int
+	defaultRetentionMs int64
+	maxConsumeWait     time.Duration
+	metrics            bool // when true, wire real Prometheus metrics and /metrics endpoint
+	logOptions         storage.Options
 }
 
 func defaultOpts() envOpts {
 	return envOpts{
-		defaultParts:     4,
-		maxParts:         128,
-		defaultRF:        2,
-		defaultRetention: topic.Retention{MaxAgeMs: 7 * 24 * 3600 * 1000},
-		maxConsumeWait:   5 * time.Second,
+		defaultParts:       4,
+		maxParts:           128,
+		defaultRF:          2,
+		defaultRetentionMs: 7 * 24 * 3600 * 1000,
+		maxConsumeWait:     5 * time.Second,
 		logOptions: storage.Options{
 			Codec:         storage.NewNoopCodec(),
 			FlushBytes:    1 << 20,
@@ -95,21 +95,21 @@ func newEnv(t *testing.T, opts envOpts) *env {
 	}
 
 	br, err := broker.New(broker.Deps{
-		DataDir:    opts.dataDir,
-		LogOptions: opts.logOptions,
-		TopicPolicy: broker.TopicPolicy{
+		DataDir:        opts.dataDir,
+		StorageOptions: opts.logOptions,
+		TopicConfig: broker.TopicConfig{
 			DefaultPartitions:        opts.defaultParts,
 			MaxPartitions:            opts.maxParts,
 			DefaultReplicationFactor: opts.defaultRF,
-			DefaultRetentionMs:       opts.defaultRetention,
+			DefaultRetentionMs:       opts.defaultRetentionMs,
 		},
-		Metastore:  ms,
-		Partitions: partition.NewHashRoundRobin(),
-		Schemas:    schema.NewJSONSchema(),
-		Offsets:    consumer.NewInFlight(consumer.NewMetastoreBacked(ms)),
-		Replicator: replication.NewLocal(),
-		Logger:     log,
-		Metrics:    nil,
+		Metastore:       ms,
+		Partitions:      partition.NewHashRoundRobin(),
+		Schemas:         schema.NewJSONSchema(),
+		ConsumerOffsets: consumer.NewInFlight(consumer.NewMetastoreBacked(ms)),
+		Replicator:      replication.NewLocal(),
+		Logger:          log,
+		Metrics:         nil,
 	})
 	if err != nil {
 		t.Fatalf("broker: %v", err)
@@ -251,8 +251,8 @@ func expectConflict(t *testing.T, resp *http.Response) {
 	expectStatus(t, resp, http.StatusConflict)
 }
 
-// createTopic is a convenience wrapper. Pass zero partitions/RF to use defaults.
-func (e *env) createTopic(name string, partitions, rf int, ret topic.Retention) topic.Topic {
+// createTopic is a convenience wrapper. Pass zero partitions/RF/retentionMs to use defaults.
+func (e *env) createTopic(name string, partitions, rf int, retentionMs int64) topic.Topic {
 	e.t.Helper()
 	body := map[string]any{"name": name}
 	if partitions > 0 {
@@ -261,8 +261,8 @@ func (e *env) createTopic(name string, partitions, rf int, ret topic.Retention) 
 	if rf > 0 {
 		body["replication_factor"] = rf
 	}
-	if ret.MaxAgeMs > 0 || ret.MaxBytes > 0 {
-		body["retention"] = ret
+	if retentionMs > 0 {
+		body["retention_ms"] = retentionMs
 	}
 	resp := e.post("/v1/topics", body)
 	expectStatus(e.t, resp, http.StatusCreated)

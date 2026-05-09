@@ -15,7 +15,7 @@ import (
 type Deps struct {
 	DataDir         string
 	StorageOptions  storage.Options
-	TopicPolicy     TopicPolicy
+	TopicConfig     TopicConfig
 	Metastore       metastore.Metastore
 	Partitions      partition.Manager
 	Schemas         schema.Registry
@@ -28,10 +28,10 @@ type Deps struct {
 	Metrics *metrics.Metrics
 }
 
-// TopicPolicy supplies CreateTopic's defaults and bounds. Lives in the
+// TopicConfig supplies CreateTopic's defaults and bounds. Lives in the
 // broker package so the broker stays decoupled from internal/config;
-// serve.go translates config.TopicConfig → TopicPolicy at startup.
-type TopicPolicy struct {
+// serve.go translates config.TopicConfig → TopicConfig at startup.
+type TopicConfig struct {
 	DefaultPartitions          int
 	MaxPartitions              int
 	DefaultReplicationFactor   int

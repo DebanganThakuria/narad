@@ -17,43 +17,45 @@ import (
 // directory. Partition log files are opened lazily on first use.
 //
 // Zero values for partitions, replicationFactor, retention.MaxAgeMs,
-// and retention.MaxBytes inherit from TopicPolicy defaults. Negative
-// values are rejected; partitions exceeding TopicPolicy.MaxPartitions
+// and retention.MaxBytes inherit from TopicConfig defaults. Negative
+// values are rejected; partitions exceeding TopicConfig.MaxPartitions
 // are rejected.
-func (b *impl) CreateTopic(ctx context.Context, name string, partitions, replicationFactor int, retention topic.Retention) (topic.Topic, error) {
+func (b *impl) CreateTopic(ctx context.Context, name string, partitions, replicationFactor int, retentionMs int64) (topic.Topic, error) {
 	if name == "" {
 		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalidArgument)
 	}
 
 	if partitions == 0 {
-		partitions = b.deps.TopicPolicy.DefaultPartitions
+		partitions = b.deps.TopicConfig.DefaultPartitions
 	}
 	if partitions < 0 {
 		return topic.Topic{}, fmt.Errorf("%w: partitions must be >= 0 (0 = use default)", ErrInvalidArgument)
 	}
-	if maximum := b.deps.TopicPolicy.MaxPartitions; maximum > 0 && partitions > maximum {
+	if maximum := b.deps.TopicConfig.MaxPartitions; maximum > 0 && partitions > maximum {
 		return topic.Topic{}, fmt.Errorf("%w: partitions (%d) exceeds topic.max_partitions (%d)",
 			ErrInvalidArgument, partitions, maximum)
 	}
 
 	if replicationFactor == 0 {
-		replicationFactor = b.deps.TopicPolicy.DefaultReplicationFactor
+		replicationFactor = b.deps.TopicConfig.DefaultReplicationFactor
 	}
 	if replicationFactor < 2 {
 		return topic.Topic{}, fmt.Errorf("%w: replication_factor must be >= 2 (0 = use default)", ErrInvalidArgument)
 	}
 
-	retention, err := b.resolveRetention(retention)
-	if err != nil {
-		return topic.Topic{}, err
+	if retentionMs == 0 {
+		retentionMs = b.deps.TopicConfig.DefaultRetentionMs
+	}
+	if retentionMs < 0 {
+		return topic.Topic{}, fmt.Errorf("%w: retention.max_age_ms must be >= 0 (0 = use default)", ErrInvalidArgument)
 	}
 
 	t := topic.Topic{
 		Name:              name,
 		Partitions:        partitions,
 		ReplicationFactor: replicationFactor,
-		Retention:         retention,
-		CreatedAt:         time.Now().UTC(),
+		RetentionMs:       retentionMs,
+		CreatedAt:         time.Now().Unix(),
 	}
 
 	dir := filepath.Join(b.deps.DataDir, "topics", name)
@@ -72,29 +74,9 @@ func (b *impl) CreateTopic(ctx context.Context, name string, partitions, replica
 		"topic", name,
 		"partitions", partitions,
 		"replication_factor", replicationFactor,
-		"retention_age_ms", retention.MaxAgeMs,
-		"retention_bytes", retention.MaxBytes)
+		"retention_ms", retentionMs)
 
 	return t, nil
-}
-
-// resolveRetention applies the same zero-value-inherits-default rule
-// used for partitions and replication factor. Negative values are
-// rejected; positive values pass through.
-func (b *impl) resolveRetention(r topic.Retention) (topic.Retention, error) {
-	if r.MaxAgeMs < 0 {
-		return r, fmt.Errorf("%w: retention.max_age_ms must be >= 0 (0 = use default)", ErrInvalidArgument)
-	}
-	if r.MaxBytes < 0 {
-		return r, fmt.Errorf("%w: retention.max_bytes must be >= 0 (0 = use default)", ErrInvalidArgument)
-	}
-	if r.MaxAgeMs == 0 {
-		r.MaxAgeMs = b.deps.TopicPolicy.DefaultRetentionMs.MaxAgeMs
-	}
-	if r.MaxBytes == 0 {
-		r.MaxBytes = b.deps.TopicPolicy.DefaultRetentionMs.MaxBytes
-	}
-	return r, nil
 }
 
 // DeleteTopic removes a topic and all of its data: closes cached
@@ -182,7 +164,7 @@ func (b *impl) IncreaseTopicPartitions(ctx context.Context, name string, newPart
 	if newPartitions <= 0 {
 		return topic.Topic{}, fmt.Errorf("%w: partitions must be > 0", ErrInvalidArgument)
 	}
-	if maximum := b.deps.TopicPolicy.MaxPartitions; maximum > 0 && newPartitions > maximum {
+	if maximum := b.deps.TopicConfig.MaxPartitions; maximum > 0 && newPartitions > maximum {
 		return topic.Topic{}, fmt.Errorf("%w: partitions (%d) exceeds topic.max_partitions (%d)",
 			ErrInvalidArgument, newPartitions, maximum)
 	}
@@ -235,12 +217,21 @@ func (b *impl) ListTopics(ctx context.Context, opts metastore.ListOptions) ([]to
 // them with the new bounds (storage.Options.Retention is folded in at
 // log-open time, not on every operation).
 //
+// retentionMs == 0 inherits TopicConfig.DefaultRetentionMs; negative
+// values are rejected.
+//
 // Closing flushes the in-memory buffer synchronously, so no in-flight
 // records are lost. The cost is a brief reopen on the next produce or
 // consume — acceptable for an operator-driven change.
-func (b *impl) UpdateTopicRetention(ctx context.Context, name string, retention topic.Retention) (topic.Topic, error) {
+func (b *impl) UpdateTopicRetention(ctx context.Context, name string, retentionMs int64) (topic.Topic, error) {
 	if name == "" {
 		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalidArgument)
+	}
+	if retentionMs < 0 {
+		return topic.Topic{}, fmt.Errorf("%w: retention_ms must be >= 0 (0 = use default)", ErrInvalidArgument)
+	}
+	if retentionMs == 0 {
+		retentionMs = b.deps.TopicConfig.DefaultRetentionMs
 	}
 
 	current, err := b.GetTopic(ctx, name)
@@ -248,13 +239,8 @@ func (b *impl) UpdateTopicRetention(ctx context.Context, name string, retention 
 		return topic.Topic{}, err
 	}
 
-	resolved, err := b.resolveRetention(retention)
-	if err != nil {
-		return topic.Topic{}, err
-	}
-
 	updated := current
-	updated.Retention = resolved
+	updated.RetentionMs = retentionMs
 
 	if err := b.deps.Metastore.UpdateTopic(ctx, updated); err != nil {
 		if errors.Is(err, metastore.ErrNotFound) {
@@ -290,10 +276,8 @@ func (b *impl) UpdateTopicRetention(ctx context.Context, name string, retention 
 
 	b.deps.Logger.Info("topic retention updated",
 		"topic", name,
-		"old_age_ms", current.Retention.MaxAgeMs,
-		"new_age_ms", resolved.MaxAgeMs,
-		"old_bytes", current.Retention.MaxBytes,
-		"new_bytes", resolved.MaxBytes)
+		"old_retention_ms", current.RetentionMs,
+		"new_retention_ms", retentionMs)
 
 	return updated, nil
 }

@@ -172,7 +172,7 @@ func TestPollerUpdatesGauges(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New(reg)
 
-	produced := time.Now().Add(-30 * time.Second)
+	produced := time.Now().Add(-30 * time.Second).Unix()
 	provider := fakeSnapshotProvider{
 		[]TopicSnapshot{{
 			Topic: "orders",

@@ -22,7 +22,8 @@ func (s *SQLiteStore) CreateTopic(ctx context.Context, t topic.Topic) error {
 		return ErrAlreadyExists
 	}
 
-	if err := s.db.WithContext(ctx).Create(new(TopicRecord{}.FromTopic(t))).Error; err != nil {
+	record := TopicRecord{}.FromTopic(t)
+	if err := s.db.WithContext(ctx).Create(&record).Error; err != nil {
 		return err
 	}
 	s.cache.delete(listTopicsKey)
@@ -35,10 +36,10 @@ func (s *SQLiteStore) UpdateTopic(ctx context.Context, t topic.Topic) error {
 	}
 
 	updates := map[string]any{
-		"partitions":         t.Partitions,
-		"replication_factor": t.ReplicationFactor,
-		"max_age_ms":         t.Retention.MaxAgeMs,
-		"max_bytes":          t.Retention.MaxBytes,
+		"partitions":            t.Partitions,
+		"replication_factor":    t.ReplicationFactor,
+		"retention_ms":          t.RetentionMs,
+		"visibility_timeout_ms": t.VisibilityTimeoutMs,
 	}
 	result := s.db.WithContext(ctx).Model(&TopicRecord{}).Where("name = ?", t.Name).Updates(updates)
 	if result.Error != nil {

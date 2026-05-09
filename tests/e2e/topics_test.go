@@ -12,7 +12,7 @@ func TestCreateTopic(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	tp := env.createTopic("orders", 8, 2, topic.Retention{})
+	tp := env.createTopic("orders", 8, 2, int64(0))
 	if tp.Name != "orders" {
 		t.Fatalf("name: got %q, want orders", tp.Name)
 	}
@@ -25,7 +25,7 @@ func TestCreateTopicDefaults(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	tp := env.createTopic("events", 0, 0, topic.Retention{})
+	tp := env.createTopic("events", 0, 0, int64(0))
 	if tp.Partitions != 4 {
 		t.Fatalf("partitions: got %d, want default 4", tp.Partitions)
 	}
@@ -38,12 +38,9 @@ func TestCreateTopicWithRetention(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	tp := env.createTopic("logs", 2, 2, topic.Retention{MaxAgeMs: 3_600_000, MaxBytes: 1 << 30})
-	if tp.Retention.MaxAgeMs != 3_600_000 {
-		t.Fatalf("max_age_ms: got %d, want 3600000", tp.Retention.MaxAgeMs)
-	}
-	if tp.Retention.MaxBytes != 1<<30 {
-		t.Fatalf("max_bytes: got %d, want %d", tp.Retention.MaxBytes, 1<<30)
+	tp := env.createTopic("logs", 2, 2, 3_600_000)
+	if tp.RetentionMs != 3_600_000 {
+		t.Fatalf("retention_ms: got %d, want 3600000", tp.RetentionMs)
 	}
 }
 
@@ -51,7 +48,7 @@ func TestCreateTopicDuplicate(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("dup", 1, 2, topic.Retention{})
+	env.createTopic("dup", 1, 2, int64(0))
 	resp := env.post("/v1/topics", map[string]any{"name": "dup"})
 	expectConflict(t, resp)
 }
@@ -60,7 +57,7 @@ func TestGetTopic(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("test-get", 2, 2, topic.Retention{})
+	env.createTopic("test-get", 2, 2, int64(0))
 	resp := env.get("/v1/topics/test-get")
 	expectOK(t, resp)
 
@@ -85,8 +82,8 @@ func TestListTopics(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("aaa", 1, 2, topic.Retention{})
-	env.createTopic("bbb", 1, 2, topic.Retention{})
+	env.createTopic("aaa", 1, 2, int64(0))
+	env.createTopic("bbb", 1, 2, int64(0))
 
 	resp := env.get("/v1/topics")
 	expectOK(t, resp)
@@ -110,7 +107,7 @@ func TestListTopicsPagination(t *testing.T) {
 	defer env.close()
 
 	for _, name := range []string{"p1", "p2", "p3"} {
-		env.createTopic(name, 1, 2, topic.Retention{})
+		env.createTopic(name, 1, 2, int64(0))
 	}
 
 	// Page 1
@@ -149,7 +146,7 @@ func TestDeleteTopic(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("to-delete", 1, 2, topic.Retention{})
+	env.createTopic("to-delete", 1, 2, int64(0))
 	resp := env.del("/v1/topics/to-delete")
 	expectStatus(t, resp, 204) // broker returns 204 No Content
 
@@ -172,7 +169,7 @@ func TestAlterPartitions(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("scale", 2, 2, topic.Retention{})
+	env.createTopic("scale", 2, 2, int64(0))
 
 	resp := env.patch("/v1/topics/scale", map[string]any{"partitions": 8})
 	expectOK(t, resp)
@@ -187,7 +184,7 @@ func TestAlterPartitionsDecrease(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("nodec", 8, 2, topic.Retention{})
+	env.createTopic("nodec", 8, 2, int64(0))
 	resp := env.patch("/v1/topics/nodec", map[string]any{"partitions": 2})
 	expectBadRequest(t, resp)
 }
@@ -196,19 +193,16 @@ func TestAlterRetention(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("ret-topic", 1, 2, topic.Retention{})
+	env.createTopic("ret-topic", 1, 2, int64(0))
 
 	resp := env.patch("/v1/topics/ret-topic", map[string]any{
-		"retention": map[string]any{"max_age_ms": 999_999, "max_bytes": 123_456},
+		"retention_ms": int64(999_999),
 	})
 	expectOK(t, resp)
 
 	updated := readJSON[topic.Topic](t, resp)
-	if updated.Retention.MaxAgeMs != 999_999 {
-		t.Fatalf("max_age_ms: got %d, want 999999", updated.Retention.MaxAgeMs)
-	}
-	if updated.Retention.MaxBytes != 123_456 {
-		t.Fatalf("max_bytes: got %d, want 123456", updated.Retention.MaxBytes)
+	if updated.RetentionMs != 999_999 {
+		t.Fatalf("retention_ms: got %d, want 999999", updated.RetentionMs)
 	}
 }
 
@@ -254,7 +248,7 @@ func TestAlterSchemaFirstVersion(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("schema-first", 1, 2, topic.Retention{})
+	env.createTopic("schema-first", 1, 2, int64(0))
 
 	resp := env.patch("/v1/topics/schema-first", map[string]any{
 		"schema": json.RawMessage(schemaV1),
@@ -266,7 +260,7 @@ func TestAlterSchemaCompatible(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("schema-compat", 1, 2, topic.Retention{})
+	env.createTopic("schema-compat", 1, 2, int64(0))
 
 	resp := env.patch("/v1/topics/schema-compat", map[string]any{
 		"schema": json.RawMessage(schemaV1),
@@ -284,7 +278,7 @@ func TestAlterSchemaIncompatibleTypeChange(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("schema-type", 1, 2, topic.Retention{})
+	env.createTopic("schema-type", 1, 2, int64(0))
 
 	resp := env.patch("/v1/topics/schema-type", map[string]any{
 		"schema": json.RawMessage(schemaV1),
@@ -305,7 +299,7 @@ func TestAlterSchemaIncompatibleRemoval(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("schema-rem", 1, 2, topic.Retention{})
+	env.createTopic("schema-rem", 1, 2, int64(0))
 
 	resp := env.patch("/v1/topics/schema-rem", map[string]any{
 		"schema": json.RawMessage(schemaV1),
@@ -323,7 +317,7 @@ func TestAlterSchemaInvalidJSON(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("schema-invalid", 1, 2, topic.Retention{})
+	env.createTopic("schema-invalid", 1, 2, int64(0))
 
 	resp := env.patch("/v1/topics/schema-invalid", map[string]any{
 		"schema": "not a valid json schema",
@@ -335,7 +329,7 @@ func TestAlterSchemaWithPartitions(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("schema-multi", 2, 2, topic.Retention{})
+	env.createTopic("schema-multi", 2, 2, int64(0))
 
 	resp := env.patch("/v1/topics/schema-multi", map[string]any{
 		"partitions": 6,
@@ -353,17 +347,17 @@ func TestAlterSchemaWithRetention(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("schema-ret", 1, 2, topic.Retention{})
+	env.createTopic("schema-ret", 1, 2, int64(0))
 
 	resp := env.patch("/v1/topics/schema-ret", map[string]any{
-		"retention": map[string]any{"max_age_ms": 42_000},
-		"schema":    json.RawMessage(schemaV1),
+		"retention_ms": int64(42_000),
+		"schema":       json.RawMessage(schemaV1),
 	})
 	expectOK(t, resp)
 
 	updated := readJSON[topic.Topic](t, resp)
-	if updated.Retention.MaxAgeMs != 42_000 {
-		t.Fatalf("max_age_ms: got %d, want 42000", updated.Retention.MaxAgeMs)
+	if updated.RetentionMs != 42_000 {
+		t.Fatalf("retention_ms: got %d, want 42000", updated.RetentionMs)
 	}
 }
 
@@ -371,12 +365,12 @@ func TestAlterAllThree(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("all-three", 2, 2, topic.Retention{})
+	env.createTopic("all-three", 2, 2, int64(0))
 
 	resp := env.patch("/v1/topics/all-three", map[string]any{
-		"partitions": 8,
-		"retention":  map[string]any{"max_age_ms": 99_999},
-		"schema":     json.RawMessage(schemaV1),
+		"partitions":   8,
+		"retention_ms": int64(99_999),
+		"schema":       json.RawMessage(schemaV1),
 	})
 	expectOK(t, resp)
 
@@ -384,8 +378,8 @@ func TestAlterAllThree(t *testing.T) {
 	if updated.Partitions != 8 {
 		t.Fatalf("partitions: got %d, want 8", updated.Partitions)
 	}
-	if updated.Retention.MaxAgeMs != 99_999 {
-		t.Fatalf("retention: got %d, want 99999", updated.Retention.MaxAgeMs)
+	if updated.RetentionMs != 99_999 {
+		t.Fatalf("retention_ms: got %d, want 99999", updated.RetentionMs)
 	}
 }
 
@@ -393,7 +387,7 @@ func TestAlterEmptyBody(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("empty-body", 1, 2, topic.Retention{})
+	env.createTopic("empty-body", 1, 2, int64(0))
 	resp := env.patch("/v1/topics/empty-body", map[string]any{})
 	expectBadRequest(t, resp)
 }

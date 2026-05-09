@@ -48,6 +48,5 @@ func Default() *Config {
 			Format: "json",
 		},
 		Worker: WorkerConfig{Enabled: false},
-		Debug:  DebugConfig{PProfAddr: ""}, // disabled by default
 	}
 }

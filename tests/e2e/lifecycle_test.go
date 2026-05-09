@@ -32,7 +32,7 @@ func TestFullLifecycle(t *testing.T) {
 		"name":               "full-cycle",
 		"partitions":         4,
 		"replication_factor": 2,
-		"retention":          map[string]any{"max_age_ms": 3600_000},
+		"retention_ms":       int64(3_600_000),
 	})
 	expectStatus(t, resp, http.StatusCreated)
 
@@ -55,8 +55,8 @@ func TestFullLifecycle(t *testing.T) {
 
 	// Alter partitions + retention together
 	resp = env.patch("/v1/topics/full-cycle", map[string]any{
-		"partitions": 6,
-		"retention":  map[string]any{"max_age_ms": 7_200_000},
+		"partitions":   6,
+		"retention_ms": int64(7_200_000),
 	})
 	expectOK(t, resp)
 
@@ -64,8 +64,8 @@ func TestFullLifecycle(t *testing.T) {
 	if updated.Partitions != 6 {
 		t.Fatalf("partitions: got %d, want 6", updated.Partitions)
 	}
-	if updated.Retention.MaxAgeMs != 7_200_000 {
-		t.Fatalf("retention: got %d, want 7200000", updated.Retention.MaxAgeMs)
+	if updated.RetentionMs != 7_200_000 {
+		t.Fatalf("retention_ms: got %d, want 7200000", updated.RetentionMs)
 	}
 
 	// Delete
@@ -81,7 +81,7 @@ func TestFullLifecycleWithSchema(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("schema-cycle", 2, 2, topic.Retention{})
+	env.createTopic("schema-cycle", 2, 2, 0)
 
 	// Register schema
 	resp := env.patch("/v1/topics/schema-cycle", map[string]any{

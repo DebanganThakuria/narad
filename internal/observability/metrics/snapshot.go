@@ -2,7 +2,6 @@ package metrics
 
 import (
 	"context"
-	"time"
 )
 
 // TopicSnapshot is one (topic, []partition) row returned by a
@@ -33,7 +32,7 @@ type PartitionSnapshot struct {
 	SegmentCount       int
 	SizeBytes          int64
 	CommittedOffset    int64
-	OldestUnconsumedAt time.Time
+	OldestUnconsumedAt int64
 	Dropped            int64
 }
 

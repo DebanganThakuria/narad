@@ -889,59 +889,6 @@ func TestRetentionRespectsActiveSegment(t *testing.T) {
 	}
 }
 
-// 3. Size-based retention deletes oldest sealed segments until the
-// total drops below MaxBytes.
-func TestRetentionByBytes(t *testing.T) {
-	clock := newAtomicTime(time.Now())
-	dir := testLogPath(t)
-	noRetentionOpts := retentionOpts(t, clock, RetentionConfig{})
-	produceN(t, dir, noRetentionOpts, 5)
-
-	totalBefore := fileSize(t, dir)
-	if totalBefore == 0 {
-		t.Fatalf("no segments produced")
-	}
-
-	// Bound to half the current total — sweep must delete some
-	// (but never the active segment).
-	bound := totalBefore / 2
-
-	opts := retentionOpts(t, clock, RetentionConfig{
-		MaxBytes: bound,
-	})
-	l, err := NewLog(dir, opts)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	defer l.Close()
-
-	l.reaper.sweep()
-
-	got := fileSize(t, dir)
-	if got > bound {
-		// The active segment alone might exceed the bound — that's
-		// allowed, since active is never a candidate. But every
-		// non-active segment should be eligible. Recompute: total -
-		// active size must be ≤ bound.
-		l.rwmu.RLock()
-		var sealed int64
-		for i, s := range l.segments {
-			if i == len(l.segments)-1 {
-				continue
-			}
-			sealed += s.sizeBytes
-		}
-		l.rwmu.RUnlock()
-		if sealed > bound {
-			t.Fatalf("sealed total %d > bound %d after sweep (overall %d)", sealed, bound, got)
-		}
-	}
-	// At minimum, *some* segments were deleted.
-	if got >= totalBefore {
-		t.Fatalf("nothing deleted: was %d, now %d (bound %d)", totalBefore, got, bound)
-	}
-}
-
 // 4. Retention disabled (both fields zero) → reaper does nothing.
 func TestRetentionDisabledIsNoop(t *testing.T) {
 	clock := newAtomicTime(time.Now())

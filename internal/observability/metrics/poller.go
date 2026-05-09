@@ -76,7 +76,7 @@ func (p *Poller) tick(ctx context.Context) {
 
 	currentTopics := make(map[string]struct{}, len(snaps))
 	var partitionsTotal int
-	now := time.Now()
+	nowUnix := time.Now().Unix()
 
 	for _, ts := range snaps {
 		currentTopics[ts.Topic] = struct{}{}
@@ -96,8 +96,8 @@ func (p *Poller) tick(ctx context.Context) {
 			p.metrics.ConsumerDroppedMessages.With(labels).Set(float64(ps.Dropped))
 
 			var ageSeconds float64
-			if !ps.OldestUnconsumedAt.IsZero() {
-				ageSeconds = now.Sub(ps.OldestUnconsumedAt).Seconds()
+			if ps.OldestUnconsumedAt > 0 {
+				ageSeconds = float64(nowUnix - ps.OldestUnconsumedAt)
 				if ageSeconds < 0 {
 					ageSeconds = 0
 				}

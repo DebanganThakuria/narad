@@ -58,8 +58,8 @@ func TestLRUEvictsOldestOverByteCap(t *testing.T) {
 			t.Errorf("expected %s to be retained", kept)
 		}
 	}
-	if c.total > c.maxBytes {
-		t.Fatalf("total %d exceeds maxBytes %d after eviction", c.total, c.maxBytes)
+	if c.total.Load() > c.maxBytes {
+		t.Fatalf("total %d exceeds maxBytes %d after eviction", c.total.Load(), c.maxBytes)
 	}
 }
 
@@ -200,8 +200,8 @@ func TestStoreUpdatesExistingEntry(t *testing.T) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.total != int64(len("longer-value")) {
-		t.Fatalf("total should reflect updated size: got %d", c.total)
+	if c.total.Load() != int64(len("longer-value")) {
+		t.Fatalf("total should reflect updated size: got %d", c.total.Load())
 	}
 	if c.ll.Len() != 1 {
 		t.Fatalf("list should contain one element after update, got %d", c.ll.Len())

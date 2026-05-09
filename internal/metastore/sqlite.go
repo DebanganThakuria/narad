@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -13,40 +12,38 @@ import (
 	"github.com/debanganthakuria/narad/internal/topic"
 )
 
-const defaultCacheMaxMB = 128
+const defaultCacheMaxMB = 64
 
 // TopicRecord is the GORM model for persisted topic metadata.
 type TopicRecord struct {
-	ID                uint      `gorm:"primaryKey"`
-	Name              string    `gorm:"uniqueIndex;size:256;not null"`
-	Partitions        int       `gorm:"not null"`
-	ReplicationFactor int       `gorm:"not null"`
-	MaxAgeMs          int64     `gorm:"not null;default:0"`
-	MaxBytes          int64     `gorm:"not null;default:0"`
-	CreatedAt         time.Time `gorm:"not null"`
+	ID                  uint   `gorm:"primaryKey"`
+	Name                string `gorm:"uniqueIndex;size:256;not null"`
+	Partitions          int    `gorm:"not null"`
+	ReplicationFactor   int    `gorm:"not null"`
+	RetentionMs         int64  `gorm:"not null;default:0"`
+	VisibilityTimeoutMs int64  `gorm:"not null;default:0"`
+	CreatedAt           int64  `gorm:"not null"`
 }
 
 func (TopicRecord) FromTopic(t topic.Topic) TopicRecord {
 	return TopicRecord{
-		Name:              t.Name,
-		Partitions:        t.Partitions,
-		ReplicationFactor: t.ReplicationFactor,
-		MaxAgeMs:          t.Retention.MaxAgeMs,
-		MaxBytes:          t.Retention.MaxBytes,
-		CreatedAt:         t.CreatedAt,
+		Name:                t.Name,
+		Partitions:          t.Partitions,
+		ReplicationFactor:   t.ReplicationFactor,
+		RetentionMs:         t.RetentionMs,
+		VisibilityTimeoutMs: t.VisibilityTimeoutMs,
+		CreatedAt:           t.CreatedAt,
 	}
 }
 
 func (r TopicRecord) ToTopic() topic.Topic {
 	return topic.Topic{
-		Name:              r.Name,
-		Partitions:        r.Partitions,
-		ReplicationFactor: r.ReplicationFactor,
-		Retention: topic.Retention{
-			MaxAgeMs: r.MaxAgeMs,
-			MaxBytes: r.MaxBytes,
-		},
-		CreatedAt: r.CreatedAt,
+		Name:                r.Name,
+		Partitions:          r.Partitions,
+		ReplicationFactor:   r.ReplicationFactor,
+		RetentionMs:         r.RetentionMs,
+		VisibilityTimeoutMs: r.VisibilityTimeoutMs,
+		CreatedAt:           r.CreatedAt,
 	}
 }
 

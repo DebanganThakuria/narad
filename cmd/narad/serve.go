@@ -71,7 +71,7 @@ func runServe(args []string) error {
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		if pprofErr := http.ListenAndServe(":6060", nil); pprofErr != nil {
-			log.Error("Failed to start pprof: %v", pprofErr)
+			log.Error("failed to start pprof", "err", pprofErr)
 		}
 	})
 
@@ -203,7 +203,7 @@ func buildBroker(cfg *config.Config, ms *metastore.SQLiteStore, m *metrics.Metri
 	br, err := broker.New(broker.Deps{
 		DataDir:        cfg.Storage.DataDir,
 		StorageOptions: storageOpts,
-		TopicPolicy: broker.TopicPolicy{
+		TopicConfig: broker.TopicConfig{
 			DefaultPartitions:          cfg.Topic.DefaultPartitions,
 			MaxPartitions:              cfg.Topic.MaxPartitions,
 			DefaultReplicationFactor:   cfg.Topic.DefaultReplicationFactor,

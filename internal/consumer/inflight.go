@@ -6,104 +6,104 @@ import (
 	"time"
 )
 
-// InFlight wraps an OffsetTracker, adding message invisibility: once
-// ReserveNext delivers an offset, it remains invisible until either the
-// visibility timeout expires or Commit removes it.
+// InFlight wraps an OffsetTracker with SQS-style message invisibility.
+// Once ReserveNext hands an offset to a consumer, that offset is
+// invisible to subsequent ReserveNext calls until either Commit clears
+// it or the visibility timeout expires.
 //
-// Per-partition ordering is preserved — if the next uncommitted offset is
-// in-flight, ReserveNext returns not-found so callers can try other
-// partitions.
+// State is sharded per (topic, partition): each shard has its own
+// mutex and its own offset → expiresAt map, so reservations on
+// independent partitions never serialize against each other. Within a
+// partition, the lock window covers only the in-flight map check —
+// the inner tracker's Next call runs outside it.
+//
+// Expiries are stored as Unix-milliseconds (int64) rather than
+// time.Time so the in-flight set is timezone-independent and trivially
+// serializable if we ever persist it.
 type InFlight struct {
 	inner   OffsetTracker
-	mu      sync.RWMutex
-	entries map[string]map[int]map[int64]time.Time // topic -> partition -> offset -> expiresAt
+	shards  sync.Map // shardKey -> *partitionShard
+	timeNow func() int64
+}
+
+type partitionShard struct {
+	mu      sync.Mutex
+	entries map[int64]int64 // offset -> expiresAtUnixMs
 }
 
 func NewInFlight(inner OffsetTracker) *InFlight {
 	return &InFlight{
 		inner:   inner,
-		entries: make(map[string]map[int]map[int64]time.Time),
+		timeNow: nowUnixMs,
 	}
 }
 
-// Next delegates to the inner tracker. It returns committed+1 regardless
-// of in-flight state — callers should use ReserveNext for consumption.
+// Next returns the inner tracker's next-to-deliver offset. It does
+// NOT consult the in-flight set — callers driving consumption should
+// use ReserveNext. Next exists for read-only callers (metrics
+// snapshot, lag reporting) that want committed+1 regardless of
+// reservation state.
 func (f *InFlight) Next(ctx context.Context, topic string, partition int) (int64, error) {
 	return f.inner.Next(ctx, topic, partition)
 }
 
-// Commit removes the offset from the in-flight set and delegates to the
-// inner tracker. Idempotent; removing a non-existent entry is a no-op.
+// Commit clears the (topic, partition, offset) reservation and
+// delegates to the inner tracker. Idempotent: clearing an unreserved
+// offset is a no-op.
 func (f *InFlight) Commit(ctx context.Context, topic string, partition int, offset int64) error {
-	f.mu.Lock()
-	f.removeLocked(topic, partition, offset)
-	f.mu.Unlock()
+	sh := f.shard(topic, partition)
+	sh.mu.Lock()
+	delete(sh.entries, offset)
+	sh.mu.Unlock()
 	return f.inner.Commit(ctx, topic, partition, offset)
 }
 
-// ReserveNext atomically checks the next uncommitted offset for
-// deliverability and marks it in-flight. Returns -1, false if:
-//   - The log is empty (committed == logTail), or
-//   - The next offset is already in-flight with an unexpired timeout
+// ReserveNext atomically claims the partition's next uncommitted
+// offset for the caller. Returns (offset, true, nil) on success;
+// (-1, false, nil) when the partition is empty or the next offset is
+// already reserved with an unexpired timeout — caller should skip
+// this partition.
 //
-// Callers should skip the partition on false and try the next one.
+// inner.Next runs outside the shard lock; we pay the metastore-cache
+// hit unlocked, then take the shard lock only for the reserve check
+// and write.
 func (f *InFlight) ReserveNext(ctx context.Context, topic string, partition int, visibilityTimeout time.Duration, logTail int64) (int64, bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	next, err := f.inner.Next(ctx, topic, partition)
 	if err != nil {
 		return -1, false, err
 	}
 	if next >= logTail {
-		return -1, false, nil // partition empty / fully consumed
+		return -1, false, nil
 	}
 
-	expiresAt, inFlight := f.getLocked(topic, partition, next)
-	if inFlight && time.Now().Before(expiresAt) {
-		return -1, false, nil // still invisible
-	}
+	sh := f.shard(topic, partition)
+	now := f.timeNow()
 
-	expiresAt = time.Now().Add(visibilityTimeout)
-	f.setLocked(topic, partition, next, expiresAt)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	if exp, ok := sh.entries[next]; ok && exp > now {
+		return -1, false, nil
+	}
+	sh.entries[next] = now + visibilityTimeout.Milliseconds()
 	return next, true, nil
 }
 
-func (f *InFlight) getLocked(topic string, partition int, offset int64) (time.Time, bool) {
-	pm, ok := f.entries[topic]
-	if !ok {
-		return time.Time{}, false
+func (f *InFlight) shard(topic string, partition int) *partitionShard {
+	key := shardKey{topic: topic, partition: partition}
+	if v, ok := f.shards.Load(key); ok {
+		return v.(*partitionShard)
 	}
-	om, ok := pm[partition]
-	if !ok {
-		return time.Time{}, false
-	}
-	exp, ok := om[offset]
-	return exp, ok
+	fresh := &partitionShard{entries: make(map[int64]int64)}
+	actual, _ := f.shards.LoadOrStore(key, fresh)
+	return actual.(*partitionShard)
 }
 
-func (f *InFlight) setLocked(topic string, partition int, offset int64, expiresAt time.Time) {
-	pm, ok := f.entries[topic]
-	if !ok {
-		pm = make(map[int]map[int64]time.Time)
-		f.entries[topic] = pm
-	}
-	om, ok := pm[partition]
-	if !ok {
-		om = make(map[int64]time.Time)
-		pm[partition] = om
-	}
-	om[offset] = expiresAt
+type shardKey struct {
+	topic     string
+	partition int
 }
 
-func (f *InFlight) removeLocked(topic string, partition int, offset int64) {
-	pm, ok := f.entries[topic]
-	if !ok {
-		return
-	}
-	om, ok := pm[partition]
-	if !ok {
-		return
-	}
-	delete(om, offset)
+func nowUnixMs() int64 {
+	return time.Now().UnixMilli()
 }

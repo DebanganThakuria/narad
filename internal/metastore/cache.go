@@ -3,6 +3,7 @@ package metastore
 import (
 	"container/list"
 	"sync"
+	"sync/atomic"
 
 	"github.com/debanganthakuria/narad/internal/topic"
 )
@@ -20,7 +21,7 @@ type lruCache struct {
 	mu       sync.Mutex
 	ll       *list.List // front = most recently used
 	byTopic  map[string]map[string]struct{}
-	total    int64
+	total    atomic.Int64
 	maxBytes int64
 }
 
@@ -84,7 +85,7 @@ func (c *lruCache) store(key string, val any, topicName string) {
 		c.ll.Remove(old.elem)
 		e.elem = c.ll.PushFront(e)
 		c.entries.Store(key, e)
-		c.total += size - old.size
+		c.total.Add(size - old.size)
 		c.evictLocked()
 		return
 	}
@@ -92,7 +93,7 @@ func (c *lruCache) store(key string, val any, topicName string) {
 	e := &cacheEntry{key: key, value: val, size: size, topic: topicName}
 	e.elem = c.ll.PushFront(e)
 	c.entries.Store(key, e)
-	c.total += size
+	c.total.Add(size)
 
 	if topicName != "" {
 		set, ok := c.byTopic[topicName]
@@ -134,7 +135,7 @@ func (c *lruCache) removeKeyLocked(key string) {
 	if e.elem != nil {
 		c.ll.Remove(e.elem)
 	}
-	c.total -= e.size
+	c.total.Add(-e.size)
 	if e.topic != "" {
 		if set, ok := c.byTopic[e.topic]; ok {
 			delete(set, key)
@@ -146,7 +147,7 @@ func (c *lruCache) removeKeyLocked(key string) {
 }
 
 func (c *lruCache) evictLocked() {
-	for c.total > c.maxBytes {
+	for c.total.Load() > c.maxBytes {
 		back := c.ll.Back()
 		if back == nil {
 			return
@@ -156,9 +157,7 @@ func (c *lruCache) evictLocked() {
 	}
 }
 
-// sizeOf returns an approximate byte cost for a cached value. We only
-// cache three concrete types, so a fast type switch beats reflection or
-// json.Marshal-based sizing.
+// sizeOf returns an approximate byte cost for a cached value.
 func sizeOf(v any) int64 {
 	switch x := v.(type) {
 	case []byte:

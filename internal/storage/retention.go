@@ -116,9 +116,9 @@ func (r *reaper) candidatesForDeletion(sealed []*segment) map[*segment]string {
 	picks := make(map[*segment]string)
 
 	if r.cfg.MaxAge > 0 {
-		threshold := now.Add(-r.cfg.MaxAge)
+		threshold := now.Add(-r.cfg.MaxAge).Unix()
 		for _, s := range sealed {
-			if mt, err := segmentMTime(s); err == nil && mt.Before(threshold) {
+			if mt, err := segmentMTime(s); err == nil && mt < threshold {
 				picks[s] = "age"
 			}
 		}
@@ -159,13 +159,13 @@ func (r *reaper) waitDone() {
 
 // segmentMTime is a proxy for "time of last write to this segment" —
 // once sealed, mtime stops advancing.
-func segmentMTime(s *segment) (time.Time, error) {
+func segmentMTime(s *segment) (int64, error) {
 	if s.file == nil {
-		return time.Time{}, fmt.Errorf("storage: segment file closed")
+		return 0, fmt.Errorf("storage: segment file closed")
 	}
 	st, err := s.file.Stat()
 	if err != nil {
-		return time.Time{}, err
+		return 0, err
 	}
-	return st.ModTime(), nil
+	return st.ModTime().Unix(), nil
 }

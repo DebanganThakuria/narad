@@ -2,15 +2,13 @@ package handlers
 
 import (
 	"net/http"
-
-	"github.com/debanganthakuria/narad/internal/topic"
 )
 
 type createTopicRequest struct {
-	Name              string           `json:"name"`
-	Partitions        int              `json:"partitions"`
-	ReplicationFactor int              `json:"replication_factor"`
-	Retention         topic.Retention  `json:"retention"`
+	Name              string `json:"name"`
+	Partitions        int    `json:"partitions"`
+	ReplicationFactor int    `json:"replication_factor"`
+	RetentionMs       int64  `json:"retention_ms"`
 }
 
 func (s *Set) CreateTopic(w http.ResponseWriter, r *http.Request) {
@@ -19,7 +17,7 @@ func (s *Set) CreateTopic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	t, err := s.deps.Broker.CreateTopic(r.Context(), req.Name, req.Partitions, req.ReplicationFactor, req.Retention)
+	t, err := s.deps.Broker.CreateTopic(r.Context(), req.Name, req.Partitions, req.ReplicationFactor, req.RetentionMs)
 	if err != nil {
 		s.writeBrokerError(w, "create topic", err)
 		return

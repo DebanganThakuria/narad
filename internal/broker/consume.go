@@ -54,10 +54,12 @@ func (b *impl) Consume(ctx context.Context, topicName string, opts ConsumeOpts) 
 		scan = []int{*opts.Partition}
 	}
 
+	visibilityTimeout := time.Duration(t.VisibilityTimeoutMs) * time.Millisecond
+
 	start := time.Now()
 	deadline := start.Add(opts.Wait)
 	for {
-		msg, found, err := b.tryQueueRead(ctx, topicName, scan)
+		msg, found, err := b.tryQueueRead(ctx, topicName, scan, visibilityTimeout)
 		if err != nil {
 			if m := b.deps.Metrics; m != nil {
 				m.IncError("broker", "consume")
@@ -150,26 +152,32 @@ func (b *impl) replayRead(topicName string, partitionIdx int, offset int64, tota
 		Partition: partitionIdx,
 		Offset:    offset,
 		Payload:   payload,
-		Timestamp: time.Now().UTC(),
+		Timestamp: time.Now().Unix(),
 	}, true, nil
 }
 
-// tryQueueRead scans the given partitions in order and returns the first
-// message available beyond each partition's committed offset. It does not
-// block — callers handle long-polling.
-// TODO Need to implement message invisibility if a consumer is consuming it
-func (b *impl) tryQueueRead(ctx context.Context, topicName string, partitions []int) (topic.Message, bool, error) {
+// tryQueueRead scans the given partitions in order and returns the
+// first message whose offset can be reserved (i.e. not currently
+// in-flight with another consumer). It does not block — callers
+// handle long-polling.
+//
+// Reservation marks the offset invisible for visibilityTimeout; the
+// caller is expected to ack within that window or the message
+// becomes redeliverable. Reading the payload happens after the
+// reservation is recorded, so it does not extend the lock window
+// on the partition's in-flight shard.
+func (b *impl) tryQueueRead(ctx context.Context, topicName string, partitions []int, visibilityTimeout time.Duration) (topic.Message, bool, error) {
 	for _, idx := range partitions {
 		log, err := b.partitionLog(topicName, idx)
 		if err != nil {
 			return topic.Message{}, false, err
 		}
-		next, err := b.deps.ConsumerOffsets.Next(ctx, topicName, idx)
+		next, reserved, err := b.deps.ConsumerOffsets.ReserveNext(ctx, topicName, idx, visibilityTimeout, log.NextOffset())
 		if err != nil {
 			return topic.Message{}, false, err
 		}
-		if next >= log.NextOffset() {
-			continue // partition empty / fully consumed
+		if !reserved {
+			continue // partition empty, fully consumed, or next offset already in-flight
 		}
 		payload, err := log.Read(next)
 		if err != nil {
@@ -180,7 +188,7 @@ func (b *impl) tryQueueRead(ctx context.Context, topicName string, partitions []
 			Partition: idx,
 			Offset:    next,
 			Payload:   payload,
-			Timestamp: time.Now().UTC(),
+			Timestamp: time.Now().Unix(),
 		}, true, nil
 	}
 	return topic.Message{}, false, nil

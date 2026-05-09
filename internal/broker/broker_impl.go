@@ -24,10 +24,10 @@ func New(d Deps) (Broker, error) {
 		d.ConsumerOffsets == nil || d.Replicator == nil || d.Logger == nil {
 		return nil, fmt.Errorf("%w: missing dependency", ErrInvalidArgument)
 	}
-	if d.TopicPolicy.DefaultPartitions <= 0 {
+	if d.TopicConfig.DefaultPartitions <= 0 {
 		return nil, fmt.Errorf("%w: TopicPolicy.DefaultPartitions must be > 0", ErrInvalidArgument)
 	}
-	if d.TopicPolicy.DefaultReplicationFactor <= 0 {
+	if d.TopicConfig.DefaultReplicationFactor <= 0 {
 		return nil, fmt.Errorf("%w: TopicPolicy.DefaultReplicationFactor must be > 0", ErrInvalidArgument)
 	}
 
