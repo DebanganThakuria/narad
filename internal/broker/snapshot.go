@@ -55,7 +55,7 @@ func (b *impl) partitionSnapshot(ctx context.Context, topicName string, idx int)
 		return metrics.PartitionSnapshot{}, false
 	}
 
-	committed, err := b.deps.Offsets.Next(ctx, topicName, idx)
+	committed, err := b.deps.ConsumerOffsets.Next(ctx, topicName, idx)
 	if err != nil {
 		b.deps.Logger.Debug("snapshot: offset lookup failed", "topic", topicName, "partition", idx, "err", err)
 		return metrics.PartitionSnapshot{}, false

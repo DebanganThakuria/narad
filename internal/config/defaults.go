@@ -2,7 +2,7 @@ package config
 
 import "time"
 
-// Default returns a Config populated with sane local-development values.
+// Default returns a Config populated with sane production values.
 //
 // Port choices:
 //
@@ -26,7 +26,7 @@ func Default() *Config {
 		},
 		Storage: StorageConfig{
 			DataDir:                  "data",
-			Fsync:                    FsyncPerWrite,
+			Fsync:                    FsyncBatched,
 			Codec:                    "zstd",
 			CompressionLevel:         "best",
 			FlushBytes:               1 << 20, // 1 MiB
@@ -36,11 +36,12 @@ func Default() *Config {
 			RetentionCheckIntervalMs: 60_000,   // 1 minute
 		},
 		Topic: TopicConfig{
-			DefaultPartitions:        8,
-			MaxPartitions:            1024,
-			DefaultReplicationFactor: 1,
-			DefaultRetentionAgeMs:    7 * 24 * 60 * 60 * 1000, // 7 days
-			DefaultRetentionBytes:    0,                       // no size cap
+			DefaultPartitions:          8,
+			MaxPartitions:              1024,
+			DefaultReplicationFactor:   3,
+			DefaultRetentionAgeMs:      7 * 24 * 60 * 60 * 1000, // 7 days
+			DefaultVisibilityTimeoutMs: 30_000,                  // 30 seconds
+
 		},
 		Log: LogConfig{
 			Level:  "info",

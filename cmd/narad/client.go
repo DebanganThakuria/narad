@@ -65,10 +65,23 @@ func runClientTopics(args []string) error {
 func runClientTopicsList(args []string) error {
 	fs := newClientFlagSet("topics list")
 	addr := fs.String("addr", defaultAddr(), "HTTP base URL")
+	limit := fs.Int("limit", 0, "max page size (0 = server default, 100; cap 1000)")
+	pageToken := fs.String("page-token", "", "cursor returned by the previous page")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return newHTTPClient(*addr).getAndPrint("/v1/topics")
+	q := url.Values{}
+	if *limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", *limit))
+	}
+	if *pageToken != "" {
+		q.Set("page_token", *pageToken)
+	}
+	path := "/v1/topics"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	return newHTTPClient(*addr).getAndPrint(path)
 }
 
 func runClientTopicsCreate(args []string) error {
@@ -76,6 +89,8 @@ func runClientTopicsCreate(args []string) error {
 	addr := fs.String("addr", defaultAddr(), "HTTP base URL")
 	partitions := fs.Int("partitions", 0, "partition count (0 = server default)")
 	rf := fs.Int("replication-factor", 0, "replication factor (0 = server default)")
+	maxAgeMs := fs.Int64("retention-max-age-ms", 0, "retention max age in ms (0 = server default)")
+	maxBytes := fs.Int64("retention-max-bytes", 0, "retention max size in bytes (0 = server default)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -88,6 +103,16 @@ func runClientTopicsCreate(args []string) error {
 	}
 	if *rf > 0 {
 		body["replication_factor"] = *rf
+	}
+	if *maxAgeMs > 0 || *maxBytes > 0 {
+		ret := map[string]int64{}
+		if *maxAgeMs > 0 {
+			ret["max_age_ms"] = *maxAgeMs
+		}
+		if *maxBytes > 0 {
+			ret["max_bytes"] = *maxBytes
+		}
+		body["retention"] = ret
 	}
 	return newHTTPClient(*addr).postAndPrint("/v1/topics", body)
 }
@@ -124,19 +149,79 @@ func runClientTopicsAlter(args []string) error {
 	fs := newClientFlagSet("topics alter <name>")
 	addr := fs.String("addr", defaultAddr(), "HTTP base URL")
 	partitions := fs.Int("partitions", 0, "new partition count (must exceed current)")
+	maxAgeMs := fs.Int64("retention-max-age-ms", -1, "new retention max age in ms (0 = inherit default)")
+	maxBytes := fs.Int64("retention-max-bytes", -1, "new retention max size in bytes (0 = inherit default)")
+	schemaFile := fs.String("schema-file", "", `path to JSON Schema file ("-" reads from stdin)`)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return clientUsageErr("usage: narad client topics alter --partitions N <name>")
+		return clientUsageErr("usage: narad client topics alter [--partitions N | --retention-max-age-ms N [--retention-max-bytes N] | --schema-file F] <name>")
 	}
-	if *partitions <= 0 {
-		return clientUsageErr("--partitions is required and must be > 0")
+
+	hasPartitions := *partitions > 0
+	hasRetention := *maxAgeMs >= 0 || *maxBytes >= 0
+	hasSchema := *schemaFile != ""
+
+	modes := 0
+	for _, b := range []bool{hasPartitions, hasRetention, hasSchema} {
+		if b {
+			modes++
+		}
 	}
+	switch modes {
+	case 0:
+		return clientUsageErr("one of --partitions, --retention-max-age-ms/--retention-max-bytes, or --schema-file is required")
+	case 1:
+		// ok
+	default:
+		return clientUsageErr("--partitions, retention flags, and --schema-file are mutually exclusive (one PATCH per change)")
+	}
+
+	body := map[string]any{}
+	switch {
+	case hasPartitions:
+		body["partitions"] = *partitions
+	case hasRetention:
+		ret := map[string]int64{}
+		if *maxAgeMs >= 0 {
+			ret["max_age_ms"] = *maxAgeMs
+		}
+		if *maxBytes >= 0 {
+			ret["max_bytes"] = *maxBytes
+		}
+		body["retention"] = ret
+	case hasSchema:
+		raw, err := readSchemaFile(*schemaFile)
+		if err != nil {
+			return err
+		}
+		body["schema"] = json.RawMessage(raw)
+	}
+
 	return newHTTPClient(*addr).patchAndPrint(
 		"/v1/topics/"+url.PathEscape(fs.Arg(0)),
-		map[string]int{"partitions": *partitions},
+		body,
 	)
+}
+
+func readSchemaFile(path string) ([]byte, error) {
+	var (
+		raw []byte
+		err error
+	)
+	if path == "-" {
+		raw, err = io.ReadAll(os.Stdin)
+	} else {
+		raw, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read schema: %w", err)
+	}
+	if !json.Valid(raw) {
+		return nil, clientUsageErr("schema file is not valid JSON")
+	}
+	return raw, nil
 }
 
 func runClientProduce(args []string) error {
@@ -252,9 +337,27 @@ func (c *httpClient) do(method, path string, body any) (*http.Response, error) {
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, formatErrorBody(b))
 	}
 	return resp, nil
+}
+
+// formatErrorBody renders the server's error body for human display.
+// The server sends `{"error":"..."}` for handled errors; we surface
+// just the message in that case. Anything else is shown verbatim
+// (trimmed) so unexpected payloads still reach the operator.
+func formatErrorBody(b []byte) string {
+	trimmed := strings.TrimSpace(string(b))
+	if trimmed == "" {
+		return "<empty body>"
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(b, &env); err == nil && env.Error != "" {
+		return env.Error
+	}
+	return trimmed
 }
 
 func (c *httpClient) getAndPrint(path string) error {
@@ -354,11 +457,18 @@ func printClientUsage(w io.Writer) {
 	fmt.Fprintln(w, "  narad client <subcommand> [flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Subcommands:")
-	fmt.Fprintln(w, "  topics list                                list all topics")
+	fmt.Fprintln(w, "  topics list [--limit N] [--page-token T]   list topics (keyset paginated)")
 	fmt.Fprintln(w, "  topics create [flags] <name>               create a topic")
+	fmt.Fprintln(w, "    --partitions N                             partition count (0 = default)")
+	fmt.Fprintln(w, "    --replication-factor N                     replication factor (0 = default)")
+	fmt.Fprintln(w, "    --retention-max-age-ms N                   per-topic retention age override")
+	fmt.Fprintln(w, "    --retention-max-bytes N                    per-topic retention size override")
 	fmt.Fprintln(w, "  topics get <name>                          show topic + partition stats")
 	fmt.Fprintln(w, "  topics delete <name>                       delete topic and all data")
-	fmt.Fprintln(w, "  topics alter --partitions N <name>         increase partition count")
+	fmt.Fprintln(w, "  topics alter <name>                        one of:")
+	fmt.Fprintln(w, "    --partitions N                             increase partition count")
+	fmt.Fprintln(w, "    --retention-max-age-ms N [--retention-max-bytes N]   update retention")
+	fmt.Fprintln(w, "    --schema-file F | --schema-file -          register a JSON Schema (file or stdin)")
 	fmt.Fprintln(w, "  produce [--key K] <topic>                  produce a record (body from stdin)")
 	fmt.Fprintln(w, "  consume [flags] <topic>                    --wait D --partition P --offset O")
 	fmt.Fprintln(w, "  ack --partition P --offset O <topic>")

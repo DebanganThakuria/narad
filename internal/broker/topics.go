@@ -89,10 +89,10 @@ func (b *impl) resolveRetention(r topic.Retention) (topic.Retention, error) {
 		return r, fmt.Errorf("%w: retention.max_bytes must be >= 0 (0 = use default)", ErrInvalidArgument)
 	}
 	if r.MaxAgeMs == 0 {
-		r.MaxAgeMs = b.deps.TopicPolicy.DefaultRetention.MaxAgeMs
+		r.MaxAgeMs = b.deps.TopicPolicy.DefaultRetentionMs.MaxAgeMs
 	}
 	if r.MaxBytes == 0 {
-		r.MaxBytes = b.deps.TopicPolicy.DefaultRetention.MaxBytes
+		r.MaxBytes = b.deps.TopicPolicy.DefaultRetentionMs.MaxBytes
 	}
 	return r, nil
 }
@@ -296,4 +296,37 @@ func (b *impl) UpdateTopicRetention(ctx context.Context, name string, retention 
 		"new_bytes", resolved.MaxBytes)
 
 	return updated, nil
+}
+
+// UpdateTopicSchema registers a new JSON Schema version for the topic.
+// The schema registry enforces backwards compatibility: new schemas must
+// be additive-only with no type changes on existing fields. The raw
+// schema bytes are persisted via the metastore.
+func (b *impl) UpdateTopicSchema(ctx context.Context, name string, rawSchema []byte) (topic.Topic, error) {
+	if name == "" {
+		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalidArgument)
+	}
+	if len(rawSchema) == 0 {
+		return topic.Topic{}, fmt.Errorf("%w: schema must not be empty", ErrInvalidArgument)
+	}
+
+	t, err := b.GetTopic(ctx, name)
+	if err != nil {
+		return topic.Topic{}, err
+	}
+
+	version, err := b.deps.Schemas.Register(ctx, name, rawSchema)
+	if err != nil {
+		return topic.Topic{}, fmt.Errorf("%w: %w", ErrInvalidArgument, err)
+	}
+
+	if err := b.deps.Metastore.PutSchema(ctx, name, version, rawSchema); err != nil {
+		return topic.Topic{}, fmt.Errorf("broker: persist schema: %w", err)
+	}
+
+	b.deps.Logger.Info("topic schema updated",
+		"topic", name,
+		"version", version)
+
+	return t, nil
 }

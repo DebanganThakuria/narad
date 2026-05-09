@@ -27,7 +27,7 @@ func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prome
 
 	// Topic specific actions
 	mux.HandleFunc("GET /v1/topics/{topic}", h.GetTopic)
-	mux.HandleFunc("PATCH /v1/topics/{topic}", h.AlterTopic) // TODO Add schema update with backwards compatibility
+	mux.HandleFunc("PATCH /v1/topics/{topic}", h.AlterTopic)
 	mux.HandleFunc("DELETE /v1/topics/{topic}", h.DeleteTopic)
 
 	// Produce, Consume and Ack
@@ -35,9 +35,11 @@ func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prome
 	mux.HandleFunc("GET /v1/topics/{topic}/consume", h.Consume)
 	mux.HandleFunc("POST /v1/topics/{topic}/ack", h.Ack)
 
+	// Health Checks
 	mux.HandleFunc("GET /healthz", h.Healthz)
 	mux.HandleFunc("GET /readyz", h.Readyz)
 
+	// Expose metrics endpoint
 	if reg != nil {
 		mux.Handle("GET /metrics", metrics.Endpoint(reg))
 	}

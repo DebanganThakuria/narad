@@ -10,18 +10,12 @@ import "time"
 // (never shrink); Retention can be altered post-create (future) without
 // affecting existing data.
 type Topic struct {
-	Name              string    `json:"name"`
-	Partitions        int       `json:"partitions"`
-	ReplicationFactor int       `json:"replication_factor"`
-	Retention         Retention `json:"retention"`
-	CreatedAt         time.Time `json:"created_at"`
-}
-
-// Retention is the per-topic policy for deleting sealed segment files.
-// Zero in either field disables that bound.
-type Retention struct {
-	MaxAgeMs int64 `json:"max_age_ms"`
-	MaxBytes int64 `json:"max_bytes"`
+	Name                string    `json:"name"`
+	Partitions          int       `json:"partitions"`
+	ReplicationFactor   int       `json:"replication_factor"`
+	RetentionMs         int64     `json:"retention_ms"`
+	VisibilityTimeoutMs int64     `json:"visibility_timeout_ms"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 // Details is the response shape for "describe a topic": the topic

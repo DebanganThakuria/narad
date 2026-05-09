@@ -101,6 +101,23 @@ narad client consume --wait 5s orders
 narad client ack --partition 0 --offset 0 orders
 narad client topics alter --partitions 16 orders
 narad client topics delete orders
+
+# Create with explicit retention.
+narad client topics create \
+  --partitions 8 --replication-factor 2 \
+  --retention-max-age-ms 3600000 --retention-max-bytes 1073741824 \
+  orders
+
+# Update retention without restart (mutually exclusive with --partitions/--schema-file).
+narad client topics alter --retention-max-age-ms 86400000 orders
+
+# Register a JSON Schema (file or "-" for stdin).
+narad client topics alter --schema-file orders.schema.json orders
+cat orders.schema.json | narad client topics alter --schema-file - orders
+
+# Paginated listing (limit defaults to 100, caps at 1000).
+narad client topics list --limit 50
+narad client topics list --limit 50 --page-token "<next_page_token from previous response>"
 ```
 
 Or hit the HTTP API directly (all data routes live under `/v1`):

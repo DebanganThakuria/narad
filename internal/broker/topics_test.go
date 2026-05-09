@@ -37,7 +37,7 @@ func newTestBroker(t *testing.T, policy broker.TopicPolicy) (broker.Broker, stri
 		Metastore:   ms,
 		Partitions:  partition.NewHashRoundRobin(),
 		Schemas:     schema.NewAlwaysValid(),
-		Offsets:     consumer.NewMetastoreBacked(ms),
+		Offsets:     consumer.NewInFlight(consumer.NewMetastoreBacked(ms)),
 		Replicator:  replication.NewLocal(),
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -55,7 +55,7 @@ var defaultPolicy = broker.TopicPolicy{
 	DefaultPartitions:        8,
 	MaxPartitions:            1024,
 	DefaultReplicationFactor: 2,
-	DefaultRetention: topic.Retention{
+	DefaultRetentionMs: topic.Retention{
 		MaxAgeMs: 7 * 24 * 60 * 60 * 1000, // 7 days
 	},
 }
@@ -79,8 +79,8 @@ func TestCreateTopicAppliesDefaultPartitions(t *testing.T) {
 	if got.ReplicationFactor != 2 {
 		t.Fatalf("replication_factor: got %d want 2", got.ReplicationFactor)
 	}
-	if got.Retention.MaxAgeMs != defaultPolicy.DefaultRetention.MaxAgeMs {
-		t.Fatalf("retention.max_age_ms: got %d want %d", got.Retention.MaxAgeMs, defaultPolicy.DefaultRetention.MaxAgeMs)
+	if got.Retention.MaxAgeMs != defaultPolicy.DefaultRetentionMs.MaxAgeMs {
+		t.Fatalf("retention.max_age_ms: got %d want %d", got.Retention.MaxAgeMs, defaultPolicy.DefaultRetentionMs.MaxAgeMs)
 	}
 }
 
@@ -109,8 +109,8 @@ func TestCreateTopicRetentionFallsBackToDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
-	if got.Retention.MaxAgeMs != defaultPolicy.DefaultRetention.MaxAgeMs {
-		t.Fatalf("MaxAgeMs: got %d want default %d", got.Retention.MaxAgeMs, defaultPolicy.DefaultRetention.MaxAgeMs)
+	if got.Retention.MaxAgeMs != defaultPolicy.DefaultRetentionMs.MaxAgeMs {
+		t.Fatalf("MaxAgeMs: got %d want default %d", got.Retention.MaxAgeMs, defaultPolicy.DefaultRetentionMs.MaxAgeMs)
 	}
 	if got.Retention.MaxBytes != 4096 {
 		t.Fatalf("MaxBytes: got %d want 4096", got.Retention.MaxBytes)
@@ -275,8 +275,8 @@ func TestUpdateTopicRetentionFallsBackToDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateTopicRetention: %v", err)
 	}
-	if updated.Retention.MaxAgeMs != defaultPolicy.DefaultRetention.MaxAgeMs {
-		t.Fatalf("MaxAgeMs not defaulted: got %d want %d", updated.Retention.MaxAgeMs, defaultPolicy.DefaultRetention.MaxAgeMs)
+	if updated.Retention.MaxAgeMs != defaultPolicy.DefaultRetentionMs.MaxAgeMs {
+		t.Fatalf("MaxAgeMs not defaulted: got %d want %d", updated.Retention.MaxAgeMs, defaultPolicy.DefaultRetentionMs.MaxAgeMs)
 	}
 }
 

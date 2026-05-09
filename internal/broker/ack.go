@@ -19,5 +19,5 @@ func (b *impl) Ack(ctx context.Context, topicName string, partitionIdx int, offs
 	if offset < 0 {
 		return fmt.Errorf("%w: offset must be >= 0", ErrInvalidArgument)
 	}
-	return b.deps.Offsets.Commit(ctx, topicName, partitionIdx, offset)
+	return b.deps.ConsumerOffsets.Commit(ctx, topicName, partitionIdx, offset)
 }

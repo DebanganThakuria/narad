@@ -32,7 +32,6 @@ import (
 	"github.com/debanganthakuria/narad/internal/replication"
 	"github.com/debanganthakuria/narad/internal/schema"
 	"github.com/debanganthakuria/narad/internal/storage"
-	"github.com/debanganthakuria/narad/internal/topic"
 )
 
 func runServe(args []string) error {
@@ -50,11 +49,11 @@ func runServe(args []string) error {
 
 	reg, m := buildMetrics()
 
-	if err := os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil {
+	if err = os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil { // idempotent dir creation
 		return fmt.Errorf("data dir: %w", err)
 	}
 
-	ms, err := metastore.NewSQLiteStore(filepath.Join(cfg.Storage.DataDir, "/metastore/metadata.db"))
+	ms, err := metastore.NewSQLiteStore(filepath.Join(cfg.Storage.DataDir, "metastore/metadata.db"))
 	if err != nil {
 		return fmt.Errorf("metastore: %w", err)
 	}
@@ -70,32 +69,34 @@ func runServe(args []string) error {
 	defer stop()
 
 	var wg sync.WaitGroup
-	if cfg.Debug.PProfAddr != "" {
-		wg.Go(func() {
-			if err := httpserver.RunPProf(ctx, cfg.Debug.PProfAddr, log); err != nil {
-				log.Error("pprof server", "err", err)
-			}
-		})
-	}
+	wg.Go(func() {
+		if pprofErr := http.ListenAndServe(":6060", nil); pprofErr != nil {
+			log.Error("Failed to start pprof: %v", pprofErr)
+		}
+	})
 
 	poller := metrics.NewPoller(m, br, log)
 	wg.Go(func() { poller.Run(ctx) })
 
-	log.Info("narad serve starting",
+	srv := buildAPIServer(cfg, br, m, reg, log)
+
+	// Capture boot time
+	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())
+
+	if err = srv.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("server: %w", err)
+	}
+
+	log.Info("narad serve started",
 		"addr", cfg.HTTP.Addr,
 		"cluster_addr", cfg.Cluster.Addr,
 		"data_dir", cfg.Storage.DataDir,
-		"pprof_addr", cfg.Debug.PProfAddr,
 		"version", versionString())
 
-	srv := buildAPIServer(cfg, br, m, reg, log)
-	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())
-
-	if err := srv.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("server: %w", err)
-	}
 	wg.Wait()
+
 	log.Info("narad serve stopped")
+
 	return nil
 }
 
@@ -125,6 +126,29 @@ type serveFlags struct {
 	logLevel    string
 	logFormat   string
 	pprofAddr   string
+}
+
+// applyTo overlays CLI-flag values onto cfg. Only non-zero fields take
+// effect, preserving values from the config file and environment.
+func (f *serveFlags) applyTo(cfg *config.Config) {
+	if f.port != 0 {
+		cfg.HTTP.Addr = ":" + strconv.Itoa(f.port)
+	}
+	if f.addr != "" {
+		cfg.HTTP.Addr = f.addr
+	}
+	if f.clusterPort != 0 {
+		cfg.Cluster.Addr = ":" + strconv.Itoa(f.clusterPort)
+	}
+	if f.dataDir != "" {
+		cfg.Storage.DataDir = f.dataDir
+	}
+	if f.logLevel != "" {
+		cfg.Log.Level = f.logLevel
+	}
+	if f.logFormat != "" {
+		cfg.Log.Format = f.logFormat
+	}
 }
 
 // loadServeConfig parses CLI flags, loads the config (file + env), and
@@ -164,63 +188,35 @@ func loadServeConfig(args []string) (*config.Config, error) {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	f.applyTo(cfg)
-	if err := cfg.Validate(); err != nil {
+	if err = cfg.Validate(); err != nil {
 		return nil, err
 	}
 	return cfg, nil
 }
 
-// applyTo overlays CLI-flag values onto cfg. Only non-zero fields take
-// effect, preserving values from the config file and environment.
-func (f *serveFlags) applyTo(cfg *config.Config) {
-	if f.port != 0 {
-		cfg.HTTP.Addr = ":" + strconv.Itoa(f.port)
-	}
-	if f.addr != "" {
-		cfg.HTTP.Addr = f.addr
-	}
-	if f.clusterPort != 0 {
-		cfg.Cluster.Addr = ":" + strconv.Itoa(f.clusterPort)
-	}
-	if f.dataDir != "" {
-		cfg.Storage.DataDir = f.dataDir
-	}
-	if f.logLevel != "" {
-		cfg.Log.Level = f.logLevel
-	}
-	if f.logFormat != "" {
-		cfg.Log.Format = f.logFormat
-	}
-	if f.pprofAddr != "" {
-		cfg.Debug.PProfAddr = f.pprofAddr
-	}
-}
-
 func buildBroker(cfg *config.Config, ms *metastore.SQLiteStore, m *metrics.Metrics, log *slog.Logger) (broker.Broker, error) {
-	logOpts, err := storageOptions(cfg.Storage)
+	storageOpts, err := storageOptions(cfg.Storage)
 	if err != nil {
 		return nil, fmt.Errorf("storage options: %w", err)
 	}
 
 	br, err := broker.New(broker.Deps{
-		DataDir:    cfg.Storage.DataDir,
-		LogOptions: logOpts,
+		DataDir:        cfg.Storage.DataDir,
+		StorageOptions: storageOpts,
 		TopicPolicy: broker.TopicPolicy{
-			DefaultPartitions:        cfg.Topic.DefaultPartitions,
-			MaxPartitions:            cfg.Topic.MaxPartitions,
-			DefaultReplicationFactor: cfg.Topic.DefaultReplicationFactor,
-			DefaultRetention: topic.Retention{
-				MaxAgeMs: cfg.Topic.DefaultRetentionAgeMs,
-				MaxBytes: cfg.Topic.DefaultRetentionBytes,
-			},
+			DefaultPartitions:          cfg.Topic.DefaultPartitions,
+			MaxPartitions:              cfg.Topic.MaxPartitions,
+			DefaultReplicationFactor:   cfg.Topic.DefaultReplicationFactor,
+			DefaultRetentionMs:         cfg.Topic.DefaultRetentionAgeMs,
+			DefaultVisibilityTimeoutMs: cfg.Topic.DefaultVisibilityTimeoutMs,
 		},
-		Metastore:  ms,
-		Partitions: partition.NewHashRoundRobin(),
-		Schemas:    schema.NewJSONSchema(),
-		Offsets:    consumer.NewMetastoreBacked(ms),
-		Replicator: replication.NewLocal(),
-		Logger:     log,
-		Metrics:    m,
+		Metastore:       ms,
+		Partitions:      partition.NewHashRoundRobin(),
+		Schemas:         schema.NewJSONSchema(),
+		ConsumerOffsets: consumer.NewInFlight(consumer.NewMetastoreBacked(ms)),
+		Replicator:      replication.NewLocal(),
+		Logger:          log,
+		Metrics:         m,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("broker: %w", err)

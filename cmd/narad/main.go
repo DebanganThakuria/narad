@@ -31,7 +31,6 @@ var commands = map[string]struct {
 	"client":  {runClient, "interact with a running narad serve over HTTP"},
 	"serve":   {runServe, "run the HTTP API server (default port 7942)"},
 	"version": {runVersion, "print build version and exit"},
-	"worker":  {runWorker, "run the cluster worker (default port 7943)"},
 }
 
 func main() {

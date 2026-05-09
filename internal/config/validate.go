@@ -91,7 +91,7 @@ func (c *Config) Validate() error {
 	if c.Topic.DefaultRetentionAgeMs < 0 {
 		errs = append(errs, "topic.default_retention_age_ms must be >= 0")
 	}
-	if c.Topic.DefaultRetentionBytes < 0 {
+	if c.Topic.DefaultVisibilityTimeoutMs < 0 {
 		errs = append(errs, "topic.default_retention_bytes must be >= 0")
 	}
 
@@ -104,12 +104,6 @@ func (c *Config) Validate() error {
 	case "json", "text":
 	default:
 		errs = append(errs, fmt.Sprintf("log.format %q is not one of [json, text]", c.Log.Format))
-	}
-
-	if pprof := strings.TrimSpace(c.Debug.PProfAddr); pprof != "" {
-		if pprof == c.HTTP.Addr || pprof == c.Cluster.Addr {
-			errs = append(errs, "debug.pprof_addr must differ from http.addr and cluster.addr")
-		}
 	}
 
 	if len(errs) == 0 {

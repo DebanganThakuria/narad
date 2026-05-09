@@ -10,7 +10,6 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/metastore"
 	"github.com/debanganthakuria/narad/internal/storage"
-	"github.com/debanganthakuria/narad/internal/topic"
 )
 
 // partitionLog returns the storage.Log for a (topic, partition) pair,
@@ -37,9 +36,9 @@ func (b *impl) partitionLog(topicName string, idx int) (*storage.Log, error) {
 		return l, nil
 	}
 
-	opts := b.deps.LogOptions
+	opts := b.deps.StorageOptions
 	if t, err := b.deps.Metastore.GetTopic(context.Background(), topicName); err == nil {
-		opts.Retention = retentionFromTopic(t.Retention, opts.Retention.CheckInterval)
+		opts.Retention = retentionFromTopic(t.RetentionMs, opts.Retention.CheckInterval)
 	} else if !errors.Is(err, metastore.ErrNotFound) {
 		return nil, fmt.Errorf("broker: lookup topic for retention: %w", err)
 	}
@@ -51,14 +50,14 @@ func (b *impl) partitionLog(topicName string, idx int) (*storage.Log, error) {
 	if err != nil {
 		return nil, fmt.Errorf("broker: open partition log %s: %w", partitionDir, err)
 	}
+
 	b.logs[key] = l
 	return l, nil
 }
 
-func retentionFromTopic(r topic.Retention, checkInterval time.Duration) storage.RetentionConfig {
+func retentionFromTopic(r int64, checkInterval time.Duration) storage.RetentionConfig {
 	return storage.RetentionConfig{
-		MaxAge:        time.Duration(r.MaxAgeMs) * time.Millisecond,
-		MaxBytes:      r.MaxBytes,
+		MaxAge:        time.Duration(r) * time.Millisecond,
 		CheckInterval: checkInterval,
 	}
 }

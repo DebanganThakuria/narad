@@ -11,6 +11,20 @@ import (
 	"github.com/debanganthakuria/narad/internal/topic"
 )
 
+// ConsumeOpts is the input for Broker.Consume.
+//
+//   - If Partition is nil, the broker scans partitions in order looking
+//     for the first one with an undelivered message (queue-style pull).
+//   - If Offset is set, replay mode is engaged and Partition is required.
+//   - Wait controls long-polling: if no message is available now, the
+//     broker waits up to Wait for one (or for ctx to expire), whichever
+//     is sooner.
+type ConsumeOpts struct {
+	Partition *int
+	Offset    *int64
+	Wait      time.Duration
+}
+
 // Consume returns the next available message for a topic, supporting
 // queue-mode pull, partition-pinned pull, replay-by-offset, and HTTP
 // long-polling. See ConsumeOpts for the full semantics.
@@ -45,7 +59,9 @@ func (b *impl) Consume(ctx context.Context, topicName string, opts ConsumeOpts) 
 	for {
 		msg, found, err := b.tryQueueRead(ctx, topicName, scan)
 		if err != nil {
-			b.deps.Metrics.IncError("broker", "consume")
+			if m := b.deps.Metrics; m != nil {
+				m.IncError("broker", "consume")
+			}
 			return msg, false, err
 		}
 		if found {
@@ -73,7 +89,9 @@ func (b *impl) Consume(ctx context.Context, topicName string, opts ConsumeOpts) 
 				b.recordConsumeEmpty(topicName, outcome, time.Since(start))
 				return topic.Message{}, false, nil
 			}
-			b.deps.Metrics.IncError("broker", "consume_wait")
+			if m := b.deps.Metrics; m != nil {
+				m.IncError("broker", "consume_wait")
+			}
 			return topic.Message{}, false, err
 		}
 	}
@@ -146,7 +164,7 @@ func (b *impl) tryQueueRead(ctx context.Context, topicName string, partitions []
 		if err != nil {
 			return topic.Message{}, false, err
 		}
-		next, err := b.deps.Offsets.Next(ctx, topicName, idx)
+		next, err := b.deps.ConsumerOffsets.Next(ctx, topicName, idx)
 		if err != nil {
 			return topic.Message{}, false, err
 		}

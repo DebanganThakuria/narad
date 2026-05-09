@@ -87,12 +87,12 @@ func applyEnv(cfg *Config) error {
 		}
 		cfg.Topic.DefaultRetentionAgeMs = n
 	}
-	if v, ok := os.LookupEnv("NARAD_TOPIC_DEFAULT_RETENTION_BYTES"); ok {
+	if v, ok := os.LookupEnv("NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS"); ok {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
-			return fmt.Errorf("NARAD_TOPIC_DEFAULT_RETENTION_BYTES: %w", err)
+			return fmt.Errorf("NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS: %w", err)
 		}
-		cfg.Topic.DefaultRetentionBytes = n
+		cfg.Topic.DefaultVisibilityTimeoutMs = n
 	}
 
 	if v, ok := os.LookupEnv("NARAD_TOPIC_DEFAULT_PARTITIONS"); ok {

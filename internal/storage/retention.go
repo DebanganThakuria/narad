@@ -11,7 +11,6 @@ import (
 // means "keep forever" (the goroutine still runs but does no work).
 type RetentionConfig struct {
 	MaxAge        time.Duration
-	MaxBytes      int64
 	CheckInterval time.Duration
 	Now           func() time.Time
 }
@@ -42,7 +41,7 @@ func newReaper(log *Log, cfg RetentionConfig) *reaper {
 func (r *reaper) run() {
 	defer close(r.done)
 
-	if r.cfg.MaxAge <= 0 && r.cfg.MaxBytes <= 0 {
+	if r.cfg.MaxAge <= 0 {
 		<-r.stop
 		return
 	}
@@ -121,28 +120,6 @@ func (r *reaper) candidatesForDeletion(sealed []*segment) map[*segment]string {
 		for _, s := range sealed {
 			if mt, err := segmentMTime(s); err == nil && mt.Before(threshold) {
 				picks[s] = "age"
-			}
-		}
-	}
-
-	if r.cfg.MaxBytes > 0 {
-		var total int64
-		for _, s := range sealed {
-			total += s.sizeBytes
-		}
-		if total > r.cfg.MaxBytes {
-			for s := range picks {
-				total -= s.sizeBytes
-			}
-			for _, s := range sealed {
-				if total <= r.cfg.MaxBytes {
-					break
-				}
-				if _, ok := picks[s]; ok {
-					continue
-				}
-				picks[s] = "bytes"
-				total -= s.sizeBytes
 			}
 		}
 	}
