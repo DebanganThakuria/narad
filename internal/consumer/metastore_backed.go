@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/debanganthakuria/narad/internal/metastore"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
 
 // MetastoreBacked delegates persistence to a metastore.Metastore. Reads

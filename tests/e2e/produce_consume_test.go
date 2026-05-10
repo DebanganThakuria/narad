@@ -96,16 +96,16 @@ func TestAck(t *testing.T) {
 	defer env.close()
 
 	env.createTopic("ack-topic", 1, 2, int64(0))
-	off, part := env.produce("ack-topic", "k", `{"x": 1}`)
+	env.produce("ack-topic", "k", `{"x": 1}`)
 
-	resp := env.post("/v1/topics/ack-topic/ack", map[string]any{
-		"partition": part,
-		"offset":    off,
-	})
-	expectStatus(t, resp, http.StatusNoContent)
+	msg := env.consume("/v1/topics/ack-topic/consume")
+	if msg.ReceiptHandle == "" {
+		t.Fatal("expected receipt_handle in consume response")
+	}
+	env.ack("ack-topic", msg.ReceiptHandle)
 
 	// Next consume should skip the acked message and return 204 (no wait).
-	resp = env.get("/v1/topics/ack-topic/consume")
+	resp := env.get("/v1/topics/ack-topic/consume")
 	expectStatus(t, resp, http.StatusNoContent)
 }
 
@@ -117,28 +117,13 @@ func TestConsumeMultipleThenAck(t *testing.T) {
 	env.produce("multi-ack", "k", `{"seq": 0}`)
 	env.produce("multi-ack", "k", `{"seq": 1}`)
 
-	// Consume first
-	resp := env.get("/v1/topics/multi-ack/consume?partition=0")
-	expectOK(t, resp)
-	msg1 := readJSON[struct {
-		Offset int64 `json:"offset"`
-	}](t, resp)
-
+	msg1 := env.consume("/v1/topics/multi-ack/consume?partition=0")
 	if msg1.Offset != 0 {
 		t.Fatalf("first offset: got %d, want 0", msg1.Offset)
 	}
+	env.ack("multi-ack", msg1.ReceiptHandle)
 
-	// Ack first
-	resp = env.post("/v1/topics/multi-ack/ack", map[string]any{"partition": 0, "offset": 0})
-	expectStatus(t, resp, http.StatusNoContent)
-
-	// Consume second
-	resp = env.get("/v1/topics/multi-ack/consume?partition=0")
-	expectOK(t, resp)
-	msg2 := readJSON[struct {
-		Offset int64 `json:"offset"`
-	}](t, resp)
-
+	msg2 := env.consume("/v1/topics/multi-ack/consume?partition=0")
 	if msg2.Offset != 1 {
 		t.Fatalf("second offset: got %d, want 1", msg2.Offset)
 	}
@@ -164,4 +149,3 @@ func TestProduceInvalidJSON(t *testing.T) {
 	resp := env.rawPost("/v1/topics/produce-bad/produce", `{"key": "k", "message": not-json}`)
 	expectBadRequest(t, resp)
 }
-

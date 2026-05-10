@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/debanganthakuria/narad/internal/topic"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 )
 
 func TestCreateTopic(t *testing.T) {

@@ -7,11 +7,38 @@ offsets.
 
 > **Status:** single-node, production-shaped surface. The HTTP API,
 > append-only segmented log, SQLite metastore, JSON-Schema validation,
-> per-topic retention, partitioning, Prometheus metrics, and a debug
-> pprof listener are all functional. Multi-node leader/follower
-> replication, cross-node partition rebalancing, message-visibility
-> timeouts (SQS-style in-flight tracking), and schema-update with
+> per-topic retention, partitioning, **SQS-style in-flight tracking
+> with gap-skipping reservations + out-of-order acks + HMAC-signed
+> receipt handles**, Prometheus metrics, and a debug pprof listener
+> are all functional. Multi-node leader/follower replication,
+> cross-node partition rebalancing, and schema-update with
 > backwards-compatibility checks are the next big chunks.
+
+### Breaking changes (pre-1.0)
+
+The consumer wire contract changed when in-flight tracking landed:
+
+- `POST /v1/topics/{topic}/ack` body went from `{"partition", "offset"}`
+  to `{"receipt_handle"}`. The handle is the opaque, HMAC-signed token
+  returned in the consume response. Old clients sending
+  `{partition, offset}` get **400**.
+- `POST /v1/topics` and `PATCH /v1/topics/{topic}` use flat scalar
+  fields (`retention_ms`, `visibility_timeout_ms`,
+  `max_in_flight_per_partition`, `max_acked_ahead_per_partition`)
+  rather than the previous nested `retention: { max_age_ms, max_bytes }`
+  object. `max_bytes`-based retention has been removed; size-cap
+  retention is on the roadmap if anyone needs it.
+- `topic.Message.timestamp` and `topic.Topic.created_at` are now Unix
+  seconds (`int64`) rather than RFC-3339 strings. Wire format is
+  timezone-independent.
+- `narad client ack` now takes `--handle` (or reads the handle from
+  stdin); `--partition` / `--offset` are gone. Pipe receipt handles in:
+  `consume | jq -r .receipt_handle | narad client ack <topic>`.
+
+The SQLite metastore schema is auto-migrated, but the new columns
+(`retention_ms`, `visibility_timeout_ms`, `max_in_flight_per_partition`,
+`max_acked_ahead_per_partition`) replace `max_age_ms` / `max_bytes`.
+For local dev databases the simplest path is to wipe the data dir.
 
 ## Architecture (current)
 
@@ -38,40 +65,55 @@ operator surface.
 
 ## Layout
 
+The repo is grouped into category folders (domain / persistence /
+transport / platform) under `internal/`. Each leaf is one Go package;
+broker and HTTP handlers fan out into per-domain subpackages.
+
 ```
 cmd/
-  narad/                single binary with subcommands (serve/worker/client/version)
+  narad/                              single binary: main, serve, worker, client, version
 internal/
-  config/               defaults + JSON file + env + flag layering
-  observability/
-    logger/             thin log/slog wrapper
-    metrics/            Prometheus collectors, HTTP middleware, lag poller,
-                          pprof-safe /metrics endpoint
-  httpserver/           http.Server, router, middleware (Recover, RequestID,
-                          metrics middleware, AccessLog), pprof listener
-    handlers/           request handlers
-  broker/               orchestrator: produce / consume / ack / topic CRUD,
-                          plus Snapshot used by the metrics poller
-  storage/              append-only Log: in-memory buffer + async flusher
-                          per partition, zstd-compressed batched frames,
-                          per-frame CRC32C, segment rotation, retention
-                          reaper, skip-and-continue corruption recovery
-  metastore/            SQLite-backed metadata store (gorm + glebarez/sqlite,
-                          pure-Go) with byte-bounded LRU read cache
-  topic/                shared value types (Topic, Retention, Message,
-                          Details, PartitionStats)
-  partition/            partition selection (FNV hash + round-robin)
-  replication/          Replicator interface + single-node Local stub
-  schema/               SchemaRegistry interface, JSON-Schema impl
-                          (santhosh-tekuri/jsonschema), AlwaysValid stub
-  consumer/             OffsetTracker interface + metastore-backed impl
-                          with batched flushes and per-topic eviction
+  domain/
+    topic/                            value types (Topic, Message, PartitionStats)
+  persistence/
+    storage/                          append-only segmented log (16 files; see doc.go)
+    metastore/                        SQLite metadata store: topics, schemas, offsets
+  consumer/                           offset tracker, in-flight reservations,
+                                      HMAC receipt-handle codec
+  broker/                             orchestrator facade (impl.go embeds the managers)
+    errs/                             shared error sentinels
+    runtime/                          *Logs (lazy partition-log map),
+                                      *Snapshotter, *Lifecycle
+    topics/                           CreateTopic / Update* / Delete / Get / List
+    messaging/                        Produce / Consume / Ack
+  transport/
+    httpserver/                       http.Server, router, middleware
+      handlers/                       *Set + shared helpers (WriteJSON, DecodeJSON, ...)
+        topics/                       /v1/topics CRUD endpoints
+        messaging/                    produce / consume / ack endpoints
+        health/                       /healthz, /readyz
+  platform/
+    config/                           defaults + JSON file + env + flag layering
+    schema/                           JSON-Schema registry (santhosh-tekuri)
+    partition/                        FNV hash + round-robin partition picker
+    replication/                      Replicator interface + single-node Local stub
+    observability/
+      logger/                         thin log/slog wrapper
+      metrics/                        Prometheus collectors, HTTP middleware, lag poller
 tests/
-  e2e/                  HTTP-level end-to-end tests (httptest + real
-                          broker), split by feature surface
+  e2e/                                HTTP-level end-to-end tests (httptest + real
+                                      broker), split by feature surface
 .github/
-  workflows/ci.yml      build / unit-tests / e2e-tests jobs (race-enabled)
+  workflows/ci.yml                    build / unit-tests / e2e-tests (race-enabled)
 ```
+
+Most multi-file packages have a `doc.go` with a per-file map for
+quick navigation (notably `internal/persistence/storage/`,
+`internal/persistence/metastore/`, and `internal/platform/config/`).
+The broker subpackages are split by operation: `topics/` has
+`create.go`, `update.go`, `delete.go`, `query.go`; `messaging/` has
+`produce.go`, `consume.go`, `ack.go`; `runtime/` has `logs.go`,
+`snapshot.go`, `lifecycle.go`.
 
 ## Quickstart
 
@@ -97,19 +139,23 @@ narad client topics create orders
 narad client topics list
 narad client topics get orders
 echo '{"id":1,"amount":1500}' | narad client produce --key c1 orders
-narad client consume --wait 5s orders
-narad client ack --partition 0 --offset 0 orders
+msg=$(narad client consume --wait 5s orders)
+echo "$msg" | jq -r .receipt_handle | narad client ack orders
 narad client topics alter --partitions 16 orders
 narad client topics delete orders
 
-# Create with explicit retention.
+# Create with explicit retention + visibility + per-partition caps.
 narad client topics create \
   --partitions 8 --replication-factor 2 \
-  --retention-max-age-ms 3600000 --retention-max-bytes 1073741824 \
+  --retention-ms 3600000 --visibility-timeout-ms 30000 \
+  --max-in-flight-per-partition 64 --max-acked-ahead-per-partition 256 \
   orders
 
-# Update retention without restart (mutually exclusive with --partitions/--schema-file).
-narad client topics alter --retention-max-age-ms 86400000 orders
+# Update retention without restart.
+narad client topics alter --retention-ms 86400000 orders
+
+# Adjust the consumer-parallelism caps.
+narad client topics alter --max-in-flight-per-partition 128 orders
 
 # Register a JSON Schema (file or "-" for stdin).
 narad client topics alter --schema-file orders.schema.json orders
@@ -123,29 +169,30 @@ narad client topics list --limit 50 --page-token "<next_page_token from previous
 Or hit the HTTP API directly (all data routes live under `/v1`):
 
 ```sh
-# Create with explicit retention.
+# Create with explicit retention + visibility + caps.
 curl -X POST localhost:7942/v1/topics \
   -H 'Content-Type: application/json' \
   -d '{"name":"orders","partitions":8,"replication_factor":2,
-       "retention":{"max_age_ms":3600000,"max_bytes":1073741824}}'
+       "retention_ms":3600000,"visibility_timeout_ms":30000,
+       "max_in_flight_per_partition":64,"max_acked_ahead_per_partition":256}'
 
 # Produce.
 curl -X POST localhost:7942/v1/topics/orders/produce \
   -H 'Content-Type: application/json' \
   -d '{"key":"customer-42","message":{"id":1,"amount":1500}}'
 
-# Consume with long-poll.
+# Consume with long-poll. Response includes a receipt_handle.
 curl 'localhost:7942/v1/topics/orders/consume?wait=5s'
 
-# Ack.
+# Ack — handle is the opaque token returned by Consume.
 curl -X POST localhost:7942/v1/topics/orders/ack \
   -H 'Content-Type: application/json' \
-  -d '{"partition":0,"offset":0}'
+  -d '{"receipt_handle":"<token from consume response>"}'
 
 # Update retention without restart.
 curl -X PATCH localhost:7942/v1/topics/orders \
   -H 'Content-Type: application/json' \
-  -d '{"retention":{"max_age_ms":86400000,"max_bytes":0}}'
+  -d '{"retention_ms": 86400000}'
 
 # List with pagination.
 curl 'localhost:7942/v1/topics?limit=50'
@@ -158,15 +205,19 @@ curl localhost:7942/metrics
 API routes:
 
 ```
-POST    /v1/topics                          create (accepts retention overrides)
+POST    /v1/topics                          create (retention/visibility/caps optional)
 GET     /v1/topics?limit=&page_token=       list (keyset pagination by name)
 GET     /v1/topics/{topic}                  get single + per-partition stats
-PATCH   /v1/topics/{topic}                  alter partitions OR retention
-                                              (exactly one per request)
+PATCH   /v1/topics/{topic}                  alter any combination of:
+                                              partitions, retention_ms,
+                                              visibility_timeout_ms,
+                                              max_in_flight_per_partition,
+                                              max_acked_ahead_per_partition,
+                                              schema
 DELETE  /v1/topics/{topic}                  delete topic and all data
 POST    /v1/topics/{topic}/produce
-GET     /v1/topics/{topic}/consume
-POST    /v1/topics/{topic}/ack
+GET     /v1/topics/{topic}/consume          response carries receipt_handle
+POST    /v1/topics/{topic}/ack              body: {"receipt_handle": "..."}
 GET     /healthz                            liveness
 GET     /readyz                             readiness (broker.Ready)
 GET     /metrics                            Prometheus exposition
@@ -356,24 +407,24 @@ to that segment".
 
 ## Topics
 
-Topics are created via `POST /v1/topics`. `partitions`,
-`replication_factor`, and `retention` are optional; omitting them (or
-sending zero) applies the configured defaults.
+Topics are created via `POST /v1/topics`. All policy fields are
+optional; omitting them (or sending zero) applies the configured
+defaults.
 
 ```jsonc
 {
   "name": "orders",
-  "partitions": 8,                    // 0 = use default
-  "replication_factor": 2,            // 0 = use default; must be >= 2
-  "retention": {                      // omit to use defaults
-    "max_age_ms": 86400000,           // 0 = use default
-    "max_bytes":  1073741824          // 0 = use default
-  }
+  "partitions": 8,                              // 0 = use default
+  "replication_factor": 2,                      // 0 = use default; must be >= 2
+  "retention_ms": 86400000,                     // 0 = use default
+  "visibility_timeout_ms": 30000,               // 0 = use default
+  "max_in_flight_per_partition": 1024,          // per-partition reservation cap
+  "max_acked_ahead_per_partition": 1024         // per-partition out-of-order ack cap
 }
 ```
 
-`PATCH /v1/topics/{name}` accepts **exactly one** of `partitions` or
-`retention` per request:
+`PATCH /v1/topics/{name}` accepts any combination of fields; each is
+applied in turn:
 
 ```sh
 # Increase partitions (increase-only; decrease/equal returns 400).
@@ -383,7 +434,12 @@ curl -X PATCH localhost:7942/v1/topics/orders \
 # Update retention (no restart needed; cached logs reopen on next access).
 curl -X PATCH localhost:7942/v1/topics/orders \
   -H 'Content-Type: application/json' \
-  -d '{"retention":{"max_age_ms":3600000}}'
+  -d '{"retention_ms": 3600000}'
+
+# Adjust the consumer-parallelism caps.
+curl -X PATCH localhost:7942/v1/topics/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"max_in_flight_per_partition": 64, "max_acked_ahead_per_partition": 256}'
 ```
 
 Existing records are not moved when partitions increase — they stay in
@@ -406,6 +462,70 @@ Pagination is keyset by name (cursor in `next_page_token`), robust
 against inserts and deletes between pages. `limit` defaults to 100,
 caps at 1000. `limit=0` is rejected at the HTTP layer; the
 broker-internal "no limit" path is reserved for the metrics poller.
+
+## Parallel consumers (single partition)
+
+Narad's consume path supports SQS-style **gap-skipping reservation +
+out-of-order acknowledgement**, so a single partition can feed many
+concurrent consumer threads / pods without redelivery.
+
+**The model:**
+
+* `Consume` reserves the partition's lowest reachable offset that is
+  neither already in flight nor sitting in the partition's "acked
+  ahead" set, marks it invisible for `visibility_timeout_ms`, and
+  returns the message together with an opaque, HMAC-signed
+  `receipt_handle`.
+* `Ack` decodes the handle, verifies it cryptographically, and only
+  commits if it still matches an active reservation. Acks for already-
+  committed offsets, expired reservations, or re-issued offsets are
+  rejected.
+* When an ack arrives in offset order it advances the partition's
+  committed offset and walks forward through any contiguous run of
+  previously out-of-order acks. Out-of-order acks for higher offsets
+  sit in a sparse `ackedAhead` set per partition until the head
+  catches up.
+
+**Per-partition caps** bound the in-memory book-keeping:
+
+| Cap | Default | Effect when reached |
+|---|---|---|
+| `max_in_flight_per_partition` | 1024 | `Consume` returns 204 (no message); existing reservations must ack or expire |
+| `max_acked_ahead_per_partition` | 1024 | `Ack` of an out-of-order offset returns **503**, signaling the partition's head is genuinely stuck |
+
+**Ack error codes:**
+
+| Status | Meaning |
+|---|---|
+| 204 | Acked. |
+| 400 | Malformed handle, missing handle, or topic in path doesn't match the topic encoded in the handle. |
+| 401 | HMAC verification failed — handle was forged or signed with a different broker secret. |
+| 410 | Handle no longer matches an active reservation: already committed, visibility timeout expired, or broker restarted (handles are signed with a process-local secret and do not survive restart). |
+| 503 | Out-of-order ack rejected because `max_acked_ahead_per_partition` is full — head of queue is stuck; consumer should back off. |
+
+**Consumer pattern (CLI):**
+
+```sh
+# Consumer worker loop. The receipt handle round-trips through stdin.
+while true; do
+  msg=$(narad client consume --wait 5s --partition 0 orders) || break
+  [ -z "$msg" ] && continue   # 204 = nothing to do
+  echo "$msg" | jq -r .receipt_handle | narad client ack orders
+done
+```
+
+**Known limitation (v1):** when an in-flight cap slot frees via an ack,
+long-poll consumers blocked on the cap will not wake until either a
+new produce notifies the partition or their long-poll deadline
+expires. Acceptable for typical workloads; a "shard-freed" notify
+signal is on the roadmap.
+
+**Operational note:** receipt handles are signed with a per-process
+random key generated at broker startup. Restarting the broker
+invalidates every outstanding handle — clients see 410 on subsequent
+acks, the corresponding reservations expire via visibility timeout,
+and the messages are redelivered. This is intentional: the in-flight
+set is in-memory only.
 
 ## Observability
 

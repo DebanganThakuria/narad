@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,17 +22,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"github.com/debanganthakuria/narad/internal/broker"
-	"github.com/debanganthakuria/narad/internal/config"
 	"github.com/debanganthakuria/narad/internal/consumer"
-	"github.com/debanganthakuria/narad/internal/httpserver"
-	"github.com/debanganthakuria/narad/internal/httpserver/handlers"
-	"github.com/debanganthakuria/narad/internal/metastore"
-	"github.com/debanganthakuria/narad/internal/observability/logger"
-	"github.com/debanganthakuria/narad/internal/observability/metrics"
-	"github.com/debanganthakuria/narad/internal/partition"
-	"github.com/debanganthakuria/narad/internal/replication"
-	"github.com/debanganthakuria/narad/internal/schema"
-	"github.com/debanganthakuria/narad/internal/storage"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/platform/config"
+	"github.com/debanganthakuria/narad/internal/platform/observability/logger"
+	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
+	"github.com/debanganthakuria/narad/internal/platform/partition"
+	"github.com/debanganthakuria/narad/internal/platform/replication"
+	"github.com/debanganthakuria/narad/internal/platform/schema"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
 func runServe(args []string) error {
@@ -200,22 +201,50 @@ func buildBroker(cfg *config.Config, ms *metastore.SQLiteStore, m *metrics.Metri
 		return nil, fmt.Errorf("storage options: %w", err)
 	}
 
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return nil, fmt.Errorf("generate handle secret: %w", err)
+	}
+
+	// Caps resolver consults the metastore so altered caps are honored
+	// at the next ReserveNext / Commit call without restarting the
+	// broker. Falls back to TopicConfig defaults for topics whose
+	// per-record value is zero (legacy rows pre-migration).
+	resolveCaps := func(ctx context.Context, topicName string) (consumer.Caps, error) {
+		t, err := ms.GetTopic(ctx, topicName)
+		if err != nil {
+			return consumer.Caps{}, err
+		}
+		maxIF := int(t.MaxInFlightPerPartition)
+		if maxIF <= 0 {
+			maxIF = int(cfg.Topic.DefaultMaxInFlightPerPartition)
+		}
+		maxAA := int(t.MaxAckedAheadPerPartition)
+		if maxAA <= 0 {
+			maxAA = int(cfg.Topic.DefaultMaxAckedAheadPerPartition)
+		}
+		return consumer.Caps{MaxInFlight: maxIF, MaxAckedAhead: maxAA}, nil
+	}
+
 	br, err := broker.New(broker.Deps{
 		DataDir:        cfg.Storage.DataDir,
 		StorageOptions: storageOpts,
 		TopicConfig: broker.TopicConfig{
-			DefaultPartitions:          cfg.Topic.DefaultPartitions,
-			MaxPartitions:              cfg.Topic.MaxPartitions,
-			DefaultReplicationFactor:   cfg.Topic.DefaultReplicationFactor,
-			DefaultRetentionMs:         cfg.Topic.DefaultRetentionAgeMs,
-			DefaultVisibilityTimeoutMs: cfg.Topic.DefaultVisibilityTimeoutMs,
+			DefaultPartitions:                cfg.Topic.DefaultPartitions,
+			MaxPartitions:                    cfg.Topic.MaxPartitions,
+			DefaultReplicationFactor:         cfg.Topic.DefaultReplicationFactor,
+			DefaultRetentionMs:               cfg.Topic.DefaultRetentionAgeMs,
+			DefaultVisibilityTimeoutMs:       cfg.Topic.DefaultVisibilityTimeoutMs,
+			DefaultMaxInFlightPerPartition:   cfg.Topic.DefaultMaxInFlightPerPartition,
+			DefaultMaxAckedAheadPerPartition: cfg.Topic.DefaultMaxAckedAheadPerPartition,
 		},
 		Metastore:       ms,
 		Partitions:      partition.NewHashRoundRobin(),
 		Schemas:         schema.NewJSONSchema(),
-		ConsumerOffsets: consumer.NewInFlight(consumer.NewMetastoreBacked(ms)),
+		ConsumerOffsets: consumer.NewInFlight(consumer.NewMetastoreBacked(ms), resolveCaps),
 		Replicator:      replication.NewLocal(),
 		Logger:          log,
+		HandleSecret:    secret,
 		Metrics:         m,
 	})
 	if err != nil {

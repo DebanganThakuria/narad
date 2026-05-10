@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,36 +19,38 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/consumer"
-	"github.com/debanganthakuria/narad/internal/httpserver"
-	"github.com/debanganthakuria/narad/internal/httpserver/handlers"
-	"github.com/debanganthakuria/narad/internal/metastore"
-	"github.com/debanganthakuria/narad/internal/partition"
-	"github.com/debanganthakuria/narad/internal/replication"
-	"github.com/debanganthakuria/narad/internal/schema"
-	"github.com/debanganthakuria/narad/internal/storage"
-	"github.com/debanganthakuria/narad/internal/topic"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/platform/partition"
+	"github.com/debanganthakuria/narad/internal/platform/replication"
+	"github.com/debanganthakuria/narad/internal/platform/schema"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 // envOpts lets tests override broker policy values without a fat constructor.
 type envOpts struct {
-	dataDir            string
-	defaultParts       int
-	maxParts           int
-	defaultRF          int
-	defaultRetentionMs int64
-	maxConsumeWait     time.Duration
-	metrics            bool // when true, wire real Prometheus metrics and /metrics endpoint
-	logOptions         storage.Options
+	dataDir                    string
+	defaultParts               int
+	maxParts                   int
+	defaultRF                  int
+	defaultRetentionMs         int64
+	defaultVisibilityTimeoutMs int64
+	maxConsumeWait             time.Duration
+	metrics                    bool // when true, wire real Prometheus metrics and /metrics endpoint
+	logOptions                 storage.Options
 }
 
 func defaultOpts() envOpts {
 	return envOpts{
-		defaultParts:       4,
-		maxParts:           128,
-		defaultRF:          2,
-		defaultRetentionMs: 7 * 24 * 3600 * 1000,
-		maxConsumeWait:     5 * time.Second,
+		defaultParts:               4,
+		maxParts:                   128,
+		defaultRF:                  2,
+		defaultRetentionMs:         7 * 24 * 3600 * 1000,
+		defaultVisibilityTimeoutMs: 30_000, // 30s — long enough that no e2e test races against expiry
+		maxConsumeWait:             5 * time.Second,
 		logOptions: storage.Options{
 			Codec:         storage.NewNoopCodec(),
 			FlushBytes:    1 << 20,
@@ -94,21 +97,41 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		reg = prometheus.NewRegistry()
 	}
 
+	resolveCaps := func(_ context.Context, topicName string) (consumer.Caps, error) {
+		t, err := ms.GetTopic(context.Background(), topicName)
+		if err != nil {
+			return consumer.Caps{}, err
+		}
+		maxIF := int(t.MaxInFlightPerPartition)
+		if maxIF <= 0 {
+			maxIF = 1024
+		}
+		maxAA := int(t.MaxAckedAheadPerPartition)
+		if maxAA <= 0 {
+			maxAA = 1024
+		}
+		return consumer.Caps{MaxInFlight: maxIF, MaxAckedAhead: maxAA}, nil
+	}
+
 	br, err := broker.New(broker.Deps{
 		DataDir:        opts.dataDir,
 		StorageOptions: opts.logOptions,
 		TopicConfig: broker.TopicConfig{
-			DefaultPartitions:        opts.defaultParts,
-			MaxPartitions:            opts.maxParts,
-			DefaultReplicationFactor: opts.defaultRF,
-			DefaultRetentionMs:       opts.defaultRetentionMs,
+			DefaultPartitions:                opts.defaultParts,
+			MaxPartitions:                    opts.maxParts,
+			DefaultReplicationFactor:         opts.defaultRF,
+			DefaultRetentionMs:               opts.defaultRetentionMs,
+			DefaultVisibilityTimeoutMs:       opts.defaultVisibilityTimeoutMs,
+			DefaultMaxInFlightPerPartition:   1024,
+			DefaultMaxAckedAheadPerPartition: 1024,
 		},
 		Metastore:       ms,
 		Partitions:      partition.NewHashRoundRobin(),
 		Schemas:         schema.NewJSONSchema(),
-		ConsumerOffsets: consumer.NewInFlight(consumer.NewMetastoreBacked(ms)),
+		ConsumerOffsets: consumer.NewInFlight(consumer.NewMetastoreBacked(ms), resolveCaps),
 		Replicator:      replication.NewLocal(),
 		Logger:          log,
+		HandleSecret:    []byte("e2e-test-secret-32-bytes-padding"),
 		Metrics:         nil,
 	})
 	if err != nil {
@@ -272,6 +295,28 @@ func (e *env) createTopic(name string, partitions, rf int, retentionMs int64) to
 // jsonRaw returns its argument as json.RawMessage. Shorthand for inline
 // schema strings in test tables.
 func jsonRaw(s string) json.RawMessage { return json.RawMessage(s) }
+
+// consume issues a single Consume against `path` (typically built from
+// the topic name and any partition/wait params) and returns the parsed
+// Message. Fails the test on non-200; use the raw `get` helper if you
+// want to inspect a 204 / error.
+func (e *env) consume(path string) topic.Message {
+	e.t.Helper()
+	resp := e.get(path)
+	expectOK(e.t, resp)
+	return readJSON[topic.Message](e.t, resp)
+}
+
+// ack posts a receipt handle against the standard ack endpoint and
+// asserts 204. Tests that want to assert a specific error code should
+// call env.post directly.
+func (e *env) ack(topicName, handle string) {
+	e.t.Helper()
+	resp := e.post("/v1/topics/"+topicName+"/ack", map[string]any{
+		"receipt_handle": handle,
+	})
+	expectStatus(e.t, resp, http.StatusNoContent)
+}
 
 func (e *env) produce(topicName, key, msg string) (offset int64, partition int) {
 	e.t.Helper()

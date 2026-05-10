@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/debanganthakuria/narad/internal/topic"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 )
 
 func TestHealthz(t *testing.T) {
@@ -41,17 +41,8 @@ func TestFullLifecycle(t *testing.T) {
 	env.produce("full-cycle", "k2", `{"msg": "world"}`)
 
 	// Consume and ack
-	resp = env.get("/v1/topics/full-cycle/consume?partition=0")
-	expectOK(t, resp)
-	msg := readJSON[struct {
-		Offset int64 `json:"offset"`
-	}](t, resp)
-
-	resp = env.post("/v1/topics/full-cycle/ack", map[string]any{
-		"partition": 0,
-		"offset":    msg.Offset,
-	})
-	expectStatus(t, resp, http.StatusNoContent)
+	msg := env.consume("/v1/topics/full-cycle/consume?partition=0")
+	env.ack("full-cycle", msg.ReceiptHandle)
 
 	// Alter partitions + retention together
 	resp = env.patch("/v1/topics/full-cycle", map[string]any{
