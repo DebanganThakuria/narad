@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/debanganthakuria/narad/internal/common"
 )
 
 // InFlight wraps an OffsetTracker with SQS-style message invisibility,
@@ -62,6 +64,7 @@ type reservation struct {
 type ReserveResult struct {
 	Reserved        bool
 	Offset          int64
+	HandleReceipt   string
 	Nonce           int64
 	ExpiresAtUnixMs int64
 	// SkipReason is set when Reserved is false:
@@ -136,6 +139,7 @@ func (f *InFlight) ReserveNext(ctx context.Context, topic string, partition int,
 		return ReserveResult{
 			Reserved:        true,
 			Offset:          off,
+			HandleReceipt:   common.RequestIDFrom(ctx),
 			Nonce:           nonce,
 			ExpiresAtUnixMs: exp,
 		}, nil

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -201,11 +200,6 @@ func buildBroker(cfg *config.Config, ms *metastore.SQLiteStore, m *metrics.Metri
 		return nil, fmt.Errorf("storage options: %w", err)
 	}
 
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return nil, fmt.Errorf("generate handle secret: %w", err)
-	}
-
 	// Caps resolver consults the metastore so altered caps are honored
 	// at the next ReserveNext / Commit call without restarting the
 	// broker. Falls back to TopicConfig defaults for topics whose
@@ -244,7 +238,6 @@ func buildBroker(cfg *config.Config, ms *metastore.SQLiteStore, m *metrics.Metri
 		ConsumerOffsets: consumer.NewInFlight(consumer.NewMetastoreBacked(ms), resolveCaps),
 		Replicator:      replication.NewLocal(),
 		Logger:          log,
-		HandleSecret:    secret,
 		Metrics:         m,
 	})
 	if err != nil {

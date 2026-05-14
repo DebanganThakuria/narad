@@ -35,9 +35,6 @@ func New(d Deps) (Broker, error) {
 		d.ConsumerOffsets == nil || d.Replicator == nil || d.Logger == nil {
 		return nil, fmt.Errorf("%w: missing dependency", ErrInvalidArgument)
 	}
-	if len(d.HandleSecret) < 16 {
-		return nil, fmt.Errorf("%w: HandleSecret must be at least 16 bytes", ErrInvalidArgument)
-	}
 	if d.TopicConfig.DefaultPartitions <= 0 {
 		return nil, fmt.Errorf("%w: TopicConfig.DefaultPartitions must be > 0", ErrInvalidArgument)
 	}
@@ -65,7 +62,7 @@ func New(d Deps) (Broker, error) {
 
 	return &impl{
 		Manager:     topics.NewManager(d.DataDir, d.Metastore, d.Schemas, d.ConsumerOffsets, logs, topicCfg, d.Logger),
-		Engine:      messaging.NewEngine(d.Metastore, d.Schemas, d.Partitions, d.Replicator, d.ConsumerOffsets, logs, d.Metrics, d.HandleSecret, d.Logger),
+		Engine:      messaging.NewEngine(d.Metastore, d.Schemas, d.Partitions, d.Replicator, d.ConsumerOffsets, logs, d.Metrics, d.Logger),
 		Snapshotter: runtime.NewSnapshotter(d.Metastore, d.ConsumerOffsets, logs, d.Logger),
 		Lifecycle:   runtime.NewLifecycle(logs),
 		deps:        d,

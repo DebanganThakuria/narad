@@ -23,7 +23,7 @@ func AccessLog(log *slog.Logger) Middleware {
 				slog.Int64("bytes", rec.bytes),
 				slog.Duration("duration", time.Since(start)),
 				slog.String("remote", r.RemoteAddr),
-				slog.String("request_id", RequestIDFrom(r.Context())),
+				slog.String("request_id", requestIDFrom(r.Context())),
 			)
 		})
 	}

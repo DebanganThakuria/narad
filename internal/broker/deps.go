@@ -26,14 +26,6 @@ type Deps struct {
 	Replicator      replication.Replicator
 	Logger          *slog.Logger
 
-	// HandleSecret is the HMAC key used to sign receipt handles
-	// returned to consumers. Must be at least 16 bytes; serve.go
-	// generates 32 random bytes via crypto/rand at startup. Process-
-	// local: a broker restart invalidates outstanding handles, which
-	// is correct because in-flight reservations are also in-memory
-	// only.
-	HandleSecret []byte
-
 	// MaxConsumeWait caps how long a long-poll consume can block.
 	// Plumbed through to the messaging engine.
 	MaxConsumeWait int64 // milliseconds; 0 → no cap

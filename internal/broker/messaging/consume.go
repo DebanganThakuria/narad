@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/debanganthakuria/narad/internal/consumer"
+	"github.com/debanganthakuria/narad/internal/common"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 )
 
@@ -170,14 +170,13 @@ func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions 
 		if err != nil {
 			return topic.Message{}, false, err
 		}
-		handle := consumer.EncodeHandle(e.handleSecret, topicName, int32(idx), res.Offset, res.ExpiresAtUnixMs, res.Nonce)
 		return topic.Message{
 			Topic:         topicName,
 			Partition:     idx,
 			Offset:        res.Offset,
 			Payload:       payload,
 			Timestamp:     time.Now().Unix(),
-			ReceiptHandle: handle,
+			ReceiptHandle: common.RequestIDFrom(ctx),
 		}, true, nil
 	}
 	return topic.Message{}, false, nil

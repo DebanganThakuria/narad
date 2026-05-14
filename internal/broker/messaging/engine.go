@@ -59,15 +59,14 @@ type ConsumeOpts struct {
 // Engine handles produce, consume, and ack. Constructed once at
 // broker startup; safe for concurrent use.
 type Engine struct {
-	metastore    metastore.Metastore
-	schemas      schema.Registry
-	partitions   partition.Manager
-	replicator   replication.Replicator
-	offsets      *consumer.InFlight
-	logs         *runtime.Logs
-	metrics      *metrics.Metrics
-	handleSecret []byte
-	logger       *slog.Logger
+	metastore  metastore.Metastore
+	schemas    schema.Registry
+	partitions partition.Manager
+	replicator replication.Replicator
+	offsets    *consumer.InFlight
+	logs       *runtime.Logs
+	metrics    *metrics.Metrics
+	logger     *slog.Logger
 }
 
 // NewEngine wires an Engine. handleSecret must be at least 16 bytes
@@ -80,19 +79,17 @@ func NewEngine(
 	offsets *consumer.InFlight,
 	logs *runtime.Logs,
 	m *metrics.Metrics,
-	handleSecret []byte,
 	logger *slog.Logger,
 ) *Engine {
 	return &Engine{
-		metastore:    ms,
-		schemas:      schemas,
-		partitions:   partitions,
-		replicator:   replicator,
-		offsets:      offsets,
-		logs:         logs,
-		metrics:      m,
-		handleSecret: handleSecret,
-		logger:       logger,
+		metastore:  ms,
+		schemas:    schemas,
+		partitions: partitions,
+		replicator: replicator,
+		offsets:    offsets,
+		logs:       logs,
+		metrics:    m,
+		logger:     logger,
 	}
 }
 

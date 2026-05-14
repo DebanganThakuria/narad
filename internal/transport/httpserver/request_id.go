@@ -6,19 +6,13 @@ import (
 	"encoding/hex"
 	"net/http"
 	"time"
+
+	"github.com/debanganthakuria/narad/internal/common"
 )
 
 // HeaderRequestID is set on every response carrying the request's
 // correlation ID.
 const HeaderRequestID = "X-Request-ID"
-
-// ctxKey is the unexported key type for storing per-request values in
-// context.Context, per the standard convention.
-type ctxKey int
-
-const (
-	ctxRequestID ctxKey = iota
-)
 
 // RequestID generates (or accepts) a correlation ID and propagates it
 // via both the response header and the request context.
@@ -30,15 +24,15 @@ func RequestID() Middleware {
 				id = newRequestID()
 			}
 			w.Header().Set(HeaderRequestID, id)
-			ctx := context.WithValue(r.Context(), ctxRequestID, id)
+			ctx := context.WithValue(r.Context(), common.RequestID, id)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
 
-// RequestIDFrom returns the correlation ID from ctx, or "" if absent.
-func RequestIDFrom(ctx context.Context) string {
-	if v, ok := ctx.Value(ctxRequestID).(string); ok {
+// requestIDFrom returns the correlation ID from ctx, or "" if absent.
+func requestIDFrom(ctx context.Context) string {
+	if v, ok := ctx.Value(common.RequestID).(string); ok {
 		return v
 	}
 	return ""

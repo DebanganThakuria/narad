@@ -6,6 +6,11 @@ import (
 	"fmt"
 
 	"github.com/debanganthakuria/narad/internal/consumer"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
+)
+
+var (
+	ErrHandleMalformed     = errors.New("consumer: receipt handle is malformed")
 )
 
 // Ack accepts an opaque receipt handle previously returned by Consume.
@@ -21,7 +26,7 @@ func (e *Engine) Ack(ctx context.Context, topicName string, receiptHandle string
 		return fmt.Errorf("%w: topic required", ErrInvalid)
 	}
 	if receiptHandle == "" {
-		return consumer.ErrHandleMalformed
+		return ErrHandleMalformed
 	}
 
 	// Confirm the topic still exists before doing handle work — gives
@@ -31,25 +36,8 @@ func (e *Engine) Ack(ctx context.Context, topicName string, receiptHandle string
 		return err
 	}
 
-	h, err := consumer.DecodeHandle(e.handleSecret, receiptHandle)
-	if err != nil {
-		switch {
-		case errors.Is(err, consumer.ErrHandleHMACMismatch):
-			e.metrics.IncAckRejected("hmac")
-		default:
-			e.metrics.IncAckRejected("malformed")
-		}
-		return err
-	}
-	if err := h.MatchTopic(topicName); err != nil {
-		e.metrics.IncAckRejected("topic_mismatch")
-		return err
-	}
-	if err := e.offsets.CheckHandle(ctx, h.Topic, int(h.Partition), h.Offset, h.Nonce); err != nil {
-		e.metrics.IncAckRejected("stale")
-		return err
-	}
-	if err := e.offsets.Commit(ctx, h.Topic, int(h.Partition), h.Offset); err != nil {
+	// TODO Get reservation and match handle and commit
+	if err := e.offsets.Commit(ctx, t.Name, int(.Partition), h.Offset); err != nil {
 		// ackedAhead-cap is the one Commit error worth bubbling as a
 		// distinct sentinel so the HTTP layer can return 503 instead
 		// of a generic 5xx.
