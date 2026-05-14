@@ -1,9 +1,9 @@
 package schema
 
-import "errors"
+import "github.com/debanganthakuria/narad/internal/errs"
 
-// Sentinel errors returned by Registry implementations.
+// Aliases of the canonical sentinels in internal/errs.
 var (
-	ErrSchemaNotFound = errors.New("schema: not registered for topic")
-	ErrIncompatible   = errors.New("schema: incompatible with previous version")
+	ErrSchemaNotFound = errs.ErrSchemaNotFound
+	ErrIncompatible   = errs.ErrSchemaIncompatible
 )

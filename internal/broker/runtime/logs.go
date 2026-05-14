@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
@@ -72,7 +73,7 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 	opts := g.storageOpts
 	if t, err := g.metastore.GetTopic(context.Background(), topicName); err == nil {
 		opts.Retention = retentionFromTopic(t.RetentionMs, opts.Retention.CheckInterval)
-	} else if !errors.Is(err, metastore.ErrNotFound) {
+	} else if !errors.Is(err, errs.ErrNotFound) {
 		return nil, fmt.Errorf("broker/runtime: lookup topic for retention: %w", err)
 	}
 	if g.metrics != nil {

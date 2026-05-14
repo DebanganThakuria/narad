@@ -6,7 +6,11 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/broker/topics"
+	"github.com/debanganthakuria/narad/internal/errs"
 )
+
+// broker-level error aliases for use within this package.
+var ErrInvalidArgument = errs.ErrInvalidArgument
 
 // impl is the broker facade. It composes per-domain managers via Go
 // type embedding; method promotion makes every embedded manager's

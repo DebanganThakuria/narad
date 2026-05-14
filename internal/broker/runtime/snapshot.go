@@ -72,11 +72,7 @@ func (s *Snapshotter) partitionSnapshot(ctx context.Context, topicName string, i
 		return metrics.PartitionSnapshot{}, false
 	}
 
-	committed, err := s.offsets.Next(ctx, topicName, idx)
-	if err != nil {
-		s.logger.Debug("snapshot: offset lookup failed", "topic", topicName, "partition", idx, "err", err)
-		return metrics.PartitionSnapshot{}, false
-	}
+	committed := s.offsets.Next(topicName, idx)
 
 	logStart := log.OldestOffset()
 	logEnd := log.NextOffset()

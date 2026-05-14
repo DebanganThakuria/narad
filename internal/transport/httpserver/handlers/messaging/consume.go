@@ -28,6 +28,12 @@ func Consume(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
+		if s.Deps.Router != nil {
+			if s.Deps.Router.RouteConsume(r.Context(), w, r, topicName, opts.Partition) {
+				return
+			}
+		}
+
 		msg, found, err := s.Deps.Broker.Consume(r.Context(), topicName, opts)
 		if err != nil {
 			s.WriteBrokerError(w, "consume", err)

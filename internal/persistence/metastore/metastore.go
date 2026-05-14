@@ -1,5 +1,3 @@
-// Package metastore is the contract for Narad's persistent metadata:
-// topics, schemas, and committed consumer offsets.
 package metastore
 
 import (
@@ -25,19 +23,33 @@ type Metastore interface {
 	Close() error
 }
 
-// ListOptions controls pagination for ListTopics. Pagination is keyset
-// by topic name (lexicographic ascending) — robust against inserts and
-// deletes between pages, unlike offset-based pagination.
-//
-//   - Limit == 0: return every topic in one shot. The underlying list
-//     is cached, which is what the metrics poller wants.
-//   - Limit > 0: return up to Limit topics. The returned next-token is
-//     non-empty when more rows exist, and should be passed verbatim as
-//     the next call's PageToken to fetch the next page. Cache is
-//     bypassed.
-//   - PageToken: empty for the first page, otherwise the token returned
-//     by the previous call.
+// ListOptions controls pagination for ListTopics. PageToken is the
+// first key of the next page — pass it back verbatim on the next call.
+// Limit == 0 returns all topics in one shot.
 type ListOptions struct {
 	Limit     int
 	PageToken string
+}
+
+// MemberStatus is the liveness state of a cluster pod.
+type MemberStatus string
+
+const (
+	MemberAlive MemberStatus = "alive"
+	MemberDead  MemberStatus = "dead"
+)
+
+// Member represents a narad pod registered in the cluster.
+type Member struct {
+	ID            string       `json:"id"`
+	Addr          string       `json:"addr"` // host:port for intra-cluster RPCs
+	Status        MemberStatus `json:"status"`
+	LastHeartbeat int64        `json:"last_heartbeat"` // Unix seconds
+}
+
+// Assignment maps a single partition of a topic to its owner pod.
+type Assignment struct {
+	Topic     string `json:"topic"`
+	Partition int    `json:"partition"`
+	OwnerID   string `json:"owner_id"`
 }

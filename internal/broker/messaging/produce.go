@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/debanganthakuria/narad/internal/platform/schema"
+	"github.com/debanganthakuria/narad/internal/errs"
 )
 
 // Produce validates the payload, picks a partition, appends to the
@@ -17,7 +17,7 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 		return 0, 0, err
 	}
 
-	if err = e.schemas.Validate(ctx, topicName, payload); err != nil && !errors.Is(err, schema.ErrSchemaNotFound) {
+	if err = e.schemas.Validate(ctx, topicName, payload); err != nil && !errors.Is(err, errs.ErrSchemaNotFound) {
 		if e.metrics != nil {
 			e.metrics.ProduceRejectionsTotal.WithLabelValues(topicName, "schema").Inc()
 		}

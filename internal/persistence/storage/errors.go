@@ -1,14 +1,19 @@
 package storage
 
-import "errors"
+import (
+	"errors"
 
-var (
-	ErrOffsetNotFound = errors.New("storage: offset not found")
-	ErrCorruptRecord  = errors.New("storage: corrupt record")
-	ErrLogClosed      = errors.New("storage: log closed")
+	"github.com/debanganthakuria/narad/internal/errs"
 )
 
-// Internal — recovery handles these by resyncing.
+// Aliases of the canonical sentinels in internal/errs.
+var (
+	ErrOffsetNotFound = errs.ErrOffsetNotFound
+	ErrCorruptRecord  = errs.ErrCorruptRecord
+	ErrLogClosed      = errs.ErrLogClosed
+)
+
+// Internal sentinels — recovery handles these by resyncing.
 var (
 	errBadMagic = errors.New("storage: frame magic mismatch")
 	errCorrupt  = errors.New("storage: frame integrity check failed")

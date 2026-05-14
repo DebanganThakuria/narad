@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+
+	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 )
 
 var crc32cTable = crc32.MakeTable(crc32.Castagnoli)
@@ -54,7 +56,7 @@ func decodeRecordsPayload(payload []byte, recordCount int32) ([][]byte, error) {
 
 // writeFrame emits the whole frame in a single Write so partial-write
 // recovery sees a clean torn-tail boundary.
-func writeFrame(w io.Writer, records [][]byte, baseOffset int64, codec Codec) (int, error) {
+func writeFrame(w io.Writer, records [][]byte, baseOffset int64, c codec.Codec) (int, error) {
 	if len(records) == 0 {
 		return 0, errors.New("storage: writeFrame: empty batch")
 	}
@@ -65,7 +67,7 @@ func writeFrame(w io.Writer, records [][]byte, baseOffset int64, codec Codec) (i
 	}
 	inner := make([]byte, 0, innerSize)
 	inner = encodeRecordsPayload(inner, records)
-	encoded := codec.Encode(nil, inner)
+	encoded := c.Encode(nil, inner)
 
 	if len(inner) > (1<<31)-1 || len(encoded) > (1<<31)-1 {
 		return 0, fmt.Errorf("storage: frame too large: uncompressed=%d compressed=%d", len(inner), len(encoded))
@@ -73,7 +75,7 @@ func writeFrame(w io.Writer, records [][]byte, baseOffset int64, codec Codec) (i
 
 	frame := make([]byte, headerSize+len(encoded))
 	encodeHeader(frame[:headerSize], frameHeader{
-		flags:        codec.Flag() & codecMask,
+		flags:        c.Flag() & codecMask,
 		recordCount:  int32(len(records)),
 		baseOffset:   baseOffset,
 		uncompressed: int32(len(inner)),
@@ -118,11 +120,11 @@ func readFrameAt(r io.ReaderAt, pos int64, log *Log) (frameHeader, [][]byte, int
 		return h, nil, pos, fmt.Errorf("%w: crc want=0x%x got=0x%x at pos=%d", errCorrupt, want, got, pos)
 	}
 
-	codec, err := codecForFlag(h.codec(), log)
+	c, err := codecForFlag(h.codec(), log.codec)
 	if err != nil {
 		return h, nil, pos, err
 	}
-	decoded, err := codec.Decode(nil, payload, int(h.uncompressed))
+	decoded, err := c.Decode(nil, payload, int(h.uncompressed))
 	if err != nil {
 		return h, nil, pos, fmt.Errorf("%w: decode: %v", errCorrupt, err)
 	}

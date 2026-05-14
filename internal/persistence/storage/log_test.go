@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+
+	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 )
 
 // ---- helpers --------------------------------------------------------
@@ -27,13 +29,13 @@ func testLogPath(t *testing.T) string {
 // auto-flush, so tests that read from the buffer aren't racing the
 // flusher. Close() still forces a final flush, which is how tests
 // trigger disk persistence.
-func slowFlushOpts(t *testing.T, codec Codec) Options {
+func slowFlushOpts(t *testing.T, c codec.Codec) Options {
 	t.Helper()
-	if codec == nil {
-		codec = NewNoopCodec()
+	if c == nil {
+		c = codec.NewNoopCodec()
 	}
 	return Options{
-		Codec:         codec,
+		Codec:         c,
 		FlushBytes:    1 << 30, // 1 GiB — never crossed in tests
 		FlushRecords:  1 << 20,
 		FlushInterval: 1 * time.Hour,
@@ -43,13 +45,13 @@ func slowFlushOpts(t *testing.T, codec Codec) Options {
 // fastFlushOpts returns Options that flush as soon as anything is
 // pushed (FlushRecords=1, short interval). Useful for tests that want
 // disk-side behaviour without explicitly closing.
-func fastFlushOpts(t *testing.T, codec Codec) Options {
+func fastFlushOpts(t *testing.T, c codec.Codec) Options {
 	t.Helper()
-	if codec == nil {
-		codec = NewNoopCodec()
+	if c == nil {
+		c = codec.NewNoopCodec()
 	}
 	return Options{
-		Codec:         codec,
+		Codec:         c,
 		FlushBytes:    1,
 		FlushRecords:  1,
 		FlushInterval: 5 * time.Millisecond,
@@ -168,7 +170,7 @@ func TestAppendBatch(t *testing.T) {
 // ---- 7. Compression round-trip + on-disk size sanity ---------------
 
 func TestZstdCompressionRoundTripShrinks(t *testing.T) {
-	zc, err := NewZstdCodec(zstd.SpeedBestCompression)
+	zc, err := codec.NewZstdCodec(zstd.SpeedBestCompression)
 	if err != nil {
 		t.Fatalf("NewZstdCodec: %v", err)
 	}
@@ -186,7 +188,7 @@ func TestZstdCompressionRoundTripShrinks(t *testing.T) {
 	})
 
 	pathRaw := testLogPath(t)
-	mustWriteAndClose(t, pathRaw, slowFlushOpts(t, NewNoopCodec()), func(l *Log) {
+	mustWriteAndClose(t, pathRaw, slowFlushOpts(t, codec.NewNoopCodec()), func(l *Log) {
 		for i := 0; i < 20; i++ {
 			if _, err := l.Append(payload); err != nil {
 				t.Fatalf("Append: %v", err)
@@ -231,7 +233,7 @@ func TestRecoverySkipsCorruptMiddleFrame(t *testing.T) {
 	// (otherwise the slow-flush opts would coalesce them all into one
 	// frame at the final Close).
 	for i := 0; i < 3; i++ {
-		mustWriteAndClose(t, path, slowFlushOpts(t, NewNoopCodec()), func(l *Log) {
+		mustWriteAndClose(t, path, slowFlushOpts(t, codec.NewNoopCodec()), func(l *Log) {
 			if _, _, err := l.AppendBatch([][]byte{[]byte(fmt.Sprintf("frame-%d", i))}); err != nil {
 				t.Fatalf("AppendBatch: %v", err)
 			}
@@ -251,7 +253,7 @@ func TestRecoverySkipsCorruptMiddleFrame(t *testing.T) {
 	corruptByteAt(t, path, frames[1]+headerSize+2)
 
 	// Reopen — recovery should skip the corrupt frame, NOT truncate.
-	l, err := NewLog(path, slowFlushOpts(t, NewNoopCodec()))
+	l, err := NewLog(path, slowFlushOpts(t, codec.NewNoopCodec()))
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -280,7 +282,7 @@ func TestRecoveryResyncsAfterMagicWipe(t *testing.T) {
 	path := testLogPath(t)
 
 	for i := 0; i < 3; i++ {
-		mustWriteAndClose(t, path, slowFlushOpts(t, NewNoopCodec()), func(l *Log) {
+		mustWriteAndClose(t, path, slowFlushOpts(t, codec.NewNoopCodec()), func(l *Log) {
 			if _, _, err := l.AppendBatch([][]byte{[]byte(fmt.Sprintf("frame-%d", i))}); err != nil {
 				t.Fatalf("AppendBatch: %v", err)
 			}
@@ -296,7 +298,7 @@ func TestRecoveryResyncsAfterMagicWipe(t *testing.T) {
 	// until we hit the next valid magic at frames[2].
 	wipeMagic(t, path, frames[1])
 
-	l, err := NewLog(path, slowFlushOpts(t, NewNoopCodec()))
+	l, err := NewLog(path, slowFlushOpts(t, codec.NewNoopCodec()))
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -318,7 +320,7 @@ func TestRecoveryResyncsAfterMagicWipe(t *testing.T) {
 func TestRecoveryTruncatesTornTail(t *testing.T) {
 	path := testLogPath(t)
 
-	mustWriteAndClose(t, path, slowFlushOpts(t, NewNoopCodec()), func(l *Log) {
+	mustWriteAndClose(t, path, slowFlushOpts(t, codec.NewNoopCodec()), func(l *Log) {
 		for i := 0; i < 2; i++ {
 			if _, _, err := l.AppendBatch([][]byte{[]byte(fmt.Sprintf("frame-%d", i))}); err != nil {
 				t.Fatalf("AppendBatch: %v", err)
@@ -346,7 +348,7 @@ func TestRecoveryTruncatesTornTail(t *testing.T) {
 		t.Fatalf("torn write didn't grow file: %d -> %d", sizeBefore, got)
 	}
 
-	l, err := NewLog(path, slowFlushOpts(t, NewNoopCodec()))
+	l, err := NewLog(path, slowFlushOpts(t, codec.NewNoopCodec()))
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -374,7 +376,7 @@ func TestCloseFlushesPendingRecords(t *testing.T) {
 	path := testLogPath(t)
 	// Use slow flusher so we know the flush is happening at Close,
 	// not from the periodic timer.
-	l, err := NewLog(path, slowFlushOpts(t, NewNoopCodec()))
+	l, err := NewLog(path, slowFlushOpts(t, codec.NewNoopCodec()))
 	if err != nil {
 		t.Fatalf("NewLog: %v", err)
 	}
@@ -398,7 +400,7 @@ func TestCloseFlushesPendingRecords(t *testing.T) {
 	}
 
 	// Reopen and verify all records.
-	l2, err := NewLog(path, slowFlushOpts(t, NewNoopCodec()))
+	l2, err := NewLog(path, slowFlushOpts(t, codec.NewNoopCodec()))
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -422,7 +424,7 @@ func TestConcurrentAppendOffsetsUniqueAndContiguous(t *testing.T) {
 	const perGoroutine = 250
 
 	path := testLogPath(t)
-	l, err := NewLog(path, fastFlushOpts(t, NewNoopCodec()))
+	l, err := NewLog(path, fastFlushOpts(t, codec.NewNoopCodec()))
 	if err != nil {
 		t.Fatalf("NewLog: %v", err)
 	}
@@ -462,7 +464,7 @@ func TestConcurrentAppendOffsetsUniqueAndContiguous(t *testing.T) {
 	}
 
 	// All records readable after reopen.
-	l2, err := NewLog(path, slowFlushOpts(t, NewNoopCodec()))
+	l2, err := NewLog(path, slowFlushOpts(t, codec.NewNoopCodec()))
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -484,7 +486,7 @@ func TestConcurrentAppendOffsetsUniqueAndContiguous(t *testing.T) {
 func rollOpts(t *testing.T, segmentBytes int64) Options {
 	t.Helper()
 	return Options{
-		Codec:         NewNoopCodec(),
+		Codec:         codec.NewNoopCodec(),
 		FlushBytes:    1 << 30,
 		FlushRecords:  1 << 20,
 		FlushInterval: 1 * time.Hour,
@@ -689,7 +691,7 @@ func TestRollPreservesOffsetContinuity(t *testing.T) {
 	const total = 30
 
 	l, err := NewLog(dir, Options{
-		Codec:         NewNoopCodec(),
+		Codec:         codec.NewNoopCodec(),
 		FlushBytes:    1, // flush every record
 		FlushRecords:  1,
 		FlushInterval: 5 * time.Millisecond,
@@ -751,7 +753,7 @@ func retentionOpts(t *testing.T, clock *atomicTime, cfg RetentionConfig) Options
 		cfg.CheckInterval = 1 * time.Hour // never fires during a test run
 	}
 	return Options{
-		Codec:         NewNoopCodec(),
+		Codec:         codec.NewNoopCodec(),
 		FlushBytes:    1,
 		FlushRecords:  1,
 		FlushInterval: 5 * time.Millisecond,
@@ -851,7 +853,7 @@ func TestRetentionRespectsActiveSegment(t *testing.T) {
 	// segment bytes — no roll, so the only segment IS the active
 	// one.
 	noRollOpts := Options{
-		Codec:         NewNoopCodec(),
+		Codec:         codec.NewNoopCodec(),
 		FlushBytes:    1,
 		FlushRecords:  1,
 		FlushInterval: 5 * time.Millisecond,

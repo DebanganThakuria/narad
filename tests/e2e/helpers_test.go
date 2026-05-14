@@ -22,6 +22,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
 	"github.com/debanganthakuria/narad/internal/platform/replication"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
@@ -52,7 +53,7 @@ func defaultOpts() envOpts {
 		defaultVisibilityTimeoutMs: 30_000, // 30s — long enough that no e2e test races against expiry
 		maxConsumeWait:             5 * time.Second,
 		logOptions: storage.Options{
-			Codec:         storage.NewNoopCodec(),
+			Codec:         codec.NewNoopCodec(),
 			FlushBytes:    1 << 20,
 			FlushRecords:  100,
 			FlushInterval: 100 * time.Millisecond,
@@ -70,7 +71,7 @@ type env struct {
 	broker broker.Broker
 	server *httptest.Server
 	client *http.Client
-	ms     *metastore.SQLiteStore
+	ms     metastore.Metastore
 
 	reg *prometheus.Registry // non-nil only when metrics:true
 }
@@ -85,9 +86,26 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		t.Fatalf("create data dir: %v", err)
 	}
 
-	ms, err := metastore.NewSQLiteStore(filepath.Join(opts.dataDir, "meta.db"))
+	ms, err := metastore.New(metastore.Config{
+		NodeID:   "test-0",
+		DataDir:  filepath.Join(opts.dataDir, "metastore"),
+		BindAddr: "127.0.0.1:0",
+	})
 	if err != nil {
 		t.Fatalf("metastore: %v", err)
+	}
+	t.Cleanup(func() { ms.Close() })
+
+	// Wait for Raft to elect a leader before any broker operations.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if ms.IsLeader() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !ms.IsLeader() {
+		t.Fatal("metastore: timed out waiting for Raft leader")
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -128,10 +146,9 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		Metastore:       ms,
 		Partitions:      partition.NewHashRoundRobin(),
 		Schemas:         schema.NewJSONSchema(),
-		ConsumerOffsets: consumer.NewInFlight(consumer.NewMetastoreBacked(ms), resolveCaps),
+		ConsumerOffsets: consumer.NewInFlight(resolveCaps, nil),
 		Replicator:      replication.NewLocal(),
 		Logger:          log,
-		HandleSecret:    []byte("e2e-test-secret-32-bytes-padding"),
 		Metrics:         nil,
 	})
 	if err != nil {

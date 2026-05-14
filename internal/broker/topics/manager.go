@@ -20,8 +20,8 @@ package topics
 import (
 	"log/slog"
 
-	"github.com/debanganthakuria/narad/internal/broker/errs"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
@@ -31,9 +31,9 @@ import (
 // use; the broker package re-exports the underlying errs.* values
 // publicly.
 var (
-	ErrNotFound      = errs.TopicNotFound
-	ErrAlreadyExists = errs.TopicAlreadyExists
-	ErrInvalid       = errs.InvalidArgument
+	ErrNotFound      = errs.ErrTopicNotFound
+	ErrAlreadyExists = errs.ErrTopicAlreadyExists
+	ErrInvalid       = errs.ErrInvalidArgument
 )
 
 // Config supplies create-time defaults and bounds. Same fields as the

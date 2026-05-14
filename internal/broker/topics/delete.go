@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/errs"
 )
 
 // DeleteTopic removes a topic and all of its data: closes cached
@@ -25,7 +25,7 @@ func (m *Manager) DeleteTopic(ctx context.Context, name string) error {
 	firstErr := m.logs.CloseTopic(name)
 
 	if err := m.metastore.DeleteTopic(ctx, name); err != nil {
-		if !errors.Is(err, metastore.ErrNotFound) && firstErr == nil {
+		if !errors.Is(err, errs.ErrNotFound) && firstErr == nil {
 			firstErr = err
 		}
 	}

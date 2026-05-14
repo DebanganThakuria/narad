@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
-	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
 
 // CreateTopic registers a new topic and prepares its on-disk
@@ -92,7 +92,7 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	}
 
 	if err := m.metastore.CreateTopic(ctx, t); err != nil {
-		if errors.Is(err, metastore.ErrAlreadyExists) {
+		if errors.Is(err, errs.ErrAlreadyExists) {
 			return topic.Topic{}, ErrAlreadyExists
 		}
 		return topic.Topic{}, err

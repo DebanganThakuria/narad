@@ -21,9 +21,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"github.com/debanganthakuria/narad/internal/broker"
+	"github.com/debanganthakuria/narad/internal/cluster"
+	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 	"github.com/debanganthakuria/narad/internal/platform/config"
 	"github.com/debanganthakuria/narad/internal/platform/observability/logger"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
@@ -53,13 +56,18 @@ func runServe(args []string) error {
 		return fmt.Errorf("data dir: %w", err)
 	}
 
-	ms, err := metastore.NewSQLiteStore(filepath.Join(cfg.Storage.DataDir, "metastore/metadata.db"))
+	nodeID, _ := os.Hostname()
+	ms, err := metastore.New(metastore.Config{
+		NodeID:   nodeID,
+		DataDir:  filepath.Join(cfg.Storage.DataDir, "metastore"),
+		BindAddr: cfg.Cluster.Addr,
+	})
 	if err != nil {
 		return fmt.Errorf("metastore: %w", err)
 	}
 	defer closeWithLog(log, "metastore", ms.Close)
 
-	br, err := buildBroker(cfg, ms, m, log)
+	br, offsets, err := buildBroker(cfg, ms, m, log)
 	if err != nil {
 		return err
 	}
@@ -68,7 +76,19 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Start cluster background loops.
+	hb := controller.NewHeartbeater(ms, metastore.Member{
+		ID:     nodeID,
+		Addr:   cfg.HTTP.Addr,
+		Status: metastore.MemberAlive,
+	}, 5*time.Second)
+	ctrl := controller.New(ms, controller.Config{})
+	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin())
+
 	var wg sync.WaitGroup
+	wg.Go(func() { hb.Run(ctx) })
+	wg.Go(func() { ctrl.Run(ctx) })
+	wg.Go(func() { offsets.RunPurger(ctx, time.Second) })
 	wg.Go(func() {
 		if pprofErr := http.ListenAndServe(":6060", nil); pprofErr != nil {
 			log.Error("failed to start pprof", "err", pprofErr)
@@ -78,7 +98,7 @@ func runServe(args []string) error {
 	poller := metrics.NewPoller(m, br, log)
 	wg.Go(func() { poller.Run(ctx) })
 
-	srv := buildAPIServer(cfg, br, m, reg, log)
+	srv := buildAPIServer(cfg, br, router, m, reg, log)
 
 	// Capture boot time
 	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())
@@ -194,10 +214,10 @@ func loadServeConfig(args []string) (*config.Config, error) {
 	return cfg, nil
 }
 
-func buildBroker(cfg *config.Config, ms *metastore.SQLiteStore, m *metrics.Metrics, log *slog.Logger) (broker.Broker, error) {
+func buildBroker(cfg *config.Config, ms metastore.Metastore, m *metrics.Metrics, log *slog.Logger) (broker.Broker, *consumer.InFlight, error) {
 	storageOpts, err := storageOptions(cfg.Storage)
 	if err != nil {
-		return nil, fmt.Errorf("storage options: %w", err)
+		return nil, nil, fmt.Errorf("storage options: %w", err)
 	}
 
 	// Caps resolver consults the metastore so altered caps are honored
@@ -220,6 +240,8 @@ func buildBroker(cfg *config.Config, ms *metastore.SQLiteStore, m *metrics.Metri
 		return consumer.Caps{MaxInFlight: maxIF, MaxAckedAhead: maxAA}, nil
 	}
 
+	offsets := consumer.NewInFlight(resolveCaps, nil)
+
 	br, err := broker.New(broker.Deps{
 		DataDir:        cfg.Storage.DataDir,
 		StorageOptions: storageOpts,
@@ -235,22 +257,23 @@ func buildBroker(cfg *config.Config, ms *metastore.SQLiteStore, m *metrics.Metri
 		Metastore:       ms,
 		Partitions:      partition.NewHashRoundRobin(),
 		Schemas:         schema.NewJSONSchema(),
-		ConsumerOffsets: consumer.NewInFlight(consumer.NewMetastoreBacked(ms), resolveCaps),
+		ConsumerOffsets: offsets,
 		Replicator:      replication.NewLocal(),
 		Logger:          log,
 		Metrics:         m,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("broker: %w", err)
+		return nil, nil, fmt.Errorf("broker: %w", err)
 	}
-	return br, nil
+	return br, offsets, nil
 }
 
-func buildAPIServer(cfg *config.Config, br broker.Broker, m *metrics.Metrics, reg *prometheus.Registry, log *slog.Logger) *httpserver.Server {
+func buildAPIServer(cfg *config.Config, br broker.Broker, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, log *slog.Logger) *httpserver.Server {
 	handlerSet := handlers.New(handlers.Deps{
 		Broker:         br,
 		Logger:         log,
 		MaxConsumeWait: cfg.HTTP.MaxConsumeWait.D(),
+		Router:         router,
 	})
 	return httpserver.New(cfg.HTTP, httpserver.NewRouter(handlerSet, log, m, reg), log)
 }
@@ -284,16 +307,16 @@ func storageOptions(sc config.StorageConfig) (storage.Options, error) {
 	}, nil
 }
 
-func buildCodec(sc config.StorageConfig) (storage.Codec, error) {
+func buildCodec(sc config.StorageConfig) (codec.Codec, error) {
 	switch strings.ToLower(sc.Codec) {
 	case "none":
-		return storage.NewNoopCodec(), nil
+		return codec.NewNoopCodec(), nil
 	case "zstd", "":
 		level, err := zstdLevelFromString(sc.CompressionLevel)
 		if err != nil {
 			return nil, err
 		}
-		return storage.NewZstdCodec(level)
+		return codec.NewZstdCodec(level)
 	default:
 		return nil, fmt.Errorf("unknown codec %q", sc.Codec)
 	}

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
-	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
 
 // IncreaseTopicPartitions raises the partition count of an existing
@@ -42,7 +42,7 @@ func (m *Manager) IncreaseTopicPartitions(ctx context.Context, name string, newP
 	updated.Partitions = newPartitions
 
 	if err = m.metastore.UpdateTopic(ctx, updated); err != nil {
-		if errors.Is(err, metastore.ErrNotFound) {
+		if errors.Is(err, errs.ErrNotFound) {
 			return topic.Topic{}, ErrNotFound
 		}
 		return topic.Topic{}, err
@@ -82,7 +82,7 @@ func (m *Manager) UpdateTopicRetention(ctx context.Context, name string, retenti
 	updated.RetentionMs = retentionMs
 
 	if err := m.metastore.UpdateTopic(ctx, updated); err != nil {
-		if errors.Is(err, metastore.ErrNotFound) {
+		if errors.Is(err, errs.ErrNotFound) {
 			return topic.Topic{}, ErrNotFound
 		}
 		return topic.Topic{}, err
@@ -129,7 +129,7 @@ func (m *Manager) UpdateTopicCaps(ctx context.Context, name string, maxInFlight,
 	updated.MaxAckedAheadPerPartition = maxAckedAhead
 
 	if err := m.metastore.UpdateTopic(ctx, updated); err != nil {
-		if errors.Is(err, metastore.ErrNotFound) {
+		if errors.Is(err, errs.ErrNotFound) {
 			return topic.Topic{}, ErrNotFound
 		}
 		return topic.Topic{}, err

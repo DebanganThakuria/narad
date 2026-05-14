@@ -15,6 +15,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -22,14 +23,25 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker"
-	"github.com/debanganthakuria/narad/internal/consumer"
+	"github.com/debanganthakuria/narad/internal/errs"
 )
+
+// Router forwards requests to the partition-owning pod in a multi-node cluster.
+// Nil in single-node mode — handlers skip all routing checks when it is nil.
+type Router interface {
+	RouteProduce(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName, key string, body []byte) bool
+	RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) bool
+	RouteAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, partition int, body []byte) bool
+}
 
 // Deps is the bag of collaborators every handler needs.
 type Deps struct {
 	Broker         broker.Broker
 	Logger         *slog.Logger
 	MaxConsumeWait time.Duration
+	// Router is optional. When set, requests are forwarded to the partition
+	// owner instead of being handled locally on non-owner pods.
+	Router Router
 }
 
 // Set is shared by every handler subpackage. The Deps field is
@@ -111,21 +123,19 @@ func (s *Set) DecodeAndValidate(w http.ResponseWriter, r *http.Request, dst Vali
 // the head is genuinely stuck and the client should back off.
 func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 	switch {
-	case errors.Is(err, broker.ErrTopicNotFound):
+	case errors.Is(err, errs.ErrTopicNotFound):
 		s.WriteError(w, http.StatusNotFound, "topic not found")
-	case errors.Is(err, broker.ErrTopicAlreadyExists):
+	case errors.Is(err, errs.ErrTopicAlreadyExists):
 		s.WriteError(w, http.StatusConflict, "topic already exists")
-	case errors.Is(err, consumer.ErrHandleMalformed),
-		errors.Is(err, consumer.ErrHandleTopicMismatch):
+	case errors.Is(err, errs.ErrHandleMalformed),
+		errors.Is(err, errs.ErrHandleTopicMismatch):
 		s.WriteError(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, consumer.ErrHandleHMACMismatch):
-		s.WriteError(w, http.StatusUnauthorized, err.Error())
-	case errors.Is(err, consumer.ErrHandleStale):
+	case errors.Is(err, errs.ErrHandleStale):
 		s.WriteError(w, http.StatusGone, err.Error())
-	case errors.Is(err, consumer.ErrAckedAheadFull):
+	case errors.Is(err, errs.ErrAckedAheadFull):
 		s.WriteError(w, http.StatusServiceUnavailable, err.Error())
-	case errors.Is(err, broker.ErrInvalidArgument),
-		errors.Is(err, broker.ErrPartitionRequired):
+	case errors.Is(err, errs.ErrInvalidArgument),
+		errors.Is(err, errs.ErrPartitionRequired):
 		s.WriteError(w, http.StatusBadRequest, err.Error())
 	default:
 		s.Deps.Logger.Error(op, "err", err)

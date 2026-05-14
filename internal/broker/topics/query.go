@@ -4,16 +4,17 @@ import (
 	"context"
 	"errors"
 
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
 
-// GetTopic maps metastore.ErrNotFound to ErrNotFound. Other errors
+// GetTopic maps errs.ErrNotFound to ErrNotFound. Other errors
 // pass through unchanged.
 func (m *Manager) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
 	t, err := m.metastore.GetTopic(ctx, name)
 	if err != nil {
-		if errors.Is(err, metastore.ErrNotFound) {
+		if errors.Is(err, errs.ErrNotFound) {
 			return topic.Topic{}, ErrNotFound
 		}
 		return topic.Topic{}, err

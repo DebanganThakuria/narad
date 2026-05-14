@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+
+	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 	"strings"
 )
 
@@ -113,12 +115,12 @@ func createSegment(dir string, baseOffset int64) (*segment, error) {
 // writeFrame on partial-write failure truncates back to the pre-write
 // size so recovery doesn't have to resync past a torn tail next
 // startup.
-func (s *segment) writeFrame(records [][]byte, baseOffset int64, codec Codec) (pos int64, n int, err error) {
+func (s *segment) writeFrame(records [][]byte, baseOffset int64, c codec.Codec) (pos int64, n int, err error) {
 	pos, err = s.file.Seek(0, io.SeekEnd)
 	if err != nil {
 		return 0, 0, fmt.Errorf("storage: segment seek: %w", err)
 	}
-	n, err = writeFrame(s.file, records, baseOffset, codec)
+	n, err = writeFrame(s.file, records, baseOffset, c)
 	if err != nil {
 		_ = s.file.Truncate(pos)
 		_, _ = s.file.Seek(pos, io.SeekStart)

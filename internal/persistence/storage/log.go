@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+
+	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 )
 
 type indexEntry struct {
@@ -38,7 +40,7 @@ type indexEntry struct {
 }
 
 type Options struct {
-	Codec Codec
+	Codec codec.Codec
 
 	FlushBytes    int
 	FlushRecords  int
@@ -54,12 +56,12 @@ type Options struct {
 }
 
 func DefaultOptions() Options {
-	codec, err := NewZstdCodec(zstd.SpeedBestCompression)
+	c, err := codec.NewZstdCodec(zstd.SpeedBestCompression)
 	if err != nil {
 		panic(fmt.Sprintf("storage: default zstd codec: %v", err))
 	}
 	return Options{
-		Codec:         codec,
+		Codec:         c,
 		FlushBytes:    1 << 20,
 		FlushRecords:  1000,
 		FlushInterval: 100 * time.Millisecond,
@@ -71,7 +73,7 @@ func DefaultOptions() Options {
 // files with an in-memory buffer in front of the disk.
 type Log struct {
 	dir   string
-	codec Codec
+	codec codec.Codec
 	opts  Options
 
 	// rwmu serializes file writes and segment-list mutations against
@@ -103,7 +105,7 @@ type Log struct {
 
 func NewLog(dir string, opts Options) (*Log, error) {
 	if opts.Codec == nil {
-		opts.Codec = NewNoopCodec()
+		opts.Codec = codec.NewNoopCodec()
 	}
 	if opts.FlushInterval <= 0 {
 		opts.FlushInterval = 100 * time.Millisecond

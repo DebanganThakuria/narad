@@ -9,72 +9,21 @@ import (
 	"time"
 )
 
-// fakeTracker is a minimal in-memory OffsetTracker for unit tests. It
-// records the highest committed offset per (topic, partition) and
-// returns committed+1 from Next.
-type fakeTracker struct {
-	mu     sync.Mutex
-	offset map[string]int64 // "topic:partition" -> last committed
-}
+// -- test helpers --------------------------------------------------------
 
-func newFakeTracker() *fakeTracker {
-	return &fakeTracker{offset: make(map[string]int64)}
-}
-
-func (f *fakeTracker) key(topic string, partition int) string {
-	return topic + ":" + itoa(partition)
-}
-
-func (f *fakeTracker) Next(_ context.Context, topic string, partition int) (int64, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	v, ok := f.offset[f.key(topic, partition)]
-	if !ok {
-		return 0, nil // no commits yet → next is 0
-	}
-	return v + 1, nil
-}
-
-func (f *fakeTracker) Commit(_ context.Context, topic string, partition int, offset int64) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	k := f.key(topic, partition)
-	if cur, ok := f.offset[k]; !ok || offset > cur {
-		f.offset[k] = offset
-	}
-	return nil
-}
-
-func (f *fakeTracker) committed(topic string, partition int) int64 {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.offset[f.key(topic, partition)]
-}
-
-func itoa(n int) string {
-	// avoid strconv import bloat; tests-only
-	if n == 0 {
-		return "0"
-	}
-	var b [20]byte
-	pos := len(b)
-	for n > 0 {
-		pos--
-		b[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[pos:])
-}
-
-func newTestInFlight(maxIF, maxAA int) (*InFlight, *fakeTracker) {
-	tracker := newFakeTracker()
+func newTestInFlight(maxIF, maxAA int) *InFlight {
 	caps := func(_ context.Context, _ string) (Caps, error) {
 		return Caps{MaxInFlight: maxIF, MaxAckedAhead: maxAA}, nil
 	}
-	return NewInFlight(tracker, caps), tracker
+	return NewInFlight(caps, nil) // nil onCommit — pure in-memory for tests
 }
 
-// withClock lets a test inject a fixed-now timeNow function.
+// committedOffset returns the last committed offset (Next - 1).
+// Returns -1 when no messages have been committed yet.
+func committedOffset(f *InFlight, topic string, partition int) int64 {
+	return f.Next(topic, partition) - 1
+}
+
 func withClock(f *InFlight, now int64) {
 	f.timeNow = func() int64 { return now }
 }
@@ -86,23 +35,52 @@ const (
 	testDeepTail = 1_000_000
 )
 
+func mustReserve(t *testing.T, f *InFlight, logTail int64) ReserveResult {
+	t.Helper()
+	r, err := f.ReserveNext(context.Background(), testTopic, testPart, testVT, logTail)
+	if err != nil {
+		t.Fatalf("ReserveNext: %v", err)
+	}
+	if !r.Reserved {
+		t.Fatalf("ReserveNext: expected reservation, got skip=%q", r.SkipReason)
+	}
+	return r
+}
+
+func mustCommit(t *testing.T, f *InFlight, offset, nonce int64) {
+	t.Helper()
+	if err := f.CommitHandle(testTopic, testPart, offset, nonce); err != nil {
+		t.Fatalf("CommitHandle(offset=%d): %v", offset, err)
+	}
+}
+
+// reserveN reserves n messages in order and returns their nonces indexed by offset.
+func reserveN(t *testing.T, f *InFlight, n int) map[int64]int64 {
+	t.Helper()
+	nonces := make(map[int64]int64, n)
+	for range n {
+		r := mustReserve(t, f, testDeepTail)
+		nonces[r.Offset] = r.Nonce
+	}
+	return nonces
+}
+
+// -- tests ---------------------------------------------------------------
+
 func TestReserveSkipsReservedUnexpiredOffset(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	f, _ := newTestInFlight(1024, 1024)
+	f := newTestInFlight(1024, 1024)
 	withClock(f, 1000)
 
-	// First reserve takes offset 0.
 	r1, err := f.ReserveNext(ctx, testTopic, testPart, testVT, testDeepTail)
 	if err != nil || !r1.Reserved || r1.Offset != 0 {
 		t.Fatalf("first reserve: r=%+v err=%v", r1, err)
 	}
-	// Second reserve must skip 0 and take 1.
 	r2, err := f.ReserveNext(ctx, testTopic, testPart, testVT, testDeepTail)
 	if err != nil || !r2.Reserved || r2.Offset != 1 {
 		t.Fatalf("second reserve: r=%+v err=%v", r2, err)
 	}
-	// Third reserve takes 2.
 	r3, err := f.ReserveNext(ctx, testTopic, testPart, testVT, testDeepTail)
 	if err != nil || !r3.Reserved || r3.Offset != 2 {
 		t.Fatalf("third reserve: r=%+v err=%v", r3, err)
@@ -111,232 +89,223 @@ func TestReserveSkipsReservedUnexpiredOffset(t *testing.T) {
 
 func TestReserveSkipsAckedAhead(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	f, _ := newTestInFlight(1024, 1024)
+	f := newTestInFlight(1024, 1024)
 	withClock(f, 1000)
 
-	// Reserve 0, 1, 2.
-	for i := int64(0); i < 3; i++ {
-		r, err := f.ReserveNext(ctx, testTopic, testPart, testVT, testDeepTail)
-		if err != nil || r.Offset != i {
-			t.Fatalf("reserve %d: %+v %v", i, r, err)
+	// Reserve 0, 1, 2 and capture nonces.
+	nonces := reserveN(t, f, 3)
+
+	// Ack offset 2 out-of-order → goes to ackedAhead.
+	mustCommit(t, f, 2, nonces[2])
+
+	// Advance clock past visibility timeout so 0 and 1 expire.
+	withClock(f, 1000+60_000)
+
+	// Reserve should pick 0 (expired), then 1 (expired), skip 2 (ackedAhead), pick 3.
+	for _, want := range []int64{0, 1, 3} {
+		r, err := f.ReserveNext(context.Background(), testTopic, testPart, testVT, 10)
+		if err != nil || !r.Reserved || r.Offset != want {
+			t.Fatalf("post-expiry reserve: got %+v, want offset=%d err=nil", r, want)
 		}
-	}
-	// Ack offset 2 (out-of-order). Goes to ackedAhead.
-	if err := f.Commit(ctx, testTopic, testPart, 2); err != nil {
-		t.Fatalf("commit 2: %v", err)
-	}
-	// Free entries[0] and entries[1] to simulate visibility expiry of 0,1.
-	// Easiest way: advance the clock and re-attempt; but for this test, we
-	// directly clear entries via a fresh shard inspection — not exposed.
-	// Alternative: reserve up to 5 and verify reserve scans past acked-ahead 2.
-	// New reserve with logTail=10 should NOT pick 2 even after vt expiry.
-	withClock(f, 1000+(60_000)) // jump past vt; entries[0],[1],[2] all expired
-	r, err := f.ReserveNext(ctx, testTopic, testPart, testVT, 10)
-	if err != nil {
-		t.Fatalf("reserve after expiry: %v", err)
-	}
-	if !r.Reserved {
-		t.Fatalf("expected reservation; got %+v", r)
-	}
-	// Should have picked 0 (first expired-and-not-acked-ahead). Then we
-	// reserve again and should get 1, then skip 2 (acked-ahead), get 3.
-	if r.Offset != 0 {
-		t.Fatalf("first post-expiry reserve: got %d, want 0", r.Offset)
-	}
-	r, _ = f.ReserveNext(ctx, testTopic, testPart, testVT, 10)
-	if r.Offset != 1 {
-		t.Fatalf("second post-expiry reserve: got %d, want 1", r.Offset)
-	}
-	r, _ = f.ReserveNext(ctx, testTopic, testPart, testVT, 10)
-	if r.Offset != 3 {
-		t.Fatalf("third post-expiry reserve: got %d, want 3 (skipping acked-ahead 2)", r.Offset)
 	}
 }
 
-func TestCommitOutOfOrderInsertsAckedAhead(t *testing.T) {
+func TestCommitOutOfOrderDoesNotAdvanceFrontier(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	f, tracker := newTestInFlight(1024, 1024)
+	f := newTestInFlight(1024, 1024)
 	withClock(f, 1000)
 
-	// Reserve 0..3.
-	for i := int64(0); i < 4; i++ {
-		if _, err := f.ReserveNext(ctx, testTopic, testPart, testVT, testDeepTail); err != nil {
-			t.Fatalf("reserve %d: %v", i, err)
-		}
-	}
-	// Ack 2 first; committed should NOT advance.
-	if err := f.Commit(ctx, testTopic, testPart, 2); err != nil {
-		t.Fatalf("commit 2: %v", err)
-	}
-	if got := tracker.committed(testTopic, testPart); got != 0 {
-		t.Fatalf("committed after ack 2: got %d, want 0", got)
-	}
-	// Ack 3 also out of order.
-	if err := f.Commit(ctx, testTopic, testPart, 3); err != nil {
-		t.Fatalf("commit 3: %v", err)
-	}
-	if got := tracker.committed(testTopic, testPart); got != 0 {
-		t.Fatalf("committed after ack 3: got %d, want 0", got)
+	nonces := reserveN(t, f, 4)
+
+	// Ack 2 and 3 out-of-order — frontier must stay at -1.
+	mustCommit(t, f, 2, nonces[2])
+	mustCommit(t, f, 3, nonces[3])
+
+	if got := committedOffset(f, testTopic, testPart); got != -1 {
+		t.Fatalf("committed after out-of-order acks: got %d, want -1", got)
 	}
 }
 
 func TestCommitFillsGapAndWalksForward(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	f, tracker := newTestInFlight(1024, 1024)
+	f := newTestInFlight(1024, 1024)
 	withClock(f, 1000)
 
-	for i := int64(0); i < 5; i++ {
-		if _, err := f.ReserveNext(ctx, testTopic, testPart, testVT, testDeepTail); err != nil {
-			t.Fatalf("reserve %d: %v", i, err)
-		}
-	}
-	// Out-of-order: ack 2, 4, 1.
+	nonces := reserveN(t, f, 5) // offsets 0..4
+
+	// Out-of-order: ack 2, 4, 1. Frontier stays at -1.
 	for _, off := range []int64{2, 4, 1} {
-		if err := f.Commit(ctx, testTopic, testPart, off); err != nil {
-			t.Fatalf("commit %d: %v", off, err)
-		}
+		mustCommit(t, f, off, nonces[off])
 	}
-	if got := tracker.committed(testTopic, testPart); got != 0 {
-		t.Fatalf("committed before head ack: got %d, want 0", got)
+	if got := committedOffset(f, testTopic, testPart); got != -1 {
+		t.Fatalf("before head ack: got %d, want -1", got)
 	}
-	// Now ack 0 — should walk through 1, 2 (both acked-ahead) but stop
-	// at 3 (still in flight). Final committed = 2.
-	// Note: tracker stores last-committed offset; semantic is "committed+1 = next".
-	// Walk: advance starts at 0, then 1∈ahead → 1, 2∈ahead → 2, 3∉ahead → stop.
-	// So tracker stores 2 (last committed offset).
-	if err := f.Commit(ctx, testTopic, testPart, 0); err != nil {
-		t.Fatalf("commit 0: %v", err)
+
+	// Ack 0 — walks through acked-ahead 1 and 2; stops at 3 (still in-flight).
+	mustCommit(t, f, 0, nonces[0])
+	if got := committedOffset(f, testTopic, testPart); got != 2 {
+		t.Fatalf("after first walk: got %d, want 2", got)
 	}
-	if got := tracker.committed(testTopic, testPart); got != 2 {
-		t.Fatalf("committed after walk: got %d, want 2", got)
-	}
-	// Ack 3 — should walk through 4 also.
-	if err := f.Commit(ctx, testTopic, testPart, 3); err != nil {
-		t.Fatalf("commit 3: %v", err)
-	}
-	if got := tracker.committed(testTopic, testPart); got != 4 {
-		t.Fatalf("committed after second walk: got %d, want 4", got)
+
+	// Ack 3 — walks through acked-ahead 4.
+	mustCommit(t, f, 3, nonces[3])
+	if got := committedOffset(f, testTopic, testPart); got != 4 {
+		t.Fatalf("after second walk: got %d, want 4", got)
 	}
 }
 
 func TestReserveInFlightCap(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	f, _ := newTestInFlight(3, 1024)
+	f := newTestInFlight(3, 1024)
 	withClock(f, 1000)
 
-	for i := int64(0); i < 3; i++ {
+	for i := range int64(3) {
 		r, err := f.ReserveNext(ctx, testTopic, testPart, testVT, testDeepTail)
 		if err != nil || !r.Reserved {
-			t.Fatalf("reserve %d at boundary: %+v %v", i, r, err)
+			t.Fatalf("reserve %d: %+v err=%v", i, r, err)
 		}
 	}
 	r, err := f.ReserveNext(ctx, testTopic, testPart, testVT, testDeepTail)
 	if err != nil {
-		t.Fatalf("reserve over cap: err=%v", err)
+		t.Fatalf("over cap: err=%v", err)
 	}
-	if r.Reserved {
-		t.Fatalf("expected cap-skip, got reserved %+v", r)
-	}
-	if r.SkipReason != "cap" {
-		t.Fatalf("SkipReason: got %q, want cap", r.SkipReason)
+	if r.Reserved || r.SkipReason != "cap" {
+		t.Fatalf("expected cap-skip, got %+v", r)
 	}
 }
 
-func TestCommitAckedAheadCapRejects(t *testing.T) {
+func TestCommitHandleAckedAheadCapRejects(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	f, _ := newTestInFlight(1024, 2)
+	f := newTestInFlight(1024, 2) // max 2 out-of-order acks
 	withClock(f, 1000)
 
-	// Reserve some so commits are valid.
-	for i := int64(0); i < 5; i++ {
-		if _, err := f.ReserveNext(ctx, testTopic, testPart, testVT, testDeepTail); err != nil {
-			t.Fatalf("reserve %d: %v", i, err)
-		}
+	nonces := reserveN(t, f, 5)
+
+	// Fill the ackedAhead set.
+	mustCommit(t, f, 2, nonces[2])
+	mustCommit(t, f, 3, nonces[3])
+
+	// Third out-of-order ack must be rejected.
+	if err := f.CommitHandle(testTopic, testPart, 4, nonces[4]); !errors.Is(err, ErrAckedAheadFull) {
+		t.Fatalf("want ErrAckedAheadFull, got %v", err)
 	}
-	// Fill ackedAhead with 2, 3.
-	if err := f.Commit(ctx, testTopic, testPart, 2); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Commit(ctx, testTopic, testPart, 3); err != nil {
-		t.Fatal(err)
-	}
-	// Now try to ack 4 — cap is full, must reject.
-	err := f.Commit(ctx, testTopic, testPart, 4)
-	if !errors.Is(err, ErrAckedAheadFull) {
-		t.Fatalf("expected ErrAckedAheadFull, got %v", err)
-	}
-	// Snapshot must show ackedAhead size still 2 (no leak from rejected insert).
+
+	// ackedAhead must not have grown (no leak from rejected insert).
 	_, aa := f.Snapshot(testTopic, testPart)
 	if aa != 2 {
-		t.Fatalf("ackedAhead leaked: got %d, want 2", aa)
+		t.Fatalf("ackedAhead size leaked: got %d, want 2", aa)
 	}
 }
 
-func TestCheckHandleStaleOnReReserve(t *testing.T) {
+func TestCommitHandleStaleNonce(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	f, _ := newTestInFlight(1024, 1024)
+	f := newTestInFlight(1024, 1024)
 	withClock(f, 1000)
 
-	// First reserve at offset 0.
-	r1, err := f.ReserveNext(ctx, testTopic, testPart, testVT, testDeepTail)
-	if err != nil || r1.Offset != 0 {
-		t.Fatalf("reserve: %+v %v", r1, err)
-	}
-	// Advance clock past VT — entry expires.
+	r1 := mustReserve(t, f, testDeepTail)
+
+	// Advance clock past VT so offset 0 becomes eligible for re-reservation.
 	withClock(f, 1000+60_000)
-	// Second reserve at offset 0 (re-reserved with new nonce).
-	r2, err := f.ReserveNext(ctx, testTopic, testPart, testVT, testDeepTail)
-	if err != nil || r2.Offset != 0 {
-		t.Fatalf("re-reserve: %+v %v", r2, err)
-	}
+	r2 := mustReserve(t, f, testDeepTail)
+
 	if r2.Nonce == r1.Nonce {
-		t.Fatalf("expected fresh nonce on re-reserve; got same %d", r1.Nonce)
+		t.Fatalf("nonce must change on re-reservation; both = %d", r1.Nonce)
 	}
-	// Original handle (r1.Nonce) must now fail CheckHandle.
-	if err := f.CheckHandle(ctx, testTopic, testPart, r1.Offset, r1.Nonce); !errors.Is(err, ErrHandleStale) {
-		t.Fatalf("stale handle CheckHandle: got %v, want ErrHandleStale", err)
+
+	// Old nonce is rejected.
+	if err := f.CommitHandle(testTopic, testPart, r1.Offset, r1.Nonce); !errors.Is(err, ErrHandleStale) {
+		t.Fatalf("stale nonce: want ErrHandleStale, got %v", err)
 	}
-	// Fresh handle (r2.Nonce) should pass.
-	if err := f.CheckHandle(ctx, testTopic, testPart, r2.Offset, r2.Nonce); err != nil {
-		t.Fatalf("fresh handle CheckHandle: %v", err)
+	// New nonce succeeds.
+	if err := f.CommitHandle(testTopic, testPart, r2.Offset, r2.Nonce); err != nil {
+		t.Fatalf("fresh nonce: %v", err)
+	}
+}
+
+func TestOnCommitCalledWhenFrontierAdvances(t *testing.T) {
+	t.Parallel()
+
+	var called []int64
+	caps := func(_ context.Context, _ string) (Caps, error) {
+		return Caps{MaxInFlight: 1024, MaxAckedAhead: 1024}, nil
+	}
+	onCommit := func(_ string, _ int, offset int64) {
+		called = append(called, offset)
+	}
+	f := NewInFlight(caps, onCommit)
+	withClock(f, 1000)
+
+	nonces := reserveN(t, f, 3)
+
+	mustCommit(t, f, 0, nonces[0]) // frontier → 0; onCommit(0)
+	mustCommit(t, f, 2, nonces[2]) // out-of-order; no onCommit
+	mustCommit(t, f, 1, nonces[1]) // frontier → 1 then walks to 2; onCommit(2)
+
+	if len(called) != 2 {
+		t.Fatalf("onCommit called %d times, want 2; values=%v", len(called), called)
+	}
+	if called[0] != 0 || called[1] != 2 {
+		t.Fatalf("onCommit values: got %v, want [0 2]", called)
+	}
+}
+
+func TestExpiredEntriesDoNotBlockCap(t *testing.T) {
+	t.Parallel()
+	// maxInFlight = 2. Reserve 2 messages, let them expire without acking.
+	// Without the heap, len(entries)=2 still counts toward the cap and
+	// new consumers would get "cap" forever. With the heap, purgeExpired
+	// removes them and new consumers get fresh reservations.
+	f := newTestInFlight(2, 1024)
+	withClock(f, 1000)
+
+	mustReserve(t, f, testDeepTail) // offset 0
+	mustReserve(t, f, testDeepTail) // offset 1
+
+	// Advance clock past visibility timeout — both entries expire.
+	withClock(f, 1000+60_000)
+
+	// Without the heap fix this would return SkipReason="cap".
+	r, err := f.ReserveNext(context.Background(), testTopic, testPart, testVT, testDeepTail)
+	if err != nil {
+		t.Fatalf("ReserveNext after expiry: %v", err)
+	}
+	if !r.Reserved {
+		t.Fatalf("expired entries blocked cap: SkipReason=%q", r.SkipReason)
+	}
+	if r.Offset != 0 {
+		t.Fatalf("expected offset 0 (re-reserved), got %d", r.Offset)
 	}
 }
 
 func TestConcurrentReserveAcrossPartitions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	f, _ := newTestInFlight(1024, 1024)
+	f := newTestInFlight(1024, 1024)
 
-	// 8 partitions × 100 reservations each, all in parallel. Race
-	// detector catches anything corrupt.
 	const partitions = 8
 	const perPart = 100
+
 	var wg sync.WaitGroup
 	var collisions atomic.Int64
+
 	type seen struct {
 		mu   sync.Mutex
 		offs map[int64]struct{}
 	}
 	seenMap := make([]*seen, partitions)
-	for i := 0; i < partitions; i++ {
+	for i := range seenMap {
 		seenMap[i] = &seen{offs: make(map[int64]struct{})}
 	}
 
-	for p := 0; p < partitions; p++ {
-		p := p
+	for p := range partitions {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 0; i < perPart; i++ {
+			for range perPart {
 				r, err := f.ReserveNext(ctx, testTopic, p, testVT, testDeepTail)
 				if err != nil || !r.Reserved {
-					t.Errorf("p=%d i=%d: r=%+v err=%v", p, i, r, err)
+					t.Errorf("p=%d: r=%+v err=%v", p, r, err)
 					return
 				}
 				seenMap[p].mu.Lock()
@@ -351,7 +320,7 @@ func TestConcurrentReserveAcrossPartitions(t *testing.T) {
 	wg.Wait()
 
 	if c := collisions.Load(); c != 0 {
-		t.Fatalf("got %d duplicate reservations", c)
+		t.Fatalf("got %d duplicate reservations across goroutines", c)
 	}
 	for p, s := range seenMap {
 		if len(s.offs) != perPart {

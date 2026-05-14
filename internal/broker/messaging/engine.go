@@ -22,8 +22,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/debanganthakuria/narad/internal/broker/errs"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -37,9 +37,9 @@ import (
 // use. The broker package re-exports the underlying errs.* values
 // publicly.
 var (
-	ErrTopicNotFound     = errs.TopicNotFound
-	ErrInvalid           = errs.InvalidArgument
-	ErrPartitionRequired = errs.PartitionRequired
+	ErrTopicNotFound     = errs.ErrTopicNotFound
+	ErrInvalid           = errs.ErrInvalidArgument
+	ErrPartitionRequired = errs.ErrPartitionRequired
 )
 
 // ConsumeOpts is the input for Engine.Consume.
@@ -99,7 +99,7 @@ func NewEngine(
 func (e *Engine) getTopic(ctx context.Context, name string) (topic.Topic, error) {
 	t, err := e.metastore.GetTopic(ctx, name)
 	if err != nil {
-		if errors.Is(err, metastore.ErrNotFound) {
+		if errors.Is(err, errs.ErrNotFound) {
 			return topic.Topic{}, ErrTopicNotFound
 		}
 		return topic.Topic{}, fmt.Errorf("messaging: get topic: %w", err)

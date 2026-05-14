@@ -6,13 +6,15 @@ import (
 	"encoding/hex"
 	"net/http"
 	"time"
-
-	"github.com/debanganthakuria/narad/internal/common"
 )
 
 // HeaderRequestID is set on every response carrying the request's
 // correlation ID.
 const HeaderRequestID = "X-Request-ID"
+
+type contextKey int
+
+const requestIDKey contextKey = iota
 
 // RequestID generates (or accepts) a correlation ID and propagates it
 // via both the response header and the request context.
@@ -24,7 +26,7 @@ func RequestID() Middleware {
 				id = newRequestID()
 			}
 			w.Header().Set(HeaderRequestID, id)
-			ctx := context.WithValue(r.Context(), common.RequestID, id)
+			ctx := context.WithValue(r.Context(), requestIDKey, id)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -32,7 +34,7 @@ func RequestID() Middleware {
 
 // requestIDFrom returns the correlation ID from ctx, or "" if absent.
 func requestIDFrom(ctx context.Context) string {
-	if v, ok := ctx.Value(common.RequestID).(string); ok {
+	if v, ok := ctx.Value(requestIDKey).(string); ok {
 		return v
 	}
 	return ""
@@ -41,9 +43,6 @@ func requestIDFrom(ctx context.Context) string {
 func newRequestID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// rand.Read failing is essentially impossible on a healthy
-		// system; fall back to a timestamp-derived ID rather than
-		// panicking the request.
 		return "req-" + time.Now().UTC().Format("20060102T150405.000000000Z")
 	}
 	return hex.EncodeToString(b[:])

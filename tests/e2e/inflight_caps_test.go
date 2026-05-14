@@ -2,7 +2,6 @@ package e2e
 
 import (
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -96,25 +95,25 @@ func TestOutOfOrderAckCommitAdvancesContiguous(t *testing.T) {
 	}
 }
 
-// TestAckTamperedHandleReturns401 verifies HMAC validation: a
-// hand-forged handle cannot ack any message.
-func TestAckTamperedHandleReturns401(t *testing.T) {
+// TestAckTamperedHandleReturns400 verifies that a corrupted receipt
+// handle is rejected. The handle format is base64url(json({t,p,o,n}))
+// with no HMAC — corruption causes a decode failure → 400.
+func TestAckTamperedHandleReturns400(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
 	env.createTopic("tamper", 1, 2, int64(0))
 	env.produce("tamper", "k", `{}`)
-	msg := env.consume("/v1/topics/tamper/consume")
 
-	// Flip a byte in the payload portion (before the '.').
-	dot := strings.IndexByte(msg.ReceiptHandle, '.')
-	if dot <= 0 {
-		t.Fatal("handle missing '.' separator")
+	// Flip a byte inside the base64 to produce invalid encoding.
+	msg := env.consume("/v1/topics/tamper/consume")
+	if len(msg.ReceiptHandle) < 4 {
+		t.Fatalf("handle too short: %q", msg.ReceiptHandle)
 	}
 	tampered := []byte(msg.ReceiptHandle)
-	tampered[dot-1] ^= 1
+	tampered[2] ^= 0xFF // corrupt the middle of the base64 string
 	resp := env.post("/v1/topics/tamper/ack", map[string]any{"receipt_handle": string(tampered)})
-	expectStatus(t, resp, http.StatusUnauthorized)
+	expectStatus(t, resp, http.StatusBadRequest)
 }
 
 // TestAckReusedHandleReturns410 covers a handle whose offset has
