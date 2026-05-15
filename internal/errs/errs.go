@@ -70,13 +70,13 @@ var (
 // -- schema registry -----------------------------------------------------
 
 var (
-	ErrSchemaNotFound    = errors.New("schema not registered for topic")
+	ErrSchemaNotFound     = errors.New("schema not registered for topic")
 	ErrSchemaIncompatible = errors.New("schema incompatible with previous version")
 )
 
 // -- input validation ----------------------------------------------------
 
 var (
-	ErrInvalidArgument  = errors.New("invalid argument")
+	ErrInvalidArgument   = errors.New("invalid argument")
 	ErrPartitionRequired = errors.New("partition required for replay-mode consume")
 )

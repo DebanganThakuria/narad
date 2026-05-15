@@ -120,7 +120,6 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 				return
 			}
 		}
-
 		s.WriteJSON(w, http.StatusOK, t)
 	}
 }

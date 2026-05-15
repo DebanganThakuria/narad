@@ -1,6 +1,7 @@
 package messaging
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -41,7 +42,9 @@ func Produce(s *handlers.Set) http.HandlerFunc {
 		}
 
 		var req produceRequest
-		if err := json.Unmarshal(body, &req); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
 			s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
 		}

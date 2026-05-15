@@ -21,8 +21,8 @@ import (
 	"log/slog"
 
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
-	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/consumer"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 )

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/debanganthakuria/narad/internal/topic"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 )
 
 // listResponse mirrors the JSON shape returned by GET /v1/topics.

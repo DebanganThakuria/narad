@@ -10,7 +10,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/debanganthakuria/narad/internal/observability/metrics"
+	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 )
 
 // TestMetrics_EndpointDisabledByDefault verifies that an env without
@@ -160,17 +160,17 @@ func TestMetrics_PollerUpdatesLagAndInventory(t *testing.T) {
 // parsing the prometheus exposition format) and return the value of
 // the metric matching the supplied labels. Fails the test if the
 // metric is absent.
-func readCounter(t *testing.T, env *testEnv, name string, want map[string]string) float64 {
+func readCounter(t *testing.T, env *env, name string, want map[string]string) float64 {
 	t.Helper()
 	return readMetric(t, env, name, want, "counter")
 }
 
-func readGauge(t *testing.T, env *testEnv, name string, want map[string]string) float64 {
+func readGauge(t *testing.T, env *env, name string, want map[string]string) float64 {
 	t.Helper()
 	return readMetric(t, env, name, want, "gauge")
 }
 
-func readMetric(t *testing.T, env *testEnv, name string, want map[string]string, kind string) float64 {
+func readMetric(t *testing.T, env *env, name string, want map[string]string, kind string) float64 {
 	t.Helper()
 	mfs, err := env.Registry.Gather()
 	if err != nil {

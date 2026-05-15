@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/debanganthakuria/narad/internal/topic"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 )
 
 func TestGetTopic_ReturnsDetailsAndStats(t *testing.T) {

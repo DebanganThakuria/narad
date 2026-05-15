@@ -167,14 +167,18 @@ func (s *Store) ListTopics(_ context.Context, opts ListOptions) ([]topic.Topic, 
 		c := tx.Bucket(bucketTopics).Cursor()
 		var k, v []byte
 		if opts.PageToken != "" {
-			// Token is the first item of the next page — seek to it, not past it.
+			// Token is the last item of the previous page — seek to it and step past.
 			k, v = c.Seek([]byte(opts.PageToken))
+			if k != nil {
+				k, v = c.Next()
+			}
 		} else {
 			k, v = c.First()
 		}
 		for ; k != nil; k, v = c.Next() {
 			if opts.Limit > 0 && len(out) >= opts.Limit {
-				nextToken = string(k)
+				// nextToken is the last item of the current page, not the first of next.
+				nextToken = out[len(out)-1].Name
 				break
 			}
 			var t topic.Topic

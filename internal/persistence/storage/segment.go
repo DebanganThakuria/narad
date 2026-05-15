@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
-	"strings"
 )
 
 // segment is one file in a partition's directory of segment files.

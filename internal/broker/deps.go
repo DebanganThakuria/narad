@@ -49,3 +49,13 @@ type TopicConfig struct {
 	DefaultMaxInFlightPerPartition   int64
 	DefaultMaxAckedAheadPerPartition int64
 }
+
+// TopicPolicy is a convenience configuration bag for tests and
+// integration harnesses that want to override topic defaults without
+// dealing with raw millisecond fields.
+type TopicPolicy struct {
+	DefaultPartitions        int
+	MaxPartitions            int
+	DefaultReplicationFactor int
+	DefaultRetentionMs       int64
+}

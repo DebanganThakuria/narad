@@ -1,6 +1,7 @@
 package messaging
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -32,7 +33,9 @@ func Ack(s *handlers.Set) http.HandlerFunc {
 		}
 
 		var req ackRequest
-		if err := json.Unmarshal(body, &req); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
 			s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
 		}

@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/debanganthakuria/narad/internal/broker"
-	"github.com/debanganthakuria/narad/internal/topic"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 )
 
 func TestAlterTopic_IncreasePartitions(t *testing.T) {
@@ -23,9 +23,6 @@ func TestAlterTopic_IncreasePartitions(t *testing.T) {
 		t.Errorf("partitions: got %d want 6", got.Partitions)
 	}
 
-	// Verify persisted. d.Topic.Partitions is the count; d.Partitions
-	// (the explicit field on Details) shadows that with the slice of
-	// PartitionStats.
 	resp = getJSON(t, env.Server.URL+"/v1/topics/alter")
 	var d topic.Details
 	decodeJSON(t, resp, &d)
@@ -60,7 +57,7 @@ func TestAlterTopic_RejectsAboveMaxPartitions(t *testing.T) {
 		DefaultPartitions:        2,
 		MaxPartitions:            8,
 		DefaultReplicationFactor: 2,
-		DefaultRetention:         topic.Retention{MaxAgeMs: 1000},
+		DefaultRetentionMs:       1000,
 	}))
 	mustCreateTopic(t, env, createTopicReq{Name: "cap", Partitions: 4})
 
@@ -71,75 +68,49 @@ func TestAlterTopic_RejectsAboveMaxPartitions(t *testing.T) {
 
 func TestAlterTopic_UpdateRetention(t *testing.T) {
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{
-		Name:      "retention",
-		Retention: topic.Retention{MaxAgeMs: 60_000, MaxBytes: 1024},
-	})
+	mustCreateTopic(t, env, createTopicReq{Name: "retention", RetentionMs: 60_000})
 
 	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/retention",
-		map[string]any{
-			"retention": map[string]any{
-				"max_age_ms": 7_200_000,
-				"max_bytes":  524_288_000,
-			},
-		})
+		map[string]any{"retention_ms": int64(7_200_000)})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: got %d body=%s", resp.StatusCode, readBody(resp))
 	}
 	var got topic.Topic
 	decodeJSON(t, resp, &got)
-
-	if got.Retention.MaxAgeMs != 7_200_000 {
-		t.Errorf("max_age_ms: got %d want 7200000", got.Retention.MaxAgeMs)
-	}
-	if got.Retention.MaxBytes != 524_288_000 {
-		t.Errorf("max_bytes: got %d want 524288000", got.Retention.MaxBytes)
+	if got.RetentionMs != 7_200_000 {
+		t.Errorf("retention_ms: got %d want 7200000", got.RetentionMs)
 	}
 }
 
 // TestAlterTopic_RetentionUpdateReopensPartitionLogs verifies that a
-// retention update doesn't break the partition log cache. The broker
-// closes cached logs on update; the next produce must succeed by
-// reopening with the new bounds.
+// retention update doesn't break the partition log cache.
 func TestAlterTopic_RetentionUpdateReopensPartitionLogs(t *testing.T) {
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "reopen", Partitions: 1})
 
-	// Open the partition log via a produce.
 	mustProduce(t, env, "reopen", "k", map[string]int{"v": 1})
 
-	// PATCH retention — should close cached logs.
 	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/reopen",
-		map[string]any{"retention": map[string]any{"max_age_ms": 10_000}})
+		map[string]any{"retention_ms": int64(10_000)})
 	expectStatus(t, resp, http.StatusOK)
 
-	// Subsequent produce exercises the reopen path.
 	mustProduce(t, env, "reopen", "k", map[string]int{"v": 2})
 }
 
-func TestAlterTopic_RetentionPartialDefaulting(t *testing.T) {
+func TestAlterTopic_RetentionDefaultsWhenZero(t *testing.T) {
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{
-		Name:      "partial",
-		Retention: topic.Retention{MaxAgeMs: 60_000, MaxBytes: 4096},
-	})
+	mustCreateTopic(t, env, createTopicReq{Name: "default-ret", RetentionMs: 60_000})
 
-	// Update only MaxBytes; MaxAgeMs zero → resolveRetention falls
-	// back to the policy default. Check the persisted value matches
-	// the env's default (24h = 86_400_000 ms).
-	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/partial",
-		map[string]any{"retention": map[string]any{"max_bytes": 8192}})
+	// Sending retention_ms=0 should fall back to the broker default.
+	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/default-ret",
+		map[string]any{"retention_ms": int64(0)})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: got %d body=%s", resp.StatusCode, readBody(resp))
 	}
 	var got topic.Topic
 	decodeJSON(t, resp, &got)
-
-	if got.Retention.MaxBytes != 8192 {
-		t.Errorf("max_bytes: got %d want 8192", got.Retention.MaxBytes)
-	}
-	if got.Retention.MaxAgeMs != int64(24*60*60*1000) {
-		t.Errorf("max_age_ms: got %d want 86400000 (24h policy default)", got.Retention.MaxAgeMs)
+	if got.RetentionMs != int64(7*24*60*60*1000) {
+		t.Errorf("retention_ms: got %d want %d (7-day env default)", got.RetentionMs, int64(7*24*60*60*1000))
 	}
 }
 
@@ -148,19 +119,7 @@ func TestAlterTopic_RejectsNegativeRetention(t *testing.T) {
 	mustCreateTopic(t, env, createTopicReq{Name: "neg"})
 
 	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/neg",
-		map[string]any{"retention": map[string]any{"max_age_ms": -100}})
-	expectStatus(t, resp, http.StatusBadRequest)
-}
-
-func TestAlterTopic_RejectsBothFields(t *testing.T) {
-	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "both"})
-
-	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/both",
-		map[string]any{
-			"partitions": 8,
-			"retention":  map[string]any{"max_age_ms": 1000},
-		})
+		map[string]any{"retention_ms": int64(-100)})
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/errs"
 )
 
 // IncreaseTopicPartitions raises the partition count of an existing

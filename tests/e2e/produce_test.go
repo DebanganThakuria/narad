@@ -157,7 +157,10 @@ func TestProduce_ConcurrentProducersAssignUniqueOffsets(t *testing.T) {
 		totalExpect = writers * perWriter
 	)
 
-	type slot struct{ p int; o int64 }
+	type slot struct {
+		p int
+		o int64
+	}
 	results := make(chan slot, totalExpect)
 
 	var wg sync.WaitGroup

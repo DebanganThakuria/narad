@@ -23,6 +23,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
+	obsmetrics "github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
 	"github.com/debanganthakuria/narad/internal/platform/replication"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
@@ -69,11 +70,13 @@ type env struct {
 	t      *testing.T
 	dir    string
 	broker broker.Broker
-	server *httptest.Server
+	Broker broker.Broker
+	Server *httptest.Server
 	client *http.Client
 	ms     metastore.Metastore
 
-	reg *prometheus.Registry // non-nil only when metrics:true
+	Registry *prometheus.Registry // non-nil only when metrics:true
+	Metrics  *obsmetrics.Metrics  // non-nil only when metrics:true
 }
 
 func newEnv(t *testing.T, opts envOpts) *env {
@@ -110,9 +113,13 @@ func newEnv(t *testing.T, opts envOpts) *env {
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	var reg *prometheus.Registry
+	var (
+		reg *prometheus.Registry
+		m   *obsmetrics.Metrics
+	)
 	if opts.metrics {
 		reg = prometheus.NewRegistry()
+		m = obsmetrics.New(reg)
 	}
 
 	resolveCaps := func(_ context.Context, topicName string) (consumer.Caps, error) {
@@ -149,7 +156,7 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		ConsumerOffsets: consumer.NewInFlight(resolveCaps, nil),
 		Replicator:      replication.NewLocal(),
 		Logger:          log,
-		Metrics:         nil,
+		Metrics:         m,
 	})
 	if err != nil {
 		t.Fatalf("broker: %v", err)
@@ -161,29 +168,31 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		MaxConsumeWait: opts.maxConsumeWait,
 	})
 
-	router := httpserver.NewRouter(h, log, nil, reg)
+	router := httpserver.NewRouter(h, log, m, reg)
 	ts := httptest.NewServer(router)
 
 	return &env{
-		t:      t,
-		dir:    opts.dataDir,
-		broker: br,
-		server: ts,
-		client: ts.Client(),
-		ms:     ms,
-		reg:    reg,
+		t:        t,
+		dir:      opts.dataDir,
+		broker:   br,
+		Broker:   br,
+		Server:   ts,
+		client:   ts.Client(),
+		ms:       ms,
+		Registry: reg,
+		Metrics:  m,
 	}
 }
 
 func (e *env) close() {
-	e.server.Close()
+	e.Server.Close()
 	_ = e.broker.Close()
 	_ = e.ms.Close()
 }
 
 // ---- request helpers -------------------------------------------------------
 
-func (e *env) url(path string) string { return e.server.URL + path }
+func (e *env) url(path string) string { return e.Server.URL + path }
 
 func (e *env) post(path string, body any) *http.Response {
 	e.t.Helper()

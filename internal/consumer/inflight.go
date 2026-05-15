@@ -24,10 +24,10 @@ type expiryEntry struct {
 // expiryHeap is a min-heap ordered by expiresAtUnixMs.
 type expiryHeap []expiryEntry
 
-func (h expiryHeap) Len() int            { return len(h) }
-func (h expiryHeap) Less(i, j int) bool  { return h[i].expiresAtUnixMs < h[j].expiresAtUnixMs }
-func (h expiryHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *expiryHeap) Push(x any)         { *h = append(*h, x.(expiryEntry)) }
+func (h expiryHeap) Len() int           { return len(h) }
+func (h expiryHeap) Less(i, j int) bool { return h[i].expiresAtUnixMs < h[j].expiresAtUnixMs }
+func (h expiryHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *expiryHeap) Push(x any)        { *h = append(*h, x.(expiryEntry)) }
 func (h *expiryHeap) Pop() any {
 	old := *h
 	n := len(old)
@@ -72,7 +72,7 @@ type partitionShard struct {
 	mu            sync.Mutex
 	committed     int64 // last committed offset; -1 = none committed yet
 	entries       map[int64]reservation
-	expiry        expiryHeap   // min-heap by expiresAtUnixMs for proactive eviction
+	expiry        expiryHeap // min-heap by expiresAtUnixMs for proactive eviction
 	ackedAhead    map[int64]struct{}
 	nonceSeq      atomic.Int64
 	maxInFlight   int
