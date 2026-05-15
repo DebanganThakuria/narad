@@ -21,18 +21,20 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"github.com/debanganthakuria/narad/internal/broker"
-	"github.com/debanganthakuria/narad/internal/config"
+	"github.com/debanganthakuria/narad/internal/cluster"
+	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/consumer"
-	"github.com/debanganthakuria/narad/internal/httpserver"
-	"github.com/debanganthakuria/narad/internal/httpserver/handlers"
-	"github.com/debanganthakuria/narad/internal/metastore"
-	"github.com/debanganthakuria/narad/internal/observability/logger"
-	"github.com/debanganthakuria/narad/internal/observability/metrics"
-	"github.com/debanganthakuria/narad/internal/partition"
-	"github.com/debanganthakuria/narad/internal/replication"
-	"github.com/debanganthakuria/narad/internal/schema"
-	"github.com/debanganthakuria/narad/internal/storage"
-	"github.com/debanganthakuria/narad/internal/topic"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
+	"github.com/debanganthakuria/narad/internal/platform/config"
+	"github.com/debanganthakuria/narad/internal/platform/observability/logger"
+	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
+	"github.com/debanganthakuria/narad/internal/platform/partition"
+	"github.com/debanganthakuria/narad/internal/platform/replication"
+	"github.com/debanganthakuria/narad/internal/platform/schema"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
 func runServe(args []string) error {
@@ -50,17 +52,22 @@ func runServe(args []string) error {
 
 	reg, m := buildMetrics()
 
-	if err := os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil {
+	if err = os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil { // idempotent dir creation
 		return fmt.Errorf("data dir: %w", err)
 	}
 
-	ms, err := metastore.NewSQLiteStore(filepath.Join(cfg.Storage.DataDir, "/metastore/metadata.db"))
+	nodeID, _ := os.Hostname()
+	ms, err := metastore.New(metastore.Config{
+		NodeID:   nodeID,
+		DataDir:  filepath.Join(cfg.Storage.DataDir, "metastore"),
+		BindAddr: cfg.Cluster.Addr,
+	})
 	if err != nil {
 		return fmt.Errorf("metastore: %w", err)
 	}
 	defer closeWithLog(log, "metastore", ms.Close)
 
-	br, err := buildBroker(cfg, ms, m, log)
+	br, offsets, err := buildBroker(cfg, ms, m, log)
 	if err != nil {
 		return err
 	}
@@ -69,33 +76,47 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Start cluster background loops.
+	hb := controller.NewHeartbeater(ms, metastore.Member{
+		ID:     nodeID,
+		Addr:   cfg.HTTP.Addr,
+		Status: metastore.MemberAlive,
+	}, 5*time.Second)
+	ctrl := controller.New(ms, controller.Config{})
+	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin())
+
 	var wg sync.WaitGroup
-	if cfg.Debug.PProfAddr != "" {
-		wg.Go(func() {
-			if err := httpserver.RunPProf(ctx, cfg.Debug.PProfAddr, log); err != nil {
-				log.Error("pprof server", "err", err)
-			}
-		})
-	}
+	wg.Go(func() { hb.Run(ctx) })
+	wg.Go(func() { ctrl.Run(ctx) })
+	wg.Go(func() { offsets.RunPurger(ctx, time.Second) })
+	wg.Go(func() {
+		if pprofErr := http.ListenAndServe(":6060", nil); pprofErr != nil {
+			log.Error("failed to start pprof", "err", pprofErr)
+		}
+	})
 
 	poller := metrics.NewPoller(m, br, log)
 	wg.Go(func() { poller.Run(ctx) })
 
-	log.Info("narad serve starting",
+	srv := buildAPIServer(cfg, br, router, m, reg, log)
+
+	// Capture boot time
+	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())
+
+	if err = srv.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("server: %w", err)
+	}
+
+	log.Info("narad serve started",
 		"addr", cfg.HTTP.Addr,
 		"cluster_addr", cfg.Cluster.Addr,
 		"data_dir", cfg.Storage.DataDir,
-		"pprof_addr", cfg.Debug.PProfAddr,
 		"version", versionString())
 
-	srv := buildAPIServer(cfg, br, m, reg, log)
-	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())
-
-	if err := srv.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("server: %w", err)
-	}
 	wg.Wait()
+
 	log.Info("narad serve stopped")
+
 	return nil
 }
 
@@ -125,6 +146,29 @@ type serveFlags struct {
 	logLevel    string
 	logFormat   string
 	pprofAddr   string
+}
+
+// applyTo overlays CLI-flag values onto cfg. Only non-zero fields take
+// effect, preserving values from the config file and environment.
+func (f *serveFlags) applyTo(cfg *config.Config) {
+	if f.port != 0 {
+		cfg.HTTP.Addr = ":" + strconv.Itoa(f.port)
+	}
+	if f.addr != "" {
+		cfg.HTTP.Addr = f.addr
+	}
+	if f.clusterPort != 0 {
+		cfg.Cluster.Addr = ":" + strconv.Itoa(f.clusterPort)
+	}
+	if f.dataDir != "" {
+		cfg.Storage.DataDir = f.dataDir
+	}
+	if f.logLevel != "" {
+		cfg.Log.Level = f.logLevel
+	}
+	if f.logFormat != "" {
+		cfg.Log.Format = f.logFormat
+	}
 }
 
 // loadServeConfig parses CLI flags, loads the config (file + env), and
@@ -164,75 +208,72 @@ func loadServeConfig(args []string) (*config.Config, error) {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	f.applyTo(cfg)
-	if err := cfg.Validate(); err != nil {
+	if err = cfg.Validate(); err != nil {
 		return nil, err
 	}
 	return cfg, nil
 }
 
-// applyTo overlays CLI-flag values onto cfg. Only non-zero fields take
-// effect, preserving values from the config file and environment.
-func (f *serveFlags) applyTo(cfg *config.Config) {
-	if f.port != 0 {
-		cfg.HTTP.Addr = ":" + strconv.Itoa(f.port)
-	}
-	if f.addr != "" {
-		cfg.HTTP.Addr = f.addr
-	}
-	if f.clusterPort != 0 {
-		cfg.Cluster.Addr = ":" + strconv.Itoa(f.clusterPort)
-	}
-	if f.dataDir != "" {
-		cfg.Storage.DataDir = f.dataDir
-	}
-	if f.logLevel != "" {
-		cfg.Log.Level = f.logLevel
-	}
-	if f.logFormat != "" {
-		cfg.Log.Format = f.logFormat
-	}
-	if f.pprofAddr != "" {
-		cfg.Debug.PProfAddr = f.pprofAddr
-	}
-}
-
-func buildBroker(cfg *config.Config, ms *metastore.SQLiteStore, m *metrics.Metrics, log *slog.Logger) (broker.Broker, error) {
-	logOpts, err := storageOptions(cfg.Storage)
+func buildBroker(cfg *config.Config, ms metastore.Metastore, m *metrics.Metrics, log *slog.Logger) (broker.Broker, *consumer.InFlight, error) {
+	storageOpts, err := storageOptions(cfg.Storage)
 	if err != nil {
-		return nil, fmt.Errorf("storage options: %w", err)
+		return nil, nil, fmt.Errorf("storage options: %w", err)
 	}
+
+	// Caps resolver consults the metastore so altered caps are honored
+	// at the next ReserveNext / Commit call without restarting the
+	// broker. Falls back to TopicConfig defaults for topics whose
+	// per-record value is zero (legacy rows pre-migration).
+	resolveCaps := func(ctx context.Context, topicName string) (consumer.Caps, error) {
+		t, err := ms.GetTopic(ctx, topicName)
+		if err != nil {
+			return consumer.Caps{}, err
+		}
+		maxIF := int(t.MaxInFlightPerPartition)
+		if maxIF <= 0 {
+			maxIF = int(cfg.Topic.DefaultMaxInFlightPerPartition)
+		}
+		maxAA := int(t.MaxAckedAheadPerPartition)
+		if maxAA <= 0 {
+			maxAA = int(cfg.Topic.DefaultMaxAckedAheadPerPartition)
+		}
+		return consumer.Caps{MaxInFlight: maxIF, MaxAckedAhead: maxAA}, nil
+	}
+
+	offsets := consumer.NewInFlight(resolveCaps, nil)
 
 	br, err := broker.New(broker.Deps{
-		DataDir:    cfg.Storage.DataDir,
-		LogOptions: logOpts,
-		TopicPolicy: broker.TopicPolicy{
-			DefaultPartitions:        cfg.Topic.DefaultPartitions,
-			MaxPartitions:            cfg.Topic.MaxPartitions,
-			DefaultReplicationFactor: cfg.Topic.DefaultReplicationFactor,
-			DefaultRetention: topic.Retention{
-				MaxAgeMs: cfg.Topic.DefaultRetentionAgeMs,
-				MaxBytes: cfg.Topic.DefaultRetentionBytes,
-			},
+		DataDir:        cfg.Storage.DataDir,
+		StorageOptions: storageOpts,
+		TopicConfig: broker.TopicConfig{
+			DefaultPartitions:                cfg.Topic.DefaultPartitions,
+			MaxPartitions:                    cfg.Topic.MaxPartitions,
+			DefaultReplicationFactor:         cfg.Topic.DefaultReplicationFactor,
+			DefaultRetentionMs:               cfg.Topic.DefaultRetentionAgeMs,
+			DefaultVisibilityTimeoutMs:       cfg.Topic.DefaultVisibilityTimeoutMs,
+			DefaultMaxInFlightPerPartition:   cfg.Topic.DefaultMaxInFlightPerPartition,
+			DefaultMaxAckedAheadPerPartition: cfg.Topic.DefaultMaxAckedAheadPerPartition,
 		},
-		Metastore:  ms,
-		Partitions: partition.NewHashRoundRobin(),
-		Schemas:    schema.NewJSONSchema(),
-		Offsets:    consumer.NewMetastoreBacked(ms),
-		Replicator: replication.NewLocal(),
-		Logger:     log,
-		Metrics:    m,
+		Metastore:       ms,
+		Partitions:      partition.NewHashRoundRobin(),
+		Schemas:         schema.NewJSONSchema(),
+		ConsumerOffsets: offsets,
+		Replicator:      replication.NewLocal(),
+		Logger:          log,
+		Metrics:         m,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("broker: %w", err)
+		return nil, nil, fmt.Errorf("broker: %w", err)
 	}
-	return br, nil
+	return br, offsets, nil
 }
 
-func buildAPIServer(cfg *config.Config, br broker.Broker, m *metrics.Metrics, reg *prometheus.Registry, log *slog.Logger) *httpserver.Server {
+func buildAPIServer(cfg *config.Config, br broker.Broker, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, log *slog.Logger) *httpserver.Server {
 	handlerSet := handlers.New(handlers.Deps{
 		Broker:         br,
 		Logger:         log,
 		MaxConsumeWait: cfg.HTTP.MaxConsumeWait.D(),
+		Router:         router,
 	})
 	return httpserver.New(cfg.HTTP, httpserver.NewRouter(handlerSet, log, m, reg), log)
 }
@@ -266,16 +307,16 @@ func storageOptions(sc config.StorageConfig) (storage.Options, error) {
 	}, nil
 }
 
-func buildCodec(sc config.StorageConfig) (storage.Codec, error) {
+func buildCodec(sc config.StorageConfig) (codec.Codec, error) {
 	switch strings.ToLower(sc.Codec) {
 	case "none":
-		return storage.NewNoopCodec(), nil
+		return codec.NewNoopCodec(), nil
 	case "zstd", "":
 		level, err := zstdLevelFromString(sc.CompressionLevel)
 		if err != nil {
 			return nil, err
 		}
-		return storage.NewZstdCodec(level)
+		return codec.NewZstdCodec(level)
 	default:
 		return nil, fmt.Errorf("unknown codec %q", sc.Codec)
 	}

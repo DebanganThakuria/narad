@@ -1,375 +1,363 @@
-// Package e2e runs end-to-end HTTP tests against a fully wired narad
-// broker (real metastore, real partition logs on a temp dir) via
-// httptest. Each test gets its own isolated environment.
-//
-// Files in this package are split by HTTP endpoint or feature surface
-// — see the file-level docstring on each. Shared infrastructure lives
-// in this file.
+// Package e2e holds HTTP-level end-to-end tests against a real broker
+// (SQLite metastore + temp partition logs) exposed via httptest.Server.
 package e2e
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/consumer"
-	"github.com/debanganthakuria/narad/internal/httpserver"
-	"github.com/debanganthakuria/narad/internal/httpserver/handlers"
-	"github.com/debanganthakuria/narad/internal/metastore"
-	"github.com/debanganthakuria/narad/internal/observability/metrics"
-	"github.com/debanganthakuria/narad/internal/partition"
-	"github.com/debanganthakuria/narad/internal/replication"
-	"github.com/debanganthakuria/narad/internal/schema"
-	"github.com/debanganthakuria/narad/internal/storage"
-	"github.com/debanganthakuria/narad/internal/topic"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
+	obsmetrics "github.com/debanganthakuria/narad/internal/platform/observability/metrics"
+	"github.com/debanganthakuria/narad/internal/platform/partition"
+	"github.com/debanganthakuria/narad/internal/platform/replication"
+	"github.com/debanganthakuria/narad/internal/platform/schema"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
-// testEnv bundles the test server and broker so tests can hit HTTP
-// endpoints and, when necessary, interact with the broker directly.
-//
-// Metrics is non-nil when the env was built with newTestEnvWithMetrics;
-// the /metrics endpoint is mounted only in that mode.
-type testEnv struct {
-	Server   *httptest.Server
-	Broker   broker.Broker
-	Metrics  *metrics.Metrics
-	Registry *prometheus.Registry
+// envOpts lets tests override broker policy values without a fat constructor.
+type envOpts struct {
+	dataDir                    string
+	defaultParts               int
+	maxParts                   int
+	defaultRF                  int
+	defaultRetentionMs         int64
+	defaultVisibilityTimeoutMs int64
+	maxConsumeWait             time.Duration
+	metrics                    bool // when true, wire real Prometheus metrics and /metrics endpoint
+	logOptions                 storage.Options
 }
 
-// envOpt customises newTestEnv. Tests that need bespoke knobs (small
-// SegmentBytes for retention testing, custom default policy, real
-// JSON-Schema validator, etc.) pass one or more of these.
-type envOpt func(*envConfig)
-
-type envConfig struct {
-	policy          broker.TopicPolicy
-	storage         storage.Options
-	maxConsumeWait  time.Duration
-	schemaRegistry  schema.Registry
-	enableMetrics   bool
-}
-
-func defaultEnvConfig() *envConfig {
-	return &envConfig{
-		policy: broker.TopicPolicy{
-			DefaultPartitions:        4,
-			MaxPartitions:            128,
-			DefaultReplicationFactor: 2,
-			DefaultRetention: topic.Retention{
-				MaxAgeMs: int64(24 * time.Hour / time.Millisecond),
-			},
-		},
-		storage: storage.Options{
-			Codec:         storage.NewNoopCodec(),
+func defaultOpts() envOpts {
+	return envOpts{
+		defaultParts:               4,
+		maxParts:                   128,
+		defaultRF:                  2,
+		defaultRetentionMs:         7 * 24 * 3600 * 1000,
+		defaultVisibilityTimeoutMs: 30_000, // 30s — long enough that no e2e test races against expiry
+		maxConsumeWait:             5 * time.Second,
+		logOptions: storage.Options{
+			Codec:         codec.NewNoopCodec(),
 			FlushBytes:    1 << 20,
-			FlushRecords:  1000,
-			FlushInterval: 50 * time.Millisecond,
+			FlushRecords:  100,
+			FlushInterval: 100 * time.Millisecond,
 			SegmentBytes:  64 << 20,
-			Retention: storage.RetentionConfig{
-				CheckInterval: time.Minute,
-			},
+			Retention:     storage.RetentionConfig{CheckInterval: time.Hour}, // no reaper in e2e
 		},
-		maxConsumeWait: 2 * time.Second,
-		schemaRegistry: schema.NewAlwaysValid(),
 	}
 }
 
-// withPolicy overrides the broker TopicPolicy for tests that exercise
-// partition or retention bounds.
-func withPolicy(p broker.TopicPolicy) envOpt {
-	return func(c *envConfig) { c.policy = p }
+// env bundles a running server, its broker, and a client helper for a
+// single test. Call env.close() to clean up.
+type env struct {
+	t      *testing.T
+	dir    string
+	broker broker.Broker
+	Broker broker.Broker
+	Server *httptest.Server
+	client *http.Client
+	ms     metastore.Metastore
+
+	Registry *prometheus.Registry // non-nil only when metrics:true
+	Metrics  *obsmetrics.Metrics  // non-nil only when metrics:true
 }
 
-// withMaxConsumeWait shortens (or lengthens) the long-poll cap for
-// tests that exercise the wait path.
-func withMaxConsumeWait(d time.Duration) envOpt {
-	return func(c *envConfig) { c.maxConsumeWait = d }
-}
-
-// withMetrics enables the metrics surface — registers collectors and
-// mounts /metrics. Off by default to keep most tests cheap.
-func withMetrics() envOpt {
-	return func(c *envConfig) { c.enableMetrics = true }
-}
-
-// newTestEnv builds a real broker (SQLite metastore + temp partition
-// logs), wires it into the handler set, and returns an httptest server.
-// Call any number of envOpts to customise.
-func newTestEnv(t *testing.T, opts ...envOpt) *testEnv {
+func newEnv(t *testing.T, opts envOpts) *env {
 	t.Helper()
 
-	cfg := defaultEnvConfig()
-	for _, opt := range opts {
-		opt(cfg)
+	if opts.dataDir == "" {
+		opts.dataDir = t.TempDir()
+	}
+	if err := os.MkdirAll(opts.dataDir, 0o755); err != nil {
+		t.Fatalf("create data dir: %v", err)
 	}
 
-	dataDir := t.TempDir()
-	ms, err := metastore.NewSQLiteStore(filepath.Join(dataDir, "metastore", "metadata.db"))
+	ms, err := metastore.New(metastore.Config{
+		NodeID:   "test-0",
+		DataDir:  filepath.Join(opts.dataDir, "metastore"),
+		BindAddr: "127.0.0.1:0",
+	})
 	if err != nil {
 		t.Fatalf("metastore: %v", err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
+	t.Cleanup(func() { ms.Close() })
 
-	// Discard logs by default so test output stays focused. Bump to
-	// LevelDebug if a specific test needs to see broker internals.
-	log := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	// Wait for Raft to elect a leader before any broker operations.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if ms.IsLeader() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !ms.IsLeader() {
+		t.Fatal("metastore: timed out waiting for Raft leader")
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	var (
 		reg *prometheus.Registry
-		m   *metrics.Metrics
+		m   *obsmetrics.Metrics
 	)
-	if cfg.enableMetrics {
+	if opts.metrics {
 		reg = prometheus.NewRegistry()
-		m = metrics.New(reg)
+		m = obsmetrics.New(reg)
+	}
+
+	resolveCaps := func(_ context.Context, topicName string) (consumer.Caps, error) {
+		t, err := ms.GetTopic(context.Background(), topicName)
+		if err != nil {
+			return consumer.Caps{}, err
+		}
+		maxIF := int(t.MaxInFlightPerPartition)
+		if maxIF <= 0 {
+			maxIF = 1024
+		}
+		maxAA := int(t.MaxAckedAheadPerPartition)
+		if maxAA <= 0 {
+			maxAA = 1024
+		}
+		return consumer.Caps{MaxInFlight: maxIF, MaxAckedAhead: maxAA}, nil
 	}
 
 	br, err := broker.New(broker.Deps{
-		DataDir:     dataDir,
-		LogOptions:  cfg.storage,
-		TopicPolicy: cfg.policy,
-		Metastore:   ms,
-		Partitions:  partition.NewHashRoundRobin(),
-		Schemas:     cfg.schemaRegistry,
-		Offsets:     consumer.NewMetastoreBacked(ms),
-		Replicator:  replication.NewLocal(),
-		Logger:      log,
-		Metrics:     m,
+		DataDir:        opts.dataDir,
+		StorageOptions: opts.logOptions,
+		TopicConfig: broker.TopicConfig{
+			DefaultPartitions:                opts.defaultParts,
+			MaxPartitions:                    opts.maxParts,
+			DefaultReplicationFactor:         opts.defaultRF,
+			DefaultRetentionMs:               opts.defaultRetentionMs,
+			DefaultVisibilityTimeoutMs:       opts.defaultVisibilityTimeoutMs,
+			DefaultMaxInFlightPerPartition:   1024,
+			DefaultMaxAckedAheadPerPartition: 1024,
+		},
+		Metastore:       ms,
+		Partitions:      partition.NewHashRoundRobin(),
+		Schemas:         schema.NewJSONSchema(),
+		ConsumerOffsets: consumer.NewInFlight(resolveCaps, nil),
+		Replicator:      replication.NewLocal(),
+		Logger:          log,
+		Metrics:         m,
 	})
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
-	t.Cleanup(func() { _ = br.Close() })
 
 	h := handlers.New(handlers.Deps{
 		Broker:         br,
 		Logger:         log,
-		MaxConsumeWait: cfg.maxConsumeWait,
+		MaxConsumeWait: opts.maxConsumeWait,
 	})
-	router := httpserver.NewRouter(h, log, m, reg)
-	srv := httptest.NewServer(router)
-	t.Cleanup(srv.Close)
 
-	return &testEnv{Server: srv, Broker: br, Metrics: m, Registry: reg}
+	router := httpserver.NewRouter(h, log, m, reg)
+	ts := httptest.NewServer(router)
+
+	return &env{
+		t:        t,
+		dir:      opts.dataDir,
+		broker:   br,
+		Broker:   br,
+		Server:   ts,
+		client:   ts.Client(),
+		ms:       ms,
+		Registry: reg,
+		Metrics:  m,
+	}
 }
 
-// ---------------------------------------------------------------------------
-// HTTP request helpers
-// ---------------------------------------------------------------------------
+func (e *env) close() {
+	e.Server.Close()
+	_ = e.broker.Close()
+	_ = e.ms.Close()
+}
 
-// jsonReq builds a JSON request with the given method/url/body and
-// returns the response. body == nil sends an empty body. Tests own
-// the response — close the body when done.
-func jsonReq(t *testing.T, method, url string, body any) *http.Response {
-	t.Helper()
+// ---- request helpers -------------------------------------------------------
 
-	var rdr *bytes.Reader
+func (e *env) url(path string) string { return e.Server.URL + path }
+
+func (e *env) post(path string, body any) *http.Response {
+	e.t.Helper()
+	return e.do(http.MethodPost, path, body)
+}
+
+func (e *env) get(path string) *http.Response {
+	e.t.Helper()
+	return e.do(http.MethodGet, path, nil)
+}
+
+func (e *env) patch(path string, body any) *http.Response {
+	e.t.Helper()
+	return e.do(http.MethodPatch, path, body)
+}
+
+func (e *env) del(path string) *http.Response {
+	e.t.Helper()
+	return e.do(http.MethodDelete, path, nil)
+}
+
+// rawPost sends a raw string body (for testing invalid JSON payloads).
+func (e *env) rawPost(path, rawBody string) *http.Response {
+	e.t.Helper()
+	req, err := http.NewRequest(http.MethodPost, e.url(path), strings.NewReader(rawBody))
+	if err != nil {
+		e.t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := e.client.Do(req)
+	if err != nil {
+		e.t.Fatalf("do: %v", err)
+	}
+	return resp
+}
+
+func (e *env) do(method, path string, body any) *http.Response {
+	e.t.Helper()
+	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			t.Fatalf("marshal body: %v", err)
+			e.t.Fatalf("marshal: %v", err)
 		}
-		rdr = bytes.NewReader(b)
-	} else {
-		rdr = bytes.NewReader(nil)
+		r = bytes.NewReader(b)
 	}
-
-	req, err := http.NewRequest(method, url, rdr)
+	req, err := http.NewRequest(method, e.url(path), r)
 	if err != nil {
-		t.Fatalf("new request: %v", err)
+		e.t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := e.client.Do(req)
 	if err != nil {
-		t.Fatalf("%s %s: %v", method, url, err)
+		e.t.Fatalf("do: %v", err)
 	}
 	return resp
 }
 
-// rawReq sends a request with a raw byte body — used for malformed-JSON
-// tests where we don't want json.Marshal to clean things up.
-func rawReq(t *testing.T, method, url string, body []byte) *http.Response {
-	t.Helper()
-	req, err := http.NewRequest(method, url, bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, url, err)
-	}
-	return resp
-}
+// ---- response helpers ------------------------------------------------------
 
-func getJSON(t *testing.T, url string) *http.Response {
-	t.Helper()
-	resp, err := http.Get(url)
-	if err != nil {
-		t.Fatalf("GET %s: %v", url, err)
-	}
-	return resp
-}
-
-// ---------------------------------------------------------------------------
-// Body / response helpers
-// ---------------------------------------------------------------------------
-
-// readBody drains and returns the body, closing it. Safe to call on a
-// nil resp (returns nil).
-func readBody(resp *http.Response) []byte {
-	if resp == nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	return b
-}
-
-// decodeJSON closes resp.Body after decoding.
-func decodeJSON(t *testing.T, resp *http.Response, v any) {
+func readJSON[T any](t *testing.T, resp *http.Response) T {
 	t.Helper()
 	defer resp.Body.Close()
-	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
-		t.Fatalf("decode response: %v", err)
+	var v T
+	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
+	return v
 }
 
-// expectStatus asserts the response status and includes the body in
-// the failure message — the body usually carries the actual error.
+func readError(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	m := readJSON[map[string]string](t, resp)
+	return m["error"]
+}
+
 func expectStatus(t *testing.T, resp *http.Response, want int) {
 	t.Helper()
 	if resp.StatusCode != want {
-		body := readBody(resp)
-		t.Fatalf("status: got %d want %d, body=%s", resp.StatusCode, want, body)
-		return
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("status: got %d, want %d (body: %s)", resp.StatusCode, want, string(body))
 	}
-	// Drain so the connection can be reused. Tests that need the body
-	// should call decodeJSON or readBody before this.
-	_ = resp.Body.Close()
 }
 
-// ---------------------------------------------------------------------------
-// must* convenience helpers
-// ---------------------------------------------------------------------------
-
-// createTopicReq is the input to mustCreateTopic. Zero-valued fields
-// fall through to broker defaults.
-type createTopicReq struct {
-	Name              string          `json:"name"`
-	Partitions        int             `json:"partitions,omitempty"`
-	ReplicationFactor int             `json:"replication_factor,omitempty"`
-	Retention         topic.Retention `json:"retention,omitempty"`
-}
-
-func mustCreateTopic(t *testing.T, env *testEnv, req createTopicReq) topic.Topic {
+func expectOK(t *testing.T, resp *http.Response) {
 	t.Helper()
-	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics", req)
-	if resp.StatusCode != http.StatusCreated {
-		body := readBody(resp)
-		t.Fatalf("create topic %q: status %d, body=%s", req.Name, resp.StatusCode, body)
-	}
-	var out topic.Topic
-	decodeJSON(t, resp, &out)
-	return out
+	expectStatus(t, resp, http.StatusOK)
 }
 
-// produceResult is the response shape from POST .../produce.
-type produceResult struct {
-	Offset    int64 `json:"offset"`
-	Partition int   `json:"partition"`
-}
-
-// mustProduce sends one message and returns the assigned (offset,
-// partition). msg is JSON-serialisable; empty key uses the round-robin
-// path.
-func mustProduce(t *testing.T, env *testEnv, topicName, key string, msg any) produceResult {
+func expectBadRequest(t *testing.T, resp *http.Response) {
 	t.Helper()
-	body := map[string]any{"message": msg}
-	if key != "" {
-		body["key"] = key
-	}
-	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/"+topicName+"/produce", body)
-	if resp.StatusCode != http.StatusOK {
-		b := readBody(resp)
-		t.Fatalf("produce: status %d, body=%s", resp.StatusCode, b)
-	}
-	var out produceResult
-	decodeJSON(t, resp, &out)
-	return out
+	expectStatus(t, resp, http.StatusBadRequest)
 }
 
-// mustAck ackowledges (topic, partition, offset).
-func mustAck(t *testing.T, env *testEnv, topicName string, partitionIdx int, offset int64) {
+func expectNotFound(t *testing.T, resp *http.Response) {
 	t.Helper()
-	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/"+topicName+"/ack", map[string]any{
-		"partition": partitionIdx,
-		"offset":    offset,
+	expectStatus(t, resp, http.StatusNotFound)
+}
+
+func expectConflict(t *testing.T, resp *http.Response) {
+	t.Helper()
+	expectStatus(t, resp, http.StatusConflict)
+}
+
+// createTopic is a convenience wrapper. Pass zero partitions/RF/retentionMs to use defaults.
+func (e *env) createTopic(name string, partitions, rf int, retentionMs int64) topic.Topic {
+	e.t.Helper()
+	body := map[string]any{"name": name}
+	if partitions > 0 {
+		body["partitions"] = partitions
+	}
+	if rf > 0 {
+		body["replication_factor"] = rf
+	}
+	if retentionMs > 0 {
+		body["retention_ms"] = retentionMs
+	}
+	resp := e.post("/v1/topics", body)
+	expectStatus(e.t, resp, http.StatusCreated)
+	return readJSON[topic.Topic](e.t, resp)
+}
+
+// jsonRaw returns its argument as json.RawMessage. Shorthand for inline
+// schema strings in test tables.
+func jsonRaw(s string) json.RawMessage { return json.RawMessage(s) }
+
+// consume issues a single Consume against `path` (typically built from
+// the topic name and any partition/wait params) and returns the parsed
+// Message. Fails the test on non-200; use the raw `get` helper if you
+// want to inspect a 204 / error.
+func (e *env) consume(path string) topic.Message {
+	e.t.Helper()
+	resp := e.get(path)
+	expectOK(e.t, resp)
+	return readJSON[topic.Message](e.t, resp)
+}
+
+// ack posts a receipt handle against the standard ack endpoint and
+// asserts 204. Tests that want to assert a specific error code should
+// call env.post directly.
+func (e *env) ack(topicName, handle string) {
+	e.t.Helper()
+	resp := e.post("/v1/topics/"+topicName+"/ack", map[string]any{
+		"receipt_handle": handle,
 	})
-	expectStatus(t, resp, http.StatusNoContent)
+	expectStatus(e.t, resp, http.StatusNoContent)
 }
 
-// consumeQuery describes optional consume query params.
-type consumeQuery struct {
-	Partition *int
-	Offset    *int64
-	Wait      time.Duration
+func (e *env) produce(topicName, key, msg string) (offset int64, partition int) {
+	e.t.Helper()
+	resp := e.post(fmt.Sprintf("/v1/topics/%s/produce", topicName), map[string]any{
+		"key":     key,
+		"message": json.RawMessage(msg),
+	})
+	expectOK(e.t, resp)
+	var result struct {
+		Offset    int64 `json:"offset"`
+		Partition int   `json:"partition"`
+	}
+	result = readJSON[struct {
+		Offset    int64 `json:"offset"`
+		Partition int   `json:"partition"`
+	}](e.t, resp)
+	return result.Offset, result.Partition
 }
-
-func (q consumeQuery) String() string {
-	out := ""
-	first := true
-	add := func(s string) {
-		if first {
-			out += "?"
-			first = false
-		} else {
-			out += "&"
-		}
-		out += s
-	}
-	if q.Partition != nil {
-		add(fmt.Sprintf("partition=%d", *q.Partition))
-	}
-	if q.Offset != nil {
-		add(fmt.Sprintf("offset=%d", *q.Offset))
-	}
-	if q.Wait > 0 {
-		add(fmt.Sprintf("wait=%s", q.Wait))
-	}
-	return out
-}
-
-// mustConsume hits the consume endpoint and returns the parsed message
-// (when found=true) or an empty struct + found=false on 204.
-func mustConsume(t *testing.T, env *testEnv, topicName string, q consumeQuery) (msg topic.Message, found bool) {
-	t.Helper()
-	resp := getJSON(t, env.Server.URL+"/v1/topics/"+topicName+"/consume"+q.String())
-	switch resp.StatusCode {
-	case http.StatusNoContent:
-		_ = resp.Body.Close()
-		return topic.Message{}, false
-	case http.StatusOK:
-		decodeJSON(t, resp, &msg)
-		return msg, true
-	default:
-		b := readBody(resp)
-		t.Fatalf("consume: unexpected status %d, body=%s", resp.StatusCode, b)
-		return topic.Message{}, false
-	}
-}
-
-// intPtr / int64Ptr are small helpers since consumeQuery uses pointers
-// to distinguish "not set" from "set to zero".
-func intPtr(v int) *int       { return &v }
-func int64Ptr(v int64) *int64 { return &v }

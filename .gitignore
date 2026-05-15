@@ -1,8 +1,9 @@
-.idea
-
 bin/
 
-data/
-*.data
+.claude/
 
-.claude
+data/
+
+.idea/
+
+docs/

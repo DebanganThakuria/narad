@@ -83,7 +83,7 @@ func TestConsume_AckAdvancesQueueCursor(t *testing.T) {
 	if !found || msg.Offset != 0 {
 		t.Fatalf("first consume: found=%v offset=%d want offset=0", found, msg.Offset)
 	}
-	mustAck(t, env, "ack-cursor", msg.Partition, msg.Offset)
+	mustAck(t, env, "ack-cursor", msg.ReceiptHandle)
 
 	// Next consume must skip past the acked offset.
 	msg, found = mustConsume(t, env, "ack-cursor", consumeQuery{})

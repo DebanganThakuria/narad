@@ -65,10 +65,23 @@ func runClientTopics(args []string) error {
 func runClientTopicsList(args []string) error {
 	fs := newClientFlagSet("topics list")
 	addr := fs.String("addr", defaultAddr(), "HTTP base URL")
+	limit := fs.Int("limit", 0, "max page size (0 = server default, 100; cap 1000)")
+	pageToken := fs.String("page-token", "", "cursor returned by the previous page")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return newHTTPClient(*addr).getAndPrint("/v1/topics")
+	q := url.Values{}
+	if *limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", *limit))
+	}
+	if *pageToken != "" {
+		q.Set("page_token", *pageToken)
+	}
+	path := "/v1/topics"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	return newHTTPClient(*addr).getAndPrint(path)
 }
 
 func runClientTopicsCreate(args []string) error {
@@ -76,6 +89,10 @@ func runClientTopicsCreate(args []string) error {
 	addr := fs.String("addr", defaultAddr(), "HTTP base URL")
 	partitions := fs.Int("partitions", 0, "partition count (0 = server default)")
 	rf := fs.Int("replication-factor", 0, "replication factor (0 = server default)")
+	retentionMs := fs.Int64("retention-ms", 0, "retention duration in ms (0 = server default)")
+	visibilityMs := fs.Int64("visibility-timeout-ms", 0, "consumer visibility timeout in ms (0 = server default)")
+	maxIF := fs.Int64("max-in-flight-per-partition", 0, "per-partition reservation cap (0 = server default)")
+	maxAA := fs.Int64("max-acked-ahead-per-partition", 0, "per-partition out-of-order ack cap (0 = server default)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -88,6 +105,18 @@ func runClientTopicsCreate(args []string) error {
 	}
 	if *rf > 0 {
 		body["replication_factor"] = *rf
+	}
+	if *retentionMs > 0 {
+		body["retention_ms"] = *retentionMs
+	}
+	if *visibilityMs > 0 {
+		body["visibility_timeout_ms"] = *visibilityMs
+	}
+	if *maxIF > 0 {
+		body["max_in_flight_per_partition"] = *maxIF
+	}
+	if *maxAA > 0 {
+		body["max_acked_ahead_per_partition"] = *maxAA
 	}
 	return newHTTPClient(*addr).postAndPrint("/v1/topics", body)
 }
@@ -124,19 +153,65 @@ func runClientTopicsAlter(args []string) error {
 	fs := newClientFlagSet("topics alter <name>")
 	addr := fs.String("addr", defaultAddr(), "HTTP base URL")
 	partitions := fs.Int("partitions", 0, "new partition count (must exceed current)")
+	retentionMs := fs.Int64("retention-ms", -1, "new retention duration in ms (0 = inherit default)")
+	maxIF := fs.Int64("max-in-flight-per-partition", -1, "new per-partition reservation cap (0 = inherit default)")
+	maxAA := fs.Int64("max-acked-ahead-per-partition", -1, "new per-partition out-of-order ack cap (0 = inherit default)")
+	schemaFile := fs.String("schema-file", "", `path to JSON Schema file ("-" reads from stdin)`)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return clientUsageErr("usage: narad client topics alter --partitions N <name>")
+		return clientUsageErr("usage: narad client topics alter [--partitions N | --retention-ms N | --max-in-flight-per-partition N | --max-acked-ahead-per-partition N | --schema-file F] <name>")
 	}
-	if *partitions <= 0 {
-		return clientUsageErr("--partitions is required and must be > 0")
+
+	body := map[string]any{}
+	if *partitions > 0 {
+		body["partitions"] = *partitions
 	}
+	if *retentionMs >= 0 {
+		body["retention_ms"] = *retentionMs
+	}
+	if *maxIF >= 0 {
+		body["max_in_flight_per_partition"] = *maxIF
+	}
+	if *maxAA >= 0 {
+		body["max_acked_ahead_per_partition"] = *maxAA
+	}
+	if *schemaFile != "" {
+		raw, err := readSchemaFile(*schemaFile)
+		if err != nil {
+			return err
+		}
+		body["schema"] = json.RawMessage(raw)
+	}
+
+	if len(body) == 0 {
+		return clientUsageErr("at least one of --partitions, --retention-ms, --max-in-flight-per-partition, --max-acked-ahead-per-partition, or --schema-file is required")
+	}
+
 	return newHTTPClient(*addr).patchAndPrint(
 		"/v1/topics/"+url.PathEscape(fs.Arg(0)),
-		map[string]int{"partitions": *partitions},
+		body,
 	)
+}
+
+func readSchemaFile(path string) ([]byte, error) {
+	var (
+		raw []byte
+		err error
+	)
+	if path == "-" {
+		raw, err = io.ReadAll(os.Stdin)
+	} else {
+		raw, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read schema: %w", err)
+	}
+	if !json.Valid(raw) {
+		return nil, clientUsageErr("schema file is not valid JSON")
+	}
+	return raw, nil
 }
 
 func runClientProduce(args []string) error {
@@ -196,20 +271,29 @@ func runClientConsume(args []string) error {
 func runClientAck(args []string) error {
 	fs := newClientFlagSet("ack <topic>")
 	addr := fs.String("addr", defaultAddr(), "HTTP base URL")
-	partition := fs.Int("partition", -1, "partition (required)")
-	offset := fs.Int64("offset", -1, "offset to ack (required)")
+	handle := fs.String("handle", "", `receipt handle from a prior consume; if empty, read from stdin`)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return clientUsageErr("usage: narad client ack --partition P --offset O <topic>")
+		return clientUsageErr("usage: narad client ack [--handle H] <topic>  (handle from stdin if omitted)")
 	}
-	if *partition < 0 || *offset < 0 {
-		return clientUsageErr("--partition and --offset are required and must be >= 0")
+
+	h := strings.TrimSpace(*handle)
+	if h == "" {
+		raw, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("read handle from stdin: %w", err)
+		}
+		h = strings.TrimSpace(string(raw))
 	}
+	if h == "" {
+		return clientUsageErr("receipt handle required (use --handle or pipe via stdin)")
+	}
+
 	if err := newHTTPClient(*addr).postNoBody(
 		"/v1/topics/"+url.PathEscape(fs.Arg(0))+"/ack",
-		map[string]any{"partition": *partition, "offset": *offset},
+		map[string]any{"receipt_handle": h},
 	); err != nil {
 		return err
 	}
@@ -252,9 +336,27 @@ func (c *httpClient) do(method, path string, body any) (*http.Response, error) {
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, formatErrorBody(b))
 	}
 	return resp, nil
+}
+
+// formatErrorBody renders the server's error body for human display.
+// The server sends `{"error":"..."}` for handled errors; we surface
+// just the message in that case. Anything else is shown verbatim
+// (trimmed) so unexpected payloads still reach the operator.
+func formatErrorBody(b []byte) string {
+	trimmed := strings.TrimSpace(string(b))
+	if trimmed == "" {
+		return "<empty body>"
+	}
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(b, &env); err == nil && env.Error != "" {
+		return env.Error
+	}
+	return trimmed
 }
 
 func (c *httpClient) getAndPrint(path string) error {
@@ -354,14 +456,25 @@ func printClientUsage(w io.Writer) {
 	fmt.Fprintln(w, "  narad client <subcommand> [flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Subcommands:")
-	fmt.Fprintln(w, "  topics list                                list all topics")
+	fmt.Fprintln(w, "  topics list [--limit N] [--page-token T]   list topics (keyset paginated)")
 	fmt.Fprintln(w, "  topics create [flags] <name>               create a topic")
+	fmt.Fprintln(w, "    --partitions N                             partition count (0 = default)")
+	fmt.Fprintln(w, "    --replication-factor N                     replication factor (0 = default)")
+	fmt.Fprintln(w, "    --retention-ms N                           retention duration in ms (0 = default)")
+	fmt.Fprintln(w, "    --visibility-timeout-ms N                  consumer visibility timeout in ms")
+	fmt.Fprintln(w, "    --max-in-flight-per-partition N            per-partition reservation cap")
+	fmt.Fprintln(w, "    --max-acked-ahead-per-partition N          per-partition out-of-order ack cap")
 	fmt.Fprintln(w, "  topics get <name>                          show topic + partition stats")
 	fmt.Fprintln(w, "  topics delete <name>                       delete topic and all data")
-	fmt.Fprintln(w, "  topics alter --partitions N <name>         increase partition count")
+	fmt.Fprintln(w, "  topics alter <name>                        any combination of:")
+	fmt.Fprintln(w, "    --partitions N                             increase partition count")
+	fmt.Fprintln(w, "    --retention-ms N                           update retention")
+	fmt.Fprintln(w, "    --max-in-flight-per-partition N            update reservation cap")
+	fmt.Fprintln(w, "    --max-acked-ahead-per-partition N          update out-of-order ack cap")
+	fmt.Fprintln(w, "    --schema-file F | --schema-file -          register a JSON Schema (file or stdin)")
 	fmt.Fprintln(w, "  produce [--key K] <topic>                  produce a record (body from stdin)")
 	fmt.Fprintln(w, "  consume [flags] <topic>                    --wait D --partition P --offset O")
-	fmt.Fprintln(w, "  ack --partition P --offset O <topic>")
+	fmt.Fprintln(w, "  ack [--handle H] <topic>                   ack a message (handle from stdin if omitted)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Common flags:")
 	fmt.Fprintln(w, "  --addr URL   server URL (default: http://localhost:7942 or $NARAD_ADDR)")

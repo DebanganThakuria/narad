@@ -5,79 +5,121 @@ JSON messages to topics; consumers pull (with optional long-polling) and
 acknowledge to advance their offset. Replay is supported via explicit
 offsets.
 
-> **Status:** single-node, production-shaped surface. The HTTP API,
-> append-only segmented log, SQLite metastore, JSON-Schema validation,
-> per-topic retention, partitioning, Prometheus metrics, and a debug
-> pprof listener are all functional. Multi-node leader/follower
-> replication, cross-node partition rebalancing, message-visibility
-> timeouts (SQS-style in-flight tracking), and schema-update with
-> backwards-compatibility checks are the next big chunks.
+> **Status:** control-plane architecture complete. The HTTP API,
+> append-only segmented log, **Raft+bbolt metastore** (topics, schemas,
+> partition assignments, cluster membership), **cluster controller**
+> (partition assignment, heartbeat monitoring, leader election),
+> **any-pod proxy routing**, JSON-Schema validation, per-topic retention,
+> partitioning, **SQS-style in-flight tracking with gap-skipping
+> reservations + out-of-order acks + nonce-verified receipt handles**,
+> Prometheus metrics, and a debug pprof listener are all functional.
+> Data-plane replication (leader → follower log sync, `.offsets` files,
+> HWM/LEO) is the next milestone.
 
-## Architecture (current)
+### Breaking changes (pre-1.0)
+
+- `POST /v1/topics/{topic}/ack` body is `{"receipt_handle": "<token>"}`.
+  The handle is a `base64url(json({t,p,o,n}))` token returned by
+  Consume — no longer HMAC-signed. Tampering returns **400**; a stale
+  or already-committed handle returns **410** (not 401).
+- `POST /v1/topics` and `PATCH /v1/topics/{topic}` use flat scalar
+  fields (`retention_ms`, `visibility_timeout_ms`,
+  `max_in_flight_per_partition`, `max_acked_ahead_per_partition`).
+- `topic.Message.timestamp` and `topic.Topic.created_at` are Unix
+  seconds (`int64`). Wire format is timezone-independent.
+- `narad client ack` takes `--handle` (or reads the handle from stdin).
+  Pipe receipt handles: `consume | jq -r .receipt_handle | narad client ack <topic>`.
+- The SQLite metastore has been replaced by a Raft+bbolt store. Wipe
+  the `data/` directory when upgrading from older builds.
+
+## Architecture
 
 ```
-                         ┌─────────────┐
-HTTP Producers ─────────▶│             │
-  (port 7942)            │   Broker    │── append ──▶ Partition Log (disk)
-HTTP Consumers ◀── pull ─┤             │                 ▲
-  (long-poll)            └──────┬──────┘                 │
-                                │                        │  notify
-                                │  metadata               on append
-                                ▼
-                          SQLite Metastore
-                       (topics, schemas, offsets,
-                        in-process LRU cache)
+                                ┌─────────────────────────┐
+                                │   Raft control plane     │
+                                │  (hashicorp/raft + bbolt)│
+                                │                          │
+                                │  topics · schemas        │
+                                │  assignments · members   │
+                                └────────────┬────────────┘
+                                             │ read (local bbolt replica)
+                         ┌───────────────────┼───────────────────┐
+                         │                   │                   │
+HTTP Producers ─────────▶│     narad-0       │     narad-1       │  ...
+  (port 7942)            │     (broker)      │     (broker)      │
+HTTP Consumers ◀── pull ─│                   │                   │
+                         │  partition log    │  partition log    │
+                         │  (disk, PV)       │  (disk, PV)       │
+                         └───────────────────┴───────────────────┘
+                                  ↑ any pod proxies to owner via
+                                    cluster port (7943)
 ```
 
-Cluster traffic (replication, follower fetch, membership) will run on
-port 7943 once `narad worker` lands real replication.
+**Control plane.** Three Raft voters (e.g. `narad-0..2`) form a consensus
+cluster; remaining pods are non-voters that receive the full replicated
+state. The Raft leader acts as the **controller** — it assigns partitions
+when topics are created and marks pods dead when their heartbeats time out.
+Every pod's local bbolt replica serves metadata reads (topic config,
+partition assignment, member address) without a network round-trip.
 
-A separate, opt-in pprof listener (`--pprof-addr 127.0.0.1:6060`) and
-a `/metrics` Prometheus endpoint on the public port round out the
-operator surface.
+**Data plane.** Each partition is owned by one pod. That pod holds the
+segment files on its persistent volume and manages the in-flight
+reservation table in memory. Requests that arrive at the wrong pod are
+transparently proxied to the owner via the internal cluster port.
+
+**Replication.** A `replication.Local` stub is wired today (single-copy
+durability, bounded by async flush + PV durability). Leader→follower
+log replication and `.offsets` files are the next milestone.
 
 ## Layout
 
 ```
 cmd/
-  narad/                single binary with subcommands (serve/worker/client/version)
+  narad/                    single binary: main, serve, worker, client, version
 internal/
-  config/               defaults + JSON file + env + flag layering
-  observability/
-    logger/             thin log/slog wrapper
-    metrics/            Prometheus collectors, HTTP middleware, lag poller,
-                          pprof-safe /metrics endpoint
-  httpserver/           http.Server, router, middleware (Recover, RequestID,
-                          metrics middleware, AccessLog), pprof listener
-    handlers/           request handlers
-  broker/               orchestrator: produce / consume / ack / topic CRUD,
-                          plus Snapshot used by the metrics poller
-  storage/              append-only Log: in-memory buffer + async flusher
-                          per partition, zstd-compressed batched frames,
-                          per-frame CRC32C, segment rotation, retention
-                          reaper, skip-and-continue corruption recovery
-  metastore/            SQLite-backed metadata store (gorm + glebarez/sqlite,
-                          pure-Go) with byte-bounded LRU read cache
-  topic/                shared value types (Topic, Retention, Message,
-                          Details, PartitionStats)
-  partition/            partition selection (FNV hash + round-robin)
-  replication/          Replicator interface + single-node Local stub
-  schema/               SchemaRegistry interface, JSON-Schema impl
-                          (santhosh-tekuri/jsonschema), AlwaysValid stub
-  consumer/             OffsetTracker interface + metastore-backed impl
-                          with batched flushes and per-topic eviction
+  errs/                     all 15 sentinel errors in one place (ErrTopicNotFound, ...)
+  domain/
+    topic/                  value types (Topic, Message, PartitionStats)
+  persistence/
+    storage/                append-only segmented log (see doc.go for file map)
+      codec/                Codec interface + zstd / noop implementations
+    metastore/              Raft+bbolt metadata store: topics, schemas,
+                            partition assignments, cluster members
+  consumer/                 in-flight reservations, nonce-based receipt handles,
+                            min-heap expiry, out-of-order ack tracking
+  cluster/
+    controller/             partition assignment algorithm, heartbeat monitor,
+                            OnLeadershipAcquired reconciliation, Heartbeater
+    router.go               any-pod proxy routing (RouteProduce/Consume/Ack)
+  broker/                   orchestrator facade (impl.go embeds the managers)
+    runtime/                *Logs (lazy partition-log map), *Snapshotter, *Lifecycle
+    topics/                 CreateTopic / Update* / Delete / Get / List
+    messaging/              Produce / Consume / Ack
+  transport/
+    httpserver/             http.Server, router, middleware
+      handlers/             *Set + shared helpers (WriteJSON, DecodeJSON, ...)
+        topics/             /v1/topics CRUD endpoints
+        messaging/          produce / consume / ack endpoints
+        health/             /healthz, /readyz
+  platform/
+    config/                 defaults + JSON file + env + flag layering
+    schema/                 JSON-Schema registry (santhosh-tekuri)
+    partition/              FNV hash + round-robin partition picker
+    replication/            Replicator interface + single-node Local stub
+    observability/
+      logger/               thin log/slog wrapper
+      metrics/              Prometheus collectors, HTTP middleware, lag poller
 tests/
-  e2e/                  HTTP-level end-to-end tests (httptest + real
-                          broker), split by feature surface
+  e2e/                      HTTP-level end-to-end tests (httptest + real broker)
 .github/
-  workflows/ci.yml      build / unit-tests / e2e-tests jobs (race-enabled)
+  workflows/ci.yml          build / unit-tests / e2e-tests (race-enabled)
 ```
 
 ## Quickstart
 
 ```sh
 make build         # produces bin/narad
-bin/narad serve    # listens on :7942
+bin/narad serve    # listens on :7942 (API) and :7943 (cluster/Raft)
 ```
 
 ## Developer setup (one-time)
@@ -86,49 +128,69 @@ bin/narad serve    # listens on :7942
 make tools-install   # gofumpt + goimports into $(go env GOPATH)/bin
 ```
 
-`make fmt` auto-formats the tree with both tools; `make check` runs
-`fmt-check + vet + test` for a strict no-write pass.
+`make fmt` auto-formats the tree; `make check` runs `fmt-check + vet + test`.
 
 In another terminal, the easiest way to drive the server is the
-built-in `narad client` subcommand (HTTP under the hood):
+built-in `narad client` subcommand:
 
 ```sh
 narad client topics create orders
 narad client topics list
 narad client topics get orders
 echo '{"id":1,"amount":1500}' | narad client produce --key c1 orders
-narad client consume --wait 5s orders
-narad client ack --partition 0 --offset 0 orders
+msg=$(narad client consume --wait 5s orders)
+echo "$msg" | jq -r .receipt_handle | narad client ack orders
 narad client topics alter --partitions 16 orders
 narad client topics delete orders
+
+# Create with explicit retention + visibility + per-partition caps.
+narad client topics create \
+  --partitions 8 --replication-factor 2 \
+  --retention-ms 3600000 --visibility-timeout-ms 30000 \
+  --max-in-flight-per-partition 64 --max-acked-ahead-per-partition 256 \
+  orders
+
+# Update retention without restart.
+narad client topics alter --retention-ms 86400000 orders
+
+# Adjust the consumer-parallelism caps.
+narad client topics alter --max-in-flight-per-partition 128 orders
+
+# Register a JSON Schema (file or "-" for stdin).
+narad client topics alter --schema-file orders.schema.json orders
+
+# Paginated listing (limit defaults to 100, caps at 1000).
+narad client topics list --limit 50
+narad client topics list --limit 50 --page-token "<next_page_token from previous response>"
 ```
 
 Or hit the HTTP API directly (all data routes live under `/v1`):
 
 ```sh
-# Create with explicit retention.
+# Create topic.
 curl -X POST localhost:7942/v1/topics \
   -H 'Content-Type: application/json' \
   -d '{"name":"orders","partitions":8,"replication_factor":2,
-       "retention":{"max_age_ms":3600000,"max_bytes":1073741824}}'
+       "retention_ms":3600000,"visibility_timeout_ms":30000,
+       "max_in_flight_per_partition":64,"max_acked_ahead_per_partition":256}'
 
 # Produce.
 curl -X POST localhost:7942/v1/topics/orders/produce \
   -H 'Content-Type: application/json' \
   -d '{"key":"customer-42","message":{"id":1,"amount":1500}}'
 
-# Consume with long-poll.
+# Consume with long-poll. Response includes a receipt_handle.
 curl 'localhost:7942/v1/topics/orders/consume?wait=5s'
 
-# Ack.
+# Ack — handle is the token returned by Consume.
 curl -X POST localhost:7942/v1/topics/orders/ack \
   -H 'Content-Type: application/json' \
-  -d '{"partition":0,"offset":0}'
+  -d '{"receipt_handle":"<token from consume response>"}'
 
 # Update retention without restart.
 curl -X PATCH localhost:7942/v1/topics/orders \
   -H 'Content-Type: application/json' \
-  -d '{"retention":{"max_age_ms":86400000,"max_bytes":0}}'
+  -d '{"retention_ms": 86400000}'
 
 # List with pagination.
 curl 'localhost:7942/v1/topics?limit=50'
@@ -141,15 +203,17 @@ curl localhost:7942/metrics
 API routes:
 
 ```
-POST    /v1/topics                          create (accepts retention overrides)
+POST    /v1/topics                          create (retention/visibility/caps optional)
 GET     /v1/topics?limit=&page_token=       list (keyset pagination by name)
 GET     /v1/topics/{topic}                  get single + per-partition stats
-PATCH   /v1/topics/{topic}                  alter partitions OR retention
-                                              (exactly one per request)
+PATCH   /v1/topics/{topic}                  alter: partitions, retention_ms,
+                                             visibility_timeout_ms,
+                                             max_in_flight_per_partition,
+                                             max_acked_ahead_per_partition, schema
 DELETE  /v1/topics/{topic}                  delete topic and all data
 POST    /v1/topics/{topic}/produce
-GET     /v1/topics/{topic}/consume
-POST    /v1/topics/{topic}/ack
+GET     /v1/topics/{topic}/consume          response carries receipt_handle
+POST    /v1/topics/{topic}/ack              body: {"receipt_handle": "..."}
 GET     /healthz                            liveness
 GET     /readyz                             readiness (broker.Ready)
 GET     /metrics                            Prometheus exposition
@@ -164,8 +228,6 @@ narad client    interact with a running narad serve over HTTP
 narad version   print build version
 narad --help    top-level help
 ```
-
-Run `narad <subcommand> --help` for the full flag list.
 
 Common `narad serve` flags:
 
@@ -199,7 +261,6 @@ A starting template lives in [`narad.example.json`](./narad.example.json):
   "cluster": { "addr": ":7943" },
   "storage": {
     "data_dir": "data",
-    "fsync": "per_write",
     "codec": "zstd",
     "compression_level": "best",
     "flush_bytes": 1048576,
@@ -212,8 +273,7 @@ A starting template lives in [`narad.example.json`](./narad.example.json):
     "default_partitions": 8,
     "max_partitions": 1024,
     "default_replication_factor": 2,
-    "default_retention_age_ms": 604800000,
-    "default_retention_bytes": 0
+    "default_retention_age_ms": 604800000
   },
   "log":     { "level": "info", "format": "json" },
   "worker":  { "enabled": false },
@@ -230,7 +290,6 @@ Useful environment overrides:
 | `NARAD_DATA_DIR` | Storage directory |
 | `NARAD_LOG_LEVEL` | `debug` / `info` / `warn` / `error` |
 | `NARAD_LOG_FORMAT` | `json` / `text` |
-| `NARAD_FSYNC` | `per_write` / `batched` |
 | `NARAD_STORAGE_CODEC` | `zstd` / `none` |
 | `NARAD_STORAGE_COMPRESSION_LEVEL` | `fastest` / `default` / `better` / `best` |
 | `NARAD_STORAGE_FLUSH_BYTES` | flush when buffer ≥ N bytes |
@@ -240,69 +299,45 @@ Useful environment overrides:
 | `NARAD_STORAGE_RETENTION_CHECK_INTERVAL_MS` | retention reaper sweep period |
 | `NARAD_TOPIC_DEFAULT_PARTITIONS` | default partition count when omitted from CreateTopic |
 | `NARAD_TOPIC_MAX_PARTITIONS` | upper bound for partition count |
-| `NARAD_TOPIC_DEFAULT_REPLICATION_FACTOR` | default replication factor when omitted (must be ≥ 2) |
+| `NARAD_TOPIC_DEFAULT_REPLICATION_FACTOR` | default replication factor (must be ≥ 2) |
 | `NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS` | default retention age (default: 7 days) |
-| `NARAD_TOPIC_DEFAULT_RETENTION_BYTES` | default retention size cap (default: 0 = disabled) |
-| `NARAD_DEBUG_PPROF_ADDR` | pprof listener address; empty disables |
 | `NARAD_ADDR` | (client only) base URL for `narad client` |
-
-See `internal/config/config.go` for the full list and the matching JSON keys.
 
 ## Storage layer
 
 A partition log is a *directory* of segment files. The active segment
 receives writes; older segments are sealed (read-only). Each segment
 is an append-only file made of CRC-checked, optionally zstd-compressed
-*frames*. Each frame holds 1..N records that share a contiguous offset
-range:
+*frames*. Each frame holds 1..N records that share a contiguous offset range:
 
 ```
 ┌─ frame ────────────────────────────────────────────────────────────┐
-│ magic (2B) │ flags (1B) │ recordCount (4B) │ baseOffset (8B)        │
-│ uncompressed (4B) │ compressed (4B) │ crc32c (4B)                   │
+│ magic (2B) │ flags (1B) │ recordCount (4B) │ baseOffset (8B)       │
+│ uncompressed (4B) │ compressed (4B) │ crc32c (4B)                  │
 │ payload (compressed): [length:4][bytes] xN                         │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
 **Produce path.** `Append` pushes the record into a per-partition
-in-memory buffer and returns the assigned offset immediately — no
-fsync, no disk I/O on the hot path. A single flusher goroutine drains
-the buffer to disk when one of `flush_bytes`, `flush_records`, or
-`flush_interval_ms` is crossed, and one final time on graceful
-shutdown. Multiple producer goroutines may call `Append` concurrently;
-the buffer is internally synchronized.
+in-memory buffer and returns the assigned offset immediately. A single
+flusher goroutine drains the buffer to disk when `flush_bytes`,
+`flush_records`, or `flush_interval_ms` is crossed, and one final time
+on graceful shutdown.
 
-**Concurrency model.** *Many writers, one flusher per partition file.*
-Producer goroutines contend only on the buffer's lightweight mutex;
-exactly one goroutine — the flusher — touches the file. Throughput
-scales by adding more partitions, not more writers per file.
+**Concurrency model.** Many writers, one flusher per partition file.
+Producer goroutines contend only on the buffer's lightweight mutex.
 
 **Durability.** Records produced before a flush are durable. Records
-produced in the open flush window can be lost on a hard crash; this
-is bounded by `flush_interval_ms` and the byte/record thresholds, and
-graceful shutdown (SIGTERM) always does a final flush. Future
-multi-node replication will close the crash window — peers ACK from
-their own in-memory buffers before the producer is acknowledged.
+in the open flush window can be lost on a hard crash; this window is
+bounded by the flush thresholds. Graceful shutdown always does a final
+flush. Future data-plane replication will close the crash window by
+requiring follower acknowledgement before the producer is notified.
 
-**Recovery.** On startup the log file is scanned frame by frame:
+**Recovery.** On startup the log file is scanned frame by frame. Corrupt
+frames are skipped (scanner resyncs on the next valid magic). A torn
+tail (interrupted write at EOF) is truncated to the last valid frame.
 
-* A frame whose magic, header, CRC, or inner record stream is corrupt
-  is *skipped*, not removed; the scanner resyncs on the next valid
-  magic and continues. The bad frame's offsets become permanent gaps
-  that read as `ErrOffsetNotFound`.
-* A torn tail (an interrupted write at EOF) is truncated to the last
-  valid frame boundary so future appends start clean.
-
-**Compression.** `zstd` at `SpeedBestCompression` is the default. The
-flusher pays the encoder cost off the produce hot path; zstd's
-decompression speed is independent of the encoder level, so reads are
-unaffected by the choice. A single-slot decoded-frame cache on each
-log makes sequential consumer reads inside a batch O(1) after the
-first decompression.
-
-**Segments.** Each partition lives under a directory; the flusher
-rolls a new segment when the active one crosses `storage.segment_bytes`
-(default 64 MiB):
+**Segments.**
 
 ```
 data/topics/orders/p00007/
@@ -311,137 +346,149 @@ data/topics/orders/p00007/
   00000000000000020000.log    (active, base offset 20000)
 ```
 
-Segment filenames encode the segment's first offset (20-digit
-zero-padded). Sealed segments are kept open for reads but never
-written to.
+## Metadata store (Raft + bbolt)
 
-## Retention
+Topic configs, schemas, partition assignments, and cluster membership
+are stored in a Raft-replicated bbolt database. Three pods act as Raft
+voters; the rest are non-voters that receive the full replicated state.
 
-A per-partition reaper deletes sealed segments past the topic's
-retention bounds. Defaults: 7 days, no size cap. Both bounds are
-configurable globally (`topic.default_retention_age_ms`,
-`topic.default_retention_bytes`) and per-topic via:
+- **Reads** are served from each pod's local bbolt replica — no network
+  round-trip, ms-fresh staleness.
+- **Writes** go through `raft.Apply` and require quorum. Control-plane
+  write rate is very low (topic CRUD, partition assignments, heartbeats)
+  so Raft overhead is negligible.
+- **Peer discovery.** Pods register themselves via `bootstrap_peers`
+  config (static list of voter addresses). On K8s, use a headless
+  Service so pod DNS names are predictable:
+  `narad-0.narad.default.svc.cluster.local:7943`.
+- **Snapshots and log compaction** are handled automatically by the Raft
+  library (`FileSnapshotStore`). The FSM snapshot is a full bbolt
+  database copy.
 
-* the `retention` field on `POST /v1/topics`, and
-* `PATCH /v1/topics/{name}` with a `retention` body — the broker
-  closes cached partition logs so the next access reopens with the
-  new bounds (storage folds retention in at log-open time).
+## Cluster controller
 
-Zero in either field inherits the policy default; negatives are
-rejected. The active segment is never deleted, regardless of its age.
-Records in deleted segments become permanent gaps; reads return
-`404`/`ErrOffsetNotFound`.
+The **controller** is always the Raft leader — no separate election. On
+leadership takeover, `OnLeadershipAcquired` reconciles the FSM state:
+finds topics with unassigned partitions and pods with missed heartbeats.
 
-The reaper sweeps every `storage.retention_check_interval_ms` (default
-1 minute). Age is measured by segment-file mtime — a sealed segment's
-mtime stops advancing, so it's a stable proxy for "time of last write
-to that segment".
+**Partition assignment.** When a topic is created, the controller assigns
+each partition to the least-loaded active pod (sort by current partition
+count, round-robin for ties). Assignments are **sticky** — without
+data-plane replication, data lives only on the owning pod's disk, so
+partitions cannot be moved automatically.
 
-## Topics
+**Heartbeats.** Each pod calls `RegisterMember` (an upsert) every 5
+seconds. If a pod's heartbeat is older than `DeadTimeout` (default 30s),
+the controller marks it dead. Partitions owned by dead pods return 503
+until the pod restarts and its persistent volume reattaches.
 
-Topics are created via `POST /v1/topics`. `partitions`,
-`replication_factor`, and `retention` are optional; omitting them (or
-sending zero) applies the configured defaults.
+**Graceful shutdown.** If the leader calls `raft.LeadershipTransfer()`
+before shutting down, a follower elects itself immediately (~150ms)
+instead of waiting for the full heartbeat timeout + election window
+(~300–600ms).
 
-```jsonc
-{
-  "name": "orders",
-  "partitions": 8,                    // 0 = use default
-  "replication_factor": 2,            // 0 = use default; must be >= 2
-  "retention": {                      // omit to use defaults
-    "max_age_ms": 86400000,           // 0 = use default
-    "max_bytes":  1073741824          // 0 = use default
-  }
-}
-```
+## Routing
 
-`PATCH /v1/topics/{name}` accepts **exactly one** of `partitions` or
-`retention` per request:
+Requests arrive at any pod via the load balancer. Each pod reads the
+partition assignment from its local bbolt replica and either handles
+the request locally (if it owns the partition) or proxies it to the
+owner via the cluster port.
+
+- **Produce**: key is hashed to a partition; request proxied if needed.
+- **Consume**: a partition is chosen (random by default, lag-aware in
+  v1 via peer `/metrics` scraping); request proxied to its owner with
+  the partition pinned.
+- **Ack**: partition is decoded from the receipt handle; request proxied
+  if needed.
+
+## Parallel consumers (single partition)
+
+Narad's consume path supports SQS-style **gap-skipping reservation +
+out-of-order acknowledgement**, so a single partition can feed many
+concurrent consumer threads / pods without redelivery.
+
+**The model:**
+
+* `Consume` reserves the partition's lowest reachable offset that is
+  neither already in flight nor sitting in the partition's "acked ahead"
+  set, marks it invisible for `visibility_timeout_ms`, and returns the
+  message with a `receipt_handle`.
+* `Ack` decodes the handle, verifies the nonce against the active
+  reservation, and commits. Acks for already-committed offsets, expired
+  reservations, or re-reserved offsets return **410**.
+* When an ack arrives in offset order it advances the partition's
+  committed offset and walks forward through any contiguous run of
+  previously out-of-order acks. Out-of-order acks sit in a sparse
+  `ackedAhead` set per partition until the head catches up.
+
+**Receipt handle format.** Handles are `base64url(json({t,p,o,n}))` where
+`t`=topic, `p`=partition, `o`=offset, `n`=nonce. The nonce is generated
+per-reservation — it proves the consumer received this specific instance
+of the message. A forged handle with a wrong nonce returns **410**, not
+**401** (there is no shared secret). Any pod can decode the partition
+from the handle for routing without any shared key.
+
+**Per-partition caps:**
+
+| Cap | Default | Effect when reached |
+|---|---|---|
+| `max_in_flight_per_partition` | 1024 | `Consume` returns 204 (no message) |
+| `max_acked_ahead_per_partition` | 1024 | `Ack` of out-of-order offset returns **503** |
+
+**Ack error codes:**
+
+| Status | Meaning |
+|---|---|
+| 204 | Acked. |
+| 400 | Malformed handle, missing handle, or topic mismatch. |
+| 410 | Handle no longer matches an active reservation: already committed, visibility timeout expired, or broker restarted. |
+| 503 | Out-of-order ack rejected — `max_acked_ahead_per_partition` is full; head of queue is stuck. |
+
+**Consumer pattern (CLI):**
 
 ```sh
-# Increase partitions (increase-only; decrease/equal returns 400).
-curl -X PATCH localhost:7942/v1/topics/orders \
-  -H 'Content-Type: application/json' -d '{"partitions": 32}'
-
-# Update retention (no restart needed; cached logs reopen on next access).
-curl -X PATCH localhost:7942/v1/topics/orders \
-  -H 'Content-Type: application/json' \
-  -d '{"retention":{"max_age_ms":3600000}}'
+while true; do
+  msg=$(narad client consume --wait 5s orders) || break
+  [ -z "$msg" ] && continue
+  echo "$msg" | jq -r .receipt_handle | narad client ack orders
+done
 ```
 
-Existing records are not moved when partitions increase — they stay in
-the partitions they were originally written to. Future records'
-partition assignment uses `hash(key) % newCount`, so an existing key
-may now hash to a different partition than its prior records.
-Consumers that depend on per-key ordering should be aware. Decreasing
-the partition count is not supported (offsets are immutable).
-
-`DELETE /v1/topics/{name}` removes a topic, its on-disk segments, and
-its consumer offsets. Irreversible. The topic name can be reused
-immediately afterwards — a fresh produce starts at offset 0 again.
-
-`GET /v1/topics/{name}` returns the topic record plus per-partition
-runtime stats (segment count, oldest/next offset, bytes, oldest
-segment mtime).
-
-`GET /v1/topics` returns topics in lexicographic order by name.
-Pagination is keyset by name (cursor in `next_page_token`), robust
-against inserts and deletes between pages. `limit` defaults to 100,
-caps at 1000. `limit=0` is rejected at the HTTP layer; the
-broker-internal "no limit" path is reserved for the metrics poller.
+**Operational note.** The in-flight set is in-memory only. Restarting
+the broker clears all reservations — clients see 410 on subsequent acks,
+and the messages are redelivered after the visibility timeout. A
+background purger goroutine sweeps expired reservations every second so
+the in-flight cap and consumer lag metrics stay accurate between consume
+calls.
 
 ## Observability
 
-**`/metrics` (Prometheus exposition).** Mounted on the public API
-listener. Strict cardinality budget — labels are limited to
-`{topic}`, `{topic, partition}`, and `{route, method, status}` (where
-`route` is the matched ServeMux pattern, never the literal path).
-Highlights:
+**`/metrics` (Prometheus).** Highlights:
 
-* `narad_http_*` — requests by route/method/status, duration histogram,
-  bytes in/out, in-flight gauge.
-* `narad_messages_{produced,consumed}_total{topic,partition}` and the
-  matching `bytes_*_total` counters.
-* `narad_consume_wait_seconds{topic,outcome}` and
-  `narad_consume_empty_total{topic}` for tuning long-poll behaviour.
+* `narad_http_*` — requests by route/method/status, duration, bytes, in-flight.
+* `narad_messages_{produced,consumed}_total{topic,partition}` and `bytes_*_total`.
+* `narad_consume_wait_seconds{topic,outcome}` and `narad_consume_empty_total{topic}`.
 * `narad_consumer_lag_messages{topic,partition}` and
-  `narad_oldest_unconsumed_message_age_seconds{topic,partition}` for
-  autoscaling consumer worker counts. The age metric uses the segment
-  mtime containing the committed offset — Narad's on-disk frame
-  doesn't carry per-message timestamps, so this is documented as an
-  upper bound on "time since the consumer's next message was last
-  touched", not exact produce time.
-* `narad_consumer_dropped_messages{topic,partition}` — count of
-  unacknowledged messages already deleted by retention. Non-zero
-  means data was lost before the consumer caught up.
-* `narad_storage_{flush,fsync,retention_run}_duration_seconds`,
-  `narad_storage_segments_rolled_total`,
-  `narad_storage_retention_{deletions,bytes_deleted,messages_deleted}_total`.
+  `narad_oldest_unconsumed_message_age_seconds{topic,partition}`.
+* `narad_consumer_dropped_messages{topic,partition}` — unacknowledged
+  messages deleted by retention (data loss indicator).
+* `narad_storage_*` — flush/fsync/retention durations, segments rolled,
+  bytes deleted.
 * Inventory gauges: `narad_topics_total`, `narad_partitions_total`,
   `narad_topic_bytes{topic}`, `narad_segments{topic,partition}`.
-* Boot: `narad_boot_duration_seconds`,
-  `narad_storage_segments_scanned_at_boot_total{topic,partition}`.
+* `narad_partition_available_v1{topic,partition}` — messages ready to
+  deliver. **This metric name is load-bearing** — the cluster router
+  scrapes peer `/metrics` endpoints to make lag-aware consume routing
+  decisions. Do not rename it.
 
-A 5-second background poller refreshes the gauge-style metrics
-(inventory + lag) by calling `Broker.Snapshot`. Counters and
-histograms update inline at each call site. Series for deleted topics
-are pruned on the next tick so `DeleteTopic` doesn't leak series.
+A 5-second background poller refreshes gauge-style metrics. Series for
+deleted topics are pruned on the next tick.
 
-**pprof.** Enable with `--pprof-addr 127.0.0.1:6060` (or
-`NARAD_DEBUG_PPROF_ADDR=...`). Disabled by default. Handlers are
-registered explicitly on a private mux (no `DefaultServeMux` leak),
-and only `ReadHeaderTimeout` is set so `/debug/pprof/profile?seconds=N`
-isn't truncated. Bind to loopback in production — pprof exposes
-goroutine and heap details. The listener logs a warning if it sees a
-non-loopback address.
-
-```sh
-go tool pprof http://127.0.0.1:6060/debug/pprof/heap
-```
+**pprof.** Enable with `--pprof-addr 127.0.0.1:6060`. Bind to loopback
+in production.
 
 **Healthz / readyz.** `GET /healthz` is a fixed-200 liveness probe.
-`GET /readyz` returns 200 if `broker.Ready` succeeds, 503 otherwise —
-intended for Kubernetes-style traffic gating.
+`GET /readyz` returns 200 if `broker.Ready` succeeds, 503 otherwise.
 
 ## Testing
 
@@ -452,54 +499,50 @@ go test ./tests/e2e/... -race      # HTTP-level e2e against a real broker
 go test ./tests/e2e/... -run TestConsume   # one feature
 ```
 
-Unit tests live next to the code they cover. End-to-end HTTP tests
-under `tests/e2e/` are split by feature surface — one file per
-endpoint plus `lifecycle_test.go` for cross-cutting flows and
-`metrics_test.go` for the observability layer. The e2e harness
-(`helpers_test.go`) builds a real broker (SQLite metastore + temp
-partition logs) per test and exposes it via `httptest`. `envOpts`
-let individual tests override the policy, long-poll cap, or enable
-`/metrics` without bloating a fat constructor.
+The e2e harness (`helpers_test.go`) builds a real broker with a
+single-node Raft metastore (waits for leader election) and temp partition
+logs per test, exposed via `httptest`. Tests are split by feature surface.
 
 ## CI
 
-`.github/workflows/ci.yml` runs three jobs in parallel on every push
-to master and every PR:
+`.github/workflows/ci.yml` runs three jobs in parallel on every push to
+master and every PR:
 
 * **build** — `go vet ./...` + `go build ./...`
 * **unit-tests** — `go test -race -count=1` for everything except `tests/e2e`
 * **e2e-tests** — `go test -race -count=1 ./tests/e2e/...`
 
-Go version is pinned via `go-version-file: go.mod` so bumping the
-toolchain happens in one place. Each job has a 10-minute timeout
-(generous for the current ~30s local runtime).
-
 ## Design decisions
 
-* **Pure-Go dependencies.** SQLite is pulled in via
-  `glebarez/sqlite` (modernc/sqlite under the hood — no CGO).
-  Compression is `klauspost/compress`. JSON-Schema validation is
-  `santhosh-tekuri/jsonschema`. Metrics use `prometheus/client_golang`.
-  All four are pure Go; the binary builds and tests on any
-  CGO-disabled environment that supports `go test -race`.
+* **Pure-Go dependencies.** `hashicorp/raft` + `raft-boltdb` for
+  consensus, `go.etcd.io/bbolt` for the FSM state, `klauspost/compress`
+  for zstd, `santhosh-tekuri/jsonschema` for JSON-Schema validation,
+  `prometheus/client_golang` for metrics. All pure Go; no CGO required.
 * **Single binary with subcommands.** `narad serve|worker|client|version`
-  follows the kubectl/etcd/consul convention and keeps the install
-  story to one drop-in binary.
-* **Operator endpoints separated from data endpoints.** `/metrics`
-  shares the public listener (standard Prometheus convention), but
-  pprof is a separate, opt-in listener so its leak surface
-  (goroutine stacks, heap layout, profile DoS) is firewall-isolated
-  by default.
+  follows the kubectl/etcd/consul convention.
+* **Controller = Raft leader.** No separate controller election process —
+  Raft's built-in leader election provides split-brain prevention for free.
+* **Lazy expiry + background purger.** In-flight reservations expire via
+  a min-heap; a background goroutine sweeps all shards every second.
+  Lazy expiry during `ReserveNext` fixes the cap-blocking edge case
+  immediately; the purger keeps metrics accurate between consume calls.
+* **Operator endpoints separated from data endpoints.** `/metrics` shares
+  the public listener (standard Prometheus convention); pprof is a
+  separate, opt-in listener.
 
 ## Roadmap
 
-* Real leader/follower replication (`internal/replication`).
-* Cross-node partition assignment & rebalancing.
-* Message-visibility timeouts (SQS-style in-flight tracking) so
-  multiple consumers can pull from one topic without redelivery
-  during processing.
-* Schema-update with backwards-compatibility checking
-  (`PATCH /v1/topics/{name}` extension).
-* HTTP endpoints for schema registration (currently broker-internal
-  via the `schema.Registry` interface).
-* Auth, rate limiting.
+* **Data-plane replication.** Leader→follower log sync (`sync to follower
+  page cache, async fsync on both`), LEO/HWM distinction, log truncation
+  on leader change. `replication.Local` stub is wired today.
+* **`.offsets` log files.** Per-partition committed offset persistence
+  (Kafka `__consumer_offsets` style): append-only log, replicated in the
+  same stream as data, aggressively compacted to keep only the latest.
+  `onCommit` callback in `InFlight` is ready to wire this up.
+* **Cross-AZ replication (RF=3).** `replication_factor` is already in
+  the topic API; RF=3 support requires the replication protocol above.
+* **Consume routing v1.** Lag-aware weighted-random partition pick via
+  peer `/metrics` scraping (infrastructure is built; wiring pending).
+* **Auth, rate limiting.**
+* **Schema evolution** — backwards-compatibility checking on
+  `PATCH /v1/topics/{name}` with schema field.

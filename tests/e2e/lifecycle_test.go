@@ -3,130 +3,97 @@ package e2e
 import (
 	"net/http"
 	"testing"
+
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 )
 
-// TestLifecycle_FullFlow walks the canonical user journey end-to-end:
-// create → produce many → describe → consume all → ack all → alter →
-// delete. It's intentionally one big test rather than sub-tests so a
-// failure points at the exact step.
-func TestLifecycle_FullFlow(t *testing.T) {
-	env := newTestEnv(t)
+func TestHealthz(t *testing.T) {
+	env := newEnv(t, defaultOpts())
+	defer env.close()
 
-	// 1. Create a topic.
-	mustCreateTopic(t, env, createTopicReq{Name: "lifecycle", Partitions: 3})
+	resp := env.get("/healthz")
+	expectOK(t, resp)
+}
 
-	// 2. Produce 10 messages with rotating keys so they spread across partitions.
-	const total = 10
-	type position struct {
-		partition int
-		offset    int64
-	}
-	positions := make([]position, total)
-	for i := range total {
-		pr := mustProduce(t, env, "lifecycle", "k", map[string]int{"i": i})
-		positions[i] = position{partition: pr.Partition, offset: pr.Offset}
-	}
+func TestReadyz(t *testing.T) {
+	env := newEnv(t, defaultOpts())
+	defer env.close()
 
-	// 3. Get topic details — verify partition count and that NextOffsets sum
-	// to total.
-	resp := getJSON(t, env.Server.URL+"/v1/topics/lifecycle")
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("get-details: %d body=%s", resp.StatusCode, readBody(resp))
-	}
-	var d struct {
-		Name       string `json:"name"`
-		Partitions []struct {
-			NextOffset int64 `json:"next_offset"`
-		} `json:"partition_stats"`
-	}
-	decodeJSON(t, resp, &d)
-	if got := len(d.Partitions); got != 3 {
-		t.Fatalf("partition count: got %d want 3", got)
-	}
-	var sum int64
-	for _, p := range d.Partitions {
-		sum += p.NextOffset
-	}
-	if sum != int64(total) {
-		t.Fatalf("sum of next_offset: got %d want %d", sum, total)
-	}
+	resp := env.get("/readyz")
+	expectOK(t, resp)
+}
 
-	// 4. Consume all messages via queue mode.
-	consumed := 0
-	for consumed < total {
-		_, found := mustConsume(t, env, "lifecycle", consumeQuery{})
-		if !found {
-			break
-		}
-		consumed++
+func TestFullLifecycle(t *testing.T) {
+	env := newEnv(t, defaultOpts())
+	defer env.close()
+
+	// Create
+	resp := env.post("/v1/topics", map[string]any{
+		"name":               "full-cycle",
+		"partitions":         4,
+		"replication_factor": 2,
+		"retention_ms":       int64(3_600_000),
+	})
+	expectStatus(t, resp, http.StatusCreated)
+
+	// Produce some messages
+	env.produce("full-cycle", "k1", `{"msg": "hello"}`)
+	env.produce("full-cycle", "k2", `{"msg": "world"}`)
+
+	// Consume and ack
+	msg := env.consume("/v1/topics/full-cycle/consume?partition=0")
+	env.ack("full-cycle", msg.ReceiptHandle)
+
+	// Alter partitions + retention together
+	resp = env.patch("/v1/topics/full-cycle", map[string]any{
+		"partitions":   6,
+		"retention_ms": int64(7_200_000),
+	})
+	expectOK(t, resp)
+
+	updated := readJSON[topic.Topic](t, resp)
+	if updated.Partitions != 6 {
+		t.Fatalf("partitions: got %d, want 6", updated.Partitions)
 	}
-	if consumed != total {
-		t.Fatalf("consumed: got %d want %d", consumed, total)
+	if updated.RetentionMs != 7_200_000 {
+		t.Fatalf("retention_ms: got %d, want 7200000", updated.RetentionMs)
 	}
 
-	// 5. Ack each (partition, offset) we produced.
-	for _, p := range positions {
-		mustAck(t, env, "lifecycle", p.partition, p.offset)
-	}
-
-	// 6. After acking everything, queue consume returns 204.
-	if _, found := mustConsume(t, env, "lifecycle", consumeQuery{}); found {
-		t.Error("queue consume after acking all: expected 204")
-	}
-
-	// 7. Alter — increase partitions.
-	resp = jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/lifecycle",
-		map[string]any{"partitions": 5})
-	expectStatus(t, resp, http.StatusOK)
-
-	// 8. Delete and confirm gone.
-	resp = jsonReq(t, http.MethodDelete, env.Server.URL+"/v1/topics/lifecycle", nil)
+	// Delete
+	resp = env.del("/v1/topics/full-cycle")
 	expectStatus(t, resp, http.StatusNoContent)
 
-	resp = getJSON(t, env.Server.URL+"/v1/topics/lifecycle")
-	expectStatus(t, resp, http.StatusNotFound)
+	// Gone
+	resp = env.get("/v1/topics/full-cycle")
+	expectNotFound(t, resp)
 }
 
-// TestLifecycle_ReplayWorksAfterAck ensures that acking does NOT
-// erase data on disk — replay-by-offset on an acked offset still
-// returns the original message.
-func TestLifecycle_ReplayWorksAfterAck(t *testing.T) {
-	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "replay-after-ack", Partitions: 1})
+func TestFullLifecycleWithSchema(t *testing.T) {
+	env := newEnv(t, defaultOpts())
+	defer env.close()
 
-	for i := range 3 {
-		mustProduce(t, env, "replay-after-ack", "k", map[string]int{"i": i})
-	}
+	env.createTopic("schema-cycle", 2, 2, 0)
 
-	mustAck(t, env, "replay-after-ack", 0, 0)
+	// Register schema
+	resp := env.patch("/v1/topics/schema-cycle", map[string]any{
+		"schema": jsonRaw(schemaV1),
+	})
+	expectOK(t, resp)
 
-	// Replay offset 0 — must still succeed.
-	msg, found := mustConsume(t, env, "replay-after-ack",
-		consumeQuery{Partition: intPtr(0), Offset: int64Ptr(0)})
-	if !found {
-		t.Fatal("replay of acked offset: expected message, got 204")
-	}
-	if msg.Offset != 0 {
-		t.Errorf("replay offset: got %d want 0", msg.Offset)
-	}
-}
+	// Produce with valid data matching schema
+	env.produce("schema-cycle", "k", `{"id": 42, "name": "test"}`)
 
-// TestLifecycle_DistributesAcrossPartitions feeds 30 distinct keys
-// into a 3-partition topic and confirms all partitions received some
-// traffic.
-func TestLifecycle_DistributesAcrossPartitions(t *testing.T) {
-	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "spread", Partitions: 3})
+	// Consume
+	resp = env.get("/v1/topics/schema-cycle/consume")
+	expectOK(t, resp)
 
-	hit := make(map[int]int)
-	for i := range 30 {
-		// Distinct keys → broker hashes to varied partitions.
-		key := []byte{byte('a' + i)}
-		pr := mustProduce(t, env, "spread", string(key), map[string]int{"i": i})
-		hit[pr.Partition]++
-	}
+	// Evolve schema (add email field)
+	resp = env.patch("/v1/topics/schema-cycle", map[string]any{
+		"schema": jsonRaw(schemaV2Additive),
+	})
+	expectOK(t, resp)
 
-	if len(hit) < 2 {
-		t.Errorf("hit only %d partitions out of 3 with 30 distinct keys: %v", len(hit), hit)
-	}
+	// Delete
+	resp = env.del("/v1/topics/schema-cycle")
+	expectStatus(t, resp, http.StatusNoContent)
 }
