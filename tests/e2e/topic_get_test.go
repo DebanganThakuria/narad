@@ -8,6 +8,7 @@ import (
 )
 
 func TestGetTopic_ReturnsDetailsAndStats(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "details", Partitions: 3})
 
@@ -36,6 +37,7 @@ func TestGetTopic_ReturnsDetailsAndStats(t *testing.T) {
 }
 
 func TestGetTopic_ReportsNextOffsetAfterProduce(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "stats", Partitions: 2})
 
@@ -67,6 +69,7 @@ func TestGetTopic_ReportsNextOffsetAfterProduce(t *testing.T) {
 }
 
 func TestGetTopic_NotFound(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := getJSON(t, env.Server.URL+"/v1/topics/missing")
 	expectStatus(t, resp, http.StatusNotFound)

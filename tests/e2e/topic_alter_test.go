@@ -9,6 +9,7 @@ import (
 )
 
 func TestAlterTopic_IncreasePartitions(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "alter", Partitions: 2})
 
@@ -35,6 +36,7 @@ func TestAlterTopic_IncreasePartitions(t *testing.T) {
 }
 
 func TestAlterTopic_RejectsPartitionDecrease(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "shrink", Partitions: 4})
 
@@ -44,6 +46,7 @@ func TestAlterTopic_RejectsPartitionDecrease(t *testing.T) {
 }
 
 func TestAlterTopic_RejectsPartitionEqual(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "same", Partitions: 4})
 
@@ -53,6 +56,7 @@ func TestAlterTopic_RejectsPartitionEqual(t *testing.T) {
 }
 
 func TestAlterTopic_RejectsAboveMaxPartitions(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t, withPolicy(broker.TopicPolicy{
 		DefaultPartitions:        2,
 		MaxPartitions:            8,
@@ -67,6 +71,7 @@ func TestAlterTopic_RejectsAboveMaxPartitions(t *testing.T) {
 }
 
 func TestAlterTopic_UpdateRetention(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "retention", RetentionMs: 60_000})
 
@@ -85,6 +90,7 @@ func TestAlterTopic_UpdateRetention(t *testing.T) {
 // TestAlterTopic_RetentionUpdateReopensPartitionLogs verifies that a
 // retention update doesn't break the partition log cache.
 func TestAlterTopic_RetentionUpdateReopensPartitionLogs(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "reopen", Partitions: 1})
 
@@ -98,6 +104,7 @@ func TestAlterTopic_RetentionUpdateReopensPartitionLogs(t *testing.T) {
 }
 
 func TestAlterTopic_RetentionDefaultsWhenZero(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "default-ret", RetentionMs: 60_000})
 
@@ -115,6 +122,7 @@ func TestAlterTopic_RetentionDefaultsWhenZero(t *testing.T) {
 }
 
 func TestAlterTopic_RejectsNegativeRetention(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "neg"})
 
@@ -124,6 +132,7 @@ func TestAlterTopic_RejectsNegativeRetention(t *testing.T) {
 }
 
 func TestAlterTopic_RejectsNeitherField(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "neither"})
 
@@ -133,6 +142,7 @@ func TestAlterTopic_RejectsNeitherField(t *testing.T) {
 }
 
 func TestAlterTopic_NotFound(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/missing",
 		map[string]any{"partitions": 5})
@@ -140,6 +150,7 @@ func TestAlterTopic_NotFound(t *testing.T) {
 }
 
 func TestAlterTopic_RejectsInvalidJSON(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "bad-json"})
 

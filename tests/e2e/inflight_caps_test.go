@@ -14,6 +14,7 @@ import (
 // concurrent consumers on a single partition each get a different
 // offset (gap-skipping ReserveNext working end-to-end through HTTP).
 func TestParallelConsumersOnePartitionDistinctMessages(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -59,6 +60,7 @@ func TestParallelConsumersOnePartitionDistinctMessages(t *testing.T) {
 // path: three reservations, ack arrives in 1, 2, 0 order, and the
 // final committed offset should be 2.
 func TestOutOfOrderAckCommitAdvancesContiguous(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -99,6 +101,7 @@ func TestOutOfOrderAckCommitAdvancesContiguous(t *testing.T) {
 // handle is rejected. The handle format is base64url(json({t,p,o,n}))
 // with no HMAC — corruption causes a decode failure → 400.
 func TestAckTamperedHandleReturns400(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -120,6 +123,7 @@ func TestAckTamperedHandleReturns400(t *testing.T) {
 // already been committed — the visibility window has elapsed for the
 // caller.
 func TestAckReusedHandleReturns410(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -136,6 +140,7 @@ func TestAckReusedHandleReturns410(t *testing.T) {
 // TestAckTopicMismatchReturns400 covers a handle for one topic sent
 // against another's ack endpoint.
 func TestAckTopicMismatchReturns400(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -151,6 +156,7 @@ func TestAckTopicMismatchReturns400(t *testing.T) {
 // TestAckEmptyHandleReturns400 covers the empty-handle short-circuit
 // in the handler.
 func TestAckEmptyHandleReturns400(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -164,6 +170,7 @@ func TestAckEmptyHandleReturns400(t *testing.T) {
 // (without acking) return 204 (no message available — partition cap
 // hit).
 func TestInFlightCapBlocksFurtherReserves(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -205,6 +212,7 @@ func TestInFlightCapBlocksFurtherReserves(t *testing.T) {
 // TestAckedAheadCapReturns503 covers the ackedAhead-full path.
 // Drives two out-of-order acks (cap=2), then a third triggers 503.
 func TestAckedAheadCapReturns503(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -239,6 +247,7 @@ func TestAckedAheadCapReturns503(t *testing.T) {
 // TestAlterCapsTakesEffect verifies that altering caps via PATCH
 // updates the broker's view immediately (RefreshCaps integration).
 func TestAlterCapsTakesEffect(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -274,6 +283,7 @@ func TestAlterCapsTakesEffect(t *testing.T) {
 // many consumer threads, single partition, every produced message
 // must be delivered exactly once.
 func TestParallelConsumersDoNotDuplicateMessages(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
