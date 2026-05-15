@@ -17,6 +17,7 @@ import (
 // equality because json.Unmarshal turns every number into float64,
 // which makes naive map equality awkward.
 func TestConsume_RoundTripIntegrity(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "rt", Partitions: 1})
 
@@ -58,6 +59,7 @@ func TestConsume_RoundTripIntegrity(t *testing.T) {
 }
 
 func TestConsume_ReturnsNoContentWhenEmpty(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "empty", Partitions: 1})
 
@@ -71,6 +73,7 @@ func TestConsume_ReturnsNoContentWhenEmpty(t *testing.T) {
 // after Ack(offset=N), the next queue-style consume on the same
 // partition returns offset N+1 (or 204 if drained).
 func TestConsume_AckAdvancesQueueCursor(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "ack-cursor", Partitions: 1})
 
@@ -93,13 +96,14 @@ func TestConsume_AckAdvancesQueueCursor(t *testing.T) {
 }
 
 func TestConsume_PartitionPinned(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "pinned", Partitions: 4})
 
 	pr := mustProduce(t, env, "pinned", "stable", map[string]int{"v": 1})
 
 	// Consume from the same partition the produce landed on — should hit.
-	msg, found := mustConsume(t, env, "pinned", consumeQuery{Partition: intPtr(pr.Partition)})
+	msg, found := mustConsume(t, env, "pinned", consumeQuery{Partition: new(pr.Partition)})
 	if !found {
 		t.Fatalf("partition %d: expected message, got 204", pr.Partition)
 	}
@@ -109,7 +113,7 @@ func TestConsume_PartitionPinned(t *testing.T) {
 
 	// Consume from a partition that DIDN'T receive the message — 204.
 	other := (pr.Partition + 1) % 4
-	if _, found := mustConsume(t, env, "pinned", consumeQuery{Partition: intPtr(other)}); found {
+	if _, found := mustConsume(t, env, "pinned", consumeQuery{Partition: new(other)}); found {
 		t.Errorf("partition %d: expected 204, got a message", other)
 	}
 }
@@ -119,6 +123,7 @@ func TestConsume_PartitionPinned(t *testing.T) {
 // committed offset is unaffected, so a queue-style consume after a
 // replay still returns offset 0.
 func TestConsume_ReplayDoesNotAdvanceCommittedOffset(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "replay", Partitions: 1})
 
@@ -127,7 +132,7 @@ func TestConsume_ReplayDoesNotAdvanceCommittedOffset(t *testing.T) {
 	// Replay offset 0 twice — should return the same message both times.
 	for i := range 2 {
 		msg, found := mustConsume(t, env, "replay",
-			consumeQuery{Partition: intPtr(pr.Partition), Offset: int64Ptr(0)})
+			consumeQuery{Partition: new(pr.Partition), Offset: new(int64(0))})
 		if !found {
 			t.Fatalf("replay #%d: expected message, got 204", i)
 		}
@@ -146,18 +151,20 @@ func TestConsume_ReplayDoesNotAdvanceCommittedOffset(t *testing.T) {
 // TestConsume_ReplayPastTailReturns204 verifies that asking for a
 // future offset (>= LogEndOffset) returns 204 rather than blocking.
 func TestConsume_ReplayPastTailReturns204(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "future", Partitions: 1})
 
 	mustProduce(t, env, "future", "k", map[string]int{"v": 1})
 
 	if _, found := mustConsume(t, env, "future",
-		consumeQuery{Partition: intPtr(0), Offset: int64Ptr(999)}); found {
+		consumeQuery{Partition: new(0), Offset: new(int64(999))}); found {
 		t.Error("offset 999 with no records there: expected 204, got a message")
 	}
 }
 
 func TestConsume_RejectsOffsetWithoutPartition(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "no-part"})
 
@@ -166,6 +173,7 @@ func TestConsume_RejectsOffsetWithoutPartition(t *testing.T) {
 }
 
 func TestConsume_RejectsInvalidPartition(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "bad-part"})
 
@@ -174,6 +182,7 @@ func TestConsume_RejectsInvalidPartition(t *testing.T) {
 }
 
 func TestConsume_RejectsOutOfRangePartition(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "oor", Partitions: 2})
 
@@ -182,6 +191,7 @@ func TestConsume_RejectsOutOfRangePartition(t *testing.T) {
 }
 
 func TestConsume_RejectsInvalidOffset(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "bad-off"})
 
@@ -190,6 +200,7 @@ func TestConsume_RejectsInvalidOffset(t *testing.T) {
 }
 
 func TestConsume_RejectsInvalidWait(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "bad-wait"})
 
@@ -198,6 +209,7 @@ func TestConsume_RejectsInvalidWait(t *testing.T) {
 }
 
 func TestConsume_NotFoundForUnknownTopic(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := getJSON(t, env.Server.URL+"/v1/topics/missing/consume")
 	expectStatus(t, resp, http.StatusNotFound)
@@ -208,6 +220,7 @@ func TestConsume_NotFoundForUnknownTopic(t *testing.T) {
 // midway, and the consumer wakes up with the new message before its
 // wait expires.
 func TestConsume_LongPollWaitsAndReturnsOnArrival(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t, withMaxConsumeWait(2*time.Second))
 	mustCreateTopic(t, env, createTopicReq{Name: "longpoll", Partitions: 1})
 
@@ -260,6 +273,7 @@ func TestConsume_LongPollWaitsAndReturnsOnArrival(t *testing.T) {
 // TestConsume_LongPollTimesOutWith204 verifies that wait expiry on an
 // empty topic returns 204 cleanly, not an error.
 func TestConsume_LongPollTimesOutWith204(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t, withMaxConsumeWait(500*time.Millisecond))
 	mustCreateTopic(t, env, createTopicReq{Name: "timeout", Partitions: 1})
 

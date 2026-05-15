@@ -9,6 +9,7 @@ import (
 )
 
 func TestCreateTopic(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -22,6 +23,7 @@ func TestCreateTopic(t *testing.T) {
 }
 
 func TestCreateTopicDefaults(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -35,6 +37,7 @@ func TestCreateTopicDefaults(t *testing.T) {
 }
 
 func TestCreateTopicWithRetention(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -45,6 +48,7 @@ func TestCreateTopicWithRetention(t *testing.T) {
 }
 
 func TestCreateTopicDuplicate(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -54,6 +58,7 @@ func TestCreateTopicDuplicate(t *testing.T) {
 }
 
 func TestGetTopic(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -71,6 +76,7 @@ func TestGetTopic(t *testing.T) {
 }
 
 func TestGetTopicNotFound(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -79,6 +85,7 @@ func TestGetTopicNotFound(t *testing.T) {
 }
 
 func TestListTopics(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -103,6 +110,7 @@ func TestListTopics(t *testing.T) {
 }
 
 func TestListTopicsPagination(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -143,6 +151,7 @@ func TestListTopicsPagination(t *testing.T) {
 }
 
 func TestDeleteTopic(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -156,6 +165,7 @@ func TestDeleteTopic(t *testing.T) {
 }
 
 func TestDeleteTopicNotFound(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -166,6 +176,7 @@ func TestDeleteTopicNotFound(t *testing.T) {
 // ---- alter tests -----------------------------------------------------------
 
 func TestAlterPartitions(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -181,6 +192,7 @@ func TestAlterPartitions(t *testing.T) {
 }
 
 func TestAlterPartitionsDecrease(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -190,6 +202,7 @@ func TestAlterPartitionsDecrease(t *testing.T) {
 }
 
 func TestAlterRetention(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -245,6 +258,7 @@ const schemaV2RemoveField = `{
 }`
 
 func TestAlterSchemaFirstVersion(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -257,6 +271,7 @@ func TestAlterSchemaFirstVersion(t *testing.T) {
 }
 
 func TestAlterSchemaCompatible(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -275,6 +290,7 @@ func TestAlterSchemaCompatible(t *testing.T) {
 }
 
 func TestAlterSchemaIncompatibleTypeChange(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -296,6 +312,7 @@ func TestAlterSchemaIncompatibleTypeChange(t *testing.T) {
 }
 
 func TestAlterSchemaIncompatibleRemoval(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -314,6 +331,7 @@ func TestAlterSchemaIncompatibleRemoval(t *testing.T) {
 }
 
 func TestAlterSchemaInvalidJSON(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -326,6 +344,7 @@ func TestAlterSchemaInvalidJSON(t *testing.T) {
 }
 
 func TestAlterSchemaWithPartitions(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -344,6 +363,7 @@ func TestAlterSchemaWithPartitions(t *testing.T) {
 }
 
 func TestAlterSchemaWithRetention(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -362,6 +382,7 @@ func TestAlterSchemaWithRetention(t *testing.T) {
 }
 
 func TestAlterAllThree(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -384,6 +405,7 @@ func TestAlterAllThree(t *testing.T) {
 }
 
 func TestAlterEmptyBody(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -393,6 +415,7 @@ func TestAlterEmptyBody(t *testing.T) {
 }
 
 func TestAlterNotFound(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 

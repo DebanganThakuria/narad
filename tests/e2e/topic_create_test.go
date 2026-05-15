@@ -11,6 +11,7 @@ import (
 // TestCreateTopic_Defaults verifies that omitting partitions/RF/retention
 // pulls them from TopicPolicy.
 func TestCreateTopic_Defaults(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics", map[string]any{
@@ -39,6 +40,7 @@ func TestCreateTopic_Defaults(t *testing.T) {
 // TestCreateTopic_ExplicitValues verifies that user-supplied
 // partitions, replication factor, and retention are persisted as-is.
 func TestCreateTopic_ExplicitValues(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 
 	got := mustCreateTopic(t, env, createTopicReq{
@@ -60,6 +62,7 @@ func TestCreateTopic_ExplicitValues(t *testing.T) {
 }
 
 func TestCreateTopic_RejectsDuplicateName(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "dup"})
 
@@ -68,12 +71,14 @@ func TestCreateTopic_RejectsDuplicateName(t *testing.T) {
 }
 
 func TestCreateTopic_RejectsEmptyName(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics", map[string]any{"name": ""})
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
 func TestCreateTopic_RejectsNegativePartitions(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics", map[string]any{
 		"name":       "neg-partitions",
@@ -84,6 +89,7 @@ func TestCreateTopic_RejectsNegativePartitions(t *testing.T) {
 
 // TestCreateTopic_RejectsAboveMaxPartitions exercises the policy bound.
 func TestCreateTopic_RejectsAboveMaxPartitions(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t, withPolicy(broker.TopicPolicy{
 		DefaultPartitions:        4,
 		MaxPartitions:            8,
@@ -99,6 +105,7 @@ func TestCreateTopic_RejectsAboveMaxPartitions(t *testing.T) {
 }
 
 func TestCreateTopic_RejectsRFBelowTwo(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics", map[string]any{
 		"name":               "rf-1",
@@ -108,6 +115,7 @@ func TestCreateTopic_RejectsRFBelowTwo(t *testing.T) {
 }
 
 func TestCreateTopic_RejectsNegativeRetention(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics", map[string]any{
 		"name":         "neg-retention",
@@ -117,12 +125,14 @@ func TestCreateTopic_RejectsNegativeRetention(t *testing.T) {
 }
 
 func TestCreateTopic_RejectsInvalidJSON(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := rawReq(t, http.MethodPost, env.Server.URL+"/v1/topics", []byte("{not json}"))
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
 func TestCreateTopic_RejectsUnknownFields(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics", map[string]any{
 		"name":    "extra-fields",
@@ -133,6 +143,7 @@ func TestCreateTopic_RejectsUnknownFields(t *testing.T) {
 
 // TestCreateTopic_RejectsOversizedBody confirms the 1MiB body cap.
 func TestCreateTopic_RejectsOversizedBody(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 
 	huge := make([]byte, 0, 2<<20)

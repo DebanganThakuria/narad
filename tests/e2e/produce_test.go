@@ -9,6 +9,7 @@ import (
 )
 
 func TestProduce_AssignsOffsetAndPartition(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "produce-basic", Partitions: 4})
 
@@ -22,6 +23,7 @@ func TestProduce_AssignsOffsetAndPartition(t *testing.T) {
 }
 
 func TestProduce_KeyPinsToOnePartition(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "key-pin", Partitions: 8})
 
@@ -39,6 +41,7 @@ func TestProduce_KeyPinsToOnePartition(t *testing.T) {
 // each partition, successive produces get strictly increasing offsets
 // starting at 0.
 func TestProduce_OffsetsAreMonotonicPerPartition(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "monotonic", Partitions: 2})
 
@@ -58,6 +61,7 @@ func TestProduce_OffsetsAreMonotonicPerPartition(t *testing.T) {
 }
 
 func TestProduce_AcceptsArrayMessage(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "arr"})
 
@@ -67,6 +71,7 @@ func TestProduce_AcceptsArrayMessage(t *testing.T) {
 }
 
 func TestProduce_AcceptsStringMessage(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "str"})
 
@@ -80,6 +85,7 @@ func TestProduce_AcceptsStringMessage(t *testing.T) {
 // handler accepts it. If we ever want to reject zero-content payloads
 // the policy should live in handlers/produce.go's Validate, not here.
 func TestProduce_AcceptsEmptyStringMessage(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "empty-str"})
 
@@ -89,6 +95,7 @@ func TestProduce_AcceptsEmptyStringMessage(t *testing.T) {
 }
 
 func TestProduce_RejectsMissingMessage(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "no-msg"})
 
@@ -98,6 +105,7 @@ func TestProduce_RejectsMissingMessage(t *testing.T) {
 }
 
 func TestProduce_RejectsUnknownFields(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "extra"})
 
@@ -107,6 +115,7 @@ func TestProduce_RejectsUnknownFields(t *testing.T) {
 }
 
 func TestProduce_RejectsInvalidJSON(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "bad-json"})
 
@@ -116,6 +125,7 @@ func TestProduce_RejectsInvalidJSON(t *testing.T) {
 }
 
 func TestProduce_NotFoundForUnknownTopic(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/never-created/produce",
 		map[string]any{"message": map[string]string{"x": "1"}})
@@ -126,6 +136,7 @@ func TestProduce_NotFoundForUnknownTopic(t *testing.T) {
 // MaxBytesReader wrapping the body fires inside the JSON decoder and
 // the handler maps the error to 400.
 func TestProduce_RejectsOversizedBody(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "big"})
 
@@ -148,6 +159,7 @@ func TestProduce_RejectsOversizedBody(t *testing.T) {
 //
 // Run with -race for additional coverage.
 func TestProduce_ConcurrentProducersAssignUniqueOffsets(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "race", Partitions: 4})
 

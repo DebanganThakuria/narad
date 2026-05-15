@@ -6,11 +6,12 @@ import (
 )
 
 func TestAck_HappyPath(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "ack", Partitions: 2})
 
 	pr := mustProduce(t, env, "ack", "k", map[string]int{"v": 1})
-	msg, found := mustConsume(t, env, "ack", consumeQuery{Partition: intPtr(pr.Partition)})
+	msg, found := mustConsume(t, env, "ack", consumeQuery{Partition: new(pr.Partition)})
 	if !found {
 		t.Fatal("expected a message after produce")
 	}
@@ -24,6 +25,7 @@ func TestAck_HappyPath(t *testing.T) {
 // (parks in ackedAhead), then offset 0 (commits in-order, chain collapses
 // to 1). After both commits, queue consume returns offset 2.
 func TestAck_LowerThanCommittedIsNoOp(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "monotonic-commit", Partitions: 1})
 
@@ -55,6 +57,7 @@ func TestAck_LowerThanCommittedIsNoOp(t *testing.T) {
 }
 
 func TestAck_NotFoundForUnknownTopic(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	// Create, produce, consume to get a valid handle, then delete the topic.
 	mustCreateTopic(t, env, createTopicReq{Name: "gone"})
@@ -72,6 +75,7 @@ func TestAck_NotFoundForUnknownTopic(t *testing.T) {
 }
 
 func TestAck_RejectsInvalidJSON(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "bad-json"})
 
@@ -81,6 +85,7 @@ func TestAck_RejectsInvalidJSON(t *testing.T) {
 }
 
 func TestAck_RejectsUnknownFields(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "extra-fields"})
 
@@ -90,6 +95,7 @@ func TestAck_RejectsUnknownFields(t *testing.T) {
 }
 
 func TestAck_RejectsMissingHandle(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "no-handle"})
 
