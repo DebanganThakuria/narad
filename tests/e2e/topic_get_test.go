@@ -37,7 +37,7 @@ func TestGetTopic_ReturnsDetailsAndStats(t *testing.T) {
 
 func TestGetTopic_ReportsNextOffsetAfterProduce(t *testing.T) {
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "stats", Partitions: 2})
+	mustCreateTopic(t, env, createTopicReq{Name: "stats", Partitions: 3})
 
 	// Produce with the same key 3 times — HashRoundRobin keyed mode is
 	// deterministic, so all 3 land on the same partition.

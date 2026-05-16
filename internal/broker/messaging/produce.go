@@ -24,7 +24,13 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 		return 0, 0, err
 	}
 
-	partIdx := e.partitions.Pick(topicName, key, t.Partitions)
+	partIdx, err := e.pickProducePartition(topicName, key, t.Partitions)
+	if err != nil {
+		if e.metrics != nil {
+			e.metrics.IncError("messaging", "partition_pick")
+		}
+		return 0, 0, err
+	}
 	log, err := e.logs.Get(topicName, partIdx)
 	if err != nil {
 		if e.metrics != nil {

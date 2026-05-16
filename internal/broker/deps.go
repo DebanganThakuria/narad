@@ -3,6 +3,7 @@ package broker
 import (
 	"log/slog"
 
+	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
@@ -24,6 +25,7 @@ type Deps struct {
 	Schemas         schema.Registry
 	ConsumerOffsets *consumer.InFlight
 	Replicator      replication.Replicator
+	Logs            *runtime.Logs
 	Logger          *slog.Logger
 
 	// MaxConsumeWait caps how long a long-poll consume can block.

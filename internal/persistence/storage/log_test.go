@@ -920,6 +920,120 @@ func TestRetentionDisabledIsNoop(t *testing.T) {
 	}
 }
 
+func TestDefaultOptionsAndAccessors(t *testing.T) {
+	dir := testLogPath(t)
+	l, err := NewLog(dir, DefaultOptions())
+	if err != nil {
+		t.Fatalf("NewLog() error = %v", err)
+	}
+	defer l.Close()
+
+	if l.NotifyC() == nil {
+		t.Fatal("NotifyC() = nil")
+	}
+	if got := l.OldestOffset(); got != 0 {
+		t.Fatalf("OldestOffset() = %d, want 0", got)
+	}
+	if got := l.SizeBytes(); got != 0 {
+		t.Fatalf("SizeBytes() = %d, want 0", got)
+	}
+	if got := l.SegmentCount(); got != 1 {
+		t.Fatalf("SegmentCount() = %d, want 1", got)
+	}
+	if got := l.LatestOffset(); got != 0 {
+		t.Fatalf("LatestOffset() = %d, want 0", got)
+	}
+	if mt, ok := l.OldestSegmentAt(); !ok || mt <= 0 {
+		t.Fatalf("OldestSegmentAt() = (%d, %t), want valid mtime", mt, ok)
+	}
+	if mt, ok := l.SegmentMTimeForOffset(0); ok || mt != 0 {
+		t.Fatalf("SegmentMTimeForOffset(0) = (%d, %t), want no match", mt, ok)
+	}
+	if l.findSegmentLocked(999) != nil {
+		t.Fatal("findSegmentLocked() found unexpected segment")
+	}
+
+	off, err := l.Append([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	if off != 0 {
+		t.Fatalf("Append() offset = %d, want 0", off)
+	}
+	if got := l.LatestOffset(); got != 0 {
+		t.Fatalf("LatestOffset() = %d, want 0", got)
+	}
+	if mt, ok := l.SegmentMTimeForOffset(0); ok || mt != 0 {
+		t.Fatalf("SegmentMTimeForOffset(0) = (%d, %t), want no flushed match", mt, ok)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	l, err = NewLog(dir, DefaultOptions())
+	if err != nil {
+		t.Fatalf("reopen NewLog() error = %v", err)
+	}
+	defer l.Close()
+	if mt, ok := l.SegmentMTimeForOffset(0); !ok || mt <= 0 {
+		t.Fatalf("SegmentMTimeForOffset(0) = (%d, %t), want valid mtime", mt, ok)
+	}
+	if mt, ok := l.SegmentMTimeForOffset(1); ok || mt != 0 {
+		t.Fatalf("SegmentMTimeForOffset(1) = (%d, %t), want no match", mt, ok)
+	}
+	if seg := l.findSegmentLocked(0); seg == nil {
+		t.Fatal("findSegmentLocked(0) = nil, want segment")
+	}
+}
+
+func TestListSegmentFileNamesSortsAndFilters(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{
+		segmentFileName(20),
+		segmentFileName(5),
+		"notes.txt",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q) error = %v", name, err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, segmentFileName(99)), 0o755); err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+
+	names, err := listSegmentFileNames(dir)
+	if err != nil {
+		t.Fatalf("listSegmentFileNames() error = %v", err)
+	}
+	want := []string{segmentFileName(5), segmentFileName(20)}
+	if fmt.Sprint(names) != fmt.Sprint(want) {
+		t.Fatalf("listSegmentFileNames() = %v, want %v", names, want)
+	}
+}
+
+func TestSegmentHelpersCoverClosedPaths(t *testing.T) {
+	dir := t.TempDir()
+	seg, err := createSegment(dir, 7)
+	if err != nil {
+		t.Fatalf("createSegment() error = %v", err)
+	}
+	if seg.path != filepath.Join(dir, segmentFileName(7)) {
+		t.Fatalf("segment path = %q, want %q", seg.path, filepath.Join(dir, segmentFileName(7)))
+	}
+	if seg.baseOffset != 7 || seg.nextOffset != 7 || seg.sizeBytes != 0 {
+		t.Fatalf("segment state = %+v, want base=7 next=7 size=0", seg)
+	}
+	if err := seg.close(); err != nil {
+		t.Fatalf("close() error = %v", err)
+	}
+	if mt, err := segmentMTime(seg); err == nil || mt != 0 {
+		t.Fatalf("segmentMTime(closed) = (%d, %v), want error", mt, err)
+	}
+	if err := seg.close(); err != nil {
+		t.Fatalf("second close() error = %v", err)
+	}
+}
+
 // ---- file-poking helpers (test-only) ------------------------------
 //
 // Tests in this file treat a "log" as a directory of segment files

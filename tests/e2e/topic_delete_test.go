@@ -29,7 +29,7 @@ func TestDeleteTopic_NotFound(t *testing.T) {
 // should all work cleanly.
 func TestDeleteTopic_AllowsRecreate(t *testing.T) {
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "recycle", Partitions: 1})
+	mustCreateTopic(t, env, createTopicReq{Name: "recycle", Partitions: 3})
 	mustProduce(t, env, "recycle", "k", map[string]int{"v": 1})
 
 	// Delete.
@@ -37,7 +37,7 @@ func TestDeleteTopic_AllowsRecreate(t *testing.T) {
 	expectStatus(t, resp, http.StatusNoContent)
 
 	// Recreate the same name and confirm a fresh produce starts at offset 0.
-	mustCreateTopic(t, env, createTopicReq{Name: "recycle", Partitions: 1})
+	mustCreateTopic(t, env, createTopicReq{Name: "recycle", Partitions: 3})
 	got := mustProduce(t, env, "recycle", "k", map[string]int{"v": 99})
 	if got.Offset != 0 {
 		t.Errorf("first produce after recreate: offset %d want 0", got.Offset)

@@ -216,8 +216,8 @@ func (s *Store) GetSchema(_ context.Context, topicName string, version int) ([]b
 
 // -- assignment methods --
 
-func (s *Store) AssignPartition(ctx context.Context, topicName string, partition int, ownerID string) error {
-	return s.apply(ctx, opAssignPartition, Assignment{Topic: topicName, Partition: partition, OwnerID: ownerID})
+func (s *Store) AssignPartition(ctx context.Context, topicName string, partition int, ownerID string, followerID string) error {
+	return s.apply(ctx, opAssignPartition, Assignment{Topic: topicName, Partition: partition, OwnerID: ownerID, FollowerID: followerID})
 }
 
 func (s *Store) GetAssignment(topicName string, partition int) (Assignment, error) {

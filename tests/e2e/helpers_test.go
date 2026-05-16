@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker"
+	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -162,8 +163,11 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		t.Fatalf("broker: %v", err)
 	}
 
+	logs := runtime.NewLogs(opts.dataDir, opts.logOptions, ms, m)
+
 	h := handlers.New(handlers.Deps{
 		Broker:         br,
+		Logs:           logs,
 		Logger:         log,
 		MaxConsumeWait: opts.maxConsumeWait,
 	})

@@ -181,11 +181,11 @@ func TestAssignments(t *testing.T) {
 	s := newTestStore(t)
 
 	for _, p := range []int{0, 1, 2, 3} {
-		if err := s.AssignPartition(ctx, "orders", p, "narad-0"); err != nil {
+		if err := s.AssignPartition(ctx, "orders", p, "narad-0", "narad-1"); err != nil {
 			t.Fatalf("AssignPartition %d: %v", p, err)
 		}
 	}
-	s.AssignPartition(ctx, "payments", 0, "narad-1")
+	s.AssignPartition(ctx, "payments", 0, "narad-1", "narad-2")
 
 	a, err := s.GetAssignment("orders", 2)
 	if err != nil || a.OwnerID != "narad-0" {

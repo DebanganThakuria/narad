@@ -21,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"github.com/debanganthakuria/narad/internal/broker"
+	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/cluster"
 	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/consumer"
@@ -44,6 +45,9 @@ func runServe(args []string) error {
 	if err != nil || cfg == nil {
 		return err
 	}
+	if err := validateServeCluster(); err != nil {
+		return err
+	}
 
 	log, err := logger.New(cfg.Log.Format, cfg.Log.Level)
 	if err != nil {
@@ -52,7 +56,7 @@ func runServe(args []string) error {
 
 	reg, m := buildMetrics()
 
-	if err = os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil { // idempotent dir creation
+	if err = os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil {
 		return fmt.Errorf("data dir: %w", err)
 	}
 
@@ -67,7 +71,7 @@ func runServe(args []string) error {
 	}
 	defer closeWithLog(log, "metastore", ms.Close)
 
-	br, offsets, err := buildBroker(cfg, ms, m, log)
+	br, logs, offsets, err := buildBroker(cfg, nodeID, ms, m, log)
 	if err != nil {
 		return err
 	}
@@ -76,7 +80,9 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Start cluster background loops.
+	recoveryClient := &http.Client{Timeout: 5 * time.Second}
+	recovery := replication.NewStoreRecovery(nodeID, ms, logs, recoveryClient)
+
 	hb := controller.NewHeartbeater(ms, metastore.Member{
 		ID:     nodeID,
 		Addr:   cfg.HTTP.Addr,
@@ -98,9 +104,13 @@ func runServe(args []string) error {
 	poller := metrics.NewPoller(m, br, log)
 	wg.Go(func() { poller.Run(ctx) })
 
-	srv := buildAPIServer(cfg, br, router, m, reg, log)
-
-	// Capture boot time
+	srv := buildAPIServer(cfg, br, logs, router, m, reg, log)
+	wg.Go(func() {
+		if repairErr := recovery.RepairOwnedPartitions(ctx); repairErr != nil {
+			log.Error("repair owned partitions", "err", repairErr)
+			stop()
+		}
+	})
 	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())
 
 	if err = srv.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -114,17 +124,10 @@ func runServe(args []string) error {
 		"version", versionString())
 
 	wg.Wait()
-
 	log.Info("narad serve stopped")
-
 	return nil
 }
 
-// buildMetrics constructs the Prometheus registry plus runtime
-// collectors and returns both. The registry is what /metrics scrapes;
-// the *Metrics struct is what every instrumented call site reads
-// from. Splitting them this way means tests can swap a fresh registry
-// without touching the rest of the wiring.
 func buildMetrics() (*prometheus.Registry, *metrics.Metrics) {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(
@@ -134,9 +137,6 @@ func buildMetrics() (*prometheus.Registry, *metrics.Metrics) {
 	return reg, metrics.New(reg)
 }
 
-// serveFlags holds the values parsed from the `narad serve` flag set
-// before they are overlaid onto the loaded config. Keeping them in one
-// struct lets us pass parsed flags around without long parameter lists.
 type serveFlags struct {
 	configPath  string
 	port        int
@@ -148,8 +148,6 @@ type serveFlags struct {
 	pprofAddr   string
 }
 
-// applyTo overlays CLI-flag values onto cfg. Only non-zero fields take
-// effect, preserving values from the config file and environment.
 func (f *serveFlags) applyTo(cfg *config.Config) {
 	if f.port != 0 {
 		cfg.HTTP.Addr = ":" + strconv.Itoa(f.port)
@@ -171,9 +169,6 @@ func (f *serveFlags) applyTo(cfg *config.Config) {
 	}
 }
 
-// loadServeConfig parses CLI flags, loads the config (file + env), and
-// applies CLI overlays. Returns (nil, nil) when --help was printed so
-// the caller can exit cleanly without doing further work.
 func loadServeConfig(args []string) (*config.Config, error) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.Usage = func() {
@@ -214,16 +209,32 @@ func loadServeConfig(args []string) (*config.Config, error) {
 	return cfg, nil
 }
 
-func buildBroker(cfg *config.Config, ms metastore.Metastore, m *metrics.Metrics, log *slog.Logger) (broker.Broker, *consumer.InFlight, error) {
-	storageOpts, err := storageOptions(cfg.Storage)
-	if err != nil {
-		return nil, nil, fmt.Errorf("storage options: %w", err)
+func validateServeCluster() error {
+	peers := strings.TrimSpace(os.Getenv("NARAD_CLUSTER_PEERS"))
+	if peers == "" {
+		return errors.New("serve: NARAD_CLUSTER_PEERS must list exactly 3 cluster voters")
 	}
 
-	// Caps resolver consults the metastore so altered caps are honored
-	// at the next ReserveNext / Commit call without restarting the
-	// broker. Falls back to TopicConfig defaults for topics whose
-	// per-record value is zero (legacy rows pre-migration).
+	seen := make(map[string]struct{}, 3)
+	for _, peer := range strings.Split(peers, ",") {
+		peer = strings.TrimSpace(peer)
+		if peer == "" {
+			continue
+		}
+		seen[peer] = struct{}{}
+	}
+	if len(seen) != 3 {
+		return fmt.Errorf("serve: NARAD_CLUSTER_PEERS must list exactly 3 cluster voters, got %d", len(seen))
+	}
+	return nil
+}
+
+func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, m *metrics.Metrics, log *slog.Logger) (broker.Broker, *runtime.Logs, *consumer.InFlight, error) {
+	storageOpts, err := storageOptions(cfg.Storage)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("storage options: %w", err)
+	}
+
 	resolveCaps := func(ctx context.Context, topicName string) (consumer.Caps, error) {
 		t, err := ms.GetTopic(ctx, topicName)
 		if err != nil {
@@ -241,6 +252,13 @@ func buildBroker(cfg *config.Config, ms metastore.Metastore, m *metrics.Metrics,
 	}
 
 	offsets := consumer.NewInFlight(resolveCaps, nil)
+	logs := runtime.NewLogs(cfg.Storage.DataDir, storageOpts, ms, m)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	store, ok := ms.(*metastore.Store)
+	if !ok {
+		return nil, nil, nil, errors.New("broker: cluster replication requires metastore.Store")
+	}
 
 	br, err := broker.New(broker.Deps{
 		DataDir:        cfg.Storage.DataDir,
@@ -258,19 +276,21 @@ func buildBroker(cfg *config.Config, ms metastore.Metastore, m *metrics.Metrics,
 		Partitions:      partition.NewHashRoundRobin(),
 		Schemas:         schema.NewJSONSchema(),
 		ConsumerOffsets: offsets,
-		Replicator:      replication.NewLocal(),
+		Replicator:      replication.NewCluster(nodeID, store, client),
+		Logs:            logs,
 		Logger:          log,
 		Metrics:         m,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("broker: %w", err)
+		return nil, nil, nil, fmt.Errorf("broker: %w", err)
 	}
-	return br, offsets, nil
+	return br, logs, offsets, nil
 }
 
-func buildAPIServer(cfg *config.Config, br broker.Broker, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, log *slog.Logger) *httpserver.Server {
+func buildAPIServer(cfg *config.Config, br broker.Broker, logs *runtime.Logs, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, log *slog.Logger) *httpserver.Server {
 	handlerSet := handlers.New(handlers.Deps{
 		Broker:         br,
+		Logs:           logs,
 		Logger:         log,
 		MaxConsumeWait: cfg.HTTP.MaxConsumeWait.D(),
 		Router:         router,
@@ -278,9 +298,6 @@ func buildAPIServer(cfg *config.Config, br broker.Broker, router handlers.Router
 	return httpserver.New(cfg.HTTP, httpserver.NewRouter(handlerSet, log, m, reg), log)
 }
 
-// closeWithLog invokes close and logs any error under the given label.
-// Useful as a defer where we don't want to drop the error but also
-// don't want it to mask the function's primary return.
 func closeWithLog(log *slog.Logger, what string, close func() error) {
 	if err := close(); err != nil {
 		log.Error(what+" close", "err", err)
@@ -288,19 +305,16 @@ func closeWithLog(log *slog.Logger, what string, close func() error) {
 }
 
 func storageOptions(sc config.StorageConfig) (storage.Options, error) {
-	codec, err := buildCodec(sc)
+	storageCodec, err := buildCodec(sc)
 	if err != nil {
 		return storage.Options{}, err
 	}
 	return storage.Options{
-		Codec:         codec,
+		Codec:         storageCodec,
 		FlushBytes:    sc.FlushBytes,
 		FlushRecords:  sc.FlushRecords,
 		FlushInterval: time.Duration(sc.FlushIntervalMs) * time.Millisecond,
 		SegmentBytes:  sc.SegmentBytes,
-		// Per-topic MaxAge/MaxBytes get filled in by the broker per
-		// partition (see broker/partition_log.go). Only the
-		// operational dial comes from storage config.
 		Retention: storage.RetentionConfig{
 			CheckInterval: time.Duration(sc.RetentionCheckIntervalMs) * time.Millisecond,
 		},

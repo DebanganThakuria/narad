@@ -17,7 +17,7 @@ func TestParallelConsumersOnePartitionDistinctMessages(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("para", 1, 2, int64(0))
+	env.createTopic("para", 3, 2, int64(0))
 	for i := 0; i < 5; i++ {
 		env.produce("para", "k", `{"i": 1}`)
 	}
@@ -62,7 +62,7 @@ func TestOutOfOrderAckCommitAdvancesContiguous(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("ooo", 1, 2, int64(0))
+	env.createTopic("ooo", 3, 2, int64(0))
 	for i := 0; i < 3; i++ {
 		env.produce("ooo", "k", `{"i": 1}`)
 	}
@@ -102,7 +102,7 @@ func TestAckTamperedHandleReturns400(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("tamper", 1, 2, int64(0))
+	env.createTopic("tamper", 3, 2, int64(0))
 	env.produce("tamper", "k", `{}`)
 
 	// Flip a byte inside the base64 to produce invalid encoding.
@@ -123,7 +123,7 @@ func TestAckReusedHandleReturns410(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("reuse", 1, 2, int64(0))
+	env.createTopic("reuse", 3, 2, int64(0))
 	env.produce("reuse", "k", `{}`)
 	msg := env.consume("/v1/topics/reuse/consume")
 	env.ack("reuse", msg.ReceiptHandle) // succeeds, committed advances
@@ -139,8 +139,8 @@ func TestAckTopicMismatchReturns400(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("topicA", 1, 2, int64(0))
-	env.createTopic("topicB", 1, 2, int64(0))
+	env.createTopic("topicA", 3, 2, int64(0))
+	env.createTopic("topicB", 3, 2, int64(0))
 	env.produce("topicA", "k", `{}`)
 	msg := env.consume("/v1/topics/topicA/consume")
 
@@ -154,7 +154,7 @@ func TestAckEmptyHandleReturns400(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("empty-handle", 1, 2, int64(0))
+	env.createTopic("empty-handle", 3, 2, int64(0))
 	resp := env.post("/v1/topics/empty-handle/ack", map[string]any{"receipt_handle": ""})
 	expectStatus(t, resp, http.StatusBadRequest)
 }
@@ -169,7 +169,7 @@ func TestInFlightCapBlocksFurtherReserves(t *testing.T) {
 
 	resp := env.post("/v1/topics", map[string]any{
 		"name":                        "capped",
-		"partitions":                  1,
+		"partitions":                  3,
 		"replication_factor":          2,
 		"max_in_flight_per_partition": int64(2),
 	})
@@ -210,7 +210,7 @@ func TestAckedAheadCapReturns503(t *testing.T) {
 
 	resp := env.post("/v1/topics", map[string]any{
 		"name":                          "stuckhead",
-		"partitions":                    1,
+		"partitions":                    3,
 		"replication_factor":            2,
 		"max_acked_ahead_per_partition": int64(2),
 	})
@@ -244,7 +244,7 @@ func TestAlterCapsTakesEffect(t *testing.T) {
 
 	resp := env.post("/v1/topics", map[string]any{
 		"name":                        "altercap",
-		"partitions":                  1,
+		"partitions":                  3,
 		"replication_factor":          2,
 		"max_in_flight_per_partition": int64(1),
 	})
@@ -277,7 +277,7 @@ func TestParallelConsumersDoNotDuplicateMessages(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("stress", 1, 2, int64(0))
+	env.createTopic("stress", 3, 2, int64(0))
 	const total = 50
 	for i := 0; i < total; i++ {
 		env.produce("stress", "k", `{}`)

@@ -29,21 +29,29 @@ func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager) *Ro
 	return &Router{store: store, selfID: selfID, partitions: mgr}
 }
 
-// RouteProduce forwards a produce request to the owner of the partition
-// the key hashes to. body is the already-read request body bytes.
-// Returns true if the request was forwarded (caller must return).
+// RouteProduce forwards a produce request to the first alive partition owner
+// starting from the key-hashed partition and walking forward circularly.
+// body is the already-read request body bytes. Returns true if forwarded.
 func (rt *Router) RouteProduce(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName, key string, body []byte) bool {
 	t, err := rt.store.GetTopic(ctx, topicName)
-	if err != nil {
+	if err != nil || t.Partitions == 0 {
 		return false
 	}
-	p := rt.partitions.Pick(topicName, key, t.Partitions)
-	addr := rt.ownerAddr(topicName, p)
-	if addr == "" {
-		return false
+	start := rt.partitions.Pick(topicName, key, t.Partitions)
+	for i := 0; i < t.Partitions; i++ {
+		p := (start + i) % t.Partitions
+		addr := rt.ownerAddr(topicName, p)
+		if addr == "" {
+			continue
+		}
+		fwd := r.Clone(ctx)
+		q := fwd.URL.Query()
+		q.Set("partition", strconv.Itoa(p))
+		fwd.URL.RawQuery = q.Encode()
+		rt.forward(w, fwd, addr, body)
+		return true
 	}
-	rt.forward(w, r, addr, body)
-	return true
+	return false
 }
 
 // RouteConsume forwards a consume request to the owner of a partition.
@@ -94,14 +102,24 @@ func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, r *http.R
 // or "" if this pod is the owner or the assignment/member cannot be resolved.
 func (rt *Router) ownerAddr(topicName string, p int) string {
 	a, err := rt.store.GetAssignment(topicName, p)
-	if err != nil || a.OwnerID == rt.selfID {
+	if err != nil {
+		return ""
+	}
+	if a.OwnerID == rt.selfID {
 		return ""
 	}
 	m, err := rt.store.GetMember(a.OwnerID)
-	if err != nil || m.Status == metastore.MemberDead {
+	if err == nil && m.Status != metastore.MemberDead {
+		return m.Addr
+	}
+	if a.FollowerID == "" || a.FollowerID == rt.selfID {
 		return ""
 	}
-	return m.Addr
+	fm, err := rt.store.GetMember(a.FollowerID)
+	if err != nil || fm.Status == metastore.MemberDead {
+		return ""
+	}
+	return fm.Addr
 }
 
 // forward proxies r to http://addr, optionally replacing the body.

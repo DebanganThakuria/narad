@@ -40,7 +40,7 @@ func TestProduce_KeyPinsToOnePartition(t *testing.T) {
 // starting at 0.
 func TestProduce_OffsetsAreMonotonicPerPartition(t *testing.T) {
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "monotonic", Partitions: 2})
+	mustCreateTopic(t, env, createTopicReq{Name: "monotonic", Partitions: 3})
 
 	perPartition := make(map[int][]int64)
 	for i := range 20 {

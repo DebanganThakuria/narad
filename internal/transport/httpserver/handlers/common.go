@@ -23,7 +23,9 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker"
+	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/errs"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
 // Router forwards requests to the partition-owning pod in a multi-node cluster.
@@ -37,6 +39,7 @@ type Router interface {
 // Deps is the bag of collaborators every handler needs.
 type Deps struct {
 	Broker         broker.Broker
+	Logs           *runtime.Logs
 	Logger         *slog.Logger
 	MaxConsumeWait time.Duration
 	// Router is optional. When set, requests are forwarded to the partition
@@ -56,6 +59,9 @@ type Set struct {
 func New(d Deps) *Set {
 	if d.Broker == nil {
 		panic("handlers: Broker is required")
+	}
+	if d.Logs == nil {
+		d.Logs = runtime.NewLogs("", storage.DefaultOptions(), nil, nil)
 	}
 	if d.Logger == nil {
 		panic("handlers: Logger is required")

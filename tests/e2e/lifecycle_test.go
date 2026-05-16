@@ -72,7 +72,7 @@ func TestFullLifecycleWithSchema(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("schema-cycle", 2, 2, 0)
+	env.createTopic("schema-cycle", 3, 2, 0)
 
 	// Register schema
 	resp := env.patch("/v1/topics/schema-cycle", map[string]any{

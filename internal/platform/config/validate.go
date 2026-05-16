@@ -75,8 +75,8 @@ func (c *Config) Validate() error {
 		errs = append(errs, "storage.retention_check_interval_ms must be > 0")
 	}
 
-	if c.Topic.DefaultPartitions <= 0 {
-		errs = append(errs, "topic.default_partitions must be > 0")
+	if c.Topic.DefaultPartitions < 3 {
+		errs = append(errs, "topic.default_partitions must be >= 3")
 	}
 	if c.Topic.MaxPartitions <= 0 {
 		errs = append(errs, "topic.max_partitions must be > 0")
@@ -85,8 +85,8 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Sprintf("topic.default_partitions (%d) must not exceed topic.max_partitions (%d)",
 			c.Topic.DefaultPartitions, c.Topic.MaxPartitions))
 	}
-	if c.Topic.DefaultReplicationFactor <= 0 {
-		errs = append(errs, "topic.default_replication_factor must be > 0")
+	if c.Topic.DefaultReplicationFactor < 2 {
+		errs = append(errs, "topic.default_replication_factor must be >= 2")
 	}
 	if c.Topic.DefaultRetentionAgeMs < 0 {
 		errs = append(errs, "topic.default_retention_age_ms must be >= 0")

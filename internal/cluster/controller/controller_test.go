@@ -108,7 +108,7 @@ func TestReconcileDoesNotMoveExistingAssignments(t *testing.T) {
 
 	// Pre-assign all partitions to narad-0.
 	for p := 0; p < 4; p++ {
-		s.AssignPartition(ctx, "orders", p, "narad-0")
+		s.AssignPartition(ctx, "orders", p, "narad-0", "narad-1")
 	}
 
 	// Register a second (less-loaded) member.
