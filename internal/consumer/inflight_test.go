@@ -25,7 +25,7 @@ func committedOffset(f *InFlight, topic string, partition int) int64 {
 }
 
 func withClock(f *InFlight, now int64) {
-	f.timeNow = func() int64 { return now }
+	f.setTimeNow(func() int64 { return now })
 }
 
 const (
