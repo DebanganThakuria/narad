@@ -1,0 +1,117 @@
+repository:
+  name: narad
+  description: Lightweight, durable, queue-first event streaming system.
+  private: true
+  homepage: ""
+  topics:
+    - go
+    - queue
+    - event-streaming
+    - distributed-systems
+    - raft
+    - message-queue
+    - streaming
+    - json-schema
+    - prometheus
+    - kubernetes
+  default_branch: master
+  has_issues: true
+  has_projects: false
+  has_wiki: false
+  delete_branch_on_merge: true
+  allow_squash_merge: true
+  allow_merge_commit: false
+  allow_rebase_merge: false
+  allow_auto_merge: true
+  vulnerability_alerts: true
+  security_and_analysis:
+    secret_scanning:
+      status: enabled
+    secret_scanning_push_protection:
+      status: enabled
+    dependabot_security_updates:
+      status: enabled
+    secret_scanning_non_provider_patterns:
+      status: enabled
+  archived: false
+  allow_forking: true
+  web_commit_signoff_required: false
+  squash_merge_commit_title: PR_TITLE
+  squash_merge_commit_message: PR_BODY
+  merge_commit_title: PR_TITLE
+  merge_commit_message: PR_BODY
+  rebase_merge_commit_title: PR_TITLE
+  rebase_merge_commit_message: PR_BODY
+
+# Apply with a settings-sync app such as Probot Settings.
+# This keeps the repository private while making the intended public
+# settings explicit and reviewable before the visibility flip.
+
+branches:
+  - name: master
+    protection:
+      required_pull_request_reviews:
+        required_approving_review_count: 1
+        dismiss_stale_reviews: true
+        require_code_owner_reviews: true
+      required_status_checks:
+        strict: true
+        contexts:
+          - Build & vet
+          - Unit tests
+          - E2E tests
+      enforce_admins: false
+      restrictions: null
+      required_linear_history: true
+      allow_force_pushes: false
+      allow_deletions: false
+      block_creations: false
+      required_conversation_resolution: true
+      lock_branch: false
+
+  has_issues: true
+  has_projects: false
+  has_wiki: false
+  delete_branch_on_merge: true
+  allow_squash_merge: true
+  allow_merge_commit: false
+  allow_rebase_merge: false
+  default_branch: master
+  allow_auto_merge: true
+  vulnerability_alerts: true
+
+labels:
+  - name: bug
+    color: d73a4a
+    description: Something is not working
+  - name: enhancement
+    color: a2eeef
+    description: New feature or request
+  - name: documentation
+    color: 0075ca
+    description: Documentation improvements
+  - name: good first issue
+    color: 7057ff
+    description: Good for first-time contributors
+  - name: help wanted
+    color: 008672
+    description: Extra attention is needed
+
+branches:
+  - name: master
+    protection:
+      required_pull_request_reviews:
+        required_approving_review_count: 1
+        dismiss_stale_reviews: true
+        require_code_owner_reviews: true
+      required_status_checks:
+        strict: true
+        contexts:
+          - Build & vet
+          - Unit tests
+          - E2E tests
+      enforce_admins: false
+      restrictions: null
+      required_linear_history: true
+      allow_force_pushes: false
+      allow_deletions: false

@@ -154,16 +154,19 @@ type stubMetastore struct{}
 
 func (stubMetastore) CreateTopic(context.Context, topic.Topic) error { return nil }
 func (stubMetastore) UpdateTopic(context.Context, topic.Topic) error { return nil }
-func (stubMetastore) DeleteTopic(context.Context, string) error { return nil }
-func (stubMetastore) GetTopic(context.Context, string) (topic.Topic, error) { return topic.Topic{}, nil }
+func (stubMetastore) DeleteTopic(context.Context, string) error      { return nil }
+func (stubMetastore) GetTopic(context.Context, string) (topic.Topic, error) {
+	return topic.Topic{}, nil
+}
+
 func (stubMetastore) ListTopics(context.Context, metastore.ListOptions) ([]topic.Topic, string, error) {
 	return nil, "", nil
 }
-func (stubMetastore) PutSchema(context.Context, string, int, []byte) error { return nil }
-func (stubMetastore) GetSchema(context.Context, string, int) ([]byte, error) { return nil, nil }
+func (stubMetastore) PutSchema(context.Context, string, int, []byte) error          { return nil }
+func (stubMetastore) GetSchema(context.Context, string, int) ([]byte, error)        { return nil, nil }
 func (stubMetastore) GetConsumerOffset(context.Context, string, int) (int64, error) { return 0, nil }
-func (stubMetastore) SetConsumerOffset(context.Context, string, int, int64) error { return nil }
-func (stubMetastore) Close() error { return nil }
+func (stubMetastore) SetConsumerOffset(context.Context, string, int, int64) error   { return nil }
+func (stubMetastore) Close() error                                                  { return nil }
 
 func TestBuildMetricsReturnsUsableRegistry(t *testing.T) {
 	reg, m := buildMetrics()
@@ -301,32 +304,40 @@ type stubBroker struct{}
 func (stubBroker) CreateTopic(context.Context, brokertopics.CreateOpts) (topic.Topic, error) {
 	return topic.Topic{}, nil
 }
+
 func (stubBroker) IncreaseTopicPartitions(context.Context, string, int) (topic.Topic, error) {
 	return topic.Topic{}, nil
 }
+
 func (stubBroker) UpdateTopicRetention(context.Context, string, int64) (topic.Topic, error) {
 	return topic.Topic{}, nil
 }
+
 func (stubBroker) UpdateTopicCaps(context.Context, string, int64, int64) (topic.Topic, error) {
 	return topic.Topic{}, nil
 }
+
 func (stubBroker) UpdateTopicSchema(context.Context, string, []byte) (topic.Topic, error) {
 	return topic.Topic{}, nil
 }
-func (stubBroker) DeleteTopic(context.Context, string) error { return nil }
+func (stubBroker) DeleteTopic(context.Context, string) error             { return nil }
 func (stubBroker) GetTopic(context.Context, string) (topic.Topic, error) { return topic.Topic{}, nil }
 func (stubBroker) GetTopicDetails(context.Context, string) (topic.Details, error) {
 	return topic.Details{}, nil
 }
+
 func (stubBroker) ListTopics(context.Context, metastore.ListOptions) ([]topic.Topic, string, error) {
 	return nil, "", nil
 }
-func (stubBroker) Produce(context.Context, string, string, []byte) (int64, int, error) { return 0, 0, nil }
+
+func (stubBroker) Produce(context.Context, string, string, []byte) (int64, int, error) {
+	return 0, 0, nil
+}
+
 func (stubBroker) Consume(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {
 	return topic.Message{}, false, nil
 }
-func (stubBroker) Ack(context.Context, string, string) error { return nil }
+func (stubBroker) Ack(context.Context, string, string) error                 { return nil }
 func (stubBroker) Snapshot(context.Context) ([]metrics.TopicSnapshot, error) { return nil, nil }
-func (stubBroker) Ready(context.Context) error { return nil }
-func (stubBroker) Close() error { return nil }
-
+func (stubBroker) Ready(context.Context) error                               { return nil }
+func (stubBroker) Close() error                                              { return nil }

@@ -36,38 +36,53 @@ type fakeBroker struct {
 func (f *fakeBroker) CreateTopic(ctx context.Context, opts brokertopics.CreateOpts) (topic.Topic, error) {
 	return f.createTopicFn(ctx, opts)
 }
+
 func (f *fakeBroker) IncreaseTopicPartitions(ctx context.Context, name string, newPartitions int) (topic.Topic, error) {
 	return f.increaseTopicPartitionsFn(ctx, name, newPartitions)
 }
+
 func (f *fakeBroker) UpdateTopicRetention(ctx context.Context, name string, retentionMs int64) (topic.Topic, error) {
 	return f.updateTopicRetentionFn(ctx, name, retentionMs)
 }
+
 func (f *fakeBroker) UpdateTopicCaps(ctx context.Context, name string, maxInFlightPerPartition, maxAckedAheadPerPartition int64) (topic.Topic, error) {
 	return f.updateTopicCapsFn(ctx, name, maxInFlightPerPartition, maxAckedAheadPerPartition)
 }
+
 func (f *fakeBroker) UpdateTopicSchema(ctx context.Context, name string, schema []byte) (topic.Topic, error) {
 	return f.updateTopicSchemaFn(ctx, name, schema)
 }
-func (f *fakeBroker) DeleteTopic(ctx context.Context, name string) error { return f.deleteTopicFn(ctx, name) }
+
+func (f *fakeBroker) DeleteTopic(ctx context.Context, name string) error {
+	return f.deleteTopicFn(ctx, name)
+}
+
 func (f *fakeBroker) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
 	return f.getTopicFn(ctx, name)
 }
+
 func (f *fakeBroker) GetTopicDetails(ctx context.Context, name string) (topic.Details, error) {
 	return f.getTopicDetailsFn(ctx, name)
 }
+
 func (f *fakeBroker) ListTopics(ctx context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error) {
 	return f.listTopicsFn(ctx, opts)
 }
+
 func (f *fakeBroker) Produce(context.Context, string, string, []byte) (int64, int, error) {
 	return 0, 0, errors.New("unexpected Produce call")
 }
+
 func (f *fakeBroker) Consume(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {
 	return topic.Message{}, false, errors.New("unexpected Consume call")
 }
-func (f *fakeBroker) Ack(context.Context, string, string) error { return errors.New("unexpected Ack call") }
+
+func (f *fakeBroker) Ack(context.Context, string, string) error {
+	return errors.New("unexpected Ack call")
+}
 func (f *fakeBroker) Snapshot(context.Context) ([]metrics.TopicSnapshot, error) { return nil, nil }
-func (f *fakeBroker) Ready(context.Context) error { return nil }
-func (f *fakeBroker) Close() error { return nil }
+func (f *fakeBroker) Ready(context.Context) error                               { return nil }
+func (f *fakeBroker) Close() error                                              { return nil }
 
 func newTestSet(b broker.Broker) *handlers.Set {
 	return handlers.New(handlers.Deps{
@@ -190,7 +205,6 @@ func TestParseLimit(t *testing.T) {
 }
 
 func TestAlterRequestValidate(t *testing.T) {
-	zero := int64(0)
 	negative := int64(-1)
 	validSchema := json.RawMessage(`{"type":"object"}`)
 	invalidSchema := json.RawMessage(`{"type":`)
@@ -205,7 +219,7 @@ func TestAlterRequestValidate(t *testing.T) {
 		{name: "negative in flight invalid", req: alterRequest{MaxInFlightPerPartition: &negative}, wantErr: true},
 		{name: "negative acked ahead invalid", req: alterRequest{MaxAckedAheadPerPartition: &negative}, wantErr: true},
 		{name: "invalid schema", req: alterRequest{Schema: invalidSchema}, wantErr: true},
-		{name: "valid caps update", req: alterRequest{MaxInFlightPerPartition: &zero}, wantErr: false},
+		{name: "valid caps update", req: alterRequest{MaxInFlightPerPartition: new(int64(0))}, wantErr: false},
 		{name: "valid schema", req: alterRequest{Schema: validSchema}, wantErr: false},
 	}
 

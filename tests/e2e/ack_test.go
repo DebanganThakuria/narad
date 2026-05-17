@@ -10,7 +10,7 @@ func TestAck_HappyPath(t *testing.T) {
 	mustCreateTopic(t, env, createTopicReq{Name: "ack", Partitions: 3})
 
 	pr := mustProduce(t, env, "ack", "k", map[string]int{"v": 1})
-	msg, found := mustConsume(t, env, "ack", consumeQuery{Partition: intPtr(pr.Partition)})
+	msg, found := mustConsume(t, env, "ack", consumeQuery{Partition: new(pr.Partition)})
 	if !found {
 		t.Fatal("expected a message after produce")
 	}

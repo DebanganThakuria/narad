@@ -85,13 +85,13 @@ type Log struct {
 
 	index map[int64]indexEntry
 
-	buffer         *buffer
-	highWatermark  atomic.Int64
-	hwmMu          sync.Mutex
-	hwmPath        string
-	hwmTmpPath     string
-	flusher        *flusher
-	reaper         *reaper
+	buffer        *buffer
+	highWatermark atomic.Int64
+	hwmMu         sync.Mutex
+	hwmPath       string
+	hwmTmpPath    string
+	flusher       *flusher
+	reaper        *reaper
 
 	notify chan struct{}
 

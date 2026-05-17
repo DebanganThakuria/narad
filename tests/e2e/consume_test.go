@@ -99,7 +99,7 @@ func TestConsume_PartitionPinned(t *testing.T) {
 	pr := mustProduce(t, env, "pinned", "stable", map[string]int{"v": 1})
 
 	// Consume from the same partition the produce landed on — should hit.
-	msg, found := mustConsume(t, env, "pinned", consumeQuery{Partition: intPtr(pr.Partition)})
+	msg, found := mustConsume(t, env, "pinned", consumeQuery{Partition: new(pr.Partition)})
 	if !found {
 		t.Fatalf("partition %d: expected message, got 204", pr.Partition)
 	}
@@ -109,7 +109,7 @@ func TestConsume_PartitionPinned(t *testing.T) {
 
 	// Consume from a partition that DIDN'T receive the message — 204.
 	other := (pr.Partition + 1) % 4
-	if _, found := mustConsume(t, env, "pinned", consumeQuery{Partition: intPtr(other)}); found {
+	if _, found := mustConsume(t, env, "pinned", consumeQuery{Partition: new(other)}); found {
 		t.Errorf("partition %d: expected 204, got a message", other)
 	}
 }
@@ -127,7 +127,7 @@ func TestConsume_ReplayDoesNotAdvanceCommittedOffset(t *testing.T) {
 	// Replay offset 0 twice — should return the same message both times.
 	for i := range 2 {
 		msg, found := mustConsume(t, env, "replay",
-			consumeQuery{Partition: intPtr(pr.Partition), Offset: int64Ptr(0)})
+			consumeQuery{Partition: new(pr.Partition), Offset: new(int64(0))})
 		if !found {
 			t.Fatalf("replay #%d: expected message, got 204", i)
 		}
@@ -152,7 +152,7 @@ func TestConsume_ReplayPastTailReturns204(t *testing.T) {
 	mustProduce(t, env, "future", "k", map[string]int{"v": 1})
 
 	if _, found := mustConsume(t, env, "future",
-		consumeQuery{Partition: intPtr(0), Offset: int64Ptr(999)}); found {
+		consumeQuery{Partition: new(0), Offset: new(int64(999))}); found {
 		t.Error("offset 999 with no records there: expected 204, got a message")
 	}
 }

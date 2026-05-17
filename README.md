@@ -1,9 +1,58 @@
 # Narad
 
-A lightweight, durable, queue-first event streaming system. Producers push
-JSON messages to topics; consumers pull (with optional long-polling) and
-acknowledge to advance their offset. Replay is supported via explicit
-offsets.
+[![CI](https://github.com/DebanganThakuria/narad/actions/workflows/ci.yml/badge.svg)](https://github.com/DebanganThakuria/narad/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/DebanganThakuria/narad)](./go.mod)
+
+Narad is a lightweight, durable, queue-first event streaming system built
+in Go. Producers push JSON messages to topics; consumers pull with
+optional long-polling, acknowledge with receipt handles, and can replay
+from explicit offsets.
+
+## Why Narad
+
+Narad is aimed at teams that want a small, understandable event system
+with queue semantics, explicit operational tradeoffs, and a single Go
+binary that is easy to run locally and in Kubernetes.
+
+It focuses on:
+
+- durable append-only segmented storage
+- queue-style consume/ack semantics with replay support
+- Raft-backed control-plane metadata
+- any-pod routing to the owning partition
+- JSON-Schema validation and per-topic tuning
+- Prometheus metrics and operational debugging hooks
+
+## Project status
+
+Narad is pre-1.0 and under active development.
+
+Today, the control plane, HTTP API, CLI surface, topic CRUD, consumer
+flows, and core storage paths are covered by unit and end-to-end tests.
+The main roadmap item still in progress is fully replicated data-plane
+durability.
+
+## Community and project docs
+
+- [Contributing guide](./CONTRIBUTING.md)
+- [Code of conduct](./CODE_OF_CONDUCT.md)
+- [Security policy](./SECURITY.md)
+- [License](./LICENSE)
+
+> **Current implementation status:** the control-plane architecture is in
+> place. The HTTP API, append-only segmented log, **Raft+bbolt
+> metastore** (topics, schemas, partition assignments, cluster
+> membership), **cluster controller** (partition assignment, heartbeat
+> monitoring, leader election), **any-pod proxy routing**,
+> JSON-Schema validation, per-topic retention, partitioning,
+> **SQS-style in-flight tracking with gap-skipping reservations,
+> out-of-order acks, and nonce-verified receipt handles**, Prometheus
+> metrics, and a debug pprof listener are functional. Data-plane
+> replication (leader → follower log sync, `.offsets` files, HWM/LEO)
+> is the next milestone.
+
+### Breaking changes (pre-1.0)
 
 > **Status:** control-plane architecture complete. The HTTP API,
 > append-only segmented log, **Raft+bbolt metastore** (topics, schemas,
@@ -494,10 +543,15 @@ in production.
 
 ```sh
 make test                          # full suite, race detector on
+go test ./cmd/narad                # CLI parity tests against a real in-process HTTP server
 go test ./internal/...             # unit tests only
 go test ./tests/e2e/... -race      # HTTP-level e2e against a real broker
 go test ./tests/e2e/... -run TestConsume   # one feature
 ```
+
+The CLI suite in `cmd/narad/client_test.go` exercises `narad client`
+commands against a real in-process HTTP server and asserts stdout/stderr
+behavior for topic CRUD plus produce/consume/ack flows.
 
 The e2e harness (`helpers_test.go`) builds a real broker with a
 single-node Raft metastore (waits for leader election) and temp partition
@@ -508,9 +562,39 @@ logs per test, exposed via `httptest`. Tests are split by feature surface.
 `.github/workflows/ci.yml` runs three jobs in parallel on every push to
 master and every PR:
 
+For public-release readiness, `.github/settings.yml` also declares the
+intended repository defaults:
+
+- keep the repo private until validation is complete
+- require PR reviews on `master`
+- require the three CI checks to pass before merge
+- allow squash merge
+- disable merge commits and rebase merges
+- delete branches after merge
+- enable security scanning and Dependabot updates
+
+That file is declarative repo configuration for settings-sync tools; it
+makes the target public-repo posture reviewable without actually changing
+repository visibility yet.
+
+
 * **build** — `go vet ./...` + `go build ./...`
 * **unit-tests** — `go test -race -count=1` for everything except `tests/e2e`
 * **e2e-tests** — `go test -race -count=1 ./tests/e2e/...`
+
+## Third-party libraries
+
+Narad is built on top of a small set of well-known Go libraries:
+
+- [`github.com/hashicorp/raft`](https://github.com/hashicorp/raft) — Raft consensus and cluster coordination
+- [`github.com/hashicorp/raft-boltdb/v2`](https://github.com/hashicorp/raft-boltdb) — BoltDB-backed Raft log and stable store
+- [`go.etcd.io/bbolt`](https://github.com/etcd-io/bbolt) — embedded metadata storage
+- [`github.com/klauspost/compress`](https://github.com/klauspost/compress) — zstd compression for log segments
+- [`github.com/santhosh-tekuri/jsonschema/v6`](https://github.com/santhosh-tekuri/jsonschema) — JSON-Schema validation
+- [`github.com/prometheus/client_golang`](https://github.com/prometheus/client_golang) — Prometheus metrics and instrumentation
+
+These libraries make it possible to keep Narad as a pure-Go project with
+no CGO requirement.
 
 ## Design decisions
 
