@@ -64,11 +64,11 @@ func TestReconcileAssignsNewTopic(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	registerMember(t, s, "narad-0")
 	registerMember(t, s, "narad-1")
 	registerMember(t, s, "narad-2")
+	registerMember(t, s, "narad-3")
 
-	s.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 6})
+	s.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 6, ReplicationFactor: 3})
 
 	c := newController(s)
 	go c.Run(ctx)
@@ -78,17 +78,17 @@ func TestReconcileAssignsNewTopic(t *testing.T) {
 	for time.Now().Before(deadline) {
 		assignments, _ := s.ListAssignments("orders")
 		if len(assignments) == 6 {
-			// Verify load is roughly balanced across 3 members.
+			// With RF=3, owners are chosen from the two least-loaded members each cycle.
 			counts := map[string]int{}
 			for _, a := range assignments {
 				counts[a.OwnerID]++
 			}
-			if len(counts) != 3 {
-				t.Fatalf("expected 3 distinct owners, got %v", counts)
+			if len(counts) != 2 {
+				t.Fatalf("expected 2 distinct owners, got %v", counts)
 			}
 			for id, n := range counts {
-				if n != 2 {
-					t.Fatalf("member %s owns %d partitions, expected 2", id, n)
+				if n != 3 {
+					t.Fatalf("member %s owns %d partitions, expected 3", id, n)
 				}
 			}
 			return

@@ -19,6 +19,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
+	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -111,6 +112,36 @@ func newEnv(t *testing.T, opts envOpts) *env {
 	if !ms.IsLeader() {
 		t.Fatal("metastore: timed out waiting for Raft leader")
 	}
+	if err := ms.RegisterMember(context.Background(), metastore.Member{
+		ID:            "test-0",
+		Addr:          "127.0.0.1:0",
+		Status:        metastore.MemberAlive,
+		LastHeartbeat: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("register member test-0: %v", err)
+	}
+	if err := ms.RegisterMember(context.Background(), metastore.Member{
+		ID:            "test-1",
+		Addr:          "127.0.0.1:1",
+		Status:        metastore.MemberAlive,
+		LastHeartbeat: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("register member test-1: %v", err)
+	}
+	if err := ms.RegisterMember(context.Background(), metastore.Member{
+		ID:            "test-2",
+		Addr:          "127.0.0.1:2",
+		Status:        metastore.MemberAlive,
+		LastHeartbeat: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("register member test-2: %v", err)
+	}
+	ctrlCtx, ctrlCancel := context.WithCancel(context.Background())
+	t.Cleanup(ctrlCancel)
+	go controller.New(ms, controller.Config{
+		ReconcileInterval: 50 * time.Millisecond,
+		DeadTimeout:       5 * time.Second,
+	}).Run(ctrlCtx)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -200,7 +231,26 @@ func (e *env) url(path string) string { return e.Server.URL + path }
 
 func (e *env) post(path string, body any) *http.Response {
 	e.t.Helper()
-	return e.do(http.MethodPost, path, body)
+	resp := e.do(http.MethodPost, path, body)
+	if path == "/v1/topics" && resp.StatusCode == http.StatusCreated {
+		var created topic.Topic
+		decodeResp, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err := json.Unmarshal(decodeResp, &created); err == nil {
+			if store, ok := e.ms.(*metastore.Store); ok {
+				deadline := time.Now().Add(3 * time.Second)
+				for time.Now().Before(deadline) {
+					assignments, err := store.ListAssignments(created.Name)
+					if err == nil && len(assignments) == created.Partitions {
+						break
+					}
+					time.Sleep(25 * time.Millisecond)
+				}
+			}
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(decodeResp))
+	}
+	return resp
 }
 
 func (e *env) get(path string) *http.Response {
