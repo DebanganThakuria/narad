@@ -53,6 +53,12 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 		}
 		return 0, 0, fmt.Errorf("messaging: replicate: %w", err)
 	}
+	if err := log.AdvanceHighWatermark(offset + 1); err != nil {
+		if e.metrics != nil {
+			e.metrics.IncError("messaging", "commit_boundary")
+		}
+		return 0, 0, fmt.Errorf("messaging: commit boundary durability: %w", err)
+	}
 
 	if e.metrics != nil {
 		partLabel := strconv.Itoa(partIdx)

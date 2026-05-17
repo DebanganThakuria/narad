@@ -17,3 +17,30 @@ func (l *Log) LatestOffset() int64 {
 func (l *Log) NextOffset() int64 {
 	return l.buffer.nextOffsetSnapshot()
 }
+
+// HighWatermark is the exclusive upper bound of records visible to consumers.
+func (l *Log) HighWatermark() int64 {
+	return l.highWatermark.Load()
+}
+
+// AdvanceHighWatermark moves the visible tail forward, persists it, and wakes
+// long-poll consumers waiting on new committed records.
+func (l *Log) AdvanceHighWatermark(newHWM int64) error {
+	l.hwmMu.Lock()
+	defer l.hwmMu.Unlock()
+
+	cur := l.highWatermark.Load()
+	if newHWM <= cur {
+		return nil
+	}
+	if err := l.persistHighWatermark(newHWM); err != nil {
+		return err
+	}
+	l.highWatermark.Store(newHWM)
+	select {
+	case l.notify <- struct{}{}:
+	default:
+	}
+	return nil
+}
+

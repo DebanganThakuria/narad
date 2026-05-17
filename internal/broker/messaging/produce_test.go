@@ -2,52 +2,107 @@ package messaging
 
 import (
 	"context"
-	"io"
-	"log/slog"
+	"errors"
+	"os"
+	"strings"
 	"testing"
-	"time"
 
-	"github.com/debanganthakuria/narad/internal/broker/runtime"
-	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
-	"github.com/debanganthakuria/narad/internal/persistence/storage"
-	"github.com/debanganthakuria/narad/internal/platform/replication"
-	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
-func newTestStore(t *testing.T) *metastore.Store {
-	t.Helper()
-	store, err := metastore.New(metastore.Config{
-		NodeID:   "node-self",
-		DataDir:  t.TempDir(),
-		BindAddr: "127.0.0.1:0",
-	})
+func TestProduceAppendsAndReplicates(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 3}
+	schemas := &fakeSchemas{}
+	replicator := &fakeReplicator{}
+	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 1}, replicator)
+
+	offset, partitionIdx, err := engine.Produce(context.Background(), "orders", "customer-1", []byte(`{"id":1}`))
 	if err != nil {
-		t.Fatalf("metastore.New() error = %v", err)
+		t.Fatalf("Produce() error = %v", err)
 	}
-	t.Cleanup(func() {
-		_ = store.Close()
-	})
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := store.CreateTopic(context.Background(), topic.Topic{Name: "__probe__", Partitions: 3, ReplicationFactor: 2}); err == nil {
-			_ = store.DeleteTopic(context.Background(), "__probe__")
-			return store
-		}
-		time.Sleep(50 * time.Millisecond)
+	if offset != 0 {
+		t.Fatalf("Produce() offset = %d, want 0", offset)
 	}
-
-	t.Fatal("timed out waiting for leader")
-	return nil
+	if partitionIdx != 1 {
+		t.Fatalf("Produce() partition = %d, want 1", partitionIdx)
+	}
+	if schemas.lastTopic != "orders" || string(schemas.lastPayload) != `{"id":1}` {
+		t.Fatalf("schema Validate() args = topic=%q payload=%q", schemas.lastTopic, string(schemas.lastPayload))
+	}
+	if !replicator.called {
+		t.Fatal("Replicate() was not called")
+	}
+	if replicator.lastTopic != "orders" || replicator.lastPartition != 1 || replicator.lastOffset != 0 {
+		t.Fatalf("Replicate() args = topic=%q partition=%d offset=%d", replicator.lastTopic, replicator.lastPartition, replicator.lastOffset)
+	}
+	if string(replicator.lastPayload) != `{"id":1}` {
+		t.Fatalf("Replicate() payload = %q, want %q", string(replicator.lastPayload), `{"id":1}`)
+	}
+	log, err := engine.logs.Get("orders", 1)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got := log.HighWatermark(); got != 1 {
+		t.Fatalf("HighWatermark() = %d, want 1", got)
+	}
 }
 
-type fixedPartitionManager struct {
-	picked int
+func TestProduceAllowsMissingSchema(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
+	schemas := &fakeSchemas{validateErr: errs.ErrSchemaNotFound}
+	replicator := &fakeReplicator{}
+	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0}, replicator)
+
+	offset, partitionIdx, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`))
+	if err != nil {
+		t.Fatalf("Produce() error = %v", err)
+	}
+	if offset != 0 || partitionIdx != 0 {
+		t.Fatalf("Produce() = offset %d partition %d, want 0,0", offset, partitionIdx)
+	}
+	if !replicator.called {
+		t.Fatal("Replicate() was not called for schema-not-found path")
+	}
 }
 
-func (f fixedPartitionManager) Pick(string, string, int) int { return f.picked }
+func TestProduceRejectsSchemaValidationError(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
+	schemas := &fakeSchemas{validateErr: errors.New("invalid payload")}
+	replicator := &fakeReplicator{}
+	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0}, replicator)
+
+	_, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`))
+	if err == nil || err.Error() != "invalid payload" {
+		t.Fatalf("Produce() error = %v, want invalid payload", err)
+	}
+	if replicator.called {
+		t.Fatal("Replicate() was called after schema validation failure")
+	}
+}
+
+func TestProduceReturnsReplicatorError(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
+	replicator := &fakeReplicator{err: errors.New("replication failed")}
+	engine := newTestEngine(t, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
+
+	_, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`))
+	if err == nil || err.Error() != "messaging: replicate: replication failed" {
+		t.Fatalf("Produce() error = %v, want wrapped replicate error", err)
+	}
+	log, getErr := engine.logs.Get("orders", 0)
+	if getErr != nil {
+		t.Fatalf("Get() error = %v", getErr)
+	}
+	if got := log.HighWatermark(); got != 0 {
+		t.Fatalf("HighWatermark() = %d, want 0", got)
+	}
+}
 
 func TestProduceSkipsDeadOwnerPartition(t *testing.T) {
 	store := newTestStore(t)
@@ -74,20 +129,7 @@ func TestProduceSkipsDeadOwnerPartition(t *testing.T) {
 		t.Fatalf("AssignPartition(2) error = %v", err)
 	}
 
-	logs := runtime.NewLogs(t.TempDir(), storage.Options{FlushInterval: time.Millisecond}, store, nil)
-	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
-		return consumer.Caps{MaxInFlight: 10, MaxAckedAhead: 10}, nil
-	}, nil)
-	engine := NewEngine(
-		store,
-		schema.NewAlwaysValid(),
-		fixedPartitionManager{picked: 0},
-		replication.NewLocal(),
-		offsets,
-		logs,
-		nil,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-	)
+	engine := newClusterTestEngine(t, store, fixedPartitionManager{picked: 0})
 	offset, partitionIdx, err := engine.Produce(ctx, "orders", "customer-1", []byte(`{"id":1}`))
 	if err != nil {
 		t.Fatalf("Produce() error = %v", err)
@@ -97,5 +139,62 @@ func TestProduceSkipsDeadOwnerPartition(t *testing.T) {
 	}
 	if partitionIdx != 1 {
 		t.Fatalf("partition = %d, want 1", partitionIdx)
+	}
+}
+
+func TestProduceWithLocalReplicatorAdvancesHighWatermark(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 3, ReplicationFactor: 2}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-dead", Addr: "dead.example:7942", Status: metastore.MemberDead}); err != nil {
+		t.Fatalf("RegisterMember(dead) error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-follower", Addr: "follower.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember(follower) error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-alive", Addr: "alive.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember(alive) error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 0, "node-dead", "node-follower"); err != nil {
+		t.Fatalf("AssignPartition(0) error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 1, "node-alive", "node-follower"); err != nil {
+		t.Fatalf("AssignPartition(1) error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 2, "node-alive", "node-follower"); err != nil {
+		t.Fatalf("AssignPartition(2) error = %v", err)
+	}
+
+	engine := newClusterTestEngine(t, store, fixedPartitionManager{picked: 0})
+	if _, _, err := engine.Produce(ctx, "orders", "customer-1", []byte(`{"id":1}`)); err != nil {
+		t.Fatalf("Produce() error = %v", err)
+	}
+	committedLog, err := engine.logs.Get("orders", 1)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got := committedLog.HighWatermark(); got != 1 {
+		t.Fatalf("HighWatermark() = %d, want 1", got)
+	}
+}
+
+func TestProduceFailsWhenHighWatermarkPersistFails(t *testing.T) {
+	dataDir := t.TempDir()
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
+	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, &fakeReplicator{})
+	hwmPath := partitionHWMPath(dataDir, "orders", 0)
+	if err := os.Remove(hwmPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Remove(hwm): %v", err)
+	}
+	if err := os.MkdirAll(hwmPath, 0o755); err != nil {
+		t.Fatalf("Mkdir(hwm path): %v", err)
+	}
+
+	_, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`))
+	if err == nil || !(strings.Contains(err.Error(), "commit boundary durability") || strings.Contains(err.Error(), "read hwm")) {
+		t.Fatalf("Produce() error = %v, want commit boundary durability failure", err)
 	}
 }

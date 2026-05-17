@@ -150,10 +150,6 @@ func TestBuildBrokerReturnsLogs(t *testing.T) {
 	}
 }
 
-func TestBuildBrokerPanicsWithoutStoreOnlyAfterTypeCheck(t *testing.T) {
-	_ = stubMetastore{}
-}
-
 type stubMetastore struct{}
 
 func (stubMetastore) CreateTopic(context.Context, topic.Topic) error { return nil }

@@ -3,8 +3,10 @@ package messaging
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -98,6 +100,57 @@ type fixedPartitioner struct {
 
 func (p fixedPartitioner) Pick(string, string, int) int { return p.picked }
 
+func newTestStore(t *testing.T) *metastore.Store {
+	t.Helper()
+	store, err := metastore.New(metastore.Config{
+		NodeID:   "node-self",
+		DataDir:  t.TempDir(),
+		BindAddr: "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("metastore.New() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := store.CreateTopic(context.Background(), topic.Topic{Name: "__probe__", Partitions: 3, ReplicationFactor: 2}); err == nil {
+			_ = store.DeleteTopic(context.Background(), "__probe__")
+			return store
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Fatal("timed out waiting for leader")
+	return nil
+}
+
+type fixedPartitionManager struct {
+	picked int
+}
+
+func (f fixedPartitionManager) Pick(string, string, int) int { return f.picked }
+
+func newClusterTestEngine(t *testing.T, store *metastore.Store, mgr partition.Manager) *Engine {
+	t.Helper()
+	logs := runtime.NewLogs(t.TempDir(), storage.Options{FlushInterval: time.Millisecond}, store, nil)
+	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+		return consumer.Caps{MaxInFlight: 10, MaxAckedAhead: 10}, nil
+	}, nil)
+	return NewEngine(
+		store,
+		schema.NewAlwaysValid(),
+		mgr,
+		replication.NewLocal(),
+		offsets,
+		logs,
+		nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+}
+
 type fakeReplicator struct {
 	err           error
 	called        bool
@@ -118,6 +171,11 @@ func (r *fakeReplicator) Replicate(_ context.Context, topic string, partition in
 
 func newTestEngine(t *testing.T, ms *messagingFakeMetastore, schemas schema.Registry, partitioner partition.Manager, replicator replication.Replicator) *Engine {
 	t.Helper()
+	return newTestEngineWithDir(t, t.TempDir(), ms, schemas, partitioner, replicator)
+}
+
+func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetastore, schemas schema.Registry, partitioner partition.Manager, replicator replication.Replicator) *Engine {
+	t.Helper()
 	if ms == nil {
 		ms = newMessagingFakeMetastore()
 	}
@@ -130,11 +188,15 @@ func newTestEngine(t *testing.T, ms *messagingFakeMetastore, schemas schema.Regi
 	if replicator == nil {
 		replicator = &fakeReplicator{}
 	}
-	logs := runtime.NewLogs(t.TempDir(), storage.Options{FlushInterval: 5 * time.Millisecond}, ms, nil)
+	logs := runtime.NewLogs(dataDir, storage.Options{FlushInterval: 5 * time.Millisecond}, ms, nil)
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 10, MaxAckedAhead: 10}, nil
 	}, nil)
 	return NewEngine(ms, schemas, partitioner, replicator, offsets, logs, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func partitionHWMPath(dataDir, topicName string, partition int) string {
+	return filepath.Join(dataDir, "topics", topicName, fmt.Sprintf("p%05d", partition), "hwm")
 }
 
 func TestGetTopicMapsNotFound(t *testing.T) {
@@ -157,81 +219,6 @@ func TestGetTopicWrapsUnexpectedError(t *testing.T) {
 	}
 }
 
-func TestProduceAppendsAndReplicates(t *testing.T) {
-	ms := newMessagingFakeMetastore()
-	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 3}
-	schemas := &fakeSchemas{}
-	replicator := &fakeReplicator{}
-	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 1}, replicator)
-
-	offset, partitionIdx, err := engine.Produce(context.Background(), "orders", "customer-1", []byte(`{"id":1}`))
-	if err != nil {
-		t.Fatalf("Produce() error = %v", err)
-	}
-	if offset != 0 {
-		t.Fatalf("Produce() offset = %d, want 0", offset)
-	}
-	if partitionIdx != 1 {
-		t.Fatalf("Produce() partition = %d, want 1", partitionIdx)
-	}
-	if schemas.lastTopic != "orders" || string(schemas.lastPayload) != `{"id":1}` {
-		t.Fatalf("schema Validate() args = topic=%q payload=%q", schemas.lastTopic, string(schemas.lastPayload))
-	}
-	if !replicator.called {
-		t.Fatal("Replicate() was not called")
-	}
-	if replicator.lastTopic != "orders" || replicator.lastPartition != 1 || replicator.lastOffset != 0 {
-		t.Fatalf("Replicate() args = topic=%q partition=%d offset=%d", replicator.lastTopic, replicator.lastPartition, replicator.lastOffset)
-	}
-}
-
-func TestProduceAllowsMissingSchema(t *testing.T) {
-	ms := newMessagingFakeMetastore()
-	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	schemas := &fakeSchemas{validateErr: errs.ErrSchemaNotFound}
-	replicator := &fakeReplicator{}
-	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0}, replicator)
-
-	offset, partitionIdx, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`))
-	if err != nil {
-		t.Fatalf("Produce() error = %v", err)
-	}
-	if offset != 0 || partitionIdx != 0 {
-		t.Fatalf("Produce() = offset %d partition %d, want 0,0", offset, partitionIdx)
-	}
-	if !replicator.called {
-		t.Fatal("Replicate() was not called for schema-not-found path")
-	}
-}
-
-func TestProduceRejectsSchemaValidationError(t *testing.T) {
-	ms := newMessagingFakeMetastore()
-	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	schemas := &fakeSchemas{validateErr: errors.New("invalid payload")}
-	replicator := &fakeReplicator{}
-	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0}, replicator)
-
-	_, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`))
-	if err == nil || err.Error() != "invalid payload" {
-		t.Fatalf("Produce() error = %v, want invalid payload", err)
-	}
-	if replicator.called {
-		t.Fatal("Replicate() was called after schema validation failure")
-	}
-}
-
-func TestProduceReturnsReplicatorError(t *testing.T) {
-	ms := newMessagingFakeMetastore()
-	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	replicator := &fakeReplicator{err: errors.New("replication failed")}
-	engine := newTestEngine(t, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
-
-	_, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`))
-	if err == nil || err.Error() != "messaging: replicate: replication failed" {
-		t.Fatalf("Produce() error = %v, want wrapped replicate error", err)
-	}
-}
-
 func TestReplayReadReturnsMessageWhenOffsetExists(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2}
@@ -242,6 +229,9 @@ func TestReplayReadReturnsMessageWhenOffsetExists(t *testing.T) {
 	}
 	if _, err := log.Append([]byte(`{"id":1}`)); err != nil {
 		t.Fatalf("Append() error = %v", err)
+	}
+	if err := log.AdvanceHighWatermark(1); err != nil {
+		t.Fatalf("AdvanceHighWatermark() error = %v", err)
 	}
 
 	msg, found, err := engine.replayRead("orders", 1, 0, 2)
@@ -404,6 +394,9 @@ func TestConsumeReturnsMessageForPinnedPartition(t *testing.T) {
 	if _, err := log.Append([]byte(`{"id":42}`)); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
+	if err := log.AdvanceHighWatermark(1); err != nil {
+		t.Fatalf("AdvanceHighWatermark() error = %v", err)
+	}
 	partitionIdx := 1
 
 	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: &partitionIdx})
@@ -432,6 +425,9 @@ func TestAckReturnsTopicNotFoundWhenTopicDeleted(t *testing.T) {
 	if _, err := log.Append([]byte(`{"id":1}`)); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
+	if err := log.AdvanceHighWatermark(1); err != nil {
+		t.Fatalf("AdvanceHighWatermark() error = %v", err)
+	}
 	partitionIdx := 0
 	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: &partitionIdx})
 	if err != nil {
@@ -459,6 +455,9 @@ func TestAckCommitsReservedHandle(t *testing.T) {
 	if _, err := log.Append([]byte(`{"id":1}`)); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
+	if err := log.AdvanceHighWatermark(1); err != nil {
+		t.Fatalf("AdvanceHighWatermark() error = %v", err)
+	}
 	partitionIdx := 0
 	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: &partitionIdx})
 	if err != nil {
@@ -483,6 +482,9 @@ func TestAckRejectsStaleHandleAfterCommit(t *testing.T) {
 	}
 	if _, err := log.Append([]byte(`{"id":1}`)); err != nil {
 		t.Fatalf("Append() error = %v", err)
+	}
+	if err := log.AdvanceHighWatermark(1); err != nil {
+		t.Fatalf("AdvanceHighWatermark() error = %v", err)
 	}
 	partitionIdx := 0
 	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: &partitionIdx})
@@ -523,6 +525,9 @@ func TestTryQueueReadReturnsMessageFromFirstReservablePartition(t *testing.T) {
 	if _, err := log0.Append([]byte(`{"id":1}`)); err != nil {
 		t.Fatalf("Append(0) error = %v", err)
 	}
+	if err := log0.AdvanceHighWatermark(1); err != nil {
+		t.Fatalf("AdvanceHighWatermark(0) error = %v", err)
+	}
 	if _, _, err := engine.tryQueueRead(context.Background(), "orders", []int{0}, time.Second); err != nil {
 		t.Fatalf("tryQueueRead() reserve first partition error = %v", err)
 	}
@@ -533,6 +538,9 @@ func TestTryQueueReadReturnsMessageFromFirstReservablePartition(t *testing.T) {
 	}
 	if _, err := log1.Append([]byte(`{"id":2}`)); err != nil {
 		t.Fatalf("Append(1) error = %v", err)
+	}
+	if err := log1.AdvanceHighWatermark(1); err != nil {
+		t.Fatalf("AdvanceHighWatermark(1) error = %v", err)
 	}
 
 	msg, found, err := engine.tryQueueRead(context.Background(), "orders", []int{0, 1}, time.Second)
@@ -559,6 +567,9 @@ func TestConsumeScansPartitionsInOrder(t *testing.T) {
 	if _, err := log1.Append([]byte(`{"id":99}`)); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
+	if err := log1.AdvanceHighWatermark(1); err != nil {
+		t.Fatalf("AdvanceHighWatermark() error = %v", err)
+	}
 
 	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{})
 	if err != nil {
@@ -582,6 +593,9 @@ func TestConsumeReplayReturnsMessageForExistingOffset(t *testing.T) {
 	}
 	if _, err := log.Append([]byte(`{"id":7}`)); err != nil {
 		t.Fatalf("Append() error = %v", err)
+	}
+	if err := log.AdvanceHighWatermark(1); err != nil {
+		t.Fatalf("AdvanceHighWatermark() error = %v", err)
 	}
 	partitionIdx := 0
 	offset := int64(0)

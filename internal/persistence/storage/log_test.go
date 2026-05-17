@@ -134,6 +134,116 @@ func TestRoundTripAfterFlushAndReopen(t *testing.T) {
 	}
 }
 
+func TestHighWatermarkPersistsAcrossRestart(t *testing.T) {
+	path := testLogPath(t)
+	mustWriteAndClose(t, path, slowFlushOpts(t, nil), func(l *Log) {
+		for i := range 3 {
+			if _, err := l.Append(fmt.Appendf(nil, "rec-%d", i)); err != nil {
+				t.Fatalf("Append %d: %v", i, err)
+			}
+		}
+		if err := l.AdvanceHighWatermark(2); err != nil {
+			t.Fatalf("AdvanceHighWatermark: %v", err)
+		}
+	})
+
+	l, err := NewLog(path, slowFlushOpts(t, nil))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l.Close()
+
+	if got := l.HighWatermark(); got != 2 {
+		t.Fatalf("HighWatermark() = %d, want 2", got)
+	}
+	if got := l.NextOffset(); got != 3 {
+		t.Fatalf("NextOffset() = %d, want 3", got)
+	}
+}
+
+func TestHighWatermarkMissingFileBootstrapsFromTail(t *testing.T) {
+	path := testLogPath(t)
+	mustWriteAndClose(t, path, slowFlushOpts(t, nil), func(l *Log) {
+		for i := range 2 {
+			if _, err := l.Append(fmt.Appendf(nil, "rec-%d", i)); err != nil {
+				t.Fatalf("Append %d: %v", i, err)
+			}
+		}
+	})
+	if err := os.Remove(filepath.Join(path, hwmFileName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Remove(hwm): %v", err)
+	}
+
+	l, err := NewLog(path, slowFlushOpts(t, nil))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l.Close()
+
+	if got := l.HighWatermark(); got != 2 {
+		t.Fatalf("HighWatermark() = %d, want 2", got)
+	}
+}
+
+func TestHighWatermarkClampsToRecoveredTail(t *testing.T) {
+	path := testLogPath(t)
+	mustWriteAndClose(t, path, slowFlushOpts(t, nil), func(l *Log) {
+		if _, err := l.Append([]byte("rec-0")); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	})
+	if err := os.WriteFile(filepath.Join(path, hwmFileName), []byte{0, 0, 0, 0, 0, 0, 0, 9}, 0o644); err != nil {
+		t.Fatalf("WriteFile(hwm): %v", err)
+	}
+
+	l, err := NewLog(path, slowFlushOpts(t, nil))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l.Close()
+
+	if got := l.HighWatermark(); got != 1 {
+		t.Fatalf("HighWatermark() = %d, want 1", got)
+	}
+}
+
+func TestHighWatermarkHiddenTailSurvivesRestart(t *testing.T) {
+	path := testLogPath(t)
+	mustWriteAndClose(t, path, slowFlushOpts(t, nil), func(l *Log) {
+		for i := range 3 {
+			if _, err := l.Append(fmt.Appendf(nil, "rec-%d", i)); err != nil {
+				t.Fatalf("Append %d: %v", i, err)
+			}
+		}
+		if err := l.AdvanceHighWatermark(1); err != nil {
+			t.Fatalf("AdvanceHighWatermark: %v", err)
+		}
+	})
+
+	l, err := NewLog(path, slowFlushOpts(t, nil))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l.Close()
+
+	if l.NextOffset() != 3 {
+		t.Fatalf("NextOffset after reopen want 3 got %d", l.NextOffset())
+	}
+	if got := l.HighWatermark(); got != 1 {
+		t.Fatalf("HighWatermark() = %d, want 1", got)
+	}
+	for i := range int64(3) {
+		got, err := l.Read(i)
+		if err != nil {
+			t.Fatalf("Read %d: %v", i, err)
+		}
+		want := fmt.Appendf(nil, "rec-%d", i)
+		if !bytes.Equal(got, want) {
+			t.Fatalf("Read %d got %q want %q", i, got, want)
+		}
+	}
+}
+
 // ---- 3. Batch round-trip ------------------------------------------
 
 func TestAppendBatch(t *testing.T) {
