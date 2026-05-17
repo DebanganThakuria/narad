@@ -8,7 +8,7 @@ import (
 func TestAck_HappyPath(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "ack", Partitions: 2})
+	mustCreateTopic(t, env, createTopicReq{Name: "ack", Partitions: 3})
 
 	pr := mustProduce(t, env, "ack", "k", map[string]int{"v": 1})
 	msg, found := mustConsume(t, env, "ack", consumeQuery{Partition: new(pr.Partition)})
@@ -27,7 +27,7 @@ func TestAck_HappyPath(t *testing.T) {
 func TestAck_LowerThanCommittedIsNoOp(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "monotonic-commit", Partitions: 1})
+	mustCreateTopic(t, env, createTopicReq{Name: "monotonic-commit", Partitions: 3})
 
 	for i := range 3 {
 		mustProduce(t, env, "monotonic-commit", "k", map[string]int{"i": i})

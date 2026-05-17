@@ -133,12 +133,15 @@ func (c *Controller) reconcileAssignments(ctx context.Context) {
 	}
 
 	for _, t := range topics {
-		c.assignTopic(ctx, t.Name, t.Partitions, active, counts)
+		c.assignTopic(ctx, t.Name, t.Partitions, t.ReplicationFactor, active, counts)
 	}
 }
 
 // assignTopic assigns only the partitions of topicName that have no owner yet.
-func (c *Controller) assignTopic(ctx context.Context, topicName string, numPartitions int, active []metastore.Member, counts map[string]int) {
+func (c *Controller) assignTopic(ctx context.Context, topicName string, numPartitions int, replicationFactor int, active []metastore.Member, counts map[string]int) {
+	if replicationFactor < 2 || len(active) < replicationFactor {
+		return
+	}
 	existing, _ := c.store.ListAssignments(topicName)
 	assigned := make(map[int]bool, len(existing))
 	for _, a := range existing {
@@ -154,10 +157,12 @@ func (c *Controller) assignTopic(ctx context.Context, topicName string, numParti
 			return counts[active[i].ID] < counts[active[j].ID]
 		})
 		owner := active[0].ID
-		if err := c.store.AssignPartition(ctx, topicName, p, owner); err != nil {
+		follower := active[1].ID
+		if err := c.store.AssignPartition(ctx, topicName, p, owner, follower); err != nil {
 			continue // Raft Apply failed (e.g. lost leadership); next reconcile will retry.
 		}
 		counts[owner]++
+		counts[follower]++
 	}
 }
 

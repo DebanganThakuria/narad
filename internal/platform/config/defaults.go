@@ -36,9 +36,9 @@ func Default() *Config {
 			RetentionCheckIntervalMs: 60_000,   // 1 minute
 		},
 		Topic: TopicConfig{
-			DefaultPartitions:                8,
+			DefaultPartitions:                3,
 			MaxPartitions:                    1024,
-			DefaultReplicationFactor:         3,
+			DefaultReplicationFactor:         2,
 			DefaultRetentionAgeMs:            7 * 24 * 60 * 60 * 1000, // 7 days
 			DefaultVisibilityTimeoutMs:       30_000,                  // 30 seconds
 			DefaultMaxInFlightPerPartition:   1024,

@@ -13,7 +13,7 @@ func TestProduceAndConsume(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("prodcon", 2, 2, int64(0))
+	env.createTopic("prodcon", 3, 2, int64(0))
 
 	off, part := env.produce("prodcon", "k1", `{"val": 1}`)
 	if off != 0 {
@@ -46,7 +46,7 @@ func TestConsumeLongPoll(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("longpoll", 1, 2, int64(0))
+	env.createTopic("longpoll", 3, 2, int64(0))
 
 	go func() {
 		time.Sleep(200 * time.Millisecond)
@@ -62,7 +62,7 @@ func TestConsumeWithExplicitOffset(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("replay", 1, 2, int64(0))
+	env.createTopic("replay", 3, 2, int64(0))
 
 	env.produce("replay", "k1", `{"n": 1}`)
 	env.produce("replay", "k2", `{"n": 2}`)
@@ -88,7 +88,7 @@ func TestConsumeEmptyTopic(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("empty", 1, 2, int64(0))
+	env.createTopic("empty", 3, 2, int64(0))
 
 	// Immediate consume on empty topic with no wait returns 204 (no message yet).
 	resp := env.get("/v1/topics/empty/consume")
@@ -100,7 +100,7 @@ func TestAck(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("ack-topic", 1, 2, int64(0))
+	env.createTopic("ack-topic", 3, 2, int64(0))
 	env.produce("ack-topic", "k", `{"x": 1}`)
 
 	msg := env.consume("/v1/topics/ack-topic/consume")
@@ -119,7 +119,7 @@ func TestConsumeMultipleThenAck(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("multi-ack", 1, 2, int64(0))
+	env.createTopic("multi-ack", 3, 2, int64(0))
 	env.produce("multi-ack", "k", `{"seq": 0}`)
 	env.produce("multi-ack", "k", `{"seq": 1}`)
 
@@ -151,7 +151,7 @@ func TestProduceInvalidJSON(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	env.createTopic("produce-bad", 1, 2, int64(0))
+	env.createTopic("produce-bad", 3, 2, int64(0))
 
 	// Send a raw body with an unquoted string, which is not valid JSON.
 	resp := env.rawPost("/v1/topics/produce-bad/produce", `{"key": "k", "message": not-json}`)

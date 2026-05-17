@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -59,7 +60,7 @@ func TestMetrics_EndpointReachable(t *testing.T) {
 func TestMetrics_ProduceCountersIncrement(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t, withMetrics())
-	mustCreateTopic(t, env, createTopicReq{Name: "produce-metrics", Partitions: 1})
+	mustCreateTopic(t, env, createTopicReq{Name: "produce-metrics", Partitions: 3})
 
 	msg := map[string]string{"hello": "world"}
 	mustProduce(t, env, "produce-metrics", "k", msg)
@@ -111,7 +112,7 @@ func TestMetrics_RouteLabelsUseTemplate(t *testing.T) {
 func TestMetrics_PollerUpdatesLagAndInventory(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t, withMetrics())
-	mustCreateTopic(t, env, createTopicReq{Name: "poll-me", Partitions: 1})
+	mustCreateTopic(t, env, createTopicReq{Name: "poll-me", Partitions: 3})
 
 	for range 5 {
 		mustProduce(t, env, "poll-me", "k", map[string]int{"v": 1})
@@ -131,19 +132,28 @@ func TestMetrics_PollerUpdatesLagAndInventory(t *testing.T) {
 
 	// Mirror what poller.tick does — set the inventory and lag gauges.
 	env.Metrics.TopicsTotal.Set(float64(len(snaps)))
+	var totalLag float64
 	for _, ts := range snaps {
 		for _, ps := range ts.Partitions {
 			lag := ps.LogEndOffset - ps.CommittedOffset
-			env.Metrics.ConsumerLagMessages.WithLabelValues(ts.Topic, "0").Set(float64(lag))
+			env.Metrics.ConsumerLagMessages.WithLabelValues(ts.Topic, fmt.Sprintf("%d", ps.Partition)).Set(float64(lag))
+			totalLag += float64(lag)
 		}
 	}
 
 	if got := readGauge(t, env, "narad_topics_total", nil); got != 1 {
 		t.Errorf("narad_topics_total: got %v want 1", got)
 	}
-	if got := readGauge(t, env, "narad_consumer_lag_messages",
-		map[string]string{"topic": "poll-me", "partition": "0"}); got != 5 {
-		t.Errorf("narad_consumer_lag_messages: got %v want 5", got)
+	if totalLag != 5 {
+		t.Fatalf("total lag from snapshot = %v, want 5", totalLag)
+	}
+	var reportedLag float64
+	for partition := 0; partition < 3; partition++ {
+		reportedLag += readGauge(t, env, "narad_consumer_lag_messages",
+			map[string]string{"topic": "poll-me", "partition": fmt.Sprintf("%d", partition)})
+	}
+	if reportedLag != 5 {
+		t.Errorf("reported lag sum = %v, want 5", reportedLag)
 	}
 	// Sanity check: snapshot type assertion (avoids unused-import warning).
 	var _ metrics.PartitionSnapshot

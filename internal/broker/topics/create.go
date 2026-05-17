@@ -27,8 +27,8 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	if partitions == 0 {
 		partitions = m.cfg.DefaultPartitions
 	}
-	if partitions < 0 {
-		return topic.Topic{}, fmt.Errorf("%w: partitions must be >= 0 (0 = use default)", ErrInvalid)
+	if partitions < 3 {
+		return topic.Topic{}, fmt.Errorf("%w: partitions must be >= 3 (0 = use default)", ErrInvalid)
 	}
 	if maximum := m.cfg.MaxPartitions; maximum > 0 && partitions > maximum {
 		return topic.Topic{}, fmt.Errorf("%w: partitions (%d) exceeds topic.max_partitions (%d)",

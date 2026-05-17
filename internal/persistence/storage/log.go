@@ -85,9 +85,13 @@ type Log struct {
 
 	index map[int64]indexEntry
 
-	buffer  *buffer
-	flusher *flusher
-	reaper  *reaper
+	buffer         *buffer
+	highWatermark  atomic.Int64
+	hwmMu          sync.Mutex
+	hwmPath        string
+	hwmTmpPath     string
+	flusher        *flusher
+	reaper         *reaper
 
 	notify chan struct{}
 
@@ -115,12 +119,15 @@ func NewLog(dir string, opts Options) (*Log, error) {
 	}
 
 	l := &Log{
-		dir:    dir,
-		codec:  opts.Codec,
-		opts:   opts,
-		index:  make(map[int64]indexEntry),
-		notify: make(chan struct{}, 1),
+		dir:        dir,
+		codec:      opts.Codec,
+		opts:       opts,
+		index:      make(map[int64]indexEntry),
+		notify:     make(chan struct{}, 1),
+		hwmPath:    hwmFilePath(dir),
+		hwmTmpPath: hwmTempFilePath(dir),
 	}
+	l.highWatermark.Store(-1)
 
 	nextOffset, err := l.recover()
 	if err != nil {
@@ -131,6 +138,12 @@ func NewLog(dir string, opts Options) (*Log, error) {
 	}
 
 	l.buffer = newBuffer(nextOffset, opts.FlushBytes, opts.FlushRecords)
+	if err := l.loadHighWatermark(nextOffset); err != nil {
+		for _, s := range l.segments {
+			_ = s.close()
+		}
+		return nil, err
+	}
 	l.flusher = newFlusher(l, &l.rwmu, opts.FlushInterval)
 	l.reaper = newReaper(l, opts.Retention)
 	go l.flusher.run()

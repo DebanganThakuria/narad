@@ -19,7 +19,7 @@ import (
 func TestConsume_RoundTripIntegrity(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "rt", Partitions: 1})
+	mustCreateTopic(t, env, createTopicReq{Name: "rt", Partitions: 3})
 
 	want := map[string]any{"event": "checkout", "user": 42, "amount": 19.99}
 	pr := mustProduce(t, env, "rt", "k", want)
@@ -61,7 +61,7 @@ func TestConsume_RoundTripIntegrity(t *testing.T) {
 func TestConsume_ReturnsNoContentWhenEmpty(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "empty", Partitions: 1})
+	mustCreateTopic(t, env, createTopicReq{Name: "empty", Partitions: 3})
 
 	_, found := mustConsume(t, env, "empty", consumeQuery{})
 	if found {
@@ -75,7 +75,7 @@ func TestConsume_ReturnsNoContentWhenEmpty(t *testing.T) {
 func TestConsume_AckAdvancesQueueCursor(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "ack-cursor", Partitions: 1})
+	mustCreateTopic(t, env, createTopicReq{Name: "ack-cursor", Partitions: 3})
 
 	for i := range 3 {
 		mustProduce(t, env, "ack-cursor", "k", map[string]int{"i": i})
@@ -125,7 +125,7 @@ func TestConsume_PartitionPinned(t *testing.T) {
 func TestConsume_ReplayDoesNotAdvanceCommittedOffset(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "replay", Partitions: 1})
+	mustCreateTopic(t, env, createTopicReq{Name: "replay", Partitions: 3})
 
 	pr := mustProduce(t, env, "replay", "k", map[string]int{"v": 1})
 
@@ -153,7 +153,7 @@ func TestConsume_ReplayDoesNotAdvanceCommittedOffset(t *testing.T) {
 func TestConsume_ReplayPastTailReturns204(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "future", Partitions: 1})
+	mustCreateTopic(t, env, createTopicReq{Name: "future", Partitions: 3})
 
 	mustProduce(t, env, "future", "k", map[string]int{"v": 1})
 
@@ -184,7 +184,7 @@ func TestConsume_RejectsInvalidPartition(t *testing.T) {
 func TestConsume_RejectsOutOfRangePartition(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "oor", Partitions: 2})
+	mustCreateTopic(t, env, createTopicReq{Name: "oor", Partitions: 3})
 
 	resp := getJSON(t, env.Server.URL+"/v1/topics/oor/consume?partition=99")
 	expectStatus(t, resp, http.StatusBadRequest)
@@ -222,7 +222,7 @@ func TestConsume_NotFoundForUnknownTopic(t *testing.T) {
 func TestConsume_LongPollWaitsAndReturnsOnArrival(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t, withMaxConsumeWait(2*time.Second))
-	mustCreateTopic(t, env, createTopicReq{Name: "longpoll", Partitions: 1})
+	mustCreateTopic(t, env, createTopicReq{Name: "longpoll", Partitions: 3})
 
 	type result struct {
 		msg   string
@@ -275,7 +275,7 @@ func TestConsume_LongPollWaitsAndReturnsOnArrival(t *testing.T) {
 func TestConsume_LongPollTimesOutWith204(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t, withMaxConsumeWait(500*time.Millisecond))
-	mustCreateTopic(t, env, createTopicReq{Name: "timeout", Partitions: 1})
+	mustCreateTopic(t, env, createTopicReq{Name: "timeout", Partitions: 3})
 
 	start := time.Now()
 	resp := getJSON(t, env.Server.URL+"/v1/topics/timeout/consume?wait=200ms")

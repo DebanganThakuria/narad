@@ -52,7 +52,10 @@ func New(d Deps) (Broker, error) {
 		return nil, fmt.Errorf("%w: TopicConfig.DefaultMaxAckedAheadPerPartition must be > 0", ErrInvalidArgument)
 	}
 
-	logs := runtime.NewLogs(d.DataDir, d.StorageOptions, d.Metastore, d.Metrics)
+	logs := d.Logs
+	if logs == nil {
+		logs = runtime.NewLogs(d.DataDir, d.StorageOptions, d.Metastore, d.Metrics)
+	}
 
 	topicCfg := topics.Config{
 		DefaultPartitions:                d.TopicConfig.DefaultPartitions,

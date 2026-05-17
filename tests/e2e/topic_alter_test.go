@@ -11,7 +11,7 @@ import (
 func TestAlterTopic_IncreasePartitions(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "alter", Partitions: 2})
+	mustCreateTopic(t, env, createTopicReq{Name: "alter", Partitions: 3})
 
 	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/alter",
 		map[string]any{"partitions": 6})
@@ -41,7 +41,7 @@ func TestAlterTopic_RejectsPartitionDecrease(t *testing.T) {
 	mustCreateTopic(t, env, createTopicReq{Name: "shrink", Partitions: 4})
 
 	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/shrink",
-		map[string]any{"partitions": 2})
+		map[string]any{"partitions": 3})
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
@@ -66,7 +66,7 @@ func TestAlterTopic_RejectsAboveMaxPartitions(t *testing.T) {
 	mustCreateTopic(t, env, createTopicReq{Name: "cap", Partitions: 4})
 
 	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/cap",
-		map[string]any{"partitions": 16})
+		map[string]any{"partitions": 36})
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
@@ -92,7 +92,7 @@ func TestAlterTopic_UpdateRetention(t *testing.T) {
 func TestAlterTopic_RetentionUpdateReopensPartitionLogs(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "reopen", Partitions: 1})
+	mustCreateTopic(t, env, createTopicReq{Name: "reopen", Partitions: 3})
 
 	mustProduce(t, env, "reopen", "k", map[string]int{"v": 1})
 

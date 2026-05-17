@@ -24,7 +24,13 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 		return 0, 0, err
 	}
 
-	partIdx := e.partitions.Pick(topicName, key, t.Partitions)
+	partIdx, err := e.pickProducePartition(topicName, key, t.Partitions)
+	if err != nil {
+		if e.metrics != nil {
+			e.metrics.IncError("messaging", "partition_pick")
+		}
+		return 0, 0, err
+	}
 	log, err := e.logs.Get(topicName, partIdx)
 	if err != nil {
 		if e.metrics != nil {
@@ -46,6 +52,12 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 			e.metrics.IncError("messaging", "replicate")
 		}
 		return 0, 0, fmt.Errorf("messaging: replicate: %w", err)
+	}
+	if err := log.AdvanceHighWatermark(offset + 1); err != nil {
+		if e.metrics != nil {
+			e.metrics.IncError("messaging", "commit_boundary")
+		}
+		return 0, 0, fmt.Errorf("messaging: commit boundary durability: %w", err)
 	}
 
 	if e.metrics != nil {

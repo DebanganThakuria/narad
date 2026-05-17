@@ -127,7 +127,7 @@ func (e *Engine) replayRead(topicName string, partitionIdx int, offset int64, to
 	if err != nil {
 		return topic.Message{}, false, err
 	}
-	if offset >= log.NextOffset() {
+	if offset >= log.HighWatermark() {
 		return topic.Message{}, false, nil
 	}
 	payload, err := log.Read(offset)
@@ -158,12 +158,14 @@ func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions 
 		if err != nil {
 			return topic.Message{}, false, err
 		}
-		res, err := e.offsets.ReserveNext(ctx, topicName, idx, visibilityTimeout, log.NextOffset())
+		res, err := e.offsets.ReserveNext(ctx, topicName, idx, visibilityTimeout, log.HighWatermark())
 		if err != nil {
 			return topic.Message{}, false, err
 		}
 		if !res.Reserved {
-			e.metrics.IncReserveSkipped(topicName, res.SkipReason)
+			if e.metrics != nil {
+				e.metrics.IncReserveSkipped(topicName, res.SkipReason)
+			}
 			continue // partition empty, fully reserved, or in-flight cap hit
 		}
 		payload, err := log.Read(res.Offset)

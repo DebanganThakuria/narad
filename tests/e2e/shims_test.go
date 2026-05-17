@@ -11,6 +11,8 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/platform/replication"
 )
 
 // envOption tunes the env returned by newTestEnv.
@@ -39,6 +41,10 @@ func withPolicy(p broker.TopicPolicy) envOption {
 
 func withMaxConsumeWait(d time.Duration) envOption {
 	return func(o *envOpts) { o.maxConsumeWait = d }
+}
+
+func withReplicatorFactory(f func(*metastore.Store, *http.Client) replication.Replicator) envOption {
+	return func(o *envOpts) { o.replicatorFactory = f }
 }
 
 // newTestEnv builds an env with t.Cleanup wired for close.
@@ -80,7 +86,21 @@ func mustCreateTopic(t *testing.T, e *env, req createTopicReq) topic.Topic {
 	}
 	var out topic.Topic
 	decodeJSON(t, resp, &out)
-	return out
+
+	store, ok := e.ms.(*metastore.Store)
+	if !ok {
+		t.Fatalf("unexpected metastore type %T", e.ms)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		assignments, err := store.ListAssignments(req.Name)
+		if err == nil && len(assignments) == out.Partitions {
+			return out
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("mustCreateTopic %q: timed out waiting for partition assignments", req.Name)
+	return topic.Topic{}
 }
 
 // produceResult holds the fields returned by the produce endpoint.

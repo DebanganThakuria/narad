@@ -134,6 +134,116 @@ func TestRoundTripAfterFlushAndReopen(t *testing.T) {
 	}
 }
 
+func TestHighWatermarkPersistsAcrossRestart(t *testing.T) {
+	path := testLogPath(t)
+	mustWriteAndClose(t, path, slowFlushOpts(t, nil), func(l *Log) {
+		for i := range 3 {
+			if _, err := l.Append(fmt.Appendf(nil, "rec-%d", i)); err != nil {
+				t.Fatalf("Append %d: %v", i, err)
+			}
+		}
+		if err := l.AdvanceHighWatermark(2); err != nil {
+			t.Fatalf("AdvanceHighWatermark: %v", err)
+		}
+	})
+
+	l, err := NewLog(path, slowFlushOpts(t, nil))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l.Close()
+
+	if got := l.HighWatermark(); got != 2 {
+		t.Fatalf("HighWatermark() = %d, want 2", got)
+	}
+	if got := l.NextOffset(); got != 3 {
+		t.Fatalf("NextOffset() = %d, want 3", got)
+	}
+}
+
+func TestHighWatermarkMissingFileBootstrapsFromTail(t *testing.T) {
+	path := testLogPath(t)
+	mustWriteAndClose(t, path, slowFlushOpts(t, nil), func(l *Log) {
+		for i := range 2 {
+			if _, err := l.Append(fmt.Appendf(nil, "rec-%d", i)); err != nil {
+				t.Fatalf("Append %d: %v", i, err)
+			}
+		}
+	})
+	if err := os.Remove(filepath.Join(path, hwmFileName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Remove(hwm): %v", err)
+	}
+
+	l, err := NewLog(path, slowFlushOpts(t, nil))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l.Close()
+
+	if got := l.HighWatermark(); got != 2 {
+		t.Fatalf("HighWatermark() = %d, want 2", got)
+	}
+}
+
+func TestHighWatermarkClampsToRecoveredTail(t *testing.T) {
+	path := testLogPath(t)
+	mustWriteAndClose(t, path, slowFlushOpts(t, nil), func(l *Log) {
+		if _, err := l.Append([]byte("rec-0")); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	})
+	if err := os.WriteFile(filepath.Join(path, hwmFileName), []byte{0, 0, 0, 0, 0, 0, 0, 9}, 0o644); err != nil {
+		t.Fatalf("WriteFile(hwm): %v", err)
+	}
+
+	l, err := NewLog(path, slowFlushOpts(t, nil))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l.Close()
+
+	if got := l.HighWatermark(); got != 1 {
+		t.Fatalf("HighWatermark() = %d, want 1", got)
+	}
+}
+
+func TestHighWatermarkHiddenTailSurvivesRestart(t *testing.T) {
+	path := testLogPath(t)
+	mustWriteAndClose(t, path, slowFlushOpts(t, nil), func(l *Log) {
+		for i := range 3 {
+			if _, err := l.Append(fmt.Appendf(nil, "rec-%d", i)); err != nil {
+				t.Fatalf("Append %d: %v", i, err)
+			}
+		}
+		if err := l.AdvanceHighWatermark(1); err != nil {
+			t.Fatalf("AdvanceHighWatermark: %v", err)
+		}
+	})
+
+	l, err := NewLog(path, slowFlushOpts(t, nil))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l.Close()
+
+	if l.NextOffset() != 3 {
+		t.Fatalf("NextOffset after reopen want 3 got %d", l.NextOffset())
+	}
+	if got := l.HighWatermark(); got != 1 {
+		t.Fatalf("HighWatermark() = %d, want 1", got)
+	}
+	for i := range int64(3) {
+		got, err := l.Read(i)
+		if err != nil {
+			t.Fatalf("Read %d: %v", i, err)
+		}
+		want := fmt.Appendf(nil, "rec-%d", i)
+		if !bytes.Equal(got, want) {
+			t.Fatalf("Read %d got %q want %q", i, got, want)
+		}
+	}
+}
+
 // ---- 3. Batch round-trip ------------------------------------------
 
 func TestAppendBatch(t *testing.T) {
@@ -917,6 +1027,120 @@ func TestRetentionDisabledIsNoop(t *testing.T) {
 	}
 	if afterSize != beforeSize {
 		t.Fatalf("retention disabled but size changed: was %d, now %d", beforeSize, afterSize)
+	}
+}
+
+func TestDefaultOptionsAndAccessors(t *testing.T) {
+	dir := testLogPath(t)
+	l, err := NewLog(dir, DefaultOptions())
+	if err != nil {
+		t.Fatalf("NewLog() error = %v", err)
+	}
+	defer l.Close()
+
+	if l.NotifyC() == nil {
+		t.Fatal("NotifyC() = nil")
+	}
+	if got := l.OldestOffset(); got != 0 {
+		t.Fatalf("OldestOffset() = %d, want 0", got)
+	}
+	if got := l.SizeBytes(); got != 0 {
+		t.Fatalf("SizeBytes() = %d, want 0", got)
+	}
+	if got := l.SegmentCount(); got != 1 {
+		t.Fatalf("SegmentCount() = %d, want 1", got)
+	}
+	if got := l.LatestOffset(); got != 0 {
+		t.Fatalf("LatestOffset() = %d, want 0", got)
+	}
+	if mt, ok := l.OldestSegmentAt(); !ok || mt <= 0 {
+		t.Fatalf("OldestSegmentAt() = (%d, %t), want valid mtime", mt, ok)
+	}
+	if mt, ok := l.SegmentMTimeForOffset(0); ok || mt != 0 {
+		t.Fatalf("SegmentMTimeForOffset(0) = (%d, %t), want no match", mt, ok)
+	}
+	if l.findSegmentLocked(999) != nil {
+		t.Fatal("findSegmentLocked() found unexpected segment")
+	}
+
+	off, err := l.Append([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	if off != 0 {
+		t.Fatalf("Append() offset = %d, want 0", off)
+	}
+	if got := l.LatestOffset(); got != 0 {
+		t.Fatalf("LatestOffset() = %d, want 0", got)
+	}
+	if mt, ok := l.SegmentMTimeForOffset(0); ok || mt != 0 {
+		t.Fatalf("SegmentMTimeForOffset(0) = (%d, %t), want no flushed match", mt, ok)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	l, err = NewLog(dir, DefaultOptions())
+	if err != nil {
+		t.Fatalf("reopen NewLog() error = %v", err)
+	}
+	defer l.Close()
+	if mt, ok := l.SegmentMTimeForOffset(0); !ok || mt <= 0 {
+		t.Fatalf("SegmentMTimeForOffset(0) = (%d, %t), want valid mtime", mt, ok)
+	}
+	if mt, ok := l.SegmentMTimeForOffset(1); ok || mt != 0 {
+		t.Fatalf("SegmentMTimeForOffset(1) = (%d, %t), want no match", mt, ok)
+	}
+	if seg := l.findSegmentLocked(0); seg == nil {
+		t.Fatal("findSegmentLocked(0) = nil, want segment")
+	}
+}
+
+func TestListSegmentFileNamesSortsAndFilters(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{
+		segmentFileName(20),
+		segmentFileName(5),
+		"notes.txt",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q) error = %v", name, err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, segmentFileName(99)), 0o755); err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+
+	names, err := listSegmentFileNames(dir)
+	if err != nil {
+		t.Fatalf("listSegmentFileNames() error = %v", err)
+	}
+	want := []string{segmentFileName(5), segmentFileName(20)}
+	if fmt.Sprint(names) != fmt.Sprint(want) {
+		t.Fatalf("listSegmentFileNames() = %v, want %v", names, want)
+	}
+}
+
+func TestSegmentHelpersCoverClosedPaths(t *testing.T) {
+	dir := t.TempDir()
+	seg, err := createSegment(dir, 7)
+	if err != nil {
+		t.Fatalf("createSegment() error = %v", err)
+	}
+	if seg.path != filepath.Join(dir, segmentFileName(7)) {
+		t.Fatalf("segment path = %q, want %q", seg.path, filepath.Join(dir, segmentFileName(7)))
+	}
+	if seg.baseOffset != 7 || seg.nextOffset != 7 || seg.sizeBytes != 0 {
+		t.Fatalf("segment state = %+v, want base=7 next=7 size=0", seg)
+	}
+	if err := seg.close(); err != nil {
+		t.Fatalf("close() error = %v", err)
+	}
+	if mt, err := segmentMTime(seg); err == nil || mt != 0 {
+		t.Fatalf("segmentMTime(closed) = (%d, %v), want error", mt, err)
+	}
+	if err := seg.close(); err != nil {
+		t.Fatalf("second close() error = %v", err)
 	}
 }
 

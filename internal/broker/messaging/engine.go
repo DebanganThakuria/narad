@@ -33,6 +33,11 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
+type assignmentReader interface {
+	GetAssignment(topicName string, partition int) (metastore.Assignment, error)
+	GetMember(podID string) (metastore.Member, error)
+}
+
 // Aliases of the shared broker error sentinels for ergonomic local
 // use. The broker package re-exports the underlying errs.* values
 // publicly.
@@ -105,4 +110,24 @@ func (e *Engine) getTopic(ctx context.Context, name string) (topic.Topic, error)
 		return topic.Topic{}, fmt.Errorf("messaging: get topic: %w", err)
 	}
 	return t, nil
+}
+
+func (e *Engine) pickProducePartition(topicName, key string, partitions int) (int, error) {
+	start := e.partitions.Pick(topicName, key, partitions)
+	assignments, ok := e.metastore.(assignmentReader)
+	if !ok {
+		return start, nil
+	}
+	for i := 0; i < partitions; i++ {
+		candidate := (start + i) % partitions
+		assignment, err := assignments.GetAssignment(topicName, candidate)
+		if err != nil {
+			continue
+		}
+		owner, err := assignments.GetMember(assignment.OwnerID)
+		if err == nil && owner.Status == metastore.MemberAlive {
+			return candidate, nil
+		}
+	}
+	return 0, fmt.Errorf("messaging: no alive partition owner for topic %s", topicName)
 }

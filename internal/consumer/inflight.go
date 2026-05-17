@@ -65,6 +65,7 @@ type InFlight struct {
 	shards   map[shardKey]*partitionShard
 	onCommit CommitFunc
 	resolve  CapsResolver
+	clockMu  sync.RWMutex
 	timeNow  func() int64 // replaced in tests
 }
 
@@ -369,7 +370,7 @@ func (f *InFlight) RunPurger(ctx context.Context, interval time.Duration) {
 
 // purgeAll sweeps every shard and evicts expired reservations.
 func (f *InFlight) purgeAll() {
-	now := f.timeNow()
+	now := f.now()
 	// Snapshot shard list under RLock so we don't hold f.mu while
 	// locking individual shards (avoids lock-order issues).
 	f.mu.RLock()
@@ -384,6 +385,19 @@ func (f *InFlight) purgeAll() {
 		sh.purgeExpired(now)
 		sh.mu.Unlock()
 	}
+}
+
+func (f *InFlight) now() int64 {
+	f.clockMu.RLock()
+	now := f.timeNow
+	f.clockMu.RUnlock()
+	return now()
+}
+
+func (f *InFlight) setTimeNow(now func() int64) {
+	f.clockMu.Lock()
+	f.timeNow = now
+	f.clockMu.Unlock()
 }
 
 func nowUnixMs() int64 {
