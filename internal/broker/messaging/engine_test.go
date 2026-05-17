@@ -279,9 +279,7 @@ func TestConsumeRequiresPartitionWhenOffsetProvided(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngine(t, ms, nil, nil, nil)
-	offset := int64(0)
-
-	_, _, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Offset: &offset})
+	_, _, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Offset: new(int64(0))})
 	if !errors.Is(err, ErrPartitionRequired) {
 		t.Fatalf("Consume() error = %v, want %v", err, ErrPartitionRequired)
 	}
@@ -291,9 +289,7 @@ func TestConsumeRejectsOutOfRangePinnedPartition(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngine(t, ms, nil, nil, nil)
-	partitionIdx := 1
-
-	_, _, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: &partitionIdx})
+	_, _, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(1)})
 	if err == nil || !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Consume() error = %v, want %v", err, ErrInvalid)
 	}
@@ -397,9 +393,7 @@ func TestConsumeReturnsMessageForPinnedPartition(t *testing.T) {
 	if err := log.AdvanceHighWatermark(1); err != nil {
 		t.Fatalf("AdvanceHighWatermark() error = %v", err)
 	}
-	partitionIdx := 1
-
-	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: &partitionIdx})
+	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(1)})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -428,8 +422,7 @@ func TestAckReturnsTopicNotFoundWhenTopicDeleted(t *testing.T) {
 	if err := log.AdvanceHighWatermark(1); err != nil {
 		t.Fatalf("AdvanceHighWatermark() error = %v", err)
 	}
-	partitionIdx := 0
-	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: &partitionIdx})
+	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0)})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -458,8 +451,7 @@ func TestAckCommitsReservedHandle(t *testing.T) {
 	if err := log.AdvanceHighWatermark(1); err != nil {
 		t.Fatalf("AdvanceHighWatermark() error = %v", err)
 	}
-	partitionIdx := 0
-	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: &partitionIdx})
+	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0)})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -486,8 +478,7 @@ func TestAckRejectsStaleHandleAfterCommit(t *testing.T) {
 	if err := log.AdvanceHighWatermark(1); err != nil {
 		t.Fatalf("AdvanceHighWatermark() error = %v", err)
 	}
-	partitionIdx := 0
-	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: &partitionIdx})
+	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0)})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -597,10 +588,7 @@ func TestConsumeReplayReturnsMessageForExistingOffset(t *testing.T) {
 	if err := log.AdvanceHighWatermark(1); err != nil {
 		t.Fatalf("AdvanceHighWatermark() error = %v", err)
 	}
-	partitionIdx := 0
-	offset := int64(0)
-
-	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: &partitionIdx, Offset: &offset})
+	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Offset: new(int64(0))})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -619,10 +607,7 @@ func TestConsumeReplayReturnsNoMessagePastTail(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngine(t, ms, nil, nil, nil)
-	partitionIdx := 0
-	offset := int64(5)
-
-	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: &partitionIdx, Offset: &offset})
+	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Offset: new(int64(5))})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}

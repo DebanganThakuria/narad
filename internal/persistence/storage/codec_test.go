@@ -13,12 +13,12 @@ func TestCodecForFlag(t *testing.T) {
 	noop := storagecodec.NewNoopCodec()
 
 	cases := []struct {
-		name        string
-		flag        uint8
-		existing    storagecodec.Codec
-		wantFlag    uint8
-		wantReuse   bool
-		wantErr     bool
+		name      string
+		flag      uint8
+		existing  storagecodec.Codec
+		wantFlag  uint8
+		wantReuse bool
+		wantErr   bool
 	}{
 		{name: "none returns noop codec", flag: storagecodec.FlagNone, wantFlag: storagecodec.FlagNone},
 		{name: "zstd reuses existing codec", flag: storagecodec.FlagZstd, existing: mustZstdCodec(t), wantFlag: storagecodec.FlagZstd, wantReuse: true},

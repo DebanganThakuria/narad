@@ -23,8 +23,7 @@ func TestProduceCommittedVisibilityPersistsAcrossRestart(t *testing.T) {
 	}
 
 	restarted := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
-	partitionIdx := 0
-	msg, found, err := restarted.Consume(context.Background(), "orders", ConsumeOpts{Partition: &partitionIdx, Wait: 0})
+	msg, found, err := restarted.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Wait: 0})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -63,8 +62,7 @@ func TestProduceUncommittedVisibilityStaysHiddenAcrossRestart(t *testing.T) {
 	}
 
 	restarted := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, &fakeReplicator{})
-	partitionIdx := 0
-	_, found, err := restarted.Consume(context.Background(), "orders", ConsumeOpts{Partition: &partitionIdx, Wait: 0})
+	_, found, err := restarted.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Wait: 0})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}

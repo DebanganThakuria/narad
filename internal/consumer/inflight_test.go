@@ -547,7 +547,7 @@ func TestRefreshCapsSkipsOtherTopics(t *testing.T) {
 	t.Parallel()
 	caps := map[string]Caps{
 		testTopic: {MaxInFlight: 1, MaxAckedAhead: 1},
-		"other":  {MaxInFlight: 1, MaxAckedAhead: 1},
+		"other":   {MaxInFlight: 1, MaxAckedAhead: 1},
 	}
 	f := NewInFlight(func(_ context.Context, topic string) (Caps, error) {
 		return caps[topic], nil
@@ -1098,7 +1098,7 @@ func TestRefreshCapsForOneTopicKeepsOtherTopicState(t *testing.T) {
 	t.Parallel()
 	caps := map[string]Caps{
 		testTopic: {MaxInFlight: 1, MaxAckedAhead: 1},
-		"other":  {MaxInFlight: 1, MaxAckedAhead: 1},
+		"other":   {MaxInFlight: 1, MaxAckedAhead: 1},
 	}
 	f := NewInFlight(func(_ context.Context, topic string) (Caps, error) {
 		return caps[topic], nil
@@ -2083,7 +2083,7 @@ func TestRefreshCapsWithExistingOtherTopicShardIgnoresIt(t *testing.T) {
 	t.Parallel()
 	caps := map[string]Caps{
 		testTopic: {MaxInFlight: 1, MaxAckedAhead: 1},
-		"other":  {MaxInFlight: 1, MaxAckedAhead: 1},
+		"other":   {MaxInFlight: 1, MaxAckedAhead: 1},
 	}
 	f := NewInFlight(func(_ context.Context, topic string) (Caps, error) {
 		return caps[topic], nil
@@ -2196,7 +2196,7 @@ func TestCommitHandleAfterRefreshAndDropOtherTopicStillAdvances(t *testing.T) {
 	t.Parallel()
 	caps := map[string]Caps{
 		testTopic: {MaxInFlight: 1, MaxAckedAhead: 1},
-		"other":  {MaxInFlight: 1, MaxAckedAhead: 1},
+		"other":   {MaxInFlight: 1, MaxAckedAhead: 1},
 	}
 	f := NewInFlight(func(_ context.Context, topic string) (Caps, error) {
 		return caps[topic], nil
@@ -2266,7 +2266,7 @@ func TestCommitHandleAfterFreshShardRefreshAndDropOtherTopicStillWorks(t *testin
 	t.Parallel()
 	caps := map[string]Caps{
 		testTopic: {MaxInFlight: 10, MaxAckedAhead: 10},
-		"other":  {MaxInFlight: 10, MaxAckedAhead: 10},
+		"other":   {MaxInFlight: 10, MaxAckedAhead: 10},
 	}
 	f := NewInFlight(func(_ context.Context, topic string) (Caps, error) {
 		return caps[topic], nil

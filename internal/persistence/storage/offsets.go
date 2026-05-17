@@ -43,4 +43,3 @@ func (l *Log) AdvanceHighWatermark(newHWM int64) error {
 	}
 	return nil
 }
-

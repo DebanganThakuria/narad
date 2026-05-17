@@ -41,34 +41,47 @@ type fakeBroker struct {
 func (f *fakeBroker) CreateTopic(ctx context.Context, opts brokertopics.CreateOpts) (topic.Topic, error) {
 	return f.createTopicFn(ctx, opts)
 }
+
 func (f *fakeBroker) IncreaseTopicPartitions(ctx context.Context, name string, newPartitions int) (topic.Topic, error) {
 	return f.increaseTopicPartitionsFn(ctx, name, newPartitions)
 }
+
 func (f *fakeBroker) UpdateTopicRetention(ctx context.Context, name string, retentionMs int64) (topic.Topic, error) {
 	return f.updateTopicRetentionFn(ctx, name, retentionMs)
 }
+
 func (f *fakeBroker) UpdateTopicCaps(ctx context.Context, name string, maxInFlightPerPartition, maxAckedAheadPerPartition int64) (topic.Topic, error) {
 	return f.updateTopicCapsFn(ctx, name, maxInFlightPerPartition, maxAckedAheadPerPartition)
 }
+
 func (f *fakeBroker) UpdateTopicSchema(ctx context.Context, name string, schema []byte) (topic.Topic, error) {
 	return f.updateTopicSchemaFn(ctx, name, schema)
 }
-func (f *fakeBroker) DeleteTopic(ctx context.Context, name string) error { return f.deleteTopicFn(ctx, name) }
+
+func (f *fakeBroker) DeleteTopic(ctx context.Context, name string) error {
+	return f.deleteTopicFn(ctx, name)
+}
+
 func (f *fakeBroker) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
 	return f.getTopicFn(ctx, name)
 }
+
 func (f *fakeBroker) GetTopicDetails(ctx context.Context, name string) (topic.Details, error) {
 	return f.getTopicDetailsFn(ctx, name)
 }
+
 func (f *fakeBroker) ListTopics(ctx context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error) {
 	return f.listTopicsFn(ctx, opts)
 }
+
 func (f *fakeBroker) Produce(ctx context.Context, topicName, key string, payload []byte) (int64, int, error) {
 	return f.produceFn(ctx, topicName, key, payload)
 }
+
 func (f *fakeBroker) Consume(ctx context.Context, topicName string, opts brokermsg.ConsumeOpts) (topic.Message, bool, error) {
 	return f.consumeFn(ctx, topicName, opts)
 }
+
 func (f *fakeBroker) Ack(ctx context.Context, topicName string, receiptHandle string) error {
 	return f.ackFn(ctx, topicName, receiptHandle)
 }
@@ -455,4 +468,3 @@ func TestParseConsumeQuery(t *testing.T) {
 		t.Fatal("parseConsumeQuery() ok = true, want false")
 	}
 }
-
