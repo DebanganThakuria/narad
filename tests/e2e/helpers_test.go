@@ -45,6 +45,8 @@ type envOpts struct {
 	maxConsumeWait             time.Duration
 	metrics                    bool // when true, wire real Prometheus metrics and /metrics endpoint
 	logOptions                 storage.Options
+	replicator                 replication.Replicator
+	replicatorFactory          func(*metastore.Store, *http.Client) replication.Replicator
 }
 
 func defaultOpts() envOpts {
@@ -143,7 +145,11 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		DeadTimeout:       5 * time.Second,
 	}).Run(ctrlCtx)
 
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logWriter := io.Writer(io.Discard)
+	if testing.Verbose() {
+		logWriter = os.Stdout
+	}
+	log := slog.New(slog.NewTextHandler(logWriter, nil))
 
 	var (
 		reg *prometheus.Registry
@@ -170,6 +176,14 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		return consumer.Caps{MaxInFlight: maxIF, MaxAckedAhead: maxAA}, nil
 	}
 
+	replicatorImpl := opts.replicator
+	if opts.replicatorFactory != nil {
+		replicatorImpl = opts.replicatorFactory(ms, nil)
+	}
+	if replicatorImpl == nil {
+		replicatorImpl = replication.NewLocal()
+	}
+
 	br, err := broker.New(broker.Deps{
 		DataDir:        opts.dataDir,
 		StorageOptions: opts.logOptions,
@@ -186,7 +200,7 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		Partitions:      partition.NewHashRoundRobin(),
 		Schemas:         schema.NewJSONSchema(),
 		ConsumerOffsets: consumer.NewInFlight(resolveCaps, nil),
-		Replicator:      replication.NewLocal(),
+		Replicator:      replicatorImpl,
 		Logger:          log,
 		Metrics:         m,
 	})

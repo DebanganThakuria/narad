@@ -12,6 +12,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/platform/replication"
 )
 
 // envOption tunes the env returned by newTestEnv.
@@ -40,6 +41,10 @@ func withPolicy(p broker.TopicPolicy) envOption {
 
 func withMaxConsumeWait(d time.Duration) envOption {
 	return func(o *envOpts) { o.maxConsumeWait = d }
+}
+
+func withReplicatorFactory(f func(*metastore.Store, *http.Client) replication.Replicator) envOption {
+	return func(o *envOpts) { o.replicatorFactory = f }
 }
 
 // newTestEnv builds an env with t.Cleanup wired for close.
@@ -94,7 +99,7 @@ func mustCreateTopic(t *testing.T, e *env, req createTopicReq) topic.Topic {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-			t.Fatalf("mustCreateTopic %q: timed out waiting for partition assignments", req.Name)
+	t.Fatalf("mustCreateTopic %q: timed out waiting for partition assignments", req.Name)
 	return topic.Topic{}
 }
 
