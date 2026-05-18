@@ -6,6 +6,7 @@ import (
 )
 
 func TestHealthz_AlwaysOK(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := getJSON(t, env.Server.URL+"/healthz")
 	if resp.StatusCode != http.StatusOK {
@@ -20,6 +21,7 @@ func TestHealthz_AlwaysOK(t *testing.T) {
 }
 
 func TestReadyz_OkWhenBrokerReady(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := getJSON(t, env.Server.URL+"/readyz")
 	if resp.StatusCode != http.StatusOK {

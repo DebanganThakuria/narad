@@ -292,7 +292,7 @@ func TestConsumeRequiresPartitionWhenOffsetProvided(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngine(t, ms, nil, nil, nil)
-	_, _, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Offset: int64ptr(0)})
+	_, _, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Offset: new(int64(0))})
 	if !errors.Is(err, ErrPartitionRequired) {
 		t.Fatalf("Consume() error = %v, want %v", err, ErrPartitionRequired)
 	}
@@ -601,7 +601,7 @@ func TestConsumeReplayReturnsMessageForExistingOffset(t *testing.T) {
 	if err := log.AdvanceHighWatermark(1); err != nil {
 		t.Fatalf("AdvanceHighWatermark() error = %v", err)
 	}
-	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Offset: int64ptr(0)})
+	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Offset: new(int64(0))})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -620,7 +620,7 @@ func TestConsumeReplayReturnsNoMessagePastTail(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngine(t, ms, nil, nil, nil)
-	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Offset: int64ptr(5)})
+	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Offset: new(int64(5))})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}

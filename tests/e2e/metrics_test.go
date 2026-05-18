@@ -18,6 +18,7 @@ import (
 // withMetrics() doesn't expose /metrics. Catches accidental wiring of
 // the observability surface in unrelated tests.
 func TestMetrics_EndpointDisabledByDefault(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := getJSON(t, env.Server.URL+"/metrics")
 	if resp.StatusCode == http.StatusOK {
@@ -34,6 +35,7 @@ func TestMetrics_EndpointDisabledByDefault(t *testing.T) {
 // cmd/narad/serve.go's buildMetrics so prod has them but tests don't
 // pay the cost. The endpoint smoke is just "narad_* shows up".
 func TestMetrics_EndpointReachable(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t, withMetrics())
 
 	// Touch one collector so the registry has at least one sample to
@@ -56,6 +58,7 @@ func TestMetrics_EndpointReachable(t *testing.T) {
 // produce bumps both the message and byte counters labeled by topic
 // and partition.
 func TestMetrics_ProduceCountersIncrement(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t, withMetrics())
 	mustCreateTopic(t, env, createTopicReq{Name: "produce-metrics", Partitions: 3})
 
@@ -80,6 +83,7 @@ func TestMetrics_ProduceCountersIncrement(t *testing.T) {
 // produce ONE series labeled with the route template, not one per
 // topic name.
 func TestMetrics_RouteLabelsUseTemplate(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t, withMetrics())
 	for _, n := range []string{"alpha", "beta", "gamma"} {
 		mustCreateTopic(t, env, createTopicReq{Name: n})
@@ -106,6 +110,7 @@ func TestMetrics_RouteLabelsUseTemplate(t *testing.T) {
 // per test inflates flakiness; calling tick-equivalent logic inline
 // gives the same coverage deterministically.
 func TestMetrics_PollerUpdatesLagAndInventory(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t, withMetrics())
 	mustCreateTopic(t, env, createTopicReq{Name: "poll-me", Partitions: 3})
 

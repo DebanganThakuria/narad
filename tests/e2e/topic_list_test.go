@@ -16,6 +16,7 @@ type listResponse struct {
 }
 
 func TestListTopics_EmptyInitially(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 
 	resp := getJSON(t, env.Server.URL+"/v1/topics")
@@ -36,6 +37,7 @@ func TestListTopics_EmptyInitially(t *testing.T) {
 // TestListTopics_ReturnsLexicographicOrder seeds out-of-order names
 // and verifies the returned slice is sorted.
 func TestListTopics_ReturnsLexicographicOrder(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	for _, n := range []string{"zebra", "alpha", "mango", "banana"} {
 		mustCreateTopic(t, env, createTopicReq{Name: n})
@@ -57,6 +59,7 @@ func TestListTopics_ReturnsLexicographicOrder(t *testing.T) {
 // TestListTopics_PaginationWalk walks every page and reassembles the
 // full set, asserting nothing was duplicated or lost.
 func TestListTopics_PaginationWalk(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	want := []string{"a", "b", "c", "d", "e", "f", "g"}
 	for _, n := range want {
@@ -98,6 +101,7 @@ func TestListTopics_PaginationWalk(t *testing.T) {
 // in the current page, so passing it back fetches strictly-greater
 // names.
 func TestListTopics_PaginationCursorPointsToLastReturned(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	for _, n := range []string{"a", "b", "c", "d"} {
 		mustCreateTopic(t, env, createTopicReq{Name: n})
@@ -112,6 +116,7 @@ func TestListTopics_PaginationCursorPointsToLastReturned(t *testing.T) {
 }
 
 func TestListTopics_LastPageHasEmptyToken(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	for _, n := range []string{"a", "b"} {
 		mustCreateTopic(t, env, createTopicReq{Name: n})
@@ -129,6 +134,7 @@ func TestListTopics_LastPageHasEmptyToken(t *testing.T) {
 // names strictly greater than the largest existing name returns an
 // empty page with no error.
 func TestListTopics_PageTokenReturningNoRows(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "alpha"})
 
@@ -144,18 +150,21 @@ func TestListTopics_PageTokenReturningNoRows(t *testing.T) {
 }
 
 func TestListTopics_RejectsLimitZero(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := getJSON(t, env.Server.URL+"/v1/topics?limit=0")
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
 func TestListTopics_RejectsNegativeLimit(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := getJSON(t, env.Server.URL+"/v1/topics?limit=-5")
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
 func TestListTopics_RejectsNonIntegerLimit(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := getJSON(t, env.Server.URL+"/v1/topics?limit=abc")
 	expectStatus(t, resp, http.StatusBadRequest)
@@ -166,6 +175,7 @@ func TestListTopics_RejectsNonIntegerLimit(t *testing.T) {
 // they all come back in one page, and that's enough to know the cap
 // didn't trip a 4xx.
 func TestListTopics_ClampsLargeLimit(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	for _, n := range []string{"a", "b", "c", "d", "e", "f", "g"} {
 		mustCreateTopic(t, env, createTopicReq{Name: n})

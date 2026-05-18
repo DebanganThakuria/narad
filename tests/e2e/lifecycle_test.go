@@ -8,6 +8,7 @@ import (
 )
 
 func TestHealthz(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -16,6 +17,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestReadyz(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -24,6 +26,7 @@ func TestReadyz(t *testing.T) {
 }
 
 func TestFullLifecycle(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -69,6 +72,7 @@ func TestFullLifecycle(t *testing.T) {
 }
 
 func TestFullLifecycleWithSchema(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 

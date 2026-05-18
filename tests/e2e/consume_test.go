@@ -17,6 +17,7 @@ import (
 // equality because json.Unmarshal turns every number into float64,
 // which makes naive map equality awkward.
 func TestConsume_RoundTripIntegrity(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "rt", Partitions: 3})
 
@@ -58,6 +59,7 @@ func TestConsume_RoundTripIntegrity(t *testing.T) {
 }
 
 func TestConsume_ReturnsNoContentWhenEmpty(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "empty", Partitions: 3})
 
@@ -71,6 +73,7 @@ func TestConsume_ReturnsNoContentWhenEmpty(t *testing.T) {
 // after Ack(offset=N), the next queue-style consume on the same
 // partition returns offset N+1 (or 204 if drained).
 func TestConsume_AckAdvancesQueueCursor(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "ack-cursor", Partitions: 3})
 
@@ -93,6 +96,7 @@ func TestConsume_AckAdvancesQueueCursor(t *testing.T) {
 }
 
 func TestConsume_PartitionPinned(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "pinned", Partitions: 4})
 
@@ -119,6 +123,7 @@ func TestConsume_PartitionPinned(t *testing.T) {
 // committed offset is unaffected, so a queue-style consume after a
 // replay still returns offset 0.
 func TestConsume_ReplayDoesNotAdvanceCommittedOffset(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "replay", Partitions: 3})
 
@@ -146,6 +151,7 @@ func TestConsume_ReplayDoesNotAdvanceCommittedOffset(t *testing.T) {
 // TestConsume_ReplayPastTailReturns204 verifies that asking for a
 // future offset (>= LogEndOffset) returns 204 rather than blocking.
 func TestConsume_ReplayPastTailReturns204(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "future", Partitions: 3})
 
@@ -158,6 +164,7 @@ func TestConsume_ReplayPastTailReturns204(t *testing.T) {
 }
 
 func TestConsume_RejectsOffsetWithoutPartition(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "no-part"})
 
@@ -166,6 +173,7 @@ func TestConsume_RejectsOffsetWithoutPartition(t *testing.T) {
 }
 
 func TestConsume_RejectsInvalidPartition(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "bad-part"})
 
@@ -174,6 +182,7 @@ func TestConsume_RejectsInvalidPartition(t *testing.T) {
 }
 
 func TestConsume_RejectsOutOfRangePartition(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "oor", Partitions: 3})
 
@@ -182,6 +191,7 @@ func TestConsume_RejectsOutOfRangePartition(t *testing.T) {
 }
 
 func TestConsume_RejectsInvalidOffset(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "bad-off"})
 
@@ -190,6 +200,7 @@ func TestConsume_RejectsInvalidOffset(t *testing.T) {
 }
 
 func TestConsume_RejectsInvalidWait(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "bad-wait"})
 
@@ -198,6 +209,7 @@ func TestConsume_RejectsInvalidWait(t *testing.T) {
 }
 
 func TestConsume_NotFoundForUnknownTopic(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := getJSON(t, env.Server.URL+"/v1/topics/missing/consume")
 	expectStatus(t, resp, http.StatusNotFound)
@@ -208,6 +220,7 @@ func TestConsume_NotFoundForUnknownTopic(t *testing.T) {
 // midway, and the consumer wakes up with the new message before its
 // wait expires.
 func TestConsume_LongPollWaitsAndReturnsOnArrival(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t, withMaxConsumeWait(2*time.Second))
 	mustCreateTopic(t, env, createTopicReq{Name: "longpoll", Partitions: 3})
 
@@ -260,6 +273,7 @@ func TestConsume_LongPollWaitsAndReturnsOnArrival(t *testing.T) {
 // TestConsume_LongPollTimesOutWith204 verifies that wait expiry on an
 // empty topic returns 204 cleanly, not an error.
 func TestConsume_LongPollTimesOutWith204(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t, withMaxConsumeWait(500*time.Millisecond))
 	mustCreateTopic(t, env, createTopicReq{Name: "timeout", Partitions: 3})
 

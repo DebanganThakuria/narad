@@ -25,7 +25,7 @@ func TestProduceCommittedVisibilityPersistsAcrossRestart(t *testing.T) {
 	}
 
 	restarted := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
-	msg, found, err := restarted.Consume(context.Background(), "orders", ConsumeOpts{Partition: intPtr(0), Wait: 0})
+	msg, found, err := restarted.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Wait: 0})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}

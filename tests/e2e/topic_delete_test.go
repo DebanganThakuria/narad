@@ -6,6 +6,7 @@ import (
 )
 
 func TestDeleteTopic_DeletesExisting(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "doomed"})
 
@@ -18,6 +19,7 @@ func TestDeleteTopic_DeletesExisting(t *testing.T) {
 }
 
 func TestDeleteTopic_NotFound(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	resp := jsonReq(t, http.MethodDelete, env.Server.URL+"/v1/topics/never-existed", nil)
 	expectStatus(t, resp, http.StatusNotFound)
@@ -28,6 +30,7 @@ func TestDeleteTopic_NotFound(t *testing.T) {
 // deleting it, then creating a same-named topic and producing again
 // should all work cleanly.
 func TestDeleteTopic_AllowsRecreate(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "recycle", Partitions: 3})
 	mustProduce(t, env, "recycle", "k", map[string]int{"v": 1})
@@ -47,6 +50,7 @@ func TestDeleteTopic_AllowsRecreate(t *testing.T) {
 // TestDeleteTopic_ScopedToOneTopic verifies that deleting one topic
 // doesn't disturb others.
 func TestDeleteTopic_ScopedToOneTopic(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "keep"})
 	mustCreateTopic(t, env, createTopicReq{Name: "drop"})

@@ -9,6 +9,7 @@ import (
 )
 
 func TestProduceAndConsume(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -41,6 +42,7 @@ func TestProduceAndConsume(t *testing.T) {
 }
 
 func TestConsumeLongPoll(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -56,6 +58,7 @@ func TestConsumeLongPoll(t *testing.T) {
 }
 
 func TestConsumeWithExplicitOffset(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -81,6 +84,7 @@ func TestConsumeWithExplicitOffset(t *testing.T) {
 }
 
 func TestConsumeEmptyTopic(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -92,6 +96,7 @@ func TestConsumeEmptyTopic(t *testing.T) {
 }
 
 func TestAck(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -110,6 +115,7 @@ func TestAck(t *testing.T) {
 }
 
 func TestConsumeMultipleThenAck(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -130,6 +136,7 @@ func TestConsumeMultipleThenAck(t *testing.T) {
 }
 
 func TestProduceNonExistentTopic(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
@@ -140,6 +147,7 @@ func TestProduceNonExistentTopic(t *testing.T) {
 }
 
 func TestProduceInvalidJSON(t *testing.T) {
+	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
