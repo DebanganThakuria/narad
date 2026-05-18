@@ -48,6 +48,5 @@ func Default() *Config {
 			Level:  "info",
 			Format: "json",
 		},
-		Worker: WorkerConfig{Enabled: false},
 	}
 }

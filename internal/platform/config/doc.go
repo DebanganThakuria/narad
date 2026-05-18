@@ -18,5 +18,4 @@
 //	storage.go   StorageConfig (data dir, codec, fsync, flush thresholds,
 //	             segment size, retention check interval).
 //	topic.go     TopicConfig (per-topic creation defaults + bounds).
-//	worker.go    WorkerConfig (cluster worker enable/disable).
 package config

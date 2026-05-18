@@ -137,7 +137,7 @@ func (c *Controller) reconcileAssignments(ctx context.Context) {
 	}
 }
 
-// assignTopic assigns only the partitions of topicName that have no owner yet.
+// assignTopic assigns partitions of topicName that are missing an alive owner.
 func (c *Controller) assignTopic(ctx context.Context, topicName string, numPartitions int, replicationFactor int, active []metastore.Member, counts map[string]int) {
 	if replicationFactor < 2 || len(active) < replicationFactor {
 		return
@@ -145,6 +145,23 @@ func (c *Controller) assignTopic(ctx context.Context, topicName string, numParti
 	existing, _ := c.store.ListAssignments(topicName)
 	assigned := make(map[int]bool, len(existing))
 	for _, a := range existing {
+		owner, err := c.store.GetMember(a.OwnerID)
+		if err == nil && owner.Status == metastore.MemberAlive {
+			assigned[a.Partition] = true
+			continue
+		}
+		if a.FollowerID == "" {
+			continue
+		}
+		follower, err := c.store.GetMember(a.FollowerID)
+		if err != nil || follower.Status != metastore.MemberAlive {
+			continue
+		}
+		if err := c.store.AssignPartition(ctx, topicName, a.Partition, a.FollowerID, a.OwnerID); err != nil {
+			continue
+		}
+		counts[a.FollowerID]++
+		counts[a.OwnerID]++
 		assigned[a.Partition] = true
 	}
 
@@ -152,14 +169,13 @@ func (c *Controller) assignTopic(ctx context.Context, topicName string, numParti
 		if assigned[p] {
 			continue
 		}
-		// Always pick the least-loaded alive member for each unassigned partition.
 		sort.Slice(active, func(i, j int) bool {
 			return counts[active[i].ID] < counts[active[j].ID]
 		})
 		owner := active[0].ID
 		follower := active[1].ID
 		if err := c.store.AssignPartition(ctx, topicName, p, owner, follower); err != nil {
-			continue // Raft Apply failed (e.g. lost leadership); next reconcile will retry.
+			continue
 		}
 		counts[owner]++
 		counts[follower]++

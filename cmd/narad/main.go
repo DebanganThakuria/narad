@@ -2,7 +2,6 @@
 // requested subcommand:
 //
 //	narad serve     run the HTTP API server
-//	narad worker    run the cluster worker (replication, etc.)
 //	narad client    interact with a running narad serve over HTTP
 //	narad version   print build version
 //	narad help      print this help (also: -h, --help)
@@ -67,7 +66,7 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "Subcommands:")
 
 	// Sorted iteration so help output is stable.
-	names := []string{"serve", "worker", "client", "version"}
+	names := []string{"client", "serve", "version"}
 	for _, n := range names {
 		c := commands[n]
 		fmt.Fprintf(w, "  %-9s  %s\n", n, c.short)

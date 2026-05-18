@@ -13,5 +13,4 @@ type Config struct {
 	Storage StorageConfig `json:"storage"`
 	Topic   TopicConfig   `json:"topic"`
 	Log     LogConfig     `json:"log"`
-	Worker  WorkerConfig  `json:"worker"`
 }

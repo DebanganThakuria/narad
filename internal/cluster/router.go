@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
@@ -98,6 +99,20 @@ func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, r *http.R
 	return true
 }
 
+func (rt *Router) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool {
+	leaderAddr := strings.TrimSpace(rt.store.LeaderAddr())
+	if leaderAddr == "" {
+		return false
+	}
+	memberAddr := rt.memberAddrByClusterAddr(leaderAddr)
+	if memberAddr == "" {
+		return false
+	}
+	fwd := r.Clone(ctx)
+	rt.forward(w, fwd, memberAddr, body)
+	return true
+}
+
 // ownerAddr returns the API address of the pod that owns (topicName, partition),
 // or "" if this pod is the owner or the assignment/member cannot be resolved.
 func (rt *Router) ownerAddr(topicName string, p int) string {
@@ -120,6 +135,43 @@ func (rt *Router) ownerAddr(topicName string, p int) string {
 		return ""
 	}
 	return fm.Addr
+}
+
+func clusterAddrMatchesPeer(clusterAddr, peerAddr string) bool {
+	clusterAddr = strings.TrimSpace(clusterAddr)
+	peerAddr = strings.TrimSpace(peerAddr)
+	if clusterAddr == "" || peerAddr == "" {
+		return false
+	}
+	if clusterAddr == peerAddr {
+		return true
+	}
+	if strings.HasPrefix(clusterAddr, ":") {
+		return strings.HasSuffix(peerAddr, clusterAddr)
+	}
+	if strings.HasPrefix(peerAddr, ":") {
+		return strings.HasSuffix(clusterAddr, peerAddr)
+	}
+	return false
+}
+
+func (rt *Router) memberAddrByClusterAddr(clusterAddr string) string {
+	members, err := rt.store.ListMembers()
+	if err != nil {
+		return ""
+	}
+	for _, member := range members {
+		if member.Status == metastore.MemberDead {
+			continue
+		}
+		if strings.TrimSpace(member.ID) == strings.TrimSpace(rt.selfID) && clusterAddrMatchesPeer(clusterAddr, member.Addr) {
+			return ""
+		}
+		if clusterAddrMatchesPeer(clusterAddr, member.Addr) {
+			return member.Addr
+		}
+	}
+	return ""
 }
 
 // forward proxies r to http://addr, optionally replacing the body.

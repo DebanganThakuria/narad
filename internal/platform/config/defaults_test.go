@@ -20,7 +20,4 @@ func TestDefaultReturnsExpectedValues(t *testing.T) {
 	if cfg.Topic.DefaultPartitions != 3 || cfg.Topic.MaxPartitions != 1024 || cfg.Topic.DefaultReplicationFactor != 2 {
 		t.Fatalf("Default() topic defaults = %+v", cfg.Topic)
 	}
-	if cfg.Worker.Enabled {
-		t.Fatal("Default() worker enabled = true, want false")
-	}
 }

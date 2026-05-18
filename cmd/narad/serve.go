@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -45,9 +46,7 @@ func runServe(args []string) error {
 	if err != nil || cfg == nil {
 		return err
 	}
-	if err := validateServeCluster(); err != nil {
-		return err
-	}
+	pprofAddr := servePprofAddr(args)
 
 	log, err := logger.New(cfg.Log.Format, cfg.Log.Level)
 	if err != nil {
@@ -60,11 +59,16 @@ func runServe(args []string) error {
 		return fmt.Errorf("data dir: %w", err)
 	}
 
-	nodeID, _ := os.Hostname()
+	nodeID, err := resolveNodeID(cfg)
+	if err != nil {
+		return err
+	}
 	ms, err := metastore.New(metastore.Config{
-		NodeID:   nodeID,
-		DataDir:  filepath.Join(cfg.Storage.DataDir, "metastore"),
-		BindAddr: cfg.Cluster.Addr,
+		NodeID:        nodeID,
+		DataDir:       filepath.Join(cfg.Storage.DataDir, "metastore"),
+		BindAddr:      cfg.Cluster.Addr,
+		AdvertiseAddr: advertisedClusterAddr(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
+		Peers:         configPeersToMetastore(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
 	})
 	if err != nil {
 		return fmt.Errorf("metastore: %w", err)
@@ -85,7 +89,7 @@ func runServe(args []string) error {
 
 	hb := controller.NewHeartbeater(ms, metastore.Member{
 		ID:     nodeID,
-		Addr:   cfg.HTTP.Addr,
+		Addr:   advertisedClusterAddr(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
 		Status: metastore.MemberAlive,
 	}, 5*time.Second)
 	ctrl := controller.New(ms, controller.Config{})
@@ -95,11 +99,22 @@ func runServe(args []string) error {
 	wg.Go(func() { hb.Run(ctx) })
 	wg.Go(func() { ctrl.Run(ctx) })
 	wg.Go(func() { offsets.RunPurger(ctx, time.Second) })
-	wg.Go(func() {
-		if pprofErr := http.ListenAndServe(":6060", nil); pprofErr != nil {
-			log.Error("failed to start pprof", "err", pprofErr)
-		}
-	})
+	if strings.TrimSpace(pprofAddr) != "" {
+		pprofSrv := &http.Server{Addr: pprofAddr, Handler: nil}
+		wg.Go(func() {
+			if pprofErr := pprofSrv.ListenAndServe(); pprofErr != nil && !errors.Is(pprofErr, http.ErrServerClosed) {
+				log.Error("failed to start pprof", "err", pprofErr)
+			}
+		})
+		wg.Go(func() {
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := pprofSrv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
+				log.Error("failed to stop pprof", "err", err)
+			}
+		})
+	}
 
 	poller := metrics.NewPoller(m, br, log)
 	wg.Go(func() { poller.Run(ctx) })
@@ -142,6 +157,7 @@ type serveFlags struct {
 	port        int
 	addr        string
 	clusterPort int
+	nodeID      string
 	dataDir     string
 	logLevel    string
 	logFormat   string
@@ -157,6 +173,9 @@ func (f *serveFlags) applyTo(cfg *config.Config) {
 	}
 	if f.clusterPort != 0 {
 		cfg.Cluster.Addr = ":" + strconv.Itoa(f.clusterPort)
+	}
+	if f.nodeID != "" {
+		cfg.Cluster.NodeID = f.nodeID
 	}
 	if f.dataDir != "" {
 		cfg.Storage.DataDir = f.dataDir
@@ -186,6 +205,7 @@ func loadServeConfig(args []string) (*config.Config, error) {
 	fs.IntVar(&f.port, "port", 0, "API listen port (overrides http.addr; e.g. --port 7942)")
 	fs.StringVar(&f.addr, "addr", "", "API listen address (overrides http.addr; e.g. --addr 0.0.0.0:7942)")
 	fs.IntVar(&f.clusterPort, "cluster-port", 0, "cluster listen port (overrides cluster.addr)")
+	fs.StringVar(&f.nodeID, "node-id", "", "stable cluster node ID (overrides cluster.node_id)")
 	fs.StringVar(&f.dataDir, "data-dir", "", "storage directory (overrides storage.data_dir)")
 	fs.StringVar(&f.logLevel, "log-level", "", "log level: debug|info|warn|error (overrides log.level)")
 	fs.StringVar(&f.logFormat, "log-format", "", "log format: json|text (overrides log.format)")
@@ -209,24 +229,60 @@ func loadServeConfig(args []string) (*config.Config, error) {
 	return cfg, nil
 }
 
-func validateServeCluster() error {
-	peers := strings.TrimSpace(os.Getenv("NARAD_CLUSTER_PEERS"))
-	if peers == "" {
-		return errors.New("serve: NARAD_CLUSTER_PEERS must list exactly 3 cluster voters")
+func resolveNodeID(cfg *config.Config) (string, error) {
+	if cfg != nil && cfg.Cluster.NodeID != "" {
+		return cfg.Cluster.NodeID, nil
 	}
+	nodeID, err := os.Hostname()
+	if err != nil {
+		return "", fmt.Errorf("resolve node id: %w", err)
+	}
+	return nodeID, nil
+}
 
-	seen := make(map[string]struct{}, 3)
-	for _, peer := range strings.Split(peers, ",") {
-		peer = strings.TrimSpace(peer)
-		if peer == "" {
+func configPeersToMetastore(nodeID, clusterAddr string, peers []config.ClusterPeer) []metastore.Peer {
+	if len(peers) == 0 {
+		return nil
+	}
+	out := make([]metastore.Peer, 0, len(peers)-1)
+	for _, peer := range peers {
+		if peer.ID == nodeID && clusterAddrMatchesPeer(clusterAddr, peer.Addr) {
 			continue
 		}
-		seen[peer] = struct{}{}
+		out = append(out, metastore.Peer{ID: peer.ID, Addr: peer.Addr})
 	}
-	if len(seen) != 3 {
-		return fmt.Errorf("serve: NARAD_CLUSTER_PEERS must list exactly 3 cluster voters, got %d", len(seen))
+	return out
+}
+
+func advertisedClusterAddr(nodeID, clusterAddr string, peers []config.ClusterPeer) string {
+	for _, peer := range peers {
+		if peer.ID != nodeID || !clusterAddrMatchesPeer(clusterAddr, peer.Addr) {
+			continue
+		}
+		if strings.HasPrefix(clusterAddr, ":") && !strings.HasPrefix(strings.TrimSpace(peer.Addr), ":") {
+			return peer.Addr
+		}
+		return clusterAddr
 	}
-	return nil
+	return clusterAddr
+}
+
+func clusterAddrMatchesPeer(clusterAddr, peerAddr string) bool {
+	clusterAddr = strings.TrimSpace(clusterAddr)
+	peerAddr = strings.TrimSpace(peerAddr)
+	if clusterAddr == "" || peerAddr == "" {
+		return false
+	}
+	if clusterAddr == peerAddr {
+		return true
+	}
+	if strings.HasPrefix(clusterAddr, ":") {
+		return strings.HasSuffix(peerAddr, clusterAddr)
+	}
+	if strings.HasPrefix(peerAddr, ":") {
+		return strings.HasSuffix(clusterAddr, peerAddr)
+	}
+	return false
 }
 
 func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, m *metrics.Metrics, log *slog.Logger) (broker.Broker, *runtime.Logs, *consumer.InFlight, error) {
@@ -381,4 +437,13 @@ func zstdLevelFromString(s string) (zstd.EncoderLevel, error) {
 	default:
 		return 0, fmt.Errorf("unknown compression level %q", s)
 	}
+}
+
+func servePprofAddr(args []string) string {
+	fs := flag.NewFlagSet("serve-pprof", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var addr string
+	fs.StringVar(&addr, "pprof-addr", "", "")
+	_ = fs.Parse(args)
+	return addr
 }

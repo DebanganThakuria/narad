@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 	bolt "go.etcd.io/bbolt"
@@ -22,10 +23,11 @@ const applyTimeout = 5 * time.Second
 
 // Config configures the Raft-backed metastore.
 type Config struct {
-	NodeID   string // stable pod identity, e.g. "narad-0"
-	DataDir  string // raft.db, fsm.db, snapshots/ all go here
-	BindAddr string // TCP address for Raft transport, e.g. "0.0.0.0:7943"
-	Peers    []Peer // empty = single-node bootstrap
+	NodeID        string // stable pod identity, e.g. "narad-0"
+	DataDir       string // raft.db, fsm.db, snapshots/ all go here
+	BindAddr      string // TCP address for Raft transport, e.g. "0.0.0.0:7943"
+	AdvertiseAddr string // cluster-routable Raft address advertised to peers
+	Peers         []Peer // empty = single-node bootstrap
 	// Logger receives Raft's internal log output. Defaults to io.Discard
 	// (quiet). Pass os.Stderr or a structured writer for production.
 	Logger io.Writer
@@ -66,17 +68,25 @@ func New(cfg Config) (*Store, error) {
 	if logW == nil {
 		logW = io.Discard
 	}
+	transportLog := hclog.New(&hclog.LoggerOptions{Output: logW})
 
 	snapStore, err := raft.NewFileSnapshotStore(cfg.DataDir, 2, logW)
 	if err != nil {
 		return nil, fmt.Errorf("metastore: snapshots: %w", err)
 	}
 
-	addr, err := net.ResolveTCPAddr("tcp", cfg.BindAddr)
-	if err != nil {
+	if _, err := net.ResolveTCPAddr("tcp", cfg.BindAddr); err != nil {
 		return nil, fmt.Errorf("metastore: bind addr: %w", err)
 	}
-	transport, err := raft.NewTCPTransport(cfg.BindAddr, addr, 3, 10*time.Second, logW)
+	advertiseAddr := cfg.AdvertiseAddr
+	if advertiseAddr == "" {
+		advertiseAddr = cfg.BindAddr
+	}
+	resolvedAdvertiseAddr, err := net.ResolveTCPAddr("tcp", advertiseAddr)
+	if err != nil {
+		return nil, fmt.Errorf("metastore: advertise addr: %w", err)
+	}
+	transport, err := raft.NewTCPTransportWithLogger(cfg.BindAddr, resolvedAdvertiseAddr, 3, 10*time.Second, transportLog)
 	if err != nil {
 		return nil, fmt.Errorf("metastore: transport: %w", err)
 	}
@@ -95,7 +105,7 @@ func New(cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("metastore: check state: %w", err)
 	}
 	if !hasState {
-		servers := []raft.Server{{ID: raft.ServerID(cfg.NodeID), Address: raft.ServerAddress(cfg.BindAddr)}}
+		servers := []raft.Server{{ID: raft.ServerID(cfg.NodeID), Address: raft.ServerAddress(advertiseAddr)}}
 		for _, p := range cfg.Peers {
 			servers = append(servers, raft.Server{ID: raft.ServerID(p.ID), Address: raft.ServerAddress(p.Addr)})
 		}
@@ -330,6 +340,12 @@ func (s *Store) IsLeader() bool {
 // start and stop its background loops.
 func (s *Store) LeaderCh() <-chan bool {
 	return s.r.LeaderCh()
+}
+
+// LeaderAddr returns the current Raft leader address as host:port, or empty
+// when no leader is known.
+func (s *Store) LeaderAddr() string {
+	return string(s.r.Leader())
 }
 
 // Ensure Store satisfies Metastore at compile time.

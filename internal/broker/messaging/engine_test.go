@@ -68,6 +68,12 @@ func (f *messagingFakeMetastore) GetSchema(_ context.Context, _ string, _ int) (
 	return nil, errs.ErrNotFound
 }
 
+func (f *messagingFakeMetastore) LeaderAddr() string { return "" }
+
+func (f *messagingFakeMetastore) GetMember(string) (metastore.Member, error) {
+	return metastore.Member{}, errs.ErrNotFound
+}
+
 func (f *messagingFakeMetastore) Close() error { return nil }
 
 type fakeSchemas struct {

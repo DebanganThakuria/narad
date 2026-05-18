@@ -60,8 +60,14 @@ func (f *fakeMetastore) PutSchema(_ context.Context, _ string, _ int, _ []byte) 
 func (f *fakeMetastore) GetSchema(_ context.Context, _ string, _ int) ([]byte, error) {
 	return nil, errs.ErrNotFound
 }
-func (f *fakeMetastore) GetConsumerOffset(_ context.Context, _ string, _ int) (int64, error) { return 0, nil }
-func (f *fakeMetastore) SetConsumerOffset(_ context.Context, _ string, _ int, _ int64) error { return nil }
+
+func (f *fakeMetastore) GetConsumerOffset(_ context.Context, _ string, _ int) (int64, error) {
+	return 0, nil
+}
+
+func (f *fakeMetastore) SetConsumerOffset(_ context.Context, _ string, _ int, _ int64) error {
+	return nil
+}
 func (f *fakeMetastore) Close() error { return nil }
 
 func validDeps(t *testing.T) Deps {
