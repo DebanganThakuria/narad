@@ -110,14 +110,6 @@ func (f *fakeMetastore) GetSchema(_ context.Context, topicName string, version i
 	return nil, errs.ErrNotFound
 }
 
-func (f *fakeMetastore) GetConsumerOffset(_ context.Context, _ string, _ int) (int64, error) {
-	return 0, nil
-}
-
-func (f *fakeMetastore) SetConsumerOffset(_ context.Context, _ string, _ int, _ int64) error {
-	return nil
-}
-
 func (f *fakeMetastore) Close() error { return nil }
 
 type fakeSchemaRegistry struct {

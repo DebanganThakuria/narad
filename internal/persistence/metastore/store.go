@@ -301,18 +301,6 @@ func (s *Store) ListMembers() ([]Member, error) {
 	return out, err
 }
 
-// -- consumer offset stubs --
-// Consumer offsets are managed by the partition log layer via .offsets
-// files, not by the Raft metastore. These satisfy the Metastore interface.
-
-func (s *Store) GetConsumerOffset(_ context.Context, _ string, _ int) (int64, error) {
-	return 0, nil
-}
-
-func (s *Store) SetConsumerOffset(_ context.Context, _ string, _ int, _ int64) error {
-	return nil
-}
-
 // -- lifecycle --
 
 func (s *Store) Close() error {
