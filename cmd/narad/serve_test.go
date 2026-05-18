@@ -162,11 +162,9 @@ func (stubMetastore) GetTopic(context.Context, string) (topic.Topic, error) {
 func (stubMetastore) ListTopics(context.Context, metastore.ListOptions) ([]topic.Topic, string, error) {
 	return nil, "", nil
 }
-func (stubMetastore) PutSchema(context.Context, string, int, []byte) error          { return nil }
-func (stubMetastore) GetSchema(context.Context, string, int) ([]byte, error)        { return nil, nil }
-func (stubMetastore) GetConsumerOffset(context.Context, string, int) (int64, error) { return 0, nil }
-func (stubMetastore) SetConsumerOffset(context.Context, string, int, int64) error   { return nil }
-func (stubMetastore) Close() error                                                  { return nil }
+func (stubMetastore) PutSchema(context.Context, string, int, []byte) error   { return nil }
+func (stubMetastore) GetSchema(context.Context, string, int) ([]byte, error) { return nil, nil }
+func (stubMetastore) Close() error                                           { return nil }
 
 func TestBuildMetricsReturnsUsableRegistry(t *testing.T) {
 	reg, m := buildMetrics()

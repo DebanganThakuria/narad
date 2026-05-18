@@ -68,14 +68,6 @@ func (f *messagingFakeMetastore) GetSchema(_ context.Context, _ string, _ int) (
 	return nil, errs.ErrNotFound
 }
 
-func (f *messagingFakeMetastore) GetConsumerOffset(_ context.Context, _ string, _ int) (int64, error) {
-	return 0, nil
-}
-
-func (f *messagingFakeMetastore) SetConsumerOffset(_ context.Context, _ string, _ int, _ int64) error {
-	return nil
-}
-
 func (f *messagingFakeMetastore) Close() error { return nil }
 
 type fakeSchemas struct {
@@ -174,6 +166,10 @@ func newTestEngine(t *testing.T, ms *messagingFakeMetastore, schemas schema.Regi
 	return newTestEngineWithDir(t, t.TempDir(), ms, schemas, partitioner, replicator)
 }
 
+func int64ptr(v int64) *int64 {
+	return &v
+}
+
 func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetastore, schemas schema.Registry, partitioner partition.Manager, replicator replication.Replicator) *Engine {
 	t.Helper()
 	if ms == nil {
@@ -191,7 +187,24 @@ func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetasto
 	logs := runtime.NewLogs(dataDir, storage.Options{FlushInterval: 5 * time.Millisecond}, ms, nil)
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 10, MaxAckedAhead: 10}, nil
-	}, nil)
+	}, func(topic string, partition int, offset int64) {
+		partitionDir := filepath.Join(dataDir, "topics", topic, fmt.Sprintf("p%05d", partition))
+		if err := storage.WriteConsumerOffset(partitionDir, offset); err != nil {
+			panic(err)
+		}
+	})
+	for topicName, cfg := range ms.topics {
+		for partition := 0; partition < cfg.Partitions; partition++ {
+			partitionDir := filepath.Join(dataDir, "topics", topicName, fmt.Sprintf("p%05d", partition))
+			committed, ok, err := storage.ReadConsumerOffset(partitionDir)
+			if err != nil || !ok {
+				continue
+			}
+			if err := offsets.Init(context.Background(), topicName, partition, committed); err != nil {
+				panic(err)
+			}
+		}
+	}
 	return NewEngine(ms, schemas, partitioner, replicator, offsets, logs, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
@@ -279,7 +292,7 @@ func TestConsumeRequiresPartitionWhenOffsetProvided(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngine(t, ms, nil, nil, nil)
-	_, _, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Offset: new(int64(0))})
+	_, _, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Offset: int64ptr(0)})
 	if !errors.Is(err, ErrPartitionRequired) {
 		t.Fatalf("Consume() error = %v, want %v", err, ErrPartitionRequired)
 	}
@@ -588,7 +601,7 @@ func TestConsumeReplayReturnsMessageForExistingOffset(t *testing.T) {
 	if err := log.AdvanceHighWatermark(1); err != nil {
 		t.Fatalf("AdvanceHighWatermark() error = %v", err)
 	}
-	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Offset: new(int64(0))})
+	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Offset: int64ptr(0)})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -607,7 +620,7 @@ func TestConsumeReplayReturnsNoMessagePastTail(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngine(t, ms, nil, nil, nil)
-	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Offset: new(int64(5))})
+	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Offset: int64ptr(5)})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}

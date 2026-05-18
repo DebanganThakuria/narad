@@ -28,10 +28,9 @@ It focuses on:
 
 Narad is pre-1.0 and under active development.
 
-Today, the control plane, HTTP API, CLI surface, topic CRUD, consumer
-flows, and core storage paths are covered by unit and end-to-end tests.
-The main roadmap item still in progress is fully replicated data-plane
-durability.
+Today, the control plane, fixed-leader data plane, HTTP API, CLI surface,
+topic CRUD, consumer flows, and core storage paths are covered by unit
+and end-to-end tests.
 
 ## Community and project docs
 
@@ -41,29 +40,27 @@ durability.
 - [License](./LICENSE)
 
 > **Current implementation status:** the control-plane architecture is in
-> place. The HTTP API, append-only segmented log, **Raft+bbolt
+> place. The HTTP API, append-only segmented log, fixed-leader
+> leader→follower replication path, HWM-gated visibility, **Raft+bbolt
 > metastore** (topics, schemas, partition assignments, cluster
 > membership), **cluster controller** (partition assignment, heartbeat
 > monitoring, leader election), **any-pod proxy routing**,
 > JSON-Schema validation, per-topic retention, partitioning,
 > **SQS-style in-flight tracking with gap-skipping reservations,
 > out-of-order acks, and nonce-verified receipt handles**, Prometheus
-> metrics, and a debug pprof listener are functional. Data-plane
-> replication (leader → follower log sync, `.offsets` files, HWM/LEO)
-> is the next milestone.
+> metrics, and a debug pprof listener are functional.
 
 ### Breaking changes (pre-1.0)
 
 > **Status:** control-plane architecture complete. The HTTP API,
-> append-only segmented log, **Raft+bbolt metastore** (topics, schemas,
+> append-only segmented log, fixed-leader leader→follower replication
+> path, HWM-gated visibility, **Raft+bbolt metastore** (topics, schemas,
 > partition assignments, cluster membership), **cluster controller**
 > (partition assignment, heartbeat monitoring, leader election),
 > **any-pod proxy routing**, JSON-Schema validation, per-topic retention,
 > partitioning, **SQS-style in-flight tracking with gap-skipping
 > reservations + out-of-order acks + nonce-verified receipt handles**,
 > Prometheus metrics, and a debug pprof listener are all functional.
-> Data-plane replication (leader → follower log sync, `.offsets` files,
-> HWM/LEO) is the next milestone.
 
 ### Breaking changes (pre-1.0)
 
@@ -116,9 +113,9 @@ segment files on its persistent volume and manages the in-flight
 reservation table in memory. Requests that arrive at the wrong pod are
 transparently proxied to the owner via the internal cluster port.
 
-**Replication.** A `replication.Local` stub is wired today (single-copy
-durability, bounded by async flush + PV durability). Leader→follower
-log replication and `.offsets` files are the next milestone.
+**Replication.** In the fixed-leader model, the leader→follower log
+replication path is in place and visibility is gated by the replicated
+high-water mark rather than raw append position.
 
 ## Layout
 
@@ -379,8 +376,7 @@ Producer goroutines contend only on the buffer's lightweight mutex.
 **Durability.** Records produced before a flush are durable. Records
 in the open flush window can be lost on a hard crash; this window is
 bounded by the flush thresholds. Graceful shutdown always does a final
-flush. Future data-plane replication will close the crash window by
-requiring follower acknowledgement before the producer is notified.
+flush.
 
 **Recovery.** On startup the log file is scanned frame by frame. Corrupt
 frames are skipped (scanner resyncs on the next valid magic). A torn

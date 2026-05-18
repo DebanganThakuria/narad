@@ -72,14 +72,6 @@ func (f *runtimeFakeMetastore) GetSchema(_ context.Context, _ string, _ int) ([]
 	return nil, errs.ErrNotFound
 }
 
-func (f *runtimeFakeMetastore) GetConsumerOffset(_ context.Context, _ string, _ int) (int64, error) {
-	return 0, nil
-}
-
-func (f *runtimeFakeMetastore) SetConsumerOffset(_ context.Context, _ string, _ int, _ int64) error {
-	return nil
-}
-
 func (f *runtimeFakeMetastore) Close() error { return nil }
 
 func newRuntimeTestLogs(t *testing.T, ms metastore.Metastore) *Logs {

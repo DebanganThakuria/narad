@@ -251,8 +251,16 @@ func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, m *m
 		return consumer.Caps{MaxInFlight: maxIF, MaxAckedAhead: maxAA}, nil
 	}
 
-	offsets := consumer.NewInFlight(resolveCaps, nil)
+	offsets := consumer.NewInFlight(resolveCaps, func(topic string, partition int, offset int64) {
+		partitionDir := filepath.Join(cfg.Storage.DataDir, "topics", topic, fmt.Sprintf("p%05d", partition))
+		if err := storage.WriteConsumerOffset(partitionDir, offset); err != nil {
+			log.Error("consumer offset write failed", "topic", topic, "partition", partition, "offset", offset, "err", err)
+		}
+	})
 	logs := runtime.NewLogs(cfg.Storage.DataDir, storageOpts, ms, m)
+	if err := initializeConsumerOffsets(context.Background(), cfg.Storage.DataDir, ms, offsets, log); err != nil {
+		return nil, nil, nil, fmt.Errorf("initialize consumer offsets: %w", err)
+	}
 	client := &http.Client{Timeout: 5 * time.Second}
 
 	store, ok := ms.(*metastore.Store)
@@ -296,6 +304,30 @@ func buildAPIServer(cfg *config.Config, br broker.Broker, logs *runtime.Logs, ro
 		Router:         router,
 	})
 	return httpserver.New(cfg.HTTP, httpserver.NewRouter(handlerSet, log, m, reg), log)
+}
+
+func initializeConsumerOffsets(ctx context.Context, dataDir string, ms metastore.Metastore, offsets *consumer.InFlight, log *slog.Logger) error {
+	topics, _, err := ms.ListTopics(ctx, metastore.ListOptions{})
+	if err != nil {
+		return err
+	}
+	for _, topicCfg := range topics {
+		for partition := 0; partition < topicCfg.Partitions; partition++ {
+			partitionDir := filepath.Join(dataDir, "topics", topicCfg.Name, fmt.Sprintf("p%05d", partition))
+			committed, ok, err := storage.ReadConsumerOffset(partitionDir)
+			if err != nil {
+				log.Error("consumer offset recovery skipped", "topic", topicCfg.Name, "partition", partition, "err", err)
+				continue
+			}
+			if !ok {
+				continue
+			}
+			if err := offsets.Init(ctx, topicCfg.Name, partition, committed); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func closeWithLog(log *slog.Logger, what string, close func() error) {

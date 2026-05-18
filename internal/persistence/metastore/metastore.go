@@ -17,9 +17,6 @@ type Metastore interface {
 	PutSchema(ctx context.Context, topic string, version int, schema []byte) error
 	GetSchema(ctx context.Context, topic string, version int) ([]byte, error)
 
-	GetConsumerOffset(ctx context.Context, topic string, partition int) (int64, error)
-	SetConsumerOffset(ctx context.Context, topic string, partition int, offset int64) error
-
 	Close() error
 }
 
