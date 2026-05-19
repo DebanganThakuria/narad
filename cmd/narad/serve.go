@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -46,7 +45,6 @@ func runServe(args []string) error {
 	if err != nil || cfg == nil {
 		return err
 	}
-	pprofAddr := servePprofAddr(args)
 
 	log, err := logger.New(cfg.Log.Format, cfg.Log.Level)
 	if err != nil {
@@ -99,33 +97,19 @@ func runServe(args []string) error {
 	wg.Go(func() { hb.Run(ctx) })
 	wg.Go(func() { ctrl.Run(ctx) })
 	wg.Go(func() { offsets.RunPurger(ctx, time.Second) })
-	if strings.TrimSpace(pprofAddr) != "" {
-		pprofSrv := &http.Server{Addr: pprofAddr, Handler: nil}
-		wg.Go(func() {
-			if pprofErr := pprofSrv.ListenAndServe(); pprofErr != nil && !errors.Is(pprofErr, http.ErrServerClosed) {
-				log.Error("failed to start pprof", "err", pprofErr)
-			}
-		})
-		wg.Go(func() {
-			<-ctx.Done()
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := pprofSrv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
-				log.Error("failed to stop pprof", "err", err)
-			}
-		})
-	}
 
 	poller := metrics.NewPoller(m, br, log)
 	wg.Go(func() { poller.Run(ctx) })
 
-	srv := buildAPIServer(cfg, br, logs, router, m, reg, log)
 	wg.Go(func() {
 		if repairErr := recovery.RepairOwnedPartitions(ctx); repairErr != nil {
 			log.Error("repair owned partitions", "err", repairErr)
 			stop()
 		}
 	})
+
+	srv := buildAPIServer(cfg, br, logs, router, m, reg, log)
+
 	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())
 
 	if err = srv.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -139,7 +123,9 @@ func runServe(args []string) error {
 		"version", versionString())
 
 	wg.Wait()
+
 	log.Info("narad serve stopped")
+
 	return nil
 }
 
@@ -307,17 +293,18 @@ func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, m *m
 		return consumer.Caps{MaxInFlight: maxIF, MaxAckedAhead: maxAA}, nil
 	}
 
-	offsets := consumer.NewInFlight(resolveCaps, func(topic string, partition int, offset int64) {
+	onCommit := func(topic string, partition int, offset int64) {
 		partitionDir := filepath.Join(cfg.Storage.DataDir, "topics", topic, fmt.Sprintf("p%05d", partition))
 		if err := storage.WriteConsumerOffset(partitionDir, offset); err != nil {
 			log.Error("consumer offset write failed", "topic", topic, "partition", partition, "offset", offset, "err", err)
 		}
-	})
+	}
+
+	offsets := consumer.NewInFlight(resolveCaps, onCommit)
 	logs := runtime.NewLogs(cfg.Storage.DataDir, storageOpts, ms, m)
-	if err := initializeConsumerOffsets(context.Background(), cfg.Storage.DataDir, ms, offsets, log); err != nil {
+	if err = initializeConsumerOffsets(context.Background(), cfg.Storage.DataDir, ms, offsets, log); err != nil {
 		return nil, nil, nil, fmt.Errorf("initialize consumer offsets: %w", err)
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
 
 	store, ok := ms.(*metastore.Store)
 	if !ok {
@@ -340,7 +327,7 @@ func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, m *m
 		Partitions:      partition.NewHashRoundRobin(),
 		Schemas:         schema.NewJSONSchema(),
 		ConsumerOffsets: offsets,
-		Replicator:      replication.NewCluster(nodeID, store, client),
+		Replicator:      replication.NewCluster(nodeID, store, &http.Client{Timeout: 5 * time.Second}),
 		Logs:            logs,
 		Logger:          log,
 		Metrics:         m,
@@ -363,6 +350,7 @@ func buildAPIServer(cfg *config.Config, br broker.Broker, logs *runtime.Logs, ro
 }
 
 func initializeConsumerOffsets(ctx context.Context, dataDir string, ms metastore.Metastore, offsets *consumer.InFlight, log *slog.Logger) error {
+	// TODO Only list topics this is a leader of and own it
 	topics, _, err := ms.ListTopics(ctx, metastore.ListOptions{})
 	if err != nil {
 		return err
@@ -437,13 +425,4 @@ func zstdLevelFromString(s string) (zstd.EncoderLevel, error) {
 	default:
 		return 0, fmt.Errorf("unknown compression level %q", s)
 	}
-}
-
-func servePprofAddr(args []string) string {
-	fs := flag.NewFlagSet("serve-pprof", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var addr string
-	fs.StringVar(&addr, "pprof-addr", "", "")
-	_ = fs.Parse(args)
-	return addr
 }

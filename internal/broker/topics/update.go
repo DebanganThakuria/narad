@@ -17,6 +17,8 @@ import (
 // uses hash(key) % newPartitions, so a key that previously hashed to
 // partition 3 may now hash to partition 11. Existing records stay in
 // their original partitions.
+
+// TODO need to assign new partitions
 func (m *Manager) IncreaseTopicPartitions(ctx context.Context, name string, newPartitions int) (topic.Topic, error) {
 	if name == "" {
 		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalid)
