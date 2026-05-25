@@ -36,6 +36,7 @@ type fakeBroker struct {
 
 type fakeRouter struct {
 	routeCreateTopicFn func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
+	routeAlterTopicFn  func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool
 }
 
 func (f *fakeRouter) RouteProduce(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool {
@@ -55,6 +56,13 @@ func (f *fakeRouter) RouteCreateTopic(ctx context.Context, w http.ResponseWriter
 		return false
 	}
 	return f.routeCreateTopicFn(ctx, w, r, body)
+}
+
+func (f *fakeRouter) RouteAlterTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, body []byte) bool {
+	if f.routeAlterTopicFn == nil {
+		return false
+	}
+	return f.routeAlterTopicFn(ctx, w, r, topicName, body)
 }
 
 func newTestSetWithRouter(b broker.Broker, router handlers.Router) *handlers.Set {
@@ -356,6 +364,101 @@ func TestAlterRequestValidate(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want nil", err)
 			}
 		})
+	}
+}
+
+func TestAlterHandlerRoutesToLeader(t *testing.T) {
+	routed := false
+	s := newTestSetWithRouter(&fakeBroker{updateTopicRetentionFn: func(context.Context, string, int64) (topic.Topic, error) {
+		return topic.Topic{}, errors.New("unexpected UpdateTopicRetention call")
+	}}, &fakeRouter{routeAlterTopicFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName string, body []byte) bool {
+		routed = true
+		if topicName != "orders" {
+			t.Fatalf("topicName = %q, want orders", topicName)
+		}
+		if string(body) != `{"retention_ms":1}` {
+			t.Fatalf("forwarded body = %s", body)
+		}
+		w.WriteHeader(http.StatusOK)
+		return true
+	}})
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/topics/orders", bytes.NewBufferString(`{"retention_ms":1}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Alter(s).ServeHTTP(res, req)
+
+	if !routed {
+		t.Fatal("Alter() did not route to leader")
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("Alter() status = %d, want %d", res.Code, http.StatusOK)
+	}
+}
+
+func TestAlterHandlerFallsBackToLocalWhenRouterDoesNotForward(t *testing.T) {
+	called := false
+	s := newTestSetWithRouter(&fakeBroker{updateTopicRetentionFn: func(_ context.Context, name string, retentionMs int64) (topic.Topic, error) {
+		called = name == "orders" && retentionMs == 1
+		return topic.Topic{Name: name}, nil
+	}}, &fakeRouter{routeAlterTopicFn: func(_ context.Context, _ http.ResponseWriter, _ *http.Request, _ string, _ []byte) bool {
+		return false
+	}})
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/topics/orders", bytes.NewBufferString(`{"retention_ms":1}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Alter(s).ServeHTTP(res, req)
+
+	if !called {
+		t.Fatal("Alter() did not fall back to local broker")
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("Alter() status = %d, want %d", res.Code, http.StatusOK)
+	}
+}
+
+func TestAlterHandlerRejectsInvalidJSONBeforeRouting(t *testing.T) {
+	routed := false
+	s := newTestSetWithRouter(&fakeBroker{updateTopicRetentionFn: func(context.Context, string, int64) (topic.Topic, error) {
+		return topic.Topic{}, errors.New("unexpected UpdateTopicRetention call")
+	}}, &fakeRouter{routeAlterTopicFn: func(_ context.Context, _ http.ResponseWriter, _ *http.Request, _ string, _ []byte) bool {
+		routed = true
+		return true
+	}})
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/topics/orders", bytes.NewBufferString(`{"retention_ms":`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Alter(s).ServeHTTP(res, req)
+
+	if routed {
+		t.Fatal("Alter() routed invalid JSON")
+	}
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("Alter() status = %d, want %d", res.Code, http.StatusBadRequest)
+	}
+}
+
+func TestAlterHandlerRejectsReadErrorsBeforeRouting(t *testing.T) {
+	routed := false
+	s := newTestSetWithRouter(&fakeBroker{updateTopicRetentionFn: func(context.Context, string, int64) (topic.Topic, error) {
+		return topic.Topic{}, errors.New("unexpected UpdateTopicRetention call")
+	}}, &fakeRouter{routeAlterTopicFn: func(_ context.Context, _ http.ResponseWriter, _ *http.Request, _ string, _ []byte) bool {
+		routed = true
+		return true
+	}})
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/topics/orders", io.NopCloser(errReader{}))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Alter(s).ServeHTTP(res, req)
+
+	if routed {
+		t.Fatal("Alter() routed unreadable body")
+	}
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("Alter() status = %d, want %d", res.Code, http.StatusBadRequest)
 	}
 }
 

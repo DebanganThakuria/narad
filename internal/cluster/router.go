@@ -155,6 +155,20 @@ func (rt *Router) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, r
 	return true
 }
 
+func (rt *Router) RouteAlterTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, _ string, body []byte) bool {
+	leaderAddr := strings.TrimSpace(rt.store.LeaderAddr())
+	if leaderAddr == "" {
+		return false
+	}
+	memberAddr := rt.memberAddrByClusterAddr(leaderAddr)
+	if memberAddr == "" {
+		return false
+	}
+	fwd := r.Clone(ctx)
+	rt.forward(w, fwd, memberAddr, body)
+	return true
+}
+
 func (rt *Router) backlogByPartition(ctx context.Context, topicName string) map[int]int64 {
 	if rt.snapshots == nil {
 		return nil
