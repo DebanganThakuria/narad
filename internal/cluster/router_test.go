@@ -454,8 +454,7 @@ func TestRouteConsumeForwardsPinnedPartitionToRemoteOwner(t *testing.T) {
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=1s", nil)
-	pinned := 1
-	forwarded := router.RouteConsume(context.Background(), res, req, "orders", &pinned)
+	forwarded := router.RouteConsume(context.Background(), res, req, "orders", new(1))
 	if !forwarded {
 		t.Fatal("RouteConsume() = false, want true")
 	}
