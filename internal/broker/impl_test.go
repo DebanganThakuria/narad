@@ -64,8 +64,14 @@ func (f *fakeMetastore) LeaderAddr() string { return "" }
 func (f *fakeMetastore) GetMember(string) (metastore.Member, error) {
 	return metastore.Member{}, errs.ErrNotFound
 }
-func (f *fakeMetastore) GetConsumerOffset(_ context.Context, _ string, _ int) (int64, error) { return 0, nil }
-func (f *fakeMetastore) SetConsumerOffset(_ context.Context, _ string, _ int, _ int64) error { return nil }
+
+func (f *fakeMetastore) GetConsumerOffset(_ context.Context, _ string, _ int) (int64, error) {
+	return 0, nil
+}
+
+func (f *fakeMetastore) SetConsumerOffset(_ context.Context, _ string, _ int, _ int64) error {
+	return nil
+}
 func (f *fakeMetastore) Close() error { return nil }
 
 func validDeps(t *testing.T) Deps {

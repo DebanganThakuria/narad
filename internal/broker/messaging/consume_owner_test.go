@@ -26,7 +26,7 @@ func TestConsumePinnedRejectsWhenNotPartitionOwner(t *testing.T) {
 	}
 
 	engine := newClusterTestEngine(t, store, fixedPartitionManager{picked: 0})
-	_, _, err := engine.Consume(ctx, "orders", ConsumeOpts{Partition: intPtr(0), Wait: 0})
+	_, _, err := engine.Consume(ctx, "orders", ConsumeOpts{Partition: new(0), Wait: 0})
 	if !errors.Is(err, ErrNotPartitionOwner) {
 		t.Fatalf("Consume() error = %v, want %v", err, ErrNotPartitionOwner)
 	}
@@ -49,7 +49,7 @@ func TestConsumeReplayRejectsWhenNotPartitionOwner(t *testing.T) {
 	}
 
 	engine := newClusterTestEngine(t, store, fixedPartitionManager{picked: 0})
-	_, _, err := engine.Consume(ctx, "orders", ConsumeOpts{Partition: intPtr(0), Offset: int64ptr(0)})
+	_, _, err := engine.Consume(ctx, "orders", ConsumeOpts{Partition: new(0), Offset: new(int64(0))})
 	if !errors.Is(err, ErrNotPartitionOwner) {
 		t.Fatalf("Consume() error = %v, want %v", err, ErrNotPartitionOwner)
 	}
@@ -72,7 +72,7 @@ func TestConsumePinnedAllowsOwner(t *testing.T) {
 	if _, _, err := engine.Produce(ctx, "orders", "", []byte(`{"id":1}`)); err != nil {
 		t.Fatalf("Produce() error = %v", err)
 	}
-	msg, found, err := engine.Consume(ctx, "orders", ConsumeOpts{Partition: intPtr(0), Wait: 0})
+	msg, found, err := engine.Consume(ctx, "orders", ConsumeOpts{Partition: new(0), Wait: 0})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -92,7 +92,7 @@ func TestConsumePinnedAllowsWhenOwnershipUnavailable(t *testing.T) {
 	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
 		t.Fatalf("Produce() error = %v", err)
 	}
-	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: intPtr(0), Wait: 0})
+	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Wait: 0})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
