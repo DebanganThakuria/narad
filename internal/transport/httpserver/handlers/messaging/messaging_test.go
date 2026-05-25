@@ -99,6 +99,7 @@ type fakeRouter struct {
 	routeConsumeFn     func(context.Context, http.ResponseWriter, *http.Request, string, *int) bool
 	routeAckFn         func(context.Context, http.ResponseWriter, *http.Request, string, int, []byte) bool
 	routeCreateTopicFn func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
+	routeAlterTopicFn  func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool
 }
 
 func (f *fakeRouter) RouteProduce(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName, key string, body []byte) bool {
@@ -127,6 +128,13 @@ func (f *fakeRouter) RouteCreateTopic(ctx context.Context, w http.ResponseWriter
 		return false
 	}
 	return f.routeCreateTopicFn(ctx, w, r, body)
+}
+
+func (f *fakeRouter) RouteAlterTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, body []byte) bool {
+	if f.routeAlterTopicFn == nil {
+		return false
+	}
+	return f.routeAlterTopicFn(ctx, w, r, topicName, body)
 }
 
 func newTestSet(b broker.Broker, router handlers.Router) *handlers.Set {
@@ -210,6 +218,140 @@ func TestProduceHandlerRejectsInvalidRequest(t *testing.T) {
 
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusBadRequest)
+	}
+}
+
+func TestProduceHandlerRejectsInvalidPartitionQuery(t *testing.T) {
+	s := newTestSet(&fakeBroker{}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce?partition=bad", bytes.NewBufferString(`{"message":{"id":1}}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Produce(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusBadRequest)
+	}
+}
+
+func TestProduceHandlerSkipsRouterForPinnedPartition(t *testing.T) {
+	brokerCalled := false
+	routerCalled := false
+	s := newTestSet(&fakeBroker{produceFn: func(_ context.Context, topicName, key string, payload []byte) (int64, int, error) {
+		brokerCalled = topicName == "orders" && key == "customer-1" && string(payload) == `{"id":1}`
+		return 3, 1, nil
+	}}, &fakeRouter{routeProduceFn: func(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool {
+		routerCalled = true
+		return false
+	}})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce?partition=2", bytes.NewBufferString(`{"key":"customer-1","message":{"id":1}}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Produce(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusOK)
+	}
+	if routerCalled {
+		t.Fatal("Produce() called router for pinned partition")
+	}
+	if !brokerCalled {
+		t.Fatal("Produce() did not call broker for pinned partition")
+	}
+}
+
+func TestProduceHandlerGeneratesKeyWhenMissing(t *testing.T) {
+	var gotKey string
+	s := newTestSet(&fakeBroker{produceFn: func(_ context.Context, topicName, key string, payload []byte) (int64, int, error) {
+		gotKey = key
+		return 7, 2, nil
+	}}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Produce(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusOK)
+	}
+	if gotKey == "" {
+		t.Fatal("Produce() did not generate a key")
+	}
+}
+
+func TestProduceHandlerRoutesWithGeneratedKeyAndRewrittenBody(t *testing.T) {
+	routerCalled := false
+	s := newTestSet(&fakeBroker{produceFn: func(context.Context, string, string, []byte) (int64, int, error) {
+		return 0, 0, nil
+	}}, &fakeRouter{routeProduceFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName, key string, body []byte) bool {
+		routerCalled = true
+		if topicName != "orders" {
+			t.Fatalf("topic = %q, want orders", topicName)
+		}
+		if key == "" {
+			t.Fatal("router key is empty")
+		}
+
+		var req produceRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("json.Unmarshal() error = %v", err)
+		}
+		if req.Key != key {
+			t.Fatalf("forwarded body key = %q, want %q", req.Key, key)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return true
+	}})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Produce(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
+	}
+	if !routerCalled {
+		t.Fatal("Produce() did not call router")
+	}
+}
+
+func TestProduceHandlerPreservesExplicitKeyWhenRouting(t *testing.T) {
+	routerCalled := false
+	s := newTestSet(&fakeBroker{produceFn: func(context.Context, string, string, []byte) (int64, int, error) {
+		return 0, 0, nil
+	}}, &fakeRouter{routeProduceFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName, key string, body []byte) bool {
+		routerCalled = true
+		if topicName != "orders" {
+			t.Fatalf("topic = %q, want orders", topicName)
+		}
+		if key != "customer-1" {
+			t.Fatalf("key = %q, want customer-1", key)
+		}
+		if string(body) != `{"key":"customer-1","message":{"id":1}}` {
+			t.Fatalf("forwarded body = %s", body)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return true
+	}})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"key":"customer-1","message":{"id":1}}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Produce(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
+	}
+	if !routerCalled {
+		t.Fatal("Produce() did not call router")
 	}
 }
 

@@ -1,8 +1,10 @@
 package topics
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -67,9 +69,28 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
-		var req alterRequest
-		if !s.DecodeAndValidate(w, r, &req) {
+		body, readErr := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if readErr != nil {
+			s.WriteError(w, http.StatusBadRequest, "read body: "+readErr.Error())
 			return
+		}
+
+		var req alterRequest
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+			return
+		}
+		if err := req.Validate(); err != nil {
+			s.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		if s.Deps.Router != nil {
+			if s.Deps.Router.RouteAlterTopic(r.Context(), w, r, topicName, body) {
+				return
+			}
 		}
 
 		var (

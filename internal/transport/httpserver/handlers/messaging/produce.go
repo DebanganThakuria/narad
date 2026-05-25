@@ -2,10 +2,14 @@ package messaging
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
@@ -26,13 +30,16 @@ func (req produceRequest) Validate() error {
 }
 
 // Produce handles POST /v1/topics/{topic}/produce.
-// TODO read partition from the query string
-// TODO if key is empty we should generate some key
 func Produce(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")
 		if topicName == "" {
 			s.WriteError(w, http.StatusBadRequest, "topic required")
+			return
+		}
+
+		pinnedPartition, ok := parseProduceQuery(s, w, r)
+		if !ok {
 			return
 		}
 
@@ -54,14 +61,18 @@ func Produce(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		key, body := produceKeyAndBody(body, req.Key)
+		if req.Key == "" {
+			req.Key = key
+		}
 
-		if s.Deps.Router != nil {
-			if s.Deps.Router.RouteProduce(r.Context(), w, r, topicName, req.Key, body) {
+		if s.Deps.Router != nil && pinnedPartition == nil {
+			if s.Deps.Router.RouteProduce(r.Context(), w, r, topicName, key, body) {
 				return
 			}
 		}
 
-		offset, partition, err := s.Deps.Broker.Produce(r.Context(), topicName, req.Key, []byte(req.Message))
+		offset, partition, err := s.Deps.Broker.Produce(r.Context(), topicName, key, []byte(req.Message))
 		if err != nil {
 			s.WriteBrokerError(w, "produce", err)
 			return
@@ -71,4 +82,51 @@ func Produce(s *handlers.Set) http.HandlerFunc {
 			"partition": partition,
 		})
 	}
+}
+
+func parseProduceQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) (*int, bool) {
+	v := r.URL.Query().Get("partition")
+	if v == "" {
+		return nil, true
+	}
+	p, err := strconv.Atoi(v)
+	if err != nil {
+		s.WriteError(w, http.StatusBadRequest, "invalid partition: "+err.Error())
+		return nil, false
+	}
+	return &p, true
+}
+
+func generateProduceKey() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "key-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func rewriteProduceBodyKey(body []byte, key string) []byte {
+	var req produceRequest
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		return body
+	}
+	if req.Key != "" {
+		return body
+	}
+	req.Key = key
+	updated, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
+func produceKeyAndBody(body []byte, key string) (string, []byte) {
+	if key != "" {
+		return key, body
+	}
+	resolvedKey := generateProduceKey()
+	return resolvedKey, rewriteProduceBodyKey(body, resolvedKey)
 }
