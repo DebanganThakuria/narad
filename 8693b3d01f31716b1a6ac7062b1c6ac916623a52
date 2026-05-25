@@ -1,0 +1,66 @@
+.gitignore
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:51:19.470Z 14
+cmd/narad/serve.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T17:07:21.602Z 44,50,56,63,80,90,100,102,118,341
+internal/broker/deps.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T16:19:38.598Z 30
+internal/broker/impl.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T16:20:14.144Z 72
+internal/broker/impl_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T18:50:48.496Z 63-66
+internal/broker/messaging/consume.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T17:01:40.250Z 29-34,42-44
+internal/broker/messaging/consume_owner_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T16:24:13.983Z 1,3-6,8-10,12-26,28-33,35-49,51-56,58-69,71-85,87-105
+internal/broker/messaging/engine.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T17:01:40.250Z 23,40-41,43-49,51-60,62-66,68-85,87-101,111,139,153,164,195-198,201-205,210-223
+internal/broker/messaging/engine_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T16:21:01.980Z 149,215
+internal/broker/messaging/produce.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T16:01:35.958Z 8,11,36-39,42-43,45-46,49-51,53-64,66
+internal/broker/messaging/produce_race_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:55:17.819Z 1,3-6,8-9,11-15,17-19,21-27,29-40,42-46,48-49,51-54,56-65,67-70,72-75,77-84,86-88,90-93
+internal/broker/messaging/produce_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T16:03:15.733Z 145-168,170-181,221-238,240-245
+internal/broker/runtime/logs.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:54:20.724Z 39-40,53-55,57-58,60-66,68-70,72-76,78-80,82-84,86-87,89-91,93-98,100-102,104-109,111-115,117-118
+internal/broker/runtime/logs_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T18:51:02.811Z 75,77-79
+internal/broker/topics/manager_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T18:51:20.411Z 113,115-117
+internal/cluster/controller/controller.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:46:20.638Z 49-52,63-68,71
+internal/cluster/controller/heartbeat.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:46:57.400Z 1,3-5,7-8,10-28,30-50
+internal/cluster/controller/reconcile.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:46:47.874Z 1,3-5,7-8,10-16,18-25,27-30,32-41,43-46,48-52,54-75,77-92
+internal/cluster/controller/run.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:46:35.328Z 1,3-6,8-11,13-16,18-35,37-41,43-47,49-50,52-61
+internal/cluster/router.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T18:48:14.715Z 12,15,17,28,32-33,45,64-65,67,69-70,73-78,81-89,91-92,94-99,101-105,107-130,159-182,184-204,206-210,212-214,216-222,224-226,228-237
+internal/cluster/router_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T18:47:57.587Z 9,15,62,71,88,104,113,125,129,140,144,152,189,222,225-226,259,272-285,287-298,300-319,321-332,334-347,349,351-353
+internal/consumer/inflight_core.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:41:05.896Z 1,3-6,8-17,19-29,31-35,37-43,45-49,51-56,58-63,65-74,76-88,90-99,101-106,108-112,114-120,122,124-132,134-143,145-150
+internal/consumer/inflight_purger.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:41:30.210Z 1,3-6,8-22,24-32,34-39,41-46,48-52,54-56
+internal/consumer/inflight_reservations.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:41:19.907Z 1,3-7,9-15,17-18,20-21,23-25,27-30,32-49,51-52,54-61,63-68,70-87,89-99
+internal/consumer/inflight_types.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:40:43.783Z 1,3-7,9-10,12-15,17-21,23-25,27-31,33-43,45-54,56-59,61-64,66-77,79-87,89-90,92-102,104-114
+internal/errs/errs.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T16:19:38.598Z 82
+internal/platform/config/defaults_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T18:51:33.577Z 20
+internal/transport/httpserver/handlers/common.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T17:02:47.420Z 35,147-148
+internal/transport/httpserver/handlers/handlers_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T16:21:01.980Z 201
+internal/transport/httpserver/handlers/messaging/consume.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T17:07:08.443Z 17,32
+internal/transport/httpserver/handlers/messaging/messaging_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T17:02:47.420Z 99,111,115,286-287
+internal/transport/httpserver/handlers/topics/topics_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T17:10:24.107Z 45
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:51:19.470Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 1, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T17:07:21.602Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 10, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T16:19:38.598Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 1, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T16:20:14.144Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 1, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T18:50:48.496Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 4, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T17:01:40.250Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 9, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T16:24:13.983Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 96, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T16:21:01.980Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 2, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T16:01:35.958Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 26, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:55:17.819Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 78, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T16:03:15.733Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 60, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:54:20.724Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 55, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T18:51:02.811Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 4, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T18:51:20.411Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 4, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:46:20.638Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 11, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:46:57.400Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 46, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:46:47.874Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 82, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:46:35.328Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 53, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T18:48:14.715Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 137, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T18:47:57.587Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 93, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:41:05.896Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 132, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:41:30.210Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 49, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:41:19.907Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 87, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T15:40:43.783Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 99, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T18:51:33.577Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 1, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T17:02:47.420Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 3, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T17:07:08.443Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 2, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-24T17:10:24.107Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 1, "overriden_lines": 0}}}
