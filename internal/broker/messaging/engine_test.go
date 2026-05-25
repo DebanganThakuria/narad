@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,6 +78,7 @@ func (f *messagingFakeMetastore) GetMember(string) (metastore.Member, error) {
 func (f *messagingFakeMetastore) Close() error { return nil }
 
 type fakeSchemas struct {
+	mu          sync.Mutex
 	validateErr error
 	lastTopic   string
 	lastPayload []byte
@@ -87,6 +89,8 @@ func (f *fakeSchemas) Register(_ context.Context, _ string, _ []byte) (int, erro
 }
 
 func (f *fakeSchemas) Validate(_ context.Context, topic string, payload []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.lastTopic = topic
 	f.lastPayload = append([]byte(nil), payload...)
 	return f.validateErr
