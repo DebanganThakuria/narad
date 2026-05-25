@@ -37,6 +37,7 @@ type fakeBroker struct {
 type fakeRouter struct {
 	routeCreateTopicFn func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
 	routeAlterTopicFn  func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool
+	routeGetTopicFn    func(context.Context, *http.Request, string, topic.Details) (topic.Details, error)
 }
 
 func (f *fakeRouter) RouteProduce(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool {
@@ -63,6 +64,13 @@ func (f *fakeRouter) RouteAlterTopic(ctx context.Context, w http.ResponseWriter,
 		return false
 	}
 	return f.routeAlterTopicFn(ctx, w, r, topicName, body)
+}
+
+func (f *fakeRouter) RouteGetTopic(ctx context.Context, r *http.Request, topicName string, details topic.Details) (topic.Details, error) {
+	if f.routeGetTopicFn == nil {
+		return details, nil
+	}
+	return f.routeGetTopicFn(ctx, r, topicName, details)
 }
 
 func newTestSetWithRouter(b broker.Broker, router handlers.Router) *handlers.Set {
@@ -254,6 +262,134 @@ func TestGetHandler(t *testing.T) {
 
 	if res.Code != http.StatusOK {
 		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusOK)
+	}
+}
+
+func TestGetHandlerUsesRouterMergedStats(t *testing.T) {
+	routerCalled := false
+	s := newTestSetWithRouter(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
+		return topic.Details{
+			Topic:      topic.Topic{Name: name, Partitions: 2},
+			Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 1}, {Index: 1, NextOffset: 2}},
+		}, nil
+	}}, &fakeRouter{routeGetTopicFn: func(_ context.Context, _ *http.Request, topicName string, details topic.Details) (topic.Details, error) {
+		routerCalled = true
+		if topicName != "orders" {
+			t.Fatalf("topicName = %q, want orders", topicName)
+		}
+		details.Partitions = []topic.PartitionStats{{Index: 0, NextOffset: 10}, {Index: 1, NextOffset: 20}}
+		return details, nil
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if !routerCalled {
+		t.Fatal("Get() did not call router")
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusOK)
+	}
+	var body topic.Details
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if len(body.Partitions) != 2 || body.Partitions[0].NextOffset != 10 || body.Partitions[1].NextOffset != 20 {
+		t.Fatalf("Get() partitions = %+v", body.Partitions)
+	}
+}
+
+func TestGetHandlerFallsBackToLocalWhenRouterNil(t *testing.T) {
+	s := newTestSet(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
+		return topic.Details{
+			Topic:      topic.Topic{Name: name, Partitions: 1},
+			Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 3}},
+		}, nil
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusOK)
+	}
+	var body topic.Details
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if len(body.Partitions) != 1 || body.Partitions[0].NextOffset != 3 {
+		t.Fatalf("Get() partitions = %+v", body.Partitions)
+	}
+}
+
+func TestGetHandlerPartitionQuerySkipsRouter(t *testing.T) {
+	routerCalled := false
+	s := newTestSetWithRouter(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
+		return topic.Details{
+			Topic:      topic.Topic{Name: name, Partitions: 2},
+			Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 1}, {Index: 1, NextOffset: 2}},
+		}, nil
+	}}, &fakeRouter{routeGetTopicFn: func(_ context.Context, _ *http.Request, _ string, details topic.Details) (topic.Details, error) {
+		routerCalled = true
+		return details, nil
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders?partition=1", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if routerCalled {
+		t.Fatal("Get() routed partition-scoped request")
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusOK)
+	}
+	var body topic.Details
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if len(body.Partitions) != 1 || body.Partitions[0].Index != 1 || body.Partitions[0].NextOffset != 2 {
+		t.Fatalf("Get() partitions = %+v", body.Partitions)
+	}
+}
+
+func TestGetHandlerRejectsInvalidPartitionQuery(t *testing.T) {
+	s := newTestSet(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
+		return topic.Details{
+			Topic:      topic.Topic{Name: name, Partitions: 1},
+			Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 1}},
+		}, nil
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders?partition=bad", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusBadRequest)
+	}
+}
+
+func TestGetHandlerReturnsRouterError(t *testing.T) {
+	s := newTestSetWithRouter(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
+		return topic.Details{Topic: topic.Topic{Name: name, Partitions: 1}, Partitions: []topic.PartitionStats{{Index: 0}}}, nil
+	}}, &fakeRouter{routeGetTopicFn: func(_ context.Context, _ *http.Request, _ string, _ topic.Details) (topic.Details, error) {
+		return topic.Details{}, errors.New("boom")
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusInternalServerError)
 	}
 }
 
