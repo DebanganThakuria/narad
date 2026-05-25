@@ -1,0 +1,14 @@
+internal/cluster/router.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T10:09:50.558Z 145-156,158
+internal/transport/httpserver/handlers/common.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T10:09:50.558Z 38
+internal/transport/httpserver/handlers/messaging/messaging_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T10:11:35.667Z 102,133-138,224-225,227-229,231,233-236,238-247,249-251,253,255-264,266-271,273-275,277,279-285,287-298,300-309,311-313,315,317-323,325-342,344-346,348,350-356
+internal/transport/httpserver/handlers/messaging/produce.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T09:43:15.183Z 5-6,11-12,41-44,64-67,69-70,75,87-98,100-106,108-124,126-132
+internal/transport/httpserver/handlers/topics/alter.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T10:12:39.690Z 4,7,72-76,79-86,90-94
+internal/transport/httpserver/handlers/topics/topics_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T10:13:09.472Z 39,61-66,370-384,386-389,391-397,399-406,408-411,413-419,421-428,430-433,435-441,443-450,452-455,457-463
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T10:09:50.558Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 13, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T10:11:35.667Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 120, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T09:43:15.183Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 58, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T10:12:39.690Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 20, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T10:13:09.472Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 90, "overriden_lines": 0}}}
