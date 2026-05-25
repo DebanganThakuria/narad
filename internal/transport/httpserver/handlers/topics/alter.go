@@ -58,6 +58,7 @@ func (req alterRequest) Validate() error {
 // triggers the matching broker call; order is retention → caps →
 // partitions → schema. The returned topic record reflects all
 // applied changes.
+// TODO need to route the call to leader
 func Alter(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")

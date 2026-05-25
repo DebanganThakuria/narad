@@ -12,6 +12,8 @@ import (
 
 // JSONSchema is a schema.Registry backed by santhosh-tekuri/jsonschema.
 // Schemas are pre-compiled on Register for fast repeated validation.
+
+// TODO we need to store the json schemas in the raft metastore.
 type JSONSchema struct {
 	mu       sync.RWMutex
 	versions map[string]int                        // topic → latest version number

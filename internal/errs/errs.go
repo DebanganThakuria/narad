@@ -79,4 +79,5 @@ var (
 var (
 	ErrInvalidArgument   = errors.New("invalid argument")
 	ErrPartitionRequired = errors.New("partition required for replay-mode consume")
+	ErrNotPartitionOwner = errors.New("this node does not own the requested partition")
 )

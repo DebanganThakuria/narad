@@ -6,13 +6,15 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"math/rand"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
 )
@@ -23,11 +25,12 @@ type Router struct {
 	store      *metastore.Store
 	selfID     string
 	partitions partition.Manager
+	snapshots  metrics.SnapshotProvider
 }
 
 // NewRouter constructs a Router. selfID is this pod's member ID (os.Hostname()).
-func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager) *Router {
-	return &Router{store: store, selfID: selfID, partitions: mgr}
+func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager, snapshots metrics.SnapshotProvider) *Router {
+	return &Router{store: store, selfID: selfID, partitions: mgr, snapshots: snapshots}
 }
 
 // RouteProduce forwards a produce request to the first alive partition owner
@@ -39,6 +42,7 @@ func (rt *Router) RouteProduce(ctx context.Context, w http.ResponseWriter, r *ht
 		return false
 	}
 	start := rt.partitions.Pick(topicName, key, t.Partitions)
+	// TODO if the partition owner node is down. Chose the next partition and write to it
 	for i := 0; i < t.Partitions; i++ {
 		p := (start + i) % t.Partitions
 		addr := rt.ownerAddr(topicName, p)
@@ -57,34 +61,73 @@ func (rt *Router) RouteProduce(ctx context.Context, w http.ResponseWriter, r *ht
 
 // RouteConsume forwards a consume request to the owner of a partition.
 // pinnedPartition is set when the caller already chose a partition (replay
-// or pinned consume); nil causes the router to pick one at random.
+// or pinned consume); nil causes the router to walk candidate partitions once
+// with non-blocking probes.
 // Returns true if forwarded.
-func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) bool {
-	var p int
+func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int, _ time.Duration) bool {
 	if pinnedPartition != nil {
-		p = *pinnedPartition
-	} else {
-		t, err := rt.store.GetTopic(ctx, topicName)
-		if err != nil || t.Partitions == 0 {
+		addr := rt.ownerAddr(topicName, *pinnedPartition)
+		if addr == "" {
 			return false
 		}
-		p = rand.Intn(t.Partitions)
+		fwd := r.Clone(ctx)
+		q := fwd.URL.Query()
+		q.Set("partition", strconv.Itoa(*pinnedPartition))
+		fwd.URL.RawQuery = q.Encode()
+		rt.forward(w, fwd, addr, nil)
+		return true
 	}
 
-	addr := rt.ownerAddr(topicName, p)
-	if addr == "" {
-		return false
+	candidates := rt.consumePartitionCandidates(ctx, topicName)
+	for _, candidate := range candidates {
+		if candidate.addr == "" {
+			continue
+		}
+		_, forwarded := rt.forwardConsumeProbe(ctx, w, r, candidate.partition, candidate.addr)
+		if forwarded {
+			return true
+		}
+	}
+	return false
+}
+
+type consumePartitionCandidate struct {
+	partition int
+	addr      string
+	backlog   int64
+	order     int
+}
+
+func (rt *Router) consumePartitionCandidates(ctx context.Context, topicName string) []consumePartitionCandidate {
+	assignments, err := rt.store.ListAssignments(topicName)
+	if err != nil || len(assignments) == 0 {
+		return nil
 	}
 
-	// Pin the partition in the forwarded URL so the remote pod only
-	// consumes from the partition it owns.
-	fwd := r.Clone(ctx)
-	q := fwd.URL.Query()
-	q.Set("partition", strconv.Itoa(p))
-	fwd.URL.RawQuery = q.Encode()
-
-	rt.forward(w, fwd, addr, nil)
-	return true
+	backlogByPartition := rt.backlogByPartition(ctx, topicName)
+	candidates := make([]consumePartitionCandidate, 0, len(assignments))
+	for i, assignment := range assignments {
+		addr := rt.ownerAddr(topicName, assignment.Partition)
+		if addr == "" {
+			continue
+		}
+		candidates = append(candidates, consumePartitionCandidate{
+			partition: assignment.Partition,
+			addr:      addr,
+			backlog:   backlogByPartition[assignment.Partition],
+			order:     i,
+		})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].backlog != candidates[j].backlog {
+			return candidates[i].backlog > candidates[j].backlog
+		}
+		if candidates[i].partition != candidates[j].partition {
+			return candidates[i].partition < candidates[j].partition
+		}
+		return candidates[i].order < candidates[j].order
+	})
+	return candidates
 }
 
 // RouteAck forwards an ack request to the owner of the given partition.
@@ -111,6 +154,86 @@ func (rt *Router) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, r
 	fwd := r.Clone(ctx)
 	rt.forward(w, fwd, memberAddr, body)
 	return true
+}
+
+func (rt *Router) backlogByPartition(ctx context.Context, topicName string) map[int]int64 {
+	if rt.snapshots == nil {
+		return nil
+	}
+	snapshots, err := rt.snapshots.Snapshot(ctx)
+	if err != nil {
+		return nil
+	}
+	backlog := make(map[int]int64)
+	for _, snapshot := range snapshots {
+		if snapshot.Topic != topicName {
+			continue
+		}
+		for _, partitionSnapshot := range snapshot.Partitions {
+			value := partitionSnapshot.LogEndOffset - partitionSnapshot.CommittedOffset
+			if value < 0 {
+				value = 0
+			}
+			backlog[partitionSnapshot.Partition] = value
+		}
+		break
+	}
+	return backlog
+}
+
+func (rt *Router) forwardConsumeProbe(ctx context.Context, w http.ResponseWriter, r *http.Request, partition int, addr string) (bool, bool) {
+	fwd := r.Clone(ctx)
+	q := fwd.URL.Query()
+	q.Set("partition", strconv.Itoa(partition))
+	q.Set("wait", "0s")
+	fwd.URL.RawQuery = q.Encode()
+	probe := httptestResponseRecorder{header: make(http.Header)}
+	rt.forward(&probe, fwd, addr, nil)
+	if probe.code == 0 {
+		probe.code = http.StatusOK
+	}
+	if probe.code == http.StatusNoContent {
+		return false, false
+	}
+	copyHeader(w.Header(), probe.header)
+	w.WriteHeader(probe.code)
+	if len(probe.body) > 0 {
+		_, _ = w.Write(probe.body)
+	}
+	return true, true
+}
+
+type httptestResponseRecorder struct {
+	header http.Header
+	body   []byte
+	code   int
+}
+
+func (r *httptestResponseRecorder) Header() http.Header {
+	return r.header
+}
+
+func (r *httptestResponseRecorder) Write(body []byte) (int, error) {
+	if r.code == 0 {
+		r.code = http.StatusOK
+	}
+	r.body = append(r.body, body...)
+	return len(body), nil
+}
+
+func (r *httptestResponseRecorder) WriteHeader(statusCode int) {
+	r.code = statusCode
+}
+
+func copyHeader(dst, src http.Header) {
+	for key := range dst {
+		dst.Del(key)
+	}
+	for key, values := range src {
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
 }
 
 // ownerAddr returns the API address of the pod that owns (topicName, partition),

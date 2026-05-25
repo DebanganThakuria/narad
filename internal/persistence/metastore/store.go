@@ -345,7 +345,8 @@ func (s *Store) LeaderCh() <-chan bool {
 // LeaderAddr returns the current Raft leader address as host:port, or empty
 // when no leader is known.
 func (s *Store) LeaderAddr() string {
-	return string(s.r.Leader())
+	serverAddress, _ := s.r.LeaderWithID()
+	return string(serverAddress)
 }
 
 // Ensure Store satisfies Metastore at compile time.

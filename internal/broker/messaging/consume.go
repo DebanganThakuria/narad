@@ -26,6 +26,12 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 	}
 
 	if opts.Offset != nil {
+		if *opts.Partition < 0 || *opts.Partition >= t.Partitions {
+			return topic.Message{}, false, fmt.Errorf("%w: partition out of range", ErrInvalid)
+		}
+		if !e.isLocalOwner(topicName, *opts.Partition) {
+			return topic.Message{}, false, ErrNotPartitionOwner
+		}
 		msg, found, err := e.replayRead(topicName, *opts.Partition, *opts.Offset, t.Partitions)
 		if found {
 			e.recordConsumed(topicName, msg.Partition, len(msg.Payload))
@@ -33,12 +39,9 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 		return msg, found, err
 	}
 
-	scan := allPartitions(t.Partitions)
-	if opts.Partition != nil {
-		if *opts.Partition < 0 || *opts.Partition >= t.Partitions {
-			return topic.Message{}, false, fmt.Errorf("%w: partition out of range", ErrInvalid)
-		}
-		scan = []int{*opts.Partition}
+	scan, err := e.localProbePartitions(topicName, t.Partitions, opts.Partition)
+	if err != nil {
+		return topic.Message{}, false, err
 	}
 
 	visibilityTimeout := time.Duration(t.VisibilityTimeoutMs) * time.Millisecond

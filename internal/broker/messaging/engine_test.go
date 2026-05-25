@@ -146,6 +146,7 @@ func newClusterTestEngine(t *testing.T, store *metastore.Store, mgr partition.Ma
 		logs,
 		nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		"node-self",
 	)
 }
 
@@ -211,7 +212,7 @@ func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetasto
 			}
 		}
 	}
-	return NewEngine(ms, schemas, partitioner, replicator, offsets, logs, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewEngine(ms, schemas, partitioner, replicator, offsets, logs, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 }
 
 func partitionHWMPath(dataDir, topicName string, partition int) string {

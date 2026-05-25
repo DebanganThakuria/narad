@@ -39,6 +39,7 @@ func NewSnapshotter(ms metastore.Metastore, offsets *consumer.InFlight, logs *Lo
 // missing or transient partition is omitted from the result rather
 // than failing the whole snapshot, so a single broken partition
 // can't blind operators to the rest of the system.
+// TODO Do we need to get partition information from all replicas
 func (s *Snapshotter) Snapshot(ctx context.Context) ([]metrics.TopicSnapshot, error) {
 	// Limit=0 is the unpaginated, cached path — appropriate for the
 	// poller, which always wants every topic in one shot.

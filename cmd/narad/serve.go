@@ -41,22 +41,26 @@ import (
 func runServe(args []string) error {
 	bootStart := time.Now()
 
+	// Load the app config
 	cfg, err := loadServeConfig(args)
 	if err != nil || cfg == nil {
 		return err
 	}
 
+	// Observability Logger
 	log, err := logger.New(cfg.Log.Format, cfg.Log.Level)
 	if err != nil {
 		return fmt.Errorf("logger: %w", err)
 	}
 
+	// Observability metrics
 	reg, m := buildMetrics()
 
 	if err = os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil {
 		return fmt.Errorf("data dir: %w", err)
 	}
 
+	// Init metastore
 	nodeID, err := resolveNodeID(cfg)
 	if err != nil {
 		return err
@@ -73,6 +77,7 @@ func runServe(args []string) error {
 	}
 	defer closeWithLog(log, "metastore", ms.Close)
 
+	// Build the main broker which is responsible for all client actions
 	br, logs, offsets, err := buildBroker(cfg, nodeID, ms, m, log)
 	if err != nil {
 		return err
@@ -82,6 +87,7 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Recovery client, controller and cluster router
 	recoveryClient := &http.Client{Timeout: 5 * time.Second}
 	recovery := replication.NewStoreRecovery(nodeID, ms, logs, recoveryClient)
 
@@ -91,8 +97,9 @@ func runServe(args []string) error {
 		Status: metastore.MemberAlive,
 	}, 5*time.Second)
 	ctrl := controller.New(ms, controller.Config{})
-	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin())
+	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), br)
 
+	// Start background processes
 	var wg sync.WaitGroup
 	wg.Go(func() { hb.Run(ctx) })
 	wg.Go(func() { ctrl.Run(ctx) })
@@ -108,6 +115,7 @@ func runServe(args []string) error {
 		}
 	})
 
+	// Finally build the API server
 	srv := buildAPIServer(cfg, br, logs, router, m, reg, log)
 
 	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())
@@ -330,6 +338,7 @@ func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, m *m
 		Replicator:      replication.NewCluster(nodeID, store, &http.Client{Timeout: 5 * time.Second}),
 		Logs:            logs,
 		Logger:          log,
+		SelfID:          nodeID,
 		Metrics:         m,
 	})
 	if err != nil {

@@ -198,6 +198,7 @@ func TestWriteBrokerErrorMapsStatuses(t *testing.T) {
 		{"already exists", errs.ErrTopicAlreadyExists, http.StatusConflict},
 		{"invalid argument", errs.ErrInvalidArgument, http.StatusBadRequest},
 		{"partition required", errs.ErrPartitionRequired, http.StatusBadRequest},
+		{"not partition owner", errs.ErrNotPartitionOwner, http.StatusMisdirectedRequest},
 		{"malformed handle", errs.ErrHandleMalformed, http.StatusBadRequest},
 		{"topic mismatch", errs.ErrHandleTopicMismatch, http.StatusBadRequest},
 		{"stale handle", errs.ErrHandleStale, http.StatusGone},

@@ -14,7 +14,7 @@ import (
 // Query params: partition, offset, wait. No offset = queue-style
 // pull. Offset set = replay (partition required). wait > 0 =
 // long-poll up to MaxConsumeWait. Returns 204 if no message
-// materialises within wait.
+// materializes within wait.
 func Consume(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")
@@ -29,7 +29,7 @@ func Consume(s *handlers.Set) http.HandlerFunc {
 		}
 
 		if s.Deps.Router != nil {
-			if s.Deps.Router.RouteConsume(r.Context(), w, r, topicName, opts.Partition) {
+			if s.Deps.Router.RouteConsume(r.Context(), w, r, topicName, opts.Partition, opts.Wait) {
 				return
 			}
 		}

@@ -7,6 +7,7 @@ import (
 )
 
 // Get handles GET /v1/topics/{topic}.
+// TODO Need to route to each partition owner to get the required details
 func Get(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")

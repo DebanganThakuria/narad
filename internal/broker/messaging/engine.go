@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
@@ -36,6 +37,68 @@ import (
 type assignmentReader interface {
 	GetAssignment(topicName string, partition int) (metastore.Assignment, error)
 	GetMember(podID string) (metastore.Member, error)
+	ListAssignments(topicName string) ([]metastore.Assignment, error)
+}
+
+func backlogForPartition(snapshot metrics.PartitionSnapshot) int64 {
+	backlog := snapshot.LogEndOffset - snapshot.CommittedOffset
+	if backlog < 0 {
+		return 0
+	}
+	return backlog
+}
+
+func ownerPartitions(assignments []metastore.Assignment, ownerID string) []int {
+	owned := make([]int, 0, len(assignments))
+	for _, assignment := range assignments {
+		if assignment.OwnerID != ownerID {
+			continue
+		}
+		owned = append(owned, assignment.Partition)
+	}
+	return owned
+}
+
+func sortPartitions(partitions []int) []int {
+	out := append([]int(nil), partitions...)
+	sort.Ints(out)
+	return out
+}
+
+func (e *Engine) localPartitions(topicName string, totalPartitions int) []int {
+	if e.selfID == "" {
+		return allPartitions(totalPartitions)
+	}
+	assignments, ok := e.metastore.(assignmentReader)
+	if !ok {
+		return allPartitions(totalPartitions)
+	}
+	rows, err := assignments.ListAssignments(topicName)
+	if err != nil || len(rows) == 0 {
+		return allPartitions(totalPartitions)
+	}
+	owned := ownerPartitions(rows, e.selfID)
+	if len(owned) == 0 {
+		return nil
+	}
+	return sortPartitions(owned)
+}
+
+func (e *Engine) localProbePartitions(topicName string, totalPartitions int, pinnedPartition *int) ([]int, error) {
+	if pinnedPartition != nil {
+		if *pinnedPartition < 0 || *pinnedPartition >= totalPartitions {
+			return nil, fmt.Errorf("%w: partition out of range", ErrInvalid)
+		}
+		if !e.isLocalOwner(topicName, *pinnedPartition) {
+			return nil, ErrNotPartitionOwner
+		}
+		return []int{*pinnedPartition}, nil
+	}
+	scan := e.localPartitions(topicName, totalPartitions)
+	if len(scan) == 0 {
+		return nil, ErrNotPartitionOwner
+	}
+	return scan, nil
 }
 
 // Aliases of the shared broker error sentinels for ergonomic local
@@ -45,6 +108,7 @@ var (
 	ErrTopicNotFound     = errs.ErrTopicNotFound
 	ErrInvalid           = errs.ErrInvalidArgument
 	ErrPartitionRequired = errs.ErrPartitionRequired
+	ErrNotPartitionOwner = errs.ErrNotPartitionOwner
 )
 
 // ConsumeOpts is the input for Engine.Consume.
@@ -72,6 +136,7 @@ type Engine struct {
 	logs       *runtime.Logs
 	metrics    *metrics.Metrics
 	logger     *slog.Logger
+	selfID     string
 }
 
 // NewEngine wires an Engine. handleSecret must be at least 16 bytes
@@ -85,6 +150,7 @@ func NewEngine(
 	logs *runtime.Logs,
 	m *metrics.Metrics,
 	logger *slog.Logger,
+	selfID string,
 ) *Engine {
 	return &Engine{
 		metastore:  ms,
@@ -95,6 +161,7 @@ func NewEngine(
 		logs:       logs,
 		metrics:    m,
 		logger:     logger,
+		selfID:     selfID,
 	}
 }
 
@@ -125,9 +192,32 @@ func (e *Engine) pickProducePartition(topicName, key string, partitions int) (in
 			continue
 		}
 		owner, err := assignments.GetMember(assignment.OwnerID)
-		if err == nil && owner.Status == metastore.MemberAlive {
+		if err != nil || owner.Status != metastore.MemberAlive {
+			continue
+		}
+		if assignment.FollowerID == "" {
 			return candidate, nil
 		}
+		follower, err := assignments.GetMember(assignment.FollowerID)
+		if err != nil || follower.Status != metastore.MemberAlive {
+			continue
+		}
+		return candidate, nil
 	}
 	return 0, fmt.Errorf("messaging: no alive partition owner for topic %s", topicName)
+}
+
+func (e *Engine) isLocalOwner(topicName string, partition int) bool {
+	if e.selfID == "" {
+		return true
+	}
+	assignments, ok := e.metastore.(assignmentReader)
+	if !ok {
+		return true
+	}
+	assignment, err := assignments.GetAssignment(topicName, partition)
+	if err != nil {
+		return true
+	}
+	return assignment.OwnerID == e.selfID
 }

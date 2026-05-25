@@ -16,6 +16,7 @@ func NewLifecycle(logs *Logs) *Lifecycle {
 // Ready returns nil — the broker is single-node and is ready as soon
 // as construction completes. Future replication will check follower
 // liveness here.
+// TODO complete implementation. Check if all the nodes in the cluster are ready
 func (l *Lifecycle) Ready(_ context.Context) error { return nil }
 
 // Close releases all open partition logs. Each Log.Close() does a

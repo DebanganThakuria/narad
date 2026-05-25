@@ -96,7 +96,7 @@ func (f *fakeBroker) Close() error { return nil }
 
 type fakeRouter struct {
 	routeProduceFn     func(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool
-	routeConsumeFn     func(context.Context, http.ResponseWriter, *http.Request, string, *int) bool
+	routeConsumeFn     func(context.Context, http.ResponseWriter, *http.Request, string, *int, time.Duration) bool
 	routeAckFn         func(context.Context, http.ResponseWriter, *http.Request, string, int, []byte) bool
 	routeCreateTopicFn func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
 }
@@ -108,11 +108,11 @@ func (f *fakeRouter) RouteProduce(ctx context.Context, w http.ResponseWriter, r 
 	return f.routeProduceFn(ctx, w, r, topicName, key, body)
 }
 
-func (f *fakeRouter) RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) bool {
+func (f *fakeRouter) RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int, wait time.Duration) bool {
 	if f.routeConsumeFn == nil {
 		return false
 	}
-	return f.routeConsumeFn(ctx, w, r, topicName, pinnedPartition)
+	return f.routeConsumeFn(ctx, w, r, topicName, pinnedPartition, wait)
 }
 
 func (f *fakeRouter) RouteAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, partition int, body []byte) bool {
@@ -283,8 +283,8 @@ func TestConsumeHandlerRoutesBeforeBroker(t *testing.T) {
 	s := newTestSet(&fakeBroker{consumeFn: func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {
 		brokerCalled = true
 		return topic.Message{}, false, nil
-	}}, &fakeRouter{routeConsumeFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName string, pinnedPartition *int) bool {
-		routerCalled = topicName == "orders" && pinnedPartition != nil && *pinnedPartition == 2
+	}}, &fakeRouter{routeConsumeFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName string, pinnedPartition *int, wait time.Duration) bool {
+		routerCalled = topicName == "orders" && pinnedPartition != nil && *pinnedPartition == 2 && wait == 0
 		w.WriteHeader(http.StatusAccepted)
 		return true
 	}})

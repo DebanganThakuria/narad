@@ -110,6 +110,12 @@ func (f *fakeMetastore) GetSchema(_ context.Context, topicName string, version i
 	return nil, errs.ErrNotFound
 }
 
+func (f *fakeMetastore) LeaderAddr() string { return "" }
+
+func (f *fakeMetastore) GetMember(string) (metastore.Member, error) {
+	return metastore.Member{}, errs.ErrNotFound
+}
+
 func (f *fakeMetastore) Close() error { return nil }
 
 type fakeSchemaRegistry struct {
