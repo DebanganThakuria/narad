@@ -17,6 +17,9 @@ type Metastore interface {
 	PutSchema(ctx context.Context, topic string, version int, schema []byte) error
 	GetSchema(ctx context.Context, topic string, version int) ([]byte, error)
 
+	LeaderAddr() string
+	GetMember(podID string) (Member, error)
+
 	Close() error
 }
 

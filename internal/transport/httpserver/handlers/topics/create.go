@@ -5,6 +5,9 @@
 package topics
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"net/http"
 
 	"github.com/debanganthakuria/narad/internal/broker/topics"
@@ -24,10 +27,26 @@ type createRequest struct {
 // Create handles POST /v1/topics.
 func Create(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req createRequest
-		if !s.DecodeJSON(w, r, &req) {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			s.WriteError(w, http.StatusBadRequest, "read body: "+err.Error())
 			return
 		}
+
+		var req createRequest
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+			return
+		}
+
+		if s.Deps.Router != nil {
+			if s.Deps.Router.RouteCreateTopic(r.Context(), w, r, body) {
+				return
+			}
+		}
+
 		t, err := s.Deps.Broker.CreateTopic(r.Context(), topics.CreateOpts{
 			Name:                      req.Name,
 			Partitions:                req.Partitions,

@@ -43,10 +43,6 @@ install: ## Install narad into $GOBIN.
 run-serve: build ## Build and run `narad serve` with default flags.
 	$(BIN_DIR)/narad serve
 
-.PHONY: run-worker
-run-worker: build ## Build and run `narad worker` with default flags.
-	$(BIN_DIR)/narad worker
-
 .PHONY: run-cli
 run-cli: build ## Build and run `narad cli` with default flags.
 	$(BIN_DIR)/narad cli

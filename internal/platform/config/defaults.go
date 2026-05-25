@@ -19,7 +19,7 @@ func Default() *Config {
 			WriteTimeout:   Duration(30 * time.Second),
 			IdleTimeout:    Duration(60 * time.Second),
 			ShutdownGrace:  Duration(10 * time.Second),
-			MaxConsumeWait: Duration(30 * time.Second),
+			MaxConsumeWait: Duration(10 * time.Second),
 		},
 		Cluster: ClusterConfig{
 			Addr: ":7943",
@@ -37,7 +37,7 @@ func Default() *Config {
 		},
 		Topic: TopicConfig{
 			DefaultPartitions:                3,
-			MaxPartitions:                    1024,
+			MaxPartitions:                    108,
 			DefaultReplicationFactor:         2,
 			DefaultRetentionAgeMs:            7 * 24 * 60 * 60 * 1000, // 7 days
 			DefaultVisibilityTimeoutMs:       30_000,                  // 30 seconds
@@ -48,6 +48,5 @@ func Default() *Config {
 			Level:  "info",
 			Format: "json",
 		},
-		Worker: WorkerConfig{Enabled: false},
 	}
 }

@@ -52,7 +52,6 @@ func TestApplyEnvOverridesFields(t *testing.T) {
 	t.Setenv("NARAD_HTTP_READ_TIMEOUT", "2s")
 	t.Setenv("NARAD_STORAGE_FLUSH_BYTES", "123")
 	t.Setenv("NARAD_LOG_FORMAT", "json")
-	t.Setenv("NARAD_WORKER_ENABLED", "true")
 
 	cfg := Default()
 	if err := applyEnv(cfg); err != nil {
@@ -64,7 +63,7 @@ func TestApplyEnvOverridesFields(t *testing.T) {
 	if cfg.HTTP.ReadTimeout.D() != 2*time.Second {
 		t.Fatalf("ReadTimeout = %v, want %v", cfg.HTTP.ReadTimeout.D(), 2*time.Second)
 	}
-	if cfg.Storage.FlushBytes != 123 || cfg.Log.Format != "json" || !cfg.Worker.Enabled {
+	if cfg.Storage.FlushBytes != 123 || cfg.Log.Format != "json" {
 		t.Fatalf("applyEnv() cfg = %+v", cfg)
 	}
 }

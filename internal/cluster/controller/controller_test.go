@@ -106,25 +106,70 @@ func TestReconcileDoesNotMoveExistingAssignments(t *testing.T) {
 	registerMember(t, s, "narad-0")
 	s.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 4})
 
-	// Pre-assign all partitions to narad-0.
 	for p := 0; p < 4; p++ {
 		s.AssignPartition(ctx, "orders", p, "narad-0", "narad-1")
 	}
 
-	// Register a second (less-loaded) member.
 	registerMember(t, s, "narad-1")
 
 	c := newController(s)
 	go c.Run(ctx)
-	time.Sleep(300 * time.Millisecond) // let reconcile run at least twice
+	time.Sleep(300 * time.Millisecond)
 
-	// All partitions must still be on narad-0 — reconcile never moves existing assignments.
 	assignments, _ := s.ListAssignments("orders")
 	for _, a := range assignments {
 		if a.OwnerID != "narad-0" {
 			t.Fatalf("partition %d moved to %s, expected narad-0", a.Partition, a.OwnerID)
 		}
 	}
+}
+
+func TestReconcileReassignsPartitionsOwnedByDeadMember(t *testing.T) {
+	s := newTestStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	registerMember(t, s, "narad-0")
+	registerMember(t, s, "narad-1")
+	registerMember(t, s, "narad-2")
+	if err := s.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 3, ReplicationFactor: 2}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	for p := 0; p < 3; p++ {
+		if err := s.AssignPartition(ctx, "orders", p, "narad-dead", "narad-1"); err != nil {
+			t.Fatalf("AssignPartition %d: %v", p, err)
+		}
+	}
+
+	c := newController(s)
+	go c.Run(ctx)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		assignments, _ := s.ListAssignments("orders")
+		if len(assignments) != 3 {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		allAlive := true
+		for _, a := range assignments {
+			if a.OwnerID == "narad-dead" {
+				allAlive = false
+				break
+			}
+			owner, err := s.GetMember(a.OwnerID)
+			if err != nil || owner.Status != metastore.MemberAlive {
+				allAlive = false
+				break
+			}
+		}
+		if allAlive {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Fatal("timed out waiting for dead-member partitions to be reassigned")
 }
 
 func TestHeartbeatMonitorMarksDead(t *testing.T) {

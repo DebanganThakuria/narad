@@ -142,6 +142,44 @@ func TestProduceSkipsDeadOwnerPartition(t *testing.T) {
 	}
 }
 
+func TestProduceRejectsDeadFollowerPartition(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 3, ReplicationFactor: 2}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-dead", Addr: "dead.example:7942", Status: metastore.MemberDead}); err != nil {
+		t.Fatalf("RegisterMember(dead) error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-follower", Addr: "follower.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember(follower) error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-alive", Addr: "alive.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember(alive) error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 0, "node-dead", "node-follower"); err != nil {
+		t.Fatalf("AssignPartition(0) error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 1, "node-alive", "node-dead"); err != nil {
+		t.Fatalf("AssignPartition(1) error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 2, "node-alive", "node-follower"); err != nil {
+		t.Fatalf("AssignPartition(2) error = %v", err)
+	}
+
+	engine := newClusterTestEngine(t, store, fixedPartitionManager{picked: 1})
+	offset, partitionIdx, err := engine.Produce(ctx, "orders", "customer-1", []byte(`{"id":1}`))
+	if err != nil {
+		t.Fatalf("Produce() error = %v", err)
+	}
+	if offset != 0 {
+		t.Fatalf("offset = %d, want 0", offset)
+	}
+	if partitionIdx != 2 {
+		t.Fatalf("partition = %d, want 2", partitionIdx)
+	}
+}
+
 func TestProduceWithLocalReplicatorAdvancesHighWatermark(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -177,6 +215,32 @@ func TestProduceWithLocalReplicatorAdvancesHighWatermark(t *testing.T) {
 	}
 	if got := committedLog.HighWatermark(); got != 1 {
 		t.Fatalf("HighWatermark() = %d, want 1", got)
+	}
+}
+
+func TestProduceFailsWhenNoPartitionHasAliveOwnerAndFollower(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2, ReplicationFactor: 2}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-alive", Addr: "alive.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember(alive) error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-dead", Addr: "dead.example:7942", Status: metastore.MemberDead}); err != nil {
+		t.Fatalf("RegisterMember(dead) error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 0, "node-alive", "node-dead"); err != nil {
+		t.Fatalf("AssignPartition(0) error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 1, "node-dead", "node-alive"); err != nil {
+		t.Fatalf("AssignPartition(1) error = %v", err)
+	}
+
+	engine := newClusterTestEngine(t, store, fixedPartitionManager{picked: 0})
+	_, _, err := engine.Produce(ctx, "orders", "customer-1", []byte(`{"id":1}`))
+	if err == nil || !strings.Contains(err.Error(), "no alive partition owner") {
+		t.Fatalf("Produce() error = %v, want no alive partition owner", err)
 	}
 }
 

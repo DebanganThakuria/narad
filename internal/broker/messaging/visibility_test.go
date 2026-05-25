@@ -87,7 +87,7 @@ func TestCommittedConsumeOffsetPersistsAcrossRestart(t *testing.T) {
 		}
 	}
 
-	first, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: intPtr(0), Wait: 0})
+	first, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Wait: 0})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -102,7 +102,7 @@ func TestCommittedConsumeOffsetPersistsAcrossRestart(t *testing.T) {
 	}
 
 	restarted := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
-	msg, found, err := restarted.Consume(context.Background(), "orders", ConsumeOpts{Partition: intPtr(0), Wait: 0})
+	msg, found, err := restarted.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Wait: 0})
 	if err != nil {
 		t.Fatalf("Consume() after restart error = %v", err)
 	}
@@ -124,7 +124,7 @@ func TestCorruptCommittedConsumeOffsetFallsBackToBeginning(t *testing.T) {
 	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
 		t.Fatalf("Produce() error = %v", err)
 	}
-	first, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: intPtr(0), Wait: 0})
+	first, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Wait: 0})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
 	}
@@ -143,7 +143,7 @@ func TestCorruptCommittedConsumeOffsetFallsBackToBeginning(t *testing.T) {
 	}
 
 	restarted := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
-	msg, found, err := restarted.Consume(context.Background(), "orders", ConsumeOpts{Partition: intPtr(0), Wait: 0})
+	msg, found, err := restarted.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Wait: 0})
 	if err != nil {
 		t.Fatalf("Consume() after restart error = %v", err)
 	}

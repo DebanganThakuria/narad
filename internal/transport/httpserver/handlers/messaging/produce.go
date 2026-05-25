@@ -26,6 +26,8 @@ func (req produceRequest) Validate() error {
 }
 
 // Produce handles POST /v1/topics/{topic}/produce.
+// TODO read partition from the query string
+// TODO if key is empty we should generate some key
 func Produce(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")

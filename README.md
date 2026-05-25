@@ -121,7 +121,7 @@ high-water mark rather than raw append position.
 
 ```
 cmd/
-  narad/                    single binary: main, serve, worker, client, version
+  narad/                    single binary: main, serve, client, version
 internal/
   errs/                     all 15 sentinel errors in one place (ErrTopicNotFound, ...)
   domain/
@@ -269,7 +269,6 @@ GET     /metrics                            Prometheus exposition
 
 ```
 narad serve     run the HTTP API server (default port 7942)
-narad worker    run the cluster worker (default port 7943)
 narad client    interact with a running narad serve over HTTP
 narad version   print build version
 narad --help    top-level help
@@ -281,12 +280,32 @@ Common `narad serve` flags:
 --port 7942                  override the API listen port
 --addr 0.0.0.0:7942          override the API listen address (host+port)
 --cluster-port 7943          override the cluster listen port
+--node-id narad-0            stable Raft node ID (required for local multi-node runs)
 --config narad.json          path to JSON config file (optional)
 --data-dir ./data            storage directory
 --log-level info             debug | info | warn | error
 --log-format json            json | text
 --pprof-addr 127.0.0.1:6060  enable pprof on this address; empty disables
 ```
+
+For a real 3-node local cluster, run each process with a unique API port, cluster port, data dir, and `--node-id`, and give all three the same 3-voter peer list via `NARAD_CLUSTER_PEERS`.
+
+```sh
+NARAD_CLUSTER_PEERS='narad-0@127.0.0.1:9101,narad-1@127.0.0.1:9102,narad-2@127.0.0.1:9103' ./bin/narad serve --addr 127.0.0.1:7942 --cluster-port 9101 --node-id narad-0 --data-dir ./data/narad-0
+NARAD_CLUSTER_PEERS='narad-0@127.0.0.1:9101,narad-1@127.0.0.1:9102,narad-2@127.0.0.1:9103' ./bin/narad serve --addr 127.0.0.1:7944 --cluster-port 9102 --node-id narad-1 --data-dir ./data/narad-1
+NARAD_CLUSTER_PEERS='narad-0@127.0.0.1:9101,narad-1@127.0.0.1:9102,narad-2@127.0.0.1:9103' ./bin/narad serve --addr 127.0.0.1:7945 --cluster-port 9103 --node-id narad-2 --data-dir ./data/narad-2
+```
+
+Then point the client at any node:
+
+```sh
+NARAD_ADDR=http://127.0.0.1:7942 narad client topics create orders
+NARAD_ADDR=http://127.0.0.1:7944 narad client topics get orders
+```
+
+`NARAD_CLUSTER_PEERS` and `cluster.peers` must contain exactly three `id@host:port` voters including the local node, and `cluster.node_id` / `--node-id` must be set whenever peers are configured.
+
+If you leave peers unset, Narad keeps the single-node bootstrap path.
 
 ## Configuration
 
@@ -304,7 +323,15 @@ A starting template lives in [`narad.example.json`](./narad.example.json):
 ```jsonc
 {
   "http":    { "addr": ":7942", "read_timeout": "10s", "max_consume_wait": "30s" },
-  "cluster": { "addr": ":7943" },
+  "cluster": {
+    "addr": "127.0.0.1:9101",
+    "node_id": "narad-0",
+    "peers": [
+      { "id": "narad-0", "addr": "127.0.0.1:9101" },
+      { "id": "narad-1", "addr": "127.0.0.1:9102" },
+      { "id": "narad-2", "addr": "127.0.0.1:9103" }
+    ]
+  },
   "storage": {
     "data_dir": "data",
     "codec": "zstd",
@@ -321,9 +348,7 @@ A starting template lives in [`narad.example.json`](./narad.example.json):
     "default_replication_factor": 2,
     "default_retention_age_ms": 604800000
   },
-  "log":     { "level": "info", "format": "json" },
-  "worker":  { "enabled": false },
-  "debug":   { "pprof_addr": "" }
+  "log":     { "level": "info", "format": "json" }
 }
 ```
 
@@ -333,6 +358,8 @@ Useful environment overrides:
 |---|---|
 | `NARAD_HTTP_ADDR` | API listen address |
 | `NARAD_CLUSTER_ADDR` | Cluster listen address |
+| `NARAD_NODE_ID` | stable local Raft node ID |
+| `NARAD_CLUSTER_PEERS` | comma-separated 3-voter list as `id@host:port` |
 | `NARAD_DATA_DIR` | Storage directory |
 | `NARAD_LOG_LEVEL` | `debug` / `info` / `warn` / `error` |
 | `NARAD_LOG_FORMAT` | `json` / `text` |
@@ -402,10 +429,11 @@ voters; the rest are non-voters that receive the full replicated state.
 - **Writes** go through `raft.Apply` and require quorum. Control-plane
   write rate is very low (topic CRUD, partition assignments, heartbeats)
   so Raft overhead is negligible.
-- **Peer discovery.** Pods register themselves via `bootstrap_peers`
-  config (static list of voter addresses). On K8s, use a headless
-  Service so pod DNS names are predictable:
-  `narad-0.narad.default.svc.cluster.local:7943`.
+- **Peer discovery.** Each voter starts with a static 3-node peer list via
+  `cluster.peers` or `NARAD_CLUSTER_PEERS`, using `id@host:port` entries.
+  On K8s, use stable pod IDs and a headless Service so pod DNS names are
+  predictable, for example
+  `narad-0@narad-0.narad.default.svc.cluster.local:7943`.
 - **Snapshots and log compaction** are handled automatically by the Raft
   library (`FileSnapshotStore`). The FSM snapshot is a full bbolt
   database copy.
@@ -598,8 +626,8 @@ no CGO requirement.
   consensus, `go.etcd.io/bbolt` for the FSM state, `klauspost/compress`
   for zstd, `santhosh-tekuri/jsonschema` for JSON-Schema validation,
   `prometheus/client_golang` for metrics. All pure Go; no CGO required.
-* **Single binary with subcommands.** `narad serve|worker|client|version`
-  follows the kubectl/etcd/consul convention.
+* **Single binary with subcommands.** `narad serve|client|version`
+  keeps the local and deployment surface small.
 * **Controller = Raft leader.** No separate controller election process —
   Raft's built-in leader election provides split-brain prevention for free.
 * **Lazy expiry + background purger.** In-flight reservations expire via

@@ -69,7 +69,7 @@ func New(d Deps) (Broker, error) {
 
 	return &impl{
 		Manager:     topics.NewManager(d.DataDir, d.Metastore, d.Schemas, d.ConsumerOffsets, logs, topicCfg, d.Logger),
-		Engine:      messaging.NewEngine(d.Metastore, d.Schemas, d.Partitions, d.Replicator, d.ConsumerOffsets, logs, d.Metrics, d.Logger),
+		Engine:      messaging.NewEngine(d.Metastore, d.Schemas, d.Partitions, d.Replicator, d.ConsumerOffsets, logs, d.Metrics, d.Logger, d.SelfID),
 		Snapshotter: runtime.NewSnapshotter(d.Metastore, d.ConsumerOffsets, logs, d.Logger),
 		Lifecycle:   runtime.NewLifecycle(logs),
 		deps:        d,

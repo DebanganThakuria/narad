@@ -65,6 +65,7 @@ func (c Cluster) Replicate(ctx context.Context, topic string, partition int, off
 		return fmt.Errorf("marshal replicate request: %w", err)
 	}
 
+	// TODO Why not https?
 	url := "http://" + strings.TrimPrefix(follower.Addr, "http://") + "/internal/v1/replicate"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {

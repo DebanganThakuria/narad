@@ -2,6 +2,8 @@ package metastore_test
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,9 +14,10 @@ import (
 func newTestStore(t *testing.T) *metastore.Store {
 	t.Helper()
 	s, err := metastore.New(metastore.Config{
-		NodeID:   "test-0",
-		DataDir:  t.TempDir(),
-		BindAddr: "127.0.0.1:0",
+		NodeID:        "test-0",
+		DataDir:       t.TempDir(),
+		BindAddr:      "127.0.0.1:0",
+		AdvertiseAddr: "127.0.0.1:0",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -209,4 +212,77 @@ func TestAssignments(t *testing.T) {
 	if _, err := s.GetAssignment("payments", 0); err != nil {
 		t.Fatalf("unrelated assignment deleted: %v", err)
 	}
+}
+
+func TestBootstrapThreeNodeCluster(t *testing.T) {
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	addrs := []string{"127.0.0.1:19101", "127.0.0.1:19102", "127.0.0.1:19103"}
+	ids := []string{"node-1", "node-2", "node-3"}
+	stores := make([]*metastore.Store, 0, 3)
+
+	for i := range ids {
+		peers := make([]metastore.Peer, 0, len(ids)-1)
+		for j := range ids {
+			if i == j {
+				continue
+			}
+			peers = append(peers, metastore.Peer{ID: ids[j], Addr: addrs[j]})
+		}
+		store, err := metastore.New(metastore.Config{
+			NodeID:        ids[i],
+			DataDir:       filepath.Join(baseDir, fmt.Sprintf("metastore-%s", ids[i])),
+			BindAddr:      addrs[i],
+			AdvertiseAddr: addrs[i],
+			Peers:         peers,
+		})
+		if err != nil {
+			t.Fatalf("New(%s): %v", ids[i], err)
+		}
+		stores = append(stores, store)
+	}
+	for i := range stores {
+		store := stores[i]
+		t.Cleanup(func() { _ = store.Close() })
+	}
+
+	leader := waitForLeaderStore(t, stores)
+	probe := topic.Topic{Name: "cluster-probe", Partitions: 3}
+	if err := leader.CreateTopic(ctx, probe); err != nil {
+		t.Fatalf("leader CreateTopic: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for _, store := range stores {
+		for time.Now().Before(deadline) {
+			got, err := store.GetTopic(ctx, "cluster-probe")
+			if err == nil && got.Partitions == 3 {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		got, err := store.GetTopic(ctx, "cluster-probe")
+		if err != nil {
+			t.Fatalf("GetTopic(cluster-probe): %v", err)
+		}
+		if got.Partitions != 3 {
+			t.Fatalf("GetTopic(cluster-probe) = %+v", got)
+		}
+	}
+}
+
+func waitForLeaderStore(t *testing.T, stores []*metastore.Store) *metastore.Store {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, store := range stores {
+			if err := store.CreateTopic(context.Background(), topic.Topic{Name: "__leader_probe__", Partitions: 1}); err == nil {
+				_ = store.DeleteTopic(context.Background(), "__leader_probe__")
+				return store
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for cluster leader")
+	return nil
 }

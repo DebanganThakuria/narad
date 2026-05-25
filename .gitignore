@@ -8,3 +8,7 @@ data/
 .idea/
 
 docs/
+
+tmp/
+
+todo-plan.local.md

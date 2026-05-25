@@ -72,6 +72,12 @@ func (f *runtimeFakeMetastore) GetSchema(_ context.Context, _ string, _ int) ([]
 	return nil, errs.ErrNotFound
 }
 
+func (f *runtimeFakeMetastore) LeaderAddr() string { return "" }
+
+func (f *runtimeFakeMetastore) GetMember(string) (metastore.Member, error) {
+	return metastore.Member{}, errs.ErrNotFound
+}
+
 func (f *runtimeFakeMetastore) Close() error { return nil }
 
 func newRuntimeTestLogs(t *testing.T, ms metastore.Metastore) *Logs {

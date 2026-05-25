@@ -27,6 +27,7 @@ type Deps struct {
 	Replicator      replication.Replicator
 	Logs            *runtime.Logs
 	Logger          *slog.Logger
+	SelfID          string
 
 	// MaxConsumeWait caps how long a long-poll consume can block.
 	// Plumbed through to the messaging engine.

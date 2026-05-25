@@ -31,6 +31,7 @@ func NewStoreRecovery(selfID string, store *metastore.Store, logs *runtime.Logs,
 	return StoreRecovery{selfID: selfID, store: store, logs: logs, client: client}
 }
 
+// TODO we need to reapir the followers as well from the leader
 func (r StoreRecovery) RepairOwnedPartitions(ctx context.Context) error {
 	topics, _, err := r.store.ListTopics(ctx, metastore.ListOptions{})
 	if err != nil {
@@ -53,6 +54,7 @@ func (r StoreRecovery) RepairOwnedPartitions(ctx context.Context) error {
 	return nil
 }
 
+// TODO are we considering high watermark
 func (r StoreRecovery) repairPartition(ctx context.Context, assignment metastore.Assignment) error {
 	follower, err := r.store.GetMember(assignment.FollowerID)
 	if err != nil {

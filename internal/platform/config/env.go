@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,16 @@ func applyEnv(cfg *Config) error {
 	}
 	if v, ok := os.LookupEnv("NARAD_CLUSTER_ADDR"); ok {
 		cfg.Cluster.Addr = v
+	}
+	if v, ok := os.LookupEnv("NARAD_NODE_ID"); ok {
+		cfg.Cluster.NodeID = v
+	}
+	if v, ok := os.LookupEnv("NARAD_CLUSTER_PEERS"); ok {
+		peers, err := parseClusterPeers(v)
+		if err != nil {
+			return fmt.Errorf("NARAD_CLUSTER_PEERS: %w", err)
+		}
+		cfg.Cluster.Peers = peers
 	}
 	if err := envDuration("NARAD_HTTP_READ_TIMEOUT", &cfg.HTTP.ReadTimeout); err != nil {
 		return err
@@ -138,14 +149,6 @@ func applyEnv(cfg *Config) error {
 		cfg.Log.Format = v
 	}
 
-	if v, ok := os.LookupEnv("NARAD_WORKER_ENABLED"); ok {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			return fmt.Errorf("NARAD_WORKER_ENABLED: %w", err)
-		}
-		cfg.Worker.Enabled = b
-	}
-
 	return nil
 }
 
@@ -160,4 +163,26 @@ func envDuration(key string, dst *Duration) error {
 	}
 	*dst = Duration(d)
 	return nil
+}
+
+func parseClusterPeers(raw string) ([]ClusterPeer, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+
+	parts := strings.Split(raw, ",")
+	peers := make([]ClusterPeer, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, addr, ok := strings.Cut(part, "@")
+		if !ok || strings.Contains(addr, "@") || strings.TrimSpace(id) == "" || strings.TrimSpace(addr) == "" {
+			return nil, fmt.Errorf("invalid peer %q: want id@host:port", part)
+		}
+		peers = append(peers, ClusterPeer{ID: strings.TrimSpace(id), Addr: strings.TrimSpace(addr)})
+	}
+	return peers, nil
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -31,6 +32,42 @@ type fakeBroker struct {
 	getTopicFn                func(context.Context, string) (topic.Topic, error)
 	getTopicDetailsFn         func(context.Context, string) (topic.Details, error)
 	listTopicsFn              func(context.Context, metastore.ListOptions) ([]topic.Topic, string, error)
+}
+
+type fakeRouter struct {
+	routeCreateTopicFn func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
+}
+
+func (f *fakeRouter) RouteProduce(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool {
+	return false
+}
+
+func (f *fakeRouter) RouteConsume(context.Context, http.ResponseWriter, *http.Request, string, *int) bool {
+	return false
+}
+
+func (f *fakeRouter) RouteAck(context.Context, http.ResponseWriter, *http.Request, string, int, []byte) bool {
+	return false
+}
+
+func (f *fakeRouter) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool {
+	if f.routeCreateTopicFn == nil {
+		return false
+	}
+	return f.routeCreateTopicFn(ctx, w, r, body)
+}
+
+func newTestSetWithRouter(b broker.Broker, router handlers.Router) *handlers.Set {
+	return handlers.New(handlers.Deps{
+		Broker:         b,
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxConsumeWait: time.Second,
+		Router:         router,
+	})
+}
+
+func newTestSet(b broker.Broker) *handlers.Set {
+	return newTestSetWithRouter(b, nil)
 }
 
 func (f *fakeBroker) CreateTopic(ctx context.Context, opts brokertopics.CreateOpts) (topic.Topic, error) {
@@ -84,12 +121,10 @@ func (f *fakeBroker) Snapshot(context.Context) ([]metrics.TopicSnapshot, error) 
 func (f *fakeBroker) Ready(context.Context) error                               { return nil }
 func (f *fakeBroker) Close() error                                              { return nil }
 
-func newTestSet(b broker.Broker) *handlers.Set {
-	return handlers.New(handlers.Deps{
-		Broker:         b,
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		MaxConsumeWait: time.Second,
-	})
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) {
+	return 0, fmt.Errorf("boom")
 }
 
 func TestCreateHandler(t *testing.T) {
@@ -108,6 +143,94 @@ func TestCreateHandler(t *testing.T) {
 	}
 	if captured.Name != "orders" || captured.Partitions != 3 {
 		t.Fatalf("Create() broker opts = %+v", captured)
+	}
+}
+
+func TestCreateHandlerRoutesToLeader(t *testing.T) {
+	routed := false
+	s := newTestSetWithRouter(&fakeBroker{createTopicFn: func(_ context.Context, _ brokertopics.CreateOpts) (topic.Topic, error) {
+		return topic.Topic{}, errors.New("unexpected CreateTopic call")
+	}}, &fakeRouter{routeCreateTopicFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, body []byte) bool {
+		routed = true
+		if string(body) != `{"name":"orders","partitions":3}` {
+			t.Fatalf("forwarded body = %s", body)
+		}
+		w.WriteHeader(http.StatusCreated)
+		return true
+	}})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":"orders","partitions":3}`))
+	res := httptest.NewRecorder()
+	Create(s).ServeHTTP(res, req)
+
+	if !routed {
+		t.Fatal("Create() did not route to leader")
+	}
+	if res.Code != http.StatusCreated {
+		t.Fatalf("Create() status = %d, want %d", res.Code, http.StatusCreated)
+	}
+}
+
+func TestCreateHandlerFallsBackToLocalWhenRouterDoesNotForward(t *testing.T) {
+	called := false
+	s := newTestSetWithRouter(&fakeBroker{createTopicFn: func(_ context.Context, opts brokertopics.CreateOpts) (topic.Topic, error) {
+		called = true
+		return topic.Topic{Name: opts.Name, Partitions: opts.Partitions}, nil
+	}}, &fakeRouter{routeCreateTopicFn: func(_ context.Context, _ http.ResponseWriter, _ *http.Request, _ []byte) bool {
+		return false
+	}})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":"orders","partitions":3}`))
+	res := httptest.NewRecorder()
+	Create(s).ServeHTTP(res, req)
+
+	if !called {
+		t.Fatal("Create() did not fall back to local broker")
+	}
+	if res.Code != http.StatusCreated {
+		t.Fatalf("Create() status = %d, want %d", res.Code, http.StatusCreated)
+	}
+}
+
+func TestCreateHandlerRejectsInvalidJSONBeforeRouting(t *testing.T) {
+	routed := false
+	s := newTestSetWithRouter(&fakeBroker{createTopicFn: func(_ context.Context, _ brokertopics.CreateOpts) (topic.Topic, error) {
+		return topic.Topic{}, errors.New("unexpected CreateTopic call")
+	}}, &fakeRouter{routeCreateTopicFn: func(_ context.Context, _ http.ResponseWriter, _ *http.Request, _ []byte) bool {
+		routed = true
+		return true
+	}})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":`))
+	res := httptest.NewRecorder()
+	Create(s).ServeHTTP(res, req)
+
+	if routed {
+		t.Fatal("Create() routed invalid JSON")
+	}
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("Create() status = %d, want %d", res.Code, http.StatusBadRequest)
+	}
+}
+
+func TestCreateHandlerRejectsReadErrorsBeforeRouting(t *testing.T) {
+	routed := false
+	s := newTestSetWithRouter(&fakeBroker{createTopicFn: func(_ context.Context, _ brokertopics.CreateOpts) (topic.Topic, error) {
+		return topic.Topic{}, errors.New("unexpected CreateTopic call")
+	}}, &fakeRouter{routeCreateTopicFn: func(_ context.Context, _ http.ResponseWriter, _ *http.Request, _ []byte) bool {
+		routed = true
+		return true
+	}})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics", io.NopCloser(errReader{}))
+	res := httptest.NewRecorder()
+	Create(s).ServeHTTP(res, req)
+
+	if routed {
+		t.Fatal("Create() routed unreadable body")
+	}
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("Create() status = %d, want %d", res.Code, http.StatusBadRequest)
 	}
 }
 

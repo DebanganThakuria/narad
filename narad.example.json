@@ -8,7 +8,13 @@
     "max_consume_wait": "30s"
   },
   "cluster": {
-    "addr": ":7943"
+    "addr":    "127.0.0.1:9101",
+    "node_id": "narad-0",
+    "peers": [
+      { "id": "narad-0", "addr": "127.0.0.1:9101" },
+      { "id": "narad-1", "addr": "127.0.0.1:9102" },
+      { "id": "narad-2", "addr": "127.0.0.1:9103" }
+    ]
   },
   "storage": {
     "data_dir":                    "data",
@@ -31,11 +37,5 @@
   "log": {
     "level":  "info",
     "format": "json"
-  },
-  "worker": {
-    "enabled": false
-  },
-  "debug": {
-    "pprof_addr": ""
   }
 }

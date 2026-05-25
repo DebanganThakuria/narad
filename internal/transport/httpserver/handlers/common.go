@@ -34,6 +34,7 @@ type Router interface {
 	RouteProduce(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName, key string, body []byte) bool
 	RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) bool
 	RouteAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, partition int, body []byte) bool
+	RouteCreateTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool
 }
 
 // Deps is the bag of collaborators every handler needs.
@@ -143,6 +144,8 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 	case errors.Is(err, errs.ErrInvalidArgument),
 		errors.Is(err, errs.ErrPartitionRequired):
 		s.WriteError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, errs.ErrNotPartitionOwner):
+		s.WriteError(w, http.StatusMisdirectedRequest, err.Error())
 	default:
 		s.Deps.Logger.Error(op, "err", err)
 		s.WriteError(w, http.StatusInternalServerError, op+" failed")

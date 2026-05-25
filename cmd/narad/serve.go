@@ -41,36 +41,43 @@ import (
 func runServe(args []string) error {
 	bootStart := time.Now()
 
+	// Load the app config
 	cfg, err := loadServeConfig(args)
 	if err != nil || cfg == nil {
 		return err
 	}
-	if err := validateServeCluster(); err != nil {
-		return err
-	}
 
+	// Observability Logger
 	log, err := logger.New(cfg.Log.Format, cfg.Log.Level)
 	if err != nil {
 		return fmt.Errorf("logger: %w", err)
 	}
 
+	// Observability metrics
 	reg, m := buildMetrics()
 
 	if err = os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil {
 		return fmt.Errorf("data dir: %w", err)
 	}
 
-	nodeID, _ := os.Hostname()
+	// Init metastore
+	nodeID, err := resolveNodeID(cfg)
+	if err != nil {
+		return err
+	}
 	ms, err := metastore.New(metastore.Config{
-		NodeID:   nodeID,
-		DataDir:  filepath.Join(cfg.Storage.DataDir, "metastore"),
-		BindAddr: cfg.Cluster.Addr,
+		NodeID:        nodeID,
+		DataDir:       filepath.Join(cfg.Storage.DataDir, "metastore"),
+		BindAddr:      cfg.Cluster.Addr,
+		AdvertiseAddr: advertisedClusterAddr(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
+		Peers:         configPeersToMetastore(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
 	})
 	if err != nil {
 		return fmt.Errorf("metastore: %w", err)
 	}
 	defer closeWithLog(log, "metastore", ms.Close)
 
+	// Build the main broker which is responsible for all client actions
 	br, logs, offsets, err := buildBroker(cfg, nodeID, ms, m, log)
 	if err != nil {
 		return err
@@ -80,37 +87,37 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Recovery client, controller and cluster router
 	recoveryClient := &http.Client{Timeout: 5 * time.Second}
 	recovery := replication.NewStoreRecovery(nodeID, ms, logs, recoveryClient)
 
 	hb := controller.NewHeartbeater(ms, metastore.Member{
 		ID:     nodeID,
-		Addr:   cfg.HTTP.Addr,
+		Addr:   advertisedClusterAddr(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
 		Status: metastore.MemberAlive,
 	}, 5*time.Second)
 	ctrl := controller.New(ms, controller.Config{})
-	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin())
+	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), br)
 
+	// Start background processes
 	var wg sync.WaitGroup
 	wg.Go(func() { hb.Run(ctx) })
 	wg.Go(func() { ctrl.Run(ctx) })
 	wg.Go(func() { offsets.RunPurger(ctx, time.Second) })
-	wg.Go(func() {
-		if pprofErr := http.ListenAndServe(":6060", nil); pprofErr != nil {
-			log.Error("failed to start pprof", "err", pprofErr)
-		}
-	})
 
 	poller := metrics.NewPoller(m, br, log)
 	wg.Go(func() { poller.Run(ctx) })
 
-	srv := buildAPIServer(cfg, br, logs, router, m, reg, log)
 	wg.Go(func() {
 		if repairErr := recovery.RepairOwnedPartitions(ctx); repairErr != nil {
 			log.Error("repair owned partitions", "err", repairErr)
 			stop()
 		}
 	})
+
+	// Finally build the API server
+	srv := buildAPIServer(cfg, br, logs, router, m, reg, log)
+
 	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())
 
 	if err = srv.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -124,7 +131,9 @@ func runServe(args []string) error {
 		"version", versionString())
 
 	wg.Wait()
+
 	log.Info("narad serve stopped")
+
 	return nil
 }
 
@@ -142,6 +151,7 @@ type serveFlags struct {
 	port        int
 	addr        string
 	clusterPort int
+	nodeID      string
 	dataDir     string
 	logLevel    string
 	logFormat   string
@@ -157,6 +167,9 @@ func (f *serveFlags) applyTo(cfg *config.Config) {
 	}
 	if f.clusterPort != 0 {
 		cfg.Cluster.Addr = ":" + strconv.Itoa(f.clusterPort)
+	}
+	if f.nodeID != "" {
+		cfg.Cluster.NodeID = f.nodeID
 	}
 	if f.dataDir != "" {
 		cfg.Storage.DataDir = f.dataDir
@@ -186,6 +199,7 @@ func loadServeConfig(args []string) (*config.Config, error) {
 	fs.IntVar(&f.port, "port", 0, "API listen port (overrides http.addr; e.g. --port 7942)")
 	fs.StringVar(&f.addr, "addr", "", "API listen address (overrides http.addr; e.g. --addr 0.0.0.0:7942)")
 	fs.IntVar(&f.clusterPort, "cluster-port", 0, "cluster listen port (overrides cluster.addr)")
+	fs.StringVar(&f.nodeID, "node-id", "", "stable cluster node ID (overrides cluster.node_id)")
 	fs.StringVar(&f.dataDir, "data-dir", "", "storage directory (overrides storage.data_dir)")
 	fs.StringVar(&f.logLevel, "log-level", "", "log level: debug|info|warn|error (overrides log.level)")
 	fs.StringVar(&f.logFormat, "log-format", "", "log format: json|text (overrides log.format)")
@@ -209,24 +223,60 @@ func loadServeConfig(args []string) (*config.Config, error) {
 	return cfg, nil
 }
 
-func validateServeCluster() error {
-	peers := strings.TrimSpace(os.Getenv("NARAD_CLUSTER_PEERS"))
-	if peers == "" {
-		return errors.New("serve: NARAD_CLUSTER_PEERS must list exactly 3 cluster voters")
+func resolveNodeID(cfg *config.Config) (string, error) {
+	if cfg != nil && cfg.Cluster.NodeID != "" {
+		return cfg.Cluster.NodeID, nil
 	}
+	nodeID, err := os.Hostname()
+	if err != nil {
+		return "", fmt.Errorf("resolve node id: %w", err)
+	}
+	return nodeID, nil
+}
 
-	seen := make(map[string]struct{}, 3)
-	for _, peer := range strings.Split(peers, ",") {
-		peer = strings.TrimSpace(peer)
-		if peer == "" {
+func configPeersToMetastore(nodeID, clusterAddr string, peers []config.ClusterPeer) []metastore.Peer {
+	if len(peers) == 0 {
+		return nil
+	}
+	out := make([]metastore.Peer, 0, len(peers)-1)
+	for _, peer := range peers {
+		if peer.ID == nodeID && clusterAddrMatchesPeer(clusterAddr, peer.Addr) {
 			continue
 		}
-		seen[peer] = struct{}{}
+		out = append(out, metastore.Peer{ID: peer.ID, Addr: peer.Addr})
 	}
-	if len(seen) != 3 {
-		return fmt.Errorf("serve: NARAD_CLUSTER_PEERS must list exactly 3 cluster voters, got %d", len(seen))
+	return out
+}
+
+func advertisedClusterAddr(nodeID, clusterAddr string, peers []config.ClusterPeer) string {
+	for _, peer := range peers {
+		if peer.ID != nodeID || !clusterAddrMatchesPeer(clusterAddr, peer.Addr) {
+			continue
+		}
+		if strings.HasPrefix(clusterAddr, ":") && !strings.HasPrefix(strings.TrimSpace(peer.Addr), ":") {
+			return peer.Addr
+		}
+		return clusterAddr
 	}
-	return nil
+	return clusterAddr
+}
+
+func clusterAddrMatchesPeer(clusterAddr, peerAddr string) bool {
+	clusterAddr = strings.TrimSpace(clusterAddr)
+	peerAddr = strings.TrimSpace(peerAddr)
+	if clusterAddr == "" || peerAddr == "" {
+		return false
+	}
+	if clusterAddr == peerAddr {
+		return true
+	}
+	if strings.HasPrefix(clusterAddr, ":") {
+		return strings.HasSuffix(peerAddr, clusterAddr)
+	}
+	if strings.HasPrefix(peerAddr, ":") {
+		return strings.HasSuffix(clusterAddr, peerAddr)
+	}
+	return false
 }
 
 func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, m *metrics.Metrics, log *slog.Logger) (broker.Broker, *runtime.Logs, *consumer.InFlight, error) {
@@ -251,17 +301,18 @@ func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, m *m
 		return consumer.Caps{MaxInFlight: maxIF, MaxAckedAhead: maxAA}, nil
 	}
 
-	offsets := consumer.NewInFlight(resolveCaps, func(topic string, partition int, offset int64) {
+	onCommit := func(topic string, partition int, offset int64) {
 		partitionDir := filepath.Join(cfg.Storage.DataDir, "topics", topic, fmt.Sprintf("p%05d", partition))
 		if err := storage.WriteConsumerOffset(partitionDir, offset); err != nil {
 			log.Error("consumer offset write failed", "topic", topic, "partition", partition, "offset", offset, "err", err)
 		}
-	})
+	}
+
+	offsets := consumer.NewInFlight(resolveCaps, onCommit)
 	logs := runtime.NewLogs(cfg.Storage.DataDir, storageOpts, ms, m)
-	if err := initializeConsumerOffsets(context.Background(), cfg.Storage.DataDir, ms, offsets, log); err != nil {
+	if err = initializeConsumerOffsets(context.Background(), cfg.Storage.DataDir, ms, offsets, log); err != nil {
 		return nil, nil, nil, fmt.Errorf("initialize consumer offsets: %w", err)
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
 
 	store, ok := ms.(*metastore.Store)
 	if !ok {
@@ -284,9 +335,10 @@ func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, m *m
 		Partitions:      partition.NewHashRoundRobin(),
 		Schemas:         schema.NewJSONSchema(),
 		ConsumerOffsets: offsets,
-		Replicator:      replication.NewCluster(nodeID, store, client),
+		Replicator:      replication.NewCluster(nodeID, store, &http.Client{Timeout: 5 * time.Second}),
 		Logs:            logs,
 		Logger:          log,
+		SelfID:          nodeID,
 		Metrics:         m,
 	})
 	if err != nil {
@@ -307,6 +359,7 @@ func buildAPIServer(cfg *config.Config, br broker.Broker, logs *runtime.Logs, ro
 }
 
 func initializeConsumerOffsets(ctx context.Context, dataDir string, ms metastore.Metastore, offsets *consumer.InFlight, log *slog.Logger) error {
+	// TODO Only list topics this is a leader of and own it
 	topics, _, err := ms.ListTopics(ctx, metastore.ListOptions{})
 	if err != nil {
 		return err

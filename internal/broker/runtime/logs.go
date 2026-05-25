@@ -35,6 +35,9 @@ type Logs struct {
 
 	mu   sync.RWMutex
 	logs map[string]*storage.Log
+
+	produceMu   sync.Mutex
+	produceSync map[string]*sync.Mutex
 }
 
 // NewLogs constructs a partition-log manager. metastore is consulted
@@ -47,7 +50,72 @@ func NewLogs(dataDir string, storageOpts storage.Options, ms metastore.Metastore
 		metastore:   ms,
 		metrics:     m,
 		logs:        make(map[string]*storage.Log),
+		produceSync: make(map[string]*sync.Mutex),
 	}
+}
+
+func (g *Logs) lockProduce(topicName string, idx int) func() {
+	key := keyOf(topicName, idx)
+
+	g.produceMu.Lock()
+	mu, ok := g.produceSync[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		g.produceSync[key] = mu
+	}
+	g.produceMu.Unlock()
+
+	mu.Lock()
+	return mu.Unlock
+}
+
+func (g *Logs) dropProduceLock(topicName string, idx int) {
+	g.produceMu.Lock()
+	delete(g.produceSync, keyOf(topicName, idx))
+	g.produceMu.Unlock()
+}
+
+func (g *Logs) WithProduceLock(topicName string, idx int, fn func(*storage.Log) error) error {
+	unlock := g.lockProduce(topicName, idx)
+	defer unlock()
+
+	log, err := g.Get(topicName, idx)
+	if err != nil {
+		return err
+	}
+	return fn(log)
+}
+
+func (g *Logs) WithProduceLockResult(topicName string, idx int, fn func(*storage.Log) (int64, error)) (int64, error) {
+	unlock := g.lockProduce(topicName, idx)
+	defer unlock()
+
+	log, err := g.Get(topicName, idx)
+	if err != nil {
+		return 0, err
+	}
+	return fn(log)
+}
+
+func (g *Logs) WithProduceLockValue(topicName string, idx int, fn func(*storage.Log) (int64, int, error)) (int64, int, error) {
+	unlock := g.lockProduce(topicName, idx)
+	defer unlock()
+
+	log, err := g.Get(topicName, idx)
+	if err != nil {
+		return 0, 0, err
+	}
+	return fn(log)
+}
+
+func (g *Logs) ProduceSyncCount() int {
+	g.produceMu.Lock()
+	defer g.produceMu.Unlock()
+	return len(g.produceSync)
+}
+
+func (g *Logs) DropProduceSync(topicName string, idx int) {
+	g.dropProduceLock(topicName, idx)
 }
 
 // Get returns the storage.Log for (topic, partition), opening the

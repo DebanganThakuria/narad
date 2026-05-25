@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,9 +69,16 @@ func (f *messagingFakeMetastore) GetSchema(_ context.Context, _ string, _ int) (
 	return nil, errs.ErrNotFound
 }
 
+func (f *messagingFakeMetastore) LeaderAddr() string { return "" }
+
+func (f *messagingFakeMetastore) GetMember(string) (metastore.Member, error) {
+	return metastore.Member{}, errs.ErrNotFound
+}
+
 func (f *messagingFakeMetastore) Close() error { return nil }
 
 type fakeSchemas struct {
+	mu          sync.Mutex
 	validateErr error
 	lastTopic   string
 	lastPayload []byte
@@ -81,6 +89,8 @@ func (f *fakeSchemas) Register(_ context.Context, _ string, _ []byte) (int, erro
 }
 
 func (f *fakeSchemas) Validate(_ context.Context, topic string, payload []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.lastTopic = topic
 	f.lastPayload = append([]byte(nil), payload...)
 	return f.validateErr
@@ -140,6 +150,7 @@ func newClusterTestEngine(t *testing.T, store *metastore.Store, mgr partition.Ma
 		logs,
 		nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		"node-self",
 	)
 }
 
@@ -205,7 +216,7 @@ func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetasto
 			}
 		}
 	}
-	return NewEngine(ms, schemas, partitioner, replicator, offsets, logs, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewEngine(ms, schemas, partitioner, replicator, offsets, logs, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 }
 
 func partitionHWMPath(dataDir, topicName string, partition int) string {

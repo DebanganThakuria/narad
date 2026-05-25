@@ -7,6 +7,7 @@ import (
 )
 
 // Delete handles DELETE /v1/topics/{topic}.
+// TODO need to route to partition and replica owners to delete all partitions and their replicas
 func Delete(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")

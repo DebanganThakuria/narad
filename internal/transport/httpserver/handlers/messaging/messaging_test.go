@@ -95,9 +95,10 @@ func (f *fakeBroker) Ready(ctx context.Context) error {
 func (f *fakeBroker) Close() error { return nil }
 
 type fakeRouter struct {
-	routeProduceFn func(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool
-	routeConsumeFn func(context.Context, http.ResponseWriter, *http.Request, string, *int) bool
-	routeAckFn     func(context.Context, http.ResponseWriter, *http.Request, string, int, []byte) bool
+	routeProduceFn     func(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool
+	routeConsumeFn     func(context.Context, http.ResponseWriter, *http.Request, string, *int) bool
+	routeAckFn         func(context.Context, http.ResponseWriter, *http.Request, string, int, []byte) bool
+	routeCreateTopicFn func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
 }
 
 func (f *fakeRouter) RouteProduce(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName, key string, body []byte) bool {
@@ -119,6 +120,13 @@ func (f *fakeRouter) RouteAck(ctx context.Context, w http.ResponseWriter, r *htt
 		return false
 	}
 	return f.routeAckFn(ctx, w, r, topicName, partition, body)
+}
+
+func (f *fakeRouter) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool {
+	if f.routeCreateTopicFn == nil {
+		return false
+	}
+	return f.routeCreateTopicFn(ctx, w, r, body)
 }
 
 func newTestSet(b broker.Broker, router handlers.Router) *handlers.Set {

@@ -80,3 +80,128 @@ func TestValidateRejectsDefaultPartitionsAboveMax(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want partition bounds error", err)
 	}
 }
+
+func TestValidateRejectsClusterPeersWithoutLocalNodeID(t *testing.T) {
+	cfg := Default()
+	cfg.Cluster.Addr = "127.0.0.1:9101"
+	cfg.Cluster.NodeID = "node-1"
+	cfg.Cluster.Peers = []ClusterPeer{
+		{ID: "node-2", Addr: "127.0.0.1:9102"},
+		{ID: "node-3", Addr: "127.0.0.1:9103"},
+		{ID: "node-4", Addr: "127.0.0.1:9104"},
+	}
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "cluster.peers must include local node id \"node-1\"") {
+		t.Fatalf("Validate() error = %v, want local node id error", err)
+	}
+}
+
+func TestValidateRejectsClusterPeersWithoutLocalAddr(t *testing.T) {
+	cfg := Default()
+	cfg.Cluster.Addr = "127.0.0.1:9101"
+	cfg.Cluster.NodeID = "node-1"
+	cfg.Cluster.Peers = []ClusterPeer{
+		{ID: "node-1", Addr: "127.0.0.1:9109"},
+		{ID: "node-2", Addr: "127.0.0.1:9102"},
+		{ID: "node-3", Addr: "127.0.0.1:9103"},
+	}
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "cluster.peers must include local cluster address \"127.0.0.1:9101\"") {
+		t.Fatalf("Validate() error = %v, want local cluster address error", err)
+	}
+}
+
+func TestValidateRejectsClusterPeersWithoutLocalVoter(t *testing.T) {
+	cfg := Default()
+	cfg.Cluster.Addr = "127.0.0.1:9101"
+	cfg.Cluster.NodeID = "node-1"
+	cfg.Cluster.Peers = []ClusterPeer{
+		{ID: "node-1", Addr: "127.0.0.1:9109"},
+		{ID: "node-x", Addr: "127.0.0.1:9101"},
+		{ID: "node-3", Addr: "127.0.0.1:9103"},
+	}
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "cluster.peers must include local voter \"node-1\"@127.0.0.1:9101") {
+		t.Fatalf("Validate() error = %v, want local voter error", err)
+	}
+}
+
+func TestValidateAcceptsClusterPeersIncludingSelf(t *testing.T) {
+	cfg := Default()
+	cfg.Cluster.Addr = "127.0.0.1:9101"
+	cfg.Cluster.NodeID = "node-1"
+	cfg.Cluster.Peers = []ClusterPeer{
+		{ID: "node-1", Addr: "127.0.0.1:9101"},
+		{ID: "node-2", Addr: "127.0.0.1:9102"},
+		{ID: "node-3", Addr: "127.0.0.1:9103"},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestValidateAcceptsClusterPeersWithPortLikeAddr(t *testing.T) {
+	cfg := Default()
+	cfg.Cluster.Addr = ":9101"
+	cfg.Cluster.NodeID = "node-1"
+	cfg.Cluster.Peers = []ClusterPeer{
+		{ID: "node-1", Addr: ":9101"},
+		{ID: "node-2", Addr: ":9102"},
+		{ID: "node-3", Addr: ":9103"},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestValidateAcceptsClusterPeersWithClusterPortAndHostfulPeerAddr(t *testing.T) {
+	cfg := Default()
+	cfg.Cluster.Addr = ":9101"
+	cfg.Cluster.NodeID = "node-1"
+	cfg.Cluster.Peers = []ClusterPeer{
+		{ID: "node-1", Addr: "127.0.0.1:9101"},
+		{ID: "node-2", Addr: "127.0.0.1:9102"},
+		{ID: "node-3", Addr: "127.0.0.1:9103"},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestValidateRejectsDuplicateClusterPeerID(t *testing.T) {
+	cfg := Default()
+	cfg.Cluster.Addr = "127.0.0.1:9101"
+	cfg.Cluster.NodeID = "node-1"
+	cfg.Cluster.Peers = []ClusterPeer{
+		{ID: "node-1", Addr: "127.0.0.1:9101"},
+		{ID: "node-2", Addr: "127.0.0.1:9102"},
+		{ID: "node-2", Addr: "127.0.0.1:9103"},
+	}
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "cluster peer id \"node-2\" must be unique") {
+		t.Fatalf("Validate() error = %v, want duplicate id error", err)
+	}
+}
+
+func TestValidateRejectsDuplicateClusterPeerAddr(t *testing.T) {
+	cfg := Default()
+	cfg.Cluster.Addr = "127.0.0.1:9101"
+	cfg.Cluster.NodeID = "node-1"
+	cfg.Cluster.Peers = []ClusterPeer{
+		{ID: "node-1", Addr: "127.0.0.1:9101"},
+		{ID: "node-2", Addr: "127.0.0.1:9102"},
+		{ID: "node-3", Addr: "127.0.0.1:9102"},
+	}
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "cluster peer addr \"127.0.0.1:9102\" must be unique") {
+		t.Fatalf("Validate() error = %v, want duplicate addr error", err)
+	}
+}
