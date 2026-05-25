@@ -42,7 +42,7 @@ func (f *fakeRouter) RouteProduce(context.Context, http.ResponseWriter, *http.Re
 	return false
 }
 
-func (f *fakeRouter) RouteConsume(context.Context, http.ResponseWriter, *http.Request, string, *int, time.Duration) bool {
+func (f *fakeRouter) RouteConsume(context.Context, http.ResponseWriter, *http.Request, string, *int) bool {
 	return false
 }
 

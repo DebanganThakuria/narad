@@ -29,7 +29,7 @@ func Consume(s *handlers.Set) http.HandlerFunc {
 		}
 
 		if s.Deps.Router != nil {
-			if s.Deps.Router.RouteConsume(r.Context(), w, r, topicName, opts.Partition, opts.Wait) {
+			if s.Deps.Router.RouteConsume(r.Context(), w, r, topicName, opts.Partition) {
 				return
 			}
 		}

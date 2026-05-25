@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -64,7 +63,7 @@ func (rt *Router) RouteProduce(ctx context.Context, w http.ResponseWriter, r *ht
 // or pinned consume); nil causes the router to walk candidate partitions once
 // with non-blocking probes.
 // Returns true if forwarded.
-func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int, _ time.Duration) bool {
+func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) bool {
 	if pinnedPartition != nil {
 		addr := rt.ownerAddr(topicName, *pinnedPartition)
 		if addr == "" {
@@ -133,7 +132,7 @@ func (rt *Router) consumePartitionCandidates(ctx context.Context, topicName stri
 // RouteAck forwards an ack request to the owner of the given partition.
 // body is the already-read request body bytes.
 // Returns true if forwarded.
-func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, partition int, body []byte) bool {
+func (rt *Router) RouteAck(_ context.Context, w http.ResponseWriter, r *http.Request, topicName string, partition int, body []byte) bool {
 	addr := rt.ownerAddr(topicName, partition)
 	if addr == "" {
 		return false

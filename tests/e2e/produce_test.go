@@ -159,7 +159,6 @@ func TestProduce_RejectsOversizedBody(t *testing.T) {
 //
 // Run with -race for additional coverage.
 func TestProduce_ConcurrentProducersAssignUniqueOffsets(t *testing.T) {
-	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "race", Partitions: 4})
 

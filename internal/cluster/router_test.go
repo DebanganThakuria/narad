@@ -126,7 +126,7 @@ func TestRouteConsumeReturnsFalseWhenTopicMissing(t *testing.T) {
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume", nil)
 
-	forwarded := router.RouteConsume(context.Background(), res, req, "orders", nil, 0)
+	forwarded := router.RouteConsume(context.Background(), res, req, "orders", nil)
 	if forwarded {
 		t.Fatal("RouteConsume() = true, want false")
 	}
@@ -141,7 +141,7 @@ func TestRouteConsumeReturnsFalseWhenTopicHasNoPartitions(t *testing.T) {
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume", nil)
 
-	forwarded := router.RouteConsume(context.Background(), res, req, "orders", nil, 0)
+	forwarded := router.RouteConsume(context.Background(), res, req, "orders", nil)
 	if forwarded {
 		t.Fatal("RouteConsume() = true, want false")
 	}
@@ -223,7 +223,7 @@ func TestRouteConsumeForwardsPinnedPartitionToRemoteOwner(t *testing.T) {
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=1s", nil)
 	pinned := 1
-	forwarded := router.RouteConsume(context.Background(), res, req, "orders", &pinned, time.Second)
+	forwarded := router.RouteConsume(context.Background(), res, req, "orders", &pinned)
 	if !forwarded {
 		t.Fatal("RouteConsume() = false, want true")
 	}
@@ -331,7 +331,7 @@ func TestRouteConsumeWalksRankedPartitionsOnce(t *testing.T) {
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=1s", nil)
 
-	forwarded := router.RouteConsume(context.Background(), res, req, "orders", nil, time.Second)
+	forwarded := router.RouteConsume(context.Background(), res, req, "orders", nil)
 	if !forwarded {
 		t.Fatal("RouteConsume() = false, want true")
 	}
