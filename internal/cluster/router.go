@@ -145,3 +145,154 @@ func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, r
 	rt.forward(w, fwd, memberAddr, nil)
 	return true
 }
+
+func (rt *Router) backlogByPartition(ctx context.Context, topicName string) map[int]int64 {
+	if rt.snapshots == nil {
+		return nil
+	}
+	snapshots, err := rt.snapshots.Snapshot(ctx)
+	if err != nil {
+		return nil
+	}
+	backlog := make(map[int]int64)
+	for _, snapshot := range snapshots {
+		if snapshot.Topic != topicName {
+			continue
+		}
+		for _, partitionSnapshot := range snapshot.Partitions {
+			value := partitionSnapshot.LogEndOffset - partitionSnapshot.CommittedOffset
+			if value < 0 {
+				value = 0
+			}
+			backlog[partitionSnapshot.Partition] = value
+		}
+		break
+	}
+	return backlog
+}
+
+func (rt *Router) forwardConsumeProbe(ctx context.Context, w http.ResponseWriter, r *http.Request, partition int, addr string) (bool, bool) {
+	fwd := r.Clone(ctx)
+	q := fwd.URL.Query()
+	q.Set("partition", strconv.Itoa(partition))
+	q.Set("wait", "0s")
+	fwd.URL.RawQuery = q.Encode()
+	probe := httptestResponseRecorder{header: make(http.Header)}
+	rt.forward(&probe, fwd, addr, nil)
+	if probe.code == 0 {
+		probe.code = http.StatusOK
+	}
+	if probe.code == http.StatusNoContent {
+		return false, false
+	}
+	copyHeader(w.Header(), probe.header)
+	w.WriteHeader(probe.code)
+	if len(probe.body) > 0 {
+		_, _ = w.Write(probe.body)
+	}
+	return true, true
+}
+
+type httptestResponseRecorder struct {
+	header http.Header
+	body   []byte
+	code   int
+}
+
+func (r *httptestResponseRecorder) Header() http.Header {
+	return r.header
+}
+
+func (r *httptestResponseRecorder) Write(body []byte) (int, error) {
+	if r.code == 0 {
+		r.code = http.StatusOK
+	}
+	r.body = append(r.body, body...)
+	return len(body), nil
+}
+
+func (r *httptestResponseRecorder) WriteHeader(statusCode int) {
+	r.code = statusCode
+}
+
+func copyHeader(dst, src http.Header) {
+	for key := range dst {
+		dst.Del(key)
+	}
+	for key, values := range src {
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+// ownerAddr returns the API address of the pod that owns (topicName, partition),
+// or "" if this pod is the owner or the assignment/member cannot be resolved.
+func (rt *Router) ownerAddr(topicName string, p int) string {
+	a, err := rt.store.GetAssignment(topicName, p)
+	if err != nil {
+		return ""
+	}
+	if a.OwnerID == rt.selfID {
+		return ""
+	}
+	m, err := rt.store.GetMember(a.OwnerID)
+	if err == nil && m.Status != metastore.MemberDead {
+		return m.Addr
+	}
+	if a.FollowerID == "" || a.FollowerID == rt.selfID {
+		return ""
+	}
+	fm, err := rt.store.GetMember(a.FollowerID)
+	if err != nil || fm.Status == metastore.MemberDead {
+		return ""
+	}
+	return fm.Addr
+}
+
+func clusterAddrMatchesPeer(clusterAddr, peerAddr string) bool {
+	clusterAddr = strings.TrimSpace(clusterAddr)
+	peerAddr = strings.TrimSpace(peerAddr)
+	if clusterAddr == "" || peerAddr == "" {
+		return false
+	}
+	if clusterAddr == peerAddr {
+		return true
+	}
+	if strings.HasPrefix(clusterAddr, ":") {
+		return strings.HasSuffix(peerAddr, clusterAddr)
+	}
+	if strings.HasPrefix(peerAddr, ":") {
+		return strings.HasSuffix(clusterAddr, peerAddr)
+	}
+	return false
+}
+
+func (rt *Router) memberAddrByClusterAddr(clusterAddr string) string {
+	members, err := rt.store.ListMembers()
+	if err != nil {
+		return ""
+	}
+	for _, member := range members {
+		if member.Status == metastore.MemberDead {
+			continue
+		}
+		if strings.TrimSpace(member.ID) == strings.TrimSpace(rt.selfID) && clusterAddrMatchesPeer(clusterAddr, member.Addr) {
+			return ""
+		}
+		if clusterAddrMatchesPeer(clusterAddr, member.Addr) {
+			return member.Addr
+		}
+	}
+	return ""
+}
+
+// forward proxies r to http://addr, optionally replacing the body.
+func (rt *Router) forward(w http.ResponseWriter, r *http.Request, addr string, body []byte) {
+	if body != nil {
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+	}
+	target, _ := url.Parse("http://" + addr)
+	httputil.NewSingleHostReverseProxy(target).ServeHTTP(w, r)
+}
