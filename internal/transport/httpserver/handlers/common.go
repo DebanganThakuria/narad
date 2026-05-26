@@ -37,6 +37,7 @@ type Router interface {
 	RouteAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, partition int, body []byte) bool
 	RouteCreateTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool
 	RouteAlterTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, body []byte) bool
+	RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) bool
 	RouteGetTopic(ctx context.Context, r *http.Request, topicName string, details topic.Details) (topic.Details, error)
 }
 

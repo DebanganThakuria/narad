@@ -131,3 +131,17 @@ func (rt *Router) RouteAlterTopic(ctx context.Context, w http.ResponseWriter, r 
 	rt.forward(w, fwd, memberAddr, body)
 	return true
 }
+
+func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, _ string) bool {
+	leaderAddr := strings.TrimSpace(rt.store.LeaderAddr())
+	if leaderAddr == "" {
+		return false
+	}
+	memberAddr := rt.memberAddrByClusterAddr(leaderAddr)
+	if memberAddr == "" {
+		return false
+	}
+	fwd := r.Clone(ctx)
+	rt.forward(w, fwd, memberAddr, nil)
+	return true
+}

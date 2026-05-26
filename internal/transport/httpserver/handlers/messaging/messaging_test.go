@@ -137,6 +137,10 @@ func (f *fakeRouter) RouteAlterTopic(ctx context.Context, w http.ResponseWriter,
 	return f.routeAlterTopicFn(ctx, w, r, topicName, body)
 }
 
+func (f *fakeRouter) RouteDeleteTopic(context.Context, http.ResponseWriter, *http.Request, string) bool {
+	return false
+}
+
 func (f *fakeRouter) RouteGetTopic(context.Context, *http.Request, string, topic.Details) (topic.Details, error) {
 	return topic.Details{}, nil
 }
