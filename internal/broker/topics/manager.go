@@ -18,6 +18,7 @@
 package topics
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
@@ -63,9 +64,14 @@ type CreateOpts struct {
 
 // Manager handles every topic-CRUD operation. Constructed once at
 // broker startup; safe for concurrent use.
+type partitionAssigner interface {
+	AssignNewPartitions(ctx context.Context, topicName string, fromPartition, toPartition int, replicationFactor int) error
+}
+
 type Manager struct {
 	dataDir   string
 	metastore metastore.Metastore
+	assigner  partitionAssigner
 	schemas   schema.Registry
 	offsets   *consumer.InFlight
 	logs      *runtime.Logs
@@ -78,6 +84,7 @@ type Manager struct {
 func NewManager(
 	dataDir string,
 	ms metastore.Metastore,
+	assigner partitionAssigner,
 	schemas schema.Registry,
 	offsets *consumer.InFlight,
 	logs *runtime.Logs,
@@ -87,6 +94,7 @@ func NewManager(
 	return &Manager{
 		dataDir:   dataDir,
 		metastore: ms,
+		assigner:  assigner,
 		schemas:   schemas,
 		offsets:   offsets,
 		logs:      logs,

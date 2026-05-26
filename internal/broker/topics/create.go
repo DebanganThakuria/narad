@@ -18,7 +18,6 @@ import (
 // Zero values for any policy field inherit the matching default from
 // Config. Negative values and partitions exceeding Config.MaxPartitions
 // are rejected.
-// TODO Need to assign partitions to clusters
 func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic, error) {
 	if opts.Name == "" {
 		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalid)
@@ -97,6 +96,11 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 			return topic.Topic{}, ErrAlreadyExists
 		}
 		return topic.Topic{}, err
+	}
+	if m.assigner != nil {
+		if err := m.assigner.AssignNewPartitions(ctx, opts.Name, 0, partitions, rf); err != nil {
+			m.logger.Warn("topic created without immediate partition assignment", "topic", opts.Name, "err", err)
+		}
 	}
 
 	m.logger.Info("topic created",
