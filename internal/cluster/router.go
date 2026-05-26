@@ -4,8 +4,10 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
@@ -116,6 +118,27 @@ func (rt *Router) RouteAlterTopic(ctx context.Context, w http.ResponseWriter, r 
 // RouteDeleteTopic forwards a topic delete request to the cluster leader.
 func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, _ string) bool {
 	return rt.routeToLeader(ctx, w, r, nil)
+}
+
+func (rt *Router) BroadcastDeleteTopic(ctx context.Context, topicName string) error {
+	members, err := rt.store.ListMembers()
+	if err != nil {
+		return err
+	}
+	for _, member := range members {
+		if member.Status == metastore.MemberDead || strings.TrimSpace(member.ID) == strings.TrimSpace(rt.selfID) {
+			continue
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, "/internal/v1/topics/"+topicName, nil)
+		if err != nil {
+			return err
+		}
+		probe := rt.forwardProbe(req, member.Addr, nil)
+		if probe.code < http.StatusOK || probe.code >= http.StatusMultipleChoices {
+			return fmt.Errorf("delete purge returned status %d for %s", probe.code, member.ID)
+		}
+	}
+	return nil
 }
 
 func (rt *Router) routeToLeader(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool {

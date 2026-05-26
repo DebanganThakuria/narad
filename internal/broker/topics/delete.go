@@ -22,22 +22,30 @@ func (m *Manager) DeleteTopic(ctx context.Context, name string) error {
 		return err
 	}
 
-	firstErr := m.logs.CloseTopic(name)
-
+	firstErr := error(nil)
 	if err := m.metastore.DeleteTopic(ctx, name); err != nil {
-		if !errors.Is(err, errs.ErrNotFound) && firstErr == nil {
+		if !errors.Is(err, errs.ErrNotFound) {
 			firstErr = err
 		}
 	}
-	m.offsets.DropTopic(name)
+	if err := m.PurgeTopic(ctx, name); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if firstErr == nil {
+		m.logger.Info("topic deleted", "topic", name)
+	}
+	return firstErr
+}
 
+func (m *Manager) PurgeTopic(_ context.Context, name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: name required", ErrInvalid)
+	}
+	firstErr := m.logs.CloseTopic(name)
+	m.offsets.DropTopic(name)
 	dir := filepath.Join(m.dataDir, "topics", name)
 	if err := os.RemoveAll(dir); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("topics: remove topic dir: %w", err)
-	}
-
-	if firstErr == nil {
-		m.logger.Info("topic deleted", "topic", name)
 	}
 	return firstErr
 }

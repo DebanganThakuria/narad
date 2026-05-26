@@ -7,8 +7,8 @@ import (
 )
 
 // Delete handles DELETE /v1/topics/{topic}. The request is forwarded to
-// the leader; the leader's broker remains responsible for any partition
-// cleanup it orchestrates.
+// the leader, which deletes topic metadata locally and then asks other
+// nodes to purge their local runtime and disk state for the topic.
 func Delete(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")
@@ -24,6 +24,12 @@ func Delete(s *handlers.Set) http.HandlerFunc {
 		if err := s.Deps.Broker.DeleteTopic(r.Context(), topicName); err != nil {
 			s.WriteBrokerError(w, "delete topic", err)
 			return
+		}
+		if s.Deps.Router != nil {
+			if err := s.Deps.Router.BroadcastDeleteTopic(r.Context(), topicName); err != nil {
+				s.WriteBrokerError(w, "broadcast delete topic", err)
+				return
+			}
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
