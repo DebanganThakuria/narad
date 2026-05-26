@@ -40,10 +40,6 @@ func (rt *Router) RouteGetTopic(ctx context.Context, r *http.Request, topicName 
 		if addr == "" {
 			return topic.Details{}, errs.ErrNotPartitionOwner
 		}
-		if partitionStats, ok := localByPartition[assignment.Partition]; ok && assignment.OwnerID == rt.selfID {
-			merged = append(merged, partitionStats)
-			continue
-		}
 		partitionStats, err := rt.fetchTopicPartitionStats(ctx, r, addr, assignment.Partition)
 		if err != nil {
 			return topic.Details{}, err

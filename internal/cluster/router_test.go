@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -698,7 +699,7 @@ func TestRouteGetTopicReturnsErrorWhenRemotePayloadHasMultiplePartitions(t *test
 	}
 }
 
-func TestRouteDeleteTopicReturnsFalseWhenLeaderUnresolvable(t *testing.T) {
+func TestRouteDeleteTopicReturnsFalseWhenLeaderMemberCannotBeResolved(t *testing.T) {
 	store := newTestStore(t)
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
 	res := httptest.NewRecorder()
@@ -710,8 +711,12 @@ func TestRouteDeleteTopicReturnsFalseWhenLeaderUnresolvable(t *testing.T) {
 	}
 }
 
-func TestRouteDeleteTopicReturnsFalseWhenLeaderIsLocal(t *testing.T) {
+func TestRouteDeleteTopicReturnsFalseWhenLeaderMatchesSelf(t *testing.T) {
 	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: store.LeaderAddr(), Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
@@ -722,7 +727,47 @@ func TestRouteDeleteTopicReturnsFalseWhenLeaderIsLocal(t *testing.T) {
 	}
 }
 
-func TestRouteDeleteTopicForwardsToResolvedLeaderMember(t *testing.T) {
+func TestRouteDeleteTopicReturnsFalseWhenMatchingLeaderMemberIsDead(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-dead", Addr: store.LeaderAddr(), Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	if err := store.MarkMemberDead(ctx, "node-dead"); err != nil {
+		t.Fatalf("MarkMemberDead() error = %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
+
+	forwarded := router.RouteDeleteTopic(context.Background(), res, req, "orders")
+	if forwarded {
+		t.Fatal("RouteDeleteTopic() = true, want false")
+	}
+}
+
+func TestRouteDeleteTopicReturnsFalseWhenLeaderAddressOnlyMatchesPort(t *testing.T) {
+	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer leader.Close()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+	leaderAddr := ":" + leader.Listener.Addr().String()[strings.LastIndex(leader.Listener.Addr().String(), ":")+1:]
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-leader", Addr: leaderAddr, Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
+
+	if router.RouteDeleteTopic(context.Background(), res, req, "orders") {
+		t.Fatal("RouteDeleteTopic() unexpectedly forwarded")
+	}
+}
+
+func TestRouteDeleteTopicForwardsWhenLeaderAddressMatchesExactly(t *testing.T) {
 	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			t.Fatalf("method = %s, want %s", r.Method, http.MethodDelete)
@@ -736,95 +781,73 @@ func TestRouteDeleteTopicForwardsToResolvedLeaderMember(t *testing.T) {
 
 	store := newTestStore(t)
 	ctx := context.Background()
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: leader.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember() error = %v", err)
-	}
-	router := NewRouter(store, "node-other", partition.NewHashRoundRobin(), nil)
-	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
-
-	forwarded := router.RouteDeleteTopic(context.Background(), res, req, "orders")
-	if forwarded {
-		t.Fatal("RouteDeleteTopic() = true, want false")
-	}
-}
-
-func TestRouteDeleteTopicForwardsWhenLeaderAddrMatchesPortOnly(t *testing.T) {
-	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer leader.Close()
-
-	store := newTestStore(t)
-	ctx := context.Background()
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-port", Addr: leader.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember() error = %v", err)
-	}
-	router := NewRouter(store, "node-port", partition.NewHashRoundRobin(), nil)
-	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
-
-	forwarded := router.RouteDeleteTopic(context.Background(), res, req, "orders")
-	if forwarded {
-		t.Fatal("RouteDeleteTopic() = true, want false")
-	}
-}
-
-func TestRouteDeleteTopicForwardsWhenLeaderAddrResolvesMember(t *testing.T) {
-	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer leader.Close()
-
-	store := newTestStore(t)
-	ctx := context.Background()
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: store.LeaderAddr(), Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember() error = %v", err)
-	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-api", Addr: leader.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember() error = %v", err)
-	}
-	if err := store.MarkMemberDead(ctx, "node-self"); err != nil {
-		t.Fatalf("MarkMemberDead() error = %v", err)
-	}
-	router := NewRouter(store, "node-api", partition.NewHashRoundRobin(), nil)
-	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
-
-	forwarded := router.RouteDeleteTopic(context.Background(), res, req, "orders")
-	if forwarded {
-		t.Fatal("RouteDeleteTopic() = true, want false")
-	}
-}
-
-func TestRouteDeleteTopicForwardsWithDirectLeaderMatch(t *testing.T) {
-	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete {
-			t.Fatalf("method = %s, want %s", r.Method, http.MethodDelete)
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer leader.Close()
-
-	store := newTestStore(t)
-	ctx := context.Background()
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-api", Addr: leader.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-leader", Addr: store.LeaderAddr(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
 
-	if clusterAddrMatchesPeer(store.LeaderAddr(), leader.Listener.Addr().String()) {
-		forwarded := router.RouteDeleteTopic(context.Background(), res, req, "orders")
-		if !forwarded {
-			t.Fatal("RouteDeleteTopic() = false, want true")
-		}
-		if res.Code != http.StatusNoContent {
-			t.Fatalf("status = %d, want %d", res.Code, http.StatusNoContent)
-		}
-		return
+	forwarded := router.RouteDeleteTopic(context.Background(), res, req, "orders")
+	if !forwarded {
+		t.Fatal("RouteDeleteTopic() = false, want true")
 	}
+	if res.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusBadGateway)
+	}
+}
+
+func TestRouteDeleteTopicForwardsWhenLeaderMemberUsesExactLeaderAddress(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-leader", Addr: store.LeaderAddr(), Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
+
+	forwarded := router.RouteDeleteTopic(context.Background(), res, req, "orders")
+	if !forwarded {
+		t.Fatal("RouteDeleteTopic() = false, want true")
+	}
+}
+
+func TestRouteDeleteTopicReturnsFalseWhenLeaderOnlyMatchesForeignPort(t *testing.T) {
+	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer leader.Close()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-foreign", Addr: leader.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
+
+	if router.RouteDeleteTopic(context.Background(), res, req, "orders") {
+		t.Fatal("RouteDeleteTopic() unexpectedly forwarded")
+	}
+}
+
+func TestRouteDeleteTopicReturnsFalseWhenLeaderPortMatchIsSelf(t *testing.T) {
+	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer leader.Close()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+	leaderAddr := ":" + leader.Listener.Addr().String()[strings.LastIndex(leader.Listener.Addr().String(), ":")+1:]
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: leaderAddr, Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
 
 	if router.RouteDeleteTopic(context.Background(), res, req, "orders") {
 		t.Fatal("RouteDeleteTopic() unexpectedly forwarded")
