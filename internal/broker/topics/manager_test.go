@@ -119,12 +119,12 @@ func (f *fakeMetastore) GetMember(string) (metastore.Member, error) {
 func (f *fakeMetastore) Close() error { return nil }
 
 type fakePartitionAssigner struct {
-	lastTopic            string
-	lastFromPartition    int
-	lastToPartition      int
+	lastTopic             string
+	lastFromPartition     int
+	lastToPartition       int
 	lastReplicationFactor int
-	calls                int
-	err                  error
+	calls                 int
+	err                   error
 }
 
 func (f *fakePartitionAssigner) AssignNewPartitions(_ context.Context, topicName string, fromPartition, toPartition int, replicationFactor int) error {

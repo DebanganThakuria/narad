@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
 	"time"
 
 	hclog "github.com/hashicorp/go-hclog"
