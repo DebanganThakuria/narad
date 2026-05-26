@@ -1,0 +1,25 @@
+internal/broker/impl.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:36:53.046Z 71
+internal/broker/topics/manager.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:36:05.776Z 65-68,72-73,78,91
+internal/broker/topics/manager_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:36:21.644Z 166
+internal/persistence/metastore/assignments.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:49:33.976Z 1,3-7,9-10,12-14,16-28,30-47,49-57,59-62,64-79,81-100,102-110
+internal/persistence/metastore/fsm_apply.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:51:01.586Z 1,3-5,7,9-10,12-28,30-46,48-76,78-86,88-100,102-114,116-138,140-162
+internal/persistence/metastore/fsm_snapshot.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:51:19.315Z 1,3-6,8,12-20,23-44,49-54
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:52:17.823Z 9
+internal/persistence/metastore/lifecycle.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:49:51.527Z 1,3,5-15,17-19,21-23,25-28,30
+internal/persistence/metastore/members.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:49:43.301Z 1,3-5,7-8,10-12,14-16,18-20,22-34,36-51
+internal/persistence/metastore/schemas.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:49:14.421Z 1,3-4,6-7,9-11,13-27
+internal/persistence/metastore/store.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:50:26.106Z 22-27
+internal/persistence/metastore/topics.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:49:05.212Z 1,3-5,7,9-10,12-14,16-18,20-22,24-36,38-68
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:36:53.046Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 1, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:36:05.776Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 8, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:36:21.644Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 1, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:49:33.976Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 100, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:51:01.586Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 151, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:51:19.315Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 44, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:52:17.823Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 44, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:49:51.527Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 24, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:49:43.301Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 44, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:49:14.421Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 23, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:50:26.106Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 6, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T15:49:05.212Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 60, "overriden_lines": 0}}}
