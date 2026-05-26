@@ -1,0 +1,6 @@
+internal/cluster/router.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T08:03:53.565Z 106,108,111,113,116,118-119,121-122,127
+internal/cluster/router_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T08:07:15.538Z 12,702,714,716-719,730,733,736-739,749,757-758,761,765-766,770,772-777,784,787-789,791-793,795-798,800-804,806,811-812,816,824,831-832,834,836-840,842-850
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T08:03:53.565Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 10, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-26T08:07:15.538Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 64, "overriden_lines": 0}}}
