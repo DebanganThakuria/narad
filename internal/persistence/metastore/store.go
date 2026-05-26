@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	hclog "github.com/hashicorp/go-hclog"
@@ -309,6 +310,69 @@ func (s *Store) ListMembers() ([]Member, error) {
 		})
 	})
 	return out, err
+}
+
+func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromPartition, toPartition int, replicationFactor int) error {
+	members, err := s.ListMembers()
+	if err != nil {
+		return err
+	}
+	active := AliveMembers(members)
+	if replicationFactor < 2 || len(active) < replicationFactor {
+		return nil
+	}
+
+	counts := make(map[string]int, len(active))
+	for _, member := range active {
+		counts[member.ID] = 0
+	}
+
+	existing, err := s.ListAssignments(topicName)
+	if err != nil {
+		return err
+	}
+	assigned := make(map[int]bool, len(existing))
+	for _, assignment := range existing {
+		if _, ok := counts[assignment.OwnerID]; ok {
+			counts[assignment.OwnerID]++
+		}
+		if assignment.FollowerID != "" {
+			if _, ok := counts[assignment.FollowerID]; ok {
+				counts[assignment.FollowerID]++
+			}
+		}
+		assigned[assignment.Partition] = true
+	}
+
+	for partition := fromPartition; partition < toPartition; partition++ {
+		if assigned[partition] {
+			continue
+		}
+		sort.Slice(active, func(i, j int) bool {
+			if counts[active[i].ID] == counts[active[j].ID] {
+				return active[i].ID < active[j].ID
+			}
+			return counts[active[i].ID] < counts[active[j].ID]
+		})
+		owner := active[0].ID
+		follower := active[1].ID
+		if err := s.AssignPartition(ctx, topicName, partition, owner, follower); err != nil {
+			return err
+		}
+		counts[owner]++
+		counts[follower]++
+	}
+	return nil
+}
+
+func AliveMembers(members []Member) []Member {
+	active := make([]Member, 0, len(members))
+	for _, member := range members {
+		if member.Status == MemberAlive {
+			active = append(active, member)
+		}
+	}
+	return active
 }
 
 // -- lifecycle --

@@ -1,12 +1,14 @@
 package broker
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/errs"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
 
 // broker-level error aliases for use within this package.
@@ -67,8 +69,15 @@ func New(d Deps) (Broker, error) {
 		DefaultMaxAckedAheadPerPartition: d.TopicConfig.DefaultMaxAckedAheadPerPartition,
 	}
 
+	var assigner interface {
+		AssignNewPartitions(ctx context.Context, topicName string, fromPartition, toPartition int, replicationFactor int) error
+	}
+	if store, ok := d.Metastore.(*metastore.Store); ok {
+		assigner = store
+	}
+
 	return &impl{
-		Manager:     topics.NewManager(d.DataDir, d.Metastore, d.Schemas, d.ConsumerOffsets, logs, topicCfg, d.Logger),
+		Manager:     topics.NewManager(d.DataDir, d.Metastore, assigner, d.Schemas, d.ConsumerOffsets, logs, topicCfg, d.Logger),
 		Engine:      messaging.NewEngine(d.Metastore, d.Schemas, d.Partitions, d.Replicator, d.ConsumerOffsets, logs, d.Metrics, d.Logger, d.SelfID),
 		Snapshotter: runtime.NewSnapshotter(d.Metastore, d.ConsumerOffsets, logs, d.Logger),
 		Lifecycle:   runtime.NewLifecycle(logs),

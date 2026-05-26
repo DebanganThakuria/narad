@@ -19,7 +19,7 @@ func (c *Controller) reconcileAssignments(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	active := aliveMembers(members)
+	active := metastore.AliveMembers(members)
 	if len(active) == 0 {
 		return
 	}

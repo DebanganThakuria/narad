@@ -17,8 +17,6 @@ import (
 // uses hash(key) % newPartitions, so a key that previously hashed to
 // partition 3 may now hash to partition 11. Existing records stay in
 // their original partitions.
-
-// TODO need to assign new partitions to cluster memebers and also assign replicas
 func (m *Manager) IncreaseTopicPartitions(ctx context.Context, name string, newPartitions int) (topic.Topic, error) {
 	if name == "" {
 		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalid)
@@ -48,6 +46,11 @@ func (m *Manager) IncreaseTopicPartitions(ctx context.Context, name string, newP
 			return topic.Topic{}, ErrNotFound
 		}
 		return topic.Topic{}, err
+	}
+	if m.assigner != nil {
+		if err := m.assigner.AssignNewPartitions(ctx, name, current.Partitions, newPartitions, updated.ReplicationFactor); err != nil {
+			m.logger.Warn("topic partitions increased without immediate assignment", "topic", name, "old_partitions", current.Partitions, "new_partitions", newPartitions, "err", err)
+		}
 	}
 
 	m.logger.Info("topic partitions increased",
