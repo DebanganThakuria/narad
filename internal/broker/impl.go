@@ -1,7 +1,6 @@
 package broker
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
@@ -69,9 +68,7 @@ func New(d Deps) (Broker, error) {
 		DefaultMaxAckedAheadPerPartition: d.TopicConfig.DefaultMaxAckedAheadPerPartition,
 	}
 
-	var assigner interface {
-		AssignNewPartitions(ctx context.Context, topicName string, fromPartition, toPartition int, replicationFactor int) error
-	}
+	var assigner topics.PartitionAssigner
 	if store, ok := d.Metastore.(*metastore.Store); ok {
 		assigner = store
 	}

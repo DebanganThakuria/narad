@@ -163,7 +163,7 @@ func newTestManager(t *testing.T, ms *fakeMetastore, reg schema.Registry) *Manag
 	return newTestManagerWithAssigner(t, ms, nil, reg)
 }
 
-func newTestManagerWithAssigner(t *testing.T, ms *fakeMetastore, assigner partitionAssigner, reg schema.Registry) *Manager {
+func newTestManagerWithAssigner(t *testing.T, ms *fakeMetastore, assigner PartitionAssigner, reg schema.Registry) *Manager {
 	t.Helper()
 	if ms == nil {
 		ms = newFakeMetastore()
