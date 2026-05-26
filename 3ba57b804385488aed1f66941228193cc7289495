@@ -1,0 +1,14 @@
+internal/cluster/router.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T17:25:22.805Z 135-147
+internal/cluster/router_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T17:29:40.269Z 605-609,611-621,623-633,635-642,644-654,656-666,668-675,677-687,689-699,701-705,707-711,713-717,719-723,725-735,737-744,746-750,752-756,758-765,767-771,773-777,779-792,794-798,800-807,809-816,818-827,829-832
+internal/transport/httpserver/handlers/common.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T17:25:22.805Z 40
+internal/transport/httpserver/handlers/messaging/messaging_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T17:26:13.298Z 140-142
+internal/transport/httpserver/handlers/topics/delete.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T17:25:22.805Z 9-11,19-23
+internal/transport/httpserver/handlers/topics/topics_test.go
+  26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T17:26:58.380Z 40,70-75,404-410,412-415,417-420,422-428,430-433,435-451,453-454,456-458,460-463,497-510,512-515,517-526,528-535,537-540,542-548
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T17:25:22.805Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 13, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T17:29:40.269Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 203, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T17:26:13.298Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 3, "overriden_lines": 0}, "26c8ff70-fb25-4d65-bab3-0b123d6ab184:2026-05-25T17:26:58.380Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 106, "overriden_lines": 0}}}
