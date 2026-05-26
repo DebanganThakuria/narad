@@ -47,6 +47,7 @@ type Broker interface {
 	// topic, enforcing backwards compatibility.
 	UpdateTopicSchema(ctx context.Context, name string, schema []byte) (topic.Topic, error)
 	DeleteTopic(ctx context.Context, name string) error
+	PurgeTopic(ctx context.Context, name string) error
 	GetTopic(ctx context.Context, name string) (topic.Topic, error)
 	GetTopicDetails(ctx context.Context, name string) (topic.Details, error)
 	// ListTopics returns topics in lexicographic order. See

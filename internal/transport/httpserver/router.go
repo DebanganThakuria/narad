@@ -38,9 +38,10 @@ func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prome
 	mux.HandleFunc("GET /v1/topics/{topic}/consume", httpmessaging.Consume(h))
 	mux.HandleFunc("POST /v1/topics/{topic}/ack", httpmessaging.Ack(h))
 
-	// Internal replication
+	// Internal replication and maintenance
 	mux.HandleFunc("POST /internal/v1/replicate", httpreplication.Replicate(h))
 	mux.HandleFunc("GET /internal/v1/replicate", httpreplication.ReadReplica(h))
+	mux.HandleFunc("DELETE /internal/v1/topics/{topic}", httptopics.PurgeLocal(h))
 
 	// Health Checks
 	mux.HandleFunc("GET /healthz", health.Healthz(h))

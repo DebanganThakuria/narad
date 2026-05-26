@@ -38,6 +38,7 @@ type Router interface {
 	RouteCreateTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool
 	RouteAlterTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, body []byte) bool
 	RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) bool
+	BroadcastDeleteTopic(ctx context.Context, topicName string) error
 	RouteGetTopic(ctx context.Context, r *http.Request, topicName string, details topic.Details) (topic.Details, error)
 }
 

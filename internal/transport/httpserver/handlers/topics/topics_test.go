@@ -29,16 +29,18 @@ type fakeBroker struct {
 	updateTopicCapsFn         func(context.Context, string, int64, int64) (topic.Topic, error)
 	updateTopicSchemaFn       func(context.Context, string, []byte) (topic.Topic, error)
 	deleteTopicFn             func(context.Context, string) error
+	purgeTopicFn              func(context.Context, string) error
 	getTopicFn                func(context.Context, string) (topic.Topic, error)
 	getTopicDetailsFn         func(context.Context, string) (topic.Details, error)
 	listTopicsFn              func(context.Context, metastore.ListOptions) ([]topic.Topic, string, error)
 }
 
 type fakeRouter struct {
-	routeCreateTopicFn func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
-	routeAlterTopicFn  func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool
-	routeDeleteTopicFn func(context.Context, http.ResponseWriter, *http.Request, string) bool
-	routeGetTopicFn    func(context.Context, *http.Request, string, topic.Details) (topic.Details, error)
+	routeCreateTopicFn      func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
+	routeAlterTopicFn       func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool
+	routeDeleteTopicFn      func(context.Context, http.ResponseWriter, *http.Request, string) bool
+	broadcastDeleteTopicFn  func(context.Context, string) error
+	routeGetTopicFn         func(context.Context, *http.Request, string, topic.Details) (topic.Details, error)
 }
 
 func (f *fakeRouter) RouteProduce(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool {
@@ -72,6 +74,13 @@ func (f *fakeRouter) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter
 		return false
 	}
 	return f.routeDeleteTopicFn(ctx, w, r, topicName)
+}
+
+func (f *fakeRouter) BroadcastDeleteTopic(ctx context.Context, topicName string) error {
+	if f.broadcastDeleteTopicFn == nil {
+		return nil
+	}
+	return f.broadcastDeleteTopicFn(ctx, topicName)
 }
 
 func (f *fakeRouter) RouteGetTopic(ctx context.Context, r *http.Request, topicName string, details topic.Details) (topic.Details, error) {
@@ -116,6 +125,13 @@ func (f *fakeBroker) UpdateTopicSchema(ctx context.Context, name string, schema 
 
 func (f *fakeBroker) DeleteTopic(ctx context.Context, name string) error {
 	return f.deleteTopicFn(ctx, name)
+}
+
+func (f *fakeBroker) PurgeTopic(ctx context.Context, name string) error {
+	if f.purgeTopicFn == nil {
+		return nil
+	}
+	return f.purgeTopicFn(ctx, name)
 }
 
 func (f *fakeBroker) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
@@ -544,6 +560,80 @@ func TestDeleteHandlerFallsBackToLocalWhenRouterDoesNotForward(t *testing.T) {
 	}
 	if res.Code != http.StatusNoContent {
 		t.Fatalf("Delete() status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+}
+
+func TestDeleteHandlerBroadcastsAfterLocalDelete(t *testing.T) {
+	deleted := false
+	broadcasted := false
+	s := newTestSetWithRouter(&fakeBroker{deleteTopicFn: func(_ context.Context, name string) error {
+		deleted = name == "orders"
+		return nil
+	}}, &fakeRouter{
+		routeDeleteTopicFn: func(_ context.Context, _ http.ResponseWriter, _ *http.Request, _ string) bool {
+			return false
+		},
+		broadcastDeleteTopicFn: func(_ context.Context, topicName string) error {
+			broadcasted = topicName == "orders"
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Delete(s).ServeHTTP(res, req)
+
+	if !deleted {
+		t.Fatal("Delete() did not delete topic locally before broadcast")
+	}
+	if !broadcasted {
+		t.Fatal("Delete() did not broadcast remote purge after local delete")
+	}
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("Delete() status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+}
+
+func TestDeleteHandlerReturnsBroadcastError(t *testing.T) {
+	s := newTestSetWithRouter(&fakeBroker{deleteTopicFn: func(_ context.Context, _ string) error {
+		return nil
+	}}, &fakeRouter{
+		routeDeleteTopicFn: func(_ context.Context, _ http.ResponseWriter, _ *http.Request, _ string) bool {
+			return false
+		},
+		broadcastDeleteTopicFn: func(context.Context, string) error {
+			return errors.New("boom")
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Delete(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("Delete() status = %d, want %d", res.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestPurgeLocalHandlerCallsBrokerPurge(t *testing.T) {
+	purged := false
+	s := newTestSet(&fakeBroker{purgeTopicFn: func(_ context.Context, name string) error {
+		purged = name == "orders"
+		return nil
+	}})
+
+	req := httptest.NewRequest(http.MethodDelete, "/internal/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	PurgeLocal(s).ServeHTTP(res, req)
+
+	if !purged {
+		t.Fatal("PurgeLocal() did not call broker purge")
+	}
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("PurgeLocal() status = %d, want %d", res.Code, http.StatusNoContent)
 	}
 }
 
