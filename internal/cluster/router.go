@@ -6,7 +6,6 @@ import (
 	"context"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
@@ -104,26 +103,23 @@ func (rt *Router) RouteAck(_ context.Context, w http.ResponseWriter, r *http.Req
 	return true
 }
 
+// RouteCreateTopic forwards a topic create request to the cluster leader.
 func (rt *Router) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool {
-	leaderAddr := strings.TrimSpace(rt.store.LeaderAddr())
-	if leaderAddr == "" {
-		return false
-	}
-	memberAddr := rt.memberAddrByClusterAddr(leaderAddr)
-	if memberAddr == "" {
-		return false
-	}
-	fwd := r.Clone(ctx)
-	rt.forward(w, fwd, memberAddr, body)
-	return true
+	return rt.routeToLeader(ctx, w, r, body)
 }
 
+// RouteAlterTopic forwards a topic alter request to the cluster leader.
 func (rt *Router) RouteAlterTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, _ string, body []byte) bool {
-	leaderAddr := strings.TrimSpace(rt.store.LeaderAddr())
-	if leaderAddr == "" {
-		return false
-	}
-	memberAddr := rt.memberAddrByClusterAddr(leaderAddr)
+	return rt.routeToLeader(ctx, w, r, body)
+}
+
+// RouteDeleteTopic forwards a topic delete request to the cluster leader.
+func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, _ string) bool {
+	return rt.routeToLeader(ctx, w, r, nil)
+}
+
+func (rt *Router) routeToLeader(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool {
+	memberAddr := rt.memberAddrByClusterAddr(rt.store.LeaderAddr())
 	if memberAddr == "" {
 		return false
 	}

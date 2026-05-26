@@ -37,6 +37,8 @@ type fakeBroker struct {
 type fakeRouter struct {
 	routeCreateTopicFn func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
 	routeAlterTopicFn  func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool
+	routeDeleteTopicFn func(context.Context, http.ResponseWriter, *http.Request, string) bool
+	routeGetTopicFn    func(context.Context, *http.Request, string, topic.Details) (topic.Details, error)
 }
 
 func (f *fakeRouter) RouteProduce(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool {
@@ -63,6 +65,20 @@ func (f *fakeRouter) RouteAlterTopic(ctx context.Context, w http.ResponseWriter,
 		return false
 	}
 	return f.routeAlterTopicFn(ctx, w, r, topicName, body)
+}
+
+func (f *fakeRouter) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) bool {
+	if f.routeDeleteTopicFn == nil {
+		return false
+	}
+	return f.routeDeleteTopicFn(ctx, w, r, topicName)
+}
+
+func (f *fakeRouter) RouteGetTopic(ctx context.Context, r *http.Request, topicName string, details topic.Details) (topic.Details, error) {
+	if f.routeGetTopicFn == nil {
+		return details, nil
+	}
+	return f.routeGetTopicFn(ctx, r, topicName, details)
 }
 
 func newTestSetWithRouter(b broker.Broker, router handlers.Router) *handlers.Set {
@@ -257,6 +273,195 @@ func TestGetHandler(t *testing.T) {
 	}
 }
 
+func TestGetHandlerUsesRouterMergedStats(t *testing.T) {
+	routerCalled := false
+	s := newTestSetWithRouter(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
+		return topic.Details{
+			Topic:      topic.Topic{Name: name, Partitions: 2},
+			Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 1}, {Index: 1, NextOffset: 2}},
+		}, nil
+	}}, &fakeRouter{routeGetTopicFn: func(_ context.Context, _ *http.Request, topicName string, details topic.Details) (topic.Details, error) {
+		routerCalled = true
+		if topicName != "orders" {
+			t.Fatalf("topicName = %q, want orders", topicName)
+		}
+		details.Partitions = []topic.PartitionStats{{Index: 0, NextOffset: 10}, {Index: 1, NextOffset: 20}}
+		return details, nil
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if !routerCalled {
+		t.Fatal("Get() did not call router")
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusOK)
+	}
+	var body topic.Details
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if len(body.Partitions) != 2 || body.Partitions[0].NextOffset != 10 || body.Partitions[1].NextOffset != 20 {
+		t.Fatalf("Get() partitions = %+v", body.Partitions)
+	}
+}
+
+func TestGetHandlerFallsBackToLocalWhenRouterNil(t *testing.T) {
+	s := newTestSet(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
+		return topic.Details{
+			Topic:      topic.Topic{Name: name, Partitions: 1},
+			Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 3}},
+		}, nil
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusOK)
+	}
+	var body topic.Details
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if len(body.Partitions) != 1 || body.Partitions[0].NextOffset != 3 {
+		t.Fatalf("Get() partitions = %+v", body.Partitions)
+	}
+}
+
+func TestGetHandlerPartitionQuerySkipsRouter(t *testing.T) {
+	routerCalled := false
+	s := newTestSetWithRouter(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
+		return topic.Details{
+			Topic:      topic.Topic{Name: name, Partitions: 2},
+			Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 1}, {Index: 1, NextOffset: 2}},
+		}, nil
+	}}, &fakeRouter{routeGetTopicFn: func(_ context.Context, _ *http.Request, _ string, details topic.Details) (topic.Details, error) {
+		routerCalled = true
+		return details, nil
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders?partition=1", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if routerCalled {
+		t.Fatal("Get() routed partition-scoped request")
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusOK)
+	}
+	var body topic.Details
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if len(body.Partitions) != 1 || body.Partitions[0].Index != 1 || body.Partitions[0].NextOffset != 2 {
+		t.Fatalf("Get() partitions = %+v", body.Partitions)
+	}
+}
+
+func TestGetHandlerRejectsInvalidPartitionQuery(t *testing.T) {
+	s := newTestSet(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
+		return topic.Details{
+			Topic:      topic.Topic{Name: name, Partitions: 1},
+			Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 1}},
+		}, nil
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders?partition=bad", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusBadRequest)
+	}
+}
+
+func TestGetHandlerReturnsRouterError(t *testing.T) {
+	s := newTestSetWithRouter(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
+		return topic.Details{Topic: topic.Topic{Name: name, Partitions: 1}, Partitions: []topic.PartitionStats{{Index: 0}}}, nil
+	}}, &fakeRouter{routeGetTopicFn: func(_ context.Context, _ *http.Request, _ string, _ topic.Details) (topic.Details, error) {
+		return topic.Details{}, errors.New("boom")
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestGetHandlerRejectsOutOfRangePartitionQuery(t *testing.T) {
+	s := newTestSet(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
+		return topic.Details{
+			Topic:      topic.Topic{Name: name, Partitions: 1},
+			Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 1}},
+		}, nil
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders?partition=1", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusBadRequest)
+	}
+}
+
+func TestGetHandlerPreservesTopicFieldsForPartitionQuery(t *testing.T) {
+	s := newTestSet(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
+		return topic.Details{
+			Topic:      topic.Topic{Name: name, Partitions: 2, ReplicationFactor: 3},
+			Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 1}, {Index: 1, NextOffset: 2}},
+		}, nil
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders?partition=1", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusOK)
+	}
+	var body topic.Details
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if body.Name != "orders" {
+		t.Fatalf("Get() topic name = %q, want orders", body.Name)
+	}
+	if body.ReplicationFactor != 3 {
+		t.Fatalf("Get() replication factor = %d, want 3", body.ReplicationFactor)
+	}
+	if len(body.Partitions) != 1 || body.Partitions[0].Index != 1 {
+		t.Fatalf("Get() partitions = %+v", body.Partitions)
+	}
+}
+
+func TestGetHandlerMissingTopicReturnsBadRequest(t *testing.T) {
+	s := newTestSet(&fakeBroker{})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/", nil)
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusBadRequest)
+	}
+}
+
 func TestDeleteHandlerRequiresTopic(t *testing.T) {
 	s := newTestSet(&fakeBroker{deleteTopicFn: func(context.Context, string) error { return nil }})
 
@@ -286,6 +491,59 @@ func TestDeleteHandlerCallsBroker(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("Delete() did not call broker with topic name")
+	}
+}
+
+func TestDeleteHandlerRoutesToLeader(t *testing.T) {
+	routed := false
+	brokerCalled := false
+	s := newTestSetWithRouter(&fakeBroker{deleteTopicFn: func(_ context.Context, _ string) error {
+		brokerCalled = true
+		return errors.New("unexpected DeleteTopic call")
+	}}, &fakeRouter{routeDeleteTopicFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName string) bool {
+		routed = true
+		if topicName != "orders" {
+			t.Fatalf("topicName = %q, want orders", topicName)
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}})
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Delete(s).ServeHTTP(res, req)
+
+	if !routed {
+		t.Fatal("Delete() did not route to leader")
+	}
+	if brokerCalled {
+		t.Fatal("Delete() called broker after routing")
+	}
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("Delete() status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+}
+
+func TestDeleteHandlerFallsBackToLocalWhenRouterDoesNotForward(t *testing.T) {
+	called := false
+	s := newTestSetWithRouter(&fakeBroker{deleteTopicFn: func(_ context.Context, name string) error {
+		called = name == "orders"
+		return nil
+	}}, &fakeRouter{routeDeleteTopicFn: func(_ context.Context, _ http.ResponseWriter, _ *http.Request, _ string) bool {
+		return false
+	}})
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Delete(s).ServeHTTP(res, req)
+
+	if !called {
+		t.Fatal("Delete() did not fall back to local broker")
+	}
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("Delete() status = %d, want %d", res.Code, http.StatusNoContent)
 	}
 }
 
