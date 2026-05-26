@@ -36,11 +36,11 @@ type fakeBroker struct {
 }
 
 type fakeRouter struct {
-	routeCreateTopicFn      func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
-	routeAlterTopicFn       func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool
-	routeDeleteTopicFn      func(context.Context, http.ResponseWriter, *http.Request, string) bool
-	broadcastDeleteTopicFn  func(context.Context, string) error
-	routeGetTopicFn         func(context.Context, *http.Request, string, topic.Details) (topic.Details, error)
+	routeCreateTopicFn     func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
+	routeAlterTopicFn      func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool
+	routeDeleteTopicFn     func(context.Context, http.ResponseWriter, *http.Request, string) bool
+	broadcastDeleteTopicFn func(context.Context, string) error
+	routeGetTopicFn        func(context.Context, *http.Request, string, topic.Details) (topic.Details, error)
 }
 
 func (f *fakeRouter) RouteProduce(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool {

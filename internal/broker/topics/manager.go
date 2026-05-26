@@ -62,16 +62,20 @@ type CreateOpts struct {
 	MaxAckedAheadPerPartition int64
 }
 
-// Manager handles every topic-CRUD operation. Constructed once at
-// broker startup; safe for concurrent use.
-type partitionAssigner interface {
+// PartitionAssigner assigns a topic partition range to cluster members.
+// It is injected so topic CRUD can use assignment capability without
+// depending directly on the concrete metastore store type.
+type PartitionAssigner interface {
 	AssignNewPartitions(ctx context.Context, topicName string, fromPartition, toPartition int, replicationFactor int) error
 }
+
+// Manager handles every topic-CRUD operation. Constructed once at
+// broker startup; safe for concurrent use.
 
 type Manager struct {
 	dataDir   string
 	metastore metastore.Metastore
-	assigner  partitionAssigner
+	assigner  PartitionAssigner
 	schemas   schema.Registry
 	offsets   *consumer.InFlight
 	logs      *runtime.Logs
@@ -84,7 +88,7 @@ type Manager struct {
 func NewManager(
 	dataDir string,
 	ms metastore.Metastore,
-	assigner partitionAssigner,
+	assigner PartitionAssigner,
 	schemas schema.Registry,
 	offsets *consumer.InFlight,
 	logs *runtime.Logs,

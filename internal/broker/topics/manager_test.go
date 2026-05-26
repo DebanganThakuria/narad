@@ -119,12 +119,12 @@ func (f *fakeMetastore) GetMember(string) (metastore.Member, error) {
 func (f *fakeMetastore) Close() error { return nil }
 
 type fakePartitionAssigner struct {
-	lastTopic            string
-	lastFromPartition    int
-	lastToPartition      int
+	lastTopic             string
+	lastFromPartition     int
+	lastToPartition       int
 	lastReplicationFactor int
-	calls                int
-	err                  error
+	calls                 int
+	err                   error
 }
 
 func (f *fakePartitionAssigner) AssignNewPartitions(_ context.Context, topicName string, fromPartition, toPartition int, replicationFactor int) error {
@@ -163,7 +163,7 @@ func newTestManager(t *testing.T, ms *fakeMetastore, reg schema.Registry) *Manag
 	return newTestManagerWithAssigner(t, ms, nil, reg)
 }
 
-func newTestManagerWithAssigner(t *testing.T, ms *fakeMetastore, assigner partitionAssigner, reg schema.Registry) *Manager {
+func newTestManagerWithAssigner(t *testing.T, ms *fakeMetastore, assigner PartitionAssigner, reg schema.Registry) *Manager {
 	t.Helper()
 	if ms == nil {
 		ms = newFakeMetastore()
