@@ -76,7 +76,7 @@ func (f *fakeBroker) ListTopics(ctx context.Context, opts metastore.ListOptions)
 	return f.listTopicsFn(ctx, opts)
 }
 
-func (f *fakeBroker) Produce(ctx context.Context, topicName, key string, payload []byte) (int64, int, error) {
+func (f *fakeBroker) Produce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (int64, int, error) {
 	return f.produceFn(ctx, topicName, key, payload)
 }
 

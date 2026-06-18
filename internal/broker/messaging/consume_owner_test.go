@@ -55,6 +55,40 @@ func TestConsumeReplayRejectsWhenNotPartitionOwner(t *testing.T) {
 	}
 }
 
+func TestConsumePinnedRejectsWhenAssignmentMissing(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember(self) error = %v", err)
+	}
+
+	engine := newClusterTestEngine(t, store, fixedPartitionManager{picked: 0})
+	_, _, err := engine.Consume(ctx, "orders", ConsumeOpts{Partition: new(0), Wait: 0})
+	if !errors.Is(err, ErrNotPartitionOwner) {
+		t.Fatalf("Consume() error = %v, want %v", err, ErrNotPartitionOwner)
+	}
+}
+
+func TestConsumeQueueRejectsWhenNoAssignmentsExist(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember(self) error = %v", err)
+	}
+
+	engine := newClusterTestEngine(t, store, fixedPartitionManager{picked: 0})
+	_, _, err := engine.Consume(ctx, "orders", ConsumeOpts{Wait: 0})
+	if !errors.Is(err, ErrNotPartitionOwner) {
+		t.Fatalf("Consume() error = %v, want %v", err, ErrNotPartitionOwner)
+	}
+}
+
 func TestConsumePinnedAllowsOwner(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

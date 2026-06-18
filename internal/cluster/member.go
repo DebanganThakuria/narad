@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/platform/netaddr"
 )
 
 // ownerAddr returns the API address of the pod that owns (topicName, partition),
@@ -30,22 +31,31 @@ func (rt *Router) ownerAddr(topicName string, p int) string {
 	return fm.Addr
 }
 
-func clusterAddrMatchesPeer(clusterAddr, peerAddr string) bool {
-	clusterAddr = strings.TrimSpace(clusterAddr)
-	peerAddr = strings.TrimSpace(peerAddr)
-	if clusterAddr == "" || peerAddr == "" {
-		return false
+func (rt *Router) produceOwnerAddr(topicName string, p int) (string, bool) {
+	a, err := rt.store.GetAssignment(topicName, p)
+	if err != nil {
+		return "", false
 	}
-	if clusterAddr == peerAddr {
-		return true
+	ownerAddr, writable := rt.produceAssignmentWritable(a)
+	if !writable {
+		return "", false
 	}
-	if strings.HasPrefix(clusterAddr, ":") {
-		return strings.HasSuffix(peerAddr, clusterAddr)
+	if a.OwnerID == rt.selfID {
+		return "", true
 	}
-	if strings.HasPrefix(peerAddr, ":") {
-		return strings.HasSuffix(clusterAddr, peerAddr)
+	return ownerAddr, false
+}
+
+func (rt *Router) produceAssignmentWritable(a metastore.Assignment) (string, bool) {
+	owner, err := rt.store.GetMember(a.OwnerID)
+	if err != nil || owner.Status != metastore.MemberAlive {
+		return "", false
 	}
-	return false
+	if a.FollowerID == "" {
+		return owner.Addr, true
+	}
+	follower, err := rt.store.GetMember(a.FollowerID)
+	return owner.Addr, err == nil && follower.Status == metastore.MemberAlive
 }
 
 func (rt *Router) memberAddrByClusterAddr(clusterAddr string) string {
@@ -57,12 +67,20 @@ func (rt *Router) memberAddrByClusterAddr(clusterAddr string) string {
 		if member.Status == metastore.MemberDead {
 			continue
 		}
-		if strings.TrimSpace(member.ID) == strings.TrimSpace(rt.selfID) && clusterAddrMatchesPeer(clusterAddr, member.Addr) {
+		if !memberMatchesClusterAddr(member, clusterAddr) {
+			continue
+		}
+		if strings.TrimSpace(member.ID) == strings.TrimSpace(rt.selfID) {
 			return ""
 		}
-		if clusterAddrMatchesPeer(clusterAddr, member.Addr) {
-			return member.Addr
-		}
+		return member.Addr
 	}
 	return ""
+}
+
+func memberMatchesClusterAddr(member metastore.Member, clusterAddr string) bool {
+	if strings.TrimSpace(member.ClusterAddr) != "" {
+		return netaddr.ClusterAddrMatchesPeer(clusterAddr, member.ClusterAddr)
+	}
+	return netaddr.ClusterAddrMatchesPeer(clusterAddr, member.Addr)
 }

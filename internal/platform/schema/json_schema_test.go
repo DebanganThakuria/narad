@@ -50,6 +50,31 @@ func TestJSONSchemaRegisterAndValidateSuccess(t *testing.T) {
 	}
 }
 
+func TestJSONSchemaValidateDefinitionDoesNotRegister(t *testing.T) {
+	registry := NewJSONSchema()
+	schemaBytes := []byte(`{
+		"type":"object",
+		"properties":{"id":{"type":"string"}},
+		"required":["id"]
+	}`)
+
+	if err := registry.ValidateDefinition(context.Background(), "orders", schemaBytes); err != nil {
+		t.Fatalf("ValidateDefinition() error = %v", err)
+	}
+	if err := registry.Validate(context.Background(), "orders", []byte(`{"id":"o_123"}`)); !errors.Is(err, ErrSchemaNotFound) {
+		t.Fatalf("Validate() after dry-run error = %v, want %v", err, ErrSchemaNotFound)
+	}
+}
+
+func TestJSONSchemaValidateDefinitionRejectsInvalidSchema(t *testing.T) {
+	registry := NewJSONSchema()
+
+	err := registry.ValidateDefinition(context.Background(), "orders", []byte(`{"type":`))
+	if err == nil {
+		t.Fatal("ValidateDefinition() error = nil, want invalid schema error")
+	}
+}
+
 func TestJSONSchemaRegisterRejectsIncompatibleSchema(t *testing.T) {
 	registry := NewJSONSchema()
 	original := []byte(`{
@@ -69,6 +94,74 @@ func TestJSONSchemaRegisterRejectsIncompatibleSchema(t *testing.T) {
 	_, err := registry.Register(context.Background(), "orders", updated)
 	if !errors.Is(err, ErrIncompatible) {
 		t.Fatalf("Register() incompatible error = %v, want %v", err, ErrIncompatible)
+	}
+}
+
+func TestJSONSchemaLoadRestoresPersistedSchema(t *testing.T) {
+	registry := NewJSONSchema()
+	schemaBytes := []byte(`{
+		"type":"object",
+		"properties":{"id":{"type":"string"}},
+		"required":["id"]
+	}`)
+
+	if err := registry.Load(context.Background(), "orders", 3, schemaBytes); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err := registry.Validate(context.Background(), "orders", []byte(`{"id":"o_123"}`)); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if got := registry.versions["orders"]; got != 3 {
+		t.Fatalf("versions[orders] = %d, want 3", got)
+	}
+}
+
+func TestJSONSchemaUnloadRestoresPreviousLatestVersion(t *testing.T) {
+	registry := NewJSONSchema()
+	v1 := []byte(`{
+		"type":"object",
+		"properties":{"id":{"type":"string"}},
+		"required":["id"]
+	}`)
+	v2 := []byte(`{
+		"type":"object",
+		"properties":{"id":{"type":"string"},"count":{"type":"integer"}},
+		"required":["id"]
+	}`)
+
+	if err := registry.Load(context.Background(), "orders", 1, v1); err != nil {
+		t.Fatalf("Load(v1) error = %v", err)
+	}
+	if err := registry.Load(context.Background(), "orders", 2, v2); err != nil {
+		t.Fatalf("Load(v2) error = %v", err)
+	}
+	if err := registry.Unload(context.Background(), "orders", 2); err != nil {
+		t.Fatalf("Unload(v2) error = %v", err)
+	}
+	if got := registry.versions["orders"]; got != 1 {
+		t.Fatalf("versions[orders] = %d, want 1", got)
+	}
+	if err := registry.Validate(context.Background(), "orders", []byte(`{"id":"o_123"}`)); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestJSONSchemaUnloadLastVersionRemovesTopic(t *testing.T) {
+	registry := NewJSONSchema()
+	schemaBytes := []byte(`{
+		"type":"object",
+		"properties":{"id":{"type":"string"}},
+		"required":["id"]
+	}`)
+
+	if err := registry.Load(context.Background(), "orders", 1, schemaBytes); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err := registry.Unload(context.Background(), "orders", 1); err != nil {
+		t.Fatalf("Unload() error = %v", err)
+	}
+	if err := registry.Validate(context.Background(), "orders", []byte(`{"id":"o_123"}`)); !errors.Is(err, ErrSchemaNotFound) {
+		t.Fatalf("Validate() error = %v, want %v", err, ErrSchemaNotFound)
 	}
 }
 
@@ -122,13 +215,37 @@ func TestCheckCompatible(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "overlapping union types stay compatible",
+			name: "widening union types stays compatible",
 			oldRaw: []byte(`{
-				"properties":{"id":{"type":["string","null"]}}
-			}`),
+					"properties":{"id":{"type":["string","null"]}}
+				}`),
 			newRaw: []byte(`{
-				"properties":{"id":{"type":["null","number"]}}
-			}`),
+					"properties":{"id":{"type":["string","null","number"]}}
+				}`),
+		},
+		{
+			name: "narrowing union types is incompatible",
+			oldRaw: []byte(`{
+					"properties":{"id":{"type":["string","null"]}}
+				}`),
+			newRaw: []byte(`{
+					"properties":{"id":{"type":["string"]}}
+				}`),
+			wantErr: true,
+		},
+		{
+			name: "adding required property is incompatible",
+			oldRaw: []byte(`{
+					"properties":{"id":{"type":"string"}}
+				}`),
+			newRaw: []byte(`{
+					"properties":{
+						"id":{"type":"string"},
+						"region":{"type":"string"}
+					},
+					"required":["region"]
+				}`),
+			wantErr: true,
 		},
 	}
 

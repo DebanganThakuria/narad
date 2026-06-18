@@ -64,17 +64,17 @@ func (f *flusher) run() {
 }
 
 func (f *flusher) drainOnce() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	records, baseOffset := f.log.buffer.drain()
 	if len(records) == 0 {
 		return nil
 	}
-	return f.writeBatch(records, baseOffset)
+	return f.writeBatchLocked(records, baseOffset)
 }
 
-func (f *flusher) writeBatch(records [][]byte, baseOffset int64) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
+func (f *flusher) writeBatchLocked(records [][]byte, baseOffset int64) error {
 	if len(f.log.segments) == 0 {
 		return fmt.Errorf("storage: flusher: no active segment")
 	}

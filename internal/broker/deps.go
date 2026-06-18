@@ -28,6 +28,7 @@ type Deps struct {
 	Logs            *runtime.Logs
 	Logger          *slog.Logger
 	SelfID          string
+	Lifecycle       *runtime.Lifecycle
 
 	// MaxConsumeWait caps how long a long-poll consume can block.
 	// Plumbed through to the messaging engine.

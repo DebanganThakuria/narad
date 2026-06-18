@@ -278,6 +278,18 @@ func TestExpiredEntriesDoNotBlockCap(t *testing.T) {
 	}
 }
 
+func TestCommitHandleRejectsExpiredReservationWithoutPurger(t *testing.T) {
+	t.Parallel()
+	f := newTestInFlight(2, 1024)
+	withClock(f, 1000)
+	r := mustReserve(t, f, testDeepTail)
+
+	withClock(f, 1000+testVT.Milliseconds()+1)
+	if err := f.CommitHandle(testTopic, testPart, r.Offset, r.Nonce); !errors.Is(err, ErrHandleStale) {
+		t.Fatalf("CommitHandle() error = %v, want %v", err, ErrHandleStale)
+	}
+}
+
 func TestConcurrentReserveAcrossPartitions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -440,8 +452,7 @@ func TestRunPurgerRemovesExpiredEntries(t *testing.T) {
 		t.Fatalf("Snapshot() inFlight = %d, want 1", inFlight)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go f.RunPurger(ctx, 10*time.Millisecond)
 
 	withClock(f, 1000+60_000)
@@ -1383,8 +1394,7 @@ func TestRunPurgerCanSweepAfterReReservation(t *testing.T) {
 	mustReserve(t, f, testDeepTail)
 	withClock(f, 1000+60_000)
 	mustReserve(t, f, testDeepTail)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go f.RunPurger(ctx, 10*time.Millisecond)
 	withClock(f, 1000+120_000)
 	deadline := time.Now().Add(time.Second)
@@ -2177,8 +2187,7 @@ func TestRunPurgerAfterOtherTopicDropStillSweepsCurrentTopic(t *testing.T) {
 	withClock(f, 1000)
 	mustReserve(t, f, testDeepTail)
 	f.DropTopic("other")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go f.RunPurger(ctx, 10*time.Millisecond)
 	withClock(f, 1000+60_000)
 	deadline := time.Now().Add(time.Second)

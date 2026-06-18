@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
@@ -65,9 +64,7 @@ func (c Cluster) Replicate(ctx context.Context, topic string, partition int, off
 		return fmt.Errorf("marshal replicate request: %w", err)
 	}
 
-	// TODO Why not https?
-	url := "http://" + strings.TrimPrefix(follower.Addr, "http://") + "/internal/v1/replicate"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, replicateEndpoint(follower.Addr), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build replicate request: %w", err)
 	}

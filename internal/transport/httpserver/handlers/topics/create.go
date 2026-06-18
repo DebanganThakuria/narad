@@ -5,9 +5,7 @@
 package topics
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 
 	"github.com/debanganthakuria/narad/internal/broker/topics"
@@ -15,29 +13,26 @@ import (
 )
 
 type createRequest struct {
-	Name                      string `json:"name"`
-	Partitions                int    `json:"partitions"`
-	ReplicationFactor         int    `json:"replication_factor"`
-	RetentionMs               int64  `json:"retention_ms"`
-	VisibilityTimeoutMs       int64  `json:"visibility_timeout_ms"`
-	MaxInFlightPerPartition   int64  `json:"max_in_flight_per_partition"`
-	MaxAckedAheadPerPartition int64  `json:"max_acked_ahead_per_partition"`
+	Name                      string          `json:"name"`
+	Partitions                int             `json:"partitions"`
+	ReplicationFactor         int             `json:"replication_factor"`
+	RetentionMs               int64           `json:"retention_ms"`
+	VisibilityTimeoutMs       int64           `json:"visibility_timeout_ms"`
+	MaxInFlightPerPartition   int64           `json:"max_in_flight_per_partition"`
+	MaxAckedAheadPerPartition int64           `json:"max_acked_ahead_per_partition"`
+	Schema                    json.RawMessage `json:"schema,omitempty"`
 }
 
 // Create handles POST /v1/topics.
 func Create(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		if err != nil {
-			s.WriteError(w, http.StatusBadRequest, "read body: "+err.Error())
+		body, ok := s.ReadBody(w, r, handlers.MaxJSONBodyBytes)
+		if !ok {
 			return
 		}
 
 		var req createRequest
-		dec := json.NewDecoder(bytes.NewReader(body))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		if !s.DecodeJSONBytes(w, body, &req) {
 			return
 		}
 
@@ -55,6 +50,7 @@ func Create(s *handlers.Set) http.HandlerFunc {
 			VisibilityTimeoutMs:       req.VisibilityTimeoutMs,
 			MaxInFlightPerPartition:   req.MaxInFlightPerPartition,
 			MaxAckedAheadPerPartition: req.MaxAckedAheadPerPartition,
+			Schema:                    req.Schema,
 		})
 		if err != nil {
 			s.WriteBrokerError(w, "create topic", err)

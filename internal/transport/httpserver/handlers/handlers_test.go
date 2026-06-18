@@ -77,7 +77,7 @@ func (f *fakeBroker) ListTopics(ctx context.Context, opts metastore.ListOptions)
 	return f.listTopicsFn(ctx, opts)
 }
 
-func (f *fakeBroker) Produce(ctx context.Context, topicName, key string, payload []byte) (int64, int, error) {
+func (f *fakeBroker) Produce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (int64, int, error) {
 	return f.produceFn(ctx, topicName, key, payload)
 }
 
@@ -173,6 +173,16 @@ func TestDecodeJSONAndDecodeAndValidate(t *testing.T) {
 	var decoded req
 	if s.DecodeJSON(res, httpReq, &decoded) {
 		t.Fatal("DecodeJSON() returned true for unknown field")
+	}
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("DecodeJSON() status = %d, want %d", res.Code, http.StatusBadRequest)
+	}
+
+	res = httptest.NewRecorder()
+	httpReq = httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(`{"name":"orders"} {"name":"payments"}`))
+	decoded = req{}
+	if s.DecodeJSON(res, httpReq, &decoded) {
+		t.Fatal("DecodeJSON() returned true for multiple JSON values")
 	}
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("DecodeJSON() status = %d, want %d", res.Code, http.StatusBadRequest)

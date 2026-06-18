@@ -74,7 +74,7 @@ func (c *Controller) assignTopic(ctx context.Context, topicName string, numParti
 		assigned[a.Partition] = true
 	}
 
-	for p := 0; p < numPartitions; p++ {
+	for p := range numPartitions {
 		if assigned[p] {
 			continue
 		}

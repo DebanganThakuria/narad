@@ -119,12 +119,12 @@ func (f *fakeMetastore) GetMember(string) (metastore.Member, error) {
 func (f *fakeMetastore) Close() error { return nil }
 
 type fakePartitionAssigner struct {
-	lastTopic            string
-	lastFromPartition    int
-	lastToPartition      int
+	lastTopic             string
+	lastFromPartition     int
+	lastToPartition       int
 	lastReplicationFactor int
-	calls                int
-	err                  error
+	calls                 int
+	err                   error
 }
 
 func (f *fakePartitionAssigner) AssignNewPartitions(_ context.Context, topicName string, fromPartition, toPartition int, replicationFactor int) error {
@@ -137,10 +137,25 @@ func (f *fakePartitionAssigner) AssignNewPartitions(_ context.Context, topicName
 }
 
 type fakeSchemaRegistry struct {
-	registerVersion int
-	registerErr     error
-	lastTopic       string
-	lastSchema      []byte
+	validateDefinitionErr error
+	registerVersion       int
+	registerErr           error
+	loadErr               error
+	lastValidatedTopic    string
+	lastValidatedSchema   []byte
+	lastTopic             string
+	lastSchema            []byte
+	lastLoadedTopic       string
+	lastLoadedVersion     int
+	lastLoadedSchema      []byte
+	lastUnloadedTopic     string
+	lastUnloadedVersion   int
+}
+
+func (f *fakeSchemaRegistry) ValidateDefinition(_ context.Context, topic string, raw []byte) error {
+	f.lastValidatedTopic = topic
+	f.lastValidatedSchema = append([]byte(nil), raw...)
+	return f.validateDefinitionErr
 }
 
 func (f *fakeSchemaRegistry) Register(_ context.Context, topic string, raw []byte) (int, error) {
@@ -153,6 +168,22 @@ func (f *fakeSchemaRegistry) Register(_ context.Context, topic string, raw []byt
 		f.registerVersion = 1
 	}
 	return f.registerVersion, nil
+}
+
+func (f *fakeSchemaRegistry) Load(_ context.Context, topic string, version int, raw []byte) error {
+	if f.loadErr != nil {
+		return f.loadErr
+	}
+	f.lastLoadedTopic = topic
+	f.lastLoadedVersion = version
+	f.lastLoadedSchema = append([]byte(nil), raw...)
+	return nil
+}
+
+func (f *fakeSchemaRegistry) Unload(_ context.Context, topic string, version int) error {
+	f.lastUnloadedTopic = topic
+	f.lastUnloadedVersion = version
+	return nil
 }
 
 func (f *fakeSchemaRegistry) Validate(_ context.Context, _ string, _ []byte) error {
@@ -245,6 +276,86 @@ func TestCreateTopic_AssignsPartitionsSynchronously(t *testing.T) {
 	}
 	if assigner.lastTopic != testTopicName || assigner.lastFromPartition != 0 || assigner.lastToPartition != 3 || assigner.lastReplicationFactor != 3 {
 		t.Fatalf("AssignNewPartitions() = topic=%q from=%d to=%d rf=%d", assigner.lastTopic, assigner.lastFromPartition, assigner.lastToPartition, assigner.lastReplicationFactor)
+	}
+}
+
+func TestCreateTopic_WithSchemaPersistsAndLoadsInitialVersion(t *testing.T) {
+	ms := newFakeMetastore()
+	reg := &fakeSchemaRegistry{}
+	manager := newTestManager(t, ms, reg)
+	rawSchema := []byte(`{"type":"object"}`)
+
+	created, err := manager.CreateTopic(context.Background(), CreateOpts{Name: testTopicName, Schema: rawSchema})
+	if err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if created.Name != testTopicName {
+		t.Fatalf("CreateTopic() name = %q, want %q", created.Name, testTopicName)
+	}
+	if reg.lastValidatedTopic != testTopicName || string(reg.lastValidatedSchema) != string(rawSchema) {
+		t.Fatalf("ValidateDefinition() = topic %q schema %q", reg.lastValidatedTopic, string(reg.lastValidatedSchema))
+	}
+	if ms.lastSchemaTopic != testTopicName || ms.lastSchemaVersion != 1 || string(ms.lastSchemaBytes) != string(rawSchema) {
+		t.Fatalf("PutSchema() = topic %q version %d schema %q", ms.lastSchemaTopic, ms.lastSchemaVersion, string(ms.lastSchemaBytes))
+	}
+	if reg.lastLoadedTopic != testTopicName || reg.lastLoadedVersion != 1 || string(reg.lastLoadedSchema) != string(rawSchema) {
+		t.Fatalf("Load() = topic %q version %d schema %q", reg.lastLoadedTopic, reg.lastLoadedVersion, string(reg.lastLoadedSchema))
+	}
+}
+
+func TestCreateTopic_RejectsInvalidSchemaBeforeCreate(t *testing.T) {
+	ms := newFakeMetastore()
+	manager := newTestManager(t, ms, &fakeSchemaRegistry{validateDefinitionErr: schema.ErrIncompatible})
+
+	_, err := manager.CreateTopic(context.Background(), CreateOpts{Name: testTopicName, Schema: []byte(`{"type":"object"}`)})
+	if err == nil || !errors.Is(err, ErrInvalid) {
+		t.Fatalf("CreateTopic() error = %v, want %v", err, ErrInvalid)
+	}
+	if ms.lastCreatedTopic.Name != "" {
+		t.Fatalf("CreateTopic() created topic %q before rejecting schema", ms.lastCreatedTopic.Name)
+	}
+}
+
+func TestCreateTopic_RollsBackWhenInitialSchemaSetupFails(t *testing.T) {
+	cases := []struct {
+		name string
+		ms   *fakeMetastore
+		reg  *fakeSchemaRegistry
+	}{
+		{
+			name: "persist schema fails",
+			ms:   &fakeMetastore{topics: map[string]topic.Topic{}, schemas: map[string]map[int][]byte{}, putSchemaErr: errors.New("put schema failed")},
+			reg:  &fakeSchemaRegistry{},
+		},
+		{
+			name: "load schema fails",
+			ms:   newFakeMetastore(),
+			reg:  &fakeSchemaRegistry{loadErr: errors.New("load schema failed")},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := newTestManager(t, tc.ms, tc.reg)
+
+			_, err := manager.CreateTopic(context.Background(), CreateOpts{Name: testTopicName, Schema: []byte(`{"type":"object"}`)})
+			if err == nil {
+				t.Fatal("CreateTopic() error = nil, want schema setup error")
+			}
+			if _, ok := tc.ms.topics[testTopicName]; ok {
+				t.Fatalf("CreateTopic() left topic metadata for %q after schema failure", testTopicName)
+			}
+			if _, ok := tc.ms.schemas[testTopicName]; ok {
+				t.Fatalf("CreateTopic() left schema metadata for %q after schema failure", testTopicName)
+			}
+			if tc.ms.lastDeletedTopicName != testTopicName {
+				t.Fatalf("rollback deleted topic = %q, want %q", tc.ms.lastDeletedTopicName, testTopicName)
+			}
+			topicDir := filepath.Join(manager.dataDir, "topics", testTopicName)
+			if _, statErr := os.Stat(topicDir); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("topic dir stat error = %v, want not exists", statErr)
+			}
+		})
 	}
 }
 
@@ -432,6 +543,22 @@ func TestUpdateTopicSchema_RegistersAndPersists(t *testing.T) {
 	}
 }
 
+func TestUpdateTopicSchema_RollsBackRegistryWhenPersistFails(t *testing.T) {
+	ms := newFakeMetastore()
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
+	ms.putSchemaErr = errors.New("persist failed")
+	reg := &fakeSchemaRegistry{registerVersion: 7}
+	manager := newTestManager(t, ms, reg)
+
+	_, err := manager.UpdateTopicSchema(context.Background(), testTopicName, []byte(`{"type":"object"}`))
+	if err == nil || !strings.Contains(err.Error(), "persist schema") {
+		t.Fatalf("UpdateTopicSchema() error = %v, want persist schema error", err)
+	}
+	if reg.lastUnloadedTopic != testTopicName || reg.lastUnloadedVersion != 7 {
+		t.Fatalf("Unload() = topic %q version %d, want %q version 7", reg.lastUnloadedTopic, reg.lastUnloadedVersion, testTopicName)
+	}
+}
+
 func TestUpdateTopicSchema_RejectsEmptyOrInvalidSchema(t *testing.T) {
 	ms := newFakeMetastore()
 	ms.topics[testTopicName] = topic.Topic{Name: testTopicName}
@@ -466,5 +593,26 @@ func TestDeleteTopic_RemovesTopicAndDirectory(t *testing.T) {
 	}
 	if _, statErr := os.Stat(topicDir); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("topic dir stat error = %v, want not exists", statErr)
+	}
+}
+
+func TestDeleteTopic_ReturnsPurgeErrorAfterMetadataDelete(t *testing.T) {
+	ms := newFakeMetastore()
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
+	manager := newTestManager(t, ms, nil)
+	if err := os.WriteFile(filepath.Join(manager.dataDir, "topics"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	err := manager.DeleteTopic(context.Background(), testTopicName)
+	var purgeErr PurgeError
+	if !errors.As(err, &purgeErr) {
+		t.Fatalf("DeleteTopic() error = %v, want PurgeError", err)
+	}
+	if purgeErr.Topic != testTopicName {
+		t.Fatalf("PurgeError topic = %q, want %q", purgeErr.Topic, testTopicName)
+	}
+	if ms.lastDeletedTopicName != testTopicName {
+		t.Fatalf("DeleteTopic() deleted topic = %q, want %q", ms.lastDeletedTopicName, testTopicName)
 	}
 }

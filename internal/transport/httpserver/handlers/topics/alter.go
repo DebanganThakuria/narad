@@ -1,10 +1,8 @@
 package topics
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -68,17 +66,13 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
-		body, readErr := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		if readErr != nil {
-			s.WriteError(w, http.StatusBadRequest, "read body: "+readErr.Error())
+		body, ok := s.ReadBody(w, r, handlers.MaxJSONBodyBytes)
+		if !ok {
 			return
 		}
 
 		var req alterRequest
-		dec := json.NewDecoder(bytes.NewReader(body))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		if !s.DecodeJSONBytes(w, body, &req) {
 			return
 		}
 		if err := req.Validate(); err != nil {

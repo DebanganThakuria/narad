@@ -75,7 +75,7 @@ func TestWriteConsumerOffsetReplacesExistingValue(t *testing.T) {
 }
 
 func TestWriteConsumerOffsetCreatesPartitionDir(t *testing.T) {
-	partitionDir := filepath.Join(t.TempDir(), "topics", "orders", "p00000")
+	partitionDir := TopicPartitionDir(t.TempDir(), "orders", 0)
 	if err := WriteConsumerOffset(partitionDir, 3); err != nil {
 		t.Fatalf("WriteConsumerOffset() error = %v", err)
 	}

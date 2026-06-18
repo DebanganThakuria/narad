@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/debanganthakuria/narad/internal/platform/netaddr"
 )
 
 const clusterVoterCount = 3
@@ -78,21 +80,7 @@ func appendClusterValidationErrors(errs *[]string, httpCfg HTTPConfig, cfg Clust
 }
 
 func clusterAddrsMatch(localAddr, peerAddr string) bool {
-	localAddr = strings.TrimSpace(localAddr)
-	peerAddr = strings.TrimSpace(peerAddr)
-	if localAddr == "" || peerAddr == "" {
-		return false
-	}
-	if localAddr == peerAddr {
-		return true
-	}
-	if strings.HasPrefix(localAddr, ":") {
-		return strings.HasSuffix(peerAddr, localAddr)
-	}
-	if strings.HasPrefix(peerAddr, ":") {
-		return strings.HasSuffix(localAddr, peerAddr)
-	}
-	return false
+	return netaddr.ClusterAddrMatchesPeer(localAddr, peerAddr)
 }
 
 func clusterVotersMatch(selfID, selfAddr, peerID, peerAddr string) bool {

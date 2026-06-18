@@ -2,13 +2,23 @@ package topics
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"github.com/debanganthakuria/narad/internal/errs"
 )
+
+type PurgeError struct {
+	Topic string
+	Err   error
+}
+
+func (e PurgeError) Error() string {
+	return fmt.Sprintf("topics: purge %q after metadata delete: %v", e.Topic, e.Err)
+}
+
+func (e PurgeError) Unwrap() error {
+	return e.Err
+}
 
 // DeleteTopic removes a topic and all of its data: closes cached
 // partition logs (each does a final flush), drops in-flight
@@ -22,19 +32,14 @@ func (m *Manager) DeleteTopic(ctx context.Context, name string) error {
 		return err
 	}
 
-	firstErr := error(nil)
 	if err := m.metastore.DeleteTopic(ctx, name); err != nil {
-		if !errors.Is(err, errs.ErrNotFound) {
-			firstErr = err
-		}
+		return err
 	}
-	if err := m.PurgeTopic(ctx, name); err != nil && firstErr == nil {
-		firstErr = err
+	if err := m.PurgeTopic(ctx, name); err != nil {
+		return PurgeError{Topic: name, Err: err}
 	}
-	if firstErr == nil {
-		m.logger.Info("topic deleted", "topic", name)
-	}
-	return firstErr
+	m.logger.Info("topic deleted", "topic", name)
+	return nil
 }
 
 func (m *Manager) PurgeTopic(_ context.Context, name string) error {

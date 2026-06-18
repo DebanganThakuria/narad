@@ -60,6 +60,7 @@ type CreateOpts struct {
 	VisibilityTimeoutMs       int64
 	MaxInFlightPerPartition   int64
 	MaxAckedAheadPerPartition int64
+	Schema                    []byte
 }
 
 // Manager handles every topic-CRUD operation. Constructed once at

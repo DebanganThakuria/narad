@@ -8,6 +8,8 @@ import (
 	"net/url"
 )
 
+const headerRequestID = "X-Request-ID"
+
 func (rt *Router) forwardProbe(r *http.Request, addr string, body []byte) httptestResponseRecorder {
 	probe := httptestResponseRecorder{header: make(http.Header)}
 	rt.forward(&probe, r, addr, body)
@@ -57,5 +59,10 @@ func (rt *Router) forward(w http.ResponseWriter, r *http.Request, addr string, b
 		r.ContentLength = int64(len(body))
 	}
 	target, _ := url.Parse("http://" + addr)
-	httputil.NewSingleHostReverseProxy(target).ServeHTTP(w, r)
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		resp.Header.Del(headerRequestID)
+		return nil
+	}
+	proxy.ServeHTTP(w, r)
 }

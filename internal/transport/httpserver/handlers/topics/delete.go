@@ -1,8 +1,10 @@
 package topics
 
 import (
+	"errors"
 	"net/http"
 
+	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
@@ -22,6 +24,12 @@ func Delete(s *handlers.Set) http.HandlerFunc {
 			}
 		}
 		if err := s.Deps.Broker.DeleteTopic(r.Context(), topicName); err != nil {
+			if _, ok := errors.AsType[brokertopics.PurgeError](err); ok && s.Deps.Router != nil {
+				if broadcastErr := s.Deps.Router.BroadcastDeleteTopic(r.Context(), topicName); broadcastErr != nil {
+					s.WriteBrokerError(w, "broadcast delete topic", broadcastErr)
+					return
+				}
+			}
 			s.WriteBrokerError(w, "delete topic", err)
 			return
 		}

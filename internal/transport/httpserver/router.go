@@ -9,6 +9,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/health"
+	httpmembers "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/members"
 	httpmessaging "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/messaging"
 	httpreplication "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/replication"
 	httptopics "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/topics"
@@ -42,6 +43,7 @@ func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prome
 	mux.HandleFunc("POST /internal/v1/replicate", httpreplication.Replicate(h))
 	mux.HandleFunc("GET /internal/v1/replicate", httpreplication.ReadReplica(h))
 	mux.HandleFunc("DELETE /internal/v1/topics/{topic}", httptopics.PurgeLocal(h))
+	mux.HandleFunc("POST /internal/v1/members", httpmembers.Register(h))
 
 	// Health Checks
 	mux.HandleFunc("GET /healthz", health.Healthz(h))

@@ -129,9 +129,12 @@ func TestRouteConsumeReturnsFalseWhenTopicMissing(t *testing.T) {
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume", nil)
 
-	forwarded := router.RouteConsume(context.Background(), res, req, "orders", nil)
+	forwarded, localPartition := router.RouteConsume(context.Background(), res, req, "orders", nil)
 	if forwarded {
 		t.Fatal("RouteConsume() = true, want false")
+	}
+	if localPartition != nil {
+		t.Fatalf("RouteConsume() local partition = %d, want nil", *localPartition)
 	}
 }
 
@@ -144,9 +147,12 @@ func TestRouteConsumeReturnsFalseWhenTopicHasNoPartitions(t *testing.T) {
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume", nil)
 
-	forwarded := router.RouteConsume(context.Background(), res, req, "orders", nil)
+	forwarded, localPartition := router.RouteConsume(context.Background(), res, req, "orders", nil)
 	if forwarded {
 		t.Fatal("RouteConsume() = true, want false")
+	}
+	if localPartition != nil {
+		t.Fatalf("RouteConsume() local partition = %d, want nil", *localPartition)
 	}
 }
 
@@ -188,6 +194,9 @@ func TestRouteProduceForwardsToRemoteOwner(t *testing.T) {
 	}
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-follower", Addr: "follower.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember(follower) error = %v", err)
 	}
 	if err := store.AssignPartition(ctx, "orders", 1, "node-remote", "node-follower"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
@@ -249,6 +258,52 @@ func TestRouteProduceFallsBackToNextReachablePartition(t *testing.T) {
 	}
 	if got := res.Body.String(); got != `{"ok":true}` {
 		t.Fatalf("body = %q, want %q", got, `{"ok":true}`)
+	}
+}
+
+func TestRouteProduceSkipsUnwritableLocalOwner(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("partition"); got != "1" {
+			t.Fatalf("partition query = %q, want %q", got, "1")
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer remote.Close()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember(self) error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-dead", Addr: "dead.example:7942", Status: metastore.MemberDead}); err != nil {
+		t.Fatalf("RegisterMember(dead) error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-follower", Addr: "follower.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember(follower) error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember(remote) error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 0, "node-self", "node-dead"); err != nil {
+		t.Fatalf("AssignPartition(0) error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote", "node-follower"); err != nil {
+		t.Fatalf("AssignPartition(1) error = %v", err)
+	}
+
+	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 0}, nil)
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
+
+	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"message":{"id":1}}`))
+	if !forwarded {
+		t.Fatal("RouteProduce() = false, want true")
+	}
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusAccepted)
 	}
 }
 
@@ -456,12 +511,107 @@ func TestRouteConsumeForwardsPinnedPartitionToRemoteOwner(t *testing.T) {
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=1s", nil)
-	forwarded := router.RouteConsume(context.Background(), res, req, "orders", new(1))
+	forwarded, localPartition := router.RouteConsume(context.Background(), res, req, "orders", new(1))
 	if !forwarded {
 		t.Fatal("RouteConsume() = false, want true")
 	}
+	if localPartition != nil {
+		t.Fatalf("RouteConsume() local partition = %d, want nil", *localPartition)
+	}
 	if res.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+}
+
+func TestRouteConsumeReturnsLocalPartitionAfterEmptyRemoteProbe(t *testing.T) {
+	var probed []int
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, err := strconv.Atoi(r.URL.Query().Get("partition"))
+		if err != nil {
+			t.Fatalf("partition query parse error = %v", err)
+		}
+		if got := r.URL.Query().Get("wait"); got != "0s" {
+			t.Fatalf("wait query = %q, want %q", got, "0s")
+		}
+		probed = append(probed, p)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer remote.Close()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote", ""); err != nil {
+		t.Fatalf("AssignPartition(0) error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 1, "node-self", ""); err != nil {
+		t.Fatalf("AssignPartition(1) error = %v", err)
+	}
+
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=1s", nil)
+
+	forwarded, localPartition := router.RouteConsume(context.Background(), res, req, "orders", nil)
+	if forwarded {
+		t.Fatal("RouteConsume() forwarded = true, want false")
+	}
+	if localPartition == nil || *localPartition != 1 {
+		t.Fatalf("RouteConsume() local partition = %+v, want 1", localPartition)
+	}
+	if len(probed) != 1 || probed[0] != 0 {
+		t.Fatalf("probed partitions = %v, want [0]", probed)
+	}
+}
+
+func TestRouteConsumeReturnsNoContentWhenOnlyRemotePartitionsAreEmpty(t *testing.T) {
+	var probed []int
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, err := strconv.Atoi(r.URL.Query().Get("partition"))
+		if err != nil {
+			t.Fatalf("partition query parse error = %v", err)
+		}
+		probed = append(probed, p)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer remote.Close()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote", ""); err != nil {
+		t.Fatalf("AssignPartition(0) error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote", ""); err != nil {
+		t.Fatalf("AssignPartition(1) error = %v", err)
+	}
+
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=1s", nil)
+
+	forwarded, localPartition := router.RouteConsume(context.Background(), res, req, "orders", nil)
+	if !forwarded {
+		t.Fatal("RouteConsume() forwarded = false, want true")
+	}
+	if localPartition != nil {
+		t.Fatalf("RouteConsume() local partition = %d, want nil", *localPartition)
+	}
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+	if len(probed) != 2 || probed[0] != 0 || probed[1] != 1 {
+		t.Fatalf("probed partitions = %v, want [0 1]", probed)
 	}
 }
 
@@ -724,6 +874,41 @@ func TestRouteCreateTopicForwardsWhenLeaderMemberUsesExactLeaderAddress(t *testi
 	forwarded := router.RouteCreateTopic(context.Background(), res, req, []byte(`{"name":"orders"}`))
 	if !forwarded {
 		t.Fatal("RouteCreateTopic() = false, want true")
+	}
+}
+
+func TestRouteCreateTopicUsesMemberHTTPAddrWhenClusterAddrMatchesLeader(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	var gotPath string
+	leaderHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer leaderHTTP.Close()
+
+	leaderHTTPAddr := strings.TrimPrefix(leaderHTTP.URL, "http://")
+	if err := store.RegisterMember(ctx, metastore.Member{
+		ID:          "node-leader",
+		Addr:        leaderHTTPAddr,
+		ClusterAddr: store.LeaderAddr(),
+		Status:      metastore.MemberAlive,
+	}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewReader([]byte(`{"name":"orders"}`)))
+
+	forwarded := router.RouteCreateTopic(context.Background(), res, req, []byte(`{"name":"orders"}`))
+	if !forwarded {
+		t.Fatal("RouteCreateTopic() = false, want true")
+	}
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusCreated)
+	}
+	if gotPath != "/v1/topics" {
+		t.Fatalf("forwarded path = %q, want %q", gotPath, "/v1/topics")
 	}
 }
 
@@ -1019,9 +1204,12 @@ func TestRouteConsumeWalksRankedPartitionsOnce(t *testing.T) {
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=1s", nil)
 
-	forwarded := router.RouteConsume(context.Background(), res, req, "orders", nil)
+	forwarded, localPartition := router.RouteConsume(context.Background(), res, req, "orders", nil)
 	if !forwarded {
 		t.Fatal("RouteConsume() = false, want true")
+	}
+	if localPartition != nil {
+		t.Fatalf("RouteConsume() local partition = %d, want nil", *localPartition)
 	}
 	if res.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)

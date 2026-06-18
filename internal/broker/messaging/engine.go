@@ -75,7 +75,7 @@ func (e *Engine) localPartitions(topicName string, totalPartitions int) []int {
 	}
 	rows, err := assignments.ListAssignments(topicName)
 	if err != nil || len(rows) == 0 {
-		return allPartitions(totalPartitions)
+		return nil
 	}
 	owned := ownerPartitions(rows, e.selfID)
 	if len(owned) == 0 {
@@ -185,26 +185,45 @@ func (e *Engine) pickProducePartition(topicName, key string, partitions int) (in
 	if !ok {
 		return start, nil
 	}
-	for i := 0; i < partitions; i++ {
+	for i := range partitions {
 		candidate := (start + i) % partitions
 		assignment, err := assignments.GetAssignment(topicName, candidate)
 		if err != nil {
 			continue
 		}
-		owner, err := assignments.GetMember(assignment.OwnerID)
-		if err != nil || owner.Status != metastore.MemberAlive {
-			continue
-		}
-		if assignment.FollowerID == "" {
-			return candidate, nil
-		}
-		follower, err := assignments.GetMember(assignment.FollowerID)
-		if err != nil || follower.Status != metastore.MemberAlive {
+		if !produceAssignmentWritable(assignments, assignment) {
 			continue
 		}
 		return candidate, nil
 	}
 	return 0, fmt.Errorf("messaging: no alive partition owner for topic %s", topicName)
+}
+
+func produceAssignmentWritable(assignments assignmentReader, assignment metastore.Assignment) bool {
+	owner, err := assignments.GetMember(assignment.OwnerID)
+	if err != nil || owner.Status != metastore.MemberAlive {
+		return false
+	}
+	if assignment.FollowerID == "" {
+		return true
+	}
+	follower, err := assignments.GetMember(assignment.FollowerID)
+	return err == nil && follower.Status == metastore.MemberAlive
+}
+
+func (e *Engine) isWritableLocalProducePartition(topicName string, partition int) bool {
+	if e.selfID == "" {
+		return true
+	}
+	assignments, ok := e.metastore.(assignmentReader)
+	if !ok {
+		return true
+	}
+	assignment, err := assignments.GetAssignment(topicName, partition)
+	if err != nil {
+		return false
+	}
+	return assignment.OwnerID == e.selfID && produceAssignmentWritable(assignments, assignment)
 }
 
 func (e *Engine) isLocalOwner(topicName string, partition int) bool {
@@ -217,7 +236,7 @@ func (e *Engine) isLocalOwner(topicName string, partition int) bool {
 	}
 	assignment, err := assignments.GetAssignment(topicName, partition)
 	if err != nil {
-		return true
+		return false
 	}
 	return assignment.OwnerID == e.selfID
 }

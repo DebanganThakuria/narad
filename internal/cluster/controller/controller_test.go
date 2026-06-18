@@ -106,7 +106,7 @@ func TestReconcileDoesNotMoveExistingAssignments(t *testing.T) {
 	registerMember(t, s, "narad-0")
 	s.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 4})
 
-	for p := 0; p < 4; p++ {
+	for p := range 4 {
 		s.AssignPartition(ctx, "orders", p, "narad-0", "narad-1")
 	}
 
@@ -135,7 +135,7 @@ func TestReconcileReassignsPartitionsOwnedByDeadMember(t *testing.T) {
 	if err := s.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 3, ReplicationFactor: 2}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
-	for p := 0; p < 3; p++ {
+	for p := range 3 {
 		if err := s.AssignPartition(ctx, "orders", p, "narad-dead", "narad-1"); err != nil {
 			t.Fatalf("AssignPartition %d: %v", p, err)
 		}

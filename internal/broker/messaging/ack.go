@@ -34,7 +34,7 @@ func (e *Engine) Ack(ctx context.Context, topicName string, receiptHandle string
 	}
 
 	if err := e.offsets.CommitHandle(topicName, h.Partition, h.Offset, h.Nonce); err != nil {
-		if errors.Is(err, consumer.ErrAckedAheadFull) {
+		if errors.Is(err, consumer.ErrAckedAheadFull) && e.metrics != nil {
 			e.metrics.IncAckRejected("cap")
 		}
 		return err

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -44,17 +43,13 @@ func Produce(s *handlers.Set) http.HandlerFunc {
 		}
 
 		// Read body once — may need to forward it to the partition owner.
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		if err != nil {
-			s.WriteError(w, http.StatusBadRequest, "read body: "+err.Error())
+		body, ok := s.ReadBody(w, r, handlers.MaxJSONBodyBytes)
+		if !ok {
 			return
 		}
 
 		var req produceRequest
-		dec := json.NewDecoder(bytes.NewReader(body))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		if !s.DecodeJSONBytes(w, body, &req) {
 			return
 		}
 		if err := req.Validate(); err != nil {
@@ -72,7 +67,16 @@ func Produce(s *handlers.Set) http.HandlerFunc {
 			}
 		}
 
-		offset, partition, err := s.Deps.Broker.Produce(r.Context(), topicName, key, []byte(req.Message))
+		var (
+			offset    int64
+			partition int
+			err       error
+		)
+		if pinnedPartition != nil {
+			offset, partition, err = s.Deps.Broker.Produce(r.Context(), topicName, key, []byte(req.Message), *pinnedPartition)
+		} else {
+			offset, partition, err = s.Deps.Broker.Produce(r.Context(), topicName, key, []byte(req.Message))
+		}
 		if err != nil {
 			s.WriteBrokerError(w, "produce", err)
 			return

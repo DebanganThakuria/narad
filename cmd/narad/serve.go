@@ -78,7 +78,12 @@ func runServe(args []string) error {
 	defer closeWithLog(log, "metastore", ms.Close)
 
 	// Build the main broker which is responsible for all client actions
-	br, logs, offsets, err := buildBroker(cfg, nodeID, ms, m, log)
+	schemas := schema.NewJSONSchema()
+	if err = initializeSchemas(context.Background(), ms, schemas); err != nil {
+		return fmt.Errorf("initialize schemas: %w", err)
+	}
+
+	br, logs, offsets, lifecycle, err := buildBroker(cfg, nodeID, ms, schemas, m, log)
 	if err != nil {
 		return err
 	}
@@ -91,19 +96,21 @@ func runServe(args []string) error {
 	recoveryClient := &http.Client{Timeout: 5 * time.Second}
 	recovery := replication.NewStoreRecovery(nodeID, ms, logs, recoveryClient)
 
-	hb := controller.NewHeartbeater(ms, metastore.Member{
-		ID:     nodeID,
-		Addr:   advertisedClusterAddr(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
-		Status: metastore.MemberAlive,
-	}, 5*time.Second)
+	member := metastore.Member{
+		ID:          nodeID,
+		Addr:        advertisedMemberAddr(nodeID, cfg.HTTP.Addr, cfg.Cluster.Addr, cfg.Cluster.Peers),
+		ClusterAddr: advertisedClusterAddr(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
+		Status:      metastore.MemberAlive,
+	}
 	ctrl := controller.New(ms, controller.Config{})
 	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), br)
 
 	// Start background processes
 	var wg sync.WaitGroup
-	wg.Go(func() { hb.Run(ctx) })
+	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, recoveryClient, log) })
 	wg.Go(func() { ctrl.Run(ctx) })
 	wg.Go(func() { offsets.RunPurger(ctx, time.Second) })
+	startPprofServer(ctx, &wg, cfg.HTTP.PprofAddr, log)
 
 	poller := metrics.NewPoller(m, br, log)
 	wg.Go(func() { poller.Run(ctx) })
@@ -116,19 +123,20 @@ func runServe(args []string) error {
 	})
 
 	// Finally build the API server
-	srv := buildAPIServer(cfg, br, logs, router, m, reg, log)
+	srv := buildAPIServer(ctx, cfg, br, logs, ms, router, m, reg, log)
+	lifecycle.MarkReady()
+	defer lifecycle.MarkNotReady()
 
 	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())
-
-	if err = srv.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("server: %w", err)
-	}
-
-	log.Info("narad serve started",
+	log.Info("narad serve starting",
 		"addr", cfg.HTTP.Addr,
 		"cluster_addr", cfg.Cluster.Addr,
 		"data_dir", cfg.Storage.DataDir,
 		"version", versionString())
+
+	if err = srv.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("server: %w", err)
+	}
 
 	wg.Wait()
 
@@ -179,6 +187,9 @@ func (f *serveFlags) applyTo(cfg *config.Config) {
 	}
 	if f.logFormat != "" {
 		cfg.Log.Format = f.logFormat
+	}
+	if f.pprofAddr != "" {
+		cfg.HTTP.PprofAddr = f.pprofAddr
 	}
 }
 
@@ -234,55 +245,10 @@ func resolveNodeID(cfg *config.Config) (string, error) {
 	return nodeID, nil
 }
 
-func configPeersToMetastore(nodeID, clusterAddr string, peers []config.ClusterPeer) []metastore.Peer {
-	if len(peers) == 0 {
-		return nil
-	}
-	out := make([]metastore.Peer, 0, len(peers)-1)
-	for _, peer := range peers {
-		if peer.ID == nodeID && clusterAddrMatchesPeer(clusterAddr, peer.Addr) {
-			continue
-		}
-		out = append(out, metastore.Peer{ID: peer.ID, Addr: peer.Addr})
-	}
-	return out
-}
-
-func advertisedClusterAddr(nodeID, clusterAddr string, peers []config.ClusterPeer) string {
-	for _, peer := range peers {
-		if peer.ID != nodeID || !clusterAddrMatchesPeer(clusterAddr, peer.Addr) {
-			continue
-		}
-		if strings.HasPrefix(clusterAddr, ":") && !strings.HasPrefix(strings.TrimSpace(peer.Addr), ":") {
-			return peer.Addr
-		}
-		return clusterAddr
-	}
-	return clusterAddr
-}
-
-func clusterAddrMatchesPeer(clusterAddr, peerAddr string) bool {
-	clusterAddr = strings.TrimSpace(clusterAddr)
-	peerAddr = strings.TrimSpace(peerAddr)
-	if clusterAddr == "" || peerAddr == "" {
-		return false
-	}
-	if clusterAddr == peerAddr {
-		return true
-	}
-	if strings.HasPrefix(clusterAddr, ":") {
-		return strings.HasSuffix(peerAddr, clusterAddr)
-	}
-	if strings.HasPrefix(peerAddr, ":") {
-		return strings.HasSuffix(clusterAddr, peerAddr)
-	}
-	return false
-}
-
-func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, m *metrics.Metrics, log *slog.Logger) (broker.Broker, *runtime.Logs, *consumer.InFlight, error) {
+func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, schemas schema.Registry, m *metrics.Metrics, log *slog.Logger) (broker.Broker, *runtime.Logs, *consumer.InFlight, *runtime.Lifecycle, error) {
 	storageOpts, err := storageOptions(cfg.Storage)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("storage options: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("storage options: %w", err)
 	}
 
 	resolveCaps := func(ctx context.Context, topicName string) (consumer.Caps, error) {
@@ -302,7 +268,7 @@ func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, m *m
 	}
 
 	onCommit := func(topic string, partition int, offset int64) {
-		partitionDir := filepath.Join(cfg.Storage.DataDir, "topics", topic, fmt.Sprintf("p%05d", partition))
+		partitionDir := storage.TopicPartitionDir(cfg.Storage.DataDir, topic, partition)
 		if err := storage.WriteConsumerOffset(partitionDir, offset); err != nil {
 			log.Error("consumer offset write failed", "topic", topic, "partition", partition, "offset", offset, "err", err)
 		}
@@ -310,13 +276,14 @@ func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, m *m
 
 	offsets := consumer.NewInFlight(resolveCaps, onCommit)
 	logs := runtime.NewLogs(cfg.Storage.DataDir, storageOpts, ms, m)
-	if err = initializeConsumerOffsets(context.Background(), cfg.Storage.DataDir, ms, offsets, log); err != nil {
-		return nil, nil, nil, fmt.Errorf("initialize consumer offsets: %w", err)
+	lifecycle := runtime.NewLifecycle(logs)
+	if err = initializeConsumerOffsets(context.Background(), cfg.Storage.DataDir, ms, offsets, log, nodeID); err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("initialize consumer offsets: %w", err)
 	}
 
 	store, ok := ms.(*metastore.Store)
 	if !ok {
-		return nil, nil, nil, errors.New("broker: cluster replication requires metastore.Store")
+		return nil, nil, nil, nil, errors.New("broker: cluster replication requires metastore.Store")
 	}
 
 	br, err := broker.New(broker.Deps{
@@ -333,40 +300,78 @@ func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, m *m
 		},
 		Metastore:       ms,
 		Partitions:      partition.NewHashRoundRobin(),
-		Schemas:         schema.NewJSONSchema(),
+		Schemas:         schemas,
 		ConsumerOffsets: offsets,
 		Replicator:      replication.NewCluster(nodeID, store, &http.Client{Timeout: 5 * time.Second}),
 		Logs:            logs,
 		Logger:          log,
 		SelfID:          nodeID,
+		Lifecycle:       lifecycle,
 		Metrics:         m,
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("broker: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("broker: %w", err)
 	}
-	return br, logs, offsets, nil
+	return br, logs, offsets, lifecycle, nil
 }
 
-func buildAPIServer(cfg *config.Config, br broker.Broker, logs *runtime.Logs, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, log *slog.Logger) *httpserver.Server {
+func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, logs *runtime.Logs, ms *metastore.Store, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, log *slog.Logger) *httpserver.Server {
 	handlerSet := handlers.New(handlers.Deps{
 		Broker:         br,
 		Logs:           logs,
+		Metastore:      ms,
 		Logger:         log,
 		MaxConsumeWait: cfg.HTTP.MaxConsumeWait.D(),
+		ShutdownCtx:    ctx,
 		Router:         router,
 	})
 	return httpserver.New(cfg.HTTP, httpserver.NewRouter(handlerSet, log, m, reg), log)
 }
 
-func initializeConsumerOffsets(ctx context.Context, dataDir string, ms metastore.Metastore, offsets *consumer.InFlight, log *slog.Logger) error {
-	// TODO Only list topics this is a leader of and own it
+func initializeSchemas(ctx context.Context, ms metastore.Metastore, schemas schema.Registry) error {
 	topics, _, err := ms.ListTopics(ctx, metastore.ListOptions{})
 	if err != nil {
 		return err
 	}
 	for _, topicCfg := range topics {
-		for partition := 0; partition < topicCfg.Partitions; partition++ {
-			partitionDir := filepath.Join(dataDir, "topics", topicCfg.Name, fmt.Sprintf("p%05d", partition))
+		for version := 1; ; version++ {
+			raw, err := ms.GetSchema(ctx, topicCfg.Name, version)
+			if err != nil {
+				if errors.Is(err, metastore.ErrNotFound) {
+					break
+				}
+				return err
+			}
+			if err := schemas.Load(ctx, topicCfg.Name, version, raw); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func initializeConsumerOffsets(ctx context.Context, dataDir string, ms metastore.Metastore, offsets *consumer.InFlight, log *slog.Logger, nodeID string) error {
+	topics, _, err := ms.ListTopics(ctx, metastore.ListOptions{})
+	if err != nil {
+		return err
+	}
+	store, ok := ms.(*metastore.Store)
+	if !ok {
+		return fmt.Errorf("metastore does not support assignment listing")
+	}
+	for _, topicCfg := range topics {
+		assignments, err := store.ListAssignments(topicCfg.Name)
+		if err != nil {
+			return err
+		}
+		owned := make(map[int]struct{}, len(assignments))
+		for _, assignment := range assignments {
+			if assignment.OwnerID == nodeID {
+				owned[assignment.Partition] = struct{}{}
+			}
+		}
+		for partition := range owned {
+			partitionDir := storage.TopicPartitionDir(dataDir, topicCfg.Name, partition)
 			committed, ok, err := storage.ReadConsumerOffset(partitionDir)
 			if err != nil {
 				log.Error("consumer offset recovery skipped", "topic", topicCfg.Name, "partition", partition, "err", err)

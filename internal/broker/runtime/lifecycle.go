@@ -1,11 +1,18 @@
 package runtime
 
-import "context"
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+)
+
+var errNotReady = errors.New("not ready")
 
 // Lifecycle owns broker-level startup/shutdown hooks. Embedded into
 // the broker facade so Ready and Close satisfy the Broker interface.
 type Lifecycle struct {
-	logs *Logs
+	logs  *Logs
+	ready atomic.Bool
 }
 
 // NewLifecycle wires a Lifecycle.
@@ -13,14 +20,33 @@ func NewLifecycle(logs *Logs) *Lifecycle {
 	return &Lifecycle{logs: logs}
 }
 
-// Ready returns nil — the broker is single-node and is ready as soon
-// as construction completes. Future replication will check follower
-// liveness here.
-// TODO complete implementation. Check if all the nodes in the cluster are ready
-func (l *Lifecycle) Ready(_ context.Context) error { return nil }
+func (l *Lifecycle) MarkReady() {
+	l.ready.Store(true)
+}
+
+func (l *Lifecycle) MarkNotReady() {
+	l.ready.Store(false)
+}
+
+func (l *Lifecycle) Ready(_ context.Context) error {
+	if !l.ready.Load() {
+		return errNotReady
+	}
+	return nil
+}
 
 // Close releases all open partition logs. Each Log.Close() does a
 // final flush before releasing its file handles.
 func (l *Lifecycle) Close() error {
+	l.MarkNotReady()
 	return l.logs.CloseAll()
+}
+
+var _ interface {
+	MarkReady()
+	MarkNotReady()
+} = (*Lifecycle)(nil)
+
+func IsNotReady(err error) bool {
+	return errors.Is(err, errNotReady)
 }

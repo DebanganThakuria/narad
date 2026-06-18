@@ -5,11 +5,14 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
 
 type consumePartitionCandidate struct {
 	partition int
 	addr      string
+	local     bool
 	backlog   int64
 	order     int
 }
@@ -23,16 +26,11 @@ func (rt *Router) consumePartitionCandidates(ctx context.Context, topicName stri
 	backlogByPartition := rt.backlogByPartition(ctx, topicName)
 	candidates := make([]consumePartitionCandidate, 0, len(assignments))
 	for i, assignment := range assignments {
-		addr := rt.ownerAddr(topicName, assignment.Partition)
-		if addr == "" {
+		candidate, ok := rt.consumePartitionCandidate(assignment, backlogByPartition, i)
+		if !ok {
 			continue
 		}
-		candidates = append(candidates, consumePartitionCandidate{
-			partition: assignment.Partition,
-			addr:      addr,
-			backlog:   backlogByPartition[assignment.Partition],
-			order:     i,
-		})
+		candidates = append(candidates, candidate)
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].backlog != candidates[j].backlog {
@@ -44,6 +42,27 @@ func (rt *Router) consumePartitionCandidates(ctx context.Context, topicName stri
 		return candidates[i].order < candidates[j].order
 	})
 	return candidates
+}
+
+func (rt *Router) consumePartitionCandidate(assignment metastore.Assignment, backlogByPartition map[int]int64, order int) (consumePartitionCandidate, bool) {
+	if assignment.OwnerID == rt.selfID {
+		return consumePartitionCandidate{
+			partition: assignment.Partition,
+			local:     true,
+			backlog:   backlogByPartition[assignment.Partition],
+			order:     order,
+		}, true
+	}
+	addr := rt.ownerAddr(assignment.Topic, assignment.Partition)
+	if addr == "" {
+		return consumePartitionCandidate{}, false
+	}
+	return consumePartitionCandidate{
+		partition: assignment.Partition,
+		addr:      addr,
+		backlog:   backlogByPartition[assignment.Partition],
+		order:     order,
+	}, true
 }
 
 func (rt *Router) backlogByPartition(ctx context.Context, topicName string) map[int]int64 {
@@ -60,10 +79,7 @@ func (rt *Router) backlogByPartition(ctx context.Context, topicName string) map[
 			continue
 		}
 		for _, partitionSnapshot := range snapshot.Partitions {
-			value := partitionSnapshot.LogEndOffset - partitionSnapshot.CommittedOffset
-			if value < 0 {
-				value = 0
-			}
+			value := max(partitionSnapshot.LogEndOffset-partitionSnapshot.CommittedOffset, 0)
 			backlog[partitionSnapshot.Partition] = value
 		}
 		break

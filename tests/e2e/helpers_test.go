@@ -184,6 +184,8 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		replicatorImpl = replication.NewLocal()
 	}
 
+	logs := runtime.NewLogs(opts.dataDir, opts.logOptions, ms, m)
+	lifecycle := runtime.NewLifecycle(logs)
 	br, err := broker.New(broker.Deps{
 		DataDir:        opts.dataDir,
 		StorageOptions: opts.logOptions,
@@ -201,14 +203,15 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		Schemas:         schema.NewJSONSchema(),
 		ConsumerOffsets: consumer.NewInFlight(resolveCaps, nil),
 		Replicator:      replicatorImpl,
+		Logs:            logs,
 		Logger:          log,
+		Lifecycle:       lifecycle,
 		Metrics:         m,
 	})
 	if err != nil {
 		t.Fatalf("broker: %v", err)
 	}
-
-	logs := runtime.NewLogs(opts.dataDir, opts.logOptions, ms, m)
+	lifecycle.MarkReady()
 
 	h := handlers.New(handlers.Deps{
 		Broker:         br,

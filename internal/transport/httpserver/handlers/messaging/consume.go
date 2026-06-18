@@ -29,8 +29,12 @@ func Consume(s *handlers.Set) http.HandlerFunc {
 		}
 
 		if s.Deps.Router != nil {
-			if s.Deps.Router.RouteConsume(r.Context(), w, r, topicName, opts.Partition) {
+			forwarded, localPartition := s.Deps.Router.RouteConsume(r.Context(), w, r, topicName, opts.Partition)
+			if forwarded {
 				return
+			}
+			if localPartition != nil {
+				opts.Partition = localPartition
 			}
 		}
 

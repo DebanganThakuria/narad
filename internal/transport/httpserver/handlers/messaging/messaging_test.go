@@ -34,6 +34,7 @@ type fakeBroker struct {
 	getTopicDetailsFn         func(context.Context, string) (topic.Details, error)
 	listTopicsFn              func(context.Context, metastore.ListOptions) ([]topic.Topic, string, error)
 	produceFn                 func(context.Context, string, string, []byte) (int64, int, error)
+	producePartitions         []int
 	consumeFn                 func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error)
 	ackFn                     func(context.Context, string, string) error
 	readyFn                   func(context.Context) error
@@ -82,7 +83,8 @@ func (f *fakeBroker) ListTopics(ctx context.Context, opts metastore.ListOptions)
 	return f.listTopicsFn(ctx, opts)
 }
 
-func (f *fakeBroker) Produce(ctx context.Context, topicName, key string, payload []byte) (int64, int, error) {
+func (f *fakeBroker) Produce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (int64, int, error) {
+	f.producePartitions = append([]int(nil), partition...)
 	return f.produceFn(ctx, topicName, key, payload)
 }
 
@@ -104,7 +106,7 @@ func (f *fakeBroker) Close() error { return nil }
 
 type fakeRouter struct {
 	routeProduceFn     func(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool
-	routeConsumeFn     func(context.Context, http.ResponseWriter, *http.Request, string, *int) bool
+	routeConsumeFn     func(context.Context, http.ResponseWriter, *http.Request, string, *int) (bool, *int)
 	routeAckFn         func(context.Context, http.ResponseWriter, *http.Request, string, int, []byte) bool
 	routeCreateTopicFn func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
 	routeAlterTopicFn  func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool
@@ -117,9 +119,9 @@ func (f *fakeRouter) RouteProduce(ctx context.Context, w http.ResponseWriter, r 
 	return f.routeProduceFn(ctx, w, r, topicName, key, body)
 }
 
-func (f *fakeRouter) RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) bool {
+func (f *fakeRouter) RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) (bool, *int) {
 	if f.routeConsumeFn == nil {
-		return false
+		return false, nil
 	}
 	return f.routeConsumeFn(ctx, w, r, topicName, pinnedPartition)
 }
@@ -258,10 +260,11 @@ func TestProduceHandlerRejectsInvalidPartitionQuery(t *testing.T) {
 func TestProduceHandlerSkipsRouterForPinnedPartition(t *testing.T) {
 	brokerCalled := false
 	routerCalled := false
-	s := newTestSet(&fakeBroker{produceFn: func(_ context.Context, topicName, key string, payload []byte) (int64, int, error) {
+	broker := &fakeBroker{produceFn: func(_ context.Context, topicName, key string, payload []byte) (int64, int, error) {
 		brokerCalled = topicName == "orders" && key == "customer-1" && string(payload) == `{"id":1}`
-		return 3, 1, nil
-	}}, &fakeRouter{routeProduceFn: func(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool {
+		return 3, 2, nil
+	}}
+	s := newTestSet(broker, &fakeRouter{routeProduceFn: func(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool {
 		routerCalled = true
 		return false
 	}})
@@ -280,6 +283,9 @@ func TestProduceHandlerSkipsRouterForPinnedPartition(t *testing.T) {
 	}
 	if !brokerCalled {
 		t.Fatal("Produce() did not call broker for pinned partition")
+	}
+	if len(broker.producePartitions) != 1 || broker.producePartitions[0] != 2 {
+		t.Fatalf("Produce() pinned partitions = %v, want [2]", broker.producePartitions)
 	}
 }
 
@@ -445,10 +451,10 @@ func TestConsumeHandlerRoutesBeforeBroker(t *testing.T) {
 	s := newTestSet(&fakeBroker{consumeFn: func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {
 		brokerCalled = true
 		return topic.Message{}, false, nil
-	}}, &fakeRouter{routeConsumeFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName string, pinnedPartition *int) bool {
+	}}, &fakeRouter{routeConsumeFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName string, pinnedPartition *int) (bool, *int) {
 		routerCalled = topicName == "orders" && pinnedPartition != nil && *pinnedPartition == 2
 		w.WriteHeader(http.StatusAccepted)
-		return true
+		return true, nil
 	}})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?partition=2", nil)
@@ -465,6 +471,30 @@ func TestConsumeHandlerRoutesBeforeBroker(t *testing.T) {
 	}
 	if brokerCalled {
 		t.Fatal("Consume() called broker after routing")
+	}
+}
+
+func TestConsumeHandlerUsesRouterLocalPartition(t *testing.T) {
+	var gotOpts brokermsg.ConsumeOpts
+	localPartition := 3
+	s := newTestSet(&fakeBroker{consumeFn: func(_ context.Context, _ string, opts brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+		gotOpts = opts
+		return topic.Message{Topic: "orders", Partition: localPartition, Offset: 1, Payload: []byte(`{"id":1}`), ReceiptHandle: "h1"}, true, nil
+	}}, &fakeRouter{routeConsumeFn: func(context.Context, http.ResponseWriter, *http.Request, string, *int) (bool, *int) {
+		return false, &localPartition
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Consume(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("Consume() status = %d, want %d", res.Code, http.StatusOK)
+	}
+	if gotOpts.Partition == nil || *gotOpts.Partition != localPartition {
+		t.Fatalf("Consume() partition = %+v, want %d", gotOpts.Partition, localPartition)
 	}
 }
 
