@@ -582,18 +582,23 @@ func deleteTopics(ctx context.Context, lb *roundRobinClient, topics []string) er
 
 func verifyDeleted(ctx context.Context, lb *roundRobinClient, nodes []string, topics []string) error {
 	for _, node := range nodes {
-		var listed listTopicsResponse
-		if _, _, err := lb.doTo(ctx, node, http.MethodGet, "/v1/topics?limit=1000", nil, &listed, http.StatusOK); err != nil {
-			return fmt.Errorf("list after delete on %s: %w", node, err)
-		}
-		left := make(map[string]struct{}, len(listed.Topics))
-		for _, t := range listed.Topics {
-			left[t.Name] = struct{}{}
-		}
-		for _, topicName := range topics {
-			if _, ok := left[topicName]; ok {
-				return fmt.Errorf("topic %s still listed on %s", topicName, node)
+		if err := retry(ctx, 40, 250*time.Millisecond, func() error {
+			var listed listTopicsResponse
+			if _, _, err := lb.doTo(ctx, node, http.MethodGet, "/v1/topics?limit=1000", nil, &listed, http.StatusOK); err != nil {
+				return err
 			}
+			left := make(map[string]struct{}, len(listed.Topics))
+			for _, t := range listed.Topics {
+				left[t.Name] = struct{}{}
+			}
+			for _, topicName := range topics {
+				if _, ok := left[topicName]; ok {
+					return fmt.Errorf("topic %s still listed", topicName)
+				}
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("verify deleted on %s: %w", node, err)
 		}
 	}
 	return nil
