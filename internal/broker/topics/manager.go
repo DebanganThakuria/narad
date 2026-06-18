@@ -60,6 +60,7 @@ type CreateOpts struct {
 	VisibilityTimeoutMs       int64
 	MaxInFlightPerPartition   int64
 	MaxAckedAheadPerPartition int64
+	Schema                    []byte
 }
 
 // PartitionAssigner assigns a topic partition range to cluster members.

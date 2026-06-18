@@ -235,8 +235,11 @@ func mustAck(t *testing.T, e *env, topicName, receiptHandle string) {
 	}
 }
 
-func intPtr(n int) *int       { return &n }
-func int64Ptr(n int64) *int64 { return &n }
+//go:fix inline
+func intPtr(n int) *int { return new(n) }
+
+//go:fix inline
+func int64Ptr(n int64) *int64 { return new(n) }
 
 func itoa(n int) string     { return strconv.Itoa(n) }
 func i64toa(n int64) string { return strconv.FormatInt(n, 10) }

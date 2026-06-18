@@ -1,9 +1,6 @@
 package messaging
 
 import (
-	"bytes"
-	"encoding/json"
-	"io"
 	"net/http"
 
 	"github.com/debanganthakuria/narad/internal/consumer"
@@ -26,17 +23,13 @@ func Ack(s *handlers.Set) http.HandlerFunc {
 		}
 
 		// Read body once — may need to forward to the partition owner.
-		body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
-		if err != nil {
-			s.WriteError(w, http.StatusBadRequest, "read body: "+err.Error())
+		body, ok := s.ReadBody(w, r, handlers.MaxAckBodyBytes)
+		if !ok {
 			return
 		}
 
 		var req ackRequest
-		dec := json.NewDecoder(bytes.NewReader(body))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		if !s.DecodeJSONBytes(w, body, &req) {
 			return
 		}
 		if req.ReceiptHandle == "" {

@@ -86,6 +86,10 @@ tidy: ## go mod tidy.
 .PHONY: check
 check: fmt-check vet test ## Strict check: fmt-check + vet + test (no auto-fix).
 
+.PHONY: local-cluster-e2e
+local-cluster-e2e: ## Run a local 3-node cluster integration/load test. Pass ARGS='--topics 10 --messages 1000' to override.
+	./scripts/local-cluster-e2e.sh $(ARGS)
+
 # ---- developer setup -----------------------------------------------------
 
 .PHONY: tools-install

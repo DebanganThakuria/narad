@@ -86,11 +86,16 @@ func ReadReplica(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, "invalid offset")
 			return
 		}
+		committedOnly := r.URL.Query().Get("committed") == "true"
 
 		log, err := s.Deps.Logs.Get(topicName, partitionIdx)
 		if err != nil {
 			s.Deps.Logger.Error("replica read open log", "topic", topicName, "partition", partitionIdx, "err", err)
 			s.WriteError(w, http.StatusInternalServerError, "replica read failed")
+			return
+		}
+		if committedOnly && offset >= log.HighWatermark() {
+			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		payload, err := log.Read(offset)

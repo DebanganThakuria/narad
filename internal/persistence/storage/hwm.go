@@ -35,13 +35,7 @@ func (l *Log) loadHighWatermark(nextOffset int64) error {
 		return fmt.Errorf("storage: invalid hwm file size %d", len(data))
 	}
 
-	persisted := int64(binary.BigEndian.Uint64(data))
-	if persisted < 0 {
-		persisted = 0
-	}
-	if persisted > nextOffset {
-		persisted = nextOffset
-	}
+	persisted := min(max(int64(binary.BigEndian.Uint64(data)), 0), nextOffset)
 	l.highWatermark.Store(persisted)
 	return nil
 }
@@ -51,6 +45,25 @@ func (l *Log) bootstrapHighWatermark(nextOffset int64) {
 		nextOffset = 0
 	}
 	l.highWatermark.Store(nextOffset)
+}
+
+func (l *Log) PersistedHighWatermark() (int64, error) {
+	data, err := os.ReadFile(l.hwmPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return l.HighWatermark(), nil
+		}
+		return 0, fmt.Errorf("storage: read persisted hwm: %w", err)
+	}
+	if len(data) == 0 {
+		return l.HighWatermark(), nil
+	}
+	if len(data) != 8 {
+		return 0, fmt.Errorf("storage: invalid hwm file size %d", len(data))
+	}
+
+	persisted := max(int64(binary.BigEndian.Uint64(data)), 0)
+	return persisted, nil
 }
 
 func (l *Log) persistHighWatermark(next int64) error {

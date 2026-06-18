@@ -42,7 +42,8 @@ const (
 // Member represents a narad pod registered in the cluster.
 type Member struct {
 	ID            string       `json:"id"`
-	Addr          string       `json:"addr"` // host:port for intra-cluster RPCs
+	Addr          string       `json:"addr"` // host:port for HTTP peer RPCs
+	ClusterAddr   string       `json:"cluster_addr,omitempty"`
 	Status        MemberStatus `json:"status"`
 	LastHeartbeat int64        `json:"last_heartbeat"` // Unix seconds
 }

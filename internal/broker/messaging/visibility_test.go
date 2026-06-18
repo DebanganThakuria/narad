@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
 func TestProduceCommittedVisibilityPersistsAcrossRestart(t *testing.T) {
@@ -81,7 +82,7 @@ func TestCommittedConsumeOffsetPersistsAcrossRestart(t *testing.T) {
 	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
 
 	for i := range 2 {
-		payload := []byte(fmt.Sprintf(`{"id":%d}`, i+1))
+		payload := fmt.Appendf(nil, `{"id":%d}`, i+1)
 		if _, _, err := engine.Produce(context.Background(), "orders", "", payload); err != nil {
 			t.Fatalf("Produce(%d) error = %v", i, err)
 		}
@@ -134,7 +135,7 @@ func TestCorruptCommittedConsumeOffsetFallsBackToBeginning(t *testing.T) {
 	if err := engine.Ack(context.Background(), "orders", first.ReceiptHandle); err != nil {
 		t.Fatalf("Ack() error = %v", err)
 	}
-	partitionDir := filepath.Join(dataDir, "topics", "orders", "p00000")
+	partitionDir := storage.TopicPartitionDir(dataDir, "orders", 0)
 	if err := os.WriteFile(filepath.Join(partitionDir, "consumer.offset"), []byte{1, 2, 3}, 0o644); err != nil {
 		t.Fatalf("WriteFile(consumer.offset) error = %v", err)
 	}
@@ -155,8 +156,9 @@ func TestCorruptCommittedConsumeOffsetFallsBackToBeginning(t *testing.T) {
 	}
 }
 
+//go:fix inline
 func intPtr(partition int) *int {
-	return &partition
+	return new(partition)
 }
 
 func TestReplayReadUsesHighWatermark(t *testing.T) {

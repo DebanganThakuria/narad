@@ -15,9 +15,11 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -26,14 +28,20 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
+)
+
+const (
+	MaxJSONBodyBytes int64 = 1 << 20
+	MaxAckBodyBytes  int64 = 4 << 10
 )
 
 // Router forwards requests to the partition-owning pod in a multi-node cluster.
 // Nil in single-node mode — handlers skip all routing checks when it is nil.
 type Router interface {
 	RouteProduce(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName, key string, body []byte) bool
-	RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) bool
+	RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) (bool, *int)
 	RouteAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, partition int, body []byte) bool
 	RouteCreateTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool
 	RouteAlterTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, body []byte) bool
@@ -46,8 +54,10 @@ type Router interface {
 type Deps struct {
 	Broker         broker.Broker
 	Logs           *runtime.Logs
+	Metastore      *metastore.Store
 	Logger         *slog.Logger
 	MaxConsumeWait time.Duration
+	ShutdownCtx    context.Context
 	// Router is optional. When set, requests are forwarded to the partition
 	// owner instead of being handled locally on non-owner pods.
 	Router Router
@@ -72,6 +82,9 @@ func New(d Deps) *Set {
 	if d.Logger == nil {
 		panic("handlers: Logger is required")
 	}
+	if d.ShutdownCtx == nil {
+		d.ShutdownCtx = context.Background()
+	}
 	return &Set{Deps: d}
 }
 
@@ -93,12 +106,39 @@ func (s *Set) WriteError(w http.ResponseWriter, status int, msg string) {
 	s.WriteJSON(w, status, map[string]string{"error": msg})
 }
 
+func (s *Set) ReadBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	if err != nil {
+		s.WriteError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return nil, false
+	}
+	return body, true
+}
+
 // DecodeJSON reads a JSON body in strict mode (unknown fields
 // rejected). Responds to the client on failure and returns false.
 func (s *Set) DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxJSONBodyBytes))
+	return s.decodeJSON(w, dec, dst)
+}
+
+func (s *Set) DecodeJSONBytes(w http.ResponseWriter, body []byte, dst any) bool {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	return s.decodeJSON(w, dec, dst)
+}
+
+func (s *Set) decodeJSON(w http.ResponseWriter, dec *json.Decoder, dst any) bool {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return false
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			s.WriteError(w, http.StatusBadRequest, "invalid json: multiple JSON values")
+			return false
+		}
 		s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return false
 	}

@@ -15,10 +15,13 @@ import (
 
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/platform/config"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
+	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
 func TestServeFlagsApplyTo(t *testing.T) {
@@ -31,6 +34,7 @@ func TestServeFlagsApplyTo(t *testing.T) {
 		dataDir:     "/tmp/narad-data",
 		logLevel:    "debug",
 		logFormat:   "json",
+		pprofAddr:   "127.0.0.1:6060",
 	}
 
 	flags.applyTo(cfg)
@@ -50,6 +54,9 @@ func TestServeFlagsApplyTo(t *testing.T) {
 	if cfg.Log.Level != "debug" || cfg.Log.Format != "json" {
 		t.Fatalf("Log config = %+v", cfg.Log)
 	}
+	if cfg.HTTP.PprofAddr != "127.0.0.1:6060" {
+		t.Fatalf("HTTP.PprofAddr = %q, want %q", cfg.HTTP.PprofAddr, "127.0.0.1:6060")
+	}
 }
 
 func TestLoadServeConfigReturnsNilOnHelp(t *testing.T) {
@@ -63,7 +70,7 @@ func TestLoadServeConfigReturnsNilOnHelp(t *testing.T) {
 }
 
 func TestLoadServeConfigAppliesFlags(t *testing.T) {
-	cfg, err := loadServeConfig([]string{"--addr", "127.0.0.1:9123", "--cluster-port", "9456", "--log-level", "debug"})
+	cfg, err := loadServeConfig([]string{"--addr", "127.0.0.1:9123", "--cluster-port", "9456", "--log-level", "debug", "--pprof-addr", "127.0.0.1:6060"})
 	if err != nil {
 		t.Fatalf("loadServeConfig() error = %v", err)
 	}
@@ -75,6 +82,9 @@ func TestLoadServeConfigAppliesFlags(t *testing.T) {
 	}
 	if cfg.Log.Level != "debug" {
 		t.Fatalf("Log.Level = %q, want %q", cfg.Log.Level, "debug")
+	}
+	if cfg.HTTP.PprofAddr != "127.0.0.1:6060" {
+		t.Fatalf("HTTP.PprofAddr = %q, want %q", cfg.HTTP.PprofAddr, "127.0.0.1:6060")
 	}
 }
 
@@ -141,6 +151,41 @@ func TestAdvertisedClusterAddrFallsBackToClusterAddr(t *testing.T) {
 	got := advertisedClusterAddr("node-1", ":9101", []config.ClusterPeer{{ID: "node-2", Addr: "127.0.0.1:9102"}, {ID: "node-3", Addr: "127.0.0.1:9103"}})
 	if got != ":9101" {
 		t.Fatalf("advertisedClusterAddr() = %q, want %q", got, ":9101")
+	}
+}
+
+func TestAdvertisedMemberAddrUsesHTTPAddrWhenHostful(t *testing.T) {
+	got := advertisedMemberAddr("node-1", "127.0.0.1:7942", "127.0.0.1:9101", []config.ClusterPeer{{ID: "node-1", Addr: "127.0.0.1:9101"}})
+	if got != "127.0.0.1:7942" {
+		t.Fatalf("advertisedMemberAddr() = %q, want %q", got, "127.0.0.1:7942")
+	}
+}
+
+func TestAdvertisedMemberAddrUsesClusterHostForPortOnlyHTTPAddr(t *testing.T) {
+	got := advertisedMemberAddr("node-1", ":7942", "127.0.0.1:9101", []config.ClusterPeer{{ID: "node-1", Addr: "127.0.0.1:9101"}})
+	if got != "127.0.0.1:7942" {
+		t.Fatalf("advertisedMemberAddr() = %q, want %q", got, "127.0.0.1:7942")
+	}
+}
+
+func TestAdvertisedMemberAddrUsesPeerHostForPortOnlyClusterAddr(t *testing.T) {
+	got := advertisedMemberAddr("node-1", ":7942", ":9101", []config.ClusterPeer{{ID: "node-1", Addr: "narad-0.local:9101"}})
+	if got != "narad-0.local:7942" {
+		t.Fatalf("advertisedMemberAddr() = %q, want %q", got, "narad-0.local:7942")
+	}
+}
+
+func TestAdvertisedMemberAddrHandlesIPv6ClusterHost(t *testing.T) {
+	got := advertisedMemberAddr("node-1", ":7942", "[::1]:9101", []config.ClusterPeer{{ID: "node-1", Addr: "[::1]:9101"}})
+	if got != "[::1]:7942" {
+		t.Fatalf("advertisedMemberAddr() = %q, want %q", got, "[::1]:7942")
+	}
+}
+
+func TestAdvertisedMemberAddrFallsBackWhenClusterHostCannotBeResolved(t *testing.T) {
+	got := advertisedMemberAddr("node-1", ":7942", ":9101", nil)
+	if got != ":7942" {
+		t.Fatalf("advertisedMemberAddr() = %q, want %q", got, ":7942")
 	}
 }
 
@@ -1904,7 +1949,7 @@ func TestBuildBrokerRejectsNonStoreMetastore(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	fakeMS := stubMetastore{}
 
-	if _, _, _, err := buildBroker(cfg, "node-1", fakeMS, m, log); err == nil {
+	if _, _, _, _, err := buildBroker(cfg, "node-1", fakeMS, schema.NewAlwaysValid(), m, log); err == nil {
 		t.Fatal("buildBroker() error = nil, want error")
 	}
 }
@@ -1920,7 +1965,7 @@ func TestBuildBrokerReturnsLogs(t *testing.T) {
 	}
 	defer store.Close()
 
-	br, logs, _, err := buildBroker(cfg, "node-1", store, m, log)
+	br, logs, _, _, err := buildBroker(cfg, "node-1", store, schema.NewJSONSchema(), m, log)
 	if err != nil {
 		t.Fatalf("buildBroker() error = %v", err)
 	}
@@ -1948,6 +1993,141 @@ func (stubMetastore) GetMember(string) (metastore.Member, error) {
 	return metastore.Member{}, metastore.ErrNotFound
 }
 func (stubMetastore) Close() error { return nil }
+
+func TestInitializeConsumerOffsetsRestoresOnlyOwnedPartitions(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store, err := metastore.New(metastore.Config{
+		NodeID:        "node-1",
+		DataDir:       filepath.Join(t.TempDir(), "metastore"),
+		BindAddr:      "127.0.0.1:0",
+		AdvertiseAddr: "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("metastore.New() error = %v", err)
+	}
+	defer store.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if store.IsLeader() {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !store.IsLeader() {
+		t.Fatal("metastore leader election timed out")
+	}
+	if err := store.CreateTopic(ctx, topic.Topic{
+		Name:                      "orders",
+		Partitions:                2,
+		ReplicationFactor:         1,
+		VisibilityTimeoutMs:       1000,
+		MaxInFlightPerPartition:   16,
+		MaxAckedAheadPerPartition: 16,
+	}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 0, "node-1", ""); err != nil {
+		t.Fatalf("AssignPartition(0) error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 1, "node-2", ""); err != nil {
+		t.Fatalf("AssignPartition(1) error = %v", err)
+	}
+	for partition, offset := range map[int]int64{0: 3, 1: 9} {
+		partitionDir := storage.TopicPartitionDir(dataDir, "orders", partition)
+		if err := storage.WriteConsumerOffset(partitionDir, offset); err != nil {
+			t.Fatalf("WriteConsumerOffset(%d) error = %v", partition, err)
+		}
+	}
+	inFlight := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+		return consumer.Caps{MaxInFlight: 16, MaxAckedAhead: 16}, nil
+	}, nil)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	if err := initializeConsumerOffsets(ctx, dataDir, store, inFlight, logger, "node-1"); err != nil {
+		t.Fatalf("initializeConsumerOffsets() error = %v", err)
+	}
+	if got := inFlight.Next("orders", 0); got != 4 {
+		t.Fatalf("Next(orders,0) = %d, want 4", got)
+	}
+	if got := inFlight.Next("orders", 1); got != 0 {
+		t.Fatalf("Next(orders,1) = %d, want 0", got)
+	}
+}
+
+func TestInitializeSchemasLoadsPersistedSchemas(t *testing.T) {
+	ctx := context.Background()
+	store, err := metastore.New(metastore.Config{
+		NodeID:        "node-1",
+		DataDir:       filepath.Join(t.TempDir(), "metastore"),
+		BindAddr:      "127.0.0.1:0",
+		AdvertiseAddr: "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("metastore.New() error = %v", err)
+	}
+	defer store.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if store.IsLeader() {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !store.IsLeader() {
+		t.Fatal("metastore leader election timed out")
+	}
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	raw := []byte(`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`)
+	if err := store.PutSchema(ctx, "orders", 1, raw); err != nil {
+		t.Fatalf("PutSchema() error = %v", err)
+	}
+
+	registry := schema.NewJSONSchema()
+	if err := initializeSchemas(ctx, store, registry); err != nil {
+		t.Fatalf("initializeSchemas() error = %v", err)
+	}
+	if err := registry.Validate(ctx, "orders", []byte(`{"id":"o_123"}`)); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestInitializeSchemasSkipsTopicsWithoutSchemas(t *testing.T) {
+	ctx := context.Background()
+	store, err := metastore.New(metastore.Config{
+		NodeID:        "node-1",
+		DataDir:       filepath.Join(t.TempDir(), "metastore"),
+		BindAddr:      "127.0.0.1:0",
+		AdvertiseAddr: "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("metastore.New() error = %v", err)
+	}
+	defer store.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if store.IsLeader() {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !store.IsLeader() {
+		t.Fatal("metastore leader election timed out")
+	}
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+
+	registry := schema.NewJSONSchema()
+	if err := initializeSchemas(ctx, store, registry); err != nil {
+		t.Fatalf("initializeSchemas() error = %v", err)
+	}
+	if err := registry.Validate(ctx, "orders", []byte(`{"id":"o_123"}`)); !errors.Is(err, schema.ErrSchemaNotFound) {
+		t.Fatalf("Validate() error = %v, want %v", err, schema.ErrSchemaNotFound)
+	}
+}
 
 func TestBuildMetricsReturnsUsableRegistry(t *testing.T) {
 	reg, m := buildMetrics()
@@ -2064,7 +2244,7 @@ func TestBuildAPIServerPanicsWithoutBroker(t *testing.T) {
 	m := metrics.New(reg)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	_ = buildAPIServer(cfg, nil, nil, nil, m, reg, log)
+	_ = buildAPIServer(context.Background(), cfg, nil, nil, nil, nil, m, reg, log)
 }
 
 func TestBuildAPIServerReturnsServer(t *testing.T) {
@@ -2074,7 +2254,7 @@ func TestBuildAPIServerReturnsServer(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	broker := stubBroker{}
-	srv := buildAPIServer(cfg, broker, nil, nil, m, reg, log)
+	srv := buildAPIServer(context.Background(), cfg, broker, nil, nil, nil, m, reg, log)
 	if srv == nil {
 		t.Fatal("buildAPIServer() returned nil")
 	}
@@ -2112,7 +2292,7 @@ func (stubBroker) ListTopics(context.Context, metastore.ListOptions) ([]topic.To
 	return nil, "", nil
 }
 
-func (stubBroker) Produce(context.Context, string, string, []byte) (int64, int, error) {
+func (stubBroker) Produce(context.Context, string, string, []byte, ...int) (int64, int, error) {
 	return 0, 0, nil
 }
 

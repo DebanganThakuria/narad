@@ -1,10 +1,10 @@
 package schema
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -13,7 +13,6 @@ import (
 // JSONSchema is a schema.Registry backed by santhosh-tekuri/jsonschema.
 // Schemas are pre-compiled on Register for fast repeated validation.
 
-// TODO we need to store the json schemas in the raft metastore.
 type JSONSchema struct {
 	mu       sync.RWMutex
 	versions map[string]int                        // topic → latest version number
@@ -30,6 +29,12 @@ func NewJSONSchema() *JSONSchema {
 	}
 }
 
+// ValidateDefinition compiles schemaBytes without registering it.
+func (r *JSONSchema) ValidateDefinition(_ context.Context, topic string, schemaBytes []byte) error {
+	_, err := compileSchema(topic, 0, schemaBytes)
+	return err
+}
+
 // Register compiles the JSON Schema bytes and stores it under topic. It
 // returns the auto-assigned version number (monotonically increasing per
 // topic, starting at 1).
@@ -40,21 +45,6 @@ func NewJSONSchema() *JSONSchema {
 // properties, and the old required set must still be valid under the new
 // schema.
 func (r *JSONSchema) Register(_ context.Context, topic string, schemaBytes []byte) (int, error) {
-	schemaDoc, err := jsonschema.UnmarshalJSON(strings.NewReader(string(schemaBytes)))
-	if err != nil {
-		return 0, fmt.Errorf("schema: invalid JSON: %w", err)
-	}
-
-	c := jsonschema.NewCompiler()
-	resource := topic + ".json"
-	if err := c.AddResource(resource, schemaDoc); err != nil {
-		return 0, fmt.Errorf("schema: %w", err)
-	}
-	compiled, err := c.Compile(resource)
-	if err != nil {
-		return 0, fmt.Errorf("schema: %w", err)
-	}
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -66,16 +56,82 @@ func (r *JSONSchema) Register(_ context.Context, topic string, schemaBytes []byt
 	}
 
 	version := r.versions[topic] + 1
-	r.versions[topic] = version
+	if err := r.loadLocked(topic, version, schemaBytes); err != nil {
+		return 0, err
+	}
+	return version, nil
+}
+
+// Load compiles and stores a persisted schema version for startup rehydration.
+func (r *JSONSchema) Load(_ context.Context, topic string, version int, schemaBytes []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.loadLocked(topic, version, schemaBytes)
+}
+
+// Unload removes a compiled schema version from the registry.
+func (r *JSONSchema) Unload(_ context.Context, topic string, version int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.schemas[topic] == nil {
+		return nil
+	}
+	delete(r.schemas[topic], version)
+	delete(r.raw[topic], version)
+	if r.versions[topic] != version {
+		return nil
+	}
+	latest := 0
+	for candidate := range r.schemas[topic] {
+		if candidate > latest {
+			latest = candidate
+		}
+	}
+	if latest == 0 {
+		delete(r.schemas, topic)
+		delete(r.raw, topic)
+		delete(r.versions, topic)
+		return nil
+	}
+	r.versions[topic] = latest
+	return nil
+}
+
+func (r *JSONSchema) loadLocked(topic string, version int, schemaBytes []byte) error {
+	compiled, err := compileSchema(topic, version, schemaBytes)
+	if err != nil {
+		return err
+	}
 	if r.schemas[topic] == nil {
 		r.schemas[topic] = map[int]*jsonschema.Schema{}
 		r.raw[topic] = map[int][]byte{}
 	}
+	copied := make([]byte, len(schemaBytes))
+	copy(copied, schemaBytes)
+	if version > r.versions[topic] {
+		r.versions[topic] = version
+	}
 	r.schemas[topic][version] = compiled
-	r.raw[topic][version] = make([]byte, len(schemaBytes))
-	copy(r.raw[topic][version], schemaBytes)
+	r.raw[topic][version] = copied
+	return nil
+}
 
-	return version, nil
+func compileSchema(topic string, version int, schemaBytes []byte) (*jsonschema.Schema, error) {
+	schemaDoc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaBytes))
+	if err != nil {
+		return nil, fmt.Errorf("schema: invalid JSON: %w", err)
+	}
+
+	c := jsonschema.NewCompiler()
+	resource := fmt.Sprintf("%s-%d.json", topic, version)
+	if err := c.AddResource(resource, schemaDoc); err != nil {
+		return nil, fmt.Errorf("schema: %w", err)
+	}
+	compiled, err := c.Compile(resource)
+	if err != nil {
+		return nil, fmt.Errorf("schema: %w", err)
+	}
+	return compiled, nil
 }
 
 // Validate unmarshals the payload and checks it against the latest
@@ -116,6 +172,7 @@ func checkCompatible(oldRaw, newRaw []byte) error {
 	}
 
 	oldRequired := setOf(oldSchema.Required)
+	newRequired := setOf(newSchema.Required)
 
 	for name := range oldSchema.Properties {
 		newProp, ok := newSchema.Properties[name]
@@ -133,6 +190,11 @@ func checkCompatible(oldRaw, newRaw []byte) error {
 	for name := range oldRequired {
 		if _, ok := newSchema.Properties[name]; !ok {
 			return fmt.Errorf("required property %q removed", name)
+		}
+	}
+	for name := range newRequired {
+		if !oldRequired[name] {
+			return fmt.Errorf("required property %q added", name)
 		}
 	}
 
@@ -171,13 +233,13 @@ func compatibleTypes(oldProp, newProp json.RawMessage) error {
 		return nil
 	}
 
-	oldSet := setOf(oldTypes)
-	for _, nt := range newTypes {
-		if oldSet[nt] {
-			return nil // at least one old type overlaps
+	newSet := setOf(newTypes)
+	for _, oldType := range oldTypes {
+		if !newSet[oldType] {
+			return fmt.Errorf("type changed from %v to %v", oldTypes, newTypes)
 		}
 	}
-	return fmt.Errorf("type changed from %v to %v", oldTypes, newTypes)
+	return nil
 }
 
 // normalizeType converts the JSON Schema "type" field to a []string.

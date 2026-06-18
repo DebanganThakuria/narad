@@ -47,8 +47,8 @@ func (f *fakeRouter) RouteProduce(context.Context, http.ResponseWriter, *http.Re
 	return false
 }
 
-func (f *fakeRouter) RouteConsume(context.Context, http.ResponseWriter, *http.Request, string, *int) bool {
-	return false
+func (f *fakeRouter) RouteConsume(context.Context, http.ResponseWriter, *http.Request, string, *int) (bool, *int) {
+	return false, nil
 }
 
 func (f *fakeRouter) RouteAck(context.Context, http.ResponseWriter, *http.Request, string, int, []byte) bool {
@@ -146,7 +146,7 @@ func (f *fakeBroker) ListTopics(ctx context.Context, opts metastore.ListOptions)
 	return f.listTopicsFn(ctx, opts)
 }
 
-func (f *fakeBroker) Produce(context.Context, string, string, []byte) (int64, int, error) {
+func (f *fakeBroker) Produce(context.Context, string, string, []byte, ...int) (int64, int, error) {
 	return 0, 0, errors.New("unexpected Produce call")
 }
 
@@ -174,7 +174,7 @@ func TestCreateHandler(t *testing.T) {
 		return topic.Topic{Name: opts.Name, Partitions: opts.Partitions}, nil
 	}})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":"orders","partitions":3}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":"orders","partitions":3,"schema":{"type":"object"}}`))
 	res := httptest.NewRecorder()
 	Create(s).ServeHTTP(res, req)
 
@@ -183,6 +183,9 @@ func TestCreateHandler(t *testing.T) {
 	}
 	if captured.Name != "orders" || captured.Partitions != 3 {
 		t.Fatalf("Create() broker opts = %+v", captured)
+	}
+	if string(captured.Schema) != `{"type":"object"}` {
+		t.Fatalf("Create() schema = %q, want schema object", string(captured.Schema))
 	}
 }
 
@@ -592,6 +595,36 @@ func TestDeleteHandlerBroadcastsAfterLocalDelete(t *testing.T) {
 	}
 	if res.Code != http.StatusNoContent {
 		t.Fatalf("Delete() status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+}
+
+func TestDeleteHandlerBroadcastsAfterLocalPurgeFailure(t *testing.T) {
+	broadcasted := false
+	s := newTestSetWithRouter(&fakeBroker{deleteTopicFn: func(_ context.Context, name string) error {
+		if name != "orders" {
+			t.Fatalf("DeleteTopic() name = %q, want orders", name)
+		}
+		return brokertopics.PurgeError{Topic: name, Err: errors.New("disk remove failed")}
+	}}, &fakeRouter{
+		routeDeleteTopicFn: func(_ context.Context, _ http.ResponseWriter, _ *http.Request, _ string) bool {
+			return false
+		},
+		broadcastDeleteTopicFn: func(_ context.Context, topicName string) error {
+			broadcasted = topicName == "orders"
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Delete(s).ServeHTTP(res, req)
+
+	if !broadcasted {
+		t.Fatal("Delete() did not broadcast remote purge after local purge failure")
+	}
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("Delete() status = %d, want %d", res.Code, http.StatusInternalServerError)
 	}
 }
 

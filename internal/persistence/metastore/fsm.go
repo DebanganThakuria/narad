@@ -52,11 +52,11 @@ type schemaPayload struct {
 }
 
 func schemaKey(topicName string, version int) []byte {
-	return []byte(fmt.Sprintf("%s:%d", topicName, version))
+	return fmt.Appendf(nil, "%s:%d", topicName, version)
 }
 
 func assignmentKey(topicName string, partition int) []byte {
-	return []byte(fmt.Sprintf("%s:%d", topicName, partition))
+	return fmt.Appendf(nil, "%s:%d", topicName, partition)
 }
 
 // heartbeatPayload is the body of an opMemberHeartbeat command.
@@ -102,7 +102,7 @@ func openBolt(path string) (*bolt.DB, error) {
 }
 
 // Apply is called by Raft when a log entry is committed.
-func (f *fsmState) Apply(l *raft.Log) interface{} {
+func (f *fsmState) Apply(l *raft.Log) any {
 	var c cmd
 	if err := json.Unmarshal(l.Data, &c); err != nil {
 		return err

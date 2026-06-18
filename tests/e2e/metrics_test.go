@@ -148,7 +148,7 @@ func TestMetrics_PollerUpdatesLagAndInventory(t *testing.T) {
 		t.Fatalf("total lag from snapshot = %v, want 5", totalLag)
 	}
 	var reportedLag float64
-	for partition := 0; partition < 3; partition++ {
+	for partition := range 3 {
 		reportedLag += readGauge(t, env, "narad_consumer_lag_messages",
 			map[string]string{"topic": "poll-me", "partition": fmt.Sprintf("%d", partition)})
 	}

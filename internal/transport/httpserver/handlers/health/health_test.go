@@ -73,7 +73,7 @@ func (f *fakeBroker) ListTopics(ctx context.Context, opts metastore.ListOptions)
 	return f.listTopicsFn(ctx, opts)
 }
 
-func (f *fakeBroker) Produce(ctx context.Context, topicName, key string, payload []byte) (int64, int, error) {
+func (f *fakeBroker) Produce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (int64, int, error) {
 	return f.produceFn(ctx, topicName, key, payload)
 }
 
@@ -94,15 +94,46 @@ func (f *fakeBroker) Ready(ctx context.Context) error {
 func (f *fakeBroker) Close() error { return nil }
 
 func newTestSet(b broker.Broker) *handlers.Set {
+	return newTestSetWithShutdownCtx(b, nil)
+}
+
+func newTestSetWithShutdownCtx(b broker.Broker, shutdownCtx context.Context) *handlers.Set {
 	return handlers.New(handlers.Deps{
 		Broker:         b,
 		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		MaxConsumeWait: time.Second,
+		ShutdownCtx:    shutdownCtx,
 	})
 }
 
 func TestHealthzHandler(t *testing.T) {
 	s := newTestSet(&fakeBroker{})
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	res := httptest.NewRecorder()
+
+	Healthz(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("Healthz() status = %d, want %d", res.Code, http.StatusOK)
+	}
+}
+
+func TestHealthzHandlerReturnsUnavailableWhenShutdownStarts(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s := newTestSetWithShutdownCtx(&fakeBroker{}, ctx)
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	res := httptest.NewRecorder()
+
+	Healthz(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Healthz() status = %d, want %d", res.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestHealthzHandlerUsesBackgroundWhenShutdownCtxMissing(t *testing.T) {
+	s := newTestSetWithShutdownCtx(&fakeBroker{}, nil)
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	res := httptest.NewRecorder()
 

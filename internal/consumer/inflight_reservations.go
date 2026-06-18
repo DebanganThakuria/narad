@@ -61,6 +61,7 @@ func (f *InFlight) CommitHandle(topic string, partition int, offset, nonce int64
 	}
 
 	sh.mu.Lock()
+	sh.purgeExpired(f.now())
 	rsv, ok := sh.entries[offset]
 	if !ok || rsv.nonce != nonce {
 		sh.mu.Unlock()

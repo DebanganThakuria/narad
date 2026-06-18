@@ -39,7 +39,10 @@ func (rt *Router) RouteProduce(ctx context.Context, w http.ResponseWriter, r *ht
 	start := rt.partitions.Pick(topicName, key, t.Partitions)
 	for i := 0; i < t.Partitions; i++ {
 		p := (start + i) % t.Partitions
-		addr := rt.ownerAddr(topicName, p)
+		addr, local := rt.produceOwnerAddr(topicName, p)
+		if local {
+			return false
+		}
 		if addr == "" {
 			continue
 		}
@@ -65,32 +68,45 @@ func (rt *Router) RouteProduce(ctx context.Context, w http.ResponseWriter, r *ht
 // pinnedPartition is set when the caller already chose a partition (replay
 // or pinned consume); nil causes the router to walk candidate partitions once
 // with non-blocking probes.
-// Returns true if forwarded.
-func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) bool {
+// Returns true if forwarded. For queue-style pulls, localPartition is set when
+// the request should be handled locally against a specific owned partition.
+func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) (bool, *int) {
 	if pinnedPartition != nil {
 		addr := rt.ownerAddr(topicName, *pinnedPartition)
 		if addr == "" {
-			return false
+			return false, nil
 		}
 		fwd := r.Clone(ctx)
 		q := fwd.URL.Query()
 		q.Set("partition", strconv.Itoa(*pinnedPartition))
 		fwd.URL.RawQuery = q.Encode()
 		rt.forward(w, fwd, addr, nil)
-		return true
+		return true, nil
 	}
 
 	candidates := rt.consumePartitionCandidates(ctx, topicName)
+	var localPartition *int
 	for _, candidate := range candidates {
-		if candidate.addr == "" {
+		if candidate.local {
+			partition := candidate.partition
+			if localPartition == nil {
+				localPartition = &partition
+			}
 			continue
 		}
 		_, forwarded := rt.forwardConsumeProbe(ctx, w, r, candidate.partition, candidate.addr)
 		if forwarded {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	if localPartition != nil {
+		return false, localPartition
+	}
+	if len(candidates) > 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return true, nil
+	}
+	return false, nil
 }
 
 // RouteAck forwards an ack request to the owner of the given partition.

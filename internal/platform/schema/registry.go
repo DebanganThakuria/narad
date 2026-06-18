@@ -11,6 +11,9 @@ import "context"
 // against them. Evolution rules: additive-only, no field
 // removal, no type changes — those go in the real implementation.
 type Registry interface {
+	ValidateDefinition(ctx context.Context, topic string, schema []byte) error
 	Register(ctx context.Context, topic string, schema []byte) (version int, err error)
+	Load(ctx context.Context, topic string, version int, schema []byte) error
+	Unload(ctx context.Context, topic string, version int) error
 	Validate(ctx context.Context, topic string, payload []byte) error
 }

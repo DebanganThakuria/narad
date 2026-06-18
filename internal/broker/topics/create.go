@@ -74,6 +74,11 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	if maxAA < 0 {
 		return topic.Topic{}, fmt.Errorf("%w: max_acked_ahead_per_partition must be >= 0 (0 = use default)", ErrInvalid)
 	}
+	if len(opts.Schema) > 0 {
+		if err := m.schemas.ValidateDefinition(ctx, opts.Name, opts.Schema); err != nil {
+			return topic.Topic{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+		}
+	}
 
 	t := topic.Topic{
 		Name:                      opts.Name,
@@ -97,6 +102,11 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 		}
 		return topic.Topic{}, err
 	}
+	if len(opts.Schema) > 0 {
+		if err := m.createInitialSchema(ctx, opts.Name, opts.Schema); err != nil {
+			return topic.Topic{}, m.rollbackCreatedTopic(ctx, opts.Name, err)
+		}
+	}
 	if m.assigner != nil {
 		if err := m.assigner.AssignNewPartitions(ctx, opts.Name, 0, partitions, rf); err != nil {
 			m.logger.Warn("topic created without immediate partition assignment", "topic", opts.Name, "err", err)
@@ -113,4 +123,29 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 		"max_acked_ahead_per_partition", maxAA)
 
 	return t, nil
+}
+
+func (m *Manager) rollbackCreatedTopic(ctx context.Context, topicName string, cause error) error {
+	var rollbackErrs []error
+	if err := m.metastore.DeleteTopic(ctx, topicName); err != nil && !errors.Is(err, errs.ErrNotFound) {
+		rollbackErrs = append(rollbackErrs, fmt.Errorf("delete topic metadata: %w", err))
+	}
+	if err := m.PurgeTopic(ctx, topicName); err != nil {
+		rollbackErrs = append(rollbackErrs, fmt.Errorf("purge topic data: %w", err))
+	}
+	if len(rollbackErrs) > 0 {
+		return fmt.Errorf("%w; rollback failed: %v", cause, errors.Join(rollbackErrs...))
+	}
+	return cause
+}
+
+func (m *Manager) createInitialSchema(ctx context.Context, topicName string, rawSchema []byte) error {
+	const version = 1
+	if err := m.metastore.PutSchema(ctx, topicName, version, rawSchema); err != nil {
+		return fmt.Errorf("topics: persist schema: %w", err)
+	}
+	if err := m.schemas.Load(ctx, topicName, version, rawSchema); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	return nil
 }

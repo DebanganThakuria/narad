@@ -5,6 +5,7 @@ package config
 // Duration.
 type HTTPConfig struct {
 	Addr           string   `json:"addr"`
+	PprofAddr      string   `json:"pprof_addr,omitempty"`
 	ReadTimeout    Duration `json:"read_timeout"`
 	WriteTimeout   Duration `json:"write_timeout"`
 	IdleTimeout    Duration `json:"idle_timeout"`

@@ -57,6 +57,11 @@ func New(d Deps) (Broker, error) {
 	if logs == nil {
 		logs = runtime.NewLogs(d.DataDir, d.StorageOptions, d.Metastore, d.Metrics)
 	}
+	lifecycle := d.Lifecycle
+	if lifecycle == nil {
+		lifecycle = runtime.NewLifecycle(logs)
+	}
+	lifecycle.MarkNotReady()
 
 	topicCfg := topics.Config{
 		DefaultPartitions:                d.TopicConfig.DefaultPartitions,
@@ -76,8 +81,8 @@ func New(d Deps) (Broker, error) {
 	return &impl{
 		Manager:     topics.NewManager(d.DataDir, d.Metastore, assigner, d.Schemas, d.ConsumerOffsets, logs, topicCfg, d.Logger),
 		Engine:      messaging.NewEngine(d.Metastore, d.Schemas, d.Partitions, d.Replicator, d.ConsumerOffsets, logs, d.Metrics, d.Logger, d.SelfID),
-		Snapshotter: runtime.NewSnapshotter(d.Metastore, d.ConsumerOffsets, logs, d.Logger),
-		Lifecycle:   runtime.NewLifecycle(logs),
+		Snapshotter: runtime.NewSnapshotter(d.Metastore, d.ConsumerOffsets, logs, d.Logger, d.SelfID),
+		Lifecycle:   lifecycle,
 		deps:        d,
 	}, nil
 }

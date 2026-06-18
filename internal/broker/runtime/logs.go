@@ -13,7 +13,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -148,7 +147,7 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 		opts.Metrics = g.metrics.StorageRecorder(topicName, idx)
 	}
 
-	partitionDir := filepath.Join(g.dataDir, "topics", topicName, fmt.Sprintf("p%05d", idx))
+	partitionDir := storage.TopicPartitionDir(g.dataDir, topicName, idx)
 	l, err := storage.NewLog(partitionDir, opts)
 	if err != nil {
 		return nil, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)

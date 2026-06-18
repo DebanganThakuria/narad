@@ -54,7 +54,7 @@ type Broker interface {
 	// metastore.ListOptions for pagination semantics.
 	ListTopics(ctx context.Context, opts metastore.ListOptions) (topics []topic.Topic, nextPageToken string, err error)
 
-	Produce(ctx context.Context, topicName, key string, payload []byte) (offset int64, partition int, err error)
+	Produce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (offset int64, partitionIdx int, err error)
 	Consume(ctx context.Context, topicName string, opts messaging.ConsumeOpts) (msg topic.Message, found bool, err error)
 	// Ack accepts an opaque receipt handle returned by a prior Consume
 	// call. The broker decodes, verifies HMAC, and only commits if the

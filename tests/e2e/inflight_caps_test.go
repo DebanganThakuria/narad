@@ -19,7 +19,7 @@ func TestParallelConsumersOnePartitionDistinctMessages(t *testing.T) {
 	defer env.close()
 
 	env.createTopic("para", 3, 2, int64(0))
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		env.produce("para", "k", `{"i": 1}`)
 	}
 
@@ -30,13 +30,11 @@ func TestParallelConsumersOnePartitionDistinctMessages(t *testing.T) {
 	const consumers = 3
 	results := make(chan result, consumers)
 	var wg sync.WaitGroup
-	for i := 0; i < consumers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range consumers {
+		wg.Go(func() {
 			msg := env.consume("/v1/topics/para/consume?partition=0&wait=2s")
 			results <- result{offset: msg.Offset, handle: msg.ReceiptHandle}
-		}()
+		})
 	}
 	wg.Wait()
 	close(results)
@@ -65,7 +63,7 @@ func TestOutOfOrderAckCommitAdvancesContiguous(t *testing.T) {
 	defer env.close()
 
 	env.createTopic("ooo", 3, 2, int64(0))
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		env.produce("ooo", "k", `{"i": 1}`)
 	}
 
@@ -182,7 +180,7 @@ func TestInFlightCapBlocksFurtherReserves(t *testing.T) {
 	})
 	expectStatus(t, resp, http.StatusCreated)
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		env.produce("capped", "k", `{}`)
 	}
 
@@ -225,7 +223,7 @@ func TestAckedAheadCapReturns503(t *testing.T) {
 	expectStatus(t, resp, http.StatusCreated)
 
 	// Produce 4 messages so we can reserve 0..3.
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		env.produce("stuckhead", "k", `{}`)
 	}
 	// Reserve all 4 in order.
@@ -259,7 +257,7 @@ func TestAlterCapsTakesEffect(t *testing.T) {
 	})
 	expectStatus(t, resp, http.StatusCreated)
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		env.produce("altercap", "k", `{}`)
 	}
 
@@ -289,7 +287,7 @@ func TestParallelConsumersDoNotDuplicateMessages(t *testing.T) {
 
 	env.createTopic("stress", 3, 2, int64(0))
 	const total = 50
-	for i := 0; i < total; i++ {
+	for range total {
 		env.produce("stress", "k", `{}`)
 	}
 
@@ -300,10 +298,8 @@ func TestParallelConsumersDoNotDuplicateMessages(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			for time.Now().Before(deadline) && done.Load() < int64(total) {
 				resp := env.get("/v1/topics/stress/consume?partition=0&wait=200ms")
 				if resp.StatusCode == http.StatusNoContent {
@@ -322,7 +318,7 @@ func TestParallelConsumersDoNotDuplicateMessages(t *testing.T) {
 				env.ack("stress", m.ReceiptHandle)
 				done.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

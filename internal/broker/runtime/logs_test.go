@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -19,12 +20,36 @@ import (
 
 type runtimeFakeMetastore struct {
 	topics        map[string]topic.Topic
+	assignments   map[string]metastore.Assignment
 	getTopicErr   error
 	listTopicsErr error
 }
 
+func runtimeAssignmentKey(topicName string, partition int) string {
+	return fmt.Sprintf("%s/%d", topicName, partition)
+}
+
+func (f *runtimeFakeMetastore) GetAssignment(topicName string, partition int) (metastore.Assignment, error) {
+	assignment, ok := f.assignments[runtimeAssignmentKey(topicName, partition)]
+	if !ok {
+		return metastore.Assignment{}, errs.ErrNotFound
+	}
+	return assignment, nil
+}
+
+func (f *runtimeFakeMetastore) setAssignment(topicName string, partition int, ownerID string) {
+	if f.assignments == nil {
+		f.assignments = map[string]metastore.Assignment{}
+	}
+	f.assignments[runtimeAssignmentKey(topicName, partition)] = metastore.Assignment{
+		Topic:     topicName,
+		Partition: partition,
+		OwnerID:   ownerID,
+	}
+}
+
 func newRuntimeFakeMetastore() *runtimeFakeMetastore {
-	return &runtimeFakeMetastore{topics: map[string]topic.Topic{}}
+	return &runtimeFakeMetastore{topics: map[string]topic.Topic{}, assignments: map[string]metastore.Assignment{}}
 }
 
 func (f *runtimeFakeMetastore) CreateTopic(_ context.Context, t topic.Topic) error {
@@ -79,6 +104,50 @@ func (f *runtimeFakeMetastore) GetMember(string) (metastore.Member, error) {
 }
 
 func (f *runtimeFakeMetastore) Close() error { return nil }
+
+type runtimeMetastoreWithoutAssignments struct {
+	inner *runtimeFakeMetastore
+}
+
+func (m runtimeMetastoreWithoutAssignments) CreateTopic(ctx context.Context, t topic.Topic) error {
+	return m.inner.CreateTopic(ctx, t)
+}
+
+func (m runtimeMetastoreWithoutAssignments) UpdateTopic(ctx context.Context, t topic.Topic) error {
+	return m.inner.UpdateTopic(ctx, t)
+}
+
+func (m runtimeMetastoreWithoutAssignments) DeleteTopic(ctx context.Context, name string) error {
+	return m.inner.DeleteTopic(ctx, name)
+}
+
+func (m runtimeMetastoreWithoutAssignments) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
+	return m.inner.GetTopic(ctx, name)
+}
+
+func (m runtimeMetastoreWithoutAssignments) ListTopics(ctx context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error) {
+	return m.inner.ListTopics(ctx, opts)
+}
+
+func (m runtimeMetastoreWithoutAssignments) PutSchema(ctx context.Context, topicName string, version int, raw []byte) error {
+	return m.inner.PutSchema(ctx, topicName, version, raw)
+}
+
+func (m runtimeMetastoreWithoutAssignments) GetSchema(ctx context.Context, topicName string, version int) ([]byte, error) {
+	return m.inner.GetSchema(ctx, topicName, version)
+}
+
+func (m runtimeMetastoreWithoutAssignments) LeaderAddr() string {
+	return m.inner.LeaderAddr()
+}
+
+func (m runtimeMetastoreWithoutAssignments) GetMember(id string) (metastore.Member, error) {
+	return m.inner.GetMember(id)
+}
+
+func (m runtimeMetastoreWithoutAssignments) Close() error {
+	return m.inner.Close()
+}
 
 func newRuntimeTestLogs(t *testing.T, ms metastore.Metastore) *Logs {
 	t.Helper()
@@ -200,11 +269,18 @@ func TestLifecycleReadyAndClose(t *testing.T) {
 	}
 
 	lifecycle := NewLifecycle(logs)
+	if err := lifecycle.Ready(context.Background()); !IsNotReady(err) {
+		t.Fatalf("Ready() error = %v, want not ready", err)
+	}
+	lifecycle.MarkReady()
 	if err := lifecycle.Ready(context.Background()); err != nil {
-		t.Fatalf("Ready() error = %v", err)
+		t.Fatalf("Ready() after MarkReady error = %v", err)
 	}
 	if err := lifecycle.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
+	}
+	if err := lifecycle.Ready(context.Background()); !IsNotReady(err) {
+		t.Fatalf("Ready() after Close error = %v, want not ready", err)
 	}
 }
 
@@ -237,7 +313,7 @@ func TestSnapshotterSnapshotBuildsPartitionStats(t *testing.T) {
 		t.Fatalf("ReserveNext() reserved = false, want true (result=%+v)", res)
 	}
 
-	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 	snapshots, err := snapshotter.Snapshot(context.Background())
 	if err != nil {
 		t.Fatalf("Snapshot() error = %v", err)
@@ -279,7 +355,7 @@ func TestSnapshotterPartitionSnapshotOmitsPartitionWhenLogOpenFails(t *testing.T
 		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
 	}, nil)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	snapshotter := NewSnapshotter(ms, offsets, newRuntimeTestLogs(t, ms), logger)
+	snapshotter := NewSnapshotter(ms, offsets, newRuntimeTestLogs(t, ms), logger, "")
 
 	ps, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 0)
 	if ok {
@@ -296,7 +372,7 @@ func TestSnapshotterSnapshotReturnsMetastoreError(t *testing.T) {
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
 	}, nil)
-	snapshotter := NewSnapshotter(ms, offsets, newRuntimeTestLogs(t, ms), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	snapshotter := NewSnapshotter(ms, offsets, newRuntimeTestLogs(t, ms), slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 
 	_, err := snapshotter.Snapshot(context.Background())
 	if err == nil || err.Error() != "list failed" {
@@ -315,7 +391,7 @@ func TestSnapshotterSnapshotSkipsPartitionWhenLogOpenFails(t *testing.T) {
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
 	}, nil)
-	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 
 	snapshots, err := snapshotter.Snapshot(context.Background())
 	if err != nil {
@@ -332,6 +408,199 @@ func TestSnapshotterSnapshotSkipsPartitionWhenLogOpenFails(t *testing.T) {
 	}
 	if err := logs.CloseAll(); err != nil {
 		t.Fatalf("CloseAll() error = %v", err)
+	}
+}
+
+func TestSnapshotterSnapshotOmitsRemotePartitionsWhenSelfIDSet(t *testing.T) {
+	ms := newRuntimeFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, RetentionMs: 1000}
+	ms.setAssignment("orders", 0, "node-a")
+	ms.setAssignment("orders", 1, "node-b")
+	logs := newRuntimeTestLogs(t, ms)
+	log, err := logs.Get("orders", 0)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if _, err := log.Append([]byte("msg")); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
+	}, nil)
+	snapshotter := NewSnapshotter(ms, offsets, logs, logger, "node-a")
+
+	snapshots, err := snapshotter.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("Snapshot() topics = %d, want 1", len(snapshots))
+	}
+	if len(snapshots[0].Partitions) != 1 {
+		t.Fatalf("Snapshot() partitions = %d, want 1 owned partition", len(snapshots[0].Partitions))
+	}
+	if snapshots[0].Partitions[0].Partition != 0 {
+		t.Fatalf("Snapshot() kept partition = %d, want 0", snapshots[0].Partitions[0].Partition)
+	}
+	if _, ok := logs.logs[keyOf("orders", 1)]; ok {
+		t.Fatal("Snapshot() opened remote partition log")
+	}
+	if err := logs.CloseAll(); err != nil {
+		t.Fatalf("CloseAll() error = %v", err)
+	}
+}
+
+func TestSnapshotterSnapshotFallsBackWhenSelfIDEmpty(t *testing.T) {
+	ms := newRuntimeFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, RetentionMs: 1000}
+	ms.setAssignment("orders", 0, "node-a")
+	ms.setAssignment("orders", 1, "node-b")
+	logs := newRuntimeTestLogs(t, ms)
+	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
+	}, nil)
+	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+
+	snapshots, err := snapshotter.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("Snapshot() topics = %d, want 1", len(snapshots))
+	}
+	if len(snapshots[0].Partitions) != 2 {
+		t.Fatalf("Snapshot() partitions = %d, want 2 with empty selfID fallback", len(snapshots[0].Partitions))
+	}
+	if err := logs.CloseAll(); err != nil {
+		t.Fatalf("CloseAll() error = %v", err)
+	}
+}
+
+func TestSnapshotterPartitionSnapshotOmitsRemotePartitionBeforeLogOpen(t *testing.T) {
+	ms := newRuntimeFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, RetentionMs: 1000}
+	ms.setAssignment("orders", 0, "node-b")
+	logs := newRuntimeTestLogs(t, ms)
+	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
+	}, nil)
+	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "node-a")
+
+	ps, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 0)
+	if ok {
+		t.Fatalf("partitionSnapshot() ok = true, want false for remote partition: %+v", ps)
+	}
+	if _, exists := logs.logs[keyOf("orders", 0)]; exists {
+		t.Fatal("partitionSnapshot() opened remote partition log")
+	}
+}
+
+func TestSnapshotterPartitionSnapshotOmitsPartitionWhenAssignmentLookupFails(t *testing.T) {
+	ms := newRuntimeFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, RetentionMs: 1000}
+	logs := newRuntimeTestLogs(t, ms)
+	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
+	}, nil)
+	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "node-a")
+
+	if _, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 0); ok {
+		t.Fatal("partitionSnapshot() ok = true, want false when assignment lookup fails")
+	}
+	if _, exists := logs.logs[keyOf("orders", 0)]; exists {
+		t.Fatal("partitionSnapshot() opened log after assignment lookup failure")
+	}
+}
+
+func TestSnapshotterPartitionSnapshotIncludesOwnedPartitionWhenSelfIDSet(t *testing.T) {
+	ms := newRuntimeFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, RetentionMs: 1000}
+	ms.setAssignment("orders", 0, "node-a")
+	logs := newRuntimeTestLogs(t, ms)
+	log, err := logs.Get("orders", 0)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if _, err := log.Append([]byte("msg")); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
+	}, nil)
+	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "node-a")
+
+	ps, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 0)
+	if !ok {
+		t.Fatal("partitionSnapshot() ok = false, want true for owned partition")
+	}
+	if ps.Partition != 0 || ps.LogEndOffset != 1 {
+		t.Fatalf("partitionSnapshot() = %+v, want owned partition stats", ps)
+	}
+	if err := logs.CloseAll(); err != nil {
+		t.Fatalf("CloseAll() error = %v", err)
+	}
+}
+
+func TestSnapshotterPartitionSnapshotFallsBackWithoutAssignmentReader(t *testing.T) {
+	base := newRuntimeFakeMetastore()
+	ms := runtimeMetastoreWithoutAssignments{inner: base}
+	base.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, RetentionMs: 1000}
+	logs := newRuntimeTestLogs(t, ms)
+	log, err := logs.Get("orders", 0)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if _, err := log.Append([]byte("msg")); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
+	}, nil)
+	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "node-a")
+
+	ps, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 0)
+	if !ok {
+		t.Fatal("partitionSnapshot() ok = false, want fallback success without assignment reader")
+	}
+	if ps.LogEndOffset != 1 {
+		t.Fatalf("partitionSnapshot() = %+v, want opened partition stats", ps)
+	}
+	if err := logs.CloseAll(); err != nil {
+		t.Fatalf("CloseAll() error = %v", err)
+	}
+}
+
+func TestSnapshotterPartitionSnapshotOmitsRemotePartitionWhenTopicLookupFailsWouldHaveOpenedLog(t *testing.T) {
+	ms := newRuntimeFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, RetentionMs: 1000}
+	ms.setAssignment("orders", 0, "node-b")
+	ms.getTopicErr = errors.New("boom")
+	logs := newRuntimeTestLogs(t, ms)
+	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
+	}, nil)
+	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "node-a")
+
+	if _, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 0); ok {
+		t.Fatal("partitionSnapshot() ok = true, want false for remote partition")
+	}
+	if _, exists := logs.logs[keyOf("orders", 0)]; exists {
+		t.Fatal("partitionSnapshot() opened remote log despite ownership guard")
+	}
+}
+
+func TestSnapshotterPartitionSnapshotReturnsFalseForMissingTopicOpenErrorOnlyWhenMetastoreFails(t *testing.T) {
+	ms := newRuntimeFakeMetastore()
+	ms.getTopicErr = errors.New("lookup failed")
+	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
+	}, nil)
+	snapshotter := NewSnapshotter(ms, offsets, newRuntimeTestLogs(t, ms), slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+
+	_, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 9)
+	if ok {
+		t.Fatal("partitionSnapshot() ok = true, want false")
 	}
 }
 
@@ -365,6 +634,40 @@ func TestNewLifecycleStoresLogs(t *testing.T) {
 	}
 }
 
+func TestLifecycleReadyRequiresMarkReady(t *testing.T) {
+	lifecycle := NewLifecycle(newRuntimeTestLogs(t, newRuntimeFakeMetastore()))
+	if err := lifecycle.Ready(context.Background()); !IsNotReady(err) {
+		t.Fatalf("Ready() error = %v, want not ready", err)
+	}
+
+	lifecycle.MarkReady()
+	if err := lifecycle.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready() after MarkReady error = %v", err)
+	}
+
+	lifecycle.MarkNotReady()
+	if err := lifecycle.Ready(context.Background()); !IsNotReady(err) {
+		t.Fatalf("Ready() after MarkNotReady error = %v, want not ready", err)
+	}
+}
+
+func TestLifecycleCloseMarksNotReady(t *testing.T) {
+	lifecycle := NewLifecycle(newRuntimeTestLogs(t, newRuntimeFakeMetastore()))
+	lifecycle.MarkReady()
+	if err := lifecycle.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := lifecycle.Ready(context.Background()); !IsNotReady(err) {
+		t.Fatalf("Ready() after Close error = %v, want not ready", err)
+	}
+}
+
+func TestLifecycleIsNotReadyRecognizesWrappedError(t *testing.T) {
+	if !IsNotReady(fmt.Errorf("wrap: %w", errNotReady)) {
+		t.Fatal("IsNotReady(wrapped) = false, want true")
+	}
+}
+
 func TestNewSnapshotterStoresDependencies(t *testing.T) {
 	ms := newRuntimeFakeMetastore()
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
@@ -372,7 +675,7 @@ func TestNewSnapshotterStoresDependencies(t *testing.T) {
 	}, nil)
 	logs := newRuntimeTestLogs(t, ms)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	snapshotter := NewSnapshotter(ms, offsets, logs, logger)
+	snapshotter := NewSnapshotter(ms, offsets, logs, logger, "")
 	if snapshotter.metastore != ms || snapshotter.offsets != offsets || snapshotter.logs != logs || snapshotter.logger != logger {
 		t.Fatal("NewSnapshotter() did not retain dependencies")
 	}
@@ -417,7 +720,7 @@ func TestSnapshotterPartitionSnapshotUsesOffsetSnapshots(t *testing.T) {
 	if err := offsets.CommitHandle("orders", 0, res.Offset, res.Nonce); err != nil {
 		t.Fatalf("CommitHandle() error = %v", err)
 	}
-	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 
 	ps, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 0)
 	if !ok {
@@ -439,7 +742,7 @@ func TestSnapshotterSnapshotReturnsEmptyWhenNoTopics(t *testing.T) {
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
 	}, nil)
-	snapshotter := NewSnapshotter(ms, offsets, newRuntimeTestLogs(t, ms), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	snapshotter := NewSnapshotter(ms, offsets, newRuntimeTestLogs(t, ms), slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 
 	snapshots, err := snapshotter.Snapshot(context.Background())
 	if err != nil {
@@ -456,7 +759,7 @@ func TestPartitionSnapshotReturnsFalseForMissingTopicOpenErrorOnlyWhenMetastoreF
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
 	}, nil)
-	snapshotter := NewSnapshotter(ms, offsets, newRuntimeTestLogs(t, ms), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	snapshotter := NewSnapshotter(ms, offsets, newRuntimeTestLogs(t, ms), slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 
 	_, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 9)
 	if ok {
@@ -546,7 +849,7 @@ func TestSnapshotterSnapshotTopicNameIsPreserved(t *testing.T) {
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
 	}, nil)
-	snapshotter := NewSnapshotter(ms, offsets, newRuntimeTestLogs(t, ms), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	snapshotter := NewSnapshotter(ms, offsets, newRuntimeTestLogs(t, ms), slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 
 	snapshots, err := snapshotter.Snapshot(context.Background())
 	if err != nil {

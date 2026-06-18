@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
@@ -185,6 +186,27 @@ func TestHighWatermarkMissingFileBootstrapsFromTail(t *testing.T) {
 	}
 }
 
+func TestPersistedHighWatermarkReturnsReadError(t *testing.T) {
+	path := testLogPath(t)
+	l, err := NewLog(path, slowFlushOpts(t, nil))
+	if err != nil {
+		t.Fatalf("NewLog() error = %v", err)
+	}
+	defer l.Close()
+
+	hwmPath := filepath.Join(path, hwmFileName)
+	if err := os.Remove(hwmPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Remove(hwm) error = %v", err)
+	}
+	if err := os.Mkdir(hwmPath, 0o755); err != nil {
+		t.Fatalf("Mkdir(hwm) error = %v", err)
+	}
+
+	if _, err := l.PersistedHighWatermark(); err == nil {
+		t.Fatal("PersistedHighWatermark() error = nil, want read error")
+	}
+}
+
 func TestHighWatermarkClampsToRecoveredTail(t *testing.T) {
 	path := testLogPath(t)
 	mustWriteAndClose(t, path, slowFlushOpts(t, nil), func(l *Log) {
@@ -290,7 +312,7 @@ func TestZstdCompressionRoundTripShrinks(t *testing.T) {
 
 	pathZstd := testLogPath(t)
 	mustWriteAndClose(t, pathZstd, slowFlushOpts(t, zc), func(l *Log) {
-		for i := 0; i < 20; i++ {
+		for range 20 {
 			if _, err := l.Append(payload); err != nil {
 				t.Fatalf("Append: %v", err)
 			}
@@ -299,7 +321,7 @@ func TestZstdCompressionRoundTripShrinks(t *testing.T) {
 
 	pathRaw := testLogPath(t)
 	mustWriteAndClose(t, pathRaw, slowFlushOpts(t, codec.NewNoopCodec()), func(l *Log) {
-		for i := 0; i < 20; i++ {
+		for range 20 {
 			if _, err := l.Append(payload); err != nil {
 				t.Fatalf("Append: %v", err)
 			}
@@ -322,7 +344,7 @@ func TestZstdCompressionRoundTripShrinks(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer l.Close()
-	for i := int64(0); i < 20; i++ {
+	for i := range int64(20) {
 		got, err := l.Read(i)
 		if err != nil {
 			t.Fatalf("Read %d: %v", i, err)
@@ -342,9 +364,9 @@ func TestRecoverySkipsCorruptMiddleFrame(t *testing.T) {
 	// Close cycles, so each Close produces its own frame on disk
 	// (otherwise the slow-flush opts would coalesce them all into one
 	// frame at the final Close).
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		mustWriteAndClose(t, path, slowFlushOpts(t, codec.NewNoopCodec()), func(l *Log) {
-			if _, _, err := l.AppendBatch([][]byte{[]byte(fmt.Sprintf("frame-%d", i))}); err != nil {
+			if _, _, err := l.AppendBatch([][]byte{fmt.Appendf(nil, "frame-%d", i)}); err != nil {
 				t.Fatalf("AppendBatch: %v", err)
 			}
 		})
@@ -391,9 +413,9 @@ func TestRecoverySkipsCorruptMiddleFrame(t *testing.T) {
 func TestRecoveryResyncsAfterMagicWipe(t *testing.T) {
 	path := testLogPath(t)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		mustWriteAndClose(t, path, slowFlushOpts(t, codec.NewNoopCodec()), func(l *Log) {
-			if _, _, err := l.AppendBatch([][]byte{[]byte(fmt.Sprintf("frame-%d", i))}); err != nil {
+			if _, _, err := l.AppendBatch([][]byte{fmt.Appendf(nil, "frame-%d", i)}); err != nil {
 				t.Fatalf("AppendBatch: %v", err)
 			}
 		})
@@ -431,8 +453,8 @@ func TestRecoveryTruncatesTornTail(t *testing.T) {
 	path := testLogPath(t)
 
 	mustWriteAndClose(t, path, slowFlushOpts(t, codec.NewNoopCodec()), func(l *Log) {
-		for i := 0; i < 2; i++ {
-			if _, _, err := l.AppendBatch([][]byte{[]byte(fmt.Sprintf("frame-%d", i))}); err != nil {
+		for i := range 2 {
+			if _, _, err := l.AppendBatch([][]byte{fmt.Appendf(nil, "frame-%d", i)}); err != nil {
 				t.Fatalf("AppendBatch: %v", err)
 			}
 		}
@@ -468,12 +490,12 @@ func TestRecoveryTruncatesTornTail(t *testing.T) {
 		t.Fatalf("torn tail not truncated: was %d now %d (expected %d)", got, fileSize(t, path), sizeBefore)
 	}
 
-	for i := int64(0); i < 2; i++ {
+	for i := range int64(2) {
 		got, err := l.Read(i)
 		if err != nil {
 			t.Fatalf("Read %d: %v", i, err)
 		}
-		want := []byte(fmt.Sprintf("frame-%d", i))
+		want := fmt.Appendf(nil, "frame-%d", i)
 		if !bytes.Equal(got, want) {
 			t.Fatalf("Read %d got %q want %q", i, got, want)
 		}
@@ -490,8 +512,8 @@ func TestCloseFlushesPendingRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLog: %v", err)
 	}
-	for i := 0; i < 4; i++ {
-		if _, err := l.Append([]byte(fmt.Sprintf("r%d", i))); err != nil {
+	for i := range 4 {
+		if _, err := l.Append(fmt.Appendf(nil, "r%d", i)); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
 	}
@@ -515,12 +537,12 @@ func TestCloseFlushesPendingRecords(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer l2.Close()
-	for i := int64(0); i < 4; i++ {
+	for i := range int64(4) {
 		got, err := l2.Read(i)
 		if err != nil {
 			t.Fatalf("Read %d: %v", i, err)
 		}
-		want := []byte(fmt.Sprintf("r%d", i))
+		want := fmt.Appendf(nil, "r%d", i)
 		if !bytes.Equal(got, want) {
 			t.Fatalf("Read %d got %q want %q", i, got, want)
 		}
@@ -544,11 +566,11 @@ func TestConcurrentAppendOffsetsUniqueAndContiguous(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	for g := 0; g < goroutines; g++ {
+	for g := range goroutines {
 		go func(g int) {
 			defer wg.Done()
-			for j := 0; j < perGoroutine; j++ {
-				off, err := l.Append([]byte(fmt.Sprintf("g%d-j%d", g, j)))
+			for j := range perGoroutine {
+				off, err := l.Append(fmt.Appendf(nil, "g%d-j%d", g, j))
 				if err != nil {
 					t.Errorf("Append: %v", err)
 					return
@@ -566,7 +588,7 @@ func TestConcurrentAppendOffsetsUniqueAndContiguous(t *testing.T) {
 	}
 
 	// All offsets unique and form [0, N).
-	sort.Slice(offsets, func(i, j int) bool { return offsets[i] < offsets[j] })
+	slices.Sort(offsets)
 	for i, o := range offsets {
 		if int64(i) != o {
 			t.Fatalf("offset[%d] = %d (want %d) — not contiguous", i, o, i)
@@ -632,7 +654,7 @@ func TestSegmentRollover(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer l.Close()
-	for off := int64(0); off < 5; off++ {
+	for off := range int64(5) {
 		got, err := l.Read(off)
 		if err != nil {
 			t.Fatalf("Read %d: %v", off, err)
@@ -941,7 +963,7 @@ func TestRetentionDeletesOldSegments(t *testing.T) {
 	}
 
 	// Reads of deleted offsets fail with ErrOffsetNotFound.
-	for off := int64(0); off < 5; off++ {
+	for off := range int64(5) {
 		if _, err := l.Read(off); !errors.Is(err, ErrOffsetNotFound) {
 			t.Fatalf("Read(%d) want ErrOffsetNotFound got %v", off, err)
 		}

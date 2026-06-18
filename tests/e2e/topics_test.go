@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -45,6 +46,45 @@ func TestCreateTopicWithRetention(t *testing.T) {
 	if tp.RetentionMs != 3_600_000 {
 		t.Fatalf("retention_ms: got %d, want 3600000", tp.RetentionMs)
 	}
+}
+
+func TestCreateTopicWithSchema(t *testing.T) {
+	t.Parallel()
+	env := newEnv(t, defaultOpts())
+	defer env.close()
+
+	resp := env.post("/v1/topics", map[string]any{
+		"name":               "schema-on-create",
+		"partitions":         3,
+		"replication_factor": 2,
+		"schema":             json.RawMessage(schemaV1),
+	})
+	expectStatus(t, resp, http.StatusCreated)
+
+	env.produce("schema-on-create", "k", `{"id": 42, "name": "valid"}`)
+
+	resp = env.post("/v1/topics/schema-on-create/produce", map[string]any{
+		"key":     "bad",
+		"message": json.RawMessage(`{"id":"not-an-integer","name":"invalid"}`),
+	})
+	expectBadRequest(t, resp)
+}
+
+func TestCreateTopicRejectsInvalidSchema(t *testing.T) {
+	t.Parallel()
+	env := newEnv(t, defaultOpts())
+	defer env.close()
+
+	resp := env.post("/v1/topics", map[string]any{
+		"name":               "schema-create-invalid",
+		"partitions":         3,
+		"replication_factor": 2,
+		"schema":             json.RawMessage(`{"type": 123}`),
+	})
+	expectBadRequest(t, resp)
+
+	resp = env.get("/v1/topics/schema-create-invalid")
+	expectNotFound(t, resp)
 }
 
 func TestCreateTopicDuplicate(t *testing.T) {

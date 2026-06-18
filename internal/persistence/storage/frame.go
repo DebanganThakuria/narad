@@ -36,7 +36,7 @@ func encodeRecordsPayload(dst []byte, records [][]byte) []byte {
 func decodeRecordsPayload(payload []byte, recordCount int32) ([][]byte, error) {
 	out := make([][]byte, 0, recordCount)
 	pos := 0
-	for i := int32(0); i < recordCount; i++ {
+	for i := range recordCount {
 		if pos+4 > len(payload) {
 			return nil, fmt.Errorf("%w: record %d header truncated", ErrCorruptRecord, i)
 		}

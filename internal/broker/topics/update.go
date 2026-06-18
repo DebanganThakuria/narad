@@ -171,12 +171,18 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 		return topic.Topic{}, err
 	}
 
+	if err := m.schemas.ValidateDefinition(ctx, name, rawSchema); err != nil {
+		return topic.Topic{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+
 	version, err := m.schemas.Register(ctx, name, rawSchema)
 	if err != nil {
 		return topic.Topic{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
-
 	if err := m.metastore.PutSchema(ctx, name, version, rawSchema); err != nil {
+		if unloadErr := m.schemas.Unload(ctx, name, version); unloadErr != nil {
+			return topic.Topic{}, fmt.Errorf("topics: persist schema: %w; rollback schema registry: %v", err, unloadErr)
+		}
 		return topic.Topic{}, fmt.Errorf("topics: persist schema: %w", err)
 	}
 

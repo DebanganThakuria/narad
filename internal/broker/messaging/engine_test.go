@@ -3,7 +3,6 @@ package messaging
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -24,11 +23,15 @@ import (
 
 type messagingFakeMetastore struct {
 	topics      map[string]topic.Topic
+	schemas     map[string]map[int][]byte
 	getTopicErr error
 }
 
 func newMessagingFakeMetastore() *messagingFakeMetastore {
-	return &messagingFakeMetastore{topics: map[string]topic.Topic{}}
+	return &messagingFakeMetastore{
+		topics:  map[string]topic.Topic{},
+		schemas: map[string]map[int][]byte{},
+	}
 }
 
 func (f *messagingFakeMetastore) CreateTopic(_ context.Context, t topic.Topic) error {
@@ -61,11 +64,20 @@ func (f *messagingFakeMetastore) ListTopics(_ context.Context, _ metastore.ListO
 	return nil, "", nil
 }
 
-func (f *messagingFakeMetastore) PutSchema(_ context.Context, _ string, _ int, _ []byte) error {
+func (f *messagingFakeMetastore) PutSchema(_ context.Context, topicName string, version int, raw []byte) error {
+	if f.schemas[topicName] == nil {
+		f.schemas[topicName] = map[int][]byte{}
+	}
+	f.schemas[topicName][version] = append([]byte(nil), raw...)
 	return nil
 }
 
-func (f *messagingFakeMetastore) GetSchema(_ context.Context, _ string, _ int) ([]byte, error) {
+func (f *messagingFakeMetastore) GetSchema(_ context.Context, topicName string, version int) ([]byte, error) {
+	if versions, ok := f.schemas[topicName]; ok {
+		if raw, ok := versions[version]; ok {
+			return append([]byte(nil), raw...), nil
+		}
+	}
 	return nil, errs.ErrNotFound
 }
 
@@ -82,10 +94,33 @@ type fakeSchemas struct {
 	validateErr error
 	lastTopic   string
 	lastPayload []byte
+	loads       []schemaLoad
+}
+
+type schemaLoad struct {
+	topic   string
+	version int
+	raw     []byte
+}
+
+func (f *fakeSchemas) ValidateDefinition(_ context.Context, _ string, _ []byte) error {
+	return nil
 }
 
 func (f *fakeSchemas) Register(_ context.Context, _ string, _ []byte) (int, error) {
 	return 1, nil
+}
+
+func (f *fakeSchemas) Load(_ context.Context, topic string, version int, raw []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loads = append(f.loads, schemaLoad{topic: topic, version: version, raw: append([]byte(nil), raw...)})
+	f.validateErr = nil
+	return nil
+}
+
+func (f *fakeSchemas) Unload(_ context.Context, _ string, _ int) error {
+	return nil
 }
 
 func (f *fakeSchemas) Validate(_ context.Context, topic string, payload []byte) error {
@@ -177,8 +212,9 @@ func newTestEngine(t *testing.T, ms *messagingFakeMetastore, schemas schema.Regi
 	return newTestEngineWithDir(t, t.TempDir(), ms, schemas, partitioner, replicator)
 }
 
+//go:fix inline
 func int64ptr(v int64) *int64 {
-	return &v
+	return new(v)
 }
 
 func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetastore, schemas schema.Registry, partitioner partition.Manager, replicator replication.Replicator) *Engine {
@@ -199,14 +235,14 @@ func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetasto
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 10, MaxAckedAhead: 10}, nil
 	}, func(topic string, partition int, offset int64) {
-		partitionDir := filepath.Join(dataDir, "topics", topic, fmt.Sprintf("p%05d", partition))
+		partitionDir := storage.TopicPartitionDir(dataDir, topic, partition)
 		if err := storage.WriteConsumerOffset(partitionDir, offset); err != nil {
 			panic(err)
 		}
 	})
 	for topicName, cfg := range ms.topics {
 		for partition := 0; partition < cfg.Partitions; partition++ {
-			partitionDir := filepath.Join(dataDir, "topics", topicName, fmt.Sprintf("p%05d", partition))
+			partitionDir := storage.TopicPartitionDir(dataDir, topicName, partition)
 			committed, ok, err := storage.ReadConsumerOffset(partitionDir)
 			if err != nil || !ok {
 				continue
@@ -220,7 +256,7 @@ func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetasto
 }
 
 func partitionHWMPath(dataDir, topicName string, partition int) string {
-	return filepath.Join(dataDir, "topics", topicName, fmt.Sprintf("p%05d", partition), "hwm")
+	return filepath.Join(storage.TopicPartitionDir(dataDir, topicName, partition), "hwm")
 }
 
 func TestGetTopicMapsNotFound(t *testing.T) {
@@ -516,6 +552,37 @@ func TestAckRejectsStaleHandleAfterCommit(t *testing.T) {
 	err = engine.Ack(context.Background(), "orders", msg.ReceiptHandle)
 	if !errors.Is(err, consumer.ErrHandleStale) {
 		t.Fatalf("Ack() second error = %v, want %v", err, consumer.ErrHandleStale)
+	}
+}
+
+func TestAckAckedAheadCapWithNilMetricsReturnsError(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
+	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+		return consumer.Caps{MaxInFlight: 3, MaxAckedAhead: 1}, nil
+	}, nil)
+	engine := NewEngine(ms, nil, nil, nil, offsets, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+
+	if _, err := offsets.ReserveNext(context.Background(), "orders", 0, time.Second, 2); err != nil {
+		t.Fatalf("ReserveNext(offset 0) error = %v", err)
+	}
+	r1, err := offsets.ReserveNext(context.Background(), "orders", 0, time.Second, 3)
+	if err != nil {
+		t.Fatalf("ReserveNext(offset 1) error = %v", err)
+	}
+	handle := consumer.EncodeHandle(consumer.Handle{Topic: "orders", Partition: 0, Offset: r1.Offset, Nonce: r1.Nonce})
+	if err := engine.Ack(context.Background(), "orders", handle); err != nil {
+		t.Fatalf("Ack(offset 1) error = %v", err)
+	}
+	r2, err := offsets.ReserveNext(context.Background(), "orders", 0, time.Second, 3)
+	if err != nil {
+		t.Fatalf("ReserveNext(offset 2) error = %v", err)
+	}
+	handle = consumer.EncodeHandle(consumer.Handle{Topic: "orders", Partition: 0, Offset: r2.Offset, Nonce: r2.Nonce})
+
+	err = engine.Ack(context.Background(), "orders", handle)
+	if !errors.Is(err, consumer.ErrAckedAheadFull) {
+		t.Fatalf("Ack() error = %v, want %v", err, consumer.ErrAckedAheadFull)
 	}
 }
 

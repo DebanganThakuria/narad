@@ -13,20 +13,26 @@ import (
 // partition consumed by the metrics poller. Constructed once at
 // broker startup and embedded into the broker facade so its Snapshot
 // method satisfies the Broker interface.
+type partitionAssignmentReader interface {
+	GetAssignment(topicName string, partition int) (metastore.Assignment, error)
+}
+
 type Snapshotter struct {
 	metastore metastore.Metastore
 	offsets   *consumer.InFlight
 	logs      *Logs
 	logger    *slog.Logger
+	selfID    string
 }
 
 // NewSnapshotter wires a Snapshotter.
-func NewSnapshotter(ms metastore.Metastore, offsets *consumer.InFlight, logs *Logs, logger *slog.Logger) *Snapshotter {
+func NewSnapshotter(ms metastore.Metastore, offsets *consumer.InFlight, logs *Logs, logger *slog.Logger, selfID string) *Snapshotter {
 	return &Snapshotter{
 		metastore: ms,
 		offsets:   offsets,
 		logs:      logs,
 		logger:    logger,
+		selfID:    selfID,
 	}
 }
 
@@ -67,6 +73,16 @@ func (s *Snapshotter) Snapshot(ctx context.Context) ([]metrics.TopicSnapshot, er
 }
 
 func (s *Snapshotter) partitionSnapshot(ctx context.Context, topicName string, idx int) (metrics.PartitionSnapshot, bool) {
+	if s.selfID != "" {
+		assignments, ok := s.metastore.(partitionAssignmentReader)
+		if ok {
+			assignment, err := assignments.GetAssignment(topicName, idx)
+			if err != nil || assignment.OwnerID != s.selfID {
+				return metrics.PartitionSnapshot{}, false
+			}
+		}
+	}
+
 	log, err := s.logs.Get(topicName, idx)
 	if err != nil {
 		s.logger.Debug("snapshot: partition log open failed", "topic", topicName, "partition", idx, "err", err)
