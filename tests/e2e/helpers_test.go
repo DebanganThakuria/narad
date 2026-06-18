@@ -78,6 +78,7 @@ type env struct {
 	Server *httptest.Server
 	client *http.Client
 	ms     metastore.Metastore
+	logs   *runtime.Logs
 
 	Registry *prometheus.Registry // non-nil only when metrics:true
 	Metrics  *obsmetrics.Metrics  // non-nil only when metrics:true
@@ -231,6 +232,7 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		Server:   ts,
 		client:   ts.Client(),
 		ms:       ms,
+		logs:     logs,
 		Registry: reg,
 		Metrics:  m,
 	}

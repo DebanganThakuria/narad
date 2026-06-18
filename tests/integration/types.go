@@ -1,0 +1,122 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"sync/atomic"
+	"time"
+)
+
+type config struct {
+	mode               string
+	nodes              []string
+	topics             int
+	messages           int
+	partitions         int
+	replicationFactor  int
+	produceConcurrency int
+	consumeConcurrency int
+	timeout            time.Duration
+	assignmentTimeout  time.Duration
+	visibilityTimeout  time.Duration
+	runID              string
+	planPath           string
+	cleanup            bool
+}
+
+type roundRobinClient struct {
+	nodes  []string
+	client *http.Client
+	next   atomic.Uint64
+}
+
+type topicRecord struct {
+	Name                      string          `json:"name"`
+	Partitions                int             `json:"partitions"`
+	ReplicationFactor         int             `json:"replication_factor"`
+	RetentionMs               int64           `json:"retention_ms"`
+	VisibilityTimeoutMs       int64           `json:"visibility_timeout_ms"`
+	MaxInFlightPerPartition   int64           `json:"max_in_flight_per_partition"`
+	MaxAckedAheadPerPartition int64           `json:"max_acked_ahead_per_partition"`
+	Schema                    json.RawMessage `json:"schema,omitempty"`
+}
+
+type listTopicsResponse struct {
+	Topics []topicRecord `json:"topics"`
+}
+
+type topicDetailsResponse struct {
+	topicRecord
+	PartitionStats []partitionStats `json:"partition_stats"`
+}
+
+type partitionStats struct {
+	Index int `json:"index"`
+}
+
+type produceRequest struct {
+	Key     string        `json:"key"`
+	Message messageRecord `json:"message"`
+}
+
+type messageRecord struct {
+	ID       string `json:"id"`
+	Topic    string `json:"topic"`
+	Sequence int    `json:"sequence"`
+	Key      string `json:"key"`
+	RunID    string `json:"run_id"`
+}
+
+type produceResponse struct {
+	Offset    int64 `json:"offset"`
+	Partition int   `json:"partition"`
+}
+
+type consumeResponse struct {
+	Topic         string        `json:"topic"`
+	Partition     int           `json:"partition"`
+	Offset        int64         `json:"offset"`
+	Payload       messageRecord `json:"payload"`
+	ReceiptHandle string        `json:"receipt_handle"`
+}
+
+type replicaReadResponse struct {
+	Payload []byte `json:"payload"`
+}
+
+type messageJob struct {
+	Topic string
+	Key   string
+	Body  messageRecord
+}
+
+type runStats struct {
+	produced   atomic.Int64
+	consumed   atomic.Int64
+	acked      atomic.Int64
+	duplicates atomic.Int64
+}
+
+type recoveryPlan struct {
+	Topic         string        `json:"topic"`
+	Partition     int           `json:"partition"`
+	OwnerIndex    int           `json:"owner_index"`
+	FollowerIndex int           `json:"follower_index"`
+	OwnerNode     string        `json:"owner_node"`
+	FollowerNode  string        `json:"follower_node"`
+	LastOffset    int64         `json:"last_offset"`
+	Payload       messageRecord `json:"payload"`
+}
+
+const messageSchema = `{
+  "type": "object",
+  "properties": {
+    "id":       { "type": "string" },
+    "topic":    { "type": "string" },
+    "sequence": { "type": "integer" },
+    "key":      { "type": "string" },
+    "run_id":   { "type": "string" }
+  },
+  "required": ["id", "topic", "sequence", "key", "run_id"],
+  "additionalProperties": false
+}`
