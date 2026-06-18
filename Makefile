@@ -90,6 +90,22 @@ check: fmt-check vet test ## Strict check: fmt-check + vet + test (no auto-fix).
 local-cluster-e2e: ## Run a local 3-node cluster integration/load test. Pass ARGS='--topics 10 --messages 1000' to override.
 	./scripts/local-cluster-e2e.sh $(ARGS)
 
+.PHONY: local-cluster-recovery
+local-cluster-recovery: ## Run local 3-node process restart recovery scenarios.
+	./scripts/local-cluster-recovery.sh
+
+.PHONY: local-cluster-chaos
+local-cluster-chaos: ## Run local 3-node cluster test with rolling process restarts.
+	./scripts/local-cluster-chaos.sh $(ARGS)
+
+.PHONY: cluster-load
+cluster-load: ## Run the integration/load driver against existing nodes. Use NARAD_NODES='http://host1,http://host2' ARGS='--topics 10 --messages 1000000'.
+	@if [[ -z "$(NARAD_NODES)" ]]; then \
+		echo "NARAD_NODES is required, for example: make cluster-load NARAD_NODES='http://narad:8080'"; \
+		exit 2; \
+	fi
+	$(GO) run ./tests/integration --nodes "$(NARAD_NODES)" $(ARGS)
+
 # ---- developer setup -----------------------------------------------------
 
 .PHONY: tools-install

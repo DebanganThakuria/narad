@@ -88,9 +88,8 @@ func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *ht
 	var localPartition *int
 	for _, candidate := range candidates {
 		if candidate.local {
-			partition := candidate.partition
 			if localPartition == nil {
-				localPartition = &partition
+				localPartition = new(candidate.partition)
 			}
 			continue
 		}

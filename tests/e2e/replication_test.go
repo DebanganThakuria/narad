@@ -27,6 +27,26 @@ func TestInternalReplicate_AppendsAndReplicaReadReturnsPayload(t *testing.T) {
 	}
 }
 
+func TestInternalReplicate_CommittedReadSeesReplicatedPayload(t *testing.T) {
+	env := newTestEnv(t)
+	created := mustCreateTopic(t, env, createTopicReq{Name: "replicate-committed", Partitions: 3, ReplicationFactor: 2})
+
+	resp := rawReq(t, http.MethodPost, env.Server.URL+"/internal/v1/replicate", []byte(`{"topic":"`+created.Name+`","partition":0,"offset":0,"payload":"eyJoZWxsbyI6InJlcGxpY2EifQ==","leader_id":"test-0"}`))
+	expectStatus(t, resp, http.StatusNoContent)
+
+	readURL := env.Server.URL + "/internal/v1/replicate?topic=" + url.QueryEscape(created.Name) + "&partition=0&offset=0&committed=true"
+	readResp := getJSON(t, readURL)
+	expectStatus(t, readResp, http.StatusOK)
+
+	var out struct {
+		Payload []byte `json:"payload"`
+	}
+	decodeJSON(t, readResp, &out)
+	if string(out.Payload) != `{"hello":"replica"}` {
+		t.Fatalf("payload: got %s want %s", string(out.Payload), `{"hello":"replica"}`)
+	}
+}
+
 func TestInternalReplicate_RejectsOffsetMismatch(t *testing.T) {
 	env := newTestEnv(t)
 	created := mustCreateTopic(t, env, createTopicReq{Name: "replicate-conflict", Partitions: 3, ReplicationFactor: 2})

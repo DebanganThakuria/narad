@@ -84,7 +84,7 @@ done
 echo "all nodes ready"
 (
   cd "$ROOT_DIR"
-  "$GO_BIN" run ./tests/integration/local_cluster_driver.go \
+  "$GO_BIN" run ./tests/integration \
     --nodes "http://127.0.0.1:18081,http://127.0.0.1:18082,http://127.0.0.1:18083" \
     "$@"
 )

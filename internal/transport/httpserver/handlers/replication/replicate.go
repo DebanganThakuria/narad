@@ -64,6 +64,11 @@ func Replicate(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusConflict, "replicate offset mismatch")
 			return
 		}
+		if err := log.AdvanceHighWatermark(req.Offset + 1); err != nil {
+			s.Deps.Logger.Error("replicate commit boundary", "topic", req.Topic, "partition", req.Partition, "offset", req.Offset, "err", err)
+			s.WriteError(w, http.StatusInternalServerError, "replicate failed")
+			return
+		}
 
 		w.WriteHeader(http.StatusNoContent)
 	}
