@@ -2,10 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP_DIR="${NARAD_LOCAL_CLUSTER_DIR:-$(mktemp -d /private/tmp/narad-local-cluster.XXXXXX)}"
+TMP_BASE="${TMPDIR:-/tmp}"
+TMP_BASE="${TMP_BASE%/}"
+TMP_DIR="${NARAD_LOCAL_CLUSTER_DIR:-$(mktemp -d "${TMP_BASE}/narad-local-cluster.XXXXXX")}"
 BIN="$TMP_DIR/narad"
 LOG_DIR="$TMP_DIR/logs"
 GO_BIN="${GO:-go}"
+DEFAULT_GO_CACHE="${TMP_BASE}/narad-go-cache"
 
 HTTP_PORTS=(18081 18082 18083)
 CLUSTER_PORTS=(19081 19082 19083)
@@ -50,7 +53,7 @@ mkdir -p "$LOG_DIR"
 echo "building narad into $BIN"
 (
   cd "$ROOT_DIR"
-  GOCACHE="${GOCACHE:-/private/tmp/narad-go-cache}" "$GO_BIN" build -o "$BIN" ./cmd/narad
+  GOCACHE="${GOCACHE:-$DEFAULT_GO_CACHE}" "$GO_BIN" build -o "$BIN" ./cmd/narad
 )
 
 PEERS="narad-1@127.0.0.1:19081,narad-2@127.0.0.1:19082,narad-3@127.0.0.1:19083"
