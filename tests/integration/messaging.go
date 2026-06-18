@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -196,14 +197,22 @@ func consumeOne(ctx context.Context, lb *roundRobinClient, topicName string) (co
 	var out consumeResponse
 	path := "/v1/topics/" + url.PathEscape(topicName) + "/consume?wait=500ms"
 	var status int
-	err := retry(ctx, 8, 100*time.Millisecond, func() error {
-		var attempt consumeResponse
-		gotStatus, _, err := lb.do(ctx, http.MethodGet, path, nil, &attempt, http.StatusOK, http.StatusNoContent)
+	err := retry(ctx, 40, 100*time.Millisecond, func() error {
+		gotStatus, body, err := lb.do(ctx, http.MethodGet, path, nil, nil, http.StatusOK, http.StatusNoContent, http.StatusMisdirectedRequest)
 		if err != nil {
 			return err
 		}
+		if gotStatus == http.StatusMisdirectedRequest {
+			return fmt.Errorf("consume %s misdirected: %s", topicName, string(body))
+		}
 		status = gotStatus
-		out = attempt
+		if gotStatus == http.StatusOK {
+			var attempt consumeResponse
+			if err := json.Unmarshal(body, &attempt); err != nil {
+				return fmt.Errorf("decode consume %s: %w: %s", topicName, err, string(body))
+			}
+			out = attempt
+		}
 		return nil
 	})
 	if err != nil {
