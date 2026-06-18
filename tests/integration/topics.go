@@ -106,12 +106,21 @@ func verifyTopicsReady(ctx context.Context, lb *roundRobinClient, cfg config, to
 func verifyDrained(ctx context.Context, lb *roundRobinClient, topics []string) error {
 	for _, topicName := range topics {
 		path := "/v1/topics/" + url.PathEscape(topicName) + "/consume?wait=100ms"
-		status, _, err := lb.do(ctx, http.MethodGet, path, nil, nil, http.StatusNoContent)
-		if err != nil {
+		var notDrained error
+		if err := retry(ctx, 20, 100*time.Millisecond, func() error {
+			status, _, err := lb.do(ctx, http.MethodGet, path, nil, nil, http.StatusNoContent, http.StatusOK)
+			if err != nil {
+				return err
+			}
+			if status != http.StatusNoContent {
+				notDrained = fmt.Errorf("drain check %s returned status %d, want 204", topicName, status)
+			}
+			return nil
+		}); err != nil {
 			return fmt.Errorf("drain check %s: %w", topicName, err)
 		}
-		if status != http.StatusNoContent {
-			return fmt.Errorf("drain check %s returned status %d, want 204", topicName, status)
+		if notDrained != nil {
+			return notDrained
 		}
 	}
 	return nil
