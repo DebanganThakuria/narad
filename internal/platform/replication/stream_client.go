@@ -3,15 +3,9 @@ package replication
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
-	"net/url"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,57 +20,6 @@ type streamConn interface {
 	SetDeadline(time.Time) error
 	SetReadDeadline(time.Time) error
 	SetWriteDeadline(time.Time) error
-}
-
-type streamClientPool struct {
-	selfID  string
-	timeout time.Duration
-
-	mu      sync.Mutex
-	clients map[string]*streamClient
-}
-
-func newStreamClientPool(selfID string, timeout time.Duration) *streamClientPool {
-	if timeout <= 0 {
-		timeout = defaultStreamTimeout
-	}
-	return &streamClientPool{
-		selfID:  selfID,
-		timeout: timeout,
-		clients: make(map[string]*streamClient),
-	}
-}
-
-func (p *streamClientPool) get(ctx context.Context, addr string, shard int) (*streamClient, error) {
-	key := streamClientPoolKey(addr, shard)
-	p.mu.Lock()
-	if client := p.clients[key]; client != nil && !client.isClosed() {
-		p.mu.Unlock()
-		return client, nil
-	}
-	p.mu.Unlock()
-
-	client, err := dialStreamClient(ctx, streamEndpoint(addr), p.selfID, p.timeout)
-	if err != nil {
-		return nil, err
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if existing := p.clients[key]; existing != nil && !existing.isClosed() {
-		client.closeWithError(errors.New("superseded by existing stream client"))
-		return existing, nil
-	}
-	p.clients[key] = client
-	return client, nil
-}
-
-func streamClientPoolKey(addr string, shard int) string {
-	if shard < 0 {
-		shard = 0
-	}
-	addr = strings.TrimRight(strings.TrimSpace(addr), "/")
-	return addr + "\x00" + strconv.Itoa(shard)
 }
 
 type streamClient struct {
@@ -101,99 +44,6 @@ type streamResult struct {
 	results    []replicationwire.StreamAppendResult
 	frame      replicationwire.StreamFrame
 	err        error
-}
-
-func dialStreamClient(ctx context.Context, endpoint, leaderID string, timeout time.Duration) (*streamClient, error) {
-	if timeout <= 0 {
-		timeout = defaultStreamTimeout
-	}
-	parsed, err := url.Parse(endpoint)
-	if err != nil {
-		return nil, fmt.Errorf("parse replication stream endpoint: %w", err)
-	}
-	if parsed.Scheme == "" {
-		parsed.Scheme = "http"
-	}
-	if parsed.Host == "" {
-		return nil, fmt.Errorf("replication stream endpoint missing host: %q", endpoint)
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return nil, fmt.Errorf("unsupported replication stream scheme %q", parsed.Scheme)
-	}
-
-	dialer := &net.Dialer{Timeout: timeout}
-	conn, err := dialer.DialContext(ctx, "tcp", parsed.Host)
-	if err != nil {
-		return nil, fmt.Errorf("dial replication stream: %w", err)
-	}
-	if err := setHandshakeDeadline(ctx, conn, timeout); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	if parsed.Scheme == "https" {
-		tlsConn := tls.Client(conn, &tls.Config{ServerName: tlsServerName(parsed.Host)})
-		if err := tlsConn.Handshake(); err != nil {
-			_ = conn.Close()
-			return nil, fmt.Errorf("handshake replication stream TLS: %w", err)
-		}
-		conn = tlsConn
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("build replication stream upgrade request: %w", err)
-	}
-	req.Header.Set("Connection", "Upgrade")
-	req.Header.Set("Upgrade", replicationwire.StreamUpgradeProtocol)
-	req.Header.Set(replicationwire.HeaderLeaderID, leaderID)
-	if err := req.Write(conn); err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("write replication stream upgrade request: %w", err)
-	}
-
-	reader := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(reader, req)
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("read replication stream upgrade response: %w", err)
-	}
-	if resp.StatusCode != http.StatusSwitchingProtocols {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		_ = resp.Body.Close()
-		_ = conn.Close()
-		return nil, fmt.Errorf("replication stream upgrade failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	if !strings.EqualFold(resp.Header.Get("Upgrade"), replicationwire.StreamUpgradeProtocol) {
-		_ = conn.Close()
-		return nil, fmt.Errorf("replication stream upgrade protocol mismatch: %q", resp.Header.Get("Upgrade"))
-	}
-	_ = conn.SetDeadline(time.Time{})
-
-	client := &streamClient{
-		conn:    conn,
-		reader:  reader,
-		timeout: timeout,
-		pending: make(map[uint64]chan streamResult),
-	}
-	go client.readLoop()
-	return client, nil
-}
-
-func setHandshakeDeadline(ctx context.Context, conn net.Conn, timeout time.Duration) error {
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(timeout)
-	}
-	return conn.SetDeadline(deadline)
-}
-
-func tlsServerName(host string) string {
-	name, _, err := net.SplitHostPort(host)
-	if err == nil {
-		return name
-	}
-	return host
 }
 
 func (c *streamClient) appendBatch(ctx context.Context, topic string, partition int, records []Record) (int64, error) {

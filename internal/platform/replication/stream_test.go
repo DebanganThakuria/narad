@@ -3,16 +3,14 @@ package replication
 import (
 	"bufio"
 	"context"
-	"errors"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/quic-go/quic-go"
 
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	replicationwire "github.com/debanganthakuria/narad/internal/protocol/replication"
 )
@@ -33,6 +31,31 @@ func (l streamTestLogs) Get(topic string, partition int) (*storage.Log, error) {
 
 func streamTestLogKey(topic string, partition int) string {
 	return topic + "/" + strconv.Itoa(partition)
+}
+
+type fakeClusterStore struct {
+	followerAddr string
+}
+
+func (fakeClusterStore) GetAssignment(topicName string, partition int) (metastore.Assignment, error) {
+	return metastore.Assignment{
+		Topic:      topicName,
+		Partition:  partition,
+		OwnerID:    "node-a",
+		FollowerID: "node-b",
+	}, nil
+}
+
+func (s fakeClusterStore) GetMember(podID string) (metastore.Member, error) {
+	addr := s.followerAddr
+	if addr == "" {
+		addr = podID + ".example:8080"
+	}
+	return metastore.Member{
+		ID:     podID,
+		Addr:   addr,
+		Status: metastore.MemberAlive,
+	}, nil
 }
 
 func waitForStreamTestHighWatermark(t *testing.T, log *storage.Log, want int64) {
@@ -169,46 +192,6 @@ func TestStreamClientAppendMultiReplicatesToFollowerLogs(t *testing.T) {
 	}
 	waitForStreamTestHighWatermark(t, orders, 2)
 	waitForStreamTestHighWatermark(t, payments, 1)
-}
-
-func TestStreamHTTPUpgradeAppendBatchReplicatesToFollowerLog(t *testing.T) {
-	log, err := storage.NewLog(t.TempDir(), storage.DefaultOptions())
-	if err != nil {
-		t.Fatalf("NewLog() error = %v", err)
-	}
-	t.Cleanup(func() {
-		if err := log.Close(); err != nil {
-			t.Fatalf("Close() error = %v", err)
-		}
-	})
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ServeStream(w, r, streamTestLogs{log: log}, nil)
-	}))
-	defer server.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	client, err := dialStreamClient(ctx, streamEndpoint(server.URL), "node-a", time.Second)
-	if err != nil {
-		t.Fatalf("dialStreamClient() error = %v", err)
-	}
-	t.Cleanup(func() {
-		client.closeWithError(errors.New("test done"))
-	})
-
-	next, err := client.appendBatch(ctx, "orders", 0, []Record{
-		{Offset: 0, Payload: []byte(`{"id":1}`)},
-	})
-	if err != nil {
-		t.Fatalf("appendBatch() error = %v", err)
-	}
-	if next != 1 {
-		t.Fatalf("appendBatch() next offset = %d, want 1", next)
-	}
-	if got := log.HighWatermark(); got != 1 {
-		t.Fatalf("HighWatermark() = %d, want 1", got)
-	}
 }
 
 func TestStreamingClusterReusesBoundedQUICReplicationLanes(t *testing.T) {

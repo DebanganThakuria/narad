@@ -62,8 +62,6 @@ func isDataPlaneRequest(r *http.Request) bool {
 		return true
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/ack"):
 		return true
-	case r.Method == http.MethodPost && path == "/internal/v1/replicate":
-		return true
 	default:
 		return false
 	}

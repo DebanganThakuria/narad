@@ -9,9 +9,6 @@ import (
 )
 
 const (
-	StreamPath            = "/internal/v1/replicate/stream"
-	StreamUpgradeProtocol = "narad-replication-v1"
-
 	MaxStreamFramePayloadBytes = 16 << 20
 
 	streamFrameHeaderBytes = 20

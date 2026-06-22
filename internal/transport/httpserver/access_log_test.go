@@ -31,7 +31,7 @@ func TestAccessLogKeepsDataPlaneFailureAtInfo(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 
-	req := httptest.NewRequest(http.MethodPost, "/internal/v1/replicate", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", nil)
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	got := buf.String()

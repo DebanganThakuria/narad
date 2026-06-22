@@ -2,11 +2,8 @@ package replication
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
@@ -19,10 +16,6 @@ type StoreRecovery struct {
 	store  *metastore.Store
 	logs   *runtime.Logs
 	quic   *quicClientPool
-}
-
-type replicaReadResponse struct {
-	Payload []byte `json:"payload"`
 }
 
 func NewStoreRecovery(selfID string, store *metastore.Store, logs *runtime.Logs, client *http.Client) StoreRecovery {
@@ -151,69 +144,6 @@ func (r StoreRecovery) findFollowerNextOffset(ctx context.Context, addr, topicNa
 
 func (r StoreRecovery) fetchReplicaRecord(ctx context.Context, addr, topicName string, partition int, offset int64, committedOnly bool) ([]byte, bool, error) {
 	return r.quic.readReplica(ctx, addr, topicName, partition, offset, committedOnly)
-}
-
-func findReplicaNextOffset(ctx context.Context, client *http.Client, addr, topicName string, partition int, upperBound int64) (int64, error) {
-	if upperBound <= 0 {
-		return 0, nil
-	}
-	low, high := int64(0), upperBound
-	for low < high {
-		mid := low + (high-low)/2
-		_, found, err := fetchReplicaRecord(ctx, client, addr, topicName, partition, mid, false)
-		if err != nil {
-			return 0, err
-		}
-		if found {
-			low = mid + 1
-			continue
-		}
-		high = mid
-	}
-	return low, nil
-}
-
-func fetchReplicaRecord(ctx context.Context, client *http.Client, addr, topicName string, partition int, offset int64, committedOnly bool) ([]byte, bool, error) {
-	if client == nil {
-		client = http.DefaultClient
-	}
-	parsed, err := url.Parse(replicateEndpoint(addr))
-	if err != nil {
-		return nil, false, fmt.Errorf("parse replica read url: %w", err)
-	}
-	q := parsed.Query()
-	q.Set("topic", topicName)
-	q.Set("partition", fmt.Sprintf("%d", partition))
-	q.Set("offset", fmt.Sprintf("%d", offset))
-	if committedOnly {
-		q.Set("committed", "true")
-	}
-	parsed.RawQuery = q.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
-	if err != nil {
-		return nil, false, fmt.Errorf("build replica read request: %w", err)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, false, fmt.Errorf("send replica read request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, false, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, false, fmt.Errorf("replica read failed with status %d: %s", resp.StatusCode, string(body))
-	}
-	var out replicaReadResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, false, fmt.Errorf("decode replica read response: %w", err)
-	}
-	if !json.Valid(out.Payload) {
-		return nil, false, fmt.Errorf("replica payload is not valid json")
-	}
-	return out.Payload, true, nil
 }
 
 func (r StoreRecovery) pushReplicaRecord(ctx context.Context, addr, topicName string, partition int, offset int64, payload []byte) error {

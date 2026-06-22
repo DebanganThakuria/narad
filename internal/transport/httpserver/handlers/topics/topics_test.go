@@ -667,26 +667,6 @@ func TestDeleteHandlerReturnsBroadcastError(t *testing.T) {
 	}
 }
 
-func TestPurgeLocalHandlerCallsBrokerPurge(t *testing.T) {
-	purged := false
-	s := newTestSet(&fakeBroker{purgeTopicFn: func(_ context.Context, name string) error {
-		purged = name == "orders"
-		return nil
-	}})
-
-	req := httptest.NewRequest(http.MethodDelete, "/internal/v1/topics/orders", nil)
-	req.SetPathValue("topic", "orders")
-	res := httptest.NewRecorder()
-	PurgeLocal(s).ServeHTTP(res, req)
-
-	if !purged {
-		t.Fatal("PurgeLocal() did not call broker purge")
-	}
-	if res.Code != http.StatusNoContent {
-		t.Fatalf("PurgeLocal() status = %d, want %d", res.Code, http.StatusNoContent)
-	}
-}
-
 func TestListHandlerParsesLimitAndToken(t *testing.T) {
 	var gotOpts metastore.ListOptions
 	s := newTestSet(&fakeBroker{listTopicsFn: func(_ context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error) {

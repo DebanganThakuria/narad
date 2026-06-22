@@ -84,10 +84,6 @@ type consumeResponse struct {
 	ReceiptHandle string        `json:"receipt_handle"`
 }
 
-type replicaReadResponse struct {
-	Payload []byte `json:"payload"`
-}
-
 type messageJob struct {
 	Topic string
 	Key   string
@@ -99,17 +95,6 @@ type runStats struct {
 	consumed   atomic.Int64
 	acked      atomic.Int64
 	duplicates atomic.Int64
-}
-
-type recoveryPlan struct {
-	Topic         string        `json:"topic"`
-	Partition     int           `json:"partition"`
-	OwnerIndex    int           `json:"owner_index"`
-	FollowerIndex int           `json:"follower_index"`
-	OwnerNode     string        `json:"owner_node"`
-	FollowerNode  string        `json:"follower_node"`
-	LastOffset    int64         `json:"last_offset"`
-	Payload       messageRecord `json:"payload"`
 }
 
 const messageSchema = `{

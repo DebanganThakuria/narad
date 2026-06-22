@@ -1552,33 +1552,22 @@ func TestRouteDeleteTopicReturnsFalseWhenLeaderPortMatchIsSelf(t *testing.T) {
 }
 
 func TestBroadcastDeleteTopicSkipsSelfAndDeadMembers(t *testing.T) {
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete {
-			t.Fatalf("method = %s, want %s", r.Method, http.MethodDelete)
-		}
-		if r.URL.Path != "/internal/v1/topics/orders" {
-			t.Fatalf("path = %q, want %q", r.URL.Path, "/internal/v1/topics/orders")
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer remote.Close()
-
 	store := newTestStore(t)
 	ctx := context.Background()
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "127.0.0.1:1", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "127.0.0.1:2", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-dead", Addr: "127.0.0.1:2", Status: metastore.MemberDead}); err != nil {
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-dead", Addr: "127.0.0.1:3", Status: metastore.MemberDead}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
 
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
 	router.peer = fakePeerClient{purgeTopicFn: func(_ context.Context, addr, topicName string) (nodewire.Response, error) {
-		if addr != remote.Listener.Addr().String() {
-			t.Fatalf("addr = %q, want %q", addr, remote.Listener.Addr().String())
+		if addr != "127.0.0.1:2" {
+			t.Fatalf("addr = %q, want %q", addr, "127.0.0.1:2")
 		}
 		if topicName != "orders" {
 			t.Fatalf("topic = %q, want orders", topicName)
@@ -1591,14 +1580,9 @@ func TestBroadcastDeleteTopicSkipsSelfAndDeadMembers(t *testing.T) {
 }
 
 func TestBroadcastDeleteTopicReturnsErrorOnRemoteFailure(t *testing.T) {
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer remote.Close()
-
 	store := newTestStore(t)
 	ctx := context.Background()
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "127.0.0.1:2", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
 

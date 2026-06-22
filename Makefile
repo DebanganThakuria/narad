@@ -90,10 +90,6 @@ check: fmt-check vet test ## Strict check: fmt-check + vet + test (no auto-fix).
 local-cluster-e2e: ## Run a local 3-node cluster integration/load test. Pass ARGS='--topics 10 --messages 1000' to override.
 	./scripts/local-cluster-e2e.sh $(ARGS)
 
-.PHONY: local-cluster-recovery
-local-cluster-recovery: ## Run local 3-node process restart recovery scenarios.
-	./scripts/local-cluster-recovery.sh
-
 .PHONY: local-cluster-chaos
 local-cluster-chaos: ## Run local 3-node cluster test with rolling process restarts.
 	./scripts/local-cluster-chaos.sh $(ARGS)

@@ -16,7 +16,7 @@ const (
 )
 
 type replicaAppendCoordinator struct {
-	logs   streamLogStore
+	logs   StreamLogStore
 	logger *slog.Logger
 
 	mu         sync.Mutex
@@ -45,7 +45,7 @@ type stagedReplicaBatch struct {
 	bytes int
 }
 
-func newReplicaAppendCoordinator(logs streamLogStore, logger *slog.Logger) *replicaAppendCoordinator {
+func newReplicaAppendCoordinator(logs StreamLogStore, logger *slog.Logger) *replicaAppendCoordinator {
 	return &replicaAppendCoordinator{
 		logs:       logs,
 		logger:     logger,

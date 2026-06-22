@@ -1,23 +1,16 @@
 package replication
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
-	"strings"
 	"sync"
 
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	replicationwire "github.com/debanganthakuria/narad/internal/protocol/replication"
 )
-
-type streamLogStore interface {
-	Get(topicName string, idx int) (*storage.Log, error)
-}
 
 type StreamLogStore interface {
 	Get(topicName string, idx int) (*storage.Log, error)
@@ -39,58 +32,10 @@ type streamReplicaReadLog interface {
 	HighWatermark() int64
 }
 
-func ServeStream(w http.ResponseWriter, r *http.Request, logs streamLogStore, logger *slog.Logger) {
-	if !isReplicationStreamUpgrade(r) {
-		http.Error(w, "replication stream upgrade required", http.StatusUpgradeRequired)
-		return
-	}
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "replication stream unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	conn, rw, err := hijacker.Hijack()
-	if err != nil {
-		if logger != nil {
-			logger.Error("replication stream hijack", "err", err)
-		}
-		return
-	}
-	if _, err := rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: " + replicationwire.StreamUpgradeProtocol + "\r\n\r\n"); err != nil {
-		_ = conn.Close()
-		if logger != nil {
-			logger.Error("replication stream handshake", "err", err)
-		}
-		return
-	}
-	if err := rw.Flush(); err != nil {
-		_ = conn.Close()
-		if logger != nil {
-			logger.Error("replication stream handshake flush", "err", err)
-		}
-		return
-	}
-
-	go serveStreamConn(conn, rw.Reader, logs, logger)
-}
-
-func isReplicationStreamUpgrade(r *http.Request) bool {
-	if !strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), replicationwire.StreamUpgradeProtocol) {
-		return false
-	}
-	for part := range strings.SplitSeq(r.Header.Get("Connection"), ",") {
-		if strings.EqualFold(strings.TrimSpace(part), "upgrade") {
-			return true
-		}
-	}
-	return false
-}
-
 type streamServerConn struct {
 	conn    streamConn
 	reader  io.Reader
-	logs    streamLogStore
+	logs    StreamLogStore
 	logger  *slog.Logger
 	handler StreamFrameHandler
 	append  *replicaAppendCoordinator
@@ -101,11 +46,11 @@ func ServeStreamConn(conn streamConn, reader io.Reader, logs StreamLogStore, log
 	serveStreamConn(conn, reader, logs, logger, handlers...)
 }
 
-func serveStreamConn(conn streamConn, reader io.Reader, logs streamLogStore, logger *slog.Logger, handlers ...StreamFrameHandler) {
+func serveStreamConn(conn streamConn, reader io.Reader, logs StreamLogStore, logger *slog.Logger, handlers ...StreamFrameHandler) {
 	serveStreamConnWithCoordinator(conn, reader, logs, logger, newReplicaAppendCoordinator(logs, logger), handlers...)
 }
 
-func serveStreamConnWithCoordinator(conn streamConn, reader io.Reader, logs streamLogStore, logger *slog.Logger, appendCoordinator *replicaAppendCoordinator, handlers ...StreamFrameHandler) {
+func serveStreamConnWithCoordinator(conn streamConn, reader io.Reader, logs StreamLogStore, logger *slog.Logger, appendCoordinator *replicaAppendCoordinator, handlers ...StreamFrameHandler) {
 	if reader == nil {
 		reader = conn
 	}
@@ -376,7 +321,7 @@ func acceptDuplicateStreamBatchPrefix(log streamFollowerLog, req replicationwire
 	for offset := req.BaseOffset; offset < exclusiveEnd; offset++ {
 		existing, err := log.Read(offset)
 		idx := int(offset - req.BaseOffset)
-		if err != nil || idx < 0 || idx >= len(req.Payloads) || !bytes.Equal(existing, req.Payloads[idx]) {
+		if err != nil || idx < 0 || idx >= len(req.Payloads) || string(existing) != string(req.Payloads[idx]) {
 			return offset, false
 		}
 	}
