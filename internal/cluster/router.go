@@ -27,6 +27,7 @@ type Router struct {
 
 	routeMu       sync.RWMutex
 	routeTTL      time.Duration
+	routeVersion  uint64
 	routes        map[string]cachedRouteTable
 	consumeMu     sync.Mutex
 	consumeCursor map[string]uint64

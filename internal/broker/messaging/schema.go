@@ -32,6 +32,7 @@ func (e *Engine) validateProducePayload(ctx context.Context, topicName string, p
 }
 
 func (e *Engine) loadPersistedSchemasCached(ctx context.Context, topicName string) (bool, error) {
+	e.syncMetadataCacheVersion()
 	now := time.Now()
 	e.cacheMu.RLock()
 	cached, hit := e.schemaLoadCache[topicName]

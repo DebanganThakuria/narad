@@ -8,6 +8,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	platformreplication "github.com/debanganthakuria/narad/internal/platform/replication"
+	replicationwire "github.com/debanganthakuria/narad/internal/protocol/replication"
 )
 
 func TestRecovery_RepairsOwnerFromFollowerViaQUIC(t *testing.T) {
@@ -129,12 +130,38 @@ func assignRecoveryPartition(t *testing.T, store *metastore.Store, topicName str
 
 func startRecoveryQUIC(t *testing.T, e *env) {
 	t.Helper()
+	addr := quicAddrForEnv(e)
 	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
 	t.Cleanup(cancel)
 	go func() {
-		_ = platformreplication.ServeQUIC(ctx, quicAddrForEnv(e), e.logs, nil)
+		if err := platformreplication.ServeQUIC(ctx, addr, e.logs, nil); err != nil {
+			errCh <- err
+		}
 	}()
-	time.Sleep(25 * time.Millisecond)
+	waitForRecoveryQUIC(t, addr, errCh)
+}
+
+func waitForRecoveryQUIC(t *testing.T, addr string, errCh <-chan error) {
+	t.Helper()
+	client := platformreplication.NewQUICFrameClient(250 * time.Millisecond)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-errCh:
+			t.Fatalf("start recovery QUIC: %v", err)
+		default:
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		frame, err := client.Request(ctx, addr, replicationwire.StreamFramePing, nil)
+		cancel()
+		if err == nil && frame.Type == replicationwire.StreamFramePong {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("recovery QUIC %s did not become ready", addr)
 }
 
 func quicAddrForEnv(e *env) string {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -86,6 +87,35 @@ func TestProduceCachesMissingSchemaLookup(t *testing.T) {
 	}
 	if ms.getSchemaCalls != 1 {
 		t.Fatalf("GetSchema calls = %d, want 1", ms.getSchemaCalls)
+	}
+}
+
+func TestProduceInvalidatesMissingSchemaCacheOnMetastoreVersionChange(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
+	schemas := &fakeSchemas{validateErr: errs.ErrSchemaNotFound}
+	replicator := &fakeReplicator{}
+	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0}, replicator)
+	engine.cacheTTL = time.Hour
+
+	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
+		t.Fatalf("first Produce() error = %v", err)
+	}
+	if len(schemas.loads) != 0 {
+		t.Fatalf("schema loads = %d, want 0 before schema exists", len(schemas.loads))
+	}
+	if err := ms.PutSchema(context.Background(), "orders", 1, []byte(`{"type":"object"}`)); err != nil {
+		t.Fatalf("PutSchema() error = %v", err)
+	}
+
+	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":2}`)); err != nil {
+		t.Fatalf("second Produce() error = %v", err)
+	}
+	if len(schemas.loads) != 1 {
+		t.Fatalf("schema loads = %d, want 1 after schema update", len(schemas.loads))
+	}
+	if schemas.loads[0].topic != "orders" || schemas.loads[0].version != 1 {
+		t.Fatalf("schema load = %+v, want orders v1", schemas.loads[0])
 	}
 }
 

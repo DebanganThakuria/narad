@@ -257,6 +257,7 @@ func (c *streamClient) readLoop() {
 			}
 			c.complete(frame.RequestID, streamResult{err: errors.New(streamErr.Message)})
 		case replicationwire.StreamFramePong:
+			c.complete(frame.RequestID, streamResult{frame: frame})
 		default:
 			c.closeWithError(fmt.Errorf("unsupported replication stream frame type %d", frame.Type))
 			return

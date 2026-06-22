@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -97,10 +98,11 @@ type heartbeatPayload struct {
 // does not need to hold mu. Read methods hold RLock to prevent using a
 // closed db while Restore is swapping the pointer.
 type fsmState struct {
-	mu     sync.RWMutex
-	db     *bolt.DB
-	dbPath string
-	metric MetricsRecorder
+	mu      sync.RWMutex
+	db      *bolt.DB
+	dbPath  string
+	metric  MetricsRecorder
+	version atomic.Uint64
 }
 
 func newFSM(path string, metric MetricsRecorder) (*fsmState, error) {
@@ -154,24 +156,33 @@ func (f *fsmState) Apply(l *raft.Log) any {
 	if err := json.Unmarshal(l.Data, &c); err != nil {
 		return err
 	}
+	var err error
 	switch c.Op {
 	case opCreateTopic:
-		return f.applyCreateTopic(c.Data)
+		err = f.applyCreateTopic(c.Data)
 	case opUpdateTopic:
-		return f.applyUpdateTopic(c.Data)
+		err = f.applyUpdateTopic(c.Data)
 	case opDeleteTopic:
-		return f.applyDeleteTopic(c.Data)
+		err = f.applyDeleteTopic(c.Data)
 	case opPutSchema:
-		return f.applyPutSchema(c.Data)
+		err = f.applyPutSchema(c.Data)
 	case opAssignPartition:
-		return f.applyAssignPartition(c.Data)
+		err = f.applyAssignPartition(c.Data)
 	case opMemberJoin:
-		return f.applyMemberJoin(c.Data)
+		err = f.applyMemberJoin(c.Data)
 	case opMemberHeartbeat:
-		return f.applyMemberHeartbeat(c.Data)
+		err = f.applyMemberHeartbeat(c.Data)
 	case opMemberDead:
-		return f.applyMemberDead(c.Data)
+		err = f.applyMemberDead(c.Data)
 	default:
 		return fmt.Errorf("metastore: unknown op %d", c.Op)
 	}
+	if err == nil {
+		f.version.Add(1)
+	}
+	return err
+}
+
+func (f *fsmState) metadataVersion() uint64 {
+	return f.version.Load()
 }

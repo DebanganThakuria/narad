@@ -132,6 +132,7 @@ type Engine struct {
 
 	cacheMu         sync.RWMutex
 	cacheTTL        time.Duration
+	cacheVersion    uint64
 	topicCache      map[string]cachedTopic
 	assignmentCache map[string]cachedAssignments
 	memberCache     map[string]cachedMember

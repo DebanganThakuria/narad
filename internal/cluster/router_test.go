@@ -203,6 +203,32 @@ func TestOwnerAddrReturnsEmptyForDeadMember(t *testing.T) {
 	}
 }
 
+func TestRouteCacheInvalidatesWhenMetastoreVersionChanges(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "remote.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote", ""); err != nil {
+		t.Fatalf("AssignPartition() error = %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+	router.routeTTL = time.Hour
+
+	if got := router.ownerAddr("orders", 0); got != "remote.example:7942" {
+		t.Fatalf("ownerAddr() before member death = %q, want remote.example:7942", got)
+	}
+	if err := store.MarkMemberDead(ctx, "node-remote"); err != nil {
+		t.Fatalf("MarkMemberDead() error = %v", err)
+	}
+	if got := router.ownerAddr("orders", 0); got != "" {
+		t.Fatalf("ownerAddr() after member death = %q, want empty", got)
+	}
+}
+
 func TestRouteProduceReturnsFalseWhenTopicMissing(t *testing.T) {
 	store := newTestStore(t)
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)

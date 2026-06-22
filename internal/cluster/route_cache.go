@@ -31,6 +31,7 @@ type routeEntry struct {
 func (rt *Router) routesForTopic(topicName string) (cachedRouteTable, bool) {
 	start := time.Now()
 	now := time.Now()
+	rt.syncRouteCacheVersion()
 	rt.routeMu.RLock()
 	cached, ok := rt.routes[topicName]
 	rt.routeMu.RUnlock()
@@ -96,6 +97,31 @@ func (rt *Router) routesForTopic(topicName string) (cachedRouteTable, bool) {
 	rt.routeMu.Unlock()
 	rt.observe("route_cache", "lookup", "fill", time.Since(start))
 	return table, true
+}
+
+func (rt *Router) syncRouteCacheVersion() {
+	version := rt.store.MetadataVersion()
+	rt.routeMu.RLock()
+	current := rt.routeVersion
+	rt.routeMu.RUnlock()
+	if current == version {
+		return
+	}
+
+	rt.routeMu.Lock()
+	changed := rt.routeVersion != version
+	if changed {
+		clear(rt.routes)
+		rt.routeVersion = version
+	}
+	rt.routeMu.Unlock()
+	if !changed {
+		return
+	}
+
+	rt.consumeMu.Lock()
+	clear(rt.consumeCursor)
+	rt.consumeMu.Unlock()
 }
 
 func sortRoutes(entries []routeEntry) {

@@ -22,11 +22,12 @@ import (
 )
 
 type messagingFakeMetastore struct {
-	topics         map[string]topic.Topic
-	schemas        map[string]map[int][]byte
-	getTopicErr    error
-	getTopicCalls  int
-	getSchemaCalls int
+	topics          map[string]topic.Topic
+	schemas         map[string]map[int][]byte
+	metadataVersion uint64
+	getTopicErr     error
+	getTopicCalls   int
+	getSchemaCalls  int
 }
 
 func newMessagingFakeMetastore() *messagingFakeMetastore {
@@ -38,16 +39,19 @@ func newMessagingFakeMetastore() *messagingFakeMetastore {
 
 func (f *messagingFakeMetastore) CreateTopic(_ context.Context, t topic.Topic) error {
 	f.topics[t.Name] = t
+	f.bumpMetadataVersion()
 	return nil
 }
 
 func (f *messagingFakeMetastore) UpdateTopic(_ context.Context, t topic.Topic) error {
 	f.topics[t.Name] = t
+	f.bumpMetadataVersion()
 	return nil
 }
 
 func (f *messagingFakeMetastore) DeleteTopic(_ context.Context, name string) error {
 	delete(f.topics, name)
+	f.bumpMetadataVersion()
 	return nil
 }
 
@@ -72,6 +76,7 @@ func (f *messagingFakeMetastore) PutSchema(_ context.Context, topicName string, 
 		f.schemas[topicName] = map[int][]byte{}
 	}
 	f.schemas[topicName][version] = append([]byte(nil), raw...)
+	f.bumpMetadataVersion()
 	return nil
 }
 
@@ -92,6 +97,14 @@ func (f *messagingFakeMetastore) GetMember(string) (metastore.Member, error) {
 }
 
 func (f *messagingFakeMetastore) Close() error { return nil }
+
+func (f *messagingFakeMetastore) MetadataVersion() uint64 {
+	return f.metadataVersion
+}
+
+func (f *messagingFakeMetastore) bumpMetadataVersion() {
+	f.metadataVersion++
+}
 
 type fakeSchemas struct {
 	mu          sync.Mutex
@@ -303,6 +316,31 @@ func TestGetTopicUsesShortLivedCache(t *testing.T) {
 	}
 	if ms.getTopicCalls != 1 {
 		t.Fatalf("GetTopic calls = %d, want 1", ms.getTopicCalls)
+	}
+}
+
+func TestGetTopicInvalidatesCacheOnMetastoreVersionChange(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 3}
+	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine.cacheTTL = time.Hour
+
+	first, err := engine.getTopic(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("first getTopic() error = %v", err)
+	}
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 5}
+	ms.bumpMetadataVersion()
+	second, err := engine.getTopic(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("second getTopic() error = %v", err)
+	}
+
+	if first.Partitions != 3 || second.Partitions != 5 {
+		t.Fatalf("topics = %+v then %+v, want partitions 3 then 5", first, second)
+	}
+	if ms.getTopicCalls != 2 {
+		t.Fatalf("GetTopic calls = %d, want 2", ms.getTopicCalls)
 	}
 }
 

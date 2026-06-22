@@ -76,6 +76,29 @@ func TestTopicCRUD(t *testing.T) {
 	}
 }
 
+func TestMetadataVersionAdvancesOnSuccessfulMutation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	before := s.MetadataVersion()
+	ord := topic.Topic{Name: "orders", Partitions: 1}
+	if err := s.CreateTopic(ctx, ord); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	afterCreate := s.MetadataVersion()
+	if afterCreate <= before {
+		t.Fatalf("MetadataVersion after create = %d, want > %d", afterCreate, before)
+	}
+
+	if err := s.CreateTopic(ctx, ord); err != metastore.ErrAlreadyExists {
+		t.Fatalf("duplicate CreateTopic: got %v, want ErrAlreadyExists", err)
+	}
+	afterFailedCreate := s.MetadataVersion()
+	if afterFailedCreate != afterCreate {
+		t.Fatalf("MetadataVersion after failed create = %d, want %d", afterFailedCreate, afterCreate)
+	}
+}
+
 func TestListTopicsPaginated(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

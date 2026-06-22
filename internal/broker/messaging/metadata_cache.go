@@ -32,7 +32,38 @@ type cachedSchemaLoad struct {
 	expires time.Time
 }
 
+type metadataVersioner interface {
+	MetadataVersion() uint64
+}
+
+func (e *Engine) syncMetadataCacheVersion() {
+	versioner, ok := e.metastore.(metadataVersioner)
+	if !ok {
+		return
+	}
+	version := versioner.MetadataVersion()
+
+	e.cacheMu.RLock()
+	current := e.cacheVersion
+	e.cacheMu.RUnlock()
+	if current == version {
+		return
+	}
+
+	e.cacheMu.Lock()
+	defer e.cacheMu.Unlock()
+	if e.cacheVersion == version {
+		return
+	}
+	clear(e.topicCache)
+	clear(e.assignmentCache)
+	clear(e.memberCache)
+	clear(e.schemaLoadCache)
+	e.cacheVersion = version
+}
+
 func (e *Engine) getTopic(ctx context.Context, name string) (topic.Topic, error) {
+	e.syncMetadataCacheVersion()
 	now := time.Now()
 	e.cacheMu.RLock()
 	cached, hit := e.topicCache[name]
@@ -94,6 +125,7 @@ func (e *Engine) assignmentsForTopic(topicName string) (cachedAssignments, bool,
 		return cachedAssignments{}, false, nil
 	}
 
+	e.syncMetadataCacheVersion()
 	now := time.Now()
 	e.cacheMu.RLock()
 	cached, hit := e.assignmentCache[topicName]
@@ -127,6 +159,7 @@ func (e *Engine) getMember(id string) (metastore.Member, error) {
 		return metastore.Member{}, errs.ErrNotFound
 	}
 
+	e.syncMetadataCacheVersion()
 	now := time.Now()
 	e.cacheMu.RLock()
 	cached, hit := e.memberCache[id]

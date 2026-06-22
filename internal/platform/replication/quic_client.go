@@ -31,7 +31,7 @@ type QUICFrameClient struct {
 }
 
 const (
-	quicDialTimeout = 100 * time.Millisecond
+	quicDialTimeout = time.Second
 
 	quicReplicationLanes = 32
 	quicProduceLanes     = 16
