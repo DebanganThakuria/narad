@@ -7,6 +7,16 @@ GOIMPORTS ?= goimports
 BIN_DIR  := bin
 DATA_DIR := data
 PKG      := github.com/debanganthakuria/narad
+IMAGE    ?= ghcr.io/debanganthakuria/narad:dev
+DOCKER_PLATFORM ?= linux/amd64
+HOST_ARCH := $(shell uname -m)
+ifeq ($(HOST_ARCH),arm64)
+BUILD_PLATFORM ?= linux/arm64
+else ifeq ($(HOST_ARCH),aarch64)
+BUILD_PLATFORM ?= linux/arm64
+else
+BUILD_PLATFORM ?= linux/amd64
+endif
 
 PKGS       := ./...
 TEST_FLAGS := -race -count=1
@@ -34,6 +44,14 @@ help: ## Show this help.
 build: ## Build the narad binary into bin/narad.
 	@mkdir -p $(BIN_DIR)
 	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/narad ./cmd/narad
+
+.PHONY: docker-build
+docker-build: ## Build a container image. Override with IMAGE=ghcr.io/owner/narad:tag.
+	docker build --platform "$(DOCKER_PLATFORM)" --build-arg BUILDPLATFORM="$(BUILD_PLATFORM)" --build-arg GIT_REV="$(GIT_REV)" -t "$(IMAGE)" .
+
+.PHONY: docker-push
+docker-push: ## Push the container image built by docker-build.
+	docker push "$(IMAGE)"
 
 .PHONY: install
 install: ## Install narad into $GOBIN.

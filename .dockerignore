@@ -1,0 +1,13 @@
+.git
+.github
+.claude
+.idea
+
+bin
+data
+tmp
+docs
+
+*.log
+.DS_Store
+todo-plan.local.md

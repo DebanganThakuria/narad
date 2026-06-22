@@ -167,6 +167,31 @@ make build         # produces bin/narad
 bin/narad serve    # listens on :7942 (API) and :7943 (cluster/Raft)
 ```
 
+### Container Image
+
+Narad ships as a single static binary inside a small non-root container image.
+The default local image name is the public GHCR path:
+
+```sh
+make docker-build
+make docker-push
+```
+
+The CI workflow in `.github/workflows/container.yml` publishes multi-arch
+images to `ghcr.io/debanganthakuria/narad` on `master`, version tags, and
+manual workflow dispatches. The default branch also gets the `latest` tag.
+
+If this repository remains private, the first GHCR package may be created as a
+private package. After the first successful publish, change the package
+visibility to public in GitHub Packages before using it from a cluster without
+an image pull secret.
+
+The image starts `narad serve` by default, listens on `7942` for the public API
+and `7943` for cluster traffic, and uses `/var/lib/narad` as the data
+directory. Mount the StatefulSet PVC at that path. In Kubernetes, run the pod
+with `securityContext.fsGroup: 10001` so the non-root `narad` user can write to
+the mounted volume.
+
 ## Developer setup (one-time)
 
 ```sh
