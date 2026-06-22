@@ -99,6 +99,25 @@ func (rt *Router) memberAddrByClusterAddr(clusterAddr string) string {
 	return ""
 }
 
+func (rt *Router) leaderMemberAddr() string {
+	if addr := rt.memberAddrByClusterAddr(rt.store.LeaderAddr()); addr != "" {
+		return addr
+	}
+	return rt.memberAddrByID(rt.store.LeaderID())
+}
+
+func (rt *Router) memberAddrByID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" || id == strings.TrimSpace(rt.selfID) {
+		return ""
+	}
+	member, err := rt.store.GetMember(id)
+	if err != nil || member.Status == metastore.MemberDead {
+		return ""
+	}
+	return strings.TrimSpace(member.Addr)
+}
+
 func memberMatchesClusterAddr(member metastore.Member, clusterAddr string) bool {
 	if strings.TrimSpace(member.ClusterAddr) != "" {
 		return netaddr.ClusterAddrMatchesPeer(clusterAddr, member.ClusterAddr)

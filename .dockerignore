@@ -4,6 +4,7 @@
 .idea
 
 bin
+charts/narad
 data
 tmp
 docs
