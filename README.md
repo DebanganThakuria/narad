@@ -20,7 +20,7 @@ It focuses on:
 - durable append-only segmented storage
 - queue-style consume/ack semantics with replay support
 - Raft-backed control-plane metadata
-- any-pod routing to the owning partition
+- any-pod produce ingress with async owner dispatch
 - JSON-Schema validation and per-topic tuning
 - Prometheus metrics and operational debugging hooks
 
@@ -28,7 +28,7 @@ It focuses on:
 
 Narad is pre-1.0 and under active development.
 
-Today, the control plane, fixed-leader data plane, HTTP API, CLI surface,
+Today, the control plane, WAL-first data plane, HTTP API, CLI surface,
 topic CRUD, consumer flows, and core storage paths are covered by unit
 and end-to-end tests.
 
@@ -37,30 +37,18 @@ and end-to-end tests.
 - [Contributing guide](./CONTRIBUTING.md)
 - [Code of conduct](./CODE_OF_CONDUCT.md)
 - [Security policy](./SECURITY.md)
+- [PCA flow diagrams](./PCA_FLOWS.md)
 - [License](./LICENSE)
 
 > **Current implementation status:** the control-plane architecture is in
-> place. The HTTP API, append-only segmented log, fixed-leader
-> leader→follower replication path, HWM-gated visibility, **Raft+bbolt
-> metastore** (topics, schemas, partition assignments, cluster
-> membership), **cluster controller** (partition assignment, heartbeat
-> monitoring, leader election), **any-pod proxy routing**,
-> JSON-Schema validation, per-topic retention, partitioning,
-> **SQS-style in-flight tracking with gap-skipping reservations,
-> out-of-order acks, and nonce-verified receipt handles**, Prometheus
-> metrics, and a debug pprof listener are functional.
-
-### Breaking changes (pre-1.0)
-
-> **Status:** control-plane architecture complete. The HTTP API,
-> append-only segmented log, fixed-leader leader→follower replication
-> path, HWM-gated visibility, **Raft+bbolt metastore** (topics, schemas,
+> place. The HTTP API, append-only segmented log, produce ingress WAL,
+> async produce dispatcher, **Raft+bbolt metastore** (topics, schemas,
 > partition assignments, cluster membership), **cluster controller**
 > (partition assignment, heartbeat monitoring, leader election),
-> **any-pod proxy routing**, JSON-Schema validation, per-topic retention,
+> consume/ack routing, JSON-Schema validation, per-topic retention,
 > partitioning, **SQS-style in-flight tracking with gap-skipping
-> reservations + out-of-order acks + nonce-verified receipt handles**,
-> Prometheus metrics, and a debug pprof listener are all functional.
+> reservations, out-of-order acks, and nonce-verified receipt handles**,
+> Prometheus metrics, and a debug pprof listener are functional.
 
 ### Breaking changes (pre-1.0)
 
@@ -68,6 +56,10 @@ and end-to-end tests.
   The handle is a `base64url(json({t,p,o,n}))` token returned by
   Consume — no longer HMAC-signed. Tampering returns **400**; a stale
   or already-committed handle returns **410** (not 401).
+- `POST /v1/topics/{topic}/produce` returns **202 Accepted** with an
+  ingress `message_id`, topic, partition, and accepted timestamp. It no
+  longer returns a final log offset. The message becomes visible after
+  the background dispatcher commits it to the owner partition.
 - `POST /v1/topics` and `PATCH /v1/topics/{topic}` use flat scalar
   fields (`retention_ms`, `visibility_timeout_ms`,
   `max_in_flight_per_partition`, `max_acked_ahead_per_partition`).
@@ -95,10 +87,11 @@ HTTP Producers ─────────▶│     narad-0       │     narad
   (port 7942)            │     (broker)      │     (broker)      │
 HTTP Consumers ◀── pull ─│                   │                   │
                          │  partition log    │  partition log    │
+                         │  ingress WAL      │  ingress WAL      │
                          │  (disk, PV)       │  (disk, PV)       │
                          └───────────────────┴───────────────────┘
-                                  ↑ any pod proxies to owner via
-                                    cluster port (7943)
+                                  ↑ accepted records dispatch to owner
+                                    over the cluster port (7943)
 ```
 
 **Control plane.** Three Raft voters (e.g. `narad-0..2`) form a consensus
@@ -110,12 +103,18 @@ partition assignment, member address) without a network round-trip.
 
 **Data plane.** Each partition is owned by one pod. That pod holds the
 segment files on its persistent volume and manages the in-flight
-reservation table in memory. Requests that arrive at the wrong pod are
-transparently proxied to the owner via the internal cluster port.
+reservation table in memory. Produce can hit any pod: the ingress pod
+validates the request, writes it to its local ingress WAL, and returns
+`202 Accepted`. A background dispatcher moves accepted records to the
+selected owner partition, where they become visible to consumers.
+Consume and ack still route/probe owners through the internal cluster
+port when the local pod cannot serve the request.
 
-**Replication.** In the fixed-leader model, the leader→follower log
-replication path is in place and visibility is gated by the replicated
-high-water mark rather than raw append position.
+**Replication.** Narad v1 has no follower in the produce hot path.
+Produce durability means the record exists in the receiving pod's
+ingress WAL on a durable volume. If a pod dies but its volume survives,
+the WAL is replayed on restart. Future versions may add async followers
+or configurable replicated durability tiers.
 
 ## Layout
 
@@ -225,6 +224,15 @@ curl -X POST localhost:7942/v1/topics/orders/produce \
   -H 'Content-Type: application/json' \
   -d '{"key":"customer-42","message":{"id":1,"amount":1500}}'
 
+# Response:
+# {
+#   "status": "accepted",
+#   "message_id": "4f7c...",
+#   "topic": "orders",
+#   "partition": 3,
+#   "accepted_at_unix_ms": 1719000000000
+# }
+
 # Consume with long-poll. Response includes a receipt_handle.
 curl 'localhost:7942/v1/topics/orders/consume?wait=5s'
 
@@ -257,7 +265,8 @@ PATCH   /v1/topics/{topic}                  alter: partitions, retention_ms,
                                              max_in_flight_per_partition,
                                              max_acked_ahead_per_partition, schema
 DELETE  /v1/topics/{topic}                  delete topic and all data
-POST    /v1/topics/{topic}/produce
+POST    /v1/topics/{topic}/produce          202 Accepted; returns ingress message_id,
+                                             selected partition, and accepted_at_unix_ms
 GET     /v1/topics/{topic}/consume          response carries receipt_handle
 POST    /v1/topics/{topic}/ack              body: {"receipt_handle": "..."}
 GET     /healthz                            liveness
@@ -332,16 +341,7 @@ A starting template lives in [`narad.example.json`](./narad.example.json):
       { "id": "narad-2", "addr": "127.0.0.1:9103" }
     ]
   },
-  "storage": {
-    "data_dir": "data",
-    "codec": "zstd",
-    "compression_level": "best",
-    "flush_bytes": 1048576,
-    "flush_records": 1000,
-    "flush_interval_ms": 100,
-    "segment_bytes": 67108864,
-    "retention_check_interval_ms": 60000
-  },
+  "storage": { "data_dir": "data" },
   "topic": {
     "default_partitions": 8,
     "max_partitions": 1024,
@@ -357,24 +357,27 @@ Useful environment overrides:
 | Variable | Effect |
 |---|---|
 | `NARAD_HTTP_ADDR` | API listen address |
+| `NARAD_HTTP_PPROF_ADDR` | optional pprof listen address |
+| `NARAD_HTTP_MAX_CONSUME_WAIT` | server-side cap for long-poll consume wait |
 | `NARAD_CLUSTER_ADDR` | Cluster listen address |
 | `NARAD_NODE_ID` | stable local Raft node ID |
 | `NARAD_CLUSTER_PEERS` | comma-separated 3-voter list as `id@host:port` |
 | `NARAD_DATA_DIR` | Storage directory |
 | `NARAD_LOG_LEVEL` | `debug` / `info` / `warn` / `error` |
 | `NARAD_LOG_FORMAT` | `json` / `text` |
-| `NARAD_STORAGE_CODEC` | `zstd` / `none` |
-| `NARAD_STORAGE_COMPRESSION_LEVEL` | `fastest` / `default` / `better` / `best` |
-| `NARAD_STORAGE_FLUSH_BYTES` | flush when buffer ≥ N bytes |
-| `NARAD_STORAGE_FLUSH_RECORDS` | flush when buffer ≥ N records |
-| `NARAD_STORAGE_FLUSH_INTERVAL_MS` | flush at least every N ms |
-| `NARAD_STORAGE_SEGMENT_BYTES` | roll the active segment past N bytes |
-| `NARAD_STORAGE_RETENTION_CHECK_INTERVAL_MS` | retention reaper sweep period |
 | `NARAD_TOPIC_DEFAULT_PARTITIONS` | default partition count when omitted from CreateTopic |
 | `NARAD_TOPIC_MAX_PARTITIONS` | upper bound for partition count |
 | `NARAD_TOPIC_DEFAULT_REPLICATION_FACTOR` | default replication factor (must be ≥ 2) |
 | `NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS` | default retention age (default: 7 days) |
+| `NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS` | default queue visibility timeout |
+| `NARAD_TOPIC_DEFAULT_MAX_IN_FLIGHT_PER_PARTITION` | default reservation cap per partition |
+| `NARAD_TOPIC_DEFAULT_MAX_ACKED_AHEAD_PER_PARTITION` | default out-of-order ack cap per partition |
 | `NARAD_ADDR` | (client only) base URL for `narad client` |
+
+Narad intentionally does not expose storage flush, fsync, WAL, compression,
+or segment-layout tuning through environment variables. Those are engine
+internals with production defaults; tuning them per deployment tends to
+create hard-to-debug behavior differences.
 
 ## Storage layer
 
@@ -391,19 +394,28 @@ is an append-only file made of CRC-checked, optionally zstd-compressed
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-**Produce path.** `Append` pushes the record into a per-partition
-in-memory buffer and returns the assigned offset immediately. A single
-flusher goroutine drains the buffer to disk when `flush_bytes`,
-`flush_records`, or `flush_interval_ms` is crossed, and one final time
-on graceful shutdown.
+**Produce ingress path.** HTTP produce validates topic/schema, appends
+the request to the receiving pod's ingress WAL, and returns
+`202 Accepted` with a `message_id`. This response does not include the
+final partition offset. A background dispatcher replays durable WAL
+records and commits them to the selected owner partition.
+
+**Partition append path.** Owner-side append pushes the record into a
+per-partition in-memory buffer and returns the assigned offset to the
+dispatcher. A single flusher goroutine drains the buffer to disk when
+Narad's built-in batch thresholds are crossed, and one final time on
+graceful shutdown.
 
 **Concurrency model.** Many writers, one flusher per partition file.
 Producer goroutines contend only on the buffer's lightweight mutex.
 
-**Durability.** Records produced before a flush are durable. Records
-in the open flush window can be lost on a hard crash; this window is
-bounded by the flush thresholds. Graceful shutdown always does a final
-flush.
+**Durability.** Produce durability is provided by the ingress WAL on the
+receiving pod's persistent volume. Partition-log durability is a second
+stage: once the dispatcher commits a record to the owner partition, the
+partition flusher writes and syncs frames in batches. Records accepted
+to WAL but not yet visible are replayed after process restart as long as
+the ingress pod's volume survives. Graceful shutdown always does a final
+partition-log flush and sync.
 
 **Recovery.** On startup the log file is scanned frame by frame. Corrupt
 frames are skipped (scanner resyncs on the next valid magic). A torn
@@ -446,8 +458,9 @@ finds topics with unassigned partitions and pods with missed heartbeats.
 
 **Partition assignment.** When a topic is created, the controller assigns
 each partition to the least-loaded active pod (sort by current partition
-count, round-robin for ties). Assignments are **sticky** — without
-data-plane replication, data lives only on the owning pod's disk, so
+count, round-robin for ties). Assignments are **sticky**. Accepted
+messages live first in the ingress pod's WAL, then in the owner
+partition log after dispatch. Without replicated partition logs,
 partitions cannot be moved automatically.
 
 **Heartbeats.** Each pod calls `RegisterMember` (an upsert) every 5
@@ -545,8 +558,8 @@ calls.
   `narad_oldest_unconsumed_message_age_seconds{topic,partition}`.
 * `narad_consumer_dropped_messages{topic,partition}` — unacknowledged
   messages deleted by retention (data loss indicator).
-* `narad_storage_*` — flush/fsync/retention durations, segments rolled,
-  bytes deleted.
+* `narad_storage_*` — flush/fsync/high-watermark persistence/retention
+  durations, segments rolled, bytes deleted.
 * Inventory gauges: `narad_topics_total`, `narad_partitions_total`,
   `narad_topic_bytes{topic}`, `narad_segments{topic,partition}`.
 * `narad_partition_available_v1{topic,partition}` — messages ready to
@@ -640,9 +653,9 @@ no CGO requirement.
 
 ## Roadmap
 
-* **Data-plane replication.** Leader→follower log sync (`sync to follower
-  page cache, async fsync on both`), LEO/HWM distinction, log truncation
-  on leader change. `replication.Local` stub is wired today.
+* **Replicated durability tier.** Optional async or quorum follower
+  copies for partition logs and/or ingress WAL. Narad v1 does not block
+  HTTP produce on follower replication.
 * **`.offsets` log files.** Per-partition committed offset persistence
   (Kafka `__consumer_offsets` style): append-only log, replicated in the
   same stream as data, aggressively compacted to keep only the latest.

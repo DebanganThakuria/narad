@@ -17,15 +17,15 @@ package messaging
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/consumer"
-	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
@@ -38,14 +38,6 @@ type assignmentReader interface {
 	GetAssignment(topicName string, partition int) (metastore.Assignment, error)
 	GetMember(podID string) (metastore.Member, error)
 	ListAssignments(topicName string) ([]metastore.Assignment, error)
-}
-
-func backlogForPartition(snapshot metrics.PartitionSnapshot) int64 {
-	backlog := snapshot.LogEndOffset - snapshot.CommittedOffset
-	if backlog < 0 {
-		return 0
-	}
-	return backlog
 }
 
 func ownerPartitions(assignments []metastore.Assignment, ownerID string) []int {
@@ -69,11 +61,10 @@ func (e *Engine) localPartitions(topicName string, totalPartitions int) []int {
 	if e.selfID == "" {
 		return allPartitions(totalPartitions)
 	}
-	assignments, ok := e.metastore.(assignmentReader)
-	if !ok {
+	if _, ok := e.metastore.(assignmentReader); !ok {
 		return allPartitions(totalPartitions)
 	}
-	rows, err := assignments.ListAssignments(topicName)
+	rows, err := e.listAssignments(topicName)
 	if err != nil || len(rows) == 0 {
 		return nil
 	}
@@ -134,9 +125,23 @@ type Engine struct {
 	replicator replication.Replicator
 	offsets    *consumer.InFlight
 	logs       *runtime.Logs
+	ingress    *ingress.Manager
 	metrics    *metrics.Metrics
 	logger     *slog.Logger
 	selfID     string
+
+	cacheMu         sync.RWMutex
+	cacheTTL        time.Duration
+	cacheVersion    uint64
+	topicCache      map[string]cachedTopic
+	assignmentCache map[string]cachedAssignments
+	memberCache     map[string]cachedMember
+	schemaLoadCache map[string]cachedSchemaLoad
+
+	replicationMu     sync.Mutex
+	replicationLanes  map[string]*replicationLane
+	replicationCtx    context.Context
+	replicationCancel context.CancelFunc
 }
 
 // NewEngine wires an Engine. handleSecret must be at least 16 bytes
@@ -148,50 +153,56 @@ func NewEngine(
 	replicator replication.Replicator,
 	offsets *consumer.InFlight,
 	logs *runtime.Logs,
+	ingressManager *ingress.Manager,
 	m *metrics.Metrics,
 	logger *slog.Logger,
 	selfID string,
 ) *Engine {
+	replicationCtx, replicationCancel := context.WithCancel(context.Background())
 	return &Engine{
-		metastore:  ms,
-		schemas:    schemas,
-		partitions: partitions,
-		replicator: replicator,
-		offsets:    offsets,
-		logs:       logs,
-		metrics:    m,
-		logger:     logger,
-		selfID:     selfID,
+		metastore:         ms,
+		schemas:           schemas,
+		partitions:        partitions,
+		replicator:        replicator,
+		offsets:           offsets,
+		logs:              logs,
+		ingress:           ingressManager,
+		metrics:           m,
+		logger:            logger,
+		selfID:            selfID,
+		cacheTTL:          250 * time.Millisecond,
+		topicCache:        make(map[string]cachedTopic),
+		assignmentCache:   make(map[string]cachedAssignments),
+		memberCache:       make(map[string]cachedMember),
+		schemaLoadCache:   make(map[string]cachedSchemaLoad),
+		replicationLanes:  make(map[string]*replicationLane),
+		replicationCtx:    replicationCtx,
+		replicationCancel: replicationCancel,
 	}
 }
 
-// getTopic looks up a topic record, mapping metastore.ErrNotFound to
-// the shared sentinel so callers can errors.Is against
-// errs.TopicNotFound regardless of which manager surfaced the error.
-func (e *Engine) getTopic(ctx context.Context, name string) (topic.Topic, error) {
-	t, err := e.metastore.GetTopic(ctx, name)
-	if err != nil {
-		if errors.Is(err, errs.ErrNotFound) {
-			return topic.Topic{}, ErrTopicNotFound
-		}
-		return topic.Topic{}, fmt.Errorf("messaging: get topic: %w", err)
+func (e *Engine) Close() error {
+	if e.replicationCancel != nil {
+		e.replicationCancel()
 	}
-	return t, nil
+	if e.ingress != nil {
+		return e.ingress.Close()
+	}
+	return nil
 }
 
 func (e *Engine) pickProducePartition(topicName, key string, partitions int) (int, error) {
 	start := e.partitions.Pick(topicName, key, partitions)
-	assignments, ok := e.metastore.(assignmentReader)
-	if !ok {
+	if _, ok := e.metastore.(assignmentReader); !ok {
 		return start, nil
 	}
 	for i := range partitions {
 		candidate := (start + i) % partitions
-		assignment, err := assignments.GetAssignment(topicName, candidate)
+		assignment, err := e.getAssignment(topicName, candidate)
 		if err != nil {
 			continue
 		}
-		if !produceAssignmentWritable(assignments, assignment) {
+		if !e.produceAssignmentWritable(assignment) {
 			continue
 		}
 		return candidate, nil
@@ -199,15 +210,15 @@ func (e *Engine) pickProducePartition(topicName, key string, partitions int) (in
 	return 0, fmt.Errorf("messaging: no alive partition owner for topic %s", topicName)
 }
 
-func produceAssignmentWritable(assignments assignmentReader, assignment metastore.Assignment) bool {
-	owner, err := assignments.GetMember(assignment.OwnerID)
+func (e *Engine) produceAssignmentWritable(assignment metastore.Assignment) bool {
+	owner, err := e.getMember(assignment.OwnerID)
 	if err != nil || owner.Status != metastore.MemberAlive {
 		return false
 	}
 	if assignment.FollowerID == "" {
 		return true
 	}
-	follower, err := assignments.GetMember(assignment.FollowerID)
+	follower, err := e.getMember(assignment.FollowerID)
 	return err == nil && follower.Status == metastore.MemberAlive
 }
 
@@ -215,26 +226,24 @@ func (e *Engine) isWritableLocalProducePartition(topicName string, partition int
 	if e.selfID == "" {
 		return true
 	}
-	assignments, ok := e.metastore.(assignmentReader)
-	if !ok {
+	if _, ok := e.metastore.(assignmentReader); !ok {
 		return true
 	}
-	assignment, err := assignments.GetAssignment(topicName, partition)
+	assignment, err := e.getAssignment(topicName, partition)
 	if err != nil {
 		return false
 	}
-	return assignment.OwnerID == e.selfID && produceAssignmentWritable(assignments, assignment)
+	return assignment.OwnerID == e.selfID && e.produceAssignmentWritable(assignment)
 }
 
 func (e *Engine) isLocalOwner(topicName string, partition int) bool {
 	if e.selfID == "" {
 		return true
 	}
-	assignments, ok := e.metastore.(assignmentReader)
-	if !ok {
+	if _, ok := e.metastore.(assignmentReader); !ok {
 		return true
 	}
-	assignment, err := assignments.GetAssignment(topicName, partition)
+	assignment, err := e.getAssignment(topicName, partition)
 	if err != nil {
 		return false
 	}

@@ -2,11 +2,9 @@ package cluster
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
-	"strconv"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -40,7 +38,7 @@ func (rt *Router) RouteGetTopic(ctx context.Context, r *http.Request, topicName 
 		if addr == "" {
 			return topic.Details{}, errs.ErrNotPartitionOwner
 		}
-		partitionStats, err := rt.fetchTopicPartitionStats(ctx, r, addr, assignment.Partition)
+		partitionStats, err := rt.fetchTopicPartitionStats(ctx, r, topicName, addr, assignment.Partition)
 		if err != nil {
 			return topic.Details{}, err
 		}
@@ -54,24 +52,13 @@ func (rt *Router) RouteGetTopic(ctx context.Context, r *http.Request, topicName 
 	return details, nil
 }
 
-func (rt *Router) fetchTopicPartitionStats(ctx context.Context, r *http.Request, addr string, partition int) (topic.PartitionStats, error) {
-	fwd := r.Clone(ctx)
-	q := fwd.URL.Query()
-	q.Set("partition", strconv.Itoa(partition))
-	fwd.URL.RawQuery = q.Encode()
-	probe := rt.forwardProbe(fwd, addr, nil)
-	if probe.code < http.StatusOK || probe.code >= http.StatusMultipleChoices {
-		return topic.PartitionStats{}, fmt.Errorf("topic get returned status %d", probe.code)
+func (rt *Router) fetchTopicPartitionStats(ctx context.Context, _ *http.Request, topicName, addr string, partition int) (topic.PartitionStats, error) {
+	stats, err := rt.peer.TopicPartitionStats(ctx, addr, topicName, partition)
+	if err != nil {
+		return topic.PartitionStats{}, fmt.Errorf("topic get: %w", err)
 	}
-	var details topic.Details
-	if err := json.Unmarshal(probe.body, &details); err != nil {
-		return topic.PartitionStats{}, err
+	if stats.Index != partition {
+		return topic.PartitionStats{}, fmt.Errorf("topic get returned partition %d, want %d", stats.Index, partition)
 	}
-	if len(details.Partitions) != 1 {
-		return topic.PartitionStats{}, fmt.Errorf("topic get returned %d partitions, want 1", len(details.Partitions))
-	}
-	if details.Partitions[0].Index != partition {
-		return topic.PartitionStats{}, fmt.Errorf("topic get returned partition %d, want %d", details.Partitions[0].Index, partition)
-	}
-	return details.Partitions[0], nil
+	return stats, nil
 }

@@ -1,7 +1,8 @@
 package config
 
-// StorageConfig governs the on-disk log layout and the in-memory
-// buffering that fronts it.
+// StorageConfig governs the data directory and internal storage-engine
+// defaults. Only DataDir is part of the stable operator surface; the
+// remaining fields are intentionally configured by Narad defaults.
 type StorageConfig struct {
 	DataDir string    `json:"data_dir"`
 	Fsync   FsyncMode `json:"fsync"`
@@ -21,6 +22,31 @@ type StorageConfig struct {
 	// FlushIntervalMs is the maximum time a record may sit in the
 	// buffer before being flushed.
 	FlushIntervalMs int `json:"flush_interval_ms"`
+
+	// SyncIntervalMs is the maximum time flushed bytes may sit in the OS
+	// page cache before the flusher calls file.Sync() in batched mode.
+	SyncIntervalMs int `json:"sync_interval_ms"`
+
+	// SyncBytes triggers file.Sync() once a partition has written at least
+	// this many unsynced bytes in batched mode. Zero disables the byte bound.
+	SyncBytes int64 `json:"sync_bytes"`
+
+	// HighWatermarkSyncIntervalMs batches durable high-watermark metadata
+	// rewrites. Close always forces one final persist.
+	HighWatermarkSyncIntervalMs int `json:"high_watermark_sync_interval_ms"`
+
+	// IngressWALSyncIntervalMs is the maximum time a successfully accepted
+	// produce may wait before the ingress WAL is fsynced.
+	IngressWALSyncIntervalMs int `json:"ingress_wal_sync_interval_ms"`
+
+	// IngressWALSyncBytes triggers an ingress WAL fsync once this many bytes
+	// are pending. Zero uses the WAL package default.
+	IngressWALSyncBytes int64 `json:"ingress_wal_sync_bytes"`
+
+	// IngressWALShards is the number of independent ingress produce WALs.
+	// Accepted produces are distributed across shards to parallelize append
+	// locks and group commits. Narad does not guarantee message ordering.
+	IngressWALShards int `json:"ingress_wal_shards"`
 
 	// SegmentBytes triggers a segment roll once the active segment's
 	// on-disk size meets or exceeds this value.

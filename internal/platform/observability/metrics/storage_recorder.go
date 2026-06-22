@@ -31,13 +31,37 @@ type storageRecorder struct {
 	partition string
 }
 
-func (r *storageRecorder) ObserveFlush(duration time.Duration, bytesWritten int64) {
+func (r *storageRecorder) ObserveAppend(operation string, duration time.Duration, outcome string, records int, bytes int64) {
+	r.m.ObserveHotPathStage("storage", operation, "append", outcome, duration)
+}
+
+func (r *storageRecorder) ObserveRead(duration time.Duration, source string, outcome string) {
+	r.m.ObserveHotPathStage("storage", "read", source, outcome, duration)
+}
+
+func (r *storageRecorder) ObserveFlush(duration time.Duration, records int, payloadBytes int64, frameBytes int64) {
 	r.m.FlushDurationSeconds.WithLabelValues(r.topic, r.partition).Observe(duration.Seconds())
-	r.m.FlushBytesTotal.WithLabelValues(r.topic, r.partition).Add(float64(bytesWritten))
+	r.m.FlushBytesTotal.WithLabelValues(r.topic, r.partition).Add(float64(frameBytes))
+	r.m.FlushRecordsPerFrame.WithLabelValues(r.topic, r.partition).Observe(float64(records))
+	r.m.FlushPayloadBytes.WithLabelValues(r.topic, r.partition).Observe(float64(payloadBytes))
+	r.m.FlushFrameBytes.WithLabelValues(r.topic, r.partition).Observe(float64(frameBytes))
+}
+
+func (r *storageRecorder) SetBufferStats(records int, bytes int64) {
+	r.m.BufferRecords.WithLabelValues(r.topic, r.partition).Set(float64(records))
+	r.m.BufferBytes.WithLabelValues(r.topic, r.partition).Set(float64(bytes))
+}
+
+func (r *storageRecorder) SetSegmentIndexStats(entries int) {
+	r.m.SegmentIndexEntries.WithLabelValues(r.topic, r.partition).Set(float64(entries))
 }
 
 func (r *storageRecorder) ObserveFsync(duration time.Duration) {
 	r.m.FsyncDurationSeconds.WithLabelValues(r.topic, r.partition).Observe(duration.Seconds())
+}
+
+func (r *storageRecorder) ObserveHighWatermarkPersist(duration time.Duration, outcome string) {
+	r.m.HighWatermarkPersistSeconds.WithLabelValues(r.topic, r.partition, outcome).Observe(duration.Seconds())
 }
 
 func (r *storageRecorder) IncSegmentRolled() {

@@ -25,7 +25,7 @@ func (s *Store) GetTopic(_ context.Context, name string) (topic.Topic, error) {
 	s.fsm.mu.RLock()
 	defer s.fsm.mu.RUnlock()
 	var t topic.Topic
-	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+	err := s.fsm.view("get_topic", func(tx *bolt.Tx) error {
 		v := tx.Bucket(bucketTopics).Get([]byte(name))
 		if v == nil {
 			return ErrNotFound
@@ -40,7 +40,7 @@ func (s *Store) ListTopics(_ context.Context, opts ListOptions) ([]topic.Topic, 
 	defer s.fsm.mu.RUnlock()
 	var out []topic.Topic
 	var nextToken string
-	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+	err := s.fsm.view("list_topics", func(tx *bolt.Tx) error {
 		c := tx.Bucket(bucketTopics).Cursor()
 		var k, v []byte
 		if opts.PageToken != "" {

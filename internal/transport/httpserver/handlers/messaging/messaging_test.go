@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker"
+	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/consumer"
@@ -35,6 +36,8 @@ type fakeBroker struct {
 	listTopicsFn              func(context.Context, metastore.ListOptions) ([]topic.Topic, string, error)
 	produceFn                 func(context.Context, string, string, []byte) (int64, int, error)
 	producePartitions         []int
+	acceptProduceFn           func(context.Context, string, string, []byte, ...int) (ingress.AcceptedProduce, error)
+	acceptProducePartitions   []int
 	consumeFn                 func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error)
 	ackFn                     func(context.Context, string, string) error
 	readyFn                   func(context.Context) error
@@ -88,6 +91,22 @@ func (f *fakeBroker) Produce(ctx context.Context, topicName, key string, payload
 	return f.produceFn(ctx, topicName, key, payload)
 }
 
+func (f *fakeBroker) AcceptProduce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (ingress.AcceptedProduce, error) {
+	f.acceptProducePartitions = append([]int(nil), partition...)
+	if f.acceptProduceFn != nil {
+		return f.acceptProduceFn(ctx, topicName, key, payload, partition...)
+	}
+	return ingress.AcceptedProduce{MessageID: "message-1", Topic: topicName, TargetPartition: 0, CreatedAtUnixMs: 123}, nil
+}
+
+func (f *fakeBroker) CommitAcceptedProduce(context.Context, ingress.ProduceRecord) (int64, error) {
+	return 0, nil
+}
+
+func (f *fakeBroker) CommitAcceptedProduceBatch(_ context.Context, records []ingress.ProduceRecord) ([]int64, error) {
+	return make([]int64, len(records)), nil
+}
+
 func (f *fakeBroker) Consume(ctx context.Context, topicName string, opts brokermsg.ConsumeOpts) (topic.Message, bool, error) {
 	return f.consumeFn(ctx, topicName, opts)
 }
@@ -107,6 +126,7 @@ func (f *fakeBroker) Close() error { return nil }
 type fakeRouter struct {
 	routeProduceFn     func(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool
 	routeConsumeFn     func(context.Context, http.ResponseWriter, *http.Request, string, *int) (bool, *int)
+	routeConsumeRemote func(context.Context, http.ResponseWriter, *http.Request, string) (bool, bool)
 	routeAckFn         func(context.Context, http.ResponseWriter, *http.Request, string, int, []byte) bool
 	routeCreateTopicFn func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
 	routeAlterTopicFn  func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool
@@ -124,6 +144,13 @@ func (f *fakeRouter) RouteConsume(ctx context.Context, w http.ResponseWriter, r 
 		return false, nil
 	}
 	return f.routeConsumeFn(ctx, w, r, topicName, pinnedPartition)
+}
+
+func (f *fakeRouter) RouteConsumeRemote(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) (bool, bool) {
+	if f.routeConsumeRemote == nil {
+		return false, false
+	}
+	return f.routeConsumeRemote(ctx, w, r, topicName)
 }
 
 func (f *fakeRouter) RouteAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, partition int, body []byte) bool {
@@ -168,14 +195,19 @@ func newTestSet(b broker.Broker, router handlers.Router) *handlers.Set {
 	})
 }
 
-func TestProduceHandlerCallsBroker(t *testing.T) {
+func TestProduceHandlerAcceptsToBroker(t *testing.T) {
 	var gotTopic, gotKey string
 	var gotPayload []byte
-	s := newTestSet(&fakeBroker{produceFn: func(_ context.Context, topicName, key string, payload []byte) (int64, int, error) {
+	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
 		gotTopic = topicName
 		gotKey = key
 		gotPayload = append([]byte(nil), payload...)
-		return 7, 2, nil
+		return ingress.AcceptedProduce{
+			MessageID:       "message-1",
+			Topic:           topicName,
+			TargetPartition: 2,
+			CreatedAtUnixMs: 123,
+		}, nil
 	}}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"key":"customer-1","message":{"id":1}}`))
@@ -184,8 +216,8 @@ func TestProduceHandlerCallsBroker(t *testing.T) {
 
 	Produce(s).ServeHTTP(res, req)
 
-	if res.Code != http.StatusOK {
-		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusOK)
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
 	}
 	if gotTopic != "orders" || gotKey != "customer-1" || string(gotPayload) != `{"id":1}` {
 		t.Fatalf("Produce() broker args = topic=%q key=%q payload=%q", gotTopic, gotKey, string(gotPayload))
@@ -195,17 +227,21 @@ func TestProduceHandlerCallsBroker(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
-	if body["offset"].(float64) != 7 || body["partition"].(float64) != 2 {
+	if body["status"] != "accepted" ||
+		body["message_id"] != "message-1" ||
+		body["topic"] != "orders" ||
+		body["partition"].(float64) != 2 ||
+		body["accepted_at_unix_ms"].(float64) != 123 {
 		t.Fatalf("Produce() body = %+v", body)
 	}
 }
 
-func TestProduceHandlerRoutesBeforeBroker(t *testing.T) {
+func TestProduceHandlerDoesNotRouteBeforeAccept(t *testing.T) {
 	brokerCalled := false
 	routerCalled := false
-	s := newTestSet(&fakeBroker{produceFn: func(context.Context, string, string, []byte) (int64, int, error) {
+	s := newTestSet(&fakeBroker{acceptProduceFn: func(context.Context, string, string, []byte, ...int) (ingress.AcceptedProduce, error) {
 		brokerCalled = true
-		return 0, 0, nil
+		return ingress.AcceptedProduce{MessageID: "message-1", Topic: "orders", TargetPartition: 1, CreatedAtUnixMs: 123}, nil
 	}}, &fakeRouter{routeProduceFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName, key string, body []byte) bool {
 		routerCalled = topicName == "orders" && key == "customer-1" && string(body) == `{"key":"customer-1","message":{"id":1}}`
 		w.WriteHeader(http.StatusAccepted)
@@ -221,11 +257,11 @@ func TestProduceHandlerRoutesBeforeBroker(t *testing.T) {
 	if res.Code != http.StatusAccepted {
 		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
 	}
-	if !routerCalled {
-		t.Fatal("Produce() did not call router")
+	if routerCalled {
+		t.Fatal("Produce() called router")
 	}
-	if brokerCalled {
-		t.Fatal("Produce() called broker after routing")
+	if !brokerCalled {
+		t.Fatal("Produce() did not call broker")
 	}
 }
 
@@ -260,9 +296,9 @@ func TestProduceHandlerRejectsInvalidPartitionQuery(t *testing.T) {
 func TestProduceHandlerSkipsRouterForPinnedPartition(t *testing.T) {
 	brokerCalled := false
 	routerCalled := false
-	broker := &fakeBroker{produceFn: func(_ context.Context, topicName, key string, payload []byte) (int64, int, error) {
+	broker := &fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
 		brokerCalled = topicName == "orders" && key == "customer-1" && string(payload) == `{"id":1}`
-		return 3, 2, nil
+		return ingress.AcceptedProduce{MessageID: "message-1", Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
 	}}
 	s := newTestSet(broker, &fakeRouter{routeProduceFn: func(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool {
 		routerCalled = true
@@ -275,8 +311,8 @@ func TestProduceHandlerSkipsRouterForPinnedPartition(t *testing.T) {
 
 	Produce(s).ServeHTTP(res, req)
 
-	if res.Code != http.StatusOK {
-		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusOK)
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
 	}
 	if routerCalled {
 		t.Fatal("Produce() called router for pinned partition")
@@ -284,16 +320,16 @@ func TestProduceHandlerSkipsRouterForPinnedPartition(t *testing.T) {
 	if !brokerCalled {
 		t.Fatal("Produce() did not call broker for pinned partition")
 	}
-	if len(broker.producePartitions) != 1 || broker.producePartitions[0] != 2 {
-		t.Fatalf("Produce() pinned partitions = %v, want [2]", broker.producePartitions)
+	if len(broker.acceptProducePartitions) != 1 || broker.acceptProducePartitions[0] != 2 {
+		t.Fatalf("Produce() pinned partitions = %v, want [2]", broker.acceptProducePartitions)
 	}
 }
 
 func TestProduceHandlerGeneratesKeyWhenMissing(t *testing.T) {
 	var gotKey string
-	s := newTestSet(&fakeBroker{produceFn: func(_ context.Context, topicName, key string, payload []byte) (int64, int, error) {
+	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
 		gotKey = key
-		return 7, 2, nil
+		return ingress.AcceptedProduce{MessageID: "message-1", Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
 	}}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
@@ -302,18 +338,20 @@ func TestProduceHandlerGeneratesKeyWhenMissing(t *testing.T) {
 
 	Produce(s).ServeHTTP(res, req)
 
-	if res.Code != http.StatusOK {
-		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusOK)
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
 	}
 	if gotKey == "" {
 		t.Fatal("Produce() did not generate a key")
 	}
 }
 
-func TestProduceHandlerRoutesWithGeneratedKeyAndRewrittenBody(t *testing.T) {
+func TestProduceHandlerAcceptsWithGeneratedKeyAndDoesNotRoute(t *testing.T) {
 	routerCalled := false
-	s := newTestSet(&fakeBroker{produceFn: func(context.Context, string, string, []byte) (int64, int, error) {
-		return 0, 0, nil
+	var gotKey string
+	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, _ string, key string, _ []byte, _ ...int) (ingress.AcceptedProduce, error) {
+		gotKey = key
+		return ingress.AcceptedProduce{MessageID: "message-1", Topic: "orders", TargetPartition: 0, CreatedAtUnixMs: 123}, nil
 	}}, &fakeRouter{routeProduceFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName, key string, body []byte) bool {
 		routerCalled = true
 		if topicName != "orders" {
@@ -343,15 +381,20 @@ func TestProduceHandlerRoutesWithGeneratedKeyAndRewrittenBody(t *testing.T) {
 	if res.Code != http.StatusAccepted {
 		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
 	}
-	if !routerCalled {
-		t.Fatal("Produce() did not call router")
+	if routerCalled {
+		t.Fatal("Produce() called router")
+	}
+	if gotKey == "" {
+		t.Fatal("Produce() did not generate a key")
 	}
 }
 
-func TestProduceHandlerPreservesExplicitKeyWhenRouting(t *testing.T) {
+func TestProduceHandlerPreservesExplicitKeyWhenAccepting(t *testing.T) {
 	routerCalled := false
-	s := newTestSet(&fakeBroker{produceFn: func(context.Context, string, string, []byte) (int64, int, error) {
-		return 0, 0, nil
+	var gotKey string
+	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, _ string, key string, _ []byte, _ ...int) (ingress.AcceptedProduce, error) {
+		gotKey = key
+		return ingress.AcceptedProduce{MessageID: "message-1", Topic: "orders", TargetPartition: 0, CreatedAtUnixMs: 123}, nil
 	}}, &fakeRouter{routeProduceFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName, key string, body []byte) bool {
 		routerCalled = true
 		if topicName != "orders" {
@@ -376,14 +419,17 @@ func TestProduceHandlerPreservesExplicitKeyWhenRouting(t *testing.T) {
 	if res.Code != http.StatusAccepted {
 		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
 	}
-	if !routerCalled {
-		t.Fatal("Produce() did not call router")
+	if routerCalled {
+		t.Fatal("Produce() called router")
+	}
+	if gotKey != "customer-1" {
+		t.Fatalf("key = %q, want customer-1", gotKey)
 	}
 }
 
 func TestProduceHandlerMapsBrokerError(t *testing.T) {
-	s := newTestSet(&fakeBroker{produceFn: func(context.Context, string, string, []byte) (int64, int, error) {
-		return 0, 0, errs.ErrTopicNotFound
+	s := newTestSet(&fakeBroker{acceptProduceFn: func(context.Context, string, string, []byte, ...int) (ingress.AcceptedProduce, error) {
+		return ingress.AcceptedProduce{}, errs.ErrTopicNotFound
 	}}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
@@ -445,6 +491,22 @@ func TestConsumeHandlerReturnsNoContentWhenNotFound(t *testing.T) {
 	}
 }
 
+func TestConsumeHandlerTreatsQueueNotOwnerAsNoContent(t *testing.T) {
+	s := newTestSet(&fakeBroker{consumeFn: func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+		return topic.Message{}, false, brokermsg.ErrNotPartitionOwner
+	}}, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Consume(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("Consume() status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+}
+
 func TestConsumeHandlerRoutesBeforeBroker(t *testing.T) {
 	brokerCalled := false
 	routerCalled := false
@@ -474,7 +536,7 @@ func TestConsumeHandlerRoutesBeforeBroker(t *testing.T) {
 	}
 }
 
-func TestConsumeHandlerUsesRouterLocalPartition(t *testing.T) {
+func TestConsumeHandlerUsesRouterSelectedLocalPartition(t *testing.T) {
 	var gotOpts brokermsg.ConsumeOpts
 	localPartition := 3
 	s := newTestSet(&fakeBroker{consumeFn: func(_ context.Context, _ string, opts brokermsg.ConsumeOpts) (topic.Message, bool, error) {
@@ -495,6 +557,136 @@ func TestConsumeHandlerUsesRouterLocalPartition(t *testing.T) {
 	}
 	if gotOpts.Partition == nil || *gotOpts.Partition != localPartition {
 		t.Fatalf("Consume() partition = %+v, want %d", gotOpts.Partition, localPartition)
+	}
+}
+
+func TestConsumeHandlerFallsBackToRemoteWhenLocalPartitionIsEmpty(t *testing.T) {
+	localPartition := 3
+	var waits []time.Duration
+	var partitions []int
+	s := newTestSet(&fakeBroker{consumeFn: func(_ context.Context, _ string, opts brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+		waits = append(waits, opts.Wait)
+		if opts.Partition == nil {
+			partitions = append(partitions, -1)
+		} else {
+			partitions = append(partitions, *opts.Partition)
+		}
+		return topic.Message{}, false, nil
+	}}, &fakeRouter{
+		routeConsumeFn: func(context.Context, http.ResponseWriter, *http.Request, string, *int) (bool, *int) {
+			return false, &localPartition
+		},
+		routeConsumeRemote: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName string) (bool, bool) {
+			if topicName != "orders" {
+				t.Fatalf("topic = %q, want orders", topicName)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			return true, true
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=1s", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Consume(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("Consume() status = %d, want %d", res.Code, http.StatusAccepted)
+	}
+	if len(waits) != 2 || waits[0] != 0 || waits[1] != 0 {
+		t.Fatalf("local consume waits = %v, want [0s 0s]", waits)
+	}
+	if len(partitions) != 2 || partitions[0] != localPartition || partitions[1] != -1 {
+		t.Fatalf("local consume partitions = %v, want [%d -1]", partitions, localPartition)
+	}
+}
+
+func TestConsumeHandlerLongPollsLocalAfterRemoteEmpty(t *testing.T) {
+	localPartition := 3
+	var waits []time.Duration
+	var partitions []int
+	s := newTestSet(&fakeBroker{consumeFn: func(_ context.Context, _ string, opts brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+		waits = append(waits, opts.Wait)
+		if opts.Partition == nil {
+			partitions = append(partitions, -1)
+		} else {
+			partitions = append(partitions, *opts.Partition)
+		}
+		if len(waits) < 3 {
+			return topic.Message{}, false, nil
+		}
+		return topic.Message{Topic: "orders", Partition: localPartition, Offset: 1, Payload: []byte(`{"id":1}`), ReceiptHandle: "h1"}, true, nil
+	}}, &fakeRouter{
+		routeConsumeFn: func(context.Context, http.ResponseWriter, *http.Request, string, *int) (bool, *int) {
+			return false, &localPartition
+		},
+		routeConsumeRemote: func(context.Context, http.ResponseWriter, *http.Request, string) (bool, bool) {
+			return false, true
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=1s", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Consume(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("Consume() status = %d, want %d", res.Code, http.StatusOK)
+	}
+	if len(waits) != 3 || waits[0] != 0 || waits[1] != 0 || waits[2] != time.Second {
+		t.Fatalf("consume waits = %v, want [0s 0s 1s]", waits)
+	}
+	if len(partitions) != 3 || partitions[0] != localPartition || partitions[1] != -1 || partitions[2] != -1 {
+		t.Fatalf("consume partitions = %v, want [%d -1 -1]", partitions, localPartition)
+	}
+}
+
+func TestConsumeHandlerLocalOnlyProbeDoesNotRoute(t *testing.T) {
+	var gotOpts brokermsg.ConsumeOpts
+	routerCalled := false
+	s := newTestSet(&fakeBroker{consumeFn: func(_ context.Context, _ string, opts brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+		gotOpts = opts
+		return topic.Message{}, false, nil
+	}}, &fakeRouter{routeConsumeFn: func(context.Context, http.ResponseWriter, *http.Request, string, *int) (bool, *int) {
+		routerCalled = true
+		return false, nil
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?local_only=1&wait=1s", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Consume(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("Consume() status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+	if routerCalled {
+		t.Fatal("local-only consume called router")
+	}
+	if gotOpts.Partition != nil {
+		t.Fatalf("Consume() partition = %+v, want nil", gotOpts.Partition)
+	}
+	if gotOpts.Wait != 0 {
+		t.Fatalf("Consume() wait = %v, want 0", gotOpts.Wait)
+	}
+}
+
+func TestConsumeHandlerLocalOnlyProbeTreatsNotOwnerAsEmpty(t *testing.T) {
+	s := newTestSet(&fakeBroker{consumeFn: func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+		return topic.Message{}, false, brokermsg.ErrNotPartitionOwner
+	}}, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?local_only=1", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Consume(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("Consume() status = %d, want %d", res.Code, http.StatusNoContent)
 	}
 }
 

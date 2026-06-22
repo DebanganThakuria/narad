@@ -97,13 +97,18 @@ func (g *Logs) WithProduceLockResult(topicName string, idx int, fn func(*storage
 }
 
 func (g *Logs) WithProduceLockValue(topicName string, idx int, fn func(*storage.Log) (int64, int, error)) (int64, int, error) {
+	waitStart := time.Now()
 	unlock := g.lockProduce(topicName, idx)
+	g.observeProduce("lock_wait", "ok", time.Since(waitStart))
 	defer unlock()
 
+	openStart := time.Now()
 	log, err := g.Get(topicName, idx)
 	if err != nil {
+		g.observeProduce("log_open", "error", time.Since(openStart))
 		return 0, 0, err
 	}
+	g.observeProduce("log_open", "ok", time.Since(openStart))
 	return fn(log)
 }
 
@@ -115,6 +120,13 @@ func (g *Logs) ProduceSyncCount() int {
 
 func (g *Logs) DropProduceSync(topicName string, idx int) {
 	g.dropProduceLock(topicName, idx)
+}
+
+func (g *Logs) observeProduce(stage, outcome string, duration time.Duration) {
+	if g.metrics == nil {
+		return
+	}
+	g.metrics.ObserveHotPathStage("broker_runtime", "produce", stage, outcome, duration)
 }
 
 // Get returns the storage.Log for (topic, partition), opening the
@@ -138,10 +150,12 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 	}
 
 	opts := g.storageOpts
-	if t, err := g.metastore.GetTopic(context.Background(), topicName); err == nil {
-		opts.Retention = retentionFromTopic(t.RetentionMs, opts.Retention.CheckInterval)
-	} else if !errors.Is(err, errs.ErrNotFound) {
-		return nil, fmt.Errorf("broker/runtime: lookup topic for retention: %w", err)
+	if g.metastore != nil {
+		if t, err := g.metastore.GetTopic(context.Background(), topicName); err == nil {
+			opts.Retention = retentionFromTopic(t.RetentionMs, opts.Retention.CheckInterval)
+		} else if !errors.Is(err, errs.ErrNotFound) {
+			return nil, fmt.Errorf("broker/runtime: lookup topic for retention: %w", err)
+		}
 	}
 	if g.metrics != nil {
 		opts.Metrics = g.metrics.StorageRecorder(topicName, idx)
@@ -153,6 +167,7 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 		return nil, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)
 	}
 	g.logs[key] = l
+	g.setActiveLogCountLocked()
 	return l, nil
 }
 
@@ -175,6 +190,7 @@ func (g *Logs) CloseTopic(topicName string) error {
 		}
 		delete(g.logs, k)
 	}
+	g.setActiveLogCountLocked()
 	return firstErr
 }
 
@@ -190,11 +206,19 @@ func (g *Logs) CloseAll() error {
 		}
 		delete(g.logs, k)
 	}
+	g.setActiveLogCountLocked()
 	return firstErr
 }
 
 func keyOf(topicName string, idx int) string {
 	return topicName + "/" + strconv.Itoa(idx)
+}
+
+func (g *Logs) setActiveLogCountLocked() {
+	if g.metrics == nil {
+		return
+	}
+	g.metrics.ActivePartitionLogs.Set(float64(len(g.logs)))
 }
 
 func retentionFromTopic(r int64, checkInterval time.Duration) storage.RetentionConfig {

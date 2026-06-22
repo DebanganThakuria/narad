@@ -54,11 +54,9 @@ func decodeRecordsPayload(payload []byte, recordCount int32) ([][]byte, error) {
 	return out, nil
 }
 
-// writeFrame emits the whole frame in a single Write so partial-write
-// recovery sees a clean torn-tail boundary.
-func writeFrame(w io.Writer, records [][]byte, baseOffset int64, c codec.Codec) (int, error) {
+func encodeFrame(records [][]byte, baseOffset int64, c codec.Codec) ([]byte, error) {
 	if len(records) == 0 {
-		return 0, errors.New("storage: writeFrame: empty batch")
+		return nil, errors.New("storage: encodeFrame: empty batch")
 	}
 
 	innerSize := 0
@@ -70,7 +68,7 @@ func writeFrame(w io.Writer, records [][]byte, baseOffset int64, c codec.Codec) 
 	encoded := c.Encode(nil, inner)
 
 	if len(inner) > (1<<31)-1 || len(encoded) > (1<<31)-1 {
-		return 0, fmt.Errorf("storage: frame too large: uncompressed=%d compressed=%d", len(inner), len(encoded))
+		return nil, fmt.Errorf("storage: frame too large: uncompressed=%d compressed=%d", len(inner), len(encoded))
 	}
 
 	frame := make([]byte, headerSize+len(encoded))
@@ -85,6 +83,16 @@ func writeFrame(w io.Writer, records [][]byte, baseOffset int64, c codec.Codec) 
 
 	crc := crc32cOf(frame[2:23], frame[headerSize:])
 	binary.BigEndian.PutUint32(frame[23:27], crc)
+	return frame, nil
+}
+
+// writeFrame emits the whole frame in a single Write so partial-write
+// recovery sees a clean torn-tail boundary.
+func writeFrame(w io.Writer, records [][]byte, baseOffset int64, c codec.Codec) (int, error) {
+	frame, err := encodeFrame(records, baseOffset, c)
+	if err != nil {
+		return 0, err
+	}
 
 	return w.Write(frame)
 }

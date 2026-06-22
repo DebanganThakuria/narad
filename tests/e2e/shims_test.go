@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -105,8 +106,16 @@ func mustCreateTopic(t *testing.T, e *env, req createTopicReq) topic.Topic {
 
 // produceResult holds the fields returned by the produce endpoint.
 type produceResult struct {
-	Offset    int64 `json:"offset"`
-	Partition int   `json:"partition"`
+	Status           string `json:"status"`
+	MessageID        string `json:"message_id"`
+	Topic            string `json:"topic"`
+	Partition        int    `json:"partition"`
+	AcceptedAtUnixMs int64  `json:"accepted_at_unix_ms"`
+
+	// Offset is test-only compatibility. The HTTP produce response is
+	// asynchronous and no longer returns an offset; helpers fill this
+	// after the dispatcher makes the accepted record visible.
+	Offset int64 `json:"-"`
 }
 
 // mustProduce produces a single message and fatals on error.
@@ -116,14 +125,68 @@ func mustProduce(t *testing.T, e *env, topicName, key string, val any) produceRe
 	if err != nil {
 		t.Fatalf("mustProduce marshal: %v", err)
 	}
+	before := topicNextOffsets(t, e, topicName)
 	resp := jsonReq(t, http.MethodPost, e.Server.URL+"/v1/topics/"+topicName+"/produce",
 		map[string]any{"key": key, "message": json.RawMessage(payload)})
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("mustProduce %q: got %d body=%s", topicName, resp.StatusCode, readBody(resp))
 	}
 	var out produceResult
 	decodeJSON(t, resp, &out)
+	validateAcceptedProduce(t, out, topicName, len(before))
+	out.Offset = waitForVisibleOffset(t, e, topicName, out.Partition, before[out.Partition])
 	return out
+}
+
+func topicNextOffsets(t *testing.T, e *env, topicName string) []int64 {
+	t.Helper()
+	details, err := e.Broker.GetTopicDetails(context.Background(), topicName)
+	if err != nil {
+		t.Fatalf("get topic details %q: %v", topicName, err)
+	}
+	offsets := make([]int64, len(details.Partitions))
+	for i, p := range details.Partitions {
+		offsets[i] = p.NextOffset
+	}
+	return offsets
+}
+
+func validateAcceptedProduce(t *testing.T, got produceResult, topicName string, partitions int) {
+	t.Helper()
+	if got.Status != "accepted" {
+		t.Fatalf("produce status = %q, want accepted", got.Status)
+	}
+	if got.MessageID == "" {
+		t.Fatal("produce message_id is empty")
+	}
+	if got.Topic != topicName {
+		t.Fatalf("produce topic = %q, want %q", got.Topic, topicName)
+	}
+	if got.Partition < 0 || got.Partition >= partitions {
+		t.Fatalf("produce partition = %d, want in [0,%d)", got.Partition, partitions)
+	}
+	if got.AcceptedAtUnixMs <= 0 {
+		t.Fatalf("produce accepted_at_unix_ms = %d, want positive", got.AcceptedAtUnixMs)
+	}
+}
+
+func waitForVisibleOffset(t *testing.T, e *env, topicName string, partition int, previousNext int64) int64 {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		details, err := e.Broker.GetTopicDetails(context.Background(), topicName)
+		if err != nil {
+			t.Fatalf("get topic details %q: %v", topicName, err)
+		}
+		if partition >= 0 && partition < len(details.Partitions) {
+			if details.Partitions[partition].NextOffset > previousNext {
+				return previousNext
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for produce visibility topic=%q partition=%d next_offset>%d", topicName, partition, previousNext)
+	return 0
 }
 
 // jsonReq sends a JSON-encoded body with the given method and URL.

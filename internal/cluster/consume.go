@@ -2,105 +2,97 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"net/http"
-	"sort"
-	"strconv"
+	"time"
 
-	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
-type consumePartitionCandidate struct {
-	partition int
+type consumeNodeCandidate struct {
 	addr      string
-	local     bool
-	backlog   int64
-	order     int
+	partition int
 }
 
-func (rt *Router) consumePartitionCandidates(ctx context.Context, topicName string) []consumePartitionCandidate {
-	assignments, err := rt.store.ListAssignments(topicName)
-	if err != nil || len(assignments) == 0 {
+type consumeProbeResult struct {
+	res   nodewire.Response
+	err   error
+	fatal bool
+}
+
+func (rt *Router) localConsumePartition(topicName string) (int, bool) {
+	start := time.Now()
+	outcome := "miss"
+	defer func() {
+		rt.observe("consume", "local_partition", outcome, time.Since(start))
+	}()
+	routes, ok := rt.routesForTopic(topicName)
+	if !ok {
+		return 0, false
+	}
+
+	if len(routes.localEntries) == 0 {
+		return 0, false
+	}
+	cursor := rt.nextConsumeCursor(topicName+":local", len(routes.localEntries))
+	outcome = "hit"
+	return routes.localEntries[cursor].partition, true
+}
+
+func (rt *Router) remoteConsumeCandidates(topicName string) []consumeNodeCandidate {
+	start := time.Now()
+	outcome := "empty"
+	defer func() {
+		rt.observe("consume", "remote_candidates", outcome, time.Since(start))
+	}()
+	routes, ok := rt.routesForTopic(topicName)
+	if !ok {
 		return nil
 	}
 
-	backlogByPartition := rt.backlogByPartition(ctx, topicName)
-	candidates := make([]consumePartitionCandidate, 0, len(assignments))
-	for i, assignment := range assignments {
-		candidate, ok := rt.consumePartitionCandidate(assignment, backlogByPartition, i)
-		if !ok {
+	remote := routes.remoteEntries
+	cursor := rt.nextConsumeCursor(topicName+":remote", len(remote))
+
+	seenOwners := make(map[string]struct{}, len(remote))
+	candidates := make([]consumeNodeCandidate, 0, len(remote))
+	for i := range remote {
+		entry := remote[(cursor+i)%len(remote)]
+		addr := rt.consumeOwnerAddrForRoute(entry)
+		if addr == "" {
 			continue
 		}
-		candidates = append(candidates, candidate)
+		if _, ok := seenOwners[addr]; ok {
+			continue
+		}
+		seenOwners[addr] = struct{}{}
+		candidates = append(candidates, consumeNodeCandidate{addr: addr, partition: entry.partition})
 	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].backlog != candidates[j].backlog {
-			return candidates[i].backlog > candidates[j].backlog
-		}
-		if candidates[i].partition != candidates[j].partition {
-			return candidates[i].partition < candidates[j].partition
-		}
-		return candidates[i].order < candidates[j].order
-	})
+	if len(candidates) > 0 {
+		outcome = "hit"
+	}
 	return candidates
 }
 
-func (rt *Router) consumePartitionCandidate(assignment metastore.Assignment, backlogByPartition map[int]int64, order int) (consumePartitionCandidate, bool) {
-	if assignment.OwnerID == rt.selfID {
-		return consumePartitionCandidate{
-			partition: assignment.Partition,
-			local:     true,
-			backlog:   backlogByPartition[assignment.Partition],
-			order:     order,
-		}, true
-	}
-	addr := rt.ownerAddr(assignment.Topic, assignment.Partition)
-	if addr == "" {
-		return consumePartitionCandidate{}, false
-	}
-	return consumePartitionCandidate{
-		partition: assignment.Partition,
-		addr:      addr,
-		backlog:   backlogByPartition[assignment.Partition],
-		order:     order,
-	}, true
-}
-
-func (rt *Router) backlogByPartition(ctx context.Context, topicName string) map[int]int64 {
-	if rt.snapshots == nil {
-		return nil
-	}
-	snapshots, err := rt.snapshots.Snapshot(ctx)
-	if err != nil {
-		return nil
-	}
-	backlog := make(map[int]int64)
-	for _, snapshot := range snapshots {
-		if snapshot.Topic != topicName {
-			continue
-		}
-		for _, partitionSnapshot := range snapshot.Partitions {
-			value := max(partitionSnapshot.LogEndOffset-partitionSnapshot.CommittedOffset, 0)
-			backlog[partitionSnapshot.Partition] = value
-		}
-		break
-	}
-	return backlog
-}
-
-func (rt *Router) forwardConsumeProbe(ctx context.Context, w http.ResponseWriter, r *http.Request, partition int, addr string) (bool, bool) {
+func (rt *Router) callConsumeProbe(ctx context.Context, r *http.Request, topicName string, candidate consumeNodeCandidate) consumeProbeResult {
+	start := time.Now()
+	outcome := "forwarded"
+	defer func() {
+		rt.observe("consume", "remote_probe", outcome, time.Since(start))
+	}()
 	fwd := r.Clone(ctx)
-	q := fwd.URL.Query()
-	q.Set("partition", strconv.Itoa(partition))
-	q.Set("wait", "0s")
-	fwd.URL.RawQuery = q.Encode()
-	probe := rt.forwardProbe(fwd, addr, nil)
-	if probe.code == http.StatusNoContent {
-		return false, false
+	req, err := consumeRPCRequestFromHTTP(fwd, topicName, &candidate.partition, true)
+	if err != nil {
+		outcome = "error"
+		return consumeProbeResult{err: err, fatal: true}
 	}
-	copyHeader(w.Header(), probe.header)
-	w.WriteHeader(probe.code)
-	if len(probe.body) > 0 {
-		_, _ = w.Write(probe.body)
+	res, err := rt.peer.Consume(ctx, candidate.addr, req)
+	if err != nil {
+		outcome = "error"
+		return consumeProbeResult{err: fmt.Errorf("consume probe %s: %w", candidate.addr, err)}
 	}
-	return true, true
+	if res.Status != http.StatusOK {
+		outcome = "empty"
+		return consumeProbeResult{res: nodewire.Response{Status: http.StatusNoContent}}
+	}
+	return consumeProbeResult{res: res}
 }

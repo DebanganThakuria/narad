@@ -45,7 +45,6 @@ func NewSnapshotter(ms metastore.Metastore, offsets *consumer.InFlight, logs *Lo
 // missing or transient partition is omitted from the result rather
 // than failing the whole snapshot, so a single broken partition
 // can't blind operators to the rest of the system.
-// TODO Do we need to get partition information from all replicas
 func (s *Snapshotter) Snapshot(ctx context.Context) ([]metrics.TopicSnapshot, error) {
 	// Limit=0 is the unpaginated, cached path — appropriate for the
 	// poller, which always wants every topic in one shot.
@@ -76,6 +75,9 @@ func (s *Snapshotter) partitionSnapshot(ctx context.Context, topicName string, i
 	if s.selfID != "" {
 		assignments, ok := s.metastore.(partitionAssignmentReader)
 		if ok {
+			// Runtime metrics are intentionally local. In the WAL-first design,
+			// a pod only opens and reports partition logs it currently owns.
+			// Cross-node aggregation belongs in Prometheus/Grafana.
 			assignment, err := assignments.GetAssignment(topicName, idx)
 			if err != nil || assignment.OwnerID != s.selfID {
 				return metrics.PartitionSnapshot{}, false

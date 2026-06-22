@@ -17,8 +17,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/debanganthakuria/narad/internal/broker"
+	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/broker/topics"
+	"github.com/debanganthakuria/narad/internal/cluster"
 	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -76,6 +78,22 @@ func newCLITestEnv(t *testing.T) *cliTestEnv {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reg := prometheus.NewRegistry()
 	metrics := obsmetrics.New(reg)
+	storageOptions := storage.Options{
+		Codec:         mustZstdCodec(t),
+		FlushBytes:    1 << 20,
+		FlushRecords:  100,
+		FlushInterval: 100 * time.Millisecond,
+		SegmentBytes:  64 << 20,
+		Retention:     storage.RetentionConfig{CheckInterval: time.Hour},
+	}
+	logs := runtime.NewLogs(dataDir, storageOptions, store, metrics)
+	lifecycle := runtime.NewLifecycle(logs)
+	ingressManager, err := ingress.OpenManager(dataDir, ingress.DefaultWALOptions())
+	if err != nil {
+		ctrlCancel()
+		store.Close()
+		t.Fatalf("ingress: %v", err)
+	}
 	resolveCaps := func(_ context.Context, topicName string) (consumer.Caps, error) {
 		topicCfg, err := store.GetTopic(context.Background(), topicName)
 		if err != nil {
@@ -92,15 +110,8 @@ func newCLITestEnv(t *testing.T) *cliTestEnv {
 		return consumer.Caps{MaxInFlight: maxIF, MaxAckedAhead: maxAA}, nil
 	}
 	br, err := broker.New(broker.Deps{
-		DataDir: dataDir,
-		StorageOptions: storage.Options{
-			Codec:         mustZstdCodec(t),
-			FlushBytes:    1 << 20,
-			FlushRecords:  100,
-			FlushInterval: 100 * time.Millisecond,
-			SegmentBytes:  64 << 20,
-			Retention:     storage.RetentionConfig{CheckInterval: time.Hour},
-		},
+		DataDir:        dataDir,
+		StorageOptions: storageOptions,
 		TopicConfig: broker.TopicConfig{
 			DefaultPartitions:                3,
 			MaxPartitions:                    1024,
@@ -116,6 +127,9 @@ func newCLITestEnv(t *testing.T) *cliTestEnv {
 		ConsumerOffsets: consumer.NewInFlight(resolveCaps, nil),
 		Replicator:      replication.NewLocal(),
 		Logger:          log,
+		Logs:            logs,
+		Ingress:         ingressManager,
+		Lifecycle:       lifecycle,
 		Metrics:         metrics,
 	})
 	if err != nil {
@@ -123,14 +137,11 @@ func newCLITestEnv(t *testing.T) *cliTestEnv {
 		store.Close()
 		t.Fatalf("broker: %v", err)
 	}
-	logs := runtime.NewLogs(dataDir, storage.Options{
-		Codec:         mustZstdCodec(t),
-		FlushBytes:    1 << 20,
-		FlushRecords:  100,
-		FlushInterval: 100 * time.Millisecond,
-		SegmentBytes:  64 << 20,
-		Retention:     storage.RetentionConfig{CheckInterval: time.Hour},
-	}, store, metrics)
+	lifecycle.MarkReady()
+	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
+	go cluster.NewProduceDispatcher(ingressManager, store, "", br, nil, log, cluster.ProduceDispatcherConfig{
+		PollInterval: 5 * time.Millisecond,
+	}, metrics).Run(dispatchCtx)
 	server := httptest.NewServer(httpserver.NewRouter(handlers.New(handlers.Deps{
 		Broker:         br,
 		Logs:           logs,
@@ -142,6 +153,7 @@ func newCLITestEnv(t *testing.T) *cliTestEnv {
 	}
 
 	t.Cleanup(func() {
+		dispatchCancel()
 		server.Close()
 		_ = br.Close()
 		ctrlCancel()
@@ -167,6 +179,23 @@ func waitForAssignments(store *metastore.Store, topicName string) error {
 		time.Sleep(25 * time.Millisecond)
 	}
 	return context.DeadlineExceeded
+}
+
+func waitForVisibleOffset(t *testing.T, br broker.Broker, topicName string, partition int, previousNext int64) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		details, err := br.GetTopicDetails(context.Background(), topicName)
+		if err != nil {
+			t.Fatalf("get topic details %q: %v", topicName, err)
+		}
+		if partition >= 0 && partition < len(details.Partitions) &&
+			details.Partitions[partition].NextOffset > previousNext {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for visible offset topic=%q partition=%d next_offset>%d", topicName, partition, previousNext)
 }
 
 func captureCLIOutput(t *testing.T, fn func() error, stdin string) (string, string, error) {
@@ -323,16 +352,28 @@ func TestClientProduceConsumeAckParity(t *testing.T) {
 		t.Fatalf("produce stderr = %q, want empty", stderr)
 	}
 	var produced struct {
-		Offset    int64 `json:"offset"`
-		Partition int   `json:"partition"`
+		Status           string `json:"status"`
+		MessageID        string `json:"message_id"`
+		Topic            string `json:"topic"`
+		Partition        int    `json:"partition"`
+		AcceptedAtUnixMs int64  `json:"accepted_at_unix_ms"`
 	}
 	produced = decodeCLIJSON[struct {
-		Offset    int64 `json:"offset"`
-		Partition int   `json:"partition"`
+		Status           string `json:"status"`
+		MessageID        string `json:"message_id"`
+		Topic            string `json:"topic"`
+		Partition        int    `json:"partition"`
+		AcceptedAtUnixMs int64  `json:"accepted_at_unix_ms"`
 	}](t, stdout)
-	if produced.Offset != 0 || produced.Partition < 0 || produced.Partition >= 3 {
+	if produced.Status != "accepted" ||
+		produced.MessageID == "" ||
+		produced.Topic != "orders" ||
+		produced.Partition < 0 ||
+		produced.Partition >= 3 ||
+		produced.AcceptedAtUnixMs <= 0 {
 		t.Fatalf("produce result = %+v", produced)
 	}
+	waitForVisibleOffset(t, env.broker, "orders", produced.Partition, 0)
 
 	stdout, stderr, err = captureCLIOutput(t, func() error {
 		return runClient([]string{"consume", "--addr", env.server.URL, "orders"})

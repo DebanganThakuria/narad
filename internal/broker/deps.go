@@ -3,6 +3,7 @@ package broker
 import (
 	"log/slog"
 
+	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -26,6 +27,7 @@ type Deps struct {
 	ConsumerOffsets *consumer.InFlight
 	Replicator      replication.Replicator
 	Logs            *runtime.Logs
+	Ingress         *ingress.Manager
 	Logger          *slog.Logger
 	SelfID          string
 	Lifecycle       *runtime.Lifecycle

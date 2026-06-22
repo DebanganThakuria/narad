@@ -17,7 +17,7 @@ func (s *Store) GetAssignment(topicName string, partition int) (Assignment, erro
 	s.fsm.mu.RLock()
 	defer s.fsm.mu.RUnlock()
 	var a Assignment
-	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+	err := s.fsm.view("get_assignment", func(tx *bolt.Tx) error {
 		v := tx.Bucket(bucketAssignments).Get(assignmentKey(topicName, partition))
 		if v == nil {
 			return ErrNotFound
@@ -31,7 +31,7 @@ func (s *Store) ListAssignments(topicName string) ([]Assignment, error) {
 	s.fsm.mu.RLock()
 	defer s.fsm.mu.RUnlock()
 	var out []Assignment
-	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+	err := s.fsm.view("list_assignments", func(tx *bolt.Tx) error {
 		prefix := []byte(topicName + ":")
 		c := tx.Bucket(bucketAssignments).Cursor()
 		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
@@ -56,10 +56,7 @@ func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromP
 		return nil
 	}
 
-	counts := make(map[string]int, len(active))
-	for _, member := range active {
-		counts[member.ID] = 0
-	}
+	active = RoundRobinMembers(active)
 
 	existing, err := s.ListAssignments(topicName)
 	if err != nil {
@@ -67,14 +64,6 @@ func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromP
 	}
 	assigned := make(map[int]bool, len(existing))
 	for _, assignment := range existing {
-		if _, ok := counts[assignment.OwnerID]; ok {
-			counts[assignment.OwnerID]++
-		}
-		if assignment.FollowerID != "" {
-			if _, ok := counts[assignment.FollowerID]; ok {
-				counts[assignment.FollowerID]++
-			}
-		}
 		assigned[assignment.Partition] = true
 	}
 
@@ -82,21 +71,32 @@ func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromP
 		if assigned[partition] {
 			continue
 		}
-		sort.Slice(active, func(i, j int) bool {
-			if counts[active[i].ID] == counts[active[j].ID] {
-				return active[i].ID < active[j].ID
-			}
-			return counts[active[i].ID] < counts[active[j].ID]
-		})
-		owner := active[0].ID
-		follower := active[1].ID
+		owner, follower, ok := RoundRobinReplicaPair(active, partition)
+		if !ok {
+			return nil
+		}
 		if err := s.AssignPartition(ctx, topicName, partition, owner, follower); err != nil {
 			return err
 		}
-		counts[owner]++
-		counts[follower]++
 	}
 	return nil
+}
+
+func RoundRobinMembers(active []Member) []Member {
+	out := append([]Member(nil), active...)
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+func RoundRobinReplicaPair(active []Member, partition int) (string, string, bool) {
+	if len(active) < 2 || partition < 0 {
+		return "", "", false
+	}
+	ownerIdx := partition % len(active)
+	followerIdx := (ownerIdx + 1) % len(active)
+	return active[ownerIdx].ID, active[followerIdx].ID, true
 }
 
 func AliveMembers(members []Member) []Member {

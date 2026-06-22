@@ -12,7 +12,7 @@ func parseConfig(args []string) (config, error) {
 	var nodesCSV string
 	cfg := config{mode: modeLoad}
 	flagSet := flag.NewFlagSet("local-cluster-driver", flag.ContinueOnError)
-	flagSet.StringVar(&cfg.mode, "mode", modeLoad, "driver mode: load, chaos, prepare-owner-repair, verify-owner-repair, prepare-follower-repair, verify-follower-repair")
+	flagSet.StringVar(&cfg.mode, "mode", modeLoad, "driver mode: load, chaos")
 	flagSet.StringVar(&nodesCSV, "nodes", "http://127.0.0.1:18081,http://127.0.0.1:18082,http://127.0.0.1:18083", "comma-separated Narad node base URLs")
 	flagSet.IntVar(&cfg.topics, "topics", 10, "number of topics to create")
 	flagSet.IntVar(&cfg.messages, "messages", 1000, "total messages to produce and consume")

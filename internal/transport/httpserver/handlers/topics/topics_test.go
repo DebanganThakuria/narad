@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker"
+	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -49,6 +50,10 @@ func (f *fakeRouter) RouteProduce(context.Context, http.ResponseWriter, *http.Re
 
 func (f *fakeRouter) RouteConsume(context.Context, http.ResponseWriter, *http.Request, string, *int) (bool, *int) {
 	return false, nil
+}
+
+func (f *fakeRouter) RouteConsumeRemote(context.Context, http.ResponseWriter, *http.Request, string) (bool, bool) {
+	return false, false
 }
 
 func (f *fakeRouter) RouteAck(context.Context, http.ResponseWriter, *http.Request, string, int, []byte) bool {
@@ -148,6 +153,18 @@ func (f *fakeBroker) ListTopics(ctx context.Context, opts metastore.ListOptions)
 
 func (f *fakeBroker) Produce(context.Context, string, string, []byte, ...int) (int64, int, error) {
 	return 0, 0, errors.New("unexpected Produce call")
+}
+
+func (f *fakeBroker) AcceptProduce(context.Context, string, string, []byte, ...int) (ingress.AcceptedProduce, error) {
+	return ingress.AcceptedProduce{}, nil
+}
+
+func (f *fakeBroker) CommitAcceptedProduce(context.Context, ingress.ProduceRecord) (int64, error) {
+	return 0, nil
+}
+
+func (f *fakeBroker) CommitAcceptedProduceBatch(_ context.Context, records []ingress.ProduceRecord) ([]int64, error) {
+	return make([]int64, len(records)), nil
 }
 
 func (f *fakeBroker) Consume(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {
@@ -647,26 +664,6 @@ func TestDeleteHandlerReturnsBroadcastError(t *testing.T) {
 
 	if res.Code != http.StatusInternalServerError {
 		t.Fatalf("Delete() status = %d, want %d", res.Code, http.StatusInternalServerError)
-	}
-}
-
-func TestPurgeLocalHandlerCallsBrokerPurge(t *testing.T) {
-	purged := false
-	s := newTestSet(&fakeBroker{purgeTopicFn: func(_ context.Context, name string) error {
-		purged = name == "orders"
-		return nil
-	}})
-
-	req := httptest.NewRequest(http.MethodDelete, "/internal/v1/topics/orders", nil)
-	req.SetPathValue("topic", "orders")
-	res := httptest.NewRecorder()
-	PurgeLocal(s).ServeHTTP(res, req)
-
-	if !purged {
-		t.Fatal("PurgeLocal() did not call broker purge")
-	}
-	if res.Code != http.StatusNoContent {
-		t.Fatalf("PurgeLocal() status = %d, want %d", res.Code, http.StatusNoContent)
 	}
 }
 

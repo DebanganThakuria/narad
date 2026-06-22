@@ -2,15 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/url"
-	"strconv"
 	"time"
 )
 
-func verifyCommittedReplicaRead(ctx context.Context, lb *roundRobinClient, cfg config, topicName string) error {
+func verifyAcceptedProduceVisibility(ctx context.Context, lb *roundRobinClient, cfg config, topicName string) error {
 	job := messageJob{
 		Topic: topicName,
 		Key:   "recovery-probe",
@@ -27,45 +23,23 @@ func verifyCommittedReplicaRead(ctx context.Context, lb *roundRobinClient, cfg c
 	if err != nil {
 		return fmt.Errorf("produce recovery probe: %w", err)
 	}
-
-	wantCopies := min(cfg.replicationFactor, len(lb.nodes))
+	if produced.Partition < 0 {
+		return fmt.Errorf("produce recovery probe returned invalid partition %d", produced.Partition)
+	}
 	return retry(ctx, 20, 100*time.Millisecond, func() error {
-		copies, err := committedReplicaCopies(ctx, lb, job.Body, produced)
+		msg, found, err := consumeOne(ctx, lb, topicName)
 		if err != nil {
 			return err
 		}
-		if copies < wantCopies {
-			return fmt.Errorf("committed replica copies = %d, want >= %d", copies, wantCopies)
+		if !found {
+			return fmt.Errorf("accepted produce is not visible yet")
 		}
-		return nil
+		if msg.Payload != job.Body {
+			return fmt.Errorf("visible probe payload = %+v, want %+v", msg.Payload, job.Body)
+		}
+		if msg.ReceiptHandle == "" {
+			return fmt.Errorf("visible probe missing receipt handle")
+		}
+		return ackOne(ctx, lb, topicName, msg.ReceiptHandle)
 	})
-}
-
-func committedReplicaCopies(ctx context.Context, lb *roundRobinClient, want messageRecord, produced produceResponse) (int, error) {
-	path := "/internal/v1/replicate?topic=" + url.QueryEscape(want.Topic) +
-		"&partition=" + strconv.Itoa(produced.Partition) +
-		"&offset=" + strconv.FormatInt(produced.Offset, 10) +
-		"&committed=true"
-
-	copies := 0
-	for _, node := range lb.nodes {
-		var out replicaReadResponse
-		status, _, err := lb.doTo(ctx, node, http.MethodGet, path, nil, &out, http.StatusOK, http.StatusNotFound)
-		if err != nil {
-			return 0, fmt.Errorf("read committed replica from %s: %w", node, err)
-		}
-		if status == http.StatusNotFound {
-			continue
-		}
-
-		var got messageRecord
-		if err := json.Unmarshal(out.Payload, &got); err != nil {
-			return 0, fmt.Errorf("decode committed replica payload from %s: %w", node, err)
-		}
-		if got != want {
-			return 0, fmt.Errorf("committed replica payload mismatch from %s: got %+v want %+v", node, got, want)
-		}
-		copies++
-	}
-	return copies, nil
 }

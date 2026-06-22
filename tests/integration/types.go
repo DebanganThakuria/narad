@@ -68,8 +68,12 @@ type messageRecord struct {
 }
 
 type produceResponse struct {
-	Offset    int64 `json:"offset"`
-	Partition int   `json:"partition"`
+	Status           string `json:"status"`
+	MessageID        string `json:"message_id"`
+	Topic            string `json:"topic"`
+	Partition        int    `json:"partition"`
+	AcceptedAtUnixMs int64  `json:"accepted_at_unix_ms"`
+	Offset           int64  `json:"-"`
 }
 
 type consumeResponse struct {
@@ -78,10 +82,6 @@ type consumeResponse struct {
 	Offset        int64         `json:"offset"`
 	Payload       messageRecord `json:"payload"`
 	ReceiptHandle string        `json:"receipt_handle"`
-}
-
-type replicaReadResponse struct {
-	Payload []byte `json:"payload"`
 }
 
 type messageJob struct {
@@ -95,17 +95,6 @@ type runStats struct {
 	consumed   atomic.Int64
 	acked      atomic.Int64
 	duplicates atomic.Int64
-}
-
-type recoveryPlan struct {
-	Topic         string        `json:"topic"`
-	Partition     int           `json:"partition"`
-	OwnerIndex    int           `json:"owner_index"`
-	FollowerIndex int           `json:"follower_index"`
-	OwnerNode     string        `json:"owner_node"`
-	FollowerNode  string        `json:"follower_node"`
-	LastOffset    int64         `json:"last_offset"`
-	Payload       messageRecord `json:"payload"`
 }
 
 const messageSchema = `{

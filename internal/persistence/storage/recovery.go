@@ -8,8 +8,9 @@ import (
 )
 
 // recover walks every segment file in the partition directory in
-// base-offset order, populating the offset → frame index. Returns
-// the next offset to assign for new records.
+// base-offset order, recovering segment bounds and indexing only the
+// active segment. Old sealed-segment indexes are loaded lazily by
+// reads, which keeps retained history from becoming live heap.
 //
 // Per-segment scan rules:
 //
@@ -70,23 +71,28 @@ func (l *Log) recover() (int64, error) {
 func (l *Log) walkSegment(seg *segment, isActive bool, nextOffset *int64) error {
 	pos := int64(0)
 	size := seg.sizeBytes
+	entries := make([]indexEntry, 0)
 
 	for pos < size {
 		h, records, end, err := readFrameAt(seg.file, pos, l)
 
 		switch {
 		case err == nil:
-			for i := range records {
-				offset := h.baseOffset + int64(i)
-				l.index[offset] = indexEntry{
-					segmentBaseOffset: seg.baseOffset,
-					framePos:          pos,
-					idx:               int32(i),
-					frameLen:          int32(end - pos),
-				}
-				if offset+1 > *nextOffset {
-					*nextOffset = offset + 1
-				}
+			if len(records) != int(h.recordCount) {
+				return ErrCorruptRecord
+			}
+			entry := indexEntry{
+				segmentBaseOffset: seg.baseOffset,
+				baseOffset:        h.baseOffset,
+				recordCount:       h.recordCount,
+				framePos:          pos,
+				frameLen:          int32(end - pos),
+			}
+			if isActive {
+				entries = l.appendSparseIndexEntry(entries, entry)
+			}
+			if frameNext := h.baseOffset + int64(h.recordCount); frameNext > *nextOffset {
+				*nextOffset = frameNext
 			}
 			seg.nextOffset = h.baseOffset + int64(h.recordCount)
 			pos = end
@@ -99,6 +105,9 @@ func (l *Log) walkSegment(seg *segment, isActive bool, nextOffset *int64) error 
 			}
 			if seg.nextOffset > *nextOffset {
 				*nextOffset = seg.nextOffset
+			}
+			if isActive {
+				l.setSegmentIndexLocked(seg.baseOffset, entries)
 			}
 			return nil
 
@@ -115,7 +124,55 @@ func (l *Log) walkSegment(seg *segment, isActive bool, nextOffset *int64) error 
 	if seg.nextOffset > *nextOffset {
 		*nextOffset = seg.nextOffset
 	}
+	if isActive {
+		l.setSegmentIndexLocked(seg.baseOffset, entries)
+	}
 	return nil
+}
+
+func (l *Log) loadSegmentIndexLocked(seg *segment) error {
+	entries, err := l.scanSegmentIndexLocked(seg)
+	if err != nil {
+		return err
+	}
+	l.setSegmentIndexLocked(seg.baseOffset, entries)
+	return nil
+}
+
+func (l *Log) scanSegmentIndexLocked(seg *segment) ([]indexEntry, error) {
+	pos := int64(0)
+	size := seg.sizeBytes
+	entries := make([]indexEntry, 0)
+
+	for pos < size {
+		h, records, end, err := readFrameAt(seg.file, pos, l)
+		switch {
+		case err == nil:
+			if len(records) != int(h.recordCount) {
+				return nil, ErrCorruptRecord
+			}
+			entries = l.appendSparseIndexEntry(entries, indexEntry{
+				segmentBaseOffset: seg.baseOffset,
+				baseOffset:        h.baseOffset,
+				recordCount:       h.recordCount,
+				framePos:          pos,
+				frameLen:          int32(end - pos),
+			})
+			pos = end
+
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			return entries, nil
+
+		case errors.Is(err, errBadMagic),
+			errors.Is(err, errCorrupt),
+			errors.Is(err, ErrCorruptRecord):
+			pos = nextMagicInSegment(seg.file, pos+1, size)
+
+		default:
+			return nil, err
+		}
+	}
+	return entries, nil
 }
 
 // nextMagicInSegment scans forward in 4 KiB chunks; overlaps by 1

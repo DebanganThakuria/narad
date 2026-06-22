@@ -1,0 +1,201 @@
+package storage
+
+import (
+	"errors"
+	"io"
+	"sort"
+)
+
+func (l *Log) segmentIndexEntryCountLocked() int {
+	total := 0
+	for _, idx := range l.segmentIndexes {
+		total += len(idx.entries)
+	}
+	return total
+}
+
+func (l *Log) appendIndexLocked(entry indexEntry) {
+	idx := l.segmentIndexes[entry.segmentBaseOffset]
+	if idx == nil {
+		idx = &segmentIndex{}
+		l.segmentIndexes[entry.segmentBaseOffset] = idx
+	}
+	if l.shouldKeepIndexAnchor(idx.entries, entry) {
+		idx.entries = append(idx.entries, entry)
+	}
+	l.touchSegmentIndexLocked(entry.segmentBaseOffset)
+	l.pruneSegmentIndexesLocked(entry.segmentBaseOffset)
+	l.observeSegmentIndexStatsLocked()
+}
+
+func (l *Log) setSegmentIndexLocked(segmentBaseOffset int64, entries []indexEntry) {
+	entries = l.sparseIndexEntries(entries)
+	if len(entries) == 0 {
+		delete(l.segmentIndexes, segmentBaseOffset)
+		l.observeSegmentIndexStatsLocked()
+		return
+	}
+	l.segmentIndexes[segmentBaseOffset] = &segmentIndex{entries: entries}
+	l.touchSegmentIndexLocked(segmentBaseOffset)
+	l.pruneSegmentIndexesLocked(segmentBaseOffset)
+	l.observeSegmentIndexStatsLocked()
+}
+
+func (l *Log) sparseIndexEntries(entries []indexEntry) []indexEntry {
+	sparse := make([]indexEntry, 0, min(len(entries), targetMaxSegmentIndexEntries))
+	for _, entry := range entries {
+		sparse = l.appendSparseIndexEntry(sparse, entry)
+	}
+	return sparse
+}
+
+func (l *Log) appendSparseIndexEntry(entries []indexEntry, entry indexEntry) []indexEntry {
+	if l.shouldKeepIndexAnchor(entries, entry) {
+		return append(entries, entry)
+	}
+	return entries
+}
+
+func (l *Log) shouldKeepIndexAnchor(entries []indexEntry, entry indexEntry) bool {
+	if len(entries) == 0 {
+		return true
+	}
+	last := entries[len(entries)-1]
+	return entry.framePos-last.framePos >= l.indexStrideBytes()
+}
+
+func (l *Log) indexStrideBytes() int64 {
+	stride := int64(segmentIndexStrideBytes)
+	if l.opts.SegmentBytes <= 0 {
+		return stride
+	}
+	segmentStride := l.opts.SegmentBytes / targetMaxSegmentIndexEntries
+	if l.opts.SegmentBytes%targetMaxSegmentIndexEntries != 0 {
+		segmentStride++
+	}
+	if segmentStride > stride {
+		return segmentStride
+	}
+	return stride
+}
+
+// findIndexLocked returns the exact frame containing offset. The
+// in-memory index is sparse, so this may scan forward from the nearest
+// retained anchor under the caller's segment lock.
+func (l *Log) findIndexLocked(offset int64) (indexEntry, int32, bool, error) {
+	seg := l.findSegmentForOffsetLocked(offset)
+	if seg == nil {
+		return indexEntry{}, 0, false, nil
+	}
+	idx := l.segmentIndexes[seg.baseOffset]
+	if idx == nil || len(idx.entries) == 0 {
+		return indexEntry{}, 0, false, nil
+	}
+	anchor, ok := indexAnchorForOffset(idx.entries, offset)
+	if !ok {
+		return indexEntry{}, 0, false, nil
+	}
+	if offset >= anchor.baseOffset && offset < anchor.baseOffset+int64(anchor.recordCount) {
+		return anchor, int32(offset - anchor.baseOffset), true, nil
+	}
+	return l.scanSegmentFromIndexAnchorLocked(seg, anchor, offset)
+}
+
+func indexAnchorForOffset(entries []indexEntry, offset int64) (indexEntry, bool) {
+	i := sort.Search(len(entries), func(i int) bool {
+		return entries[i].baseOffset > offset
+	})
+	if i == 0 {
+		return indexEntry{}, false
+	}
+	return entries[i-1], true
+}
+
+func (l *Log) scanSegmentFromIndexAnchorLocked(seg *segment, anchor indexEntry, offset int64) (indexEntry, int32, bool, error) {
+	pos := anchor.framePos
+	if anchor.frameLen > 0 {
+		pos += int64(anchor.frameLen)
+	}
+	size := seg.sizeBytes
+	for pos < size {
+		h, records, end, err := readFrameAt(seg.file, pos, l)
+		switch {
+		case err == nil:
+			if len(records) != int(h.recordCount) {
+				return indexEntry{}, 0, false, ErrCorruptRecord
+			}
+			frameEndOffset := h.baseOffset + int64(h.recordCount)
+			if offset >= h.baseOffset && offset < frameEndOffset {
+				return indexEntry{
+					segmentBaseOffset: seg.baseOffset,
+					baseOffset:        h.baseOffset,
+					recordCount:       h.recordCount,
+					framePos:          pos,
+					frameLen:          int32(end - pos),
+				}, int32(offset - h.baseOffset), true, nil
+			}
+			if h.baseOffset > offset {
+				return indexEntry{}, 0, false, nil
+			}
+			pos = end
+
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			return indexEntry{}, 0, false, nil
+
+		case errors.Is(err, errBadMagic),
+			errors.Is(err, errCorrupt),
+			errors.Is(err, ErrCorruptRecord):
+			pos = nextMagicInSegment(seg.file, pos+1, size)
+
+		default:
+			return indexEntry{}, 0, false, err
+		}
+	}
+	return indexEntry{}, 0, false, nil
+}
+
+func (l *Log) deleteSegmentIndexLocked(segmentBaseOffset int64) {
+	delete(l.segmentIndexes, segmentBaseOffset)
+	l.observeSegmentIndexStatsLocked()
+}
+
+func (l *Log) touchSegmentIndexLocked(segmentBaseOffset int64) {
+	idx := l.segmentIndexes[segmentBaseOffset]
+	if idx == nil {
+		return
+	}
+	l.indexClock++
+	idx.lastUsed = l.indexClock
+}
+
+func (l *Log) pruneSegmentIndexesLocked(preserveSegmentBaseOffset int64) {
+	for len(l.segmentIndexes) > maxHotSegmentIndexes {
+		victim, ok := l.oldestPrunableSegmentIndexLocked(preserveSegmentBaseOffset)
+		if !ok {
+			return
+		}
+		delete(l.segmentIndexes, victim)
+	}
+}
+
+func (l *Log) oldestPrunableSegmentIndexLocked(preserveSegmentBaseOffset int64) (int64, bool) {
+	activeBaseOffset := int64(-1)
+	if len(l.segments) > 0 {
+		activeBaseOffset = l.segments[len(l.segments)-1].baseOffset
+	}
+
+	var victim int64
+	var oldest uint64
+	found := false
+	for baseOffset, idx := range l.segmentIndexes {
+		if baseOffset == preserveSegmentBaseOffset || baseOffset == activeBaseOffset {
+			continue
+		}
+		if !found || idx.lastUsed < oldest {
+			victim = baseOffset
+			oldest = idx.lastUsed
+			found = true
+		}
+	}
+	return victim, found
+}

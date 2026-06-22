@@ -25,6 +25,7 @@ type Config struct {
 	AdvertiseAddr string
 	Peers         []Peer
 	Logger        io.Writer
+	Metrics       MetricsRecorder
 }
 
 // Peer is a known Raft voter used for cluster bootstrap.
@@ -46,7 +47,7 @@ func New(cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("metastore: mkdir: %w", err)
 	}
 
-	fsm, err := newFSM(filepath.Join(cfg.DataDir, "fsm.db"))
+	fsm, err := newFSM(filepath.Join(cfg.DataDir, "fsm.db"), cfg.Metrics)
 	if err != nil {
 		return nil, fmt.Errorf("metastore: fsm: %w", err)
 	}
@@ -116,19 +117,31 @@ func (s *Store) apply(ctx context.Context, op opCode, payload any) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	operation := op.metricName()
+	start := time.Now()
+	var applyErr error
+	defer func() {
+		if s.fsm != nil && s.fsm.metric != nil {
+			s.fsm.metric.ObserveMetastoreTx(operation, "raft", statusForErr(applyErr), time.Since(start))
+		}
+	}()
 	data, err := json.Marshal(payload)
 	if err != nil {
+		applyErr = err
 		return err
 	}
 	b, err := json.Marshal(cmd{Op: op, Data: data})
 	if err != nil {
+		applyErr = err
 		return err
 	}
 	f := s.r.Apply(b, applyTimeout)
 	if err := f.Error(); err != nil {
+		applyErr = err
 		return err
 	}
 	if resp, ok := f.Response().(error); ok {
+		applyErr = resp
 		return resp
 	}
 	return nil

@@ -14,7 +14,7 @@ func (f *fsmState) applyCreateTopic(data []byte) error {
 	if err := json.Unmarshal(data, &t); err != nil {
 		return err
 	}
-	return f.db.Update(func(tx *bolt.Tx) error {
+	return f.update("create_topic", func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketTopics)
 		if b.Get([]byte(t.Name)) != nil {
 			return ErrAlreadyExists
@@ -32,7 +32,7 @@ func (f *fsmState) applyUpdateTopic(data []byte) error {
 	if err := json.Unmarshal(data, &t); err != nil {
 		return err
 	}
-	return f.db.Update(func(tx *bolt.Tx) error {
+	return f.update("update_topic", func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketTopics)
 		if b.Get([]byte(t.Name)) == nil {
 			return ErrNotFound
@@ -50,7 +50,7 @@ func (f *fsmState) applyDeleteTopic(data []byte) error {
 	if err := json.Unmarshal(data, &name); err != nil {
 		return err
 	}
-	return f.db.Update(func(tx *bolt.Tx) error {
+	return f.update("delete_topic", func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketTopics)
 		if b.Get([]byte(name)) == nil {
 			return ErrNotFound
@@ -80,7 +80,7 @@ func (f *fsmState) applyPutSchema(data []byte) error {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return err
 	}
-	return f.db.Update(func(tx *bolt.Tx) error {
+	return f.update("put_schema", func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketSchemas).Put(schemaKey(p.Topic, p.Version), p.Schema)
 	})
 }
@@ -94,7 +94,7 @@ func (f *fsmState) applyAssignPartition(data []byte) error {
 	if err != nil {
 		return err
 	}
-	return f.db.Update(func(tx *bolt.Tx) error {
+	return f.update("assign_partition", func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketAssignments).Put(assignmentKey(a.Topic, a.Partition), v)
 	})
 }
@@ -108,7 +108,7 @@ func (f *fsmState) applyMemberJoin(data []byte) error {
 	if err != nil {
 		return err
 	}
-	return f.db.Update(func(tx *bolt.Tx) error {
+	return f.update("member_join", func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketMembers).Put([]byte(m.ID), v)
 	})
 }
@@ -118,7 +118,7 @@ func (f *fsmState) applyMemberHeartbeat(data []byte) error {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return err
 	}
-	return f.db.Update(func(tx *bolt.Tx) error {
+	return f.update("member_heartbeat", func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketMembers)
 		raw := b.Get([]byte(p.ID))
 		if raw == nil {
@@ -142,7 +142,7 @@ func (f *fsmState) applyMemberDead(data []byte) error {
 	if err := json.Unmarshal(data, &id); err != nil {
 		return err
 	}
-	return f.db.Update(func(tx *bolt.Tx) error {
+	return f.update("member_dead", func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketMembers)
 		raw := b.Get([]byte(id))
 		if raw == nil {

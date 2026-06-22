@@ -133,9 +133,7 @@ func (r *reaper) deleteSegmentLocked(s *segment, reason string) {
 
 	_ = s.close()
 	_ = os.Remove(s.path)
-	for off := s.baseOffset; off < s.nextOffset; off++ {
-		delete(r.log.index, off)
-	}
+	r.log.deleteSegmentIndexLocked(s.baseOffset)
 
 	r.log.cacheMu.Lock()
 	if r.log.cacheValid && r.log.cacheSegmentBase == s.baseOffset {

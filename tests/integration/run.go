@@ -10,17 +10,13 @@ import (
 )
 
 const (
-	modeLoad                  = "load"
-	modeChaos                 = "chaos"
-	modePrepareOwnerRepair    = "prepare-owner-repair"
-	modeVerifyOwnerRepair     = "verify-owner-repair"
-	modePrepareFollowerRepair = "prepare-follower-repair"
-	modeVerifyFollowerRepair  = "verify-follower-repair"
+	modeLoad  = "load"
+	modeChaos = "chaos"
 )
 
 func validMode(mode string) bool {
 	switch mode {
-	case modeLoad, modeChaos, modePrepareOwnerRepair, modeVerifyOwnerRepair, modePrepareFollowerRepair, modeVerifyFollowerRepair:
+	case modeLoad, modeChaos:
 		return true
 	default:
 		return false
@@ -28,20 +24,12 @@ func validMode(mode string) bool {
 }
 
 func modeRequiresPlan(mode string) bool {
-	switch mode {
-	case modePrepareOwnerRepair, modeVerifyOwnerRepair, modePrepareFollowerRepair, modeVerifyFollowerRepair:
-		return true
-	default:
-		return false
-	}
+	return false
 }
 
 func run(cfg config) error {
 	if cfg.mode == modeChaos {
 		return runChaos(cfg)
-	}
-	if cfg.mode != modeLoad {
-		return runRecoveryMode(cfg)
 	}
 	return runLoad(cfg)
 }
@@ -82,8 +70,8 @@ func runLoad(cfg config) error {
 	if err := verifySchemaRejection(ctx, lb, loadTopics[0]); err != nil {
 		return err
 	}
-	fmt.Printf("verifying committed replica recovery reads\n")
-	if err := verifyCommittedReplicaRead(ctx, lb, cfg, recoveryTopic); err != nil {
+	fmt.Printf("verifying accepted produce visibility\n")
+	if err := verifyAcceptedProduceVisibility(ctx, lb, cfg, recoveryTopic); err != nil {
 		return err
 	}
 

@@ -76,6 +76,29 @@ func TestTopicCRUD(t *testing.T) {
 	}
 }
 
+func TestMetadataVersionAdvancesOnSuccessfulMutation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	before := s.MetadataVersion()
+	ord := topic.Topic{Name: "orders", Partitions: 1}
+	if err := s.CreateTopic(ctx, ord); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	afterCreate := s.MetadataVersion()
+	if afterCreate <= before {
+		t.Fatalf("MetadataVersion after create = %d, want > %d", afterCreate, before)
+	}
+
+	if err := s.CreateTopic(ctx, ord); err != metastore.ErrAlreadyExists {
+		t.Fatalf("duplicate CreateTopic: got %v, want ErrAlreadyExists", err)
+	}
+	afterFailedCreate := s.MetadataVersion()
+	if afterFailedCreate != afterCreate {
+		t.Fatalf("MetadataVersion after failed create = %d, want %d", afterFailedCreate, afterCreate)
+	}
+}
+
 func TestListTopicsPaginated(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -211,6 +234,61 @@ func TestAssignments(t *testing.T) {
 	// payments assignment must be untouched.
 	if _, err := s.GetAssignment("payments", 0); err != nil {
 		t.Fatalf("unrelated assignment deleted: %v", err)
+	}
+}
+
+func TestAssignNewPartitionsBalancesOwnersAndFollowers(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for _, id := range []string{"narad-1", "narad-2"} {
+		if err := s.RegisterMember(ctx, metastore.Member{
+			ID:            id,
+			Addr:          id + ":7943",
+			Status:        metastore.MemberAlive,
+			LastHeartbeat: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("RegisterMember %s: %v", id, err)
+		}
+	}
+
+	if err := s.AssignNewPartitions(ctx, "orders", 0, 6, 2); err != nil {
+		t.Fatalf("AssignNewPartitions: %v", err)
+	}
+	assignments, err := s.ListAssignments("orders")
+	if err != nil {
+		t.Fatalf("ListAssignments: %v", err)
+	}
+	if len(assignments) != 6 {
+		t.Fatalf("assignments = %d, want 6", len(assignments))
+	}
+
+	owners := map[string]int{}
+	followers := map[string]int{}
+	for _, assignment := range assignments {
+		if assignment.OwnerID == assignment.FollowerID {
+			t.Fatalf("partition %d assigned owner and follower to %q", assignment.Partition, assignment.OwnerID)
+		}
+		wantOwner := "narad-1"
+		wantFollower := "narad-2"
+		if assignment.Partition%2 == 1 {
+			wantOwner = "narad-2"
+			wantFollower = "narad-1"
+		}
+		if assignment.OwnerID != wantOwner || assignment.FollowerID != wantFollower {
+			t.Fatalf("partition %d = owner %s follower %s, want owner %s follower %s",
+				assignment.Partition, assignment.OwnerID, assignment.FollowerID, wantOwner, wantFollower)
+		}
+		owners[assignment.OwnerID]++
+		followers[assignment.FollowerID]++
+	}
+	for _, id := range []string{"narad-1", "narad-2"} {
+		if owners[id] != 3 {
+			t.Fatalf("%s owns %d partitions, want 3; all owners=%v", id, owners[id], owners)
+		}
+		if followers[id] != 3 {
+			t.Fatalf("%s follows %d partitions, want 3; all followers=%v", id, followers[id], followers)
+		}
 	}
 }
 

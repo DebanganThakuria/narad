@@ -90,10 +90,6 @@ check: fmt-check vet test ## Strict check: fmt-check + vet + test (no auto-fix).
 local-cluster-e2e: ## Run a local 3-node cluster integration/load test. Pass ARGS='--topics 10 --messages 1000' to override.
 	./scripts/local-cluster-e2e.sh $(ARGS)
 
-.PHONY: local-cluster-recovery
-local-cluster-recovery: ## Run local 3-node process restart recovery scenarios.
-	./scripts/local-cluster-recovery.sh
-
 .PHONY: local-cluster-chaos
 local-cluster-chaos: ## Run local 3-node cluster test with rolling process restarts.
 	./scripts/local-cluster-chaos.sh $(ARGS)
@@ -105,6 +101,34 @@ cluster-load: ## Run the integration/load driver against existing nodes. Use NAR
 		exit 2; \
 	fi
 	$(GO) run ./tests/integration --nodes "$(NARAD_NODES)" $(ARGS)
+
+.PHONY: local-soak-cluster
+local-soak-cluster: ## Start a persistent local 3-node cluster for soak/perf testing.
+	./scripts/local-soak-cluster.sh
+
+.PHONY: local-soak-stop
+local-soak-stop: ## Stop the persistent local soak cluster, keeping data/logs.
+	./scripts/local-soak-stop.sh
+
+.PHONY: local-soak-launchd-start
+local-soak-launchd-start: ## Start local Narad + tester under macOS launchd for long soak runs.
+	./scripts/local-soak-launchd-start.sh
+
+.PHONY: local-soak-launchd-stop
+local-soak-launchd-stop: ## Stop the macOS launchd local Narad + tester soak services.
+	./scripts/local-soak-launchd-stop.sh
+
+.PHONY: local-soak-tester
+local-soak-tester: ## Run the long-running Narad tester. Defaults to 50 msg/sec, 20ms consume wait, +/-10 msg/sec every 10m, capped at 100k.
+	./scripts/local-soak-tester.sh $(ARGS)
+
+.PHONY: local-monitoring-start
+local-monitoring-start: ## Start local Prometheus and import the Grafana soak dashboard.
+	./scripts/local-monitoring-start.sh
+
+.PHONY: local-monitoring-stop
+local-monitoring-stop: ## Stop local Prometheus. Pass ARGS='--grafana' to stop Homebrew Grafana too.
+	./scripts/local-monitoring-stop.sh $(ARGS)
 
 # ---- developer setup -----------------------------------------------------
 

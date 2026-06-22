@@ -1,6 +1,11 @@
 package httpserver
 
-import "net/http"
+import (
+	"bufio"
+	"fmt"
+	"net"
+	"net/http"
+)
 
 // recorder wraps http.ResponseWriter to capture the response status and
 // payload size for the access log. It also implicitly writes a 200 on
@@ -28,4 +33,16 @@ func (r *recorder) Write(b []byte) (int, error) {
 	n, err := r.ResponseWriter.Write(b)
 	r.bytes += int64(n)
 	return n, err
+}
+
+func (r *recorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not support hijacking")
+	}
+	if !r.wroteHeader {
+		r.status = http.StatusSwitchingProtocols
+		r.wroteHeader = true
+	}
+	return hijacker.Hijack()
 }

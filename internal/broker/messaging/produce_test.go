@@ -6,10 +6,12 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/platform/replication"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
@@ -67,6 +69,53 @@ func TestProduceAllowsMissingSchema(t *testing.T) {
 	}
 	if !replicator.called {
 		t.Fatal("Replicate() was not called for schema-not-found path")
+	}
+}
+
+func TestProduceCachesMissingSchemaLookup(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
+	schemas := &fakeSchemas{validateErr: errs.ErrSchemaNotFound}
+	replicator := &fakeReplicator{}
+	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0}, replicator)
+
+	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
+		t.Fatalf("first Produce() error = %v", err)
+	}
+	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":2}`)); err != nil {
+		t.Fatalf("second Produce() error = %v", err)
+	}
+	if ms.getSchemaCalls != 1 {
+		t.Fatalf("GetSchema calls = %d, want 1", ms.getSchemaCalls)
+	}
+}
+
+func TestProduceInvalidatesMissingSchemaCacheOnMetastoreVersionChange(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
+	schemas := &fakeSchemas{validateErr: errs.ErrSchemaNotFound}
+	replicator := &fakeReplicator{}
+	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0}, replicator)
+	engine.cacheTTL = time.Hour
+
+	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
+		t.Fatalf("first Produce() error = %v", err)
+	}
+	if len(schemas.loads) != 0 {
+		t.Fatalf("schema loads = %d, want 0 before schema exists", len(schemas.loads))
+	}
+	if err := ms.PutSchema(context.Background(), "orders", 1, []byte(`{"type":"object"}`)); err != nil {
+		t.Fatalf("PutSchema() error = %v", err)
+	}
+
+	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":2}`)); err != nil {
+		t.Fatalf("second Produce() error = %v", err)
+	}
+	if len(schemas.loads) != 1 {
+		t.Fatalf("schema loads = %d, want 1 after schema update", len(schemas.loads))
+	}
+	if schemas.loads[0].topic != "orders" || schemas.loads[0].version != 1 {
+		t.Fatalf("schema load = %+v, want orders v1", schemas.loads[0])
 	}
 }
 
@@ -149,6 +198,71 @@ func TestProduceReturnsReplicatorError(t *testing.T) {
 	}
 	if got := log.HighWatermark(); got != 0 {
 		t.Fatalf("HighWatermark() = %d, want 0", got)
+	}
+}
+
+func TestProduceDoesNotAppendPastUnrepairedReplicationTail(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
+	replicator := &scriptedCatchUpReplicator{
+		replicateErrs: []error{errors.New("replication down")},
+		catchUpErrs:   []error{errors.New("repair down"), errors.New("repair down")},
+	}
+	engine := newTestEngine(t, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
+
+	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err == nil {
+		t.Fatal("first Produce() error = nil, want replication failure")
+	}
+	log, err := engine.logs.Get("orders", 0)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got := log.NextOffset(); got != 1 {
+		t.Fatalf("NextOffset() after first failure = %d, want 1", got)
+	}
+	if got := log.HighWatermark(); got != 0 {
+		t.Fatalf("HighWatermark() after first failure = %d, want 0", got)
+	}
+
+	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":2}`)); err == nil {
+		t.Fatal("second Produce() error = nil, want repair failure")
+	}
+	if got := log.NextOffset(); got != 1 {
+		t.Fatalf("NextOffset() after unrepaired second produce = %d, want 1", got)
+	}
+	if got := len(replicator.replicateOffsets); got != 1 {
+		t.Fatalf("replicate calls = %d, want 1", got)
+	}
+}
+
+func TestProduceRepairsHiddenTailBeforeAppendingNextRecord(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
+	replicator := &scriptedCatchUpReplicator{
+		replicateErrs: []error{errors.New("replication down"), nil},
+		catchUpErrs:   []error{errors.New("repair down"), nil},
+	}
+	engine := newTestEngine(t, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
+
+	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err == nil {
+		t.Fatal("first Produce() error = nil, want replication failure")
+	}
+	offset, partition, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":2}`))
+	if err != nil {
+		t.Fatalf("second Produce() error = %v", err)
+	}
+	if offset != 1 || partition != 0 {
+		t.Fatalf("second Produce() = offset %d partition %d, want 1,0", offset, partition)
+	}
+	log, err := engine.logs.Get("orders", 0)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got := log.HighWatermark(); got != 2 {
+		t.Fatalf("HighWatermark() = %d, want 2", got)
+	}
+	if got := replicator.replicateOffsets; len(got) != 2 || got[0] != 0 || got[1] != 1 {
+		t.Fatalf("replicate offsets = %v, want [0 1]", got)
 	}
 }
 
@@ -389,11 +503,14 @@ func TestProduceFailsWhenNoPartitionHasAliveOwnerAndFollower(t *testing.T) {
 	}
 }
 
-func TestProduceFailsWhenHighWatermarkPersistFails(t *testing.T) {
+func TestProduceDoesNotSynchronouslyPersistHighWatermark(t *testing.T) {
 	dataDir := t.TempDir()
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, &fakeReplicator{})
+	if _, err := engine.logs.Get("orders", 0); err != nil {
+		t.Fatalf("open log: %v", err)
+	}
 	hwmPath := partitionHWMPath(dataDir, "orders", 0)
 	if err := os.Remove(hwmPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Remove(hwm): %v", err)
@@ -402,8 +519,52 @@ func TestProduceFailsWhenHighWatermarkPersistFails(t *testing.T) {
 		t.Fatalf("Mkdir(hwm path): %v", err)
 	}
 
-	_, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`))
-	if err == nil || !(strings.Contains(err.Error(), "commit boundary durability") || strings.Contains(err.Error(), "read hwm")) {
-		t.Fatalf("Produce() error = %v, want commit boundary durability failure", err)
+	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
+		t.Fatalf("Produce() error = %v", err)
 	}
+	if err := engine.logs.CloseAll(); err == nil || !strings.Contains(err.Error(), "storage: replace hwm") {
+		t.Fatalf("CloseAll() error = %v, want hwm persistence failure", err)
+	}
+}
+
+type scriptedCatchUpReplicator struct {
+	replicateErrs    []error
+	catchUpErrs      []error
+	replicateOffsets []int64
+	catchUpHints     []*int64
+}
+
+func (r *scriptedCatchUpReplicator) Replicate(_ context.Context, _ string, _ int, offset int64, _ []byte) error {
+	r.replicateOffsets = append(r.replicateOffsets, offset)
+	if len(r.replicateErrs) == 0 {
+		return nil
+	}
+	err := r.replicateErrs[0]
+	r.replicateErrs = r.replicateErrs[1:]
+	return err
+}
+
+func (r *scriptedCatchUpReplicator) CatchUp(_ context.Context, _ string, _ int, log replication.LeaderLog, opts replication.CatchUpOptions) error {
+	if opts.FollowerNextOffset == nil {
+		r.catchUpHints = append(r.catchUpHints, nil)
+	} else {
+		hint := *opts.FollowerNextOffset
+		r.catchUpHints = append(r.catchUpHints, &hint)
+	}
+	if log.HighWatermark() >= log.NextOffset() && opts.FollowerNextOffset == nil {
+		return nil
+	}
+	if len(r.catchUpErrs) > 0 {
+		err := r.catchUpErrs[0]
+		r.catchUpErrs = r.catchUpErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
+	for next := log.HighWatermark() + 1; next <= log.NextOffset(); next++ {
+		if err := log.AdvanceHighWatermark(next); err != nil {
+			return err
+		}
+	}
+	return nil
 }

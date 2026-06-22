@@ -25,15 +25,21 @@ func Default() *Config {
 			Addr: ":7943",
 		},
 		Storage: StorageConfig{
-			DataDir:                  "data",
-			Fsync:                    FsyncBatched,
-			Codec:                    "zstd",
-			CompressionLevel:         "best",
-			FlushBytes:               1 << 20, // 1 MiB
-			FlushRecords:             1000,
-			FlushIntervalMs:          100,
-			SegmentBytes:             64 << 20, // 64 MiB
-			RetentionCheckIntervalMs: 60_000,   // 1 minute
+			DataDir:                     "data",
+			Fsync:                       FsyncBatched,
+			Codec:                       "none",
+			CompressionLevel:            "fastest",
+			FlushBytes:                  1 << 20, // 1 MiB
+			FlushRecords:                1000,
+			FlushIntervalMs:             100,
+			SyncIntervalMs:              1000,
+			SyncBytes:                   8 << 20,
+			HighWatermarkSyncIntervalMs: 5000,
+			IngressWALSyncIntervalMs:    10,
+			IngressWALSyncBytes:         1 << 20,
+			IngressWALShards:            1,
+			SegmentBytes:                64 << 20, // 64 MiB
+			RetentionCheckIntervalMs:    60_000,   // 1 minute
 		},
 		Topic: TopicConfig{
 			DefaultPartitions:                3,

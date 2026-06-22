@@ -17,22 +17,16 @@
     ]
   },
   "storage": {
-    "data_dir":                    "data",
-    "fsync":                       "per_write",
-    "codec":                       "zstd",
-    "compression_level":           "best",
-    "flush_bytes":                 1048576,
-    "flush_records":               1000,
-    "flush_interval_ms":           100,
-    "segment_bytes":               67108864,
-    "retention_check_interval_ms": 60000
+    "data_dir": "data"
   },
   "topic": {
-    "default_partitions":         8,
-    "max_partitions":             1024,
-    "default_replication_factor": 2,
-    "default_retention_age_ms":   604800000,
-    "default_retention_bytes":    0
+    "default_partitions":                         8,
+    "max_partitions":                             1024,
+    "default_replication_factor":                 2,
+    "default_retention_age_ms":                   604800000,
+    "default_visibility_timeout_ms":              30000,
+    "default_max_in_flight_per_partition":        1024,
+    "default_max_acked_ahead_per_partition":      1024
   },
   "log": {
     "level":  "info",

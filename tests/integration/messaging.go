@@ -82,11 +82,14 @@ func produceMessages(ctx context.Context, lb *roundRobinClient, jobs []messageJo
 func produceOne(ctx context.Context, lb *roundRobinClient, job messageJob) (produceResponse, error) {
 	path := "/v1/topics/" + url.PathEscape(job.Topic) + "/produce"
 	req := produceRequest{Key: job.Key, Message: job.Body}
-	var out produceResponse
+	out := produceResponse{Offset: -1}
 	err := retry(ctx, 20, 100*time.Millisecond, func() error {
-		_, _, err := lb.do(ctx, http.MethodPost, path, req, &out, http.StatusOK)
+		_, _, err := lb.do(ctx, http.MethodPost, path, req, &out, http.StatusAccepted)
 		if err != nil {
 			return err
+		}
+		if out.Status != "accepted" || out.MessageID == "" || out.Topic != job.Topic {
+			return fmt.Errorf("produce %s returned invalid accepted response: %+v", job.Body.ID, out)
 		}
 		if out.Partition < 0 {
 			return fmt.Errorf("produce %s returned invalid partition %d", job.Body.ID, out.Partition)

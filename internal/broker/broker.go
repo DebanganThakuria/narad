@@ -28,6 +28,7 @@ package broker
 import (
 	"context"
 
+	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -55,6 +56,9 @@ type Broker interface {
 	ListTopics(ctx context.Context, opts metastore.ListOptions) (topics []topic.Topic, nextPageToken string, err error)
 
 	Produce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (offset int64, partitionIdx int, err error)
+	AcceptProduce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (ingress.AcceptedProduce, error)
+	CommitAcceptedProduce(ctx context.Context, record ingress.ProduceRecord) (offset int64, err error)
+	CommitAcceptedProduceBatch(ctx context.Context, records []ingress.ProduceRecord) (offsets []int64, err error)
 	Consume(ctx context.Context, topicName string, opts messaging.ConsumeOpts) (msg topic.Message, found bool, err error)
 	// Ack accepts an opaque receipt handle returned by a prior Consume
 	// call. The broker decodes, verifies HMAC, and only commits if the

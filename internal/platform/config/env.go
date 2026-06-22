@@ -15,6 +15,9 @@ func applyEnv(cfg *Config) error {
 	if v, ok := os.LookupEnv("NARAD_HTTP_ADDR"); ok {
 		cfg.HTTP.Addr = v
 	}
+	if v, ok := os.LookupEnv("NARAD_HTTP_PPROF_ADDR"); ok {
+		cfg.HTTP.PprofAddr = v
+	}
 	if v, ok := os.LookupEnv("NARAD_CLUSTER_ADDR"); ok {
 		cfg.Cluster.Addr = v
 	}
@@ -47,99 +50,26 @@ func applyEnv(cfg *Config) error {
 	if v, ok := os.LookupEnv("NARAD_DATA_DIR"); ok {
 		cfg.Storage.DataDir = v
 	}
-	if v, ok := os.LookupEnv("NARAD_FSYNC"); ok {
-		cfg.Storage.Fsync = FsyncMode(v)
+	if err := envInt64("NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS", &cfg.Topic.DefaultRetentionAgeMs); err != nil {
+		return err
 	}
-	if v, ok := os.LookupEnv("NARAD_STORAGE_CODEC"); ok {
-		cfg.Storage.Codec = v
+	if err := envInt64("NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS", &cfg.Topic.DefaultVisibilityTimeoutMs); err != nil {
+		return err
 	}
-	if v, ok := os.LookupEnv("NARAD_STORAGE_COMPRESSION_LEVEL"); ok {
-		cfg.Storage.CompressionLevel = v
+	if err := envInt("NARAD_TOPIC_DEFAULT_PARTITIONS", &cfg.Topic.DefaultPartitions); err != nil {
+		return err
 	}
-	if v, ok := os.LookupEnv("NARAD_STORAGE_FLUSH_BYTES"); ok {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("NARAD_STORAGE_FLUSH_BYTES: %w", err)
-		}
-		cfg.Storage.FlushBytes = n
+	if err := envInt("NARAD_TOPIC_MAX_PARTITIONS", &cfg.Topic.MaxPartitions); err != nil {
+		return err
 	}
-	if v, ok := os.LookupEnv("NARAD_STORAGE_FLUSH_RECORDS"); ok {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("NARAD_STORAGE_FLUSH_RECORDS: %w", err)
-		}
-		cfg.Storage.FlushRecords = n
+	if err := envInt("NARAD_TOPIC_DEFAULT_REPLICATION_FACTOR", &cfg.Topic.DefaultReplicationFactor); err != nil {
+		return err
 	}
-	if v, ok := os.LookupEnv("NARAD_STORAGE_FLUSH_INTERVAL_MS"); ok {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("NARAD_STORAGE_FLUSH_INTERVAL_MS: %w", err)
-		}
-		cfg.Storage.FlushIntervalMs = n
+	if err := envInt64("NARAD_TOPIC_DEFAULT_MAX_IN_FLIGHT_PER_PARTITION", &cfg.Topic.DefaultMaxInFlightPerPartition); err != nil {
+		return err
 	}
-	if v, ok := os.LookupEnv("NARAD_STORAGE_SEGMENT_BYTES"); ok {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			return fmt.Errorf("NARAD_STORAGE_SEGMENT_BYTES: %w", err)
-		}
-		cfg.Storage.SegmentBytes = n
-	}
-	if v, ok := os.LookupEnv("NARAD_STORAGE_RETENTION_CHECK_INTERVAL_MS"); ok {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("NARAD_STORAGE_RETENTION_CHECK_INTERVAL_MS: %w", err)
-		}
-		cfg.Storage.RetentionCheckIntervalMs = n
-	}
-	if v, ok := os.LookupEnv("NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS"); ok {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			return fmt.Errorf("NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS: %w", err)
-		}
-		cfg.Topic.DefaultRetentionAgeMs = n
-	}
-	if v, ok := os.LookupEnv("NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS"); ok {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			return fmt.Errorf("NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS: %w", err)
-		}
-		cfg.Topic.DefaultVisibilityTimeoutMs = n
-	}
-
-	if v, ok := os.LookupEnv("NARAD_TOPIC_DEFAULT_PARTITIONS"); ok {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("NARAD_TOPIC_DEFAULT_PARTITIONS: %w", err)
-		}
-		cfg.Topic.DefaultPartitions = n
-	}
-	if v, ok := os.LookupEnv("NARAD_TOPIC_MAX_PARTITIONS"); ok {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("NARAD_TOPIC_MAX_PARTITIONS: %w", err)
-		}
-		cfg.Topic.MaxPartitions = n
-	}
-	if v, ok := os.LookupEnv("NARAD_TOPIC_DEFAULT_REPLICATION_FACTOR"); ok {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("NARAD_TOPIC_DEFAULT_REPLICATION_FACTOR: %w", err)
-		}
-		cfg.Topic.DefaultReplicationFactor = n
-	}
-	if v, ok := os.LookupEnv("NARAD_TOPIC_DEFAULT_MAX_IN_FLIGHT_PER_PARTITION"); ok {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			return fmt.Errorf("NARAD_TOPIC_DEFAULT_MAX_IN_FLIGHT_PER_PARTITION: %w", err)
-		}
-		cfg.Topic.DefaultMaxInFlightPerPartition = n
-	}
-	if v, ok := os.LookupEnv("NARAD_TOPIC_DEFAULT_MAX_ACKED_AHEAD_PER_PARTITION"); ok {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			return fmt.Errorf("NARAD_TOPIC_DEFAULT_MAX_ACKED_AHEAD_PER_PARTITION: %w", err)
-		}
-		cfg.Topic.DefaultMaxAckedAheadPerPartition = n
+	if err := envInt64("NARAD_TOPIC_DEFAULT_MAX_ACKED_AHEAD_PER_PARTITION", &cfg.Topic.DefaultMaxAckedAheadPerPartition); err != nil {
+		return err
 	}
 
 	if v, ok := os.LookupEnv("NARAD_LOG_LEVEL"); ok {
@@ -162,6 +92,32 @@ func envDuration(key string, dst *Duration) error {
 		return fmt.Errorf("%s: %w", key, err)
 	}
 	*dst = Duration(d)
+	return nil
+}
+
+func envInt(key string, dst *int) error {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fmt.Errorf("%s: %w", key, err)
+	}
+	*dst = n
+	return nil
+}
+
+func envInt64(key string, dst *int64) error {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return fmt.Errorf("%s: %w", key, err)
+	}
+	*dst = n
 	return nil
 }
 

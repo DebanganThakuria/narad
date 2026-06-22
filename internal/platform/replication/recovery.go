@@ -1,42 +1,36 @@
 package replication
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	replicationwire "github.com/debanganthakuria/narad/internal/protocol/replication"
 )
 
 type StoreRecovery struct {
 	selfID string
 	store  *metastore.Store
 	logs   *runtime.Logs
-	client *http.Client
-}
-
-type replicaReadResponse struct {
-	Payload []byte `json:"payload"`
-}
-
-type replicaWriteRequest struct {
-	Topic     string `json:"topic"`
-	Partition int    `json:"partition"`
-	Offset    int64  `json:"offset"`
-	Payload   []byte `json:"payload"`
-	LeaderID  string `json:"leader_id"`
+	quic   *quicClientPool
 }
 
 func NewStoreRecovery(selfID string, store *metastore.Store, logs *runtime.Logs, client *http.Client) StoreRecovery {
-	if client == nil {
-		client = http.DefaultClient
+	timeout := defaultStreamTimeout
+	if client != nil && client.Timeout > 0 {
+		timeout = client.Timeout
 	}
-	return StoreRecovery{selfID: selfID, store: store, logs: logs, client: client}
+	return NewStoreRecoveryWithTimeout(selfID, store, logs, timeout)
+}
+
+func NewStoreRecoveryWithTimeout(selfID string, store *metastore.Store, logs *runtime.Logs, timeout time.Duration) StoreRecovery {
+	if timeout <= 0 {
+		timeout = defaultStreamTimeout
+	}
+	return StoreRecovery{selfID: selfID, store: store, logs: logs, quic: newQUICClientPool(timeout)}
 }
 
 func (r StoreRecovery) RepairOwnedPartitions(ctx context.Context) error {
@@ -120,7 +114,7 @@ func (r StoreRecovery) repairFollowerFromOwner(ctx context.Context, followerAddr
 	Read(int64) ([]byte, error)
 }, committedTail int64,
 ) error {
-	start, err := r.findFollowerNextOffset(ctx, followerAddr, topicName, partition)
+	start, err := r.findFollowerNextOffset(ctx, followerAddr, topicName, partition, committedTail)
 	if err != nil {
 		return err
 	}
@@ -136,7 +130,7 @@ func (r StoreRecovery) repairFollowerFromOwner(ctx context.Context, followerAddr
 	return nil
 }
 
-func (r StoreRecovery) findFollowerNextOffset(ctx context.Context, addr, topicName string, partition int) (int64, error) {
+func (r StoreRecovery) findFollowerNextOffset(ctx context.Context, addr, topicName string, partition int, upperBound int64) (int64, error) {
 	for offset := int64(0); ; offset++ {
 		_, found, err := r.fetchReplicaRecord(ctx, addr, topicName, partition, offset, false)
 		if err != nil {
@@ -149,71 +143,28 @@ func (r StoreRecovery) findFollowerNextOffset(ctx context.Context, addr, topicNa
 }
 
 func (r StoreRecovery) fetchReplicaRecord(ctx context.Context, addr, topicName string, partition int, offset int64, committedOnly bool) ([]byte, bool, error) {
-	parsed, err := url.Parse(replicateEndpoint(addr))
-	if err != nil {
-		return nil, false, fmt.Errorf("parse replica read url: %w", err)
-	}
-	q := parsed.Query()
-	q.Set("topic", topicName)
-	q.Set("partition", fmt.Sprintf("%d", partition))
-	q.Set("offset", fmt.Sprintf("%d", offset))
-	if committedOnly {
-		q.Set("committed", "true")
-	}
-	parsed.RawQuery = q.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
-	if err != nil {
-		return nil, false, fmt.Errorf("build replica read request: %w", err)
-	}
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return nil, false, fmt.Errorf("send replica read request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, false, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, false, fmt.Errorf("replica read failed with status %d: %s", resp.StatusCode, string(body))
-	}
-	var out replicaReadResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, false, fmt.Errorf("decode replica read response: %w", err)
-	}
-	if !json.Valid(out.Payload) {
-		return nil, false, fmt.Errorf("replica payload is not valid json")
-	}
-	return out.Payload, true, nil
+	return r.quic.readReplica(ctx, addr, topicName, partition, offset, committedOnly)
 }
 
 func (r StoreRecovery) pushReplicaRecord(ctx context.Context, addr, topicName string, partition int, offset int64, payload []byte) error {
-	body, err := json.Marshal(replicaWriteRequest{
-		Topic:     topicName,
-		Partition: partition,
-		Offset:    offset,
-		Payload:   payload,
-		LeaderID:  r.selfID,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal replicate request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, replicateEndpoint(addr), bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build replicate request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := r.client.Do(req)
+	results, err := r.quic.appendMulti(ctx, addr, []replicationwire.StreamAppendGroup{{
+		Topic:      topicName,
+		Partition:  partition,
+		BaseOffset: offset,
+		Payloads:   [][]byte{payload},
+	}})
 	if err != nil {
 		return fmt.Errorf("send replicate request: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("replicate request failed with status %d: %s", resp.StatusCode, string(body))
+	if len(results) != 1 {
+		return fmt.Errorf("replicate request returned %d results, want 1", len(results))
+	}
+	result := results[0]
+	if result.Message != "" {
+		return fmt.Errorf("replicate request failed: %s", result.Message)
+	}
+	if result.NextOffset != offset+1 {
+		return &OffsetMismatchError{RequestedOffset: offset, ReplicaNextOffset: result.NextOffset}
 	}
 	return nil
 }

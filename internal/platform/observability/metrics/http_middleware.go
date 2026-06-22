@@ -1,6 +1,9 @@
 package metrics
 
 import (
+	"bufio"
+	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -41,7 +44,7 @@ func HTTPMiddleware(m *Metrics) func(http.Handler) http.Handler {
 			elapsed := time.Since(start).Seconds()
 
 			m.HTTPRequestsTotal.WithLabelValues(route, method, status).Inc()
-			m.HTTPRequestDuration.WithLabelValues(route, method).Observe(elapsed)
+			m.HTTPRequestDuration.WithLabelValues(route, method, status).Observe(elapsed)
 			if rec.bytes > 0 {
 				m.HTTPBytesOut.WithLabelValues(route).Add(float64(rec.bytes))
 			}
@@ -81,4 +84,16 @@ func (r *metricsRecorder) Write(b []byte) (int, error) {
 	n, err := r.ResponseWriter.Write(b)
 	r.bytes += int64(n)
 	return n, err
+}
+
+func (r *metricsRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not support hijacking")
+	}
+	if !r.wroteHeader {
+		r.status = http.StatusSwitchingProtocols
+		r.wroteHeader = true
+	}
+	return hijacker.Hijack()
 }

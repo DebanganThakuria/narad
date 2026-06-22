@@ -14,7 +14,7 @@ func (s *Store) GetSchema(_ context.Context, topicName string, version int) ([]b
 	s.fsm.mu.RLock()
 	defer s.fsm.mu.RUnlock()
 	var out []byte
-	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+	err := s.fsm.view("get_schema", func(tx *bolt.Tx) error {
 		v := tx.Bucket(bucketSchemas).Get(schemaKey(topicName, version))
 		if v == nil {
 			return ErrNotFound

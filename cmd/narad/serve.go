@@ -21,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
 	"github.com/debanganthakuria/narad/internal/broker"
+	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/cluster"
 	"github.com/debanganthakuria/narad/internal/cluster/controller"
@@ -71,6 +72,7 @@ func runServe(args []string) error {
 		BindAddr:      cfg.Cluster.Addr,
 		AdvertiseAddr: advertisedClusterAddr(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
 		Peers:         configPeersToMetastore(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
+		Metrics:       m,
 	})
 	if err != nil {
 		return fmt.Errorf("metastore: %w", err)
@@ -83,7 +85,7 @@ func runServe(args []string) error {
 		return fmt.Errorf("initialize schemas: %w", err)
 	}
 
-	br, logs, offsets, lifecycle, err := buildBroker(cfg, nodeID, ms, schemas, m, log)
+	br, logs, offsets, lifecycle, ingressManager, err := buildBroker(cfg, nodeID, ms, schemas, m, log)
 	if err != nil {
 		return err
 	}
@@ -93,8 +95,7 @@ func runServe(args []string) error {
 	defer stop()
 
 	// Recovery client, controller and cluster router
-	recoveryClient := &http.Client{Timeout: 5 * time.Second}
-	recovery := replication.NewStoreRecovery(nodeID, ms, logs, recoveryClient)
+	recovery := replication.NewStoreRecoveryWithTimeout(nodeID, ms, logs, 5*time.Second)
 
 	member := metastore.Member{
 		ID:          nodeID,
@@ -103,24 +104,28 @@ func runServe(args []string) error {
 		Status:      metastore.MemberAlive,
 	}
 	ctrl := controller.New(ms, controller.Config{})
-	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), br)
+	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), br, m)
+	peerRPC := cluster.NewPeerClient(5*time.Second, m)
+	rpcServer := cluster.NewRPCServer(br, ms, log, m)
+	produceDispatcher := cluster.NewProduceDispatcher(ingressManager, ms, nodeID, br, peerRPC, log, cluster.ProduceDispatcherConfig{}, m)
 
 	// Start background processes
 	var wg sync.WaitGroup
-	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, recoveryClient, log) })
+	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, peerRPC, log) })
 	wg.Go(func() { ctrl.Run(ctx) })
 	wg.Go(func() { offsets.RunPurger(ctx, time.Second) })
+	wg.Go(func() { produceDispatcher.Run(ctx) })
 	startPprofServer(ctx, &wg, cfg.HTTP.PprofAddr, log)
-
-	poller := metrics.NewPoller(m, br, log)
-	wg.Go(func() { poller.Run(ctx) })
-
 	wg.Go(func() {
-		if repairErr := recovery.RepairOwnedPartitions(ctx); repairErr != nil {
-			log.Error("repair owned partitions", "err", repairErr)
-			stop()
+		if err := replication.ServeQUIC(ctx, cfg.HTTP.Addr, logs, log, rpcServer); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("quic replication server", "addr", cfg.HTTP.Addr, "err", err)
 		}
 	})
+
+	poller := metrics.NewPoller(m, br, log, cfg.Storage.DataDir)
+	wg.Go(func() { poller.Run(ctx) })
+
+	wg.Go(func() { runStoreRecoveryRepairer(ctx, recovery, storeRecoveryRetryInterval, log) })
 
 	// Finally build the API server
 	srv := buildAPIServer(ctx, cfg, br, logs, ms, router, m, reg, log)
@@ -245,10 +250,17 @@ func resolveNodeID(cfg *config.Config) (string, error) {
 	return nodeID, nil
 }
 
-func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, schemas schema.Registry, m *metrics.Metrics, log *slog.Logger) (broker.Broker, *runtime.Logs, *consumer.InFlight, *runtime.Lifecycle, error) {
+func buildBroker(
+	cfg *config.Config,
+	nodeID string,
+	ms metastore.Metastore,
+	schemas schema.Registry,
+	m *metrics.Metrics,
+	log *slog.Logger,
+) (broker.Broker, *runtime.Logs, *consumer.InFlight, *runtime.Lifecycle, *ingress.Manager, error) {
 	storageOpts, err := storageOptions(cfg.Storage)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("storage options: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("storage options: %w", err)
 	}
 
 	resolveCaps := func(ctx context.Context, topicName string) (consumer.Caps, error) {
@@ -267,23 +279,26 @@ func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, sche
 		return consumer.Caps{MaxInFlight: maxIF, MaxAckedAhead: maxAA}, nil
 	}
 
+	offsetCommitter := runtime.NewConsumerOffsetCommitter(cfg.Storage.DataDir, time.Duration(cfg.Storage.FlushIntervalMs)*time.Millisecond, log)
 	onCommit := func(topic string, partition int, offset int64) {
-		partitionDir := storage.TopicPartitionDir(cfg.Storage.DataDir, topic, partition)
-		if err := storage.WriteConsumerOffset(partitionDir, offset); err != nil {
-			log.Error("consumer offset write failed", "topic", topic, "partition", partition, "offset", offset, "err", err)
-		}
+		offsetCommitter.Commit(topic, partition, offset)
 	}
 
 	offsets := consumer.NewInFlight(resolveCaps, onCommit)
 	logs := runtime.NewLogs(cfg.Storage.DataDir, storageOpts, ms, m)
-	lifecycle := runtime.NewLifecycle(logs)
+	lifecycle := runtime.NewLifecycle(logs, offsetCommitter.Close)
 	if err = initializeConsumerOffsets(context.Background(), cfg.Storage.DataDir, ms, offsets, log, nodeID); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("initialize consumer offsets: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("initialize consumer offsets: %w", err)
 	}
 
 	store, ok := ms.(*metastore.Store)
 	if !ok {
-		return nil, nil, nil, nil, errors.New("broker: cluster replication requires metastore.Store")
+		return nil, nil, nil, nil, nil, errors.New("broker: cluster replication requires metastore.Store")
+	}
+
+	ingressManager, err := ingress.OpenManagerWithOptions(cfg.Storage.DataDir, ingressWALOptions(cfg.Storage, m))
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("ingress: %w", err)
 	}
 
 	br, err := broker.New(broker.Deps{
@@ -302,17 +317,19 @@ func buildBroker(cfg *config.Config, nodeID string, ms metastore.Metastore, sche
 		Partitions:      partition.NewHashRoundRobin(),
 		Schemas:         schemas,
 		ConsumerOffsets: offsets,
-		Replicator:      replication.NewCluster(nodeID, store, &http.Client{Timeout: 5 * time.Second}),
+		Replicator:      replication.NewStreamingClusterWithTimeout(nodeID, store, 5*time.Second, m),
 		Logs:            logs,
+		Ingress:         ingressManager,
 		Logger:          log,
 		SelfID:          nodeID,
 		Lifecycle:       lifecycle,
 		Metrics:         m,
 	})
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("broker: %w", err)
+		_ = ingressManager.Close()
+		return nil, nil, nil, nil, nil, fmt.Errorf("broker: %w", err)
 	}
-	return br, logs, offsets, lifecycle, nil
+	return br, logs, offsets, lifecycle, ingressManager, nil
 }
 
 func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, logs *runtime.Logs, ms *metastore.Store, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, log *slog.Logger) *httpserver.Server {
@@ -400,15 +417,36 @@ func storageOptions(sc config.StorageConfig) (storage.Options, error) {
 		return storage.Options{}, err
 	}
 	return storage.Options{
-		Codec:         storageCodec,
-		FlushBytes:    sc.FlushBytes,
-		FlushRecords:  sc.FlushRecords,
-		FlushInterval: time.Duration(sc.FlushIntervalMs) * time.Millisecond,
-		SegmentBytes:  sc.SegmentBytes,
+		Codec:           storageCodec,
+		FlushBytes:      sc.FlushBytes,
+		FlushRecords:    sc.FlushRecords,
+		FlushInterval:   time.Duration(sc.FlushIntervalMs) * time.Millisecond,
+		SyncMode:        storageSyncMode(sc.Fsync),
+		SyncInterval:    time.Duration(sc.SyncIntervalMs) * time.Millisecond,
+		SyncBytes:       sc.SyncBytes,
+		HWMSyncInterval: time.Duration(sc.HighWatermarkSyncIntervalMs) * time.Millisecond,
+		SegmentBytes:    sc.SegmentBytes,
 		Retention: storage.RetentionConfig{
 			CheckInterval: time.Duration(sc.RetentionCheckIntervalMs) * time.Millisecond,
 		},
 	}, nil
+}
+
+func ingressWALOptions(sc config.StorageConfig, m *metrics.Metrics) ingress.Options {
+	opts := ingress.DefaultWALOptions(m)
+	opts.SyncInterval = time.Duration(sc.IngressWALSyncIntervalMs) * time.Millisecond
+	opts.SyncBytes = sc.IngressWALSyncBytes
+	return ingress.Options{
+		WAL:    opts,
+		Shards: sc.IngressWALShards,
+	}
+}
+
+func storageSyncMode(mode config.FsyncMode) storage.SyncMode {
+	if mode == config.FsyncPerWrite {
+		return storage.SyncPerWrite
+	}
+	return storage.SyncBatched
 }
 
 func buildCodec(sc config.StorageConfig) (codec.Codec, error) {

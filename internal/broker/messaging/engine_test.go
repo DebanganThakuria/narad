@@ -22,9 +22,12 @@ import (
 )
 
 type messagingFakeMetastore struct {
-	topics      map[string]topic.Topic
-	schemas     map[string]map[int][]byte
-	getTopicErr error
+	topics          map[string]topic.Topic
+	schemas         map[string]map[int][]byte
+	metadataVersion uint64
+	getTopicErr     error
+	getTopicCalls   int
+	getSchemaCalls  int
 }
 
 func newMessagingFakeMetastore() *messagingFakeMetastore {
@@ -36,20 +39,24 @@ func newMessagingFakeMetastore() *messagingFakeMetastore {
 
 func (f *messagingFakeMetastore) CreateTopic(_ context.Context, t topic.Topic) error {
 	f.topics[t.Name] = t
+	f.bumpMetadataVersion()
 	return nil
 }
 
 func (f *messagingFakeMetastore) UpdateTopic(_ context.Context, t topic.Topic) error {
 	f.topics[t.Name] = t
+	f.bumpMetadataVersion()
 	return nil
 }
 
 func (f *messagingFakeMetastore) DeleteTopic(_ context.Context, name string) error {
 	delete(f.topics, name)
+	f.bumpMetadataVersion()
 	return nil
 }
 
 func (f *messagingFakeMetastore) GetTopic(_ context.Context, name string) (topic.Topic, error) {
+	f.getTopicCalls++
 	if f.getTopicErr != nil {
 		return topic.Topic{}, f.getTopicErr
 	}
@@ -69,10 +76,12 @@ func (f *messagingFakeMetastore) PutSchema(_ context.Context, topicName string, 
 		f.schemas[topicName] = map[int][]byte{}
 	}
 	f.schemas[topicName][version] = append([]byte(nil), raw...)
+	f.bumpMetadataVersion()
 	return nil
 }
 
 func (f *messagingFakeMetastore) GetSchema(_ context.Context, topicName string, version int) ([]byte, error) {
+	f.getSchemaCalls++
 	if versions, ok := f.schemas[topicName]; ok {
 		if raw, ok := versions[version]; ok {
 			return append([]byte(nil), raw...), nil
@@ -88,6 +97,14 @@ func (f *messagingFakeMetastore) GetMember(string) (metastore.Member, error) {
 }
 
 func (f *messagingFakeMetastore) Close() error { return nil }
+
+func (f *messagingFakeMetastore) MetadataVersion() uint64 {
+	return f.metadataVersion
+}
+
+func (f *messagingFakeMetastore) bumpMetadataVersion() {
+	f.metadataVersion++
+}
 
 type fakeSchemas struct {
 	mu          sync.Mutex
@@ -184,6 +201,7 @@ func newClusterTestEngine(t *testing.T, store *metastore.Store, mgr partition.Ma
 		offsets,
 		logs,
 		nil,
+		nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		"node-self",
 	)
@@ -232,6 +250,7 @@ func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetasto
 		replicator = &fakeReplicator{}
 	}
 	logs := runtime.NewLogs(dataDir, storage.Options{FlushInterval: 5 * time.Millisecond}, ms, nil)
+	t.Cleanup(func() { _ = logs.CloseAll() })
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 10, MaxAckedAhead: 10}, nil
 	}, func(topic string, partition int, offset int64) {
@@ -252,7 +271,7 @@ func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetasto
 			}
 		}
 	}
-	return NewEngine(ms, schemas, partitioner, replicator, offsets, logs, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+	return NewEngine(ms, schemas, partitioner, replicator, offsets, logs, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 }
 
 func partitionHWMPath(dataDir, topicName string, partition int) string {
@@ -276,6 +295,52 @@ func TestGetTopicWrapsUnexpectedError(t *testing.T) {
 	_, err := engine.getTopic(context.Background(), "orders")
 	if err == nil || err.Error() != "messaging: get topic: db down" {
 		t.Fatalf("getTopic() error = %v, want wrapped error", err)
+	}
+}
+
+func TestGetTopicUsesShortLivedCache(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 3}
+	engine := newTestEngine(t, ms, nil, nil, nil)
+
+	first, err := engine.getTopic(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("first getTopic() error = %v", err)
+	}
+	second, err := engine.getTopic(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("second getTopic() error = %v", err)
+	}
+	if first.Partitions != 3 || second.Partitions != 3 {
+		t.Fatalf("cached topics = %+v %+v, want partitions=3", first, second)
+	}
+	if ms.getTopicCalls != 1 {
+		t.Fatalf("GetTopic calls = %d, want 1", ms.getTopicCalls)
+	}
+}
+
+func TestGetTopicInvalidatesCacheOnMetastoreVersionChange(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 3}
+	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine.cacheTTL = time.Hour
+
+	first, err := engine.getTopic(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("first getTopic() error = %v", err)
+	}
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 5}
+	ms.bumpMetadataVersion()
+	second, err := engine.getTopic(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("second getTopic() error = %v", err)
+	}
+
+	if first.Partitions != 3 || second.Partitions != 5 {
+		t.Fatalf("topics = %+v then %+v, want partitions 3 then 5", first, second)
+	}
+	if ms.getTopicCalls != 2 {
+		t.Fatalf("GetTopic calls = %d, want 2", ms.getTopicCalls)
 	}
 }
 
@@ -561,7 +626,7 @@ func TestAckAckedAheadCapWithNilMetricsReturnsError(t *testing.T) {
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 3, MaxAckedAhead: 1}, nil
 	}, nil)
-	engine := NewEngine(ms, nil, nil, nil, offsets, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+	engine := NewEngine(ms, nil, nil, nil, offsets, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 
 	if _, err := offsets.ReserveNext(context.Background(), "orders", 0, time.Second, 2); err != nil {
 		t.Fatalf("ReserveNext(offset 0) error = %v", err)

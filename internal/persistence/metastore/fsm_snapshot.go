@@ -13,7 +13,7 @@ func (f *fsmState) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	var buf bytes.Buffer
-	err := f.db.View(func(tx *bolt.Tx) error {
+	err := f.view("snapshot", func(tx *bolt.Tx) error {
 		_, err := tx.WriteTo(&buf)
 		return err
 	})
@@ -41,6 +41,7 @@ func (f *fsmState) Restore(rc io.ReadCloser) error {
 		return err
 	}
 	f.db = db
+	f.version.Add(1)
 	return nil
 }
 

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
@@ -30,6 +32,29 @@ const (
 	opMemberHeartbeat
 	opMemberDead
 )
+
+func (op opCode) metricName() string {
+	switch op {
+	case opCreateTopic:
+		return "create_topic"
+	case opUpdateTopic:
+		return "update_topic"
+	case opDeleteTopic:
+		return "delete_topic"
+	case opPutSchema:
+		return "put_schema"
+	case opAssignPartition:
+		return "assign_partition"
+	case opMemberJoin:
+		return "member_join"
+	case opMemberHeartbeat:
+		return "member_heartbeat"
+	case opMemberDead:
+		return "member_dead"
+	default:
+		return "unknown"
+	}
+}
 
 var (
 	bucketTopics      = []byte("topics")
@@ -73,17 +98,19 @@ type heartbeatPayload struct {
 // does not need to hold mu. Read methods hold RLock to prevent using a
 // closed db while Restore is swapping the pointer.
 type fsmState struct {
-	mu     sync.RWMutex
-	db     *bolt.DB
-	dbPath string
+	mu      sync.RWMutex
+	db      *bolt.DB
+	dbPath  string
+	metric  MetricsRecorder
+	version atomic.Uint64
 }
 
-func newFSM(path string) (*fsmState, error) {
+func newFSM(path string, metric MetricsRecorder) (*fsmState, error) {
 	db, err := openBolt(path)
 	if err != nil {
 		return nil, err
 	}
-	return &fsmState{db: db, dbPath: path}, nil
+	return &fsmState{db: db, dbPath: path, metric: metric}, nil
 }
 
 func openBolt(path string) (*bolt.DB, error) {
@@ -101,30 +128,61 @@ func openBolt(path string) (*bolt.DB, error) {
 	})
 }
 
+func (f *fsmState) view(operation string, fn func(*bolt.Tx) error) error {
+	start := time.Now()
+	err := f.db.View(fn)
+	f.observeTx(operation, "read", err, time.Since(start))
+	return err
+}
+
+func (f *fsmState) update(operation string, fn func(*bolt.Tx) error) error {
+	start := time.Now()
+	err := f.db.Update(fn)
+	f.observeTx(operation, "write", err, time.Since(start))
+	return err
+}
+
+func (f *fsmState) observeTx(operation, mode string, err error, duration time.Duration) {
+	if f.metric == nil {
+		return
+	}
+	f.metric.ObserveMetastoreTx(operation, mode, statusForErr(err), duration)
+	f.metric.ObserveMetastoreBboltStats(bboltStatsFrom(f.db.Stats()))
+}
+
 // Apply is called by Raft when a log entry is committed.
 func (f *fsmState) Apply(l *raft.Log) any {
 	var c cmd
 	if err := json.Unmarshal(l.Data, &c); err != nil {
 		return err
 	}
+	var err error
 	switch c.Op {
 	case opCreateTopic:
-		return f.applyCreateTopic(c.Data)
+		err = f.applyCreateTopic(c.Data)
 	case opUpdateTopic:
-		return f.applyUpdateTopic(c.Data)
+		err = f.applyUpdateTopic(c.Data)
 	case opDeleteTopic:
-		return f.applyDeleteTopic(c.Data)
+		err = f.applyDeleteTopic(c.Data)
 	case opPutSchema:
-		return f.applyPutSchema(c.Data)
+		err = f.applyPutSchema(c.Data)
 	case opAssignPartition:
-		return f.applyAssignPartition(c.Data)
+		err = f.applyAssignPartition(c.Data)
 	case opMemberJoin:
-		return f.applyMemberJoin(c.Data)
+		err = f.applyMemberJoin(c.Data)
 	case opMemberHeartbeat:
-		return f.applyMemberHeartbeat(c.Data)
+		err = f.applyMemberHeartbeat(c.Data)
 	case opMemberDead:
-		return f.applyMemberDead(c.Data)
+		err = f.applyMemberDead(c.Data)
 	default:
 		return fmt.Errorf("metastore: unknown op %d", c.Op)
 	}
+	if err == nil {
+		f.version.Add(1)
+	}
+	return err
+}
+
+func (f *fsmState) metadataVersion() uint64 {
+	return f.version.Load()
 }

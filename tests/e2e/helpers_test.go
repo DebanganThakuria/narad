@@ -14,11 +14,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker"
+	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
+	"github.com/debanganthakuria/narad/internal/cluster"
 	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -33,6 +36,8 @@ import (
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+const e2eMemberDeadTimeout = 5 * time.Minute
 
 // envOpts lets tests override broker policy values without a fat constructor.
 type envOpts struct {
@@ -79,6 +84,12 @@ type env struct {
 	client *http.Client
 	ms     metastore.Metastore
 	logs   *runtime.Logs
+	cancel context.CancelFunc
+	done   chan struct{}
+
+	controllerCancel context.CancelFunc
+	controllerDone   chan struct{}
+	closeOnce        sync.Once
 
 	Registry *prometheus.Registry // non-nil only when metrics:true
 	Metrics  *obsmetrics.Metrics  // non-nil only when metrics:true
@@ -140,11 +151,18 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		t.Fatalf("register member test-2: %v", err)
 	}
 	ctrlCtx, ctrlCancel := context.WithCancel(context.Background())
-	t.Cleanup(ctrlCancel)
-	go controller.New(ms, controller.Config{
-		ReconcileInterval: 50 * time.Millisecond,
-		DeadTimeout:       5 * time.Second,
-	}).Run(ctrlCtx)
+	ctrlDone := make(chan struct{})
+	t.Cleanup(func() {
+		ctrlCancel()
+		waitDone(t, "controller", ctrlDone)
+	})
+	go func() {
+		defer close(ctrlDone)
+		controller.New(ms, controller.Config{
+			ReconcileInterval: 50 * time.Millisecond,
+			DeadTimeout:       e2eMemberDeadTimeout,
+		}).Run(ctrlCtx)
+	}()
 
 	logWriter := io.Writer(io.Discard)
 	if testing.Verbose() {
@@ -187,6 +205,10 @@ func newEnv(t *testing.T, opts envOpts) *env {
 
 	logs := runtime.NewLogs(opts.dataDir, opts.logOptions, ms, m)
 	lifecycle := runtime.NewLifecycle(logs)
+	ingressManager, err := ingress.OpenManager(opts.dataDir, ingress.DefaultWALOptions())
+	if err != nil {
+		t.Fatalf("ingress: %v", err)
+	}
 	br, err := broker.New(broker.Deps{
 		DataDir:        opts.dataDir,
 		StorageOptions: opts.logOptions,
@@ -205,6 +227,7 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		ConsumerOffsets: consumer.NewInFlight(resolveCaps, nil),
 		Replicator:      replicatorImpl,
 		Logs:            logs,
+		Ingress:         ingressManager,
 		Logger:          log,
 		Lifecycle:       lifecycle,
 		Metrics:         m,
@@ -213,6 +236,14 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		t.Fatalf("broker: %v", err)
 	}
 	lifecycle.MarkReady()
+	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
+	dispatchDone := make(chan struct{})
+	go func() {
+		defer close(dispatchDone)
+		cluster.NewProduceDispatcher(ingressManager, ms, "", br, nil, log, cluster.ProduceDispatcherConfig{
+			PollInterval: 5 * time.Millisecond,
+		}, m).Run(dispatchCtx)
+	}()
 
 	h := handlers.New(handlers.Deps{
 		Broker:         br,
@@ -225,23 +256,56 @@ func newEnv(t *testing.T, opts envOpts) *env {
 	ts := httptest.NewServer(router)
 
 	return &env{
-		t:        t,
-		dir:      opts.dataDir,
-		broker:   br,
-		Broker:   br,
-		Server:   ts,
-		client:   ts.Client(),
-		ms:       ms,
-		logs:     logs,
-		Registry: reg,
-		Metrics:  m,
+		t:      t,
+		dir:    opts.dataDir,
+		broker: br,
+		Broker: br,
+		Server: ts,
+		client: ts.Client(),
+		ms:     ms,
+		logs:   logs,
+		cancel: dispatchCancel,
+		done:   dispatchDone,
+
+		controllerCancel: ctrlCancel,
+		controllerDone:   ctrlDone,
+		Registry:         reg,
+		Metrics:          m,
 	}
 }
 
 func (e *env) close() {
-	e.Server.Close()
-	_ = e.broker.Close()
-	_ = e.ms.Close()
+	e.closeOnce.Do(func() {
+		if e.Server != nil {
+			e.Server.Close()
+		}
+		if e.cancel != nil {
+			e.cancel()
+			waitDone(e.t, "produce dispatcher", e.done)
+		}
+		if e.controllerCancel != nil {
+			e.controllerCancel()
+			waitDone(e.t, "controller", e.controllerDone)
+		}
+		if e.broker != nil {
+			_ = e.broker.Close()
+		}
+		if e.ms != nil {
+			_ = e.ms.Close()
+		}
+	})
+}
+
+func waitDone(t *testing.T, name string, done <-chan struct{}) {
+	t.Helper()
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Errorf("%s did not stop", name)
+	}
 }
 
 // ---- request helpers -------------------------------------------------------
@@ -419,18 +483,14 @@ func (e *env) ack(topicName, handle string) {
 
 func (e *env) produce(topicName, key, msg string) (offset int64, partition int) {
 	e.t.Helper()
+	before := topicNextOffsets(e.t, e, topicName)
 	resp := e.post(fmt.Sprintf("/v1/topics/%s/produce", topicName), map[string]any{
 		"key":     key,
 		"message": json.RawMessage(msg),
 	})
-	expectOK(e.t, resp)
-	var result struct {
-		Offset    int64 `json:"offset"`
-		Partition int   `json:"partition"`
-	}
-	result = readJSON[struct {
-		Offset    int64 `json:"offset"`
-		Partition int   `json:"partition"`
-	}](e.t, resp)
-	return result.Offset, result.Partition
+	expectStatus(e.t, resp, http.StatusAccepted)
+	result := readJSON[produceResult](e.t, resp)
+	validateAcceptedProduce(e.t, result, topicName, len(before))
+	offset = waitForVisibleOffset(e.t, e, topicName, result.Partition, before[result.Partition])
+	return offset, result.Partition
 }

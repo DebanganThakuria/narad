@@ -3,6 +3,7 @@ package broker
 import (
 	"fmt"
 
+	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/broker/topics"
@@ -62,6 +63,14 @@ func New(d Deps) (Broker, error) {
 		lifecycle = runtime.NewLifecycle(logs)
 	}
 	lifecycle.MarkNotReady()
+	ingressManager := d.Ingress
+	if ingressManager == nil {
+		var err error
+		ingressManager, err = ingress.OpenManager(d.DataDir, ingress.DefaultWALOptions())
+		if err != nil {
+			return nil, fmt.Errorf("broker: open ingress wal: %w", err)
+		}
+	}
 
 	topicCfg := topics.Config{
 		DefaultPartitions:                d.TopicConfig.DefaultPartitions,
@@ -80,9 +89,24 @@ func New(d Deps) (Broker, error) {
 
 	return &impl{
 		Manager:     topics.NewManager(d.DataDir, d.Metastore, assigner, d.Schemas, d.ConsumerOffsets, logs, topicCfg, d.Logger),
-		Engine:      messaging.NewEngine(d.Metastore, d.Schemas, d.Partitions, d.Replicator, d.ConsumerOffsets, logs, d.Metrics, d.Logger, d.SelfID),
+		Engine:      messaging.NewEngine(d.Metastore, d.Schemas, d.Partitions, d.Replicator, d.ConsumerOffsets, logs, ingressManager, d.Metrics, d.Logger, d.SelfID),
 		Snapshotter: runtime.NewSnapshotter(d.Metastore, d.ConsumerOffsets, logs, d.Logger, d.SelfID),
 		Lifecycle:   lifecycle,
 		deps:        d,
 	}, nil
+}
+
+func (b *impl) Close() error {
+	var firstErr error
+	if b.Engine != nil {
+		if err := b.Engine.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if b.Lifecycle != nil {
+		if err := b.Lifecycle.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
