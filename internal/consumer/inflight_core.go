@@ -5,6 +5,8 @@ import (
 	"errors"
 )
 
+const initialExpiryHeapCap = 64
+
 // NewInFlight creates an InFlight tracker. onCommit may be nil (no
 // persistence, useful for tests or early development).
 func NewInFlight(resolve CapsResolver, onCommit CommitFunc) *InFlight {
@@ -135,11 +137,18 @@ func newPartitionShard(committed int64, caps Caps) *partitionShard {
 	return &partitionShard{
 		committed:     committed,
 		entries:       make(map[int64]reservation),
-		expiry:        make(expiryHeap, 0, caps.MaxInFlight),
+		expiry:        make(expiryHeap, 0, initialPartitionExpiryCap(caps.MaxInFlight)),
 		ackedAhead:    make(map[int64]struct{}),
 		maxInFlight:   caps.MaxInFlight,
 		maxAckedAhead: caps.MaxAckedAhead,
 	}
+}
+
+func initialPartitionExpiryCap(maxInFlight int) int {
+	if maxInFlight < initialExpiryHeapCap {
+		return maxInFlight
+	}
+	return initialExpiryHeapCap
 }
 
 func validateCaps(caps Caps) error {

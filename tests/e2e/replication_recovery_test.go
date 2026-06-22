@@ -2,9 +2,7 @@ package e2e
 
 import (
 	"context"
-	"net/http"
-	"net/url"
-	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,18 +10,18 @@ import (
 	platformreplication "github.com/debanganthakuria/narad/internal/platform/replication"
 )
 
-func TestRecovery_RepairsOwnerFromFollowerViaInternalHTTP(t *testing.T) {
+func TestRecovery_RepairsOwnerFromFollowerViaQUIC(t *testing.T) {
 	owner := newTestEnv(t)
 	defer owner.close()
 	follower := newTestEnv(t)
 	defer follower.close()
+	startRecoveryQUIC(t, follower)
 	store := recoveryStore(t, owner)
-	registerRecoveryFollower(t, store, follower.Server.URL)
+	registerRecoveryFollower(t, store, quicAddrForEnv(follower))
 	mustCreateTopic(t, owner, createTopicReq{Name: "recover-owner", Partitions: 3, ReplicationFactor: 2})
 	assignRecoveryPartition(t, store, "recover-owner")
 
-	postReplicaRecord(t, follower, "recover-owner", 0, 0, []byte(`{"n":1}`))
-	postReplicaRecord(t, follower, "recover-owner", 0, 1, []byte(`{"n":2}`))
+	appendReplicaRecord(t, follower, "recover-owner", 0, []byte(`{"n":1}`), []byte(`{"n":2}`))
 
 	ownerLog, err := owner.logs.Get("recover-owner", 0)
 	if err != nil {
@@ -60,13 +58,14 @@ func TestRecovery_RepairsOwnerFromFollowerViaInternalHTTP(t *testing.T) {
 	}
 }
 
-func TestRecovery_RepairsFollowerFromOwnerViaInternalHTTP(t *testing.T) {
+func TestRecovery_RepairsFollowerFromOwnerViaQUIC(t *testing.T) {
 	owner := newTestEnv(t)
 	defer owner.close()
 	follower := newTestEnv(t)
 	defer follower.close()
+	startRecoveryQUIC(t, follower)
 	store := recoveryStore(t, owner)
-	registerRecoveryFollower(t, store, follower.Server.URL)
+	registerRecoveryFollower(t, store, quicAddrForEnv(follower))
 	mustCreateTopic(t, owner, createTopicReq{Name: "recover-follower", Partitions: 3, ReplicationFactor: 2})
 	assignRecoveryPartition(t, store, "recover-follower")
 
@@ -82,14 +81,17 @@ func TestRecovery_RepairsFollowerFromOwnerViaInternalHTTP(t *testing.T) {
 	if err := ownerLog.AdvanceHighWatermark(2); err != nil {
 		t.Fatalf("advance owner high watermark: %v", err)
 	}
-	postReplicaRecord(t, follower, "recover-follower", 0, 0, []byte(`{"n":1}`))
+	if err := owner.logs.CloseTopic("recover-follower"); err != nil {
+		t.Fatalf("close owner topic: %v", err)
+	}
+	appendReplicaRecord(t, follower, "recover-follower", 0, []byte(`{"n":1}`))
 
 	recovery := platformreplication.NewStoreRecovery("test-0", store, owner.logs, follower.client)
 	if err := recovery.RepairOwnedPartitions(context.Background()); err != nil {
 		t.Fatalf("RepairOwnedPartitions: %v", err)
 	}
 
-	payload := getCommittedReplicaRecord(t, follower, "recover-follower", 0, 1)
+	payload := readReplicaRecord(t, follower, "recover-follower", 0, 1)
 	if string(payload) != `{"n":2}` {
 		t.Fatalf("follower committed payload = %s, want %s", string(payload), `{"n":2}`)
 	}
@@ -104,13 +106,13 @@ func recoveryStore(t *testing.T, e *env) *metastore.Store {
 	return store
 }
 
-func registerRecoveryFollower(t *testing.T, store *metastore.Store, followerURL string) {
+func registerRecoveryFollower(t *testing.T, store *metastore.Store, followerAddr string) {
 	t.Helper()
 	member, err := store.GetMember("test-1")
 	if err != nil {
 		t.Fatalf("get member test-1: %v", err)
 	}
-	member.Addr = followerURL
+	member.Addr = followerAddr
 	member.Status = metastore.MemberAlive
 	member.LastHeartbeat = time.Now().Unix()
 	if err := store.RegisterMember(context.Background(), member); err != nil {
@@ -125,29 +127,50 @@ func assignRecoveryPartition(t *testing.T, store *metastore.Store, topicName str
 	}
 }
 
-func postReplicaRecord(t *testing.T, e *env, topicName string, partition int, offset int64, payload []byte) {
+func startRecoveryQUIC(t *testing.T, e *env) {
 	t.Helper()
-	resp := e.post("/internal/v1/replicate", map[string]any{
-		"topic":     topicName,
-		"partition": partition,
-		"offset":    offset,
-		"payload":   payload,
-		"leader_id": "test-0",
-	})
-	expectStatus(t, resp, http.StatusNoContent)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() {
+		_ = platformreplication.ServeQUIC(ctx, quicAddrForEnv(e), e.logs, nil)
+	}()
+	time.Sleep(25 * time.Millisecond)
 }
 
-func getCommittedReplicaRecord(t *testing.T, e *env, topicName string, partition int, offset int64) []byte {
+func quicAddrForEnv(e *env) string {
+	return strings.TrimPrefix(e.Server.URL, "http://")
+}
+
+func appendReplicaRecord(t *testing.T, e *env, topicName string, partition int, payloads ...[]byte) {
 	t.Helper()
-	path := "/internal/v1/replicate?topic=" + url.QueryEscape(topicName) +
-		"&partition=" + strconv.Itoa(partition) +
-		"&offset=" + strconv.FormatInt(offset, 10) +
-		"&committed=true"
-	resp := e.get(path)
-	expectStatus(t, resp, http.StatusOK)
-	var out struct {
-		Payload []byte `json:"payload"`
+	log, err := e.logs.Get(topicName, partition)
+	if err != nil {
+		t.Fatalf("logs.Get: %v", err)
 	}
-	decodeJSON(t, resp, &out)
-	return out.Payload
+	for _, payload := range payloads {
+		if _, err := log.Append(payload); err != nil {
+			t.Fatalf("append replica: %v", err)
+		}
+	}
+	if err := log.AdvanceHighWatermark(log.NextOffset()); err != nil {
+		t.Fatalf("advance replica hwm: %v", err)
+	}
+}
+
+func readReplicaRecord(t *testing.T, e *env, topicName string, partition int, offset int64) []byte {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		log, err := e.logs.Get(topicName, partition)
+		if err != nil {
+			t.Fatalf("logs.Get: %v", err)
+		}
+		payload, err := log.Read(offset)
+		if err == nil {
+			return payload
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for replica offset %d", offset)
+	return nil
 }

@@ -1,6 +1,9 @@
 package storage
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // buffer is the per-partition in-memory accumulator producers push
 // into. The flusher goroutine drains it on threshold or interval, and
@@ -12,9 +15,15 @@ type buffer struct {
 	baseOffset int64
 	nextOffset int64
 	bytes      int
+	firstAt    time.Time
 
 	flushBytes   int
 	flushRecords int
+}
+
+type bufferStats struct {
+	records int
+	bytes   int
 }
 
 func newBuffer(startOffset int64, flushBytes, flushRecords int) *buffer {
@@ -28,23 +37,27 @@ func newBuffer(startOffset int64, flushBytes, flushRecords int) *buffer {
 
 // push returns the assigned offset and reports whether the
 // byte/record threshold is now crossed.
-func (b *buffer) push(record []byte) (int64, bool) {
+func (b *buffer) push(record []byte) (int64, bool, bufferStats) {
 	cp := make([]byte, len(record))
 	copy(cp, record)
 
 	b.mu.Lock()
+	if len(b.records) == 0 {
+		b.firstAt = time.Now()
+	}
 	off := b.nextOffset
 	b.records = append(b.records, cp)
 	b.nextOffset++
 	b.bytes += len(cp)
 	cross := b.crossedThresholdLocked()
+	stats := b.statsLocked()
 	b.mu.Unlock()
-	return off, cross
+	return off, cross, stats
 }
 
-func (b *buffer) pushBatch(records [][]byte) (int64, int64, bool) {
+func (b *buffer) pushBatch(records [][]byte) (int64, int64, bool, bufferStats) {
 	if len(records) == 0 {
-		return 0, -1, false
+		return 0, -1, false, bufferStats{}
 	}
 	cps := make([][]byte, len(records))
 	for i, r := range records {
@@ -54,6 +67,9 @@ func (b *buffer) pushBatch(records [][]byte) (int64, int64, bool) {
 	}
 
 	b.mu.Lock()
+	if len(b.records) == 0 {
+		b.firstAt = time.Now()
+	}
 	first := b.nextOffset
 	b.records = append(b.records, cps...)
 	b.nextOffset += int64(len(cps))
@@ -62,8 +78,9 @@ func (b *buffer) pushBatch(records [][]byte) (int64, int64, bool) {
 	}
 	last := b.nextOffset - 1
 	cross := b.crossedThresholdLocked()
+	stats := b.statsLocked()
 	b.mu.Unlock()
-	return first, last, cross
+	return first, last, cross, stats
 }
 
 // drain hands the buffered records to the flusher and resets the
@@ -81,7 +98,26 @@ func (b *buffer) drain() ([][]byte, int64) {
 	b.records = nil
 	b.baseOffset = b.nextOffset
 	b.bytes = 0
+	b.firstAt = time.Time{}
 	return recs, base
+}
+
+func (b *buffer) shouldFlushByAge(maxAge time.Duration) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.records) == 0 {
+		return false
+	}
+	if maxAge <= 0 {
+		return true
+	}
+	return !b.firstAt.IsZero() && time.Since(b.firstAt) >= maxAge
+}
+
+func (b *buffer) stats() bufferStats {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.statsLocked()
 }
 
 func (b *buffer) readBuffered(offset int64) ([]byte, bool) {
@@ -111,4 +147,11 @@ func (b *buffer) crossedThresholdLocked() bool {
 		return true
 	}
 	return false
+}
+
+func (b *buffer) statsLocked() bufferStats {
+	return bufferStats{
+		records: len(b.records),
+		bytes:   b.bytes,
+	}
 }

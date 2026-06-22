@@ -68,8 +68,12 @@ type messageRecord struct {
 }
 
 type produceResponse struct {
-	Offset    int64 `json:"offset"`
-	Partition int   `json:"partition"`
+	Status           string `json:"status"`
+	MessageID        string `json:"message_id"`
+	Topic            string `json:"topic"`
+	Partition        int    `json:"partition"`
+	AcceptedAtUnixMs int64  `json:"accepted_at_unix_ms"`
+	Offset           int64  `json:"-"`
 }
 
 type consumeResponse struct {

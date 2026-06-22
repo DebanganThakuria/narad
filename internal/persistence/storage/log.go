@@ -23,6 +23,7 @@ package storage
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,17 +35,42 @@ import (
 
 type indexEntry struct {
 	segmentBaseOffset int64
+	baseOffset        int64
+	recordCount       int32
 	framePos          int64
-	idx               int32
 	frameLen          int32
 }
+
+type segmentIndex struct {
+	entries  []indexEntry
+	lastUsed uint64
+}
+
+const (
+	maxHotSegmentIndexes = 2
+
+	// segmentIndexStrideBytes is the default target spacing between
+	// in-memory frame anchors. Reads scan forward from the nearest
+	// anchor, so this keeps active index memory bounded without making
+	// random reads walk an entire segment.
+	segmentIndexStrideBytes = 32 << 10
+
+	// targetMaxSegmentIndexEntries widens the stride for unusually
+	// large segment settings. It is a target rather than a hard cap
+	// because one final frame can legitimately roll past SegmentBytes.
+	targetMaxSegmentIndexEntries = 2048
+)
 
 type Options struct {
 	Codec codec.Codec
 
-	FlushBytes    int
-	FlushRecords  int
-	FlushInterval time.Duration
+	FlushBytes      int
+	FlushRecords    int
+	FlushInterval   time.Duration
+	SyncMode        SyncMode
+	SyncInterval    time.Duration
+	SyncBytes       int64
+	HWMSyncInterval time.Duration
 
 	SegmentBytes int64
 
@@ -56,18 +82,35 @@ type Options struct {
 }
 
 func DefaultOptions() Options {
-	c, err := codec.NewZstdCodec(zstd.SpeedBestCompression)
+	c, err := codec.NewZstdCodec(zstd.SpeedFastest)
 	if err != nil {
 		panic(fmt.Sprintf("storage: default zstd codec: %v", err))
 	}
 	return Options{
-		Codec:         c,
-		FlushBytes:    1 << 20,
-		FlushRecords:  1000,
-		FlushInterval: 100 * time.Millisecond,
-		SegmentBytes:  64 << 20,
+		Codec:           c,
+		FlushBytes:      1 << 20,
+		FlushRecords:    1000,
+		FlushInterval:   100 * time.Millisecond,
+		SyncMode:        SyncBatched,
+		SyncInterval:    time.Second,
+		SyncBytes:       8 << 20,
+		HWMSyncInterval: 5 * time.Second,
+		SegmentBytes:    64 << 20,
 	}
 }
+
+// SyncMode controls when the background flusher calls file.Sync().
+type SyncMode string
+
+const (
+	// SyncPerWrite syncs every flushed batch. Appends are still buffered, so
+	// this means "per storage batch", not "inside Produce".
+	SyncPerWrite SyncMode = "per_write"
+
+	// SyncBatched lets the flusher write many batches before syncing, bounded
+	// by Options.SyncInterval, Options.SyncBytes, segment roll, and Close.
+	SyncBatched SyncMode = "batched"
+)
 
 // Log is an append-only record log backed by a directory of segment
 // files with an in-memory buffer in front of the disk.
@@ -83,11 +126,19 @@ type Log struct {
 	// segments is sorted by baseOffset; segments[len-1] is active.
 	segments []*segment
 
-	index map[int64]indexEntry
+	segmentIndexes map[int64]*segmentIndex
+	indexClock     uint64
 
 	buffer        *buffer
+	flushingMu    sync.Mutex
+	flushingBase  int64
+	flushingRec   [][]byte
+	flushingValid bool
 	highWatermark atomic.Int64
+	durableTail   atomic.Int64
+	persistedHWM  atomic.Int64
 	hwmMu         sync.Mutex
+	lastHWMSync   time.Time
 	hwmPath       string
 	hwmTmpPath    string
 	flusher       *flusher
@@ -114,18 +165,30 @@ func NewLog(dir string, opts Options) (*Log, error) {
 	if opts.FlushInterval <= 0 {
 		opts.FlushInterval = 100 * time.Millisecond
 	}
+	if opts.SyncMode == "" {
+		opts.SyncMode = SyncBatched
+	}
+	if opts.SyncInterval <= 0 {
+		opts.SyncInterval = time.Second
+	}
+	if opts.SyncBytes < 0 {
+		opts.SyncBytes = 0
+	}
+	if opts.HWMSyncInterval <= 0 {
+		opts.HWMSyncInterval = 5 * time.Second
+	}
 	if opts.SegmentBytes <= 0 {
 		opts.SegmentBytes = 64 << 20
 	}
 
 	l := &Log{
-		dir:        dir,
-		codec:      opts.Codec,
-		opts:       opts,
-		index:      make(map[int64]indexEntry),
-		notify:     make(chan struct{}, 1),
-		hwmPath:    hwmFilePath(dir),
-		hwmTmpPath: hwmTempFilePath(dir),
+		dir:            dir,
+		codec:          opts.Codec,
+		opts:           opts,
+		segmentIndexes: make(map[int64]*segmentIndex),
+		notify:         make(chan struct{}, 1),
+		hwmPath:        hwmFilePath(dir),
+		hwmTmpPath:     hwmTempFilePath(dir),
 	}
 	l.highWatermark.Store(-1)
 
@@ -144,8 +207,12 @@ func NewLog(dir string, opts Options) (*Log, error) {
 		}
 		return nil, err
 	}
+	l.durableTail.Store(nextOffset)
+	l.lastHWMSync = time.Now()
 	l.flusher = newFlusher(l, &l.rwmu, opts.FlushInterval)
 	l.reaper = newReaper(l, opts.Retention)
+	l.observeBufferStats(l.buffer.stats())
+	l.observeSegmentIndexStats()
 	go l.flusher.run()
 	go l.reaper.run()
 
@@ -157,6 +224,28 @@ func NewLog(dir string, opts Options) (*Log, error) {
 // coalesce.
 func (l *Log) NotifyC() <-chan struct{} { return l.notify }
 
+func (l *Log) observeBufferStats(stats bufferStats) {
+	if m := l.opts.Metrics; m != nil {
+		m.SetBufferStats(stats.records, int64(stats.bytes))
+	}
+}
+
+func (l *Log) observeSegmentIndexStats() {
+	if l.opts.Metrics == nil {
+		return
+	}
+	l.rwmu.RLock()
+	entries := l.segmentIndexEntryCountLocked()
+	l.rwmu.RUnlock()
+	l.opts.Metrics.SetSegmentIndexStats(entries)
+}
+
+func (l *Log) observeSegmentIndexStatsLocked() {
+	if m := l.opts.Metrics; m != nil {
+		m.SetSegmentIndexStats(l.segmentIndexEntryCountLocked())
+	}
+}
+
 func (l *Log) findSegmentLocked(baseOffset int64) *segment {
 	for _, s := range l.segments {
 		if s.baseOffset == baseOffset {
@@ -164,6 +253,20 @@ func (l *Log) findSegmentLocked(baseOffset int64) *segment {
 		}
 	}
 	return nil
+}
+
+func (l *Log) findSegmentForOffsetLocked(offset int64) *segment {
+	i := sort.Search(len(l.segments), func(i int) bool {
+		return l.segments[i].nextOffset > offset
+	})
+	if i >= len(l.segments) {
+		return nil
+	}
+	s := l.segments[i]
+	if offset < s.baseOffset {
+		return nil
+	}
+	return s
 }
 
 func (l *Log) OldestOffset() int64 {

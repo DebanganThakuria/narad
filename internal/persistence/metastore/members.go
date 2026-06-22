@@ -23,7 +23,7 @@ func (s *Store) GetMember(podID string) (Member, error) {
 	s.fsm.mu.RLock()
 	defer s.fsm.mu.RUnlock()
 	var m Member
-	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+	err := s.fsm.view("get_member", func(tx *bolt.Tx) error {
 		v := tx.Bucket(bucketMembers).Get([]byte(podID))
 		if v == nil {
 			return ErrNotFound
@@ -37,7 +37,7 @@ func (s *Store) ListMembers() ([]Member, error) {
 	s.fsm.mu.RLock()
 	defer s.fsm.mu.RUnlock()
 	var out []Member
-	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+	err := s.fsm.view("list_members", func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketMembers).ForEach(func(_, v []byte) error {
 			var m Member
 			if err := json.Unmarshal(v, &m); err != nil {

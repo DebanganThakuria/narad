@@ -1,6 +1,7 @@
 package messaging
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -28,27 +29,115 @@ func Consume(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
+		if isLocalOnlyConsumeProbe(r, opts) {
+			opts.Wait = 0
+			done, found := consumeLocalOnly(s, w, r, topicName, opts)
+			if done {
+				return
+			}
+			if !found {
+				w.WriteHeader(http.StatusNoContent)
+			}
+			return
+		}
+
 		if s.Deps.Router != nil {
 			forwarded, localPartition := s.Deps.Router.RouteConsume(r.Context(), w, r, topicName, opts.Partition)
 			if forwarded {
 				return
 			}
-			if localPartition != nil {
-				opts.Partition = localPartition
+			if localPartition != nil && opts.Offset == nil && opts.Partition == nil {
+				handleQueueConsumeWithLocalOwner(s, w, r, topicName, opts, *localPartition)
+				return
 			}
 		}
 
-		msg, found, err := s.Deps.Broker.Consume(r.Context(), topicName, opts)
-		if err != nil {
-			s.WriteBrokerError(w, "consume", err)
+		done, found := consumeOnce(s, w, r, topicName, opts)
+		if done {
 			return
 		}
 		if !found {
 			w.WriteHeader(http.StatusNoContent)
-			return
 		}
-		s.WriteJSON(w, http.StatusOK, msg)
 	}
+}
+
+func handleQueueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts, localPartition int) {
+	originalWait := opts.Wait
+
+	pinnedOpts := opts
+	pinnedOpts.Partition = &localPartition
+	pinnedOpts.Wait = 0
+	if done, _ := consumeOnce(s, w, r, topicName, pinnedOpts); done {
+		return
+	}
+
+	localScanOpts := opts
+	localScanOpts.Partition = nil
+	localScanOpts.Wait = 0
+	if done, _ := consumeOnce(s, w, r, topicName, localScanOpts); done {
+		return
+	}
+
+	forwarded, _ := s.Deps.Router.RouteConsumeRemote(r.Context(), w, r, topicName)
+	if forwarded {
+		return
+	}
+	if originalWait <= 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	waitOpts := opts
+	waitOpts.Partition = nil
+	waitOpts.Wait = originalWait
+	done, found := consumeOnce(s, w, r, topicName, waitOpts)
+	if done {
+		return
+	}
+	if !found {
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func isLocalOnlyConsumeProbe(r *http.Request, opts brokermsg.ConsumeOpts) bool {
+	return r.URL.Query().Get("local_only") == "1" && opts.Partition == nil && opts.Offset == nil
+}
+
+func consumeLocalOnly(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts) (bool, bool) {
+	msg, found, err := s.Deps.Broker.Consume(r.Context(), topicName, opts)
+	if errors.Is(err, brokermsg.ErrNotPartitionOwner) {
+		return false, false
+	}
+	if err != nil {
+		s.WriteBrokerError(w, "consume", err)
+		return true, false
+	}
+	if !found {
+		return false, false
+	}
+	s.WriteJSON(w, http.StatusOK, msg)
+	return true, true
+}
+
+func consumeOnce(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts) (bool, bool) {
+	msg, found, err := s.Deps.Broker.Consume(r.Context(), topicName, opts)
+	if isQueueConsume(opts) && errors.Is(err, brokermsg.ErrNotPartitionOwner) {
+		return false, false
+	}
+	if err != nil {
+		s.WriteBrokerError(w, "consume", err)
+		return true, false
+	}
+	if !found {
+		return false, false
+	}
+	s.WriteJSON(w, http.StatusOK, msg)
+	return true, true
+}
+
+func isQueueConsume(opts brokermsg.ConsumeOpts) bool {
+	return opts.Partition == nil && opts.Offset == nil
 }
 
 func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) (brokermsg.ConsumeOpts, bool) {

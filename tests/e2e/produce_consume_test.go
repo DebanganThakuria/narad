@@ -48,13 +48,20 @@ func TestConsumeLongPoll(t *testing.T) {
 
 	env.createTopic("longpoll", 3, 2, int64(0))
 
+	produced := make(chan struct{})
 	go func() {
+		defer close(produced)
 		time.Sleep(200 * time.Millisecond)
 		env.produce("longpoll", "k", `{"msg": "late"}`)
 	}()
 
 	resp := env.get("/v1/topics/longpoll/consume?wait=2s")
 	expectOK(t, resp)
+	select {
+	case <-produced:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delayed producer")
+	}
 }
 
 func TestConsumeWithExplicitOffset(t *testing.T) {

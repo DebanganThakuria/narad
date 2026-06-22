@@ -1,0 +1,541 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(narad_messages_produced_total{job=\"narad\",instance=~\"$instance\"}[1m]))",
+          "legendFormat": "produced"
+        },
+        {
+          "expr": "sum(rate(narad_messages_consumed_total{job=\"narad\",instance=~\"$instance\"}[1m]))",
+          "legendFormat": "consumed"
+        },
+        {
+          "expr": "sum(rate(narad_consume_empty_total{job=\"narad\",instance=~\"$instance\"}[1m]))",
+          "legendFormat": "empty consumes"
+        }
+      ],
+      "title": "Message Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(narad_http_requests_total{job=\"narad\",instance=~\"$instance\"}[1m])) by (route, status)",
+          "legendFormat": "{{route}} {{status}}"
+        }
+      ],
+      "title": "HTTP Requests",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(narad_http_request_duration_seconds_bucket{job=\"narad\",instance=~\"$instance\"}[5m])) by (le, route, status))",
+          "legendFormat": "{{route}} {{status}} p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(narad_http_request_duration_seconds_bucket{job=\"narad\",instance=~\"$instance\"}[5m])) by (le, route, status))",
+          "legendFormat": "{{route}} {{status}} p99"
+        }
+      ],
+      "title": "HTTP Latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "sum(rate(narad_http_requests_total{job=\"narad\",instance=~\"$instance\",status!~\"2..\"}[1m])) by (route, status)",
+          "legendFormat": "{{route}} {{status}}"
+        },
+        {
+          "expr": "sum(rate(narad_errors_total{job=\"narad\",instance=~\"$instance\"}[1m])) by (component, kind)",
+          "legendFormat": "{{component}} {{kind}}"
+        },
+        {
+          "expr": "sum(rate(narad_produce_rejections_total{job=\"narad\",instance=~\"$instance\"}[1m])) by (reason)",
+          "legendFormat": "produce rejection {{reason}}"
+        }
+      ],
+      "title": "Errors And Rejections",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "sum(narad_consumer_lag_messages{job=\"narad\",instance=~\"$instance\"})",
+          "legendFormat": "lag messages"
+        },
+        {
+          "expr": "sum(narad_inflight_size{job=\"narad\",instance=~\"$instance\"})",
+          "legendFormat": "in flight"
+        },
+        {
+          "expr": "sum(narad_acked_ahead_size{job=\"narad\",instance=~\"$instance\"})",
+          "legendFormat": "acked ahead"
+        }
+      ],
+      "title": "Consumer Backlog",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "max(narad_oldest_unconsumed_message_age_seconds{job=\"narad\",instance=~\"$instance\"})",
+          "legendFormat": "oldest unconsumed"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(narad_consume_wait_seconds_bucket{job=\"narad\",instance=~\"$instance\"}[5m])) by (le, outcome))",
+          "legendFormat": "consume wait {{outcome}} p95"
+        }
+      ],
+      "title": "Consumer Age And Wait",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "RSS is the closest local equivalent to Kubernetes container memory for this single-process service. Heap is only live Go heap and does not include stacks, mmap, allocator overhead, or runtime metadata.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "narad_data_dir_size_bytes{job=\"narad\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} data dir"
+        },
+        {
+          "expr": "narad_data_dir_available_bytes{job=\"narad\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} fs available"
+        },
+        {
+          "expr": "sum(narad_topic_bytes{job=\"narad\",instance=~\"$instance\"})",
+          "legendFormat": "topic bytes"
+        }
+      ],
+      "title": "Disk Usage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "topk(10, sum(narad_topic_bytes{job=\"narad\",instance=~\"$instance\"}) by (topic))",
+          "legendFormat": "{{topic}}"
+        }
+      ],
+      "title": "Largest Topics",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "id": 9,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(narad_storage_flush_duration_seconds_bucket{job=\"narad\",instance=~\"$instance\"}[5m])) by (le))",
+          "legendFormat": "flush p95"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(narad_storage_fsync_duration_seconds_bucket{job=\"narad\",instance=~\"$instance\"}[5m])) by (le))",
+          "legendFormat": "fsync p95"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(narad_storage_high_watermark_persist_duration_seconds_bucket{job=\"narad\",instance=~\"$instance\"}[5m])) by (le, outcome))",
+          "legendFormat": "hwm persist p95 {{outcome}}"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(narad_storage_retention_run_duration_seconds_bucket{job=\"narad\",instance=~\"$instance\"}[5m])) by (le))",
+          "legendFormat": "retention p95"
+        }
+      ],
+      "title": "Storage Latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "id": 10,
+      "targets": [
+        {
+          "expr": "sum(rate(narad_storage_flush_bytes_total{job=\"narad\",instance=~\"$instance\"}[1m]))",
+          "legendFormat": "flush bytes/sec"
+        },
+        {
+          "expr": "sum(rate(narad_storage_retention_bytes_deleted_total{job=\"narad\",instance=~\"$instance\"}[1m]))",
+          "legendFormat": "retention deleted bytes/sec"
+        },
+        {
+          "expr": "sum(rate(narad_bytes_produced_total{job=\"narad\",instance=~\"$instance\"}[1m]))",
+          "legendFormat": "produced payload bytes/sec"
+        }
+      ],
+      "title": "Storage Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cores"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "id": 11,
+      "targets": [
+        {
+          "expr": "rate(process_cpu_seconds_total{job=\"narad\",instance=~\"$instance\"}[1m])",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "title": "CPU",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "id": 12,
+      "targets": [
+        {
+          "expr": "process_resident_memory_bytes{job=\"narad\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} RSS"
+        },
+        {
+          "expr": "go_memstats_heap_alloc_bytes{job=\"narad\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} heap"
+        }
+      ],
+      "title": "Memory RSS Vs Heap",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "id": 13,
+      "targets": [
+        {
+          "expr": "go_goroutines{job=\"narad\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} goroutines"
+        },
+        {
+          "expr": "go_threads{job=\"narad\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} threads"
+        },
+        {
+          "expr": "process_open_fds{job=\"narad\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} open fds"
+        }
+      ],
+      "title": "Runtime Counts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "id": 14,
+      "targets": [
+        {
+          "expr": "narad_topics_total{job=\"narad\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} topics"
+        },
+        {
+          "expr": "narad_partitions_total{job=\"narad\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} partitions"
+        },
+        {
+          "expr": "narad_boot_duration_seconds{job=\"narad\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} boot seconds"
+        }
+      ],
+      "title": "Inventory",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "narad",
+    "nodes"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(narad_boot_duration_seconds{job=\"narad\"}, instance)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Narad instance",
+        "multi": true,
+        "name": "instance",
+        "options": [],
+        "query": {
+          "query": "label_values(narad_boot_duration_seconds{job=\"narad\"}, instance)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Narad Nodes",
+  "uid": "narad-nodes",
+  "version": 1,
+  "weekStart": ""
+}

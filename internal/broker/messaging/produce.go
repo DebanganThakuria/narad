@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/platform/replication"
 )
 
 type produceStage string
@@ -14,6 +16,7 @@ type produceStage string
 const (
 	produceStageAppend    produceStage = "append"
 	produceStageReplicate produceStage = "replicate"
+	produceStageCatchUp   produceStage = "replication_catch_up"
 	produceStageCommit    produceStage = "commit boundary durability"
 )
 
@@ -40,42 +43,86 @@ func (e produceStageError) metricReason() string {
 // Produce validates the payload, picks a partition, appends to the
 // partition log, then asks the replicator to fan the record out.
 func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (int64, int, error) {
+	totalStart := time.Now()
+	totalOutcome := "ok"
+	defer func() {
+		e.observe("produce", "total", totalOutcome, time.Since(totalStart))
+	}()
+
+	stageStart := time.Now()
 	t, err := e.getTopic(ctx, topicName)
+	e.observe("produce", "get_topic", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
+		totalOutcome = "error"
 		return 0, 0, err
 	}
 
+	stageStart = time.Now()
 	if err = e.validateProducePayload(ctx, topicName, payload); err != nil {
+		e.observe("produce", "validate_payload", "error", time.Since(stageStart))
 		if e.metrics != nil {
 			e.metrics.ProduceRejectionsTotal.WithLabelValues(topicName, "schema").Inc()
 		}
+		totalOutcome = "error"
 		return 0, 0, err
 	}
+	e.observe("produce", "validate_payload", "ok", time.Since(stageStart))
 
+	stageStart = time.Now()
 	partIdx, err := e.resolveProducePartition(topicName, key, t.Partitions, partition)
+	e.observe("produce", "resolve_partition", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
 		if e.metrics != nil {
 			e.metrics.IncError("messaging", "partition_pick")
 		}
+		totalOutcome = "error"
 		return 0, 0, err
 	}
+	lane := e.replicationLane(topicName, partIdx)
+	var job *replicationJob
 	offset, _, err := e.logs.WithProduceLockValue(topicName, partIdx, func(log *storage.Log) (int64, int, error) {
+		stageStart := time.Now()
+		if lane.needsRepair(log) {
+			if _, err := e.catchUpReplication(ctx, topicName, partIdx, log, nil); err != nil {
+				e.observe("produce", "replication_catch_up", "error", time.Since(stageStart))
+				return 0, 0, produceStageError{stage: produceStageCatchUp, err: err}
+			}
+			lane.markRepaired()
+		}
+		e.observe("produce", "replication_catch_up", "ok", time.Since(stageStart))
+
+		stageStart = time.Now()
 		offset, err := log.Append(payload)
+		e.observe("produce", "append", observeOutcome(err), time.Since(stageStart))
 		if err != nil {
 			return 0, 0, produceStageError{stage: produceStageAppend, err: err}
 		}
 
-		if err := e.replicator.Replicate(ctx, topicName, partIdx, offset, payload); err != nil {
-			return 0, 0, produceStageError{stage: produceStageReplicate, err: err}
+		job = &replicationJob{
+			log:      log,
+			offset:   offset,
+			payload:  append([]byte(nil), payload...),
+			queuedAt: time.Now(),
+			done:     make(chan error, 1),
 		}
-		if err := log.AdvanceHighWatermark(offset + 1); err != nil {
-			return 0, 0, produceStageError{stage: produceStageCommit, err: err}
+		if err := lane.enqueue(job); err != nil {
+			e.observe("produce", "replicate", "error", time.Since(stageStart))
+			return 0, 0, produceStageError{stage: produceStageReplicate, err: err}
 		}
 
 		return offset, partIdx, nil
 	})
 	if err != nil {
 		e.recordProduceError(err)
+		totalOutcome = "error"
+		return 0, 0, err
+	}
+	stageStart = time.Now()
+	err = job.wait(ctx)
+	e.observe("produce", "replicate", observeOutcome(err), time.Since(stageStart))
+	if err != nil {
+		e.recordProduceError(err)
+		totalOutcome = "error"
 		return 0, 0, err
 	}
 
@@ -86,6 +133,19 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 	}
 
 	return offset, partIdx, nil
+}
+
+func (e *Engine) catchUpReplication(ctx context.Context, topicName string, partIdx int, log replication.LeaderLog, cause error) (bool, error) {
+	catchUp, ok := e.replicator.(replication.CatchUpReplicator)
+	if !ok {
+		return false, nil
+	}
+	opts := replication.CatchUpOptions{}
+	var mismatch *replication.OffsetMismatchError
+	if cause != nil && errors.As(cause, &mismatch) {
+		opts.FollowerNextOffset = &mismatch.ReplicaNextOffset
+	}
+	return true, catchUp.CatchUp(ctx, topicName, partIdx, log, opts)
 }
 
 func (e *Engine) recordProduceError(err error) {

@@ -13,6 +13,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/consumer"
@@ -1949,7 +1950,7 @@ func TestBuildBrokerRejectsNonStoreMetastore(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	fakeMS := stubMetastore{}
 
-	if _, _, _, _, err := buildBroker(cfg, "node-1", fakeMS, schema.NewAlwaysValid(), m, log); err == nil {
+	if _, _, _, _, _, err := buildBroker(cfg, "node-1", fakeMS, schema.NewAlwaysValid(), m, log); err == nil {
 		t.Fatal("buildBroker() error = nil, want error")
 	}
 }
@@ -1965,7 +1966,7 @@ func TestBuildBrokerReturnsLogs(t *testing.T) {
 	}
 	defer store.Close()
 
-	br, logs, _, _, err := buildBroker(cfg, "node-1", store, schema.NewJSONSchema(), m, log)
+	br, logs, _, _, _, err := buildBroker(cfg, "node-1", store, schema.NewJSONSchema(), m, log)
 	if err != nil {
 		t.Fatalf("buildBroker() error = %v", err)
 	}
@@ -2198,12 +2199,16 @@ func TestBuildCodec(t *testing.T) {
 
 func TestStorageOptions(t *testing.T) {
 	opts, err := storageOptions(config.StorageConfig{
-		Codec:                    "none",
-		FlushBytes:               128,
-		FlushRecords:             16,
-		FlushIntervalMs:          250,
-		SegmentBytes:             4096,
-		RetentionCheckIntervalMs: 500,
+		Codec:                       "none",
+		Fsync:                       config.FsyncBatched,
+		FlushBytes:                  128,
+		FlushRecords:                16,
+		FlushIntervalMs:             250,
+		SyncIntervalMs:              750,
+		SyncBytes:                   4096,
+		HighWatermarkSyncIntervalMs: 3000,
+		SegmentBytes:                4096,
+		RetentionCheckIntervalMs:    500,
 	})
 	if err != nil {
 		t.Fatalf("storageOptions() error = %v", err)
@@ -2214,8 +2219,50 @@ func TestStorageOptions(t *testing.T) {
 	if opts.FlushInterval != 250*time.Millisecond {
 		t.Fatalf("FlushInterval = %v, want %v", opts.FlushInterval, 250*time.Millisecond)
 	}
+	if opts.SyncMode != storage.SyncBatched || opts.SyncInterval != 750*time.Millisecond || opts.SyncBytes != 4096 {
+		t.Fatalf("sync options = %+v", opts)
+	}
+	if opts.HWMSyncInterval != 3*time.Second {
+		t.Fatalf("HWMSyncInterval = %v, want 3s", opts.HWMSyncInterval)
+	}
 	if opts.Retention.CheckInterval != 500*time.Millisecond {
 		t.Fatalf("Retention.CheckInterval = %v, want %v", opts.Retention.CheckInterval, 500*time.Millisecond)
+	}
+
+	opts, err = storageOptions(config.StorageConfig{
+		Codec:                       "none",
+		Fsync:                       config.FsyncPerWrite,
+		FlushBytes:                  128,
+		FlushRecords:                16,
+		FlushIntervalMs:             250,
+		SyncIntervalMs:              750,
+		HighWatermarkSyncIntervalMs: 3000,
+		SegmentBytes:                4096,
+		RetentionCheckIntervalMs:    500,
+	})
+	if err != nil {
+		t.Fatalf("storageOptions(per_write) error = %v", err)
+	}
+	if opts.SyncMode != storage.SyncPerWrite {
+		t.Fatalf("SyncMode = %q, want %q", opts.SyncMode, storage.SyncPerWrite)
+	}
+}
+
+func TestIngressWALOptions(t *testing.T) {
+	opts := ingressWALOptions(config.StorageConfig{
+		IngressWALSyncIntervalMs: 5,
+		IngressWALSyncBytes:      4096,
+		IngressWALShards:         16,
+	}, nil)
+
+	if opts.WAL.SyncInterval != 5*time.Millisecond {
+		t.Fatalf("SyncInterval = %v, want 5ms", opts.WAL.SyncInterval)
+	}
+	if opts.WAL.SyncBytes != 4096 {
+		t.Fatalf("SyncBytes = %d, want 4096", opts.WAL.SyncBytes)
+	}
+	if opts.Shards != 16 {
+		t.Fatalf("Shards = %d, want 16", opts.Shards)
 	}
 }
 
@@ -2294,6 +2341,18 @@ func (stubBroker) ListTopics(context.Context, metastore.ListOptions) ([]topic.To
 
 func (stubBroker) Produce(context.Context, string, string, []byte, ...int) (int64, int, error) {
 	return 0, 0, nil
+}
+
+func (stubBroker) AcceptProduce(context.Context, string, string, []byte, ...int) (ingress.AcceptedProduce, error) {
+	return ingress.AcceptedProduce{}, nil
+}
+
+func (stubBroker) CommitAcceptedProduce(context.Context, ingress.ProduceRecord) (int64, error) {
+	return 0, nil
+}
+
+func (stubBroker) CommitAcceptedProduceBatch(_ context.Context, records []ingress.ProduceRecord) ([]int64, error) {
+	return make([]int64, len(records)), nil
 }
 
 func (stubBroker) Consume(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {

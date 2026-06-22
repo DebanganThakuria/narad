@@ -82,8 +82,8 @@ func runLoad(cfg config) error {
 	if err := verifySchemaRejection(ctx, lb, loadTopics[0]); err != nil {
 		return err
 	}
-	fmt.Printf("verifying committed replica recovery reads\n")
-	if err := verifyCommittedReplicaRead(ctx, lb, cfg, recoveryTopic); err != nil {
+	fmt.Printf("verifying accepted produce visibility\n")
+	if err := verifyAcceptedProduceVisibility(ctx, lb, cfg, recoveryTopic); err != nil {
 		return err
 	}
 

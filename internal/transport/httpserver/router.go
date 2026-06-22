@@ -42,6 +42,7 @@ func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prome
 	// Internal replication and maintenance
 	mux.HandleFunc("POST /internal/v1/replicate", httpreplication.Replicate(h))
 	mux.HandleFunc("GET /internal/v1/replicate", httpreplication.ReadReplica(h))
+	mux.HandleFunc("GET /internal/v1/replicate/stream", httpreplication.Stream(h))
 	mux.HandleFunc("DELETE /internal/v1/topics/{topic}", httptopics.PurgeLocal(h))
 	mux.HandleFunc("POST /internal/v1/members", httpmembers.Register(h))
 
@@ -57,8 +58,8 @@ func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prome
 	stack := Chain(
 		Recover(log),
 		RequestID(),
-		metrics.HTTPMiddleware(m),
 		AccessLog(log),
+		metrics.HTTPMiddleware(m),
 	)
 	return stack(mux)
 }

@@ -15,7 +15,7 @@
 //	cluster.go   ClusterConfig (cluster listen address; replication TBD).
 //	http.go      HTTPConfig (listen address, timeouts, max-consume-wait).
 //	log.go       LogConfig (level, format).
-//	storage.go   StorageConfig (data dir, codec, fsync, flush thresholds,
-//	             segment size, retention check interval).
+//	storage.go   StorageConfig (data dir plus internal storage defaults).
+//	storage_json.go StorageConfig JSON boundary: only data_dir is user-facing.
 //	topic.go     TopicConfig (per-topic creation defaults + bounds).
 package config

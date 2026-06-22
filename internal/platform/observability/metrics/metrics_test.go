@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -30,10 +32,11 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	// the gather output (Prometheus omits collectors that have never
 	// been touched).
 	m.HTTPRequestsTotal.WithLabelValues("/x", "GET", "200").Inc()
-	m.HTTPRequestDuration.WithLabelValues("/x", "GET").Observe(0.01)
+	m.HTTPRequestDuration.WithLabelValues("/x", "GET", "200").Observe(0.01)
 	m.HTTPBytesIn.WithLabelValues("/x").Add(1)
 	m.HTTPBytesOut.WithLabelValues("/x").Add(1)
 	m.HTTPRequestsInFlight.Set(0)
+	m.HotPathStageDurationSeconds.WithLabelValues("broker", "produce", "append", "ok").Observe(0.001)
 	m.MessagesProducedTotal.WithLabelValues("t", "0").Inc()
 	m.MessagesConsumedTotal.WithLabelValues("t", "0").Inc()
 	m.BytesProducedTotal.WithLabelValues("t", "0").Add(1)
@@ -43,21 +46,42 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	m.ConsumeEmptyTotal.WithLabelValues("t").Inc()
 	m.TopicsTotal.Set(1)
 	m.PartitionsTotal.Set(1)
+	m.DataDirSizeBytes.Set(1)
+	m.DataDirAvailableBytes.Set(1)
 	m.TopicBytes.WithLabelValues("t").Set(1)
 	m.PartitionSizeBytes.WithLabelValues("t", "0").Set(1)
 	m.Segments.WithLabelValues("t", "0").Set(1)
 	m.ConsumerLagMessages.WithLabelValues("t", "0").Set(0)
 	m.ConsumerDroppedMessages.WithLabelValues("t", "0").Set(0)
 	m.OldestUnconsumedAgeSeconds.WithLabelValues("t", "0").Set(0)
+	m.ActivePartitionLogs.Set(1)
+	m.BufferRecords.WithLabelValues("t", "0").Set(1)
+	m.BufferBytes.WithLabelValues("t", "0").Set(1)
+	m.SegmentIndexEntries.WithLabelValues("t", "0").Set(1)
 	m.FlushDurationSeconds.WithLabelValues("t", "0").Observe(0.001)
 	m.FlushBytesTotal.WithLabelValues("t", "0").Add(1)
+	m.FlushRecordsPerFrame.WithLabelValues("t", "0").Observe(1)
+	m.FlushPayloadBytes.WithLabelValues("t", "0").Observe(1)
+	m.FlushFrameBytes.WithLabelValues("t", "0").Observe(1)
 	m.FsyncDurationSeconds.WithLabelValues("t", "0").Observe(0.001)
+	m.HighWatermarkPersistSeconds.WithLabelValues("t", "0", "ok").Observe(0.001)
 	m.SegmentsRolledTotal.WithLabelValues("t", "0").Inc()
 	m.RetentionDeletionsTotal.WithLabelValues("t", "0", "age").Inc()
 	m.RetentionBytesDeleted.WithLabelValues("t", "0", "age").Add(1)
 	m.RetentionMessagesDeleted.WithLabelValues("t", "0", "age").Add(1)
 	m.RetentionRunSeconds.WithLabelValues("t", "0").Observe(0.001)
 	m.SegmentsScannedAtBoot.WithLabelValues("t", "0").Inc()
+	m.MetastoreTxDurationSeconds.WithLabelValues("get_topic", "read", "ok").Observe(0.001)
+	m.MetastoreBboltOpenReadTx.Set(0)
+	m.MetastoreBboltReadTx.Set(1)
+	m.MetastoreBboltFreePages.Set(1)
+	m.MetastoreBboltPendingPages.Set(0)
+	m.MetastoreBboltFreeAllocBytes.Set(4096)
+	m.MetastoreBboltFreelistInuse.Set(128)
+	m.MetastoreBboltWrites.Set(1)
+	m.MetastoreBboltWriteSeconds.Set(0.001)
+	m.MetastoreBboltSpillSeconds.Set(0.001)
+	m.MetastoreBboltRebalanceSeconds.Set(0.001)
 	m.IncError("test", "kind")
 	m.BootDurationSeconds.Set(0.1)
 
@@ -67,6 +91,7 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 		"narad_http_request_bytes_in_total",
 		"narad_http_response_bytes_out_total",
 		"narad_http_requests_in_flight",
+		"narad_hot_path_stage_duration_seconds",
 		"narad_messages_produced_total",
 		"narad_messages_consumed_total",
 		"narad_bytes_produced_total",
@@ -76,21 +101,42 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 		"narad_consume_empty_total",
 		"narad_topics_total",
 		"narad_partitions_total",
+		"narad_data_dir_size_bytes",
+		"narad_data_dir_available_bytes",
 		"narad_topic_bytes",
 		"narad_partition_size_bytes",
 		"narad_segments",
 		"narad_consumer_lag_messages",
 		"narad_consumer_dropped_messages",
 		"narad_oldest_unconsumed_message_age_seconds",
+		"narad_storage_active_partition_logs",
+		"narad_storage_buffer_records",
+		"narad_storage_buffer_bytes",
+		"narad_storage_segment_index_entries",
 		"narad_storage_flush_duration_seconds",
 		"narad_storage_flush_bytes_total",
+		"narad_storage_flush_records_per_frame",
+		"narad_storage_flush_payload_bytes",
+		"narad_storage_flush_frame_bytes",
 		"narad_storage_fsync_duration_seconds",
+		"narad_storage_high_watermark_persist_duration_seconds",
 		"narad_storage_segments_rolled_total",
 		"narad_storage_retention_deletions_total",
 		"narad_storage_retention_bytes_deleted_total",
 		"narad_storage_retention_messages_deleted_total",
 		"narad_storage_retention_run_duration_seconds",
 		"narad_storage_segments_scanned_at_boot_total",
+		"narad_metastore_tx_duration_seconds",
+		"narad_metastore_bbolt_open_read_transactions",
+		"narad_metastore_bbolt_read_transactions",
+		"narad_metastore_bbolt_free_pages",
+		"narad_metastore_bbolt_pending_pages",
+		"narad_metastore_bbolt_free_alloc_bytes",
+		"narad_metastore_bbolt_freelist_inuse_bytes",
+		"narad_metastore_bbolt_writes",
+		"narad_metastore_bbolt_write_seconds",
+		"narad_metastore_bbolt_spill_seconds",
+		"narad_metastore_bbolt_rebalance_seconds",
 		"narad_errors_total",
 		"narad_boot_duration_seconds",
 	}
@@ -164,6 +210,23 @@ func TestHTTPMiddlewareLabelsRoutePattern(t *testing.T) {
 			t.Errorf("route label: got %q, want template", labels["route"])
 		}
 	}
+
+	var durationFamily *dto.MetricFamily
+	for _, mf := range mfs {
+		if mf.GetName() == "narad_http_request_duration_seconds" {
+			durationFamily = mf
+			break
+		}
+	}
+	if durationFamily == nil {
+		t.Fatal("narad_http_request_duration_seconds missing")
+	}
+	for _, met := range durationFamily.GetMetric() {
+		labels := labelsToMap(met.GetLabel())
+		if labels["status"] != "200" {
+			t.Errorf("duration status label: got %q, want 200", labels["status"])
+		}
+	}
 }
 
 // TestPollerUpdatesGauges feeds a fake snapshot provider into the
@@ -235,6 +298,25 @@ func TestPollerPrunesDeletedTopics(t *testing.T) {
 
 	if hasSeries(t, reg, "narad_consumer_lag_messages", "topic", "doomed") {
 		t.Error("second tick: lag series for doomed still present after deletion")
+	}
+}
+
+func TestPollerUpdatesDataDirGauges(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "segment.log"), []byte("hello narad"), 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	p := NewPoller(m, fakeSnapshotProvider{}, discardLogger(), dataDir)
+	p.tick(context.Background())
+
+	if got := readGauge(t, reg, "narad_data_dir_size_bytes", nil); got != 11 {
+		t.Errorf("data_dir_size_bytes: got %v, want 11", got)
+	}
+	if got := readGauge(t, reg, "narad_data_dir_available_bytes", nil); got <= 0 {
+		t.Errorf("data_dir_available_bytes: got %v, want > 0", got)
 	}
 }
 

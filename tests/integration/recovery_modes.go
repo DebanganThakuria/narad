@@ -12,26 +12,7 @@ import (
 )
 
 func runRecoveryMode(cfg config) error {
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.timeout)
-	defer cancel()
-
-	lb := &roundRobinClient{
-		nodes:  cfg.nodes,
-		client: &http.Client{Timeout: 15 * time.Second},
-	}
-
-	switch cfg.mode {
-	case modePrepareOwnerRepair:
-		return prepareRecoveryPlan(ctx, lb, cfg, cfg.runID+"-owner-repair")
-	case modeVerifyOwnerRepair:
-		return verifyRecoveryPlan(ctx, lb, cfg.planPath, "owner")
-	case modePrepareFollowerRepair:
-		return prepareRecoveryPlan(ctx, lb, cfg, cfg.runID+"-follower-repair")
-	case modeVerifyFollowerRepair:
-		return verifyRecoveryPlan(ctx, lb, cfg.planPath, "follower")
-	default:
-		return fmt.Errorf("unsupported recovery mode %q", cfg.mode)
-	}
+	return fmt.Errorf("%s is unsupported by the WAL-first no-follower produce design", cfg.mode)
 }
 
 func prepareRecoveryPlan(ctx context.Context, lb *roundRobinClient, cfg config, topicName string) error {
@@ -123,13 +104,16 @@ func producePinnedToNode(ctx context.Context, lb *roundRobinClient, node string,
 		Key:     "recovery-partition-" + strconv.Itoa(partition),
 		Message: recoveryPayload(cfg, topicName, sequence),
 	}
-	var out produceResponse
-	status, _, err := lb.doTo(ctx, node, http.MethodPost, path, req, &out, http.StatusOK, http.StatusMisdirectedRequest, http.StatusServiceUnavailable)
+	out := produceResponse{Offset: -1}
+	status, _, err := lb.doTo(ctx, node, http.MethodPost, path, req, &out, http.StatusAccepted, http.StatusMisdirectedRequest, http.StatusServiceUnavailable)
 	if err != nil {
 		return produceResponse{}, err
 	}
-	if status != http.StatusOK {
+	if status != http.StatusAccepted {
 		return produceResponse{}, fmt.Errorf("%s pinned produce returned status %d", node, status)
+	}
+	if out.Status != "accepted" || out.MessageID == "" || out.Topic != topicName {
+		return produceResponse{}, fmt.Errorf("%s pinned produce returned invalid accepted response: %+v", node, out)
 	}
 	if out.Partition != partition {
 		return produceResponse{}, fmt.Errorf("%s pinned produce partition = %d, want %d", node, out.Partition, partition)

@@ -67,7 +67,7 @@ func TestProduce_AcceptsArrayMessage(t *testing.T) {
 
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/arr/produce",
 		map[string]any{"message": []int{1, 2, 3}})
-	expectStatus(t, resp, http.StatusOK)
+	expectStatus(t, resp, http.StatusAccepted)
 }
 
 func TestProduce_AcceptsStringMessage(t *testing.T) {
@@ -77,7 +77,7 @@ func TestProduce_AcceptsStringMessage(t *testing.T) {
 
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/str/produce",
 		map[string]any{"message": "hello"})
-	expectStatus(t, resp, http.StatusOK)
+	expectStatus(t, resp, http.StatusAccepted)
 }
 
 // TestProduce_AcceptsEmptyStringMessage documents current behaviour:
@@ -91,7 +91,7 @@ func TestProduce_AcceptsEmptyStringMessage(t *testing.T) {
 
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/empty-str/produce",
 		map[string]any{"message": ""})
-	expectStatus(t, resp, http.StatusOK)
+	expectStatus(t, resp, http.StatusAccepted)
 }
 
 func TestProduce_RejectsMissingMessage(t *testing.T) {
@@ -152,13 +152,12 @@ func TestProduce_RejectsOversizedBody(t *testing.T) {
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
-// TestProduce_ConcurrentProducersAssignUniqueOffsets stress-tests the
-// produce path under concurrent pressure. Every produce should get a
-// unique (partition, offset) pair — duplicate offsets within a
-// partition would indicate a race in the buffer or flusher.
+// TestProduce_ConcurrentProducersReturnUniqueMessageIDs stress-tests the
+// HTTP accept path under concurrent pressure. Every accepted produce
+// should return a unique ingress message ID.
 //
 // Run with -race for additional coverage.
-func TestProduce_ConcurrentProducersAssignUniqueOffsets(t *testing.T) {
+func TestProduce_ConcurrentProducersReturnUniqueMessageIDs(t *testing.T) {
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "race", Partitions: 4})
 
@@ -169,8 +168,8 @@ func TestProduce_ConcurrentProducersAssignUniqueOffsets(t *testing.T) {
 	)
 
 	type slot struct {
-		p int
-		o int64
+		id string
+		p  int
 	}
 	results := make(chan slot, totalExpect)
 
@@ -184,14 +183,14 @@ func TestProduce_ConcurrentProducersAssignUniqueOffsets(t *testing.T) {
 				resp := jsonReq(t, http.MethodPost,
 					env.Server.URL+"/v1/topics/race/produce",
 					map[string]any{"message": map[string]int{"w": w, "i": i}})
-				if resp.StatusCode != http.StatusOK {
+				if resp.StatusCode != http.StatusAccepted {
 					failed.Add(1)
 					_ = resp.Body.Close()
 					continue
 				}
 				var pr produceResult
 				decodeJSON(t, resp, &pr)
-				results <- slot{p: pr.Partition, o: pr.Offset}
+				results <- slot{id: pr.MessageID, p: pr.Partition}
 			}
 		}(w)
 	}
@@ -202,13 +201,18 @@ func TestProduce_ConcurrentProducersAssignUniqueOffsets(t *testing.T) {
 		t.Fatalf("%d produce calls failed under concurrency", failed.Load())
 	}
 
-	// (partition, offset) must be unique across all results.
-	seen := make(map[slot]struct{}, totalExpect)
+	seen := make(map[string]struct{}, totalExpect)
 	for s := range results {
-		if _, dup := seen[s]; dup {
-			t.Fatalf("duplicate (partition=%d, offset=%d) returned to two producers", s.p, s.o)
+		if s.id == "" {
+			t.Fatal("empty message_id returned to producer")
 		}
-		seen[s] = struct{}{}
+		if s.p < 0 || s.p >= 4 {
+			t.Fatalf("partition=%d, want in [0,4)", s.p)
+		}
+		if _, dup := seen[s.id]; dup {
+			t.Fatalf("duplicate message_id %q returned to two producers", s.id)
+		}
+		seen[s.id] = struct{}{}
 	}
 	if len(seen) != totalExpect {
 		t.Errorf("unique results: got %d want %d", len(seen), totalExpect)

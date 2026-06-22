@@ -3,7 +3,11 @@ package metrics
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -15,6 +19,8 @@ import (
 // significantly more work than the scraper consumes.
 const pollInterval = 5 * time.Second
 
+const dataDirScanInterval = 30 * time.Second
+
 // Poller is the goroutine that updates Narad's gauge-style metrics
 // (lag, inventory, on-disk sizes). Counters and histograms are
 // updated inline at the relevant call sites; only gauges need
@@ -24,21 +30,28 @@ type Poller struct {
 	metrics *Metrics
 	broker  SnapshotProvider
 	logger  *slog.Logger
+	dataDir string
 
 	// previousTopics tracks what topics existed at the last tick so
 	// we can prune their gauge series after DeleteTopic. Without
 	// this, deleted topics would leak series in /metrics until the
 	// process restarts.
-	previousTopics map[string]struct{}
+	previousTopics  map[string]struct{}
+	lastDataDirScan time.Time
 }
 
 // NewPoller wires the poller. Run must be called for it to do any
 // work; the constructor itself does no I/O.
-func NewPoller(m *Metrics, br SnapshotProvider, log *slog.Logger) *Poller {
+func NewPoller(m *Metrics, br SnapshotProvider, log *slog.Logger, dataDir ...string) *Poller {
+	var dir string
+	if len(dataDir) > 0 {
+		dir = dataDir[0]
+	}
 	return &Poller{
 		metrics:        m,
 		broker:         br,
 		logger:         log,
+		dataDir:        dir,
 		previousTopics: make(map[string]struct{}),
 	}
 }
@@ -112,6 +125,7 @@ func (p *Poller) tick(ctx context.Context) {
 
 	p.metrics.TopicsTotal.Set(float64(len(snaps)))
 	p.metrics.PartitionsTotal.Set(float64(partitionsTotal))
+	p.updateDataDirGauges()
 
 	// Prune series for topics that disappeared since last tick.
 	for topic := range p.previousTopics {
@@ -121,6 +135,9 @@ func (p *Poller) tick(ctx context.Context) {
 		p.metrics.TopicBytes.DeletePartialMatch(prometheus.Labels{"topic": topic})
 		p.metrics.PartitionSizeBytes.DeletePartialMatch(prometheus.Labels{"topic": topic})
 		p.metrics.Segments.DeletePartialMatch(prometheus.Labels{"topic": topic})
+		p.metrics.BufferRecords.DeletePartialMatch(prometheus.Labels{"topic": topic})
+		p.metrics.BufferBytes.DeletePartialMatch(prometheus.Labels{"topic": topic})
+		p.metrics.SegmentIndexEntries.DeletePartialMatch(prometheus.Labels{"topic": topic})
 		p.metrics.ConsumerLagMessages.DeletePartialMatch(prometheus.Labels{"topic": topic})
 		p.metrics.ConsumerDroppedMessages.DeletePartialMatch(prometheus.Labels{"topic": topic})
 		p.metrics.OldestUnconsumedAgeSeconds.DeletePartialMatch(prometheus.Labels{"topic": topic})
@@ -129,4 +146,69 @@ func (p *Poller) tick(ctx context.Context) {
 		p.metrics.ReserveSkipped.DeletePartialMatch(prometheus.Labels{"topic": topic})
 	}
 	p.previousTopics = currentTopics
+}
+
+func (p *Poller) updateDataDirGauges() {
+	if p.dataDir == "" {
+		return
+	}
+	now := time.Now()
+	if !p.lastDataDirScan.IsZero() && now.Sub(p.lastDataDirScan) < dataDirScanInterval {
+		return
+	}
+	p.lastDataDirScan = now
+
+	sizeBytes, err := dirSizeBytes(p.dataDir)
+	if err != nil {
+		p.logger.Warn("metrics: data dir size scan failed", "data_dir", p.dataDir, "err", err)
+		p.metrics.IncError("metrics", "data_dir_size")
+	} else {
+		p.metrics.DataDirSizeBytes.Set(float64(sizeBytes))
+	}
+
+	availableBytes, err := filesystemAvailableBytes(p.dataDir)
+	if err != nil {
+		p.logger.Warn("metrics: data dir statfs failed", "data_dir", p.dataDir, "err", err)
+		p.metrics.IncError("metrics", "data_dir_available")
+	} else {
+		p.metrics.DataDirAvailableBytes.Set(float64(availableBytes))
+	}
+}
+
+func dirSizeBytes(root string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".tmp") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total, err
+}
+
+func filesystemAvailableBytes(path string) (uint64, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0, err
+	}
+	return uint64(stat.Bavail) * uint64(stat.Bsize), nil
 }

@@ -11,6 +11,8 @@
 package metrics
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -23,10 +25,13 @@ const Namespace = "narad"
 type Metrics struct {
 	// HTTP
 	HTTPRequestsTotal    *prometheus.CounterVec   // route, method, status
-	HTTPRequestDuration  *prometheus.HistogramVec // route, method
+	HTTPRequestDuration  *prometheus.HistogramVec // route, method, status
 	HTTPBytesIn          *prometheus.CounterVec   // route
 	HTTPBytesOut         *prometheus.CounterVec   // route
 	HTTPRequestsInFlight prometheus.Gauge         // total (route unknown at entry)
+
+	// Hot-path stage timings
+	HotPathStageDurationSeconds *prometheus.HistogramVec // component, operation, stage, outcome
 
 	// Broker throughput
 	MessagesProducedTotal  *prometheus.CounterVec // topic, partition
@@ -42,6 +47,8 @@ type Metrics struct {
 	// Inventory / lag (gauges; updated by poller)
 	TopicsTotal                prometheus.Gauge
 	PartitionsTotal            prometheus.Gauge
+	DataDirSizeBytes           prometheus.Gauge
+	DataDirAvailableBytes      prometheus.Gauge
 	TopicBytes                 *prometheus.GaugeVec // topic
 	PartitionSizeBytes         *prometheus.GaugeVec // topic, partition
 	Segments                   *prometheus.GaugeVec // topic, partition
@@ -56,15 +63,36 @@ type Metrics struct {
 	AckRejected    *prometheus.CounterVec // reason ("hmac" | "stale" | "malformed" | "topic_mismatch" | "cap")
 
 	// Storage lifecycle
-	FlushDurationSeconds     *prometheus.HistogramVec // topic, partition
-	FlushBytesTotal          *prometheus.CounterVec   // topic, partition
-	FsyncDurationSeconds     *prometheus.HistogramVec // topic, partition
-	SegmentsRolledTotal      *prometheus.CounterVec   // topic, partition
-	RetentionDeletionsTotal  *prometheus.CounterVec   // topic, partition, reason
-	RetentionBytesDeleted    *prometheus.CounterVec   // topic, partition, reason
-	RetentionMessagesDeleted *prometheus.CounterVec   // topic, partition, reason
-	RetentionRunSeconds      *prometheus.HistogramVec // topic, partition
-	SegmentsScannedAtBoot    *prometheus.CounterVec   // topic, partition
+	ActivePartitionLogs         prometheus.Gauge         // total open partition logs
+	BufferRecords               *prometheus.GaugeVec     // topic, partition
+	BufferBytes                 *prometheus.GaugeVec     // topic, partition
+	SegmentIndexEntries         *prometheus.GaugeVec     // topic, partition
+	FlushDurationSeconds        *prometheus.HistogramVec // topic, partition
+	FlushBytesTotal             *prometheus.CounterVec   // topic, partition
+	FlushRecordsPerFrame        *prometheus.HistogramVec // topic, partition
+	FlushPayloadBytes           *prometheus.HistogramVec // topic, partition
+	FlushFrameBytes             *prometheus.HistogramVec // topic, partition
+	FsyncDurationSeconds        *prometheus.HistogramVec // topic, partition
+	HighWatermarkPersistSeconds *prometheus.HistogramVec // topic, partition, outcome
+	SegmentsRolledTotal         *prometheus.CounterVec   // topic, partition
+	RetentionDeletionsTotal     *prometheus.CounterVec   // topic, partition, reason
+	RetentionBytesDeleted       *prometheus.CounterVec   // topic, partition, reason
+	RetentionMessagesDeleted    *prometheus.CounterVec   // topic, partition, reason
+	RetentionRunSeconds         *prometheus.HistogramVec // topic, partition
+	SegmentsScannedAtBoot       *prometheus.CounterVec   // topic, partition
+
+	// Metastore / bbolt
+	MetastoreTxDurationSeconds     *prometheus.HistogramVec // operation, mode, status
+	MetastoreBboltOpenReadTx       prometheus.Gauge
+	MetastoreBboltReadTx           prometheus.Gauge
+	MetastoreBboltFreePages        prometheus.Gauge
+	MetastoreBboltPendingPages     prometheus.Gauge
+	MetastoreBboltFreeAllocBytes   prometheus.Gauge
+	MetastoreBboltFreelistInuse    prometheus.Gauge
+	MetastoreBboltWrites           prometheus.Gauge
+	MetastoreBboltWriteSeconds     prometheus.Gauge
+	MetastoreBboltSpillSeconds     prometheus.Gauge
+	MetastoreBboltRebalanceSeconds prometheus.Gauge
 
 	// Errors
 	ErrorsTotal *prometheus.CounterVec // component, kind
@@ -89,9 +117,9 @@ func New(reg prometheus.Registerer) *Metrics {
 			Namespace: Namespace,
 			Subsystem: "http",
 			Name:      "request_duration_seconds",
-			Help:      "HTTP request duration in seconds, by route and method.",
+			Help:      "HTTP request duration in seconds, by route, method, and status code.",
 			Buckets:   prometheus.DefBuckets,
-		}, []string{"route", "method"}),
+		}, []string{"route", "method", "status"}),
 
 		HTTPBytesIn: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
@@ -113,6 +141,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name:      "requests_in_flight",
 			Help:      "Number of HTTP requests currently being served. Not labeled by route — the matched route is only known after dispatch, so we track the total only.",
 		}),
+
+		HotPathStageDurationSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: Namespace,
+			Name:      "hot_path_stage_duration_seconds",
+			Help:      "Duration of bounded-cardinality internal hot-path stages.",
+			Buckets:   fastDurationBuckets,
+		}, []string{"component", "operation", "stage", "outcome"}),
 
 		MessagesProducedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
@@ -168,6 +203,18 @@ func New(reg prometheus.Registerer) *Metrics {
 			Namespace: Namespace,
 			Name:      "partitions_total",
 			Help:      "Total partitions across all topics.",
+		}),
+
+		DataDirSizeBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Name:      "data_dir_size_bytes",
+			Help:      "Bytes used by regular files under this Narad process data directory.",
+		}),
+
+		DataDirAvailableBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Name:      "data_dir_available_bytes",
+			Help:      "Filesystem bytes available to the Narad data directory path.",
 		}),
 
 		TopicBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -230,6 +277,34 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:      "Ack requests rejected before commit; partitioned by reason.",
 		}, []string{"reason"}),
 
+		ActivePartitionLogs: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "storage",
+			Name:      "active_partition_logs",
+			Help:      "Currently open partition logs in this Narad process.",
+		}),
+
+		BufferRecords: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "storage",
+			Name:      "buffer_records",
+			Help:      "Records currently buffered in memory before storage flush, by partition.",
+		}, []string{"topic", "partition"}),
+
+		BufferBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "storage",
+			Name:      "buffer_bytes",
+			Help:      "Payload bytes currently buffered in memory before storage flush, by partition.",
+		}, []string{"topic", "partition"}),
+
+		SegmentIndexEntries: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "storage",
+			Name:      "segment_index_entries",
+			Help:      "Hot in-memory segment index entries currently retained, by partition.",
+		}, []string{"topic", "partition"}),
+
 		FlushDurationSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: Namespace,
 			Subsystem: "storage",
@@ -245,6 +320,30 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:      "Total bytes written by flusher to segment files.",
 		}, []string{"topic", "partition"}),
 
+		FlushRecordsPerFrame: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: Namespace,
+			Subsystem: "storage",
+			Name:      "flush_records_per_frame",
+			Help:      "Records written per storage flush frame.",
+			Buckets:   storageFlushRecordBuckets,
+		}, []string{"topic", "partition"}),
+
+		FlushPayloadBytes: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: Namespace,
+			Subsystem: "storage",
+			Name:      "flush_payload_bytes",
+			Help:      "Logical payload bytes written per storage flush frame before codec/framing.",
+			Buckets:   storageFlushByteBuckets,
+		}, []string{"topic", "partition"}),
+
+		FlushFrameBytes: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: Namespace,
+			Subsystem: "storage",
+			Name:      "flush_frame_bytes",
+			Help:      "Encoded bytes written per storage flush frame.",
+			Buckets:   storageFlushByteBuckets,
+		}, []string{"topic", "partition"}),
+
 		FsyncDurationSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: Namespace,
 			Subsystem: "storage",
@@ -252,6 +351,14 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:      "Time spent in file.Sync().",
 			Buckets:   storageDurationBuckets,
 		}, []string{"topic", "partition"}),
+
+		HighWatermarkPersistSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: Namespace,
+			Subsystem: "storage",
+			Name:      "high_watermark_persist_duration_seconds",
+			Help:      "Time spent persisting the durable high-watermark metadata file.",
+			Buckets:   storageDurationBuckets,
+		}, []string{"topic", "partition", "outcome"}),
 
 		SegmentsRolledTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
@@ -296,6 +403,84 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:      "Segment files scanned during partition log recovery (cumulative across restarts).",
 		}, []string{"topic", "partition"}),
 
+		MetastoreTxDurationSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: Namespace,
+			Subsystem: "metastore",
+			Name:      "tx_duration_seconds",
+			Help:      "Duration of metastore bbolt read/write transactions and raft apply calls.",
+			Buckets:   fastDurationBuckets,
+		}, []string{"operation", "mode", "status"}),
+
+		MetastoreBboltOpenReadTx: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "metastore_bbolt",
+			Name:      "open_read_transactions",
+			Help:      "Current number of open bbolt read transactions for the metastore FSM database.",
+		}),
+
+		MetastoreBboltReadTx: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "metastore_bbolt",
+			Name:      "read_transactions",
+			Help:      "Cumulative bbolt read transactions started for the metastore FSM database since process start.",
+		}),
+
+		MetastoreBboltFreePages: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "metastore_bbolt",
+			Name:      "free_pages",
+			Help:      "Total free pages on the metastore FSM bbolt freelist.",
+		}),
+
+		MetastoreBboltPendingPages: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "metastore_bbolt",
+			Name:      "pending_pages",
+			Help:      "Total pending free pages on the metastore FSM bbolt freelist.",
+		}),
+
+		MetastoreBboltFreeAllocBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "metastore_bbolt",
+			Name:      "free_alloc_bytes",
+			Help:      "Bytes allocated in free pages in the metastore FSM bbolt database.",
+		}),
+
+		MetastoreBboltFreelistInuse: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "metastore_bbolt",
+			Name:      "freelist_inuse_bytes",
+			Help:      "Bytes used by the metastore FSM bbolt freelist.",
+		}),
+
+		MetastoreBboltWrites: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "metastore_bbolt",
+			Name:      "writes",
+			Help:      "Cumulative bbolt page writes performed by the metastore FSM database since process start.",
+		}),
+
+		MetastoreBboltWriteSeconds: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "metastore_bbolt",
+			Name:      "write_seconds",
+			Help:      "Cumulative time spent writing bbolt pages for the metastore FSM database.",
+		}),
+
+		MetastoreBboltSpillSeconds: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "metastore_bbolt",
+			Name:      "spill_seconds",
+			Help:      "Cumulative time spent spilling bbolt nodes for the metastore FSM database.",
+		}),
+
+		MetastoreBboltRebalanceSeconds: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "metastore_bbolt",
+			Name:      "rebalance_seconds",
+			Help:      "Cumulative time spent rebalancing bbolt nodes for the metastore FSM database.",
+		}),
+
 		ErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Name:      "errors_total",
@@ -311,18 +496,28 @@ func New(reg prometheus.Registerer) *Metrics {
 
 	reg.MustRegister(
 		m.HTTPRequestsTotal, m.HTTPRequestDuration, m.HTTPBytesIn, m.HTTPBytesOut, m.HTTPRequestsInFlight,
+		m.HotPathStageDurationSeconds,
 		m.MessagesProducedTotal, m.MessagesConsumedTotal,
 		m.BytesProducedTotal, m.BytesConsumedTotal,
 		m.ProduceRejectionsTotal,
 		m.ConsumeWaitSeconds, m.ConsumeEmptyTotal,
-		m.TopicsTotal, m.PartitionsTotal,
+		m.TopicsTotal, m.PartitionsTotal, m.DataDirSizeBytes, m.DataDirAvailableBytes,
 		m.TopicBytes, m.PartitionSizeBytes, m.Segments,
 		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
 		m.InFlightSize, m.AckedAheadSize, m.ReserveSkipped, m.AckRejected,
-		m.FlushDurationSeconds, m.FlushBytesTotal, m.FsyncDurationSeconds,
+		m.ActivePartitionLogs,
+		m.BufferRecords, m.BufferBytes, m.SegmentIndexEntries,
+		m.FlushDurationSeconds, m.FlushBytesTotal, m.FlushRecordsPerFrame, m.FlushPayloadBytes, m.FlushFrameBytes,
+		m.FsyncDurationSeconds, m.HighWatermarkPersistSeconds,
 		m.SegmentsRolledTotal,
 		m.RetentionDeletionsTotal, m.RetentionBytesDeleted, m.RetentionMessagesDeleted, m.RetentionRunSeconds,
 		m.SegmentsScannedAtBoot,
+		m.MetastoreTxDurationSeconds,
+		m.MetastoreBboltOpenReadTx, m.MetastoreBboltReadTx,
+		m.MetastoreBboltFreePages, m.MetastoreBboltPendingPages,
+		m.MetastoreBboltFreeAllocBytes, m.MetastoreBboltFreelistInuse,
+		m.MetastoreBboltWrites, m.MetastoreBboltWriteSeconds,
+		m.MetastoreBboltSpillSeconds, m.MetastoreBboltRebalanceSeconds,
 		m.ErrorsTotal,
 		m.BootDurationSeconds,
 	)
@@ -337,6 +532,36 @@ var storageDurationBuckets = []float64{
 	100e-6, 500e-6, // 100µs, 500µs
 	0.001, 0.005, 0.01, 0.05, // 1ms, 5ms, 10ms, 50ms
 	0.1, 0.5, 1, // 100ms, 500ms, 1s
+}
+
+var storageFlushRecordBuckets = []float64{
+	1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000,
+}
+
+var storageFlushByteBuckets = []float64{
+	128, 512, 1 << 10, 4 << 10, 16 << 10, 64 << 10, 256 << 10, 1 << 20, 4 << 20, 16 << 20,
+}
+
+// fastDurationBuckets focuses on the <10ms target while still keeping
+// enough headroom to identify pathological slow calls.
+var fastDurationBuckets = []float64{
+	50e-6, 100e-6, 250e-6, 500e-6,
+	0.001, 0.0025, 0.005, 0.0075, 0.01,
+	0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
+}
+
+func (m *Metrics) ObserveHotPathStage(component, operation, stage, outcome string, duration time.Duration) {
+	if m == nil {
+		return
+	}
+	m.HotPathStageDurationSeconds.WithLabelValues(component, operation, stage, outcome).Observe(duration.Seconds())
+}
+
+func (m *Metrics) ObserveMetastoreTx(operation, mode, status string, duration time.Duration) {
+	if m == nil {
+		return
+	}
+	m.MetastoreTxDurationSeconds.WithLabelValues(operation, mode, status).Observe(duration.Seconds())
 }
 
 // IncError is a small helper so callers don't need to remember the

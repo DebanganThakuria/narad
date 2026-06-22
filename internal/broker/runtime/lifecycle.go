@@ -11,13 +11,14 @@ var errNotReady = errors.New("not ready")
 // Lifecycle owns broker-level startup/shutdown hooks. Embedded into
 // the broker facade so Ready and Close satisfy the Broker interface.
 type Lifecycle struct {
-	logs  *Logs
-	ready atomic.Bool
+	logs    *Logs
+	closers []func() error
+	ready   atomic.Bool
 }
 
 // NewLifecycle wires a Lifecycle.
-func NewLifecycle(logs *Logs) *Lifecycle {
-	return &Lifecycle{logs: logs}
+func NewLifecycle(logs *Logs, closers ...func() error) *Lifecycle {
+	return &Lifecycle{logs: logs, closers: closers}
 }
 
 func (l *Lifecycle) MarkReady() {
@@ -39,7 +40,16 @@ func (l *Lifecycle) Ready(_ context.Context) error {
 // final flush before releasing its file handles.
 func (l *Lifecycle) Close() error {
 	l.MarkNotReady()
-	return l.logs.CloseAll()
+	var firstErr error
+	for _, closeFn := range l.closers {
+		if err := closeFn(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if err := l.logs.CloseAll(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
 }
 
 var _ interface {

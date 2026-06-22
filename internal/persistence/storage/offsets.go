@@ -23,20 +23,17 @@ func (l *Log) HighWatermark() int64 {
 	return l.highWatermark.Load()
 }
 
-// AdvanceHighWatermark moves the visible tail forward, persists it, and wakes
-// long-poll consumers waiting on new committed records.
+// AdvanceHighWatermark moves the visible tail forward and wakes long-poll
+// consumers waiting on new committed records. Persistence is batched by the
+// storage flusher; the produce path must not fsync this metadata per record.
 func (l *Log) AdvanceHighWatermark(newHWM int64) error {
-	l.hwmMu.Lock()
-	defer l.hwmMu.Unlock()
-
 	cur := l.highWatermark.Load()
 	if newHWM <= cur {
 		return nil
 	}
-	if err := l.persistHighWatermark(newHWM); err != nil {
-		return err
+	for newHWM > cur && !l.highWatermark.CompareAndSwap(cur, newHWM) {
+		cur = l.highWatermark.Load()
 	}
-	l.highWatermark.Store(newHWM)
 	select {
 	case l.notify <- struct{}{}:
 	default:

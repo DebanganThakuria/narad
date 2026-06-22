@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,6 +59,40 @@ func fastFlushOpts(t *testing.T, c codec.Codec) Options {
 		FlushInterval: 5 * time.Millisecond,
 	}
 }
+
+type storageMetricsProbe struct {
+	flushes atomic.Int64
+	fsyncs  atomic.Int64
+	hwms    atomic.Int64
+}
+
+func (m *storageMetricsProbe) ObserveAppend(string, time.Duration, string, int, int64) {}
+
+func (m *storageMetricsProbe) ObserveRead(time.Duration, string, string) {}
+
+func (m *storageMetricsProbe) ObserveFlush(time.Duration, int, int64, int64) {
+	m.flushes.Add(1)
+}
+
+func (m *storageMetricsProbe) SetBufferStats(int, int64) {}
+
+func (m *storageMetricsProbe) SetSegmentIndexStats(int) {}
+
+func (m *storageMetricsProbe) ObserveFsync(time.Duration) {
+	m.fsyncs.Add(1)
+}
+
+func (m *storageMetricsProbe) ObserveHighWatermarkPersist(time.Duration, string) {
+	m.hwms.Add(1)
+}
+
+func (m *storageMetricsProbe) IncSegmentRolled() {}
+
+func (m *storageMetricsProbe) IncRetentionDeletion(string, int64, int64) {}
+
+func (m *storageMetricsProbe) ObserveRetentionRun(time.Duration) {}
+
+func (m *storageMetricsProbe) IncSegmentScanned() {}
 
 // requireRead opens a log, calls fn, closes the log, and surfaces
 // errors with t.Fatalf.
@@ -263,6 +298,112 @@ func TestHighWatermarkHiddenTailSurvivesRestart(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Fatalf("Read %d got %q want %q", i, got, want)
 		}
+	}
+}
+
+func TestBatchedSyncDoesNotFsyncEveryFlush(t *testing.T) {
+	path := testLogPath(t)
+	metrics := &storageMetricsProbe{}
+	opts := fastFlushOpts(t, nil)
+	opts.SyncMode = SyncBatched
+	opts.SyncInterval = time.Hour
+	opts.SyncBytes = 1 << 30
+	opts.HWMSyncInterval = time.Hour
+	opts.Metrics = metrics
+
+	l, err := NewLog(path, opts)
+	if err != nil {
+		t.Fatalf("NewLog: %v", err)
+	}
+	for i := range 3 {
+		offset, err := l.Append(fmt.Appendf(nil, "rec-%d", i))
+		if err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+		if err := l.AdvanceHighWatermark(offset + 1); err != nil {
+			t.Fatalf("AdvanceHighWatermark %d: %v", i, err)
+		}
+		wantFlushes := int64(i + 1)
+		deadline := time.Now().Add(time.Second)
+		for metrics.flushes.Load() < wantFlushes && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	if got := metrics.flushes.Load(); got < 3 {
+		t.Fatalf("flushes = %d, want at least 3", got)
+	}
+	if got := metrics.fsyncs.Load(); got != 0 {
+		t.Fatalf("fsyncs before close = %d, want 0", got)
+	}
+	if got := metrics.hwms.Load(); got != 0 {
+		t.Fatalf("hwm persists before close = %d, want 0", got)
+	}
+
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := metrics.fsyncs.Load(); got != 1 {
+		t.Fatalf("fsyncs after close = %d, want 1", got)
+	}
+	if got := metrics.hwms.Load(); got != 1 {
+		t.Fatalf("hwm persists after close = %d, want 1", got)
+	}
+}
+
+func TestTimerDoesNotFlushTinyBufferBeforeCoalesceAge(t *testing.T) {
+	metrics := &storageMetricsProbe{}
+	opts := Options{
+		Codec:         codec.NewNoopCodec(),
+		FlushBytes:    1 << 20,
+		FlushRecords:  1000,
+		FlushInterval: time.Hour,
+		Metrics:       metrics,
+	}
+
+	l, err := NewLog(testLogPath(t), opts)
+	if err != nil {
+		t.Fatalf("NewLog: %v", err)
+	}
+	defer l.Close()
+
+	if _, err := l.Append([]byte("tiny")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := l.flusher.drainOnce(false, false); err != nil {
+		t.Fatalf("drainOnce: %v", err)
+	}
+
+	if got := metrics.flushes.Load(); got != 0 {
+		t.Fatalf("flushes = %d, want 0 before coalesce age", got)
+	}
+}
+
+func TestTimerFlushPreservedWhenNoThresholdConfigured(t *testing.T) {
+	metrics := &storageMetricsProbe{}
+	opts := Options{
+		Codec:         codec.NewNoopCodec(),
+		FlushInterval: 5 * time.Millisecond,
+		Metrics:       metrics,
+	}
+
+	l, err := NewLog(testLogPath(t), opts)
+	if err != nil {
+		t.Fatalf("NewLog: %v", err)
+	}
+	defer l.Close()
+
+	if _, err := l.Append([]byte("tiny")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	l.buffer.mu.Lock()
+	l.buffer.firstAt = time.Now().Add(-time.Second)
+	l.buffer.mu.Unlock()
+	if err := l.flusher.drainOnce(false, false); err != nil {
+		t.Fatalf("drainOnce: %v", err)
+	}
+	if got := metrics.flushes.Load(); got == 0 {
+		t.Fatal("flushes = 0, want timer flush when no threshold is configured")
 	}
 }
 
@@ -699,6 +840,46 @@ func TestMultiSegmentRecovery(t *testing.T) {
 		}
 		if !bytes.Equal(got, want) {
 			t.Fatalf("Read %d got %q want %q", i, got, want)
+		}
+	}
+}
+
+func TestSegmentIndexesStayBoundedToHotSegments(t *testing.T) {
+	dir := testLogPath(t)
+	const total = 20
+
+	for i := range total {
+		mustWriteAndClose(t, dir, rollOpts(t, 120), func(l *Log) {
+			if _, err := l.Append(fmt.Appendf(nil, "rec-%05d", i)); err != nil {
+				t.Fatalf("Append %d: %v", i, err)
+			}
+		})
+	}
+	segments := segmentPaths(t, dir)
+	if len(segments) <= maxHotSegmentIndexes {
+		t.Fatalf("segments = %d, want more than index cap %d", len(segments), maxHotSegmentIndexes)
+	}
+
+	l, err := NewLog(dir, rollOpts(t, 120))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l.Close()
+	if got := len(l.segmentIndexes); got > maxHotSegmentIndexes {
+		t.Fatalf("segment indexes after recovery = %d, want <= %d", got, maxHotSegmentIndexes)
+	}
+
+	for i := range int64(total) {
+		want := fmt.Appendf(nil, "rec-%05d", i)
+		got, err := l.Read(i)
+		if err != nil {
+			t.Fatalf("Read %d: %v", i, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("Read %d got %q want %q", i, got, want)
+		}
+		if got := len(l.segmentIndexes); got > maxHotSegmentIndexes {
+			t.Fatalf("segment indexes after read %d = %d, want <= %d", i, got, maxHotSegmentIndexes)
 		}
 	}
 }

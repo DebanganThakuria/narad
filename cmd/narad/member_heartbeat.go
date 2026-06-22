@@ -1,31 +1,28 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strings"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/netaddr"
+	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
-const memberRegisterPath = "/internal/v1/members"
+type memberRegistrar interface {
+	RegisterMember(context.Context, string, nodewire.MemberRequest) (nodewire.Response, error)
+}
 
-func runMemberHeartbeater(ctx context.Context, store *metastore.Store, member metastore.Member, interval time.Duration, client *http.Client, log *slog.Logger) {
+func runMemberHeartbeater(ctx context.Context, store *metastore.Store, member metastore.Member, interval time.Duration, registrar memberRegistrar, log *slog.Logger) {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
-	if client == nil {
-		client = http.DefaultClient
-	}
 
 	send := func() {
-		if err := registerMember(ctx, store, member, client); err != nil {
+		if err := registerMember(ctx, store, member, registrar); err != nil {
 			log.Debug("member heartbeat failed", "member", member.ID, "err", err)
 		}
 	}
@@ -43,20 +40,36 @@ func runMemberHeartbeater(ctx context.Context, store *metastore.Store, member me
 	}
 }
 
-func registerMember(ctx context.Context, store *metastore.Store, member metastore.Member, client *http.Client) error {
+func registerMember(ctx context.Context, store *metastore.Store, member metastore.Member, registrar memberRegistrar) error {
 	member.LastHeartbeat = time.Now().Unix()
 	if err := store.RegisterMember(ctx, member); err == nil {
 		return nil
 	}
 
-	leaderAddr := leaderMemberHTTPAddr(store)
+	leaderAddr := leaderMemberAddr(store)
 	if leaderAddr == "" {
-		return fmt.Errorf("register member: leader HTTP address unavailable")
+		return fmt.Errorf("register member: leader member address unavailable")
 	}
-	return postMemberRegistration(ctx, client, leaderAddr, member)
+	if registrar == nil {
+		return fmt.Errorf("register member: peer registrar unavailable")
+	}
+	res, err := registrar.RegisterMember(ctx, leaderAddr, nodewire.MemberRequest{
+		ID:            member.ID,
+		Addr:          member.Addr,
+		ClusterAddr:   member.ClusterAddr,
+		Status:        string(member.Status),
+		LastHeartbeat: member.LastHeartbeat,
+	})
+	if err != nil {
+		return err
+	}
+	if res.Status < 200 || res.Status >= 300 {
+		return fmt.Errorf("register member returned status %d", res.Status)
+	}
+	return nil
 }
 
-func leaderMemberHTTPAddr(store *metastore.Store) string {
+func leaderMemberAddr(store *metastore.Store) string {
 	leaderClusterAddr := store.LeaderAddr()
 	if strings.TrimSpace(leaderClusterAddr) == "" {
 		return ""
@@ -81,34 +94,4 @@ func memberMatchesLeaderClusterAddr(member metastore.Member, leaderClusterAddr s
 		return netaddr.ClusterAddrMatchesPeer(leaderClusterAddr, member.ClusterAddr)
 	}
 	return netaddr.ClusterAddrMatchesPeer(leaderClusterAddr, member.Addr)
-}
-
-func postMemberRegistration(ctx context.Context, client *http.Client, addr string, member metastore.Member) error {
-	body, err := json.Marshal(member)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, memberRegisterEndpoint(addr), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("register member returned status %d", resp.StatusCode)
-	}
-	return nil
-}
-
-func memberRegisterEndpoint(addr string) string {
-	addr = strings.TrimRight(strings.TrimSpace(addr), "/")
-	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
-		return addr + memberRegisterPath
-	}
-	return "http://" + addr + memberRegisterPath
 }

@@ -67,6 +67,20 @@ func reserveN(t *testing.T, f *InFlight, n int) map[int64]int64 {
 
 // -- tests ---------------------------------------------------------------
 
+func TestNewPartitionShardDoesNotPreallocateMaxInFlight(t *testing.T) {
+	t.Parallel()
+
+	sh := newPartitionShard(-1, Caps{MaxInFlight: 65_536, MaxAckedAhead: 65_536})
+	if got, want := cap(sh.expiry), initialExpiryHeapCap; got != want {
+		t.Fatalf("expiry cap = %d, want %d", got, want)
+	}
+
+	sh = newPartitionShard(-1, Caps{MaxInFlight: 8, MaxAckedAhead: 8})
+	if got, want := cap(sh.expiry), 8; got != want {
+		t.Fatalf("small expiry cap = %d, want %d", got, want)
+	}
+}
+
 func TestReserveSkipsReservedUnexpiredOffset(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

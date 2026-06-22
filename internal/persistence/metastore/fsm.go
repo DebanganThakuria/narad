@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
@@ -30,6 +31,29 @@ const (
 	opMemberHeartbeat
 	opMemberDead
 )
+
+func (op opCode) metricName() string {
+	switch op {
+	case opCreateTopic:
+		return "create_topic"
+	case opUpdateTopic:
+		return "update_topic"
+	case opDeleteTopic:
+		return "delete_topic"
+	case opPutSchema:
+		return "put_schema"
+	case opAssignPartition:
+		return "assign_partition"
+	case opMemberJoin:
+		return "member_join"
+	case opMemberHeartbeat:
+		return "member_heartbeat"
+	case opMemberDead:
+		return "member_dead"
+	default:
+		return "unknown"
+	}
+}
 
 var (
 	bucketTopics      = []byte("topics")
@@ -76,14 +100,15 @@ type fsmState struct {
 	mu     sync.RWMutex
 	db     *bolt.DB
 	dbPath string
+	metric MetricsRecorder
 }
 
-func newFSM(path string) (*fsmState, error) {
+func newFSM(path string, metric MetricsRecorder) (*fsmState, error) {
 	db, err := openBolt(path)
 	if err != nil {
 		return nil, err
 	}
-	return &fsmState{db: db, dbPath: path}, nil
+	return &fsmState{db: db, dbPath: path, metric: metric}, nil
 }
 
 func openBolt(path string) (*bolt.DB, error) {
@@ -99,6 +124,28 @@ func openBolt(path string) (*bolt.DB, error) {
 		}
 		return nil
 	})
+}
+
+func (f *fsmState) view(operation string, fn func(*bolt.Tx) error) error {
+	start := time.Now()
+	err := f.db.View(fn)
+	f.observeTx(operation, "read", err, time.Since(start))
+	return err
+}
+
+func (f *fsmState) update(operation string, fn func(*bolt.Tx) error) error {
+	start := time.Now()
+	err := f.db.Update(fn)
+	f.observeTx(operation, "write", err, time.Since(start))
+	return err
+}
+
+func (f *fsmState) observeTx(operation, mode string, err error, duration time.Duration) {
+	if f.metric == nil {
+		return
+	}
+	f.metric.ObserveMetastoreTx(operation, mode, statusForErr(err), duration)
+	f.metric.ObserveMetastoreBboltStats(bboltStatsFrom(f.db.Stats()))
 }
 
 // Apply is called by Raft when a log entry is committed.

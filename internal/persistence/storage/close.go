@@ -12,6 +12,9 @@ func (l *Log) Close() error {
 	l.flusher.waitDone()
 
 	var firstErr error
+	if err := l.syncHighWatermark(true); err != nil {
+		firstErr = err
+	}
 	for _, s := range l.segments {
 		if err := s.close(); err != nil && firstErr == nil {
 			firstErr = err

@@ -163,6 +163,24 @@ func appendStorageValidationErrors(errs *[]string, cfg StorageConfig) {
 	if cfg.FlushBytes == 0 && cfg.FlushRecords == 0 {
 		*errs = append(*errs, "at least one of storage.flush_bytes or storage.flush_records must be > 0")
 	}
+	if cfg.SyncIntervalMs <= 0 {
+		*errs = append(*errs, "storage.sync_interval_ms must be > 0")
+	}
+	if cfg.SyncBytes < 0 {
+		*errs = append(*errs, "storage.sync_bytes must be >= 0")
+	}
+	if cfg.HighWatermarkSyncIntervalMs <= 0 {
+		*errs = append(*errs, "storage.high_watermark_sync_interval_ms must be > 0")
+	}
+	if cfg.IngressWALSyncIntervalMs <= 0 {
+		*errs = append(*errs, "storage.ingress_wal_sync_interval_ms must be > 0")
+	}
+	if cfg.IngressWALSyncBytes < 0 {
+		*errs = append(*errs, "storage.ingress_wal_sync_bytes must be >= 0")
+	}
+	if cfg.IngressWALShards <= 0 {
+		*errs = append(*errs, "storage.ingress_wal_shards must be > 0")
+	}
 	if cfg.SegmentBytes < 4096 {
 		*errs = append(*errs, fmt.Sprintf("storage.segment_bytes (%d) must be >= 4096", cfg.SegmentBytes))
 	}

@@ -78,17 +78,16 @@ func TestReconcileAssignsNewTopic(t *testing.T) {
 	for time.Now().Before(deadline) {
 		assignments, _ := s.ListAssignments("orders")
 		if len(assignments) == 6 {
-			// With RF=3, owners are chosen from the two least-loaded members each cycle.
 			counts := map[string]int{}
 			for _, a := range assignments {
 				counts[a.OwnerID]++
 			}
-			if len(counts) != 2 {
-				t.Fatalf("expected 2 distinct owners, got %v", counts)
+			if len(counts) != 3 {
+				t.Fatalf("expected 3 distinct owners, got %v", counts)
 			}
 			for id, n := range counts {
-				if n != 3 {
-					t.Fatalf("member %s owns %d partitions, expected 3", id, n)
+				if n != 2 {
+					t.Fatalf("member %s owns %d partitions, expected 2", id, n)
 				}
 			}
 			return

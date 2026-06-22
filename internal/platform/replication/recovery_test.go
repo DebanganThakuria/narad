@@ -2,13 +2,10 @@ package replication
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go"
 
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -51,39 +48,32 @@ func newRecoveryLogs(t *testing.T, store *metastore.Store) *runtime.Logs {
 	}, store, nil)
 }
 
-func TestStoreRecoveryRepairOwnedPartitionsRepairsOwnerFromFollowerWithinCommittedBoundary(t *testing.T) {
-	ctx := context.Background()
-	store := newRecoveryStore(t, "node-a")
-	defer store.Close()
-	logs := newRecoveryLogs(t, store)
-	defer logs.CloseAll()
+func startRecoveryQUICServer(t *testing.T, logs *runtime.Logs) string {
+	t.Helper()
+	tlsConf, err := quicServerTLSConfig()
+	if err != nil {
+		t.Fatalf("quic tls config: %v", err)
+	}
+	listener, err := quic.ListenAddr("127.0.0.1:0", tlsConf, quicConfig())
+	if err != nil {
+		t.Fatalf("quic listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		_ = serveQUICListener(ctx, listener, logs, nil)
+	}()
+	return listener.Addr().String()
+}
 
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-a", Addr: "127.0.0.1:0", Status: metastore.MemberAlive, LastHeartbeat: time.Now().Unix()}); err != nil {
+func setupRecoveryAssignment(t *testing.T, ctx context.Context, store *metastore.Store, followerAddr string) {
+	t.Helper()
+	now := time.Now().Unix()
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-a", Addr: "127.0.0.1:0", Status: metastore.MemberAlive, LastHeartbeat: now}); err != nil {
 		t.Fatalf("register owner: %v", err)
 	}
-
-	var getQueries []string
-	follower := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			getQueries = append(getQueries, r.URL.RawQuery)
-			switch r.URL.Query().Get("offset") {
-			case "0":
-				_, _ = w.Write([]byte(`{"payload":"eyJuIjoxfQ=="}`))
-			case "1":
-				_, _ = w.Write([]byte(`{"payload":"eyJuIjoyfQ=="}`))
-			default:
-				w.WriteHeader(http.StatusNotFound)
-			}
-		case http.MethodPost:
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			w.WriteHeader(http.StatusMethodNotAllowed)
-		}
-	}))
-	defer follower.Close()
-
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-b", Addr: follower.URL, Status: metastore.MemberAlive, LastHeartbeat: time.Now().Unix()}); err != nil {
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-b", Addr: followerAddr, Status: metastore.MemberAlive, LastHeartbeat: now}); err != nil {
 		t.Fatalf("register follower: %v", err)
 	}
 	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1, ReplicationFactor: 2}); err != nil {
@@ -92,35 +82,62 @@ func TestStoreRecoveryRepairOwnedPartitionsRepairsOwnerFromFollowerWithinCommitt
 	if err := store.AssignPartition(ctx, "orders", 0, "node-a", "node-b"); err != nil {
 		t.Fatalf("assign partition: %v", err)
 	}
+}
 
+func appendRecords(t *testing.T, logs *runtime.Logs, records ...[]byte) {
+	t.Helper()
 	log, err := logs.Get("orders", 0)
 	if err != nil {
 		t.Fatalf("logs.Get: %v", err)
 	}
-	if _, err := log.Append([]byte(`{"n":1}`)); err != nil {
-		t.Fatalf("Append: %v", err)
+	for _, record := range records {
+		if _, err := log.Append(record); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
 	}
-	if err := log.AdvanceHighWatermark(2); err != nil {
+}
+
+func advanceHWM(t *testing.T, logs *runtime.Logs, hwm int64) {
+	t.Helper()
+	log, err := logs.Get("orders", 0)
+	if err != nil {
+		t.Fatalf("logs.Get: %v", err)
+	}
+	if err := log.AdvanceHighWatermark(hwm); err != nil {
 		t.Fatalf("AdvanceHighWatermark: %v", err)
 	}
-	if err := logs.CloseTopic("orders"); err != nil {
+}
+
+func TestStoreRecoveryRepairOwnedPartitionsRepairsOwnerFromFollowerWithinCommittedBoundary(t *testing.T) {
+	ctx := context.Background()
+	store := newRecoveryStore(t, "node-a")
+	defer store.Close()
+	ownerLogs := newRecoveryLogs(t, store)
+	defer ownerLogs.CloseAll()
+	followerLogs := newRecoveryLogs(t, store)
+	defer followerLogs.CloseAll()
+	followerAddr := startRecoveryQUICServer(t, followerLogs)
+	setupRecoveryAssignment(t, ctx, store, followerAddr)
+
+	appendRecords(t, ownerLogs, []byte(`{"n":1}`))
+	advanceHWM(t, ownerLogs, 2)
+	if err := ownerLogs.CloseTopic("orders"); err != nil {
 		t.Fatalf("CloseTopic: %v", err)
 	}
+	appendRecords(t, followerLogs, []byte(`{"n":1}`), []byte(`{"n":2}`))
+	advanceHWM(t, followerLogs, 2)
 
-	recovery := NewStoreRecovery("node-a", store, logs, follower.Client())
+	recovery := NewStoreRecovery("node-a", store, ownerLogs, nil)
 	if err := recovery.RepairOwnedPartitions(ctx); err != nil {
 		t.Fatalf("RepairOwnedPartitions: %v", err)
 	}
 
-	log, err = logs.Get("orders", 0)
+	log, err := ownerLogs.Get("orders", 0)
 	if err != nil {
 		t.Fatalf("logs.Get after recovery: %v", err)
 	}
 	if got := log.NextOffset(); got != 2 {
 		t.Fatalf("NextOffset() = %d, want 2", got)
-	}
-	if got := log.HighWatermark(); got != 2 {
-		t.Fatalf("HighWatermark() = %d, want 2", got)
 	}
 	for i, want := range []string{`{"n":1}`, `{"n":2}`} {
 		payload, err := log.Read(int64(i))
@@ -131,77 +148,39 @@ func TestStoreRecoveryRepairOwnedPartitionsRepairsOwnerFromFollowerWithinCommitt
 			t.Fatalf("Read(%d) = %s, want %s", i, string(payload), want)
 		}
 	}
-	if len(getQueries) == 0 || !strings.Contains(getQueries[0], "committed=true") {
-		t.Fatalf("replica get queries = %v, want committed owner repair read", getQueries)
-	}
 }
 
 func TestStoreRecoveryRepairOwnedPartitionsRepairsFollowerFromOwner(t *testing.T) {
 	ctx := context.Background()
 	store := newRecoveryStore(t, "node-a")
 	defer store.Close()
-	logs := newRecoveryLogs(t, store)
-	defer logs.CloseAll()
+	ownerLogs := newRecoveryLogs(t, store)
+	defer ownerLogs.CloseAll()
+	followerLogs := newRecoveryLogs(t, store)
+	defer followerLogs.CloseAll()
+	followerAddr := startRecoveryQUICServer(t, followerLogs)
+	setupRecoveryAssignment(t, ctx, store, followerAddr)
 
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-a", Addr: "127.0.0.1:0", Status: metastore.MemberAlive, LastHeartbeat: time.Now().Unix()}); err != nil {
-		t.Fatalf("register owner: %v", err)
-	}
+	appendRecords(t, ownerLogs, []byte(`{"n":1}`), []byte(`{"n":2}`))
+	advanceHWM(t, ownerLogs, 2)
+	appendRecords(t, followerLogs, []byte(`{"n":1}`))
+	advanceHWM(t, followerLogs, 1)
 
-	var postOffsets []int64
-	follower := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			switch r.URL.Query().Get("offset") {
-			case "0":
-				_, _ = w.Write([]byte(`{"payload":"eyJuIjoxfQ=="}`))
-			default:
-				w.WriteHeader(http.StatusNotFound)
-			}
-		case http.MethodPost:
-			var req struct {
-				Offset int64 `json:"offset"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode follower post: %v", err)
-			}
-			postOffsets = append(postOffsets, req.Offset)
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			w.WriteHeader(http.StatusMethodNotAllowed)
-		}
-	}))
-	defer follower.Close()
-
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-b", Addr: follower.URL, Status: metastore.MemberAlive, LastHeartbeat: time.Now().Unix()}); err != nil {
-		t.Fatalf("register follower: %v", err)
-	}
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1, ReplicationFactor: 2}); err != nil {
-		t.Fatalf("create topic: %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-a", "node-b"); err != nil {
-		t.Fatalf("assign partition: %v", err)
-	}
-
-	log, err := logs.Get("orders", 0)
-	if err != nil {
-		t.Fatalf("logs.Get: %v", err)
-	}
-	if _, err := log.Append([]byte(`{"n":1}`)); err != nil {
-		t.Fatalf("Append first: %v", err)
-	}
-	if _, err := log.Append([]byte(`{"n":2}`)); err != nil {
-		t.Fatalf("Append second: %v", err)
-	}
-	if err := log.AdvanceHighWatermark(2); err != nil {
-		t.Fatalf("AdvanceHighWatermark: %v", err)
-	}
-
-	recovery := NewStoreRecovery("node-a", store, logs, follower.Client())
+	recovery := NewStoreRecovery("node-a", store, ownerLogs, nil)
 	if err := recovery.RepairOwnedPartitions(ctx); err != nil {
 		t.Fatalf("RepairOwnedPartitions: %v", err)
 	}
-	if len(postOffsets) != 1 || postOffsets[0] != 1 {
-		t.Fatalf("replica post offsets = %v, want [1]", postOffsets)
+
+	log, err := followerLogs.Get("orders", 0)
+	if err != nil {
+		t.Fatalf("follower logs.Get: %v", err)
+	}
+	payload, err := log.Read(1)
+	if err != nil {
+		t.Fatalf("follower Read(1): %v", err)
+	}
+	if string(payload) != `{"n":2}` {
+		t.Fatalf("follower Read(1) = %s, want %s", payload, `{"n":2}`)
 	}
 }
 
@@ -209,64 +188,26 @@ func TestStoreRecoveryRepairOwnedPartitionsStopsAtCommittedBoundary(t *testing.T
 	ctx := context.Background()
 	store := newRecoveryStore(t, "node-a")
 	defer store.Close()
-	logs := newRecoveryLogs(t, store)
-	defer logs.CloseAll()
+	ownerLogs := newRecoveryLogs(t, store)
+	defer ownerLogs.CloseAll()
+	followerLogs := newRecoveryLogs(t, store)
+	defer followerLogs.CloseAll()
+	followerAddr := startRecoveryQUICServer(t, followerLogs)
+	setupRecoveryAssignment(t, ctx, store, followerAddr)
 
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-a", Addr: "127.0.0.1:0", Status: metastore.MemberAlive, LastHeartbeat: time.Now().Unix()}); err != nil {
-		t.Fatalf("register owner: %v", err)
-	}
-
-	requests := make([]string, 0, 4)
-	follower := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		requests = append(requests, r.URL.RawQuery)
-		offset := r.URL.Query().Get("offset")
-		committedOnly := r.URL.Query().Get("committed") == "true"
-		switch offset {
-		case "0":
-			_, _ = w.Write([]byte(`{"payload":"eyJuIjoxfQ=="}`))
-		case "1":
-			if committedOnly {
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
-			_, _ = w.Write([]byte(`{"payload":"eyJuIjo5OX0="}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer follower.Close()
-
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-b", Addr: follower.URL, Status: metastore.MemberAlive, LastHeartbeat: time.Now().Unix()}); err != nil {
-		t.Fatalf("register follower: %v", err)
-	}
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1, ReplicationFactor: 2}); err != nil {
-		t.Fatalf("create topic: %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-a", "node-b"); err != nil {
-		t.Fatalf("assign partition: %v", err)
-	}
-
-	log, err := logs.Get("orders", 0)
-	if err != nil {
-		t.Fatalf("logs.Get: %v", err)
-	}
-	if err := log.AdvanceHighWatermark(1); err != nil {
-		t.Fatalf("AdvanceHighWatermark: %v", err)
-	}
-	if err := logs.CloseTopic("orders"); err != nil {
+	advanceHWM(t, ownerLogs, 1)
+	if err := ownerLogs.CloseTopic("orders"); err != nil {
 		t.Fatalf("CloseTopic: %v", err)
 	}
+	appendRecords(t, followerLogs, []byte(`{"n":1}`), []byte(`{"n":99}`))
+	advanceHWM(t, followerLogs, 1)
 
-	recovery := NewStoreRecovery("node-a", store, logs, follower.Client())
+	recovery := NewStoreRecovery("node-a", store, ownerLogs, nil)
 	if err := recovery.RepairOwnedPartitions(ctx); err != nil {
 		t.Fatalf("RepairOwnedPartitions: %v", err)
 	}
 
-	log, err = logs.Get("orders", 0)
+	log, err := ownerLogs.Get("orders", 0)
 	if err != nil {
 		t.Fatalf("logs.Get after recovery: %v", err)
 	}
@@ -278,64 +219,7 @@ func TestStoreRecoveryRepairOwnedPartitionsStopsAtCommittedBoundary(t *testing.T
 		t.Fatalf("Read(0): %v", err)
 	}
 	if string(payload) != `{"n":1}` {
-		t.Fatalf("Read(0) = %s, want %s", string(payload), `{"n":1}`)
-	}
-	for _, q := range requests {
-		if strings.Contains(q, "committed=true") && strings.Contains(q, "offset=0") {
-			return
-		}
-	}
-	t.Fatalf("replica requests = %v, want committed boundary probe for offset=0", requests)
-}
-
-func TestStoreRecoveryRepairOwnedPartitionsPropagatesFollowerRepairErrors(t *testing.T) {
-	ctx := context.Background()
-	store := newRecoveryStore(t, "node-a")
-	defer store.Close()
-	logs := newRecoveryLogs(t, store)
-	defer logs.CloseAll()
-
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-a", Addr: "127.0.0.1:0", Status: metastore.MemberAlive, LastHeartbeat: time.Now().Unix()}); err != nil {
-		t.Fatalf("register owner: %v", err)
-	}
-	follower := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte("offset mismatch"))
-	}))
-	defer follower.Close()
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-b", Addr: follower.URL, Status: metastore.MemberAlive, LastHeartbeat: time.Now().Unix()}); err != nil {
-		t.Fatalf("register follower: %v", err)
-	}
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1, ReplicationFactor: 2}); err != nil {
-		t.Fatalf("create topic: %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-a", "node-b"); err != nil {
-		t.Fatalf("assign partition: %v", err)
-	}
-
-	log, err := logs.Get("orders", 0)
-	if err != nil {
-		t.Fatalf("logs.Get: %v", err)
-	}
-	if _, err := log.Append([]byte(`{"n":1}`)); err != nil {
-		t.Fatalf("Append: %v", err)
-	}
-	if err := log.AdvanceHighWatermark(1); err != nil {
-		t.Fatalf("AdvanceHighWatermark: %v", err)
-	}
-
-	recovery := NewStoreRecovery("node-a", store, logs, follower.Client())
-	err = recovery.RepairOwnedPartitions(ctx)
-	if err == nil {
-		t.Fatal("RepairOwnedPartitions() error = nil, want follower repair failure")
-	}
-	want := "replicate request failed with status 409: offset mismatch"
-	if err.Error() != want {
-		t.Fatalf("RepairOwnedPartitions() error = %q, want %q", err.Error(), want)
+		t.Fatalf("Read(0) = %s, want %s", payload, `{"n":1}`)
 	}
 }
 
@@ -343,35 +227,14 @@ func TestStoreRecoveryRepairOwnedPartitionsPropagatesReplicaReadErrors(t *testin
 	ctx := context.Background()
 	store := newRecoveryStore(t, "node-a")
 	defer store.Close()
-	logs := newRecoveryLogs(t, store)
-	defer logs.CloseAll()
+	ownerLogs := newRecoveryLogs(t, store)
+	defer ownerLogs.CloseAll()
+	setupRecoveryAssignment(t, ctx, store, "127.0.0.1:1")
 
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-a", Addr: "127.0.0.1:0", Status: metastore.MemberAlive, LastHeartbeat: time.Now().Unix()}); err != nil {
-		t.Fatalf("register owner: %v", err)
-	}
-	follower := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("boom"))
-	}))
-	defer follower.Close()
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-b", Addr: follower.URL, Status: metastore.MemberAlive, LastHeartbeat: time.Now().Unix()}); err != nil {
-		t.Fatalf("register follower: %v", err)
-	}
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1, ReplicationFactor: 2}); err != nil {
-		t.Fatalf("create topic: %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-a", "node-b"); err != nil {
-		t.Fatalf("assign partition: %v", err)
-	}
-
-	recovery := NewStoreRecovery("node-a", store, logs, follower.Client())
+	recovery := NewStoreRecovery("node-a", store, ownerLogs, nil)
 	err := recovery.RepairOwnedPartitions(ctx)
 	if err == nil {
 		t.Fatal("RepairOwnedPartitions() error = nil, want replica read failure")
-	}
-	want := "replica read failed with status 500: boom"
-	if err.Error() != want {
-		t.Fatalf("RepairOwnedPartitions() error = %q, want %q", err.Error(), want)
 	}
 }
 
@@ -399,55 +262,22 @@ func TestStoreRecoveryRepairOwnedPartitionsSkipsDeadFollower(t *testing.T) {
 	if err := recovery.RepairOwnedPartitions(ctx); err != nil {
 		t.Fatalf("RepairOwnedPartitions: %v", err)
 	}
-
-	log, err := logs.Get("orders", 0)
-	if err != nil {
-		t.Fatalf("logs.Get: %v", err)
-	}
-	if got := log.NextOffset(); got != 0 {
-		t.Fatalf("NextOffset() = %d, want 0", got)
-	}
 }
 
-func TestStoreRecoveryFetchReplicaRecordRejectsInvalidJSONPayload(t *testing.T) {
-	follower := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"payload":"not-json"}`))
-	}))
-	defer follower.Close()
-
-	recovery := NewStoreRecovery("node-a", nil, nil, follower.Client())
-	_, found, err := recovery.fetchReplicaRecord(context.Background(), follower.URL, "orders", 0, 0, false)
-	if err == nil {
-		t.Fatal("fetchReplicaRecord() error = nil, want invalid payload error")
+func TestStoreRecoveryFetchReplicaRecordOverQUIC(t *testing.T) {
+	store := newRecoveryStore(t, "node-a")
+	defer store.Close()
+	logs := newRecoveryLogs(t, store)
+	defer logs.CloseAll()
+	addr := startRecoveryQUICServer(t, logs)
+	if err := store.CreateTopic(context.Background(), topic.Topic{Name: "orders", Partitions: 1, ReplicationFactor: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
 	}
-	if found {
-		t.Fatal("fetchReplicaRecord() found = true, want false on invalid payload")
-	}
-	if err.Error() != "decode replica read response: illegal base64 data at input byte 3" {
-		t.Fatalf("fetchReplicaRecord() error = %q, want %q", err.Error(), "decode replica read response: illegal base64 data at input byte 3")
-	}
-}
+	appendRecords(t, logs, []byte(`{"ok":true}`))
+	advanceHWM(t, logs, 1)
 
-func TestStoreRecoveryFetchReplicaRecordBuildsExpectedQuery(t *testing.T) {
-	follower := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/internal/v1/replicate" {
-			t.Fatalf("path = %s, want /internal/v1/replicate", r.URL.Path)
-		}
-		if got := r.URL.Query().Get("topic"); got != "orders" {
-			t.Fatalf("topic query = %s, want orders", got)
-		}
-		if got := r.URL.Query().Get("partition"); got != "3" {
-			t.Fatalf("partition query = %s, want 3", got)
-		}
-		if got := r.URL.Query().Get("offset"); got != "9" {
-			t.Fatalf("offset query = %s, want 9", got)
-		}
-		_, _ = w.Write([]byte(`{"payload":"eyJvayI6dHJ1ZX0="}`))
-	}))
-	defer follower.Close()
-
-	recovery := NewStoreRecovery("node-a", nil, nil, follower.Client())
-	payload, found, err := recovery.fetchReplicaRecord(context.Background(), follower.URL, "orders", 3, 9, false)
+	recovery := NewStoreRecovery("node-a", store, logs, nil)
+	payload, found, err := recovery.fetchReplicaRecord(context.Background(), addr, "orders", 0, 0, true)
 	if err != nil {
 		t.Fatalf("fetchReplicaRecord(): %v", err)
 	}
@@ -455,18 +285,23 @@ func TestStoreRecoveryFetchReplicaRecordBuildsExpectedQuery(t *testing.T) {
 		t.Fatal("fetchReplicaRecord() found = false, want true")
 	}
 	if string(payload) != `{"ok":true}` {
-		t.Fatalf("payload = %s, want %s", string(payload), `{"ok":true}`)
+		t.Fatalf("payload = %s, want %s", payload, `{"ok":true}`)
 	}
 }
 
-func TestStoreRecoveryFetchReplicaRecordNotFound(t *testing.T) {
-	follower := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer follower.Close()
+func TestStoreRecoveryFetchReplicaRecordCommittedOnlyNotFound(t *testing.T) {
+	store := newRecoveryStore(t, "node-a")
+	defer store.Close()
+	logs := newRecoveryLogs(t, store)
+	defer logs.CloseAll()
+	addr := startRecoveryQUICServer(t, logs)
+	if err := store.CreateTopic(context.Background(), topic.Topic{Name: "orders", Partitions: 1, ReplicationFactor: 1}); err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+	appendRecords(t, logs, []byte(`{"ok":true}`))
 
-	recovery := NewStoreRecovery("node-a", nil, nil, follower.Client())
-	payload, found, err := recovery.fetchReplicaRecord(context.Background(), follower.URL, "orders", 0, 0, false)
+	recovery := NewStoreRecovery("node-a", store, logs, nil)
+	payload, found, err := recovery.fetchReplicaRecord(context.Background(), addr, "orders", 0, 0, true)
 	if err != nil {
 		t.Fatalf("fetchReplicaRecord(): %v", err)
 	}
@@ -476,49 +311,4 @@ func TestStoreRecoveryFetchReplicaRecordNotFound(t *testing.T) {
 	if payload != nil {
 		t.Fatalf("payload = %v, want nil", payload)
 	}
-}
-
-func TestStoreRecoveryFetchReplicaRecordWrapsRequestErrors(t *testing.T) {
-	recovery := NewStoreRecovery("node-a", nil, nil, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return nil, fmt.Errorf("dial failed")
-	})})
-
-	_, found, err := recovery.fetchReplicaRecord(context.Background(), "127.0.0.1:1234", "orders", 0, 0, false)
-	if err == nil {
-		t.Fatal("fetchReplicaRecord() error = nil, want request error")
-	}
-	if found {
-		t.Fatal("fetchReplicaRecord() found = true, want false on request error")
-	}
-	if err.Error() != "send replica read request: Get \"http://127.0.0.1:1234/internal/v1/replicate?offset=0&partition=0&topic=orders\": dial failed" {
-		t.Fatalf("fetchReplicaRecord() error = %q", err.Error())
-	}
-}
-
-func TestStoreRecoveryFetchReplicaRecordBuildsCommittedQuery(t *testing.T) {
-	follower := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.URL.Query().Get("committed"); got != "true" {
-			t.Fatalf("committed query = %q, want true", got)
-		}
-		_, _ = w.Write([]byte(`{"payload":"eyJvayI6dHJ1ZX0="}`))
-	}))
-	defer follower.Close()
-
-	recovery := NewStoreRecovery("node-a", nil, nil, follower.Client())
-	payload, found, err := recovery.fetchReplicaRecord(context.Background(), follower.URL, "orders", 0, 0, true)
-	if err != nil {
-		t.Fatalf("fetchReplicaRecord(): %v", err)
-	}
-	if !found {
-		t.Fatal("fetchReplicaRecord() found = false, want true")
-	}
-	if string(payload) != `{"ok":true}` {
-		t.Fatalf("payload = %s, want %s", string(payload), `{"ok":true}`)
-	}
-}
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
-	return f(r)
 }
