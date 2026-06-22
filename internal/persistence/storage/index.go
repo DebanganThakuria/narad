@@ -6,14 +6,6 @@ import (
 	"sort"
 )
 
-func (l *Log) segmentIndexEntryCountLocked() int {
-	total := 0
-	for _, idx := range l.segmentIndexes {
-		total += len(idx.entries)
-	}
-	return total
-}
-
 func (l *Log) appendIndexLocked(entry indexEntry) {
 	idx := l.segmentIndexes[entry.segmentBaseOffset]
 	if idx == nil {
@@ -25,20 +17,17 @@ func (l *Log) appendIndexLocked(entry indexEntry) {
 	}
 	l.touchSegmentIndexLocked(entry.segmentBaseOffset)
 	l.pruneSegmentIndexesLocked(entry.segmentBaseOffset)
-	l.observeSegmentIndexStatsLocked()
 }
 
 func (l *Log) setSegmentIndexLocked(segmentBaseOffset int64, entries []indexEntry) {
 	entries = l.sparseIndexEntries(entries)
 	if len(entries) == 0 {
 		delete(l.segmentIndexes, segmentBaseOffset)
-		l.observeSegmentIndexStatsLocked()
 		return
 	}
 	l.segmentIndexes[segmentBaseOffset] = &segmentIndex{entries: entries}
 	l.touchSegmentIndexLocked(segmentBaseOffset)
 	l.pruneSegmentIndexesLocked(segmentBaseOffset)
-	l.observeSegmentIndexStatsLocked()
 }
 
 func (l *Log) sparseIndexEntries(entries []indexEntry) []indexEntry {
@@ -156,7 +145,6 @@ func (l *Log) scanSegmentFromIndexAnchorLocked(seg *segment, anchor indexEntry, 
 
 func (l *Log) deleteSegmentIndexLocked(segmentBaseOffset int64) {
 	delete(l.segmentIndexes, segmentBaseOffset)
-	l.observeSegmentIndexStatsLocked()
 }
 
 func (l *Log) touchSegmentIndexLocked(segmentBaseOffset int64) {

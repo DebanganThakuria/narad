@@ -1,38 +1,22 @@
 package storage
 
-import "time"
-
 // Read returns the payload bytes stored at the given offset. Lookup
 // order: in-memory buffer, decoded-frame cache, on-disk segment.
 func (l *Log) Read(offset int64) ([]byte, error) {
-	start := time.Now()
-	source := "unknown"
-	outcome := "ok"
-	defer func() {
-		if m := l.opts.Metrics; m != nil {
-			m.ObserveRead(time.Since(start), source, outcome)
-		}
-	}()
 	if rec, ok := l.buffer.readBuffered(offset); ok {
-		source = "buffer"
 		out := make([]byte, len(rec))
 		copy(out, rec)
 		return out, nil
 	}
 	if rec, ok := l.readFlushing(offset); ok {
-		source = "flushing"
 		return rec, nil
 	}
 
 	entry, idx, unlock, ok, err := l.indexEntryForRead(offset)
 	if err != nil {
-		source = "index"
-		outcome = "error"
 		return nil, err
 	}
 	if !ok {
-		source = "index"
-		outcome = "not_found"
 		return nil, ErrOffsetNotFound
 	}
 	defer unlock()
@@ -46,26 +30,19 @@ func (l *Log) Read(offset int64) ([]byte, error) {
 		out := make([]byte, len(rec))
 		copy(out, rec)
 		l.cacheMu.Unlock()
-		source = "cache"
 		return out, nil
 	}
 	l.cacheMu.Unlock()
 
 	seg := l.findSegmentLocked(entry.segmentBaseOffset)
 	if seg == nil {
-		source = "segment"
-		outcome = "corrupt"
 		return nil, ErrCorruptRecord
 	}
 	_, records, _, err := readFrameAt(seg.file, entry.framePos, l)
 	if err != nil {
-		source = "disk"
-		outcome = "error"
 		return nil, err
 	}
 	if idx < 0 || int(idx) >= len(records) {
-		source = "disk"
-		outcome = "corrupt"
 		return nil, ErrCorruptRecord
 	}
 
@@ -86,7 +63,6 @@ func (l *Log) Read(offset int64) ([]byte, error) {
 
 	out := make([]byte, len(cached[int(idx)]))
 	copy(out, cached[int(idx)])
-	source = "disk"
 	return out, nil
 }
 

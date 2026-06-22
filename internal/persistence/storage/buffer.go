@@ -21,11 +21,6 @@ type buffer struct {
 	flushRecords int
 }
 
-type bufferStats struct {
-	records int
-	bytes   int
-}
-
 func newBuffer(startOffset int64, flushBytes, flushRecords int) *buffer {
 	return &buffer{
 		baseOffset:   startOffset,
@@ -37,7 +32,7 @@ func newBuffer(startOffset int64, flushBytes, flushRecords int) *buffer {
 
 // push returns the assigned offset and reports whether the
 // byte/record threshold is now crossed.
-func (b *buffer) push(record []byte) (int64, bool, bufferStats) {
+func (b *buffer) push(record []byte) (int64, bool) {
 	cp := make([]byte, len(record))
 	copy(cp, record)
 
@@ -50,14 +45,13 @@ func (b *buffer) push(record []byte) (int64, bool, bufferStats) {
 	b.nextOffset++
 	b.bytes += len(cp)
 	cross := b.crossedThresholdLocked()
-	stats := b.statsLocked()
 	b.mu.Unlock()
-	return off, cross, stats
+	return off, cross
 }
 
-func (b *buffer) pushBatch(records [][]byte) (int64, int64, bool, bufferStats) {
+func (b *buffer) pushBatch(records [][]byte) (int64, int64, bool) {
 	if len(records) == 0 {
-		return 0, -1, false, bufferStats{}
+		return 0, -1, false
 	}
 	cps := make([][]byte, len(records))
 	for i, r := range records {
@@ -78,9 +72,8 @@ func (b *buffer) pushBatch(records [][]byte) (int64, int64, bool, bufferStats) {
 	}
 	last := b.nextOffset - 1
 	cross := b.crossedThresholdLocked()
-	stats := b.statsLocked()
 	b.mu.Unlock()
-	return first, last, cross, stats
+	return first, last, cross
 }
 
 // drain hands the buffered records to the flusher and resets the
@@ -114,12 +107,6 @@ func (b *buffer) shouldFlushByAge(maxAge time.Duration) bool {
 	return !b.firstAt.IsZero() && time.Since(b.firstAt) >= maxAge
 }
 
-func (b *buffer) stats() bufferStats {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.statsLocked()
-}
-
 func (b *buffer) readBuffered(offset int64) ([]byte, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -147,11 +134,4 @@ func (b *buffer) crossedThresholdLocked() bool {
 		return true
 	}
 	return false
-}
-
-func (b *buffer) statsLocked() bufferStats {
-	return bufferStats{
-		records: len(b.records),
-		bytes:   b.bytes,
-	}
 }

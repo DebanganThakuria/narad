@@ -36,7 +36,6 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	m.HTTPBytesIn.WithLabelValues("/x").Add(1)
 	m.HTTPBytesOut.WithLabelValues("/x").Add(1)
 	m.HTTPRequestsInFlight.Set(0)
-	m.HotPathStageDurationSeconds.WithLabelValues("broker", "produce", "append", "ok").Observe(0.001)
 	m.MessagesProducedTotal.WithLabelValues("t", "0").Inc()
 	m.MessagesConsumedTotal.WithLabelValues("t", "0").Inc()
 	m.BytesProducedTotal.WithLabelValues("t", "0").Add(1)
@@ -55,14 +54,8 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	m.ConsumerDroppedMessages.WithLabelValues("t", "0").Set(0)
 	m.OldestUnconsumedAgeSeconds.WithLabelValues("t", "0").Set(0)
 	m.ActivePartitionLogs.Set(1)
-	m.BufferRecords.WithLabelValues("t", "0").Set(1)
-	m.BufferBytes.WithLabelValues("t", "0").Set(1)
-	m.SegmentIndexEntries.WithLabelValues("t", "0").Set(1)
 	m.FlushDurationSeconds.WithLabelValues("t", "0").Observe(0.001)
 	m.FlushBytesTotal.WithLabelValues("t", "0").Add(1)
-	m.FlushRecordsPerFrame.WithLabelValues("t", "0").Observe(1)
-	m.FlushPayloadBytes.WithLabelValues("t", "0").Observe(1)
-	m.FlushFrameBytes.WithLabelValues("t", "0").Observe(1)
 	m.FsyncDurationSeconds.WithLabelValues("t", "0").Observe(0.001)
 	m.HighWatermarkPersistSeconds.WithLabelValues("t", "0", "ok").Observe(0.001)
 	m.SegmentsRolledTotal.WithLabelValues("t", "0").Inc()
@@ -72,16 +65,6 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	m.RetentionRunSeconds.WithLabelValues("t", "0").Observe(0.001)
 	m.SegmentsScannedAtBoot.WithLabelValues("t", "0").Inc()
 	m.MetastoreTxDurationSeconds.WithLabelValues("get_topic", "read", "ok").Observe(0.001)
-	m.MetastoreBboltOpenReadTx.Set(0)
-	m.MetastoreBboltReadTx.Set(1)
-	m.MetastoreBboltFreePages.Set(1)
-	m.MetastoreBboltPendingPages.Set(0)
-	m.MetastoreBboltFreeAllocBytes.Set(4096)
-	m.MetastoreBboltFreelistInuse.Set(128)
-	m.MetastoreBboltWrites.Set(1)
-	m.MetastoreBboltWriteSeconds.Set(0.001)
-	m.MetastoreBboltSpillSeconds.Set(0.001)
-	m.MetastoreBboltRebalanceSeconds.Set(0.001)
 	m.IncError("test", "kind")
 	m.BootDurationSeconds.Set(0.1)
 
@@ -91,7 +74,6 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 		"narad_http_request_bytes_in_total",
 		"narad_http_response_bytes_out_total",
 		"narad_http_requests_in_flight",
-		"narad_hot_path_stage_duration_seconds",
 		"narad_messages_produced_total",
 		"narad_messages_consumed_total",
 		"narad_bytes_produced_total",
@@ -110,14 +92,8 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 		"narad_consumer_dropped_messages",
 		"narad_oldest_unconsumed_message_age_seconds",
 		"narad_storage_active_partition_logs",
-		"narad_storage_buffer_records",
-		"narad_storage_buffer_bytes",
-		"narad_storage_segment_index_entries",
 		"narad_storage_flush_duration_seconds",
 		"narad_storage_flush_bytes_total",
-		"narad_storage_flush_records_per_frame",
-		"narad_storage_flush_payload_bytes",
-		"narad_storage_flush_frame_bytes",
 		"narad_storage_fsync_duration_seconds",
 		"narad_storage_high_watermark_persist_duration_seconds",
 		"narad_storage_segments_rolled_total",
@@ -127,16 +103,6 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 		"narad_storage_retention_run_duration_seconds",
 		"narad_storage_segments_scanned_at_boot_total",
 		"narad_metastore_tx_duration_seconds",
-		"narad_metastore_bbolt_open_read_transactions",
-		"narad_metastore_bbolt_read_transactions",
-		"narad_metastore_bbolt_free_pages",
-		"narad_metastore_bbolt_pending_pages",
-		"narad_metastore_bbolt_free_alloc_bytes",
-		"narad_metastore_bbolt_freelist_inuse_bytes",
-		"narad_metastore_bbolt_writes",
-		"narad_metastore_bbolt_write_seconds",
-		"narad_metastore_bbolt_spill_seconds",
-		"narad_metastore_bbolt_rebalance_seconds",
 		"narad_errors_total",
 		"narad_boot_duration_seconds",
 	}
@@ -154,6 +120,31 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	for _, name := range want {
 		if _, ok := got[name]; !ok {
 			t.Errorf("metric %q not registered", name)
+		}
+	}
+
+	notExported := []string{
+		"narad_hot_path_stage_duration_seconds",
+		"narad_storage_buffer_records",
+		"narad_storage_buffer_bytes",
+		"narad_storage_segment_index_entries",
+		"narad_storage_flush_records_per_frame",
+		"narad_storage_flush_payload_bytes",
+		"narad_storage_flush_frame_bytes",
+		"narad_metastore_bbolt_open_read_transactions",
+		"narad_metastore_bbolt_read_transactions",
+		"narad_metastore_bbolt_free_pages",
+		"narad_metastore_bbolt_pending_pages",
+		"narad_metastore_bbolt_free_alloc_bytes",
+		"narad_metastore_bbolt_freelist_inuse_bytes",
+		"narad_metastore_bbolt_writes",
+		"narad_metastore_bbolt_write_seconds",
+		"narad_metastore_bbolt_spill_seconds",
+		"narad_metastore_bbolt_rebalance_seconds",
+	}
+	for _, name := range notExported {
+		if _, ok := got[name]; ok {
+			t.Errorf("debug/internal metric %q should not be exported by default", name)
 		}
 	}
 }

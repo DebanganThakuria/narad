@@ -15,7 +15,6 @@ func (l *Log) drainBufferForFlush() ([][]byte, int64) {
 	l.buffer.baseOffset = l.buffer.nextOffset
 	l.buffer.bytes = 0
 	l.buffer.firstAt = time.Time{}
-	stats := l.buffer.statsLocked()
 
 	l.flushingMu.Lock()
 	l.flushingBase = base
@@ -23,7 +22,6 @@ func (l *Log) drainBufferForFlush() ([][]byte, int64) {
 	l.flushingValid = true
 	l.flushingMu.Unlock()
 
-	l.observeBufferStats(stats)
 	return records, base
 }
 

@@ -66,17 +66,9 @@ type storageMetricsProbe struct {
 	hwms    atomic.Int64
 }
 
-func (m *storageMetricsProbe) ObserveAppend(string, time.Duration, string, int, int64) {}
-
-func (m *storageMetricsProbe) ObserveRead(time.Duration, string, string) {}
-
-func (m *storageMetricsProbe) ObserveFlush(time.Duration, int, int64, int64) {
+func (m *storageMetricsProbe) ObserveFlush(time.Duration, int64) {
 	m.flushes.Add(1)
 }
-
-func (m *storageMetricsProbe) SetBufferStats(int, int64) {}
-
-func (m *storageMetricsProbe) SetSegmentIndexStats(int) {}
 
 func (m *storageMetricsProbe) ObserveFsync(time.Duration) {
 	m.fsyncs.Add(1)

@@ -30,9 +30,6 @@ type Metrics struct {
 	HTTPBytesOut         *prometheus.CounterVec   // route
 	HTTPRequestsInFlight prometheus.Gauge         // total (route unknown at entry)
 
-	// Hot-path stage timings
-	HotPathStageDurationSeconds *prometheus.HistogramVec // component, operation, stage, outcome
-
 	// Broker throughput
 	MessagesProducedTotal  *prometheus.CounterVec // topic, partition
 	MessagesConsumedTotal  *prometheus.CounterVec // topic, partition
@@ -64,14 +61,8 @@ type Metrics struct {
 
 	// Storage lifecycle
 	ActivePartitionLogs         prometheus.Gauge         // total open partition logs
-	BufferRecords               *prometheus.GaugeVec     // topic, partition
-	BufferBytes                 *prometheus.GaugeVec     // topic, partition
-	SegmentIndexEntries         *prometheus.GaugeVec     // topic, partition
 	FlushDurationSeconds        *prometheus.HistogramVec // topic, partition
 	FlushBytesTotal             *prometheus.CounterVec   // topic, partition
-	FlushRecordsPerFrame        *prometheus.HistogramVec // topic, partition
-	FlushPayloadBytes           *prometheus.HistogramVec // topic, partition
-	FlushFrameBytes             *prometheus.HistogramVec // topic, partition
 	FsyncDurationSeconds        *prometheus.HistogramVec // topic, partition
 	HighWatermarkPersistSeconds *prometheus.HistogramVec // topic, partition, outcome
 	SegmentsRolledTotal         *prometheus.CounterVec   // topic, partition
@@ -82,17 +73,7 @@ type Metrics struct {
 	SegmentsScannedAtBoot       *prometheus.CounterVec   // topic, partition
 
 	// Metastore / bbolt
-	MetastoreTxDurationSeconds     *prometheus.HistogramVec // operation, mode, status
-	MetastoreBboltOpenReadTx       prometheus.Gauge
-	MetastoreBboltReadTx           prometheus.Gauge
-	MetastoreBboltFreePages        prometheus.Gauge
-	MetastoreBboltPendingPages     prometheus.Gauge
-	MetastoreBboltFreeAllocBytes   prometheus.Gauge
-	MetastoreBboltFreelistInuse    prometheus.Gauge
-	MetastoreBboltWrites           prometheus.Gauge
-	MetastoreBboltWriteSeconds     prometheus.Gauge
-	MetastoreBboltSpillSeconds     prometheus.Gauge
-	MetastoreBboltRebalanceSeconds prometheus.Gauge
+	MetastoreTxDurationSeconds *prometheus.HistogramVec // operation, mode, status
 
 	// Errors
 	ErrorsTotal *prometheus.CounterVec // component, kind
@@ -141,13 +122,6 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name:      "requests_in_flight",
 			Help:      "Number of HTTP requests currently being served. Not labeled by route — the matched route is only known after dispatch, so we track the total only.",
 		}),
-
-		HotPathStageDurationSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Namespace: Namespace,
-			Name:      "hot_path_stage_duration_seconds",
-			Help:      "Duration of bounded-cardinality internal hot-path stages.",
-			Buckets:   fastDurationBuckets,
-		}, []string{"component", "operation", "stage", "outcome"}),
 
 		MessagesProducedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
@@ -284,27 +258,6 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:      "Currently open partition logs in this Narad process.",
 		}),
 
-		BufferRecords: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "storage",
-			Name:      "buffer_records",
-			Help:      "Records currently buffered in memory before storage flush, by partition.",
-		}, []string{"topic", "partition"}),
-
-		BufferBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "storage",
-			Name:      "buffer_bytes",
-			Help:      "Payload bytes currently buffered in memory before storage flush, by partition.",
-		}, []string{"topic", "partition"}),
-
-		SegmentIndexEntries: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "storage",
-			Name:      "segment_index_entries",
-			Help:      "Hot in-memory segment index entries currently retained, by partition.",
-		}, []string{"topic", "partition"}),
-
 		FlushDurationSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: Namespace,
 			Subsystem: "storage",
@@ -318,30 +271,6 @@ func New(reg prometheus.Registerer) *Metrics {
 			Subsystem: "storage",
 			Name:      "flush_bytes_total",
 			Help:      "Total bytes written by flusher to segment files.",
-		}, []string{"topic", "partition"}),
-
-		FlushRecordsPerFrame: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Namespace: Namespace,
-			Subsystem: "storage",
-			Name:      "flush_records_per_frame",
-			Help:      "Records written per storage flush frame.",
-			Buckets:   storageFlushRecordBuckets,
-		}, []string{"topic", "partition"}),
-
-		FlushPayloadBytes: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Namespace: Namespace,
-			Subsystem: "storage",
-			Name:      "flush_payload_bytes",
-			Help:      "Logical payload bytes written per storage flush frame before codec/framing.",
-			Buckets:   storageFlushByteBuckets,
-		}, []string{"topic", "partition"}),
-
-		FlushFrameBytes: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Namespace: Namespace,
-			Subsystem: "storage",
-			Name:      "flush_frame_bytes",
-			Help:      "Encoded bytes written per storage flush frame.",
-			Buckets:   storageFlushByteBuckets,
 		}, []string{"topic", "partition"}),
 
 		FsyncDurationSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -411,76 +340,6 @@ func New(reg prometheus.Registerer) *Metrics {
 			Buckets:   fastDurationBuckets,
 		}, []string{"operation", "mode", "status"}),
 
-		MetastoreBboltOpenReadTx: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "metastore_bbolt",
-			Name:      "open_read_transactions",
-			Help:      "Current number of open bbolt read transactions for the metastore FSM database.",
-		}),
-
-		MetastoreBboltReadTx: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "metastore_bbolt",
-			Name:      "read_transactions",
-			Help:      "Cumulative bbolt read transactions started for the metastore FSM database since process start.",
-		}),
-
-		MetastoreBboltFreePages: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "metastore_bbolt",
-			Name:      "free_pages",
-			Help:      "Total free pages on the metastore FSM bbolt freelist.",
-		}),
-
-		MetastoreBboltPendingPages: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "metastore_bbolt",
-			Name:      "pending_pages",
-			Help:      "Total pending free pages on the metastore FSM bbolt freelist.",
-		}),
-
-		MetastoreBboltFreeAllocBytes: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "metastore_bbolt",
-			Name:      "free_alloc_bytes",
-			Help:      "Bytes allocated in free pages in the metastore FSM bbolt database.",
-		}),
-
-		MetastoreBboltFreelistInuse: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "metastore_bbolt",
-			Name:      "freelist_inuse_bytes",
-			Help:      "Bytes used by the metastore FSM bbolt freelist.",
-		}),
-
-		MetastoreBboltWrites: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "metastore_bbolt",
-			Name:      "writes",
-			Help:      "Cumulative bbolt page writes performed by the metastore FSM database since process start.",
-		}),
-
-		MetastoreBboltWriteSeconds: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "metastore_bbolt",
-			Name:      "write_seconds",
-			Help:      "Cumulative time spent writing bbolt pages for the metastore FSM database.",
-		}),
-
-		MetastoreBboltSpillSeconds: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "metastore_bbolt",
-			Name:      "spill_seconds",
-			Help:      "Cumulative time spent spilling bbolt nodes for the metastore FSM database.",
-		}),
-
-		MetastoreBboltRebalanceSeconds: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "metastore_bbolt",
-			Name:      "rebalance_seconds",
-			Help:      "Cumulative time spent rebalancing bbolt nodes for the metastore FSM database.",
-		}),
-
 		ErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Name:      "errors_total",
@@ -496,7 +355,6 @@ func New(reg prometheus.Registerer) *Metrics {
 
 	reg.MustRegister(
 		m.HTTPRequestsTotal, m.HTTPRequestDuration, m.HTTPBytesIn, m.HTTPBytesOut, m.HTTPRequestsInFlight,
-		m.HotPathStageDurationSeconds,
 		m.MessagesProducedTotal, m.MessagesConsumedTotal,
 		m.BytesProducedTotal, m.BytesConsumedTotal,
 		m.ProduceRejectionsTotal,
@@ -506,18 +364,12 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
 		m.InFlightSize, m.AckedAheadSize, m.ReserveSkipped, m.AckRejected,
 		m.ActivePartitionLogs,
-		m.BufferRecords, m.BufferBytes, m.SegmentIndexEntries,
-		m.FlushDurationSeconds, m.FlushBytesTotal, m.FlushRecordsPerFrame, m.FlushPayloadBytes, m.FlushFrameBytes,
+		m.FlushDurationSeconds, m.FlushBytesTotal,
 		m.FsyncDurationSeconds, m.HighWatermarkPersistSeconds,
 		m.SegmentsRolledTotal,
 		m.RetentionDeletionsTotal, m.RetentionBytesDeleted, m.RetentionMessagesDeleted, m.RetentionRunSeconds,
 		m.SegmentsScannedAtBoot,
 		m.MetastoreTxDurationSeconds,
-		m.MetastoreBboltOpenReadTx, m.MetastoreBboltReadTx,
-		m.MetastoreBboltFreePages, m.MetastoreBboltPendingPages,
-		m.MetastoreBboltFreeAllocBytes, m.MetastoreBboltFreelistInuse,
-		m.MetastoreBboltWrites, m.MetastoreBboltWriteSeconds,
-		m.MetastoreBboltSpillSeconds, m.MetastoreBboltRebalanceSeconds,
 		m.ErrorsTotal,
 		m.BootDurationSeconds,
 	)
@@ -534,14 +386,6 @@ var storageDurationBuckets = []float64{
 	0.1, 0.5, 1, // 100ms, 500ms, 1s
 }
 
-var storageFlushRecordBuckets = []float64{
-	1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000,
-}
-
-var storageFlushByteBuckets = []float64{
-	128, 512, 1 << 10, 4 << 10, 16 << 10, 64 << 10, 256 << 10, 1 << 20, 4 << 20, 16 << 20,
-}
-
 // fastDurationBuckets focuses on the <10ms target while still keeping
 // enough headroom to identify pathological slow calls.
 var fastDurationBuckets = []float64{
@@ -551,10 +395,9 @@ var fastDurationBuckets = []float64{
 }
 
 func (m *Metrics) ObserveHotPathStage(component, operation, stage, outcome string, duration time.Duration) {
-	if m == nil {
-		return
-	}
-	m.HotPathStageDurationSeconds.WithLabelValues(component, operation, stage, outcome).Observe(duration.Seconds())
+	// Kept as a compatibility hook for internal debug observers. The
+	// default Prometheus surface intentionally does not export per-stage
+	// hot-path metrics because they are noisy and easy to overuse.
 }
 
 func (m *Metrics) ObserveMetastoreTx(operation, mode, status string, duration time.Duration) {

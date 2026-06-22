@@ -147,7 +147,6 @@ func (f *fsmState) observeTx(operation, mode string, err error, duration time.Du
 		return
 	}
 	f.metric.ObserveMetastoreTx(operation, mode, statusForErr(err), duration)
-	f.metric.ObserveMetastoreBboltStats(bboltStatsFrom(f.db.Stats()))
 }
 
 // Apply is called by Raft when a log entry is committed.
