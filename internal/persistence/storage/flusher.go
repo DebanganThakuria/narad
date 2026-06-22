@@ -104,7 +104,6 @@ func (f *flusher) timerFlushAge() time.Duration {
 
 func (f *flusher) writeBatch(records [][]byte, baseOffset int64, forceSync bool) error {
 	flushStart := time.Now()
-	payloadBytes := payloadBytes(records)
 	frame, err := encodeFrame(records, baseOffset, f.log.codec)
 	if err != nil {
 		return err
@@ -134,7 +133,7 @@ func (f *flusher) writeBatch(records [][]byte, baseOffset int64, forceSync bool)
 	shouldRoll := active.sizeBytes >= f.log.opts.SegmentBytes
 
 	if m := f.log.opts.Metrics; m != nil {
-		m.ObserveFlush(time.Since(flushStart), len(records), payloadBytes, int64(n))
+		m.ObserveFlush(time.Since(flushStart), int64(n))
 	}
 
 	f.unsyncedBytes += int64(n)
@@ -163,14 +162,6 @@ func (f *flusher) writeBatch(records [][]byte, baseOffset int64, forceSync bool)
 	default:
 	}
 	return nil
-}
-
-func payloadBytes(records [][]byte) int64 {
-	var total int64
-	for _, record := range records {
-		total += int64(len(record))
-	}
-	return total
 }
 
 func (f *flusher) syncIfNeeded(force bool, active *segment) error {

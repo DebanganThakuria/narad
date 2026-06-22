@@ -320,37 +320,6 @@
       ],
       "title": "Narad Memory By Node",
       "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 32
-      },
-      "id": 9,
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.95, sum(rate(narad_hot_path_stage_duration_seconds_bucket{component=\"replication\",operation=~\"replicate|replicate_batch\"}[5m])) by (le, operation, stage, outcome))",
-          "legendFormat": "replication {{stage}} {{outcome}}"
-        },
-        {
-          "expr": "histogram_quantile(0.95, sum(rate(narad_hot_path_stage_duration_seconds_bucket{component=~\"broker|broker_runtime\",operation=\"produce\",stage=~\"replicate|lock_wait|append|advance_high_watermark\"}[5m])) by (le, component, stage, outcome))",
-          "legendFormat": "{{component}} {{stage}} {{outcome}}"
-        }
-      ],
-      "title": "Produce Hot Path",
-      "type": "timeseries"
     }
   ],
   "refresh": "5s",

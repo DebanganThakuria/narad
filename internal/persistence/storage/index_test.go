@@ -161,7 +161,11 @@ func segmentIndexEntries(t *testing.T, l *Log) int {
 	t.Helper()
 	l.rwmu.RLock()
 	defer l.rwmu.RUnlock()
-	return l.segmentIndexEntryCountLocked()
+	total := 0
+	for _, idx := range l.segmentIndexes {
+		total += len(idx.entries)
+	}
+	return total
 }
 
 func assertSparseReads(t *testing.T, l *Log, total int) {

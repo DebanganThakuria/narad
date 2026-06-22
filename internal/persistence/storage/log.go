@@ -211,8 +211,6 @@ func NewLog(dir string, opts Options) (*Log, error) {
 	l.lastHWMSync = time.Now()
 	l.flusher = newFlusher(l, &l.rwmu, opts.FlushInterval)
 	l.reaper = newReaper(l, opts.Retention)
-	l.observeBufferStats(l.buffer.stats())
-	l.observeSegmentIndexStats()
 	go l.flusher.run()
 	go l.reaper.run()
 
@@ -223,28 +221,6 @@ func NewLog(dir string, opts Options) (*Log, error) {
 // the buffer or flushed to disk. Buffered (size 1); wake-ups
 // coalesce.
 func (l *Log) NotifyC() <-chan struct{} { return l.notify }
-
-func (l *Log) observeBufferStats(stats bufferStats) {
-	if m := l.opts.Metrics; m != nil {
-		m.SetBufferStats(stats.records, int64(stats.bytes))
-	}
-}
-
-func (l *Log) observeSegmentIndexStats() {
-	if l.opts.Metrics == nil {
-		return
-	}
-	l.rwmu.RLock()
-	entries := l.segmentIndexEntryCountLocked()
-	l.rwmu.RUnlock()
-	l.opts.Metrics.SetSegmentIndexStats(entries)
-}
-
-func (l *Log) observeSegmentIndexStatsLocked() {
-	if m := l.opts.Metrics; m != nil {
-		m.SetSegmentIndexStats(l.segmentIndexEntryCountLocked())
-	}
-}
 
 func (l *Log) findSegmentLocked(baseOffset int64) *segment {
 	for _, s := range l.segments {
