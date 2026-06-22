@@ -37,6 +37,7 @@ and end-to-end tests.
 - [Contributing guide](./CONTRIBUTING.md)
 - [Code of conduct](./CODE_OF_CONDUCT.md)
 - [Security policy](./SECURITY.md)
+- [PCA flow diagrams](./PCA_FLOWS.md)
 - [License](./LICENSE)
 
 > **Current implementation status:** the control-plane architecture is in
