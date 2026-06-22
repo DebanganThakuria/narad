@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -136,6 +138,83 @@ func newTestStore(t *testing.T) *metastore.Store {
 
 	t.Fatal("timed out waiting for leader")
 	return nil
+}
+
+func newTestStoreCluster(t *testing.T, ids ...string) map[string]*metastore.Store {
+	t.Helper()
+	if len(ids) == 0 {
+		t.Fatal("newTestStoreCluster requires at least one node")
+	}
+
+	addrs := make(map[string]string, len(ids))
+	for _, id := range ids {
+		addrs[id] = freeTCPAddr(t)
+	}
+
+	baseDir := t.TempDir()
+	stores := make(map[string]*metastore.Store, len(ids))
+	for _, id := range ids {
+		peers := make([]metastore.Peer, 0, len(ids)-1)
+		for _, peerID := range ids {
+			if peerID == id {
+				continue
+			}
+			peers = append(peers, metastore.Peer{ID: peerID, Addr: addrs[peerID]})
+		}
+		store, err := metastore.New(metastore.Config{
+			NodeID:        id,
+			DataDir:       filepath.Join(baseDir, fmt.Sprintf("metastore-%s", id)),
+			BindAddr:      addrs[id],
+			AdvertiseAddr: addrs[id],
+			Peers:         peers,
+		})
+		if err != nil {
+			t.Fatalf("metastore.New(%s) error = %v", id, err)
+		}
+		stores[id] = store
+		t.Cleanup(func() { _ = store.Close() })
+	}
+	return stores
+}
+
+func freeTCPAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	return addr
+}
+
+func waitForClusterLeader(t *testing.T, stores map[string]*metastore.Store) (string, *metastore.Store) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for id, store := range stores {
+			if store.IsLeader() {
+				return id, store
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for cluster leader")
+	return "", nil
+}
+
+func waitForMember(t *testing.T, store *metastore.Store, id string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := store.GetMember(id); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for member %q", id)
 }
 
 func seedTopicRouteState(t *testing.T, store *metastore.Store) {
@@ -1383,6 +1462,57 @@ func TestRouteCreateTopicUsesMemberHTTPAddrWhenClusterAddrMatchesLeader(t *testi
 	}
 	if gotAddr != leaderHTTPAddr {
 		t.Fatalf("forwarded addr = %q, want %q", gotAddr, leaderHTTPAddr)
+	}
+}
+
+func TestRouteCreateTopicFallsBackToLeaderIDWhenLeaderAddressDoesNotMatchMemberAddr(t *testing.T) {
+	stores := newTestStoreCluster(t, "node-0", "node-1", "node-2")
+	leaderID, leaderStore := waitForClusterLeader(t, stores)
+
+	followerID := ""
+	for id := range stores {
+		if id != leaderID {
+			followerID = id
+			break
+		}
+	}
+	if followerID == "" {
+		t.Fatal("no follower found")
+	}
+	followerStore := stores[followerID]
+
+	const leaderHTTPAddr = "leader.narad.svc.cluster.local:7942"
+	if err := leaderStore.RegisterMember(context.Background(), metastore.Member{
+		ID:          leaderID,
+		Addr:        leaderHTTPAddr,
+		ClusterAddr: "different-address-shape:7943",
+		Status:      metastore.MemberAlive,
+	}); err != nil {
+		t.Fatalf("RegisterMember(%s) error = %v", leaderID, err)
+	}
+	waitForMember(t, followerStore, leaderID)
+
+	var gotAddr string
+	router := NewRouter(followerStore, followerID, partition.NewHashRoundRobin(), nil)
+	router.peer = fakePeerClient{createTopicFn: func(_ context.Context, addr string, body []byte) (nodewire.Response, error) {
+		gotAddr = addr
+		if string(body) != `{"name":"orders"}` {
+			t.Fatalf("body = %q, want create topic body", body)
+		}
+		return nodewire.Response{Status: http.StatusCreated}, nil
+	}}
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewReader([]byte(`{"name":"orders"}`)))
+
+	forwarded := router.RouteCreateTopic(context.Background(), res, req, []byte(`{"name":"orders"}`))
+	if !forwarded {
+		t.Fatal("RouteCreateTopic() = false, want true")
+	}
+	if gotAddr != leaderHTTPAddr {
+		t.Fatalf("forwarded addr = %q, want %q", gotAddr, leaderHTTPAddr)
+	}
+	if res.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusCreated)
 	}
 }
 

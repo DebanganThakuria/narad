@@ -27,4 +27,9 @@ func (s *Store) LeaderAddr() string {
 	return string(serverAddress)
 }
 
+func (s *Store) LeaderID() string {
+	_, serverID := s.r.LeaderWithID()
+	return string(serverID)
+}
+
 var _ Metastore = (*Store)(nil)

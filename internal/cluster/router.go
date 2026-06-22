@@ -215,7 +215,7 @@ func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.R
 
 // RouteCreateTopic forwards a topic create request to the cluster leader.
 func (rt *Router) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, _ *http.Request, body []byte) bool {
-	memberAddr := rt.memberAddrByClusterAddr(rt.store.LeaderAddr())
+	memberAddr := rt.leaderMemberAddr()
 	if memberAddr == "" {
 		return false
 	}
@@ -230,7 +230,7 @@ func (rt *Router) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, _
 
 // RouteAlterTopic forwards a topic alter request to the cluster leader.
 func (rt *Router) RouteAlterTopic(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, body []byte) bool {
-	memberAddr := rt.memberAddrByClusterAddr(rt.store.LeaderAddr())
+	memberAddr := rt.leaderMemberAddr()
 	if memberAddr == "" {
 		return false
 	}
@@ -245,7 +245,7 @@ func (rt *Router) RouteAlterTopic(ctx context.Context, w http.ResponseWriter, _ 
 
 // RouteDeleteTopic forwards a topic delete request to the cluster leader.
 func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string) bool {
-	memberAddr := rt.memberAddrByClusterAddr(rt.store.LeaderAddr())
+	memberAddr := rt.leaderMemberAddr()
 	if memberAddr == "" {
 		return false
 	}

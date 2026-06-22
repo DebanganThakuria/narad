@@ -74,6 +74,9 @@ func leaderMemberAddr(store *metastore.Store) string {
 	if strings.TrimSpace(leaderClusterAddr) == "" {
 		return ""
 	}
+	if member, err := store.GetMember(store.LeaderID()); err == nil && member.Status != metastore.MemberDead {
+		return strings.TrimSpace(member.Addr)
+	}
 	members, err := store.ListMembers()
 	if err != nil {
 		return ""
