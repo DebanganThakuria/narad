@@ -4,6 +4,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -263,17 +264,22 @@ func (rt *Router) BroadcastDeleteTopic(ctx context.Context, topicName string) er
 	if err != nil {
 		return err
 	}
+	// Attempt every live member even if one fails: a single unreachable
+	// peer must not stop the others from purging. Any member we miss is
+	// reclaimed by its startup orphan sweep.
+	var joined error
 	for _, member := range members {
 		if member.Status == metastore.MemberDead || strings.TrimSpace(member.ID) == strings.TrimSpace(rt.selfID) {
 			continue
 		}
 		res, err := rt.peer.PurgeTopic(ctx, member.Addr, topicName)
 		if err != nil {
-			return err
+			joined = errors.Join(joined, fmt.Errorf("purge %s on %s: %w", topicName, member.ID, err))
+			continue
 		}
 		if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
-			return fmt.Errorf("delete purge returned status %d for %s", res.Status, member.ID)
+			joined = errors.Join(joined, fmt.Errorf("purge %s returned status %d for %s", topicName, res.Status, member.ID))
 		}
 	}
-	return nil
+	return joined
 }
