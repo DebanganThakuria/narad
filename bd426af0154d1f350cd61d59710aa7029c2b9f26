@@ -1,0 +1,8 @@
+internal/persistence/storage/segment.go
+  9550bf40-bf98-490b-9ce8-76a868368628:2026-06-23T12:34:50.717Z 113-115
+internal/platform/clusterrpc/quic_tls.go
+  9550bf40-bf98-490b-9ce8-76a868368628:2026-06-23T12:54:28.127Z 1,12-14
+internal/protocol/clusterwire/stream.go
+  9550bf40-bf98-490b-9ce8-76a868368628:2026-06-23T12:54:10.462Z 1,5
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"9550bf40-bf98-490b-9ce8-76a868368628:2026-06-23T12:34:50.717Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 3, "overriden_lines": 0}, "9550bf40-bf98-490b-9ce8-76a868368628:2026-06-23T12:54:28.127Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 4, "overriden_lines": 0}, "9550bf40-bf98-490b-9ce8-76a868368628:2026-06-23T12:54:10.462Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 2, "overriden_lines": 0}}}
