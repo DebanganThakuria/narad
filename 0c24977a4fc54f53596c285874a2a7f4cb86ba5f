@@ -1,0 +1,4 @@
+.gitignore
+  bd2710f9-be68-4d10-a8bd-4bfecfacb629:2026-05-13T09:22:38.424Z 3,7,9
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"bd2710f9-be68-4d10-a8bd-4bfecfacb629:2026-05-13T09:22:38.424Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 3, "overriden_lines": 0}}}

@@ -1,0 +1,169 @@
+.gitignore
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:51:22.954Z 1,3,5-6,8
+Makefile
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:41:12.636Z 1,8-9,11-12,14-19,21,24,26,28-29,33-35,38-39,42-43,46-47,50-51,57-58,61-62
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:16:01.099Z 3-5,31,54,64-67,69,71-84,91,93,95-98,100
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:04:57.021Z 7
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:39:34.619Z 20,22,27,36,40,44,48,52,56,60
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:36:04.979Z 70
+README.md
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:40:30.872Z 1,3-6,8-12,14,16-27,29-30,32,34-51,53,55-58,71,73-74,77-80,82,85-89,94,96-99,101,103,106,108,110-113,115,117,119-124,126,129,131-136,138,140,142,144-147,149,151,153-158,160,162-167
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:17:06.903Z 60,62-64,69
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:35:46.158Z 66-67
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:04:38.902Z 72,75,83,91,93,95,105,107,109,128,130
+cmd/narad/cli.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:38:44.516Z 1,3-4,6-9,12,15-25,30,34-35,37,39,41,45,48-49,51-62,64-65,68-69,71-79,81-83,85-102,104-106
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:42:32.448Z 5
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:42:45.058Z 31-33
+cmd/narad/main.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:37:42.596Z 1-15,17-20,22-23,25-35,37-42,44-48,50-54,56-62,64-68,70-75,77-79
+cmd/narad/serve.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:38:15.620Z 1,3-13,15-25,27-37,39-45,47,51-52,54,56-57,59-74,76-77,80-81,83,85-86,89-90,92-97,99-100,102-115,117-118,120-122,125-126,128-129,131-132,134-135,137-139
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:41:56.772Z 48-50
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:46:00.857Z 123
+cmd/narad/version.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:37:52.831Z 1,3-6,8-11,13-17,19-43
+cmd/narad/worker.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:38:29.180Z 1,3-4,6-10,13-14,17-27,30-34,37,41-42,45-47,49-59,61-63,65-67,70-71,74-75,77-80
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:42:11.225Z 5
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:42:24.664Z 38-40
+internal/broker/ack.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:57:29.385Z 1,3-6,8-23
+internal/broker/broker.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:55:40.868Z 1-9,11-12,14-15,17-23,25-27,29-31
+internal/broker/consume.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:57:21.201Z 1,3-8,10-11,13-20,22-24,26-28,30-36,38-43,45-47,49-60,62-87,89-118,120-139,141-150,152-159
+internal/broker/consume_opts.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:56:06.177Z 1,3,5-17
+internal/broker/deps.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:56:14.742Z 1,3-4,6-11,13-23
+internal/broker/errors.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:55:56.265Z 1,3,5-11
+internal/broker/impl.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:56:24.495Z 1,3-5,7-8,10-13,15-18,20-28,30-35
+internal/broker/lifecycle.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:57:38.496Z 1,3,5-9,11-15,17-26
+internal/broker/partition_log.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:57:52.405Z 1,3-8,10-11,13-18,20-26,28-29,31-35,37-41,43-51
+internal/broker/produce.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:56:56.650Z 1,3-6,8-16,18-20,22-26,28-30,32-34,36-38,40-41
+internal/broker/topics.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:56:42.197Z 1,3-9,11-13,15-26,28-33,35-40,42-45,47-52,54-65,67-70
+internal/config/cluster.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:53:42.629Z 1,3-11
+internal/config/config.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:53:19.509Z 1-7,9-16
+internal/config/defaults.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:54:24.816Z 1,3,5-37
+internal/config/duration.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:54:14.980Z 1,3-7,9-16,18-19,21-22,24-27,29-47
+internal/config/env.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:54:51.447Z 1,3-8,10-34,36-41,43-48,50-56,58-59,61-72
+internal/config/http.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:53:34.438Z 1,3-13
+internal/config/load.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:54:37.226Z 1,3-7,9-19,21-25,27-29,31-32,34-39,41-44
+internal/config/log.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:53:56.975Z 1,3-7
+internal/config/storage.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:53:51.249Z 1,3-7,9-12,14-17
+internal/config/validate.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:55:05.970Z 1,3-7,9-13,15-32,34-39,41-48,50-59,61-65
+internal/config/worker.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:54:03.425Z 1,3-6
+internal/consumer/metastore_backed.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:04:48.403Z 1,3-5,7-8,10-15,17-20,22-34,36-48
+internal/consumer/tracker.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:04:36.336Z 1-6,8,10-16,18-22
+internal/httpserver/access_log.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:00:32.983Z 1,3-7,9-17,19-30
+internal/httpserver/handlers/ack.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:01:59.066Z 1,3-5,7-8,10-16,18-24,26-38
+internal/httpserver/handlers/consume.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:01:50.218Z 1,3-7,9-10,12-25,27-30,32-46,48-53,55-86
+internal/httpserver/handlers/create_topic.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:01:14.225Z 1,3-5,7-8,10-19,21-33
+internal/httpserver/handlers/handlers.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T16:59:08.241Z 1-3,5-9,11-12,14-19,21-25,27-39,41-52,54-57,59-69
+internal/httpserver/handlers/healthz.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:02:05.628Z 1,3,5-9
+internal/httpserver/handlers/list_topics.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:01:21.586Z 1,3-4,6-7,9-21
+internal/httpserver/handlers/produce.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:01:32.638Z 1,3-6,8-9,11-16,18-27,29-35,37-40,42-46,48-63
+internal/httpserver/handlers/readyz.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:02:18.294Z 1,3,5-13
+internal/httpserver/middleware.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:00:07.614Z 1,3,5-6,8-17
+internal/httpserver/recorder.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:00:52.166Z 1,3,5-13,15-22,24-31
+internal/httpserver/recover.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:00:42.240Z 1,3-7,9-30
+internal/httpserver/request_id.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:00:23.922Z 1,3-9,11-13,15-17,19-21,23-37,39-45,47-56
+internal/httpserver/router.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:00:41.477Z 1,3-5,7-8,10-23,25-29,31-32,34-40
+internal/httpserver/server.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:00:55.214Z 1-4,6-11,13-14,16-22,24-32,36-39,41-49,51-59,61-62,64,66-70,72-75
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:45:32.139Z 33-35
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:45:47.170Z 63
+internal/metastore/errors.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:58:21.349Z 1,3,5-9
+internal/metastore/flush.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:59:03.420Z 1,3-8,10-16,18-21,23-26,28-45,47-52
+internal/metastore/jsonfile.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:58:42.110Z 1,3-4,6-7,9-18,20-22,24-36,38-42,44-46
+internal/metastore/load.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:58:51.748Z 1,3-8,10-11,13-25,27-45
+internal/metastore/metastore.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:58:14.993Z 1-8,10-11,13-14,16-20,22-23,25-26,28-29
+internal/metastore/offsets.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:59:32.106Z 1,3,5-10,12-21,23-28,30-37
+internal/metastore/schemas.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:59:23.082Z 1,3,5-9,11-18,20-24,26-35
+internal/metastore/state.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:58:30.247Z 1,3,5-13,15
+internal/metastore/topics.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:59:13.284Z 1,3-5,7-8,10-17,19-24,26-30,32-37,39-42,44-49
+internal/observability/logger/level.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:05:18.655Z 1,3-7,9-24
+internal/observability/logger/logger.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:05:06.303Z 1-6,8-14,16-22,24-30,32-35,37-45,47-48
+internal/partition/hash_round_robin.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:03:25.717Z 1,3-6,8-12,14-17,19-33
+internal/partition/manager.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:03:14.345Z 1-5,7-11
+internal/replication/local.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:03:54.111Z 1,3,5-8,10-11,13-16
+internal/replication/replicator.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:03:41.374Z 1-7,9,11-16
+internal/schema/always_valid.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:04:22.739Z 1,3,5-7,9-10,12-15,17-20
+internal/schema/errors.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:04:14.543Z 1,3,5-9
+internal/schema/registry.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:04:08.262Z 1-6,8,10-16
+internal/storage/append.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:52:11.928Z 1,3-6,8-12,14-17,19,21-29,31-32,34-37,39-40,42-47
+internal/storage/close.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:52:50.421Z 1,3-7
+internal/storage/errors.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:52:56.999Z 1,3,5-10
+internal/storage/log.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:52:00.160Z 1-7,9,11-15,17-22,24-30,32-36,38-42,44-45
+internal/storage/offsets.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:52:43.543Z 1,3-11,13-19
+internal/storage/read.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:52:19.372Z 1,3-6,8-13,15-17,19-22,24-27,29-30
+internal/storage/recovery.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:52:35.001Z 1,3-6,8-18,20,22-27,29-40,42-48,50-51,53-56,58-64,66,68-70,72-73,75-78,80-81,83-91
+internal/topic/message.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:03:01.946Z 1,3-6,8-18
+internal/topic/partition.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:02:53.804Z 1,3-12
+internal/topic/topic.go
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:02:43.655Z 1-4,6,8-15
+narad.example.json
+  2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:39:50.348Z 1-24
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "prompts": {"2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:51:22.954Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 5, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:41:12.636Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 74, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:16:01.099Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 74, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:04:57.021Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 74, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:39:34.619Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 74, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:36:04.979Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 74, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:40:30.872Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 131, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:17:06.903Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 131, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:35:46.158Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 131, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:04:38.902Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 131, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:38:44.516Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 81, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:42:32.448Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 81, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:42:45.058Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 81, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:37:42.596Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 69, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:38:15.620Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 114, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:41:56.772Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 114, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:46:00.857Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 114, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:37:52.831Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 39, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:38:29.180Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 61, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:42:11.225Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 61, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:42:24.664Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 61, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:57:29.385Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 21, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:55:40.868Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 26, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:57:21.201Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 145, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:56:06.177Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 15, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:56:14.742Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 20, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:55:56.265Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 9, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:56:24.495Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 29, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:57:38.496Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 22, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:57:52.405Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 43, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:56:56.650Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 33, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:56:42.197Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 61, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:53:42.629Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 10, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:53:19.509Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 15, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:54:24.816Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 35, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:54:14.980Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 41, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:54:51.447Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 65, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:53:34.438Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 12, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:54:37.226Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 37, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:53:56.975Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 6, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:53:51.249Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 14, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:55:05.970Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 58, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:54:03.425Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 5, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:04:48.403Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 42, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:04:36.336Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 19, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:00:32.983Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 27, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:01:59.066Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 33, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:01:50.218Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 79, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:01:14.225Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 29, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T16:59:08.241Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 61, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:02:05.628Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 7, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:01:21.586Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 18, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:01:32.638Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 55, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:02:18.294Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 11, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:00:07.614Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 14, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:00:52.166Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 27, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:00:42.240Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 28, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:00:23.922Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 49, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:00:41.477Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 34, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:00:55.214Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 66, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:45:32.139Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 66, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:45:47.170Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 66, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:58:21.349Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 7, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:59:03.420Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 46, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:58:42.110Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 39, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:58:51.748Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 41, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:58:14.993Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 23, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:59:32.106Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 32, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:59:23.082Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 30, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:58:30.247Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 12, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:59:13.284Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 41, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:05:18.655Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 22, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:05:06.303Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 42, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:03:25.717Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 29, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:03:14.345Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 10, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:03:54.111Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 12, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:03:41.374Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 14, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:04:22.739Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 15, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:04:14.543Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 7, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:04:08.262Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 14, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:52:11.928Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 38, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:52:50.421Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 6, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:52:56.999Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 8, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:52:00.160Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 38, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:52:43.543Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 17, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:52:19.372Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 24, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:52:35.001Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 76, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:03:01.946Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 16, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:02:53.804Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 11, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T18:02:43.655Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 13, "overriden_lines": 0}, "2a35a4a8-1ab6-4c24-9d43-60c965650895:2026-05-06T17:39:50.348Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 24, "overriden_lines": 0}}}
