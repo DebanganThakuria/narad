@@ -29,32 +29,25 @@ func TestCreateTopic_Defaults(t *testing.T) {
 	if got.Partitions != 4 {
 		t.Errorf("partitions: got %d want 4 (policy default)", got.Partitions)
 	}
-	if got.ReplicationFactor != 2 {
-		t.Errorf("replication_factor: got %d want 2 (policy default)", got.ReplicationFactor)
-	}
 	if got.RetentionMs == 0 {
 		t.Errorf("retention_ms: zero (expected policy default)")
 	}
 }
 
 // TestCreateTopic_ExplicitValues verifies that user-supplied
-// partitions, replication factor, and retention are persisted as-is.
+// partitions and retention are persisted as-is.
 func TestCreateTopic_ExplicitValues(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
 
 	got := mustCreateTopic(t, env, createTopicReq{
-		Name:              "explicit",
-		Partitions:        8,
-		ReplicationFactor: 3,
-		RetentionMs:       3_600_000,
+		Name:        "explicit",
+		Partitions:  8,
+		RetentionMs: 3_600_000,
 	})
 
 	if got.Partitions != 8 {
 		t.Errorf("partitions: got %d want 8", got.Partitions)
-	}
-	if got.ReplicationFactor != 3 {
-		t.Errorf("replication_factor: got %d want 3", got.ReplicationFactor)
 	}
 	if got.RetentionMs != 3_600_000 {
 		t.Errorf("retention_ms: got %d want 3600000", got.RetentionMs)
@@ -91,25 +84,14 @@ func TestCreateTopic_RejectsNegativePartitions(t *testing.T) {
 func TestCreateTopic_RejectsAboveMaxPartitions(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t, withPolicy(broker.TopicPolicy{
-		DefaultPartitions:        4,
-		MaxPartitions:            8,
-		DefaultReplicationFactor: 2,
-		DefaultRetentionMs:       1000,
+		DefaultPartitions:  4,
+		MaxPartitions:      8,
+		DefaultRetentionMs: 1000,
 	}))
 
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics", map[string]any{
 		"name":       "too-big",
 		"partitions": 9,
-	})
-	expectStatus(t, resp, http.StatusBadRequest)
-}
-
-func TestCreateTopic_RejectsRFBelowTwo(t *testing.T) {
-	t.Parallel()
-	env := newTestEnv(t)
-	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics", map[string]any{
-		"name":               "rf-1",
-		"replication_factor": 1,
 	})
 	expectStatus(t, resp, http.StatusBadRequest)
 }
@@ -141,7 +123,8 @@ func TestCreateTopic_RejectsUnknownFields(t *testing.T) {
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
-// TestCreateTopic_RejectsOversizedBody confirms the 1MiB body cap.
+// TestCreateTopic_RejectsOversizedBody confirms the 1MiB body cap is
+// rejected with 413 Request Entity Too Large.
 func TestCreateTopic_RejectsOversizedBody(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
@@ -154,5 +137,5 @@ func TestCreateTopic_RejectsOversizedBody(t *testing.T) {
 	huge = append(huge, []byte(`"}`)...)
 
 	resp := rawReq(t, http.MethodPost, env.Server.URL+"/v1/topics", huge)
-	expectStatus(t, resp, http.StatusBadRequest)
+	expectStatus(t, resp, http.StatusRequestEntityTooLarge)
 }

@@ -44,7 +44,6 @@ func Default() *Config {
 		Topic: TopicConfig{
 			DefaultPartitions:                3,
 			MaxPartitions:                    108,
-			DefaultReplicationFactor:         2,
 			DefaultRetentionAgeMs:            7 * 24 * 60 * 60 * 1000, // 7 days
 			DefaultVisibilityTimeoutMs:       30_000,                  // 30 seconds
 			DefaultMaxInFlightPerPartition:   1024,

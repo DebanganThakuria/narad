@@ -111,4 +111,32 @@ func (sh *partitionShard) purgeExpired(now int64) {
 			delete(sh.entries, e.offset)
 		}
 	}
+	sh.compactExpiryLocked()
 }
+
+// compactExpiryLocked rebuilds the expiry heap from the live reservation
+// set when it has accumulated many dead slots. Committed and acked-ahead
+// reservations are deleted from entries but their heap slot lingers until
+// its expiry timestamp passes (it is skipped on pop via the nonce check).
+// Under a long visibility timeout with high throughput that backlog is
+// unbounded, so periodically rebuild from entries (the authoritative live
+// set) to keep heap memory proportional to live reservations.
+// Must be called with sh.mu held.
+func (sh *partitionShard) compactExpiryLocked() {
+	if len(sh.expiry) <= 2*len(sh.entries)+heapCompactSlack {
+		return
+	}
+	rebuilt := sh.expiry[:0]
+	for offset, rsv := range sh.entries {
+		rebuilt = append(rebuilt, expiryEntry{
+			offset:          offset,
+			expiresAtUnixMs: rsv.expiresAtUnixMs,
+			nonce:           rsv.nonce,
+		})
+	}
+	sh.expiry = rebuilt
+	heap.Init(&sh.expiry)
+}
+
+// heapCompactSlack keeps small heaps from churning through rebuilds.
+const heapCompactSlack = 16

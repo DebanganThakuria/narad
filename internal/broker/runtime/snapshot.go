@@ -60,7 +60,7 @@ func (s *Snapshotter) Snapshot(ctx context.Context) ([]metrics.TopicSnapshot, er
 			Partitions: make([]metrics.PartitionSnapshot, 0, t.Partitions),
 		}
 		for i := 0; i < t.Partitions; i++ {
-			ps, ok := s.partitionSnapshot(ctx, t.Name, i)
+			ps, ok := s.partitionSnapshot(t.Name, i)
 			if !ok {
 				continue
 			}
@@ -71,7 +71,7 @@ func (s *Snapshotter) Snapshot(ctx context.Context) ([]metrics.TopicSnapshot, er
 	return out, nil
 }
 
-func (s *Snapshotter) partitionSnapshot(ctx context.Context, topicName string, idx int) (metrics.PartitionSnapshot, bool) {
+func (s *Snapshotter) partitionSnapshot(topicName string, idx int) (metrics.PartitionSnapshot, bool) {
 	if s.selfID != "" {
 		assignments, ok := s.metastore.(partitionAssignmentReader)
 		if ok {
@@ -85,9 +85,11 @@ func (s *Snapshotter) partitionSnapshot(ctx context.Context, topicName string, i
 		}
 	}
 
-	log, err := s.logs.Get(topicName, idx)
-	if err != nil {
-		s.logger.Debug("snapshot: partition log open failed", "topic", topicName, "partition", idx, "err", err)
+	// Peek, never Get: a metrics poll must not lazily open (and mkdir) a
+	// partition log. Opening here would resurrect directories for a topic
+	// being deleted and report partitions this node has never served.
+	log, ok := s.logs.Peek(topicName, idx)
+	if !ok {
 		return metrics.PartitionSnapshot{}, false
 	}
 

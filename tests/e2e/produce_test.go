@@ -133,8 +133,8 @@ func TestProduce_NotFoundForUnknownTopic(t *testing.T) {
 }
 
 // TestProduce_RejectsOversizedBody confirms the 1MiB request cap. The
-// MaxBytesReader wrapping the body fires inside the JSON decoder and
-// the handler maps the error to 400.
+// MaxBytesReader wrapping the body fires while reading and the handler
+// maps the size-limit error to 413 Request Entity Too Large.
 func TestProduce_RejectsOversizedBody(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
@@ -149,7 +149,7 @@ func TestProduce_RejectsOversizedBody(t *testing.T) {
 
 	resp := rawReq(t, http.MethodPost, env.Server.URL+"/v1/topics/big/produce",
 		[]byte(huge.String()))
-	expectStatus(t, resp, http.StatusBadRequest)
+	expectStatus(t, resp, http.StatusRequestEntityTooLarge)
 }
 
 // TestProduce_ConcurrentProducersReturnUniqueMessageIDs stress-tests the

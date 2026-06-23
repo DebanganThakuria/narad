@@ -9,14 +9,13 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
-	"github.com/debanganthakuria/narad/internal/platform/replication"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
 func TestCommitAcceptedProduceMakesRecordVisible(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, VisibilityTimeoutMs: 1000}
-	engine := newTestEngineWithIngress(t, t.TempDir(), ms, schema.NewAlwaysValid(), fixedPartitioner{picked: 0}, &fakeReplicator{}, newTestIngressManager(t), "")
+	engine := newTestEngineWithIngress(t, t.TempDir(), ms, schema.NewAlwaysValid(), fixedPartitioner{picked: 0}, newTestIngressManager(t), "")
 
 	offset, err := engine.CommitAcceptedProduce(context.Background(), ingress.ProduceRecord{
 		MessageID:       "message-1",
@@ -49,7 +48,7 @@ func TestCommitAcceptedProduceMakesRecordVisible(t *testing.T) {
 func TestCommitAcceptedProduceBatchMakesRecordsVisible(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, VisibilityTimeoutMs: 1000}
-	engine := newTestEngineWithIngress(t, t.TempDir(), ms, schema.NewAlwaysValid(), fixedPartitioner{picked: 0}, &fakeReplicator{}, newTestIngressManager(t), "")
+	engine := newTestEngineWithIngress(t, t.TempDir(), ms, schema.NewAlwaysValid(), fixedPartitioner{picked: 0}, newTestIngressManager(t), "")
 
 	offsets, err := engine.CommitAcceptedProduceBatch(context.Background(), []ingress.ProduceRecord{
 		{
@@ -96,7 +95,7 @@ func TestCommitAcceptedProduceBatchMakesRecordsVisible(t *testing.T) {
 func TestCommitAcceptedProduceRejectsRemotePartition(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2, ReplicationFactor: 1}); err != nil {
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
 	}
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
@@ -105,11 +104,11 @@ func TestCommitAcceptedProduceRejectsRemotePartition(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "remote.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember(remote) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition(1) error = %v", err)
 	}
 
-	engine := newTestEngineWithIngress(t, t.TempDir(), store, schema.NewAlwaysValid(), fixedPartitionManager{picked: 0}, replication.NewLocal(), newTestIngressManager(t), "node-self")
+	engine := newTestEngineWithIngress(t, t.TempDir(), store, schema.NewAlwaysValid(), fixedPartitionManager{picked: 0}, newTestIngressManager(t), "node-self")
 	_, err := engine.CommitAcceptedProduce(ctx, ingress.ProduceRecord{
 		MessageID:       "message-1",
 		Topic:           "orders",

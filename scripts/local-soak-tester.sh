@@ -20,7 +20,6 @@ args=(
   "--consumer-concurrency" "${NARAD_TESTER_CONSUMER_CONCURRENCY:-32}"
   "--payload-bytes" "${NARAD_TESTER_PAYLOAD_BYTES:-512}"
   "--partitions" "${NARAD_TESTER_PARTITIONS:-12}"
-  "--replication-factor" "${NARAD_TESTER_REPLICATION_FACTOR:-2}"
   "--max-in-flight-per-partition" "${NARAD_TESTER_MAX_IN_FLIGHT_PER_PARTITION:-1024}"
   "--max-acked-ahead-per-partition" "${NARAD_TESTER_MAX_ACKED_AHEAD_PER_PARTITION:-1024}"
   "--retention" "${NARAD_TESTER_RETENTION:-24h}"

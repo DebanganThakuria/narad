@@ -49,9 +49,10 @@ type Member struct {
 }
 
 // Assignment maps a single partition of a topic to its owner pod.
+// Narad has no follower replication, so each partition has exactly one
+// owner.
 type Assignment struct {
-	Topic      string `json:"topic"`
-	Partition  int    `json:"partition"`
-	OwnerID    string `json:"owner_id"`
-	FollowerID string `json:"follower_id"`
+	Topic     string `json:"topic"`
+	Partition int    `json:"partition"`
+	OwnerID   string `json:"owner_id"`
 }

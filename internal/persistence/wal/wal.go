@@ -141,15 +141,17 @@ func (l *Log) Append(ctx context.Context, payload []byte) (RecordID, error) {
 
 	l.signalSync()
 
+	// The record is now in the write buffer with a committed seq; the
+	// sync loop will durably persist it and it will be replayed after a
+	// restart regardless of ctx. Abandoning the wait on ctx.Done() here
+	// would report failure for a record that is in fact durable, which a
+	// retrying caller would then duplicate. So past the append we wait
+	// for the true sync outcome rather than honouring cancellation.
+	// (ctx is still checked before the append, at the top of Append.)
 	waitStart := time.Now()
-	select {
-	case <-batch.done:
-		l.observe("append_sync_wait", observeOutcome(batch.err), time.Since(waitStart))
-		return id, batch.err
-	case <-ctx.Done():
-		l.observe("append_sync_wait", "cancelled", time.Since(waitStart))
-		return RecordID{}, ctx.Err()
-	}
+	<-batch.done
+	l.observe("append_sync_wait", observeOutcome(batch.err), time.Since(waitStart))
+	return id, batch.err
 }
 
 func (l *Log) Close() error {

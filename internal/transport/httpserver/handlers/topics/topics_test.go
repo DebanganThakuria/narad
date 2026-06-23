@@ -458,7 +458,7 @@ func TestGetHandlerRejectsOutOfRangePartitionQuery(t *testing.T) {
 func TestGetHandlerPreservesTopicFieldsForPartitionQuery(t *testing.T) {
 	s := newTestSet(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
 		return topic.Details{
-			Topic:      topic.Topic{Name: name, Partitions: 2, ReplicationFactor: 3},
+			Topic:      topic.Topic{Name: name, Partitions: 2},
 			Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 1}, {Index: 1, NextOffset: 2}},
 		}, nil
 	}})
@@ -477,9 +477,6 @@ func TestGetHandlerPreservesTopicFieldsForPartitionQuery(t *testing.T) {
 	}
 	if body.Name != "orders" {
 		t.Fatalf("Get() topic name = %q, want orders", body.Name)
-	}
-	if body.ReplicationFactor != 3 {
-		t.Fatalf("Get() replication factor = %d, want 3", body.ReplicationFactor)
 	}
 	if len(body.Partitions) != 1 || body.Partitions[0].Index != 1 {
 		t.Fatalf("Get() partitions = %+v", body.Partitions)

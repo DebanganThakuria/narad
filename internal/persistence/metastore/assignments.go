@@ -9,8 +9,8 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-func (s *Store) AssignPartition(ctx context.Context, topicName string, partition int, ownerID string, followerID string) error {
-	return s.apply(ctx, opAssignPartition, Assignment{Topic: topicName, Partition: partition, OwnerID: ownerID, FollowerID: followerID})
+func (s *Store) AssignPartition(ctx context.Context, topicName string, partition int, ownerID string) error {
+	return s.apply(ctx, opAssignPartition, Assignment{Topic: topicName, Partition: partition, OwnerID: ownerID})
 }
 
 func (s *Store) GetAssignment(topicName string, partition int) (Assignment, error) {
@@ -46,13 +46,17 @@ func (s *Store) ListAssignments(topicName string) ([]Assignment, error) {
 	return out, err
 }
 
-func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromPartition, toPartition int, replicationFactor int) error {
+// AssignNewPartitions assigns each unassigned partition in
+// [fromPartition, toPartition) to an active member. Narad has no
+// follower replication: each partition has a single owner. Assignments
+// are sticky — existing assignments are never reassigned here.
+func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromPartition, toPartition int) error {
 	members, err := s.ListMembers()
 	if err != nil {
 		return err
 	}
 	active := AliveMembers(members)
-	if replicationFactor < 2 || len(active) < replicationFactor {
+	if len(active) == 0 {
 		return nil
 	}
 
@@ -71,11 +75,11 @@ func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromP
 		if assigned[partition] {
 			continue
 		}
-		owner, follower, ok := RoundRobinReplicaPair(active, partition)
+		owner, ok := RoundRobinOwner(active, partition)
 		if !ok {
 			return nil
 		}
-		if err := s.AssignPartition(ctx, topicName, partition, owner, follower); err != nil {
+		if err := s.AssignPartition(ctx, topicName, partition, owner); err != nil {
 			return err
 		}
 	}
@@ -90,13 +94,13 @@ func RoundRobinMembers(active []Member) []Member {
 	return out
 }
 
-func RoundRobinReplicaPair(active []Member, partition int) (string, string, bool) {
-	if len(active) < 2 || partition < 0 {
-		return "", "", false
+// RoundRobinOwner picks the owning member for a partition by round-robin
+// over the (ID-sorted) active member list.
+func RoundRobinOwner(active []Member, partition int) (string, bool) {
+	if len(active) == 0 || partition < 0 {
+		return "", false
 	}
-	ownerIdx := partition % len(active)
-	followerIdx := (ownerIdx + 1) % len(active)
-	return active[ownerIdx].ID, active[followerIdx].ID, true
+	return active[partition%len(active)].ID, true
 }
 
 func AliveMembers(members []Member) []Member {

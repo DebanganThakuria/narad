@@ -199,14 +199,17 @@ func appendTopicValidationErrors(errs *[]string, cfg TopicConfig) {
 	if cfg.DefaultPartitions > cfg.MaxPartitions {
 		*errs = append(*errs, fmt.Sprintf("topic.default_partitions (%d) must not exceed topic.max_partitions (%d)", cfg.DefaultPartitions, cfg.MaxPartitions))
 	}
-	if cfg.DefaultReplicationFactor < 2 {
-		*errs = append(*errs, "topic.default_replication_factor must be >= 2")
-	}
 	if cfg.DefaultRetentionAgeMs < 0 {
 		*errs = append(*errs, "topic.default_retention_age_ms must be >= 0")
 	}
 	if cfg.DefaultVisibilityTimeoutMs < 0 {
 		*errs = append(*errs, "topic.default_visibility_timeout_ms must be >= 0")
+	}
+	if cfg.DefaultMaxInFlightPerPartition <= 0 {
+		*errs = append(*errs, "topic.default_max_in_flight_per_partition must be > 0")
+	}
+	if cfg.DefaultMaxAckedAheadPerPartition <= 0 {
+		*errs = append(*errs, "topic.default_max_acked_ahead_per_partition must be > 0")
 	}
 }
 

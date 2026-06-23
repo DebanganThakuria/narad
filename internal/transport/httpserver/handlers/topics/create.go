@@ -15,7 +15,6 @@ import (
 type createRequest struct {
 	Name                      string          `json:"name"`
 	Partitions                int             `json:"partitions"`
-	ReplicationFactor         int             `json:"replication_factor"`
 	RetentionMs               int64           `json:"retention_ms"`
 	VisibilityTimeoutMs       int64           `json:"visibility_timeout_ms"`
 	MaxInFlightPerPartition   int64           `json:"max_in_flight_per_partition"`
@@ -45,7 +44,6 @@ func Create(s *handlers.Set) http.HandlerFunc {
 		t, err := s.Deps.Broker.CreateTopic(r.Context(), topics.CreateOpts{
 			Name:                      req.Name,
 			Partitions:                req.Partitions,
-			ReplicationFactor:         req.ReplicationFactor,
 			RetentionMs:               req.RetentionMs,
 			VisibilityTimeoutMs:       req.VisibilityTimeoutMs,
 			MaxInFlightPerPartition:   req.MaxInFlightPerPartition,

@@ -424,7 +424,7 @@ func seedProduceDispatchTopic(t *testing.T, store *metastore.Store, ownerID stri
 func seedProduceDispatchTopicPartitions(t *testing.T, store *metastore.Store, ownerID string, partitions int) {
 	t.Helper()
 	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: partitions, ReplicationFactor: 1}); err != nil {
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: partitions}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
 	}
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
@@ -434,7 +434,7 @@ func seedProduceDispatchTopicPartitions(t *testing.T, store *metastore.Store, ow
 		t.Fatalf("RegisterMember(remote) error = %v", err)
 	}
 	for partition := range partitions {
-		if err := store.AssignPartition(ctx, "orders", partition, ownerID, ""); err != nil {
+		if err := store.AssignPartition(ctx, "orders", partition, ownerID); err != nil {
 			t.Fatalf("AssignPartition(%d) error = %v", partition, err)
 		}
 	}

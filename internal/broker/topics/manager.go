@@ -43,7 +43,6 @@ var (
 type Config struct {
 	DefaultPartitions                int
 	MaxPartitions                    int
-	DefaultReplicationFactor         int
 	DefaultRetentionMs               int64
 	DefaultVisibilityTimeoutMs       int64
 	DefaultMaxInFlightPerPartition   int64
@@ -55,7 +54,6 @@ type Config struct {
 type CreateOpts struct {
 	Name                      string
 	Partitions                int
-	ReplicationFactor         int
 	RetentionMs               int64
 	VisibilityTimeoutMs       int64
 	MaxInFlightPerPartition   int64
@@ -67,7 +65,7 @@ type CreateOpts struct {
 // It is injected so topic CRUD can use assignment capability without
 // depending directly on the concrete metastore store type.
 type PartitionAssigner interface {
-	AssignNewPartitions(ctx context.Context, topicName string, fromPartition, toPartition int, replicationFactor int) error
+	AssignNewPartitions(ctx context.Context, topicName string, fromPartition, toPartition int) error
 }
 
 // Manager handles every topic-CRUD operation. Constructed once at

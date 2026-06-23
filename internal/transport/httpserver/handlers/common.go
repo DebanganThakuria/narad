@@ -35,6 +35,12 @@ import (
 const (
 	MaxJSONBodyBytes int64 = 1 << 20
 	MaxAckBodyBytes  int64 = 4 << 10
+
+	// DefaultMaxConsumeWait is the hard ceiling applied to a long-poll
+	// consume wait when Deps.MaxConsumeWait is left unset (<= 0). It stops
+	// a client from pinning a server goroutine for an arbitrary duration
+	// if the configured cap is ever missing from the wiring.
+	DefaultMaxConsumeWait = 30 * time.Second
 )
 
 // Router forwards requests to the partition-owning pod in a multi-node cluster.
@@ -110,6 +116,11 @@ func (s *Set) WriteError(w http.ResponseWriter, status int, msg string) {
 func (s *Set) ReadBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			s.WriteError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return nil, false
+		}
 		s.WriteError(w, http.StatusBadRequest, "read body: "+err.Error())
 		return nil, false
 	}

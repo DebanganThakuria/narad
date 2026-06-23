@@ -23,7 +23,7 @@ func TestDefaultReturnsExpectedValues(t *testing.T) {
 	if cfg.Storage.IngressWALSyncIntervalMs != 10 || cfg.Storage.IngressWALSyncBytes != 1<<20 || cfg.Storage.IngressWALShards != 1 {
 		t.Fatalf("Default() ingress WAL sync = %+v", cfg.Storage)
 	}
-	if cfg.Topic.DefaultPartitions != 3 || cfg.Topic.MaxPartitions != 108 || cfg.Topic.DefaultReplicationFactor != 2 {
+	if cfg.Topic.DefaultPartitions != 3 || cfg.Topic.MaxPartitions != 108 {
 		t.Fatalf("Default() topic defaults = %+v", cfg.Topic)
 	}
 }

@@ -13,7 +13,6 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
-	"github.com/debanganthakuria/narad/internal/platform/replication"
 )
 
 // envOption tunes the env returned by newTestEnv.
@@ -31,9 +30,6 @@ func withPolicy(p broker.TopicPolicy) envOption {
 		if p.MaxPartitions > 0 {
 			o.maxParts = p.MaxPartitions
 		}
-		if p.DefaultReplicationFactor > 0 {
-			o.defaultRF = p.DefaultReplicationFactor
-		}
 		if p.DefaultRetentionMs > 0 {
 			o.defaultRetentionMs = p.DefaultRetentionMs
 		}
@@ -42,10 +38,6 @@ func withPolicy(p broker.TopicPolicy) envOption {
 
 func withMaxConsumeWait(d time.Duration) envOption {
 	return func(o *envOpts) { o.maxConsumeWait = d }
-}
-
-func withReplicatorFactory(f func(*metastore.Store, *http.Client) replication.Replicator) envOption {
-	return func(o *envOpts) { o.replicatorFactory = f }
 }
 
 // newTestEnv builds an env with t.Cleanup wired for close.
@@ -62,10 +54,9 @@ func newTestEnv(t *testing.T, opts ...envOption) *env {
 
 // createTopicReq is the input for mustCreateTopic.
 type createTopicReq struct {
-	Name              string
-	Partitions        int
-	ReplicationFactor int
-	RetentionMs       int64
+	Name        string
+	Partitions  int
+	RetentionMs int64
 }
 
 // mustCreateTopic creates a topic and fatals if the server rejects it.
@@ -74,9 +65,6 @@ func mustCreateTopic(t *testing.T, e *env, req createTopicReq) topic.Topic {
 	body := map[string]any{"name": req.Name}
 	if req.Partitions > 0 {
 		body["partitions"] = req.Partitions
-	}
-	if req.ReplicationFactor > 0 {
-		body["replication_factor"] = req.ReplicationFactor
 	}
 	if req.RetentionMs != 0 {
 		body["retention_ms"] = req.RetentionMs
@@ -179,7 +167,10 @@ func waitForVisibleOffset(t *testing.T, e *env, topicName string, partition int,
 			t.Fatalf("get topic details %q: %v", topicName, err)
 		}
 		if partition >= 0 && partition < len(details.Partitions) {
-			if details.Partitions[partition].NextOffset > previousNext {
+			// Wait on the high-watermark (consume-visible frontier), not
+			// NextOffset (append counter): a record is appended before it
+			// is durably committed and made visible.
+			if details.Partitions[partition].HighWatermark > previousNext {
 				return previousNext
 			}
 		}
@@ -297,12 +288,6 @@ func mustAck(t *testing.T, e *env, topicName, receiptHandle string) {
 		t.Fatalf("mustAck %q: got %d body=%s", topicName, resp.StatusCode, readBody(resp))
 	}
 }
-
-//go:fix inline
-func intPtr(n int) *int { return new(n) }
-
-//go:fix inline
-func int64Ptr(n int64) *int64 { return new(n) }
 
 func itoa(n int) string     { return strconv.Itoa(n) }
 func i64toa(n int64) string { return strconv.FormatInt(n, 10) }

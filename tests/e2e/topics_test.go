@@ -32,9 +32,6 @@ func TestCreateTopicDefaults(t *testing.T) {
 	if tp.Partitions != 4 {
 		t.Fatalf("partitions: got %d, want default 4", tp.Partitions)
 	}
-	if tp.ReplicationFactor != 2 {
-		t.Fatalf("rf: got %d, want default 2", tp.ReplicationFactor)
-	}
 }
 
 func TestCreateTopicWithRetention(t *testing.T) {
@@ -54,10 +51,9 @@ func TestCreateTopicWithSchema(t *testing.T) {
 	defer env.close()
 
 	resp := env.post("/v1/topics", map[string]any{
-		"name":               "schema-on-create",
-		"partitions":         3,
-		"replication_factor": 2,
-		"schema":             json.RawMessage(schemaV1),
+		"name":       "schema-on-create",
+		"partitions": 3,
+		"schema":     json.RawMessage(schemaV1),
 	})
 	expectStatus(t, resp, http.StatusCreated)
 
@@ -76,10 +72,9 @@ func TestCreateTopicRejectsInvalidSchema(t *testing.T) {
 	defer env.close()
 
 	resp := env.post("/v1/topics", map[string]any{
-		"name":               "schema-create-invalid",
-		"partitions":         3,
-		"replication_factor": 2,
-		"schema":             json.RawMessage(`{"type": 123}`),
+		"name":       "schema-create-invalid",
+		"partitions": 3,
+		"schema":     json.RawMessage(`{"type": 123}`),
 	})
 	expectBadRequest(t, resp)
 

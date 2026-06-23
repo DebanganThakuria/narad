@@ -17,7 +17,6 @@ func parseConfig(args []string) (config, error) {
 	flagSet.IntVar(&cfg.topics, "topics", 10, "number of topics to create")
 	flagSet.IntVar(&cfg.messages, "messages", 1000, "total messages to produce and consume")
 	flagSet.IntVar(&cfg.partitions, "partitions", 6, "partitions per topic")
-	flagSet.IntVar(&cfg.replicationFactor, "replication-factor", 2, "replication factor per topic")
 	flagSet.IntVar(&cfg.produceConcurrency, "produce-concurrency", 32, "concurrent producer workers")
 	flagSet.IntVar(&cfg.consumeConcurrency, "consume-concurrency", 32, "concurrent consumer workers")
 	flagSet.DurationVar(&cfg.timeout, "timeout", 2*time.Minute, "overall driver timeout")
@@ -45,9 +44,6 @@ func parseConfig(args []string) (config, error) {
 	}
 	if cfg.partitions < 3 {
 		return cfg, errors.New("--partitions must be >= 3")
-	}
-	if cfg.replicationFactor < 2 {
-		return cfg, errors.New("--replication-factor must be >= 2")
 	}
 	if cfg.produceConcurrency <= 0 || cfg.consumeConcurrency <= 0 {
 		return cfg, errors.New("concurrency values must be > 0")

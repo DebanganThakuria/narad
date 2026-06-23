@@ -14,6 +14,7 @@ type flusher struct {
 	log *Log
 
 	wakeup   chan struct{}
+	syncReqs chan chan error
 	stop     chan struct{}
 	done     chan struct{}
 	once     sync.Once
@@ -28,11 +29,30 @@ func newFlusher(log *Log, mu *sync.RWMutex, interval time.Duration) *flusher {
 	return &flusher{
 		log:      log,
 		wakeup:   make(chan struct{}, 1),
+		syncReqs: make(chan chan error),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 		interval: interval,
 		mu:       mu,
 		lastSync: time.Now(),
+	}
+}
+
+// Sync synchronously drains the write buffer to the active segment and
+// fsyncs it, blocking until the data is durable on disk. Use it on the
+// commit path when a record must be durable before it is made visible
+// (Narad has no follower replication, so the partition log is the sole
+// copy). Returns ErrLogClosed if the log is closing.
+func (l *Log) Sync() error {
+	if l.closed.Load() {
+		return ErrLogClosed
+	}
+	done := make(chan error, 1)
+	select {
+	case l.flusher.syncReqs <- done:
+		return <-done
+	case <-l.flusher.done:
+		return ErrLogClosed
 	}
 }
 
@@ -54,6 +74,20 @@ func (f *flusher) run() {
 		select {
 		case <-f.wakeup:
 			forceDrain = true
+		case done := <-f.syncReqs:
+			// Synchronous flush+fsync: drain the buffer and force an
+			// fsync so the caller can treat the record as durable on
+			// return. Stays on the single flusher goroutine so the
+			// "one writer per partition" invariant holds.
+			done <- f.drainOnce(true, true)
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(f.interval)
+			continue
 		case <-timer.C:
 		case <-f.stop:
 			_ = f.drainOnce(true, true)

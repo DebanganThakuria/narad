@@ -16,7 +16,6 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/persistence/wal"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
-	"github.com/debanganthakuria/narad/internal/platform/replication"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
@@ -24,7 +23,7 @@ func TestAcceptProducePersistsToIngressWAL(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 3}
 	ingressManager := newTestIngressManager(t)
-	engine := newTestEngineWithIngress(t, t.TempDir(), ms, schema.NewAlwaysValid(), fixedPartitioner{picked: 2}, &fakeReplicator{}, ingressManager, "")
+	engine := newTestEngineWithIngress(t, t.TempDir(), ms, schema.NewAlwaysValid(), fixedPartitioner{picked: 2}, ingressManager, "")
 
 	accepted, err := engine.AcceptProduce(context.Background(), "orders", "customer-1", []byte(`{"id":1}`))
 	if err != nil {
@@ -59,7 +58,7 @@ func TestAcceptProducePersistsToIngressWAL(t *testing.T) {
 func TestAcceptProduceAllowsRemoteTargetPartition(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 3, ReplicationFactor: 1}); err != nil {
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 3}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
 	}
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
@@ -68,12 +67,12 @@ func TestAcceptProduceAllowsRemoteTargetPartition(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "remote.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember(remote) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition(1) error = %v", err)
 	}
 
 	ingressManager := newTestIngressManager(t)
-	engine := newTestEngineWithIngress(t, t.TempDir(), store, schema.NewAlwaysValid(), fixedPartitionManager{picked: 1}, replication.NewLocal(), ingressManager, "node-self")
+	engine := newTestEngineWithIngress(t, t.TempDir(), store, schema.NewAlwaysValid(), fixedPartitionManager{picked: 1}, ingressManager, "node-self")
 
 	if _, _, err := engine.Produce(ctx, "orders", "customer-1", []byte(`{"id":1}`)); !errors.Is(err, ErrNotPartitionOwner) {
 		t.Fatalf("Produce() error = %v, want %v", err, ErrNotPartitionOwner)
@@ -92,7 +91,7 @@ func TestAcceptProduceUsesPinnedPartitionWithoutOwnershipCheck(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 3}
 	ingressManager := newTestIngressManager(t)
-	engine := newTestEngineWithIngress(t, t.TempDir(), ms, schema.NewAlwaysValid(), fixedPartitioner{picked: 0}, &fakeReplicator{}, ingressManager, "")
+	engine := newTestEngineWithIngress(t, t.TempDir(), ms, schema.NewAlwaysValid(), fixedPartitioner{picked: 0}, ingressManager, "")
 
 	accepted, err := engine.AcceptProduce(context.Background(), "orders", "customer-1", []byte(`{"id":1}`), 2)
 	if err != nil {
@@ -107,7 +106,7 @@ func TestAcceptProduceRejectsInvalidPinnedPartition(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2}
 	ingressManager := newTestIngressManager(t)
-	engine := newTestEngineWithIngress(t, t.TempDir(), ms, schema.NewAlwaysValid(), fixedPartitioner{picked: 0}, &fakeReplicator{}, ingressManager, "")
+	engine := newTestEngineWithIngress(t, t.TempDir(), ms, schema.NewAlwaysValid(), fixedPartitioner{picked: 0}, ingressManager, "")
 
 	_, err := engine.AcceptProduce(context.Background(), "orders", "customer-1", []byte(`{"id":1}`), 2)
 	if !errors.Is(err, ErrInvalid) {
@@ -140,7 +139,6 @@ func newTestEngineWithIngress(
 	ms metastore.Metastore,
 	schemas schema.Registry,
 	partitioner partition.Manager,
-	replicator replication.Replicator,
 	ingressManager *ingress.Manager,
 	selfID string,
 ) *Engine {
@@ -154,7 +152,6 @@ func newTestEngineWithIngress(
 		ms,
 		schemas,
 		partitioner,
-		replicator,
 		offsets,
 		logs,
 		ingressManager,

@@ -169,8 +169,12 @@ func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) 
 		if d < 0 {
 			d = 0
 		}
-		if s.Deps.MaxConsumeWait > 0 && d > s.Deps.MaxConsumeWait {
-			d = s.Deps.MaxConsumeWait
+		ceiling := s.Deps.MaxConsumeWait
+		if ceiling <= 0 {
+			ceiling = handlers.DefaultMaxConsumeWait
+		}
+		if d > ceiling {
+			d = ceiling
 		}
 		opts.Wait = d
 	}

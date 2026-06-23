@@ -119,19 +119,17 @@ func (f *fakeMetastore) GetMember(string) (metastore.Member, error) {
 func (f *fakeMetastore) Close() error { return nil }
 
 type fakePartitionAssigner struct {
-	lastTopic             string
-	lastFromPartition     int
-	lastToPartition       int
-	lastReplicationFactor int
-	calls                 int
-	err                   error
+	lastTopic         string
+	lastFromPartition int
+	lastToPartition   int
+	calls             int
+	err               error
 }
 
-func (f *fakePartitionAssigner) AssignNewPartitions(_ context.Context, topicName string, fromPartition, toPartition int, replicationFactor int) error {
+func (f *fakePartitionAssigner) AssignNewPartitions(_ context.Context, topicName string, fromPartition, toPartition int) error {
 	f.lastTopic = topicName
 	f.lastFromPartition = fromPartition
 	f.lastToPartition = toPartition
-	f.lastReplicationFactor = replicationFactor
 	f.calls++
 	return f.err
 }
@@ -216,7 +214,6 @@ func newTestManagerWithAssigner(t *testing.T, ms *fakeMetastore, assigner Partit
 		Config{
 			DefaultPartitions:                3,
 			MaxPartitions:                    12,
-			DefaultReplicationFactor:         3,
 			DefaultRetentionMs:               60000,
 			DefaultVisibilityTimeoutMs:       30000,
 			DefaultMaxInFlightPerPartition:   10,
@@ -237,8 +234,8 @@ func TestCreateTopic_AppliesDefaultsAndCreatesDirectory(t *testing.T) {
 	if created.Name != testTopicName {
 		t.Fatalf("CreateTopic() name = %q, want %q", created.Name, testTopicName)
 	}
-	if created.Partitions != 3 || created.ReplicationFactor != 3 {
-		t.Fatalf("CreateTopic() defaults = %+v, want partitions=3 replication=3", created)
+	if created.Partitions != 3 {
+		t.Fatalf("CreateTopic() defaults = %+v, want partitions=3", created)
 	}
 	if created.RetentionMs != 60000 || created.VisibilityTimeoutMs != 30000 {
 		t.Fatalf("CreateTopic() retention defaults = %+v", created)
@@ -274,8 +271,8 @@ func TestCreateTopic_AssignsPartitionsSynchronously(t *testing.T) {
 	if assigner.calls != 1 {
 		t.Fatalf("AssignNewPartitions() calls = %d, want 1", assigner.calls)
 	}
-	if assigner.lastTopic != testTopicName || assigner.lastFromPartition != 0 || assigner.lastToPartition != 3 || assigner.lastReplicationFactor != 3 {
-		t.Fatalf("AssignNewPartitions() = topic=%q from=%d to=%d rf=%d", assigner.lastTopic, assigner.lastFromPartition, assigner.lastToPartition, assigner.lastReplicationFactor)
+	if assigner.lastTopic != testTopicName || assigner.lastFromPartition != 0 || assigner.lastToPartition != 3 {
+		t.Fatalf("AssignNewPartitions() = topic=%q from=%d to=%d", assigner.lastTopic, assigner.lastFromPartition, assigner.lastToPartition)
 	}
 }
 
@@ -369,7 +366,6 @@ func TestCreateTopic_RejectsInvalidInputs(t *testing.T) {
 		{name: "missing name", opts: CreateOpts{}, want: "name required"},
 		{name: "negative partitions", opts: CreateOpts{Name: testTopicName, Partitions: -1}, want: "partitions must be >= 3"},
 		{name: "partitions over max", opts: CreateOpts{Name: testTopicName, Partitions: 33}, want: "exceeds topic.max_partitions"},
-		{name: "replication factor below two", opts: CreateOpts{Name: testTopicName, ReplicationFactor: 1}, want: "replication_factor must be >= 2"},
 		{name: "negative retention", opts: CreateOpts{Name: testTopicName, RetentionMs: -1}, want: "retention_ms must be >= 0"},
 		{name: "negative visibility timeout", opts: CreateOpts{Name: testTopicName, VisibilityTimeoutMs: -1}, want: "visibility_timeout_ms must be >= 0"},
 		{name: "negative in flight cap", opts: CreateOpts{Name: testTopicName, MaxInFlightPerPartition: -1}, want: "max_in_flight_per_partition must be >= 0"},
@@ -442,7 +438,7 @@ func TestIncreaseTopicPartitions_UpdatesTopic(t *testing.T) {
 
 func TestIncreaseTopicPartitions_AssignsOnlyNewRange(t *testing.T) {
 	ms := newFakeMetastore()
-	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3, ReplicationFactor: 3}
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
 	assigner := &fakePartitionAssigner{}
 	manager := newTestManagerWithAssigner(t, ms, assigner, nil)
 
@@ -456,14 +452,14 @@ func TestIncreaseTopicPartitions_AssignsOnlyNewRange(t *testing.T) {
 	if assigner.calls != 1 {
 		t.Fatalf("AssignNewPartitions() calls = %d, want 1", assigner.calls)
 	}
-	if assigner.lastTopic != testTopicName || assigner.lastFromPartition != 3 || assigner.lastToPartition != 5 || assigner.lastReplicationFactor != 3 {
-		t.Fatalf("AssignNewPartitions() = topic=%q from=%d to=%d rf=%d", assigner.lastTopic, assigner.lastFromPartition, assigner.lastToPartition, assigner.lastReplicationFactor)
+	if assigner.lastTopic != testTopicName || assigner.lastFromPartition != 3 || assigner.lastToPartition != 5 {
+		t.Fatalf("AssignNewPartitions() = topic=%q from=%d to=%d", assigner.lastTopic, assigner.lastFromPartition, assigner.lastToPartition)
 	}
 }
 
 func TestIncreaseTopicPartitions_AssignmentFailureDoesNotFailUpdate(t *testing.T) {
 	ms := newFakeMetastore()
-	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3, ReplicationFactor: 3}
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
 	assigner := &fakePartitionAssigner{err: errors.New("assign failed")}
 	manager := newTestManagerWithAssigner(t, ms, assigner, nil)
 

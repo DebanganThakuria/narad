@@ -59,14 +59,3 @@ func NewHeartbeater(store *metastore.Store, m metastore.Member, interval time.Du
 	}
 	return &Heartbeater{store: store, member: m, interval: interval}
 }
-
-// aliveMembers filters a member list to those with MemberAlive status.
-func aliveMembers(members []metastore.Member) []metastore.Member {
-	out := make([]metastore.Member, 0, len(members))
-	for _, m := range members {
-		if m.Status == metastore.MemberAlive {
-			out = append(out, m)
-		}
-	}
-	return out
-}

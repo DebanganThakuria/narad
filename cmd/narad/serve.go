@@ -94,9 +94,7 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Recovery client, controller and cluster router
-	recovery := replication.NewStoreRecoveryWithTimeout(nodeID, ms, logs, 5*time.Second)
-
+	// Controller and cluster router
 	member := metastore.Member{
 		ID:          nodeID,
 		Addr:        advertisedMemberAddr(nodeID, cfg.HTTP.Addr, cfg.Cluster.Addr, cfg.Cluster.Peers),
@@ -117,15 +115,13 @@ func runServe(args []string) error {
 	wg.Go(func() { produceDispatcher.Run(ctx) })
 	startPprofServer(ctx, &wg, cfg.HTTP.PprofAddr, log)
 	wg.Go(func() {
-		if err := replication.ServeQUIC(ctx, cfg.HTTP.Addr, logs, log, rpcServer); err != nil && !errors.Is(err, context.Canceled) {
-			log.Error("quic replication server", "addr", cfg.HTTP.Addr, "err", err)
+		if err := replication.ServeQUIC(ctx, cfg.HTTP.Addr, log, rpcServer); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("cluster rpc server", "addr", cfg.HTTP.Addr, "err", err)
 		}
 	})
 
 	poller := metrics.NewPoller(m, br, log, cfg.Storage.DataDir)
 	wg.Go(func() { poller.Run(ctx) })
-
-	wg.Go(func() { runStoreRecoveryRepairer(ctx, recovery, storeRecoveryRetryInterval, log) })
 
 	// Finally build the API server
 	srv := buildAPIServer(ctx, cfg, br, logs, ms, router, m, reg, log)
@@ -291,9 +287,8 @@ func buildBroker(
 		return nil, nil, nil, nil, nil, fmt.Errorf("initialize consumer offsets: %w", err)
 	}
 
-	store, ok := ms.(*metastore.Store)
-	if !ok {
-		return nil, nil, nil, nil, nil, errors.New("broker: cluster replication requires metastore.Store")
+	if _, ok := ms.(*metastore.Store); !ok {
+		return nil, nil, nil, nil, nil, errors.New("broker: cluster coordination requires metastore.Store")
 	}
 
 	ingressManager, err := ingress.OpenManagerWithOptions(cfg.Storage.DataDir, ingressWALOptions(cfg.Storage, m))
@@ -307,7 +302,6 @@ func buildBroker(
 		TopicConfig: broker.TopicConfig{
 			DefaultPartitions:                cfg.Topic.DefaultPartitions,
 			MaxPartitions:                    cfg.Topic.MaxPartitions,
-			DefaultReplicationFactor:         cfg.Topic.DefaultReplicationFactor,
 			DefaultRetentionMs:               cfg.Topic.DefaultRetentionAgeMs,
 			DefaultVisibilityTimeoutMs:       cfg.Topic.DefaultVisibilityTimeoutMs,
 			DefaultMaxInFlightPerPartition:   cfg.Topic.DefaultMaxInFlightPerPartition,
@@ -317,7 +311,6 @@ func buildBroker(
 		Partitions:      partition.NewHashRoundRobin(),
 		Schemas:         schemas,
 		ConsumerOffsets: offsets,
-		Replicator:      replication.NewStreamingClusterWithTimeout(nodeID, store, 5*time.Second, m),
 		Logs:            logs,
 		Ingress:         ingressManager,
 		Logger:          log,

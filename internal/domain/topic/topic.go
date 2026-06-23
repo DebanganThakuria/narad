@@ -7,10 +7,11 @@
 // any layout-dependent encoding.
 package topic
 
-// Topic is the user-facing logical stream. ReplicationFactor is fixed
-// at create time; Partitions can grow via IncreaseTopicPartitions
-// (never shrink); Retention, visibility, and the in-flight caps can
-// be altered post-create without affecting existing data.
+// Topic is the user-facing logical stream. Partitions can grow via
+// IncreaseTopicPartitions (never shrink); Retention, visibility, and the
+// in-flight caps can be altered post-create without affecting existing
+// data. Narad has no follower replication: each partition has a single
+// owner whose durable log is the sole copy of the data.
 //
 // MaxInFlightPerPartition bounds the number of simultaneously-reserved
 // offsets per partition (consumer-side parallelism cap). Once reached,
@@ -27,7 +28,6 @@ package topic
 type Topic struct {
 	Name                      string `json:"name"`
 	Partitions                int    `json:"partitions"`
-	ReplicationFactor         int    `json:"replication_factor"`
 	RetentionMs               int64  `json:"retention_ms"`
 	VisibilityTimeoutMs       int64  `json:"visibility_timeout_ms"`
 	MaxInFlightPerPartition   int64  `json:"max_in_flight_per_partition"`
@@ -43,10 +43,17 @@ type Details struct {
 }
 
 type PartitionStats struct {
-	Index           int   `json:"index"`
-	Segments        int   `json:"segments"`
-	OldestOffset    int64 `json:"oldest_offset"`
-	NextOffset      int64 `json:"next_offset"`
+	Index    int `json:"index"`
+	Segments int `json:"segments"`
+	// OldestOffset is the lowest offset still retained on disk.
+	OldestOffset int64 `json:"oldest_offset"`
+	// NextOffset is the offset the next appended record will receive
+	// (total records ever appended). It can briefly lead HighWatermark
+	// while a record is being committed.
+	NextOffset int64 `json:"next_offset"`
+	// HighWatermark is the exclusive upper bound of records visible to
+	// consumers — the durably-committed frontier.
+	HighWatermark   int64 `json:"high_watermark"`
 	SizeBytes       int64 `json:"size_bytes"`
 	OldestSegmentAt int64 `json:"oldest_segment_at,omitempty"`
 }

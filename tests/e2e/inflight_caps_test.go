@@ -175,7 +175,6 @@ func TestInFlightCapBlocksFurtherReserves(t *testing.T) {
 	resp := env.post("/v1/topics", map[string]any{
 		"name":                        "capped",
 		"partitions":                  3,
-		"replication_factor":          2,
 		"max_in_flight_per_partition": int64(2),
 	})
 	expectStatus(t, resp, http.StatusCreated)
@@ -217,7 +216,6 @@ func TestAckedAheadCapReturns503(t *testing.T) {
 	resp := env.post("/v1/topics", map[string]any{
 		"name":                          "stuckhead",
 		"partitions":                    3,
-		"replication_factor":            2,
 		"max_acked_ahead_per_partition": int64(2),
 	})
 	expectStatus(t, resp, http.StatusCreated)
@@ -252,7 +250,6 @@ func TestAlterCapsTakesEffect(t *testing.T) {
 	resp := env.post("/v1/topics", map[string]any{
 		"name":                        "altercap",
 		"partitions":                  3,
-		"replication_factor":          2,
 		"max_in_flight_per_partition": int64(1),
 	})
 	expectStatus(t, resp, http.StatusCreated)

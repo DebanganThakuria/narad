@@ -40,7 +40,6 @@ func createTopics(ctx context.Context, lb *roundRobinClient, cfg config, topics 
 		req := topicRecord{
 			Name:                      topicName,
 			Partitions:                cfg.partitions,
-			ReplicationFactor:         cfg.replicationFactor,
 			RetentionMs:               int64((1 * time.Hour) / time.Millisecond),
 			VisibilityTimeoutMs:       int64(cfg.visibilityTimeout / time.Millisecond),
 			MaxInFlightPerPartition:   4096,

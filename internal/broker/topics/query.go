@@ -36,11 +36,12 @@ func (m *Manager) GetTopicDetails(ctx context.Context, name string) (topic.Detai
 			return topic.Details{}, err
 		}
 		ps := topic.PartitionStats{
-			Index:        i,
-			Segments:     l.SegmentCount(),
-			OldestOffset: l.OldestOffset(),
-			NextOffset:   l.NextOffset(),
-			SizeBytes:    l.SizeBytes(),
+			Index:         i,
+			Segments:      l.SegmentCount(),
+			OldestOffset:  l.OldestOffset(),
+			NextOffset:    l.NextOffset(),
+			HighWatermark: l.HighWatermark(),
+			SizeBytes:     l.SizeBytes(),
 		}
 		if mt, ok := l.OldestSegmentAt(); ok {
 			ps.OldestSegmentAt = mt

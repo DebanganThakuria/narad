@@ -10,7 +10,6 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
-	"github.com/debanganthakuria/narad/internal/platform/replication"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
@@ -25,7 +24,6 @@ type Deps struct {
 	Partitions      partition.Manager
 	Schemas         schema.Registry
 	ConsumerOffsets *consumer.InFlight
-	Replicator      replication.Replicator
 	Logs            *runtime.Logs
 	Ingress         *ingress.Manager
 	Logger          *slog.Logger
@@ -49,7 +47,6 @@ type Deps struct {
 type TopicConfig struct {
 	DefaultPartitions                int
 	MaxPartitions                    int
-	DefaultReplicationFactor         int
 	DefaultRetentionMs               int64
 	DefaultVisibilityTimeoutMs       int64
 	DefaultMaxInFlightPerPartition   int64
@@ -60,8 +57,7 @@ type TopicConfig struct {
 // integration harnesses that want to override topic defaults without
 // dealing with raw millisecond fields.
 type TopicPolicy struct {
-	DefaultPartitions        int
-	MaxPartitions            int
-	DefaultReplicationFactor int
-	DefaultRetentionMs       int64
+	DefaultPartitions  int
+	MaxPartitions      int
+	DefaultRetentionMs int64
 }

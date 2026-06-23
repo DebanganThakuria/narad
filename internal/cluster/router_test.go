@@ -226,7 +226,7 @@ func seedTopicRouteState(t *testing.T, store *metastore.Store) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "remote.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote", "node-follower"); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 }
@@ -256,7 +256,7 @@ func TestOwnerAddrReturnsEmptyForLocalOwner(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-self", "node-remote"); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-self"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
@@ -272,7 +272,7 @@ func TestOwnerAddrReturnsEmptyForDeadMember(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "remote.example:7942", Status: metastore.MemberDead}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 2, "node-remote", "node-follower"); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 2, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
@@ -291,7 +291,7 @@ func TestRouteCacheInvalidatesWhenMetastoreVersionChanges(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "remote.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
@@ -395,7 +395,7 @@ func TestRouteProduceForwardsToRemoteOwner(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-follower", Addr: "follower.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember(follower) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote", "node-follower"); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 1}, nil)
@@ -445,10 +445,10 @@ func TestRouteProduceFallsBackToNextReachablePartition(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-failed", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-failed"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 2, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 2, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 1}, nil)
@@ -479,61 +479,6 @@ func TestRouteProduceFallsBackToNextReachablePartition(t *testing.T) {
 	}
 }
 
-func TestRouteProduceSkipsUnwritableLocalOwner(t *testing.T) {
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.URL.Query().Get("partition"); got != "1" {
-			t.Fatalf("partition query = %q, want %q", got, "1")
-		}
-		w.WriteHeader(http.StatusAccepted)
-	}))
-	defer remote.Close()
-
-	store := newTestStore(t)
-	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2}); err != nil {
-		t.Fatalf("CreateTopic() error = %v", err)
-	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember(self) error = %v", err)
-	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-dead", Addr: "dead.example:7942", Status: metastore.MemberDead}); err != nil {
-		t.Fatalf("RegisterMember(dead) error = %v", err)
-	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-follower", Addr: "follower.example:7942", Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember(follower) error = %v", err)
-	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember(remote) error = %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-self", "node-dead"); err != nil {
-		t.Fatalf("AssignPartition(0) error = %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote", "node-follower"); err != nil {
-		t.Fatalf("AssignPartition(1) error = %v", err)
-	}
-
-	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 0}, nil)
-	router.peer = fakePeerClient{produceFn: func(_ context.Context, addr string, req nodewire.ProduceRequest) (nodewire.Response, error) {
-		if addr != remote.Listener.Addr().String() {
-			t.Fatalf("addr = %q, want %q", addr, remote.Listener.Addr().String())
-		}
-		if req.Partition != 1 {
-			t.Fatalf("partition = %d, want 1", req.Partition)
-		}
-		return nodewire.Response{Status: http.StatusAccepted}, nil
-	}}
-	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
-
-	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"message":{"id":1}}`))
-	if !forwarded {
-		t.Fatal("RouteProduce() = false, want true")
-	}
-	if res.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want %d", res.Code, http.StatusAccepted)
-	}
-}
-
 func TestRouteProduceReturnsFalseWhenNoOwnersReachable(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -546,10 +491,10 @@ func TestRouteProduceReturnsFalseWhenNoOwnersReachable(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote-1", Addr: unreachableAddr(t), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote-0", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote-0"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-1", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-1"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 0}, nil)
@@ -589,13 +534,13 @@ func TestRouteProduceSkipsDeadMemberThenRetriesTransportFailure(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-dead", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-dead"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-failed", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-failed"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 2, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 2, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 0}, nil)
@@ -655,10 +600,10 @@ func TestRouteProduceRetriesAfterNon2xxResponse(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote-2", Addr: remoteOK.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-1", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-1"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 2, "node-remote-2", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 2, "node-remote-2"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 1}, nil)
@@ -717,10 +662,10 @@ func TestRouteProduceReturnsFalseWhenAllResponsesAreNon2xx(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote-1", Addr: remote2.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote-0", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote-0"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-1", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-1"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 0}, nil)
@@ -763,7 +708,7 @@ func TestRouteConsumeForwardsPinnedPartitionToRemoteOwner(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote", "node-follower"); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
@@ -816,10 +761,10 @@ func TestRouteConsumeReturnsLocalPartitionWithoutRemoteProbe(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition(0) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-self", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-self"); err != nil {
 		t.Fatalf("AssignPartition(1) error = %v", err)
 	}
 
@@ -864,10 +809,10 @@ func TestRouteConsumeReturnsNoContentWhenOnlyRemotePartitionsAreEmpty(t *testing
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition(0) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition(1) error = %v", err)
 	}
 
@@ -912,7 +857,7 @@ func TestRouteConsumeRemoteTreatsNotOwnerProbeAsEmpty(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "remote.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
@@ -949,10 +894,10 @@ func TestRouteConsumeRemoteStopsAfterFirstDeliveredProbe(t *testing.T) {
 			t.Fatalf("RegisterMember(%s) error = %v", member.ID, err)
 		}
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote-a", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote-a"); err != nil {
 		t.Fatalf("AssignPartition(0) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-b", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-b"); err != nil {
 		t.Fatalf("AssignPartition(1) error = %v", err)
 	}
 
@@ -1039,7 +984,7 @@ func TestRouteConsumeRemoteProbesEachRemoteOwnerOnce(t *testing.T) {
 		{partition: 4, ownerID: "node-remote-b"},
 		{partition: 5, ownerID: "node-remote-b"},
 	} {
-		if err := store.AssignPartition(ctx, "orders", assignment.partition, assignment.ownerID, ""); err != nil {
+		if err := store.AssignPartition(ctx, "orders", assignment.partition, assignment.ownerID); err != nil {
 			t.Fatalf("AssignPartition(%d) error = %v", assignment.partition, err)
 		}
 	}
@@ -1104,7 +1049,7 @@ func TestRemoteConsumeCandidatesLimitOneProbePerRemoteOwner(t *testing.T) {
 		{partition: 3, ownerID: "node-remote-b"},
 		{partition: 4, ownerID: "node-remote-b"},
 	} {
-		if err := store.AssignPartition(ctx, "orders", assignment.partition, assignment.ownerID, ""); err != nil {
+		if err := store.AssignPartition(ctx, "orders", assignment.partition, assignment.ownerID); err != nil {
 			t.Fatalf("AssignPartition(%d) error = %v", assignment.partition, err)
 		}
 	}
@@ -1153,7 +1098,7 @@ func TestRouteAckForwardsBodyToRemoteOwner(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote", "node-follower"); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
@@ -1201,10 +1146,10 @@ func TestRouteGetTopicMergesRemotePartitionStats(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-self", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-self"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
@@ -1244,7 +1189,7 @@ func TestRouteGetTopicReturnsErrorWhenRemoteOwnerMissing(t *testing.T) {
 	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
@@ -1272,7 +1217,7 @@ func TestRouteGetTopicKeepsLocalPartitionsLocal(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-self", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-self"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
@@ -1308,7 +1253,7 @@ func TestRouteGetTopicReturnsErrorWhenRemoteStatusIsNon2xx(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
@@ -1341,7 +1286,7 @@ func TestRouteGetTopicReturnsErrorWhenRemotePayloadHasWrongPartition(t *testing.
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
@@ -1374,7 +1319,7 @@ func TestRouteGetTopicReturnsErrorWhenRemotePayloadHasMultiplePartitions(t *test
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
@@ -1790,13 +1735,13 @@ func TestRouteConsumePrefersLocalPartitionWithoutSnapshotRanking(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote-2", Addr: remote2.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-self", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-self"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-1", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-1"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 2, "node-remote-2", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 2, "node-remote-2"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 

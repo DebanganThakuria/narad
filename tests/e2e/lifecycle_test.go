@@ -32,10 +32,9 @@ func TestFullLifecycle(t *testing.T) {
 
 	// Create
 	resp := env.post("/v1/topics", map[string]any{
-		"name":               "full-cycle",
-		"partitions":         4,
-		"replication_factor": 2,
-		"retention_ms":       int64(3_600_000),
+		"name":         "full-cycle",
+		"partitions":   4,
+		"retention_ms": int64(3_600_000),
 	})
 	expectStatus(t, resp, http.StatusCreated)
 

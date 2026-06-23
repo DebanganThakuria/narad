@@ -357,7 +357,7 @@ func TestSnapshotterPartitionSnapshotOmitsPartitionWhenLogOpenFails(t *testing.T
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	snapshotter := NewSnapshotter(ms, offsets, newRuntimeTestLogs(t, ms), logger, "")
 
-	ps, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 0)
+	ps, ok := snapshotter.partitionSnapshot("orders", 0)
 	if ok {
 		t.Fatalf("partitionSnapshot() ok = true, want false when log open fails")
 	}
@@ -457,6 +457,15 @@ func TestSnapshotterSnapshotFallsBackWhenSelfIDEmpty(t *testing.T) {
 	ms.setAssignment("orders", 0, "node-a")
 	ms.setAssignment("orders", 1, "node-b")
 	logs := newRuntimeTestLogs(t, ms)
+	// The snapshotter only reports already-open partition logs (it never
+	// lazily opens one — that would resurrect deleted topics), so open
+	// both partitions first.
+	if _, err := logs.Get("orders", 0); err != nil {
+		t.Fatalf("Get(0) error = %v", err)
+	}
+	if _, err := logs.Get("orders", 1); err != nil {
+		t.Fatalf("Get(1) error = %v", err)
+	}
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 1, MaxAckedAhead: 1}, nil
 	}, nil)
@@ -487,7 +496,7 @@ func TestSnapshotterPartitionSnapshotOmitsRemotePartitionBeforeLogOpen(t *testin
 	}, nil)
 	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "node-a")
 
-	ps, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 0)
+	ps, ok := snapshotter.partitionSnapshot("orders", 0)
 	if ok {
 		t.Fatalf("partitionSnapshot() ok = true, want false for remote partition: %+v", ps)
 	}
@@ -505,7 +514,7 @@ func TestSnapshotterPartitionSnapshotOmitsPartitionWhenAssignmentLookupFails(t *
 	}, nil)
 	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "node-a")
 
-	if _, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 0); ok {
+	if _, ok := snapshotter.partitionSnapshot("orders", 0); ok {
 		t.Fatal("partitionSnapshot() ok = true, want false when assignment lookup fails")
 	}
 	if _, exists := logs.logs[keyOf("orders", 0)]; exists {
@@ -530,7 +539,7 @@ func TestSnapshotterPartitionSnapshotIncludesOwnedPartitionWhenSelfIDSet(t *test
 	}, nil)
 	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "node-a")
 
-	ps, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 0)
+	ps, ok := snapshotter.partitionSnapshot("orders", 0)
 	if !ok {
 		t.Fatal("partitionSnapshot() ok = false, want true for owned partition")
 	}
@@ -559,7 +568,7 @@ func TestSnapshotterPartitionSnapshotFallsBackWithoutAssignmentReader(t *testing
 	}, nil)
 	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "node-a")
 
-	ps, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 0)
+	ps, ok := snapshotter.partitionSnapshot("orders", 0)
 	if !ok {
 		t.Fatal("partitionSnapshot() ok = false, want fallback success without assignment reader")
 	}
@@ -582,7 +591,7 @@ func TestSnapshotterPartitionSnapshotOmitsRemotePartitionWhenTopicLookupFailsWou
 	}, nil)
 	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "node-a")
 
-	if _, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 0); ok {
+	if _, ok := snapshotter.partitionSnapshot("orders", 0); ok {
 		t.Fatal("partitionSnapshot() ok = true, want false for remote partition")
 	}
 	if _, exists := logs.logs[keyOf("orders", 0)]; exists {
@@ -598,7 +607,7 @@ func TestSnapshotterPartitionSnapshotReturnsFalseForMissingTopicOpenErrorOnlyWhe
 	}, nil)
 	snapshotter := NewSnapshotter(ms, offsets, newRuntimeTestLogs(t, ms), slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 
-	_, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 9)
+	_, ok := snapshotter.partitionSnapshot("orders", 9)
 	if ok {
 		t.Fatal("partitionSnapshot() ok = true, want false")
 	}
@@ -722,7 +731,7 @@ func TestSnapshotterPartitionSnapshotUsesOffsetSnapshots(t *testing.T) {
 	}
 	snapshotter := NewSnapshotter(ms, offsets, logs, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 
-	ps, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 0)
+	ps, ok := snapshotter.partitionSnapshot("orders", 0)
 	if !ok {
 		t.Fatal("partitionSnapshot() ok = false, want true")
 	}
@@ -761,7 +770,7 @@ func TestPartitionSnapshotReturnsFalseForMissingTopicOpenErrorOnlyWhenMetastoreF
 	}, nil)
 	snapshotter := NewSnapshotter(ms, offsets, newRuntimeTestLogs(t, ms), slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 
-	_, ok := snapshotter.partitionSnapshot(context.Background(), "orders", 9)
+	_, ok := snapshotter.partitionSnapshot("orders", 9)
 	if ok {
 		t.Fatal("partitionSnapshot() ok = true, want false")
 	}

@@ -6,7 +6,6 @@ package config
 type TopicConfig struct {
 	DefaultPartitions                int   `json:"default_partitions"`
 	MaxPartitions                    int   `json:"max_partitions"`
-	DefaultReplicationFactor         int   `json:"default_replication_factor"`
 	DefaultRetentionAgeMs            int64 `json:"default_retention_age_ms"`
 	DefaultVisibilityTimeoutMs       int64 `json:"default_visibility_timeout_ms"`
 	DefaultMaxInFlightPerPartition   int64 `json:"default_max_in_flight_per_partition"`

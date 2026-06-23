@@ -3,6 +3,7 @@ package metrics
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -83,6 +84,30 @@ func (r *metricsRecorder) Write(b []byte) (int, error) {
 	}
 	n, err := r.ResponseWriter.Write(b)
 	r.bytes += int64(n)
+	return n, err
+}
+
+func (r *metricsRecorder) Flush() {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (r *metricsRecorder) ReadFrom(src io.Reader) (int64, error) {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	var n int64
+	var err error
+	if rf, ok := r.ResponseWriter.(io.ReaderFrom); ok {
+		n, err = rf.ReadFrom(src)
+	} else {
+		n, err = io.Copy(r.ResponseWriter, src)
+	}
+	r.bytes += n
 	return n, err
 }
 

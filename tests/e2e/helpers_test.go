@@ -30,7 +30,6 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 	obsmetrics "github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
-	"github.com/debanganthakuria/narad/internal/platform/replication"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
@@ -50,8 +49,6 @@ type envOpts struct {
 	maxConsumeWait             time.Duration
 	metrics                    bool // when true, wire real Prometheus metrics and /metrics endpoint
 	logOptions                 storage.Options
-	replicator                 replication.Replicator
-	replicatorFactory          func(*metastore.Store, *http.Client) replication.Replicator
 }
 
 func defaultOpts() envOpts {
@@ -195,14 +192,6 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		return consumer.Caps{MaxInFlight: maxIF, MaxAckedAhead: maxAA}, nil
 	}
 
-	replicatorImpl := opts.replicator
-	if opts.replicatorFactory != nil {
-		replicatorImpl = opts.replicatorFactory(ms, nil)
-	}
-	if replicatorImpl == nil {
-		replicatorImpl = replication.NewLocal()
-	}
-
 	logs := runtime.NewLogs(opts.dataDir, opts.logOptions, ms, m)
 	lifecycle := runtime.NewLifecycle(logs)
 	ingressManager, err := ingress.OpenManager(opts.dataDir, ingress.DefaultWALOptions())
@@ -215,7 +204,6 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		TopicConfig: broker.TopicConfig{
 			DefaultPartitions:                opts.defaultParts,
 			MaxPartitions:                    opts.maxParts,
-			DefaultReplicationFactor:         opts.defaultRF,
 			DefaultRetentionMs:               opts.defaultRetentionMs,
 			DefaultVisibilityTimeoutMs:       opts.defaultVisibilityTimeoutMs,
 			DefaultMaxInFlightPerPartition:   1024,
@@ -225,7 +213,6 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		Partitions:      partition.NewHashRoundRobin(),
 		Schemas:         schema.NewJSONSchema(),
 		ConsumerOffsets: consumer.NewInFlight(resolveCaps, nil),
-		Replicator:      replicatorImpl,
 		Logs:            logs,
 		Ingress:         ingressManager,
 		Logger:          log,
@@ -444,9 +431,7 @@ func (e *env) createTopic(name string, partitions, rf int, retentionMs int64) to
 	if partitions > 0 {
 		body["partitions"] = partitions
 	}
-	if rf > 0 {
-		body["replication_factor"] = rf
-	}
+	_ = rf
 	if retentionMs > 0 {
 		body["retention_ms"] = retentionMs
 	}

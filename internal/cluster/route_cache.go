@@ -22,10 +22,6 @@ type routeEntry struct {
 	ownerID    string
 	ownerAddr  string
 	ownerAlive bool
-
-	followerID    string
-	followerAddr  string
-	followerAlive bool
 }
 
 func (rt *Router) routesForTopic(topicName string) (cachedRouteTable, bool) {
@@ -65,17 +61,12 @@ func (rt *Router) routesForTopic(topicName string) (cachedRouteTable, bool) {
 	}
 	for _, assignment := range assignments {
 		entry := routeEntry{
-			partition:  assignment.Partition,
-			ownerID:    assignment.OwnerID,
-			followerID: assignment.FollowerID,
+			partition: assignment.Partition,
+			ownerID:   assignment.OwnerID,
 		}
 		if owner, ok := memberByID[assignment.OwnerID]; ok {
 			entry.ownerAddr = owner.Addr
 			entry.ownerAlive = owner.Status != metastore.MemberDead
-		}
-		if follower, ok := memberByID[assignment.FollowerID]; ok {
-			entry.followerAddr = follower.Addr
-			entry.followerAlive = follower.Status != metastore.MemberDead
 		}
 		table.entries = append(table.entries, entry)
 		table.byPartition[entry.partition] = entry

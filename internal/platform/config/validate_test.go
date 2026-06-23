@@ -39,7 +39,6 @@ func TestValidateRejectsInvalidFields(t *testing.T) {
 	cfg.Storage.RetentionCheckIntervalMs = 0
 	cfg.Topic.DefaultPartitions = 0
 	cfg.Topic.MaxPartitions = 0
-	cfg.Topic.DefaultReplicationFactor = 0
 	cfg.Topic.DefaultRetentionAgeMs = -1
 	cfg.Topic.DefaultVisibilityTimeoutMs = -1
 	cfg.Log.Level = "verbose"

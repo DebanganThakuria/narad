@@ -2021,17 +2021,16 @@ func TestInitializeConsumerOffsetsRestoresOnlyOwnedPartitions(t *testing.T) {
 	if err := store.CreateTopic(ctx, topic.Topic{
 		Name:                      "orders",
 		Partitions:                2,
-		ReplicationFactor:         1,
 		VisibilityTimeoutMs:       1000,
 		MaxInFlightPerPartition:   16,
 		MaxAckedAheadPerPartition: 16,
 	}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-1", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-1"); err != nil {
 		t.Fatalf("AssignPartition(0) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-2", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-2"); err != nil {
 		t.Fatalf("AssignPartition(1) error = %v", err)
 	}
 	for partition, offset := range map[int]int64{0: 3, 1: 9} {

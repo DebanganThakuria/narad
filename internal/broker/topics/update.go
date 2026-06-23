@@ -48,7 +48,7 @@ func (m *Manager) IncreaseTopicPartitions(ctx context.Context, name string, newP
 		return topic.Topic{}, err
 	}
 	if m.assigner != nil {
-		if err := m.assigner.AssignNewPartitions(ctx, name, current.Partitions, newPartitions, updated.ReplicationFactor); err != nil {
+		if err := m.assigner.AssignNewPartitions(ctx, name, current.Partitions, newPartitions); err != nil {
 			m.logger.Warn("topic partitions increased without immediate assignment", "topic", name, "old_partitions", current.Partitions, "new_partitions", newPartitions, "err", err)
 		}
 	}

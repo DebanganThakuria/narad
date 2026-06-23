@@ -38,7 +38,6 @@ type rpcProduceBody struct {
 type rpcCreateTopicBody struct {
 	Name                      string          `json:"name"`
 	Partitions                int             `json:"partitions"`
-	ReplicationFactor         int             `json:"replication_factor"`
 	RetentionMs               int64           `json:"retention_ms"`
 	VisibilityTimeoutMs       int64           `json:"visibility_timeout_ms"`
 	MaxInFlightPerPartition   int64           `json:"max_in_flight_per_partition"`
@@ -253,7 +252,6 @@ func (s *RPCServer) handleCreateTopic(payload []byte) nodewire.Response {
 	t, err := s.broker.CreateTopic(rpcRequestContext(), brokertopics.CreateOpts{
 		Name:                      body.Name,
 		Partitions:                body.Partitions,
-		ReplicationFactor:         body.ReplicationFactor,
 		RetentionMs:               body.RetentionMs,
 		VisibilityTimeoutMs:       body.VisibilityTimeoutMs,
 		MaxInFlightPerPartition:   body.MaxInFlightPerPartition,

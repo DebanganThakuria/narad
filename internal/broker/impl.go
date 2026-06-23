@@ -38,14 +38,11 @@ func New(d Deps) (Broker, error) {
 		return nil, fmt.Errorf("%w: data_dir empty", ErrInvalidArgument)
 	}
 	if d.Metastore == nil || d.Partitions == nil || d.Schemas == nil ||
-		d.ConsumerOffsets == nil || d.Replicator == nil || d.Logger == nil {
+		d.ConsumerOffsets == nil || d.Logger == nil {
 		return nil, fmt.Errorf("%w: missing dependency", ErrInvalidArgument)
 	}
 	if d.TopicConfig.DefaultPartitions <= 0 {
 		return nil, fmt.Errorf("%w: TopicConfig.DefaultPartitions must be > 0", ErrInvalidArgument)
-	}
-	if d.TopicConfig.DefaultReplicationFactor <= 0 {
-		return nil, fmt.Errorf("%w: TopicConfig.DefaultReplicationFactor must be > 0", ErrInvalidArgument)
 	}
 	if d.TopicConfig.DefaultMaxInFlightPerPartition <= 0 {
 		return nil, fmt.Errorf("%w: TopicConfig.DefaultMaxInFlightPerPartition must be > 0", ErrInvalidArgument)
@@ -75,7 +72,6 @@ func New(d Deps) (Broker, error) {
 	topicCfg := topics.Config{
 		DefaultPartitions:                d.TopicConfig.DefaultPartitions,
 		MaxPartitions:                    d.TopicConfig.MaxPartitions,
-		DefaultReplicationFactor:         d.TopicConfig.DefaultReplicationFactor,
 		DefaultRetentionMs:               d.TopicConfig.DefaultRetentionMs,
 		DefaultVisibilityTimeoutMs:       d.TopicConfig.DefaultVisibilityTimeoutMs,
 		DefaultMaxInFlightPerPartition:   d.TopicConfig.DefaultMaxInFlightPerPartition,
@@ -89,7 +85,7 @@ func New(d Deps) (Broker, error) {
 
 	return &impl{
 		Manager:     topics.NewManager(d.DataDir, d.Metastore, assigner, d.Schemas, d.ConsumerOffsets, logs, topicCfg, d.Logger),
-		Engine:      messaging.NewEngine(d.Metastore, d.Schemas, d.Partitions, d.Replicator, d.ConsumerOffsets, logs, ingressManager, d.Metrics, d.Logger, d.SelfID),
+		Engine:      messaging.NewEngine(d.Metastore, d.Schemas, d.Partitions, d.ConsumerOffsets, logs, ingressManager, d.Metrics, d.Logger, d.SelfID),
 		Snapshotter: runtime.NewSnapshotter(d.Metastore, d.ConsumerOffsets, logs, d.Logger, d.SelfID),
 		Lifecycle:   lifecycle,
 		deps:        d,

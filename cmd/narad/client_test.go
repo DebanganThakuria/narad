@@ -29,7 +29,6 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 	obsmetrics "github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
-	"github.com/debanganthakuria/narad/internal/platform/replication"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
@@ -115,7 +114,6 @@ func newCLITestEnv(t *testing.T) *cliTestEnv {
 		TopicConfig: broker.TopicConfig{
 			DefaultPartitions:                3,
 			MaxPartitions:                    1024,
-			DefaultReplicationFactor:         2,
 			DefaultRetentionMs:               7 * 24 * 3600 * 1000,
 			DefaultVisibilityTimeoutMs:       30_000,
 			DefaultMaxInFlightPerPartition:   1024,
@@ -125,7 +123,6 @@ func newCLITestEnv(t *testing.T) *cliTestEnv {
 		Partitions:      partition.NewHashRoundRobin(),
 		Schemas:         schema.NewJSONSchema(),
 		ConsumerOffsets: consumer.NewInFlight(resolveCaps, nil),
-		Replicator:      replication.NewLocal(),
 		Logger:          log,
 		Logs:            logs,
 		Ingress:         ingressManager,
@@ -190,7 +187,7 @@ func waitForVisibleOffset(t *testing.T, br broker.Broker, topicName string, part
 			t.Fatalf("get topic details %q: %v", topicName, err)
 		}
 		if partition >= 0 && partition < len(details.Partitions) &&
-			details.Partitions[partition].NextOffset > previousNext {
+			details.Partitions[partition].HighWatermark > previousNext {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -255,7 +252,7 @@ func TestClientTopicsCreateListGetAlterDeleteParity(t *testing.T) {
 	env := newCLITestEnv(t)
 
 	stdout, stderr, err := captureCLIOutput(t, func() error {
-		return runClient([]string{"topics", "create", "--addr", env.server.URL, "--partitions", "3", "--replication-factor", "2", "--retention-ms", "1234", "orders"})
+		return runClient([]string{"topics", "create", "--addr", env.server.URL, "--partitions", "3", "--retention-ms", "1234", "orders"})
 	}, "")
 	if err != nil {
 		t.Fatalf("topics create: %v", err)
@@ -335,7 +332,7 @@ func TestClientTopicsCreateListGetAlterDeleteParity(t *testing.T) {
 
 func TestClientProduceConsumeAckParity(t *testing.T) {
 	env := newCLITestEnv(t)
-	if _, err := env.broker.CreateTopic(context.Background(), topics.CreateOpts{Name: "orders", Partitions: 3, ReplicationFactor: 2}); err != nil {
+	if _, err := env.broker.CreateTopic(context.Background(), topics.CreateOpts{Name: "orders", Partitions: 3}); err != nil {
 		t.Fatalf("create topic: %v", err)
 	}
 	if err := waitForAssignments(env.store, "orders"); err != nil {

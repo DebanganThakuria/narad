@@ -22,7 +22,6 @@
   "topic": {
     "default_partitions":                         8,
     "max_partitions":                             1024,
-    "default_replication_factor":                 2,
     "default_retention_age_ms":                   604800000,
     "default_visibility_timeout_ms":              30000,
     "default_max_in_flight_per_partition":        1024,
