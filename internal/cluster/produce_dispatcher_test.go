@@ -235,6 +235,72 @@ func TestProduceDispatcherDoesNotCheckpointFailedRecord(t *testing.T) {
 	}
 }
 
+// TestProduceDispatcherDiscardsRecordsForDeletedTopic verifies that
+// undispatched WAL records whose topic was deleted are discarded (the
+// checkpoint advances past them) instead of head-of-line-blocking the
+// shard forever — delete also removes the assignment, so dispatchTarget
+// fails for these records.
+func TestProduceDispatcherDiscardsRecordsForDeletedTopic(t *testing.T) {
+	store := newTestStore(t)
+	seedProduceDispatchTopic(t, store, "node-self")
+	manager := newDispatchIngressManager(t)
+	if _, err := manager.AcceptProduce(context.Background(), "orders", "c1", 0, []byte(`{"id":1}`)); err != nil {
+		t.Fatalf("AcceptProduce() error = %v", err)
+	}
+	if err := store.DeleteTopic(context.Background(), "orders"); err != nil {
+		t.Fatalf("DeleteTopic() error = %v", err)
+	}
+	committer := &fakeProduceCommitter{}
+	dispatcher := NewProduceDispatcher(manager, store, "node-self", committer, nil, nil, ProduceDispatcherConfig{})
+
+	processed, err := dispatcher.DispatchAvailable(context.Background())
+	if err != nil {
+		t.Fatalf("DispatchAvailable() error = %v, want nil (records discarded)", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d, want 1 (discarded)", processed)
+	}
+	if len(committer.records) != 0 {
+		t.Fatalf("committed = %d, want 0 (topic deleted, nothing committed)", len(committer.records))
+	}
+	nextSeq, err := manager.LoadProduceCheckpoint()
+	if err != nil {
+		t.Fatalf("LoadProduceCheckpoint() error = %v", err)
+	}
+	if nextSeq != 1 {
+		t.Fatalf("checkpoint = %d, want 1 (advanced past discarded record)", nextSeq)
+	}
+}
+
+// TestProduceDispatcherRetriesCommitFailureWhileTopicExists is the
+// no-data-loss guard: a commit failure for a topic that STILL EXISTS must
+// never be discarded — the checkpoint must not advance, so the record is
+// retried.
+func TestProduceDispatcherRetriesCommitFailureWhileTopicExists(t *testing.T) {
+	store := newTestStore(t)
+	seedProduceDispatchTopic(t, store, "node-self")
+	manager := newDispatchIngressManager(t)
+	if _, err := manager.AcceptProduce(context.Background(), "orders", "c1", 0, []byte(`{"id":1}`)); err != nil {
+		t.Fatalf("AcceptProduce() error = %v", err)
+	}
+	committer := &fakeProduceCommitter{err: errors.New("commit boom")}
+	dispatcher := NewProduceDispatcher(manager, store, "node-self", committer, nil, nil, ProduceDispatcherConfig{})
+
+	if _, err := dispatcher.DispatchAvailable(context.Background()); err == nil {
+		t.Fatal("DispatchAvailable() error = nil, want error (topic exists -> retry, not discard)")
+	}
+	if len(committer.records) != 0 {
+		t.Fatalf("committed = %d, want 0", len(committer.records))
+	}
+	nextSeq, err := manager.LoadProduceCheckpoint()
+	if err != nil {
+		t.Fatalf("LoadProduceCheckpoint() error = %v", err)
+	}
+	if nextSeq != 0 {
+		t.Fatalf("checkpoint = %d, want 0 (record retained for retry)", nextSeq)
+	}
+}
+
 func TestProduceDispatcherReplaysAcceptedWALAfterRestart(t *testing.T) {
 	store := newTestStore(t)
 	seedProduceDispatchTopic(t, store, "node-self")

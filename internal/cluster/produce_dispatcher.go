@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/wal"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
@@ -82,6 +84,9 @@ func NewProduceDispatcher(
 	var observer stageObserver
 	if len(observers) > 0 {
 		observer = observers[0]
+	}
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &ProduceDispatcher{
 		ingress:   ingressManager,
@@ -191,7 +196,7 @@ func (d *ProduceDispatcher) dispatchShard(ctx context.Context, shard int, state 
 		if len(pending) == 0 {
 			return nil
 		}
-		if err := d.dispatchRecordBatch(ctx, pendingTarget, pending); err != nil {
+		if err := d.commitBatch(ctx, pendingTarget, pending); err != nil {
 			return err
 		}
 		last := pending[len(pending)-1]
@@ -228,13 +233,28 @@ func (d *ProduceDispatcher) dispatchShard(ctx context.Context, shard int, state 
 			if flushErr := flushPending(); flushErr != nil {
 				return flushErr
 			}
+			// A deleted topic loses its assignment too (applyDeleteTopic
+			// removes topic + assignments atomically), so dispatchTarget
+			// fails here for its leftover WAL records. Discard them
+			// (advance past) rather than head-of-line-blocking the shard
+			// — gated on the local replica confirming the topic is gone,
+			// never on the lookup error alone.
+			if d.topicDeletedLocally(record.Topic) {
+				d.logger.Warn("discarding undispatched record for deleted topic",
+					"topic", record.Topic, "partition", record.TargetPartition,
+					"seq", record.WAL.Seq, "err", err)
+				checkpointSeq = record.WAL.Seq + 1
+				nextCursor = cursor
+				processed++
+				return nil
+			}
 			return err
 		}
 		if !d.canBatchTarget(target) {
 			if err := flushPending(); err != nil {
 				return err
 			}
-			if err := d.dispatchRecordBatch(ctx, target, []ingress.ProduceRecord{record}); err != nil {
+			if err := d.commitBatch(ctx, target, []ingress.ProduceRecord{record}); err != nil {
 				return err
 			}
 			checkpointSeq = record.WAL.Seq + 1
@@ -332,6 +352,45 @@ func (d *ProduceDispatcher) dispatchTarget(record ingress.ProduceRecord) (produc
 		topic:     record.Topic,
 		partition: record.TargetPartition,
 	}, nil
+}
+
+// commitBatch dispatches a batch. If the commit fails AND the topic is
+// genuinely gone from this node's metastore replica, the records are
+// DISCARDED (returns nil so the caller advances the WAL checkpoint past
+// them) — a topic deleted while it still had undispatched WAL records is
+// the motivating case; without this the shard would head-of-line-block on
+// records that can never commit.
+//
+// The discard decision keys off this node's own replica, never the commit
+// error itself. That is the safe signal: a record only reached this WAL
+// because AcceptProduce saw the topic in this replica, and Raft replicas
+// only move forward — so if the topic is now absent here, a delete was
+// truly applied (it cannot be create-replication lag). Any other failure
+// (transient network, a lagging remote owner returning 404 for a live
+// topic, owner moved, malformed record) is returned so the caller retries
+// rather than silently dropping data.
+func (d *ProduceDispatcher) commitBatch(ctx context.Context, target produceDispatchTarget, records []ingress.ProduceRecord) error {
+	err := d.dispatchRecordBatch(ctx, target, records)
+	if err == nil || ctx.Err() != nil {
+		return err
+	}
+	if d.topicDeletedLocally(target.topic) {
+		d.logger.Warn("discarding undispatched produce records for deleted topic",
+			"topic", target.topic, "partition", target.partition,
+			"records", len(records), "err", err)
+		return nil
+	}
+	return err
+}
+
+// topicDeletedLocally reports whether the topic is absent from this node's
+// local metastore replica.
+func (d *ProduceDispatcher) topicDeletedLocally(topicName string) bool {
+	if d.store == nil {
+		return false
+	}
+	_, err := d.store.GetTopic(context.Background(), topicName)
+	return errors.Is(err, errs.ErrNotFound)
 }
 
 func (d *ProduceDispatcher) dispatchRecordBatch(ctx context.Context, target produceDispatchTarget, records []ingress.ProduceRecord) error {

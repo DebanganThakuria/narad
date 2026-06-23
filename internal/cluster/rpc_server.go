@@ -342,10 +342,42 @@ func (s *RPCServer) handlePurgeTopic(payload []byte) nodewire.Response {
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid purge topic request: "+err.Error())
 	}
+	// Wait until this node's local metastore replica reflects the
+	// deletion before removing files. The leader broadcasts this purge
+	// after the delete is quorum-committed, but a follower applies it to
+	// its local replica asynchronously. Purging before the local replica
+	// catches up would let a concurrent produce-dispatch/consume re-open
+	// (and thus resurrect) the partition logs via Logs.Get, which keys
+	// off the local replica. If the replica never reflects the deletion
+	// (timeout), we skip the purge rather than risk deleting live data;
+	// the startup orphan sweep is the backstop.
+	if s.store != nil && !s.waitTopicDeletedLocally(req.Topic, purgeApplyWaitTimeout) {
+		s.logger.Warn("skipping purge: local metastore still shows topic; deferring to orphan sweep", "topic", req.Topic)
+		return nodewire.Response{Status: http.StatusNoContent}
+	}
 	if err := s.broker.PurgeTopic(rpcRequestContext(), req.Topic); err != nil {
 		return s.brokerError("purge topic", err)
 	}
 	return nodewire.Response{Status: http.StatusNoContent}
+}
+
+// purgeApplyWaitTimeout bounds how long a purge waits for the local Raft
+// replica to reflect a topic deletion. Apply lag is normally sub-second.
+const purgeApplyWaitTimeout = 5 * time.Second
+
+// waitTopicDeletedLocally returns true once the local metastore no longer
+// has the topic, or false if it still does after the timeout.
+func (s *RPCServer) waitTopicDeletedLocally(topicName string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := s.store.GetTopic(rpcRequestContext(), topicName); errors.Is(err, errs.ErrNotFound) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func (s *RPCServer) handleTopicPartitionStats(payload []byte) nodewire.Response {

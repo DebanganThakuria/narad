@@ -309,3 +309,22 @@ func waitForLeaderStore(t *testing.T, stores []*metastore.Store) *metastore.Stor
 	t.Fatal("timed out waiting for cluster leader")
 	return nil
 }
+
+func TestStoreAppliedCaughtUp(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// An elected single-node leader that has applied its probe writes is
+	// caught up.
+	if !s.AppliedCaughtUp() {
+		t.Fatal("AppliedCaughtUp() = false, want true for an elected single-node leader")
+	}
+
+	// Remains caught up after further committed+applied writes.
+	if err := s.CreateTopic(ctx, topic.Topic{Name: "caughtup-topic", Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	if !s.AppliedCaughtUp() {
+		t.Fatal("AppliedCaughtUp() = false after an applied write, want true")
+	}
+}
