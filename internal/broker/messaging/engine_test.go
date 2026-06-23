@@ -17,7 +17,6 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
-	"github.com/debanganthakuria/narad/internal/platform/replication"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
@@ -170,7 +169,7 @@ func newTestStore(t *testing.T) *metastore.Store {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := store.CreateTopic(context.Background(), topic.Topic{Name: "__probe__", Partitions: 3, ReplicationFactor: 2}); err == nil {
+		if err := store.CreateTopic(context.Background(), topic.Topic{Name: "__probe__", Partitions: 3}); err == nil {
 			_ = store.DeleteTopic(context.Background(), "__probe__")
 			return store
 		}
@@ -197,7 +196,6 @@ func newClusterTestEngine(t *testing.T, store *metastore.Store, mgr partition.Ma
 		store,
 		schema.NewAlwaysValid(),
 		mgr,
-		replication.NewLocal(),
 		offsets,
 		logs,
 		nil,
@@ -207,27 +205,9 @@ func newClusterTestEngine(t *testing.T, store *metastore.Store, mgr partition.Ma
 	)
 }
 
-type fakeReplicator struct {
-	err           error
-	called        bool
-	lastTopic     string
-	lastPartition int
-	lastOffset    int64
-	lastPayload   []byte
-}
-
-func (r *fakeReplicator) Replicate(_ context.Context, topic string, partition int, offset int64, payload []byte) error {
-	r.called = true
-	r.lastTopic = topic
-	r.lastPartition = partition
-	r.lastOffset = offset
-	r.lastPayload = append([]byte(nil), payload...)
-	return r.err
-}
-
-func newTestEngine(t *testing.T, ms *messagingFakeMetastore, schemas schema.Registry, partitioner partition.Manager, replicator replication.Replicator) *Engine {
+func newTestEngine(t *testing.T, ms *messagingFakeMetastore, schemas schema.Registry, partitioner partition.Manager) *Engine {
 	t.Helper()
-	return newTestEngineWithDir(t, t.TempDir(), ms, schemas, partitioner, replicator)
+	return newTestEngineWithDir(t, t.TempDir(), ms, schemas, partitioner)
 }
 
 //go:fix inline
@@ -235,7 +215,7 @@ func int64ptr(v int64) *int64 {
 	return new(v)
 }
 
-func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetastore, schemas schema.Registry, partitioner partition.Manager, replicator replication.Replicator) *Engine {
+func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetastore, schemas schema.Registry, partitioner partition.Manager) *Engine {
 	t.Helper()
 	if ms == nil {
 		ms = newMessagingFakeMetastore()
@@ -245,9 +225,6 @@ func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetasto
 	}
 	if partitioner == nil {
 		partitioner = fixedPartitioner{picked: 0}
-	}
-	if replicator == nil {
-		replicator = &fakeReplicator{}
 	}
 	logs := runtime.NewLogs(dataDir, storage.Options{FlushInterval: 5 * time.Millisecond}, ms, nil)
 	t.Cleanup(func() { _ = logs.CloseAll() })
@@ -271,7 +248,7 @@ func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetasto
 			}
 		}
 	}
-	return NewEngine(ms, schemas, partitioner, replicator, offsets, logs, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+	return NewEngine(ms, schemas, partitioner, offsets, logs, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 }
 
 func partitionHWMPath(dataDir, topicName string, partition int) string {
@@ -279,7 +256,7 @@ func partitionHWMPath(dataDir, topicName string, partition int) string {
 }
 
 func TestGetTopicMapsNotFound(t *testing.T) {
-	engine := newTestEngine(t, newMessagingFakeMetastore(), nil, nil, nil)
+	engine := newTestEngine(t, newMessagingFakeMetastore(), nil, nil)
 
 	_, err := engine.getTopic(context.Background(), "missing")
 	if !errors.Is(err, ErrTopicNotFound) {
@@ -290,7 +267,7 @@ func TestGetTopicMapsNotFound(t *testing.T) {
 func TestGetTopicWrapsUnexpectedError(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.getTopicErr = errors.New("db down")
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 
 	_, err := engine.getTopic(context.Background(), "orders")
 	if err == nil || err.Error() != "messaging: get topic: db down" {
@@ -301,7 +278,7 @@ func TestGetTopicWrapsUnexpectedError(t *testing.T) {
 func TestGetTopicUsesShortLivedCache(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 3}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 
 	first, err := engine.getTopic(context.Background(), "orders")
 	if err != nil {
@@ -322,7 +299,7 @@ func TestGetTopicUsesShortLivedCache(t *testing.T) {
 func TestGetTopicInvalidatesCacheOnMetastoreVersionChange(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 3}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	engine.cacheTTL = time.Hour
 
 	first, err := engine.getTopic(context.Background(), "orders")
@@ -347,7 +324,7 @@ func TestGetTopicInvalidatesCacheOnMetastoreVersionChange(t *testing.T) {
 func TestReplayReadReturnsMessageWhenOffsetExists(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	log, err := engine.logs.Get("orders", 1)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -380,7 +357,7 @@ func TestReplayReadReturnsMessageWhenOffsetExists(t *testing.T) {
 func TestReplayReadReturnsNotFoundWhenOffsetPastTail(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 
 	_, found, err := engine.replayRead("orders", 0, 0, 1)
 	if err != nil {
@@ -392,7 +369,7 @@ func TestReplayReadReturnsNotFoundWhenOffsetPastTail(t *testing.T) {
 }
 
 func TestReplayReadRejectsOutOfRangePartition(t *testing.T) {
-	engine := newTestEngine(t, newMessagingFakeMetastore(), nil, nil, nil)
+	engine := newTestEngine(t, newMessagingFakeMetastore(), nil, nil)
 
 	_, _, err := engine.replayRead("orders", -1, 0, 1)
 	if err == nil || !errors.Is(err, ErrInvalid) {
@@ -403,7 +380,7 @@ func TestReplayReadRejectsOutOfRangePartition(t *testing.T) {
 func TestConsumeRequiresPartitionWhenOffsetProvided(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	_, _, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Offset: new(int64(0))})
 	if !errors.Is(err, ErrPartitionRequired) {
 		t.Fatalf("Consume() error = %v, want %v", err, ErrPartitionRequired)
@@ -413,7 +390,7 @@ func TestConsumeRequiresPartitionWhenOffsetProvided(t *testing.T) {
 func TestConsumeRejectsOutOfRangePinnedPartition(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	_, _, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(1)})
 	if err == nil || !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Consume() error = %v, want %v", err, ErrInvalid)
@@ -436,7 +413,7 @@ func TestAllPartitions(t *testing.T) {
 func TestWaitForActivityReturnsDeadlineExceededOnTimeout(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 
 	err := engine.waitForActivity(context.Background(), "orders", []int{0}, 10*time.Millisecond)
 	if !errors.Is(err, context.DeadlineExceeded) {
@@ -447,7 +424,7 @@ func TestWaitForActivityReturnsDeadlineExceededOnTimeout(t *testing.T) {
 func TestWaitForActivityReturnsContextCancellation(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -460,7 +437,7 @@ func TestWaitForActivityReturnsContextCancellation(t *testing.T) {
 func TestAckRejectsMissingInputsAndTopicMismatch(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 
 	if err := engine.Ack(context.Background(), "", "handle"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Ack() empty topic error = %v, want %v", err, ErrInvalid)
@@ -477,7 +454,7 @@ func TestAckRejectsMissingInputsAndTopicMismatch(t *testing.T) {
 func TestConsumeReturnsNoMessageWhenWaitIsNonPositive(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 
 	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Wait: 0})
 	if err != nil {
@@ -491,7 +468,7 @@ func TestConsumeReturnsNoMessageWhenWaitIsNonPositive(t *testing.T) {
 func TestConsumeReturnsNoMessageWhenContextCancelledDuringWait(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -507,7 +484,7 @@ func TestConsumeReturnsNoMessageWhenContextCancelledDuringWait(t *testing.T) {
 func TestConsumeReturnsMessageForPinnedPartition(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, VisibilityTimeoutMs: 1000}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	log, err := engine.logs.Get("orders", 1)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -536,7 +513,7 @@ func TestConsumeReturnsMessageForPinnedPartition(t *testing.T) {
 func TestAckReturnsTopicNotFoundWhenTopicDeleted(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	log, err := engine.logs.Get("orders", 0)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -565,7 +542,7 @@ func TestAckReturnsTopicNotFoundWhenTopicDeleted(t *testing.T) {
 func TestAckCommitsReservedHandle(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	log, err := engine.logs.Get("orders", 0)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -592,7 +569,7 @@ func TestAckCommitsReservedHandle(t *testing.T) {
 func TestAckRejectsStaleHandleAfterCommit(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	log, err := engine.logs.Get("orders", 0)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -626,7 +603,7 @@ func TestAckAckedAheadCapWithNilMetricsReturnsError(t *testing.T) {
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 3, MaxAckedAhead: 1}, nil
 	}, nil)
-	engine := NewEngine(ms, nil, nil, nil, offsets, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+	engine := NewEngine(ms, nil, nil, offsets, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 
 	if _, err := offsets.ReserveNext(context.Background(), "orders", 0, time.Second, 2); err != nil {
 		t.Fatalf("ReserveNext(offset 0) error = %v", err)
@@ -652,7 +629,7 @@ func TestAckAckedAheadCapWithNilMetricsReturnsError(t *testing.T) {
 }
 
 func TestProduceRejectsMissingTopic(t *testing.T) {
-	engine := newTestEngine(t, newMessagingFakeMetastore(), nil, nil, nil)
+	engine := newTestEngine(t, newMessagingFakeMetastore(), nil, nil)
 
 	_, _, err := engine.Produce(context.Background(), "missing", "", []byte(`{"id":1}`))
 	if !errors.Is(err, ErrTopicNotFound) {
@@ -663,7 +640,7 @@ func TestProduceRejectsMissingTopic(t *testing.T) {
 func TestTryQueueReadReturnsMessageFromFirstReservablePartition(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, VisibilityTimeoutMs: 1000}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 
 	log0, err := engine.logs.Get("orders", 0)
 	if err != nil {
@@ -705,7 +682,7 @@ func TestTryQueueReadReturnsMessageFromFirstReservablePartition(t *testing.T) {
 func TestConsumeScansPartitionsInOrder(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, VisibilityTimeoutMs: 1000}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 
 	log1, err := engine.logs.Get("orders", 1)
 	if err != nil {
@@ -733,7 +710,7 @@ func TestConsumeScansPartitionsInOrder(t *testing.T) {
 func TestConsumeReplayReturnsMessageForExistingOffset(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	log, err := engine.logs.Get("orders", 0)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -762,7 +739,7 @@ func TestConsumeReplayReturnsMessageForExistingOffset(t *testing.T) {
 func TestConsumeReplayReturnsNoMessagePastTail(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Offset: new(int64(5))})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
@@ -775,7 +752,7 @@ func TestConsumeReplayReturnsNoMessagePastTail(t *testing.T) {
 func TestWaitForActivityReturnsNilWhenPartitionNotifies(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	log, err := engine.logs.Get("orders", 0)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -804,7 +781,7 @@ func TestWaitForActivityReturnsNilWhenPartitionNotifies(t *testing.T) {
 func TestAckRejectsMalformedHandle(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 
 	err := engine.Ack(context.Background(), "orders", "not-a-valid-handle")
 	if !errors.Is(err, consumer.ErrHandleMalformed) {
@@ -815,7 +792,7 @@ func TestAckRejectsMalformedHandle(t *testing.T) {
 func TestAckRejectsUnreservedHandle(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	handle := consumer.EncodeHandle(consumer.Handle{Topic: "orders", Partition: 0, Offset: 0, Nonce: 123})
 
 	err := engine.Ack(context.Background(), "orders", handle)
@@ -825,7 +802,7 @@ func TestAckRejectsUnreservedHandle(t *testing.T) {
 }
 
 func TestConsumeReturnsTopicNotFoundForMissingTopic(t *testing.T) {
-	engine := newTestEngine(t, newMessagingFakeMetastore(), nil, nil, nil)
+	engine := newTestEngine(t, newMessagingFakeMetastore(), nil, nil)
 
 	_, _, err := engine.Consume(context.Background(), "missing", ConsumeOpts{})
 	if !errors.Is(err, ErrTopicNotFound) {
@@ -834,7 +811,7 @@ func TestConsumeReturnsTopicNotFoundForMissingTopic(t *testing.T) {
 }
 
 func TestAckReturnsTopicNotFoundForMissingTopic(t *testing.T) {
-	engine := newTestEngine(t, newMessagingFakeMetastore(), nil, nil, nil)
+	engine := newTestEngine(t, newMessagingFakeMetastore(), nil, nil)
 	handle := consumer.EncodeHandle(consumer.Handle{Topic: "missing", Partition: 0, Offset: 0, Nonce: 1})
 
 	err := engine.Ack(context.Background(), "missing", handle)

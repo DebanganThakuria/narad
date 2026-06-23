@@ -35,14 +35,6 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 			ErrInvalid, partitions, maximum)
 	}
 
-	rf := opts.ReplicationFactor
-	if rf == 0 {
-		rf = m.cfg.DefaultReplicationFactor
-	}
-	if rf < 2 {
-		return topic.Topic{}, fmt.Errorf("%w: replication_factor must be >= 2 (0 = use default)", ErrInvalid)
-	}
-
 	retentionMs := opts.RetentionMs
 	if retentionMs == 0 {
 		retentionMs = m.cfg.DefaultRetentionMs
@@ -83,7 +75,6 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	t := topic.Topic{
 		Name:                      opts.Name,
 		Partitions:                partitions,
-		ReplicationFactor:         rf,
 		RetentionMs:               retentionMs,
 		VisibilityTimeoutMs:       visibilityMs,
 		MaxInFlightPerPartition:   maxIF,
@@ -108,7 +99,7 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 		}
 	}
 	if m.assigner != nil {
-		if err := m.assigner.AssignNewPartitions(ctx, opts.Name, 0, partitions, rf); err != nil {
+		if err := m.assigner.AssignNewPartitions(ctx, opts.Name, 0, partitions); err != nil {
 			m.logger.Warn("topic created without immediate partition assignment", "topic", opts.Name, "err", err)
 		}
 	}
@@ -116,7 +107,6 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	m.logger.Info("topic created",
 		"topic", opts.Name,
 		"partitions", partitions,
-		"replication_factor", rf,
 		"retention_ms", retentionMs,
 		"visibility_timeout_ms", visibilityMs,
 		"max_in_flight_per_partition", maxIF,

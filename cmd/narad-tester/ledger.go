@@ -136,15 +136,20 @@ func (l *ledger) markConsumed(msg testerMessage, topic string, _ time.Time) (con
 		if rec.Sequence != msg.Sequence {
 			return result, nil
 		}
+		// Validate the routing invariant BEFORE consuming the sequence or
+		// dropping the record. A topic mismatch is exactly the misrouting
+		// defect this harness exists to catch; consuming/deleting first
+		// would mask it and turn a later correct delivery into a spurious
+		// duplicate. Leave the record outstanding so it can still validate.
+		if rec.Topic != topic {
+			return result, nil
+		}
 		alreadyConsumed := l.markSequenceConsumedLocked(msg.Sequence)
 		delete(shard.outstanding, msg.ID)
 		l.outstanding.Add(-1)
 		if alreadyConsumed {
 			result.Outcome = consumeOutcomeDuplicate
 			result.ProducedAtUnixMs = rec.ProducedAtUnixMs
-			return result, nil
-		}
-		if rec.Topic != topic {
 			return result, nil
 		}
 		result.Outcome = consumeOutcomeValid

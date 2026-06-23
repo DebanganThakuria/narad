@@ -108,7 +108,10 @@ func DecodeCommitProduceBatchRequest(payload []byte) (CommitProduceBatchRequest,
 	if count < 0 {
 		return CommitProduceBatchRequest{}, fmt.Errorf("negative commit produce batch size %d", count)
 	}
-	records := make([]CommitProduceRequest, 0, count)
+	// Each record consumes several bytes, so count can never exceed the
+	// remaining payload. Cap the preallocation so an attacker-controlled
+	// count can't trigger a multi-gigabyte allocation before decode fails.
+	records := make([]CommitProduceRequest, 0, min(int(count), r.remaining()))
 	for range int(count) {
 		record, err := readCommitProduceRequest(r)
 		if err != nil {

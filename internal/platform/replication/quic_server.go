@@ -10,21 +10,23 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-func ServeQUIC(ctx context.Context, addr string, logs StreamLogStore, logger *slog.Logger, handlers ...StreamFrameHandler) error {
+// ServeQUIC listens for cluster-RPC connections over QUIC and dispatches
+// each request frame to the supplied handlers (e.g. the cluster RPC
+// server). It blocks until ctx is cancelled.
+func ServeQUIC(ctx context.Context, addr string, logger *slog.Logger, handlers ...StreamFrameHandler) error {
 	tlsConf, err := quicServerTLSConfig()
 	if err != nil {
-		return fmt.Errorf("quic replication tls: %w", err)
+		return fmt.Errorf("quic cluster tls: %w", err)
 	}
 	listener, err := quic.ListenAddr(addr, tlsConf, quicConfig())
 	if err != nil {
-		return fmt.Errorf("quic replication listen: %w", err)
+		return fmt.Errorf("quic cluster listen: %w", err)
 	}
-	return serveQUICListener(ctx, listener, logs, logger, handlers...)
+	return serveQUICListener(ctx, listener, logger, handlers...)
 }
 
-func serveQUICListener(ctx context.Context, listener *quic.Listener, logs StreamLogStore, logger *slog.Logger, handlers ...StreamFrameHandler) error {
+func serveQUICListener(ctx context.Context, listener *quic.Listener, logger *slog.Logger, handlers ...StreamFrameHandler) error {
 	defer listener.Close()
-	appendCoordinator := newReplicaAppendCoordinator(logs, logger)
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
@@ -38,20 +40,20 @@ func serveQUICListener(ctx context.Context, listener *quic.Listener, logs Stream
 			}
 			return err
 		}
-		go serveQUICConn(ctx, conn, logs, logger, appendCoordinator, handlers...)
+		go serveQUICConn(ctx, conn, logger, handlers...)
 	}
 }
 
-func serveQUICConn(ctx context.Context, conn *quic.Conn, logs StreamLogStore, logger *slog.Logger, appendCoordinator *replicaAppendCoordinator, handlers ...StreamFrameHandler) {
-	defer conn.CloseWithError(0, "replication quic connection closed")
+func serveQUICConn(ctx context.Context, conn *quic.Conn, logger *slog.Logger, handlers ...StreamFrameHandler) {
+	defer conn.CloseWithError(0, "cluster quic connection closed")
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
 			if logger != nil && !errors.Is(err, context.Canceled) {
-				logger.Debug("replication quic accept stream", "err", err)
+				logger.Debug("cluster quic accept stream", "err", err)
 			}
 			return
 		}
-		go serveStreamConnWithCoordinator(stream, stream, logs, logger, appendCoordinator, handlers...)
+		go ServeStreamConn(stream, stream, logger, handlers...)
 	}
 }

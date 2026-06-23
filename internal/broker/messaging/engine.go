@@ -16,7 +16,6 @@
 package messaging
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -30,7 +29,6 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
-	"github.com/debanganthakuria/narad/internal/platform/replication"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
@@ -122,7 +120,6 @@ type Engine struct {
 	metastore  metastore.Metastore
 	schemas    schema.Registry
 	partitions partition.Manager
-	replicator replication.Replicator
 	offsets    *consumer.InFlight
 	logs       *runtime.Logs
 	ingress    *ingress.Manager
@@ -137,20 +134,13 @@ type Engine struct {
 	assignmentCache map[string]cachedAssignments
 	memberCache     map[string]cachedMember
 	schemaLoadCache map[string]cachedSchemaLoad
-
-	replicationMu     sync.Mutex
-	replicationLanes  map[string]*replicationLane
-	replicationCtx    context.Context
-	replicationCancel context.CancelFunc
 }
 
-// NewEngine wires an Engine. handleSecret must be at least 16 bytes
-// (caller's responsibility to validate; broker.New does so).
+// NewEngine wires an Engine.
 func NewEngine(
 	ms metastore.Metastore,
 	schemas schema.Registry,
 	partitions partition.Manager,
-	replicator replication.Replicator,
 	offsets *consumer.InFlight,
 	logs *runtime.Logs,
 	ingressManager *ingress.Manager,
@@ -158,33 +148,25 @@ func NewEngine(
 	logger *slog.Logger,
 	selfID string,
 ) *Engine {
-	replicationCtx, replicationCancel := context.WithCancel(context.Background())
 	return &Engine{
-		metastore:         ms,
-		schemas:           schemas,
-		partitions:        partitions,
-		replicator:        replicator,
-		offsets:           offsets,
-		logs:              logs,
-		ingress:           ingressManager,
-		metrics:           m,
-		logger:            logger,
-		selfID:            selfID,
-		cacheTTL:          250 * time.Millisecond,
-		topicCache:        make(map[string]cachedTopic),
-		assignmentCache:   make(map[string]cachedAssignments),
-		memberCache:       make(map[string]cachedMember),
-		schemaLoadCache:   make(map[string]cachedSchemaLoad),
-		replicationLanes:  make(map[string]*replicationLane),
-		replicationCtx:    replicationCtx,
-		replicationCancel: replicationCancel,
+		metastore:       ms,
+		schemas:         schemas,
+		partitions:      partitions,
+		offsets:         offsets,
+		logs:            logs,
+		ingress:         ingressManager,
+		metrics:         m,
+		logger:          logger,
+		selfID:          selfID,
+		cacheTTL:        250 * time.Millisecond,
+		topicCache:      make(map[string]cachedTopic),
+		assignmentCache: make(map[string]cachedAssignments),
+		memberCache:     make(map[string]cachedMember),
+		schemaLoadCache: make(map[string]cachedSchemaLoad),
 	}
 }
 
 func (e *Engine) Close() error {
-	if e.replicationCancel != nil {
-		e.replicationCancel()
-	}
 	if e.ingress != nil {
 		return e.ingress.Close()
 	}
@@ -212,14 +194,7 @@ func (e *Engine) pickProducePartition(topicName, key string, partitions int) (in
 
 func (e *Engine) produceAssignmentWritable(assignment metastore.Assignment) bool {
 	owner, err := e.getMember(assignment.OwnerID)
-	if err != nil || owner.Status != metastore.MemberAlive {
-		return false
-	}
-	if assignment.FollowerID == "" {
-		return true
-	}
-	follower, err := e.getMember(assignment.FollowerID)
-	return err == nil && follower.Status == metastore.MemberAlive
+	return err == nil && owner.Status == metastore.MemberAlive
 }
 
 func (e *Engine) isWritableLocalProducePartition(topicName string, partition int) bool {

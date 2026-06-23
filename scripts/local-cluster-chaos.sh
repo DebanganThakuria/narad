@@ -156,7 +156,6 @@ RESTARTER_PID="$!"
     --topics 3 \
     --messages 240 \
     --partitions 6 \
-    --replication-factor 2 \
     --produce-concurrency 12 \
     --consume-concurrency 12 \
     --visibility-timeout 3s \

@@ -177,8 +177,6 @@ write_tester_plist() {
     <string>${NARAD_TESTER_PAYLOAD_BYTES:-512}</string>
     <string>--partitions</string>
     <string>${NARAD_TESTER_PARTITIONS:-12}</string>
-    <string>--replication-factor</string>
-    <string>${NARAD_TESTER_REPLICATION_FACTOR:-2}</string>
     <string>--max-in-flight-per-partition</string>
     <string>${NARAD_TESTER_MAX_IN_FLIGHT_PER_PARTITION:-1024}</string>
     <string>--max-acked-ahead-per-partition</string>

@@ -15,8 +15,7 @@ func TestProduceCommittedVisibilityPersistsAcrossRestart(t *testing.T) {
 	dataDir := t.TempDir()
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}
-	replicator := &fakeReplicator{}
-	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
+	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0})
 
 	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
 		t.Fatalf("Produce() error = %v", err)
@@ -25,7 +24,7 @@ func TestProduceCommittedVisibilityPersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("CloseAll() error = %v", err)
 	}
 
-	restarted := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
+	restarted := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0})
 	msg, found, err := restarted.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Wait: 0})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
@@ -48,7 +47,7 @@ func TestProduceUncommittedVisibilityStaysHiddenAcrossRestart(t *testing.T) {
 	dataDir := t.TempDir()
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}
-	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, &fakeReplicator{})
+	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0})
 	log, err := engine.logs.Get("orders", 0)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -64,7 +63,7 @@ func TestProduceUncommittedVisibilityStaysHiddenAcrossRestart(t *testing.T) {
 		t.Fatalf("CloseAll() error = %v", err)
 	}
 
-	restarted := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, &fakeReplicator{})
+	restarted := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0})
 	_, found, err := restarted.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Wait: 0})
 	if err != nil {
 		t.Fatalf("Consume() error = %v", err)
@@ -78,8 +77,7 @@ func TestCommittedConsumeOffsetPersistsAcrossRestart(t *testing.T) {
 	dataDir := t.TempDir()
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}
-	replicator := &fakeReplicator{}
-	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
+	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0})
 
 	for i := range 2 {
 		payload := fmt.Appendf(nil, `{"id":%d}`, i+1)
@@ -102,7 +100,7 @@ func TestCommittedConsumeOffsetPersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("CloseAll() error = %v", err)
 	}
 
-	restarted := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
+	restarted := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0})
 	msg, found, err := restarted.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Wait: 0})
 	if err != nil {
 		t.Fatalf("Consume() after restart error = %v", err)
@@ -119,8 +117,7 @@ func TestCorruptCommittedConsumeOffsetFallsBackToBeginning(t *testing.T) {
 	dataDir := t.TempDir()
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}
-	replicator := &fakeReplicator{}
-	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
+	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0})
 
 	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
 		t.Fatalf("Produce() error = %v", err)
@@ -143,7 +140,7 @@ func TestCorruptCommittedConsumeOffsetFallsBackToBeginning(t *testing.T) {
 		t.Fatalf("CloseAll() error = %v", err)
 	}
 
-	restarted := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
+	restarted := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0})
 	msg, found, err := restarted.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0), Wait: 0})
 	if err != nil {
 		t.Fatalf("Consume() after restart error = %v", err)
@@ -164,7 +161,7 @@ func intPtr(partition int) *int {
 func TestReplayReadUsesHighWatermark(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	log, err := engine.logs.Get("orders", 0)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -190,7 +187,7 @@ func TestReplayReadUsesHighWatermark(t *testing.T) {
 func TestConsumeUsesHighWatermark(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	log, err := engine.logs.Get("orders", 0)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)

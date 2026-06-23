@@ -171,6 +171,17 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 	return l, nil
 }
 
+// Peek returns the already-open log for (topic, idx) without lazily
+// opening one. Read-only observers (the metrics snapshotter) use it so a
+// poll never creates a partition directory or resurrects a log that a
+// concurrent topic delete just retired.
+func (g *Logs) Peek(topicName string, idx int) (*storage.Log, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	l, ok := g.logs[keyOf(topicName, idx)]
+	return l, ok
+}
+
 // CloseTopic flushes and closes every cached log under the given
 // topic. Subsequent Get calls reopen with whatever options reflect
 // the current metastore record. Returns the first close error, if

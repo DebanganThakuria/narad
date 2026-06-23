@@ -580,6 +580,83 @@ func TestRecoveryResyncsAfterMagicWipe(t *testing.T) {
 	}
 }
 
+// TestRecoveryResyncsAcrossLargeCorruptGap exercises the multi-chunk
+// path of nextMagicInSegment: a corrupt region larger than the 4 KiB
+// scan chunk with no valid magic in it. The overlap read on chunks
+// after the first must not overrun the scan buffer.
+func TestRecoveryResyncsAcrossLargeCorruptGap(t *testing.T) {
+	path := testLogPath(t)
+
+	// Middle frame carries an 8 KiB all-zero payload so that, once its
+	// magic is wiped, the scanner must cross more than one 4 KiB chunk
+	// of magic-free bytes before reaching the next valid frame.
+	bigZero := make([]byte, 8192)
+	payloads := [][]byte{[]byte("frame-0"), bigZero, []byte("frame-2")}
+	for _, p := range payloads {
+		mustWriteAndClose(t, path, slowFlushOpts(t, codec.NewNoopCodec()), func(l *Log) {
+			if _, _, err := l.AppendBatch([][]byte{p}); err != nil {
+				t.Fatalf("AppendBatch: %v", err)
+			}
+		})
+	}
+
+	frames := scanFramePositions(t, path)
+	if len(frames) != 3 {
+		t.Fatalf("expected 3 frames, got %d", len(frames))
+	}
+
+	wipeMagic(t, path, frames[1])
+
+	// Before the buffer-size fix this NewLog panicked with a slice bounds
+	// overrun on the second scan chunk.
+	l, err := NewLog(path, slowFlushOpts(t, codec.NewNoopCodec()))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l.Close()
+
+	if got, err := l.Read(0); err != nil || !bytes.Equal(got, []byte("frame-0")) {
+		t.Fatalf("Read(0) got=%q err=%v", got, err)
+	}
+	if got, err := l.Read(2); err != nil || !bytes.Equal(got, []byte("frame-2")) {
+		t.Fatalf("Read(2) got=%q err=%v", got, err)
+	}
+	if _, err := l.Read(1); !errors.Is(err, ErrOffsetNotFound) {
+		t.Fatalf("Read(1) want ErrOffsetNotFound got %v", err)
+	}
+}
+
+// TestSyncFlushesBufferToDiskWithoutClose verifies that Sync forces the
+// buffered record to be written and fsynced to the active segment even
+// under a never-auto-flush policy and without a graceful Close. This is
+// the durability primitive the no-follower commit path relies on.
+func TestSyncFlushesBufferToDiskWithoutClose(t *testing.T) {
+	path := testLogPath(t)
+	l, err := NewLog(path, slowFlushOpts(t, codec.NewNoopCodec()))
+	if err != nil {
+		t.Fatalf("NewLog: %v", err)
+	}
+	defer l.Close()
+
+	if _, _, err := l.AppendBatch([][]byte{[]byte("durable")}); err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+
+	// With slowFlushOpts the flusher never flushes on its own, so nothing
+	// is on disk yet.
+	if got := scanFramePositions(t, path); len(got) != 0 {
+		t.Fatalf("before Sync: expected 0 frames on disk, got %d", len(got))
+	}
+
+	if err := l.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	if got := scanFramePositions(t, path); len(got) != 1 {
+		t.Fatalf("after Sync: expected 1 frame on disk, got %d", len(got))
+	}
+}
+
 // ---- 6. Torn tail truncation -------------------------------------
 
 func TestRecoveryTruncatesTornTail(t *testing.T) {

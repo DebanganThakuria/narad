@@ -33,11 +33,10 @@ type QUICFrameClient struct {
 const (
 	quicDialTimeout = time.Second
 
-	quicReplicationLanes = 32
-	quicProduceLanes     = 16
-	quicConsumeLanes     = 16
-	quicAckLanes         = 16
-	quicControlLanes     = 4
+	quicProduceLanes = 16
+	quicConsumeLanes = 16
+	quicAckLanes     = 16
+	quicControlLanes = 4
 
 	quicMaxIncomingStreams             = 1024
 	quicInitialStreamReceiveWindow     = 256 << 10
@@ -80,21 +79,6 @@ func (c *QUICFrameClient) RequestOnLane(ctx context.Context, addr, lane string, 
 	return c.pool.request(ctx, addr, lane, frameType, payload)
 }
 
-func (p *quicClientPool) appendMulti(ctx context.Context, addr string, groups []replicationwire.StreamAppendGroup) ([]replicationwire.StreamAppendResult, error) {
-	if len(groups) == 0 {
-		return nil, nil
-	}
-	client, err := p.getStream(ctx, addr, "replication")
-	if err != nil {
-		return nil, err
-	}
-	results, err := client.appendMulti(ctx, groups)
-	if err != nil && client.isClosed() {
-		p.closeStream(addr, "replication", client, err)
-	}
-	return results, err
-}
-
 func (p *quicClientPool) request(ctx context.Context, addr, lane string, frameType replicationwire.StreamFrameType, payload []byte) (replicationwire.StreamFrame, error) {
 	client, err := p.getStream(ctx, addr, lane)
 	if err != nil {
@@ -105,28 +89,6 @@ func (p *quicClientPool) request(ctx context.Context, addr, lane string, frameTy
 		p.closeStream(addr, lane, client, err)
 	}
 	return frame, err
-}
-
-func (p *quicClientPool) readReplica(ctx context.Context, addr, topic string, partition int, offset int64, committedOnly bool) ([]byte, bool, error) {
-	payload, err := replicationwire.EncodeStreamReplicaRead(topic, partition, offset, committedOnly)
-	if err != nil {
-		return nil, false, err
-	}
-	frame, err := p.request(ctx, addr, "replica_read", replicationwire.StreamFrameReplicaRead, payload)
-	if err != nil {
-		return nil, false, err
-	}
-	if frame.Type != replicationwire.StreamFrameReplicaData {
-		return nil, false, errors.New("unexpected replica read response frame")
-	}
-	data, err := replicationwire.DecodeStreamReplicaData(frame.Payload)
-	if err != nil {
-		return nil, false, err
-	}
-	if !data.Found {
-		return nil, false, nil
-	}
-	return data.Payload, true, nil
 }
 
 func (p *quicClientPool) getStream(ctx context.Context, addr, lane string) (*streamClient, error) {
@@ -189,7 +151,7 @@ func quicStreamPoolKey(addr, lane string, shard int) string {
 func normalizeQUICLane(lane string) string {
 	lane = strings.TrimSpace(strings.ToLower(lane))
 	switch lane {
-	case "replication", "produce", "consume", "ack", "control", "replica_read":
+	case "produce", "consume", "ack", "control":
 		return lane
 	default:
 		return "control"
@@ -198,10 +160,6 @@ func normalizeQUICLane(lane string) string {
 
 func quicLaneForFrame(frameType replicationwire.StreamFrameType) string {
 	switch frameType {
-	case replicationwire.StreamFrameAppendBatch, replicationwire.StreamFrameAppendMulti:
-		return "replication"
-	case replicationwire.StreamFrameReplicaRead:
-		return "replica_read"
 	case replicationwire.StreamFrameNodeRequest:
 		return "control"
 	default:
@@ -211,16 +169,12 @@ func quicLaneForFrame(frameType replicationwire.StreamFrameType) string {
 
 func quicLaneWidth(lane string) int {
 	switch normalizeQUICLane(lane) {
-	case "replication":
-		return quicReplicationLanes
 	case "produce":
 		return quicProduceLanes
 	case "consume":
 		return quicConsumeLanes
 	case "ack":
 		return quicAckLanes
-	case "replica_read":
-		return quicControlLanes
 	default:
 		return quicControlLanes
 	}

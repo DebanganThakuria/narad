@@ -88,7 +88,6 @@ func runClientTopicsCreate(args []string) error {
 	fs := newClientFlagSet("topics create <name>")
 	addr := fs.String("addr", defaultAddr(), "HTTP base URL")
 	partitions := fs.Int("partitions", 0, "partition count (0 = server default)")
-	rf := fs.Int("replication-factor", 0, "replication factor (0 = server default)")
 	retentionMs := fs.Int64("retention-ms", 0, "retention duration in ms (0 = server default)")
 	visibilityMs := fs.Int64("visibility-timeout-ms", 0, "consumer visibility timeout in ms (0 = server default)")
 	maxIF := fs.Int64("max-in-flight-per-partition", 0, "per-partition reservation cap (0 = server default)")
@@ -102,9 +101,6 @@ func runClientTopicsCreate(args []string) error {
 	body := map[string]any{"name": fs.Arg(0)}
 	if *partitions > 0 {
 		body["partitions"] = *partitions
-	}
-	if *rf > 0 {
-		body["replication_factor"] = *rf
 	}
 	if *retentionMs > 0 {
 		body["retention_ms"] = *retentionMs
@@ -459,7 +455,6 @@ func printClientUsage(w io.Writer) {
 	fmt.Fprintln(w, "  topics list [--limit N] [--page-token T]   list topics (keyset paginated)")
 	fmt.Fprintln(w, "  topics create [flags] <name>               create a topic")
 	fmt.Fprintln(w, "    --partitions N                             partition count (0 = default)")
-	fmt.Fprintln(w, "    --replication-factor N                     replication factor (0 = default)")
 	fmt.Fprintln(w, "    --retention-ms N                           retention duration in ms (0 = default)")
 	fmt.Fprintln(w, "    --visibility-timeout-ms N                  consumer visibility timeout in ms")
 	fmt.Fprintln(w, "    --max-in-flight-per-partition N            per-partition reservation cap")

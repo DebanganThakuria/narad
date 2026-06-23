@@ -14,7 +14,6 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
-	"github.com/debanganthakuria/narad/internal/platform/replication"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
@@ -82,7 +81,6 @@ func validDeps(t *testing.T) Deps {
 		TopicConfig: TopicConfig{
 			DefaultPartitions:                1,
 			MaxPartitions:                    8,
-			DefaultReplicationFactor:         1,
 			DefaultRetentionMs:               1000,
 			DefaultVisibilityTimeoutMs:       1000,
 			DefaultMaxInFlightPerPartition:   10,
@@ -94,8 +92,7 @@ func validDeps(t *testing.T) Deps {
 		ConsumerOffsets: consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 			return consumer.Caps{MaxInFlight: 10, MaxAckedAhead: 10}, nil
 		}, nil),
-		Replicator: replication.NewLocal(),
-		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
@@ -118,12 +115,6 @@ func TestNewRejectsInvalidTopicDefaults(t *testing.T) {
 	deps.TopicConfig.DefaultPartitions = 0
 	if _, err := New(deps); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("New() default partitions error = %v, want %v", err, ErrInvalidArgument)
-	}
-
-	deps = validDeps(t)
-	deps.TopicConfig.DefaultReplicationFactor = 0
-	if _, err := New(deps); !errors.Is(err, ErrInvalidArgument) {
-		t.Fatalf("New() replication factor error = %v, want %v", err, ErrInvalidArgument)
 	}
 
 	deps = validDeps(t)

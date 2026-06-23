@@ -31,34 +31,23 @@ func (c *Controller) reconcileAssignments(ctx context.Context) {
 	active = metastore.RoundRobinMembers(active)
 
 	for _, t := range topics {
-		c.assignTopic(ctx, t.Name, t.Partitions, t.ReplicationFactor, active)
+		c.assignTopic(ctx, t.Name, t.Partitions, active)
 	}
 }
 
-// assignTopic assigns partitions of topicName that are missing an alive owner.
-func (c *Controller) assignTopic(ctx context.Context, topicName string, numPartitions int, replicationFactor int, active []metastore.Member) {
-	if replicationFactor < 2 || len(active) < replicationFactor {
+// assignTopic assigns partitions of topicName that have never been
+// assigned. Assignments are sticky: a partition whose owner is currently
+// dead is NOT reassigned, because Narad has no follower replication and
+// the partition's data lives only on that owner's disk — it must wait for
+// the owner to restart.
+func (c *Controller) assignTopic(ctx context.Context, topicName string, numPartitions int, active []metastore.Member) {
+	if len(active) == 0 {
 		return
 	}
 
 	existing, _ := c.store.ListAssignments(topicName)
 	assigned := make(map[int]bool, len(existing))
 	for _, a := range existing {
-		owner, err := c.store.GetMember(a.OwnerID)
-		if err == nil && owner.Status == metastore.MemberAlive {
-			assigned[a.Partition] = true
-			continue
-		}
-		if a.FollowerID == "" {
-			continue
-		}
-		follower, err := c.store.GetMember(a.FollowerID)
-		if err != nil || follower.Status != metastore.MemberAlive {
-			continue
-		}
-		if err := c.store.AssignPartition(ctx, topicName, a.Partition, a.FollowerID, a.OwnerID); err != nil {
-			continue
-		}
 		assigned[a.Partition] = true
 	}
 
@@ -66,11 +55,11 @@ func (c *Controller) assignTopic(ctx context.Context, topicName string, numParti
 		if assigned[p] {
 			continue
 		}
-		owner, follower, ok := metastore.RoundRobinReplicaPair(active, p)
+		owner, ok := metastore.RoundRobinOwner(active, p)
 		if !ok {
 			return
 		}
-		if err := c.store.AssignPartition(ctx, topicName, p, owner, follower); err != nil {
+		if err := c.store.AssignPartition(ctx, topicName, p, owner); err != nil {
 			continue
 		}
 	}

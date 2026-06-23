@@ -55,7 +55,7 @@ func runLoad(cfg config) error {
 
 	fmt.Printf("nodes: %s\n", strings.Join(cfg.nodes, ", "))
 	fmt.Printf("run_id: %s\n", cfg.runID)
-	fmt.Printf("creating topics: %d load topics + 1 recovery topic x %d partitions rf=%d\n", len(loadTopics), cfg.partitions, cfg.replicationFactor)
+	fmt.Printf("creating topics: %d load topics + 1 recovery topic x %d partitions\n", len(loadTopics), cfg.partitions)
 	if err := verifyReady(ctx, lb); err != nil {
 		return err
 	}

@@ -37,15 +37,21 @@ sequenceDiagram
             D->>Q: CommitProduceBatch
             Q->>O: QUIC frame request
         end
-        O->>L: Append to partition log buffer
+        O->>L: Append record(s)
+        O->>L: Synchronous fsync
+        O->>L: Read back, verify frame CRC
+        O->>L: Advance high-watermark (now visible)
         O-->>D: committed offset(s)
-        D->>WAL: Persist dispatch checkpoint
+        D->>WAL: Persist dispatch checkpoint, then compact
     end
 ```
 
 **Guarantee boundary:** once the HTTP response is `202 Accepted`, the
 record is durable in the ingress WAL. It becomes consumable only after
-the dispatcher commits it to the owner partition log.
+the dispatcher commits it to the owner partition log — and the owner does
+not report success until the record is fsynced and read back CRC-clean,
+nor does the WAL compact past it until then. Narad has no follower
+replication: the owner's durably-fsynced log is the sole copy.
 
 ## Consume
 

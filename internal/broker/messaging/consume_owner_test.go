@@ -21,7 +21,7 @@ func TestConsumePinnedRejectsWhenNotPartitionOwner(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-other", Addr: "other.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember(other) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-other", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-other"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
@@ -44,7 +44,7 @@ func TestConsumeReplayRejectsWhenNotPartitionOwner(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-other", Addr: "other.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember(other) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-other", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-other"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
@@ -98,7 +98,7 @@ func TestConsumePinnedAllowsOwner(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember(self) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-self", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-self"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
@@ -121,7 +121,7 @@ func TestConsumePinnedAllowsOwner(t *testing.T) {
 func TestConsumePinnedAllowsWhenOwnershipUnavailable(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}
-	engine := newTestEngine(t, ms, nil, nil, nil)
+	engine := newTestEngine(t, ms, nil, nil)
 	engine.selfID = "node-self"
 	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
 		t.Fatalf("Produce() error = %v", err)

@@ -34,7 +34,7 @@ func runChaos(cfg config) error {
 
 	fmt.Printf("chaos nodes: %s\n", strings.Join(cfg.nodes, ", "))
 	fmt.Printf("run_id: %s\n", cfg.runID)
-	fmt.Printf("creating chaos topics: %d topics x %d partitions rf=%d\n", len(topics), cfg.partitions, cfg.replicationFactor)
+	fmt.Printf("creating chaos topics: %d topics x %d partitions\n", len(topics), cfg.partitions)
 	if err := verifyReady(ctx, lb); err != nil {
 		return err
 	}

@@ -62,9 +62,6 @@ func applyEnv(cfg *Config) error {
 	if err := envInt("NARAD_TOPIC_MAX_PARTITIONS", &cfg.Topic.MaxPartitions); err != nil {
 		return err
 	}
-	if err := envInt("NARAD_TOPIC_DEFAULT_REPLICATION_FACTOR", &cfg.Topic.DefaultReplicationFactor); err != nil {
-		return err
-	}
 	if err := envInt64("NARAD_TOPIC_DEFAULT_MAX_IN_FLIGHT_PER_PARTITION", &cfg.Topic.DefaultMaxInFlightPerPartition); err != nil {
 		return err
 	}

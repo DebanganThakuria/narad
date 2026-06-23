@@ -8,16 +8,14 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
-	"github.com/debanganthakuria/narad/internal/platform/replication"
 )
 
 type produceStage string
 
 const (
-	produceStageAppend    produceStage = "append"
-	produceStageReplicate produceStage = "replicate"
-	produceStageCatchUp   produceStage = "replication_catch_up"
-	produceStageCommit    produceStage = "commit boundary durability"
+	produceStageAppend produceStage = "append"
+	produceStageVerify produceStage = "durability verify"
+	produceStageCommit produceStage = "commit boundary durability"
 )
 
 type produceStageError struct {
@@ -34,14 +32,23 @@ func (e produceStageError) Unwrap() error {
 }
 
 func (e produceStageError) metricReason() string {
-	if e.stage == produceStageCommit {
+	switch e.stage {
+	case produceStageCommit:
 		return "commit_boundary"
+	case produceStageVerify:
+		return "durability_verify"
+	default:
+		return string(e.stage)
 	}
-	return string(e.stage)
 }
 
-// Produce validates the payload, picks a partition, appends to the
-// partition log, then asks the replicator to fan the record out.
+// Produce validates the payload, picks a partition, appends the record
+// to the owning partition log, and advances the high-watermark so the
+// record becomes visible to consumers.
+//
+// Narad has no follower replication: the partition owner's durable log
+// is the sole copy of the record. Durability is provided by the
+// partition flusher's fsync of the segment file.
 func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (int64, int, error) {
 	totalStart := time.Now()
 	totalOutcome := "ok"
@@ -78,48 +85,12 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 		totalOutcome = "error"
 		return 0, 0, err
 	}
-	lane := e.replicationLane(topicName, partIdx)
-	var job *replicationJob
-	offset, _, err := e.logs.WithProduceLockValue(topicName, partIdx, func(log *storage.Log) (int64, int, error) {
-		stageStart := time.Now()
-		if lane.needsRepair(log) {
-			if _, err := e.catchUpReplication(ctx, topicName, partIdx, log, nil); err != nil {
-				e.observe("produce", "replication_catch_up", "error", time.Since(stageStart))
-				return 0, 0, produceStageError{stage: produceStageCatchUp, err: err}
-			}
-			lane.markRepaired()
-		}
-		e.observe("produce", "replication_catch_up", "ok", time.Since(stageStart))
 
-		stageStart = time.Now()
-		offset, err := log.Append(payload)
-		e.observe("produce", "append", observeOutcome(err), time.Since(stageStart))
-		if err != nil {
-			return 0, 0, produceStageError{stage: produceStageAppend, err: err}
-		}
-
-		job = &replicationJob{
-			log:      log,
-			offset:   offset,
-			payload:  append([]byte(nil), payload...),
-			queuedAt: time.Now(),
-			done:     make(chan error, 1),
-		}
-		if err := lane.enqueue(job); err != nil {
-			e.observe("produce", "replicate", "error", time.Since(stageStart))
-			return 0, 0, produceStageError{stage: produceStageReplicate, err: err}
-		}
-
-		return offset, partIdx, nil
-	})
-	if err != nil {
-		e.recordProduceError(err)
-		totalOutcome = "error"
-		return 0, 0, err
-	}
 	stageStart = time.Now()
-	err = job.wait(ctx)
-	e.observe("produce", "replicate", observeOutcome(err), time.Since(stageStart))
+	offset, err := e.logs.WithProduceLockResult(topicName, partIdx, func(log *storage.Log) (int64, error) {
+		return e.appendAndCommit(log, payload)
+	})
+	e.observe("produce", "append_commit", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
 		e.recordProduceError(err)
 		totalOutcome = "error"
@@ -135,25 +106,12 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 	return offset, partIdx, nil
 }
 
-func (e *Engine) catchUpReplication(ctx context.Context, topicName string, partIdx int, log replication.LeaderLog, cause error) (bool, error) {
-	catchUp, ok := e.replicator.(replication.CatchUpReplicator)
-	if !ok {
-		return false, nil
-	}
-	opts := replication.CatchUpOptions{}
-	var mismatch *replication.OffsetMismatchError
-	if cause != nil && errors.As(cause, &mismatch) {
-		opts.FollowerNextOffset = &mismatch.ReplicaNextOffset
-	}
-	return true, catchUp.CatchUp(ctx, topicName, partIdx, log, opts)
-}
-
 func (e *Engine) recordProduceError(err error) {
 	if e.metrics == nil {
 		return
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		e.metrics.IncError("messaging", "replicate")
+		e.metrics.IncError("messaging", "commit_boundary")
 		return
 	}
 	if stageErr, ok := errors.AsType[produceStageError](err); ok {

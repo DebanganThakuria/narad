@@ -1,6 +1,7 @@
 package messaging
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strconv"
@@ -55,14 +56,7 @@ func (e *Engine) CommitAcceptedProduce(ctx context.Context, record ingress.Produ
 
 	stageStart = time.Now()
 	offset, err := e.logs.WithProduceLockResult(record.Topic, record.TargetPartition, func(log *storage.Log) (int64, error) {
-		offset, err := log.Append(record.Payload)
-		if err != nil {
-			return 0, err
-		}
-		if err := log.AdvanceHighWatermark(offset + 1); err != nil {
-			return 0, err
-		}
-		return offset, nil
+		return e.appendAndCommit(log, record.Payload)
 	})
 	e.observe("produce_commit", "append_visible", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
@@ -138,12 +132,12 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 	err = e.logs.WithProduceLock(topicName, partition, func(log *storage.Log) error {
 		first, last, err := log.AppendBatch(payloads)
 		if err != nil {
-			return err
+			return produceStageError{stage: produceStageAppend, err: err}
 		}
 		if last < first {
 			return nil
 		}
-		if err := log.AdvanceHighWatermark(last + 1); err != nil {
+		if err := e.commitDurable(log, first, payloads); err != nil {
 			return err
 		}
 		offsets = make([]int64, len(records))
@@ -162,6 +156,58 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 		e.recordAcceptedProduceCommitted(record)
 	}
 	return offsets, nil
+}
+
+// appendAndCommit is the single durability chokepoint shared by the
+// synchronous Produce path and the WAL-first commit path. It appends one
+// payload to the partition log, then runs commitDurable.
+//
+// The caller must hold the partition produce lock.
+func (e *Engine) appendAndCommit(log *storage.Log, payload []byte) (int64, error) {
+	offset, err := log.Append(payload)
+	if err != nil {
+		return 0, produceStageError{stage: produceStageAppend, err: err}
+	}
+	if err := e.commitDurable(log, offset, [][]byte{payload}); err != nil {
+		return 0, err
+	}
+	return offset, nil
+}
+
+// commitDurable is the no-follower durability boundary. Narad has no
+// replicas, so before a record is made visible (and before the ingress
+// WAL is allowed to compact past it) the owner's partition log must be
+// the proven-durable, uncorrupted copy. It:
+//
+//  1. synchronously fsyncs the partition log,
+//  2. reads each record back so its on-disk frame CRC is validated and
+//     the bytes round-trip (guards against a torn or corrupt write),
+//  3. only then advances the high-watermark to make the records visible.
+//
+// firstOffset is the offset of payloads[0]; the records are contiguous.
+// The caller must hold the partition produce lock.
+func (e *Engine) commitDurable(log *storage.Log, firstOffset int64, payloads [][]byte) error {
+	if len(payloads) == 0 {
+		return nil
+	}
+	if err := log.Sync(); err != nil {
+		return produceStageError{stage: produceStageCommit, err: err}
+	}
+	for i, payload := range payloads {
+		offset := firstOffset + int64(i)
+		got, err := log.Read(offset)
+		if err != nil {
+			return produceStageError{stage: produceStageVerify, err: fmt.Errorf("read back offset %d: %w", offset, err)}
+		}
+		if !bytes.Equal(got, payload) {
+			return produceStageError{stage: produceStageVerify, err: fmt.Errorf("durability verify mismatch at offset %d", offset)}
+		}
+	}
+	lastOffset := firstOffset + int64(len(payloads)) - 1
+	if err := log.AdvanceHighWatermark(lastOffset + 1); err != nil {
+		return produceStageError{stage: produceStageCommit, err: err}
+	}
+	return nil
 }
 
 func (e *Engine) recordAcceptedProduceCommitted(record ingress.ProduceRecord) {

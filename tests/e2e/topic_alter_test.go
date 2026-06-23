@@ -58,10 +58,9 @@ func TestAlterTopic_RejectsPartitionEqual(t *testing.T) {
 func TestAlterTopic_RejectsAboveMaxPartitions(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t, withPolicy(broker.TopicPolicy{
-		DefaultPartitions:        2,
-		MaxPartitions:            8,
-		DefaultReplicationFactor: 2,
-		DefaultRetentionMs:       1000,
+		DefaultPartitions:  2,
+		MaxPartitions:      8,
+		DefaultRetentionMs: 1000,
 	}))
 	mustCreateTopic(t, env, createTopicReq{Name: "cap", Partitions: 4})
 

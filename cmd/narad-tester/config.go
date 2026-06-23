@@ -24,7 +24,6 @@ type config struct {
 	ConsumerConcurrency       int
 	PayloadBytes              int
 	Partitions                int
-	ReplicationFactor         int
 	MaxInFlightPerPartition   int64
 	MaxAckedAheadPerPartition int64
 	Retention                 time.Duration
@@ -59,7 +58,6 @@ func parseConfig(args []string) (config, error) {
 		ConsumerConcurrency:       32,
 		PayloadBytes:              512,
 		Partitions:                12,
-		ReplicationFactor:         2,
 		MaxInFlightPerPartition:   1024,
 		MaxAckedAheadPerPartition: 1024,
 		Retention:                 24 * time.Hour,
@@ -92,7 +90,6 @@ func parseConfig(args []string) (config, error) {
 	fs.IntVar(&cfg.ConsumerConcurrency, "consumer-concurrency", cfg.ConsumerConcurrency, "number of consumer workers")
 	fs.IntVar(&cfg.PayloadBytes, "payload-bytes", cfg.PayloadBytes, "bytes to put in the payload field of each message")
 	fs.IntVar(&cfg.Partitions, "partitions", cfg.Partitions, "partitions per created topic")
-	fs.IntVar(&cfg.ReplicationFactor, "replication-factor", cfg.ReplicationFactor, "replication factor per created topic")
 	fs.Int64Var(&cfg.MaxInFlightPerPartition, "max-in-flight-per-partition", cfg.MaxInFlightPerPartition, "topic max in-flight reservations per partition")
 	fs.Int64Var(&cfg.MaxAckedAheadPerPartition, "max-acked-ahead-per-partition", cfg.MaxAckedAheadPerPartition, "topic max acked-ahead offsets per partition")
 	fs.DurationVar(&cfg.Retention, "retention", cfg.Retention, "topic retention age")
@@ -149,7 +146,6 @@ func (c config) validate() error {
 		{c.ConsumerConcurrency >= 0, "consumer-concurrency must be >= 0"},
 		{c.PayloadBytes >= 0, "payload-bytes must be >= 0"},
 		{c.Partitions >= 3, "partitions must be >= 3"},
-		{c.ReplicationFactor >= 2, "replication-factor must be >= 2"},
 		{c.MaxInFlightPerPartition >= 0, "max-in-flight-per-partition must be >= 0"},
 		{c.MaxAckedAheadPerPartition >= 0, "max-acked-ahead-per-partition must be >= 0"},
 		{c.Retention >= 0, "retention must be >= 0"},

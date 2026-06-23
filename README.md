@@ -69,6 +69,13 @@ and end-to-end tests.
   Pipe receipt handles: `consume | jq -r .receipt_handle | narad client ack <topic>`.
 - The SQLite metastore has been replaced by a Raft+bbolt store. Wipe
   the `data/` directory when upgrading from older builds.
+- **Follower replication and `replication_factor` are removed.** Each
+  partition has a single owner; durability rests on synchronous fsync of
+  the owner's log (and the ingress WAL). The `replication_factor` field
+  is gone from the topic API, the CLI (`--replication-factor`), and
+  config (`default_replication_factor` / `NARAD_TOPIC_DEFAULT_REPLICATION_FACTOR`);
+  sending it now fails as an unknown field. Wipe `data/` when upgrading —
+  the on-disk metastore schema dropped the per-partition follower.
 
 ## Architecture
 
@@ -110,11 +117,18 @@ selected owner partition, where they become visible to consumers.
 Consume and ack still route/probe owners through the internal cluster
 port when the local pod cannot serve the request.
 
-**Replication.** Narad v1 has no follower in the produce hot path.
-Produce durability means the record exists in the receiving pod's
-ingress WAL on a durable volume. If a pod dies but its volume survives,
-the WAL is replayed on restart. Future versions may add async followers
-or configurable replicated durability tiers.
+**Durability (no replication).** Narad does not replicate partition
+data: each partition has a single owner whose durable log is the sole
+copy. Durability comes from two synchronous fsync points. (1) Produce
+durability means the record exists in the receiving pod's ingress WAL on
+a durable volume, fsynced before `202 Accepted`. (2) When the background
+dispatcher copies a WAL record to the owner partition log, it
+synchronously fsyncs the segment and reads the record back to validate
+its frame CRC *before* the record is made visible (high-watermark
+advanced) and *before* the WAL is allowed to compact past it — so a
+record is never lost or served corrupt as long as the owner's volume
+survives. If a pod dies but its volume survives, both logs replay on
+restart.
 
 ## Layout
 
@@ -150,7 +164,7 @@ internal/
     config/                 defaults + JSON file + env + flag layering
     schema/                 JSON-Schema registry (santhosh-tekuri)
     partition/              FNV hash + round-robin partition picker
-    replication/            Replicator interface + single-node Local stub
+    replication/            QUIC cluster-RPC transport (node-to-node)
     observability/
       logger/               thin log/slog wrapper
       metrics/              Prometheus collectors, HTTP middleware, lag poller
@@ -215,7 +229,7 @@ narad client topics delete orders
 
 # Create with explicit retention + visibility + per-partition caps.
 narad client topics create \
-  --partitions 8 --replication-factor 2 \
+  --partitions 8 \
   --retention-ms 3600000 --visibility-timeout-ms 30000 \
   --max-in-flight-per-partition 64 --max-acked-ahead-per-partition 256 \
   orders
@@ -240,7 +254,7 @@ Or hit the HTTP API directly (all data routes live under `/v1`):
 # Create topic.
 curl -X POST localhost:7942/v1/topics \
   -H 'Content-Type: application/json' \
-  -d '{"name":"orders","partitions":8,"replication_factor":2,
+  -d '{"name":"orders","partitions":8,
        "retention_ms":3600000,"visibility_timeout_ms":30000,
        "max_in_flight_per_partition":64,"max_acked_ahead_per_partition":256}'
 
@@ -370,7 +384,6 @@ A starting template lives in [`narad.example.json`](./narad.example.json):
   "topic": {
     "default_partitions": 8,
     "max_partitions": 1024,
-    "default_replication_factor": 2,
     "default_retention_age_ms": 604800000
   },
   "log":     { "level": "info", "format": "json" }
@@ -392,7 +405,6 @@ Useful environment overrides:
 | `NARAD_LOG_FORMAT` | `json` / `text` |
 | `NARAD_TOPIC_DEFAULT_PARTITIONS` | default partition count when omitted from CreateTopic |
 | `NARAD_TOPIC_MAX_PARTITIONS` | upper bound for partition count |
-| `NARAD_TOPIC_DEFAULT_REPLICATION_FACTOR` | default replication factor (must be ≥ 2) |
 | `NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS` | default retention age (default: 7 days) |
 | `NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS` | default queue visibility timeout |
 | `NARAD_TOPIC_DEFAULT_MAX_IN_FLIGHT_PER_PARTITION` | default reservation cap per partition |
@@ -482,11 +494,13 @@ leadership takeover, `OnLeadershipAcquired` reconciles the FSM state:
 finds topics with unassigned partitions and pods with missed heartbeats.
 
 **Partition assignment.** When a topic is created, the controller assigns
-each partition to the least-loaded active pod (sort by current partition
-count, round-robin for ties). Assignments are **sticky**. Accepted
-messages live first in the ingress pod's WAL, then in the owner
-partition log after dispatch. Without replicated partition logs,
-partitions cannot be moved automatically.
+each partition to an active pod by round-robin over the (ID-sorted)
+active members. Each partition has a single owner — there is no follower.
+Assignments are **sticky**: a partition whose owner is currently dead is
+**not** reassigned, because the partition's data lives only on that
+owner's disk; it waits for the owner to restart with its volume
+reattached. Accepted messages live first in the ingress pod's WAL, then
+in the owner partition log after dispatch.
 
 **Heartbeats.** Each pod calls `RegisterMember` (an upsert) every 5
 seconds. If a pod's heartbeat is older than `DeadTimeout` (default 30s),
@@ -678,15 +692,15 @@ no CGO requirement.
 
 ## Roadmap
 
-* **Replicated durability tier.** Optional async or quorum follower
-  copies for partition logs and/or ingress WAL. Narad v1 does not block
-  HTTP produce on follower replication.
+* **Replicated durability tier.** Optional follower copies for partition
+  logs and/or the ingress WAL. Narad currently has no data replication:
+  each partition has a single owner and durability rests on synchronous
+  fsync of the owner's log. A future tier would reintroduce a
+  `replication_factor` knob and a partition-log replication protocol.
 * **`.offsets` log files.** Per-partition committed offset persistence
-  (Kafka `__consumer_offsets` style): append-only log, replicated in the
-  same stream as data, aggressively compacted to keep only the latest.
-  `onCommit` callback in `InFlight` is ready to wire this up.
-* **Cross-AZ replication (RF=3).** `replication_factor` is already in
-  the topic API; RF=3 support requires the replication protocol above.
+  (Kafka `__consumer_offsets` style): append-only log, aggressively
+  compacted to keep only the latest. `onCommit` callback in `InFlight`
+  is ready to wire this up.
 * **Consume routing v1.** Lag-aware weighted-random partition pick via
   peer `/metrics` scraping (infrastructure is built; wiring pending).
 * **Auth, rate limiting.**

@@ -13,7 +13,6 @@ type config struct {
 	topics             int
 	messages           int
 	partitions         int
-	replicationFactor  int
 	produceConcurrency int
 	consumeConcurrency int
 	timeout            time.Duration
@@ -33,7 +32,6 @@ type roundRobinClient struct {
 type topicRecord struct {
 	Name                      string          `json:"name"`
 	Partitions                int             `json:"partitions"`
-	ReplicationFactor         int             `json:"replication_factor"`
 	RetentionMs               int64           `json:"retention_ms"`
 	VisibilityTimeoutMs       int64           `json:"visibility_timeout_ms"`
 	MaxInFlightPerPartition   int64           `json:"max_in_flight_per_partition"`

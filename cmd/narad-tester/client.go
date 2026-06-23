@@ -68,7 +68,6 @@ func (c *apiClient) createTopic(ctx context.Context, topic string, cfg config) e
 	req := createTopicRequest{
 		Name:                      topic,
 		Partitions:                cfg.Partitions,
-		ReplicationFactor:         cfg.ReplicationFactor,
 		RetentionMs:               cfg.Retention.Milliseconds(),
 		VisibilityTimeoutMs:       cfg.VisibilityTimeout.Milliseconds(),
 		MaxInFlightPerPartition:   cfg.MaxInFlightPerPartition,

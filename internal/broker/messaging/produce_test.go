@@ -11,16 +11,14 @@ import (
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
-	"github.com/debanganthakuria/narad/internal/platform/replication"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
-func TestProduceAppendsAndReplicates(t *testing.T) {
+func TestProduceAppendsAndMakesVisible(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 3}
 	schemas := &fakeSchemas{}
-	replicator := &fakeReplicator{}
-	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 1}, replicator)
+	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 1})
 
 	offset, partitionIdx, err := engine.Produce(context.Background(), "orders", "customer-1", []byte(`{"id":1}`))
 	if err != nil {
@@ -35,15 +33,6 @@ func TestProduceAppendsAndReplicates(t *testing.T) {
 	if schemas.lastTopic != "orders" || string(schemas.lastPayload) != `{"id":1}` {
 		t.Fatalf("schema Validate() args = topic=%q payload=%q", schemas.lastTopic, string(schemas.lastPayload))
 	}
-	if !replicator.called {
-		t.Fatal("Replicate() was not called")
-	}
-	if replicator.lastTopic != "orders" || replicator.lastPartition != 1 || replicator.lastOffset != 0 {
-		t.Fatalf("Replicate() args = topic=%q partition=%d offset=%d", replicator.lastTopic, replicator.lastPartition, replicator.lastOffset)
-	}
-	if string(replicator.lastPayload) != `{"id":1}` {
-		t.Fatalf("Replicate() payload = %q, want %q", string(replicator.lastPayload), `{"id":1}`)
-	}
 	log, err := engine.logs.Get("orders", 1)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -57,8 +46,7 @@ func TestProduceAllowsMissingSchema(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	schemas := &fakeSchemas{validateErr: errs.ErrSchemaNotFound}
-	replicator := &fakeReplicator{}
-	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0}, replicator)
+	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0})
 
 	offset, partitionIdx, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`))
 	if err != nil {
@@ -67,8 +55,12 @@ func TestProduceAllowsMissingSchema(t *testing.T) {
 	if offset != 0 || partitionIdx != 0 {
 		t.Fatalf("Produce() = offset %d partition %d, want 0,0", offset, partitionIdx)
 	}
-	if !replicator.called {
-		t.Fatal("Replicate() was not called for schema-not-found path")
+	log, err := engine.logs.Get("orders", 0)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got := log.HighWatermark(); got != 1 {
+		t.Fatalf("HighWatermark() = %d, want 1 for schema-not-found path", got)
 	}
 }
 
@@ -76,8 +68,7 @@ func TestProduceCachesMissingSchemaLookup(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	schemas := &fakeSchemas{validateErr: errs.ErrSchemaNotFound}
-	replicator := &fakeReplicator{}
-	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0}, replicator)
+	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0})
 
 	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
 		t.Fatalf("first Produce() error = %v", err)
@@ -94,8 +85,7 @@ func TestProduceInvalidatesMissingSchemaCacheOnMetastoreVersionChange(t *testing
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	schemas := &fakeSchemas{validateErr: errs.ErrSchemaNotFound}
-	replicator := &fakeReplicator{}
-	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0}, replicator)
+	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0})
 	engine.cacheTTL = time.Hour
 
 	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
@@ -126,8 +116,7 @@ func TestProduceLoadsPersistedSchemaWhenLocalRegistryMisses(t *testing.T) {
 		t.Fatalf("PutSchema() error = %v", err)
 	}
 	schemas := &fakeSchemas{validateErr: errs.ErrSchemaNotFound}
-	replicator := &fakeReplicator{}
-	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0}, replicator)
+	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0})
 
 	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
 		t.Fatalf("Produce() error = %v", err)
@@ -137,9 +126,6 @@ func TestProduceLoadsPersistedSchemaWhenLocalRegistryMisses(t *testing.T) {
 	}
 	if schemas.loads[0].topic != "orders" || schemas.loads[0].version != 1 {
 		t.Fatalf("schema load = %+v, want orders v1", schemas.loads[0])
-	}
-	if !replicator.called {
-		t.Fatal("Replicate() was not called after schema load")
 	}
 }
 
@@ -154,15 +140,18 @@ func TestProduceRejectsInvalidPayloadAfterLazySchemaLoad(t *testing.T) {
 	if err := ms.PutSchema(context.Background(), "orders", 1, rawSchema); err != nil {
 		t.Fatalf("PutSchema() error = %v", err)
 	}
-	replicator := &fakeReplicator{}
-	engine := newTestEngine(t, ms, schema.NewJSONSchema(), fixedPartitioner{picked: 0}, replicator)
+	engine := newTestEngine(t, ms, schema.NewJSONSchema(), fixedPartitioner{picked: 0})
 
 	_, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`))
 	if err == nil || !strings.Contains(err.Error(), "schema") {
 		t.Fatalf("Produce() error = %v, want schema validation error", err)
 	}
-	if replicator.called {
-		t.Fatal("Replicate() was called after lazy schema validation failure")
+	log, getErr := engine.logs.Get("orders", 0)
+	if getErr != nil {
+		t.Fatalf("Get() error = %v", getErr)
+	}
+	if got := log.HighWatermark(); got != 0 {
+		t.Fatalf("HighWatermark() = %d, want 0 after lazy schema validation failure", got)
 	}
 }
 
@@ -170,124 +159,40 @@ func TestProduceRejectsSchemaValidationError(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	schemas := &fakeSchemas{validateErr: errors.New("invalid payload")}
-	replicator := &fakeReplicator{}
-	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0}, replicator)
+	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0})
 
 	_, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`))
 	if err == nil || !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "invalid payload") {
 		t.Fatalf("Produce() error = %v, want invalid payload", err)
-	}
-	if replicator.called {
-		t.Fatal("Replicate() was called after schema validation failure")
-	}
-}
-
-func TestProduceReturnsReplicatorError(t *testing.T) {
-	ms := newMessagingFakeMetastore()
-	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	replicator := &fakeReplicator{err: errors.New("replication failed")}
-	engine := newTestEngine(t, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
-
-	_, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`))
-	if err == nil || err.Error() != "messaging: replicate: replication failed" {
-		t.Fatalf("Produce() error = %v, want wrapped replicate error", err)
 	}
 	log, getErr := engine.logs.Get("orders", 0)
 	if getErr != nil {
 		t.Fatalf("Get() error = %v", getErr)
 	}
 	if got := log.HighWatermark(); got != 0 {
-		t.Fatalf("HighWatermark() = %d, want 0", got)
-	}
-}
-
-func TestProduceDoesNotAppendPastUnrepairedReplicationTail(t *testing.T) {
-	ms := newMessagingFakeMetastore()
-	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	replicator := &scriptedCatchUpReplicator{
-		replicateErrs: []error{errors.New("replication down")},
-		catchUpErrs:   []error{errors.New("repair down"), errors.New("repair down")},
-	}
-	engine := newTestEngine(t, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
-
-	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err == nil {
-		t.Fatal("first Produce() error = nil, want replication failure")
-	}
-	log, err := engine.logs.Get("orders", 0)
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
-	}
-	if got := log.NextOffset(); got != 1 {
-		t.Fatalf("NextOffset() after first failure = %d, want 1", got)
-	}
-	if got := log.HighWatermark(); got != 0 {
-		t.Fatalf("HighWatermark() after first failure = %d, want 0", got)
-	}
-
-	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":2}`)); err == nil {
-		t.Fatal("second Produce() error = nil, want repair failure")
-	}
-	if got := log.NextOffset(); got != 1 {
-		t.Fatalf("NextOffset() after unrepaired second produce = %d, want 1", got)
-	}
-	if got := len(replicator.replicateOffsets); got != 1 {
-		t.Fatalf("replicate calls = %d, want 1", got)
-	}
-}
-
-func TestProduceRepairsHiddenTailBeforeAppendingNextRecord(t *testing.T) {
-	ms := newMessagingFakeMetastore()
-	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	replicator := &scriptedCatchUpReplicator{
-		replicateErrs: []error{errors.New("replication down"), nil},
-		catchUpErrs:   []error{errors.New("repair down"), nil},
-	}
-	engine := newTestEngine(t, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, replicator)
-
-	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err == nil {
-		t.Fatal("first Produce() error = nil, want replication failure")
-	}
-	offset, partition, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":2}`))
-	if err != nil {
-		t.Fatalf("second Produce() error = %v", err)
-	}
-	if offset != 1 || partition != 0 {
-		t.Fatalf("second Produce() = offset %d partition %d, want 1,0", offset, partition)
-	}
-	log, err := engine.logs.Get("orders", 0)
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
-	}
-	if got := log.HighWatermark(); got != 2 {
-		t.Fatalf("HighWatermark() = %d, want 2", got)
-	}
-	if got := replicator.replicateOffsets; len(got) != 2 || got[0] != 0 || got[1] != 1 {
-		t.Fatalf("replicate offsets = %v, want [0 1]", got)
+		t.Fatalf("HighWatermark() = %d, want 0 after schema validation failure", got)
 	}
 }
 
 func TestProduceSkipsDeadOwnerPartition(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 3, ReplicationFactor: 2}); err != nil {
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 3}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
 	}
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-dead", Addr: "dead.example:7942", Status: metastore.MemberDead}); err != nil {
 		t.Fatalf("RegisterMember(dead) error = %v", err)
 	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-follower", Addr: "follower.example:7942", Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember(follower) error = %v", err)
-	}
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember(self) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-dead", "node-follower"); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-dead"); err != nil {
 		t.Fatalf("AssignPartition(0) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-self", "node-follower"); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-self"); err != nil {
 		t.Fatalf("AssignPartition(1) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 2, "node-self", "node-follower"); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 2, "node-self"); err != nil {
 		t.Fatalf("AssignPartition(2) error = %v", err)
 	}
 
@@ -307,13 +212,13 @@ func TestProduceSkipsDeadOwnerPartition(t *testing.T) {
 func TestProducePinnedPartitionUsesRequestedLocalPartition(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 3, ReplicationFactor: 1}); err != nil {
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 3}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
 	}
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember(self) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 2, "node-self", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 2, "node-self"); err != nil {
 		t.Fatalf("AssignPartition(2) error = %v", err)
 	}
 
@@ -330,7 +235,7 @@ func TestProducePinnedPartitionUsesRequestedLocalPartition(t *testing.T) {
 func TestProducePinnedPartitionRejectsOutOfRange(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2, ReplicationFactor: 1}); err != nil {
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
 	}
 
@@ -344,7 +249,7 @@ func TestProducePinnedPartitionRejectsOutOfRange(t *testing.T) {
 func TestProducePinnedPartitionRejectsMissingAssignment(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2, ReplicationFactor: 1}); err != nil {
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
 	}
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
@@ -361,13 +266,13 @@ func TestProducePinnedPartitionRejectsMissingAssignment(t *testing.T) {
 func TestProducePinnedPartitionRejectsRemoteOwner(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2, ReplicationFactor: 1}); err != nil {
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
 	}
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "remote.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember(remote) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-remote", ""); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition(1) error = %v", err)
 	}
 
@@ -378,19 +283,16 @@ func TestProducePinnedPartitionRejectsRemoteOwner(t *testing.T) {
 	}
 }
 
-func TestProducePinnedPartitionRejectsDeadFollower(t *testing.T) {
+func TestProducePinnedPartitionRejectsDeadOwner(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1, ReplicationFactor: 2}); err != nil {
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
 	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberDead}); err != nil {
 		t.Fatalf("RegisterMember(self) error = %v", err)
 	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-dead", Addr: "dead.example:7942", Status: metastore.MemberDead}); err != nil {
-		t.Fatalf("RegisterMember(dead) error = %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-self", "node-dead"); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-self"); err != nil {
 		t.Fatalf("AssignPartition(0) error = %v", err)
 	}
 
@@ -401,70 +303,20 @@ func TestProducePinnedPartitionRejectsDeadFollower(t *testing.T) {
 	}
 }
 
-func TestProduceRejectsDeadFollowerPartition(t *testing.T) {
+func TestProduceAdvancesHighWatermark(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 3, ReplicationFactor: 2}); err != nil {
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 3}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
-	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-dead", Addr: "dead.example:7942", Status: metastore.MemberDead}); err != nil {
-		t.Fatalf("RegisterMember(dead) error = %v", err)
-	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-follower", Addr: "follower.example:7942", Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember(follower) error = %v", err)
 	}
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember(self) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-dead", "node-follower"); err != nil {
-		t.Fatalf("AssignPartition(0) error = %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-self", "node-dead"); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-self"); err != nil {
 		t.Fatalf("AssignPartition(1) error = %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 2, "node-self", "node-follower"); err != nil {
-		t.Fatalf("AssignPartition(2) error = %v", err)
 	}
 
 	engine := newClusterTestEngine(t, store, fixedPartitionManager{picked: 1})
-	offset, partitionIdx, err := engine.Produce(ctx, "orders", "customer-1", []byte(`{"id":1}`))
-	if err != nil {
-		t.Fatalf("Produce() error = %v", err)
-	}
-	if offset != 0 {
-		t.Fatalf("offset = %d, want 0", offset)
-	}
-	if partitionIdx != 2 {
-		t.Fatalf("partition = %d, want 2", partitionIdx)
-	}
-}
-
-func TestProduceWithLocalReplicatorAdvancesHighWatermark(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 3, ReplicationFactor: 2}); err != nil {
-		t.Fatalf("CreateTopic() error = %v", err)
-	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-dead", Addr: "dead.example:7942", Status: metastore.MemberDead}); err != nil {
-		t.Fatalf("RegisterMember(dead) error = %v", err)
-	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-follower", Addr: "follower.example:7942", Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember(follower) error = %v", err)
-	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "self.example:7942", Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember(self) error = %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-dead", "node-follower"); err != nil {
-		t.Fatalf("AssignPartition(0) error = %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-self", "node-follower"); err != nil {
-		t.Fatalf("AssignPartition(1) error = %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 2, "node-self", "node-follower"); err != nil {
-		t.Fatalf("AssignPartition(2) error = %v", err)
-	}
-
-	engine := newClusterTestEngine(t, store, fixedPartitionManager{picked: 0})
 	if _, _, err := engine.Produce(ctx, "orders", "customer-1", []byte(`{"id":1}`)); err != nil {
 		t.Fatalf("Produce() error = %v", err)
 	}
@@ -477,22 +329,19 @@ func TestProduceWithLocalReplicatorAdvancesHighWatermark(t *testing.T) {
 	}
 }
 
-func TestProduceFailsWhenNoPartitionHasAliveOwnerAndFollower(t *testing.T) {
+func TestProduceFailsWhenNoPartitionHasAliveOwner(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2, ReplicationFactor: 2}); err != nil {
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
-	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-alive", Addr: "alive.example:7942", Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember(alive) error = %v", err)
 	}
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-dead", Addr: "dead.example:7942", Status: metastore.MemberDead}); err != nil {
 		t.Fatalf("RegisterMember(dead) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-alive", "node-dead"); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 0, "node-dead"); err != nil {
 		t.Fatalf("AssignPartition(0) error = %v", err)
 	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-dead", "node-alive"); err != nil {
+	if err := store.AssignPartition(ctx, "orders", 1, "node-dead"); err != nil {
 		t.Fatalf("AssignPartition(1) error = %v", err)
 	}
 
@@ -507,7 +356,7 @@ func TestProduceDoesNotSynchronouslyPersistHighWatermark(t *testing.T) {
 	dataDir := t.TempDir()
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
-	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, &fakeReplicator{})
+	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0})
 	if _, err := engine.logs.Get("orders", 0); err != nil {
 		t.Fatalf("open log: %v", err)
 	}
@@ -525,46 +374,4 @@ func TestProduceDoesNotSynchronouslyPersistHighWatermark(t *testing.T) {
 	if err := engine.logs.CloseAll(); err == nil || !strings.Contains(err.Error(), "storage: replace hwm") {
 		t.Fatalf("CloseAll() error = %v, want hwm persistence failure", err)
 	}
-}
-
-type scriptedCatchUpReplicator struct {
-	replicateErrs    []error
-	catchUpErrs      []error
-	replicateOffsets []int64
-	catchUpHints     []*int64
-}
-
-func (r *scriptedCatchUpReplicator) Replicate(_ context.Context, _ string, _ int, offset int64, _ []byte) error {
-	r.replicateOffsets = append(r.replicateOffsets, offset)
-	if len(r.replicateErrs) == 0 {
-		return nil
-	}
-	err := r.replicateErrs[0]
-	r.replicateErrs = r.replicateErrs[1:]
-	return err
-}
-
-func (r *scriptedCatchUpReplicator) CatchUp(_ context.Context, _ string, _ int, log replication.LeaderLog, opts replication.CatchUpOptions) error {
-	if opts.FollowerNextOffset == nil {
-		r.catchUpHints = append(r.catchUpHints, nil)
-	} else {
-		hint := *opts.FollowerNextOffset
-		r.catchUpHints = append(r.catchUpHints, &hint)
-	}
-	if log.HighWatermark() >= log.NextOffset() && opts.FollowerNextOffset == nil {
-		return nil
-	}
-	if len(r.catchUpErrs) > 0 {
-		err := r.catchUpErrs[0]
-		r.catchUpErrs = r.catchUpErrs[1:]
-		if err != nil {
-			return err
-		}
-	}
-	for next := log.HighWatermark() + 1; next <= log.NextOffset(); next++ {
-		if err := log.AdvanceHighWatermark(next); err != nil {
-			return err
-		}
-	}
-	return nil
 }

@@ -21,18 +21,6 @@ func (rt *Router) ownerAddr(topicName string, p int) string {
 	return rt.consumeOwnerAddrForRoute(entry)
 }
 
-func (rt *Router) produceOwnerAddr(topicName string, p int) (string, bool) {
-	routes, ok := rt.routesForTopic(topicName)
-	if !ok {
-		return "", false
-	}
-	entry, ok := routes.byPartition[p]
-	if !ok {
-		return "", false
-	}
-	return rt.produceOwnerAddrForRoute(entry)
-}
-
 func (rt *Router) consumeOwnerAddrForRoute(entry routeEntry) string {
 	if entry.ownerID == rt.selfID {
 		return ""
@@ -40,10 +28,9 @@ func (rt *Router) consumeOwnerAddrForRoute(entry routeEntry) string {
 	if entry.ownerAlive {
 		return entry.ownerAddr
 	}
-	if entry.followerID == "" || entry.followerID == rt.selfID || !entry.followerAlive {
-		return ""
-	}
-	return entry.followerAddr
+	// No follower replication: a dead owner's partition is unavailable
+	// until the owner restarts and its volume reattaches.
+	return ""
 }
 
 func (rt *Router) produceOwnerAddrForRoute(entry routeEntry) (string, bool) {
@@ -57,26 +44,11 @@ func (rt *Router) produceOwnerAddrForRoute(entry routeEntry) (string, bool) {
 	return ownerAddr, false
 }
 
-func (rt *Router) produceAssignmentWritable(a metastore.Assignment) (string, bool) {
-	owner, err := rt.store.GetMember(a.OwnerID)
-	if err != nil || owner.Status != metastore.MemberAlive {
-		return "", false
-	}
-	if a.FollowerID == "" {
-		return owner.Addr, true
-	}
-	follower, err := rt.store.GetMember(a.FollowerID)
-	return owner.Addr, err == nil && follower.Status == metastore.MemberAlive
-}
-
 func (rt *Router) produceAssignmentWritableForRoute(entry routeEntry) (string, bool) {
 	if !entry.ownerAlive {
 		return "", false
 	}
-	if entry.followerID == "" {
-		return entry.ownerAddr, true
-	}
-	return entry.ownerAddr, entry.followerAlive
+	return entry.ownerAddr, true
 }
 
 func (rt *Router) memberAddrByClusterAddr(clusterAddr string) string {

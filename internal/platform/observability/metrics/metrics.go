@@ -377,6 +377,32 @@ func New(reg prometheus.Registerer) *Metrics {
 	return m
 }
 
+// pruneTopicSeries drops every series labeled with the given topic across
+// all topic-labeled collectors. It is called when a topic disappears so
+// the exposition does not leak series for the process lifetime under topic
+// churn. Every collector carrying a "topic" label MUST be listed here;
+// collectors without a topic label (HTTP, data-dir, ack-rejected-by-reason,
+// metastore, boot, errors) are intentionally omitted.
+func (m *Metrics) pruneTopicSeries(topic string) {
+	sel := prometheus.Labels{"topic": topic}
+	for _, c := range []interface{ DeletePartialMatch(prometheus.Labels) int }{
+		m.MessagesProducedTotal, m.MessagesConsumedTotal,
+		m.BytesProducedTotal, m.BytesConsumedTotal,
+		m.ProduceRejectionsTotal,
+		m.ConsumeWaitSeconds, m.ConsumeEmptyTotal,
+		m.TopicBytes, m.PartitionSizeBytes, m.Segments,
+		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
+		m.InFlightSize, m.AckedAheadSize, m.ReserveSkipped,
+		m.FlushDurationSeconds, m.FlushBytesTotal,
+		m.FsyncDurationSeconds, m.HighWatermarkPersistSeconds,
+		m.SegmentsRolledTotal,
+		m.RetentionDeletionsTotal, m.RetentionBytesDeleted, m.RetentionMessagesDeleted, m.RetentionRunSeconds,
+		m.SegmentsScannedAtBoot,
+	} {
+		c.DeletePartialMatch(sel)
+	}
+}
+
 // storageDurationBuckets is tuned for sub-second IO (flush, fsync,
 // retention sweeps that don't touch the disk). Anything above 1s is
 // already pathological for these paths.

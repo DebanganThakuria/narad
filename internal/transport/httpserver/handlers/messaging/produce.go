@@ -98,6 +98,10 @@ func parseProduceQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) 
 		s.WriteError(w, http.StatusBadRequest, "invalid partition: "+err.Error())
 		return nil, false
 	}
+	if p < 0 {
+		s.WriteError(w, http.StatusBadRequest, "invalid partition: must be >= 0")
+		return nil, false
+	}
 	return &p, true
 }
 

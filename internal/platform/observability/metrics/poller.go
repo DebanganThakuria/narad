@@ -127,20 +127,15 @@ func (p *Poller) tick(ctx context.Context) {
 	p.metrics.PartitionsTotal.Set(float64(partitionsTotal))
 	p.updateDataDirGauges()
 
-	// Prune series for topics that disappeared since last tick.
+	// Prune series for topics that disappeared since last tick. Every
+	// topic-labeled collector must be listed here: any omission leaks a
+	// series per deleted topic for the lifetime of the process, which is
+	// unbounded under topic churn.
 	for topic := range p.previousTopics {
 		if _, still := currentTopics[topic]; still {
 			continue
 		}
-		p.metrics.TopicBytes.DeletePartialMatch(prometheus.Labels{"topic": topic})
-		p.metrics.PartitionSizeBytes.DeletePartialMatch(prometheus.Labels{"topic": topic})
-		p.metrics.Segments.DeletePartialMatch(prometheus.Labels{"topic": topic})
-		p.metrics.ConsumerLagMessages.DeletePartialMatch(prometheus.Labels{"topic": topic})
-		p.metrics.ConsumerDroppedMessages.DeletePartialMatch(prometheus.Labels{"topic": topic})
-		p.metrics.OldestUnconsumedAgeSeconds.DeletePartialMatch(prometheus.Labels{"topic": topic})
-		p.metrics.InFlightSize.DeletePartialMatch(prometheus.Labels{"topic": topic})
-		p.metrics.AckedAheadSize.DeletePartialMatch(prometheus.Labels{"topic": topic})
-		p.metrics.ReserveSkipped.DeletePartialMatch(prometheus.Labels{"topic": topic})
+		p.metrics.pruneTopicSeries(topic)
 	}
 	p.previousTopics = currentTopics
 }

@@ -179,7 +179,9 @@ func (l *Log) scanSegmentIndexLocked(seg *segment) ([]indexEntry, error) {
 // byte so a magic spanning a chunk boundary isn't missed.
 func nextMagicInSegment(f *os.File, start, size int64) int64 {
 	const chunk = 4096
-	buf := make([]byte, chunk)
+	// One extra byte so the 1-byte overlap read (readStart = pos-1) on
+	// chunks after the first still fits: end-readStart can be chunk+1.
+	buf := make([]byte, chunk+1)
 	for pos := start; pos < size; {
 		end := min(pos+chunk, size)
 		readStart := pos
