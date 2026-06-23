@@ -1,4 +1,4 @@
-package replication
+package clusterrpc
 
 import (
 	"bufio"
@@ -12,7 +12,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 
-	replicationwire "github.com/debanganthakuria/narad/internal/protocol/replication"
+	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 )
 
 type quicClientPool struct {
@@ -65,24 +65,24 @@ func NewQUICFrameClient(timeout time.Duration, observers ...stageObserver) *QUIC
 	return &QUICFrameClient{pool: newQUICClientPool(timeout, observers...)}
 }
 
-func (c *QUICFrameClient) Request(ctx context.Context, addr string, frameType replicationwire.StreamFrameType, payload []byte) (replicationwire.StreamFrame, error) {
+func (c *QUICFrameClient) Request(ctx context.Context, addr string, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
 	if c == nil || c.pool == nil {
-		return replicationwire.StreamFrame{}, errors.New("quic frame client is nil")
+		return clusterwire.StreamFrame{}, errors.New("quic frame client is nil")
 	}
 	return c.pool.request(ctx, addr, quicLaneForFrame(frameType), frameType, payload)
 }
 
-func (c *QUICFrameClient) RequestOnLane(ctx context.Context, addr, lane string, frameType replicationwire.StreamFrameType, payload []byte) (replicationwire.StreamFrame, error) {
+func (c *QUICFrameClient) RequestOnLane(ctx context.Context, addr, lane string, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
 	if c == nil || c.pool == nil {
-		return replicationwire.StreamFrame{}, errors.New("quic frame client is nil")
+		return clusterwire.StreamFrame{}, errors.New("quic frame client is nil")
 	}
 	return c.pool.request(ctx, addr, lane, frameType, payload)
 }
 
-func (p *quicClientPool) request(ctx context.Context, addr, lane string, frameType replicationwire.StreamFrameType, payload []byte) (replicationwire.StreamFrame, error) {
+func (p *quicClientPool) request(ctx context.Context, addr, lane string, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
 	client, err := p.getStream(ctx, addr, lane)
 	if err != nil {
-		return replicationwire.StreamFrame{}, err
+		return clusterwire.StreamFrame{}, err
 	}
 	frame, err := client.requestFrame(ctx, frameType, payload)
 	if err != nil && client.isClosed() {
@@ -158,9 +158,9 @@ func normalizeQUICLane(lane string) string {
 	}
 }
 
-func quicLaneForFrame(frameType replicationwire.StreamFrameType) string {
+func quicLaneForFrame(frameType clusterwire.StreamFrameType) string {
 	switch frameType {
-	case replicationwire.StreamFrameNodeRequest:
+	case clusterwire.StreamFrameNodeRequest:
 		return "control"
 	default:
 		return "control"

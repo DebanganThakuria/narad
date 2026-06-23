@@ -86,17 +86,6 @@ func encodeFrame(records [][]byte, baseOffset int64, c codec.Codec) ([]byte, err
 	return frame, nil
 }
 
-// writeFrame emits the whole frame in a single Write so partial-write
-// recovery sees a clean torn-tail boundary.
-func writeFrame(w io.Writer, records [][]byte, baseOffset int64, c codec.Codec) (int, error) {
-	frame, err := encodeFrame(records, baseOffset, c)
-	if err != nil {
-		return 0, err
-	}
-
-	return w.Write(frame)
-}
-
 // readFrameAt errors:
 //   - errBadMagic: header magic mismatch (caller resyncs)
 //   - errCorrupt:  CRC mismatch or inner record stream invalid

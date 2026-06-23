@@ -1,4 +1,4 @@
-package replication
+package clusterrpc
 
 import (
 	"bufio"
@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	clusterwire "github.com/debanganthakuria/narad/internal/protocol/replication"
+	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 )
 
 const defaultStreamTimeout = 5 * time.Second

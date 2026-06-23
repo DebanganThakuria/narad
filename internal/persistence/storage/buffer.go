@@ -76,25 +76,6 @@ func (b *buffer) pushBatch(records [][]byte) (int64, int64, bool) {
 	return first, last, cross
 }
 
-// drain hands the buffered records to the flusher and resets the
-// buffer. After drain, readBuffered won't find them — the flusher
-// must finish writing the frame and updating the index before
-// releasing rwmu, or readers will see a temporary gap.
-func (b *buffer) drain() ([][]byte, int64) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if len(b.records) == 0 {
-		return nil, b.nextOffset
-	}
-	recs := b.records
-	base := b.baseOffset
-	b.records = nil
-	b.baseOffset = b.nextOffset
-	b.bytes = 0
-	b.firstAt = time.Time{}
-	return recs, base
-}
-
 func (b *buffer) shouldFlushByAge(maxAge time.Duration) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()

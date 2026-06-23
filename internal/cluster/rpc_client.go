@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
-	"github.com/debanganthakuria/narad/internal/platform/replication"
+	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
+	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
-	replicationwire "github.com/debanganthakuria/narad/internal/protocol/replication"
 )
 
 const defaultPeerRPCTimeout = 5 * time.Second
@@ -30,7 +30,7 @@ type peerClient interface {
 }
 
 type PeerClient struct {
-	frames  *replication.QUICFrameClient
+	frames  *clusterrpc.QUICFrameClient
 	metrics stageObserver
 }
 
@@ -42,7 +42,7 @@ func NewPeerClient(timeout time.Duration, observers ...stageObserver) *PeerClien
 	if len(observers) > 0 {
 		observer = observers[0]
 	}
-	return &PeerClient{frames: replication.NewQUICFrameClient(timeout, observer), metrics: observer}
+	return &PeerClient{frames: clusterrpc.NewQUICFrameClient(timeout, observer), metrics: observer}
 }
 
 func (c *PeerClient) Produce(ctx context.Context, addr string, req nodewire.ProduceRequest) (nodewire.Response, error) {
@@ -176,12 +176,12 @@ func (c *PeerClient) request(ctx context.Context, addr, operation string, payloa
 		return nodewire.Response{}, fmt.Errorf("peer rpc client is nil")
 	}
 	start := time.Now()
-	frame, err := c.frames.RequestOnLane(ctx, addr, operation, replicationwire.StreamFrameNodeRequest, payload)
+	frame, err := c.frames.RequestOnLane(ctx, addr, operation, clusterwire.StreamFrameNodeRequest, payload)
 	c.observe(operation, "round_trip", observeOutcome(err), time.Since(start))
 	if err != nil {
 		return nodewire.Response{}, err
 	}
-	if frame.Type != replicationwire.StreamFrameNodeReply {
+	if frame.Type != clusterwire.StreamFrameNodeReply {
 		return nodewire.Response{}, fmt.Errorf("unexpected peer rpc frame type %d", frame.Type)
 	}
 	start = time.Now()

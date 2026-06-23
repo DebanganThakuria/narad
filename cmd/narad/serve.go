@@ -29,11 +29,11 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
+	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
 	"github.com/debanganthakuria/narad/internal/platform/config"
 	"github.com/debanganthakuria/narad/internal/platform/observability/logger"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
-	"github.com/debanganthakuria/narad/internal/platform/replication"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
@@ -115,7 +115,7 @@ func runServe(args []string) error {
 	wg.Go(func() { produceDispatcher.Run(ctx) })
 	startPprofServer(ctx, &wg, cfg.HTTP.PprofAddr, log)
 	wg.Go(func() {
-		if err := replication.ServeQUIC(ctx, cfg.HTTP.Addr, log, rpcServer); err != nil && !errors.Is(err, context.Canceled) {
+		if err := clusterrpc.ServeQUIC(ctx, cfg.HTTP.Addr, log, rpcServer); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error("cluster rpc server", "addr", cfg.HTTP.Addr, "err", err)
 		}
 	})

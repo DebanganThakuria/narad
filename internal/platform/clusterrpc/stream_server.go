@@ -1,4 +1,4 @@
-package replication
+package clusterrpc
 
 import (
 	"errors"
@@ -8,7 +8,7 @@ import (
 	"net"
 	"sync"
 
-	clusterwire "github.com/debanganthakuria/narad/internal/protocol/replication"
+	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 )
 
 // StreamFrameHandler handles a decoded cluster-RPC request frame and

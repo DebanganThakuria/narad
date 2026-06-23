@@ -19,8 +19,8 @@ import (
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
-	replicationwire "github.com/debanganthakuria/narad/internal/protocol/replication"
 )
 
 type RPCServer struct {
@@ -61,8 +61,8 @@ func NewRPCServer(br broker.Broker, store *metastore.Store, logger *slog.Logger,
 	return &RPCServer{broker: br, store: store, logger: logger, metrics: observer}
 }
 
-func (s *RPCServer) HandleStreamFrame(frame replicationwire.StreamFrame, respond func(replicationwire.StreamFrame)) bool {
-	if frame.Type != replicationwire.StreamFrameNodeRequest {
+func (s *RPCServer) HandleStreamFrame(frame clusterwire.StreamFrame, respond func(clusterwire.StreamFrame)) bool {
+	if frame.Type != clusterwire.StreamFrameNodeRequest {
 		return false
 	}
 	go func() {
@@ -71,8 +71,8 @@ func (s *RPCServer) HandleStreamFrame(frame replicationwire.StreamFrame, respond
 		if err != nil {
 			payload, _ = nodewire.EncodeResponse(errorResponse(http.StatusInternalServerError, "encode rpc response failed"))
 		}
-		respond(replicationwire.StreamFrame{
-			Type:      replicationwire.StreamFrameNodeReply,
+		respond(clusterwire.StreamFrame{
+			Type:      clusterwire.StreamFrameNodeReply,
 			RequestID: frame.RequestID,
 			Payload:   payload,
 		})

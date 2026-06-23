@@ -1,8 +1,8 @@
-// Package replication defines the cluster stream-framing protocol used
+// Package clusterwire defines the cluster stream-framing protocol used
 // for node-to-node RPC over QUIC. Each request/response is a length-
 // prefixed StreamFrame carrying an opaque payload (the node-RPC wire
 // format lives in internal/protocol/node).
-package replication
+package clusterwire
 
 import (
 	"encoding/binary"

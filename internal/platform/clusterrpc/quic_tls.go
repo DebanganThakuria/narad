@@ -1,4 +1,4 @@
-package replication
+package clusterrpc
 
 import (
 	"crypto/rand"
@@ -9,7 +9,9 @@ import (
 	"time"
 )
 
-const quicALPN = "narad-replication-quic-v1"
+// quicALPN identifies Narad's cluster-RPC QUIC protocol during the TLS
+// handshake. All nodes in a cluster must agree on it.
+const quicALPN = "narad-cluster-quic-v1"
 
 func quicServerTLSConfig() (*tls.Config, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
