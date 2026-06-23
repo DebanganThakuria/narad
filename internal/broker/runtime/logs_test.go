@@ -196,18 +196,17 @@ func TestLogsGetCachesLogInstance(t *testing.T) {
 	}
 }
 
-func TestLogsGetIgnoresMissingTopicRetentionLookup(t *testing.T) {
+func TestLogsGetRefusesTopicAbsentFromMetastore(t *testing.T) {
 	logs := newRuntimeTestLogs(t, newRuntimeFakeMetastore())
 
-	l, err := logs.Get("missing", 1)
-	if err != nil {
-		t.Fatalf("Get() error = %v, want nil", err)
+	// A topic the metastore does not know about must not be (re)opened —
+	// this is the guard that stops a deleted topic from being resurrected
+	// by a late produce-dispatch or consume.
+	if _, err := logs.Get("missing", 1); !errors.Is(err, errs.ErrTopicNotFound) {
+		t.Fatalf("Get() error = %v, want ErrTopicNotFound", err)
 	}
-	if l == nil {
-		t.Fatal("Get() log = nil, want opened log")
-	}
-	if err := logs.CloseAll(); err != nil {
-		t.Fatalf("CloseAll() error = %v", err)
+	if _, ok := logs.Peek("missing", 1); ok {
+		t.Fatal("Get() opened/cached a log for an absent topic; want none")
 	}
 }
 
@@ -834,21 +833,14 @@ func TestLogsGetCanReopenAfterCloseAll(t *testing.T) {
 	}
 }
 
-func TestLogsGetOnUnknownTopicStillCaches(t *testing.T) {
+func TestLogsGetOnUnknownTopicIsRefusedAndNotCached(t *testing.T) {
 	logs := newRuntimeTestLogs(t, newRuntimeFakeMetastore())
-	first, err := logs.Get("ghost", 0)
-	if err != nil {
-		t.Fatalf("Get() first error = %v", err)
+	if _, err := logs.Get("ghost", 0); !errors.Is(err, errs.ErrTopicNotFound) {
+		t.Fatalf("Get() error = %v, want ErrTopicNotFound", err)
 	}
-	second, err := logs.Get("ghost", 0)
-	if err != nil {
-		t.Fatalf("Get() second error = %v", err)
-	}
-	if first != second {
-		t.Fatal("Get() did not cache unknown-topic partition log")
-	}
-	if err := logs.CloseAll(); err != nil {
-		t.Fatalf("CloseAll() error = %v", err)
+	// Refusal must not leave a cached entry that a later call would reuse.
+	if _, ok := logs.Peek("ghost", 0); ok {
+		t.Fatal("Get() cached an unknown-topic log; want no cache")
 	}
 }
 

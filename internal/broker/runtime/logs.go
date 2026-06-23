@@ -151,9 +151,20 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 
 	opts := g.storageOpts
 	if g.metastore != nil {
-		if t, err := g.metastore.GetTopic(context.Background(), topicName); err == nil {
+		t, err := g.metastore.GetTopic(context.Background(), topicName)
+		switch {
+		case err == nil:
 			opts.Retention = retentionFromTopic(t.RetentionMs, opts.Retention.CheckInterval)
-		} else if !errors.Is(err, errs.ErrNotFound) {
+		case errors.Is(err, errs.ErrNotFound):
+			// Refuse to (re)create a partition log for a topic that the
+			// local metastore no longer knows about. This is the guard
+			// that stops a deleted topic from being resurrected by a
+			// late produce-dispatch or consume that lazily opens a log
+			// after the topic's files were purged. The delete path waits
+			// for the local replica to reflect the deletion before
+			// purging, so by purge time this branch is authoritative.
+			return nil, errs.ErrTopicNotFound
+		default:
 			return nil, fmt.Errorf("broker/runtime: lookup topic for retention: %w", err)
 		}
 	}
