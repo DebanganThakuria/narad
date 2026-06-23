@@ -23,11 +23,20 @@ import (
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
+// purgeBroadcaster fans a topic purge out to the other cluster members.
+// *Router implements it; the RPC server holds it so a delete that was
+// forwarded to the leader over RPC still triggers the same owner-pod purge
+// the HTTP handler does for a leader-direct delete.
+type purgeBroadcaster interface {
+	BroadcastDeleteTopic(ctx context.Context, topicName string) error
+}
+
 type RPCServer struct {
-	broker  broker.Broker
-	store   *metastore.Store
-	logger  *slog.Logger
-	metrics stageObserver
+	broker      broker.Broker
+	store       *metastore.Store
+	logger      *slog.Logger
+	metrics     stageObserver
+	broadcaster purgeBroadcaster
 }
 
 type rpcProduceBody struct {
@@ -59,6 +68,15 @@ func NewRPCServer(br broker.Broker, store *metastore.Store, logger *slog.Logger,
 		observer = observers[0]
 	}
 	return &RPCServer{broker: br, store: store, logger: logger, metrics: observer}
+}
+
+// SetBroadcaster wires the purge fan-out used when a topic delete is
+// forwarded to this node as the leader. Without it, a delete that arrives
+// over RPC (i.e. from a follower) deletes the metastore record and purges
+// only this node's files, leaving the owner pods' partition directories
+// orphaned until the next startup sweep.
+func (s *RPCServer) SetBroadcaster(b purgeBroadcaster) {
+	s.broadcaster = b
 }
 
 func (s *RPCServer) HandleStreamFrame(frame clusterwire.StreamFrame, respond func(clusterwire.StreamFrame)) bool {
@@ -333,6 +351,19 @@ func (s *RPCServer) handleDeleteTopic(payload []byte) nodewire.Response {
 	}
 	if err := s.broker.DeleteTopic(rpcRequestContext(), req.Topic); err != nil {
 		return s.brokerError("delete topic", err)
+	}
+	// The metastore record is gone and this node's own files are purged.
+	// Fan the purge out to the other members so the partition owners drop
+	// their directories too — the HTTP handler does this for a
+	// leader-direct delete, but a follower-originated delete reaches the
+	// leader here over RPC. Best-effort: the metastore delete already
+	// succeeded, and the startup sweep reclaims any member we miss (e.g.
+	// one that is briefly unreachable), so a fan-out failure must not fail
+	// the delete.
+	if s.broadcaster != nil {
+		if err := s.broadcaster.BroadcastDeleteTopic(rpcRequestContext(), req.Topic); err != nil {
+			s.logger.Warn("broadcast topic purge after forwarded delete failed; orphans will be reclaimed by startup sweep", "topic", req.Topic, "err", err)
+		}
 	}
 	return nodewire.Response{Status: http.StatusNoContent}
 }

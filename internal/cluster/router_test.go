@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1693,6 +1695,41 @@ func TestBroadcastDeleteTopicReturnsErrorOnRemoteFailure(t *testing.T) {
 	}}
 	if err := router.BroadcastDeleteTopic(context.Background(), "orders"); err == nil {
 		t.Fatal("BroadcastDeleteTopic() error = nil, want error")
+	}
+}
+
+func TestBroadcastDeleteTopicAttemptsAllMembersDespiteFailure(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	for _, m := range []metastore.Member{
+		{ID: "node-a", Addr: "127.0.0.1:2", Status: metastore.MemberAlive},
+		{ID: "node-b", Addr: "127.0.0.1:3", Status: metastore.MemberAlive},
+	} {
+		if err := store.RegisterMember(ctx, m); err != nil {
+			t.Fatalf("RegisterMember(%s) error = %v", m.ID, err)
+		}
+	}
+
+	var mu sync.Mutex
+	attempted := map[string]bool{}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+	router.peer = fakePeerClient{purgeTopicFn: func(_ context.Context, addr, _ string) (nodewire.Response, error) {
+		mu.Lock()
+		attempted[addr] = true
+		mu.Unlock()
+		if addr == "127.0.0.1:2" {
+			// First member fails; the second must still be attempted.
+			return nodewire.Response{}, errors.New("unreachable")
+		}
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	}}
+
+	err := router.BroadcastDeleteTopic(ctx, "orders")
+	if err == nil {
+		t.Fatal("BroadcastDeleteTopic() error = nil, want the failed member surfaced")
+	}
+	if !attempted["127.0.0.1:2"] || !attempted["127.0.0.1:3"] {
+		t.Fatalf("attempted = %v, want both members attempted despite the first failing", attempted)
 	}
 }
 

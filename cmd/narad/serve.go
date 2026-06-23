@@ -106,6 +106,9 @@ func runServe(args []string) error {
 	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), br, m)
 	peerRPC := cluster.NewPeerClient(5*time.Second, m)
 	rpcServer := cluster.NewRPCServer(br, ms, log, m)
+	// So a delete forwarded to this node as leader still fans the purge out
+	// to the partition owners, matching the HTTP leader-direct path.
+	rpcServer.SetBroadcaster(router)
 	produceDispatcher := cluster.NewProduceDispatcher(ingressManager, ms, nodeID, br, peerRPC, log, cluster.ProduceDispatcherConfig{}, m)
 
 	// Start background processes
