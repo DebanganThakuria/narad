@@ -9,8 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 )
 
 // segment is one file in a partition's directory of segment files.
@@ -112,17 +110,9 @@ func createSegment(dir string, baseOffset int64) (*segment, error) {
 	}, nil
 }
 
-// writeFrame on partial-write failure truncates back to the pre-write
-// size so recovery doesn't have to resync past a torn tail next
-// startup.
-func (s *segment) writeFrame(records [][]byte, baseOffset int64, c codec.Codec) (pos int64, n int, err error) {
-	frame, err := encodeFrame(records, baseOffset, c)
-	if err != nil {
-		return 0, 0, err
-	}
-	return s.writeEncodedFrame(frame, baseOffset, len(records))
-}
-
+// writeEncodedFrame appends a pre-encoded frame to the segment. On a
+// partial-write failure it truncates back to the pre-write size so
+// recovery doesn't have to resync past a torn tail on the next startup.
 func (s *segment) writeEncodedFrame(frame []byte, baseOffset int64, records int) (pos int64, n int, err error) {
 	pos, err = s.file.Seek(0, io.SeekEnd)
 	if err != nil {
