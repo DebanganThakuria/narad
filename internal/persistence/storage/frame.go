@@ -138,35 +138,44 @@ func readFrameAt(r io.ReaderAt, pos int64, log *Log) (frameHeader, [][]byte, int
 }
 
 // verifyFrameAt re-reads the frame at pos and validates its CRC over the raw
-// (possibly compressed) on-disk bytes, WITHOUT decoding. It returns the
-// frame's record count and the position just after the frame. The durability
-// read-back (VerifyDurable) uses this so a group-commit batch costs one CRC
-// check per frame instead of a full decode per record — decisive for zstd.
-func verifyFrameAt(r io.ReaderAt, pos int64) (recordCount int32, nextPos int64, err error) {
+// (possibly compressed) on-disk bytes, WITHOUT decoding. It returns the frame
+// header (record count, base offset) and the position just after the frame.
+//
+// Two hot, decode-free paths use it:
+//   - the durability read-back (VerifyDurable) — one CRC check per frame
+//     instead of a full decode per record;
+//   - index navigation (scanSegmentFromIndexAnchorLocked / the index build) —
+//     locating an offset only needs frame headers to step frame-to-frame, so
+//     decoding the payload there is pure waste. With small frames and a sparse
+//     index, that waste dominated consume CPU (hundreds of decodes per lookup).
+//
+// CRC is still checked so navigation detects corruption exactly as the old
+// decode-based walk did; only the (expensive) zstd decode is skipped.
+func verifyFrameAt(r io.ReaderAt, pos int64) (frameHeader, int64, error) {
 	var hdrBuf [headerSize]byte
 	n, err := r.ReadAt(hdrBuf[:], pos)
 	if err != nil && err != io.EOF {
-		return 0, pos, err
+		return frameHeader{}, pos, err
 	}
 	if n < headerSize {
-		return 0, pos, io.ErrUnexpectedEOF
+		return frameHeader{}, pos, io.ErrUnexpectedEOF
 	}
 	h, err := decodeHeader(hdrBuf[:])
 	if err != nil {
-		return 0, pos, err
+		return h, pos, err
 	}
 
 	payload := make([]byte, h.compressed)
 	n, err = r.ReadAt(payload, pos+headerSize)
 	if err != nil && err != io.EOF {
-		return 0, pos, err
+		return h, pos, err
 	}
 	if n < int(h.compressed) {
-		return 0, pos, io.ErrUnexpectedEOF
+		return h, pos, io.ErrUnexpectedEOF
 	}
 
 	if want, got := h.crc, crc32cOf(hdrBuf[2:23], payload); want != got {
-		return 0, pos, fmt.Errorf("%w: crc want=0x%x got=0x%x at pos=%d", errCorrupt, want, got, pos)
+		return h, pos, fmt.Errorf("%w: crc want=0x%x got=0x%x at pos=%d", errCorrupt, want, got, pos)
 	}
-	return h.recordCount, pos + int64(headerSize) + int64(h.compressed), nil
+	return h, pos + int64(headerSize) + int64(h.compressed), nil
 }

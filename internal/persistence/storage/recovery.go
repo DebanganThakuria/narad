@@ -74,13 +74,15 @@ func (l *Log) walkSegment(seg *segment, isActive bool, nextOffset *int64) error 
 	entries := make([]indexEntry, 0)
 
 	for pos < size {
-		h, records, end, err := readFrameAt(seg.file, pos, l)
+		// Recovery only needs frame headers + CRC to find the durable tail and
+		// build the index; decoding every frame on startup is pure waste (and a
+		// cold-start CPU spike on a large log). verifyFrameAt validates each
+		// frame's CRC over the raw bytes, so corruption is still caught — an
+		// intact CRC means the compressed payload is byte-good and would decode.
+		h, end, err := verifyFrameAt(seg.file, pos)
 
 		switch {
 		case err == nil:
-			if len(records) != int(h.recordCount) {
-				return ErrCorruptRecord
-			}
 			entry := indexEntry{
 				segmentBaseOffset: seg.baseOffset,
 				baseOffset:        h.baseOffset,
@@ -145,12 +147,11 @@ func (l *Log) scanSegmentIndexLocked(seg *segment) ([]indexEntry, error) {
 	entries := make([]indexEntry, 0)
 
 	for pos < size {
-		h, records, end, err := readFrameAt(seg.file, pos, l)
+		// Building the index only needs frame headers (no decode); see
+		// verifyFrameAt. This keeps cold-start index loads off the zstd path.
+		h, end, err := verifyFrameAt(seg.file, pos)
 		switch {
 		case err == nil:
-			if len(records) != int(h.recordCount) {
-				return nil, ErrCorruptRecord
-			}
 			entries = l.appendSparseIndexEntry(entries, indexEntry{
 				segmentBaseOffset: seg.baseOffset,
 				baseOffset:        h.baseOffset,

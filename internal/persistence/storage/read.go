@@ -79,15 +79,15 @@ func (l *Log) VerifyDurable(first, last int64) error {
 			unlock()
 			return ErrCorruptRecord
 		}
-		recordCount, _, verr := verifyFrameAt(seg.file, entry.framePos)
+		h, _, verr := verifyFrameAt(seg.file, entry.framePos)
 		unlock()
 		if verr != nil {
 			return verr
 		}
-		if recordCount <= 0 {
+		if h.recordCount <= 0 {
 			return ErrCorruptRecord
 		}
-		off = entry.baseOffset + int64(recordCount)
+		off = entry.baseOffset + int64(h.recordCount)
 	}
 	return nil
 }
