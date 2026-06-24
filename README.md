@@ -50,33 +50,6 @@ and end-to-end tests.
 > reservations, out-of-order acks, and nonce-verified receipt handles**,
 > Prometheus metrics, and a debug pprof listener are functional.
 
-### Breaking changes (pre-1.0)
-
-- `POST /v1/topics/{topic}/ack` body is `{"receipt_handle": "<token>"}`.
-  The handle is a `base64url(json({t,p,o,n}))` token returned by
-  Consume — no longer HMAC-signed. Tampering returns **400**; a stale
-  or already-committed handle returns **410** (not 401).
-- `POST /v1/topics/{topic}/produce` returns **202 Accepted** with an
-  ingress `message_id`, topic, partition, and accepted timestamp. It no
-  longer returns a final log offset. The message becomes visible after
-  the background dispatcher commits it to the owner partition.
-- `POST /v1/topics` and `PATCH /v1/topics/{topic}` use flat scalar
-  fields (`retention_ms`, `visibility_timeout_ms`,
-  `max_in_flight_per_partition`, `max_acked_ahead_per_partition`).
-- `topic.Message.timestamp` and `topic.Topic.created_at` are Unix
-  seconds (`int64`). Wire format is timezone-independent.
-- `narad client ack` takes `--handle` (or reads the handle from stdin).
-  Pipe receipt handles: `consume | jq -r .receipt_handle | narad client ack <topic>`.
-- The SQLite metastore has been replaced by a Raft+bbolt store. Wipe
-  the `data/` directory when upgrading from older builds.
-- **Follower replication and `replication_factor` are removed.** Each
-  partition has a single owner; durability rests on synchronous fsync of
-  the owner's log (and the ingress WAL). The `replication_factor` field
-  is gone from the topic API, the CLI (`--replication-factor`), and
-  config (`default_replication_factor` / `NARAD_TOPIC_DEFAULT_REPLICATION_FACTOR`);
-  sending it now fails as an unknown field. Wipe `data/` when upgrading —
-  the on-disk metastore schema dropped the per-partition follower.
-
 ## Architecture
 
 ```
@@ -136,7 +109,7 @@ restart.
 cmd/
   narad/                    single binary: main, serve, client, version
 internal/
-  errs/                     all 15 sentinel errors in one place (ErrTopicNotFound, ...)
+  errs/                     sentinel errors in one place (ErrTopicNotFound, ...)
   domain/
     topic/                  value types (Topic, Message, PartitionStats)
   persistence/
@@ -146,32 +119,43 @@ internal/
                             partition assignments, cluster members
   consumer/                 in-flight reservations, nonce-based receipt handles,
                             min-heap expiry, out-of-order ack tracking
-  cluster/
-    controller/             partition assignment algorithm, heartbeat monitor,
-                            OnLeadershipAcquired reconciliation, Heartbeater
-    router.go               any-pod proxy routing (RouteProduce/Consume/Ack)
   broker/                   orchestrator facade (impl.go embeds the managers)
-    runtime/                *Logs (lazy partition-log map), *Snapshotter, *Lifecycle
+    ingress/                produce ingress WAL (fsynced accept; dispatch source)
+    runtime/                *Logs (lazy partition-log map), *Snapshotter,
+                            *Lifecycle, startup orphan sweep
     topics/                 CreateTopic / Update* / Delete / Get / List
     messaging/              Produce / Consume / Ack
+  cluster/                  any-pod routing + node-to-node RPC
+    router.go               RouteProduce/Consume/Ack, BroadcastDeleteTopic
+    produce_dispatcher.go   drains the ingress WAL to partition owners
+    rpc_server.go           node-RPC server (handles forwarded ops)
+    rpc_client.go           peer client (forwards ops over QUIC)
+    controller/             partition assignment, heartbeat monitor,
+                            OnLeadershipAcquired reconciliation, Heartbeater
   transport/
     httpserver/             http.Server, router, middleware
       handlers/             *Set + shared helpers (WriteJSON, DecodeJSON, ...)
         topics/             /v1/topics CRUD endpoints
         messaging/          produce / consume / ack endpoints
         health/             /healthz, /readyz
+  protocol/
+    clusterwire/            cluster stream-framing protocol (node-RPC over QUIC)
+    node/                   node-RPC operations + request/response codecs
   platform/
+    clusterrpc/             QUIC transport for the cluster (node-to-node)
     config/                 defaults + JSON file + env + flag layering
     schema/                 JSON-Schema registry (santhosh-tekuri)
     partition/              FNV hash + round-robin partition picker
-    replication/            QUIC cluster-RPC transport (node-to-node)
+    httpclient/             shared HTTP client
+    netaddr/                address parsing / normalization helpers
     observability/
       logger/               thin log/slog wrapper
       metrics/              Prometheus collectors, HTTP middleware, lag poller
 tests/
   e2e/                      HTTP-level end-to-end tests (httptest + real broker)
 .github/
-  workflows/ci.yml          build / unit-tests / e2e-tests (race-enabled)
+  workflows/ci.yml          build · unit · e2e · cluster integration · chaos
+  workflows/container.yml   multi-arch GHCR image publish
 ```
 
 ## Quickstart
@@ -370,7 +354,7 @@ A starting template lives in [`narad.example.json`](./narad.example.json):
 
 ```jsonc
 {
-  "http":    { "addr": ":7942", "read_timeout": "10s", "max_consume_wait": "30s" },
+  "http":    { "addr": ":7942", "read_timeout": "10s", "max_consume_wait": "10s" },
   "cluster": {
     "addr": "127.0.0.1:9101",
     "node_id": "narad-0",
@@ -382,8 +366,8 @@ A starting template lives in [`narad.example.json`](./narad.example.json):
   },
   "storage": { "data_dir": "data" },
   "topic": {
-    "default_partitions": 8,
-    "max_partitions": 1024,
+    "default_partitions": 3,
+    "max_partitions": 108,
     "default_retention_age_ms": 604800000
   },
   "log":     { "level": "info", "format": "json" }
@@ -520,9 +504,10 @@ the request locally (if it owns the partition) or proxies it to the
 owner via the cluster port.
 
 - **Produce**: key is hashed to a partition; request proxied if needed.
-- **Consume**: a partition is chosen (random by default, lag-aware in
-  v1 via peer `/metrics` scraping); request proxied to its owner with
-  the partition pinned.
+- **Consume**: a live-owner partition is chosen by round-robin rotation —
+  partitions whose owner is currently dead are skipped — and the request
+  is proxied to that owner with the partition pinned. (Lag-aware
+  selection is future work; see Production readiness.)
 - **Ack**: partition is decoded from the receipt handle; request proxied
   if needed.
 
@@ -566,7 +551,9 @@ from the handle for routing without any shared key.
 |---|---|
 | 204 | Acked. |
 | 400 | Malformed handle, missing handle, or topic mismatch. |
+| 404 | Topic does not exist. |
 | 410 | Handle no longer matches an active reservation: already committed, visibility timeout expired, or broker restarted. |
+| 421 | This node does not own the handle's partition (ownership changed mid-flight); retry. |
 | 503 | Out-of-order ack rejected — `max_acked_ahead_per_partition` is full; head of queue is stuck. |
 
 **Consumer pattern (CLI):**
@@ -586,6 +573,20 @@ background purger goroutine sweeps expired reservations every second so
 the in-flight cap and consumer lag metrics stay accurate between consume
 calls.
 
+## Schema validation & evolution
+
+A topic can carry an optional JSON Schema, set at create time or via
+`PATCH /v1/topics/{topic}` with a `schema` field. When present, every
+produced message is validated against it and invalid payloads are
+rejected with **400**.
+
+Schema changes are **additive-only and backwards-compatible**, enforced
+at registration. You may add optional properties; but removing a
+property, changing the type of an existing property, dropping a
+previously-required field, or adding a new required field is rejected
+with `ErrSchemaIncompatible`. The contract is "extend only, never break —
+once a field exists, it stays."
+
 ## Observability
 
 **`/metrics` (Prometheus).** Highlights:
@@ -600,11 +601,8 @@ calls.
 * `narad_storage_*` — flush/fsync/high-watermark persistence/retention
   durations, segments rolled, bytes deleted.
 * Inventory gauges: `narad_topics_total`, `narad_partitions_total`,
-  `narad_topic_bytes{topic}`, `narad_segments{topic,partition}`.
-* `narad_partition_available_v1{topic,partition}` — messages ready to
-  deliver. **This metric name is load-bearing** — the cluster router
-  scrapes peer `/metrics` endpoints to make lag-aware consume routing
-  decisions. Do not rename it.
+  `narad_topic_bytes{topic}`, `narad_partition_size_bytes{topic,partition}`,
+  `narad_segments{topic,partition}`.
 
 A 5-second background poller refreshes gauge-style metrics. Series for
 deleted topics are pruned on the next tick.
@@ -635,28 +633,25 @@ logs per test, exposed via `httptest`. Tests are split by feature surface.
 
 ## CI
 
-`.github/workflows/ci.yml` runs three jobs in parallel on every push to
-master and every PR:
+`.github/workflows/ci.yml` runs five jobs in parallel on every push to
+`master` and every PR (all race-enabled):
 
-For public-release readiness, `.github/settings.yml` also declares the
-intended repository defaults:
+* **Build & vet** — `go vet ./...` + `go build ./...`
+* **Unit tests** — `go test -race -count=1` for everything except `tests/e2e`
+* **E2E tests** — `go test -race -count=1 ./tests/e2e/...`
+* **Local cluster integration** — boots a real 3-node cluster and exercises
+  topic CRUD + produce/consume/ack across nodes
+* **Local cluster chaos** — 3-node smoke test under induced node failures
 
-- keep the repo private until validation is complete
-- require PR reviews on `master`
-- require the three CI checks to pass before merge
-- allow squash merge
-- disable merge commits and rebase merges
-- delete branches after merge
-- enable security scanning and Dependabot updates
+`.github/workflows/container.yml` publishes the multi-arch GHCR image on
+`master`, version tags, and manual dispatch.
 
-That file is declarative repo configuration for settings-sync tools; it
-makes the target public-repo posture reviewable without actually changing
-repository visibility yet.
-
-
-* **build** — `go vet ./...` + `go build ./...`
-* **unit-tests** — `go test -race -count=1` for everything except `tests/e2e`
-* **e2e-tests** — `go test -race -count=1 ./tests/e2e/...`
+For public-release readiness, `.github/settings.yml` declares the intended
+repository defaults — require PR review + passing checks on `master`,
+squash-only merges, delete-branch-on-merge, security scanning, and
+Dependabot. It is declarative config for settings-sync tools, making the
+target public-repo posture reviewable without changing repository
+visibility yet.
 
 ## Third-party libraries
 
@@ -665,6 +660,7 @@ Narad is built on top of a small set of well-known Go libraries:
 - [`github.com/hashicorp/raft`](https://github.com/hashicorp/raft) — Raft consensus and cluster coordination
 - [`github.com/hashicorp/raft-boltdb/v2`](https://github.com/hashicorp/raft-boltdb) — BoltDB-backed Raft log and stable store
 - [`go.etcd.io/bbolt`](https://github.com/etcd-io/bbolt) — embedded metadata storage
+- [`github.com/quic-go/quic-go`](https://github.com/quic-go/quic-go) — QUIC transport for node-to-node cluster RPC
 - [`github.com/klauspost/compress`](https://github.com/klauspost/compress) — zstd compression for log segments
 - [`github.com/santhosh-tekuri/jsonschema/v6`](https://github.com/santhosh-tekuri/jsonschema) — JSON-Schema validation
 - [`github.com/prometheus/client_golang`](https://github.com/prometheus/client_golang) — Prometheus metrics and instrumentation
@@ -675,8 +671,9 @@ no CGO requirement.
 ## Design decisions
 
 * **Pure-Go dependencies.** `hashicorp/raft` + `raft-boltdb` for
-  consensus, `go.etcd.io/bbolt` for the FSM state, `klauspost/compress`
-  for zstd, `santhosh-tekuri/jsonschema` for JSON-Schema validation,
+  consensus, `go.etcd.io/bbolt` for the FSM state, `quic-go` for the
+  node-to-node cluster RPC transport, `klauspost/compress` for zstd,
+  `santhosh-tekuri/jsonschema` for JSON-Schema validation,
   `prometheus/client_golang` for metrics. All pure Go; no CGO required.
 * **Single binary with subcommands.** `narad serve|client|version`
   keeps the local and deployment surface small.
@@ -690,19 +687,42 @@ no CGO requirement.
   the public listener (standard Prometheus convention); pprof is a
   separate, opt-in listener.
 
-## Roadmap
+## Production readiness
 
-* **Replicated durability tier.** Optional follower copies for partition
-  logs and/or the ingress WAL. Narad currently has no data replication:
-  each partition has a single owner and durability rests on synchronous
-  fsync of the owner's log. A future tier would reintroduce a
-  `replication_factor` knob and a partition-log replication protocol.
-* **`.offsets` log files.** Per-partition committed offset persistence
-  (Kafka `__consumer_offsets` style): append-only log, aggressively
-  compacted to keep only the latest. `onCommit` callback in `InFlight`
-  is ready to wire this up.
-* **Consume routing v1.** Lag-aware weighted-random partition pick via
-  peer `/metrics` scraping (infrastructure is built; wiring pending).
-* **Auth, rate limiting.**
-* **Schema evolution** — backwards-compatibility checking on
-  `PATCH /v1/topics/{name}` with schema field.
+Narad is pre-1.0. The code is well-tested — full race suite, plus 3-node
+integration and chaos in CI — but the following must land before a
+production or externally-exposed rollout. The first two are **hard
+gates**; until they ship, run Narad only behind a trusted boundary.
+
+1. **API auth, rate limiting & TLS (hard gate).** The HTTP API has no
+   authn/authz, no TLS, and no rate limiting today. Until this lands,
+   Narad must sit behind a network policy / authenticated gateway and
+   never be exposed directly.
+2. **Durability / DR contract (hard gate).** With no data replication
+   (one owner per partition; its volume is the only copy), we need a
+   *tested* backup/restore runbook for every loss scenario — metastore
+   quorum loss and voter replacement, partition-log/WAL volume snapshot +
+   restore-by-reattach, and the "volume lost = bounded, documented data
+   loss" procedure — with stated RPO (≈ fsync cadence) and RTO (≈ restart
+   + recovery scan).
+3. **Liveness-aware routing (finish the HA model).** The baseline already
+   works: consume rotates only over live owners and skips dead-owner
+   partitions, partition assignment is sticky (a dead owner's partition
+   waits for it to return rather than being reassigned), and the produce
+   dispatcher treats a dead owner as unavailable. Remaining: lag-aware
+   partition selection (today it is plain rotation), return a retryable
+   **503** for a pinned / dead-owner consume + ack (today that path can
+   surface **421**), and fix cursor advance on empty polls so a busy
+   partition cannot starve others. (Keyed produce to a dead partition is
+   inherently unavailable — to be documented.)
+4. **Soak, SLOs & capacity.** Define and prove the numbers over time:
+   produce-accept p99, produce→visible p99, consume p99, max sustainable
+   throughput, max lag, recovery time. Quantify the synchronous
+   fsync + CRC-readback cost on the commit path. Multi-hour soak under
+   fault injection against the SLOs, wired to Grafana + alerts.
+5. **Versioning, on-disk format & upgrade/rollback.** Add explicit
+   version headers + migrations to the on-disk formats (segment, WAL,
+   metastore) and version-negotiate the cluster RPC / QUIC ALPN so N and
+   N+1 coexist during a rolling upgrade. Then freeze the HTTP API +
+   receipt-handle + wire contracts and cut **1.0**.
+
