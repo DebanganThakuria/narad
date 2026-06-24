@@ -1,7 +1,6 @@
 package messaging
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"strconv"
@@ -193,17 +192,16 @@ func (e *Engine) commitDurable(log *storage.Log, firstOffset int64, payloads [][
 	if err := log.Sync(); err != nil {
 		return produceStageError{stage: produceStageCommit, err: err}
 	}
-	for i, payload := range payloads {
-		offset := firstOffset + int64(i)
-		got, err := log.Read(offset)
-		if err != nil {
-			return produceStageError{stage: produceStageVerify, err: fmt.Errorf("read back offset %d: %w", offset, err)}
-		}
-		if !bytes.Equal(got, payload) {
-			return produceStageError{stage: produceStageVerify, err: fmt.Errorf("durability verify mismatch at offset %d", offset)}
-		}
-	}
 	lastOffset := firstOffset + int64(len(payloads)) - 1
+	// Verify the durable copy by re-reading each frame and checking its CRC
+	// over the on-disk bytes — no decode. The CRC was computed over the
+	// stored (possibly compressed) payload at write time, so this proves the
+	// bytes survived intact before we advance the high-watermark and let the
+	// WAL compact past them. Decoding per record here would be O(N) full-frame
+	// zstd decodes per commit (the cause of the commit-throughput collapse).
+	if err := log.VerifyDurable(firstOffset, lastOffset); err != nil {
+		return produceStageError{stage: produceStageVerify, err: fmt.Errorf("verify [%d,%d]: %w", firstOffset, lastOffset, err)}
+	}
 	if err := log.AdvanceHighWatermark(lastOffset + 1); err != nil {
 		return produceStageError{stage: produceStageCommit, err: err}
 	}
