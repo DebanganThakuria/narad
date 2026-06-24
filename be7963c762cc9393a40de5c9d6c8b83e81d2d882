@@ -1,0 +1,6 @@
+internal/cluster/produce_dispatcher.go
+  9550bf40-bf98-490b-9ce8-76a868368628:2026-06-24T10:30:27.537Z 72-78,238-248,304-311,345-359,440-442
+internal/cluster/produce_dispatcher_test.go
+  9550bf40-bf98-490b-9ce8-76a868368628:2026-06-24T10:32:18.032Z 258-259,261-264,266-281,283-292
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"9550bf40-bf98-490b-9ce8-76a868368628:2026-06-24T10:30:27.537Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 44, "overriden_lines": 0}, "9550bf40-bf98-490b-9ce8-76a868368628:2026-06-24T10:32:18.032Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 32, "overriden_lines": 0}}}
