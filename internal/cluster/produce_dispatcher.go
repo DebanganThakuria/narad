@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
@@ -17,8 +18,10 @@ import (
 )
 
 const (
-	defaultProduceDispatchInterval  = 10 * time.Millisecond
-	defaultProduceDispatchBatchSize = 4096
+	defaultProduceDispatchInterval       = 10 * time.Millisecond
+	defaultProduceDispatchBatchSize      = 4096
+	defaultProduceDispatchCommitFanout   = 16
+	defaultProduceDispatchFailureBackoff = time.Second
 )
 
 var errProduceReplayBoundary = errors.New("produce replay reached durable boundary")
@@ -41,18 +44,23 @@ type produceDispatchTarget struct {
 type ProduceDispatcherConfig struct {
 	PollInterval time.Duration
 	BatchSize    int
+	// CommitConcurrency bounds how many per-partition batches are committed
+	// in parallel within one shard window. <=0 uses the default.
+	CommitConcurrency int
 }
 
 type ProduceDispatcher struct {
-	ingress   *ingress.Manager
-	store     *metastore.Store
-	selfID    string
-	committer produceCommitter
-	peer      peerClient
-	logger    *slog.Logger
-	metrics   stageObserver
-	interval  time.Duration
-	batchSize int
+	ingress           *ingress.Manager
+	store             *metastore.Store
+	selfID            string
+	committer         produceCommitter
+	peer              peerClient
+	logger            *slog.Logger
+	metrics           stageObserver
+	interval          time.Duration
+	batchSize         int
+	commitConcurrency int
+	failureBackoff    time.Duration
 
 	shards    []produceDispatchShard
 	nextShard int
@@ -81,6 +89,10 @@ func NewProduceDispatcher(
 	if batchSize <= 0 {
 		batchSize = defaultProduceDispatchBatchSize
 	}
+	commitConcurrency := cfg.CommitConcurrency
+	if commitConcurrency <= 0 {
+		commitConcurrency = defaultProduceDispatchCommitFanout
+	}
 	var observer stageObserver
 	if len(observers) > 0 {
 		observer = observers[0]
@@ -89,37 +101,68 @@ func NewProduceDispatcher(
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &ProduceDispatcher{
-		ingress:   ingressManager,
-		store:     store,
-		selfID:    selfID,
-		committer: committer,
-		peer:      peer,
-		logger:    logger,
-		metrics:   observer,
-		interval:  interval,
-		batchSize: batchSize,
+		ingress:           ingressManager,
+		store:             store,
+		selfID:            selfID,
+		committer:         committer,
+		peer:              peer,
+		logger:            logger,
+		metrics:           observer,
+		interval:          interval,
+		batchSize:         batchSize,
+		commitConcurrency: commitConcurrency,
+		failureBackoff:    defaultProduceDispatchFailureBackoff,
 	}
 }
 
+// Run dispatches every WAL shard concurrently — one goroutine per shard,
+// each with its own cursor/checkpoint. Shards are independent (a partition
+// is pinned to one shard by pickShard), so they never contend on the same
+// partition and per-partition order is preserved within each lane.
 func (d *ProduceDispatcher) Run(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := d.loadCursor(); err != nil {
+		d.logger.Error("produce dispatcher: load cursor", "err", err)
+		return
+	}
+	var wg sync.WaitGroup
+	for shard := range d.shards {
+		wg.Add(1)
+		go func(shard int) {
+			defer wg.Done()
+			d.runShard(ctx, shard)
+		}(shard)
+	}
+	wg.Wait()
+}
+
+func (d *ProduceDispatcher) runShard(ctx context.Context, shard int) {
 	for {
-		processed, err := d.DispatchAvailable(ctx)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			if d.logger != nil {
-				d.logger.Error("produce dispatcher", "err", err)
-			}
-		}
-		if err := ctx.Err(); err != nil {
+		if ctx.Err() != nil {
 			return
 		}
+		processed, err := d.dispatchShard(ctx, shard, &d.shards[shard], d.batchSize)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			d.logger.Error("produce dispatcher", "shard", shard, "err", err)
+		}
+		if ctx.Err() != nil {
+			return
+		}
+
+		// More work pending and no error: keep draining without sleeping.
 		if processed > 0 && err == nil {
 			continue
 		}
-
-		timer := time.NewTimer(d.interval)
+		// On failure, back off so a stuck partition (e.g. a dead owner)
+		// neither spins nor re-commits the window's already-committed
+		// records at the poll rate.
+		wait := d.interval
+		if err != nil {
+			wait = d.failureBackoff
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -173,6 +216,24 @@ func (d *ProduceDispatcher) DispatchAvailable(ctx context.Context) (int, error) 
 	return processed, nil
 }
 
+// dispatchShard drains up to `limit` records from one WAL shard, groups
+// them by destination (topic,partition,owner), commits the groups as large
+// per-partition batches concurrently, then advances the shard checkpoint to
+// the lowest WAL seq not yet durably committed and compacts up to it.
+//
+// Grouping is the throughput lever: the WAL interleaves every partition, so
+// flushing on each target change produced ~1-record batches (one fsync
+// each). Bucketing a whole window by partition turns N interleaved records
+// into a handful of large batches — one fsync per batch — committed in
+// parallel across partitions and owners.
+//
+// Checkpoint = the first seq in the window that did not durably commit
+// (records discarded for a deleted topic count as done). The compaction
+// never deletes WAL records past the checkpoint, so a buffered-but-
+// uncommitted record always survives a crash. Any higher-seq record that
+// DID commit this window is re-committed on the next pass — an at-least-once
+// duplicate confined to the failure path; a clean all-success window
+// advances with no duplicates.
 func (d *ProduceDispatcher) dispatchShard(ctx context.Context, shard int, state *produceDispatchShard, limit int) (int, error) {
 	if limit <= 0 {
 		return 0, nil
@@ -185,124 +246,144 @@ func (d *ProduceDispatcher) dispatchShard(ctx context.Context, shard int, state 
 		return 0, nil
 	}
 
-	processed := 0
-	checkpointSeq := state.nextSeq
-	nextCursor := state.cursor
-	var pending []ingress.ProduceRecord
-	var pendingTarget produceDispatchTarget
-	var pendingCursor wal.Cursor
-
-	flushPending := func() error {
-		if len(pending) == 0 {
-			return nil
-		}
-		if err := d.commitBatch(ctx, pendingTarget, pending); err != nil {
-			return err
-		}
-		last := pending[len(pending)-1]
-		checkpointSeq = last.WAL.Seq + 1
-		nextCursor = pendingCursor
-		processed += len(pending)
-		pending = nil
-		pendingTarget = produceDispatchTarget{}
-		pendingCursor = wal.Cursor{}
-		return nil
+	// 1. Drain a window of records (no commits yet), recording the resume
+	// cursor that sits just after each record.
+	type windowRecord struct {
+		rec         ingress.ProduceRecord
+		cursorAfter wal.Cursor
 	}
-
+	var window []windowRecord
 	err = d.ingress.ReplayProduceShardFromCursor(shard, state.cursor, func(record ingress.ProduceRecord, cursor wal.Cursor) error {
-		if err := ctx.Err(); err != nil {
-			return err
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
 		}
 		if record.WAL.Seq < state.nextSeq {
 			return nil
 		}
-		if record.WAL.Seq >= durableNext {
-			if err := flushPending(); err != nil {
-				return err
-			}
+		if record.WAL.Seq >= durableNext || len(window) >= limit {
 			return errProduceReplayBoundary
 		}
-		if processed+len(pending) >= limit {
-			if err := flushPending(); err != nil {
-				return err
-			}
-			return errProduceReplayBoundary
-		}
-		target, err := d.dispatchTarget(record)
-		if err != nil {
-			if flushErr := flushPending(); flushErr != nil {
-				return flushErr
-			}
-			// A deleted topic loses its assignment too (applyDeleteTopic
-			// removes topic + assignments atomically), so dispatchTarget
-			// fails here for its leftover WAL records. Discard them
-			// (advance past) rather than head-of-line-blocking the shard
-			// — gated on the local replica confirming the topic is gone,
-			// never on the lookup error alone.
-			if d.topicDeletedLocally(record.Topic) {
-				d.logger.Warn("discarding undispatched record for deleted topic",
-					"topic", record.Topic, "partition", record.TargetPartition,
-					"seq", record.WAL.Seq, "err", err)
-				checkpointSeq = record.WAL.Seq + 1
-				nextCursor = cursor
-				processed++
-				return nil
-			}
-			return err
-		}
-		if !d.canBatchTarget(target) {
-			if err := flushPending(); err != nil {
-				return err
-			}
-			if err := d.commitBatch(ctx, target, []ingress.ProduceRecord{record}); err != nil {
-				return err
-			}
-			checkpointSeq = record.WAL.Seq + 1
-			nextCursor = cursor
-			processed++
-			return nil
-		}
-		if len(pending) > 0 && pendingTarget != target {
-			if err := flushPending(); err != nil {
-				return err
-			}
-		}
-		pendingTarget = target
-		pending = append(pending, record)
-		pendingCursor = cursor
+		window = append(window, windowRecord{rec: record, cursorAfter: cursor})
 		return nil
 	})
 	if errors.Is(err, errProduceReplayBoundary) {
 		err = nil
 	}
-	if err == nil {
-		err = flushPending()
-	}
-	if processed > 0 {
-		if checkpointErr := d.ingress.StoreProduceCheckpointForShard(shard, checkpointSeq); checkpointErr != nil {
-			return processed, errors.Join(err, checkpointErr)
-		}
-		state.nextSeq = checkpointSeq
-		state.cursor = nextCursor
-		if compactErr := d.ingress.CompactProduceShardBefore(shard, checkpointSeq); compactErr != nil {
-			return processed, errors.Join(err, compactErr)
-		}
-	}
 	if err != nil {
-		return processed, err
+		return 0, err
 	}
-	return processed, nil
+	if len(window) == 0 {
+		return 0, nil
+	}
+
+	windowStart := window[0].rec.WAL.Seq
+	windowEnd := window[len(window)-1].rec.WAL.Seq + 1
+	cursorAfterSeq := make(map[uint64]wal.Cursor, len(window))
+
+	// 2. Resolve each record's target and bucket by destination. A record
+	// whose topic is gone from the local replica is discarded (done). A
+	// target that cannot be resolved for a still-live topic (e.g. a
+	// temporarily unavailable owner) is left uncommitted and bounds the
+	// checkpoint.
+	done := make(map[uint64]bool, len(window))
+	buckets := make(map[produceDispatchTarget][]ingress.ProduceRecord)
+	var firstErr error
+	for _, w := range window {
+		cursorAfterSeq[w.rec.WAL.Seq] = w.cursorAfter
+		target, terr := d.dispatchTarget(w.rec)
+		if terr != nil {
+			if d.topicDeletedLocally(w.rec.Topic) {
+				d.logger.Warn("discarding undispatched record for deleted topic",
+					"topic", w.rec.Topic, "partition", w.rec.TargetPartition,
+					"seq", w.rec.WAL.Seq, "err", terr)
+				done[w.rec.WAL.Seq] = true
+				continue
+			}
+			if firstErr == nil {
+				firstErr = terr
+			}
+			continue
+		}
+		buckets[target] = append(buckets[target], w.rec)
+	}
+
+	// 3. Commit the buckets concurrently. Different partitions use
+	// different logs/locks (safe to parallelise); each bucket keeps
+	// WAL-seq order so per-partition offsets stay monotonic.
+	if cerr := d.commitBuckets(ctx, buckets, done); cerr != nil && firstErr == nil {
+		firstErr = cerr
+	}
+
+	// 4. Advance the checkpoint to the first not-done seq in the window.
+	checkpointSeq := windowEnd
+	for s := windowStart; s < windowEnd; s++ {
+		if !done[s] {
+			checkpointSeq = s
+			break
+		}
+	}
+	processed := int(checkpointSeq - windowStart)
+	if processed <= 0 {
+		return 0, firstErr
+	}
+
+	nextCursor := state.cursor
+	if c, ok := cursorAfterSeq[checkpointSeq-1]; ok {
+		nextCursor = c
+	}
+	if checkpointErr := d.ingress.StoreProduceCheckpointForShard(shard, checkpointSeq); checkpointErr != nil {
+		return processed, errors.Join(firstErr, checkpointErr)
+	}
+	state.nextSeq = checkpointSeq
+	state.cursor = nextCursor
+	if compactErr := d.ingress.CompactProduceShardBefore(shard, checkpointSeq); compactErr != nil {
+		return processed, errors.Join(firstErr, compactErr)
+	}
+	return processed, firstErr
 }
 
-func (d *ProduceDispatcher) canBatchTarget(target produceDispatchTarget) bool {
-	if !target.local {
-		return true
+// commitBuckets commits each bucket concurrently with bounded fan-out and
+// marks every record of a successful bucket done. The done map is mutated
+// only after all commits finish, so the parallel phase has no shared
+// writes.
+func (d *ProduceDispatcher) commitBuckets(ctx context.Context, buckets map[produceDispatchTarget][]ingress.ProduceRecord, done map[uint64]bool) error {
+	if len(buckets) == 0 {
+		return nil
 	}
-	if d.committer == nil {
-		return false
+	type job struct {
+		target produceDispatchTarget
+		recs   []ingress.ProduceRecord
 	}
-	_, ok := d.committer.(produceBatchCommitter)
-	return ok
+	jobs := make([]job, 0, len(buckets))
+	for target, recs := range buckets {
+		jobs = append(jobs, job{target: target, recs: recs})
+	}
+
+	results := make([]error, len(jobs))
+	sem := make(chan struct{}, max(d.commitConcurrency, 1))
+	var wg sync.WaitGroup
+	for i := range jobs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results[i] = d.commitBatch(ctx, jobs[i].target, jobs[i].recs)
+		}(i)
+	}
+	wg.Wait()
+
+	var firstErr error
+	for i, j := range jobs {
+		if results[i] == nil {
+			for _, r := range j.recs {
+				done[r.WAL.Seq] = true
+			}
+		} else if firstErr == nil {
+			firstErr = results[i]
+		}
+	}
+	return firstErr
 }
 
 func (d *ProduceDispatcher) loadCursor() error {
