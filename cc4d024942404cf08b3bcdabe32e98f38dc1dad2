@@ -1,0 +1,6 @@
+internal/platform/config/storage_json.go
+  9550bf40-bf98-490b-9ce8-76a868368628:2026-06-24T14:29:31.984Z 8-17,19-22,29,35-37,45-50
+internal/platform/config/storage_json_test.go
+  9550bf40-bf98-490b-9ce8-76a868368628:2026-06-24T14:30:13.770Z 1,3-6,8-22,24-32,34-42,44-51
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"9550bf40-bf98-490b-9ce8-76a868368628:2026-06-24T14:29:31.984Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 24, "overriden_lines": 0}, "9550bf40-bf98-490b-9ce8-76a868368628:2026-06-24T14:30:13.770Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 46, "overriden_lines": 0}}}
