@@ -8,6 +8,7 @@ package codec
 
 import (
 	"fmt"
+	"runtime"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -53,18 +54,41 @@ type zstdCodec struct {
 	level   zstd.EncoderLevel
 }
 
-const maxRetainedZstdWorkers = 4
+// Encoder/decoder pool sizing. Encode and decode are pure-CPU work, so
+// pooling more instances than usable cores cannot raise throughput — it only
+// retains memory and adds scheduler churn. We therefore size both pools to
+// GOMAXPROCS, with a floor so tiny hosts still pipeline a little and a ceiling
+// so a many-core host does not retain an unbounded number of encoder/decoder
+// states (each holds internal buffers). The old fixed cap of 4 became the wall
+// when hundreds of partitions shared one codec: commit (encode) and consume
+// (decode) serialised behind 4 workers.
+const (
+	minZstdPoolWorkers = 4
+	maxZstdPoolWorkers = 32
+)
+
+func zstdPoolWorkers() int {
+	n := runtime.GOMAXPROCS(0)
+	if n < minZstdPoolWorkers {
+		return minZstdPoolWorkers
+	}
+	if n > maxZstdPoolWorkers {
+		return maxZstdPoolWorkers
+	}
+	return n
+}
 
 // NewZstdCodec returns a zstd codec at the given encoder level.
 // zstd's decompression speed is independent of the encoder level —
 // there is no read-side cost to using SpeedBestCompression.
 func NewZstdCodec(level zstd.EncoderLevel) (Codec, error) {
+	workers := zstdPoolWorkers()
 	c := &zstdCodec{
 		level:   level,
-		encPool: make(chan *zstd.Encoder, maxRetainedZstdWorkers),
-		encSem:  make(chan struct{}, maxRetainedZstdWorkers),
-		decPool: make(chan *zstd.Decoder, maxRetainedZstdWorkers),
-		decSem:  make(chan struct{}, maxRetainedZstdWorkers),
+		encPool: make(chan *zstd.Encoder, workers),
+		encSem:  make(chan struct{}, workers),
+		decPool: make(chan *zstd.Decoder, workers),
+		decSem:  make(chan struct{}, workers),
 	}
 	c.encSem <- struct{}{}
 	enc, err := c.newEncoder()

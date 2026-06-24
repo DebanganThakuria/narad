@@ -760,3 +760,64 @@ func newShardedDispatchIngressManager(t *testing.T, shards int) *ingress.Manager
 	t.Cleanup(func() { _ = manager.Close() })
 	return manager
 }
+
+// clampWindow bounds the adaptive window to [base, BatchSize cap], with the
+// cap winning when it is below the base (so a tiny configured BatchSize still
+// hard-caps the window — the StopsAtBatchSize contract).
+func TestProduceDispatcherClampWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		batchSize int
+		target    int
+		want      int
+	}{
+		{"below base clamps up to base", 1 << 16, 100, produceDispatchBaseWindow},
+		{"within range passes through", 1 << 16, 6400, 6400},
+		{"above cap clamps to cap", 1 << 16, 200000, 1 << 16},
+		{"tiny cap wins over base", 1, 64, 1},
+		{"zero cap treated as one", 0, 64, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &ProduceDispatcher{batchSize: tc.batchSize}
+			if got := d.clampWindow(tc.target); got != tc.want {
+				t.Fatalf("clampWindow(%d) with batchSize=%d = %d, want %d",
+					tc.target, tc.batchSize, got, tc.want)
+			}
+		})
+	}
+}
+
+// The adaptive window grows to ~targetPerPartition * (distinct partitions
+// seen) after a pass, so per-partition commit batches stay fat under fan-out.
+func TestProduceDispatcherWindowGrowsWithFanout(t *testing.T) {
+	const partitions = 100
+	store := newTestStore(t)
+	seedProduceDispatchTopicPartitions(t, store, "node-self", partitions)
+	manager := newDispatchIngressManager(t)
+	ctx := context.Background()
+	for p := range partitions {
+		if _, err := manager.AcceptProduce(ctx, "orders", "k", p, []byte(`{"id":1}`)); err != nil {
+			t.Fatalf("AcceptProduce(p%d) error = %v", p, err)
+		}
+	}
+	committer := &fakeProduceCommitter{}
+	dispatcher := NewProduceDispatcher(manager, store, "node-self", committer, nil, nil, ProduceDispatcherConfig{})
+
+	// First pass starts at the base window (>= 100 records), so it sees the
+	// full fan-out and sizes the next window to it.
+	processed, err := dispatcher.DispatchAvailable(ctx)
+	if err != nil {
+		t.Fatalf("DispatchAvailable() error = %v", err)
+	}
+	if processed != partitions {
+		t.Fatalf("processed = %d, want %d", processed, partitions)
+	}
+	want := dispatcher.clampWindow(produceDispatchTargetPerPartition * partitions)
+	if want <= produceDispatchBaseWindow {
+		t.Fatalf("test setup: expected window above base, got want=%d base=%d", want, produceDispatchBaseWindow)
+	}
+	if got := dispatcher.shards[0].windowLimit; got != want {
+		t.Fatalf("windowLimit after fan-out = %d, want %d (target %d * %d partitions, clamped)",
+			got, want, produceDispatchTargetPerPartition, partitions)
+	}
+}

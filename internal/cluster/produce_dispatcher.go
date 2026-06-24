@@ -18,8 +18,26 @@ import (
 )
 
 const (
-	defaultProduceDispatchInterval       = 10 * time.Millisecond
-	defaultProduceDispatchBatchSize      = 4096
+	defaultProduceDispatchInterval = 10 * time.Millisecond
+	// defaultProduceDispatchBatchSize is the hard ceiling on a single shard's
+	// drain window (BatchSize in the config). The actual window grows
+	// adaptively up to this cap (see produceDispatchBaseWindow /
+	// produceDispatchTargetPerPartition); the cap only binds at very high
+	// fan-out (>~1k partitions) and bounds the transient memory a drain holds.
+	defaultProduceDispatchBatchSize = 1 << 16 // 65536
+
+	// produceDispatchBaseWindow is the window used before any fan-out has been
+	// observed and the floor it never drops below (clamped to the BatchSize
+	// cap). At low fan-out this already yields large per-partition batches.
+	produceDispatchBaseWindow = 4096
+
+	// produceDispatchTargetPerPartition is the per-partition batch size the
+	// adaptive window aims for: the next window is sized to
+	// target * (distinct partitions seen this window), so per-partition commit
+	// batches — hence fsyncs — stay fat regardless of how many partitions the
+	// WAL interleaves.
+	produceDispatchTargetPerPartition = 64
+
 	defaultProduceDispatchCommitFanout   = 16
 	defaultProduceDispatchFailureBackoff = time.Second
 )
@@ -69,6 +87,11 @@ type ProduceDispatcher struct {
 type produceDispatchShard struct {
 	nextSeq uint64
 	cursor  wal.Cursor
+	// windowLimit is the adaptive drain window for this shard, grown toward
+	// produceDispatchTargetPerPartition * (distinct partitions seen) and
+	// clamped to [base, BatchSize cap]. It converges in one window: the first
+	// pass sees the fan-out and the next is sized to it.
+	windowLimit int
 	// committedAhead holds WAL seqs that committed in a prior window but
 	// sit above the checkpoint because a lower seq has not committed yet.
 	// They are skipped (not re-committed) on subsequent passes, so a stuck
@@ -150,7 +173,7 @@ func (d *ProduceDispatcher) runShard(ctx context.Context, shard int) {
 		if ctx.Err() != nil {
 			return
 		}
-		processed, err := d.dispatchShard(ctx, shard, &d.shards[shard], d.batchSize)
+		processed, err := d.dispatchShard(ctx, shard, &d.shards[shard])
 		if err != nil && !errors.Is(err, context.Canceled) {
 			d.logger.Error("produce dispatcher", "shard", shard, "err", err)
 		}
@@ -206,7 +229,7 @@ func (d *ProduceDispatcher) DispatchAvailable(ctx context.Context) (int, error) 
 	startShard := d.nextShard % len(d.shards)
 	for visited := 0; visited < len(d.shards); visited++ {
 		shard := (startShard + visited) % len(d.shards)
-		n, err := d.dispatchShard(ctx, shard, &d.shards[shard], d.batchSize)
+		n, err := d.dispatchShard(ctx, shard, &d.shards[shard])
 		processed += n
 		if n > 0 {
 			d.nextShard = (shard + 1) % len(d.shards)
@@ -223,16 +246,19 @@ func (d *ProduceDispatcher) DispatchAvailable(ctx context.Context) (int, error) 
 	return processed, nil
 }
 
-// dispatchShard drains up to `limit` records from one WAL shard, groups
-// them by destination (topic,partition,owner), commits the groups as large
-// per-partition batches concurrently, then advances the shard checkpoint to
-// the lowest WAL seq not yet durably committed and compacts up to it.
+// dispatchShard drains up to the shard's adaptive window (state.windowLimit)
+// of records from one WAL shard, groups them by destination
+// (topic,partition,owner), commits the groups as large per-partition batches
+// concurrently, then advances the shard checkpoint to the lowest WAL seq not
+// yet durably committed and compacts up to it.
 //
 // Grouping is the throughput lever: the WAL interleaves every partition, so
 // flushing on each target change produced ~1-record batches (one fsync
 // each). Bucketing a whole window by partition turns N interleaved records
 // into a handful of large batches — one fsync per batch — committed in
-// parallel across partitions and owners.
+// parallel across partitions and owners. The window grows with the observed
+// fan-out (see windowLimit) so per-partition batches stay fat even when
+// hundreds of partitions interleave, keeping the fsync count low.
 //
 // Checkpoint = the first seq in the window that did not durably commit
 // (records discarded for a deleted topic count as done). Compaction never
@@ -246,9 +272,11 @@ func (d *ProduceDispatcher) DispatchAvailable(ctx context.Context) (int, error) 
 // neighbours. That set is in-memory only: a process crash loses it and the
 // committed-ahead records replay, which is the sole at-least-once duplicate
 // path. The steady state delivers each record exactly once.
-func (d *ProduceDispatcher) dispatchShard(ctx context.Context, shard int, state *produceDispatchShard, limit int) (int, error) {
+func (d *ProduceDispatcher) dispatchShard(ctx context.Context, shard int, state *produceDispatchShard) (int, error) {
+	limit := state.windowLimit
 	if limit <= 0 {
-		return 0, nil
+		limit = d.clampWindow(produceDispatchBaseWindow)
+		state.windowLimit = limit
 	}
 	durableNext, err := d.ingress.DurableProduceNextForShard(shard)
 	if err != nil {
@@ -324,6 +352,14 @@ func (d *ProduceDispatcher) dispatchShard(ctx context.Context, shard int, state 
 			continue
 		}
 		buckets[target] = append(buckets[target], w.rec)
+	}
+
+	// Size the next window to this pass's fan-out: aim for ~target records per
+	// distinct partition so per-partition commit batches (one fsync each) stay
+	// fat no matter how many partitions the WAL interleaves. Converges in one
+	// pass — the base window already samples enough records to see the spread.
+	if n := len(buckets); n > 0 {
+		state.windowLimit = d.clampWindow(produceDispatchTargetPerPartition * n)
 	}
 
 	// 3. Commit the buckets concurrently. Different partitions use
@@ -422,6 +458,15 @@ func (d *ProduceDispatcher) commitBuckets(ctx context.Context, buckets map[produ
 	return firstErr
 }
 
+// clampWindow bounds an adaptive window to [base, BatchSize cap]. The cap
+// (d.batchSize) wins when it is below the base, so a tiny configured BatchSize
+// (e.g. tests) still hard-caps the window.
+func (d *ProduceDispatcher) clampWindow(target int) int {
+	ceil := max(d.batchSize, 1)
+	lo := min(produceDispatchBaseWindow, ceil)
+	return min(max(target, lo), ceil)
+}
+
 func (d *ProduceDispatcher) loadCursor() error {
 	if d.shards != nil {
 		return nil
@@ -440,6 +485,7 @@ func (d *ProduceDispatcher) loadCursor() error {
 			nextSeq:        nextSeq,
 			cursor:         wal.Cursor{Seq: nextSeq},
 			committedAhead: map[uint64]bool{},
+			windowLimit:    d.clampWindow(produceDispatchBaseWindow),
 		}
 	}
 	d.shards = shards

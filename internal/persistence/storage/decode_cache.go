@@ -11,8 +11,15 @@ const (
 	// high fan-out (small) and many only when partitions are few (but then
 	// there are few partitions), so per-partition memory stays modest either
 	// way. The byte cap is the hard ceiling.
-	maxDecodeCacheFrames = 16
-	maxDecodeCacheBytes  = 4 << 20 // 4 MiB
+	//
+	// Sizing: at high fan-out, frames are tiny (a few KiB) so the frame count
+	// dominates — 64 frames keeps the actively-read window of many concurrent
+	// consumers resident without re-decoding, at ~a few KiB each (≈hundreds of
+	// KiB/partition). At low fan-out, frames are large but partitions are few,
+	// so the byte cap (8 MiB) bounds the total. narad's heap is small with
+	// ample headroom, so we trade a little memory to cut consume-side decodes.
+	maxDecodeCacheFrames = 64
+	maxDecodeCacheBytes  = 8 << 20 // 8 MiB
 )
 
 // frameKey identifies a decoded frame. (segmentBaseOffset, framePos) is
