@@ -5,7 +5,7 @@
     "write_timeout":    "30s",
     "idle_timeout":     "60s",
     "shutdown_grace":   "10s",
-    "max_consume_wait": "30s"
+    "max_consume_wait": "10s"
   },
   "cluster": {
     "addr":    "127.0.0.1:9101",
@@ -20,8 +20,8 @@
     "data_dir": "data"
   },
   "topic": {
-    "default_partitions":                         8,
-    "max_partitions":                             1024,
+    "default_partitions":                         3,
+    "max_partitions":                             108,
     "default_retention_age_ms":                   604800000,
     "default_visibility_timeout_ms":              30000,
     "default_max_in_flight_per_partition":        1024,
