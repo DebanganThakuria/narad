@@ -255,9 +255,41 @@ func TestProduceDispatcherConvergesAfterPartitionRecovers(t *testing.T) {
 	if nextSeq, _ := manager.LoadProduceCheckpoint(); nextSeq != 3 {
 		t.Fatalf("checkpoint = %d, want 3 after recovery", nextSeq)
 	}
+	// Exactly-once in steady state: the skip-set prevented p0's seq2 (which
+	// committed before p1 recovered) from being re-committed.
 	counts := committer.committedPartitions()
-	if counts[0] < 2 || counts[1] < 1 {
-		t.Fatalf("committed partitions = %v, want p0>=2 and p1>=1 (all delivered)", counts)
+	if counts[0] != 2 || counts[1] != 1 {
+		t.Fatalf("committed partitions = %v, want exactly p0=2, p1=1 (no duplicate)", counts)
+	}
+}
+
+// While a head partition is stuck, neighbours that already committed must
+// not be re-committed on subsequent passes — the skip-set is what keeps
+// healthy operation duplicate-free.
+func TestProduceDispatcherDoesNotRecommitAheadOfStuckPartition(t *testing.T) {
+	store := newTestStore(t)
+	seedProduceDispatchTopicPartitions(t, store, "node-self", 3)
+	manager := newDispatchIngressManager(t)
+	ctx := context.Background()
+	// seq0->p1 (stuck head), seq1->p0, seq2->p0.
+	for _, p := range []int{1, 0, 0} {
+		if _, err := manager.AcceptProduce(ctx, "orders", "k", p, []byte(`{"id":1}`)); err != nil {
+			t.Fatalf("AcceptProduce(p%d) error = %v", p, err)
+		}
+	}
+	committer := &perPartitionCommitter{failPartitions: map[int]error{1: errors.New("p1 down")}}
+	dispatcher := NewProduceDispatcher(manager, store, "node-self", committer, nil, nil, ProduceDispatcherConfig{})
+
+	for range 3 {
+		if _, err := dispatcher.DispatchAvailable(ctx); err == nil {
+			t.Fatal("want error while p1 is down")
+		}
+	}
+	if got := committer.committedPartitions()[0]; got != 2 {
+		t.Fatalf("p0 commits = %d across 3 passes, want 2 (no re-commit while p1 stuck)", got)
+	}
+	if n, _ := manager.LoadProduceCheckpoint(); n != 0 {
+		t.Fatalf("checkpoint = %d, want 0 (stuck head p1 blocks it)", n)
 	}
 }
 

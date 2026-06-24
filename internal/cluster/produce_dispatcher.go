@@ -69,6 +69,13 @@ type ProduceDispatcher struct {
 type produceDispatchShard struct {
 	nextSeq uint64
 	cursor  wal.Cursor
+	// committedAhead holds WAL seqs that committed in a prior window but
+	// sit above the checkpoint because a lower seq has not committed yet.
+	// They are skipped (not re-committed) on subsequent passes, so a stuck
+	// partition cannot cause duplicate deliveries of its neighbours. The
+	// set lives only in memory: a process crash loses it, and those seqs
+	// re-commit on replay — the sole, at-least-once duplicate path.
+	committedAhead map[uint64]bool
 }
 
 func NewProduceDispatcher(
@@ -228,12 +235,17 @@ func (d *ProduceDispatcher) DispatchAvailable(ctx context.Context) (int, error) 
 // parallel across partitions and owners.
 //
 // Checkpoint = the first seq in the window that did not durably commit
-// (records discarded for a deleted topic count as done). The compaction
-// never deletes WAL records past the checkpoint, so a buffered-but-
-// uncommitted record always survives a crash. Any higher-seq record that
-// DID commit this window is re-committed on the next pass — an at-least-once
-// duplicate confined to the failure path; a clean all-success window
-// advances with no duplicates.
+// (records discarded for a deleted topic count as done). Compaction never
+// deletes WAL records past the checkpoint, so a buffered-but-uncommitted
+// record always survives a crash.
+//
+// When a lower seq cannot commit (e.g. a temporarily unavailable owner) but
+// higher seqs in the same window already committed, those higher seqs are
+// remembered in state.committedAhead and skipped on later passes rather than
+// re-committed — so a single stuck partition never duplicates its
+// neighbours. That set is in-memory only: a process crash loses it and the
+// committed-ahead records replay, which is the sole at-least-once duplicate
+// path. The steady state delivers each record exactly once.
 func (d *ProduceDispatcher) dispatchShard(ctx context.Context, shard int, state *produceDispatchShard, limit int) (int, error) {
 	if limit <= 0 {
 		return 0, nil
@@ -289,7 +301,14 @@ func (d *ProduceDispatcher) dispatchShard(ctx context.Context, shard int, state 
 	buckets := make(map[produceDispatchTarget][]ingress.ProduceRecord)
 	var firstErr error
 	for _, w := range window {
-		cursorAfterSeq[w.rec.WAL.Seq] = w.cursorAfter
+		seq := w.rec.WAL.Seq
+		cursorAfterSeq[seq] = w.cursorAfter
+		// Already committed on an earlier pass but held above the
+		// checkpoint by a lower stuck seq: count it done, never re-commit.
+		if state.committedAhead[seq] {
+			done[seq] = true
+			continue
+		}
 		target, terr := d.dispatchTarget(w.rec)
 		if terr != nil {
 			if d.topicDeletedLocally(w.rec.Topic) {
@@ -322,6 +341,23 @@ func (d *ProduceDispatcher) dispatchShard(ctx context.Context, shard int, state 
 			break
 		}
 	}
+
+	// Carry forward seqs that committed but sit above the checkpoint so the
+	// next pass skips (does not re-commit) them; drop those the checkpoint
+	// has now passed. This runs even when the checkpoint does not advance.
+	ahead := make(map[uint64]bool)
+	for s := range state.committedAhead {
+		if s >= checkpointSeq {
+			ahead[s] = true
+		}
+	}
+	for s := windowStart; s < windowEnd; s++ {
+		if done[s] && s >= checkpointSeq {
+			ahead[s] = true
+		}
+	}
+	state.committedAhead = ahead
+
 	processed := int(checkpointSeq - windowStart)
 	if processed <= 0 {
 		return 0, firstErr
@@ -401,8 +437,9 @@ func (d *ProduceDispatcher) loadCursor() error {
 			return err
 		}
 		shards[shard] = produceDispatchShard{
-			nextSeq: nextSeq,
-			cursor:  wal.Cursor{Seq: nextSeq},
+			nextSeq:        nextSeq,
+			cursor:         wal.Cursor{Seq: nextSeq},
+			committedAhead: map[uint64]bool{},
 		}
 	}
 	d.shards = shards
