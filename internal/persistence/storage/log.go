@@ -146,14 +146,11 @@ type Log struct {
 
 	notify chan struct{}
 
-	// Single-slot cache of the most recently decoded frame's
-	// records. Hits make sequential consumer reads inside one batch
-	// O(1) after the first.
-	cacheMu          sync.Mutex
-	cacheSegmentBase int64
-	cachePos         int64
-	cacheValid       bool
-	cacheRec         [][]byte
+	// Per-partition bounded LRU of decoded frames. Lets concurrent
+	// consumers reading records of the same frame share one decode
+	// instead of thrashing a single slot and re-decoding the (zstd)
+	// frame on every read.
+	frameCache *frameCache
 
 	closed atomic.Bool
 }
@@ -189,6 +186,7 @@ func NewLog(dir string, opts Options) (*Log, error) {
 		notify:         make(chan struct{}, 1),
 		hwmPath:        hwmFilePath(dir),
 		hwmTmpPath:     hwmTempFilePath(dir),
+		frameCache:     newFrameCache(maxDecodeCacheFrames, maxDecodeCacheBytes),
 	}
 	l.highWatermark.Store(-1)
 

@@ -136,3 +136,37 @@ func readFrameAt(r io.ReaderAt, pos int64, log *Log) (frameHeader, [][]byte, int
 
 	return h, records, pos + int64(headerSize) + int64(h.compressed), nil
 }
+
+// verifyFrameAt re-reads the frame at pos and validates its CRC over the raw
+// (possibly compressed) on-disk bytes, WITHOUT decoding. It returns the
+// frame's record count and the position just after the frame. The durability
+// read-back (VerifyDurable) uses this so a group-commit batch costs one CRC
+// check per frame instead of a full decode per record — decisive for zstd.
+func verifyFrameAt(r io.ReaderAt, pos int64) (recordCount int32, nextPos int64, err error) {
+	var hdrBuf [headerSize]byte
+	n, err := r.ReadAt(hdrBuf[:], pos)
+	if err != nil && err != io.EOF {
+		return 0, pos, err
+	}
+	if n < headerSize {
+		return 0, pos, io.ErrUnexpectedEOF
+	}
+	h, err := decodeHeader(hdrBuf[:])
+	if err != nil {
+		return 0, pos, err
+	}
+
+	payload := make([]byte, h.compressed)
+	n, err = r.ReadAt(payload, pos+headerSize)
+	if err != nil && err != io.EOF {
+		return 0, pos, err
+	}
+	if n < int(h.compressed) {
+		return 0, pos, io.ErrUnexpectedEOF
+	}
+
+	if want, got := h.crc, crc32cOf(hdrBuf[2:23], payload); want != got {
+		return 0, pos, fmt.Errorf("%w: crc want=0x%x got=0x%x at pos=%d", errCorrupt, want, got, pos)
+	}
+	return h.recordCount, pos + int64(headerSize) + int64(h.compressed), nil
+}
