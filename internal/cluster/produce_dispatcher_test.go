@@ -2,8 +2,11 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,12 +17,20 @@ import (
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
+// fakeProduceCommitter is thread-safe: the dispatcher now commits buckets
+// concurrently, so multiple goroutines may call into it at once. It also
+// records the size of each batch call so tests can assert that interleaved
+// records were grouped into few large batches rather than many size-1 ones.
 type fakeProduceCommitter struct {
-	records []ingress.ProduceRecord
-	err     error
+	mu         sync.Mutex
+	records    []ingress.ProduceRecord
+	batchSizes []int
+	err        error
 }
 
 func (f *fakeProduceCommitter) CommitAcceptedProduce(_ context.Context, record ingress.ProduceRecord) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return 0, f.err
 	}
@@ -28,9 +39,12 @@ func (f *fakeProduceCommitter) CommitAcceptedProduce(_ context.Context, record i
 }
 
 func (f *fakeProduceCommitter) CommitAcceptedProduceBatch(_ context.Context, records []ingress.ProduceRecord) ([]int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return nil, f.err
 	}
+	f.batchSizes = append(f.batchSizes, len(records))
 	offsets := make([]int64, len(records))
 	for i, record := range records {
 		f.records = append(f.records, record)
@@ -39,18 +53,59 @@ func (f *fakeProduceCommitter) CommitAcceptedProduceBatch(_ context.Context, rec
 	return offsets, nil
 }
 
-type failAfterProduceCommitter struct {
-	records []ingress.ProduceRecord
-	failAt  int
-	err     error
+func (f *fakeProduceCommitter) committed() []ingress.ProduceRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ingress.ProduceRecord(nil), f.records...)
 }
 
-func (f *failAfterProduceCommitter) CommitAcceptedProduce(_ context.Context, record ingress.ProduceRecord) (int64, error) {
-	if len(f.records) == f.failAt {
-		return 0, f.err
+func (f *fakeProduceCommitter) batchCalls() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.batchSizes...)
+}
+
+// perPartitionCommitter commits everything except records whose partition is
+// listed in failPartitions, for which it returns the configured error. It is
+// thread-safe for the parallel commit path.
+type perPartitionCommitter struct {
+	mu             sync.Mutex
+	records        []ingress.ProduceRecord
+	failPartitions map[int]error
+}
+
+func (c *perPartitionCommitter) CommitAcceptedProduceBatch(_ context.Context, records []ingress.ProduceRecord) ([]int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(records) > 0 {
+		if err, ok := c.failPartitions[records[0].TargetPartition]; ok {
+			return nil, err
+		}
 	}
-	f.records = append(f.records, record)
-	return int64(len(f.records) - 1), nil
+	offsets := make([]int64, len(records))
+	for i, record := range records {
+		c.records = append(c.records, record)
+		offsets[i] = int64(len(c.records) - 1)
+	}
+	return offsets, nil
+}
+
+func (c *perPartitionCommitter) CommitAcceptedProduce(ctx context.Context, record ingress.ProduceRecord) (int64, error) {
+	offsets, err := c.CommitAcceptedProduceBatch(ctx, []ingress.ProduceRecord{record})
+	if err != nil {
+		return 0, err
+	}
+	return offsets[0], nil
+}
+
+func (c *perPartitionCommitter) committedPartitions() map[int]int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	counts := map[int]int{}
+	for _, r := range c.records {
+		counts[r.TargetPartition]++
+	}
+	return counts
 }
 
 func TestProduceDispatcherCommitsLocalOwnerAndCheckpoints(t *testing.T) {
@@ -129,25 +184,30 @@ func TestProduceDispatcherStopsAtBatchSize(t *testing.T) {
 	}
 }
 
-func TestProduceDispatcherCheckpointsSuccessfulPrefixBeforeFailure(t *testing.T) {
+// A bucket that fails to commit bounds the checkpoint at its lowest seq:
+// records before it commit and advance, records from it onward are retried.
+// seq0->p0 (commits), seq1->p1 (fails), seq2->p0 (commits but is beyond the
+// checkpoint, so it re-commits next pass — an accepted at-least-once dup).
+func TestProduceDispatcherCheckpointsToFirstUncommittedPartition(t *testing.T) {
 	store := newTestStore(t)
-	seedProduceDispatchTopic(t, store, "node-self")
+	seedProduceDispatchTopicPartitions(t, store, "node-self", 3)
 	manager := newDispatchIngressManager(t)
-	for i := range 2 {
-		if _, err := manager.AcceptProduce(context.Background(), "orders", "customer-1", 0, []byte(`{"id":1}`)); err != nil {
-			t.Fatalf("AcceptProduce(%d) error = %v", i, err)
+	ctx := context.Background()
+	for _, p := range []int{0, 1, 0} {
+		if _, err := manager.AcceptProduce(ctx, "orders", "k", p, []byte(`{"id":1}`)); err != nil {
+			t.Fatalf("AcceptProduce(p%d) error = %v", p, err)
 		}
 	}
-	commitErr := errors.New("commit failed")
-	committer := &failAfterProduceCommitter{failAt: 1, err: commitErr}
+	commitErr := errors.New("p1 owner down")
+	committer := &perPartitionCommitter{failPartitions: map[int]error{1: commitErr}}
 	dispatcher := NewProduceDispatcher(manager, store, "node-self", committer, nil, nil, ProduceDispatcherConfig{})
 
-	processed, err := dispatcher.DispatchAvailable(context.Background())
+	processed, err := dispatcher.DispatchAvailable(ctx)
 	if !errors.Is(err, commitErr) {
-		t.Fatalf("DispatchAvailable() error = %v, want %v", err, commitErr)
+		t.Fatalf("error = %v, want %v", err, commitErr)
 	}
 	if processed != 1 {
-		t.Fatalf("processed = %d, want 1", processed)
+		t.Fatalf("processed = %d, want 1 (only seq0 before the failed seq1)", processed)
 	}
 	nextSeq, err := manager.LoadProduceCheckpoint()
 	if err != nil {
@@ -155,6 +215,163 @@ func TestProduceDispatcherCheckpointsSuccessfulPrefixBeforeFailure(t *testing.T)
 	}
 	if nextSeq != 1 {
 		t.Fatalf("checkpoint = %d, want 1", nextSeq)
+	}
+}
+
+// After the failing partition recovers, the dispatcher drains everything
+// (no data loss). It may re-commit higher-seq records that committed before
+// the failure — the accepted at-least-once duplicate — but every record is
+// delivered at least once and the checkpoint reaches the end.
+func TestProduceDispatcherConvergesAfterPartitionRecovers(t *testing.T) {
+	store := newTestStore(t)
+	seedProduceDispatchTopicPartitions(t, store, "node-self", 3)
+	manager := newDispatchIngressManager(t)
+	ctx := context.Background()
+	for _, p := range []int{0, 1, 0} {
+		if _, err := manager.AcceptProduce(ctx, "orders", "k", p, []byte(`{"id":1}`)); err != nil {
+			t.Fatalf("AcceptProduce(p%d) error = %v", p, err)
+		}
+	}
+	committer := &perPartitionCommitter{failPartitions: map[int]error{1: errors.New("p1 owner down")}}
+	dispatcher := NewProduceDispatcher(manager, store, "node-self", committer, nil, nil, ProduceDispatcherConfig{})
+
+	if _, err := dispatcher.DispatchAvailable(ctx); err == nil {
+		t.Fatal("first pass: want commit error while p1 is down")
+	}
+
+	// p1 recovers.
+	committer.mu.Lock()
+	committer.failPartitions = nil
+	committer.mu.Unlock()
+
+	for i := range 5 {
+		if _, err := dispatcher.DispatchAvailable(ctx); err != nil {
+			t.Fatalf("drain pass %d error = %v", i, err)
+		}
+		if n, _ := manager.LoadProduceCheckpoint(); n >= 3 {
+			break
+		}
+	}
+	if nextSeq, _ := manager.LoadProduceCheckpoint(); nextSeq != 3 {
+		t.Fatalf("checkpoint = %d, want 3 after recovery", nextSeq)
+	}
+	// Exactly-once in steady state: the skip-set prevented p0's seq2 (which
+	// committed before p1 recovered) from being re-committed.
+	counts := committer.committedPartitions()
+	if counts[0] != 2 || counts[1] != 1 {
+		t.Fatalf("committed partitions = %v, want exactly p0=2, p1=1 (no duplicate)", counts)
+	}
+}
+
+// While a head partition is stuck, neighbours that already committed must
+// not be re-committed on subsequent passes — the skip-set is what keeps
+// healthy operation duplicate-free.
+func TestProduceDispatcherDoesNotRecommitAheadOfStuckPartition(t *testing.T) {
+	store := newTestStore(t)
+	seedProduceDispatchTopicPartitions(t, store, "node-self", 3)
+	manager := newDispatchIngressManager(t)
+	ctx := context.Background()
+	// seq0->p1 (stuck head), seq1->p0, seq2->p0.
+	for _, p := range []int{1, 0, 0} {
+		if _, err := manager.AcceptProduce(ctx, "orders", "k", p, []byte(`{"id":1}`)); err != nil {
+			t.Fatalf("AcceptProduce(p%d) error = %v", p, err)
+		}
+	}
+	committer := &perPartitionCommitter{failPartitions: map[int]error{1: errors.New("p1 down")}}
+	dispatcher := NewProduceDispatcher(manager, store, "node-self", committer, nil, nil, ProduceDispatcherConfig{})
+
+	for range 3 {
+		if _, err := dispatcher.DispatchAvailable(ctx); err == nil {
+			t.Fatal("want error while p1 is down")
+		}
+	}
+	if got := committer.committedPartitions()[0]; got != 2 {
+		t.Fatalf("p0 commits = %d across 3 passes, want 2 (no re-commit while p1 stuck)", got)
+	}
+	if n, _ := manager.LoadProduceCheckpoint(); n != 0 {
+		t.Fatalf("checkpoint = %d, want 0 (stuck head p1 blocks it)", n)
+	}
+}
+
+// The core throughput fix: interleaved records across many partitions must
+// be grouped into a few large per-partition batches (one fsync each), not a
+// batch-per-record.
+func TestProduceDispatcherGroupsInterleavedRecordsIntoFewBatches(t *testing.T) {
+	store := newTestStore(t)
+	seedProduceDispatchTopicPartitions(t, store, "node-self", 4)
+	manager := newDispatchIngressManager(t)
+	ctx := context.Background()
+	const records = 40
+	for i := range records {
+		if _, err := manager.AcceptProduce(ctx, "orders", "k", i%4, []byte(`{"id":1}`)); err != nil {
+			t.Fatalf("AcceptProduce(%d) error = %v", i, err)
+		}
+	}
+	committer := &fakeProduceCommitter{}
+	dispatcher := NewProduceDispatcher(manager, store, "node-self", committer, nil, nil, ProduceDispatcherConfig{})
+
+	processed, err := dispatcher.DispatchAvailable(ctx)
+	if err != nil {
+		t.Fatalf("DispatchAvailable() error = %v", err)
+	}
+	if processed != records {
+		t.Fatalf("processed = %d, want %d", processed, records)
+	}
+	calls := committer.batchCalls()
+	if len(calls) > 4 {
+		t.Fatalf("batch calls = %d (sizes %v), want <= 4 (one per partition)", len(calls), calls)
+	}
+	for _, n := range calls {
+		if n <= 1 {
+			t.Fatalf("batch sizes = %v, want each > 1 (records grouped)", calls)
+		}
+	}
+	if got := len(committer.committed()); got != records {
+		t.Fatalf("committed = %d, want %d", got, records)
+	}
+}
+
+// Records committed for a partition must preserve WAL (produce) order even
+// though buckets commit in parallel.
+func TestProduceDispatcherPreservesPerPartitionOrder(t *testing.T) {
+	store := newTestStore(t)
+	seedProduceDispatchTopicPartitions(t, store, "node-self", 3)
+	manager := newDispatchIngressManager(t)
+	ctx := context.Background()
+	const perPartition = 8
+	seqOf := map[int]int{}
+	for i := range perPartition * 3 {
+		p := i % 3
+		payload := fmt.Appendf(nil, `{"p":%d,"n":%d}`, p, seqOf[p])
+		if _, err := manager.AcceptProduce(ctx, "orders", "k", p, payload); err != nil {
+			t.Fatalf("AcceptProduce error = %v", err)
+		}
+		seqOf[p]++
+	}
+	committer := &fakeProduceCommitter{}
+	dispatcher := NewProduceDispatcher(manager, store, "node-self", committer, nil, nil, ProduceDispatcherConfig{})
+	if _, err := dispatcher.DispatchAvailable(ctx); err != nil {
+		t.Fatalf("DispatchAvailable() error = %v", err)
+	}
+
+	last := map[int]int{0: -1, 1: -1, 2: -1}
+	for _, r := range committer.committed() {
+		var pp struct {
+			P int `json:"p"`
+			N int `json:"n"`
+		}
+		if err := json.Unmarshal(r.Payload, &pp); err != nil {
+			t.Fatalf("unmarshal %s: %v", r.Payload, err)
+		}
+		if pp.N != last[pp.P]+1 {
+			t.Fatalf("partition %d out of order: got n=%d after %d", pp.P, pp.N, last[pp.P])
+		}
+		last[pp.P] = pp.N
+	}
+	for p, n := range last {
+		if n != perPartition-1 {
+			t.Fatalf("partition %d committed up to n=%d, want %d", p, n, perPartition-1)
+		}
 	}
 }
 
