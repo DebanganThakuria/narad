@@ -135,8 +135,11 @@ func (r *reaper) deleteSegmentLocked(s *segment, reason string) {
 	_ = os.Remove(s.path)
 	r.log.deleteSegmentIndexLocked(s.baseOffset)
 
-	// Drop any decoded frames cached from the segment we just deleted.
+	// Drop any decoded frames and resolved frame positions cached from the
+	// segment we just deleted (both invalidated under the Log's write lock, so
+	// no reader can dereference a position into the removed file).
 	r.log.frameCache.invalidateSegment(s.baseOffset)
+	r.log.navCache.invalidateSegment(s.baseOffset)
 
 	if m := r.log.opts.Metrics; m != nil {
 		m.IncRetentionDeletion(reason, bytes, messages)
