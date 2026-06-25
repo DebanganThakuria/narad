@@ -11,6 +11,7 @@
 package metrics
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -58,6 +59,11 @@ type Metrics struct {
 	AckedAheadSize *prometheus.GaugeVec   // topic, partition
 	ReserveSkipped *prometheus.CounterVec // topic, reason ("cap" | "empty" | "all_reserved")
 	AckRejected    *prometheus.CounterVec // reason ("hmac" | "stale" | "malformed" | "topic_mismatch" | "cap")
+
+	// CorruptSkippedTotal counts consumer offsets skipped because their on-disk
+	// frame was permanently unreadable (corruption). Each increment is one lost
+	// record — alert on any non-zero rate. topic, partition.
+	CorruptSkippedTotal *prometheus.CounterVec
 
 	// Storage lifecycle
 	ActivePartitionLogs         prometheus.Gauge         // total open partition logs
@@ -251,6 +257,12 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:      "Ack requests rejected before commit; partitioned by reason.",
 		}, []string{"reason"}),
 
+		CorruptSkippedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "consumer_corrupt_skipped_total",
+			Help:      "Consumer offsets skipped because their on-disk frame was permanently unreadable (corruption). Each is a lost record; alert on any non-zero rate.",
+		}, []string{"topic", "partition"}),
+
 		ActivePartitionLogs: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: Namespace,
 			Subsystem: "storage",
@@ -363,6 +375,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.TopicBytes, m.PartitionSizeBytes, m.Segments,
 		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
 		m.InFlightSize, m.AckedAheadSize, m.ReserveSkipped, m.AckRejected,
+		m.CorruptSkippedTotal,
 		m.ActivePartitionLogs,
 		m.FlushDurationSeconds, m.FlushBytesTotal,
 		m.FsyncDurationSeconds, m.HighWatermarkPersistSeconds,
@@ -392,7 +405,7 @@ func (m *Metrics) pruneTopicSeries(topic string) {
 		m.ConsumeWaitSeconds, m.ConsumeEmptyTotal,
 		m.TopicBytes, m.PartitionSizeBytes, m.Segments,
 		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
-		m.InFlightSize, m.AckedAheadSize, m.ReserveSkipped,
+		m.InFlightSize, m.AckedAheadSize, m.ReserveSkipped, m.CorruptSkippedTotal,
 		m.FlushDurationSeconds, m.FlushBytesTotal,
 		m.FsyncDurationSeconds, m.HighWatermarkPersistSeconds,
 		m.SegmentsRolledTotal,
@@ -449,6 +462,15 @@ func (m *Metrics) IncReserveSkipped(topic, reason string) {
 		return
 	}
 	m.ReserveSkipped.WithLabelValues(topic, reason).Inc()
+}
+
+// IncCorruptSkipped records that a consumer skipped one permanently-unreadable
+// (corrupt) offset on the given partition — a lost record.
+func (m *Metrics) IncCorruptSkipped(topic string, partition int) {
+	if m == nil {
+		return
+	}
+	m.CorruptSkippedTotal.WithLabelValues(topic, strconv.Itoa(partition)).Inc()
 }
 
 // IncAckRejected bumps the ack_rejected_total counter.

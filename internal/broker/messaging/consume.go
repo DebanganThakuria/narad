@@ -10,6 +10,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
 // Consume returns the next available message for a topic, supporting
@@ -214,6 +215,20 @@ func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions 
 		payload, err := log.Read(res.Offset)
 		e.observe("consume", "storage_read", observeOutcome(err), time.Since(stageStart))
 		if err != nil {
+			// A permanently-unreadable (corrupt) frame, or a gap left by a
+			// corrupt frame recovery skipped, would otherwise head-of-line-block
+			// this partition forever (the offset can never be acked). Skip past
+			// it — recorded loss, never silent — and resume on the next poll.
+			// Transient errors (I/O, log closed) are returned for retry.
+			if storage.IsCorrupt(err) || errors.Is(err, storage.ErrOffsetNotFound) {
+				if serr := e.offsets.SkipCorrupt(topicName, idx, res.Offset, res.Nonce); serr != nil {
+					return topic.Message{}, false, serr
+				}
+				e.metrics.IncCorruptSkipped(topicName, idx)
+				e.logger.Warn("skipped permanently-unreadable record",
+					"topic", topicName, "partition", idx, "offset", res.Offset, "err", err)
+				continue
+			}
 			return topic.Message{}, false, err
 		}
 		return topic.Message{

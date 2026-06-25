@@ -17,6 +17,7 @@ package messaging
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"sort"
 	"sync"
@@ -148,6 +149,9 @@ func NewEngine(
 	logger *slog.Logger,
 	selfID string,
 ) *Engine {
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	return &Engine{
 		metastore:       ms,
 		schemas:         schemas,

@@ -139,6 +139,7 @@ func newPartitionShard(committed int64, caps Caps) *partitionShard {
 		entries:       make(map[int64]reservation),
 		expiry:        make(expiryHeap, 0, initialPartitionExpiryCap(caps.MaxInFlight)),
 		ackedAhead:    make(map[int64]struct{}),
+		corrupt:       make(map[int64]struct{}),
 		maxInFlight:   caps.MaxInFlight,
 		maxAckedAhead: caps.MaxAckedAhead,
 	}
