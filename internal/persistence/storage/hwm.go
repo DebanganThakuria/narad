@@ -15,10 +15,13 @@ func hwmFilePath(dir string) string {
 	return filepath.Join(dir, hwmFileName)
 }
 
-func hwmTempFilePath(dir string) string {
-	return filepath.Join(dir, hwmFileName+".tmp")
-}
-
+// loadHighWatermark restores the persisted HWM on recovery. The HWM is the
+// durable VISIBILITY boundary and is deliberately allowed to lag the durable
+// tail (nextOffset): records written+fsynced but whose commit did not advance
+// the HWM are a "hidden tail" that must stay hidden across restart, because the
+// WAL replays and re-commits them at fresh offsets — exposing the hidden copy
+// would double-deliver. So recovery trusts the persisted file (clamped to the
+// recovered tail), NOT nextOffset.
 func (l *Log) loadHighWatermark(nextOffset int64) error {
 	data, err := os.ReadFile(l.hwmPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -69,29 +72,35 @@ func (l *Log) PersistedHighWatermark() (int64, error) {
 	return persisted, nil
 }
 
+// persistHighWatermark durably writes the 8-byte HWM in place.
+//
+// The HWM is persisted on every commit (durability of the visible boundary is
+// required — a record once exposed must stay exposed across a crash). The cost
+// must therefore be minimal. The previous temp-file + fsync + rename made a new
+// inode and a directory mutation on EVERY commit across every partition; under
+// load that metadata churn — not the value write — was the dominant disk cost
+// (≈50ms p95). An 8-byte value fits in a single sector, and a single-sector
+// write is atomic across a crash (the reader sees the old or new 8 bytes, never
+// a torn mix), so the temp+rename dance — which exists only to make
+// variable-length writes atomic — is unnecessary. We overwrite the fixed-size
+// file in place and fsync, eliminating the inode/dir churn.
 func (l *Log) persistHighWatermark(next int64) error {
-	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, uint64(next))
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(next))
 
-	tmpFile, err := os.OpenFile(l.hwmTmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(l.hwmPath, os.O_WRONLY|os.O_CREATE, 0o644)
 	if err != nil {
-		return fmt.Errorf("storage: open hwm temp: %w", err)
+		return fmt.Errorf("storage: open hwm: %w", err)
 	}
-	if _, err := tmpFile.Write(buf); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("storage: write hwm temp: %w", err)
+	if _, err := f.WriteAt(buf[:], 0); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("storage: write hwm: %w", err)
 	}
-	if err := tmpFile.Sync(); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("storage: sync hwm temp: %w", err)
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("storage: sync hwm: %w", err)
 	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("storage: close hwm temp: %w", err)
-	}
-	if err := os.Rename(l.hwmTmpPath, l.hwmPath); err != nil {
-		return fmt.Errorf("storage: replace hwm: %w", err)
-	}
-	return nil
+	return f.Close()
 }
 
 func (l *Log) syncHighWatermark(force bool) error {

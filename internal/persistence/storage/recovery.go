@@ -147,11 +147,16 @@ func (l *Log) scanSegmentIndexLocked(seg *segment) ([]indexEntry, error) {
 	entries := make([]indexEntry, 0)
 
 	for pos < size {
-		// Building the index only needs frame headers (no decode); see
-		// verifyFrameAt. This keeps cold-start index loads off the zstd path.
-		h, end, err := verifyFrameAt(seg.file, pos)
+		// Building the index of a sealed segment only needs frame headers to
+		// find frame boundaries — no payload read, no CRC, no decode (see
+		// frameHeaderAt). Sealed segments are complete, so a frame whose end
+		// runs past the segment is a torn/corrupt tail: stop there.
+		h, end, err := frameHeaderAt(seg.file, pos)
 		switch {
 		case err == nil:
+			if end > size {
+				return entries, nil
+			}
 			entries = l.appendSparseIndexEntry(entries, indexEntry{
 				segmentBaseOffset: seg.baseOffset,
 				baseOffset:        h.baseOffset,

@@ -142,8 +142,13 @@ func TestSparseIndexScansPastCorruptGap(t *testing.T) {
 	if got, err := l2.Read(2); err != nil || !bytes.Equal(got, []byte("frame-2")) {
 		t.Fatalf("Read(2) got=%q err=%v", got, err)
 	}
-	if _, err := l2.Read(1); !errors.Is(err, ErrOffsetNotFound) {
-		t.Fatalf("Read(1) want ErrOffsetNotFound got %v", err)
+	// Frame 1's payload is corrupt. Header-only navigation steps over frames by
+	// header to reach the target, then the actual read CRC-checks it — so the
+	// corruption is surfaced as an integrity error, never silently skipped or
+	// returned as wrong bytes. (Reads of the valid neighbours above/below still
+	// succeed, as asserted for offset 2.)
+	if got, err := l2.Read(1); !errors.Is(err, errCorrupt) {
+		t.Fatalf("Read(1) want errCorrupt got=%q err=%v", got, err)
 	}
 }
 

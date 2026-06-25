@@ -371,7 +371,12 @@ func TestProduceDoesNotSynchronouslyPersistHighWatermark(t *testing.T) {
 	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
 		t.Fatalf("Produce() error = %v", err)
 	}
-	if err := engine.logs.CloseAll(); err == nil || !strings.Contains(err.Error(), "storage: replace hwm") {
+	// HWM persistence now writes the fixed-size file in place (no temp+rename),
+	// so a broken hwm path surfaces as an open/write/sync failure rather than a
+	// rename ("replace") failure. The contract under test is unchanged: Produce
+	// does not synchronously persist the HWM (it succeeded above despite the
+	// broken path), and the failure surfaces when the flusher persists at Close.
+	if err := engine.logs.CloseAll(); err == nil || !strings.Contains(err.Error(), "hwm") {
 		t.Fatalf("CloseAll() error = %v, want hwm persistence failure", err)
 	}
 }
