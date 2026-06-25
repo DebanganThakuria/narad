@@ -108,12 +108,19 @@ func (l *Log) scanSegmentFromIndexAnchorLocked(seg *segment, anchor indexEntry, 
 	size := seg.sizeBytes
 	for pos < size {
 		// Navigation only needs frame headers to step frame-to-frame, so this
-		// walks with verifyFrameAt (header + CRC, no decode). Decoding here was
-		// the dominant consume-CPU cost: small frames + a sparse index meant
-		// hundreds of full zstd decodes per offset lookup.
-		h, end, err := verifyFrameAt(seg.file, pos)
+		// walks header-only (no payload read, no CRC, no decode). Decoding here
+		// was the dominant consume-CPU cost (hundreds of zstd decodes per offset
+		// lookup with small frames + a sparse index); even reading the payload
+		// to CRC every skipped frame was the next-largest cost. The target frame
+		// is CRC-validated by readFrameAt when it is actually read.
+		h, end, err := frameHeaderAt(seg.file, pos)
 		switch {
 		case err == nil:
+			if end > size {
+				// Torn/incomplete tail frame: not navigable (and not yet
+				// readable). Treat as not found, like a short read.
+				return indexEntry{}, 0, false, nil
+			}
 			frameEndOffset := h.baseOffset + int64(h.recordCount)
 			if offset >= h.baseOffset && offset < frameEndOffset {
 				return indexEntry{

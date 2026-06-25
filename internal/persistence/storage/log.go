@@ -140,7 +140,6 @@ type Log struct {
 	hwmMu         sync.Mutex
 	lastHWMSync   time.Time
 	hwmPath       string
-	hwmTmpPath    string
 	flusher       *flusher
 	reaper        *reaper
 
@@ -185,7 +184,6 @@ func NewLog(dir string, opts Options) (*Log, error) {
 		segmentIndexes: make(map[int64]*segmentIndex),
 		notify:         make(chan struct{}, 1),
 		hwmPath:        hwmFilePath(dir),
-		hwmTmpPath:     hwmTempFilePath(dir),
 		frameCache:     newFrameCache(maxDecodeCacheFrames, maxDecodeCacheBytes),
 	}
 	l.highWatermark.Store(-1)

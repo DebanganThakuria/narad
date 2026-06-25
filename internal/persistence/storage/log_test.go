@@ -535,9 +535,11 @@ func TestRecoverySkipsCorruptMiddleFrame(t *testing.T) {
 	if got, err := l.Read(2); err != nil || !bytes.Equal(got, []byte("frame-2")) {
 		t.Fatalf("Read(2) got=%q err=%v", got, err)
 	}
-	// Offset 1 is gone.
-	if _, err := l.Read(1); !errors.Is(err, ErrOffsetNotFound) {
-		t.Fatalf("Read(1) want ErrOffsetNotFound got %v", err)
+	// Offset 1's frame is corrupt: recovery skips it (no truncation, asserted
+	// above) and the read surfaces the corruption as an integrity error rather
+	// than silently returning it as missing or as wrong bytes.
+	if _, err := l.Read(1); !errors.Is(err, errCorrupt) {
+		t.Fatalf("Read(1) want errCorrupt got %v", err)
 	}
 }
 

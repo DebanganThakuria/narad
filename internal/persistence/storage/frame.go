@@ -137,6 +137,36 @@ func readFrameAt(r io.ReaderAt, pos int64, log *Log) (frameHeader, [][]byte, int
 	return h, records, pos + int64(headerSize) + int64(h.compressed), nil
 }
 
+// frameHeaderAt reads ONLY the frame header at pos — no payload read, no CRC,
+// no decode — and returns it plus the position just after the frame. It is for
+// pure navigation: locating an offset by stepping frame-to-frame needs only
+// baseOffset, recordCount and the compressed length to advance, all of which
+// live in the header. Skipping the payload read is what makes a consume offset
+// lookup cheap when small frames and a sparse index force a multi-frame walk.
+//
+// Safety: navigation that lands on the target hands off to readFrameAt, which
+// validates the CRC, so a corrupt target is still caught on read. Frames merely
+// skipped over are validated when they are themselves read (or by recovery /
+// VerifyDurable). A corrupt header is caught by decodeHeader (magic/size), so a
+// bad header triggers the caller's magic-resync rather than a wrong step. The
+// caller must reject a frame whose computed end exceeds the segment size (a
+// torn tail), since this read does not touch the payload to detect truncation.
+func frameHeaderAt(r io.ReaderAt, pos int64) (frameHeader, int64, error) {
+	var hdrBuf [headerSize]byte
+	n, err := r.ReadAt(hdrBuf[:], pos)
+	if err != nil && err != io.EOF {
+		return frameHeader{}, pos, err
+	}
+	if n < headerSize {
+		return frameHeader{}, pos, io.ErrUnexpectedEOF
+	}
+	h, err := decodeHeader(hdrBuf[:])
+	if err != nil {
+		return h, pos, err
+	}
+	return h, pos + int64(headerSize) + int64(h.compressed), nil
+}
+
 // verifyFrameAt re-reads the frame at pos and validates its CRC over the raw
 // (possibly compressed) on-disk bytes, WITHOUT decoding. It returns the frame
 // header (record count, base offset) and the position just after the frame.
