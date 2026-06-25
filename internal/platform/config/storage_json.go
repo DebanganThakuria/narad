@@ -6,14 +6,16 @@ import (
 )
 
 // configurableStorageKeys are the only storage fields an operator may set in
-// the config file. Where data lives plus the compression tradeoff are
+// the config file. Where data lives, the compression tradeoff, and the ingress
+// WAL shard count (a commit-throughput scaling knob, like partition count) are
 // legitimate per-deployment choices; everything else (flush/fsync cadence,
-// segment sizing, WAL internals) is an engine internal with production
-// defaults and stays locked.
+// segment sizing) is an engine internal with production defaults and stays
+// locked.
 var configurableStorageKeys = map[string]bool{
-	"data_dir":          true,
-	"codec":             true,
-	"compression_level": true,
+	"data_dir":           true,
+	"codec":              true,
+	"compression_level":  true,
+	"ingress_wal_shards": true,
 }
 
 // UnmarshalJSON keeps file-based storage configuration intentionally narrow:
@@ -35,6 +37,7 @@ func (c *StorageConfig) UnmarshalJSON(data []byte) error {
 		DataDir          string `json:"data_dir"`
 		Codec            string `json:"codec"`
 		CompressionLevel string `json:"compression_level"`
+		IngressWALShards int    `json:"ingress_wal_shards"`
 	}
 	if err := json.Unmarshal(data, &fileConfig); err != nil {
 		return err
@@ -47,6 +50,9 @@ func (c *StorageConfig) UnmarshalJSON(data []byte) error {
 	}
 	if fileConfig.CompressionLevel != "" {
 		c.CompressionLevel = fileConfig.CompressionLevel
+	}
+	if fileConfig.IngressWALShards > 0 {
+		c.IngressWALShards = fileConfig.IngressWALShards
 	}
 	return nil
 }

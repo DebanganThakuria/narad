@@ -56,6 +56,22 @@ func newNavCache(maxEntries int) *navCache {
 func (c *navCache) bestAnchor(segmentBase, offset int64) (indexEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Fast path: the most-recently-used entry almost always covers a sequential
+	// read (the frame just resolved, and the next few records fall in it). A
+	// frame that contains the offset is unambiguously the best anchor, so return
+	// it in O(1) without walking the list — this is the common case at high read
+	// rates, where the full scan was showing up as a CPU hot spot.
+	if front := c.ll.Front(); front != nil {
+		e := front.Value.(*navCacheEntry).entry
+		if e.segmentBaseOffset == segmentBase &&
+			offset >= e.baseOffset && offset < e.baseOffset+int64(e.recordCount) {
+			return e, true
+		}
+	}
+
+	// Slow path: closest cached frame at or below the offset (boundary crossings
+	// and non-sequential reads).
 	var (
 		best    indexEntry
 		bestEl  *list.Element
