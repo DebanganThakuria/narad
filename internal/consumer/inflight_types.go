@@ -43,11 +43,16 @@ type InFlight struct {
 }
 
 type partitionShard struct {
-	mu            sync.Mutex
-	committed     int64 // last committed offset; -1 = none committed yet
-	entries       map[int64]reservation
-	expiry        expiryHeap // min-heap by expiresAtUnixMs for proactive eviction
-	ackedAhead    map[int64]struct{}
+	mu         sync.Mutex
+	committed  int64 // last committed offset; -1 = none committed yet
+	entries    map[int64]reservation
+	expiry     expiryHeap // min-heap by expiresAtUnixMs for proactive eviction
+	ackedAhead map[int64]struct{}
+	// corrupt holds offsets skipped because their on-disk frame is permanently
+	// unreadable (corruption). Like ackedAhead they are "resolved" offsets the
+	// committed frontier may advance over, but they are skipped data (lost),
+	// not delivered. ReserveNext never re-reserves them.
+	corrupt       map[int64]struct{}
 	nonceSeq      atomic.Int64
 	maxInFlight   int
 	maxAckedAhead int
