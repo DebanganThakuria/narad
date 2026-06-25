@@ -76,18 +76,53 @@ func (l *Log) findIndexLocked(offset int64) (indexEntry, int32, bool, error) {
 	if seg == nil {
 		return indexEntry{}, 0, false, nil
 	}
+
+	// A recently-resolved frame near this offset lets us skip re-walking from
+	// the sparse anchor — the consume pread storm. Sequential reads either land
+	// inside the cached frame (zero header reads) or one frame past it.
+	cached, cachedOK := l.navCache.bestAnchor(seg.baseOffset, offset)
+	if cachedOK && offset < cached.baseOffset+int64(cached.recordCount) {
+		return cached, int32(offset - cached.baseOffset), true, nil
+	}
+
 	idx := l.segmentIndexes[seg.baseOffset]
 	if idx == nil || len(idx.entries) == 0 {
+		// Sparse index not loaded yet. If the cache gives a start anchor below
+		// the target, walk from it without forcing the (expensive) full index
+		// load; on failure fall through to not-found so the caller lazily loads.
+		if cachedOK {
+			return l.resolveFromAnchorLocked(seg, cached, offset)
+		}
 		return indexEntry{}, 0, false, nil
 	}
+
 	anchor, ok := indexAnchorForOffset(idx.entries, offset)
 	if !ok {
+		if cachedOK {
+			return l.resolveFromAnchorLocked(seg, cached, offset)
+		}
 		return indexEntry{}, 0, false, nil
 	}
+	// Start from whichever anchor sits closer below the target.
+	if cachedOK && cached.baseOffset > anchor.baseOffset {
+		anchor = cached
+	}
+	return l.resolveFromAnchorLocked(seg, anchor, offset)
+}
+
+// resolveFromAnchorLocked returns the entry for offset starting at anchor:
+// directly when the anchor's own frame covers it, otherwise by walking forward.
+// Every resolved frame is cached so the next sequential read starts from it.
+func (l *Log) resolveFromAnchorLocked(seg *segment, anchor indexEntry, offset int64) (indexEntry, int32, bool, error) {
 	if offset >= anchor.baseOffset && offset < anchor.baseOffset+int64(anchor.recordCount) {
+		l.navCache.put(anchor)
 		return anchor, int32(offset - anchor.baseOffset), true, nil
 	}
-	return l.scanSegmentFromIndexAnchorLocked(seg, anchor, offset)
+	entry, idx, ok, err := l.scanSegmentFromIndexAnchorLocked(seg, anchor, offset)
+	if ok && err == nil {
+		l.navCache.put(entry)
+	}
+	return entry, idx, ok, err
 }
 
 func indexAnchorForOffset(entries []indexEntry, offset int64) (indexEntry, bool) {

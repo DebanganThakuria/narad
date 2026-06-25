@@ -151,6 +151,11 @@ type Log struct {
 	// frame on every read.
 	frameCache *frameCache
 
+	// Per-partition cache of recently-resolved frame positions. Lets a
+	// sequential consume read resolve from the previous frame instead of
+	// re-walking header-by-header from the sparse index anchor.
+	navCache *navCache
+
 	closed atomic.Bool
 }
 
@@ -185,6 +190,7 @@ func NewLog(dir string, opts Options) (*Log, error) {
 		notify:         make(chan struct{}, 1),
 		hwmPath:        hwmFilePath(dir),
 		frameCache:     newFrameCache(maxDecodeCacheFrames, maxDecodeCacheBytes),
+		navCache:       newNavCache(maxNavCacheEntries),
 	}
 	l.highWatermark.Store(-1)
 

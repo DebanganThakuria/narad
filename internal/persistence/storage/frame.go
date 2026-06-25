@@ -151,7 +151,16 @@ func readFrameAt(r io.ReaderAt, pos int64, log *Log) (frameHeader, [][]byte, int
 // bad header triggers the caller's magic-resync rather than a wrong step. The
 // caller must reject a frame whose computed end exceeds the segment size (a
 // torn tail), since this read does not touch the payload to detect truncation.
+// frameHeaderReadHook, when non-nil, is invoked on every frame-header read.
+// It is nil in production (a single predicted-not-taken branch) and set only by
+// tests to count header reads — used to prove navigation no longer re-walks
+// frames from the sparse anchor on each sequential read.
+var frameHeaderReadHook func()
+
 func frameHeaderAt(r io.ReaderAt, pos int64) (frameHeader, int64, error) {
+	if frameHeaderReadHook != nil {
+		frameHeaderReadHook()
+	}
 	var hdrBuf [headerSize]byte
 	n, err := r.ReadAt(hdrBuf[:], pos)
 	if err != nil && err != io.EOF {
