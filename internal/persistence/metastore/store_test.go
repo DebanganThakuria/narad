@@ -99,6 +99,129 @@ func TestMetadataVersionAdvancesOnSuccessfulMutation(t *testing.T) {
 	}
 }
 
+func TestDomainVersionsAdvanceOnlyForAffectedMetadata(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	initialTopic := s.TopicVersion("orders")
+	initialAssignment := s.AssignmentVersion("orders")
+	initialSchema := s.SchemaVersion("orders")
+	initialRoutingMembers := s.RoutingMembersVersion()
+
+	orders := topic.Topic{Name: "orders", Partitions: 1}
+	if err := s.CreateTopic(ctx, orders); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	afterCreateTopic := s.TopicVersion("orders")
+	if afterCreateTopic <= initialTopic {
+		t.Fatalf("TopicVersion after create = %d, want > %d", afterCreateTopic, initialTopic)
+	}
+	if got := s.AssignmentVersion("orders"); got != initialAssignment {
+		t.Fatalf("AssignmentVersion after create = %d, want %d", got, initialAssignment)
+	}
+	if got := s.SchemaVersion("orders"); got != initialSchema {
+		t.Fatalf("SchemaVersion after create = %d, want %d", got, initialSchema)
+	}
+	if got := s.RoutingMembersVersion(); got != initialRoutingMembers {
+		t.Fatalf("RoutingMembersVersion after create = %d, want %d", got, initialRoutingMembers)
+	}
+
+	if err := s.CreateTopic(ctx, topic.Topic{Name: "payments", Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic payments: %v", err)
+	}
+	if got := s.TopicVersion("orders"); got != afterCreateTopic {
+		t.Fatalf("TopicVersion(orders) after unrelated topic create = %d, want %d", got, afterCreateTopic)
+	}
+
+	orders.RetentionMs = 10
+	if err := s.UpdateTopic(ctx, orders); err != nil {
+		t.Fatalf("UpdateTopic: %v", err)
+	}
+	afterUpdateTopic := s.TopicVersion("orders")
+	if afterUpdateTopic <= afterCreateTopic {
+		t.Fatalf("TopicVersion after update = %d, want > %d", afterUpdateTopic, afterCreateTopic)
+	}
+
+	if err := s.AssignPartition(ctx, "orders", 0, "narad-0"); err != nil {
+		t.Fatalf("AssignPartition: %v", err)
+	}
+	afterAssign := s.AssignmentVersion("orders")
+	if afterAssign <= initialAssignment {
+		t.Fatalf("AssignmentVersion after assign = %d, want > %d", afterAssign, initialAssignment)
+	}
+	if got := s.TopicVersion("orders"); got != afterUpdateTopic {
+		t.Fatalf("TopicVersion after assign = %d, want %d", got, afterUpdateTopic)
+	}
+
+	if err := s.PutSchema(ctx, "orders", 1, []byte(`{"type":"object"}`)); err != nil {
+		t.Fatalf("PutSchema: %v", err)
+	}
+	afterSchema := s.SchemaVersion("orders")
+	if afterSchema <= initialSchema {
+		t.Fatalf("SchemaVersion after put = %d, want > %d", afterSchema, initialSchema)
+	}
+	if got := s.AssignmentVersion("orders"); got != afterAssign {
+		t.Fatalf("AssignmentVersion after schema put = %d, want %d", got, afterAssign)
+	}
+
+	member := metastore.Member{ID: "narad-0", Addr: "10.0.0.1:7943", ClusterAddr: "10.0.0.1:7942", Status: metastore.MemberAlive, LastHeartbeat: 1000}
+	if err := s.RegisterMember(ctx, member); err != nil {
+		t.Fatalf("RegisterMember: %v", err)
+	}
+	afterMemberJoin := s.RoutingMembersVersion()
+	if afterMemberJoin <= initialRoutingMembers {
+		t.Fatalf("RoutingMembersVersion after member join = %d, want > %d", afterMemberJoin, initialRoutingMembers)
+	}
+
+	member.LastHeartbeat = 2000
+	if err := s.RegisterMember(ctx, member); err != nil {
+		t.Fatalf("RegisterMember heartbeat-only update: %v", err)
+	}
+	if got := s.RoutingMembersVersion(); got != afterMemberJoin {
+		t.Fatalf("RoutingMembersVersion after heartbeat-only register = %d, want %d", got, afterMemberJoin)
+	}
+	if err := s.Heartbeat(ctx, "narad-0", 3000); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if got := s.RoutingMembersVersion(); got != afterMemberJoin {
+		t.Fatalf("RoutingMembersVersion after Heartbeat = %d, want %d", got, afterMemberJoin)
+	}
+
+	member.Addr = "10.0.0.2:7943"
+	member.LastHeartbeat = 4000
+	if err := s.RegisterMember(ctx, member); err != nil {
+		t.Fatalf("RegisterMember addr update: %v", err)
+	}
+	afterMemberAddr := s.RoutingMembersVersion()
+	if afterMemberAddr <= afterMemberJoin {
+		t.Fatalf("RoutingMembersVersion after addr update = %d, want > %d", afterMemberAddr, afterMemberJoin)
+	}
+
+	if err := s.MarkMemberDead(ctx, "narad-0"); err != nil {
+		t.Fatalf("MarkMemberDead: %v", err)
+	}
+	afterMemberDead := s.RoutingMembersVersion()
+	if afterMemberDead <= afterMemberAddr {
+		t.Fatalf("RoutingMembersVersion after member dead = %d, want > %d", afterMemberDead, afterMemberAddr)
+	}
+
+	if err := s.DeleteTopic(ctx, "orders"); err != nil {
+		t.Fatalf("DeleteTopic: %v", err)
+	}
+	if got := s.TopicVersion("orders"); got <= afterUpdateTopic {
+		t.Fatalf("TopicVersion after delete = %d, want > %d", got, afterUpdateTopic)
+	}
+	if got := s.AssignmentVersion("orders"); got <= afterAssign {
+		t.Fatalf("AssignmentVersion after delete = %d, want > %d", got, afterAssign)
+	}
+	if got := s.SchemaVersion("orders"); got <= afterSchema {
+		t.Fatalf("SchemaVersion after delete = %d, want > %d", got, afterSchema)
+	}
+	if got := s.RoutingMembersVersion(); got != afterMemberDead {
+		t.Fatalf("RoutingMembersVersion after topic delete = %d, want %d", got, afterMemberDead)
+	}
+}
+
 func TestListTopicsPaginated(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

@@ -42,7 +42,7 @@ func (e *Engine) Ack(ctx context.Context, topicName string, receiptHandle string
 
 	// Confirm the topic still exists — clean 404 beats an opaque 410.
 	stageStart = time.Now()
-	if _, err := e.getTopicFresh(ctx, topicName); err != nil {
+	if _, err := e.getTopic(ctx, topicName); err != nil {
 		e.observe("ack", "get_topic", "error", time.Since(stageStart))
 		totalOutcome = "error"
 		return err

@@ -14,7 +14,7 @@ func (f *fsmState) applyCreateTopic(data []byte) error {
 	if err := json.Unmarshal(data, &t); err != nil {
 		return err
 	}
-	return f.update("create_topic", func(tx *bolt.Tx) error {
+	err := f.update("create_topic", func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketTopics)
 		if b.Get([]byte(t.Name)) != nil {
 			return ErrAlreadyExists
@@ -25,6 +25,10 @@ func (f *fsmState) applyCreateTopic(data []byte) error {
 		}
 		return b.Put([]byte(t.Name), v)
 	})
+	if err == nil {
+		f.versions.bumpTopic(t.Name)
+	}
+	return err
 }
 
 func (f *fsmState) applyUpdateTopic(data []byte) error {
@@ -32,7 +36,7 @@ func (f *fsmState) applyUpdateTopic(data []byte) error {
 	if err := json.Unmarshal(data, &t); err != nil {
 		return err
 	}
-	return f.update("update_topic", func(tx *bolt.Tx) error {
+	err := f.update("update_topic", func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketTopics)
 		if b.Get([]byte(t.Name)) == nil {
 			return ErrNotFound
@@ -43,6 +47,10 @@ func (f *fsmState) applyUpdateTopic(data []byte) error {
 		}
 		return b.Put([]byte(t.Name), v)
 	})
+	if err == nil {
+		f.versions.bumpTopic(t.Name)
+	}
+	return err
 }
 
 func (f *fsmState) applyDeleteTopic(data []byte) error {
@@ -50,7 +58,7 @@ func (f *fsmState) applyDeleteTopic(data []byte) error {
 	if err := json.Unmarshal(data, &name); err != nil {
 		return err
 	}
-	return f.update("delete_topic", func(tx *bolt.Tx) error {
+	err := f.update("delete_topic", func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketTopics)
 		if b.Get([]byte(name)) == nil {
 			return ErrNotFound
@@ -73,6 +81,12 @@ func (f *fsmState) applyDeleteTopic(data []byte) error {
 		}
 		return nil
 	})
+	if err == nil {
+		f.versions.bumpTopic(name)
+		f.versions.bumpAssignment(name)
+		f.versions.bumpSchema(name)
+	}
+	return err
 }
 
 func (f *fsmState) applyPutSchema(data []byte) error {
@@ -80,9 +94,13 @@ func (f *fsmState) applyPutSchema(data []byte) error {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return err
 	}
-	return f.update("put_schema", func(tx *bolt.Tx) error {
+	err := f.update("put_schema", func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketSchemas).Put(schemaKey(p.Topic, p.Version), p.Schema)
 	})
+	if err == nil {
+		f.versions.bumpSchema(p.Topic)
+	}
+	return err
 }
 
 func (f *fsmState) applyAssignPartition(data []byte) error {
@@ -94,9 +112,13 @@ func (f *fsmState) applyAssignPartition(data []byte) error {
 	if err != nil {
 		return err
 	}
-	return f.update("assign_partition", func(tx *bolt.Tx) error {
+	err = f.update("assign_partition", func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketAssignments).Put(assignmentKey(a.Topic, a.Partition), v)
 	})
+	if err == nil {
+		f.versions.bumpAssignment(a.Topic)
+	}
+	return err
 }
 
 func (f *fsmState) applyMemberJoin(data []byte) error {
@@ -108,9 +130,25 @@ func (f *fsmState) applyMemberJoin(data []byte) error {
 	if err != nil {
 		return err
 	}
-	return f.update("member_join", func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketMembers).Put([]byte(m.ID), v)
+	routingChanged := false
+	err = f.update("member_join", func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketMembers)
+		raw := b.Get([]byte(m.ID))
+		if raw == nil {
+			routingChanged = true
+		} else {
+			var current Member
+			if err := json.Unmarshal(raw, &current); err != nil {
+				return err
+			}
+			routingChanged = !sameRoutingMember(current, m)
+		}
+		return b.Put([]byte(m.ID), v)
 	})
+	if err == nil && routingChanged {
+		f.versions.bumpRoutingMembers()
+	}
+	return err
 }
 
 func (f *fsmState) applyMemberHeartbeat(data []byte) error {
@@ -142,7 +180,8 @@ func (f *fsmState) applyMemberDead(data []byte) error {
 	if err := json.Unmarshal(data, &id); err != nil {
 		return err
 	}
-	return f.update("member_dead", func(tx *bolt.Tx) error {
+	routingChanged := false
+	err := f.update("member_dead", func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketMembers)
 		raw := b.Get([]byte(id))
 		if raw == nil {
@@ -152,6 +191,7 @@ func (f *fsmState) applyMemberDead(data []byte) error {
 		if err := json.Unmarshal(raw, &m); err != nil {
 			return err
 		}
+		routingChanged = m.Status != MemberDead
 		m.Status = MemberDead
 		v, err := json.Marshal(m)
 		if err != nil {
@@ -159,4 +199,15 @@ func (f *fsmState) applyMemberDead(data []byte) error {
 		}
 		return b.Put([]byte(id), v)
 	})
+	if err == nil && routingChanged {
+		f.versions.bumpRoutingMembers()
+	}
+	return err
+}
+
+func sameRoutingMember(a, b Member) bool {
+	return a.ID == b.ID &&
+		a.Addr == b.Addr &&
+		a.ClusterAddr == b.ClusterAddr &&
+		a.Status == b.Status
 }

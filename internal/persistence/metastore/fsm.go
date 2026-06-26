@@ -98,11 +98,12 @@ type heartbeatPayload struct {
 // does not need to hold mu. Read methods hold RLock to prevent using a
 // closed db while Restore is swapping the pointer.
 type fsmState struct {
-	mu      sync.RWMutex
-	db      *bolt.DB
-	dbPath  string
-	metric  MetricsRecorder
-	version atomic.Uint64
+	mu       sync.RWMutex
+	db       *bolt.DB
+	dbPath   string
+	metric   MetricsRecorder
+	version  atomic.Uint64
+	versions metadataDomainVersions
 }
 
 func newFSM(path string, metric MetricsRecorder) (*fsmState, error) {
@@ -110,7 +111,7 @@ func newFSM(path string, metric MetricsRecorder) (*fsmState, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &fsmState{db: db, dbPath: path, metric: metric}, nil
+	return &fsmState{db: db, dbPath: path, metric: metric, versions: newMetadataDomainVersions()}, nil
 }
 
 func openBolt(path string) (*bolt.DB, error) {

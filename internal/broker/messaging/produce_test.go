@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -81,12 +80,11 @@ func TestProduceCachesMissingSchemaLookup(t *testing.T) {
 	}
 }
 
-func TestProduceInvalidatesMissingSchemaCacheOnMetastoreVersionChange(t *testing.T) {
+func TestProduceInvalidatesMissingSchemaCacheOnSchemaVersionChange(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	schemas := &fakeSchemas{validateErr: errs.ErrSchemaNotFound}
 	engine := newTestEngine(t, ms, schemas, fixedPartitioner{picked: 0})
-	engine.cacheTTL = time.Hour
 
 	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
 		t.Fatalf("first Produce() error = %v", err)

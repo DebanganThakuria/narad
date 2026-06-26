@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/errs"
 )
@@ -32,26 +31,40 @@ func (e *Engine) validateProducePayload(ctx context.Context, topicName string, p
 }
 
 func (e *Engine) loadPersistedSchemasCached(ctx context.Context, topicName string) (bool, error) {
-	e.syncMetadataCacheVersion()
-	now := time.Now()
-	e.cacheMu.RLock()
-	cached, hit := e.schemaLoadCache[topicName]
-	e.cacheMu.RUnlock()
-	if hit && now.Before(cached.expires) {
-		return cached.loaded, nil
+	version, ok := e.schemaVersion(topicName)
+	if !ok {
+		return e.loadPersistedSchemas(ctx, topicName)
 	}
 
-	loaded, err := e.loadPersistedSchemas(ctx, topicName)
-	if err != nil {
-		return false, err
+	for {
+		e.cacheMu.RLock()
+		cached, hit := e.schemaLoadCache[topicName]
+		e.cacheMu.RUnlock()
+		if hit && cached.version == version {
+			if current, _ := e.schemaVersion(topicName); current == version {
+				return cached.loaded, nil
+			}
+			version, _ = e.schemaVersion(topicName)
+			continue
+		}
+
+		loaded, err := e.loadPersistedSchemas(ctx, topicName)
+		current, _ := e.schemaVersion(topicName)
+		if current != version {
+			version = current
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		e.cacheMu.Lock()
+		e.schemaLoadCache[topicName] = cachedSchemaLoad{
+			loaded:  loaded,
+			version: version,
+		}
+		e.cacheMu.Unlock()
+		return loaded, nil
 	}
-	e.cacheMu.Lock()
-	e.schemaLoadCache[topicName] = cachedSchemaLoad{
-		loaded:  loaded,
-		expires: now.Add(e.cacheTTL),
-	}
-	e.cacheMu.Unlock()
-	return loaded, nil
 }
 
 func (e *Engine) loadPersistedSchemas(ctx context.Context, topicName string) (bool, error) {

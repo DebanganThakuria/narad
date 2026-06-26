@@ -129,11 +129,9 @@ type Engine struct {
 	selfID     string
 
 	cacheMu         sync.RWMutex
-	cacheTTL        time.Duration
-	cacheVersion    uint64
 	topicCache      map[string]cachedTopic
 	assignmentCache map[string]cachedAssignments
-	memberCache     map[string]cachedMember
+	memberCache     map[string]cachedRoutingMember
 	schemaLoadCache map[string]cachedSchemaLoad
 }
 
@@ -162,10 +160,9 @@ func NewEngine(
 		metrics:         m,
 		logger:          logger,
 		selfID:          selfID,
-		cacheTTL:        250 * time.Millisecond,
 		topicCache:      make(map[string]cachedTopic),
 		assignmentCache: make(map[string]cachedAssignments),
-		memberCache:     make(map[string]cachedMember),
+		memberCache:     make(map[string]cachedRoutingMember),
 		schemaLoadCache: make(map[string]cachedSchemaLoad),
 	}
 }
@@ -197,7 +194,7 @@ func (e *Engine) pickProducePartition(topicName, key string, partitions int) (in
 }
 
 func (e *Engine) produceAssignmentWritable(assignment metastore.Assignment) bool {
-	owner, err := e.getMember(assignment.OwnerID)
+	owner, err := e.getRoutingMember(assignment.OwnerID)
 	return err == nil && owner.Status == metastore.MemberAlive
 }
 
