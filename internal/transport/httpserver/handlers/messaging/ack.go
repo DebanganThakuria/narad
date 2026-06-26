@@ -1,8 +1,10 @@
 package messaging
 
 import (
+	"errors"
 	"net/http"
 
+	"github.com/buger/jsonparser"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
@@ -28,8 +30,8 @@ func Ack(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
-		var req ackRequest
-		if !s.DecodeJSONBytes(w, body, &req) {
+		req, ok := decodeAckRequest(s, w, body)
+		if !ok {
 			return
 		}
 		if req.ReceiptHandle == "" {
@@ -53,4 +55,27 @@ func Ack(s *handlers.Set) http.HandlerFunc {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func decodeAckRequest(s *handlers.Set, w http.ResponseWriter, body []byte) (ackRequest, bool) {
+	req, err := parseAckRequest(body)
+	if err != nil {
+		s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return ackRequest{}, false
+	}
+	return req, true
+}
+
+func parseAckRequest(body []byte) (ackRequest, error) {
+	var req ackRequest
+	receiptHandle, err := jsonparser.GetString(body, "receipt_handle")
+	if err != nil {
+		if errors.Is(err, jsonparser.KeyPathNotFoundError) ||
+			errors.Is(err, jsonparser.NullValueError) {
+			return req, nil
+		}
+		return req, err
+	}
+	req.ReceiptHandle = receiptHandle
+	return req, nil
 }

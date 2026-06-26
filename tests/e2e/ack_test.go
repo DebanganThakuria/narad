@@ -84,14 +84,19 @@ func TestAck_RejectsInvalidJSON(t *testing.T) {
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
-func TestAck_RejectsUnknownFields(t *testing.T) {
+func TestAck_IgnoresUnknownFields(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "extra-fields"})
+	mustProduce(t, env, "extra-fields", "k", map[string]int{"v": 1})
+	msg, found := mustConsume(t, env, "extra-fields", consumeQuery{})
+	if !found {
+		t.Fatal("expected a message")
+	}
 
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/extra-fields/ack",
-		map[string]any{"receipt_handle": "x", "garbage": true})
-	expectStatus(t, resp, http.StatusBadRequest)
+		map[string]any{"receipt_handle": msg.ReceiptHandle, "garbage": true})
+	expectStatus(t, resp, http.StatusNoContent)
 }
 
 func TestAck_RejectsMissingHandle(t *testing.T) {

@@ -2,6 +2,7 @@ package topic
 
 import (
 	"encoding/json"
+	"strconv"
 )
 
 // Message is a single record returned to consumers. Payload is the
@@ -22,4 +23,31 @@ type Message struct {
 	Payload       json.RawMessage `json:"payload"`
 	Timestamp     int64           `json:"timestamp"`
 	ReceiptHandle string          `json:"receipt_handle,omitempty"`
+}
+
+func (m Message) AppendJSON(dst []byte) []byte {
+	dst = append(dst, `{"topic":`...)
+	dst = strconv.AppendQuote(dst, m.Topic)
+	dst = append(dst, `,"partition":`...)
+	dst = strconv.AppendInt(dst, int64(m.Partition), 10)
+	dst = append(dst, `,"offset":`...)
+	dst = strconv.AppendInt(dst, m.Offset, 10)
+	if m.Key != "" {
+		dst = append(dst, `,"key":`...)
+		dst = strconv.AppendQuote(dst, m.Key)
+	}
+	dst = append(dst, `,"payload":`...)
+	if len(m.Payload) == 0 {
+		dst = append(dst, "null"...)
+	} else {
+		dst = append(dst, m.Payload...)
+	}
+	dst = append(dst, `,"timestamp":`...)
+	dst = strconv.AppendInt(dst, m.Timestamp, 10)
+	if m.ReceiptHandle != "" {
+		dst = append(dst, `,"receipt_handle":`...)
+		dst = strconv.AppendQuote(dst, m.ReceiptHandle)
+	}
+	dst = append(dst, '}')
+	return dst
 }

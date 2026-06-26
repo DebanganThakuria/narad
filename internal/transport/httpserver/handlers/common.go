@@ -22,6 +22,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker"
@@ -77,6 +79,14 @@ type Set struct {
 	Deps Deps
 }
 
+type jsonAppender interface {
+	AppendJSON([]byte) []byte
+}
+
+var responseBufferPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
 // New panics on missing required deps — handlers are constructed
 // once at startup, so failing here surfaces wiring bugs immediately.
 func New(d Deps) *Set {
@@ -99,18 +109,44 @@ func New(d Deps) *Set {
 // status. Nil values produce a header-only response.
 func (s *Set) WriteJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
 	if v == nil {
+		w.WriteHeader(status)
 		return
 	}
-	if err := json.NewEncoder(w).Encode(v); err != nil {
+
+	buf := responseBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer responseBufferPool.Put(buf)
+
+	if appender, ok := v.(jsonAppender); ok {
+		buf.Write(appender.AppendJSON(buf.AvailableBuffer()))
+		buf.WriteByte('\n')
+	} else if err := json.NewEncoder(buf).Encode(v); err != nil {
 		s.Deps.Logger.Error("encode response", "err", err)
+		w.WriteHeader(status)
+		return
+	}
+
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+	w.WriteHeader(status)
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		s.Deps.Logger.Error("write response", "err", err)
 	}
 }
 
 // WriteError writes a `{"error": msg}` body with the given status.
 func (s *Set) WriteError(w http.ResponseWriter, status int, msg string) {
-	s.WriteJSON(w, status, map[string]string{"error": msg})
+	body := make([]byte, 0, len(msg)+14)
+	body = append(body, `{"error":`...)
+	body = strconv.AppendQuote(body, msg)
+	body = append(body, "}\n"...)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(status)
+	if _, err := w.Write(body); err != nil {
+		s.Deps.Logger.Error("write error response", "err", err)
+	}
 }
 
 func (s *Set) ReadBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {

@@ -24,6 +24,21 @@ type acceptedProduceResponse struct {
 	AcceptedAtUnixMs int64  `json:"accepted_at_unix_ms"`
 }
 
+func (r acceptedProduceResponse) AppendJSON(dst []byte) []byte {
+	dst = append(dst, `{"status":`...)
+	dst = strconv.AppendQuote(dst, r.Status)
+	dst = append(dst, `,"message_id":`...)
+	dst = strconv.AppendQuote(dst, r.MessageID)
+	dst = append(dst, `,"topic":`...)
+	dst = strconv.AppendQuote(dst, r.Topic)
+	dst = append(dst, `,"partition":`...)
+	dst = strconv.AppendInt(dst, int64(r.Partition), 10)
+	dst = append(dst, `,"accepted_at_unix_ms":`...)
+	dst = strconv.AppendInt(dst, r.AcceptedAtUnixMs, 10)
+	dst = append(dst, '}')
+	return dst
+}
+
 var generatedProduceKeySeq atomic.Uint64
 
 func (req produceRequest) Validate() error {
@@ -55,12 +70,12 @@ func Produce(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
-		var req produceRequest
-		if !s.DecodeJSONBytes(w, body, &req) {
+		req, ok := decodeProduceRequest(s, w, body)
+		if !ok {
 			return
 		}
-		if err := req.Validate(); err != nil {
-			s.WriteError(w, http.StatusBadRequest, err.Error())
+		if len(req.Message) == 0 {
+			s.WriteError(w, http.StatusBadRequest, "message required")
 			return
 		}
 		key := req.Key

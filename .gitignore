@@ -13,4 +13,4 @@ docs/
 
 tmp/
 
-todo-plan.local.md
+*.local.md

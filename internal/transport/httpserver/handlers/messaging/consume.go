@@ -24,12 +24,12 @@ func Consume(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
-		opts, ok := parseConsumeQuery(s, w, r)
+		opts, localOnly, ok := parseConsumeQuery(s, w, r)
 		if !ok {
 			return
 		}
 
-		if isLocalOnlyConsumeProbe(r, opts) {
+		if isLocalOnlyConsumeProbe(localOnly, opts) {
 			opts.Wait = 0
 			done, found := consumeLocalOnly(s, w, r, topicName, opts)
 			if done {
@@ -100,8 +100,8 @@ func handleQueueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r 
 	}
 }
 
-func isLocalOnlyConsumeProbe(r *http.Request, opts brokermsg.ConsumeOpts) bool {
-	return r.URL.Query().Get("local_only") == "1" && opts.Partition == nil && opts.Offset == nil
+func isLocalOnlyConsumeProbe(localOnly bool, opts brokermsg.ConsumeOpts) bool {
+	return localOnly && opts.Partition == nil && opts.Offset == nil
 }
 
 func consumeLocalOnly(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts) (bool, bool) {
@@ -140,15 +140,16 @@ func isQueueConsume(opts brokermsg.ConsumeOpts) bool {
 	return opts.Partition == nil && opts.Offset == nil
 }
 
-func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) (brokermsg.ConsumeOpts, bool) {
+func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) (brokermsg.ConsumeOpts, bool, bool) {
 	q := r.URL.Query()
 	opts := brokermsg.ConsumeOpts{}
+	localOnly := q.Get("local_only") == "1"
 
 	if v := q.Get("partition"); v != "" {
 		p, err := strconv.Atoi(v)
 		if err != nil {
 			s.WriteError(w, http.StatusBadRequest, "invalid partition: "+err.Error())
-			return opts, false
+			return opts, false, false
 		}
 		opts.Partition = &p
 	}
@@ -156,7 +157,7 @@ func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) 
 		o, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
 			s.WriteError(w, http.StatusBadRequest, "invalid offset: "+err.Error())
-			return opts, false
+			return opts, false, false
 		}
 		opts.Offset = &o
 	}
@@ -164,7 +165,7 @@ func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) 
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			s.WriteError(w, http.StatusBadRequest, "invalid wait: "+err.Error())
-			return opts, false
+			return opts, false, false
 		}
 		if d < 0 {
 			d = 0
@@ -178,5 +179,5 @@ func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) 
 		}
 		opts.Wait = d
 	}
-	return opts, true
+	return opts, localOnly, true
 }
