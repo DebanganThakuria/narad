@@ -16,7 +16,6 @@ func Recover(log *slog.Logger) Middleware {
 					log.LogAttrs(r.Context(), slog.LevelError, "http panic",
 						slog.Any("panic", rec),
 						slog.String("path", r.URL.Path),
-						slog.String("request_id", requestIDFrom(r.Context())),
 						slog.String("stack", string(debug.Stack())),
 					)
 					w.Header().Set("Content-Type", "application/json")

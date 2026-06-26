@@ -136,6 +136,11 @@ func (s *Set) WriteJSON(w http.ResponseWriter, status int, v any) {
 
 // WriteError writes a `{"error": msg}` body with the given status.
 func (s *Set) WriteError(w http.ResponseWriter, status int, msg string) {
+	s.logServerError(status, msg)
+	s.writeError(w, status, msg)
+}
+
+func (s *Set) writeError(w http.ResponseWriter, status int, msg string) {
 	body := make([]byte, 0, len(msg)+14)
 	body = append(body, `{"error":`...)
 	body = strconv.AppendQuote(body, msg)
@@ -147,6 +152,19 @@ func (s *Set) WriteError(w http.ResponseWriter, status int, msg string) {
 	if _, err := w.Write(body); err != nil {
 		s.Deps.Logger.Error("write error response", "err", err)
 	}
+}
+
+func (s *Set) logServerError(status int, msg string, attrs ...slog.Attr) {
+	if status < http.StatusInternalServerError {
+		return
+	}
+	logAttrs := make([]slog.Attr, 0, len(attrs)+2)
+	logAttrs = append(logAttrs,
+		slog.Int("status", status),
+		slog.String("error", msg),
+	)
+	logAttrs = append(logAttrs, attrs...)
+	s.Deps.Logger.LogAttrs(context.Background(), slog.LevelError, "http server error", logAttrs...)
 }
 
 func (s *Set) ReadBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
@@ -240,7 +258,9 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 	case errors.Is(err, errs.ErrNotPartitionOwner):
 		s.WriteError(w, http.StatusMisdirectedRequest, err.Error())
 	default:
-		s.Deps.Logger.Error(op, "err", err)
-		s.WriteError(w, http.StatusInternalServerError, op+" failed")
+		status := http.StatusInternalServerError
+		msg := op + " failed"
+		s.logServerError(status, msg, slog.String("op", op), slog.Any("err", err))
+		s.writeError(w, status, msg)
 	}
 }

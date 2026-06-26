@@ -209,8 +209,8 @@ func TestNewRouterServesHealthAndMetrics(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("GET /healthz status = %d, want %d", res.Code, http.StatusOK)
 	}
-	if res.Header().Get(HeaderRequestID) == "" {
-		t.Fatal("GET /healthz missing request id header")
+	if res.Header().Get("X-Request-ID") != "" {
+		t.Fatal("GET /healthz returned request id header")
 	}
 
 	res = httptest.NewRecorder()
