@@ -48,8 +48,6 @@ func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prome
 
 	stack := Chain(
 		Recover(log),
-		RequestID(),
-		AccessLog(log),
 		metrics.HTTPMiddleware(m),
 	)
 	return stack(mux)

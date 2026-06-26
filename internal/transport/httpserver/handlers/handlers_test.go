@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -160,6 +161,48 @@ func TestWriteJSONAndWriteError(t *testing.T) {
 	}
 	if body["error"] != "bad request" {
 		t.Fatalf("WriteError() body = %+v", body)
+	}
+}
+
+func TestWriteErrorLogsServerErrorsOnly(t *testing.T) {
+	var buf bytes.Buffer
+	s := New(Deps{
+		Broker: &fakeBroker{},
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+	})
+
+	s.WriteError(httptest.NewRecorder(), http.StatusBadRequest, "bad request")
+	if got := buf.String(); got != "" {
+		t.Fatalf("4xx log output = %q, want empty", got)
+	}
+
+	s.WriteError(httptest.NewRecorder(), http.StatusInternalServerError, "internal failure")
+	got := buf.String()
+	if !strings.Contains(got, "http server error") ||
+		!strings.Contains(got, "status=500") ||
+		!strings.Contains(got, "error=\"internal failure\"") {
+		t.Fatalf("5xx log output = %q, want server error log", got)
+	}
+}
+
+func TestWriteBrokerErrorLogsUnderlyingInternalError(t *testing.T) {
+	var buf bytes.Buffer
+	s := New(Deps{
+		Broker: &fakeBroker{},
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+	})
+
+	res := httptest.NewRecorder()
+	s.WriteBrokerError(res, "produce", errors.New("boom"))
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("WriteBrokerError() status = %d, want %d", res.Code, http.StatusInternalServerError)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "http server error") ||
+		!strings.Contains(got, "op=produce") ||
+		!strings.Contains(got, "err=boom") {
+		t.Fatalf("broker 5xx log output = %q, want underlying error", got)
 	}
 }
 
