@@ -3,6 +3,7 @@ package httpserver
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -43,6 +44,42 @@ func TestRequestIDGeneratesHeaderWhenMissing(t *testing.T) {
 	}
 	if gotContextID != generated {
 		t.Fatalf("context request id = %q, want %q", gotContextID, generated)
+	}
+}
+
+func TestNewRequestIDUsesPodPrefixAndSequence(t *testing.T) {
+	oldPrefix := requestIDPrefix
+	oldSeq := requestIDSeq.Load()
+	t.Cleanup(func() {
+		requestIDPrefix = oldPrefix
+		requestIDSeq.Store(oldSeq)
+	})
+
+	requestIDPrefix = "req-narad-0"
+	requestIDSeq.Store(0)
+
+	first := newRequestID()
+	second := newRequestID()
+
+	if !strings.HasPrefix(first, "req-narad-0-") {
+		t.Fatalf("request id = %q, want pod prefix", first)
+	}
+	if first == second {
+		t.Fatalf("request IDs should be unique, got %q twice", first)
+	}
+	if !strings.HasSuffix(first, "-1") {
+		t.Fatalf("first request id = %q, want sequence suffix -1", first)
+	}
+	if !strings.HasSuffix(second, "-2") {
+		t.Fatalf("second request id = %q, want sequence suffix -2", second)
+	}
+}
+
+func TestSanitizeRequestIDPart(t *testing.T) {
+	got := sanitizeRequestIDPart("narad-0.dev_cluster\nbad")
+	want := "narad-0.dev_cluster-bad"
+	if got != want {
+		t.Fatalf("sanitizeRequestIDPart() = %q, want %q", got, want)
 	}
 }
 

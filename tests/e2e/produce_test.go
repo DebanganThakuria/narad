@@ -104,14 +104,14 @@ func TestProduce_RejectsMissingMessage(t *testing.T) {
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
-func TestProduce_RejectsUnknownFields(t *testing.T) {
+func TestProduce_IgnoresUnknownFields(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "extra"})
 
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/extra/produce",
 		map[string]any{"message": map[string]string{"v": "1"}, "garbage": true})
-	expectStatus(t, resp, http.StatusBadRequest)
+	expectStatus(t, resp, http.StatusAccepted)
 }
 
 func TestProduce_RejectsInvalidJSON(t *testing.T) {

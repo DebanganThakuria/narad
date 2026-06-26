@@ -35,8 +35,8 @@ endif
 
 .PHONY: help
 help: ## Show this help.
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-		| awk 'BEGIN {FS = ":.*?## "} {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+		| awk 'BEGIN {FS = ":.*?## "} {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
 
 # ---- build / run ---------------------------------------------------------
 
@@ -127,18 +127,6 @@ local-soak-cluster: ## Start a persistent local 3-node cluster for soak/perf tes
 .PHONY: local-soak-stop
 local-soak-stop: ## Stop the persistent local soak cluster, keeping data/logs.
 	./scripts/local-soak-stop.sh
-
-.PHONY: local-soak-launchd-start
-local-soak-launchd-start: ## Start local Narad + tester under macOS launchd for long soak runs.
-	./scripts/local-soak-launchd-start.sh
-
-.PHONY: local-soak-launchd-stop
-local-soak-launchd-stop: ## Stop the macOS launchd local Narad + tester soak services.
-	./scripts/local-soak-launchd-stop.sh
-
-.PHONY: local-soak-tester
-local-soak-tester: ## Run the long-running Narad tester. Defaults to 50 msg/sec, 20ms consume wait, +/-10 msg/sec every 10m, capped at 100k.
-	./scripts/local-soak-tester.sh $(ARGS)
 
 .PHONY: local-monitoring-start
 local-monitoring-start: ## Start local Prometheus and import the Grafana soak dashboard.

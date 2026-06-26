@@ -346,6 +346,69 @@ func TestProduceHandlerGeneratesKeyWhenMissing(t *testing.T) {
 	}
 }
 
+func TestProduceHandlerIgnoresUnknownFields(t *testing.T) {
+	var gotPayload []byte
+	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
+		gotPayload = append([]byte(nil), payload...)
+		return ingress.AcceptedProduce{MessageID: "message-1", Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
+	}}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"ignored":true,"key":"customer-1","message":{"id":1},"also_ignored":{"nested":1}}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Produce(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
+	}
+	if string(gotPayload) != `{"id":1}` {
+		t.Fatalf("Produce() payload = %q, want raw message", string(gotPayload))
+	}
+}
+
+func TestProduceHandlerTreatsNullKeyAsMissing(t *testing.T) {
+	var gotKey string
+	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, _ []byte, _ ...int) (ingress.AcceptedProduce, error) {
+		gotKey = key
+		return ingress.AcceptedProduce{MessageID: "message-1", Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
+	}}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"key":null,"message":{"id":1}}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Produce(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
+	}
+	if gotKey == "" {
+		t.Fatal("Produce() did not generate a key")
+	}
+}
+
+func TestProduceHandlerPreservesStringMessagePayload(t *testing.T) {
+	var gotPayload []byte
+	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, _ string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
+		gotPayload = append([]byte(nil), payload...)
+		return ingress.AcceptedProduce{MessageID: "message-1", Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
+	}}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":"hello\nworld"}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Produce(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
+	}
+	if string(gotPayload) != `"hello\nworld"` {
+		t.Fatalf("Produce() payload = %q, want quoted string payload", string(gotPayload))
+	}
+}
+
 func TestProduceHandlerAcceptsWithGeneratedKeyAndDoesNotRoute(t *testing.T) {
 	routerCalled := false
 	var gotKey string
@@ -799,6 +862,69 @@ func TestAckHandlerRejectsMissingHandle(t *testing.T) {
 	}
 }
 
+func TestAckHandlerIgnoresUnknownField(t *testing.T) {
+	var gotHandle string
+	s := newTestSet(&fakeBroker{ackFn: func(_ context.Context, _ string, receiptHandle string) error {
+		gotHandle = receiptHandle
+		return nil
+	}}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", bytes.NewBufferString(`{"receipt_handle":"x","extra":1}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Ack(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("Ack() status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+	if gotHandle != "x" {
+		t.Fatalf("Ack() handle = %q, want x", gotHandle)
+	}
+}
+
+func TestAckHandlerIgnoresUnusedTrailingJSON(t *testing.T) {
+	var gotHandle string
+	s := newTestSet(&fakeBroker{ackFn: func(_ context.Context, _ string, receiptHandle string) error {
+		gotHandle = receiptHandle
+		return nil
+	}}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", bytes.NewBufferString(`{"receipt_handle":"x"} {}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Ack(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("Ack() status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+	if gotHandle != "x" {
+		t.Fatalf("Ack() handle = %q, want x", gotHandle)
+	}
+}
+
+func TestAckHandlerParsesEscapedReceiptHandle(t *testing.T) {
+	var gotHandle string
+	s := newTestSet(&fakeBroker{ackFn: func(_ context.Context, _ string, receiptHandle string) error {
+		gotHandle = receiptHandle
+		return nil
+	}}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", bytes.NewBufferString(`{"receipt_handle":"abc\u002d123"}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Ack(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("Ack() status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+	if gotHandle != "abc-123" {
+		t.Fatalf("Ack() handle = %q, want abc-123", gotHandle)
+	}
+}
+
 func TestAckHandlerMapsBrokerError(t *testing.T) {
 	s := newTestSet(&fakeBroker{ackFn: func(context.Context, string, string) error {
 		return errs.ErrHandleStale
@@ -828,14 +954,117 @@ func TestProduceRequestValidate(t *testing.T) {
 	}
 }
 
+func TestParseProduceRequestExtractsMessageValues(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantKey     string
+		wantMessage string
+	}{
+		{"object", `{"key":"k1","message":{"id":1},"ignored":true}`, "k1", `{"id":1}`},
+		{"array", `{"message":[1,{"ok":true}]}`, "", `[1,{"ok":true}]`},
+		{"string", `{"message":"hello\nworld"}`, "", `"hello\nworld"`},
+		{"number", `{"message":123.45}`, "", `123.45`},
+		{"boolean", `{"message":true}`, "", `true`},
+		{"null message", `{"message":null}`, "", `null`},
+		{"null key", `{"key":null,"message":{"id":1}}`, "", `{"id":1}`},
+		{"escaped key", `{"key":"cust\u002d1","message":{"id":1}}`, "cust-1", `{"id":1}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseProduceRequest([]byte(tt.body))
+			if err != nil {
+				t.Fatalf("parseProduceRequest() error = %v", err)
+			}
+			if got.Key != tt.wantKey {
+				t.Fatalf("key = %q, want %q", got.Key, tt.wantKey)
+			}
+			if string(got.Message) != tt.wantMessage {
+				t.Fatalf("message = %q, want %q", string(got.Message), tt.wantMessage)
+			}
+		})
+	}
+}
+
+func TestParseProduceRequestFieldErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"bad key type", `{"key":123,"message":{"id":1}}`},
+		{"malformed message", `{"message":{"id":1`},
+		{"malformed key string", `{"key":"bad\uZZZZ","message":{"id":1}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := parseProduceRequest([]byte(tt.body)); err == nil {
+				t.Fatal("parseProduceRequest() error = nil, want error")
+			}
+		})
+	}
+}
+
+func TestParseProduceRequestMissingMessage(t *testing.T) {
+	got, err := parseProduceRequest([]byte(`{"key":"k1","ignored":true}`))
+	if err != nil {
+		t.Fatalf("parseProduceRequest() error = %v", err)
+	}
+	if got.Key != "k1" {
+		t.Fatalf("key = %q, want k1", got.Key)
+	}
+	if len(got.Message) != 0 {
+		t.Fatalf("message = %q, want empty", string(got.Message))
+	}
+}
+
+func TestParseAckRequestFieldCases(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantHandle string
+		wantErr    bool
+	}{
+		{"simple", `{"receipt_handle":"h1"}`, "h1", false},
+		{"escaped", `{"receipt_handle":"abc\u002d123"}`, "abc-123", false},
+		{"unknown ignored", `{"receipt_handle":"h1","ignored":true}`, "h1", false},
+		{"null handle", `{"receipt_handle":null}`, "", false},
+		{"missing handle", `{"ignored":true}`, "", false},
+		{"bad handle type", `{"receipt_handle":123}`, "", true},
+		{"bad handle string", `{"receipt_handle":"bad\uZZZZ"}`, "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseAckRequest([]byte(tt.body))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("parseAckRequest() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseAckRequest() error = %v", err)
+			}
+			if got.ReceiptHandle != tt.wantHandle {
+				t.Fatalf("receipt handle = %q, want %q", got.ReceiptHandle, tt.wantHandle)
+			}
+		})
+	}
+}
+
 func TestParseConsumeQuery(t *testing.T) {
 	s := newTestSet(&fakeBroker{}, nil)
 
 	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/?partition=1&offset=4&wait=5s", nil)
-	got, ok := parseConsumeQuery(s, res, req)
+	req := httptest.NewRequest(http.MethodGet, "/?partition=1&offset=4&wait=5s&local_only=1", nil)
+	got, localOnly, ok := parseConsumeQuery(s, res, req)
 	if !ok {
 		t.Fatal("parseConsumeQuery() ok = false, want true")
+	}
+	if !localOnly {
+		t.Fatal("parseConsumeQuery() localOnly = false, want true")
 	}
 	if got.Partition == nil || *got.Partition != 1 {
 		t.Fatalf("parseConsumeQuery() partition = %+v", got.Partition)
@@ -849,14 +1078,17 @@ func TestParseConsumeQuery(t *testing.T) {
 
 	res = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/?wait=-2s", nil)
-	got, ok = parseConsumeQuery(s, res, req)
+	got, localOnly, ok = parseConsumeQuery(s, res, req)
 	if !ok || got.Wait != 0 {
 		t.Fatalf("parseConsumeQuery() negative wait = %v, %v; want 0, true", got.Wait, ok)
+	}
+	if localOnly {
+		t.Fatal("parseConsumeQuery() localOnly = true, want false")
 	}
 
 	res = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/?offset=bad", nil)
-	if _, ok := parseConsumeQuery(s, res, req); ok {
+	if _, _, ok := parseConsumeQuery(s, res, req); ok {
 		t.Fatal("parseConsumeQuery() ok = true, want false")
 	}
 }
