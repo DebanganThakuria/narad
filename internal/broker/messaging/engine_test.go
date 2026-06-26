@@ -21,36 +21,49 @@ import (
 )
 
 type messagingFakeMetastore struct {
-	topics          map[string]topic.Topic
-	schemas         map[string]map[int][]byte
-	metadataVersion uint64
-	getTopicErr     error
-	getTopicCalls   int
-	getSchemaCalls  int
+	topics                map[string]topic.Topic
+	schemas               map[string]map[int][]byte
+	metadataVersion       uint64
+	nextDomainVersion     uint64
+	topicVersions         map[string]uint64
+	assignmentVersions    map[string]uint64
+	schemaVersions        map[string]uint64
+	routingMembersVersion uint64
+	getTopicErr           error
+	getTopicCalls         int
+	getSchemaCalls        int
 }
 
 func newMessagingFakeMetastore() *messagingFakeMetastore {
 	return &messagingFakeMetastore{
-		topics:  map[string]topic.Topic{},
-		schemas: map[string]map[int][]byte{},
+		topics:             map[string]topic.Topic{},
+		schemas:            map[string]map[int][]byte{},
+		topicVersions:      map[string]uint64{},
+		assignmentVersions: map[string]uint64{},
+		schemaVersions:     map[string]uint64{},
 	}
 }
 
 func (f *messagingFakeMetastore) CreateTopic(_ context.Context, t topic.Topic) error {
 	f.topics[t.Name] = t
 	f.bumpMetadataVersion()
+	f.bumpTopicVersion(t.Name)
 	return nil
 }
 
 func (f *messagingFakeMetastore) UpdateTopic(_ context.Context, t topic.Topic) error {
 	f.topics[t.Name] = t
 	f.bumpMetadataVersion()
+	f.bumpTopicVersion(t.Name)
 	return nil
 }
 
 func (f *messagingFakeMetastore) DeleteTopic(_ context.Context, name string) error {
 	delete(f.topics, name)
 	f.bumpMetadataVersion()
+	f.bumpTopicVersion(name)
+	f.bumpAssignmentVersion(name)
+	f.bumpSchemaVersion(name)
 	return nil
 }
 
@@ -76,6 +89,7 @@ func (f *messagingFakeMetastore) PutSchema(_ context.Context, topicName string, 
 	}
 	f.schemas[topicName][version] = append([]byte(nil), raw...)
 	f.bumpMetadataVersion()
+	f.bumpSchemaVersion(topicName)
 	return nil
 }
 
@@ -101,8 +115,39 @@ func (f *messagingFakeMetastore) MetadataVersion() uint64 {
 	return f.metadataVersion
 }
 
+func (f *messagingFakeMetastore) TopicVersion(name string) uint64 {
+	return f.topicVersions[name]
+}
+
+func (f *messagingFakeMetastore) AssignmentVersion(topicName string) uint64 {
+	return f.assignmentVersions[topicName]
+}
+
+func (f *messagingFakeMetastore) SchemaVersion(topicName string) uint64 {
+	return f.schemaVersions[topicName]
+}
+
+func (f *messagingFakeMetastore) RoutingMembersVersion() uint64 {
+	return f.routingMembersVersion
+}
+
 func (f *messagingFakeMetastore) bumpMetadataVersion() {
 	f.metadataVersion++
+}
+
+func (f *messagingFakeMetastore) bumpTopicVersion(name string) {
+	f.nextDomainVersion++
+	f.topicVersions[name] = f.nextDomainVersion
+}
+
+func (f *messagingFakeMetastore) bumpAssignmentVersion(topicName string) {
+	f.nextDomainVersion++
+	f.assignmentVersions[topicName] = f.nextDomainVersion
+}
+
+func (f *messagingFakeMetastore) bumpSchemaVersion(topicName string) {
+	f.nextDomainVersion++
+	f.schemaVersions[topicName] = f.nextDomainVersion
 }
 
 type fakeSchemas struct {
@@ -275,7 +320,7 @@ func TestGetTopicWrapsUnexpectedError(t *testing.T) {
 	}
 }
 
-func TestGetTopicUsesShortLivedCache(t *testing.T) {
+func TestGetTopicUsesVersionedCache(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 3}
 	engine := newTestEngine(t, ms, nil, nil)
@@ -296,18 +341,17 @@ func TestGetTopicUsesShortLivedCache(t *testing.T) {
 	}
 }
 
-func TestGetTopicInvalidatesCacheOnMetastoreVersionChange(t *testing.T) {
+func TestGetTopicInvalidatesCacheOnTopicVersionChange(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 3}
 	engine := newTestEngine(t, ms, nil, nil)
-	engine.cacheTTL = time.Hour
 
 	first, err := engine.getTopic(context.Background(), "orders")
 	if err != nil {
 		t.Fatalf("first getTopic() error = %v", err)
 	}
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 5}
-	ms.bumpMetadataVersion()
+	ms.bumpTopicVersion("orders")
 	second, err := engine.getTopic(context.Background(), "orders")
 	if err != nil {
 		t.Fatalf("second getTopic() error = %v", err)
@@ -531,7 +575,9 @@ func TestAckReturnsTopicNotFoundWhenTopicDeleted(t *testing.T) {
 	if !found {
 		t.Fatal("Consume() found = false, want true")
 	}
-	delete(ms.topics, "orders")
+	if err := ms.DeleteTopic(context.Background(), "orders"); err != nil {
+		t.Fatalf("DeleteTopic() error = %v", err)
+	}
 
 	err = engine.Ack(context.Background(), "orders", msg.ReceiptHandle)
 	if !errors.Is(err, ErrTopicNotFound) {
@@ -563,6 +609,41 @@ func TestAckCommitsReservedHandle(t *testing.T) {
 
 	if err := engine.Ack(context.Background(), "orders", msg.ReceiptHandle); err != nil {
 		t.Fatalf("Ack() error = %v", err)
+	}
+}
+
+func TestAckUsesVersionedTopicCache(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}
+	engine := newTestEngine(t, ms, nil, nil)
+	log, err := engine.logs.Get("orders", 0)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if _, err := log.Append([]byte(`{"id":1}`)); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	if err := log.AdvanceHighWatermark(1); err != nil {
+		t.Fatalf("AdvanceHighWatermark() error = %v", err)
+	}
+
+	ms.getTopicCalls = 0
+	msg, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Partition: new(0)})
+	if err != nil {
+		t.Fatalf("Consume() error = %v", err)
+	}
+	if !found {
+		t.Fatal("Consume() found = false, want true")
+	}
+	if ms.getTopicCalls != 1 {
+		t.Fatalf("GetTopic calls after consume = %d, want 1", ms.getTopicCalls)
+	}
+
+	if err := engine.Ack(context.Background(), "orders", msg.ReceiptHandle); err != nil {
+		t.Fatalf("Ack() error = %v", err)
+	}
+	if ms.getTopicCalls != 1 {
+		t.Fatalf("GetTopic calls after ack = %d, want still 1", ms.getTopicCalls)
 	}
 }
 

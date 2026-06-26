@@ -59,6 +59,17 @@ type produceDispatchTarget struct {
 	partition int
 }
 
+type cachedProduceDispatchTarget struct {
+	target produceDispatchTarget
+	err    error
+}
+
+type cachedProduceDispatchTargets struct {
+	assignmentVersion     uint64
+	routingMembersVersion uint64
+	byPartition           map[int]cachedProduceDispatchTarget
+}
+
 type ProduceDispatcherConfig struct {
 	PollInterval time.Duration
 	BatchSize    int
@@ -82,6 +93,9 @@ type ProduceDispatcher struct {
 
 	shards    []produceDispatchShard
 	nextShard int
+
+	targetMu    sync.RWMutex
+	targetCache map[string]cachedProduceDispatchTargets
 }
 
 type produceDispatchShard struct {
@@ -142,6 +156,7 @@ func NewProduceDispatcher(
 		batchSize:         batchSize,
 		commitConcurrency: commitConcurrency,
 		failureBackoff:    defaultProduceDispatchFailureBackoff,
+		targetCache:       make(map[string]cachedProduceDispatchTargets),
 	}
 }
 
@@ -496,26 +511,112 @@ func (d *ProduceDispatcher) dispatchTarget(record ingress.ProduceRecord) (produc
 	if d.store == nil {
 		return produceDispatchTarget{}, errors.New("produce dispatcher metastore is nil")
 	}
-	assignment, err := d.store.GetAssignment(record.Topic, record.TargetPartition)
+	targets, err := d.dispatchTargetsForTopic(record.Topic)
 	if err != nil {
-		return produceDispatchTarget{}, fmt.Errorf("lookup assignment: %w", err)
-	}
-	if d.selfID == "" || assignment.OwnerID == d.selfID {
-		return produceDispatchTarget{local: true, topic: record.Topic, partition: record.TargetPartition}, nil
+		return produceDispatchTarget{}, err
 	}
 
-	member, err := d.store.GetMember(assignment.OwnerID)
-	if err != nil {
-		return produceDispatchTarget{}, fmt.Errorf("lookup owner member: %w", err)
+	cached, ok := targets.byPartition[record.TargetPartition]
+	if !ok {
+		return produceDispatchTarget{}, fmt.Errorf("lookup assignment: %w", errs.ErrNotFound)
 	}
-	if member.Status == metastore.MemberDead || member.Addr == "" {
-		return produceDispatchTarget{}, fmt.Errorf("owner %q is unavailable", assignment.OwnerID)
+	if cached.err != nil {
+		return produceDispatchTarget{}, cached.err
 	}
-	return produceDispatchTarget{
-		addr:      member.Addr,
-		topic:     record.Topic,
-		partition: record.TargetPartition,
-	}, nil
+	return cached.target, nil
+}
+
+func (d *ProduceDispatcher) dispatchTargetsForTopic(topicName string) (cachedProduceDispatchTargets, error) {
+	assignmentVersion := d.store.AssignmentVersion(topicName)
+	routingMembersVersion := d.store.RoutingMembersVersion()
+
+	d.targetMu.RLock()
+	cached, ok := d.targetCache[topicName]
+	d.targetMu.RUnlock()
+	if ok && cached.assignmentVersion == assignmentVersion && cached.routingMembersVersion == routingMembersVersion {
+		if d.store.AssignmentVersion(topicName) == assignmentVersion && d.store.RoutingMembersVersion() == routingMembersVersion {
+			return cached, nil
+		}
+		assignmentVersion = d.store.AssignmentVersion(topicName)
+		routingMembersVersion = d.store.RoutingMembersVersion()
+	}
+
+	for {
+		assignments, err := d.store.ListAssignments(topicName)
+		currentAssignmentVersion := d.store.AssignmentVersion(topicName)
+		currentRoutingMembersVersion := d.store.RoutingMembersVersion()
+		if currentAssignmentVersion != assignmentVersion || currentRoutingMembersVersion != routingMembersVersion {
+			assignmentVersion = currentAssignmentVersion
+			routingMembersVersion = currentRoutingMembersVersion
+			continue
+		}
+		if err != nil {
+			return cachedProduceDispatchTargets{}, fmt.Errorf("lookup assignment: %w", err)
+		}
+
+		targets := cachedProduceDispatchTargets{
+			assignmentVersion:     assignmentVersion,
+			routingMembersVersion: routingMembersVersion,
+			byPartition:           make(map[int]cachedProduceDispatchTarget, len(assignments)),
+		}
+		needsMembers := false
+		for _, assignment := range assignments {
+			if d.selfID != "" && assignment.OwnerID != d.selfID {
+				needsMembers = true
+				break
+			}
+		}
+		memberByID := map[string]metastore.Member{}
+		if needsMembers {
+			members, err := d.store.ListMembers()
+			currentAssignmentVersion = d.store.AssignmentVersion(topicName)
+			currentRoutingMembersVersion = d.store.RoutingMembersVersion()
+			if currentAssignmentVersion != assignmentVersion || currentRoutingMembersVersion != routingMembersVersion {
+				assignmentVersion = currentAssignmentVersion
+				routingMembersVersion = currentRoutingMembersVersion
+				continue
+			}
+			if err != nil {
+				return cachedProduceDispatchTargets{}, fmt.Errorf("lookup owner member: %w", err)
+			}
+			memberByID = make(map[string]metastore.Member, len(members))
+			for _, member := range members {
+				memberByID[member.ID] = member
+			}
+		}
+
+		for _, assignment := range assignments {
+			target := produceDispatchTarget{
+				local:     d.selfID == "" || assignment.OwnerID == d.selfID,
+				topic:     topicName,
+				partition: assignment.Partition,
+			}
+			if target.local {
+				targets.byPartition[assignment.Partition] = cachedProduceDispatchTarget{target: target}
+				continue
+			}
+			member, ok := memberByID[assignment.OwnerID]
+			if !ok {
+				targets.byPartition[assignment.Partition] = cachedProduceDispatchTarget{
+					err: fmt.Errorf("lookup owner member: %w", errs.ErrNotFound),
+				}
+				continue
+			}
+			if member.Status == metastore.MemberDead || member.Addr == "" {
+				targets.byPartition[assignment.Partition] = cachedProduceDispatchTarget{
+					err: fmt.Errorf("owner %q is unavailable", assignment.OwnerID),
+				}
+				continue
+			}
+			target.addr = member.Addr
+			targets.byPartition[assignment.Partition] = cachedProduceDispatchTarget{target: target}
+		}
+
+		d.targetMu.Lock()
+		d.targetCache[topicName] = targets
+		d.targetMu.Unlock()
+		return targets, nil
+	}
 }
 
 // commitBatch dispatches a batch. If the commit fails AND the topic is

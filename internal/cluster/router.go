@@ -27,8 +27,6 @@ type Router struct {
 	metrics    *metrics.Metrics
 
 	routeMu       sync.RWMutex
-	routeTTL      time.Duration
-	routeVersion  uint64
 	routes        map[string]cachedRouteTable
 	consumeMu     sync.Mutex
 	consumeCursor map[string]uint64
@@ -46,7 +44,6 @@ func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager, _ m
 		partitions:    mgr,
 		peer:          NewPeerClient(defaultPeerRPCTimeout, observed),
 		metrics:       observed,
-		routeTTL:      250 * time.Millisecond,
 		routes:        make(map[string]cachedRouteTable),
 		consumeCursor: make(map[string]uint64),
 	}

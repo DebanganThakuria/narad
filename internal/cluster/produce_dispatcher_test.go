@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -486,6 +487,89 @@ func TestProduceDispatcherDiscardsRecordsForDeletedTopic(t *testing.T) {
 	}
 	if nextSeq != 1 {
 		t.Fatalf("checkpoint = %d, want 1 (advanced past discarded record)", nextSeq)
+	}
+}
+
+func TestProduceDispatcherDispatchTargetInvalidatesOnAssignmentChange(t *testing.T) {
+	store := newTestStore(t)
+	seedProduceDispatchTopic(t, store, "node-remote")
+	dispatcher := NewProduceDispatcher(newDispatchIngressManager(t), store, "node-self", &fakeProduceCommitter{}, nil, nil, ProduceDispatcherConfig{})
+	record := ingress.ProduceRecord{Topic: "orders", TargetPartition: 0}
+
+	target, err := dispatcher.dispatchTarget(record)
+	if err != nil {
+		t.Fatalf("dispatchTarget() before reassignment error = %v", err)
+	}
+	if target.local || target.addr != "remote.example:7942" {
+		t.Fatalf("dispatchTarget() before reassignment = %+v, want remote target", target)
+	}
+
+	if err := store.AssignPartition(context.Background(), "orders", 0, "node-self"); err != nil {
+		t.Fatalf("AssignPartition() error = %v", err)
+	}
+	target, err = dispatcher.dispatchTarget(record)
+	if err != nil {
+		t.Fatalf("dispatchTarget() after reassignment error = %v", err)
+	}
+	if !target.local {
+		t.Fatalf("dispatchTarget() after reassignment = %+v, want local target", target)
+	}
+}
+
+func TestProduceDispatcherDispatchTargetInvalidatesOnMemberDeath(t *testing.T) {
+	store := newTestStore(t)
+	seedProduceDispatchTopic(t, store, "node-remote")
+	dispatcher := NewProduceDispatcher(newDispatchIngressManager(t), store, "node-self", &fakeProduceCommitter{}, nil, nil, ProduceDispatcherConfig{})
+	record := ingress.ProduceRecord{Topic: "orders", TargetPartition: 0}
+
+	if target, err := dispatcher.dispatchTarget(record); err != nil || target.addr != "remote.example:7942" {
+		t.Fatalf("dispatchTarget() before death = %+v, %v; want remote target", target, err)
+	}
+	if err := store.MarkMemberDead(context.Background(), "node-remote"); err != nil {
+		t.Fatalf("MarkMemberDead() error = %v", err)
+	}
+
+	_, err := dispatcher.dispatchTarget(record)
+	if err == nil || !strings.Contains(err.Error(), `owner "node-remote" is unavailable`) {
+		t.Fatalf("dispatchTarget() after death error = %v, want owner unavailable", err)
+	}
+}
+
+func TestProduceDispatcherDispatchTargetKeepsCacheOnHeartbeatOnlyMemberUpdate(t *testing.T) {
+	store := newTestStore(t)
+	seedProduceDispatchTopic(t, store, "node-remote")
+	dispatcher := NewProduceDispatcher(newDispatchIngressManager(t), store, "node-self", &fakeProduceCommitter{}, nil, nil, ProduceDispatcherConfig{})
+	record := ingress.ProduceRecord{Topic: "orders", TargetPartition: 0}
+
+	if _, err := dispatcher.dispatchTarget(record); err != nil {
+		t.Fatalf("dispatchTarget() initial error = %v", err)
+	}
+	dispatcher.targetMu.RLock()
+	before := dispatcher.targetCache["orders"]
+	dispatcher.targetMu.RUnlock()
+
+	if err := store.RegisterMember(context.Background(), metastore.Member{
+		ID:            "node-remote",
+		Addr:          "remote.example:7942",
+		Status:        metastore.MemberAlive,
+		LastHeartbeat: 1234,
+	}); err != nil {
+		t.Fatalf("RegisterMember() heartbeat-only update error = %v", err)
+	}
+
+	target, err := dispatcher.dispatchTarget(record)
+	if err != nil {
+		t.Fatalf("dispatchTarget() after heartbeat-only update error = %v", err)
+	}
+	if target.addr != "remote.example:7942" {
+		t.Fatalf("dispatchTarget() after heartbeat-only update = %+v, want same remote addr", target)
+	}
+	dispatcher.targetMu.RLock()
+	after := dispatcher.targetCache["orders"]
+	dispatcher.targetMu.RUnlock()
+	if after.assignmentVersion != before.assignmentVersion || after.routingMembersVersion != before.routingMembersVersion {
+		t.Fatalf("cache versions after heartbeat-only update = (%d,%d), want (%d,%d)",
+			after.assignmentVersion, after.routingMembersVersion, before.assignmentVersion, before.routingMembersVersion)
 	}
 }
 

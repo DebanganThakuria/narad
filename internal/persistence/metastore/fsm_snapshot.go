@@ -42,6 +42,7 @@ func (f *fsmState) Restore(rc io.ReadCloser) error {
 	}
 	f.db = db
 	f.version.Add(1)
+	f.versions.bumpAll()
 	return nil
 }
 
