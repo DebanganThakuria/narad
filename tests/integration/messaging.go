@@ -222,11 +222,10 @@ func ackOne(ctx context.Context, lb *roundRobinClient, topicName, receiptHandle 
 }
 
 func ackOneStatus(ctx context.Context, lb *roundRobinClient, topicName, receiptHandle string, attempts int, want ...int) (int, error) {
-	path := "/v1/topics/" + url.PathEscape(topicName) + "/ack"
-	body := map[string]string{"receipt_handle": receiptHandle}
+	path := "/v1/topics/" + url.PathEscape(topicName) + "/ack?receipt_handle=" + url.QueryEscape(receiptHandle)
 	var status int
 	err := retry(ctx, attempts, 100*time.Millisecond, func() error {
-		got, _, err := lb.do(ctx, http.MethodPost, path, body, nil, want...)
+		got, _, err := lb.do(ctx, http.MethodPost, path, nil, nil, want...)
 		if err != nil {
 			return err
 		}

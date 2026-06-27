@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"net/http"
+	"net/url"
 	"testing"
 )
 
@@ -16,8 +17,7 @@ func TestAck_HappyPath(t *testing.T) {
 		t.Fatal("expected a message after produce")
 	}
 
-	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/ack/ack",
-		map[string]any{"receipt_handle": msg.ReceiptHandle})
+	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/ack/ack?receipt_handle="+url.QueryEscape(msg.ReceiptHandle), nil)
 	expectStatus(t, resp, http.StatusNoContent)
 }
 
@@ -69,33 +69,30 @@ func TestAck_NotFoundForUnknownTopic(t *testing.T) {
 	del := jsonReq(t, http.MethodDelete, env.Server.URL+"/v1/topics/gone", nil)
 	expectStatus(t, del, http.StatusNoContent)
 
-	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/gone/ack",
-		map[string]any{"receipt_handle": msg.ReceiptHandle})
+	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/gone/ack?receipt_handle="+url.QueryEscape(msg.ReceiptHandle), nil)
 	expectStatus(t, resp, http.StatusNotFound)
 }
 
-func TestAck_RejectsInvalidJSON(t *testing.T) {
+func TestAck_RejectsMalformedHandle(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "bad-json"})
+	mustCreateTopic(t, env, createTopicReq{Name: "bad-handle"})
 
-	resp := rawReq(t, http.MethodPost, env.Server.URL+"/v1/topics/bad-json/ack",
-		[]byte("{not json}"))
+	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/bad-handle/ack?receipt_handle=not-a-handle", nil)
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
-func TestAck_IgnoresUnknownFields(t *testing.T) {
+func TestAck_IgnoresUnknownQueryParams(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "extra-fields"})
-	mustProduce(t, env, "extra-fields", "k", map[string]int{"v": 1})
-	msg, found := mustConsume(t, env, "extra-fields", consumeQuery{})
+	mustCreateTopic(t, env, createTopicReq{Name: "extra-query"})
+	mustProduce(t, env, "extra-query", "k", map[string]int{"v": 1})
+	msg, found := mustConsume(t, env, "extra-query", consumeQuery{})
 	if !found {
 		t.Fatal("expected a message")
 	}
 
-	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/extra-fields/ack",
-		map[string]any{"receipt_handle": msg.ReceiptHandle, "garbage": true})
+	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/extra-query/ack?ignored=true&receipt_handle="+url.QueryEscape(msg.ReceiptHandle), nil)
 	expectStatus(t, resp, http.StatusNoContent)
 }
 
@@ -104,7 +101,6 @@ func TestAck_RejectsMissingHandle(t *testing.T) {
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "no-handle"})
 
-	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/no-handle/ack",
-		map[string]any{})
+	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/no-handle/ack", nil)
 	expectStatus(t, resp, http.StatusBadRequest)
 }

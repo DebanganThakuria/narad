@@ -16,6 +16,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/config"
@@ -35,7 +36,7 @@ type fakeBroker struct {
 	listTopicsFn              func(context.Context, metastore.ListOptions) ([]topic.Topic, string, error)
 	produceFn                 func(context.Context, string, string, []byte) (int64, int, error)
 	consumeFn                 func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error)
-	ackFn                     func(context.Context, string, string) error
+	ackFn                     func(context.Context, string, consumer.Handle) error
 	readyFn                   func(context.Context) error
 }
 
@@ -97,8 +98,8 @@ func (f *fakeBroker) Consume(ctx context.Context, topicName string, opts brokerm
 	return f.consumeFn(ctx, topicName, opts)
 }
 
-func (f *fakeBroker) Ack(ctx context.Context, topicName string, receiptHandle string) error {
-	return f.ackFn(ctx, topicName, receiptHandle)
+func (f *fakeBroker) Ack(ctx context.Context, topicName string, handle consumer.Handle) error {
+	return f.ackFn(ctx, topicName, handle)
 }
 func (f *fakeBroker) Snapshot(context.Context) ([]metrics.TopicSnapshot, error) { return nil, nil }
 func (f *fakeBroker) Ready(ctx context.Context) error {

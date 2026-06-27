@@ -188,9 +188,9 @@ func (e *Engine) replayRead(topicName string, partitionIdx int, offset int64, to
 // MaxInFlight cap). It does not block — callers handle long-polling.
 //
 // Reservation marks the offset invisible for visibilityTimeout. The
-// returned message carries an HMAC-signed receipt handle the consumer
-// must echo on Ack — the broker rejects acks for offsets the consumer
-// did not reserve, and acks whose visibility window has elapsed.
+// returned message carries a receipt handle the consumer must echo on
+// Ack — the broker rejects acks for offsets the consumer did not
+// reserve, and acks whose visibility window has elapsed.
 func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions []int, visibilityTimeout time.Duration) (topic.Message, bool, error) {
 	for _, idx := range partitions {
 		stageStart := time.Now()
@@ -238,7 +238,6 @@ func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions 
 			Payload:   payload,
 			Timestamp: time.Now().Unix(),
 			ReceiptHandle: consumer.EncodeHandle(consumer.Handle{
-				Topic:     topicName,
 				Partition: idx,
 				Offset:    res.Offset,
 				Nonce:     res.Nonce,

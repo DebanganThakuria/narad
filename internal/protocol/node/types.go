@@ -52,8 +52,10 @@ type ConsumeRequest struct {
 }
 
 type AckRequest struct {
-	Topic         string
-	ReceiptHandle string
+	Topic     string
+	Partition int
+	Offset    int64
+	Nonce     int64
 }
 
 type TopicBodyRequest struct {

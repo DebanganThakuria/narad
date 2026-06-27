@@ -16,6 +16,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -250,7 +251,11 @@ func (s *RPCServer) handleAck(payload []byte) nodewire.Response {
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid ack request: "+err.Error())
 	}
-	if err := s.broker.Ack(rpcRequestContext(), req.Topic, req.ReceiptHandle); err != nil {
+	if err := s.broker.Ack(rpcRequestContext(), req.Topic, consumer.Handle{
+		Partition: req.Partition,
+		Offset:    req.Offset,
+		Nonce:     req.Nonce,
+	}); err != nil {
 		return s.brokerError("ack", err)
 	}
 	return nodewire.Response{Status: http.StatusNoContent}
@@ -493,8 +498,7 @@ func (s *RPCServer) brokerError(op string, err error) nodewire.Response {
 		return errorResponse(http.StatusNotFound, "topic not found")
 	case errors.Is(err, errs.ErrTopicAlreadyExists):
 		return errorResponse(http.StatusConflict, "topic already exists")
-	case errors.Is(err, errs.ErrHandleMalformed),
-		errors.Is(err, errs.ErrHandleTopicMismatch):
+	case errors.Is(err, errs.ErrHandleMalformed):
 		return errorResponse(http.StatusBadRequest, err.Error())
 	case errors.Is(err, errs.ErrHandleStale):
 		return errorResponse(http.StatusGone, err.Error())

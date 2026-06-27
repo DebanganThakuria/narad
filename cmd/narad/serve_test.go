@@ -2353,7 +2353,7 @@ func (stubBroker) CommitAcceptedProduceBatch(_ context.Context, records []ingres
 func (stubBroker) Consume(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {
 	return topic.Message{}, false, nil
 }
-func (stubBroker) Ack(context.Context, string, string) error                 { return nil }
+func (stubBroker) Ack(context.Context, string, consumer.Handle) error        { return nil }
 func (stubBroker) Snapshot(context.Context) ([]metrics.TopicSnapshot, error) { return nil, nil }
 func (stubBroker) Ready(context.Context) error                               { return nil }
 func (stubBroker) Close() error                                              { return nil }

@@ -95,7 +95,7 @@ func TestQueueConsumeSkipsCorruptFrameEndToEnd(t *testing.T) {
 			continue
 		}
 		delivered[msg.Offset] = string(msg.Payload)
-		if err := engine.Ack(ctx, topicName, msg.ReceiptHandle); err != nil {
+		if err := engine.Ack(ctx, topicName, decodeHandleForTest(t, msg.ReceiptHandle)); err != nil {
 			t.Fatalf("Ack(offset=%d): %v", msg.Offset, err)
 		}
 	}

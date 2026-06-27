@@ -93,7 +93,7 @@ func TestCommittedConsumeOffsetPersistsAcrossRestart(t *testing.T) {
 	if !found {
 		t.Fatal("Consume() found = false, want true")
 	}
-	if err := engine.Ack(context.Background(), "orders", first.ReceiptHandle); err != nil {
+	if err := engine.Ack(context.Background(), "orders", decodeHandleForTest(t, first.ReceiptHandle)); err != nil {
 		t.Fatalf("Ack() error = %v", err)
 	}
 	if err := engine.logs.CloseAll(); err != nil {
@@ -129,7 +129,7 @@ func TestCorruptCommittedConsumeOffsetFallsBackToBeginning(t *testing.T) {
 	if !found {
 		t.Fatal("Consume() found = false, want true")
 	}
-	if err := engine.Ack(context.Background(), "orders", first.ReceiptHandle); err != nil {
+	if err := engine.Ack(context.Background(), "orders", decodeHandleForTest(t, first.ReceiptHandle)); err != nil {
 		t.Fatalf("Ack() error = %v", err)
 	}
 	partitionDir := storage.TopicPartitionDir(dataDir, "orders", 0)

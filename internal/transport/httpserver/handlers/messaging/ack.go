@@ -1,21 +1,15 @@
 package messaging
 
 import (
-	"errors"
 	"net/http"
+	"net/url"
+	"strings"
 
-	"github.com/buger/jsonparser"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
-// ackRequest carries an opaque receipt handle previously returned by
-// Consume. Partition and offset are encoded inside the handle.
-type ackRequest struct {
-	ReceiptHandle string `json:"receipt_handle"`
-}
-
-// Ack handles POST /v1/topics/{topic}/ack.
+// Ack handles POST /v1/topics/{topic}/ack?receipt_handle=...
 func Ack(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")
@@ -24,32 +18,28 @@ func Ack(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
-		// Read body once — may need to forward to the partition owner.
-		body, ok := s.ReadBody(w, r, handlers.MaxAckBodyBytes)
-		if !ok {
+		receiptHandle, found, err := receiptHandleFromRawQuery(r.URL.RawQuery)
+		if err != nil {
+			s.WriteError(w, http.StatusBadRequest, "invalid receipt_handle: "+err.Error())
 			return
 		}
-
-		req, ok := decodeAckRequest(s, w, body)
-		if !ok {
-			return
-		}
-		if req.ReceiptHandle == "" {
+		if !found || receiptHandle == "" {
 			s.WriteError(w, http.StatusBadRequest, "receipt_handle required")
 			return
 		}
 
+		h, err := consumer.DecodeHandle(receiptHandle)
+		if err != nil {
+			s.WriteBrokerError(w, "ack", err)
+			return
+		}
 		if s.Deps.Router != nil {
-			// Decode the handle to extract the partition for routing.
-			// Full verification (nonce check) happens inside the broker.
-			if h, err := consumer.DecodeHandle(req.ReceiptHandle); err == nil {
-				if s.Deps.Router.RouteAck(r.Context(), w, r, topicName, h.Partition, body) {
-					return
-				}
+			if s.Deps.Router.RouteAck(r.Context(), w, r, topicName, h) {
+				return
 			}
 		}
 
-		if err := s.Deps.Broker.Ack(r.Context(), topicName, req.ReceiptHandle); err != nil {
+		if err := s.Deps.Broker.Ack(r.Context(), topicName, h); err != nil {
 			s.WriteBrokerError(w, "ack", err)
 			return
 		}
@@ -57,25 +47,43 @@ func Ack(s *handlers.Set) http.HandlerFunc {
 	}
 }
 
-func decodeAckRequest(s *handlers.Set, w http.ResponseWriter, body []byte) (ackRequest, bool) {
-	req, err := parseAckRequest(body)
-	if err != nil {
-		s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
-		return ackRequest{}, false
-	}
-	return req, true
-}
-
-func parseAckRequest(body []byte) (ackRequest, error) {
-	var req ackRequest
-	receiptHandle, err := jsonparser.GetString(body, "receipt_handle")
-	if err != nil {
-		if errors.Is(err, jsonparser.KeyPathNotFoundError) ||
-			errors.Is(err, jsonparser.NullValueError) {
-			return req, nil
+func receiptHandleFromRawQuery(raw string) (string, bool, error) {
+	for raw != "" {
+		part := raw
+		if idx := strings.IndexByte(raw, '&'); idx >= 0 {
+			part = raw[:idx]
+			raw = raw[idx+1:]
+		} else {
+			raw = ""
 		}
-		return req, err
+		if part == "" {
+			continue
+		}
+
+		key, value, hasValue := strings.Cut(part, "=")
+		if key != "receipt_handle" {
+			if !strings.ContainsAny(key, "%+") {
+				continue
+			}
+			unescaped, err := url.QueryUnescape(key)
+			if err != nil {
+				return "", false, err
+			}
+			if unescaped != "receipt_handle" {
+				continue
+			}
+		}
+		if !hasValue || value == "" {
+			return "", true, nil
+		}
+		if strings.ContainsAny(value, "%+") {
+			unescaped, err := url.QueryUnescape(value)
+			if err != nil {
+				return "", true, err
+			}
+			return unescaped, true, nil
+		}
+		return value, true, nil
 	}
-	req.ReceiptHandle = receiptHandle
-	return req, nil
+	return "", false, nil
 }

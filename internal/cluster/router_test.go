@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
@@ -462,9 +463,9 @@ func TestRouteAckReturnsFalseWhenOwnerMissing(t *testing.T) {
 	store := newTestStore(t)
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
 	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", bytes.NewBufferString(`{"receipt_handle":"h1"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", nil)
 
-	forwarded := router.RouteAck(context.Background(), res, req, "orders", 0, []byte(`{"receipt_handle":"h1"}`))
+	forwarded := router.RouteAck(context.Background(), res, req, "orders", consumer.Handle{Partition: 0, Offset: 1, Nonce: 2})
 	if forwarded {
 		t.Fatal("RouteAck() = true, want false")
 	}
@@ -1182,17 +1183,10 @@ func TestRemoteConsumeCandidatesLimitOneProbePerRemoteOwner(t *testing.T) {
 	}
 }
 
-func TestRouteAckForwardsBodyToRemoteOwner(t *testing.T) {
+func TestRouteAckForwardsHandleToRemoteOwner(t *testing.T) {
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s, want %s", r.Method, http.MethodPost)
-		}
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("ReadAll() error = %v", err)
-		}
-		if string(body) != `{"receipt_handle":"h1"}` {
-			t.Fatalf("body = %q, want %q", body, `{"receipt_handle":"h1"}`)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -1211,15 +1205,16 @@ func TestRouteAckForwardsBodyToRemoteOwner(t *testing.T) {
 		if addr != remote.Listener.Addr().String() {
 			t.Fatalf("addr = %q, want %q", addr, remote.Listener.Addr().String())
 		}
-		if req.Topic != "orders" || req.ReceiptHandle != "h1" {
-			t.Fatalf("ack request = %+v, want orders/h1", req)
+		want := nodewire.AckRequest{Topic: "orders", Partition: 0, Offset: 1, Nonce: 2}
+		if req != want {
+			t.Fatalf("ack request = %+v, want %+v", req, want)
 		}
 		return nodewire.Response{Status: http.StatusOK, Body: []byte("ok")}, nil
 	}}
 	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", bytes.NewBufferString(`{"receipt_handle":"h1"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", nil)
 
-	forwarded := router.RouteAck(context.Background(), res, req, "orders", 0, []byte(`{"receipt_handle":"h1"}`))
+	forwarded := router.RouteAck(context.Background(), res, req, "orders", consumer.Handle{Partition: 0, Offset: 1, Nonce: 2})
 	if !forwarded {
 		t.Fatal("RouteAck() = false, want true")
 	}
