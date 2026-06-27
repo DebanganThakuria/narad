@@ -8,19 +8,26 @@
   <img src="./assets/narad.png" alt="Narad logo: durable messages, timeless connections" width="420">
 </p>
 
-Narad is a lightweight, durable, queue-first event streaming system built
-in Go. Producers push raw message bodies to topics; consumers pull with
-optional long-polling, acknowledge with receipt handles, and can replay
-from explicit offsets. Topics can opt into JSON-Schema validation when
-they need JSON enforcement.
+Narad is a lightweight, queue-first event streaming system built in Go.
+It provides durable append-only storage, HTTP produce/consume/ack APIs,
+Raft-backed metadata, Prometheus metrics, and a single static binary that
+is straightforward to run locally or in Kubernetes.
 
-## Why Narad
+Narad is currently **pre-1.0**. It is suitable for local evaluation,
+experimentation, and early integration work. It should not be exposed
+directly to untrusted networks or used as a production dependency until
+the production-readiness gates documented below are complete.
 
-Narad is aimed at teams that want a small, understandable event system
-with queue semantics, explicit operational tradeoffs, and a single Go
-binary that is easy to run locally and in Kubernetes.
+## Overview
 
-It focuses on:
+Narad is designed for teams that want a small, understandable event
+system with queue semantics and explicit operational tradeoffs. Producers
+send raw message bodies to topics; consumers pull with optional
+long-polling, acknowledge with receipt handles, and can replay from
+explicit offsets. Topics can opt into JSON-Schema validation when they
+need JSON enforcement.
+
+Core capabilities:
 
 - durable append-only segmented storage
 - queue-style consume/ack semantics with replay support
@@ -31,11 +38,20 @@ It focuses on:
 
 ## Project status
 
-Narad is pre-1.0 and under active development.
+Narad is under active development. The current public release line starts
+at `v0.1.0-alpha.1`.
 
-Today, the control plane, WAL-first data plane, HTTP API, CLI surface,
-topic CRUD, consumer flows, and core storage paths are covered by unit
-and end-to-end tests.
+| Area | Status |
+|---|---|
+| API and CLI | Functional, pre-1.0 compatibility |
+| Storage engine | WAL-first produce path and segmented partition logs |
+| Cluster metadata | Raft+bbolt control plane |
+| Delivery model | At-least-once; consumers must be idempotent |
+| Security | No built-in API auth, TLS, or rate limiting yet |
+| Production use | Blocked on the readiness gates below |
+
+CI runs race-enabled unit and end-to-end tests, plus local 3-node
+integration and chaos smoke tests.
 
 ## Community and project docs
 
@@ -44,12 +60,6 @@ and end-to-end tests.
 - [Security policy](./SECURITY.md)
 - [PCA flow diagrams](./PCA_FLOWS.md)
 - [License](./LICENSE)
-
-## Visual identity
-
-<p align="center">
-  <img src="./assets/narad-design.png" alt="Narad visual identity sheet with logo variants, icons, and design notes" width="720">
-</p>
 
 ## Architecture
 
@@ -162,15 +172,34 @@ tests/
 
 ## Quickstart
 
+Install the current alpha with Go:
+
+```sh
+go install github.com/debanganthakuria/narad/cmd/narad@v0.1.0-alpha.1
+narad serve
+```
+
+Or build from a source checkout:
+
 ```sh
 make build         # produces bin/narad
 bin/narad serve    # listens on :7942 (API) and :7943 (cluster/Raft)
 ```
 
+The development server has no built-in API authentication or TLS yet.
+Bind it only to loopback or a trusted network.
+
 ### Container Image
 
-Narad ships as a single static binary inside a small non-root container image.
-The default local image name is the public GHCR path:
+Narad ships as a single static binary inside a small non-root container
+image. Published images are available from GHCR:
+
+```sh
+docker pull ghcr.io/debanganthakuria/narad:v0.1.0-alpha.1
+docker run --rm -p 7942:7942 -p 7943:7943 ghcr.io/debanganthakuria/narad:v0.1.0-alpha.1
+```
+
+For local image development:
 
 ```sh
 make docker-build
@@ -180,11 +209,6 @@ make docker-push
 The CI workflow in `.github/workflows/container.yml` publishes multi-arch
 images to `ghcr.io/debanganthakuria/narad` on `master`, version tags, and
 manual workflow dispatches. The default branch also gets the `latest` tag.
-
-If this repository remains private, the first GHCR package may be created as a
-private package. After the first successful publish, change the package
-visibility to public in GitHub Packages before using it from a cluster without
-an image pull secret.
 
 The image starts `narad serve` by default, listens on `7942` for the public API
 and `7943` for cluster traffic, and uses `/var/lib/narad` as the data
@@ -649,12 +673,9 @@ logs per test, exposed via `httptest`. Tests are split by feature surface.
 `.github/workflows/container.yml` publishes the multi-arch GHCR image on
 `master`, version tags, and manual dispatch.
 
-For public-release readiness, `.github/settings.yml` declares the intended
-repository defaults — require PR review + passing checks on `master`,
-squash-only merges, delete-branch-on-merge, security scanning, and
-Dependabot. It is declarative config for settings-sync tools, making the
-target public-repo posture reviewable without changing repository
-visibility yet.
+`.github/settings.yml` documents the intended public repository defaults:
+PR review, required checks on `master`, squash-only merges,
+delete-branch-on-merge, security scanning, and Dependabot.
 
 ## Third-party libraries
 
@@ -690,12 +711,21 @@ no CGO requirement.
   the public listener (standard Prometheus convention); pprof is a
   separate, opt-in listener.
 
+## Brand assets
+
+The project logo and identity sheet live under [`assets/`](./assets/).
+
+<p align="center">
+  <img src="./assets/narad-design.png" alt="Narad visual identity sheet with logo variants, icons, and design notes" width="720">
+</p>
+
 ## Production readiness
 
-Narad is pre-1.0. The code is well-tested — full race suite, plus 3-node
-integration and chaos in CI — but the following must land before a
-production or externally-exposed rollout. The first two are **hard
-gates**; until they ship, run Narad only behind a trusted boundary.
+Narad is pre-1.0. The code has race-enabled unit and end-to-end coverage,
+plus 3-node integration and chaos smoke tests in CI, but the following
+work must land before a production or externally exposed rollout. The
+first two are **hard gates**; until they ship, run Narad only behind a
+trusted boundary.
 
 1. **API auth, rate limiting & TLS (hard gate).** The HTTP API has no
    authn/authz, no TLS, and no rate limiting today. Until this lands,
