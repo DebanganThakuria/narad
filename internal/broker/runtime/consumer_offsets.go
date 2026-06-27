@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -90,7 +91,10 @@ func (c *ConsumerOffsetCommitter) flush() error {
 	var firstErr error
 	for _, commit := range commits {
 		partitionDir := storage.TopicPartitionDir(c.dataDir, commit.key.topic, commit.key.partition)
-		if err := storage.WriteConsumerOffset(partitionDir, commit.offset); err != nil {
+		if err := storage.WriteConsumerOffsetIfPartitionDirExists(partitionDir, commit.offset); err != nil {
+			if errors.Is(err, storage.ErrPartitionDirMissing) {
+				continue
+			}
 			if firstErr == nil {
 				firstErr = fmt.Errorf("write consumer offset %s/%d=%d: %w", commit.key.topic, commit.key.partition, commit.offset, err)
 			}
