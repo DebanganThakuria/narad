@@ -106,8 +106,11 @@ func mustProduce(t *testing.T, e *env, topicName, key string, val any) produceRe
 		t.Fatalf("mustProduce marshal: %v", err)
 	}
 	before := topicNextOffsets(t, e, topicName)
-	resp := jsonReq(t, http.MethodPost, e.Server.URL+"/v1/topics/"+topicName+"/produce",
-		map[string]any{"key": key, "message": json.RawMessage(payload)})
+	u := e.Server.URL + "/v1/topics/" + topicName + "/produce"
+	if key != "" {
+		u += "?key=" + url.QueryEscape(key)
+	}
+	resp := rawReq(t, http.MethodPost, u, payload)
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("mustProduce %q: got %d body=%s", topicName, resp.StatusCode, readBody(resp))
 	}
@@ -201,14 +204,14 @@ func getJSON(t *testing.T, url string) *http.Response {
 	return jsonReq(t, http.MethodGet, url, nil)
 }
 
-// rawReq sends raw bytes with Content-Type: application/json.
+// rawReq sends raw bytes.
 func rawReq(t *testing.T, method, url string, body []byte) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(method, url, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("rawReq: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/octet-stream")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("rawReq do: %v", err)

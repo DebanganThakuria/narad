@@ -80,10 +80,13 @@ func produceMessages(ctx context.Context, lb *roundRobinClient, jobs []messageJo
 }
 
 func produceOne(ctx context.Context, lb *roundRobinClient, job messageJob) error {
-	path := "/v1/topics/" + url.PathEscape(job.Topic) + "/produce"
-	req := produceRequest{Key: job.Key, Message: job.Body}
+	path := "/v1/topics/" + url.PathEscape(job.Topic) + "/produce?key=" + url.QueryEscape(job.Key)
+	body, err := json.Marshal(job.Body)
+	if err != nil {
+		return err
+	}
 	return retry(ctx, 20, 100*time.Millisecond, func() error {
-		_, _, err := lb.do(ctx, http.MethodPost, path, req, nil, http.StatusAccepted)
+		_, _, err := lb.doRaw(ctx, http.MethodPost, path, body, nil, http.StatusAccepted)
 		return err
 	})
 }

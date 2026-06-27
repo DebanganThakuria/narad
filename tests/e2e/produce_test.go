@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -65,8 +66,7 @@ func TestProduce_AcceptsArrayMessage(t *testing.T) {
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "arr"})
 
-	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/arr/produce",
-		map[string]any{"message": []int{1, 2, 3}})
+	resp := rawReq(t, http.MethodPost, env.Server.URL+"/v1/topics/arr/produce", []byte(`[1,2,3]`))
 	expectStatus(t, resp, http.StatusAccepted)
 	_ = resp.Body.Close()
 }
@@ -76,63 +76,56 @@ func TestProduce_AcceptsStringMessage(t *testing.T) {
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "str"})
 
-	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/str/produce",
-		map[string]any{"message": "hello"})
+	resp := rawReq(t, http.MethodPost, env.Server.URL+"/v1/topics/str/produce", []byte(`hello`))
 	expectStatus(t, resp, http.StatusAccepted)
 	_ = resp.Body.Close()
 }
 
-// TestProduce_AcceptsEmptyStringMessage documents current behaviour:
-// an empty JSON string ("") is technically valid JSON, so the produce
-// handler accepts it. If we ever want to reject zero-content payloads
-// the policy should live in handlers/produce.go's Validate, not here.
+// TestProduce_AcceptsQuotedEmptyStringMessage documents that a non-empty raw
+// body is accepted even if the logical payload is an empty JSON string.
 func TestProduce_AcceptsEmptyStringMessage(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "empty-str"})
 
-	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/empty-str/produce",
-		map[string]any{"message": ""})
+	resp := rawReq(t, http.MethodPost, env.Server.URL+"/v1/topics/empty-str/produce", []byte(`""`))
 	expectStatus(t, resp, http.StatusAccepted)
 	_ = resp.Body.Close()
 }
 
-func TestProduce_RejectsMissingMessage(t *testing.T) {
+func TestProduce_RejectsEmptyBody(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "no-msg"})
 
-	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/no-msg/produce",
-		map[string]any{"key": "k"})
+	resp := rawReq(t, http.MethodPost, env.Server.URL+"/v1/topics/no-msg/produce?key=k", nil)
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
-func TestProduce_IgnoresUnknownFields(t *testing.T) {
+func TestProduce_IgnoresUnknownQueryParams(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "extra"})
 
-	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/extra/produce",
-		map[string]any{"message": map[string]string{"v": "1"}, "garbage": true})
+	resp := rawReq(t, http.MethodPost, env.Server.URL+"/v1/topics/extra/produce?garbage=true", []byte(`{"v":"1"}`))
 	expectStatus(t, resp, http.StatusAccepted)
 	_ = resp.Body.Close()
 }
 
-func TestProduce_RejectsInvalidJSON(t *testing.T) {
+func TestProduce_AcceptsInvalidJSONWithoutSchema(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "bad-json"})
 
 	resp := rawReq(t, http.MethodPost, env.Server.URL+"/v1/topics/bad-json/produce",
 		[]byte("{not valid"))
-	expectStatus(t, resp, http.StatusBadRequest)
+	expectStatus(t, resp, http.StatusAccepted)
 }
 
 func TestProduce_NotFoundForUnknownTopic(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/never-created/produce",
-		map[string]any{"message": map[string]string{"x": "1"}})
+	resp := rawReq(t, http.MethodPost, env.Server.URL+"/v1/topics/never-created/produce", []byte(`{"x":"1"}`))
 	expectStatus(t, resp, http.StatusNotFound)
 }
 
@@ -144,12 +137,8 @@ func TestProduce_RejectsOversizedBody(t *testing.T) {
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "big"})
 
-	// Construct a > 1MiB JSON body. We escape one quote inside the
-	// string so the result remains valid JSON, then pad with 'A's.
 	huge := strings.Builder{}
-	huge.WriteString(`{"message":"`)
 	huge.WriteString(strings.Repeat("A", (1<<20)+1024))
-	huge.WriteString(`"}`)
 
 	resp := rawReq(t, http.MethodPost, env.Server.URL+"/v1/topics/big/produce",
 		[]byte(huge.String()))
@@ -179,9 +168,9 @@ func TestProduce_ConcurrentProducersAcceptedAndVisible(t *testing.T) {
 		go func(w int) {
 			defer wg.Done()
 			for i := range perWriter {
-				resp := jsonReq(t, http.MethodPost,
+				resp := rawReq(t, http.MethodPost,
 					env.Server.URL+"/v1/topics/race/produce",
-					map[string]any{"message": map[string]int{"w": w, "i": i}})
+					[]byte(fmt.Sprintf(`{"w":%d,"i":%d}`, w, i)))
 				if resp.StatusCode != http.StatusAccepted {
 					failed.Add(1)
 					_ = resp.Body.Close()

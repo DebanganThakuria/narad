@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"testing"
@@ -147,20 +146,18 @@ func TestProduceNonExistentTopic(t *testing.T) {
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
-	resp := env.post("/v1/topics/no-such/produce", map[string]any{
-		"message": json.RawMessage(`{}`),
-	})
+	resp := env.rawPost("/v1/topics/no-such/produce", `{}`)
 	expectNotFound(t, resp)
 }
 
-func TestProduceInvalidJSON(t *testing.T) {
+func TestProduceAcceptsInvalidJSONWithoutSchema(t *testing.T) {
 	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
 
 	env.createTopic("produce-bad", 3, 2, int64(0))
 
-	// Send a raw body with an unquoted string, which is not valid JSON.
-	resp := env.rawPost("/v1/topics/produce-bad/produce", `{"key": "k", "message": not-json}`)
-	expectBadRequest(t, resp)
+	resp := env.rawPost("/v1/topics/produce-bad/produce?key=k", `{not-json`)
+	expectStatus(t, resp, http.StatusAccepted)
+	_ = resp.Body.Close()
 }

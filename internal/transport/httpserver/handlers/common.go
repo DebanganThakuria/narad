@@ -36,7 +36,8 @@ import (
 )
 
 const (
-	MaxJSONBodyBytes int64 = 1 << 20
+	MaxJSONBodyBytes    int64 = 1 << 20
+	MaxMessageBodyBytes int64 = 1 << 20
 
 	// DefaultMaxConsumeWait is the hard ceiling applied to a long-poll
 	// consume wait when Deps.MaxConsumeWait is left unset (<= 0). It stops

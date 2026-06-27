@@ -58,18 +58,18 @@ func createTopics(ctx context.Context, lb *roundRobinClient, cfg config, topics 
 }
 
 func verifySchemaRejection(ctx context.Context, lb *roundRobinClient, topicName string) error {
-	path := "/v1/topics/" + url.PathEscape(topicName) + "/produce"
-	req := map[string]any{
-		"key": "schema-reject",
-		"message": map[string]any{
-			"id":       123,
-			"topic":    topicName,
-			"sequence": "invalid",
-			"key":      "schema-reject",
-			"run_id":   "schema-reject",
-		},
+	path := "/v1/topics/" + url.PathEscape(topicName) + "/produce?key=schema-reject"
+	body, err := json.Marshal(map[string]any{
+		"id":       123,
+		"topic":    topicName,
+		"sequence": "invalid",
+		"key":      "schema-reject",
+		"run_id":   "schema-reject",
+	})
+	if err != nil {
+		return err
 	}
-	_, _, err := lb.do(ctx, http.MethodPost, path, req, nil, http.StatusBadRequest)
+	_, _, err = lb.doRaw(ctx, http.MethodPost, path, body, nil, http.StatusBadRequest)
 	return err
 }
 

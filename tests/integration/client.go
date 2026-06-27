@@ -16,6 +16,11 @@ func (lb *roundRobinClient) do(ctx context.Context, method, path string, body an
 	return lb.doTo(ctx, node, method, path, body, out, want...)
 }
 
+func (lb *roundRobinClient) doRaw(ctx context.Context, method, path string, body []byte, out any, want ...int) (int, []byte, error) {
+	node := lb.nodes[int(lb.next.Add(1)-1)%len(lb.nodes)]
+	return lb.doRawTo(ctx, node, method, path, body, out, want...)
+}
+
 func (lb *roundRobinClient) doTo(ctx context.Context, node, method, path string, body any, out any, want ...int) (int, []byte, error) {
 	var reader io.Reader
 	if body != nil {
@@ -32,6 +37,32 @@ func (lb *roundRobinClient) doTo(ctx context.Context, node, method, path string,
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	resp, err := lb.client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+	if !wantedStatus(resp.StatusCode, want) {
+		return resp.StatusCode, respBody, fmt.Errorf("%s %s returned status %d: %s", method, node+path, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	if out != nil && len(bytes.TrimSpace(respBody)) > 0 {
+		if err := json.Unmarshal(respBody, out); err != nil {
+			return resp.StatusCode, respBody, fmt.Errorf("decode %s %s: %w: %s", method, path, err, string(respBody))
+		}
+	}
+	return resp.StatusCode, respBody, nil
+}
+
+func (lb *roundRobinClient) doRawTo(ctx context.Context, node, method, path string, body []byte, out any, want ...int) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, node+path, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
 	resp, err := lb.client.Do(req)
 	if err != nil {
 		return 0, nil, err

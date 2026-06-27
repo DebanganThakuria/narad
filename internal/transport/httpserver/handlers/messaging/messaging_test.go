@@ -3,7 +3,6 @@ package messaging
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -209,7 +208,7 @@ func newTestSet(b broker.Broker, router handlers.Router) *handlers.Set {
 	})
 }
 
-func TestProduceHandlerAcceptsToBroker(t *testing.T) {
+func TestProduceHandlerAcceptsRawBodyToBroker(t *testing.T) {
 	var gotTopic, gotKey string
 	var gotPayload []byte
 	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
@@ -223,7 +222,7 @@ func TestProduceHandlerAcceptsToBroker(t *testing.T) {
 		}, nil
 	}}, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"key":"customer-1","message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce?key=customer-1", bytes.NewBufferString(`{"id":1}`))
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -250,12 +249,12 @@ func TestProduceHandlerDoesNotRouteBeforeAccept(t *testing.T) {
 		brokerCalled = true
 		return ingress.AcceptedProduce{TargetPartition: 1, CreatedAtUnixMs: 123}, nil
 	}}, &fakeRouter{routeProduceFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName, key string, body []byte) bool {
-		routerCalled = topicName == "orders" && key == "customer-1" && string(body) == `{"key":"customer-1","message":{"id":1}}`
+		routerCalled = topicName == "orders" && key == "customer-1" && string(body) == `{"id":1}`
 		w.WriteHeader(http.StatusAccepted)
 		return true
 	}})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"key":"customer-1","message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce?key=customer-1", bytes.NewBufferString(`{"id":1}`))
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -272,10 +271,58 @@ func TestProduceHandlerDoesNotRouteBeforeAccept(t *testing.T) {
 	}
 }
 
-func TestProduceHandlerRejectsInvalidRequest(t *testing.T) {
+func TestProduceHandlerAcceptsNonJSONRawBody(t *testing.T) {
+	var gotPayload []byte
+	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, _ string, _ string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
+		gotPayload = append([]byte(nil), payload...)
+		return ingress.AcceptedProduce{TargetPartition: 0, CreatedAtUnixMs: 123}, nil
+	}}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce?key=customer-1", bytes.NewBufferString(`not-json`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Produce(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
+	}
+	if string(gotPayload) != "not-json" {
+		t.Fatalf("Produce() payload = %q, want raw body", string(gotPayload))
+	}
+}
+
+func TestProduceHandlerDoesNotInterpretLegacyJSONEnvelope(t *testing.T) {
+	var gotKey string
+	var gotPayload []byte
+	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, _ string, key string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
+		gotKey = key
+		gotPayload = append([]byte(nil), payload...)
+		return ingress.AcceptedProduce{TargetPartition: 0, CreatedAtUnixMs: 123}, nil
+	}}, nil)
+
+	body := `{"key":"body-key","message":{"id":1}}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(body))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+
+	Produce(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
+	}
+	if gotKey == "" || gotKey == "body-key" {
+		t.Fatalf("Produce() key = %q, want generated key unrelated to body", gotKey)
+	}
+	if string(gotPayload) != body {
+		t.Fatalf("Produce() payload = %q, want full raw body", string(gotPayload))
+	}
+}
+
+func TestProduceHandlerRejectsEmptyBody(t *testing.T) {
 	s := newTestSet(&fakeBroker{}, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", nil)
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -289,7 +336,7 @@ func TestProduceHandlerRejectsInvalidRequest(t *testing.T) {
 func TestProduceHandlerRejectsInvalidPartitionQuery(t *testing.T) {
 	s := newTestSet(&fakeBroker{}, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce?partition=bad", bytes.NewBufferString(`{"message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce?partition=bad", bytes.NewBufferString(`{"id":1}`))
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -300,7 +347,7 @@ func TestProduceHandlerRejectsInvalidPartitionQuery(t *testing.T) {
 	}
 }
 
-func TestProduceHandlerSkipsRouterForPinnedPartition(t *testing.T) {
+func TestProduceHandlerPassesPinnedPartition(t *testing.T) {
 	brokerCalled := false
 	routerCalled := false
 	broker := &fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
@@ -312,7 +359,7 @@ func TestProduceHandlerSkipsRouterForPinnedPartition(t *testing.T) {
 		return false
 	}})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce?partition=2", bytes.NewBufferString(`{"key":"customer-1","message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce?key=customer-1&partition=2", bytes.NewBufferString(`{"id":1}`))
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -332,14 +379,47 @@ func TestProduceHandlerSkipsRouterForPinnedPartition(t *testing.T) {
 	}
 }
 
-func TestProduceHandlerGeneratesKeyWhenMissing(t *testing.T) {
+func TestProduceHandlerGeneratesKeyWhenMissingOrEmpty(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{"missing", "/v1/topics/orders/produce"},
+		{"empty", "/v1/topics/orders/produce?key="},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotKey string
+			s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
+				gotKey = key
+				return ingress.AcceptedProduce{Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
+			}}, nil)
+
+			req := httptest.NewRequest(http.MethodPost, tt.url, bytes.NewBufferString(`{"id":1}`))
+			req.SetPathValue("topic", "orders")
+			res := httptest.NewRecorder()
+
+			Produce(s).ServeHTTP(res, req)
+
+			if res.Code != http.StatusAccepted {
+				t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
+			}
+			if gotKey == "" {
+				t.Fatal("Produce() did not generate a key")
+			}
+		})
+	}
+}
+
+func TestProduceHandlerParsesEscapedKey(t *testing.T) {
 	var gotKey string
 	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
 		gotKey = key
 		return ingress.AcceptedProduce{Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
 	}}, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce?key=customer%2D1%2Bnorth", bytes.NewBufferString(`{"id":1}`))
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -348,19 +428,19 @@ func TestProduceHandlerGeneratesKeyWhenMissing(t *testing.T) {
 	if res.Code != http.StatusAccepted {
 		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
 	}
-	if gotKey == "" {
-		t.Fatal("Produce() did not generate a key")
+	if gotKey != "customer-1+north" {
+		t.Fatalf("Produce() key = %q, want customer-1+north", gotKey)
 	}
 }
 
-func TestProduceHandlerIgnoresUnknownFields(t *testing.T) {
+func TestProduceHandlerIgnoresUnknownQueryParams(t *testing.T) {
 	var gotPayload []byte
 	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
 		gotPayload = append([]byte(nil), payload...)
 		return ingress.AcceptedProduce{Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
 	}}, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"ignored":true,"key":"customer-1","message":{"id":1},"also_ignored":{"nested":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce?ignored=true&key=customer-1&also_ignored=1", bytes.NewBufferString(`{"id":1}`))
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -370,49 +450,7 @@ func TestProduceHandlerIgnoresUnknownFields(t *testing.T) {
 		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
 	}
 	if string(gotPayload) != `{"id":1}` {
-		t.Fatalf("Produce() payload = %q, want raw message", string(gotPayload))
-	}
-}
-
-func TestProduceHandlerTreatsNullKeyAsMissing(t *testing.T) {
-	var gotKey string
-	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, _ []byte, _ ...int) (ingress.AcceptedProduce, error) {
-		gotKey = key
-		return ingress.AcceptedProduce{Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
-	}}, nil)
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"key":null,"message":{"id":1}}`))
-	req.SetPathValue("topic", "orders")
-	res := httptest.NewRecorder()
-
-	Produce(s).ServeHTTP(res, req)
-
-	if res.Code != http.StatusAccepted {
-		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
-	}
-	if gotKey == "" {
-		t.Fatal("Produce() did not generate a key")
-	}
-}
-
-func TestProduceHandlerPreservesStringMessagePayload(t *testing.T) {
-	var gotPayload []byte
-	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, _ string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
-		gotPayload = append([]byte(nil), payload...)
-		return ingress.AcceptedProduce{Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
-	}}, nil)
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":"hello\nworld"}`))
-	req.SetPathValue("topic", "orders")
-	res := httptest.NewRecorder()
-
-	Produce(s).ServeHTTP(res, req)
-
-	if res.Code != http.StatusAccepted {
-		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
-	}
-	if string(gotPayload) != `"hello\nworld"` {
-		t.Fatalf("Produce() payload = %q, want quoted string payload", string(gotPayload))
+		t.Fatalf("Produce() payload = %q, want raw body", string(gotPayload))
 	}
 }
 
@@ -430,19 +468,14 @@ func TestProduceHandlerAcceptsWithGeneratedKeyAndDoesNotRoute(t *testing.T) {
 		if key == "" {
 			t.Fatal("router key is empty")
 		}
-
-		var req produceRequest
-		if err := json.Unmarshal(body, &req); err != nil {
-			t.Fatalf("json.Unmarshal() error = %v", err)
-		}
-		if req.Key != key {
-			t.Fatalf("forwarded body key = %q, want %q", req.Key, key)
+		if string(body) != `{"id":1}` {
+			t.Fatalf("forwarded body = %q, want raw body", string(body))
 		}
 		w.WriteHeader(http.StatusAccepted)
 		return true
 	}})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"id":1}`))
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -473,14 +506,14 @@ func TestProduceHandlerPreservesExplicitKeyWhenAccepting(t *testing.T) {
 		if key != "customer-1" {
 			t.Fatalf("key = %q, want customer-1", key)
 		}
-		if string(body) != `{"key":"customer-1","message":{"id":1}}` {
-			t.Fatalf("forwarded body = %s", body)
+		if string(body) != `{"id":1}` {
+			t.Fatalf("forwarded body = %q, want raw body", string(body))
 		}
 		w.WriteHeader(http.StatusAccepted)
 		return true
 	}})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"key":"customer-1","message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce?key=customer-1", bytes.NewBufferString(`{"id":1}`))
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -502,7 +535,7 @@ func TestProduceHandlerMapsBrokerError(t *testing.T) {
 		return ingress.AcceptedProduce{}, errs.ErrTopicNotFound
 	}}, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"id":1}`))
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -956,80 +989,57 @@ func TestAckHandlerMapsBrokerError(t *testing.T) {
 	}
 }
 
-func TestProduceRequestValidate(t *testing.T) {
-	if err := (produceRequest{}).Validate(); err == nil {
-		t.Fatal("Validate() error = nil, want error")
-	}
-	if err := (produceRequest{Message: json.RawMessage(`{"id":1}`)}).Validate(); err != nil {
-		t.Fatalf("Validate() error = %v, want nil", err)
-	}
-	if err := (produceRequest{Message: json.RawMessage(`{"id":`)}).Validate(); err == nil {
-		t.Fatal("Validate() error = nil, want invalid JSON error")
-	}
-}
-
-func TestParseProduceRequestExtractsMessageValues(t *testing.T) {
+func TestProduceQueryFromRawQuery(t *testing.T) {
 	tests := []struct {
-		name        string
-		body        string
-		wantKey     string
-		wantMessage string
+		name             string
+		rawQuery         string
+		wantKey          string
+		wantPartition    int
+		wantHasPartition bool
+		wantErr          bool
 	}{
-		{"object", `{"key":"k1","message":{"id":1},"ignored":true}`, "k1", `{"id":1}`},
-		{"array", `{"message":[1,{"ok":true}]}`, "", `[1,{"ok":true}]`},
-		{"string", `{"message":"hello\nworld"}`, "", `"hello\nworld"`},
-		{"number", `{"message":123.45}`, "", `123.45`},
-		{"boolean", `{"message":true}`, "", `true`},
-		{"null message", `{"message":null}`, "", `null`},
-		{"null key", `{"key":null,"message":{"id":1}}`, "", `{"id":1}`},
-		{"escaped key", `{"key":"cust\u002d1","message":{"id":1}}`, "cust-1", `{"id":1}`},
+		{name: "empty"},
+		{name: "key only", rawQuery: "key=customer-1", wantKey: "customer-1"},
+		{name: "empty key", rawQuery: "key=", wantKey: ""},
+		{name: "key without value", rawQuery: "key", wantKey: ""},
+		{name: "escaped key value", rawQuery: "key=customer%2D1%2Bnorth", wantKey: "customer-1+north"},
+		{name: "encoded key name", rawQuery: "k%65y=customer-1", wantKey: "customer-1"},
+		{name: "partition only", rawQuery: "partition=2", wantPartition: 2, wantHasPartition: true},
+		{name: "key and partition", rawQuery: "ignored=1&key=customer-1&partition=3", wantKey: "customer-1", wantPartition: 3, wantHasPartition: true},
+		{name: "duplicate key", rawQuery: "key=a&key=b", wantErr: true},
+		{name: "duplicate partition", rawQuery: "partition=1&partition=2", wantErr: true},
+		{name: "empty partition", rawQuery: "partition=", wantErr: true},
+		{name: "partition without value", rawQuery: "partition", wantErr: true},
+		{name: "negative partition", rawQuery: "partition=-1", wantErr: true},
+		{name: "bad partition", rawQuery: "partition=bad", wantErr: true},
+		{name: "overflow partition", rawQuery: "partition=999999999999999999999999", wantErr: true},
+		{name: "bad key escape", rawQuery: "key=bad%ZZ", wantErr: true},
+		{name: "bad partition escape", rawQuery: "partition=%ZZ", wantErr: true},
+		{name: "bad encoded parameter name", rawQuery: "k%ZZy=value", wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseProduceRequest([]byte(tt.body))
+			got, err := produceQueryFromRawQuery(tt.rawQuery)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("produceQueryFromRawQuery() error = nil, want error")
+				}
+				return
+			}
 			if err != nil {
-				t.Fatalf("parseProduceRequest() error = %v", err)
+				t.Fatalf("produceQueryFromRawQuery() error = %v", err)
 			}
-			if got.Key != tt.wantKey {
-				t.Fatalf("key = %q, want %q", got.Key, tt.wantKey)
+			if got.key != tt.wantKey {
+				t.Fatalf("key = %q, want %q", got.key, tt.wantKey)
 			}
-			if string(got.Message) != tt.wantMessage {
-				t.Fatalf("message = %q, want %q", string(got.Message), tt.wantMessage)
+			if got.hasPartition != tt.wantHasPartition {
+				t.Fatalf("hasPartition = %v, want %v", got.hasPartition, tt.wantHasPartition)
 			}
-		})
-	}
-}
-
-func TestParseProduceRequestFieldErrors(t *testing.T) {
-	tests := []struct {
-		name string
-		body string
-	}{
-		{"bad key type", `{"key":123,"message":{"id":1}}`},
-		{"malformed message", `{"message":{"id":1`},
-		{"malformed key string", `{"key":"bad\uZZZZ","message":{"id":1}}`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := parseProduceRequest([]byte(tt.body)); err == nil {
-				t.Fatal("parseProduceRequest() error = nil, want error")
+			if got.partition != tt.wantPartition {
+				t.Fatalf("partition = %d, want %d", got.partition, tt.wantPartition)
 			}
 		})
-	}
-}
-
-func TestParseProduceRequestMissingMessage(t *testing.T) {
-	got, err := parseProduceRequest([]byte(`{"key":"k1","ignored":true}`))
-	if err != nil {
-		t.Fatalf("parseProduceRequest() error = %v", err)
-	}
-	if got.Key != "k1" {
-		t.Fatalf("key = %q, want k1", got.Key)
-	}
-	if len(got.Message) != 0 {
-		t.Fatalf("message = %q, want empty", string(got.Message))
 	}
 }
 

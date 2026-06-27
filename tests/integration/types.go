@@ -52,11 +52,6 @@ type partitionStats struct {
 	Index int `json:"index"`
 }
 
-type produceRequest struct {
-	Key     string        `json:"key"`
-	Message messageRecord `json:"message"`
-}
-
 type messageRecord struct {
 	ID       string `json:"id"`
 	Topic    string `json:"topic"`

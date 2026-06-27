@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"testing"
 	"time"
@@ -32,10 +33,7 @@ func TestBatchedDispatchDeliversBacklogAcrossPartitions(t *testing.T) {
 	// records sit in the WAL at once and the dispatcher must batch the
 	// interleaved stream rather than commit one record at a time.
 	for i := range total {
-		resp := env.post("/v1/topics/batch-dispatch/produce", map[string]any{
-			"key":     fmt.Sprintf("k-%d", i),
-			"message": json.RawMessage(fmt.Sprintf(`{"n":%d}`, i)),
-		})
+		resp := env.rawPost("/v1/topics/batch-dispatch/produce?key="+url.QueryEscape(fmt.Sprintf("k-%d", i)), fmt.Sprintf(`{"n":%d}`, i))
 		expectStatus(t, resp, http.StatusAccepted)
 		_ = resp.Body.Close()
 	}
@@ -89,10 +87,7 @@ func TestBatchedDispatchPreservesPartitionOrder(t *testing.T) {
 	const total = 100
 	before := topicNextOffsets(t, env, "batch-order")
 	for i := range total {
-		resp := env.post("/v1/topics/batch-order/produce", map[string]any{
-			"key":     "fixed-key",
-			"message": json.RawMessage(fmt.Sprintf(`{"n":%d}`, i)),
-		})
+		resp := env.rawPost("/v1/topics/batch-order/produce?key=fixed-key", fmt.Sprintf(`{"n":%d}`, i))
 		expectStatus(t, resp, http.StatusAccepted)
 		resp.Body.Close()
 	}

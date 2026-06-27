@@ -59,10 +59,7 @@ func TestCreateTopicWithSchema(t *testing.T) {
 
 	env.produce("schema-on-create", "k", `{"id": 42, "name": "valid"}`)
 
-	resp = env.post("/v1/topics/schema-on-create/produce", map[string]any{
-		"key":     "bad",
-		"message": json.RawMessage(`{"id":"not-an-integer","name":"invalid"}`),
-	})
+	resp = env.rawPost("/v1/topics/schema-on-create/produce?key=bad", `{"id":"not-an-integer","name":"invalid"}`)
 	expectBadRequest(t, resp)
 }
 

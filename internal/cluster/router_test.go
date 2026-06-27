@@ -418,9 +418,9 @@ func TestRouteProduceReturnsFalseWhenTopicMissing(t *testing.T) {
 	store := newTestStore(t)
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
 	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"id":1}`))
 
-	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"message":{"id":1}}`))
+	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"id":1}`))
 	if forwarded {
 		t.Fatal("RouteProduce() = true, want false")
 	}
@@ -483,8 +483,8 @@ func TestRouteProduceForwardsToRemoteOwner(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReadAll() error = %v", err)
 		}
-		if string(body) != `{"message":{"id":1}}` {
-			t.Fatalf("body = %q, want %q", body, `{"message":{"id":1}}`)
+		if string(body) != `{"id":1}` {
+			t.Fatalf("body = %q, want %q", body, `{"id":1}`)
 		}
 		w.WriteHeader(http.StatusAccepted)
 	}))
@@ -512,15 +512,15 @@ func TestRouteProduceForwardsToRemoteOwner(t *testing.T) {
 		if req.Partition != 1 {
 			t.Fatalf("partition = %d, want 1", req.Partition)
 		}
-		if string(req.Payload) != `{"message":{"id":1}}` {
-			t.Fatalf("body = %q, want %q", req.Payload, `{"message":{"id":1}}`)
+		if string(req.Payload) != `{"id":1}` {
+			t.Fatalf("body = %q, want %q", req.Payload, `{"id":1}`)
 		}
 		return nodewire.Response{Status: http.StatusAccepted}, nil
 	}}
 	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"id":1}`))
 
-	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"message":{"id":1}}`))
+	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"id":1}`))
 	if !forwarded {
 		t.Fatal("RouteProduce() = false, want true")
 	}
@@ -571,9 +571,9 @@ func TestRouteProduceFallsBackToNextReachablePartition(t *testing.T) {
 		return nodewire.Response{Status: http.StatusOK, Body: []byte(`{"ok":true}`)}, nil
 	}}
 	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"id":1}`))
 
-	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"message":{"id":1}}`))
+	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"id":1}`))
 	if !forwarded {
 		t.Fatal("RouteProduce() = false, want true")
 	}
@@ -608,9 +608,9 @@ func TestRouteProduceReturnsFalseWhenNoOwnersReachable(t *testing.T) {
 		return nodewire.Response{}, context.DeadlineExceeded
 	}}
 	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"id":1}`))
 
-	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"message":{"id":1}}`))
+	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"id":1}`))
 	if forwarded {
 		t.Fatal("RouteProduce() = true, want false")
 	}
@@ -663,9 +663,9 @@ func TestRouteProduceSkipsDeadMemberThenRetriesTransportFailure(t *testing.T) {
 		return nodewire.Response{Status: http.StatusAccepted}, nil
 	}}
 	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"id":1}`))
 
-	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"message":{"id":1}}`))
+	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"id":1}`))
 	if !forwarded {
 		t.Fatal("RouteProduce() = false, want true")
 	}
@@ -730,9 +730,9 @@ func TestRouteProduceRetriesAfterNon2xxResponse(t *testing.T) {
 		return nodewire.Response{Status: http.StatusCreated, Body: []byte(`{"ok":true}`)}, nil
 	}}
 	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"id":1}`))
 
-	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"message":{"id":1}}`))
+	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"id":1}`))
 	if !forwarded {
 		t.Fatal("RouteProduce() = false, want true")
 	}
@@ -776,9 +776,9 @@ func TestRouteProduceReturnsFalseWhenAllResponsesAreNon2xx(t *testing.T) {
 	}
 	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 0}, nil)
 	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"id":1}`))
 
-	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"message":{"id":1}}`))
+	forwarded := router.RouteProduce(context.Background(), res, req, "orders", "customer-1", []byte(`{"id":1}`))
 	if forwarded {
 		t.Fatal("RouteProduce() = true, want false")
 	}
