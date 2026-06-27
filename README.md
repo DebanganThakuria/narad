@@ -4,6 +4,10 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/DebanganThakuria/narad)](./go.mod)
 
+<p align="center">
+  <img src="./assets/narad.png" alt="Narad logo: durable messages, timeless connections" width="420">
+</p>
+
 Narad is a lightweight, durable, queue-first event streaming system built
 in Go. Producers push raw message bodies to topics; consumers pull with
 optional long-polling, acknowledge with receipt handles, and can replay
@@ -40,6 +44,12 @@ and end-to-end tests.
 - [Security policy](./SECURITY.md)
 - [PCA flow diagrams](./PCA_FLOWS.md)
 - [License](./LICENSE)
+
+## Visual identity
+
+<p align="center">
+  <img src="./assets/narad-design.png" alt="Narad visual identity sheet with logo variants, icons, and design notes" width="720">
+</p>
 
 > **Current implementation status:** the control-plane architecture is in
 > place. The HTTP API, append-only segmented log, produce ingress WAL,
