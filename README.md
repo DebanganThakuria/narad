@@ -27,6 +27,11 @@ long-polling, acknowledge with receipt handles, and can replay from
 explicit offsets. Topics can opt into JSON-Schema validation when they
 need JSON enforcement.
 
+Narad's core vision is to provide a simple queue-like interface backed by
+durable logs: applications get familiar produce, consume, and ack
+workflows, while operators retain replayability and log-based recovery
+semantics.
+
 Core capabilities:
 
 - durable append-only segmented storage
