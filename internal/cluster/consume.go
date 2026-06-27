@@ -10,8 +10,7 @@ import (
 )
 
 type consumeNodeCandidate struct {
-	addr      string
-	partition int
+	addr string
 }
 
 type consumeProbeResult struct {
@@ -65,7 +64,7 @@ func (rt *Router) remoteConsumeCandidates(topicName string) []consumeNodeCandida
 			continue
 		}
 		seenOwners[addr] = struct{}{}
-		candidates = append(candidates, consumeNodeCandidate{addr: addr, partition: entry.partition})
+		candidates = append(candidates, consumeNodeCandidate{addr: addr})
 	}
 	if len(candidates) > 0 {
 		outcome = "hit"
@@ -73,17 +72,15 @@ func (rt *Router) remoteConsumeCandidates(topicName string) []consumeNodeCandida
 	return candidates
 }
 
-func (rt *Router) callConsumeProbe(ctx context.Context, r *http.Request, topicName string, candidate consumeNodeCandidate) consumeProbeResult {
+func (rt *Router) callConsumeProbe(ctx context.Context, topicName string, candidate consumeNodeCandidate) consumeProbeResult {
 	start := time.Now()
 	outcome := "forwarded"
 	defer func() {
 		rt.observe("consume", "remote_probe", outcome, time.Since(start))
 	}()
-	fwd := r.Clone(ctx)
-	req, err := consumeRPCRequestFromHTTP(fwd, topicName, &candidate.partition, true)
-	if err != nil {
-		outcome = "error"
-		return consumeProbeResult{err: err, fatal: true}
+	req := nodewire.ConsumeRequest{
+		Topic:     topicName,
+		LocalOnly: true,
 	}
 	res, err := rt.peer.Consume(ctx, candidate.addr, req)
 	if err != nil {

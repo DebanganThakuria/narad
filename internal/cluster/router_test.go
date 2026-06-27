@@ -927,8 +927,8 @@ func TestRouteConsumeReturnsNoContentWhenOnlyRemotePartitionsAreEmpty(t *testing
 		if addr != remote.Listener.Addr().String() {
 			t.Fatalf("addr = %q, want %q", addr, remote.Listener.Addr().String())
 		}
-		if !req.HasPartition || req.Partition != 0 {
-			t.Fatalf("partition request = %+v, want partition 0", req)
+		if req.HasPartition {
+			t.Fatalf("partition request = %+v, want unpinned local-only scan", req)
 		}
 		if !req.LocalOnly || req.WaitNanos != 0 {
 			t.Fatalf("local-only request = %+v, want local_only wait=0", req)
@@ -968,7 +968,10 @@ func TestRouteConsumeRemoteTreatsNotOwnerProbeAsEmpty(t *testing.T) {
 	}
 
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
-	router.peer = fakePeerClient{consumeFn: func(context.Context, string, nodewire.ConsumeRequest) (nodewire.Response, error) {
+	router.peer = fakePeerClient{consumeFn: func(_ context.Context, _ string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
+		if !req.LocalOnly || req.HasPartition || req.WaitNanos != 0 {
+			t.Fatalf("remote probe request = %+v, want unpinned local-only scan", req)
+		}
 		return nodewire.Response{Status: http.StatusMisdirectedRequest, Body: []byte(`{"error":"not owner"}`)}, nil
 	}}
 	res := httptest.NewRecorder()
@@ -1009,7 +1012,10 @@ func TestRouteConsumeRemoteStopsAfterFirstDeliveredProbe(t *testing.T) {
 
 	var calls []string
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
-	router.peer = fakePeerClient{consumeFn: func(_ context.Context, addr string, _ nodewire.ConsumeRequest) (nodewire.Response, error) {
+	router.peer = fakePeerClient{consumeFn: func(_ context.Context, addr string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
+		if !req.LocalOnly || req.HasPartition || req.WaitNanos != 0 {
+			t.Fatalf("remote probe request = %+v, want unpinned local-only scan", req)
+		}
 		calls = append(calls, addr)
 		if addr != "remote-a.example:7942" {
 			t.Fatalf("unexpected second remote consume probe to %q after first delivered", addr)
@@ -1100,16 +1106,13 @@ func TestRouteConsumeRemoteProbesEachRemoteOwnerOnce(t *testing.T) {
 		if !req.LocalOnly {
 			t.Fatalf("local_only = false, want true")
 		}
+		if req.HasPartition {
+			t.Fatalf("remote probe request = %+v, want unpinned local-only scan", req)
+		}
 		switch addr {
 		case remoteA.Listener.Addr().String():
-			if !req.HasPartition || req.Partition != 2 {
-				t.Fatalf("remote A request = %+v, want partition 2", req)
-			}
 			remoteAProbes++
 		case remoteB.Listener.Addr().String():
-			if !req.HasPartition || req.Partition != 4 {
-				t.Fatalf("remote B request = %+v, want partition 4", req)
-			}
 			remoteBProbes++
 		default:
 			t.Fatalf("unexpected addr %q", addr)
@@ -1167,19 +1170,14 @@ func TestRemoteConsumeCandidatesLimitOneProbePerRemoteOwner(t *testing.T) {
 	}
 
 	seen := map[string]bool{}
-	partitions := map[string]int{}
 	for _, candidate := range candidates {
 		if seen[candidate.addr] {
 			t.Fatalf("remoteConsumeCandidates() returned duplicate owner addr %q: %+v", candidate.addr, candidates)
 		}
 		seen[candidate.addr] = true
-		partitions[candidate.addr] = candidate.partition
 	}
 	if !seen["remote-a.example:7942"] || !seen["remote-b.example:7942"] {
 		t.Fatalf("remoteConsumeCandidates() owners = %v, want remote-a and remote-b", seen)
-	}
-	if partitions["remote-a.example:7942"] != 0 || partitions["remote-b.example:7942"] != 3 {
-		t.Fatalf("remoteConsumeCandidates() partitions = %v, want remote-a:0 remote-b:3", partitions)
 	}
 }
 

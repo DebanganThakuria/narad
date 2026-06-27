@@ -162,7 +162,7 @@ func (rt *Router) RouteConsumeRemote(ctx context.Context, w http.ResponseWriter,
 	}
 
 	for _, candidate := range candidates {
-		result := rt.callConsumeProbe(ctx, r, topicName, candidate)
+		result := rt.callConsumeProbe(ctx, topicName, candidate)
 		if result.err != nil {
 			if result.fatal {
 				outcome = "error"
