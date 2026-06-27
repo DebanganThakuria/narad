@@ -3,6 +3,7 @@ package messaging
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -739,7 +740,7 @@ func TestTryQueueReadReturnsMessageFromFirstReservablePartition(t *testing.T) {
 	if err := log0.AdvanceHighWatermark(1); err != nil {
 		t.Fatalf("AdvanceHighWatermark(0) error = %v", err)
 	}
-	if _, _, err := engine.tryQueueRead(context.Background(), "orders", []int{0}, time.Second); err != nil {
+	if _, _, err := engine.tryQueueRead(context.Background(), "orders", []int{0}, 0, time.Second); err != nil {
 		t.Fatalf("tryQueueRead() reserve first partition error = %v", err)
 	}
 
@@ -754,7 +755,7 @@ func TestTryQueueReadReturnsMessageFromFirstReservablePartition(t *testing.T) {
 		t.Fatalf("AdvanceHighWatermark(1) error = %v", err)
 	}
 
-	msg, found, err := engine.tryQueueRead(context.Background(), "orders", []int{0, 1}, time.Second)
+	msg, found, err := engine.tryQueueRead(context.Background(), "orders", []int{0, 1}, 0, time.Second)
 	if err != nil {
 		t.Fatalf("tryQueueRead() error = %v", err)
 	}
@@ -791,6 +792,49 @@ func TestConsumeScansPartitionsInOrder(t *testing.T) {
 	}
 	if msg.Partition != 1 || msg.Offset != 0 || string(msg.Payload) != `{"id":99}` {
 		t.Fatalf("Consume() message = %+v", msg)
+	}
+}
+
+func TestConsumeRotatesQueueScanStartAcrossLocalPartitions(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, VisibilityTimeoutMs: 1000}
+	engine := newTestEngine(t, ms, nil, nil)
+
+	for partition := 0; partition < 2; partition++ {
+		log, err := engine.logs.Get("orders", partition)
+		if err != nil {
+			t.Fatalf("Get(%d) error = %v", partition, err)
+		}
+		for offset := 0; offset < 2; offset++ {
+			if _, err := log.Append([]byte(fmt.Sprintf(`{"partition":%d,"offset":%d}`, partition, offset))); err != nil {
+				t.Fatalf("Append(%d,%d) error = %v", partition, offset, err)
+			}
+		}
+		if err := log.AdvanceHighWatermark(2); err != nil {
+			t.Fatalf("AdvanceHighWatermark(%d) error = %v", partition, err)
+		}
+	}
+
+	first, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Wait: 0})
+	if err != nil {
+		t.Fatalf("first Consume() error = %v", err)
+	}
+	if !found {
+		t.Fatal("first Consume() found = false, want true")
+	}
+	if first.Partition != 0 {
+		t.Fatalf("first Consume() partition = %d, want 0", first.Partition)
+	}
+
+	second, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Wait: 0})
+	if err != nil {
+		t.Fatalf("second Consume() error = %v", err)
+	}
+	if !found {
+		t.Fatal("second Consume() found = false, want true")
+	}
+	if second.Partition != 1 {
+		t.Fatalf("second Consume() partition = %d, want 1", second.Partition)
 	}
 }
 

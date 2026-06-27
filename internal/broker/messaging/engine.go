@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
@@ -133,6 +134,8 @@ type Engine struct {
 	assignmentCache map[string]cachedAssignments
 	memberCache     map[string]cachedRoutingMember
 	schemaLoadCache map[string]cachedSchemaLoad
+
+	consumeCursors sync.Map // topic name -> *atomic.Uint64
 }
 
 // NewEngine wires an Engine.
@@ -165,6 +168,15 @@ func NewEngine(
 		memberCache:     make(map[string]cachedRoutingMember),
 		schemaLoadCache: make(map[string]cachedSchemaLoad),
 	}
+}
+
+func (e *Engine) nextConsumeScanStart(topicName string, partitions int) int {
+	if partitions <= 1 {
+		return 0
+	}
+	counter, _ := e.consumeCursors.LoadOrStore(topicName, new(atomic.Uint64))
+	cursor := counter.(*atomic.Uint64).Add(1) - 1
+	return int(cursor % uint64(partitions))
 }
 
 func (e *Engine) Close() error {

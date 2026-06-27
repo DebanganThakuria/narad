@@ -68,6 +68,7 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 		totalOutcome = "error"
 		return topic.Message{}, false, err
 	}
+	scanStart := e.nextConsumeScanStart(topicName, len(scan))
 
 	visibilityTimeout := time.Duration(t.VisibilityTimeoutMs) * time.Millisecond
 
@@ -75,7 +76,7 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 	deadline := start.Add(opts.Wait)
 	for {
 		stageStart = time.Now()
-		msg, found, err := e.tryQueueRead(ctx, topicName, scan, visibilityTimeout)
+		msg, found, err := e.tryQueueRead(ctx, topicName, scan, scanStart, visibilityTimeout)
 		e.observe("consume", "try_queue_read", consumeStageOutcome(found, err), time.Since(stageStart))
 		if err != nil {
 			if e.metrics != nil {
@@ -191,8 +192,9 @@ func (e *Engine) replayRead(topicName string, partitionIdx int, offset int64, to
 // returned message carries a receipt handle the consumer must echo on
 // Ack — the broker rejects acks for offsets the consumer did not
 // reserve, and acks whose visibility window has elapsed.
-func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions []int, visibilityTimeout time.Duration) (topic.Message, bool, error) {
-	for _, idx := range partitions {
+func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions []int, scanStart int, visibilityTimeout time.Duration) (topic.Message, bool, error) {
+	for i := range partitions {
+		idx := partitions[(scanStart+i)%len(partitions)]
 		stageStart := time.Now()
 		log, err := e.logs.Get(topicName, idx)
 		e.observe("consume", "log_open", observeOutcome(err), time.Since(stageStart))
