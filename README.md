@@ -5,9 +5,10 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/DebanganThakuria/narad)](./go.mod)
 
 Narad is a lightweight, durable, queue-first event streaming system built
-in Go. Producers push JSON messages to topics; consumers pull with
+in Go. Producers push raw message bodies to topics; consumers pull with
 optional long-polling, acknowledge with receipt handles, and can replay
-from explicit offsets.
+from explicit offsets. Topics can opt into JSON-Schema validation when
+they need JSON enforcement.
 
 ## Why Narad
 
@@ -243,10 +244,10 @@ curl -X POST localhost:7942/v1/topics \
        "retention_ms":3600000,"visibility_timeout_ms":30000,
        "max_in_flight_per_partition":64,"max_acked_ahead_per_partition":256}'
 
-# Produce.
-curl -X POST localhost:7942/v1/topics/orders/produce \
-  -H 'Content-Type: application/json' \
-  -d '{"key":"customer-42","message":{"id":1,"amount":1500}}'
+# Produce. The body is the message; key and partition are optional query params.
+curl -X POST 'localhost:7942/v1/topics/orders/produce?key=customer-42' \
+  -H 'Content-Type: application/octet-stream' \
+  --data-binary '{"id":1,"amount":1500}'
 
 # Response: 202 Accepted with an empty body.
 
@@ -280,7 +281,8 @@ PATCH   /v1/topics/{topic}                  alter: partitions, retention_ms,
                                              max_in_flight_per_partition,
                                              max_acked_ahead_per_partition, schema
 DELETE  /v1/topics/{topic}                  delete topic and all data
-POST    /v1/topics/{topic}/produce          202 Accepted with an empty body
+POST    /v1/topics/{topic}/produce?key=&partition=
+                                             raw body; 202 Accepted with an empty body
 GET     /v1/topics/{topic}/consume          response carries receipt_handle
 POST    /v1/topics/{topic}/ack?receipt_handle=...
 GET     /healthz                            liveness
@@ -408,12 +410,15 @@ is an append-only file made of CRC-checked, optionally zstd-compressed
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-**Produce ingress path.** HTTP produce validates topic/schema, appends
-the request to the receiving pod's ingress WAL, and returns
-`202 Accepted` with an empty body. A background dispatcher replays
-durable WAL records and commits them to the selected owner partition.
-The WAL record ID is internal checkpointing only; clients do not receive
-a message ID, partition, or offset from produce.
+**Produce ingress path.** HTTP produce reads the request body as the raw
+message payload. Optional metadata (`key`, `partition`) comes from query
+params. For topics without a schema, Narad does not parse or validate the
+payload as JSON; it appends the bytes to the receiving pod's ingress WAL
+and returns `202 Accepted` with an empty body. Schema-enabled topics
+validate the same raw body before acceptance. A background dispatcher
+replays durable WAL records and commits them to the selected owner
+partition. The WAL record ID is internal checkpointing only; clients do
+not receive a message ID, partition, or offset from produce.
 
 **Partition append path.** Owner-side append pushes the record into a
 per-partition in-memory buffer and returns the assigned offset to the
@@ -574,8 +579,9 @@ calls.
 
 A topic can carry an optional JSON Schema, set at create time or via
 `PATCH /v1/topics/{topic}` with a `schema` field. When present, every
-produced message is validated against it and invalid payloads are
-rejected with **400**.
+produced message body must be valid JSON and match the schema; invalid
+payloads are rejected with **400**. Topics without a schema treat
+produced bodies as opaque bytes.
 
 Schema changes are **additive-only and backwards-compatible**, enforced
 at registration. You may add optional properties; but removing a

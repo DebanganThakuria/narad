@@ -5,11 +5,14 @@ for. These diagrams describe the current WAL-first design.
 
 ## Produce
 
-Produce can hit any Narad pod. The receiving pod validates the request,
-writes it to its local ingress WAL, and returns `202 Accepted`. A
-background dispatcher later commits the record to the partition owner.
-The response intentionally does not include a message ID, partition, or
-offset.
+Produce can hit any Narad pod. The body is the raw message payload;
+optional metadata such as `key` and `partition` is sent as query params.
+For topics without a schema, the receiving pod does not parse the body as
+JSON. Schema-enabled topics validate the raw body before accepting it.
+Accepted records are written to the local ingress WAL and the API returns
+`202 Accepted`. A background dispatcher later commits the record to the
+partition owner. The response intentionally does not include a message
+ID, partition, or offset.
 
 ```mermaid
 sequenceDiagram
@@ -23,9 +26,9 @@ sequenceDiagram
     participant O as Owner Pod<br/>Broker
     participant L as Owner Partition Log
 
-    C->>API: POST /v1/topics/{topic}/produce
+    C->>API: POST /v1/topics/{topic}/produce?key=...<br/>body = raw payload
     API->>MS: Read topic, schema, assignment
-    API->>API: Validate JSON/schema<br/>choose target partition
+    API->>API: Validate schema if configured<br/>choose target partition
     API->>WAL: Append accepted produce record
     WAL-->>API: fsynced to ingress WAL
     API-->>C: 202 Accepted<br/>empty body

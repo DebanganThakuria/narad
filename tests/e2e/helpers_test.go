@@ -339,14 +339,14 @@ func (e *env) del(path string) *http.Response {
 	return e.do(http.MethodDelete, path, nil)
 }
 
-// rawPost sends a raw string body (for testing invalid JSON payloads).
+// rawPost sends a raw string body.
 func (e *env) rawPost(path, rawBody string) *http.Response {
 	e.t.Helper()
 	req, err := http.NewRequest(http.MethodPost, e.url(path), strings.NewReader(rawBody))
 	if err != nil {
 		e.t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/octet-stream")
 	resp, err := e.client.Do(req)
 	if err != nil {
 		e.t.Fatalf("do: %v", err)
@@ -468,10 +468,11 @@ func (e *env) ack(topicName, handle string) {
 func (e *env) produce(topicName, key, msg string) (offset int64, partition int) {
 	e.t.Helper()
 	before := topicNextOffsets(e.t, e, topicName)
-	resp := e.post(fmt.Sprintf("/v1/topics/%s/produce", topicName), map[string]any{
-		"key":     key,
-		"message": json.RawMessage(msg),
-	})
+	path := fmt.Sprintf("/v1/topics/%s/produce", topicName)
+	if key != "" {
+		path += "?key=" + url.QueryEscape(key)
+	}
+	resp := e.rawPost(path, msg)
 	expectStatus(e.t, resp, http.StatusAccepted)
 	resp.Body.Close()
 	return waitForAnyVisibleOffset(e.t, e, topicName, before)

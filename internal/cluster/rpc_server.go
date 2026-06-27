@@ -40,11 +40,6 @@ type RPCServer struct {
 	broadcaster purgeBroadcaster
 }
 
-type rpcProduceBody struct {
-	Key     string          `json:"key,omitempty"`
-	Message json.RawMessage `json:"message"`
-}
-
 type rpcCreateTopicBody struct {
 	Name                      string          `json:"name"`
 	Partitions                int             `json:"partitions"`
@@ -195,21 +190,10 @@ func (s *RPCServer) handleProduce(payload []byte) nodewire.Response {
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid produce request: "+err.Error())
 	}
-	var body rpcProduceBody
-	if err := decodeStrictJSON(req.Payload, &body); err != nil {
-		return errorResponse(http.StatusBadRequest, "invalid json: "+err.Error())
-	}
-	if len(body.Message) == 0 {
+	if len(req.Payload) == 0 {
 		return errorResponse(http.StatusBadRequest, "message required")
 	}
-	if !json.Valid(body.Message) {
-		return errorResponse(http.StatusBadRequest, "message is not valid JSON")
-	}
-	key := req.Key
-	if key == "" {
-		key = body.Key
-	}
-	offset, partition, err := s.broker.Produce(rpcRequestContext(), req.Topic, key, []byte(body.Message), req.Partition)
+	offset, partition, err := s.broker.Produce(rpcRequestContext(), req.Topic, req.Key, req.Payload, req.Partition)
 	if err != nil {
 		return s.brokerError("produce", err)
 	}

@@ -224,13 +224,11 @@ func runClientProduce(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read stdin: %w", err)
 	}
-	if !json.Valid(body) {
-		return clientUsageErr("stdin is not valid JSON")
+	path := "/v1/topics/" + url.PathEscape(fs.Arg(0)) + "/produce"
+	if *key != "" {
+		path += "?key=" + url.QueryEscape(*key)
 	}
-	return newHTTPClient(*addr).postAndPrint(
-		"/v1/topics/"+url.PathEscape(fs.Arg(0))+"/produce",
-		map[string]any{"key": *key, "message": json.RawMessage(body)},
-	)
+	return newHTTPClient(*addr).postRawAndPrint(path, body)
 }
 
 func runClientConsume(args []string) error {
@@ -335,6 +333,24 @@ func (c *httpClient) do(method, path string, body any) (*http.Response, error) {
 	return resp, nil
 }
 
+func (c *httpClient) doRaw(method, path string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(context.Background(), method, c.addr+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := c.h.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("transport: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, formatErrorBody(b))
+	}
+	return resp, nil
+}
+
 // formatErrorBody renders the server's error body for human display.
 // The server sends `{"error":"..."}` for handled errors; we surface
 // just the message in that case. Anything else is shown verbatim
@@ -364,6 +380,15 @@ func (c *httpClient) getAndPrint(path string) error {
 
 func (c *httpClient) postAndPrint(path string, body any) error {
 	resp, err := c.do(http.MethodPost, path, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return printResponse(resp)
+}
+
+func (c *httpClient) postRawAndPrint(path string, body []byte) error {
+	resp, err := c.doRaw(http.MethodPost, path, body)
 	if err != nil {
 		return err
 	}
