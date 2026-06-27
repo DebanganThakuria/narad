@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
@@ -180,27 +181,23 @@ func (rt *Router) RouteConsumeRemote(ctx context.Context, w http.ResponseWriter,
 	return false, true
 }
 
-// RouteAck forwards an ack request to the owner of the given partition.
-// body is the already-read request body bytes.
+// RouteAck forwards an ack request to the owner of the handle partition.
 // Returns true if forwarded.
-func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, partition int, body []byte) bool {
+func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, handle consumer.Handle) bool {
 	start := time.Now()
 	outcome := "local"
 	defer func() {
 		rt.observe("ack", "route_total", outcome, time.Since(start))
 	}()
-	addr := rt.ownerAddr(topicName, partition)
+	addr := rt.ownerAddr(topicName, handle.Partition)
 	if addr == "" {
 		return false
 	}
-	receiptHandle, err := receiptHandleFromAckBody(body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return true
-	}
 	res, err := rt.peer.Ack(ctx, addr, nodewire.AckRequest{
-		Topic:         topicName,
-		ReceiptHandle: receiptHandle,
+		Topic:     topicName,
+		Partition: handle.Partition,
+		Offset:    handle.Offset,
+		Nonce:     handle.Nonce,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)

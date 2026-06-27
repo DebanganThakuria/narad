@@ -17,6 +17,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
@@ -56,7 +57,7 @@ func (f *fakeRouter) RouteConsumeRemote(context.Context, http.ResponseWriter, *h
 	return false, false
 }
 
-func (f *fakeRouter) RouteAck(context.Context, http.ResponseWriter, *http.Request, string, int, []byte) bool {
+func (f *fakeRouter) RouteAck(context.Context, http.ResponseWriter, *http.Request, string, consumer.Handle) bool {
 	return false
 }
 
@@ -171,7 +172,7 @@ func (f *fakeBroker) Consume(context.Context, string, brokermsg.ConsumeOpts) (to
 	return topic.Message{}, false, errors.New("unexpected Consume call")
 }
 
-func (f *fakeBroker) Ack(context.Context, string, string) error {
+func (f *fakeBroker) Ack(context.Context, string, consumer.Handle) error {
 	return errors.New("unexpected Ack call")
 }
 func (f *fakeBroker) Snapshot(context.Context) ([]metrics.TopicSnapshot, error) { return nil, nil }

@@ -12,7 +12,6 @@
 //
 //	Message delivery
 //	  ErrHandleMalformed     receipt handle cannot be decoded
-//	  ErrHandleTopicMismatch handle topic ≠ request topic
 //	  ErrHandleStale         reservation expired or already committed
 //	  ErrAckedAheadFull      out-of-order ack set full; head stuck
 //
@@ -46,10 +45,9 @@ var (
 // -- message delivery ----------------------------------------------------
 
 var (
-	ErrHandleMalformed     = errors.New("receipt handle is malformed")
-	ErrHandleTopicMismatch = errors.New("handle topic does not match request topic")
-	ErrHandleStale         = errors.New("receipt handle no longer matches an active reservation")
-	ErrAckedAheadFull      = errors.New("acked-ahead set is full; head of queue may be stuck")
+	ErrHandleMalformed = errors.New("receipt handle is malformed")
+	ErrHandleStale     = errors.New("receipt handle no longer matches an active reservation")
+	ErrAckedAheadFull  = errors.New("acked-ahead set is full; head of queue may be stuck")
 )
 
 // -- metastore -----------------------------------------------------------

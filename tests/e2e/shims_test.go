@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"testing"
 	"time"
@@ -271,8 +272,7 @@ func mustConsume(t *testing.T, e *env, topicName string, q consumeQuery) (topic.
 // mustAck acks a message by its receipt handle and fatals on non-204.
 func mustAck(t *testing.T, e *env, topicName, receiptHandle string) {
 	t.Helper()
-	resp := jsonReq(t, http.MethodPost, e.Server.URL+"/v1/topics/"+topicName+"/ack",
-		map[string]any{"receipt_handle": receiptHandle})
+	resp := jsonReq(t, http.MethodPost, e.Server.URL+"/v1/topics/"+topicName+"/ack?receipt_handle="+url.QueryEscape(receiptHandle), nil)
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("mustAck %q: got %d body=%s", topicName, resp.StatusCode, readBody(resp))
 	}

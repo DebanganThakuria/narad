@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -96,8 +97,8 @@ func TestOutOfOrderAckCommitAdvancesContiguous(t *testing.T) {
 }
 
 // TestAckTamperedHandleReturns400 verifies that a corrupted receipt
-// handle is rejected. The handle format is base64url(json({t,p,o,n}))
-// with no HMAC — corruption causes a decode failure → 400.
+// handle is rejected. Receipt handles are partition:offset:nonce, so
+// a malformed handle fails parsing and returns 400.
 func TestAckTamperedHandleReturns400(t *testing.T) {
 	t.Parallel()
 	env := newEnv(t, defaultOpts())
@@ -106,14 +107,11 @@ func TestAckTamperedHandleReturns400(t *testing.T) {
 	env.createTopic("tamper", 3, 2, int64(0))
 	env.produce("tamper", "k", `{}`)
 
-	// Flip a byte inside the base64 to produce invalid encoding.
 	msg := env.consume("/v1/topics/tamper/consume")
 	if len(msg.ReceiptHandle) < 4 {
 		t.Fatalf("handle too short: %q", msg.ReceiptHandle)
 	}
-	tampered := []byte(msg.ReceiptHandle)
-	tampered[2] ^= 0xFF // corrupt the middle of the base64 string
-	resp := env.post("/v1/topics/tamper/ack", map[string]any{"receipt_handle": string(tampered)})
+	resp := env.post("/v1/topics/tamper/ack?receipt_handle=bad-handle", nil)
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
@@ -131,13 +129,14 @@ func TestAckReusedHandleReturns410(t *testing.T) {
 	env.ack("reuse", msg.ReceiptHandle) // succeeds, committed advances
 
 	// Replay the same handle.
-	resp := env.post("/v1/topics/reuse/ack", map[string]any{"receipt_handle": msg.ReceiptHandle})
+	resp := env.post("/v1/topics/reuse/ack?receipt_handle="+url.QueryEscape(msg.ReceiptHandle), nil)
 	expectStatus(t, resp, http.StatusGone)
 }
 
-// TestAckTopicMismatchReturns400 covers a handle for one topic sent
-// against another's ack endpoint.
-func TestAckTopicMismatchReturns400(t *testing.T) {
+// TestAckHandleAgainstWrongTopicReturns410 covers a handle for one topic sent
+// against another's ack endpoint. The URL topic is authoritative, so the
+// valid handle is stale for that topic.
+func TestAckHandleAgainstWrongTopicReturns410(t *testing.T) {
 	t.Parallel()
 	env := newEnv(t, defaultOpts())
 	defer env.close()
@@ -147,8 +146,8 @@ func TestAckTopicMismatchReturns400(t *testing.T) {
 	env.produce("topicA", "k", `{}`)
 	msg := env.consume("/v1/topics/topicA/consume")
 
-	resp := env.post("/v1/topics/topicB/ack", map[string]any{"receipt_handle": msg.ReceiptHandle})
-	expectStatus(t, resp, http.StatusBadRequest)
+	resp := env.post("/v1/topics/topicB/ack?receipt_handle="+url.QueryEscape(msg.ReceiptHandle), nil)
+	expectStatus(t, resp, http.StatusGone)
 }
 
 // TestAckEmptyHandleReturns400 covers the empty-handle short-circuit
@@ -159,7 +158,7 @@ func TestAckEmptyHandleReturns400(t *testing.T) {
 	defer env.close()
 
 	env.createTopic("empty-handle", 3, 2, int64(0))
-	resp := env.post("/v1/topics/empty-handle/ack", map[string]any{"receipt_handle": ""})
+	resp := env.post("/v1/topics/empty-handle/ack?receipt_handle=", nil)
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
@@ -236,7 +235,7 @@ func TestAckedAheadCapReturns503(t *testing.T) {
 	env.ack("stuckhead", m2.ReceiptHandle)
 
 	// Ack m3 — cap is full, must return 503.
-	resp = env.post("/v1/topics/stuckhead/ack", map[string]any{"receipt_handle": m3.ReceiptHandle})
+	resp = env.post("/v1/topics/stuckhead/ack?receipt_handle="+url.QueryEscape(m3.ReceiptHandle), nil)
 	expectStatus(t, resp, http.StatusServiceUnavailable)
 }
 

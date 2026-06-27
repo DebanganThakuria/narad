@@ -31,6 +31,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/broker/topics"
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
@@ -60,10 +61,10 @@ type Broker interface {
 	CommitAcceptedProduce(ctx context.Context, record ingress.ProduceRecord) (offset int64, err error)
 	CommitAcceptedProduceBatch(ctx context.Context, records []ingress.ProduceRecord) (offsets []int64, err error)
 	Consume(ctx context.Context, topicName string, opts messaging.ConsumeOpts) (msg topic.Message, found bool, err error)
-	// Ack accepts an opaque receipt handle returned by a prior Consume
-	// call. The broker decodes, verifies HMAC, and only commits if the
-	// handle still matches an active reservation.
-	Ack(ctx context.Context, topicName string, receiptHandle string) error
+	// Ack accepts a decoded receipt handle returned by a prior Consume
+	// call. The broker commits only if the handle still matches an
+	// active reservation.
+	Ack(ctx context.Context, topicName string, handle consumer.Handle) error
 
 	// Snapshot returns the current runtime state of every topic and
 	// partition. Used by the metrics poller; safe to call frequently.

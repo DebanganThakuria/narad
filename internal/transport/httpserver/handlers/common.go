@@ -28,6 +28,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -36,7 +37,6 @@ import (
 
 const (
 	MaxJSONBodyBytes int64 = 1 << 20
-	MaxAckBodyBytes  int64 = 4 << 10
 
 	// DefaultMaxConsumeWait is the hard ceiling applied to a long-poll
 	// consume wait when Deps.MaxConsumeWait is left unset (<= 0). It stops
@@ -51,7 +51,7 @@ type Router interface {
 	RouteProduce(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName, key string, body []byte) bool
 	RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) (bool, *int)
 	RouteConsumeRemote(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) (bool, bool)
-	RouteAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, partition int, body []byte) bool
+	RouteAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, handle consumer.Handle) bool
 	RouteCreateTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool
 	RouteAlterTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, body []byte) bool
 	RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) bool
@@ -235,18 +235,17 @@ func (s *Set) DecodeAndValidate(w http.ResponseWriter, r *http.Request, dst Vali
 // the generic 5xx body.
 //
 // Receipt-handle errors are mapped to discrete codes so clients can
-// distinguish "you sent garbage" (400) from "your handle was forged"
-// (401) from "you took too long / it was already redelivered"
-// (410). Out-of-order ack rejected by ackedAhead-cap maps to 503 —
-// the head is genuinely stuck and the client should back off.
+// distinguish "you sent garbage or used the wrong topic" (400) from
+// "you took too long / it was already redelivered" (410). Out-of-order
+// ack rejected by ackedAhead-cap maps to 503 — the head is genuinely
+// stuck and the client should back off.
 func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 	switch {
 	case errors.Is(err, errs.ErrTopicNotFound):
 		s.WriteError(w, http.StatusNotFound, "topic not found")
 	case errors.Is(err, errs.ErrTopicAlreadyExists):
 		s.WriteError(w, http.StatusConflict, "topic already exists")
-	case errors.Is(err, errs.ErrHandleMalformed),
-		errors.Is(err, errs.ErrHandleTopicMismatch):
+	case errors.Is(err, errs.ErrHandleMalformed):
 		s.WriteError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, errs.ErrHandleStale):
 		s.WriteError(w, http.StatusGone, err.Error())

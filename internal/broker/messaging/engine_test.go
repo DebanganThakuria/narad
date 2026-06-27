@@ -296,6 +296,15 @@ func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetasto
 	return NewEngine(ms, schemas, partitioner, offsets, logs, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 }
 
+func decodeHandleForTest(t *testing.T, receiptHandle string) consumer.Handle {
+	t.Helper()
+	h, err := consumer.DecodeHandle(receiptHandle)
+	if err != nil {
+		t.Fatalf("DecodeHandle(%q) error = %v", receiptHandle, err)
+	}
+	return h
+}
+
 func partitionHWMPath(dataDir, topicName string, partition int) string {
 	return filepath.Join(storage.TopicPartitionDir(dataDir, topicName, partition), "hwm")
 }
@@ -478,20 +487,17 @@ func TestWaitForActivityReturnsContextCancellation(t *testing.T) {
 	}
 }
 
-func TestAckRejectsMissingInputsAndTopicMismatch(t *testing.T) {
+func TestAckRejectsMissingInputs(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngine(t, ms, nil, nil)
 
-	if err := engine.Ack(context.Background(), "", "handle"); !errors.Is(err, ErrInvalid) {
+	validHandle := consumer.Handle{Partition: 0, Offset: 0, Nonce: 1}
+	if err := engine.Ack(context.Background(), "", validHandle); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Ack() empty topic error = %v, want %v", err, ErrInvalid)
 	}
-	if err := engine.Ack(context.Background(), "orders", ""); !errors.Is(err, consumer.ErrHandleMalformed) {
+	if err := engine.Ack(context.Background(), "orders", consumer.Handle{}); !errors.Is(err, consumer.ErrHandleMalformed) {
 		t.Fatalf("Ack() empty handle error = %v, want %v", err, consumer.ErrHandleMalformed)
-	}
-	handle := consumer.EncodeHandle(consumer.Handle{Topic: "payments", Partition: 0, Offset: 0, Nonce: 1})
-	if err := engine.Ack(context.Background(), "orders", handle); !errors.Is(err, consumer.ErrHandleTopicMismatch) {
-		t.Fatalf("Ack() topic mismatch error = %v, want %v", err, consumer.ErrHandleTopicMismatch)
 	}
 }
 
@@ -579,7 +585,7 @@ func TestAckReturnsTopicNotFoundWhenTopicDeleted(t *testing.T) {
 		t.Fatalf("DeleteTopic() error = %v", err)
 	}
 
-	err = engine.Ack(context.Background(), "orders", msg.ReceiptHandle)
+	err = engine.Ack(context.Background(), "orders", decodeHandleForTest(t, msg.ReceiptHandle))
 	if !errors.Is(err, ErrTopicNotFound) {
 		t.Fatalf("Ack() error = %v, want %v", err, ErrTopicNotFound)
 	}
@@ -607,7 +613,7 @@ func TestAckCommitsReservedHandle(t *testing.T) {
 		t.Fatal("Consume() found = false, want true")
 	}
 
-	if err := engine.Ack(context.Background(), "orders", msg.ReceiptHandle); err != nil {
+	if err := engine.Ack(context.Background(), "orders", decodeHandleForTest(t, msg.ReceiptHandle)); err != nil {
 		t.Fatalf("Ack() error = %v", err)
 	}
 }
@@ -639,7 +645,7 @@ func TestAckUsesVersionedTopicCache(t *testing.T) {
 		t.Fatalf("GetTopic calls after consume = %d, want 1", ms.getTopicCalls)
 	}
 
-	if err := engine.Ack(context.Background(), "orders", msg.ReceiptHandle); err != nil {
+	if err := engine.Ack(context.Background(), "orders", decodeHandleForTest(t, msg.ReceiptHandle)); err != nil {
 		t.Fatalf("Ack() error = %v", err)
 	}
 	if ms.getTopicCalls != 1 {
@@ -668,11 +674,11 @@ func TestAckRejectsStaleHandleAfterCommit(t *testing.T) {
 	if !found {
 		t.Fatal("Consume() found = false, want true")
 	}
-	if err := engine.Ack(context.Background(), "orders", msg.ReceiptHandle); err != nil {
+	if err := engine.Ack(context.Background(), "orders", decodeHandleForTest(t, msg.ReceiptHandle)); err != nil {
 		t.Fatalf("Ack() first error = %v", err)
 	}
 
-	err = engine.Ack(context.Background(), "orders", msg.ReceiptHandle)
+	err = engine.Ack(context.Background(), "orders", decodeHandleForTest(t, msg.ReceiptHandle))
 	if !errors.Is(err, consumer.ErrHandleStale) {
 		t.Fatalf("Ack() second error = %v, want %v", err, consumer.ErrHandleStale)
 	}
@@ -693,7 +699,7 @@ func TestAckAckedAheadCapWithNilMetricsReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReserveNext(offset 1) error = %v", err)
 	}
-	handle := consumer.EncodeHandle(consumer.Handle{Topic: "orders", Partition: 0, Offset: r1.Offset, Nonce: r1.Nonce})
+	handle := consumer.Handle{Partition: 0, Offset: r1.Offset, Nonce: r1.Nonce}
 	if err := engine.Ack(context.Background(), "orders", handle); err != nil {
 		t.Fatalf("Ack(offset 1) error = %v", err)
 	}
@@ -701,7 +707,7 @@ func TestAckAckedAheadCapWithNilMetricsReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReserveNext(offset 2) error = %v", err)
 	}
-	handle = consumer.EncodeHandle(consumer.Handle{Topic: "orders", Partition: 0, Offset: r2.Offset, Nonce: r2.Nonce})
+	handle = consumer.Handle{Partition: 0, Offset: r2.Offset, Nonce: r2.Nonce}
 
 	err = engine.Ack(context.Background(), "orders", handle)
 	if !errors.Is(err, consumer.ErrAckedAheadFull) {
@@ -864,7 +870,7 @@ func TestAckRejectsMalformedHandle(t *testing.T) {
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngine(t, ms, nil, nil)
 
-	err := engine.Ack(context.Background(), "orders", "not-a-valid-handle")
+	err := engine.Ack(context.Background(), "orders", consumer.Handle{Partition: -1, Offset: 0, Nonce: 1})
 	if !errors.Is(err, consumer.ErrHandleMalformed) {
 		t.Fatalf("Ack() error = %v, want %v", err, consumer.ErrHandleMalformed)
 	}
@@ -874,7 +880,7 @@ func TestAckRejectsUnreservedHandle(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}
 	engine := newTestEngine(t, ms, nil, nil)
-	handle := consumer.EncodeHandle(consumer.Handle{Topic: "orders", Partition: 0, Offset: 0, Nonce: 123})
+	handle := consumer.Handle{Partition: 0, Offset: 0, Nonce: 123}
 
 	err := engine.Ack(context.Background(), "orders", handle)
 	if !errors.Is(err, consumer.ErrHandleStale) {
@@ -893,7 +899,7 @@ func TestConsumeReturnsTopicNotFoundForMissingTopic(t *testing.T) {
 
 func TestAckReturnsTopicNotFoundForMissingTopic(t *testing.T) {
 	engine := newTestEngine(t, newMessagingFakeMetastore(), nil, nil)
-	handle := consumer.EncodeHandle(consumer.Handle{Topic: "missing", Partition: 0, Offset: 0, Nonce: 1})
+	handle := consumer.Handle{Partition: 0, Offset: 0, Nonce: 1}
 
 	err := engine.Ack(context.Background(), "missing", handle)
 	if !errors.Is(err, ErrTopicNotFound) {

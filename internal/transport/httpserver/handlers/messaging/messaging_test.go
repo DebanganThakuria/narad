@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -39,7 +40,7 @@ type fakeBroker struct {
 	acceptProduceFn           func(context.Context, string, string, []byte, ...int) (ingress.AcceptedProduce, error)
 	acceptProducePartitions   []int
 	consumeFn                 func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error)
-	ackFn                     func(context.Context, string, string) error
+	ackFn                     func(context.Context, string, consumer.Handle) error
 	readyFn                   func(context.Context) error
 }
 
@@ -111,8 +112,8 @@ func (f *fakeBroker) Consume(ctx context.Context, topicName string, opts brokerm
 	return f.consumeFn(ctx, topicName, opts)
 }
 
-func (f *fakeBroker) Ack(ctx context.Context, topicName string, receiptHandle string) error {
-	return f.ackFn(ctx, topicName, receiptHandle)
+func (f *fakeBroker) Ack(ctx context.Context, topicName string, handle consumer.Handle) error {
+	return f.ackFn(ctx, topicName, handle)
 }
 func (f *fakeBroker) Snapshot(context.Context) ([]metrics.TopicSnapshot, error) { return nil, nil }
 func (f *fakeBroker) Ready(ctx context.Context) error {
@@ -127,9 +128,22 @@ type fakeRouter struct {
 	routeProduceFn     func(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool
 	routeConsumeFn     func(context.Context, http.ResponseWriter, *http.Request, string, *int) (bool, *int)
 	routeConsumeRemote func(context.Context, http.ResponseWriter, *http.Request, string) (bool, bool)
-	routeAckFn         func(context.Context, http.ResponseWriter, *http.Request, string, int, []byte) bool
+	routeAckFn         func(context.Context, http.ResponseWriter, *http.Request, string, consumer.Handle) bool
 	routeCreateTopicFn func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
 	routeAlterTopicFn  func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool
+}
+
+type readTrackingBody struct {
+	read bool
+}
+
+func (b *readTrackingBody) Read([]byte) (int, error) {
+	b.read = true
+	return 0, io.EOF
+}
+
+func (*readTrackingBody) Close() error {
+	return nil
 }
 
 func (f *fakeRouter) RouteProduce(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName, key string, body []byte) bool {
@@ -153,11 +167,11 @@ func (f *fakeRouter) RouteConsumeRemote(ctx context.Context, w http.ResponseWrit
 	return f.routeConsumeRemote(ctx, w, r, topicName)
 }
 
-func (f *fakeRouter) RouteAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, partition int, body []byte) bool {
+func (f *fakeRouter) RouteAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, handle consumer.Handle) bool {
 	if f.routeAckFn == nil {
 		return false
 	}
-	return f.routeAckFn(ctx, w, r, topicName, partition, body)
+	return f.routeAckFn(ctx, w, r, topicName, handle)
 }
 
 func (f *fakeRouter) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool {
@@ -234,7 +248,7 @@ func TestProduceHandlerDoesNotRouteBeforeAccept(t *testing.T) {
 	routerCalled := false
 	s := newTestSet(&fakeBroker{acceptProduceFn: func(context.Context, string, string, []byte, ...int) (ingress.AcceptedProduce, error) {
 		brokerCalled = true
-		return ingress.AcceptedProduce{Topic: "orders", TargetPartition: 1, CreatedAtUnixMs: 123}, nil
+		return ingress.AcceptedProduce{TargetPartition: 1, CreatedAtUnixMs: 123}, nil
 	}}, &fakeRouter{routeProduceFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName, key string, body []byte) bool {
 		routerCalled = topicName == "orders" && key == "customer-1" && string(body) == `{"key":"customer-1","message":{"id":1}}`
 		w.WriteHeader(http.StatusAccepted)
@@ -407,7 +421,7 @@ func TestProduceHandlerAcceptsWithGeneratedKeyAndDoesNotRoute(t *testing.T) {
 	var gotKey string
 	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, _ string, key string, _ []byte, _ ...int) (ingress.AcceptedProduce, error) {
 		gotKey = key
-		return ingress.AcceptedProduce{Topic: "orders", TargetPartition: 0, CreatedAtUnixMs: 123}, nil
+		return ingress.AcceptedProduce{TargetPartition: 0, CreatedAtUnixMs: 123}, nil
 	}}, &fakeRouter{routeProduceFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName, key string, body []byte) bool {
 		routerCalled = true
 		if topicName != "orders" {
@@ -450,7 +464,7 @@ func TestProduceHandlerPreservesExplicitKeyWhenAccepting(t *testing.T) {
 	var gotKey string
 	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, _ string, key string, _ []byte, _ ...int) (ingress.AcceptedProduce, error) {
 		gotKey = key
-		return ingress.AcceptedProduce{Topic: "orders", TargetPartition: 0, CreatedAtUnixMs: 123}, nil
+		return ingress.AcceptedProduce{TargetPartition: 0, CreatedAtUnixMs: 123}, nil
 	}}, &fakeRouter{routeProduceFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName, key string, body []byte) bool {
 		routerCalled = true
 		if topicName != "orders" {
@@ -597,7 +611,7 @@ func TestConsumeHandlerUsesRouterSelectedLocalPartition(t *testing.T) {
 	localPartition := 3
 	s := newTestSet(&fakeBroker{consumeFn: func(_ context.Context, _ string, opts brokermsg.ConsumeOpts) (topic.Message, bool, error) {
 		gotOpts = opts
-		return topic.Message{Topic: "orders", Partition: localPartition, Offset: 1, Payload: []byte(`{"id":1}`), ReceiptHandle: "h1"}, true, nil
+		return topic.Message{Partition: localPartition, Offset: 1, Payload: []byte(`{"id":1}`), ReceiptHandle: "h1"}, true, nil
 	}}, &fakeRouter{routeConsumeFn: func(context.Context, http.ResponseWriter, *http.Request, string, *int) (bool, *int) {
 		return false, &localPartition
 	}})
@@ -672,7 +686,7 @@ func TestConsumeHandlerLongPollsLocalAfterRemoteEmpty(t *testing.T) {
 		if len(waits) < 3 {
 			return topic.Message{}, false, nil
 		}
-		return topic.Message{Topic: "orders", Partition: localPartition, Offset: 1, Payload: []byte(`{"id":1}`), ReceiptHandle: "h1"}, true, nil
+		return topic.Message{Partition: localPartition, Offset: 1, Payload: []byte(`{"id":1}`), ReceiptHandle: "h1"}, true, nil
 	}}, &fakeRouter{
 		routeConsumeFn: func(context.Context, http.ResponseWriter, *http.Request, string, *int) (bool, *int) {
 			return false, &localPartition
@@ -761,15 +775,17 @@ func TestConsumeHandlerRejectsInvalidQuery(t *testing.T) {
 }
 
 func TestAckHandlerCallsBroker(t *testing.T) {
-	handle := consumer.EncodeHandle(consumer.Handle{Topic: "orders", Partition: 1, Offset: 2, Nonce: 3})
-	var gotTopic, gotHandle string
-	s := newTestSet(&fakeBroker{ackFn: func(_ context.Context, topicName string, receiptHandle string) error {
+	handle := consumer.EncodeHandle(consumer.Handle{Partition: 1, Offset: 2, Nonce: 3})
+	wantHandle := consumer.Handle{Partition: 1, Offset: 2, Nonce: 3}
+	var gotTopic string
+	var gotHandle consumer.Handle
+	s := newTestSet(&fakeBroker{ackFn: func(_ context.Context, topicName string, h consumer.Handle) error {
 		gotTopic = topicName
-		gotHandle = receiptHandle
+		gotHandle = h
 		return nil
 	}}, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", bytes.NewBufferString(`{"receipt_handle":"`+handle+`"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack?receipt_handle="+url.QueryEscape(handle), nil)
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -778,25 +794,26 @@ func TestAckHandlerCallsBroker(t *testing.T) {
 	if res.Code != http.StatusNoContent {
 		t.Fatalf("Ack() status = %d, want %d", res.Code, http.StatusNoContent)
 	}
-	if gotTopic != "orders" || gotHandle != handle {
-		t.Fatalf("Ack() broker args = topic=%q handle=%q", gotTopic, gotHandle)
+	if gotTopic != "orders" || gotHandle != wantHandle {
+		t.Fatalf("Ack() broker args = topic=%q handle=%+v", gotTopic, gotHandle)
 	}
 }
 
 func TestAckHandlerRoutesWithDecodedPartition(t *testing.T) {
-	handle := consumer.EncodeHandle(consumer.Handle{Topic: "orders", Partition: 2, Offset: 4, Nonce: 9})
+	handle := consumer.EncodeHandle(consumer.Handle{Partition: 2, Offset: 4, Nonce: 9})
+	wantHandle := consumer.Handle{Partition: 2, Offset: 4, Nonce: 9}
 	brokerCalled := false
 	routerCalled := false
-	s := newTestSet(&fakeBroker{ackFn: func(context.Context, string, string) error {
+	s := newTestSet(&fakeBroker{ackFn: func(context.Context, string, consumer.Handle) error {
 		brokerCalled = true
 		return nil
-	}}, &fakeRouter{routeAckFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName string, partition int, body []byte) bool {
-		routerCalled = topicName == "orders" && partition == 2 && string(body) == `{"receipt_handle":"`+handle+`"}`
+	}}, &fakeRouter{routeAckFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName string, h consumer.Handle) bool {
+		routerCalled = topicName == "orders" && h == wantHandle
 		w.WriteHeader(http.StatusAccepted)
 		return true
 	}})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", bytes.NewBufferString(`{"receipt_handle":"`+handle+`"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack?receipt_handle="+url.QueryEscape(handle), nil)
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -813,38 +830,38 @@ func TestAckHandlerRoutesWithDecodedPartition(t *testing.T) {
 	}
 }
 
-func TestAckHandlerIgnoresUndecodableHandleForRouting(t *testing.T) {
+func TestAckHandlerRejectsUndecodableHandleBeforeRouting(t *testing.T) {
 	brokerCalled := false
 	routerCalled := false
-	s := newTestSet(&fakeBroker{ackFn: func(context.Context, string, string) error {
+	s := newTestSet(&fakeBroker{ackFn: func(context.Context, string, consumer.Handle) error {
 		brokerCalled = true
 		return nil
-	}}, &fakeRouter{routeAckFn: func(context.Context, http.ResponseWriter, *http.Request, string, int, []byte) bool {
+	}}, &fakeRouter{routeAckFn: func(context.Context, http.ResponseWriter, *http.Request, string, consumer.Handle) bool {
 		routerCalled = true
 		return false
 	}})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", bytes.NewBufferString(`{"receipt_handle":"bad-handle"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack?receipt_handle=bad-handle", nil)
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
 	Ack(s).ServeHTTP(res, req)
 
-	if res.Code != http.StatusNoContent {
-		t.Fatalf("Ack() status = %d, want %d", res.Code, http.StatusNoContent)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("Ack() status = %d, want %d", res.Code, http.StatusBadRequest)
 	}
 	if routerCalled {
 		t.Fatal("Ack() called router for undecodable handle")
 	}
-	if !brokerCalled {
-		t.Fatal("Ack() did not call broker")
+	if brokerCalled {
+		t.Fatal("Ack() called broker for undecodable handle")
 	}
 }
 
 func TestAckHandlerRejectsMissingHandle(t *testing.T) {
 	s := newTestSet(&fakeBroker{}, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", bytes.NewBufferString(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", nil)
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -855,14 +872,16 @@ func TestAckHandlerRejectsMissingHandle(t *testing.T) {
 	}
 }
 
-func TestAckHandlerIgnoresUnknownField(t *testing.T) {
-	var gotHandle string
-	s := newTestSet(&fakeBroker{ackFn: func(_ context.Context, _ string, receiptHandle string) error {
-		gotHandle = receiptHandle
+func TestAckHandlerIgnoresExtraQueryParams(t *testing.T) {
+	handle := consumer.EncodeHandle(consumer.Handle{Partition: 0, Offset: 1, Nonce: 2})
+	wantHandle := consumer.Handle{Partition: 0, Offset: 1, Nonce: 2}
+	var gotHandle consumer.Handle
+	s := newTestSet(&fakeBroker{ackFn: func(_ context.Context, _ string, h consumer.Handle) error {
+		gotHandle = h
 		return nil
 	}}, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", bytes.NewBufferString(`{"receipt_handle":"x","extra":1}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack?ignored=1&receipt_handle="+url.QueryEscape(handle)+"&extra=2", nil)
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -871,19 +890,19 @@ func TestAckHandlerIgnoresUnknownField(t *testing.T) {
 	if res.Code != http.StatusNoContent {
 		t.Fatalf("Ack() status = %d, want %d", res.Code, http.StatusNoContent)
 	}
-	if gotHandle != "x" {
-		t.Fatalf("Ack() handle = %q, want x", gotHandle)
+	if gotHandle != wantHandle {
+		t.Fatalf("Ack() handle = %+v, want %+v", gotHandle, wantHandle)
 	}
 }
 
-func TestAckHandlerIgnoresUnusedTrailingJSON(t *testing.T) {
-	var gotHandle string
-	s := newTestSet(&fakeBroker{ackFn: func(_ context.Context, _ string, receiptHandle string) error {
-		gotHandle = receiptHandle
+func TestAckHandlerDoesNotReadBody(t *testing.T) {
+	handle := consumer.EncodeHandle(consumer.Handle{Partition: 0, Offset: 1, Nonce: 2})
+	body := &readTrackingBody{}
+	s := newTestSet(&fakeBroker{ackFn: func(context.Context, string, consumer.Handle) error {
 		return nil
 	}}, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", bytes.NewBufferString(`{"receipt_handle":"x"} {}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack?receipt_handle="+url.QueryEscape(handle), body)
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -892,19 +911,21 @@ func TestAckHandlerIgnoresUnusedTrailingJSON(t *testing.T) {
 	if res.Code != http.StatusNoContent {
 		t.Fatalf("Ack() status = %d, want %d", res.Code, http.StatusNoContent)
 	}
-	if gotHandle != "x" {
-		t.Fatalf("Ack() handle = %q, want x", gotHandle)
+	if body.read {
+		t.Fatal("Ack() read request body")
 	}
 }
 
 func TestAckHandlerParsesEscapedReceiptHandle(t *testing.T) {
-	var gotHandle string
-	s := newTestSet(&fakeBroker{ackFn: func(_ context.Context, _ string, receiptHandle string) error {
-		gotHandle = receiptHandle
+	handle := consumer.EncodeHandle(consumer.Handle{Partition: 0, Offset: 1, Nonce: 2})
+	wantHandle := consumer.Handle{Partition: 0, Offset: 1, Nonce: 2}
+	var gotHandle consumer.Handle
+	s := newTestSet(&fakeBroker{ackFn: func(_ context.Context, _ string, h consumer.Handle) error {
+		gotHandle = h
 		return nil
 	}}, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", bytes.NewBufferString(`{"receipt_handle":"abc\u002d123"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack?receipt_handle="+url.QueryEscape(handle), nil)
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -913,18 +934,18 @@ func TestAckHandlerParsesEscapedReceiptHandle(t *testing.T) {
 	if res.Code != http.StatusNoContent {
 		t.Fatalf("Ack() status = %d, want %d", res.Code, http.StatusNoContent)
 	}
-	if gotHandle != "abc-123" {
-		t.Fatalf("Ack() handle = %q, want abc-123", gotHandle)
+	if gotHandle != wantHandle {
+		t.Fatalf("Ack() handle = %+v, want %+v", gotHandle, wantHandle)
 	}
 }
 
 func TestAckHandlerMapsBrokerError(t *testing.T) {
-	s := newTestSet(&fakeBroker{ackFn: func(context.Context, string, string) error {
+	s := newTestSet(&fakeBroker{ackFn: func(context.Context, string, consumer.Handle) error {
 		return errs.ErrHandleStale
 	}}, nil)
 
-	handle := consumer.EncodeHandle(consumer.Handle{Topic: "orders", Partition: 0, Offset: 1, Nonce: 2})
-	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", bytes.NewBufferString(`{"receipt_handle":"`+handle+`"}`))
+	handle := consumer.EncodeHandle(consumer.Handle{Partition: 0, Offset: 1, Nonce: 2})
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack?receipt_handle="+url.QueryEscape(handle), nil)
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 
@@ -1012,36 +1033,41 @@ func TestParseProduceRequestMissingMessage(t *testing.T) {
 	}
 }
 
-func TestParseAckRequestFieldCases(t *testing.T) {
+func TestReceiptHandleFromRawQueryFieldCases(t *testing.T) {
 	tests := []struct {
 		name       string
-		body       string
+		rawQuery   string
 		wantHandle string
+		wantFound  bool
 		wantErr    bool
 	}{
-		{"simple", `{"receipt_handle":"h1"}`, "h1", false},
-		{"escaped", `{"receipt_handle":"abc\u002d123"}`, "abc-123", false},
-		{"unknown ignored", `{"receipt_handle":"h1","ignored":true}`, "h1", false},
-		{"null handle", `{"receipt_handle":null}`, "", false},
-		{"missing handle", `{"ignored":true}`, "", false},
-		{"bad handle type", `{"receipt_handle":123}`, "", true},
-		{"bad handle string", `{"receipt_handle":"bad\uZZZZ"}`, "", true},
+		{"simple", "receipt_handle=1:2:3", "1:2:3", true, false},
+		{"escaped value", "receipt_handle=1%3A2%3A3", "1:2:3", true, false},
+		{"unknown ignored", "ignored=true&receipt_handle=1:2:3", "1:2:3", true, false},
+		{"empty handle", "receipt_handle=", "", true, false},
+		{"missing handle", "ignored=true", "", false, false},
+		{"encoded key", "receipt%5Fhandle=1:2:3", "1:2:3", true, false},
+		{"bad escape in key", "receipt%ZZhandle=1:2:3", "", false, true},
+		{"bad escape in value", "receipt_handle=orders%ZZ1", "", true, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseAckRequest([]byte(tt.body))
+			got, found, err := receiptHandleFromRawQuery(tt.rawQuery)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatal("parseAckRequest() error = nil, want error")
+					t.Fatal("receiptHandleFromRawQuery() error = nil, want error")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("parseAckRequest() error = %v", err)
+				t.Fatalf("receiptHandleFromRawQuery() error = %v", err)
 			}
-			if got.ReceiptHandle != tt.wantHandle {
-				t.Fatalf("receipt handle = %q, want %q", got.ReceiptHandle, tt.wantHandle)
+			if found != tt.wantFound {
+				t.Fatalf("found = %v, want %v", found, tt.wantFound)
+			}
+			if got != tt.wantHandle {
+				t.Fatalf("receipt handle = %q, want %q", got, tt.wantHandle)
 			}
 		})
 	}

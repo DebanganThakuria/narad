@@ -18,6 +18,7 @@ import (
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -37,7 +38,7 @@ type fakeBroker struct {
 	listTopicsFn              func(context.Context, metastore.ListOptions) ([]topic.Topic, string, error)
 	produceFn                 func(context.Context, string, string, []byte) (int64, int, error)
 	consumeFn                 func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error)
-	ackFn                     func(context.Context, string, string) error
+	ackFn                     func(context.Context, string, consumer.Handle) error
 	readyFn                   func(context.Context) error
 }
 
@@ -99,8 +100,8 @@ func (f *fakeBroker) Consume(ctx context.Context, topicName string, opts brokerm
 	return f.consumeFn(ctx, topicName, opts)
 }
 
-func (f *fakeBroker) Ack(ctx context.Context, topicName string, receiptHandle string) error {
-	return f.ackFn(ctx, topicName, receiptHandle)
+func (f *fakeBroker) Ack(ctx context.Context, topicName string, handle consumer.Handle) error {
+	return f.ackFn(ctx, topicName, handle)
 }
 func (f *fakeBroker) Snapshot(context.Context) ([]metrics.TopicSnapshot, error) { return nil, nil }
 func (f *fakeBroker) Ready(ctx context.Context) error {
@@ -268,7 +269,6 @@ func TestWriteBrokerErrorMapsStatuses(t *testing.T) {
 		{"partition required", errs.ErrPartitionRequired, http.StatusBadRequest},
 		{"not partition owner", errs.ErrNotPartitionOwner, http.StatusMisdirectedRequest},
 		{"malformed handle", errs.ErrHandleMalformed, http.StatusBadRequest},
-		{"topic mismatch", errs.ErrHandleTopicMismatch, http.StatusBadRequest},
 		{"stale handle", errs.ErrHandleStale, http.StatusGone},
 		{"acked ahead full", errs.ErrAckedAheadFull, http.StatusServiceUnavailable},
 		{"internal", errors.New("boom"), http.StatusInternalServerError},

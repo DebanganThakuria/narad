@@ -287,10 +287,8 @@ func runClientAck(args []string) error {
 		return clientUsageErr("receipt handle required (use --handle or pipe via stdin)")
 	}
 
-	if err := newHTTPClient(*addr).postNoBody(
-		"/v1/topics/"+url.PathEscape(fs.Arg(0))+"/ack",
-		map[string]any{"receipt_handle": h},
-	); err != nil {
+	path := "/v1/topics/" + url.PathEscape(fs.Arg(0)) + "/ack?receipt_handle=" + url.QueryEscape(h)
+	if err := newHTTPClient(*addr).postNoBody(path, nil); err != nil {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "acked")

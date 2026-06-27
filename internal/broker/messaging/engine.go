@@ -11,8 +11,8 @@
 //   - ack.go:     Ack.
 //
 // Cross-package state: Engine holds *runtime.Logs (lazy partition log
-// access), *consumer.InFlight (reservation/ack book-keeping), and the
-// HMAC secret for receipt handles.
+// access), *consumer.InFlight (reservation/ack book-keeping), and
+// cached metadata used by the hot path.
 package messaging
 
 import (

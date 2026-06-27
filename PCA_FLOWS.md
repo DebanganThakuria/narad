@@ -101,9 +101,10 @@ time, the message can be delivered again.
 
 ## Ack
 
-The receipt handle contains the topic, partition, offset, and reservation
-nonce. Any pod can receive the ack; if it is not the owner, it forwards
-the ack to the owner over QUIC.
+The receipt handle contains partition, offset, and reservation nonce as
+`partition:offset:nonce`; the request path supplies the topic. Any pod
+can receive the ack; if it is not the owner, it forwards the ack to the
+owner over QUIC.
 
 ```mermaid
 sequenceDiagram
@@ -116,8 +117,8 @@ sequenceDiagram
     participant IF as In-flight Table
     participant OC as Offset Committer
 
-    C->>API: POST /v1/topics/{topic}/ack<br/>receipt_handle
-    API->>API: Decode handle<br/>topic, partition, offset, nonce
+    C->>API: POST /v1/topics/{topic}/ack?receipt_handle=...
+    API->>API: Decode handle<br/>partition, offset, nonce
     API->>MS: Resolve partition owner
 
     alt owner is local pod

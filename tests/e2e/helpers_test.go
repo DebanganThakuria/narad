@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -460,9 +461,7 @@ func (e *env) consume(path string) topic.Message {
 // call env.post directly.
 func (e *env) ack(topicName, handle string) {
 	e.t.Helper()
-	resp := e.post("/v1/topics/"+topicName+"/ack", map[string]any{
-		"receipt_handle": handle,
-	})
+	resp := e.post("/v1/topics/"+topicName+"/ack?receipt_handle="+url.QueryEscape(handle), nil)
 	expectStatus(e.t, resp, http.StatusNoContent)
 }
 

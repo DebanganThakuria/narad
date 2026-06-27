@@ -254,9 +254,7 @@ curl -X POST localhost:7942/v1/topics/orders/produce \
 curl 'localhost:7942/v1/topics/orders/consume?wait=5s'
 
 # Ack — handle is the token returned by Consume.
-curl -X POST localhost:7942/v1/topics/orders/ack \
-  -H 'Content-Type: application/json' \
-  -d '{"receipt_handle":"<token from consume response>"}'
+curl -X POST 'localhost:7942/v1/topics/orders/ack?receipt_handle=<token from consume response>'
 
 # Update retention without restart.
 curl -X PATCH localhost:7942/v1/topics/orders \
@@ -284,7 +282,7 @@ PATCH   /v1/topics/{topic}                  alter: partitions, retention_ms,
 DELETE  /v1/topics/{topic}                  delete topic and all data
 POST    /v1/topics/{topic}/produce          202 Accepted with an empty body
 GET     /v1/topics/{topic}/consume          response carries receipt_handle
-POST    /v1/topics/{topic}/ack              body: {"receipt_handle": "..."}
+POST    /v1/topics/{topic}/ack?receipt_handle=...
 GET     /healthz                            liveness
 GET     /readyz                             readiness (broker.Ready)
 GET     /metrics                            Prometheus exposition
@@ -530,8 +528,8 @@ concurrent consumer threads / pods without redelivery.
   previously out-of-order acks. Out-of-order acks sit in a sparse
   `ackedAhead` set per partition until the head catches up.
 
-**Receipt handle format.** Handles are `base64url(json({t,p,o,n}))` where
-`t`=topic, `p`=partition, `o`=offset, `n`=nonce. The nonce is generated
+**Receipt handle format.** Handles are `partition:offset:nonce`. The
+topic comes from the ack request path. The nonce is generated
 per-reservation — it proves the consumer received this specific instance
 of the message. A forged handle with a wrong nonce returns **410**, not
 **401** (there is no shared secret). Any pod can decode the partition
@@ -549,7 +547,7 @@ from the handle for routing without any shared key.
 | Status | Meaning |
 |---|---|
 | 204 | Acked. |
-| 400 | Malformed handle, missing handle, or topic mismatch. |
+| 400 | Malformed or missing handle. |
 | 404 | Topic does not exist. |
 | 410 | Handle no longer matches an active reservation: already committed, visibility timeout expired, or broker restarted. |
 | 421 | This node does not own the handle's partition (ownership changed mid-flight); retry. |

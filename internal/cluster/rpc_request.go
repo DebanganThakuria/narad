@@ -1,40 +1,12 @@
 package cluster
 
 import (
-	"bytes"
-	"encoding/json"
-	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
 
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
-
-type routedAckRequest struct {
-	ReceiptHandle string `json:"receipt_handle"`
-}
-
-func receiptHandleFromAckBody(body []byte) (string, error) {
-	var req routedAckRequest
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		return "", err
-	}
-	var extra any
-	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return "", errors.New("multiple JSON values")
-		}
-		return "", err
-	}
-	if req.ReceiptHandle == "" {
-		return "", errors.New("receipt_handle required")
-	}
-	return req.ReceiptHandle, nil
-}
 
 func consumeRPCRequestFromHTTP(r *http.Request, topicName string, pinnedPartition *int, localOnly bool) (nodewire.ConsumeRequest, error) {
 	q := r.URL.Query()

@@ -9,11 +9,10 @@ import (
 	"github.com/debanganthakuria/narad/internal/consumer"
 )
 
-// Ack accepts a receipt handle previously returned by Consume.
-// It decodes the handle, checks the encoded topic matches the request,
-// verifies the nonce against the active in-flight reservation, and
-// commits the offset.
-func (e *Engine) Ack(ctx context.Context, topicName string, receiptHandle string) error {
+// Ack accepts a decoded receipt handle previously returned by Consume.
+// It verifies the nonce against the active in-flight reservation and
+// commits the offset under the request path topic.
+func (e *Engine) Ack(ctx context.Context, topicName string, h consumer.Handle) error {
 	totalStart := time.Now()
 	totalOutcome := "ok"
 	defer func() {
@@ -23,21 +22,13 @@ func (e *Engine) Ack(ctx context.Context, topicName string, receiptHandle string
 		totalOutcome = "error"
 		return fmt.Errorf("%w: topic required", ErrInvalid)
 	}
-	if receiptHandle == "" {
-		totalOutcome = "error"
-		return consumer.ErrHandleMalformed
-	}
 
 	stageStart := time.Now()
-	h, err := consumer.DecodeHandle(receiptHandle)
+	err := consumer.ValidateHandle(h)
 	e.observe("ack", "decode_handle", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
 		totalOutcome = "error"
 		return err
-	}
-	if h.Topic != topicName {
-		totalOutcome = "error"
-		return consumer.ErrHandleTopicMismatch
 	}
 
 	// Confirm the topic still exists — clean 404 beats an opaque 410.
