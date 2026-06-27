@@ -84,9 +84,10 @@ partition assignment, member address) without a network round-trip.
 **Data plane.** Each partition is owned by one pod. That pod holds the
 segment files on its persistent volume and manages the in-flight
 reservation table in memory. Produce can hit any pod: the ingress pod
-validates the request, writes it to its local ingress WAL, and returns
-`202 Accepted`. A background dispatcher moves accepted records to the
-selected owner partition, where they become visible to consumers.
+validates the request, writes it to its single local ingress WAL, and
+returns `202 Accepted` with no response body. A background dispatcher
+moves accepted records to the selected owner partition, where they
+become visible to consumers.
 Consume and ack still route/probe owners through the internal cluster
 port when the local pod cannot serve the request.
 
@@ -387,10 +388,12 @@ Useful environment overrides:
 | `NARAD_TOPIC_DEFAULT_MAX_ACKED_AHEAD_PER_PARTITION` | default out-of-order ack cap per partition |
 | `NARAD_ADDR` | (client only) base URL for `narad client` |
 
-Narad intentionally does not expose storage flush, fsync, WAL, compression,
-or segment-layout tuning through environment variables. Those are engine
-internals with production defaults; tuning them per deployment tends to
-create hard-to-debug behavior differences.
+The JSON config intentionally exposes only `storage.data_dir`,
+`storage.codec`, and `storage.compression_level` from the storage layer.
+Environment variables expose only `NARAD_DATA_DIR` for storage. Flush,
+fsync, WAL sync, and segment-layout tuning are engine internals with
+production defaults; tuning them per deployment tends to create
+hard-to-debug behavior differences.
 
 ## Storage layer
 
@@ -411,6 +414,8 @@ is an append-only file made of CRC-checked, optionally zstd-compressed
 the request to the receiving pod's ingress WAL, and returns
 `202 Accepted` with an empty body. A background dispatcher replays
 durable WAL records and commits them to the selected owner partition.
+The WAL record ID is internal checkpointing only; clients do not receive
+a message ID, partition, or offset from produce.
 
 **Partition append path.** Owner-side append pushes the record into a
 per-partition in-memory buffer and returns the assigned offset to the
@@ -494,7 +499,10 @@ partition assignment from its local bbolt replica and either handles
 the request locally (if it owns the partition) or proxies it to the
 owner via the cluster port.
 
-- **Produce**: key is hashed to a partition; request proxied if needed.
+- **Produce**: keyed records are hashed to a partition; unkeyed records
+  rotate across partitions. The receiving pod accepts the request into
+  its ingress WAL, then the dispatcher forwards it to the owner when
+  needed.
 - **Consume**: a live-owner partition is chosen by round-robin rotation —
   partitions whose owner is currently dead are skipped — and the request
   is proxied to that owner with the partition pinned. (Lag-aware
@@ -711,8 +719,10 @@ gates**; until they ship, run Narad only behind a trusted boundary.
    throughput, max lag, recovery time. Quantify the synchronous
    fsync + CRC-readback cost on the commit path. Multi-hour soak under
    fault injection against the SLOs, wired to Grafana + alerts.
-5. **Versioning, on-disk format & upgrade/rollback.** Add explicit
-   version headers + migrations to the on-disk formats (segment, WAL,
-   metastore) and version-negotiate the cluster RPC / QUIC ALPN so N and
-   N+1 coexist during a rolling upgrade. Then freeze the HTTP API +
-   receipt-handle + wire contracts and cut **1.0**.
+5. **Upgrade/rollback contract.** Current pre-1.0 internal builds use
+   current-only on-disk and node-RPC formats; incompatible internal
+   changes may require wiping development data. Before 1.0, add explicit
+   version headers + migrations for durable formats and version-negotiate
+   cluster RPC / QUIC ALPN so N and N+1 coexist during rolling upgrades.
+   Then freeze the HTTP API + receipt-handle + wire contracts and cut
+   **1.0**.

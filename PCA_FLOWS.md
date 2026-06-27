@@ -8,6 +8,8 @@ for. These diagrams describe the current WAL-first design.
 Produce can hit any Narad pod. The receiving pod validates the request,
 writes it to its local ingress WAL, and returns `202 Accepted`. A
 background dispatcher later commits the record to the partition owner.
+The response intentionally does not include a message ID, partition, or
+offset.
 
 ```mermaid
 sequenceDiagram
@@ -51,7 +53,9 @@ record is durable in the ingress WAL. It becomes consumable only after
 the dispatcher commits it to the owner partition log — and the owner does
 not report success until the record is fsynced and read back CRC-clean,
 nor does the WAL compact past it until then. Narad has no follower
-replication: the owner's durably-fsynced log is the sole copy.
+replication: the owner's durably-fsynced log is the sole copy. The WAL
+record ID used during dispatch is internal bookkeeping and is not exposed
+to clients.
 
 ## Consume
 
