@@ -26,7 +26,7 @@ sequenceDiagram
     API->>API: Validate JSON/schema<br/>choose target partition
     API->>WAL: Append accepted produce record
     WAL-->>API: fsynced to ingress WAL
-    API-->>C: 202 Accepted<br/>message_id, partition, accepted_at
+    API-->>C: 202 Accepted<br/>empty body
 
     loop background replay/dispatch
         D->>WAL: Read undispatched records

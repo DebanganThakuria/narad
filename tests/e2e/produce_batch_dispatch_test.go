@@ -87,16 +87,16 @@ func TestBatchedDispatchPreservesPartitionOrder(t *testing.T) {
 
 	// A fixed key pins all records to a single partition.
 	const total = 100
-	var part int
+	before := topicNextOffsets(t, env, "batch-order")
 	for i := range total {
 		resp := env.post("/v1/topics/batch-order/produce", map[string]any{
 			"key":     "fixed-key",
 			"message": json.RawMessage(fmt.Sprintf(`{"n":%d}`, i)),
 		})
 		expectStatus(t, resp, http.StatusAccepted)
-		res := readJSON[produceResult](t, resp)
-		part = res.Partition
+		resp.Body.Close()
 	}
+	_, part := waitForAnyVisibleOffset(t, env, "batch-order", before)
 
 	want := 0
 	deadline := time.Now().Add(20 * time.Second)

@@ -130,7 +130,7 @@ func TestProduceDispatcherCommitsLocalOwnerAndCheckpoints(t *testing.T) {
 	if len(committer.records) != 1 {
 		t.Fatalf("committed records = %d, want 1", len(committer.records))
 	}
-	if committer.records[0].MessageID != accepted.MessageID || string(committer.records[0].Payload) != `{"id":1}` {
+	if committer.records[0].WAL != accepted.WAL || string(committer.records[0].Payload) != `{"id":1}` {
 		t.Fatalf("committed record = %+v", committer.records[0])
 	}
 	nextSeq, err := manager.LoadProduceCheckpoint()
@@ -408,11 +408,11 @@ func TestProduceDispatcherCommitsRemoteOwnerAndCheckpoints(t *testing.T) {
 		t.Fatalf("remote batch records = %d, want 1", len(gotReq.Records))
 	}
 	gotRecord := gotReq.Records[0]
-	if gotRecord.MessageID != accepted.MessageID ||
-		gotRecord.Topic != "orders" ||
+	if gotRecord.Topic != "orders" ||
 		gotRecord.Key != "customer-1" ||
 		gotRecord.TargetPartition != 0 ||
-		string(gotRecord.Payload) != `{"id":1}` {
+		string(gotRecord.Payload) != `{"id":1}` ||
+		gotRecord.CreatedAtUnixMs != accepted.CreatedAtUnixMs {
 		t.Fatalf("remote request = %+v", gotReq)
 	}
 	nextSeq, err := manager.LoadProduceCheckpoint()
@@ -629,7 +629,7 @@ func TestProduceDispatcherReplaysAcceptedWALAfterRestart(t *testing.T) {
 	if len(committer.records) != 1 {
 		t.Fatalf("committed records = %d, want 1", len(committer.records))
 	}
-	if committer.records[0].MessageID != accepted.MessageID || string(committer.records[0].Payload) != `{"id":1}` {
+	if committer.records[0].WAL != accepted.WAL || string(committer.records[0].Payload) != `{"id":1}` {
 		t.Fatalf("committed record = %+v", committer.records[0])
 	}
 	nextSeq, err := reopened.LoadProduceCheckpoint()
@@ -683,7 +683,12 @@ func TestProduceDispatcherRetriesFailedRemoteRecordAfterRestart(t *testing.T) {
 	if processed != 1 {
 		t.Fatalf("retry processed = %d, want 1", processed)
 	}
-	if len(gotReq.Records) != 1 || gotReq.Records[0].MessageID != accepted.MessageID || string(gotReq.Records[0].Payload) != `{"id":1}` {
+	if len(gotReq.Records) != 1 ||
+		gotReq.Records[0].Topic != "orders" ||
+		gotReq.Records[0].Key != "customer-1" ||
+		gotReq.Records[0].TargetPartition != 0 ||
+		string(gotReq.Records[0].Payload) != `{"id":1}` ||
+		gotReq.Records[0].CreatedAtUnixMs != accepted.CreatedAtUnixMs {
 		t.Fatalf("retried request = %+v", gotReq)
 	}
 	nextSeq, err := reopened.LoadProduceCheckpoint()
@@ -727,28 +732,21 @@ func TestProduceDispatcherDoesNotReplayCheckpointedRecordAfterRestart(t *testing
 	}
 }
 
-func TestProduceDispatcherDispatchesAllWALShards(t *testing.T) {
+func TestProduceDispatcherDispatchesSingleWALAcrossPartitions(t *testing.T) {
 	store := newTestStore(t)
 	seedProduceDispatchTopicPartitions(t, store, "node-self", 4)
-	manager := newShardedDispatchIngressManager(t, 4)
-	acceptedByID := make(map[string]ingress.AcceptedProduce)
-	recordsPerShard := make(map[int]int)
+	manager := newDispatchIngressManager(t)
+	acceptedByWAL := make(map[wal.RecordID]ingress.AcceptedProduce)
 	for i := range 16 {
 		partition := i % 4
 		accepted, err := manager.AcceptProduce(context.Background(), "orders", "customer-1", partition, []byte(`{"id":1}`))
 		if err != nil {
 			t.Fatalf("AcceptProduce(%d) error = %v", i, err)
 		}
-		acceptedByID[accepted.MessageID] = accepted
-		recordsPerShard[accepted.WALShard]++
-	}
-	if len(recordsPerShard) < 2 {
-		t.Fatalf("records only used %d WAL shard(s), want multiple", len(recordsPerShard))
-	}
-	for shard := range 4 {
-		if got := recordsPerShard[shard]; got != 4 {
-			t.Fatalf("records on shard %d = %d, want 4", shard, got)
+		if accepted.WAL.Seq != uint64(i) {
+			t.Fatalf("accepted WAL seq = %d, want %d", accepted.WAL.Seq, i)
 		}
+		acceptedByWAL[accepted.WAL] = accepted
 	}
 
 	committer := &fakeProduceCommitter{}
@@ -757,29 +755,27 @@ func TestProduceDispatcherDispatchesAllWALShards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DispatchAvailable() error = %v", err)
 	}
-	if processed != len(acceptedByID) {
-		t.Fatalf("processed = %d, want %d", processed, len(acceptedByID))
+	if processed != len(acceptedByWAL) {
+		t.Fatalf("processed = %d, want %d", processed, len(acceptedByWAL))
 	}
-	if len(committer.records) != len(acceptedByID) {
-		t.Fatalf("committed records = %d, want %d", len(committer.records), len(acceptedByID))
+	if len(committer.records) != len(acceptedByWAL) {
+		t.Fatalf("committed records = %d, want %d", len(committer.records), len(acceptedByWAL))
 	}
 	for _, record := range committer.records {
-		accepted, ok := acceptedByID[record.MessageID]
+		accepted, ok := acceptedByWAL[record.WAL]
 		if !ok {
 			t.Fatalf("committed unknown record %+v", record)
 		}
-		if record.WALShard != accepted.WALShard {
-			t.Fatalf("committed shard = %d, want %d", record.WALShard, accepted.WALShard)
+		if record.TargetPartition != accepted.TargetPartition {
+			t.Fatalf("committed partition = %d, want %d", record.TargetPartition, accepted.TargetPartition)
 		}
 	}
-	for shard, want := range recordsPerShard {
-		checkpoint, err := manager.LoadProduceCheckpointForShard(shard)
-		if err != nil {
-			t.Fatalf("LoadProduceCheckpointForShard(%d) error = %v", shard, err)
-		}
-		if checkpoint != uint64(want) {
-			t.Fatalf("LoadProduceCheckpointForShard(%d) = %d, want %d", shard, checkpoint, want)
-		}
+	checkpoint, err := manager.LoadProduceCheckpoint()
+	if err != nil {
+		t.Fatalf("LoadProduceCheckpoint() error = %v", err)
+	}
+	if checkpoint != uint64(len(acceptedByWAL)) {
+		t.Fatalf("LoadProduceCheckpoint() = %d, want %d", checkpoint, len(acceptedByWAL))
 	}
 }
 
@@ -822,24 +818,6 @@ func newDispatchIngressManagerAt(t *testing.T, dir string) *ingress.Manager {
 	})
 	if err != nil {
 		t.Fatalf("OpenManager() error = %v", err)
-	}
-	t.Cleanup(func() { _ = manager.Close() })
-	return manager
-}
-
-func newShardedDispatchIngressManager(t *testing.T, shards int) *ingress.Manager {
-	t.Helper()
-	manager, err := ingress.OpenManagerWithOptions(t.TempDir(), ingress.Options{
-		WAL: wal.Options{
-			SegmentBytes: 1024,
-			SyncInterval: time.Hour,
-			SyncBytes:    1,
-			MaxRecord:    1024,
-		},
-		Shards: shards,
-	})
-	if err != nil {
-		t.Fatalf("OpenManagerWithOptions() error = %v", err)
 	}
 	t.Cleanup(func() { _ = manager.Close() })
 	return manager
@@ -900,7 +878,7 @@ func TestProduceDispatcherWindowGrowsWithFanout(t *testing.T) {
 	if want <= produceDispatchBaseWindow {
 		t.Fatalf("test setup: expected window above base, got want=%d base=%d", want, produceDispatchBaseWindow)
 	}
-	if got := dispatcher.shards[0].windowLimit; got != want {
+	if got := dispatcher.state.windowLimit; got != want {
 		t.Fatalf("windowLimit after fan-out = %d, want %d (target %d * %d partitions, clamped)",
 			got, want, produceDispatchTargetPerPartition, partitions)
 	}

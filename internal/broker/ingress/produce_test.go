@@ -3,6 +3,7 @@ package ingress
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,7 +12,6 @@ import (
 
 func TestProduceRecordEncodeDecodeRoundTrip(t *testing.T) {
 	want := ProduceRecord{
-		MessageID:       "message-1",
 		Topic:           "orders",
 		Key:             "customer-1",
 		TargetPartition: 7,
@@ -27,13 +27,110 @@ func TestProduceRecordEncodeDecodeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeProduceRecord() error = %v", err)
 	}
-	if got.MessageID != want.MessageID ||
-		got.Topic != want.Topic ||
+	if got.Topic != want.Topic ||
 		got.Key != want.Key ||
 		got.TargetPartition != want.TargetPartition ||
 		string(got.Payload) != string(want.Payload) ||
 		got.CreatedAtUnixMs != want.CreatedAtUnixMs {
 		t.Fatalf("roundtrip = %+v, want %+v", got, want)
+	}
+}
+
+func TestProduceRecordEncodeRejectsInvalidRecords(t *testing.T) {
+	valid := ProduceRecord{
+		Topic:           "orders",
+		Key:             "customer-1",
+		TargetPartition: 0,
+		Payload:         []byte(`{"id":1}`),
+		CreatedAtUnixMs: 123456,
+	}
+
+	for _, tc := range []struct {
+		name   string
+		record ProduceRecord
+		want   string
+	}{
+		{
+			name:   "missing topic",
+			record: ProduceRecord{Key: valid.Key, TargetPartition: valid.TargetPartition, Payload: valid.Payload, CreatedAtUnixMs: valid.CreatedAtUnixMs},
+			want:   "topic required",
+		},
+		{
+			name:   "negative partition",
+			record: ProduceRecord{Topic: valid.Topic, Key: valid.Key, TargetPartition: -1, Payload: valid.Payload, CreatedAtUnixMs: valid.CreatedAtUnixMs},
+			want:   "target partition must be >= 0",
+		},
+		{
+			name:   "empty payload",
+			record: ProduceRecord{Topic: valid.Topic, Key: valid.Key, TargetPartition: valid.TargetPartition, CreatedAtUnixMs: valid.CreatedAtUnixMs},
+			want:   "payload required",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := EncodeProduceRecord(tc.record)
+			if err == nil {
+				t.Fatal("EncodeProduceRecord() error = nil, want error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("EncodeProduceRecord() error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestProduceRecordDecodeRejectsMalformedRecords(t *testing.T) {
+	valid := ProduceRecord{
+		Topic:           "orders",
+		Key:             "customer-1",
+		TargetPartition: 7,
+		Payload:         []byte(`{"id":1}`),
+		CreatedAtUnixMs: 123456,
+	}
+	encoded, err := EncodeProduceRecord(valid)
+	if err != nil {
+		t.Fatalf("EncodeProduceRecord() error = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{
+			name: "empty",
+			data: nil,
+			want: "EOF",
+		},
+		{
+			name: "unsupported format",
+			data: append([]byte{99}, encoded[1:]...),
+			want: "unsupported produce record format 99",
+		},
+		{
+			name: "truncated topic length",
+			data: encoded[:3],
+			want: "EOF",
+		},
+		{
+			name: "truncated payload",
+			data: encoded[:len(encoded)-1],
+			want: "EOF",
+		},
+		{
+			name: "trailing bytes",
+			data: append(append([]byte(nil), encoded...), 0),
+			want: "trailing bytes",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DecodeProduceRecord(tc.data)
+			if err == nil {
+				t.Fatal("DecodeProduceRecord() error = nil, want error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("DecodeProduceRecord() error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -50,9 +147,6 @@ func TestManagerAcceptProducePersistsAndReplays(t *testing.T) {
 	}
 	if got := manager.DurableProduceNext(); got != 1 {
 		t.Fatalf("DurableProduceNext() = %d, want 1", got)
-	}
-	if accepted.MessageID == "" {
-		t.Fatal("AcceptProduce() returned empty message id")
 	}
 	if accepted.Topic != "orders" || accepted.TargetPartition != 2 {
 		t.Fatalf("AcceptProduce() = %+v, want topic orders partition 2", accepted)
@@ -83,8 +177,7 @@ func TestManagerAcceptProducePersistsAndReplays(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("replayed records = %d, want 1", len(got))
 	}
-	if got[0].MessageID != accepted.MessageID ||
-		got[0].Topic != "orders" ||
+	if got[0].Topic != "orders" ||
 		got[0].Key != "customer-1" ||
 		got[0].TargetPartition != 2 ||
 		string(got[0].Payload) != `{"id":1}` ||
@@ -93,79 +186,61 @@ func TestManagerAcceptProducePersistsAndReplays(t *testing.T) {
 	}
 }
 
-func TestManagerAcceptProduceDistributesPartitionsAcrossShards(t *testing.T) {
+func TestManagerAcceptProduceAppendsSequentialWALRecords(t *testing.T) {
 	dir := t.TempDir()
-	manager, err := OpenManagerWithOptions(dir, Options{
-		WAL:    testWALOptions(),
-		Shards: 4,
-	})
+	manager, err := OpenManager(dir, testWALOptions())
 	if err != nil {
-		t.Fatalf("OpenManagerWithOptions() error = %v", err)
+		t.Fatalf("OpenManager() error = %v", err)
 	}
 	defer manager.Close()
 
-	acceptedByID := make(map[string]AcceptedProduce)
-	recordsPerShard := make(map[int]int)
+	acceptedByWAL := make(map[wal.RecordID]AcceptedProduce)
 	for i := range 16 {
 		partition := i % 4
 		accepted, err := manager.AcceptProduce(context.Background(), "orders", "customer-1", partition, []byte(`{"id":1}`))
 		if err != nil {
 			t.Fatalf("AcceptProduce(%d) error = %v", i, err)
 		}
-		if accepted.WALShard < 0 || accepted.WALShard >= 4 {
-			t.Fatalf("accepted WAL shard = %d, want [0,4)", accepted.WALShard)
+		if accepted.WAL.Seq != uint64(i) {
+			t.Fatalf("accepted WAL seq = %d, want %d", accepted.WAL.Seq, i)
 		}
-		if accepted.WALShard != partition {
-			t.Fatalf("accepted WAL shard = %d, want partition shard %d", accepted.WALShard, partition)
+		if accepted.TargetPartition != partition {
+			t.Fatalf("accepted partition = %d, want %d", accepted.TargetPartition, partition)
 		}
-		acceptedByID[accepted.MessageID] = accepted
-		recordsPerShard[accepted.WALShard]++
-	}
-	if len(recordsPerShard) != 4 {
-		t.Fatalf("records used %d WAL shard(s), want 4", len(recordsPerShard))
-	}
-	for shard := range 4 {
-		if got := recordsPerShard[shard]; got != 4 {
-			t.Fatalf("records on shard %d = %d, want 4", shard, got)
-		}
+		acceptedByWAL[accepted.WAL] = accepted
 	}
 
 	var replayed int
 	if err := manager.ReplayProduce(0, func(record ProduceRecord) error {
-		accepted, ok := acceptedByID[record.MessageID]
+		accepted, ok := acceptedByWAL[record.WAL]
 		if !ok {
-			t.Fatalf("replayed unknown message id %q", record.MessageID)
+			t.Fatalf("replayed unknown WAL record %+v", record.WAL)
 		}
-		if record.WALShard != accepted.WALShard {
-			t.Fatalf("replayed shard = %d, want %d", record.WALShard, accepted.WALShard)
+		if record.TargetPartition != accepted.TargetPartition {
+			t.Fatalf("replayed partition = %d, want %d", record.TargetPartition, accepted.TargetPartition)
 		}
 		replayed++
 		return nil
 	}); err != nil {
 		t.Fatalf("ReplayProduce() error = %v", err)
 	}
-	if replayed != len(acceptedByID) {
-		t.Fatalf("replayed records = %d, want %d", replayed, len(acceptedByID))
+	if replayed != len(acceptedByWAL) {
+		t.Fatalf("replayed records = %d, want %d", replayed, len(acceptedByWAL))
 	}
 
-	for shard, want := range recordsPerShard {
-		got, err := manager.DurableProduceNextForShard(shard)
-		if err != nil {
-			t.Fatalf("DurableProduceNextForShard(%d) error = %v", shard, err)
-		}
-		if got != uint64(want) {
-			t.Fatalf("DurableProduceNextForShard(%d) = %d, want %d", shard, got, want)
-		}
-		if err := manager.StoreProduceCheckpointForShard(shard, got); err != nil {
-			t.Fatalf("StoreProduceCheckpointForShard(%d) error = %v", shard, err)
-		}
-		checkpoint, err := manager.LoadProduceCheckpointForShard(shard)
-		if err != nil {
-			t.Fatalf("LoadProduceCheckpointForShard(%d) error = %v", shard, err)
-		}
-		if checkpoint != got {
-			t.Fatalf("LoadProduceCheckpointForShard(%d) = %d, want %d", shard, checkpoint, got)
-		}
+	got := manager.DurableProduceNext()
+	if got != uint64(len(acceptedByWAL)) {
+		t.Fatalf("DurableProduceNext() = %d, want %d", got, len(acceptedByWAL))
+	}
+	if err := manager.StoreProduceCheckpoint(got); err != nil {
+		t.Fatalf("StoreProduceCheckpoint() error = %v", err)
+	}
+	checkpoint, err := manager.LoadProduceCheckpoint()
+	if err != nil {
+		t.Fatalf("LoadProduceCheckpoint() error = %v", err)
+	}
+	if checkpoint != got {
+		t.Fatalf("LoadProduceCheckpoint() = %d, want %d", checkpoint, got)
 	}
 }
 
@@ -175,8 +250,7 @@ func TestManagerReplayFromSequence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenManager() error = %v", err)
 	}
-	first, err := manager.AcceptProduce(context.Background(), "orders", "k1", 0, []byte(`{"id":1}`))
-	if err != nil {
+	if _, err := manager.AcceptProduce(context.Background(), "orders", "k1", 0, []byte(`{"id":1}`)); err != nil {
 		t.Fatalf("AcceptProduce(first) error = %v", err)
 	}
 	second, err := manager.AcceptProduce(context.Background(), "orders", "k2", 0, []byte(`{"id":2}`))
@@ -197,8 +271,8 @@ func TestManagerReplayFromSequence(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("records from seq %d = %d, want 1", second.WAL.Seq, len(got))
 	}
-	if got[0].MessageID != second.MessageID {
-		t.Fatalf("replayed message id = %q, want %q; first was %q", got[0].MessageID, second.MessageID, first.MessageID)
+	if got[0].WAL.Seq != second.WAL.Seq || got[0].Key != "k2" || string(got[0].Payload) != `{"id":2}` {
+		t.Fatalf("replayed record = %+v, want second %+v", got[0], second)
 	}
 }
 
@@ -242,7 +316,7 @@ func TestManagerReplayFromCursorStartsAfterRecord(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("records from cursor = %d, want 2", len(got))
 	}
-	if got[0].MessageID != second.MessageID || got[0].WAL.Seq != 1 {
+	if got[0].WAL.Seq != second.WAL.Seq || got[0].Key != "k2" || string(got[0].Payload) != `{"id":2}` {
 		t.Fatalf("first cursor replay = %+v, want second %+v", got[0], second)
 	}
 }

@@ -68,6 +68,7 @@ func TestProduce_AcceptsArrayMessage(t *testing.T) {
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/arr/produce",
 		map[string]any{"message": []int{1, 2, 3}})
 	expectStatus(t, resp, http.StatusAccepted)
+	_ = resp.Body.Close()
 }
 
 func TestProduce_AcceptsStringMessage(t *testing.T) {
@@ -78,6 +79,7 @@ func TestProduce_AcceptsStringMessage(t *testing.T) {
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/str/produce",
 		map[string]any{"message": "hello"})
 	expectStatus(t, resp, http.StatusAccepted)
+	_ = resp.Body.Close()
 }
 
 // TestProduce_AcceptsEmptyStringMessage documents current behaviour:
@@ -92,6 +94,7 @@ func TestProduce_AcceptsEmptyStringMessage(t *testing.T) {
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/empty-str/produce",
 		map[string]any{"message": ""})
 	expectStatus(t, resp, http.StatusAccepted)
+	_ = resp.Body.Close()
 }
 
 func TestProduce_RejectsMissingMessage(t *testing.T) {
@@ -112,6 +115,7 @@ func TestProduce_IgnoresUnknownFields(t *testing.T) {
 	resp := jsonReq(t, http.MethodPost, env.Server.URL+"/v1/topics/extra/produce",
 		map[string]any{"message": map[string]string{"v": "1"}, "garbage": true})
 	expectStatus(t, resp, http.StatusAccepted)
+	_ = resp.Body.Close()
 }
 
 func TestProduce_RejectsInvalidJSON(t *testing.T) {
@@ -152,12 +156,12 @@ func TestProduce_RejectsOversizedBody(t *testing.T) {
 	expectStatus(t, resp, http.StatusRequestEntityTooLarge)
 }
 
-// TestProduce_ConcurrentProducersReturnUniqueMessageIDs stress-tests the
-// HTTP accept path under concurrent pressure. Every accepted produce
-// should return a unique ingress message ID.
+// TestProduce_ConcurrentProducersAcceptedAndVisible stress-tests the HTTP
+// accept path under concurrent pressure. Every accepted produce should
+// eventually become visible even though the hot response has no body.
 //
 // Run with -race for additional coverage.
-func TestProduce_ConcurrentProducersReturnUniqueMessageIDs(t *testing.T) {
+func TestProduce_ConcurrentProducersAcceptedAndVisible(t *testing.T) {
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "race", Partitions: 4})
 
@@ -167,12 +171,7 @@ func TestProduce_ConcurrentProducersReturnUniqueMessageIDs(t *testing.T) {
 		totalExpect = writers * perWriter
 	)
 
-	type slot struct {
-		id string
-		p  int
-	}
-	results := make(chan slot, totalExpect)
-
+	before := topicNextOffsets(t, env, "race")
 	var wg sync.WaitGroup
 	var failed atomic.Int32
 	for w := range writers {
@@ -188,33 +187,14 @@ func TestProduce_ConcurrentProducersReturnUniqueMessageIDs(t *testing.T) {
 					_ = resp.Body.Close()
 					continue
 				}
-				var pr produceResult
-				decodeJSON(t, resp, &pr)
-				results <- slot{id: pr.MessageID, p: pr.Partition}
+				_ = resp.Body.Close()
 			}
 		}(w)
 	}
 	wg.Wait()
-	close(results)
 
 	if failed.Load() > 0 {
 		t.Fatalf("%d produce calls failed under concurrency", failed.Load())
 	}
-
-	seen := make(map[string]struct{}, totalExpect)
-	for s := range results {
-		if s.id == "" {
-			t.Fatal("empty message_id returned to producer")
-		}
-		if s.p < 0 || s.p >= 4 {
-			t.Fatalf("partition=%d, want in [0,4)", s.p)
-		}
-		if _, dup := seen[s.id]; dup {
-			t.Fatalf("duplicate message_id %q returned to two producers", s.id)
-		}
-		seen[s.id] = struct{}{}
-	}
-	if len(seen) != totalExpect {
-		t.Errorf("unique results: got %d want %d", len(seen), totalExpect)
-	}
+	waitForVisibleDelta(t, env, "race", before, totalExpect)
 }

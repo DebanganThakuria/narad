@@ -18,7 +18,6 @@ func TestCommitAcceptedProduceMakesRecordVisible(t *testing.T) {
 	engine := newTestEngineWithIngress(t, t.TempDir(), ms, schema.NewAlwaysValid(), fixedPartitioner{picked: 0}, newTestIngressManager(t), "")
 
 	offset, err := engine.CommitAcceptedProduce(context.Background(), ingress.ProduceRecord{
-		MessageID:       "message-1",
 		Topic:           "orders",
 		Key:             "customer-1",
 		TargetPartition: 1,
@@ -52,7 +51,6 @@ func TestCommitAcceptedProduceBatchMakesRecordsVisible(t *testing.T) {
 
 	offsets, err := engine.CommitAcceptedProduceBatch(context.Background(), []ingress.ProduceRecord{
 		{
-			MessageID:       "message-1",
 			Topic:           "orders",
 			Key:             "customer-1",
 			TargetPartition: 1,
@@ -60,7 +58,6 @@ func TestCommitAcceptedProduceBatchMakesRecordsVisible(t *testing.T) {
 			CreatedAtUnixMs: time.Now().Add(-time.Millisecond).UnixMilli(),
 		},
 		{
-			MessageID:       "message-2",
 			Topic:           "orders",
 			Key:             "customer-2",
 			TargetPartition: 1,
@@ -110,7 +107,6 @@ func TestCommitAcceptedProduceRejectsRemotePartition(t *testing.T) {
 
 	engine := newTestEngineWithIngress(t, t.TempDir(), store, schema.NewAlwaysValid(), fixedPartitionManager{picked: 0}, newTestIngressManager(t), "node-self")
 	_, err := engine.CommitAcceptedProduce(ctx, ingress.ProduceRecord{
-		MessageID:       "message-1",
 		Topic:           "orders",
 		TargetPartition: 1,
 		Payload:         []byte(`{"id":1}`),

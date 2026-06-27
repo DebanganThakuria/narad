@@ -92,18 +92,9 @@ func mustCreateTopic(t *testing.T, e *env, req createTopicReq) topic.Topic {
 	return topic.Topic{}
 }
 
-// produceResult holds the fields returned by the produce endpoint.
 type produceResult struct {
-	Status           string `json:"status"`
-	MessageID        string `json:"message_id"`
-	Topic            string `json:"topic"`
-	Partition        int    `json:"partition"`
-	AcceptedAtUnixMs int64  `json:"accepted_at_unix_ms"`
-
-	// Offset is test-only compatibility. The HTTP produce response is
-	// asynchronous and no longer returns an offset; helpers fill this
-	// after the dispatcher makes the accepted record visible.
-	Offset int64 `json:"-"`
+	Partition int
+	Offset    int64
 }
 
 // mustProduce produces a single message and fatals on error.
@@ -119,11 +110,9 @@ func mustProduce(t *testing.T, e *env, topicName, key string, val any) produceRe
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("mustProduce %q: got %d body=%s", topicName, resp.StatusCode, readBody(resp))
 	}
-	var out produceResult
-	decodeJSON(t, resp, &out)
-	validateAcceptedProduce(t, out, topicName, len(before))
-	out.Offset = waitForVisibleOffset(t, e, topicName, out.Partition, before[out.Partition])
-	return out
+	resp.Body.Close()
+	offset, partition := waitForAnyVisibleOffset(t, e, topicName, before)
+	return produceResult{Partition: partition, Offset: offset}
 }
 
 func topicNextOffsets(t *testing.T, e *env, topicName string) []int64 {
@@ -139,26 +128,7 @@ func topicNextOffsets(t *testing.T, e *env, topicName string) []int64 {
 	return offsets
 }
 
-func validateAcceptedProduce(t *testing.T, got produceResult, topicName string, partitions int) {
-	t.Helper()
-	if got.Status != "accepted" {
-		t.Fatalf("produce status = %q, want accepted", got.Status)
-	}
-	if got.MessageID == "" {
-		t.Fatal("produce message_id is empty")
-	}
-	if got.Topic != topicName {
-		t.Fatalf("produce topic = %q, want %q", got.Topic, topicName)
-	}
-	if got.Partition < 0 || got.Partition >= partitions {
-		t.Fatalf("produce partition = %d, want in [0,%d)", got.Partition, partitions)
-	}
-	if got.AcceptedAtUnixMs <= 0 {
-		t.Fatalf("produce accepted_at_unix_ms = %d, want positive", got.AcceptedAtUnixMs)
-	}
-}
-
-func waitForVisibleOffset(t *testing.T, e *env, topicName string, partition int, previousNext int64) int64 {
+func waitForAnyVisibleOffset(t *testing.T, e *env, topicName string, previousNext []int64) (int64, int) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -166,18 +136,37 @@ func waitForVisibleOffset(t *testing.T, e *env, topicName string, partition int,
 		if err != nil {
 			t.Fatalf("get topic details %q: %v", topicName, err)
 		}
-		if partition >= 0 && partition < len(details.Partitions) {
-			// Wait on the high-watermark (consume-visible frontier), not
-			// NextOffset (append counter): a record is appended before it
-			// is durably committed and made visible.
-			if details.Partitions[partition].HighWatermark > previousNext {
-				return previousNext
+		for partition, before := range previousNext {
+			if partition < len(details.Partitions) && details.Partitions[partition].HighWatermark > before {
+				return before, partition
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for produce visibility topic=%q partition=%d next_offset>%d", topicName, partition, previousNext)
-	return 0
+	t.Fatalf("timed out waiting for produce visibility topic=%q", topicName)
+	return 0, 0
+}
+
+func waitForVisibleDelta(t *testing.T, e *env, topicName string, previousNext []int64, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		details, err := e.Broker.GetTopicDetails(context.Background(), topicName)
+		if err != nil {
+			t.Fatalf("get topic details %q: %v", topicName, err)
+		}
+		var got int64
+		for partition, before := range previousNext {
+			if partition < len(details.Partitions) && details.Partitions[partition].HighWatermark > before {
+				got += details.Partitions[partition].HighWatermark - before
+			}
+		}
+		if got >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d visible produced messages topic=%q", want, topicName)
 }
 
 // jsonReq sends a JSON-encoded body with the given method and URL.

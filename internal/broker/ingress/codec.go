@@ -7,12 +7,9 @@ import (
 	"io"
 )
 
-const produceRecordVersion byte = 1
+const produceRecordFormat byte = 1
 
 func EncodeProduceRecord(record ProduceRecord) ([]byte, error) {
-	if record.MessageID == "" {
-		return nil, errors.New("ingress: message id required")
-	}
 	if record.Topic == "" {
 		return nil, errors.New("ingress: topic required")
 	}
@@ -23,10 +20,9 @@ func EncodeProduceRecord(record ProduceRecord) ([]byte, error) {
 		return nil, errors.New("ingress: payload required")
 	}
 
-	size := 1 + stringSize(record.MessageID) + stringSize(record.Topic) + stringSize(record.Key) + 4 + 8 + bytesSize(record.Payload)
+	size := 1 + stringSize(record.Topic) + stringSize(record.Key) + 4 + 8 + bytesSize(record.Payload)
 	out := make([]byte, 0, size)
-	out = append(out, produceRecordVersion)
-	out = appendString(out, record.MessageID)
+	out = append(out, produceRecordFormat)
 	out = appendString(out, record.Topic)
 	out = appendString(out, record.Key)
 	out = binary.BigEndian.AppendUint32(out, uint32(record.TargetPartition))
@@ -37,16 +33,12 @@ func EncodeProduceRecord(record ProduceRecord) ([]byte, error) {
 
 func DecodeProduceRecord(data []byte) (ProduceRecord, error) {
 	r := byteReader{data: data}
-	version, err := r.u8()
+	format, err := r.u8()
 	if err != nil {
 		return ProduceRecord{}, err
 	}
-	if version != produceRecordVersion {
-		return ProduceRecord{}, fmt.Errorf("ingress: unsupported produce record version %d", version)
-	}
-	messageID, err := r.string()
-	if err != nil {
-		return ProduceRecord{}, err
+	if format != produceRecordFormat {
+		return ProduceRecord{}, fmt.Errorf("ingress: unsupported produce record format %d", format)
 	}
 	topicName, err := r.string()
 	if err != nil {
@@ -72,7 +64,6 @@ func DecodeProduceRecord(data []byte) (ProduceRecord, error) {
 		return ProduceRecord{}, err
 	}
 	return ProduceRecord{
-		MessageID:       messageID,
 		Topic:           topicName,
 		Key:             key,
 		TargetPartition: int(partition),

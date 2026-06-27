@@ -29,9 +29,6 @@ func TestAcceptProducePersistsToIngressWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AcceptProduce() error = %v", err)
 	}
-	if accepted.MessageID == "" {
-		t.Fatal("AcceptProduce() returned empty message id")
-	}
 	if accepted.Topic != "orders" || accepted.TargetPartition != 2 {
 		t.Fatalf("accepted = %+v, want topic orders partition 2", accepted)
 	}
@@ -46,8 +43,7 @@ func TestAcceptProducePersistsToIngressWAL(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("replayed records = %d, want 1", len(records))
 	}
-	if records[0].MessageID != accepted.MessageID ||
-		records[0].Topic != "orders" ||
+	if records[0].Topic != "orders" ||
 		records[0].Key != "customer-1" ||
 		records[0].TargetPartition != 2 ||
 		string(records[0].Payload) != `{"id":1}` {

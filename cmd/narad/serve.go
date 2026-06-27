@@ -30,6 +30,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
+	"github.com/debanganthakuria/narad/internal/persistence/wal"
 	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
 	"github.com/debanganthakuria/narad/internal/platform/config"
 	"github.com/debanganthakuria/narad/internal/platform/observability/logger"
@@ -301,7 +302,7 @@ func buildBroker(
 		return nil, nil, nil, nil, nil, errors.New("broker: cluster coordination requires metastore.Store")
 	}
 
-	ingressManager, err := ingress.OpenManagerWithOptions(cfg.Storage.DataDir, ingressWALOptions(cfg.Storage, m))
+	ingressManager, err := ingress.OpenManager(cfg.Storage.DataDir, ingressWALOptions(cfg.Storage, m))
 	if err != nil {
 		return nil, nil, nil, nil, nil, fmt.Errorf("ingress: %w", err)
 	}
@@ -517,14 +518,11 @@ func storageOptions(sc config.StorageConfig) (storage.Options, error) {
 	}, nil
 }
 
-func ingressWALOptions(sc config.StorageConfig, m *metrics.Metrics) ingress.Options {
+func ingressWALOptions(sc config.StorageConfig, m *metrics.Metrics) wal.Options {
 	opts := ingress.DefaultWALOptions(m)
 	opts.SyncInterval = time.Duration(sc.IngressWALSyncIntervalMs) * time.Millisecond
 	opts.SyncBytes = sc.IngressWALSyncBytes
-	return ingress.Options{
-		WAL:    opts,
-		Shards: sc.IngressWALShards,
-	}
+	return opts
 }
 
 func storageSyncMode(mode config.FsyncMode) storage.SyncMode {

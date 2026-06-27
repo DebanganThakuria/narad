@@ -43,11 +43,6 @@ type StorageConfig struct {
 	// are pending. Zero uses the WAL package default.
 	IngressWALSyncBytes int64 `json:"ingress_wal_sync_bytes"`
 
-	// IngressWALShards is the number of independent ingress produce WALs.
-	// Accepted produces are distributed across shards to parallelize append
-	// locks and group commits. Narad does not guarantee message ordering.
-	IngressWALShards int `json:"ingress_wal_shards"`
-
 	// SegmentBytes triggers a segment roll once the active segment's
 	// on-disk size meets or exceeds this value.
 	SegmentBytes int64 `json:"segment_bytes"`

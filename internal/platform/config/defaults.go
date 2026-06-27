@@ -37,7 +37,6 @@ func Default() *Config {
 			HighWatermarkSyncIntervalMs: 5000,
 			IngressWALSyncIntervalMs:    10,
 			IngressWALSyncBytes:         1 << 20,
-			IngressWALShards:            1,
 			SegmentBytes:                64 << 20, // 64 MiB
 			RetentionCheckIntervalMs:    60_000,   // 1 minute
 		},

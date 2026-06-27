@@ -34,7 +34,6 @@ func TestValidateRejectsInvalidFields(t *testing.T) {
 	cfg.Storage.HighWatermarkSyncIntervalMs = 0
 	cfg.Storage.IngressWALSyncIntervalMs = 0
 	cfg.Storage.IngressWALSyncBytes = -1
-	cfg.Storage.IngressWALShards = 0
 	cfg.Storage.SegmentBytes = 1024
 	cfg.Storage.RetentionCheckIntervalMs = 0
 	cfg.Topic.DefaultPartitions = 0
@@ -61,7 +60,6 @@ func TestValidateRejectsInvalidFields(t *testing.T) {
 		"storage.high_watermark_sync_interval_ms must be > 0",
 		"storage.ingress_wal_sync_interval_ms must be > 0",
 		"storage.ingress_wal_sync_bytes must be >= 0",
-		"storage.ingress_wal_shards must be > 0",
 		"topic.default_partitions must be >= 3",
 		"log.level \"verbose\" is not one of [debug, info, warn, error]",
 	} {
