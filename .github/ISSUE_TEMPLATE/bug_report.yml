@@ -11,7 +11,18 @@ body:
     id: version
     attributes:
       label: Version or commit SHA
-      placeholder: e.g. main@abcdef1
+      placeholder: e.g. v0.1.0-alpha.1 or d2b203d
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Environment
+      options:
+        - local single-node
+        - local multi-node
+        - Kubernetes
+        - other
     validations:
       required: true
   - type: textarea
@@ -39,3 +50,10 @@ body:
     attributes:
       label: Logs or output
       description: Paste relevant logs, stack traces, or failing responses.
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security check
+      options:
+        - label: This does not disclose a security vulnerability.
+          required: true

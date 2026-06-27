@@ -18,6 +18,7 @@ repository:
   has_issues: true
   has_projects: false
   has_wiki: false
+  has_discussions: true
   delete_branch_on_merge: true
   allow_squash_merge: true
   allow_merge_commit: false
@@ -30,8 +31,6 @@ repository:
     secret_scanning_push_protection:
       status: enabled
     dependabot_security_updates:
-      status: enabled
-    secret_scanning_non_provider_patterns:
       status: enabled
   archived: false
   allow_forking: true
@@ -80,6 +79,15 @@ labels:
   - name: documentation
     color: 0075ca
     description: Documentation improvements
+  - name: security
+    color: b60205
+    description: Security-sensitive maintenance
+  - name: performance
+    color: c5def5
+    description: Throughput, latency, memory, or CPU work
+  - name: operations
+    color: fef2c0
+    description: Deployment, observability, or production-readiness work
   - name: good first issue
     color: 7057ff
     description: Good for first-time contributors

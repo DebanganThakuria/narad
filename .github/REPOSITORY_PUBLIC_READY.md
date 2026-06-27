@@ -1,73 +1,85 @@
-# Repository public-readiness checklist
+# Repository public-readiness record
 
-This repository has been prepared to be **public-ready** without actually
-changing repository visibility yet.
+Narad is public as an Apache-2.0, pre-1.0 open-source project.
 
-## What is already added in-repo
+This file records the expected public repository posture. It is not a
+production-readiness declaration for Narad deployments; production gates
+remain documented in the README.
+
+## In-repository OSS surface
 
 - `LICENSE` — Apache License 2.0
-- `CONTRIBUTING.md` — contributor workflow and expectations
+- `README.md` — project overview, quickstart, status, benchmark notes,
+  architecture, and production-readiness gates
+- `CONTRIBUTING.md` — contributor workflow and local development commands
 - `CODE_OF_CONDUCT.md` — community expectations
-- `SECURITY.md` — vulnerability reporting guidance
+- `SECURITY.md` — private vulnerability reporting process
+- `SUPPORT.md` — support, questions, and troubleshooting paths
 - issue templates for bugs and feature requests
 - pull request template
-- `dependabot.yml` for Go modules and GitHub Actions
 - `CODEOWNERS`
-- `.github/settings.yml` with intended repository settings
+- Dependabot configuration for Go modules and GitHub Actions
+- CI workflow: build/vet, unit, e2e, local cluster integration, chaos
+- container workflow: multi-arch GHCR image publishing
+- CodeQL workflow for static analysis
+- `.github/settings.yml` documenting intended repository settings
 
-## Intended repository settings
+## Live repository settings
 
-These are declared in `.github/settings.yml` for a settings-sync tool or
-manual application in GitHub.
+Expected public settings:
 
-### Merge strategy
+- repository visibility: public
+- default branch: `master`
+- issues: enabled
+- discussions: enabled
+- projects and wiki: disabled
+- squash merge: enabled
+- merge commits and rebase merge: disabled
+- auto-merge: enabled
+- delete branches on merge: enabled
+- vulnerability alerts and Dependabot security updates: enabled
+- secret scanning and push protection: enabled
 
-- Allow **squash merge**
-- Disable merge commits
-- Disable rebase merge
-- Delete head branches after merge
-- Allow auto-merge
+## Branch protection
 
-### Branch protection for `master`
+The `master` branch should require:
 
-- Require a pull request before merging
-- Require 1 approving review
-- Dismiss stale approvals on new commits
-- Require CODEOWNERS review
-- Require conversation resolution before merging
-- Require branches to be up to date before merging
-- Require these status checks:
-  - `Build & vet`
-  - `Unit tests`
-  - `E2E tests`
-- Disallow force pushes
-- Disallow deletions
-- Require linear history
+- pull request before merge
+- 1 approving review
+- CODEOWNERS review
+- stale approval dismissal on new commits
+- conversation resolution
+- branch up to date before merge
+- linear history
+- no force pushes
+- no branch deletion
 
-### Security posture
+Required checks:
 
-- Enable Dependabot updates
-- Enable vulnerability alerts
-- Enable secret scanning
-- Enable push protection
+- `Build & vet`
+- `Unit tests`
+- `E2E tests`
+- `Local cluster integration`
+- `Local cluster chaos`
 
-## Before making the repo public
+## Release posture
 
-Review these items manually:
+The first public alpha is `v0.1.0-alpha.1`.
 
-- remove or redact any sensitive information in docs, examples, issues, and history
-- verify badges and links resolve correctly from the public GitHub URL
-- confirm the maintainer contact path for `SECURITY.md`
-- decide whether `master` should be renamed to `main`
-- review `README.md` language for claims about maturity and roadmap
-- confirm whether GitHub Discussions should be enabled
-- confirm whether Releases should be published and versioning policy documented
+Published image:
 
-## How to apply settings
+```text
+ghcr.io/debanganthakuria/narad:v0.1.0-alpha.1
+```
 
-You can either:
+Future release tags should be immutable once published. Follow-up
+documentation changes should land on `master` unless a replacement
+release is intentionally planned.
 
-1. apply `.github/settings.yml` with a settings-sync app such as Probot Settings, or
-2. mirror the same settings manually in the GitHub repository settings UI
+## Remaining production gates
 
-The repository should stay private until the validation checklist is done.
+Narad is public-ready as an OSS project, but not yet ready for direct
+production or externally exposed deployments. The README tracks the
+current production gates, including API auth/rate limiting/TLS,
+durability/DR, liveness behavior, partition rebalance, soak/SLOs, and
+upgrade/rollback contracts.

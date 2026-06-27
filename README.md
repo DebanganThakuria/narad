@@ -85,6 +85,7 @@ Benchmark environment highlights:
 - [Contributing guide](./CONTRIBUTING.md)
 - [Code of conduct](./CODE_OF_CONDUCT.md)
 - [Security policy](./SECURITY.md)
+- [Support policy](./SUPPORT.md)
 - [PCA flow diagrams](./PCA_FLOWS.md)
 - [License](./LICENSE)
 

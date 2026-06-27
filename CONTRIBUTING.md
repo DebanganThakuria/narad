@@ -7,6 +7,7 @@ Thanks for contributing to Narad.
 - Open an issue or start a discussion before large changes so the work can be scoped before implementation starts.
 - Keep pull requests focused. Small, reviewable changes are easier to land than broad refactors.
 - If the change affects behavior, tests are expected in the same pull request.
+- Use `SUPPORT.md` for questions and troubleshooting paths.
 
 ## Development setup
 
