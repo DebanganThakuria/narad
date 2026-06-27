@@ -1,7 +1,7 @@
 repository:
   name: narad
   description: Lightweight, durable, queue-first event streaming system.
-  private: true
+  private: false
   homepage: ""
   topics:
     - go
@@ -43,9 +43,8 @@ repository:
   rebase_merge_commit_title: PR_TITLE
   rebase_merge_commit_message: PR_BODY
 
-# Apply with a settings-sync app such as Probot Settings.
-# This keeps the repository private while making the intended public
-# settings explicit and reviewable before the visibility flip.
+# Apply with a settings-sync app such as Probot Settings, or mirror
+# manually in GitHub repository settings.
 
 branches:
   - name: master
@@ -60,6 +59,8 @@ branches:
           - Build & vet
           - Unit tests
           - E2E tests
+          - Local cluster integration
+          - Local cluster chaos
       enforce_admins: false
       restrictions: null
       required_linear_history: true
@@ -68,17 +69,6 @@ branches:
       block_creations: false
       required_conversation_resolution: true
       lock_branch: false
-
-  has_issues: true
-  has_projects: false
-  has_wiki: false
-  delete_branch_on_merge: true
-  allow_squash_merge: true
-  allow_merge_commit: false
-  allow_rebase_merge: false
-  default_branch: master
-  allow_auto_merge: true
-  vulnerability_alerts: true
 
 labels:
   - name: bug
@@ -94,24 +84,5 @@ labels:
     color: 7057ff
     description: Good for first-time contributors
   - name: help wanted
-    color: 008672
+    color: "008672"
     description: Extra attention is needed
-
-branches:
-  - name: master
-    protection:
-      required_pull_request_reviews:
-        required_approving_review_count: 1
-        dismiss_stale_reviews: true
-        require_code_owner_reviews: true
-      required_status_checks:
-        strict: true
-        contexts:
-          - Build & vet
-          - Unit tests
-          - E2E tests
-      enforce_admins: false
-      restrictions: null
-      required_linear_history: true
-      allow_force_pushes: false
-      allow_deletions: false
