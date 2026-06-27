@@ -728,12 +728,21 @@ gates**; until they ship, run Narad only behind a trusted boundary.
    surface **421**), and fix cursor advance on empty polls so a busy
    partition cannot starve others. (Keyed produce to a dead partition is
    inherently unavailable — to be documented.)
-4. **Soak, SLOs & capacity.** Define and prove the numbers over time:
+4. **Partition rebalance / scale-out contract.** New Narad pods can join
+   the cluster, but existing partition ownership is sticky today; new
+   capacity does not automatically absorb existing partitions. Before
+   production scale-out, add an explicit rebalance protocol: choose
+   candidate partitions, drain or pause writes safely, move/copy the
+   partition log plus consumer offset state, verify high-watermark and
+   frame CRCs on the destination, atomically update ownership, and roll
+   back cleanly on failure. This needs load-aware placement, operator
+   controls, metrics, and tests for adding/removing pods under traffic.
+5. **Soak, SLOs & capacity.** Define and prove the numbers over time:
    produce-accept p99, produce→visible p99, consume p99, max sustainable
    throughput, max lag, recovery time. Quantify the synchronous
    fsync + CRC-readback cost on the commit path. Multi-hour soak under
    fault injection against the SLOs, wired to Grafana + alerts.
-5. **Upgrade/rollback contract.** Current pre-1.0 internal builds use
+6. **Upgrade/rollback contract.** Current pre-1.0 internal builds use
    current-only on-disk and node-RPC formats; incompatible internal
    changes may require wiping development data. Before 1.0, add explicit
    version headers + migrations for durable formats and version-negotiate
