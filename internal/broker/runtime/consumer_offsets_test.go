@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -9,6 +11,7 @@ import (
 
 func TestConsumerOffsetCommitterFlushesLatestOffsetOnClose(t *testing.T) {
 	dataDir := t.TempDir()
+	mustCreatePartitionDir(t, dataDir, "orders", 0)
 	committer := NewConsumerOffsetCommitter(dataDir, time.Hour, nil)
 
 	committer.Commit("orders", 0, 1)
@@ -33,6 +36,7 @@ func TestConsumerOffsetCommitterFlushesLatestOffsetOnClose(t *testing.T) {
 
 func TestConsumerOffsetCommitterCanPersistOffsetZero(t *testing.T) {
 	dataDir := t.TempDir()
+	mustCreatePartitionDir(t, dataDir, "orders", 0)
 	committer := NewConsumerOffsetCommitter(dataDir, time.Hour, nil)
 
 	committer.Commit("orders", 0, 0)
@@ -51,4 +55,31 @@ func TestConsumerOffsetCommitterCanPersistOffsetZero(t *testing.T) {
 	if got != 0 {
 		t.Fatalf("consumer offset = %d, want 0", got)
 	}
+}
+
+func TestConsumerOffsetCommitterDoesNotRecreatePurgedPartitionDir(t *testing.T) {
+	dataDir := t.TempDir()
+	partitionDir := mustCreatePartitionDir(t, dataDir, "orders", 0)
+	committer := NewConsumerOffsetCommitter(dataDir, time.Hour, nil)
+
+	committer.Commit("orders", 0, 7)
+	if err := os.RemoveAll(partitionDir); err != nil {
+		t.Fatalf("RemoveAll() error = %v", err)
+	}
+
+	if err := committer.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, err := os.Stat(partitionDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partition dir stat error = %v, want not exist", err)
+	}
+}
+
+func mustCreatePartitionDir(t *testing.T, dataDir, topic string, partition int) string {
+	t.Helper()
+	partitionDir := storage.TopicPartitionDir(dataDir, topic, partition)
+	if err := os.MkdirAll(partitionDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	return partitionDir
 }

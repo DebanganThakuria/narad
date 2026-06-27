@@ -10,6 +10,8 @@ import (
 
 const consumerOffsetFileName = "consumer.offset"
 
+var ErrPartitionDirMissing = errors.New("storage: partition directory missing")
+
 func ReadConsumerOffset(partitionDir string) (int64, bool, error) {
 	buf, err := os.ReadFile(filepath.Join(partitionDir, consumerOffsetFileName))
 	if errors.Is(err, os.ErrNotExist) {
@@ -28,7 +30,28 @@ func WriteConsumerOffset(partitionDir string, offset int64) error {
 	if err := os.MkdirAll(partitionDir, 0o755); err != nil {
 		return err
 	}
+	return writeConsumerOffsetFile(partitionDir, offset)
+}
+
+func WriteConsumerOffsetIfPartitionDirExists(partitionDir string, offset int64) error {
+	info, err := os.Stat(partitionDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrPartitionDirMissing
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("consumer offset partition path is not a directory: %s", partitionDir)
+	}
+	return writeConsumerOffsetFile(partitionDir, offset)
+}
+
+func writeConsumerOffsetFile(partitionDir string, offset int64) error {
 	tmp, err := os.CreateTemp(partitionDir, consumerOffsetFileName+".*")
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrPartitionDirMissing
+	}
 	if err != nil {
 		return err
 	}
@@ -50,5 +73,11 @@ func WriteConsumerOffset(partitionDir string, offset int64) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, filepath.Join(partitionDir, consumerOffsetFileName))
+	if err := os.Rename(tmpName, filepath.Join(partitionDir, consumerOffsetFileName)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrPartitionDirMissing
+		}
+		return err
+	}
+	return nil
 }
