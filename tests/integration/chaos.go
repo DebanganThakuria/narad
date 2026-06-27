@@ -243,7 +243,7 @@ func drainChaosDuplicates(ctx context.Context, lb *roundRobinClient, topics []st
 func validateChaosMessage(msg consumeResponse, expected map[string]messageJob) error {
 	job, ok := expected[msg.Payload.ID]
 	if !ok {
-		return fmt.Errorf("unexpected message id %q from topic %s", msg.Payload.ID, msg.Topic)
+		return fmt.Errorf("unexpected payload id %q from topic %s", msg.Payload.ID, msg.Topic)
 	}
 	if msg.Topic != job.Topic || msg.Payload.Topic != job.Topic || msg.Payload.Sequence != job.Body.Sequence {
 		return fmt.Errorf("message mismatch for id %s: got topic=%s payload_topic=%s seq=%d", msg.Payload.ID, msg.Topic, msg.Payload.Topic, msg.Payload.Sequence)

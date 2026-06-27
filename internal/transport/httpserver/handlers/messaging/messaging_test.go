@@ -96,7 +96,7 @@ func (f *fakeBroker) AcceptProduce(ctx context.Context, topicName, key string, p
 	if f.acceptProduceFn != nil {
 		return f.acceptProduceFn(ctx, topicName, key, payload, partition...)
 	}
-	return ingress.AcceptedProduce{MessageID: "message-1", Topic: topicName, TargetPartition: 0, CreatedAtUnixMs: 123}, nil
+	return ingress.AcceptedProduce{Topic: topicName, TargetPartition: 0, CreatedAtUnixMs: 123}, nil
 }
 
 func (f *fakeBroker) CommitAcceptedProduce(context.Context, ingress.ProduceRecord) (int64, error) {
@@ -203,7 +203,6 @@ func TestProduceHandlerAcceptsToBroker(t *testing.T) {
 		gotKey = key
 		gotPayload = append([]byte(nil), payload...)
 		return ingress.AcceptedProduce{
-			MessageID:       "message-1",
 			Topic:           topicName,
 			TargetPartition: 2,
 			CreatedAtUnixMs: 123,
@@ -222,17 +221,11 @@ func TestProduceHandlerAcceptsToBroker(t *testing.T) {
 	if gotTopic != "orders" || gotKey != "customer-1" || string(gotPayload) != `{"id":1}` {
 		t.Fatalf("Produce() broker args = topic=%q key=%q payload=%q", gotTopic, gotKey, string(gotPayload))
 	}
-
-	var body map[string]any
-	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
-		t.Fatalf("Decode() error = %v", err)
+	if res.Body.Len() != 0 {
+		t.Fatalf("Produce() body = %q, want empty", res.Body.String())
 	}
-	if body["status"] != "accepted" ||
-		body["message_id"] != "message-1" ||
-		body["topic"] != "orders" ||
-		body["partition"].(float64) != 2 ||
-		body["accepted_at_unix_ms"].(float64) != 123 {
-		t.Fatalf("Produce() body = %+v", body)
+	if got := res.Header().Get("Content-Type"); got != "" {
+		t.Fatalf("Produce() Content-Type = %q, want empty", got)
 	}
 }
 
@@ -241,7 +234,7 @@ func TestProduceHandlerDoesNotRouteBeforeAccept(t *testing.T) {
 	routerCalled := false
 	s := newTestSet(&fakeBroker{acceptProduceFn: func(context.Context, string, string, []byte, ...int) (ingress.AcceptedProduce, error) {
 		brokerCalled = true
-		return ingress.AcceptedProduce{MessageID: "message-1", Topic: "orders", TargetPartition: 1, CreatedAtUnixMs: 123}, nil
+		return ingress.AcceptedProduce{Topic: "orders", TargetPartition: 1, CreatedAtUnixMs: 123}, nil
 	}}, &fakeRouter{routeProduceFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName, key string, body []byte) bool {
 		routerCalled = topicName == "orders" && key == "customer-1" && string(body) == `{"key":"customer-1","message":{"id":1}}`
 		w.WriteHeader(http.StatusAccepted)
@@ -298,7 +291,7 @@ func TestProduceHandlerSkipsRouterForPinnedPartition(t *testing.T) {
 	routerCalled := false
 	broker := &fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
 		brokerCalled = topicName == "orders" && key == "customer-1" && string(payload) == `{"id":1}`
-		return ingress.AcceptedProduce{MessageID: "message-1", Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
+		return ingress.AcceptedProduce{Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
 	}}
 	s := newTestSet(broker, &fakeRouter{routeProduceFn: func(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool {
 		routerCalled = true
@@ -329,7 +322,7 @@ func TestProduceHandlerGeneratesKeyWhenMissing(t *testing.T) {
 	var gotKey string
 	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
 		gotKey = key
-		return ingress.AcceptedProduce{MessageID: "message-1", Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
+		return ingress.AcceptedProduce{Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
 	}}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":{"id":1}}`))
@@ -350,7 +343,7 @@ func TestProduceHandlerIgnoresUnknownFields(t *testing.T) {
 	var gotPayload []byte
 	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
 		gotPayload = append([]byte(nil), payload...)
-		return ingress.AcceptedProduce{MessageID: "message-1", Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
+		return ingress.AcceptedProduce{Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
 	}}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"ignored":true,"key":"customer-1","message":{"id":1},"also_ignored":{"nested":1}}`))
@@ -371,7 +364,7 @@ func TestProduceHandlerTreatsNullKeyAsMissing(t *testing.T) {
 	var gotKey string
 	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, key string, _ []byte, _ ...int) (ingress.AcceptedProduce, error) {
 		gotKey = key
-		return ingress.AcceptedProduce{MessageID: "message-1", Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
+		return ingress.AcceptedProduce{Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
 	}}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"key":null,"message":{"id":1}}`))
@@ -392,7 +385,7 @@ func TestProduceHandlerPreservesStringMessagePayload(t *testing.T) {
 	var gotPayload []byte
 	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, topicName, _ string, payload []byte, _ ...int) (ingress.AcceptedProduce, error) {
 		gotPayload = append([]byte(nil), payload...)
-		return ingress.AcceptedProduce{MessageID: "message-1", Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
+		return ingress.AcceptedProduce{Topic: topicName, TargetPartition: 2, CreatedAtUnixMs: 123}, nil
 	}}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"message":"hello\nworld"}`))
@@ -414,7 +407,7 @@ func TestProduceHandlerAcceptsWithGeneratedKeyAndDoesNotRoute(t *testing.T) {
 	var gotKey string
 	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, _ string, key string, _ []byte, _ ...int) (ingress.AcceptedProduce, error) {
 		gotKey = key
-		return ingress.AcceptedProduce{MessageID: "message-1", Topic: "orders", TargetPartition: 0, CreatedAtUnixMs: 123}, nil
+		return ingress.AcceptedProduce{Topic: "orders", TargetPartition: 0, CreatedAtUnixMs: 123}, nil
 	}}, &fakeRouter{routeProduceFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName, key string, body []byte) bool {
 		routerCalled = true
 		if topicName != "orders" {
@@ -457,7 +450,7 @@ func TestProduceHandlerPreservesExplicitKeyWhenAccepting(t *testing.T) {
 	var gotKey string
 	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, _ string, key string, _ []byte, _ ...int) (ingress.AcceptedProduce, error) {
 		gotKey = key
-		return ingress.AcceptedProduce{MessageID: "message-1", Topic: "orders", TargetPartition: 0, CreatedAtUnixMs: 123}, nil
+		return ingress.AcceptedProduce{Topic: "orders", TargetPartition: 0, CreatedAtUnixMs: 123}, nil
 	}}, &fakeRouter{routeProduceFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, topicName, key string, body []byte) bool {
 		routerCalled = true
 		if topicName != "orders" {

@@ -178,7 +178,7 @@ func waitForAssignments(store *metastore.Store, topicName string) error {
 	return context.DeadlineExceeded
 }
 
-func waitForVisibleOffset(t *testing.T, br broker.Broker, topicName string, partition int, previousNext int64) {
+func waitForAnyVisibleOffset(t *testing.T, br broker.Broker, topicName string, previousNext []int64) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -186,13 +186,15 @@ func waitForVisibleOffset(t *testing.T, br broker.Broker, topicName string, part
 		if err != nil {
 			t.Fatalf("get topic details %q: %v", topicName, err)
 		}
-		if partition >= 0 && partition < len(details.Partitions) &&
-			details.Partitions[partition].HighWatermark > previousNext {
-			return
+		for partition, before := range previousNext {
+			if partition < len(details.Partitions) &&
+				details.Partitions[partition].HighWatermark > before {
+				return
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for visible offset topic=%q partition=%d next_offset>%d", topicName, partition, previousNext)
+	t.Fatalf("timed out waiting for visible offset topic=%q", topicName)
 }
 
 func captureCLIOutput(t *testing.T, fn func() error, stdin string) (string, string, error) {
@@ -348,29 +350,10 @@ func TestClientProduceConsumeAckParity(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("produce stderr = %q, want empty", stderr)
 	}
-	var produced struct {
-		Status           string `json:"status"`
-		MessageID        string `json:"message_id"`
-		Topic            string `json:"topic"`
-		Partition        int    `json:"partition"`
-		AcceptedAtUnixMs int64  `json:"accepted_at_unix_ms"`
+	if stdout != "" {
+		t.Fatalf("produce stdout = %q, want empty", stdout)
 	}
-	produced = decodeCLIJSON[struct {
-		Status           string `json:"status"`
-		MessageID        string `json:"message_id"`
-		Topic            string `json:"topic"`
-		Partition        int    `json:"partition"`
-		AcceptedAtUnixMs int64  `json:"accepted_at_unix_ms"`
-	}](t, stdout)
-	if produced.Status != "accepted" ||
-		produced.MessageID == "" ||
-		produced.Topic != "orders" ||
-		produced.Partition < 0 ||
-		produced.Partition >= 3 ||
-		produced.AcceptedAtUnixMs <= 0 {
-		t.Fatalf("produce result = %+v", produced)
-	}
-	waitForVisibleOffset(t, env.broker, "orders", produced.Partition, 0)
+	waitForAnyVisibleOffset(t, env.broker, "orders", []int64{0, 0, 0})
 
 	stdout, stderr, err = captureCLIOutput(t, func() error {
 		return runClient([]string{"consume", "--addr", env.server.URL, "orders"})

@@ -7,36 +7,12 @@ import (
 	"strconv"
 	"sync/atomic"
 
-	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
 type produceRequest struct {
 	Key     string          `json:"key,omitempty"`
 	Message json.RawMessage `json:"message"`
-}
-
-type acceptedProduceResponse struct {
-	Status           string `json:"status"`
-	MessageID        string `json:"message_id"`
-	Topic            string `json:"topic"`
-	Partition        int    `json:"partition"`
-	AcceptedAtUnixMs int64  `json:"accepted_at_unix_ms"`
-}
-
-func (r acceptedProduceResponse) AppendJSON(dst []byte) []byte {
-	dst = append(dst, `{"status":`...)
-	dst = strconv.AppendQuote(dst, r.Status)
-	dst = append(dst, `,"message_id":`...)
-	dst = strconv.AppendQuote(dst, r.MessageID)
-	dst = append(dst, `,"topic":`...)
-	dst = strconv.AppendQuote(dst, r.Topic)
-	dst = append(dst, `,"partition":`...)
-	dst = strconv.AppendInt(dst, int64(r.Partition), 10)
-	dst = append(dst, `,"accepted_at_unix_ms":`...)
-	dst = strconv.AppendInt(dst, r.AcceptedAtUnixMs, 10)
-	dst = append(dst, '}')
-	return dst
 }
 
 var generatedProduceKeySeq atomic.Uint64
@@ -86,20 +62,17 @@ func Produce(s *handlers.Set) http.HandlerFunc {
 			req.Key = key
 		}
 
-		var (
-			accepted ingress.AcceptedProduce
-			err      error
-		)
+		var err error
 		if pinnedPartition != nil {
-			accepted, err = s.Deps.Broker.AcceptProduce(r.Context(), topicName, key, []byte(req.Message), *pinnedPartition)
+			_, err = s.Deps.Broker.AcceptProduce(r.Context(), topicName, key, []byte(req.Message), *pinnedPartition)
 		} else {
-			accepted, err = s.Deps.Broker.AcceptProduce(r.Context(), topicName, key, []byte(req.Message))
+			_, err = s.Deps.Broker.AcceptProduce(r.Context(), topicName, key, []byte(req.Message))
 		}
 		if err != nil {
 			s.WriteBrokerError(w, "produce", err)
 			return
 		}
-		s.WriteJSON(w, http.StatusAccepted, newAcceptedProduceResponse(accepted))
+		w.WriteHeader(http.StatusAccepted)
 	}
 }
 
@@ -126,14 +99,4 @@ func generateProduceKey() string {
 	key = append(key, "key-"...)
 	key = strconv.AppendUint(key, seq, 36)
 	return string(key)
-}
-
-func newAcceptedProduceResponse(accepted ingress.AcceptedProduce) acceptedProduceResponse {
-	return acceptedProduceResponse{
-		Status:           "accepted",
-		MessageID:        accepted.MessageID,
-		Topic:            accepted.Topic,
-		Partition:        accepted.TargetPartition,
-		AcceptedAtUnixMs: accepted.CreatedAtUnixMs,
-	}
 }

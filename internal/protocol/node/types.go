@@ -30,7 +30,6 @@ type ProduceRequest struct {
 }
 
 type CommitProduceRequest struct {
-	MessageID       string
 	Topic           string
 	Key             string
 	TargetPartition int

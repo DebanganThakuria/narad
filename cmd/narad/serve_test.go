@@ -2251,17 +2251,13 @@ func TestIngressWALOptions(t *testing.T) {
 	opts := ingressWALOptions(config.StorageConfig{
 		IngressWALSyncIntervalMs: 5,
 		IngressWALSyncBytes:      4096,
-		IngressWALShards:         16,
 	}, nil)
 
-	if opts.WAL.SyncInterval != 5*time.Millisecond {
-		t.Fatalf("SyncInterval = %v, want 5ms", opts.WAL.SyncInterval)
+	if opts.SyncInterval != 5*time.Millisecond {
+		t.Fatalf("SyncInterval = %v, want 5ms", opts.SyncInterval)
 	}
-	if opts.WAL.SyncBytes != 4096 {
-		t.Fatalf("SyncBytes = %d, want 4096", opts.WAL.SyncBytes)
-	}
-	if opts.Shards != 16 {
-		t.Fatalf("Shards = %d, want 16", opts.Shards)
+	if opts.SyncBytes != 4096 {
+		t.Fatalf("SyncBytes = %d, want 4096", opts.SyncBytes)
 	}
 }
 

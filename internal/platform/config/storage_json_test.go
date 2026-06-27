@@ -41,26 +41,8 @@ func TestStorageConfigOmittedPreservesDefaults(t *testing.T) {
 	}
 }
 
-func TestStorageConfigAllowsIngressWALShards(t *testing.T) {
-	c := StorageConfig{IngressWALShards: 1}
-	if err := json.Unmarshal([]byte(`{"ingress_wal_shards":8}`), &c); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if c.IngressWALShards != 8 {
-		t.Errorf("ingress_wal_shards = %d, want 8", c.IngressWALShards)
-	}
-	// Omitted (0) must not clobber the existing value.
-	c2 := StorageConfig{IngressWALShards: 4}
-	if err := json.Unmarshal([]byte(`{"data_dir":"d"}`), &c2); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if c2.IngressWALShards != 4 {
-		t.Errorf("ingress_wal_shards = %d, want preserved 4", c2.IngressWALShards)
-	}
-}
-
 func TestStorageConfigRejectsInternalKeys(t *testing.T) {
-	for _, key := range []string{"segment_bytes", "fsync", "flush_bytes", "sync_interval_ms", "retention_check_interval_ms"} {
+	for _, key := range []string{"segment_bytes", "fsync", "flush_bytes", "sync_interval_ms", "retention_check_interval_ms", "ingress_wal_shards"} {
 		var c StorageConfig
 		if err := json.Unmarshal([]byte(`{"`+key+`":123}`), &c); err == nil {
 			t.Errorf("storage.%s was accepted, want rejected as internal", key)

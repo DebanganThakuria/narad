@@ -19,7 +19,7 @@ import (
 
 const (
 	defaultProduceDispatchInterval = 10 * time.Millisecond
-	// defaultProduceDispatchBatchSize is the hard ceiling on a single shard's
+	// defaultProduceDispatchBatchSize is the hard ceiling on a single drain
 	// drain window (BatchSize in the config). The actual window grows
 	// adaptively up to this cap (see produceDispatchBaseWindow /
 	// produceDispatchTargetPerPartition); the cap only binds at very high
@@ -74,7 +74,7 @@ type ProduceDispatcherConfig struct {
 	PollInterval time.Duration
 	BatchSize    int
 	// CommitConcurrency bounds how many per-partition batches are committed
-	// in parallel within one shard window. <=0 uses the default.
+	// in parallel within one drain window. <=0 uses the default.
 	CommitConcurrency int
 }
 
@@ -91,17 +91,16 @@ type ProduceDispatcher struct {
 	commitConcurrency int
 	failureBackoff    time.Duration
 
-	shards    []produceDispatchShard
-	nextShard int
+	state *produceDispatchState
 
 	targetMu    sync.RWMutex
 	targetCache map[string]cachedProduceDispatchTargets
 }
 
-type produceDispatchShard struct {
+type produceDispatchState struct {
 	nextSeq uint64
 	cursor  wal.Cursor
-	// windowLimit is the adaptive drain window for this shard, grown toward
+	// windowLimit is the adaptive drain window, grown toward
 	// produceDispatchTargetPerPartition * (distinct partitions seen) and
 	// clamped to [base, BatchSize cap]. It converges in one window: the first
 	// pass sees the fan-out and the next is sized to it.
@@ -160,10 +159,9 @@ func NewProduceDispatcher(
 	}
 }
 
-// Run dispatches every WAL shard concurrently — one goroutine per shard,
-// each with its own cursor/checkpoint. Shards are independent (a partition
-// is pinned to one shard by pickShard), so they never contend on the same
-// partition and per-partition order is preserved within each lane.
+// Run continuously drains the ingress WAL and commits accepted produce records
+// to the owning partition logs. Per-partition batches are committed in parallel,
+// while checkpointing stays tied to the single ingress WAL cursor.
 func (d *ProduceDispatcher) Run(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -172,25 +170,17 @@ func (d *ProduceDispatcher) Run(ctx context.Context) {
 		d.logger.Error("produce dispatcher: load cursor", "err", err)
 		return
 	}
-	var wg sync.WaitGroup
-	for shard := range d.shards {
-		wg.Add(1)
-		go func(shard int) {
-			defer wg.Done()
-			d.runShard(ctx, shard)
-		}(shard)
-	}
-	wg.Wait()
+	d.run(ctx)
 }
 
-func (d *ProduceDispatcher) runShard(ctx context.Context, shard int) {
+func (d *ProduceDispatcher) run(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		processed, err := d.dispatchShard(ctx, shard, &d.shards[shard])
+		processed, err := d.dispatch(ctx, d.state)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			d.logger.Error("produce dispatcher", "shard", shard, "err", err)
+			d.logger.Error("produce dispatcher", "err", err)
 		}
 		if ctx.Err() != nil {
 			return
@@ -235,36 +225,26 @@ func (d *ProduceDispatcher) DispatchAvailable(ctx context.Context) (int, error) 
 		outcome = "error"
 		return 0, err
 	}
-	if len(d.shards) == 0 {
+	if d.state == nil {
 		outcome = "empty"
 		return 0, nil
 	}
 
-	processed := 0
-	startShard := d.nextShard % len(d.shards)
-	for visited := 0; visited < len(d.shards); visited++ {
-		shard := (startShard + visited) % len(d.shards)
-		n, err := d.dispatchShard(ctx, shard, &d.shards[shard])
-		processed += n
-		if n > 0 {
-			d.nextShard = (shard + 1) % len(d.shards)
-		}
-		if err != nil {
-			outcome = "error"
-			return processed, err
-		}
+	processed, err := d.dispatch(ctx, d.state)
+	if err != nil {
+		outcome = "error"
+		return processed, err
 	}
-
 	if processed == 0 {
 		outcome = "empty"
 	}
 	return processed, nil
 }
 
-// dispatchShard drains up to the shard's adaptive window (state.windowLimit)
-// of records from one WAL shard, groups them by destination
+// dispatch drains up to the adaptive window (state.windowLimit) of records from
+// the ingress WAL, groups them by destination
 // (topic,partition,owner), commits the groups as large per-partition batches
-// concurrently, then advances the shard checkpoint to the lowest WAL seq not
+// concurrently, then advances the checkpoint to the lowest WAL seq not
 // yet durably committed and compacts up to it.
 //
 // Grouping is the throughput lever: the WAL interleaves every partition, so
@@ -287,16 +267,13 @@ func (d *ProduceDispatcher) DispatchAvailable(ctx context.Context) (int, error) 
 // neighbours. That set is in-memory only: a process crash loses it and the
 // committed-ahead records replay, which is the sole at-least-once duplicate
 // path. The steady state delivers each record exactly once.
-func (d *ProduceDispatcher) dispatchShard(ctx context.Context, shard int, state *produceDispatchShard) (int, error) {
+func (d *ProduceDispatcher) dispatch(ctx context.Context, state *produceDispatchState) (int, error) {
 	limit := state.windowLimit
 	if limit <= 0 {
 		limit = d.clampWindow(produceDispatchBaseWindow)
 		state.windowLimit = limit
 	}
-	durableNext, err := d.ingress.DurableProduceNextForShard(shard)
-	if err != nil {
-		return 0, err
-	}
+	durableNext := d.ingress.DurableProduceNext()
 	if state.nextSeq >= durableNext {
 		return 0, nil
 	}
@@ -308,7 +285,7 @@ func (d *ProduceDispatcher) dispatchShard(ctx context.Context, shard int, state 
 		cursorAfter wal.Cursor
 	}
 	var window []windowRecord
-	err = d.ingress.ReplayProduceShardFromCursor(shard, state.cursor, func(record ingress.ProduceRecord, cursor wal.Cursor) error {
+	err := d.ingress.ReplayProduceFromCursor(state.cursor, func(record ingress.ProduceRecord, cursor wal.Cursor) error {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
@@ -418,12 +395,12 @@ func (d *ProduceDispatcher) dispatchShard(ctx context.Context, shard int, state 
 	if c, ok := cursorAfterSeq[checkpointSeq-1]; ok {
 		nextCursor = c
 	}
-	if checkpointErr := d.ingress.StoreProduceCheckpointForShard(shard, checkpointSeq); checkpointErr != nil {
+	if checkpointErr := d.ingress.StoreProduceCheckpoint(checkpointSeq); checkpointErr != nil {
 		return processed, errors.Join(firstErr, checkpointErr)
 	}
 	state.nextSeq = checkpointSeq
 	state.cursor = nextCursor
-	if compactErr := d.ingress.CompactProduceShardBefore(shard, checkpointSeq); compactErr != nil {
+	if compactErr := d.ingress.CompactProduceBefore(checkpointSeq); compactErr != nil {
 		return processed, errors.Join(firstErr, compactErr)
 	}
 	return processed, firstErr
@@ -483,27 +460,19 @@ func (d *ProduceDispatcher) clampWindow(target int) int {
 }
 
 func (d *ProduceDispatcher) loadCursor() error {
-	if d.shards != nil {
+	if d.state != nil {
 		return nil
 	}
-	shardCount := d.ingress.ShardCount()
-	if shardCount <= 0 {
-		return errors.New("produce dispatcher ingress manager has no WAL shards")
+	nextSeq, err := d.ingress.LoadProduceCheckpoint()
+	if err != nil {
+		return err
 	}
-	shards := make([]produceDispatchShard, shardCount)
-	for shard := range shards {
-		nextSeq, err := d.ingress.LoadProduceCheckpointForShard(shard)
-		if err != nil {
-			return err
-		}
-		shards[shard] = produceDispatchShard{
-			nextSeq:        nextSeq,
-			cursor:         wal.Cursor{Seq: nextSeq},
-			committedAhead: map[uint64]bool{},
-			windowLimit:    d.clampWindow(produceDispatchBaseWindow),
-		}
+	d.state = &produceDispatchState{
+		nextSeq:        nextSeq,
+		cursor:         wal.Cursor{Seq: nextSeq},
+		committedAhead: map[uint64]bool{},
+		windowLimit:    d.clampWindow(produceDispatchBaseWindow),
 	}
-	d.shards = shards
 	return nil
 }
 
@@ -623,8 +592,8 @@ func (d *ProduceDispatcher) dispatchTargetsForTopic(topicName string) (cachedPro
 // genuinely gone from this node's metastore replica, the records are
 // DISCARDED (returns nil so the caller advances the WAL checkpoint past
 // them) — a topic deleted while it still had undispatched WAL records is
-// the motivating case; without this the shard would head-of-line-block on
-// records that can never commit.
+// the motivating case; without this the dispatch window would block on records
+// that can never commit.
 //
 // The discard decision keys off this node's own replica, never the commit
 // error itself. That is the safe signal: a record only reached this WAL
@@ -696,7 +665,6 @@ func (d *ProduceDispatcher) dispatchRecordBatch(ctx context.Context, target prod
 	req := nodewire.CommitProduceBatchRequest{Records: make([]nodewire.CommitProduceRequest, 0, len(records))}
 	for _, record := range records {
 		req.Records = append(req.Records, nodewire.CommitProduceRequest{
-			MessageID:       record.MessageID,
 			Topic:           record.Topic,
 			Key:             record.Key,
 			TargetPartition: record.TargetPartition,

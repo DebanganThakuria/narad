@@ -65,15 +65,6 @@ type messageRecord struct {
 	RunID    string `json:"run_id"`
 }
 
-type produceResponse struct {
-	Status           string `json:"status"`
-	MessageID        string `json:"message_id"`
-	Topic            string `json:"topic"`
-	Partition        int    `json:"partition"`
-	AcceptedAtUnixMs int64  `json:"accepted_at_unix_ms"`
-	Offset           int64  `json:"-"`
-}
-
 type consumeResponse struct {
 	Topic         string        `json:"topic"`
 	Partition     int           `json:"partition"`

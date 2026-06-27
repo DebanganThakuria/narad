@@ -247,14 +247,7 @@ curl -X POST localhost:7942/v1/topics/orders/produce \
   -H 'Content-Type: application/json' \
   -d '{"key":"customer-42","message":{"id":1,"amount":1500}}'
 
-# Response:
-# {
-#   "status": "accepted",
-#   "message_id": "4f7c...",
-#   "topic": "orders",
-#   "partition": 3,
-#   "accepted_at_unix_ms": 1719000000000
-# }
+# Response: 202 Accepted with an empty body.
 
 # Consume with long-poll. Response includes a receipt_handle.
 curl 'localhost:7942/v1/topics/orders/consume?wait=5s'
@@ -288,8 +281,7 @@ PATCH   /v1/topics/{topic}                  alter: partitions, retention_ms,
                                              max_in_flight_per_partition,
                                              max_acked_ahead_per_partition, schema
 DELETE  /v1/topics/{topic}                  delete topic and all data
-POST    /v1/topics/{topic}/produce          202 Accepted; returns ingress message_id,
-                                             selected partition, and accepted_at_unix_ms
+POST    /v1/topics/{topic}/produce          202 Accepted with an empty body
 GET     /v1/topics/{topic}/consume          response carries receipt_handle
 POST    /v1/topics/{topic}/ack              body: {"receipt_handle": "..."}
 GET     /healthz                            liveness
@@ -417,9 +409,8 @@ is an append-only file made of CRC-checked, optionally zstd-compressed
 
 **Produce ingress path.** HTTP produce validates topic/schema, appends
 the request to the receiving pod's ingress WAL, and returns
-`202 Accepted` with a `message_id`. This response does not include the
-final partition offset. A background dispatcher replays durable WAL
-records and commits them to the selected owner partition.
+`202 Accepted` with an empty body. A background dispatcher replays
+durable WAL records and commits them to the selected owner partition.
 
 **Partition append path.** Owner-side append pushes the record into a
 per-partition in-memory buffer and returns the assigned offset to the
@@ -725,4 +716,3 @@ gates**; until they ship, run Narad only behind a trusted boundary.
    metastore) and version-negotiate the cluster RPC / QUIC ALPN so N and
    N+1 coexist during a rolling upgrade. Then freeze the HTTP API +
    receipt-handle + wire contracts and cut **1.0**.
-

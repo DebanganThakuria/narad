@@ -20,7 +20,7 @@ func TestDefaultReturnsExpectedValues(t *testing.T) {
 	if cfg.Storage.SyncIntervalMs != 1000 || cfg.Storage.SyncBytes != 8<<20 || cfg.Storage.HighWatermarkSyncIntervalMs != 5000 {
 		t.Fatalf("Default() storage sync = %+v", cfg.Storage)
 	}
-	if cfg.Storage.IngressWALSyncIntervalMs != 10 || cfg.Storage.IngressWALSyncBytes != 1<<20 || cfg.Storage.IngressWALShards != 1 {
+	if cfg.Storage.IngressWALSyncIntervalMs != 10 || cfg.Storage.IngressWALSyncBytes != 1<<20 {
 		t.Fatalf("Default() ingress WAL sync = %+v", cfg.Storage)
 	}
 	if cfg.Topic.DefaultPartitions != 3 || cfg.Topic.MaxPartitions != 108 {

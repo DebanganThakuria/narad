@@ -149,7 +149,6 @@ func (s *RPCServer) handleCommitProduce(payload []byte) nodewire.Response {
 		return errorResponse(http.StatusBadRequest, "invalid commit produce request: "+err.Error())
 	}
 	offset, err := s.broker.CommitAcceptedProduce(rpcRequestContext(), ingress.ProduceRecord{
-		MessageID:       req.MessageID,
 		Topic:           req.Topic,
 		Key:             req.Key,
 		TargetPartition: req.TargetPartition,
@@ -173,7 +172,6 @@ func (s *RPCServer) handleCommitProduceBatch(payload []byte) nodewire.Response {
 	records := make([]ingress.ProduceRecord, 0, len(req.Records))
 	for _, record := range req.Records {
 		records = append(records, ingress.ProduceRecord{
-			MessageID:       record.MessageID,
 			Topic:           record.Topic,
 			Key:             record.Key,
 			TargetPartition: record.TargetPartition,

@@ -474,8 +474,6 @@ func (e *env) produce(topicName, key, msg string) (offset int64, partition int) 
 		"message": json.RawMessage(msg),
 	})
 	expectStatus(e.t, resp, http.StatusAccepted)
-	result := readJSON[produceResult](e.t, resp)
-	validateAcceptedProduce(e.t, result, topicName, len(before))
-	offset = waitForVisibleOffset(e.t, e, topicName, result.Partition, before[result.Partition])
-	return offset, result.Partition
+	resp.Body.Close()
+	return waitForAnyVisibleOffset(e.t, e, topicName, before)
 }

@@ -3,10 +3,6 @@ package ingress
 import "github.com/debanganthakuria/narad/internal/persistence/wal"
 
 func ReplayProduce(dir string, from uint64, fn func(ProduceRecord) error) error {
-	return ReplayProduceShard(dir, 0, from, fn)
-}
-
-func ReplayProduceShard(dir string, shard int, from uint64, fn func(ProduceRecord) error) error {
 	if fn == nil {
 		return nil
 	}
@@ -16,16 +12,11 @@ func ReplayProduceShard(dir string, shard int, from uint64, fn func(ProduceRecor
 			return err
 		}
 		produce.WAL = record.ID
-		produce.WALShard = shard
 		return fn(produce)
 	})
 }
 
 func ReplayProduceFromCursor(dir string, cursor wal.Cursor, fn func(ProduceRecord, wal.Cursor) error) error {
-	return ReplayProduceShardFromCursor(dir, 0, cursor, fn)
-}
-
-func ReplayProduceShardFromCursor(dir string, shard int, cursor wal.Cursor, fn func(ProduceRecord, wal.Cursor) error) error {
 	if fn == nil {
 		return nil
 	}
@@ -35,7 +26,6 @@ func ReplayProduceShardFromCursor(dir string, shard int, cursor wal.Cursor, fn f
 			return err
 		}
 		produce.WAL = record.ID
-		produce.WALShard = shard
 		return fn(produce, next)
 	})
 }

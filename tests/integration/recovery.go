@@ -19,12 +19,8 @@ func verifyAcceptedProduceVisibility(ctx context.Context, lb *roundRobinClient, 
 		},
 	}
 
-	produced, err := produceOne(ctx, lb, job)
-	if err != nil {
+	if err := produceOne(ctx, lb, job); err != nil {
 		return fmt.Errorf("produce recovery probe: %w", err)
-	}
-	if produced.Partition < 0 {
-		return fmt.Errorf("produce recovery probe returned invalid partition %d", produced.Partition)
 	}
 	return retry(ctx, 20, 100*time.Millisecond, func() error {
 		msg, found, err := consumeOne(ctx, lb, topicName)

@@ -43,7 +43,7 @@ func produceMessages(ctx context.Context, lb *roundRobinClient, jobs []messageJo
 	for range concurrency {
 		wg.Go(func() {
 			for job := range jobCh {
-				if _, err := produceOne(ctx, lb, job); err != nil {
+				if err := produceOne(ctx, lb, job); err != nil {
 					sendErr(errCh, err)
 					return
 				}
@@ -79,24 +79,13 @@ func produceMessages(ctx context.Context, lb *roundRobinClient, jobs []messageJo
 	}
 }
 
-func produceOne(ctx context.Context, lb *roundRobinClient, job messageJob) (produceResponse, error) {
+func produceOne(ctx context.Context, lb *roundRobinClient, job messageJob) error {
 	path := "/v1/topics/" + url.PathEscape(job.Topic) + "/produce"
 	req := produceRequest{Key: job.Key, Message: job.Body}
-	out := produceResponse{Offset: -1}
-	err := retry(ctx, 20, 100*time.Millisecond, func() error {
-		_, _, err := lb.do(ctx, http.MethodPost, path, req, &out, http.StatusAccepted)
-		if err != nil {
-			return err
-		}
-		if out.Status != "accepted" || out.MessageID == "" || out.Topic != job.Topic {
-			return fmt.Errorf("produce %s returned invalid accepted response: %+v", job.Body.ID, out)
-		}
-		if out.Partition < 0 {
-			return fmt.Errorf("produce %s returned invalid partition %d", job.Body.ID, out.Partition)
-		}
-		return nil
+	return retry(ctx, 20, 100*time.Millisecond, func() error {
+		_, _, err := lb.do(ctx, http.MethodPost, path, req, nil, http.StatusAccepted)
+		return err
 	})
-	return out, err
 }
 
 func consumeAndAck(ctx context.Context, lb *roundRobinClient, topics []string, expected map[string]messageJob, concurrency int, stats *runStats) error {
@@ -130,7 +119,7 @@ func consumeAndAck(ctx context.Context, lb *roundRobinClient, topics []string, e
 				}
 				job, ok := expected[msg.Payload.ID]
 				if !ok {
-					sendErr(errCh, fmt.Errorf("unexpected message id %q from topic %s", msg.Payload.ID, msg.Topic))
+					sendErr(errCh, fmt.Errorf("unexpected payload id %q from topic %s", msg.Payload.ID, msg.Topic))
 					cancel()
 					return
 				}

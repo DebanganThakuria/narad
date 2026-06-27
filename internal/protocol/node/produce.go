@@ -47,22 +47,11 @@ func DecodeProduceRequest(payload []byte) (ProduceRequest, error) {
 func EncodeCommitProduceRequest(req CommitProduceRequest) ([]byte, error) {
 	w := opWriter(
 		OpCommitProduce,
-		fieldLen(req.MessageID)+fieldLen(req.Topic)+fieldLen(req.Key)+4+fieldLenBytes(req.Payload)+8,
+		commitProduceRequestLen(req),
 	)
-	if err := w.string(req.MessageID); err != nil {
+	if err := writeCommitProduceRequest(w, req); err != nil {
 		return nil, err
 	}
-	if err := w.string(req.Topic); err != nil {
-		return nil, err
-	}
-	if err := w.string(req.Key); err != nil {
-		return nil, err
-	}
-	w.i32(int32(req.TargetPartition))
-	if err := w.bytes(req.Payload); err != nil {
-		return nil, err
-	}
-	w.i64(req.CreatedAtUnixMs)
 	return w.bytesOut(), nil
 }
 
@@ -126,9 +115,6 @@ func DecodeCommitProduceBatchRequest(payload []byte) (CommitProduceBatchRequest,
 }
 
 func writeCommitProduceRequest(w *writer, req CommitProduceRequest) error {
-	if err := w.string(req.MessageID); err != nil {
-		return err
-	}
 	if err := w.string(req.Topic); err != nil {
 		return err
 	}
@@ -144,10 +130,6 @@ func writeCommitProduceRequest(w *writer, req CommitProduceRequest) error {
 }
 
 func readCommitProduceRequest(r *reader) (CommitProduceRequest, error) {
-	messageID, err := r.string()
-	if err != nil {
-		return CommitProduceRequest{}, err
-	}
 	topicName, err := r.string()
 	if err != nil {
 		return CommitProduceRequest{}, err
@@ -169,7 +151,6 @@ func readCommitProduceRequest(r *reader) (CommitProduceRequest, error) {
 		return CommitProduceRequest{}, err
 	}
 	return CommitProduceRequest{
-		MessageID:       messageID,
 		Topic:           topicName,
 		Key:             key,
 		TargetPartition: int(partition),
@@ -179,8 +160,7 @@ func readCommitProduceRequest(r *reader) (CommitProduceRequest, error) {
 }
 
 func commitProduceRequestLen(req CommitProduceRequest) int {
-	return fieldLen(req.MessageID) +
-		fieldLen(req.Topic) +
+	return fieldLen(req.Topic) +
 		fieldLen(req.Key) +
 		4 +
 		fieldLenBytes(req.Payload) +
