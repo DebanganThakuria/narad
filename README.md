@@ -51,16 +51,6 @@ and end-to-end tests.
   <img src="./assets/narad-design.png" alt="Narad visual identity sheet with logo variants, icons, and design notes" width="720">
 </p>
 
-> **Current implementation status:** the control-plane architecture is in
-> place. The HTTP API, append-only segmented log, produce ingress WAL,
-> async produce dispatcher, **Raft+bbolt metastore** (topics, schemas,
-> partition assignments, cluster membership), **cluster controller**
-> (partition assignment, heartbeat monitoring, leader election),
-> consume/ack routing, JSON-Schema validation, per-topic retention,
-> partitioning, **SQS-style in-flight tracking with gap-skipping
-> reservations, out-of-order acks, and nonce-verified receipt handles**,
-> Prometheus metrics, and a debug pprof listener are functional.
-
 ## Architecture
 
 ```
