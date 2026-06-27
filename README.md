@@ -53,6 +53,33 @@ at `v0.1.0-alpha.1`.
 CI runs race-enabled unit and end-to-end tests, plus local 3-node
 integration and chaos smoke tests.
 
+## Observed benchmark
+
+One Kubernetes benchmark run on a 3-node Narad cluster sustained about
+**50,000 logical messages per second** through the full
+produce -> consume -> ack loop. Each Narad pod used roughly **500 MiB**
+of memory and was capped around **5 vCPUs**.
+
+This is an observed benchmark, not a committed SLO. Results depend on
+payload shape, topic and partition layout, client concurrency, storage
+class, kernel and container limits, and garbage collector settings.
+
+Benchmark environment highlights:
+
+| Setting | Value |
+|---|---|
+| Cluster size | 3 Narad pods |
+| Per-pod CPU runtime | `GOMAXPROCS=5` |
+| Per-pod memory target | `GOMEMLIMIT=1GiB` |
+| GC target | `GOGC=400` |
+| Default partitions | `NARAD_TOPIC_DEFAULT_PARTITIONS=3` |
+| Max partitions | `NARAD_TOPIC_MAX_PARTITIONS=108` |
+| In-flight cap | `NARAD_TOPIC_DEFAULT_MAX_IN_FLIGHT_PER_PARTITION=1024` |
+| Acked-ahead cap | `NARAD_TOPIC_DEFAULT_MAX_ACKED_AHEAD_PER_PARTITION=1024` |
+| Visibility timeout | `NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS=30000` |
+| Retention age | `NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS=43200000` |
+| Log format | `NARAD_LOG_FORMAT=json`, `NARAD_LOG_LEVEL=info` |
+
 ## Community and project docs
 
 - [Contributing guide](./CONTRIBUTING.md)
