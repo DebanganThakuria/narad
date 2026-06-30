@@ -1,0 +1,16 @@
+cmd/narad/client.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T13:55:47.463Z 289,408-409
+cmd/narad/main.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T13:55:47.463Z 69-75
+internal/transport/httpserver/handlers/messaging/ack.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T13:55:47.463Z 64,68,75-77,79
+internal/transport/httpserver/handlers/messaging/consume.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T13:55:47.463Z 33-34,36
+internal/transport/httpserver/handlers/messaging/produce.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T13:55:47.463Z 36-38
+internal/transport/httpserver/handlers/topics/alter.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T13:55:47.463Z 89,91-95,98-102,104-107,114-116,119,129-131,136-138,143-145
+internal/transport/httpserver/handlers/topics/list.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T13:55:47.463Z 42
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T13:55:47.463Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 3, "overriden_lines": 0}}}
