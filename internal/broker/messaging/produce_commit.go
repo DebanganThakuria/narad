@@ -17,7 +17,7 @@ func (e *Engine) CommitAcceptedProduce(ctx context.Context, record ingress.Produ
 		return 0, err
 	}
 	if e.logs == nil {
-		return 0, errorsUnavailable("partition logs")
+		return 0, errUnavailable("partition logs")
 	}
 	if record.Topic == "" {
 		return 0, fmt.Errorf("%w: topic required", ErrInvalid)
@@ -58,7 +58,7 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 		return nil, err
 	}
 	if e.logs == nil {
-		return nil, errorsUnavailable("partition logs")
+		return nil, errUnavailable("partition logs")
 	}
 
 	topicName := records[0].Topic

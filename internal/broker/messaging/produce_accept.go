@@ -13,7 +13,7 @@ import (
 // for moving accepted records to their final partition owner.
 func (e *Engine) AcceptProduce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (ingress.AcceptedProduce, error) {
 	if e.ingress == nil {
-		return ingress.AcceptedProduce{}, errorsUnavailable("ingress manager")
+		return ingress.AcceptedProduce{}, errUnavailable("ingress manager")
 	}
 
 	t, err := e.getTopic(ctx, topicName)
@@ -55,7 +55,7 @@ func (e *Engine) resolveAcceptedProducePartition(topicName, key string, partitio
 		return partIdx, nil
 	}
 	if e.partitions == nil {
-		return 0, errorsUnavailable("partition manager")
+		return 0, errUnavailable("partition manager")
 	}
 	partIdx := e.partitions.Pick(topicName, key, partitions)
 	if partIdx < 0 || partIdx >= partitions {
@@ -64,6 +64,8 @@ func (e *Engine) resolveAcceptedProducePartition(topicName, key string, partitio
 	return partIdx, nil
 }
 
-func errorsUnavailable(component string) error {
+// errUnavailable reports that a required dependency was not wired in,
+// as an ErrInvalid so callers map it to a client error.
+func errUnavailable(component string) error {
 	return fmt.Errorf("%w: %s unavailable", ErrInvalid, component)
 }
