@@ -20,7 +20,7 @@ import (
 const (
 	defaultProduceDispatchInterval = 10 * time.Millisecond
 	// defaultProduceDispatchBatchSize is the hard ceiling on a single drain
-	// drain window (BatchSize in the config). The actual window grows
+	// window (BatchSize in the config). The actual window grows
 	// adaptively up to this cap (see produceDispatchBaseWindow /
 	// produceDispatchTargetPerPartition); the cap only binds at very high
 	// fan-out (>~1k partitions) and bounds the transient memory a drain holds.

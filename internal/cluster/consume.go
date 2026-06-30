@@ -8,10 +8,6 @@ import (
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
-type consumeNodeCandidate struct {
-	addr string
-}
-
 type consumeProbeResult struct {
 	res   nodewire.Response
 	err   error
@@ -31,7 +27,7 @@ func (rt *Router) localConsumePartition(topicName string) (int, bool) {
 	return routes.localEntries[cursor].partition, true
 }
 
-func (rt *Router) remoteConsumeCandidates(topicName string) []consumeNodeCandidate {
+func (rt *Router) remoteConsumeCandidates(topicName string) []string {
 	routes, ok := rt.routesForTopic(topicName)
 	if !ok {
 		return nil
@@ -41,7 +37,7 @@ func (rt *Router) remoteConsumeCandidates(topicName string) []consumeNodeCandida
 	cursor := rt.nextConsumeCursor(topicName+":remote", len(remote))
 
 	seenOwners := make(map[string]struct{}, len(remote))
-	candidates := make([]consumeNodeCandidate, 0, len(remote))
+	candidates := make([]string, 0, len(remote))
 	for i := range remote {
 		entry := remote[(cursor+i)%len(remote)]
 		addr := rt.consumeOwnerAddrForRoute(entry)
@@ -52,19 +48,19 @@ func (rt *Router) remoteConsumeCandidates(topicName string) []consumeNodeCandida
 			continue
 		}
 		seenOwners[addr] = struct{}{}
-		candidates = append(candidates, consumeNodeCandidate{addr: addr})
+		candidates = append(candidates, addr)
 	}
 	return candidates
 }
 
-func (rt *Router) callConsumeProbe(ctx context.Context, topicName string, candidate consumeNodeCandidate) consumeProbeResult {
+func (rt *Router) callConsumeProbe(ctx context.Context, topicName, candidateAddr string) consumeProbeResult {
 	req := nodewire.ConsumeRequest{
 		Topic:     topicName,
 		LocalOnly: true,
 	}
-	res, err := rt.peer.Consume(ctx, candidate.addr, req)
+	res, err := rt.peer.Consume(ctx, candidateAddr, req)
 	if err != nil {
-		return consumeProbeResult{err: fmt.Errorf("consume probe %s: %w", candidate.addr, err)}
+		return consumeProbeResult{err: fmt.Errorf("consume probe %s: %w", candidateAddr, err)}
 	}
 	if res.Status != http.StatusOK {
 		return consumeProbeResult{res: nodewire.Response{Status: http.StatusNoContent}}

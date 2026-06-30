@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -148,7 +149,7 @@ func (c *PeerClient) topicNameRequest(ctx context.Context, addr string, op nodew
 
 func (c *PeerClient) request(ctx context.Context, addr, operation string, payload []byte) (nodewire.Response, error) {
 	if c == nil || c.frames == nil {
-		return nodewire.Response{}, fmt.Errorf("peer rpc client is nil")
+		return nodewire.Response{}, errors.New("peer rpc client is nil")
 	}
 	frame, err := c.frames.RequestOnLane(ctx, addr, operation, clusterwire.StreamFrameNodeRequest, payload)
 	if err != nil {
