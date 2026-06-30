@@ -101,8 +101,6 @@ func (p *Poller) tick(ctx context.Context) {
 			labels := prometheus.Labels{"topic": ts.Topic, "partition": partLabel}
 
 			topicBytes += ps.SizeBytes
-			p.metrics.PartitionSizeBytes.With(labels).Set(float64(ps.SizeBytes))
-			p.metrics.Segments.With(labels).Set(float64(ps.SegmentCount))
 			p.metrics.InFlightSize.With(labels).Set(float64(ps.InFlightSize))
 			p.metrics.AckedAheadSize.With(labels).Set(float64(ps.AckedAheadSize))
 

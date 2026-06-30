@@ -33,13 +33,9 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	// been touched).
 	m.HTTPRequestsTotal.WithLabelValues("/x", "GET", "200").Inc()
 	m.HTTPRequestDuration.WithLabelValues("/x", "GET", "200").Observe(0.01)
-	m.HTTPBytesIn.WithLabelValues("/x").Add(1)
-	m.HTTPBytesOut.WithLabelValues("/x").Add(1)
-	m.HTTPRequestsInFlight.Set(0)
 	m.MessagesProducedTotal.WithLabelValues("t", "0").Inc()
 	m.MessagesConsumedTotal.WithLabelValues("t", "0").Inc()
 	m.BytesProducedTotal.WithLabelValues("t", "0").Add(1)
-	m.BytesConsumedTotal.WithLabelValues("t", "0").Add(1)
 	m.ProduceRejectionsTotal.WithLabelValues("t", "schema").Inc()
 	m.ConsumeWaitSeconds.WithLabelValues("t", "hit").Observe(0.01)
 	m.ConsumeEmptyTotal.WithLabelValues("t").Inc()
@@ -48,8 +44,6 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	m.DataDirSizeBytes.Set(1)
 	m.DataDirAvailableBytes.Set(1)
 	m.TopicBytes.WithLabelValues("t").Set(1)
-	m.PartitionSizeBytes.WithLabelValues("t", "0").Set(1)
-	m.Segments.WithLabelValues("t", "0").Set(1)
 	m.ConsumerLagMessages.WithLabelValues("t", "0").Set(0)
 	m.ConsumerDroppedMessages.WithLabelValues("t", "0").Set(0)
 	m.OldestUnconsumedAgeSeconds.WithLabelValues("t", "0").Set(0)
@@ -58,12 +52,8 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	m.FlushBytesTotal.WithLabelValues("t", "0").Add(1)
 	m.FsyncDurationSeconds.WithLabelValues("t", "0").Observe(0.001)
 	m.HighWatermarkPersistSeconds.WithLabelValues("t", "0", "ok").Observe(0.001)
-	m.SegmentsRolledTotal.WithLabelValues("t", "0").Inc()
-	m.RetentionDeletionsTotal.WithLabelValues("t", "0", "age").Inc()
 	m.RetentionBytesDeleted.WithLabelValues("t", "0", "age").Add(1)
-	m.RetentionMessagesDeleted.WithLabelValues("t", "0", "age").Add(1)
 	m.RetentionRunSeconds.WithLabelValues("t", "0").Observe(0.001)
-	m.SegmentsScannedAtBoot.WithLabelValues("t", "0").Inc()
 	m.MetastoreTxDurationSeconds.WithLabelValues("get_topic", "read", "ok").Observe(0.001)
 	m.IncError("test", "kind")
 	m.BootDurationSeconds.Set(0.1)
@@ -71,13 +61,9 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	want := []string{
 		"narad_http_requests_total",
 		"narad_http_request_duration_seconds",
-		"narad_http_request_bytes_in_total",
-		"narad_http_response_bytes_out_total",
-		"narad_http_requests_in_flight",
 		"narad_messages_produced_total",
 		"narad_messages_consumed_total",
 		"narad_bytes_produced_total",
-		"narad_bytes_consumed_total",
 		"narad_produce_rejections_total",
 		"narad_consume_wait_seconds",
 		"narad_consume_empty_total",
@@ -86,8 +72,6 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 		"narad_data_dir_size_bytes",
 		"narad_data_dir_available_bytes",
 		"narad_topic_bytes",
-		"narad_partition_size_bytes",
-		"narad_segments",
 		"narad_consumer_lag_messages",
 		"narad_consumer_dropped_messages",
 		"narad_oldest_unconsumed_message_age_seconds",
@@ -96,12 +80,8 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 		"narad_storage_flush_bytes_total",
 		"narad_storage_fsync_duration_seconds",
 		"narad_storage_high_watermark_persist_duration_seconds",
-		"narad_storage_segments_rolled_total",
-		"narad_storage_retention_deletions_total",
 		"narad_storage_retention_bytes_deleted_total",
-		"narad_storage_retention_messages_deleted_total",
 		"narad_storage_retention_run_duration_seconds",
-		"narad_storage_segments_scanned_at_boot_total",
 		"narad_metastore_tx_duration_seconds",
 		"narad_errors_total",
 		"narad_boot_duration_seconds",

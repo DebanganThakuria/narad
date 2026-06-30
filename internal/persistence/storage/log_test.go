@@ -78,13 +78,9 @@ func (m *storageMetricsProbe) ObserveHighWatermarkPersist(time.Duration, string)
 	m.hwms.Add(1)
 }
 
-func (m *storageMetricsProbe) IncSegmentRolled() {}
-
-func (m *storageMetricsProbe) IncRetentionDeletion(string, int64, int64) {}
+func (m *storageMetricsProbe) IncRetentionDeletion(string, int64) {}
 
 func (m *storageMetricsProbe) ObserveRetentionRun(time.Duration) {}
-
-func (m *storageMetricsProbe) IncSegmentScanned() {}
 
 // requireRead opens a log, calls fn, closes the log, and surfaces
 // errors with t.Fatalf.

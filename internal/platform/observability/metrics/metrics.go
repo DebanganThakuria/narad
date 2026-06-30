@@ -25,17 +25,13 @@ const Namespace = "narad"
 // that hold *Metrics check for nil before observing).
 type Metrics struct {
 	// HTTP
-	HTTPRequestsTotal    *prometheus.CounterVec   // route, method, status
-	HTTPRequestDuration  *prometheus.HistogramVec // route, method, status
-	HTTPBytesIn          *prometheus.CounterVec   // route
-	HTTPBytesOut         *prometheus.CounterVec   // route
-	HTTPRequestsInFlight prometheus.Gauge         // total (route unknown at entry)
+	HTTPRequestsTotal   *prometheus.CounterVec   // route, method, status
+	HTTPRequestDuration *prometheus.HistogramVec // route, method, status
 
 	// Broker throughput
 	MessagesProducedTotal  *prometheus.CounterVec // topic, partition
 	MessagesConsumedTotal  *prometheus.CounterVec // topic, partition
 	BytesProducedTotal     *prometheus.CounterVec // topic, partition
-	BytesConsumedTotal     *prometheus.CounterVec // topic, partition
 	ProduceRejectionsTotal *prometheus.CounterVec // topic, reason
 
 	// Long-poll
@@ -48,8 +44,6 @@ type Metrics struct {
 	DataDirSizeBytes           prometheus.Gauge
 	DataDirAvailableBytes      prometheus.Gauge
 	TopicBytes                 *prometheus.GaugeVec // topic
-	PartitionSizeBytes         *prometheus.GaugeVec // topic, partition
-	Segments                   *prometheus.GaugeVec // topic, partition
 	ConsumerLagMessages        *prometheus.GaugeVec // topic, partition
 	ConsumerDroppedMessages    *prometheus.GaugeVec // topic, partition
 	OldestUnconsumedAgeSeconds *prometheus.GaugeVec // topic, partition
@@ -57,7 +51,6 @@ type Metrics struct {
 	// In-flight / out-of-order ack book-keeping (gauges; updated by poller)
 	InFlightSize   *prometheus.GaugeVec   // topic, partition
 	AckedAheadSize *prometheus.GaugeVec   // topic, partition
-	ReserveSkipped *prometheus.CounterVec // topic, reason ("cap" | "empty" | "all_reserved")
 	AckRejected    *prometheus.CounterVec // reason ("hmac" | "stale" | "malformed" | "topic_mismatch" | "cap")
 
 	// CorruptSkippedTotal counts consumer offsets skipped because their on-disk
@@ -71,12 +64,8 @@ type Metrics struct {
 	FlushBytesTotal             *prometheus.CounterVec   // topic, partition
 	FsyncDurationSeconds        *prometheus.HistogramVec // topic, partition
 	HighWatermarkPersistSeconds *prometheus.HistogramVec // topic, partition, outcome
-	SegmentsRolledTotal         *prometheus.CounterVec   // topic, partition
-	RetentionDeletionsTotal     *prometheus.CounterVec   // topic, partition, reason
 	RetentionBytesDeleted       *prometheus.CounterVec   // topic, partition, reason
-	RetentionMessagesDeleted    *prometheus.CounterVec   // topic, partition, reason
 	RetentionRunSeconds         *prometheus.HistogramVec // topic, partition
-	SegmentsScannedAtBoot       *prometheus.CounterVec   // topic, partition
 
 	// Metastore / bbolt
 	MetastoreTxDurationSeconds *prometheus.HistogramVec // operation, mode, status
@@ -108,27 +97,6 @@ func New(reg prometheus.Registerer) *Metrics {
 			Buckets:   prometheus.DefBuckets,
 		}, []string{"route", "method", "status"}),
 
-		HTTPBytesIn: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: Namespace,
-			Subsystem: "http",
-			Name:      "request_bytes_in_total",
-			Help:      "Total request bytes received per route (from Content-Length).",
-		}, []string{"route"}),
-
-		HTTPBytesOut: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: Namespace,
-			Subsystem: "http",
-			Name:      "response_bytes_out_total",
-			Help:      "Total response bytes written per route.",
-		}, []string{"route"}),
-
-		HTTPRequestsInFlight: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "http",
-			Name:      "requests_in_flight",
-			Help:      "Number of HTTP requests currently being served. Not labeled by route — the matched route is only known after dispatch, so we track the total only.",
-		}),
-
 		MessagesProducedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Name:      "messages_produced_total",
@@ -145,12 +113,6 @@ func New(reg prometheus.Registerer) *Metrics {
 			Namespace: Namespace,
 			Name:      "bytes_produced_total",
 			Help:      "Payload bytes appended to a partition log.",
-		}, []string{"topic", "partition"}),
-
-		BytesConsumedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: Namespace,
-			Name:      "bytes_consumed_total",
-			Help:      "Payload bytes returned by Consume.",
 		}, []string{"topic", "partition"}),
 
 		ProduceRejectionsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -203,18 +165,6 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:      "On-disk bytes used by a topic, summed across partitions.",
 		}, []string{"topic"}),
 
-		PartitionSizeBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Name:      "partition_size_bytes",
-			Help:      "On-disk bytes used by a single partition.",
-		}, []string{"topic", "partition"}),
-
-		Segments: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Name:      "segments",
-			Help:      "Number of segment files for a partition.",
-		}, []string{"topic", "partition"}),
-
 		ConsumerLagMessages: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: Namespace,
 			Name:      "consumer_lag_messages",
@@ -244,12 +194,6 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name:      "acked_ahead_size",
 			Help:      "Sparse out-of-order ack set size per partition. Persistently > 0 means the head of the queue is stuck.",
 		}, []string{"topic", "partition"}),
-
-		ReserveSkipped: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: Namespace,
-			Name:      "reserve_skipped_total",
-			Help:      "ReserveNext returned no offset; partitioned by reason.",
-		}, []string{"topic", "reason"}),
 
 		AckRejected: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
@@ -301,32 +245,11 @@ func New(reg prometheus.Registerer) *Metrics {
 			Buckets:   storageDurationBuckets,
 		}, []string{"topic", "partition", "outcome"}),
 
-		SegmentsRolledTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: Namespace,
-			Subsystem: "storage",
-			Name:      "segments_rolled_total",
-			Help:      "Active segment closed and a new one created.",
-		}, []string{"topic", "partition"}),
-
-		RetentionDeletionsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: Namespace,
-			Subsystem: "storage",
-			Name:      "retention_deletions_total",
-			Help:      "Segment files removed by retention, by reason (age, bytes).",
-		}, []string{"topic", "partition", "reason"}),
-
 		RetentionBytesDeleted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Subsystem: "storage",
 			Name:      "retention_bytes_deleted_total",
 			Help:      "Bytes reclaimed by retention, by reason.",
-		}, []string{"topic", "partition", "reason"}),
-
-		RetentionMessagesDeleted: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: Namespace,
-			Subsystem: "storage",
-			Name:      "retention_messages_deleted_total",
-			Help:      "Messages discarded by retention, by reason.",
 		}, []string{"topic", "partition", "reason"}),
 
 		RetentionRunSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -335,13 +258,6 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name:      "retention_run_duration_seconds",
 			Help:      "Wall time of one retention sweep.",
 			Buckets:   prometheus.DefBuckets,
-		}, []string{"topic", "partition"}),
-
-		SegmentsScannedAtBoot: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: Namespace,
-			Subsystem: "storage",
-			Name:      "segments_scanned_at_boot_total",
-			Help:      "Segment files scanned during partition log recovery (cumulative across restarts).",
 		}, []string{"topic", "partition"}),
 
 		MetastoreTxDurationSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -366,22 +282,20 @@ func New(reg prometheus.Registerer) *Metrics {
 	}
 
 	reg.MustRegister(
-		m.HTTPRequestsTotal, m.HTTPRequestDuration, m.HTTPBytesIn, m.HTTPBytesOut, m.HTTPRequestsInFlight,
+		m.HTTPRequestsTotal, m.HTTPRequestDuration,
 		m.MessagesProducedTotal, m.MessagesConsumedTotal,
-		m.BytesProducedTotal, m.BytesConsumedTotal,
+		m.BytesProducedTotal,
 		m.ProduceRejectionsTotal,
 		m.ConsumeWaitSeconds, m.ConsumeEmptyTotal,
 		m.TopicsTotal, m.PartitionsTotal, m.DataDirSizeBytes, m.DataDirAvailableBytes,
-		m.TopicBytes, m.PartitionSizeBytes, m.Segments,
+		m.TopicBytes,
 		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
-		m.InFlightSize, m.AckedAheadSize, m.ReserveSkipped, m.AckRejected,
+		m.InFlightSize, m.AckedAheadSize, m.AckRejected,
 		m.CorruptSkippedTotal,
 		m.ActivePartitionLogs,
 		m.FlushDurationSeconds, m.FlushBytesTotal,
 		m.FsyncDurationSeconds, m.HighWatermarkPersistSeconds,
-		m.SegmentsRolledTotal,
-		m.RetentionDeletionsTotal, m.RetentionBytesDeleted, m.RetentionMessagesDeleted, m.RetentionRunSeconds,
-		m.SegmentsScannedAtBoot,
+		m.RetentionBytesDeleted, m.RetentionRunSeconds,
 		m.MetastoreTxDurationSeconds,
 		m.ErrorsTotal,
 		m.BootDurationSeconds,
@@ -400,17 +314,15 @@ func (m *Metrics) pruneTopicSeries(topic string) {
 	sel := prometheus.Labels{"topic": topic}
 	for _, c := range []interface{ DeletePartialMatch(prometheus.Labels) int }{
 		m.MessagesProducedTotal, m.MessagesConsumedTotal,
-		m.BytesProducedTotal, m.BytesConsumedTotal,
+		m.BytesProducedTotal,
 		m.ProduceRejectionsTotal,
 		m.ConsumeWaitSeconds, m.ConsumeEmptyTotal,
-		m.TopicBytes, m.PartitionSizeBytes, m.Segments,
+		m.TopicBytes,
 		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
-		m.InFlightSize, m.AckedAheadSize, m.ReserveSkipped, m.CorruptSkippedTotal,
+		m.InFlightSize, m.AckedAheadSize, m.CorruptSkippedTotal,
 		m.FlushDurationSeconds, m.FlushBytesTotal,
 		m.FsyncDurationSeconds, m.HighWatermarkPersistSeconds,
-		m.SegmentsRolledTotal,
-		m.RetentionDeletionsTotal, m.RetentionBytesDeleted, m.RetentionMessagesDeleted, m.RetentionRunSeconds,
-		m.SegmentsScannedAtBoot,
+		m.RetentionBytesDeleted, m.RetentionRunSeconds,
 	} {
 		c.DeletePartialMatch(sel)
 	}
@@ -447,15 +359,6 @@ func (m *Metrics) IncError(component, kind string) {
 		return
 	}
 	m.ErrorsTotal.WithLabelValues(component, kind).Inc()
-}
-
-// IncReserveSkipped bumps the reserve_skipped_total counter. Callers
-// pass the SkipReason returned by InFlight.ReserveNext.
-func (m *Metrics) IncReserveSkipped(topic, reason string) {
-	if m == nil || reason == "" {
-		return
-	}
-	m.ReserveSkipped.WithLabelValues(topic, reason).Inc()
 }
 
 // IncCorruptSkipped records that a consumer skipped one permanently-unreadable

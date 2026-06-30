@@ -61,9 +61,6 @@ func (l *Log) recover() (int64, error) {
 			return 0, err
 		}
 		l.segments = append(l.segments, seg)
-		if m := l.opts.Metrics; m != nil {
-			m.IncSegmentScanned()
-		}
 	}
 	return nextOffset, nil
 }

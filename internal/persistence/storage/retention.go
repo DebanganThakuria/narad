@@ -129,7 +129,6 @@ func (r *reaper) candidatesForDeletion(sealed []*segment) map[*segment]string {
 
 func (r *reaper) deleteSegmentLocked(s *segment, reason string) {
 	bytes := s.sizeBytes
-	messages := s.nextOffset - s.baseOffset
 
 	_ = s.close()
 	_ = os.Remove(s.path)
@@ -142,7 +141,7 @@ func (r *reaper) deleteSegmentLocked(s *segment, reason string) {
 	r.log.navCache.invalidateSegment(s.baseOffset)
 
 	if m := r.log.opts.Metrics; m != nil {
-		m.IncRetentionDeletion(reason, bytes, messages)
+		m.IncRetentionDeletion(reason, bytes)
 	}
 }
 

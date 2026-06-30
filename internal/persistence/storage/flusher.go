@@ -185,9 +185,6 @@ func (f *flusher) writeBatch(records [][]byte, baseOffset int64, forceSync bool)
 			return fmt.Errorf("storage: flusher roll: %w", err)
 		}
 		f.log.segments = append(f.log.segments, newActive)
-		if m := f.log.opts.Metrics; m != nil {
-			m.IncSegmentRolled()
-		}
 		f.mu.Unlock()
 	}
 

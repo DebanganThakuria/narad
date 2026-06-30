@@ -21,20 +21,11 @@ type MetricsRecorder interface {
 	// durable high-watermark metadata file.
 	ObserveHighWatermarkPersist(duration time.Duration, outcome string)
 
-	// IncSegmentRolled fires when the active segment is sealed and a
-	// fresh one is opened.
-	IncSegmentRolled()
-
 	// IncRetentionDeletion fires once per segment removed by retention.
-	// reason is "age" or "bytes". messagesDeleted = nextOffset -
-	// baseOffset for that segment.
-	IncRetentionDeletion(reason string, bytesDeleted, messagesDeleted int64)
+	// reason is "age" or "bytes".
+	IncRetentionDeletion(reason string, bytesDeleted int64)
 
 	// ObserveRetentionRun records one sweep, whether or not anything
 	// was deleted.
 	ObserveRetentionRun(duration time.Duration)
-
-	// IncSegmentScanned fires once per segment file walked during
-	// startup recovery.
-	IncSegmentScanned()
 }

@@ -11,7 +11,7 @@ import (
 )
 
 // HTTPMiddleware returns an http middleware that records request
-// counts, durations, in-flight count, and bytes per route.
+// counts and durations per route.
 //
 // Routes are labeled with the matched ServeMux pattern (e.g.
 // "GET /v1/topics/{topic}") rather than the literal URL path. This
@@ -30,8 +30,6 @@ func HTTPMiddleware(m *Metrics) func(http.Handler) http.Handler {
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
-			m.HTTPRequestsInFlight.Inc()
-			defer m.HTTPRequestsInFlight.Dec()
 
 			rec := &metricsRecorder{ResponseWriter: w, status: http.StatusOK}
 			next.ServeHTTP(rec, r)
@@ -46,12 +44,6 @@ func HTTPMiddleware(m *Metrics) func(http.Handler) http.Handler {
 
 			m.HTTPRequestsTotal.WithLabelValues(route, method, status).Inc()
 			m.HTTPRequestDuration.WithLabelValues(route, method, status).Observe(elapsed)
-			if rec.bytes > 0 {
-				m.HTTPBytesOut.WithLabelValues(route).Add(float64(rec.bytes))
-			}
-			if r.ContentLength > 0 {
-				m.HTTPBytesIn.WithLabelValues(route).Add(float64(r.ContentLength))
-			}
 			if rec.status >= 500 {
 				m.IncError("http", "5xx")
 			}
@@ -65,7 +57,6 @@ func HTTPMiddleware(m *Metrics) func(http.Handler) http.Handler {
 type metricsRecorder struct {
 	http.ResponseWriter
 	status      int
-	bytes       int64
 	wroteHeader bool
 }
 
@@ -82,9 +73,7 @@ func (r *metricsRecorder) Write(b []byte) (int, error) {
 	if !r.wroteHeader {
 		r.WriteHeader(http.StatusOK)
 	}
-	n, err := r.ResponseWriter.Write(b)
-	r.bytes += int64(n)
-	return n, err
+	return r.ResponseWriter.Write(b)
 }
 
 func (r *metricsRecorder) Flush() {
@@ -100,15 +89,10 @@ func (r *metricsRecorder) ReadFrom(src io.Reader) (int64, error) {
 	if !r.wroteHeader {
 		r.WriteHeader(http.StatusOK)
 	}
-	var n int64
-	var err error
 	if rf, ok := r.ResponseWriter.(io.ReaderFrom); ok {
-		n, err = rf.ReadFrom(src)
-	} else {
-		n, err = io.Copy(r.ResponseWriter, src)
+		return rf.ReadFrom(src)
 	}
-	r.bytes += n
-	return n, err
+	return io.Copy(r.ResponseWriter, src)
 }
 
 func (r *metricsRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {

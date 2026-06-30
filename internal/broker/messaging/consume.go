@@ -98,7 +98,6 @@ func (e *Engine) recordConsumed(topicName string, partition, payloadBytes int) {
 	}
 	partLabel := strconv.Itoa(partition)
 	e.metrics.MessagesConsumedTotal.WithLabelValues(topicName, partLabel).Inc()
-	e.metrics.BytesConsumedTotal.WithLabelValues(topicName, partLabel).Add(float64(payloadBytes))
 }
 
 // recordConsumeWait observes the long-poll histogram for a hit
@@ -169,9 +168,6 @@ func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions 
 			return topic.Message{}, false, err
 		}
 		if !res.Reserved {
-			if e.metrics != nil {
-				e.metrics.IncReserveSkipped(topicName, res.SkipReason)
-			}
 			continue // partition empty, fully reserved, or in-flight cap hit
 		}
 		payload, err := log.Read(res.Offset)
