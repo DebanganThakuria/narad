@@ -68,12 +68,6 @@ func (g *Logs) lockProduce(topicName string, idx int) func() {
 	return mu.Unlock
 }
 
-func (g *Logs) dropProduceLock(topicName string, idx int) {
-	g.produceMu.Lock()
-	delete(g.produceSync, keyOf(topicName, idx))
-	g.produceMu.Unlock()
-}
-
 func (g *Logs) WithProduceLock(topicName string, idx int, fn func(*storage.Log) error) error {
 	unlock := g.lockProduce(topicName, idx)
 	defer unlock()
@@ -94,39 +88,6 @@ func (g *Logs) WithProduceLockResult(topicName string, idx int, fn func(*storage
 		return 0, err
 	}
 	return fn(log)
-}
-
-func (g *Logs) WithProduceLockValue(topicName string, idx int, fn func(*storage.Log) (int64, int, error)) (int64, int, error) {
-	waitStart := time.Now()
-	unlock := g.lockProduce(topicName, idx)
-	g.observeProduce("lock_wait", "ok", time.Since(waitStart))
-	defer unlock()
-
-	openStart := time.Now()
-	log, err := g.Get(topicName, idx)
-	if err != nil {
-		g.observeProduce("log_open", "error", time.Since(openStart))
-		return 0, 0, err
-	}
-	g.observeProduce("log_open", "ok", time.Since(openStart))
-	return fn(log)
-}
-
-func (g *Logs) ProduceSyncCount() int {
-	g.produceMu.Lock()
-	defer g.produceMu.Unlock()
-	return len(g.produceSync)
-}
-
-func (g *Logs) DropProduceSync(topicName string, idx int) {
-	g.dropProduceLock(topicName, idx)
-}
-
-func (g *Logs) observeProduce(stage, outcome string, duration time.Duration) {
-	if g.metrics == nil {
-		return
-	}
-	g.metrics.ObserveHotPathStage("broker_runtime", "produce", stage, outcome, duration)
 }
 
 // Get returns the storage.Log for (topic, partition), opening the

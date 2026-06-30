@@ -230,7 +230,7 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		defer close(dispatchDone)
 		cluster.NewProduceDispatcher(ingressManager, ms, "", br, nil, log, cluster.ProduceDispatcherConfig{
 			PollInterval: 5 * time.Millisecond,
-		}, m).Run(dispatchCtx)
+		}).Run(dispatchCtx)
 	}()
 
 	h := handlers.New(handlers.Deps{

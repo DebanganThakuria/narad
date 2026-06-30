@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"sync"
-	"time"
 )
 
 type RecordID struct {
@@ -122,22 +121,12 @@ func (l *Log) Append(ctx context.Context, payload []byte) (RecordID, error) {
 		return RecordID{}, fmt.Errorf("wal: payload size %d exceeds max %d", len(payload), l.opts.MaxRecord)
 	}
 
-	lockStart := time.Now()
 	l.mu.Lock()
-	lockWait := time.Since(lockStart)
-	writeStart := time.Now()
 	id, batch, err := l.appendLocked(payload)
+	l.mu.Unlock()
 	if err != nil {
-		writeDuration := time.Since(writeStart)
-		l.mu.Unlock()
-		l.observe("append_lock_wait", "ok", lockWait)
-		l.observe("append_write", "error", writeDuration)
 		return RecordID{}, err
 	}
-	writeDuration := time.Since(writeStart)
-	l.mu.Unlock()
-	l.observe("append_lock_wait", "ok", lockWait)
-	l.observe("append_write", "ok", writeDuration)
 
 	l.signalSync()
 
@@ -148,9 +137,7 @@ func (l *Log) Append(ctx context.Context, payload []byte) (RecordID, error) {
 	// retrying caller would then duplicate. So past the append we wait
 	// for the true sync outcome rather than honouring cancellation.
 	// (ctx is still checked before the append, at the top of Append.)
-	waitStart := time.Now()
 	<-batch.done
-	l.observe("append_sync_wait", observeOutcome(batch.err), time.Since(waitStart))
 	return id, batch.err
 }
 

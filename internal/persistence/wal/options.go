@@ -10,17 +10,10 @@ const (
 )
 
 type Options struct {
-	SegmentBytes      int64
-	SyncInterval      time.Duration
-	SyncBytes         int64
-	MaxRecord         int
-	Observer          StageObserver
-	ObserverComponent string
-	ObserverOperation string
-}
-
-type StageObserver interface {
-	ObserveHotPathStage(component, operation, stage, outcome string, duration time.Duration)
+	SegmentBytes int64
+	SyncInterval time.Duration
+	SyncBytes    int64
+	MaxRecord    int
 }
 
 func normalizeOptions(opts Options) Options {

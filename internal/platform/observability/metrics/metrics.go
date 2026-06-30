@@ -433,12 +433,6 @@ var fastDurationBuckets = []float64{
 	0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
 }
 
-func (m *Metrics) ObserveHotPathStage(component, operation, stage, outcome string, duration time.Duration) {
-	// Kept as a compatibility hook for internal debug observers. The
-	// default Prometheus surface intentionally does not export per-stage
-	// hot-path metrics because they are noisy and easy to overuse.
-}
-
 func (m *Metrics) ObserveMetastoreTx(operation, mode, status string, duration time.Duration) {
 	if m == nil {
 		return

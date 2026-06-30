@@ -46,7 +46,6 @@ func (l *Log) flushSync() {
 		l.mu.Unlock()
 		err = errors.New("wal: active file closed")
 	} else {
-		start := time.Now()
 		// Claim fileOps before releasing mu so a later segment roll cannot
 		// close this file before this detached buffer is written and synced.
 		l.fileOps.Lock()
@@ -57,7 +56,6 @@ func (l *Log) flushSync() {
 			err = file.Sync()
 		}
 		l.fileOps.Unlock()
-		l.observe("sync", observeOutcome(err), time.Since(start))
 	}
 	if err != nil {
 		err = fmt.Errorf("wal: write and sync: %w", err)

@@ -138,7 +138,7 @@ func newCLITestEnv(t *testing.T) *cliTestEnv {
 	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 	go cluster.NewProduceDispatcher(ingressManager, store, "", br, nil, log, cluster.ProduceDispatcherConfig{
 		PollInterval: 5 * time.Millisecond,
-	}, metrics).Run(dispatchCtx)
+	}).Run(dispatchCtx)
 	server := httptest.NewServer(httpserver.NewRouter(handlers.New(handlers.Deps{
 		Broker:         br,
 		Logs:           logs,
