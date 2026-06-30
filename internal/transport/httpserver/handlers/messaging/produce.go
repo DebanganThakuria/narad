@@ -33,8 +33,9 @@ func Produce(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
-		query, ok := parseProduceQuery(s, w, r)
-		if !ok {
+		query, err := produceQueryFromRawQuery(r.URL.RawQuery)
+		if err != nil {
+			s.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -52,7 +53,6 @@ func Produce(s *handlers.Set) http.HandlerFunc {
 			key = generateProduceKey()
 		}
 
-		var err error
 		if query.hasPartition {
 			_, err = s.Deps.Broker.AcceptProduce(r.Context(), topicName, key, body, query.partition)
 		} else {
@@ -64,15 +64,6 @@ func Produce(s *handlers.Set) http.HandlerFunc {
 		}
 		w.WriteHeader(http.StatusAccepted)
 	}
-}
-
-func parseProduceQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) (produceQuery, bool) {
-	query, err := produceQueryFromRawQuery(r.URL.RawQuery)
-	if err != nil {
-		s.WriteError(w, http.StatusBadRequest, err.Error())
-		return produceQuery{}, false
-	}
-	return query, true
 }
 
 func produceQueryFromRawQuery(raw string) (produceQuery, error) {

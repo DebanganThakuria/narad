@@ -2,7 +2,6 @@ package messaging
 
 import (
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/debanganthakuria/narad/internal/consumer"
@@ -62,28 +61,22 @@ func receiptHandleFromRawQuery(raw string) (string, bool, error) {
 
 		key, value, hasValue := strings.Cut(part, "=")
 		if key != "receipt_handle" {
-			if !strings.ContainsAny(key, "%+") {
-				continue
-			}
-			unescaped, err := url.QueryUnescape(key)
+			decodedKey, err := queryComponent(key)
 			if err != nil {
 				return "", false, err
 			}
-			if unescaped != "receipt_handle" {
+			if decodedKey != "receipt_handle" {
 				continue
 			}
 		}
 		if !hasValue || value == "" {
 			return "", true, nil
 		}
-		if strings.ContainsAny(value, "%+") {
-			unescaped, err := url.QueryUnescape(value)
-			if err != nil {
-				return "", true, err
-			}
-			return unescaped, true, nil
+		decodedValue, err := queryComponent(value)
+		if err != nil {
+			return "", true, err
 		}
-		return value, true, nil
+		return decodedValue, true, nil
 	}
 	return "", false, nil
 }

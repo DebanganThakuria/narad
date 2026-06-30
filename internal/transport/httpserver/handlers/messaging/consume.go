@@ -30,8 +30,10 @@ func Consume(s *handlers.Set) http.HandlerFunc {
 		}
 
 		if isLocalOnlyConsumeProbe(localOnly, opts) {
+			// opts has no partition/offset here, so consumeOnce treats a
+			// not-owner error as "no message" (queue-consume semantics).
 			opts.Wait = 0
-			done, found := consumeLocalOnly(s, w, r, topicName, opts)
+			done, found := consumeOnce(s, w, r, topicName, opts)
 			if done {
 				return
 			}
@@ -102,22 +104,6 @@ func handleQueueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r 
 
 func isLocalOnlyConsumeProbe(localOnly bool, opts brokermsg.ConsumeOpts) bool {
 	return localOnly && opts.Partition == nil && opts.Offset == nil
-}
-
-func consumeLocalOnly(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts) (bool, bool) {
-	msg, found, err := s.Deps.Broker.Consume(r.Context(), topicName, opts)
-	if errors.Is(err, brokermsg.ErrNotPartitionOwner) {
-		return false, false
-	}
-	if err != nil {
-		s.WriteBrokerError(w, "consume", err)
-		return true, false
-	}
-	if !found {
-		return false, false
-	}
-	s.WriteJSON(w, http.StatusOK, msg)
-	return true, true
 }
 
 func consumeOnce(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts) (bool, bool) {

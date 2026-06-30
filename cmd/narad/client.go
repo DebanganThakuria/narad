@@ -286,7 +286,7 @@ func runClientAck(args []string) error {
 	}
 
 	path := "/v1/topics/" + url.PathEscape(fs.Arg(0)) + "/ack?receipt_handle=" + url.QueryEscape(h)
-	if err := newHTTPClient(*addr).postNoBody(path, nil); err != nil {
+	if err := newHTTPClient(*addr).postNoBody(path); err != nil {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "acked")
@@ -405,8 +405,8 @@ func (c *httpClient) patchAndPrint(path string, body any) error {
 	return printResponse(resp)
 }
 
-func (c *httpClient) postNoBody(path string, body any) error {
-	resp, err := c.do(http.MethodPost, path, body)
+func (c *httpClient) postNoBody(path string) error {
+	resp, err := c.do(http.MethodPost, path, nil)
 	if err != nil {
 		return err
 	}

@@ -16,6 +16,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 )
 
 // subcommand is the contract every subcommand satisfies.
@@ -65,8 +66,13 @@ func usage(w *os.File) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Subcommands:")
 
-	// Sorted iteration so help output is stable.
-	names := []string{"client", "serve", "version"}
+	// Derive names from the dispatcher table and sort them so the help
+	// output stays stable and can never drift from the command set.
+	names := make([]string, 0, len(commands))
+	for n := range commands {
+		names = append(names, n)
+	}
+	sort.Strings(names)
 	for _, n := range names {
 		c := commands[n]
 		fmt.Fprintf(w, "  %-9s  %s\n", n, c.short)

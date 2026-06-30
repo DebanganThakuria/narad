@@ -39,7 +39,7 @@ func List(s *handlers.Set) http.HandlerFunc {
 			PageToken: pageToken,
 		})
 		if err != nil {
-			s.Deps.Logger.Error("list topics", "err", err)
+			// WriteError logs the 5xx via logServerError; no separate log here.
 			s.WriteError(w, http.StatusInternalServerError, "list topics failed")
 			return
 		}
