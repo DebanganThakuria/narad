@@ -345,6 +345,8 @@ var fastDurationBuckets = []float64{
 	0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
 }
 
+// ObserveMetastoreTx records the latency of one metastore transaction,
+// labeled by operation, mode (e.g. raft/read/write), and status.
 func (m *Metrics) ObserveMetastoreTx(operation, mode, status string, duration time.Duration) {
 	if m == nil {
 		return

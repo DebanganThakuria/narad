@@ -8,8 +8,9 @@ package schema
 import "context"
 
 // Registry stores per-topic JSON Schemas and validates payloads
-// against them. Evolution rules: additive-only, no field
-// removal, no type changes — those go in the real implementation.
+// against them. Schema evolution is additive-only — no property removal
+// and no type changes — enforced by the JSONSchema implementation on
+// Register.
 type Registry interface {
 	ValidateDefinition(ctx context.Context, topic string, schema []byte) error
 	Register(ctx context.Context, topic string, schema []byte) (version int, err error)
