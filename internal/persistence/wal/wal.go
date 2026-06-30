@@ -37,7 +37,6 @@ type Log struct {
 	segmentBase uint64
 	segmentSize int64
 	nextSeq     uint64
-	unsynced    int64
 	writeBuffer []byte
 	pending     *syncBatch
 	closed      bool
@@ -71,7 +70,7 @@ func Open(dir string, opts Options) (*Log, error) {
 		}
 	}
 
-	nextSeq, lastValidEnd, err := scanForOpen(segments, opts.MaxRecord)
+	nextSeq, lastValidEnd, err := scanForOpen(segments, opts.MaxRecord, opts.Logger)
 	if err != nil {
 		return nil, err
 	}

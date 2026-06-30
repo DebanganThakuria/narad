@@ -39,7 +39,6 @@ func (l *Log) flushSync() {
 	batch := l.pending
 	l.writeBuffer = nil
 	l.pending = nil
-	l.unsynced = 0
 
 	var err error
 	if file == nil {
@@ -64,7 +63,6 @@ func (l *Log) flushSync() {
 		pending := l.pending
 		l.writeBuffer = nil
 		l.pending = nil
-		l.unsynced = 0
 		l.mu.Unlock()
 		completeBatch(pending, err)
 	}
@@ -89,7 +87,6 @@ func (l *Log) syncLocked() (*syncBatch, error) {
 		l.syncErr = fmt.Errorf("wal: write and sync: %w", err)
 		return batch, l.syncErr
 	}
-	l.unsynced = 0
 	return batch, nil
 }
 

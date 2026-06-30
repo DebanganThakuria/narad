@@ -13,6 +13,13 @@ const (
 	frameHeaderSize        = 20
 )
 
+// errTornFrame signals a partially-written frame (a truncated header or a
+// header whose declared payload runs past end-of-file). Callers treat it as
+// the end of the segment — a crash mid-append legitimately leaves such a
+// tail — but, unlike a clean EOF, it is worth logging so a truncation that
+// drops committed records is not silent.
+var errTornFrame = errors.New("wal: torn frame")
+
 func appendFrame(dst []byte, seq uint64, payload []byte) []byte {
 	start := len(dst)
 	size := frameHeaderSize + len(payload)
@@ -40,8 +47,11 @@ func appendFrame(dst []byte, seq uint64, payload []byte) []byte {
 func readFrame(r io.Reader, segmentBase uint64, offset int64, maxRecord int) (Record, bool, error) {
 	var header [frameHeaderSize]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return Record{}, false, nil
+		if errors.Is(err, io.EOF) {
+			return Record{}, false, nil // clean boundary: no bytes left
+		}
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return Record{}, false, errTornFrame // partial header
 		}
 		return Record{}, false, fmt.Errorf("wal: read frame header: %w", err)
 	}
@@ -60,7 +70,7 @@ func readFrame(r io.Reader, segmentBase uint64, offset int64, maxRecord int) (Re
 	payload := make([]byte, int(n))
 	if _, err := io.ReadFull(r, payload); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return Record{}, false, nil
+			return Record{}, false, errTornFrame // header parsed but payload truncated
 		}
 		return Record{}, false, fmt.Errorf("wal: read frame payload: %w", err)
 	}

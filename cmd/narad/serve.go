@@ -302,7 +302,7 @@ func buildBroker(
 		return nil, nil, nil, nil, nil, errors.New("broker: cluster coordination requires metastore.Store")
 	}
 
-	ingressManager, err := ingress.OpenManager(cfg.Storage.DataDir, ingressWALOptions(cfg.Storage))
+	ingressManager, err := ingress.OpenManager(cfg.Storage.DataDir, ingressWALOptions(cfg.Storage, log))
 	if err != nil {
 		return nil, nil, nil, nil, nil, fmt.Errorf("ingress: %w", err)
 	}
@@ -518,10 +518,10 @@ func storageOptions(sc config.StorageConfig) (storage.Options, error) {
 	}, nil
 }
 
-func ingressWALOptions(sc config.StorageConfig) wal.Options {
+func ingressWALOptions(sc config.StorageConfig, logger *slog.Logger) wal.Options {
 	opts := ingress.DefaultWALOptions()
 	opts.SyncInterval = time.Duration(sc.IngressWALSyncIntervalMs) * time.Millisecond
-	opts.SyncBytes = sc.IngressWALSyncBytes
+	opts.Logger = logger
 	return opts
 }
 

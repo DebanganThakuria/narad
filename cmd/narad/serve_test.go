@@ -2250,14 +2250,10 @@ func TestStorageOptions(t *testing.T) {
 func TestIngressWALOptions(t *testing.T) {
 	opts := ingressWALOptions(config.StorageConfig{
 		IngressWALSyncIntervalMs: 5,
-		IngressWALSyncBytes:      4096,
-	})
+	}, nil)
 
 	if opts.SyncInterval != 5*time.Millisecond {
 		t.Fatalf("SyncInterval = %v, want 5ms", opts.SyncInterval)
-	}
-	if opts.SyncBytes != 4096 {
-		t.Fatalf("SyncBytes = %d, want 4096", opts.SyncBytes)
 	}
 }
 
