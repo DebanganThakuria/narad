@@ -8,10 +8,14 @@ import (
 	"io"
 )
 
-const (
-	frameMagic      uint32 = 0x4e57414c // NWAL
-	frameHeaderSize        = 20
-)
+// frameMagic prefixes every frame on disk so a stray or zeroed region is not
+// mistaken for a valid header.
+const frameMagic uint32 = 0x4e57414c // NWAL
+
+// frameHeaderSize is the on-disk frame header width: magic(4) + len(4) +
+// seq(8) + crc(4). It is left untyped so it composes in both int and int64
+// (file-offset) arithmetic without conversions.
+const frameHeaderSize = 20
 
 // errTornFrame signals a partially-written frame (a truncated header or a
 // header whose declared payload runs past end-of-file). Callers treat it as

@@ -3,6 +3,7 @@ package metastore
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 
 	bolt "go.etcd.io/bbolt"
 
@@ -12,7 +13,7 @@ import (
 func (f *fsmState) applyCreateTopic(data []byte) error {
 	var t topic.Topic
 	if err := json.Unmarshal(data, &t); err != nil {
-		return err
+		return fmt.Errorf("metastore: decode create_topic: %w", err)
 	}
 	err := f.update("create_topic", func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketTopics)
@@ -34,7 +35,7 @@ func (f *fsmState) applyCreateTopic(data []byte) error {
 func (f *fsmState) applyUpdateTopic(data []byte) error {
 	var t topic.Topic
 	if err := json.Unmarshal(data, &t); err != nil {
-		return err
+		return fmt.Errorf("metastore: decode update_topic: %w", err)
 	}
 	err := f.update("update_topic", func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketTopics)
@@ -56,7 +57,7 @@ func (f *fsmState) applyUpdateTopic(data []byte) error {
 func (f *fsmState) applyDeleteTopic(data []byte) error {
 	var name string
 	if err := json.Unmarshal(data, &name); err != nil {
-		return err
+		return fmt.Errorf("metastore: decode delete_topic: %w", err)
 	}
 	err := f.update("delete_topic", func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketTopics)
@@ -92,7 +93,7 @@ func (f *fsmState) applyDeleteTopic(data []byte) error {
 func (f *fsmState) applyPutSchema(data []byte) error {
 	var p schemaPayload
 	if err := json.Unmarshal(data, &p); err != nil {
-		return err
+		return fmt.Errorf("metastore: decode put_schema: %w", err)
 	}
 	err := f.update("put_schema", func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketSchemas).Put(schemaKey(p.Topic, p.Version), p.Schema)
@@ -106,7 +107,7 @@ func (f *fsmState) applyPutSchema(data []byte) error {
 func (f *fsmState) applyAssignPartition(data []byte) error {
 	var a Assignment
 	if err := json.Unmarshal(data, &a); err != nil {
-		return err
+		return fmt.Errorf("metastore: decode assign_partition: %w", err)
 	}
 	v, err := json.Marshal(a)
 	if err != nil {
@@ -124,7 +125,7 @@ func (f *fsmState) applyAssignPartition(data []byte) error {
 func (f *fsmState) applyMemberJoin(data []byte) error {
 	var m Member
 	if err := json.Unmarshal(data, &m); err != nil {
-		return err
+		return fmt.Errorf("metastore: decode member_join: %w", err)
 	}
 	v, err := json.Marshal(m)
 	if err != nil {
@@ -145,16 +146,13 @@ func (f *fsmState) applyMemberJoin(data []byte) error {
 		}
 		return b.Put([]byte(m.ID), v)
 	})
-	if err == nil && routingChanged {
-		f.versions.bumpRoutingMembers()
-	}
-	return err
+	return f.bumpRoutingOnSuccess(err, routingChanged)
 }
 
 func (f *fsmState) applyMemberHeartbeat(data []byte) error {
 	var p heartbeatPayload
 	if err := json.Unmarshal(data, &p); err != nil {
-		return err
+		return fmt.Errorf("metastore: decode member_heartbeat: %w", err)
 	}
 	return f.update("member_heartbeat", func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketMembers)
@@ -178,7 +176,7 @@ func (f *fsmState) applyMemberHeartbeat(data []byte) error {
 func (f *fsmState) applyMemberDead(data []byte) error {
 	var id string
 	if err := json.Unmarshal(data, &id); err != nil {
-		return err
+		return fmt.Errorf("metastore: decode member_dead: %w", err)
 	}
 	routingChanged := false
 	err := f.update("member_dead", func(tx *bolt.Tx) error {
@@ -199,6 +197,13 @@ func (f *fsmState) applyMemberDead(data []byte) error {
 		}
 		return b.Put([]byte(id), v)
 	})
+	return f.bumpRoutingOnSuccess(err, routingChanged)
+}
+
+// bumpRoutingOnSuccess advances the routing-members version when a member
+// mutation committed (err == nil) and changed routing-relevant fields. It
+// returns err unchanged so callers can propagate it directly.
+func (f *fsmState) bumpRoutingOnSuccess(err error, routingChanged bool) error {
 	if err == nil && routingChanged {
 		f.versions.bumpRoutingMembers()
 	}

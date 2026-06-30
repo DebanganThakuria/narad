@@ -86,6 +86,9 @@ func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromP
 	return nil
 }
 
+// RoundRobinMembers returns a copy of active sorted by member ID. It does not
+// itself assign partitions; the deterministic ID order it produces is what
+// makes the subsequent RoundRobinOwner picks stable and identical across nodes.
 func RoundRobinMembers(active []Member) []Member {
 	out := append([]Member(nil), active...)
 	sort.Slice(out, func(i, j int) bool {

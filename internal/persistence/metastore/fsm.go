@@ -33,27 +33,22 @@ const (
 	opMemberDead
 )
 
+var opMetricNames = map[opCode]string{
+	opCreateTopic:     "create_topic",
+	opUpdateTopic:     "update_topic",
+	opDeleteTopic:     "delete_topic",
+	opPutSchema:       "put_schema",
+	opAssignPartition: "assign_partition",
+	opMemberJoin:      "member_join",
+	opMemberHeartbeat: "member_heartbeat",
+	opMemberDead:      "member_dead",
+}
+
 func (op opCode) metricName() string {
-	switch op {
-	case opCreateTopic:
-		return "create_topic"
-	case opUpdateTopic:
-		return "update_topic"
-	case opDeleteTopic:
-		return "delete_topic"
-	case opPutSchema:
-		return "put_schema"
-	case opAssignPartition:
-		return "assign_partition"
-	case opMemberJoin:
-		return "member_join"
-	case opMemberHeartbeat:
-		return "member_heartbeat"
-	case opMemberDead:
-		return "member_dead"
-	default:
-		return "unknown"
+	if name, ok := opMetricNames[op]; ok {
+		return name
 	}
+	return "unknown"
 }
 
 var (
@@ -154,7 +149,7 @@ func (f *fsmState) observeTx(operation, mode string, err error, duration time.Du
 func (f *fsmState) Apply(l *raft.Log) any {
 	var c cmd
 	if err := json.Unmarshal(l.Data, &c); err != nil {
-		return err
+		return fmt.Errorf("metastore: decode command: %w", err)
 	}
 	var err error
 	switch c.Op {
