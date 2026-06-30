@@ -1,0 +1,6 @@
+internal/transport/httpserver/handlers/topics/delete.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T12:49:56.163Z 27-39,41-43
+internal/transport/httpserver/handlers/topics/topics_test.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T13:00:13.602Z 641-647,649-659,661-664
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T12:49:56.163Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 16, "overriden_lines": 0}, "3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T13:00:13.602Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 22, "overriden_lines": 0}}}
