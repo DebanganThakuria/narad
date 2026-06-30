@@ -44,20 +44,10 @@ func (r *storageRecorder) ObserveHighWatermarkPersist(duration time.Duration, ou
 	r.m.HighWatermarkPersistSeconds.WithLabelValues(r.topic, r.partition, outcome).Observe(duration.Seconds())
 }
 
-func (r *storageRecorder) IncSegmentRolled() {
-	r.m.SegmentsRolledTotal.WithLabelValues(r.topic, r.partition).Inc()
-}
-
-func (r *storageRecorder) IncRetentionDeletion(reason string, bytesDeleted, messagesDeleted int64) {
-	r.m.RetentionDeletionsTotal.WithLabelValues(r.topic, r.partition, reason).Inc()
+func (r *storageRecorder) IncRetentionDeletion(reason string, bytesDeleted int64) {
 	r.m.RetentionBytesDeleted.WithLabelValues(r.topic, r.partition, reason).Add(float64(bytesDeleted))
-	r.m.RetentionMessagesDeleted.WithLabelValues(r.topic, r.partition, reason).Add(float64(messagesDeleted))
 }
 
 func (r *storageRecorder) ObserveRetentionRun(duration time.Duration) {
 	r.m.RetentionRunSeconds.WithLabelValues(r.topic, r.partition).Observe(duration.Seconds())
-}
-
-func (r *storageRecorder) IncSegmentScanned() {
-	r.m.SegmentsScannedAtBoot.WithLabelValues(r.topic, r.partition).Inc()
 }

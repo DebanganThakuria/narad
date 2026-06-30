@@ -36,7 +36,6 @@ func (l *Log) appendLocked(payload []byte) (RecordID, *syncBatch, error) {
 	id := RecordID{SegmentBase: l.segmentBase, Offset: l.segmentSize, Seq: seq}
 	l.writeBuffer = appendFrame(l.writeBuffer, seq, payload)
 	l.segmentSize += int64(frameSize)
-	l.unsynced += int64(frameSize)
 	l.nextSeq++
 	return id, batch, nil
 }

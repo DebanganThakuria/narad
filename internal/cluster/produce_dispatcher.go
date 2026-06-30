@@ -20,7 +20,7 @@ import (
 const (
 	defaultProduceDispatchInterval = 10 * time.Millisecond
 	// defaultProduceDispatchBatchSize is the hard ceiling on a single drain
-	// drain window (BatchSize in the config). The actual window grows
+	// window (BatchSize in the config). The actual window grows
 	// adaptively up to this cap (see produceDispatchBaseWindow /
 	// produceDispatchTargetPerPartition); the cap only binds at very high
 	// fan-out (>~1k partitions) and bounds the transient memory a drain holds.
@@ -85,7 +85,6 @@ type ProduceDispatcher struct {
 	committer         produceCommitter
 	peer              peerClient
 	logger            *slog.Logger
-	metrics           stageObserver
 	interval          time.Duration
 	batchSize         int
 	commitConcurrency int
@@ -122,7 +121,6 @@ func NewProduceDispatcher(
 	peer peerClient,
 	logger *slog.Logger,
 	cfg ProduceDispatcherConfig,
-	observers ...stageObserver,
 ) *ProduceDispatcher {
 	interval := cfg.PollInterval
 	if interval <= 0 {
@@ -136,10 +134,6 @@ func NewProduceDispatcher(
 	if commitConcurrency <= 0 {
 		commitConcurrency = defaultProduceDispatchCommitFanout
 	}
-	var observer stageObserver
-	if len(observers) > 0 {
-		observer = observers[0]
-	}
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -150,7 +144,6 @@ func NewProduceDispatcher(
 		committer:         committer,
 		peer:              peer,
 		logger:            logger,
-		metrics:           observer,
 		interval:          interval,
 		batchSize:         batchSize,
 		commitConcurrency: commitConcurrency,
@@ -208,12 +201,6 @@ func (d *ProduceDispatcher) run(ctx context.Context) {
 }
 
 func (d *ProduceDispatcher) DispatchAvailable(ctx context.Context) (int, error) {
-	start := time.Now()
-	outcome := "ok"
-	defer func() {
-		d.observe("dispatch_available", outcome, time.Since(start))
-	}()
-
 	if d == nil {
 		return 0, errors.New("produce dispatcher is nil")
 	}
@@ -222,21 +209,15 @@ func (d *ProduceDispatcher) DispatchAvailable(ctx context.Context) (int, error) 
 	}
 
 	if err := d.loadCursor(); err != nil {
-		outcome = "error"
 		return 0, err
 	}
 	if d.state == nil {
-		outcome = "empty"
 		return 0, nil
 	}
 
 	processed, err := d.dispatch(ctx, d.state)
 	if err != nil {
-		outcome = "error"
 		return processed, err
-	}
-	if processed == 0 {
-		outcome = "empty"
 	}
 	return processed, nil
 }
@@ -628,30 +609,19 @@ func (d *ProduceDispatcher) topicDeletedLocally(topicName string) bool {
 }
 
 func (d *ProduceDispatcher) dispatchRecordBatch(ctx context.Context, target produceDispatchTarget, records []ingress.ProduceRecord) error {
-	start := time.Now()
-	outcome := "ok"
-	defer func() {
-		d.observe("dispatch_record_batch", outcome, time.Since(start))
-	}()
-
 	if len(records) == 0 {
 		return nil
 	}
 	if target.local {
 		if d.committer == nil {
-			outcome = "error"
 			return errors.New("produce dispatcher committer is nil")
 		}
 		if batcher, ok := d.committer.(produceBatchCommitter); ok {
 			_, err := batcher.CommitAcceptedProduceBatch(ctx, records)
-			if err != nil {
-				outcome = "error"
-			}
 			return err
 		}
 		for _, record := range records {
 			if _, err := d.committer.CommitAcceptedProduce(ctx, record); err != nil {
-				outcome = "error"
 				return err
 			}
 		}
@@ -659,7 +629,6 @@ func (d *ProduceDispatcher) dispatchRecordBatch(ctx context.Context, target prod
 	}
 
 	if d.peer == nil {
-		outcome = "error"
 		return errors.New("produce dispatcher peer client is nil")
 	}
 	req := nodewire.CommitProduceBatchRequest{Records: make([]nodewire.CommitProduceRequest, 0, len(records))}
@@ -674,19 +643,10 @@ func (d *ProduceDispatcher) dispatchRecordBatch(ctx context.Context, target prod
 	}
 	res, err := d.peer.CommitProduceBatch(ctx, target.addr, req)
 	if err != nil {
-		outcome = "error"
 		return err
 	}
 	if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
-		outcome = "error"
 		return fmt.Errorf("commit produce batch returned status %d", res.Status)
 	}
 	return nil
-}
-
-func (d *ProduceDispatcher) observe(stage, outcome string, duration time.Duration) {
-	if d == nil || d.metrics == nil {
-		return
-	}
-	d.metrics.ObserveHotPathStage("produce_dispatcher", "produce", stage, outcome, duration)
 }

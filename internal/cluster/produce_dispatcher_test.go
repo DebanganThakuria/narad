@@ -813,7 +813,6 @@ func newDispatchIngressManagerAt(t *testing.T, dir string) *ingress.Manager {
 	manager, err := ingress.OpenManager(dir, wal.Options{
 		SegmentBytes: 1024,
 		SyncInterval: time.Hour,
-		SyncBytes:    1,
 		MaxRecord:    1024,
 	})
 	if err != nil {

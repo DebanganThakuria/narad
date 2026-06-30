@@ -175,9 +175,6 @@ func appendStorageValidationErrors(errs *[]string, cfg StorageConfig) {
 	if cfg.IngressWALSyncIntervalMs <= 0 {
 		*errs = append(*errs, "storage.ingress_wal_sync_interval_ms must be > 0")
 	}
-	if cfg.IngressWALSyncBytes < 0 {
-		*errs = append(*errs, "storage.ingress_wal_sync_bytes must be >= 0")
-	}
 	if cfg.SegmentBytes < 4096 {
 		*errs = append(*errs, fmt.Sprintf("storage.segment_bytes (%d) must be >= 4096", cfg.SegmentBytes))
 	}

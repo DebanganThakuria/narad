@@ -32,14 +32,8 @@ type Manager struct {
 	durableNext atomic.Uint64
 }
 
-func DefaultWALOptions(observers ...wal.StageObserver) wal.Options {
-	opts := wal.Options{}
-	if len(observers) > 0 {
-		opts.Observer = observers[0]
-		opts.ObserverComponent = "wal"
-		opts.ObserverOperation = "ingress_produce"
-	}
-	return opts
+func DefaultWALOptions() wal.Options {
+	return wal.Options{}
 }
 
 func OpenManager(dataDir string, opts wal.Options) (*Manager, error) {

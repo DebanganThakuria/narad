@@ -86,26 +86,37 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 			}
 		}
 
-		var (
-			t   topic.Topic
-			err error
-		)
+		var t topic.Topic
 
-		if req.RetentionMs != nil {
-			t, err = s.Deps.Broker.UpdateTopicRetention(r.Context(), topicName, *req.RetentionMs)
+		// applyStep runs one broker mutation, stores its result in t, and
+		// reports whether the request can continue. On error it writes the
+		// mapped broker error and returns false so the caller bails out.
+		applyStep := func(fn func() (topic.Topic, error)) bool {
+			updated, err := fn()
 			if err != nil {
 				s.WriteBrokerError(w, "alter topic", err)
+				return false
+			}
+			t = updated
+			return true
+		}
+
+		if req.RetentionMs != nil {
+			if !applyStep(func() (topic.Topic, error) {
+				return s.Deps.Broker.UpdateTopicRetention(r.Context(), topicName, *req.RetentionMs)
+			}) {
 				return
 			}
 		}
 		if req.MaxInFlightPerPartition != nil || req.MaxAckedAheadPerPartition != nil {
 			current := t
 			if current.Name == "" {
-				current, err = s.Deps.Broker.GetTopic(r.Context(), topicName)
-				if err != nil {
-					s.WriteBrokerError(w, "alter topic", err)
+				if !applyStep(func() (topic.Topic, error) {
+					return s.Deps.Broker.GetTopic(r.Context(), topicName)
+				}) {
 					return
 				}
+				current = t
 			}
 			newIF := current.MaxInFlightPerPartition
 			if req.MaxInFlightPerPartition != nil {
@@ -115,23 +126,23 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 			if req.MaxAckedAheadPerPartition != nil {
 				newAA = *req.MaxAckedAheadPerPartition
 			}
-			t, err = s.Deps.Broker.UpdateTopicCaps(r.Context(), topicName, newIF, newAA)
-			if err != nil {
-				s.WriteBrokerError(w, "alter topic", err)
+			if !applyStep(func() (topic.Topic, error) {
+				return s.Deps.Broker.UpdateTopicCaps(r.Context(), topicName, newIF, newAA)
+			}) {
 				return
 			}
 		}
 		if req.Partitions > 0 {
-			t, err = s.Deps.Broker.IncreaseTopicPartitions(r.Context(), topicName, req.Partitions)
-			if err != nil {
-				s.WriteBrokerError(w, "alter topic", err)
+			if !applyStep(func() (topic.Topic, error) {
+				return s.Deps.Broker.IncreaseTopicPartitions(r.Context(), topicName, req.Partitions)
+			}) {
 				return
 			}
 		}
 		if len(req.Schema) > 0 {
-			t, err = s.Deps.Broker.UpdateTopicSchema(r.Context(), topicName, req.Schema)
-			if err != nil {
-				s.WriteBrokerError(w, "alter topic", err)
+			if !applyStep(func() (topic.Topic, error) {
+				return s.Deps.Broker.UpdateTopicSchema(r.Context(), topicName, req.Schema)
+			}) {
 				return
 			}
 		}

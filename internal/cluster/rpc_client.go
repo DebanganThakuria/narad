@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -30,25 +31,18 @@ type peerClient interface {
 }
 
 type PeerClient struct {
-	frames  *clusterrpc.QUICFrameClient
-	metrics stageObserver
+	frames *clusterrpc.QUICFrameClient
 }
 
-func NewPeerClient(timeout time.Duration, observers ...stageObserver) *PeerClient {
+func NewPeerClient(timeout time.Duration) *PeerClient {
 	if timeout <= 0 {
 		timeout = defaultPeerRPCTimeout
 	}
-	var observer stageObserver
-	if len(observers) > 0 {
-		observer = observers[0]
-	}
-	return &PeerClient{frames: clusterrpc.NewQUICFrameClient(timeout, observer), metrics: observer}
+	return &PeerClient{frames: clusterrpc.NewQUICFrameClient(timeout)}
 }
 
 func (c *PeerClient) Produce(ctx context.Context, addr string, req nodewire.ProduceRequest) (nodewire.Response, error) {
-	start := time.Now()
 	payload, err := nodewire.EncodeProduceRequest(req)
-	c.observe("produce", "encode", observeOutcome(err), time.Since(start))
 	if err != nil {
 		return nodewire.Response{}, err
 	}
@@ -56,9 +50,7 @@ func (c *PeerClient) Produce(ctx context.Context, addr string, req nodewire.Prod
 }
 
 func (c *PeerClient) CommitProduce(ctx context.Context, addr string, req nodewire.CommitProduceRequest) (nodewire.Response, error) {
-	start := time.Now()
 	payload, err := nodewire.EncodeCommitProduceRequest(req)
-	c.observe("commit_produce", "encode", observeOutcome(err), time.Since(start))
 	if err != nil {
 		return nodewire.Response{}, err
 	}
@@ -66,9 +58,7 @@ func (c *PeerClient) CommitProduce(ctx context.Context, addr string, req nodewir
 }
 
 func (c *PeerClient) CommitProduceBatch(ctx context.Context, addr string, req nodewire.CommitProduceBatchRequest) (nodewire.Response, error) {
-	start := time.Now()
 	payload, err := nodewire.EncodeCommitProduceBatchRequest(req)
-	c.observe("commit_produce_batch", "encode", observeOutcome(err), time.Since(start))
 	if err != nil {
 		return nodewire.Response{}, err
 	}
@@ -76,9 +66,7 @@ func (c *PeerClient) CommitProduceBatch(ctx context.Context, addr string, req no
 }
 
 func (c *PeerClient) Consume(ctx context.Context, addr string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
-	start := time.Now()
 	payload, err := nodewire.EncodeConsumeRequest(req)
-	c.observe("consume", "encode", observeOutcome(err), time.Since(start))
 	if err != nil {
 		return nodewire.Response{}, err
 	}
@@ -86,9 +74,7 @@ func (c *PeerClient) Consume(ctx context.Context, addr string, req nodewire.Cons
 }
 
 func (c *PeerClient) Ack(ctx context.Context, addr string, req nodewire.AckRequest) (nodewire.Response, error) {
-	start := time.Now()
 	payload, err := nodewire.EncodeAckRequest(req)
-	c.observe("ack", "encode", observeOutcome(err), time.Since(start))
 	if err != nil {
 		return nodewire.Response{}, err
 	}
@@ -96,9 +82,7 @@ func (c *PeerClient) Ack(ctx context.Context, addr string, req nodewire.AckReque
 }
 
 func (c *PeerClient) CreateTopic(ctx context.Context, addr string, body []byte) (nodewire.Response, error) {
-	start := time.Now()
 	payload, err := nodewire.EncodeTopicBodyRequest(nodewire.OpCreateTopic, nodewire.TopicBodyRequest{Body: body})
-	c.observe("create_topic", "encode", observeOutcome(err), time.Since(start))
 	if err != nil {
 		return nodewire.Response{}, err
 	}
@@ -106,9 +90,7 @@ func (c *PeerClient) CreateTopic(ctx context.Context, addr string, body []byte) 
 }
 
 func (c *PeerClient) AlterTopic(ctx context.Context, addr, topicName string, body []byte) (nodewire.Response, error) {
-	start := time.Now()
 	payload, err := nodewire.EncodeTopicBodyRequest(nodewire.OpAlterTopic, nodewire.TopicBodyRequest{Topic: topicName, Body: body})
-	c.observe("alter_topic", "encode", observeOutcome(err), time.Since(start))
 	if err != nil {
 		return nodewire.Response{}, err
 	}
@@ -124,12 +106,10 @@ func (c *PeerClient) PurgeTopic(ctx context.Context, addr, topicName string) (no
 }
 
 func (c *PeerClient) TopicPartitionStats(ctx context.Context, addr, topicName string, partition int) (topic.PartitionStats, error) {
-	start := time.Now()
 	payload, err := nodewire.EncodeTopicPartitionStatsRequest(nodewire.TopicPartitionStatsRequest{
 		Topic:     topicName,
 		Partition: partition,
 	})
-	c.observe("topic_partition_stats", "encode", observeOutcome(err), time.Since(start))
 	if err != nil {
 		return topic.PartitionStats{}, err
 	}
@@ -151,9 +131,7 @@ func (c *PeerClient) TopicPartitionStats(ctx context.Context, addr, topicName st
 }
 
 func (c *PeerClient) RegisterMember(ctx context.Context, addr string, req nodewire.MemberRequest) (nodewire.Response, error) {
-	start := time.Now()
 	payload, err := nodewire.EncodeMemberRequest(req)
-	c.observe("register_member", "encode", observeOutcome(err), time.Since(start))
 	if err != nil {
 		return nodewire.Response{}, err
 	}
@@ -162,9 +140,7 @@ func (c *PeerClient) RegisterMember(ctx context.Context, addr string, req nodewi
 
 func (c *PeerClient) topicNameRequest(ctx context.Context, addr string, op nodewire.Operation, topicName string) (nodewire.Response, error) {
 	operation := nodeOperationName(op)
-	start := time.Now()
 	payload, err := nodewire.EncodeTopicNameRequest(op, nodewire.TopicNameRequest{Topic: topicName})
-	c.observe(operation, "encode", observeOutcome(err), time.Since(start))
 	if err != nil {
 		return nodewire.Response{}, err
 	}
@@ -173,20 +149,16 @@ func (c *PeerClient) topicNameRequest(ctx context.Context, addr string, op nodew
 
 func (c *PeerClient) request(ctx context.Context, addr, operation string, payload []byte) (nodewire.Response, error) {
 	if c == nil || c.frames == nil {
-		return nodewire.Response{}, fmt.Errorf("peer rpc client is nil")
+		return nodewire.Response{}, errors.New("peer rpc client is nil")
 	}
-	start := time.Now()
 	frame, err := c.frames.RequestOnLane(ctx, addr, operation, clusterwire.StreamFrameNodeRequest, payload)
-	c.observe(operation, "round_trip", observeOutcome(err), time.Since(start))
 	if err != nil {
 		return nodewire.Response{}, err
 	}
 	if frame.Type != clusterwire.StreamFrameNodeReply {
 		return nodewire.Response{}, fmt.Errorf("unexpected peer rpc frame type %d", frame.Type)
 	}
-	start = time.Now()
 	res, err := nodewire.DecodeResponse(frame.Payload)
-	c.observe(operation, "decode_response", observeOutcome(err), time.Since(start))
 	return res, err
 }
 

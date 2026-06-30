@@ -95,11 +95,10 @@ func TestLogCompactBeforeDeletesCompleteSegments(t *testing.T) {
 	}
 }
 
-func TestLogAppendWakesSyncBeforeTimerOrByteThreshold(t *testing.T) {
+func TestLogAppendWakesSyncBeforeTimer(t *testing.T) {
 	dir := t.TempDir()
 	opts := testOptions()
 	opts.SyncInterval = time.Hour
-	opts.SyncBytes = 1 << 20
 
 	log, err := Open(dir, opts)
 	if err != nil {
@@ -169,7 +168,6 @@ func TestLogConcurrentAppendBatchesAndReplays(t *testing.T) {
 	opts := testOptions()
 	opts.SegmentBytes = 1 << 20
 	opts.SyncInterval = time.Millisecond
-	opts.SyncBytes = 1 << 20
 
 	log, err := Open(dir, opts)
 	if err != nil {
@@ -233,7 +231,6 @@ func TestLogConcurrentAppendWithSegmentRolls(t *testing.T) {
 	opts := testOptions()
 	opts.SegmentBytes = frameHeaderSize + 12
 	opts.SyncInterval = time.Hour
-	opts.SyncBytes = 1
 
 	log, err := Open(dir, opts)
 	if err != nil {
@@ -320,7 +317,6 @@ func testOptions() Options {
 	return Options{
 		SegmentBytes: 1024,
 		SyncInterval: time.Hour,
-		SyncBytes:    1,
 		MaxRecord:    1024,
 	}
 }

@@ -36,7 +36,6 @@ type RPCServer struct {
 	broker      broker.Broker
 	store       *metastore.Store
 	logger      *slog.Logger
-	metrics     stageObserver
 	broadcaster purgeBroadcaster
 }
 
@@ -58,12 +57,8 @@ type rpcAlterTopicBody struct {
 	Schema                    json.RawMessage `json:"schema,omitempty"`
 }
 
-func NewRPCServer(br broker.Broker, store *metastore.Store, logger *slog.Logger, observers ...stageObserver) *RPCServer {
-	var observer stageObserver
-	if len(observers) > 0 {
-		observer = observers[0]
-	}
-	return &RPCServer{broker: br, store: store, logger: logger, metrics: observer}
+func NewRPCServer(br broker.Broker, store *metastore.Store, logger *slog.Logger) *RPCServer {
+	return &RPCServer{broker: br, store: store, logger: logger}
 }
 
 // SetBroadcaster wires the purge fan-out used when a topic delete is
@@ -95,19 +90,10 @@ func (s *RPCServer) HandleStreamFrame(frame clusterwire.StreamFrame, respond fun
 }
 
 func (s *RPCServer) dispatch(payload []byte) nodewire.Response {
-	start := time.Now()
-	operation := "unknown"
-	outcome := "ok"
-	defer func() {
-		s.observe(operation, "dispatch", outcome, time.Since(start))
-	}()
-
 	op, err := nodewire.OperationOf(payload)
 	if err != nil {
-		outcome = "error"
 		return errorResponse(http.StatusBadRequest, "invalid rpc request")
 	}
-	operation = nodeOperationName(op)
 	var res nodewire.Response
 	switch op {
 	case nodewire.OpProduce:
@@ -135,7 +121,6 @@ func (s *RPCServer) dispatch(payload []byte) nodewire.Response {
 	default:
 		res = errorResponse(http.StatusBadRequest, fmt.Sprintf("unsupported rpc operation %d", op))
 	}
-	outcome = responseOutcome(res.Status)
 	return res
 }
 

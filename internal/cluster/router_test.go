@@ -1171,10 +1171,10 @@ func TestRemoteConsumeCandidatesLimitOneProbePerRemoteOwner(t *testing.T) {
 
 	seen := map[string]bool{}
 	for _, candidate := range candidates {
-		if seen[candidate.addr] {
-			t.Fatalf("remoteConsumeCandidates() returned duplicate owner addr %q: %+v", candidate.addr, candidates)
+		if seen[candidate] {
+			t.Fatalf("remoteConsumeCandidates() returned duplicate owner addr %q: %+v", candidate, candidates)
 		}
-		seen[candidate.addr] = true
+		seen[candidate] = true
 	}
 	if !seen["remote-a.example:7942"] || !seen["remote-b.example:7942"] {
 		t.Fatalf("remoteConsumeCandidates() owners = %v, want remote-a and remote-b", seen)

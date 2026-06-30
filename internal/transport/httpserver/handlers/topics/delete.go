@@ -24,13 +24,23 @@ func Delete(s *handlers.Set) http.HandlerFunc {
 			}
 		}
 		if err := s.Deps.Broker.DeleteTopic(r.Context(), topicName); err != nil {
-			if _, ok := errors.AsType[brokertopics.PurgeError](err); ok && s.Deps.Router != nil {
-				if broadcastErr := s.Deps.Router.BroadcastDeleteTopic(r.Context(), topicName); broadcastErr != nil {
-					s.WriteBrokerError(w, "broadcast delete topic", broadcastErr)
-					return
-				}
+			purgeErr, isPurge := errors.AsType[brokertopics.PurgeError](err)
+			if !isPurge || s.Deps.Router == nil {
+				s.WriteBrokerError(w, "delete topic", err)
+				return
 			}
-			s.WriteBrokerError(w, "delete topic", err)
+			// The metastore record is already gone; only this node's local
+			// file purge failed (the orphan is reclaimed by the startup
+			// sweep). Still broadcast so the partition owners purge their
+			// copies; if that succeeds the topic is deleted everywhere that
+			// matters, so report success rather than a misleading 500.
+			if broadcastErr := s.Deps.Router.BroadcastDeleteTopic(r.Context(), topicName); broadcastErr != nil {
+				s.WriteBrokerError(w, "broadcast delete topic", broadcastErr)
+				return
+			}
+			s.Deps.Logger.Warn("topic metadata deleted but local purge failed; orphan files left for startup sweep",
+				"topic", topicName, "err", purgeErr)
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		if s.Deps.Router != nil {

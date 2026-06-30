@@ -6,7 +6,10 @@ import (
 )
 
 const (
-	defaultMaxIdleConns        = 4096
+	defaultMaxIdleConns = 4096
+	// MaxIdleConnsPerHost equals MaxConnsPerHost so every connection a host
+	// is allowed to open can also be retained idle for reuse, rather than
+	// being closed and re-dialed under bursty data-plane traffic.
 	defaultMaxIdleConnsPerHost = 1024
 	defaultMaxConnsPerHost     = 1024
 	defaultIdleConnTimeout     = 90 * time.Second

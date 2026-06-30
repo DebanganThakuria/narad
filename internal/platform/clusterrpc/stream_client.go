@@ -26,7 +26,6 @@ type streamClient struct {
 	conn      streamConn
 	reader    *bufio.Reader
 	timeout   time.Duration
-	metrics   stageObserver
 	component string
 
 	writerMu sync.Mutex
@@ -48,54 +47,25 @@ type streamResult struct {
 // frame (correlated by RequestID). This is the generic cluster-RPC
 // transport primitive used by the peer client.
 func (c *streamClient) requestFrame(ctx context.Context, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
-	operation := streamFrameOperation(frameType)
 	requestID := c.nextID.Add(1)
 	resultCh := make(chan streamResult, 1)
 	c.addPending(requestID, resultCh)
-	stageStart := time.Now()
 	if err := c.writeFrame(ctx, clusterwire.StreamFrame{
 		Type:      frameType,
 		RequestID: requestID,
 		Payload:   payload,
 	}); err != nil {
 		c.removePending(requestID)
-		c.observe(operation, "write_frame", "error", time.Since(stageStart))
 		return clusterwire.StreamFrame{}, err
 	}
-	c.observe(operation, "write_frame", "ok", time.Since(stageStart))
 
-	stageStart = time.Now()
 	select {
 	case result := <-resultCh:
-		c.observe(operation, "wait_reply", observeOutcome(result.err), time.Since(stageStart))
 		return result.frame, result.err
 	case <-ctx.Done():
 		c.removePending(requestID)
 		c.closeWithError(ctx.Err())
-		c.observe(operation, "wait_reply", "error", time.Since(stageStart))
 		return clusterwire.StreamFrame{}, ctx.Err()
-	}
-}
-
-func (c *streamClient) observe(operation, stage, outcome string, duration time.Duration) {
-	if c.metrics == nil {
-		return
-	}
-	component := c.component
-	if component == "" {
-		component = "stream_client"
-	}
-	c.metrics.ObserveHotPathStage(component, operation, stage, outcome, duration)
-}
-
-func streamFrameOperation(frameType clusterwire.StreamFrameType) string {
-	switch frameType {
-	case clusterwire.StreamFrameNodeRequest:
-		return "node_request"
-	case clusterwire.StreamFramePing:
-		return "ping"
-	default:
-		return "unknown"
 	}
 }
 

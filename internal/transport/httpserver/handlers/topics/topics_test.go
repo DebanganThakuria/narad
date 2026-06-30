@@ -638,6 +638,31 @@ func TestDeleteHandlerBroadcastsAfterLocalPurgeFailure(t *testing.T) {
 	if !broadcasted {
 		t.Fatal("Delete() did not broadcast remote purge after local purge failure")
 	}
+	// The metastore record is gone and the owners purged; only this node's
+	// local file purge failed (reclaimed later by the startup sweep), so the
+	// delete is logically complete and must report success, not 500.
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("Delete() status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+}
+
+func TestDeleteHandlerReturnsErrorWhenBroadcastFailsAfterPurgeFailure(t *testing.T) {
+	s := newTestSetWithRouter(&fakeBroker{deleteTopicFn: func(_ context.Context, name string) error {
+		return brokertopics.PurgeError{Topic: name, Err: errors.New("disk remove failed")}
+	}}, &fakeRouter{
+		routeDeleteTopicFn: func(_ context.Context, _ http.ResponseWriter, _ *http.Request, _ string) bool {
+			return false
+		},
+		broadcastDeleteTopicFn: func(context.Context, string) error {
+			return errors.New("boom")
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Delete(s).ServeHTTP(res, req)
+
 	if res.Code != http.StatusInternalServerError {
 		t.Fatalf("Delete() status = %d, want %d", res.Code, http.StatusInternalServerError)
 	}

@@ -17,7 +17,6 @@ import (
 
 type quicClientPool struct {
 	timeout time.Duration
-	metrics stageObserver
 
 	nextLane atomic.Uint64
 
@@ -45,24 +44,19 @@ const (
 	quicMaxConnectionReceiveWindow     = 8 << 20
 )
 
-func newQUICClientPool(timeout time.Duration, observers ...stageObserver) *quicClientPool {
+func newQUICClientPool(timeout time.Duration) *quicClientPool {
 	if timeout <= 0 {
 		timeout = defaultStreamTimeout
 	}
-	var observer stageObserver
-	if len(observers) > 0 {
-		observer = observers[0]
-	}
 	return &quicClientPool{
 		timeout: timeout,
-		metrics: observer,
 		conns:   make(map[string]*quic.Conn),
 		streams: make(map[string]*streamClient),
 	}
 }
 
-func NewQUICFrameClient(timeout time.Duration, observers ...stageObserver) *QUICFrameClient {
-	return &QUICFrameClient{pool: newQUICClientPool(timeout, observers...)}
+func NewQUICFrameClient(timeout time.Duration) *QUICFrameClient {
+	return &QUICFrameClient{pool: newQUICClientPool(timeout)}
 }
 
 func (c *QUICFrameClient) Request(ctx context.Context, addr string, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
@@ -106,26 +100,20 @@ func (p *quicClientPool) getStream(ctx context.Context, addr, lane string) (*str
 	}
 	p.mu.Unlock()
 
-	operation := lane
-	stageStart := time.Now()
 	conn, err := p.getConn(opCtx, addr)
 	if err != nil {
-		p.observe(operation, "open_stream", "error", time.Since(stageStart))
 		return nil, err
 	}
 	stream, err := conn.OpenStreamSync(opCtx)
 	if err != nil {
 		p.closeConn(addr, conn, err)
-		p.observe(operation, "open_stream", "error", time.Since(stageStart))
 		return nil, err
 	}
-	p.observe(operation, "open_stream", "ok", time.Since(stageStart))
 
 	client := &streamClient{
 		conn:      stream,
 		reader:    bufio.NewReader(stream),
 		timeout:   p.timeout,
-		metrics:   p.metrics,
 		component: "quic_frame",
 		pending:   make(map[uint64]chan streamResult),
 	}
@@ -267,13 +255,6 @@ func quicAddr(addr string) string {
 	addr = strings.TrimPrefix(addr, "http://")
 	addr = strings.TrimPrefix(addr, "https://")
 	return addr
-}
-
-func (p *quicClientPool) observe(operation, stage, outcome string, duration time.Duration) {
-	if p.metrics == nil {
-		return
-	}
-	p.metrics.ObserveHotPathStage("quic_frame", operation, stage, outcome, duration)
 }
 
 func quicConfig() *quic.Config {

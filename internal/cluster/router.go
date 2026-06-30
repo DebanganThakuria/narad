@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -25,7 +24,6 @@ type Router struct {
 	selfID     string
 	partitions partition.Manager
 	peer       peerClient
-	metrics    *metrics.Metrics
 
 	routeMu       sync.RWMutex
 	routes        map[string]cachedRouteTable
@@ -34,17 +32,12 @@ type Router struct {
 }
 
 // NewRouter constructs a Router. selfID is this pod's member ID (os.Hostname()).
-func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager, _ metrics.SnapshotProvider, m ...*metrics.Metrics) *Router {
-	var observed *metrics.Metrics
-	if len(m) > 0 {
-		observed = m[0]
-	}
+func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager, _ metrics.SnapshotProvider) *Router {
 	return &Router{
 		store:         store,
 		selfID:        selfID,
 		partitions:    mgr,
-		peer:          NewPeerClient(defaultPeerRPCTimeout, observed),
-		metrics:       observed,
+		peer:          NewPeerClient(defaultPeerRPCTimeout),
 		routes:        make(map[string]cachedRouteTable),
 		consumeCursor: make(map[string]uint64),
 	}
@@ -54,14 +47,8 @@ func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager, _ m
 // starting from the key-hashed partition and walking forward circularly.
 // body is the already-read request body bytes. Returns true if forwarded.
 func (rt *Router) RouteProduce(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName, key string, body []byte) bool {
-	start := time.Now()
-	outcome := "local"
-	defer func() {
-		rt.observe("produce", "route_total", outcome, time.Since(start))
-	}()
 	routes, ok := rt.routesForTopic(topicName)
 	if !ok || len(routes.entries) == 0 || routes.partitions == 0 {
-		outcome = "no_route"
 		return false
 	}
 	cursor := rt.partitions.Pick(topicName, key, routes.partitions)
@@ -88,10 +75,8 @@ func (rt *Router) RouteProduce(ctx context.Context, w http.ResponseWriter, r *ht
 			continue
 		}
 		writePeerResponse(w, res)
-		outcome = "forwarded"
 		return true
 	}
-	outcome = "local"
 	return false
 }
 
@@ -101,11 +86,6 @@ func (rt *Router) RouteProduce(ctx context.Context, w http.ResponseWriter, r *ht
 // Returns true if forwarded. For queue-style pulls, localPartition is set when
 // the request should be handled locally against all partitions owned by this node.
 func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) (bool, *int) {
-	start := time.Now()
-	outcome := "local"
-	defer func() {
-		rt.observe("consume", "route_total", outcome, time.Since(start))
-	}()
 	if pinnedPartition != nil {
 		addr := rt.ownerAddr(topicName, *pinnedPartition)
 		if addr == "" {
@@ -122,26 +102,21 @@ func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *ht
 			return true, nil
 		}
 		writePeerResponse(w, res)
-		outcome = "forwarded"
 		return true, nil
 	}
 
 	if localPartition, ok := rt.localConsumePartition(topicName); ok {
-		outcome = "local"
 		return false, &localPartition
 	}
 
 	forwarded, hadCandidates := rt.RouteConsumeRemote(ctx, w, r, topicName)
 	if forwarded {
-		outcome = "forwarded"
 		return true, nil
 	}
 	if hadCandidates {
 		w.WriteHeader(http.StatusNoContent)
-		outcome = "remote_empty"
 		return true, nil
 	}
-	outcome = "no_route"
 	return false, nil
 }
 
@@ -150,14 +125,8 @@ func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *ht
 // non-blocking; when all remote owners are empty, the
 // caller decides whether to return 204 or keep polling a local partition.
 func (rt *Router) RouteConsumeRemote(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) (bool, bool) {
-	start := time.Now()
-	outcome := "empty"
-	defer func() {
-		rt.observe("consume", "remote_probe_total", outcome, time.Since(start))
-	}()
 	candidates := rt.remoteConsumeCandidates(topicName)
 	if len(candidates) == 0 {
-		outcome = "no_candidates"
 		return false, false
 	}
 
@@ -165,7 +134,6 @@ func (rt *Router) RouteConsumeRemote(ctx context.Context, w http.ResponseWriter,
 		result := rt.callConsumeProbe(ctx, topicName, candidate)
 		if result.err != nil {
 			if result.fatal {
-				outcome = "error"
 				http.Error(w, result.err.Error(), http.StatusBadRequest)
 				return true, true
 			}
@@ -175,7 +143,6 @@ func (rt *Router) RouteConsumeRemote(ctx context.Context, w http.ResponseWriter,
 			continue
 		}
 		writePeerResponse(w, result.res)
-		outcome = "forwarded"
 		return true, true
 	}
 	return false, true
@@ -184,11 +151,6 @@ func (rt *Router) RouteConsumeRemote(ctx context.Context, w http.ResponseWriter,
 // RouteAck forwards an ack request to the owner of the handle partition.
 // Returns true if forwarded.
 func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, handle consumer.Handle) bool {
-	start := time.Now()
-	outcome := "local"
-	defer func() {
-		rt.observe("ack", "route_total", outcome, time.Since(start))
-	}()
 	addr := rt.ownerAddr(topicName, handle.Partition)
 	if addr == "" {
 		return false
@@ -204,7 +166,6 @@ func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.R
 		return true
 	}
 	writePeerResponse(w, res)
-	outcome = "forwarded"
 	return true
 }
 

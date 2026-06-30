@@ -104,7 +104,13 @@ func (l *Log) persistHighWatermark(next int64) error {
 }
 
 func (l *Log) syncHighWatermark(force bool) error {
-	target := l.highWatermark.Load()
+	// Never persist a visibility boundary past the durably-fsynced tail.
+	// The commit path only advances highWatermark after Sync()+VerifyDurable,
+	// so this clamp is a no-op today; it guards against any future caller
+	// that advances the HWM optimistically — a persisted HWM ahead of the
+	// durable data would expose records the WAL re-commits at fresh offsets
+	// after a crash (double delivery).
+	target := min(l.highWatermark.Load(), l.durableTail.Load())
 	if target < 0 || target <= l.persistedHWM.Load() {
 		return nil
 	}
@@ -112,7 +118,7 @@ func (l *Log) syncHighWatermark(force bool) error {
 	l.hwmMu.Lock()
 	defer l.hwmMu.Unlock()
 
-	target = l.highWatermark.Load()
+	target = min(l.highWatermark.Load(), l.durableTail.Load())
 	if target < 0 || target <= l.persistedHWM.Load() {
 		return nil
 	}

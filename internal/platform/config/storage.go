@@ -39,10 +39,6 @@ type StorageConfig struct {
 	// produce may wait before the ingress WAL is fsynced.
 	IngressWALSyncIntervalMs int `json:"ingress_wal_sync_interval_ms"`
 
-	// IngressWALSyncBytes triggers an ingress WAL fsync once this many bytes
-	// are pending. Zero uses the WAL package default.
-	IngressWALSyncBytes int64 `json:"ingress_wal_sync_bytes"`
-
 	// SegmentBytes triggers a segment roll once the active segment's
 	// on-disk size meets or exceeds this value.
 	SegmentBytes int64 `json:"segment_bytes"`

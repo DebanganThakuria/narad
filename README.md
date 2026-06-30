@@ -661,8 +661,7 @@ once a field exists, it stays."
 * `narad_storage_*` — flush/fsync/high-watermark persistence/retention
   durations, segments rolled, bytes deleted.
 * Inventory gauges: `narad_topics_total`, `narad_partitions_total`,
-  `narad_topic_bytes{topic}`, `narad_partition_size_bytes{topic,partition}`,
-  `narad_segments{topic,partition}`.
+  `narad_topic_bytes{topic}`.
 
 A 5-second background poller refreshes gauge-style metrics. Series for
 deleted topics are pruned on the next tick.

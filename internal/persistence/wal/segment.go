@@ -17,6 +17,11 @@ type segmentInfo struct {
 	path string
 }
 
+// shouldSkipSegment reports whether segments[i] lies entirely before the
+// replay cursor and can be skipped. It takes the whole slice rather than a
+// single segment because the second test peeks at the next segment's base:
+// when even that base is at or below cursor.Seq, every record in segments[i]
+// predates the cursor.
 func shouldSkipSegment(segments []segmentInfo, i int, cursor Cursor) bool {
 	segment := segments[i]
 	if cursor.SegmentBase > 0 && segment.base < cursor.SegmentBase {

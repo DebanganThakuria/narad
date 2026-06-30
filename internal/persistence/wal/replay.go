@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -59,6 +60,11 @@ func replaySegmentFrom(segment segmentInfo, from uint64, offset int64, maxRecord
 			return fmt.Errorf("wal: segment offset: %w", err)
 		}
 		record, ok, err := readFrame(file, segment.base, offset, maxRecord)
+		if errors.Is(err, errTornFrame) {
+			// A torn tail ends the log just like a clean EOF. The scan at
+			// Open already logged it; replay stops here as it always has.
+			return nil
+		}
 		if err != nil {
 			return err
 		}

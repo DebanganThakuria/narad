@@ -1,16 +1,18 @@
 package wal
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 )
 
-func scanForOpen(segments []segmentInfo, maxRecord int) (uint64, int64, error) {
+func scanForOpen(segments []segmentInfo, maxRecord int, logger *slog.Logger) (uint64, int64, error) {
 	var next uint64
 	var lastValidEnd int64
 	for i, segment := range segments {
-		validEnd, maxSeq, sawRecord, err := scanSegment(segment, maxRecord)
+		validEnd, maxSeq, sawRecord, err := scanSegment(segment, maxRecord, logger)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -24,7 +26,7 @@ func scanForOpen(segments []segmentInfo, maxRecord int) (uint64, int64, error) {
 	return next, lastValidEnd, nil
 }
 
-func scanSegment(segment segmentInfo, maxRecord int) (int64, uint64, bool, error) {
+func scanSegment(segment segmentInfo, maxRecord int, logger *slog.Logger) (int64, uint64, bool, error) {
 	file, err := os.Open(segment.path)
 	if err != nil {
 		return 0, 0, false, fmt.Errorf("wal: open segment: %w", err)
@@ -40,6 +42,15 @@ func scanSegment(segment segmentInfo, maxRecord int) (int64, uint64, bool, error
 			return 0, 0, false, fmt.Errorf("wal: segment offset: %w", err)
 		}
 		record, ok, err := readFrame(file, segment.base, offset, maxRecord)
+		if errors.Is(err, errTornFrame) {
+			// A torn tail is expected after a crash mid-append, but a torn
+			// frame that drops committed records would otherwise be invisible.
+			if logger != nil {
+				logger.Warn("wal: truncated frame; treating as end of segment",
+					"segment", segment.path, "offset", offset)
+			}
+			return validEnd, maxSeq, sawRecord, nil
+		}
 		if err != nil {
 			return 0, 0, false, err
 		}

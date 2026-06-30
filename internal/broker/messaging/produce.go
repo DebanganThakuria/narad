@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
@@ -50,50 +49,31 @@ func (e produceStageError) metricReason() string {
 // is the sole copy of the record. Durability is provided by the
 // partition flusher's fsync of the segment file.
 func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (int64, int, error) {
-	totalStart := time.Now()
-	totalOutcome := "ok"
-	defer func() {
-		e.observe("produce", "total", totalOutcome, time.Since(totalStart))
-	}()
-
-	stageStart := time.Now()
 	t, err := e.getTopic(ctx, topicName)
-	e.observe("produce", "get_topic", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
-		totalOutcome = "error"
 		return 0, 0, err
 	}
 
-	stageStart = time.Now()
 	if err = e.validateProducePayload(ctx, topicName, payload); err != nil {
-		e.observe("produce", "validate_payload", "error", time.Since(stageStart))
 		if e.metrics != nil {
 			e.metrics.ProduceRejectionsTotal.WithLabelValues(topicName, "schema").Inc()
 		}
-		totalOutcome = "error"
 		return 0, 0, err
 	}
-	e.observe("produce", "validate_payload", "ok", time.Since(stageStart))
 
-	stageStart = time.Now()
 	partIdx, err := e.resolveProducePartition(topicName, key, t.Partitions, partition)
-	e.observe("produce", "resolve_partition", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
 		if e.metrics != nil {
 			e.metrics.IncError("messaging", "partition_pick")
 		}
-		totalOutcome = "error"
 		return 0, 0, err
 	}
 
-	stageStart = time.Now()
 	offset, err := e.logs.WithProduceLockResult(topicName, partIdx, func(log *storage.Log) (int64, error) {
 		return e.appendAndCommit(log, payload)
 	})
-	e.observe("produce", "append_commit", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
 		e.recordProduceError(err)
-		totalOutcome = "error"
 		return 0, 0, err
 	}
 

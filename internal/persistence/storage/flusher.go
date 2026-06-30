@@ -6,7 +6,12 @@ import (
 	"time"
 )
 
-const minTimerFlushAge = time.Second
+const (
+	minTimerFlushAge = time.Second
+	// timerFlushAgeFactor scales the flush interval into the age threshold
+	// used by the timer-driven (size/count-configured) flush path.
+	timerFlushAgeFactor = 10
+)
 
 // flusher is the single goroutine that drains a Log's buffer to the
 // active segment file. "Single writer per partition" lives here.
@@ -129,7 +134,7 @@ func (f *flusher) timerFlushAge() time.Duration {
 	if f.log.opts.FlushBytes <= 0 && f.log.opts.FlushRecords <= 0 {
 		return f.interval
 	}
-	age := f.interval * 10
+	age := f.interval * timerFlushAgeFactor
 	if age < minTimerFlushAge {
 		return minTimerFlushAge
 	}
@@ -185,9 +190,6 @@ func (f *flusher) writeBatch(records [][]byte, baseOffset int64, forceSync bool)
 			return fmt.Errorf("storage: flusher roll: %w", err)
 		}
 		f.log.segments = append(f.log.segments, newActive)
-		if m := f.log.opts.Metrics; m != nil {
-			m.IncSegmentRolled()
-		}
 		f.mu.Unlock()
 	}
 

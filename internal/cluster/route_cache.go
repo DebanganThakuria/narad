@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"sort"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
@@ -26,7 +25,6 @@ type routeEntry struct {
 }
 
 func (rt *Router) routesForTopic(topicName string) (cachedRouteTable, bool) {
-	start := time.Now()
 	assignmentVersion := rt.store.AssignmentVersion(topicName)
 	routingMembersVersion := rt.store.RoutingMembersVersion()
 	rt.routeMu.RLock()
@@ -34,7 +32,6 @@ func (rt *Router) routesForTopic(topicName string) (cachedRouteTable, bool) {
 	rt.routeMu.RUnlock()
 	if ok && cached.assignmentVersion == assignmentVersion && cached.routingMembersVersion == routingMembersVersion {
 		if rt.store.AssignmentVersion(topicName) == assignmentVersion && rt.store.RoutingMembersVersion() == routingMembersVersion {
-			rt.observe("route_cache", "lookup", "hit", time.Since(start))
 			return cached, true
 		}
 		assignmentVersion = rt.store.AssignmentVersion(topicName)
@@ -55,7 +52,6 @@ func (rt *Router) routesForTopic(topicName string) (cachedRouteTable, bool) {
 			delete(rt.routes, topicName)
 			rt.routeMu.Unlock()
 			rt.clearConsumeCursor(topicName)
-			rt.observe("route_cache", "lookup", "miss", time.Since(start))
 			return cachedRouteTable{}, false
 		}
 
@@ -68,7 +64,6 @@ func (rt *Router) routesForTopic(topicName string) (cachedRouteTable, bool) {
 			continue
 		}
 		if err != nil {
-			rt.observe("route_cache", "lookup", "error", time.Since(start))
 			return cachedRouteTable{}, false
 		}
 
@@ -115,7 +110,6 @@ func (rt *Router) routesForTopic(topicName string) (cachedRouteTable, bool) {
 		}
 		rt.routes[topicName] = table
 		rt.routeMu.Unlock()
-		rt.observe("route_cache", "lookup", "fill", time.Since(start))
 		return table, true
 	}
 }

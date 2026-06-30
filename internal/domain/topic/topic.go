@@ -4,7 +4,9 @@
 //
 // All wall-clock fields are Unix-seconds (int64) so the wire format
 // is timezone-independent and round-trips through JSON/SQLite without
-// any layout-dependent encoding.
+// any layout-dependent encoding. Note this differs from the ingress and
+// in-flight layers, which work in Unix-milliseconds (e.g.
+// ingress.ProduceRecord.CreatedAtUnixMs).
 package topic
 
 // Topic is the user-facing logical stream. Partitions can grow via

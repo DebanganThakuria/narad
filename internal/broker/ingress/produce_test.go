@@ -360,7 +360,6 @@ func testWALOptions() wal.Options {
 	return wal.Options{
 		SegmentBytes: 1024,
 		SyncInterval: time.Hour,
-		SyncBytes:    1,
 		MaxRecord:    1024,
 	}
 }

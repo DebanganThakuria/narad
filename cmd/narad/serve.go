@@ -104,13 +104,13 @@ func runServe(args []string) error {
 		Status:      metastore.MemberAlive,
 	}
 	ctrl := controller.New(ms, controller.Config{})
-	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), br, m)
-	peerRPC := cluster.NewPeerClient(5*time.Second, m)
-	rpcServer := cluster.NewRPCServer(br, ms, log, m)
+	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), br)
+	peerRPC := cluster.NewPeerClient(5 * time.Second)
+	rpcServer := cluster.NewRPCServer(br, ms, log)
 	// So a delete forwarded to this node as leader still fans the purge out
 	// to the partition owners, matching the HTTP leader-direct path.
 	rpcServer.SetBroadcaster(router)
-	produceDispatcher := cluster.NewProduceDispatcher(ingressManager, ms, nodeID, br, peerRPC, log, cluster.ProduceDispatcherConfig{}, m)
+	produceDispatcher := cluster.NewProduceDispatcher(ingressManager, ms, nodeID, br, peerRPC, log, cluster.ProduceDispatcherConfig{})
 
 	// Start background processes
 	var wg sync.WaitGroup
@@ -302,7 +302,7 @@ func buildBroker(
 		return nil, nil, nil, nil, nil, errors.New("broker: cluster coordination requires metastore.Store")
 	}
 
-	ingressManager, err := ingress.OpenManager(cfg.Storage.DataDir, ingressWALOptions(cfg.Storage, m))
+	ingressManager, err := ingress.OpenManager(cfg.Storage.DataDir, ingressWALOptions(cfg.Storage, log))
 	if err != nil {
 		return nil, nil, nil, nil, nil, fmt.Errorf("ingress: %w", err)
 	}
@@ -518,10 +518,10 @@ func storageOptions(sc config.StorageConfig) (storage.Options, error) {
 	}, nil
 }
 
-func ingressWALOptions(sc config.StorageConfig, m *metrics.Metrics) wal.Options {
-	opts := ingress.DefaultWALOptions(m)
+func ingressWALOptions(sc config.StorageConfig, logger *slog.Logger) wal.Options {
+	opts := ingress.DefaultWALOptions()
 	opts.SyncInterval = time.Duration(sc.IngressWALSyncIntervalMs) * time.Millisecond
-	opts.SyncBytes = sc.IngressWALSyncBytes
+	opts.Logger = logger
 	return opts
 }
 
