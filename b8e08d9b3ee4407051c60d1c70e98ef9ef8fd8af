@@ -1,0 +1,16 @@
+README.md
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T10:14:35.861Z 664
+internal/persistence/storage/log_test.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T10:14:35.861Z 81
+internal/persistence/storage/metrics.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T10:14:35.861Z 25-26
+internal/persistence/storage/retention.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T10:14:35.861Z 144
+internal/platform/observability/metrics/http_middleware.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T10:22:22.544Z 14,76,93,95
+internal/platform/observability/metrics/metrics.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T10:14:35.861Z 28-29,285,287,291,293,298,317,320,322,325
+internal/platform/observability/metrics/storage_recorder.go
+  3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T10:14:35.861Z 47
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T10:14:35.861Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 1, "overriden_lines": 0}, "3f383bc3-fff3-4c35-b32e-3237b5ebb91d:2026-06-30T10:22:22.544Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 4, "overriden_lines": 0}}}
