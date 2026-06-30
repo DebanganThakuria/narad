@@ -1,4 +1,4 @@
-// Package metastorev2 is the Raft-backed metadata store for multi-node narad.
+// Package metastore is the Raft-backed metadata store for multi-node narad.
 // It owns topic configs and JSON schemas. Consumer offsets are managed
 // separately via per-partition .offsets log files.
 //

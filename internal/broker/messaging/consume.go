@@ -35,7 +35,7 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 		}
 		msg, found, err := e.replayRead(topicName, *opts.Partition, *opts.Offset, t.Partitions)
 		if found {
-			e.recordConsumed(topicName, msg.Partition, len(msg.Payload))
+			e.recordConsumed(topicName, msg.Partition)
 		}
 		return msg, found, err
 	}
@@ -59,7 +59,7 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 			return msg, false, err
 		}
 		if found {
-			e.recordConsumed(topicName, msg.Partition, len(msg.Payload))
+			e.recordConsumed(topicName, msg.Partition)
 			e.recordConsumeWait(topicName, "hit", time.Since(start))
 			return msg, true, nil
 		}
@@ -91,13 +91,12 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 	}
 }
 
-// recordConsumed bumps the per-partition delivered counters.
-func (e *Engine) recordConsumed(topicName string, partition, payloadBytes int) {
+// recordConsumed bumps the per-partition delivered counter.
+func (e *Engine) recordConsumed(topicName string, partition int) {
 	if e.metrics == nil {
 		return
 	}
-	partLabel := strconv.Itoa(partition)
-	e.metrics.MessagesConsumedTotal.WithLabelValues(topicName, partLabel).Inc()
+	e.metrics.MessagesConsumedTotal.WithLabelValues(topicName, strconv.Itoa(partition)).Inc()
 }
 
 // recordConsumeWait observes the long-poll histogram for a hit

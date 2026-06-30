@@ -174,13 +174,11 @@ func checkCompatible(oldRaw, newRaw []byte) error {
 	oldRequired := setOf(oldSchema.Required)
 	newRequired := setOf(newSchema.Required)
 
-	for name := range oldSchema.Properties {
+	for name, oldProp := range oldSchema.Properties {
 		newProp, ok := newSchema.Properties[name]
 		if !ok {
 			return fmt.Errorf("property %q removed", name)
 		}
-
-		oldProp := oldSchema.Properties[name]
 		if err := compatibleTypes(oldProp, newProp); err != nil {
 			return fmt.Errorf("property %q: %w", name, err)
 		}
