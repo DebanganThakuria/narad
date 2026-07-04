@@ -53,25 +53,72 @@ func NewLogs(dataDir string, storageOpts storage.Options, ms metastore.Metastore
 	}
 }
 
+// lockProduce acquires the produce-serialization mutex for (topic,
+// partition), minting one on first use.
+//
+// Keyed-mutex revalidation: CloseTopic/CloseAll/DropProduceSync retire
+// map entries, and a goroutine may have fetched a mutex from the map
+// just before its entry was retired. If it then acquired that orphaned
+// mutex while a later producer minted a fresh one for the same key, two
+// produce commits could run concurrently. So after acquiring, re-check
+// that the acquired mutex is still the one installed in the map; if
+// not, release it and retry against the current map state. Retirement
+// itself only deletes an entry while holding that entry's mutex (see
+// retireProduceMutex), so a holder inside its critical section is never
+// invalidated mid-flight.
 func (g *Logs) lockProduce(topicName string, idx int) func() {
 	key := keyOf(topicName, idx)
+	for {
+		g.produceMu.Lock()
+		mu, ok := g.produceSync[key]
+		if !ok {
+			mu = &sync.Mutex{}
+			g.produceSync[key] = mu
+		}
+		g.produceMu.Unlock()
 
+		mu.Lock()
+
+		g.produceMu.Lock()
+		current := g.produceSync[key] == mu
+		g.produceMu.Unlock()
+		if current {
+			return mu.Unlock
+		}
+		// The entry was retired (and possibly replaced) between our map
+		// fetch and the acquisition — this mutex no longer serializes
+		// anything. Drop it and retry.
+		mu.Unlock()
+	}
+}
+
+// retireProduceMutex removes a produceSync entry, but only while
+// holding that entry's mutex: a produce commit currently inside its
+// critical section blocks the retirement until it finishes, so a
+// producer that mints a replacement mutex afterwards can never run
+// concurrently with the old holder. Goroutines still queued on the
+// retired mutex fail lockProduce's revalidation and retry. The map
+// re-check under produceMu makes retirement idempotent against a
+// concurrent retire of the same key.
+func (g *Logs) retireProduceMutex(key string, mu *sync.Mutex) {
+	mu.Lock()
 	g.produceMu.Lock()
-	mu, ok := g.produceSync[key]
-	if !ok {
-		mu = &sync.Mutex{}
-		g.produceSync[key] = mu
+	if g.produceSync[key] == mu {
+		delete(g.produceSync, key)
 	}
 	g.produceMu.Unlock()
-
-	mu.Lock()
-	return mu.Unlock
+	mu.Unlock()
 }
 
 func (g *Logs) dropProduceLock(topicName string, idx int) {
+	key := keyOf(topicName, idx)
 	g.produceMu.Lock()
-	delete(g.produceSync, keyOf(topicName, idx))
+	mu, ok := g.produceSync[key]
 	g.produceMu.Unlock()
+	if !ok {
+		return
+	}
+	g.retireProduceMutex(key, mu)
 }
 
 func (g *Logs) WithProduceLock(topicName string, idx int, fn func(*storage.Log) error) error {
@@ -201,7 +248,6 @@ func (g *Logs) Peek(topicName string, idx int) (*storage.Log, bool) {
 func (g *Logs) CloseTopic(topicName string) error {
 	prefix := topicName + "/"
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	var firstErr error
 	for k, l := range g.logs {
 		if !strings.HasPrefix(k, prefix) {
@@ -213,14 +259,41 @@ func (g *Logs) CloseTopic(topicName string) error {
 		delete(g.logs, k)
 	}
 	g.setActiveLogCountLocked()
+	g.mu.Unlock()
+
+	// Retire the topic's produce-serialization mutexes too; otherwise
+	// topic churn leaks one entry per (topic, partition) forever. Each
+	// entry is deleted only while holding its mutex (retireProduceMutex),
+	// so a produce commit mid-critical-section finishes before its mutex
+	// disappears from the map — combined with lockProduce's revalidation
+	// this keeps produce mutual exclusion intact even when CloseTopic
+	// runs against a LIVE topic (e.g. UpdateTopicRetention).
+	g.retireProduceEntries(func(k string) bool { return strings.HasPrefix(k, prefix) })
 	return firstErr
+}
+
+// retireProduceEntries retires every produceSync entry whose key
+// matches. The map is snapshotted under produceMu, then each entry is
+// retired individually under its own mutex.
+func (g *Logs) retireProduceEntries(match func(key string) bool) {
+	g.produceMu.Lock()
+	retire := make(map[string]*sync.Mutex)
+	for k, mu := range g.produceSync {
+		if match(k) {
+			retire[k] = mu
+		}
+	}
+	g.produceMu.Unlock()
+
+	for k, mu := range retire {
+		g.retireProduceMutex(k, mu)
+	}
 }
 
 // CloseAll flushes and closes every cached log. Called on broker
 // shutdown.
 func (g *Logs) CloseAll() error {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	var firstErr error
 	for k, l := range g.logs {
 		if err := l.Close(); err != nil && firstErr == nil {
@@ -229,6 +302,9 @@ func (g *Logs) CloseAll() error {
 		delete(g.logs, k)
 	}
 	g.setActiveLogCountLocked()
+	g.mu.Unlock()
+
+	g.retireProduceEntries(func(string) bool { return true })
 	return firstErr
 }
 

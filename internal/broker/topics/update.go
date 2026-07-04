@@ -28,6 +28,8 @@ func (m *Manager) IncreaseTopicPartitions(ctx context.Context, name string, newP
 		return topic.Topic{}, fmt.Errorf("%w: partitions (%d) exceeds topic.max_partitions (%d)",
 			ErrInvalid, newPartitions, maximum)
 	}
+	unlock := m.lockTopicName(name)
+	defer unlock()
 
 	current, err := m.GetTopic(ctx, name)
 	if err != nil {
@@ -77,6 +79,8 @@ func (m *Manager) UpdateTopicRetention(ctx context.Context, name string, retenti
 	if retentionMs == 0 {
 		retentionMs = m.cfg.DefaultRetentionMs
 	}
+	unlock := m.lockTopicName(name)
+	defer unlock()
 
 	current, err := m.GetTopic(ctx, name)
 	if err != nil {
@@ -123,6 +127,8 @@ func (m *Manager) UpdateTopicCaps(ctx context.Context, name string, maxInFlight,
 	if maxAckedAhead == 0 {
 		maxAckedAhead = m.cfg.DefaultMaxAckedAheadPerPartition
 	}
+	unlock := m.lockTopicName(name)
+	defer unlock()
 
 	current, err := m.GetTopic(ctx, name)
 	if err != nil {
@@ -165,6 +171,8 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 	if len(rawSchema) == 0 {
 		return topic.Topic{}, fmt.Errorf("%w: schema must not be empty", ErrInvalid)
 	}
+	unlock := m.lockTopicName(name)
+	defer unlock()
 
 	t, err := m.GetTopic(ctx, name)
 	if err != nil {

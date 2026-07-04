@@ -97,6 +97,18 @@ func (r *JSONSchema) Unload(_ context.Context, topic string, version int) error 
 	return nil
 }
 
+// DropTopic removes every schema version and the latest-version pointer
+// for the topic. Called on topic delete/purge so a recreated topic
+// starts schema-less instead of inheriting phantom versions.
+func (r *JSONSchema) DropTopic(_ context.Context, topic string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.schemas, topic)
+	delete(r.raw, topic)
+	delete(r.versions, topic)
+	return nil
+}
+
 func (r *JSONSchema) loadLocked(topic string, version int, schemaBytes []byte) error {
 	compiled, err := compileSchema(topic, version, schemaBytes)
 	if err != nil {

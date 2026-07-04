@@ -165,6 +165,48 @@ func TestJSONSchemaUnloadLastVersionRemovesTopic(t *testing.T) {
 	}
 }
 
+func TestJSONSchemaDropTopicRemovesAllVersionsAndResetsNumbering(t *testing.T) {
+	registry := NewJSONSchema()
+	v1 := []byte(`{
+		"type":"object",
+		"properties":{"id":{"type":"string"}},
+		"required":["id"]
+	}`)
+	v2 := []byte(`{
+		"type":"object",
+		"properties":{"id":{"type":"string"},"count":{"type":"integer"}},
+		"required":["id"]
+	}`)
+
+	if _, err := registry.Register(context.Background(), "orders", v1); err != nil {
+		t.Fatalf("Register(v1) error = %v", err)
+	}
+	if _, err := registry.Register(context.Background(), "orders", v2); err != nil {
+		t.Fatalf("Register(v2) error = %v", err)
+	}
+	if err := registry.DropTopic(context.Background(), "orders"); err != nil {
+		t.Fatalf("DropTopic() error = %v", err)
+	}
+	if err := registry.Validate(context.Background(), "orders", []byte(`{}`)); !errors.Is(err, ErrSchemaNotFound) {
+		t.Fatalf("Validate() after drop error = %v, want %v", err, ErrSchemaNotFound)
+	}
+
+	// A recreated topic starts fresh: the next Register is version 1 and
+	// is not compatibility-checked against the dropped topic's schemas.
+	incompatible := []byte(`{
+		"type":"object",
+		"properties":{"name":{"type":"string"}},
+		"required":["name"]
+	}`)
+	version, err := registry.Register(context.Background(), "orders", incompatible)
+	if err != nil {
+		t.Fatalf("Register() after drop error = %v", err)
+	}
+	if version != 1 {
+		t.Fatalf("Register() after drop version = %d, want 1", version)
+	}
+}
+
 func TestJSONSchemaValidateRejectsInvalidPayloadJSON(t *testing.T) {
 	registry := NewJSONSchema()
 	schemaBytes := []byte(`{

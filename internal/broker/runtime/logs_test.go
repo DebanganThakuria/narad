@@ -259,6 +259,36 @@ func TestLogsCloseTopicRemovesOnlyMatchingEntries(t *testing.T) {
 	}
 }
 
+func TestCloseTopicAndCloseAllDropProduceSyncEntries(t *testing.T) {
+	ms := newRuntimeFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", RetentionMs: 1000}
+	ms.topics["payments"] = topic.Topic{Name: "payments", RetentionMs: 1000}
+	logs := newRuntimeTestLogs(t, ms)
+
+	for _, name := range []string{"orders", "payments"} {
+		if err := logs.WithProduceLock(name, 0, func(*storage.Log) error { return nil }); err != nil {
+			t.Fatalf("WithProduceLock(%s) error = %v", name, err)
+		}
+	}
+	if got := logs.ProduceSyncCount(); got != 2 {
+		t.Fatalf("ProduceSyncCount() = %d, want 2", got)
+	}
+
+	if err := logs.CloseTopic("orders"); err != nil {
+		t.Fatalf("CloseTopic() error = %v", err)
+	}
+	if got := logs.ProduceSyncCount(); got != 1 {
+		t.Fatalf("ProduceSyncCount() after CloseTopic = %d, want 1 (orders entries retired, payments kept)", got)
+	}
+
+	if err := logs.CloseAll(); err != nil {
+		t.Fatalf("CloseAll() error = %v", err)
+	}
+	if got := logs.ProduceSyncCount(); got != 0 {
+		t.Fatalf("ProduceSyncCount() after CloseAll = %d, want 0", got)
+	}
+}
+
 func TestLifecycleReadyAndClose(t *testing.T) {
 	ms := newRuntimeFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", RetentionMs: 1000}

@@ -3,10 +3,17 @@ package messaging
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
+	"time"
 
+	"github.com/debanganthakuria/narad/internal/broker/runtime"
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
 func TestConsumePinnedRejectsWhenNotPartitionOwner(t *testing.T) {
@@ -115,6 +122,47 @@ func TestConsumePinnedAllowsOwner(t *testing.T) {
 	}
 	if msg.Partition != 0 || msg.Offset != 0 {
 		t.Fatalf("Consume() message = %+v, want partition 0 offset 0", msg)
+	}
+}
+
+// failingAssignmentsMetastore implements assignmentReader with a failing
+// ListAssignments, simulating a metastore hiccup during ownership lookup.
+type failingAssignmentsMetastore struct {
+	*messagingFakeMetastore
+	listErr error
+}
+
+func (f *failingAssignmentsMetastore) ListAssignments(string) ([]metastore.Assignment, error) {
+	return nil, f.listErr
+}
+
+func (f *failingAssignmentsMetastore) GetAssignment(string, int) (metastore.Assignment, error) {
+	return metastore.Assignment{}, errs.ErrNotFound
+}
+
+// A ListAssignments failure is a retryable internal error, not proof that
+// this node owns nothing — it must not surface as ErrNotPartitionOwner
+// (which clients treat as a routing verdict).
+func TestConsumeQueueSurfacesAssignmentListError(t *testing.T) {
+	inner := newMessagingFakeMetastore()
+	inner.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 1000}
+	listErr := errors.New("raft leadership lost")
+	ms := &failingAssignmentsMetastore{messagingFakeMetastore: inner, listErr: listErr}
+
+	logs := runtime.NewLogs(t.TempDir(), storage.Options{FlushInterval: time.Millisecond}, ms, nil)
+	t.Cleanup(func() { _ = logs.CloseAll() })
+	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+		return consumer.Caps{MaxInFlight: 10, MaxAckedAhead: 10}, nil
+	}, nil)
+	engine := NewEngine(ms, &fakeSchemas{}, fixedPartitioner{picked: 0}, offsets, logs, nil, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), "node-self")
+
+	_, _, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Wait: 0})
+	if errors.Is(err, ErrNotPartitionOwner) {
+		t.Fatalf("Consume() error = %v, want the underlying assignment error, not %v", err, ErrNotPartitionOwner)
+	}
+	if !errors.Is(err, listErr) {
+		t.Fatalf("Consume() error = %v, want wrapped %v", err, listErr)
 	}
 }
 

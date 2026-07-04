@@ -40,7 +40,18 @@ type InFlight struct {
 	resolve  CapsResolver
 	clockMu  sync.RWMutex
 	timeNow  func() int64 // replaced in tests
+
+	notifyMu  sync.RWMutex
+	onRelease ReleaseFunc
 }
+
+// ReleaseFunc is called by the background purger after expired
+// reservations were released for a partition — the messages are
+// redeliverable again, so blocked long-poll consumers must be woken.
+// Called without any shard lock held; implementations may be slow but
+// must not call back into InFlight for the same partition
+// synchronously in a way that assumes reservation state is unchanged.
+type ReleaseFunc func(topic string, partition int)
 
 type partitionShard struct {
 	mu         sync.Mutex
@@ -106,17 +117,22 @@ func (h *expiryHeap) Pop() any {
 	return x
 }
 
-// purgeExpired removes expired reservations from entries and the heap.
-// Must be called with sh.mu held. Entries whose nonce no longer matches
-// (re-reserved since the heap entry was pushed) are silently discarded.
-func (sh *partitionShard) purgeExpired(now int64) {
+// purgeExpired removes expired reservations from entries and the heap,
+// returning how many live reservations were released (i.e. offsets that
+// became redeliverable). Must be called with sh.mu held. Entries whose
+// nonce no longer matches (re-reserved since the heap entry was pushed)
+// are silently discarded and not counted.
+func (sh *partitionShard) purgeExpired(now int64) int {
+	released := 0
 	for sh.expiry.Len() > 0 && sh.expiry[0].expiresAtUnixMs <= now {
 		e := heap.Pop(&sh.expiry).(expiryEntry)
 		if rsv, ok := sh.entries[e.offset]; ok && rsv.nonce == e.nonce {
 			delete(sh.entries, e.offset)
+			released++
 		}
 	}
 	sh.compactExpiryLocked()
+	return released
 }
 
 // compactExpiryLocked rebuilds the expiry heap from the live reservation

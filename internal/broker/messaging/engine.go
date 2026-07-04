@@ -57,22 +57,28 @@ func sortPartitions(partitions []int) []int {
 	return out
 }
 
-func (e *Engine) localPartitions(topicName string, totalPartitions int) []int {
+func (e *Engine) localPartitions(topicName string, totalPartitions int) ([]int, error) {
 	if e.selfID == "" {
-		return allPartitions(totalPartitions)
+		return allPartitions(totalPartitions), nil
 	}
 	if _, ok := e.metastore.(assignmentReader); !ok {
-		return allPartitions(totalPartitions)
+		return allPartitions(totalPartitions), nil
 	}
 	rows, err := e.listAssignments(topicName)
-	if err != nil || len(rows) == 0 {
-		return nil
+	if err != nil {
+		// Not a routing verdict: surface as an internal error so callers
+		// retry, instead of coercing a metastore hiccup into "owns
+		// nothing" (which reads as ErrNotPartitionOwner).
+		return nil, fmt.Errorf("messaging: list assignments for %s: %w", topicName, err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
 	}
 	owned := ownerPartitions(rows, e.selfID)
 	if len(owned) == 0 {
-		return nil
+		return nil, nil
 	}
-	return sortPartitions(owned)
+	return sortPartitions(owned), nil
 }
 
 func (e *Engine) localProbePartitions(topicName string, totalPartitions int, pinnedPartition *int) ([]int, error) {
@@ -85,7 +91,10 @@ func (e *Engine) localProbePartitions(topicName string, totalPartitions int, pin
 		}
 		return []int{*pinnedPartition}, nil
 	}
-	scan := e.localPartitions(topicName, totalPartitions)
+	scan, err := e.localPartitions(topicName, totalPartitions)
+	if err != nil {
+		return nil, err
+	}
 	if len(scan) == 0 {
 		return nil, ErrNotPartitionOwner
 	}
@@ -152,6 +161,19 @@ func NewEngine(
 ) *Engine {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	if offsets != nil && logs != nil {
+		// When the in-flight purger releases expired reservations the
+		// messages become redeliverable, but the partition log has no
+		// way to know — its NotifyC otherwise fires only on new data.
+		// Wake blocked long-pollers so they retry immediately instead
+		// of sleeping out their full Wait. Peek (not Get) so a purge
+		// never lazily reopens a log a concurrent topic delete retired.
+		offsets.SetReleaseNotifier(func(topicName string, partitionIdx int) {
+			if l, ok := logs.Peek(topicName, partitionIdx); ok {
+				l.Wake()
+			}
+		})
 	}
 	return &Engine{
 		metastore:       ms,

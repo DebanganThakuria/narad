@@ -29,6 +29,11 @@ func (AlwaysValid) Unload(_ context.Context, _ string, _ int) error {
 	return nil
 }
 
+// DropTopic drops every schema version for a topic.
+func (AlwaysValid) DropTopic(_ context.Context, _ string) error {
+	return nil
+}
+
 // Validate accepts any payload.
 func (AlwaysValid) Validate(_ context.Context, _ string, _ []byte) error {
 	return nil

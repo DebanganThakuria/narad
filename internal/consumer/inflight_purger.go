@@ -21,20 +21,51 @@ func (f *InFlight) RunPurger(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// purgeAll sweeps every shard and evicts expired reservations.
+// SetReleaseNotifier registers fn to be invoked whenever a live
+// reservation is released for a (topic, partition) — by the background
+// purger evicting expired reservations, or by an ack/skip removing one
+// (CommitHandle/SkipCorrupt), which frees a MaxInFlight cap slot.
+// Either way the partition may have deliverable messages again.
+// Long-poll consumers block until a partition signals activity, and
+// neither an expiry nor a cap slot freeing is activity the partition
+// log can see on its own, so the broker wires this to the log's
+// broadcast wake-up. fn is called without shard locks held. Passing nil
+// disables notification.
+func (f *InFlight) SetReleaseNotifier(fn ReleaseFunc) {
+	f.notifyMu.Lock()
+	f.onRelease = fn
+	f.notifyMu.Unlock()
+}
+
+func (f *InFlight) releaseNotifier() ReleaseFunc {
+	f.notifyMu.RLock()
+	fn := f.onRelease
+	f.notifyMu.RUnlock()
+	return fn
+}
+
+// purgeAll sweeps every shard and evicts expired reservations, then
+// notifies the release notifier for each partition where reservations
+// were actually released.
 func (f *InFlight) purgeAll() {
 	now := f.now()
 	f.mu.RLock()
+	keys := make([]shardKey, 0, len(f.shards))
 	shards := make([]*partitionShard, 0, len(f.shards))
-	for _, sh := range f.shards {
+	for k, sh := range f.shards {
+		keys = append(keys, k)
 		shards = append(shards, sh)
 	}
 	f.mu.RUnlock()
 
-	for _, sh := range shards {
+	notify := f.releaseNotifier()
+	for i, sh := range shards {
 		sh.mu.Lock()
-		sh.purgeExpired(now)
+		released := sh.purgeExpired(now)
 		sh.mu.Unlock()
+		if released > 0 && notify != nil {
+			notify(keys[i].topic, keys[i].partition)
+		}
 	}
 }
 

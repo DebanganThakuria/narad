@@ -73,3 +73,19 @@ type Broker interface {
 	Ready(ctx context.Context) error
 	Close() error
 }
+
+// CreateGater is the optional startup-gating surface of a Broker.
+// Brokers built by New implement it (via the embedded topics.Manager):
+// ArmCreateGate blocks CreateTopic on every transport (HTTP and cluster
+// RPC alike) until ReleaseCreateGate opens the gate. serve.go arms the
+// gate before the cluster RPC listener starts and releases it once the
+// startup orphan sweep has completed, so a peer-forwarded create can
+// never land a topic directory while the sweep is still walking.
+//
+// It is intentionally not part of Broker: transports never gate, and
+// test fakes of Broker shouldn't have to implement it. The gate defaults
+// to open, so brokers that never arm it behave exactly as before.
+type CreateGater interface {
+	ArmCreateGate()
+	ReleaseCreateGate()
+}
