@@ -100,7 +100,35 @@ func (l *Log) persistHighWatermark(next int64) error {
 		_ = f.Close()
 		return fmt.Errorf("storage: sync hwm: %w", err)
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	// The open above may have CREATED the file, and file creation is only
+	// durable once the parent directory is fsynced. Without it a crash
+	// can lose the file entirely; recovery would then bootstrap the HWM
+	// from the tail and expose the hidden tail (double-delivery). One dir
+	// fsync per Log lifetime covers the first-creation case cheaply.
+	if !l.hwmDirSynced {
+		if err := syncDir(l.dir); err != nil {
+			return fmt.Errorf("storage: sync partition dir for hwm: %w", err)
+		}
+		l.hwmDirSynced = true
+	}
+	return nil
+}
+
+// syncDir fsyncs a directory so entries created in it are durable.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	syncErr := d.Sync()
+	closeErr := d.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
 }
 
 func (l *Log) syncHighWatermark(force bool) error {

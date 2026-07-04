@@ -152,8 +152,15 @@ func (l *Log) scanSegmentFromIndexAnchorLocked(seg *segment, anchor indexEntry, 
 		switch {
 		case err == nil:
 			if end > size {
-				// Torn/incomplete tail frame: not navigable (and not yet
-				// readable). Treat as not found, like a short read.
+				// Frame runs past the segment: either a torn tail or a
+				// mid-file corrupted length field. If a later valid frame
+				// exists, resync past the corruption so intact frames
+				// beyond it stay reachable; otherwise it's a genuine torn
+				// tail — not navigable (and not yet readable), not found.
+				if next := nextValidFramePos(seg.file, pos+1, size); next < size {
+					pos = next
+					continue
+				}
 				return indexEntry{}, 0, false, nil
 			}
 			frameEndOffset := h.baseOffset + int64(h.recordCount)

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -623,6 +624,56 @@ func TestRecoveryResyncsAcrossLargeCorruptGap(t *testing.T) {
 	if got, err := l.Read(2); err != nil || !bytes.Equal(got, []byte("frame-2")) {
 		t.Fatalf("Read(2) got=%q err=%v", got, err)
 	}
+	if _, err := l.Read(1); !errors.Is(err, ErrOffsetNotFound) {
+		t.Fatalf("Read(1) want ErrOffsetNotFound got %v", err)
+	}
+}
+
+// TestRecoveryResyncsAfterCorruptLengthField corrupts a mid-file frame's
+// compressed-length field so its claimed end runs past EOF. verifyFrameAt
+// then sees a short payload read (io.ErrUnexpectedEOF) exactly like a torn
+// tail — but a later valid, fsynced frame exists, so recovery must resync
+// to it rather than truncate it away.
+func TestRecoveryResyncsAfterCorruptLengthField(t *testing.T) {
+	path := testLogPath(t)
+
+	for i := range 3 {
+		mustWriteAndClose(t, path, slowFlushOpts(t, codec.NewNoopCodec()), func(l *Log) {
+			if _, _, err := l.AppendBatch([][]byte{fmt.Appendf(nil, "frame-%d", i)}); err != nil {
+				t.Fatalf("AppendBatch: %v", err)
+			}
+		})
+	}
+
+	frames := scanFramePositions(t, path)
+	if len(frames) != 3 {
+		t.Fatalf("expected 3 frames, got %d", len(frames))
+	}
+
+	sizeBefore := fileSize(t, path)
+	// A large but header-valid length (≤ maxFrameBytes) so decodeHeader
+	// accepts it and the payload read comes up short mid-file.
+	corruptCompressedLenAt(t, path, frames[1], 1<<20)
+
+	l, err := NewLog(path, slowFlushOpts(t, codec.NewNoopCodec()))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer l.Close()
+
+	if got := fileSize(t, path); got != sizeBefore {
+		t.Fatalf("mid-file corruption truncated the file: was %d now %d", sizeBefore, got)
+	}
+	if got := l.NextOffset(); got != 3 {
+		t.Fatalf("NextOffset = %d, want 3 (frame 2 lost?)", got)
+	}
+	if got, err := l.Read(0); err != nil || !bytes.Equal(got, []byte("frame-0")) {
+		t.Fatalf("Read(0) got=%q err=%v", got, err)
+	}
+	if got, err := l.Read(2); err != nil || !bytes.Equal(got, []byte("frame-2")) {
+		t.Fatalf("Read(2) got=%q err=%v", got, err)
+	}
+	// The corrupt frame's offset is a permanent gap, not wrong data.
 	if _, err := l.Read(1); !errors.Is(err, ErrOffsetNotFound) {
 		t.Fatalf("Read(1) want ErrOffsetNotFound got %v", err)
 	}
@@ -1532,6 +1583,23 @@ func corruptByteAtPath(t *testing.T, path string, offset int64) {
 	}
 	b[0] ^= 0x01
 	if _, err := f.WriteAt(b[:], offset); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+}
+
+// corruptCompressedLenAt overwrites the 4-byte compressed-length field
+// (header offset 19) of the frame at pos in the first segment of dir.
+func corruptCompressedLenAt(t *testing.T, dir string, pos int64, val uint32) {
+	t.Helper()
+	path := segmentPaths(t, dir)[0]
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open for corrupt: %v", err)
+	}
+	defer f.Close()
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], val)
+	if _, err := f.WriteAt(b[:], pos+19); err != nil {
 		t.Fatalf("WriteAt: %v", err)
 	}
 }
