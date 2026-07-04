@@ -31,7 +31,27 @@ type Router struct {
 	routes        map[string]cachedRouteTable
 	consumeMu     sync.Mutex
 	consumeCursor map[string]uint64
+
+	// consumeReprobeInterval paces the remote re-probe loop for queue-style
+	// long-poll consumes on nodes that own no partitions of the topic.
+	// Defaults to remoteConsumeReprobeInterval; tests shrink it.
+	consumeReprobeInterval time.Duration
+
+	// maxConsumeWait caps the client-supplied ?wait= budget on every
+	// long-poll consume path this router touches (pinned forwards and the
+	// remote re-probe loop). Defaults to defaultMaxConsumeWait; serve.go
+	// overrides it with the configured http.max_consume_wait via
+	// SetMaxConsumeWait so the router honors the same ceiling as the HTTP
+	// handlers.
+	maxConsumeWait time.Duration
 }
+
+// defaultMaxConsumeWait is the ceiling applied to a long-poll consume wait
+// when no configured value has been wired in via SetMaxConsumeWait. It
+// mirrors handlers.DefaultMaxConsumeWait (the HTTP layer's fallback ceiling,
+// not imported to keep this package below the transport layer) so routers
+// built without explicit wiring — tests, mostly — stay bounded.
+const defaultMaxConsumeWait = 30 * time.Second
 
 // NewRouter constructs a Router. selfID is this pod's member ID (os.Hostname()).
 func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager, _ metrics.SnapshotProvider, m ...*metrics.Metrics) *Router {
@@ -40,13 +60,24 @@ func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager, _ m
 		observed = m[0]
 	}
 	return &Router{
-		store:         store,
-		selfID:        selfID,
-		partitions:    mgr,
-		peer:          NewPeerClient(defaultPeerRPCTimeout, observed),
-		metrics:       observed,
-		routes:        make(map[string]cachedRouteTable),
-		consumeCursor: make(map[string]uint64),
+		store:                  store,
+		selfID:                 selfID,
+		partitions:             mgr,
+		peer:                   NewPeerClient(defaultPeerRPCTimeout, observed),
+		metrics:                observed,
+		routes:                 make(map[string]cachedRouteTable),
+		consumeCursor:          make(map[string]uint64),
+		consumeReprobeInterval: remoteConsumeReprobeInterval,
+		maxConsumeWait:         defaultMaxConsumeWait,
+	}
+}
+
+// SetMaxConsumeWait wires the configured long-poll consume wait ceiling
+// (http.max_consume_wait). Values <= 0 keep the defaultMaxConsumeWait
+// fallback, matching how the HTTP handlers treat an unset config value.
+func (rt *Router) SetMaxConsumeWait(d time.Duration) {
+	if d > 0 {
+		rt.maxConsumeWait = d
 	}
 }
 
@@ -111,12 +142,18 @@ func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *ht
 		if addr == "" {
 			return false, nil
 		}
-		req, err := consumeRPCRequestFromHTTP(r, topicName, pinnedPartition, false)
+		req, err := consumeRPCRequestFromHTTP(r, topicName, pinnedPartition, false, rt.maxConsumeWait)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return true, nil
 		}
-		res, err := rt.peer.Consume(ctx, addr, req)
+		// A long-poll forward legitimately waits up to the requested
+		// duration on the remote owner; give it an explicit deadline of
+		// wait + grace so the transport's short no-deadline fallback
+		// timeout does not cut the poll short.
+		consumeCtx, cancel := longWaitRPCContext(ctx, time.Duration(req.WaitNanos))
+		defer cancel()
+		res, err := rt.peer.Consume(consumeCtx, addr, req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return true, nil
@@ -137,12 +174,38 @@ func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *ht
 		return true, nil
 	}
 	if hadCandidates {
+		// The handler contract says wait > 0 long-polls up to the wait
+		// for a message. Honor that budget even though this node owns no
+		// partitions of the topic: keep re-probing the remote owners
+		// until a message materializes. Answering 204 immediately would
+		// make long-poll behavior depend on which node a load balancer
+		// picked and degrade clients into busy-polling.
+		if rt.longPollConsumeRemote(ctx, w, r, topicName) {
+			outcome = "forwarded"
+			return true, nil
+		}
 		w.WriteHeader(http.StatusNoContent)
 		outcome = "remote_empty"
 		return true, nil
 	}
 	outcome = "no_route"
 	return false, nil
+}
+
+// longWaitRPCGrace is added on top of a known server-side wait when
+// deriving an explicit RPC deadline, covering transfer and scan overhead.
+const longWaitRPCGrace = 2 * time.Second
+
+// longWaitRPCContext bounds an RPC whose server side legitimately blocks
+// for up to wait (e.g. a forwarded long-poll consume) to wait + grace when
+// the inbound context carries no deadline of its own. Without an explicit
+// deadline the peer transport applies its short default reply timeout,
+// which would cut such calls short.
+func longWaitRPCContext(ctx context.Context, wait time.Duration) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok || wait <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, wait+longWaitRPCGrace)
 }
 
 // RouteConsumeRemote probes remote nodes for queue-style consume. Each remote
@@ -181,6 +244,60 @@ func (rt *Router) RouteConsumeRemote(ctx context.Context, w http.ResponseWriter,
 	return false, true
 }
 
+// remoteConsumeReprobeInterval paces longPollConsumeRemote. Each round costs
+// one RPC per remote owner, so the interval trades delivery latency against
+// probe QPS: a few hundred ms keeps the worst-case added latency small while
+// capping the extra load at len(owners)/interval RPCs per waiting client.
+const remoteConsumeReprobeInterval = 250 * time.Millisecond
+
+// longPollConsumeRemote honors a queue-style long-poll on a node that owns
+// no partitions of the topic: it re-probes every remote owner on a fixed
+// interval until a message materializes (response written, returns true),
+// the wait budget expires, or the request context is done (returns false;
+// the caller answers 204). Re-probing all owners each round is preferred
+// over parking the whole wait on a single owner because a message can
+// materialize on any owner. Each probe is non-blocking and individually
+// bounded by the peer transport's default reply timeout, so unlike a pinned
+// long-poll forward the loop needs no longWaitRPCContext-stretched deadline.
+func (rt *Router) longPollConsumeRemote(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) bool {
+	// The HTTP handler already rejected malformed wait values, so a parse
+	// failure here conservatively degrades to no wait.
+	wait, err := consumeWaitFromHTTP(r, rt.maxConsumeWait)
+	if err != nil || wait <= 0 {
+		return false
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 || ctx.Err() != nil {
+			return false
+		}
+		interval := rt.consumeReprobeInterval
+		if interval <= 0 {
+			interval = remoteConsumeReprobeInterval
+		}
+		if remaining < interval {
+			interval = remaining
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+		forwarded, hadCandidates := rt.RouteConsumeRemote(ctx, w, r, topicName)
+		if forwarded {
+			return true
+		}
+		if !hadCandidates {
+			// Ownership changed under us (e.g. a rebalance removed every
+			// remote owner); nothing is left to poll against.
+			return false
+		}
+	}
+}
+
 // RouteAck forwards an ack request to the owner of the handle partition.
 // Returns true if forwarded.
 func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, handle consumer.Handle) bool {
@@ -208,13 +325,25 @@ func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.R
 	return true
 }
 
+// createForwardTimeout bounds a follower's create forward to the cluster
+// leader. The leader legitimately parks a create on its armed startup
+// create gate while startup reconciliation is still running — up to the
+// ~60s metastore catch-up cap (startupReconcileCaughtUpTimeout in
+// cmd/narad) plus the sweep work itself — so this sits above that window.
+// Without an explicit deadline the transport's short default reply timeout
+// fires: the client gets a 502 while the create still executes on the
+// leader, and the retry then hits a 409.
+const createForwardTimeout = 75 * time.Second
+
 // RouteCreateTopic forwards a topic create request to the cluster leader.
 func (rt *Router) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, _ *http.Request, body []byte) bool {
 	memberAddr := rt.leaderMemberAddr()
 	if memberAddr == "" {
 		return false
 	}
-	res, err := rt.peer.CreateTopic(ctx, memberAddr, body)
+	createCtx, cancel := longWaitRPCContext(ctx, createForwardTimeout)
+	defer cancel()
+	res, err := rt.peer.CreateTopic(createCtx, memberAddr, body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return true
@@ -238,13 +367,21 @@ func (rt *Router) RouteAlterTopic(ctx context.Context, w http.ResponseWriter, _ 
 	return true
 }
 
+// deleteTopicForwardTimeout bounds a follower's delete forward to the
+// leader. The leader synchronously fans the purge out to every member and
+// each purge can wait several seconds for a lagging replica, so this sits
+// deliberately far above the transport's default reply timeout.
+const deleteTopicForwardTimeout = 30 * time.Second
+
 // RouteDeleteTopic forwards a topic delete request to the cluster leader.
 func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string) bool {
 	memberAddr := rt.leaderMemberAddr()
 	if memberAddr == "" {
 		return false
 	}
-	res, err := rt.peer.DeleteTopic(ctx, memberAddr, topicName)
+	deleteCtx, cancel := longWaitRPCContext(ctx, deleteTopicForwardTimeout)
+	defer cancel()
+	res, err := rt.peer.DeleteTopic(deleteCtx, memberAddr, topicName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return true
@@ -266,7 +403,16 @@ func (rt *Router) BroadcastDeleteTopic(ctx context.Context, topicName string) er
 		if member.Status == metastore.MemberDead || strings.TrimSpace(member.ID) == strings.TrimSpace(rt.selfID) {
 			continue
 		}
-		res, err := rt.peer.PurgeTopic(ctx, member.Addr, topicName)
+		// A purge legitimately waits up to purgeApplyWaitTimeout on the
+		// remote for its replica to reflect the deletion, and only THEN
+		// starts the purge work itself — which can take multiple seconds
+		// for a topic with many partition directories. Budget both phases
+		// (plus longWaitRPCContext's transfer grace) so the leader's
+		// deadline doesn't expire on a purge that is about to succeed,
+		// turning a completed delete into a 500 whose retry then 404s.
+		purgeCtx, cancel := longWaitRPCContext(ctx, purgeApplyWaitTimeout+purgeExecutionAllowance)
+		res, err := rt.peer.PurgeTopic(purgeCtx, member.Addr, topicName)
+		cancel()
 		if err != nil {
 			joined = errors.Join(joined, fmt.Errorf("purge %s on %s: %w", topicName, member.ID, err))
 			continue

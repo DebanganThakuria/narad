@@ -844,6 +844,44 @@ func TestRouteConsumeForwardsPinnedPartitionToRemoteOwner(t *testing.T) {
 	}
 }
 
+// A forwarded long-poll must carry an explicit deadline covering the full
+// requested wait: with no deadline, the peer transport applies its short
+// default reply timeout, which would cut long polls short.
+func TestRouteConsumePinnedLongPollDeadlineCoversWait(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "remote.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
+		t.Fatalf("AssignPartition() error = %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+
+	var deadline time.Time
+	var hasDeadline bool
+	router.peer = fakePeerClient{consumeFn: func(ctx context.Context, _ string, _ nodewire.ConsumeRequest) (nodewire.Response, error) {
+		deadline, hasDeadline = ctx.Deadline()
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	}}
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=30s", nil)
+	start := time.Now()
+	forwarded, _ := router.RouteConsume(context.Background(), res, req, "orders", new(1))
+	if !forwarded {
+		t.Fatal("RouteConsume() = false, want true")
+	}
+	if !hasDeadline {
+		t.Fatal("forwarded long-poll has no deadline; the transport fallback timeout would cut it short")
+	}
+	if remaining := deadline.Sub(start); remaining < 30*time.Second {
+		t.Fatalf("forwarded deadline is %s away, want at least the 30s wait", remaining)
+	}
+}
+
 func TestRouteConsumeReturnsLocalPartitionWithoutRemoteProbe(t *testing.T) {
 	var probed []int
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -937,8 +975,9 @@ func TestRouteConsumeReturnsNoContentWhenOnlyRemotePartitionsAreEmpty(t *testing
 		return nodewire.Response{Status: http.StatusNoContent}, nil
 	}}
 	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=1s", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=0s", nil)
 
+	start := time.Now()
 	forwarded, localPartition := router.RouteConsume(context.Background(), res, req, "orders", nil)
 	if !forwarded {
 		t.Fatal("RouteConsume() forwarded = false, want true")
@@ -950,7 +989,138 @@ func TestRouteConsumeReturnsNoContentWhenOnlyRemotePartitionsAreEmpty(t *testing
 		t.Fatalf("status = %d, want %d", res.Code, http.StatusNoContent)
 	}
 	if probes != 1 {
-		t.Fatalf("remote probes = %d, want 1", probes)
+		t.Fatalf("remote probes = %d, want 1 immediate probe for wait=0", probes)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("wait=0 consume took %s, want an immediate 204", elapsed)
+	}
+}
+
+// remoteOnlyConsumeRouter builds a router whose topic has every partition
+// owned by a remote member, so queue-style consumes can only be satisfied by
+// probing remote owners.
+func remoteOnlyConsumeRouter(t *testing.T, consumeFn func(context.Context, string, nodewire.ConsumeRequest) (nodewire.Response, error)) *Router {
+	t.Helper()
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "remote.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
+		t.Fatalf("AssignPartition() error = %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+	router.consumeReprobeInterval = 10 * time.Millisecond
+	router.peer = fakePeerClient{consumeFn: consumeFn}
+	return router
+}
+
+// A queue-style long-poll on a node that owns no partitions of the topic
+// must honor the wait budget: when the initial remote probes come back
+// empty, the router keeps re-probing the owners and returns a message that
+// materializes later instead of an immediate 204.
+func TestRouteConsumeRemoteLongPollDeliversLateMessage(t *testing.T) {
+	var probes int
+	router := remoteOnlyConsumeRouter(t, func(_ context.Context, _ string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
+		if !req.LocalOnly || req.WaitNanos != 0 {
+			t.Fatalf("remote probe request = %+v, want non-blocking local-only scan", req)
+		}
+		probes++
+		if probes == 1 {
+			return nodewire.Response{Status: http.StatusNoContent}, nil
+		}
+		return nodewire.Response{Status: http.StatusOK, ContentType: "application/json", Body: []byte(`{"offset":7}`)}, nil
+	})
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=5s", nil)
+
+	start := time.Now()
+	forwarded, localPartition := router.RouteConsume(context.Background(), res, req, "orders", nil)
+	if !forwarded {
+		t.Fatal("RouteConsume() forwarded = false, want true")
+	}
+	if localPartition != nil {
+		t.Fatalf("RouteConsume() local partition = %d, want nil", *localPartition)
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)
+	}
+	if got := res.Body.String(); got != `{"offset":7}` {
+		t.Fatalf("body = %q, want %q", got, `{"offset":7}`)
+	}
+	if probes != 2 {
+		t.Fatalf("remote probes = %d, want 2 (empty then delivered)", probes)
+	}
+	if elapsed := time.Since(start); elapsed >= 5*time.Second {
+		t.Fatalf("long-poll took the full %s budget despite an early message", elapsed)
+	}
+}
+
+// When every re-probe stays empty, the long-poll must consume the wait
+// budget before answering 204 rather than 204ing on the first empty round.
+func TestRouteConsumeRemoteLongPollReturnsNoContentAfterWaitBudget(t *testing.T) {
+	var probes int
+	router := remoteOnlyConsumeRouter(t, func(context.Context, string, nodewire.ConsumeRequest) (nodewire.Response, error) {
+		probes++
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	})
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=100ms", nil)
+
+	start := time.Now()
+	forwarded, localPartition := router.RouteConsume(context.Background(), res, req, "orders", nil)
+	elapsed := time.Since(start)
+	if !forwarded {
+		t.Fatal("RouteConsume() forwarded = false, want true")
+	}
+	if localPartition != nil {
+		t.Fatalf("RouteConsume() local partition = %d, want nil", *localPartition)
+	}
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+	if probes < 2 {
+		t.Fatalf("remote probes = %d, want re-probes beyond the initial round", probes)
+	}
+	if elapsed < 100*time.Millisecond {
+		t.Fatalf("long-poll answered 204 after %s, want the full 100ms wait budget", elapsed)
+	}
+}
+
+// Cancelling the request context must stop the remote re-probe loop well
+// before the wait budget expires.
+func TestRouteConsumeRemoteLongPollStopsOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var probes int
+	router := remoteOnlyConsumeRouter(t, func(context.Context, string, nodewire.ConsumeRequest) (nodewire.Response, error) {
+		probes++
+		cancel()
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	})
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=30s", nil)
+
+	start := time.Now()
+	forwarded, localPartition := router.RouteConsume(ctx, res, req, "orders", nil)
+	elapsed := time.Since(start)
+	if !forwarded {
+		t.Fatal("RouteConsume() forwarded = false, want true")
+	}
+	if localPartition != nil {
+		t.Fatalf("RouteConsume() local partition = %d, want nil", *localPartition)
+	}
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusNoContent)
+	}
+	if probes != 1 {
+		t.Fatalf("remote probes = %d, want 1 before cancellation stopped the loop", probes)
+	}
+	if elapsed >= 5*time.Second {
+		t.Fatalf("cancelled long-poll returned after %s, want well before the 30s budget", elapsed)
 	}
 }
 
@@ -1908,3 +2078,144 @@ type fixedPartitionManager struct {
 }
 
 func (f fixedPartitionManager) Pick(string, string, int) int { return f.picked }
+
+// A client-supplied ?wait= must not stretch a forwarded long-poll (and the
+// RPC deadline derived from it) arbitrarily: the router clamps the parsed
+// wait to its max consume wait before forwarding.
+func TestRouteConsumePinnedLongPollClampsExcessiveWait(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "remote.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
+		t.Fatalf("AssignPartition() error = %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+
+	var gotWait time.Duration
+	var deadline time.Time
+	var hasDeadline bool
+	router.peer = fakePeerClient{consumeFn: func(ctx context.Context, _ string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
+		gotWait = time.Duration(req.WaitNanos)
+		deadline, hasDeadline = ctx.Deadline()
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	}}
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=24h", nil)
+	start := time.Now()
+	forwarded, _ := router.RouteConsume(context.Background(), res, req, "orders", new(1))
+	if !forwarded {
+		t.Fatal("RouteConsume() = false, want true")
+	}
+	if gotWait != defaultMaxConsumeWait {
+		t.Fatalf("forwarded wait = %s, want clamped to %s", gotWait, defaultMaxConsumeWait)
+	}
+	if !hasDeadline {
+		t.Fatal("forwarded long-poll has no deadline")
+	}
+	if remaining := deadline.Sub(start); remaining > defaultMaxConsumeWait+longWaitRPCGrace+3*time.Second {
+		t.Fatalf("forwarded deadline is %s away, want at most wait ceiling + grace", remaining)
+	}
+}
+
+// SetMaxConsumeWait wires the configured ceiling; the clamp must honor it.
+func TestRouteConsumePinnedLongPollHonorsConfiguredMaxWait(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "remote.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
+		t.Fatalf("AssignPartition() error = %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+	router.SetMaxConsumeWait(10 * time.Second)
+
+	var gotWait time.Duration
+	router.peer = fakePeerClient{consumeFn: func(_ context.Context, _ string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
+		gotWait = time.Duration(req.WaitNanos)
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	}}
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=24h", nil)
+	forwarded, _ := router.RouteConsume(context.Background(), res, req, "orders", new(1))
+	if !forwarded {
+		t.Fatal("RouteConsume() = false, want true")
+	}
+	if gotWait != 10*time.Second {
+		t.Fatalf("forwarded wait = %s, want clamped to configured 10s", gotWait)
+	}
+}
+
+// A create forward must carry a deadline covering the leader's startup
+// create gate window (~60s of metastore catch-up plus sweep work): without
+// one, the transport's short default reply timeout fires while the create
+// still executes on the leader — the client sees 502, the retry sees 409.
+func TestRouteCreateTopicForwardDeadlineCoversStartupGate(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-leader", Addr: store.LeaderAddr(), Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+
+	var deadline time.Time
+	var hasDeadline bool
+	router.peer = fakePeerClient{createTopicFn: func(ctx context.Context, _ string, _ []byte) (nodewire.Response, error) {
+		deadline, hasDeadline = ctx.Deadline()
+		return nodewire.Response{Status: http.StatusCreated}, nil
+	}}
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewReader([]byte(`{"name":"orders"}`)))
+	start := time.Now()
+	forwarded := router.RouteCreateTopic(context.Background(), res, req, []byte(`{"name":"orders"}`))
+	if !forwarded {
+		t.Fatal("RouteCreateTopic() = false, want true")
+	}
+	if !hasDeadline {
+		t.Fatal("create forward has no deadline; the transport fallback timeout would cut it short")
+	}
+	if remaining := deadline.Sub(start); remaining < time.Minute {
+		t.Fatalf("create forward deadline is %s away, want at least the 60s startup gate window", remaining)
+	}
+}
+
+// Each per-member purge RPC must budget the remote's purge execution on top
+// of its replica apply wait, while staying bounded.
+func TestBroadcastDeleteTopicDeadlineCoversPurgeExecution(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "127.0.0.1:2", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), nil)
+	var deadline time.Time
+	var hasDeadline bool
+	router.peer = fakePeerClient{purgeTopicFn: func(ctx context.Context, _, _ string) (nodewire.Response, error) {
+		deadline, hasDeadline = ctx.Deadline()
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	}}
+	start := time.Now()
+	if err := router.BroadcastDeleteTopic(ctx, "orders"); err != nil {
+		t.Fatalf("BroadcastDeleteTopic() error = %v", err)
+	}
+	if !hasDeadline {
+		t.Fatal("purge RPC has no deadline, want a bounded one")
+	}
+	remaining := deadline.Sub(start)
+	if remaining < purgeApplyWaitTimeout+purgeExecutionAllowance {
+		t.Fatalf("purge deadline is %s away, want at least apply wait (%s) + execution allowance (%s)",
+			remaining, purgeApplyWaitTimeout, purgeExecutionAllowance)
+	}
+	if remaining > purgeApplyWaitTimeout+purgeExecutionAllowance+longWaitRPCGrace+3*time.Second {
+		t.Fatalf("purge deadline is %s away, want it bounded near the budgeted window", remaining)
+	}
+}
