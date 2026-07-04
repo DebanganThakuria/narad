@@ -55,6 +55,11 @@ func (l *Log) rollLocked() error {
 	if err != nil {
 		return fmt.Errorf("wal: create segment: %w", err)
 	}
+	// Make the new segment file durable before any appends can target it.
+	if err := syncDir(l.dir); err != nil {
+		_ = file.Close()
+		return err
+	}
 	l.file = file
 	return nil
 }

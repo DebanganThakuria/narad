@@ -43,6 +43,10 @@ type Log struct {
 	pending     *syncBatch
 	closed      bool
 	syncErr     error
+	// writeFailed is guarded by fileOps, not mu. It latches the first
+	// write or fsync failure on the active file so that no later batch
+	// is written on top of a possibly torn region and acked.
+	writeFailed error
 
 	wakeup chan struct{}
 	stop   chan struct{}

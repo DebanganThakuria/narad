@@ -45,7 +45,9 @@ func (s *Store) ListTopics(_ context.Context, opts ListOptions) ([]topic.Topic, 
 		var k, v []byte
 		if opts.PageToken != "" {
 			k, v = c.Seek([]byte(opts.PageToken))
-			if k != nil {
+			// Only step past the token if it still exists; if it was
+			// deleted, Seek already landed on the next topic.
+			if k != nil && string(k) == opts.PageToken {
 				k, v = c.Next()
 			}
 		} else {

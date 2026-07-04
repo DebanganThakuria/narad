@@ -61,5 +61,23 @@ func createEmptySegment(path string) error {
 	if err != nil {
 		return fmt.Errorf("wal: create first segment: %w", err)
 	}
-	return file.Close()
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// syncDir fsyncs a directory so that a newly created segment file survives a
+// power loss. Without it a freshly rolled segment (and its fsynced records)
+// could vanish and seqs would regress after a restart.
+func syncDir(dir string) error {
+	handle, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("wal: open dir for sync: %w", err)
+	}
+	if err := handle.Sync(); err != nil {
+		_ = handle.Close()
+		return fmt.Errorf("wal: sync dir: %w", err)
+	}
+	return handle.Close()
 }

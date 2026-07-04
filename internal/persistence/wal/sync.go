@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 )
 
@@ -51,11 +52,7 @@ func (l *Log) flushSync() {
 		// close this file before this detached buffer is written and synced.
 		l.fileOps.Lock()
 		l.mu.Unlock()
-		if writeErr := writeFull(file, buffer); writeErr != nil {
-			err = writeErr
-		} else {
-			err = file.Sync()
-		}
+		err = l.writeAndSyncFileOps(file, buffer)
 		l.fileOps.Unlock()
 		l.observe("sync", observeOutcome(err), time.Since(start))
 	}
@@ -80,10 +77,7 @@ func (l *Log) syncLocked() (*syncBatch, error) {
 	buffer := l.writeBuffer
 	l.writeBuffer = nil
 	l.fileOps.Lock()
-	err := writeFull(l.file, buffer)
-	if err == nil {
-		err = l.file.Sync()
-	}
+	err := l.writeAndSyncFileOps(l.file, buffer)
 	l.fileOps.Unlock()
 	batch := l.pending
 	l.pending = nil
@@ -93,6 +87,25 @@ func (l *Log) syncLocked() (*syncBatch, error) {
 	}
 	l.unsynced = 0
 	return batch, nil
+}
+
+// writeAndSyncFileOps writes buffer to file and fsyncs it. It must be called
+// with fileOps held. A write or sync failure is latched in writeFailed inside
+// the same fileOps critical section, so a writer that was waiting on fileOps
+// (e.g. the roll path's syncLocked) cannot write and ack a later batch on top
+// of a possibly torn region.
+func (l *Log) writeAndSyncFileOps(file *os.File, buffer []byte) error {
+	if l.writeFailed != nil {
+		return l.writeFailed
+	}
+	err := writeFull(file, buffer)
+	if err == nil {
+		err = file.Sync()
+	}
+	if err != nil {
+		l.writeFailed = err
+	}
+	return err
 }
 
 func completeBatch(batch *syncBatch, err error) {
