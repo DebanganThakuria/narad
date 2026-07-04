@@ -30,6 +30,10 @@ type impl struct {
 	deps Deps
 }
 
+// Compile-time check: the startup create gate (see CreateGater) must
+// stay reachable through the facade via the embedded topics.Manager.
+var _ CreateGater = (*impl)(nil)
+
 // New constructs a Broker from the supplied dependencies. It
 // validates required fields and TopicConfig bounds, then wires each
 // sub-manager with the slice of dependencies it needs.
@@ -84,7 +88,7 @@ func New(d Deps) (Broker, error) {
 	}
 
 	return &impl{
-		Manager:     topics.NewManager(d.DataDir, d.Metastore, assigner, d.Schemas, d.ConsumerOffsets, logs, topicCfg, d.Logger),
+		Manager:     topics.NewManager(d.DataDir, d.Metastore, assigner, d.Schemas, d.ConsumerOffsets, logs, topicCfg, d.Logger, d.SelfID),
 		Engine:      messaging.NewEngine(d.Metastore, d.Schemas, d.Partitions, d.ConsumerOffsets, logs, ingressManager, d.Metrics, d.Logger, d.SelfID),
 		Snapshotter: runtime.NewSnapshotter(d.Metastore, d.ConsumerOffsets, logs, d.Logger, d.SelfID),
 		Lifecycle:   lifecycle,

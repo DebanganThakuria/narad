@@ -67,7 +67,10 @@ func encodeFrame(records [][]byte, baseOffset int64, c codec.Codec) ([]byte, err
 	inner = encodeRecordsPayload(inner, records)
 	encoded := c.Encode(nil, inner)
 
-	if len(inner) > (1<<31)-1 || len(encoded) > (1<<31)-1 {
+	// Mirror decodeHeader's read-time bound: a frame past maxFrameBytes
+	// would be written but rejected as corrupt on every read (a poison
+	// frame), so refuse it at write time instead.
+	if len(inner) > maxFrameBytes || len(encoded) > maxFrameBytes {
 		return nil, fmt.Errorf("storage: frame too large: uncompressed=%d compressed=%d", len(inner), len(encoded))
 	}
 

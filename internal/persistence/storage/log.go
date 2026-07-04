@@ -140,10 +140,35 @@ type Log struct {
 	hwmMu         sync.Mutex
 	lastHWMSync   time.Time
 	hwmPath       string
+	hwmDirSynced  bool // guarded by hwmMu; set after the first hwm-file dir fsync
 	flusher       *flusher
 	reaper        *reaper
 
-	notify chan struct{}
+	// notify is the current broadcast channel for "new records may be
+	// available" wake-ups. It is closed and replaced (under notifyMu)
+	// on every notification so ALL waiters wake, not just one; waiters
+	// must re-fetch via NotifyC before every wait.
+	//
+	// notifyWaiters records whether NotifyC handed out the current
+	// channel since the last broadcast. When clear, notifyAll no-ops so
+	// the append hot path pays zero allocations when nobody long-polls.
+	// Sound because NotifyC and notifyAll serialize on notifyMu and
+	// waiters snapshot the channel BEFORE their final data probe: a
+	// broadcast ordered before NotifyC is not needed (the probe sees the
+	// data), and one ordered after sees the flag set.
+	notifyMu      sync.Mutex
+	notify        chan struct{}
+	notifyWaiters bool
+
+	// appendGate makes Append/AppendBatch atomic with respect to Close:
+	// appends hold the read side across the closed-check + buffer push,
+	// and Close takes the write side after flipping closed and before
+	// signalling the flusher's final drain. An append that observed
+	// closed=false is therefore guaranteed to have its record in the
+	// buffer before the final drain runs (acked ⇒ flushed), and an
+	// append that loses the race observes closed=true and returns
+	// ErrLogClosed.
+	appendGate sync.RWMutex
 
 	// Per-partition bounded LRU of decoded frames. Lets concurrent
 	// consumers reading records of the same frame share one decode
@@ -187,7 +212,7 @@ func NewLog(dir string, opts Options) (*Log, error) {
 		codec:          opts.Codec,
 		opts:           opts,
 		segmentIndexes: make(map[int64]*segmentIndex),
-		notify:         make(chan struct{}, 1),
+		notify:         make(chan struct{}),
 		hwmPath:        hwmFilePath(dir),
 		frameCache:     newFrameCache(maxDecodeCacheFrames, maxDecodeCacheBytes),
 		navCache:       newNavCache(maxNavCacheEntries),
@@ -219,10 +244,42 @@ func NewLog(dir string, opts Options) (*Log, error) {
 	return l, nil
 }
 
-// NotifyC fires whenever new records become available — pushed into
-// the buffer or flushed to disk. Buffered (size 1); wake-ups
-// coalesce.
-func (l *Log) NotifyC() <-chan struct{} { return l.notify }
+// NotifyC returns the current broadcast channel. It is CLOSED (never
+// sent on) whenever new records may have become available — pushed
+// into the buffer, flushed to disk, made visible by an HWM advance,
+// or on Wake/Close — so every waiter blocked on it wakes at once.
+// Because the channel is replaced after each broadcast, callers must
+// fetch it BEFORE checking for data and re-fetch it before every
+// subsequent wait.
+func (l *Log) NotifyC() <-chan struct{} {
+	l.notifyMu.Lock()
+	l.notifyWaiters = true
+	ch := l.notify
+	l.notifyMu.Unlock()
+	return ch
+}
+
+// notifyAll broadcasts to every goroutine blocked on the channel
+// returned by NotifyC: it closes the current channel and installs a
+// fresh one for the next round of waiters. When no one fetched the
+// current channel (notifyWaiters clear) there is nothing to wake, so it
+// returns without touching the channel — keeping Append/AppendBatch/
+// AdvanceHighWatermark allocation-free in the no-waiter common case.
+func (l *Log) notifyAll() {
+	l.notifyMu.Lock()
+	if l.notifyWaiters {
+		close(l.notify)
+		l.notify = make(chan struct{})
+		l.notifyWaiters = false
+	}
+	l.notifyMu.Unlock()
+}
+
+// Wake broadcasts to long-poll waiters without any log-state change.
+// Used when records become deliverable again for reasons the log
+// cannot see — e.g. an in-flight reservation's visibility timeout
+// expired. Safe to call concurrently and after Close.
+func (l *Log) Wake() { l.notifyAll() }
 
 func (l *Log) findSegmentLocked(baseOffset int64) *segment {
 	for _, s := range l.segments {

@@ -23,6 +23,11 @@ type flusher struct {
 	mu            *sync.RWMutex
 	lastSync      time.Time
 	unsyncedBytes int64
+
+	// closeErr records the final shutdown drain's error so Close can
+	// surface it. Written only by run() before done closes; read only
+	// after waitDone returns.
+	closeErr error
 }
 
 func newFlusher(log *Log, mu *sync.RWMutex, interval time.Duration) *flusher {
@@ -90,7 +95,7 @@ func (f *flusher) run() {
 			continue
 		case <-timer.C:
 		case <-f.stop:
-			_ = f.drainOnce(true, true)
+			f.closeErr = f.drainOnce(true, true)
 			return
 		}
 		_ = f.drainOnce(false, forceDrain)
@@ -105,7 +110,9 @@ func (f *flusher) run() {
 }
 
 func (f *flusher) drainOnce(forceSync, forceDrain bool) error {
-	if !forceDrain && !f.log.buffer.shouldFlushByAge(f.timerFlushAge()) {
+	// A pending flushing snapshot means an earlier writeBatch failed;
+	// retry it on every drain regardless of buffer thresholds.
+	if !forceDrain && !f.log.hasPendingFlushing() && !f.log.buffer.shouldFlushByAge(f.timerFlushAge()) {
 		if err := f.syncIfNeeded(forceSync, nil); err != nil {
 			return err
 		}
@@ -136,7 +143,43 @@ func (f *flusher) timerFlushAge() time.Duration {
 	return age
 }
 
+// maxFrameInnerBytes caps the record payload packed into a single frame.
+// decodeHeader rejects frames over maxFrameBytes as corrupt, so a larger
+// frame would be written but never readable again (a poison frame). Half
+// the read limit leaves ample headroom for codec expansion on
+// incompressible payloads. Var (not const) only so tests can shrink it.
+var maxFrameInnerBytes = maxFrameBytes / 2
+
+// frameSplitLen returns how many leading records fit within
+// maxFrameInnerBytes of encoded payload. Always at least 1, so a single
+// oversized record surfaces as an encodeFrame error instead of looping.
+func frameSplitLen(records [][]byte) int {
+	size := 0
+	for i, r := range records {
+		size += 4 + len(r)
+		if size > maxFrameInnerBytes && i > 0 {
+			return i
+		}
+	}
+	return len(records)
+}
+
+// writeBatch writes the drained batch as one or more frames, splitting
+// so every frame stays under the decodeHeader read limit. Offsets stay
+// continuous across the split frames.
 func (f *flusher) writeBatch(records [][]byte, baseOffset int64, forceSync bool) error {
+	for len(records) > 0 {
+		n := frameSplitLen(records)
+		if err := f.writeFrame(records[:n], baseOffset, forceSync); err != nil {
+			return err
+		}
+		baseOffset += int64(n)
+		records = records[n:]
+	}
+	return nil
+}
+
+func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool) error {
 	flushStart := time.Now()
 	frame, err := encodeFrame(records, baseOffset, f.log.codec)
 	if err != nil {
@@ -163,7 +206,7 @@ func (f *flusher) writeBatch(records [][]byte, baseOffset int64, forceSync bool)
 		framePos:          pos,
 		frameLen:          int32(n),
 	})
-	f.log.clearFlushing(baseOffset, len(records))
+	f.log.clearFlushingThrough(baseOffset + int64(len(records)))
 	shouldRoll := active.sizeBytes >= f.log.opts.SegmentBytes
 
 	if m := f.log.opts.Metrics; m != nil {
@@ -191,10 +234,7 @@ func (f *flusher) writeBatch(records [][]byte, baseOffset int64, forceSync bool)
 		f.mu.Unlock()
 	}
 
-	select {
-	case f.log.notify <- struct{}{}:
-	default:
-	}
+	f.log.notifyAll()
 	return nil
 }
 

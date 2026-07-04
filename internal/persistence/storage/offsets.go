@@ -34,9 +34,8 @@ func (l *Log) AdvanceHighWatermark(newHWM int64) error {
 	for newHWM > cur && !l.highWatermark.CompareAndSwap(cur, newHWM) {
 		cur = l.highWatermark.Load()
 	}
-	select {
-	case l.notify <- struct{}{}:
-	default:
-	}
+	// Broadcast: one commit can make many records visible, so EVERY
+	// long-poll waiter must wake and re-check, not just one.
+	l.notifyAll()
 	return nil
 }

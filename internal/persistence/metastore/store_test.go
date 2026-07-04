@@ -251,6 +251,36 @@ func TestListTopicsPaginated(t *testing.T) {
 	}
 }
 
+func TestListTopicsPaginationAfterTokenTopicDeleted(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for _, name := range []string{"aaa", "bbb", "ccc", "ddd"} {
+		if err := s.CreateTopic(ctx, topic.Topic{Name: name, Partitions: 1}); err != nil {
+			t.Fatalf("CreateTopic %s: %v", name, err)
+		}
+	}
+
+	page1, tok, err := s.ListTopics(ctx, metastore.ListOptions{Limit: 2})
+	if err != nil || len(page1) != 2 || tok != "bbb" {
+		t.Fatalf("page1: topics=%v tok=%q err=%v", page1, tok, err)
+	}
+
+	// Deleting the page-token topic between pages must not skip the topic
+	// that Seek lands on next.
+	if err := s.DeleteTopic(ctx, tok); err != nil {
+		t.Fatalf("DeleteTopic(%s): %v", tok, err)
+	}
+
+	page2, _, err := s.ListTopics(ctx, metastore.ListOptions{Limit: 2, PageToken: tok})
+	if err != nil {
+		t.Fatalf("page2: %v", err)
+	}
+	if len(page2) != 2 || page2[0].Name != "ccc" || page2[1].Name != "ddd" {
+		t.Fatalf("page2 = %+v, want ccc,ddd", page2)
+	}
+}
+
 func TestSchemas(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

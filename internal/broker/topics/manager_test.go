@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/consumer"
@@ -26,6 +28,7 @@ type fakeMetastore struct {
 	schemas              map[string]map[int][]byte
 	createTopicErr       error
 	updateTopicErr       error
+	updateTopicHook      func()
 	deleteTopicErr       error
 	getTopicErr          error
 	putSchemaErr         error
@@ -54,6 +57,9 @@ func (f *fakeMetastore) CreateTopic(_ context.Context, t topic.Topic) error {
 }
 
 func (f *fakeMetastore) UpdateTopic(_ context.Context, t topic.Topic) error {
+	if f.updateTopicHook != nil {
+		f.updateTopicHook()
+	}
 	if f.updateTopicErr != nil {
 		return f.updateTopicErr
 	}
@@ -148,6 +154,7 @@ type fakeSchemaRegistry struct {
 	lastLoadedSchema      []byte
 	lastUnloadedTopic     string
 	lastUnloadedVersion   int
+	lastDroppedTopic      string
 }
 
 func (f *fakeSchemaRegistry) ValidateDefinition(_ context.Context, topic string, raw []byte) error {
@@ -184,6 +191,11 @@ func (f *fakeSchemaRegistry) Unload(_ context.Context, topic string, version int
 	return nil
 }
 
+func (f *fakeSchemaRegistry) DropTopic(_ context.Context, topic string) error {
+	f.lastDroppedTopic = topic
+	return nil
+}
+
 func (f *fakeSchemaRegistry) Validate(_ context.Context, _ string, _ []byte) error {
 	return nil
 }
@@ -197,6 +209,13 @@ func newTestManagerWithAssigner(t *testing.T, ms *fakeMetastore, assigner Partit
 	if ms == nil {
 		ms = newFakeMetastore()
 	}
+	return newTestManagerForMetastore(t, ms, assigner, reg, "")
+}
+
+// newTestManagerForMetastore accepts any metastore implementation (so
+// tests can wrap fakeMetastore with assignment support) plus a selfID.
+func newTestManagerForMetastore(t *testing.T, ms metastore.Metastore, assigner PartitionAssigner, reg schema.Registry, selfID string) *Manager {
+	t.Helper()
 	if reg == nil {
 		reg = &fakeSchemaRegistry{}
 	}
@@ -220,6 +239,7 @@ func newTestManagerWithAssigner(t *testing.T, ms *fakeMetastore, assigner Partit
 			DefaultMaxAckedAheadPerPartition: 11,
 		},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		selfID,
 	)
 }
 
@@ -364,6 +384,10 @@ func TestCreateTopic_RejectsInvalidInputs(t *testing.T) {
 		want string
 	}{
 		{name: "missing name", opts: CreateOpts{}, want: "name required"},
+		{name: "path separator", opts: CreateOpts{Name: "orders/nested"}, want: "topic name must match"},
+		{name: "dot dot", opts: CreateOpts{Name: ".."}, want: `topic name must not be ".."`},
+		{name: "dot", opts: CreateOpts{Name: "."}, want: `topic name must not be "."`},
+		{name: "space", opts: CreateOpts{Name: "or ders"}, want: "topic name must match"},
 		{name: "negative partitions", opts: CreateOpts{Name: testTopicName, Partitions: -1}, want: "partitions must be >= 3"},
 		{name: "partitions over max", opts: CreateOpts{Name: testTopicName, Partitions: 33}, want: "exceeds topic.max_partitions"},
 		{name: "negative retention", opts: CreateOpts{Name: testTopicName, RetentionMs: -1}, want: "retention_ms must be >= 0"},
@@ -574,7 +598,8 @@ func TestUpdateTopicSchema_RejectsEmptyOrInvalidSchema(t *testing.T) {
 func TestDeleteTopic_RemovesTopicAndDirectory(t *testing.T) {
 	ms := newFakeMetastore()
 	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
-	manager := newTestManager(t, ms, nil)
+	reg := &fakeSchemaRegistry{}
+	manager := newTestManager(t, ms, reg)
 	topicDir := filepath.Join(manager.dataDir, "topics", testTopicName)
 	if err := os.MkdirAll(topicDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
@@ -589,6 +614,86 @@ func TestDeleteTopic_RemovesTopicAndDirectory(t *testing.T) {
 	}
 	if _, statErr := os.Stat(topicDir); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("topic dir stat error = %v, want not exists", statErr)
+	}
+	if reg.lastDroppedTopic != testTopicName {
+		t.Fatalf("schema DropTopic() topic = %q, want %q (deleted topic's schemas must not survive in the registry)", reg.lastDroppedTopic, testTopicName)
+	}
+}
+
+func TestPurgeTopic_RejectsNamesEscapingTopicsRoot(t *testing.T) {
+	manager := newTestManager(t, newFakeMetastore(), nil)
+	marker := filepath.Join(manager.dataDir, "marker")
+	if err := os.WriteFile(marker, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	topicDir := filepath.Join(manager.dataDir, "topics", testTopicName)
+	if err := os.MkdirAll(topicDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	// ".." resolves to the data dir itself, "." to the topics root, and a
+	// separator to a nested path — RemoveAll on any of them would destroy
+	// data far beyond a single topic.
+	for _, name := range []string{"..", ".", "nested/" + testTopicName} {
+		if err := manager.PurgeTopic(context.Background(), name); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("PurgeTopic(%q) error = %v, want %v", name, err, ErrInvalid)
+		}
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("data dir marker stat error = %v, want data dir untouched", err)
+	}
+	if _, err := os.Stat(topicDir); err != nil {
+		t.Fatalf("topic dir stat error = %v, want topics untouched", err)
+	}
+}
+
+func TestTopicUpdatesAreSerializedPerName(t *testing.T) {
+	ms := newFakeMetastore()
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3, RetentionMs: 1000}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	ms.updateTopicHook = func() {
+		once.Do(func() {
+			close(entered)
+			<-release
+		})
+	}
+	manager := newTestManager(t, ms, nil)
+
+	increaseDone := make(chan error, 1)
+	go func() {
+		_, err := manager.IncreaseTopicPartitions(context.Background(), testTopicName, 5)
+		increaseDone <- err
+	}()
+	<-entered // partition increase is now mid-write, holding the name lock
+
+	retentionDone := make(chan error, 1)
+	go func() {
+		_, err := manager.UpdateTopicRetention(context.Background(), testTopicName, 2000)
+		retentionDone <- err
+	}()
+
+	// The retention update must block on the per-name lock while the
+	// partition increase is mid-write; completing here means it read the
+	// pre-increase record and will blindly overwrite the new partition
+	// count (lost update).
+	select {
+	case err := <-retentionDone:
+		t.Fatalf("UpdateTopicRetention() finished during concurrent IncreaseTopicPartitions (err = %v), want it serialized", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-increaseDone; err != nil {
+		t.Fatalf("IncreaseTopicPartitions() error = %v", err)
+	}
+	if err := <-retentionDone; err != nil {
+		t.Fatalf("UpdateTopicRetention() error = %v", err)
+	}
+	final := ms.topics[testTopicName]
+	if final.Partitions != 5 || final.RetentionMs != 2000 {
+		t.Fatalf("final topic = %+v, want partitions=5 retention_ms=2000 (one update was lost)", final)
 	}
 }
 

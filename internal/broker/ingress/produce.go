@@ -3,6 +3,7 @@ package ingress
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync/atomic"
 	"time"
@@ -55,6 +56,18 @@ func OpenManager(dataDir string, opts wal.Options) (*Manager, error) {
 	if err != nil {
 		_ = log.Close()
 		return nil, err
+	}
+	// A checkpoint ahead of the recovered WAL means segments were removed
+	// while the checkpoint survived; new records would get seqs below the
+	// checkpoint and silently never be dispatched.
+	checkpoint, err := loadCheckpoint(filepath.Join(produceDir, produceCheckpointFile))
+	if err != nil {
+		_ = log.Close()
+		return nil, err
+	}
+	if checkpoint > nextSeq {
+		_ = log.Close()
+		return nil, fmt.Errorf("ingress: produce checkpoint %d is ahead of recovered WAL next seq %d (missing WAL segments?)", checkpoint, nextSeq)
 	}
 	manager := &Manager{
 		produceDir: produceDir,

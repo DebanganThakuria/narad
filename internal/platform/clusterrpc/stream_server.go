@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 )
@@ -92,7 +93,18 @@ func (c *streamServerConn) writeError(requestID uint64, message string) {
 func (c *streamServerConn) writeFrame(frame clusterwire.StreamFrame) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if err := clusterwire.WriteStreamFrame(c.conn, frame); err != nil && c.logger != nil {
-		c.logger.Debug("cluster stream write", "err", err)
+	// Bound reply writes (mirrors the client's write-deadline convention):
+	// each request frame spawns a reply goroutine, so a stalled peer must
+	// not pile them up on writeMu/flow control until the idle timeout.
+	_ = c.conn.SetWriteDeadline(time.Now().Add(defaultStreamTimeout))
+	err := clusterwire.WriteStreamFrame(c.conn, frame)
+	_ = c.conn.SetWriteDeadline(time.Time{})
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Debug("cluster stream write", "err", err)
+		}
+		// A failed (possibly partial) write corrupts the framing; the
+		// stream is unrecoverable. Closing also unblocks the serve loop.
+		_ = c.conn.Close()
 	}
 }

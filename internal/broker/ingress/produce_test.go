@@ -2,6 +2,7 @@ package ingress
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -334,7 +335,13 @@ func TestManagerProduceCheckpointPersists(t *testing.T) {
 	if nextSeq != 0 {
 		t.Fatalf("initial checkpoint = %d, want 0", nextSeq)
 	}
-	if err := manager.StoreProduceCheckpoint(42); err != nil {
+	if _, err := manager.AcceptProduce(context.Background(), "orders", "k1", 0, []byte(`{"id":1}`)); err != nil {
+		t.Fatalf("AcceptProduce(first) error = %v", err)
+	}
+	if _, err := manager.AcceptProduce(context.Background(), "orders", "k2", 0, []byte(`{"id":2}`)); err != nil {
+		t.Fatalf("AcceptProduce(second) error = %v", err)
+	}
+	if err := manager.StoreProduceCheckpoint(2); err != nil {
 		t.Fatalf("StoreProduceCheckpoint() error = %v", err)
 	}
 	if err := manager.Close(); err != nil {
@@ -351,8 +358,48 @@ func TestManagerProduceCheckpointPersists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopened LoadProduceCheckpoint() error = %v", err)
 	}
-	if nextSeq != 42 {
-		t.Fatalf("checkpoint = %d, want 42", nextSeq)
+	if nextSeq != 2 {
+		t.Fatalf("checkpoint = %d, want 2", nextSeq)
+	}
+}
+
+func TestOpenManagerRejectsCheckpointAheadOfWAL(t *testing.T) {
+	dir := t.TempDir()
+	manager, err := OpenManager(dir, testWALOptions())
+	if err != nil {
+		t.Fatalf("OpenManager() error = %v", err)
+	}
+	if _, err := manager.AcceptProduce(context.Background(), "orders", "k1", 0, []byte(`{"id":1}`)); err != nil {
+		t.Fatalf("AcceptProduce() error = %v", err)
+	}
+	if err := manager.StoreProduceCheckpoint(1); err != nil {
+		t.Fatalf("StoreProduceCheckpoint() error = %v", err)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	// Remove the WAL segments while the checkpoint survives; new records
+	// would get seqs below the checkpoint and never be dispatched.
+	segments, err := filepath.Glob(filepath.Join(produceWALDir(dir), "*.wal"))
+	if err != nil {
+		t.Fatalf("Glob() error = %v", err)
+	}
+	if len(segments) == 0 {
+		t.Fatal("expected at least one WAL segment")
+	}
+	for _, segment := range segments {
+		if err := os.Remove(segment); err != nil {
+			t.Fatalf("Remove(%s) error = %v", segment, err)
+		}
+	}
+
+	_, err = OpenManager(dir, testWALOptions())
+	if err == nil {
+		t.Fatal("OpenManager() error = nil, want checkpoint ahead of WAL error")
+	}
+	if !strings.Contains(err.Error(), "checkpoint") {
+		t.Fatalf("OpenManager() error = %v, want checkpoint mismatch error", err)
 	}
 }
 

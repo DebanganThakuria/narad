@@ -45,7 +45,14 @@ func (c *Controller) assignTopic(ctx context.Context, topicName string, numParti
 		return
 	}
 
-	existing, _ := c.store.ListAssignments(topicName)
+	existing, err := c.store.ListAssignments(topicName)
+	if err != nil {
+		// A transient read failure must not make every partition look
+		// unassigned: round-robin could then hand a partition whose data
+		// lives on its current owner's disk to a different member. Skip
+		// this topic; the next reconcile tick retries.
+		return
+	}
 	assigned := make(map[int]bool, len(existing))
 	for _, a := range existing {
 		assigned[a.Partition] = true

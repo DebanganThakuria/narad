@@ -75,6 +75,22 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 	start := time.Now()
 	deadline := start.Add(opts.Wait)
 	for {
+		// Fetch the notify channels BEFORE probing for data. The
+		// channels are close-and-replace broadcasts, so a snapshot
+		// taken after an empty probe could miss a wake-up that fired
+		// in between; fetching first guarantees any post-probe
+		// activity closes a channel we are (about to be) waiting on.
+		// Re-fetched every iteration because each broadcast installs a
+		// fresh channel.
+		var notifyChans []<-chan struct{}
+		if opts.Wait > 0 {
+			notifyChans, err = e.notifyChannels(topicName, scan)
+			if err != nil {
+				totalOutcome = "error"
+				return topic.Message{}, false, err
+			}
+		}
+
 		stageStart = time.Now()
 		msg, found, err := e.tryQueueRead(ctx, topicName, scan, scanStart, visibilityTimeout)
 		e.observe("consume", "try_queue_read", consumeStageOutcome(found, err), time.Since(stageStart))
@@ -105,7 +121,7 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 			return topic.Message{}, false, nil
 		}
 		stageStart = time.Now()
-		if err := e.waitForActivity(ctx, topicName, scan, remaining); err != nil {
+		if err := e.waitForActivity(ctx, notifyChans, remaining); err != nil {
 			e.observe("consume", "wait_for_activity", waitOutcome(err), time.Since(stageStart))
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 				outcome := "timeout"
@@ -201,66 +217,87 @@ func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions 
 		if err != nil {
 			return topic.Message{}, false, err
 		}
-		stageStart = time.Now()
-		res, err := e.offsets.ReserveNext(ctx, topicName, idx, visibilityTimeout, log.HighWatermark())
-		e.observe("consume", "reserve_next", reserveOutcome(res, err), time.Since(stageStart))
-		if err != nil {
-			return topic.Message{}, false, err
-		}
-		if !res.Reserved {
-			if e.metrics != nil {
-				e.metrics.IncReserveSkipped(topicName, res.SkipReason)
+		for {
+			stageStart = time.Now()
+			res, err := e.offsets.ReserveNext(ctx, topicName, idx, visibilityTimeout, log.HighWatermark())
+			e.observe("consume", "reserve_next", reserveOutcome(res, err), time.Since(stageStart))
+			if err != nil {
+				return topic.Message{}, false, err
 			}
-			continue // partition empty, fully reserved, or in-flight cap hit
-		}
-		stageStart = time.Now()
-		payload, err := log.Read(res.Offset)
-		e.observe("consume", "storage_read", observeOutcome(err), time.Since(stageStart))
-		if err != nil {
-			// A permanently-unreadable (corrupt) frame, or a gap left by a
-			// corrupt frame recovery skipped, would otherwise head-of-line-block
-			// this partition forever (the offset can never be acked). Skip past
-			// it — recorded loss, never silent — and resume on the next poll.
-			// Transient errors (I/O, log closed) are returned for retry.
-			if storage.IsCorrupt(err) || errors.Is(err, storage.ErrOffsetNotFound) {
-				if serr := e.offsets.SkipCorrupt(topicName, idx, res.Offset, res.Nonce); serr != nil {
-					return topic.Message{}, false, serr
+			if !res.Reserved {
+				if e.metrics != nil {
+					e.metrics.IncReserveSkipped(topicName, res.SkipReason)
 				}
-				e.metrics.IncCorruptSkipped(topicName, idx)
-				e.logger.Warn("skipped permanently-unreadable record",
-					"topic", topicName, "partition", idx, "offset", res.Offset, "err", err)
-				continue
+				break // partition empty, fully reserved, or in-flight cap hit — try the next one
 			}
-			return topic.Message{}, false, err
-		}
-		return topic.Message{
-			Topic:     topicName,
-			Partition: idx,
-			Offset:    res.Offset,
-			Payload:   payload,
-			Timestamp: time.Now().Unix(),
-			ReceiptHandle: consumer.EncodeHandle(consumer.Handle{
+			stageStart = time.Now()
+			payload, err := log.Read(res.Offset)
+			e.observe("consume", "storage_read", observeOutcome(err), time.Since(stageStart))
+			if err != nil {
+				// A permanently-unreadable (corrupt) frame, or a gap left by a
+				// corrupt frame recovery skipped, would otherwise head-of-line-block
+				// this partition forever (the offset can never be acked). Skip past
+				// it — recorded loss, never silent — and retry the SAME partition:
+				// the record after the skipped frame may be immediately deliverable,
+				// and moving on could stall a long-poll for the full Wait even
+				// though data is available here. Transient errors (I/O, log
+				// closed) are returned for retry.
+				if storage.IsCorrupt(err) || errors.Is(err, storage.ErrOffsetNotFound) {
+					if serr := e.offsets.SkipCorrupt(topicName, idx, res.Offset, res.Nonce); serr != nil {
+						return topic.Message{}, false, serr
+					}
+					if e.metrics != nil {
+						e.metrics.IncCorruptSkipped(topicName, idx)
+					}
+					e.logger.Warn("skipped permanently-unreadable record",
+						"topic", topicName, "partition", idx, "offset", res.Offset, "err", err)
+					continue
+				}
+				return topic.Message{}, false, err
+			}
+			return topic.Message{
+				Topic:     topicName,
 				Partition: idx,
 				Offset:    res.Offset,
-				Nonce:     res.Nonce,
-			}),
-		}, true, nil
+				Payload:   payload,
+				Timestamp: time.Now().Unix(),
+				ReceiptHandle: consumer.EncodeHandle(consumer.Handle{
+					Partition: idx,
+					Offset:    res.Offset,
+					Nonce:     res.Nonce,
+				}),
+			}, true, nil
+		}
 	}
 	return topic.Message{}, false, nil
 }
 
-// waitForActivity blocks until any of the partitions' notify channels
-// fires, the timeout elapses, or ctx is cancelled.
-func (e *Engine) waitForActivity(ctx context.Context, topicName string, partitions []int, timeout time.Duration) error {
-	cases := make([]reflect.SelectCase, 0, len(partitions)+2)
+// notifyChannels snapshots the partitions' current broadcast notify
+// channels. The snapshot must be taken before probing for data (see
+// Consume) and re-taken before every wait, because each broadcast
+// closes the channel and installs a fresh one.
+func (e *Engine) notifyChannels(topicName string, partitions []int) ([]<-chan struct{}, error) {
+	chans := make([]<-chan struct{}, 0, len(partitions))
 	for _, idx := range partitions {
 		log, err := e.logs.Get(topicName, idx)
 		if err != nil {
-			return err
+			return nil, err
 		}
+		chans = append(chans, log.NotifyC())
+	}
+	return chans, nil
+}
+
+// waitForActivity blocks until any of the given broadcast channels is
+// closed, the timeout elapses, or ctx is cancelled. The channels are
+// closed (never sent on) to wake ALL waiters at once — a single commit
+// can make records available to many blocked long-pollers.
+func (e *Engine) waitForActivity(ctx context.Context, notifyChans []<-chan struct{}, timeout time.Duration) error {
+	cases := make([]reflect.SelectCase, 0, len(notifyChans)+2)
+	for _, ch := range notifyChans {
 		cases = append(cases, reflect.SelectCase{
 			Dir:  reflect.SelectRecv,
-			Chan: reflect.ValueOf(log.NotifyC()),
+			Chan: reflect.ValueOf(ch),
 		})
 	}
 	timer := time.NewTimer(timeout)

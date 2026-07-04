@@ -129,6 +129,57 @@ func TestQueueConsumeSkipsCorruptFrameEndToEnd(t *testing.T) {
 	}
 }
 
+// After skipping a permanently-unreadable frame, the SAME poll must retry
+// the partition and deliver the next healthy record. Falling through to the
+// next partition instead would return empty and leave a long-poll blocked in
+// waitForActivity for the full Wait even though data is deliverable now.
+func TestQueueConsumeCorruptSkipDeliversNextRecordInSamePoll(t *testing.T) {
+	dataDir := t.TempDir()
+	const topicName = "orders"
+
+	payloads := [][]byte{
+		[]byte(`{"id":1,"m":"AAAAAAAAAAAA"}`), // this frame will be corrupted
+		[]byte(`{"id":2,"m":"BBBBBBBBBBBB"}`),
+	}
+	corruptMarker := []byte("AAAAAAAAAAAA")
+
+	logs1 := runtime.NewLogs(dataDir, storage.Options{FlushInterval: 5 * time.Millisecond}, nil, nil)
+	log1, err := logs1.Get(topicName, 0)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for i, p := range payloads {
+		if _, err := log1.Append(p); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+		if err := log1.Sync(); err != nil { // one Sync => one frame
+			t.Fatalf("Sync %d: %v", i, err)
+		}
+	}
+	if err := log1.AdvanceHighWatermark(int64(len(payloads))); err != nil {
+		t.Fatalf("AdvanceHighWatermark: %v", err)
+	}
+	if err := logs1.CloseAll(); err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+	corruptRecordPayloadOnDisk(t, dataDir, topicName, 0, corruptMarker)
+
+	ms := newMessagingFakeMetastore()
+	ms.topics[topicName] = topic.Topic{Name: topicName, Partitions: 1, VisibilityTimeoutMs: 60_000}
+	engine := newTestEngineWithDir(t, dataDir, ms, nil, nil)
+
+	msg, found, err := engine.Consume(context.Background(), topicName, ConsumeOpts{Wait: 0})
+	if err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	if !found {
+		t.Fatal("Consume() found = false, want the healthy record right after the skipped corrupt frame in the same poll")
+	}
+	if msg.Offset != 1 || string(msg.Payload) != string(payloads[1]) {
+		t.Fatalf("Consume() = offset %d payload %q, want offset 1 payload %q", msg.Offset, msg.Payload, payloads[1])
+	}
+}
+
 // counterTotal sums all label series of a named counter from the registry.
 func counterTotal(t *testing.T, reg *prometheus.Registry, name string) float64 {
 	t.Helper()

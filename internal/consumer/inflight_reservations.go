@@ -57,6 +57,12 @@ func (f *InFlight) ReserveNext(ctx context.Context, topic string, partition int,
 // CommitHandle verifies the nonce and commits the offset atomically.
 // When the frontier advances, onCommit is called to persist the new
 // committed offset to the .offsets log.
+//
+// Removing a live reservation frees a MaxInFlight cap slot, so on
+// success the release notifier fires too: a long-poller parked because
+// the partition was at cap must be woken by the ack, not left sleeping
+// out its full Wait. Like the purger, the notifier is invoked only
+// after all shard locks are released (see ReleaseFunc).
 func (f *InFlight) CommitHandle(topic string, partition int, offset, nonce int64) error {
 	sh := f.getShard(topic, partition)
 	if sh == nil {
@@ -79,6 +85,7 @@ func (f *InFlight) CommitHandle(topic string, partition int, offset, nonce int64
 		if f.onCommit != nil {
 			f.onCommit(topic, partition, advance)
 		}
+		f.notifyRelease(topic, partition)
 		return nil
 	}
 
@@ -91,7 +98,18 @@ func (f *InFlight) CommitHandle(topic string, partition int, offset, nonce int64
 	}
 	delete(sh.entries, offset)
 	sh.mu.Unlock()
+	f.notifyRelease(topic, partition)
 	return nil
+}
+
+// notifyRelease invokes the release notifier for (topic, partition), if
+// one is registered. Callers must NOT hold any shard lock — the
+// notifier may call back into log wake-up paths (deadlock discipline
+// documented on SetReleaseNotifier and ReleaseFunc).
+func (f *InFlight) notifyRelease(topic string, partition int) {
+	if notify := f.releaseNotifier(); notify != nil {
+		notify(topic, partition)
+	}
 }
 
 // SkipCorrupt advances the committed frontier past an offset whose on-disk
@@ -128,6 +146,7 @@ func (f *InFlight) SkipCorrupt(topic string, partition int, offset, nonce int64)
 		if f.onCommit != nil {
 			f.onCommit(topic, partition, advance)
 		}
+		f.notifyRelease(topic, partition)
 		return nil
 	}
 
@@ -142,6 +161,7 @@ func (f *InFlight) SkipCorrupt(topic string, partition int, offset, nonce int64)
 	}
 	delete(sh.entries, offset)
 	sh.mu.Unlock()
+	f.notifyRelease(topic, partition)
 	return nil
 }
 

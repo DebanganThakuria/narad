@@ -13,6 +13,11 @@ const (
 	frameHeaderSize        = 20
 )
 
+// errCorruptFrame marks frame validation failures (bad magic, bad length,
+// checksum mismatch) as opposed to I/O errors. Open-time recovery treats a
+// corrupt frame in the last (active) segment as a torn tail to truncate.
+var errCorruptFrame = errors.New("corrupt frame")
+
 func appendFrame(dst []byte, seq uint64, payload []byte) []byte {
 	start := len(dst)
 	size := frameHeaderSize + len(payload)
@@ -46,14 +51,14 @@ func readFrame(r io.Reader, segmentBase uint64, offset int64, maxRecord int) (Re
 		return Record{}, false, fmt.Errorf("wal: read frame header: %w", err)
 	}
 	if got := binary.BigEndian.Uint32(header[0:4]); got != frameMagic {
-		return Record{}, false, fmt.Errorf("wal: bad frame magic at offset %d", offset)
+		return Record{}, false, fmt.Errorf("wal: bad frame magic at offset %d: %w", offset, errCorruptFrame)
 	}
 	n := binary.BigEndian.Uint32(header[4:8])
 	if n == 0 {
-		return Record{}, false, fmt.Errorf("wal: empty frame at offset %d", offset)
+		return Record{}, false, fmt.Errorf("wal: empty frame at offset %d: %w", offset, errCorruptFrame)
 	}
 	if int(n) > maxRecord {
-		return Record{}, false, fmt.Errorf("wal: frame size %d exceeds max %d", n, maxRecord)
+		return Record{}, false, fmt.Errorf("wal: frame size %d exceeds max %d: %w", n, maxRecord, errCorruptFrame)
 	}
 	seq := binary.BigEndian.Uint64(header[8:16])
 	wantCRC := binary.BigEndian.Uint32(header[16:20])
@@ -65,7 +70,7 @@ func readFrame(r io.Reader, segmentBase uint64, offset int64, maxRecord int) (Re
 		return Record{}, false, fmt.Errorf("wal: read frame payload: %w", err)
 	}
 	if got := crc32.ChecksumIEEE(payload); got != wantCRC {
-		return Record{}, false, fmt.Errorf("wal: checksum mismatch at offset %d", offset)
+		return Record{}, false, fmt.Errorf("wal: checksum mismatch at offset %d: %w", offset, errCorruptFrame)
 	}
 	return Record{
 		ID:      RecordID{SegmentBase: segmentBase, Offset: offset, Seq: seq},

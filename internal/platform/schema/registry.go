@@ -15,5 +15,6 @@ type Registry interface {
 	Register(ctx context.Context, topic string, schema []byte) (version int, err error)
 	Load(ctx context.Context, topic string, version int, schema []byte) error
 	Unload(ctx context.Context, topic string, version int) error
+	DropTopic(ctx context.Context, topic string) error
 	Validate(ctx context.Context, topic string, payload []byte) error
 }

@@ -46,9 +46,13 @@ func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prome
 		mux.Handle("GET /metrics", metrics.Endpoint(reg))
 	}
 
+	// Metrics outermost, Recover inside it: a panicking handler is
+	// converted to a 500 by Recover within the metrics measurement
+	// window, so panic storms still show up in requests_total,
+	// request durations, and the 5xx error counter.
 	stack := Chain(
-		Recover(log),
 		metrics.HTTPMiddleware(m),
+		Recover(log),
 	)
 	return stack(mux)
 }

@@ -80,3 +80,49 @@ func TestRPCServerLocalOnlyConsumeTreatsNotOwnerAsEmpty(t *testing.T) {
 		t.Fatalf("status = %d, want %d", res.Status, http.StatusNoContent)
 	}
 }
+
+// RPC frames carry no caller deadline and broker.Consume runs under a
+// Background context here, so an unclamped wire-supplied wait would park
+// this server for however long the peer asked (e.g. 24h). The handler must
+// clamp it to the package's consume wait ceiling.
+func TestRPCServerConsumeClampsExcessiveWait(t *testing.T) {
+	var gotWait time.Duration
+	br := &consumeOnlyBroker{consumeFn: func(_ context.Context, _ string, opts brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+		gotWait = opts.Wait
+		return topic.Message{}, false, nil
+	}}
+	s := &RPCServer{broker: br}
+
+	res := s.handleConsume(encodeConsumeReq(t, nodewire.ConsumeRequest{
+		Topic:     "orders",
+		WaitNanos: int64(24 * time.Hour),
+	}))
+
+	if res.Status != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", res.Status, http.StatusNoContent)
+	}
+	if gotWait != defaultMaxConsumeWait {
+		t.Fatalf("broker wait = %s, want clamped to %s", gotWait, defaultMaxConsumeWait)
+	}
+}
+
+func TestRPCServerConsumeNormalizesNegativeWait(t *testing.T) {
+	var gotWait time.Duration
+	br := &consumeOnlyBroker{consumeFn: func(_ context.Context, _ string, opts brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+		gotWait = opts.Wait
+		return topic.Message{}, false, nil
+	}}
+	s := &RPCServer{broker: br}
+
+	res := s.handleConsume(encodeConsumeReq(t, nodewire.ConsumeRequest{
+		Topic:     "orders",
+		WaitNanos: -int64(time.Second),
+	}))
+
+	if res.Status != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", res.Status, http.StatusNoContent)
+	}
+	if gotWait != 0 {
+		t.Fatalf("broker wait = %s, want 0 for a negative wire wait", gotWait)
+	}
+}

@@ -185,6 +185,10 @@ func (f *fakeSchemas) Unload(_ context.Context, _ string, _ int) error {
 	return nil
 }
 
+func (f *fakeSchemas) DropTopic(_ context.Context, _ string) error {
+	return nil
+}
+
 func (f *fakeSchemas) Validate(_ context.Context, topic string, payload []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -469,7 +473,11 @@ func TestWaitForActivityReturnsDeadlineExceededOnTimeout(t *testing.T) {
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngine(t, ms, nil, nil)
 
-	err := engine.waitForActivity(context.Background(), "orders", []int{0}, 10*time.Millisecond)
+	chans, err := engine.notifyChannels("orders", []int{0})
+	if err != nil {
+		t.Fatalf("notifyChannels() error = %v", err)
+	}
+	err = engine.waitForActivity(context.Background(), chans, 10*time.Millisecond)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("waitForActivity() error = %v, want %v", err, context.DeadlineExceeded)
 	}
@@ -482,7 +490,11 @@ func TestWaitForActivityReturnsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := engine.waitForActivity(ctx, "orders", []int{0}, time.Second)
+	chans, err := engine.notifyChannels("orders", []int{0})
+	if err != nil {
+		t.Fatalf("notifyChannels() error = %v", err)
+	}
+	err = engine.waitForActivity(ctx, chans, time.Second)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("waitForActivity() error = %v, want %v", err, context.Canceled)
 	}
@@ -800,13 +812,13 @@ func TestConsumeRotatesQueueScanStartAcrossLocalPartitions(t *testing.T) {
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, VisibilityTimeoutMs: 1000}
 	engine := newTestEngine(t, ms, nil, nil)
 
-	for partition := 0; partition < 2; partition++ {
+	for partition := range 2 {
 		log, err := engine.logs.Get("orders", partition)
 		if err != nil {
 			t.Fatalf("Get(%d) error = %v", partition, err)
 		}
-		for offset := 0; offset < 2; offset++ {
-			if _, err := log.Append([]byte(fmt.Sprintf(`{"partition":%d,"offset":%d}`, partition, offset))); err != nil {
+		for offset := range 2 {
+			if _, err := log.Append(fmt.Appendf(nil, `{"partition":%d,"offset":%d}`, partition, offset)); err != nil {
 				t.Fatalf("Append(%d,%d) error = %v", partition, offset, err)
 			}
 		}
@@ -889,9 +901,13 @@ func TestWaitForActivityReturnsNilWhenPartitionNotifies(t *testing.T) {
 		t.Fatalf("Get() error = %v", err)
 	}
 
+	chans, err := engine.notifyChannels("orders", []int{0})
+	if err != nil {
+		t.Fatalf("notifyChannels() error = %v", err)
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- engine.waitForActivity(context.Background(), "orders", []int{0}, time.Second)
+		errCh <- engine.waitForActivity(context.Background(), chans, time.Second)
 	}()
 
 	time.Sleep(20 * time.Millisecond)

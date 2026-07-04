@@ -65,13 +65,29 @@ func (c *streamClient) requestFrame(ctx context.Context, frameType clusterwire.S
 	c.observe(operation, "write_frame", "ok", time.Since(stageStart))
 
 	stageStart = time.Now()
+	// A caller without a deadline must not block forever on a peer that
+	// accepted the frame but never replies: fall back to the configured
+	// client timeout for the reply wait. Callers with legitimately longer
+	// waits (e.g. long-poll consume forwards) pass an explicit deadline.
+	var timeoutCh <-chan time.Time
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && c.timeout > 0 {
+		timer := time.NewTimer(c.timeout)
+		defer timer.Stop()
+		timeoutCh = timer.C
+	}
 	select {
 	case result := <-resultCh:
 		c.observe(operation, "wait_reply", observeOutcome(result.err), time.Since(stageStart))
 		return result.frame, result.err
-	case <-ctx.Done():
+	case <-timeoutCh:
 		c.removePending(requestID)
-		c.closeWithError(ctx.Err())
+		c.observe(operation, "wait_reply", "error", time.Since(stageStart))
+		return clusterwire.StreamFrame{}, fmt.Errorf("cluster rpc reply timed out after %s: %w", c.timeout, context.DeadlineExceeded)
+	case <-ctx.Done():
+		// Drop only this request's waiter: the stream is multiplexed and
+		// unrelated in-flight RPCs must keep it. The reader discards the
+		// late reply for this RequestID (complete finds no pending entry).
+		c.removePending(requestID)
 		c.observe(operation, "wait_reply", "error", time.Since(stageStart))
 		return clusterwire.StreamFrame{}, ctx.Err()
 	}

@@ -100,6 +100,15 @@ func (l *Log) walkSegment(seg *segment, isActive bool, nextOffset *int64) error 
 			pos = end
 
 		case errors.Is(err, io.ErrUnexpectedEOF):
+			// A short frame read is a torn tail only when the tear runs
+			// to EOF. A corrupted length field mid-file lands here too;
+			// if a later valid frame exists this is mid-file corruption,
+			// so resync and keep scanning instead of truncating away
+			// fsynced frames.
+			if next := nextValidFramePos(seg.file, pos+1, size); next < size {
+				pos = next
+				continue
+			}
 			if isActive {
 				if err := seg.truncate(pos); err != nil {
 					return err
@@ -179,6 +188,19 @@ func (l *Log) scanSegmentIndexLocked(seg *segment) ([]indexEntry, error) {
 		}
 	}
 	return entries, nil
+}
+
+// nextValidFramePos scans forward from start for the next position
+// holding a frame that passes CRC verification, so callers can tell a
+// mid-file tear (resyncable) from one that runs to EOF. Returns size
+// when no later valid frame exists.
+func nextValidFramePos(f *os.File, start, size int64) int64 {
+	for pos := nextMagicInSegment(f, start, size); pos < size; pos = nextMagicInSegment(f, pos+1, size) {
+		if _, _, err := verifyFrameAt(f, pos); err == nil {
+			return pos
+		}
+	}
+	return size
 }
 
 // nextMagicInSegment scans forward in 4 KiB chunks; overlaps by 1

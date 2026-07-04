@@ -69,6 +69,26 @@ func TestValidateRejectsInvalidFields(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsMaxConsumeWaitNotBelowWriteTimeout(t *testing.T) {
+	cfg := Default()
+	cfg.HTTP.WriteTimeout = cfg.HTTP.MaxConsumeWait
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "http.max_consume_wait (10s) must be < http.write_timeout (10s)") {
+		t.Fatalf("Validate() error = %v, want max_consume_wait/write_timeout error", err)
+	}
+}
+
+func TestValidateRejectsMaxConsumeWaitAboveShutdownGrace(t *testing.T) {
+	cfg := Default()
+	cfg.HTTP.ShutdownGrace = cfg.HTTP.MaxConsumeWait - 1
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "must be <= http.shutdown_grace") {
+		t.Fatalf("Validate() error = %v, want max_consume_wait/shutdown_grace error", err)
+	}
+}
+
 func TestValidateRejectsSameHTTPAndClusterAddr(t *testing.T) {
 	cfg := Default()
 	cfg.Cluster.Addr = cfg.HTTP.Addr

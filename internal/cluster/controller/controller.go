@@ -4,10 +4,24 @@
 package controller
 
 import (
+	"context"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
+
+// controllerStore is the slice of the metastore the controller uses.
+// *metastore.Store implements it; tests substitute fakes.
+type controllerStore interface {
+	IsLeader() bool
+	LeaderCh() <-chan bool
+	ListMembers() ([]metastore.Member, error)
+	ListTopics(ctx context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error)
+	ListAssignments(topicName string) ([]metastore.Assignment, error)
+	AssignPartition(ctx context.Context, topicName string, partition int, ownerID string) error
+	MarkMemberDead(ctx context.Context, podID string) error
+}
 
 // Config holds tunables for the controller. Zero values use safe defaults.
 type Config struct {
@@ -32,7 +46,7 @@ func (c Config) withDefaults() Config {
 // Controller drives cluster-level decisions: partition assignment and
 // member liveness. It must be started with Run and stopped via context.
 type Controller struct {
-	store *metastore.Store
+	store controllerStore
 	cfg   Config
 }
 

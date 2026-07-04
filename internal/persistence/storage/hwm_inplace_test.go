@@ -35,6 +35,16 @@ func TestHighWatermarkInPlacePersistDurableMidRun(t *testing.T) {
 		}
 	}
 
+	// The first persist CREATES the hwm file; that creation is only durable
+	// once the parent directory has been fsynced (otherwise a crash can lose
+	// the file and recovery would expose the hidden tail).
+	l.hwmMu.Lock()
+	dirSynced := l.hwmDirSynced
+	l.hwmMu.Unlock()
+	if !dirSynced {
+		t.Fatalf("partition dir not fsynced after first hwm persist")
+	}
+
 	// Fixed-size file: an in-place 8-byte overwrite must never grow the file or
 	// leave a stale tail (which loadHighWatermark would reject as != 8 bytes).
 	info, err := os.Stat(hwmFilePath(path))

@@ -208,7 +208,18 @@ func (s *RPCServer) handleConsume(payload []byte) nodewire.Response {
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid consume request: "+err.Error())
 	}
-	opts := brokermsg.ConsumeOpts{Wait: time.Duration(req.WaitNanos)}
+	// Clamp the wire-supplied wait: broker.Consume runs under a Background
+	// context here (RPC frames carry no caller deadline), so an unclamped
+	// wait would park this server for however long the peer asked —
+	// defense in depth against peers that skipped the router-side clamp.
+	wait := time.Duration(req.WaitNanos)
+	if wait < 0 {
+		wait = 0
+	}
+	if wait > defaultMaxConsumeWait {
+		wait = defaultMaxConsumeWait
+	}
+	opts := brokermsg.ConsumeOpts{Wait: wait}
 	if req.HasPartition {
 		partition := req.Partition
 		opts.Partition = &partition
@@ -382,6 +393,14 @@ func (s *RPCServer) handlePurgeTopic(payload []byte) nodewire.Response {
 // purgeApplyWaitTimeout bounds how long a purge waits for the local Raft
 // replica to reflect a topic deletion. Apply lag is normally sub-second.
 const purgeApplyWaitTimeout = 5 * time.Second
+
+// purgeExecutionAllowance budgets the purge work a remote member does AFTER
+// its replica reflects the deletion (removing partition directories, closing
+// logs). The leader's per-member purge deadline is
+// purgeApplyWaitTimeout + purgeExecutionAllowance (+ RPC grace): a member
+// can exhaust the full apply wait before it even starts deleting, so the
+// deadline must cover both phases while staying bounded.
+const purgeExecutionAllowance = 10 * time.Second
 
 // waitTopicDeletedLocally returns true once the local metastore no longer
 // has the topic, or false if it still does after the timeout.
