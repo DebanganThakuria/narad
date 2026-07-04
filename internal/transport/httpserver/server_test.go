@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
@@ -197,6 +198,28 @@ func TestRecoverMiddlewareReturnsInternalServerError(t *testing.T) {
 	}
 	if got := strings.TrimSpace(res.Body.String()); got != `{"error":"internal server panic"}` {
 		t.Fatalf("Recover() body = %q", got)
+	}
+}
+
+func TestNewRouterRecordsMetricsForPanickingHandler(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	router := NewRouter(newTestSet(&fakeBroker{listTopicsFn: func(context.Context, metastore.ListOptions) ([]topic.Topic, string, error) {
+		panic("boom")
+	}}), newTestLogger(), m, reg)
+
+	res := httptest.NewRecorder()
+	router.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/v1/topics", nil))
+
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("GET /v1/topics status = %d, want %d", res.Code, http.StatusInternalServerError)
+	}
+	got := testutil.ToFloat64(m.HTTPRequestsTotal.WithLabelValues("GET /v1/topics", http.MethodGet, "500"))
+	if got != 1 {
+		t.Fatalf("http_requests_total{500} = %v, want 1 (panicking requests must be recorded)", got)
+	}
+	if errs := testutil.ToFloat64(m.ErrorsTotal.WithLabelValues("http", "5xx")); errs != 1 {
+		t.Fatalf("errors_total{http,5xx} = %v, want 1", errs)
 	}
 }
 

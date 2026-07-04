@@ -371,15 +371,23 @@ func TestGetHandlerFallsBackToLocalWhenRouterNil(t *testing.T) {
 	}
 }
 
-func TestGetHandlerPartitionQuerySkipsRouter(t *testing.T) {
+func TestGetHandlerPartitionQueryUsesRouterMergedStats(t *testing.T) {
+	// A ?partition= query landing on a non-owner node: the local details
+	// carry only a zero-valued placeholder for partition 1, and the
+	// router merge fills in the owner's real stats. The handler must
+	// slice the merged result, not the local placeholder.
 	routerCalled := false
 	s := newTestSetWithRouter(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
 		return topic.Details{
 			Topic:      topic.Topic{Name: name, Partitions: 2},
-			Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 1}, {Index: 1, NextOffset: 2}},
+			Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 1}, {Index: 1}},
 		}, nil
-	}}, &fakeRouter{routeGetTopicFn: func(_ context.Context, _ *http.Request, _ string, details topic.Details) (topic.Details, error) {
+	}}, &fakeRouter{routeGetTopicFn: func(_ context.Context, _ *http.Request, topicName string, details topic.Details) (topic.Details, error) {
 		routerCalled = true
+		if topicName != "orders" {
+			t.Fatalf("topicName = %q, want orders", topicName)
+		}
+		details.Partitions = []topic.PartitionStats{{Index: 0, NextOffset: 1}, {Index: 1, NextOffset: 20, HighWatermark: 19}}
 		return details, nil
 	}})
 
@@ -388,9 +396,57 @@ func TestGetHandlerPartitionQuerySkipsRouter(t *testing.T) {
 	res := httptest.NewRecorder()
 	Get(s).ServeHTTP(res, req)
 
-	if routerCalled {
-		t.Fatal("Get() routed partition-scoped request")
+	if !routerCalled {
+		t.Fatal("Get() did not route partition-scoped request through the cluster merge")
 	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusOK)
+	}
+	var body topic.Details
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if len(body.Partitions) != 1 || body.Partitions[0].Index != 1 ||
+		body.Partitions[0].NextOffset != 20 || body.Partitions[0].HighWatermark != 19 {
+		t.Fatalf("Get() partitions = %+v, want merged owner stats for partition 1", body.Partitions)
+	}
+}
+
+func TestGetHandlerPartitionQueryReturnsRouterError(t *testing.T) {
+	s := newTestSetWithRouter(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
+		return topic.Details{
+			Topic:      topic.Topic{Name: name, Partitions: 1},
+			Partitions: []topic.PartitionStats{{Index: 0}},
+		}, nil
+	}}, &fakeRouter{routeGetTopicFn: func(_ context.Context, _ *http.Request, _ string, _ topic.Details) (topic.Details, error) {
+		return topic.Details{}, errors.New("peer unreachable")
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders?partition=0", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestGetHandlerPartitionQueryFallsBackToLocalWhenRouterNil(t *testing.T) {
+	// Single-node mode: no router, so the local slice is authoritative
+	// and the handler must keep serving it directly.
+	s := newTestSet(&fakeBroker{getTopicDetailsFn: func(_ context.Context, name string) (topic.Details, error) {
+		return topic.Details{
+			Topic:      topic.Topic{Name: name, Partitions: 2},
+			Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 1}, {Index: 1, NextOffset: 2}},
+		}, nil
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders?partition=1", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
 	if res.Code != http.StatusOK {
 		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusOK)
 	}
@@ -400,6 +456,24 @@ func TestGetHandlerPartitionQuerySkipsRouter(t *testing.T) {
 	}
 	if len(body.Partitions) != 1 || body.Partitions[0].Index != 1 || body.Partitions[0].NextOffset != 2 {
 		t.Fatalf("Get() partitions = %+v", body.Partitions)
+	}
+}
+
+func TestGetHandlerAssignmentLookupErrorReturns500(t *testing.T) {
+	// A non-NotFound assignment lookup failure inside GetTopicDetails
+	// (db closed, corrupt record) must surface as a 500, never as a 200
+	// with phantom zero-valued stats.
+	s := newTestSet(&fakeBroker{getTopicDetailsFn: func(context.Context, string) (topic.Details, error) {
+		return topic.Details{}, errors.New("get assignment: db closed")
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders?partition=0", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Get(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusInternalServerError {
+		t.Fatalf("Get() status = %d, want %d", res.Code, http.StatusInternalServerError)
 	}
 }
 
@@ -722,6 +796,9 @@ func TestAlterRequestValidate(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "empty request invalid", req: alterRequest{}, wantErr: true},
+		{name: "negative partitions invalid", req: alterRequest{Partitions: -3}, wantErr: true},
+		{name: "negative partitions with retention invalid", req: alterRequest{Partitions: -3, RetentionMs: new(int64(60000))}, wantErr: true},
+		{name: "positive partitions valid", req: alterRequest{Partitions: 6}, wantErr: false},
 		{name: "negative retention invalid", req: alterRequest{RetentionMs: &negative}, wantErr: true},
 		{name: "negative in flight invalid", req: alterRequest{MaxInFlightPerPartition: &negative}, wantErr: true},
 		{name: "negative acked ahead invalid", req: alterRequest{MaxAckedAheadPerPartition: &negative}, wantErr: true},

@@ -36,6 +36,9 @@ func (req alterRequest) Validate() error {
 	hasCaps := req.MaxInFlightPerPartition != nil || req.MaxAckedAheadPerPartition != nil
 	hasSchema := len(req.Schema) > 0
 
+	if req.Partitions < 0 {
+		return errors.New("partitions must be > 0")
+	}
 	if !hasPartitions && !hasRetention && !hasCaps && !hasSchema {
 		return errors.New("at least one of partitions, retention_ms, max_*_per_partition, or schema is required")
 	}

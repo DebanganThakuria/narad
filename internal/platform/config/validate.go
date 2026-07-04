@@ -45,6 +45,15 @@ func appendHTTPValidationErrors(errs *[]string, cfg HTTPConfig) {
 	if cfg.MaxConsumeWait < 0 {
 		*errs = append(*errs, "http.max_consume_wait must be >= 0")
 	}
+	// A long-poll that actually waits max_consume_wait must still fit
+	// inside the server write deadline and the shutdown grace window,
+	// or every waiting consume gets killed mid-response.
+	if cfg.WriteTimeout > 0 && cfg.MaxConsumeWait >= cfg.WriteTimeout {
+		*errs = append(*errs, fmt.Sprintf("http.max_consume_wait (%s) must be < http.write_timeout (%s)", cfg.MaxConsumeWait, cfg.WriteTimeout))
+	}
+	if cfg.ShutdownGrace > 0 && cfg.MaxConsumeWait > cfg.ShutdownGrace {
+		*errs = append(*errs, fmt.Sprintf("http.max_consume_wait (%s) must be <= http.shutdown_grace (%s)", cfg.MaxConsumeWait, cfg.ShutdownGrace))
+	}
 }
 
 func appendClusterValidationErrors(errs *[]string, httpCfg HTTPConfig, cfg ClusterConfig) {

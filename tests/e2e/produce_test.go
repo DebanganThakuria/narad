@@ -170,7 +170,7 @@ func TestProduce_ConcurrentProducersAcceptedAndVisible(t *testing.T) {
 			for i := range perWriter {
 				resp := rawReq(t, http.MethodPost,
 					env.Server.URL+"/v1/topics/race/produce",
-					[]byte(fmt.Sprintf(`{"w":%d,"i":%d}`, w, i)))
+					fmt.Appendf(nil, `{"w":%d,"i":%d}`, w, i))
 				if resp.StatusCode != http.StatusAccepted {
 					failed.Add(1)
 					_ = resp.Body.Close()

@@ -1950,7 +1950,7 @@ func TestBuildBrokerRejectsNonStoreMetastore(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	fakeMS := stubMetastore{}
 
-	if _, _, _, _, _, err := buildBroker(cfg, "node-1", fakeMS, schema.NewAlwaysValid(), m, log); err == nil {
+	if _, _, _, _, _, _, err := buildBroker(cfg, "node-1", fakeMS, schema.NewAlwaysValid(), m, log); err == nil {
 		t.Fatal("buildBroker() error = nil, want error")
 	}
 }
@@ -1966,12 +1966,15 @@ func TestBuildBrokerReturnsLogs(t *testing.T) {
 	}
 	defer store.Close()
 
-	br, logs, _, _, _, err := buildBroker(cfg, "node-1", store, schema.NewJSONSchema(), m, log)
+	br, createGater, logs, _, _, _, err := buildBroker(cfg, "node-1", store, schema.NewJSONSchema(), m, log)
 	if err != nil {
 		t.Fatalf("buildBroker() error = %v", err)
 	}
 	if br == nil || logs == nil {
 		t.Fatalf("buildBroker() = (%v, %v), want non-nil", br, logs)
+	}
+	if createGater == nil {
+		t.Fatal("buildBroker() createGater = nil, want the broker's create gate handle")
 	}
 }
 

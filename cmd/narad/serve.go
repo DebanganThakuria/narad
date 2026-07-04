@@ -87,7 +87,7 @@ func runServe(args []string) error {
 		return fmt.Errorf("initialize schemas: %w", err)
 	}
 
-	br, logs, offsets, lifecycle, ingressManager, err := buildBroker(cfg, nodeID, ms, schemas, m, log)
+	br, createGater, logs, offsets, lifecycle, ingressManager, err := buildBroker(cfg, nodeID, ms, schemas, m, log)
 	if err != nil {
 		return err
 	}
@@ -95,6 +95,11 @@ func runServe(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// failServe cancels ctx with a cause when a critical background
+	// component fails, so runServe shuts down and exits with that error
+	// instead of serving client traffic in a degraded state.
+	ctx, failServe := context.WithCancelCause(ctx)
+	defer failServe(nil)
 
 	// Controller and cluster router
 	member := metastore.Member{
@@ -105,6 +110,9 @@ func runServe(args []string) error {
 	}
 	ctrl := controller.New(ms, controller.Config{})
 	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), br, m)
+	// The router clamps client-supplied long-poll waits (?wait=) on its
+	// forward and re-probe paths to the same ceiling the HTTP handlers use.
+	router.SetMaxConsumeWait(cfg.HTTP.MaxConsumeWait.D())
 	peerRPC := cluster.NewPeerClient(5*time.Second, m)
 	rpcServer := cluster.NewRPCServer(br, ms, log, m)
 	// So a delete forwarded to this node as leader still fans the purge out
@@ -112,8 +120,33 @@ func runServe(args []string) error {
 	rpcServer.SetBroadcaster(router)
 	produceDispatcher := cluster.NewProduceDispatcher(ingressManager, ms, nodeID, br, peerRPC, log, cluster.ProduceDispatcherConfig{}, m)
 
-	// Start background processes
+	// Start background processes. This defer is registered AFTER the
+	// broker/metastore Close defers above so it runs BEFORE them (defers
+	// are LIFO): the goroutines below must be cancelled and drained
+	// before the broker and metastore they use are closed, on every
+	// return path.
 	var wg sync.WaitGroup
+	defer func() {
+		stop()
+		wg.Wait()
+	}()
+
+	// Gate topic creation until startup reconciliation completes. The
+	// cluster RPC listener started below can deliver a peer-forwarded
+	// CreateTopic while runStartupReconcile's orphan sweep is still
+	// walking topic directories; ungated, such a create could mkdir its
+	// topic dir after the sweep's existence check and have the live
+	// directory removed as an orphan. The gate is armed BEFORE the QUIC
+	// listener starts and released right after runStartupReconcile
+	// returns (on success and failure alike — a degraded reconcile must
+	// not leave creates blocked forever). The deferred release is an
+	// idempotent safety net for any early-return path; registered after
+	// the wg.Wait defer above, it runs first (defers are LIFO), so on
+	// shutdown a create blocked on the gate — cluster RPC requests carry
+	// no deadline — unblocks before we wait for the RPC goroutines.
+	createGater.ArmCreateGate()
+	defer createGater.ReleaseCreateGate()
+
 	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, peerRPC, log) })
 	wg.Go(func() { ctrl.Run(ctx) })
 	wg.Go(func() { offsets.RunPurger(ctx, time.Second) })
@@ -122,6 +155,12 @@ func runServe(args []string) error {
 	wg.Go(func() {
 		if err := clusterrpc.ServeQUIC(ctx, cfg.HTTP.Addr, log, rpcServer); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error("cluster rpc server", "addr", cfg.HTTP.Addr, "err", err)
+			if len(cfg.Cluster.Peers) > 0 {
+				// Multi-node: without the cluster RPC listener this
+				// node is unreachable for all peer RPC, so fail fast
+				// rather than keep serving client HTTP while degraded.
+				failServe(fmt.Errorf("cluster rpc server: %w", err))
+			}
 		}
 	})
 
@@ -131,12 +170,36 @@ func runServe(args []string) error {
 	// Startup reconciliation: once this node's metastore replica is caught
 	// up, reclaim orphaned topic dirs (crash safety) and open owned
 	// partition logs so their retention reapers run even for topics that
-	// are idle after a restart.
-	wg.Go(func() { runStartupReconcile(ctx, ms, logs, cfg.Storage.DataDir, nodeID, log) })
+	// are idle after a restart. It runs in the BACKGROUND so the HTTP
+	// listener below starts immediately: under quorum loss the metastore
+	// catch-up wait can take the full startupReconcileCaughtUpTimeout
+	// (60s), and a synchronous reconcile would leave /healthz unanswered
+	// for that whole window — long enough for a Kubernetes startup probe
+	// to kill the pod in a restart loop. Correctness is preserved because
+	// the create gate armed above blocks topic creates on EVERY transport
+	// (HTTP and cluster RPC) until the sweep is done, and MarkReady is
+	// only called once reconcile completes, so /readyz still implies a
+	// reconciled node while /healthz answers from the start. The gate
+	// release must precede MarkReady on success and must also happen on
+	// failure/shutdown paths — a degraded reconcile must not leave creates
+	// blocked forever (ReleaseCreateGate is idempotent; the deferred
+	// release above stays the shutdown safety net).
+	wg.Go(func() {
+		runStartupReconcile(ctx, ms, logs, cfg.Storage.DataDir, nodeID, log)
+		// The sweep can no longer race a create: open the gate so topic
+		// creates (HTTP and cluster RPC) proceed. Reconcile failures are
+		// non-fatal (logged and skipped inside runStartupReconcile), so
+		// creates must be unblocked here regardless of how it went.
+		createGater.ReleaseCreateGate()
+		if ctx.Err() == nil {
+			lifecycle.MarkReady()
+		}
+	})
 
-	// Finally build the API server
+	// Finally build the API server. It serves /healthz immediately;
+	// /readyz turns true only when the reconcile goroutine above calls
+	// MarkReady.
 	srv := buildAPIServer(ctx, cfg, br, logs, ms, router, m, reg, log)
-	lifecycle.MarkReady()
 	defer lifecycle.MarkNotReady()
 
 	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())
@@ -150,7 +213,14 @@ func runServe(args []string) error {
 		return fmt.Errorf("server: %w", err)
 	}
 
+	stop()
 	wg.Wait()
+
+	// A background component may have cancelled ctx via failServe;
+	// surface its error so the process exits non-zero.
+	if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+		return cause
+	}
 
 	log.Info("narad serve stopped")
 
@@ -264,10 +334,10 @@ func buildBroker(
 	schemas schema.Registry,
 	m *metrics.Metrics,
 	log *slog.Logger,
-) (broker.Broker, *runtime.Logs, *consumer.InFlight, *runtime.Lifecycle, *ingress.Manager, error) {
+) (broker.Broker, broker.CreateGater, *runtime.Logs, *consumer.InFlight, *runtime.Lifecycle, *ingress.Manager, error) {
 	storageOpts, err := storageOptions(cfg.Storage)
 	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("storage options: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("storage options: %w", err)
 	}
 
 	resolveCaps := func(ctx context.Context, topicName string) (consumer.Caps, error) {
@@ -295,16 +365,16 @@ func buildBroker(
 	logs := runtime.NewLogs(cfg.Storage.DataDir, storageOpts, ms, m)
 	lifecycle := runtime.NewLifecycle(logs, offsetCommitter.Close)
 	if err = initializeConsumerOffsets(context.Background(), cfg.Storage.DataDir, ms, offsets, log, nodeID); err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("initialize consumer offsets: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("initialize consumer offsets: %w", err)
 	}
 
 	if _, ok := ms.(*metastore.Store); !ok {
-		return nil, nil, nil, nil, nil, errors.New("broker: cluster coordination requires metastore.Store")
+		return nil, nil, nil, nil, nil, nil, errors.New("broker: cluster coordination requires metastore.Store")
 	}
 
 	ingressManager, err := ingress.OpenManager(cfg.Storage.DataDir, ingressWALOptions(cfg.Storage, m))
 	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("ingress: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("ingress: %w", err)
 	}
 
 	br, err := broker.New(broker.Deps{
@@ -331,9 +401,20 @@ func buildBroker(
 	})
 	if err != nil {
 		_ = ingressManager.Close()
-		return nil, nil, nil, nil, nil, fmt.Errorf("broker: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("broker: %w", err)
 	}
-	return br, logs, offsets, lifecycle, ingressManager, nil
+	// The startup create gate is load-bearing: without it a peer-forwarded
+	// create can race the startup orphan sweep and have its live topic
+	// directory removed as an orphan. Brokers built by broker.New always
+	// implement CreateGater (compile-time checked there); surface any
+	// future wrapper that drops the interface as a loud startup failure
+	// rather than silently running ungated.
+	createGater, ok := br.(broker.CreateGater)
+	if !ok {
+		_ = br.Close()
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("broker: %T does not implement broker.CreateGater; startup create gate cannot be armed", br)
+	}
+	return br, createGater, logs, offsets, lifecycle, ingressManager, nil
 }
 
 func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, logs *runtime.Logs, ms *metastore.Store, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, log *slog.Logger) *httpserver.Server {
@@ -382,6 +463,13 @@ const startupReconcileCaughtUpTimeout = 60 * time.Second
 // owned partition logs so retention reapers run for topics that are idle
 // after a restart. The sweep is skipped if the replica never catches up,
 // since acting on a stale topic set could delete live data.
+//
+// It runs in a background goroutine during startup while the armed create
+// gate holds topic creates on every transport, so the sweep's
+// topic-existence checks can never race a concurrent create; the caller
+// releases the gate and marks the node ready only after it returns. It
+// returns early on ctx cancellation so shutdown during startup isn't
+// blocked.
 func runStartupReconcile(ctx context.Context, store *metastore.Store, logs *runtime.Logs, dataDir, nodeID string, log *slog.Logger) {
 	if waitMetastoreCaughtUp(ctx, store, startupReconcileCaughtUpTimeout) {
 		removed, err := runtime.SweepOrphanTopicDirs(dataDir, func(name string) bool {
@@ -396,6 +484,10 @@ func runStartupReconcile(ctx context.Context, store *metastore.Store, logs *runt
 		}
 	} else if ctx.Err() == nil {
 		log.Warn("skipping startup orphan sweep: metastore not caught up within timeout")
+	}
+	if ctx.Err() != nil {
+		// Shutting down during startup: don't open logs we're about to close.
+		return
 	}
 	openOwnedPartitionLogs(ctx, store, logs, nodeID, log)
 }
