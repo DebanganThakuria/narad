@@ -9,6 +9,9 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/netaddr"
 )
 
+// configPeersToMetastore converts the configured peer list — which every
+// node shares verbatim — into metastore peers, dropping this node's own
+// entry: it is the local voter, not a remote peer.
 func configPeersToMetastore(nodeID, clusterAddr string, peers []config.ClusterPeer) []metastore.Peer {
 	if len(peers) == 0 {
 		return nil
@@ -23,6 +26,10 @@ func configPeersToMetastore(nodeID, clusterAddr string, peers []config.ClusterPe
 	return out
 }
 
+// advertisedClusterAddr resolves the cluster address this node advertises
+// to peers. When cluster.addr is port-only (":9101") the bind address is
+// not reachable from other hosts, so the node's own hostful entry in the
+// shared peer list is advertised instead; otherwise cluster.addr stands.
 func advertisedClusterAddr(nodeID, clusterAddr string, peers []config.ClusterPeer) string {
 	for _, peer := range peers {
 		if peer.ID != nodeID || !netaddr.ClusterAddrMatchesPeer(clusterAddr, peer.Addr) {
@@ -36,14 +43,18 @@ func advertisedClusterAddr(nodeID, clusterAddr string, peers []config.ClusterPee
 	return clusterAddr
 }
 
+// advertisedMemberAddr resolves the HTTP address this node advertises in
+// cluster membership. A port-only http.addr borrows the host from the
+// advertised cluster address so peers get a reachable endpoint; if no
+// host can be derived, the raw http.addr is kept as-is.
 func advertisedMemberAddr(nodeID, httpAddr, clusterAddr string, peers []config.ClusterPeer) string {
 	httpAddr = strings.TrimSpace(httpAddr)
 	if httpAddr == "" || !strings.HasPrefix(httpAddr, ":") {
 		return httpAddr
 	}
 
-	clusterAdvertiseAddr := advertisedClusterAddr(nodeID, clusterAddr, peers)
-	host, _, err := net.SplitHostPort(strings.TrimSpace(clusterAdvertiseAddr))
+	advertised := advertisedClusterAddr(nodeID, clusterAddr, peers)
+	host, _, err := net.SplitHostPort(strings.TrimSpace(advertised))
 	if err != nil || strings.TrimSpace(host) == "" {
 		return httpAddr
 	}

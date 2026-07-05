@@ -1,15 +1,25 @@
-// Package schema is the contract for per-topic JSON Schema validation.
+// Package schema validates message payloads against per-topic JSON
+// Schemas.
 //
-// The wiring pass ships a JSON Schema validator backed by
-// github.com/santhosh-tekuri/jsonschema. A permissive AlwaysValid
-// stub is available for tests.
+// JSONSchema is the production Registry, backed by
+// github.com/santhosh-tekuri/jsonschema. AlwaysValid is a permissive
+// stub for tests and for topics without schema enforcement.
 package schema
 
 import "context"
 
-// Registry stores per-topic JSON Schemas and validates payloads
-// against them. Evolution rules: additive-only, no field
-// removal, no type changes — those go in the real implementation.
+// Registry stores per-topic JSON Schemas and validates payloads against
+// the latest registered version. Register enforces additive-only
+// evolution: no property removal, no type changes, no new required
+// fields — every document accepted by the previous version must remain
+// valid.
+//
+//   - ValidateDefinition checks that a schema compiles without storing it.
+//   - Register stores a schema and returns its auto-assigned version.
+//   - Load rehydrates a persisted (topic, version, schema) at startup.
+//   - Unload removes one version; DropTopic removes all of a topic's
+//     versions so a recreated topic starts schema-less.
+//   - Validate checks a payload against the topic's latest schema.
 type Registry interface {
 	ValidateDefinition(ctx context.Context, topic string, schema []byte) error
 	Register(ctx context.Context, topic string, schema []byte) (version int, err error)

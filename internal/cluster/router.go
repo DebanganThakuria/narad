@@ -4,16 +4,12 @@ package cluster
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
-	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
@@ -25,7 +21,6 @@ type Router struct {
 	selfID     string
 	partitions partition.Manager
 	peer       peerClient
-	metrics    *metrics.Metrics
 
 	routeMu       sync.RWMutex
 	routes        map[string]cachedRouteTable
@@ -54,17 +49,12 @@ type Router struct {
 const defaultMaxConsumeWait = 30 * time.Second
 
 // NewRouter constructs a Router. selfID is this pod's member ID (os.Hostname()).
-func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager, _ metrics.SnapshotProvider, m ...*metrics.Metrics) *Router {
-	var observed *metrics.Metrics
-	if len(m) > 0 {
-		observed = m[0]
-	}
+func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager) *Router {
 	return &Router{
 		store:                  store,
 		selfID:                 selfID,
 		partitions:             mgr,
-		peer:                   NewPeerClient(defaultPeerRPCTimeout, observed),
-		metrics:                observed,
+		peer:                   NewPeerClient(defaultPeerRPCTimeout),
 		routes:                 make(map[string]cachedRouteTable),
 		consumeCursor:          make(map[string]uint64),
 		consumeReprobeInterval: remoteConsumeReprobeInterval,
@@ -85,14 +75,8 @@ func (rt *Router) SetMaxConsumeWait(d time.Duration) {
 // starting from the key-hashed partition and walking forward circularly.
 // body is the already-read request body bytes. Returns true if forwarded.
 func (rt *Router) RouteProduce(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName, key string, body []byte) bool {
-	start := time.Now()
-	outcome := "local"
-	defer func() {
-		rt.observe("produce", "route_total", outcome, time.Since(start))
-	}()
 	routes, ok := rt.routesForTopic(topicName)
 	if !ok || len(routes.entries) == 0 || routes.partitions == 0 {
-		outcome = "no_route"
 		return false
 	}
 	cursor := rt.partitions.Pick(topicName, key, routes.partitions)
@@ -102,7 +86,7 @@ func (rt *Router) RouteProduce(ctx context.Context, w http.ResponseWriter, r *ht
 		if !exists {
 			continue
 		}
-		addr, local := rt.produceOwnerAddrForRoute(entry)
+		addr, local := rt.produceOwnerAddr(entry)
 		if local {
 			return false
 		}
@@ -119,10 +103,8 @@ func (rt *Router) RouteProduce(ctx context.Context, w http.ResponseWriter, r *ht
 			continue
 		}
 		writePeerResponse(w, res)
-		outcome = "forwarded"
 		return true
 	}
-	outcome = "local"
 	return false
 }
 
@@ -132,11 +114,6 @@ func (rt *Router) RouteProduce(ctx context.Context, w http.ResponseWriter, r *ht
 // Returns true if forwarded. For queue-style pulls, localPartition is set when
 // the request should be handled locally against all partitions owned by this node.
 func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) (bool, *int) {
-	start := time.Now()
-	outcome := "local"
-	defer func() {
-		rt.observe("consume", "route_total", outcome, time.Since(start))
-	}()
 	if pinnedPartition != nil {
 		addr := rt.ownerAddr(topicName, *pinnedPartition)
 		if addr == "" {
@@ -159,18 +136,15 @@ func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *ht
 			return true, nil
 		}
 		writePeerResponse(w, res)
-		outcome = "forwarded"
 		return true, nil
 	}
 
 	if localPartition, ok := rt.localConsumePartition(topicName); ok {
-		outcome = "local"
 		return false, &localPartition
 	}
 
 	forwarded, hadCandidates := rt.RouteConsumeRemote(ctx, w, r, topicName)
 	if forwarded {
-		outcome = "forwarded"
 		return true, nil
 	}
 	if hadCandidates {
@@ -181,14 +155,11 @@ func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *ht
 		// make long-poll behavior depend on which node a load balancer
 		// picked and degrade clients into busy-polling.
 		if rt.longPollConsumeRemote(ctx, w, r, topicName) {
-			outcome = "forwarded"
 			return true, nil
 		}
 		w.WriteHeader(http.StatusNoContent)
-		outcome = "remote_empty"
 		return true, nil
 	}
-	outcome = "no_route"
 	return false, nil
 }
 
@@ -213,32 +184,20 @@ func longWaitRPCContext(ctx context.Context, wait time.Duration) (context.Contex
 // non-blocking; when all remote owners are empty, the
 // caller decides whether to return 204 or keep polling a local partition.
 func (rt *Router) RouteConsumeRemote(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) (bool, bool) {
-	start := time.Now()
-	outcome := "empty"
-	defer func() {
-		rt.observe("consume", "remote_probe_total", outcome, time.Since(start))
-	}()
 	candidates := rt.remoteConsumeCandidates(topicName)
 	if len(candidates) == 0 {
-		outcome = "no_candidates"
 		return false, false
 	}
 
-	for _, candidate := range candidates {
-		result := rt.callConsumeProbe(ctx, topicName, candidate)
+	for _, addr := range candidates {
+		result := rt.callConsumeProbe(ctx, topicName, addr)
 		if result.err != nil {
-			if result.fatal {
-				outcome = "error"
-				http.Error(w, result.err.Error(), http.StatusBadRequest)
-				return true, true
-			}
 			continue
 		}
 		if result.res.Status == http.StatusNoContent {
 			continue
 		}
 		writePeerResponse(w, result.res)
-		outcome = "forwarded"
 		return true, true
 	}
 	return false, true
@@ -301,11 +260,6 @@ func (rt *Router) longPollConsumeRemote(ctx context.Context, w http.ResponseWrit
 // RouteAck forwards an ack request to the owner of the handle partition.
 // Returns true if forwarded.
 func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, handle consumer.Handle) bool {
-	start := time.Now()
-	outcome := "local"
-	defer func() {
-		rt.observe("ack", "route_total", outcome, time.Since(start))
-	}()
 	addr := rt.ownerAddr(topicName, handle.Partition)
 	if addr == "" {
 		return false
@@ -321,105 +275,5 @@ func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.R
 		return true
 	}
 	writePeerResponse(w, res)
-	outcome = "forwarded"
 	return true
-}
-
-// createForwardTimeout bounds a follower's create forward to the cluster
-// leader. The leader legitimately parks a create on its armed startup
-// create gate while startup reconciliation is still running — up to the
-// ~60s metastore catch-up cap (startupReconcileCaughtUpTimeout in
-// cmd/narad) plus the sweep work itself — so this sits above that window.
-// Without an explicit deadline the transport's short default reply timeout
-// fires: the client gets a 502 while the create still executes on the
-// leader, and the retry then hits a 409.
-const createForwardTimeout = 75 * time.Second
-
-// RouteCreateTopic forwards a topic create request to the cluster leader.
-func (rt *Router) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, _ *http.Request, body []byte) bool {
-	memberAddr := rt.leaderMemberAddr()
-	if memberAddr == "" {
-		return false
-	}
-	createCtx, cancel := longWaitRPCContext(ctx, createForwardTimeout)
-	defer cancel()
-	res, err := rt.peer.CreateTopic(createCtx, memberAddr, body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return true
-	}
-	writePeerResponse(w, res)
-	return true
-}
-
-// RouteAlterTopic forwards a topic alter request to the cluster leader.
-func (rt *Router) RouteAlterTopic(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, body []byte) bool {
-	memberAddr := rt.leaderMemberAddr()
-	if memberAddr == "" {
-		return false
-	}
-	res, err := rt.peer.AlterTopic(ctx, memberAddr, topicName, body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return true
-	}
-	writePeerResponse(w, res)
-	return true
-}
-
-// deleteTopicForwardTimeout bounds a follower's delete forward to the
-// leader. The leader synchronously fans the purge out to every member and
-// each purge can wait several seconds for a lagging replica, so this sits
-// deliberately far above the transport's default reply timeout.
-const deleteTopicForwardTimeout = 30 * time.Second
-
-// RouteDeleteTopic forwards a topic delete request to the cluster leader.
-func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string) bool {
-	memberAddr := rt.leaderMemberAddr()
-	if memberAddr == "" {
-		return false
-	}
-	deleteCtx, cancel := longWaitRPCContext(ctx, deleteTopicForwardTimeout)
-	defer cancel()
-	res, err := rt.peer.DeleteTopic(deleteCtx, memberAddr, topicName)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return true
-	}
-	writePeerResponse(w, res)
-	return true
-}
-
-func (rt *Router) BroadcastDeleteTopic(ctx context.Context, topicName string) error {
-	members, err := rt.store.ListMembers()
-	if err != nil {
-		return err
-	}
-	// Attempt every live member even if one fails: a single unreachable
-	// peer must not stop the others from purging. Any member we miss is
-	// reclaimed by its startup orphan sweep.
-	var joined error
-	for _, member := range members {
-		if member.Status == metastore.MemberDead || strings.TrimSpace(member.ID) == strings.TrimSpace(rt.selfID) {
-			continue
-		}
-		// A purge legitimately waits up to purgeApplyWaitTimeout on the
-		// remote for its replica to reflect the deletion, and only THEN
-		// starts the purge work itself — which can take multiple seconds
-		// for a topic with many partition directories. Budget both phases
-		// (plus longWaitRPCContext's transfer grace) so the leader's
-		// deadline doesn't expire on a purge that is about to succeed,
-		// turning a completed delete into a 500 whose retry then 404s.
-		purgeCtx, cancel := longWaitRPCContext(ctx, purgeApplyWaitTimeout+purgeExecutionAllowance)
-		res, err := rt.peer.PurgeTopic(purgeCtx, member.Addr, topicName)
-		cancel()
-		if err != nil {
-			joined = errors.Join(joined, fmt.Errorf("purge %s on %s: %w", topicName, member.ID, err))
-			continue
-		}
-		if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
-			joined = errors.Join(joined, fmt.Errorf("purge %s returned status %d for %s", topicName, res.Status, member.ID))
-		}
-	}
-	return joined
 }

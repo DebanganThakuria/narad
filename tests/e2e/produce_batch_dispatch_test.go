@@ -20,14 +20,13 @@ import (
 // become consumable — with no loss and no message left undelivered.
 func TestBatchedDispatchDeliversBacklogAcrossPartitions(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
 	const (
 		partitions = 6
 		total      = 300
 	)
-	env.createTopic("batch-dispatch", partitions, 0, int64(0))
+	env.createTopic("batch-dispatch", partitions, 0)
 
 	// Fire async produces (202) WITHOUT waiting for visibility, so many
 	// records sit in the WAL at once and the dispatcher must batch the
@@ -78,10 +77,9 @@ func TestBatchedDispatchDeliversBacklogAcrossPartitions(t *testing.T) {
 // within a partition.
 func TestBatchedDispatchPreservesPartitionOrder(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("batch-order", 3, 0, int64(0))
+	env.createTopic("batch-order", 3, 0)
 
 	// A fixed key pins all records to a single partition.
 	const total = 100

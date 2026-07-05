@@ -18,15 +18,13 @@ func TestAlterTopic_IncreasePartitions(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: got %d body=%s", resp.StatusCode, readBody(resp))
 	}
-	var got topic.Topic
-	decodeJSON(t, resp, &got)
+	got := readJSON[topic.Topic](t, resp)
 	if got.Partitions != 6 {
 		t.Errorf("partitions: got %d want 6", got.Partitions)
 	}
 
 	resp = getJSON(t, env.Server.URL+"/v1/topics/alter")
-	var d topic.Details
-	decodeJSON(t, resp, &d)
+	d := readJSON[topic.Details](t, resp)
 	if d.Topic.Partitions != 6 {
 		t.Errorf("persisted partitions: got %d want 6", d.Topic.Partitions)
 	}
@@ -79,8 +77,7 @@ func TestAlterTopic_UpdateRetention(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: got %d body=%s", resp.StatusCode, readBody(resp))
 	}
-	var got topic.Topic
-	decodeJSON(t, resp, &got)
+	got := readJSON[topic.Topic](t, resp)
 	if got.RetentionMs != 7_200_000 {
 		t.Errorf("retention_ms: got %d want 7200000", got.RetentionMs)
 	}
@@ -113,8 +110,7 @@ func TestAlterTopic_RetentionDefaultsWhenZero(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: got %d body=%s", resp.StatusCode, readBody(resp))
 	}
-	var got topic.Topic
-	decodeJSON(t, resp, &got)
+	got := readJSON[topic.Topic](t, resp)
 	if got.RetentionMs != int64(7*24*60*60*1000) {
 		t.Errorf("retention_ms: got %d want %d (7-day env default)", got.RetentionMs, int64(7*24*60*60*1000))
 	}

@@ -16,10 +16,9 @@ import (
 // offset (gap-skipping ReserveNext working end-to-end through HTTP).
 func TestParallelConsumersOnePartitionDistinctMessages(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("para", 3, 2, int64(0))
+	env.createTopic("para", 3, 0)
 	for range 5 {
 		env.produce("para", "k", `{"i": 1}`)
 	}
@@ -60,10 +59,9 @@ func TestParallelConsumersOnePartitionDistinctMessages(t *testing.T) {
 // final committed offset should be 2.
 func TestOutOfOrderAckCommitAdvancesContiguous(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("ooo", 3, 2, int64(0))
+	env.createTopic("ooo", 3, 0)
 	for range 3 {
 		env.produce("ooo", "k", `{"i": 1}`)
 	}
@@ -101,10 +99,9 @@ func TestOutOfOrderAckCommitAdvancesContiguous(t *testing.T) {
 // a malformed handle fails parsing and returns 400.
 func TestAckTamperedHandleReturns400(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("tamper", 3, 2, int64(0))
+	env.createTopic("tamper", 3, 0)
 	env.produce("tamper", "k", `{}`)
 
 	msg := env.consume("/v1/topics/tamper/consume")
@@ -120,10 +117,9 @@ func TestAckTamperedHandleReturns400(t *testing.T) {
 // caller.
 func TestAckReusedHandleReturns410(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("reuse", 3, 2, int64(0))
+	env.createTopic("reuse", 3, 0)
 	env.produce("reuse", "k", `{}`)
 	msg := env.consume("/v1/topics/reuse/consume")
 	env.ack("reuse", msg.ReceiptHandle) // succeeds, committed advances
@@ -138,11 +134,10 @@ func TestAckReusedHandleReturns410(t *testing.T) {
 // valid handle is stale for that topic.
 func TestAckHandleAgainstWrongTopicReturns410(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("topicA", 3, 2, int64(0))
-	env.createTopic("topicB", 3, 2, int64(0))
+	env.createTopic("topicA", 3, 0)
+	env.createTopic("topicB", 3, 0)
 	env.produce("topicA", "k", `{}`)
 	msg := env.consume("/v1/topics/topicA/consume")
 
@@ -154,10 +149,9 @@ func TestAckHandleAgainstWrongTopicReturns410(t *testing.T) {
 // in the handler.
 func TestAckEmptyHandleReturns400(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("empty-handle", 3, 2, int64(0))
+	env.createTopic("empty-handle", 3, 0)
 	resp := env.post("/v1/topics/empty-handle/ack?receipt_handle=", nil)
 	expectStatus(t, resp, http.StatusBadRequest)
 }
@@ -168,8 +162,7 @@ func TestAckEmptyHandleReturns400(t *testing.T) {
 // hit).
 func TestInFlightCapBlocksFurtherReserves(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
 	resp := env.post("/v1/topics", map[string]any{
 		"name":                        "capped",
@@ -209,8 +202,7 @@ func TestInFlightCapBlocksFurtherReserves(t *testing.T) {
 // Drives two out-of-order acks (cap=2), then a third triggers 503.
 func TestAckedAheadCapReturns503(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
 	resp := env.post("/v1/topics", map[string]any{
 		"name":                          "stuckhead",
@@ -243,8 +235,7 @@ func TestAckedAheadCapReturns503(t *testing.T) {
 // updates the broker's view immediately (RefreshCaps integration).
 func TestAlterCapsTakesEffect(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
 	resp := env.post("/v1/topics", map[string]any{
 		"name":                        "altercap",
@@ -278,10 +269,9 @@ func TestAlterCapsTakesEffect(t *testing.T) {
 // must be delivered exactly once.
 func TestParallelConsumersDoNotDuplicateMessages(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("stress", 3, 2, int64(0))
+	env.createTopic("stress", 3, 0)
 	const total = 50
 	for range total {
 		env.produce("stress", "k", `{}`)

@@ -9,15 +9,19 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+// AssignPartition records ownerID as the single owner of the partition
+// through Raft, replacing any previous owner.
 func (s *Store) AssignPartition(ctx context.Context, topicName string, partition int, ownerID string) error {
 	return s.apply(ctx, opAssignPartition, Assignment{Topic: topicName, Partition: partition, OwnerID: ownerID})
 }
 
+// GetAssignment reads the partition's assignment from the local replica.
+// It returns ErrNotFound if the partition is unassigned.
 func (s *Store) GetAssignment(topicName string, partition int) (Assignment, error) {
 	s.fsm.mu.RLock()
 	defer s.fsm.mu.RUnlock()
 	var a Assignment
-	err := s.fsm.view("get_assignment", func(tx *bolt.Tx) error {
+	err := s.fsm.view(func(tx *bolt.Tx) error {
 		v := tx.Bucket(bucketAssignments).Get(assignmentKey(topicName, partition))
 		if v == nil {
 			return ErrNotFound
@@ -27,11 +31,13 @@ func (s *Store) GetAssignment(topicName string, partition int) (Assignment, erro
 	return a, err
 }
 
+// ListAssignments reads all of the topic's partition assignments from
+// the local replica.
 func (s *Store) ListAssignments(topicName string) ([]Assignment, error) {
 	s.fsm.mu.RLock()
 	defer s.fsm.mu.RUnlock()
 	var out []Assignment
-	err := s.fsm.view("list_assignments", func(tx *bolt.Tx) error {
+	err := s.fsm.view(func(tx *bolt.Tx) error {
 		prefix := []byte(topicName + ":")
 		c := tx.Bucket(bucketAssignments).Cursor()
 		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
@@ -59,7 +65,6 @@ func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromP
 	if len(active) == 0 {
 		return nil
 	}
-
 	active = RoundRobinMembers(active)
 
 	existing, err := s.ListAssignments(topicName)
@@ -86,6 +91,9 @@ func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromP
 	return nil
 }
 
+// RoundRobinMembers returns a copy of active sorted by member ID, the
+// canonical order for round-robin assignment: every node computes the
+// same owner for the same partition.
 func RoundRobinMembers(active []Member) []Member {
 	out := append([]Member(nil), active...)
 	sort.Slice(out, func(i, j int) bool {
@@ -103,6 +111,7 @@ func RoundRobinOwner(active []Member, partition int) (string, bool) {
 	return active[partition%len(active)].ID, true
 }
 
+// AliveMembers filters members down to those with MemberAlive status.
 func AliveMembers(members []Member) []Member {
 	active := make([]Member, 0, len(members))
 	for _, member := range members {

@@ -10,9 +10,15 @@ import (
 // RetentionConfig governs the per-partition reaper. Both bounds zero
 // means "keep forever" (the goroutine still runs but does no work).
 type RetentionConfig struct {
-	MaxAge        time.Duration
+	// MaxAge deletes sealed segments whose last write is older than
+	// this. Zero disables age-based deletion.
+	MaxAge time.Duration
+
+	// CheckInterval is the sweep period; zero defaults to one minute.
 	CheckInterval time.Duration
-	Now           func() time.Time
+
+	// Now overrides the clock, for tests. Nil means time.Now.
+	Now func() time.Time
 }
 
 type reaper struct {

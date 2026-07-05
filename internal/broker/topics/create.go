@@ -108,63 +108,14 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	unlock := m.lockTopicName(opts.Name)
 	defer unlock()
 
-	partitions := opts.Partitions
-	if partitions == 0 {
-		partitions = m.cfg.DefaultPartitions
-	}
-	if partitions < 3 {
-		return topic.Topic{}, fmt.Errorf("%w: partitions must be >= 3 (0 = use default)", ErrInvalid)
-	}
-	if maximum := m.cfg.MaxPartitions; maximum > 0 && partitions > maximum {
-		return topic.Topic{}, fmt.Errorf("%w: partitions (%d) exceeds topic.max_partitions (%d)",
-			ErrInvalid, partitions, maximum)
-	}
-
-	retentionMs := opts.RetentionMs
-	if retentionMs == 0 {
-		retentionMs = m.cfg.DefaultRetentionMs
-	}
-	if retentionMs < 0 {
-		return topic.Topic{}, fmt.Errorf("%w: retention_ms must be >= 0 (0 = use default)", ErrInvalid)
-	}
-
-	visibilityMs := opts.VisibilityTimeoutMs
-	if visibilityMs == 0 {
-		visibilityMs = m.cfg.DefaultVisibilityTimeoutMs
-	}
-	if visibilityMs < 0 {
-		return topic.Topic{}, fmt.Errorf("%w: visibility_timeout_ms must be >= 0 (0 = use default)", ErrInvalid)
-	}
-
-	maxIF := opts.MaxInFlightPerPartition
-	if maxIF == 0 {
-		maxIF = m.cfg.DefaultMaxInFlightPerPartition
-	}
-	if maxIF < 0 {
-		return topic.Topic{}, fmt.Errorf("%w: max_in_flight_per_partition must be >= 0 (0 = use default)", ErrInvalid)
-	}
-
-	maxAA := opts.MaxAckedAheadPerPartition
-	if maxAA == 0 {
-		maxAA = m.cfg.DefaultMaxAckedAheadPerPartition
-	}
-	if maxAA < 0 {
-		return topic.Topic{}, fmt.Errorf("%w: max_acked_ahead_per_partition must be >= 0 (0 = use default)", ErrInvalid)
+	t, err := m.topicFromOpts(opts)
+	if err != nil {
+		return topic.Topic{}, err
 	}
 	if len(opts.Schema) > 0 {
 		if err := m.schemas.ValidateDefinition(ctx, opts.Name, opts.Schema); err != nil {
 			return topic.Topic{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 		}
-	}
-
-	t := topic.Topic{
-		Name:                      opts.Name,
-		Partitions:                partitions,
-		RetentionMs:               retentionMs,
-		VisibilityTimeoutMs:       visibilityMs,
-		MaxInFlightPerPartition:   maxIF,
-		MaxAckedAheadPerPartition: maxAA,
-		CreatedAt:                 time.Now().Unix(),
 	}
 
 	dir, err := m.topicDir(opts.Name)
@@ -187,20 +138,77 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 		}
 	}
 	if m.assigner != nil {
-		if err := m.assigner.AssignNewPartitions(ctx, opts.Name, 0, partitions); err != nil {
+		if err := m.assigner.AssignNewPartitions(ctx, opts.Name, 0, t.Partitions); err != nil {
 			m.logger.Warn("topic created without immediate partition assignment", "topic", opts.Name, "err", err)
 		}
 	}
 
 	m.logger.Info("topic created",
 		"topic", opts.Name,
-		"partitions", partitions,
-		"retention_ms", retentionMs,
-		"visibility_timeout_ms", visibilityMs,
-		"max_in_flight_per_partition", maxIF,
-		"max_acked_ahead_per_partition", maxAA)
+		"partitions", t.Partitions,
+		"retention_ms", t.RetentionMs,
+		"visibility_timeout_ms", t.VisibilityTimeoutMs,
+		"max_in_flight_per_partition", t.MaxInFlightPerPartition,
+		"max_acked_ahead_per_partition", t.MaxAckedAheadPerPartition)
 
 	return t, nil
+}
+
+// topicFromOpts resolves CreateOpts against the configured defaults
+// and bounds, returning the fully populated record to persist. Zero
+// policy fields inherit their Config default; negative values are
+// rejected.
+func (m *Manager) topicFromOpts(opts CreateOpts) (topic.Topic, error) {
+	partitions := opts.Partitions
+	if partitions == 0 {
+		partitions = m.cfg.DefaultPartitions
+	}
+	if partitions < 3 {
+		return topic.Topic{}, fmt.Errorf("%w: partitions must be >= 3 (0 = use default)", ErrInvalid)
+	}
+	if maximum := m.cfg.MaxPartitions; maximum > 0 && partitions > maximum {
+		return topic.Topic{}, fmt.Errorf("%w: partitions (%d) exceeds topic.max_partitions (%d)",
+			ErrInvalid, partitions, maximum)
+	}
+
+	retentionMs, err := defaultedNonNegative(opts.RetentionMs, m.cfg.DefaultRetentionMs, "retention_ms")
+	if err != nil {
+		return topic.Topic{}, err
+	}
+	visibilityMs, err := defaultedNonNegative(opts.VisibilityTimeoutMs, m.cfg.DefaultVisibilityTimeoutMs, "visibility_timeout_ms")
+	if err != nil {
+		return topic.Topic{}, err
+	}
+	maxInFlight, err := defaultedNonNegative(opts.MaxInFlightPerPartition, m.cfg.DefaultMaxInFlightPerPartition, "max_in_flight_per_partition")
+	if err != nil {
+		return topic.Topic{}, err
+	}
+	maxAckedAhead, err := defaultedNonNegative(opts.MaxAckedAheadPerPartition, m.cfg.DefaultMaxAckedAheadPerPartition, "max_acked_ahead_per_partition")
+	if err != nil {
+		return topic.Topic{}, err
+	}
+
+	return topic.Topic{
+		Name:                      opts.Name,
+		Partitions:                partitions,
+		RetentionMs:               retentionMs,
+		VisibilityTimeoutMs:       visibilityMs,
+		MaxInFlightPerPartition:   maxInFlight,
+		MaxAckedAheadPerPartition: maxAckedAhead,
+		CreatedAt:                 time.Now().Unix(),
+	}, nil
+}
+
+// defaultedNonNegative substitutes def when v is zero and rejects
+// negative values; field names the offender in the error message.
+func defaultedNonNegative(v, def int64, field string) (int64, error) {
+	if v == 0 {
+		v = def
+	}
+	if v < 0 {
+		return 0, fmt.Errorf("%w: %s must be >= 0 (0 = use default)", ErrInvalid, field)
+	}
+	return v, nil
 }
 
 func (m *Manager) rollbackCreatedTopic(ctx context.Context, topicName string, cause error) error {

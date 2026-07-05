@@ -20,8 +20,7 @@ func TestCreateTopic_Defaults(t *testing.T) {
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("status: got %d body=%s", resp.StatusCode, readBody(resp))
 	}
-	var got topic.Topic
-	decodeJSON(t, resp, &got)
+	got := readJSON[topic.Topic](t, resp)
 
 	if got.Name != "defaults" {
 		t.Errorf("name: got %q want %q", got.Name, "defaults")

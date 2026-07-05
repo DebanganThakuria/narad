@@ -29,15 +29,15 @@ func Consume(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
-		if isLocalOnlyConsumeProbe(localOnly, opts) {
+		// local_only marks a peer's fan-out probe. Answer it strictly
+		// from local partitions without waiting; routing it onward
+		// would bounce the probe around the cluster.
+		if localOnly && isQueueConsume(opts) {
 			opts.Wait = 0
-			done, found := consumeLocalOnly(s, w, r, topicName, opts)
-			if done {
+			if consumeOnce(s, w, r, topicName, opts) {
 				return
 			}
-			if !found {
-				w.WriteHeader(http.StatusNoContent)
-			}
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 
@@ -46,96 +46,79 @@ func Consume(s *handlers.Set) http.HandlerFunc {
 			if forwarded {
 				return
 			}
-			if localPartition != nil && opts.Offset == nil && opts.Partition == nil {
-				handleQueueConsumeWithLocalOwner(s, w, r, topicName, opts, *localPartition)
+			if localPartition != nil && isQueueConsume(opts) {
+				queueConsumeWithLocalOwner(s, w, r, topicName, opts, *localPartition)
 				return
 			}
 		}
 
-		done, found := consumeOnce(s, w, r, topicName, opts)
-		if done {
+		if consumeOnce(s, w, r, topicName, opts) {
 			return
 		}
-		if !found {
-			w.WriteHeader(http.StatusNoContent)
-		}
-	}
-}
-
-func handleQueueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts, localPartition int) {
-	originalWait := opts.Wait
-
-	pinnedOpts := opts
-	pinnedOpts.Partition = &localPartition
-	pinnedOpts.Wait = 0
-	if done, _ := consumeOnce(s, w, r, topicName, pinnedOpts); done {
-		return
-	}
-
-	localScanOpts := opts
-	localScanOpts.Partition = nil
-	localScanOpts.Wait = 0
-	if done, _ := consumeOnce(s, w, r, topicName, localScanOpts); done {
-		return
-	}
-
-	forwarded, _ := s.Deps.Router.RouteConsumeRemote(r.Context(), w, r, topicName)
-	if forwarded {
-		return
-	}
-	if originalWait <= 0 {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	waitOpts := opts
-	waitOpts.Partition = nil
-	waitOpts.Wait = originalWait
-	done, found := consumeOnce(s, w, r, topicName, waitOpts)
-	if done {
-		return
-	}
-	if !found {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-func isLocalOnlyConsumeProbe(localOnly bool, opts brokermsg.ConsumeOpts) bool {
-	return localOnly && opts.Partition == nil && opts.Offset == nil
+// queueConsumeWithLocalOwner serves a queue-style consume on a node
+// that owns at least one partition: try the router-selected local
+// partition, then any other local partition, then remote owners, and
+// only then spend the requested wait long-polling locally.
+func queueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts, localPartition int) {
+	wait := opts.Wait
+
+	pinned := opts
+	pinned.Partition = &localPartition
+	pinned.Wait = 0
+	if consumeOnce(s, w, r, topicName, pinned) {
+		return
+	}
+
+	localScan := opts
+	localScan.Partition = nil
+	localScan.Wait = 0
+	if consumeOnce(s, w, r, topicName, localScan) {
+		return
+	}
+
+	if forwarded, _ := s.Deps.Router.RouteConsumeRemote(r.Context(), w, r, topicName); forwarded {
+		return
+	}
+	if wait <= 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	longPoll := opts
+	longPoll.Partition = nil
+	longPoll.Wait = wait
+	if consumeOnce(s, w, r, topicName, longPoll) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
-func consumeLocalOnly(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts) (bool, bool) {
-	msg, found, err := s.Deps.Broker.Consume(r.Context(), topicName, opts)
-	if errors.Is(err, brokermsg.ErrNotPartitionOwner) {
-		return false, false
-	}
-	if err != nil {
-		s.WriteBrokerError(w, "consume", err)
-		return true, false
-	}
-	if !found {
-		return false, false
-	}
-	s.WriteJSON(w, http.StatusOK, msg)
-	return true, true
-}
-
-func consumeOnce(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts) (bool, bool) {
+// consumeOnce performs a single broker consume and reports whether a
+// response was written. Queue-style consumes treat ErrNotPartitionOwner
+// as "no message here" — ownership may have just moved, and the caller
+// decides whether to route elsewhere or answer 204.
+func consumeOnce(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts) bool {
 	msg, found, err := s.Deps.Broker.Consume(r.Context(), topicName, opts)
 	if isQueueConsume(opts) && errors.Is(err, brokermsg.ErrNotPartitionOwner) {
-		return false, false
+		return false
 	}
 	if err != nil {
 		s.WriteBrokerError(w, "consume", err)
-		return true, false
+		return true
 	}
 	if !found {
-		return false, false
+		return false
 	}
 	s.WriteJSON(w, http.StatusOK, msg)
-	return true, true
+	return true
 }
 
+// isQueueConsume reports whether opts describe a queue-style pull:
+// no explicit partition and no replay offset.
 func isQueueConsume(opts brokermsg.ConsumeOpts) bool {
 	return opts.Partition == nil && opts.Offset == nil
 }

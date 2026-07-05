@@ -11,11 +11,12 @@ import (
 var version = ""
 
 func runVersion(_ []string) error {
-	v := versionString()
-	fmt.Println(v)
+	fmt.Println(versionString())
 	return nil
 }
 
+// versionString renders the human-readable version reported by both
+// `narad version` and the serve startup log.
 func versionString() string {
 	if version != "" {
 		return "narad " + version

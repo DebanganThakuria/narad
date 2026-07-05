@@ -6,6 +6,8 @@ import (
 	"github.com/hashicorp/raft"
 )
 
+// Close hands leadership to another voter if this node leads, shuts
+// Raft down, and closes the FSM database.
 func (s *Store) Close() error {
 	if s.r.State() == raft.Leader {
 		s.r.LeadershipTransfer() //nolint:errcheck
@@ -18,19 +20,26 @@ func (s *Store) Close() error {
 	return s.fsm.db.Close()
 }
 
+// IsLeader reports whether this node is the current Raft leader.
 func (s *Store) IsLeader() bool {
 	return s.r.State() == raft.Leader
 }
 
+// LeaderCh returns Raft's leadership notification channel; it receives
+// true when this node gains leadership and false when it loses it.
 func (s *Store) LeaderCh() <-chan bool {
 	return s.r.LeaderCh()
 }
 
+// LeaderAddr returns the current leader's Raft address, or "" if there
+// is no known leader.
 func (s *Store) LeaderAddr() string {
 	serverAddress, _ := s.r.LeaderWithID()
 	return string(serverAddress)
 }
 
+// LeaderID returns the current leader's node ID, or "" if there is no
+// known leader.
 func (s *Store) LeaderID() string {
 	_, serverID := s.r.LeaderWithID()
 	return string(serverID)

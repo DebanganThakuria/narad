@@ -7,6 +7,10 @@ import (
 	"path/filepath"
 )
 
+// PurgeError reports a DeleteTopic that removed the topic's metadata
+// but failed to purge its local state. The metadata delete stands —
+// callers should treat the topic as gone and the leftover files as
+// reclaimable by the startup orphan sweep.
 type PurgeError struct {
 	Topic string
 	Err   error

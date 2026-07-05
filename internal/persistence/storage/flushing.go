@@ -17,7 +17,7 @@ func (l *Log) drainBufferForFlush() ([][]byte, int64) {
 
 	if len(l.buffer.records) == 0 {
 		if l.flushingValid {
-			return l.flushingRec, l.flushingBase
+			return l.flushingRecords, l.flushingBase
 		}
 		return nil, l.buffer.nextOffset
 	}
@@ -30,13 +30,13 @@ func (l *Log) drainBufferForFlush() ([][]byte, int64) {
 	l.buffer.firstAt = time.Time{}
 
 	if l.flushingValid {
-		l.flushingRec = append(l.flushingRec, records...)
+		l.flushingRecords = append(l.flushingRecords, records...)
 	} else {
 		l.flushingBase = base
-		l.flushingRec = records
+		l.flushingRecords = records
 		l.flushingValid = true
 	}
-	return l.flushingRec, l.flushingBase
+	return l.flushingRecords, l.flushingBase
 }
 
 // hasPendingFlushing reports whether a previous drain's records are
@@ -54,10 +54,10 @@ func (l *Log) readFlushing(offset int64) ([]byte, bool) {
 		return nil, false
 	}
 	idx := offset - l.flushingBase
-	if idx < 0 || int(idx) >= len(l.flushingRec) {
+	if idx < 0 || int(idx) >= len(l.flushingRecords) {
 		return nil, false
 	}
-	rec := l.flushingRec[idx]
+	rec := l.flushingRecords[idx]
 	out := make([]byte, len(rec))
 	copy(out, rec)
 	return out, true
@@ -73,12 +73,12 @@ func (l *Log) clearFlushingThrough(end int64) {
 		return
 	}
 	n := end - l.flushingBase
-	if n >= int64(len(l.flushingRec)) {
+	if n >= int64(len(l.flushingRecords)) {
 		l.flushingBase = 0
-		l.flushingRec = nil
+		l.flushingRecords = nil
 		l.flushingValid = false
 		return
 	}
-	l.flushingRec = l.flushingRec[n:]
+	l.flushingRecords = l.flushingRecords[n:]
 	l.flushingBase = end
 }

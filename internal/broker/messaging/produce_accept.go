@@ -3,7 +3,6 @@ package messaging
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 )
@@ -13,54 +12,34 @@ import (
 // partition to be locally owned; a background dispatcher is responsible
 // for moving accepted records to their final partition owner.
 func (e *Engine) AcceptProduce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (ingress.AcceptedProduce, error) {
-	totalStart := time.Now()
-	totalOutcome := "ok"
-	defer func() {
-		e.observe("produce_accept", "total", totalOutcome, time.Since(totalStart))
-	}()
-
 	if e.ingress == nil {
-		totalOutcome = "error"
-		return ingress.AcceptedProduce{}, errorsUnavailable("ingress manager")
+		return ingress.AcceptedProduce{}, unavailableError("ingress manager")
 	}
 
-	stageStart := time.Now()
 	t, err := e.getTopic(ctx, topicName)
-	e.observe("produce_accept", "get_topic", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
-		totalOutcome = "error"
 		return ingress.AcceptedProduce{}, err
 	}
 
-	stageStart = time.Now()
 	if err = e.validateProducePayload(ctx, topicName, payload); err != nil {
-		e.observe("produce_accept", "validate_payload", "error", time.Since(stageStart))
 		if e.metrics != nil {
 			e.metrics.ProduceRejectionsTotal.WithLabelValues(topicName, "schema").Inc()
 		}
-		totalOutcome = "error"
 		return ingress.AcceptedProduce{}, err
 	}
-	e.observe("produce_accept", "validate_payload", "ok", time.Since(stageStart))
 
-	stageStart = time.Now()
 	partIdx, err := e.resolveAcceptedProducePartition(topicName, key, t.Partitions, partition)
-	e.observe("produce_accept", "resolve_partition", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
-		totalOutcome = "error"
 		return ingress.AcceptedProduce{}, err
 	}
 
-	stageStart = time.Now()
-	accepted, err := e.ingress.AcceptProduce(ctx, topicName, key, partIdx, payload)
-	e.observe("produce_accept", "wal_append", observeOutcome(err), time.Since(stageStart))
-	if err != nil {
-		totalOutcome = "error"
-		return ingress.AcceptedProduce{}, err
-	}
-	return accepted, nil
+	return e.ingress.AcceptProduce(ctx, topicName, key, partIdx, payload)
 }
 
+// resolveAcceptedProducePartition picks the target partition for a
+// WAL-first accept: the pinned partition after a range check, or the
+// partitioner's pick. Unlike the synchronous produce path there is no
+// ownership check — the dispatcher routes the record to its owner.
 func (e *Engine) resolveAcceptedProducePartition(topicName, key string, partitions int, pinned []int) (int, error) {
 	if len(pinned) > 1 {
 		return 0, fmt.Errorf("%w: at most one partition may be specified", ErrInvalid)
@@ -76,7 +55,7 @@ func (e *Engine) resolveAcceptedProducePartition(topicName, key string, partitio
 		return partIdx, nil
 	}
 	if e.partitions == nil {
-		return 0, errorsUnavailable("partition manager")
+		return 0, unavailableError("partition manager")
 	}
 	partIdx := e.partitions.Pick(topicName, key, partitions)
 	if partIdx < 0 || partIdx >= partitions {
@@ -85,6 +64,8 @@ func (e *Engine) resolveAcceptedProducePartition(topicName, key string, partitio
 	return partIdx, nil
 }
 
-func errorsUnavailable(component string) error {
+// unavailableError reports a request that needs a component this
+// broker was constructed without.
+func unavailableError(component string) error {
 	return fmt.Errorf("%w: %s unavailable", ErrInvalid, component)
 }

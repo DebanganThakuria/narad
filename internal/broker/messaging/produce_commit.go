@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
@@ -14,110 +13,69 @@ import (
 // partition log and advances the partition high-watermark. It is the
 // owner-side visibility step for the WAL-first produce design.
 func (e *Engine) CommitAcceptedProduce(ctx context.Context, record ingress.ProduceRecord) (int64, error) {
-	totalStart := time.Now()
-	totalOutcome := "ok"
-	defer func() {
-		e.observe("produce_commit", "total", totalOutcome, time.Since(totalStart))
-	}()
-
 	if err := ctx.Err(); err != nil {
-		totalOutcome = "error"
 		return 0, err
 	}
 	if e.logs == nil {
-		totalOutcome = "error"
-		return 0, errorsUnavailable("partition logs")
+		return 0, unavailableError("partition logs")
 	}
 	if record.Topic == "" {
-		totalOutcome = "error"
 		return 0, fmt.Errorf("%w: topic required", ErrInvalid)
 	}
 	if len(record.Payload) == 0 {
-		totalOutcome = "error"
 		return 0, fmt.Errorf("%w: payload required", ErrInvalid)
 	}
 
-	stageStart := time.Now()
 	t, err := e.getTopic(ctx, record.Topic)
-	e.observe("produce_commit", "get_topic", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
-		totalOutcome = "error"
 		return 0, err
 	}
 	if record.TargetPartition < 0 || record.TargetPartition >= t.Partitions {
-		totalOutcome = "error"
 		return 0, fmt.Errorf("%w: partition out of range", ErrInvalid)
 	}
 	if !e.isLocalOwner(record.Topic, record.TargetPartition) {
-		totalOutcome = "error"
 		return 0, ErrNotPartitionOwner
 	}
 
-	stageStart = time.Now()
 	offset, err := e.logs.WithProduceLockResult(record.Topic, record.TargetPartition, func(log *storage.Log) (int64, error) {
 		return e.appendAndCommit(log, record.Payload)
 	})
-	e.observe("produce_commit", "append_visible", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
-		totalOutcome = "error"
 		return 0, err
 	}
 
-	if e.metrics != nil {
-		e.recordAcceptedProduceCommitted(record)
-	}
+	e.recordAcceptedProduceCommitted(record)
 	return offset, nil
 }
 
+// CommitAcceptedProduceBatch commits a batch of ingress WAL records to
+// one locally owned topic partition under a single produce lock, with
+// one append+fsync+verify cycle and a single high-watermark advance.
+// All records must target the same (topic, partition). Returns the
+// assigned offsets in record order.
 func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingress.ProduceRecord) ([]int64, error) {
-	totalStart := time.Now()
-	totalOutcome := "ok"
-	defer func() {
-		e.observe("produce_commit_batch", "total", totalOutcome, time.Since(totalStart))
-	}()
-
 	if len(records) == 0 {
 		return nil, nil
 	}
 	if err := ctx.Err(); err != nil {
-		totalOutcome = "error"
 		return nil, err
 	}
 	if e.logs == nil {
-		totalOutcome = "error"
-		return nil, errorsUnavailable("partition logs")
+		return nil, unavailableError("partition logs")
 	}
-
-	topicName := records[0].Topic
-	partition := records[0].TargetPartition
-	for _, record := range records {
-		if record.Topic == "" {
-			totalOutcome = "error"
-			return nil, fmt.Errorf("%w: topic required", ErrInvalid)
-		}
-		if record.Topic != topicName || record.TargetPartition != partition {
-			totalOutcome = "error"
-			return nil, fmt.Errorf("%w: accepted produce batch must target one topic partition", ErrInvalid)
-		}
-		if len(record.Payload) == 0 {
-			totalOutcome = "error"
-			return nil, fmt.Errorf("%w: payload required", ErrInvalid)
-		}
-	}
-
-	stageStart := time.Now()
-	t, err := e.getTopic(ctx, topicName)
-	e.observe("produce_commit_batch", "get_topic", observeOutcome(err), time.Since(stageStart))
+	topicName, partition, err := singleBatchTarget(records)
 	if err != nil {
-		totalOutcome = "error"
+		return nil, err
+	}
+
+	t, err := e.getTopic(ctx, topicName)
+	if err != nil {
 		return nil, err
 	}
 	if partition < 0 || partition >= t.Partitions {
-		totalOutcome = "error"
 		return nil, fmt.Errorf("%w: partition out of range", ErrInvalid)
 	}
 	if !e.isLocalOwner(topicName, partition) {
-		totalOutcome = "error"
 		return nil, ErrNotPartitionOwner
 	}
 
@@ -126,7 +84,6 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 		payloads[i] = record.Payload
 	}
 
-	stageStart = time.Now()
 	var offsets []int64
 	err = e.logs.WithProduceLock(topicName, partition, func(log *storage.Log) error {
 		first, last, err := log.AppendBatch(payloads)
@@ -145,9 +102,7 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 		}
 		return nil
 	})
-	e.observe("produce_commit_batch", "append_visible", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
-		totalOutcome = "error"
 		return nil, err
 	}
 
@@ -155,6 +110,26 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 		e.recordAcceptedProduceCommitted(record)
 	}
 	return offsets, nil
+}
+
+// singleBatchTarget validates that every record in the batch is
+// well-formed and targets the same (topic, partition), returning that
+// target.
+func singleBatchTarget(records []ingress.ProduceRecord) (string, int, error) {
+	topicName := records[0].Topic
+	partition := records[0].TargetPartition
+	for _, record := range records {
+		if record.Topic == "" {
+			return "", 0, fmt.Errorf("%w: topic required", ErrInvalid)
+		}
+		if record.Topic != topicName || record.TargetPartition != partition {
+			return "", 0, fmt.Errorf("%w: accepted produce batch must target one topic partition", ErrInvalid)
+		}
+		if len(record.Payload) == 0 {
+			return "", 0, fmt.Errorf("%w: payload required", ErrInvalid)
+		}
+	}
+	return topicName, partition, nil
 }
 
 // appendAndCommit is the single durability chokepoint shared by the
@@ -208,6 +183,8 @@ func (e *Engine) commitDurable(log *storage.Log, firstOffset int64, payloads [][
 	return nil
 }
 
+// recordAcceptedProduceCommitted bumps the produced counters for a
+// committed WAL record.
 func (e *Engine) recordAcceptedProduceCommitted(record ingress.ProduceRecord) {
 	if e.metrics == nil {
 		return
@@ -215,8 +192,4 @@ func (e *Engine) recordAcceptedProduceCommitted(record ingress.ProduceRecord) {
 	partLabel := strconv.Itoa(record.TargetPartition)
 	e.metrics.MessagesProducedTotal.WithLabelValues(record.Topic, partLabel).Inc()
 	e.metrics.BytesProducedTotal.WithLabelValues(record.Topic, partLabel).Add(float64(len(record.Payload)))
-	if record.CreatedAtUnixMs > 0 {
-		createdAt := time.UnixMilli(record.CreatedAtUnixMs)
-		e.observe("produce_commit", "accepted_to_visible", "ok", time.Since(createdAt))
-	}
 }

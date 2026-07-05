@@ -1,3 +1,6 @@
+// Command local-cluster-driver drives load and chaos runs against a
+// running Narad cluster over HTTP. It is invoked by
+// scripts/local-cluster-e2e.sh and scripts/local-cluster-chaos.sh.
 package main
 
 import (

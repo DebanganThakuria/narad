@@ -25,7 +25,8 @@ import (
 )
 
 // Logs is the partition-log manager. All access is concurrency-safe;
-// the map is RWMutex-guarded for the lazy-open fast path.
+// the map is RWMutex-guarded for the lazy-open fast path. The produce
+// serialization mutexes live in produce_lock.go.
 type Logs struct {
 	dataDir     string
 	storageOpts storage.Options
@@ -51,129 +52,6 @@ func NewLogs(dataDir string, storageOpts storage.Options, ms metastore.Metastore
 		logs:        make(map[string]*storage.Log),
 		produceSync: make(map[string]*sync.Mutex),
 	}
-}
-
-// lockProduce acquires the produce-serialization mutex for (topic,
-// partition), minting one on first use.
-//
-// Keyed-mutex revalidation: CloseTopic/CloseAll/DropProduceSync retire
-// map entries, and a goroutine may have fetched a mutex from the map
-// just before its entry was retired. If it then acquired that orphaned
-// mutex while a later producer minted a fresh one for the same key, two
-// produce commits could run concurrently. So after acquiring, re-check
-// that the acquired mutex is still the one installed in the map; if
-// not, release it and retry against the current map state. Retirement
-// itself only deletes an entry while holding that entry's mutex (see
-// retireProduceMutex), so a holder inside its critical section is never
-// invalidated mid-flight.
-func (g *Logs) lockProduce(topicName string, idx int) func() {
-	key := keyOf(topicName, idx)
-	for {
-		g.produceMu.Lock()
-		mu, ok := g.produceSync[key]
-		if !ok {
-			mu = &sync.Mutex{}
-			g.produceSync[key] = mu
-		}
-		g.produceMu.Unlock()
-
-		mu.Lock()
-
-		g.produceMu.Lock()
-		current := g.produceSync[key] == mu
-		g.produceMu.Unlock()
-		if current {
-			return mu.Unlock
-		}
-		// The entry was retired (and possibly replaced) between our map
-		// fetch and the acquisition — this mutex no longer serializes
-		// anything. Drop it and retry.
-		mu.Unlock()
-	}
-}
-
-// retireProduceMutex removes a produceSync entry, but only while
-// holding that entry's mutex: a produce commit currently inside its
-// critical section blocks the retirement until it finishes, so a
-// producer that mints a replacement mutex afterwards can never run
-// concurrently with the old holder. Goroutines still queued on the
-// retired mutex fail lockProduce's revalidation and retry. The map
-// re-check under produceMu makes retirement idempotent against a
-// concurrent retire of the same key.
-func (g *Logs) retireProduceMutex(key string, mu *sync.Mutex) {
-	mu.Lock()
-	g.produceMu.Lock()
-	if g.produceSync[key] == mu {
-		delete(g.produceSync, key)
-	}
-	g.produceMu.Unlock()
-	mu.Unlock()
-}
-
-func (g *Logs) dropProduceLock(topicName string, idx int) {
-	key := keyOf(topicName, idx)
-	g.produceMu.Lock()
-	mu, ok := g.produceSync[key]
-	g.produceMu.Unlock()
-	if !ok {
-		return
-	}
-	g.retireProduceMutex(key, mu)
-}
-
-func (g *Logs) WithProduceLock(topicName string, idx int, fn func(*storage.Log) error) error {
-	unlock := g.lockProduce(topicName, idx)
-	defer unlock()
-
-	log, err := g.Get(topicName, idx)
-	if err != nil {
-		return err
-	}
-	return fn(log)
-}
-
-func (g *Logs) WithProduceLockResult(topicName string, idx int, fn func(*storage.Log) (int64, error)) (int64, error) {
-	unlock := g.lockProduce(topicName, idx)
-	defer unlock()
-
-	log, err := g.Get(topicName, idx)
-	if err != nil {
-		return 0, err
-	}
-	return fn(log)
-}
-
-func (g *Logs) WithProduceLockValue(topicName string, idx int, fn func(*storage.Log) (int64, int, error)) (int64, int, error) {
-	waitStart := time.Now()
-	unlock := g.lockProduce(topicName, idx)
-	g.observeProduce("lock_wait", "ok", time.Since(waitStart))
-	defer unlock()
-
-	openStart := time.Now()
-	log, err := g.Get(topicName, idx)
-	if err != nil {
-		g.observeProduce("log_open", "error", time.Since(openStart))
-		return 0, 0, err
-	}
-	g.observeProduce("log_open", "ok", time.Since(openStart))
-	return fn(log)
-}
-
-func (g *Logs) ProduceSyncCount() int {
-	g.produceMu.Lock()
-	defer g.produceMu.Unlock()
-	return len(g.produceSync)
-}
-
-func (g *Logs) DropProduceSync(topicName string, idx int) {
-	g.dropProduceLock(topicName, idx)
-}
-
-func (g *Logs) observeProduce(stage, outcome string, duration time.Duration) {
-	if g.metrics == nil {
-		return
-	}
-	g.metrics.ObserveHotPathStage("broker_runtime", "produce", stage, outcome, duration)
 }
 
 // Get returns the storage.Log for (topic, partition), opening the
@@ -225,7 +103,6 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 		return nil, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)
 	}
 	g.logs[key] = l
-	g.setActiveLogCountLocked()
 	return l, nil
 }
 
@@ -258,7 +135,6 @@ func (g *Logs) CloseTopic(topicName string) error {
 		}
 		delete(g.logs, k)
 	}
-	g.setActiveLogCountLocked()
 	g.mu.Unlock()
 
 	// Retire the topic's produce-serialization mutexes too; otherwise
@@ -272,24 +148,6 @@ func (g *Logs) CloseTopic(topicName string) error {
 	return firstErr
 }
 
-// retireProduceEntries retires every produceSync entry whose key
-// matches. The map is snapshotted under produceMu, then each entry is
-// retired individually under its own mutex.
-func (g *Logs) retireProduceEntries(match func(key string) bool) {
-	g.produceMu.Lock()
-	retire := make(map[string]*sync.Mutex)
-	for k, mu := range g.produceSync {
-		if match(k) {
-			retire[k] = mu
-		}
-	}
-	g.produceMu.Unlock()
-
-	for k, mu := range retire {
-		g.retireProduceMutex(k, mu)
-	}
-}
-
 // CloseAll flushes and closes every cached log. Called on broker
 // shutdown.
 func (g *Logs) CloseAll() error {
@@ -301,7 +159,6 @@ func (g *Logs) CloseAll() error {
 		}
 		delete(g.logs, k)
 	}
-	g.setActiveLogCountLocked()
 	g.mu.Unlock()
 
 	g.retireProduceEntries(func(string) bool { return true })
@@ -310,13 +167,6 @@ func (g *Logs) CloseAll() error {
 
 func keyOf(topicName string, idx int) string {
 	return topicName + "/" + strconv.Itoa(idx)
-}
-
-func (g *Logs) setActiveLogCountLocked() {
-	if g.metrics == nil {
-		return
-	}
-	g.metrics.ActivePartitionLogs.Set(float64(len(g.logs)))
 }
 
 func retentionFromTopic(r int64, checkInterval time.Duration) storage.RetentionConfig {

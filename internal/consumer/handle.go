@@ -7,8 +7,8 @@ import (
 )
 
 // ErrHandleMalformed is an alias of the canonical sentinel in
-// internal/errs, kept here so callers in this package can reference it
-// without the errs import.
+// internal/errs, re-exported so callers can match handle-parse failures
+// without importing errs.
 var ErrHandleMalformed = errs.ErrHandleMalformed
 
 // Handle is the decoded content of a receipt handle.

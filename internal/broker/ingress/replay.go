@@ -2,6 +2,9 @@ package ingress
 
 import "github.com/debanganthakuria/narad/internal/persistence/wal"
 
+// ReplayProduce streams every produce record with seq >= from to fn,
+// in sequence order. Replay stops at the first error from fn or from
+// decoding.
 func ReplayProduce(dir string, from uint64, fn func(ProduceRecord) error) error {
 	if fn == nil {
 		return nil
@@ -16,6 +19,10 @@ func ReplayProduce(dir string, from uint64, fn func(ProduceRecord) error) error 
 	})
 }
 
+// ReplayProduceFromCursor streams produce records starting at an exact
+// byte cursor, handing fn each record along with the cursor for the
+// record after it — persisting that cursor lets a dispatcher resume
+// without rescanning the segment.
 func ReplayProduceFromCursor(dir string, cursor wal.Cursor, fn func(ProduceRecord, wal.Cursor) error) error {
 	if fn == nil {
 		return nil
@@ -30,6 +37,8 @@ func ReplayProduceFromCursor(dir string, cursor wal.Cursor, fn func(ProduceRecor
 	})
 }
 
+// nextProduceSeq scans the WAL and returns one past the highest
+// recovered sequence (0 for an empty log).
 func nextProduceSeq(dir string) (uint64, error) {
 	var next uint64
 	err := wal.Replay(dir, 0, 0, func(record wal.Record) error {

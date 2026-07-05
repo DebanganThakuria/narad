@@ -169,12 +169,12 @@ func TestCommitProduceBatchRequestRejectsMalformedPayloads(t *testing.T) {
 		},
 		{
 			name: "negative count",
-			data: negativeCount.bytesOut(),
+			data: negativeCount.finish(),
 			want: "negative commit produce batch size",
 		},
 		{
 			name: "huge count without records",
-			data: hugeCount.bytesOut(),
+			data: hugeCount.finish(),
 			want: "EOF",
 		},
 		{

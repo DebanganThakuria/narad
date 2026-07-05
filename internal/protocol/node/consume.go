@@ -1,5 +1,6 @@
 package node
 
+// EncodeConsumeRequest encodes an OpConsume payload.
 func EncodeConsumeRequest(req ConsumeRequest) ([]byte, error) {
 	w := opWriter(OpConsume, fieldLen(req.Topic)+4+1+8+1+8+1)
 	if err := w.string(req.Topic); err != nil {
@@ -11,15 +12,16 @@ func EncodeConsumeRequest(req ConsumeRequest) ([]byte, error) {
 	w.bool(req.HasOffset)
 	w.i64(req.WaitNanos)
 	w.bool(req.LocalOnly)
-	return w.bytesOut(), nil
+	return w.finish(), nil
 }
 
+// DecodeConsumeRequest decodes an OpConsume payload.
 func DecodeConsumeRequest(payload []byte) (ConsumeRequest, error) {
 	r, err := opReader(payload, OpConsume)
 	if err != nil {
 		return ConsumeRequest{}, err
 	}
-	topicName, err := r.string()
+	topic, err := r.string()
 	if err != nil {
 		return ConsumeRequest{}, err
 	}
@@ -51,7 +53,7 @@ func DecodeConsumeRequest(payload []byte) (ConsumeRequest, error) {
 		return ConsumeRequest{}, err
 	}
 	return ConsumeRequest{
-		Topic:        topicName,
+		Topic:        topic,
 		Partition:    int(partition),
 		HasPartition: hasPartition,
 		Offset:       offset,

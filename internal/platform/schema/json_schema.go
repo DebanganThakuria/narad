@@ -10,9 +10,9 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-// JSONSchema is a schema.Registry backed by santhosh-tekuri/jsonschema.
-// Schemas are pre-compiled on Register for fast repeated validation.
-
+// JSONSchema is a Registry backed by santhosh-tekuri/jsonschema.
+// Schemas are compiled once on Register/Load so repeated Validate calls
+// pay no compilation cost. Safe for concurrent use.
 type JSONSchema struct {
 	mu       sync.RWMutex
 	versions map[string]int                        // topic → latest version number
@@ -168,115 +168,4 @@ func (r *JSONSchema) Validate(_ context.Context, topic string, payload []byte) e
 		return fmt.Errorf("schema: %w", err)
 	}
 	return nil
-}
-
-// checkCompatible validates that newSchema accepts every document
-// accepted by oldSchema. It parses both as raw JSON to compare
-// properties, required fields, and types.
-func checkCompatible(oldRaw, newRaw []byte) error {
-	oldSchema, err := parseSchemaShape(oldRaw)
-	if err != nil {
-		return err
-	}
-	newSchema, err := parseSchemaShape(newRaw)
-	if err != nil {
-		return err
-	}
-
-	oldRequired := setOf(oldSchema.Required)
-	newRequired := setOf(newSchema.Required)
-
-	for name := range oldSchema.Properties {
-		newProp, ok := newSchema.Properties[name]
-		if !ok {
-			return fmt.Errorf("property %q removed", name)
-		}
-
-		oldProp := oldSchema.Properties[name]
-		if err := compatibleTypes(oldProp, newProp); err != nil {
-			return fmt.Errorf("property %q: %w", name, err)
-		}
-	}
-
-	// Previously-required fields must still exist and be compatible.
-	for name := range oldRequired {
-		if _, ok := newSchema.Properties[name]; !ok {
-			return fmt.Errorf("required property %q removed", name)
-		}
-	}
-	for name := range newRequired {
-		if !oldRequired[name] {
-			return fmt.Errorf("required property %q added", name)
-		}
-	}
-
-	return nil
-}
-
-type schemaShape struct {
-	Properties map[string]json.RawMessage `json:"properties"`
-	Required   []string                   `json:"required"`
-}
-
-func parseSchemaShape(raw []byte) (schemaShape, error) {
-	var s schemaShape
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return schemaShape{}, err
-	}
-	return s, nil
-}
-
-type propShape struct {
-	Type any `json:"type"` // string or []string
-}
-
-func compatibleTypes(oldProp, newProp json.RawMessage) error {
-	var oldPS, newPS propShape
-	if err := json.Unmarshal(oldProp, &oldPS); err != nil {
-		return err
-	}
-	if err := json.Unmarshal(newProp, &newPS); err != nil {
-		return err
-	}
-
-	oldTypes := normalizeType(oldPS.Type)
-	newTypes := normalizeType(newPS.Type)
-	if len(oldTypes) == 0 || len(newTypes) == 0 {
-		return nil
-	}
-
-	newSet := setOf(newTypes)
-	for _, oldType := range oldTypes {
-		if !newSet[oldType] {
-			return fmt.Errorf("type changed from %v to %v", oldTypes, newTypes)
-		}
-	}
-	return nil
-}
-
-// normalizeType converts the JSON Schema "type" field to a []string.
-// JSON Schema allows type to be a single string or an array.
-func normalizeType(t any) []string {
-	switch v := t.(type) {
-	case string:
-		return []string{v}
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				out = append(out, s)
-			}
-		}
-		return out
-	default:
-		return nil
-	}
-}
-
-func setOf(ss []string) map[string]bool {
-	m := make(map[string]bool, len(ss))
-	for _, s := range ss {
-		m[s] = true
-	}
-	return m
 }

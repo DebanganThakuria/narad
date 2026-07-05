@@ -14,7 +14,7 @@ import (
 )
 
 func TestFSMSnapshotRestoreRoundTrip(t *testing.T) {
-	source, err := newFSM(filepath.Join(t.TempDir(), "meta.db"), nil)
+	source, err := newFSM(filepath.Join(t.TempDir(), "meta.db"))
 	if err != nil {
 		t.Fatalf("newFSM(source): %v", err)
 	}
@@ -34,7 +34,7 @@ func TestFSMSnapshotRestoreRoundTrip(t *testing.T) {
 	}
 	snapData := snap.(*fsmSnapshot).data
 
-	target, err := newFSM(filepath.Join(t.TempDir(), "meta.db"), nil)
+	target, err := newFSM(filepath.Join(t.TempDir(), "meta.db"))
 	if err != nil {
 		t.Fatalf("newFSM(target): %v", err)
 	}
@@ -49,7 +49,7 @@ func TestFSMSnapshotRestoreRoundTrip(t *testing.T) {
 	}
 
 	// The restored db must be open and contain the snapshotted topic.
-	err = target.view("get_topic", func(tx *bolt.Tx) error {
+	err = target.view(func(tx *bolt.Tx) error {
 		if tx.Bucket(bucketTopics).Get([]byte("orders")) == nil {
 			return errors.New("topic missing after restore")
 		}

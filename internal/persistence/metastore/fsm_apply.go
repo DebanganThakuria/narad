@@ -1,5 +1,11 @@
 package metastore
 
+// The apply* handlers below run on Raft's FSM goroutine for every
+// committed log entry, on every node. They must stay deterministic:
+// identical inputs must produce identical bbolt state and identical
+// business errors. Domain version bumps happen only after a successful
+// update, outside the bbolt transaction.
+
 import (
 	"bytes"
 	"encoding/json"
@@ -14,7 +20,7 @@ func (f *fsmState) applyCreateTopic(data []byte) error {
 	if err := json.Unmarshal(data, &t); err != nil {
 		return err
 	}
-	err := f.update("create_topic", func(tx *bolt.Tx) error {
+	err := f.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketTopics)
 		if b.Get([]byte(t.Name)) != nil {
 			return ErrAlreadyExists
@@ -36,7 +42,7 @@ func (f *fsmState) applyUpdateTopic(data []byte) error {
 	if err := json.Unmarshal(data, &t); err != nil {
 		return err
 	}
-	err := f.update("update_topic", func(tx *bolt.Tx) error {
+	err := f.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketTopics)
 		if b.Get([]byte(t.Name)) == nil {
 			return ErrNotFound
@@ -53,12 +59,14 @@ func (f *fsmState) applyUpdateTopic(data []byte) error {
 	return err
 }
 
+// applyDeleteTopic removes the topic together with all of its schemas
+// and partition assignments in a single transaction.
 func (f *fsmState) applyDeleteTopic(data []byte) error {
 	var name string
 	if err := json.Unmarshal(data, &name); err != nil {
 		return err
 	}
-	err := f.update("delete_topic", func(tx *bolt.Tx) error {
+	err := f.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketTopics)
 		if b.Get([]byte(name)) == nil {
 			return ErrNotFound
@@ -94,7 +102,7 @@ func (f *fsmState) applyPutSchema(data []byte) error {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return err
 	}
-	err := f.update("put_schema", func(tx *bolt.Tx) error {
+	err := f.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketSchemas).Put(schemaKey(p.Topic, p.Version), p.Schema)
 	})
 	if err == nil {
@@ -112,7 +120,7 @@ func (f *fsmState) applyAssignPartition(data []byte) error {
 	if err != nil {
 		return err
 	}
-	err = f.update("assign_partition", func(tx *bolt.Tx) error {
+	err = f.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketAssignments).Put(assignmentKey(a.Topic, a.Partition), v)
 	})
 	if err == nil {
@@ -121,6 +129,9 @@ func (f *fsmState) applyAssignPartition(data []byte) error {
 	return err
 }
 
+// applyMemberJoin upserts the member record. The routing-members version
+// only advances when routing-relevant fields change, so heartbeat-only
+// re-registrations do not invalidate route caches.
 func (f *fsmState) applyMemberJoin(data []byte) error {
 	var m Member
 	if err := json.Unmarshal(data, &m); err != nil {
@@ -131,7 +142,7 @@ func (f *fsmState) applyMemberJoin(data []byte) error {
 		return err
 	}
 	routingChanged := false
-	err = f.update("member_join", func(tx *bolt.Tx) error {
+	err = f.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketMembers)
 		raw := b.Get([]byte(m.ID))
 		if raw == nil {
@@ -156,7 +167,7 @@ func (f *fsmState) applyMemberHeartbeat(data []byte) error {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return err
 	}
-	return f.update("member_heartbeat", func(tx *bolt.Tx) error {
+	return f.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketMembers)
 		raw := b.Get([]byte(p.ID))
 		if raw == nil {
@@ -181,7 +192,7 @@ func (f *fsmState) applyMemberDead(data []byte) error {
 		return err
 	}
 	routingChanged := false
-	err := f.update("member_dead", func(tx *bolt.Tx) error {
+	err := f.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketMembers)
 		raw := b.Get([]byte(id))
 		if raw == nil {
@@ -205,6 +216,8 @@ func (f *fsmState) applyMemberDead(data []byte) error {
 	return err
 }
 
+// sameRoutingMember compares only the fields routing depends on;
+// LastHeartbeat is deliberately excluded.
 func sameRoutingMember(a, b Member) bool {
 	return a.ID == b.ID &&
 		a.Addr == b.Addr &&

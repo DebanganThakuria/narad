@@ -89,35 +89,51 @@ func encodeFrame(records [][]byte, baseOffset int64, c codec.Codec) ([]byte, err
 	return frame, nil
 }
 
-// readFrameAt errors:
+// readFrameRaw reads the header and raw (still-encoded) payload of the
+// frame at pos and validates the CRC — no decode. Shared by readFrameAt
+// (which goes on to decode) and verifyFrameAt (which deliberately does
+// not).
+//
+// Errors:
 //   - errBadMagic: header magic mismatch (caller resyncs)
-//   - errCorrupt:  CRC mismatch or inner record stream invalid
+//   - errCorrupt:  CRC mismatch
 //   - io.ErrUnexpectedEOF: torn tail
-func readFrameAt(r io.ReaderAt, pos int64, log *Log) (frameHeader, [][]byte, int64, error) {
+func readFrameRaw(r io.ReaderAt, pos int64) (frameHeader, []byte, error) {
 	var hdrBuf [headerSize]byte
 	n, err := r.ReadAt(hdrBuf[:], pos)
 	if err != nil && err != io.EOF {
-		return frameHeader{}, nil, pos, err
+		return frameHeader{}, nil, err
 	}
 	if n < headerSize {
-		return frameHeader{}, nil, pos, io.ErrUnexpectedEOF
+		return frameHeader{}, nil, io.ErrUnexpectedEOF
 	}
 	h, err := decodeHeader(hdrBuf[:])
 	if err != nil {
-		return h, nil, pos, err
+		return h, nil, err
 	}
 
 	payload := make([]byte, h.compressed)
 	n, err = r.ReadAt(payload, pos+headerSize)
 	if err != nil && err != io.EOF {
-		return h, nil, pos, err
+		return h, nil, err
 	}
 	if n < int(h.compressed) {
-		return h, nil, pos, io.ErrUnexpectedEOF
+		return h, nil, io.ErrUnexpectedEOF
 	}
 
 	if want, got := h.crc, crc32cOf(hdrBuf[2:23], payload); want != got {
-		return h, nil, pos, fmt.Errorf("%w: crc want=0x%x got=0x%x at pos=%d", errCorrupt, want, got, pos)
+		return h, nil, fmt.Errorf("%w: crc want=0x%x got=0x%x at pos=%d", errCorrupt, want, got, pos)
+	}
+	return h, payload, nil
+}
+
+// readFrameAt reads, CRC-checks, and decodes the frame at pos, returning
+// its records and the position just after the frame. Errors are those of
+// readFrameRaw, plus errCorrupt when the decoded record stream is invalid.
+func readFrameAt(r io.ReaderAt, pos int64, log *Log) (frameHeader, [][]byte, int64, error) {
+	h, payload, err := readFrameRaw(r, pos)
+	if err != nil {
+		return h, nil, pos, err
 	}
 
 	c, err := codecForFlag(h.codec(), log.codec)
@@ -140,6 +156,12 @@ func readFrameAt(r io.ReaderAt, pos int64, log *Log) (frameHeader, [][]byte, int
 	return h, records, pos + int64(headerSize) + int64(h.compressed), nil
 }
 
+// frameHeaderReadHook, when non-nil, is invoked on every frame-header read.
+// It is nil in production (a single predicted-not-taken branch) and set only by
+// tests to count header reads — used to prove navigation no longer re-walks
+// frames from the sparse anchor on each sequential read.
+var frameHeaderReadHook func()
+
 // frameHeaderAt reads ONLY the frame header at pos — no payload read, no CRC,
 // no decode — and returns it plus the position just after the frame. It is for
 // pure navigation: locating an offset by stepping frame-to-frame needs only
@@ -154,12 +176,6 @@ func readFrameAt(r io.ReaderAt, pos int64, log *Log) (frameHeader, [][]byte, int
 // bad header triggers the caller's magic-resync rather than a wrong step. The
 // caller must reject a frame whose computed end exceeds the segment size (a
 // torn tail), since this read does not touch the payload to detect truncation.
-// frameHeaderReadHook, when non-nil, is invoked on every frame-header read.
-// It is nil in production (a single predicted-not-taken branch) and set only by
-// tests to count header reads — used to prove navigation no longer re-walks
-// frames from the sparse anchor on each sequential read.
-var frameHeaderReadHook func()
-
 func frameHeaderAt(r io.ReaderAt, pos int64) (frameHeader, int64, error) {
 	if frameHeaderReadHook != nil {
 		frameHeaderReadHook()
@@ -194,30 +210,9 @@ func frameHeaderAt(r io.ReaderAt, pos int64) (frameHeader, int64, error) {
 // CRC is still checked so navigation detects corruption exactly as the old
 // decode-based walk did; only the (expensive) zstd decode is skipped.
 func verifyFrameAt(r io.ReaderAt, pos int64) (frameHeader, int64, error) {
-	var hdrBuf [headerSize]byte
-	n, err := r.ReadAt(hdrBuf[:], pos)
-	if err != nil && err != io.EOF {
-		return frameHeader{}, pos, err
-	}
-	if n < headerSize {
-		return frameHeader{}, pos, io.ErrUnexpectedEOF
-	}
-	h, err := decodeHeader(hdrBuf[:])
+	h, _, err := readFrameRaw(r, pos)
 	if err != nil {
 		return h, pos, err
-	}
-
-	payload := make([]byte, h.compressed)
-	n, err = r.ReadAt(payload, pos+headerSize)
-	if err != nil && err != io.EOF {
-		return h, pos, err
-	}
-	if n < int(h.compressed) {
-		return h, pos, io.ErrUnexpectedEOF
-	}
-
-	if want, got := h.crc, crc32cOf(hdrBuf[2:23], payload); want != got {
-		return h, pos, fmt.Errorf("%w: crc want=0x%x got=0x%x at pos=%d", errCorrupt, want, got, pos)
 	}
 	return h, pos + int64(headerSize) + int64(h.compressed), nil
 }

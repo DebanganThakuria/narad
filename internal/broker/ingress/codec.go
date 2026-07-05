@@ -7,8 +7,14 @@ import (
 	"io"
 )
 
+// produceRecordFormat versions the on-disk record layout. Bump only
+// with a decoder that still accepts every prior format.
 const produceRecordFormat byte = 1
 
+// EncodeProduceRecord serializes a record into the ingress WAL payload
+// format: a format byte followed by length-prefixed fields, all
+// big-endian. The record's WAL field is not encoded — the WAL assigns
+// it at append time.
 func EncodeProduceRecord(record ProduceRecord) ([]byte, error) {
 	if record.Topic == "" {
 		return nil, errors.New("ingress: topic required")
@@ -31,6 +37,9 @@ func EncodeProduceRecord(record ProduceRecord) ([]byte, error) {
 	return out, nil
 }
 
+// DecodeProduceRecord parses a payload written by EncodeProduceRecord.
+// It rejects unknown formats, truncated fields, and trailing bytes, so
+// a corrupt WAL frame can never decode into a plausible-looking record.
 func DecodeProduceRecord(data []byte) (ProduceRecord, error) {
 	r := byteReader{data: data}
 	format, err := r.u8()
@@ -90,6 +99,9 @@ func appendBytes(dst []byte, b []byte) []byte {
 	return append(dst, b...)
 }
 
+// byteReader is a bounds-checked cursor over an encoded record. bytes
+// copies out of the backing slice so decoded records never alias WAL
+// read buffers.
 type byteReader struct {
 	data []byte
 	off  int

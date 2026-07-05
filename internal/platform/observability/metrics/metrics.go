@@ -11,9 +11,6 @@
 package metrics
 
 import (
-	"strconv"
-	"time"
-
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -57,7 +54,6 @@ type Metrics struct {
 	// In-flight / out-of-order ack book-keeping (gauges; updated by poller)
 	InFlightSize   *prometheus.GaugeVec   // topic, partition
 	AckedAheadSize *prometheus.GaugeVec   // topic, partition
-	ReserveSkipped *prometheus.CounterVec // topic, reason ("cap" | "empty" | "all_reserved")
 	AckRejected    *prometheus.CounterVec // reason ("hmac" | "stale" | "malformed" | "topic_mismatch" | "cap")
 
 	// CorruptSkippedTotal counts consumer offsets skipped because their on-disk
@@ -66,20 +62,13 @@ type Metrics struct {
 	CorruptSkippedTotal *prometheus.CounterVec
 
 	// Storage lifecycle
-	ActivePartitionLogs         prometheus.Gauge         // total open partition logs
 	FlushDurationSeconds        *prometheus.HistogramVec // topic, partition
 	FlushBytesTotal             *prometheus.CounterVec   // topic, partition
 	FsyncDurationSeconds        *prometheus.HistogramVec // topic, partition
 	HighWatermarkPersistSeconds *prometheus.HistogramVec // topic, partition, outcome
-	SegmentsRolledTotal         *prometheus.CounterVec   // topic, partition
-	RetentionDeletionsTotal     *prometheus.CounterVec   // topic, partition, reason
 	RetentionBytesDeleted       *prometheus.CounterVec   // topic, partition, reason
 	RetentionMessagesDeleted    *prometheus.CounterVec   // topic, partition, reason
 	RetentionRunSeconds         *prometheus.HistogramVec // topic, partition
-	SegmentsScannedAtBoot       *prometheus.CounterVec   // topic, partition
-
-	// Metastore / bbolt
-	MetastoreTxDurationSeconds *prometheus.HistogramVec // operation, mode, status
 
 	// Errors
 	ErrorsTotal *prometheus.CounterVec // component, kind
@@ -245,12 +234,6 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:      "Sparse out-of-order ack set size per partition. Persistently > 0 means the head of the queue is stuck.",
 		}, []string{"topic", "partition"}),
 
-		ReserveSkipped: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: Namespace,
-			Name:      "reserve_skipped_total",
-			Help:      "ReserveNext returned no offset; partitioned by reason.",
-		}, []string{"topic", "reason"}),
-
 		AckRejected: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Name:      "ack_rejected_total",
@@ -262,13 +245,6 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name:      "consumer_corrupt_skipped_total",
 			Help:      "Consumer offsets skipped because their on-disk frame was permanently unreadable (corruption). Each is a lost record; alert on any non-zero rate.",
 		}, []string{"topic", "partition"}),
-
-		ActivePartitionLogs: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: Namespace,
-			Subsystem: "storage",
-			Name:      "active_partition_logs",
-			Help:      "Currently open partition logs in this Narad process.",
-		}),
 
 		FlushDurationSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: Namespace,
@@ -301,20 +277,6 @@ func New(reg prometheus.Registerer) *Metrics {
 			Buckets:   storageDurationBuckets,
 		}, []string{"topic", "partition", "outcome"}),
 
-		SegmentsRolledTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: Namespace,
-			Subsystem: "storage",
-			Name:      "segments_rolled_total",
-			Help:      "Active segment closed and a new one created.",
-		}, []string{"topic", "partition"}),
-
-		RetentionDeletionsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: Namespace,
-			Subsystem: "storage",
-			Name:      "retention_deletions_total",
-			Help:      "Segment files removed by retention, by reason (age, bytes).",
-		}, []string{"topic", "partition", "reason"}),
-
 		RetentionBytesDeleted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Subsystem: "storage",
@@ -336,21 +298,6 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:      "Wall time of one retention sweep.",
 			Buckets:   prometheus.DefBuckets,
 		}, []string{"topic", "partition"}),
-
-		SegmentsScannedAtBoot: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: Namespace,
-			Subsystem: "storage",
-			Name:      "segments_scanned_at_boot_total",
-			Help:      "Segment files scanned during partition log recovery (cumulative across restarts).",
-		}, []string{"topic", "partition"}),
-
-		MetastoreTxDurationSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Namespace: Namespace,
-			Subsystem: "metastore",
-			Name:      "tx_duration_seconds",
-			Help:      "Duration of metastore bbolt read/write transactions and raft apply calls.",
-			Buckets:   fastDurationBuckets,
-		}, []string{"operation", "mode", "status"}),
 
 		ErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
@@ -374,15 +321,11 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.TopicsTotal, m.PartitionsTotal, m.DataDirSizeBytes, m.DataDirAvailableBytes,
 		m.TopicBytes, m.PartitionSizeBytes, m.Segments,
 		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
-		m.InFlightSize, m.AckedAheadSize, m.ReserveSkipped, m.AckRejected,
+		m.InFlightSize, m.AckedAheadSize, m.AckRejected,
 		m.CorruptSkippedTotal,
-		m.ActivePartitionLogs,
 		m.FlushDurationSeconds, m.FlushBytesTotal,
 		m.FsyncDurationSeconds, m.HighWatermarkPersistSeconds,
-		m.SegmentsRolledTotal,
-		m.RetentionDeletionsTotal, m.RetentionBytesDeleted, m.RetentionMessagesDeleted, m.RetentionRunSeconds,
-		m.SegmentsScannedAtBoot,
-		m.MetastoreTxDurationSeconds,
+		m.RetentionBytesDeleted, m.RetentionMessagesDeleted, m.RetentionRunSeconds,
 		m.ErrorsTotal,
 		m.BootDurationSeconds,
 	)
@@ -405,12 +348,10 @@ func (m *Metrics) pruneTopicSeries(topic string) {
 		m.ConsumeWaitSeconds, m.ConsumeEmptyTotal,
 		m.TopicBytes, m.PartitionSizeBytes, m.Segments,
 		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
-		m.InFlightSize, m.AckedAheadSize, m.ReserveSkipped, m.CorruptSkippedTotal,
+		m.InFlightSize, m.AckedAheadSize, m.CorruptSkippedTotal,
 		m.FlushDurationSeconds, m.FlushBytesTotal,
 		m.FsyncDurationSeconds, m.HighWatermarkPersistSeconds,
-		m.SegmentsRolledTotal,
-		m.RetentionDeletionsTotal, m.RetentionBytesDeleted, m.RetentionMessagesDeleted, m.RetentionRunSeconds,
-		m.SegmentsScannedAtBoot,
+		m.RetentionBytesDeleted, m.RetentionMessagesDeleted, m.RetentionRunSeconds,
 	} {
 		c.DeletePartialMatch(sel)
 	}
@@ -423,60 +364,4 @@ var storageDurationBuckets = []float64{
 	100e-6, 500e-6, // 100µs, 500µs
 	0.001, 0.005, 0.01, 0.05, // 1ms, 5ms, 10ms, 50ms
 	0.1, 0.5, 1, // 100ms, 500ms, 1s
-}
-
-// fastDurationBuckets focuses on the <10ms target while still keeping
-// enough headroom to identify pathological slow calls.
-var fastDurationBuckets = []float64{
-	50e-6, 100e-6, 250e-6, 500e-6,
-	0.001, 0.0025, 0.005, 0.0075, 0.01,
-	0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
-}
-
-func (m *Metrics) ObserveHotPathStage(component, operation, stage, outcome string, duration time.Duration) {
-	// Kept as a compatibility hook for internal debug observers. The
-	// default Prometheus surface intentionally does not export per-stage
-	// hot-path metrics because they are noisy and easy to overuse.
-}
-
-func (m *Metrics) ObserveMetastoreTx(operation, mode, status string, duration time.Duration) {
-	if m == nil {
-		return
-	}
-	m.MetastoreTxDurationSeconds.WithLabelValues(operation, mode, status).Observe(duration.Seconds())
-}
-
-// IncError is a small helper so callers don't need to remember the
-// label order or guard against m == nil at every site.
-func (m *Metrics) IncError(component, kind string) {
-	if m == nil {
-		return
-	}
-	m.ErrorsTotal.WithLabelValues(component, kind).Inc()
-}
-
-// IncReserveSkipped bumps the reserve_skipped_total counter. Callers
-// pass the SkipReason returned by InFlight.ReserveNext.
-func (m *Metrics) IncReserveSkipped(topic, reason string) {
-	if m == nil || reason == "" {
-		return
-	}
-	m.ReserveSkipped.WithLabelValues(topic, reason).Inc()
-}
-
-// IncCorruptSkipped records that a consumer skipped one permanently-unreadable
-// (corrupt) offset on the given partition — a lost record.
-func (m *Metrics) IncCorruptSkipped(topic string, partition int) {
-	if m == nil {
-		return
-	}
-	m.CorruptSkippedTotal.WithLabelValues(topic, strconv.Itoa(partition)).Inc()
-}
-
-// IncAckRejected bumps the ack_rejected_total counter.
-func (m *Metrics) IncAckRejected(reason string) {
-	if m == nil || reason == "" {
-		return
-	}
-	m.AckRejected.WithLabelValues(reason).Inc()
 }

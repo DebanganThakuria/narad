@@ -1,6 +1,7 @@
 package topics
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -89,55 +90,69 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 			}
 		}
 
-		var (
-			t   topic.Topic
-			err error
-		)
-
-		if req.RetentionMs != nil {
-			t, err = s.Deps.Broker.UpdateTopicRetention(r.Context(), topicName, *req.RetentionMs)
-			if err != nil {
-				s.WriteBrokerError(w, "alter topic", err)
-				return
-			}
-		}
-		if req.MaxInFlightPerPartition != nil || req.MaxAckedAheadPerPartition != nil {
-			current := t
-			if current.Name == "" {
-				current, err = s.Deps.Broker.GetTopic(r.Context(), topicName)
-				if err != nil {
-					s.WriteBrokerError(w, "alter topic", err)
-					return
-				}
-			}
-			newIF := current.MaxInFlightPerPartition
-			if req.MaxInFlightPerPartition != nil {
-				newIF = *req.MaxInFlightPerPartition
-			}
-			newAA := current.MaxAckedAheadPerPartition
-			if req.MaxAckedAheadPerPartition != nil {
-				newAA = *req.MaxAckedAheadPerPartition
-			}
-			t, err = s.Deps.Broker.UpdateTopicCaps(r.Context(), topicName, newIF, newAA)
-			if err != nil {
-				s.WriteBrokerError(w, "alter topic", err)
-				return
-			}
-		}
-		if req.Partitions > 0 {
-			t, err = s.Deps.Broker.IncreaseTopicPartitions(r.Context(), topicName, req.Partitions)
-			if err != nil {
-				s.WriteBrokerError(w, "alter topic", err)
-				return
-			}
-		}
-		if len(req.Schema) > 0 {
-			t, err = s.Deps.Broker.UpdateTopicSchema(r.Context(), topicName, req.Schema)
-			if err != nil {
-				s.WriteBrokerError(w, "alter topic", err)
-				return
-			}
+		t, err := applyAlter(r.Context(), s, topicName, req)
+		if err != nil {
+			s.WriteBrokerError(w, "alter topic", err)
+			return
 		}
 		s.WriteJSON(w, http.StatusOK, t)
 	}
+}
+
+// applyAlter applies each supplied field in order: retention → caps →
+// partitions → schema. The returned topic reflects the last applied
+// change.
+func applyAlter(ctx context.Context, s *handlers.Set, topicName string, req alterRequest) (topic.Topic, error) {
+	var t topic.Topic
+	var err error
+
+	if req.RetentionMs != nil {
+		t, err = s.Deps.Broker.UpdateTopicRetention(ctx, topicName, *req.RetentionMs)
+		if err != nil {
+			return topic.Topic{}, err
+		}
+	}
+	if req.MaxInFlightPerPartition != nil || req.MaxAckedAheadPerPartition != nil {
+		t, err = applyCaps(ctx, s, topicName, t, req)
+		if err != nil {
+			return topic.Topic{}, err
+		}
+	}
+	if req.Partitions > 0 {
+		t, err = s.Deps.Broker.IncreaseTopicPartitions(ctx, topicName, req.Partitions)
+		if err != nil {
+			return topic.Topic{}, err
+		}
+	}
+	if len(req.Schema) > 0 {
+		t, err = s.Deps.Broker.UpdateTopicSchema(ctx, topicName, req.Schema)
+		if err != nil {
+			return topic.Topic{}, err
+		}
+	}
+	return t, nil
+}
+
+// applyCaps updates the in-flight / acked-ahead caps. A cap the
+// request leaves unset must keep its current value, so the topic is
+// fetched first unless an earlier alteration already returned it
+// (current is the zero Topic otherwise).
+func applyCaps(ctx context.Context, s *handlers.Set, topicName string, current topic.Topic, req alterRequest) (topic.Topic, error) {
+	if current.Name == "" {
+		var err error
+		current, err = s.Deps.Broker.GetTopic(ctx, topicName)
+		if err != nil {
+			return topic.Topic{}, err
+		}
+	}
+
+	inFlight := current.MaxInFlightPerPartition
+	if req.MaxInFlightPerPartition != nil {
+		inFlight = *req.MaxInFlightPerPartition
+	}
+	ackedAhead := current.MaxAckedAheadPerPartition
+	if req.MaxAckedAheadPerPartition != nil {
+		ackedAhead = *req.MaxAckedAheadPerPartition
+	}
+	return s.Deps.Broker.UpdateTopicCaps(ctx, topicName, inFlight, ackedAhead)
 }

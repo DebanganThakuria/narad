@@ -13,6 +13,10 @@ import (
 // handshake. All nodes in a cluster must agree on it.
 const quicALPN = "narad-cluster-quic-v1"
 
+// quicServerTLSConfig generates an ephemeral self-signed certificate at
+// startup. QUIC requires TLS, but cluster traffic stays inside the
+// deployment's trust boundary, so peers pin the ALPN protocol instead of
+// verifying certificates (see quicClientTLSConfig).
 func quicServerTLSConfig() (*tls.Config, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

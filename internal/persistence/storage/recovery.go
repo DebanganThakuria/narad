@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 // recover walks every segment file in the partition directory in
@@ -50,8 +51,7 @@ func (l *Log) recover() (int64, error) {
 	var nextOffset int64
 	for i, name := range names {
 		baseOffset, _ := parseSegmentFileName(name)
-		path := l.dir + "/" + name
-		seg, err := openSegment(path, baseOffset)
+		seg, err := openSegment(filepath.Join(l.dir, name), baseOffset)
 		if err != nil {
 			return 0, fmt.Errorf("storage: open segment %s: %w", name, err)
 		}
@@ -61,9 +61,6 @@ func (l *Log) recover() (int64, error) {
 			return 0, err
 		}
 		l.segments = append(l.segments, seg)
-		if m := l.opts.Metrics; m != nil {
-			m.IncSegmentScanned()
-		}
 	}
 	return nextOffset, nil
 }

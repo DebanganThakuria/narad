@@ -53,6 +53,10 @@ func (l *Log) bootstrapHighWatermark(nextOffset int64) {
 	l.persistedHWM.Store(nextOffset)
 }
 
+// PersistedHighWatermark reads the HWM back from disk — the value a
+// restart would recover — falling back to the in-memory HWM when no
+// file has been written yet. Used to verify durability, not on any hot
+// path.
 func (l *Log) PersistedHighWatermark() (int64, error) {
 	data, err := os.ReadFile(l.hwmPath)
 	if err != nil {

@@ -153,11 +153,6 @@ func TestCorruptCommittedConsumeOffsetFallsBackToBeginning(t *testing.T) {
 	}
 }
 
-//go:fix inline
-func intPtr(partition int) *int {
-	return new(partition)
-}
-
 func TestReplayReadUsesHighWatermark(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}

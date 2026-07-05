@@ -49,3 +49,11 @@ func (l *Log) Close() error {
 	}
 	return firstErr
 }
+
+// closeSegments releases every segment file handle, ignoring errors.
+// Used on NewLog's failure paths, where the recovery error wins.
+func (l *Log) closeSegments() {
+	for _, s := range l.segments {
+		_ = s.close()
+	}
+}

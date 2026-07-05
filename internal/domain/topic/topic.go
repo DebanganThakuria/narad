@@ -42,6 +42,7 @@ type Details struct {
 	Partitions []PartitionStats `json:"partition_stats"`
 }
 
+// PartitionStats reports runtime storage stats for one partition.
 type PartitionStats struct {
 	Index    int `json:"index"`
 	Segments int `json:"segments"`

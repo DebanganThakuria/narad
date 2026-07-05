@@ -24,6 +24,11 @@ type Message struct {
 	ReceiptHandle string          `json:"receipt_handle,omitempty"`
 }
 
+// AppendJSON appends m's JSON encoding to dst and returns the extended
+// slice. It matches encoding/json output for Message — including the
+// omitempty handling of Key and ReceiptHandle, and null for an empty
+// Payload — without reflection or intermediate allocations, which
+// matters on the consume hot path.
 func (m Message) AppendJSON(dst []byte) []byte {
 	dst = append(dst, `{"topic":`...)
 	dst = strconv.AppendQuote(dst, m.Topic)

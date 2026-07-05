@@ -10,6 +10,8 @@ import (
 
 const produceCheckpointFile = "checkpoint"
 
+// loadCheckpoint reads a fixed 8-byte big-endian checkpoint. A missing
+// file reads as 0 (nothing dispatched yet); any other size is corrupt.
 func loadCheckpoint(path string) (uint64, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -24,6 +26,9 @@ func loadCheckpoint(path string) (uint64, error) {
 	return binary.BigEndian.Uint64(data), nil
 }
 
+// storeCheckpoint durably replaces the checkpoint via write-to-temp,
+// fsync, rename, then directory sync — a crash at any point leaves
+// either the old or the new checkpoint intact, never a torn one.
 func storeCheckpoint(dir, name string, nextSeq uint64) error {
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], nextSeq)

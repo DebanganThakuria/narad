@@ -1,5 +1,9 @@
 package node
 
+// Low-level codec helpers shared by every encoder/decoder in this
+// package. Multi-byte integers are big-endian; strings and byte slices
+// are length-prefixed with a uint32.
+
 import (
 	"encoding/binary"
 	"errors"
@@ -8,10 +12,13 @@ import (
 	"math"
 )
 
+// writer builds a request or response payload in a single buffer.
 type writer struct {
 	buf []byte
 }
 
+// opWriter starts a request payload with its leading operation byte.
+// capacity is the expected size of the fields that follow.
 func opWriter(op Operation, capacity int) *writer {
 	w := newWriter(1 + capacity)
 	w.buf = append(w.buf, byte(op))
@@ -66,15 +73,20 @@ func (w *writer) bytes(v []byte) error {
 	return nil
 }
 
-func (w *writer) bytesOut() []byte {
+// finish returns the assembled payload.
+func (w *writer) finish() []byte {
 	return w.buf
 }
 
+// reader consumes a payload field by field, failing with
+// io.ErrUnexpectedEOF on truncation.
 type reader struct {
 	payload []byte
 	pos     int
 }
 
+// opReader starts decoding a request payload, verifying that its
+// leading operation byte matches expected.
 func opReader(payload []byte, expected Operation) (*reader, error) {
 	r := newReader(payload)
 	op, err := r.op()
@@ -151,6 +163,8 @@ func (r *reader) string() (string, error) {
 	return string(v), nil
 }
 
+// bytes returns a sub-slice of the payload; callers that retain it
+// keep the whole payload alive.
 func (r *reader) bytes() ([]byte, error) {
 	if r.remaining() < 4 {
 		return nil, io.ErrUnexpectedEOF
@@ -165,6 +179,8 @@ func (r *reader) bytes() ([]byte, error) {
 	return out, nil
 }
 
+// done verifies the payload was consumed exactly; trailing bytes mean
+// a framing bug or a tampered payload.
 func (r *reader) done() error {
 	if r.pos != len(r.payload) {
 		return errors.New("trailing node rpc payload data")
@@ -176,10 +192,12 @@ func (r *reader) remaining() int {
 	return len(r.payload) - r.pos
 }
 
+// fieldLen is the encoded size of a length-prefixed string field.
 func fieldLen(v string) int {
 	return fieldLenBytes([]byte(v))
 }
 
+// fieldLenBytes is the encoded size of a length-prefixed bytes field.
 func fieldLenBytes(v []byte) int {
 	return 4 + len(v)
 }

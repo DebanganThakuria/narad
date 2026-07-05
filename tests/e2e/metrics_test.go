@@ -10,8 +10,6 @@ import (
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
-
-	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 )
 
 // TestMetrics_EndpointDisabledByDefault verifies that an env without
@@ -155,39 +153,30 @@ func TestMetrics_PollerUpdatesLagAndInventory(t *testing.T) {
 	if reportedLag != 5 {
 		t.Errorf("reported lag sum = %v, want 5", reportedLag)
 	}
-	// Sanity check: snapshot type assertion (avoids unused-import warning).
-	var _ metrics.PartitionSnapshot
 }
 
-// Schema-rejection counter coverage lives in
-// internal/observability/metrics/metrics_test.go's
-// TestNewRegistersAllCollectors — that test verifies every collector
-// shows up in the registry with at least one observation. We don't
-// duplicate it here because the rejection path requires a real
-// JSON-Schema registered for a topic, and there's no HTTP endpoint to
-// register schemas yet (out of scope for this PR).
+// Schema-rejection counter coverage lives with the collector tests in
+// internal/platform/observability/metrics; it is not duplicated here.
 
-// ---------------------------------------------------------------------------
-// metrics-test helpers (local — only used here)
-// ---------------------------------------------------------------------------
+// ---- registry helpers (local to metrics tests) -----------------------------
 
 // readCounter / readGauge gather from the registry directly (avoids
 // parsing the prometheus exposition format) and return the value of
 // the metric matching the supplied labels. Fails the test if the
 // metric is absent.
-func readCounter(t *testing.T, env *env, name string, want map[string]string) float64 {
+func readCounter(t *testing.T, e *env, name string, want map[string]string) float64 {
 	t.Helper()
-	return readMetric(t, env, name, want, "counter")
+	return readMetric(t, e, name, want, "counter")
 }
 
-func readGauge(t *testing.T, env *env, name string, want map[string]string) float64 {
+func readGauge(t *testing.T, e *env, name string, want map[string]string) float64 {
 	t.Helper()
-	return readMetric(t, env, name, want, "gauge")
+	return readMetric(t, e, name, want, "gauge")
 }
 
-func readMetric(t *testing.T, env *env, name string, want map[string]string, kind string) float64 {
+func readMetric(t *testing.T, e *env, name string, want map[string]string, kind string) float64 {
 	t.Helper()
-	mfs, err := env.Registry.Gather()
+	mfs, err := e.Registry.Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
 	}

@@ -11,14 +11,17 @@ import (
 	"math"
 )
 
-const (
-	MaxStreamFramePayloadBytes = 16 << 20
+// MaxStreamFramePayloadBytes is the default cap on a frame payload
+// (16 MiB), applied on write and, unless overridden, on read.
+const MaxStreamFramePayloadBytes = 16 << 20
 
+const (
 	streamFrameHeaderBytes = 20
 	streamMagic            = uint32(0x4e525331) // NRS1
 	streamVersion          = byte(1)
 )
 
+// StreamFrameType identifies the kind of frame on a cluster stream.
 type StreamFrameType uint8
 
 // Frame types. Values are stable on the wire; gaps correspond to frame
@@ -31,6 +34,15 @@ const (
 	StreamFrameNodeReply   StreamFrameType = 9
 )
 
+// StreamFrame is one framed message on a cluster stream. On the wire it
+// is a fixed 20-byte header followed by the payload:
+//
+//	[0:4]   magic "NRS1"
+//	[4]     version (1)
+//	[5]     frame type
+//	[6:8]   reserved (zero on write, ignored on read)
+//	[8:16]  request ID, big-endian
+//	[16:20] payload length, big-endian
 type StreamFrame struct {
 	Type      StreamFrameType
 	RequestID uint64
@@ -42,6 +54,9 @@ type StreamError struct {
 	Message string
 }
 
+// WriteStreamFrame writes frame to w in the wire layout described on
+// StreamFrame. It rejects payloads larger than
+// MaxStreamFramePayloadBytes.
 func WriteStreamFrame(w io.Writer, frame StreamFrame) error {
 	if len(frame.Payload) > MaxStreamFramePayloadBytes {
 		return fmt.Errorf("stream frame payload too large: %d bytes", len(frame.Payload))
@@ -63,6 +78,9 @@ func WriteStreamFrame(w io.Writer, frame StreamFrame) error {
 	return err
 }
 
+// ReadStreamFrame reads one frame from r, rejecting payloads larger
+// than maxPayloadBytes. A maxPayloadBytes <= 0 means
+// MaxStreamFramePayloadBytes.
 func ReadStreamFrame(r io.Reader, maxPayloadBytes int) (StreamFrame, error) {
 	if maxPayloadBytes <= 0 {
 		maxPayloadBytes = MaxStreamFramePayloadBytes
@@ -85,10 +103,8 @@ func ReadStreamFrame(r io.Reader, maxPayloadBytes int) (StreamFrame, error) {
 	}
 
 	payload := make([]byte, payloadLen)
-	if payloadLen > 0 {
-		if _, err := io.ReadFull(r, payload); err != nil {
-			return StreamFrame{}, err
-		}
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return StreamFrame{}, err
 	}
 	return StreamFrame{
 		Type:      StreamFrameType(header[5]),
@@ -97,6 +113,10 @@ func ReadStreamFrame(r io.Reader, maxPayloadBytes int) (StreamFrame, error) {
 	}, nil
 }
 
+// EncodeStreamError encodes a StreamError payload: a big-endian uint16
+// length followed by the message bytes. Messages longer than 64 KiB are
+// truncated. The error result is always nil; the signature is kept for
+// symmetry with other encoders.
 func EncodeStreamError(message string) ([]byte, error) {
 	if len(message) > math.MaxUint16 {
 		message = message[:math.MaxUint16]
@@ -107,6 +127,8 @@ func EncodeStreamError(message string) ([]byte, error) {
 	return out, nil
 }
 
+// DecodeStreamError decodes a StreamError payload produced by
+// EncodeStreamError.
 func DecodeStreamError(payload []byte) (StreamError, error) {
 	if len(payload) < 2 {
 		return StreamError{}, io.ErrUnexpectedEOF

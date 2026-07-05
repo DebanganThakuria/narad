@@ -13,8 +13,7 @@ func TestHealthz_AlwaysOK(t *testing.T) {
 		t.Fatalf("status: got %d body=%s", resp.StatusCode, readBody(resp))
 	}
 
-	var body map[string]string
-	decodeJSON(t, resp, &body)
+	body := readJSON[map[string]string](t, resp)
 	if body["status"] != "ok" {
 		t.Errorf("status: got %q want %q", body["status"], "ok")
 	}
@@ -28,8 +27,7 @@ func TestReadyz_OkWhenBrokerReady(t *testing.T) {
 		t.Fatalf("status: got %d body=%s", resp.StatusCode, readBody(resp))
 	}
 
-	var body map[string]string
-	decodeJSON(t, resp, &body)
+	body := readJSON[map[string]string](t, resp)
 	if body["status"] != "ready" {
 		t.Errorf("status: got %q want %q", body["status"], "ready")
 	}

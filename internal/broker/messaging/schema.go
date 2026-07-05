@@ -8,6 +8,11 @@ import (
 	"github.com/debanganthakuria/narad/internal/errs"
 )
 
+// validateProducePayload validates a payload against the topic's
+// schema. A registry miss is not a rejection: persisted schemas are
+// loaded lazily (a peer may have registered one this node hasn't seen)
+// and only then is validation retried; a topic with no schema at all
+// accepts any payload.
 func (e *Engine) validateProducePayload(ctx context.Context, topicName string, payload []byte) error {
 	err := e.schemas.Validate(ctx, topicName, payload)
 	if err == nil {
@@ -30,43 +35,24 @@ func (e *Engine) validateProducePayload(ctx context.Context, topicName string, p
 	return nil
 }
 
+// loadPersistedSchemasCached memoizes loadPersistedSchemas per topic,
+// keyed by the metastore's schema version, so the common "topic has no
+// schema" produce path doesn't rescan the metastore on every request.
 func (e *Engine) loadPersistedSchemasCached(ctx context.Context, topicName string) (bool, error) {
 	version, ok := e.schemaVersion(topicName)
 	if !ok {
 		return e.loadPersistedSchemas(ctx, topicName)
 	}
-
-	for {
-		e.cacheMu.RLock()
-		cached, hit := e.schemaLoadCache[topicName]
-		e.cacheMu.RUnlock()
-		if hit && cached.version == version {
-			if current, _ := e.schemaVersion(topicName); current == version {
-				return cached.loaded, nil
-			}
-			version, _ = e.schemaVersion(topicName)
-			continue
-		}
-
-		loaded, err := e.loadPersistedSchemas(ctx, topicName)
-		current, _ := e.schemaVersion(topicName)
-		if current != version {
-			version = current
-			continue
-		}
-		if err != nil {
-			return false, err
-		}
-		e.cacheMu.Lock()
-		e.schemaLoadCache[topicName] = cachedSchemaLoad{
-			loaded:  loaded,
-			version: version,
-		}
-		e.cacheMu.Unlock()
-		return loaded, nil
-	}
+	return lookupCached(&e.cacheMu, e.schemaLoadCache, topicName, version,
+		func() uint64 { v, _ := e.schemaVersion(topicName); return v },
+		func() (bool, error) { return e.loadPersistedSchemas(ctx, topicName) },
+		nil,
+	)
 }
 
+// loadPersistedSchemas loads every persisted schema version for the
+// topic into the local registry, in order, and reports whether any
+// existed.
 func (e *Engine) loadPersistedSchemas(ctx context.Context, topicName string) (bool, error) {
 	loaded := false
 	for version := 1; ; version++ {

@@ -5,6 +5,15 @@ import (
 	"sync/atomic"
 )
 
+// metadataDomainVersions hands out monotonically increasing versions,
+// scoped per metadata domain and per key within a domain, so readers can
+// cache and invalidate precisely (e.g. only when a specific topic's
+// assignments change).
+//
+// Each domain has a whole-domain floor (the *All fields, bumped by
+// snapshot restores) and a per-key map; a key's effective version is the
+// max of the two. All versions are drawn from the shared next counter,
+// and mu guards the per-key maps.
 type metadataDomainVersions struct {
 	next atomic.Uint64
 
@@ -43,6 +52,8 @@ func (v *metadataDomainVersions) bumpRoutingMembers() {
 	v.routingMembers.Store(v.next.Add(1))
 }
 
+// bumpAll advances every domain at once and clears the per-key maps;
+// used after a snapshot restore, when any cached read may be stale.
 func (v *metadataDomainVersions) bumpAll() {
 	version := v.next.Add(1)
 	v.topicsAll.Store(version)

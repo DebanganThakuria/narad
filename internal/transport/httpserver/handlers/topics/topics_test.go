@@ -917,8 +917,6 @@ func TestAlterHandlerRejectsReadErrorsBeforeRouting(t *testing.T) {
 
 func TestAlterHandlerAppliesOperationsInOrder(t *testing.T) {
 	calls := []string{}
-	one := int64(1)
-	two := int64(2)
 	s := newTestSet(&fakeBroker{
 		updateTopicRetentionFn: func(context.Context, string, int64) (topic.Topic, error) {
 			calls = append(calls, "retention")
@@ -960,6 +958,4 @@ func TestAlterHandlerAppliesOperationsInOrder(t *testing.T) {
 			t.Fatalf("Alter() calls[%d] = %q, want %q (all=%v)", i, calls[i], want[i], calls)
 		}
 	}
-	_ = one
-	_ = two
 }

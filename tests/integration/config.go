@@ -23,7 +23,6 @@ func parseConfig(args []string) (config, error) {
 	flagSet.DurationVar(&cfg.assignmentTimeout, "assignment-timeout", 20*time.Second, "maximum time to wait for topic assignments to become visible")
 	flagSet.DurationVar(&cfg.visibilityTimeout, "visibility-timeout", 30*time.Second, "topic visibility timeout")
 	flagSet.StringVar(&cfg.runID, "run-id", "", "topic/message run id; defaults to timestamp")
-	flagSet.StringVar(&cfg.planPath, "plan", "", "path to recovery plan JSON for recovery modes")
 	flagSet.BoolVar(&cfg.cleanup, "cleanup", true, "delete created topics at the end")
 	if err := flagSet.Parse(args); err != nil {
 		return cfg, err
@@ -56,9 +55,6 @@ func parseConfig(args []string) (config, error) {
 	}
 	if cfg.visibilityTimeout <= 0 {
 		return cfg, errors.New("--visibility-timeout must be > 0")
-	}
-	if modeRequiresPlan(cfg.mode) && cfg.planPath == "" {
-		return cfg, errors.New("--plan is required for recovery modes")
 	}
 	if cfg.runID == "" {
 		cfg.runID = fmt.Sprintf("lc-%d", time.Now().UnixNano())
