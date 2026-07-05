@@ -15,96 +15,95 @@ const clusterVoterCount = 3
 // config rather than coping at runtime.
 func (c *Config) Validate() error {
 	var errs []string
-	appendHTTPValidationErrors(&errs, c.HTTP)
-	appendClusterValidationErrors(&errs, c.HTTP, c.Cluster)
-	appendStorageValidationErrors(&errs, c.Storage)
-	appendTopicValidationErrors(&errs, c.Topic)
-	appendLogValidationErrors(&errs, c.Log)
+	errs = append(errs, httpValidationErrors(c.HTTP)...)
+	errs = append(errs, clusterValidationErrors(c.HTTP, c.Cluster)...)
+	errs = append(errs, storageValidationErrors(c.Storage)...)
+	errs = append(errs, topicValidationErrors(c.Topic)...)
+	errs = append(errs, logValidationErrors(c.Log)...)
 	if len(errs) == 0 {
 		return nil
 	}
 	return errors.New("config: " + strings.Join(errs, "; "))
 }
 
-func appendHTTPValidationErrors(errs *[]string, cfg HTTPConfig) {
+func httpValidationErrors(cfg HTTPConfig) []string {
+	var errs []string
 	if strings.TrimSpace(cfg.Addr) == "" {
-		*errs = append(*errs, "http.addr must not be empty")
+		errs = append(errs, "http.addr must not be empty")
 	}
 	if cfg.ReadTimeout <= 0 {
-		*errs = append(*errs, "http.read_timeout must be > 0")
+		errs = append(errs, "http.read_timeout must be > 0")
 	}
 	if cfg.WriteTimeout <= 0 {
-		*errs = append(*errs, "http.write_timeout must be > 0")
+		errs = append(errs, "http.write_timeout must be > 0")
 	}
 	if cfg.IdleTimeout <= 0 {
-		*errs = append(*errs, "http.idle_timeout must be > 0")
+		errs = append(errs, "http.idle_timeout must be > 0")
 	}
 	if cfg.ShutdownGrace <= 0 {
-		*errs = append(*errs, "http.shutdown_grace must be > 0")
+		errs = append(errs, "http.shutdown_grace must be > 0")
 	}
 	if cfg.MaxConsumeWait < 0 {
-		*errs = append(*errs, "http.max_consume_wait must be >= 0")
+		errs = append(errs, "http.max_consume_wait must be >= 0")
 	}
 	// A long-poll that actually waits max_consume_wait must still fit
 	// inside the server write deadline and the shutdown grace window,
 	// or every waiting consume gets killed mid-response.
 	if cfg.WriteTimeout > 0 && cfg.MaxConsumeWait >= cfg.WriteTimeout {
-		*errs = append(*errs, fmt.Sprintf("http.max_consume_wait (%s) must be < http.write_timeout (%s)", cfg.MaxConsumeWait, cfg.WriteTimeout))
+		errs = append(errs, fmt.Sprintf("http.max_consume_wait (%s) must be < http.write_timeout (%s)", cfg.MaxConsumeWait, cfg.WriteTimeout))
 	}
 	if cfg.ShutdownGrace > 0 && cfg.MaxConsumeWait > cfg.ShutdownGrace {
-		*errs = append(*errs, fmt.Sprintf("http.max_consume_wait (%s) must be <= http.shutdown_grace (%s)", cfg.MaxConsumeWait, cfg.ShutdownGrace))
+		errs = append(errs, fmt.Sprintf("http.max_consume_wait (%s) must be <= http.shutdown_grace (%s)", cfg.MaxConsumeWait, cfg.ShutdownGrace))
 	}
+	return errs
 }
 
-func appendClusterValidationErrors(errs *[]string, httpCfg HTTPConfig, cfg ClusterConfig) {
+func clusterValidationErrors(httpCfg HTTPConfig, cfg ClusterConfig) []string {
+	var errs []string
 	selfAddr := strings.TrimSpace(cfg.Addr)
 	selfID := strings.TrimSpace(cfg.NodeID)
 	if selfAddr == "" {
-		*errs = append(*errs, "cluster.addr must not be empty")
+		errs = append(errs, "cluster.addr must not be empty")
 	}
 	if httpCfg.Addr == cfg.Addr {
-		*errs = append(*errs, "http.addr and cluster.addr must differ")
+		errs = append(errs, "http.addr and cluster.addr must differ")
 	}
 	if len(cfg.Peers) == 0 {
-		return
+		return errs
 	}
 	if selfID == "" {
-		*errs = append(*errs, "cluster.node_id must not be empty when cluster.peers is set")
+		errs = append(errs, "cluster.node_id must not be empty when cluster.peers is set")
 	}
 	if len(cfg.Peers) != clusterVoterCount {
-		*errs = append(*errs, fmt.Sprintf("cluster.peers must list exactly %d voters including self, got %d", clusterVoterCount, len(cfg.Peers)))
+		errs = append(errs, fmt.Sprintf("cluster.peers must list exactly %d voters including self, got %d", clusterVoterCount, len(cfg.Peers)))
 	}
 
-	result := inspectClusterPeers(cfg.Peers, selfID, selfAddr)
-	*errs = append(*errs, result.errors...)
+	result := inspectPeers(cfg.Peers, selfID, selfAddr)
+	errs = append(errs, result.errors...)
 	if selfID != "" && !result.foundSelfID {
-		*errs = append(*errs, fmt.Sprintf("cluster.peers must include local node id %q", selfID))
+		errs = append(errs, fmt.Sprintf("cluster.peers must include local node id %q", selfID))
 	}
 	if !result.foundSelfAddr {
-		*errs = append(*errs, fmt.Sprintf("cluster.peers must include local cluster address %q", selfAddr))
+		errs = append(errs, fmt.Sprintf("cluster.peers must include local cluster address %q", selfAddr))
 	}
 	if selfID != "" && selfAddr != "" && !result.foundSelfVoter {
-		*errs = append(*errs, fmt.Sprintf("cluster.peers must include local voter %q@%s", selfID, selfAddr))
+		errs = append(errs, fmt.Sprintf("cluster.peers must include local voter %q@%s", selfID, selfAddr))
 	}
+	return errs
 }
 
-func clusterAddrsMatch(localAddr, peerAddr string) bool {
-	return netaddr.ClusterAddrMatchesPeer(localAddr, peerAddr)
-}
-
-func clusterVotersMatch(selfID, selfAddr, peerID, peerAddr string) bool {
-	return peerID == selfID && clusterAddrsMatch(selfAddr, peerAddr)
-}
-
-type clusterPeerInspection struct {
+// peerInspection is what one pass over cluster.peers reveals: per-peer
+// validation errors plus whether the local node appears in the voter
+// list by id, by address, and as a full id@addr voter entry.
+type peerInspection struct {
 	errors         []string
 	foundSelfID    bool
 	foundSelfAddr  bool
 	foundSelfVoter bool
 }
 
-func inspectClusterPeers(peers []ClusterPeer, selfID, selfAddr string) clusterPeerInspection {
-	result := clusterPeerInspection{}
+func inspectPeers(peers []ClusterPeer, selfID, selfAddr string) peerInspection {
+	var result peerInspection
 	seenIDs := make(map[string]struct{}, len(peers))
 	seenAddrs := make(map[string]struct{}, len(peers))
 	for i, peer := range peers {
@@ -128,106 +127,111 @@ func inspectClusterPeers(peers []ClusterPeer, selfID, selfAddr string) clusterPe
 		} else {
 			seenAddrs[addr] = struct{}{}
 		}
+
+		addrMatchesSelf := netaddr.ClusterAddrMatchesPeer(selfAddr, addr)
 		if id == selfID {
 			result.foundSelfID = true
 		}
-		if clusterAddrsMatch(selfAddr, addr) {
+		if addrMatchesSelf {
 			result.foundSelfAddr = true
 		}
-		if clusterVotersMatch(selfID, selfAddr, id, addr) {
+		if id == selfID && addrMatchesSelf {
 			result.foundSelfVoter = true
 		}
 	}
 	return result
 }
 
-func appendStorageValidationErrors(errs *[]string, cfg StorageConfig) {
+func storageValidationErrors(cfg StorageConfig) []string {
+	var errs []string
 	if strings.TrimSpace(cfg.DataDir) == "" {
-		*errs = append(*errs, "storage.data_dir must not be empty")
+		errs = append(errs, "storage.data_dir must not be empty")
 	}
 	switch cfg.Fsync {
 	case FsyncPerWrite, FsyncBatched:
 	default:
-		*errs = append(*errs, fmt.Sprintf("storage.fsync %q is not one of [per_write, batched]", cfg.Fsync))
+		errs = append(errs, fmt.Sprintf("storage.fsync %q is not one of [per_write, batched]", cfg.Fsync))
 	}
 	switch strings.ToLower(cfg.Codec) {
 	case "zstd", "none":
 	default:
-		*errs = append(*errs, fmt.Sprintf("storage.codec %q is not one of [zstd, none]", cfg.Codec))
+		errs = append(errs, fmt.Sprintf("storage.codec %q is not one of [zstd, none]", cfg.Codec))
 	}
 	switch strings.ToLower(cfg.CompressionLevel) {
 	case "fastest", "default", "better", "best":
 	default:
-		*errs = append(*errs, fmt.Sprintf("storage.compression_level %q is not one of [fastest, default, better, best]", cfg.CompressionLevel))
+		errs = append(errs, fmt.Sprintf("storage.compression_level %q is not one of [fastest, default, better, best]", cfg.CompressionLevel))
 	}
 	if cfg.FlushBytes < 0 {
-		*errs = append(*errs, "storage.flush_bytes must be >= 0")
+		errs = append(errs, "storage.flush_bytes must be >= 0")
 	}
 	if cfg.FlushRecords < 0 {
-		*errs = append(*errs, "storage.flush_records must be >= 0")
+		errs = append(errs, "storage.flush_records must be >= 0")
 	}
 	if cfg.FlushIntervalMs <= 0 {
-		*errs = append(*errs, "storage.flush_interval_ms must be > 0")
+		errs = append(errs, "storage.flush_interval_ms must be > 0")
 	}
 	if cfg.FlushBytes == 0 && cfg.FlushRecords == 0 {
-		*errs = append(*errs, "at least one of storage.flush_bytes or storage.flush_records must be > 0")
+		errs = append(errs, "at least one of storage.flush_bytes or storage.flush_records must be > 0")
 	}
 	if cfg.SyncIntervalMs <= 0 {
-		*errs = append(*errs, "storage.sync_interval_ms must be > 0")
+		errs = append(errs, "storage.sync_interval_ms must be > 0")
 	}
 	if cfg.SyncBytes < 0 {
-		*errs = append(*errs, "storage.sync_bytes must be >= 0")
+		errs = append(errs, "storage.sync_bytes must be >= 0")
 	}
 	if cfg.HighWatermarkSyncIntervalMs <= 0 {
-		*errs = append(*errs, "storage.high_watermark_sync_interval_ms must be > 0")
+		errs = append(errs, "storage.high_watermark_sync_interval_ms must be > 0")
 	}
 	if cfg.IngressWALSyncIntervalMs <= 0 {
-		*errs = append(*errs, "storage.ingress_wal_sync_interval_ms must be > 0")
-	}
-	if cfg.IngressWALSyncBytes < 0 {
-		*errs = append(*errs, "storage.ingress_wal_sync_bytes must be >= 0")
+		errs = append(errs, "storage.ingress_wal_sync_interval_ms must be > 0")
 	}
 	if cfg.SegmentBytes < 4096 {
-		*errs = append(*errs, fmt.Sprintf("storage.segment_bytes (%d) must be >= 4096", cfg.SegmentBytes))
+		errs = append(errs, fmt.Sprintf("storage.segment_bytes (%d) must be >= 4096", cfg.SegmentBytes))
 	}
 	if cfg.RetentionCheckIntervalMs <= 0 {
-		*errs = append(*errs, "storage.retention_check_interval_ms must be > 0")
+		errs = append(errs, "storage.retention_check_interval_ms must be > 0")
 	}
+	return errs
 }
 
-func appendTopicValidationErrors(errs *[]string, cfg TopicConfig) {
+func topicValidationErrors(cfg TopicConfig) []string {
+	var errs []string
 	if cfg.DefaultPartitions < 3 {
-		*errs = append(*errs, "topic.default_partitions must be >= 3")
+		errs = append(errs, "topic.default_partitions must be >= 3")
 	}
 	if cfg.MaxPartitions <= 0 {
-		*errs = append(*errs, "topic.max_partitions must be > 0")
+		errs = append(errs, "topic.max_partitions must be > 0")
 	}
 	if cfg.DefaultPartitions > cfg.MaxPartitions {
-		*errs = append(*errs, fmt.Sprintf("topic.default_partitions (%d) must not exceed topic.max_partitions (%d)", cfg.DefaultPartitions, cfg.MaxPartitions))
+		errs = append(errs, fmt.Sprintf("topic.default_partitions (%d) must not exceed topic.max_partitions (%d)", cfg.DefaultPartitions, cfg.MaxPartitions))
 	}
 	if cfg.DefaultRetentionAgeMs < 0 {
-		*errs = append(*errs, "topic.default_retention_age_ms must be >= 0")
+		errs = append(errs, "topic.default_retention_age_ms must be >= 0")
 	}
 	if cfg.DefaultVisibilityTimeoutMs < 0 {
-		*errs = append(*errs, "topic.default_visibility_timeout_ms must be >= 0")
+		errs = append(errs, "topic.default_visibility_timeout_ms must be >= 0")
 	}
 	if cfg.DefaultMaxInFlightPerPartition <= 0 {
-		*errs = append(*errs, "topic.default_max_in_flight_per_partition must be > 0")
+		errs = append(errs, "topic.default_max_in_flight_per_partition must be > 0")
 	}
 	if cfg.DefaultMaxAckedAheadPerPartition <= 0 {
-		*errs = append(*errs, "topic.default_max_acked_ahead_per_partition must be > 0")
+		errs = append(errs, "topic.default_max_acked_ahead_per_partition must be > 0")
 	}
+	return errs
 }
 
-func appendLogValidationErrors(errs *[]string, cfg LogConfig) {
+func logValidationErrors(cfg LogConfig) []string {
+	var errs []string
 	switch strings.ToLower(cfg.Level) {
 	case "debug", "info", "warn", "error":
 	default:
-		*errs = append(*errs, fmt.Sprintf("log.level %q is not one of [debug, info, warn, error]", cfg.Level))
+		errs = append(errs, fmt.Sprintf("log.level %q is not one of [debug, info, warn, error]", cfg.Level))
 	}
 	switch strings.ToLower(cfg.Format) {
 	case "json", "text":
 	default:
-		*errs = append(*errs, fmt.Sprintf("log.format %q is not one of [json, text]", cfg.Format))
+		errs = append(errs, fmt.Sprintf("log.format %q is not one of [json, text]", cfg.Format))
 	}
+	return errs
 }

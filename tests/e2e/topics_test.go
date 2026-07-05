@@ -11,10 +11,9 @@ import (
 
 func TestCreateTopic(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	tp := env.createTopic("orders", 8, 2, int64(0))
+	tp := env.createTopic("orders", 8, 0)
 	if tp.Name != "orders" {
 		t.Fatalf("name: got %q, want orders", tp.Name)
 	}
@@ -25,10 +24,9 @@ func TestCreateTopic(t *testing.T) {
 
 func TestCreateTopicDefaults(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	tp := env.createTopic("events", 0, 0, int64(0))
+	tp := env.createTopic("events", 0, 0)
 	if tp.Partitions != 4 {
 		t.Fatalf("partitions: got %d, want default 4", tp.Partitions)
 	}
@@ -36,10 +34,9 @@ func TestCreateTopicDefaults(t *testing.T) {
 
 func TestCreateTopicWithRetention(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	tp := env.createTopic("logs", 3, 2, 3_600_000)
+	tp := env.createTopic("logs", 3, 3_600_000)
 	if tp.RetentionMs != 3_600_000 {
 		t.Fatalf("retention_ms: got %d, want 3600000", tp.RetentionMs)
 	}
@@ -47,8 +44,7 @@ func TestCreateTopicWithRetention(t *testing.T) {
 
 func TestCreateTopicWithSchema(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
 	resp := env.post("/v1/topics", map[string]any{
 		"name":       "schema-on-create",
@@ -65,8 +61,7 @@ func TestCreateTopicWithSchema(t *testing.T) {
 
 func TestCreateTopicRejectsInvalidSchema(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
 	resp := env.post("/v1/topics", map[string]any{
 		"name":       "schema-create-invalid",
@@ -81,20 +76,18 @@ func TestCreateTopicRejectsInvalidSchema(t *testing.T) {
 
 func TestCreateTopicDuplicate(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("dup", 3, 2, int64(0))
+	env.createTopic("dup", 3, 0)
 	resp := env.post("/v1/topics", map[string]any{"name": "dup"})
 	expectConflict(t, resp)
 }
 
 func TestGetTopic(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("test-get", 3, 2, int64(0))
+	env.createTopic("test-get", 3, 0)
 	resp := env.get("/v1/topics/test-get")
 	expectOK(t, resp)
 
@@ -109,8 +102,7 @@ func TestGetTopic(t *testing.T) {
 
 func TestGetTopicNotFound(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
 	resp := env.get("/v1/topics/no-such-topic")
 	expectNotFound(t, resp)
@@ -118,88 +110,65 @@ func TestGetTopicNotFound(t *testing.T) {
 
 func TestListTopics(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("aaa", 3, 2, int64(0))
-	env.createTopic("bbb", 3, 2, int64(0))
+	env.createTopic("aaa", 3, 0)
+	env.createTopic("bbb", 3, 0)
 
 	resp := env.get("/v1/topics")
 	expectOK(t, resp)
 
-	var wrapper struct {
-		Topics []topic.Topic `json:"topics"`
+	body := readJSON[listResponse](t, resp)
+	if len(body.Topics) != 2 {
+		t.Fatalf("count: got %d, want 2", len(body.Topics))
 	}
-	wrapper = readJSON[struct {
-		Topics []topic.Topic `json:"topics"`
-	}](t, resp)
-	if len(wrapper.Topics) != 2 {
-		t.Fatalf("count: got %d, want 2", len(wrapper.Topics))
-	}
-	if wrapper.Topics[0].Name != "aaa" || wrapper.Topics[1].Name != "bbb" {
-		t.Fatalf("order: got %v", []string{wrapper.Topics[0].Name, wrapper.Topics[1].Name})
+	if body.Topics[0].Name != "aaa" || body.Topics[1].Name != "bbb" {
+		t.Fatalf("order: got %v", []string{body.Topics[0].Name, body.Topics[1].Name})
 	}
 }
 
 func TestListTopicsPagination(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
 	for _, name := range []string{"p1", "p2", "p3"} {
-		env.createTopic(name, 3, 2, int64(0))
+		env.createTopic(name, 3, 0)
 	}
 
-	// Page 1
 	resp := env.get("/v1/topics?limit=2")
 	expectOK(t, resp)
-	var wrapper struct {
-		Topics        []topic.Topic `json:"topics"`
-		NextPageToken string        `json:"next_page_token"`
-	}
-	wrapper = readJSON[struct {
-		Topics        []topic.Topic `json:"topics"`
-		NextPageToken string        `json:"next_page_token"`
-	}](t, resp)
+	page1 := readJSON[listResponse](t, resp)
 
-	if len(wrapper.Topics) != 2 {
-		t.Fatalf("page 1: got %d topics, want 2", len(wrapper.Topics))
+	if len(page1.Topics) != 2 {
+		t.Fatalf("page 1: got %d topics, want 2", len(page1.Topics))
 	}
-	if wrapper.NextPageToken == "" {
+	if page1.NextPageToken == "" {
 		t.Fatal("expected next_page_token")
 	}
 
-	// Page 2
-	resp = env.get("/v1/topics?limit=2&page_token=" + wrapper.NextPageToken)
-	defer resp.Body.Close()
-	wrapper = readJSON[struct {
-		Topics        []topic.Topic `json:"topics"`
-		NextPageToken string        `json:"next_page_token"`
-	}](t, resp)
+	resp = env.get("/v1/topics?limit=2&page_token=" + page1.NextPageToken)
+	page2 := readJSON[listResponse](t, resp)
 
-	if len(wrapper.Topics) != 1 {
-		t.Fatalf("page 2: got %d topics, want 1", len(wrapper.Topics))
+	if len(page2.Topics) != 1 {
+		t.Fatalf("page 2: got %d topics, want 1", len(page2.Topics))
 	}
 }
 
 func TestDeleteTopic(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("to-delete", 3, 2, int64(0))
+	env.createTopic("to-delete", 3, 0)
 	resp := env.del("/v1/topics/to-delete")
-	expectStatus(t, resp, 204) // broker returns 204 No Content
+	expectStatus(t, resp, http.StatusNoContent)
 
-	// Confirm it's gone
 	resp = env.get("/v1/topics/to-delete")
 	expectNotFound(t, resp)
 }
 
 func TestDeleteTopicNotFound(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
 	resp := env.del("/v1/topics/no-such-topic")
 	expectNotFound(t, resp)
@@ -209,10 +178,9 @@ func TestDeleteTopicNotFound(t *testing.T) {
 
 func TestAlterPartitions(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("scale", 3, 2, int64(0))
+	env.createTopic("scale", 3, 0)
 
 	resp := env.patch("/v1/topics/scale", map[string]any{"partitions": 8})
 	expectOK(t, resp)
@@ -225,20 +193,18 @@ func TestAlterPartitions(t *testing.T) {
 
 func TestAlterPartitionsDecrease(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("nodec", 8, 2, int64(0))
+	env.createTopic("nodec", 8, 0)
 	resp := env.patch("/v1/topics/nodec", map[string]any{"partitions": 3})
 	expectBadRequest(t, resp)
 }
 
 func TestAlterRetention(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("ret-topic", 3, 2, int64(0))
+	env.createTopic("ret-topic", 3, 0)
 
 	resp := env.patch("/v1/topics/ret-topic", map[string]any{
 		"retention_ms": int64(999_999),
@@ -253,48 +219,11 @@ func TestAlterRetention(t *testing.T) {
 
 // ---- alter with schema -----------------------------------------------------
 
-const schemaV1 = `{
-  "type": "object",
-  "properties": {
-    "id":    { "type": "integer" },
-    "name":  { "type": "string" }
-  },
-  "required": ["id"]
-}`
-
-const schemaV2Additive = `{
-  "type": "object",
-  "properties": {
-    "id":    { "type": "integer" },
-    "name":  { "type": "string" },
-    "email": { "type": "string" }
-  },
-  "required": ["id"]
-}`
-
-const schemaV2TypeChange = `{
-  "type": "object",
-  "properties": {
-    "id":   { "type": "string" },
-    "name": { "type": "string" }
-  },
-  "required": ["id"]
-}`
-
-const schemaV2RemoveField = `{
-  "type": "object",
-  "properties": {
-    "id": { "type": "integer" }
-  },
-  "required": ["id"]
-}`
-
 func TestAlterSchemaFirstVersion(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("schema-first", 3, 2, int64(0))
+	env.createTopic("schema-first", 3, 0)
 
 	resp := env.patch("/v1/topics/schema-first", map[string]any{
 		"schema": json.RawMessage(schemaV1),
@@ -304,10 +233,9 @@ func TestAlterSchemaFirstVersion(t *testing.T) {
 
 func TestAlterSchemaCompatible(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("schema-compat", 3, 2, int64(0))
+	env.createTopic("schema-compat", 3, 0)
 
 	resp := env.patch("/v1/topics/schema-compat", map[string]any{
 		"schema": json.RawMessage(schemaV1),
@@ -323,10 +251,9 @@ func TestAlterSchemaCompatible(t *testing.T) {
 
 func TestAlterSchemaIncompatibleTypeChange(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("schema-type", 3, 2, int64(0))
+	env.createTopic("schema-type", 3, 0)
 
 	resp := env.patch("/v1/topics/schema-type", map[string]any{
 		"schema": json.RawMessage(schemaV1),
@@ -345,10 +272,9 @@ func TestAlterSchemaIncompatibleTypeChange(t *testing.T) {
 
 func TestAlterSchemaIncompatibleRemoval(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("schema-rem", 3, 2, int64(0))
+	env.createTopic("schema-rem", 3, 0)
 
 	resp := env.patch("/v1/topics/schema-rem", map[string]any{
 		"schema": json.RawMessage(schemaV1),
@@ -364,10 +290,9 @@ func TestAlterSchemaIncompatibleRemoval(t *testing.T) {
 
 func TestAlterSchemaInvalidJSON(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("schema-invalid", 3, 2, int64(0))
+	env.createTopic("schema-invalid", 3, 0)
 
 	resp := env.patch("/v1/topics/schema-invalid", map[string]any{
 		"schema": "not a valid json schema",
@@ -377,10 +302,9 @@ func TestAlterSchemaInvalidJSON(t *testing.T) {
 
 func TestAlterSchemaWithPartitions(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("schema-multi", 3, 2, int64(0))
+	env.createTopic("schema-multi", 3, 0)
 
 	resp := env.patch("/v1/topics/schema-multi", map[string]any{
 		"partitions": 6,
@@ -396,10 +320,9 @@ func TestAlterSchemaWithPartitions(t *testing.T) {
 
 func TestAlterSchemaWithRetention(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("schema-ret", 3, 2, int64(0))
+	env.createTopic("schema-ret", 3, 0)
 
 	resp := env.patch("/v1/topics/schema-ret", map[string]any{
 		"retention_ms": int64(42_000),
@@ -415,10 +338,9 @@ func TestAlterSchemaWithRetention(t *testing.T) {
 
 func TestAlterAllThree(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("all-three", 3, 2, int64(0))
+	env.createTopic("all-three", 3, 0)
 
 	resp := env.patch("/v1/topics/all-three", map[string]any{
 		"partitions":   8,
@@ -438,18 +360,16 @@ func TestAlterAllThree(t *testing.T) {
 
 func TestAlterEmptyBody(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("empty-body", 3, 2, int64(0))
+	env.createTopic("empty-body", 3, 0)
 	resp := env.patch("/v1/topics/empty-body", map[string]any{})
 	expectBadRequest(t, resp)
 }
 
 func TestAlterNotFound(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
 	resp := env.patch("/v1/topics/no-such", map[string]any{"partitions": 8})
 	expectNotFound(t, resp)

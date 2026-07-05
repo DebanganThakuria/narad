@@ -103,13 +103,16 @@ func (f *fakeBroker) Consume(ctx context.Context, topicName string, opts brokerm
 func (f *fakeBroker) Ack(ctx context.Context, topicName string, handle consumer.Handle) error {
 	return f.ackFn(ctx, topicName, handle)
 }
+
 func (f *fakeBroker) Snapshot(context.Context) ([]metrics.TopicSnapshot, error) { return nil, nil }
+
 func (f *fakeBroker) Ready(ctx context.Context) error {
 	if f.readyFn == nil {
 		return nil
 	}
 	return f.readyFn(ctx)
 }
+
 func (f *fakeBroker) Close() error { return nil }
 
 func newTestSet(b broker.Broker) *Set {

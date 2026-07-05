@@ -16,19 +16,24 @@ type Lifecycle struct {
 	ready   atomic.Bool
 }
 
-// NewLifecycle wires a Lifecycle.
+// NewLifecycle wires a Lifecycle. The optional closers run before the
+// partition logs are closed, in the order given.
 func NewLifecycle(logs *Logs, closers ...func() error) *Lifecycle {
 	return &Lifecycle{logs: logs, closers: closers}
 }
 
+// MarkReady makes Ready report success.
 func (l *Lifecycle) MarkReady() {
 	l.ready.Store(true)
 }
 
+// MarkNotReady makes Ready fail until MarkReady is called again.
 func (l *Lifecycle) MarkNotReady() {
 	l.ready.Store(false)
 }
 
+// Ready reports whether the broker has finished startup. The error it
+// returns is recognized by IsNotReady.
 func (l *Lifecycle) Ready(_ context.Context) error {
 	if !l.ready.Load() {
 		return errNotReady
@@ -36,8 +41,9 @@ func (l *Lifecycle) Ready(_ context.Context) error {
 	return nil
 }
 
-// Close releases all open partition logs. Each Log.Close() does a
-// final flush before releasing its file handles.
+// Close marks the broker not ready, runs the registered closers, and
+// releases all open partition logs (each Log.Close does a final flush
+// before releasing its file handles). Returns the first error.
 func (l *Lifecycle) Close() error {
 	l.MarkNotReady()
 	var firstErr error
@@ -52,11 +58,8 @@ func (l *Lifecycle) Close() error {
 	return firstErr
 }
 
-var _ interface {
-	MarkReady()
-	MarkNotReady()
-} = (*Lifecycle)(nil)
-
+// IsNotReady reports whether err is the not-ready sentinel returned by
+// Ready (possibly wrapped).
 func IsNotReady(err error) bool {
 	return errors.Is(err, errNotReady)
 }

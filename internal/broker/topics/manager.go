@@ -71,7 +71,6 @@ type PartitionAssigner interface {
 
 // Manager handles every topic-CRUD operation. Constructed once at
 // broker startup; safe for concurrent use.
-
 type Manager struct {
 	dataDir   string
 	metastore metastore.Metastore

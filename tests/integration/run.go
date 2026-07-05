@@ -23,10 +23,6 @@ func validMode(mode string) bool {
 	}
 }
 
-func modeRequiresPlan(mode string) bool {
-	return false
-}
-
 func run(cfg config) error {
 	if cfg.mode == modeChaos {
 		return runChaos(cfg)

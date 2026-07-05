@@ -11,7 +11,8 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
 
-// broker-level error aliases for use within this package.
+// ErrInvalidArgument aliases the shared sentinel so callers can
+// discriminate broker errors without importing internal/errs.
 var ErrInvalidArgument = errs.ErrInvalidArgument
 
 // impl is the broker facade. It composes per-domain managers via Go
@@ -96,6 +97,8 @@ func New(d Deps) (Broker, error) {
 	}, nil
 }
 
+// Close shuts down the messaging engine (ingress WAL) and then the
+// lifecycle (partition logs), returning the first error encountered.
 func (b *impl) Close() error {
 	var firstErr error
 	if b.Engine != nil {

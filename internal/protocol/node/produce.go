@@ -2,6 +2,7 @@ package node
 
 import "fmt"
 
+// EncodeProduceRequest encodes an OpProduce payload.
 func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
 	w := opWriter(OpProduce, fieldLen(req.Topic)+fieldLen(req.Key)+4+fieldLenBytes(req.Payload))
 	if err := w.string(req.Topic); err != nil {
@@ -14,15 +15,16 @@ func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
 	if err := w.bytes(req.Payload); err != nil {
 		return nil, err
 	}
-	return w.bytesOut(), nil
+	return w.finish(), nil
 }
 
+// DecodeProduceRequest decodes an OpProduce payload.
 func DecodeProduceRequest(payload []byte) (ProduceRequest, error) {
 	r, err := opReader(payload, OpProduce)
 	if err != nil {
 		return ProduceRequest{}, err
 	}
-	topicName, err := r.string()
+	topic, err := r.string()
 	if err != nil {
 		return ProduceRequest{}, err
 	}
@@ -41,26 +43,25 @@ func DecodeProduceRequest(payload []byte) (ProduceRequest, error) {
 	if err := r.done(); err != nil {
 		return ProduceRequest{}, err
 	}
-	return ProduceRequest{Topic: topicName, Key: key, Partition: int(partition), Payload: body}, nil
+	return ProduceRequest{Topic: topic, Key: key, Partition: int(partition), Payload: body}, nil
 }
 
+// EncodeCommitProduceRequest encodes an OpCommitProduce payload.
 func EncodeCommitProduceRequest(req CommitProduceRequest) ([]byte, error) {
-	w := opWriter(
-		OpCommitProduce,
-		commitProduceRequestLen(req),
-	)
-	if err := writeCommitProduceRequest(w, req); err != nil {
+	w := opWriter(OpCommitProduce, commitProduceLen(req))
+	if err := writeCommitProduce(w, req); err != nil {
 		return nil, err
 	}
-	return w.bytesOut(), nil
+	return w.finish(), nil
 }
 
+// DecodeCommitProduceRequest decodes an OpCommitProduce payload.
 func DecodeCommitProduceRequest(payload []byte) (CommitProduceRequest, error) {
 	r, err := opReader(payload, OpCommitProduce)
 	if err != nil {
 		return CommitProduceRequest{}, err
 	}
-	record, err := readCommitProduceRequest(r)
+	record, err := readCommitProduce(r)
 	if err != nil {
 		return CommitProduceRequest{}, err
 	}
@@ -70,21 +71,25 @@ func DecodeCommitProduceRequest(payload []byte) (CommitProduceRequest, error) {
 	return record, nil
 }
 
+// EncodeCommitProduceBatchRequest encodes an OpCommitProduceBatch
+// payload: a record count followed by that many commit-produce records.
 func EncodeCommitProduceBatchRequest(req CommitProduceBatchRequest) ([]byte, error) {
 	capacity := 4
 	for _, record := range req.Records {
-		capacity += commitProduceRequestLen(record)
+		capacity += commitProduceLen(record)
 	}
 	w := opWriter(OpCommitProduceBatch, capacity)
 	w.i32(int32(len(req.Records)))
 	for _, record := range req.Records {
-		if err := writeCommitProduceRequest(w, record); err != nil {
+		if err := writeCommitProduce(w, record); err != nil {
 			return nil, err
 		}
 	}
-	return w.bytesOut(), nil
+	return w.finish(), nil
 }
 
+// DecodeCommitProduceBatchRequest decodes an OpCommitProduceBatch
+// payload.
 func DecodeCommitProduceBatchRequest(payload []byte) (CommitProduceBatchRequest, error) {
 	r, err := opReader(payload, OpCommitProduceBatch)
 	if err != nil {
@@ -102,7 +107,7 @@ func DecodeCommitProduceBatchRequest(payload []byte) (CommitProduceBatchRequest,
 	// count can't trigger a multi-gigabyte allocation before decode fails.
 	records := make([]CommitProduceRequest, 0, min(int(count), r.remaining()))
 	for range int(count) {
-		record, err := readCommitProduceRequest(r)
+		record, err := readCommitProduce(r)
 		if err != nil {
 			return CommitProduceBatchRequest{}, err
 		}
@@ -114,7 +119,7 @@ func DecodeCommitProduceBatchRequest(payload []byte) (CommitProduceBatchRequest,
 	return CommitProduceBatchRequest{Records: records}, nil
 }
 
-func writeCommitProduceRequest(w *writer, req CommitProduceRequest) error {
+func writeCommitProduce(w *writer, req CommitProduceRequest) error {
 	if err := w.string(req.Topic); err != nil {
 		return err
 	}
@@ -129,8 +134,8 @@ func writeCommitProduceRequest(w *writer, req CommitProduceRequest) error {
 	return nil
 }
 
-func readCommitProduceRequest(r *reader) (CommitProduceRequest, error) {
-	topicName, err := r.string()
+func readCommitProduce(r *reader) (CommitProduceRequest, error) {
+	topic, err := r.string()
 	if err != nil {
 		return CommitProduceRequest{}, err
 	}
@@ -151,7 +156,7 @@ func readCommitProduceRequest(r *reader) (CommitProduceRequest, error) {
 		return CommitProduceRequest{}, err
 	}
 	return CommitProduceRequest{
-		Topic:           topicName,
+		Topic:           topic,
 		Key:             key,
 		TargetPartition: int(partition),
 		Payload:         body,
@@ -159,10 +164,7 @@ func readCommitProduceRequest(r *reader) (CommitProduceRequest, error) {
 	}, nil
 }
 
-func commitProduceRequestLen(req CommitProduceRequest) int {
-	return fieldLen(req.Topic) +
-		fieldLen(req.Key) +
-		4 +
-		fieldLenBytes(req.Payload) +
-		8
+// commitProduceLen is the encoded size of one commit-produce record.
+func commitProduceLen(req CommitProduceRequest) int {
+	return fieldLen(req.Topic) + fieldLen(req.Key) + 4 + fieldLenBytes(req.Payload) + 8
 }

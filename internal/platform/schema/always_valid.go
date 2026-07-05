@@ -2,8 +2,9 @@ package schema
 
 import "context"
 
-// AlwaysValid accepts every payload. Used until the real validator
-// lands.
+// AlwaysValid is a permissive Registry that accepts every schema and
+// every payload. Use it in tests and wherever schema enforcement is
+// disabled.
 type AlwaysValid struct{}
 
 // NewAlwaysValid returns the permissive stub.

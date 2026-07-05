@@ -6,6 +6,11 @@ import (
 	"time"
 )
 
+// verifyAcceptedProduceVisibility guards the async-produce contract: a
+// produce acknowledged with 202 goes through the ingress WAL and must
+// become consumable shortly after, even though the accept path returns
+// before the record is committed. It probes with a single message and
+// acks it so the run's drain checks stay clean.
 func verifyAcceptedProduceVisibility(ctx context.Context, lb *roundRobinClient, cfg config, topicName string) error {
 	job := messageJob{
 		Topic: topicName,

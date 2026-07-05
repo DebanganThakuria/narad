@@ -1,3 +1,6 @@
+// Package httpclient builds HTTP clients tuned for Narad's
+// node-to-node data plane, where a handful of peers carry heavy
+// concurrent traffic.
 package httpclient
 
 import (

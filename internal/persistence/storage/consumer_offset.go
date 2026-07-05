@@ -10,8 +10,14 @@ import (
 
 const consumerOffsetFileName = "consumer.offset"
 
+// ErrPartitionDirMissing reports that a consumer offset write was
+// refused because the partition directory no longer exists (e.g. the
+// topic was deleted concurrently).
 var ErrPartitionDirMissing = errors.New("storage: partition directory missing")
 
+// ReadConsumerOffset returns the committed consumer offset persisted in
+// partitionDir. ok=false (with a nil error) when no offset has been
+// committed yet.
 func ReadConsumerOffset(partitionDir string) (int64, bool, error) {
 	buf, err := os.ReadFile(filepath.Join(partitionDir, consumerOffsetFileName))
 	if errors.Is(err, os.ErrNotExist) {
@@ -26,6 +32,10 @@ func ReadConsumerOffset(partitionDir string) (int64, bool, error) {
 	return int64(binary.BigEndian.Uint64(buf)), true, nil
 }
 
+// WriteConsumerOffset durably persists the committed consumer offset,
+// creating the partition directory if needed. The write is atomic
+// (temp file + fsync + rename), so a crash leaves either the old or the
+// new offset, never a torn value.
 func WriteConsumerOffset(partitionDir string, offset int64) error {
 	if err := os.MkdirAll(partitionDir, 0o755); err != nil {
 		return err
@@ -33,6 +43,10 @@ func WriteConsumerOffset(partitionDir string, offset int64) error {
 	return writeConsumerOffsetFile(partitionDir, offset)
 }
 
+// WriteConsumerOffsetIfPartitionDirExists is WriteConsumerOffset except
+// it fails with ErrPartitionDirMissing instead of recreating a deleted
+// partition directory — the guard against resurrecting a topic that was
+// removed while a commit was in flight.
 func WriteConsumerOffsetIfPartitionDirExists(partitionDir string, offset int64) error {
 	info, err := os.Stat(partitionDir)
 	if errors.Is(err, os.ErrNotExist) {

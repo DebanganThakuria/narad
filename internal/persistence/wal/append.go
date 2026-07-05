@@ -6,6 +6,10 @@ import (
 	"os"
 )
 
+// appendLocked stages payload into the write buffer, assigns it the next
+// seq, and returns the batch the caller must wait on for durability.
+// If the frame would overflow the segment, the current buffer is synced
+// and the log rolls to a fresh segment first. Caller must hold mu.
 func (l *Log) appendLocked(payload []byte) (RecordID, *syncBatch, error) {
 	if l.closed {
 		return RecordID{}, nil, errors.New("wal: log closed")
@@ -16,6 +20,7 @@ func (l *Log) appendLocked(payload []byte) (RecordID, *syncBatch, error) {
 	if l.file == nil {
 		return RecordID{}, nil, errors.New("wal: active file closed")
 	}
+
 	frameSize := frameHeaderSize + len(payload)
 	if l.segmentSize > 0 && l.segmentSize+int64(frameSize) > l.opts.SegmentBytes {
 		batch, err := l.syncLocked()
@@ -36,11 +41,13 @@ func (l *Log) appendLocked(payload []byte) (RecordID, *syncBatch, error) {
 	id := RecordID{SegmentBase: l.segmentBase, Offset: l.segmentSize, Seq: seq}
 	l.writeBuffer = appendFrame(l.writeBuffer, seq, payload)
 	l.segmentSize += int64(frameSize)
-	l.unsynced += int64(frameSize)
 	l.nextSeq++
 	return id, batch, nil
 }
 
+// rollLocked closes the active segment and creates the next one, whose
+// base is the next unassigned seq. Caller must hold mu; fileOps is taken
+// so an in-flight flush cannot race the file swap.
 func (l *Log) rollLocked() error {
 	l.fileOps.Lock()
 	defer l.fileOps.Unlock()
@@ -50,6 +57,7 @@ func (l *Log) rollLocked() error {
 	}
 	l.segmentBase = l.nextSeq
 	l.segmentSize = 0
+
 	path := segmentPath(l.dir, l.segmentBase)
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o644)
 	if err != nil {
@@ -64,6 +72,8 @@ func (l *Log) rollLocked() error {
 	return nil
 }
 
+// signalSync wakes the sync loop without blocking; a wakeup already in
+// flight covers this record too.
 func (l *Log) signalSync() {
 	select {
 	case l.wakeup <- struct{}{}:

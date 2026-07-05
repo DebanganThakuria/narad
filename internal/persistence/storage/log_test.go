@@ -79,15 +79,11 @@ func (m *storageMetricsProbe) ObserveHighWatermarkPersist(time.Duration, string)
 	m.hwms.Add(1)
 }
 
-func (m *storageMetricsProbe) IncSegmentRolled() {}
-
 func (m *storageMetricsProbe) IncRetentionDeletion(string, int64, int64) {}
 
 func (m *storageMetricsProbe) ObserveRetentionRun(time.Duration) {}
 
-func (m *storageMetricsProbe) IncSegmentScanned() {}
-
-// requireRead opens a log, calls fn, closes the log, and surfaces
+// mustWriteAndClose opens a log, calls fn, closes the log, and surfaces
 // errors with t.Fatalf.
 func mustWriteAndClose(t *testing.T, path string, opts Options, fn func(*Log)) {
 	t.Helper()
@@ -101,7 +97,7 @@ func mustWriteAndClose(t *testing.T, path string, opts Options, fn func(*Log)) {
 	}
 }
 
-// ---- 1. Round-trip via buffer (no flush) ---------------------------
+// ---- Round-trip via buffer (no flush) ------------------------------
 
 func TestAppendReadFromBuffer(t *testing.T) {
 	l, err := NewLog(testLogPath(t), slowFlushOpts(t, nil))
@@ -130,7 +126,7 @@ func TestAppendReadFromBuffer(t *testing.T) {
 	}
 }
 
-// ---- 2. Round-trip after flush (reopens log to force disk path) ----
+// ---- Round-trip after flush (reopens log to force disk path) -------
 
 func TestRoundTripAfterFlushAndReopen(t *testing.T) {
 	path := testLogPath(t)
@@ -400,7 +396,7 @@ func TestTimerFlushPreservedWhenNoThresholdConfigured(t *testing.T) {
 	}
 }
 
-// ---- 3. Batch round-trip ------------------------------------------
+// ---- Batch round-trip ----------------------------------------------
 
 func TestAppendBatch(t *testing.T) {
 	path := testLogPath(t)
@@ -433,7 +429,7 @@ func TestAppendBatch(t *testing.T) {
 	}
 }
 
-// ---- 7. Compression round-trip + on-disk size sanity ---------------
+// ---- Compression round-trip + on-disk size sanity ------------------
 
 func TestZstdCompressionRoundTripShrinks(t *testing.T) {
 	zc, err := codec.NewZstdCodec(zstd.SpeedBestCompression)
@@ -489,7 +485,7 @@ func TestZstdCompressionRoundTripShrinks(t *testing.T) {
 	}
 }
 
-// ---- 4. CRC mismatch in middle of file: skip-and-continue ---------
+// ---- CRC mismatch in middle of file: skip-and-continue -------------
 
 func TestRecoverySkipsCorruptMiddleFrame(t *testing.T) {
 	path := testLogPath(t)
@@ -544,7 +540,7 @@ func TestRecoverySkipsCorruptMiddleFrame(t *testing.T) {
 	}
 }
 
-// ---- 5. Magic-byte resync ----------------------------------------
+// ---- Magic-byte resync ---------------------------------------------
 
 func TestRecoveryResyncsAfterMagicWipe(t *testing.T) {
 	path := testLogPath(t)
@@ -710,7 +706,7 @@ func TestSyncFlushesBufferToDiskWithoutClose(t *testing.T) {
 	}
 }
 
-// ---- 6. Torn tail truncation -------------------------------------
+// ---- Torn tail truncation ------------------------------------------
 
 func TestRecoveryTruncatesTornTail(t *testing.T) {
 	path := testLogPath(t)
@@ -765,7 +761,7 @@ func TestRecoveryTruncatesTornTail(t *testing.T) {
 	}
 }
 
-// ---- 8. Graceful shutdown flushes ---------------------------------
+// ---- Graceful shutdown flushes -------------------------------------
 
 func TestCloseFlushesPendingRecords(t *testing.T) {
 	path := testLogPath(t)
@@ -812,7 +808,7 @@ func TestCloseFlushesPendingRecords(t *testing.T) {
 	}
 }
 
-// ---- 9. Concurrent producers -------------------------------------
+// ---- Concurrent producers ------------------------------------------
 
 func TestConcurrentAppendOffsetsUniqueAndContiguous(t *testing.T) {
 	const goroutines = 16
@@ -889,8 +885,8 @@ func rollOpts(t *testing.T, segmentBytes int64) Options {
 	}
 }
 
-// 1. Segment rollover — writes that cross SegmentBytes produce
-// multiple segment files.
+// Segment rollover — writes that cross SegmentBytes produce multiple
+// segment files.
 func TestSegmentRollover(t *testing.T) {
 	dir := testLogPath(t)
 	// Each frame is at least headerSize (27) + record bytes; with
@@ -928,7 +924,7 @@ func TestSegmentRollover(t *testing.T) {
 	}
 }
 
-// 2. Multi-segment recovery — close, reopen, all offsets readable.
+// Multi-segment recovery — close, reopen, all offsets readable.
 func TestMultiSegmentRecovery(t *testing.T) {
 	dir := testLogPath(t)
 	// Generate ≥3 segments with 50 records, each ~80 bytes → ~107 byte
@@ -1006,7 +1002,7 @@ func TestSegmentIndexesStayBoundedToHotSegments(t *testing.T) {
 	}
 }
 
-// 3. Mid-segment corruption in a sealed (non-last) segment skips that
+// Mid-segment corruption in a sealed (non-last) segment skips that
 // frame; later segments stay readable; no segment file is shorter.
 func TestMidSegmentCorruptionInSealedSegmentSkipped(t *testing.T) {
 	dir := testLogPath(t)
@@ -1070,7 +1066,7 @@ func TestMidSegmentCorruptionInSealedSegmentSkipped(t *testing.T) {
 	}
 }
 
-// 5. Torn tail on a sealed (non-last) segment is NOT truncated.
+// Torn tail on a sealed (non-last) segment is NOT truncated.
 func TestTornTailOnSealedSegmentNotTruncated(t *testing.T) {
 	dir := testLogPath(t)
 	// SegmentBytes=20 → one record per segment (see comment in
@@ -1120,7 +1116,7 @@ func TestTornTailOnSealedSegmentNotTruncated(t *testing.T) {
 	}
 }
 
-// 6. Roll preserves offset continuity — no gaps, no repeats.
+// Roll preserves offset continuity — no gaps, no repeats.
 func TestRollPreservesOffsetContinuity(t *testing.T) {
 	dir := testLogPath(t)
 	const total = 30
@@ -1233,8 +1229,8 @@ func produceN(t *testing.T, dir string, opts Options, n int) {
 	}
 }
 
-// 1. Age-based retention deletes old sealed segments. Active stays;
-// the offsets in deleted segments become permanent gaps.
+// Age-based retention deletes old sealed segments. Active stays; the
+// offsets in deleted segments become permanent gaps.
 func TestRetentionDeletesOldSegments(t *testing.T) {
 	clock := newAtomicTime(time.Now())
 	opts := retentionOpts(t, clock, RetentionConfig{
@@ -1278,8 +1274,8 @@ func TestRetentionDeletesOldSegments(t *testing.T) {
 	}
 }
 
-// 2. Active segment is never deleted, even if it's the only segment
-// and the retention bound says everything should go.
+// Active segment is never deleted, even if it's the only segment and
+// the retention bound says everything should go.
 func TestRetentionRespectsActiveSegment(t *testing.T) {
 	clock := newAtomicTime(time.Now())
 	dir := testLogPath(t)
@@ -1326,7 +1322,7 @@ func TestRetentionRespectsActiveSegment(t *testing.T) {
 	}
 }
 
-// 4. Retention disabled (both fields zero) → reaper does nothing.
+// Retention disabled (both fields zero) → reaper does nothing.
 func TestRetentionDisabledIsNoop(t *testing.T) {
 	clock := newAtomicTime(time.Now())
 	opts := retentionOpts(t, clock, RetentionConfig{})

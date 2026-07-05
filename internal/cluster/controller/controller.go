@@ -50,26 +50,7 @@ type Controller struct {
 	cfg   Config
 }
 
-// Heartbeater runs a background loop that upserts this pod's Member record
-// into the metastore on every tick. Using RegisterMember (not Heartbeat)
-// means the first tick also handles initial registration, and a pod that
-// was marked dead gets resurrected automatically when it comes back.
-type Heartbeater struct {
-	store    *metastore.Store
-	member   metastore.Member
-	interval time.Duration
-}
-
 // New creates a Controller. Call Run to start it.
 func New(store *metastore.Store, cfg Config) *Controller {
 	return &Controller{store: store, cfg: cfg.withDefaults()}
-}
-
-// NewHeartbeater creates a Heartbeater. interval should be well below the
-// controller's DeadTimeout (e.g. DeadTimeout/4).
-func NewHeartbeater(store *metastore.Store, m metastore.Member, interval time.Duration) *Heartbeater {
-	if interval == 0 {
-		interval = 5 * time.Second
-	}
-	return &Heartbeater{store: store, member: m, interval: interval}
 }

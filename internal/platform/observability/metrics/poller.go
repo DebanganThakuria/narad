@@ -32,25 +32,25 @@ type Poller struct {
 	logger  *slog.Logger
 	dataDir string
 
-	// previousTopics tracks what topics existed at the last tick so
-	// we can prune their gauge series after DeleteTopic. Without
-	// this, deleted topics would leak series in /metrics until the
-	// process restarts.
+	// previousTopics records which topics existed at the last tick;
+	// see pruneDeletedTopics.
 	previousTopics  map[string]struct{}
 	lastDataDirScan time.Time
 }
 
 // NewPoller wires the poller. Run must be called for it to do any
-// work; the constructor itself does no I/O.
-func NewPoller(m *Metrics, br SnapshotProvider, log *slog.Logger, dataDir ...string) *Poller {
+// work; the constructor itself does no I/O. At most one dataDir is
+// used; when supplied, the poller also tracks that directory's size
+// and available filesystem space.
+func NewPoller(m *Metrics, broker SnapshotProvider, logger *slog.Logger, dataDir ...string) *Poller {
 	var dir string
 	if len(dataDir) > 0 {
 		dir = dataDir[0]
 	}
 	return &Poller{
 		metrics:        m,
-		broker:         br,
-		logger:         log,
+		broker:         broker,
+		logger:         logger,
 		dataDir:        dir,
 		previousTopics: make(map[string]struct{}),
 	}
@@ -94,50 +94,58 @@ func (p *Poller) tick(ctx context.Context) {
 	for _, ts := range snaps {
 		currentTopics[ts.Topic] = struct{}{}
 		partitionsTotal += len(ts.Partitions)
-
-		var topicBytes int64
-		for _, ps := range ts.Partitions {
-			partLabel := strconv.Itoa(ps.Partition)
-			labels := prometheus.Labels{"topic": ts.Topic, "partition": partLabel}
-
-			topicBytes += ps.SizeBytes
-			p.metrics.PartitionSizeBytes.With(labels).Set(float64(ps.SizeBytes))
-			p.metrics.Segments.With(labels).Set(float64(ps.SegmentCount))
-			p.metrics.InFlightSize.With(labels).Set(float64(ps.InFlightSize))
-			p.metrics.AckedAheadSize.With(labels).Set(float64(ps.AckedAheadSize))
-
-			lag := max(ps.LogEndOffset-ps.CommittedOffset, 0)
-			p.metrics.ConsumerLagMessages.With(labels).Set(float64(lag))
-			p.metrics.ConsumerDroppedMessages.With(labels).Set(float64(ps.Dropped))
-
-			var ageSeconds float64
-			if ps.OldestUnconsumedAt > 0 {
-				ageSeconds = float64(nowUnix - ps.OldestUnconsumedAt)
-				if ageSeconds < 0 {
-					ageSeconds = 0
-				}
-			}
-			p.metrics.OldestUnconsumedAgeSeconds.With(labels).Set(ageSeconds)
-		}
-
-		p.metrics.TopicBytes.With(prometheus.Labels{"topic": ts.Topic}).Set(float64(topicBytes))
+		p.setTopicGauges(ts, nowUnix)
 	}
 
 	p.metrics.TopicsTotal.Set(float64(len(snaps)))
 	p.metrics.PartitionsTotal.Set(float64(partitionsTotal))
 	p.updateDataDirGauges()
+	p.pruneDeletedTopics(currentTopics)
+}
 
-	// Prune series for topics that disappeared since last tick. Every
-	// topic-labeled collector must be listed here: any omission leaks a
-	// series per deleted topic for the lifetime of the process, which is
-	// unbounded under topic churn.
+func (p *Poller) setTopicGauges(ts TopicSnapshot, nowUnix int64) {
+	var topicBytes int64
+	for _, ps := range ts.Partitions {
+		topicBytes += ps.SizeBytes
+		p.setPartitionGauges(ts.Topic, ps, nowUnix)
+	}
+	p.metrics.TopicBytes.With(prometheus.Labels{"topic": ts.Topic}).Set(float64(topicBytes))
+}
+
+func (p *Poller) setPartitionGauges(topic string, ps PartitionSnapshot, nowUnix int64) {
+	labels := prometheus.Labels{"topic": topic, "partition": strconv.Itoa(ps.Partition)}
+
+	p.metrics.PartitionSizeBytes.With(labels).Set(float64(ps.SizeBytes))
+	p.metrics.Segments.With(labels).Set(float64(ps.SegmentCount))
+	p.metrics.InFlightSize.With(labels).Set(float64(ps.InFlightSize))
+	p.metrics.AckedAheadSize.With(labels).Set(float64(ps.AckedAheadSize))
+
+	lag := max(ps.LogEndOffset-ps.CommittedOffset, 0)
+	p.metrics.ConsumerLagMessages.With(labels).Set(float64(lag))
+	p.metrics.ConsumerDroppedMessages.With(labels).Set(float64(ps.Dropped))
+
+	var ageSeconds float64
+	if ps.OldestUnconsumedAt > 0 {
+		ageSeconds = float64(nowUnix - ps.OldestUnconsumedAt)
+		if ageSeconds < 0 {
+			ageSeconds = 0
+		}
+	}
+	p.metrics.OldestUnconsumedAgeSeconds.With(labels).Set(ageSeconds)
+}
+
+// pruneDeletedTopics drops gauge series for topics that disappeared
+// since the previous tick. Without this, deleted topics would leak
+// series in /metrics for the lifetime of the process — unbounded under
+// topic churn.
+func (p *Poller) pruneDeletedTopics(current map[string]struct{}) {
 	for topic := range p.previousTopics {
-		if _, still := currentTopics[topic]; still {
+		if _, still := current[topic]; still {
 			continue
 		}
 		p.metrics.pruneTopicSeries(topic)
 	}
-	p.previousTopics = currentTopics
+	p.previousTopics = current
 }
 
 func (p *Poller) updateDataDirGauges() {

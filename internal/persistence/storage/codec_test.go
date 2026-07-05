@@ -10,8 +10,6 @@ import (
 )
 
 func TestCodecForFlag(t *testing.T) {
-	noop := storagecodec.NewNoopCodec()
-
 	cases := []struct {
 		name      string
 		flag      uint8
@@ -42,9 +40,6 @@ func TestCodecForFlag(t *testing.T) {
 			}
 			if tc.wantReuse && got != tc.existing {
 				t.Fatal("codecForFlag() did not reuse existing codec")
-			}
-			if !tc.wantReuse && tc.existing == nil && tc.flag == storagecodec.FlagNone && got == noop {
-				return
 			}
 		})
 	}

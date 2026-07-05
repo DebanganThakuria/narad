@@ -4,6 +4,14 @@ import (
 	"context"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/errs"
+)
+
+// ErrNotFound and ErrAlreadyExists are aliases of the canonical
+// sentinels in internal/errs.
+var (
+	ErrNotFound      = errs.ErrNotFound
+	ErrAlreadyExists = errs.ErrAlreadyExists
 )
 
 // Metastore is the broker's view of durable metadata.
@@ -34,6 +42,8 @@ type ListOptions struct {
 // MemberStatus is the liveness state of a cluster pod.
 type MemberStatus string
 
+// The two liveness states a member can be in. There is no intermediate
+// state: a member is routable until it is marked dead.
 const (
 	MemberAlive MemberStatus = "alive"
 	MemberDead  MemberStatus = "dead"

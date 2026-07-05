@@ -1,3 +1,7 @@
+// Package messaging holds the data-plane HTTP handlers — produce,
+// consume, and ack under /v1/topics/{topic}. Each handler is a free
+// function that takes a *handlers.Set and returns an
+// http.HandlerFunc; the router wires them up at startup.
 package messaging
 
 import (
@@ -47,6 +51,10 @@ func Ack(s *handlers.Set) http.HandlerFunc {
 	}
 }
 
+// receiptHandleFromRawQuery extracts receipt_handle by walking the raw
+// query string directly: ack is on the hot path, and url.ParseQuery
+// would allocate a map for parameters the handler ignores anyway.
+// Components are unescaped only when they contain escape characters.
 func receiptHandleFromRawQuery(raw string) (string, bool, error) {
 	for raw != "" {
 		part := raw

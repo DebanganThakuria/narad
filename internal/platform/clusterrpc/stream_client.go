@@ -15,6 +15,8 @@ import (
 
 const defaultStreamTimeout = 5 * time.Second
 
+// streamConn is the subset of net.Conn a stream client needs; both
+// *net.TCPConn and *quic.Stream satisfy it.
 type streamConn interface {
 	io.ReadWriteCloser
 	SetDeadline(time.Time) error
@@ -22,14 +24,15 @@ type streamConn interface {
 	SetWriteDeadline(time.Time) error
 }
 
+// streamClient multiplexes request/reply RPCs over one stream. Requests
+// are correlated by RequestID: writers park a channel in pending, the
+// single readLoop goroutine delivers the matching reply or error.
 type streamClient struct {
-	conn      streamConn
-	reader    *bufio.Reader
-	timeout   time.Duration
-	metrics   stageObserver
-	component string
+	conn    streamConn
+	reader  *bufio.Reader
+	timeout time.Duration
 
-	writerMu sync.Mutex
+	writeMu  sync.Mutex
 	nextID   atomic.Uint64
 	closed   atomic.Bool
 	closeMu  sync.Mutex
@@ -48,23 +51,18 @@ type streamResult struct {
 // frame (correlated by RequestID). This is the generic cluster-RPC
 // transport primitive used by the peer client.
 func (c *streamClient) requestFrame(ctx context.Context, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
-	operation := streamFrameOperation(frameType)
 	requestID := c.nextID.Add(1)
 	resultCh := make(chan streamResult, 1)
 	c.addPending(requestID, resultCh)
-	stageStart := time.Now()
 	if err := c.writeFrame(ctx, clusterwire.StreamFrame{
 		Type:      frameType,
 		RequestID: requestID,
 		Payload:   payload,
 	}); err != nil {
 		c.removePending(requestID)
-		c.observe(operation, "write_frame", "error", time.Since(stageStart))
 		return clusterwire.StreamFrame{}, err
 	}
-	c.observe(operation, "write_frame", "ok", time.Since(stageStart))
 
-	stageStart = time.Now()
 	// A caller without a deadline must not block forever on a peer that
 	// accepted the frame but never replies: fall back to the configured
 	// client timeout for the reply wait. Callers with legitimately longer
@@ -77,41 +75,16 @@ func (c *streamClient) requestFrame(ctx context.Context, frameType clusterwire.S
 	}
 	select {
 	case result := <-resultCh:
-		c.observe(operation, "wait_reply", observeOutcome(result.err), time.Since(stageStart))
 		return result.frame, result.err
 	case <-timeoutCh:
 		c.removePending(requestID)
-		c.observe(operation, "wait_reply", "error", time.Since(stageStart))
 		return clusterwire.StreamFrame{}, fmt.Errorf("cluster rpc reply timed out after %s: %w", c.timeout, context.DeadlineExceeded)
 	case <-ctx.Done():
 		// Drop only this request's waiter: the stream is multiplexed and
 		// unrelated in-flight RPCs must keep it. The reader discards the
 		// late reply for this RequestID (complete finds no pending entry).
 		c.removePending(requestID)
-		c.observe(operation, "wait_reply", "error", time.Since(stageStart))
 		return clusterwire.StreamFrame{}, ctx.Err()
-	}
-}
-
-func (c *streamClient) observe(operation, stage, outcome string, duration time.Duration) {
-	if c.metrics == nil {
-		return
-	}
-	component := c.component
-	if component == "" {
-		component = "stream_client"
-	}
-	c.metrics.ObserveHotPathStage(component, operation, stage, outcome, duration)
-}
-
-func streamFrameOperation(frameType clusterwire.StreamFrameType) string {
-	switch frameType {
-	case clusterwire.StreamFrameNodeRequest:
-		return "node_request"
-	case clusterwire.StreamFramePing:
-		return "ping"
-	default:
-		return "unknown"
 	}
 }
 
@@ -140,10 +113,10 @@ func (c *streamClient) complete(requestID uint64, result streamResult) {
 
 func (c *streamClient) writeFrame(ctx context.Context, frame clusterwire.StreamFrame) error {
 	if c.isClosed() {
-		return c.err()
+		return c.closeError()
 	}
-	c.writerMu.Lock()
-	defer c.writerMu.Unlock()
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -189,7 +162,9 @@ func (c *streamClient) isClosed() bool {
 	return c.closed.Load()
 }
 
-func (c *streamClient) err() error {
+// closeError reports why the stream closed, or a generic error if it
+// closed without a recorded cause.
+func (c *streamClient) closeError() error {
 	c.closeMu.Lock()
 	defer c.closeMu.Unlock()
 	if c.closeErr == nil {

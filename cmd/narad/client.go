@@ -1,18 +1,14 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"strings"
-	"time"
 )
 
 // runClient dispatches `narad client <category> <action> ...`. Output:
@@ -70,6 +66,7 @@ func runClientTopicsList(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
 	q := url.Values{}
 	if *limit > 0 {
 		q.Set("limit", fmt.Sprintf("%d", *limit))
@@ -90,14 +87,15 @@ func runClientTopicsCreate(args []string) error {
 	partitions := fs.Int("partitions", 0, "partition count (0 = server default)")
 	retentionMs := fs.Int64("retention-ms", 0, "retention duration in ms (0 = server default)")
 	visibilityMs := fs.Int64("visibility-timeout-ms", 0, "consumer visibility timeout in ms (0 = server default)")
-	maxIF := fs.Int64("max-in-flight-per-partition", 0, "per-partition reservation cap (0 = server default)")
-	maxAA := fs.Int64("max-acked-ahead-per-partition", 0, "per-partition out-of-order ack cap (0 = server default)")
+	maxInFlight := fs.Int64("max-in-flight-per-partition", 0, "per-partition reservation cap (0 = server default)")
+	maxAckedAhead := fs.Int64("max-acked-ahead-per-partition", 0, "per-partition out-of-order ack cap (0 = server default)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		return clientUsageErr("usage: narad client topics create [flags] <name>")
 	}
+
 	body := map[string]any{"name": fs.Arg(0)}
 	if *partitions > 0 {
 		body["partitions"] = *partitions
@@ -108,11 +106,11 @@ func runClientTopicsCreate(args []string) error {
 	if *visibilityMs > 0 {
 		body["visibility_timeout_ms"] = *visibilityMs
 	}
-	if *maxIF > 0 {
-		body["max_in_flight_per_partition"] = *maxIF
+	if *maxInFlight > 0 {
+		body["max_in_flight_per_partition"] = *maxInFlight
 	}
-	if *maxAA > 0 {
-		body["max_acked_ahead_per_partition"] = *maxAA
+	if *maxAckedAhead > 0 {
+		body["max_acked_ahead_per_partition"] = *maxAckedAhead
 	}
 	return newHTTPClient(*addr).postAndPrint("/v1/topics", body)
 }
@@ -150,8 +148,8 @@ func runClientTopicsAlter(args []string) error {
 	addr := fs.String("addr", defaultAddr(), "HTTP base URL")
 	partitions := fs.Int("partitions", 0, "new partition count (must exceed current)")
 	retentionMs := fs.Int64("retention-ms", -1, "new retention duration in ms (0 = inherit default)")
-	maxIF := fs.Int64("max-in-flight-per-partition", -1, "new per-partition reservation cap (0 = inherit default)")
-	maxAA := fs.Int64("max-acked-ahead-per-partition", -1, "new per-partition out-of-order ack cap (0 = inherit default)")
+	maxInFlight := fs.Int64("max-in-flight-per-partition", -1, "new per-partition reservation cap (0 = inherit default)")
+	maxAckedAhead := fs.Int64("max-acked-ahead-per-partition", -1, "new per-partition out-of-order ack cap (0 = inherit default)")
 	schemaFile := fs.String("schema-file", "", `path to JSON Schema file ("-" reads from stdin)`)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -167,11 +165,11 @@ func runClientTopicsAlter(args []string) error {
 	if *retentionMs >= 0 {
 		body["retention_ms"] = *retentionMs
 	}
-	if *maxIF >= 0 {
-		body["max_in_flight_per_partition"] = *maxIF
+	if *maxInFlight >= 0 {
+		body["max_in_flight_per_partition"] = *maxInFlight
 	}
-	if *maxAA >= 0 {
-		body["max_acked_ahead_per_partition"] = *maxAA
+	if *maxAckedAhead >= 0 {
+		body["max_acked_ahead_per_partition"] = *maxAckedAhead
 	}
 	if *schemaFile != "" {
 		raw, err := readSchemaFile(*schemaFile)
@@ -220,6 +218,7 @@ func runClientProduce(args []string) error {
 	if fs.NArg() != 1 {
 		return clientUsageErr("usage: narad client produce [--key K] <topic>  (body from stdin)")
 	}
+
 	body, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return fmt.Errorf("read stdin: %w", err)
@@ -293,162 +292,8 @@ func runClientAck(args []string) error {
 	return nil
 }
 
-type httpClient struct {
-	addr string
-	h    *http.Client
-}
-
-func newHTTPClient(addr string) *httpClient {
-	return &httpClient{
-		addr: strings.TrimRight(addr, "/"),
-		h:    &http.Client{Timeout: 60 * time.Second},
-	}
-}
-
-func (c *httpClient) do(method, path string, body any) (*http.Response, error) {
-	var rdr io.Reader
-	if body != nil {
-		buf, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("marshal request: %w", err)
-		}
-		rdr = bytes.NewReader(buf)
-	}
-	req, err := http.NewRequestWithContext(context.Background(), method, c.addr+path, rdr)
-	if err != nil {
-		return nil, err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.h.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("transport: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, formatErrorBody(b))
-	}
-	return resp, nil
-}
-
-func (c *httpClient) doRaw(method, path string, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(context.Background(), method, c.addr+path, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	resp, err := c.h.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("transport: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, formatErrorBody(b))
-	}
-	return resp, nil
-}
-
-// formatErrorBody renders the server's error body for human display.
-// The server sends `{"error":"..."}` for handled errors; we surface
-// just the message in that case. Anything else is shown verbatim
-// (trimmed) so unexpected payloads still reach the operator.
-func formatErrorBody(b []byte) string {
-	trimmed := strings.TrimSpace(string(b))
-	if trimmed == "" {
-		return "<empty body>"
-	}
-	var env struct {
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(b, &env); err == nil && env.Error != "" {
-		return env.Error
-	}
-	return trimmed
-}
-
-func (c *httpClient) getAndPrint(path string) error {
-	resp, err := c.do(http.MethodGet, path, nil)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	return printResponse(resp)
-}
-
-func (c *httpClient) postAndPrint(path string, body any) error {
-	resp, err := c.do(http.MethodPost, path, body)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	return printResponse(resp)
-}
-
-func (c *httpClient) postRawAndPrint(path string, body []byte) error {
-	resp, err := c.doRaw(http.MethodPost, path, body)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	return printResponse(resp)
-}
-
-func (c *httpClient) patchAndPrint(path string, body any) error {
-	resp, err := c.do(http.MethodPatch, path, body)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	return printResponse(resp)
-}
-
-func (c *httpClient) postNoBody(path string, body any) error {
-	resp, err := c.do(http.MethodPost, path, body)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	return nil
-}
-
-func (c *httpClient) deleteRequest(path string) error {
-	resp, err := c.do(http.MethodDelete, path, nil)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	return nil
-}
-
-// printResponse pretty-prints a JSON response body to stdout. 204
-// (no body) and non-JSON bodies are passed through verbatim.
-func printResponse(resp *http.Response) error {
-	if resp.StatusCode == http.StatusNoContent {
-		return nil
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if len(body) == 0 {
-		return nil
-	}
-	var pretty bytes.Buffer
-	if err := json.Indent(&pretty, body, "", "  "); err != nil {
-		_, _ = os.Stdout.Write(body)
-		if !bytes.HasSuffix(body, []byte("\n")) {
-			fmt.Println()
-		}
-		return nil
-	}
-	pretty.WriteByte('\n')
-	_, err = pretty.WriteTo(os.Stdout)
-	return err
-}
-
+// defaultAddr is the server base URL used when --addr is not given:
+// $NARAD_ADDR if set, else the local default port.
 func defaultAddr() string {
 	if v := os.Getenv("NARAD_ADDR"); v != "" {
 		return v
@@ -456,6 +301,8 @@ func defaultAddr() string {
 	return "http://localhost:7942"
 }
 
+// clientUsageErr marks a client invocation error caused by bad usage
+// rather than a failed request.
 func clientUsageErr(msg string) error {
 	return errors.New(msg)
 }

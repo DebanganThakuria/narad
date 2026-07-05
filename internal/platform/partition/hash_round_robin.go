@@ -27,7 +27,7 @@ func (h *HashRoundRobin) Pick(_ string, key string, partitions int) int {
 		n := h.cursor.Add(1) - 1
 		return int(n % uint64(partitions))
 	}
-	hh := fnv.New32a()
-	_, _ = hh.Write([]byte(key))
-	return int(hh.Sum32() % uint32(partitions))
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(key))
+	return int(hasher.Sum32() % uint32(partitions))
 }

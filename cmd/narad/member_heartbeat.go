@@ -12,10 +12,16 @@ import (
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
+// memberRegistrar forwards a member registration to another node, used
+// when this node is not the metastore leader.
 type memberRegistrar interface {
 	RegisterMember(context.Context, string, nodewire.MemberRequest) (nodewire.Response, error)
 }
 
+// runMemberHeartbeater re-registers this node's membership on every tick
+// (and once immediately) so the controller keeps seeing it alive. It runs
+// until ctx is cancelled; failures are logged at debug and retried on the
+// next tick.
 func runMemberHeartbeater(ctx context.Context, store *metastore.Store, member metastore.Member, interval time.Duration, registrar memberRegistrar, log *slog.Logger) {
 	if interval <= 0 {
 		interval = 5 * time.Second
@@ -40,6 +46,9 @@ func runMemberHeartbeater(ctx context.Context, store *metastore.Store, member me
 	}
 }
 
+// registerMember records the member in the local store; when that fails
+// (this node is not the leader) it forwards the registration to the
+// leader over peer RPC.
 func registerMember(ctx context.Context, store *metastore.Store, member metastore.Member, registrar memberRegistrar) error {
 	member.LastHeartbeat = time.Now().Unix()
 	if err := store.RegisterMember(ctx, member); err == nil {
@@ -69,6 +78,9 @@ func registerMember(ctx context.Context, store *metastore.Store, member metastor
 	return nil
 }
 
+// leaderMemberAddr resolves the leader's member (HTTP/RPC) address. The
+// store only knows the leader's raft cluster address, so the member entry
+// is found either by leader ID or by matching cluster addresses.
 func leaderMemberAddr(store *metastore.Store) string {
 	leaderClusterAddr := store.LeaderAddr()
 	if strings.TrimSpace(leaderClusterAddr) == "" {

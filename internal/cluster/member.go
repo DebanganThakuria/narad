@@ -18,10 +18,12 @@ func (rt *Router) ownerAddr(topicName string, p int) string {
 	if !ok {
 		return ""
 	}
-	return rt.consumeOwnerAddrForRoute(entry)
+	return rt.consumeOwnerAddr(entry)
 }
 
-func (rt *Router) consumeOwnerAddrForRoute(entry routeEntry) string {
+// consumeOwnerAddr returns the address to forward a consume/ack to, or ""
+// when the entry is local or unreachable.
+func (rt *Router) consumeOwnerAddr(entry routeEntry) string {
 	if entry.ownerID == rt.selfID {
 		return ""
 	}
@@ -33,22 +35,25 @@ func (rt *Router) consumeOwnerAddrForRoute(entry routeEntry) string {
 	return ""
 }
 
-func (rt *Router) produceOwnerAddrForRoute(entry routeEntry) (string, bool) {
-	ownerAddr, writable := rt.produceAssignmentWritableForRoute(entry)
-	if !writable {
+// produceOwnerAddr resolves a produce forward for a route entry: local means
+// this pod owns the partition and should handle the produce itself; an empty
+// addr with local=false means the owner is dead and the partition must be
+// skipped.
+func (rt *Router) produceOwnerAddr(entry routeEntry) (addr string, local bool) {
+	if !entry.ownerAlive {
 		return "", false
 	}
 	if entry.ownerID == rt.selfID {
 		return "", true
 	}
-	return ownerAddr, false
+	return entry.ownerAddr, false
 }
 
-func (rt *Router) produceAssignmentWritableForRoute(entry routeEntry) (string, bool) {
-	if !entry.ownerAlive {
-		return "", false
+func (rt *Router) leaderMemberAddr() string {
+	if addr := rt.memberAddrByClusterAddr(rt.store.LeaderAddr()); addr != "" {
+		return addr
 	}
-	return entry.ownerAddr, true
+	return rt.memberAddrByID(rt.store.LeaderID())
 }
 
 func (rt *Router) memberAddrByClusterAddr(clusterAddr string) string {
@@ -69,13 +74,6 @@ func (rt *Router) memberAddrByClusterAddr(clusterAddr string) string {
 		return member.Addr
 	}
 	return ""
-}
-
-func (rt *Router) leaderMemberAddr() string {
-	if addr := rt.memberAddrByClusterAddr(rt.store.LeaderAddr()); addr != "" {
-		return addr
-	}
-	return rt.memberAddrByID(rt.store.LeaderID())
 }
 
 func (rt *Router) memberAddrByID(id string) string {

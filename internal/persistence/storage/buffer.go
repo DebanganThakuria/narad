@@ -53,11 +53,11 @@ func (b *buffer) pushBatch(records [][]byte) (int64, int64, bool) {
 	if len(records) == 0 {
 		return 0, -1, false
 	}
-	cps := make([][]byte, len(records))
+	copies := make([][]byte, len(records))
 	for i, r := range records {
 		cp := make([]byte, len(r))
 		copy(cp, r)
-		cps[i] = cp
+		copies[i] = cp
 	}
 
 	b.mu.Lock()
@@ -65,9 +65,9 @@ func (b *buffer) pushBatch(records [][]byte) (int64, int64, bool) {
 		b.firstAt = time.Now()
 	}
 	first := b.nextOffset
-	b.records = append(b.records, cps...)
-	b.nextOffset += int64(len(cps))
-	for _, cp := range cps {
+	b.records = append(b.records, copies...)
+	b.nextOffset += int64(len(copies))
+	for _, cp := range copies {
 		b.bytes += len(cp)
 	}
 	last := b.nextOffset - 1

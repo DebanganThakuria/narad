@@ -12,6 +12,8 @@ import (
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
+// generatedProduceKeySeq feeds generateProduceKey so keyless produces
+// still spread across partitions instead of hashing to one.
 var generatedProduceKeySeq atomic.Uint64
 
 type produceQuery struct {
@@ -75,6 +77,11 @@ func parseProduceQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) 
 	return query, true
 }
 
+// produceQueryFromRawQuery parses key and partition by walking the
+// raw query string directly: produce is on the hot path, and
+// url.ParseQuery would allocate a map for parameters the handler
+// ignores. Walking the string also lets it reject duplicate key or
+// partition parameters, which url.Values would silently collapse.
 func produceQueryFromRawQuery(raw string) (produceQuery, error) {
 	var out produceQuery
 	seenKey := false
@@ -93,7 +100,7 @@ func produceQueryFromRawQuery(raw string) (produceQuery, error) {
 		}
 
 		key, value, hasValue := strings.Cut(part, "=")
-		decodedKey, err := queryComponent(key)
+		decodedKey, err := unescapeQueryComponent(key)
 		if err != nil {
 			return produceQuery{}, fmt.Errorf("invalid query parameter: %w", err)
 		}
@@ -107,7 +114,7 @@ func produceQueryFromRawQuery(raw string) (produceQuery, error) {
 			if !hasValue || value == "" {
 				continue
 			}
-			decodedValue, err := queryComponent(value)
+			decodedValue, err := unescapeQueryComponent(value)
 			if err != nil {
 				return produceQuery{}, fmt.Errorf("invalid key: %w", err)
 			}
@@ -120,7 +127,7 @@ func produceQueryFromRawQuery(raw string) (produceQuery, error) {
 			if !hasValue || value == "" {
 				return produceQuery{}, errors.New("invalid partition: empty")
 			}
-			decodedValue, err := queryComponent(value)
+			decodedValue, err := unescapeQueryComponent(value)
 			if err != nil {
 				return produceQuery{}, fmt.Errorf("invalid partition: %w", err)
 			}
@@ -139,7 +146,9 @@ func produceQueryFromRawQuery(raw string) (produceQuery, error) {
 	return out, nil
 }
 
-func queryComponent(s string) (string, error) {
+// unescapeQueryComponent skips url.QueryUnescape for the common case
+// of a component with no escape characters.
+func unescapeQueryComponent(s string) (string, error) {
 	if strings.ContainsAny(s, "%+") {
 		return url.QueryUnescape(s)
 	}

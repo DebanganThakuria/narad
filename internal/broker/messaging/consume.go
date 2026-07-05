@@ -17,63 +17,54 @@ import (
 // queue-mode pull, partition-pinned pull, replay-by-offset, and HTTP
 // long-polling. See ConsumeOpts for the full semantics.
 func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts) (topic.Message, bool, error) {
-	totalStart := time.Now()
-	totalOutcome := "empty"
-	defer func() {
-		e.observe("consume", "total", totalOutcome, time.Since(totalStart))
-	}()
-
-	stageStart := time.Now()
 	t, err := e.getTopic(ctx, topicName)
-	e.observe("consume", "get_topic", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
-		totalOutcome = "error"
 		return topic.Message{}, false, err
 	}
 
 	if opts.Offset != nil && opts.Partition == nil {
-		totalOutcome = "error"
 		return topic.Message{}, false, ErrPartitionRequired
 	}
-
 	if opts.Offset != nil {
-		if *opts.Partition < 0 || *opts.Partition >= t.Partitions {
-			totalOutcome = "error"
-			return topic.Message{}, false, fmt.Errorf("%w: partition out of range", ErrInvalid)
-		}
-		stageStart = time.Now()
-		if !e.isLocalOwner(topicName, *opts.Partition) {
-			e.observe("consume", "owner_check", "remote", time.Since(stageStart))
-			totalOutcome = "error"
-			return topic.Message{}, false, ErrNotPartitionOwner
-		}
-		e.observe("consume", "owner_check", "local", time.Since(stageStart))
-		stageStart = time.Now()
-		msg, found, err := e.replayRead(topicName, *opts.Partition, *opts.Offset, t.Partitions)
-		e.observe("consume", "replay_read", consumeStageOutcome(found, err), time.Since(stageStart))
-		if found {
-			e.recordConsumed(topicName, msg.Partition, len(msg.Payload))
-			totalOutcome = "hit"
-		}
-		if err != nil {
-			totalOutcome = "error"
-		}
-		return msg, found, err
+		return e.consumeReplay(topicName, *opts.Partition, *opts.Offset, t.Partitions)
 	}
 
-	stageStart = time.Now()
 	scan, err := e.localProbePartitions(topicName, t.Partitions, opts.Partition)
-	e.observe("consume", "local_partitions", observeOutcome(err), time.Since(stageStart))
 	if err != nil {
-		totalOutcome = "error"
 		return topic.Message{}, false, err
 	}
-	scanStart := e.nextConsumeScanStart(topicName, len(scan))
 
 	visibilityTimeout := time.Duration(t.VisibilityTimeoutMs) * time.Millisecond
+	return e.consumeQueue(ctx, topicName, scan, visibilityTimeout, opts.Wait)
+}
+
+// consumeReplay serves an offset-pinned Consume: an ownership check
+// followed by a direct read at (partition, offset). Replay never
+// reserves — the returned message carries no receipt handle.
+func (e *Engine) consumeReplay(topicName string, partitionIdx int, offset int64, totalPartitions int) (topic.Message, bool, error) {
+	if partitionIdx < 0 || partitionIdx >= totalPartitions {
+		return topic.Message{}, false, fmt.Errorf("%w: partition out of range", ErrInvalid)
+	}
+
+	if !e.isLocalOwner(topicName, partitionIdx) {
+		return topic.Message{}, false, ErrNotPartitionOwner
+	}
+
+	msg, found, err := e.replayRead(topicName, partitionIdx, offset, totalPartitions)
+	if found {
+		e.recordConsumed(topicName, msg.Partition, len(msg.Payload))
+	}
+	return msg, found, err
+}
+
+// consumeQueue serves a queue-mode Consume over the given partitions:
+// probe for a reservable message, and if none is available long-poll
+// up to wait for partition activity before probing again.
+func (e *Engine) consumeQueue(ctx context.Context, topicName string, scan []int, visibilityTimeout, wait time.Duration) (topic.Message, bool, error) {
+	scanStart := e.nextConsumeScanStart(topicName, len(scan))
 
 	start := time.Now()
-	deadline := start.Add(opts.Wait)
+	deadline := start.Add(wait)
 	for {
 		// Fetch the notify channels BEFORE probing for data. The
 		// channels are close-and-replace broadcasts, so a snapshot
@@ -83,62 +74,51 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 		// Re-fetched every iteration because each broadcast installs a
 		// fresh channel.
 		var notifyChans []<-chan struct{}
-		if opts.Wait > 0 {
+		if wait > 0 {
+			var err error
 			notifyChans, err = e.notifyChannels(topicName, scan)
 			if err != nil {
-				totalOutcome = "error"
 				return topic.Message{}, false, err
 			}
 		}
 
-		stageStart = time.Now()
 		msg, found, err := e.tryQueueRead(ctx, topicName, scan, scanStart, visibilityTimeout)
-		e.observe("consume", "try_queue_read", consumeStageOutcome(found, err), time.Since(stageStart))
 		if err != nil {
 			if e.metrics != nil {
 				e.metrics.IncError("messaging", "consume")
 			}
-			totalOutcome = "error"
 			return msg, false, err
 		}
 		if found {
 			e.recordConsumed(topicName, msg.Partition, len(msg.Payload))
 			e.recordConsumeWait(topicName, "hit", time.Since(start))
-			totalOutcome = "hit"
 			return msg, true, nil
 		}
 
-		if opts.Wait <= 0 {
+		if wait <= 0 {
 			e.recordConsumeEmpty(topicName, "no_wait", time.Since(start))
-			totalOutcome = "empty"
 			return topic.Message{}, false, nil
 		}
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			e.recordConsumeEmpty(topicName, "timeout", time.Since(start))
-			totalOutcome = "timeout"
 			return topic.Message{}, false, nil
 		}
-		stageStart = time.Now()
 		if err := e.waitForActivity(ctx, notifyChans, remaining); err != nil {
-			e.observe("consume", "wait_for_activity", waitOutcome(err), time.Since(stageStart))
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 				outcome := "timeout"
 				if errors.Is(err, context.Canceled) {
 					outcome = "cancelled"
 				}
 				e.recordConsumeEmpty(topicName, outcome, time.Since(start))
-				totalOutcome = outcome
 				return topic.Message{}, false, nil
 			}
 			if e.metrics != nil {
 				e.metrics.IncError("messaging", "consume_wait")
 			}
-			totalOutcome = "error"
 			return topic.Message{}, false, err
 		}
-		e.observe("consume", "wait_for_activity", "wakeup", time.Since(stageStart))
 	}
 }
 
@@ -211,28 +191,19 @@ func (e *Engine) replayRead(topicName string, partitionIdx int, offset int64, to
 func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions []int, scanStart int, visibilityTimeout time.Duration) (topic.Message, bool, error) {
 	for i := range partitions {
 		idx := partitions[(scanStart+i)%len(partitions)]
-		stageStart := time.Now()
 		log, err := e.logs.Get(topicName, idx)
-		e.observe("consume", "log_open", observeOutcome(err), time.Since(stageStart))
 		if err != nil {
 			return topic.Message{}, false, err
 		}
 		for {
-			stageStart = time.Now()
 			res, err := e.offsets.ReserveNext(ctx, topicName, idx, visibilityTimeout, log.HighWatermark())
-			e.observe("consume", "reserve_next", reserveOutcome(res, err), time.Since(stageStart))
 			if err != nil {
 				return topic.Message{}, false, err
 			}
 			if !res.Reserved {
-				if e.metrics != nil {
-					e.metrics.IncReserveSkipped(topicName, res.SkipReason)
-				}
 				break // partition empty, fully reserved, or in-flight cap hit — try the next one
 			}
-			stageStart = time.Now()
 			payload, err := log.Read(res.Offset)
-			e.observe("consume", "storage_read", observeOutcome(err), time.Since(stageStart))
 			if err != nil {
 				// A permanently-unreadable (corrupt) frame, or a gap left by a
 				// corrupt frame recovery skipped, would otherwise head-of-line-block
@@ -274,7 +245,7 @@ func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions 
 
 // notifyChannels snapshots the partitions' current broadcast notify
 // channels. The snapshot must be taken before probing for data (see
-// Consume) and re-taken before every wait, because each broadcast
+// consumeQueue) and re-taken before every wait, because each broadcast
 // closes the channel and installs a fresh one.
 func (e *Engine) notifyChannels(topicName string, partitions []int) ([]<-chan struct{}, error) {
 	chans := make([]<-chan struct{}, 0, len(partitions))
@@ -316,13 +287,4 @@ func (e *Engine) waitForActivity(ctx context.Context, notifyChans []<-chan struc
 	default:
 		return nil
 	}
-}
-
-// allPartitions returns [0, n).
-func allPartitions(n int) []int {
-	out := make([]int, n)
-	for i := range out {
-		out[i] = i
-	}
-	return out
 }

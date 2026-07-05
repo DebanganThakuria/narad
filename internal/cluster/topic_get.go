@@ -10,6 +10,11 @@ import (
 	"github.com/debanganthakuria/narad/internal/errs"
 )
 
+// RouteGetTopic merges per-partition stats from every partition owner into
+// details: locally-owned partitions come from the details the caller already
+// computed, remote ones are fetched from their owners. Any partition whose
+// owner cannot be resolved fails the whole call with ErrNotPartitionOwner —
+// partial stats would silently under-report the topic.
 func (rt *Router) RouteGetTopic(ctx context.Context, r *http.Request, topicName string, details topic.Details) (topic.Details, error) {
 	assignments, err := rt.store.ListAssignments(topicName)
 	if err != nil {
@@ -38,7 +43,7 @@ func (rt *Router) RouteGetTopic(ctx context.Context, r *http.Request, topicName 
 		if addr == "" {
 			return topic.Details{}, errs.ErrNotPartitionOwner
 		}
-		partitionStats, err := rt.fetchTopicPartitionStats(ctx, r, topicName, addr, assignment.Partition)
+		partitionStats, err := rt.fetchTopicPartitionStats(ctx, topicName, addr, assignment.Partition)
 		if err != nil {
 			return topic.Details{}, err
 		}
@@ -52,7 +57,7 @@ func (rt *Router) RouteGetTopic(ctx context.Context, r *http.Request, topicName 
 	return details, nil
 }
 
-func (rt *Router) fetchTopicPartitionStats(ctx context.Context, _ *http.Request, topicName, addr string, partition int) (topic.PartitionStats, error) {
+func (rt *Router) fetchTopicPartitionStats(ctx context.Context, topicName, addr string, partition int) (topic.PartitionStats, error) {
 	stats, err := rt.peer.TopicPartitionStats(ctx, addr, topicName, partition)
 	if err != nil {
 		return topic.PartitionStats{}, fmt.Errorf("topic get: %w", err)

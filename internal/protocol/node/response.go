@@ -5,12 +5,16 @@ import (
 	"math"
 )
 
+// Response is the reply to any node RPC: an HTTP-style status code plus
+// an optional body.
 type Response struct {
 	Status      int
 	ContentType string
 	Body        []byte
 }
 
+// EncodeResponse encodes a Response payload. The status must fit in a
+// uint16.
 func EncodeResponse(res Response) ([]byte, error) {
 	if res.Status < 0 || res.Status > math.MaxUint16 {
 		return nil, fmt.Errorf("invalid response status %d", res.Status)
@@ -23,9 +27,10 @@ func EncodeResponse(res Response) ([]byte, error) {
 	if err := w.bytes(res.Body); err != nil {
 		return nil, err
 	}
-	return w.bytesOut(), nil
+	return w.finish(), nil
 }
 
+// DecodeResponse decodes a Response payload.
 func DecodeResponse(payload []byte) (Response, error) {
 	r := newReader(payload)
 	status, err := r.u16()

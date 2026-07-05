@@ -19,7 +19,6 @@ type config struct {
 	assignmentTimeout  time.Duration
 	visibilityTimeout  time.Duration
 	runID              string
-	planPath           string
 	cleanup            bool
 }
 

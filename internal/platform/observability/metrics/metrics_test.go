@@ -53,18 +53,13 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	m.ConsumerLagMessages.WithLabelValues("t", "0").Set(0)
 	m.ConsumerDroppedMessages.WithLabelValues("t", "0").Set(0)
 	m.OldestUnconsumedAgeSeconds.WithLabelValues("t", "0").Set(0)
-	m.ActivePartitionLogs.Set(1)
 	m.FlushDurationSeconds.WithLabelValues("t", "0").Observe(0.001)
 	m.FlushBytesTotal.WithLabelValues("t", "0").Add(1)
 	m.FsyncDurationSeconds.WithLabelValues("t", "0").Observe(0.001)
 	m.HighWatermarkPersistSeconds.WithLabelValues("t", "0", "ok").Observe(0.001)
-	m.SegmentsRolledTotal.WithLabelValues("t", "0").Inc()
-	m.RetentionDeletionsTotal.WithLabelValues("t", "0", "age").Inc()
 	m.RetentionBytesDeleted.WithLabelValues("t", "0", "age").Add(1)
 	m.RetentionMessagesDeleted.WithLabelValues("t", "0", "age").Add(1)
 	m.RetentionRunSeconds.WithLabelValues("t", "0").Observe(0.001)
-	m.SegmentsScannedAtBoot.WithLabelValues("t", "0").Inc()
-	m.MetastoreTxDurationSeconds.WithLabelValues("get_topic", "read", "ok").Observe(0.001)
 	m.IncError("test", "kind")
 	m.BootDurationSeconds.Set(0.1)
 
@@ -91,18 +86,13 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 		"narad_consumer_lag_messages",
 		"narad_consumer_dropped_messages",
 		"narad_oldest_unconsumed_message_age_seconds",
-		"narad_storage_active_partition_logs",
 		"narad_storage_flush_duration_seconds",
 		"narad_storage_flush_bytes_total",
 		"narad_storage_fsync_duration_seconds",
 		"narad_storage_high_watermark_persist_duration_seconds",
-		"narad_storage_segments_rolled_total",
-		"narad_storage_retention_deletions_total",
 		"narad_storage_retention_bytes_deleted_total",
 		"narad_storage_retention_messages_deleted_total",
 		"narad_storage_retention_run_duration_seconds",
-		"narad_storage_segments_scanned_at_boot_total",
-		"narad_metastore_tx_duration_seconds",
 		"narad_errors_total",
 		"narad_boot_duration_seconds",
 	}
@@ -125,6 +115,12 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 
 	notExported := []string{
 		"narad_hot_path_stage_duration_seconds",
+		"narad_reserve_skipped_total",
+		"narad_storage_active_partition_logs",
+		"narad_storage_segments_rolled_total",
+		"narad_storage_segments_scanned_at_boot_total",
+		"narad_storage_retention_deletions_total",
+		"narad_metastore_tx_duration_seconds",
 		"narad_storage_buffer_records",
 		"narad_storage_buffer_bytes",
 		"narad_storage_segment_index_entries",

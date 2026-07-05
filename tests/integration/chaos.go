@@ -15,6 +15,11 @@ const (
 	chaosStateAcked    = "acked"
 )
 
+// runChaos produces and consumes a full message set while
+// scripts/local-cluster-chaos.sh restarts nodes underneath it. Unlike the
+// load run, duplicate deliveries are expected (at-least-once during
+// failover) and are counted rather than failed on; the invariant is that
+// every message is eventually acked exactly once in the claim table.
 func runChaos(cfg config) error {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.timeout)
@@ -102,13 +107,71 @@ func runChaos(cfg config) error {
 	return nil
 }
 
+// claimTable tracks each message's delivery state so concurrent chaos
+// consumers can count duplicate deliveries without double-counting acks.
+type claimTable struct {
+	mu     sync.Mutex
+	states map[string]string
+}
+
+func newClaimTable(capacity int) *claimTable {
+	return &claimTable{states: make(map[string]string, capacity)}
+}
+
+// claim marks id as in-flight and reports whether it was already claimed
+// by another delivery (a duplicate).
+func (c *claimTable) claim(id string) (duplicate bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch c.states[id] {
+	case chaosStateAcked, chaosStateInFlight:
+		return true
+	default:
+		c.states[id] = chaosStateInFlight
+		return false
+	}
+}
+
+// release gives back an in-flight claim after a failed ack so a future
+// redelivery can own the message.
+func (c *claimTable) release(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.states[id] == chaosStateInFlight {
+		delete(c.states, id)
+	}
+}
+
+// markAcked records a successful ack and reports whether id newly
+// transitioned to acked.
+func (c *claimTable) markAcked(id string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.states[id] == chaosStateAcked {
+		return false
+	}
+	c.states[id] = chaosStateAcked
+	return true
+}
+
+func (c *claimTable) ackedCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	count := 0
+	for _, state := range c.states {
+		if state == chaosStateAcked {
+			count++
+		}
+	}
+	return count
+}
+
 func consumeAndAckChaos(ctx context.Context, lb *roundRobinClient, topics []string, expected map[string]messageJob, concurrency int, stats *runStats) error {
 	consumeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	var mu sync.Mutex
 	var topicCursor atomic.Uint64
-	states := make(map[string]string, len(expected))
+	claims := newClaimTable(len(expected))
 	errCh := make(chan error, 1)
 	var wg sync.WaitGroup
 
@@ -138,45 +201,24 @@ func consumeAndAckChaos(ctx context.Context, lb *roundRobinClient, topics []stri
 					return
 				}
 
-				duplicate := false
-				mu.Lock()
-				switch states[msg.Payload.ID] {
-				case chaosStateAcked, chaosStateInFlight:
-					duplicate = true
+				duplicate := claims.claim(msg.Payload.ID)
+				if duplicate {
 					stats.duplicates.Add(1)
-				default:
-					states[msg.Payload.ID] = chaosStateInFlight
 				}
-				mu.Unlock()
 
 				status, err := ackOneStatus(consumeCtx, lb, msg.Topic, msg.ReceiptHandle, 8, http.StatusNoContent, http.StatusGone)
-				if err != nil {
+				if err != nil || status == http.StatusGone {
+					// The ack didn't land (or the handle was already stale);
+					// return the claim so a redelivery can complete it.
 					if !duplicate {
-						mu.Lock()
-						if states[msg.Payload.ID] == chaosStateInFlight {
-							delete(states, msg.Payload.ID)
-						}
-						mu.Unlock()
-					}
-					continue
-				}
-				if status == http.StatusGone {
-					if !duplicate {
-						mu.Lock()
-						if states[msg.Payload.ID] == chaosStateInFlight {
-							delete(states, msg.Payload.ID)
-						}
-						mu.Unlock()
+						claims.release(msg.Payload.ID)
 					}
 					continue
 				}
 
-				mu.Lock()
-				if states[msg.Payload.ID] != chaosStateAcked {
-					states[msg.Payload.ID] = chaosStateAcked
+				if claims.markAcked(msg.Payload.ID) {
 					stats.acked.Add(1)
 				}
-				mu.Unlock()
 			}
 		})
 	}
@@ -195,7 +237,7 @@ func consumeAndAckChaos(ctx context.Context, lb *roundRobinClient, topics []stri
 			if err := firstErr(errCh); err != nil {
 				return err
 			}
-			if got := countAcked(states); got != len(expected) {
+			if got := claims.ackedCount(); got != len(expected) {
 				return fmt.Errorf("acked %d messages, want %d", got, len(expected))
 			}
 			return nil
@@ -211,6 +253,9 @@ func consumeAndAckChaos(ctx context.Context, lb *roundRobinClient, topics []stri
 	}
 }
 
+// drainChaosDuplicates keeps consuming and acking until every topic has
+// been quiet for quietFor — duplicates redelivered after a visibility
+// timeout may still be trickling in when the main consume loop finishes.
 func drainChaosDuplicates(ctx context.Context, lb *roundRobinClient, topics []string, expected map[string]messageJob, quietFor time.Duration, stats *runStats) error {
 	quietUntil := time.Now().Add(quietFor)
 	for time.Now().Before(quietUntil) {
@@ -252,14 +297,4 @@ func validateChaosMessage(msg consumeResponse, expected map[string]messageJob) e
 		return fmt.Errorf("message %s missing receipt handle", msg.Payload.ID)
 	}
 	return nil
-}
-
-func countAcked(states map[string]string) int {
-	count := 0
-	for _, state := range states {
-		if state == chaosStateAcked {
-			count++
-		}
-	}
-	return count
 }

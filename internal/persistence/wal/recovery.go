@@ -10,24 +10,28 @@ import (
 	"os"
 )
 
-func scanForOpen(segments []segmentInfo, maxRecord int) (uint64, int64, error) {
-	var next uint64
-	var lastValidEnd int64
+// scanForOpen walks every segment to recover Open's starting state: the
+// next sequence number to assign and the end of valid data in the last
+// (active) segment, past which Open truncates a torn tail.
+func scanForOpen(segments []segmentInfo, maxRecord int) (nextSeq uint64, lastValidEnd int64, err error) {
 	for i, segment := range segments {
 		validEnd, maxSeq, sawRecord, err := scanSegment(segment, maxRecord, i == len(segments)-1)
 		if err != nil {
 			return 0, 0, err
 		}
-		if sawRecord && maxSeq >= next {
-			next = maxSeq + 1
+		if sawRecord && maxSeq >= nextSeq {
+			nextSeq = maxSeq + 1
 		}
 		if i == len(segments)-1 {
 			lastValidEnd = validEnd
 		}
 	}
-	return next, lastValidEnd, nil
+	return nextSeq, lastValidEnd, nil
 }
 
+// scanSegment reads frames until EOF or corruption, returning the end
+// offset of the last valid frame, the highest seq seen, and whether any
+// record was read at all.
 func scanSegment(segment segmentInfo, maxRecord int, tolerateCorruptTail bool) (int64, uint64, bool, error) {
 	file, err := os.Open(segment.path)
 	if err != nil {
@@ -69,6 +73,7 @@ func scanSegment(segment segmentInfo, maxRecord int, tolerateCorruptTail bool) (
 		if !ok {
 			return validEnd, maxSeq, sawRecord, nil
 		}
+
 		sawRecord = true
 		validEnd = offset + frameHeaderSize + int64(len(record.Payload))
 		if record.ID.Seq > maxSeq {

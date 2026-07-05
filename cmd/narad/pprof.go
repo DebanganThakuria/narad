@@ -12,6 +12,9 @@ import (
 	"time"
 )
 
+// startPprofServer serves the pprof endpoints on their own listener when
+// addr is non-empty, keeping profiling off the public API port. The server
+// runs on wg and shuts down when ctx is cancelled.
 func startPprofServer(ctx context.Context, wg *sync.WaitGroup, addr string, log *slog.Logger) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {

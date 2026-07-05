@@ -6,6 +6,41 @@ import (
 	"sort"
 )
 
+const (
+	// maxHotSegmentIndexes caps how many segments keep an in-memory
+	// index at once; cold sealed-segment indexes are rebuilt lazily on
+	// read (see loadSegmentIndexLocked).
+	maxHotSegmentIndexes = 2
+
+	// segmentIndexStrideBytes is the default target spacing between
+	// in-memory frame anchors. Reads scan forward from the nearest
+	// anchor, so this keeps active index memory bounded without making
+	// random reads walk an entire segment.
+	segmentIndexStrideBytes = 32 << 10
+
+	// targetMaxSegmentIndexEntries widens the stride for unusually
+	// large segment settings. It is a target rather than a hard cap
+	// because one final frame can legitimately roll past SegmentBytes.
+	targetMaxSegmentIndexEntries = 2048
+)
+
+// indexEntry locates one frame: which segment it lives in, where it
+// starts, and which offsets it covers.
+type indexEntry struct {
+	segmentBaseOffset int64
+	baseOffset        int64
+	recordCount       int32
+	framePos          int64
+	frameLen          int32
+}
+
+// segmentIndex is the sparse in-memory frame index of one segment.
+// lastUsed orders indexes for LRU pruning (see pruneSegmentIndexesLocked).
+type segmentIndex struct {
+	entries  []indexEntry
+	lastUsed uint64
+}
+
 func (l *Log) appendIndexLocked(entry indexEntry) {
 	idx := l.segmentIndexes[entry.segmentBaseOffset]
 	if idx == nil {
@@ -62,10 +97,7 @@ func (l *Log) indexStrideBytes() int64 {
 	if l.opts.SegmentBytes%targetMaxSegmentIndexEntries != 0 {
 		segmentStride++
 	}
-	if segmentStride > stride {
-		return segmentStride
-	}
-	return stride
+	return max(stride, segmentStride)
 }
 
 // findIndexLocked returns the exact frame containing offset. The

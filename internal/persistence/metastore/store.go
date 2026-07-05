@@ -25,7 +25,6 @@ type Config struct {
 	AdvertiseAddr string
 	Peers         []Peer
 	Logger        io.Writer
-	Metrics       MetricsRecorder
 }
 
 // Peer is a known Raft voter used for cluster bootstrap.
@@ -47,11 +46,22 @@ func New(cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("metastore: mkdir: %w", err)
 	}
 
-	fsm, err := newFSM(filepath.Join(cfg.DataDir, "fsm.db"), cfg.Metrics)
+	fsm, err := newFSM(filepath.Join(cfg.DataDir, "fsm.db"))
 	if err != nil {
 		return nil, fmt.Errorf("metastore: fsm: %w", err)
 	}
 
+	r, err := newRaft(cfg, fsm)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{r: r, fsm: fsm}, nil
+}
+
+// newRaft wires up the Raft node: log/stable store, snapshot store, TCP
+// transport, and — only when no prior state exists on disk — a one-time
+// cluster bootstrap from cfg plus cfg.Peers.
+func newRaft(cfg Config, fsm *fsmState) (*raft.Raft, error) {
 	boltStore, err := raftboltdb.New(raftboltdb.Options{
 		Path: filepath.Join(cfg.DataDir, "raft.db"),
 	})
@@ -59,36 +69,24 @@ func New(cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("metastore: raft store: %w", err)
 	}
 
-	logW := cfg.Logger
-	if logW == nil {
-		logW = io.Discard
+	logOutput := cfg.Logger
+	if logOutput == nil {
+		logOutput = io.Discard
 	}
-	transportLog := hclog.New(&hclog.LoggerOptions{Output: logW})
 
-	snapStore, err := raft.NewFileSnapshotStore(cfg.DataDir, 2, logW)
+	snapStore, err := raft.NewFileSnapshotStore(cfg.DataDir, 2, logOutput)
 	if err != nil {
 		return nil, fmt.Errorf("metastore: snapshots: %w", err)
 	}
 
-	if _, err := net.ResolveTCPAddr("tcp", cfg.BindAddr); err != nil {
-		return nil, fmt.Errorf("metastore: bind addr: %w", err)
-	}
-	advertiseAddr := cfg.AdvertiseAddr
-	if advertiseAddr == "" {
-		advertiseAddr = cfg.BindAddr
-	}
-	resolvedAdvertiseAddr, err := net.ResolveTCPAddr("tcp", advertiseAddr)
+	transport, advertiseAddr, err := newTransport(cfg, logOutput)
 	if err != nil {
-		return nil, fmt.Errorf("metastore: advertise addr: %w", err)
-	}
-	transport, err := raft.NewTCPTransportWithLogger(cfg.BindAddr, resolvedAdvertiseAddr, 3, 10*time.Second, transportLog)
-	if err != nil {
-		return nil, fmt.Errorf("metastore: transport: %w", err)
+		return nil, err
 	}
 
 	rc := raft.DefaultConfig()
 	rc.LocalID = raft.ServerID(cfg.NodeID)
-	rc.LogOutput = logW
+	rc.LogOutput = logOutput
 
 	r, err := raft.NewRaft(rc, fsm, boltStore, boltStore, snapStore, transport)
 	if err != nil {
@@ -100,48 +98,70 @@ func New(cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("metastore: check state: %w", err)
 	}
 	if !hasState {
-		servers := []raft.Server{{ID: raft.ServerID(cfg.NodeID), Address: raft.ServerAddress(advertiseAddr)}}
-		for _, p := range cfg.Peers {
-			servers = append(servers, raft.Server{ID: raft.ServerID(p.ID), Address: raft.ServerAddress(p.Addr)})
-		}
-		if f := r.BootstrapCluster(raft.Configuration{Servers: servers}); f.Error() != nil {
-			return nil, fmt.Errorf("metastore: bootstrap: %w", f.Error())
+		if err := bootstrapCluster(r, cfg, advertiseAddr); err != nil {
+			return nil, err
 		}
 	}
-
-	return &Store{r: r, fsm: fsm}, nil
+	return r, nil
 }
 
-// apply encodes payload as JSON and submits it through Raft.
+// newTransport validates the bind address and returns a TCP transport
+// advertising cfg.AdvertiseAddr (falling back to cfg.BindAddr), along
+// with the advertise address actually used.
+func newTransport(cfg Config, logOutput io.Writer) (raft.Transport, string, error) {
+	if _, err := net.ResolveTCPAddr("tcp", cfg.BindAddr); err != nil {
+		return nil, "", fmt.Errorf("metastore: bind addr: %w", err)
+	}
+	advertiseAddr := cfg.AdvertiseAddr
+	if advertiseAddr == "" {
+		advertiseAddr = cfg.BindAddr
+	}
+	resolved, err := net.ResolveTCPAddr("tcp", advertiseAddr)
+	if err != nil {
+		return nil, "", fmt.Errorf("metastore: advertise addr: %w", err)
+	}
+
+	transportLog := hclog.New(&hclog.LoggerOptions{Output: logOutput})
+	transport, err := raft.NewTCPTransportWithLogger(cfg.BindAddr, resolved, 3, 10*time.Second, transportLog)
+	if err != nil {
+		return nil, "", fmt.Errorf("metastore: transport: %w", err)
+	}
+	return transport, advertiseAddr, nil
+}
+
+// bootstrapCluster seeds the initial voter set: this node plus cfg.Peers.
+func bootstrapCluster(r *raft.Raft, cfg Config, advertiseAddr string) error {
+	servers := []raft.Server{{ID: raft.ServerID(cfg.NodeID), Address: raft.ServerAddress(advertiseAddr)}}
+	for _, p := range cfg.Peers {
+		servers = append(servers, raft.Server{ID: raft.ServerID(p.ID), Address: raft.ServerAddress(p.Addr)})
+	}
+	if f := r.BootstrapCluster(raft.Configuration{Servers: servers}); f.Error() != nil {
+		return fmt.Errorf("metastore: bootstrap: %w", f.Error())
+	}
+	return nil
+}
+
+// apply encodes payload as JSON and submits it through Raft, returning
+// either the Raft error or the FSM's business error for this command.
 func (s *Store) apply(ctx context.Context, op opCode, payload any) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	operation := op.metricName()
-	start := time.Now()
-	var applyErr error
-	defer func() {
-		if s.fsm != nil && s.fsm.metric != nil {
-			s.fsm.metric.ObserveMetastoreTx(operation, "raft", statusForErr(applyErr), time.Since(start))
-		}
-	}()
+
 	data, err := json.Marshal(payload)
 	if err != nil {
-		applyErr = err
 		return err
 	}
 	b, err := json.Marshal(cmd{Op: op, Data: data})
 	if err != nil {
-		applyErr = err
 		return err
 	}
+
 	f := s.r.Apply(b, applyTimeout)
 	if err := f.Error(); err != nil {
-		applyErr = err
 		return err
 	}
 	if resp, ok := f.Response().(error); ok {
-		applyErr = resp
 		return resp
 	}
 	return nil

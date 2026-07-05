@@ -6,6 +6,7 @@ import (
 	"os"
 )
 
+// Replay invokes fn for every record with seq >= from, in order.
 func Replay(dir string, from uint64, maxRecord int, fn func(Record) error) error {
 	if fn == nil {
 		return nil
@@ -15,6 +16,8 @@ func Replay(dir string, from uint64, maxRecord int, fn func(Record) error) error
 	})
 }
 
+// ReplayFromCursor invokes fn for every record at or after cursor, in
+// order, passing alongside each record the cursor to resume just past it.
 func ReplayFromCursor(dir string, cursor Cursor, maxRecord int, fn func(Record, Cursor) error) error {
 	if fn == nil {
 		return nil
@@ -41,18 +44,32 @@ func ReplayFromCursor(dir string, cursor Cursor, maxRecord int, fn func(Record, 
 	return nil
 }
 
+// shouldSkipSegment reports whether segment i cannot contain any record
+// at or after cursor: it either precedes the cursor's segment, or the
+// next segment's base proves all its records are below cursor.Seq.
+func shouldSkipSegment(segments []segmentInfo, i int, cursor Cursor) bool {
+	segment := segments[i]
+	if cursor.SegmentBase > 0 && segment.base < cursor.SegmentBase {
+		return true
+	}
+	if i+1 < len(segments) && segments[i+1].base <= cursor.Seq {
+		return true
+	}
+	return false
+}
+
 func replaySegmentFrom(segment segmentInfo, from uint64, offset int64, maxRecord int, fn func(Record, Cursor) error) error {
 	file, err := os.Open(segment.path)
 	if err != nil {
 		return fmt.Errorf("wal: open segment: %w", err)
 	}
 	defer file.Close()
+
 	if offset > 0 {
 		if _, err := file.Seek(offset, io.SeekStart); err != nil {
 			return fmt.Errorf("wal: seek segment: %w", err)
 		}
 	}
-
 	for {
 		offset, err := file.Seek(0, io.SeekCurrent)
 		if err != nil {
@@ -70,13 +87,5 @@ func replaySegmentFrom(segment segmentInfo, from uint64, offset int64, maxRecord
 				return err
 			}
 		}
-	}
-}
-
-func CursorAfter(record Record) Cursor {
-	return Cursor{
-		SegmentBase: record.ID.SegmentBase,
-		Offset:      record.ID.Offset + frameHeaderSize + int64(len(record.Payload)),
-		Seq:         record.ID.Seq + 1,
 	}
 }

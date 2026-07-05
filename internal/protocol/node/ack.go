@@ -2,6 +2,7 @@ package node
 
 import "fmt"
 
+// EncodeAckRequest encodes an OpAck payload.
 func EncodeAckRequest(req AckRequest) ([]byte, error) {
 	if int(int32(req.Partition)) != req.Partition {
 		return nil, fmt.Errorf("partition out of int32 range: %d", req.Partition)
@@ -13,15 +14,16 @@ func EncodeAckRequest(req AckRequest) ([]byte, error) {
 	w.i32(int32(req.Partition))
 	w.i64(req.Offset)
 	w.i64(req.Nonce)
-	return w.bytesOut(), nil
+	return w.finish(), nil
 }
 
+// DecodeAckRequest decodes an OpAck payload.
 func DecodeAckRequest(payload []byte) (AckRequest, error) {
 	r, err := opReader(payload, OpAck)
 	if err != nil {
 		return AckRequest{}, err
 	}
-	topicName, err := r.string()
+	topic, err := r.string()
 	if err != nil {
 		return AckRequest{}, err
 	}
@@ -41,7 +43,7 @@ func DecodeAckRequest(payload []byte) (AckRequest, error) {
 		return AckRequest{}, err
 	}
 	return AckRequest{
-		Topic:     topicName,
+		Topic:     topic,
 		Partition: int(partition),
 		Offset:    offset,
 		Nonce:     nonce,

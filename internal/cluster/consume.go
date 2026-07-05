@@ -4,46 +4,35 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"time"
 
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
-type consumeNodeCandidate struct {
-	addr string
-}
-
 type consumeProbeResult struct {
-	res   nodewire.Response
-	err   error
-	fatal bool
+	res nodewire.Response
+	err error
 }
 
+// localConsumePartition picks the next locally-owned partition of the topic
+// for a queue-style pull, rotating a per-topic cursor so pulls spread across
+// this node's partitions.
 func (rt *Router) localConsumePartition(topicName string) (int, bool) {
-	start := time.Now()
-	outcome := "miss"
-	defer func() {
-		rt.observe("consume", "local_partition", outcome, time.Since(start))
-	}()
 	routes, ok := rt.routesForTopic(topicName)
 	if !ok {
 		return 0, false
 	}
-
 	if len(routes.localEntries) == 0 {
 		return 0, false
 	}
+
 	cursor := rt.nextConsumeCursor(topicName+":local", len(routes.localEntries))
-	outcome = "hit"
 	return routes.localEntries[cursor].partition, true
 }
 
-func (rt *Router) remoteConsumeCandidates(topicName string) []consumeNodeCandidate {
-	start := time.Now()
-	outcome := "empty"
-	defer func() {
-		rt.observe("consume", "remote_candidates", outcome, time.Since(start))
-	}()
+// remoteConsumeCandidates returns the addresses of the topic's live remote
+// owners, one per owner (an owner with several partitions is probed once),
+// rotated by a per-topic cursor so probe order spreads across owners.
+func (rt *Router) remoteConsumeCandidates(topicName string) []string {
 	routes, ok := rt.routesForTopic(topicName)
 	if !ok {
 		return nil
@@ -53,10 +42,10 @@ func (rt *Router) remoteConsumeCandidates(topicName string) []consumeNodeCandida
 	cursor := rt.nextConsumeCursor(topicName+":remote", len(remote))
 
 	seenOwners := make(map[string]struct{}, len(remote))
-	candidates := make([]consumeNodeCandidate, 0, len(remote))
+	candidates := make([]string, 0, len(remote))
 	for i := range remote {
 		entry := remote[(cursor+i)%len(remote)]
-		addr := rt.consumeOwnerAddrForRoute(entry)
+		addr := rt.consumeOwnerAddr(entry)
 		if addr == "" {
 			continue
 		}
@@ -64,31 +53,25 @@ func (rt *Router) remoteConsumeCandidates(topicName string) []consumeNodeCandida
 			continue
 		}
 		seenOwners[addr] = struct{}{}
-		candidates = append(candidates, consumeNodeCandidate{addr: addr})
-	}
-	if len(candidates) > 0 {
-		outcome = "hit"
+		candidates = append(candidates, addr)
 	}
 	return candidates
 }
 
-func (rt *Router) callConsumeProbe(ctx context.Context, topicName string, candidate consumeNodeCandidate) consumeProbeResult {
-	start := time.Now()
-	outcome := "forwarded"
-	defer func() {
-		rt.observe("consume", "remote_probe", outcome, time.Since(start))
-	}()
+// callConsumeProbe asks one remote owner for a single non-blocking,
+// local-only scan of its partitions. Non-OK statuses (including 421 from an
+// owner that just lost the partition) are normalized to an empty 204 so the
+// caller simply moves on to the next candidate.
+func (rt *Router) callConsumeProbe(ctx context.Context, topicName, addr string) consumeProbeResult {
 	req := nodewire.ConsumeRequest{
 		Topic:     topicName,
 		LocalOnly: true,
 	}
-	res, err := rt.peer.Consume(ctx, candidate.addr, req)
+	res, err := rt.peer.Consume(ctx, addr, req)
 	if err != nil {
-		outcome = "error"
-		return consumeProbeResult{err: fmt.Errorf("consume probe %s: %w", candidate.addr, err)}
+		return consumeProbeResult{err: fmt.Errorf("consume probe %s: %w", addr, err)}
 	}
 	if res.Status != http.StatusOK {
-		outcome = "empty"
 		return consumeProbeResult{res: nodewire.Response{Status: http.StatusNoContent}}
 	}
 	return consumeProbeResult{res: res}

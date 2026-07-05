@@ -8,9 +8,15 @@ import (
 
 // Aliases of the canonical sentinels in internal/errs.
 var (
+	// ErrOffsetNotFound reports a read of an offset the log does not
+	// hold: past the tail, or lost to retention/corruption gaps.
 	ErrOffsetNotFound = errs.ErrOffsetNotFound
-	ErrCorruptRecord  = errs.ErrCorruptRecord
-	ErrLogClosed      = errs.ErrLogClosed
+
+	// ErrCorruptRecord reports an on-disk frame that failed validation.
+	ErrCorruptRecord = errs.ErrCorruptRecord
+
+	// ErrLogClosed reports an operation on a Log after Close.
+	ErrLogClosed = errs.ErrLogClosed
 )
 
 // Internal sentinels — recovery handles these by resyncing.

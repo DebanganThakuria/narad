@@ -37,6 +37,9 @@ type ConsumerOffsetCommitter struct {
 	once sync.Once
 }
 
+// NewConsumerOffsetCommitter starts the background flush loop. A
+// non-positive interval falls back to the default. Callers must Close
+// to stop the loop and flush what's pending.
 func NewConsumerOffsetCommitter(dataDir string, interval time.Duration, log *slog.Logger) *ConsumerOffsetCommitter {
 	if interval <= 0 {
 		interval = defaultConsumerOffsetCommitInterval
@@ -53,6 +56,8 @@ func NewConsumerOffsetCommitter(dataDir string, interval time.Duration, log *slo
 	return c
 }
 
+// Commit queues an offset for the next flush. Offsets only move
+// forward: a smaller offset never overwrites a pending larger one.
 func (c *ConsumerOffsetCommitter) Commit(topic string, partition int, offset int64) {
 	key := offsetCommitKey{topic: topic, partition: partition}
 	c.mu.Lock()
@@ -62,6 +67,7 @@ func (c *ConsumerOffsetCommitter) Commit(topic string, partition int, offset int
 	c.mu.Unlock()
 }
 
+// Close stops the flush loop and performs a final flush. Idempotent.
 func (c *ConsumerOffsetCommitter) Close() error {
 	c.once.Do(func() { close(c.stop) })
 	<-c.done
@@ -86,6 +92,10 @@ func (c *ConsumerOffsetCommitter) run() {
 	}
 }
 
+// flush drains the pending map and writes each offset. A purged
+// partition directory is skipped silently (the topic is gone); any
+// other failure re-queues the offset for the next flush so a transient
+// error can't lose the recovery seed.
 func (c *ConsumerOffsetCommitter) flush() error {
 	commits := c.drain()
 	var firstErr error

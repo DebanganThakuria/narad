@@ -16,8 +16,7 @@ func TestGetTopic_ReturnsDetailsAndStats(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: got %d body=%s", resp.StatusCode, readBody(resp))
 	}
-	var d topic.Details
-	decodeJSON(t, resp, &d)
+	d := readJSON[topic.Details](t, resp)
 
 	if d.Name != "details" {
 		t.Errorf("name: got %q want %q", d.Name, "details")
@@ -48,8 +47,7 @@ func TestGetTopic_ReportsNextOffsetAfterProduce(t *testing.T) {
 	}
 
 	resp := getJSON(t, env.Server.URL+"/v1/topics/stats")
-	var d topic.Details
-	decodeJSON(t, resp, &d)
+	d := readJSON[topic.Details](t, resp)
 
 	var sumNext int64
 	var nonEmpty int

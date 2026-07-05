@@ -3,6 +3,7 @@ package e2e
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"testing"
 
@@ -23,8 +24,7 @@ func TestListTopics_EmptyInitially(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: got %d body=%s", resp.StatusCode, readBody(resp))
 	}
-	var body listResponse
-	decodeJSON(t, resp, &body)
+	body := readJSON[listResponse](t, resp)
 
 	if len(body.Topics) != 0 {
 		t.Errorf("topics: got %d want 0", len(body.Topics))
@@ -44,8 +44,7 @@ func TestListTopics_ReturnsLexicographicOrder(t *testing.T) {
 	}
 
 	resp := getJSON(t, env.Server.URL+"/v1/topics")
-	var body listResponse
-	decodeJSON(t, resp, &body)
+	body := readJSON[listResponse](t, resp)
 
 	names := make([]string, len(body.Topics))
 	for i, tp := range body.Topics {
@@ -70,7 +69,6 @@ func TestListTopics_PaginationWalk(t *testing.T) {
 	var got []string
 	token := ""
 	for page := range 10 { // safety bound
-		_ = page
 		url := fmt.Sprintf("%s/v1/topics?limit=%d", env.Server.URL, pageSize)
 		if token != "" {
 			url += "&page_token=" + token
@@ -79,8 +77,7 @@ func TestListTopics_PaginationWalk(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("page %d status: %d body=%s", page, resp.StatusCode, readBody(resp))
 		}
-		var body listResponse
-		decodeJSON(t, resp, &body)
+		body := readJSON[listResponse](t, resp)
 
 		for _, tp := range body.Topics {
 			got = append(got, tp.Name)
@@ -91,7 +88,7 @@ func TestListTopics_PaginationWalk(t *testing.T) {
 		token = body.NextPageToken
 	}
 
-	if !equalStringSlices(got, want) {
+	if !slices.Equal(got, want) {
 		t.Errorf("walk: got %v want %v", got, want)
 	}
 }
@@ -108,8 +105,7 @@ func TestListTopics_PaginationCursorPointsToLastReturned(t *testing.T) {
 	}
 
 	resp := getJSON(t, env.Server.URL+"/v1/topics?limit=2")
-	var body listResponse
-	decodeJSON(t, resp, &body)
+	body := readJSON[listResponse](t, resp)
 	if body.NextPageToken != "b" {
 		t.Errorf("next_page_token: got %q want %q (last name of page 1)", body.NextPageToken, "b")
 	}
@@ -123,8 +119,7 @@ func TestListTopics_LastPageHasEmptyToken(t *testing.T) {
 	}
 
 	resp := getJSON(t, env.Server.URL+"/v1/topics?limit=10") // larger than total
-	var body listResponse
-	decodeJSON(t, resp, &body)
+	body := readJSON[listResponse](t, resp)
 	if body.NextPageToken != "" {
 		t.Errorf("next_page_token on last page: got %q want empty", body.NextPageToken)
 	}
@@ -139,8 +134,7 @@ func TestListTopics_PageTokenReturningNoRows(t *testing.T) {
 	mustCreateTopic(t, env, createTopicReq{Name: "alpha"})
 
 	resp := getJSON(t, env.Server.URL+"/v1/topics?limit=10&page_token=zzzz")
-	var body listResponse
-	decodeJSON(t, resp, &body)
+	body := readJSON[listResponse](t, resp)
 	if len(body.Topics) != 0 {
 		t.Errorf("topics: got %d want 0", len(body.Topics))
 	}
@@ -185,21 +179,8 @@ func TestListTopics_ClampsLargeLimit(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: got %d body=%s", resp.StatusCode, readBody(resp))
 	}
-	var body listResponse
-	decodeJSON(t, resp, &body)
+	body := readJSON[listResponse](t, resp)
 	if len(body.Topics) != 7 {
 		t.Errorf("topics: got %d want 7", len(body.Topics))
 	}
-}
-
-func equalStringSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

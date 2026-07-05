@@ -5,14 +5,15 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 )
 
 func TestProduceAndConsume(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("prodcon", 3, 2, int64(0))
+	env.createTopic("prodcon", 3, 0)
 
 	off, part := env.produce("prodcon", "k1", `{"val": 1}`)
 	if off != 0 {
@@ -22,16 +23,10 @@ func TestProduceAndConsume(t *testing.T) {
 		t.Fatalf("partition: got %d, want 0..1", part)
 	}
 
-	// Consume the message
 	resp := env.get("/v1/topics/prodcon/consume?partition=" + strconv.Itoa(part))
 	expectOK(t, resp)
 
-	msg := readJSON[struct {
-		Topic     string `json:"topic"`
-		Partition int    `json:"partition"`
-		Offset    int64  `json:"offset"`
-	}](t, resp)
-
+	msg := readJSON[topic.Message](t, resp)
 	if msg.Topic != "prodcon" {
 		t.Fatalf("msg topic: got %q, want prodcon", msg.Topic)
 	}
@@ -42,10 +37,9 @@ func TestProduceAndConsume(t *testing.T) {
 
 func TestConsumeLongPoll(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("longpoll", 3, 2, int64(0))
+	env.createTopic("longpoll", 3, 0)
 
 	produced := make(chan struct{})
 	go func() {
@@ -65,25 +59,18 @@ func TestConsumeLongPoll(t *testing.T) {
 
 func TestConsumeWithExplicitOffset(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("replay", 3, 2, int64(0))
+	env.createTopic("replay", 3, 0)
 
 	env.produce("replay", "k1", `{"n": 1}`)
 	env.produce("replay", "k2", `{"n": 2}`)
 
-	// Replay from offset 0
+	// Replay from offset 0.
 	resp := env.get("/v1/topics/replay/consume?partition=0&offset=0")
 	expectOK(t, resp)
 
-	var msg struct {
-		Offset int64 `json:"offset"`
-	}
-	msg = readJSON[struct {
-		Offset int64 `json:"offset"`
-	}](t, resp)
-
+	msg := readJSON[topic.Message](t, resp)
 	if msg.Offset != 0 {
 		t.Fatalf("replay offset: got %d, want 0", msg.Offset)
 	}
@@ -91,22 +78,20 @@ func TestConsumeWithExplicitOffset(t *testing.T) {
 
 func TestConsumeEmptyTopic(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("empty", 3, 2, int64(0))
+	env.createTopic("empty", 3, 0)
 
 	// Immediate consume on empty topic with no wait returns 204 (no message yet).
 	resp := env.get("/v1/topics/empty/consume")
-	expectStatus(t, resp, 204)
+	expectStatus(t, resp, http.StatusNoContent)
 }
 
 func TestAck(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("ack-topic", 3, 2, int64(0))
+	env.createTopic("ack-topic", 3, 0)
 	env.produce("ack-topic", "k", `{"x": 1}`)
 
 	msg := env.consume("/v1/topics/ack-topic/consume")
@@ -122,10 +107,9 @@ func TestAck(t *testing.T) {
 
 func TestConsumeMultipleThenAck(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("multi-ack", 3, 2, int64(0))
+	env.createTopic("multi-ack", 3, 0)
 	env.produce("multi-ack", "k", `{"seq": 0}`)
 	env.produce("multi-ack", "k", `{"seq": 1}`)
 
@@ -143,8 +127,7 @@ func TestConsumeMultipleThenAck(t *testing.T) {
 
 func TestProduceNonExistentTopic(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
 	resp := env.rawPost("/v1/topics/no-such/produce", `{}`)
 	expectNotFound(t, resp)
@@ -152,10 +135,9 @@ func TestProduceNonExistentTopic(t *testing.T) {
 
 func TestProduceAcceptsInvalidJSONWithoutSchema(t *testing.T) {
 	t.Parallel()
-	env := newEnv(t, defaultOpts())
-	defer env.close()
+	env := newTestEnv(t)
 
-	env.createTopic("produce-bad", 3, 2, int64(0))
+	env.createTopic("produce-bad", 3, 0)
 
 	resp := env.rawPost("/v1/topics/produce-bad/produce?key=k", `{not-json`)
 	expectStatus(t, resp, http.StatusAccepted)

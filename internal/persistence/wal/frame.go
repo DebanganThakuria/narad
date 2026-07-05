@@ -8,6 +8,14 @@ import (
 	"io"
 )
 
+// A frame is the on-disk encoding of one record, all fields big endian:
+//
+//	offset  size  field
+//	0       4     magic "NWAL" (0x4e57414c)
+//	4       4     payload length (never zero)
+//	8       8     sequence number
+//	16      4     CRC32 (IEEE) of the payload
+//	20      n     payload
 const (
 	frameMagic      uint32 = 0x4e57414c // NWAL
 	frameHeaderSize        = 20
@@ -18,6 +26,8 @@ const (
 // corrupt frame in the last (active) segment as a torn tail to truncate.
 var errCorruptFrame = errors.New("corrupt frame")
 
+// appendFrame encodes one record onto dst, growing it geometrically like
+// append so repeated staging into the shared write buffer stays cheap.
 func appendFrame(dst []byte, seq uint64, payload []byte) []byte {
 	start := len(dst)
 	size := frameHeaderSize + len(payload)
@@ -33,6 +43,7 @@ func appendFrame(dst []byte, seq uint64, payload []byte) []byte {
 	} else {
 		dst = dst[:end]
 	}
+
 	frame := dst[start:end]
 	binary.BigEndian.PutUint32(frame[0:4], frameMagic)
 	binary.BigEndian.PutUint32(frame[4:8], uint32(len(payload)))
@@ -42,6 +53,10 @@ func appendFrame(dst []byte, seq uint64, payload []byte) []byte {
 	return dst
 }
 
+// readFrame decodes the next frame from r. It returns ok=false without an
+// error on a clean or truncated EOF (a torn tail), and wraps validation
+// failures in errCorruptFrame so callers can distinguish them from I/O
+// errors.
 func readFrame(r io.Reader, segmentBase uint64, offset int64, maxRecord int) (Record, bool, error) {
 	var header [frameHeaderSize]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
@@ -60,6 +75,7 @@ func readFrame(r io.Reader, segmentBase uint64, offset int64, maxRecord int) (Re
 	if int(n) > maxRecord {
 		return Record{}, false, fmt.Errorf("wal: frame size %d exceeds max %d: %w", n, maxRecord, errCorruptFrame)
 	}
+
 	seq := binary.BigEndian.Uint64(header[8:16])
 	wantCRC := binary.BigEndian.Uint32(header[16:20])
 	payload := make([]byte, int(n))
@@ -72,6 +88,7 @@ func readFrame(r io.Reader, segmentBase uint64, offset int64, maxRecord int) (Re
 	if got := crc32.ChecksumIEEE(payload); got != wantCRC {
 		return Record{}, false, fmt.Errorf("wal: checksum mismatch at offset %d: %w", offset, errCorruptFrame)
 	}
+
 	return Record{
 		ID:      RecordID{SegmentBase: segmentBase, Offset: offset, Seq: seq},
 		Payload: payload,

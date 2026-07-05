@@ -37,6 +37,10 @@ func (l *Log) Append(data []byte) (int64, error) {
 	return offset, nil
 }
 
+// AppendBatch pushes records into the in-memory buffer as one
+// contiguous run and returns the first and last offsets assigned. An
+// empty batch is a no-op returning (0, -1, nil). See Append for the
+// Close-race guarantees.
 func (l *Log) AppendBatch(records [][]byte) (firstOffset, lastOffset int64, err error) {
 	l.appendGate.RLock()
 	defer l.appendGate.RUnlock()

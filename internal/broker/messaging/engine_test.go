@@ -260,11 +260,6 @@ func newTestEngine(t *testing.T, ms *messagingFakeMetastore, schemas schema.Regi
 	return newTestEngineWithDir(t, t.TempDir(), ms, schemas, partitioner)
 }
 
-//go:fix inline
-func int64ptr(v int64) *int64 {
-	return new(v)
-}
-
 func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetastore, schemas schema.Registry, partitioner partition.Manager) *Engine {
 	t.Helper()
 	if ms == nil {

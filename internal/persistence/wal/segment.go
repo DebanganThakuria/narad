@@ -10,6 +10,8 @@ import (
 	"strings"
 )
 
+// Segment files are named <base zero-padded to 20 digits>.wal, where
+// base is the seq of the first record the segment may hold.
 const segmentSuffix = ".wal"
 
 type segmentInfo struct {
@@ -17,17 +19,8 @@ type segmentInfo struct {
 	path string
 }
 
-func shouldSkipSegment(segments []segmentInfo, i int, cursor Cursor) bool {
-	segment := segments[i]
-	if cursor.SegmentBase > 0 && segment.base < cursor.SegmentBase {
-		return true
-	}
-	if i+1 < len(segments) && segments[i+1].base <= cursor.Seq {
-		return true
-	}
-	return false
-}
-
+// listSegments returns the segment files in dir sorted by base seq.
+// A missing directory yields an empty list, not an error.
 func listSegments(dir string) ([]segmentInfo, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -36,6 +29,7 @@ func listSegments(dir string) ([]segmentInfo, error) {
 		}
 		return nil, fmt.Errorf("wal: list segments: %w", err)
 	}
+
 	segments := make([]segmentInfo, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), segmentSuffix) {

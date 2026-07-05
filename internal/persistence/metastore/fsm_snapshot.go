@@ -11,17 +11,23 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+// Snapshot captures the whole bbolt database as one in-memory blob.
+// Raft serialises Snapshot with Apply, so the copy is consistent.
 func (f *fsmState) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	var buf bytes.Buffer
-	err := f.view("snapshot", func(tx *bolt.Tx) error {
+	err := f.view(func(tx *bolt.Tx) error {
 		_, err := tx.WriteTo(&buf)
 		return err
 	})
 	return &fsmSnapshot{data: buf.Bytes()}, err
 }
 
+// Restore replaces the local database with a leader snapshot: the blob
+// is written and fsynced to a sidecar file, atomically renamed over the
+// live database, and reopened. On any failure f.db is left holding an
+// open database — either the new one or the untouched old one.
 func (f *fsmState) Restore(rc io.ReadCloser) error {
 	defer rc.Close()
 	data, err := io.ReadAll(rc)
@@ -32,6 +38,7 @@ func (f *fsmState) Restore(rc io.ReadCloser) error {
 	if err := writeFileSync(tmp, data); err != nil {
 		return err
 	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.db.Close()
@@ -50,6 +57,7 @@ func (f *fsmState) Restore(rc io.ReadCloser) error {
 		_ = dir.Sync()
 		_ = dir.Close()
 	}
+
 	db, err := openBolt(f.dbPath)
 	if err != nil {
 		// The old file is gone; nothing left to reopen. Surface a hard
@@ -80,6 +88,8 @@ func writeFileSync(path string, data []byte) error {
 	return file.Close()
 }
 
+// fsmSnapshot is a fully materialised database image; Persist just
+// streams it into the sink.
 type fsmSnapshot struct{ data []byte }
 
 func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error {

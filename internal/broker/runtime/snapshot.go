@@ -9,14 +9,16 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 )
 
-// Snapshotter produces the read-only inventory of every topic and
-// partition consumed by the metrics poller. Constructed once at
-// broker startup and embedded into the broker facade so its Snapshot
-// method satisfies the Broker interface.
+// partitionAssignmentReader is the optional metastore capability used
+// to resolve partition ownership (implemented by *metastore.Store).
 type partitionAssignmentReader interface {
 	GetAssignment(topicName string, partition int) (metastore.Assignment, error)
 }
 
+// Snapshotter produces the read-only inventory of every topic and
+// partition consumed by the metrics poller. Constructed once at
+// broker startup and embedded into the broker facade so its Snapshot
+// method satisfies the Broker interface.
 type Snapshotter struct {
 	metastore metastore.Metastore
 	offsets   *consumer.InFlight
@@ -71,6 +73,9 @@ func (s *Snapshotter) Snapshot(ctx context.Context) ([]metrics.TopicSnapshot, er
 	return out, nil
 }
 
+// partitionSnapshot builds the snapshot for one partition, or reports
+// ok=false when the partition should be omitted: not locally owned, or
+// its log isn't open on this node.
 func (s *Snapshotter) partitionSnapshot(topicName string, idx int) (metrics.PartitionSnapshot, bool) {
 	if s.selfID != "" {
 		assignments, ok := s.metastore.(partitionAssignmentReader)

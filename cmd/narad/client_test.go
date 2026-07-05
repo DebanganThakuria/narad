@@ -34,6 +34,8 @@ import (
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
+// cliTestEnv is a single-node broker behind a real HTTP server, so the
+// client subcommands are exercised end to end.
 type cliTestEnv struct {
 	server *httptest.Server
 	broker broker.Broker
@@ -51,16 +53,7 @@ func newCLITestEnv(t *testing.T) *cliTestEnv {
 	if err != nil {
 		t.Fatalf("metastore: %v", err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if store.IsLeader() {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !store.IsLeader() {
-		t.Fatal("metastore: timed out waiting for leader")
-	}
+	waitForLeadership(t, store)
 	for _, member := range []metastore.Member{
 		{ID: "test-0", Addr: "127.0.0.1:0", Status: metastore.MemberAlive, LastHeartbeat: time.Now().Unix()},
 		{ID: "test-1", Addr: "127.0.0.1:1", Status: metastore.MemberAlive, LastHeartbeat: time.Now().Unix()},
@@ -138,16 +131,13 @@ func newCLITestEnv(t *testing.T) *cliTestEnv {
 	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 	go cluster.NewProduceDispatcher(ingressManager, store, "", br, nil, log, cluster.ProduceDispatcherConfig{
 		PollInterval: 5 * time.Millisecond,
-	}, metrics).Run(dispatchCtx)
+	}).Run(dispatchCtx)
 	server := httptest.NewServer(httpserver.NewRouter(handlers.New(handlers.Deps{
 		Broker:         br,
 		Logs:           logs,
 		Logger:         log,
 		MaxConsumeWait: 5 * time.Second,
 	}), log, metrics, reg))
-	if err := waitForAssignments(store, "__bootstrap__"); err != nil {
-		_ = err
-	}
 
 	t.Cleanup(func() {
 		dispatchCancel()
@@ -159,10 +149,9 @@ func newCLITestEnv(t *testing.T) *cliTestEnv {
 	return &cliTestEnv{server: server, broker: br, store: store}
 }
 
+// waitForAssignments blocks until the controller has assigned every
+// partition of the topic, so consume/produce paths have owners.
 func waitForAssignments(store *metastore.Store, topicName string) error {
-	if topicName == "__bootstrap__" {
-		return nil
-	}
 	cfg, err := store.GetTopic(context.Background(), topicName)
 	if err != nil {
 		return err
@@ -197,6 +186,8 @@ func waitForAnyVisibleOffset(t *testing.T, br broker.Broker, topicName string, p
 	t.Fatalf("timed out waiting for visible offset topic=%q", topicName)
 }
 
+// captureCLIOutput runs fn with stdin fed from the given string and
+// returns what it wrote to stdout and stderr.
 func captureCLIOutput(t *testing.T, fn func() error, stdin string) (string, string, error) {
 	t.Helper()
 	oldStdout, oldStderr, oldStdin := os.Stdout, os.Stderr, os.Stdin
@@ -279,10 +270,7 @@ func TestClientTopicsCreateListGetAlterDeleteParity(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("topics list stderr = %q, want empty", stderr)
 	}
-	var listed struct {
-		Topics []topic.Topic `json:"topics"`
-	}
-	listed = decodeCLIJSON[struct {
+	listed := decodeCLIJSON[struct {
 		Topics []topic.Topic `json:"topics"`
 	}](t, stdout)
 	if len(listed.Topics) != 1 || listed.Topics[0].Name != "orders" {
@@ -298,8 +286,7 @@ func TestClientTopicsCreateListGetAlterDeleteParity(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("topics get stderr = %q, want empty", stderr)
 	}
-	var details topic.Details
-	details = decodeCLIJSON[topic.Details](t, stdout)
+	details := decodeCLIJSON[topic.Details](t, stdout)
 	if details.Topic.Name != "orders" || len(details.Partitions) != 3 {
 		t.Fatalf("topic details = %+v", details)
 	}
@@ -364,8 +351,7 @@ func TestClientProduceConsumeAckParity(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("consume stderr = %q, want empty", stderr)
 	}
-	var msg topic.Message
-	msg = decodeCLIJSON[topic.Message](t, stdout)
+	msg := decodeCLIJSON[topic.Message](t, stdout)
 	if msg.Topic != "orders" || strings.TrimSpace(string(msg.Payload)) != "{\n    \"id\": 1\n  }" || msg.ReceiptHandle == "" {
 		t.Fatalf("consumed message = %+v", msg)
 	}

@@ -659,7 +659,7 @@ once a field exists, it stays."
 * `narad_consumer_dropped_messages{topic,partition}` — unacknowledged
   messages deleted by retention (data loss indicator).
 * `narad_storage_*` — flush/fsync/high-watermark persistence/retention
-  durations, segments rolled, bytes deleted.
+  durations, bytes and messages deleted by retention.
 * Inventory gauges: `narad_topics_total`, `narad_partitions_total`,
   `narad_topic_bytes{topic}`, `narad_partition_size_bytes{topic,partition}`,
   `narad_segments{topic,partition}`.

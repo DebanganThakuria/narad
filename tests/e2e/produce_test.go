@@ -81,7 +81,7 @@ func TestProduce_AcceptsStringMessage(t *testing.T) {
 	_ = resp.Body.Close()
 }
 
-// TestProduce_AcceptsQuotedEmptyStringMessage documents that a non-empty raw
+// TestProduce_AcceptsEmptyStringMessage documents that a non-empty raw
 // body is accepted even if the logical payload is an empty JSON string.
 func TestProduce_AcceptsEmptyStringMessage(t *testing.T) {
 	t.Parallel()
@@ -137,11 +137,8 @@ func TestProduce_RejectsOversizedBody(t *testing.T) {
 	env := newTestEnv(t)
 	mustCreateTopic(t, env, createTopicReq{Name: "big"})
 
-	huge := strings.Builder{}
-	huge.WriteString(strings.Repeat("A", (1<<20)+1024))
-
-	resp := rawReq(t, http.MethodPost, env.Server.URL+"/v1/topics/big/produce",
-		[]byte(huge.String()))
+	huge := []byte(strings.Repeat("A", (1<<20)+1024))
+	resp := rawReq(t, http.MethodPost, env.Server.URL+"/v1/topics/big/produce", huge)
 	expectStatus(t, resp, http.StatusRequestEntityTooLarge)
 }
 
@@ -164,21 +161,17 @@ func TestProduce_ConcurrentProducersAcceptedAndVisible(t *testing.T) {
 	var wg sync.WaitGroup
 	var failed atomic.Int32
 	for w := range writers {
-		wg.Add(1)
-		go func(w int) {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range perWriter {
 				resp := rawReq(t, http.MethodPost,
 					env.Server.URL+"/v1/topics/race/produce",
 					fmt.Appendf(nil, `{"w":%d,"i":%d}`, w, i))
 				if resp.StatusCode != http.StatusAccepted {
 					failed.Add(1)
-					_ = resp.Body.Close()
-					continue
 				}
 				_ = resp.Body.Close()
 			}
-		}(w)
+		})
 	}
 	wg.Wait()
 
