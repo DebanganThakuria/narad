@@ -10,8 +10,12 @@ RUN go mod download
 
 COPY . .
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+# TARGETOS/TARGETARCH are populated per target platform by buildx.
+# Hardcoded defaults would mask those values and bake one architecture's
+# binary into every image variant; left empty, plain `docker build`
+# falls back to the host's Go defaults.
+ARG TARGETOS
+ARG TARGETARCH
 ARG GIT_REV=dev
 
 ENV CGO_ENABLED=0
