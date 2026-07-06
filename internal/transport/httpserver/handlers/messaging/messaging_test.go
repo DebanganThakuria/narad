@@ -198,6 +198,18 @@ func (f *fakeRouter) BroadcastDeleteTopic(context.Context, string) error {
 	return nil
 }
 
+func (f *fakeRouter) RouteCreateUser(context.Context, http.ResponseWriter, *http.Request, []byte) bool {
+	return false
+}
+
+func (f *fakeRouter) RouteUpdateUser(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool {
+	return false
+}
+
+func (f *fakeRouter) RouteDeleteUser(context.Context, http.ResponseWriter, *http.Request, string) bool {
+	return false
+}
+
 func (f *fakeRouter) RouteGetTopic(context.Context, *http.Request, string, topic.Details) (topic.Details, error) {
 	return topic.Details{}, nil
 }

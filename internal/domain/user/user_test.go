@@ -100,6 +100,36 @@ func TestCoversEnforcesNoEscalation(t *testing.T) {
 	}
 }
 
+func TestCanDelegate(t *testing.T) {
+	root := User{Root: true}
+	admin := User{Grants: []Grant{{Action: ActionAdmin}}}
+	scoped := User{Grants: []Grant{{Action: ActionProduce, Patterns: []string{"orders-*"}}}}
+
+	adminGrant := []Grant{{Action: ActionAdmin}}
+	produceGrant := []Grant{{Action: ActionProduce, Patterns: []string{"orders-eu"}}}
+	broaderGrant := []Grant{{Action: ActionProduce, Patterns: []string{"ord*"}}}
+
+	cases := []struct {
+		name      string
+		granter   User
+		requested []Grant
+		want      bool
+	}{
+		{"root confers admin", root, adminGrant, true},
+		{"admin cannot confer admin", admin, adminGrant, false},
+		{"root confers scoped", root, produceGrant, true},
+		{"admin confers scoped", admin, produceGrant, true},
+		{"scoped confers subset", scoped, produceGrant, true},
+		{"scoped cannot broaden", scoped, broaderGrant, false},
+		{"scoped cannot confer admin", scoped, adminGrant, false},
+	}
+	for _, c := range cases {
+		if got := c.granter.CanDelegate(c.requested); got != c.want {
+			t.Errorf("%s: CanDelegate = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestValidateUsername(t *testing.T) {
 	for _, ok := range []string{"admin", "svc.orders-1", "A_b-c.9"} {
 		if err := ValidateUsername(ok); err != nil {

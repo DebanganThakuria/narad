@@ -94,6 +94,26 @@ func MatchPattern(pattern, name string) bool {
 	return pattern == name
 }
 
+// CanDelegate reports whether this user may create or modify a principal
+// holding exactly the requested grants. The policy:
+//
+//   - Only the root admin may confer the admin action, so admin rights
+//     cannot proliferate through delegated user management.
+//   - A full admin may confer any scoped (non-admin) grant.
+//   - Anyone else may confer only grants they already hold themselves
+//     (no privilege escalation).
+func (u User) CanDelegate(requested []Grant) bool {
+	for _, g := range requested {
+		if g.Action == ActionAdmin && !u.Root {
+			return false
+		}
+	}
+	if u.IsAdmin() {
+		return true
+	}
+	return Covers(u.Grants, requested)
+}
+
 // Covers reports whether the granted set is a superset of the requested
 // set — the no-escalation check: a user may only hand out permissions
 // they hold themselves. An admin grant covers everything.

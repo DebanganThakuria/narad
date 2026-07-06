@@ -25,6 +25,30 @@ type fakePeerClient struct {
 	purgeTopicFn          func(context.Context, string, string) (nodewire.Response, error)
 	topicPartitionStatsFn func(context.Context, string, string, int) (topic.PartitionStats, error)
 	registerMemberFn      func(context.Context, string, nodewire.MemberRequest) (nodewire.Response, error)
+	createUserFn          func(context.Context, string, []byte) (nodewire.Response, error)
+	updateUserFn          func(context.Context, string, string, []byte) (nodewire.Response, error)
+	deleteUserFn          func(context.Context, string, string) (nodewire.Response, error)
+}
+
+func (f fakePeerClient) CreateUser(ctx context.Context, addr string, body []byte) (nodewire.Response, error) {
+	if f.createUserFn != nil {
+		return f.createUserFn(ctx, addr, body)
+	}
+	return nodewire.Response{}, context.DeadlineExceeded
+}
+
+func (f fakePeerClient) UpdateUser(ctx context.Context, addr, username string, body []byte) (nodewire.Response, error) {
+	if f.updateUserFn != nil {
+		return f.updateUserFn(ctx, addr, username, body)
+	}
+	return nodewire.Response{}, context.DeadlineExceeded
+}
+
+func (f fakePeerClient) DeleteUser(ctx context.Context, addr, username string) (nodewire.Response, error) {
+	if f.deleteUserFn != nil {
+		return f.deleteUserFn(ctx, addr, username)
+	}
+	return nodewire.Response{}, context.DeadlineExceeded
 }
 
 func (f fakePeerClient) Produce(ctx context.Context, addr string, req nodewire.ProduceRequest) (nodewire.Response, error) {

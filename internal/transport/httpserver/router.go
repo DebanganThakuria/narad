@@ -12,6 +12,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/health"
 	httpmessaging "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/messaging"
 	httptopics "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/topics"
+	httpusers "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/users"
 )
 
 // NewRouter wires HTTP routes to per-domain handler subpackages. All
@@ -38,6 +39,17 @@ func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prome
 	mux.HandleFunc("POST /v1/topics/{topic}/produce", httpmessaging.Produce(h))
 	mux.HandleFunc("GET /v1/topics/{topic}/consume", httpmessaging.Consume(h))
 	mux.HandleFunc("POST /v1/topics/{topic}/ack", httpmessaging.Ack(h))
+
+	// User administration. Registered only when a metastore is wired in
+	// (multi-node builds); the handlers write users through Raft.
+	if h.Deps.Metastore != nil {
+		mux.HandleFunc("POST /v1/users", httpusers.Create(h))
+		mux.HandleFunc("GET /v1/users", httpusers.List(h))
+		mux.HandleFunc("GET /v1/users/{username}", httpusers.Get(h))
+		mux.HandleFunc("DELETE /v1/users/{username}", httpusers.Delete(h))
+		mux.HandleFunc("PUT /v1/users/{username}/grants", httpusers.UpdateGrants(h))
+		mux.HandleFunc("PUT /v1/users/{username}/password", httpusers.UpdatePassword(h))
+	}
 
 	// Health Checks
 	mux.HandleFunc("GET /healthz", health.Healthz(h))

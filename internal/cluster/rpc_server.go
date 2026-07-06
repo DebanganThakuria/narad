@@ -99,6 +99,12 @@ func (s *RPCServer) dispatch(payload []byte) nodewire.Response {
 		res = s.handleTopicPartitionStats(payload)
 	case nodewire.OpRegisterMember:
 		res = s.handleRegisterMember(payload)
+	case nodewire.OpCreateUser:
+		res = s.handleCreateUser(payload)
+	case nodewire.OpUpdateUser:
+		res = s.handleUpdateUser(payload)
+	case nodewire.OpDeleteUser:
+		res = s.handleDeleteUser(payload)
 	default:
 		res = errorResponse(http.StatusBadRequest, fmt.Sprintf("unsupported rpc operation %d", op))
 	}
