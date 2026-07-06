@@ -10,8 +10,11 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/errs"
+	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/security"
 )
 
@@ -103,5 +106,59 @@ func TestAuthMiddlewareNilAuthenticatorDisablesAuth(t *testing.T) {
 	h.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/v1/topics", nil))
 	if res.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 with auth disabled", res.Code)
+	}
+}
+
+func TestAuthPreservesRouteLabelForMetrics(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("bcrypt: %v", err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	auth := security.New(staticUserStore{users: map[string]user.User{
+		"alice": {Username: "alice", PasswordHash: hash},
+	}}, log)
+
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/topics/{topic}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	// Same composition NewRouter uses: metrics outermost, then Recover,
+	// then Auth. The auth middleware clones the request to attach the
+	// identity; the matched route pattern must still reach the metrics
+	// layer (regression: authenticated requests were bucketed "unmatched").
+	handler := Chain(metrics.HTTPMiddleware(m), Recover(log), Auth(auth, log))(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders", nil)
+	req.SetBasicAuth("alice", "pw")
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Code)
+	}
+
+	const wantRoute = "GET /v1/topics/{topic}"
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	var gotRoute string
+	for _, fam := range families {
+		if fam.GetName() != "narad_http_requests_total" {
+			continue
+		}
+		for _, metric := range fam.GetMetric() {
+			for _, lbl := range metric.GetLabel() {
+				if lbl.GetName() == "route" {
+					gotRoute = lbl.GetValue()
+				}
+			}
+		}
+	}
+	if gotRoute != wantRoute {
+		t.Fatalf("route label = %q, want %q (authenticated request bucketed as unmatched)", gotRoute, wantRoute)
 	}
 }

@@ -38,7 +38,16 @@ func Auth(auth *security.Authenticator, log *slog.Logger) Middleware {
 			rec, err := auth.Verify(r.Context(), username, password)
 			switch {
 			case err == nil:
-				next.ServeHTTP(w, r.WithContext(security.WithIdentity(r.Context(), rec)))
+				// The ServeMux records the matched route pattern on the
+				// request it receives. We must give it a context-augmented
+				// copy to carry the identity, so copy the resolved pattern
+				// back onto the caller's request — otherwise outer
+				// middleware (metrics route labelling) reads an empty
+				// pattern and buckets every authenticated request under
+				// "unmatched".
+				authed := r.WithContext(security.WithIdentity(r.Context(), rec))
+				next.ServeHTTP(w, authed)
+				r.Pattern = authed.Pattern
 			case errors.Is(err, security.ErrThrottled):
 				writeAuthError(w, http.StatusTooManyRequests, "too many failed authentication attempts")
 			case errors.Is(err, security.ErrUnauthorized):
