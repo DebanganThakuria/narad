@@ -14,6 +14,11 @@ DEFAULT_GO_CACHE="${TMP_BASE}/narad-go-cache"
 HTTP_PORTS=(18281 18282 18283)
 CLUSTER_PORTS=(19281 19282 19283)
 NODE_IDS=(narad-1 narad-2 narad-3)
+
+# Run the secured path by default; override NARAD_SECURITY_ENABLED=false to skip auth.
+SECURITY_ENABLED="${NARAD_SECURITY_ENABLED:-true}"
+CLUSTER_SECRET="${NARAD_CLUSTER_SECRET:-local-cluster-secret}"
+ADMIN_PASSWORD="${NARAD_ADMIN_PASSWORD:-local-admin-password}"
 RESTARTER_PID=""
 
 cleanup() {
@@ -63,6 +68,19 @@ wait_ready() {
   return 1
 }
 
+wait_admin_auth() {
+  local url
+  url="$(node_url 0)/v1/users"
+  for _ in {1..80}; do
+    if curl -fsS -u "admin:${ADMIN_PASSWORD}" "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "root admin was not seeded / could not authenticate" >&2
+  return 1
+}
+
 start_node() {
   local i="$1"
   local node="${NODE_IDS[$i]}"
@@ -77,7 +95,9 @@ start_node() {
   NARAD_NODE_ID="$node" \
   NARAD_CLUSTER_PEERS="$PEERS" \
   NARAD_DATA_DIR="$data_dir" \
-  NARAD_SECURITY_ENABLED="${NARAD_SECURITY_ENABLED:-false}" \
+  NARAD_SECURITY_ENABLED="$SECURITY_ENABLED" \
+  NARAD_CLUSTER_SECRET="$CLUSTER_SECRET" \
+  NARAD_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
   NARAD_LOG_FORMAT="${NARAD_LOG_FORMAT:-text}" \
   NARAD_LOG_LEVEL="${NARAD_LOG_LEVEL:-info}" \
     "$BIN" serve >>"$log_file" 2>&1 &
@@ -145,6 +165,12 @@ for i in 0 1 2; do
 done
 echo "all nodes ready"
 
+DRIVER_AUTH=()
+if [[ "$SECURITY_ENABLED" == "true" ]]; then
+  wait_admin_auth
+  DRIVER_AUTH=(--username admin --password "$ADMIN_PASSWORD")
+fi
+
 chaos_restarts &
 RESTARTER_PID="$!"
 
@@ -153,6 +179,7 @@ RESTARTER_PID="$!"
   GOCACHE="${GOCACHE:-$DEFAULT_GO_CACHE}" "$GO_BIN" run ./tests/integration \
     --mode chaos \
     --nodes "$(nodes_csv)" \
+    "${DRIVER_AUTH[@]}" \
     --run-id "lcc-$(date +%s%N)" \
     --topics 3 \
     --messages 240 \

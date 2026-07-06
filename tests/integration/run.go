@@ -36,8 +36,10 @@ func runLoad(cfg config) error {
 	defer cancel()
 
 	lb := &roundRobinClient{
-		nodes:  cfg.nodes,
-		client: &http.Client{Timeout: 15 * time.Second},
+		nodes:    cfg.nodes,
+		client:   &http.Client{Timeout: 15 * time.Second},
+		username: cfg.username,
+		password: cfg.password,
 	}
 
 	loadTopics := topicNames(cfg)
