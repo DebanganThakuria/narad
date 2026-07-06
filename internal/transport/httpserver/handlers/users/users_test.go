@@ -234,6 +234,44 @@ func TestSelfServicePasswordChange(t *testing.T) {
 	}
 }
 
+func TestRootPasswordChangeRestrictedToRoot(t *testing.T) {
+	s := newStore(t)
+	set := newSet(t, s)
+	seedUser(t, s, user.User{Username: "admin", Root: true, Grants: []user.Grant{{Action: user.ActionAdmin}}}, "rootpw")
+	seedUser(t, s, user.User{Username: "ops", Grants: []user.Grant{{Action: user.ActionAdmin}}}, "opspw")
+
+	// A non-root admin may NOT reset the root password (escalation guard).
+	ops := user.User{Username: "ops", Grants: []user.Grant{{Action: user.ActionAdmin}}}
+	req := asUser(httptest.NewRequest(http.MethodPut, "/v1/users/admin/password",
+		bytes.NewBufferString(`{"new_password":"pwned"}`)), ops)
+	req.SetPathValue("username", "admin")
+	res := httptest.NewRecorder()
+	httpusers.UpdatePassword(set).ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("non-root admin resetting root: status = %d, want 403 (%s)", res.Code, res.Body)
+	}
+	// Root's password must be unchanged.
+	root, _ := s.GetUser(context.Background(), "admin")
+	if bcrypt.CompareHashAndPassword(root.PasswordHash, []byte("rootpw")) != nil {
+		t.Fatal("root password was altered by a non-root admin")
+	}
+
+	// Root may change its own password.
+	rootID := user.User{Username: "admin", Root: true, Grants: []user.Grant{{Action: user.ActionAdmin}}}
+	req = asUser(httptest.NewRequest(http.MethodPut, "/v1/users/admin/password",
+		bytes.NewBufferString(`{"new_password":"newrootpw"}`)), rootID)
+	req.SetPathValue("username", "admin")
+	res = httptest.NewRecorder()
+	httpusers.UpdatePassword(set).ServeHTTP(res, req)
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("root changing own password: status = %d, want 204 (%s)", res.Code, res.Body)
+	}
+	root, _ = s.GetUser(context.Background(), "admin")
+	if bcrypt.CompareHashAndPassword(root.PasswordHash, []byte("newrootpw")) != nil {
+		t.Fatal("root self password change did not take effect")
+	}
+}
+
 func TestListRedactsHashes(t *testing.T) {
 	s := newStore(t)
 	set := newSet(t, s)
