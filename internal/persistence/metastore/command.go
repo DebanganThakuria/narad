@@ -15,6 +15,9 @@ const (
 	opMemberJoin
 	opMemberHeartbeat
 	opMemberDead
+	opCreateUser
+	opUpdateUser
+	opDeleteUser
 )
 
 // cmd is the envelope written to the Raft log.

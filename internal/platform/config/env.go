@@ -76,6 +76,20 @@ func applyEnv(cfg *Config) error {
 		cfg.Log.Format = v
 	}
 
+	if v, ok := os.LookupEnv("NARAD_SECURITY_ENABLED"); ok {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("NARAD_SECURITY_ENABLED: %w", err)
+		}
+		cfg.Security.Enabled = enabled
+	}
+	if v, ok := os.LookupEnv("NARAD_ADMIN_PASSWORD"); ok {
+		cfg.Security.AdminPassword = v
+	}
+	if v, ok := os.LookupEnv("NARAD_CLUSTER_SECRET"); ok {
+		cfg.Security.ClusterSecret = v
+	}
+
 	return nil
 }
 

@@ -20,6 +20,9 @@ type rpcCreateTopicBody struct {
 	MaxInFlightPerPartition   int64           `json:"max_in_flight_per_partition"`
 	MaxAckedAheadPerPartition int64           `json:"max_acked_ahead_per_partition"`
 	Schema                    json.RawMessage `json:"schema,omitempty"`
+	// Owner is set by the authenticated ingress node before forwarding;
+	// the cluster port is not client-reachable, so it is trusted here.
+	Owner string `json:"owner,omitempty"`
 }
 
 type rpcAlterTopicBody struct {
@@ -71,6 +74,7 @@ func (s *RPCServer) handleCreateTopic(payload []byte) nodewire.Response {
 		MaxInFlightPerPartition:   body.MaxInFlightPerPartition,
 		MaxAckedAheadPerPartition: body.MaxAckedAheadPerPartition,
 		Schema:                    body.Schema,
+		Owner:                     body.Owner,
 	})
 	if err != nil {
 		return s.brokerError("create topic", err)

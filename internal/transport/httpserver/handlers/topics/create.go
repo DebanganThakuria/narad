@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/debanganthakuria/narad/internal/broker/topics"
+	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
@@ -20,6 +21,10 @@ type createRequest struct {
 	MaxInFlightPerPartition   int64           `json:"max_in_flight_per_partition"`
 	MaxAckedAheadPerPartition int64           `json:"max_acked_ahead_per_partition"`
 	Schema                    json.RawMessage `json:"schema,omitempty"`
+	// Owner is server-assigned: whatever the client sends is discarded
+	// and replaced with the authenticated identity before the request
+	// is applied or forwarded.
+	Owner string `json:"owner,omitempty"`
 }
 
 // Create handles POST /v1/topics.
@@ -32,6 +37,22 @@ func Create(s *handlers.Set) http.HandlerFunc {
 
 		var req createRequest
 		if !s.DecodeJSONBytes(w, body, &req) {
+			return
+		}
+		if !s.Authorize(w, r, user.ActionCreate, req.Name) {
+			return
+		}
+
+		// The creator becomes the topic owner. Never trust a
+		// client-supplied owner; re-marshal so the leader-forwarded
+		// body carries the identity this node authenticated.
+		req.Owner = ""
+		if id, ok := handlers.Identity(r); ok {
+			req.Owner = id.Username
+		}
+		body, err := json.Marshal(req)
+		if err != nil {
+			s.WriteError(w, http.StatusInternalServerError, "encode create request")
 			return
 		}
 
@@ -49,6 +70,7 @@ func Create(s *handlers.Set) http.HandlerFunc {
 			MaxInFlightPerPartition:   req.MaxInFlightPerPartition,
 			MaxAckedAheadPerPartition: req.MaxAckedAheadPerPartition,
 			Schema:                    req.Schema,
+			Owner:                     req.Owner,
 		})
 		if err != nil {
 			s.WriteBrokerError(w, "create topic", err)

@@ -15,6 +15,7 @@ var (
 	bucketSchemas     = []byte("schemas")
 	bucketAssignments = []byte("assignments")
 	bucketMembers     = []byte("members")
+	bucketUsers       = []byte("users")
 )
 
 func schemaKey(topicName string, version int) []byte {
@@ -53,7 +54,7 @@ func openBolt(path string) (*bolt.DB, error) {
 		return nil, err
 	}
 	return db, db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketTopics, bucketSchemas, bucketAssignments, bucketMembers} {
+		for _, b := range [][]byte{bucketTopics, bucketSchemas, bucketAssignments, bucketMembers, bucketUsers} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -97,6 +98,12 @@ func (f *fsmState) Apply(l *raft.Log) any {
 		err = f.applyMemberHeartbeat(c.Data)
 	case opMemberDead:
 		err = f.applyMemberDead(c.Data)
+	case opCreateUser:
+		err = f.applyCreateUser(c.Data)
+	case opUpdateUser:
+		err = f.applyUpdateUser(c.Data)
+	case opDeleteUser:
+		err = f.applyDeleteUser(c.Data)
 	default:
 		return fmt.Errorf("metastore: unknown op %d", c.Op)
 	}

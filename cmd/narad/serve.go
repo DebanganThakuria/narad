@@ -152,10 +152,16 @@ func runServe(args []string) error {
 		}
 	})
 
+	// Authentication: seed the root admin (background, leader-gated so
+	// exactly one node wins) and gate the API with Basic auth when
+	// security is enabled.
+	auth := buildAuthenticator(cfg, ms, log)
+	seedRootAdmin(ctx, cfg, ms, log)
+
 	// Finally build the API server. It serves /healthz immediately;
 	// /readyz turns true only when the reconcile goroutine above calls
 	// MarkReady.
-	srv := buildAPIServer(ctx, cfg, bc.broker, bc.logs, ms, cs.router, m, reg, log)
+	srv := buildAPIServer(ctx, cfg, bc.broker, bc.logs, ms, cs.router, m, reg, auth, log)
 	defer bc.lifecycle.MarkNotReady()
 
 	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())

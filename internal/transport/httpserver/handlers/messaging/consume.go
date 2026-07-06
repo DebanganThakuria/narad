@@ -7,6 +7,7 @@ import (
 	"time"
 
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
+	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
@@ -21,6 +22,9 @@ func Consume(s *handlers.Set) http.HandlerFunc {
 		topicName := r.PathValue("topic")
 		if topicName == "" {
 			s.WriteError(w, http.StatusBadRequest, "topic required")
+			return
+		}
+		if !s.Authorize(w, r, user.ActionConsume, topicName) {
 			return
 		}
 

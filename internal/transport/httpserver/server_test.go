@@ -209,7 +209,7 @@ func TestNewRouterRecordsMetricsForPanickingHandler(t *testing.T) {
 	m := metrics.New(reg)
 	router := NewRouter(newTestSet(&fakeBroker{listTopicsFn: func(context.Context, metastore.ListOptions) ([]topic.Topic, string, error) {
 		panic("boom")
-	}}), newTestLogger(), m, reg)
+	}}), newTestLogger(), m, reg, nil)
 
 	res := httptest.NewRecorder()
 	router.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/v1/topics", nil))
@@ -229,7 +229,7 @@ func TestNewRouterRecordsMetricsForPanickingHandler(t *testing.T) {
 func TestNewRouterServesHealthAndMetrics(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := metrics.New(reg)
-	router := NewRouter(newTestSet(&fakeBroker{}), newTestLogger(), m, reg)
+	router := NewRouter(newTestSet(&fakeBroker{}), newTestLogger(), m, reg, nil)
 
 	res := httptest.NewRecorder()
 	router.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -248,7 +248,7 @@ func TestNewRouterServesHealthAndMetrics(t *testing.T) {
 }
 
 func TestNewRouterWithoutMetricsReturnsNotFoundOnMetrics(t *testing.T) {
-	router := NewRouter(newTestSet(&fakeBroker{}), newTestLogger(), nil, nil)
+	router := NewRouter(newTestSet(&fakeBroker{}), newTestLogger(), nil, nil, nil)
 	res := httptest.NewRecorder()
 
 	router.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/metrics", nil))

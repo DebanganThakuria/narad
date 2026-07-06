@@ -20,6 +20,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
+	"github.com/debanganthakuria/narad/internal/security"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
@@ -145,7 +146,7 @@ func capsResolver(ms metastore.Metastore, defaults config.TopicConfig) consumer.
 	}
 }
 
-func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, logs *runtime.Logs, ms *metastore.Store, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, log *slog.Logger) *httpserver.Server {
+func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, logs *runtime.Logs, ms *metastore.Store, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, auth *security.Authenticator, log *slog.Logger) *httpserver.Server {
 	handlerSet := handlers.New(handlers.Deps{
 		Broker:         br,
 		Logs:           logs,
@@ -155,7 +156,7 @@ func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, l
 		ShutdownCtx:    ctx,
 		Router:         router,
 	})
-	return httpserver.New(cfg.HTTP, httpserver.NewRouter(handlerSet, log, m, reg), log)
+	return httpserver.New(cfg.HTTP, httpserver.NewRouter(handlerSet, log, m, reg, auth), log)
 }
 
 // initializeSchemas loads every persisted schema version into the registry

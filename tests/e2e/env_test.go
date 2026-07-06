@@ -182,7 +182,7 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		Logs:           logs,
 		Logger:         log,
 		MaxConsumeWait: opts.maxConsumeWait,
-	}), log, m, reg)
+	}), log, m, reg, nil)
 
 	return &env{
 		t:                t,

@@ -37,6 +37,16 @@ func (s *Store) SchemaVersion(topicName string) uint64 {
 	return s.fsm.versions.schemaVersion(topicName)
 }
 
+// UsersVersion advances when any user is created, updated, or deleted,
+// or a snapshot restore replaces local state. Auth caches key their
+// entries by it.
+func (s *Store) UsersVersion() uint64 {
+	if s == nil || s.fsm == nil {
+		return 0
+	}
+	return s.fsm.versions.usersVersion()
+}
+
 // RoutingMembersVersion advances when member data used by routing changes:
 // membership, API address, cluster address, or alive/dead status. Heartbeat-only
 // LastHeartbeat updates do not change this version.

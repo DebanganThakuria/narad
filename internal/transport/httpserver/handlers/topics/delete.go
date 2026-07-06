@@ -18,6 +18,9 @@ func Delete(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, "topic required")
 			return
 		}
+		if !s.AuthorizeTopicManage(w, r, topicName) {
+			return
+		}
 		if s.Deps.Router != nil {
 			if s.Deps.Router.RouteDeleteTopic(r.Context(), w, r, topicName) {
 				return

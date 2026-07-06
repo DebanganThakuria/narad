@@ -21,6 +21,7 @@ type metadataDomainVersions struct {
 	assignmentsAll atomic.Uint64
 	schemasAll     atomic.Uint64
 	routingMembers atomic.Uint64
+	users          atomic.Uint64
 
 	mu          sync.RWMutex
 	topics      map[string]uint64
@@ -52,6 +53,12 @@ func (v *metadataDomainVersions) bumpRoutingMembers() {
 	v.routingMembers.Store(v.next.Add(1))
 }
 
+// bumpUsers advances the whole users domain. Auth caches re-validate
+// per user by re-reading the record, so per-key versions are not needed.
+func (v *metadataDomainVersions) bumpUsers() {
+	v.users.Store(v.next.Add(1))
+}
+
 // bumpAll advances every domain at once and clears the per-key maps;
 // used after a snapshot restore, when any cached read may be stale.
 func (v *metadataDomainVersions) bumpAll() {
@@ -60,6 +67,7 @@ func (v *metadataDomainVersions) bumpAll() {
 	v.assignmentsAll.Store(version)
 	v.schemasAll.Store(version)
 	v.routingMembers.Store(version)
+	v.users.Store(version)
 
 	v.mu.Lock()
 	clear(v.topics)
@@ -82,6 +90,10 @@ func (v *metadataDomainVersions) schemaVersion(topicName string) uint64 {
 
 func (v *metadataDomainVersions) routingMembersVersion() uint64 {
 	return v.routingMembers.Load()
+}
+
+func (v *metadataDomainVersions) usersVersion() uint64 {
+	return v.users.Load()
 }
 
 func (v *metadataDomainVersions) bumpKey(values map[string]uint64, key string) {

@@ -51,5 +51,12 @@ func Default() *Config {
 			Level:  "info",
 			Format: "json",
 		},
+		// Secure by default: a fresh cluster seeds a root admin (random
+		// password logged once unless NARAD_ADMIN_PASSWORD is set) and
+		// every API call requires Basic auth. Local development can opt
+		// out with security.enabled=false / NARAD_SECURITY_ENABLED=false.
+		Security: SecurityConfig{
+			Enabled: true,
+		},
 	}
 }

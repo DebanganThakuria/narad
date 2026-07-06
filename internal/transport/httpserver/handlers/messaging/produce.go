@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
@@ -32,6 +33,9 @@ func Produce(s *handlers.Set) http.HandlerFunc {
 		topicName := r.PathValue("topic")
 		if topicName == "" {
 			s.WriteError(w, http.StatusBadRequest, "topic required")
+			return
+		}
+		if !s.Authorize(w, r, user.ActionProduce, topicName) {
 			return
 		}
 

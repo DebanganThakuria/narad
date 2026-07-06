@@ -7,6 +7,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
+	"github.com/debanganthakuria/narad/internal/security"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/health"
 	httpmessaging "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/messaging"
@@ -21,8 +22,9 @@ import (
 // metrics struct that the HTTP middleware reads/writes. Either can
 // be nil — passing nil for both disables the /metrics endpoint and
 // the middleware (useful for tests that don't care about
-// observability).
-func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prometheus.Registry) http.Handler {
+// observability). auth enables Basic authentication when non-nil;
+// /healthz, /readyz, and /metrics are always exempt.
+func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prometheus.Registry, auth *security.Authenticator) http.Handler {
 	mux := http.NewServeMux()
 
 	// Topic CRUD
@@ -49,10 +51,13 @@ func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prome
 	// Metrics outermost, Recover inside it: a panicking handler is
 	// converted to a 500 by Recover within the metrics measurement
 	// window, so panic storms still show up in requests_total,
-	// request durations, and the 5xx error counter.
+	// request durations, and the 5xx error counter. Auth sits inside
+	// Recover so 401s are metered and an authenticator panic is a
+	// clean 500.
 	stack := Chain(
 		metrics.HTTPMiddleware(m),
 		Recover(log),
+		Auth(auth, log),
 	)
 	return stack(mux)
 }
