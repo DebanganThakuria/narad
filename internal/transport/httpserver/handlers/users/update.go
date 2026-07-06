@@ -94,6 +94,17 @@ func UpdatePassword(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
+		// Only root may change the root password. Without this, any other
+		// admin could reset it, log in as root, and inherit root's
+		// exclusive powers (granting the admin action, root immutability) —
+		// defeating the whole point of reserving those to root. Matches the
+		// root guards on Delete and UpdateGrants. Skipped when security is
+		// disabled (ok == false, dev mode).
+		if ok && target.Root && caller.Username != target.Username {
+			s.WriteError(w, http.StatusForbidden, "only the root admin may change the root password")
+			return
+		}
+
 		// Self-service (non-admin) must prove the current password.
 		if selfService && !caller.IsAdmin() {
 			if bcrypt.CompareHashAndPassword(target.PasswordHash, []byte(req.CurrentPassword)) != nil {
