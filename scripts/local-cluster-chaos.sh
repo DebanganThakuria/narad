@@ -77,6 +77,7 @@ start_node() {
   NARAD_NODE_ID="$node" \
   NARAD_CLUSTER_PEERS="$PEERS" \
   NARAD_DATA_DIR="$data_dir" \
+  NARAD_SECURITY_ENABLED="${NARAD_SECURITY_ENABLED:-false}" \
   NARAD_LOG_FORMAT="${NARAD_LOG_FORMAT:-text}" \
   NARAD_LOG_LEVEL="${NARAD_LOG_LEVEL:-info}" \
     "$BIN" serve >>"$log_file" 2>&1 &
