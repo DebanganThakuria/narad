@@ -219,8 +219,12 @@ make build         # produces bin/narad
 bin/narad serve    # listens on :7942 (API) and :7943 (cluster/Raft)
 ```
 
-The development server has no built-in API authentication or TLS yet.
-Bind it only to loopback or a trusted network.
+Security is on by default: the server seeds a root `admin` user at first
+start (a random password is logged once, or set `NARAD_ADMIN_PASSWORD`)
+and every API call requires HTTP Basic auth. For local experimentation
+you can disable it with `NARAD_SECURITY_ENABLED=false`. TLS is expected to
+terminate at an ingress in front of Narad; bind the plaintext listener
+only to loopback or a trusted network.
 
 ### Container Image
 
