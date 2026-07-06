@@ -57,6 +57,7 @@ func certFromCA(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey) tls
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(time.Now().UnixNano()),
 		Subject:      pkix.Name{CommonName: "narad-node"},
+		DNSNames:     []string{ClusterCertDNSName},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
