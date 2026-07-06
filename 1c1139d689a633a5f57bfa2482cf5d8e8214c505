@@ -1,0 +1,6 @@
+internal/transport/httpserver/handlers/users/update.go
+  b3f76f08-53c5-447c-9df8-3d5fcbafdc52:2026-07-06T15:03:06.230Z 97-106
+internal/transport/httpserver/handlers/users/users_test.go
+  b3f76f08-53c5-447c-9df8-3d5fcbafdc52:2026-07-06T15:03:49.581Z 237-241,243-257,259-273
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"b3f76f08-53c5-447c-9df8-3d5fcbafdc52:2026-07-06T15:03:06.230Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 10, "overriden_lines": 0}, "b3f76f08-53c5-447c-9df8-3d5fcbafdc52:2026-07-06T15:03:49.581Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 35, "overriden_lines": 0}}}
