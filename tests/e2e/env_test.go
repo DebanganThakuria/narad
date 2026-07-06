@@ -20,15 +20,18 @@ import (
 	"github.com/debanganthakuria/narad/internal/cluster"
 	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/consumer"
+	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 	obsmetrics "github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
+	"github.com/debanganthakuria/narad/internal/security"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // e2eMemberDeadTimeout is deliberately generous so the controller never
@@ -43,6 +46,7 @@ type envOpts struct {
 	defaultVisibilityTimeoutMs int64
 	maxConsumeWait             time.Duration
 	metrics                    bool // when true, wire real Prometheus metrics and /metrics endpoint
+	security                   bool // when true, enable Basic auth + RBAC and seed an admin
 	logOptions                 storage.Options
 }
 
@@ -89,6 +93,10 @@ func withMaxConsumeWait(d time.Duration) envOption {
 	return func(o *envOpts) { o.maxConsumeWait = d }
 }
 
+func withSecurity() envOption {
+	return func(o *envOpts) { o.security = true }
+}
+
 // env bundles a running server, its broker, and request helpers for a
 // single test. Call env.close() to clean up.
 type env struct {
@@ -105,6 +113,11 @@ type env struct {
 
 	Registry *prometheus.Registry // non-nil only when metrics:true
 	Metrics  *obsmetrics.Metrics  // non-nil only when metrics:true
+
+	// adminUser/adminPass are the seeded root credentials when
+	// security:true; empty otherwise.
+	adminUser string
+	adminPass string
 }
 
 // newTestEnv builds an env with t.Cleanup wired for close.
@@ -177,24 +190,52 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		}).Run(dispatcherCtx)
 	}()
 
-	router := httpserver.NewRouter(handlers.New(handlers.Deps{
+	var auth *security.Authenticator
+	adminUser, adminPass := "", ""
+	deps := handlers.Deps{
 		Broker:         br,
 		Logs:           logs,
 		Logger:         log,
 		MaxConsumeWait: opts.maxConsumeWait,
-	}), log, m, reg, nil)
+	}
+	if opts.security {
+		auth = security.New(ms, log)
+		adminUser, adminPass = "admin", "admin-secret"
+		seedTestAdmin(t, ms, adminUser, adminPass)
+		deps.Metastore = ms // enables /v1/users routes
+	}
+
+	router := httpserver.NewRouter(handlers.New(deps), log, m, reg, auth)
 
 	return &env{
 		t:                t,
 		Broker:           br,
 		Server:           httptest.NewServer(router),
 		ms:               ms,
+		adminUser:        adminUser,
+		adminPass:        adminPass,
 		dispatcherCancel: dispatcherCancel,
 		dispatcherDone:   dispatcherDone,
 		controllerCancel: controllerCancel,
 		controllerDone:   controllerDone,
 		Registry:         reg,
 		Metrics:          m,
+	}
+}
+
+// seedTestAdmin creates the root admin directly in the metastore so a
+// secured env has working admin credentials from the first request.
+func seedTestAdmin(t *testing.T, ms *metastore.Store, username, password string) {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash admin password: %v", err)
+	}
+	err = ms.CreateUser(context.Background(), user.User{
+		Username: username, PasswordHash: hash, Root: true,
+	})
+	if err != nil {
+		t.Fatalf("seed admin: %v", err)
 	}
 }
 
