@@ -33,6 +33,9 @@ type Topic struct {
 	MaxInFlightPerPartition   int64  `json:"max_in_flight_per_partition"`
 	MaxAckedAheadPerPartition int64  `json:"max_acked_ahead_per_partition"`
 	CreatedAt                 int64  `json:"created_at"`
+	// Owner is the username that created the topic. Alter/delete
+	// require the owner or an admin. Empty when security is disabled.
+	Owner string `json:"owner,omitempty"`
 }
 
 // Details is the response shape for "describe a topic": the topic

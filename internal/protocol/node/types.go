@@ -27,6 +27,9 @@ const (
 	OpRegisterMember
 	OpCommitProduce
 	OpCommitProduceBatch
+	OpCreateUser
+	OpUpdateUser
+	OpDeleteUser
 )
 
 // ProduceRequest asks a node to route and append one record.
@@ -93,6 +96,15 @@ type TopicNameRequest struct {
 type TopicPartitionStatsRequest struct {
 	Topic     string
 	Partition int
+}
+
+// UserRequest is the shared shape for user write operations forwarded
+// to the leader. Body is the JSON-encoded user.User for create/update
+// and empty for delete; Username identifies the target for update and
+// delete.
+type UserRequest struct {
+	Username string
+	Body     []byte
 }
 
 // MemberRequest registers or refreshes a cluster member.

@@ -60,6 +60,9 @@ type CreateOpts struct {
 	MaxInFlightPerPartition   int64
 	MaxAckedAheadPerPartition int64
 	Schema                    []byte
+	// Owner is the authenticated creator; recorded on the topic for
+	// owner-or-admin alter/delete checks. Empty when security is off.
+	Owner string
 }
 
 // PartitionAssigner assigns a topic partition range to cluster members.

@@ -32,6 +32,10 @@ const (
 	StreamFramePong        StreamFrameType = 5
 	StreamFrameNodeRequest StreamFrameType = 8
 	StreamFrameNodeReply   StreamFrameType = 9
+	// StreamFrameAuth is the first frame a client sends on a new stream
+	// when a cluster secret is configured. Its payload proves knowledge
+	// of the shared secret (see internal/platform/clusterrpc auth).
+	StreamFrameAuth StreamFrameType = 10
 )
 
 // StreamFrame is one framed message on a cluster stream. On the wire it

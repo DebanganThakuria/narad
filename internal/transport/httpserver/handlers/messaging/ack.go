@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/debanganthakuria/narad/internal/consumer"
+	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
@@ -19,6 +20,11 @@ func Ack(s *handlers.Set) http.HandlerFunc {
 		topicName := r.PathValue("topic")
 		if topicName == "" {
 			s.WriteError(w, http.StatusBadRequest, "topic required")
+			return
+		}
+		// Ack is covered by the consume grant: a consumer that cannot
+		// ack what it consumed would only grow redelivery loops.
+		if !s.Authorize(w, r, user.ActionConsume, topicName) {
 			return
 		}
 

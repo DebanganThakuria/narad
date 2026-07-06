@@ -29,6 +29,9 @@ type peerClient interface {
 	PurgeTopic(context.Context, string, string) (nodewire.Response, error)
 	TopicPartitionStats(context.Context, string, string, int) (topic.PartitionStats, error)
 	RegisterMember(context.Context, string, nodewire.MemberRequest) (nodewire.Response, error)
+	CreateUser(ctx context.Context, addr string, body []byte) (nodewire.Response, error)
+	UpdateUser(ctx context.Context, addr, username string, body []byte) (nodewire.Response, error)
+	DeleteUser(ctx context.Context, addr, username string) (nodewire.Response, error)
 }
 
 // PeerClient issues node RPCs to peers over the QUIC frame transport. It is
@@ -39,12 +42,13 @@ type PeerClient struct {
 
 // NewPeerClient constructs a PeerClient. timeout is the transport's default
 // reply timeout, applied to requests whose context carries no deadline;
-// <= 0 uses defaultPeerRPCTimeout.
-func NewPeerClient(timeout time.Duration) *PeerClient {
+// <= 0 uses defaultPeerRPCTimeout. secret authenticates to peers that
+// require a cluster secret (empty disables it).
+func NewPeerClient(timeout time.Duration, secret string) *PeerClient {
 	if timeout <= 0 {
 		timeout = defaultPeerRPCTimeout
 	}
-	return &PeerClient{frames: clusterrpc.NewQUICFrameClient(timeout)}
+	return &PeerClient{frames: clusterrpc.NewQUICFrameClient(timeout, secret)}
 }
 
 // Produce forwards a produce request to the peer at addr.
@@ -128,6 +132,24 @@ func (c *PeerClient) TopicPartitionStats(ctx context.Context, addr, topicName st
 func (c *PeerClient) RegisterMember(ctx context.Context, addr string, req nodewire.MemberRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeMemberRequest(req)
 	return c.send(ctx, addr, "register_member", payload, err)
+}
+
+// CreateUser forwards a user create to the leader at addr.
+func (c *PeerClient) CreateUser(ctx context.Context, addr string, body []byte) (nodewire.Response, error) {
+	payload, err := nodewire.EncodeUserRequest(nodewire.OpCreateUser, nodewire.UserRequest{Body: body})
+	return c.send(ctx, addr, "create_user", payload, err)
+}
+
+// UpdateUser forwards a user update to the leader at addr.
+func (c *PeerClient) UpdateUser(ctx context.Context, addr, username string, body []byte) (nodewire.Response, error) {
+	payload, err := nodewire.EncodeUserRequest(nodewire.OpUpdateUser, nodewire.UserRequest{Username: username, Body: body})
+	return c.send(ctx, addr, "update_user", payload, err)
+}
+
+// DeleteUser forwards a user delete to the leader at addr.
+func (c *PeerClient) DeleteUser(ctx context.Context, addr, username string) (nodewire.Response, error) {
+	payload, err := nodewire.EncodeUserRequest(nodewire.OpDeleteUser, nodewire.UserRequest{Username: username})
+	return c.send(ctx, addr, "delete_user", payload, err)
 }
 
 func (c *PeerClient) topicNameRequest(ctx context.Context, addr string, op nodewire.Operation, operation, topicName string) (nodewire.Response, error) {

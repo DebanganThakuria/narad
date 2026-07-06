@@ -39,6 +39,7 @@ const (
 // all traffic.
 type quicClientPool struct {
 	timeout time.Duration
+	secret  string
 
 	nextShard atomic.Uint64
 
@@ -47,12 +48,13 @@ type quicClientPool struct {
 	streams map[string]*streamClient
 }
 
-func newQUICClientPool(timeout time.Duration) *quicClientPool {
+func newQUICClientPool(timeout time.Duration, secret string) *quicClientPool {
 	if timeout <= 0 {
 		timeout = defaultStreamTimeout
 	}
 	return &quicClientPool{
 		timeout: timeout,
+		secret:  secret,
 		conns:   make(map[string]*quic.Conn),
 		streams: make(map[string]*streamClient),
 	}
@@ -93,6 +95,15 @@ func (p *quicClientPool) getStream(ctx context.Context, addr, lane string) (*str
 	if err != nil {
 		p.closeConn(addr, conn, err)
 		return nil, err
+	}
+	// Prove secret knowledge as the stream's first frame; the server
+	// rejects the stream otherwise. Safe to write directly: the stream
+	// is not yet shared (readLoop unstarted, not in the pool map).
+	if p.secret != "" {
+		if err := clusterwire.WriteStreamFrame(stream, authFrame(p.secret)); err != nil {
+			_ = stream.Close()
+			return nil, err
+		}
 	}
 
 	client := &streamClient{

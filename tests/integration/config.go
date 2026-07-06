@@ -24,6 +24,8 @@ func parseConfig(args []string) (config, error) {
 	flagSet.DurationVar(&cfg.visibilityTimeout, "visibility-timeout", 30*time.Second, "topic visibility timeout")
 	flagSet.StringVar(&cfg.runID, "run-id", "", "topic/message run id; defaults to timestamp")
 	flagSet.BoolVar(&cfg.cleanup, "cleanup", true, "delete created topics at the end")
+	flagSet.StringVar(&cfg.username, "username", "", "HTTP Basic auth username (empty = no auth)")
+	flagSet.StringVar(&cfg.password, "password", "", "HTTP Basic auth password")
 	if err := flagSet.Parse(args); err != nil {
 		return cfg, err
 	}

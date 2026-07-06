@@ -20,12 +20,16 @@ type config struct {
 	visibilityTimeout  time.Duration
 	runID              string
 	cleanup            bool
+	username           string
+	password           string
 }
 
 type roundRobinClient struct {
-	nodes  []string
-	client *http.Client
-	next   atomic.Uint64
+	nodes    []string
+	client   *http.Client
+	next     atomic.Uint64
+	username string
+	password string
 }
 
 type topicRecord struct {

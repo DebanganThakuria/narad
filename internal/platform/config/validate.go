@@ -20,6 +20,7 @@ func (c *Config) Validate() error {
 	errs = append(errs, storageValidationErrors(c.Storage)...)
 	errs = append(errs, topicValidationErrors(c.Topic)...)
 	errs = append(errs, logValidationErrors(c.Log)...)
+	errs = append(errs, securityValidationErrors(c.Security, c.Cluster)...)
 	if len(errs) == 0 {
 		return nil
 	}
@@ -232,6 +233,17 @@ func logValidationErrors(cfg LogConfig) []string {
 	case "json", "text":
 	default:
 		errs = append(errs, fmt.Sprintf("log.format %q is not one of [json, text]", cfg.Format))
+	}
+	return errs
+}
+
+func securityValidationErrors(cfg SecurityConfig, cluster ClusterConfig) []string {
+	var errs []string
+	// A multi-node cluster with security on must set a cluster secret,
+	// otherwise the node-to-node port would be the unauthenticated way
+	// around RBAC. Single-node clusters (no peers) don't expose it.
+	if cfg.Enabled && len(cluster.Peers) > 0 && strings.TrimSpace(cfg.ClusterSecret) == "" {
+		errs = append(errs, "security.cluster_secret (NARAD_CLUSTER_SECRET) is required when security is enabled with cluster peers")
 	}
 	return errs
 }

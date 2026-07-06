@@ -60,6 +60,9 @@ func (lb *roundRobinClient) send(ctx context.Context, node, method, path string,
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
+	if lb.username != "" {
+		req.SetBasicAuth(lb.username, lb.password)
+	}
 	resp, err := lb.client.Do(req)
 	if err != nil {
 		return 0, nil, err

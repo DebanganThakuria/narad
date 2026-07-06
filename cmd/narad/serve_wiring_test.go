@@ -222,7 +222,7 @@ func TestBuildAPIServerPanicsWithoutBroker(t *testing.T) {
 	m := metrics.New(reg)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	_ = buildAPIServer(context.Background(), cfg, nil, nil, nil, nil, m, reg, log)
+	_ = buildAPIServer(context.Background(), cfg, nil, nil, nil, nil, m, reg, nil, log)
 }
 
 func TestBuildAPIServerReturnsServer(t *testing.T) {
@@ -232,7 +232,7 @@ func TestBuildAPIServerReturnsServer(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	broker := stubBroker{}
-	srv := buildAPIServer(context.Background(), cfg, broker, nil, nil, nil, m, reg, log)
+	srv := buildAPIServer(context.Background(), cfg, broker, nil, nil, nil, m, reg, nil, log)
 	if srv == nil {
 		t.Fatal("buildAPIServer() returned nil")
 	}

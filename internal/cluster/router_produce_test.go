@@ -16,7 +16,7 @@ import (
 
 func TestNewRouter(t *testing.T) {
 	store := newTestStore(t)
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	if router == nil {
 		t.Fatal("NewRouter() returned nil")
 	}
@@ -24,7 +24,7 @@ func TestNewRouter(t *testing.T) {
 
 func TestRouteProduceReturnsFalseWhenTopicMissing(t *testing.T) {
 	store := newTestStore(t)
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"id":1}`))
 
@@ -67,7 +67,7 @@ func TestRouteProduceForwardsToRemoteOwner(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 1})
+	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 1}, "")
 	router.peer = fakePeerClient{produceFn: func(_ context.Context, addr string, req nodewire.ProduceRequest) (nodewire.Response, error) {
 		if addr != remote.Listener.Addr().String() {
 			t.Fatalf("addr = %q, want %q", addr, remote.Listener.Addr().String())
@@ -120,7 +120,7 @@ func TestRouteProduceFallsBackToNextReachablePartition(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 2, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 1})
+	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 1}, "")
 	router.peer = fakePeerClient{produceFn: func(_ context.Context, addr string, req nodewire.ProduceRequest) (nodewire.Response, error) {
 		if addr == failedAddr {
 			return nodewire.Response{}, context.DeadlineExceeded
@@ -166,7 +166,7 @@ func TestRouteProduceReturnsFalseWhenNoOwnersReachable(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-1"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 0})
+	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 0}, "")
 	router.peer = fakePeerClient{produceFn: func(context.Context, string, nodewire.ProduceRequest) (nodewire.Response, error) {
 		return nodewire.Response{}, context.DeadlineExceeded
 	}}
@@ -212,7 +212,7 @@ func TestRouteProduceSkipsDeadMemberThenRetriesTransportFailure(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 2, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 0})
+	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 0}, "")
 	router.peer = fakePeerClient{produceFn: func(_ context.Context, addr string, req nodewire.ProduceRequest) (nodewire.Response, error) {
 		if addr == failedAddr {
 			return nodewire.Response{}, context.DeadlineExceeded
@@ -275,7 +275,7 @@ func TestRouteProduceRetriesAfterNon2xxResponse(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 2, "node-remote-2"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 1})
+	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 1}, "")
 	router.peer = fakePeerClient{produceFn: func(_ context.Context, addr string, req nodewire.ProduceRequest) (nodewire.Response, error) {
 		if addr == remoteFail.Listener.Addr().String() {
 			firstCalls++
@@ -337,7 +337,7 @@ func TestRouteProduceReturnsFalseWhenAllResponsesAreNon2xx(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 1, "node-remote-1"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 0})
+	router := NewRouter(store, "node-self", fixedPartitionManager{picked: 0}, "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"id":1}`))
 

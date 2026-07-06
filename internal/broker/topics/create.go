@@ -196,6 +196,7 @@ func (m *Manager) topicFromOpts(opts CreateOpts) (topic.Topic, error) {
 		MaxInFlightPerPartition:   maxInFlight,
 		MaxAckedAheadPerPartition: maxAckedAhead,
 		CreatedAt:                 time.Now().Unix(),
+		Owner:                     opts.Owner,
 	}, nil
 }
 

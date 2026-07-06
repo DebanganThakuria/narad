@@ -35,6 +35,12 @@ func TestLoadReadsConfigFile(t *testing.T) {
 }
 
 func TestExampleConfigLoads(t *testing.T) {
+	// The example is a secure 3-node cluster, which requires the cluster
+	// secret via env (it is never file-configurable) — exactly as an
+	// operator supplies it. The admin password is optional (generated if
+	// absent), so only the cluster secret is needed here.
+	t.Setenv("NARAD_CLUSTER_SECRET", "example-cluster-secret")
+
 	path := filepath.Join("..", "..", "..", "narad.example.json")
 	cfg, err := Load(path)
 	if err != nil {

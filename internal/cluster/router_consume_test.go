@@ -17,7 +17,7 @@ import (
 
 func TestRouteConsumeReturnsFalseWhenTopicMissing(t *testing.T) {
 	store := newTestStore(t)
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume", nil)
 
@@ -35,7 +35,7 @@ func TestRouteConsumeReturnsFalseWhenTopicHasNoPartitions(t *testing.T) {
 	if err := store.CreateTopic(context.Background(), topic.Topic{Name: "orders", Partitions: 0}); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume", nil)
 
@@ -50,7 +50,7 @@ func TestRouteConsumeReturnsFalseWhenTopicHasNoPartitions(t *testing.T) {
 
 func TestRouteAckReturnsFalseWhenOwnerMissing(t *testing.T) {
 	store := newTestStore(t)
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/ack", nil)
 
@@ -80,7 +80,7 @@ func TestRouteConsumeForwardsPinnedPartitionToRemoteOwner(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{consumeFn: func(_ context.Context, addr string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
 		if addr != remote.Listener.Addr().String() {
 			t.Fatalf("addr = %q, want %q", addr, remote.Listener.Addr().String())
@@ -122,7 +122,7 @@ func TestRouteConsumePinnedLongPollDeadlineCoversWait(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 
 	var deadline time.Time
 	var hasDeadline bool
@@ -175,7 +175,7 @@ func TestRouteConsumeReturnsLocalPartitionWithoutRemoteProbe(t *testing.T) {
 		t.Fatalf("AssignPartition(1) error = %v", err)
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=1s", nil)
 
@@ -223,7 +223,7 @@ func TestRouteConsumeReturnsNoContentWhenOnlyRemotePartitionsAreEmpty(t *testing
 		t.Fatalf("AssignPartition(1) error = %v", err)
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{consumeFn: func(_ context.Context, addr string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
 		if addr != remote.Listener.Addr().String() {
 			t.Fatalf("addr = %q, want %q", addr, remote.Listener.Addr().String())
@@ -275,7 +275,7 @@ func remoteOnlyConsumeRouter(t *testing.T, consumeFn func(context.Context, strin
 	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.consumeReprobeInterval = 10 * time.Millisecond
 	router.peer = fakePeerClient{consumeFn: consumeFn}
 	return router
@@ -400,7 +400,7 @@ func TestRouteConsumeRemoteTreatsNotOwnerProbeAsEmpty(t *testing.T) {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{consumeFn: func(_ context.Context, _ string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
 		if !req.LocalOnly || req.HasPartition || req.WaitNanos != 0 {
 			t.Fatalf("remote probe request = %+v, want unpinned local-only scan", req)
@@ -444,7 +444,7 @@ func TestRouteConsumeRemoteStopsAfterFirstDeliveredProbe(t *testing.T) {
 	}
 
 	var calls []string
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{consumeFn: func(_ context.Context, addr string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
 		if !req.LocalOnly || req.HasPartition || req.WaitNanos != 0 {
 			t.Fatalf("remote probe request = %+v, want unpinned local-only scan", req)
@@ -534,7 +534,7 @@ func TestRouteConsumeRemoteProbesEachRemoteOwnerOnce(t *testing.T) {
 		}
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{consumeFn: func(_ context.Context, addr string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
 		if !req.LocalOnly {
 			t.Fatalf("local_only = false, want true")
@@ -596,7 +596,7 @@ func TestRemoteConsumeCandidatesLimitOneProbePerRemoteOwner(t *testing.T) {
 		}
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	candidates := router.remoteConsumeCandidates("orders")
 	if len(candidates) != 2 {
 		t.Fatalf("remoteConsumeCandidates() len = %d, want 2: %+v", len(candidates), candidates)
@@ -631,7 +631,7 @@ func TestRouteAckForwardsHandleToRemoteOwner(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{ackFn: func(_ context.Context, addr string, req nodewire.AckRequest) (nodewire.Response, error) {
 		if addr != remote.Listener.Addr().String() {
 			t.Fatalf("addr = %q, want %q", addr, remote.Listener.Addr().String())
@@ -703,7 +703,7 @@ func TestRouteConsumePrefersLocalPartitionWithoutSnapshotRanking(t *testing.T) {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=1s", nil)
 
@@ -734,7 +734,7 @@ func TestRouteConsumePinnedLongPollClampsExcessiveWait(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 
 	var gotWait time.Duration
 	var deadline time.Time
@@ -775,7 +775,7 @@ func TestRouteConsumePinnedLongPollHonorsConfiguredMaxWait(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.SetMaxConsumeWait(10 * time.Second)
 
 	var gotWait time.Duration

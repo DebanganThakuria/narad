@@ -52,7 +52,7 @@ at `v0.1.0-alpha.1`.
 | Storage engine | WAL-first produce path and segmented partition logs |
 | Cluster metadata | Raft+bbolt control plane |
 | Delivery model | At-least-once; consumers must be idempotent |
-| Security | No built-in API auth, TLS, or rate limiting yet |
+| Security | Basic auth + RBAC + cluster-secret auth (secure by default); TLS terminates at the ingress; no rate limiting yet |
 | Production use | Blocked on the readiness gates below |
 
 CI runs race-enabled unit and end-to-end tests, plus local 3-node
@@ -647,6 +647,65 @@ previously-required field, or adding a new required field is rejected
 with `ErrSchemaIncompatible`. The contract is "extend only, never break —
 once a field exists, it stays."
 
+## Security (authentication & RBAC)
+
+Narad ships **secure by default**: every HTTP API call requires HTTP
+Basic authentication, requests are authorized against per-user grants,
+and node-to-node cluster RPC requires a shared secret. Disable it for
+local development with `security.enabled=false` (`NARAD_SECURITY_ENABLED`).
+
+**TLS.** Narad speaks plain HTTP and expects TLS to terminate at an
+ingress or gateway in front of it. Because Basic credentials travel in
+cleartext from that terminator to Narad, the hop between them must be a
+trusted network path.
+
+**Users.** A user is a username plus a bcrypt-hashed password and a list
+of grants, replicated through the Raft metastore. Manage them via the
+admin-only `/v1/users` API:
+
+* `POST /v1/users` — create `{username, password, grants}`
+* `GET /v1/users`, `GET /v1/users/{username}` — list / describe (hashes
+  are never returned)
+* `DELETE /v1/users/{username}`
+* `PUT /v1/users/{username}/grants` — replace grants
+* `PUT /v1/users/{username}/password` — change password (self-service
+  with `current_password`, or admin reset)
+
+**Grants.** Each grant is an action over topic name patterns (a literal
+name or a single trailing `*` wildcard, e.g. `orders-*`):
+
+* `produce` — produce to matching topics
+* `consume` — consume from and ack matching topics
+* `create` — create topics whose name matches; the creator becomes the
+  topic **owner**
+* `admin` — full access, including user management and altering/deleting
+  any topic (carries no patterns)
+
+Topic **alter/delete** require the topic's owner or an admin.
+
+**Root admin.** On first boot with no users, one node seeds a root
+`admin` account from `NARAD_ADMIN_PASSWORD`; if unset, it generates a
+random password and logs it **once** (`component=audit`). The root
+account is undeletable and its grants are immutable — only its password
+can change. No account may grant a permission it does not hold, edit its
+own grants, or delete itself, and only root may confer the `admin`
+action (so admin rights cannot proliferate through delegation).
+
+**Hot path.** Password verification (bcrypt, deliberately slow) is cached
+per node and keyed by the users-domain version, so the produce/consume
+path never re-hashes. Grant changes take effect on the next request;
+password changes cut access immediately. A negative cache, a decaying
+per-user failed-attempt throttle, and request de-duplication bound the
+cost of wrong or repeated credentials.
+
+**Cluster port.** When security is on and peers are configured,
+`NARAD_CLUSTER_SECRET` is required. Each QUIC stream proves knowledge of
+the secret (an HMAC, never the raw secret) before the server serves any
+request, closing the "reach the port, skip RBAC" bypass. Mutual TLS
+between nodes is planned; today the secret rides inside the transport's
+existing TLS. Every user mutation and rejected auth emits a structured
+`component=audit` log line.
+
 ## Observability
 
 **`/metrics` (Prometheus).** Highlights:
@@ -757,13 +816,15 @@ The project logo and identity sheet live under [`assets/`](./assets/).
 Narad is pre-1.0. The code has race-enabled unit and end-to-end coverage,
 plus 3-node integration and chaos smoke tests in CI, but the following
 work must land before a production or externally exposed rollout. The
-first two are **hard gates**; until they ship, run Narad only behind a
+first is a **hard gate**; until it ships, run Narad only behind a
 trusted boundary.
 
-1. **API auth, rate limiting & TLS (hard gate).** The HTTP API has no
-   authn/authz, no TLS, and no rate limiting today. Until this lands,
-   Narad must sit behind a network policy / authenticated gateway and
-   never be exposed directly.
+1. **TLS & rate limiting (hard gate).** Authentication (Basic + RBAC)
+   and cluster-secret auth now ship (see [Security](#security-authentication--rbac)),
+   but Narad still serves plain HTTP: TLS must terminate at an ingress in
+   front of it, and that ingress→Narad hop must be a trusted path. Native
+   TLS, mutual TLS between cluster nodes, and per-user/IP request rate
+   limiting remain future work.
 2. **Durability / DR contract (hard gate).** With no data replication
    (one owner per partition; its volume is the only copy), we need a
    *tested* backup/restore runbook for every loss scenario — metastore

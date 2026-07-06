@@ -54,6 +54,9 @@ type Router interface {
 	RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) bool
 	BroadcastDeleteTopic(ctx context.Context, topicName string) error
 	RouteGetTopic(ctx context.Context, r *http.Request, topicName string, details topic.Details) (topic.Details, error)
+	RouteCreateUser(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool
+	RouteUpdateUser(ctx context.Context, w http.ResponseWriter, r *http.Request, username string, body []byte) bool
+	RouteDeleteUser(ctx context.Context, w http.ResponseWriter, r *http.Request, username string) bool
 }
 
 // Deps is the bag of collaborators every handler needs.

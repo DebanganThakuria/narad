@@ -89,6 +89,18 @@ func (f *fakeRouter) BroadcastDeleteTopic(ctx context.Context, topicName string)
 	return f.broadcastDeleteTopicFn(ctx, topicName)
 }
 
+func (f *fakeRouter) RouteCreateUser(context.Context, http.ResponseWriter, *http.Request, []byte) bool {
+	return false
+}
+
+func (f *fakeRouter) RouteUpdateUser(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool {
+	return false
+}
+
+func (f *fakeRouter) RouteDeleteUser(context.Context, http.ResponseWriter, *http.Request, string) bool {
+	return false
+}
+
 func (f *fakeRouter) RouteGetTopic(ctx context.Context, r *http.Request, topicName string, details topic.Details) (topic.Details, error) {
 	if f.routeGetTopicFn == nil {
 		return details, nil
@@ -213,7 +225,13 @@ func TestCreateHandlerRoutesToLeader(t *testing.T) {
 		return topic.Topic{}, errors.New("unexpected CreateTopic call")
 	}}, &fakeRouter{routeCreateTopicFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, body []byte) bool {
 		routed = true
-		if string(body) != `{"name":"orders","partitions":3}` {
+		// The handler re-marshals the request (to inject the server-
+		// assigned owner), so assert on decoded content, not raw bytes.
+		var req createRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("decode forwarded body: %v", err)
+		}
+		if req.Name != "orders" || req.Partitions != 3 || req.Owner != "" {
 			t.Fatalf("forwarded body = %s", body)
 		}
 		w.WriteHeader(http.StatusCreated)

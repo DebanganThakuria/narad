@@ -83,6 +83,9 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if !s.AuthorizeTopicManage(w, r, topicName) {
+			return
+		}
 
 		if s.Deps.Router != nil {
 			if s.Deps.Router.RouteAlterTopic(r.Context(), w, r, topicName, body) {

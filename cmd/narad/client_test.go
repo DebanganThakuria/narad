@@ -137,7 +137,7 @@ func newCLITestEnv(t *testing.T) *cliTestEnv {
 		Logs:           logs,
 		Logger:         log,
 		MaxConsumeWait: 5 * time.Second,
-	}), log, metrics, reg))
+	}), log, metrics, reg, nil))
 
 	t.Cleanup(func() {
 		dispatchCancel()

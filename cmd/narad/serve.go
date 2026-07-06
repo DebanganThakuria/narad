@@ -152,10 +152,16 @@ func runServe(args []string) error {
 		}
 	})
 
+	// Authentication: seed the root admin (background, leader-gated so
+	// exactly one node wins) and gate the API with Basic auth when
+	// security is enabled.
+	auth := buildAuthenticator(cfg, ms, log)
+	seedRootAdmin(ctx, cfg, ms, log)
+
 	// Finally build the API server. It serves /healthz immediately;
 	// /readyz turns true only when the reconcile goroutine above calls
 	// MarkReady.
-	srv := buildAPIServer(ctx, cfg, bc.broker, bc.logs, ms, cs.router, m, reg, log)
+	srv := buildAPIServer(ctx, cfg, bc.broker, bc.logs, ms, cs.router, m, reg, auth, log)
 	defer bc.lifecycle.MarkNotReady()
 
 	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())
@@ -197,12 +203,12 @@ type clusterStack struct {
 func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, bc *brokerComponents, log *slog.Logger) *clusterStack {
 	ctrl := controller.New(ms, controller.Config{})
 
-	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin())
+	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), cfg.Security.ClusterSecret)
 	// The router clamps client-supplied long-poll waits (?wait=) on its
 	// forward and re-probe paths to the same ceiling the HTTP handlers use.
 	router.SetMaxConsumeWait(cfg.HTTP.MaxConsumeWait.D())
 
-	peerRPC := cluster.NewPeerClient(5 * time.Second)
+	peerRPC := cluster.NewPeerClient(5*time.Second, cfg.Security.ClusterSecret)
 
 	rpcServer := cluster.NewRPCServer(bc.broker, ms, log)
 	// So a delete forwarded to this node as leader still fans the purge out
@@ -223,7 +229,7 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 // all peer RPC, so it fails the serve loop via failServe rather than
 // keeping degraded client HTTP alive.
 func serveClusterRPC(ctx context.Context, cfg *config.Config, rpc *cluster.RPCServer, failServe func(error), log *slog.Logger) {
-	err := clusterrpc.ServeQUIC(ctx, cfg.HTTP.Addr, log, rpc)
+	err := clusterrpc.ServeQUIC(ctx, cfg.HTTP.Addr, cfg.Security.ClusterSecret, log, rpc)
 	if err == nil || errors.Is(err, context.Canceled) {
 		return
 	}

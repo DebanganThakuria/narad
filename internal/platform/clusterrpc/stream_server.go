@@ -21,19 +21,23 @@ type StreamFrameHandler interface {
 type streamServerConn struct {
 	conn    streamConn
 	reader  io.Reader
+	secret  string
 	logger  *slog.Logger
 	handler StreamFrameHandler
 	writeMu sync.Mutex
 }
 
-// ServeStreamConn serves cluster-RPC frames on a single stream.
-func ServeStreamConn(conn streamConn, reader io.Reader, logger *slog.Logger, handlers ...StreamFrameHandler) {
+// ServeStreamConn serves cluster-RPC frames on a single stream. When
+// secret is non-empty, the stream's first frame must be a valid auth
+// proof or the stream is closed without serving any request.
+func ServeStreamConn(conn streamConn, reader io.Reader, secret string, logger *slog.Logger, handlers ...StreamFrameHandler) {
 	if reader == nil {
 		reader = conn
 	}
 	c := &streamServerConn{
 		conn:    conn,
 		reader:  reader,
+		secret:  secret,
 		logger:  logger,
 		handler: firstStreamFrameHandler(handlers),
 	}
@@ -51,6 +55,9 @@ func firstStreamFrameHandler(handlers []StreamFrameHandler) StreamFrameHandler {
 
 func (c *streamServerConn) serve() {
 	defer c.conn.Close()
+	if !c.authenticate() {
+		return
+	}
 	for {
 		frame, err := clusterwire.ReadStreamFrame(c.reader, clusterwire.MaxStreamFramePayloadBytes)
 		if err != nil {
@@ -61,6 +68,40 @@ func (c *streamServerConn) serve() {
 		}
 		c.handleFrame(frame)
 	}
+}
+
+// authHandshakeTimeout bounds how long the server waits for a client's
+// first (auth) frame, so an authenticated-transport peer that opens a
+// stream and then goes silent cannot pin a serving goroutine and its
+// receive buffer indefinitely.
+const authHandshakeTimeout = 5 * time.Second
+
+// authenticate consumes and verifies the stream's first frame when a
+// cluster secret is configured. With no secret it is a no-op. A missing
+// or invalid proof closes the stream (returns false).
+func (c *streamServerConn) authenticate() bool {
+	if c.secret == "" {
+		return true
+	}
+	// Bound the wait for the auth frame, then clear the deadline so the
+	// served stream reverts to its normal (deadline-free) read loop.
+	_ = c.conn.SetReadDeadline(time.Now().Add(authHandshakeTimeout))
+	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
+
+	frame, err := clusterwire.ReadStreamFrame(c.reader, clusterwire.MaxStreamFramePayloadBytes)
+	if err != nil {
+		if c.logger != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+			c.logger.Debug("cluster stream auth read", "err", err)
+		}
+		return false
+	}
+	if !verifyAuthFrame(c.secret, frame) {
+		if c.logger != nil {
+			c.logger.Warn("cluster stream rejected: invalid auth", "component", "audit")
+		}
+		return false
+	}
+	return true
 }
 
 func (c *streamServerConn) handleFrame(frame clusterwire.StreamFrame) {
