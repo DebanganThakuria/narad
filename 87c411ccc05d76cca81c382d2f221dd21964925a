@@ -1,0 +1,4 @@
+internal/security/authenticator.go
+  b3f76f08-53c5-447c-9df8-3d5fcbafdc52:2026-07-06T12:20:24.734Z 24-25,88-90,107,111,122-127,132,138-153,159
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"b3f76f08-53c5-447c-9df8-3d5fcbafdc52:2026-07-06T12:20:24.734Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 31, "overriden_lines": 0}}}
