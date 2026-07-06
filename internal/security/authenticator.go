@@ -70,6 +70,10 @@ const (
 	// maxConcurrentVerify caps in-flight bcrypt runs process-wide; a
 	// backstop so no request mix can pin every core on hashing.
 	maxConcurrentVerify = 4
+
+	// maxCachedUsers bounds the per-node verification cache so a large or
+	// churning real-account population cannot grow it without limit.
+	maxCachedUsers = 4096
 )
 
 // Authenticator verifies Basic credentials against the user store.
@@ -155,6 +159,13 @@ func (a *Authenticator) Verify(ctx context.Context, username, password string) (
 	a.mu.Lock()
 	e = a.users[username]
 	if e == nil {
+		// Bound the cache: it holds one entry per distinct real user seen,
+		// and stale entries (e.g. deleted users never re-probed) would
+		// otherwise persist for the process lifetime. Evicting an entry
+		// only forces a bcrypt re-verify on that user's next request.
+		if len(a.users) >= maxCachedUsers {
+			a.evictOneUserLocked()
+		}
 		e = &userEntry{tokens: bucketCapacity, lastRefill: a.now(), failed: make(map[[32]byte]time.Time)}
 		a.users[username] = e
 	}
@@ -274,6 +285,17 @@ func (a *Authenticator) dropUser(username string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.users, username)
+}
+
+// evictOneUserLocked removes one arbitrary cache entry to keep the map
+// bounded. Map iteration order is random, so this needs no bookkeeping;
+// an evicted user simply re-verifies on its next request. Caller holds
+// a.mu.
+func (a *Authenticator) evictOneUserLocked() {
+	for username := range a.users {
+		delete(a.users, username)
+		return
+	}
 }
 
 // takeToken refills by elapsed time and consumes one token if

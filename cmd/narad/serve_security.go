@@ -64,7 +64,7 @@ func seedRootAdmin(ctx context.Context, cfg *config.Config, ms *metastore.Store,
 			if has, err := ms.HasUsers(ctx); err == nil && has {
 				return // someone (possibly us, earlier) already seeded
 			}
-			err := ms.CreateUser(ctx, root)
+			err := ms.SeedRootUser(ctx, root)
 			switch {
 			case err == nil:
 				if generated {

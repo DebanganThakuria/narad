@@ -2,6 +2,7 @@ package metastore
 
 import (
 	"context"
+	"errors"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -13,6 +14,10 @@ var (
 	ErrNotFound      = errs.ErrNotFound
 	ErrAlreadyExists = errs.ErrAlreadyExists
 )
+
+// ErrRootProtected is returned when a write would delete the root admin
+// or otherwise violate a root-account invariant enforced in the FSM.
+var ErrRootProtected = errors.New("metastore: root account is protected")
 
 // Metastore is the broker's view of durable metadata.
 type Metastore interface {

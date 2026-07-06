@@ -10,9 +10,17 @@ import (
 )
 
 // CreateUser creates u through Raft. It returns ErrAlreadyExists if a
-// user with the same username exists.
+// user with the same username exists. The root flag is ignored here —
+// only SeedRootUser may create a root account.
 func (s *Store) CreateUser(ctx context.Context, u user.User) error {
 	return s.apply(ctx, opCreateUser, u)
+}
+
+// SeedRootUser creates the root admin. It is the only path that may
+// persist a root account, and it is idempotent: if the user already
+// exists it returns ErrAlreadyExists without modifying it.
+func (s *Store) SeedRootUser(ctx context.Context, u user.User) error {
+	return s.apply(ctx, opSeedRootUser, u)
 }
 
 // UpdateUser replaces the stored record for u.Username through Raft. It

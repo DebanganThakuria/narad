@@ -70,6 +70,12 @@ func (c *streamServerConn) serve() {
 	}
 }
 
+// authHandshakeTimeout bounds how long the server waits for a client's
+// first (auth) frame, so an authenticated-transport peer that opens a
+// stream and then goes silent cannot pin a serving goroutine and its
+// receive buffer indefinitely.
+const authHandshakeTimeout = 5 * time.Second
+
 // authenticate consumes and verifies the stream's first frame when a
 // cluster secret is configured. With no secret it is a no-op. A missing
 // or invalid proof closes the stream (returns false).
@@ -77,6 +83,11 @@ func (c *streamServerConn) authenticate() bool {
 	if c.secret == "" {
 		return true
 	}
+	// Bound the wait for the auth frame, then clear the deadline so the
+	// served stream reverts to its normal (deadline-free) read loop.
+	_ = c.conn.SetReadDeadline(time.Now().Add(authHandshakeTimeout))
+	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
+
 	frame, err := clusterwire.ReadStreamFrame(c.reader, clusterwire.MaxStreamFramePayloadBytes)
 	if err != nil {
 		if c.logger != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {

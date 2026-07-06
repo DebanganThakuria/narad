@@ -76,6 +76,62 @@ func TestUserCRUD(t *testing.T) {
 	}
 }
 
+func TestRootProtectionEnforcedInFSM(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// CreateUser must never persist a root account, even if the caller
+	// sets Root=true (defends the leader-forwarded RPC path).
+	if err := s.CreateUser(ctx, user.User{Username: "sneaky", Root: true,
+		Grants: []user.Grant{{Action: user.ActionAdmin}}}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	got, _ := s.GetUser(ctx, "sneaky")
+	if got.Root {
+		t.Fatal("CreateUser persisted a root account — escalation possible")
+	}
+
+	// Only SeedRootUser makes a root account, and it is idempotent.
+	if err := s.SeedRootUser(ctx, user.User{Username: "admin", Root: true, PasswordHash: []byte("h1"),
+		Grants: []user.Grant{{Action: user.ActionAdmin}}}); err != nil {
+		t.Fatalf("SeedRootUser: %v", err)
+	}
+	root, _ := s.GetUser(ctx, "admin")
+	if !root.Root {
+		t.Fatal("SeedRootUser did not create a root account")
+	}
+	if err := s.SeedRootUser(ctx, user.User{Username: "admin", Root: true, PasswordHash: []byte("h2")}); !errors.Is(err, metastore.ErrAlreadyExists) {
+		t.Fatalf("second SeedRootUser = %v, want ErrAlreadyExists (no clobber)", err)
+	}
+	if again, _ := s.GetUser(ctx, "admin"); string(again.PasswordHash) != "h1" {
+		t.Fatal("SeedRootUser clobbered an existing root password")
+	}
+
+	// Update cannot escalate a non-root user to root.
+	if err := s.UpdateUser(ctx, user.User{Username: "sneaky", Root: true,
+		Grants: []user.Grant{{Action: user.ActionAdmin}}}); err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+	if esc, _ := s.GetUser(ctx, "sneaky"); esc.Root {
+		t.Fatal("UpdateUser escalated a user to root")
+	}
+
+	// Update cannot tamper with root's grants, but may change its password.
+	if err := s.UpdateUser(ctx, user.User{Username: "admin", PasswordHash: []byte("h3"),
+		Grants: []user.Grant{{Action: user.ActionProduce, Patterns: []string{"x"}}}}); err != nil {
+		t.Fatalf("UpdateUser(admin password): %v", err)
+	}
+	updated, _ := s.GetUser(ctx, "admin")
+	if !updated.Root || !updated.IsAdmin() || string(updated.PasswordHash) != "h3" {
+		t.Fatalf("root update wrong: root=%v admin=%v hash=%s", updated.Root, updated.IsAdmin(), updated.PasswordHash)
+	}
+
+	// Root cannot be deleted.
+	if err := s.DeleteUser(ctx, "admin"); !errors.Is(err, metastore.ErrRootProtected) {
+		t.Fatalf("DeleteUser(root) = %v, want ErrRootProtected", err)
+	}
+}
+
 func TestUsersVersionBumpsOnEveryMutation(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

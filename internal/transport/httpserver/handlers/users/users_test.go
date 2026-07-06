@@ -64,7 +64,11 @@ func seedUser(t *testing.T, s *metastore.Store, u user.User, password string) {
 		t.Fatalf("bcrypt: %v", err)
 	}
 	u.PasswordHash = hash
-	if err := s.CreateUser(context.Background(), u); err != nil {
+	create := s.CreateUser
+	if u.Root {
+		create = s.SeedRootUser
+	}
+	if err := create(context.Background(), u); err != nil {
 		t.Fatalf("seed %s: %v", u.Username, err)
 	}
 }

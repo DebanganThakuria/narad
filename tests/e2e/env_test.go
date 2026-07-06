@@ -231,7 +231,7 @@ func seedTestAdmin(t *testing.T, ms *metastore.Store, username, password string)
 	if err != nil {
 		t.Fatalf("hash admin password: %v", err)
 	}
-	err = ms.CreateUser(context.Background(), user.User{
+	err = ms.SeedRootUser(context.Background(), user.User{
 		Username: username, PasswordHash: hash, Root: true,
 	})
 	if err != nil {

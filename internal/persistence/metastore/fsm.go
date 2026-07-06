@@ -104,6 +104,8 @@ func (f *fsmState) Apply(l *raft.Log) any {
 		err = f.applyUpdateUser(c.Data)
 	case opDeleteUser:
 		err = f.applyDeleteUser(c.Data)
+	case opSeedRootUser:
+		err = f.applySeedRootUser(c.Data)
 	default:
 		return fmt.Errorf("metastore: unknown op %d", c.Op)
 	}
