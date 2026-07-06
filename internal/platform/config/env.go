@@ -89,6 +89,15 @@ func applyEnv(cfg *Config) error {
 	if v, ok := os.LookupEnv("NARAD_CLUSTER_SECRET"); ok {
 		cfg.Security.ClusterSecret = v
 	}
+	if v, ok := os.LookupEnv("NARAD_CLUSTER_TLS_CERT_FILE"); ok {
+		cfg.Security.ClusterTLSCertFile = v
+	}
+	if v, ok := os.LookupEnv("NARAD_CLUSTER_TLS_KEY_FILE"); ok {
+		cfg.Security.ClusterTLSKeyFile = v
+	}
+	if v, ok := os.LookupEnv("NARAD_CLUSTER_TLS_CA_FILE"); ok {
+		cfg.Security.ClusterTLSCAFile = v
+	}
 
 	return nil
 }

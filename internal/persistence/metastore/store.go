@@ -25,6 +25,9 @@ type Config struct {
 	AdvertiseAddr string
 	Peers         []Peer
 	Logger        io.Writer
+	// TLS, when non-nil, secures the Raft transport with mutual TLS.
+	// Nil runs it as plain TCP (relying on network isolation).
+	TLS *TLSConfig
 }
 
 // Peer is a known Raft voter used for cluster bootstrap.
@@ -122,6 +125,15 @@ func newTransport(cfg Config, logOutput io.Writer) (raft.Transport, string, erro
 	}
 
 	transportLog := hclog.New(&hclog.LoggerOptions{Output: logOutput})
+
+	if cfg.TLS != nil {
+		stream, err := newTLSStreamLayer(cfg.BindAddr, resolved, cfg.TLS)
+		if err != nil {
+			return nil, "", fmt.Errorf("metastore: tls transport: %w", err)
+		}
+		return raft.NewNetworkTransportWithLogger(stream, 3, 10*time.Second, transportLog), advertiseAddr, nil
+	}
+
 	transport, err := raft.NewTCPTransportWithLogger(cfg.BindAddr, resolved, 3, 10*time.Second, transportLog)
 	if err != nil {
 		return nil, "", fmt.Errorf("metastore: transport: %w", err)

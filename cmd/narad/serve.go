@@ -50,12 +50,22 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	clusterTLS, err := clusterTLSConfig(cfg.Security)
+	if err != nil {
+		return fmt.Errorf("cluster tls: %w", err)
+	}
+	if clusterTLS != nil {
+		log.Info("raft metadata transport secured with mutual TLS")
+	} else {
+		log.Warn("raft metadata transport is plaintext; restrict the cluster port by network policy")
+	}
 	ms, err := metastore.New(metastore.Config{
 		NodeID:        nodeID,
 		DataDir:       filepath.Join(cfg.Storage.DataDir, "metastore"),
 		BindAddr:      cfg.Cluster.Addr,
 		AdvertiseAddr: advertisedClusterAddr(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
 		Peers:         configPeersToMetastore(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
+		TLS:           clusterTLS,
 	})
 	if err != nil {
 		return fmt.Errorf("metastore: %w", err)
