@@ -21,6 +21,8 @@ package security
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
@@ -83,6 +85,10 @@ type Authenticator struct {
 	logger *slog.Logger
 	now    func() time.Time
 
+	// credKey is a random per-process key for the in-memory credential
+	// comparator (see credToken). It is never persisted.
+	credKey []byte
+
 	group     singleflight.Group
 	verifySem chan struct{}
 
@@ -98,11 +104,11 @@ type userEntry struct {
 	version uint64
 	// record is the user as of version (grants served to authorization).
 	record user.User
-	// verifiedCred is the SHA-256 of the plaintext that bcrypt-verified
+	// verifiedCred is the credToken of the plaintext that bcrypt-verified
 	// against record.PasswordHash; zero when nothing is verified yet.
 	verifiedCred [32]byte
 	hasVerified  bool
-	// failed maps SHA-256s of recently rejected plaintexts to when they
+	// failed maps credTokens of recently rejected plaintexts to when they
 	// were rejected; entries expire after negativeTTL and are only
 	// trusted while record.PasswordHash is unchanged.
 	failed map[[32]byte]time.Time
@@ -113,20 +119,44 @@ type userEntry struct {
 
 // New constructs an Authenticator over the given store.
 func New(store UserStore, logger *slog.Logger) *Authenticator {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		// The platform RNG being unavailable is unrecoverable; refuse to
+		// run with a predictable comparator key.
+		panic("security: crypto/rand unavailable: " + err.Error())
+	}
 	return &Authenticator{
 		store:     store,
 		logger:    logger,
 		now:       time.Now,
+		credKey:   key,
 		verifySem: make(chan struct{}, maxConcurrentVerify),
 		users:     make(map[string]*userEntry),
 	}
+}
+
+// credToken derives the in-memory comparator for a presented password.
+//
+// This is NOT password hashing for storage — bcrypt does that, against
+// the stored PasswordHash. This is a fixed-size, constant-time-comparable
+// token used only to key the positive/negative caches for a credential
+// that bcrypt has already validated (or rejected). It is an HMAC under a
+// random per-process key, never persisted, so cache keys cannot be
+// dictionary-matched even from a memory dump, and it carries none of the
+// offline-crackability concerns of a stored password digest.
+func (a *Authenticator) credToken(password string) [32]byte {
+	mac := hmac.New(sha256.New, a.credKey)
+	mac.Write([]byte(password))
+	var out [32]byte
+	copy(out[:], mac.Sum(nil))
+	return out
 }
 
 // Verify authenticates username/password and returns the user record
 // (for authorization) on success. Failures are ErrUnauthorized or
 // ErrThrottled; any other error is an internal store failure.
 func (a *Authenticator) Verify(ctx context.Context, username, password string) (user.User, error) {
-	cred := sha256.Sum256([]byte(password))
+	cred := a.credToken(password)
 	version := a.store.UsersVersion()
 
 	// Fast path: a version-current entry with this exact credential.
