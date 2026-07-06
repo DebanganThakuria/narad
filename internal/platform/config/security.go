@@ -25,4 +25,15 @@ type SecurityConfig struct {
 	// when security is enabled and cluster peers are configured.
 	// Env: NARAD_CLUSTER_SECRET.
 	ClusterSecret string `json:"-"`
+
+	// ClusterTLSCertFile, ClusterTLSKeyFile, and ClusterTLSCAFile enable
+	// mutual TLS on the Raft metadata transport (which replicates user
+	// password hashes and grants). All three must be set together; leaving
+	// them empty runs the transport as plain TCP, relying on network
+	// isolation. These are file paths (typically a mounted secret), not
+	// secret values, so they are file-configurable.
+	// Env: NARAD_CLUSTER_TLS_CERT_FILE / _KEY_FILE / _CA_FILE.
+	ClusterTLSCertFile string `json:"cluster_tls_cert_file"`
+	ClusterTLSKeyFile  string `json:"cluster_tls_key_file"`
+	ClusterTLSCAFile   string `json:"cluster_tls_ca_file"`
 }

@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -16,6 +19,32 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/config"
 	"github.com/debanganthakuria/narad/internal/security"
 )
+
+// clusterTLSConfig builds the mutual-TLS config for the Raft metadata
+// transport from the configured cert/key/CA files, or returns nil when
+// none are set (plain TCP). The three files are all-or-nothing.
+func clusterTLSConfig(sec config.SecurityConfig) (*metastore.TLSConfig, error) {
+	cert, key, ca := sec.ClusterTLSCertFile, sec.ClusterTLSKeyFile, sec.ClusterTLSCAFile
+	if cert == "" && key == "" && ca == "" {
+		return nil, nil
+	}
+	if cert == "" || key == "" || ca == "" {
+		return nil, errors.New("cluster TLS requires cert, key, and CA files to be set together")
+	}
+	keyPair, err := tls.LoadX509KeyPair(cert, key)
+	if err != nil {
+		return nil, fmt.Errorf("load keypair: %w", err)
+	}
+	caPEM, err := os.ReadFile(ca)
+	if err != nil {
+		return nil, fmt.Errorf("read CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("CA file %q contained no valid certificates", ca)
+	}
+	return &metastore.TLSConfig{Certificate: keyPair, CAs: pool}, nil
+}
 
 // rootAdminUsername is the seeded root account. It is undeletable and
 // its grants are immutable; only its password can change.
