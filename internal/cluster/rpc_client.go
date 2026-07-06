@@ -42,12 +42,13 @@ type PeerClient struct {
 
 // NewPeerClient constructs a PeerClient. timeout is the transport's default
 // reply timeout, applied to requests whose context carries no deadline;
-// <= 0 uses defaultPeerRPCTimeout.
-func NewPeerClient(timeout time.Duration) *PeerClient {
+// <= 0 uses defaultPeerRPCTimeout. secret authenticates to peers that
+// require a cluster secret (empty disables it).
+func NewPeerClient(timeout time.Duration, secret string) *PeerClient {
 	if timeout <= 0 {
 		timeout = defaultPeerRPCTimeout
 	}
-	return &PeerClient{frames: clusterrpc.NewQUICFrameClient(timeout)}
+	return &PeerClient{frames: clusterrpc.NewQUICFrameClient(timeout, secret)}
 }
 
 // Produce forwards a produce request to the peer at addr.

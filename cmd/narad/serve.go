@@ -203,12 +203,12 @@ type clusterStack struct {
 func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, bc *brokerComponents, log *slog.Logger) *clusterStack {
 	ctrl := controller.New(ms, controller.Config{})
 
-	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin())
+	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), cfg.Security.ClusterSecret)
 	// The router clamps client-supplied long-poll waits (?wait=) on its
 	// forward and re-probe paths to the same ceiling the HTTP handlers use.
 	router.SetMaxConsumeWait(cfg.HTTP.MaxConsumeWait.D())
 
-	peerRPC := cluster.NewPeerClient(5 * time.Second)
+	peerRPC := cluster.NewPeerClient(5*time.Second, cfg.Security.ClusterSecret)
 
 	rpcServer := cluster.NewRPCServer(bc.broker, ms, log)
 	// So a delete forwarded to this node as leader still fans the purge out
@@ -229,7 +229,7 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 // all peer RPC, so it fails the serve loop via failServe rather than
 // keeping degraded client HTTP alive.
 func serveClusterRPC(ctx context.Context, cfg *config.Config, rpc *cluster.RPCServer, failServe func(error), log *slog.Logger) {
-	err := clusterrpc.ServeQUIC(ctx, cfg.HTTP.Addr, log, rpc)
+	err := clusterrpc.ServeQUIC(ctx, cfg.HTTP.Addr, cfg.Security.ClusterSecret, log, rpc)
 	if err == nil || errors.Is(err, context.Canceled) {
 		return
 	}

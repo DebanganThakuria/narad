@@ -48,7 +48,7 @@ func TestRouteGetTopicMergesRemotePartitionStats(t *testing.T) {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{topicPartitionStatsFn: func(_ context.Context, addr, topicName string, partition int) (topic.PartitionStats, error) {
 		if addr != remote.Listener.Addr().String() {
 			t.Fatalf("addr = %q, want %q", addr, remote.Listener.Addr().String())
@@ -88,7 +88,7 @@ func TestRouteGetTopicReturnsErrorWhenRemoteOwnerMissing(t *testing.T) {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{topicPartitionStatsFn: func(context.Context, string, string, int) (topic.PartitionStats, error) {
 		return topic.PartitionStats{}, context.DeadlineExceeded
 	}}
@@ -116,7 +116,7 @@ func TestRouteGetTopicKeepsLocalPartitionsLocal(t *testing.T) {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{topicPartitionStatsFn: func(context.Context, string, string, int) (topic.PartitionStats, error) {
 		return topic.PartitionStats{Index: 9, NextOffset: 20}, nil
 	}}
@@ -152,7 +152,7 @@ func TestRouteGetTopicReturnsErrorWhenRemoteStatusIsNon2xx(t *testing.T) {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders", nil)
 	req.SetPathValue("topic", "orders")
 	_, err := router.RouteGetTopic(context.Background(), req, "orders", topic.Details{
@@ -185,7 +185,7 @@ func TestRouteGetTopicReturnsErrorWhenRemotePayloadHasWrongPartition(t *testing.
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders", nil)
 	req.SetPathValue("topic", "orders")
 	_, err := router.RouteGetTopic(context.Background(), req, "orders", topic.Details{
@@ -218,7 +218,7 @@ func TestRouteGetTopicReturnsErrorWhenRemotePayloadHasMultiplePartitions(t *test
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{topicPartitionStatsFn: func(context.Context, string, string, int) (topic.PartitionStats, error) {
 		return topic.PartitionStats{}, context.DeadlineExceeded
 	}}
@@ -235,7 +235,7 @@ func TestRouteGetTopicReturnsErrorWhenRemotePayloadHasMultiplePartitions(t *test
 
 func TestRouteCreateTopicReturnsFalseWhenLeaderMemberCannotBeResolved(t *testing.T) {
 	store := newTestStore(t)
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewReader([]byte(`{"name":"orders"}`)))
 
@@ -251,7 +251,7 @@ func TestRouteCreateTopicForwardsWhenLeaderMemberUsesExactLeaderAddress(t *testi
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-leader", Addr: store.LeaderAddr(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{createTopicFn: func(context.Context, string, []byte) (nodewire.Response, error) {
 		return nodewire.Response{Status: http.StatusCreated}, nil
 	}}
@@ -282,7 +282,7 @@ func TestRouteCreateTopicUsesMemberHTTPAddrWhenClusterAddrMatchesLeader(t *testi
 	}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{createTopicFn: func(_ context.Context, addr string, body []byte) (nodewire.Response, error) {
 		gotAddr = addr
 		if string(body) != `{"name":"orders"}` {
@@ -333,7 +333,7 @@ func TestRouteCreateTopicFallsBackToLeaderIDWhenLeaderAddressDoesNotMatchMemberA
 	waitForMember(t, followerStore, leaderID)
 
 	var gotAddr string
-	router := NewRouter(followerStore, followerID, partition.NewHashRoundRobin())
+	router := NewRouter(followerStore, followerID, partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{createTopicFn: func(_ context.Context, addr string, body []byte) (nodewire.Response, error) {
 		gotAddr = addr
 		if string(body) != `{"name":"orders"}` {
@@ -358,7 +358,7 @@ func TestRouteCreateTopicFallsBackToLeaderIDWhenLeaderAddressDoesNotMatchMemberA
 
 func TestRouteAlterTopicReturnsFalseWhenLeaderMemberCannotBeResolved(t *testing.T) {
 	store := newTestStore(t)
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPatch, "/v1/topics/orders", bytes.NewReader([]byte(`{"partitions":2}`)))
 	forwarded := router.RouteAlterTopic(context.Background(), res, req, "orders", []byte(`{"partitions":2}`))
@@ -373,7 +373,7 @@ func TestRouteAlterTopicForwardsWhenLeaderMemberUsesExactLeaderAddress(t *testin
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-leader", Addr: store.LeaderAddr(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{alterTopicFn: func(context.Context, string, string, []byte) (nodewire.Response, error) {
 		return nodewire.Response{Status: http.StatusOK}, nil
 	}}
@@ -388,7 +388,7 @@ func TestRouteAlterTopicForwardsWhenLeaderMemberUsesExactLeaderAddress(t *testin
 
 func TestRouteDeleteTopicReturnsFalseWhenLeaderMemberCannotBeResolved(t *testing.T) {
 	store := newTestStore(t)
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
 
@@ -404,7 +404,7 @@ func TestRouteDeleteTopicReturnsFalseWhenLeaderMatchesSelf(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: store.LeaderAddr(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{deleteTopicFn: func(context.Context, string, string) (nodewire.Response, error) {
 		return nodewire.Response{}, context.DeadlineExceeded
 	}}
@@ -426,7 +426,7 @@ func TestRouteDeleteTopicReturnsFalseWhenMatchingLeaderMemberIsDead(t *testing.T
 	if err := store.MarkMemberDead(ctx, "node-dead"); err != nil {
 		t.Fatalf("MarkMemberDead() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{deleteTopicFn: func(context.Context, string, string) (nodewire.Response, error) {
 		return nodewire.Response{Status: http.StatusNoContent}, nil
 	}}
@@ -451,7 +451,7 @@ func TestRouteDeleteTopicReturnsFalseWhenLeaderAddressOnlyMatchesPort(t *testing
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-leader", Addr: leaderAddr, Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
 
@@ -477,7 +477,7 @@ func TestRouteDeleteTopicForwardsWhenLeaderAddressMatchesExactly(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-leader", Addr: store.LeaderAddr(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
 
@@ -496,7 +496,7 @@ func TestRouteDeleteTopicForwardsWhenLeaderMemberUsesExactLeaderAddress(t *testi
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-leader", Addr: store.LeaderAddr(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
 
@@ -517,7 +517,7 @@ func TestRouteDeleteTopicReturnsFalseWhenLeaderOnlyMatchesForeignPort(t *testing
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-foreign", Addr: leader.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
 
@@ -538,7 +538,7 @@ func TestRouteDeleteTopicReturnsFalseWhenLeaderPortMatchIsSelf(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: leaderAddr, Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
 
@@ -560,7 +560,7 @@ func TestBroadcastDeleteTopicSkipsSelfAndDeadMembers(t *testing.T) {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{purgeTopicFn: func(_ context.Context, addr, topicName string) (nodewire.Response, error) {
 		if addr != "127.0.0.1:2" {
 			t.Fatalf("addr = %q, want %q", addr, "127.0.0.1:2")
@@ -582,7 +582,7 @@ func TestBroadcastDeleteTopicReturnsErrorOnRemoteFailure(t *testing.T) {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{purgeTopicFn: func(context.Context, string, string) (nodewire.Response, error) {
 		return nodewire.Response{Status: http.StatusInternalServerError}, nil
 	}}
@@ -605,7 +605,7 @@ func TestBroadcastDeleteTopicAttemptsAllMembersDespiteFailure(t *testing.T) {
 
 	var mu sync.Mutex
 	attempted := map[string]bool{}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{purgeTopicFn: func(_ context.Context, addr, _ string) (nodewire.Response, error) {
 		mu.Lock()
 		attempted[addr] = true
@@ -636,7 +636,7 @@ func TestRouteCreateTopicForwardDeadlineCoversStartupGate(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-leader", Addr: store.LeaderAddr(), Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 
 	var deadline time.Time
 	var hasDeadline bool
@@ -668,7 +668,7 @@ func TestBroadcastDeleteTopicDeadlineCoversPurgeExecution(t *testing.T) {
 		t.Fatalf("RegisterMember() error = %v", err)
 	}
 
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	var deadline time.Time
 	var hasDeadline bool
 	router.peer = fakePeerClient{purgeTopicFn: func(ctx context.Context, _, _ string) (nodewire.Response, error) {

@@ -49,12 +49,12 @@ type Router struct {
 const defaultMaxConsumeWait = 30 * time.Second
 
 // NewRouter constructs a Router. selfID is this pod's member ID (os.Hostname()).
-func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager) *Router {
+func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager, clusterSecret string) *Router {
 	return &Router{
 		store:                  store,
 		selfID:                 selfID,
 		partitions:             mgr,
-		peer:                   NewPeerClient(defaultPeerRPCTimeout),
+		peer:                   NewPeerClient(defaultPeerRPCTimeout, clusterSecret),
 		routes:                 make(map[string]cachedRouteTable),
 		consumeCursor:          make(map[string]uint64),
 		consumeReprobeInterval: remoteConsumeReprobeInterval,

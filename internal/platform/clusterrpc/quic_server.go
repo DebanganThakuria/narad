@@ -12,8 +12,10 @@ import (
 
 // ServeQUIC listens for cluster-RPC connections over QUIC and dispatches
 // each request frame to the supplied handlers (e.g. the cluster RPC
-// server). It blocks until ctx is cancelled.
-func ServeQUIC(ctx context.Context, addr string, logger *slog.Logger, handlers ...StreamFrameHandler) error {
+// server). When secret is non-empty, every stream must present a valid
+// auth frame first or it is closed unserved. It blocks until ctx is
+// cancelled.
+func ServeQUIC(ctx context.Context, addr, secret string, logger *slog.Logger, handlers ...StreamFrameHandler) error {
 	tlsConf, err := quicServerTLSConfig()
 	if err != nil {
 		return fmt.Errorf("quic cluster tls: %w", err)
@@ -22,10 +24,10 @@ func ServeQUIC(ctx context.Context, addr string, logger *slog.Logger, handlers .
 	if err != nil {
 		return fmt.Errorf("quic cluster listen: %w", err)
 	}
-	return serveQUICListener(ctx, listener, logger, handlers...)
+	return serveQUICListener(ctx, listener, secret, logger, handlers...)
 }
 
-func serveQUICListener(ctx context.Context, listener *quic.Listener, logger *slog.Logger, handlers ...StreamFrameHandler) error {
+func serveQUICListener(ctx context.Context, listener *quic.Listener, secret string, logger *slog.Logger, handlers ...StreamFrameHandler) error {
 	defer listener.Close()
 	go func() {
 		<-ctx.Done()
@@ -40,11 +42,11 @@ func serveQUICListener(ctx context.Context, listener *quic.Listener, logger *slo
 			}
 			return err
 		}
-		go serveQUICConn(ctx, conn, logger, handlers...)
+		go serveQUICConn(ctx, conn, secret, logger, handlers...)
 	}
 }
 
-func serveQUICConn(ctx context.Context, conn *quic.Conn, logger *slog.Logger, handlers ...StreamFrameHandler) {
+func serveQUICConn(ctx context.Context, conn *quic.Conn, secret string, logger *slog.Logger, handlers ...StreamFrameHandler) {
 	defer conn.CloseWithError(0, "cluster quic connection closed")
 	for {
 		stream, err := conn.AcceptStream(ctx)
@@ -54,6 +56,6 @@ func serveQUICConn(ctx context.Context, conn *quic.Conn, logger *slog.Logger, ha
 			}
 			return
 		}
-		go ServeStreamConn(stream, stream, logger, handlers...)
+		go ServeStreamConn(stream, stream, secret, logger, handlers...)
 	}
 }

@@ -12,7 +12,7 @@ import (
 func TestOwnerAddrReturnsRemoteMemberAddress(t *testing.T) {
 	store := newTestStore(t)
 	seedTopicRouteState(t, store)
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 
 	got := router.ownerAddr("orders", 1)
 	if got != "remote.example:7942" {
@@ -29,7 +29,7 @@ func TestOwnerAddrReturnsEmptyForLocalOwner(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 0, "node-self"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 
 	if got := router.ownerAddr("orders", 0); got != "" {
 		t.Fatalf("ownerAddr() = %q, want empty", got)
@@ -45,7 +45,7 @@ func TestOwnerAddrReturnsEmptyForDeadMember(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 2, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 
 	if got := router.ownerAddr("orders", 2); got != "" {
 		t.Fatalf("ownerAddr() = %q, want empty", got)
@@ -64,7 +64,7 @@ func TestRouteCacheInvalidatesWhenRoutingMemberVersionChanges(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 
 	if got := router.ownerAddr("orders", 0); got != "remote.example:7942" {
 		t.Fatalf("ownerAddr() before member death = %q, want remote.example:7942", got)
@@ -89,7 +89,7 @@ func TestRouteCacheInvalidatesWhenAssignmentVersionChanges(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition(remote) error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 
 	if got := router.ownerAddr("orders", 0); got != "remote.example:7942" {
 		t.Fatalf("ownerAddr() before reassignment = %q, want remote.example:7942", got)
@@ -111,7 +111,7 @@ func TestRouteCacheKeepsEntryOnHeartbeatOnlyMemberUpdate(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
 		t.Fatalf("AssignPartition() error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 
 	if got := router.ownerAddr("orders", 0); got != "remote.example:7942" {
 		t.Fatalf("ownerAddr() initial = %q, want remote.example:7942", got)
@@ -153,7 +153,7 @@ func TestRouteCacheClearsConsumeCursorsOnAssignmentChange(t *testing.T) {
 	if err := store.AssignPartition(ctx, "orders", 0, "node-self"); err != nil {
 		t.Fatalf("AssignPartition(self) error = %v", err)
 	}
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin())
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	if _, ok := router.routesForTopic("orders"); !ok {
 		t.Fatal("routesForTopic() initial = false, want true")
 	}

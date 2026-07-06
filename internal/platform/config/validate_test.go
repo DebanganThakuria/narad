@@ -158,6 +158,7 @@ func TestValidateRejectsClusterPeersWithoutLocalVoter(t *testing.T) {
 
 func TestValidateAcceptsClusterPeersIncludingSelf(t *testing.T) {
 	cfg := Default()
+	cfg.Security.ClusterSecret = "test-cluster-secret"
 	cfg.Cluster.Addr = "127.0.0.1:9101"
 	cfg.Cluster.NodeID = "node-1"
 	cfg.Cluster.Peers = []ClusterPeer{
@@ -173,6 +174,7 @@ func TestValidateAcceptsClusterPeersIncludingSelf(t *testing.T) {
 
 func TestValidateAcceptsClusterPeersWithPortLikeAddr(t *testing.T) {
 	cfg := Default()
+	cfg.Security.ClusterSecret = "test-cluster-secret"
 	cfg.Cluster.Addr = ":9101"
 	cfg.Cluster.NodeID = "node-1"
 	cfg.Cluster.Peers = []ClusterPeer{
@@ -188,6 +190,7 @@ func TestValidateAcceptsClusterPeersWithPortLikeAddr(t *testing.T) {
 
 func TestValidateAcceptsClusterPeersWithClusterPortAndHostfulPeerAddr(t *testing.T) {
 	cfg := Default()
+	cfg.Security.ClusterSecret = "test-cluster-secret"
 	cfg.Cluster.Addr = ":9101"
 	cfg.Cluster.NodeID = "node-1"
 	cfg.Cluster.Peers = []ClusterPeer{
@@ -230,5 +233,31 @@ func TestValidateRejectsDuplicateClusterPeerAddr(t *testing.T) {
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "cluster peer addr \"127.0.0.1:9102\" must be unique") {
 		t.Fatalf("Validate() error = %v, want duplicate addr error", err)
+	}
+}
+
+func TestValidateRequiresClusterSecretForSecureMultiNode(t *testing.T) {
+	cfg := Default()
+	cfg.Cluster.Addr = "127.0.0.1:9101"
+	cfg.Cluster.NodeID = "node-1"
+	cfg.Cluster.Peers = []ClusterPeer{
+		{ID: "node-1", Addr: "127.0.0.1:9101"},
+		{ID: "node-2", Addr: "127.0.0.1:9102"},
+		{ID: "node-3", Addr: "127.0.0.1:9103"},
+	}
+	// Security on + peers + no secret → rejected.
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "security.cluster_secret") {
+		t.Fatalf("Validate() error = %v, want cluster_secret requirement", err)
+	}
+	// Providing the secret clears it.
+	cfg.Security.ClusterSecret = "shared"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with secret = %v, want nil", err)
+	}
+	// Single-node (no peers) does not require the secret.
+	cfg.Security.ClusterSecret = ""
+	cfg.Cluster.Peers = nil
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() single-node secure = %v, want nil", err)
 	}
 }

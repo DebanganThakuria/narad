@@ -23,9 +23,11 @@ type QUICFrameClient struct {
 
 // NewQUICFrameClient returns a client whose reply waits and dials fall
 // back to timeout when the caller's context carries no deadline. A
-// non-positive timeout selects the package default.
-func NewQUICFrameClient(timeout time.Duration) *QUICFrameClient {
-	return &QUICFrameClient{pool: newQUICClientPool(timeout)}
+// non-positive timeout selects the package default. secret, when
+// non-empty, is presented on every new stream to authenticate to peers
+// that require a cluster secret.
+func NewQUICFrameClient(timeout time.Duration, secret string) *QUICFrameClient {
+	return &QUICFrameClient{pool: newQUICClientPool(timeout, secret)}
 }
 
 // Request sends one request frame to addr on the lane implied by the
