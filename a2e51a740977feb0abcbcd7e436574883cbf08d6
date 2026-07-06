@@ -1,0 +1,10 @@
+scripts/local-cluster-e2e.sh
+  b3f76f08-53c5-447c-9df8-3d5fcbafdc52:2026-07-06T12:10:28.645Z 18-23,58-70,95-97,108-114,121
+tests/integration/client.go
+  b3f76f08-53c5-447c-9df8-3d5fcbafdc52:2026-07-06T12:08:46.306Z 63-65
+tests/integration/config.go
+  b3f76f08-53c5-447c-9df8-3d5fcbafdc52:2026-07-06T12:08:30.843Z 27-28
+tests/integration/types.go
+  b3f76f08-53c5-447c-9df8-3d5fcbafdc52:2026-07-06T12:08:30.843Z 23-24,28-32
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"b3f76f08-53c5-447c-9df8-3d5fcbafdc52:2026-07-06T12:10:28.645Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 30, "overriden_lines": 0}, "b3f76f08-53c5-447c-9df8-3d5fcbafdc52:2026-07-06T12:08:46.306Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 3, "overriden_lines": 0}, "b3f76f08-53c5-447c-9df8-3d5fcbafdc52:2026-07-06T12:08:30.843Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 2, "overriden_lines": 0}}}
