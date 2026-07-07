@@ -30,3 +30,19 @@ func (m *Metrics) IncAckRejected(reason string) {
 	}
 	m.AckRejected.WithLabelValues(reason).Inc()
 }
+
+// IncAckExtended bumps the ack_extended_total counter.
+func (m *Metrics) IncAckExtended(topic string) {
+	if m == nil {
+		return
+	}
+	m.AckExtendedTotal.WithLabelValues(topic).Inc()
+}
+
+// IncNack bumps the nack_total counter.
+func (m *Metrics) IncNack(topic string) {
+	if m == nil {
+		return
+	}
+	m.NackTotal.WithLabelValues(topic).Inc()
+}

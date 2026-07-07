@@ -308,3 +308,7 @@ func (stubBroker) ReadFanoutSlab(context.Context, string, int, int64, int, int64
 func (stubBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutCursorStat, error) {
 	return nil, nil
 }
+
+func (stubBroker) ExtendAck(context.Context, string, consumer.Handle) error { return nil }
+
+func (stubBroker) Nack(context.Context, string, consumer.Handle) error { return nil }

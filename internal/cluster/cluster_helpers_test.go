@@ -19,6 +19,8 @@ type fakePeerClient struct {
 	commitProduceBatchFn  func(context.Context, string, nodewire.CommitProduceBatchRequest) (nodewire.Response, error)
 	consumeFn             func(context.Context, string, nodewire.ConsumeRequest) (nodewire.Response, error)
 	ackFn                 func(context.Context, string, nodewire.AckRequest) (nodewire.Response, error)
+	extendAckFn           func(context.Context, string, nodewire.AckRequest) (nodewire.Response, error)
+	nackFn                func(context.Context, string, nodewire.AckRequest) (nodewire.Response, error)
 	createTopicFn         func(context.Context, string, []byte) (nodewire.Response, error)
 	alterTopicFn          func(context.Context, string, string, []byte) (nodewire.Response, error)
 	deleteTopicFn         func(context.Context, string, string) (nodewire.Response, error)
@@ -288,3 +290,17 @@ type fixedPartitionManager struct {
 }
 
 func (f fixedPartitionManager) Pick(string, string, int) int { return f.picked }
+
+func (f fakePeerClient) ExtendAck(ctx context.Context, addr string, req nodewire.AckRequest) (nodewire.Response, error) {
+	if f.extendAckFn != nil {
+		return f.extendAckFn(ctx, addr, req)
+	}
+	return nodewire.Response{}, context.DeadlineExceeded
+}
+
+func (f fakePeerClient) Nack(ctx context.Context, addr string, req nodewire.AckRequest) (nodewire.Response, error) {
+	if f.nackFn != nil {
+		return f.nackFn(ctx, addr, req)
+	}
+	return nodewire.Response{}, context.DeadlineExceeded
+}

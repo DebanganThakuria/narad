@@ -317,11 +317,16 @@ func runClientAck(args []string) error {
 	fs := newClientFlagSet("ack <topic>")
 	addr := fs.String("addr", defaultAddr(), "HTTP base URL")
 	handle := fs.String("handle", "", `receipt handle from a prior consume; if empty, read from stdin`)
+	extend := fs.Bool("extend", false, "renew the visibility window instead of acking (keep the lease)")
+	nack := fs.Bool("nack", false, "release the reservation for immediate redelivery instead of acking")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return clientUsageErr("usage: narad client ack [--handle H] <topic>  (handle from stdin if omitted)")
+		return clientUsageErr("usage: narad client ack [--handle H] [--extend | --nack] <topic>  (handle from stdin if omitted)")
+	}
+	if *extend && *nack {
+		return clientUsageErr("--extend and --nack are mutually exclusive")
 	}
 
 	h := strings.TrimSpace(*handle)
@@ -337,10 +342,19 @@ func runClientAck(args []string) error {
 	}
 
 	path := "/v1/topics/" + url.PathEscape(fs.Arg(0)) + "/ack?receipt_handle=" + url.QueryEscape(h)
+	outcome := "acked"
+	switch {
+	case *extend:
+		path += "&extend=true"
+		outcome = "extended"
+	case *nack:
+		path += "&extend=0"
+		outcome = "nacked"
+	}
 	if err := newHTTPClient(*addr).postNoBody(path, nil); err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "acked")
+	fmt.Fprintln(os.Stderr, outcome)
 	return nil
 }
 
@@ -395,6 +409,8 @@ func printClientUsage(w io.Writer) {
 	fmt.Fprintln(w, "  produce [--key K] <topic>                  produce a record (body from stdin)")
 	fmt.Fprintln(w, "  consume [flags] <topic>                    --wait D --partition P --offset O")
 	fmt.Fprintln(w, "  ack [--handle H] <topic>                   ack a message (handle from stdin if omitted)")
+	fmt.Fprintln(w, "    --extend                                   renew the visibility window instead (keep the lease)")
+	fmt.Fprintln(w, "    --nack                                     release for immediate redelivery instead")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Common flags:")
 	fmt.Fprintln(w, "  --addr URL   server URL (default: http://localhost:7942 or $NARAD_ADDR)")

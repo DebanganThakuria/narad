@@ -621,9 +621,23 @@ from the handle for routing without any shared key.
 | 204 | Acked. |
 | 400 | Malformed or missing handle. |
 | 404 | Topic does not exist. |
-| 410 | Handle no longer matches an active reservation: already committed, visibility timeout expired, or broker restarted. |
+| 410 | Handle no longer matches an active reservation: already committed, nacked, visibility timeout expired, or broker restarted. |
 | 421 | This node does not own the handle's partition (ownership changed mid-flight); retry. |
 | 503 | Out-of-order ack rejected — `max_acked_ahead_per_partition` is full; head of queue is stuck. |
+
+**Lease operations on the ack endpoint.** The optional `extend` query
+parameter turns an ack into a lease operation on the same receipt
+handle, with identical validation (a lapsed handle gets **410**):
+
+| Request | Effect |
+|---|---|
+| `POST .../ack?receipt_handle=H` | Ack: commit the message. |
+| `POST .../ack?receipt_handle=H&extend=true` | Extend: renew the visibility window to a full fresh window (`now + visibility_timeout_ms`). The handle stays valid — heartbeat this while processing runs long, then ack as usual. |
+| `POST .../ack?receipt_handle=H&extend=0` | Nack: release the reservation immediately (SQS-style visibility zero). The message is redeliverable right away under a new handle; parked long-pollers are woken. |
+
+CLI: `narad client ack --extend <topic>` / `narad client ack --nack
+<topic>`. Extensions and nacks are counted on
+`narad_ack_extended_total` and `narad_nack_total`.
 
 **Consumer pattern (CLI):**
 

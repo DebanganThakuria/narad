@@ -277,3 +277,45 @@ func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.R
 	writePeerResponse(w, res)
 	return true
 }
+
+// RouteExtendAck forwards a visibility-window extension to the owner of
+// the handle partition. Returns true if forwarded.
+func (rt *Router) RouteExtendAck(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, handle consumer.Handle) bool {
+	addr := rt.ownerAddr(topicName, handle.Partition)
+	if addr == "" {
+		return false
+	}
+	res, err := rt.peer.ExtendAck(ctx, addr, nodewire.AckRequest{
+		Topic:     topicName,
+		Partition: handle.Partition,
+		Offset:    handle.Offset,
+		Nonce:     handle.Nonce,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return true
+	}
+	writePeerResponse(w, res)
+	return true
+}
+
+// RouteNack forwards an immediate reservation release to the owner of
+// the handle partition. Returns true if forwarded.
+func (rt *Router) RouteNack(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, handle consumer.Handle) bool {
+	addr := rt.ownerAddr(topicName, handle.Partition)
+	if addr == "" {
+		return false
+	}
+	res, err := rt.peer.Nack(ctx, addr, nodewire.AckRequest{
+		Topic:     topicName,
+		Partition: handle.Partition,
+		Offset:    handle.Offset,
+		Nonce:     handle.Nonce,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return true
+	}
+	writePeerResponse(w, res)
+	return true
+}

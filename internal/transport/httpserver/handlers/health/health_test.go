@@ -195,3 +195,7 @@ func (f *fakeBroker) ReadFanoutSlab(context.Context, string, int, int64, int, in
 func (f *fakeBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutCursorStat, error) {
 	return nil, nil
 }
+
+func (f *fakeBroker) ExtendAck(context.Context, string, consumer.Handle) error { return nil }
+
+func (f *fakeBroker) Nack(context.Context, string, consumer.Handle) error { return nil }
