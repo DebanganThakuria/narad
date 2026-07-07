@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
@@ -30,8 +33,6 @@ import (
 	"github.com/debanganthakuria/narad/internal/security"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
-	"github.com/prometheus/client_golang/prometheus"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // e2eMemberDeadTimeout is deliberately generous so the controller never

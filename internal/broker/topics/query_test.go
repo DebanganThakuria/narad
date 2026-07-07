@@ -127,7 +127,7 @@ func TestGetTopicDetails_SelfOwnedPartitionsReportFullStats(t *testing.T) {
 	}
 	// Owning every partition (the single-node case) must still open and
 	// report every partition log, as before the owner-only change.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, ok := manager.logs.Peek(testTopicName, i); !ok {
 			t.Fatalf("GetTopicDetails() did not open the log for owned partition %d", i)
 		}
@@ -149,7 +149,7 @@ func TestGetTopicDetails_NoClusterIdentityOwnsEverything(t *testing.T) {
 	if len(details.Partitions) != 3 {
 		t.Fatalf("GetTopicDetails() partitions = %d, want 3", len(details.Partitions))
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, ok := manager.logs.Peek(testTopicName, i); !ok {
 			t.Fatalf("GetTopicDetails() did not open the log for partition %d", i)
 		}

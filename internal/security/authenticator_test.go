@@ -82,8 +82,10 @@ func newTestAuthenticator(t *testing.T) (*Authenticator, *fakeStore, *time.Time)
 
 func TestVerifySuccessAndCacheHit(t *testing.T) {
 	a, store, _ := newTestAuthenticator(t)
-	store.put(user.User{Username: "alice", PasswordHash: testHash(t, "s3cret"),
-		Grants: []user.Grant{{Action: user.ActionProduce, Patterns: []string{"orders-*"}}}})
+	store.put(user.User{
+		Username: "alice", PasswordHash: testHash(t, "s3cret"),
+		Grants: []user.Grant{{Action: user.ActionProduce, Patterns: []string{"orders-*"}}},
+	})
 
 	rec, err := a.Verify(context.Background(), "alice", "s3cret")
 	if err != nil {
@@ -178,8 +180,10 @@ func TestVerifyThrottleAndRefill(t *testing.T) {
 func TestGrantChangeRefreshesWithoutBcrypt(t *testing.T) {
 	a, store, _ := newTestAuthenticator(t)
 	hash := testHash(t, "s3cret")
-	store.put(user.User{Username: "alice", PasswordHash: hash,
-		Grants: []user.Grant{{Action: user.ActionProduce, Patterns: []string{"orders-*"}}}})
+	store.put(user.User{
+		Username: "alice", PasswordHash: hash,
+		Grants: []user.Grant{{Action: user.ActionProduce, Patterns: []string{"orders-*"}}},
+	})
 
 	if _, err := a.Verify(context.Background(), "alice", "s3cret"); err != nil {
 		t.Fatalf("Verify: %v", err)
@@ -187,8 +191,10 @@ func TestGrantChangeRefreshesWithoutBcrypt(t *testing.T) {
 
 	// Change grants only: same hash. The next verify re-reads the record
 	// but must not consume a throttle token (i.e. no bcrypt attempt).
-	store.put(user.User{Username: "alice", PasswordHash: hash,
-		Grants: []user.Grant{{Action: user.ActionConsume, Patterns: []string{"logs"}}}})
+	store.put(user.User{
+		Username: "alice", PasswordHash: hash,
+		Grants: []user.Grant{{Action: user.ActionConsume, Patterns: []string{"logs"}}},
+	})
 
 	rec, err := a.Verify(context.Background(), "alice", "s3cret")
 	if err != nil {

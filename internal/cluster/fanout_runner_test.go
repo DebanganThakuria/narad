@@ -37,8 +37,10 @@ func newFanoutTestEnv(t *testing.T) *fanoutTestEnv {
 	dataDir := t.TempDir()
 
 	for _, name := range []string{"parent", "child"} {
-		if err := store.CreateTopic(ctx, topic.Topic{Name: name, Partitions: 3, RetentionMs: 3_600_000,
-			VisibilityTimeoutMs: 30_000, MaxInFlightPerPartition: 64, MaxAckedAheadPerPartition: 64}); err != nil {
+		if err := store.CreateTopic(ctx, topic.Topic{
+			Name: name, Partitions: 3, RetentionMs: 3_600_000,
+			VisibilityTimeoutMs: 30_000, MaxInFlightPerPartition: 64, MaxAckedAheadPerPartition: 64,
+		}); err != nil {
 			t.Fatalf("CreateTopic(%s): %v", name, err)
 		}
 		for p := range 3 {

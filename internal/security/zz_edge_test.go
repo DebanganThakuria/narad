@@ -57,13 +57,13 @@ func TestLockoutSustainability(t *testing.T) {
 	a.now = func() time.Time { return now }
 	store.put(user.User{Username: "alice", PasswordHash: testHash(t, "right")})
 
-	for i := 0; i < bucketCapacity; i++ {
+	for i := range bucketCapacity {
 		pw := "wrong" + string(rune('a'+i))
 		a.Verify(context.Background(), "alice", pw)
 	}
 	// Attacker sends one fresh wrong pw every 12s indefinitely.
 	locked := 0
-	for round := 0; round < 20; round++ {
+	for round := range 20 {
 		now = now.Add(bucketRefillEvery)
 		pw := "atk" + string(rune('a'+round))
 		if _, err := a.Verify(context.Background(), "alice", pw); errors.Is(err, ErrThrottled) {

@@ -147,6 +147,46 @@ sequenceDiagram
 state and advances queue progress when possible. Ack durability is
 best-effort; consumers must be idempotent.
 
+## Fan-out (parent → child)
+
+Fan-out sits entirely after the produce hot path: producing to a parent
+is a normal produce, and a background cursor on each parent partition's
+owner tails the committed log and re-commits records to the attached
+children through the same commit paths the dispatcher uses. One cursor
+exists per (child, parent-partition); its persisted offset advances only
+after the child batch is durably committed.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Producer
+    participant PO as Parent Partition Owner<br/>Broker
+    participant PL as Parent Partition Log
+    participant CU as Fan-out Cursor<br/>(same pod as PL)
+    participant CF as Cursor Offset File
+    participant CO as Child Partition Owner<br/>local or via QUIC
+    participant CL as Child Partition Log
+
+    P->>PO: Produce (normal PCA produce flow)
+    PO->>PL: append + fsync + advance HWM
+
+    loop per slab (fill-or-linger)
+        CU->>PL: read committed slab from cursor offset
+        CU->>CU: re-key each record with the<br/>child's partitioner
+        CU->>CO: CommitAcceptedProduceBatch<br/>(one batch per child partition)
+        CO->>CL: append + fsync + CRC verify + advance HWM
+        CO-->>CU: committed
+        CU->>CF: persist advanced cursor offset<br/>(commit-before-advance)
+    end
+```
+
+**Guarantee boundary:** fan-out is at-least-once within the parent's
+retention window. A crash between the child commit and the cursor
+persist re-delivers the last slab (duplicates, never loss). A child that
+falls behind the parent's retention drops to the oldest retained record
+and the loss is counted on `narad_fanout_child_dropped_messages`; the
+uniform 1-hour retention floor bounds how quickly that can happen.
+
 ## Summary
 
 ```mermaid
@@ -165,6 +205,10 @@ flowchart LR
     C -->|Ack HTTP| A[Any receiving pod]
     A -->|local call or QUIC Ack| O
     O -->|commit handle| F
+
+    L -->|fan-out cursor tails committed log| FO[Fan-out cursor]
+    FO -->|re-keyed batch, local or QUIC| CO[Child partition broker]
+    CO --> CL[Child partition log]
 ```
 
 Narad node-to-node PCA RPCs use QUIC. Raft metastore replication remains

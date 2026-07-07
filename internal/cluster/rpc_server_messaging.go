@@ -84,10 +84,7 @@ func (s *RPCServer) handleConsume(payload []byte) nodewire.Response {
 	// context here (RPC frames carry no caller deadline), so an unclamped
 	// wait would park this server for however long the peer asked —
 	// defense in depth against peers that skipped the router-side clamp.
-	wait := time.Duration(req.WaitNanos)
-	if wait < 0 {
-		wait = 0
-	}
+	wait := max(time.Duration(req.WaitNanos), 0)
 	if wait > defaultMaxConsumeWait {
 		wait = defaultMaxConsumeWait
 	}

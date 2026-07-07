@@ -174,6 +174,8 @@ internal/
   cluster/                  any-pod routing + node-to-node RPC
     router.go               RouteProduce/Consume/Ack, BroadcastDeleteTopic
     produce_dispatcher.go   drains the ingress WAL to partition owners
+    fanout_runner.go        parent→child fan-out: cursor reconciler
+    fanout_cursor.go        per-(child, parentPartition) fan-out cursor loop
     rpc_server.go           node-RPC server (handles forwarded ops)
     rpc_client.go           peer client (forwards ops over QUIC)
     controller/             partition assignment, heartbeat monitor,
@@ -181,7 +183,7 @@ internal/
   transport/
     httpserver/             http.Server, router, middleware
       handlers/             *Set + shared helpers (WriteJSON, DecodeJSON, ...)
-        topics/             /v1/topics CRUD endpoints
+        topics/             /v1/topics CRUD + fan-out children endpoints
         messaging/          produce / consume / ack endpoints
         health/             /healthz, /readyz
   protocol/
@@ -663,8 +665,7 @@ producing to a normal topic; in addition, each attached child
 independently receives a copy, re-keyed with the child's own
 partitioner so **per-key ordering is preserved within each child**.
 This is not consumer groups — children are independent topics with
-their own partitions, offsets, retention, and consumers. The full
-design lives in [FANOUT.md](./FANOUT.md).
+their own partitions, offsets, retention, and consumers.
 
 ```
 POST   /v1/topics/{parent}/children            attach: {"child": "name"}
@@ -679,7 +680,26 @@ narad client topics detach <parent> <child>
 Attach/detach are admin-or-owner operations on the parent. Roles are
 exclusive and flat: a topic is `standalone`, `parent`, or `child`
 (reported by topic describe); fan-out is depth 1, a child has exactly
-one parent, and a parent holds at most 108 children.
+one parent, and a parent holds at most 108 children. All link
+invariants are enforced atomically in the Raft metastore, so no
+sequence of attach/detach/delete can ever observe a half-linked pair.
+
+**How it works.** Fan-out materializes the parent and then tails its
+committed log ("model C"): a produce to a parent is byte-for-byte a
+normal produce, so the hot path pays nothing. One **cursor** exists per
+(child, parent-partition); it runs on the node that owns the parent
+partition, reads large slabs of committed records locally
+(fill-or-linger batching), re-keys each record with the child's
+partitioner, and commits one batch per touched child partition through
+the same local/remote commit paths every produce dispatch uses. The
+cursor's offset is persisted in the parent partition's directory and
+advances only **after** the child batch is durably committed
+(commit-before-advance), which is what makes delivery at-least-once.
+Each attach stamps the link with a fresh epoch that scopes all cursor
+state, so a detach followed by a re-attach can never resume — and
+replay — a dead cursor. Cursors spread across the cluster with the
+parent partition assignments, so the write amplification divides by
+cluster size.
 
 Semantics worth knowing:
 
@@ -874,6 +894,13 @@ no CGO requirement.
   a min-heap; a background goroutine sweeps all shards every second.
   Lazy expiry during `ReserveNext` fixes the cap-blocking edge case
   immediately; the purger keeps metrics accurate between consume calls.
+* **Fan-out pays its amplification off the hot path.** Producing to a
+  fan-out parent is a normal produce; children tail the parent's
+  committed log with per-(child, partition) cursors on the parent
+  partition owners. The parent's retained log doubles as the fan-out
+  buffer (bounded by retention — hence the uniform 1-hour retention
+  floor), a lagging child stalls only itself, and cursor offsets
+  advance only after the child batch is durably committed.
 * **Operator endpoints separated from data endpoints.** `/metrics` shares
   the public listener (standard Prometheus convention); pprof is a
   separate, opt-in listener.

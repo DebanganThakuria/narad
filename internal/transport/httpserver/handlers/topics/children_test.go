@@ -174,8 +174,10 @@ func TestDetachChildHandler(t *testing.T) {
 func TestListChildrenHandlerAggregatesLag(t *testing.T) {
 	b := &fakeBroker{
 		getTopicFn: func(_ context.Context, name string) (topic.Topic, error) {
-			return topic.Topic{Name: name, Partitions: 2, Role: topic.RoleParent,
-				Children: []string{"audit", "slow", "fresh"}}, nil
+			return topic.Topic{
+				Name: name, Partitions: 2, Role: topic.RoleParent,
+				Children: []string{"audit", "slow", "fresh"},
+			}, nil
 		},
 		fanoutCursorStatsFn: func(context.Context, string) ([]topic.FanoutCursorStat, error) {
 			return []topic.FanoutCursorStat{
