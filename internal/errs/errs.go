@@ -82,6 +82,18 @@ var (
 	// ErrFanoutSchemaManaged reports a schema change on an attached
 	// child; its schema is parent-managed until detach.
 	ErrFanoutSchemaManaged = errors.New("schema is parent-managed while attached to a fan-out parent")
+
+	// ErrFanoutDelayTooLong reports a child delay the parent's
+	// retention cannot buffer: the parent must retain records for the
+	// delay plus the minimum outage-tolerance floor. Returned both at
+	// attach and when shrinking a parent's retention below an attached
+	// child's requirement.
+	ErrFanoutDelayTooLong = errors.New("delay exceeds what the parent's retention can buffer")
+
+	// ErrDelayedChildProduce reports a direct produce to a delay
+	// child. Delayed children only receive records through fan-out, so
+	// the delay holds for every record in the topic.
+	ErrDelayedChildProduce = errors.New("direct produce to a delayed child topic is not allowed")
 )
 
 // Input validation and routing.

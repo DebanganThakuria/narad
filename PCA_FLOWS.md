@@ -186,6 +186,11 @@ sequenceDiagram
     end
 ```
 
+For a **delay child** (attached with `delay_ms`), the cursor adds a due
+gate: it delivers only records with `commitTime + delay <= now`, and —
+because commit times are monotonic per partition — an undue head means
+the cursor simply sleeps until it becomes due (O(1) while idle).
+
 **Guarantee boundary:** fan-out is at-least-once within the parent's
 retention window. A crash between the child commit and the cursor
 persist re-delivers the last slab (duplicates, never loss). A child that

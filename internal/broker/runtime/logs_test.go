@@ -67,8 +67,8 @@ func (f *runtimeFakeMetastore) DeleteTopic(_ context.Context, name string) error
 	return nil
 }
 
-func (f *runtimeFakeMetastore) AttachChild(context.Context, string, string) error { return nil }
-func (f *runtimeFakeMetastore) DetachChild(context.Context, string, string) error { return nil }
+func (f *runtimeFakeMetastore) AttachChild(context.Context, string, string, int64) error { return nil }
+func (f *runtimeFakeMetastore) DetachChild(context.Context, string, string) error        { return nil }
 
 func (f *runtimeFakeMetastore) GetTopic(_ context.Context, name string) (topic.Topic, error) {
 	if f.getTopicErr != nil {
@@ -132,8 +132,8 @@ func (m runtimeMetastoreWithoutAssignments) ListTopics(ctx context.Context, opts
 	return m.inner.ListTopics(ctx, opts)
 }
 
-func (m runtimeMetastoreWithoutAssignments) AttachChild(ctx context.Context, parent, child string) error {
-	return m.inner.AttachChild(ctx, parent, child)
+func (m runtimeMetastoreWithoutAssignments) AttachChild(ctx context.Context, parent, child string, delayMs int64) error {
+	return m.inner.AttachChild(ctx, parent, child, delayMs)
 }
 
 func (m runtimeMetastoreWithoutAssignments) DetachChild(ctx context.Context, parent, child string) error {

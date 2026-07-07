@@ -82,6 +82,11 @@ type Metrics struct {
 	FanoutChildDroppedMessages *prometheus.CounterVec // parent, child — records lost to drop-behind (aged out) or corruption; alert on any non-zero rate
 	FanoutBatchRecords         prometheus.Histogram   // records per committed fan-out batch
 	FanoutBatchBytes           prometheus.Histogram   // payload bytes per committed fan-out batch
+	// FanoutDueLagSeconds is the delay-child health signal: how far
+	// behind the DUE frontier the cursor runs (0 while the head is not
+	// due yet). Offset lag is permanently non-zero for a delay child
+	// by design; alert on this instead. parent, child, partition.
+	FanoutDueLagSeconds *prometheus.GaugeVec
 
 	// Errors
 	ErrorsTotal *prometheus.CounterVec // component, kind
@@ -361,6 +366,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			Buckets:   prometheus.ExponentialBuckets(1024, 4, 10), // 1KiB .. 256MiB
 		}),
 
+		FanoutDueLagSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "fanout",
+			Name:      "due_lag_seconds",
+			Help:      "How far behind the due frontier a delay child's cursor runs (0 while the head is not due yet). The delay-child health signal.",
+		}, []string{"parent", "child", "partition"}),
+
 		ErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Name:      "errors_total",
@@ -389,7 +401,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.FsyncDurationSeconds, m.HighWatermarkPersistSeconds,
 		m.RetentionBytesDeleted, m.RetentionMessagesDeleted, m.RetentionRunSeconds,
 		m.FanoutLagMessages, m.FanoutCommittedTotal, m.FanoutChildDroppedMessages,
-		m.FanoutBatchRecords, m.FanoutBatchBytes,
+		m.FanoutBatchRecords, m.FanoutBatchBytes, m.FanoutDueLagSeconds,
 		m.ErrorsTotal,
 		m.BootDurationSeconds,
 	)
@@ -423,7 +435,7 @@ func (m *Metrics) pruneTopicSeries(topic string) {
 	// Fan-out collectors label the topic as "parent" or "child"; prune
 	// both directions so neither side of a deleted link leaks series.
 	for _, c := range []interface{ DeletePartialMatch(prometheus.Labels) int }{
-		m.FanoutLagMessages, m.FanoutCommittedTotal, m.FanoutChildDroppedMessages,
+		m.FanoutLagMessages, m.FanoutCommittedTotal, m.FanoutChildDroppedMessages, m.FanoutDueLagSeconds,
 	} {
 		c.DeletePartialMatch(prometheus.Labels{"parent": topic})
 		c.DeletePartialMatch(prometheus.Labels{"child": topic})

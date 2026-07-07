@@ -99,7 +99,7 @@ func (f *fakeMetastore) ListTopics(_ context.Context, _ metastore.ListOptions) (
 // AttachChild/DetachChild mimic the FSM's link mutations closely enough
 // for Manager-level tests; invariant enforcement is covered by the
 // metastore's own tests.
-func (f *fakeMetastore) AttachChild(_ context.Context, parent, child string) error {
+func (f *fakeMetastore) AttachChild(_ context.Context, parent, child string, delayMs int64) error {
 	if f.attachChildErr != nil {
 		return f.attachChildErr
 	}
@@ -112,7 +112,7 @@ func (f *fakeMetastore) AttachChild(_ context.Context, parent, child string) err
 		return errs.ErrNotFound
 	}
 	p.Role, p.Children = topic.RoleParent, append(p.Children, child)
-	c.Role, c.Parent = topic.RoleChild, parent
+	c.Role, c.Parent, c.FanoutDelayMs = topic.RoleChild, parent, delayMs
 	f.topics[parent], f.topics[child] = p, c
 	return nil
 }
@@ -130,7 +130,7 @@ func (f *fakeMetastore) DetachChild(_ context.Context, parent, child string) err
 	if len(p.Children) == 0 {
 		p.Children, p.Role = nil, topic.RoleStandalone
 	}
-	c.Role, c.Parent = topic.RoleStandalone, ""
+	c.Role, c.Parent, c.FanoutDelayMs = topic.RoleStandalone, "", 0
 	f.topics[parent], f.topics[child] = p, c
 	return nil
 }

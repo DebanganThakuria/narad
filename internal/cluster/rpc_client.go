@@ -28,7 +28,7 @@ type peerClient interface {
 	CreateTopic(context.Context, string, []byte) (nodewire.Response, error)
 	AlterTopic(context.Context, string, string, []byte) (nodewire.Response, error)
 	DeleteTopic(context.Context, string, string) (nodewire.Response, error)
-	AttachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error)
+	AttachChild(ctx context.Context, addr, parent, child string, delayMs int64) (nodewire.Response, error)
 	DetachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error)
 	FanoutCursors(ctx context.Context, addr, parent string) ([]topic.FanoutCursorStat, error)
 	PurgeTopic(context.Context, string, string) (nodewire.Response, error)
@@ -122,8 +122,8 @@ func (c *PeerClient) PurgeTopic(ctx context.Context, addr, topicName string) (no
 }
 
 // AttachChild forwards a fan-out attach to the peer at addr (the leader).
-func (c *PeerClient) AttachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error) {
-	payload, err := nodewire.EncodeChildLinkRequest(nodewire.OpAttachChild, nodewire.ChildLinkRequest{Parent: parent, Child: child})
+func (c *PeerClient) AttachChild(ctx context.Context, addr, parent, child string, delayMs int64) (nodewire.Response, error) {
+	payload, err := nodewire.EncodeChildLinkRequest(nodewire.OpAttachChild, nodewire.ChildLinkRequest{Parent: parent, Child: child, DelayMs: delayMs})
 	return c.send(ctx, addr, "attach_child", payload, err)
 }
 

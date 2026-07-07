@@ -166,7 +166,7 @@ func (e *Engine) replayRead(topicName string, partitionIdx int, offset int64, to
 	if offset >= log.HighWatermark() {
 		return topic.Message{}, false, nil
 	}
-	key, payload, err := log.ReadKeyed(offset)
+	key, committedAt, payload, err := log.ReadKeyed(offset)
 	if err != nil {
 		return topic.Message{}, false, err
 	}
@@ -176,7 +176,7 @@ func (e *Engine) replayRead(topicName string, partitionIdx int, offset int64, to
 		Offset:    offset,
 		Key:       key,
 		Payload:   payload,
-		Timestamp: time.Now().Unix(),
+		Timestamp: committedAt / 1000,
 	}, true, nil
 }
 
@@ -204,7 +204,7 @@ func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions 
 			if !res.Reserved {
 				break // partition empty, fully reserved, or in-flight cap hit — try the next one
 			}
-			key, payload, err := log.ReadKeyed(res.Offset)
+			key, committedAt, payload, err := log.ReadKeyed(res.Offset)
 			if err != nil {
 				// A permanently-unreadable (corrupt) frame, or a gap left by a
 				// corrupt frame recovery skipped, would otherwise head-of-line-block
@@ -233,7 +233,7 @@ func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions 
 				Offset:    res.Offset,
 				Key:       key,
 				Payload:   payload,
-				Timestamp: time.Now().Unix(),
+				Timestamp: committedAt / 1000,
 				ReceiptHandle: consumer.EncodeHandle(consumer.Handle{
 					Partition: idx,
 					Offset:    res.Offset,

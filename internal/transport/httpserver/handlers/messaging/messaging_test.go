@@ -1141,10 +1141,10 @@ func TestParseConsumeQuery(t *testing.T) {
 	}
 }
 
-func (f *fakeBroker) AttachChild(context.Context, string, string) error { return nil }
-func (f *fakeBroker) DetachChild(context.Context, string, string) error { return nil }
+func (f *fakeBroker) AttachChild(context.Context, string, string, int64) error { return nil }
+func (f *fakeBroker) DetachChild(context.Context, string, string) error        { return nil }
 
-func (f *fakeBroker) ReadFanoutSlab(context.Context, string, int, int64, int, int64, time.Duration) (topic.FanoutSlab, error) {
+func (f *fakeBroker) ReadFanoutSlab(context.Context, string, int, topic.FanoutReadOpts) (topic.FanoutSlab, error) {
 	return topic.FanoutSlab{}, nil
 }
 
@@ -1152,7 +1152,7 @@ func (f *fakeBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutC
 	return nil, nil
 }
 
-func (f *fakeRouter) RouteAttachChild(context.Context, http.ResponseWriter, *http.Request, string, string) bool {
+func (f *fakeRouter) RouteAttachChild(context.Context, http.ResponseWriter, *http.Request, string, string, int64) bool {
 	return false
 }
 

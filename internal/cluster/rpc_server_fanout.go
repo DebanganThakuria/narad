@@ -17,7 +17,7 @@ func (s *RPCServer) handleAttachChild(payload []byte) nodewire.Response {
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid attach child request: "+err.Error())
 	}
-	if err := s.broker.AttachChild(rpcRequestContext(), req.Parent, req.Child); err != nil {
+	if err := s.broker.AttachChild(rpcRequestContext(), req.Parent, req.Child, req.DelayMs); err != nil {
 		return s.brokerError("attach child", err)
 	}
 	t, err := s.broker.GetTopic(rpcRequestContext(), req.Parent)

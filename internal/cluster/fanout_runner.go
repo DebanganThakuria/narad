@@ -40,6 +40,13 @@ const (
 	defaultFanoutLongPollWait      = time.Second
 	defaultFanoutRetryBackoff      = time.Second
 
+	// defaultFanoutDueWakeCap bounds how long a delay cursor sleeps
+	// waiting for its head record to become due, so lag gauges and the
+	// cursor's view of metadata stay reasonably fresh even under very
+	// long delays. Context cancellation (detach/shutdown) wakes the
+	// sleep immediately regardless.
+	defaultFanoutDueWakeCap = 30 * time.Second
+
 	// fanoutCursorFileSweepEvery is how many reconcile passes elapse
 	// between sweeps for orphaned cursor files (links that dissolved
 	// while this node was down). The sweep walks partition directories,
@@ -80,7 +87,7 @@ func (c FanoutConfig) withDefaults() FanoutConfig {
 // fanoutBroker is the slice of the local broker the runner needs: the
 // local slab read from a parent partition and the local child commit.
 type fanoutBroker interface {
-	ReadFanoutSlab(ctx context.Context, topicName string, partitionIdx int, fromOffset int64, maxRecords int, maxBytes int64, wait time.Duration) (topic.FanoutSlab, error)
+	ReadFanoutSlab(ctx context.Context, topicName string, partitionIdx int, opts topic.FanoutReadOpts) (topic.FanoutSlab, error)
 	CommitAcceptedProduceBatch(ctx context.Context, records []ingress.ProduceRecord) ([]int64, error)
 }
 
@@ -275,6 +282,7 @@ func (r *FanoutRunner) cleanUpStoppedCursor(key fanoutCursorKey, byName map[stri
 	}
 	if r.metrics != nil {
 		r.metrics.FanoutLagMessages.DeletePartialMatch(map[string]string{"parent": key.parent, "child": key.child})
+		r.metrics.FanoutDueLagSeconds.DeletePartialMatch(map[string]string{"parent": key.parent, "child": key.child})
 	}
 }
 

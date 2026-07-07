@@ -20,6 +20,22 @@ import (
 	"github.com/debanganthakuria/narad/internal/errs"
 )
 
+// checkDelayAgainstRetention enforces the delay-buffer invariant: the
+// parent must retain records for the child's delay PLUS the minimum
+// outage-tolerance floor, so a delay child always has at least the
+// floor's worth of slack before drop-behind can eat a due record.
+// Keep-forever parents (retention zero) buffer any delay.
+func checkDelayAgainstRetention(delayMs, parentRetentionMs int64, parentName string) error {
+	if delayMs <= 0 || parentRetentionMs == 0 {
+		return nil
+	}
+	if parentRetentionMs < delayMs+topic.MinRetentionMs {
+		return fmt.Errorf("%w: parent %q retention (%dms) must be at least delay (%dms) + %dms",
+			errs.ErrFanoutDelayTooLong, parentName, parentRetentionMs, delayMs, topic.MinRetentionMs)
+	}
+	return nil
+}
+
 func getTopicRecord(tx *bolt.Tx, name string) (topic.Topic, error) {
 	raw := tx.Bucket(bucketTopics).Get([]byte(name))
 	if raw == nil {
@@ -81,6 +97,12 @@ func (f *fsmState) applyAttachChild(data []byte) error {
 			return fmt.Errorf("%w: %q already has %d children",
 				errs.ErrFanoutChildLimit, p.Parent, len(parent.Children))
 		}
+		if p.DelayMs < 0 {
+			return fmt.Errorf("%w: delay_ms must be >= 0", errs.ErrFanoutRoleConflict)
+		}
+		if err := checkDelayAgainstRetention(p.DelayMs, parent.RetentionMs, p.Parent); err != nil {
+			return err
+		}
 
 		schemaAdopted, err = reconcileSchemasForAttach(tx, p.Parent, p.Child)
 		if err != nil {
@@ -92,6 +114,7 @@ func (f *fsmState) applyAttachChild(data []byte) error {
 		child.Role = topic.RoleChild
 		child.Parent = p.Parent
 		child.AttachEpoch = p.Epoch
+		child.FanoutDelayMs = p.DelayMs
 		if err := putTopicRecord(tx, parent); err != nil {
 			return err
 		}
@@ -136,6 +159,7 @@ func (f *fsmState) applyDetachChild(data []byte) error {
 		child.Role = topic.RoleStandalone
 		child.Parent = ""
 		child.AttachEpoch = ""
+		child.FanoutDelayMs = 0
 		if err := putTopicRecord(tx, parent); err != nil {
 			return err
 		}

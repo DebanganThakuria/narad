@@ -42,7 +42,7 @@ func TestQueueConsumeSkipsCorruptFrameEndToEnd(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	for i, p := range payloads {
-		if _, err := log1.Append(storage.EncodeKeyedRecord("", p)); err != nil {
+		if _, err := log1.Append(storage.EncodeKeyedRecord("", 1, p)); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 		if err := log1.Sync(); err != nil { // one Sync => one frame
@@ -149,7 +149,7 @@ func TestQueueConsumeCorruptSkipDeliversNextRecordInSamePoll(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	for i, p := range payloads {
-		if _, err := log1.Append(storage.EncodeKeyedRecord("", p)); err != nil {
+		if _, err := log1.Append(storage.EncodeKeyedRecord("", 1, p)); err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
 		if err := log1.Sync(); err != nil { // one Sync => one frame

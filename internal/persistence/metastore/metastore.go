@@ -27,7 +27,7 @@ type Metastore interface {
 	GetTopic(ctx context.Context, name string) (topic.Topic, error)
 	ListTopics(ctx context.Context, opts ListOptions) ([]topic.Topic, string, error)
 
-	AttachChild(ctx context.Context, parent, child string) error
+	AttachChild(ctx context.Context, parent, child string, delayMs int64) error
 	DetachChild(ctx context.Context, parent, child string) error
 
 	PutSchema(ctx context.Context, topic string, version int, schema []byte) error

@@ -81,15 +81,19 @@ func runClientTopicsChildren(args []string) error {
 func runClientTopicsAttach(args []string) error {
 	fs := newClientFlagSet("topics attach <parent> <child>")
 	addr := fs.String("addr", defaultAddr(), "HTTP base URL")
+	delayMs := fs.Int64("delay-ms", 0, "deliver each record only after this delay past its parent commit (0 = immediate)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 2 {
-		return clientUsageErr("usage: narad client topics attach <parent> <child>")
+		return clientUsageErr("usage: narad client topics attach [--delay-ms N] <parent> <child>")
+	}
+	body := map[string]any{"child": fs.Arg(1)}
+	if *delayMs > 0 {
+		body["delay_ms"] = *delayMs
 	}
 	return newHTTPClient(*addr).postAndPrint(
-		"/v1/topics/"+url.PathEscape(fs.Arg(0))+"/children",
-		map[string]any{"child": fs.Arg(1)})
+		"/v1/topics/"+url.PathEscape(fs.Arg(0))+"/children", body)
 }
 
 // runClientTopicsDetach detaches a child topic from its parent.
@@ -404,6 +408,7 @@ func printClientUsage(w io.Writer) {
 	fmt.Fprintln(w, "    --max-acked-ahead-per-partition N          update out-of-order ack cap")
 	fmt.Fprintln(w, "    --schema-file F | --schema-file -          register a JSON Schema (file or stdin)")
 	fmt.Fprintln(w, "  topics attach <parent> <child>             attach a fan-out child to a parent")
+	fmt.Fprintln(w, "    --delay-ms N                               make it a delay child (delivered after N ms)")
 	fmt.Fprintln(w, "  topics detach <parent> <child>             detach a fan-out child")
 	fmt.Fprintln(w, "  topics children <parent>                   list fan-out children with lag")
 	fmt.Fprintln(w, "  produce [--key K] <topic>                  produce a record (body from stdin)")

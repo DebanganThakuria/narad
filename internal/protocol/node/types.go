@@ -97,10 +97,12 @@ type TopicNameRequest struct {
 }
 
 // ChildLinkRequest is the shared shape for fan-out attach and detach,
-// forwarded to the cluster leader.
+// forwarded to the cluster leader. DelayMs is meaningful on attach
+// only.
 type ChildLinkRequest struct {
-	Parent string
-	Child  string
+	Parent  string
+	Child   string
+	DelayMs int64
 }
 
 // TopicPartitionStatsRequest asks the owner of one partition for its

@@ -44,7 +44,12 @@ func fsmCreateTopic(t *testing.T, f *fsmState, name string) {
 
 func fsmAttach(t *testing.T, f *fsmState, parent, child string) error {
 	t.Helper()
-	data, err := json.Marshal(childLinkPayload{Parent: parent, Child: child})
+	return fsmAttachDelay(t, f, parent, child, 0)
+}
+
+func fsmAttachDelay(t *testing.T, f *fsmState, parent, child string, delayMs int64) error {
+	t.Helper()
+	data, err := json.Marshal(childLinkPayload{Parent: parent, Child: child, DelayMs: delayMs})
 	if err != nil {
 		t.Fatalf("Marshal link: %v", err)
 	}
@@ -489,5 +494,98 @@ func TestFanout_ZeroRoleReadsAsStandalone(t *testing.T) {
 	}
 	if p := fsmGetTopic(t, f, "plain"); !p.IsParent() {
 		t.Fatalf("parent after attach = %+v, want role=parent", p)
+	}
+}
+
+// Delay children: the parent's retention must buffer delay + the
+// minimum floor, the delay is stored on the child, cleared at detach,
+// and preserved across config updates.
+func TestApplyAttachChild_DelayInvariants(t *testing.T) {
+	f := newFanoutFSM(t)
+	// Parent retains 2h; the floor is 1h, so delays up to 1h fit.
+	data, _ := json.Marshal(topic.Topic{Name: "parent", Partitions: 3, RetentionMs: 2 * topic.MinRetentionMs})
+	if err := f.applyCreateTopic(data); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	fsmCreateTopic(t, f, "child")
+
+	if err := fsmAttachDelay(t, f, "parent", "child", -1); !errors.Is(err, errs.ErrFanoutRoleConflict) {
+		t.Fatalf("negative delay error = %v, want %v", err, errs.ErrFanoutRoleConflict)
+	}
+	if err := fsmAttachDelay(t, f, "parent", "child", topic.MinRetentionMs+1); !errors.Is(err, errs.ErrFanoutDelayTooLong) {
+		t.Fatalf("oversized delay error = %v, want %v", err, errs.ErrFanoutDelayTooLong)
+	}
+	if err := fsmAttachDelay(t, f, "parent", "child", topic.MinRetentionMs); err != nil {
+		t.Fatalf("attach with fitting delay: %v", err)
+	}
+	child := fsmGetTopic(t, f, "child")
+	if child.FanoutDelayMs != topic.MinRetentionMs {
+		t.Fatalf("child delay = %d, want %d", child.FanoutDelayMs, topic.MinRetentionMs)
+	}
+
+	// Config updates preserve the delay like every link field.
+	update := child
+	update.MaxInFlightPerPartition = 7
+	update.FanoutDelayMs = 0 // hostile payload
+	raw, _ := json.Marshal(update)
+	if err := f.applyUpdateTopic(raw); err != nil {
+		t.Fatalf("update child config: %v", err)
+	}
+	if got := fsmGetTopic(t, f, "child"); got.FanoutDelayMs != topic.MinRetentionMs || got.MaxInFlightPerPartition != 7 {
+		t.Fatalf("child after config update = %+v, want delay preserved", got)
+	}
+
+	// Detach clears the delay.
+	if err := fsmDetach(t, f, "parent", "child"); err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+	if got := fsmGetTopic(t, f, "child"); got.FanoutDelayMs != 0 {
+		t.Fatalf("child delay after detach = %d, want 0", got.FanoutDelayMs)
+	}
+}
+
+// A keep-forever parent (retention zero) buffers any delay.
+func TestApplyAttachChild_KeepForeverParentBuffersAnyDelay(t *testing.T) {
+	f := newFanoutFSM(t)
+	data, _ := json.Marshal(topic.Topic{Name: "parent", Partitions: 3}) // RetentionMs 0
+	if err := f.applyCreateTopic(data); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	fsmCreateTopic(t, f, "child")
+	if err := fsmAttachDelay(t, f, "parent", "child", 30*24*topic.MinRetentionMs); err != nil {
+		t.Fatalf("attach huge delay under keep-forever parent: %v", err)
+	}
+}
+
+// Shrinking a parent's retention below an attached child's requirement
+// (delay + floor) must be rejected: the retained log is the delay
+// buffer.
+func TestApplyUpdateTopic_RejectsRetentionBelowChildDelay(t *testing.T) {
+	f := newFanoutFSM(t)
+	parent := topic.Topic{Name: "parent", Partitions: 3, RetentionMs: 3 * topic.MinRetentionMs}
+	data, _ := json.Marshal(parent)
+	if err := f.applyCreateTopic(data); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	fsmCreateTopic(t, f, "child")
+	if err := fsmAttachDelay(t, f, "parent", "child", topic.MinRetentionMs); err != nil { // needs >= 2h
+		t.Fatalf("attach: %v", err)
+	}
+
+	shrunk := parent
+	shrunk.RetentionMs = 2*topic.MinRetentionMs - 1
+	raw, _ := json.Marshal(shrunk)
+	if err := f.applyUpdateTopic(raw); !errors.Is(err, errs.ErrFanoutDelayTooLong) {
+		t.Fatalf("retention shrink error = %v, want %v", err, errs.ErrFanoutDelayTooLong)
+	}
+	if got := fsmGetTopic(t, f, "parent"); got.RetentionMs != 3*topic.MinRetentionMs {
+		t.Fatalf("parent retention changed despite rejection: %d", got.RetentionMs)
+	}
+
+	// Shrinking to exactly the requirement is allowed.
+	shrunk.RetentionMs = 2 * topic.MinRetentionMs
+	raw, _ = json.Marshal(shrunk)
+	if err := f.applyUpdateTopic(raw); err != nil {
+		t.Fatalf("valid retention shrink: %v", err)
 	}
 }

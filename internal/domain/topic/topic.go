@@ -54,6 +54,14 @@ type Topic struct {
 	// detach followed by a re-attach starts fresh at the parent's tail
 	// instead of resuming — and replaying from — the dead cursor.
 	AttachEpoch string `json:"attach_epoch,omitempty"`
+	// FanoutDelayMs makes this a DELAY child (child role only): every
+	// parent record is delivered to it only once
+	// parentCommitTime + FanoutDelayMs has passed. Zero means deliver
+	// immediately (a normal child). Set at attach, immutable while
+	// attached (detach and re-attach to change it), cleared at detach.
+	// Direct produce to a delayed child is rejected — the delay is a
+	// guarantee of the topic, not a property of one write path.
+	FanoutDelayMs int64 `json:"fanout_delay_ms,omitempty"`
 }
 
 // Role classifies a topic's position in fan-out. Roles are exclusive

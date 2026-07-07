@@ -56,7 +56,7 @@ type Router interface {
 	RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) bool
 	BroadcastDeleteTopic(ctx context.Context, topicName string) error
 	RouteGetTopic(ctx context.Context, r *http.Request, topicName string, details topic.Details) (topic.Details, error)
-	RouteAttachChild(ctx context.Context, w http.ResponseWriter, r *http.Request, parent, child string) bool
+	RouteAttachChild(ctx context.Context, w http.ResponseWriter, r *http.Request, parent, child string, delayMs int64) bool
 	RouteDetachChild(ctx context.Context, w http.ResponseWriter, r *http.Request, parent, child string) bool
 	// CollectFanoutCursors merges remote owners' fan-out cursor stats
 	// with the local ones; ok=false means some owners were unreachable

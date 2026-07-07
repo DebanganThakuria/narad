@@ -38,7 +38,7 @@ func newFanoutTestEnv(t *testing.T) *fanoutTestEnv {
 
 	for _, name := range []string{"parent", "child"} {
 		if err := store.CreateTopic(ctx, topic.Topic{
-			Name: name, Partitions: 3, RetentionMs: 3_600_000,
+			Name: name, Partitions: 3, RetentionMs: 7_200_000,
 			VisibilityTimeoutMs: 30_000, MaxInFlightPerPartition: 64, MaxAckedAheadPerPartition: 64,
 		}); err != nil {
 			t.Fatalf("CreateTopic(%s): %v", name, err)
@@ -97,11 +97,11 @@ func (env *fanoutTestEnv) childRecords(t *testing.T) map[int][]topic.KeyedRecord
 			t.Fatalf("logs.Get(child, %d): %v", p, err)
 		}
 		for off := int64(0); off < log.HighWatermark(); off++ {
-			key, payload, err := log.ReadKeyed(off)
+			key, committedAt, payload, err := log.ReadKeyed(off)
 			if err != nil {
 				t.Fatalf("ReadKeyed(child/%d@%d): %v", p, off, err)
 			}
-			out[p] = append(out[p], topic.KeyedRecord{Key: key, Payload: payload})
+			out[p] = append(out[p], topic.KeyedRecord{Key: key, CommittedAtUnixMs: committedAt, Payload: payload})
 		}
 	}
 	return out
@@ -136,7 +136,7 @@ func TestFanoutRunnerFansOutWithReKeyingAndNoBackfill(t *testing.T) {
 	// Records produced before the attach must never reach the child.
 	env.produceToParent(t, 0, 5, 3, 1000)
 
-	if err := env.store.AttachChild(ctx, "parent", "child"); err != nil {
+	if err := env.store.AttachChild(ctx, "parent", "child", 0); err != nil {
 		t.Fatalf("AttachChild: %v", err)
 	}
 	child, err := env.store.GetTopic(ctx, "child")
@@ -241,7 +241,7 @@ func TestFanoutRunnerDetachStopsAndCleansUp(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := env.store.AttachChild(ctx, "parent", "child"); err != nil {
+	if err := env.store.AttachChild(ctx, "parent", "child", 0); err != nil {
 		t.Fatalf("AttachChild: %v", err)
 	}
 	child, _ := env.store.GetTopic(ctx, "child")
@@ -283,7 +283,7 @@ func TestFanoutRunnerDetachStopsAndCleansUp(t *testing.T) {
 	// Traffic produced while detached must not reach the child, even
 	// after a re-attach (fresh epoch ⇒ fresh tail anchor).
 	env.produceToParent(t, 0, 3, 2, 500)
-	if err := env.store.AttachChild(ctx, "parent", "child"); err != nil {
+	if err := env.store.AttachChild(ctx, "parent", "child", 0); err != nil {
 		t.Fatalf("re-AttachChild: %v", err)
 	}
 	reChild, _ := env.store.GetTopic(ctx, "child")
@@ -305,7 +305,7 @@ func TestFanoutRunnerResumesFromPersistedCursor(t *testing.T) {
 	env := newFanoutTestEnv(t)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	if err := env.store.AttachChild(ctx, "parent", "child"); err != nil {
+	if err := env.store.AttachChild(ctx, "parent", "child", 0); err != nil {
 		t.Fatalf("AttachChild: %v", err)
 	}
 	child, _ := env.store.GetTopic(ctx, "child")
@@ -345,7 +345,7 @@ func TestFanoutRunnerRespawnsSelfExitedCursor(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := env.store.AttachChild(ctx, "parent", "child"); err != nil {
+	if err := env.store.AttachChild(ctx, "parent", "child", 0); err != nil {
 		t.Fatalf("AttachChild: %v", err)
 	}
 	child, _ := env.store.GetTopic(ctx, "child")
@@ -410,4 +410,80 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// A delay child receives records only after parentCommitTime + delay:
+// nothing before due, everything (re-keyed, in order) after.
+func TestFanoutRunnerDelayChildDeliversOnlyWhenDue(t *testing.T) {
+	env := newFanoutTestEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const delayMs = 900
+	if err := env.store.AttachChild(ctx, "parent", "child", delayMs); err != nil {
+		t.Fatalf("AttachChild: %v", err)
+	}
+	child, _ := env.store.GetTopic(ctx, "child")
+	if child.FanoutDelayMs != delayMs {
+		t.Fatalf("child delay = %d, want %d", child.FanoutDelayMs, delayMs)
+	}
+
+	runner := env.newRunner(t)
+	runner.Reconcile(ctx)
+	defer func() { cancel(); runner.wg.Wait() }()
+	waitForCursorFiles(t, env, child.AttachEpoch, 3)
+
+	produced := time.Now()
+	env.produceToParent(t, 0, 4, 2, 0)
+
+	// Well before due: nothing may have been delivered.
+	time.Sleep(300 * time.Millisecond)
+	if got := env.childTotal(t); got != 0 {
+		t.Fatalf("child received %d records before the delay elapsed", got)
+	}
+
+	// After due: everything arrives, keys intact.
+	env.waitChildTotal(t, 4)
+	if elapsed := time.Since(produced); elapsed < delayMs*time.Millisecond {
+		t.Fatalf("records delivered after %v, before the %dms delay", elapsed, delayMs)
+	}
+	for p, recs := range env.childRecords(t) {
+		for _, rec := range recs {
+			if rec.Key == "" {
+				t.Fatalf("delayed record in partition %d lost its key", p)
+			}
+		}
+	}
+}
+
+// Records produced at different times drain in due order: an early
+// record becomes due (and is delivered) while a later one is still
+// blocked.
+func TestFanoutRunnerDelayChildDrainsInDueOrder(t *testing.T) {
+	env := newFanoutTestEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const delayMs = 800
+	if err := env.store.AttachChild(ctx, "parent", "child", delayMs); err != nil {
+		t.Fatalf("AttachChild: %v", err)
+	}
+	child, _ := env.store.GetTopic(ctx, "child")
+
+	runner := env.newRunner(t)
+	runner.Reconcile(ctx)
+	defer func() { cancel(); runner.wg.Wait() }()
+	waitForCursorFiles(t, env, child.AttachEpoch, 3)
+
+	env.produceToParent(t, 0, 2, 1, 0)
+	time.Sleep(600 * time.Millisecond)
+	env.produceToParent(t, 0, 2, 1, 100) // due ~600ms after the first pair
+
+	// First pair due, second still blocked.
+	env.waitChildTotal(t, 2)
+	if got := env.childTotal(t); got != 2 {
+		t.Fatalf("child has %d records, want exactly the first due pair (2)", got)
+	}
+	// Then the second pair becomes due too.
+	env.waitChildTotal(t, 4)
 }
