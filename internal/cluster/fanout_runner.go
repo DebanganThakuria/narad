@@ -209,10 +209,18 @@ func (r *FanoutRunner) Reconcile(ctx context.Context) {
 	// Stop cursors that should no longer run here. A cancelled cursor
 	// finishes draining in the background; its map entry (and, for a
 	// dissolved link, its offset file) is reaped on a later pass once
-	// done — never while it might still write.
+	// done — never while it might still write. A cursor that exited on
+	// its own while still desired (e.g. a transient cursor-file write
+	// failure stopped it) is reaped too, so the spawn loop below
+	// respawns it from its last persisted offset.
 	draining := map[fanoutCursorKey]bool{}
 	for key, h := range r.cursors {
 		if _, want := desired[key]; want {
+			select {
+			case <-h.done:
+				delete(r.cursors, key)
+			default:
+			}
 			continue
 		}
 		h.cancel()

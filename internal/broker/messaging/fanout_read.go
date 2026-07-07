@@ -141,8 +141,11 @@ func (e *Engine) readFanoutSlabOnce(log fanoutLog, fromOffset int64, maxRecords 
 	}
 	if start < oldest {
 		// The requested range aged out of retention (drop-behind):
-		// skip to the oldest record still available.
-		slab.DroppedBehind = min(oldest, hwm) - start
+		// skip to the oldest record still available. Only offsets that
+		// were VISIBLE count as dropped — after a crash the recovered
+		// HWM can sit below the cursor, making this difference
+		// negative for ranges that never became consumable.
+		slab.DroppedBehind = max(0, min(oldest, hwm)-start)
 		start = oldest
 	}
 	slab.NextOffset = start

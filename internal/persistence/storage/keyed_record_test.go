@@ -136,6 +136,27 @@ func TestReadKeyedHonorsKeyedFromMarker(t *testing.T) {
 	}
 }
 
+// A marker above the recovered tail (power loss dropped unsynced
+// frames the first open counted) must clamp down: records rewritten at
+// those offsets are envelope-aware.
+func TestKeyedFromMarkerClampsToRecoveredTail(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "p00000")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := writeOffsetFile(dir, keyedFromFileName, 42); err != nil {
+		t.Fatalf("seed marker: %v", err)
+	}
+	l, err := NewLog(dir, Options{FlushInterval: time.Millisecond})
+	if err != nil {
+		t.Fatalf("NewLog: %v", err)
+	}
+	defer l.Close()
+	if got := l.KeyedFromOffset(); got != 0 {
+		t.Fatalf("KeyedFromOffset() = %d, want 0 (clamped to the empty recovered tail)", got)
+	}
+}
+
 // A fresh partition is fully keyed from offset zero.
 func TestNewLogStampsKeyedFromZero(t *testing.T) {
 	l, err := NewLog(filepath.Join(t.TempDir(), "p00000"), Options{FlushInterval: time.Millisecond})

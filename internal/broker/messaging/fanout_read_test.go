@@ -194,4 +194,15 @@ func TestReadFanoutSlabOnceDropBehindAndCorruptSkip(t *testing.T) {
 	if slab.DroppedBehind != 15 || slab.NextOffset != 20 || len(slab.Records) != 0 {
 		t.Fatalf("slab = dropped=%d next=%d records=%d, want 15/20/0", slab.DroppedBehind, slab.NextOffset, len(slab.Records))
 	}
+
+	// A crash-regressed HWM below the cursor must never yield a
+	// negative drop count: only offsets that were visible count.
+	log = &fakeFanoutLog{oldest: 10, hwm: 2}
+	slab, err = e.readFanoutSlabOnce(log, 5, 100, 1<<20)
+	if err != nil {
+		t.Fatalf("readFanoutSlabOnce(regressed hwm): %v", err)
+	}
+	if slab.DroppedBehind != 0 || slab.NextOffset != 10 || len(slab.Records) != 0 {
+		t.Fatalf("slab = dropped=%d next=%d records=%d, want 0/10/0", slab.DroppedBehind, slab.NextOffset, len(slab.Records))
+	}
 }

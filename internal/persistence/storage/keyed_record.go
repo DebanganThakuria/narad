@@ -85,6 +85,12 @@ func (l *Log) KeyedFromOffset() int64 { return l.keyedFrom }
 // pre-existing records keep reading as bare payloads. nextOffset is the
 // recovered append position: everything below it was written before
 // this open.
+//
+// A loaded marker is clamped to the recovered tail: a power loss can
+// drop unsynced pre-envelope frames the first open counted when it
+// stamped the marker, and any record later written at those offsets is
+// envelope-aware — reading it as a bare payload would serve envelope
+// bytes to consumers.
 func loadOrInitKeyedFrom(dir string, nextOffset int64) (int64, error) {
 	path := filepath.Join(dir, keyedFromFileName)
 	buf, err := os.ReadFile(path)
@@ -93,10 +99,16 @@ func loadOrInitKeyedFrom(dir string, nextOffset int64) (int64, error) {
 		if len(buf) != 8 {
 			return 0, fmt.Errorf("storage: keyed.from marker corrupt: got %d bytes, want 8", len(buf))
 		}
-		return int64(binary.BigEndian.Uint64(buf)), nil
+		return min(int64(binary.BigEndian.Uint64(buf)), nextOffset), nil
 	case errors.Is(err, os.ErrNotExist):
 		if err := writeOffsetFile(dir, keyedFromFileName, nextOffset); err != nil {
 			return 0, fmt.Errorf("storage: persist keyed.from marker: %w", err)
+		}
+		// The rename is not durable until the directory entry is
+		// synced; losing the marker after enveloped records were
+		// appended would silently misread them as bare payloads.
+		if err := syncDir(dir); err != nil {
+			return 0, fmt.Errorf("storage: sync dir for keyed.from marker: %w", err)
 		}
 		return nextOffset, nil
 	default:

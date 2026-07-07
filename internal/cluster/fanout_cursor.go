@@ -62,9 +62,9 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 			}
 			continue
 		}
-		if dropped > 0 {
-			r.recordDropped(key, dropped)
-		}
+		// Dropped/skipped offsets are recorded only once the cursor has
+		// durably advanced past them (below); recording before a failed
+		// commit would re-count the same range on every retry.
 		if len(batch) == 0 {
 			// Nothing to fan out, but the cursor may still advance past
 			// a dropped/skipped range; persist so a restart doesn't
@@ -73,6 +73,9 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 				next = newNext
 				if !r.persistCursor(key, partitionDir, next) {
 					return
+				}
+				if dropped > 0 {
+					r.recordDropped(key, dropped)
 				}
 			}
 			r.recordLag(key, hwm-next)
@@ -92,6 +95,9 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 		next = newNext
 		if !r.persistCursor(key, partitionDir, next) {
 			return
+		}
+		if dropped > 0 {
+			r.recordDropped(key, dropped)
 		}
 		if r.metrics != nil {
 			r.metrics.FanoutCommittedTotal.WithLabelValues(key.parent, key.child).Add(float64(len(batch)))

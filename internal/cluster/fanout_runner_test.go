@@ -334,6 +334,51 @@ func TestFanoutRunnerResumesFromPersistedCursor(t *testing.T) {
 	}
 }
 
+// A cursor that exits on its own (e.g. a transient cursor-file write
+// failure) while its link is still desired must be reaped and
+// respawned by the next reconcile pass, resuming from its persisted
+// offset — not left as a dead map entry that stalls fan-out forever.
+func TestFanoutRunnerRespawnsSelfExitedCursor(t *testing.T) {
+	env := newFanoutTestEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := env.store.AttachChild(ctx, "parent", "child"); err != nil {
+		t.Fatalf("AttachChild: %v", err)
+	}
+	child, _ := env.store.GetTopic(ctx, "child")
+
+	runner := env.newRunner(t)
+	runner.Reconcile(ctx)
+	defer func() { cancel(); runner.wg.Wait() }()
+	waitForCursorFiles(t, env, child.AttachEpoch, 3)
+
+	env.produceToParent(t, 0, 2, 2, 0)
+	env.waitChildTotal(t, 2)
+
+	// Kill the partition-0 cursor as if it had hit a fatal-looking
+	// transient error; its done handle stays in the map.
+	runner.mu.Lock()
+	var victim *fanoutCursorHandle
+	for k, h := range runner.cursors {
+		if k.partition == 0 {
+			victim = h
+			h.cancel()
+			break
+		}
+	}
+	runner.mu.Unlock()
+	if victim == nil {
+		t.Fatal("no cursor for parent partition 0")
+	}
+	<-victim.done
+
+	// The next reconcile must reap the dead handle and respawn.
+	runner.Reconcile(ctx)
+	env.produceToParent(t, 0, 3, 2, 100)
+	env.waitChildTotal(t, 5)
+}
+
 func waitForCursorFiles(t *testing.T, env *fanoutTestEnv, epoch string, want int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
