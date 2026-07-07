@@ -19,12 +19,18 @@ import (
 
 type attachChildRequest struct {
 	Child string `json:"child"`
+	// DelayMs, when positive, makes the child a delay child: records
+	// are delivered only once parentCommitTime+DelayMs has passed.
+	DelayMs int64 `json:"delay_ms,omitempty"`
 }
 
 // Validate implements handlers.Validator.
 func (r attachChildRequest) Validate() error {
 	if r.Child == "" {
 		return errors.New("child is required")
+	}
+	if r.DelayMs < 0 {
+		return errors.New("delay_ms must be >= 0")
 	}
 	return nil
 }
@@ -45,11 +51,11 @@ func AttachChild(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 		if s.Deps.Router != nil {
-			if s.Deps.Router.RouteAttachChild(r.Context(), w, r, parent, req.Child) {
+			if s.Deps.Router.RouteAttachChild(r.Context(), w, r, parent, req.Child, req.DelayMs) {
 				return
 			}
 		}
-		if err := s.Deps.Broker.AttachChild(r.Context(), parent, req.Child); err != nil {
+		if err := s.Deps.Broker.AttachChild(r.Context(), parent, req.Child, req.DelayMs); err != nil {
 			s.WriteBrokerError(w, "attach child", err)
 			return
 		}
@@ -93,9 +99,11 @@ func DetachChild(s *handlers.Set) http.HandlerFunc {
 // not reported (owner unreachable or cursor not anchored yet), making
 // the lag a lower bound.
 type childStatus struct {
-	Name        string `json:"name"`
-	LagMessages int64  `json:"lag_messages"`
-	LagComplete bool   `json:"lag_complete"`
+	Name string `json:"name"`
+	// DelayMs is the child's fan-out delay (0 = immediate).
+	DelayMs     int64 `json:"delay_ms"`
+	LagMessages int64 `json:"lag_messages"`
+	LagComplete bool  `json:"lag_complete"`
 }
 
 type childrenResponse struct {
@@ -145,6 +153,9 @@ func ListChildren(s *handlers.Set) http.HandlerFunc {
 		resp := childrenResponse{Parent: parent, Children: []childStatus{}}
 		for _, child := range t.Children {
 			status := childStatus{Name: child}
+			if childRecord, err := s.Deps.Broker.GetTopic(r.Context(), child); err == nil {
+				status.DelayMs = childRecord.FanoutDelayMs
+			}
 			if agg := byChild[child]; agg != nil {
 				status.LagMessages = agg.lag
 				status.LagComplete = remoteComplete && agg.cursors == t.Partitions

@@ -145,6 +145,8 @@ func (s *RPCServer) brokerError(op string, err error) nodewire.Response {
 		errors.Is(err, errs.ErrFanoutChildLimit),
 		errors.Is(err, errs.ErrFanoutSchemaMismatch),
 		errors.Is(err, errs.ErrFanoutSchemaManaged),
+		errors.Is(err, errs.ErrFanoutDelayTooLong),
+		errors.Is(err, errs.ErrDelayedChildProduce),
 		errors.Is(err, errs.ErrAlreadyExists):
 		return errorResponse(http.StatusConflict, err.Error())
 	case errors.Is(err, errs.ErrNotFound):

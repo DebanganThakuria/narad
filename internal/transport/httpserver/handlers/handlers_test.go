@@ -288,10 +288,10 @@ func TestWriteBrokerErrorMapsStatuses(t *testing.T) {
 	}
 }
 
-func (f *fakeBroker) AttachChild(context.Context, string, string) error { return nil }
-func (f *fakeBroker) DetachChild(context.Context, string, string) error { return nil }
+func (f *fakeBroker) AttachChild(context.Context, string, string, int64) error { return nil }
+func (f *fakeBroker) DetachChild(context.Context, string, string) error        { return nil }
 
-func (f *fakeBroker) ReadFanoutSlab(context.Context, string, int, int64, int, int64, time.Duration) (topic.FanoutSlab, error) {
+func (f *fakeBroker) ReadFanoutSlab(context.Context, string, int, topic.FanoutReadOpts) (topic.FanoutSlab, error) {
 	return topic.FanoutSlab{}, nil
 }
 

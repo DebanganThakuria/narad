@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
@@ -56,6 +58,14 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 	if err != nil {
 		return 0, 0, err
 	}
+	// A delayed child only receives records through fan-out — a direct
+	// produce would bypass the delay the topic guarantees.
+	if t.IsChild() && t.FanoutDelayMs > 0 {
+		if e.metrics != nil {
+			e.metrics.ProduceRejectionsTotal.WithLabelValues(topicName, "delayed_child").Inc()
+		}
+		return 0, 0, errs.ErrDelayedChildProduce
+	}
 
 	if err = e.validateProducePayload(ctx, topicName, payload); err != nil {
 		if e.metrics != nil {
@@ -73,7 +83,7 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 	}
 
 	offset, err := e.logs.WithProduceLockResult(topicName, partIdx, func(log *storage.Log) (int64, error) {
-		return e.appendAndCommit(log, storage.EncodeKeyedRecord(key, payload))
+		return e.appendAndCommit(log, storage.EncodeKeyedRecord(key, time.Now().UnixMilli(), payload))
 	})
 	if err != nil {
 		e.recordProduceError(err)

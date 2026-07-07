@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
@@ -38,7 +39,7 @@ func (e *Engine) CommitAcceptedProduce(ctx context.Context, record ingress.Produ
 	}
 
 	offset, err := e.logs.WithProduceLockResult(record.Topic, record.TargetPartition, func(log *storage.Log) (int64, error) {
-		return e.appendAndCommit(log, storage.EncodeKeyedRecord(record.Key, record.Payload))
+		return e.appendAndCommit(log, storage.EncodeKeyedRecord(record.Key, time.Now().UnixMilli(), record.Payload))
 	})
 	if err != nil {
 		return 0, err
@@ -80,11 +81,13 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 	}
 
 	// Records are stored wrapped in the keyed envelope so the produce
-	// key survives the commit (fan-out re-keys parent records with it;
-	// consumers get Message.Key populated from it).
+	// key and commit time survive the commit (fan-out re-keys parent
+	// records with the key, delay children anchor due times to the
+	// commit time, and consumers get Message.Key/Timestamp from them).
+	committedAt := time.Now().UnixMilli()
 	payloads := make([][]byte, len(records))
 	for i, record := range records {
-		payloads[i] = storage.EncodeKeyedRecord(record.Key, record.Payload)
+		payloads[i] = storage.EncodeKeyedRecord(record.Key, committedAt, record.Payload)
 	}
 
 	var offsets []int64

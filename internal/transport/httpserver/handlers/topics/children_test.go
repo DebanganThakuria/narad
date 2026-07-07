@@ -23,9 +23,10 @@ func attachRequest(parent, body string) *http.Request {
 
 func TestAttachChildHandler(t *testing.T) {
 	var gotParent, gotChild string
+	var gotDelay int64
 	b := &fakeBroker{
-		attachChildFn: func(_ context.Context, parent, child string) error {
-			gotParent, gotChild = parent, child
+		attachChildFn: func(_ context.Context, parent, child string, delayMs int64) error {
+			gotParent, gotChild, gotDelay = parent, child, delayMs
 			return nil
 		},
 		getTopicFn: func(_ context.Context, name string) (topic.Topic, error) {
@@ -38,8 +39,8 @@ func TestAttachChildHandler(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s, want 200", w.Code, w.Body)
 	}
-	if gotParent != "orders" || gotChild != "audit" {
-		t.Fatalf("AttachChild called with (%q, %q), want (orders, audit)", gotParent, gotChild)
+	if gotParent != "orders" || gotChild != "audit" || gotDelay != 0 {
+		t.Fatalf("AttachChild called with (%q, %q, %d), want (orders, audit, 0)", gotParent, gotChild, gotDelay)
 	}
 	var resp topic.Topic
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
@@ -78,7 +79,7 @@ func TestAttachChildHandlerMapsFanoutConflicts(t *testing.T) {
 		errs.ErrFanoutSchemaMismatch,
 		errs.ErrAlreadyExists,
 	} {
-		b := &fakeBroker{attachChildFn: func(context.Context, string, string) error {
+		b := &fakeBroker{attachChildFn: func(context.Context, string, string, int64) error {
 			return fmt.Errorf("%w: details", sentinel)
 		}}
 		w := httptest.NewRecorder()
@@ -88,7 +89,7 @@ func TestAttachChildHandlerMapsFanoutConflicts(t *testing.T) {
 		}
 	}
 
-	b := &fakeBroker{attachChildFn: func(context.Context, string, string) error {
+	b := &fakeBroker{attachChildFn: func(context.Context, string, string, int64) error {
 		return errs.ErrTopicNotFound
 	}}
 	w := httptest.NewRecorder()
@@ -100,7 +101,7 @@ func TestAttachChildHandlerMapsFanoutConflicts(t *testing.T) {
 
 func TestAttachDetachForwardToLeader(t *testing.T) {
 	b := &fakeBroker{
-		attachChildFn: func(context.Context, string, string) error {
+		attachChildFn: func(context.Context, string, string, int64) error {
 			t.Fatal("local AttachChild called despite router forwarding")
 			return nil
 		},
@@ -111,7 +112,7 @@ func TestAttachDetachForwardToLeader(t *testing.T) {
 	}
 	forwarded := 0
 	router := &fakeRouter{
-		routeAttachChildFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, parent, child string) bool {
+		routeAttachChildFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, parent, child string, delayMs int64) bool {
 			forwarded++
 			w.WriteHeader(http.StatusOK)
 			return true
@@ -279,5 +280,60 @@ func TestAttachDetachEnforceOwnerOrAdmin(t *testing.T) {
 				t.Fatalf("detach as %s: status = %d, want %d", tc.name, dw.Code, wantDetach)
 			}
 		})
+	}
+}
+
+func TestAttachChildHandlerPassesDelay(t *testing.T) {
+	var gotDelay int64
+	b := &fakeBroker{
+		attachChildFn: func(_ context.Context, _, _ string, delayMs int64) error {
+			gotDelay = delayMs
+			return nil
+		},
+		getTopicFn: func(_ context.Context, name string) (topic.Topic, error) {
+			return topic.Topic{Name: name, Role: topic.RoleParent, Children: []string{"audit"}}, nil
+		},
+	}
+	w := httptest.NewRecorder()
+	AttachChild(newTestSet(b))(w, attachRequest("orders", `{"child":"audit","delay_ms":3600000}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200", w.Code, w.Body)
+	}
+	if gotDelay != 3600000 {
+		t.Fatalf("delay passed to broker = %d, want 3600000", gotDelay)
+	}
+
+	w = httptest.NewRecorder()
+	AttachChild(newTestSet(b))(w, attachRequest("orders", `{"child":"audit","delay_ms":-1}`))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("negative delay status = %d, want 400", w.Code)
+	}
+}
+
+func TestListChildrenReportsDelay(t *testing.T) {
+	b := &fakeBroker{
+		getTopicFn: func(_ context.Context, name string) (topic.Topic, error) {
+			if name == "orders" {
+				return topic.Topic{
+					Name: name, Partitions: 2, Role: topic.RoleParent,
+					Children: []string{"slow"},
+				}, nil
+			}
+			return topic.Topic{Name: name, Role: topic.RoleChild, Parent: "orders", FanoutDelayMs: 60_000}, nil
+		},
+	}
+	r := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/children", nil)
+	r.SetPathValue("parent", "orders")
+	w := httptest.NewRecorder()
+	ListChildren(newTestSet(b))(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp childrenResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Children) != 1 || resp.Children[0].DelayMs != 60_000 {
+		t.Fatalf("children = %+v, want delay_ms 60000", resp.Children)
 	}
 }

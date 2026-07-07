@@ -24,6 +24,7 @@ import (
 
 func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 	partitionDir := storage.TopicPartitionDir(r.dataDir, key.parent, key.partition)
+	delayMs := key.delayMs
 
 	next := topic.FanoutTailOffset
 	if cur, ok, err := storage.ReadFanoutCursor(partitionDir, key.child); err != nil {
@@ -37,7 +38,8 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 		// tail (no backfill), and persist that starting point BEFORE
 		// fanning anything so a crash cannot re-anchor at a later tail
 		// and silently skip the window in between.
-		slab, err := r.broker.ReadFanoutSlab(ctx, key.parent, key.partition, topic.FanoutTailOffset, 1, 1, 0)
+		slab, err := r.broker.ReadFanoutSlab(ctx, key.parent, key.partition,
+			topic.FanoutReadOpts{FromOffset: topic.FanoutTailOffset, MaxRecords: 1, MaxBytes: 1})
 		if err != nil {
 			r.cursorReadError(key, err)
 			return
@@ -49,10 +51,11 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 	}
 
 	r.logger.Info("fanout cursor started",
-		"parent", key.parent, "partition", key.partition, "child", key.child, "from_offset", next)
+		"parent", key.parent, "partition", key.partition, "child", key.child,
+		"from_offset", next, "delay_ms", delayMs)
 
 	for ctx.Err() == nil {
-		batch, batchBytes, newNext, hwm, dropped, err := r.readBatch(ctx, key, next)
+		batch, batchBytes, newNext, hwm, dropped, blockedUntil, err := r.readBatch(ctx, key, next, delayMs)
 		if err != nil {
 			if !r.cursorReadRetryable(key, err) {
 				return
@@ -62,6 +65,7 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 			}
 			continue
 		}
+		r.recordDueLag(key, delayMs, batch, blockedUntil)
 		// Dropped/skipped offsets are recorded only once the cursor has
 		// durably advanced past them (below); recording before a failed
 		// commit would re-count the same range on every retry.
@@ -79,6 +83,18 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 				}
 			}
 			r.recordLag(key, hwm-next)
+			// Blocked on a record that is not due yet: nothing newer
+			// can be due either, so sleep until the head's due time
+			// (capped so lag gauges and metadata stay fresh; ctx
+			// cancellation wakes the sleep on detach/shutdown).
+			if blockedUntil > 0 {
+				until := time.Until(time.UnixMilli(blockedUntil + delayMs))
+				if until > 0 {
+					if !sleepCtx(ctx, min(until, defaultFanoutDueWakeCap)) {
+						return
+					}
+				}
+			}
 			continue
 		}
 
@@ -110,14 +126,27 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 
 // readBatch reads one fill-or-linger batch starting at next: an
 // initial long-polled slab, topped up until the batch fills or the
-// linger deadline fires. Returns the records, their payload bytes, the
-// cursor position after them, the parent HWM observed, and how many
-// offsets were lost (aged out or unreadable).
-func (r *FanoutRunner) readBatch(ctx context.Context, key fanoutCursorKey, next int64) ([]topic.KeyedRecord, int64, int64, int64, int64, error) {
-	slab, err := r.broker.ReadFanoutSlab(ctx, key.parent, key.partition, next,
-		r.cfg.MaxBatchRecords, r.cfg.MaxBatchBytes, defaultFanoutLongPollWait)
+// linger deadline fires. For a delay child every read is gated on the
+// due cutoff (records committed no later than now - delay). Returns
+// the records, their payload bytes, the cursor position after them,
+// the parent HWM observed, how many offsets were lost (aged out or
+// unreadable), and — when the read stopped at an undue record — that
+// record's commit time.
+func (r *FanoutRunner) readBatch(ctx context.Context, key fanoutCursorKey, next, delayMs int64) ([]topic.KeyedRecord, int64, int64, int64, int64, int64, error) {
+	opts := topic.FanoutReadOpts{
+		FromOffset: next,
+		MaxRecords: r.cfg.MaxBatchRecords,
+		MaxBytes:   r.cfg.MaxBatchBytes,
+		Wait:       defaultFanoutLongPollWait,
+	}
+	if delayMs > 0 {
+		// Clamp so an extreme delay can never yield a non-positive
+		// cutoff, which the reader would treat as "no gate".
+		opts.MaxCommittedAt = max(time.Now().UnixMilli()-delayMs, 1)
+	}
+	slab, err := r.broker.ReadFanoutSlab(ctx, key.parent, key.partition, opts)
 	if err != nil {
-		return nil, 0, 0, 0, 0, err
+		return nil, 0, 0, 0, 0, 0, err
 	}
 	records := slab.Records
 	var bytes int64
@@ -127,23 +156,33 @@ func (r *FanoutRunner) readBatch(ctx context.Context, key fanoutCursorKey, next 
 	cursor := slab.NextOffset
 	hwm := slab.HighWatermark
 	dropped := slab.DroppedBehind + slab.SkippedCorrupt
+	blockedUntil := slab.BlockedUntilUnixMs
 
-	if len(records) > 0 && r.cfg.Linger > 0 {
+	if len(records) > 0 && blockedUntil == 0 && r.cfg.Linger > 0 {
 		deadline := time.Now().Add(r.cfg.Linger)
 		for ctx.Err() == nil && len(records) < r.cfg.MaxBatchRecords && bytes < r.cfg.MaxBatchBytes {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				break
 			}
-			more, err := r.broker.ReadFanoutSlab(ctx, key.parent, key.partition, cursor,
-				r.cfg.MaxBatchRecords-len(records), r.cfg.MaxBatchBytes-bytes, remaining)
+			moreOpts := topic.FanoutReadOpts{
+				FromOffset: cursor,
+				MaxRecords: r.cfg.MaxBatchRecords - len(records),
+				MaxBytes:   r.cfg.MaxBatchBytes - bytes,
+				Wait:       remaining,
+			}
+			if delayMs > 0 {
+				moreOpts.MaxCommittedAt = max(time.Now().UnixMilli()-delayMs, 1)
+			}
+			more, err := r.broker.ReadFanoutSlab(ctx, key.parent, key.partition, moreOpts)
 			if err != nil {
 				// The initial slab is intact; fan it out and surface the
 				// error on the next read.
 				break
 			}
 			if len(more.Records) == 0 && more.DroppedBehind == 0 && more.SkippedCorrupt == 0 {
-				break // linger expired with nothing new
+				blockedUntil = more.BlockedUntilUnixMs
+				break // linger expired (or the due gate closed) with nothing new
 			}
 			records = append(records, more.Records...)
 			for _, rec := range more.Records {
@@ -152,9 +191,33 @@ func (r *FanoutRunner) readBatch(ctx context.Context, key fanoutCursorKey, next 
 			cursor = more.NextOffset
 			hwm = more.HighWatermark
 			dropped += more.DroppedBehind + more.SkippedCorrupt
+			if more.BlockedUntilUnixMs > 0 {
+				blockedUntil = more.BlockedUntilUnixMs
+				break
+			}
 		}
 	}
-	return records, bytes, cursor, hwm, dropped, nil
+	return records, bytes, cursor, hwm, dropped, blockedUntil, nil
+}
+
+// recordDueLag updates the due-lag gauge for delay children: how far
+// behind the DUE frontier the cursor is running. Zero when the head of
+// the log is not due yet (caught up) or the partition is drained. The
+// raw offset-lag gauge stays permanently non-zero for a delay child by
+// design; due-lag is the health signal to alert on.
+func (r *FanoutRunner) recordDueLag(key fanoutCursorKey, delayMs int64, batch []topic.KeyedRecord, blockedUntil int64) {
+	if r.metrics == nil || delayMs <= 0 {
+		return
+	}
+	lagSeconds := 0.0
+	if len(batch) > 0 {
+		due := batch[0].CommittedAtUnixMs + delayMs
+		if behindMs := time.Now().UnixMilli() - due; behindMs > 0 {
+			lagSeconds = float64(behindMs) / 1000
+		}
+	}
+	_ = blockedUntil // blocked head ⇒ due frontier not reached ⇒ lag 0
+	r.metrics.FanoutDueLagSeconds.WithLabelValues(key.parent, key.child, fanoutPartitionLabel(key.partition)).Set(lagSeconds)
 }
 
 // commitBatch re-keys the batch with the child's partitioner and

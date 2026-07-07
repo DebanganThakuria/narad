@@ -117,6 +117,8 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 		errors.Is(err, errs.ErrFanoutChildLimit),
 		errors.Is(err, errs.ErrFanoutSchemaMismatch),
 		errors.Is(err, errs.ErrFanoutSchemaManaged),
+		errors.Is(err, errs.ErrFanoutDelayTooLong),
+		errors.Is(err, errs.ErrDelayedChildProduce),
 		errors.Is(err, errs.ErrAlreadyExists):
 		s.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errs.ErrNotFound):

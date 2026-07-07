@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
+	"github.com/debanganthakuria/narad/internal/errs"
 )
 
 // AcceptProduce validates a produce request and durably accepts it into
@@ -19,6 +20,14 @@ func (e *Engine) AcceptProduce(ctx context.Context, topicName, key string, paylo
 	t, err := e.getTopic(ctx, topicName)
 	if err != nil {
 		return ingress.AcceptedProduce{}, err
+	}
+	// A delayed child only receives records through fan-out — a direct
+	// produce would bypass the delay the topic guarantees.
+	if t.IsChild() && t.FanoutDelayMs > 0 {
+		if e.metrics != nil {
+			e.metrics.ProduceRejectionsTotal.WithLabelValues(topicName, "delayed_child").Inc()
+		}
+		return ingress.AcceptedProduce{}, errs.ErrDelayedChildProduce
 	}
 
 	if err = e.validateProducePayload(ctx, topicName, payload); err != nil {

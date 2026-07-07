@@ -29,7 +29,7 @@ func TestAttachDetachChildThroughRaft(t *testing.T) {
 	parentVerBefore := s.TopicVersion("parent")
 	childVerBefore := s.TopicVersion("child")
 
-	if err := s.AttachChild(ctx, "parent", "child"); err != nil {
+	if err := s.AttachChild(ctx, "parent", "child", 0); err != nil {
 		t.Fatalf("AttachChild: %v", err)
 	}
 
@@ -55,13 +55,13 @@ func TestAttachDetachChildThroughRaft(t *testing.T) {
 	}
 
 	// Business errors must surface through the Raft apply.
-	if err := s.AttachChild(ctx, "parent", "child"); !errors.Is(err, metastore.ErrAlreadyExists) {
+	if err := s.AttachChild(ctx, "parent", "child", 0); !errors.Is(err, metastore.ErrAlreadyExists) {
 		t.Fatalf("duplicate AttachChild error = %v, want %v", err, metastore.ErrAlreadyExists)
 	}
-	if err := s.AttachChild(ctx, "parent", "ghost"); !errors.Is(err, metastore.ErrNotFound) {
+	if err := s.AttachChild(ctx, "parent", "ghost", 0); !errors.Is(err, metastore.ErrNotFound) {
 		t.Fatalf("AttachChild(ghost) error = %v, want %v", err, metastore.ErrNotFound)
 	}
-	if err := s.AttachChild(ctx, "child", "parent"); !errors.Is(err, errs.ErrFanoutRoleConflict) {
+	if err := s.AttachChild(ctx, "child", "parent", 0); !errors.Is(err, errs.ErrFanoutRoleConflict) {
 		t.Fatalf("reversed AttachChild error = %v, want %v", err, errs.ErrFanoutRoleConflict)
 	}
 

@@ -35,7 +35,7 @@ type fakeBroker struct {
 	getTopicFn                func(context.Context, string) (topic.Topic, error)
 	getTopicDetailsFn         func(context.Context, string) (topic.Details, error)
 	listTopicsFn              func(context.Context, metastore.ListOptions) ([]topic.Topic, string, error)
-	attachChildFn             func(context.Context, string, string) error
+	attachChildFn             func(context.Context, string, string, int64) error
 	detachChildFn             func(context.Context, string, string) error
 	fanoutCursorStatsFn       func(context.Context, string) ([]topic.FanoutCursorStat, error)
 }
@@ -46,7 +46,7 @@ type fakeRouter struct {
 	routeDeleteTopicFn     func(context.Context, http.ResponseWriter, *http.Request, string) bool
 	broadcastDeleteTopicFn func(context.Context, string) error
 	routeGetTopicFn        func(context.Context, *http.Request, string, topic.Details) (topic.Details, error)
-	routeAttachChildFn     func(context.Context, http.ResponseWriter, *http.Request, string, string) bool
+	routeAttachChildFn     func(context.Context, http.ResponseWriter, *http.Request, string, string, int64) bool
 	routeDetachChildFn     func(context.Context, http.ResponseWriter, *http.Request, string, string) bool
 }
 
@@ -983,11 +983,11 @@ func TestAlterHandlerAppliesOperationsInOrder(t *testing.T) {
 	}
 }
 
-func (f *fakeBroker) AttachChild(ctx context.Context, parent, child string) error {
+func (f *fakeBroker) AttachChild(ctx context.Context, parent, child string, delayMs int64) error {
 	if f.attachChildFn == nil {
 		return nil
 	}
-	return f.attachChildFn(ctx, parent, child)
+	return f.attachChildFn(ctx, parent, child, delayMs)
 }
 
 func (f *fakeBroker) DetachChild(ctx context.Context, parent, child string) error {
@@ -997,7 +997,7 @@ func (f *fakeBroker) DetachChild(ctx context.Context, parent, child string) erro
 	return f.detachChildFn(ctx, parent, child)
 }
 
-func (f *fakeBroker) ReadFanoutSlab(context.Context, string, int, int64, int, int64, time.Duration) (topic.FanoutSlab, error) {
+func (f *fakeBroker) ReadFanoutSlab(context.Context, string, int, topic.FanoutReadOpts) (topic.FanoutSlab, error) {
 	return topic.FanoutSlab{}, nil
 }
 
@@ -1008,11 +1008,11 @@ func (f *fakeBroker) FanoutCursorStats(ctx context.Context, parent string) ([]to
 	return f.fanoutCursorStatsFn(ctx, parent)
 }
 
-func (f *fakeRouter) RouteAttachChild(ctx context.Context, w http.ResponseWriter, r *http.Request, parent, child string) bool {
+func (f *fakeRouter) RouteAttachChild(ctx context.Context, w http.ResponseWriter, r *http.Request, parent, child string, delayMs int64) bool {
 	if f.routeAttachChildFn == nil {
 		return false
 	}
-	return f.routeAttachChildFn(ctx, w, r, parent, child)
+	return f.routeAttachChildFn(ctx, w, r, parent, child, delayMs)
 }
 
 func (f *fakeRouter) RouteDetachChild(ctx context.Context, w http.ResponseWriter, r *http.Request, parent, child string) bool {

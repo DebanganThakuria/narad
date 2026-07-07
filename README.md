@@ -682,11 +682,11 @@ This is not consumer groups — children are independent topics with
 their own partitions, offsets, retention, and consumers.
 
 ```
-POST   /v1/topics/{parent}/children            attach: {"child": "name"}
-GET    /v1/topics/{parent}/children            list children + per-child lag
+POST   /v1/topics/{parent}/children            attach: {"child": "name", "delay_ms": 0}
+GET    /v1/topics/{parent}/children            list children + delay + per-child lag
 DELETE /v1/topics/{parent}/children/{child}    detach
 
-narad client topics attach <parent> <child>
+narad client topics attach [--delay-ms N] <parent> <child>
 narad client topics children <parent>
 narad client topics detach <parent> <child>
 ```
@@ -743,6 +743,22 @@ Semantics worth knowing:
   an attached child receives messages regardless of the producing
   user's grants. Producing to the parent and consuming from a child are
   still governed by normal RBAC.
+* **Delay children.** Attaching with a positive `delay_ms` makes the
+  child a **delay topic**: every record is delivered only once
+  `parentCommitTime + delay_ms` has passed — retry-backoff tiers,
+  scheduled reprocessing, and "give the auditor the 1h view" fall out
+  of one flag. Because commit times are monotonic per partition, the
+  cursor's due check is a head-peek-and-sleep — O(1) while idle no
+  matter how much is pending, and the pending backlog costs disk, not
+  memory. The parent's retained log is the delay buffer, so the parent
+  must retain `delay_ms + 1h` (enforced at attach AND when shrinking
+  the parent's retention). Direct produce to a delayed child returns
+  **409** — the delay is a guarantee of the topic, not of one write
+  path. The delay is immutable while attached (detach and re-attach to
+  change it) and is per-topic, not per-message. Note that a delay
+  child's offset lag is permanently non-zero by design; alert on
+  `narad_fanout_due_lag_seconds` (how far behind the DUE frontier the
+  cursor runs) instead.
 * **Capacity.** A parent sustaining `R` msg/s with `C` children costs
   roughly `R × (C + 1)` commits/s across the cluster: size the cluster
   to the fanned-out rate. Fan-out batches large slabs per child
@@ -752,9 +768,10 @@ Semantics worth knowing:
   the parent partition assignments.
 
 Health signals: `narad_fanout_lag_messages{parent,child,partition}` is
-the primary one (also surfaced as `lag_messages` in the list-children
-API), plus `narad_fanout_committed_total` and the batch-size
-histograms.
+the primary one for immediate children (also surfaced as
+`lag_messages` in the list-children API),
+`narad_fanout_due_lag_seconds` is the one for delay children, plus
+`narad_fanout_committed_total` and the batch-size histograms.
 
 ## Security (authentication & RBAC)
 

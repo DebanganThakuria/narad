@@ -27,7 +27,6 @@ package broker
 
 import (
 	"context"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
@@ -59,13 +58,16 @@ type Broker interface {
 
 	// AttachChild links child under parent for fan-out: every message
 	// produced to parent from the attach point on is also delivered to
-	// child. DetachChild unlinks; the child keeps what it received.
-	AttachChild(ctx context.Context, parent, child string) error
+	// child. A positive delayMs makes it a DELAY child: records are
+	// delivered only once parentCommitTime+delayMs has passed, and the
+	// parent's retention must buffer delay + the minimum floor.
+	// DetachChild unlinks; the child keeps what it received.
+	AttachChild(ctx context.Context, parent, child string, delayMs int64) error
 	DetachChild(ctx context.Context, parent, child string) error
 
 	// ReadFanoutSlab reads committed keyed records from a locally owned
 	// partition — the fan-out cursor engine's read primitive.
-	ReadFanoutSlab(ctx context.Context, topicName string, partitionIdx int, fromOffset int64, maxRecords int, maxBytes int64, wait time.Duration) (topic.FanoutSlab, error)
+	ReadFanoutSlab(ctx context.Context, topicName string, partitionIdx int, opts topic.FanoutReadOpts) (topic.FanoutSlab, error)
 	// FanoutCursorStats reports fan-out cursor positions for the parent
 	// partitions this node owns (lag = HighWatermark - NextOffset).
 	FanoutCursorStats(ctx context.Context, parent string) ([]topic.FanoutCursorStat, error)

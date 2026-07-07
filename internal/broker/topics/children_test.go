@@ -17,7 +17,7 @@ func TestAttachChild_ValidatesAndLinks(t *testing.T) {
 	manager := newTestManager(t, ms, nil)
 	ctx := context.Background()
 
-	if err := manager.AttachChild(ctx, "parent", "child"); err != nil {
+	if err := manager.AttachChild(ctx, "parent", "child", 0); err != nil {
 		t.Fatalf("AttachChild() error = %v", err)
 	}
 	if got := ms.topics["parent"]; !got.IsParent() || len(got.Children) != 1 {
@@ -56,7 +56,7 @@ func TestAttachChild_RejectsBadInput(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := manager.AttachChild(ctx, tc.parent, tc.child)
+			err := manager.AttachChild(ctx, tc.parent, tc.child, 0)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("AttachChild(%q, %q) error = %v, want %v", tc.parent, tc.child, err, tc.wantErr)
 			}

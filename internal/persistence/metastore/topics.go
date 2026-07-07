@@ -34,16 +34,18 @@ func (s *Store) DeleteTopic(ctx context.Context, name string) error {
 // AttachChild links child under parent for fan-out through Raft. The
 // FSM enforces every fan-out invariant atomically: both topics must
 // exist, roles are exclusive and depth 1, a child has exactly one
-// parent, the parent's child count is capped, and the child's schema
-// must be absent (it adopts the parent's) or identical to the parent's.
-// Each attach is stamped with a fresh epoch so fan-out cursor state
-// from an earlier attachment can never be resumed.
-func (s *Store) AttachChild(ctx context.Context, parent, child string) error {
+// parent, the parent's child count is capped, the child's schema must
+// be absent (it adopts the parent's) or identical to the parent's, and
+// a positive delayMs must fit inside the parent's retention (delay +
+// the minimum floor). Each attach is stamped with a fresh epoch so
+// fan-out cursor state from an earlier attachment can never be
+// resumed. The delay is immutable while attached.
+func (s *Store) AttachChild(ctx context.Context, parent, child string, delayMs int64) error {
 	epoch, err := newAttachEpoch()
 	if err != nil {
 		return err
 	}
-	return s.apply(ctx, opAttachChild, childLinkPayload{Parent: parent, Child: child, Epoch: epoch})
+	return s.apply(ctx, opAttachChild, childLinkPayload{Parent: parent, Child: child, Epoch: epoch, DelayMs: delayMs})
 }
 
 // newAttachEpoch returns a random identifier for one attach. Generated

@@ -68,7 +68,9 @@ func (f *messagingFakeMetastore) DeleteTopic(_ context.Context, name string) err
 	return nil
 }
 
-func (f *messagingFakeMetastore) AttachChild(context.Context, string, string) error { return nil }
+func (f *messagingFakeMetastore) AttachChild(context.Context, string, string, int64) error {
+	return nil
+}
 func (f *messagingFakeMetastore) DetachChild(context.Context, string, string) error { return nil }
 
 func (f *messagingFakeMetastore) GetTopic(_ context.Context, name string) (topic.Topic, error) {
@@ -385,7 +387,7 @@ func TestReplayReadReturnsMessageWhenOffsetExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if _, err := log.Append(storage.EncodeKeyedRecord("", []byte(`{"id":1}`))); err != nil {
+	if _, err := log.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 	if err := log.AdvanceHighWatermark(1); err != nil {
@@ -550,7 +552,7 @@ func TestConsumeReturnsMessageForPinnedPartition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if _, err := log.Append(storage.EncodeKeyedRecord("", []byte(`{"id":42}`))); err != nil {
+	if _, err := log.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":42}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 	if err := log.AdvanceHighWatermark(1); err != nil {
@@ -579,7 +581,7 @@ func TestAckReturnsTopicNotFoundWhenTopicDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if _, err := log.Append(storage.EncodeKeyedRecord("", []byte(`{"id":1}`))); err != nil {
+	if _, err := log.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 	if err := log.AdvanceHighWatermark(1); err != nil {
@@ -610,7 +612,7 @@ func TestAckCommitsReservedHandle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if _, err := log.Append(storage.EncodeKeyedRecord("", []byte(`{"id":1}`))); err != nil {
+	if _, err := log.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 	if err := log.AdvanceHighWatermark(1); err != nil {
@@ -637,7 +639,7 @@ func TestAckUsesVersionedTopicCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if _, err := log.Append(storage.EncodeKeyedRecord("", []byte(`{"id":1}`))); err != nil {
+	if _, err := log.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 	if err := log.AdvanceHighWatermark(1); err != nil {
@@ -672,7 +674,7 @@ func TestAckRejectsStaleHandleAfterCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if _, err := log.Append(storage.EncodeKeyedRecord("", []byte(`{"id":1}`))); err != nil {
+	if _, err := log.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 	if err := log.AdvanceHighWatermark(1); err != nil {
@@ -744,7 +746,7 @@ func TestTryQueueReadReturnsMessageFromFirstReservablePartition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(0) error = %v", err)
 	}
-	if _, err := log0.Append(storage.EncodeKeyedRecord("", []byte(`{"id":1}`))); err != nil {
+	if _, err := log0.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":1}`))); err != nil {
 		t.Fatalf("Append(0) error = %v", err)
 	}
 	if err := log0.AdvanceHighWatermark(1); err != nil {
@@ -758,7 +760,7 @@ func TestTryQueueReadReturnsMessageFromFirstReservablePartition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(1) error = %v", err)
 	}
-	if _, err := log1.Append(storage.EncodeKeyedRecord("", []byte(`{"id":2}`))); err != nil {
+	if _, err := log1.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":2}`))); err != nil {
 		t.Fatalf("Append(1) error = %v", err)
 	}
 	if err := log1.AdvanceHighWatermark(1); err != nil {
@@ -786,7 +788,7 @@ func TestConsumeScansPartitionsInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if _, err := log1.Append(storage.EncodeKeyedRecord("", []byte(`{"id":99}`))); err != nil {
+	if _, err := log1.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":99}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 	if err := log1.AdvanceHighWatermark(1); err != nil {
@@ -816,7 +818,7 @@ func TestConsumeRotatesQueueScanStartAcrossLocalPartitions(t *testing.T) {
 			t.Fatalf("Get(%d) error = %v", partition, err)
 		}
 		for offset := range 2 {
-			if _, err := log.Append(storage.EncodeKeyedRecord("", fmt.Appendf(nil, `{"partition":%d,"offset":%d}`, partition, offset))); err != nil {
+			if _, err := log.Append(storage.EncodeKeyedRecord("", 1, fmt.Appendf(nil, `{"partition":%d,"offset":%d}`, partition, offset))); err != nil {
 				t.Fatalf("Append(%d,%d) error = %v", partition, offset, err)
 			}
 		}
@@ -856,7 +858,7 @@ func TestConsumeReplayReturnsMessageForExistingOffset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if _, err := log.Append(storage.EncodeKeyedRecord("", []byte(`{"id":7}`))); err != nil {
+	if _, err := log.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":7}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 	if err := log.AdvanceHighWatermark(1); err != nil {
@@ -909,7 +911,7 @@ func TestWaitForActivityReturnsNilWhenPartitionNotifies(t *testing.T) {
 	}()
 
 	time.Sleep(20 * time.Millisecond)
-	if _, err := log.Append(storage.EncodeKeyedRecord("", []byte(`{"id":1}`))); err != nil {
+	if _, err := log.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 

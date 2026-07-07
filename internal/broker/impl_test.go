@@ -43,8 +43,8 @@ func (f *fakeMetastore) DeleteTopic(_ context.Context, name string) error {
 	return nil
 }
 
-func (f *fakeMetastore) AttachChild(context.Context, string, string) error { return nil }
-func (f *fakeMetastore) DetachChild(context.Context, string, string) error { return nil }
+func (f *fakeMetastore) AttachChild(context.Context, string, string, int64) error { return nil }
+func (f *fakeMetastore) DetachChild(context.Context, string, string) error        { return nil }
 
 func (f *fakeMetastore) GetTopic(_ context.Context, name string) (topic.Topic, error) {
 	t, ok := f.topics[name]

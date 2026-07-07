@@ -13,12 +13,12 @@ import (
 )
 
 // RouteAttachChild forwards a fan-out attach to the cluster leader.
-func (rt *Router) RouteAttachChild(ctx context.Context, w http.ResponseWriter, _ *http.Request, parent, child string) bool {
+func (rt *Router) RouteAttachChild(ctx context.Context, w http.ResponseWriter, _ *http.Request, parent, child string, delayMs int64) bool {
 	memberAddr := rt.leaderMemberAddr()
 	if memberAddr == "" {
 		return false
 	}
-	res, err := rt.peer.AttachChild(ctx, memberAddr, parent, child)
+	res, err := rt.peer.AttachChild(ctx, memberAddr, parent, child, delayMs)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return true
