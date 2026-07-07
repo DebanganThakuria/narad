@@ -147,6 +147,12 @@ sequenceDiagram
 state and advances queue progress when possible. Ack durability is
 best-effort; consumers must be idempotent.
 
+The same endpoint doubles as the lease surface: `extend=true` renews the
+reservation's visibility window in place (same handle, new deadline) and
+`extend=0` releases it for immediate redelivery (nack). Both validate
+the handle exactly like ack — a lapsed lease returns 410 and can never
+be revived.
+
 ## Fan-out (parent → child)
 
 Fan-out sits entirely after the produce hot path: producing to a parent

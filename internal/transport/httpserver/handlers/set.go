@@ -49,6 +49,8 @@ type Router interface {
 	RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) (bool, *int)
 	RouteConsumeRemote(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) (bool, bool)
 	RouteAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, handle consumer.Handle) bool
+	RouteExtendAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, handle consumer.Handle) bool
+	RouteNack(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, handle consumer.Handle) bool
 	RouteCreateTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool
 	RouteAlterTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, body []byte) bool
 	RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) bool

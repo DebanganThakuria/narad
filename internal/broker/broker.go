@@ -79,6 +79,13 @@ type Broker interface {
 	// call. The broker commits only if the handle still matches an
 	// active reservation.
 	Ack(ctx context.Context, topicName string, handle consumer.Handle) error
+	// ExtendAck renews the handle's visibility window to a full fresh
+	// window instead of committing, so a slow consumer keeps its lease.
+	// Same validation as Ack: a lapsed handle fails with ErrHandleStale.
+	ExtendAck(ctx context.Context, topicName string, handle consumer.Handle) error
+	// Nack releases the handle's reservation immediately (visibility
+	// zero): the message becomes redeliverable right away.
+	Nack(ctx context.Context, topicName string, handle consumer.Handle) error
 
 	// Snapshot returns the current runtime state of every topic and
 	// partition. Used by the metrics poller; safe to call frequently.

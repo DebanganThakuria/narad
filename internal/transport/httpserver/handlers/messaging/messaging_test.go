@@ -40,6 +40,8 @@ type fakeBroker struct {
 	acceptProducePartitions   []int
 	consumeFn                 func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error)
 	ackFn                     func(context.Context, string, consumer.Handle) error
+	extendAckFn               func(context.Context, string, consumer.Handle) error
+	nackFn                    func(context.Context, string, consumer.Handle) error
 	readyFn                   func(context.Context) error
 }
 
@@ -131,6 +133,8 @@ type fakeRouter struct {
 	routeConsumeFn     func(context.Context, http.ResponseWriter, *http.Request, string, *int) (bool, *int)
 	routeConsumeRemote func(context.Context, http.ResponseWriter, *http.Request, string) (bool, bool)
 	routeAckFn         func(context.Context, http.ResponseWriter, *http.Request, string, consumer.Handle) bool
+	routeExtendAckFn   func(context.Context, http.ResponseWriter, *http.Request, string, consumer.Handle) bool
+	routeNackFn        func(context.Context, http.ResponseWriter, *http.Request, string, consumer.Handle) bool
 	routeCreateTopicFn func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
 	routeAlterTopicFn  func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool
 }
@@ -1078,15 +1082,15 @@ func TestReceiptHandleFromRawQueryFieldCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, found, err := receiptHandleFromRawQuery(tt.rawQuery)
+			got, found, _, err := ackParamsFromRawQuery(tt.rawQuery)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatal("receiptHandleFromRawQuery() error = nil, want error")
+					t.Fatal("ackParamsFromRawQuery() error = nil, want error")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("receiptHandleFromRawQuery() error = %v", err)
+				t.Fatalf("ackParamsFromRawQuery() error = %v", err)
 			}
 			if found != tt.wantFound {
 				t.Fatalf("found = %v, want %v", found, tt.wantFound)
@@ -1158,4 +1162,32 @@ func (f *fakeRouter) RouteDetachChild(context.Context, http.ResponseWriter, *htt
 
 func (f *fakeRouter) CollectFanoutCursors(_ context.Context, _ string, local []topic.FanoutCursorStat) ([]topic.FanoutCursorStat, bool) {
 	return local, true
+}
+
+func (f *fakeBroker) ExtendAck(ctx context.Context, topicName string, handle consumer.Handle) error {
+	if f.extendAckFn == nil {
+		return nil
+	}
+	return f.extendAckFn(ctx, topicName, handle)
+}
+
+func (f *fakeBroker) Nack(ctx context.Context, topicName string, handle consumer.Handle) error {
+	if f.nackFn == nil {
+		return nil
+	}
+	return f.nackFn(ctx, topicName, handle)
+}
+
+func (f *fakeRouter) RouteExtendAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, handle consumer.Handle) bool {
+	if f.routeExtendAckFn == nil {
+		return false
+	}
+	return f.routeExtendAckFn(ctx, w, r, topicName, handle)
+}
+
+func (f *fakeRouter) RouteNack(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, handle consumer.Handle) bool {
+	if f.routeNackFn == nil {
+		return false
+	}
+	return f.routeNackFn(ctx, w, r, topicName, handle)
 }

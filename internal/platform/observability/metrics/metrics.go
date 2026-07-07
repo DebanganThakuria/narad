@@ -55,6 +55,12 @@ type Metrics struct {
 	InFlightSize   *prometheus.GaugeVec   // topic, partition
 	AckedAheadSize *prometheus.GaugeVec   // topic, partition
 	AckRejected    *prometheus.CounterVec // reason ("hmac" | "stale" | "malformed" | "topic_mismatch" | "cap")
+	// AckExtendedTotal counts visibility-window extensions granted to
+	// slow consumers (POST /ack with extend=true). topic.
+	AckExtendedTotal *prometheus.CounterVec
+	// NackTotal counts reservations released early for immediate
+	// redelivery (POST /ack with extend=0). topic.
+	NackTotal *prometheus.CounterVec
 
 	// CorruptSkippedTotal counts consumer offsets skipped because their on-disk
 	// frame was permanently unreadable (corruption). Each increment is one lost
@@ -247,6 +253,18 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:      "Ack requests rejected before commit; partitioned by reason.",
 		}, []string{"reason"}),
 
+		AckExtendedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "ack_extended_total",
+			Help:      "Visibility-window extensions granted to in-flight reservations (ack with extend=true).",
+		}, []string{"topic"}),
+
+		NackTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "nack_total",
+			Help:      "Reservations released early for immediate redelivery (ack with extend=0).",
+		}, []string{"topic"}),
+
 		CorruptSkippedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Name:      "consumer_corrupt_skipped_total",
@@ -365,7 +383,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.TopicsTotal, m.PartitionsTotal, m.DataDirSizeBytes, m.DataDirAvailableBytes,
 		m.TopicBytes, m.PartitionSizeBytes, m.Segments,
 		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
-		m.InFlightSize, m.AckedAheadSize, m.AckRejected,
+		m.InFlightSize, m.AckedAheadSize, m.AckRejected, m.AckExtendedTotal, m.NackTotal,
 		m.CorruptSkippedTotal,
 		m.FlushDurationSeconds, m.FlushBytesTotal,
 		m.FsyncDurationSeconds, m.HighWatermarkPersistSeconds,
@@ -394,7 +412,7 @@ func (m *Metrics) pruneTopicSeries(topic string) {
 		m.ConsumeWaitSeconds, m.ConsumeEmptyTotal,
 		m.TopicBytes, m.PartitionSizeBytes, m.Segments,
 		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
-		m.InFlightSize, m.AckedAheadSize, m.CorruptSkippedTotal,
+		m.InFlightSize, m.AckedAheadSize, m.AckExtendedTotal, m.NackTotal, m.CorruptSkippedTotal,
 		m.FlushDurationSeconds, m.FlushBytesTotal,
 		m.FsyncDurationSeconds, m.HighWatermarkPersistSeconds,
 		m.RetentionBytesDeleted, m.RetentionMessagesDeleted, m.RetentionRunSeconds,

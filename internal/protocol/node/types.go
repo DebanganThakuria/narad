@@ -33,6 +33,8 @@ const (
 	OpAttachChild
 	OpDetachChild
 	OpFanoutCursors
+	OpExtendAck
+	OpNack
 )
 
 // ProduceRequest asks a node to route and append one record.

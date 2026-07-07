@@ -124,3 +124,33 @@ func (s *RPCServer) handleAck(payload []byte) nodewire.Response {
 	}
 	return nodewire.Response{Status: http.StatusNoContent}
 }
+
+func (s *RPCServer) handleExtendAck(payload []byte) nodewire.Response {
+	req, err := nodewire.DecodeExtendAckRequest(payload)
+	if err != nil {
+		return errorResponse(http.StatusBadRequest, "invalid extend ack request: "+err.Error())
+	}
+	if err := s.broker.ExtendAck(rpcRequestContext(), req.Topic, consumer.Handle{
+		Partition: req.Partition,
+		Offset:    req.Offset,
+		Nonce:     req.Nonce,
+	}); err != nil {
+		return s.brokerError("extend ack", err)
+	}
+	return nodewire.Response{Status: http.StatusNoContent}
+}
+
+func (s *RPCServer) handleNack(payload []byte) nodewire.Response {
+	req, err := nodewire.DecodeNackRequest(payload)
+	if err != nil {
+		return errorResponse(http.StatusBadRequest, "invalid nack request: "+err.Error())
+	}
+	if err := s.broker.Nack(rpcRequestContext(), req.Topic, consumer.Handle{
+		Partition: req.Partition,
+		Offset:    req.Offset,
+		Nonce:     req.Nonce,
+	}); err != nil {
+		return s.brokerError("nack", err)
+	}
+	return nodewire.Response{Status: http.StatusNoContent}
+}

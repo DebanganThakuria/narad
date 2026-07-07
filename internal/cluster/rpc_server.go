@@ -87,6 +87,10 @@ func (s *RPCServer) dispatch(payload []byte) nodewire.Response {
 		res = s.handleConsume(payload)
 	case nodewire.OpAck:
 		res = s.handleAck(payload)
+	case nodewire.OpExtendAck:
+		res = s.handleExtendAck(payload)
+	case nodewire.OpNack:
+		res = s.handleNack(payload)
 	case nodewire.OpCreateTopic:
 		res = s.handleCreateTopic(payload)
 	case nodewire.OpAlterTopic:

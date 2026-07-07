@@ -23,6 +23,8 @@ type peerClient interface {
 	CommitProduceBatch(context.Context, string, nodewire.CommitProduceBatchRequest) (nodewire.Response, error)
 	Consume(context.Context, string, nodewire.ConsumeRequest) (nodewire.Response, error)
 	Ack(context.Context, string, nodewire.AckRequest) (nodewire.Response, error)
+	ExtendAck(context.Context, string, nodewire.AckRequest) (nodewire.Response, error)
+	Nack(context.Context, string, nodewire.AckRequest) (nodewire.Response, error)
 	CreateTopic(context.Context, string, []byte) (nodewire.Response, error)
 	AlterTopic(context.Context, string, string, []byte) (nodewire.Response, error)
 	DeleteTopic(context.Context, string, string) (nodewire.Response, error)
@@ -83,6 +85,18 @@ func (c *PeerClient) Consume(ctx context.Context, addr string, req nodewire.Cons
 func (c *PeerClient) Ack(ctx context.Context, addr string, req nodewire.AckRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeAckRequest(req)
 	return c.send(ctx, addr, "ack", payload, err)
+}
+
+// ExtendAck forwards a visibility-window extension to the peer at addr.
+func (c *PeerClient) ExtendAck(ctx context.Context, addr string, req nodewire.AckRequest) (nodewire.Response, error) {
+	payload, err := nodewire.EncodeExtendAckRequest(req)
+	return c.send(ctx, addr, "extend_ack", payload, err)
+}
+
+// Nack forwards an immediate reservation release to the peer at addr.
+func (c *PeerClient) Nack(ctx context.Context, addr string, req nodewire.AckRequest) (nodewire.Response, error) {
+	payload, err := nodewire.EncodeNackRequest(req)
+	return c.send(ctx, addr, "nack", payload, err)
 }
 
 // CreateTopic forwards a raw topic create body to the peer at addr.

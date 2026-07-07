@@ -1025,3 +1025,15 @@ func (f *fakeRouter) RouteDetachChild(ctx context.Context, w http.ResponseWriter
 func (f *fakeRouter) CollectFanoutCursors(_ context.Context, _ string, local []topic.FanoutCursorStat) ([]topic.FanoutCursorStat, bool) {
 	return local, true
 }
+
+func (f *fakeBroker) ExtendAck(context.Context, string, consumer.Handle) error { return nil }
+
+func (f *fakeBroker) Nack(context.Context, string, consumer.Handle) error { return nil }
+
+func (f *fakeRouter) RouteExtendAck(context.Context, http.ResponseWriter, *http.Request, string, consumer.Handle) bool {
+	return false
+}
+
+func (f *fakeRouter) RouteNack(context.Context, http.ResponseWriter, *http.Request, string, consumer.Handle) bool {
+	return false
+}

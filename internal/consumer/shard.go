@@ -63,13 +63,16 @@ func newPartitionShard(committed int64, caps Caps) *partitionShard {
 // purgeExpiredLocked removes expired reservations from entries and the
 // heap, returning how many live reservations were released (i.e. offsets
 // that became redeliverable). Must be called with sh.mu held. Entries
-// whose nonce no longer matches (re-reserved since the heap entry was
-// pushed) are silently discarded and not counted.
+// that no longer describe the live reservation are silently discarded
+// and not counted: a nonce mismatch means the offset was re-reserved
+// since the heap entry was pushed, and an expiry mismatch means the
+// reservation was extended (ExtendHandle keeps the nonce but supersedes
+// the old deadline with a fresh heap entry).
 func (sh *partitionShard) purgeExpiredLocked(now int64) int {
 	released := 0
 	for sh.expiry.Len() > 0 && sh.expiry[0].expiresAtUnixMs <= now {
 		e := heap.Pop(&sh.expiry).(expiryEntry)
-		if rsv, ok := sh.entries[e.offset]; ok && rsv.nonce == e.nonce {
+		if rsv, ok := sh.entries[e.offset]; ok && rsv.nonce == e.nonce && rsv.expiresAtUnixMs == e.expiresAtUnixMs {
 			delete(sh.entries, e.offset)
 			released++
 		}
