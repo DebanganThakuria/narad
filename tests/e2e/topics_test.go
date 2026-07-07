@@ -207,13 +207,13 @@ func TestAlterRetention(t *testing.T) {
 	env.createTopic("ret-topic", 3, 0)
 
 	resp := env.patch("/v1/topics/ret-topic", map[string]any{
-		"retention_ms": int64(999_999),
+		"retention_ms": int64(9_999_000),
 	})
 	expectOK(t, resp)
 
 	updated := readJSON[topic.Topic](t, resp)
-	if updated.RetentionMs != 999_999 {
-		t.Fatalf("retention_ms: got %d, want 999999", updated.RetentionMs)
+	if updated.RetentionMs != 9_999_000 {
+		t.Fatalf("retention_ms: got %d, want 9999000", updated.RetentionMs)
 	}
 }
 
@@ -325,14 +325,14 @@ func TestAlterSchemaWithRetention(t *testing.T) {
 	env.createTopic("schema-ret", 3, 0)
 
 	resp := env.patch("/v1/topics/schema-ret", map[string]any{
-		"retention_ms": int64(42_000),
+		"retention_ms": int64(4_200_000),
 		"schema":       json.RawMessage(schemaV1),
 	})
 	expectOK(t, resp)
 
 	updated := readJSON[topic.Topic](t, resp)
-	if updated.RetentionMs != 42_000 {
-		t.Fatalf("retention_ms: got %d, want 42000", updated.RetentionMs)
+	if updated.RetentionMs != 4_200_000 {
+		t.Fatalf("retention_ms: got %d, want 4200000", updated.RetentionMs)
 	}
 }
 
@@ -344,7 +344,7 @@ func TestAlterAllThree(t *testing.T) {
 
 	resp := env.patch("/v1/topics/all-three", map[string]any{
 		"partitions":   8,
-		"retention_ms": int64(99_999),
+		"retention_ms": int64(9_999_000),
 		"schema":       json.RawMessage(schemaV1),
 	})
 	expectOK(t, resp)
@@ -353,8 +353,8 @@ func TestAlterAllThree(t *testing.T) {
 	if updated.Partitions != 8 {
 		t.Fatalf("partitions: got %d, want 8", updated.Partitions)
 	}
-	if updated.RetentionMs != 99_999 {
-		t.Fatalf("retention_ms: got %d, want 99999", updated.RetentionMs)
+	if updated.RetentionMs != 9_999_000 {
+		t.Fatalf("retention_ms: got %d, want 9999000", updated.RetentionMs)
 	}
 }
 

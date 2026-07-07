@@ -175,6 +175,9 @@ func (m *Manager) topicFromOpts(opts CreateOpts) (topic.Topic, error) {
 	if err != nil {
 		return topic.Topic{}, err
 	}
+	if err := checkRetentionFloor(retentionMs); err != nil {
+		return topic.Topic{}, err
+	}
 	visibilityMs, err := defaultedNonNegative(opts.VisibilityTimeoutMs, m.cfg.DefaultVisibilityTimeoutMs, "visibility_timeout_ms")
 	if err != nil {
 		return topic.Topic{}, err
@@ -210,6 +213,20 @@ func defaultedNonNegative(v, def int64, field string) (int64, error) {
 		return 0, fmt.Errorf("%w: %s must be >= 0 (0 = use default)", ErrInvalid, field)
 	}
 	return v, nil
+}
+
+// checkRetentionFloor rejects a resolved retention below the uniform
+// one-hour minimum. The retained log is the fan-out buffer for lagging
+// children, so the floor guarantees at least an hour of child outage
+// tolerance before drop-behind can lose messages. Zero (keep forever)
+// passes: it can only arrive here via a keep-forever configured
+// default, which is above any floor.
+func checkRetentionFloor(retentionMs int64) error {
+	if retentionMs != 0 && retentionMs < topic.MinRetentionMs {
+		return fmt.Errorf("%w: retention_ms (%d) is below the minimum of %d (1 hour)",
+			ErrInvalid, retentionMs, topic.MinRetentionMs)
+	}
+	return nil
 }
 
 func (m *Manager) rollbackCreatedTopic(ctx context.Context, topicName string, cause error) error {

@@ -1136,3 +1136,26 @@ func TestParseConsumeQuery(t *testing.T) {
 		t.Fatal("parseConsumeQuery() ok = true, want false")
 	}
 }
+
+func (f *fakeBroker) AttachChild(context.Context, string, string) error { return nil }
+func (f *fakeBroker) DetachChild(context.Context, string, string) error { return nil }
+
+func (f *fakeBroker) ReadFanoutSlab(context.Context, string, int, int64, int, int64, time.Duration) (topic.FanoutSlab, error) {
+	return topic.FanoutSlab{}, nil
+}
+
+func (f *fakeBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutCursorStat, error) {
+	return nil, nil
+}
+
+func (f *fakeRouter) RouteAttachChild(context.Context, http.ResponseWriter, *http.Request, string, string) bool {
+	return false
+}
+
+func (f *fakeRouter) RouteDetachChild(context.Context, http.ResponseWriter, *http.Request, string, string) bool {
+	return false
+}
+
+func (f *fakeRouter) CollectFanoutCursors(_ context.Context, _ string, local []topic.FanoutCursorStat) ([]topic.FanoutCursorStat, bool) {
+	return local, true
+}

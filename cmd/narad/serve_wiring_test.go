@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -71,6 +72,8 @@ func (stubMetastore) GetTopic(context.Context, string) (topic.Topic, error) {
 func (stubMetastore) ListTopics(context.Context, metastore.ListOptions) ([]topic.Topic, string, error) {
 	return nil, "", nil
 }
+func (stubMetastore) AttachChild(context.Context, string, string) error      { return nil }
+func (stubMetastore) DetachChild(context.Context, string, string) error      { return nil }
 func (stubMetastore) PutSchema(context.Context, string, int, []byte) error   { return nil }
 func (stubMetastore) GetSchema(context.Context, string, int) ([]byte, error) { return nil, nil }
 func (stubMetastore) LeaderAddr() string                                     { return "" }
@@ -294,3 +297,14 @@ func (stubBroker) Ack(context.Context, string, consumer.Handle) error        { r
 func (stubBroker) Snapshot(context.Context) ([]metrics.TopicSnapshot, error) { return nil, nil }
 func (stubBroker) Ready(context.Context) error                               { return nil }
 func (stubBroker) Close() error                                              { return nil }
+
+func (stubBroker) AttachChild(context.Context, string, string) error { return nil }
+func (stubBroker) DetachChild(context.Context, string, string) error { return nil }
+
+func (stubBroker) ReadFanoutSlab(context.Context, string, int, int64, int, int64, time.Duration) (topic.FanoutSlab, error) {
+	return topic.FanoutSlab{}, nil
+}
+
+func (stubBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutCursorStat, error) {
+	return nil, nil
+}

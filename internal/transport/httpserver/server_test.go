@@ -257,3 +257,14 @@ func TestNewRouterWithoutMetricsReturnsNotFoundOnMetrics(t *testing.T) {
 		t.Fatalf("GET /metrics status = %d, want %d", res.Code, http.StatusNotFound)
 	}
 }
+
+func (f *fakeBroker) AttachChild(context.Context, string, string) error { return nil }
+func (f *fakeBroker) DetachChild(context.Context, string, string) error { return nil }
+
+func (f *fakeBroker) ReadFanoutSlab(context.Context, string, int, int64, int, int64, time.Duration) (topic.FanoutSlab, error) {
+	return topic.FanoutSlab{}, nil
+}
+
+func (f *fakeBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutCursorStat, error) {
+	return nil, nil
+}

@@ -47,6 +47,11 @@ func Default() *Config {
 			DefaultMaxInFlightPerPartition:   1024,
 			DefaultMaxAckedAheadPerPartition: 1024,
 		},
+		Fanout: FanoutConfig{
+			MaxBatchRecords: 4096,
+			MaxBatchBytes:   4 << 20, // 4 MiB
+			LingerMs:        25,
+		},
 		Log: LogConfig{
 			Level:  "info",
 			Format: "json",

@@ -134,15 +134,13 @@ func TestNotifyBroadcastWakesAllWaiters(t *testing.T) {
 	woken := make(chan struct{}, waiters)
 	for range waiters {
 		ch := l.NotifyC() // fetched BEFORE the advance, as consumers do
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			select {
 			case <-ch:
 				woken <- struct{}{}
 			case <-time.After(2 * time.Second):
 			}
-		}()
+		})
 	}
 
 	if err := l.AdvanceHighWatermark(2); err != nil {

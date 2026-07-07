@@ -35,6 +35,9 @@ type fakeBroker struct {
 	getTopicFn                func(context.Context, string) (topic.Topic, error)
 	getTopicDetailsFn         func(context.Context, string) (topic.Details, error)
 	listTopicsFn              func(context.Context, metastore.ListOptions) ([]topic.Topic, string, error)
+	attachChildFn             func(context.Context, string, string) error
+	detachChildFn             func(context.Context, string, string) error
+	fanoutCursorStatsFn       func(context.Context, string) ([]topic.FanoutCursorStat, error)
 }
 
 type fakeRouter struct {
@@ -43,6 +46,8 @@ type fakeRouter struct {
 	routeDeleteTopicFn     func(context.Context, http.ResponseWriter, *http.Request, string) bool
 	broadcastDeleteTopicFn func(context.Context, string) error
 	routeGetTopicFn        func(context.Context, *http.Request, string, topic.Details) (topic.Details, error)
+	routeAttachChildFn     func(context.Context, http.ResponseWriter, *http.Request, string, string) bool
+	routeDetachChildFn     func(context.Context, http.ResponseWriter, *http.Request, string, string) bool
 }
 
 func (f *fakeRouter) RouteProduce(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool {
@@ -976,4 +981,47 @@ func TestAlterHandlerAppliesOperationsInOrder(t *testing.T) {
 			t.Fatalf("Alter() calls[%d] = %q, want %q (all=%v)", i, calls[i], want[i], calls)
 		}
 	}
+}
+
+func (f *fakeBroker) AttachChild(ctx context.Context, parent, child string) error {
+	if f.attachChildFn == nil {
+		return nil
+	}
+	return f.attachChildFn(ctx, parent, child)
+}
+
+func (f *fakeBroker) DetachChild(ctx context.Context, parent, child string) error {
+	if f.detachChildFn == nil {
+		return nil
+	}
+	return f.detachChildFn(ctx, parent, child)
+}
+
+func (f *fakeBroker) ReadFanoutSlab(context.Context, string, int, int64, int, int64, time.Duration) (topic.FanoutSlab, error) {
+	return topic.FanoutSlab{}, nil
+}
+
+func (f *fakeBroker) FanoutCursorStats(ctx context.Context, parent string) ([]topic.FanoutCursorStat, error) {
+	if f.fanoutCursorStatsFn == nil {
+		return nil, nil
+	}
+	return f.fanoutCursorStatsFn(ctx, parent)
+}
+
+func (f *fakeRouter) RouteAttachChild(ctx context.Context, w http.ResponseWriter, r *http.Request, parent, child string) bool {
+	if f.routeAttachChildFn == nil {
+		return false
+	}
+	return f.routeAttachChildFn(ctx, w, r, parent, child)
+}
+
+func (f *fakeRouter) RouteDetachChild(ctx context.Context, w http.ResponseWriter, r *http.Request, parent, child string) bool {
+	if f.routeDetachChildFn == nil {
+		return false
+	}
+	return f.routeDetachChildFn(ctx, w, r, parent, child)
+}
+
+func (f *fakeRouter) CollectFanoutCursors(_ context.Context, _ string, local []topic.FanoutCursorStat) ([]topic.FanoutCursorStat, bool) {
+	return local, true
 }

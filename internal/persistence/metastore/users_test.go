@@ -82,8 +82,10 @@ func TestRootProtectionEnforcedInFSM(t *testing.T) {
 
 	// CreateUser must never persist a root account, even if the caller
 	// sets Root=true (defends the leader-forwarded RPC path).
-	if err := s.CreateUser(ctx, user.User{Username: "sneaky", Root: true,
-		Grants: []user.Grant{{Action: user.ActionAdmin}}}); err != nil {
+	if err := s.CreateUser(ctx, user.User{
+		Username: "sneaky", Root: true,
+		Grants: []user.Grant{{Action: user.ActionAdmin}},
+	}); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	got, _ := s.GetUser(ctx, "sneaky")
@@ -92,8 +94,10 @@ func TestRootProtectionEnforcedInFSM(t *testing.T) {
 	}
 
 	// Only SeedRootUser makes a root account, and it is idempotent.
-	if err := s.SeedRootUser(ctx, user.User{Username: "admin", Root: true, PasswordHash: []byte("h1"),
-		Grants: []user.Grant{{Action: user.ActionAdmin}}}); err != nil {
+	if err := s.SeedRootUser(ctx, user.User{
+		Username: "admin", Root: true, PasswordHash: []byte("h1"),
+		Grants: []user.Grant{{Action: user.ActionAdmin}},
+	}); err != nil {
 		t.Fatalf("SeedRootUser: %v", err)
 	}
 	root, _ := s.GetUser(ctx, "admin")
@@ -108,8 +112,10 @@ func TestRootProtectionEnforcedInFSM(t *testing.T) {
 	}
 
 	// Update cannot escalate a non-root user to root.
-	if err := s.UpdateUser(ctx, user.User{Username: "sneaky", Root: true,
-		Grants: []user.Grant{{Action: user.ActionAdmin}}}); err != nil {
+	if err := s.UpdateUser(ctx, user.User{
+		Username: "sneaky", Root: true,
+		Grants: []user.Grant{{Action: user.ActionAdmin}},
+	}); err != nil {
 		t.Fatalf("UpdateUser: %v", err)
 	}
 	if esc, _ := s.GetUser(ctx, "sneaky"); esc.Root {
@@ -117,8 +123,10 @@ func TestRootProtectionEnforcedInFSM(t *testing.T) {
 	}
 
 	// Update cannot tamper with root's grants, but may change its password.
-	if err := s.UpdateUser(ctx, user.User{Username: "admin", PasswordHash: []byte("h3"),
-		Grants: []user.Grant{{Action: user.ActionProduce, Patterns: []string{"x"}}}}); err != nil {
+	if err := s.UpdateUser(ctx, user.User{
+		Username: "admin", PasswordHash: []byte("h3"),
+		Grants: []user.Grant{{Action: user.ActionProduce, Patterns: []string{"x"}}},
+	}); err != nil {
 		t.Fatalf("UpdateUser(admin password): %v", err)
 	}
 	updated, _ := s.GetUser(ctx, "admin")

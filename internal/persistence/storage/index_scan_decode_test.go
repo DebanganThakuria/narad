@@ -8,8 +8,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 	"github.com/klauspost/compress/zstd"
+
+	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 )
 
 // countingCodec wraps a real codec and counts Decode calls. It reports the

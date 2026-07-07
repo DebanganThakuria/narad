@@ -30,6 +30,9 @@ const (
 	OpCreateUser
 	OpUpdateUser
 	OpDeleteUser
+	OpAttachChild
+	OpDetachChild
+	OpFanoutCursors
 )
 
 // ProduceRequest asks a node to route and append one record.
@@ -89,6 +92,13 @@ type TopicBodyRequest struct {
 // only the topic name (delete, purge).
 type TopicNameRequest struct {
 	Topic string
+}
+
+// ChildLinkRequest is the shared shape for fan-out attach and detach,
+// forwarded to the cluster leader.
+type ChildLinkRequest struct {
+	Parent string
+	Child  string
 }
 
 // TopicPartitionStatsRequest asks the owner of one partition for its

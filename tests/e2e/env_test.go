@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
@@ -30,8 +33,6 @@ import (
 	"github.com/debanganthakuria/narad/internal/security"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
-	"github.com/prometheus/client_golang/prometheus"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // e2eMemberDeadTimeout is deliberately generous so the controller never
@@ -107,6 +108,8 @@ type env struct {
 
 	dispatcherCancel context.CancelFunc
 	dispatcherDone   chan struct{}
+	fanoutCancel     context.CancelFunc
+	fanoutDone       chan struct{}
 	controllerCancel context.CancelFunc
 	controllerDone   chan struct{}
 	closeOnce        sync.Once
@@ -190,6 +193,19 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		}).Run(dispatcherCtx)
 	}()
 
+	// The fan-out cursor engine, exactly as serve.go wires it (empty
+	// selfID: this single node owns every partition). A short linger
+	// and reconcile interval keep fan-out latency test-friendly.
+	fanoutCtx, fanoutCancel := context.WithCancel(context.Background())
+	fanoutDone := make(chan struct{})
+	go func() {
+		defer close(fanoutDone)
+		cluster.NewFanoutRunner(ms, "", dataDir, br, nil, partition.NewHashRoundRobin(), m, log, cluster.FanoutConfig{
+			Linger:            time.Millisecond,
+			ReconcileInterval: 25 * time.Millisecond,
+		}).Run(fanoutCtx)
+	}()
+
 	var auth *security.Authenticator
 	adminUser, adminPass := "", ""
 	deps := handlers.Deps{
@@ -216,6 +232,8 @@ func newEnv(t *testing.T, opts envOpts) *env {
 		adminPass:        adminPass,
 		dispatcherCancel: dispatcherCancel,
 		dispatcherDone:   dispatcherDone,
+		fanoutCancel:     fanoutCancel,
+		fanoutDone:       fanoutDone,
 		controllerCancel: controllerCancel,
 		controllerDone:   controllerDone,
 		Registry:         reg,
@@ -338,6 +356,10 @@ func (e *env) close() {
 		if e.dispatcherCancel != nil {
 			e.dispatcherCancel()
 			waitDone(e.t, "produce dispatcher", e.dispatcherDone)
+		}
+		if e.fanoutCancel != nil {
+			e.fanoutCancel()
+			waitDone(e.t, "fanout runner", e.fanoutDone)
 		}
 		if e.controllerCancel != nil {
 			e.controllerCancel()

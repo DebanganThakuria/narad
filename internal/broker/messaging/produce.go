@@ -73,7 +73,7 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 	}
 
 	offset, err := e.logs.WithProduceLockResult(topicName, partIdx, func(log *storage.Log) (int64, error) {
-		return e.appendAndCommit(log, payload)
+		return e.appendAndCommit(log, storage.EncodeKeyedRecord(key, payload))
 	})
 	if err != nil {
 		e.recordProduceError(err)

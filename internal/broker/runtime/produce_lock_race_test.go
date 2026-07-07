@@ -37,9 +37,7 @@ func TestWithProduceLockMutualExclusionAcrossCloseTopic(t *testing.T) {
 
 	stop := make(chan struct{})
 	var closerWG sync.WaitGroup
-	closerWG.Add(1)
-	go func() {
-		defer closerWG.Done()
+	closerWG.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -52,13 +50,11 @@ func TestWithProduceLockMutualExclusionAcrossCloseTopic(t *testing.T) {
 			}
 			time.Sleep(50 * time.Microsecond)
 		}
-	}()
+	})
 
 	var producerWG sync.WaitGroup
 	for range producers {
-		producerWG.Add(1)
-		go func() {
-			defer producerWG.Done()
+		producerWG.Go(func() {
 			for range iterations {
 				err := logs.WithProduceLock("orders", 0, func(*storage.Log) error {
 					if inSection.Add(1) != 1 {
@@ -76,7 +72,7 @@ func TestWithProduceLockMutualExclusionAcrossCloseTopic(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	producerWG.Wait()

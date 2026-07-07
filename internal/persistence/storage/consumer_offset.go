@@ -40,7 +40,7 @@ func WriteConsumerOffset(partitionDir string, offset int64) error {
 	if err := os.MkdirAll(partitionDir, 0o755); err != nil {
 		return err
 	}
-	return writeConsumerOffsetFile(partitionDir, offset)
+	return writeOffsetFile(partitionDir, consumerOffsetFileName, offset)
 }
 
 // WriteConsumerOffsetIfPartitionDirExists is WriteConsumerOffset except
@@ -58,11 +58,22 @@ func WriteConsumerOffsetIfPartitionDirExists(partitionDir string, offset int64) 
 	if !info.IsDir() {
 		return fmt.Errorf("consumer offset partition path is not a directory: %s", partitionDir)
 	}
-	return writeConsumerOffsetFile(partitionDir, offset)
+	return writeOffsetFile(partitionDir, consumerOffsetFileName, offset)
 }
 
-func writeConsumerOffsetFile(partitionDir string, offset int64) error {
-	tmp, err := os.CreateTemp(partitionDir, consumerOffsetFileName+".*")
+// writeOffsetFile atomically persists an 8-byte big-endian offset file
+// under dir (temp file + fsync + rename).
+func writeOffsetFile(dir, name string, offset int64) error {
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(offset))
+	return writeFileAtomic(dir, name, buf[:])
+}
+
+// writeFileAtomic atomically persists content at dir/name (temp file +
+// fsync + rename). A missing dir maps to ErrPartitionDirMissing so
+// callers never resurrect a concurrently deleted topic.
+func writeFileAtomic(dir, name string, content []byte) error {
+	tmp, err := os.CreateTemp(dir, name+".*")
 	if errors.Is(err, os.ErrNotExist) {
 		return ErrPartitionDirMissing
 	}
@@ -74,9 +85,7 @@ func writeConsumerOffsetFile(partitionDir string, offset int64) error {
 		_ = os.Remove(tmpName)
 	}()
 
-	var buf [8]byte
-	binary.BigEndian.PutUint64(buf[:], uint64(offset))
-	if _, err := tmp.Write(buf[:]); err != nil {
+	if _, err := tmp.Write(content); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -87,7 +96,7 @@ func writeConsumerOffsetFile(partitionDir string, offset int64) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, filepath.Join(partitionDir, consumerOffsetFileName)); err != nil {
+	if err := os.Rename(tmpName, filepath.Join(dir, name)); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ErrPartitionDirMissing
 		}

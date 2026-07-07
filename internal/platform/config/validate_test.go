@@ -67,6 +67,22 @@ func TestValidateRejectsInvalidFields(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsSubHourDefaultRetention(t *testing.T) {
+	cfg := Default()
+	cfg.Topic.DefaultRetentionAgeMs = 60_000
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "topic.default_retention_age_ms (60000) must be >= 3600000") {
+		t.Fatalf("Validate() error = %v, want sub-hour retention rejection", err)
+	}
+
+	// Zero (keep forever) is above any floor.
+	cfg.Topic.DefaultRetentionAgeMs = 0
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with keep-forever default error = %v, want nil", err)
+	}
+}
+
 func TestValidateRejectsMaxConsumeWaitNotBelowWriteTimeout(t *testing.T) {
 	cfg := Default()
 	cfg.HTTP.WriteTimeout = cfg.HTTP.MaxConsumeWait

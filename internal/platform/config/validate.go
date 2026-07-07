@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/platform/netaddr"
 )
 
@@ -19,6 +20,7 @@ func (c *Config) Validate() error {
 	errs = append(errs, clusterValidationErrors(c.HTTP, c.Cluster)...)
 	errs = append(errs, storageValidationErrors(c.Storage)...)
 	errs = append(errs, topicValidationErrors(c.Topic)...)
+	errs = append(errs, fanoutValidationErrors(c.Fanout)...)
 	errs = append(errs, logValidationErrors(c.Log)...)
 	errs = append(errs, securityValidationErrors(c.Security, c.Cluster)...)
 	if len(errs) == 0 {
@@ -210,6 +212,10 @@ func topicValidationErrors(cfg TopicConfig) []string {
 	if cfg.DefaultRetentionAgeMs < 0 {
 		errs = append(errs, "topic.default_retention_age_ms must be >= 0")
 	}
+	if cfg.DefaultRetentionAgeMs > 0 && cfg.DefaultRetentionAgeMs < topic.MinRetentionMs {
+		errs = append(errs, fmt.Sprintf("topic.default_retention_age_ms (%d) must be >= %d (1 hour) or 0 (keep forever)",
+			cfg.DefaultRetentionAgeMs, topic.MinRetentionMs))
+	}
 	if cfg.DefaultVisibilityTimeoutMs < 0 {
 		errs = append(errs, "topic.default_visibility_timeout_ms must be >= 0")
 	}
@@ -218,6 +224,20 @@ func topicValidationErrors(cfg TopicConfig) []string {
 	}
 	if cfg.DefaultMaxAckedAheadPerPartition <= 0 {
 		errs = append(errs, "topic.default_max_acked_ahead_per_partition must be > 0")
+	}
+	return errs
+}
+
+func fanoutValidationErrors(cfg FanoutConfig) []string {
+	var errs []string
+	if cfg.MaxBatchRecords <= 0 {
+		errs = append(errs, "fanout.max_batch_records must be > 0")
+	}
+	if cfg.MaxBatchBytes <= 0 {
+		errs = append(errs, "fanout.max_batch_bytes must be > 0")
+	}
+	if cfg.LingerMs < 0 {
+		errs = append(errs, "fanout.linger_ms must be >= 0")
 	}
 	return errs
 }

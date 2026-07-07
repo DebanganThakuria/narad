@@ -36,7 +36,66 @@ type Topic struct {
 	// Owner is the username that created the topic. Alter/delete
 	// require the owner or an admin. Empty when security is disabled.
 	Owner string `json:"owner,omitempty"`
+
+	// Role, Children, and Parent describe the topic's position in
+	// fan-out. They are managed exclusively by the metastore's
+	// attach/detach/delete operations — a config update never changes
+	// them. The zero value reads as standalone (see EffectiveRole).
+	Role Role `json:"role,omitempty"`
+	// Children is the set of child topics this parent fans out to,
+	// in attach order. Parent role only.
+	Children []string `json:"children,omitempty"`
+	// Parent is the topic this child receives fan-out from. Child
+	// role only.
+	Parent string `json:"parent,omitempty"`
+	// AttachEpoch identifies this particular attachment of the child
+	// to its parent (child role only; assigned at attach, cleared at
+	// detach). Fan-out cursor state is scoped to the epoch, so a
+	// detach followed by a re-attach starts fresh at the parent's tail
+	// instead of resuming — and replaying from — the dead cursor.
+	AttachEpoch string `json:"attach_epoch,omitempty"`
 }
+
+// Role classifies a topic's position in fan-out. Roles are exclusive
+// and flat: a child never has children of its own, and a parent is
+// never itself a child.
+type Role string
+
+// The three fan-out roles a topic can hold.
+const (
+	RoleStandalone Role = "standalone"
+	RoleParent     Role = "parent"
+	RoleChild      Role = "child"
+)
+
+// MaxChildrenPerParent caps how many children a parent may fan out to.
+// It matches the topic partition cap and is a safety rail against
+// runaway write amplification: a parent's sustainable produce rate is
+// roughly cluster capacity divided by (children + 1).
+const MaxChildrenPerParent = 108
+
+// MinRetentionMs is the minimum effective retention for every topic
+// (one hour). The parent's retained log is the fan-out buffer for
+// lagging children, so the floor guarantees every child at least an
+// hour of outage tolerance before drop-behind can lose messages. It
+// applies uniformly to all topics; zero retention (keep forever) is
+// unaffected.
+const MinRetentionMs int64 = 60 * 60 * 1000
+
+// EffectiveRole maps the zero value to RoleStandalone: a topic record
+// with no explicit role is an ordinary standalone topic.
+func (t Topic) EffectiveRole() Role {
+	if t.Role == "" {
+		return RoleStandalone
+	}
+	return t.Role
+}
+
+// IsParent reports whether the topic fans out to children.
+func (t Topic) IsParent() bool { return t.EffectiveRole() == RoleParent }
+
+// IsChild reports whether the topic receives fan-out from a parent.
+func (t Topic) IsChild() bool { return t.EffectiveRole() == RoleChild }
 
 // Details is the response shape for "describe a topic": the topic
 // record plus per-partition runtime stats.

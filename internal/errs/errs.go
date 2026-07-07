@@ -63,6 +63,27 @@ var (
 	ErrSchemaIncompatible = errors.New("schema incompatible with previous version")
 )
 
+// Fan-out (parent/child topic links).
+var (
+	// ErrFanoutRoleConflict reports an attach that would violate the
+	// fan-out role invariants: roles are exclusive (a parent is never a
+	// child and vice versa), fan-out is depth 1, and a child has
+	// exactly one parent.
+	ErrFanoutRoleConflict = errors.New("fan-out role conflict")
+
+	// ErrFanoutChildLimit reports an attach to a parent that already
+	// has the maximum number of children.
+	ErrFanoutChildLimit = errors.New("parent has reached the maximum number of children")
+
+	// ErrFanoutSchemaMismatch reports an attach whose child schema is
+	// neither absent nor identical to the parent's.
+	ErrFanoutSchemaMismatch = errors.New("child schema incompatible with parent")
+
+	// ErrFanoutSchemaManaged reports a schema change on an attached
+	// child; its schema is parent-managed until detach.
+	ErrFanoutSchemaManaged = errors.New("schema is parent-managed while attached to a fan-out parent")
+)
+
 // Input validation and routing.
 var (
 	// ErrInvalidArgument is the generic bad-input sentinel.

@@ -130,6 +130,7 @@ func runServe(args []string) error {
 	wg.Go(func() { cs.controller.Run(ctx) })
 	wg.Go(func() { bc.offsets.RunPurger(ctx, time.Second) })
 	wg.Go(func() { cs.dispatcher.Run(ctx) })
+	wg.Go(func() { cs.fanout.Run(ctx) })
 	startPprofServer(ctx, &wg, cfg.HTTP.PprofAddr, log)
 	wg.Go(func() { serveClusterRPC(ctx, cfg, cs.rpcServer, failServe, log) })
 
@@ -208,6 +209,7 @@ type clusterStack struct {
 	peerRPC    *cluster.PeerClient
 	rpcServer  *cluster.RPCServer
 	dispatcher *cluster.ProduceDispatcher
+	fanout     *cluster.FanoutRunner
 }
 
 func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, bc *brokerComponents, log *slog.Logger) *clusterStack {
@@ -231,6 +233,12 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 		peerRPC:    peerRPC,
 		rpcServer:  rpcServer,
 		dispatcher: cluster.NewProduceDispatcher(bc.ingress, ms, nodeID, bc.broker, peerRPC, log, cluster.ProduceDispatcherConfig{}),
+		fanout: cluster.NewFanoutRunner(ms, nodeID, cfg.Storage.DataDir, bc.broker, peerRPC,
+			partition.NewHashRoundRobin(), bc.metrics, log, cluster.FanoutConfig{
+				MaxBatchRecords: cfg.Fanout.MaxBatchRecords,
+				MaxBatchBytes:   cfg.Fanout.MaxBatchBytes,
+				Linger:          time.Duration(cfg.Fanout.LingerMs) * time.Millisecond,
+			}),
 	}
 }
 

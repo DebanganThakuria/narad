@@ -12,7 +12,7 @@ func TestReserveSkipsReservedUnexpiredOffset(t *testing.T) {
 	t.Parallel()
 	f := newClockedInFlight(1024, 1024)
 
-	for want := int64(0); want < 3; want++ {
+	for want := range int64(3) {
 		r, err := f.ReserveNext(context.Background(), testTopic, testPart, testVT, testDeepTail)
 		wantReserved(t, r, err, want)
 	}

@@ -54,6 +54,9 @@ func NewLogs(dataDir string, storageOpts storage.Options, ms metastore.Metastore
 	}
 }
 
+// DataDir returns the topic-directory root the log map serves from.
+func (g *Logs) DataDir() string { return g.dataDir }
+
 // Get returns the storage.Log for (topic, partition), opening the
 // underlying file lazily on first access. Per-topic retention is
 // folded into Options at open time. Cap and visibility-timeout
@@ -169,6 +172,10 @@ func keyOf(topicName string, idx int) string {
 	return topicName + "/" + strconv.Itoa(idx)
 }
 
+// retentionFromTopic folds a topic's retention into storage options.
+// The create/alter paths enforce the one-hour retention floor, so a
+// stored record's retention is either zero (keep forever) or at least
+// topic.MinRetentionMs.
 func retentionFromTopic(r int64, checkInterval time.Duration) storage.RetentionConfig {
 	return storage.RetentionConfig{
 		MaxAge:        time.Duration(r) * time.Millisecond,

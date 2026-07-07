@@ -68,6 +68,15 @@ func applyEnv(cfg *Config) error {
 	if err := envInt64("NARAD_TOPIC_DEFAULT_MAX_ACKED_AHEAD_PER_PARTITION", &cfg.Topic.DefaultMaxAckedAheadPerPartition); err != nil {
 		return err
 	}
+	if err := envInt("NARAD_FANOUT_MAX_BATCH_RECORDS", &cfg.Fanout.MaxBatchRecords); err != nil {
+		return err
+	}
+	if err := envInt64("NARAD_FANOUT_MAX_BATCH_BYTES", &cfg.Fanout.MaxBatchBytes); err != nil {
+		return err
+	}
+	if err := envInt64("NARAD_FANOUT_LINGER_MS", &cfg.Fanout.LingerMs); err != nil {
+		return err
+	}
 
 	if v, ok := os.LookupEnv("NARAD_LOG_LEVEL"); ok {
 		cfg.Log.Level = v

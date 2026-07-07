@@ -58,7 +58,7 @@ func TestAlterTopic_RejectsAboveMaxPartitions(t *testing.T) {
 	env := newTestEnv(t, withPolicy(broker.TopicPolicy{
 		DefaultPartitions:  2,
 		MaxPartitions:      8,
-		DefaultRetentionMs: 1000,
+		DefaultRetentionMs: 3_600_000,
 	}))
 	mustCreateTopic(t, env, createTopicReq{Name: "cap", Partitions: 4})
 
@@ -70,7 +70,7 @@ func TestAlterTopic_RejectsAboveMaxPartitions(t *testing.T) {
 func TestAlterTopic_UpdateRetention(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "retention", RetentionMs: 60_000})
+	mustCreateTopic(t, env, createTopicReq{Name: "retention", RetentionMs: 3_600_000})
 
 	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/retention",
 		map[string]any{"retention_ms": int64(7_200_000)})
@@ -93,7 +93,7 @@ func TestAlterTopic_RetentionUpdateReopensPartitionLogs(t *testing.T) {
 	mustProduce(t, env, "reopen", "k", map[string]int{"v": 1})
 
 	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/reopen",
-		map[string]any{"retention_ms": int64(10_000)})
+		map[string]any{"retention_ms": int64(3_600_000)})
 	expectStatus(t, resp, http.StatusOK)
 
 	mustProduce(t, env, "reopen", "k", map[string]int{"v": 2})
@@ -102,7 +102,7 @@ func TestAlterTopic_RetentionUpdateReopensPartitionLogs(t *testing.T) {
 func TestAlterTopic_RetentionDefaultsWhenZero(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "default-ret", RetentionMs: 60_000})
+	mustCreateTopic(t, env, createTopicReq{Name: "default-ret", RetentionMs: 3_600_000})
 
 	// Sending retention_ms=0 should fall back to the broker default.
 	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/default-ret",

@@ -70,6 +70,13 @@ type Metrics struct {
 	RetentionMessagesDeleted    *prometheus.CounterVec   // topic, partition, reason
 	RetentionRunSeconds         *prometheus.HistogramVec // topic, partition
 
+	// Fan-out (parent → child topic replication)
+	FanoutLagMessages          *prometheus.GaugeVec   // parent, child, partition — parent HWM minus cursor; the primary health signal
+	FanoutCommittedTotal       *prometheus.CounterVec // parent, child — records fanned out and durably committed to the child
+	FanoutChildDroppedMessages *prometheus.CounterVec // parent, child — records lost to drop-behind (aged out) or corruption; alert on any non-zero rate
+	FanoutBatchRecords         prometheus.Histogram   // records per committed fan-out batch
+	FanoutBatchBytes           prometheus.Histogram   // payload bytes per committed fan-out batch
+
 	// Errors
 	ErrorsTotal *prometheus.CounterVec // component, kind
 
@@ -299,6 +306,43 @@ func New(reg prometheus.Registerer) *Metrics {
 			Buckets:   prometheus.DefBuckets,
 		}, []string{"topic", "partition"}),
 
+		FanoutLagMessages: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "fanout",
+			Name:      "lag_messages",
+			Help:      "Fan-out lag per (parent partition, child): parent high-watermark minus the child's cursor. The primary fan-out health signal.",
+		}, []string{"parent", "child", "partition"}),
+
+		FanoutCommittedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: Namespace,
+			Subsystem: "fanout",
+			Name:      "committed_total",
+			Help:      "Records fanned out from a parent and durably committed to a child.",
+		}, []string{"parent", "child"}),
+
+		FanoutChildDroppedMessages: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: Namespace,
+			Subsystem: "fanout",
+			Name:      "child_dropped_messages",
+			Help:      "Parent records a child never received: aged out of the parent's retention before the cursor reached them (drop-behind) or permanently unreadable. Each is data loss for that child; alert on any non-zero rate.",
+		}, []string{"parent", "child"}),
+
+		FanoutBatchRecords: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: Namespace,
+			Subsystem: "fanout",
+			Name:      "batch_records",
+			Help:      "Records per committed fan-out batch (batch effectiveness).",
+			Buckets:   []float64{1, 8, 64, 256, 1024, 4096, 16384},
+		}),
+
+		FanoutBatchBytes: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: Namespace,
+			Subsystem: "fanout",
+			Name:      "batch_bytes",
+			Help:      "Payload bytes per committed fan-out batch (batch effectiveness).",
+			Buckets:   prometheus.ExponentialBuckets(1024, 4, 10), // 1KiB .. 256MiB
+		}),
+
 		ErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Name:      "errors_total",
@@ -326,6 +370,8 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.FlushDurationSeconds, m.FlushBytesTotal,
 		m.FsyncDurationSeconds, m.HighWatermarkPersistSeconds,
 		m.RetentionBytesDeleted, m.RetentionMessagesDeleted, m.RetentionRunSeconds,
+		m.FanoutLagMessages, m.FanoutCommittedTotal, m.FanoutChildDroppedMessages,
+		m.FanoutBatchRecords, m.FanoutBatchBytes,
 		m.ErrorsTotal,
 		m.BootDurationSeconds,
 	)
@@ -354,6 +400,15 @@ func (m *Metrics) pruneTopicSeries(topic string) {
 		m.RetentionBytesDeleted, m.RetentionMessagesDeleted, m.RetentionRunSeconds,
 	} {
 		c.DeletePartialMatch(sel)
+	}
+
+	// Fan-out collectors label the topic as "parent" or "child"; prune
+	// both directions so neither side of a deleted link leaks series.
+	for _, c := range []interface{ DeletePartialMatch(prometheus.Labels) int }{
+		m.FanoutLagMessages, m.FanoutCommittedTotal, m.FanoutChildDroppedMessages,
+	} {
+		c.DeletePartialMatch(prometheus.Labels{"parent": topic})
+		c.DeletePartialMatch(prometheus.Labels{"child": topic})
 	}
 }
 

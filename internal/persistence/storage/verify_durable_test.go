@@ -6,8 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 	"github.com/klauspost/compress/zstd"
+
+	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 )
 
 // VerifyDurable must pass for a healthy committed batch and FAIL when the

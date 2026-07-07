@@ -52,7 +52,7 @@ func TestLongPollBroadcastWakesAllWaitersOnOneCommit(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// One commit making two records visible: a single HWM advance.
-	if _, _, err := log.AppendBatch([][]byte{[]byte(`{"id":1}`), []byte(`{"id":2}`)}); err != nil {
+	if _, _, err := log.AppendBatch([][]byte{storage.EncodeKeyedRecord("", []byte(`{"id":1}`)), storage.EncodeKeyedRecord("", []byte(`{"id":2}`))}); err != nil {
 		t.Fatalf("AppendBatch() error = %v", err)
 	}
 	if err := log.AdvanceHighWatermark(2); err != nil {
@@ -97,7 +97,7 @@ func TestLongPollWakesOnVisibilityTimeoutExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if _, err := log.Append([]byte(`{"id":1}`)); err != nil {
+	if _, err := log.Append(storage.EncodeKeyedRecord("", []byte(`{"id":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 	if err := log.AdvanceHighWatermark(1); err != nil {
@@ -171,7 +171,7 @@ func TestLongPollWakesOnAckFreeingCapSlot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if _, _, err := log.AppendBatch([][]byte{[]byte(`{"id":1}`), []byte(`{"id":2}`)}); err != nil {
+	if _, _, err := log.AppendBatch([][]byte{storage.EncodeKeyedRecord("", []byte(`{"id":1}`)), storage.EncodeKeyedRecord("", []byte(`{"id":2}`))}); err != nil {
 		t.Fatalf("AppendBatch() error = %v", err)
 	}
 	if err := log.AdvanceHighWatermark(2); err != nil {

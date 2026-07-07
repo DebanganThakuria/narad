@@ -26,6 +26,9 @@ type peerClient interface {
 	CreateTopic(context.Context, string, []byte) (nodewire.Response, error)
 	AlterTopic(context.Context, string, string, []byte) (nodewire.Response, error)
 	DeleteTopic(context.Context, string, string) (nodewire.Response, error)
+	AttachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error)
+	DetachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error)
+	FanoutCursors(ctx context.Context, addr, parent string) ([]topic.FanoutCursorStat, error)
 	PurgeTopic(context.Context, string, string) (nodewire.Response, error)
 	TopicPartitionStats(context.Context, string, string, int) (topic.PartitionStats, error)
 	RegisterMember(context.Context, string, nodewire.MemberRequest) (nodewire.Response, error)
@@ -102,6 +105,36 @@ func (c *PeerClient) DeleteTopic(ctx context.Context, addr, topicName string) (n
 // PurgeTopic asks the peer at addr to purge the topic's on-disk state.
 func (c *PeerClient) PurgeTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error) {
 	return c.topicNameRequest(ctx, addr, nodewire.OpPurgeTopic, "purge_topic", topicName)
+}
+
+// AttachChild forwards a fan-out attach to the peer at addr (the leader).
+func (c *PeerClient) AttachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error) {
+	payload, err := nodewire.EncodeChildLinkRequest(nodewire.OpAttachChild, nodewire.ChildLinkRequest{Parent: parent, Child: child})
+	return c.send(ctx, addr, "attach_child", payload, err)
+}
+
+// DetachChild forwards a fan-out detach to the peer at addr (the leader).
+func (c *PeerClient) DetachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error) {
+	payload, err := nodewire.EncodeChildLinkRequest(nodewire.OpDetachChild, nodewire.ChildLinkRequest{Parent: parent, Child: child})
+	return c.send(ctx, addr, "detach_child", payload, err)
+}
+
+// FanoutCursors fetches the fan-out cursor positions the peer at addr
+// holds for the parent's partitions it owns.
+func (c *PeerClient) FanoutCursors(ctx context.Context, addr, parent string) ([]topic.FanoutCursorStat, error) {
+	payload, err := nodewire.EncodeTopicNameRequest(nodewire.OpFanoutCursors, nodewire.TopicNameRequest{Topic: parent})
+	res, err := c.send(ctx, addr, "fanout_cursors", payload, err)
+	if err != nil {
+		return nil, err
+	}
+	if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("fanout cursors returned status %d", res.Status)
+	}
+	var stats []topic.FanoutCursorStat
+	if err := json.Unmarshal(res.Body, &stats); err != nil {
+		return nil, err
+	}
+	return stats, nil
 }
 
 // TopicPartitionStats fetches one partition's stats from the peer at addr and
