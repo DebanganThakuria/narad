@@ -684,7 +684,10 @@ one parent, and a parent holds at most 108 children.
 Semantics worth knowing:
 
 * **At-least-once, no backfill.** A child receives messages produced
-  from the attach point forward. Delivery is at-least-once — a crash
+  from the moment its cursors anchor at the parent's tail — within
+  about a second of the attach; `lag_complete: true` in the
+  list-children response signals the anchor. Delivery is
+  at-least-once — a crash
   mid-batch re-delivers, never loses. Detach stops the flow and keeps
   everything already delivered; a later re-attach starts fresh at the
   parent's tail (no replay of the detached window). Deleting a parent

@@ -93,7 +93,9 @@ detach/re-attach always starts at the parent's current tail, never replays.
 - Total cursor state per parent = `parentPartitions × numChildren` small offset
   records (e.g. 6 × 108 = 648). Trivial.
 - A newly-attached child's cursors start at the **parent's current tail**
-  (only-new; **no backfill**).
+  (only-new; **no backfill**). The tail is read when the cursor anchors —
+  within a reconcile interval (~1s) of the attach; `lag_complete` in the
+  list-children API reports the anchor.
 - Attaching/detaching a child is "spawn / stop that child's cursors" — it
   touches nothing else.
 

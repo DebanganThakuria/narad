@@ -32,6 +32,31 @@ func (e *env) attachChild(parent, child string) *http.Response {
 	return e.post("/v1/topics/"+parent+"/children", map[string]any{"child": child})
 }
 
+// awaitCursorsAnchored polls the children listing until the child's
+// cursors report on every parent partition (lag_complete). Fan-out
+// starts when the cursors anchor at the parent's tail — within a
+// reconcile interval of the attach — so a test that produces
+// immediately after attaching must wait for the anchor or the records
+// may legitimately predate the attach point.
+func awaitCursorsAnchored(t *testing.T, e *env, parent, child string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		resp := e.get("/v1/topics/" + parent + "/children")
+		expectOK(t, resp)
+		listing := readJSON[childrenListing](t, resp)
+		for _, c := range listing.Children {
+			if c.Name == child && c.LagComplete {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cursors for %s→%s never anchored: %+v", parent, child, listing)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // totalCommitted sums the committed high-watermarks across a topic's
 // partitions, via the public describe endpoint.
 func totalCommitted(t *testing.T, e *env, name string) int64 {
@@ -98,6 +123,7 @@ func TestFanoutEndToEnd(t *testing.T) {
 	if attached.Role != topic.RoleParent || len(attached.Children) != 1 || attached.Children[0] != "fan-child" {
 		t.Fatalf("attach response = %+v, want parent with [fan-child]", attached)
 	}
+	awaitCursorsAnchored(t, e, "fan-parent", "fan-child")
 
 	// Describe reports the link from both sides.
 	resp = e.get("/v1/topics/fan-child")
@@ -181,6 +207,7 @@ func TestFanoutEndToEnd(t *testing.T) {
 	// never replays, new traffic flows.
 	resp = e.attachChild("fan-parent", "fan-child")
 	expectOK(t, resp)
+	awaitCursorsAnchored(t, e, "fan-parent", "fan-child")
 	mustProduce(t, e, "fan-parent", "k-new", map[string]any{"post": 1})
 	awaitFanout(t, e, "fan-child", n+1)
 	time.Sleep(200 * time.Millisecond)
@@ -311,6 +338,7 @@ func TestFanoutSecurity(t *testing.T) {
 		t.Fatalf("alice attach: status = %d, want 200", resp.StatusCode)
 	}
 	resp.Body.Close()
+	awaitSecCursorsAnchored(t, e)
 
 	// No fan-out RBAC gate: carol can only produce to the parent, yet
 	// her message reaches the child.
@@ -352,6 +380,7 @@ func TestFanoutDeleteParentDetachesChildren(t *testing.T) {
 	e.createTopic("del-parent", 3, 0)
 	e.createTopic("del-child", 3, 0)
 	expectOK(t, e.attachChild("del-parent", "del-child"))
+	awaitCursorsAnchored(t, e, "del-parent", "del-child")
 
 	mustProduce(t, e, "del-parent", "k", map[string]any{"v": 1})
 	awaitFanout(t, e, "del-child", 1)
@@ -382,4 +411,27 @@ func TestRetentionFloorEnforcedByAPI(t *testing.T) {
 	e.createTopic("floor-ok", 3, 3_600_000)
 	resp = e.patch("/v1/topics/floor-ok", map[string]any{"retention_ms": int64(1_800_000)})
 	expectBadRequest(t, resp)
+}
+
+// awaitSecCursorsAnchored is awaitCursorsAnchored for the secured env
+// (requests need admin credentials).
+func awaitSecCursorsAnchored(t *testing.T, e *env) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		resp := e.authReq(t, http.MethodGet, "/v1/topics/sec-parent/children", nil, e.adminUser, e.adminPass)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("list children: status = %d", resp.StatusCode)
+		}
+		listing := readJSON[childrenListing](t, resp)
+		for _, c := range listing.Children {
+			if c.Name == "sec-child" && c.LagComplete {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("sec-child cursors never anchored: %+v", listing)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
