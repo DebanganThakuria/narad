@@ -6,7 +6,7 @@ package storage
 // children anchor due times to the commit timestamp; consumers receive
 // both as Message.Key and Message.Timestamp:
 //
-//	offset 0  [version: 1 byte]  0x01
+//	offset 0  [version: 1 byte]  0x02
 //	offset 1  [keyLen: uvarint]
 //	offset N  [key: keyLen bytes]
 //	offset M  [committedAtUnixMs: 8 bytes big-endian]
@@ -17,7 +17,10 @@ import (
 	"fmt"
 )
 
-const keyedRecordVersion byte = 0x01
+// keyedRecordVersion identifies the envelope layout. 0x01 (key +
+// payload, no timestamp) was retired before release; its records
+// decode as corrupt rather than as silently truncated payloads.
+const keyedRecordVersion byte = 0x02
 
 // EncodeKeyedRecord wraps a produce key, the commit timestamp, and the
 // payload into the stored record envelope.

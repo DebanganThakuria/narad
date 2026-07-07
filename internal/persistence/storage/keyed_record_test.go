@@ -45,6 +45,7 @@ func TestKeyedRecordDecodeRejectsCorrupt(t *testing.T) {
 		{"truncated varint", []byte{keyedRecordVersion}},
 		{"key length overruns", append([]byte{keyedRecordVersion}, 0xFF, 0x01)},
 		{"timestamp truncated", append([]byte{keyedRecordVersion, 0x01}, 'k', 0x00)},
+		{"retired v1 layout", append([]byte{0x01, 0x02}, 'k', '1', 'p', 'a', 'y', 'l', 'o', 'a', 'd', '!')},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

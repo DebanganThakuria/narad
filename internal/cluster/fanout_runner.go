@@ -98,6 +98,11 @@ type fanoutCursorKey struct {
 	partition int
 	child     string
 	epoch     string
+	// delayMs is the child's fan-out delay. Immutable per epoch (a
+	// re-attach changes both), so carrying it here means the cursor
+	// never has to re-resolve it — and can never mistakenly run
+	// ungated after a transient metadata read failure.
+	delayMs int64
 }
 
 type fanoutCursorHandle struct {
@@ -208,7 +213,7 @@ func (r *FanoutRunner) Reconcile(ctx context.Context) {
 			if !r.ownsPartition(parent.Name, p) {
 				continue
 			}
-			desired[fanoutCursorKey{parent: parent.Name, partition: p, child: t.Name, epoch: t.AttachEpoch}] = struct{}{}
+			desired[fanoutCursorKey{parent: parent.Name, partition: p, child: t.Name, epoch: t.AttachEpoch, delayMs: t.FanoutDelayMs}] = struct{}{}
 		}
 	}
 

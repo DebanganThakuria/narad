@@ -24,14 +24,7 @@ import (
 
 func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 	partitionDir := storage.TopicPartitionDir(r.dataDir, key.parent, key.partition)
-
-	// The delay is immutable while attached (a re-attach changes the
-	// epoch, which respawns the cursor), so capture it once. The
-	// per-batch epoch check in commitBatch keeps this honest.
-	delayMs := int64(0)
-	if child, err := r.store.GetTopic(ctx, key.child); err == nil {
-		delayMs = child.FanoutDelayMs
-	}
+	delayMs := key.delayMs
 
 	next := topic.FanoutTailOffset
 	if cur, ok, err := storage.ReadFanoutCursor(partitionDir, key.child); err != nil {
@@ -147,7 +140,9 @@ func (r *FanoutRunner) readBatch(ctx context.Context, key fanoutCursorKey, next,
 		Wait:       defaultFanoutLongPollWait,
 	}
 	if delayMs > 0 {
-		opts.MaxCommittedAt = time.Now().UnixMilli() - delayMs
+		// Clamp so an extreme delay can never yield a non-positive
+		// cutoff, which the reader would treat as "no gate".
+		opts.MaxCommittedAt = max(time.Now().UnixMilli()-delayMs, 1)
 	}
 	slab, err := r.broker.ReadFanoutSlab(ctx, key.parent, key.partition, opts)
 	if err != nil {
@@ -177,7 +172,7 @@ func (r *FanoutRunner) readBatch(ctx context.Context, key fanoutCursorKey, next,
 				Wait:       remaining,
 			}
 			if delayMs > 0 {
-				moreOpts.MaxCommittedAt = time.Now().UnixMilli() - delayMs
+				moreOpts.MaxCommittedAt = max(time.Now().UnixMilli()-delayMs, 1)
 			}
 			more, err := r.broker.ReadFanoutSlab(ctx, key.parent, key.partition, moreOpts)
 			if err != nil {

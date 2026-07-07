@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 )
 
@@ -31,6 +32,10 @@ func (m *Manager) AttachChild(ctx context.Context, parent, child string, delayMs
 	}
 	if delayMs < 0 {
 		return fmt.Errorf("%w: delay_ms must be >= 0", ErrInvalid)
+	}
+	if delayMs > topic.MaxFanoutDelayMs {
+		return fmt.Errorf("%w: delay_ms (%d) exceeds the maximum of %d (1 year)",
+			ErrInvalid, delayMs, topic.MaxFanoutDelayMs)
 	}
 	if err := m.checkTopicExists(ctx, parent); err != nil {
 		return err

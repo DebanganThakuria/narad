@@ -82,6 +82,12 @@ const (
 // roughly cluster capacity divided by (children + 1).
 const MaxChildrenPerParent = 108
 
+// MaxFanoutDelayMs caps a delay child's delay at one year. Beyond
+// being a sanity rail (a misconfigured nanoseconds-for-milliseconds
+// delay would otherwise schedule delivery decades out), the cap keeps
+// due-time arithmetic comfortably inside int64.
+const MaxFanoutDelayMs int64 = 365 * 24 * 60 * 60 * 1000
+
 // MinRetentionMs is the minimum effective retention for every topic
 // (one hour). The parent's retained log is the fan-out buffer for
 // lagging children, so the floor guarantees every child at least an

@@ -100,6 +100,10 @@ func (f *fsmState) applyAttachChild(data []byte) error {
 		if p.DelayMs < 0 {
 			return fmt.Errorf("%w: delay_ms must be >= 0", errs.ErrFanoutRoleConflict)
 		}
+		if p.DelayMs > topic.MaxFanoutDelayMs {
+			return fmt.Errorf("%w: delay_ms (%d) exceeds the maximum of %d (1 year)",
+				errs.ErrFanoutDelayTooLong, p.DelayMs, topic.MaxFanoutDelayMs)
+		}
 		if err := checkDelayAgainstRetention(p.DelayMs, parent.RetentionMs, p.Parent); err != nil {
 			return err
 		}

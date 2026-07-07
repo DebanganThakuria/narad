@@ -515,6 +515,9 @@ func TestApplyAttachChild_DelayInvariants(t *testing.T) {
 	if err := fsmAttachDelay(t, f, "parent", "child", topic.MinRetentionMs+1); !errors.Is(err, errs.ErrFanoutDelayTooLong) {
 		t.Fatalf("oversized delay error = %v, want %v", err, errs.ErrFanoutDelayTooLong)
 	}
+	if err := fsmAttachDelay(t, f, "parent", "child", topic.MaxFanoutDelayMs+1); !errors.Is(err, errs.ErrFanoutDelayTooLong) {
+		t.Fatalf("above-cap delay error = %v, want %v", err, errs.ErrFanoutDelayTooLong)
+	}
 	if err := fsmAttachDelay(t, f, "parent", "child", topic.MinRetentionMs); err != nil {
 		t.Fatalf("attach with fitting delay: %v", err)
 	}
@@ -552,8 +555,8 @@ func TestApplyAttachChild_KeepForeverParentBuffersAnyDelay(t *testing.T) {
 		t.Fatalf("create parent: %v", err)
 	}
 	fsmCreateTopic(t, f, "child")
-	if err := fsmAttachDelay(t, f, "parent", "child", 30*24*topic.MinRetentionMs); err != nil {
-		t.Fatalf("attach huge delay under keep-forever parent: %v", err)
+	if err := fsmAttachDelay(t, f, "parent", "child", topic.MaxFanoutDelayMs); err != nil {
+		t.Fatalf("attach max delay under keep-forever parent: %v", err)
 	}
 }
 
