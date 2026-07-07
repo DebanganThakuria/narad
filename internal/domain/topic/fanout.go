@@ -5,8 +5,7 @@ package topic
 // re-keys and commits them to children).
 
 // KeyedRecord is one committed record with its produce key recovered
-// from the stored envelope. Records committed before the keyed
-// envelope existed carry an empty key.
+// from the stored envelope.
 type KeyedRecord struct {
 	Key     string
 	Payload []byte

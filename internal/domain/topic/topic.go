@@ -40,8 +40,7 @@ type Topic struct {
 	// Role, Children, and Parent describe the topic's position in
 	// fan-out. They are managed exclusively by the metastore's
 	// attach/detach/delete operations — a config update never changes
-	// them. Records written before fan-out existed have no role field;
-	// the empty string reads as standalone (see EffectiveRole).
+	// them. The zero value reads as standalone (see EffectiveRole).
 	Role Role `json:"role,omitempty"`
 	// Children is the set of child topics this parent fans out to,
 	// in attach order. Parent role only.
@@ -83,8 +82,8 @@ const MaxChildrenPerParent = 108
 // unaffected.
 const MinRetentionMs int64 = 60 * 60 * 1000
 
-// EffectiveRole maps the zero value to RoleStandalone so topic records
-// persisted before fan-out existed keep their meaning.
+// EffectiveRole maps the zero value to RoleStandalone: a topic record
+// with no explicit role is an ordinary standalone topic.
 func (t Topic) EffectiveRole() Role {
 	if t.Role == "" {
 		return RoleStandalone

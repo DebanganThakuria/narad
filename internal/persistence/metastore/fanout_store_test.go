@@ -85,8 +85,8 @@ func TestAttachDetachChildThroughRaft(t *testing.T) {
 	}
 }
 
-// Reads must report standalone for records created before fan-out
-// (and for all newly created topics, which never carry a role).
+// Reads must report an explicit standalone role for topics created
+// without one (creates never carry a role).
 func TestGetTopicNormalizesRole(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

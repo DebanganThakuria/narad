@@ -465,29 +465,29 @@ func TestApplyPutSchema_PropagatesToChildrenAndGuardsChild(t *testing.T) {
 	}
 }
 
-// Topic records persisted before fan-out existed carry no role field;
-// they must read as standalone and be attachable.
-func TestFanout_LegacyRecordsReadAsStandalone(t *testing.T) {
+// A topic record with no explicit role field (the zero value) is an
+// ordinary standalone topic and must be attachable.
+func TestFanout_ZeroRoleReadsAsStandalone(t *testing.T) {
 	f := newFanoutFSM(t)
-	legacy := []byte(`{"name":"legacy","partitions":3,"retention_ms":3600000,` +
+	plain := []byte(`{"name":"plain","partitions":3,"retention_ms":3600000,` +
 		`"visibility_timeout_ms":30000,"max_in_flight_per_partition":1,` +
 		`"max_acked_ahead_per_partition":1,"created_at":1}`)
 	err := f.update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketTopics).Put([]byte("legacy"), legacy)
+		return tx.Bucket(bucketTopics).Put([]byte("plain"), plain)
 	})
 	if err != nil {
-		t.Fatalf("seed legacy record: %v", err)
+		t.Fatalf("seed record: %v", err)
 	}
 	fsmCreateTopic(t, f, "child")
 
-	got := fsmGetTopic(t, f, "legacy")
+	got := fsmGetTopic(t, f, "plain")
 	if got.EffectiveRole() != topic.RoleStandalone || got.IsParent() || got.IsChild() {
-		t.Fatalf("legacy record role = %+v, want standalone", got)
+		t.Fatalf("zero-role record = %+v, want standalone", got)
 	}
-	if err := fsmAttach(t, f, "legacy", "child"); err != nil {
-		t.Fatalf("attach under legacy parent: %v", err)
+	if err := fsmAttach(t, f, "plain", "child"); err != nil {
+		t.Fatalf("attach under zero-role parent: %v", err)
 	}
-	if p := fsmGetTopic(t, f, "legacy"); !p.IsParent() {
-		t.Fatalf("legacy parent after attach = %+v, want role=parent", p)
+	if p := fsmGetTopic(t, f, "plain"); !p.IsParent() {
+		t.Fatalf("parent after attach = %+v, want role=parent", p)
 	}
 }

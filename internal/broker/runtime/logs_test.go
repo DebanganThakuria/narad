@@ -182,9 +182,7 @@ func TestRetentionFromTopic(t *testing.T) {
 		retentionMs int64
 		wantMaxAge  time.Duration
 	}{
-		{"at least an hour passes through", 7_200_000, 2 * time.Hour},
-		{"exactly the floor passes through", 3_600_000, time.Hour},
-		{"positive sub-hour clamps to the floor", 2500, time.Hour},
+		{"retention passes through", 7_200_000, 2 * time.Hour},
 		{"zero keeps forever", 0, 0},
 	}
 	for _, tc := range cases {

@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
@@ -173,15 +172,11 @@ func keyOf(topicName string, idx int) string {
 	return topicName + "/" + strconv.Itoa(idx)
 }
 
-// retentionFromTopic folds a topic's retention into storage options,
-// lifting positive sub-hour values to the uniform one-hour floor. The
-// create/alter paths already reject such values; the clamp covers
-// records persisted before the floor existed. Zero (keep forever) is
-// left alone.
+// retentionFromTopic folds a topic's retention into storage options.
+// The create/alter paths enforce the one-hour retention floor, so a
+// stored record's retention is either zero (keep forever) or at least
+// topic.MinRetentionMs.
 func retentionFromTopic(r int64, checkInterval time.Duration) storage.RetentionConfig {
-	if r > 0 && r < topic.MinRetentionMs {
-		r = topic.MinRetentionMs
-	}
 	return storage.RetentionConfig{
 		MaxAge:        time.Duration(r) * time.Millisecond,
 		CheckInterval: checkInterval,

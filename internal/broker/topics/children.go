@@ -73,15 +73,3 @@ func (m *Manager) checkTopicExists(ctx context.Context, name string) error {
 	}
 	return nil
 }
-
-// ChildrenOf returns the parent's child topics in attach order.
-func (m *Manager) ChildrenOf(ctx context.Context, parent string) ([]string, error) {
-	t, err := m.GetTopic(ctx, parent)
-	if err != nil {
-		return nil, err
-	}
-	if !t.IsParent() {
-		return nil, nil
-	}
-	return t.Children, nil
-}

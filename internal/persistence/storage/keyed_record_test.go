@@ -3,7 +3,6 @@ package storage
 import (
 	"bytes"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -54,22 +53,21 @@ func TestKeyedRecordDecodeRejectsCorrupt(t *testing.T) {
 	}
 }
 
-// A log written before the keyed envelope existed has no keyed.from
-// marker: opening it must stamp the marker at the recovered tail so
-// old records read as bare payloads while new appends decode.
-func TestReadKeyedHonorsKeyedFromMarker(t *testing.T) {
+// ReadKeyed round-trips key and payload through a real log, across a
+// reopen.
+func TestReadKeyedThroughLog(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "p00000")
 	opts := Options{FlushInterval: time.Millisecond}
 
-	legacy := [][]byte{[]byte(`{"legacy":1}`), []byte(`{"legacy":2}`)}
 	l, err := NewLog(dir, opts)
 	if err != nil {
 		t.Fatalf("NewLog: %v", err)
 	}
-	for _, p := range legacy {
-		if _, err := l.Append(p); err != nil {
-			t.Fatalf("Append: %v", err)
-		}
+	if _, err := l.Append(EncodeKeyedRecord("k1", []byte(`{"v":1}`))); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if _, err := l.Append(EncodeKeyedRecord("", []byte(`{"v":2}`))); err != nil {
+		t.Fatalf("Append: %v", err)
 	}
 	if err := l.Sync(); err != nil {
 		t.Fatalf("Sync: %v", err)
@@ -80,91 +78,19 @@ func TestReadKeyedHonorsKeyedFromMarker(t *testing.T) {
 	if err := l.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	// Simulate the pre-envelope on-disk state: the marker this open
-	// wrote never existed back then.
-	if err := os.Remove(filepath.Join(dir, keyedFromFileName)); err != nil {
-		t.Fatalf("remove marker: %v", err)
-	}
 
 	l, err = NewLog(dir, opts)
 	if err != nil {
 		t.Fatalf("NewLog(reopen): %v", err)
 	}
 	defer l.Close()
-	if got := l.KeyedFromOffset(); got != 2 {
-		t.Fatalf("KeyedFromOffset() = %d, want 2 (recovered tail)", got)
-	}
 
-	if _, err := l.Append(EncodeKeyedRecord("k1", []byte(`{"new":3}`))); err != nil {
-		t.Fatalf("Append keyed: %v", err)
+	key, payload, err := l.ReadKeyed(0)
+	if err != nil || key != "k1" || string(payload) != `{"v":1}` {
+		t.Fatalf("ReadKeyed(0) = (%q, %q, %v), want (k1, {\"v\":1}, nil)", key, payload, err)
 	}
-	if err := l.Sync(); err != nil {
-		t.Fatalf("Sync: %v", err)
-	}
-	if err := l.AdvanceHighWatermark(3); err != nil {
-		t.Fatalf("AdvanceHighWatermark: %v", err)
-	}
-
-	for i, want := range legacy {
-		key, payload, err := l.ReadKeyed(int64(i))
-		if err != nil {
-			t.Fatalf("ReadKeyed(%d): %v", i, err)
-		}
-		if key != "" || !bytes.Equal(payload, want) {
-			t.Fatalf("ReadKeyed(%d) = (%q, %q), want bare legacy payload %q", i, key, payload, want)
-		}
-	}
-	key, payload, err := l.ReadKeyed(2)
-	if err != nil {
-		t.Fatalf("ReadKeyed(2): %v", err)
-	}
-	if key != "k1" || string(payload) != `{"new":3}` {
-		t.Fatalf("ReadKeyed(2) = (%q, %q), want decoded envelope", key, payload)
-	}
-
-	// The marker must survive a reopen (not be re-stamped at the new tail).
-	if err := l.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	l, err = NewLog(dir, opts)
-	if err != nil {
-		t.Fatalf("NewLog(reopen 2): %v", err)
-	}
-	defer l.Close()
-	if got := l.KeyedFromOffset(); got != 2 {
-		t.Fatalf("KeyedFromOffset() after reopen = %d, want 2", got)
-	}
-}
-
-// A marker above the recovered tail (power loss dropped unsynced
-// frames the first open counted) must clamp down: records rewritten at
-// those offsets are envelope-aware.
-func TestKeyedFromMarkerClampsToRecoveredTail(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "p00000")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := writeOffsetFile(dir, keyedFromFileName, 42); err != nil {
-		t.Fatalf("seed marker: %v", err)
-	}
-	l, err := NewLog(dir, Options{FlushInterval: time.Millisecond})
-	if err != nil {
-		t.Fatalf("NewLog: %v", err)
-	}
-	defer l.Close()
-	if got := l.KeyedFromOffset(); got != 0 {
-		t.Fatalf("KeyedFromOffset() = %d, want 0 (clamped to the empty recovered tail)", got)
-	}
-}
-
-// A fresh partition is fully keyed from offset zero.
-func TestNewLogStampsKeyedFromZero(t *testing.T) {
-	l, err := NewLog(filepath.Join(t.TempDir(), "p00000"), Options{FlushInterval: time.Millisecond})
-	if err != nil {
-		t.Fatalf("NewLog: %v", err)
-	}
-	defer l.Close()
-	if got := l.KeyedFromOffset(); got != 0 {
-		t.Fatalf("KeyedFromOffset() = %d, want 0", got)
+	key, payload, err = l.ReadKeyed(1)
+	if err != nil || key != "" || string(payload) != `{"v":2}` {
+		t.Fatalf("ReadKeyed(1) = (%q, %q, %v), want empty key", key, payload, err)
 	}
 }

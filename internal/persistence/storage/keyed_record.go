@@ -1,36 +1,21 @@
 package storage
 
-// Keyed records. Historically a partition log stored only the produce
-// payload, which made the produce key unrecoverable after commit —
-// fan-out needs it to re-key parent records into child partitions (and
-// consumers get Message.Key populated as a side benefit). Records are
-// now stored wrapped in a tiny self-describing envelope:
+// Keyed records. Every record in a partition log is stored wrapped in
+// a tiny self-describing envelope so the produce key survives the
+// commit — fan-out needs it to re-key parent records into child
+// partitions, and consumers receive it as Message.Key:
 //
 //	offset 0  [version: 1 byte]  0x01
 //	offset 1  [keyLen: uvarint]
 //	offset N  [key: keyLen bytes]
 //	offset M  [payload]
-//
-// Logs written before this format hold bare payloads, so each log
-// persists the offset its keyed records start at (the "keyed.from"
-// marker, written once at first open) and ReadKeyed treats everything
-// below it as an unkeyed bare payload. Downgrading a node after keyed
-// records were written is not supported: an old binary would serve the
-// envelope bytes as the payload.
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 )
 
-const (
-	keyedRecordVersion byte = 0x01
-
-	keyedFromFileName = "keyed.from"
-)
+const keyedRecordVersion byte = 0x01
 
 // EncodeKeyedRecord wraps a produce key and payload into the stored
 // record envelope.
@@ -63,55 +48,11 @@ func DecodeKeyedRecord(b []byte) (key string, payload []byte, err error) {
 }
 
 // ReadKeyed reads the record at offset and splits it into produce key
-// and payload. Records below the log's keyed.from marker predate the
-// envelope and are returned as key-less bare payloads.
+// and payload.
 func (l *Log) ReadKeyed(offset int64) (string, []byte, error) {
 	stored, err := l.Read(offset)
 	if err != nil {
 		return "", nil, err
 	}
-	if offset < l.keyedFrom {
-		return "", stored, nil
-	}
 	return DecodeKeyedRecord(stored)
-}
-
-// KeyedFromOffset returns the first offset whose record carries the
-// keyed envelope. Records below it are bare payloads.
-func (l *Log) KeyedFromOffset() int64 { return l.keyedFrom }
-
-// loadOrInitKeyedFrom reads the log's keyed.from marker, writing it at
-// the recovered tail on first open under an envelope-aware binary so
-// pre-existing records keep reading as bare payloads. nextOffset is the
-// recovered append position: everything below it was written before
-// this open.
-//
-// A loaded marker is clamped to the recovered tail: a power loss can
-// drop unsynced pre-envelope frames the first open counted when it
-// stamped the marker, and any record later written at those offsets is
-// envelope-aware — reading it as a bare payload would serve envelope
-// bytes to consumers.
-func loadOrInitKeyedFrom(dir string, nextOffset int64) (int64, error) {
-	path := filepath.Join(dir, keyedFromFileName)
-	buf, err := os.ReadFile(path)
-	switch {
-	case err == nil:
-		if len(buf) != 8 {
-			return 0, fmt.Errorf("storage: keyed.from marker corrupt: got %d bytes, want 8", len(buf))
-		}
-		return min(int64(binary.BigEndian.Uint64(buf)), nextOffset), nil
-	case errors.Is(err, os.ErrNotExist):
-		if err := writeOffsetFile(dir, keyedFromFileName, nextOffset); err != nil {
-			return 0, fmt.Errorf("storage: persist keyed.from marker: %w", err)
-		}
-		// The rename is not durable until the directory entry is
-		// synced; losing the marker after enveloped records were
-		// appended would silently misread them as bare payloads.
-		if err := syncDir(dir); err != nil {
-			return 0, fmt.Errorf("storage: sync dir for keyed.from marker: %w", err)
-		}
-		return nextOffset, nil
-	default:
-		return 0, err
-	}
 }

@@ -24,21 +24,14 @@ func TestAttachChild_ValidatesAndLinks(t *testing.T) {
 		t.Fatalf("parent after attach = %+v", got)
 	}
 
-	children, err := manager.ChildrenOf(ctx, "parent")
-	if err != nil || len(children) != 1 || children[0] != "child" {
-		t.Fatalf("ChildrenOf() = %v, %v, want [child]", children, err)
-	}
-
 	if err := manager.DetachChild(ctx, "parent", "child"); err != nil {
 		t.Fatalf("DetachChild() error = %v", err)
 	}
 	if got := ms.topics["child"]; got.IsChild() {
 		t.Fatalf("child after detach = %+v, want standalone", got)
 	}
-	// A standalone topic has no children — and no error.
-	children, err = manager.ChildrenOf(ctx, "parent")
-	if err != nil || len(children) != 0 {
-		t.Fatalf("ChildrenOf() after detach = %v, %v, want empty", children, err)
+	if got := ms.topics["parent"]; got.IsParent() || len(got.Children) != 0 {
+		t.Fatalf("parent after detach = %+v, want standalone with no children", got)
 	}
 }
 

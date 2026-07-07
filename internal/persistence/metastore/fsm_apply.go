@@ -179,17 +179,13 @@ func (f *fsmState) applyPutSchema(data []byte) error {
 	var childTopics []string
 	err := f.update(func(tx *bolt.Tx) error {
 		t, err := getTopicRecord(tx, p.Topic)
-		if err != nil && !errors.Is(err, ErrNotFound) {
+		if err != nil {
 			return err
 		}
-		// A missing record is tolerated for compatibility: schema puts
-		// historically did not require the topic to exist.
-		if err == nil {
-			if t.IsChild() {
-				return fmt.Errorf("%w: %q is attached to %q", errs.ErrFanoutSchemaManaged, p.Topic, t.Parent)
-			}
-			childTopics = t.Children
+		if t.IsChild() {
+			return fmt.Errorf("%w: %q is attached to %q", errs.ErrFanoutSchemaManaged, p.Topic, t.Parent)
 		}
+		childTopics = t.Children
 		b := tx.Bucket(bucketSchemas)
 		if err := b.Put(schemaKey(p.Topic, p.Version), p.Schema); err != nil {
 			return err

@@ -62,8 +62,7 @@ func WriteConsumerOffsetIfPartitionDirExists(partitionDir string, offset int64) 
 }
 
 // writeOffsetFile atomically persists an 8-byte big-endian offset file
-// under dir (temp file + fsync + rename). Shared by the consumer
-// offset, the keyed.from marker, and the fan-out cursor files.
+// under dir (temp file + fsync + rename).
 func writeOffsetFile(dir, name string, offset int64) error {
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], uint64(offset))

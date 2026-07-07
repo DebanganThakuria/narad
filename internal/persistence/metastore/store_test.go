@@ -2,6 +2,7 @@ package metastore_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -286,6 +287,14 @@ func TestSchemas(t *testing.T) {
 	s := newTestStore(t)
 
 	schema := []byte(`{"type":"object"}`)
+	// A schema can only be stored for an existing topic.
+	if err := s.PutSchema(ctx, "orders", 1, schema); !errors.Is(err, metastore.ErrNotFound) {
+		t.Fatalf("PutSchema without topic error = %v, want %v", err, metastore.ErrNotFound)
+	}
+
+	if err := s.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 3}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
 	if err := s.PutSchema(ctx, "orders", 1, schema); err != nil {
 		t.Fatalf("PutSchema: %v", err)
 	}

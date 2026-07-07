@@ -62,8 +62,6 @@ type Broker interface {
 	// child. DetachChild unlinks; the child keeps what it received.
 	AttachChild(ctx context.Context, parent, child string) error
 	DetachChild(ctx context.Context, parent, child string) error
-	// ChildrenOf returns the parent's attached children in attach order.
-	ChildrenOf(ctx context.Context, parent string) ([]string, error)
 
 	// ReadFanoutSlab reads committed keyed records from a locally owned
 	// partition — the fan-out cursor engine's read primitive.
