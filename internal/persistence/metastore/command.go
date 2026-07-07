@@ -19,6 +19,8 @@ const (
 	opUpdateUser
 	opDeleteUser
 	opSeedRootUser
+	opAttachChild
+	opDetachChild
 )
 
 // cmd is the envelope written to the Raft log.
@@ -32,6 +34,12 @@ type schemaPayload struct {
 	Topic   string `json:"t"`
 	Version int    `json:"v"`
 	Schema  []byte `json:"s"`
+}
+
+// childLinkPayload is the body of opAttachChild and opDetachChild.
+type childLinkPayload struct {
+	Parent string `json:"p"`
+	Child  string `json:"c"`
 }
 
 // heartbeatPayload is the body of an opMemberHeartbeat command.

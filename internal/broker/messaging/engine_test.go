@@ -68,6 +68,9 @@ func (f *messagingFakeMetastore) DeleteTopic(_ context.Context, name string) err
 	return nil
 }
 
+func (f *messagingFakeMetastore) AttachChild(context.Context, string, string) error { return nil }
+func (f *messagingFakeMetastore) DetachChild(context.Context, string, string) error { return nil }
+
 func (f *messagingFakeMetastore) GetTopic(_ context.Context, name string) (topic.Topic, error) {
 	f.getTopicCalls++
 	if f.getTopicErr != nil {

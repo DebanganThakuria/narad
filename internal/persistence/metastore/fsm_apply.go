@@ -9,10 +9,14 @@ package metastore
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
 
 	bolt "go.etcd.io/bbolt"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/errs"
 )
 
 func (f *fsmState) applyCreateTopic(data []byte) error {
@@ -37,21 +41,25 @@ func (f *fsmState) applyCreateTopic(data []byte) error {
 	return err
 }
 
+// applyUpdateTopic overwrites the topic's config. The fan-out link
+// fields (Role/Children/Parent) are preserved from the stored record:
+// they change only through attach/detach/delete, so a read-modify-write
+// config update that raced an attach on another node cannot clobber
+// the link.
 func (f *fsmState) applyUpdateTopic(data []byte) error {
 	var t topic.Topic
 	if err := json.Unmarshal(data, &t); err != nil {
 		return err
 	}
 	err := f.update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bucketTopics)
-		if b.Get([]byte(t.Name)) == nil {
-			return ErrNotFound
-		}
-		v, err := json.Marshal(t)
+		current, err := getTopicRecord(tx, t.Name)
 		if err != nil {
 			return err
 		}
-		return b.Put([]byte(t.Name), v)
+		t.Role = current.Role
+		t.Children = current.Children
+		t.Parent = current.Parent
+		return putTopicRecord(tx, t)
 	})
 	if err == nil {
 		f.versions.bumpTopic(t.Name)
@@ -60,16 +68,25 @@ func (f *fsmState) applyUpdateTopic(data []byte) error {
 }
 
 // applyDeleteTopic removes the topic together with all of its schemas
-// and partition assignments in a single transaction.
+// and partition assignments in a single transaction. Fan-out links are
+// dissolved rather than cascaded: deleting a parent detaches all of
+// its children (they keep their data and schemas and become
+// standalone), and deleting a child unlinks it from its parent.
 func (f *fsmState) applyDeleteTopic(data []byte) error {
 	var name string
 	if err := json.Unmarshal(data, &name); err != nil {
 		return err
 	}
+	var linkedTopics []string
 	err := f.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketTopics)
 		if b.Get([]byte(name)) == nil {
 			return ErrNotFound
+		}
+		var err error
+		linkedTopics, err = dissolveFanoutLinks(tx, name)
+		if err != nil {
+			return err
 		}
 		if err := b.Delete([]byte(name)); err != nil {
 			return err
@@ -93,20 +110,100 @@ func (f *fsmState) applyDeleteTopic(data []byte) error {
 		f.versions.bumpTopic(name)
 		f.versions.bumpAssignment(name)
 		f.versions.bumpSchema(name)
+		for _, linked := range linkedTopics {
+			f.versions.bumpTopic(linked)
+		}
 	}
 	return err
 }
 
+// dissolveFanoutLinks detaches every fan-out link involving the topic
+// being deleted and returns the other endpoints so the caller can bump
+// their versions. A linked record that is unexpectedly missing is
+// skipped: the delete must not fail on an already-broken link.
+func dissolveFanoutLinks(tx *bolt.Tx, name string) ([]string, error) {
+	t, err := getTopicRecord(tx, name)
+	if err != nil {
+		return nil, err
+	}
+	var linked []string
+	if t.IsParent() {
+		for _, childName := range t.Children {
+			child, err := getTopicRecord(tx, childName)
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			child.Role = topic.RoleStandalone
+			child.Parent = ""
+			if err := putTopicRecord(tx, child); err != nil {
+				return nil, err
+			}
+			linked = append(linked, childName)
+		}
+	}
+	if t.IsChild() && t.Parent != "" {
+		parent, err := getTopicRecord(tx, t.Parent)
+		switch {
+		case errors.Is(err, ErrNotFound):
+		case err != nil:
+			return nil, err
+		default:
+			parent.Children = slices.DeleteFunc(parent.Children, func(c string) bool { return c == name })
+			if len(parent.Children) == 0 {
+				parent.Children = nil
+				parent.Role = topic.RoleStandalone
+			}
+			if err := putTopicRecord(tx, parent); err != nil {
+				return nil, err
+			}
+			linked = append(linked, t.Parent)
+		}
+	}
+	return linked, nil
+}
+
+// applyPutSchema stores a schema version. An attached child's schema
+// is parent-managed, so targeting one directly is rejected; a schema
+// stored on a fan-out parent is propagated to every child in the same
+// transaction so parent and child histories never drift.
 func (f *fsmState) applyPutSchema(data []byte) error {
 	var p schemaPayload
 	if err := json.Unmarshal(data, &p); err != nil {
 		return err
 	}
+	var childTopics []string
 	err := f.update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketSchemas).Put(schemaKey(p.Topic, p.Version), p.Schema)
+		t, err := getTopicRecord(tx, p.Topic)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		// A missing record is tolerated for compatibility: schema puts
+		// historically did not require the topic to exist.
+		if err == nil {
+			if t.IsChild() {
+				return fmt.Errorf("%w: %q is attached to %q", errs.ErrFanoutSchemaManaged, p.Topic, t.Parent)
+			}
+			childTopics = t.Children
+		}
+		b := tx.Bucket(bucketSchemas)
+		if err := b.Put(schemaKey(p.Topic, p.Version), p.Schema); err != nil {
+			return err
+		}
+		for _, child := range childTopics {
+			if err := b.Put(schemaKey(child, p.Version), p.Schema); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err == nil {
 		f.versions.bumpSchema(p.Topic)
+		for _, child := range childTopics {
+			f.versions.bumpSchema(child)
+		}
 	}
 	return err
 }

@@ -245,7 +245,7 @@ func TestClientTopicsCreateListGetAlterDeleteParity(t *testing.T) {
 	env := newCLITestEnv(t)
 
 	stdout, stderr, err := captureCLIOutput(t, func() error {
-		return runClient([]string{"topics", "create", "--addr", env.server.URL, "--partitions", "3", "--retention-ms", "1234", "orders"})
+		return runClient([]string{"topics", "create", "--addr", env.server.URL, "--partitions", "3", "--retention-ms", "3600000", "orders"})
 	}, "")
 	if err != nil {
 		t.Fatalf("topics create: %v", err)
@@ -254,7 +254,7 @@ func TestClientTopicsCreateListGetAlterDeleteParity(t *testing.T) {
 		t.Fatalf("topics create stderr = %q, want empty", stderr)
 	}
 	created := decodeCLIJSON[topic.Topic](t, stdout)
-	if created.Name != "orders" || created.Partitions != 3 || created.RetentionMs != 1234 {
+	if created.Name != "orders" || created.Partitions != 3 || created.RetentionMs != 3600000 {
 		t.Fatalf("created topic = %+v", created)
 	}
 	if err := waitForAssignments(env.store, "orders"); err != nil {

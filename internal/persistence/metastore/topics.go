@@ -28,6 +28,22 @@ func (s *Store) DeleteTopic(ctx context.Context, name string) error {
 	return s.apply(ctx, opDeleteTopic, name)
 }
 
+// AttachChild links child under parent for fan-out through Raft. The
+// FSM enforces every fan-out invariant atomically: both topics must
+// exist, roles are exclusive and depth 1, a child has exactly one
+// parent, the parent's child count is capped, and the child's schema
+// must be absent (it adopts the parent's) or identical to the parent's.
+func (s *Store) AttachChild(ctx context.Context, parent, child string) error {
+	return s.apply(ctx, opAttachChild, childLinkPayload{Parent: parent, Child: child})
+}
+
+// DetachChild unlinks child from parent through Raft. The child keeps
+// its data and schema and becomes standalone. It returns ErrNotFound
+// if the child is not attached to that parent.
+func (s *Store) DetachChild(ctx context.Context, parent, child string) error {
+	return s.apply(ctx, opDetachChild, childLinkPayload{Parent: parent, Child: child})
+}
+
 // GetTopic reads the topic from the local replica. It returns
 // ErrNotFound if the topic does not exist.
 func (s *Store) GetTopic(_ context.Context, name string) (topic.Topic, error) {
@@ -41,7 +57,11 @@ func (s *Store) GetTopic(_ context.Context, name string) (topic.Topic, error) {
 		}
 		return json.Unmarshal(v, &t)
 	})
-	return t, err
+	if err != nil {
+		return topic.Topic{}, err
+	}
+	t.Role = t.EffectiveRole()
+	return t, nil
 }
 
 // ListTopics reads topics from the local replica in name order. With a
@@ -74,6 +94,7 @@ func (s *Store) ListTopics(_ context.Context, opts ListOptions) ([]topic.Topic, 
 			if err := json.Unmarshal(v, &t); err != nil {
 				return err
 			}
+			t.Role = t.EffectiveRole()
 			out = append(out, t)
 		}
 		return nil

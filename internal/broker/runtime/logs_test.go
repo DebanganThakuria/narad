@@ -67,6 +67,9 @@ func (f *runtimeFakeMetastore) DeleteTopic(_ context.Context, name string) error
 	return nil
 }
 
+func (f *runtimeFakeMetastore) AttachChild(context.Context, string, string) error { return nil }
+func (f *runtimeFakeMetastore) DetachChild(context.Context, string, string) error { return nil }
+
 func (f *runtimeFakeMetastore) GetTopic(_ context.Context, name string) (topic.Topic, error) {
 	if f.getTopicErr != nil {
 		return topic.Topic{}, f.getTopicErr
@@ -129,6 +132,14 @@ func (m runtimeMetastoreWithoutAssignments) ListTopics(ctx context.Context, opts
 	return m.inner.ListTopics(ctx, opts)
 }
 
+func (m runtimeMetastoreWithoutAssignments) AttachChild(ctx context.Context, parent, child string) error {
+	return m.inner.AttachChild(ctx, parent, child)
+}
+
+func (m runtimeMetastoreWithoutAssignments) DetachChild(ctx context.Context, parent, child string) error {
+	return m.inner.DetachChild(ctx, parent, child)
+}
+
 func (m runtimeMetastoreWithoutAssignments) PutSchema(ctx context.Context, topicName string, version int, raw []byte) error {
 	return m.inner.PutSchema(ctx, topicName, version, raw)
 }
@@ -166,12 +177,26 @@ func TestKeyOf(t *testing.T) {
 }
 
 func TestRetentionFromTopic(t *testing.T) {
-	cfg := retentionFromTopic(2500, 3*time.Second)
-	if cfg.MaxAge != 2500*time.Millisecond {
-		t.Fatalf("retentionFromTopic() MaxAge = %v, want %v", cfg.MaxAge, 2500*time.Millisecond)
+	cases := []struct {
+		name        string
+		retentionMs int64
+		wantMaxAge  time.Duration
+	}{
+		{"at least an hour passes through", 7_200_000, 2 * time.Hour},
+		{"exactly the floor passes through", 3_600_000, time.Hour},
+		{"positive sub-hour clamps to the floor", 2500, time.Hour},
+		{"zero keeps forever", 0, 0},
 	}
-	if cfg.CheckInterval != 3*time.Second {
-		t.Fatalf("retentionFromTopic() CheckInterval = %v, want %v", cfg.CheckInterval, 3*time.Second)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := retentionFromTopic(tc.retentionMs, 3*time.Second)
+			if cfg.MaxAge != tc.wantMaxAge {
+				t.Fatalf("retentionFromTopic(%d) MaxAge = %v, want %v", tc.retentionMs, cfg.MaxAge, tc.wantMaxAge)
+			}
+			if cfg.CheckInterval != 3*time.Second {
+				t.Fatalf("retentionFromTopic() CheckInterval = %v, want %v", cfg.CheckInterval, 3*time.Second)
+			}
+		})
 	}
 }
 

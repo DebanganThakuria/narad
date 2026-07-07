@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/platform/netaddr"
 )
 
@@ -209,6 +210,10 @@ func topicValidationErrors(cfg TopicConfig) []string {
 	}
 	if cfg.DefaultRetentionAgeMs < 0 {
 		errs = append(errs, "topic.default_retention_age_ms must be >= 0")
+	}
+	if cfg.DefaultRetentionAgeMs > 0 && cfg.DefaultRetentionAgeMs < topic.MinRetentionMs {
+		errs = append(errs, fmt.Sprintf("topic.default_retention_age_ms (%d) must be >= %d (1 hour) or 0 (keep forever)",
+			cfg.DefaultRetentionAgeMs, topic.MinRetentionMs))
 	}
 	if cfg.DefaultVisibilityTimeoutMs < 0 {
 		errs = append(errs, "topic.default_visibility_timeout_ms must be >= 0")

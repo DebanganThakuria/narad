@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +33,8 @@ type fakeMetastore struct {
 	deleteTopicErr       error
 	getTopicErr          error
 	putSchemaErr         error
+	attachChildErr       error
+	detachChildErr       error
 	lastCreatedTopic     topic.Topic
 	lastUpdatedTopic     topic.Topic
 	lastDeletedTopicName string
@@ -91,6 +94,45 @@ func (f *fakeMetastore) GetTopic(_ context.Context, name string) (topic.Topic, e
 
 func (f *fakeMetastore) ListTopics(_ context.Context, _ metastore.ListOptions) ([]topic.Topic, string, error) {
 	return nil, "", nil
+}
+
+// AttachChild/DetachChild mimic the FSM's link mutations closely enough
+// for Manager-level tests; invariant enforcement is covered by the
+// metastore's own tests.
+func (f *fakeMetastore) AttachChild(_ context.Context, parent, child string) error {
+	if f.attachChildErr != nil {
+		return f.attachChildErr
+	}
+	p, ok := f.topics[parent]
+	if !ok {
+		return errs.ErrNotFound
+	}
+	c, ok := f.topics[child]
+	if !ok {
+		return errs.ErrNotFound
+	}
+	p.Role, p.Children = topic.RoleParent, append(p.Children, child)
+	c.Role, c.Parent = topic.RoleChild, parent
+	f.topics[parent], f.topics[child] = p, c
+	return nil
+}
+
+func (f *fakeMetastore) DetachChild(_ context.Context, parent, child string) error {
+	if f.detachChildErr != nil {
+		return f.detachChildErr
+	}
+	p, okP := f.topics[parent]
+	c, okC := f.topics[child]
+	if !okP || !okC || c.Parent != parent {
+		return errs.ErrNotFound
+	}
+	p.Children = slices.DeleteFunc(p.Children, func(n string) bool { return n == child })
+	if len(p.Children) == 0 {
+		p.Children, p.Role = nil, topic.RoleStandalone
+	}
+	c.Role, c.Parent = topic.RoleStandalone, ""
+	f.topics[parent], f.topics[child] = p, c
+	return nil
 }
 
 func (f *fakeMetastore) PutSchema(_ context.Context, topicName string, version int, raw []byte) error {
@@ -233,7 +275,7 @@ func newTestManagerForMetastore(t *testing.T, ms metastore.Metastore, assigner P
 		Config{
 			DefaultPartitions:                3,
 			MaxPartitions:                    12,
-			DefaultRetentionMs:               60000,
+			DefaultRetentionMs:               3600000,
 			DefaultVisibilityTimeoutMs:       30000,
 			DefaultMaxInFlightPerPartition:   10,
 			DefaultMaxAckedAheadPerPartition: 11,
@@ -257,7 +299,7 @@ func TestCreateTopic_AppliesDefaultsAndCreatesDirectory(t *testing.T) {
 	if created.Partitions != 3 {
 		t.Fatalf("CreateTopic() defaults = %+v, want partitions=3", created)
 	}
-	if created.RetentionMs != 60000 || created.VisibilityTimeoutMs != 30000 {
+	if created.RetentionMs != 3600000 || created.VisibilityTimeoutMs != 30000 {
 		t.Fatalf("CreateTopic() retention defaults = %+v", created)
 	}
 	if created.MaxInFlightPerPartition != 10 || created.MaxAckedAheadPerPartition != 11 {
@@ -519,8 +561,8 @@ func TestUpdateTopicRetention_UsesDefaultWhenZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateTopicRetention() error = %v", err)
 	}
-	if updated.RetentionMs != 60000 {
-		t.Fatalf("UpdateTopicRetention() retention = %d, want 60000", updated.RetentionMs)
+	if updated.RetentionMs != 3600000 {
+		t.Fatalf("UpdateTopicRetention() retention = %d, want 3600000", updated.RetentionMs)
 	}
 }
 
@@ -670,7 +712,7 @@ func TestTopicUpdatesAreSerializedPerName(t *testing.T) {
 
 	retentionDone := make(chan error, 1)
 	go func() {
-		_, err := manager.UpdateTopicRetention(context.Background(), testTopicName, 2000)
+		_, err := manager.UpdateTopicRetention(context.Background(), testTopicName, 7200000)
 		retentionDone <- err
 	}()
 
@@ -692,8 +734,8 @@ func TestTopicUpdatesAreSerializedPerName(t *testing.T) {
 		t.Fatalf("UpdateTopicRetention() error = %v", err)
 	}
 	final := ms.topics[testTopicName]
-	if final.Partitions != 5 || final.RetentionMs != 2000 {
-		t.Fatalf("final topic = %+v, want partitions=5 retention_ms=2000 (one update was lost)", final)
+	if final.Partitions != 5 || final.RetentionMs != 7200000 {
+		t.Fatalf("final topic = %+v, want partitions=5 retention_ms=7200000 (one update was lost)", final)
 	}
 }
 

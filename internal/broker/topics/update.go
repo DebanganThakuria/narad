@@ -79,6 +79,9 @@ func (m *Manager) UpdateTopicRetention(ctx context.Context, name string, retenti
 	if retentionMs == 0 {
 		retentionMs = m.cfg.DefaultRetentionMs
 	}
+	if err := checkRetentionFloor(retentionMs); err != nil {
+		return topic.Topic{}, err
+	}
 	unlock := m.lockTopicName(name)
 	defer unlock()
 
@@ -177,6 +180,12 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 	t, err := m.GetTopic(ctx, name)
 	if err != nil {
 		return topic.Topic{}, err
+	}
+	if t.IsChild() {
+		// The FSM also rejects this; checking here gives the caller a
+		// named error before a Raft round-trip.
+		return topic.Topic{}, fmt.Errorf("%w: schema of %q is managed by parent %q; detach to manage it independently",
+			errs.ErrFanoutSchemaManaged, name, t.Parent)
 	}
 
 	if err := m.schemas.ValidateDefinition(ctx, name, rawSchema); err != nil {
