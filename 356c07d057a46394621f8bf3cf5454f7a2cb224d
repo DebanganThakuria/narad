@@ -1,0 +1,4 @@
+tests/e2e/fanout_test.go
+  18135c72-0fe3-495b-925e-870ae13dcad5:2026-07-07T09:28:11.636Z 35-58
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"18135c72-0fe3-495b-925e-870ae13dcad5:2026-07-07T09:28:11.636Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 38, "overriden_lines": 0}}}
