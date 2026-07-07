@@ -1,7 +1,8 @@
 # Narad Fan-out (Parent → Child Topics)
 
-Status: **design** (pre-1.0 feature). This document is the agreed design; it is
-not yet implemented.
+Status: **implemented** (pre-1.0 feature). This document is the design as
+built; §11 records where the implementation deliberately refines the original
+sketch.
 
 ## 1. Summary
 
@@ -79,11 +80,15 @@ The unit of fan-out is a **cursor**, one per `(childTopic, parentPartition)`:
 
 ```
 cursor key:   (child, parentPartition)
-cursor value: nextParentOffset   // next parent-log offset to fan out
+cursor value: (attachEpoch, nextParentOffset)   // next parent-log offset to fan out
 ```
 
-Cursors are persisted exactly like consumer offsets (per-partition offset
-files), and recovered on restart.
+Cursors are persisted like consumer offsets — one small file
+(`fanout-<child>.offset`) in the **parent partition's directory**, next to the
+log it tails — and recovered on restart. Each attach stamps the link with a
+fresh **epoch** (recorded on the child's topic record and in every cursor
+file), so cursor state from an earlier attachment is never resumed: a
+detach/re-attach always starts at the parent's current tail, never replays.
 
 - Total cursor state per parent = `parentPartitions × numChildren` small offset
   records (e.g. 6 × 108 = 648). Trivial.
@@ -94,29 +99,36 @@ files), and recovered on restart.
 
 ### 3.2 Owner-driven placement
 
-**The owner of a child partition runs the cursors that feed that partition.**
-Consequences:
+**The owner of a parent partition runs the cursors that tail it** (one per
+attached child). Consequences:
 
-- The **child write is local** (the cursor runs where the child partition lives).
-- The cursor only **reads** the parent partition — local if co-owned, otherwise
-  one internal read RPC.
-- All 108 children's cursors spread across the cluster along with their
-  partition assignments, so the amplification divides by cluster size rather
-  than piling onto one node.
+- The **parent read is always local** — no internal read RPC exists or is
+  needed, and the cursor's persisted offset lives in the same durability
+  domain as the log it tails.
+- The child write is local when the child partition is co-owned, otherwise it
+  reuses the existing batched commit RPC — the same path every remote produce
+  dispatch already takes.
+- All cursors spread across the cluster along with the parent partition
+  assignments, so the amplification divides by cluster size rather than piling
+  onto one node, and cursor placement is unaffected by child partition growth.
+
+(The original sketch placed cursors on child-partition owners; that is
+unimplementable as specified — see §11.)
 
 ### 3.3 Large batches (fill-or-linger)
 
 Each cursor reads a **large slab** of parent records (thousands of records / a
-few MiB) in one pass and commits them to the child as a **single**
-`CommitAcceptedProduceBatch` — one append + fsync + high-watermark advance per
-batch, not per message. This is the primary lever that makes N× amplification
+few MiB) in one pass, re-keys it, and commits it to the child as **one
+`CommitAcceptedProduceBatch` per touched child partition** — one append +
+fsync + high-watermark advance per partition batch, not per message. This is the primary lever that makes N× amplification
 survivable: it collapses the fsync count by orders of magnitude, and the
 durability CRC-readback verify amortizes across the whole batch.
 
 Per-cursor knobs (default large; exposed for tuning):
 
-- `maxBatchBytes`, `maxBatchRecords` — batch fills at either bound.
-- `lingerMs` — a batch also flushes when the linger timer fires, so a
+- `fanout.max_batch_bytes`, `fanout.max_batch_records` — batch fills at
+  either bound.
+- `fanout.linger_ms` — a batch also flushes when the linger timer fires, so a
   low-traffic child still drains promptly.
 
 Batch size trades **latency for throughput**: bigger batches → fewer fsyncs →
@@ -212,7 +224,8 @@ Topic record gains:
 ```
 role         : "standalone" | "parent" | "child"
 children     : []string      // parent only
-parentTopic  : string        // child only
+parent       : string        // child only
+attach_epoch : string        // child only; scopes cursor state to one attach
 ```
 
 New Raft ops (applied deterministically in the FSM, same pattern as topic CRUD):
@@ -279,10 +292,45 @@ alter/delete ownership rules). Normal produce/consume APIs are unchanged.
 
 - **Backpressure** if a child owner is healthy but slow: cursors naturally slow
   (lag grows) until drop-behind; is an explicit rate cap per parent worthwhile?
-- **Detach semantics on a busy parent** — drain in-flight batch, then stop
-  (clean); confirmed no replay on re-attach.
+- ~~Detach semantics on a busy parent~~ — resolved: the cursor is cancelled,
+  an in-flight batch either completes or is dropped (commit-before-advance
+  keeps this safe), the cursor file is removed, and the attach epoch
+  guarantees no replay on re-attach.
 - **Fairness** across 108 children sharing a node's fsync budget — round-robin
   cursor scheduling vs weighted; revisit under soak.
 
 (Schema handling is resolved — see §4.3: inherited, equality-gated at attach,
 parent-managed while attached.)
+
+## 11. Implementation notes (deltas from the original sketch)
+
+- **Cursor placement (§3.2).** The sketch said "the owner of a child partition
+  runs the cursors that feed that partition", but a `(child, parentPartition)`
+  cursor re-keys records across *many* child partitions, so "the child write is
+  local" and "a single commit batch" cannot both hold for multi-partition
+  children. The implementation keeps the sketch's cursor model (state per
+  `(child, parentPartition)`, exactly the 648-record math in §3.1) and places
+  each cursor on the **parent** partition's owner instead: reads are always
+  local, no new read RPC was needed, and child writes reuse the dispatcher's
+  local/remote batched commit paths.
+- **Keys in the log.** Committed partition logs historically stored only the
+  payload, so the produce key needed for re-keying was unrecoverable. Records
+  are now stored in a tiny versioned envelope (`[v1][keyLen][key][payload]`);
+  each partition log stamps a `keyed.from` marker at first open so
+  pre-envelope records still read as bare payloads. Consumers now receive
+  `key` on consumed messages as a side benefit. Downgrading a binary after
+  keyed records were written is not supported.
+- **Attach epochs.** Every attach generates a random epoch, stored on the
+  child's topic record and in each cursor file. Cursor state is scoped to the
+  epoch, which is what makes "no replay on re-attach" robust even when a node
+  was down across the detach/re-attach.
+- **Deletes dissolve links.** Deleting a parent detaches all children (they
+  keep data + schema, become standalone); deleting a child unlinks it from its
+  parent. A parent whose last child detaches reverts to standalone.
+- **Schema equality is full-history.** The attach gate compares the entire
+  version history byte-for-byte (adoption copies it wholesale), and parent
+  schema puts propagate to children inside the same Raft apply, so histories
+  cannot drift while attached.
+- **Config updates cannot clobber links.** `opUpdateTopic` preserves
+  role/children/parent/epoch from the stored record; those fields change only
+  through attach/detach/delete.

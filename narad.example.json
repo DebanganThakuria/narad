@@ -27,6 +27,11 @@
     "default_max_in_flight_per_partition":        1024,
     "default_max_acked_ahead_per_partition":      1024
   },
+  "fanout": {
+    "max_batch_records": 4096,
+    "max_batch_bytes":   4194304,
+    "linger_ms":         25
+  },
   "log": {
     "level":  "info",
     "format": "json"

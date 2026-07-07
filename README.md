@@ -36,6 +36,7 @@ Core capabilities:
 
 - durable append-only segmented storage
 - queue-style consume/ack semantics with replay support
+- parent → child topic fan-out with per-key ordering
 - Raft-backed control-plane metadata
 - any-pod produce ingress with async owner dispatch
 - JSON-Schema validation and per-topic tuning
@@ -443,10 +444,13 @@ Useful environment overrides:
 | `NARAD_LOG_FORMAT` | `json` / `text` |
 | `NARAD_TOPIC_DEFAULT_PARTITIONS` | default partition count when omitted from CreateTopic |
 | `NARAD_TOPIC_MAX_PARTITIONS` | upper bound for partition count |
-| `NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS` | default retention age (default: 7 days) |
+| `NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS` | default retention age (default: 7 days; every topic has a 1-hour minimum, 0 = keep forever) |
 | `NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS` | default queue visibility timeout |
 | `NARAD_TOPIC_DEFAULT_MAX_IN_FLIGHT_PER_PARTITION` | default reservation cap per partition |
 | `NARAD_TOPIC_DEFAULT_MAX_ACKED_AHEAD_PER_PARTITION` | default out-of-order ack cap per partition |
+| `NARAD_FANOUT_MAX_BATCH_RECORDS` | records per fan-out batch (default 4096) |
+| `NARAD_FANOUT_MAX_BATCH_BYTES` | payload bytes per fan-out batch (default 4 MiB) |
+| `NARAD_FANOUT_LINGER_MS` | fan-out batch linger before a partial batch commits (default 25) |
 | `NARAD_ADDR` | (client only) base URL for `narad client` |
 
 The JSON config intentionally exposes only `storage.data_dir`,
@@ -650,6 +654,70 @@ property, changing the type of an existing property, dropping a
 previously-required field, or adding a new required field is rejected
 with `ErrSchemaIncompatible`. The contract is "extend only, never break —
 once a field exists, it stays."
+
+## Fan-out (parent → child topics)
+
+Fan-out lets a **parent** topic replicate every message it receives into
+one or more **child** topics. Producing to a parent behaves exactly like
+producing to a normal topic; in addition, each attached child
+independently receives a copy, re-keyed with the child's own
+partitioner so **per-key ordering is preserved within each child**.
+This is not consumer groups — children are independent topics with
+their own partitions, offsets, retention, and consumers. The full
+design lives in [FANOUT.md](./FANOUT.md).
+
+```
+POST   /v1/topics/{parent}/children            attach: {"child": "name"}
+GET    /v1/topics/{parent}/children            list children + per-child lag
+DELETE /v1/topics/{parent}/children/{child}    detach
+
+narad client topics attach <parent> <child>
+narad client topics children <parent>
+narad client topics detach <parent> <child>
+```
+
+Attach/detach are admin-or-owner operations on the parent. Roles are
+exclusive and flat: a topic is `standalone`, `parent`, or `child`
+(reported by topic describe); fan-out is depth 1, a child has exactly
+one parent, and a parent holds at most 108 children.
+
+Semantics worth knowing:
+
+* **At-least-once, no backfill.** A child receives messages produced
+  from the attach point forward. Delivery is at-least-once — a crash
+  mid-batch re-delivers, never loses. Detach stops the flow and keeps
+  everything already delivered; a later re-attach starts fresh at the
+  parent's tail (no replay of the detached window). Deleting a parent
+  detaches its children; they live on standalone.
+* **The parent's retained log is the fan-out buffer.** A slow or dead
+  child lags without affecting the parent or its siblings. If it falls
+  behind the parent's retention, the cursor **drops behind** to the
+  oldest retained record and the loss is counted on
+  `narad_fanout_child_dropped_messages` — alert on any non-zero rate.
+  To bound that failure mode, **every topic has a minimum effective
+  retention of one hour**.
+* **Schemas are inherited.** At attach, the child's schema must be
+  absent (it adopts the parent's, full history) or byte-identical to
+  the parent's; anything else is rejected with **409**. While attached,
+  the child's schema is parent-managed: parent schema evolution
+  propagates atomically to every child, and direct schema changes on
+  the child are rejected. On detach the child keeps its schema.
+* **No fan-out RBAC gate.** Fan-out is the topic's configured behavior:
+  an attached child receives messages regardless of the producing
+  user's grants. Producing to the parent and consuming from a child are
+  still governed by normal RBAC.
+* **Capacity.** A parent sustaining `R` msg/s with `C` children costs
+  roughly `R × (C + 1)` commits/s across the cluster: size the cluster
+  to the fanned-out rate. Fan-out batches large slabs per child
+  partition (one fsync per batch; `fanout.max_batch_records`,
+  `fanout.max_batch_bytes`, `fanout.linger_ms` tune the
+  latency/throughput trade), and cursors spread across the cluster with
+  the parent partition assignments.
+
+Health signals: `narad_fanout_lag_messages{parent,child,partition}` is
+the primary one (also surfaced as `lag_messages` in the list-children
+API), plus `narad_fanout_committed_total` and the batch-size
+histograms.
 
 ## Security (authentication & RBAC)
 
