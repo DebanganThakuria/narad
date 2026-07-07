@@ -1082,15 +1082,15 @@ func TestReceiptHandleFromRawQueryFieldCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, found, err := receiptHandleFromRawQuery(tt.rawQuery)
+			got, found, _, err := ackParamsFromRawQuery(tt.rawQuery)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatal("receiptHandleFromRawQuery() error = nil, want error")
+					t.Fatal("ackParamsFromRawQuery() error = nil, want error")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("receiptHandleFromRawQuery() error = %v", err)
+				t.Fatalf("ackParamsFromRawQuery() error = %v", err)
 			}
 			if found != tt.wantFound {
 				t.Fatalf("found = %v, want %v", found, tt.wantFound)
