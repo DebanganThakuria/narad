@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -296,3 +297,11 @@ func (stubBroker) Ack(context.Context, string, consumer.Handle) error        { r
 func (stubBroker) Snapshot(context.Context) ([]metrics.TopicSnapshot, error) { return nil, nil }
 func (stubBroker) Ready(context.Context) error                               { return nil }
 func (stubBroker) Close() error                                              { return nil }
+
+func (stubBroker) AttachChild(context.Context, string, string) error    { return nil }
+func (stubBroker) DetachChild(context.Context, string, string) error    { return nil }
+func (stubBroker) ChildrenOf(context.Context, string) ([]string, error) { return nil, nil }
+
+func (stubBroker) ReadFanoutSlab(context.Context, string, int, int64, int, int64, time.Duration) (topic.FanoutSlab, error) {
+	return topic.FanoutSlab{}, nil
+}

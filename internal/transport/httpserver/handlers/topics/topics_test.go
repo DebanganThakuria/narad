@@ -977,3 +977,11 @@ func TestAlterHandlerAppliesOperationsInOrder(t *testing.T) {
 		}
 	}
 }
+
+func (f *fakeBroker) AttachChild(context.Context, string, string) error    { return nil }
+func (f *fakeBroker) DetachChild(context.Context, string, string) error    { return nil }
+func (f *fakeBroker) ChildrenOf(context.Context, string) ([]string, error) { return nil, nil }
+
+func (f *fakeBroker) ReadFanoutSlab(context.Context, string, int, int64, int, int64, time.Duration) (topic.FanoutSlab, error) {
+	return topic.FanoutSlab{}, nil
+}

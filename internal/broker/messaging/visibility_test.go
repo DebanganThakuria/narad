@@ -52,7 +52,7 @@ func TestProduceUncommittedVisibilityStaysHiddenAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if _, err := log.Append([]byte(`{"id":1}`)); err != nil {
+	if _, err := log.Append(storage.EncodeKeyedRecord("", []byte(`{"id":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 	hwmPath := partitionHWMPath(dataDir, "orders", 0)
@@ -161,7 +161,7 @@ func TestReplayReadUsesHighWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if _, err := log.Append([]byte(`{"id":1}`)); err != nil {
+	if _, err := log.Append(storage.EncodeKeyedRecord("", []byte(`{"id":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 	if _, found, err := engine.replayRead("orders", 0, 0, 1); err != nil {
@@ -187,7 +187,7 @@ func TestConsumeUsesHighWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if _, err := log.Append([]byte(`{"id":1}`)); err != nil {
+	if _, err := log.Append(storage.EncodeKeyedRecord("", []byte(`{"id":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 	if _, found, err := engine.Consume(context.Background(), "orders", ConsumeOpts{Wait: 0}); err != nil {

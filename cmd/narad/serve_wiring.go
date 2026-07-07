@@ -43,6 +43,7 @@ type brokerComponents struct {
 	offsets    *consumer.InFlight
 	lifecycle  *runtime.Lifecycle
 	ingress    *ingress.Manager
+	metrics    *metrics.Metrics
 }
 
 func buildBroker(
@@ -121,6 +122,7 @@ func buildBroker(
 		offsets:    offsets,
 		lifecycle:  lifecycle,
 		ingress:    ingressManager,
+		metrics:    m,
 	}, nil
 }
 

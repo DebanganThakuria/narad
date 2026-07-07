@@ -91,6 +91,7 @@ func (f *fsmState) applyAttachChild(data []byte) error {
 		parent.Children = append(parent.Children, p.Child)
 		child.Role = topic.RoleChild
 		child.Parent = p.Parent
+		child.AttachEpoch = p.Epoch
 		if err := putTopicRecord(tx, parent); err != nil {
 			return err
 		}
@@ -134,6 +135,7 @@ func (f *fsmState) applyDetachChild(data []byte) error {
 		}
 		child.Role = topic.RoleStandalone
 		child.Parent = ""
+		child.AttachEpoch = ""
 		if err := putTopicRecord(tx, parent); err != nil {
 			return err
 		}

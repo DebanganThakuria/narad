@@ -83,6 +83,12 @@ type Log struct {
 	// re-walking header-by-header from the sparse index anchor.
 	navCache *navCache
 
+	// keyedFrom is the first offset whose stored record carries the
+	// keyed envelope (see keyed_record.go); records below it are bare
+	// payloads from before the envelope existed. Loaded (or stamped at
+	// the recovered tail) once at open, immutable afterwards.
+	keyedFrom int64
+
 	closed atomic.Bool
 }
 
@@ -111,6 +117,10 @@ func NewLog(dir string, opts Options) (*Log, error) {
 	}
 
 	l.buffer = newBuffer(nextOffset, opts.FlushBytes, opts.FlushRecords)
+	if l.keyedFrom, err = loadOrInitKeyedFrom(dir, nextOffset); err != nil {
+		l.closeSegments()
+		return nil, err
+	}
 	if err := l.loadHighWatermark(nextOffset); err != nil {
 		l.closeSegments()
 		return nil, err

@@ -59,6 +59,7 @@ func (f *fsmState) applyUpdateTopic(data []byte) error {
 		t.Role = current.Role
 		t.Children = current.Children
 		t.Parent = current.Parent
+		t.AttachEpoch = current.AttachEpoch
 		return putTopicRecord(tx, t)
 	})
 	if err == nil {
@@ -138,6 +139,7 @@ func dissolveFanoutLinks(tx *bolt.Tx, name string) ([]string, error) {
 			}
 			child.Role = topic.RoleStandalone
 			child.Parent = ""
+			child.AttachEpoch = ""
 			if err := putTopicRecord(tx, child); err != nil {
 				return nil, err
 			}

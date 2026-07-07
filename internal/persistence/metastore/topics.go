@@ -2,7 +2,10 @@ package metastore
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 
 	bolt "go.etcd.io/bbolt"
 
@@ -33,8 +36,24 @@ func (s *Store) DeleteTopic(ctx context.Context, name string) error {
 // exist, roles are exclusive and depth 1, a child has exactly one
 // parent, the parent's child count is capped, and the child's schema
 // must be absent (it adopts the parent's) or identical to the parent's.
+// Each attach is stamped with a fresh epoch so fan-out cursor state
+// from an earlier attachment can never be resumed.
 func (s *Store) AttachChild(ctx context.Context, parent, child string) error {
-	return s.apply(ctx, opAttachChild, childLinkPayload{Parent: parent, Child: child})
+	epoch, err := newAttachEpoch()
+	if err != nil {
+		return err
+	}
+	return s.apply(ctx, opAttachChild, childLinkPayload{Parent: parent, Child: child, Epoch: epoch})
+}
+
+// newAttachEpoch returns a random identifier for one attach. Generated
+// by the proposer (not the FSM) so the Raft apply stays deterministic.
+func newAttachEpoch() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("metastore: attach epoch: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 // DetachChild unlinks child from parent through Raft. The child keeps

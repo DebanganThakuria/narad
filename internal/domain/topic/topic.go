@@ -49,6 +49,12 @@ type Topic struct {
 	// Parent is the topic this child receives fan-out from. Child
 	// role only.
 	Parent string `json:"parent,omitempty"`
+	// AttachEpoch identifies this particular attachment of the child
+	// to its parent (child role only; assigned at attach, cleared at
+	// detach). Fan-out cursor state is scoped to the epoch, so a
+	// detach followed by a re-attach starts fresh at the parent's tail
+	// instead of resuming — and replaying from — the dead cursor.
+	AttachEpoch string `json:"attach_epoch,omitempty"`
 }
 
 // Role classifies a topic's position in fan-out. Roles are exclusive

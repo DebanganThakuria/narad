@@ -6,6 +6,7 @@ type Config struct {
 	Cluster  ClusterConfig  `json:"cluster"`
 	Storage  StorageConfig  `json:"storage"`
 	Topic    TopicConfig    `json:"topic"`
+	Fanout   FanoutConfig   `json:"fanout"`
 	Log      LogConfig      `json:"log"`
 	Security SecurityConfig `json:"security"`
 }

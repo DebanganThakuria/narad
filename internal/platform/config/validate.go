@@ -20,6 +20,7 @@ func (c *Config) Validate() error {
 	errs = append(errs, clusterValidationErrors(c.HTTP, c.Cluster)...)
 	errs = append(errs, storageValidationErrors(c.Storage)...)
 	errs = append(errs, topicValidationErrors(c.Topic)...)
+	errs = append(errs, fanoutValidationErrors(c.Fanout)...)
 	errs = append(errs, logValidationErrors(c.Log)...)
 	errs = append(errs, securityValidationErrors(c.Security, c.Cluster)...)
 	if len(errs) == 0 {
@@ -223,6 +224,20 @@ func topicValidationErrors(cfg TopicConfig) []string {
 	}
 	if cfg.DefaultMaxAckedAheadPerPartition <= 0 {
 		errs = append(errs, "topic.default_max_acked_ahead_per_partition must be > 0")
+	}
+	return errs
+}
+
+func fanoutValidationErrors(cfg FanoutConfig) []string {
+	var errs []string
+	if cfg.MaxBatchRecords <= 0 {
+		errs = append(errs, "fanout.max_batch_records must be > 0")
+	}
+	if cfg.MaxBatchBytes <= 0 {
+		errs = append(errs, "fanout.max_batch_bytes must be > 0")
+	}
+	if cfg.LingerMs < 0 {
+		errs = append(errs, "fanout.linger_ms must be >= 0")
 	}
 	return errs
 }

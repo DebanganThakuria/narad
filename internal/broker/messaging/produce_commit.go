@@ -38,7 +38,7 @@ func (e *Engine) CommitAcceptedProduce(ctx context.Context, record ingress.Produ
 	}
 
 	offset, err := e.logs.WithProduceLockResult(record.Topic, record.TargetPartition, func(log *storage.Log) (int64, error) {
-		return e.appendAndCommit(log, record.Payload)
+		return e.appendAndCommit(log, storage.EncodeKeyedRecord(record.Key, record.Payload))
 	})
 	if err != nil {
 		return 0, err
@@ -79,9 +79,12 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 		return nil, ErrNotPartitionOwner
 	}
 
+	// Records are stored wrapped in the keyed envelope so the produce
+	// key survives the commit (fan-out re-keys parent records with it;
+	// consumers get Message.Key populated from it).
 	payloads := make([][]byte, len(records))
 	for i, record := range records {
-		payloads[i] = record.Payload
+		payloads[i] = storage.EncodeKeyedRecord(record.Key, record.Payload)
 	}
 
 	var offsets []int64

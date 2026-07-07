@@ -184,3 +184,11 @@ func TestReadyzHandlerReturnsUnavailable(t *testing.T) {
 		t.Fatalf("Readyz() status = %d, want %d", res.Code, http.StatusServiceUnavailable)
 	}
 }
+
+func (f *fakeBroker) AttachChild(context.Context, string, string) error    { return nil }
+func (f *fakeBroker) DetachChild(context.Context, string, string) error    { return nil }
+func (f *fakeBroker) ChildrenOf(context.Context, string) ([]string, error) { return nil, nil }
+
+func (f *fakeBroker) ReadFanoutSlab(context.Context, string, int, int64, int, int64, time.Duration) (topic.FanoutSlab, error) {
+	return topic.FanoutSlab{}, nil
+}
