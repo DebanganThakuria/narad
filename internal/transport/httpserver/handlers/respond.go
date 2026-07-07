@@ -113,6 +113,14 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 		s.WriteError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, errs.ErrNotPartitionOwner):
 		s.WriteError(w, http.StatusMisdirectedRequest, err.Error())
+	case errors.Is(err, errs.ErrFanoutRoleConflict),
+		errors.Is(err, errs.ErrFanoutChildLimit),
+		errors.Is(err, errs.ErrFanoutSchemaMismatch),
+		errors.Is(err, errs.ErrFanoutSchemaManaged),
+		errors.Is(err, errs.ErrAlreadyExists):
+		s.WriteError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, errs.ErrNotFound):
+		s.WriteError(w, http.StatusNotFound, err.Error())
 	default:
 		status := http.StatusInternalServerError
 		msg := op + " failed"

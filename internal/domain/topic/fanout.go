@@ -38,3 +38,13 @@ type FanoutSlab struct {
 // at the parent's current committed tail" — the no-backfill starting
 // position of a newly attached child's cursor.
 const FanoutTailOffset int64 = -1
+
+// FanoutCursorStat reports one cursor's position for lag accounting:
+// the child's fan-out lag on this parent partition is
+// HighWatermark - NextOffset.
+type FanoutCursorStat struct {
+	Child         string `json:"child"`
+	Partition     int    `json:"partition"`
+	NextOffset    int64  `json:"next_offset"`
+	HighWatermark int64  `json:"high_watermark"`
+}

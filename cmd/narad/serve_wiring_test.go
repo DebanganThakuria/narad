@@ -305,3 +305,7 @@ func (stubBroker) ChildrenOf(context.Context, string) ([]string, error) { return
 func (stubBroker) ReadFanoutSlab(context.Context, string, int, int64, int, int64, time.Duration) (topic.FanoutSlab, error) {
 	return topic.FanoutSlab{}, nil
 }
+
+func (stubBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutCursorStat, error) {
+	return nil, nil
+}

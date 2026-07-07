@@ -369,3 +369,67 @@ func TestClientProduceConsumeAckParity(t *testing.T) {
 		t.Fatalf("ack stderr = %q, want acked", stderr)
 	}
 }
+
+func TestClientTopicsFanoutAttachChildrenDetach(t *testing.T) {
+	env := newCLITestEnv(t)
+
+	for _, name := range []string{"parent", "child"} {
+		_, _, err := captureCLIOutput(t, func() error {
+			return runClient([]string{"topics", "create", "--addr", env.server.URL, "--partitions", "3", name})
+		}, "")
+		if err != nil {
+			t.Fatalf("topics create %s: %v", name, err)
+		}
+		if err := waitForAssignments(env.store, name); err != nil {
+			t.Fatalf("wait assignments %s: %v", name, err)
+		}
+	}
+
+	stdout, _, err := captureCLIOutput(t, func() error {
+		return runClient([]string{"topics", "attach", "--addr", env.server.URL, "parent", "child"})
+	}, "")
+	if err != nil {
+		t.Fatalf("topics attach: %v", err)
+	}
+	attached := decodeCLIJSON[topic.Topic](t, stdout)
+	if attached.Role != topic.RoleParent || len(attached.Children) != 1 || attached.Children[0] != "child" {
+		t.Fatalf("attach response = %+v, want parent with [child]", attached)
+	}
+
+	stdout, _, err = captureCLIOutput(t, func() error {
+		return runClient([]string{"topics", "children", "--addr", env.server.URL, "parent"})
+	}, "")
+	if err != nil {
+		t.Fatalf("topics children: %v", err)
+	}
+	listed := decodeCLIJSON[struct {
+		Parent   string `json:"parent"`
+		Children []struct {
+			Name string `json:"name"`
+		} `json:"children"`
+	}](t, stdout)
+	if listed.Parent != "parent" || len(listed.Children) != 1 || listed.Children[0].Name != "child" {
+		t.Fatalf("children listing = %+v", listed)
+	}
+
+	stdout, stderr, err := captureCLIOutput(t, func() error {
+		return runClient([]string{"topics", "detach", "--addr", env.server.URL, "parent", "child"})
+	}, "")
+	if err != nil {
+		t.Fatalf("topics detach: %v", err)
+	}
+	if stdout != "" || stderr != "detached\n" {
+		t.Fatalf("detach output = (%q, %q), want detached on stderr", stdout, stderr)
+	}
+
+	stdout, _, err = captureCLIOutput(t, func() error {
+		return runClient([]string{"topics", "get", "--addr", env.server.URL, "child"})
+	}, "")
+	if err != nil {
+		t.Fatalf("topics get child: %v", err)
+	}
+	details := decodeCLIJSON[topic.Details](t, stdout)
+	if details.Role != topic.RoleStandalone || details.Parent != "" {
+		t.Fatalf("child after detach = %+v, want standalone", details.Topic)
+	}
+}

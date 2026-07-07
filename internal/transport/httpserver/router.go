@@ -35,6 +35,11 @@ func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prome
 	mux.HandleFunc("PATCH /v1/topics/{topic}", httptopics.Alter(h))
 	mux.HandleFunc("DELETE /v1/topics/{topic}", httptopics.Delete(h))
 
+	// Fan-out child management
+	mux.HandleFunc("POST /v1/topics/{parent}/children", httptopics.AttachChild(h))
+	mux.HandleFunc("GET /v1/topics/{parent}/children", httptopics.ListChildren(h))
+	mux.HandleFunc("DELETE /v1/topics/{parent}/children/{child}", httptopics.DetachChild(h))
+
 	// Data plane
 	mux.HandleFunc("POST /v1/topics/{topic}/produce", httpmessaging.Produce(h))
 	mux.HandleFunc("GET /v1/topics/{topic}/consume", httpmessaging.Consume(h))

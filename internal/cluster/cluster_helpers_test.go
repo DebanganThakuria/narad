@@ -28,6 +28,30 @@ type fakePeerClient struct {
 	createUserFn          func(context.Context, string, []byte) (nodewire.Response, error)
 	updateUserFn          func(context.Context, string, string, []byte) (nodewire.Response, error)
 	deleteUserFn          func(context.Context, string, string) (nodewire.Response, error)
+	attachChildFn         func(context.Context, string, string, string) (nodewire.Response, error)
+	detachChildFn         func(context.Context, string, string, string) (nodewire.Response, error)
+	fanoutCursorsFn       func(context.Context, string, string) ([]topic.FanoutCursorStat, error)
+}
+
+func (f fakePeerClient) AttachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error) {
+	if f.attachChildFn != nil {
+		return f.attachChildFn(ctx, addr, parent, child)
+	}
+	return nodewire.Response{}, context.DeadlineExceeded
+}
+
+func (f fakePeerClient) DetachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error) {
+	if f.detachChildFn != nil {
+		return f.detachChildFn(ctx, addr, parent, child)
+	}
+	return nodewire.Response{}, context.DeadlineExceeded
+}
+
+func (f fakePeerClient) FanoutCursors(ctx context.Context, addr, parent string) ([]topic.FanoutCursorStat, error) {
+	if f.fanoutCursorsFn != nil {
+		return f.fanoutCursorsFn(ctx, addr, parent)
+	}
+	return nil, context.DeadlineExceeded
 }
 
 func (f fakePeerClient) CreateUser(ctx context.Context, addr string, body []byte) (nodewire.Response, error) {

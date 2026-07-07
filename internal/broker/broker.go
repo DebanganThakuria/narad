@@ -68,6 +68,9 @@ type Broker interface {
 	// ReadFanoutSlab reads committed keyed records from a locally owned
 	// partition — the fan-out cursor engine's read primitive.
 	ReadFanoutSlab(ctx context.Context, topicName string, partitionIdx int, fromOffset int64, maxRecords int, maxBytes int64, wait time.Duration) (topic.FanoutSlab, error)
+	// FanoutCursorStats reports fan-out cursor positions for the parent
+	// partitions this node owns (lag = HighWatermark - NextOffset).
+	FanoutCursorStats(ctx context.Context, parent string) ([]topic.FanoutCursorStat, error)
 
 	Produce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (offset int64, partitionIdx int, err error)
 	AcceptProduce(ctx context.Context, topicName, key string, payload []byte, partition ...int) (ingress.AcceptedProduce, error)

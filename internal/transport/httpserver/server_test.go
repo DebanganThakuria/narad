@@ -265,3 +265,7 @@ func (f *fakeBroker) ChildrenOf(context.Context, string) ([]string, error) { ret
 func (f *fakeBroker) ReadFanoutSlab(context.Context, string, int, int64, int, int64, time.Duration) (topic.FanoutSlab, error) {
 	return topic.FanoutSlab{}, nil
 }
+
+func (f *fakeBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutCursorStat, error) {
+	return nil, nil
+}

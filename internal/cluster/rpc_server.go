@@ -105,6 +105,12 @@ func (s *RPCServer) dispatch(payload []byte) nodewire.Response {
 		res = s.handleUpdateUser(payload)
 	case nodewire.OpDeleteUser:
 		res = s.handleDeleteUser(payload)
+	case nodewire.OpAttachChild:
+		res = s.handleAttachChild(payload)
+	case nodewire.OpDetachChild:
+		res = s.handleDetachChild(payload)
+	case nodewire.OpFanoutCursors:
+		res = s.handleFanoutCursors(payload)
 	default:
 		res = errorResponse(http.StatusBadRequest, fmt.Sprintf("unsupported rpc operation %d", op))
 	}
@@ -131,6 +137,14 @@ func (s *RPCServer) brokerError(op string, err error) nodewire.Response {
 		return errorResponse(http.StatusBadRequest, err.Error())
 	case errors.Is(err, errs.ErrNotPartitionOwner):
 		return errorResponse(http.StatusMisdirectedRequest, err.Error())
+	case errors.Is(err, errs.ErrFanoutRoleConflict),
+		errors.Is(err, errs.ErrFanoutChildLimit),
+		errors.Is(err, errs.ErrFanoutSchemaMismatch),
+		errors.Is(err, errs.ErrFanoutSchemaManaged),
+		errors.Is(err, errs.ErrAlreadyExists):
+		return errorResponse(http.StatusConflict, err.Error())
+	case errors.Is(err, errs.ErrNotFound):
+		return errorResponse(http.StatusNotFound, err.Error())
 	default:
 		if s.logger != nil {
 			s.logger.Error(op, "err", err)

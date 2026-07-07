@@ -55,6 +55,9 @@ func NewLogs(dataDir string, storageOpts storage.Options, ms metastore.Metastore
 	}
 }
 
+// DataDir returns the topic-directory root the log map serves from.
+func (g *Logs) DataDir() string { return g.dataDir }
+
 // Get returns the storage.Log for (topic, partition), opening the
 // underlying file lazily on first access. Per-topic retention is
 // folded into Options at open time. Cap and visibility-timeout

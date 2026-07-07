@@ -76,6 +76,48 @@ func (e *Engine) ReadFanoutSlab(ctx context.Context, topicName string, partition
 	}
 }
 
+// FanoutCursorStats reports the persisted fan-out cursor positions for
+// every locally-owned partition of parent, one entry per (child,
+// partition) whose cursor has been anchored. Partitions owned by other
+// nodes are absent — the API layer merges owners' views.
+func (e *Engine) FanoutCursorStats(ctx context.Context, parent string) ([]topic.FanoutCursorStat, error) {
+	if e.logs == nil {
+		return nil, unavailableError("partition logs")
+	}
+	t, err := e.getTopic(ctx, parent)
+	if err != nil {
+		return nil, err
+	}
+	if !t.IsParent() {
+		return nil, nil
+	}
+	var stats []topic.FanoutCursorStat
+	for p := range t.Partitions {
+		if !e.isLocalOwner(parent, p) {
+			continue
+		}
+		log, err := e.logs.Get(parent, p)
+		if err != nil {
+			return nil, err
+		}
+		hwm := log.HighWatermark()
+		dir := storage.TopicPartitionDir(e.logs.DataDir(), parent, p)
+		for _, child := range t.Children {
+			cur, ok, err := storage.ReadFanoutCursor(dir, child)
+			if err != nil || !ok {
+				continue // cursor not anchored yet (or unreadable): report nothing
+			}
+			stats = append(stats, topic.FanoutCursorStat{
+				Child:         child,
+				Partition:     p,
+				NextOffset:    cur.NextOffset,
+				HighWatermark: hwm,
+			})
+		}
+	}
+	return stats, nil
+}
+
 // fanoutLog is the slice of *storage.Log the slab read uses; narrowed
 // so drop-behind arithmetic is unit-testable without forcing real
 // segment retention.

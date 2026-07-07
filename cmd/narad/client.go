@@ -53,9 +53,61 @@ func runClientTopics(args []string) error {
 		return runClientTopicsDelete(args[1:])
 	case "alter":
 		return runClientTopicsAlter(args[1:])
+	case "children":
+		return runClientTopicsChildren(args[1:])
+	case "attach":
+		return runClientTopicsAttach(args[1:])
+	case "detach":
+		return runClientTopicsDetach(args[1:])
 	default:
 		return clientUsageErr(fmt.Sprintf("unknown topics subcommand %q", args[0]))
 	}
+}
+
+// runClientTopicsChildren lists a parent's fan-out children with lag.
+func runClientTopicsChildren(args []string) error {
+	fs := newClientFlagSet("topics children <parent>")
+	addr := fs.String("addr", defaultAddr(), "HTTP base URL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return clientUsageErr("usage: narad client topics children <parent>")
+	}
+	return newHTTPClient(*addr).getAndPrint("/v1/topics/" + url.PathEscape(fs.Arg(0)) + "/children")
+}
+
+// runClientTopicsAttach attaches a child topic to a fan-out parent.
+func runClientTopicsAttach(args []string) error {
+	fs := newClientFlagSet("topics attach <parent> <child>")
+	addr := fs.String("addr", defaultAddr(), "HTTP base URL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return clientUsageErr("usage: narad client topics attach <parent> <child>")
+	}
+	return newHTTPClient(*addr).postAndPrint(
+		"/v1/topics/"+url.PathEscape(fs.Arg(0))+"/children",
+		map[string]any{"child": fs.Arg(1)})
+}
+
+// runClientTopicsDetach detaches a child topic from its parent.
+func runClientTopicsDetach(args []string) error {
+	fs := newClientFlagSet("topics detach <parent> <child>")
+	addr := fs.String("addr", defaultAddr(), "HTTP base URL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 {
+		return clientUsageErr("usage: narad client topics detach <parent> <child>")
+	}
+	path := "/v1/topics/" + url.PathEscape(fs.Arg(0)) + "/children/" + url.PathEscape(fs.Arg(1))
+	if err := newHTTPClient(*addr).deleteRequest(path); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "detached")
+	return nil
 }
 
 func runClientTopicsList(args []string) error {
@@ -337,6 +389,9 @@ func printClientUsage(w io.Writer) {
 	fmt.Fprintln(w, "    --max-in-flight-per-partition N            update reservation cap")
 	fmt.Fprintln(w, "    --max-acked-ahead-per-partition N          update out-of-order ack cap")
 	fmt.Fprintln(w, "    --schema-file F | --schema-file -          register a JSON Schema (file or stdin)")
+	fmt.Fprintln(w, "  topics attach <parent> <child>             attach a fan-out child to a parent")
+	fmt.Fprintln(w, "  topics detach <parent> <child>             detach a fan-out child")
+	fmt.Fprintln(w, "  topics children <parent>                   list fan-out children with lag")
 	fmt.Fprintln(w, "  produce [--key K] <topic>                  produce a record (body from stdin)")
 	fmt.Fprintln(w, "  consume [flags] <topic>                    --wait D --partition P --offset O")
 	fmt.Fprintln(w, "  ack [--handle H] <topic>                   ack a message (handle from stdin if omitted)")
