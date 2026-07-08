@@ -35,6 +35,7 @@ const (
 	OpFanoutCursors
 	OpExtendAck
 	OpNack
+	OpGetTopic
 )
 
 // ProduceRequest asks a node to route and append one record.

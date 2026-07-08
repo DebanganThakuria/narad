@@ -30,9 +30,17 @@ type fakePeerClient struct {
 	createUserFn          func(context.Context, string, []byte) (nodewire.Response, error)
 	updateUserFn          func(context.Context, string, string, []byte) (nodewire.Response, error)
 	deleteUserFn          func(context.Context, string, string) (nodewire.Response, error)
+	getTopicFn            func(context.Context, string, string) (nodewire.Response, error)
 	attachChildFn         func(context.Context, string, string, string, int64) (nodewire.Response, error)
 	detachChildFn         func(context.Context, string, string, string) (nodewire.Response, error)
 	fanoutCursorsFn       func(context.Context, string, string) ([]topic.FanoutCursorStat, error)
+}
+
+func (f fakePeerClient) GetTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error) {
+	if f.getTopicFn != nil {
+		return f.getTopicFn(ctx, addr, topicName)
+	}
+	return nodewire.Response{}, context.DeadlineExceeded
 }
 
 func (f fakePeerClient) AttachChild(ctx context.Context, addr, parent, child string, delayMs int64) (nodewire.Response, error) {

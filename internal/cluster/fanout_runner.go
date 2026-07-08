@@ -296,6 +296,13 @@ func (r *FanoutRunner) cleanUpStoppedCursor(key fanoutCursorKey, byName map[stri
 // elsewhere). Without the sweep a later re-attach could resume — and
 // replay — a cursor from a previous attachment.
 func (r *FanoutRunner) sweepOrphanCursorFiles(byName map[string]topic.Topic) {
+	// A freshly restarted replica can present a stale topic view (old
+	// snapshot, catch-up in flight); deleting cursor state against it
+	// silently rewinds fan-out to a tail anchor. Cursor-file hygiene is
+	// an optimization — skip it until the replica is provably current.
+	if !r.store.AppliedCaughtUp() {
+		return
+	}
 	for _, t := range byName {
 		for p := range t.Partitions {
 			if !r.ownsPartition(t.Name, p) {

@@ -28,9 +28,16 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 
 	next := topic.FanoutTailOffset
 	if cur, ok, err := storage.ReadFanoutCursor(partitionDir, key.child); err != nil {
-		r.logger.Warn("fanout: read cursor; starting at parent tail",
+		r.logger.Warn("fanout: read cursor failed; anchoring at parent tail",
 			"parent", key.parent, "partition", key.partition, "child", key.child, "err", err)
-	} else if ok && cur.Epoch == key.epoch {
+	} else if !ok {
+		r.logger.Warn("fanout: no cursor file; anchoring at parent tail (fresh attach, or lost cursor state)",
+			"parent", key.parent, "partition", key.partition, "child", key.child, "epoch", key.epoch)
+	} else if cur.Epoch != key.epoch {
+		r.logger.Warn("fanout: cursor file epoch mismatch; anchoring at parent tail (re-attached link)",
+			"parent", key.parent, "partition", key.partition, "child", key.child,
+			"file_epoch", cur.Epoch, "epoch", key.epoch)
+	} else {
 		next = cur.NextOffset
 	}
 	if next == topic.FanoutTailOffset {

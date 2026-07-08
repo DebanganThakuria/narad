@@ -82,6 +82,18 @@ func (s *RPCServer) handleCreateTopic(payload []byte) nodewire.Response {
 	return jsonResponse(http.StatusCreated, t)
 }
 
+func (s *RPCServer) handleGetTopic(payload []byte) nodewire.Response {
+	req, err := nodewire.DecodeTopicNameRequest(payload, nodewire.OpGetTopic)
+	if err != nil {
+		return errorResponse(http.StatusBadRequest, "invalid get topic request: "+err.Error())
+	}
+	t, err := s.broker.GetTopic(rpcRequestContext(), req.Topic)
+	if err != nil {
+		return s.brokerError("get topic", err)
+	}
+	return jsonResponse(http.StatusOK, t)
+}
+
 func (s *RPCServer) handleAlterTopic(payload []byte) nodewire.Response {
 	req, err := nodewire.DecodeTopicBodyRequest(payload, nodewire.OpAlterTopic)
 	if err != nil {
