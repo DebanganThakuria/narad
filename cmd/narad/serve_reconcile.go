@@ -9,6 +9,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/cluster"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
@@ -72,6 +73,8 @@ func runStartupReconcile(ctx context.Context, store *metastore.Store, logs *runt
 type leaderView interface {
 	LeaderID() string
 	GetMember(id string) (metastore.Member, error)
+	Barrier() error
+	GetTopic(ctx context.Context, name string) (topic.Topic, error)
 }
 
 // topicGetter fetches a topic record from a peer; *cluster.PeerClient
@@ -83,16 +86,24 @@ type topicGetter interface {
 // confirmedAbsentOnLeader reports whether the LEADER confirms the topic
 // does not exist. Only a definitive 404 from the leader authorizes a
 // deletion; every other outcome (leader unknown, unreachable, non-404
-// answer, or this node leading itself while fresh) keeps the directory.
+// answer) keeps the directory. When this node leads itself, its state is
+// authoritative only past a Raft barrier: election guarantees a fresh
+// leader's LOG, not that its FSM has applied it, so a just-elected node
+// restored from an old snapshot must not trust local absence until the
+// replay provably finished — and the absence must be re-checked AFTER
+// the barrier, since the caller's check predates it.
 func confirmedAbsentOnLeader(ctx context.Context, store leaderView, peer topicGetter, nodeID, name string, log *slog.Logger) bool {
 	leaderID := store.LeaderID()
 	if leaderID == "" {
 		return false
 	}
 	if leaderID == nodeID {
-		// This node leads: Raft leadership requires a quorum-supported
-		// current term, so its own applied state is the authority.
-		return true
+		if err := store.Barrier(); err != nil {
+			log.Warn("orphan sweep: leader barrier failed; keeping dir", "topic", name, "err", err)
+			return false
+		}
+		_, err := store.GetTopic(ctx, name)
+		return errors.Is(err, errs.ErrNotFound)
 	}
 	member, err := store.GetMember(leaderID)
 	if err != nil || member.Addr == "" {

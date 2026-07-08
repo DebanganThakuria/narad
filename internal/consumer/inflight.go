@@ -35,6 +35,17 @@ type CommitFunc func(topic string, partition int, offset int64)
 // creation; update live shards via RefreshCaps when caps change.
 type CapsResolver func(ctx context.Context, topic string) (Caps, error)
 
+// CommittedRecoverFunc returns the durably committed consumer offset for
+// a partition (ok=false when none was ever committed). Wired to the
+// persisted per-partition offset file so a lazily created shard — first
+// consume after a restart, or after ownership moved to this node — never
+// starts at -1 and re-delivers the whole partition. Recovering from DISK
+// at shard creation (not from a startup scan over metastore assignments)
+// keeps this correct even while the local metastore replica is stale:
+// the file's presence is ground truth that this node served the
+// partition before.
+type CommittedRecoverFunc func(topic string, partition int) (int64, bool)
+
 // Caps bounds per-partition in-flight state.
 type Caps struct {
 	MaxInFlight   int
@@ -58,6 +69,7 @@ type InFlight struct {
 	shards   map[shardKey]*partitionShard
 	onCommit CommitFunc
 	resolve  CapsResolver
+	recover  CommittedRecoverFunc
 
 	clockMu sync.RWMutex
 	timeNow func() int64 // replaced in tests
@@ -77,9 +89,16 @@ func NewInFlight(resolve CapsResolver, onCommit CommitFunc) *InFlight {
 	}
 }
 
-// Init seeds a partition shard with the committed offset recovered from
-// the .offsets file on startup. Call before the first ReserveNext on any
-// partition that has prior commit history.
+// SetCommittedRecovery registers fn as the durable-offset source consulted
+// when a shard is created lazily. Call once during wiring, before serving.
+func (f *InFlight) SetCommittedRecovery(fn CommittedRecoverFunc) {
+	f.recover = fn
+}
+
+// Init seeds a partition shard with a known committed offset, resolving
+// caps eagerly. Production recovery happens lazily via
+// SetCommittedRecovery; Init remains for tests and callers that must
+// pre-warm a shard.
 func (f *InFlight) Init(ctx context.Context, topic string, partition int, committed int64) error {
 	caps, err := f.resolvedCaps(ctx, topic)
 	if err != nil {
@@ -208,7 +227,13 @@ func (f *InFlight) shardOrCreate(ctx context.Context, topic string, partition in
 		return nil, err
 	}
 
-	fresh := newPartitionShard(-1, caps)
+	committed := int64(-1)
+	if f.recover != nil {
+		if off, ok := f.recover(topic, partition); ok {
+			committed = off
+		}
+	}
+	fresh := newPartitionShard(committed, caps)
 
 	f.mu.Lock()
 	if existing := f.shards[key]; existing != nil {
