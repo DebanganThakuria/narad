@@ -151,7 +151,7 @@ func runServe(args []string) error {
 	// only called once reconcile completes, so /readyz still implies a
 	// reconciled node while /healthz answers from the start.
 	wg.Go(func() {
-		runStartupReconcile(ctx, ms, bc.logs, cfg.Storage.DataDir, nodeID, log)
+		runStartupReconcile(ctx, ms, bc.logs, cs.peerRPC, cfg.Storage.DataDir, nodeID, log)
 		// The sweep can no longer race a create: open the gate so topic
 		// creates (HTTP and cluster RPC) proceed. Reconcile failures are
 		// non-fatal (logged and skipped inside runStartupReconcile), so

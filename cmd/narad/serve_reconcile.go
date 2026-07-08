@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
+	"github.com/debanganthakuria/narad/internal/cluster"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
 // startupReconcileCaughtUpTimeout bounds how long startup reconciliation
@@ -23,17 +26,30 @@ const startupReconcileCaughtUpTimeout = 60 * time.Second
 // after a restart. The sweep is skipped if the replica never catches up,
 // since acting on a stale topic set could delete live data.
 //
+// Local absence is NOT sufficient to delete: a freshly restarted node's
+// replica can be restored from an old Raft snapshot and read as "caught
+// up" against its own log while missing hours of cluster history — a
+// sweep trusting it would destroy live topics' data (observed under
+// crash testing). Every deletion candidate is therefore confirmed
+// ABSENT ON THE LEADER first; if the leader cannot confirm (unreachable,
+// this node believes it leads but is stale, any error), the directory
+// is KEPT. Orphan reclamation is an optimization — leaking a directory
+// until the next restart is always preferable to deleting live data.
+//
 // It runs in a background goroutine during startup while the armed create
 // gate holds topic creates on every transport, so the sweep's
 // topic-existence checks can never race a concurrent create; the caller
 // releases the gate and marks the node ready only after it returns. It
 // returns early on ctx cancellation so shutdown during startup isn't
 // blocked.
-func runStartupReconcile(ctx context.Context, store *metastore.Store, logs *runtime.Logs, dataDir, nodeID string, log *slog.Logger) {
+func runStartupReconcile(ctx context.Context, store *metastore.Store, logs *runtime.Logs, peer *cluster.PeerClient, dataDir, nodeID string, log *slog.Logger) {
 	if waitMetastoreCaughtUp(ctx, store, startupReconcileCaughtUpTimeout) {
 		removed, err := runtime.SweepOrphanTopicDirs(dataDir, func(name string) bool {
 			_, getErr := store.GetTopic(ctx, name)
-			return !errors.Is(getErr, errs.ErrNotFound)
+			if !errors.Is(getErr, errs.ErrNotFound) {
+				return true // present locally (or lookup failed): keep
+			}
+			return !confirmedAbsentOnLeader(ctx, store, peer, nodeID, name, log)
 		}, log)
 		if err != nil {
 			log.Warn("startup orphan sweep encountered errors", "err", err)
@@ -49,6 +65,48 @@ func runStartupReconcile(ctx context.Context, store *metastore.Store, logs *runt
 		return
 	}
 	openOwnedPartitionLogs(ctx, store, logs, nodeID, log)
+}
+
+// leaderView is the slice of the metastore the absence check needs;
+// *metastore.Store implements it, tests fake it.
+type leaderView interface {
+	LeaderID() string
+	GetMember(id string) (metastore.Member, error)
+}
+
+// topicGetter fetches a topic record from a peer; *cluster.PeerClient
+// implements it.
+type topicGetter interface {
+	GetTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error)
+}
+
+// confirmedAbsentOnLeader reports whether the LEADER confirms the topic
+// does not exist. Only a definitive 404 from the leader authorizes a
+// deletion; every other outcome (leader unknown, unreachable, non-404
+// answer, or this node leading itself while fresh) keeps the directory.
+func confirmedAbsentOnLeader(ctx context.Context, store leaderView, peer topicGetter, nodeID, name string, log *slog.Logger) bool {
+	leaderID := store.LeaderID()
+	if leaderID == "" {
+		return false
+	}
+	if leaderID == nodeID {
+		// This node leads: Raft leadership requires a quorum-supported
+		// current term, so its own applied state is the authority.
+		return true
+	}
+	member, err := store.GetMember(leaderID)
+	if err != nil || member.Addr == "" {
+		log.Warn("orphan sweep: cannot resolve leader for absence check; keeping dir",
+			"topic", name, "leader", leaderID, "err", err)
+		return false
+	}
+	res, err := peer.GetTopic(ctx, member.Addr, name)
+	if err != nil {
+		log.Warn("orphan sweep: leader absence check failed; keeping dir",
+			"topic", name, "leader", leaderID, "err", err)
+		return false
+	}
+	return res.Status == http.StatusNotFound
 }
 
 // waitMetastoreCaughtUp polls until the local replica has applied all

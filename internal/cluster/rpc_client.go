@@ -28,6 +28,7 @@ type peerClient interface {
 	CreateTopic(context.Context, string, []byte) (nodewire.Response, error)
 	AlterTopic(context.Context, string, string, []byte) (nodewire.Response, error)
 	DeleteTopic(context.Context, string, string) (nodewire.Response, error)
+	GetTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error)
 	AttachChild(ctx context.Context, addr, parent, child string, delayMs int64) (nodewire.Response, error)
 	DetachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error)
 	FanoutCursors(ctx context.Context, addr, parent string) ([]topic.FanoutCursorStat, error)
@@ -114,6 +115,14 @@ func (c *PeerClient) AlterTopic(ctx context.Context, addr, topicName string, bod
 // DeleteTopic asks the peer at addr to delete the topic.
 func (c *PeerClient) DeleteTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error) {
 	return c.topicNameRequest(ctx, addr, nodewire.OpDeleteTopic, "delete_topic", topicName)
+}
+
+// GetTopic fetches a topic record from the peer at addr. Used by the
+// startup orphan sweep to confirm absence with the LEADER before
+// deleting a topic directory — a freshly restarted local replica can
+// be arbitrarily stale.
+func (c *PeerClient) GetTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error) {
+	return c.topicNameRequest(ctx, addr, nodewire.OpGetTopic, "get_topic", topicName)
 }
 
 // PurgeTopic asks the peer at addr to purge the topic's on-disk state.
