@@ -54,6 +54,22 @@ func (s *Store) LeaderID() string {
 	return string(serverID)
 }
 
+// barrierTimeout bounds how long Barrier waits for the FSM to apply all
+// preceding log entries. Callers treat a timeout as "not confirmed" and
+// retry later, so this only needs to cover a healthy apply backlog.
+const barrierTimeout = 5 * time.Second
+
+// Barrier blocks until every log entry preceding it has been applied to
+// this node's FSM, or fails. Leader-only (followers get ErrNotLeader). A
+// FRESHLY ELECTED leader is the critical caller: election guarantees its
+// LOG is complete, not that its FSM has applied it — a leader restored
+// from an old snapshot legally serves reads from a stale FSM until the
+// replay finishes. Any "I am the leader, my local state is authoritative"
+// decision must barrier first, then re-read.
+func (s *Store) Barrier() error {
+	return s.r.Barrier(barrierTimeout).Error()
+}
+
 // AppliedCaughtUp reports whether the cluster has a leader, this node has
 // heard from it recently (or IS it), AND the FSM has applied every entry it
 // knows to be committed. It gates destructive reconciliation (orphan sweeps,

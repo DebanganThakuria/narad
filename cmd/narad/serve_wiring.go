@@ -61,11 +61,23 @@ func buildBroker(
 
 	offsetCommitter := runtime.NewConsumerOffsetCommitter(cfg.Storage.DataDir, time.Duration(cfg.Storage.FlushIntervalMs)*time.Millisecond, log)
 	offsets := consumer.NewInFlight(capsResolver(ms, cfg.Topic), offsetCommitter.Commit)
+	// Committed consumer offsets recover lazily from the per-partition
+	// file when a shard is first touched. Recovering from DISK — not from
+	// a startup scan over metastore assignments — matters: at boot the
+	// local replica can be stale (old Raft snapshot), and an
+	// assignment-driven scan would skip partitions this node owns,
+	// leaving their shards to start at -1 and re-deliver whole logs.
+	offsets.SetCommittedRecovery(func(topicName string, partition int) (int64, bool) {
+		dir := storage.TopicPartitionDir(cfg.Storage.DataDir, topicName, partition)
+		committed, ok, err := storage.ReadConsumerOffset(dir)
+		if err != nil {
+			log.Error("consumer offset recovery failed; starting from log start", "topic", topicName, "partition", partition, "err", err)
+			return 0, false
+		}
+		return committed, ok
+	})
 	logs := runtime.NewLogs(cfg.Storage.DataDir, storageOpts, ms, m)
 	lifecycle := runtime.NewLifecycle(logs, offsetCommitter.Close)
-	if err = initializeConsumerOffsets(context.Background(), cfg.Storage.DataDir, ms, offsets, log, nodeID); err != nil {
-		return nil, fmt.Errorf("initialize consumer offsets: %w", err)
-	}
 
 	if _, ok := ms.(*metastore.Store); !ok {
 		return nil, errors.New("broker: cluster coordination requires metastore.Store")
@@ -178,47 +190,6 @@ func initializeSchemas(ctx context.Context, ms metastore.Metastore, schemas sche
 				return err
 			}
 			if err := schemas.Load(ctx, topicCfg.Name, version, raw); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// initializeConsumerOffsets restores committed consumer offsets from disk
-// for the partitions this node owns, so consumption resumes where it left
-// off after a restart.
-func initializeConsumerOffsets(ctx context.Context, dataDir string, ms metastore.Metastore, offsets *consumer.InFlight, log *slog.Logger, nodeID string) error {
-	topics, _, err := ms.ListTopics(ctx, metastore.ListOptions{})
-	if err != nil {
-		return err
-	}
-	store, ok := ms.(*metastore.Store)
-	if !ok {
-		return fmt.Errorf("metastore does not support assignment listing")
-	}
-	for _, topicCfg := range topics {
-		assignments, err := store.ListAssignments(topicCfg.Name)
-		if err != nil {
-			return err
-		}
-		owned := make(map[int]struct{}, len(assignments))
-		for _, assignment := range assignments {
-			if assignment.OwnerID == nodeID {
-				owned[assignment.Partition] = struct{}{}
-			}
-		}
-		for partition := range owned {
-			partitionDir := storage.TopicPartitionDir(dataDir, topicCfg.Name, partition)
-			committed, ok, err := storage.ReadConsumerOffset(partitionDir)
-			if err != nil {
-				log.Error("consumer offset recovery skipped", "topic", topicCfg.Name, "partition", partition, "err", err)
-				continue
-			}
-			if !ok {
-				continue
-			}
-			if err := offsets.Init(ctx, topicCfg.Name, partition, committed); err != nil {
 				return err
 			}
 		}

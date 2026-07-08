@@ -283,7 +283,7 @@ func (r *FanoutRunner) Reconcile(ctx context.Context) {
 
 	r.reconcilePasses++
 	if r.reconcilePasses%fanoutCursorFileSweepEvery == 1 {
-		r.sweepOrphanCursorFiles(byName)
+		r.sweepOrphanCursorFiles(ctx, byName)
 	}
 }
 
@@ -323,7 +323,7 @@ func (r *FanoutRunner) cleanUpStoppedCursor(key fanoutCursorKey, byName map[stri
 // dissolved while this node was not running (detach or delete applied
 // elsewhere). Without the sweep a later re-attach could resume — and
 // replay — a cursor from a previous attachment.
-func (r *FanoutRunner) sweepOrphanCursorFiles(byName map[string]topic.Topic) {
+func (r *FanoutRunner) sweepOrphanCursorFiles(ctx context.Context, byName map[string]topic.Topic) {
 	// A freshly restarted replica can present a stale topic view (old
 	// snapshot, catch-up in flight); deleting cursor state against it
 	// silently rewinds fan-out to a tail anchor. Cursor-file hygiene is
@@ -351,6 +351,14 @@ func (r *FanoutRunner) sweepOrphanCursorFiles(byName map[string]topic.Topic) {
 				busy := fanoutCursorFileBusyAny(r.cursors, t.Name, p, childName)
 				r.mu.Unlock()
 				if busy {
+					continue
+				}
+				// Local absence of the link is not enough to destroy its
+				// offset file — a stale replica missing a live link would
+				// force the real cursor to tail-anchor later. The LEADER
+				// must confirm the link is dissolved (self-leader confirms
+				// through a Raft barrier).
+				if !fanoutLinkDissolvedOnLeader(ctx, r.store, r.peer, r.selfID, t.Name, childName, r.logger) {
 					continue
 				}
 				if err := storage.RemoveFanoutCursor(dir, childName); err != nil {

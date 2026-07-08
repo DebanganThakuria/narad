@@ -1,67 +1,41 @@
 package cluster
 
-// Leader confirmation for fan-out tail anchors. A cursor may only anchor
-// at the parent's tail — skipping all earlier records and overwriting the
-// shared offset file — under an attach epoch the LEADER agrees is the
-// child's current attachment. Local FSM state is not sufficient: a
-// freshly restarted replica restored from an old Raft snapshot presents
-// dead epochs as live, and anchoring on one clobbers the real cursor's
-// resume point, so the eventual catch-up re-anchors at a later tail and
-// silently drops the window in between. Every failure mode here returns
-// false: deferring a cursor is cheap (the reconciler respawns it every
-// pass), destroying its state is not.
+// Tail-anchor confirmation. Anchoring a fan-out cursor at the parent's
+// tail skips every earlier record and overwrites the shared offset file,
+// so it may only happen under an attach epoch the LEADER confirms is the
+// child's live attachment — via leaderTopicView, which also handles the
+// freshly-elected-leader case with a Raft barrier. Deferring is cheap
+// (the reconciler respawns the cursor every pass); destroying cursor
+// state is not.
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
-	"net/http"
-	"time"
-
-	"github.com/debanganthakuria/narad/internal/domain/topic"
 )
 
-const fanoutEpochConfirmTimeout = 5 * time.Second
-
 func epochConfirmedByLeader(ctx context.Context, view leaderView, peer topicFetcher, selfID string, key fanoutCursorKey, log *slog.Logger) bool {
-	if selfID == "" {
-		return true // no cluster identity: the local store is the authority
-	}
-	leaderID := view.LeaderID()
-	if leaderID == "" {
-		log.Warn("fanout: no leader known; deferring tail anchor",
-			"parent", key.parent, "partition", key.partition, "child", key.child)
+	child, absent, ok := leaderTopicView(ctx, view, peer, selfID, key.child, log)
+	if !ok || absent {
+		// Unconfirmed, or the child is gone on the leader: the link is
+		// dead and the reconciler will stop this cursor once the local
+		// replica catches up.
 		return false
 	}
-	if leaderID == selfID {
-		return true // leader state is quorum-supported
-	}
-	member, err := view.GetMember(leaderID)
-	if err != nil || member.Addr == "" {
-		log.Warn("fanout: leader member unresolvable; deferring tail anchor",
-			"leader", leaderID, "parent", key.parent, "child", key.child, "err", err)
+	return child.Parent == key.parent && child.AttachEpoch == key.epoch
+}
+
+// fanoutLinkDissolvedOnLeader reports whether the leader confirms that
+// child is NOT attached to parent — the bar for removing the (parent,
+// partition, child) cursor offset file. The local view is not enough: a
+// stale replica can be missing a live link, and deleting the file forces
+// the eventual real cursor to tail-anchor, silently skipping its backlog.
+func fanoutLinkDissolvedOnLeader(ctx context.Context, view leaderView, peer topicFetcher, selfID, parent, child string, log *slog.Logger) bool {
+	rec, absent, ok := leaderTopicView(ctx, view, peer, selfID, child, log)
+	if !ok {
 		return false
 	}
-	rpcCtx, cancel := context.WithTimeout(ctx, fanoutEpochConfirmTimeout)
-	defer cancel()
-	res, err := peer.GetTopic(rpcCtx, member.Addr, key.child)
-	if err != nil {
-		log.Warn("fanout: leader epoch check unreachable; deferring tail anchor",
-			"leader", leaderID, "parent", key.parent, "child", key.child, "err", err)
-		return false
+	if absent {
+		return true
 	}
-	if res.Status != http.StatusOK {
-		// 404 means the child is gone on the leader: the link is dead and
-		// the reconciler will stop this cursor once the replica catches up.
-		log.Warn("fanout: leader epoch check not OK; deferring tail anchor",
-			"leader", leaderID, "status", res.Status, "parent", key.parent, "child", key.child)
-		return false
-	}
-	var t topic.Topic
-	if err := json.Unmarshal(res.Body, &t); err != nil {
-		log.Warn("fanout: leader epoch check body undecodable; deferring tail anchor",
-			"leader", leaderID, "parent", key.parent, "child", key.child, "err", err)
-		return false
-	}
-	return t.Parent == key.parent && t.AttachEpoch == key.epoch
+	return !rec.IsChild() || rec.Parent != parent
 }

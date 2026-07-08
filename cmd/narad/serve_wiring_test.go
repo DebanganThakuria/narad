@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -81,35 +82,11 @@ func (stubMetastore) GetMember(string) (metastore.Member, error) {
 }
 func (stubMetastore) Close() error { return nil }
 
-func TestInitializeConsumerOffsetsRestoresOnlyOwnedPartitions(t *testing.T) {
-	ctx := context.Background()
+// Lazily created shards must recover the durably committed offset from
+// the per-partition file — disk is the ground truth, independent of the
+// (possibly stale) metastore view at boot.
+func TestLazyShardRecoversCommittedOffsetFromDisk(t *testing.T) {
 	dataDir := t.TempDir()
-	store, err := metastore.New(metastore.Config{
-		NodeID:        "node-1",
-		DataDir:       filepath.Join(t.TempDir(), "metastore"),
-		BindAddr:      "127.0.0.1:0",
-		AdvertiseAddr: "127.0.0.1:0",
-	})
-	if err != nil {
-		t.Fatalf("metastore.New() error = %v", err)
-	}
-	defer store.Close()
-	waitForLeadership(t, store)
-	if err := store.CreateTopic(ctx, topic.Topic{
-		Name:                      "orders",
-		Partitions:                2,
-		VisibilityTimeoutMs:       1000,
-		MaxInFlightPerPartition:   16,
-		MaxAckedAheadPerPartition: 16,
-	}); err != nil {
-		t.Fatalf("CreateTopic() error = %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-1"); err != nil {
-		t.Fatalf("AssignPartition(0) error = %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 1, "node-2"); err != nil {
-		t.Fatalf("AssignPartition(1) error = %v", err)
-	}
 	for partition, offset := range map[int]int64{0: 3, 1: 9} {
 		partitionDir := storage.TopicPartitionDir(dataDir, "orders", partition)
 		if err := storage.WriteConsumerOffset(partitionDir, offset); err != nil {
@@ -119,16 +96,34 @@ func TestInitializeConsumerOffsetsRestoresOnlyOwnedPartitions(t *testing.T) {
 	inFlight := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 16, MaxAckedAhead: 16}, nil
 	}, nil)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	inFlight.SetCommittedRecovery(func(topicName string, partition int) (int64, bool) {
+		committed, ok, err := storage.ReadConsumerOffset(storage.TopicPartitionDir(dataDir, topicName, partition))
+		if err != nil {
+			return 0, false
+		}
+		return committed, ok
+	})
 
-	if err := initializeConsumerOffsets(ctx, dataDir, store, inFlight, logger, "node-1"); err != nil {
-		t.Fatalf("initializeConsumerOffsets() error = %v", err)
+	// Touching a partition creates its shard; the frontier must come from
+	// the file (Next = committed+1), and a partition with no file starts
+	// fresh at 0.
+	if _, err := inFlight.ReserveNext(context.Background(), "orders", 0, time.Second, 100); err != nil {
+		t.Fatalf("ReserveNext(orders,0) error = %v", err)
 	}
-	if got := inFlight.Next("orders", 0); got != 4 {
-		t.Fatalf("Next(orders,0) = %d, want 4", got)
+	if got := inFlight.Next("orders", 0); got != 4 && got != 5 {
+		t.Fatalf("Next(orders,0) = %d, want 4 (file offset 3 + 1, +1 if reserved counted)", got)
 	}
-	if got := inFlight.Next("orders", 1); got != 0 {
-		t.Fatalf("Next(orders,1) = %d, want 0", got)
+	if _, err := inFlight.ReserveNext(context.Background(), "orders", 1, time.Second, 100); err != nil {
+		t.Fatalf("ReserveNext(orders,1) error = %v", err)
+	}
+	if got := inFlight.Next("orders", 1); got != 10 {
+		t.Fatalf("Next(orders,1) = %d, want 10 (file offset 9 + 1)", got)
+	}
+	if _, err := inFlight.ReserveNext(context.Background(), "orders", 2, time.Second, 100); err != nil {
+		t.Fatalf("ReserveNext(orders,2) error = %v", err)
+	}
+	if got := inFlight.Next("orders", 2); got != 0 {
+		t.Fatalf("Next(orders,2) = %d, want 0 (no file)", got)
 	}
 }
 
