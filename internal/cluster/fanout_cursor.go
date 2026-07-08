@@ -28,19 +28,28 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 
 	next := topic.FanoutTailOffset
 	if cur, ok, err := storage.ReadFanoutCursor(partitionDir, key.child); err != nil {
-		r.logger.Warn("fanout: read cursor failed; anchoring at parent tail",
+		r.logger.Warn("fanout: read cursor failed; cannot resume",
 			"parent", key.parent, "partition", key.partition, "child", key.child, "err", err)
 	} else if !ok {
-		r.logger.Warn("fanout: no cursor file; anchoring at parent tail (fresh attach, or lost cursor state)",
+		r.logger.Warn("fanout: no cursor file; cannot resume (fresh attach, or lost cursor state)",
 			"parent", key.parent, "partition", key.partition, "child", key.child, "epoch", key.epoch)
 	} else if cur.Epoch != key.epoch {
-		r.logger.Warn("fanout: cursor file epoch mismatch; anchoring at parent tail (re-attached link)",
+		r.logger.Warn("fanout: cursor file epoch mismatch; cannot resume (re-attached link, or stale replica)",
 			"parent", key.parent, "partition", key.partition, "child", key.child,
 			"file_epoch", cur.Epoch, "epoch", key.epoch)
 	} else {
 		next = cur.NextOffset
 	}
 	if next == topic.FanoutTailOffset {
+		// Tail-anchoring skips everything before the current tail and
+		// OVERWRITES the offset file, so it is destructive on two counts —
+		// and this cursor's epoch may have come from a stale replica view.
+		// Anchor only on an epoch the leader confirms is the child's live
+		// attachment; otherwise defer, leaving the file untouched, and let
+		// the reconciler respawn the cursor once the replica catches up.
+		if !epochConfirmedByLeader(ctx, r.store, r.peer, r.selfID, key, r.logger) {
+			return
+		}
 		// Fresh attachment: fan out from the parent's current committed
 		// tail (no backfill), and persist that starting point BEFORE
 		// fanning anything so a crash cannot re-anchor at a later tail

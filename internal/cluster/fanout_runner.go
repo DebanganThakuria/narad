@@ -128,6 +128,7 @@ type FanoutRunner struct {
 	wg      sync.WaitGroup
 
 	reconcilePasses int
+	caughtUpSkips   int
 }
 
 // NewFanoutRunner wires a runner. selfID may be empty (single-process /
@@ -190,6 +191,20 @@ func (r *FanoutRunner) Reconcile(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	// A replica that has not proven itself current against the leader must
+	// not manage cursors at all: spawning from a stale topic view starts
+	// cursors under dead attach epochs, and every anchor/cleanup decision
+	// made from that view destroys good cursor state (tail re-anchor =
+	// silently skipped deliveries). Running cursors keep running — they
+	// re-validate their link per batch — this only pauses set changes.
+	if !r.store.AppliedCaughtUp() {
+		r.caughtUpSkips++
+		if r.caughtUpSkips == 1 || r.caughtUpSkips%30 == 0 {
+			r.logger.Warn("fanout: metastore replica not caught up with leader; skipping reconcile", "consecutive_skips", r.caughtUpSkips)
+		}
+		return
+	}
+	r.caughtUpSkips = 0
 	topics, _, err := r.store.ListTopics(ctx, metastore.ListOptions{})
 	if err != nil {
 		r.logger.Error("fanout: list topics", "err", err)
@@ -282,8 +297,21 @@ func (r *FanoutRunner) cleanUpStoppedCursor(key fanoutCursorKey, byName map[stri
 		return // link still live; cursor stopped for another reason
 	}
 	dir := storage.TopicPartitionDir(r.dataDir, key.parent, key.partition)
-	if err := storage.RemoveFanoutCursor(dir, key.child); err != nil {
-		r.logger.Warn("fanout: remove cursor file", "parent", key.parent, "partition", key.partition, "child", key.child, "err", err)
+	// The offset file is shared by every attachment of (parent, partition,
+	// child); only the attachment that owns its contents may destroy it. A
+	// cursor spawned from a stale replica carries a dead epoch — if the
+	// file on disk holds a different (live) epoch, deleting it here would
+	// erase the real cursor's resume point.
+	cur, found, err := storage.ReadFanoutCursor(dir, key.child)
+	switch {
+	case err != nil:
+		r.logger.Warn("fanout: read cursor file before cleanup; keeping it", "parent", key.parent, "partition", key.partition, "child", key.child, "err", err)
+	case found && cur.Epoch != key.epoch:
+		// Belongs to another attachment; its own cursor decides its fate.
+	case found:
+		if err := storage.RemoveFanoutCursor(dir, key.child); err != nil {
+			r.logger.Warn("fanout: remove cursor file", "parent", key.parent, "partition", key.partition, "child", key.child, "err", err)
+		}
 	}
 	if r.metrics != nil {
 		r.metrics.FanoutLagMessages.DeletePartialMatch(map[string]string{"parent": key.parent, "child": key.child})
