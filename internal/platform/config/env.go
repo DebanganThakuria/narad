@@ -24,6 +24,9 @@ func applyEnv(cfg *Config) error {
 	if v, ok := os.LookupEnv("NARAD_NODE_ID"); ok {
 		cfg.Cluster.NodeID = v
 	}
+	if v, ok := os.LookupEnv("NARAD_CLUSTER_INITIAL_MEMBERS"); ok {
+		cfg.Cluster.InitialMembers = splitNonEmpty(v)
+	}
 	if v, ok := os.LookupEnv("NARAD_CLUSTER_PEERS"); ok {
 		peers, err := parseClusterPeers(v)
 		if err != nil {
@@ -170,4 +173,16 @@ func parseClusterPeers(raw string) ([]ClusterPeer, error) {
 		peers = append(peers, ClusterPeer{ID: strings.TrimSpace(id), Addr: strings.TrimSpace(addr)})
 	}
 	return peers, nil
+}
+
+// splitNonEmpty splits a comma list, trimming whitespace and dropping
+// empty entries.
+func splitNonEmpty(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

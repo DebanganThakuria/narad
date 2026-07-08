@@ -43,6 +43,10 @@ func (f fakePeerClient) GetTopic(ctx context.Context, addr, topicName string) (n
 	return nodewire.Response{}, context.DeadlineExceeded
 }
 
+func (f fakePeerClient) JoinCluster(context.Context, string, nodewire.JoinClusterRequest) (nodewire.Response, error) {
+	return nodewire.Response{}, context.DeadlineExceeded
+}
+
 func (f fakePeerClient) AttachChild(ctx context.Context, addr, parent, child string, delayMs int64) (nodewire.Response, error) {
 	if f.attachChildFn != nil {
 		return f.attachChildFn(ctx, addr, parent, child, delayMs)

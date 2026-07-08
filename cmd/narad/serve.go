@@ -59,12 +59,17 @@ func runServe(args []string) error {
 	} else {
 		log.Warn("raft metadata transport is plaintext; restrict the cluster port by network policy")
 	}
+	joinOnly := joinOnlyNode(nodeID, cfg.Cluster.InitialMembers)
+	if joinOnly {
+		log.Info("node is not an initial member; will join the existing cluster instead of bootstrapping", "node", nodeID)
+	}
 	ms, err := metastore.New(metastore.Config{
 		NodeID:        nodeID,
 		DataDir:       filepath.Join(cfg.Storage.DataDir, "metastore"),
 		BindAddr:      cfg.Cluster.Addr,
 		AdvertiseAddr: advertisedClusterAddr(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
 		Peers:         configPeersToMetastore(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
+		JoinOnly:      joinOnly,
 		TLS:           clusterTLS,
 	})
 	if err != nil {
@@ -126,6 +131,13 @@ func runServe(args []string) error {
 	bc.createGate.ArmCreateGate()
 	defer bc.createGate.ReleaseCreateGate()
 
+	if joinOnly {
+		// Scale-out admission: ask the existing leader to add this node
+		// to the Raft voter set. Harmless on a restart of an already-
+		// joined node (exits at the first leader sighting without
+		// sending anything).
+		wg.Go(func() { runClusterJoin(ctx, ms, cs.peerRPC, cfg, nodeID, log) })
+	}
 	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, cs.peerRPC, log) })
 	wg.Go(func() { cs.controller.Run(ctx) })
 	wg.Go(func() { bc.offsets.RunPurger(ctx, time.Second) })
@@ -151,6 +163,14 @@ func runServe(args []string) error {
 	// only called once reconcile completes, so /readyz still implies a
 	// reconciled node while /healthz answers from the start.
 	wg.Go(func() {
+		if joinOnly {
+			// A join-only node must not reconcile — or mark itself ready —
+			// until the leader has admitted it and Raft has a leader in
+			// view. There is no timeout: /healthz answers throughout (the
+			// pod stays alive), /readyz stays false (no traffic routes
+			// here), and admission normally lands within seconds.
+			waitForClusterLeader(ctx, ms)
+		}
 		runStartupReconcile(ctx, ms, bc.logs, cs.peerRPC, cfg.Storage.DataDir, nodeID, log)
 		// The sweep can no longer race a create: open the gate so topic
 		// creates (HTTP and cluster RPC) proceed. Reconcile failures are

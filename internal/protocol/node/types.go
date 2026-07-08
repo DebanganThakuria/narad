@@ -36,7 +36,16 @@ const (
 	OpExtendAck
 	OpNack
 	OpGetTopic
+	OpJoinCluster
 )
+
+// JoinClusterRequest asks the metastore leader to admit a new node into
+// the Raft voter set (scale-out). ID is the joining node's identity and
+// ClusterAddr its advertised Raft address.
+type JoinClusterRequest struct {
+	ID          string
+	ClusterAddr string
+}
 
 // ProduceRequest asks a node to route and append one record.
 type ProduceRequest struct {

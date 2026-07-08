@@ -557,6 +557,18 @@ seconds. If a pod's heartbeat is older than `DeadTimeout` (default 30s),
 the controller marks it dead. Partitions owned by dead pods return 503
 until the pod restarts and its persistent volume reattaches.
 
+**Scaling out.** Nodes listed in `cluster.initial_members` (env
+`NARAD_CLUSTER_INITIAL_MEMBERS`; the Helm chart derives it from
+`initialClusterSize`, default 3) may bootstrap a brand-new Raft cluster.
+Any other node starts **join-only**: it never bootstraps, asks each
+configured peer for admission (`OpJoinCluster` → leader `AddVoter`), and
+stays not-ready until the leader admits it and its replica catches up.
+Scaling is therefore just raising `replicaCount` — new pods join the
+voter set, register as members, and receive partition assignments for
+topics created afterwards. Existing partitions are never rebalanced
+(single-owner, data lives on the owner's disk). Never shrink
+`initialClusterSize`, and scale down only to `initialClusterSize` pods.
+
 **Graceful shutdown.** If the leader calls `raft.LeadershipTransfer()`
 before shutting down, a follower elects itself immediately (~150ms)
 instead of waiting for the full heartbeat timeout + election window

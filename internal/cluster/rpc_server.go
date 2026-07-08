@@ -93,6 +93,8 @@ func (s *RPCServer) dispatch(payload []byte) nodewire.Response {
 		res = s.handleNack(payload)
 	case nodewire.OpGetTopic:
 		res = s.handleGetTopic(payload)
+	case nodewire.OpJoinCluster:
+		res = s.handleJoinCluster(payload)
 	case nodewire.OpCreateTopic:
 		res = s.handleCreateTopic(payload)
 	case nodewire.OpAlterTopic:
