@@ -3,9 +3,10 @@ package wal
 import "time"
 
 const (
-	defaultSegmentBytes = 64 << 20
-	defaultSyncInterval = 10 * time.Millisecond
-	defaultMaxRecord    = 16 << 20
+	defaultSegmentBytes       = 64 << 20
+	defaultSyncInterval       = 10 * time.Millisecond
+	defaultMaxRecord          = 16 << 20
+	defaultCompactRotateBytes = 1 << 20
 )
 
 // Options configures a Log. Zero values pick sensible defaults.
@@ -22,6 +23,16 @@ type Options struct {
 	// MaxRecord is the maximum payload size accepted by Append and the
 	// upper bound trusted when validating frame lengths during recovery.
 	MaxRecord int
+
+	// CompactRotateBytes is the minimum active-segment size at which
+	// CompactBefore rolls a fully-compactable active segment so its file
+	// can be reclaimed. Without rotation, an active segment whose records
+	// are all below the compaction point is pinned on disk forever — it
+	// only seals when NEW appends overflow it, which never happens once
+	// its topics stop producing. <=0 uses the default (1 MiB); the floor
+	// bounds how much fully-compacted data may linger rather than churning
+	// a segment roll on every compaction under light traffic.
+	CompactRotateBytes int64
 }
 
 func normalizeOptions(opts Options) Options {
@@ -33,6 +44,9 @@ func normalizeOptions(opts Options) Options {
 	}
 	if opts.MaxRecord <= 0 {
 		opts.MaxRecord = defaultMaxRecord
+	}
+	if opts.CompactRotateBytes <= 0 {
+		opts.CompactRotateBytes = defaultCompactRotateBytes
 	}
 	return opts
 }

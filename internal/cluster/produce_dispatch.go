@@ -118,7 +118,7 @@ func (d *ProduceDispatcher) dispatch(ctx context.Context, state *produceDispatch
 		return 0, nil
 	}
 
-	buckets, nextStuck, firstErr := d.bucketByTarget(&win, state)
+	buckets, nextStuck, firstErr := d.bucketByTarget(ctx, &win, state)
 
 	// Size the next window to this pass's fan-out: aim for ~target records per
 	// distinct partition so per-partition commit batches (one fsync each) stay
@@ -229,7 +229,7 @@ func (d *ProduceDispatcher) scanWindow(ctx context.Context, state *produceDispat
 // uncommitted, bounding the checkpoint and marking its destination stuck for
 // the next pass. Returns the buckets, the next pass's stuck set (so far), and
 // the first resolution error.
-func (d *ProduceDispatcher) bucketByTarget(win *dispatchWindow, state *produceDispatchState) (map[produceDispatchTarget][]ingress.ProduceRecord, map[produceDispatchStuckKey]int, error) {
+func (d *ProduceDispatcher) bucketByTarget(ctx context.Context, win *dispatchWindow, state *produceDispatchState) (map[produceDispatchTarget][]ingress.ProduceRecord, map[produceDispatchStuckKey]int, error) {
 	buckets := make(map[produceDispatchTarget][]ingress.ProduceRecord)
 	nextStuck := make(map[produceDispatchStuckKey]int)
 	rerouted := make(map[produceDispatchStuckKey]int)
@@ -267,7 +267,7 @@ func (d *ProduceDispatcher) bucketByTarget(win *dispatchWindow, state *produceDi
 			buckets[target] = append(buckets[target], rec)
 			continue
 		}
-		if d.topicDeletedLocally(rec.Topic) {
+		if d.topicConfirmedDeleted(ctx, rec.Topic) {
 			d.logger.Warn("discarding undispatched record for deleted topic",
 				"topic", rec.Topic, "partition", rec.TargetPartition,
 				"seq", rec.WAL.Seq, "err", err)

@@ -2,6 +2,7 @@ package ingress
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -413,4 +414,68 @@ func testWALOptions() wal.Options {
 
 func produceWALDir(dataDir string) string {
 	return filepath.Join(dataDir, "ingress", "produce")
+}
+
+// End-to-end disk reclaim for the orphan-WAL case: every accepted record
+// dispatched (checkpoint == durable next), compaction rotates the active
+// segment away, and a manager restart preserves both watermarks — the
+// checkpoint-ahead-of-WAL boot failure must NOT trigger.
+func TestManagerCompactReclaimsFullyDispatchedWALAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultWALOptions()
+	opts.CompactRotateBytes = 1
+
+	manager, err := OpenManager(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenManager() error = %v", err)
+	}
+	for i := range 4 {
+		if _, err := manager.AcceptProduce(context.Background(), "bench", "k", 0, fmt.Appendf(nil, "payload-%d", i)); err != nil {
+			t.Fatalf("AcceptProduce(%d) error = %v", i, err)
+		}
+	}
+	next := manager.DurableProduceNext()
+	if next != 4 {
+		t.Fatalf("DurableProduceNext() = %d, want 4", next)
+	}
+	if err := manager.StoreProduceCheckpoint(next); err != nil {
+		t.Fatalf("StoreProduceCheckpoint() error = %v", err)
+	}
+	if err := manager.CompactProduceBefore(next); err != nil {
+		t.Fatalf("CompactProduceBefore() error = %v", err)
+	}
+	// The WAL dir now holds only the checkpoint and one empty segment.
+	var replayed int
+	if err := manager.ReplayProduce(0, func(ProduceRecord) error { replayed++; return nil }); err != nil {
+		t.Fatalf("ReplayProduce() error = %v", err)
+	}
+	if replayed != 0 {
+		t.Fatalf("records after full compact = %d, want 0", replayed)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := OpenManager(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenManager() after compact error = %v", err)
+	}
+	defer reopened.Close()
+	if got := reopened.DurableProduceNext(); got != next {
+		t.Fatalf("DurableProduceNext() after restart = %d, want %d", got, next)
+	}
+	checkpoint, err := reopened.LoadProduceCheckpoint()
+	if err != nil {
+		t.Fatalf("LoadProduceCheckpoint() error = %v", err)
+	}
+	if checkpoint != next {
+		t.Fatalf("checkpoint after restart = %d, want %d", checkpoint, next)
+	}
+	accepted, err := reopened.AcceptProduce(context.Background(), "bench", "k", 0, []byte("after-restart"))
+	if err != nil {
+		t.Fatalf("AcceptProduce() after restart error = %v", err)
+	}
+	if accepted.WAL.Seq != next {
+		t.Fatalf("seq after restart = %d, want %d (sequence space preserved)", accepted.WAL.Seq, next)
+	}
 }

@@ -153,6 +153,17 @@ func (l *Log) Append(ctx context.Context, payload []byte) (RecordID, error) {
 	return id, batch.err
 }
 
+// NextSeq returns the next sequence number the log will assign: one past
+// the newest record (durable or staged), as recovered at Open — where the
+// last segment's base is a floor, so an empty active segment left by
+// compaction rotation cannot regress the sequence space — and advanced by
+// appends since.
+func (l *Log) NextSeq() uint64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.nextSeq
+}
+
 // Close stops the sync loop, flushes any buffered records, and closes
 // the active segment. It returns the latched sync error, if any.
 func (l *Log) Close() error {

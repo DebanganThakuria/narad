@@ -19,26 +19,11 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
-	"github.com/debanganthakuria/narad/internal/persistence/metastore"
-	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
 const fanoutEpochConfirmTimeout = 5 * time.Second
 
-// fanoutLeaderView is the slice of the metastore needed to locate the
-// current leader.
-type fanoutLeaderView interface {
-	LeaderID() string
-	GetMember(id string) (metastore.Member, error)
-}
-
-// fanoutTopicFetcher fetches a topic record from a peer; peerClient
-// satisfies it.
-type fanoutTopicFetcher interface {
-	GetTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error)
-}
-
-func epochConfirmedByLeader(ctx context.Context, view fanoutLeaderView, peer fanoutTopicFetcher, selfID string, key fanoutCursorKey, log *slog.Logger) bool {
+func epochConfirmedByLeader(ctx context.Context, view leaderView, peer topicFetcher, selfID string, key fanoutCursorKey, log *slog.Logger) bool {
 	if selfID == "" {
 		return true // no cluster identity: the local store is the authority
 	}

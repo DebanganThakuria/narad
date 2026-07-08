@@ -530,3 +530,156 @@ func segmentCount(t *testing.T, dir string) int {
 	}
 	return len(segments)
 }
+
+// A fully-compacted active segment (every record below the compaction
+// point) must be rotated out and reclaimed — otherwise it lingers on
+// disk until NEW appends overflow it, which never happens once its
+// writers go quiet. The rotated log must keep its sequence space across
+// a restart: the empty successor segment's base is the floor.
+func TestCompactBeforeRotatesFullyCompactedActiveSegment(t *testing.T) {
+	dir := t.TempDir()
+	opts := testOptions()
+	opts.CompactRotateBytes = 1
+
+	log, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	var last RecordID
+	for i := range 3 {
+		if last, err = log.Append(context.Background(), fmt.Appendf(nil, "record-%d", i)); err != nil {
+			t.Fatalf("Append(%d) error = %v", i, err)
+		}
+	}
+
+	if err := log.CompactBefore(last.Seq + 1); err != nil {
+		t.Fatalf("CompactBefore() error = %v", err)
+	}
+	segments, err := listSegments(dir)
+	if err != nil {
+		t.Fatalf("listSegments() error = %v", err)
+	}
+	if len(segments) != 1 || segments[0].base != last.Seq+1 {
+		t.Fatalf("segments after full compact = %+v, want single empty segment at base %d", segments, last.Seq+1)
+	}
+	if info, err := os.Stat(segments[0].path); err != nil || info.Size() != 0 {
+		t.Fatalf("rotated segment stat = %v size %d, want empty file", err, info.Size())
+	}
+
+	// The log stays appendable and seqs continue past the rotation.
+	id, err := log.Append(context.Background(), []byte("after-rotation"))
+	if err != nil {
+		t.Fatalf("Append(after-rotation) error = %v", err)
+	}
+	if id.Seq != last.Seq+1 {
+		t.Fatalf("post-rotation seq = %d, want %d", id.Seq, last.Seq+1)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	// Restart: recovery must not regress the sequence space.
+	reopened, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("reopen error = %v", err)
+	}
+	defer reopened.Close()
+	if got := reopened.NextSeq(); got != id.Seq+1 {
+		t.Fatalf("NextSeq() after reopen = %d, want %d", got, id.Seq+1)
+	}
+}
+
+// Sequence-space preservation for the worst case: rotation + compaction
+// leave ONLY the empty segment, then the process restarts.
+func TestReopenAfterFullCompactionPreservesSeqs(t *testing.T) {
+	dir := t.TempDir()
+	opts := testOptions()
+	opts.CompactRotateBytes = 1
+
+	log, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	var last RecordID
+	for i := range 5 {
+		if last, err = log.Append(context.Background(), fmt.Appendf(nil, "r%d", i)); err != nil {
+			t.Fatalf("Append(%d) error = %v", i, err)
+		}
+	}
+	if err := log.CompactBefore(last.Seq + 1); err != nil {
+		t.Fatalf("CompactBefore() error = %v", err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := Open(dir, opts)
+	if err != nil {
+		t.Fatalf("reopen error = %v", err)
+	}
+	defer reopened.Close()
+	if got := reopened.NextSeq(); got != last.Seq+1 {
+		t.Fatalf("NextSeq() after reopen = %d, want %d", got, last.Seq+1)
+	}
+	id, err := reopened.Append(context.Background(), []byte("continues"))
+	if err != nil {
+		t.Fatalf("Append after reopen error = %v", err)
+	}
+	if id.Seq != last.Seq+1 {
+		t.Fatalf("seq after reopen = %d, want %d", id.Seq, last.Seq+1)
+	}
+}
+
+// Rotation must never run while undispatched records sit in the active
+// segment, and must not churn below the size floor.
+func TestCompactBeforeRotationGuards(t *testing.T) {
+	t.Run("keeps active segment with undispatched records", func(t *testing.T) {
+		dir := t.TempDir()
+		opts := testOptions()
+		opts.CompactRotateBytes = 1
+		log, err := Open(dir, opts)
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		defer log.Close()
+		var last RecordID
+		for i := range 3 {
+			if last, err = log.Append(context.Background(), fmt.Appendf(nil, "r%d", i)); err != nil {
+				t.Fatalf("Append(%d) error = %v", i, err)
+			}
+		}
+		if err := log.CompactBefore(last.Seq); err != nil { // last record NOT dispatched
+			t.Fatalf("CompactBefore() error = %v", err)
+		}
+		var replayed int
+		if err := Replay(dir, 0, 0, func(Record) error { replayed++; return nil }); err != nil {
+			t.Fatalf("Replay() error = %v", err)
+		}
+		if replayed != 3 {
+			t.Fatalf("records after partial compact = %d, want 3 (nothing lost)", replayed)
+		}
+	})
+	t.Run("keeps active segment below the rotation floor", func(t *testing.T) {
+		dir := t.TempDir()
+		opts := testOptions() // default floor normalized to 1 MiB
+		log, err := Open(dir, opts)
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		defer log.Close()
+		last, err := log.Append(context.Background(), []byte("tiny"))
+		if err != nil {
+			t.Fatalf("Append() error = %v", err)
+		}
+		if err := log.CompactBefore(last.Seq + 1); err != nil {
+			t.Fatalf("CompactBefore() error = %v", err)
+		}
+		segments, err := listSegments(dir)
+		if err != nil {
+			t.Fatalf("listSegments() error = %v", err)
+		}
+		if len(segments) != 1 || segments[0].base != 0 {
+			t.Fatalf("segments = %+v, want the original un-rotated segment", segments)
+		}
+	})
+}
