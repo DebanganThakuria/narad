@@ -74,11 +74,11 @@ func OpenManager(dataDir string, opts wal.Options) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	nextSeq, err := nextProduceSeq(produceDir)
-	if err != nil {
-		_ = log.Close()
-		return nil, err
-	}
+	// The WAL's own recovery is the durable-next authority: unlike a scan
+	// over records, it floors the result at the last segment's base, so a
+	// fully-compacted log (one empty rotated segment) keeps its sequence
+	// space instead of regressing below the checkpoint.
+	nextSeq := log.NextSeq()
 	// A checkpoint ahead of the recovered WAL means segments were removed
 	// while the checkpoint survived; new records would get seqs below the
 	// checkpoint and silently never be dispatched.

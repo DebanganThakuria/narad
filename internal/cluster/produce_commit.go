@@ -85,7 +85,7 @@ func (d *ProduceDispatcher) commitBatch(ctx context.Context, target produceDispa
 	if err == nil || ctx.Err() != nil {
 		return err
 	}
-	if d.topicDeletedLocally(target.topic) {
+	if d.topicConfirmedDeleted(ctx, target.topic) {
 		d.logger.Warn("discarding undispatched produce records for deleted topic",
 			"topic", target.topic, "partition", target.partition,
 			"records", len(records), "err", err)
@@ -94,14 +94,25 @@ func (d *ProduceDispatcher) commitBatch(ctx context.Context, target produceDispa
 	return err
 }
 
-// topicDeletedLocally reports whether the topic is absent from this node's
-// local metastore replica.
-func (d *ProduceDispatcher) topicDeletedLocally(topicName string) bool {
+// topicConfirmedDeleted reports whether topicName is deleted with enough
+// certainty to discard its accepted WAL records: absent from the local
+// replica, the replica caught up with the leader, and — unless this node
+// IS the leader — the leader itself confirming the topic is gone. Local
+// absence alone is not enough: a replica restored from an old Raft
+// snapshot is missing every topic created after the snapshot point, and
+// discarding on that view would destroy 202-accepted records. Returning
+// false just retries the records on a later pass.
+func (d *ProduceDispatcher) topicConfirmedDeleted(ctx context.Context, topicName string) bool {
 	if d.store == nil {
 		return false
 	}
-	_, err := d.store.GetTopic(context.Background(), topicName)
-	return errors.Is(err, errs.ErrNotFound)
+	if _, err := d.store.GetTopic(ctx, topicName); !errors.Is(err, errs.ErrNotFound) {
+		return false
+	}
+	if !d.store.AppliedCaughtUp() {
+		return false
+	}
+	return topicAbsentOnLeader(ctx, d.store, d.peer, d.selfID, topicName, d.logger)
 }
 
 func (d *ProduceDispatcher) dispatchRecordBatch(ctx context.Context, target produceDispatchTarget, records []ingress.ProduceRecord) error {

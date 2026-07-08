@@ -36,16 +36,3 @@ func ReplayProduceFromCursor(dir string, cursor wal.Cursor, fn func(ProduceRecor
 		return fn(produce, next)
 	})
 }
-
-// nextProduceSeq scans the WAL and returns one past the highest
-// recovered sequence (0 for an empty log).
-func nextProduceSeq(dir string) (uint64, error) {
-	var next uint64
-	err := wal.Replay(dir, 0, 0, func(record wal.Record) error {
-		if record.ID.Seq >= next {
-			next = record.ID.Seq + 1
-		}
-		return nil
-	})
-	return next, err
-}
