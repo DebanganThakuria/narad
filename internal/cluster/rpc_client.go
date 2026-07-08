@@ -29,6 +29,7 @@ type peerClient interface {
 	AlterTopic(context.Context, string, string, []byte) (nodewire.Response, error)
 	DeleteTopic(context.Context, string, string) (nodewire.Response, error)
 	GetTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error)
+	JoinCluster(ctx context.Context, addr string, req nodewire.JoinClusterRequest) (nodewire.Response, error)
 	AttachChild(ctx context.Context, addr, parent, child string, delayMs int64) (nodewire.Response, error)
 	DetachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error)
 	FanoutCursors(ctx context.Context, addr, parent string) ([]topic.FanoutCursorStat, error)
@@ -185,6 +186,13 @@ func (c *PeerClient) TopicPartitionStats(ctx context.Context, addr, topicName st
 }
 
 // RegisterMember upserts a member record on the peer at addr.
+// JoinCluster asks the node at addr — retried across peers until the
+// leader is found — to admit this node into the Raft voter set.
+func (c *PeerClient) JoinCluster(ctx context.Context, addr string, req nodewire.JoinClusterRequest) (nodewire.Response, error) {
+	payload, err := nodewire.EncodeJoinClusterRequest(req)
+	return c.send(ctx, addr, "join_cluster", payload, err)
+}
+
 func (c *PeerClient) RegisterMember(ctx context.Context, addr string, req nodewire.MemberRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeMemberRequest(req)
 	return c.send(ctx, addr, "register_member", payload, err)

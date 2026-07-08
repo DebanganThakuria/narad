@@ -100,3 +100,23 @@ func (s *Store) AppliedCaughtUp() bool {
 }
 
 var _ Metastore = (*Store)(nil)
+
+// AddVoter admits (or re-addresses) a node in the Raft voter set.
+// Leader-only — followers fail with raft.ErrNotLeader — and idempotent:
+// re-adding an existing voter with the same address is a no-op config
+// entry. This is the scale-out admission path (OpJoinCluster).
+func (s *Store) AddVoter(id, clusterAddr string) error {
+	return s.r.AddVoter(raft.ServerID(id), raft.ServerAddress(clusterAddr), 0, barrierTimeout).Error()
+}
+
+// HasRaftConfiguration reports whether this node's Raft configuration
+// contains any servers. A join-only node that has not yet been admitted
+// has an empty configuration and cannot make progress until the leader
+// adds it.
+func (s *Store) HasRaftConfiguration() (bool, error) {
+	future := s.r.GetConfiguration()
+	if err := future.Error(); err != nil {
+		return false, err
+	}
+	return len(future.Configuration().Servers) > 0, nil
+}

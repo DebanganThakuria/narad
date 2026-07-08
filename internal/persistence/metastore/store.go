@@ -24,7 +24,13 @@ type Config struct {
 	BindAddr      string
 	AdvertiseAddr string
 	Peers         []Peer
-	Logger        io.Writer
+	// JoinOnly prevents this node from bootstrapping a cluster when it
+	// has no prior Raft state: it starts with an EMPTY configuration and
+	// waits for the existing leader to admit it via AddVoter (the
+	// OpJoinCluster RPC). Without it, a scale-out node would bootstrap a
+	// phantom cluster from its peer list and never join the real one.
+	JoinOnly bool
+	Logger   io.Writer
 	// TLS, when non-nil, secures the Raft transport with mutual TLS.
 	// Nil runs it as plain TCP (relying on network isolation).
 	TLS *TLSConfig
@@ -100,7 +106,7 @@ func newRaft(cfg Config, fsm *fsmState) (*raft.Raft, error) {
 	if err != nil {
 		return nil, fmt.Errorf("metastore: check state: %w", err)
 	}
-	if !hasState {
+	if !hasState && !cfg.JoinOnly {
 		if err := bootstrapCluster(r, cfg, advertiseAddr); err != nil {
 			return nil, err
 		}
