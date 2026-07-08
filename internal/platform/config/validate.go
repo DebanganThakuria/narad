@@ -9,7 +9,11 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/netaddr"
 )
 
-const clusterVoterCount = 3
+// minClusterPeers is the smallest multi-node peer list that makes
+// sense: a Raft cluster of two cannot survive any failure, so anything
+// below three voters is a config mistake. Larger (odd) sizes are fine —
+// scale-out grows the peer list with the StatefulSet.
+const minClusterPeers = 3
 
 // Validate enforces invariants the rest of the system relies on. Callers
 // should fail fast on a Validate error — Narad refuses to start with bad
@@ -77,8 +81,8 @@ func clusterValidationErrors(httpCfg HTTPConfig, cfg ClusterConfig) []string {
 	if selfID == "" {
 		errs = append(errs, "cluster.node_id must not be empty when cluster.peers is set")
 	}
-	if len(cfg.Peers) != clusterVoterCount {
-		errs = append(errs, fmt.Sprintf("cluster.peers must list exactly %d voters including self, got %d", clusterVoterCount, len(cfg.Peers)))
+	if len(cfg.Peers) < minClusterPeers {
+		errs = append(errs, fmt.Sprintf("cluster.peers must list at least %d voters including self, got %d", minClusterPeers, len(cfg.Peers)))
 	}
 
 	result := inspectPeers(cfg.Peers, selfID, selfAddr)
