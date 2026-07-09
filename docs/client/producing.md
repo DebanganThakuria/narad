@@ -9,9 +9,9 @@ curl -u $AUTH -X POST \
 ```
 
 - The **body is the message** — raw bytes, up to **1 MiB**. JSON, protobuf, plain text: Narad doesn't care (unless the topic has a schema, in which case the body must validate against it).
-- `key` (query param, optional) — messages with the same key go to the same partition and are delivered in the order they arrived.
+- `key` (query param, optional) — messages with the same key stick to the same partition in normal operation: locality for fan-out and consumers, not an ordering guarantee.
 - `partition` (query param, optional) — pin the message to an exact partition, overriding key hashing. Most apps never need this.
-- No key and no partition? Narad spreads messages across partitions round-robin. Throughput is the same; you just give up per-key ordering.
+- No key and no partition? Narad spreads messages across partitions round-robin.
 
 ## What `202 Accepted` means — read this once, carefully
 
@@ -36,15 +36,18 @@ Consequences worth knowing:
 - **A timeout or 5xx is ambiguous** — the message may or may not have been accepted. If you retry (you should), you may create a duplicate. Consumers must tolerate duplicates anyway (see [Guarantees](guarantees-and-errors.md)), so retry freely.
 - There's a tiny gap between `202` and the message being consumable — usually single-digit milliseconds.
 
-## Ordering
+## Ordering — there is no ordering guarantee
 
-Within one key, messages are delivered in produce order. Two caveats, both rare:
+Read that heading twice, because most brokers whisper this in a footnote: **Narad does not guarantee delivery order.** Keys give steady-state partition affinity, and a single quiet partition with one consumer will usually see arrival order — but it is emergent behavior, not a contract. Three mechanisms (all deliberate) reorder:
 
-1. **Redeliveries reorder.** If message 1 times out and comes back while message 2 was already delivered, you'll see 2 before the retry of 1. At-least-once systems all share this.
-2. **Node failures can reroute.** If a partition's node is down for a while, Narad prefers delivering your messages on a sibling partition over holding them hostage. Per-key order across that failover is not preserved. If a machine being dead can't break your ordering, nothing will.
+1. **Redelivery.** A message whose consumer crashed or timed out comes back *after* newer messages were already delivered. Every at-least-once system does this.
+2. **Dead-owner skip.** When a partition's node is marked dead, keyed produces walk forward to a live partition instead of blackholing that slice of the keyspace.
+3. **Dispatch reroute.** Messages already accepted for a partition whose owner stops answering are committed to a live sibling partition rather than held hostage.
+
+The last two are the availability trade: Narad would rather deliver your message on a different partition than make you wait for a dead machine. If your processing needs a sequence, put a sequence number in the payload and order on the consumer side — which you can do safely, because your consumer is already idempotent. Right?
 
 ## Practical tips
 
-- Send messages concurrently — Narad handles parallel produces per connection and across connections; ordering is decided by arrival time per key.
+- Send messages concurrently — Narad handles parallel produces per connection and across connections.
 - Keep payloads lean. The 1 MiB cap is a ceiling, not a target; big payloads slow every hop.
 - If your payload is already compressed or encrypted, that's fine — Narad's on-disk compression just won't shrink it further.

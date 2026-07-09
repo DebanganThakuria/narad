@@ -59,5 +59,5 @@ Delivery is therefore *never early* (the gate is checked against the owner's clo
 ## Edge behaviors
 
 - **Drop-behind**: if a cursor falls behind the parent's *retention* (child down for days), aged-out offsets are skipped and counted on an explicit loss metric — bounded, alarmed loss instead of a wedged parent. The retention floor (`≥ delay + 1h` for delay children) makes this unreachable in sane configs.
-- **Dead child-partition owner**: fan-out never reroutes to a sibling child partition (it would break per-key ordering *inside the child*); the cursor stalls on that bucket and retries until the owner returns.
+- **Dead child-partition owner**: fan-out never reroutes to a sibling child partition (unlike produce, a cursor can afford to wait — rerouting would scatter a key's records across child partitions for no availability gain); the cursor stalls on that bucket and retries until the owner returns.
 - **Lag observability**: `fanout_lag_messages` (parent HWM − cursor) is the health signal for normal children; `fanout_due_lag_seconds` (how far behind the *due frontier*) is the one for delay children — raw offset lag on a delay child is permanently ≈ rate × delay *by design*.

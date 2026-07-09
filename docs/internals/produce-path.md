@@ -40,7 +40,7 @@ The interesting engineering is in the failure handling:
 
 - **Adaptive windows.** The drain window sizes itself so each partition's commit batch stays fat (target ~64 records/partition) — commit batches are one fsync each on the owner, so batch size is the throughput lever.
 - **Skip-set, not head-of-line blocking.** If partition 7's owner is down, records for it stay uncommitted, but everything else in the window commits and is remembered in a `committedAhead` set. The checkpoint only advances past the stuck record, bounded by a lookahead horizon; nothing is recommitted meanwhile.
-- **Reroute after persistent failure.** If a destination keeps failing (3 passes) and membership agrees the owner is dead, its records are **rerouted to a live sibling partition** of the same topic. This deliberately trades per-key ordering across the failure for availability — messages flow while a node is dead, at the cost of arriving on a different partition.
+- **Reroute after persistent failure.** If a destination keeps failing (3 passes) and membership agrees the owner is dead, its records are **rerouted to a live sibling partition** of the same topic. This is the availability trade made explicit: messages flow while a node is dead, at the cost of arriving on a different partition. (It is one of the reasons Narad [does not promise ordering](../client/guarantees-and-errors.md) — the client contract is honest about it.)
 - **At-least-once seams.** The skip-set is memory-only (a crash re-commits the window: duplicates), and a commit RPC that succeeds after its client timed out also duplicates. Both are within the delivery contract.
 
 ## Stage 3 — commit: the durability boundary

@@ -38,7 +38,7 @@ Core capabilities:
 
 - durable append-only segmented storage
 - queue-style consume/ack semantics with replay support
-- parent → child topic fan-out with per-key ordering
+- parent → child topic fan-out with per-key partition affinity
 - Raft-backed control-plane metadata
 - any-pod produce ingress with async owner dispatch
 - JSON-Schema validation and per-topic tuning
@@ -691,7 +691,7 @@ Fan-out lets a **parent** topic replicate every message it receives into
 one or more **child** topics. Producing to a parent behaves exactly like
 producing to a normal topic; in addition, each attached child
 independently receives a copy, re-keyed with the child's own
-partitioner so **per-key ordering is preserved within each child**.
+partitioner so **a key's records stay grouped within each child** (steady-state affinity; Narad does not guarantee delivery order).
 This is not consumer groups — children are independent topics with
 their own partitions, offsets, retention, and consumers.
 

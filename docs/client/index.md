@@ -51,7 +51,7 @@ curl -u $AUTH -X POST \
   -d '{"order_id": "ord_123", "amount": 4999}'
 ```
 
-`202 Accepted` means: *your message is durably on disk and will be delivered.* Messages with the same key always land in the same partition, so they're consumed in the order you sent them.
+`202 Accepted` means: *your message is durably on disk and will be delivered.* The key groups related messages onto the same partition in normal operation — useful for locality and fan-out, but note that Narad does **not** guarantee ordering (see [Guarantees](guarantees-and-errors.md)).
 
 ## 3. Consume it
 
@@ -87,7 +87,7 @@ curl -u $AUTH -X POST \
 ## Where to next
 
 - Tune partitions, retention, and limits → [Topics](topics.md)
-- Keys, ordering, and batching advice → [Producing](producing.md)
+- Keys, partition routing, and batching advice → [Producing](producing.md)
 - Visibility timeouts, extend, nack, replay → [Consuming](consuming.md)
 - Copy every message to other topics, or delay them → [Fan-out & Delay](fanout-and-delay.md)
 - The fine print on every promise → [Guarantees & Errors](guarantees-and-errors.md)
