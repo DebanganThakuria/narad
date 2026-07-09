@@ -1,0 +1,69 @@
+site_name: Narad
+site_description: A small, sturdy message broker — HTTP in, at-least-once out.
+site_url: https://debanganthakuria.github.io/narad/
+repo_url: https://github.com/DebanganThakuria/narad
+repo_name: DebanganThakuria/narad
+edit_uri: edit/master/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: index.md
+  - Client Guide:
+      - Getting Started: client/index.md
+      - Topics: client/topics.md
+      - Producing: client/producing.md
+      - Consuming: client/consuming.md
+      - Fan-out & Delay: client/fanout-and-delay.md
+      - Users & Access: client/users-and-access.md
+      - Guarantees & Errors: client/guarantees-and-errors.md
+  - Internals:
+      - Architecture: internals/index.md
+      - Metastore & Raft: internals/metastore-and-raft.md
+      - Produce Path: internals/produce-path.md
+      - Storage Engine: internals/storage-engine.md
+      - Consume Path: internals/consume-path.md
+      - Fan-out Engine: internals/fanout-engine.md
+      - Cluster Lifecycle: internals/cluster-lifecycle.md
+      - Networking & Security: internals/networking-and-security.md
