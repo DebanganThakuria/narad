@@ -74,9 +74,9 @@ flowchart TB
     LB[Load balancer]
     subgraph ss["StatefulSet — Raft built into every pod"]
         direction TB
-        N0[narad-0] --- V0[("PV / EBS")]
-        N1[narad-1] --- V1[("PV / EBS")]
-        N2[narad-2] --- V2[("PV / EBS")]
+        N0[narad-0] --- V0[("PV<br/>EBS-backed")]
+        N1[narad-1] --- V1[("PV<br/>EBS-backed")]
+        N2[narad-2] --- V2[("PV<br/>EBS-backed")]
     end
     LB --> N0 & N1 & N2
 ```
