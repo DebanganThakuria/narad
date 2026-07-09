@@ -65,6 +65,24 @@ Scale your consumers by... starting more consumers. That's the whole runbook.
 
 <div class="narad-section" markdown>
 
+## Built to say yes
+
+In CAP terms, Narad's data plane picks **availability** — with durability absolute on top. As long as **one node is alive**, produces keep landing: any live node accepts your message, fsyncs it locally, and works out delivery later. A dead partition owner doesn't stop the world — new messages route around it to live nodes, automatically.
+
+```mermaid
+flowchart LR
+    P[producer] -->|produce| A["narad-0 (alive)"]
+    A -. "owner narad-1 is down" .-> X["narad-1 💀"]
+    A -->|"rerouted to a live partition"| B["narad-2 (alive)"]
+    B --> C[consumers keep consuming]
+```
+
+The price, stated plainly so you never discover it in production: **ordering is not guaranteed.** Failover reroutes messages across partitions, and redelivery replays older messages after newer ones. If your consumers need a sequence, carry one in the payload. What you get in exchange is a broker that keeps accepting and keeps delivering while machines burn around it.
+
+</div>
+
+<div class="narad-section" markdown>
+
 ## Deploys like it's nothing
 
 A load balancer, a StatefulSet, and persistent volumes. **That is the complete architecture.** No ZooKeeper. No BookKeeper. No keeper of any kind — no sidecar quorum service, no external metadata store, no six-component "getting started" diagram.
@@ -74,9 +92,9 @@ flowchart TB
     LB[Load balancer]
     subgraph ss["StatefulSet — Raft built into every pod"]
         direction TB
-        N0[narad-0] --- V0[("PV / EBS")]
-        N1[narad-1] --- V1[("PV / EBS")]
-        N2[narad-2] --- V2[("PV / EBS")]
+        N0[narad-0] --- V0[("PV<br/>EBS-backed")]
+        N1[narad-1] --- V1[("PV<br/>EBS-backed")]
+        N2[narad-2] --- V2[("PV<br/>EBS-backed")]
     end
     LB --> N0 & N1 & N2
 ```
@@ -97,7 +115,7 @@ helm install narad ./charts/narad --set replicaCount=3
 
 - :material-shield-check: **Durable before acknowledged**
 
-    A `202` means your message is fsynced to disk — not buffered, not "probably." Crash a millisecond later; the message survives. Delivery is at-least-once, ordered per key.
+    A `202` means your message is fsynced to disk — not buffered, not "probably." Crash a millisecond later; the message survives. Delivery is at-least-once — durability is never traded for anything.
 
 - :material-call-split: **Fan-out, built in**
 

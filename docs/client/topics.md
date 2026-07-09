@@ -1,6 +1,6 @@
 # Topics
 
-A topic is a named stream of messages, split into **partitions**. Partitions are how Narad scales and how it keeps your messages ordered: all messages with the same key live in one partition, in the order they arrived.
+A topic is a named stream of messages, split into **partitions**. Partitions are how Narad scales: they spread storage and consumption across the cluster, and keyed messages stick to one partition in normal operation (locality, not an ordering guarantee — see [Guarantees](guarantees-and-errors.md)).
 
 ```mermaid
 flowchart TB
@@ -31,14 +31,14 @@ curl -u $AUTH -X POST $NARAD/v1/topics \
 | Field | Meaning | Default | Rules |
 |---|---|---|---|
 | `name` | Topic name | — | required, unique |
-| `partitions` | Parallelism + ordering domains | 3 | at least 3, at most 108 |
+| `partitions` | Units of parallelism and placement | 3 | at least 3, at most 108 |
 | `retention_ms` | How long messages are kept on disk | operator default | 0 = keep forever; otherwise at least 1 hour |
 | `visibility_timeout_ms` | How long a consumed message stays hidden before redelivery | 30000 | your processing time budget |
 | `max_in_flight_per_partition` | Max unacked messages handed out per partition | 1024 | backpressure knob |
 | `max_acked_ahead_per_partition` | Max out-of-order acks held per partition | 1024 | see [Consuming](consuming.md) |
 | `schema` | Optional JSON Schema; payloads are validated on produce | none | rejected payloads get `400` |
 
-**Choosing partition count.** More partitions = more parallel consumers and more spread across the cluster, but ordering only holds *within* a partition. Pick roughly the number of consumers you expect to run in parallel. Partition count is fixed after creation, so leave headroom.
+**Choosing partition count.** More partitions = more parallel consumers and more spread across the cluster. Pick roughly the number of consumers you expect to run in parallel. Partition count is fixed after creation, so leave headroom.
 
 **Choosing retention.** Messages are deleted `retention_ms` after they were written — *whether or not they were consumed*. Retention is a safety net for replay and slow consumers, not a substitute for acking promptly.
 

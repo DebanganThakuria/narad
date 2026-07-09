@@ -22,12 +22,34 @@ flowchart LR
 - **Narad keeps exactly one copy of each partition** (plus the transit copy above). There is no replication. If a node's *disk* is permanently destroyed, the messages on that disk's partitions are gone. Process crashes, restarts, and node reboots lose nothing — this has been chaos-tested extensively — but disk loss is unprotected by design. Run it on storage you trust (cloud persistent volumes, RAID) and treat Narad's durability as "as durable as the volume under it."
 - Cluster **metadata** (topics, users, assignments) is Raft-replicated across all nodes and survives any minority of disks failing.
 
-## Ordering
+## Ordering: not guaranteed
 
-- **Within a key, within normal operation**: delivery follows produce order.
-- Redelivery breaks local order (an old message can reappear after newer ones were consumed).
-- Extended node failure can reroute a key's messages to a sibling partition, breaking cross-failure ordering — availability is chosen over strict order.
-- Across different keys: no ordering promise at all.
+Narad is explicit about this where other brokers are shy: **there is no delivery-order guarantee.** In steady state, keyed messages stick to one partition and tend to arrive in produce order — but three deliberate mechanisms reorder, and your design must assume them:
+
+- **Redelivery**: a crashed or slow consumer's message reappears after newer ones were consumed.
+- **Dead-owner skip**: while a node is marked dead, keyed produces walk forward to a live partition — the key-to-partition mapping itself moves.
+- **Dispatch reroute**: accepted messages destined for an unreachable owner are committed to a live sibling partition rather than delayed indefinitely.
+
+Need a sequence? Carry it in the payload and order on your side. Need to collapse duplicates and reorders at once? Make handlers idempotent keyed on a payload ID — which the at-least-once contract requires anyway.
+
+## Availability: the deliberate trade
+
+Ordering was not lost by accident — it was spent on availability. In CAP terms Narad's **data plane is AP**:
+
+- **Produce is available while any node lives.** Any live node accepts a produce with a local fsync — no leader election, no quorum, no coordination on the hot path. Delivery is worked out afterwards and routed around dead machines.
+- **Consume is available for every partition whose owner is alive** — and since new traffic reroutes to live owners, fresh messages stay consumable even mid-outage. Messages already stored on a dead node wait for it to return (their partition answers `503` meanwhile).
+- **The control plane is the one consistent piece**: creating/altering topics and managing users go through Raft and need a quorum of nodes. Your *data* flows at one node; *administration* waits for a majority.
+
+```mermaid
+flowchart LR
+    subgraph ap["Data plane — available (AP)"]
+        PRO[produce: any live node]
+        CON[consume: live owners]
+    end
+    subgraph cp["Control plane — consistent (CP)"]
+        META["topics / users / membership<br/>need a Raft quorum"]
+    end
+```
 
 ## Timing
 

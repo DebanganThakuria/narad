@@ -31,7 +31,7 @@ curl -u $AUTH -X POST $NARAD/v1/topics/orders/children \
 Rules to know:
 
 - Fan-out starts **from the moment of attach**. Messages already in the parent are not backfilled.
-- Copies preserve the message **key**, so per-key ordering carries into each child.
+- Copies preserve the message **key**, so related messages stay grouped in each child.
 - A child belongs to one parent; a parent can have up to 108 children; chains (child of a child) are not allowed.
 - If the parent enforces a schema, children must be schema-compatible — attach fails with `409` otherwise.
 - Detach and re-attach = a fresh start from the parent's tail, never a resume or replay.
