@@ -1,5 +1,7 @@
 # Narad
 
+> 📚 **Documentation:** [debanganthakuria.github.io/narad](https://debanganthakuria.github.io/narad/) — Client Guide and Internals, with diagrams.
+
 [![CI](https://github.com/DebanganThakuria/narad/actions/workflows/ci.yml/badge.svg)](https://github.com/DebanganThakuria/narad/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/DebanganThakuria/narad)](./go.mod)
