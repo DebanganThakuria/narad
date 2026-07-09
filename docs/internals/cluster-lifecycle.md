@@ -22,7 +22,7 @@ sequenceDiagram
     L->>L: raft AddVoter(narad-3)
     L-->>N: 200
     L->>N: AppendEntries (replication begins)
-    Note over N: sees leader → admitted;<br/>catches up FSM → /readyz = true
+    Note over N: sees leader → admitted,<br/>catches up FSM → /readyz = true
 ```
 
 The join loop walks configured peers every 2s until its own Raft sees a leader (proof of admission). Readiness is held until then, so an unadmitted node never receives traffic — the failure mode where a fresh node serves an empty metastore behind the load balancer is structurally impossible. `AddVoter` is idempotent; joiner restarts and lost replies are safe. Scaling out is literally `replicaCount: 5` in Helm.
