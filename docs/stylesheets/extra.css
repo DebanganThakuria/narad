@@ -1,0 +1,159 @@
+/* ── Narad brand: deep navy + veena gold ─────────────────────────── */
+:root {
+  --narad-navy: #010816;      /* sampled from the logo lockup */
+  --narad-navy-2: #0c142c;
+  --narad-navy-3: #131c3a;
+  --narad-gold: #c9963f;
+  --narad-gold-bright: #e2b163;
+  --narad-ink: #e9ecf5;
+}
+
+/* Typography: a little more air, a little less default */
+body {
+  -webkit-font-smoothing: antialiased;
+}
+.md-typeset h1, .md-typeset h2 {
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+.md-typeset h1 {
+  color: var(--md-default-fg-color);
+}
+
+/* Header: brand navy with a whisper of gold underline */
+.md-header, .md-tabs {
+  background: linear-gradient(180deg, #010816 0%, #0a1128 100%);
+}
+.md-header {
+  border-bottom: 1px solid rgba(201, 150, 63, 0.28);
+}
+.md-header__button.md-logo img {
+  border-radius: 50%;
+}
+
+/* ── Dark scheme tuned to the brand ──────────────────────────────── */
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: #060c1e;
+  --md-default-fg-color: rgba(233, 236, 245, 0.88);
+  --md-default-fg-color--light: rgba(233, 236, 245, 0.62);
+  --md-default-fg-color--lighter: rgba(233, 236, 245, 0.36);
+  --md-typeset-a-color: var(--narad-gold-bright);
+  --md-accent-fg-color: #f0c67e;
+  --md-primary-fg-color: #010816;
+  --md-code-bg-color: #0e1631;
+  --md-code-fg-color: #dfe5f3;
+  --md-typeset-table-color: rgba(233, 236, 245, 0.10);
+  --md-footer-bg-color: #010816;
+  --md-footer-bg-color--dark: #01060f;
+}
+[data-md-color-scheme="slate"] .md-typeset code {
+  border: 1px solid rgba(201, 150, 63, 0.12);
+}
+
+/* ── Light scheme: ivory paper, navy text, gold accents ──────────── */
+[data-md-color-scheme="default"] {
+  --md-default-bg-color: #fcfbf8;
+  --md-typeset-a-color: #a1721f;
+  --md-accent-fg-color: #c9963f;
+  --md-primary-fg-color: #010816;
+  --md-primary-fg-color--light: #2a3452;
+  --md-code-bg-color: #f4f1ea;
+}
+
+/* ── Landing hero ─────────────────────────────────────────────────── */
+.narad-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 1.2rem 0 2.2rem;
+}
+.narad-hero img.narad-hero-logo {
+  width: min(380px, 78vw);
+  border-radius: 28px;
+  box-shadow: 0 24px 80px rgba(1, 8, 22, 0.45), 0 0 0 1px rgba(201, 150, 63, 0.25);
+}
+[data-md-color-scheme="slate"] .narad-hero img.narad-hero-logo {
+  box-shadow: 0 0 90px rgba(201, 150, 63, 0.16), 0 0 0 1px rgba(201, 150, 63, 0.22);
+}
+.narad-hero .narad-tagline {
+  margin: 1.4rem 0 0.2rem;
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  background: linear-gradient(90deg, var(--narad-gold) 0%, var(--narad-gold-bright) 50%, var(--narad-gold) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.narad-hero .narad-sub {
+  max-width: 34rem;
+  font-size: 0.85rem;
+  color: var(--md-default-fg-color--light);
+}
+.narad-hero .md-button {
+  margin: 0.25rem 0.35rem;
+  border-radius: 999px;
+  padding: 0.55em 1.6em;
+}
+.narad-hero .md-button--primary {
+  background: linear-gradient(135deg, #c9963f, #e2b163);
+  border-color: transparent;
+  color: #0b1023;
+  font-weight: 700;
+}
+.narad-hero .md-button--primary:hover {
+  background: linear-gradient(135deg, #d8a54c, #efc27a);
+  color: #01060f;
+}
+
+/* ── Cards: lift on hover, gold hairline ─────────────────────────── */
+.md-typeset .grid.cards > ul > li,
+.md-typeset .grid > .card {
+  border-radius: 16px;
+  border: 1px solid rgba(201, 150, 63, 0.22);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+.md-typeset .grid.cards > ul > li:hover {
+  transform: translateY(-3px);
+  border-color: rgba(201, 150, 63, 0.55);
+  box-shadow: 0 12px 32px rgba(1, 8, 22, 0.25);
+}
+
+/* ── Tables and admonitions: soften the chrome ───────────────────── */
+.md-typeset table:not([class]) {
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--md-typeset-table-color);
+}
+.md-typeset table:not([class]) th {
+  background: rgba(201, 150, 63, 0.10);
+}
+.md-typeset .admonition, .md-typeset details {
+  border-radius: 12px;
+}
+
+/* Mermaid diagrams breathe a little */
+.md-typeset .mermaid {
+  text-align: center;
+}
+
+/* Hide the auto-generated page title on the hero landing page */
+.md-content article:has(.narad-hero) > h1:first-child {
+  display: none;
+}
+
+/* Secondary hero button must read on navy */
+.narad-hero .md-button:not(.md-button--primary) {
+  border-color: rgba(201, 150, 63, 0.55);
+  color: var(--narad-gold-bright);
+}
+.narad-hero .md-button:not(.md-button--primary):hover {
+  background: rgba(201, 150, 63, 0.12);
+  border-color: var(--narad-gold-bright);
+  color: #f0c67e;
+}
+[data-md-color-scheme="default"] .narad-hero .md-button:not(.md-button--primary) {
+  color: #8a6420;
+  border-color: rgba(138, 100, 32, 0.6);
+}
