@@ -1,16 +1,21 @@
-# Narad
+---
+hide:
+  - navigation
+  - toc
+---
 
-**Narad is a small, sturdy message broker.** You send it messages over plain HTTP, and it makes sure the right consumers receive them — at least once, in order per key, even when machines crash.
+<div class="narad-hero" markdown>
 
-It runs as a cluster of identical nodes with no external dependencies: no ZooKeeper, no Kafka, no cloud services. Just Go binaries, disks, and Raft.
+![Narad — durable messages, timeless connections](assets/narad-logo.png){ .narad-hero-logo }
 
-```mermaid
-flowchart LR
-    P[Your producers] -->|"POST /produce"| N[(Narad cluster)]
-    N -->|"GET /consume"| C[Your consumers]
-    N -->|fan-out| N2[Child topics]
-    N -->|delayed delivery| N3[Delay topics]
-```
+<p class="narad-tagline">Durable messages. Timeless connections.</p>
+
+<p class="narad-sub">Narad is a small, sturdy message broker. You send it messages over plain HTTP, and it makes sure the right consumers receive them — at least once, in order per key, even when machines crash. No ZooKeeper, no Kafka, no cloud dependencies: just Go binaries, disks, and Raft.</p>
+
+[Get started in 5 minutes](client/index.md){ .md-button .md-button--primary }
+[Read the internals](internals/index.md){ .md-button }
+
+</div>
 
 ## Two ways to read these docs
 
