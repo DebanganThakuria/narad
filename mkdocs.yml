@@ -73,6 +73,7 @@ nav:
       - Guarantees & Errors: client/guarantees-and-errors.md
   - Operate:
       - Deployment: operate/index.md
+      - Helm Chart Reference: operate/helm-chart.md
       - Configuration Reference: operate/configuration.md
       - Monitoring: operate/monitoring.md
       - Scaling & Recovery: operate/scaling-and-recovery.md

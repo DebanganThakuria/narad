@@ -53,7 +53,7 @@ kubectl get pods -n narad -w
 # all pods Ready = Raft has a leader, replicas caught up, root admin seeded
 ```
 
-That's the install. Really.
+That's the install. Really. (Every knob: [Helm Chart Reference](helm-chart.md).)
 
 ## Ports and probes
 
