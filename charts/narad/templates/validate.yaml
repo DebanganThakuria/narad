@@ -1,0 +1,11 @@
+{{- $replicas := int .Values.replicaCount -}}
+{{- $initial := int (default 3 .Values.initialClusterSize) -}}
+{{- if lt $initial 1 -}}
+{{- fail "initialClusterSize must be at least 1." -}}
+{{- end -}}
+{{- if lt $replicas $initial -}}
+{{- fail (printf "replicaCount (%d) must be >= initialClusterSize (%d): the initial members bootstrapped the Raft cluster and scale-down below them is not supported." $replicas $initial) -}}
+{{- end -}}
+{{- if eq (mod $initial 2) 0 -}}
+{{- fail "initialClusterSize must be odd (Raft quorum)." -}}
+{{- end -}}

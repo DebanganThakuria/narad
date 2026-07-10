@@ -1,0 +1,31 @@
+{{- if .Values.traefik.enabled -}}
+apiVersion: {{ .Values.traefik.apiVersion }}
+kind: IngressRoute
+metadata:
+  name: {{ include "narad.fullname" . }}
+  labels:
+    {{- include "narad.labels" . | nindent 4 }}
+    {{- with .Values.traefik.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    kubernetes.io/ingress.class: {{ .Values.traefik.ingressClass | quote }}
+    {{- with .Values.traefik.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  entryPoints:
+    {{- toYaml .Values.traefik.entryPoints | nindent 4 }}
+  routes:
+    - kind: Rule
+      # Exclude blockedPathPrefixes (e.g. /metrics) from the public route;
+      # Prometheus scrapes those in-cluster via the ServiceMonitor.
+      match: Host(`{{ .Values.traefik.host }}`){{- range .Values.traefik.blockedPathPrefixes }} && !PathPrefix(`{{ . }}`){{- end }}
+      services:
+        - name: {{ include "narad.fullname" . }}
+          port: {{ .Values.service.ports.api }}
+      {{- with .Values.traefik.middlewares }}
+      middlewares:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

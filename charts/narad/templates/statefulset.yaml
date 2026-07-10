@@ -1,0 +1,225 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "narad.fullname" . }}
+  labels:
+    {{- include "narad.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "narad.headlessServiceName" . }}
+  replicas: {{ .Values.replicaCount }}
+  podManagementPolicy: {{ .Values.podManagementPolicy }}
+  updateStrategy:
+    {{- toYaml .Values.updateStrategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "narad.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "narad.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- if .Values.metrics.enabled }}
+        prometheus.io/path: {{ .Values.metrics.path | quote }}
+        prometheus.io/port: {{ .Values.metrics.port | quote }}
+        prometheus.io/scrape: "true"
+        {{- with .Values.metrics.annotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "narad.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: narad
+          image: {{ include "narad.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - serve
+            - --addr=:{{ .Values.service.ports.api }}
+            - --cluster-port={{ .Values.service.ports.cluster }}
+            - --node-id=$(POD_NAME)
+            - --data-dir=/var/lib/narad
+            {{- if .Values.narad.config }}
+            - --config=/etc/narad/narad.json
+            {{- end }}
+          ports:
+            - name: api
+              containerPort: {{ .Values.service.ports.api }}
+              protocol: TCP
+            - name: peer-udp
+              containerPort: {{ .Values.service.ports.api }}
+              protocol: UDP
+            - name: cluster
+              containerPort: {{ .Values.service.ports.cluster }}
+              protocol: TCP
+            {{- if .Values.narad.pprof.enabled }}
+            - name: pprof
+              containerPort: {{ .Values.service.ports.pprof }}
+              protocol: TCP
+            {{- end }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NARAD_CLUSTER_PEERS
+              value: {{ include "narad.clusterPeers" . | quote }}
+            - name: NARAD_CLUSTER_INITIAL_MEMBERS
+              value: {{ include "narad.initialMembers" . | quote }}
+            - name: NARAD_LOG_LEVEL
+              value: {{ .Values.narad.logLevel | quote }}
+            - name: NARAD_LOG_FORMAT
+              value: {{ .Values.narad.logFormat | quote }}
+            - name: NARAD_HTTP_MAX_CONSUME_WAIT
+              value: {{ .Values.narad.maxConsumeWait | quote }}
+            - name: NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS
+              value: {{ .Values.narad.defaultRetentionAgeMs | int64 | quote }}
+            - name: NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS
+              value: {{ .Values.narad.defaultVisibilityTimeoutMs | int64 | quote }}
+            - name: NARAD_TOPIC_DEFAULT_PARTITIONS
+              value: {{ .Values.narad.defaultPartitions | int | quote }}
+            - name: NARAD_TOPIC_MAX_PARTITIONS
+              value: {{ .Values.narad.maxPartitions | int | quote }}
+            - name: NARAD_TOPIC_DEFAULT_MAX_IN_FLIGHT_PER_PARTITION
+              value: {{ .Values.narad.defaultMaxInFlightPerPartition | int64 | quote }}
+            - name: NARAD_TOPIC_DEFAULT_MAX_ACKED_AHEAD_PER_PARTITION
+              value: {{ .Values.narad.defaultMaxAckedAheadPerPartition | int64 | quote }}
+            {{- if .Values.narad.pprof.enabled }}
+            - name: NARAD_HTTP_PPROF_ADDR
+              value: {{ printf ":%v" .Values.service.ports.pprof | quote }}
+            {{- end }}
+            - name: NARAD_SECURITY_ENABLED
+              value: {{ .Values.security.enabled | quote }}
+            {{- if .Values.security.enabled }}
+            - name: NARAD_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.security.existingSecret | default (printf "%s-security" (include "narad.fullname" .)) }}
+                  key: {{ .Values.security.adminPasswordKey }}
+                  optional: true
+            - name: NARAD_CLUSTER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.security.existingSecret | default (printf "%s-security" (include "narad.fullname" .)) }}
+                  key: {{ .Values.security.clusterSecretKey }}
+            {{- if .Values.security.clusterTLS.enabled }}
+            - name: NARAD_CLUSTER_TLS_CERT_FILE
+              value: {{ printf "%s/%s" .Values.security.clusterTLS.mountPath .Values.security.clusterTLS.certKey | quote }}
+            - name: NARAD_CLUSTER_TLS_KEY_FILE
+              value: {{ printf "%s/%s" .Values.security.clusterTLS.mountPath .Values.security.clusterTLS.keyKey | quote }}
+            - name: NARAD_CLUSTER_TLS_CA_FILE
+              value: {{ printf "%s/%s" .Values.security.clusterTLS.mountPath .Values.security.clusterTLS.caKey | quote }}
+            {{- end }}
+            {{- end }}
+            {{- range $k, $v := .Values.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: api
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: api
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: api
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/narad
+            {{- if .Values.narad.config }}
+            - name: config
+              mountPath: /etc/narad
+              readOnly: true
+            {{- end }}
+            {{- if .Values.security.clusterTLS.enabled }}
+            - name: cluster-tls
+              mountPath: {{ .Values.security.clusterTLS.mountPath }}
+              readOnly: true
+            {{- end }}
+      {{- if or (not .Values.persistence.enabled) .Values.narad.config .Values.security.clusterTLS.enabled }}
+      volumes:
+        {{- if not .Values.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- if .Values.narad.config }}
+        - name: config
+          configMap:
+            name: {{ include "narad.fullname" . }}-config
+        {{- end }}
+        {{- if .Values.security.clusterTLS.enabled }}
+        - name: cluster-tls
+          secret:
+            secretName: {{ .Values.security.clusterTLS.secretName }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "narad.labels" . | nindent 10 }}
+        {{- with .Values.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- if .Values.persistence.storageClassName }}
+        storageClassName: {{ .Values.persistence.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}
+  {{- end }}

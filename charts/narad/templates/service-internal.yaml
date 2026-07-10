@@ -1,0 +1,22 @@
+{{- if .Values.service.internal.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "narad.fullname" . }}
+  labels:
+    {{- include "narad.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  {{- with .Values.service.internal.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.internal.type }}
+  selector:
+    {{- include "narad.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: api
+      port: {{ .Values.service.ports.api }}
+      targetPort: api
+      protocol: TCP
+{{- end }}

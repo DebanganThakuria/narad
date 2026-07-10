@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "narad.headlessServiceName" . }}
+  labels:
+    {{- include "narad.labels" . | nindent 4 }}
+    app.kubernetes.io/component: headless
+  {{- with .Values.service.headless.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: {{ .Values.service.headless.publishNotReadyAddresses }}
+  selector:
+    {{- include "narad.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: peer-udp
+      port: {{ .Values.service.ports.api }}
+      targetPort: peer-udp
+      protocol: UDP
+    - name: cluster
+      port: {{ .Values.service.ports.cluster }}
+      targetPort: cluster
+      protocol: TCP

@@ -1,0 +1,204 @@
+replicaCount: 3
+
+# Number of pods that formed the ORIGINAL cluster (they may bootstrap a
+# brand-new Raft cluster; everyone else joins the existing one via the
+# leader). Set once at first install and never change it — scaling up is
+# done by raising replicaCount only.
+initialClusterSize: 3
+
+image:
+  repository: ghcr.io/debanganthakuria/narad
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+clusterDomain: cluster.local
+
+# Extra labels applied to pods (NOT to the immutable StatefulSet
+# selector). Use for platform conventions, e.g. cost-attribution labels.
+podLabels: {}
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+  automountServiceAccountToken: false
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false
+  runAsGroup: 10001
+  runAsNonRoot: true
+  runAsUser: 10001
+
+service:
+  ports:
+    api: 7942
+    cluster: 7943
+    pprof: 6060
+
+  headless:
+    annotations: {}
+    publishNotReadyAddresses: true
+
+  internal:
+    enabled: true
+    type: ClusterIP
+    annotations: {}
+
+  loadBalancer:
+    enabled: false
+    type: LoadBalancer
+    annotations: {}
+    # Example for an internal AWS NLB on EKS:
+    # annotations:
+    #   service.beta.kubernetes.io/aws-load-balancer-type: external
+    #   service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    #   service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    externalTrafficPolicy: Cluster
+    loadBalancerSourceRanges: []
+
+narad:
+  logLevel: info
+  logFormat: json
+
+  # Keep the default chart retention small for cluster soak tests. Topics can
+  # still override retention during creation.
+  defaultRetentionAgeMs: 43200000
+  defaultVisibilityTimeoutMs: 30000
+  defaultPartitions: 3
+  maxPartitions: 108
+  defaultMaxInFlightPerPartition: 1024
+  defaultMaxAckedAheadPerPartition: 1024
+  maxConsumeWait: 10s
+
+  pprof:
+    enabled: false
+
+  # Optional engine config rendered to a JSON file and passed via --config.
+  # Use for settings not exposed as env vars (e.g. storage codec/compression).
+  # Empty = no config file. Example:
+  #   config:
+  #     storage: { codec: zstd, compression_level: fastest }
+  config: {}
+
+# Authentication and authorization (RBAC).
+security:
+  # When true, every HTTP API call requires Basic auth and RBAC applies,
+  # and node-to-node cluster RPC requires the shared secret. TLS is
+  # assumed to terminate at the ingress in front of Narad.
+  enabled: true
+
+  # Secrets are read from a Kubernetes Secret, never from values.yaml.
+  # By default the chart expects a Secret named "<release>-security" with
+  # the keys below. Point existingSecret at your own Secret to override.
+  #   kubectl create secret generic narad-security \
+  #     --from-literal=cluster-secret="$(openssl rand -base64 32)" \
+  #     --from-literal=admin-password="$(openssl rand -base64 24)"
+  # admin-password is optional: if the key is absent, the seeding node
+  # generates a random password and logs it once at first boot.
+  existingSecret: ""
+  adminPasswordKey: admin-password
+  clusterSecretKey: cluster-secret
+
+  # Mutual TLS on the Raft metadata transport (which replicates user
+  # password hashes and grants). When enabled, mount a Secret holding a
+  # cluster CA + a node cert/key whose SAN includes "narad-cluster.local".
+  #   openssl ... -addext "subjectAltName=DNS:narad-cluster.local"
+  # All nodes may share one cluster-membership cert. NOTE: enabling this on
+  # a running cluster is a breaking transport change — plaintext and mTLS
+  # nodes cannot talk, so consensus writes briefly pause mid-rollout until
+  # every pod is updated.
+  clusterTLS:
+    enabled: false
+    secretName: narad-cluster-tls
+    mountPath: /etc/narad/cluster-tls
+    certKey: tls.crt
+    keyKey: tls.key
+    caKey: ca.crt
+
+metrics:
+  enabled: true
+  path: /metrics
+  port: "7942"
+  annotations: {}
+
+persistence:
+  enabled: true
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+  storageClassName: ""
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits: {}
+
+startupProbe:
+  failureThreshold: 30
+  periodSeconds: 2
+  timeoutSeconds: 1
+
+livenessProbe:
+  failureThreshold: 3
+  periodSeconds: 10
+  timeoutSeconds: 1
+
+readinessProbe:
+  failureThreshold: 3
+  periodSeconds: 5
+  timeoutSeconds: 1
+
+podManagementPolicy: Parallel
+updateStrategy:
+  type: RollingUpdate
+terminationGracePeriodSeconds: 30
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+serviceMonitor:
+  enabled: false
+  labels: {}
+  interval: 15s
+  scrapeTimeout: 10s
+
+traefik:
+  enabled: false
+  apiVersion: traefik.containo.us/v1alpha1
+  ingressClass: traefik
+  entryPoints:
+    - http
+  host: narad.example.com
+  annotations: {}
+  labels: {}
+  middlewares: []
+  # Paths excluded from the PUBLIC ingress route. /metrics is auth-exempt
+  # (for in-cluster Prometheus, which scrapes pods directly via the
+  # ServiceMonitor) and leaks topic names + traffic volumes, so it must
+  # not be reachable from the public host. Add /healthz and /readyz here
+  # too if external probes don't need them.
+  blockedPathPrefixes:
+    - /metrics
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []

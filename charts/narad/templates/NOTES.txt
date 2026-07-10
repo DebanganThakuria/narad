@@ -1,0 +1,31 @@
+Narad has been installed.
+
+Internal API service:
+  http://{{ include "narad.fullname" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}:{{ .Values.service.ports.api }}
+
+StatefulSet pods:
+{{- range $i := until (int .Values.replicaCount) }}
+  {{ include "narad.fullname" $ }}-{{ $i }}.{{ include "narad.headlessServiceName" $ }}.{{ $.Release.Namespace }}.svc.{{ $.Values.clusterDomain }}:{{ $.Values.service.ports.api }}
+{{- end }}
+
+Check rollout:
+  kubectl rollout status statefulset/{{ include "narad.fullname" . }} -n {{ .Release.Namespace }}
+  kubectl get pods,svc,pvc -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+Port-forward the API:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "narad.fullname" . }} 7942:{{ .Values.service.ports.api }}
+
+Then verify:
+  curl http://127.0.0.1:7942/healthz
+  curl http://127.0.0.1:7942/readyz
+  curl http://127.0.0.1:7942/metrics
+
+{{- if .Values.service.loadBalancer.enabled }}
+
+LoadBalancer service:
+  {{ printf "%s-lb" (include "narad.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- else }}
+
+LoadBalancer is disabled. Enable it with:
+  --set service.loadBalancer.enabled=true
+{{- end }}
