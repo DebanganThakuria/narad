@@ -17,8 +17,12 @@ fullnameOverride: ""
 
 clusterDomain: cluster.local
 
-# Extra labels applied to pods (NOT to the immutable StatefulSet
-# selector). Use for platform conventions, e.g. cost-attribution labels.
+# Extra labels applied to EVERY resource's metadata (never the immutable
+# StatefulSet selector). The escape hatch for cluster admission policies
+# that demand a site-specific label on everything.
+commonLabels: {}
+
+# Extra labels applied to pods only.
 podLabels: {}
 
 serviceAccount:

@@ -34,6 +34,7 @@ persistence:
   storageClassName: ""         # your EBS/PD/whatever class
 
 # Pod placement & platform conventions
+commonLabels: {}               # extra labels on EVERY resource's metadata (admission policies)
 podLabels: {}                  # extra POD labels (never touches the immutable selector)
 podAnnotations: {}
 resources: {}
@@ -67,14 +68,20 @@ traefik:
   blockedPathPrefixes: ["/metrics"]
 ```
 
-### `podLabels` — the platform-convention escape hatch
+### `commonLabels` & `podLabels` — the platform-convention escape hatches
 
-Some platforms want their own labels on every pod (cost attribution, routing, team ownership — every company has one of these). `podLabels` applies them to the **pod template only**, never to the StatefulSet selector — selectors are immutable in Kubernetes, and a chart that bakes site-specific labels into a selector has decided for you that you can never change them. Ask us how we know.
+Some platforms want their own labels on everything — cost attribution, team routing, an admission webhook that rejects any Service without the sacred label (every company has one of these; ours does). Two values cover it, both supplied at deploy time so site-specific conventions stay out of the chart:
+
+- **`commonLabels`** goes on every resource's **metadata** — this is what satisfies label-enforcing admission policies (Kyverno, Gatekeeper).
+- **`podLabels`** goes on the **pod template** for label-based pod selection/attribution.
 
 ```bash
 helm upgrade narad ./charts/narad --reuse-values \
+  --set commonLabels.my_platform_label=my-team \
   --set podLabels.my_platform_label=my-team
 ```
+
+Neither ever touches two places, by hard-won design: the **StatefulSet selector** (immutable — a chart that bakes site labels into it has decided you may never change them) and the **volumeClaimTemplates** (also frozen spec — an operator label added a month later must not brick every future `helm upgrade`). The chart keeps both on a fixed, boring label set. Ask us how we know. Actually don't; it's documented in the commit history.
 
 ### The Traefik route and the `/metrics` hole
 
