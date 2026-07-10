@@ -46,3 +46,33 @@ Two transport-level guards:
 ## Trust model, honestly stated
 
 Narad assumes the *cluster network* (node RPC + Raft ports) is a private, operator-controlled network — the shared secret and mTLS are guards, not a substitute for network policy. The client plane is hardened for untrusted callers: authenticated, authorized, size-capped (1 MiB bodies), and strict about malformed input.
+## The node RPC wire format
+
+Every request is a one-byte **opcode** followed by length-prefixed fields (strings/bytes get a 4-byte big-endian length; integers are big-endian). Responses carry an HTTP-vocabulary status, a content type, and a body — so errors translate 1:1 at the HTTP boundary with zero mapping tables at call sites.
+
+The full opcode registry (`internal/protocol/node/types.go` — values are stable on the wire, appended only):
+
+| Op | Name | Op | Name |
+|---|---|---|---|
+| 1 | Produce | 11 | CommitProduceBatch |
+| 2 | Consume | 12 | CreateUser |
+| 3 | Ack | 13 | UpdateUser |
+| 4 | CreateTopic | 14 | DeleteUser |
+| 5 | AlterTopic | 15 | AttachChild |
+| 6 | DeleteTopic | 16 | DetachChild |
+| 7 | PurgeTopic | 17 | FanoutCursors |
+| 8 | TopicPartitionStats | 18 | ExtendAck |
+| 9 | RegisterMember | 19 | Nack |
+| 10 | CommitProduce | 20 | GetTopic · 21 JoinCluster |
+
+An unknown opcode gets a clean 400 — which is also the mixed-version story during rolling upgrades: an old node politely declines ops it hasn't heard of, and the caller retries elsewhere or later.
+
+## Timeouts worth knowing
+
+| Path | Timeout |
+|---|---|
+| Default peer RPC reply | 5s |
+| Produce/fan-out commit RPC | 30s (a slow fsync is not a dead node) |
+| Leader-confirmation RPCs | 5s |
+| Cluster join attempt cadence | one sweep of the peer list every 2s |
+| Forwarded topic create | 75s (the leader may lawfully park it behind its startup create gate) |

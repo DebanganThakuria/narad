@@ -61,3 +61,26 @@ If a record's topic was **deleted** while it sat undispatched, committing is imp
 ## WAL hygiene
 
 The checkpoint compacts fully-dispatched segments; a fully-dispatched *active* segment past 1 MiB is rotated so it can be reclaimed too. Steady-state WAL disk on an idle-ish node is under a megabyte, self-maintained.
+## The numbers (compiled-in, grep-able)
+
+| Constant | Value | Where |
+|---|---|---|
+| Ingress WAL sync backstop | 10ms (`ingress_wal_sync_interval_ms`) | group commit fires on every append; this bounds a missed wakeup |
+| Dispatcher poll when idle | 10ms | `defaultProduceDispatchInterval` |
+| Drain window base / hard cap | 4,096 / 65,536 records | `produceDispatchBaseWindow`, `defaultProduceDispatchBatchSize` |
+| Per-partition batch target | 64 records | `produceDispatchTargetPerPartition` — one fsync per batch, so this is the throughput lever |
+| Lookahead past a stuck record | 16 windows | `produceDispatchLookaheadWindows` — bounds skip-set memory too |
+| Reroute after | 3 consecutive failed passes | `produceDispatchRerouteAfterPasses` (immediately if membership already says the owner is dead) |
+| Commit RPC timeout / failure backoff | 30s / 1s | generous on purpose: a commit that succeeds after the client gave up = duplicates |
+| Commit fan-out concurrency | 16 buckets in parallel | `defaultProduceDispatchCommitFanout` |
+
+## Group commit, precisely
+
+`wal.Log.Append` doesn't fsync per message — it stages the record into a shared buffer, wakes the sync loop, and **blocks on the batch's completion channel**. Every producer that arrived in the same instant shares one write+fsync (`syncBatch`); under load the amortized fsync cost per message approaches zero, while each caller still only returns after *its* bytes are durable. One subtlety worth knowing: once a record is staged, `Append` ignores context cancellation and waits for the true sync outcome — reporting failure for a record that actually became durable would make a well-behaved retrying client produce duplicates for no reason.
+
+## Two produce paths, one honest difference
+
+There are two partition-pickers in `broker/messaging`, and the difference is deliberate:
+
+- **`resolveAcceptedProducePartition`** (the WAL-first accept you use): pure hash, no liveness check — the accept must stay O(local fsync), and the *dispatcher* deals with dead owners later.
+- **`pickProducePartition`** (`routing.go`, the synchronous internal path): walks forward past partitions whose owner is dead per membership, "so a dead node doesn't blackhole its share of the keyspace" — that's a direct quote from the source, and it's one of the documented reasons [ordering is not a contract](../client/guarantees-and-errors.md).
