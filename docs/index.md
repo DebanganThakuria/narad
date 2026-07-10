@@ -109,6 +109,37 @@ helm install narad ./charts/narad --set replicaCount=3
 
 <div class="narad-section" markdown>
 
+## Simple is the feature
+
+Here is the **entire client API**. Not highlights — the whole thing:
+
+```text
+POST   /v1/topics                       create a topic
+GET    /v1/topics · /v1/topics/{t}      list · inspect
+PATCH  /v1/topics/{t}                   tune retention & limits
+DELETE /v1/topics/{t}                   delete
+
+POST   /v1/topics/{t}/produce           send   (body = your message)
+GET    /v1/topics/{t}/consume           receive (long-poll with ?wait=)
+POST   /v1/topics/{t}/ack               settle · extend · nack
+
+POST   /v1/topics/{p}/children          attach fan-out / delay child
+GET    /v1/topics/{p}/children          list children + lag
+DELETE /v1/topics/{p}/children/{c}      detach
+
+POST/GET/DELETE /v1/users               accounts & grants
+```
+
+You just read all of it. If you know HTTP and `curl`, you already know Narad — no client library to vendor, no binary protocol to debug at 3am, no consumer-group state machine to meditate on.
+
+And the simplicity goes all the way down. One binary, one repo, written to be **read** — a second-year engineer can trace a produce from HTTP handler to fsync in an afternoon (the [Internals](internals/index.md) section literally walks the exact function names). You don't need a dedicated DevOps team, and you don't need the one grey-bearded engineer who "knows the broker" — if that person leaves, the next person reads the docs and carries on. Two-person startup or hundred-team org, second year or twentieth: if you can run a StatefulSet, you can run Narad.
+
+Boring to operate. Readable to the bottom. That's not a limitation — that's the whole point.
+
+</div>
+
+<div class="narad-section" markdown>
+
 ## Everything you actually need from a broker
 
 <div class="grid cards" markdown>
