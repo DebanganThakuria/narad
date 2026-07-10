@@ -208,7 +208,7 @@ spec:
     - metadata:
         name: data
         labels:
-          {{- include "narad.labels" . | nindent 10 }}
+          {{- include "narad.immutableLabels" . | nindent 10 }}
         {{- with .Values.persistence.annotations }}
         annotations:
           {{- toYaml . | nindent 10 }}

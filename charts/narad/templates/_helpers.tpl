@@ -35,6 +35,20 @@ Common labels.
 helm.sh/chart: {{ include "narad.chart" . }}
 {{ include "narad.selectorLabels" . }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- with .Values.commonLabels }}
+{{ toYaml . }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Immutable labels: for StatefulSet volumeClaimTemplates, whose spec can
+never change after creation. Deliberately excludes commonLabels — an
+operator label added later must not brick every future upgrade.
+*/}}
+{{- define "narad.immutableLabels" -}}
+helm.sh/chart: {{ include "narad.chart" . }}
+{{ include "narad.selectorLabels" . }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
 {{/*
