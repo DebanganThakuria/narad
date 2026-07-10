@@ -1,0 +1,11 @@
+{{- if .Values.narad.config }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "narad.fullname" . }}-config
+  labels:
+    {{- include "narad.labels" . | nindent 4 }}
+data:
+  narad.json: |
+    {{- .Values.narad.config | toJson | nindent 4 }}
+{{- end }}
