@@ -71,3 +71,12 @@ The regimen that found the bugs now guards against their return — all runs und
 | Scale 3→5, then kill leader + new node together | quorum held at 5 nodes, zero loss |
 
 The recurring numbers: bounded duplicates (the at-least-once seams), `OVERDUE = 0` (the harness's loss detector) at the end of every scenario.
+## Lifecycle constants, for the record
+
+| Thing | Value |
+|---|---|
+| Join attempt cadence / admission proof | every 2s / "my own Raft sees a leader" |
+| Graceful leadership transfer | ~150ms; crash election ~1s |
+| Heartbeat / dead marking | 5s / 30s |
+| Startup reconcile caught-up wait | ≤60s (sweep skipped on timeout — data outlives impatience) |
+| Self-leader trust | only after a 5s-bounded Raft `Barrier` + re-read |

@@ -61,3 +61,31 @@ Delivery is therefore *never early* (the gate is checked against the owner's clo
 - **Drop-behind**: if a cursor falls behind the parent's *retention* (child down for days), aged-out offsets are skipped and counted on an explicit loss metric — bounded, alarmed loss instead of a wedged parent. The retention floor (`≥ delay + 1h` for delay children) makes this unreachable in sane configs.
 - **Dead child-partition owner**: fan-out never reroutes to a sibling child partition (unlike produce, a cursor can afford to wait — rerouting would scatter a key's records across child partitions for no availability gain); the cursor stalls on that bucket and retries until the owner returns.
 - **Lag observability**: `fanout_lag_messages` (parent HWM − cursor) is the health signal for normal children; `fanout_due_lag_seconds` (how far behind the *due frontier*) is the one for delay children — raw offset lag on a delay child is permanently ≈ rate × delay *by design*.
+## The numbers
+
+| Constant | Value |
+|---|---|
+| Reconcile interval (desired vs running cursors) | 1s |
+| Slab long-poll / retry backoff | 1s / 1s |
+| Batch caps | 4,096 records / 4 MiB (`fanout.max_batch_records/bytes`) |
+| Linger to fatten a partial batch | 25ms |
+| Delay cursor max sleep (metadata freshness bound) | 30s (`defaultFanoutDueWakeCap`) |
+| Orphan cursor-file sweep | every 30th reconcile pass |
+| Max children per parent / max delay | 108 / 1 year |
+| Retention floor for a delay child's parent | delay + 1h (`topic.MinRetentionMs`) |
+| Attach epoch | 8 random bytes, hex — e.g. `67953471cc57a32a` |
+
+## The cursor's durable state, in full
+
+One JSON file per (parent partition, child), living next to the log it indexes:
+
+```
+topics/orders/p00003/fanout-analytics.offset
+{"epoch":"67953471cc57a32a","next_offset":98332}
+```
+
+That's the entire recovery story: epoch says *which attachment* this position belongs to; `next_offset` says where to resume. Written via atomic temp+rename only after the batch below it is committed to the child (commit-before-advance). Everything else — running goroutines, batches in flight, lag gauges — is disposable.
+
+## Reading a slab: fill-or-linger
+
+`readBatch` long-polls the parent for up to 1s, then tops up until the batch hits 4,096 records / 4 MiB or a 25ms linger expires — so a busy parent produces fat child commits (one fsync each on the child side) while a trickling parent still ships within ~25ms. For a delay child, every read carries `MaxCommittedAt = now − delay`; the reader stops at the first undue record and reports *when* it becomes due, which is what lets the cursor sleep instead of spin.

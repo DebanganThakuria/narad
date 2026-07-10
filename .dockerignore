@@ -12,3 +12,12 @@ docs
 *.log
 .DS_Store
 todo-plan.local.md
+
+# Nothing below ships in the binary; keeping it out of the build context
+# stops docs/brand churn from busting the go build cache.
+assets
+tests
+mkdocs.yml
+site
+*.md
+LICENSE

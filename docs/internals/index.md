@@ -84,3 +84,46 @@ Two principles show up in every subsystem, learned the hard way under chaos test
 - **Every failure mode keeps data.** When a check can't complete — no leader, peer unreachable, barrier failed — the answer is always "keep it and retry later," never "assume it's fine."
 
 The full war stories are in [Cluster Lifecycle](cluster-lifecycle.md).
+## The codebase, oriented
+
+If you're about to read source, here's the map so you don't wander:
+
+| Package | What lives there |
+|---|---|
+| `cmd/narad` | Wiring: config, boot order, the join loop, startup reconcile. `serve.go` is the table of contents for the whole process |
+| `internal/transport/httpserver` | HTTP routes, auth middleware, handlers. Thin on purpose |
+| `internal/cluster` | Everything node-to-node: router, produce dispatcher, fan-out runner, QUIC RPC client/server, leader confirmation |
+| `internal/broker/ingress` | The produce WAL: accept, replay, checkpoint, compaction |
+| `internal/broker/messaging` | The engine: produce commit, consume, ack, fan-out slab reads |
+| `internal/broker/runtime` | Partition-log registry, offset committer, orphan sweeps, lifecycle |
+| `internal/consumer` | The in-flight lease table: reservations, nonces, acked-ahead |
+| `internal/persistence/storage` | Partition log engine: segments, frames, flusher, retention, HWM |
+| `internal/persistence/wal` | The generic segmented WAL under ingress |
+| `internal/persistence/metastore` | Raft + bbolt FSM: topics, members, users, assignments |
+| `internal/domain/*` | Pure types: topic, user, records |
+| `internal/platform/*` | Config, metrics, partitioner, net utils |
+
+## Anatomy of one produce, with real names
+
+The same diagram as above, but with function names you can grep for — handler to disk in nine hops:
+
+```
+POST /v1/topics/orders/produce?key=k
+ └─ messaging.Produce (transport/httpserver/handlers/messaging/produce.go)
+     └─ Engine.AcceptProduce (broker/messaging/produce_accept.go)
+         ├─ resolveAcceptedProducePartition — hash the key, no liveness check
+         └─ ingress.Manager.AcceptProduce (broker/ingress/produce.go)
+             └─ wal.Log.Append — staged into the group-commit buffer,
+                blocks until the shared fsync lands             ← the 202 line
+… milliseconds later, in the background …
+ └─ ProduceDispatcher.dispatch (cluster/produce_dispatch.go)
+     ├─ scanWindow — replay WAL from the checkpoint
+     ├─ bucketByTarget — group by (topic, partition), reroute dead owners
+     └─ commitBuckets → commitBatch
+         └─ Engine.CommitAcceptedProduceBatch (broker/messaging/produce_commit.go)
+             ├─ storage.Log.AppendBatch — keyed-envelope records
+             └─ commitDurable: Sync → VerifyDurable (CRC) → AdvanceHighWatermark
+                                                            ← consumers can see it
+```
+
+Every deep-dive page below follows this pattern: the concept first, then the actual constants and function names, because "trust me" is not documentation.

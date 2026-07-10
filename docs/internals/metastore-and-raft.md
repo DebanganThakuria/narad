@@ -60,3 +60,19 @@ Three primitives implement this:
 The Raft leader doubles as the **cluster controller**: it assigns partitions of new topics (round-robin over live members), marks members dead when heartbeats lapse (30s), and seeds the root admin. Leadership transfer on graceful shutdown makes planned restarts nearly seamless (~150ms failover); crash failover takes an election timeout (~1s).
 
 Assignments are **sticky**: a dead node's partitions are *not* reassigned, because the data lives only on that node's disk. The cluster waits for the node (and its volume) to come back. The produce path works around dead owners in the meantime — see [Produce Path](produce-path.md).
+## The concrete bits
+
+| Thing | Value |
+|---|---|
+| FSM store | bbolt, buckets: `topics`, `schemas`, `assignments`, `members`, `users` |
+| Raft log store | boltdb (`raft.db`); snapshots: file store, **2 retained** |
+| Heartbeat / dead marking | every 5s / after 30s silence |
+| `AppliedCaughtUp` contact freshness | leader contact within 5s (followers) |
+| `Barrier` timeout | 5s |
+| Startup reconcile wait for caught-up | up to 60s, then the destructive sweep is skipped (never rushed) |
+
+Every write is one `command` envelope — an op byte plus a JSON payload — applied identically on every node's FSM. Op families bump per-domain **version counters** (topics version, members version, …) that the hot paths use as cache keys: a produce checks its cached topic record against the topic version in one atomic load instead of a bbolt read per message.
+
+## Boot order is load-bearing
+
+`cmd/narad/serve.go` reads like a checklist because it is one: metastore first, then the broker, then the **create gate is armed** (topic creates block on every transport) *before* the QUIC listener starts — so the startup orphan sweep can never race a peer-forwarded create into deleting a directory it just missed. The gate opens when startup reconcile finishes; `/readyz` flips only after that. The comments in that file explain each ordering constraint inline, and they mean it.

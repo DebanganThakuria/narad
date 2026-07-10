@@ -63,3 +63,26 @@ flowchart LR
 ```
 
 The frontier file lags acks by up to ~100ms, so a crash can redeliver a few just-acked messages — duplicates, per contract. The file is read **lazily at first touch, from disk** rather than from a boot-time metastore scan: disk is ground truth for what this node settled, and it stays correct even while the node's metastore replica is still catching up.
+## The numbers
+
+| Constant | Value | Meaning |
+|---|---|---|
+| Offset commit cadence | 100ms | `defaultConsumerOffsetCommitInterval` — the frontier file lags acks by at most this |
+| Expiry purger cadence | 1s | background sweep releasing expired leases (plus purge-on-touch) |
+| Receipt handle | `partition:offset:nonce` | the nonce is a per-shard atomic counter, so handles never collide across re-reservations |
+| In-flight / acked-ahead caps | per topic, default 1024 each | hit the first → consume returns 204; hit the second → ack returns 503 until the gap closes |
+
+## Where each piece of state lives (and dies)
+
+| State | Lives | Survives a crash? | Consequence |
+|---|---|---|---|
+| Reservations + nonces | shard memory | no | leases evaporate → messages redeliver. The whole crash story |
+| Acked-ahead set | shard memory | no | out-of-order acks above the frontier replay as duplicates |
+| Committed frontier | `consumer.offset` file (atomic temp+rename, fsynced) | yes | at most ~100ms of just-acked messages redeliver |
+| Corrupt-skip set | shard memory + metrics | no* | *the skip is re-derived on re-read; the counter is the audit trail |
+
+The asymmetry is the design: everything cheap to reconstruct is memory; the one thing that must never move backwards-then-forwards inconsistently (the frontier) is a single fsynced 8-byte file per partition.
+
+## Ack validation, precisely
+
+`CommitHandle` accepts an ack only if the offset has a **live reservation with the same nonce**. Expired-then-re-reserved offsets carry a new nonce → the late acker gets `410 Gone` instead of silently settling someone else's lease. Extends re-validate the same way and push a *fresh* entry into the expiry heap (the stale heap slot is skipped on pop via nonce+expiry comparison — a lease can never be evicted by its own superseded deadline).

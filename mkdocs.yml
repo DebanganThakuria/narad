@@ -71,6 +71,11 @@ nav:
       - Fan-out & Delay: client/fanout-and-delay.md
       - Users & Access: client/users-and-access.md
       - Guarantees & Errors: client/guarantees-and-errors.md
+  - Operate:
+      - Deployment: operate/index.md
+      - Configuration Reference: operate/configuration.md
+      - Monitoring: operate/monitoring.md
+      - Scaling & Recovery: operate/scaling-and-recovery.md
   - Internals:
       - Architecture: internals/index.md
       - Metastore & Raft: internals/metastore-and-raft.md

@@ -3,6 +3,15 @@ name: Publish Container
 on:
   push:
     branches: [master]
+    # Docs, brand assets, and chart/markdown changes never reach the
+    # image; don't burn a build+publish on them. Tag pushes always build.
+    paths-ignore:
+      - "docs/**"
+      - "assets/**"
+      - "charts/**"
+      - "mkdocs.yml"
+      - "**.md"
+      - ".github/workflows/docs.yml"
     tags:
       - "v*"
   workflow_dispatch:
