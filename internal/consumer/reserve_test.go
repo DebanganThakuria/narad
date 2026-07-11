@@ -526,3 +526,54 @@ func TestReserveNextAfterDropOfDifferentTopicStillWorks(t *testing.T) {
 	r, err := f.ReserveNext(context.Background(), testTopic, testPart, testVT, 1)
 	wantReserved(t, r, err, 0)
 }
+
+// When the acked-ahead set is at capacity, handing out fresh offsets is
+// pure spiral fuel: their acks bounce with ErrAckedAheadFull, expire,
+// and redeliver. ReserveNext must serve ONLY the frontier hole in that
+// state — the one offset whose ack collapses the backlog — and report
+// "ahead_full" while the hole is out.
+func TestReserveNextServesOnlyFrontierHoleWhenAckedAheadFull(t *testing.T) {
+	const cap = 4
+	f := newClockedInFlight(64, cap)
+
+	// Reserve the hole (offset 0) plus enough followers to fill the
+	// acked-ahead set when everything except the hole is acked.
+	hole := mustReserve(t, f, testDeepTail) // offset 0
+	followers := make([]ReserveResult, cap)
+	for i := range followers {
+		followers[i] = mustReserve(t, f, testDeepTail) // offsets 1..cap
+	}
+	for _, r := range followers {
+		mustCommit(t, f, r.Offset, r.Nonce)
+	}
+	// Set is now at capacity: offsets 1..cap acked ahead of unacked 0.
+
+	// A fresh reservation must NOT advance into new territory (offset
+	// cap+1); the hole is still reserved, so consume backs off.
+	r, err := f.ReserveNext(context.Background(), testTopic, testPart, testVT, testDeepTail)
+	if err != nil {
+		t.Fatalf("ReserveNext: %v", err)
+	}
+	if r.Reserved {
+		t.Fatalf("reserved offset %d while acked-ahead full; want ahead_full skip", r.Offset)
+	}
+	if r.SkipReason != "ahead_full" {
+		t.Fatalf("SkipReason = %q, want ahead_full", r.SkipReason)
+	}
+
+	// The hole's lease expires — the ONLY offset ReserveNext may now
+	// hand out is the hole itself, not fresh territory.
+	withClock(f, 1000+testVT.Milliseconds()+1)
+	r2 := mustReserve(t, f, testDeepTail)
+	if r2.Offset != hole.Offset {
+		t.Fatalf("reserved offset %d while acked-ahead full; want the frontier hole %d", r2.Offset, hole.Offset)
+	}
+
+	// Acking the hole collapses the run and normal service resumes with
+	// fresh offsets.
+	mustCommit(t, f, r2.Offset, r2.Nonce)
+	r3 := mustReserve(t, f, testDeepTail)
+	if r3.Offset != int64(cap)+1 {
+		t.Fatalf("post-collapse offset = %d, want %d", r3.Offset, int64(cap)+1)
+	}
+}

@@ -705,20 +705,23 @@ func TestAckAckedAheadCapWithNilMetricsReturnsError(t *testing.T) {
 	}, nil)
 	engine := NewEngine(ms, nil, nil, offsets, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 
-	if _, err := offsets.ReserveNext(context.Background(), "orders", 0, time.Second, 2); err != nil {
+	// Reserve 0,1,2 up front (the acked-ahead set is empty, so fresh
+	// offsets flow), THEN ack out of order: acking 1 fills the cap-1
+	// set, so acking 2 must overflow it.
+	if _, err := offsets.ReserveNext(context.Background(), "orders", 0, time.Second, 3); err != nil {
 		t.Fatalf("ReserveNext(offset 0) error = %v", err)
 	}
 	r1, err := offsets.ReserveNext(context.Background(), "orders", 0, time.Second, 3)
 	if err != nil {
 		t.Fatalf("ReserveNext(offset 1) error = %v", err)
 	}
-	handle := consumer.Handle{Partition: 0, Offset: r1.Offset, Nonce: r1.Nonce}
-	if err := engine.Ack(context.Background(), "orders", handle); err != nil {
-		t.Fatalf("Ack(offset 1) error = %v", err)
-	}
 	r2, err := offsets.ReserveNext(context.Background(), "orders", 0, time.Second, 3)
 	if err != nil {
 		t.Fatalf("ReserveNext(offset 2) error = %v", err)
+	}
+	handle := consumer.Handle{Partition: 0, Offset: r1.Offset, Nonce: r1.Nonce}
+	if err := engine.Ack(context.Background(), "orders", handle); err != nil {
+		t.Fatalf("Ack(offset 1) error = %v", err)
 	}
 	handle = consumer.Handle{Partition: 0, Offset: r2.Offset, Nonce: r2.Nonce}
 
