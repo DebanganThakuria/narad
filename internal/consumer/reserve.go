@@ -43,6 +43,20 @@ func (f *InFlight) ReserveNext(ctx context.Context, topic string, partition int,
 		return ReserveResult{SkipReason: "empty"}, nil
 	}
 
+	// When the ahead-of-frontier state is at capacity, every ack except
+	// the frontier hole's is doomed to ErrAckedAheadFull — handing out
+	// NEW offsets from here only manufactures deliveries whose acks
+	// bounce, expire, and redeliver (the ack-503 spiral observed under
+	// soak: hundreds of thousands of duplicates in hours). Serve ONLY
+	// the offset the frontier is waiting on; one successful ack there
+	// collapses the whole acked-ahead run and normal service resumes.
+	if sh.aheadFullLocked() {
+		if sh.resolvedOrReservedLocked(next) {
+			return ReserveResult{SkipReason: "ahead_full"}, nil
+		}
+		return sh.reserveLocked(next, now, visibilityTimeout), nil
+	}
+
 	for off := next; off < logTail; off++ {
 		if sh.resolvedOrReservedLocked(off) {
 			continue

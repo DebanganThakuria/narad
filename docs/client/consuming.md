@@ -64,5 +64,6 @@ curl -u $AUTH -X POST \
 ## Flow control you should know about
 
 - **`max_in_flight_per_partition`**: once that many messages are out and unacked on a partition, consume returns `204` until acks arrive. Stops one stuck consumer fleet from vacuuming the queue.
-- **`max_acked_ahead_per_partition`**: bound on out-of-order acks held while an earlier message is still unacked. Exceed it and acks return `503` briefly — ack the stragglers.
+- **`max_acked_ahead_per_partition`**: bound on out-of-order acks held while an earlier message is still unacked. Exceed it and acks return `503` until the oldest unacked message is settled.
+- **Retry `503` acks. This is not optional.** An ack you drop on the floor becomes a redelivery 30 seconds later, whose ack can bounce again — we watched a consumer that didn't retry generate 600,000 duplicate deliveries in one evening. Narad also defends itself: when a partition's acked-ahead set is full, consume stops handing out fresh messages and serves only the one blocking the frontier. But your side of the contract is simple: treat a failed ack like a failed write, and retry it with backoff.
 - **Duplicates are normal.** Crashes, timeouts, and nacks all cause redelivery. Use the message key or an ID in the payload to deduplicate in your handler.
