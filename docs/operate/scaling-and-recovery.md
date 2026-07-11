@@ -49,6 +49,18 @@ Not supported yet — there is no decommission path, and removed pods' partition
 
 The one rule under the hood that makes recovery boring: **no node ever destroys data based on its own possibly-stale view** — every cleanup confirms with the Raft leader first, and every failure to confirm keeps the data. The [war stories](../internals/cluster-lifecycle.md) explain why we're this paranoid.
 
+## Measured capacity
+
+From an in-cluster load ramp against a 5-node cluster (≈5 CPU / 1 GiB per node, zstd on, 10-partition topic, 256-byte payloads):
+
+| Stage | Achieved | p50 | p99 | Errors |
+|---|---|---|---|---|
+| 500/s → 8,000/s | on target at every stage | 7–8 ms | 11–15 ms | 0 |
+| **12,000/s** | **11,998/s** | 8 ms | **14 ms** | 0 |
+| Consume+ack drain | ~13,000/s | — | — | 0 |
+
+The ramp stopped because the single load-generator pod saturated, not the broker — treat 12k msg/s as a **floor** for this modest hardware, and note the p99 didn't move between 500/s and 12,000/s, which is the WAL-first design doing exactly what it promised.
+
 ## Disk sizing
 
 Per node, roughly:
