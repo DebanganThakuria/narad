@@ -36,8 +36,9 @@ release we'll defend in public. Each gate lists its evidence.
 
 ## In progress
 
-- [ ] **Uninterrupted soak window** — 72 hours at OVERDUE=0, running
-  in-cluster (immune to laptop lifecycle) since 2026-07-11T11:04:32Z.
+- [ ] **Uninterrupted soak window** — 72 hours at OVERDUE=0 under
+  **1,000 msg/s full parent→children→consume→ack flow** (~9,000 broker
+  ops/s continuously), running in-cluster since 2026-07-11T13:12:50Z.
   Window closes 2026-07-14.
 
 ## Deferred past 1.0 (deliberately)
