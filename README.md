@@ -76,30 +76,11 @@ deployment/configuration/monitoring handbook, and code-level internals with diag
 
 ## Observed benchmark
 
-One Kubernetes benchmark run on a 3-node Narad cluster sustained about
-**50,000 logical messages per second** through the full
-produce -> consume -> ack loop. Each Narad pod used roughly **500 MiB**
-of memory and was capped around **5 vCPUs**.
-
-This is an observed benchmark, not a committed SLO. Results depend on
-payload shape, topic and partition layout, client concurrency, storage
-class, kernel and container limits, and garbage collector settings.
-
-Benchmark environment highlights:
-
-| Setting | Value |
-|---|---|
-| Cluster size | 3 Narad pods |
-| Per-pod CPU runtime | `GOMAXPROCS=5` |
-| Per-pod memory target | `GOMEMLIMIT=1GiB` |
-| GC target | `GOGC=400` |
-| Default partitions | `NARAD_TOPIC_DEFAULT_PARTITIONS=3` |
-| Max partitions | `NARAD_TOPIC_MAX_PARTITIONS=108` |
-| In-flight cap | `NARAD_TOPIC_DEFAULT_MAX_IN_FLIGHT_PER_PARTITION=1024` |
-| Acked-ahead cap | `NARAD_TOPIC_DEFAULT_MAX_ACKED_AHEAD_PER_PARTITION=1024` |
-| Visibility timeout | `NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS=30000` |
-| Retention age | `NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS=43200000` |
-| Log format | `NARAD_LOG_FORMAT=json`, `NARAD_LOG_LEVEL=info` |
+In-cluster load ramp, 5 nodes (~5 CPU / 1 GiB limit each, zstd): **12,000 msg/s
+produce sustained at p99 = 14 ms, zero errors** — highest stage tested; the
+load generator saturated before the broker did. Consume+ack drain: ~13,000/s.
+p99 was flat from 500/s to 12,000/s. Full method and stages:
+[Scaling & Recovery](https://debanganthakuria.github.io/narad/operate/scaling-and-recovery/).
 
 ## Architecture
 

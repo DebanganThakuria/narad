@@ -103,6 +103,10 @@ Two of those deserve a second look:
 - **`initialClusterSize`** is the set of pods allowed to *bootstrap* a brand-new Raft cluster (`narad-0/1/2` at 3). Every pod beyond it joins the existing cluster instead. It is consulted only on an empty disk — set it once and forget it exists. Changing it later does nothing good and possibly something educational.
 - **`narad.config.storage.codec: zstd`** — on-disk compression is **off by default**. We run zstd/fastest: ~40% smaller at low rate, up to ~95% smaller under real load for JSON-ish payloads, for near-zero CPU. Turn it on unless your payloads are already compressed.
 
+## Rate limiting: bring your own
+
+Narad has request-size caps (1 MiB bodies) and per-partition flow control, but **no built-in request rate limiting** — a hostile or buggy client can send requests as fast as you'll accept them. Put a rate limiter at your ingress (every ingress controller has one), same place your TLS terminates. Narad's job is not losing messages; your ingress's job is deciding who gets to send them.
+
 ## TLS story
 
 Client TLS terminates at your ingress — Narad serves plain HTTP behind it. Node-to-node QUIC is authenticated by the cluster secret; Raft can additionally run mutual TLS (`NARAD_CLUSTER_TLS_{CERT,KEY,CA}_FILE`). Without certs, Raft is plaintext and the node says so loudly in its logs — restrict port 7943 with a NetworkPolicy either way.

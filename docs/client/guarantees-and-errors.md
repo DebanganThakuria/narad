@@ -78,3 +78,7 @@ flowchart LR
 
 - `202` → never retry. `4xx` → never retry unchanged. `503` and timeouts → retry with backoff.
 - A **timed-out produce is ambiguous**: the message may have been accepted. Retrying may duplicate it — that's fine, because your consumer is idempotent. Right?
+
+## API stability
+
+The `/v1` surface is stable: routes, parameters, status codes, and JSON field names documented in this guide won't change or disappear within `/v1`. New optional fields and new endpoints may appear (your JSON parsing should ignore unknown fields — it already does, right?). Anything we ever need to break moves to a `/v2` with both versions serving during a deprecation window. The node-to-node RPC protocol is versioned by the same rule: opcodes are append-only, and unknown ops get a clean `400` — which is what makes mixed-version rolling upgrades boring.
