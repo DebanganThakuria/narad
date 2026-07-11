@@ -22,4 +22,6 @@ jobs:
         with:
           context: tools/soak-base
           push: true
-          tags: ghcr.io/debanganthakuria/narad-soak-base:v1
+          # Published as a tag on the allowlisted package path — cluster image
+          # policy admits ghcr.io/debanganthakuria/narad:* only.
+          tags: ghcr.io/debanganthakuria/narad:soak-base-v1
