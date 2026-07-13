@@ -37,9 +37,12 @@ release we'll defend in public. Each gate lists its evidence.
 ## In progress
 
 - [ ] **Uninterrupted soak window** — 72 hours at OVERDUE=0 under
-  **1,000 msg/s full parent→children→consume→ack flow** (~9,000 broker
-  ops/s continuously), running in-cluster since 2026-07-11T13:12:50Z.
-  Window closes 2026-07-14.
+  **1,000 msg/s full parent→children→consume→ack flow**, running
+  in-cluster as a StatefulSet (attempt 3: attempt 2 ran ~37h clean at
+  1,000 msg/s before overnight node recycling deleted the bare evidence
+  pod — the broker itself sailed through that churn; the harness now
+  self-heals). Window open since 2026-07-13T06:56:12Z, closes
+  2026-07-16T06:56Z.
 
 ## Deferred past 1.0 (deliberately)
 
