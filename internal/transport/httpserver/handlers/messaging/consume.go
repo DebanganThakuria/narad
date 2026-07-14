@@ -146,6 +146,10 @@ func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) 
 			s.WriteError(w, http.StatusBadRequest, "invalid offset: "+err.Error())
 			return opts, false, false
 		}
+		if o < 0 {
+			s.WriteError(w, http.StatusBadRequest, "invalid offset: must be >= 0")
+			return opts, false, false
+		}
 		opts.Offset = &o
 	}
 	if v := q.Get("wait"); v != "" {

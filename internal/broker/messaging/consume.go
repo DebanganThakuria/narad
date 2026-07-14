@@ -10,6 +10,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
@@ -159,6 +160,9 @@ func (e *Engine) replayRead(topicName string, partitionIdx int, offset int64, to
 	if partitionIdx < 0 || partitionIdx >= totalPartitions {
 		return topic.Message{}, false, fmt.Errorf("%w: partition out of range", ErrInvalid)
 	}
+	if offset < 0 {
+		return topic.Message{}, false, fmt.Errorf("%w: offset must be >= 0", ErrInvalid)
+	}
 	log, err := e.logs.Get(topicName, partitionIdx)
 	if err != nil {
 		return topic.Message{}, false, err
@@ -166,8 +170,18 @@ func (e *Engine) replayRead(topicName string, partitionIdx int, offset int64, to
 	if offset >= log.HighWatermark() {
 		return topic.Message{}, false, nil
 	}
+	if offset < log.OldestOffset() {
+		// Retention already reaped this offset: it existed and is gone —
+		// a fact about the request, not a server fault.
+		return topic.Message{}, false, fmt.Errorf("%w: offset %d aged out of retention (oldest retained: %d)", errs.ErrHandleStale, offset, log.OldestOffset())
+	}
 	key, committedAt, payload, err := log.ReadKeyed(offset)
 	if err != nil {
+		if storage.IsCorrupt(err) || errors.Is(err, storage.ErrOffsetNotFound) {
+			// Same fate for a hole the reaper (or corruption skip) left:
+			// not readable, never will be, and not our 500 to own.
+			return topic.Message{}, false, fmt.Errorf("%w: offset %d is not readable", errs.ErrHandleStale, offset)
+		}
 		return topic.Message{}, false, err
 	}
 	return topic.Message{
