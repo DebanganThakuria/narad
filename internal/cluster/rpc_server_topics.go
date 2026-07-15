@@ -20,6 +20,11 @@ type rpcCreateTopicBody struct {
 	MaxInFlightPerPartition   int64           `json:"max_in_flight_per_partition"`
 	MaxAckedAheadPerPartition int64           `json:"max_acked_ahead_per_partition"`
 	Schema                    json.RawMessage `json:"schema,omitempty"`
+	// Parent/FanoutDelayMs: create-as-child (the replica pattern). The
+	// ingress node authorizes manage rights on the parent before
+	// forwarding, mirroring the HTTP handler.
+	Parent        string `json:"parent,omitempty"`
+	FanoutDelayMs int64  `json:"fanout_delay_ms,omitempty"`
 	// Owner is set by the authenticated ingress node before forwarding;
 	// the cluster port is not client-reachable, so it is trusted here.
 	Owner string `json:"owner,omitempty"`
@@ -74,6 +79,8 @@ func (s *RPCServer) handleCreateTopic(payload []byte) nodewire.Response {
 		MaxInFlightPerPartition:   body.MaxInFlightPerPartition,
 		MaxAckedAheadPerPartition: body.MaxAckedAheadPerPartition,
 		Schema:                    body.Schema,
+		Parent:                    body.Parent,
+		FanoutDelayMs:             body.FanoutDelayMs,
 		Owner:                     body.Owner,
 	})
 	if err != nil {
