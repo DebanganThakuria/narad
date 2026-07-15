@@ -196,6 +196,12 @@ func storageValidationErrors(cfg StorageConfig) []string {
 	if cfg.SegmentBytes < 4096 {
 		errs = append(errs, fmt.Sprintf("storage.segment_bytes (%d) must be >= 4096", cfg.SegmentBytes))
 	}
+	// The floor keeps eviction far above request lifetimes: every
+	// long-poll and read finishes in seconds, so a minutes-scale window
+	// makes "log closed while a holder still uses it" unreachable.
+	if cfg.IdleLogEvictionMs != 0 && cfg.IdleLogEvictionMs < 60_000 {
+		errs = append(errs, fmt.Sprintf("storage.idle_log_eviction_ms (%d) must be 0 (disabled) or >= 60000", cfg.IdleLogEvictionMs))
+	}
 	if cfg.RetentionCheckIntervalMs <= 0 {
 		errs = append(errs, "storage.retention_check_interval_ms must be > 0")
 	}

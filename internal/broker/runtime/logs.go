@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -34,11 +35,21 @@ type Logs struct {
 	metrics     *metrics.Metrics
 
 	mu   sync.RWMutex
-	logs map[string]*storage.Log
+	logs map[string]*logEntry
 
 	produceMu   sync.Mutex
 	produceSync map[string]*sync.Mutex
 }
+
+// logEntry pairs an open log with the time of its last real use. Get
+// stamps it; Peek deliberately does not — observation (metrics polls)
+// must never keep an idle log warm, or idle eviction could never fire.
+type logEntry struct {
+	log        *storage.Log
+	lastAccess atomic.Int64 // unix nanoseconds of the last Get
+}
+
+func (e *logEntry) stamp() { e.lastAccess.Store(time.Now().UnixNano()) }
 
 // NewLogs constructs a partition-log manager. metastore is consulted
 // at lazy-open time to fold the topic's RetentionMs into the storage
@@ -49,7 +60,7 @@ func NewLogs(dataDir string, storageOpts storage.Options, ms metastore.Metastore
 		storageOpts: storageOpts,
 		metastore:   ms,
 		metrics:     m,
-		logs:        make(map[string]*storage.Log),
+		logs:        make(map[string]*logEntry),
 		produceSync: make(map[string]*sync.Mutex),
 	}
 }
@@ -65,16 +76,18 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 	key := keyOf(topicName, idx)
 
 	g.mu.RLock()
-	if l, ok := g.logs[key]; ok {
+	if e, ok := g.logs[key]; ok {
+		e.stamp()
 		g.mu.RUnlock()
-		return l, nil
+		return e.log, nil
 	}
 	g.mu.RUnlock()
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if l, ok := g.logs[key]; ok {
-		return l, nil
+	if e, ok := g.logs[key]; ok {
+		e.stamp()
+		return e.log, nil
 	}
 
 	opts := g.storageOpts
@@ -105,7 +118,9 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 	if err != nil {
 		return nil, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)
 	}
-	g.logs[key] = l
+	e := &logEntry{log: l}
+	e.stamp()
+	g.logs[key] = e
 	return l, nil
 }
 
@@ -116,8 +131,11 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 func (g *Logs) Peek(topicName string, idx int) (*storage.Log, bool) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	l, ok := g.logs[keyOf(topicName, idx)]
-	return l, ok
+	e, ok := g.logs[keyOf(topicName, idx)]
+	if !ok {
+		return nil, false
+	}
+	return e.log, true
 }
 
 // CloseTopic flushes and closes every cached log under the given
@@ -129,11 +147,11 @@ func (g *Logs) CloseTopic(topicName string) error {
 	prefix := topicName + "/"
 	g.mu.Lock()
 	var firstErr error
-	for k, l := range g.logs {
+	for k, e := range g.logs {
 		if !strings.HasPrefix(k, prefix) {
 			continue
 		}
-		if err := l.Close(); err != nil && firstErr == nil {
+		if err := e.log.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		delete(g.logs, k)
@@ -156,8 +174,8 @@ func (g *Logs) CloseTopic(topicName string) error {
 func (g *Logs) CloseAll() error {
 	g.mu.Lock()
 	var firstErr error
-	for k, l := range g.logs {
-		if err := l.Close(); err != nil && firstErr == nil {
+	for k, e := range g.logs {
+		if err := e.log.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		delete(g.logs, k)

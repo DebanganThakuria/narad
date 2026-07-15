@@ -38,6 +38,7 @@ func Default() *Config {
 			IngressWALSyncIntervalMs:    10,
 			SegmentBytes:                64 << 20, // 64 MiB
 			RetentionCheckIntervalMs:    60_000,   // 1 minute
+			IdleLogEvictionMs:           1_800_000, // 30 minutes
 		},
 		Topic: TopicConfig{
 			DefaultPartitions:                3,
