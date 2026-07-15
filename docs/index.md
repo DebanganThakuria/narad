@@ -79,6 +79,14 @@ flowchart LR
 
 The price, stated plainly so you never discover it in production: **ordering is not guaranteed.** Failover reroutes messages across partitions, and redelivery replays older messages after newer ones. If your consumers need a sequence, carry one in the payload. What you get in exchange is a broker that keeps accepting and keeps delivering while machines burn around it.
 
+**And when a topic needs a second copy, replication is one API call** — not a subsystem:
+
+```bash
+curl -u $AUTH -X POST $NARAD/v1/topics   -d '{"name": "orders-replica", "parent": "orders"}'
+```
+
+That creates a fan-out child that receives every message durably and whose partitions are **deliberately placed on different nodes** than the parent's — an async full copy that survives the parent's disk, with its own retention (make it longer: congratulations, you also have an archive tier). No quorums, no consistency protocol, no replication code to trust — just [a placement rule on machinery already soak-tested for days](client/fanout-and-delay.md#replication-when-you-ask-for-it). You pay double disk only on topics that opt in.
+
 </div>
 
 <div class="narad-section" markdown>

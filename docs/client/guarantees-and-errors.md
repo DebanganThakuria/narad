@@ -19,7 +19,7 @@ flowchart LR
 
 - A `202 Accepted` means your message is **fsynced to disk** on the accepting node before the response is sent. A crash one millisecond later does not lose it.
 - On its final partition, a message is **fsynced and read-back-verified** before it becomes visible to consumers or is removed from the accepting node's log.
-- **Narad keeps exactly one copy of each partition** (plus the transit copy above). There is no replication. If a node's *disk* is permanently destroyed, the messages on that disk's partitions are gone. Process crashes, restarts, and node reboots lose nothing — this has been chaos-tested extensively — but disk loss is unprotected by design. Run it on storage you trust (cloud persistent volumes, RAID) and treat Narad's durability as "as durable as the volume under it."
+- **Narad keeps exactly one copy of each partition** (plus the transit copy above). There is no replication subsystem. If a node's *disk* is permanently destroyed, the messages on that disk's partitions are gone. Process crashes, restarts, and node reboots lose nothing — this has been chaos-tested extensively — but disk loss is unprotected by default. Run it on storage you trust (cloud persistent volumes, RAID), and for topics that need a second copy, create a replica child: [replication, when you ask for it](fanout-and-delay.md#replication-when-you-ask-for-it) — an async full copy, deliberately placed on different nodes.
 - Cluster **metadata** (topics, users, assignments) is Raft-replicated across all nodes and survives any minority of disks failing.
 
 ## Ordering: not guaranteed

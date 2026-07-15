@@ -41,6 +41,72 @@ curl -u $AUTH $NARAD/v1/topics/orders/children              # list children + ho
 curl -u $AUTH -X DELETE $NARAD/v1/topics/orders/children/orders-analytics   # detach
 ```
 
+## Creating a child in one call
+
+You can also create-and-attach in a single request — pass `parent` when
+creating the topic:
+
+```bash
+curl -u $AUTH -X POST $NARAD/v1/topics   -H "Content-Type: application/json"   -d '{"name": "orders-analytics", "parent": "orders"}'
+```
+
+Same rules as attach (the parent must exist, you need manage rights on
+it, `fanout_delay_ms` makes it a delay child), plus two conveniences:
+leave `partitions` at 0 and the child inherits the **parent's** count,
+and if the attach can't complete the create is rolled back — no
+half-linked topic left behind.
+
+One-call creation is not just sugar. It's the only way a child's
+partitions can be **placed away from the parent's** — which is the whole
+replica pattern below. A topic created standalone gets its partitions
+assigned immediately, before any attach can happen, and assignments
+never move.
+
+## Replication, when you ask for it
+
+Narad famously keeps one copy of each partition. But a fan-out child IS
+a full second copy of the parent's data — durably committed before the
+fan-out cursor advances — and if its partitions live on *different
+nodes* than the parent's, that copy survives the parent's disk.
+
+That placement is exactly what create-with-`parent` guarantees:
+
+> A child created with `parent`, keeping the inherited partition count,
+> on a cluster with at least 2 live nodes: **every keyed record's parent
+> copy and child copy live on different nodes.** Partition p of the
+> child is deliberately assigned away from the owner of the parent's
+> partition p.
+
+```bash
+# One line of replication:
+curl -u $AUTH -X POST $NARAD/v1/topics   -d '{"name": "orders-replica", "parent": "orders"}'
+```
+
+Verify it yourself — partition stats carry `owner_node`:
+
+```bash
+curl -u $AUTH $NARAD/v1/topics/orders | jq '.partitions[] | {index, owner_node}'
+curl -u $AUTH $NARAD/v1/topics/orders-replica | jq '.partitions[] | {index, owner_node}'
+```
+
+Honest fine print, because a pattern is not a subsystem:
+
+- **It's asynchronous.** The copy trails the parent by the fan-out lag
+  (typically sub-second). Records committed to the parent but not yet
+  fanned out die with the parent's volume. RPO ≈ seconds, not zero.
+- **No automatic failover.** If the parent's node is lost, consumers
+  switch to `orders-replica` themselves — it's a normal topic. This is
+  disaster recovery, not transparent HA.
+- **From attach onward.** No backfill; the replica covers what the
+  parent committed after it was created.
+- **It costs what fan-out costs**: double the disk and double the write
+  IO, only on the topics that opt in.
+- The replica can have **longer retention** than the parent — a cheap
+  archive tier is the same one line.
+- Children attached the two-step way (create, then attach) keep the
+  placement they got at creation, which is *not* anti-affine. For the
+  replica pattern, use one-call creation.
+
 ## Delay children
 
 Add `delay_ms` and the child becomes a **delay topic**: each message appears in it exactly that long after the parent committed it.

@@ -57,7 +57,7 @@ Three primitives implement this:
 
 ## Leadership and the controller
 
-The Raft leader doubles as the **cluster controller**: it assigns partitions of new topics (round-robin over live members), marks members dead when heartbeats lapse (30s), and seeds the root admin. Leadership transfer on graceful shutdown makes planned restarts nearly seamless (~150ms failover); crash failover takes an election timeout (~1s).
+The Raft leader doubles as the **cluster controller**: it assigns partitions of new topics (round-robin over live members — except fan-out children, whose partition p deliberately walks past the owner of the parent's partition p via `metastore.ChildAwareOwner`, so a replica child's copy never shares a disk with the original), marks members dead when heartbeats lapse (30s), and seeds the root admin. Leadership transfer on graceful shutdown makes planned restarts nearly seamless (~150ms failover); crash failover takes an election timeout (~1s).
 
 Assignments are **sticky**: a dead node's partitions are *not* reassigned, because the data lives only on that node's disk. The cluster waits for the node (and its volume) to come back. The produce path works around dead owners in the meantime — see [Produce Path](produce-path.md).
 ## The concrete bits

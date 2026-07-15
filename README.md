@@ -41,6 +41,8 @@ Core capabilities:
 - durable append-only segmented storage
 - queue-style consume/ack semantics with replay support
 - parent → child topic fan-out with per-key partition affinity
+- opt-in async replication: create a child with `parent` and its
+  partitions are placed on different nodes than the parent's
 - Raft-backed control-plane metadata
 - any-pod produce ingress with async owner dispatch
 - JSON-Schema validation and per-topic tuning
@@ -134,7 +136,10 @@ its frame CRC *before* the record is made visible (high-watermark
 advanced) and *before* the WAL is allowed to compact past it — so a
 record is never lost or served corrupt as long as the owner's volume
 survives. If a pod dies but its volume survives, both logs replay on
-restart.
+restart. Topics that need to survive volume loss opt into the replica
+pattern: a fan-out child created with `parent` is an asynchronous full
+copy whose partitions are deliberately anti-affine to the parent's —
+see [the docs](https://debanganthakuria.github.io/narad/client/fanout-and-delay/#replication-when-you-ask-for-it).
 
 ## Layout
 
@@ -324,7 +329,8 @@ curl localhost:7942/metrics
 API routes:
 
 ```
-POST    /v1/topics                          create (retention/visibility/caps optional)
+POST    /v1/topics                          create (retention/visibility/caps optional;
+                                             parent= creates an anti-affine replica child)
 GET     /v1/topics?limit=&page_token=       list (keyset pagination by name)
 GET     /v1/topics/{topic}                  get single + per-partition stats
 PATCH   /v1/topics/{topic}                  alter: partitions, retention_ms,
