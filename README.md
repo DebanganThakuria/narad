@@ -15,10 +15,12 @@ It provides durable append-only storage, HTTP produce/consume/ack APIs,
 Raft-backed metadata, Prometheus metrics, and a single static binary that
 is straightforward to run locally or in Kubernetes.
 
-Narad is currently **pre-1.0**. It is suitable for local evaluation,
-experimentation, and early integration work. It should not be exposed
-directly to untrusted networks or used as a production dependency until
-the production-readiness gates documented below are complete.
+Narad is at **[v1.0.0](https://github.com/DebanganThakuria/narad/releases/tag/v1.0.0)** —
+graduated after a chaos matrix, multi-day soak windows (300M+ messages at
+1,000 msg/s with zero loss), a 12,000 msg/s capacity run, and live
+backup/restore, mixed-version-upgrade, and offset-replay drills. TLS is
+expected to terminate at an ingress in front of Narad; keep the
+ingress→Narad hop on a trusted network.
 
 ## Overview
 
@@ -46,17 +48,16 @@ Core capabilities:
 
 ## Project status
 
-Narad is under active development. The current public release line starts
-at `v0.1.0-alpha.1`.
+The current release is [`v1.0.0`](https://github.com/DebanganThakuria/narad/releases/tag/v1.0.0).
 
 | Area | Status |
 |---|---|
-| API and CLI | Functional, pre-1.0 compatibility |
+| API and CLI | Stable `/v1` HTTP API |
 | Storage engine | WAL-first produce path and segmented partition logs |
 | Cluster metadata | Raft+bbolt control plane |
 | Delivery model | At-least-once; consumers must be idempotent |
 | Security | Basic auth + RBAC + cluster-secret auth (secure by default); TLS terminates at the ingress; no rate limiting yet |
-| Production use | Blocked on the readiness gates below |
+| Production use | Ready — evidence in the [v1.0.0 release notes](https://github.com/DebanganThakuria/narad/releases/tag/v1.0.0); post-1.0 roadmap below |
 
 CI runs race-enabled unit and end-to-end tests, plus local 3-node
 integration and chaos smoke tests.
@@ -195,10 +196,10 @@ tests/
 
 ## Quickstart
 
-Install the current alpha with Go:
+Install with Go:
 
 ```sh
-go install github.com/debanganthakuria/narad/cmd/narad@v0.1.0-alpha.1
+go install github.com/debanganthakuria/narad/cmd/narad@v1.0.0
 narad serve
 ```
 
@@ -222,8 +223,8 @@ Narad ships as a single static binary inside a small non-root container
 image. Published images are available from GHCR:
 
 ```sh
-docker pull ghcr.io/debanganthakuria/narad:v0.1.0-alpha.1
-docker run --rm -p 7942:7942 -p 7943:7943 ghcr.io/debanganthakuria/narad:v0.1.0-alpha.1
+docker pull ghcr.io/debanganthakuria/narad:v1.0.0
+docker run --rm -p 7942:7942 -p 7943:7943 ghcr.io/debanganthakuria/narad:v1.0.0
 ```
 
 For local image development:
@@ -389,7 +390,10 @@ A topic can carry an optional JSON Schema, set at create time or via
 `PATCH /v1/topics/{topic}` with a `schema` field. When present, every
 produced message body must be valid JSON and match the schema; invalid
 payloads are rejected with **400**. Topics without a schema treat
-produced bodies as opaque bytes.
+produced bodies as opaque bytes — JSON, text, or binary all round-trip:
+consume returns JSON verbatim, text as a JSON string, and binary
+base64-encoded with `"payload_encoding":"base64"` flagged alongside
+([details](https://debanganthakuria.github.io/narad/client/consuming/#the-payload-comes-back-the-way-you-sent-it)).
 
 Schema changes are **additive-only and backwards-compatible**, enforced
 at registration. You may add optional properties; but removing a
@@ -484,55 +488,39 @@ The project logo and identity sheet live under [`assets/`](./assets/).
   <img src="./assets/narad-design.png" alt="Narad visual identity sheet with logo variants, icons, and design notes" width="720">
 </p>
 
-## Production readiness
+## What 1.0 proved
 
-Narad is pre-1.0. The code has race-enabled unit and end-to-end coverage,
-plus 3-node integration and chaos smoke tests in CI, but the following
-work must land before a production or externally exposed rollout. The
-first is a **hard gate**; until it ships, run Narad only behind a
-trusted boundary.
+Every gate below was exercised against a live 5-node Kubernetes cluster
+before the tag was cut; details and numbers live in the
+[v1.0.0 release notes](https://github.com/DebanganThakuria/narad/releases/tag/v1.0.0)
+and the [Operate handbook](https://debanganthakuria.github.io/narad/operate/).
 
-1. **TLS & rate limiting (hard gate).** Authentication (Basic + RBAC)
-   and cluster-secret auth now ship (see [Security](#security-authentication--rbac)),
-   but Narad still serves plain HTTP: TLS must terminate at an ingress in
-   front of it, and that ingress→Narad hop must be a trusted path. Native
-   TLS, mutual TLS between cluster nodes, and per-user/IP request rate
+- **Soak** — multi-day windows at 1,000 msg/s across the full
+  produce→consume→ack flow (parent + fan-out child + 60s-delay child):
+  300M+ messages in aggregate, zero lost, zero early delay fires.
+- **Chaos** — `kill -9` of partition owners, Raft leaders, and joining
+  nodes; restarts mid-produce; infrastructure node churn. All zero-loss.
+- **Capacity** — 12,000 msg/s sustained at p99 = 14 ms with zero errors;
+  the load generator saturated before the broker did.
+- **Operational drills** — backup/restore with demonstrated RPO,
+  mixed-version rolling upgrade, live scale-out 3→5 under load, and an
+  offset-replay hammer with no impact on live consumers.
+
+## Post-1.0 roadmap
+
+Known limits, in the open. Run Narad behind a trusted ingress and these
+are workable today; they are the next engineering items, roughly in order.
+
+1. **Partition rebalance + node decommission.** New pods join the Raft
+   cluster and serve topics created after they join, but existing
+   partition ownership is sticky — new capacity does not absorb existing
+   partitions, and there is no scale-down path. Both need the same
+   machinery (safe drain, log move with CRC verification, atomic
+   ownership flip), so they ship together.
+2. **Native TLS & rate limiting.** Narad serves plain HTTP; TLS must
+   terminate at an ingress and the ingress→Narad hop must be trusted.
+   Native TLS, mutual TLS between cluster nodes, and per-user/IP rate
    limiting remain future work.
-2. **Durability / DR contract (hard gate).** With no data replication
-   (one owner per partition; its volume is the only copy), we need a
-   *tested* backup/restore runbook for every loss scenario — metastore
-   quorum loss and voter replacement, partition-log/WAL volume snapshot +
-   restore-by-reattach, and the "volume lost = bounded, documented data
-   loss" procedure — with stated RPO (≈ fsync cadence) and RTO (≈ restart
-   + recovery scan).
-3. **Liveness-aware routing (finish the HA model).** The baseline already
-   works: consume rotates only over live owners and skips dead-owner
-   partitions, partition assignment is sticky (a dead owner's partition
-   waits for it to return rather than being reassigned), and the produce
-   dispatcher treats a dead owner as unavailable. Remaining: lag-aware
-   partition selection (today it is plain rotation), return a retryable
-   **503** for a pinned / dead-owner consume + ack (today that path can
-   surface **421**), and fix cursor advance on empty polls so a busy
-   partition cannot starve others. (Keyed produce to a dead partition is
-   inherently unavailable — to be documented.)
-4. **Partition rebalance / scale-out contract.** New Narad pods can join
-   the cluster, but existing partition ownership is sticky today; new
-   capacity does not automatically absorb existing partitions. Before
-   production scale-out, add an explicit rebalance protocol: choose
-   candidate partitions, drain or pause writes safely, move/copy the
-   partition log plus consumer offset state, verify high-watermark and
-   frame CRCs on the destination, atomically update ownership, and roll
-   back cleanly on failure. This needs load-aware placement, operator
-   controls, metrics, and tests for adding/removing pods under traffic.
-5. **Soak, SLOs & capacity.** Define and prove the numbers over time:
-   produce-accept p99, produce→visible p99, consume p99, max sustainable
-   throughput, max lag, recovery time. Quantify the synchronous
-   fsync + CRC-readback cost on the commit path. Multi-hour soak under
-   fault injection against the SLOs, wired to Grafana + alerts.
-6. **Upgrade/rollback contract.** Current pre-1.0 internal builds use
-   current-only on-disk and node-RPC formats; incompatible internal
-   changes may require wiping development data. Before 1.0, add explicit
-   version headers + migrations for durable formats and version-negotiate
-   cluster RPC / QUIC ALPN so N and N+1 coexist during rolling upgrades.
-   Then freeze the HTTP API + receipt-handle + wire contracts and cut
-   **1.0**.
+3. **Routing polish.** Lag-aware partition selection (today: rotation),
+   a retryable 503 for pinned dead-owner consume/ack (today that path
+   can surface 421), and cursor advance on empty polls.
