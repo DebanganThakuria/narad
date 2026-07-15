@@ -145,6 +145,8 @@ func runClientTopicsCreate(args []string) error {
 	visibilityMs := fs.Int64("visibility-timeout-ms", 0, "consumer visibility timeout in ms (0 = server default)")
 	maxInFlight := fs.Int64("max-in-flight-per-partition", 0, "per-partition reservation cap (0 = server default)")
 	maxAckedAhead := fs.Int64("max-acked-ahead-per-partition", 0, "per-partition out-of-order ack cap (0 = server default)")
+	parent := fs.String("parent", "", "create as a fan-out child of this topic (anti-affine replica placement; 0 partitions = inherit parent's)")
+	fanoutDelayMs := fs.Int64("fanout-delay-ms", 0, "with --parent: deliver each record only after this delay past its parent commit")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -153,6 +155,12 @@ func runClientTopicsCreate(args []string) error {
 	}
 
 	body := map[string]any{"name": fs.Arg(0)}
+	if *parent != "" {
+		body["parent"] = *parent
+	}
+	if *fanoutDelayMs > 0 {
+		body["fanout_delay_ms"] = *fanoutDelayMs
+	}
 	if *partitions > 0 {
 		body["partitions"] = *partitions
 	}

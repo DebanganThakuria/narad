@@ -133,4 +133,11 @@ type PartitionStats struct {
 	HighWatermark   int64 `json:"high_watermark"`
 	SizeBytes       int64 `json:"size_bytes"`
 	OldestSegmentAt int64 `json:"oldest_segment_at,omitempty"`
+	// OwnerNode is the cluster member that owns this partition (its
+	// disk holds the data). Stamped from the assignment view when stats
+	// are aggregated across the cluster; empty in single-node paths that
+	// never consult assignments. For a fan-out child created with
+	// `parent`, comparing OwnerNode per index against the parent shows
+	// the anti-affine replica placement.
+	OwnerNode string `json:"owner_node,omitempty"`
 }

@@ -63,6 +63,17 @@ type CreateOpts struct {
 	// Owner is the authenticated creator; recorded on the topic for
 	// owner-or-admin alter/delete checks. Empty when security is off.
 	Owner string
+	// Parent, when set, creates the topic as a fan-out child of that
+	// topic in one operation (create → attach → assign). Because the
+	// parent link exists before partitions are placed, the child gets
+	// anti-affine placement: partition p lands on a different node than
+	// the parent's partition p — the replica pattern. Partitions == 0
+	// then defaults to the PARENT's partition count (matching counts is
+	// what makes the per-key guarantee exact), not the server default.
+	Parent string
+	// FanoutDelayMs makes the created child a delay child. Only
+	// meaningful with Parent set.
+	FanoutDelayMs int64
 }
 
 // PartitionAssigner assigns a topic partition range to cluster members.
