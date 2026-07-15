@@ -132,6 +132,8 @@ POST/GET/DELETE /v1/users               accounts & grants
 
 You just read all of it. If you know HTTP and `curl`, you already know Narad — no client library to vendor, no binary protocol to debug at 3am, no consumer-group state machine to meditate on.
 
+**And the message body is whatever you want it to be.** JSON, plain text, protobuf, a gzip blob, an image — produce is a raw octet-stream and the broker adapts on the way out (JSON comes back verbatim, text as text, binary safely base64-flagged). Compare: SQS flat-out forbids binary bodies, and Pub/Sub's HTTP API makes *you* base64-encode every single message before sending. Narad's producers just send.
+
 And the simplicity goes all the way down. One binary, one repo, written to be **read** — a second-year engineer can trace a produce from HTTP handler to fsync in an afternoon (the [Internals](internals/index.md) section literally walks the exact function names). You don't need a dedicated DevOps team, and you don't need the one grey-bearded engineer who "knows the broker" — if that person leaves, the next person reads the docs and carries on. Two-person startup or hundred-team org, second year or twentieth: if you can run a StatefulSet, you can run Narad.
 
 Boring to operate. Readable to the bottom. That's not a limitation — that's the whole point.
