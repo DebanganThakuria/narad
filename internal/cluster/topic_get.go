@@ -37,6 +37,7 @@ func (rt *Router) RouteGetTopic(ctx context.Context, r *http.Request, topicName 
 			if !ok {
 				return topic.Details{}, errs.ErrNotPartitionOwner
 			}
+			partitionStats.OwnerNode = assignment.OwnerID
 			merged = append(merged, partitionStats)
 			continue
 		}
@@ -47,6 +48,7 @@ func (rt *Router) RouteGetTopic(ctx context.Context, r *http.Request, topicName 
 		if err != nil {
 			return topic.Details{}, err
 		}
+		partitionStats.OwnerNode = assignment.OwnerID
 		merged = append(merged, partitionStats)
 	}
 

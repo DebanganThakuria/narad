@@ -100,6 +100,9 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	if err := validateTopicName(opts.Name); err != nil {
 		return topic.Topic{}, err
 	}
+	if err := m.resolveCreateAsChild(ctx, &opts); err != nil {
+		return topic.Topic{}, err
+	}
 	// Wait before lockTopicName so a gated create doesn't stall
 	// deletes/updates of the same name behind the gate.
 	if err := m.waitCreateGate(ctx); err != nil {
@@ -137,9 +140,28 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 			return topic.Topic{}, m.rollbackCreatedTopic(ctx, opts.Name, err)
 		}
 	}
+	// Attach BEFORE partition assignment: placement reads the parent
+	// link to keep the child's partitions off the parent's nodes. A
+	// failed attach rolls the create back so no half-linked topic
+	// survives.
+	if opts.Parent != "" {
+		if err := m.metastore.AttachChild(ctx, opts.Parent, opts.Name, opts.FanoutDelayMs); err != nil {
+			if errors.Is(err, errs.ErrNotFound) {
+				err = fmt.Errorf("%w: %v", ErrNotFound, err)
+			}
+			return topic.Topic{}, m.rollbackCreatedTopic(ctx, opts.Name, err)
+		}
+	}
 	if m.assigner != nil {
 		if err := m.assigner.AssignNewPartitions(ctx, opts.Name, 0, t.Partitions); err != nil {
 			m.logger.Warn("topic created without immediate partition assignment", "topic", opts.Name, "err", err)
+		}
+	}
+	if opts.Parent != "" {
+		// Return the attached view (role, parent, attach epoch, delay),
+		// not the pre-attach record.
+		if attached, err := m.GetTopic(ctx, opts.Name); err == nil {
+			t = attached
 		}
 	}
 
@@ -152,6 +174,43 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 		"max_acked_ahead_per_partition", t.MaxAckedAheadPerPartition)
 
 	return t, nil
+}
+
+// resolveCreateAsChild validates the Parent/FanoutDelayMs pair and,
+// for a create-as-child, defaults Partitions to the parent's count —
+// matching counts make the anti-affine per-key guarantee exact. It
+// runs before anything is written, so every failure is a clean 4xx.
+func (m *Manager) resolveCreateAsChild(ctx context.Context, opts *CreateOpts) error {
+	if opts.Parent == "" {
+		if opts.FanoutDelayMs != 0 {
+			return fmt.Errorf("%w: fanout_delay_ms requires parent", ErrInvalid)
+		}
+		return nil
+	}
+	if err := validateTopicName(opts.Parent); err != nil {
+		return err
+	}
+	if opts.Parent == opts.Name {
+		return fmt.Errorf("%w: a topic cannot be its own parent", ErrInvalid)
+	}
+	if opts.FanoutDelayMs < 0 {
+		return fmt.Errorf("%w: fanout_delay_ms must be >= 0", ErrInvalid)
+	}
+	if opts.FanoutDelayMs > topic.MaxFanoutDelayMs {
+		return fmt.Errorf("%w: fanout_delay_ms (%d) exceeds the maximum of %d (1 year)",
+			ErrInvalid, opts.FanoutDelayMs, topic.MaxFanoutDelayMs)
+	}
+	parent, err := m.GetTopic(ctx, opts.Parent)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, errs.ErrNotFound) {
+			return fmt.Errorf("%w: parent topic %q", ErrNotFound, opts.Parent)
+		}
+		return err
+	}
+	if opts.Partitions == 0 {
+		opts.Partitions = parent.Partitions
+	}
+	return nil
 }
 
 // topicFromOpts resolves CreateOpts against the configured defaults

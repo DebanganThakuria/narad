@@ -21,6 +21,13 @@ type createRequest struct {
 	MaxInFlightPerPartition   int64           `json:"max_in_flight_per_partition"`
 	MaxAckedAheadPerPartition int64           `json:"max_acked_ahead_per_partition"`
 	Schema                    json.RawMessage `json:"schema,omitempty"`
+	// Parent creates the topic as a fan-out child of an existing topic
+	// in one call, which is what gets the child anti-affine partition
+	// placement (the replica pattern). FanoutDelayMs > 0 additionally
+	// makes it a delay child. Partitions == 0 with Parent set inherits
+	// the parent's partition count.
+	Parent        string `json:"parent,omitempty"`
+	FanoutDelayMs int64  `json:"fanout_delay_ms,omitempty"`
 	// Owner is server-assigned: whatever the client sends is discarded
 	// and replaced with the authenticated identity before the request
 	// is applied or forwarded.
@@ -40,6 +47,12 @@ func Create(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 		if !s.Authorize(w, r, user.ActionCreate, req.Name) {
+			return
+		}
+		// Create-as-child is also an attach: it links the new topic to
+		// req.Parent, so it needs the same manage right on the parent as
+		// POST /v1/topics/{parent}/children.
+		if req.Parent != "" && !s.AuthorizeTopicManage(w, r, req.Parent) {
 			return
 		}
 
@@ -70,6 +83,8 @@ func Create(s *handlers.Set) http.HandlerFunc {
 			MaxInFlightPerPartition:   req.MaxInFlightPerPartition,
 			MaxAckedAheadPerPartition: req.MaxAckedAheadPerPartition,
 			Schema:                    req.Schema,
+			Parent:                    req.Parent,
+			FanoutDelayMs:             req.FanoutDelayMs,
 			Owner:                     req.Owner,
 		})
 		if err != nil {
