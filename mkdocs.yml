@@ -71,6 +71,7 @@ nav:
       - Topics: client/topics.md
       - Producing: client/producing.md
       - Consuming: client/consuming.md
+      - Handling Retries: client/handling-retries.md
       - Fan-out & Delay: client/fanout-and-delay.md
       - Users & Access: client/users-and-access.md
       - Guarantees & Errors: client/guarantees-and-errors.md
