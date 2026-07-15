@@ -5,8 +5,6 @@
 [![CI](https://github.com/DebanganThakuria/narad/actions/workflows/ci.yml/badge.svg)](https://github.com/DebanganThakuria/narad/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/DebanganThakuria/narad)](./go.mod)
-[![Go Reference](https://pkg.go.dev/badge/github.com/debanganthakuria/narad.svg)](https://pkg.go.dev/github.com/debanganthakuria/narad)
-[![codecov](https://codecov.io/gh/DebanganThakuria/narad/graph/badge.svg)](https://codecov.io/gh/DebanganThakuria/narad)
 
 <p align="center">
   <img src="./assets/narad.png" alt="Narad logo: durable messages, timeless connections" width="420">
