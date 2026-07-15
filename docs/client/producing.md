@@ -8,7 +8,7 @@ curl -u $AUTH -X POST \
   --data-binary @message.json
 ```
 
-- The **body is the message** — raw bytes, up to **1 MiB**. JSON, protobuf, plain text: Narad doesn't care (unless the topic has a schema, in which case the body must validate against it).
+- The **body is the message** — raw bytes, up to **1 MiB**. JSON, protobuf, plain text, an image: Narad doesn't care (unless the topic has a schema, in which case the body must validate against it). No client-side encoding, ever — see [how each kind comes back](consuming.md#the-payload-comes-back-the-way-you-sent-it).
 - `key` (query param, optional) — messages with the same key stick to the same partition in normal operation: locality for fan-out and consumers, not an ordering guarantee.
 - `partition` (query param, optional) — pin the message to an exact partition, overriding key hashing. Most apps never need this.
 - No key and no partition? Narad spreads messages across partitions round-robin.

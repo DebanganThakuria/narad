@@ -29,6 +29,18 @@ curl -u $AUTH "$NARAD/v1/topics/orders/consume?wait=10s"
 
 You may also pass `partition=N` to consume from one partition only, or `offset=N&partition=N` to **replay** — read any retained message by position without affecting queue state. Replay is read-only: no reservation, no receipt handle.
 
+## The payload comes back the way you sent it
+
+Produce takes raw bytes, so the response's `payload` field adapts to what was produced:
+
+| You produced | You consume |
+| --- | --- |
+| A JSON value (`{"a":1}`, `[1,2]`, `"hi"`, `42`) | That exact JSON, byte-for-byte verbatim |
+| Plain text (`hello world`) | A JSON string: `"payload": "hello world"` |
+| Raw binary (an image, protobuf, gzip…) | A base64 string, flagged: `"payload_encoding": "base64"` |
+
+The rule for consumers: **if `payload_encoding` is `"base64"`, decode it; otherwise use the payload as-is.** JSON strings can't carry arbitrary bytes, so base64 is the one case where Narad must wrap — and it always tells you when it did. Text and JSON round-trip untouched.
+
 ## Acking
 
 ```bash
