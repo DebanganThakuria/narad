@@ -17,7 +17,7 @@ is straightforward to run locally or in Kubernetes.
 
 Narad is at **[v1.0.0](https://github.com/DebanganThakuria/narad/releases/tag/v1.0.0)** —
 graduated after a chaos matrix, multi-day soak windows (300M+ messages at
-1,000 msg/s with zero loss), a 12,000 msg/s capacity run, and live
+1,000 msg/s with zero loss), a 50,000 msg/s full-flow bench, and live
 backup/restore, mixed-version-upgrade, and offset-replay drills. TLS is
 expected to terminate at an ingress in front of Narad; keep the
 ingress→Narad hop on a trusted network.
@@ -77,10 +77,9 @@ deployment/configuration/monitoring handbook, and code-level internals with diag
 
 ## Observed benchmark
 
-In-cluster load ramp, 5 nodes (~5 CPU / 1 GiB limit each, zstd): **12,000 msg/s
-produce sustained at p99 = 14 ms, zero errors** — highest stage tested; the
-load generator saturated before the broker did. Consume+ack drain: ~13,000/s.
-p99 was flat from 500/s to 12,000/s. Full method and stages:
+Bench run, 3-node cluster: **50,000 msg/s sustained through the full
+produce → consume → ack flow** — the load generator saturated before the
+broker did, so treat that as a floor, not a ceiling. Details:
 [Scaling & Recovery](https://debanganthakuria.github.io/narad/operate/scaling-and-recovery/).
 
 ## Architecture
@@ -500,8 +499,9 @@ and the [Operate handbook](https://debanganthakuria.github.io/narad/operate/).
   300M+ messages in aggregate, zero lost, zero early delay fires.
 - **Chaos** — `kill -9` of partition owners, Raft leaders, and joining
   nodes; restarts mid-produce; infrastructure node churn. All zero-loss.
-- **Capacity** — 12,000 msg/s sustained at p99 = 14 ms with zero errors;
-  the load generator saturated before the broker did.
+- **Capacity** — 50,000 msg/s sustained through the full
+  produce → consume → ack flow on a 3-node cluster; the load generator
+  saturated before the broker did, so that's a floor.
 - **Operational drills** — backup/restore with demonstrated RPO,
   mixed-version rolling upgrade, live scale-out 3→5 under load, and an
   offset-replay hammer with no impact on live consumers.
