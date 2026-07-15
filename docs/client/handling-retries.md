@@ -58,14 +58,29 @@ This is the pattern the classic worker frameworks (Sidekiq, and the SQS redrive 
 
 ## Pattern 4: spaced backoff — the retry-topic pair
 
-Requeue-at-tail retries again *immediately* (an empty queue redelivers in milliseconds). When failures need breathing room — a rate-limited API, a database failing over — use Narad's native delay machinery as your backoff:
+Requeue-at-tail retries again *immediately* (an empty queue redelivers in milliseconds). When failures need breathing room — a rate-limited API, a database failing over — use Narad's native delay machinery as your backoff.
+
+First, the rule that makes the shape below make sense: **you cannot produce into a delayed child.** Narad rejects it (`409`) because a direct write would bypass the delay the topic promises. A delayed child has exactly one source — its parent — and it receives *everything* the parent receives. So the parent is your write side, the child is your read side, and the parent must be a **dedicated retry topic** that carries nothing but retries:
 
 ```text
-jobs-retry            ← a parent topic you produce retries into
-  └── jobs-retry-30s  ← its delayed child (fanout_delay_ms: 30000)
+jobs                       ← main topic: produce work here, consume from here
+
+jobs-retry-30s             ← tier PARENT: produce failed messages here…
+  └── jobs-retry-30s-run   ← …its delayed child (fanout_delay_ms: 30000):
+                              consume retries from here, 30s later
 ```
 
-Your consumers consume `jobs` **and** `jobs-retry-30s`. A failed message gets produced (envelope counter incremented) to `jobs-retry`, and its copy becomes consumable exactly 30 seconds later — durably, surviving restarts of everything, no in-process timers holding your fate. Want tiers? Attach `jobs-retry-2m` and `jobs-retry-10m` children to matching parents and pick by `delivery_count`. Fixed tiers, not arbitrary per-message delays — in practice two or three tiers cover every real policy.
+Your consumers consume `jobs` **and** `jobs-retry-30s-run`. On failure, produce the message (envelope counter incremented) to `jobs-retry-30s`; its copy becomes consumable exactly 30 seconds later — durably, surviving restarts of everything, no in-process timers holding your fate.
+
+Want tiers? **One parent + one child per tier**, picked by `delivery_count`:
+
+```text
+jobs-retry-30s   └── jobs-retry-30s-run    (delay 30s)   ← delivery_count 1–2
+jobs-retry-5m    └── jobs-retry-5m-run     (delay 5m)    ← delivery_count 3–4
+jobs-retry-30m   └── jobs-retry-30m-run    (delay 30m)   ← delivery_count 5+
+```
+
+Do **not** attach several delay children to one retry parent to "get tiers" — every child copies every parent message, so each failed message would come back once *per tier*. One tier, one pair. Fixed tiers, not arbitrary per-message delays — in practice two or three cover every real policy.
 
 ## The one discipline that is not optional: retry your acks
 
