@@ -42,6 +42,8 @@ type Metrics struct {
 	// Inventory / lag (gauges; updated by poller)
 	TopicsTotal                prometheus.Gauge
 	PartitionsTotal            prometheus.Gauge
+	OpenPartitionLogs          prometheus.Gauge
+	IdleLogsEvictedTotal       prometheus.Counter
 	DataDirSizeBytes           prometheus.Gauge
 	DataDirAvailableBytes      prometheus.Gauge
 	TopicBytes                 *prometheus.GaugeVec // topic
@@ -190,6 +192,18 @@ func New(reg prometheus.Registerer) *Metrics {
 			Namespace: Namespace,
 			Name:      "partitions_total",
 			Help:      "Total partitions across all topics.",
+		}),
+
+		OpenPartitionLogs: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Name:      "open_partition_logs",
+			Help:      "Partition logs currently open on this node (refreshed each idle-eviction sweep).",
+		}),
+
+		IdleLogsEvictedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "idle_logs_evicted_total",
+			Help:      "Partition logs closed by idle eviction; the next access reopens them lazily.",
 		}),
 
 		DataDirSizeBytes: prometheus.NewGauge(prometheus.GaugeOpts{
@@ -392,7 +406,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.BytesProducedTotal, m.BytesConsumedTotal,
 		m.ProduceRejectionsTotal,
 		m.ConsumeWaitSeconds, m.ConsumeEmptyTotal,
-		m.TopicsTotal, m.PartitionsTotal, m.DataDirSizeBytes, m.DataDirAvailableBytes,
+		m.TopicsTotal, m.PartitionsTotal, m.OpenPartitionLogs, m.IdleLogsEvictedTotal, m.DataDirSizeBytes, m.DataDirAvailableBytes,
 		m.TopicBytes, m.PartitionSizeBytes, m.Segments,
 		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
 		m.InFlightSize, m.AckedAheadSize, m.AckRejected, m.AckExtendedTotal, m.NackTotal,

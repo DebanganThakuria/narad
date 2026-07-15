@@ -1,5 +1,7 @@
 package storage
 
+import "time"
+
 // LatestOffset is the offset of the most recently appended record, or
 // 0 for an empty log. Use NextOffset to disambiguate "empty" from
 // "one record at offset 0".
@@ -49,6 +51,13 @@ func (l *Log) OldestOffset() int64 {
 		return 0
 	}
 	return l.segments[0].baseOffset
+}
+
+// RetentionMaxAge reports the age-based retention bound this log was
+// opened with. Zero means keep forever. The idle evictor uses it to
+// defer eviction while the reaper still owes sealed-segment deletions.
+func (l *Log) RetentionMaxAge() time.Duration {
+	return l.opts.Retention.MaxAge
 }
 
 // SizeBytes returns the total on-disk size of all segment files.

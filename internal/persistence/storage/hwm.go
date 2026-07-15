@@ -53,6 +53,29 @@ func (l *Log) bootstrapHighWatermark(nextOffset int64) {
 	l.persistedHWM.Store(nextOffset)
 }
 
+// ReadPersistedHighWatermark reads a partition directory's durable
+// high-watermark file without opening the log. ok=false when the file
+// (or the directory) does not exist or is empty — an empty partition.
+// Close force-syncs the HWM file, so for a cleanly closed log this
+// value is exact, not lagging; idle-evicted logs rely on that to
+// answer "is there committed backlog?" without reopening.
+func ReadPersistedHighWatermark(dir string) (int64, bool, error) {
+	data, err := os.ReadFile(hwmFilePath(dir))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("storage: read persisted hwm: %w", err)
+	}
+	if len(data) == 0 {
+		return 0, false, nil
+	}
+	if len(data) != 8 {
+		return 0, false, fmt.Errorf("storage: invalid hwm file size %d", len(data))
+	}
+	return max(int64(binary.BigEndian.Uint64(data)), 0), true, nil
+}
+
 // PersistedHighWatermark reads the HWM back from disk — the value a
 // restart would recover — falling back to the in-memory HWM when no
 // file has been written yet. Used to verify durability, not on any hot

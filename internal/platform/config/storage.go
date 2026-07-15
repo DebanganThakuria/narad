@@ -47,6 +47,13 @@ type StorageConfig struct {
 	// RetentionCheckIntervalMs is the period between retention
 	// reaper sweeps per partition.
 	RetentionCheckIntervalMs int `json:"retention_check_interval_ms"`
+
+	// IdleLogEvictionMs closes partition logs untouched by any produce,
+	// consume, replay, or fan-out backlog read for this long; the next
+	// access reopens them lazily. Frees the goroutines, file
+	// descriptors, and buffers of used-then-abandoned topics. Zero
+	// disables eviction.
+	IdleLogEvictionMs int `json:"idle_log_eviction_ms"`
 }
 
 // FsyncMode controls how aggressively the storage layer flushes

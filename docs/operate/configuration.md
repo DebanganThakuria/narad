@@ -71,22 +71,17 @@ Applied when a topic-create omits the field; existing topics keep their values.
 
 For everything not worth an env var — mostly the storage engine. The chart renders `narad.config` values into this file. Full shape with defaults:
 
+Storage accepts exactly four keys — everything else (fsync mode, flush/sync
+cadence, segment sizing) is an engine internal with production defaults, and
+the loader **rejects** any attempt to set it:
+
 ```json
 {
   "storage": {
     "data_dir": "data",
     "codec": "none",                        // "none" | "zstd" — yes, OFF by default
     "compression_level": "fastest",         // zstd: fastest | default | better | best
-    "fsync": "batched",                     // "batched" | "per_write"
-    "flush_bytes": 1048576,
-    "flush_records": 1000,
-    "flush_interval_ms": 100,
-    "sync_interval_ms": 1000,
-    "sync_bytes": 8388608,
-    "high_watermark_sync_interval_ms": 5000,
-    "ingress_wal_sync_interval_ms": 10,
-    "segment_bytes": 67108864,              // 64 MiB — the retention granule
-    "retention_check_interval_ms": 60000
+    "idle_log_eviction_ms": 1800000         // close logs untouched this long; 0 disables
   },
   "http": { "...": "same knobs as the env vars" },
   "topic": { "...": "same as env" },
@@ -97,6 +92,29 @@ For everything not worth an env var — mostly the storage engine. The chart ren
 ```
 
 Secrets (`NARAD_CLUSTER_SECRET`, `NARAD_ADMIN_PASSWORD`) are deliberately **not** file-configurable — files end up in git, and git ends up on the internet.
+
+### Idle topics cost (almost) nothing
+
+An open partition log holds two goroutines, open file descriptors, and
+buffers — and topics people create and abandon would hold them forever.
+So Narad closes any partition log untouched for `idle_log_eviction_ms`
+(default 30 minutes) and reopens it lazily, invisibly, on the next
+produce, consume, or replay. Details that make this safe:
+
+- A topic that was **never** used opens nothing anywhere — creation is
+  just a metastore entry.
+- Metrics polls never keep a log warm (they observe without opening),
+  and a fan-out child that is attached but silent doesn't either — its
+  cursor checks the durable high-watermark file instead of the log.
+  Committed backlog always forces the log open: correctness first.
+- Eviction waits until retention has finished deleting aged segments,
+  so closing never strands data the reaper still owes you.
+- Watch it: `narad_open_partition_logs` and
+  `narad_idle_logs_evicted_total`.
+
+The upshot: creating short-lived topics and forgetting to delete them
+is rude but free. Deleting them is still nicer — metastore entries and
+the last active segment on disk stay until you do.
 
 ### The fsync knob, honestly explained
 

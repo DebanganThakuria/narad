@@ -47,9 +47,24 @@ func (e *Engine) ReadFanoutSlab(ctx context.Context, topicName string, partition
 	if !e.isLocalOwner(topicName, partition) {
 		return topic.FanoutSlab{}, ErrNotPartitionOwner
 	}
-	log, err := e.logs.Get(topicName, partition)
-	if err != nil {
-		return topic.FanoutSlab{}, err
+	// Peek first: a caught-up cursor polls this once a second forever,
+	// and going through Get would stamp the log as active — an
+	// attached-but-silent child would then hold its parent open and
+	// idle eviction could never fire. When the log is closed, the
+	// durable HWM file (force-synced by Close) answers "is there
+	// committed backlog?" without opening anything. Only genuine
+	// backlog — or a tail-anchor read, which needs the live tail —
+	// opens the log.
+	log, open := e.logs.Peek(topicName, partition)
+	if !open {
+		if slab, served, err := e.fanoutSlabWhileClosed(ctx, topicName, partition, opts); served {
+			return slab, err
+		}
+		var err error
+		log, err = e.logs.Get(topicName, partition)
+		if err != nil {
+			return topic.FanoutSlab{}, err
+		}
 	}
 	if opts.MaxRecords <= 0 {
 		opts.MaxRecords = 1
@@ -205,4 +220,50 @@ func (e *Engine) readFanoutSlabOnce(log fanoutLog, opts topic.FanoutReadOpts) (t
 	}
 	slab.NextOffset = offset
 	return slab, nil
+}
+
+// fanoutSlabWhileClosed serves a fan-out read against a partition whose
+// log is not open, without opening it. served=false means the caller
+// must open the log for real: the cursor is behind the durable HWM
+// (backlog to drain — correctness over eviction, always), the read is
+// a tail-anchor (needs the live tail), or the HWM file is unreadable
+// (open for ground truth).
+//
+// The caught-up case sleeps out the long-poll in short slices,
+// re-checking Peek each slice: a produce reopens the log through Get,
+// and the next slice notices, falls back to the caller's open path,
+// and resumes real long-polling — so the first record after an idle
+// period pays at most one slice of extra latency.
+func (e *Engine) fanoutSlabWhileClosed(ctx context.Context, topicName string, partition int, opts topic.FanoutReadOpts) (topic.FanoutSlab, bool, error) {
+	if opts.FromOffset == topic.FanoutTailOffset {
+		return topic.FanoutSlab{}, false, nil
+	}
+	partitionDir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
+	hwm, _, err := storage.ReadPersistedHighWatermark(partitionDir)
+	if err != nil {
+		return topic.FanoutSlab{}, false, nil
+	}
+	if opts.FromOffset < hwm {
+		return topic.FanoutSlab{}, false, nil
+	}
+
+	const slice = 250 * time.Millisecond
+	deadline := time.Now().Add(opts.Wait)
+	for opts.Wait > 0 {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		timer := time.NewTimer(min(remaining, slice))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return topic.FanoutSlab{NextOffset: opts.FromOffset, HighWatermark: hwm}, true, nil
+		case <-timer.C:
+		}
+		if _, reopened := e.logs.Peek(topicName, partition); reopened {
+			return topic.FanoutSlab{}, false, nil
+		}
+	}
+	return topic.FanoutSlab{NextOffset: opts.FromOffset, HighWatermark: hwm}, true, nil
 }
