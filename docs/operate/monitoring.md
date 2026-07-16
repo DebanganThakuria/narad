@@ -2,6 +2,12 @@
 
 `GET /metrics` on any node serves Prometheus metrics (unauthenticated by design — it's a scrape target, not a secret). The chart ships a `ServiceMonitor` when `metrics.enabled: true`. Namespace prefix: `narad_`.
 
+**Don't build a dashboard — import ours.** The repo ships a ready-to-go Grafana dashboard at
+[`ops/monitoring/grafana/dashboards/narad-node-dashboard.json`](https://github.com/DebanganThakuria/narad/blob/master/ops/monitoring/grafana/dashboards/narad-node-dashboard.json):
+14 panels covering throughput, consumer backlog, errors & rejections, disk, storage fsync
+latency, and process health. It's the exact dashboard the 47-hour, 170M-message 1.0 soak
+was judged on.
+
 ## The four alerts that matter
 
 If you configure nothing else, configure these. Each one is a symptom that pages *you* before your users do:
