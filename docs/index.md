@@ -176,7 +176,15 @@ Boring to operate. Readable to the bottom. That's not a limitation — that's th
 
 - :material-magnify: **Replay on demand**
 
-    Everything is a retained log underneath. Point a consume at any offset within retention and re-read history — without disturbing the live queue.
+    Everything is a retained log underneath. Point a consume at any offset within retention and re-read history — without disturbing the live queue. Debugging a poison message means *reading it again*, not grepping logs.
+
+- :material-recycle: **Retries & DLQs — your policy, our primitives**
+
+    No baked-in retry engine to fight. Leases, delayed topics, and a `delivery_count` in your envelope compose into bounded retries, spaced backoff, and dead-letter queues — in ~10 lines of consumer code you control. [The complete menu →](client/handling-retries.md)
+
+- :material-chart-line: **Observability out of the box**
+
+    Every node serves Prometheus metrics on `/metrics`, zero config — queue depth, consumer lag, ack rates, and the honest delay-lag signal. A ready-to-import Grafana dashboard ships in the repo; it's the one our 47-hour soak was judged on. [Monitoring →](operate/monitoring.md)
 
 </div>
 
