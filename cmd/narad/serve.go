@@ -96,9 +96,18 @@ func runServe(args []string) error {
 	ctx, failServe := context.WithCancelCause(ctx)
 	defer failServe(nil)
 
+	memberAddr := advertisedMemberAddr(nodeID, cfg.HTTP.Addr, cfg.Cluster.Addr, cfg.Cluster.Peers)
+	// A multi-node cluster whose advertised member address is unroutable
+	// (a bare 0.0.0.0/:: bind with no host to borrow) will silently fail
+	// member registration — every peer resolves this node as its own
+	// loopback. Warn loudly; a single-node run is unaffected.
+	if len(cfg.Cluster.Peers) > 0 && memberAddrLikelyUnroutable(memberAddr) {
+		log.Warn("advertised member address is not routable by peers; set http.addr to a host:port or give this node a hostful cluster peer entry — member registration will not converge",
+			"member_addr", memberAddr, "node", nodeID)
+	}
 	member := metastore.Member{
 		ID:          nodeID,
-		Addr:        advertisedMemberAddr(nodeID, cfg.HTTP.Addr, cfg.Cluster.Addr, cfg.Cluster.Peers),
+		Addr:        memberAddr,
 		ClusterAddr: advertisedClusterAddr(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
 		Status:      metastore.MemberAlive,
 	}

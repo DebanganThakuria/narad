@@ -11,6 +11,14 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
 
+// writeLeaderForwardError answers a failed control-plane forward to the
+// leader with 503, not 502: the leader was momentarily unreachable
+// (election, partition, rolling restart), which is retryable — not a
+// bad gateway the client should treat as broken.
+func writeLeaderForwardError(w http.ResponseWriter, err error) {
+	http.Error(w, err.Error(), http.StatusServiceUnavailable)
+}
+
 // createForwardTimeout bounds a follower's create forward to the cluster
 // leader. The leader legitimately parks a create on its armed startup
 // create gate while startup reconciliation is still running — up to the
@@ -31,7 +39,7 @@ func (rt *Router) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, _
 	defer cancel()
 	res, err := rt.peer.CreateTopic(createCtx, memberAddr, body)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeLeaderForwardError(w, err)
 		return true
 	}
 	writePeerResponse(w, res)
@@ -46,7 +54,7 @@ func (rt *Router) RouteAlterTopic(ctx context.Context, w http.ResponseWriter, _ 
 	}
 	res, err := rt.peer.AlterTopic(ctx, memberAddr, topicName, body)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeLeaderForwardError(w, err)
 		return true
 	}
 	writePeerResponse(w, res)
@@ -69,7 +77,7 @@ func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, _
 	defer cancel()
 	res, err := rt.peer.DeleteTopic(deleteCtx, memberAddr, topicName)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeLeaderForwardError(w, err)
 		return true
 	}
 	writePeerResponse(w, res)

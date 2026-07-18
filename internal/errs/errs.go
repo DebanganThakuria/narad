@@ -37,6 +37,13 @@ var (
 
 	// ErrAlreadyExists reports that a metastore record already exists.
 	ErrAlreadyExists = errors.New("already exists")
+
+	// ErrUnavailable reports that a control-plane write could not be
+	// committed right now because there is no leader, leadership was
+	// lost mid-apply, or the leader could not be reached — all
+	// transient during elections, partitions, and rolling restarts.
+	// It maps to 503 so clients retry instead of treating it as a bug.
+	ErrUnavailable = errors.New("control plane temporarily unavailable")
 )
 
 // Partition log (storage).

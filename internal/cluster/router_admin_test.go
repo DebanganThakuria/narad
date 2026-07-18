@@ -485,8 +485,10 @@ func TestRouteDeleteTopicForwardsWhenLeaderAddressMatchesExactly(t *testing.T) {
 	if !forwarded {
 		t.Fatal("RouteDeleteTopic() = false, want true")
 	}
-	if res.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want %d", res.Code, http.StatusBadGateway)
+	// A forward that reaches a known leader address but fails the RPC
+	// (leader unreachable mid-election/partition) is retryable → 503.
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusServiceUnavailable)
 	}
 }
 
@@ -629,7 +631,7 @@ func TestBroadcastDeleteTopicAttemptsAllMembersDespiteFailure(t *testing.T) {
 // A create forward must carry a deadline covering the leader's startup
 // create gate window (~60s of metastore catch-up plus sweep work): without
 // one, the transport's short default reply timeout fires while the create
-// still executes on the leader — the client sees 502, the retry sees 409.
+// still executes on the leader — the client sees 503, the retry sees 409.
 func TestRouteCreateTopicForwardDeadlineCoversStartupGate(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
