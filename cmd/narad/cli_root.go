@@ -47,15 +47,13 @@ func newRootCmd() *cobra.Command {
 		newCtxCmd(),
 		newServerCmd(),
 		legacyStub("serve", "run the HTTP API server (default port 7942)", runServe),
-		legacyStub("client", "low-level client subcommands (see `narad client help`)", runClient),
 		legacyStub("version", "print build version and exit", runVersion),
 	)
 	return root
 }
 
-// legacyStub lists a legacy subcommand in cobra help. main.go routes
-// these names to the legacy dispatcher before cobra ever runs, so the
-// RunE here only fires for pathological invocations — delegate anyway.
+// legacyStub wraps a pre-cobra command (serve is the container
+// entrypoint; its flag parsing stays its own) as a passthrough.
 func legacyStub(name, short string, run func([]string) error) *cobra.Command {
 	return &cobra.Command{
 		Use:                name,
