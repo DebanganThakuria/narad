@@ -69,6 +69,7 @@ nav:
   - Compare: compare.md
   - Client Guide:
       - Getting Started: client/index.md
+      - The CLI: client/cli.md
       - Topics: client/topics.md
       - Producing: client/producing.md
       - Consuming: client/consuming.md

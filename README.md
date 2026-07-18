@@ -200,11 +200,21 @@ tests/
 
 ## Quickstart
 
-Install with Go:
+Install with Homebrew or Go:
 
 ```sh
-go install github.com/debanganthakuria/narad/cmd/narad@v1.0.0
-narad serve
+brew install debanganthakuria/narad/narad
+# or: go install github.com/debanganthakuria/narad/cmd/narad@latest
+
+narad server start --dev   # local playground: loopback, auth off
+```
+
+Then, from other terminals:
+
+```sh
+narad topic add demo
+narad sub demo --peek                                  # live, read-only tail
+narad pub demo '{"hello":"narad"}' --count 100 --rate 20
 ```
 
 Or build from a source checkout:
@@ -350,11 +360,15 @@ GET     /metrics                            Prometheus exposition
 ## CLI surface
 
 ```
-narad serve     run the HTTP API server (default port 7942)
-narad client    interact with a running narad serve over HTTP
-narad version   print build version
-narad --help    top-level help
+narad server start|report    run a broker · cluster overview table
+narad topic  add|ls|info|edit|rm|attach|detach|children
+narad pub · sub [--peek] · replay · bench
+narad user   add|grant|ls|rm
+narad ctx    add|select|ls|rm    named server+credential contexts
+narad serve · client · version   original commands, unchanged
 ```
+
+Full walkthrough: [The CLI](https://debanganthakuria.github.io/narad/client/cli/).
 
 Common `narad serve` flags:
 
