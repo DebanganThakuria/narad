@@ -5,11 +5,11 @@ Everything on this site can be done with `curl` — that's the point. But for hu
 ## Install
 
 ```sh
-brew install debanganthakuria/narad/narad     # macOS / Linuxbrew
+brew install debanganthakuria/narad/narad     # macOS / Linuxbrew (builds from source, needs ~a minute)
 go install github.com/debanganthakuria/narad/cmd/narad@latest
 ```
 
-Or grab a binary from the [releases page](https://github.com/DebanganThakuria/narad/releases). Shell completions: `narad completion bash|zsh|fish`.
+Shell completions: `narad completion bash|zsh|fish` (brew installs them automatically).
 
 ## The sixty-second demo
 
