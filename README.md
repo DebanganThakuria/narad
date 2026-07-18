@@ -266,38 +266,17 @@ make tools-install   # gofumpt + goimports into $(go env GOPATH)/bin
 
 `make fmt` auto-formats the tree; `make check` runs `fmt-check + vet + test`.
 
-In another terminal, the easiest way to drive the server is the
-built-in `narad client` subcommand:
+In another terminal, drive the server with the CLI:
 
 ```sh
-narad client topics create orders
-narad client topics list
-narad client topics get orders
-echo '{"id":1,"amount":1500}' | narad client produce --key c1 orders
-msg=$(narad client consume --wait 5s orders)
-echo "$msg" | jq -r .receipt_handle | narad client ack orders
-narad client topics alter --partitions 16 orders
-narad client topics delete orders
-
-# Create with explicit retention + visibility + per-partition caps.
-narad client topics create \
-  --partitions 8 \
-  --retention-ms 3600000 --visibility-timeout-ms 30000 \
-  --max-in-flight-per-partition 64 --max-acked-ahead-per-partition 256 \
-  orders
-
-# Update retention without restart.
-narad client topics alter --retention-ms 86400000 orders
-
-# Adjust the consumer-parallelism caps.
-narad client topics alter --max-in-flight-per-partition 128 orders
-
-# Register a JSON Schema (file or "-" for stdin).
-narad client topics alter --schema-file orders.schema.json orders
-
-# Paginated listing (limit defaults to 100, caps at 1000).
-narad client topics list --limit 50
-narad client topics list --limit 50 --page-token "<next_page_token from previous response>"
+narad topic add orders --partitions 8 --retention 1h --visibility 30s
+narad topic ls
+narad topic info orders
+narad pub orders '{"id":1,"amount":1500}' --key c1
+narad sub orders            # consume + ack; ctrl-c to stop
+narad sub orders --peek     # read-only live tail
+narad topic edit orders --retention 24h
+narad topic rm orders
 ```
 
 Or hit the HTTP API directly (all data routes live under `/v1`):
@@ -395,8 +374,8 @@ NARAD_CLUSTER_PEERS='narad-0@127.0.0.1:9101,narad-1@127.0.0.1:9102,narad-2@127.0
 Then point the client at any node:
 
 ```sh
-NARAD_ADDR=http://127.0.0.1:7942 narad client topics create orders
-NARAD_ADDR=http://127.0.0.1:7944 narad client topics get orders
+NARAD_ADDR=http://127.0.0.1:7942 narad topic add orders
+NARAD_ADDR=http://127.0.0.1:7944 narad topic info orders
 ```
 
 `NARAD_CLUSTER_PEERS` and `cluster.peers` must contain exactly three `id@host:port` voters including the local node, and `cluster.node_id` / `--node-id` must be set whenever peers are configured.
@@ -431,9 +410,9 @@ go test ./tests/e2e/... -race      # HTTP-level e2e against a real broker
 go test ./tests/e2e/... -run TestConsume   # one feature
 ```
 
-The CLI suite in `cmd/narad/client_test.go` exercises `narad client`
-commands against a real in-process HTTP server and asserts stdout/stderr
-behavior for topic CRUD plus produce/consume/ack flows.
+The CLI suite in `cmd/narad/cli_v2_test.go` exercises the CLI commands
+against a real in-process HTTP server: contexts, topic CRUD with human
+units, pub, and the read-only peek path.
 
 The e2e harness (`helpers_test.go`) builds a real broker with a
 single-node Raft metastore (waits for leader election) and temp partition

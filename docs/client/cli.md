@@ -73,4 +73,4 @@ narad user add|grant|ls|rm         grants as action:pattern — produce:orders-*
 narad ctx add|select|ls|rm         named server+credential profiles
 ```
 
-The original `narad serve` and `narad client ...` commands are unchanged for scripts that use them.
+`narad serve` remains the production server entrypoint (it's what the container image runs).

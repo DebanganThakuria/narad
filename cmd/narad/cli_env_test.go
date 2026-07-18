@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -19,11 +18,9 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
-	"github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/cluster"
 	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/consumer"
-	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
@@ -239,197 +236,4 @@ func mustZstdCodec(t *testing.T) codec.Codec {
 		t.Fatalf("zstd codec: %v", err)
 	}
 	return c
-}
-
-func TestClientTopicsCreateListGetAlterDeleteParity(t *testing.T) {
-	env := newCLITestEnv(t)
-
-	stdout, stderr, err := captureCLIOutput(t, func() error {
-		return runClient([]string{"topics", "create", "--addr", env.server.URL, "--partitions", "3", "--retention-ms", "3600000", "orders"})
-	}, "")
-	if err != nil {
-		t.Fatalf("topics create: %v", err)
-	}
-	if stderr != "" {
-		t.Fatalf("topics create stderr = %q, want empty", stderr)
-	}
-	created := decodeCLIJSON[topic.Topic](t, stdout)
-	if created.Name != "orders" || created.Partitions != 3 || created.RetentionMs != 3600000 {
-		t.Fatalf("created topic = %+v", created)
-	}
-	if err := waitForAssignments(env.store, "orders"); err != nil {
-		t.Fatalf("wait assignments: %v", err)
-	}
-
-	stdout, stderr, err = captureCLIOutput(t, func() error {
-		return runClient([]string{"topics", "list", "--addr", env.server.URL})
-	}, "")
-	if err != nil {
-		t.Fatalf("topics list: %v", err)
-	}
-	if stderr != "" {
-		t.Fatalf("topics list stderr = %q, want empty", stderr)
-	}
-	listed := decodeCLIJSON[struct {
-		Topics []topic.Topic `json:"topics"`
-	}](t, stdout)
-	if len(listed.Topics) != 1 || listed.Topics[0].Name != "orders" {
-		t.Fatalf("listed topics = %+v", listed.Topics)
-	}
-
-	stdout, stderr, err = captureCLIOutput(t, func() error {
-		return runClient([]string{"topics", "get", "--addr", env.server.URL, "orders"})
-	}, "")
-	if err != nil {
-		t.Fatalf("topics get: %v", err)
-	}
-	if stderr != "" {
-		t.Fatalf("topics get stderr = %q, want empty", stderr)
-	}
-	details := decodeCLIJSON[topic.Details](t, stdout)
-	if details.Topic.Name != "orders" || len(details.Partitions) != 3 {
-		t.Fatalf("topic details = %+v", details)
-	}
-
-	stdout, stderr, err = captureCLIOutput(t, func() error {
-		return runClient([]string{"topics", "alter", "--addr", env.server.URL, "--retention-ms", "0", "orders"})
-	}, "")
-	if err != nil {
-		t.Fatalf("topics alter: %v", err)
-	}
-	if stderr != "" {
-		t.Fatalf("topics alter stderr = %q, want empty", stderr)
-	}
-	altered := decodeCLIJSON[topic.Topic](t, stdout)
-	if altered.RetentionMs == 0 {
-		t.Fatalf("altered retention = %d, want defaulted non-zero value", altered.RetentionMs)
-	}
-
-	stdout, stderr, err = captureCLIOutput(t, func() error {
-		return runClient([]string{"topics", "delete", "--addr", env.server.URL, "orders"})
-	}, "")
-	if err != nil {
-		t.Fatalf("topics delete: %v", err)
-	}
-	if strings.TrimSpace(stdout) != "" {
-		t.Fatalf("topics delete stdout = %q, want empty", stdout)
-	}
-	if strings.TrimSpace(stderr) != "deleted" {
-		t.Fatalf("topics delete stderr = %q, want deleted", stderr)
-	}
-}
-
-func TestClientProduceConsumeAckParity(t *testing.T) {
-	env := newCLITestEnv(t)
-	if _, err := env.broker.CreateTopic(context.Background(), topics.CreateOpts{Name: "orders", Partitions: 3}); err != nil {
-		t.Fatalf("create topic: %v", err)
-	}
-	if err := waitForAssignments(env.store, "orders"); err != nil {
-		t.Fatalf("wait assignments: %v", err)
-	}
-
-	stdout, stderr, err := captureCLIOutput(t, func() error {
-		return runClient([]string{"produce", "--addr", env.server.URL, "--key", "customer-1", "orders"})
-	}, `{"id":1}`)
-	if err != nil {
-		t.Fatalf("produce: %v", err)
-	}
-	if stderr != "" {
-		t.Fatalf("produce stderr = %q, want empty", stderr)
-	}
-	if stdout != "" {
-		t.Fatalf("produce stdout = %q, want empty", stdout)
-	}
-	waitForAnyVisibleOffset(t, env.broker, "orders", []int64{0, 0, 0})
-
-	stdout, stderr, err = captureCLIOutput(t, func() error {
-		return runClient([]string{"consume", "--addr", env.server.URL, "orders"})
-	}, "")
-	if err != nil {
-		t.Fatalf("consume: %v", err)
-	}
-	if stderr != "" {
-		t.Fatalf("consume stderr = %q, want empty", stderr)
-	}
-	msg := decodeCLIJSON[topic.Message](t, stdout)
-	if msg.Topic != "orders" || strings.TrimSpace(string(msg.Payload)) != "{\n    \"id\": 1\n  }" || msg.ReceiptHandle == "" {
-		t.Fatalf("consumed message = %+v", msg)
-	}
-
-	stdout, stderr, err = captureCLIOutput(t, func() error {
-		return runClient([]string{"ack", "--addr", env.server.URL, "--handle", msg.ReceiptHandle, "orders"})
-	}, "")
-	if err != nil {
-		t.Fatalf("ack: %v", err)
-	}
-	if strings.TrimSpace(stdout) != "" {
-		t.Fatalf("ack stdout = %q, want empty", stdout)
-	}
-	if strings.TrimSpace(stderr) != "acked" {
-		t.Fatalf("ack stderr = %q, want acked", stderr)
-	}
-}
-
-func TestClientTopicsFanoutAttachChildrenDetach(t *testing.T) {
-	env := newCLITestEnv(t)
-
-	for _, name := range []string{"parent", "child"} {
-		_, _, err := captureCLIOutput(t, func() error {
-			return runClient([]string{"topics", "create", "--addr", env.server.URL, "--partitions", "3", name})
-		}, "")
-		if err != nil {
-			t.Fatalf("topics create %s: %v", name, err)
-		}
-		if err := waitForAssignments(env.store, name); err != nil {
-			t.Fatalf("wait assignments %s: %v", name, err)
-		}
-	}
-
-	stdout, _, err := captureCLIOutput(t, func() error {
-		return runClient([]string{"topics", "attach", "--addr", env.server.URL, "parent", "child"})
-	}, "")
-	if err != nil {
-		t.Fatalf("topics attach: %v", err)
-	}
-	attached := decodeCLIJSON[topic.Topic](t, stdout)
-	if attached.Role != topic.RoleParent || len(attached.Children) != 1 || attached.Children[0] != "child" {
-		t.Fatalf("attach response = %+v, want parent with [child]", attached)
-	}
-
-	stdout, _, err = captureCLIOutput(t, func() error {
-		return runClient([]string{"topics", "children", "--addr", env.server.URL, "parent"})
-	}, "")
-	if err != nil {
-		t.Fatalf("topics children: %v", err)
-	}
-	listed := decodeCLIJSON[struct {
-		Parent   string `json:"parent"`
-		Children []struct {
-			Name string `json:"name"`
-		} `json:"children"`
-	}](t, stdout)
-	if listed.Parent != "parent" || len(listed.Children) != 1 || listed.Children[0].Name != "child" {
-		t.Fatalf("children listing = %+v", listed)
-	}
-
-	stdout, stderr, err := captureCLIOutput(t, func() error {
-		return runClient([]string{"topics", "detach", "--addr", env.server.URL, "parent", "child"})
-	}, "")
-	if err != nil {
-		t.Fatalf("topics detach: %v", err)
-	}
-	if stdout != "" || stderr != "detached\n" {
-		t.Fatalf("detach output = (%q, %q), want detached on stderr", stdout, stderr)
-	}
-
-	stdout, _, err = captureCLIOutput(t, func() error {
-		return runClient([]string{"topics", "get", "--addr", env.server.URL, "child"})
-	}, "")
-	if err != nil {
-		t.Fatalf("topics get child: %v", err)
-	}
-	details := decodeCLIJSON[topic.Details](t, stdout)
-	if details.Role != topic.RoleStandalone || details.Parent != "" {
-		t.Fatalf("child after detach = %+v, want standalone", details.Topic)
-	}
 }
