@@ -66,6 +66,7 @@ extra_javascript:
 
 nav:
   - Home: index.md
+  - Compare: compare.md
   - Client Guide:
       - Getting Started: client/index.md
       - Topics: client/topics.md

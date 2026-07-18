@@ -212,6 +212,8 @@ The full war stories — including the bug that only bit the node that *won* an 
 
 ## Convinced? Good. Here's the manual.
 
+Not convinced yet? Fair — read [**Narad vs. Everything Else**](compare.md): one honest table against Kafka, NATS JetStream, RabbitMQ, SQS, Redis Streams, and Pulsar, including every row where they win.
+
 <div class="grid cards" markdown>
 
 - :material-rocket-launch: **[Client Guide](client/index.md)**
