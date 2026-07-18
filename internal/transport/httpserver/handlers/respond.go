@@ -108,6 +108,8 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 		s.WriteError(w, http.StatusGone, err.Error())
 	case errors.Is(err, errs.ErrAckedAheadFull):
 		s.WriteError(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, errs.ErrUnavailable):
+		s.WriteError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, errs.ErrInvalidArgument),
 		errors.Is(err, errs.ErrPartitionRequired):
 		s.WriteError(w, http.StatusBadRequest, err.Error())

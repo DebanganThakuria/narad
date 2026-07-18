@@ -274,6 +274,7 @@ func TestWriteBrokerErrorMapsStatuses(t *testing.T) {
 		{"malformed handle", errs.ErrHandleMalformed, http.StatusBadRequest},
 		{"stale handle", errs.ErrHandleStale, http.StatusGone},
 		{"acked ahead full", errs.ErrAckedAheadFull, http.StatusServiceUnavailable},
+		{"control plane unavailable", errs.ErrUnavailable, http.StatusServiceUnavailable},
 		{"internal", errors.New("boom"), http.StatusInternalServerError},
 	}
 

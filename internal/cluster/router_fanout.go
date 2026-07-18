@@ -20,7 +20,7 @@ func (rt *Router) RouteAttachChild(ctx context.Context, w http.ResponseWriter, _
 	}
 	res, err := rt.peer.AttachChild(ctx, memberAddr, parent, child, delayMs)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeLeaderForwardError(w, err)
 		return true
 	}
 	writePeerResponse(w, res)
@@ -35,7 +35,7 @@ func (rt *Router) RouteDetachChild(ctx context.Context, w http.ResponseWriter, _
 	}
 	res, err := rt.peer.DetachChild(ctx, memberAddr, parent, child)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeLeaderForwardError(w, err)
 		return true
 	}
 	writePeerResponse(w, res)

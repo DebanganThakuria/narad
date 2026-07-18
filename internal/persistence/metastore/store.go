@@ -3,6 +3,7 @@ package metastore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/errs"
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
@@ -177,10 +179,28 @@ func (s *Store) apply(ctx context.Context, op opCode, payload any) error {
 
 	f := s.r.Apply(b, applyTimeout)
 	if err := f.Error(); err != nil {
-		return err
+		return classifyRaftError(err)
 	}
 	if resp, ok := f.Response().(error); ok {
 		return resp
 	}
 	return nil
+}
+
+// classifyRaftError maps Raft's leadership/availability failures onto
+// errs.ErrUnavailable so the HTTP layer answers 503 (retryable) instead
+// of 500. These all mean "no committed decision right now" — expected
+// during elections, partitions, and rolling restarts — not a bug. The
+// original error is wrapped so logs keep the specific cause.
+func classifyRaftError(err error) error {
+	switch {
+	case errors.Is(err, raft.ErrNotLeader),
+		errors.Is(err, raft.ErrLeadershipLost),
+		errors.Is(err, raft.ErrLeadershipTransferInProgress),
+		errors.Is(err, raft.ErrRaftShutdown),
+		errors.Is(err, raft.ErrEnqueueTimeout):
+		return fmt.Errorf("%w: %v", errs.ErrUnavailable, err)
+	default:
+		return err
+	}
 }
