@@ -1,0 +1,43 @@
+# goreleaser builds the release binaries and maintains the Homebrew
+# tap. Runs from .github/workflows/release.yml on every v* tag.
+version: 2
+
+project_name: narad
+
+builds:
+  - main: ./cmd/narad
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "narad_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  disable: true # release notes are written by hand, with evidence
+
+release:
+  # The GitHub release for the tag already exists (created with the
+  # hand-written notes); attach artifacts to it instead of replacing it.
+  mode: keep-existing
+
+brews:
+  - name: narad
+    repository:
+      owner: DebanganThakuria
+      name: homebrew-narad
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    homepage: https://debanganthakuria.github.io/narad/
+    description: "Queue-first message broker in a single binary — plain HTTP in, at-least-once out"
+    license: Apache-2.0
+    install: |
+      bin.install "narad"
+      generate_completions_from_executable(bin/"narad", "completion")
+    test: |
+      system "#{bin}/narad", "version"
