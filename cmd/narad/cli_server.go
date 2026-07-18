@@ -72,12 +72,8 @@ func newServerCmd() *cobra.Command {
 	start.Flags().BoolVar(&dev, "dev", false, "local playground: loopback bind, auth OFF, data in ~/.narad/data")
 	start.Flags().IntVar(&port, "port", 7942, "API port")
 	start.Flags().StringVar(&dataDir, "data-dir", "", "storage directory (dev default: ~/.narad/data)")
-	return append1(server, start)
-}
-
-func append1(parent *cobra.Command, child *cobra.Command) *cobra.Command {
-	parent.AddCommand(child)
-	return parent
+	server.AddCommand(start, newServerReportCmd())
+	return server
 }
 
 func banner(port int) {
