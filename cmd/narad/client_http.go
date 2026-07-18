@@ -13,9 +13,12 @@ import (
 )
 
 // httpClient is the thin HTTP transport behind the client subcommands.
+// user/password, when set, are sent as HTTP Basic auth on every request.
 type httpClient struct {
-	addr string
-	h    *http.Client
+	addr     string
+	user     string
+	password string
+	h        *http.Client
 }
 
 func newHTTPClient(addr string) *httpClient {
@@ -23,6 +26,14 @@ func newHTTPClient(addr string) *httpClient {
 		addr: strings.TrimRight(addr, "/"),
 		h:    &http.Client{Timeout: 60 * time.Second},
 	}
+}
+
+// newContextHTTPClient builds a client from resolved connection
+// settings (context/env/flags), carrying credentials.
+func newContextHTTPClient(c cliContext) *httpClient {
+	hc := newHTTPClient(c.Server)
+	hc.user, hc.password = c.User, c.Password
+	return hc
 }
 
 // do sends a JSON request. A non-nil body is marshalled and sent as
@@ -59,6 +70,9 @@ func (c *httpClient) doRaw(method, path string, body []byte) (*http.Response, er
 // send executes the request and converts 4xx/5xx responses into errors
 // carrying the server's error message.
 func (c *httpClient) send(req *http.Request) (*http.Response, error) {
+	if c.user != "" {
+		req.SetBasicAuth(c.user, c.password)
+	}
 	resp, err := c.h.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("transport: %w", err)
