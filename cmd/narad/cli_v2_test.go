@@ -2,9 +2,7 @@ package main
 
 // Tests for the cobra CLI surface: context store semantics, connection
 // resolution precedence, and the modern commands end to end against a
-// real in-process broker (the same harness the legacy parity tests
-// use). The legacy `client` output contract is covered by
-// client_test.go and left untouched.
+// real in-process broker (the harness in cli_env_test.go).
 
 import (
 	"context"
