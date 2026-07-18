@@ -179,3 +179,23 @@ func TestCobraTopicPubPeekEndToEnd(t *testing.T) {
 	}
 	ackWithRetry(context.Background(), c, "orders", qmsg.ReceiptHandle)
 }
+
+func TestParseGrants(t *testing.T) {
+	g, err := parseGrants([]string{"produce:orders-*,invoices", "admin"})
+	if err != nil {
+		t.Fatalf("parseGrants: %v", err)
+	}
+	if len(g) != 2 || g[0]["action"] != "produce" || g[1]["action"] != "admin" {
+		t.Fatalf("grants = %+v", g)
+	}
+	pats, _ := g[0]["patterns"].([]string)
+	if len(pats) != 2 || pats[0] != "orders-*" || pats[1] != "invoices" {
+		t.Fatalf("patterns = %+v", g[0]["patterns"])
+	}
+	if _, ok := g[1]["patterns"]; ok {
+		t.Fatal("bare admin grant must have no patterns key")
+	}
+	if _, err := parseGrants([]string{"fly:me"}); err == nil {
+		t.Fatal("unknown action must fail")
+	}
+}
