@@ -33,7 +33,7 @@ var commands = map[string]struct {
 }
 
 func main() {
-	if err := dispatch(os.Args[1:]); err != nil {
+	if err := route(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "narad:", err)
 		os.Exit(1)
 	}
@@ -57,6 +57,19 @@ func dispatch(args []string) error {
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
 	return cmd.run(args[1:])
+}
+
+// route sends the legacy subcommands (serve/client/version — their
+// stdout is a compatibility contract covered by the parity tests)
+// through the original dispatcher, and everything else through the
+// cobra tree (topic/pub/sub/ctx/server ...).
+func route(args []string) error {
+	if len(args) > 0 {
+		if _, ok := commands[args[0]]; ok {
+			return dispatch(args)
+		}
+	}
+	return runCobra(args)
 }
 
 func usage(w *os.File) {
