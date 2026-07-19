@@ -19,6 +19,10 @@ type fakeControllerStore struct {
 	assignedLog        []string                  // "topic/partition→owner" in call order
 	targetLog          []string                  // "topic/partition→target" in call order
 	barrierErr         error
+	voters             []string // nil ⇒ derive from members
+	removed            []string // RemoveServer calls in order
+	transferred        int      // TransferLeadership call count
+	leaderID           string
 }
 
 func newFakeControllerStore(memberIDs ...string) *fakeControllerStore {
@@ -76,6 +80,45 @@ func (f *fakeControllerStore) AssignPartition(_ context.Context, topicName strin
 }
 
 func (f *fakeControllerStore) MarkMemberDead(context.Context, string) error { return nil }
+
+func (f *fakeControllerStore) Voters() ([]string, error) {
+	if f.voters == nil {
+		var ids []string
+		for _, m := range f.members {
+			ids = append(ids, m.ID)
+		}
+		return ids, nil
+	}
+	return f.voters, nil
+}
+
+func (f *fakeControllerStore) RemoveServer(id string) error {
+	f.removed = append(f.removed, id)
+	// Reflect the removal so a follow-up Voters() no longer lists it.
+	if f.voters == nil {
+		for _, m := range f.members {
+			if m.ID != id {
+				f.voters = append(f.voters, m.ID)
+			}
+		}
+	} else {
+		out := f.voters[:0:0]
+		for _, v := range f.voters {
+			if v != id {
+				out = append(out, v)
+			}
+		}
+		f.voters = out
+	}
+	return nil
+}
+
+func (f *fakeControllerStore) TransferLeadership() error {
+	f.transferred++
+	return nil
+}
+
+func (f *fakeControllerStore) LeaderID() string { return f.leaderID }
 
 // A transient ListAssignments failure must not make every partition look
 // unassigned: without replication, reassigning an already-owned partition

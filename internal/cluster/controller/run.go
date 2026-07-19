@@ -71,6 +71,7 @@ func (c *Controller) runAsLeader(ctx context.Context) {
 	c.reconcileAssignments(ctx)
 	c.checkHeartbeats(ctx)
 	c.reconcileRebalance(ctx)
+	c.reconcileDecommission(ctx)
 
 	ticker := time.NewTicker(c.cfg.ReconcileInterval)
 	defer ticker.Stop()
@@ -83,6 +84,7 @@ func (c *Controller) runAsLeader(ctx context.Context) {
 			c.reconcileAssignments(ctx)
 			c.checkHeartbeats(ctx)
 			c.reconcileRebalance(ctx)
+			c.reconcileDecommission(ctx)
 		}
 	}
 }
