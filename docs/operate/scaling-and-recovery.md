@@ -55,7 +55,6 @@ Draining marks the node so the rebalance planner stops sending it partitions and
 !!! warning "Order and timing matter"
     - **Wait for the drain to finish before scaling down.** A decommissioned pod keeps running (the StatefulSet owns it) but, once Raft-removed, reports *not ready* — that's expected. Scaling down before it owns zero partitions would delete a pod whose data hasn't moved yet.
     - **Don't overlap a decommission with a rolling restart** (`helm upgrade` that changes the pod template). If the draining node's pod is being cycled at the same time, its partitions have no stable source to copy from and the drain stalls until the pod settles.
-    - **`kubectl scale` is usually RBAC-blocked** on managed clusters — scale through `helm upgrade --set replicaCount=…`, which is also what keeps Helm's view of the release correct.
 
 Two safety rails hold: the controller **never removes a node if it would drop the cluster below three Raft voters** (a quorum-safe floor), and it transfers leadership away first if the departing node is the leader. So `initialClusterSize` down to 3 is safe; below 3 the Raft removal is refused by design.
 
