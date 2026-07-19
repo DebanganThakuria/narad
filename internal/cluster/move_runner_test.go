@@ -30,10 +30,14 @@ type moveForwardRec struct {
 // leader-forwarded CompleteMove/AbortMove calls.
 type movePeerFake struct {
 	dirFetcher
-	fwd *moveForwardRec
+	fwd        *moveForwardRec
+	prepareErr error // when set, PrepareHandoff fails (simulates a dead source)
 }
 
 func (f movePeerFake) PrepareHandoff(_ context.Context, _, _ string, _ int, _ time.Duration) (messaging.PartitionTransferInfo, error) {
+	if f.prepareErr != nil {
+		return messaging.PartitionTransferInfo{}, f.prepareErr
+	}
 	return messaging.PartitionTransferInfo{
 		Segments:        mustSegs(f.dir),
 		HighWatermark:   f.hwm,
@@ -70,6 +74,8 @@ type fakeMoveStore struct {
 	abortArgs    []string
 	notLeader    bool   // when true, IsLeader() is false → runner must forward
 	leaderID     string // resolved via GetMember to the leader's addr
+	deadAfter    int    // >0: GetMember(source) reports MemberDead from this call on
+	memberCalls  int
 }
 
 func (s *fakeMoveStore) AppliedCaughtUp() bool { return true }
@@ -91,7 +97,19 @@ func (s *fakeMoveStore) ListAssignments(string) ([]metastore.Assignment, error) 
 	return []metastore.Assignment{s.assignment}, nil
 }
 
-func (s *fakeMoveStore) GetMember(string) (metastore.Member, error) { return s.member, nil }
+func (s *fakeMoveStore) GetMember(id string) (metastore.Member, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.member
+	if id == s.member.ID && s.deadAfter > 0 {
+		s.memberCalls++
+		if s.memberCalls >= s.deadAfter {
+			m.Status = metastore.MemberDead
+			m.LastHeartbeat = 0 // epoch — long dead, past any ForcePromoteAfter
+		}
+	}
+	return m, nil
+}
 
 func (s *fakeMoveStore) CompleteMove(_ context.Context, topicName string, partition int, expectedOwner, targetID string) error {
 	s.mu.Lock()
@@ -152,7 +170,7 @@ func TestMoveRunnerCompletesMove(t *testing.T) {
 	}
 }
 
-func TestMoveRunnerAbortsOnFlipReject(t *testing.T) {
+func TestMoveRunnerRollsBackOnFlipReject(t *testing.T) {
 	src := t.TempDir()
 	wantHWM, _ := buildSourcePartition(t, src, 10)
 	store := &fakeMoveStore{
@@ -160,22 +178,109 @@ func TestMoveRunnerAbortsOnFlipReject(t *testing.T) {
 		member:      metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
 		completeErr: context.DeadlineExceeded, // CAS guard rejects the flip
 	}
-	r, dataDir := newMoveTestRunner(t, store, src, wantHWM)
+	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}}
+	dataDir := t.TempDir()
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, MoveConfig{RetryBackoff: 5 * time.Millisecond})
 
-	r.Reconcile(context.Background())
+	// The worker retries a rejected flip; bound it with a short-lived context.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	r.Reconcile(ctx)
 	r.wg.Wait()
 
-	// A rejected flip must NOT clear the target (the source stays owner and
-	// a retry is legitimate), but must roll the install back so a non-owner
-	// never keeps a phantom copy.
-	if len(store.abortArgs) != 0 {
-		t.Fatalf("flip-reject must not AbortMove, got %v", store.abortArgs)
+	// The flip was attempted and rejected; the install must be rolled back so a
+	// non-owner keeps no phantom copy. The target is NOT cleared — the source
+	// stays authoritative and the worker retries until a re-plan cancels it.
+	if len(store.completeArgs) == 0 {
+		t.Fatal("flip was never attempted")
 	}
 	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
-	if _, err := storage.ListPartitionSegments(dir); err == nil {
-		if segs, _ := storage.ListPartitionSegments(dir); len(segs) != 0 {
-			t.Fatalf("install not rolled back: %d segments remain at %s", len(segs), dir)
+	if segs, _ := storage.ListPartitionSegments(dir); len(segs) != 0 {
+		t.Fatalf("install not rolled back: %d segments remain at %s", len(segs), dir)
+	}
+}
+
+// When the source dies mid-move and stays dead past ForcePromoteAfter, the
+// destination promotes the copy it already caught up — completing the move
+// without the source rather than stalling forever. Gated: it only promotes
+// because the copy reached the source's last-known HWM.
+func TestMoveRunnerForcePromotesDeadSource(t *testing.T) {
+	src := t.TempDir()
+	wantHWM, payloads := buildSourcePartition(t, src, 15)
+	store := &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+		deadAfter:  2, // alive for the copy pass, dead from the 2nd lookup on
+	}
+	// PrepareHandoff fails (the source just died), so the normal cutover can't
+	// finish; the next loop sees the source dead and force-promotes.
+	peer := movePeerFake{
+		dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true},
+		prepareErr: context.DeadlineExceeded,
+	}
+	dataDir := t.TempDir()
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, MoveConfig{
+		RetryBackoff: 5 * time.Millisecond, ForcePromoteAfter: time.Millisecond,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	r.Reconcile(ctx)
+	r.wg.Wait()
+
+	if got := store.completeArgs; len(got) != 3 || got[2] != "narad-dst" {
+		t.Fatalf("force-promote did not complete the move: %v", got)
+	}
+	// The promoted copy recovers to the source's last-known HWM, records intact.
+	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	log, err := storage.NewLog(dir, storage.Options{})
+	if err != nil {
+		t.Fatalf("recover promoted partition: %v", err)
+	}
+	defer log.Close()
+	if log.NextOffset() != wantHWM {
+		t.Fatalf("promoted NextOffset = %d, want %d", log.NextOffset(), wantHWM)
+	}
+	for off, want := range payloads {
+		if _, _, got, err := log.ReadKeyed(off); err != nil || string(got) != string(want) {
+			t.Fatalf("offset %d = %q (err %v), want %q", off, got, err, want)
 		}
+	}
+}
+
+// Force-promote is REFUSED when the copy never caught up to the source's
+// last-known HWM — promoting a truncated copy would drop records the source
+// had already made visible. The move must stall (wait), not lose data.
+func TestMoveRunnerForcePromoteRefusesBehindCopy(t *testing.T) {
+	src := t.TempDir()
+	// Source HWM is well beyond what the fetcher will serve: make the fetcher
+	// report a hwm the staged copy can't reach.
+	wantHWM, _ := buildSourcePartition(t, src, 8)
+	store := &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:     metastore.Member{ID: "narad-src", Status: metastore.MemberDead, LastHeartbeat: 0},
+	}
+	// Source already dead from the start → no copy ever runs → sawInfo false →
+	// ForcePromote refuses. Nothing should be installed or flipped.
+	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM}}
+	dataDir := t.TempDir()
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, MoveConfig{
+		RetryBackoff: 5 * time.Millisecond, ForcePromoteAfter: time.Millisecond,
+	})
+	// Need an address so a session is begun.
+	store.member.Addr = "srcaddr"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	r.Reconcile(ctx)
+	r.wg.Wait()
+
+	if len(store.completeArgs) != 0 {
+		t.Fatalf("force-promote flipped without ever reaching the source: %v", store.completeArgs)
+	}
+	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	if segs, _ := storage.ListPartitionSegments(dir); len(segs) != 0 {
+		t.Fatalf("a partition was installed despite a refused force-promote: %d segments", len(segs))
 	}
 }
 
