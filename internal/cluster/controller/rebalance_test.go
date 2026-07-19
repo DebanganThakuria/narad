@@ -151,6 +151,37 @@ func TestRebalanceLeavesDeadOwnerPartitionsPut(t *testing.T) {
 	}
 }
 
+// A draining node sheds every partition it owns onto the other live nodes,
+// even when those nodes are already balanced among themselves.
+func TestRebalanceDrainsDrainingNode(t *testing.T) {
+	store := newFakeControllerStore("a", "b")
+	store.members = append(store.members, drainingMember("c"))
+	store.topics = []topic.Topic{{Name: "orders", Partitions: 6}}
+	// c owns 4, a and b own 1 each: without draining this looks balanced-ish,
+	// but c must be emptied.
+	store.assignments["orders"] = map[int]string{0: "a", 1: "b", 2: "c", 3: "c", 4: "c", 5: "c"}
+	c := &Controller{store: store, cfg: Config{MaxInFlightMoves: 8}.withDefaults()}
+
+	c.reconcileRebalance(context.Background())
+
+	// Every one of c's four partitions is targeted away, onto a or b.
+	for _, p := range []int{2, 3, 4, 5} {
+		tgt := store.targets["orders"][p]
+		if tgt == "" {
+			t.Fatalf("draining node's partition %d not targeted away", p)
+		}
+		if tgt == "c" {
+			t.Fatalf("partition %d targeted back onto the draining node", p)
+		}
+	}
+	// Nothing is ever targeted ONTO c.
+	for _, entry := range store.targetLog {
+		if entry[len(entry)-1] == 'c' {
+			t.Fatalf("target %q points at the draining node c", entry)
+		}
+	}
+}
+
 // A barrier failure aborts the pass without touching desired state.
 func TestRebalanceSkipsOnBarrierFailure(t *testing.T) {
 	store := newFakeControllerStore("a", "b", "c")
@@ -167,4 +198,8 @@ func TestRebalanceSkipsOnBarrierFailure(t *testing.T) {
 
 func deadMember(id string) metastore.Member {
 	return metastore.Member{ID: id, Status: metastore.MemberDead}
+}
+
+func drainingMember(id string) metastore.Member {
+	return metastore.Member{ID: id, Status: metastore.MemberAlive, Draining: true}
 }

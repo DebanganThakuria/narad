@@ -249,12 +249,8 @@ func (f *fsmState) applyMemberJoin(data []byte) error {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return err
 	}
-	v, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
 	routingChanged := false
-	err = f.update(func(tx *bolt.Tx) error {
+	err := f.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketMembers)
 		raw := b.Get([]byte(m.ID))
 		if raw == nil {
@@ -264,7 +260,15 @@ func (f *fsmState) applyMemberJoin(data []byte) error {
 			if err := json.Unmarshal(raw, &current); err != nil {
 				return err
 			}
+			// A re-registration (restart, heartbeat re-register) carries the
+			// join defaults, not the drain flag — preserve an in-progress
+			// decommission so a node restarting mid-drain stays draining.
+			m.Draining = current.Draining
 			routingChanged = !sameRoutingMember(current, m)
+		}
+		v, err := json.Marshal(m)
+		if err != nil {
+			return err
 		}
 		return b.Put([]byte(m.ID), v)
 	})
@@ -272,6 +276,30 @@ func (f *fsmState) applyMemberJoin(data []byte) error {
 		f.versions.bumpRoutingMembers()
 	}
 	return err
+}
+
+func (f *fsmState) applySetMemberDraining(data []byte) error {
+	var p memberDrainingPayload
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	return f.update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketMembers)
+		raw := b.Get([]byte(p.ID))
+		if raw == nil {
+			return ErrNotFound
+		}
+		var m Member
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return err
+		}
+		m.Draining = p.Draining
+		v, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(p.ID), v)
+	})
 }
 
 func (f *fsmState) applyMemberHeartbeat(data []byte) error {

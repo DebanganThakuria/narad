@@ -25,6 +25,15 @@ func (s *Store) MarkMemberDead(ctx context.Context, podID string) error {
 	return s.apply(ctx, opMemberDead, podID)
 }
 
+// SetMemberDraining marks (or unmarks) a member as draining through Raft.
+// A draining member keeps serving but the rebalance planner stops sending
+// it partitions and sheds everything it owns onto the other live nodes —
+// the placement half of decommission. It returns ErrNotFound if the member
+// is not registered.
+func (s *Store) SetMemberDraining(ctx context.Context, podID string, draining bool) error {
+	return s.apply(ctx, opSetMemberDraining, memberDrainingPayload{ID: podID, Draining: draining})
+}
+
 // GetMember reads the member from the local replica. It returns
 // ErrNotFound if the member is not registered.
 func (s *Store) GetMember(podID string) (Member, error) {
