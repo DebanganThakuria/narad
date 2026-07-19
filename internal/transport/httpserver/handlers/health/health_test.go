@@ -12,6 +12,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
+	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/consumer"
@@ -190,6 +191,14 @@ func (f *fakeBroker) DetachChild(context.Context, string, string) error        {
 
 func (f *fakeBroker) ReadFanoutSlab(context.Context, string, int, topic.FanoutReadOpts) (topic.FanoutSlab, error) {
 	return topic.FanoutSlab{}, nil
+}
+
+func (f *fakeBroker) PartitionTransferInfo(context.Context, string, int) (messaging.PartitionTransferInfo, error) {
+	return messaging.PartitionTransferInfo{}, nil
+}
+
+func (f *fakeBroker) ReadPartitionSegment(context.Context, string, int, int64, int64, int64) ([]byte, error) {
+	return nil, nil
 }
 
 func (f *fakeBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutCursorStat, error) {

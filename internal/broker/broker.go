@@ -68,6 +68,12 @@ type Broker interface {
 	// ReadFanoutSlab reads committed keyed records from a locally owned
 	// partition — the fan-out cursor engine's read primitive.
 	ReadFanoutSlab(ctx context.Context, topicName string, partitionIdx int, opts topic.FanoutReadOpts) (topic.FanoutSlab, error)
+
+	// PartitionTransferInfo and ReadPartitionSegment are the serve-side
+	// of partition rebalance: a destination node copies an owned
+	// partition's segments verbatim to become the new owner.
+	PartitionTransferInfo(ctx context.Context, topicName string, partition int) (messaging.PartitionTransferInfo, error)
+	ReadPartitionSegment(ctx context.Context, topicName string, partition int, baseOffset, at, length int64) ([]byte, error)
 	// FanoutCursorStats reports fan-out cursor positions for the parent
 	// partitions this node owns (lag = HighWatermark - NextOffset).
 	FanoutCursorStats(ctx context.Context, parent string) ([]topic.FanoutCursorStat, error)
