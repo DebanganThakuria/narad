@@ -38,7 +38,16 @@ flowchart TD
     FLIP["CompleteMove — guarded CAS:<br/>Owner := Target, iff Owner still A and Target still B"]
 ```
 
-**CatchUp** streams the source's segments (sealed files plus the growing active tail) while produce keeps flowing, returning once it is within `lagBytes` of the live tail. Only then does **PrepareHandoff** freeze the source — and the freeze lasts milliseconds, because Finalize has only the last few MiB to drain.
+**CatchUp** streams the source's segments (sealed files plus the growing active tail) while produce keeps flowing, iterating to shrink the un-copied tail. Once it is within `lagBytes` of the live tail it stops and **PrepareHandoff** freezes the source — the freeze lasts milliseconds, because Finalize has only the last few MiB to drain.
+
+### What if the partition is written faster than it copies?
+
+CatchUp is a **pre-copy / stop-and-copy** cutover, the same shape as live VM migration. Let `W` = the partition's write rate and `B` = the copy bandwidth. Each pass copies the delta since the last one, and consecutive deltas scale by `W/B`:
+
+- **`W < B`** (the normal case — a single partition's writes are far below network/disk copy speed): deltas shrink geometrically, CatchUp converges, the freeze is tiny.
+- **`W ≥ B`** (a very hot partition, or a slow copy link): deltas stay flat or grow, so the tail would never shrink below `lagBytes`.
+
+CatchUp is therefore **bounded**: after a capped number of passes — or once the tail stops shrinking — it stops pre-copying and freezes anyway. The freeze then does a **stop-and-copy** of whatever tail remains. This is always safe and always terminates, because the freeze *stops the writes*: `Finalize` drains a now-fixed tail at full bandwidth with nothing competing. The move never hangs; a partition the copy can't keep up with just gets a **longer freeze** (bounded by the remaining tail ÷ bandwidth), logged as a non-converged cutover. And because the tail only grows while you keep trying to catch a moving target, stopping sooner is what makes that freeze *smallest*.
 
 The freeze stops *both* produce-accept and commit on the source:
 
