@@ -107,6 +107,10 @@ func (f *fakeRouter) RouteDeleteUser(context.Context, http.ResponseWriter, *http
 	return false
 }
 
+func (f *fakeRouter) RouteDecommissionMember(context.Context, http.ResponseWriter, *http.Request, string, bool) bool {
+	return false
+}
+
 func (f *fakeRouter) RouteGetTopic(ctx context.Context, r *http.Request, topicName string, details topic.Details) (topic.Details, error) {
 	if f.routeGetTopicFn == nil {
 		return details, nil

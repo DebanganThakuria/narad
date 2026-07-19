@@ -65,6 +65,7 @@ type Router interface {
 	RouteCreateUser(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool
 	RouteUpdateUser(ctx context.Context, w http.ResponseWriter, r *http.Request, username string, body []byte) bool
 	RouteDeleteUser(ctx context.Context, w http.ResponseWriter, r *http.Request, username string) bool
+	RouteDecommissionMember(ctx context.Context, w http.ResponseWriter, r *http.Request, id string, cancel bool) bool
 }
 
 // Deps is the bag of collaborators every handler needs.

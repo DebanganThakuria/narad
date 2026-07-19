@@ -10,6 +10,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/security"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/health"
+	httpcluster "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/cluster"
 	httpmessaging "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/messaging"
 	httptopics "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/topics"
 	httpusers "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/users"
@@ -54,6 +55,13 @@ func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prome
 		mux.HandleFunc("DELETE /v1/users/{username}", httpusers.Delete(h))
 		mux.HandleFunc("PUT /v1/users/{username}/grants", httpusers.UpdateGrants(h))
 		mux.HandleFunc("PUT /v1/users/{username}/password", httpusers.UpdatePassword(h))
+
+		// Cluster operations: partition rebalance/decommission control and
+		// placement visibility.
+		mux.HandleFunc("POST /v1/cluster/members/{id}/decommission", httpcluster.Decommission(h))
+		mux.HandleFunc("DELETE /v1/cluster/members/{id}/decommission", httpcluster.Decommission(h))
+		mux.HandleFunc("GET /v1/cluster/moves", httpcluster.Moves(h))
+		mux.HandleFunc("GET /v1/cluster/members", httpcluster.Members(h))
 	}
 
 	// Health Checks
