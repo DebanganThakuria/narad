@@ -18,10 +18,19 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
+// moveForwardRec records leader-forwarded ownership writes.
+type moveForwardRec struct {
+	completeAddr string
+	completeArgs []string
+	abortAddr    string
+}
+
 // movePeerFake serves a source partition dir and freezes as a no-op (the
-// source dir is already static in the test).
+// source dir is already static in the test). fwd, when set, records the
+// leader-forwarded CompleteMove/AbortMove calls.
 type movePeerFake struct {
 	dirFetcher
+	fwd *moveForwardRec
 }
 
 func (f movePeerFake) PrepareHandoff(_ context.Context, _, _ string, _ int, _ time.Duration) (messaging.PartitionTransferInfo, error) {
@@ -31,6 +40,20 @@ func (f movePeerFake) PrepareHandoff(_ context.Context, _, _ string, _ int, _ ti
 		CommittedOffset: f.committed,
 		HasCommitted:    f.hasCommitted,
 	}, nil
+}
+
+func (f movePeerFake) CompleteMove(_ context.Context, addr, topicName string, partition int, expectedOwner, targetID string) error {
+	if f.fwd != nil {
+		f.fwd.completeAddr = addr
+		f.fwd.completeArgs = []string{topicName, expectedOwner, targetID}
+	}
+	return nil
+}
+func (f movePeerFake) AbortMove(_ context.Context, addr, _ string, _ int, _ string) error {
+	if f.fwd != nil {
+		f.fwd.abortAddr = addr
+	}
+	return nil
 }
 
 func mustSegs(dir string) []storage.SegmentInfo {
@@ -45,9 +68,18 @@ type fakeMoveStore struct {
 	completeErr  error
 	completeArgs []string
 	abortArgs    []string
+	notLeader    bool   // when true, IsLeader() is false → runner must forward
+	leaderID     string // resolved via GetMember to the leader's addr
 }
 
 func (s *fakeMoveStore) AppliedCaughtUp() bool { return true }
+func (s *fakeMoveStore) IsLeader() bool         { return !s.notLeader }
+func (s *fakeMoveStore) LeaderID() string {
+	if s.leaderID != "" {
+		return s.leaderID
+	}
+	return "narad-dst"
+}
 
 func (s *fakeMoveStore) ListTopics(context.Context, metastore.ListOptions) ([]topic.Topic, string, error) {
 	return []topic.Topic{{Name: "orders", Partitions: 1}}, "", nil
@@ -81,7 +113,7 @@ func (s *fakeMoveStore) AbortMove(_ context.Context, topicName string, partition
 
 func newMoveTestRunner(t *testing.T, store *fakeMoveStore, srcDir string, hwm int64) (*MoveRunner, string) {
 	t.Helper()
-	peer := movePeerFake{dirFetcher{dir: srcDir, hwm: hwm, committed: 5, hasCommitted: true}}
+	peer := movePeerFake{dirFetcher: dirFetcher{dir: srcDir, hwm: hwm, committed: 5, hasCommitted: true}}
 	dataDir := t.TempDir()
 	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, MoveConfig{})
 	return r, dataDir
@@ -144,5 +176,47 @@ func TestMoveRunnerAbortsOnFlipReject(t *testing.T) {
 		if segs, _ := storage.ListPartitionSegments(dir); len(segs) != 0 {
 			t.Fatalf("install not rolled back: %d segments remain at %s", len(segs), dir)
 		}
+	}
+}
+
+// When this node is a FOLLOWER, the ownership flip is a Raft write that only
+// the leader can apply — the runner must forward CompleteMove to the leader's
+// address, not call the local store (which would fail with not-leader). This
+// pins the fix for the bug the docker e2e surfaced: a destination that is not
+// the leader could never complete a move.
+func TestMoveRunnerForwardsFlipToLeaderWhenFollower(t *testing.T) {
+	src := t.TempDir()
+	wantHWM, _ := buildSourcePartition(t, src, 12)
+	store := &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+		notLeader:  true,
+		leaderID:   "narad-leader",
+	}
+	rec := &moveForwardRec{}
+	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}, fwd: rec}
+	dataDir := t.TempDir()
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, MoveConfig{})
+
+	// The runner resolves the leader's address via GetMember(leaderID); make
+	// that return a routable addr.
+	store.member = metastore.Member{ID: "narad-leader", Addr: "leaderaddr", Status: metastore.MemberAlive}
+	// GetMember is used for BOTH the source and the leader here; point source
+	// resolution at a live addr too by giving the assignment a self-consistent
+	// owner the fake resolves. (fakeMoveStore.GetMember returns s.member for
+	// any id, so source and leader share one addr — fine for this assertion.)
+
+	r.Reconcile(context.Background())
+	r.wg.Wait()
+
+	if rec.completeAddr != "leaderaddr" {
+		t.Fatalf("flip forwarded to %q, want leader addr \"leaderaddr\"", rec.completeAddr)
+	}
+	if got := rec.completeArgs; len(got) != 3 || got[0] != "orders" || got[1] != "narad-src" || got[2] != "narad-dst" {
+		t.Fatalf("forwarded CompleteMove args = %v, want [orders narad-src narad-dst]", got)
+	}
+	// The local store's CompleteMove must NOT have been used on a follower.
+	if store.completeArgs != nil {
+		t.Fatalf("follower called local store.CompleteMove (%v) instead of forwarding", store.completeArgs)
 	}
 }

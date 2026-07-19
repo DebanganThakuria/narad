@@ -86,9 +86,14 @@ func (c MoveConfig) withDefaults() MoveConfig {
 	return c
 }
 
-// moveStore is the slice of the metastore the runner needs.
+// moveStore is the slice of the metastore the runner needs. The ownership
+// writes (CompleteMove, AbortMove) are Raft writes that only succeed on the
+// leader; IsLeader/LeaderID let the runner forward them to the leader when
+// this node (the destination) is a follower.
 type moveStore interface {
 	AppliedCaughtUp() bool
+	IsLeader() bool
+	LeaderID() string
 	ListTopics(ctx context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error)
 	ListAssignments(topicName string) ([]metastore.Assignment, error)
 	GetMember(id string) (metastore.Member, error)
@@ -96,11 +101,15 @@ type moveStore interface {
 	AbortMove(ctx context.Context, topicName string, partition int, expectedTarget string) error
 }
 
-// movePeer is the source-side RPC surface a move needs: the segment copy
-// (via the embedded segmentFetcher) plus the last-moment freeze.
+// movePeer is the peer RPC surface a move needs: the source-side segment
+// copy (via the embedded segmentFetcher) and last-moment freeze, plus the
+// leader-forwarded ownership writes (the destination is usually not the
+// leader, so it forwards the flip/abort there).
 type movePeer interface {
 	segmentFetcher
 	PrepareHandoff(ctx context.Context, addr, topicName string, partition int, freezeTTL time.Duration) (messaging.PartitionTransferInfo, error)
+	CompleteMove(ctx context.Context, addr, topicName string, partition int, expectedOwner, targetID string) error
+	AbortMove(ctx context.Context, addr, topicName string, partition int, expectedTarget string) error
 }
 
 // *PeerClient is the production movePeer.
@@ -287,8 +296,10 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 	// The guarded flip: owner := us, only if owner is still the source and
 	// target is still us. A re-plan or a competing worker makes this fail —
 	// in which case we roll back the install so the source stays authoritative.
-	if err := r.store.CompleteMove(ctx, topicName, partition, source, r.selfID); err != nil {
-		r.logger.Warn("move: flip rejected (CAS guard)", "topic", topicName, "partition", partition, "err", err)
+	// The flip is a Raft write, so it runs on the leader — forwarded there
+	// when this destination node is a follower.
+	if err := r.completeMove(ctx, topicName, partition, source); err != nil {
+		r.logger.Warn("move: flip rejected (CAS guard or not applied)", "topic", topicName, "partition", partition, "err", err)
 		if rmErr := os.RemoveAll(r.partitionDir(topicName, partition)); rmErr != nil {
 			r.logger.Warn("move: roll back install", "topic", topicName, "partition", partition, "err", rmErr)
 		}
@@ -309,9 +320,53 @@ func (r *MoveRunner) abort(ctx context.Context, topicName string, partition int,
 	if err := os.RemoveAll(staging); err != nil {
 		r.logger.Warn("move: clear staging on abort", "dir", staging, "err", err)
 	}
-	if err := r.store.AbortMove(ctx, topicName, partition, r.selfID); err != nil {
+	if err := r.abortMove(ctx, topicName, partition); err != nil {
 		r.logger.Warn("move: clear target on abort", "topic", topicName, "partition", partition, "err", err)
 	}
+}
+
+// completeMove proposes the guarded ownership flip: directly when this node
+// is the leader, otherwise forwarded to the leader over peer RPC (the
+// destination is usually a follower). A CAS failure or a not-leader forward
+// both surface as an error — the worker rolls the install back and retries.
+func (r *MoveRunner) completeMove(ctx context.Context, topicName string, partition int, source string) error {
+	if r.store.IsLeader() {
+		return r.store.CompleteMove(ctx, topicName, partition, source, r.selfID)
+	}
+	addr, err := r.leaderAddr()
+	if err != nil {
+		return err
+	}
+	return r.peer.CompleteMove(ctx, addr, topicName, partition, source, r.selfID)
+}
+
+// abortMove clears this node's move target, directly on the leader or
+// forwarded to it.
+func (r *MoveRunner) abortMove(ctx context.Context, topicName string, partition int) error {
+	if r.store.IsLeader() {
+		return r.store.AbortMove(ctx, topicName, partition, r.selfID)
+	}
+	addr, err := r.leaderAddr()
+	if err != nil {
+		return err
+	}
+	return r.peer.AbortMove(ctx, addr, topicName, partition, r.selfID)
+}
+
+// leaderAddr resolves the current Raft leader's peer-RPC address.
+func (r *MoveRunner) leaderAddr() (string, error) {
+	id := r.store.LeaderID()
+	if id == "" {
+		return "", fmt.Errorf("no known leader")
+	}
+	m, err := r.store.GetMember(id)
+	if err != nil {
+		return "", fmt.Errorf("lookup leader member %q: %w", id, err)
+	}
+	if m.Addr == "" {
+		return "", fmt.Errorf("leader %q has no address", id)
+	}
+	return m.Addr, nil
 }
 
 // install atomically replaces the partition's real directory with the

@@ -41,7 +41,28 @@ const (
 	OpFetchSegmentChunk
 	OpPrepareHandoff
 	OpDecommissionMember
+	OpCompleteMove
+	OpAbortMove
 )
+
+// CompleteMoveRequest asks the leader to perform the guarded ownership flip
+// for a partition move (set Owner=TargetID iff Owner is still ExpectedOwner
+// and Target is still TargetID). Forwarded from the destination node, which
+// is often not the leader.
+type CompleteMoveRequest struct {
+	Topic         string
+	Partition     int
+	ExpectedOwner string
+	TargetID      string
+}
+
+// AbortMoveRequest asks the leader to clear a move target (iff it still
+// matches ExpectedTarget). Forwarded from the destination node.
+type AbortMoveRequest struct {
+	Topic          string
+	Partition      int
+	ExpectedTarget string
+}
 
 // JoinClusterRequest asks the metastore leader to admit a new node into
 // the Raft voter set (scale-out). ID is the joining node's identity and
