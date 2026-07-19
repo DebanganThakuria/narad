@@ -53,6 +53,20 @@ func (l *Log) bootstrapHighWatermark(nextOffset int64) {
 	l.persistedHWM.Store(nextOffset)
 }
 
+// WritePersistedHighWatermark writes the durable high-watermark file
+// for a partition directory. Used by a rebalance copy to reproduce the
+// source's exact visibility boundary (which may lag the record tail —
+// the hidden tail must stay hidden so a reopened copy does not
+// double-expose records the WAL will re-commit). 8 bytes, big-endian.
+func WritePersistedHighWatermark(dir string, hwm int64) error {
+	if hwm < 0 {
+		hwm = 0
+	}
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(hwm))
+	return os.WriteFile(hwmFilePath(dir), buf[:], 0o644)
+}
+
 // ReadPersistedHighWatermark reads a partition directory's durable
 // high-watermark file without opening the log. ok=false when the file
 // (or the directory) does not exist or is empty — an empty partition.
