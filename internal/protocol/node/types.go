@@ -40,6 +40,7 @@ const (
 	OpListPartitionSegments
 	OpFetchSegmentChunk
 	OpPrepareHandoff
+	OpDecommissionMember
 )
 
 // JoinClusterRequest asks the metastore leader to admit a new node into
@@ -167,6 +168,13 @@ type PrepareHandoffRequest struct {
 	Topic         string
 	Partition     int
 	FreezeTTLNanos int64
+}
+
+// DecommissionRequest asks the leader to mark a member draining (Cancel
+// false) or to clear the drain (Cancel true), forwarded from any node.
+type DecommissionRequest struct {
+	ID     string
+	Cancel bool
 }
 
 // OperationOf returns the Operation a request payload starts with,

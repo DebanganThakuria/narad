@@ -40,6 +40,7 @@ type peerClient interface {
 	CreateUser(ctx context.Context, addr string, body []byte) (nodewire.Response, error)
 	UpdateUser(ctx context.Context, addr, username string, body []byte) (nodewire.Response, error)
 	DeleteUser(ctx context.Context, addr, username string) (nodewire.Response, error)
+	DecommissionMember(ctx context.Context, addr, id string, cancel bool) (nodewire.Response, error)
 }
 
 // PeerClient issues node RPCs to peers over the QUIC frame transport. It is
@@ -215,6 +216,13 @@ func (c *PeerClient) UpdateUser(ctx context.Context, addr, username string, body
 func (c *PeerClient) DeleteUser(ctx context.Context, addr, username string) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeUserRequest(nodewire.OpDeleteUser, nodewire.UserRequest{Username: username})
 	return c.send(ctx, addr, "delete_user", payload, err)
+}
+
+// DecommissionMember forwards a decommission (mark/clear draining) to the
+// leader at addr.
+func (c *PeerClient) DecommissionMember(ctx context.Context, addr, id string, cancel bool) (nodewire.Response, error) {
+	payload, err := nodewire.EncodeDecommissionRequest(nodewire.DecommissionRequest{ID: id, Cancel: cancel})
+	return c.send(ctx, addr, "decommission_member", payload, err)
 }
 
 func (c *PeerClient) topicNameRequest(ctx context.Context, addr string, op nodewire.Operation, operation, topicName string) (nodewire.Response, error) {

@@ -89,6 +89,10 @@ func (f fakePeerClient) DeleteUser(ctx context.Context, addr, username string) (
 	return nodewire.Response{}, context.DeadlineExceeded
 }
 
+func (f fakePeerClient) DecommissionMember(context.Context, string, string, bool) (nodewire.Response, error) {
+	return nodewire.Response{}, context.DeadlineExceeded
+}
+
 func (f fakePeerClient) Produce(ctx context.Context, addr string, req nodewire.ProduceRequest) (nodewire.Response, error) {
 	if f.produceFn != nil {
 		return f.produceFn(ctx, addr, req)

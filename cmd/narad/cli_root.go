@@ -45,6 +45,7 @@ func newRootCmd() *cobra.Command {
 		newUserCmd(),
 		newBenchCmd(),
 		newCtxCmd(),
+		newClusterCmd(),
 		newServerCmd(),
 		legacyStub("serve", "run the HTTP API server (default port 7942)", runServe),
 		legacyStub("version", "print build version and exit", runVersion),
