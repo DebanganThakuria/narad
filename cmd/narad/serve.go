@@ -152,6 +152,7 @@ func runServe(args []string) error {
 	wg.Go(func() { bc.offsets.RunPurger(ctx, time.Second) })
 	wg.Go(func() { cs.dispatcher.Run(ctx) })
 	wg.Go(func() { cs.fanout.Run(ctx) })
+	wg.Go(func() { cs.mover.Run(ctx) })
 	startPprofServer(ctx, &wg, cfg.HTTP.PprofAddr, log)
 	wg.Go(func() { serveClusterRPC(ctx, cfg, cs.rpcServer, failServe, log) })
 
@@ -240,6 +241,7 @@ type clusterStack struct {
 	rpcServer  *cluster.RPCServer
 	dispatcher *cluster.ProduceDispatcher
 	fanout     *cluster.FanoutRunner
+	mover      *cluster.MoveRunner
 }
 
 func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, bc *brokerComponents, log *slog.Logger) *clusterStack {
@@ -269,6 +271,7 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 				MaxBatchBytes:   cfg.Fanout.MaxBatchBytes,
 				Linger:          time.Duration(cfg.Fanout.LingerMs) * time.Millisecond,
 			}),
+		mover: cluster.NewMoveRunner(ms, nodeID, cfg.Storage.DataDir, peerRPC, log, cluster.MoveConfig{}),
 	}
 }
 
