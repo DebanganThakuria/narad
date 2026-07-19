@@ -82,6 +82,13 @@ type Engine struct {
 	schemaLoadCache map[string]cached[bool]
 
 	consumeCursors sync.Map // topic name -> *atomic.Uint64
+
+	// producePauses holds partitions this node owns but has temporarily
+	// paused for produce during a rebalance handoff (key -> expiry unix
+	// nano). A paused partition reads as not-writable so produce reroutes
+	// (AP); the TTL auto-resumes if the handoff never completes.
+	pauseMu       sync.Mutex
+	producePauses map[string]int64
 }
 
 // NewEngine wires an Engine.

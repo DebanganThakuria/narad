@@ -92,6 +92,11 @@ func (e *Engine) pickProducePartition(topicName, key string, partitions int) (in
 // produceAssignmentWritable reports whether the assignment's owner is
 // registered and alive.
 func (e *Engine) produceAssignmentWritable(assignment metastore.Assignment) bool {
+	// A partition this node owns but has paused for a rebalance handoff
+	// is momentarily not writable — produce reroutes to a live partition.
+	if assignment.OwnerID == e.selfID && e.isProducePaused(assignment.Topic, assignment.Partition) {
+		return false
+	}
 	owner, err := e.getRoutingMember(assignment.OwnerID)
 	return err == nil && owner.Status == metastore.MemberAlive
 }

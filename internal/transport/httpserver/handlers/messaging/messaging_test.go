@@ -1157,6 +1157,9 @@ func (f *fakeBroker) ReadPartitionSegment(context.Context, string, int, int64, i
 	return nil, nil
 }
 
+func (f *fakeBroker) PauseProduceForHandoff(string, int, time.Duration) {}
+func (f *fakeBroker) ResumeProduce(string, int)                         {}
+
 func (f *fakeBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutCursorStat, error) {
 	return nil, nil
 }
