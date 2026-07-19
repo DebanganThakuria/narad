@@ -201,3 +201,24 @@ func AliveMembers(members []Member) []Member {
 	}
 	return active
 }
+
+// SetAssignmentTarget records the node a partition should move to (empty
+// clears it). Leader-only; the desired-state write the controller's
+// rebalance policy makes. The current owner keeps serving until the flip.
+func (s *Store) SetAssignmentTarget(ctx context.Context, topicName string, partition int, targetID string) error {
+	return s.apply(ctx, opSetAssignmentTarget, assignmentTargetPayload{Topic: topicName, Partition: partition, TargetID: targetID})
+}
+
+// CompleteMove atomically flips ownership to the target, guarded as a
+// compare-and-swap: it succeeds only if the current owner still equals
+// expectedOwner and the target still equals targetID. A caught-up
+// destination proposes this; an error means the flip did not happen.
+func (s *Store) CompleteMove(ctx context.Context, topicName string, partition int, expectedOwner, targetID string) error {
+	return s.apply(ctx, opCompleteMove, completeMovePayload{Topic: topicName, Partition: partition, ExpectedOwner: expectedOwner, TargetID: targetID})
+}
+
+// AbortMove clears a move target, but only if it still matches
+// expectedTarget — a stale abort never clobbers a re-planned target.
+func (s *Store) AbortMove(ctx context.Context, topicName string, partition int, expectedTarget string) error {
+	return s.apply(ctx, opAbortMove, abortMovePayload{Topic: topicName, Partition: partition, ExpectedTarget: expectedTarget})
+}

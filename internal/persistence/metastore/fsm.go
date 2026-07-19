@@ -110,6 +110,12 @@ func (f *fsmState) Apply(l *raft.Log) any {
 		err = f.applyAttachChild(c.Data)
 	case opDetachChild:
 		err = f.applyDetachChild(c.Data)
+	case opSetAssignmentTarget:
+		err = f.applySetAssignmentTarget(c.Data)
+	case opCompleteMove:
+		err = f.applyCompleteMove(c.Data)
+	case opAbortMove:
+		err = f.applyAbortMove(c.Data)
 	default:
 		return fmt.Errorf("metastore: unknown op %d", c.Op)
 	}
