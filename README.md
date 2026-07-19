@@ -510,16 +510,16 @@ and the [Operate handbook](https://debanganthakuria.github.io/narad/operate/).
 Known limits, in the open. Run Narad behind a trusted ingress and these
 are workable today; they are the next engineering items, roughly in order.
 
-1. **Partition rebalance + node decommission.** New pods join the Raft
-   cluster and serve topics created after they join, but existing
-   partition ownership is sticky — new capacity does not absorb existing
-   partitions, and there is no scale-down path. Both need the same
-   machinery (safe drain, log move with CRC verification, atomic
-   ownership flip), so they ship together.
-2. **Native TLS & rate limiting.** Narad serves plain HTTP; TLS must
+1. **Native TLS & rate limiting.** Narad serves plain HTTP; TLS must
    terminate at an ingress and the ingress→Narad hop must be trusted.
    Native TLS, mutual TLS between cluster nodes, and per-user/IP rate
    limiting remain future work.
-3. **Routing polish.** Lag-aware partition selection (today: rotation),
+2. **Routing polish.** Lag-aware partition selection (today: rotation),
    a retryable 503 for pinned dead-owner consume/ack (today that path
    can surface 421), and cursor advance on empty polls.
+
+Shipped since 1.0: **partition rebalance + node decommission** — a new
+node's arrival auto-rebalances existing partitions onto it (verbatim
+copy, last-moment cutover, no record loss), and `narad cluster
+decommission` drains a node off before removal. See
+[Rebalance & Decommission](https://debanganthakuria.github.io/narad/internals/rebalance/).
