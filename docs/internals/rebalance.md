@@ -1,0 +1,87 @@
+# Rebalance & Decommission
+
+Narad has no follower replication — a partition's data lives only on its owner's disk. So moving a partition means *physically copying it* to another node and cutting over without losing a record. Rebalance (spread load onto a new node) and decommission (drain a node off) are the same machine: **relocate a partition, verbatim, from one owner to another.**
+
+The design principle is the same one that runs fan-out and assignment: **nodes worry about themselves.** The controller (Raft leader) writes *desired* ownership into Raft; each node runs a local reconcile loop that converges its own partitions toward it. Nobody choreographs anybody.
+
+## Desired state: Owner + Target
+
+Every partition assignment carries two fields:
+
+- **Owner** — who serves it *now* (produce and consume land here).
+- **Target** — where it *should* end up (empty when stable).
+
+The controller's only job is policy: set `Target` to balance partition count across the live nodes. The nodes do the work. The ownership flip is a Raft compare-and-swap — atomic, single entry, no split-brain.
+
+```mermaid
+flowchart LR
+    subgraph raft["metastore (Raft)"]
+        A["orders/3<br/>Owner=A Target=B"]
+    end
+    CTRL["controller (leader)<br/>writes Target"] -->|SetAssignmentTarget| A
+    A -->|reads own Target| B["node B<br/>move worker"]
+    B -->|copy from A| A2[("A: orders/3")]
+    B -->|CAS flip| A
+```
+
+## The move: catch up, then freeze at the last moment
+
+A partition can be gigabytes. Freezing produce for the whole copy would be an outage, so the copy is **two phases** and the freeze covers only the tiny tail:
+
+```mermaid
+flowchart TD
+    BEGIN["Begin: open copy session against the source"] --> CATCHUP
+    CATCHUP["CatchUp — freeze-free bulk copy<br/>(GBs, produce still flowing)"] -->|within lagBytes of the tail| FREEZE
+    FREEZE["PrepareHandoff — freeze the source<br/>(last moment: accept + commit)"] --> FINAL
+    FINAL["Finalize — drain the now-static tail,<br/>reproduce exact HWM + committed offset,<br/>verify the copy recovers"] --> INSTALL
+    INSTALL["install — atomic rename into the real dir"] --> FLIP
+    FLIP["CompleteMove — guarded CAS:<br/>Owner := Target, iff Owner still A and Target still B"]
+```
+
+**CatchUp** streams the source's segments (sealed files plus the growing active tail) while produce keeps flowing, returning once it is within `lagBytes` of the live tail. Only then does **PrepareHandoff** freeze the source — and the freeze lasts milliseconds, because Finalize has only the last few MiB to drain.
+
+The freeze stops *both* produce-accept and commit on the source:
+
+- Frozen **produce reroutes** to the new owner (Narad is AP; produce never blocks).
+- Frozen **commits are rejected**, so the ingress dispatcher retries them at the new owner.
+
+That is the no-loss guarantee: once the destination captures the final tail, no record can land behind it on the source. Anything in flight redelivers at the new owner (at-least-once absorbs the small duplicate burst). If the destination dies mid-handoff, the freeze **auto-resumes on a TTL** — no coordinator needed to clean up.
+
+The copy reproduces the source's *exact* high-watermark, which may lag the physical record count (a hidden tail): a reopened copy must never expose records the source hadn't made visible. The verify step reopens the staged copy and confirms it recovers into a log reaching that HWM before the flip.
+
+## The flip is a compare-and-swap
+
+`CompleteMove` sets `Owner := Target` **only if** the owner is still the source and the target is still this node. A re-plan that retargeted the move, or a competing worker, makes the CAS fail — and a failed flip rolls the install back but keeps the target, so the source stays authoritative and a retry is legitimate. This single guarded entry is what makes the whole scheme split-brain free.
+
+## The planner: minimal movement, level-triggered
+
+On each tick the leader computes the fewest moves that balance owned partition count. With T movable partitions over R receivers, balance gives each receiver `floor(T/R)` or `ceil(T/R)`; the plan moves exactly the surplus above capacity, and the nodes already holding the most keep the `ceil` slots — so a partition on a node within its share is never touched.
+
+Two properties make it safe to recompute every tick:
+
+- **Idempotent under in-flight moves.** A partition mid-move is counted at its *destination* and excluded from the movable pool, so a plan computed while moves run already accounts for them and reaches a fixpoint. Recompute, converge, never oscillate.
+- **Bounded concurrency.** The plan tops the in-flight move count up to `MaxInFlightMoves` (default 8) each tick, so a large rebalance drains gradually instead of copying every partition at once.
+
+Planning runs under a **mutex** and after a **Raft barrier**: a membership change landing mid-computation can't race two passes, and a freshly elected leader never plans against a stale applied FSM. Dead-owner partitions are left put — their data lives only on the dead node's disk, so they wait for it to return. Anti-affinity is honored as a *preference*: a fan-out child is steered off its parent's node when a balanced alternative exists, but balance always wins.
+
+## Decommission is rebalance with a zero-capacity node
+
+Marking a node **draining** (`POST /v1/cluster/members/{id}/decommission`) removes it from the planner's *receiver* set while it stays a live owner. The same minimal-movement algorithm then sheds every partition it owns onto the others. The drain flag survives a re-registration, so a node that restarts mid-decommission stays draining.
+
+Once a draining node owns nothing, the controller removes it from the Raft voter set, behind two guards:
+
+- **MinVoters** (default 3): never remove a node if doing so would drop the cluster below a quorum-safe size.
+- **Leader-off-departing**: a node can't be cleanly removed from its own Raft config while it leads, so if the drained node is the current leader the controller transfers leadership away and the new leader finishes the removal.
+
+## Operating it
+
+Rebalance is **automatic** — the controller triggers it when a node joins. Decommission and observation are operator-driven:
+
+```
+narad cluster members                 # status, drain flag, owned + outbound counts
+narad cluster moves                   # partitions currently mid-move
+narad cluster decommission narad-4    # drain a node off and remove it
+narad cluster decommission narad-4 --cancel
+```
+
+See [Cluster Lifecycle](cluster-lifecycle.md) for how nodes join and how leadership and membership are managed.
