@@ -116,6 +116,8 @@ func (f *fsmState) Apply(l *raft.Log) any {
 		err = f.applyCompleteMove(c.Data)
 	case opAbortMove:
 		err = f.applyAbortMove(c.Data)
+	case opSetMemberDraining:
+		err = f.applySetMemberDraining(c.Data)
 	default:
 		return fmt.Errorf("metastore: unknown op %d", c.Op)
 	}

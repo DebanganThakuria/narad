@@ -39,15 +39,21 @@ func (c *Controller) reconcileRebalance(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	// A draining member is still alive — it serves and answers copy RPCs, so
+	// it counts as a live owner (its partitions are movable) — but it must
+	// not RECEIVE partitions. Excluding it from the receiver set is exactly
+	// what makes the planner shed everything it owns onto the others.
 	alive := metastore.AliveMembers(members)
-	if len(alive) < 2 {
-		return // nothing to balance across
-	}
-	receivers := make([]string, len(alive))
 	aliveSet := make(map[string]bool, len(alive))
-	for i, m := range alive {
-		receivers[i] = m.ID
+	receivers := make([]string, 0, len(alive))
+	for _, m := range alive {
 		aliveSet[m.ID] = true
+		if !m.Draining {
+			receivers = append(receivers, m.ID)
+		}
+	}
+	if len(receivers) == 0 {
+		return // nowhere to place partitions (every live node is draining)
 	}
 
 	topics, _, err := c.store.ListTopics(ctx, metastore.ListOptions{})

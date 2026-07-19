@@ -24,7 +24,17 @@ const (
 	opSetAssignmentTarget
 	opCompleteMove
 	opAbortMove
+	opSetMemberDraining
 )
+
+// memberDrainingPayload marks a member as draining (or clears it). A
+// draining member keeps serving but is excluded from receiving new
+// partitions, so the rebalance planner sheds everything it owns onto the
+// other live nodes ahead of decommission.
+type memberDrainingPayload struct {
+	ID       string `json:"id"`
+	Draining bool   `json:"draining"`
+}
 
 // assignmentTargetPayload sets (or clears, when TargetID=="") the move
 // target on an existing partition assignment.

@@ -64,6 +64,11 @@ type Member struct {
 	ClusterAddr   string       `json:"cluster_addr,omitempty"`
 	Status        MemberStatus `json:"status"`
 	LastHeartbeat int64        `json:"last_heartbeat"` // Unix seconds
+	// Draining marks a member being decommissioned: it keeps serving and
+	// answering copy RPCs, but the rebalance planner excludes it from
+	// receiving partitions and sheds everything it owns onto the other live
+	// nodes. Once drained it can be removed from the Raft voter set.
+	Draining bool `json:"draining,omitempty"`
 }
 
 // Assignment maps a single partition of a topic to its owner pod.
