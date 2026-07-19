@@ -14,13 +14,17 @@ type fakeControllerStore struct {
 	members            []metastore.Member
 	topics             []topic.Topic
 	assignments        map[string]map[int]string // topic → partition → owner
+	targets            map[string]map[int]string // topic → partition → target (in-flight)
 	listAssignmentsErr map[string]error          // per-topic ListAssignments failure
 	assignedLog        []string                  // "topic/partition→owner" in call order
+	targetLog          []string                  // "topic/partition→target" in call order
+	barrierErr         error
 }
 
 func newFakeControllerStore(memberIDs ...string) *fakeControllerStore {
 	f := &fakeControllerStore{
 		assignments:        map[string]map[int]string{},
+		targets:            map[string]map[int]string{},
 		listAssignmentsErr: map[string]error{},
 	}
 	for _, id := range memberIDs {
@@ -31,6 +35,7 @@ func newFakeControllerStore(memberIDs ...string) *fakeControllerStore {
 
 func (f *fakeControllerStore) IsLeader() bool        { return true }
 func (f *fakeControllerStore) LeaderCh() <-chan bool { return nil }
+func (f *fakeControllerStore) Barrier() error        { return f.barrierErr }
 func (f *fakeControllerStore) ListMembers() ([]metastore.Member, error) {
 	return f.members, nil
 }
@@ -45,9 +50,20 @@ func (f *fakeControllerStore) ListAssignments(topicName string) ([]metastore.Ass
 	}
 	var out []metastore.Assignment
 	for p, owner := range f.assignments[topicName] {
-		out = append(out, metastore.Assignment{Topic: topicName, Partition: p, OwnerID: owner})
+		out = append(out, metastore.Assignment{
+			Topic: topicName, Partition: p, OwnerID: owner, TargetID: f.targets[topicName][p],
+		})
 	}
 	return out, nil
+}
+
+func (f *fakeControllerStore) SetAssignmentTarget(_ context.Context, topicName string, partition int, targetID string) error {
+	if f.targets[topicName] == nil {
+		f.targets[topicName] = map[int]string{}
+	}
+	f.targets[topicName][partition] = targetID
+	f.targetLog = append(f.targetLog, fmt.Sprintf("%s/%d→%s", topicName, partition, targetID))
+	return nil
 }
 
 func (f *fakeControllerStore) AssignPartition(_ context.Context, topicName string, partition int, owner string) error {

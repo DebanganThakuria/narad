@@ -70,6 +70,7 @@ func (c *Controller) startLeaderLoop(ctx context.Context) context.CancelFunc {
 func (c *Controller) runAsLeader(ctx context.Context) {
 	c.reconcileAssignments(ctx)
 	c.checkHeartbeats(ctx)
+	c.reconcileRebalance(ctx)
 
 	ticker := time.NewTicker(c.cfg.ReconcileInterval)
 	defer ticker.Stop()
@@ -81,6 +82,7 @@ func (c *Controller) runAsLeader(ctx context.Context) {
 		case <-ticker.C:
 			c.reconcileAssignments(ctx)
 			c.checkHeartbeats(ctx)
+			c.reconcileRebalance(ctx)
 		}
 	}
 }
