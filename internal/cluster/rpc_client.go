@@ -225,6 +225,38 @@ func (c *PeerClient) DecommissionMember(ctx context.Context, addr, id string, ca
 	return c.send(ctx, addr, "decommission_member", payload, err)
 }
 
+// CompleteMove forwards the guarded ownership flip to the leader at addr.
+// Returns an error unless the leader applied it (the CAS may legitimately
+// fail, which the caller treats as "flip not done").
+func (c *PeerClient) CompleteMove(ctx context.Context, addr, topicName string, partition int, expectedOwner, targetID string) error {
+	payload, err := nodewire.EncodeCompleteMoveRequest(nodewire.CompleteMoveRequest{
+		Topic: topicName, Partition: partition, ExpectedOwner: expectedOwner, TargetID: targetID,
+	})
+	res, err := c.send(ctx, addr, "complete_move", payload, err)
+	if err != nil {
+		return err
+	}
+	if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
+		return fmt.Errorf("complete move returned status %d", res.Status)
+	}
+	return nil
+}
+
+// AbortMove forwards a move-target clear to the leader at addr.
+func (c *PeerClient) AbortMove(ctx context.Context, addr, topicName string, partition int, expectedTarget string) error {
+	payload, err := nodewire.EncodeAbortMoveRequest(nodewire.AbortMoveRequest{
+		Topic: topicName, Partition: partition, ExpectedTarget: expectedTarget,
+	})
+	res, err := c.send(ctx, addr, "abort_move", payload, err)
+	if err != nil {
+		return err
+	}
+	if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
+		return fmt.Errorf("abort move returned status %d", res.Status)
+	}
+	return nil
+}
+
 func (c *PeerClient) topicNameRequest(ctx context.Context, addr string, op nodewire.Operation, operation, topicName string) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeTopicNameRequest(op, nodewire.TopicNameRequest{Topic: topicName})
 	return c.send(ctx, addr, operation, payload, err)

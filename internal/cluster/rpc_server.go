@@ -103,6 +103,10 @@ func (s *RPCServer) dispatch(payload []byte) nodewire.Response {
 		res = s.handlePrepareHandoff(payload)
 	case nodewire.OpDecommissionMember:
 		res = s.handleDecommissionMember(payload)
+	case nodewire.OpCompleteMove:
+		res = s.handleCompleteMove(payload)
+	case nodewire.OpAbortMove:
+		res = s.handleAbortMove(payload)
 	case nodewire.OpCreateTopic:
 		res = s.handleCreateTopic(payload)
 	case nodewire.OpAlterTopic:
