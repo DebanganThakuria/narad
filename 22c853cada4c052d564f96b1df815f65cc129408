@@ -1,0 +1,6 @@
+internal/persistence/storage/transfer.go
+  18135c72-0fe3-495b-925e-870ae13dcad5:2026-07-19T09:13:42.189Z 1,3-9,11-16,18-26,28-56,58-76,78-88,90-105
+internal/persistence/storage/transfer_test.go
+  18135c72-0fe3-495b-925e-870ae13dcad5:2026-07-19T09:14:08.138Z 1,3-6,8-9,11-13,15-44,46-48,50-67,76-77,79-84,86-89,91-112,118,125-126,128-143
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"18135c72-0fe3-495b-925e-870ae13dcad5:2026-07-19T09:13:42.189Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 98, "overriden_lines": 0}, "18135c72-0fe3-495b-925e-870ae13dcad5:2026-07-19T09:14:08.138Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 121, "overriden_lines": 0}}}
