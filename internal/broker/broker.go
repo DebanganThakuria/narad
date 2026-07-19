@@ -27,6 +27,7 @@ package broker
 
 import (
 	"context"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
@@ -74,6 +75,12 @@ type Broker interface {
 	// partition's segments verbatim to become the new owner.
 	PartitionTransferInfo(ctx context.Context, topicName string, partition int) (messaging.PartitionTransferInfo, error)
 	ReadPartitionSegment(ctx context.Context, topicName string, partition int, baseOffset, at, length int64) ([]byte, error)
+
+	// PauseProduceForHandoff / ResumeProduce briefly stop and resume
+	// produce for a partition during a rebalance cutover — paused produce
+	// reroutes to a live partition (AP).
+	PauseProduceForHandoff(topicName string, partition int, ttl time.Duration)
+	ResumeProduce(topicName string, partition int)
 	// FanoutCursorStats reports fan-out cursor positions for the parent
 	// partitions this node owns (lag = HighWatermark - NextOffset).
 	FanoutCursorStats(ctx context.Context, parent string) ([]topic.FanoutCursorStat, error)

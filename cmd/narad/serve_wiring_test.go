@@ -308,6 +308,9 @@ func (stubBroker) ReadPartitionSegment(context.Context, string, int, int64, int6
 	return nil, nil
 }
 
+func (stubBroker) PauseProduceForHandoff(string, int, time.Duration) {}
+func (stubBroker) ResumeProduce(string, int)                         {}
+
 func (stubBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutCursorStat, error) {
 	return nil, nil
 }
