@@ -85,6 +85,16 @@ type MoveSession struct {
 	stagingDir string
 	copied     map[int64]int64 // base offset -> bytes copied so far
 	total      int64
+
+	// Last state the source reported on a successful list. Retained so that
+	// if the source later DIES, a force-promote can reproduce exactly the
+	// visibility boundary (HWM) the source last exposed — never more, never
+	// less. sawInfo guards against force-promoting a session that never
+	// reached the source at all.
+	lastHWM       int64
+	lastCommitted int64
+	hasCommitted  bool
+	sawInfo       bool
 }
 
 // Begin starts a copy session.
@@ -103,6 +113,9 @@ func (s *MoveSession) pass(ctx context.Context) (int64, messaging.PartitionTrans
 	if err != nil {
 		return 0, messaging.PartitionTransferInfo{}, fmt.Errorf("list segments: %w", err)
 	}
+	// Record the source's last-known visibility boundary before copying, so a
+	// force-promote after the source dies reproduces exactly this HWM.
+	s.lastHWM, s.lastCommitted, s.hasCommitted, s.sawInfo = info.HighWatermark, info.CommittedOffset, info.HasCommitted, true
 	var newBytes int64
 	for _, seg := range info.Segments {
 		at := s.copied[seg.BaseOffset]
@@ -227,8 +240,42 @@ func (s *MoveSession) Finalize(ctx context.Context) (CopyResult, error) {
 			}
 		}
 	}
+	return s.finalizeStaged(lastHWM, committed, hasCommitted)
+}
 
-	if err := storage.WritePersistedHighWatermark(s.stagingDir, lastHWM); err != nil {
+// ForcePromote completes a move WITHOUT the source: it promotes whatever the
+// destination already copied, reproducing the source's LAST-KNOWN high
+// watermark. It is the recovery path for a source that dies mid-move — the
+// source can no longer be frozen or drained, but a dead source is not writing
+// either, so the copy the destination holds is the authoritative survivor.
+//
+// It is strictly gated for data safety:
+//   - sawInfo: the session must have reached the source at least once (else
+//     we have no idea what the source exposed — refuse);
+//   - the staged copy must recover to an offset >= the last-known HWM, i.e.
+//     the destination copied everything the source had made visible. If the
+//     source died before the copy caught up, promoting would expose FEWER
+//     records than were visible — data loss — so this refuses and the caller
+//     keeps waiting for the source to return.
+//
+// Records the source committed in the window between the destination's last
+// successful list and the source's death are unrecoverable — but they live
+// only on the (now-dead) source's disk, so with single-owner partitions they
+// are lost regardless. Force-promote recovers the maximum that is recoverable.
+func (s *MoveSession) ForcePromote() (CopyResult, error) {
+	if !s.sawInfo {
+		return CopyResult{}, fmt.Errorf("force-promote refused: source was never reached")
+	}
+	return s.finalizeStaged(s.lastHWM, s.lastCommitted, s.hasCommitted)
+}
+
+// finalizeStaged writes the target HWM + committed offset onto the staged
+// copy, verifies it recovers into a log reaching that HWM, and returns the
+// result. Shared by Finalize (frozen live source) and ForcePromote (dead
+// source). The verify is the data-safety gate: it fails if the staged copy
+// does not reach hwm.
+func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool) (CopyResult, error) {
+	if err := storage.WritePersistedHighWatermark(s.stagingDir, hwm); err != nil {
 		return CopyResult{}, fmt.Errorf("write hwm: %w", err)
 	}
 	if hasCommitted {
@@ -242,13 +289,13 @@ func (s *MoveSession) Finalize(ctx context.Context) (CopyResult, error) {
 	}
 	next := log.NextOffset()
 	_ = log.Close()
-	if next < lastHWM {
-		return CopyResult{}, fmt.Errorf("verify: staged copy next offset %d < source hwm %d", next, lastHWM)
+	if next < hwm {
+		return CopyResult{}, fmt.Errorf("verify: staged copy next offset %d < source hwm %d", next, hwm)
 	}
 	s.m.logger.Info("partition copy complete",
 		"topic", s.topic, "partition", s.partition, "source", s.sourceAddr,
-		"hwm", lastHWM, "bytes", s.total)
-	return CopyResult{HighWatermark: lastHWM, CommittedOffset: committed, HasCommitted: hasCommitted, BytesCopied: s.total}, nil
+		"hwm", hwm, "bytes", s.total)
+	return CopyResult{HighWatermark: hwm, CommittedOffset: committed, HasCommitted: hasCommitted, BytesCopied: s.total}, nil
 }
 
 // Copy is Begin+Finalize for a static source (or tests) — it drains

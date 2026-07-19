@@ -33,7 +33,6 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -68,6 +67,14 @@ const (
 	// does not strand produce for long.
 	defaultMoveFreezeTTL = 30 * time.Second
 	defaultMoveChunkBytes = 1 << 20 // 1 MiB
+	// defaultMoveRetryBackoff paces a worker's retries when a copy attempt
+	// fails (source briefly unreachable, transient RPC error).
+	defaultMoveRetryBackoff = 2 * time.Second
+	// defaultMoveForcePromoteAfter is how long a source must stay dead before
+	// the destination force-promotes the copy it holds instead of waiting.
+	// Generous, so a StatefulSet pod that restarts and rejoins lets the copy
+	// finish normally rather than triggering a force-promote.
+	defaultMoveForcePromoteAfter = 2 * time.Minute
 )
 
 // MoveConfig tunes the runner. Zero values use the defaults above.
@@ -78,6 +85,8 @@ type MoveConfig struct {
 	CatchUpStallRounds int
 	FreezeTTL          time.Duration
 	ChunkBytes         int64
+	RetryBackoff       time.Duration
+	ForcePromoteAfter  time.Duration
 }
 
 func (c MoveConfig) withDefaults() MoveConfig {
@@ -98,6 +107,12 @@ func (c MoveConfig) withDefaults() MoveConfig {
 	}
 	if c.ChunkBytes <= 0 {
 		c.ChunkBytes = defaultMoveChunkBytes
+	}
+	if c.RetryBackoff <= 0 {
+		c.RetryBackoff = defaultMoveRetryBackoff
+	}
+	if c.ForcePromoteAfter <= 0 {
+		c.ForcePromoteAfter = defaultMoveForcePromoteAfter
 	}
 	return c
 }
@@ -272,80 +287,130 @@ func (r *MoveRunner) Reconcile(ctx context.Context) {
 	}
 }
 
-// runMove executes one partition move to completion (or abort). It is the
-// whole destination-side lifecycle; see the package doc.
+// runMove drives one partition move to completion. It holds ONE copy
+// session for the worker's lifetime and RETRIES until the move flips, the
+// worker is cancelled (retarget/shutdown), or — if the source dies and stays
+// dead — force-promotes the copy it already has. Retrying in place (rather
+// than aborting and being re-spawned) keeps the session's memory of the
+// source's last-known HWM, which is what force-promote needs after the source
+// is gone.
 func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition int, source string) {
-	sourceAddr, err := r.sourceAddr(source)
-	if err != nil {
-		r.logger.Warn("move: resolve source", "topic", topicName, "partition", partition, "source", source, "err", err)
-		return // no abort: the owner may just be briefly unreachable; retry next pass
-	}
-
 	staging := r.stagingDir(topicName, partition)
 	if err := os.RemoveAll(staging); err != nil {
 		r.logger.Warn("move: clear staging", "dir", staging, "err", err)
 		return
 	}
-	sess := r.mover.Begin(sourceAddr, topicName, partition, staging)
+	var sess *MoveSession
 
-	// Phase 1 — freeze-free bulk copy, iterated to shrink the tail. Bounded:
-	// if the writers keep pace with the copy it stops (converged=false) and
-	// the freeze below does a stop-and-copy of the remaining tail rather than
-	// chasing a moving target forever.
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		m, err := r.store.GetMember(source)
+		if err != nil || m.Addr == "" {
+			if !sleepCtx(ctx, r.cfg.RetryBackoff) {
+				return
+			}
+			continue
+		}
+		if sess == nil {
+			sess = r.mover.Begin(m.Addr, topicName, partition, staging)
+		}
+
+		// If the source has been dead long enough, stop waiting for it and try
+		// to promote the copy we already have (guarded: ForcePromote refuses
+		// unless we copied up to the source's last-known HWM).
+		if r.sourceDeadEnough(m) {
+			if res, err := sess.ForcePromote(); err == nil {
+				r.logger.Warn("move: force-promoting copy of a dead source",
+					"topic", topicName, "partition", partition, "source", source, "hwm", res.HighWatermark)
+				if r.finishMove(ctx, topicName, partition, source, staging, res) {
+					return
+				}
+			} else {
+				r.logger.Warn("move: source dead but copy is behind its last hwm — cannot force-promote; waiting",
+					"topic", topicName, "partition", partition, "source", source, "err", err)
+			}
+			if !sleepCtx(ctx, r.cfg.RetryBackoff) {
+				return
+			}
+			continue
+		}
+		// Source down but not yet dead-enough — wait for it to return or die.
+		if m.Status == metastore.MemberDead {
+			if !sleepCtx(ctx, r.cfg.RetryBackoff) {
+				return
+			}
+			continue
+		}
+
+		if r.attemptCopy(ctx, sess, topicName, partition, source, m.Addr) {
+			return // move completed
+		}
+		if !sleepCtx(ctx, r.cfg.RetryBackoff) {
+			return
+		}
+	}
+}
+
+// attemptCopy runs one live-source copy attempt (bounded pre-copy → freeze →
+// finalize → flip). Returns true only when the move flipped. Any failure
+// returns false WITHOUT clearing staging, so the next attempt resumes the
+// copy and keeps the session's last-known HWM for a possible force-promote.
+func (r *MoveRunner) attemptCopy(ctx context.Context, sess *MoveSession, topicName string, partition int, source, sourceAddr string) bool {
 	converged, err := sess.CatchUp(ctx, r.cfg.CatchUpLagBytes, r.cfg.CatchUpMaxRounds, r.cfg.CatchUpStallRounds)
 	if err != nil {
-		r.abort(ctx, topicName, partition, staging, "catch-up", err)
-		return
+		r.logger.Warn("move: catch-up failed; will retry", "topic", topicName, "partition", partition, "err", err)
+		return false
 	}
 	if !converged {
 		r.logger.Warn("move: pre-copy did not converge (writers keep pace with the copy); freezing with a larger tail — the cutover freeze will be longer",
 			"topic", topicName, "partition", partition)
 	}
-
-	// Phase 2 — last-moment freeze, then drain the tail and flip.
 	if _, err := r.peer.PrepareHandoff(ctx, sourceAddr, topicName, partition, r.cfg.FreezeTTL); err != nil {
-		r.abort(ctx, topicName, partition, staging, "prepare-handoff", err)
-		return
+		r.logger.Warn("move: prepare-handoff failed; will retry", "topic", topicName, "partition", partition, "err", err)
+		return false
 	}
 	res, err := sess.Finalize(ctx)
 	if err != nil {
-		r.abort(ctx, topicName, partition, staging, "finalize", err)
-		return
+		r.logger.Warn("move: finalize failed; will retry", "topic", topicName, "partition", partition, "err", err)
+		return false
 	}
-	if err := r.install(topicName, partition, staging); err != nil {
-		r.abort(ctx, topicName, partition, staging, "install", err)
-		return
+	return r.finishMove(ctx, topicName, partition, source, r.stagingDir(topicName, partition), res)
+}
+
+// finishMove installs the staged copy and proposes the guarded flip (owner
+// := us, only if owner is still the source and target is still us — forwarded
+// to the leader when this node is a follower). Returns true when the flip
+// commits; on a rejected flip it rolls the install back and returns false so
+// the source stays authoritative and the worker retries (a re-plan will
+// cancel the worker).
+func (r *MoveRunner) finishMove(ctx context.Context, topicName string, partition int, source, stagingDir string, res CopyResult) bool {
+	if err := r.install(topicName, partition, stagingDir); err != nil {
+		r.logger.Warn("move: install failed; will retry", "topic", topicName, "partition", partition, "err", err)
+		return false
 	}
-	// The guarded flip: owner := us, only if owner is still the source and
-	// target is still us. A re-plan or a competing worker makes this fail —
-	// in which case we roll back the install so the source stays authoritative.
-	// The flip is a Raft write, so it runs on the leader — forwarded there
-	// when this destination node is a follower.
 	if err := r.completeMove(ctx, topicName, partition, source); err != nil {
 		r.logger.Warn("move: flip rejected (CAS guard or not applied)", "topic", topicName, "partition", partition, "err", err)
 		if rmErr := os.RemoveAll(r.partitionDir(topicName, partition)); rmErr != nil {
 			r.logger.Warn("move: roll back install", "topic", topicName, "partition", partition, "err", rmErr)
 		}
-		return
+		return false
 	}
 	r.logger.Info("move: partition moved",
 		"topic", topicName, "partition", partition, "source", source, "hwm", res.HighWatermark, "bytes", res.BytesCopied)
+	return true
 }
 
-// abort discards the staged copy and clears the move target (guarded, so a
-// re-plan is never clobbered). The source's freeze, if any, auto-resumes on
-// its TTL.
-func (r *MoveRunner) abort(ctx context.Context, topicName string, partition int, staging, phase string, cause error) {
-	if errors.Is(cause, context.Canceled) {
-		return // shutdown or retarget: leave desired state alone
+// sourceDeadEnough reports whether the source has been confirmed dead by the
+// controller AND has stayed dead past ForcePromoteAfter — long enough that a
+// transient pod restart (which would let the copy finish normally) has been
+// ruled out, so promoting the copy we have is the right recovery.
+func (r *MoveRunner) sourceDeadEnough(m metastore.Member) bool {
+	if m.Status != metastore.MemberDead {
+		return false
 	}
-	r.logger.Warn("move: aborting", "topic", topicName, "partition", partition, "phase", phase, "err", cause)
-	if err := os.RemoveAll(staging); err != nil {
-		r.logger.Warn("move: clear staging on abort", "dir", staging, "err", err)
-	}
-	if err := r.abortMove(ctx, topicName, partition); err != nil {
-		r.logger.Warn("move: clear target on abort", "topic", topicName, "partition", partition, "err", err)
-	}
+	return time.Since(time.Unix(m.LastHeartbeat, 0)) > r.cfg.ForcePromoteAfter
 }
 
 // completeMove proposes the guarded ownership flip: directly when this node
@@ -361,19 +426,6 @@ func (r *MoveRunner) completeMove(ctx context.Context, topicName string, partiti
 		return err
 	}
 	return r.peer.CompleteMove(ctx, addr, topicName, partition, source, r.selfID)
-}
-
-// abortMove clears this node's move target, directly on the leader or
-// forwarded to it.
-func (r *MoveRunner) abortMove(ctx context.Context, topicName string, partition int) error {
-	if r.store.IsLeader() {
-		return r.store.AbortMove(ctx, topicName, partition, r.selfID)
-	}
-	addr, err := r.leaderAddr()
-	if err != nil {
-		return err
-	}
-	return r.peer.AbortMove(ctx, addr, topicName, partition, r.selfID)
 }
 
 // leaderAddr resolves the current Raft leader's peer-RPC address.
@@ -408,17 +460,6 @@ func (r *MoveRunner) install(topicName string, partition int, staging string) er
 		return fmt.Errorf("install staged copy: %w", err)
 	}
 	return nil
-}
-
-func (r *MoveRunner) sourceAddr(sourceID string) (string, error) {
-	m, err := r.store.GetMember(sourceID)
-	if err != nil {
-		return "", fmt.Errorf("lookup source member %q: %w", sourceID, err)
-	}
-	if m.Status == metastore.MemberDead || m.Addr == "" {
-		return "", fmt.Errorf("source %q is unavailable", sourceID)
-	}
-	return m.Addr, nil
 }
 
 func (r *MoveRunner) partitionDir(topicName string, partition int) string {

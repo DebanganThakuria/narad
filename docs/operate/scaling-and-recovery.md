@@ -35,18 +35,31 @@ kubectl patch statefulset narad -n narad --type=json \
 
 ## Scaling in
 
-**Decommission a node before you remove its pod** — that drains its partitions off first, so nothing strands:
+**Decommission a node before you remove its pod** — that drains its partitions off first, so nothing strands. Narad runs as a StatefulSet, so always decommission the **highest-ordinal** pod (the one a scale-down would remove), and follow the order below exactly:
 
 ```bash
-narad cluster decommission narad-4     # drain narad-4's partitions onto the others
-narad cluster members                  # watch owned_partitions on narad-4 fall to 0
-# once drained, the controller removes it from the Raft voter set; then:
-helm upgrade narad ./charts/narad -n narad --reuse-values --set replicaCount=4
+# 1. Decommission the highest-ordinal node.
+narad cluster decommission narad-5
+
+# 2. Watch it drain to zero. Its partitions move onto the other nodes; once it
+#    owns nothing, the controller removes it from the Raft voter set.
+watch narad cluster members            # owned_partitions for narad-5 -> 0
+
+# 3. Only now scale the StatefulSet down. Because narad-5 owns nothing, this
+#    removes an empty pod — no data lost.
+helm upgrade narad ./charts/narad -n narad --reuse-values --set replicaCount=5
 ```
 
-Draining marks the node so the rebalance planner stops sending it partitions and sheds everything it owns onto the others — the same verbatim-copy machine as scale-out, run in reverse. `narad cluster decommission narad-4 --cancel` aborts a drain in progress.
+Draining marks the node so the rebalance planner stops sending it partitions and sheds everything it owns onto the others — the same verbatim-copy machine as scale-out, run in reverse. `narad cluster decommission narad-5 --cancel` aborts a drain in progress.
+
+!!! warning "Order and timing matter"
+    - **Wait for the drain to finish before scaling down.** A decommissioned pod keeps running (the StatefulSet owns it) but, once Raft-removed, reports *not ready* — that's expected. Scaling down before it owns zero partitions would delete a pod whose data hasn't moved yet.
+    - **Don't overlap a decommission with a rolling restart** (`helm upgrade` that changes the pod template). If the draining node's pod is being cycled at the same time, its partitions have no stable source to copy from and the drain stalls until the pod settles.
+    - **`kubectl scale` is usually RBAC-blocked** on managed clusters — scale through `helm upgrade --set replicaCount=…`, which is also what keeps Helm's view of the release correct.
 
 Two safety rails hold: the controller **never removes a node if it would drop the cluster below three Raft voters** (a quorum-safe floor), and it transfers leadership away first if the departing node is the leader. So `initialClusterSize` down to 3 is safe; below 3 the Raft removal is refused by design.
+
+If a source node dies *while its partitions are still draining*, the destinations that already caught up **force-promote** their copies after a couple of minutes rather than waiting forever — see [Rebalance & Decommission](../internals/rebalance.md#what-if-the-source-dies-mid-move).
 
 ## What failure actually does
 

@@ -62,6 +62,17 @@ The copy reproduces the source's *exact* high-watermark, which may lag the physi
 
 `CompleteMove` sets `Owner := Target` **only if** the owner is still the source and the target is still this node. A re-plan that retargeted the move, or a competing worker, makes the CAS fail — and a failed flip rolls the install back but keeps the target, so the source stays authoritative and a retry is legitimate. This single guarded entry is what makes the whole scheme split-brain free.
 
+## What if the source dies mid-move?
+
+The destination worker holds one copy session and **retries** — it doesn't give up when a copy attempt fails. If the source is briefly unreachable (a pod restart), the next attempt resumes the copy and the move completes normally once the source is back. Because Narad has no replication, waiting for the source is the data-safe default: the source's disk holds the authoritative partition.
+
+But if the source stays dead past `ForcePromoteAfter` (default 2 min — long enough to rule out a transient restart), the destination **force-promotes** the copy it already holds: it skips the freeze (a dead source isn't writing) and flips ownership to itself. Force-promote is strictly gated so it can never expose a truncated partition:
+
+- the session must have reached the source at least once (otherwise it has no idea what the source exposed — refuse);
+- the staged copy must recover to an offset **≥ the source's last-known high-watermark** — i.e. the destination copied everything the source had made *visible*. If the source died before the copy caught up, promoting would drop visible records, so it refuses and keeps waiting.
+
+Records the source committed in the window between the destination's last successful read and the source's death are unrecoverable — but with single-owner partitions they live only on the (now-dead) source's disk, so they are lost regardless. Force-promote recovers the maximum that is recoverable, turning a stalled move into a completed one.
+
 ## The planner: minimal movement, level-triggered
 
 On each tick the leader computes the fewest moves that balance owned partition count. With T movable partitions over R receivers, balance gives each receiver `floor(T/R)` or `ceil(T/R)`; the plan moves exactly the surplus above capacity, and the nodes already holding the most keep the `ceil` slots — so a partition on a node within its share is never touched.
