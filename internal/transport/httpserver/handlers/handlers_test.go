@@ -309,6 +309,10 @@ func (f *fakeBroker) ReadPartitionSegment(context.Context, string, int, int64, i
 func (f *fakeBroker) PauseProduceForHandoff(string, int, time.Duration) {}
 func (f *fakeBroker) ResumeProduce(string, int)                         {}
 
+func (f *fakeBroker) PrepareHandoff(context.Context, string, int, time.Duration) (messaging.PartitionTransferInfo, error) {
+	return messaging.PartitionTransferInfo{}, nil
+}
+
 func (f *fakeBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutCursorStat, error) {
 	return nil, nil
 }

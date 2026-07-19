@@ -99,6 +99,8 @@ func (s *RPCServer) dispatch(payload []byte) nodewire.Response {
 		res = s.handleListPartitionSegments(payload)
 	case nodewire.OpFetchSegmentChunk:
 		res = s.handleFetchSegmentChunk(payload)
+	case nodewire.OpPrepareHandoff:
+		res = s.handlePrepareHandoff(payload)
 	case nodewire.OpCreateTopic:
 		res = s.handleCreateTopic(payload)
 	case nodewire.OpAlterTopic:

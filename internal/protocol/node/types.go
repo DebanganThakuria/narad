@@ -39,6 +39,7 @@ const (
 	OpJoinCluster
 	OpListPartitionSegments
 	OpFetchSegmentChunk
+	OpPrepareHandoff
 )
 
 // JoinClusterRequest asks the metastore leader to admit a new node into
@@ -158,6 +159,14 @@ type FetchSegmentChunkRequest struct {
 	BaseOffset int64
 	At         int64
 	Length     int64
+}
+
+// PrepareHandoffRequest asks the owner of (Topic, Partition) to freeze
+// the partition for a rebalance handoff and return its final positions.
+type PrepareHandoffRequest struct {
+	Topic         string
+	Partition     int
+	FreezeTTLNanos int64
 }
 
 // OperationOf returns the Operation a request payload starts with,
