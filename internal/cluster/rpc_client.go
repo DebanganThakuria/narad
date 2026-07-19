@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
 	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
@@ -254,4 +255,38 @@ func writePeerResponse(w http.ResponseWriter, res nodewire.Response) {
 	if len(res.Body) > 0 {
 		_, _ = w.Write(res.Body)
 	}
+}
+
+// ListPartitionSegments asks the owner at addr for a partition's segment
+// list and durable positions (rebalance copy, serve side).
+func (c *PeerClient) ListPartitionSegments(ctx context.Context, addr, topicName string, partition int) (messaging.PartitionTransferInfo, error) {
+	payload, err := nodewire.EncodePartitionSegmentsRequest(nodewire.PartitionSegmentsRequest{Topic: topicName, Partition: partition})
+	res, err := c.send(ctx, addr, "list_partition_segments", payload, err)
+	if err != nil {
+		return messaging.PartitionTransferInfo{}, err
+	}
+	if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
+		return messaging.PartitionTransferInfo{}, fmt.Errorf("list partition segments returned status %d", res.Status)
+	}
+	var info messaging.PartitionTransferInfo
+	if err := json.Unmarshal(res.Body, &info); err != nil {
+		return messaging.PartitionTransferInfo{}, err
+	}
+	return info, nil
+}
+
+// FetchSegmentChunk fetches a bounded byte range of one segment from the
+// owner at addr (rebalance copy, serve side).
+func (c *PeerClient) FetchSegmentChunk(ctx context.Context, addr, topicName string, partition int, baseOffset, at, length int64) ([]byte, error) {
+	payload, err := nodewire.EncodeFetchSegmentChunkRequest(nodewire.FetchSegmentChunkRequest{
+		Topic: topicName, Partition: partition, BaseOffset: baseOffset, At: at, Length: length,
+	})
+	res, err := c.send(ctx, addr, "fetch_segment_chunk", payload, err)
+	if err != nil {
+		return nil, err
+	}
+	if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("fetch segment chunk returned status %d", res.Status)
+	}
+	return res.Body, nil
 }

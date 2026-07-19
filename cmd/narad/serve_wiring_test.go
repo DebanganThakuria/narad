@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
+	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/consumer"
@@ -297,6 +298,14 @@ func (stubBroker) DetachChild(context.Context, string, string) error        { re
 
 func (stubBroker) ReadFanoutSlab(context.Context, string, int, topic.FanoutReadOpts) (topic.FanoutSlab, error) {
 	return topic.FanoutSlab{}, nil
+}
+
+func (stubBroker) PartitionTransferInfo(context.Context, string, int) (messaging.PartitionTransferInfo, error) {
+	return messaging.PartitionTransferInfo{}, nil
+}
+
+func (stubBroker) ReadPartitionSegment(context.Context, string, int, int64, int64, int64) ([]byte, error) {
+	return nil, nil
 }
 
 func (stubBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutCursorStat, error) {

@@ -37,6 +37,8 @@ const (
 	OpNack
 	OpGetTopic
 	OpJoinCluster
+	OpListPartitionSegments
+	OpFetchSegmentChunk
 )
 
 // JoinClusterRequest asks the metastore leader to admit a new node into
@@ -138,6 +140,24 @@ type MemberRequest struct {
 	ClusterAddr   string
 	Status        string
 	LastHeartbeat int64
+}
+
+// PartitionSegmentsRequest asks the owner of (Topic, Partition) for its
+// segment list and durable positions, for a rebalance copy.
+type PartitionSegmentsRequest struct {
+	Topic     string
+	Partition int
+}
+
+// FetchSegmentChunkRequest asks the owner of (Topic, Partition) for a
+// bounded byte range of one segment file (identified by its base
+// offset), for a rebalance copy.
+type FetchSegmentChunkRequest struct {
+	Topic      string
+	Partition  int
+	BaseOffset int64
+	At         int64
+	Length     int64
 }
 
 // OperationOf returns the Operation a request payload starts with,
