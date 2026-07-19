@@ -54,6 +54,14 @@ const (
 	// bulk (possibly GBs) freeze-free in CatchUp and only the last few MiB
 	// under the freeze.
 	defaultMoveCatchUpLagBytes = 4 << 20 // 4 MiB
+	// defaultMoveCatchUpMaxRounds and StallRounds bound the freeze-free
+	// pre-copy so a hot partition whose writers keep pace with the copy can
+	// never loop forever: after this many passes (or this many with no
+	// progress toward the lag bound) the worker freezes and does a
+	// stop-and-copy of whatever tail remains. The move always completes; a
+	// bounded fallback just means a longer freeze.
+	defaultMoveCatchUpMaxRounds   = 20
+	defaultMoveCatchUpStallRounds = 3
 	// defaultMoveFreezeTTL is how long the source stays frozen if this
 	// worker dies between PrepareHandoff and the flip. Long enough to cover
 	// Finalize + install + the Raft CAS, short enough that a dead worker
@@ -64,10 +72,12 @@ const (
 
 // MoveConfig tunes the runner. Zero values use the defaults above.
 type MoveConfig struct {
-	ReconcileInterval time.Duration
-	CatchUpLagBytes   int64
-	FreezeTTL         time.Duration
-	ChunkBytes        int64
+	ReconcileInterval  time.Duration
+	CatchUpLagBytes    int64
+	CatchUpMaxRounds   int
+	CatchUpStallRounds int
+	FreezeTTL          time.Duration
+	ChunkBytes         int64
 }
 
 func (c MoveConfig) withDefaults() MoveConfig {
@@ -76,6 +86,12 @@ func (c MoveConfig) withDefaults() MoveConfig {
 	}
 	if c.CatchUpLagBytes <= 0 {
 		c.CatchUpLagBytes = defaultMoveCatchUpLagBytes
+	}
+	if c.CatchUpMaxRounds <= 0 {
+		c.CatchUpMaxRounds = defaultMoveCatchUpMaxRounds
+	}
+	if c.CatchUpStallRounds <= 0 {
+		c.CatchUpStallRounds = defaultMoveCatchUpStallRounds
 	}
 	if c.FreezeTTL <= 0 {
 		c.FreezeTTL = defaultMoveFreezeTTL
@@ -272,11 +288,18 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 	}
 	sess := r.mover.Begin(sourceAddr, topicName, partition, staging)
 
-	// Phase 1 — freeze-free bulk copy. A GB partition copies here with
-	// produce still flowing on the source.
-	if err := sess.CatchUp(ctx, r.cfg.CatchUpLagBytes); err != nil {
+	// Phase 1 — freeze-free bulk copy, iterated to shrink the tail. Bounded:
+	// if the writers keep pace with the copy it stops (converged=false) and
+	// the freeze below does a stop-and-copy of the remaining tail rather than
+	// chasing a moving target forever.
+	converged, err := sess.CatchUp(ctx, r.cfg.CatchUpLagBytes, r.cfg.CatchUpMaxRounds, r.cfg.CatchUpStallRounds)
+	if err != nil {
 		r.abort(ctx, topicName, partition, staging, "catch-up", err)
 		return
+	}
+	if !converged {
+		r.logger.Warn("move: pre-copy did not converge (writers keep pace with the copy); freezing with a larger tail — the cutover freeze will be longer",
+			"topic", topicName, "partition", partition)
 	}
 
 	// Phase 2 — last-moment freeze, then drain the tail and flip.

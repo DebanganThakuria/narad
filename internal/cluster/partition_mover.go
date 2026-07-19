@@ -57,18 +57,26 @@ type CopyResult struct {
 // A MoveSession copies one partition from a source owner into a staging
 // dir. It carries the per-segment copied-bytes state across two phases:
 //
-//   CatchUp  — freeze-free, lag-bounded. Copies the bulk (GBs of sealed
-//              segments + the growing active tail) while produce flows
-//              normally, returning once a pass copies at most lagBytes.
-//              A big partition copies here with ZERO produce impact.
+//   CatchUp  — freeze-free, BOUNDED pre-copy. Copies the bulk (GBs of
+//              sealed segments + the growing active tail) while produce
+//              flows normally, iterating to shrink the un-copied tail. It
+//              returns converged=true once caught up (short freeze), or
+//              converged=false after a bounded number of passes if the
+//              writers keep pace with the copy (a longer stop-and-copy
+//              freeze). It NEVER loops forever.
 //   Finalize — the drain after the source is frozen (PrepareHandoff):
-//              copies the last few records to a now-static tail,
+//              copies whatever tail remains to a now-static source,
 //              reproduces the source's exact HWM + committed offset, and
 //              verifies the staged copy recovers into a log reaching it.
+//              Always terminates — the freeze stopped the writes.
 //
 // The reconcile loop does: Begin → CatchUp → PrepareHandoff (freeze,
 // last moment) → Finalize → CompleteMove (flip). The freeze covers only
-// Finalize, so it lasts milliseconds regardless of partition size.
+// Finalize; for a partition whose writes stay below the copy bandwidth it
+// lasts milliseconds regardless of partition size. For a partition whose
+// writers outrun the copy, CatchUp stops pre-copying and the freeze does a
+// stop-and-copy of the remaining tail — a longer freeze, but the move
+// always cuts over.
 type MoveSession struct {
 	m          *PartitionMover
 	sourceAddr string
@@ -126,33 +134,72 @@ func (s *MoveSession) pass(ctx context.Context) (int64, messaging.PartitionTrans
 	return newBytes, info, nil
 }
 
-// CatchUp copies the partition, produce still flowing, until a pass moves
-// at most lagBytes — i.e. the destination is within lagBytes of the live
-// tail. NO freeze here: this is where a GB partition copies for minutes
-// with zero produce impact. lagBytes bounds how much the subsequent
-// frozen Finalize must drain, so it controls the freeze duration.
-func (s *MoveSession) CatchUp(ctx context.Context, lagBytes int64) error {
+// CatchUp copies the partition with produce still flowing, iterating to
+// shrink the un-copied tail before the freeze. This is the pre-copy half of
+// a pre-copy / stop-and-copy cutover (as in live VM migration): bounded
+// pre-copy, then a guaranteed freeze. It stops — and the caller proceeds to
+// freeze + Finalize — as soon as ANY of these holds:
+//
+//   - a pass copies <= lagBytes: the destination is caught up to the live
+//     tail, so the frozen Finalize drains almost nothing (a short freeze).
+//     converged=true.
+//   - the tail stops shrinking for stallRounds passes, or maxRounds passes
+//     elapse: the writers are keeping pace with (or outrunning) the copy, so
+//     iterating further only lets the partition — and the eventual freeze —
+//     grow. We stop NOW, at the smallest tail we achieved. converged=false.
+//
+// The move ALWAYS completes: the freeze (PrepareHandoff) stops the writes, so
+// Finalize drains a fixed tail at full bandwidth no matter how hot the
+// partition was. converged=false only means the freeze will be longer (it
+// drains the tail we couldn't pre-copy) — never that the move hangs. When the
+// copy can't win the race, stopping sooner is better, because the tail (hence
+// the freeze) only grows while we keep trying.
+func (s *MoveSession) CatchUp(ctx context.Context, lagBytes int64, maxRounds, stallRounds int) (converged bool, err error) {
 	if lagBytes < 0 {
 		lagBytes = 0
 	}
+	if maxRounds <= 0 {
+		maxRounds = 1
+	}
+	if stallRounds <= 0 {
+		stallRounds = 1
+	}
+	best := int64(-1) // smallest per-pass tail seen so far
+	stalls := 0
 	for pass := 0; ; pass++ {
 		if err := ctx.Err(); err != nil {
-			return err
+			return false, err
 		}
 		newBytes, _, err := s.pass(ctx)
 		if err != nil {
-			return err
+			return false, err
 		}
-		if pass > 0 && newBytes <= lagBytes {
-			return nil // within the lag bound; ready to freeze + finalize
-		}
-		if newBytes == 0 {
-			if !sleepCtx(ctx, 50*time.Millisecond) {
-				return ctx.Err()
+		// Pass 0 is the bulk copy; measure the shrinking tail from pass 1.
+		if pass > 0 {
+			if newBytes <= lagBytes {
+				return true, nil // caught up — the freeze drains ~nothing
 			}
+			if best < 0 || newBytes < best {
+				best, stalls = newBytes, 0
+			} else {
+				stalls++ // no progress toward the tail bound this pass
+			}
+			if stalls >= stallRounds || pass >= maxRounds {
+				// Writers keep pace with the copy; stop pre-copying and let
+				// the freeze do a stop-and-copy of the remaining tail.
+				return false, nil
+			}
+		}
+		if !sleepCtx(ctx, catchUpPassInterval) {
+			return false, ctx.Err()
 		}
 	}
 }
+
+// catchUpPassInterval paces the pre-copy passes: long enough that a pass
+// carries a meaningful chunk of writes (so the shrink/stall signal is
+// stable), short enough that catch-up stays responsive.
+const catchUpPassInterval = 50 * time.Millisecond
 
 // Finalize drains the (now-frozen) source until a pass copies zero new
 // bytes, reproduces the source's exact HWM + committed offset, and

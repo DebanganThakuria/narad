@@ -10,6 +10,7 @@ package cluster
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -167,9 +168,14 @@ func TestMoveSessionCatchUpThenFinalize(t *testing.T) {
 	staging := filepath.Join(t.TempDir(), "staging")
 	sess := mover.Begin("addr", "orders", 0, staging)
 
-	// Freeze-free catch-up to within a small lag (static source → lag 0).
-	if err := sess.CatchUp(context.Background(), 4096); err != nil {
+	// Freeze-free catch-up. A static source converges immediately: the first
+	// post-bulk pass copies nothing, so it's caught up.
+	converged, err := sess.CatchUp(context.Background(), 4096, 20, 3)
+	if err != nil {
 		t.Fatalf("CatchUp: %v", err)
+	}
+	if !converged {
+		t.Fatal("static source must converge, not fall back to stop-and-copy")
 	}
 	// Finalize (as if the source were now frozen) completes + verifies.
 	res, err := sess.Finalize(context.Background())
@@ -191,5 +197,53 @@ func TestMoveSessionCatchUpThenFinalize(t *testing.T) {
 		if _, _, got, err := log.ReadKeyed(off); err != nil || string(got) != string(want) {
 			t.Fatalf("offset %d = %q (err %v), want %q", off, got, err, want)
 		}
+	}
+}
+
+// growingFetcher simulates a partition under sustained write: every list
+// reports a larger tail, so the copy can never "catch up" to a moving
+// target. It serves arbitrary bytes for the delta.
+type growingFetcher struct {
+	mu     sync.Mutex
+	size   int64
+	growth int64
+}
+
+func (g *growingFetcher) ListPartitionSegments(context.Context, string, string, int) (messaging.PartitionTransferInfo, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.size += g.growth // writers keep pace with the copy
+	return messaging.PartitionTransferInfo{
+		Segments: []storage.SegmentInfo{{BaseOffset: 0, SizeBytes: g.size, Sealed: false}},
+	}, nil
+}
+
+func (g *growingFetcher) FetchSegmentChunk(_ context.Context, _, _ string, _ int, _, _, length int64) ([]byte, error) {
+	return make([]byte, length), nil
+}
+
+// CatchUp must NOT loop forever when the writers keep pace with the copy: it
+// stops after a bounded number of passes and reports converged=false so the
+// caller falls back to a stop-and-copy under the freeze. This is the exact
+// hot-big-partition case: without the bound the move would never cut over.
+func TestCatchUpBoundedWhenWritersKeepPace(t *testing.T) {
+	fetcher := &growingFetcher{growth: 8192} // 8 KiB of new writes per pass
+	mover := NewPartitionMover(fetcher, 4096, nil)
+	sess := mover.Begin("addr", "orders", 0, filepath.Join(t.TempDir(), "staging"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// lagBytes (100) is far below the per-pass growth (8 KiB), so the lag
+	// bound is never met; maxRounds/stallRounds must stop it anyway.
+	converged, err := sess.CatchUp(ctx, 100, 20, 3)
+	if err != nil {
+		t.Fatalf("CatchUp errored (should return a bounded fallback, not fail): %v", err)
+	}
+	if converged {
+		t.Fatal("CatchUp reported converged for a partition that never catches up")
+	}
+	if ctx.Err() != nil {
+		t.Fatal("CatchUp ran until the timeout — it looped instead of falling back")
 	}
 }
