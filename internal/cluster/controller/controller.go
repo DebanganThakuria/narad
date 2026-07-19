@@ -24,6 +24,10 @@ type controllerStore interface {
 	AssignPartition(ctx context.Context, topicName string, partition int, ownerID string) error
 	SetAssignmentTarget(ctx context.Context, topicName string, partition int, targetID string) error
 	MarkMemberDead(ctx context.Context, podID string) error
+	Voters() ([]string, error)
+	RemoveServer(id string) error
+	TransferLeadership() error
+	LeaderID() string
 }
 
 // Config holds tunables for the controller. Zero values use safe defaults.
@@ -40,6 +44,11 @@ type Config struct {
 	// than copying every partition at once. Default: 8. Zero disables
 	// auto-rebalance entirely.
 	MaxInFlightMoves int
+	// MinVoters is the smallest Raft voter count decommission will leave
+	// behind: a drained node is removed only if doing so keeps at least this
+	// many voters, so a decommission can never drop the cluster below a
+	// quorum-safe size. Default: 3.
+	MinVoters int
 }
 
 func (c Config) withDefaults() Config {
@@ -51,6 +60,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxInFlightMoves == 0 {
 		c.MaxInFlightMoves = 8
+	}
+	if c.MinVoters == 0 {
+		c.MinVoters = 3
 	}
 	return c
 }

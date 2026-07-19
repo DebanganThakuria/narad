@@ -109,6 +109,39 @@ func (s *Store) AddVoter(id, clusterAddr string) error {
 	return s.r.AddVoter(raft.ServerID(id), raft.ServerAddress(clusterAddr), 0, barrierTimeout).Error()
 }
 
+// RemoveServer removes a node from the Raft configuration. Leader-only
+// (followers fail with raft.ErrNotLeader). This is the decommission path:
+// the controller calls it once a draining node owns no partitions, so the
+// removed node's data is already safely relocated. Idempotent — removing a
+// node already absent is a no-op config entry.
+func (s *Store) RemoveServer(id string) error {
+	return s.r.RemoveServer(raft.ServerID(id), 0, barrierTimeout).Error()
+}
+
+// Voters returns the IDs of the current Raft voters. Used by the
+// decommission guard to refuse a removal that would drop the cluster below
+// a safe voter count.
+func (s *Store) Voters() ([]string, error) {
+	future := s.r.GetConfiguration()
+	if err := future.Error(); err != nil {
+		return nil, err
+	}
+	var voters []string
+	for _, srv := range future.Configuration().Servers {
+		if srv.Suffrage == raft.Voter {
+			voters = append(voters, string(srv.ID))
+		}
+	}
+	return voters, nil
+}
+
+// TransferLeadership hands Raft leadership to another voter. The
+// decommission guard calls it when the node being removed is the current
+// leader — you cannot cleanly remove the leader from its own config.
+func (s *Store) TransferLeadership() error {
+	return s.r.LeadershipTransfer().Error()
+}
+
 // HasRaftConfiguration reports whether this node's Raft configuration
 // contains any servers. A join-only node that has not yet been admitted
 // has an empty configuration and cannot make progress until the leader
