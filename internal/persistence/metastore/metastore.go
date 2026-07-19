@@ -73,4 +73,9 @@ type Assignment struct {
 	Topic     string `json:"topic"`
 	Partition int    `json:"partition"`
 	OwnerID   string `json:"owner_id"`
+	// TargetID names the node this partition is being moved to during a
+	// rebalance/decommission. Empty when the assignment is stable. The
+	// leader (controller) sets it as desired state; the destination node
+	// copies the partition and proposes the atomic flip when caught up.
+	TargetID string `json:"target_id,omitempty"`
 }

@@ -21,7 +21,38 @@ const (
 	opSeedRootUser
 	opAttachChild
 	opDetachChild
+	opSetAssignmentTarget
+	opCompleteMove
+	opAbortMove
 )
+
+// assignmentTargetPayload sets (or clears, when TargetID=="") the move
+// target on an existing partition assignment.
+type assignmentTargetPayload struct {
+	Topic     string `json:"t"`
+	Partition int    `json:"p"`
+	TargetID  string `json:"g"`
+}
+
+// completeMovePayload is the atomic ownership flip a caught-up
+// destination proposes: set OwnerID=TargetID and clear the target, but
+// ONLY if the current owner still matches ExpectedOwner and the target
+// still matches TargetID (compare-and-swap through Raft).
+type completeMovePayload struct {
+	Topic         string `json:"t"`
+	Partition     int    `json:"p"`
+	ExpectedOwner string `json:"e"`
+	TargetID      string `json:"g"`
+}
+
+// abortMovePayload clears a move target, but only if it still matches
+// ExpectedTarget — so aborting a stale move never clobbers a target a
+// re-plan just set.
+type abortMovePayload struct {
+	Topic          string `json:"t"`
+	Partition      int    `json:"p"`
+	ExpectedTarget string `json:"g"`
+}
 
 // cmd is the envelope written to the Raft log.
 type cmd struct {
