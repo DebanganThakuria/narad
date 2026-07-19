@@ -111,7 +111,8 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 	case errors.Is(err, errs.ErrUnavailable):
 		s.WriteError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, errs.ErrInvalidArgument),
-		errors.Is(err, errs.ErrPartitionRequired):
+		errors.Is(err, errs.ErrPartitionRequired),
+		errors.Is(err, errs.ErrFanoutDelayTooLong):
 		s.WriteError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, errs.ErrNotPartitionOwner):
 		s.WriteError(w, http.StatusMisdirectedRequest, err.Error())
@@ -119,7 +120,6 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 		errors.Is(err, errs.ErrFanoutChildLimit),
 		errors.Is(err, errs.ErrFanoutSchemaMismatch),
 		errors.Is(err, errs.ErrFanoutSchemaManaged),
-		errors.Is(err, errs.ErrFanoutDelayTooLong),
 		errors.Is(err, errs.ErrDelayedChildProduce),
 		errors.Is(err, errs.ErrAlreadyExists):
 		s.WriteError(w, http.StatusConflict, err.Error())

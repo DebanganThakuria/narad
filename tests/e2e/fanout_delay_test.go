@@ -86,9 +86,10 @@ func TestFanoutDelayRetentionInvariant(t *testing.T) {
 	e.createTopic("dret-parent", 3, 7_200_000) // 2h: buffers delays up to 1h
 	e.createTopic("dret-child", 3, 0)
 
-	// A delay the retention cannot buffer is rejected at attach.
+	// A delay the retention cannot buffer is a bad request (invalid
+	// delay/retention combination), not a conflict.
 	resp := attachChildWithDelay(t, e, "dret-parent", "dret-child", 3_600_001)
-	expectConflict(t, resp)
+	expectBadRequest(t, resp)
 	// A negative delay is a bad request.
 	resp = attachChildWithDelay(t, e, "dret-parent", "dret-child", -5)
 	expectBadRequest(t, resp)
@@ -98,9 +99,11 @@ func TestFanoutDelayRetentionInvariant(t *testing.T) {
 	expectOK(t, resp)
 
 	// ...and now the parent's retention cannot shrink below what the
-	// child's delay requires (1500ms + the 1h floor > 1h).
+	// child's delay requires (1500ms + the 1h floor > 1h). The requested
+	// retention is invalid for this topic's delay config → bad request,
+	// consistent with the create/attach path.
 	resp = e.patch("/v1/topics/dret-parent", map[string]any{"retention_ms": int64(3_600_000)})
-	expectConflict(t, resp)
+	expectBadRequest(t, resp)
 	// Shrinking to something that still buffers the delay is fine.
 	resp = e.patch("/v1/topics/dret-parent", map[string]any{"retention_ms": int64(3_700_000)})
 	expectOK(t, resp)
