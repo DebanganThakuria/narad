@@ -78,3 +78,38 @@ func DecodeFetchSegmentChunkRequest(payload []byte) (FetchSegmentChunkRequest, e
 	}
 	return FetchSegmentChunkRequest{Topic: t, Partition: int(p), BaseOffset: base, At: at, Length: length}, nil
 }
+
+// EncodePrepareHandoffRequest encodes an OpPrepareHandoff payload.
+func EncodePrepareHandoffRequest(req PrepareHandoffRequest) ([]byte, error) {
+	w := opWriter(OpPrepareHandoff, fieldLen(req.Topic)+4+8)
+	if err := w.string(req.Topic); err != nil {
+		return nil, err
+	}
+	w.i32(int32(req.Partition))
+	w.i64(req.FreezeTTLNanos)
+	return w.finish(), nil
+}
+
+// DecodePrepareHandoffRequest decodes an OpPrepareHandoff payload.
+func DecodePrepareHandoffRequest(payload []byte) (PrepareHandoffRequest, error) {
+	r, err := opReader(payload, OpPrepareHandoff)
+	if err != nil {
+		return PrepareHandoffRequest{}, err
+	}
+	t, err := r.string()
+	if err != nil {
+		return PrepareHandoffRequest{}, err
+	}
+	pt, err := r.i32()
+	if err != nil {
+		return PrepareHandoffRequest{}, err
+	}
+	ttl, err := r.i64()
+	if err != nil {
+		return PrepareHandoffRequest{}, err
+	}
+	if err := r.done(); err != nil {
+		return PrepareHandoffRequest{}, err
+	}
+	return PrepareHandoffRequest{Topic: t, Partition: int(pt), FreezeTTLNanos: ttl}, nil
+}

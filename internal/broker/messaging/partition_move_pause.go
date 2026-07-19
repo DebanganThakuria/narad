@@ -1,13 +1,15 @@
 package messaging
 
-// Produce pause for a rebalance handoff. When a partition is about to
-// hand off to a new owner, this node briefly stops accepting produce
-// for it so no record lands after the destination captured the final
-// tail. Paused produce reroutes to a live partition (AP) — the same
-// path as a dead owner. The pause carries a TTL so if the handoff never
-// completes (the destination died), the source auto-resumes.
+// Handoff freeze for a rebalance. When a partition is about to hand off
+// to a new owner, this node briefly stops both ACCEPTING and COMMITTING
+// produce for it, so no record lands after the destination captured the
+// final tail. Frozen produce reroutes to a live partition and frozen
+// commits make the ingress dispatcher retry to the new owner (AP) — the
+// same paths as a dead owner. The freeze carries a TTL so if the handoff
+// never completes (the destination died), the source auto-resumes.
 
 import (
+	"context"
 	"strconv"
 	"time"
 )
@@ -55,4 +57,25 @@ func (e *Engine) isProducePaused(topicName string, partition int) bool {
 		return false
 	}
 	return true
+}
+
+// PrepareHandoff freezes a locally-owned partition and returns its now-
+// final transfer info (segments + HWM + committed offset). This is the
+// LAST-MOMENT freeze: the destination must first bulk-copy and tail the
+// partition (produce flowing normally — a GB partition stays available
+// for minutes) until it is caught up to within a tiny lag, and only
+// THEN call PrepareHandoff. The freeze then covers just the final few
+// records, so produce is paused for milliseconds regardless of
+// partition size. After it, the destination copies to the returned
+// (now-stable, commits frozen) HWM and proposes the ownership flip.
+// Errors with ErrNotPartitionOwner if this node does not own the
+// partition.
+func (e *Engine) PrepareHandoff(ctx context.Context, topicName string, partition int, freezeTTL time.Duration) (PartitionTransferInfo, error) {
+	if !e.isLocalOwner(topicName, partition) {
+		return PartitionTransferInfo{}, ErrNotPartitionOwner
+	}
+	e.PauseProduceForHandoff(topicName, partition, freezeTTL)
+	// The freeze stops new commits; existing ones under the produce lock
+	// finish before this read, so the reported HWM is final.
+	return e.PartitionTransferInfo(ctx, topicName, partition)
 }

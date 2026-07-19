@@ -153,3 +153,43 @@ func TestPartitionMoverPreservesHiddenTail(t *testing.T) {
 		t.Fatalf("staged NextOffset = %d, want %d (all records copied)", log.NextOffset(), recordCount)
 	}
 }
+
+// CatchUp against a static source returns once caught up without a
+// freeze — the freeze-free phase that lets a GB partition copy while
+// produce keeps flowing. Finalize then completes the (already-caught-up)
+// copy identically.
+func TestMoveSessionCatchUpThenFinalize(t *testing.T) {
+	src := t.TempDir()
+	wantHWM, payloads := buildSourcePartition(t, src, 30)
+	fetcher := dirFetcher{dir: src, hwm: wantHWM, committed: 12, hasCommitted: true}
+	mover := NewPartitionMover(fetcher, 16, nil)
+
+	staging := filepath.Join(t.TempDir(), "staging")
+	sess := mover.Begin("addr", "orders", 0, staging)
+
+	// Freeze-free catch-up to within a small lag (static source → lag 0).
+	if err := sess.CatchUp(context.Background(), 4096); err != nil {
+		t.Fatalf("CatchUp: %v", err)
+	}
+	// Finalize (as if the source were now frozen) completes + verifies.
+	res, err := sess.Finalize(context.Background())
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if res.HighWatermark != wantHWM || res.CommittedOffset != 12 {
+		t.Fatalf("res = hwm %d committed %d, want %d / 12", res.HighWatermark, res.CommittedOffset, wantHWM)
+	}
+	log, err := storage.NewLog(staging, storage.Options{})
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	defer log.Close()
+	if log.NextOffset() != wantHWM {
+		t.Fatalf("staged NextOffset = %d, want %d", log.NextOffset(), wantHWM)
+	}
+	for off, want := range payloads {
+		if _, _, got, err := log.ReadKeyed(off); err != nil || string(got) != string(want) {
+			t.Fatalf("offset %d = %q (err %v), want %q", off, got, err, want)
+		}
+	}
+}

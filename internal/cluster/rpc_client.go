@@ -290,3 +290,23 @@ func (c *PeerClient) FetchSegmentChunk(ctx context.Context, addr, topicName stri
 	}
 	return res.Body, nil
 }
+
+// PrepareHandoff asks the owner at addr to freeze (Topic, Partition) for
+// a rebalance handoff and return its final positions.
+func (c *PeerClient) PrepareHandoff(ctx context.Context, addr, topicName string, partition int, freezeTTL time.Duration) (messaging.PartitionTransferInfo, error) {
+	payload, err := nodewire.EncodePrepareHandoffRequest(nodewire.PrepareHandoffRequest{
+		Topic: topicName, Partition: partition, FreezeTTLNanos: int64(freezeTTL),
+	})
+	res, err := c.send(ctx, addr, "prepare_handoff", payload, err)
+	if err != nil {
+		return messaging.PartitionTransferInfo{}, err
+	}
+	if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
+		return messaging.PartitionTransferInfo{}, fmt.Errorf("prepare handoff returned status %d", res.Status)
+	}
+	var info messaging.PartitionTransferInfo
+	if err := json.Unmarshal(res.Body, &info); err != nil {
+		return messaging.PartitionTransferInfo{}, err
+	}
+	return info, nil
+}

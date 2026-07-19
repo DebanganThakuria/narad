@@ -34,7 +34,10 @@ func (e *Engine) CommitAcceptedProduce(ctx context.Context, record ingress.Produ
 	if record.TargetPartition < 0 || record.TargetPartition >= t.Partitions {
 		return 0, fmt.Errorf("%w: partition out of range", ErrInvalid)
 	}
-	if !e.isLocalOwner(record.Topic, record.TargetPartition) {
+	if !e.isLocalOwner(record.Topic, record.TargetPartition) || e.isProducePaused(record.Topic, record.TargetPartition) {
+		// A partition frozen for a rebalance handoff rejects commits so
+		// nothing lands after the destination captured the final tail;
+		// the ingress dispatcher retries and delivers to the new owner.
 		return 0, ErrNotPartitionOwner
 	}
 
@@ -76,7 +79,8 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 	if partition < 0 || partition >= t.Partitions {
 		return nil, fmt.Errorf("%w: partition out of range", ErrInvalid)
 	}
-	if !e.isLocalOwner(topicName, partition) {
+	if !e.isLocalOwner(topicName, partition) || e.isProducePaused(topicName, partition) {
+		// Frozen for handoff — see the single-commit path above.
 		return nil, ErrNotPartitionOwner
 	}
 

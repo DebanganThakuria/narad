@@ -6,6 +6,7 @@ package cluster
 
 import (
 	"net/http"
+	"time"
 
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
@@ -32,4 +33,16 @@ func (s *RPCServer) handleFetchSegmentChunk(payload []byte) nodewire.Response {
 		return s.brokerError("fetch segment", err)
 	}
 	return nodewire.Response{Status: http.StatusOK, ContentType: "application/octet-stream", Body: data}
+}
+
+func (s *RPCServer) handlePrepareHandoff(payload []byte) nodewire.Response {
+	req, err := nodewire.DecodePrepareHandoffRequest(payload)
+	if err != nil {
+		return errorResponse(http.StatusBadRequest, "invalid prepare-handoff request: "+err.Error())
+	}
+	info, err := s.broker.PrepareHandoff(rpcRequestContext(), req.Topic, req.Partition, time.Duration(req.FreezeTTLNanos))
+	if err != nil {
+		return s.brokerError("prepare handoff", err)
+	}
+	return jsonResponse(http.StatusOK, info)
 }

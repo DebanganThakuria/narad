@@ -45,3 +45,21 @@ func TestPartitionTransferDecodeRejectsWrongOp(t *testing.T) {
 		t.Fatal("decoding a segments request as a fetch request must fail")
 	}
 }
+
+func TestPrepareHandoffRequestRoundTrip(t *testing.T) {
+	in := PrepareHandoffRequest{Topic: "orders", Partition: 4, FreezeTTLNanos: 30_000_000_000}
+	b, err := EncodePrepareHandoffRequest(in)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if op, _ := OperationOf(b); op != OpPrepareHandoff {
+		t.Fatalf("op = %d, want OpPrepareHandoff", op)
+	}
+	out, err := DecodePrepareHandoffRequest(b)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out != in {
+		t.Fatalf("round trip = %+v, want %+v", out, in)
+	}
+}

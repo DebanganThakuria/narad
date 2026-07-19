@@ -9,6 +9,7 @@ package messaging
 
 import (
 	"context"
+	"time"
 	"testing"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
@@ -99,5 +100,46 @@ func TestPartitionTransferServeAndCopyIsIdentical(t *testing.T) {
 		if _, _, _, err := copyLog.ReadKeyed(off); err != nil {
 			t.Fatalf("copy ReadKeyed(%d): %v", off, err)
 		}
+	}
+}
+
+// PrepareHandoff freezes the partition: after it, commits are rejected
+// so no record can land after the destination captured the final tail
+// (they reroute to the new owner via the ingress dispatcher). Resume
+// restores commits. This is the cutover's no-loss guarantee.
+func TestPrepareHandoffFreezesCommits(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 3}
+	e := newTestEngine(t, ms, nil, nil)
+	ctx := context.Background()
+
+	rec := func() []ingress.ProduceRecord {
+		return []ingress.ProduceRecord{{Topic: "orders", TargetPartition: 0, Key: "k", Payload: []byte("x")}}
+	}
+	if _, err := e.CommitAcceptedProduceBatch(ctx, rec()); err != nil {
+		t.Fatalf("pre-freeze commit: %v", err)
+	}
+
+	info, err := e.PrepareHandoff(ctx, "orders", 0, time.Minute)
+	if err != nil {
+		t.Fatalf("PrepareHandoff: %v", err)
+	}
+	if info.HighWatermark != 1 {
+		t.Fatalf("frozen HWM = %d, want 1", info.HighWatermark)
+	}
+
+	// Frozen: a commit must be rejected (would reroute to the new owner).
+	if _, err := e.CommitAcceptedProduceBatch(ctx, rec()); err == nil {
+		t.Fatal("commit on a frozen partition must be rejected")
+	}
+	// The HWM did not move — nothing landed after the freeze.
+	if info2, _ := e.PartitionTransferInfo(ctx, "orders", 0); info2.HighWatermark != 1 {
+		t.Fatalf("HWM advanced to %d during freeze — a record landed", info2.HighWatermark)
+	}
+
+	// Resume restores commits.
+	e.ResumeProduce("orders", 0)
+	if _, err := e.CommitAcceptedProduceBatch(ctx, rec()); err != nil {
+		t.Fatalf("post-resume commit: %v", err)
 	}
 }
