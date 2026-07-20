@@ -58,6 +58,16 @@ That is the no-loss guarantee: once the destination captures the final tail, no 
 
 The copy reproduces the source's *exact* high-watermark, which may lag the physical record count (a hidden tail): a reopened copy must never expose records the source hadn't made visible. The verify step reopens the staged copy and confirms it recovers into a log reaching that HWM before the flip.
 
+### What clients see during a move
+
+**Nothing blocks — for anyone, at any point.** The "freeze" is internal to one partition; from the outside:
+
+- **Produce keeps succeeding.** A produce that would have routed to the moving partition lands on another partition of the topic instead (the same AP reroute Narad uses around a dead owner). No request fails or waits, even during the freeze. The trade is per-key partition affinity for those few milliseconds — a record whose key normally hashes to the moving partition is placed elsewhere, so strict per-key ordering has a seam across the cutover, exactly as it does across an owner failure.
+- **Consume is never frozen at all.** Reads can't violate the no-loss invariant (only writes to the log can), so the source keeps serving consumers through the entire freeze, and after the flip consume simply routes to the new owner.
+- **Consumer position moves with the partition.** The committed consumer offset is copied along with the data, so the new owner resumes where the old one left off. In-flight reservations are *not* transferred: anything unacked at the flip — plus an ack that lands on the source in the milliseconds after the final capture — is **redelivered** by the new owner. Duplicates, never gaps: the standard at-least-once contract.
+
+In short: the freeze protects **durability** (no write may land behind the final copy), and **redelivery** protects consume correctness. Availability is never the price of a move.
+
 ## The flip is a compare-and-swap
 
 `CompleteMove` sets `Owner := Target` **only if** the owner is still the source and the target is still this node. A re-plan that retargeted the move, or a competing worker, makes the CAS fail — and a failed flip rolls the install back but keeps the target, so the source stays authoritative and a retry is legitimate. This single guarded entry is what makes the whole scheme split-brain free.
