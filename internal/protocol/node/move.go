@@ -80,3 +80,33 @@ func DecodeAbortMoveRequest(payload []byte) (AbortMoveRequest, error) {
 	}
 	return AbortMoveRequest{Topic: topic, Partition: int(part), ExpectedTarget: target}, nil
 }
+
+// EncodeGetAssignmentRequest encodes an OpGetAssignment payload.
+func EncodeGetAssignmentRequest(req GetAssignmentRequest) ([]byte, error) {
+	w := opWriter(OpGetAssignment, fieldLen(req.Topic)+4)
+	if err := w.string(req.Topic); err != nil {
+		return nil, err
+	}
+	w.i32(int32(req.Partition))
+	return w.finish(), nil
+}
+
+// DecodeGetAssignmentRequest decodes an OpGetAssignment payload.
+func DecodeGetAssignmentRequest(payload []byte) (GetAssignmentRequest, error) {
+	r, err := opReader(payload, OpGetAssignment)
+	if err != nil {
+		return GetAssignmentRequest{}, err
+	}
+	topic, err := r.string()
+	if err != nil {
+		return GetAssignmentRequest{}, err
+	}
+	part, err := r.i32()
+	if err != nil {
+		return GetAssignmentRequest{}, err
+	}
+	if err := r.done(); err != nil {
+		return GetAssignmentRequest{}, err
+	}
+	return GetAssignmentRequest{Topic: topic, Partition: int(part)}, nil
+}

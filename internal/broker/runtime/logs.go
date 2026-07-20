@@ -200,3 +200,20 @@ func retentionFromTopic(r int64, checkInterval time.Duration) storage.RetentionC
 		CheckInterval: checkInterval,
 	}
 }
+
+// ClosePartition flushes and closes one partition's cached log (a no-op
+// when it is not open) and retires its produce mutex. Used when a
+// partition's local data is reclaimed after a rebalance moved it to
+// another node — the log must be closed before its files are deleted.
+func (g *Logs) ClosePartition(topicName string, idx int) error {
+	key := keyOf(topicName, idx)
+	g.mu.Lock()
+	var err error
+	if e, ok := g.logs[key]; ok {
+		err = e.log.Close()
+		delete(g.logs, key)
+	}
+	g.mu.Unlock()
+	g.retireProduceEntries(func(k string) bool { return k == key })
+	return err
+}

@@ -43,6 +43,7 @@ const (
 	OpDecommissionMember
 	OpCompleteMove
 	OpAbortMove
+	OpGetAssignment
 )
 
 // CompleteMoveRequest asks the leader to perform the guarded ownership flip
@@ -196,6 +197,14 @@ type PrepareHandoffRequest struct {
 type DecommissionRequest struct {
 	ID     string
 	Cancel bool
+}
+
+// GetAssignmentRequest asks a node (in practice the leader, for
+// authoritative confirmation) for the current assignment of one
+// partition. The response body is the metastore Assignment as JSON.
+type GetAssignmentRequest struct {
+	Topic     string
+	Partition int
 }
 
 // OperationOf returns the Operation a request payload starts with,

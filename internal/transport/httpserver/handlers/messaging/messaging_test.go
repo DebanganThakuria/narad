@@ -1168,6 +1168,8 @@ func (f *fakeBroker) PrepareHandoff(context.Context, string, int, time.Duration)
 	return messaging.PartitionTransferInfo{}, nil
 }
 
+func (f *fakeBroker) ReclaimMovedPartition(context.Context, string, int) error { return nil }
+
 func (f *fakeBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutCursorStat, error) {
 	return nil, nil
 }

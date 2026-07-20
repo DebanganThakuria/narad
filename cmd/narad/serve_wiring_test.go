@@ -310,6 +310,7 @@ func (stubBroker) ReadPartitionSegment(context.Context, string, int, int64, int6
 
 func (stubBroker) PauseProduceForHandoff(string, int, time.Duration) {}
 func (stubBroker) ResumeProduce(string, int)                         {}
+func (stubBroker) ReclaimMovedPartition(context.Context, string, int) error { return nil }
 
 func (stubBroker) PrepareHandoff(context.Context, string, int, time.Duration) (messaging.PartitionTransferInfo, error) {
 	return messaging.PartitionTransferInfo{}, nil

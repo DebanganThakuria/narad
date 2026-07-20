@@ -9,6 +9,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
 	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
@@ -358,4 +359,23 @@ func (c *PeerClient) PrepareHandoff(ctx context.Context, addr, topicName string,
 		return messaging.PartitionTransferInfo{}, err
 	}
 	return info, nil
+}
+
+// GetAssignment fetches the node at addr's view of a partition assignment.
+// Aimed at the LEADER for authoritative confirmation before destructive
+// decisions (the stale-copy sweep).
+func (c *PeerClient) GetAssignment(ctx context.Context, addr, topicName string, partition int) (metastore.Assignment, error) {
+	payload, err := nodewire.EncodeGetAssignmentRequest(nodewire.GetAssignmentRequest{Topic: topicName, Partition: partition})
+	res, err := c.send(ctx, addr, "get_assignment", payload, err)
+	if err != nil {
+		return metastore.Assignment{}, err
+	}
+	if res.Status != http.StatusOK {
+		return metastore.Assignment{}, fmt.Errorf("get assignment returned status %d", res.Status)
+	}
+	var a metastore.Assignment
+	if err := json.Unmarshal(res.Body, &a); err != nil {
+		return metastore.Assignment{}, err
+	}
+	return a, nil
 }

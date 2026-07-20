@@ -271,7 +271,7 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 				MaxBatchBytes:   cfg.Fanout.MaxBatchBytes,
 				Linger:          time.Duration(cfg.Fanout.LingerMs) * time.Millisecond,
 			}),
-		mover: cluster.NewMoveRunner(ms, nodeID, cfg.Storage.DataDir, peerRPC, bc.metrics, log, cluster.MoveConfig{}),
+		mover: cluster.NewMoveRunner(ms, nodeID, cfg.Storage.DataDir, peerRPC, bc.broker, bc.metrics, log, cluster.MoveConfig{}),
 	}
 }
 

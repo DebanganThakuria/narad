@@ -84,6 +84,10 @@ type Broker interface {
 	// PrepareHandoff freezes an owned partition and returns its final
 	// transfer info for the destination's last catch-up before the flip.
 	PrepareHandoff(ctx context.Context, topicName string, partition int, freezeTTL time.Duration) (messaging.PartitionTransferInfo, error)
+	// ReclaimMovedPartition deletes the stale local copy of a partition a
+	// completed move relocated to another node. Refuses unless the local
+	// view affirmatively shows another node owning it.
+	ReclaimMovedPartition(ctx context.Context, topicName string, partition int) error
 	// FanoutCursorStats reports fan-out cursor positions for the parent
 	// partitions this node owns (lag = HighWatermark - NextOffset).
 	FanoutCursorStats(ctx context.Context, parent string) ([]topic.FanoutCursorStat, error)

@@ -34,3 +34,18 @@ func (s *RPCServer) handleAbortMove(payload []byte) nodewire.Response {
 	}
 	return nodewire.Response{Status: http.StatusNoContent}
 }
+
+// handleGetAssignment returns this node's view of a partition assignment.
+// Callers use it against the LEADER for authoritative confirmation before
+// destructive decisions (the stale-copy sweep).
+func (s *RPCServer) handleGetAssignment(payload []byte) nodewire.Response {
+	req, err := nodewire.DecodeGetAssignmentRequest(payload)
+	if err != nil {
+		return errorResponse(http.StatusBadRequest, "invalid get assignment request: "+err.Error())
+	}
+	a, err := s.store.GetAssignment(req.Topic, req.Partition)
+	if err != nil {
+		return errorResponse(http.StatusNotFound, "assignment not found")
+	}
+	return jsonResponse(http.StatusOK, a)
+}
