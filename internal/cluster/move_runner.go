@@ -126,6 +126,8 @@ type moveStore interface {
 	AppliedCaughtUp() bool
 	IsLeader() bool
 	LeaderID() string
+	Barrier() error
+	GetAssignment(topicName string, partition int) (metastore.Assignment, error)
 	ListTopics(ctx context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error)
 	ListAssignments(topicName string) ([]metastore.Assignment, error)
 	GetMember(id string) (metastore.Member, error)
@@ -142,6 +144,14 @@ type movePeer interface {
 	PrepareHandoff(ctx context.Context, addr, topicName string, partition int, freezeTTL time.Duration) (messaging.PartitionTransferInfo, error)
 	CompleteMove(ctx context.Context, addr, topicName string, partition int, expectedOwner, targetID string) error
 	AbortMove(ctx context.Context, addr, topicName string, partition int, expectedTarget string) error
+	GetAssignment(ctx context.Context, addr, topicName string, partition int) (metastore.Assignment, error)
+}
+
+// moveReclaimer is the broker slice the stale-copy sweep needs. The
+// engine's ReclaimMovedPartition re-verifies ownership affirmatively
+// before deleting — defense in depth behind the sweep's own gates.
+type moveReclaimer interface {
+	ReclaimMovedPartition(ctx context.Context, topicName string, partition int) error
 }
 
 // *PeerClient is the production movePeer.
@@ -164,19 +174,22 @@ type MoveRunner struct {
 	selfID  string
 	dataDir string
 	peer    movePeer
-	mover   *PartitionMover
-	metrics *metrics.Metrics // may be nil (tests, embedded use)
+	mover     *PartitionMover
+	reclaimer moveReclaimer // may be nil (tests): disables the stale-copy sweep
+	metrics   *metrics.Metrics // may be nil (tests, embedded use)
 	logger  *slog.Logger
 	cfg     MoveConfig
 
 	mu      sync.Mutex
 	workers map[moveKey]*moveHandle
 	wg      sync.WaitGroup
+
+	reconcilePasses int
 }
 
 // NewMoveRunner wires a runner. selfID must be this node's ID; an empty
 // selfID disables the runner (a single-process node never moves anything).
-func NewMoveRunner(store moveStore, selfID, dataDir string, peer movePeer, m *metrics.Metrics, logger *slog.Logger, cfg MoveConfig) *MoveRunner {
+func NewMoveRunner(store moveStore, selfID, dataDir string, peer movePeer, reclaimer moveReclaimer, m *metrics.Metrics, logger *slog.Logger, cfg MoveConfig) *MoveRunner {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -186,8 +199,9 @@ func NewMoveRunner(store moveStore, selfID, dataDir string, peer movePeer, m *me
 		selfID:  selfID,
 		dataDir: dataDir,
 		peer:    peer,
-		mover:   NewPartitionMover(peer, cfg.ChunkBytes, logger),
-		metrics: m,
+		mover:     NewPartitionMover(peer, cfg.ChunkBytes, logger),
+		reclaimer: reclaimer,
+		metrics:   m,
 		logger:  logger,
 		cfg:     cfg,
 		workers: map[moveKey]*moveHandle{},
@@ -225,6 +239,14 @@ func (r *MoveRunner) Run(ctx context.Context) {
 func (r *MoveRunner) Reconcile(ctx context.Context) {
 	if ctx.Err() != nil || r.selfID == "" {
 		return
+	}
+	// The stale-copy sweep runs at a fraction of the reconcile cadence
+	// (it stats dirs and may RPC the leader). Offset 1 so the first pass
+	// after startup sweeps copies left by moves completed while this node
+	// was down.
+	r.reconcilePasses++
+	if r.reconcilePasses%moveSweepEvery == 1 {
+		r.sweepStaleCopies(ctx)
 	}
 	// A replica that has not caught up with the leader must not act on
 	// desired state: a stale Target could copy the wrong partition or race

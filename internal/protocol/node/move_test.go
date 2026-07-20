@@ -28,3 +28,18 @@ func TestAbortMoveRequestRoundTrip(t *testing.T) {
 		t.Fatalf("round trip = %+v (err %v), want %+v", got, err, in)
 	}
 }
+
+func TestGetAssignmentRequestRoundTrip(t *testing.T) {
+	in := GetAssignmentRequest{Topic: "orders", Partition: 7}
+	p, err := EncodeGetAssignmentRequest(in)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	got, err := DecodeGetAssignmentRequest(p)
+	if err != nil || got != in {
+		t.Fatalf("round trip = %+v (err %v), want %+v", got, err, in)
+	}
+	if _, err := DecodeCompleteMoveRequest(p); err == nil {
+		t.Fatal("get-assignment payload decoded as complete-move")
+	}
+}

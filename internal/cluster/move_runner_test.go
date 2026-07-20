@@ -57,6 +57,9 @@ func (f movePeerFake) CompleteMove(_ context.Context, addr, topicName string, pa
 	}
 	return nil
 }
+func (f movePeerFake) GetAssignment(context.Context, string, string, int) (metastore.Assignment, error) {
+	return metastore.Assignment{}, context.DeadlineExceeded
+}
 func (f movePeerFake) AbortMove(_ context.Context, addr, _ string, _ int, _ string) error {
 	if f.fwd != nil {
 		f.fwd.abortAddr = addr
@@ -78,11 +81,18 @@ type fakeMoveStore struct {
 	abortArgs    []string
 	notLeader    bool   // when true, IsLeader() is false → runner must forward
 	leaderID     string // resolved via GetMember to the leader's addr
+	completeHook func() // called on every CompleteMove (e.g. to cancel the worker)
 	deadAfter    int    // >0: GetMember(source) reports MemberDead from this call on
 	memberCalls  int
 }
 
 func (s *fakeMoveStore) AppliedCaughtUp() bool { return true }
+func (s *fakeMoveStore) Barrier() error         { return nil }
+func (s *fakeMoveStore) GetAssignment(string, int) (metastore.Assignment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.assignment, nil
+}
 func (s *fakeMoveStore) IsLeader() bool         { return !s.notLeader }
 func (s *fakeMoveStore) LeaderID() string {
 	if s.leaderID != "" {
@@ -119,6 +129,9 @@ func (s *fakeMoveStore) CompleteMove(_ context.Context, topicName string, partit
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.completeArgs = []string{topicName, expectedOwner, targetID}
+	if s.completeHook != nil {
+		s.completeHook()
+	}
 	if s.completeErr == nil {
 		s.assignment.OwnerID = targetID
 		s.assignment.TargetID = ""
@@ -138,7 +151,7 @@ func newMoveTestRunner(t *testing.T, store *fakeMoveStore, srcDir string, hwm in
 	peer := movePeerFake{dirFetcher: dirFetcher{dir: srcDir, hwm: hwm, committed: 5, hasCommitted: true}}
 	dataDir := t.TempDir()
 	m := metrics.New(prometheus.NewRegistry())
-	r := NewMoveRunner(store, "narad-dst", dataDir, peer, m, nil, MoveConfig{})
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, m, nil, MoveConfig{})
 	return r, dataDir, m
 }
 
@@ -199,11 +212,14 @@ func TestMoveRunnerRollsBackOnFlipReject(t *testing.T) {
 	}
 	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}}
 	dataDir := t.TempDir()
-	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, MoveConfig{RetryBackoff: 5 * time.Millisecond})
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, nil, MoveConfig{RetryBackoff: 5 * time.Millisecond})
 
-	// The worker retries a rejected flip; bound it with a short-lived context.
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	// The worker retries a rejected flip forever; cancel it deterministically
+	// the moment the first flip attempt lands (the rollback runs before the
+	// worker checks the context again).
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	store.completeHook = cancel
 	r.Reconcile(ctx)
 	r.wg.Wait()
 
@@ -239,7 +255,7 @@ func TestMoveRunnerForcePromotesDeadSource(t *testing.T) {
 	}
 	dataDir := t.TempDir()
 	m := metrics.New(prometheus.NewRegistry())
-	r := NewMoveRunner(store, "narad-dst", dataDir, peer, m, nil, MoveConfig{
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, m, nil, MoveConfig{
 		RetryBackoff: 5 * time.Millisecond, ForcePromoteAfter: time.Millisecond,
 	})
 
@@ -287,7 +303,7 @@ func TestMoveRunnerForcePromoteRefusesBehindCopy(t *testing.T) {
 	// ForcePromote refuses. Nothing should be installed or flipped.
 	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM}}
 	dataDir := t.TempDir()
-	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, MoveConfig{
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, nil, MoveConfig{
 		RetryBackoff: 5 * time.Millisecond, ForcePromoteAfter: time.Millisecond,
 	})
 	// Need an address so a session is begun.
@@ -324,7 +340,7 @@ func TestMoveRunnerForwardsFlipToLeaderWhenFollower(t *testing.T) {
 	rec := &moveForwardRec{}
 	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}, fwd: rec}
 	dataDir := t.TempDir()
-	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, MoveConfig{})
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, nil, MoveConfig{})
 
 	// The runner resolves the leader's address via GetMember(leaderID); make
 	// that return a routable addr.
