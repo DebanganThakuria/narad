@@ -12,10 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 )
 
 // moveForwardRec records leader-forwarded ownership writes.
@@ -129,12 +133,23 @@ func (s *fakeMoveStore) AbortMove(_ context.Context, topicName string, partition
 	return nil
 }
 
-func newMoveTestRunner(t *testing.T, store *fakeMoveStore, srcDir string, hwm int64) (*MoveRunner, string) {
+func newMoveTestRunner(t *testing.T, store *fakeMoveStore, srcDir string, hwm int64) (*MoveRunner, string, *metrics.Metrics) {
 	t.Helper()
 	peer := movePeerFake{dirFetcher: dirFetcher{dir: srcDir, hwm: hwm, committed: 5, hasCommitted: true}}
 	dataDir := t.TempDir()
-	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, MoveConfig{})
-	return r, dataDir
+	m := metrics.New(prometheus.NewRegistry())
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, m, nil, MoveConfig{})
+	return r, dataDir, m
+}
+
+// moveCounter reads a MovesTotal outcome counter's current value.
+func moveCounter(t *testing.T, m *metrics.Metrics, outcome string) float64 {
+	t.Helper()
+	var pb dto.Metric
+	if err := m.MovesTotal.WithLabelValues(outcome).Write(&pb); err != nil {
+		t.Fatalf("read counter: %v", err)
+	}
+	return pb.GetCounter().GetValue()
 }
 
 func TestMoveRunnerCompletesMove(t *testing.T) {
@@ -144,13 +159,17 @@ func TestMoveRunnerCompletesMove(t *testing.T) {
 		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
 		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
 	}
-	r, dataDir := newMoveTestRunner(t, store, src, wantHWM)
+	r, dataDir, m := newMoveTestRunner(t, store, src, wantHWM)
 
 	r.Reconcile(context.Background())
 	r.wg.Wait()
 
 	if got := store.completeArgs; len(got) != 3 || got[0] != "orders" || got[1] != "narad-src" || got[2] != "narad-dst" {
 		t.Fatalf("CompleteMove args = %v, want [orders narad-src narad-dst]", got)
+	}
+	// The completed move is observed: outcome counter up, in-flight back to 0.
+	if got := moveCounter(t, m, "completed"); got != 1 {
+		t.Fatalf("moves_total{completed} = %v, want 1", got)
 	}
 	// The partition is installed at its real location and recovers to the
 	// source's HWM with byte-identical records.
@@ -180,7 +199,7 @@ func TestMoveRunnerRollsBackOnFlipReject(t *testing.T) {
 	}
 	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}}
 	dataDir := t.TempDir()
-	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, MoveConfig{RetryBackoff: 5 * time.Millisecond})
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, MoveConfig{RetryBackoff: 5 * time.Millisecond})
 
 	// The worker retries a rejected flip; bound it with a short-lived context.
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -219,7 +238,8 @@ func TestMoveRunnerForcePromotesDeadSource(t *testing.T) {
 		prepareErr: context.DeadlineExceeded,
 	}
 	dataDir := t.TempDir()
-	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, MoveConfig{
+	m := metrics.New(prometheus.NewRegistry())
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, m, nil, MoveConfig{
 		RetryBackoff: 5 * time.Millisecond, ForcePromoteAfter: time.Millisecond,
 	})
 
@@ -230,6 +250,9 @@ func TestMoveRunnerForcePromotesDeadSource(t *testing.T) {
 
 	if got := store.completeArgs; len(got) != 3 || got[2] != "narad-dst" {
 		t.Fatalf("force-promote did not complete the move: %v", got)
+	}
+	if got := moveCounter(t, m, "force_promoted"); got != 1 {
+		t.Fatalf("moves_total{force_promoted} = %v, want 1", got)
 	}
 	// The promoted copy recovers to the source's last-known HWM, records intact.
 	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
@@ -264,7 +287,7 @@ func TestMoveRunnerForcePromoteRefusesBehindCopy(t *testing.T) {
 	// ForcePromote refuses. Nothing should be installed or flipped.
 	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM}}
 	dataDir := t.TempDir()
-	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, MoveConfig{
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, MoveConfig{
 		RetryBackoff: 5 * time.Millisecond, ForcePromoteAfter: time.Millisecond,
 	})
 	// Need an address so a session is begun.
@@ -301,7 +324,7 @@ func TestMoveRunnerForwardsFlipToLeaderWhenFollower(t *testing.T) {
 	rec := &moveForwardRec{}
 	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}, fwd: rec}
 	dataDir := t.TempDir()
-	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, MoveConfig{})
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, MoveConfig{})
 
 	// The runner resolves the leader's address via GetMember(leaderID); make
 	// that return a routable addr.

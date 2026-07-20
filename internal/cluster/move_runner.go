@@ -43,6 +43,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
@@ -164,6 +165,7 @@ type MoveRunner struct {
 	dataDir string
 	peer    movePeer
 	mover   *PartitionMover
+	metrics *metrics.Metrics // may be nil (tests, embedded use)
 	logger  *slog.Logger
 	cfg     MoveConfig
 
@@ -174,7 +176,7 @@ type MoveRunner struct {
 
 // NewMoveRunner wires a runner. selfID must be this node's ID; an empty
 // selfID disables the runner (a single-process node never moves anything).
-func NewMoveRunner(store moveStore, selfID, dataDir string, peer movePeer, logger *slog.Logger, cfg MoveConfig) *MoveRunner {
+func NewMoveRunner(store moveStore, selfID, dataDir string, peer movePeer, m *metrics.Metrics, logger *slog.Logger, cfg MoveConfig) *MoveRunner {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -185,6 +187,7 @@ func NewMoveRunner(store moveStore, selfID, dataDir string, peer movePeer, logge
 		dataDir: dataDir,
 		peer:    peer,
 		mover:   NewPartitionMover(peer, cfg.ChunkBytes, logger),
+		metrics: m,
 		logger:  logger,
 		cfg:     cfg,
 		workers: map[moveKey]*moveHandle{},
@@ -300,6 +303,11 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 		r.logger.Warn("move: clear staging", "dir", staging, "err", err)
 		return
 	}
+	started := time.Now()
+	if r.metrics != nil {
+		r.metrics.MovesInFlight.Inc()
+		defer r.metrics.MovesInFlight.Dec()
+	}
 	var sess *MoveSession
 
 	for {
@@ -325,6 +333,7 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 				r.logger.Warn("move: force-promoting copy of a dead source",
 					"topic", topicName, "partition", partition, "source", source, "hwm", res.HighWatermark)
 				if r.finishMove(ctx, topicName, partition, source, staging, res) {
+					r.observeMoveDone("force_promoted", started, res)
 					return
 				}
 			} else {
@@ -344,8 +353,9 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 			continue
 		}
 
-		if r.attemptCopy(ctx, sess, topicName, partition, source, m.Addr) {
-			return // move completed
+		if done, res := r.attemptCopy(ctx, sess, topicName, partition, source, m.Addr); done {
+			r.observeMoveDone("completed", started, res)
+			return
 		}
 		if !sleepCtx(ctx, r.cfg.RetryBackoff) {
 			return
@@ -353,15 +363,26 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 	}
 }
 
+// observeMoveDone records a completed move's outcome, duration, and copied
+// bytes. No-op without metrics.
+func (r *MoveRunner) observeMoveDone(outcome string, started time.Time, res CopyResult) {
+	if r.metrics == nil {
+		return
+	}
+	r.metrics.MovesTotal.WithLabelValues(outcome).Inc()
+	r.metrics.MoveDurationSeconds.Observe(time.Since(started).Seconds())
+	r.metrics.MoveBytesTotal.Add(float64(res.BytesCopied))
+}
+
 // attemptCopy runs one live-source copy attempt (bounded pre-copy → freeze →
 // finalize → flip). Returns true only when the move flipped. Any failure
 // returns false WITHOUT clearing staging, so the next attempt resumes the
 // copy and keeps the session's last-known HWM for a possible force-promote.
-func (r *MoveRunner) attemptCopy(ctx context.Context, sess *MoveSession, topicName string, partition int, source, sourceAddr string) bool {
+func (r *MoveRunner) attemptCopy(ctx context.Context, sess *MoveSession, topicName string, partition int, source, sourceAddr string) (bool, CopyResult) {
 	converged, err := sess.CatchUp(ctx, r.cfg.CatchUpLagBytes, r.cfg.CatchUpMaxRounds, r.cfg.CatchUpStallRounds)
 	if err != nil {
 		r.logger.Warn("move: catch-up failed; will retry", "topic", topicName, "partition", partition, "err", err)
-		return false
+		return false, CopyResult{}
 	}
 	if !converged {
 		r.logger.Warn("move: pre-copy did not converge (writers keep pace with the copy); freezing with a larger tail — the cutover freeze will be longer",
@@ -369,14 +390,14 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, sess *MoveSession, topicNa
 	}
 	if _, err := r.peer.PrepareHandoff(ctx, sourceAddr, topicName, partition, r.cfg.FreezeTTL); err != nil {
 		r.logger.Warn("move: prepare-handoff failed; will retry", "topic", topicName, "partition", partition, "err", err)
-		return false
+		return false, CopyResult{}
 	}
 	res, err := sess.Finalize(ctx)
 	if err != nil {
 		r.logger.Warn("move: finalize failed; will retry", "topic", topicName, "partition", partition, "err", err)
-		return false
+		return false, CopyResult{}
 	}
-	return r.finishMove(ctx, topicName, partition, source, r.stagingDir(topicName, partition), res)
+	return r.finishMove(ctx, topicName, partition, source, r.stagingDir(topicName, partition), res), res
 }
 
 // finishMove installs the staged copy and proposes the guarded flip (owner
