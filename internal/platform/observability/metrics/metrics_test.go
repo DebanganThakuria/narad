@@ -60,6 +60,10 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	m.RetentionBytesDeleted.WithLabelValues("t", "0", "age").Add(1)
 	m.RetentionMessagesDeleted.WithLabelValues("t", "0", "age").Add(1)
 	m.RetentionRunSeconds.WithLabelValues("t", "0").Observe(0.001)
+	m.MovesInFlight.Set(0)
+	m.MovesTotal.WithLabelValues("completed").Inc()
+	m.MoveDurationSeconds.Observe(0.1)
+	m.MoveBytesTotal.Add(1)
 	m.IncError("test", "kind")
 	m.BootDurationSeconds.Set(0.1)
 
@@ -93,6 +97,10 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 		"narad_storage_retention_bytes_deleted_total",
 		"narad_storage_retention_messages_deleted_total",
 		"narad_storage_retention_run_duration_seconds",
+		"narad_moves_inflight",
+		"narad_moves_total",
+		"narad_moves_duration_seconds",
+		"narad_moves_bytes_total",
 		"narad_errors_total",
 		"narad_boot_duration_seconds",
 	}

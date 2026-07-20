@@ -90,6 +90,14 @@ type Metrics struct {
 	// by design; alert on this instead. parent, child, partition.
 	FanoutDueLagSeconds *prometheus.GaugeVec
 
+	// Partition moves (rebalance / decommission). Emitted by the node
+	// EXECUTING the move (the destination), so sum across nodes for the
+	// cluster view.
+	MovesInFlight       prometheus.Gauge       // moves this node is currently executing
+	MovesTotal          *prometheus.CounterVec // outcome: completed | force_promoted
+	MoveDurationSeconds prometheus.Histogram   // begin-to-flip wall time per completed move
+	MoveBytesTotal      prometheus.Counter     // partition bytes copied by completed moves
+
 	// Errors
 	ErrorsTotal *prometheus.CounterVec // component, kind
 
@@ -387,6 +395,35 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:      "How far behind the due frontier a delay child's cursor runs (0 while the head is not due yet). The delay-child health signal.",
 		}, []string{"parent", "child", "partition"}),
 
+		MovesInFlight: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "moves",
+			Name:      "inflight",
+			Help:      "Partition moves this node is currently executing as the destination.",
+		}),
+
+		MovesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: Namespace,
+			Subsystem: "moves",
+			Name:      "total",
+			Help:      "Completed partition moves by outcome: completed (normal cutover) or force_promoted (source died; caught-up copy promoted).",
+		}, []string{"outcome"}),
+
+		MoveDurationSeconds: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: Namespace,
+			Subsystem: "moves",
+			Name:      "duration_seconds",
+			Help:      "Wall time from a move worker starting to the ownership flip committing.",
+			Buckets:   prometheus.ExponentialBuckets(0.25, 2, 14), // 250ms .. ~34min
+		}),
+
+		MoveBytesTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: Namespace,
+			Subsystem: "moves",
+			Name:      "bytes_total",
+			Help:      "Partition bytes copied by completed moves (network cost of rebalance).",
+		}),
+
 		ErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Name:      "errors_total",
@@ -416,6 +453,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.RetentionBytesDeleted, m.RetentionMessagesDeleted, m.RetentionRunSeconds,
 		m.FanoutLagMessages, m.FanoutCommittedTotal, m.FanoutChildDroppedMessages,
 		m.FanoutBatchRecords, m.FanoutBatchBytes, m.FanoutDueLagSeconds,
+		m.MovesInFlight, m.MovesTotal, m.MoveDurationSeconds, m.MoveBytesTotal,
 		m.ErrorsTotal,
 		m.BootDurationSeconds,
 	)
