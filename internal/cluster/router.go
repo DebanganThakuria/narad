@@ -115,7 +115,11 @@ func (rt *Router) RouteProduce(ctx context.Context, w http.ResponseWriter, r *ht
 // the request should be handled locally against all partitions owned by this node.
 func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) (bool, *int) {
 	if pinnedPartition != nil {
-		addr := rt.ownerAddr(topicName, *pinnedPartition)
+		addr, unavailable := rt.ownerRoute(topicName, *pinnedPartition)
+		if unavailable {
+			writeOwnerDown(w)
+			return true, nil
+		}
 		if addr == "" {
 			return false, nil
 		}
@@ -260,7 +264,11 @@ func (rt *Router) longPollConsumeRemote(ctx context.Context, w http.ResponseWrit
 // RouteAck forwards an ack request to the owner of the handle partition.
 // Returns true if forwarded.
 func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, handle consumer.Handle) bool {
-	addr := rt.ownerAddr(topicName, handle.Partition)
+	addr, unavailable := rt.ownerRoute(topicName, handle.Partition)
+	if unavailable {
+		writeOwnerDown(w)
+		return true
+	}
 	if addr == "" {
 		return false
 	}
@@ -281,7 +289,11 @@ func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.R
 // RouteExtendAck forwards a visibility-window extension to the owner of
 // the handle partition. Returns true if forwarded.
 func (rt *Router) RouteExtendAck(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, handle consumer.Handle) bool {
-	addr := rt.ownerAddr(topicName, handle.Partition)
+	addr, unavailable := rt.ownerRoute(topicName, handle.Partition)
+	if unavailable {
+		writeOwnerDown(w)
+		return true
+	}
 	if addr == "" {
 		return false
 	}
@@ -302,7 +314,11 @@ func (rt *Router) RouteExtendAck(ctx context.Context, w http.ResponseWriter, _ *
 // RouteNack forwards an immediate reservation release to the owner of
 // the handle partition. Returns true if forwarded.
 func (rt *Router) RouteNack(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, handle consumer.Handle) bool {
-	addr := rt.ownerAddr(topicName, handle.Partition)
+	addr, unavailable := rt.ownerRoute(topicName, handle.Partition)
+	if unavailable {
+		writeOwnerDown(w)
+		return true
+	}
 	if addr == "" {
 		return false
 	}

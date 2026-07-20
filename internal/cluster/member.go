@@ -21,6 +21,36 @@ func (rt *Router) ownerAddr(topicName string, p int) string {
 	return rt.consumeOwnerAddr(entry)
 }
 
+// ownerRoute resolves where a partition-pinned consume/ack should go,
+// distinguishing the two reasons ownerAddr comes back empty:
+//
+//	addr != ""        → forward to that live remote owner
+//	unavailable=true  → a REMOTE node owns it but is currently down; with
+//	                    no replication the partition is unavailable until
+//	                    the owner returns (or the partition moves), so the
+//	                    caller must answer a retryable 503 — NOT fall
+//	                    through to local handling, whose "not the owner"
+//	                    error would surface as a terminal-looking 421
+//	both zero         → this node owns it (or the route is unknown);
+//	                    handle locally
+func (rt *Router) ownerRoute(topicName string, p int) (addr string, unavailable bool) {
+	routes, ok := rt.routesForTopic(topicName)
+	if !ok {
+		return "", false
+	}
+	entry, ok := routes.byPartition[p]
+	if !ok {
+		return "", false
+	}
+	if entry.ownerID == rt.selfID {
+		return "", false
+	}
+	if entry.ownerAlive {
+		return entry.ownerAddr, false
+	}
+	return "", true
+}
+
 // consumeOwnerAddr returns the address to forward a consume/ack to, or ""
 // when the entry is local or unreachable.
 func (rt *Router) consumeOwnerAddr(entry routeEntry) string {

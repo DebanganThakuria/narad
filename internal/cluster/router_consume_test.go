@@ -793,3 +793,58 @@ func TestRouteConsumePinnedLongPollHonorsConfiguredMaxWait(t *testing.T) {
 		t.Fatalf("forwarded wait = %s, want clamped to configured 10s", gotWait)
 	}
 }
+
+// A consume/ack pinned to a partition whose owner is DEAD must answer a
+// retryable 503 — never fall through to local handling, whose "not the
+// owner" error surfaces as a terminal-looking 421. Without replication the
+// partition is unavailable until the owner returns; clients should back
+// off and retry, not give up.
+func TestPinnedDeadOwnerAnswersRetryable503(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "remote.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember: %v", err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 1, "node-remote"); err != nil {
+		t.Fatalf("AssignPartition: %v", err)
+	}
+	if err := store.MarkMemberDead(ctx, "node-remote"); err != nil {
+		t.Fatalf("MarkMemberDead: %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
+	router.peer = fakePeerClient{} // any forward would error; none should happen
+
+	// Pinned consume against the dead owner's partition.
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?partition=1", nil)
+	forwarded, _ := router.RouteConsume(ctx, res, req, "orders", new(1))
+	if !forwarded || res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("pinned consume vs dead owner: forwarded=%v status=%d, want true/503", forwarded, res.Code)
+	}
+
+	// The whole ack family: ack, extend, nack.
+	handle := consumer.Handle{Partition: 1, Offset: 0, Nonce: 1}
+	for name, call := range map[string]func(http.ResponseWriter) bool{
+		"ack":    func(w http.ResponseWriter) bool { return router.RouteAck(ctx, w, nil, "orders", handle) },
+		"extend": func(w http.ResponseWriter) bool { return router.RouteExtendAck(ctx, w, nil, "orders", handle) },
+		"nack":   func(w http.ResponseWriter) bool { return router.RouteNack(ctx, w, nil, "orders", handle) },
+	} {
+		rec := httptest.NewRecorder()
+		if handled := call(rec); !handled || rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s vs dead owner: handled=%v status=%d, want true/503", name, handled, rec.Code)
+		}
+	}
+
+	// A partition THIS node owns still falls through to local handling.
+	// (The route cache is version-keyed; the new assignment invalidates it.)
+	if err := store.AssignPartition(ctx, "orders", 0, "node-self"); err != nil {
+		t.Fatalf("AssignPartition self: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	if handled := router.RouteAck(ctx, rec, nil, "orders", consumer.Handle{Partition: 0}); handled {
+		t.Fatal("locally-owned partition must fall through to local handling, not be answered by the router")
+	}
+}

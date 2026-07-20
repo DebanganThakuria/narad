@@ -297,6 +297,15 @@ func writePeerResponse(w http.ResponseWriter, res nodewire.Response) {
 	}
 }
 
+// writeOwnerDown answers a partition-pinned consume/ack whose owner node is
+// currently down. Without replication the partition is unavailable until the
+// owner returns (or the partition moves), so this is a RETRYABLE condition:
+// a 503 tells clients to back off and try again, where falling through to
+// local handling would surface a terminal-looking 421.
+func writeOwnerDown(w http.ResponseWriter) {
+	http.Error(w, "partition owner is down; retry later", http.StatusServiceUnavailable)
+}
+
 // ListPartitionSegments asks the owner at addr for a partition's segment
 // list and durable positions (rebalance copy, serve side).
 func (c *PeerClient) ListPartitionSegments(ctx context.Context, addr, topicName string, partition int) (messaging.PartitionTransferInfo, error) {
