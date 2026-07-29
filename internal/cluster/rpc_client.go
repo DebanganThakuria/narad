@@ -286,9 +286,14 @@ func (c *PeerClient) request(ctx context.Context, addr, operation string, payloa
 }
 
 func writePeerResponse(w http.ResponseWriter, res nodewire.Response) {
-	if res.ContentType != "" {
-		w.Header().Set("Content-Type", res.ContentType)
+	contentType := res.ContentType
+	if contentType == "" {
+		// Never let net/http content-sniff a proxied body: a payload that
+		// happens to look like HTML must not be served as text/html.
+		contentType = "application/octet-stream"
 	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if res.Status == 0 {
 		res.Status = http.StatusOK
 	}
