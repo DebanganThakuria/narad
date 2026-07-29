@@ -1,6 +1,9 @@
 package node
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // EncodeAckRequest encodes an OpAck payload.
 func EncodeAckRequest(req AckRequest) ([]byte, error) {
@@ -20,7 +23,7 @@ func EncodeNackRequest(req AckRequest) ([]byte, error) {
 }
 
 func encodeAckShapedRequest(op Operation, req AckRequest) ([]byte, error) {
-	if int(int32(req.Partition)) != req.Partition {
+	if req.Partition < math.MinInt32 || req.Partition > math.MaxInt32 {
 		return nil, fmt.Errorf("partition out of int32 range: %d", req.Partition)
 	}
 	w := opWriter(op, fieldLen(req.Topic)+4+8+8)

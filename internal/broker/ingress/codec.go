@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 )
 
 // produceRecordFormat versions the on-disk record layout. Bump only
@@ -21,6 +22,9 @@ func EncodeProduceRecord(record ProduceRecord) ([]byte, error) {
 	}
 	if record.TargetPartition < 0 {
 		return nil, errors.New("ingress: target partition must be >= 0")
+	}
+	if record.TargetPartition > math.MaxInt32 {
+		return nil, errors.New("ingress: target partition exceeds int32 range")
 	}
 	if len(record.Payload) == 0 {
 		return nil, errors.New("ingress: payload required")

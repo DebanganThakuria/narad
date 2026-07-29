@@ -1,7 +1,15 @@
 package node
 
+import (
+	"fmt"
+	"math"
+)
+
 // EncodeConsumeRequest encodes an OpConsume payload.
 func EncodeConsumeRequest(req ConsumeRequest) ([]byte, error) {
+	if req.Partition < math.MinInt32 || req.Partition > math.MaxInt32 {
+		return nil, fmt.Errorf("partition out of int32 range: %d", req.Partition)
+	}
 	w := opWriter(OpConsume, fieldLen(req.Topic)+4+1+8+1+8+1)
 	if err := w.string(req.Topic); err != nil {
 		return nil, err
