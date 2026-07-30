@@ -9,7 +9,7 @@ require (
 	github.com/klauspost/compress v1.19.1
 	github.com/prometheus/client_golang v1.24.0
 	github.com/prometheus/client_model v0.6.2
-	github.com/quic-go/quic-go v0.60.0
+	github.com/quic-go/quic-go v0.61.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/spf13/cobra v1.10.2
 	go.etcd.io/bbolt v1.5.0
