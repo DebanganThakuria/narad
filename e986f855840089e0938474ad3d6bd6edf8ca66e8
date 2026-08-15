@@ -1,0 +1,5 @@
+internal/consumer/reserve_equivalence_test.go
+  30559c3b-3585-4c91-8ae4-2ff4925f7190:2026-08-15T15:56:28.948Z 226-242,244-259,261-262,264-281,283-292,294-299,301-302,304-307,309-313
+  30559c3b-3585-4c91-8ae4-2ff4925f7190:2026-08-15T15:56:10.378Z 316-320
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"30559c3b-3585-4c91-8ae4-2ff4925f7190:2026-08-15T15:56:28.948Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 151, "overriden_lines": 0}, "30559c3b-3585-4c91-8ae4-2ff4925f7190:2026-08-15T15:56:10.378Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 151, "overriden_lines": 0}}}
