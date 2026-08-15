@@ -33,6 +33,29 @@ type partitionShard struct {
 	// not delivered. ReserveNext never re-reserves them.
 	corrupt map[int64]struct{}
 
+	// scanCursor is the lowest offset above the committed frontier that has
+	// never been handed out. Every offset in [committed+1, scanCursor) has
+	// been reserved at least once, so it is currently reserved, resolved
+	// (ackedAhead/corrupt), or released back into freeSet.
+	//
+	// scanCursor plus freeSet replace what used to be a linear rescan from
+	// committed+1 on every ReserveNext. That scan was O(outstanding
+	// reservations) — with three map lookups per offset — and it ran while
+	// holding sh.mu, so every consumer on a partition serialised behind a
+	// lock whose hold time grew with the in-flight depth.
+	scanCursor int64
+
+	// freeSet holds offsets below scanCursor whose reservation was dropped
+	// without being resolved (visibility-timeout expiry or an explicit
+	// release), so they are deliverable again. freeSet is authoritative.
+	//
+	// freeHeap orders them so the lowest is found in O(1). It may contain
+	// stale offsets — re-reserving one leaves its heap slot behind rather
+	// than paying an O(n) removal — which are discarded on pop by checking
+	// freeSet, and compacted away once they outnumber the live set.
+	freeSet  map[int64]struct{}
+	freeHeap offsetHeap
+
 	nonceSeq      atomic.Int64
 	maxInFlight   int
 	maxAckedAhead int
@@ -55,9 +78,78 @@ func newPartitionShard(committed int64, caps Caps) *partitionShard {
 		expiry:        make(expiryHeap, 0, min(caps.MaxInFlight, initialExpiryHeapCap)),
 		ackedAhead:    make(map[int64]struct{}),
 		corrupt:       make(map[int64]struct{}),
+		scanCursor:    committed + 1,
+		freeSet:       make(map[int64]struct{}),
 		maxInFlight:   caps.MaxInFlight,
 		maxAckedAhead: caps.MaxAckedAhead,
 	}
+}
+
+// nextDeliverableLocked returns the lowest offset above the committed
+// frontier that is neither reserved nor resolved: the lowest live entry
+// in freeSet, or scanCursor when nothing has been released. Stale heap
+// slots (offsets re-reserved since being pushed) are discarded as they
+// surface. Must hold sh.mu.
+func (sh *partitionShard) nextDeliverableLocked() int64 {
+	for sh.freeHeap.Len() > 0 {
+		off := sh.freeHeap[0]
+		if _, live := sh.freeSet[off]; live {
+			return off
+		}
+		heap.Pop(&sh.freeHeap)
+	}
+	return sh.scanCursor
+}
+
+// takeOffsetLocked records that off has been handed out, so the next
+// lookup does not return it again. Must hold sh.mu.
+func (sh *partitionShard) takeOffsetLocked(off int64) {
+	if _, free := sh.freeSet[off]; free {
+		// The heap slot is left behind deliberately; nextDeliverableLocked
+		// discards it and compactFreeLocked reclaims the space.
+		delete(sh.freeSet, off)
+		return
+	}
+	if off == sh.scanCursor {
+		sh.scanCursor++
+	}
+}
+
+// releaseOffsetLocked makes off deliverable again after its reservation
+// was dropped WITHOUT being resolved — an expired visibility window or an
+// explicit release. Resolved offsets (acked-ahead, corrupt-skipped) must
+// not come through here: they are permanently undeliverable.
+//
+// Offsets at or below the frontier are ignored. That case cannot arise —
+// the frontier only advances over resolved offsets, so it can never pass
+// a free one — but the guard keeps the invariant local and cheap.
+// Must hold sh.mu.
+func (sh *partitionShard) releaseOffsetLocked(off int64) {
+	if off <= sh.committed || off >= sh.scanCursor {
+		return
+	}
+	if _, dup := sh.freeSet[off]; dup {
+		return
+	}
+	sh.freeSet[off] = struct{}{}
+	heap.Push(&sh.freeHeap, off)
+}
+
+// compactFreeLocked rebuilds the free heap from freeSet once stale slots
+// dominate it, mirroring compactExpiryLocked. Without this, a partition
+// that repeatedly releases and re-reserves the same offsets would grow
+// the heap without bound even though the live free set stays small.
+// Must hold sh.mu.
+func (sh *partitionShard) compactFreeLocked() {
+	if len(sh.freeHeap) <= 2*len(sh.freeSet)+heapCompactSlack {
+		return
+	}
+	rebuilt := sh.freeHeap[:0]
+	for off := range sh.freeSet {
+		rebuilt = append(rebuilt, off)
+	}
+	sh.freeHeap = rebuilt
+	heap.Init(&sh.freeHeap)
 }
 
 // purgeExpiredLocked removes expired reservations from entries and the
@@ -74,10 +166,14 @@ func (sh *partitionShard) purgeExpiredLocked(now int64) int {
 		e := heap.Pop(&sh.expiry).(expiryEntry)
 		if rsv, ok := sh.entries[e.offset]; ok && rsv.nonce == e.nonce && rsv.expiresAtUnixMs == e.expiresAtUnixMs {
 			delete(sh.entries, e.offset)
+			// The window lapsed without an ack, so the offset goes back into
+			// the deliverable set rather than being resolved.
+			sh.releaseOffsetLocked(e.offset)
 			released++
 		}
 	}
 	sh.compactExpiryLocked()
+	sh.compactFreeLocked()
 	return released
 }
 
@@ -141,6 +237,22 @@ type expiryEntry struct {
 	offset          int64
 	expiresAtUnixMs int64
 	nonce           int64
+}
+
+// offsetHeap is a min-heap of offsets, used to find the lowest released
+// offset without rescanning the reservation table.
+type offsetHeap []int64
+
+func (h offsetHeap) Len() int           { return len(h) }
+func (h offsetHeap) Less(i, j int) bool { return h[i] < h[j] }
+func (h offsetHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *offsetHeap) Push(x any)        { *h = append(*h, x.(int64)) }
+func (h *offsetHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
 }
 
 // expiryHeap is a min-heap ordered by expiresAtUnixMs.

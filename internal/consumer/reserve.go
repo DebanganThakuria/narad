@@ -57,13 +57,18 @@ func (f *InFlight) ReserveNext(ctx context.Context, topic string, partition int,
 		return sh.reserveLocked(next, now, visibilityTimeout), nil
 	}
 
-	for off := next; off < logTail; off++ {
-		if sh.resolvedOrReservedLocked(off) {
-			continue
-		}
-		return sh.reserveLocked(off, now, visibilityTimeout), nil
+	// The lowest deliverable offset is tracked incrementally (see
+	// partitionShard.scanCursor / freeSet) rather than rediscovered by
+	// rescanning from the frontier on every call, so this stays O(1)
+	// amortised no matter how deep the in-flight set gets. freeSet entries
+	// are always below scanCursor, and scanCursor never passes logTail, so
+	// a free offset is necessarily deliverable and only the cursor case can
+	// run out of log.
+	off := sh.nextDeliverableLocked()
+	if off >= logTail {
+		return ReserveResult{SkipReason: "all_reserved"}, nil
 	}
-	return ReserveResult{SkipReason: "all_reserved"}, nil
+	return sh.reserveLocked(off, now, visibilityTimeout), nil
 }
 
 // resolvedOrReservedLocked reports whether off cannot be handed out:
@@ -87,6 +92,7 @@ func (sh *partitionShard) resolvedOrReservedLocked(off int64) bool {
 func (sh *partitionShard) reserveLocked(off, now int64, visibilityTimeout time.Duration) ReserveResult {
 	nonce := sh.nonceSeq.Add(1)
 	exp := now + visibilityTimeout.Milliseconds()
+	sh.takeOffsetLocked(off)
 	sh.entries[off] = reservation{expiresAtUnixMs: exp, nonce: nonce}
 	heap.Push(&sh.expiry, expiryEntry{offset: off, expiresAtUnixMs: exp, nonce: nonce})
 	return ReserveResult{
