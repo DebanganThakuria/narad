@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
 const produceCheckpointFile = "checkpoint"
@@ -43,7 +45,9 @@ func storeCheckpoint(dir, name string, nextSeq uint64) error {
 		_ = file.Close()
 		return fmt.Errorf("ingress: write checkpoint temp: %w", err)
 	}
-	if err := file.Sync(); err != nil {
+	// Data-only sync: the rename below plus the directory fsync carry
+	// the namespace durability; the temp file only needs its bytes.
+	if err := syncfile.SyncData(file); err != nil {
 		_ = file.Close()
 		return fmt.Errorf("ingress: sync checkpoint temp: %w", err)
 	}

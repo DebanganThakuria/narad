@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"time"
+
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
 // syncLoop is the single background flusher. It runs until Close and
@@ -107,7 +109,11 @@ func (l *Log) writeAndSyncFileOps(file *os.File, buffer []byte) error {
 	}
 	err := writeFull(file, buffer)
 	if err == nil {
-		err = file.Sync()
+		// Data-only sync: the WAL is append-only, so fdatasync's
+		// contract (data + the size needed to read it back) is exactly
+		// the durability the 202 promises. Cheaper than fsync on Linux;
+		// identical elsewhere. See internal/persistence/syncfile.
+		err = syncfile.SyncData(file)
 	}
 	if err != nil {
 		l.writeFailed = err

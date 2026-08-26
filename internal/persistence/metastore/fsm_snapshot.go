@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
@@ -81,7 +82,7 @@ func writeFileSync(path string, data []byte) error {
 		_ = file.Close()
 		return err
 	}
-	if err := file.Sync(); err != nil {
+	if err := syncfile.SyncData(file); err != nil {
 		_ = file.Close()
 		return err
 	}
