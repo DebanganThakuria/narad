@@ -1,0 +1,30 @@
+README.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:18:29.097Z 3,18,62,69-70,83,113,136,141,302,391,400,426-429,431,444-450,464,474,496,499,501,504
+docs/client/cli.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:23:42.813Z 3,16
+docs/client/guarantees-and-errors.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:25:44.964Z 7,12-13,18,22,27,30,33,37,39-40,45,49,58,65-66,80,84
+docs/client/producing.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:10:55.389Z 11-13,16,18,36
+docs/client/topics.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:25:44.964Z 3,33,43
+docs/index.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:13:18.390Z 9,24,50,70,82,88,96,110,122,141,143,145,147,159,163,179,181,183,187,197,202,207,215
+docs/internals/index.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:25:44.964Z 47,53,83-84,108,114
+docs/internals/metastore-and-raft.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:10:55.389Z 3,18,31
+docs/internals/networking-and-security.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:12:43.221Z 14,18,33,37,42-43,48,51
+docs/internals/produce-path.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:13:18.390Z 5,20,24,41,43,46,48,52,55
+docs/internals/rebalance.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:22:55.341Z 3,11-12,14,34-36,41,47,50,57,63,65,67,73,77,79,81-82,84,88,95,108
+docs/internals/storage-engine.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:23:42.813Z 25-27,35,43,49-50,56,65,80,94,99
+docs/operate/helm-chart.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:10:55.389Z 3
+docs/operate/scaling-and-recovery.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:06:09.587Z 26,28,38,53
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:18:29.097Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 30, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:23:42.813Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 2, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:25:44.964Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 18, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:10:55.389Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 6, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:13:18.390Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 23, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:12:43.221Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 8, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:22:55.341Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 23, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T11:06:09.587Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 4, "overriden_lines": 0}}}
