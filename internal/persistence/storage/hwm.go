@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
 const hwmFileName = "hwm"
@@ -137,7 +139,11 @@ func (l *Log) persistHighWatermark(next int64) error {
 		_ = f.Close()
 		return fmt.Errorf("storage: write hwm: %w", err)
 	}
-	if err := f.Sync(); err != nil {
+	// Data-only sync: an in-place single-sector overwrite has no
+	// metadata worth journaling (first-creation durability is the dir
+	// fsync below), and this runs once per commit — the hottest of the
+	// small-file syncs.
+	if err := syncfile.SyncData(f); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("storage: sync hwm: %w", err)
 	}

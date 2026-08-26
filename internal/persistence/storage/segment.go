@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
 // segment is one file in a partition's directory of segment files.
@@ -129,13 +131,16 @@ func (s *segment) writeEncodedFrame(frame []byte, baseOffset int64, records int)
 	return pos, n, nil
 }
 
-func (s *segment) sync() error { return s.file.Sync() }
+// sync is the per-commit-batch durability point on the consume-side
+// log. Segments are append-only, so data-only sync suffices — see
+// internal/persistence/syncfile.
+func (s *segment) sync() error { return syncfile.SyncData(s.file) }
 
 func (s *segment) close() error {
 	if s.file == nil {
 		return nil
 	}
-	syncErr := s.file.Sync()
+	syncErr := syncfile.SyncData(s.file)
 	closeErr := s.file.Close()
 	s.file = nil
 	if syncErr != nil && !errors.Is(syncErr, os.ErrClosed) {

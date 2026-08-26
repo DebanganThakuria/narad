@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
 const consumerOffsetFileName = "consumer.offset"
@@ -89,7 +91,7 @@ func writeFileAtomic(dir, name string, content []byte) error {
 		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := syncfile.SyncData(tmp); err != nil {
 		_ = tmp.Close()
 		return err
 	}
