@@ -1,0 +1,4 @@
+mkdocs.yml
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T12:07:12.962Z 2
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T12:07:12.962Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 1, "overriden_lines": 0}}}
