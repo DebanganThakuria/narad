@@ -57,6 +57,21 @@ Cross-system benchmarks are the least honest genre in infrastructure, so ground 
 
 What the Narad row honestly is and isn't: the run ended because the **load generator saturated, not the broker**, so 50k is a floor — but it is our own bench, not an [OpenMessaging](https://openmessaging.cloud/docs/benchmarks/) run on standardized hardware, and we haven't measured the saturation point. Until an OMB-style run exists, the fair reading is: Narad sits in the "tens of thousands per node, fsync-durable" class with RabbitMQ quorum queues and JetStream — an order of magnitude below Kafka's log-append ceiling, which is fine, because [we already told you](#kafka) to use Kafka if you need millions per second.
 
+#### Same compute, measured ourselves
+
+Published numbers come from different hardware, years, and vendors — so we also ran every system here (SQS can't be self-hosted) on **identical resources**: one broker at a time in Docker, 2 CPUs / 2 GB each, same driver, same workload (50k × 256 B; every produce waits for the system's per-message confirmation, then a full consume+ack drain; single node, no replication for anyone; each system in its default durable config). Laptop-grade and single-run — treat the ordering as directional — but it is the only table on this page where "similar compute" is literally true:
+
+| System | Produce msg/s | p50 / p99 | Consume+ack msg/s | What the produce ack means |
+|---|---|---|---|---|
+| **NATS JetStream** | 39,525 | 0.4 / 0.8 ms | 21,600 | in the R1 file stream — fsync every 2 min |
+| **Redis Streams** | 31,643 | 0.5 / 0.8 ms | 41,698 | in the AOF buffer — fsync every 1 s |
+| **Kafka** (6 partitions) | 14,728 | 0.8 / 4.0 ms | 7,830 | page cache — no per-message fsync (default) |
+| **RabbitMQ** (quorum queue) | 13,014 | 1.2 / 1.9 ms | 14,361 | **fsynced** before the confirm |
+| **Pulsar** (standalone) | 7,632 | 2.0 / 3.0 ms | 10,984 | standalone disables the journal fsync |
+| **Narad** | 5,597 | 2.0 / 10.0 ms | 8,567 | **fsynced** (group commit) before the 202 |
+
+The ordering is mostly the durability column priced in milliseconds: the systems that don't fsync per confirm top the produce chart — that's the trade, made visible. Within the fsync-per-confirm class, RabbitMQ's quorum queue outproduced Narad ~2.3× on this workload, and Narad's plain-HTTP consume pays two round trips per message where binary protocols pipeline — real costs of the curl-is-a-client design, stated rather than hidden. Zero produce failures and a full drain for every system.
+
 ### What it costs to run
 
 Two very different bills: machines (self-hosted) or usage (managed). Worked example for the managed column: a steady 100 msg/s × 1 KB ≈ 259M messages/month. Prices are us-east-1, August 2026; self-hosted figures are 3× m6i.large-class EC2 + disks and exclude ops labor — which is the real cost, and the reason "zero servers" is a feature.
