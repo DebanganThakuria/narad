@@ -1,0 +1,147 @@
+# Nightly throughput regression bench.
+#
+# Runs a single-node --dev broker on a standard GitHub runner and
+# pushes a fixed workload through the full produce -> consume -> ack
+# flow via `narad bench`. Free public-repo runners are a fixed size but
+# not a quiet lab, so this is a REGRESSION detector, not a benchmark:
+# absolute numbers here are not publishable, but a broker that got 30%
+# slower overnight is a real signal. Best-of-two runs absorbs most
+# runner noise; the thresholds absorb the rest.
+#
+# Baseline lives in .github/bench/baseline.json. When a legitimate
+# change moves throughput (either direction), rerun via
+# workflow_dispatch, take the suggested baseline from the job summary,
+# and commit it.
+name: Bench
+
+on:
+  schedule:
+    - cron: "30 21 * * *" # nightly, ~03:00 IST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    name: Throughput regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build -o narad ./cmd/narad
+
+      - name: Start dev broker
+        run: |
+          nohup ./narad server start --dev --data-dir "$RUNNER_TEMP/narad-data" > "$RUNNER_TEMP/server.log" 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:7942/v1/topics; then
+              echo "broker ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "broker did not become ready"; tail -50 "$RUNNER_TEMP/server.log"; exit 1
+
+      - name: Create topic + warmup
+        run: |
+          curl -sf -X POST http://127.0.0.1:7942/v1/topics -d '{"name":"bench","partitions":6}' -o /dev/null
+          ./narad bench bench --server http://127.0.0.1:7942 --count 5000 --size 256 --workers 16 --consume 2>&1 | tail -3
+
+      - name: Bench (best of two)
+        run: |
+          run_once() {
+            ./narad bench bench --server http://127.0.0.1:7942 --count 50000 --size 256 --workers 16 --consume 2>&1 | tee "$RUNNER_TEMP/bench-$1.log"
+          }
+          run_once 1
+          run_once 2
+          # produce line: "produce: N ok, N failed in Xs — R msg/s; latency p50=A p95=B p99=C"
+          # consume line: "consume: N msgs in Xs (R msg/s)"
+          parse() {
+            local log="$RUNNER_TEMP/bench-$1.log"
+            local prod cons p99
+            prod=$(grep '^produce:' "$log" | grep -o '[0-9]* msg/s' | head -1 | grep -o '[0-9]*')
+            cons=$(grep '^consume:' "$log" | grep -o '[0-9]* msg/s' | head -1 | grep -o '[0-9]*')
+            p99=$(grep '^produce:' "$log" | grep -o 'p99=[^ ]*' | head -1 | cut -d= -f2)
+            echo "${prod:-0} ${cons:-0} ${p99:-?}"
+          }
+          read P1 C1 L1 <<< "$(parse 1)"
+          read P2 C2 L2 <<< "$(parse 2)"
+          echo "run1: produce=$P1 consume=$C1 p99=$L1"
+          echo "run2: produce=$P2 consume=$C2 p99=$L2"
+          PROD=$(echo "$P1 $P2" | tr ' ' '\n' | sort -rn | head -1)
+          CONS=$(echo "$C1 $C2" | tr ' ' '\n' | sort -rn | head -1)
+          printf '{"produce_msgs_per_sec": %.0f, "consume_msgs_per_sec": %.0f}\n' "$PROD" "$CONS" > "$RUNNER_TEMP/result.json"
+          cat "$RUNNER_TEMP/result.json"
+
+      - name: Compare against baseline
+        run: |
+          RESULT="$RUNNER_TEMP/result.json"
+          PROD=$(jq -r .produce_msgs_per_sec "$RESULT")
+          CONS=$(jq -r .consume_msgs_per_sec "$RESULT")
+          {
+            echo "## Bench (50k × 256B, 16 workers, single-node dev broker)"
+            echo ""
+            echo "| metric | tonight | baseline | ratio |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ ! -f .github/bench/baseline.json ]; then
+            {
+              echo "| produce msg/s | $PROD | _none_ | — |"
+              echo "| consume msg/s | $CONS | _none_ | — |"
+              echo ""
+              echo "No baseline committed yet. Suggested \`.github/bench/baseline.json\`:"
+              echo '```json'
+              cat "$RESULT"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "no baseline — record-only run"
+            exit 0
+          fi
+          BPROD=$(jq -r .produce_msgs_per_sec .github/bench/baseline.json)
+          BCONS=$(jq -r .consume_msgs_per_sec .github/bench/baseline.json)
+          check() { # name tonight baseline -> fails the job under 70%
+            local ratio
+            ratio=$(echo "$2 $3" | awk '{printf "%.2f", $1/$2}')
+            echo "| $1 msg/s | $2 | $3 | $ratio |" >> "$GITHUB_STEP_SUMMARY"
+            if awk "BEGIN{exit !($ratio < 0.70)}"; then
+              echo "::error::$1 throughput regressed to ${ratio}x of baseline ($2 vs $3 msg/s)"
+              return 1
+            fi
+            if awk "BEGIN{exit !($ratio < 0.85)}"; then
+              echo "::warning::$1 throughput at ${ratio}x of baseline ($2 vs $3 msg/s) — watch it"
+            fi
+          }
+          FAIL=0
+          check produce "$PROD" "$BPROD" || FAIL=1
+          check consume "$CONS" "$BCONS" || FAIL=1
+          {
+            echo ""
+            echo "Suggested baseline if tonight's numbers are the new normal:"
+            echo '```json'
+            cat "$RESULT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $FAIL
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/bench-*.log
+            ${{ runner.temp }}/result.json
+            ${{ runner.temp }}/server.log
+          retention-days: 90
