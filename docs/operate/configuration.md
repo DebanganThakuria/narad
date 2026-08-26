@@ -16,7 +16,7 @@ Every variable, with the compiled-in default when unset. (This table is generate
 | `NARAD_HTTP_IDLE_TIMEOUT` | `60s` | |
 | `NARAD_HTTP_SHUTDOWN_GRACE` | `10s` | Drain window on SIGTERM |
 | `NARAD_HTTP_MAX_CONSUME_WAIT` | `10s` | Server-side ceiling on `?wait=` long-polls |
-| `NARAD_HTTP_PPROF_ADDR` | off | e.g. `:6060`; unauthenticated — keep it cluster-internal |
+| `NARAD_HTTP_PPROF_ADDR` | off | e.g. `:6060`; unauthenticated; keep it cluster-internal |
 
 ### Cluster
 
@@ -24,9 +24,9 @@ Every variable, with the compiled-in default when unset. (This table is generate
 |---|---|---|
 | `NARAD_NODE_ID` | pod/host name | The node's identity; must appear in the peer list |
 | `NARAD_CLUSTER_ADDR` | `:7943` | Raft bind address |
-| `NARAD_CLUSTER_PEERS` | — | `id@host:7943,…` — the full voter list, identical on every node |
+| `NARAD_CLUSTER_PEERS` | (none) | `id@host:7943,…`: the full voter list, identical on every node |
 | `NARAD_CLUSTER_INITIAL_MEMBERS` | empty | IDs allowed to bootstrap; everyone else joins. Empty = legacy "all bootstrap" |
-| `NARAD_CLUSTER_SECRET` | — | Shared secret gating all node-to-node QUIC RPC |
+| `NARAD_CLUSTER_SECRET` | (none) | Shared secret gating all node-to-node QUIC RPC |
 | `NARAD_CLUSTER_TLS_CERT_FILE` / `_KEY_FILE` / `_CA_FILE` | off | Mutual TLS for Raft; all three or nothing |
 
 ### Storage & data
@@ -35,7 +35,7 @@ Every variable, with the compiled-in default when unset. (This table is generate
 |---|---|---|
 | `NARAD_DATA_DIR` | `data` | Everything lives here: `topics/`, `ingress/`, `metastore/` |
 
-The interesting storage knobs (codec, fsync mode, flush/sync tuning, segment size) are **file-only** — see the config file section below.
+The interesting storage knobs (codec, fsync mode, flush/sync tuning, segment size) are **file-only**; see the config file section below.
 
 ### Topic defaults
 
@@ -69,9 +69,9 @@ Applied when a topic-create omits the field; existing topics keep their values.
 
 ## The config file (`--config narad.json`)
 
-For everything not worth an env var — mostly the storage engine. The chart renders `narad.config` values into this file. Full shape with defaults:
+For everything not worth an env var: mostly the storage engine. The chart renders `narad.config` values into this file. Full shape with defaults:
 
-Storage accepts exactly four keys — everything else (fsync mode, flush/sync
+Storage accepts exactly four keys; everything else (fsync mode, flush/sync
 cadence, segment sizing) is an engine internal with production defaults, and
 the loader **rejects** any attempt to set it:
 
@@ -79,7 +79,7 @@ the loader **rejects** any attempt to set it:
 {
   "storage": {
     "data_dir": "data",
-    "codec": "none",                        // "none" | "zstd" — yes, OFF by default
+    "codec": "none",                        // "none" | "zstd" (yes, OFF by default)
     "compression_level": "fastest",         // zstd: fastest | default | better | best
     "idle_log_eviction_ms": 1800000         // close logs untouched this long; 0 disables
   },
@@ -91,20 +91,20 @@ the loader **rejects** any attempt to set it:
 }
 ```
 
-Secrets (`NARAD_CLUSTER_SECRET`, `NARAD_ADMIN_PASSWORD`) are deliberately **not** file-configurable — files end up in git, and git ends up on the internet.
+Secrets (`NARAD_CLUSTER_SECRET`, `NARAD_ADMIN_PASSWORD`) are deliberately **not** file-configurable: files end up in git, and git ends up on the internet.
 
 ### Idle topics cost (almost) nothing
 
 An open partition log holds two goroutines, open file descriptors, and
-buffers — and topics people create and abandon would hold them forever.
+buffers, and topics people create and abandon would hold them forever.
 So Narad closes any partition log untouched for `idle_log_eviction_ms`
 (default 30 minutes) and reopens it lazily, invisibly, on the next
 produce, consume, or replay. Details that make this safe:
 
-- A topic that was **never** used opens nothing anywhere — creation is
+- A topic that was **never** used opens nothing anywhere: creation is
   just a metastore entry.
 - Metrics polls never keep a log warm (they observe without opening),
-  and a fan-out child that is attached but silent doesn't either — its
+  and a fan-out child that is attached but silent doesn't either: its
   cursor checks the durable high-watermark file instead of the log.
   Committed backlog always forces the log open: correctness first.
 - Eviction waits until retention has finished deleting aged segments,
@@ -113,12 +113,12 @@ produce, consume, or replay. Details that make this safe:
   `narad_idle_logs_evicted_total`.
 
 The upshot: creating short-lived topics and forgetting to delete them
-is rude but free. Deleting them is still nicer — metastore entries and
+is rude but free. Deleting them is still nicer: metastore entries and
 the last active segment on disk stay until you do.
 
 ### The fsync knob, honestly explained
 
-`"fsync": "batched"` (the default) does **not** weaken the durability contract you care about: a produce is fsynced in the ingress WAL before its `202`, and a partition commit is fsynced + CRC-verified before it's acknowledged back or made visible — always, in both modes. The knob only controls how eagerly *background* flusher batches hit disk between those hard points. `per_write` syncs every flushed batch; it buys you almost nothing and costs you a lot of IOPS. Leave it.
+`"fsync": "batched"` (the default) does **not** weaken the durability contract you care about: a produce is fsynced in the ingress WAL before its `202`, and a partition commit is fsynced + CRC-verified before it's acknowledged back or made visible, always, in both modes. The knob only controls how eagerly *background* flusher batches hit disk between those hard points. `per_write` syncs every flushed batch; it buys you almost nothing and costs you a lot of IOPS. Leave it.
 
 ### Tuning cheat sheet
 
@@ -128,4 +128,4 @@ the last active segment on disk stay until you do.
 | Longer long-polls | `max_consume_wait` (and raise `write_timeout` to match) |
 | Fatter fan-out batches on slow disks | raise `fanout.linger_ms` |
 | Faster delay-child metadata refresh | you don't; the engine self-paces (30s max wake) |
-| More retention granularity | smaller `segment_bytes` — more files, finer reaping |
+| More retention granularity | smaller `segment_bytes`: more files, finer reaping |

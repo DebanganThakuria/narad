@@ -1,4 +1,4 @@
-/* GoatCounter analytics — privacy-friendly, no cookies.
+/* GoatCounter analytics: privacy-friendly, no cookies.
    count.js counts the initial pageview itself; Material's instant
    navigation swaps pages without full loads, so subsequent views are
    counted from the location$ stream (skipping its initial emission to
