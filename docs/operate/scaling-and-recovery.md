@@ -74,7 +74,7 @@ The one rule under the hood that makes recovery boring: **no node ever destroys 
 
 ## Measured capacity
 
-From a bench run against a 3-node cluster: **50,000 msg/s sustained through the full produce → consume → ack flow**.
+From a bench run against a 3-node cluster (4.5 vCPU per node, 13.5 vCPU total): **50,000 msg/s sustained through the full produce → consume → ack flow** — ≈3,700 msg/s per vCPU.
 
 The run ended because the load generator saturated, not the broker — treat 50k msg/s as a **floor**, not a ceiling.
 

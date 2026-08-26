@@ -79,7 +79,7 @@ deployment/configuration/monitoring handbook, and code-level internals with diag
 
 ## Observed benchmark
 
-Bench run, 3-node cluster: **50,000 msg/s sustained through the full
+Bench run, 3-node cluster (4.5 vCPU per node): **50,000 msg/s sustained through the full
 produce → consume → ack flow** — the load generator saturated before the
 broker did, so treat that as a floor, not a ceiling. Details:
 [Scaling & Recovery](https://debanganthakuria.github.io/narad/operate/scaling-and-recovery/).
