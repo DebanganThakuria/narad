@@ -1,0 +1,30 @@
+.github/workflows/container.yml
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:48:43.273Z 32-34,36-37,39-46,61-66,72
+ops/shootout/README.md
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:14:49.076Z 1,3-6,8,10-13,15,17-20,22-28,30-33,35,37-47,49
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:48:13.042Z 51,53-55,57-64,66-74
+ops/shootout/docker-compose.yml
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:09:58.664Z 1-8,10-26,28-30,32-39,41-42,44-51,53-64,81,84-89
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:19:06.079Z 31
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:37:31.158Z 66-79
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:10:23.733Z 83
+ops/shootout/driver/kafka.go
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:12:09.836Z 1,3-5,7-8,10-17,19-40,42,44-46,48-52,54-56,58-76,78-81
+ops/shootout/driver/main.go
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:11:01.971Z 1-13,15-25,27-36,38-50,52-59,61-62,64-76,79-87,89,91-92,94,96-120,122,124-149,151,153-163,165,167-187,189,191-192
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:38:09.019Z 77-78
+ops/shootout/driver/narad.go
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:11:01.971Z 1,3-12,14-19,21-32,34,36-38,40-56,58-75,77-121,123
+ops/shootout/driver/nats.go
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:11:28.635Z 1,3-5,7-9,11-19,21-32,34,36-38,40-56,58-61,63-76,78
+ops/shootout/driver/pulsar.go
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:38:09.019Z 1,3-5,7-8,10-20,22-28,30,32-34,36-52,54-57,59-74,76-84
+ops/shootout/driver/rabbitmq.go
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:11:28.635Z 1,3,5-7,9-10,12-17,20,22-25,27-33,35,37-39,41-51,53-68,70-96,98-120,122,125-141,143-149
+ops/shootout/driver/redis.go
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:11:28.635Z 1,3-6,8-9,11-17,19-21,23,25-27,29-35,37-42,44-73,75
+ops/shootout/run.sh
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:12:19.794Z 1-10,12-13,15-18,20-21,23,25-37,39-42
+  7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:38:09.019Z 14
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:48:43.273Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 20, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:14:49.076Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 60, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:48:13.042Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 60, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:09:58.664Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 82, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:19:06.079Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 82, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:37:31.158Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 82, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:10:23.733Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 82, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:12:09.836Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 71, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:11:01.971Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 174, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:38:09.019Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 174, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:11:28.635Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 68, "overriden_lines": 0}, "7a3c4f16-002c-4f91-a96d-63ac4569eb61:2026-08-26T08:12:19.794Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 37, "overriden_lines": 0}}}
