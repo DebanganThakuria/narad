@@ -57,6 +57,18 @@ jobs:
       - name: Create topic + warmup
         run: |
           curl -sf -X POST http://127.0.0.1:7942/v1/topics -d '{"name":"bench","partitions":6}' -o /dev/null
+          # Assignments propagate to the dispatcher asynchronously after
+          # topic create (~10s on a cold single node); until then produced
+          # messages are acked but not yet consumable and a fast bench
+          # measures an empty topic. Gate on one full produce->consume
+          # round trip before benching.
+          for i in $(seq 1 60); do
+            curl -sf -X POST http://127.0.0.1:7942/v1/topics/bench/produce -d probe -o /dev/null || true
+            if curl -sf "http://127.0.0.1:7942/v1/topics/bench/consume?wait=1s" | grep -q receipt_handle; then
+              echo "first message consumable after ${i} probe(s)"; break
+            fi
+            sleep 1
+          done
           ./narad bench bench --server http://127.0.0.1:7942 --count 5000 --size 256 --workers 16 --consume 2>&1 | tail -3
 
       - name: Bench (best of two)
