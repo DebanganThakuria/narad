@@ -71,6 +71,11 @@ func testHash(t *testing.T, password string) []byte {
 	return h
 }
 
+// testHashB is testHash for benchmarks, which have no *testing.T.
+func testHashB(password string) ([]byte, error) {
+	return bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+}
+
 func newTestAuthenticator(t *testing.T) (*Authenticator, *fakeStore, *time.Time) {
 	t.Helper()
 	store := newFakeStore()
