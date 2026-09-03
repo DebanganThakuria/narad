@@ -70,8 +70,30 @@ func (l *Log) flushSync() {
 		l.pending = nil
 		l.mu.Unlock()
 		completeBatch(pending, err)
+	} else {
+		l.recycleBuffer(buffer)
 	}
 	completeBatch(batch, err)
+}
+
+// maxRecycledBuffer bounds the write buffer kept between batches so one
+// burst does not pin its peak size forever.
+const maxRecycledBuffer = 4 << 20
+
+// recycleBuffer hands a written-out buffer back for the next batch. The
+// buffer was detached under mu and nothing retains it after the write
+// (replay reads from disk), so reuse cannot alias a live batch. Only an
+// empty slot takes it: appends that arrived during the write already
+// started a fresh buffer.
+func (l *Log) recycleBuffer(buffer []byte) {
+	if cap(buffer) == 0 || cap(buffer) > maxRecycledBuffer {
+		return
+	}
+	l.mu.Lock()
+	if l.writeBuffer == nil {
+		l.writeBuffer = buffer[:0]
+	}
+	l.mu.Unlock()
 }
 
 // syncLocked flushes the write buffer inline and returns the batch it
@@ -94,6 +116,9 @@ func (l *Log) syncLocked() (*syncBatch, error) {
 	if err != nil {
 		l.syncErr = fmt.Errorf("wal: write and sync: %w", err)
 		return batch, l.syncErr
+	}
+	if cap(buffer) <= maxRecycledBuffer && l.writeBuffer == nil {
+		l.writeBuffer = buffer[:0]
 	}
 	return batch, nil
 }

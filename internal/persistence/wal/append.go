@@ -57,6 +57,9 @@ func (l *Log) rollLocked() error {
 	}
 	l.segmentBase = l.nextSeq
 	l.segmentSize = 0
+	// The segment just sealed may become deletable: force the next
+	// CompactBefore to list the directory again.
+	l.compactFloor = 0
 
 	path := segmentPath(l.dir, l.segmentBase)
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o644)

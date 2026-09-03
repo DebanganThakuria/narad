@@ -139,7 +139,7 @@ func (l *Log) walkSegment(seg *segment, isActive bool, nextOffset *int64) error 
 }
 
 func (l *Log) loadSegmentIndexLocked(seg *segment) error {
-	entries, err := l.scanSegmentIndexLocked(seg)
+	entries, err := l.scanSegmentIndex(seg)
 	if err != nil {
 		return err
 	}
@@ -147,7 +147,12 @@ func (l *Log) loadSegmentIndexLocked(seg *segment) error {
 	return nil
 }
 
-func (l *Log) scanSegmentIndexLocked(seg *segment) ([]indexEntry, error) {
+// scanSegmentIndex walks a segment's frame headers to rebuild its sparse
+// index. It touches only the segment file and its recorded size, so for
+// a SEALED segment (immutable) it may run without the Log lock; for the
+// active segment the caller must hold the lock because the flusher
+// advances sizeBytes under it.
+func (l *Log) scanSegmentIndex(seg *segment) ([]indexEntry, error) {
 	pos := int64(0)
 	size := seg.sizeBytes
 	entries := make([]indexEntry, 0)

@@ -36,6 +36,12 @@ type Log struct {
 	// is written on top of a possibly torn region and acked.
 	writeFailed error
 
+	// compactFloor (guarded by mu) is the smallest seq at which
+	// CompactBefore could delete a sealed segment, as recorded by its
+	// last directory listing; 0 means unknown (list on the next call).
+	// See CompactBefore.
+	compactFloor uint64
+
 	wakeup chan struct{}
 	stop   chan struct{}
 	done   chan struct{}
