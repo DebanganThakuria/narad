@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
@@ -57,18 +58,18 @@ type CopyResult struct {
 // A MoveSession copies one partition from a source owner into a staging
 // dir. It carries the per-segment copied-bytes state across two phases:
 //
-//   CatchUp  — freeze-free, BOUNDED pre-copy. Copies the bulk (GBs of
-//              sealed segments + the growing active tail) while produce
-//              flows normally, iterating to shrink the un-copied tail. It
-//              returns converged=true once caught up (short freeze), or
-//              converged=false after a bounded number of passes if the
-//              writers keep pace with the copy (a longer stop-and-copy
-//              freeze). It NEVER loops forever.
-//   Finalize — the drain after the source is frozen (PrepareHandoff):
-//              copies whatever tail remains to a now-static source,
-//              reproduces the source's exact HWM + committed offset, and
-//              verifies the staged copy recovers into a log reaching it.
-//              Always terminates — the freeze stopped the writes.
+//	CatchUp  — freeze-free, BOUNDED pre-copy. Copies the bulk (GBs of
+//	           sealed segments + the growing active tail) while produce
+//	           flows normally, iterating to shrink the un-copied tail. It
+//	           returns converged=true once caught up (short freeze), or
+//	           converged=false after a bounded number of passes if the
+//	           writers keep pace with the copy (a longer stop-and-copy
+//	           freeze). It NEVER loops forever.
+//	Finalize — the drain after the source is frozen (PrepareHandoff):
+//	           copies whatever tail remains to a now-static source,
+//	           reproduces the source's exact HWM + committed offset, and
+//	           verifies the staged copy recovers into a log reaching it.
+//	           Always terminates — the freeze stopped the writes.
 //
 // The reconcile loop does: Begin → CatchUp → PrepareHandoff (freeze,
 // last moment) → Finalize → CompleteMove (flip). The freeze covers only
@@ -275,6 +276,11 @@ func (s *MoveSession) ForcePromote() (CopyResult, error) {
 // source). The verify is the data-safety gate: it fails if the staged copy
 // does not reach hwm.
 func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool) (CopyResult, error) {
+	// An idle source has no segments, so no pass created the staging
+	// directory; the copy is still a valid (empty) partition.
+	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
+		return CopyResult{}, fmt.Errorf("create staging dir: %w", err)
+	}
 	if err := storage.WritePersistedHighWatermark(s.stagingDir, hwm); err != nil {
 		return CopyResult{}, fmt.Errorf("write hwm: %w", err)
 	}
