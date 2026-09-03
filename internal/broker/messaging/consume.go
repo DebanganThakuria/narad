@@ -74,16 +74,21 @@ func (e *Engine) consumeQueue(ctx context.Context, topicName string, scan []int,
 		// activity closes a channel we are (about to be) waiting on.
 		// Re-fetched every iteration because each broadcast installs a
 		// fresh channel.
+		//
+		// The partition logs are resolved once per iteration and shared by
+		// the notify snapshot and the probe (each Logs.Get is a map lookup
+		// under a process-wide lock plus a key allocation); re-resolved
+		// every iteration so a reopened log after CloseTopic is picked up.
+		logs, err := e.partitionLogs(topicName, scan)
+		if err != nil {
+			return topic.Message{}, false, err
+		}
 		var notifyChans []<-chan struct{}
 		if wait > 0 {
-			var err error
-			notifyChans, err = e.notifyChannels(topicName, scan)
-			if err != nil {
-				return topic.Message{}, false, err
-			}
+			notifyChans = notifyChannelsFor(logs)
 		}
 
-		msg, found, err := e.tryQueueRead(ctx, topicName, scan, scanStart, visibilityTimeout)
+		msg, found, err := e.tryQueueReadLogs(ctx, topicName, scan, logs, scanStart, visibilityTimeout)
 		if err != nil {
 			if e.metrics != nil {
 				e.metrics.IncError("messaging", "consume")
@@ -204,30 +209,69 @@ func (e *Engine) replayRead(topicName string, partitionIdx int, offset int64, to
 // Ack — the broker rejects acks for offsets the consumer did not
 // reserve, and acks whose visibility window has elapsed.
 func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions []int, scanStart int, visibilityTimeout time.Duration) (topic.Message, bool, error) {
-	for i := range partitions {
-		idx := partitions[(scanStart+i)%len(partitions)]
+	logs, err := e.partitionLogs(topicName, partitions)
+	if err != nil {
+		return topic.Message{}, false, err
+	}
+	return e.tryQueueReadLogs(ctx, topicName, partitions, logs, scanStart, visibilityTimeout)
+}
+
+// partitionLogs resolves the log of every partition in the scan, in scan
+// order. One Logs.Get per partition per consume iteration, shared by the
+// notify snapshot and the probe.
+func (e *Engine) partitionLogs(topicName string, partitions []int) ([]*storage.Log, error) {
+	logs := make([]*storage.Log, len(partitions))
+	for i, idx := range partitions {
 		log, err := e.logs.Get(topicName, idx)
 		if err != nil {
-			return topic.Message{}, false, err
+			return nil, err
 		}
+		logs[i] = log
+	}
+	return logs, nil
+}
+
+// tryQueueReadLogs is tryQueueRead over pre-resolved logs (logs[i] is
+// the log of partitions[i]).
+func (e *Engine) tryQueueReadLogs(ctx context.Context, topicName string, partitions []int, logs []*storage.Log, scanStart int, visibilityTimeout time.Duration) (topic.Message, bool, error) {
+	for i := range partitions {
+		pos := (scanStart + i) % len(partitions)
+		idx := partitions[pos]
+		log := logs[pos]
 		for {
 			res, err := e.offsets.ReserveNext(ctx, topicName, idx, visibilityTimeout, log.HighWatermark())
 			if err != nil {
 				return topic.Message{}, false, err
 			}
 			if !res.Reserved {
-				break // partition empty, fully reserved, or in-flight cap hit — try the next one
+				break // partition empty, fully reserved, or in-flight cap hit: try the next one
 			}
 			key, committedAt, payload, err := log.ReadKeyed(res.Offset)
 			if err != nil {
+				// A frontier that fell behind retention (the segment holding
+				// the reserved offset was reaped) would otherwise be walked
+				// one poison offset per round trip, each with a log line and
+				// a frontier persist. Jump it to the oldest retained offset
+				// in one step; the loss is already visible on the consumer
+				// lag/dropped gauges.
+				if errors.Is(err, storage.ErrOffsetNotFound) {
+					if oldest := log.OldestOffset(); res.Offset < oldest {
+						skipped, serr := e.offsets.SkipMissingBelow(topicName, idx, res.Offset, res.Nonce, oldest)
+						if serr != nil {
+							return topic.Message{}, false, serr
+						}
+						e.logger.Warn("consumer frontier fell behind retention; skipped to oldest retained offset",
+							"topic", topicName, "partition", idx, "from", res.Offset, "to", oldest, "skipped", skipped)
+						continue
+					}
+				}
 				// A permanently-unreadable (corrupt) frame, or a gap left by a
 				// corrupt frame recovery skipped, would otherwise head-of-line-block
 				// this partition forever (the offset can never be acked). Skip past
-				// it — recorded loss, never silent — and retry the SAME partition:
+				// it (recorded loss, never silent) and retry the SAME partition:
 				// the record after the skipped frame may be immediately deliverable,
 				// and moving on could stall a long-poll for the full Wait even
-				// though data is available here. Transient errors (I/O, log
-				// closed) are returned for retry.
+				// though data is available here.
 				if storage.IsCorrupt(err) || errors.Is(err, storage.ErrOffsetNotFound) {
 					if serr := e.offsets.SkipCorrupt(topicName, idx, res.Offset, res.Nonce); serr != nil {
 						return topic.Message{}, false, serr
@@ -238,6 +282,13 @@ func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions 
 					e.logger.Warn("skipped permanently-unreadable record",
 						"topic", topicName, "partition", idx, "offset", res.Offset, "err", err)
 					continue
+				}
+				// Transient error (I/O, log closed): give the reservation
+				// back right away. Leaving it in place would hide the message
+				// for the full visibility timeout after a 500 the consumer
+				// will retry immediately.
+				if rerr := e.offsets.ReleaseHandle(topicName, idx, res.Offset, res.Nonce); rerr != nil && !errors.Is(rerr, consumer.ErrHandleStale) {
+					e.logger.Warn("release reservation after read error", "topic", topicName, "partition", idx, "offset", res.Offset, "err", rerr)
 				}
 				return topic.Message{}, false, err
 			}
@@ -264,15 +315,20 @@ func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions 
 // consumeQueue) and re-taken before every wait, because each broadcast
 // closes the channel and installs a fresh one.
 func (e *Engine) notifyChannels(topicName string, partitions []int) ([]<-chan struct{}, error) {
-	chans := make([]<-chan struct{}, 0, len(partitions))
-	for _, idx := range partitions {
-		log, err := e.logs.Get(topicName, idx)
-		if err != nil {
-			return nil, err
-		}
-		chans = append(chans, log.NotifyC())
+	logs, err := e.partitionLogs(topicName, partitions)
+	if err != nil {
+		return nil, err
 	}
-	return chans, nil
+	return notifyChannelsFor(logs), nil
+}
+
+// notifyChannelsFor is notifyChannels over pre-resolved logs.
+func notifyChannelsFor(logs []*storage.Log) []<-chan struct{} {
+	chans := make([]<-chan struct{}, len(logs))
+	for i, log := range logs {
+		chans[i] = log.NotifyC()
+	}
+	return chans
 }
 
 // waitForActivity blocks until any of the given broadcast channels is

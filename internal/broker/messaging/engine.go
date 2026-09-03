@@ -143,7 +143,12 @@ func (e *Engine) nextConsumeScanStart(topicName string, partitions int) int {
 	if partitions <= 1 {
 		return 0
 	}
-	counter, _ := e.consumeCursors.LoadOrStore(topicName, new(atomic.Uint64))
+	// Load first: LoadOrStore allocates its candidate value on every call,
+	// and this runs once per consume.
+	counter, ok := e.consumeCursors.Load(topicName)
+	if !ok {
+		counter, _ = e.consumeCursors.LoadOrStore(topicName, new(atomic.Uint64))
+	}
 	cursor := counter.(*atomic.Uint64).Add(1) - 1
 	return int(cursor % uint64(partitions))
 }

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -55,6 +56,9 @@ type Manager struct {
 	produceDir  string
 	log         *wal.Log
 	durableNext atomic.Uint64
+
+	checkpointMu sync.Mutex
+	checkpoint   *checkpointWriter
 }
 
 // DefaultWALOptions returns the WAL options used for the ingress
@@ -94,6 +98,7 @@ func OpenManager(dataDir string, opts wal.Options) (*Manager, error) {
 	manager := &Manager{
 		produceDir: produceDir,
 		log:        log,
+		checkpoint: newCheckpointWriter(produceDir, produceCheckpointFile),
 	}
 	manager.durableNext.Store(nextSeq)
 	return manager, nil
@@ -192,15 +197,30 @@ func (m *Manager) StoreProduceCheckpoint(nextSeq uint64) error {
 	if m == nil {
 		return errors.New("ingress: manager is nil")
 	}
-	return storeCheckpoint(m.produceDir, produceCheckpointFile, nextSeq)
+	m.checkpointMu.Lock()
+	defer m.checkpointMu.Unlock()
+	if m.checkpoint == nil {
+		m.checkpoint = newCheckpointWriter(m.produceDir, produceCheckpointFile)
+	}
+	return m.checkpoint.store(nextSeq)
 }
 
-// Close closes the underlying WAL. Safe on a nil manager.
+// Close closes the underlying WAL and the checkpoint file. Safe on a nil
+// manager.
 func (m *Manager) Close() error {
-	if m == nil || m.log == nil {
+	if m == nil {
 		return nil
 	}
-	return m.log.Close()
+	m.checkpointMu.Lock()
+	cerr := m.checkpoint.close()
+	m.checkpointMu.Unlock()
+	if m.log == nil {
+		return cerr
+	}
+	if err := m.log.Close(); err != nil {
+		return err
+	}
+	return cerr
 }
 
 // advanceDurableNext lifts durableNext to next unless a concurrent
