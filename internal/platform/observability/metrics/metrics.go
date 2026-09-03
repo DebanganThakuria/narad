@@ -11,6 +11,9 @@
 package metrics
 
 import (
+	"sync"
+	"sync/atomic"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -103,6 +106,20 @@ type Metrics struct {
 
 	// Boot
 	BootDurationSeconds prometheus.Gauge
+
+	// httpSeries caches resolved HTTP children per {route, method,
+	// status} so the middleware does one map lookup per request. The
+	// HTTP collectors are never pruned, so entries stay live.
+	httpSeries sync.Map
+
+	// partitionCounters caches PartitionCounters per (topic, partition).
+	// pruneMu serialises resolution of topic-labelled children (this
+	// cache and storageRecorder) with pruneTopicSeries, and
+	// pruneGeneration increments on every prune so holders of resolved
+	// children can tell theirs may have been detached.
+	partitionCounters sync.Map
+	pruneMu           sync.Mutex
+	pruneGeneration   atomic.Uint64
 }
 
 // New constructs the metrics struct and registers every collector with
@@ -467,7 +484,17 @@ func New(reg prometheus.Registerer) *Metrics {
 // churn. Every collector carrying a "topic" label MUST be listed here;
 // collectors without a topic label (HTTP, data-dir, ack-rejected-by-reason,
 // metastore, boot, errors) are intentionally omitted.
+//
+// Cached children for the topic (PartitionCounters) are dropped in the
+// same critical section and the prune generation is advanced, so a
+// recreated topic re-binds live children instead of incrementing the
+// detached ones that DeletePartialMatch left behind.
 func (m *Metrics) pruneTopicSeries(topic string) {
+	m.pruneMu.Lock()
+	defer m.pruneMu.Unlock()
+	defer m.pruneGeneration.Add(1)
+	m.dropPartitionCounters(topic)
+
 	sel := prometheus.Labels{"topic": topic}
 	for _, c := range []interface{ DeletePartialMatch(prometheus.Labels) int }{
 		m.MessagesProducedTotal, m.MessagesConsumedTotal,
