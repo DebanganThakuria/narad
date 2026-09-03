@@ -61,13 +61,17 @@ func NewRPCServer(br broker.Broker, store *metastore.Store, logger *slog.Logger)
 }
 
 // defaultMessagingConcurrency is the messaging-handler ceiling applied
-// by NewRPCServer: enough parallelism to keep every core busy on commits
-// and acks, bounded so a burst of forwarded traffic degrades into
+// by NewRPCServer: bounded so a burst of forwarded traffic degrades into
 // queueing instead of thousands of goroutines contending for the same
-// partition locks and fsyncs.
+// partition locks and fsyncs. Commit handlers mostly wait on fdatasync
+// rather than CPU, so the bound has a floor well above the core count:
+// a small pod must still absorb several ingress nodes' dispatchers (16
+// concurrent batches each) without queueing them behind one another.
 func defaultMessagingConcurrency() int {
-	return 4 * runtime.GOMAXPROCS(0)
+	return max(minMessagingConcurrency, 4*runtime.GOMAXPROCS(0))
 }
+
+const minMessagingConcurrency = 64
 
 // SetMessagingConcurrency bounds concurrently executing messaging
 // handlers to n; n <= 0 disables the bound. Call before serving.

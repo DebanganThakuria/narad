@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
@@ -204,7 +203,7 @@ func (e *Engine) recordProduceCommitted(topicName string, partition, count, payl
 	if e.metrics == nil || count <= 0 {
 		return
 	}
-	partLabel := strconv.Itoa(partition)
-	e.metrics.MessagesProducedTotal.WithLabelValues(topicName, partLabel).Add(float64(count))
-	e.metrics.BytesProducedTotal.WithLabelValues(topicName, partLabel).Add(float64(payloadBytes))
+	pc := e.metrics.PartitionCounters(topicName, partition)
+	pc.MessagesProduced.Add(float64(count))
+	pc.BytesProduced.Add(float64(payloadBytes))
 }

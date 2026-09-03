@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strconv"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/consumer"
@@ -133,9 +132,11 @@ func (e *Engine) recordConsumed(topicName string, partition, payloadBytes int) {
 	if e.metrics == nil {
 		return
 	}
-	partLabel := strconv.Itoa(partition)
-	e.metrics.MessagesConsumedTotal.WithLabelValues(topicName, partLabel).Inc()
-	e.metrics.BytesConsumedTotal.WithLabelValues(topicName, partLabel).Add(float64(payloadBytes))
+	// Pre-bound children: one cache lookup instead of two label-hash
+	// resolutions and an Itoa per delivered message.
+	pc := e.metrics.PartitionCounters(topicName, partition)
+	pc.MessagesConsumed.Inc()
+	pc.BytesConsumed.Add(float64(payloadBytes))
 }
 
 // recordConsumeWait observes the long-poll histogram for a hit
