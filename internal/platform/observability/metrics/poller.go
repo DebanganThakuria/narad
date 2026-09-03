@@ -9,8 +9,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 // pollInterval is the cadence at which the poller refreshes
@@ -19,7 +17,10 @@ import (
 // significantly more work than the scraper consumes.
 const pollInterval = 5 * time.Second
 
-const dataDirScanInterval = 30 * time.Second
+// defaultDataDirScanInterval bounds how often the data directory is
+// walked for the size gauge; the walk stats every segment file, so it
+// runs far less often than the 5s tick.
+const defaultDataDirScanInterval = 30 * time.Second
 
 // Poller is the goroutine that updates Narad's gauge-style metrics
 // (lag, inventory, on-disk sizes). Counters and histograms are
@@ -31,6 +32,11 @@ type Poller struct {
 	broker  SnapshotProvider
 	logger  *slog.Logger
 	dataDir string
+
+	// DataDirScanInterval is the minimum gap between data-directory
+	// walks (DataDirSizeBytes); NewPoller sets it to
+	// defaultDataDirScanInterval. Zero means walk on every tick.
+	DataDirScanInterval time.Duration
 
 	// previousTopics records which topics existed at the last tick;
 	// see pruneDeletedTopics.
@@ -48,11 +54,12 @@ func NewPoller(m *Metrics, broker SnapshotProvider, logger *slog.Logger, dataDir
 		dir = dataDir[0]
 	}
 	return &Poller{
-		metrics:        m,
-		broker:         broker,
-		logger:         logger,
-		dataDir:        dir,
-		previousTopics: make(map[string]struct{}),
+		metrics:             m,
+		broker:              broker,
+		logger:              logger,
+		dataDir:             dir,
+		DataDirScanInterval: defaultDataDirScanInterval,
+		previousTopics:      make(map[string]struct{}),
 	}
 }
 
@@ -109,20 +116,20 @@ func (p *Poller) setTopicGauges(ts TopicSnapshot, nowUnix int64) {
 		topicBytes += ps.SizeBytes
 		p.setPartitionGauges(ts.Topic, ps, nowUnix)
 	}
-	p.metrics.TopicBytes.With(prometheus.Labels{"topic": ts.Topic}).Set(float64(topicBytes))
+	p.metrics.TopicBytes.WithLabelValues(ts.Topic).Set(float64(topicBytes))
 }
 
 func (p *Poller) setPartitionGauges(topic string, ps PartitionSnapshot, nowUnix int64) {
-	labels := prometheus.Labels{"topic": topic, "partition": strconv.Itoa(ps.Partition)}
+	partition := strconv.Itoa(ps.Partition)
 
-	p.metrics.PartitionSizeBytes.With(labels).Set(float64(ps.SizeBytes))
-	p.metrics.Segments.With(labels).Set(float64(ps.SegmentCount))
-	p.metrics.InFlightSize.With(labels).Set(float64(ps.InFlightSize))
-	p.metrics.AckedAheadSize.With(labels).Set(float64(ps.AckedAheadSize))
+	p.metrics.PartitionSizeBytes.WithLabelValues(topic, partition).Set(float64(ps.SizeBytes))
+	p.metrics.Segments.WithLabelValues(topic, partition).Set(float64(ps.SegmentCount))
+	p.metrics.InFlightSize.WithLabelValues(topic, partition).Set(float64(ps.InFlightSize))
+	p.metrics.AckedAheadSize.WithLabelValues(topic, partition).Set(float64(ps.AckedAheadSize))
 
 	lag := max(ps.LogEndOffset-ps.CommittedOffset, 0)
-	p.metrics.ConsumerLagMessages.With(labels).Set(float64(lag))
-	p.metrics.ConsumerDroppedMessages.With(labels).Set(float64(ps.Dropped))
+	p.metrics.ConsumerLagMessages.WithLabelValues(topic, partition).Set(float64(lag))
+	p.metrics.ConsumerDroppedMessages.WithLabelValues(topic, partition).Set(float64(ps.Dropped))
 
 	var ageSeconds float64
 	if ps.OldestUnconsumedAt > 0 {
@@ -131,7 +138,7 @@ func (p *Poller) setPartitionGauges(topic string, ps PartitionSnapshot, nowUnix 
 			ageSeconds = 0
 		}
 	}
-	p.metrics.OldestUnconsumedAgeSeconds.With(labels).Set(ageSeconds)
+	p.metrics.OldestUnconsumedAgeSeconds.WithLabelValues(topic, partition).Set(ageSeconds)
 }
 
 // pruneDeletedTopics drops gauge series for topics that disappeared
@@ -153,7 +160,7 @@ func (p *Poller) updateDataDirGauges() {
 		return
 	}
 	now := time.Now()
-	if !p.lastDataDirScan.IsZero() && now.Sub(p.lastDataDirScan) < dataDirScanInterval {
+	if !p.lastDataDirScan.IsZero() && now.Sub(p.lastDataDirScan) < p.DataDirScanInterval {
 		return
 	}
 	p.lastDataDirScan = now

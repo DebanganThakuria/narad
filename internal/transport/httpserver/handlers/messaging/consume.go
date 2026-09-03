@@ -3,7 +3,9 @@ package messaging
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
@@ -127,12 +129,83 @@ func isQueueConsume(opts brokermsg.ConsumeOpts) bool {
 	return opts.Partition == nil && opts.Offset == nil
 }
 
-func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) (brokermsg.ConsumeOpts, bool, bool) {
-	q := r.URL.Query()
-	opts := brokermsg.ConsumeOpts{}
-	localOnly := q.Get("local_only") == "1"
+// consumeQuery holds the raw (unescaped) values of the query parameters
+// Consume reads, exactly as url.Values.Get would have returned them.
+type consumeQuery struct {
+	partition string
+	offset    string
+	wait      string
+	localOnly string
+}
 
-	if v := q.Get("partition"); v != "" {
+// consumeQueryFromRawQuery extracts Consume's four parameters in one
+// walk of the raw query string: consume is on the hot path, and
+// r.URL.Query() allocates a map (plus a slice per key) for every
+// request. It reproduces url.ParseQuery's observable behaviour for
+// these keys precisely, since callers previously read them through
+// url.Values.Get:
+//
+//   - the FIRST successfully parsed occurrence of a key wins;
+//   - a pair whose key or value carries a malformed percent-escape is
+//     silently dropped (ParseQuery records the error, Query() discards
+//     it), so "?partition=%ZZ" means "partition unset", not 400;
+//   - a pair containing a semicolon is dropped, as ParseQuery does;
+//   - a key present without "=" yields the empty value.
+//
+// Components are unescaped only when they contain an escape character.
+func consumeQueryFromRawQuery(raw string) consumeQuery {
+	var out consumeQuery
+	var seenPartition, seenOffset, seenWait, seenLocalOnly bool
+	for raw != "" {
+		var part string
+		part, raw, _ = strings.Cut(raw, "&")
+		if part == "" || strings.Contains(part, ";") {
+			continue
+		}
+		key, value, _ := strings.Cut(part, "=")
+		if strings.ContainsAny(key, "%+") {
+			unescaped, err := url.QueryUnescape(key)
+			if err != nil {
+				continue
+			}
+			key = unescaped
+		}
+		var dst *string
+		var seen *bool
+		switch key {
+		case "partition":
+			dst, seen = &out.partition, &seenPartition
+		case "offset":
+			dst, seen = &out.offset, &seenOffset
+		case "wait":
+			dst, seen = &out.wait, &seenWait
+		case "local_only":
+			dst, seen = &out.localOnly, &seenLocalOnly
+		default:
+			continue
+		}
+		if *seen {
+			continue
+		}
+		if strings.ContainsAny(value, "%+") {
+			unescaped, err := url.QueryUnescape(value)
+			if err != nil {
+				continue
+			}
+			value = unescaped
+		}
+		*dst = value
+		*seen = true
+	}
+	return out
+}
+
+func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) (brokermsg.ConsumeOpts, bool, bool) {
+	q := consumeQueryFromRawQuery(r.URL.RawQuery)
+	opts := brokermsg.ConsumeOpts{}
+	localOnly := q.localOnly == "1"
+
+	if v := q.partition; v != "" {
 		p, err := strconv.Atoi(v)
 		if err != nil {
 			s.WriteError(w, http.StatusBadRequest, "invalid partition: "+err.Error())
@@ -140,7 +213,7 @@ func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) 
 		}
 		opts.Partition = &p
 	}
-	if v := q.Get("offset"); v != "" {
+	if v := q.offset; v != "" {
 		o, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
 			s.WriteError(w, http.StatusBadRequest, "invalid offset: "+err.Error())
@@ -152,7 +225,7 @@ func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) 
 		}
 		opts.Offset = &o
 	}
-	if v := q.Get("wait"); v != "" {
+	if v := q.wait; v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			s.WriteError(w, http.StatusBadRequest, "invalid wait: "+err.Error())

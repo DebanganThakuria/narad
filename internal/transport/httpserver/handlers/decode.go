@@ -11,7 +11,32 @@ import (
 // ReadBody reads the request body up to limit bytes. On failure it
 // responds to the client (413 for an oversize body, 400 otherwise)
 // and returns false.
+//
+// When the client declared a Content-Length within the limit the body
+// is read into a single exactly-sized allocation instead of through
+// io.ReadAll's grow-and-copy loop (a 1 MiB produce payload used to cost
+// several intermediate buffers). One extra byte is probed afterwards so
+// a body longer than its declared length still takes the 413 path.
+// Unknown or negative lengths keep the MaxBytesReader path.
 func (s *Set) ReadBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
+	if n := r.ContentLength; n > 0 && n <= limit {
+		buf := make([]byte, n+1)
+		if _, err := io.ReadFull(r.Body, buf[:n]); err != nil {
+			s.WriteError(w, http.StatusBadRequest, "read body: "+err.Error())
+			return nil, false
+		}
+		extra, err := io.ReadFull(r.Body, buf[n:])
+		switch {
+		case extra > 0:
+			s.WriteError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return nil, false
+		case err != nil && !errors.Is(err, io.EOF):
+			s.WriteError(w, http.StatusBadRequest, "read body: "+err.Error())
+			return nil, false
+		}
+		return buf[:n], true
+	}
+
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
 		var maxErr *http.MaxBytesError

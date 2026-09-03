@@ -30,12 +30,20 @@ Produce is the special case that makes the cluster feel fast: it's *always* loca
 
 ## The node RPC plane
 
-Node-to-node calls (commit batches from the dispatcher, fan-out child commits, forwarded consumes/acks, leader confirmations, membership, cluster join) ride one multiplexed QUIC connection per peer pair. Each request is a single-byte opcode plus a compact binary payload; responses reuse HTTP status vocabulary so errors translate 1:1 at the boundary. QUIC gives stream multiplexing without head-of-line blocking and connection migration across pod restarts.
+Node-to-node calls (commit batches from the dispatcher, fan-out child commits, forwarded consumes/acks, leader confirmations, membership, cluster join) ride one multiplexed QUIC connection per peer pair: a node holds a single peer client, shared by the router, dispatcher, fan-out runner, mover, and heartbeater. Each request is a single-byte opcode plus a compact binary payload; responses reuse HTTP status vocabulary so errors translate 1:1 at the boundary. QUIC gives stream multiplexing without head-of-line blocking.
+
+Streams are pooled per **lane** so bulk traffic cannot starve control calls: produce commits (and bulk transfers such as fan-out cursors, segment chunks, and handoff freezes) ride the produce lane, consumes the consume lane, ack/extend/nack the ack lane (16 streams each), and everything else the 4-stream control lane. Requests round-robin across a lane's streams and are correlated by request ID, so many RPCs share one stream.
+
+Peer restarts are recovered from immediately rather than at the 30s idle timeout: both ends run a QUIC transport whose stateless reset key is derived from the cluster secret (HMAC-SHA256 with a fixed context), so a restarted node answers packets for connection IDs it no longer knows with a reset the peer can verify, and the peer's pool drops the dead connection on the spot. As a backstop for resets that never arrive, a request that hits the client's fallback reply timeout pings its stream; no pong within 1s closes the connection so the next request re-dials. Dials to one address are shared by concurrent requests, and a failed dial is cached for a backoff that doubles from 250ms to 2s, during which requests to that peer fail fast.
 
 Two transport-level guards:
 
-- **Cluster shared secret**: every node RPC connection authenticates with a symmetric secret from the deployment's Kubernetes Secret. No secret, no cluster plane; a stray client can't speak node protocol.
+- **Cluster shared secret**: every node RPC stream authenticates with a symmetric secret from the deployment's Kubernetes Secret (an HMAC proof sent as the stream's first frame, verified with a constant-time compare against a token derived once per listener). No secret, no cluster plane; a stray client can't speak node protocol.
 - **Raft mutual TLS**: metadata replication runs over mTLS when certs are configured (and warns loudly when it's plaintext).
+
+The QUIC layer itself is TLS 1.3 with an ephemeral ECDSA P-256 certificate per process and ALPN pinning (peers do not verify the certificate; the shared secret is the authentication). Clients keep a small TLS session cache so redials resume rather than re-handshake.
+
+On the serving side, the messaging handlers (produce commits, acks, and non-blocking consume scans) run under a concurrency bound of 4 x GOMAXPROCS; the frame read loop never blocks, and long-poll consumes and any op that calls other peers are exempt from the bound. Peer RPCs are observable as `narad_cluster_rpc_requests_total{op,outcome}` and `narad_cluster_rpc_request_seconds{op}`.
 
 ## AuthN and AuthZ
 
@@ -71,8 +79,14 @@ An unknown opcode gets a clean 400, which is also the mixed-version story during
 
 | Path | Timeout |
 |---|---|
-| Default peer RPC reply | 5s |
+| Default peer RPC reply | 5s (then a 1s liveness ping decides whether the connection is dropped) |
 | Produce/fan-out commit RPC | 30s (a slow fsync is not a dead node) |
+| Forwarded ack / extend / nack | 2s (acks are idempotent by nonce, so a retry after a timeout cannot double-commit) |
+| Non-blocking remote consume probe | 500ms per owner (a stalled owner is skipped for the round) |
+| Remote consume re-probe pacing | 100ms after an empty round, doubling to 1s, within the client's wait budget |
+| Forwarded long-poll consume | the client's wait (capped by `http.max_consume_wait` on the router and the RPC server alike) plus 2s grace |
+| Reply write on the server | 5s plus 1s per 256 KiB of reply |
+| Peer dial | 1s, then a failure backoff of 250ms doubling to 2s |
 | Leader-confirmation RPCs | 5s |
 | Cluster join attempt cadence | one sweep of the peer list every 2s |
 | Forwarded topic create | 75s (the leader may lawfully park it behind its startup create gate) |
