@@ -3,6 +3,7 @@ package cluster
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
@@ -69,10 +70,25 @@ func (s *RPCServer) handleCommitProduceBatch(payload []byte) nodewire.Response {
 	if err != nil {
 		return s.brokerError("commit produce batch", err)
 	}
-	return jsonResponse(http.StatusOK, map[string]any{
-		"offsets": offsets,
-		"count":   len(offsets),
-	})
+	return commitBatchResponse(offsets)
+}
+
+// commitBatchResponse is the commit_produce_batch reply body. Callers
+// (the produce dispatcher and the fan-out runner) act on the status only,
+// so the body is a small summary rather than every committed offset:
+// {"count":N,"first_offset":F}, with first_offset present when N > 0.
+// (A durable_next field would need the partition high watermark, which
+// the Broker surface does not expose cheaply; it is omitted.)
+func commitBatchResponse(offsets []int64) nodewire.Response {
+	body := make([]byte, 0, 48)
+	body = append(body, `{"count":`...)
+	body = strconv.AppendInt(body, int64(len(offsets)), 10)
+	if len(offsets) > 0 {
+		body = append(body, `,"first_offset":`...)
+		body = strconv.AppendInt(body, offsets[0], 10)
+	}
+	body = append(body, '}', '\n')
+	return nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: body}
 }
 
 func (s *RPCServer) handleConsume(payload []byte) nodewire.Response {
@@ -82,11 +98,11 @@ func (s *RPCServer) handleConsume(payload []byte) nodewire.Response {
 	}
 	// Clamp the wire-supplied wait: broker.Consume runs under a Background
 	// context here (RPC frames carry no caller deadline), so an unclamped
-	// wait would park this server for however long the peer asked —
+	// wait would park this server for however long the peer asked;
 	// defense in depth against peers that skipped the router-side clamp.
 	wait := max(time.Duration(req.WaitNanos), 0)
-	if wait > defaultMaxConsumeWait {
-		wait = defaultMaxConsumeWait
+	if ceiling := s.consumeWaitCeiling(); wait > ceiling {
+		wait = ceiling
 	}
 	opts := brokermsg.ConsumeOpts{Wait: wait}
 	if req.HasPartition {
@@ -97,17 +113,34 @@ func (s *RPCServer) handleConsume(payload []byte) nodewire.Response {
 		offset := req.Offset
 		opts.Offset = &offset
 	}
-	msg, found, err := s.broker.Consume(rpcRequestContext(), req.Topic, opts)
-	if errors.Is(err, brokermsg.ErrNotPartitionOwner) && req.LocalOnly {
-		return nodewire.Response{Status: http.StatusNoContent}
+	consume := func() nodewire.Response {
+		msg, found, err := s.broker.Consume(rpcRequestContext(), req.Topic, opts)
+		if errors.Is(err, brokermsg.ErrNotPartitionOwner) && req.LocalOnly {
+			return nodewire.Response{Status: http.StatusNoContent}
+		}
+		if err != nil {
+			return s.brokerError("consume", err)
+		}
+		if !found {
+			return nodewire.Response{Status: http.StatusNoContent}
+		}
+		// Encode the message the same way the local HTTP path does: one
+		// append-style pass with the payload embedded verbatim. Routing it
+		// through json.Marshal re-validated and compacted the payload (so
+		// a forwarded consume returned different bytes than a local one)
+		// and copied the body three times.
+		body := msg.AppendJSON(make([]byte, 0, len(msg.Payload)+128))
+		body = append(body, '\n')
+		return nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: body}
 	}
-	if err != nil {
-		return s.brokerError("consume", err)
+	if wait > 0 {
+		// A long-poll parks inside the broker for up to the wait ceiling
+		// while consuming no CPU. Holding a messaging slot for that long
+		// would let a handful of forwarded long-polls starve produce
+		// commits and acks, so only non-blocking scans are gated.
+		return consume()
 	}
-	if !found {
-		return nodewire.Response{Status: http.StatusNoContent}
-	}
-	return jsonResponse(http.StatusOK, msg)
+	return s.withMessagingSlot(consume)
 }
 
 func (s *RPCServer) handleAck(payload []byte) nodewire.Response {

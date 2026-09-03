@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -33,11 +35,64 @@ type RPCServer struct {
 	store       *metastore.Store
 	logger      *slog.Logger
 	broadcaster purgeBroadcaster
+
+	// maxConsumeWait caps a wire-supplied consume wait. Zero means
+	// defaultMaxConsumeWait; serve.go wires the configured
+	// http.max_consume_wait via SetMaxConsumeWait so the RPC-side clamp
+	// agrees with the router's and the HTTP handlers'.
+	maxConsumeWait time.Duration
+
+	// messagingSem bounds how many messaging handlers (produce commits,
+	// acks, non-blocking consumes) execute at once. The read loop still
+	// spawns a goroutine per frame so it never blocks; the goroutine
+	// waits here before touching the broker. nil disables gating
+	// (zero-value servers in tests); NewRPCServer sizes it to
+	// 4*GOMAXPROCS. Ops that call peers (delete_topic's purge broadcast)
+	// are never gated: they could hold a slot while waiting on a node
+	// that is itself waiting on us.
+	messagingSem chan struct{}
 }
 
 // NewRPCServer constructs an RPCServer around the local broker.
 func NewRPCServer(br broker.Broker, store *metastore.Store, logger *slog.Logger) *RPCServer {
-	return &RPCServer{broker: br, store: store, logger: logger}
+	s := &RPCServer{broker: br, store: store, logger: logger}
+	s.SetMessagingConcurrency(defaultMessagingConcurrency())
+	return s
+}
+
+// defaultMessagingConcurrency is the messaging-handler ceiling applied
+// by NewRPCServer: enough parallelism to keep every core busy on commits
+// and acks, bounded so a burst of forwarded traffic degrades into
+// queueing instead of thousands of goroutines contending for the same
+// partition locks and fsyncs.
+func defaultMessagingConcurrency() int {
+	return 4 * runtime.GOMAXPROCS(0)
+}
+
+// SetMessagingConcurrency bounds concurrently executing messaging
+// handlers to n; n <= 0 disables the bound. Call before serving.
+func (s *RPCServer) SetMessagingConcurrency(n int) {
+	if n <= 0 {
+		s.messagingSem = nil
+		return
+	}
+	s.messagingSem = make(chan struct{}, n)
+}
+
+// SetMaxConsumeWait wires the configured long-poll consume wait ceiling
+// (http.max_consume_wait). Values <= 0 keep the defaultMaxConsumeWait
+// fallback, matching the router and the HTTP handlers.
+func (s *RPCServer) SetMaxConsumeWait(d time.Duration) {
+	if d > 0 {
+		s.maxConsumeWait = d
+	}
+}
+
+func (s *RPCServer) consumeWaitCeiling() time.Duration {
+	if s.maxConsumeWait > 0 {
+		return s.maxConsumeWait
+	}
+	return defaultMaxConsumeWait
 }
 
 // SetBroadcaster wires the purge fan-out used when a topic delete is
@@ -70,6 +125,15 @@ func (s *RPCServer) HandleStreamFrame(frame clusterwire.StreamFrame, respond fun
 	return true
 }
 
+// withMessagingSlot runs handle under the messaging concurrency bound.
+func (s *RPCServer) withMessagingSlot(handle func() nodewire.Response) nodewire.Response {
+	if sem := s.messagingSem; sem != nil {
+		sem <- struct{}{}
+		defer func() { <-sem }()
+	}
+	return handle()
+}
+
 func (s *RPCServer) dispatch(payload []byte) nodewire.Response {
 	op, err := nodewire.OperationOf(payload)
 	if err != nil {
@@ -80,17 +144,18 @@ func (s *RPCServer) dispatch(payload []byte) nodewire.Response {
 	case nodewire.OpProduce:
 		res = s.handleProduce(payload)
 	case nodewire.OpCommitProduce:
-		res = s.handleCommitProduce(payload)
+		res = s.withMessagingSlot(func() nodewire.Response { return s.handleCommitProduce(payload) })
 	case nodewire.OpCommitProduceBatch:
-		res = s.handleCommitProduceBatch(payload)
+		res = s.withMessagingSlot(func() nodewire.Response { return s.handleCommitProduceBatch(payload) })
 	case nodewire.OpConsume:
+		// Gated inside the handler: only non-blocking scans take a slot.
 		res = s.handleConsume(payload)
 	case nodewire.OpAck:
-		res = s.handleAck(payload)
+		res = s.withMessagingSlot(func() nodewire.Response { return s.handleAck(payload) })
 	case nodewire.OpExtendAck:
-		res = s.handleExtendAck(payload)
+		res = s.withMessagingSlot(func() nodewire.Response { return s.handleExtendAck(payload) })
 	case nodewire.OpNack:
-		res = s.handleNack(payload)
+		res = s.withMessagingSlot(func() nodewire.Response { return s.handleNack(payload) })
 	case nodewire.OpGetTopic:
 		res = s.handleGetTopic(payload)
 	case nodewire.OpJoinCluster:
