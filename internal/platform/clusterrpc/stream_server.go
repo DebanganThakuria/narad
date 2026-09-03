@@ -19,27 +19,34 @@ type StreamFrameHandler interface {
 }
 
 type streamServerConn struct {
-	conn    streamConn
-	reader  io.Reader
-	secret  string
-	logger  *slog.Logger
-	handler StreamFrameHandler
-	writeMu sync.Mutex
+	conn     streamConn
+	reader   io.Reader
+	expected []byte // expected auth token; nil disables auth
+	logger   *slog.Logger
+	handler  StreamFrameHandler
+	writeMu  sync.Mutex
+	writeBuf []byte
 }
 
 // ServeStreamConn serves cluster-RPC frames on a single stream. When
 // secret is non-empty, the stream's first frame must be a valid auth
 // proof or the stream is closed without serving any request.
 func ServeStreamConn(conn streamConn, reader io.Reader, secret string, logger *slog.Logger, handlers ...StreamFrameHandler) {
+	serveStreamConn(conn, reader, expectedAuthToken(secret), logger, firstStreamFrameHandler(handlers))
+}
+
+// serveStreamConn is ServeStreamConn with the auth token already derived
+// (once per listener, not once per stream).
+func serveStreamConn(conn streamConn, reader io.Reader, expectedToken []byte, logger *slog.Logger, handler StreamFrameHandler) {
 	if reader == nil {
 		reader = conn
 	}
 	c := &streamServerConn{
-		conn:    conn,
-		reader:  reader,
-		secret:  secret,
-		logger:  logger,
-		handler: firstStreamFrameHandler(handlers),
+		conn:     conn,
+		reader:   reader,
+		expected: expectedToken,
+		logger:   logger,
+		handler:  handler,
 	}
 	c.serve()
 }
@@ -54,16 +61,24 @@ func firstStreamFrameHandler(handlers []StreamFrameHandler) StreamFrameHandler {
 }
 
 func (c *streamServerConn) serve() {
-	defer c.conn.Close()
 	if !c.authenticate() {
+		// Rejected: reset both directions so the peer's reader sees the
+		// failure now rather than at connection teardown.
+		abortStream(c.conn)
 		return
 	}
 	for {
 		frame, err := clusterwire.ReadStreamFrame(c.reader, clusterwire.MaxStreamFramePayloadBytes)
 		if err != nil {
-			if c.logger != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+			if errors.Is(err, io.EOF) {
+				// The peer finished cleanly; close our send side the same way.
+				_ = c.conn.Close()
+				return
+			}
+			if c.logger != nil && !errors.Is(err, net.ErrClosed) {
 				c.logger.Debug("cluster stream read", "err", err)
 			}
+			abortStream(c.conn)
 			return
 		}
 		c.handleFrame(frame)
@@ -80,7 +95,7 @@ const authHandshakeTimeout = 5 * time.Second
 // cluster secret is configured. With no secret it is a no-op. A missing
 // or invalid proof closes the stream (returns false).
 func (c *streamServerConn) authenticate() bool {
-	if c.secret == "" {
+	if c.expected == nil {
 		return true
 	}
 	// Bound the wait for the auth frame, then clear the deadline so the
@@ -95,7 +110,7 @@ func (c *streamServerConn) authenticate() bool {
 		}
 		return false
 	}
-	if !verifyAuthFrame(c.secret, frame) {
+	if !verifyAuthToken(c.expected, frame) {
 		if c.logger != nil {
 			c.logger.Warn("cluster stream rejected: invalid auth", "component", "audit")
 		}
@@ -131,21 +146,34 @@ func (c *streamServerConn) writeError(requestID uint64, message string) {
 	})
 }
 
+// replyWriteTimeout bounds one reply write: the base client timeout plus
+// one second per 256 KiB of payload, so a multi-megabyte segment chunk
+// or commit-batch reply is not cut off by a deadline sized for small
+// control replies, while a stalled peer still cannot pin a reply
+// goroutine indefinitely.
+func replyWriteTimeout(payloadBytes int) time.Duration {
+	return defaultStreamTimeout + time.Duration(payloadBytes/(256<<10))*time.Second
+}
+
 func (c *streamServerConn) writeFrame(frame clusterwire.StreamFrame) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	// Bound reply writes (mirrors the client's write-deadline convention):
 	// each request frame spawns a reply goroutine, so a stalled peer must
 	// not pile them up on writeMu/flow control until the idle timeout.
-	_ = c.conn.SetWriteDeadline(time.Now().Add(defaultStreamTimeout))
-	err := clusterwire.WriteStreamFrame(c.conn, frame)
+	_ = c.conn.SetWriteDeadline(time.Now().Add(replyWriteTimeout(len(frame.Payload))))
+	buf, err := clusterwire.WriteStreamFrameInto(c.conn, c.writeBuf, frame)
 	_ = c.conn.SetWriteDeadline(time.Time{})
+	if cap(buf) <= maxRetainedWriteBuffer {
+		c.writeBuf = buf[:0]
+	}
 	if err != nil {
 		if c.logger != nil {
 			c.logger.Debug("cluster stream write", "err", err)
 		}
 		// A failed (possibly partial) write corrupts the framing; the
-		// stream is unrecoverable. Closing also unblocks the serve loop.
-		_ = c.conn.Close()
+		// stream is unrecoverable. Aborting both directions also unblocks
+		// the serve loop's Read on a QUIC stream.
+		abortStream(c.conn)
 	}
 }

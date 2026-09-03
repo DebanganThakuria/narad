@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -44,10 +45,17 @@ type peerClient interface {
 	DecommissionMember(ctx context.Context, addr, id string, cancel bool) (nodewire.Response, error)
 }
 
+// frameTransport is the request/reply surface PeerClient needs from the
+// cluster transport. *clusterrpc.QUICFrameClient implements it; tests
+// substitute a fake to observe which lane each operation selects.
+type frameTransport interface {
+	RequestOnLane(ctx context.Context, addr string, lane clusterrpc.Lane, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error)
+}
+
 // PeerClient issues node RPCs to peers over the QUIC frame transport. It is
 // the client side of RPCServer.
 type PeerClient struct {
-	frames *clusterrpc.QUICFrameClient
+	frames frameTransport
 }
 
 // NewPeerClient constructs a PeerClient. timeout is the transport's default
@@ -61,59 +69,91 @@ func NewPeerClient(timeout time.Duration, secret string) *PeerClient {
 	return &PeerClient{frames: clusterrpc.NewQUICFrameClient(timeout, secret)}
 }
 
+// Close releases the transport's pooled connections and socket. A nil
+// client is a no-op.
+func (c *PeerClient) Close() error {
+	if c == nil {
+		return nil
+	}
+	if closer, ok := c.frames.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+// Lanes per operation. The transport pools 16 streams per bulk lane and
+// 4 for control; passing the wrong lane silently funnels bulk traffic
+// through the narrow control pool (which is exactly what happened when
+// operation names were passed as lanes), so every send names its lane
+// explicitly:
+//
+//   - produce and commit_produce(_batch) carry record payloads: produce lane.
+//   - consume replies carry record payloads: consume lane.
+//   - ack, extend_ack, nack are small but high-rate: ack lane.
+//   - fan-out cursors, segment chunks, and prepare_handoff are bulk
+//     transfers: produce lane (the bulk data lane).
+//   - everything else (topic/user/member admin, leader confirmations,
+//     move coordination) is light control traffic: control lane.
+const (
+	laneControl = clusterrpc.LaneControl
+	laneProduce = clusterrpc.LaneProduce
+	laneConsume = clusterrpc.LaneConsume
+	laneAck     = clusterrpc.LaneAck
+)
+
 // Produce forwards a produce request to the peer at addr.
 func (c *PeerClient) Produce(ctx context.Context, addr string, req nodewire.ProduceRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeProduceRequest(req)
-	return c.send(ctx, addr, "produce", payload, err)
+	return c.send(ctx, addr, "produce", laneProduce, payload, err)
 }
 
 // CommitProduce commits a single accepted produce record on the peer at addr.
 func (c *PeerClient) CommitProduce(ctx context.Context, addr string, req nodewire.CommitProduceRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeCommitProduceRequest(req)
-	return c.send(ctx, addr, "commit_produce", payload, err)
+	return c.send(ctx, addr, "commit_produce", laneProduce, payload, err)
 }
 
 // CommitProduceBatch commits a batch of accepted produce records on the peer
 // at addr.
 func (c *PeerClient) CommitProduceBatch(ctx context.Context, addr string, req nodewire.CommitProduceBatchRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeCommitProduceBatchRequest(req)
-	return c.send(ctx, addr, "commit_produce_batch", payload, err)
+	return c.send(ctx, addr, "commit_produce_batch", laneProduce, payload, err)
 }
 
 // Consume forwards a consume request to the peer at addr.
 func (c *PeerClient) Consume(ctx context.Context, addr string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeConsumeRequest(req)
-	return c.send(ctx, addr, "consume", payload, err)
+	return c.send(ctx, addr, "consume", laneConsume, payload, err)
 }
 
 // Ack forwards an ack request to the peer at addr.
 func (c *PeerClient) Ack(ctx context.Context, addr string, req nodewire.AckRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeAckRequest(req)
-	return c.send(ctx, addr, "ack", payload, err)
+	return c.send(ctx, addr, "ack", laneAck, payload, err)
 }
 
 // ExtendAck forwards a visibility-window extension to the peer at addr.
 func (c *PeerClient) ExtendAck(ctx context.Context, addr string, req nodewire.AckRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeExtendAckRequest(req)
-	return c.send(ctx, addr, "extend_ack", payload, err)
+	return c.send(ctx, addr, "extend_ack", laneAck, payload, err)
 }
 
 // Nack forwards an immediate reservation release to the peer at addr.
 func (c *PeerClient) Nack(ctx context.Context, addr string, req nodewire.AckRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeNackRequest(req)
-	return c.send(ctx, addr, "nack", payload, err)
+	return c.send(ctx, addr, "nack", laneAck, payload, err)
 }
 
 // CreateTopic forwards a raw topic create body to the peer at addr.
 func (c *PeerClient) CreateTopic(ctx context.Context, addr string, body []byte) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeTopicBodyRequest(nodewire.OpCreateTopic, nodewire.TopicBodyRequest{Body: body})
-	return c.send(ctx, addr, "create_topic", payload, err)
+	return c.send(ctx, addr, "create_topic", laneControl, payload, err)
 }
 
 // AlterTopic forwards a raw topic alter body to the peer at addr.
 func (c *PeerClient) AlterTopic(ctx context.Context, addr, topicName string, body []byte) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeTopicBodyRequest(nodewire.OpAlterTopic, nodewire.TopicBodyRequest{Topic: topicName, Body: body})
-	return c.send(ctx, addr, "alter_topic", payload, err)
+	return c.send(ctx, addr, "alter_topic", laneControl, payload, err)
 }
 
 // DeleteTopic asks the peer at addr to delete the topic.
@@ -137,20 +177,20 @@ func (c *PeerClient) PurgeTopic(ctx context.Context, addr, topicName string) (no
 // AttachChild forwards a fan-out attach to the peer at addr (the leader).
 func (c *PeerClient) AttachChild(ctx context.Context, addr, parent, child string, delayMs int64) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeChildLinkRequest(nodewire.OpAttachChild, nodewire.ChildLinkRequest{Parent: parent, Child: child, DelayMs: delayMs})
-	return c.send(ctx, addr, "attach_child", payload, err)
+	return c.send(ctx, addr, "attach_child", laneControl, payload, err)
 }
 
 // DetachChild forwards a fan-out detach to the peer at addr (the leader).
 func (c *PeerClient) DetachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeChildLinkRequest(nodewire.OpDetachChild, nodewire.ChildLinkRequest{Parent: parent, Child: child})
-	return c.send(ctx, addr, "detach_child", payload, err)
+	return c.send(ctx, addr, "detach_child", laneControl, payload, err)
 }
 
 // FanoutCursors fetches the fan-out cursor positions the peer at addr
 // holds for the parent's partitions it owns.
 func (c *PeerClient) FanoutCursors(ctx context.Context, addr, parent string) ([]topic.FanoutCursorStat, error) {
 	payload, err := nodewire.EncodeTopicNameRequest(nodewire.OpFanoutCursors, nodewire.TopicNameRequest{Topic: parent})
-	res, err := c.send(ctx, addr, "fanout_cursors", payload, err)
+	res, err := c.send(ctx, addr, "fanout_cursors", laneProduce, payload, err)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +211,7 @@ func (c *PeerClient) TopicPartitionStats(ctx context.Context, addr, topicName st
 		Topic:     topicName,
 		Partition: partition,
 	})
-	res, err := c.send(ctx, addr, "topic_partition_stats", payload, err)
+	res, err := c.send(ctx, addr, "topic_partition_stats", laneControl, payload, err)
 	if err != nil {
 		return topic.PartitionStats{}, err
 	}
@@ -193,37 +233,37 @@ func (c *PeerClient) TopicPartitionStats(ctx context.Context, addr, topicName st
 // leader is found — to admit this node into the Raft voter set.
 func (c *PeerClient) JoinCluster(ctx context.Context, addr string, req nodewire.JoinClusterRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeJoinClusterRequest(req)
-	return c.send(ctx, addr, "join_cluster", payload, err)
+	return c.send(ctx, addr, "join_cluster", laneControl, payload, err)
 }
 
 func (c *PeerClient) RegisterMember(ctx context.Context, addr string, req nodewire.MemberRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeMemberRequest(req)
-	return c.send(ctx, addr, "register_member", payload, err)
+	return c.send(ctx, addr, "register_member", laneControl, payload, err)
 }
 
 // CreateUser forwards a user create to the leader at addr.
 func (c *PeerClient) CreateUser(ctx context.Context, addr string, body []byte) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeUserRequest(nodewire.OpCreateUser, nodewire.UserRequest{Body: body})
-	return c.send(ctx, addr, "create_user", payload, err)
+	return c.send(ctx, addr, "create_user", laneControl, payload, err)
 }
 
 // UpdateUser forwards a user update to the leader at addr.
 func (c *PeerClient) UpdateUser(ctx context.Context, addr, username string, body []byte) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeUserRequest(nodewire.OpUpdateUser, nodewire.UserRequest{Username: username, Body: body})
-	return c.send(ctx, addr, "update_user", payload, err)
+	return c.send(ctx, addr, "update_user", laneControl, payload, err)
 }
 
 // DeleteUser forwards a user delete to the leader at addr.
 func (c *PeerClient) DeleteUser(ctx context.Context, addr, username string) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeUserRequest(nodewire.OpDeleteUser, nodewire.UserRequest{Username: username})
-	return c.send(ctx, addr, "delete_user", payload, err)
+	return c.send(ctx, addr, "delete_user", laneControl, payload, err)
 }
 
 // DecommissionMember forwards a decommission (mark/clear draining) to the
 // leader at addr.
 func (c *PeerClient) DecommissionMember(ctx context.Context, addr, id string, cancel bool) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeDecommissionRequest(nodewire.DecommissionRequest{ID: id, Cancel: cancel})
-	return c.send(ctx, addr, "decommission_member", payload, err)
+	return c.send(ctx, addr, "decommission_member", laneControl, payload, err)
 }
 
 // CompleteMove forwards the guarded ownership flip to the leader at addr.
@@ -233,7 +273,7 @@ func (c *PeerClient) CompleteMove(ctx context.Context, addr, topicName string, p
 	payload, err := nodewire.EncodeCompleteMoveRequest(nodewire.CompleteMoveRequest{
 		Topic: topicName, Partition: partition, ExpectedOwner: expectedOwner, TargetID: targetID,
 	})
-	res, err := c.send(ctx, addr, "complete_move", payload, err)
+	res, err := c.send(ctx, addr, "complete_move", laneControl, payload, err)
 	if err != nil {
 		return err
 	}
@@ -248,7 +288,7 @@ func (c *PeerClient) AbortMove(ctx context.Context, addr, topicName string, part
 	payload, err := nodewire.EncodeAbortMoveRequest(nodewire.AbortMoveRequest{
 		Topic: topicName, Partition: partition, ExpectedTarget: expectedTarget,
 	})
-	res, err := c.send(ctx, addr, "abort_move", payload, err)
+	res, err := c.send(ctx, addr, "abort_move", laneControl, payload, err)
 	if err != nil {
 		return err
 	}
@@ -260,22 +300,22 @@ func (c *PeerClient) AbortMove(ctx context.Context, addr, topicName string, part
 
 func (c *PeerClient) topicNameRequest(ctx context.Context, addr string, op nodewire.Operation, operation, topicName string) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeTopicNameRequest(op, nodewire.TopicNameRequest{Topic: topicName})
-	return c.send(ctx, addr, operation, payload, err)
+	return c.send(ctx, addr, operation, laneControl, payload, err)
 }
 
 // send performs the request round trip once the encode step succeeded.
-func (c *PeerClient) send(ctx context.Context, addr, operation string, payload []byte, encodeErr error) (nodewire.Response, error) {
+func (c *PeerClient) send(ctx context.Context, addr, operation string, lane clusterrpc.Lane, payload []byte, encodeErr error) (nodewire.Response, error) {
 	if encodeErr != nil {
 		return nodewire.Response{}, encodeErr
 	}
-	return c.request(ctx, addr, operation, payload)
+	return c.request(ctx, addr, operation, lane, payload)
 }
 
-func (c *PeerClient) request(ctx context.Context, addr, operation string, payload []byte) (nodewire.Response, error) {
+func (c *PeerClient) request(ctx context.Context, addr, operation string, lane clusterrpc.Lane, payload []byte) (nodewire.Response, error) {
 	if c == nil || c.frames == nil {
 		return nodewire.Response{}, fmt.Errorf("peer rpc client is nil")
 	}
-	frame, err := c.frames.RequestOnLane(ctx, addr, operation, clusterwire.StreamFrameNodeRequest, payload)
+	frame, err := c.frames.RequestOnLane(ctx, addr, lane, clusterwire.StreamFrameNodeRequest, payload)
 	if err != nil {
 		return nodewire.Response{}, err
 	}
@@ -316,7 +356,7 @@ func writeOwnerDown(w http.ResponseWriter) {
 // list and durable positions (rebalance copy, serve side).
 func (c *PeerClient) ListPartitionSegments(ctx context.Context, addr, topicName string, partition int) (messaging.PartitionTransferInfo, error) {
 	payload, err := nodewire.EncodePartitionSegmentsRequest(nodewire.PartitionSegmentsRequest{Topic: topicName, Partition: partition})
-	res, err := c.send(ctx, addr, "list_partition_segments", payload, err)
+	res, err := c.send(ctx, addr, "list_partition_segments", laneControl, payload, err)
 	if err != nil {
 		return messaging.PartitionTransferInfo{}, err
 	}
@@ -336,7 +376,7 @@ func (c *PeerClient) FetchSegmentChunk(ctx context.Context, addr, topicName stri
 	payload, err := nodewire.EncodeFetchSegmentChunkRequest(nodewire.FetchSegmentChunkRequest{
 		Topic: topicName, Partition: partition, BaseOffset: baseOffset, At: at, Length: length,
 	})
-	res, err := c.send(ctx, addr, "fetch_segment_chunk", payload, err)
+	res, err := c.send(ctx, addr, "fetch_segment_chunk", laneProduce, payload, err)
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +392,7 @@ func (c *PeerClient) PrepareHandoff(ctx context.Context, addr, topicName string,
 	payload, err := nodewire.EncodePrepareHandoffRequest(nodewire.PrepareHandoffRequest{
 		Topic: topicName, Partition: partition, FreezeTTLNanos: int64(freezeTTL),
 	})
-	res, err := c.send(ctx, addr, "prepare_handoff", payload, err)
+	res, err := c.send(ctx, addr, "prepare_handoff", laneProduce, payload, err)
 	if err != nil {
 		return messaging.PartitionTransferInfo{}, err
 	}
@@ -371,7 +411,7 @@ func (c *PeerClient) PrepareHandoff(ctx context.Context, addr, topicName string,
 // decisions (the stale-copy sweep).
 func (c *PeerClient) GetAssignment(ctx context.Context, addr, topicName string, partition int) (metastore.Assignment, error) {
 	payload, err := nodewire.EncodeGetAssignmentRequest(nodewire.GetAssignmentRequest{Topic: topicName, Partition: partition})
-	res, err := c.send(ctx, addr, "get_assignment", payload, err)
+	res, err := c.send(ctx, addr, "get_assignment", laneControl, payload, err)
 	if err != nil {
 		return metastore.Assignment{}, err
 	}
