@@ -1,9 +1,11 @@
 package storage
 
 // NotifyC returns the current broadcast channel. It is CLOSED (never
-// sent on) whenever new records may have become available — pushed
-// into the buffer, flushed to disk, made visible by an HWM advance,
-// or on Wake/Close — so every waiter blocked on it wakes at once.
+// sent on) whenever records may have become deliverable: made visible
+// by a high-watermark advance, or on Wake (lease expiry, nack, cap slot
+// freed) and Close. Buffering or flushing a record does not broadcast:
+// every waiter gates on the high-watermark, so it would only wake them
+// to find nothing.
 // Because the channel is replaced after each broadcast, callers must
 // fetch it BEFORE checking for data and re-fetch it before every
 // subsequent wait.

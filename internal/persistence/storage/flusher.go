@@ -321,8 +321,6 @@ func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool)
 		f.log.segments = append(f.log.segments, newActive)
 		f.mu.Unlock()
 	}
-
-	f.log.notifyAll()
 	return nil
 }
 

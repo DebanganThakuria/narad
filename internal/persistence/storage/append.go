@@ -29,8 +29,11 @@ func (l *Log) Append(data []byte) (int64, error) {
 	}
 	offset, crossed := l.buffer.push(data)
 
-	l.notifyAll()
-
+	// No broadcast here: long-poll waiters (queue consumers, the fan-out
+	// reader) gate on the high-watermark, so waking them for a buffered,
+	// not-yet-visible record only costs a full re-probe that finds
+	// nothing. AdvanceHighWatermark broadcasts when records become
+	// visible.
 	if crossed {
 		l.flusher.signal()
 	}
@@ -54,8 +57,6 @@ func (l *Log) AppendBatch(records [][]byte) (firstOffset, lastOffset int64, err 
 		h()
 	}
 	first, last, crossed := l.buffer.pushBatch(records, true)
-
-	l.notifyAll()
 
 	if crossed {
 		l.flusher.signal()
@@ -82,8 +83,6 @@ func (l *Log) AppendBatchOwned(records [][]byte) (firstOffset, lastOffset int64,
 		h()
 	}
 	first, last, crossed := l.buffer.pushBatch(records, false)
-
-	l.notifyAll()
 
 	if crossed {
 		l.flusher.signal()
