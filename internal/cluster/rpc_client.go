@@ -3,10 +3,13 @@ package cluster
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -52,10 +55,68 @@ type frameTransport interface {
 	RequestOnLane(ctx context.Context, addr string, lane clusterrpc.Lane, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error)
 }
 
+// RPCMetrics receives one observation per peer RPC issued by a
+// PeerClient: the operation name, its outcome, and the round-trip time.
+// The observability metrics package is owned elsewhere, so the client
+// records through this small hook; PrometheusRPCMetrics is the production
+// implementation and a nil hook records nothing.
+type RPCMetrics interface {
+	ObserveRPC(op, outcome string, elapsed time.Duration)
+}
+
+// RPC outcome labels. "ok" is any 2xx/3xx reply; "rejected" a 4xx;
+// "failed" a 5xx; "timeout" a transport deadline; "error" any other
+// transport failure.
+const (
+	rpcOutcomeOK       = "ok"
+	rpcOutcomeRejected = "rejected"
+	rpcOutcomeFailed   = "failed"
+	rpcOutcomeTimeout  = "timeout"
+	rpcOutcomeError    = "error"
+)
+
+// PrometheusRPCMetrics records PeerClient observations as
+// narad_cluster_rpc_requests_total{op,outcome} and
+// narad_cluster_rpc_request_seconds{op}.
+type PrometheusRPCMetrics struct {
+	requests *prometheus.CounterVec
+	latency  *prometheus.HistogramVec
+}
+
+// NewPrometheusRPCMetrics builds and registers the peer RPC metrics on reg.
+func NewPrometheusRPCMetrics(reg prometheus.Registerer) *PrometheusRPCMetrics {
+	m := &PrometheusRPCMetrics{
+		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "narad_cluster_rpc_requests_total",
+			Help: "Peer RPCs issued by this node, by operation and outcome.",
+		}, []string{"op", "outcome"}),
+		latency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "narad_cluster_rpc_request_seconds",
+			Help:    "Peer RPC round-trip time in seconds, by operation.",
+			Buckets: prometheus.ExponentialBuckets(0.0005, 2, 16),
+		}, []string{"op"}),
+	}
+	reg.MustRegister(m.requests, m.latency)
+	return m
+}
+
+// ObserveRPC implements RPCMetrics.
+func (m *PrometheusRPCMetrics) ObserveRPC(op, outcome string, elapsed time.Duration) {
+	m.requests.WithLabelValues(op, outcome).Inc()
+	m.latency.WithLabelValues(op).Observe(elapsed.Seconds())
+}
+
 // PeerClient issues node RPCs to peers over the QUIC frame transport. It is
 // the client side of RPCServer.
 type PeerClient struct {
-	frames frameTransport
+	frames  frameTransport
+	metrics RPCMetrics
+}
+
+// SetMetrics wires the RPC metrics hook; nil disables recording. Call
+// before the client is shared across goroutines.
+func (c *PeerClient) SetMetrics(m RPCMetrics) {
+	c.metrics = m
 }
 
 // NewPeerClient constructs a PeerClient. timeout is the transport's default
@@ -315,6 +376,16 @@ func (c *PeerClient) request(ctx context.Context, addr, operation string, lane c
 	if c == nil || c.frames == nil {
 		return nodewire.Response{}, fmt.Errorf("peer rpc client is nil")
 	}
+	if c.metrics == nil {
+		return c.roundTrip(ctx, addr, lane, payload)
+	}
+	start := time.Now()
+	res, err := c.roundTrip(ctx, addr, lane, payload)
+	c.metrics.ObserveRPC(operation, rpcOutcome(res, err), time.Since(start))
+	return res, err
+}
+
+func (c *PeerClient) roundTrip(ctx context.Context, addr string, lane clusterrpc.Lane, payload []byte) (nodewire.Response, error) {
 	frame, err := c.frames.RequestOnLane(ctx, addr, lane, clusterwire.StreamFrameNodeRequest, payload)
 	if err != nil {
 		return nodewire.Response{}, err
@@ -323,6 +394,22 @@ func (c *PeerClient) request(ctx context.Context, addr, operation string, lane c
 		return nodewire.Response{}, fmt.Errorf("unexpected peer rpc frame type %d", frame.Type)
 	}
 	return nodewire.DecodeResponse(frame.Payload)
+}
+
+// rpcOutcome classifies a round trip for the metrics hook.
+func rpcOutcome(res nodewire.Response, err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return rpcOutcomeTimeout
+	case err != nil:
+		return rpcOutcomeError
+	case res.Status >= http.StatusInternalServerError:
+		return rpcOutcomeFailed
+	case res.Status >= http.StatusBadRequest:
+		return rpcOutcomeRejected
+	default:
+		return rpcOutcomeOK
+	}
 }
 
 func writePeerResponse(w http.ResponseWriter, res nodewire.Response) {
