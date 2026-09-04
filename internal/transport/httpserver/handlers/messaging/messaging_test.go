@@ -3,11 +3,13 @@ package messaging
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,6 +46,9 @@ type fakeBroker struct {
 	extendAckFn               func(context.Context, string, consumer.Handle) error
 	nackFn                    func(context.Context, string, consumer.Handle) error
 	readyFn                   func(context.Context) error
+
+	probeMu      sync.Mutex
+	probeWaiters map[*brokermsg.ConsumeWaiter]fakeProbe
 }
 
 func (f *fakeBroker) CreateTopic(ctx context.Context, opts brokertopics.CreateOpts) (topic.Topic, error) {
@@ -112,6 +117,42 @@ func (f *fakeBroker) CommitAcceptedProduceBatch(_ context.Context, records []ing
 
 func (f *fakeBroker) Consume(ctx context.Context, topicName string, opts brokermsg.ConsumeOpts) (topic.Message, bool, error) {
 	return f.consumeFn(ctx, topicName, opts)
+}
+
+// ConsumeProbe routes through consumeFn with Wait 0 so tests observe the
+// probe as a non-blocking consume; the returned waiter carries the
+// topic and opts so ConsumeWait can replay the wait through consumeFn.
+func (f *fakeBroker) ConsumeProbe(ctx context.Context, topicName string, opts brokermsg.ConsumeOpts) (topic.Message, bool, *brokermsg.ConsumeWaiter, error) {
+	opts.Wait = 0
+	msg, found, err := f.consumeFn(ctx, topicName, opts)
+	if err != nil || found {
+		return msg, found, nil, err
+	}
+	f.probeMu.Lock()
+	if f.probeWaiters == nil {
+		f.probeWaiters = make(map[*brokermsg.ConsumeWaiter]fakeProbe)
+	}
+	w := &brokermsg.ConsumeWaiter{}
+	f.probeWaiters[w] = fakeProbe{topic: topicName, opts: opts}
+	f.probeMu.Unlock()
+	return topic.Message{}, false, w, nil
+}
+
+func (f *fakeBroker) ConsumeWait(ctx context.Context, w *brokermsg.ConsumeWaiter, wait time.Duration) (topic.Message, bool, error) {
+	f.probeMu.Lock()
+	p, ok := f.probeWaiters[w]
+	f.probeMu.Unlock()
+	if !ok {
+		return topic.Message{}, false, errors.New("fakeBroker: unknown waiter")
+	}
+	opts := p.opts
+	opts.Wait = wait
+	return f.consumeFn(ctx, p.topic, opts)
+}
+
+type fakeProbe struct {
+	topic string
+	opts  brokermsg.ConsumeOpts
 }
 
 func (f *fakeBroker) Ack(ctx context.Context, topicName string, handle consumer.Handle) error {
@@ -682,8 +723,13 @@ func TestConsumeHandlerUsesRouterSelectedLocalPartition(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("Consume() status = %d, want %d", res.Code, http.StatusOK)
 	}
-	if gotOpts.Partition == nil || *gotOpts.Partition != localPartition {
-		t.Fatalf("Consume() partition = %+v, want %d", gotOpts.Partition, localPartition)
+	// The router's pick is where the single local scan starts; it is no
+	// longer a separate pinned probe.
+	if gotOpts.Partition != nil {
+		t.Fatalf("Consume() pinned partition %d; want an unpinned scan", *gotOpts.Partition)
+	}
+	if gotOpts.ScanStart == nil || *gotOpts.ScanStart != localPartition {
+		t.Fatalf("Consume() scan start = %+v, want %d", gotOpts.ScanStart, localPartition)
 	}
 }
 
@@ -691,12 +737,16 @@ func TestConsumeHandlerFallsBackToRemoteWhenLocalPartitionIsEmpty(t *testing.T) 
 	localPartition := 3
 	var waits []time.Duration
 	var partitions []int
+	var scanStarts []int
 	s := newTestSet(&fakeBroker{consumeFn: func(_ context.Context, _ string, opts brokermsg.ConsumeOpts) (topic.Message, bool, error) {
 		waits = append(waits, opts.Wait)
 		if opts.Partition == nil {
 			partitions = append(partitions, -1)
 		} else {
 			partitions = append(partitions, *opts.Partition)
+		}
+		if opts.ScanStart != nil {
+			scanStarts = append(scanStarts, *opts.ScanStart)
 		}
 		return topic.Message{}, false, nil
 	}}, &fakeRouter{
@@ -721,11 +771,16 @@ func TestConsumeHandlerFallsBackToRemoteWhenLocalPartitionIsEmpty(t *testing.T) 
 	if res.Code != http.StatusAccepted {
 		t.Fatalf("Consume() status = %d, want %d", res.Code, http.StatusAccepted)
 	}
-	if len(waits) != 2 || waits[0] != 0 || waits[1] != 0 {
-		t.Fatalf("local consume waits = %v, want [0s 0s]", waits)
+	// One local probe (all local partitions, starting at the router's
+	// pick) before the remote fallback; no separate pinned probe.
+	if len(waits) != 1 || waits[0] != 0 {
+		t.Fatalf("local consume waits = %v, want [0s]", waits)
 	}
-	if len(partitions) != 2 || partitions[0] != localPartition || partitions[1] != -1 {
-		t.Fatalf("local consume partitions = %v, want [%d -1]", partitions, localPartition)
+	if len(partitions) != 1 || partitions[0] != -1 {
+		t.Fatalf("local consume partitions = %v, want [-1] (a scan, not a pin)", partitions)
+	}
+	if len(scanStarts) != 1 || scanStarts[0] != localPartition {
+		t.Fatalf("scan starts = %v, want [%d]", scanStarts, localPartition)
 	}
 }
 
@@ -740,7 +795,7 @@ func TestConsumeHandlerLongPollsLocalAfterRemoteEmpty(t *testing.T) {
 		} else {
 			partitions = append(partitions, *opts.Partition)
 		}
-		if len(waits) < 3 {
+		if len(waits) < 2 {
 			return topic.Message{}, false, nil
 		}
 		return topic.Message{Partition: localPartition, Offset: 1, Payload: []byte(`{"id":1}`), ReceiptHandle: "h1"}, true, nil
@@ -762,11 +817,13 @@ func TestConsumeHandlerLongPollsLocalAfterRemoteEmpty(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("Consume() status = %d, want %d", res.Code, http.StatusOK)
 	}
-	if len(waits) != 3 || waits[0] != 0 || waits[1] != 0 || waits[2] != time.Second {
-		t.Fatalf("consume waits = %v, want [0s 0s 1s]", waits)
+	// One local probe, then (after the remote owners came up empty) one
+	// wait for the full budget on the probe's channel snapshot.
+	if len(waits) != 2 || waits[0] != 0 || waits[1] != time.Second {
+		t.Fatalf("consume waits = %v, want [0s 1s]", waits)
 	}
-	if len(partitions) != 3 || partitions[0] != localPartition || partitions[1] != -1 || partitions[2] != -1 {
-		t.Fatalf("consume partitions = %v, want [%d -1 -1]", partitions, localPartition)
+	if len(partitions) != 2 || partitions[0] != -1 || partitions[1] != -1 {
+		t.Fatalf("consume partitions = %v, want [-1 -1]", partitions)
 	}
 }
 

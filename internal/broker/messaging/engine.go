@@ -60,6 +60,12 @@ type ConsumeOpts struct {
 	Partition *int
 	Offset    *int64
 	Wait      time.Duration
+	// ScanStart, when set for a queue-style pull, is the partition the
+	// scan starts at (the router's pick for this request); the other
+	// locally owned partitions follow in rotation. It replaces the
+	// separate pinned probe the handler used to make first, so one scan
+	// covers both. Ignored when Partition or Offset is set.
+	ScanStart *int
 }
 
 // Engine handles produce, consume, and ack. Constructed once at

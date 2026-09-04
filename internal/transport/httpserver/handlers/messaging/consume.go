@@ -66,38 +66,45 @@ func Consume(s *handlers.Set) http.HandlerFunc {
 }
 
 // queueConsumeWithLocalOwner serves a queue-style consume on a node
-// that owns at least one partition: try the router-selected local
-// partition, then any other local partition, then remote owners, and
-// only then spend the requested wait long-polling locally.
+// that owns at least one partition: one scan of the local partitions
+// starting at the router-selected one, then remote owners, and only
+// then the requested wait long-polling locally. The scan and the wait
+// are the two halves of one broker consume (ConsumeProbe/ConsumeWait):
+// the wake-up channels are snapshotted before the scan, so a commit
+// that lands while the remote owners are being asked still wakes the
+// wait, and the local partitions are not scanned again before parking.
 func queueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts, localPartition int) {
 	wait := opts.Wait
 
-	pinned := opts
-	pinned.Partition = &localPartition
-	pinned.Wait = 0
-	if consumeOnce(s, w, r, topicName, pinned) {
+	probe := opts
+	probe.Partition = nil
+	probe.ScanStart = &localPartition
+	probe.Wait = 0
+	msg, found, waiter, err := s.Deps.Broker.ConsumeProbe(r.Context(), topicName, probe)
+	if err != nil && !errors.Is(err, brokermsg.ErrNotPartitionOwner) {
+		s.WriteBrokerError(w, "consume", err)
 		return
 	}
-
-	localScan := opts
-	localScan.Partition = nil
-	localScan.Wait = 0
-	if consumeOnce(s, w, r, topicName, localScan) {
+	if found {
+		s.WriteJSON(w, http.StatusOK, msg)
 		return
 	}
 
 	if forwarded, _ := s.Deps.Router.RouteConsumeRemote(r.Context(), w, r, topicName); forwarded {
 		return
 	}
-	if wait <= 0 {
+	if wait <= 0 || waiter == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
-	longPoll := opts
-	longPoll.Partition = nil
-	longPoll.Wait = wait
-	if consumeOnce(s, w, r, topicName, longPoll) {
+	msg, found, err = s.Deps.Broker.ConsumeWait(r.Context(), waiter, wait)
+	if err != nil && !errors.Is(err, brokermsg.ErrNotPartitionOwner) {
+		s.WriteBrokerError(w, "consume", err)
+		return
+	}
+	if found {
+		s.WriteJSON(w, http.StatusOK, msg)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
