@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/debanganthakuria/narad/internal/cluster"
 	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -111,7 +113,10 @@ func runServe(args []string) error {
 		ClusterAddr: advertisedClusterAddr(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
 		Status:      metastore.MemberAlive,
 	}
-	cs := buildClusterStack(cfg, nodeID, ms, bc, log)
+	cs := buildClusterStack(cfg, nodeID, ms, bc, reg, log)
+	// Registered before the goroutine drain below, so it runs after every
+	// peer-RPC user has stopped (defers are LIFO).
+	defer closeWithLog(log, "peer rpc client", cs.peerRPC.Close)
 
 	// Start background processes. This defer is registered AFTER the
 	// broker/metastore Close defers above so it runs BEFORE them (defers
@@ -244,17 +249,26 @@ type clusterStack struct {
 	mover      *cluster.MoveRunner
 }
 
-func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, bc *brokerComponents, log *slog.Logger) *clusterStack {
+func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, bc *brokerComponents, reg prometheus.Registerer, log *slog.Logger) *clusterStack {
 	ctrl := controller.New(ms, controller.Config{})
 
+	// One peer client for the whole process: the router, dispatcher,
+	// fan-out runner, mover, heartbeater, and join loop all forward
+	// through it, so each peer gets one QUIC connection and one set of
+	// pooled streams from this node.
+	peerRPC := cluster.NewPeerClient(5*time.Second, cfg.Security.ClusterSecret)
+	peerRPC.SetMetrics(cluster.NewPrometheusRPCMetrics(reg))
+
 	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), cfg.Security.ClusterSecret)
+	router.SetPeerClient(peerRPC)
 	// The router clamps client-supplied long-poll waits (?wait=) on its
 	// forward and re-probe paths to the same ceiling the HTTP handlers use.
 	router.SetMaxConsumeWait(cfg.HTTP.MaxConsumeWait.D())
 
-	peerRPC := cluster.NewPeerClient(5*time.Second, cfg.Security.ClusterSecret)
-
 	rpcServer := cluster.NewRPCServer(bc.broker, ms, log)
+	// The RPC-side clamp on wire-supplied consume waits must agree with
+	// the router's and the HTTP handlers' ceiling.
+	rpcServer.SetMaxConsumeWait(cfg.HTTP.MaxConsumeWait.D())
 	// So a delete forwarded to this node as leader still fans the purge out
 	// to the partition owners, matching the HTTP leader-direct path.
 	rpcServer.SetBroadcaster(router)

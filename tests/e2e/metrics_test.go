@@ -63,8 +63,18 @@ func TestMetrics_ProduceCountersIncrement(t *testing.T) {
 	msg := map[string]string{"hello": "world"}
 	mustProduce(t, env, "produce-metrics", "k", msg)
 
-	if got := readCounter(t, env, "narad_messages_produced_total",
-		map[string]string{"topic": "produce-metrics", "partition": "0"}); got != 1 {
+	// The record becomes visible inside the commit, and the counters are
+	// bumped just after the commit returns, so poll briefly rather than
+	// read once.
+	labels := map[string]string{"topic": "produce-metrics", "partition": "0"}
+	var got float64
+	for range 100 {
+		if got = readCounterOrZero(t, env, "narad_messages_produced_total", labels); got >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got != 1 {
 		t.Errorf("messages_produced_total: got %v want 1", got)
 	}
 	// Bytes counter must be > 0; exact size depends on JSON marshalling
@@ -167,6 +177,30 @@ func TestMetrics_PollerUpdatesLagAndInventory(t *testing.T) {
 func readCounter(t *testing.T, e *env, name string, want map[string]string) float64 {
 	t.Helper()
 	return readMetric(t, e, name, want, "counter")
+}
+
+// readCounterOrZero is readCounter for a series that may not exist yet:
+// it returns 0 instead of failing the test when the labels do not match
+// any child.
+func readCounterOrZero(t *testing.T, e *env, name string, want map[string]string) float64 {
+	t.Helper()
+	mfs, err := e.Registry.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, met := range mf.GetMetric() {
+			if labelMatches(met.GetLabel(), want) {
+				if c := met.GetCounter(); c != nil {
+					return c.GetValue()
+				}
+			}
+		}
+	}
+	return 0
 }
 
 func readGauge(t *testing.T, e *env, name string, want map[string]string) float64 {

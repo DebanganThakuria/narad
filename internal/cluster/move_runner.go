@@ -43,8 +43,8 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
-	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 )
 
 const (
@@ -66,7 +66,7 @@ const (
 	// worker dies between PrepareHandoff and the flip. Long enough to cover
 	// Finalize + install + the Raft CAS, short enough that a dead worker
 	// does not strand produce for long.
-	defaultMoveFreezeTTL = 30 * time.Second
+	defaultMoveFreezeTTL  = 30 * time.Second
 	defaultMoveChunkBytes = 1 << 20 // 1 MiB
 	// defaultMoveRetryBackoff paces a worker's retries when a copy attempt
 	// fails (source briefly unreachable, transient RPC error).
@@ -154,6 +154,12 @@ type moveReclaimer interface {
 	ReclaimMovedPartition(ctx context.Context, topicName string, partition int) error
 }
 
+// partitionConsumerStateResetter is the optional broker capability the
+// runner uses after installing a copied partition (see finishMove).
+type partitionConsumerStateResetter interface {
+	ResetPartitionConsumerState(topicName string, partition int)
+}
+
 // *PeerClient is the production movePeer.
 var _ movePeer = (*PeerClient)(nil)
 
@@ -170,15 +176,15 @@ type moveHandle struct {
 
 // MoveRunner owns the move workers for partitions targeted at this node.
 type MoveRunner struct {
-	store   moveStore
-	selfID  string
-	dataDir string
-	peer    movePeer
+	store     moveStore
+	selfID    string
+	dataDir   string
+	peer      movePeer
 	mover     *PartitionMover
-	reclaimer moveReclaimer // may be nil (tests): disables the stale-copy sweep
+	reclaimer moveReclaimer    // may be nil (tests): disables the stale-copy sweep
 	metrics   *metrics.Metrics // may be nil (tests, embedded use)
-	logger  *slog.Logger
-	cfg     MoveConfig
+	logger    *slog.Logger
+	cfg       MoveConfig
 
 	mu      sync.Mutex
 	workers map[moveKey]*moveHandle
@@ -195,16 +201,16 @@ func NewMoveRunner(store moveStore, selfID, dataDir string, peer movePeer, recla
 	}
 	cfg = cfg.withDefaults()
 	return &MoveRunner{
-		store:   store,
-		selfID:  selfID,
-		dataDir: dataDir,
-		peer:    peer,
+		store:     store,
+		selfID:    selfID,
+		dataDir:   dataDir,
+		peer:      peer,
 		mover:     NewPartitionMover(peer, cfg.ChunkBytes, logger),
 		reclaimer: reclaimer,
 		metrics:   m,
-		logger:  logger,
-		cfg:     cfg,
-		workers: map[moveKey]*moveHandle{},
+		logger:    logger,
+		cfg:       cfg,
+		workers:   map[moveKey]*moveHandle{},
 	}
 }
 
@@ -432,6 +438,12 @@ func (r *MoveRunner) finishMove(ctx context.Context, topicName string, partition
 	if err := r.install(topicName, partition, stagingDir); err != nil {
 		r.logger.Warn("move: install failed; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
+	}
+	// A node that owned this partition before it moved away may still
+	// hold the old in-memory reservation shard; the installed copy carries
+	// the source's consumer.offset, which must win.
+	if rs, ok := r.reclaimer.(partitionConsumerStateResetter); ok {
+		rs.ResetPartitionConsumerState(topicName, partition)
 	}
 	if err := r.completeMove(ctx, topicName, partition, source); err != nil {
 		r.logger.Warn("move: flip rejected (CAS guard or not applied)", "topic", topicName, "partition", partition, "err", err)

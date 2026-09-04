@@ -63,6 +63,7 @@ func (f *InFlight) ReleaseHandle(topic string, partition int, offset, nonce int6
 	// offset is either unreserved (no entries hit) or re-reserved
 	// under a new nonce by then.
 	delete(sh.entries, offset)
+	sh.freedLocked(offset)
 	sh.mu.Unlock()
 
 	f.notifyRelease(topic, partition)

@@ -36,6 +36,12 @@ type Log struct {
 	// is written on top of a possibly torn region and acked.
 	writeFailed error
 
+	// compactFloor (guarded by mu) is the smallest seq at which
+	// CompactBefore could delete a sealed segment, as recorded by its
+	// last directory listing; 0 means unknown (list on the next call).
+	// See CompactBefore.
+	compactFloor uint64
+
 	wakeup chan struct{}
 	stop   chan struct{}
 	done   chan struct{}
@@ -133,9 +139,7 @@ func (l *Log) Append(ctx context.Context, payload []byte) (RecordID, error) {
 		return RecordID{}, fmt.Errorf("wal: payload size %d exceeds max %d", len(payload), l.opts.MaxRecord)
 	}
 
-	l.mu.Lock()
-	id, batch, err := l.appendLocked(payload)
-	l.mu.Unlock()
+	id, batch, err := l.stage(len(payload), func(dst []byte) []byte { return append(dst, payload...) })
 	if err != nil {
 		return RecordID{}, err
 	}
@@ -151,6 +155,49 @@ func (l *Log) Append(ctx context.Context, payload []byte) (RecordID, error) {
 	// (ctx is still checked before the append, at the top of Append.)
 	<-batch.done
 	return id, batch.err
+}
+
+// AppendWith is Append for a payload the caller can produce in place:
+// size is the exact encoded length and fill appends exactly size bytes
+// to the slice it is given (returning the extended slice). The bytes are
+// written directly into the group-commit buffer, so the caller neither
+// allocates nor copies its record. fill runs under the log's append
+// lock and must be cheap and non-blocking.
+func (l *Log) AppendWith(ctx context.Context, size int, fill func(dst []byte) []byte) (RecordID, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return RecordID{}, err
+	}
+	if size <= 0 {
+		return RecordID{}, errors.New("wal: empty payload")
+	}
+	if size > l.opts.MaxRecord {
+		return RecordID{}, fmt.Errorf("wal: payload size %d exceeds max %d", size, l.opts.MaxRecord)
+	}
+	if fill == nil {
+		return RecordID{}, errors.New("wal: nil fill")
+	}
+
+	id, batch, err := l.stage(size, fill)
+	if err != nil {
+		return RecordID{}, err
+	}
+
+	l.signalSync()
+	<-batch.done // see Append for why ctx is not honoured past this point
+	return id, batch.err
+}
+
+// stage runs appendLocked under mu. The unlock is deferred so a panic
+// inside a caller-supplied fill cannot leave the log locked forever (an
+// HTTP handler's recover middleware would otherwise hide the panic and
+// every later append and the sync loop would block).
+func (l *Log) stage(size int, fill func(dst []byte) []byte) (RecordID, *syncBatch, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.appendLocked(size, fill)
 }
 
 // NextSeq returns the next sequence number the log will assign: one past

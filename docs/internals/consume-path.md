@@ -45,7 +45,11 @@ Details that carry the correctness:
 - **Reservation before read**: an offset is claimed first, then read; two consumers can never receive the same live copy.
 - **Ack validation is (offset, nonce)**: an expired-then-re-reserved offset has a new nonce, so the late original acker gets `410 Gone` instead of silently settling someone else's lease. **Extend** (heartbeat) validates the same way and re-arms the expiry; **nack** releases the lease and wakes long-pollers immediately.
 - **Expiry is proactive**: a min-heap purge runs on every touch plus a background purger, so redelivery latency after a consumer death is the visibility timeout, not "whenever someone next polls."
-- **Long-poll wiring**: an empty partition parks the consumer on the log's broadcast channel; new commits, lease expiries, and nacks all wake it. No polling loops server-side.
+- **Long-poll wiring**: an empty partition parks the consumer on the log's broadcast channel; new commits (high-watermark advances), lease expiries, nacks, and acks that free a cap slot or end an ahead-full stall all wake it. An ack that relieves nothing wakes nobody. No polling loops server-side.
+- **The owner-node ladder is one consume in two halves.** `ConsumeProbe` snapshots the wake-up channels, scans the local partitions once (starting at the router's pick), and hands back a waiter; the handler asks the remote owners; `ConsumeWait` then parks on that same snapshot for the requested wait. A commit that lands while the remote owners are being asked closes a snapshotted channel and wakes the wait, and the local partitions are not scanned a second time before parking.
+- **A forwarded long-poll stops when its client leaves.** The cluster RPC client sends a cancel frame for a request it stops waiting on (context ended or reply timeout); the owner cancels the parked consume, and if it had already reserved a message for that request it nacks it at once instead of leaving it invisible until the lease expires.
+- **Retention outran the consumer**: when the reserved offset is below the oldest retained offset, the frontier jumps to the oldest retained offset in one step (logged, persisted) instead of skipping one missing offset per request.
+- **Receipt-handle nonces** are drawn from a per-partition random stream, not a counter, so a handle cannot be forged by a principal that did not receive the message.
 - **Corrupt records don't wedge the queue**: an offset whose frame is permanently unreadable is skipped with a counter and a loud log, recorded in the shard so the frontier can advance over it: bounded, visible loss instead of an immortal head-of-line block.
 
 ## Routing
@@ -78,7 +82,7 @@ The frontier file lags acks by up to ~100ms, so a crash can redeliver a few just
 |---|---|---|---|
 | Reservations + nonces | shard memory | no | leases evaporate → messages redeliver. The whole crash story |
 | Acked-ahead set | shard memory | no | out-of-order acks above the frontier replay as duplicates |
-| Committed frontier | `consumer.offset` file (atomic temp+rename, fsynced) | yes | at most ~100ms of just-acked messages redeliver |
+| Committed frontier | `consumer.offset` file (8 bytes overwritten in place, fdatasynced) | yes | at most ~100ms of just-acked messages redeliver |
 | Corrupt-skip set | shard memory + metrics | no* | *the skip is re-derived on re-read; the counter is the audit trail |
 
 The asymmetry is the design: everything cheap to reconstruct is memory; the one thing that must never move backwards-then-forwards inconsistently (the frontier) is a single fsynced 8-byte file per partition.

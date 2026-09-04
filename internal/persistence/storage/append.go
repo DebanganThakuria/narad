@@ -29,8 +29,11 @@ func (l *Log) Append(data []byte) (int64, error) {
 	}
 	offset, crossed := l.buffer.push(data)
 
-	l.notifyAll()
-
+	// No broadcast here: long-poll waiters (queue consumers, the fan-out
+	// reader) gate on the high-watermark, so waking them for a buffered,
+	// not-yet-visible record only costs a full re-probe that finds
+	// nothing. AdvanceHighWatermark broadcasts when records become
+	// visible.
 	if crossed {
 		l.flusher.signal()
 	}
@@ -53,9 +56,33 @@ func (l *Log) AppendBatch(records [][]byte) (firstOffset, lastOffset int64, err 
 	if h := appendGateHook; h != nil {
 		h()
 	}
-	first, last, crossed := l.buffer.pushBatch(records)
+	first, last, crossed := l.buffer.pushBatch(records, true)
 
-	l.notifyAll()
+	if crossed {
+		l.flusher.signal()
+	}
+	return first, last, nil
+}
+
+// AppendBatchOwned is AppendBatch for callers that hand over ownership
+// of the record slices: the buffer keeps them as-is instead of copying.
+// The caller must not read or modify any of the slices afterwards (the
+// flushing snapshot and readers alias them until they reach disk). The
+// commit path uses it because its envelopes are freshly built per batch
+// and never touched again.
+func (l *Log) AppendBatchOwned(records [][]byte) (firstOffset, lastOffset int64, err error) {
+	l.appendGate.RLock()
+	defer l.appendGate.RUnlock()
+	if l.closed.Load() {
+		return -1, -1, ErrLogClosed
+	}
+	if len(records) == 0 {
+		return 0, -1, nil
+	}
+	if h := appendGateHook; h != nil {
+		h()
+	}
+	first, last, crossed := l.buffer.pushBatch(records, false)
 
 	if crossed {
 		l.flusher.signal()

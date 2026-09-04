@@ -6,11 +6,12 @@ import (
 	"os"
 )
 
-// appendLocked stages payload into the write buffer, assigns it the next
-// seq, and returns the batch the caller must wait on for durability.
+// appendLocked stages a size-byte payload, produced by fill, into the
+// write buffer, assigns it the next seq, and returns the batch the
+// caller must wait on for durability.
 // If the frame would overflow the segment, the current buffer is synced
 // and the log rolls to a fresh segment first. Caller must hold mu.
-func (l *Log) appendLocked(payload []byte) (RecordID, *syncBatch, error) {
+func (l *Log) appendLocked(size int, fill func(dst []byte) []byte) (RecordID, *syncBatch, error) {
 	if l.closed {
 		return RecordID{}, nil, errors.New("wal: log closed")
 	}
@@ -21,7 +22,7 @@ func (l *Log) appendLocked(payload []byte) (RecordID, *syncBatch, error) {
 		return RecordID{}, nil, errors.New("wal: active file closed")
 	}
 
-	frameSize := frameHeaderSize + len(payload)
+	frameSize := frameHeaderSize + size
 	if l.segmentSize > 0 && l.segmentSize+int64(frameSize) > l.opts.SegmentBytes {
 		batch, err := l.syncLocked()
 		completeBatch(batch, err)
@@ -39,7 +40,11 @@ func (l *Log) appendLocked(payload []byte) (RecordID, *syncBatch, error) {
 	batch := l.pending
 	seq := l.nextSeq
 	id := RecordID{SegmentBase: l.segmentBase, Offset: l.segmentSize, Seq: seq}
-	l.writeBuffer = appendFrame(l.writeBuffer, seq, payload)
+	buffer, err := appendFrameWith(l.writeBuffer, seq, size, fill)
+	if err != nil {
+		return RecordID{}, nil, err
+	}
+	l.writeBuffer = buffer
 	l.segmentSize += int64(frameSize)
 	l.nextSeq++
 	return id, batch, nil
@@ -57,6 +62,9 @@ func (l *Log) rollLocked() error {
 	}
 	l.segmentBase = l.nextSeq
 	l.segmentSize = 0
+	// The segment just sealed may become deletable: force the next
+	// CompactBefore to list the directory again.
+	l.compactFloor = 0
 
 	path := segmentPath(l.dir, l.segmentBase)
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o644)

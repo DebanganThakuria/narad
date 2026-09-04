@@ -23,6 +23,10 @@ var (
 	// ErrAckedAheadFull reports that the bounded ahead-of-frontier
 	// state (out-of-order acks plus corrupt skips) is at capacity.
 	ErrAckedAheadFull = errs.ErrAckedAheadFull
+
+	// ErrInvalidSkip reports a SkipMissingBelow call whose offset is not
+	// below the oldest retained offset; nothing was changed.
+	ErrInvalidSkip = errors.New("consumer: skip target is not below the oldest retained offset")
 )
 
 // CommitFunc is called after the committed-offset frontier advances for
@@ -169,6 +173,17 @@ func (f *InFlight) DropTopic(topic string) {
 			delete(f.shards, k)
 		}
 	}
+	f.mu.Unlock()
+}
+
+// DropPartition removes one partition's shard. Called when the
+// partition's local data is reclaimed after a rebalance moved it away,
+// and on the destination before it takes ownership, so a partition that
+// moves away and back never resumes from a stale in-memory frontier
+// instead of the persisted consumer.offset the move carried over.
+func (f *InFlight) DropPartition(topic string, partition int) {
+	f.mu.Lock()
+	delete(f.shards, shardKey{topic, partition})
 	f.mu.Unlock()
 }
 

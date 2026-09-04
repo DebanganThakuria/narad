@@ -57,7 +57,11 @@ func (f *InFlight) ReserveNext(ctx context.Context, topic string, partition int,
 		return sh.reserveLocked(next, now, visibilityTimeout), nil
 	}
 
-	for off := next; off < logTail; off++ {
+	// Every offset in (committed, nextFree) is reserved or resolved (see
+	// partitionShard.nextFree), so the scan starts there instead of
+	// re-probing the whole in-flight window on every call.
+	start := max(next, sh.nextFree)
+	for off := start; off < logTail; off++ {
 		if sh.resolvedOrReservedLocked(off) {
 			continue
 		}
@@ -85,10 +89,15 @@ func (sh *partitionShard) resolvedOrReservedLocked(off int64) bool {
 // reserveLocked records a fresh reservation for off and returns it.
 // Must hold sh.mu.
 func (sh *partitionShard) reserveLocked(off, now int64, visibilityTimeout time.Duration) ReserveResult {
-	nonce := sh.nonceSeq.Add(1)
+	nonce := sh.nextNonceLocked()
 	exp := now + visibilityTimeout.Milliseconds()
 	sh.entries[off] = reservation{expiresAtUnixMs: exp, nonce: nonce}
 	heap.Push(&sh.expiry, expiryEntry{offset: off, expiresAtUnixMs: exp, nonce: nonce})
+	// The scan that chose off found everything below it (from nextFree)
+	// reserved or resolved, so the hint may move past it.
+	if off >= sh.nextFree {
+		sh.nextFree = off + 1
+	}
 	return ReserveResult{
 		Reserved:        true,
 		Offset:          off,
@@ -101,13 +110,71 @@ func (sh *partitionShard) reserveLocked(off, now int64, visibilityTimeout time.D
 // When the frontier advances, onCommit is called to persist the new
 // committed offset to the .offsets log.
 //
-// Removing a live reservation frees a MaxInFlight cap slot, so on
-// success the release notifier fires too: a long-poller parked because
-// the partition was at cap must be woken by the ack, not left sleeping
-// out its full Wait. Like the purger, the notifier is invoked only
-// after all shard locks are released (see ReleaseFunc).
+// Removing a live reservation can free a MaxInFlight cap slot, and a
+// frontier advance can end an ahead-full stall, so in those cases the
+// release notifier fires: a long-poller parked for either reason must
+// be woken by the ack, not left sleeping out its full Wait. An ack that
+// relieves neither (the common case) wakes nobody: nothing became
+// reservable, and waking every poller on every ack was the dominant
+// wake-storm cost. Like the purger, the notifier is invoked only after
+// all shard locks are released (see ReleaseFunc).
 func (f *InFlight) CommitHandle(topic string, partition int, offset, nonce int64) error {
 	return f.resolveReserved(topic, partition, offset, nonce, ackedAheadSet)
+}
+
+// SkipMissingBelow handles a reserved offset that retention has already
+// deleted: the consumer's frontier fell behind the oldest retained
+// offset. Rather than skipping one poison offset per consume round trip
+// (a gap of millions would spin for hours), it verifies the reservation
+// (offset, nonce), discards every reservation and resolved offset below
+// oldest (their records are gone), moves the committed frontier to
+// oldest-1, collapses any resolved run above it, persists the advance
+// via onCommit, and wakes pollers. Returns how many offsets the frontier
+// moved over. It is only valid when offset < oldest; otherwise it
+// returns ErrInvalidSkip and changes nothing.
+func (f *InFlight) SkipMissingBelow(topic string, partition int, offset, nonce, oldest int64) (int64, error) {
+	if offset >= oldest {
+		return 0, ErrInvalidSkip
+	}
+	sh := f.shard(topic, partition)
+	if sh == nil {
+		return 0, ErrHandleStale
+	}
+
+	sh.mu.Lock()
+	sh.purgeExpiredLocked(f.now())
+	rsv, ok := sh.entries[offset]
+	if !ok || rsv.nonce != nonce {
+		sh.mu.Unlock()
+		return 0, ErrHandleStale
+	}
+	for off := range sh.entries {
+		if off < oldest {
+			delete(sh.entries, off)
+		}
+	}
+	for off := range sh.ackedAhead {
+		if off < oldest {
+			delete(sh.ackedAhead, off)
+		}
+	}
+	for off := range sh.corrupt {
+		if off < oldest {
+			delete(sh.corrupt, off)
+		}
+	}
+	before := sh.committed
+	if sh.committed < oldest-1 {
+		sh.committed = oldest - 1
+	}
+	advance := sh.advanceCommittedLocked()
+	sh.mu.Unlock()
+
+	if f.onCommit != nil {
+		f.onCommit(topic, partition, advance)
+	}
+	f.notifyRelease(topic, partition)
+	return advance - before, nil
 }
 
 // SkipCorrupt advances the committed frontier past an offset whose on-disk
@@ -151,6 +218,14 @@ func (f *InFlight) resolveReserved(topic string, partition int, offset, nonce in
 		return ErrHandleStale
 	}
 
+	// A poller parks for one of: "cap" (relieved by any live-entry
+	// removal), "ahead_full" (relieved only by a frontier advance, which
+	// either shrinks the ahead set or frees the new frontier hole), or
+	// "empty"/"all_reserved" (an ack changes neither). Wake only when this
+	// resolve can relieve a parked poller.
+	wasAtCap := len(sh.entries) >= sh.maxInFlight
+	aheadWasFull := sh.aheadFullLocked()
+
 	if offset == sh.committed+1 {
 		delete(sh.entries, offset)
 		sh.committed = offset
@@ -159,7 +234,9 @@ func (f *InFlight) resolveReserved(topic string, partition int, offset, nonce in
 		if f.onCommit != nil {
 			f.onCommit(topic, partition, advance)
 		}
-		f.notifyRelease(topic, partition)
+		if wasAtCap || aheadWasFull {
+			f.notifyRelease(topic, partition)
+		}
 		return nil
 	}
 
@@ -173,6 +250,8 @@ func (f *InFlight) resolveReserved(topic string, partition int, offset, nonce in
 	}
 	delete(sh.entries, offset)
 	sh.mu.Unlock()
-	f.notifyRelease(topic, partition)
+	if wasAtCap {
+		f.notifyRelease(topic, partition)
+	}
 	return nil
 }
