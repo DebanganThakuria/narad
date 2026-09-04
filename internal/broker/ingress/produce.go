@@ -129,11 +129,15 @@ func (m *Manager) AcceptProduce(ctx context.Context, topicName, key string, targ
 		Payload:         payload,
 		CreatedAtUnixMs: time.Now().UTC().UnixMilli(),
 	}
-	encoded, err := EncodeProduceRecord(record)
-	if err != nil {
+	if err := validateProduceRecord(record); err != nil {
 		return AcceptedProduce{}, err
 	}
-	id, err := m.log.Append(ctx, encoded)
+	// Encode straight into the WAL's group-commit buffer: the record was
+	// previously built in its own allocation and then copied into the
+	// buffer a second time.
+	id, err := m.log.AppendWith(ctx, produceRecordSize(record), func(dst []byte) []byte {
+		return appendProduceRecord(dst, record)
+	})
 	if err != nil {
 		return AcceptedProduce{}, err
 	}

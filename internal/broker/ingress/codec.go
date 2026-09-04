@@ -17,28 +17,45 @@ const produceRecordFormat byte = 1
 // big-endian. The record's WAL field is not encoded — the WAL assigns
 // it at append time.
 func EncodeProduceRecord(record ProduceRecord) ([]byte, error) {
-	if record.Topic == "" {
-		return nil, errors.New("ingress: topic required")
-	}
-	if record.TargetPartition < 0 {
-		return nil, errors.New("ingress: target partition must be >= 0")
-	}
-	if record.TargetPartition > math.MaxInt32 {
-		return nil, errors.New("ingress: target partition exceeds int32 range")
-	}
-	if len(record.Payload) == 0 {
-		return nil, errors.New("ingress: payload required")
+	if err := validateProduceRecord(record); err != nil {
+		return nil, err
 	}
 
-	size := 1 + stringSize(record.Topic) + stringSize(record.Key) + 4 + 8 + bytesSize(record.Payload)
-	out := make([]byte, 0, size)
-	out = append(out, produceRecordFormat)
-	out = appendString(out, record.Topic)
-	out = appendString(out, record.Key)
-	out = binary.BigEndian.AppendUint32(out, uint32(record.TargetPartition))
-	out = binary.BigEndian.AppendUint64(out, uint64(record.CreatedAtUnixMs))
-	out = appendBytes(out, record.Payload)
-	return out, nil
+	out := make([]byte, 0, produceRecordSize(record))
+	return appendProduceRecord(out, record), nil
+}
+
+// validateProduceRecord is EncodeProduceRecord's validation half, for
+// callers that encode in place (see Manager.AcceptProduce).
+func validateProduceRecord(record ProduceRecord) error {
+	if record.Topic == "" {
+		return errors.New("ingress: topic required")
+	}
+	if record.TargetPartition < 0 {
+		return errors.New("ingress: target partition must be >= 0")
+	}
+	if record.TargetPartition > math.MaxInt32 {
+		return errors.New("ingress: target partition exceeds int32 range")
+	}
+	if len(record.Payload) == 0 {
+		return errors.New("ingress: payload required")
+	}
+	return nil
+}
+
+// produceRecordSize is the exact encoded size of a valid record.
+func produceRecordSize(record ProduceRecord) int {
+	return 1 + stringSize(record.Topic) + stringSize(record.Key) + 4 + 8 + bytesSize(record.Payload)
+}
+
+// appendProduceRecord appends the encoding of a validated record to dst.
+func appendProduceRecord(dst []byte, record ProduceRecord) []byte {
+	dst = append(dst, produceRecordFormat)
+	dst = appendString(dst, record.Topic)
+	dst = appendString(dst, record.Key)
+	dst = binary.BigEndian.AppendUint32(dst, uint32(record.TargetPartition))
+	dst = binary.BigEndian.AppendUint64(dst, uint64(record.CreatedAtUnixMs))
+	return appendBytes(dst, record.Payload)
 }
 
 // DecodeProduceRecord parses a payload written by EncodeProduceRecord.
