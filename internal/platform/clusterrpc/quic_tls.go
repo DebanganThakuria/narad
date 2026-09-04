@@ -52,7 +52,7 @@ func quicServerTLSConfig() (*tls.Config, error) {
 	}, nil
 }
 
-// quicClientTLS is the shared client configuration. quic-go clones it
+// quicClientSelfSignedTLS is the shared client configuration. quic-go clones it
 // per dial, so sharing is safe; the point of sharing is the session
 // cache, which lets a redial to a peer resume its TLS session instead of
 // running a full handshake.
@@ -62,18 +62,27 @@ func quicServerTLSConfig() (*tls.Config, error) {
 // quicServerTLSConfig) and proves membership with the cluster-secret
 // HMAC exchanged on every stream (auth.go). TLS provides confidentiality
 // and integrity. So the default chain verification against system roots
-// is disabled (it could never succeed) and replaced by verifyClusterPeer,
-// which enforces what is checkable here: TLS 1.3, the pinned ALPN, and
-// exactly one currently valid self-signed leaf.
-var quicClientTLS = &tls.Config{
-	// Required to bypass system-root chain building; certificate checking
-	// is NOT disabled: VerifyPeerCertificate below replaces it.
-	InsecureSkipVerify:    true,
-	VerifyPeerCertificate: verifyClusterPeerCertificate,
-	VerifyConnection:      verifyClusterConnection,
-	NextProtos:            []string{quicALPN},
-	MinVersion:            tls.VersionTLS13,
-	ClientSessionCache:    tls.NewLRUClientSessionCache(quicClientSessionCacheSize),
+// is bypassed (it could never succeed) and replaced by
+// verifyClusterPeerCertificate and verifyClusterConnection, which enforce
+// what is checkable here: exactly one currently valid self-signed leaf,
+// TLS 1.3, and the pinned ALPN.
+var quicClientSelfSignedTLS = newSelfSignedClusterClientTLS()
+
+// newSelfSignedClusterClientTLS builds the client configuration for a
+// transport whose peers present ephemeral self-signed certificates.
+// InsecureSkipVerify only bypasses system-root chain building, which
+// cannot succeed for a self-signed leaf; certificate verification is NOT
+// disabled: VerifyPeerCertificate replaces it with the self-signed leaf
+// checks, and VerifyConnection pins TLS 1.3 and the ALPN.
+func newSelfSignedClusterClientTLS() *tls.Config {
+	return &tls.Config{
+		InsecureSkipVerify:    true, // replaced by VerifyPeerCertificate, see above
+		VerifyPeerCertificate: verifyClusterPeerCertificate,
+		VerifyConnection:      verifyClusterConnection,
+		NextProtos:            []string{quicALPN},
+		MinVersion:            tls.VersionTLS13,
+		ClientSessionCache:    tls.NewLRUClientSessionCache(quicClientSessionCacheSize),
+	}
 }
 
 // verifyClusterPeerCertificate is the client-side certificate check for
@@ -118,5 +127,5 @@ func verifyClusterConnection(cs tls.ConnectionState) error {
 }
 
 func quicClientTLSConfig() *tls.Config {
-	return quicClientTLS
+	return quicClientSelfSignedTLS
 }
