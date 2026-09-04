@@ -58,19 +58,33 @@ func (w *writer) bool(v bool) {
 	w.buf = append(w.buf, 0)
 }
 
+// string appends a length-prefixed string field. The string bytes are
+// appended directly (no []byte(v) conversion), so it allocates nothing
+// beyond the writer's buffer; the encoding is identical to bytes.
 func (w *writer) string(v string) error {
-	return w.bytes([]byte(v))
+	if len(v) > math.MaxUint32 {
+		return fmt.Errorf("field too large: %d bytes", len(v))
+	}
+	w.buf = appendFieldLen(w.buf, len(v))
+	w.buf = append(w.buf, v...)
+	return nil
 }
 
 func (w *writer) bytes(v []byte) error {
 	if len(v) > math.MaxUint32 {
 		return fmt.Errorf("field too large: %d bytes", len(v))
 	}
-	var b [4]byte
-	binary.BigEndian.PutUint32(b[:], uint32(len(v)))
-	w.buf = append(w.buf, b[:]...)
+	w.buf = appendFieldLen(w.buf, len(v))
 	w.buf = append(w.buf, v...)
 	return nil
+}
+
+// appendFieldLen appends the big-endian uint32 length prefix of a
+// string or bytes field.
+func appendFieldLen(dst []byte, n int) []byte {
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], uint32(n))
+	return append(dst, b[:]...)
 }
 
 // finish returns the assembled payload.
@@ -194,7 +208,7 @@ func (r *reader) remaining() int {
 
 // fieldLen is the encoded size of a length-prefixed string field.
 func fieldLen(v string) int {
-	return fieldLenBytes([]byte(v))
+	return 4 + len(v)
 }
 
 // fieldLenBytes is the encoded size of a length-prefixed bytes field.

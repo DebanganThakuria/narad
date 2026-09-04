@@ -9,8 +9,8 @@ package messaging
 
 import (
 	"context"
-	"time"
 	"testing"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/domain/topic"

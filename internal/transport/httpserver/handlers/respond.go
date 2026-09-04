@@ -23,6 +23,21 @@ var responseBufferPool = sync.Pool{
 	New: func() any { return new(bytes.Buffer) },
 }
 
+// maxPooledResponseBuffer caps the capacity of a buffer returned to the
+// pool. A consume that served a 1 MiB payload would otherwise park a
+// 1 MiB buffer in the pool for every idle P, and every later small
+// response would pin it; buffers that grew past this are left to the GC.
+const maxPooledResponseBuffer = 256 << 10
+
+// releaseResponseBuffer returns buf to the pool unless it grew past
+// maxPooledResponseBuffer.
+func releaseResponseBuffer(buf *bytes.Buffer) {
+	if buf.Cap() > maxPooledResponseBuffer {
+		return
+	}
+	responseBufferPool.Put(buf)
+}
+
 // WriteJSON encodes v as the JSON response body with the given
 // status. Nil values produce a header-only response.
 func (s *Set) WriteJSON(w http.ResponseWriter, status int, v any) {
@@ -34,7 +49,7 @@ func (s *Set) WriteJSON(w http.ResponseWriter, status int, v any) {
 
 	buf := responseBufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
-	defer responseBufferPool.Put(buf)
+	defer releaseResponseBuffer(buf)
 
 	if appender, ok := v.(jsonAppender); ok {
 		buf.Write(appender.AppendJSON(buf.AvailableBuffer()))

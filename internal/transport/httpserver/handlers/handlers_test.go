@@ -322,3 +322,12 @@ func (f *fakeBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutC
 func (f *fakeBroker) ExtendAck(context.Context, string, consumer.Handle) error { return nil }
 
 func (f *fakeBroker) Nack(context.Context, string, consumer.Handle) error { return nil }
+
+func (f *fakeBroker) ConsumeProbe(ctx context.Context, topicName string, opts brokermsg.ConsumeOpts) (topic.Message, bool, *brokermsg.ConsumeWaiter, error) {
+	msg, found, err := f.Consume(ctx, topicName, opts)
+	return msg, found, &brokermsg.ConsumeWaiter{}, err
+}
+
+func (f *fakeBroker) ConsumeWait(context.Context, *brokermsg.ConsumeWaiter, time.Duration) (topic.Message, bool, error) {
+	return topic.Message{}, false, nil
+}

@@ -10,10 +10,29 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/quic-go/quic-go"
+
 	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 )
 
 const defaultStreamTimeout = 5 * time.Second
+
+// maxRetainedWriteBuffer caps the frame staging buffer a stream keeps
+// between writes. Frames up to this size reuse the buffer; a larger one
+// (a segment chunk, say) is staged in a throwaway buffer so an
+// occasional bulk transfer does not pin megabytes per pooled stream.
+const maxRetainedWriteBuffer = 256 << 10
+
+// errFallbackReplyTimeout marks a reply wait that ended because the
+// caller supplied no deadline and the client's own timeout fired. It
+// unwraps to context.DeadlineExceeded so callers checking for a timeout
+// keep working; the pool checks for it specifically to decide whether
+// the connection should be probed.
+var errFallbackReplyTimeout = fmt.Errorf("reply wait fell back to client timeout: %w", context.DeadlineExceeded)
+
+// streamErrorCodeAborted is the application-level QUIC stream error code
+// this transport uses when it abandons a stream.
+const streamErrorCodeAborted quic.StreamErrorCode = 1
 
 // streamConn is the subset of net.Conn a stream client needs; both
 // *net.TCPConn and *quic.Stream satisfy it.
@@ -22,6 +41,28 @@ type streamConn interface {
 	SetDeadline(time.Time) error
 	SetReadDeadline(time.Time) error
 	SetWriteDeadline(time.Time) error
+}
+
+// streamAborter is the QUIC-specific close surface. *quic.Stream's Close
+// only closes the send direction: a goroutine blocked in Read stays
+// blocked until the peer finishes or the connection dies. Cancelling
+// both directions unblocks the reader immediately and tells the peer to
+// stop sending.
+type streamAborter interface {
+	CancelRead(quic.StreamErrorCode)
+	CancelWrite(quic.StreamErrorCode)
+}
+
+// abortStream closes conn in the way that unblocks both directions:
+// CancelRead+CancelWrite on a QUIC stream, Close on anything else (pipes
+// and TCP connections unblock readers on Close already).
+func abortStream(conn streamConn) {
+	if aborter, ok := conn.(streamAborter); ok {
+		aborter.CancelRead(streamErrorCodeAborted)
+		aborter.CancelWrite(streamErrorCodeAborted)
+		return
+	}
+	_ = conn.Close()
 }
 
 // streamClient multiplexes request/reply RPCs over one stream. Requests
@@ -33,6 +74,7 @@ type streamClient struct {
 	timeout time.Duration
 
 	writeMu  sync.Mutex
+	writeBuf []byte
 	nextID   atomic.Uint64
 	closed   atomic.Bool
 	closeMu  sync.Mutex
@@ -40,6 +82,15 @@ type streamClient struct {
 
 	pendingMu sync.Mutex
 	pending   map[uint64]chan streamResult
+}
+
+func newStreamClient(conn streamConn, timeout time.Duration) *streamClient {
+	return &streamClient{
+		conn:    conn,
+		reader:  bufio.NewReader(conn),
+		timeout: timeout,
+		pending: make(map[uint64]chan streamResult),
+	}
 }
 
 type streamResult struct {
@@ -77,15 +128,38 @@ func (c *streamClient) requestFrame(ctx context.Context, frameType clusterwire.S
 	case result := <-resultCh:
 		return result.frame, result.err
 	case <-timeoutCh:
+		// The stream stays open: a slow handler is not a dead peer, and
+		// unrelated in-flight RPCs share it. The pool decides whether to
+		// probe the connection (see quicClientPool.probeAfterTimeout).
 		c.removePending(requestID)
-		return clusterwire.StreamFrame{}, fmt.Errorf("cluster rpc reply timed out after %s: %w", c.timeout, context.DeadlineExceeded)
+		c.sendCancel(requestID)
+		return clusterwire.StreamFrame{}, fmt.Errorf("cluster rpc reply timed out after %s: %w", c.timeout, errFallbackReplyTimeout)
 	case <-ctx.Done():
 		// Drop only this request's waiter: the stream is multiplexed and
 		// unrelated in-flight RPCs must keep it. The reader discards the
 		// late reply for this RequestID (complete finds no pending entry).
 		c.removePending(requestID)
+		c.sendCancel(requestID)
 		return clusterwire.StreamFrame{}, ctx.Err()
 	}
+}
+
+// cancelFrameWriteTimeout bounds the best-effort cancel notification so
+// a caller that already spent its whole budget is not held much longer
+// by a stalled stream.
+const cancelFrameWriteTimeout = time.Second
+
+// sendCancel tells the server the waiter for requestID is gone (see
+// clusterwire.StreamFrameCancel). Best-effort: a write failure closes
+// the stream like any other, which cancels every server-side request
+// on it anyway.
+func (c *streamClient) sendCancel(requestID uint64) {
+	if c.isClosed() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cancelFrameWriteTimeout)
+	defer cancel()
+	_ = c.writeFrame(ctx, clusterwire.StreamFrame{Type: clusterwire.StreamFrameCancel, RequestID: requestID})
 }
 
 func (c *streamClient) addPending(requestID uint64, ch chan streamResult) {
@@ -123,8 +197,11 @@ func (c *streamClient) writeFrame(ctx context.Context, frame clusterwire.StreamF
 		deadline = time.Now().Add(c.timeout)
 	}
 	_ = c.conn.SetWriteDeadline(deadline)
-	err := clusterwire.WriteStreamFrame(c.conn, frame)
+	buf, err := clusterwire.WriteStreamFrameInto(c.conn, c.writeBuf, frame)
 	_ = c.conn.SetWriteDeadline(time.Time{})
+	if cap(buf) <= maxRetainedWriteBuffer {
+		c.writeBuf = buf[:0]
+	}
 	if err != nil {
 		c.closeWithError(err)
 		return err
@@ -185,7 +262,7 @@ func (c *streamClient) closeWithError(err error) {
 	if c.closed.Swap(true) {
 		return
 	}
-	_ = c.conn.Close()
+	abortStream(c.conn)
 
 	c.pendingMu.Lock()
 	pending := c.pending

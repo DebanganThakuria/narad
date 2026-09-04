@@ -36,6 +36,16 @@ const (
 	// when a cluster secret is configured. Its payload proves knowledge
 	// of the shared secret (see internal/platform/clusterrpc auth).
 	StreamFrameAuth StreamFrameType = 10
+	// StreamFrameCancel tells the server that the client gave up waiting
+	// for the reply to RequestID (its caller's context ended or its
+	// reply timeout fired) and will discard any reply. The server cancels
+	// the request's context and, for a consume that already delivered a
+	// message the client will never read, gives the message back. It has
+	// no payload and no reply. Servers that predate it answer with a
+	// StreamFrameError for the request ID, which the client ignores
+	// (the waiter is already gone), so it is safe in a mixed-version
+	// cluster.
+	StreamFrameCancel StreamFrameType = 11
 )
 
 // StreamFrame is one framed message on a cluster stream. On the wire it
@@ -60,26 +70,41 @@ type StreamError struct {
 
 // WriteStreamFrame writes frame to w in the wire layout described on
 // StreamFrame. It rejects payloads larger than
-// MaxStreamFramePayloadBytes.
+// MaxStreamFramePayloadBytes. The header and payload go out in a single
+// Write call; see WriteStreamFrameInto to reuse the staging buffer.
 func WriteStreamFrame(w io.Writer, frame StreamFrame) error {
-	if len(frame.Payload) > MaxStreamFramePayloadBytes {
-		return fmt.Errorf("stream frame payload too large: %d bytes", len(frame.Payload))
-	}
+	_, err := WriteStreamFrameInto(w, nil, frame)
+	return err
+}
 
+// WriteStreamFrameInto is WriteStreamFrame with a caller-supplied staging
+// buffer. The frame is assembled (header followed by payload) into buf,
+// grown as needed, and handed to w in ONE Write call: on a QUIC stream
+// every Write is a trip through the send loop, so splitting header and
+// payload doubled the per-frame cost. The (possibly reallocated) buffer
+// is returned so a serialized writer can keep it for the next frame.
+// The wire bytes are identical to two separate header/payload writes.
+func WriteStreamFrameInto(w io.Writer, buf []byte, frame StreamFrame) ([]byte, error) {
+	if len(frame.Payload) > MaxStreamFramePayloadBytes {
+		return buf, fmt.Errorf("stream frame payload too large: %d bytes", len(frame.Payload))
+	}
+	buf = AppendStreamFrame(buf[:0], frame)
+	_, err := w.Write(buf)
+	return buf, err
+}
+
+// AppendStreamFrame appends frame's wire encoding (header then payload)
+// to dst and returns the extended slice. It performs no size check; use
+// WriteStreamFrameInto for the checked path.
+func AppendStreamFrame(dst []byte, frame StreamFrame) []byte {
 	var header [streamFrameHeaderBytes]byte
 	binary.BigEndian.PutUint32(header[0:4], streamMagic)
 	header[4] = streamVersion
 	header[5] = byte(frame.Type)
 	binary.BigEndian.PutUint64(header[8:16], frame.RequestID)
 	binary.BigEndian.PutUint32(header[16:20], uint32(len(frame.Payload)))
-	if _, err := w.Write(header[:]); err != nil {
-		return err
-	}
-	if len(frame.Payload) == 0 {
-		return nil
-	}
-	_, err := w.Write(frame.Payload)
-	return err
+	dst = append(dst, header[:]...)
+	return append(dst, frame.Payload...)
 }
 
 // ReadStreamFrame reads one frame from r, rejecting payloads larger

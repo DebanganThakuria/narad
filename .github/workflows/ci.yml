@@ -46,7 +46,7 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Excludes the e2e package — that has its own job below so HTTP
+      # Excludes the e2e package; that has its own job below so HTTP
       # surface failures don't get buried in unit-test output and
       # vice versa.
       - name: go test (excluding e2e)

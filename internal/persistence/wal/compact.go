@@ -3,6 +3,7 @@ package wal
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 )
 
@@ -20,23 +21,58 @@ func (l *Log) CompactBefore(seq uint64) error {
 	}
 	l.mu.Lock()
 	active := l.segmentBase
+	floor := l.compactFloor
 	l.mu.Unlock()
+
+	// The dispatcher calls this on every progressing pass. Listing the
+	// directory each time is wasted work whenever no sealed segment can
+	// have become deletable since the last listing: that needs seq to
+	// reach the base of the segment after the oldest sealed one, which
+	// the previous listing recorded as the floor. A roll resets the floor
+	// (rollLocked), so a freshly sealed segment is always re-listed.
+	if seq < floor {
+		return nil
+	}
 
 	segments, err := listSegments(l.dir)
 	if err != nil {
 		return err
 	}
+	kept := segments[:0:0]
 	for i, segment := range segments {
 		if segment.base == active {
+			kept = append(kept, segment)
 			continue
 		}
 		if i+1 >= len(segments) || segments[i+1].base > seq {
+			kept = append(kept, segment)
 			continue
 		}
 		if err := os.Remove(segment.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("wal: compact segment %s: %w", segment.path, err)
 		}
 	}
+
+	// Next floor: the base of the segment following the oldest remaining
+	// sealed one. With only the active segment left nothing is deletable
+	// until a roll.
+	newFloor := uint64(math.MaxUint64)
+	for i, segment := range kept {
+		if segment.base == active {
+			continue
+		}
+		if i+1 < len(kept) {
+			newFloor = kept[i+1].base
+		}
+		break
+	}
+	l.mu.Lock()
+	// Only raise the floor if no roll happened meanwhile (a roll resets
+	// it to 0 and the next listing must see the new sealed segment).
+	if l.compactFloor == floor {
+		l.compactFloor = newFloor
+	}
+	l.mu.Unlock()
 	return nil
 }
 
