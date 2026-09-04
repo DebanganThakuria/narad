@@ -42,6 +42,7 @@ type Poller struct {
 	// see pruneDeletedTopics.
 	previousTopics  map[string]struct{}
 	lastDataDirScan time.Time
+	dirScanner      *dirSizeScanner
 }
 
 // NewPoller wires the poller. Run must be called for it to do any
@@ -165,7 +166,10 @@ func (p *Poller) updateDataDirGauges() {
 	}
 	p.lastDataDirScan = now
 
-	sizeBytes, err := dirSizeBytes(p.dataDir)
+	if p.dirScanner == nil {
+		p.dirScanner = newDirSizeScanner()
+	}
+	sizeBytes, err := p.dirScanner.scan(p.dataDir)
 	if err != nil {
 		p.logger.Warn("metrics: data dir size scan failed", "data_dir", p.dataDir, "err", err)
 		p.metrics.IncError("metrics", "data_dir_size")
@@ -182,6 +186,8 @@ func (p *Poller) updateDataDirGauges() {
 	}
 }
 
+// dirSizeBytes is the reference full walk; the poller uses
+// dirSizeScanner, which must always agree with it (see the tests).
 func dirSizeBytes(root string) (int64, error) {
 	var total int64
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
