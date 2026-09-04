@@ -1,6 +1,7 @@
 package messaging
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
+	"github.com/debanganthakuria/narad/internal/consumer"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
@@ -98,6 +101,16 @@ func queueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r *http.
 		return
 	}
 
+	// The wait phase: the local long-poll raced against a forwarded
+	// long-poll to a remote owner, so a message that lands on a
+	// partition this node does not own wakes this client too. Without
+	// a remote owner to ask the router declines and the local wait runs
+	// alone.
+	local := &localConsumeWaiter{s: s, topic: topicName, waiter: waiter}
+	if s.Deps.Router.RouteConsumeWait(r.Context(), w, r, topicName, wait, local) {
+		return
+	}
+
 	msg, found, err = s.Deps.Broker.ConsumeWait(r.Context(), waiter, wait)
 	if err != nil && !errors.Is(err, brokermsg.ErrNotPartitionOwner) {
 		s.WriteBrokerError(w, "consume", err)
@@ -108,6 +121,31 @@ func queueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r *http.
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// localConsumeWaiter adapts a broker ConsumeWaiter to the router's
+// LocalConsumeWaiter: Wait is ConsumeWait, Release is a Nack of the
+// delivered handle.
+type localConsumeWaiter struct {
+	s      *handlers.Set
+	topic  string
+	waiter *brokermsg.ConsumeWaiter
+}
+
+func (l *localConsumeWaiter) Wait(ctx context.Context, wait time.Duration) (topic.Message, bool, error) {
+	msg, found, err := l.s.Deps.Broker.ConsumeWait(ctx, l.waiter, wait)
+	if errors.Is(err, brokermsg.ErrNotPartitionOwner) {
+		return topic.Message{}, false, nil
+	}
+	return msg, found, err
+}
+
+func (l *localConsumeWaiter) Release(ctx context.Context, msg topic.Message) error {
+	h, err := consumer.DecodeHandle(msg.ReceiptHandle)
+	if err != nil {
+		return err
+	}
+	return l.s.Deps.Broker.Nack(ctx, l.topic, h)
 }
 
 // consumeOnce performs a single broker consume and reports whether a

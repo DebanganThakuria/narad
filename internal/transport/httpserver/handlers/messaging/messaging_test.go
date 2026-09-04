@@ -260,6 +260,10 @@ func (f *fakeRouter) RouteDecommissionMember(context.Context, http.ResponseWrite
 	return false
 }
 
+func (f *fakeRouter) RouteConsumeWait(context.Context, http.ResponseWriter, *http.Request, string, time.Duration, handlers.LocalConsumeWaiter) bool {
+	return false
+}
+
 func (f *fakeRouter) RouteGetTopic(context.Context, *http.Request, string, topic.Details) (topic.Details, error) {
 	return topic.Details{}, nil
 }
