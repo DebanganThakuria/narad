@@ -57,9 +57,11 @@ func (f movePeerFake) CompleteMove(_ context.Context, addr, topicName string, pa
 	}
 	return nil
 }
+
 func (f movePeerFake) GetAssignment(context.Context, string, string, int) (metastore.Assignment, error) {
 	return metastore.Assignment{}, context.DeadlineExceeded
 }
+
 func (f movePeerFake) AbortMove(_ context.Context, addr, _ string, _ int, _ string) error {
 	if f.fwd != nil {
 		f.fwd.abortAddr = addr
@@ -87,13 +89,13 @@ type fakeMoveStore struct {
 }
 
 func (s *fakeMoveStore) AppliedCaughtUp() bool { return true }
-func (s *fakeMoveStore) Barrier() error         { return nil }
+func (s *fakeMoveStore) Barrier() error        { return nil }
 func (s *fakeMoveStore) GetAssignment(string, int) (metastore.Assignment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.assignment, nil
 }
-func (s *fakeMoveStore) IsLeader() bool         { return !s.notLeader }
+func (s *fakeMoveStore) IsLeader() bool { return !s.notLeader }
 func (s *fakeMoveStore) LeaderID() string {
 	if s.leaderID != "" {
 		return s.leaderID

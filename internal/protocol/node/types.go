@@ -187,8 +187,8 @@ type FetchSegmentChunkRequest struct {
 // PrepareHandoffRequest asks the owner of (Topic, Partition) to freeze
 // the partition for a rebalance handoff and return its final positions.
 type PrepareHandoffRequest struct {
-	Topic         string
-	Partition     int
+	Topic          string
+	Partition      int
 	FreezeTTLNanos int64
 }
 

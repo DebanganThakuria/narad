@@ -14,7 +14,7 @@ func TestSyncDataAppendedBytesReadBack(t *testing.T) {
 	}
 	defer f.Close()
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, err := f.Write([]byte("chunk")); err != nil {
 			t.Fatal(err)
 		}

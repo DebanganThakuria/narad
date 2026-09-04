@@ -21,6 +21,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
@@ -108,10 +109,5 @@ func (c *Controller) removeDrainedNode(id string) {
 }
 
 func containsStr(ss []string, s string) bool {
-	for _, x := range ss {
-		if x == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ss, s)
 }

@@ -126,8 +126,7 @@ func TestQUICClientRecoversFromPeerRestart(t *testing.T) {
 		}
 		restarted = s
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go serveQUICListener(ctx, restarted.listener, expectedAuthToken("sekret"), nil, echoHandler{})
 	t.Cleanup(restarted.close)
 

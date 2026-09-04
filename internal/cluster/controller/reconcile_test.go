@@ -168,7 +168,7 @@ func TestReconcileAssignsChildAntiAffineEvenWhenChildSortsFirst(t *testing.T) {
 	if len(parent) != 6 || len(child) != 6 {
 		t.Fatalf("one pass assigned %d parent / %d child partitions, want 6/6 (parents must sort first)", len(parent), len(child))
 	}
-	for p := 0; p < 6; p++ {
+	for p := range 6 {
 		if parent[p] == child[p] {
 			t.Fatalf("partition %d: parent and child both on %q — copies share a disk", p, parent[p])
 		}
@@ -197,7 +197,7 @@ func TestReconcileDefersChildWhenParentAssignmentsUnreadable(t *testing.T) {
 	if len(parent) != 2 || len(child) != 2 {
 		t.Fatalf("after recovery: %d parent / %d child assignments, want 2/2", len(parent), len(child))
 	}
-	for p := 0; p < 2; p++ {
+	for p := range 2 {
 		if parent[p] == child[p] {
 			t.Fatalf("partition %d colocated on %q", p, parent[p])
 		}
@@ -236,7 +236,7 @@ func TestReconcileChildWiderThanParent(t *testing.T) {
 	if len(child) != 4 {
 		t.Fatalf("child assignments = %v, want all 4 placed", child)
 	}
-	for p := 0; p < 2; p++ {
+	for p := range 2 {
 		if parent[p] == child[p] {
 			t.Fatalf("overlapping partition %d colocated on %q", p, parent[p])
 		}

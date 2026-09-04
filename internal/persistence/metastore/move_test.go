@@ -113,7 +113,8 @@ func TestAbortMoveClearsMatchingTargetOnly(t *testing.T) {
 func mustCreateAndAssign(t *testing.T, s interface {
 	CreateTopic(context.Context, topic.Topic) error
 	AssignPartition(context.Context, string, int, string) error
-}, topicName string, partition int, owner string) {
+}, topicName string, partition int, owner string,
+) {
 	t.Helper()
 	ctx := context.Background()
 	if err := s.CreateTopic(ctx, topic.Topic{Name: topicName, Partitions: partition + 1}); err != nil {

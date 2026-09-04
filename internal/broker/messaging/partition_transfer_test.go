@@ -96,7 +96,7 @@ func TestPartitionTransferServeAndCopyIsIdentical(t *testing.T) {
 	if copyLog.NextOffset() != info.HighWatermark {
 		t.Fatalf("copy NextOffset = %d, want %d", copyLog.NextOffset(), info.HighWatermark)
 	}
-	for off := int64(0); off < n; off++ {
+	for off := range int64(n) {
 		if _, _, _, err := copyLog.ReadKeyed(off); err != nil {
 			t.Fatalf("copy ReadKeyed(%d): %v", off, err)
 		}

@@ -33,7 +33,7 @@ func TestRebalanceTargetsNewNode(t *testing.T) {
 	store := newFakeControllerStore("a", "b", "c", "d")
 	store.topics = []topic.Topic{{Name: "orders", Partitions: 12}}
 	store.assignments["orders"] = map[int]string{}
-	for p := 0; p < 12; p++ {
+	for p := range 12 {
 		store.assignments["orders"][p] = []string{"a", "b", "c"}[p%3] // 4 each, d empty
 	}
 	c := &Controller{store: store, cfg: Config{MaxInFlightMoves: 8}.withDefaults()}
@@ -57,7 +57,7 @@ func TestRebalanceRespectsInFlightCap(t *testing.T) {
 	store := newFakeControllerStore("a", "b")
 	store.topics = []topic.Topic{{Name: "orders", Partitions: 10}}
 	store.assignments["orders"] = map[int]string{}
-	for p := 0; p < 10; p++ {
+	for p := range 10 {
 		store.assignments["orders"][p] = "a" // all on a; b empty
 	}
 	c := &Controller{store: store, cfg: Config{MaxInFlightMoves: 3}.withDefaults()}
@@ -82,7 +82,7 @@ func TestRebalanceDoesNotRetargetInFlight(t *testing.T) {
 	store := newFakeControllerStore("a", "b", "c")
 	store.topics = []topic.Topic{{Name: "orders", Partitions: 9}}
 	store.assignments["orders"] = map[int]string{}
-	for p := 0; p < 9; p++ {
+	for p := range 9 {
 		store.assignments["orders"][p] = "a"
 	}
 	// Partition 0 is already moving a→c.
@@ -121,7 +121,7 @@ func TestRebalanceHonorsAntiAffinity(t *testing.T) {
 
 	// Each child partition p ends up (owner or target) on a node != parent[p].
 	parent := store.assignments["orders"]
-	for p := 0; p < 3; p++ {
+	for p := range 3 {
 		holder := store.assignments["replica"][p]
 		if tgt := store.targets["replica"][p]; tgt != "" {
 			holder = tgt

@@ -83,8 +83,7 @@ func TestCommitDurableReportsVerifyErrorAndKeepsRecordsHidden(t *testing.T) {
 	}
 
 	err = l.CommitDurable(first, last)
-	var verr VerifyError
-	if !errors.As(err, &verr) {
+	if _, ok := errors.AsType[VerifyError](err); !ok {
 		t.Fatalf("CommitDurable error = %v, want VerifyError", err)
 	}
 	if !IsCorrupt(err) {
@@ -128,7 +127,7 @@ func TestFrameEncoderReuseMatchesFreshEncoding(t *testing.T) {
 	}
 	for _, c := range []codec.Codec{codec.NewNoopCodec(), zc} {
 		var enc frameEncoder
-		for round := 0; round < 6; round++ {
+		for round := range 6 {
 			n := 1 + (round*7)%5
 			recs := make([][]byte, n)
 			for i := range recs {
@@ -377,10 +376,8 @@ func TestReadSharedConcurrentWithRetention(t *testing.T) {
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	for r := 0; r < 4; r++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 4 {
+		wg.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -399,9 +396,9 @@ func TestReadSharedConcurrentWithRetention(t *testing.T) {
 					t.Errorf("ReadShared(%d) = %q, want prefix %q", off, rec, want)
 				}
 			}
-		}()
+		})
 	}
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		l.reaper.sweep()
 		time.Sleep(2 * time.Millisecond)
 	}

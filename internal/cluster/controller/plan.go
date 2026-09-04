@@ -152,7 +152,7 @@ func capacities(receivers []string, load map[string]int, total int) map[string]i
 		}
 		return ranked[i] < ranked[j]
 	})
-	for i := 0; i < rem; i++ {
+	for i := range rem {
 		caps[ranked[i]]++
 	}
 	return caps

@@ -39,8 +39,7 @@ func (s *Set) ReadBody(w http.ResponseWriter, r *http.Request, limit int64) ([]b
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			s.WriteError(w, http.StatusRequestEntityTooLarge, "request body too large")
 			return nil, false
 		}
