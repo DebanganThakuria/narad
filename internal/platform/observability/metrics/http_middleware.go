@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // HTTPMiddleware returns an http middleware that records request
@@ -23,6 +25,10 @@ import (
 // The middleware uses Go 1.22+ (*Request).Pattern, which is set by
 // http.ServeMux after pattern matching but before the matched
 // handler runs.
+//
+// Resolved children are cached per {route, method, status} (see
+// httpSeriesFor), so the per-request cost after the handler returns is
+// one map lookup rather than four label-hash resolutions and an Itoa.
 func HTTPMiddleware(m *Metrics) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		if m == nil {
@@ -40,23 +46,76 @@ func HTTPMiddleware(m *Metrics) func(http.Handler) http.Handler {
 			if route == "" {
 				route = "unmatched"
 			}
-			method := r.Method
-			status := strconv.Itoa(rec.status)
 			elapsed := time.Since(start).Seconds()
 
-			m.HTTPRequestsTotal.WithLabelValues(route, method, status).Inc()
-			m.HTTPRequestDuration.WithLabelValues(route, method, status).Observe(elapsed)
+			series := m.httpSeriesFor(route, r.Method, rec.status)
+			series.requests.Inc()
+			series.duration.Observe(elapsed)
 			if rec.bytes > 0 {
-				m.HTTPBytesOut.WithLabelValues(route).Add(float64(rec.bytes))
+				series.bytesOut.Add(float64(rec.bytes))
 			}
 			if r.ContentLength > 0 {
-				m.HTTPBytesIn.WithLabelValues(route).Add(float64(r.ContentLength))
+				series.bytesIn.Add(float64(r.ContentLength))
 			}
 			if rec.status >= 500 {
 				m.IncError("http", "5xx")
 			}
 		})
 	}
+}
+
+// httpSeriesKey identifies one cached set of HTTP children.
+type httpSeriesKey struct {
+	route  string
+	method string
+	status int
+}
+
+// httpSeries is the set of children one request touches, resolved once
+// per distinct label combination. The HTTP collectors are never pruned,
+// so a cached child stays live for the process lifetime.
+type httpSeries struct {
+	requests prometheus.Counter
+	duration prometheus.Observer
+	bytesIn  prometheus.Counter
+	bytesOut prometheus.Counter
+}
+
+// httpSeriesFor returns the cached children for the label combination,
+// resolving and caching them on first sight. The cache has the same
+// cardinality as the collectors themselves.
+func (m *Metrics) httpSeriesFor(route, method string, status int) *httpSeries {
+	key := httpSeriesKey{route: route, method: method, status: status}
+	if v, ok := m.httpSeries.Load(key); ok {
+		return v.(*httpSeries)
+	}
+	label := statusLabel(status)
+	s := &httpSeries{
+		requests: m.HTTPRequestsTotal.WithLabelValues(route, method, label),
+		duration: m.HTTPRequestDuration.WithLabelValues(route, method, label),
+		bytesIn:  m.HTTPBytesIn.WithLabelValues(route),
+		bytesOut: m.HTTPBytesOut.WithLabelValues(route),
+	}
+	v, _ := m.httpSeries.LoadOrStore(key, s)
+	return v.(*httpSeries)
+}
+
+// statusLabels pre-interns the label string for every status code a
+// handler can plausibly emit, so a cache miss does not allocate for the
+// common codes either.
+var statusLabels = func() (labels [600]string) {
+	for code := range labels {
+		labels[code] = strconv.Itoa(code)
+	}
+	return labels
+}()
+
+// statusLabel returns the status label string for code.
+func statusLabel(code int) string {
+	if code >= 0 && code < len(statusLabels) {
+		return statusLabels[code]
+	}
+	return strconv.Itoa(code)
 }
 
 // metricsRecorder mirrors httpserver.recorder. Duplicated locally

@@ -45,9 +45,24 @@ func (e *Engine) ReclaimMovedPartition(ctx context.Context, topicName string, pa
 	if err := e.logs.ClosePartition(topicName, partition); err != nil {
 		return fmt.Errorf("reclaim: close partition log: %w", err)
 	}
+	// The in-memory reservation shard would otherwise outlive the data and
+	// be resumed verbatim if the partition ever moved back here.
+	e.ResetPartitionConsumerState(topicName, partition)
 	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("reclaim: remove partition dir: %w", err)
 	}
 	return nil
+}
+
+// ResetPartitionConsumerState drops this node's in-memory reservation
+// state for a partition so the next consume rebuilds it from the
+// persisted consumer.offset. The move runner calls it on the destination
+// after installing a copied partition (a node that owned the partition
+// earlier may still hold the old shard), and reclaim calls it on the
+// source.
+func (e *Engine) ResetPartitionConsumerState(topicName string, partition int) {
+	if e.offsets != nil {
+		e.offsets.DropPartition(topicName, partition)
+	}
 }

@@ -19,7 +19,45 @@ var (
 	ErrLogClosed = errs.ErrLogClosed
 )
 
-// Internal sentinels — recovery handles these by resyncing.
+// VerifyError reports that CommitDurable's post-fsync CRC read-back of
+// offsets [First, Last] failed. It wraps the underlying storage error so
+// IsCorrupt and errors.Is keep working; callers classify it separately
+// from a write or sync failure.
+type VerifyError struct {
+	First int64
+	Last  int64
+	Err   error
+}
+
+func (e VerifyError) Error() string {
+	return "storage: durability verify [" + itoa(e.First) + "," + itoa(e.Last) + "]: " + e.Err.Error()
+}
+
+func (e VerifyError) Unwrap() error { return e.Err }
+
+func itoa(v int64) string {
+	if v == 0 {
+		return "0"
+	}
+	neg := v < 0
+	if neg {
+		v = -v
+	}
+	var buf [20]byte
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = byte('0' + v%10)
+		v /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+// Internal sentinels: recovery handles these by resyncing.
 var (
 	errBadMagic = errors.New("storage: frame magic mismatch")
 	errCorrupt  = errors.New("storage: frame integrity check failed")

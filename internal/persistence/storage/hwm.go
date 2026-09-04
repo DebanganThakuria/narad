@@ -127,28 +127,37 @@ func (l *Log) PersistedHighWatermark() (int64, error) {
 // a torn mix), so the temp+rename dance — which exists only to make
 // variable-length writes atomic — is unnecessary. We overwrite the fixed-size
 // file in place and fsync, eliminating the inode/dir churn.
+//
+// The file descriptor is opened on the first persist and kept open for
+// the life of the Log (closed by Close): the open/close pair per commit
+// was two syscalls of pure overhead on the hottest small-file sync. The
+// file is never replaced by rename while a Log is open (the staging-dir
+// writer runs before NewLog; delete paths close the Log first), so a
+// held descriptor cannot write into an unlinked inode.
+//
+// Caller must hold hwmMu.
 func (l *Log) persistHighWatermark(next int64) error {
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], uint64(next))
 
-	f, err := os.OpenFile(l.hwmPath, os.O_WRONLY|os.O_CREATE, 0o644)
-	if err != nil {
-		return fmt.Errorf("storage: open hwm: %w", err)
+	if l.hwmFile == nil {
+		f, err := os.OpenFile(l.hwmPath, os.O_WRONLY|os.O_CREATE, 0o644)
+		if err != nil {
+			return fmt.Errorf("storage: open hwm: %w", err)
+		}
+		l.hwmFile = f
 	}
-	if _, err := f.WriteAt(buf[:], 0); err != nil {
-		_ = f.Close()
+	if _, err := l.hwmFile.WriteAt(buf[:], 0); err != nil {
+		l.closeHWMFileLocked()
 		return fmt.Errorf("storage: write hwm: %w", err)
 	}
 	// Data-only sync: an in-place single-sector overwrite has no
 	// metadata worth journaling (first-creation durability is the dir
-	// fsync below), and this runs once per commit — the hottest of the
+	// fsync below), and this runs once per commit: the hottest of the
 	// small-file syncs.
-	if err := syncfile.SyncData(f); err != nil {
-		_ = f.Close()
+	if err := syncfile.SyncData(l.hwmFile); err != nil {
+		l.closeHWMFileLocked()
 		return fmt.Errorf("storage: sync hwm: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return err
 	}
 	// The open above may have CREATED the file, and file creation is only
 	// durable once the parent directory is fsynced. Without it a crash
@@ -162,6 +171,24 @@ func (l *Log) persistHighWatermark(next int64) error {
 		l.hwmDirSynced = true
 	}
 	return nil
+}
+
+// closeHWMFileLocked releases the held hwm descriptor (if any). A later
+// persist reopens it. Caller must hold hwmMu.
+func (l *Log) closeHWMFileLocked() error {
+	if l.hwmFile == nil {
+		return nil
+	}
+	err := l.hwmFile.Close()
+	l.hwmFile = nil
+	return err
+}
+
+// closeHWMFile releases the held hwm descriptor under hwmMu.
+func (l *Log) closeHWMFile() error {
+	l.hwmMu.Lock()
+	defer l.hwmMu.Unlock()
+	return l.closeHWMFileLocked()
 }
 
 // syncDir fsyncs a directory so entries created in it are durable.
@@ -195,6 +222,40 @@ func (l *Log) syncHighWatermark(force bool) error {
 		return nil
 	}
 
+	start := time.Now()
+	outcome := "ok"
+	if err := l.persistHighWatermark(target); err != nil {
+		outcome = "error"
+		l.observeHighWatermarkPersist(time.Since(start), outcome)
+		return err
+	}
+	l.persistedHWM.Store(target)
+	l.lastHWMSync = time.Now()
+	l.observeHighWatermarkPersist(time.Since(start), outcome)
+	return nil
+}
+
+// persistHighWatermarkAtLeast durably writes target (or the current
+// in-memory high-watermark if that is higher) unconditionally, unless
+// the persisted value already covers it. The commit path calls it BEFORE
+// advancing the in-memory high-watermark, so a record is never visible
+// with an unpersisted boundary. The following AdvanceHighWatermark then
+// finds persistedHWM already at target and the pass-ending
+// syncHighWatermark is a no-op.
+func (l *Log) persistHighWatermarkAtLeast(target int64) error {
+	if cur := l.highWatermark.Load(); cur > target {
+		target = cur
+	}
+	if target < 0 || target <= l.persistedHWM.Load() {
+		return nil
+	}
+
+	l.hwmMu.Lock()
+	defer l.hwmMu.Unlock()
+
+	if target <= l.persistedHWM.Load() {
+		return nil
+	}
 	start := time.Now()
 	outcome := "ok"
 	if err := l.persistHighWatermark(target); err != nil {

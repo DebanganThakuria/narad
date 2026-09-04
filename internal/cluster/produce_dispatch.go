@@ -26,7 +26,44 @@ type dispatchWindow struct {
 	done map[uint64]bool
 	// cursorAfterSeq records the resume cursor sitting just after each
 	// scanned seq, so the next pass can resume from the new checkpoint.
-	cursorAfterSeq map[uint64]wal.Cursor
+	cursorAfterSeq seqCursors
+}
+
+// seqCursors maps scanned seqs to their resume cursors. WAL seqs are
+// dense and the scan visits them in order, so a slice indexed from the
+// first scanned seq replaces a map with one entry per scanned seq (up to
+// the whole lookahead horizon per pass).
+type seqCursors struct {
+	base    uint64
+	cursors []wal.Cursor
+	present []bool
+}
+
+func (c *seqCursors) set(seq uint64, cursor wal.Cursor) {
+	if c.cursors == nil {
+		c.base = seq
+	}
+	if seq < c.base {
+		return // never happens: the scan is monotonic
+	}
+	idx := int(seq - c.base)
+	for len(c.cursors) <= idx {
+		c.cursors = append(c.cursors, wal.Cursor{})
+		c.present = append(c.present, false)
+	}
+	c.cursors[idx] = cursor
+	c.present[idx] = true
+}
+
+func (c *seqCursors) get(seq uint64) (wal.Cursor, bool) {
+	if c.cursors == nil || seq < c.base {
+		return wal.Cursor{}, false
+	}
+	idx := int(seq - c.base)
+	if idx >= len(c.cursors) || !c.present[idx] {
+		return wal.Cursor{}, false
+	}
+	return c.cursors[idx], true
 }
 
 // dispatch drains up to the adaptive window (state.windowLimit) of
@@ -154,8 +191,7 @@ func (d *ProduceDispatcher) dispatch(ctx context.Context, state *produceDispatch
 func (d *ProduceDispatcher) scanWindow(ctx context.Context, state *produceDispatchState, limit int, durableNext uint64) (dispatchWindow, error) {
 	scanHorizon := state.nextSeq + uint64(limit)*produceDispatchLookaheadWindows
 	win := dispatchWindow{
-		done:           make(map[uint64]bool),
-		cursorAfterSeq: make(map[uint64]wal.Cursor),
+		done: make(map[uint64]bool),
 	}
 	probed := make(map[produceDispatchStuckKey]bool, len(state.stuck))
 	rerouteReady := make(map[produceDispatchStuckKey]bool, len(state.stuck))
@@ -175,7 +211,7 @@ func (d *ProduceDispatcher) scanWindow(ctx context.Context, state *produceDispat
 			win.scanned = true
 		}
 		win.scanEnd = seq + 1
-		win.cursorAfterSeq[seq] = cursor
+		win.cursorAfterSeq.set(seq, cursor)
 		// Already committed on an earlier pass but held above the
 		// checkpoint by a lower stuck seq: count it done, never re-commit,
 		// and keep looking for fresh records.
@@ -308,19 +344,19 @@ func (d *ProduceDispatcher) advanceCheckpoint(state *produceDispatchState, win d
 		}
 	}
 
-	// Merge this pass's committed seqs into the carried-forward skip set.
+	// Merge this pass's committed seqs into the carried-forward skip set,
+	// in place (rebuilding the map every pass copied the whole horizon).
 	// Seqs below the checkpoint are pruned only AFTER the checkpoint is
 	// durably stored: if the store fails, the next pass replays from the
 	// old checkpoint and must still skip everything that already committed,
 	// or the whole window would be re-committed as duplicates.
-	ahead := make(map[uint64]bool, len(state.committedAhead)+len(win.done))
-	for s := range state.committedAhead {
-		ahead[s] = true
+	if state.committedAhead == nil {
+		state.committedAhead = make(map[uint64]bool, len(win.done))
 	}
+	ahead := state.committedAhead
 	for s := range win.done {
 		ahead[s] = true
 	}
-	state.committedAhead = ahead
 
 	processed := int(checkpointSeq - win.scanStart)
 	if processed <= 0 {
@@ -328,7 +364,7 @@ func (d *ProduceDispatcher) advanceCheckpoint(state *produceDispatchState, win d
 	}
 
 	nextCursor := state.cursor
-	if c, ok := win.cursorAfterSeq[checkpointSeq-1]; ok {
+	if c, ok := win.cursorAfterSeq.get(checkpointSeq - 1); ok {
 		nextCursor = c
 	}
 	if checkpointErr := d.ingress.StoreProduceCheckpoint(checkpointSeq); checkpointErr != nil {

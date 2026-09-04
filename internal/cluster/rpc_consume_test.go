@@ -54,7 +54,7 @@ func TestRPCServerLocalOnlyConsumeUsesUnpinnedLocalScan(t *testing.T) {
 	}}
 	s := &RPCServer{broker: br}
 
-	res := s.handleConsume(encodeConsumeReq(t, nodewire.ConsumeRequest{
+	res := s.handleConsume(context.Background(), requestKey{}, encodeConsumeReq(t, nodewire.ConsumeRequest{
 		Topic:     "orders",
 		LocalOnly: true,
 	}))
@@ -70,7 +70,7 @@ func TestRPCServerLocalOnlyConsumeTreatsNotOwnerAsEmpty(t *testing.T) {
 	}}
 	s := &RPCServer{broker: br}
 
-	res := s.handleConsume(encodeConsumeReq(t, nodewire.ConsumeRequest{
+	res := s.handleConsume(context.Background(), requestKey{}, encodeConsumeReq(t, nodewire.ConsumeRequest{
 		Topic:     "orders",
 		LocalOnly: true,
 		WaitNanos: int64(time.Second),
@@ -93,7 +93,7 @@ func TestRPCServerConsumeClampsExcessiveWait(t *testing.T) {
 	}}
 	s := &RPCServer{broker: br}
 
-	res := s.handleConsume(encodeConsumeReq(t, nodewire.ConsumeRequest{
+	res := s.handleConsume(context.Background(), requestKey{}, encodeConsumeReq(t, nodewire.ConsumeRequest{
 		Topic:     "orders",
 		WaitNanos: int64(24 * time.Hour),
 	}))
@@ -114,7 +114,7 @@ func TestRPCServerConsumeNormalizesNegativeWait(t *testing.T) {
 	}}
 	s := &RPCServer{broker: br}
 
-	res := s.handleConsume(encodeConsumeReq(t, nodewire.ConsumeRequest{
+	res := s.handleConsume(context.Background(), requestKey{}, encodeConsumeReq(t, nodewire.ConsumeRequest{
 		Topic:     "orders",
 		WaitNanos: -int64(time.Second),
 	}))

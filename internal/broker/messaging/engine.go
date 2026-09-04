@@ -60,6 +60,12 @@ type ConsumeOpts struct {
 	Partition *int
 	Offset    *int64
 	Wait      time.Duration
+	// ScanStart, when set for a queue-style pull, is the partition the
+	// scan starts at (the router's pick for this request); the other
+	// locally owned partitions follow in rotation. It replaces the
+	// separate pinned probe the handler used to make first, so one scan
+	// covers both. Ignored when Partition or Offset is set.
+	ScanStart *int
 }
 
 // Engine handles produce, consume, and ack. Constructed once at
@@ -143,7 +149,12 @@ func (e *Engine) nextConsumeScanStart(topicName string, partitions int) int {
 	if partitions <= 1 {
 		return 0
 	}
-	counter, _ := e.consumeCursors.LoadOrStore(topicName, new(atomic.Uint64))
+	// Load first: LoadOrStore allocates its candidate value on every call,
+	// and this runs once per consume.
+	counter, ok := e.consumeCursors.Load(topicName)
+	if !ok {
+		counter, _ = e.consumeCursors.LoadOrStore(topicName, new(atomic.Uint64))
+	}
 	cursor := counter.(*atomic.Uint64).Add(1) - 1
 	return int(cursor % uint64(partitions))
 }

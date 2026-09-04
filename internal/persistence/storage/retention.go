@@ -137,7 +137,7 @@ func (r *reaper) deleteSegmentLocked(s *segment, reason string) {
 	bytes := s.sizeBytes
 	messages := s.nextOffset - s.baseOffset
 
-	_ = s.close()
+	_ = s.closeNoSync()
 	_ = os.Remove(s.path)
 	r.log.deleteSegmentIndexLocked(s.baseOffset)
 

@@ -48,6 +48,19 @@ func (l *Log) hasPendingFlushing() bool {
 }
 
 func (l *Log) readFlushing(offset int64) ([]byte, bool) {
+	rec, ok := l.readFlushingShared(offset)
+	if !ok {
+		return nil, false
+	}
+	out := make([]byte, len(rec))
+	copy(out, rec)
+	return out, true
+}
+
+// readFlushingShared is readFlushing without the copy. Flushing records
+// are never mutated in place (clearFlushingThrough only reslices), so
+// the returned slice is stable; see Log.ReadShared for the contract.
+func (l *Log) readFlushingShared(offset int64) ([]byte, bool) {
 	l.flushingMu.Lock()
 	defer l.flushingMu.Unlock()
 	if !l.flushingValid || offset < l.flushingBase {
@@ -57,10 +70,7 @@ func (l *Log) readFlushing(offset int64) ([]byte, bool) {
 	if idx < 0 || int(idx) >= len(l.flushingRecords) {
 		return nil, false
 	}
-	rec := l.flushingRecords[idx]
-	out := make([]byte, len(rec))
-	copy(out, rec)
-	return out, true
+	return l.flushingRecords[idx], true
 }
 
 // clearFlushingThrough drops flushing records below end (exclusive) once

@@ -2,8 +2,8 @@ package messaging
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
@@ -45,10 +45,11 @@ func (e *Engine) CommitAcceptedProduce(ctx context.Context, record ingress.Produ
 		return e.appendAndCommit(log, storage.EncodeKeyedRecord(record.Key, time.Now().UnixMilli(), record.Payload))
 	})
 	if err != nil {
+		e.recordProduceError(err)
 		return 0, err
 	}
 
-	e.recordAcceptedProduceCommitted(record)
+	e.recordProduceCommitted(record.Topic, record.TargetPartition, 1, len(record.Payload))
 	return offset, nil
 }
 
@@ -90,20 +91,25 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 	// commit time, and consumers get Message.Key/Timestamp from them).
 	committedAt := time.Now().UnixMilli()
 	payloads := make([][]byte, len(records))
+	payloadBytes := 0
 	for i, record := range records {
 		payloads[i] = storage.EncodeKeyedRecord(record.Key, committedAt, record.Payload)
+		payloadBytes += len(record.Payload)
 	}
 
 	var offsets []int64
 	err = e.logs.WithProduceLock(topicName, partition, func(log *storage.Log) error {
-		first, last, err := log.AppendBatch(payloads)
+		// The envelopes were built above for this call only and are never
+		// read again (commitDurable needs just their count), so the log may
+		// take ownership instead of copying every record a second time.
+		first, last, err := log.AppendBatchOwned(payloads)
 		if err != nil {
 			return produceStageError{stage: produceStageAppend, err: err}
 		}
 		if last < first {
 			return nil
 		}
-		if err := e.commitDurable(log, first, payloads); err != nil {
+		if err := e.commitDurable(log, first, len(payloads)); err != nil {
 			return err
 		}
 		offsets = make([]int64, len(records))
@@ -113,12 +119,11 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 		return nil
 	})
 	if err != nil {
+		e.recordProduceError(err)
 		return nil, err
 	}
 
-	for _, record := range records {
-		e.recordAcceptedProduceCommitted(record)
-	}
+	e.recordProduceCommitted(topicName, partition, len(records), payloadBytes)
 	return offsets, nil
 }
 
@@ -152,7 +157,7 @@ func (e *Engine) appendAndCommit(log *storage.Log, payload []byte) (int64, error
 	if err != nil {
 		return 0, produceStageError{stage: produceStageAppend, err: err}
 	}
-	if err := e.commitDurable(log, offset, [][]byte{payload}); err != nil {
+	if err := e.commitDurable(log, offset, 1); err != nil {
 		return 0, err
 	}
 	return offset, nil
@@ -161,45 +166,44 @@ func (e *Engine) appendAndCommit(log *storage.Log, payload []byte) (int64, error
 // commitDurable is the no-follower durability boundary. Narad has no
 // replicas, so before a record is made visible (and before the ingress
 // WAL is allowed to compact past it) the owner's partition log must be
-// the proven-durable, uncorrupted copy. It:
+// the proven-durable, uncorrupted copy. storage.CommitDurable, on the
+// partition's single flusher goroutine:
 //
-//  1. synchronously fsyncs the partition log,
-//  2. reads each record back so its on-disk frame CRC is validated and
-//     the bytes round-trip (guards against a torn or corrupt write),
-//  3. only then advances the high-watermark to make the records visible.
+//  1. writes and fdatasyncs the partition log,
+//  2. reads each frame back so its on-disk CRC is validated over the
+//     stored bytes (guards against a torn or corrupt write; no decode,
+//     because decoding per record was the cause of the commit-throughput
+//     collapse),
+//  3. advances the high-watermark to make the records visible,
+//  4. persists the advanced high-watermark before returning, so a crash
+//     after the ingress WAL checkpoints past this batch can never leave
+//     the records durable-but-hidden.
 //
-// firstOffset is the offset of payloads[0]; the records are contiguous.
-// The caller must hold the partition produce lock.
-func (e *Engine) commitDurable(log *storage.Log, firstOffset int64, payloads [][]byte) error {
-	if len(payloads) == 0 {
+// firstOffset is the offset of the first record; the count records are
+// contiguous. The caller must hold the partition produce lock.
+func (e *Engine) commitDurable(log *storage.Log, firstOffset int64, count int) error {
+	if count <= 0 {
 		return nil
 	}
-	if err := log.Sync(); err != nil {
-		return produceStageError{stage: produceStageCommit, err: err}
-	}
-	lastOffset := firstOffset + int64(len(payloads)) - 1
-	// Verify the durable copy by re-reading each frame and checking its CRC
-	// over the on-disk bytes — no decode. The CRC was computed over the
-	// stored (possibly compressed) payload at write time, so this proves the
-	// bytes survived intact before we advance the high-watermark and let the
-	// WAL compact past them. Decoding per record here would be O(N) full-frame
-	// zstd decodes per commit (the cause of the commit-throughput collapse).
-	if err := log.VerifyDurable(firstOffset, lastOffset); err != nil {
-		return produceStageError{stage: produceStageVerify, err: fmt.Errorf("verify [%d,%d]: %w", firstOffset, lastOffset, err)}
-	}
-	if err := log.AdvanceHighWatermark(lastOffset + 1); err != nil {
+	lastOffset := firstOffset + int64(count) - 1
+	if err := log.CommitDurable(firstOffset, lastOffset); err != nil {
+		if verr, ok := errors.AsType[storage.VerifyError](err); ok {
+			return produceStageError{stage: produceStageVerify, err: verr}
+		}
 		return produceStageError{stage: produceStageCommit, err: err}
 	}
 	return nil
 }
 
-// recordAcceptedProduceCommitted bumps the produced counters for a
-// committed WAL record.
-func (e *Engine) recordAcceptedProduceCommitted(record ingress.ProduceRecord) {
-	if e.metrics == nil {
+// recordProduceCommitted bumps the produced counters for a committed
+// batch: one label resolution per batch, not per record. Every record in
+// a commit batch targets the same (topic, partition), see
+// singleBatchTarget.
+func (e *Engine) recordProduceCommitted(topicName string, partition, count, payloadBytes int) {
+	if e.metrics == nil || count <= 0 {
 		return
 	}
-	partLabel := strconv.Itoa(record.TargetPartition)
-	e.metrics.MessagesProducedTotal.WithLabelValues(record.Topic, partLabel).Inc()
-	e.metrics.BytesProducedTotal.WithLabelValues(record.Topic, partLabel).Add(float64(len(record.Payload)))
+	pc := e.metrics.PartitionCounters(topicName, partition)
+	pc.MessagesProduced.Add(float64(count))
+	pc.BytesProduced.Add(float64(payloadBytes))
 }

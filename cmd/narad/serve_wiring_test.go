@@ -308,8 +308,8 @@ func (stubBroker) ReadPartitionSegment(context.Context, string, int, int64, int6
 	return nil, nil
 }
 
-func (stubBroker) PauseProduceForHandoff(string, int, time.Duration) {}
-func (stubBroker) ResumeProduce(string, int)                         {}
+func (stubBroker) PauseProduceForHandoff(string, int, time.Duration)        {}
+func (stubBroker) ResumeProduce(string, int)                                {}
 func (stubBroker) ReclaimMovedPartition(context.Context, string, int) error { return nil }
 
 func (stubBroker) PrepareHandoff(context.Context, string, int, time.Duration) (messaging.PartitionTransferInfo, error) {
@@ -323,3 +323,11 @@ func (stubBroker) FanoutCursorStats(context.Context, string) ([]topic.FanoutCurs
 func (stubBroker) ExtendAck(context.Context, string, consumer.Handle) error { return nil }
 
 func (stubBroker) Nack(context.Context, string, consumer.Handle) error { return nil }
+
+func (stubBroker) ConsumeProbe(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, *brokermsg.ConsumeWaiter, error) {
+	return topic.Message{}, false, &brokermsg.ConsumeWaiter{}, nil
+}
+
+func (stubBroker) ConsumeWait(context.Context, *brokermsg.ConsumeWaiter, time.Duration) (topic.Message, bool, error) {
+	return topic.Message{}, false, nil
+}

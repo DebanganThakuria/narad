@@ -104,6 +104,14 @@ func createSegment(dir string, baseOffset int64) (*segment, error) {
 	if err != nil {
 		return nil, fmt.Errorf("storage: create segment %s: %w", path, err)
 	}
+	// A new file is only durable once its directory entry is: without the
+	// directory fsync a crash after the first frames were fdatasynced could
+	// lose the whole segment (data present, name absent). The ingress WAL
+	// roll does the same.
+	if err := syncDir(dir); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("storage: sync dir for segment %s: %w", path, err)
+	}
 	return &segment{
 		file:       f,
 		path:       path,
@@ -112,22 +120,20 @@ func createSegment(dir string, baseOffset int64) (*segment, error) {
 	}, nil
 }
 
-// writeEncodedFrame appends a pre-encoded frame to the segment. On a
-// partial-write failure it truncates back to the pre-write size so
-// recovery doesn't have to resync past a torn tail on the next startup.
-func (s *segment) writeEncodedFrame(frame []byte, baseOffset int64, records int) (pos int64, n int, err error) {
-	pos, err = s.file.Seek(0, io.SeekEnd)
-	if err != nil {
-		return 0, 0, fmt.Errorf("storage: segment seek: %w", err)
-	}
-	n, err = s.file.Write(frame)
+// writeEncodedFrame writes a pre-encoded frame at the segment's current
+// size and returns its position and length. It does NOT advance
+// sizeBytes/nextOffset: the flusher does that under the Log's write lock
+// so readers never observe a frame boundary before the bytes are in
+// place. Positional write (pwrite) instead of seek+write: one syscall,
+// and on a partial-write failure the truncate back to pos means the
+// retry overwrites the torn bytes even if the truncate itself failed.
+func (s *segment) writeEncodedFrame(frame []byte) (pos int64, n int, err error) {
+	pos = s.sizeBytes
+	n, err = s.file.WriteAt(frame, pos)
 	if err != nil {
 		_ = s.file.Truncate(pos)
-		_, _ = s.file.Seek(pos, io.SeekStart)
 		return pos, n, fmt.Errorf("storage: segment write: %w", err)
 	}
-	s.sizeBytes = pos + int64(n)
-	s.nextOffset = baseOffset + int64(records)
 	return pos, n, nil
 }
 
@@ -146,6 +152,21 @@ func (s *segment) close() error {
 	if syncErr != nil && !errors.Is(syncErr, os.ErrClosed) {
 		return syncErr
 	}
+	if closeErr != nil && !errors.Is(closeErr, os.ErrClosed) {
+		return closeErr
+	}
+	return nil
+}
+
+// closeNoSync releases the file handle without a final fdatasync. For a
+// segment that is about to be deleted the sync is wasted work: its bytes
+// are going away either way.
+func (s *segment) closeNoSync() error {
+	if s.file == nil {
+		return nil
+	}
+	closeErr := s.file.Close()
+	s.file = nil
 	if closeErr != nil && !errors.Is(closeErr, os.ErrClosed) {
 		return closeErr
 	}
