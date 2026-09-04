@@ -50,10 +50,14 @@ func produceRecordSize(record ProduceRecord) int {
 
 // appendProduceRecord appends the encoding of a validated record to dst.
 func appendProduceRecord(dst []byte, record ProduceRecord) []byte {
+	// validateProduceRecord already bounds the partition to [0, MaxInt32];
+	// the clamp restates the bound at the conversion site so it is
+	// checkable locally (and never changes a validated value).
+	partition := uint32(min(max(record.TargetPartition, 0), math.MaxInt32))
 	dst = append(dst, produceRecordFormat)
 	dst = appendString(dst, record.Topic)
 	dst = appendString(dst, record.Key)
-	dst = binary.BigEndian.AppendUint32(dst, uint32(record.TargetPartition))
+	dst = binary.BigEndian.AppendUint32(dst, partition)
 	dst = binary.BigEndian.AppendUint64(dst, uint64(record.CreatedAtUnixMs))
 	return appendBytes(dst, record.Payload)
 }
