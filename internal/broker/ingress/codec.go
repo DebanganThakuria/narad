@@ -51,9 +51,12 @@ func produceRecordSize(record ProduceRecord) int {
 // appendProduceRecord appends the encoding of a validated record to dst.
 func appendProduceRecord(dst []byte, record ProduceRecord) []byte {
 	// validateProduceRecord already bounds the partition to [0, MaxInt32];
-	// the clamp restates the bound at the conversion site so it is
-	// checkable locally (and never changes a validated value).
-	partition := uint32(min(max(record.TargetPartition, 0), math.MaxInt32))
+	// the check is restated at the conversion site so it is provable
+	// locally. It cannot fire on a validated record.
+	if record.TargetPartition < 0 || record.TargetPartition > math.MaxInt32 {
+		panic("ingress: appendProduceRecord: unvalidated target partition")
+	}
+	partition := uint32(record.TargetPartition)
 	dst = append(dst, produceRecordFormat)
 	dst = appendString(dst, record.Topic)
 	dst = appendString(dst, record.Key)
