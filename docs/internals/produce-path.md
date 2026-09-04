@@ -50,9 +50,10 @@ On the owner, a commit batch goes through `commitDurable`, the only place in Nar
 1. Append all records (wrapped in the keyed envelope) to the partition log's buffer.
 2. **Fsync.**
 3. **Read back and CRC-verify** every frame just written: a torn or corrupt write is caught *now*, not at consume time.
-4. Advance the **high-watermark** (records become visible to consumers and fan-out).
+4. **Persist the new high-watermark** (8-byte in-place write + fdatasync).
+5. Advance the **high-watermark** in memory (records become visible to consumers and fan-out).
 
-Only after the ack flows back does the dispatcher's checkpoint move, so the WAL copy lives until the partition copy is proven durable and uncorrupted. There is never a moment when a `202`-acked message exists in zero verified places.
+Steps 2 to 5 run as one pass on the partition's flusher goroutine (`storage.CommitDurable`). Only after the ack flows back does the dispatcher's checkpoint move, so the WAL copy lives until the partition copy is proven durable, uncorrupted, and *visible after a restart*: the checkpoint can never pass a batch whose visibility boundary is not on disk. There is never a moment when a `202`-acked message exists in zero verified places.
 
 ## Discarding: the one way a WAL record dies unfinished
 

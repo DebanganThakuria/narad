@@ -917,6 +917,16 @@ func TestWaitForActivityReturnsNilWhenPartitionNotifies(t *testing.T) {
 	if _, err := log.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
+	// A buffered record is not yet deliverable; the commit's
+	// high-watermark advance is what wakes waiters.
+	select {
+	case err := <-errCh:
+		t.Fatalf("waitForActivity() returned %v before the record became visible", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := log.AdvanceHighWatermark(1); err != nil {
+		t.Fatalf("AdvanceHighWatermark() error = %v", err)
+	}
 
 	select {
 	case err := <-errCh:

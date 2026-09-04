@@ -14,7 +14,8 @@ func notifyChanIdentity(l *Log) chan struct{} {
 // TestNotifyAllNoopsWithoutWaiters pins the zero-cost no-waiter path:
 // Append, AppendBatch, AdvanceHighWatermark, and Wake must not close or
 // replace the broadcast channel (i.e. must not allocate) when nobody
-// fetched it via NotifyC — and must still broadcast once a waiter has.
+// fetched it via NotifyC, and the visibility paths must still broadcast
+// once a waiter has.
 func TestNotifyAllNoopsWithoutWaiters(t *testing.T) {
 	l, err := NewLog(t.TempDir(), DefaultOptions())
 	if err != nil {
@@ -47,7 +48,9 @@ func TestNotifyAllNoopsWithoutWaiters(t *testing.T) {
 
 	// Broadcast semantics must be intact once a waiter registers: the
 	// fetched channel is closed synchronously by the next notification
-	// and a fresh channel installed for the next round.
+	// and a fresh channel installed for the next round. Appending alone
+	// does not notify (waiters gate on the high-watermark); the HWM
+	// advance that exposes the record does.
 	w1 := l.NotifyC()
 	w2 := l.NotifyC()
 	if _, err := l.Append([]byte("d")); err != nil {
@@ -55,13 +58,21 @@ func TestNotifyAllNoopsWithoutWaiters(t *testing.T) {
 	}
 	select {
 	case <-w1:
+		t.Fatal("Append() broadcast before the record became visible")
 	default:
-		t.Fatal("Append() did not broadcast to the first registered waiter")
+	}
+	if err := l.AdvanceHighWatermark(4); err != nil {
+		t.Fatalf("AdvanceHighWatermark() error = %v", err)
+	}
+	select {
+	case <-w1:
+	default:
+		t.Fatal("AdvanceHighWatermark() did not broadcast to the first registered waiter")
 	}
 	select {
 	case <-w2:
 	default:
-		t.Fatal("Append() did not broadcast to the second registered waiter")
+		t.Fatal("AdvanceHighWatermark() did not broadcast to the second registered waiter")
 	}
 	if notifyChanIdentity(l) == before {
 		t.Fatal("broadcast did not install a fresh notify channel")

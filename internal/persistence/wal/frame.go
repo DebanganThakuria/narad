@@ -53,6 +53,41 @@ func appendFrame(dst []byte, seq uint64, payload []byte) []byte {
 	return dst
 }
 
+// appendFrameWith is appendFrame for a payload produced in place: it
+// reserves the frame, lets fill write the payload directly into the
+// reserved region, then stamps the header (including the CRC over what
+// fill wrote). fill must append exactly size bytes; anything else is an
+// error and the buffer is left unchanged.
+func appendFrameWith(dst []byte, seq uint64, size int, fill func(dst []byte) []byte) ([]byte, error) {
+	start := len(dst)
+	end := start + frameHeaderSize + size
+	if cap(dst) < end {
+		nextCap := end
+		if doubled := cap(dst) * 2; doubled > nextCap {
+			nextCap = doubled
+		}
+		next := make([]byte, len(dst), nextCap)
+		copy(next, dst)
+		dst = next
+	}
+	payloadStart := start + frameHeaderSize
+	filled := fill(dst[:payloadStart])
+	// The capacity reserved above is enough for the whole frame, so a
+	// well-behaved fill appends in place: same backing array, exactly end
+	// bytes. dst may be empty here (first record of a batch), so compare
+	// through one-element reslices, which are valid whenever cap >= 1.
+	if len(filled) != end || cap(filled) < 1 || &filled[:1][0] != &dst[:1][0] {
+		return dst[:start], fmt.Errorf("wal: fill wrote %d bytes, want %d", len(filled)-payloadStart, size)
+	}
+	dst = filled
+	frame := dst[start:end]
+	binary.BigEndian.PutUint32(frame[0:4], frameMagic)
+	binary.BigEndian.PutUint32(frame[4:8], uint32(size))
+	binary.BigEndian.PutUint64(frame[8:16], seq)
+	binary.BigEndian.PutUint32(frame[16:20], crc32.ChecksumIEEE(frame[frameHeaderSize:]))
+	return dst, nil
+}
+
 // readFrame decodes the next frame from r. It returns ok=false without an
 // error on a clean or truncated EOF (a torn tail), and wraps validation
 // failures in errCorruptFrame so callers can distinguish them from I/O

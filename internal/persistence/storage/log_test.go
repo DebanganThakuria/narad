@@ -359,7 +359,7 @@ func TestTimerDoesNotFlushTinyBufferBeforeCoalesceAge(t *testing.T) {
 	if _, err := l.Append([]byte("tiny")); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if err := l.flusher.drainOnce(false, false); err != nil {
+	if err := l.flusher.drainOnce(false, false, nil); err != nil {
 		t.Fatalf("drainOnce: %v", err)
 	}
 
@@ -388,7 +388,7 @@ func TestTimerFlushPreservedWhenNoThresholdConfigured(t *testing.T) {
 	l.buffer.mu.Lock()
 	l.buffer.firstAt = time.Now().Add(-time.Second)
 	l.buffer.mu.Unlock()
-	if err := l.flusher.drainOnce(false, false); err != nil {
+	if err := l.flusher.drainOnce(false, false, nil); err != nil {
 		t.Fatalf("drainOnce: %v", err)
 	}
 	if got := metrics.flushes.Load(); got == 0 {

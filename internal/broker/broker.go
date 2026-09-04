@@ -97,6 +97,12 @@ type Broker interface {
 	CommitAcceptedProduce(ctx context.Context, record ingress.ProduceRecord) (offset int64, err error)
 	CommitAcceptedProduceBatch(ctx context.Context, records []ingress.ProduceRecord) (offsets []int64, err error)
 	Consume(ctx context.Context, topicName string, opts messaging.ConsumeOpts) (msg topic.Message, found bool, err error)
+	// ConsumeProbe and ConsumeWait split a queue-style consume so the
+	// HTTP handler can ask remote owners between the local probe and the
+	// local long-poll without re-scanning or losing a wake-up. See
+	// messaging.Engine.ConsumeProbe.
+	ConsumeProbe(ctx context.Context, topicName string, opts messaging.ConsumeOpts) (msg topic.Message, found bool, waiter *messaging.ConsumeWaiter, err error)
+	ConsumeWait(ctx context.Context, waiter *messaging.ConsumeWaiter, wait time.Duration) (msg topic.Message, found bool, err error)
 	// Ack accepts a decoded receipt handle returned by a prior Consume
 	// call. The broker commits only if the handle still matches an
 	// active reservation.

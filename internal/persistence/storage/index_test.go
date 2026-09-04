@@ -157,7 +157,7 @@ func appendSingleRecordFrame(t *testing.T, l *Log, record []byte) {
 	if _, err := l.Append(record); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if err := l.flusher.drainOnce(false, true); err != nil {
+	if err := l.flusher.drainOnce(false, true, nil); err != nil {
 		t.Fatalf("drainOnce: %v", err)
 	}
 }
