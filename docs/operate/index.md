@@ -1,6 +1,6 @@
 # Deployment
 
-Everything on this page is how we actually run Narad — the same chart, the same knobs, verified against a live cluster that gets force-killed for sport. No aspirational YAML.
+Everything on this page is how we actually run Narad: the same chart, the same knobs, verified against a live cluster that gets force-killed for sport. No aspirational YAML.
 
 ## The shape of a deployment
 
@@ -9,7 +9,7 @@ flowchart TB
     ING["Ingress / LoadBalancer<br/>(TLS terminates here)"] --> SVC[Service]
     SVC --> N0 & N1 & N2
     subgraph ss["StatefulSet"]
-        N0["narad-0<br/>:7942 api · :7943 raft"] --- V0[("PVC — EBS-backed")]
+        N0["narad-0<br/>:7942 api · :7943 raft"] --- V0[("PVC (EBS-backed)")]
         N1["narad-1"] --- V1[("PVC")]
         N2["narad-2"] --- V2[("PVC")]
     end
@@ -21,7 +21,7 @@ Four Kubernetes objects do all the work:
 
 | Object | Job |
 |---|---|
-| **StatefulSet** | Stable identities (`narad-0…N`) — the pod name *is* the node ID |
+| **StatefulSet** | Stable identities (`narad-0…N`): the pod name *is* the node ID |
 | **Headless Service** | Stable DNS per pod, which is what the Raft peer list is made of |
 | **Client Service / Ingress** | Round-robins client HTTP to any pod (any pod is the right pod) |
 | **Secret** | `cluster-secret` (node-to-node auth) and optionally `admin-password` |
@@ -36,7 +36,7 @@ kubectl create secret generic narad-security -n narad \
   --from-literal=admin-password="$(openssl rand -base64 24)"
 ```
 
-`admin-password` is optional — omit it and the seeding node generates one and logs it exactly once at first startup. (Then you get to practice your log-searching skills. Setting it is easier.)
+`admin-password` is optional; omit it and the seeding node generates one and logs it exactly once at first startup. (Then you get to practice your log-searching skills. Setting it is easier.)
 
 **2. Install:**
 
@@ -65,8 +65,8 @@ That's the install. Really. (Every knob: [Helm Chart Reference](helm-chart.md).)
 
 Probes matter and the chart wires them the only correct way:
 
-- **`/healthz`** → startup + liveness. "The process is up." Answers immediately at boot, *before* the node is caught up — so a node recovering from a long outage is never murdered by its own liveness probe mid-recovery.
-- **`/readyz`** → readiness. "Safe to route traffic here." Held false until the metastore replica is caught up (and, for a freshly scaled-out pod, until the leader admits it). A pod that isn't ready receives nothing — including a brand-new node that hasn't joined yet.
+- **`/healthz`** → startup + liveness. "The process is up." Answers immediately at boot, *before* the node is caught up, so a node recovering from a long outage is never murdered by its own liveness probe mid-recovery.
+- **`/readyz`** → readiness. "Safe to route traffic here." Held false until the metastore replica is caught up (and, for a freshly scaled-out pod, until the leader admits it). A pod that isn't ready receives nothing, including a brand-new node that hasn't joined yet.
 
 ## Values that matter (grounded in our live cluster)
 
@@ -100,16 +100,16 @@ metrics:
 
 Two of those deserve a second look:
 
-- **`initialClusterSize`** is the set of pods allowed to *bootstrap* a brand-new Raft cluster (`narad-0/1/2` at 3). Every pod beyond it joins the existing cluster instead. It is consulted only on an empty disk — set it once and forget it exists. Changing it later does nothing good and possibly something educational.
-- **`narad.config.storage.codec: zstd`** — on-disk compression is **off by default**. We run zstd/fastest: ~40% smaller at low rate, up to ~95% smaller under real load for JSON-ish payloads, for near-zero CPU. Turn it on unless your payloads are already compressed.
+- **`initialClusterSize`** is the set of pods allowed to *bootstrap* a brand-new Raft cluster (`narad-0/1/2` at 3). Every pod beyond it joins the existing cluster instead. It is consulted only on an empty disk; set it once and forget it exists. Changing it later does nothing good and possibly something educational.
+- **`narad.config.storage.codec: zstd`**: on-disk compression is **off by default**. We run zstd/fastest: ~40% smaller at low rate, up to ~95% smaller under real load for JSON-ish payloads, for near-zero CPU. Turn it on unless your payloads are already compressed.
 
 ## Rate limiting: bring your own
 
-Narad has request-size caps (1 MiB bodies) and per-partition flow control, but **no built-in request rate limiting** — a hostile or buggy client can send requests as fast as you'll accept them. Put a rate limiter at your ingress (every ingress controller has one), same place your TLS terminates. Narad's job is not losing messages; your ingress's job is deciding who gets to send them.
+Narad has request-size caps (1 MiB bodies) and per-partition flow control, but **no built-in request rate limiting**: a hostile or buggy client can send requests as fast as you'll accept them. Put a rate limiter at your ingress (every ingress controller has one), same place your TLS terminates. Narad's job is not losing messages; your ingress's job is deciding who gets to send them.
 
 ## TLS story
 
-Client TLS terminates at your ingress — Narad serves plain HTTP behind it. Node-to-node QUIC is authenticated by the cluster secret; Raft can additionally run mutual TLS (`NARAD_CLUSTER_TLS_{CERT,KEY,CA}_FILE`). Without certs, Raft is plaintext and the node says so loudly in its logs — restrict port 7943 with a NetworkPolicy either way.
+Client TLS terminates at your ingress; Narad serves plain HTTP behind it. Node-to-node QUIC is authenticated by the cluster secret; Raft can additionally run mutual TLS (`NARAD_CLUSTER_TLS_{CERT,KEY,CA}_FILE`). Without certs, Raft is plaintext and the node says so loudly in its logs; restrict port 7943 with a NetworkPolicy either way.
 
 ## Single-node / laptop mode
 

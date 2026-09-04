@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -90,11 +89,7 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 		return 0, 0, err
 	}
 
-	if e.metrics != nil {
-		partLabel := strconv.Itoa(partIdx)
-		e.metrics.MessagesProducedTotal.WithLabelValues(topicName, partLabel).Inc()
-		e.metrics.BytesProducedTotal.WithLabelValues(topicName, partLabel).Add(float64(len(payload)))
-	}
+	e.recordProduceCommitted(topicName, partIdx, 1, len(payload))
 
 	return offset, partIdx, nil
 }

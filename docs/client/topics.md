@@ -1,6 +1,6 @@
 # Topics
 
-A topic is a named stream of messages, split into **partitions**. Partitions are how Narad scales: they spread storage and consumption across the cluster, and keyed messages stick to one partition in normal operation (locality, not an ordering guarantee — see [Guarantees](guarantees-and-errors.md)).
+A topic is a named stream of messages, split into **partitions**. Partitions are how Narad scales: they spread storage and consumption across the cluster, and keyed messages stick to one partition in normal operation (locality, not an ordering guarantee; see [Guarantees](guarantees-and-errors.md)).
 
 ```mermaid
 flowchart TB
@@ -30,7 +30,7 @@ curl -u $AUTH -X POST $NARAD/v1/topics \
 
 | Field | Meaning | Default | Rules |
 |---|---|---|---|
-| `name` | Topic name | — | required, unique |
+| `name` | Topic name | none | required, unique |
 | `partitions` | Units of parallelism and placement | 3 | at least 3, at most 108 |
 | `retention_ms` | How long messages are kept on disk | operator default | 0 = keep forever; otherwise at least 1 hour |
 | `visibility_timeout_ms` | How long a consumed message stays hidden before redelivery | 30000 | your processing time budget |
@@ -40,7 +40,7 @@ curl -u $AUTH -X POST $NARAD/v1/topics \
 
 **Choosing partition count.** More partitions = more parallel consumers and more spread across the cluster. Pick roughly the number of consumers you expect to run in parallel. Partition count is fixed after creation, so leave headroom.
 
-**Choosing retention.** Messages are deleted `retention_ms` after they were written — *whether or not they were consumed*. Retention is a safety net for replay and slow consumers, not a substitute for acking promptly.
+**Choosing retention.** Messages are deleted `retention_ms` after they were written, *whether or not they were consumed*. Retention is a safety net for replay and slow consumers, not a substitute for acking promptly.
 
 ## Reading a topic
 
@@ -49,7 +49,7 @@ curl -u $AUTH $NARAD/v1/topics                # list all topics
 curl -u $AUTH $NARAD/v1/topics/orders         # one topic + per-partition stats
 ```
 
-The single-topic response includes `partition_stats`: per-partition oldest offset, next offset, and segment counts — handy for eyeballing backlog and growth.
+The single-topic response includes `partition_stats`: per-partition oldest offset, next offset, and segment counts, handy for eyeballing backlog and growth.
 
 ## Changing a topic
 
@@ -59,7 +59,7 @@ curl -u $AUTH -X PATCH $NARAD/v1/topics/orders \
   -d '{"retention_ms": 172800000}'
 ```
 
-Retention, visibility timeout, and the per-partition limits can be altered live. Partition count cannot. If the topic has [delay children](fanout-and-delay.md), you can't shrink retention below what the child's delay needs — Narad refuses with `409` instead of letting delayed messages age out before delivery.
+Retention, visibility timeout, and the per-partition limits can be altered live. Partition count cannot. If the topic has [delay children](fanout-and-delay.md), you can't shrink retention below what the child's delay needs; Narad refuses with `409` instead of letting delayed messages age out before delivery.
 
 ## Deleting a topic
 

@@ -27,10 +27,13 @@ type Router struct {
 	consumeMu     sync.Mutex
 	consumeCursor map[string]uint64
 
-	// consumeReprobeInterval paces the remote re-probe loop for queue-style
-	// long-poll consumes on nodes that own no partitions of the topic.
-	// Defaults to remoteConsumeReprobeInterval; tests shrink it.
-	consumeReprobeInterval time.Duration
+	// consumeReprobeInterval is the first interval of the remote re-probe
+	// loop for queue-style long-poll consumes on nodes that own no
+	// partitions of the topic; each empty round doubles it up to
+	// consumeReprobeMaxInterval. Defaults to remoteConsumeReprobeInterval
+	// and remoteConsumeReprobeMaxInterval; tests shrink them.
+	consumeReprobeInterval    time.Duration
+	consumeReprobeMaxInterval time.Duration
 
 	// maxConsumeWait caps the client-supplied ?wait= budget on every
 	// long-poll consume path this router touches (pinned forwards and the
@@ -45,20 +48,32 @@ type Router struct {
 // when no configured value has been wired in via SetMaxConsumeWait. It
 // mirrors handlers.DefaultMaxConsumeWait (the HTTP layer's fallback ceiling,
 // not imported to keep this package below the transport layer) so routers
-// built without explicit wiring — tests, mostly — stay bounded.
+// built without explicit wiring (tests, mostly) stay bounded.
 const defaultMaxConsumeWait = 30 * time.Second
 
 // NewRouter constructs a Router. selfID is this pod's member ID (os.Hostname()).
+// The router builds its own PeerClient so tests and single-node setups
+// work unwired; serve.go replaces it with the process-wide client via
+// SetPeerClient so the node holds one connection pool per peer.
 func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager, clusterSecret string) *Router {
 	return &Router{
-		store:                  store,
-		selfID:                 selfID,
-		partitions:             mgr,
-		peer:                   NewPeerClient(defaultPeerRPCTimeout, clusterSecret),
-		routes:                 make(map[string]cachedRouteTable),
-		consumeCursor:          make(map[string]uint64),
-		consumeReprobeInterval: remoteConsumeReprobeInterval,
-		maxConsumeWait:         defaultMaxConsumeWait,
+		store:                     store,
+		selfID:                    selfID,
+		partitions:                mgr,
+		peer:                      NewPeerClient(defaultPeerRPCTimeout, clusterSecret),
+		routes:                    make(map[string]cachedRouteTable),
+		consumeCursor:             make(map[string]uint64),
+		consumeReprobeInterval:    remoteConsumeReprobeInterval,
+		consumeReprobeMaxInterval: remoteConsumeReprobeMaxInterval,
+		maxConsumeWait:            defaultMaxConsumeWait,
+	}
+}
+
+// SetPeerClient makes the router forward through pc instead of the client
+// NewRouter built. A nil pc keeps the current client. Call before serving.
+func (rt *Router) SetPeerClient(pc *PeerClient) {
+	if pc != nil {
+		rt.peer = pc
 	}
 }
 
@@ -192,36 +207,31 @@ func (rt *Router) RouteConsumeRemote(ctx context.Context, w http.ResponseWriter,
 	if len(candidates) == 0 {
 		return false, false
 	}
-
-	for _, addr := range candidates {
-		result := rt.callConsumeProbe(ctx, topicName, addr)
-		if result.err != nil {
-			continue
-		}
-		if result.res.Status == http.StatusNoContent {
-			continue
-		}
-		writePeerResponse(w, result.res)
-		return true, true
-	}
-	return false, true
+	return rt.probeCandidates(ctx, w, topicName, candidates, 0), true
 }
 
-// remoteConsumeReprobeInterval paces longPollConsumeRemote. Each round costs
-// one RPC per remote owner, so the interval trades delivery latency against
-// probe QPS: a few hundred ms keeps the worst-case added latency small while
-// capping the extra load at len(owners)/interval RPCs per waiting client.
-const remoteConsumeReprobeInterval = 250 * time.Millisecond
+// Re-probe pacing for longPollConsumeRemote. Each round costs one RPC per
+// remote owner, so the interval trades delivery latency against probe
+// QPS. The loop starts at remoteConsumeReprobeInterval, so a message
+// that lands right after the initial probes is picked up quickly, and
+// doubles after every empty round up to remoteConsumeReprobeMaxInterval,
+// so an idle topic with many waiting clients settles at one round per
+// second per client instead of four.
+const (
+	remoteConsumeReprobeInterval    = 100 * time.Millisecond
+	remoteConsumeReprobeMaxInterval = time.Second
+)
 
 // longPollConsumeRemote honors a queue-style long-poll on a node that owns
-// no partitions of the topic: it re-probes every remote owner on a fixed
-// interval until a message materializes (response written, returns true),
-// the wait budget expires, or the request context is done (returns false;
-// the caller answers 204). Re-probing all owners each round is preferred
-// over parking the whole wait on a single owner because a message can
-// materialize on any owner. Each probe is non-blocking and individually
-// bounded by the peer transport's default reply timeout, so unlike a pinned
-// long-poll forward the loop needs no longWaitRPCContext-stretched deadline.
+// no partitions of the topic: it re-probes every remote owner, backing off
+// between rounds, until a message materializes (response written, returns
+// true), the wait budget expires, or the request context is done (returns
+// false; the caller answers 204). Re-probing all owners each round is
+// preferred over parking the whole wait on a single owner because a
+// message can materialize on any owner. Each probe is non-blocking and
+// individually bounded by consumeProbeTimeout, so unlike a pinned
+// long-poll forward the loop needs no longWaitRPCContext-stretched
+// deadline. The owner list is rebuilt only when the route table changes.
 func (rt *Router) longPollConsumeRemote(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) bool {
 	// The HTTP handler already rejected malformed wait values, so a parse
 	// failure here conservatively degrades to no wait.
@@ -229,27 +239,27 @@ func (rt *Router) longPollConsumeRemote(ctx context.Context, w http.ResponseWrit
 	if err != nil || wait <= 0 {
 		return false
 	}
+	interval := rt.consumeReprobeInterval
+	if interval <= 0 {
+		interval = remoteConsumeReprobeInterval
+	}
+	maxInterval := max(rt.consumeReprobeMaxInterval, interval)
+
 	deadline := time.Now().Add(wait)
+	var cache remoteCandidateCache
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 || ctx.Err() != nil {
 			return false
 		}
-		interval := rt.consumeReprobeInterval
-		if interval <= 0 {
-			interval = remoteConsumeReprobeInterval
-		}
-		if remaining < interval {
-			interval = remaining
-		}
-		timer := time.NewTimer(interval)
+		timer := time.NewTimer(min(interval, remaining))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return false
 		case <-timer.C:
 		}
-		forwarded, hadCandidates := rt.RouteConsumeRemote(ctx, w, r, topicName)
+		forwarded, hadCandidates := rt.reprobeRemote(ctx, w, topicName, &cache)
 		if forwarded {
 			return true
 		}
@@ -258,7 +268,21 @@ func (rt *Router) longPollConsumeRemote(ctx context.Context, w http.ResponseWrit
 			// remote owner); nothing is left to poll against.
 			return false
 		}
+		interval = min(interval*2, maxInterval)
 	}
+}
+
+// ackForwardTimeout bounds a forwarded ack, extend, or nack. These are
+// single-record bookkeeping calls on the owner, so 2s is generous; the
+// transport's 5s no-deadline fallback let a stalled owner hold the
+// client's HTTP request that long. Timing out is safe: acks are
+// idempotent by nonce (the owner commits only if the handle's nonce
+// still matches the active reservation), so a client retry after a
+// timeout cannot double-commit a record.
+const ackForwardTimeout = 2 * time.Second
+
+func ackForwardContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, ackForwardTimeout)
 }
 
 // RouteAck forwards an ack request to the owner of the handle partition.
@@ -272,7 +296,9 @@ func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.R
 	if addr == "" {
 		return false
 	}
-	res, err := rt.peer.Ack(ctx, addr, nodewire.AckRequest{
+	ackCtx, cancel := ackForwardContext(ctx)
+	defer cancel()
+	res, err := rt.peer.Ack(ackCtx, addr, nodewire.AckRequest{
 		Topic:     topicName,
 		Partition: handle.Partition,
 		Offset:    handle.Offset,
@@ -297,7 +323,9 @@ func (rt *Router) RouteExtendAck(ctx context.Context, w http.ResponseWriter, _ *
 	if addr == "" {
 		return false
 	}
-	res, err := rt.peer.ExtendAck(ctx, addr, nodewire.AckRequest{
+	ackCtx, cancel := ackForwardContext(ctx)
+	defer cancel()
+	res, err := rt.peer.ExtendAck(ackCtx, addr, nodewire.AckRequest{
 		Topic:     topicName,
 		Partition: handle.Partition,
 		Offset:    handle.Offset,
@@ -322,7 +350,9 @@ func (rt *Router) RouteNack(ctx context.Context, w http.ResponseWriter, _ *http.
 	if addr == "" {
 		return false
 	}
-	res, err := rt.peer.Nack(ctx, addr, nodewire.AckRequest{
+	ackCtx, cancel := ackForwardContext(ctx)
+	defer cancel()
+	res, err := rt.peer.Nack(ackCtx, addr, nodewire.AckRequest{
 		Topic:     topicName,
 		Partition: handle.Partition,
 		Offset:    handle.Offset,

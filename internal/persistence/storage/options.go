@@ -40,6 +40,13 @@ type Options struct {
 	// Retention governs the reaper that deletes old sealed segments.
 	Retention RetentionConfig
 
+	// DisableCommitVerify skips the CRC read-back CommitDurable performs
+	// after fsync. The read-back goes through the page cache, so it
+	// proves the written bytes and index are consistent (a write-path
+	// bug, a short write), not that the device kept them. Off by default;
+	// leave it on unless profiling shows the CRC pass on the commit path.
+	DisableCommitVerify bool
+
 	// Metrics is an optional observability plug. When nil, every
 	// instrumented call site short-circuits to a noop.
 	Metrics MetricsRecorder

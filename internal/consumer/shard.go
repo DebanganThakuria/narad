@@ -2,8 +2,11 @@ package consumer
 
 import (
 	"container/heap"
+	crand "crypto/rand"
+	"encoding/binary"
+	"math/rand/v2"
 	"sync"
-	"sync/atomic"
+	"time"
 )
 
 const (
@@ -16,7 +19,7 @@ const (
 )
 
 // partitionShard holds all reservation state for one (topic, partition).
-// Every field is guarded by mu except nonceSeq, which is atomic.
+// Every field is guarded by mu.
 type partitionShard struct {
 	mu        sync.Mutex
 	committed int64 // last committed offset; -1 = none committed yet
@@ -33,7 +36,22 @@ type partitionShard struct {
 	// not delivered. ReserveNext never re-reserves them.
 	corrupt map[int64]struct{}
 
-	nonceSeq      atomic.Int64
+	// nextFree is the scan hint for ReserveNext: every offset in
+	// (committed, nextFree) is reserved or resolved, so the search for the
+	// lowest free offset starts at max(committed+1, nextFree) instead of
+	// walking the whole in-flight window on every call. It is raised when
+	// a reservation lands at it and lowered whenever an offset below it
+	// becomes free again (expiry, nack). Lowering it too far only costs
+	// extra scanning; it can never hand out a reserved offset because the
+	// scan still checks membership.
+	nextFree int64
+
+	// rng mints receipt-handle nonces. Nonces are the only thing that
+	// binds an ack to the consumer that received the message, so they
+	// must not be guessable: a per-shard counter let any principal with
+	// the consume grant forge another consumer's handle.
+	rng *rand.ChaCha8
+
 	maxInFlight   int
 	maxAckedAhead int
 }
@@ -55,8 +73,34 @@ func newPartitionShard(committed int64, caps Caps) *partitionShard {
 		expiry:        make(expiryHeap, 0, min(caps.MaxInFlight, initialExpiryHeapCap)),
 		ackedAhead:    make(map[int64]struct{}),
 		corrupt:       make(map[int64]struct{}),
+		nextFree:      committed + 1,
+		rng:           newNonceSource(),
 		maxInFlight:   caps.MaxInFlight,
 		maxAckedAhead: caps.MaxAckedAhead,
+	}
+}
+
+// newNonceSource seeds a ChaCha8 stream from the OS entropy source. The
+// stream is unguessable to anyone who has not seen its seed, and cheap
+// enough (a few ns per nonce) for the reserve hot path; it is used only
+// under the shard mutex.
+func newNonceSource() *rand.ChaCha8 {
+	var seed [32]byte
+	if _, err := crand.Read(seed[:]); err != nil {
+		// crypto/rand never fails on supported platforms; fall back to a
+		// time-derived seed rather than a fixed one so nonces still vary.
+		binary.LittleEndian.PutUint64(seed[:8], uint64(time.Now().UnixNano()))
+	}
+	return rand.NewChaCha8(seed)
+}
+
+// nextNonceLocked returns a fresh positive nonce. Must hold sh.mu.
+func (sh *partitionShard) nextNonceLocked() int64 {
+	for {
+		n := int64(sh.rng.Uint64() >> 1)
+		if n > 0 {
+			return n
+		}
 	}
 }
 
@@ -74,11 +118,20 @@ func (sh *partitionShard) purgeExpiredLocked(now int64) int {
 		e := heap.Pop(&sh.expiry).(expiryEntry)
 		if rsv, ok := sh.entries[e.offset]; ok && rsv.nonce == e.nonce && rsv.expiresAtUnixMs == e.expiresAtUnixMs {
 			delete(sh.entries, e.offset)
+			sh.freedLocked(e.offset)
 			released++
 		}
 	}
 	sh.compactExpiryLocked()
 	return released
+}
+
+// freedLocked records that off is reservable again (expired or nacked),
+// lowering the scan hint so the next ReserveNext considers it.
+func (sh *partitionShard) freedLocked(off int64) {
+	if off < sh.nextFree {
+		sh.nextFree = off
+	}
 }
 
 // compactExpiryLocked rebuilds the expiry heap from the live reservation
@@ -106,9 +159,9 @@ func (sh *partitionShard) compactExpiryLocked() {
 }
 
 // advanceCommittedLocked moves the committed frontier forward across the
-// contiguous run of already-resolved offsets immediately after it — offsets
-// acked out of order (ackedAhead) and offsets skipped as corrupt (corrupt) —
-// and returns the new committed offset. Must hold sh.mu.
+// contiguous run of already-resolved offsets immediately after it (offsets
+// acked out of order and offsets skipped as corrupt) and returns the new
+// committed offset. Must hold sh.mu.
 func (sh *partitionShard) advanceCommittedLocked() int64 {
 	for {
 		next := sh.committed + 1
@@ -123,6 +176,9 @@ func (sh *partitionShard) advanceCommittedLocked() int64 {
 			continue
 		}
 		break
+	}
+	if sh.nextFree < sh.committed+1 {
+		sh.nextFree = sh.committed + 1
 	}
 	return sh.committed
 }

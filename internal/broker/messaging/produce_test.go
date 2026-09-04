@@ -3,6 +3,7 @@ package messaging
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -350,12 +351,19 @@ func TestProduceFailsWhenNoPartitionHasAliveOwner(t *testing.T) {
 	}
 }
 
-func TestProduceDoesNotSynchronouslyPersistHighWatermark(t *testing.T) {
+// The commit boundary persists the high-watermark in the same flusher
+// pass that fsyncs the records, BEFORE the records become visible: a
+// produce whose visibility boundary cannot reach disk must fail (so the
+// ingress dispatcher retries instead of checkpointing past it), and the
+// record must stay hidden. Previously the HWM persist lagged the commit
+// by one batch and a broken hwm path only surfaced at Close.
+func TestProduceFailsWhenHighWatermarkCannotPersist(t *testing.T) {
 	dataDir := t.TempDir()
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0})
-	if _, err := engine.logs.Get("orders", 0); err != nil {
+	log, err := engine.logs.Get("orders", 0)
+	if err != nil {
 		t.Fatalf("open log: %v", err)
 	}
 	hwmPath := partitionHWMPath(dataDir, "orders", 0)
@@ -366,15 +374,47 @@ func TestProduceDoesNotSynchronouslyPersistHighWatermark(t *testing.T) {
 		t.Fatalf("Mkdir(hwm path): %v", err)
 	}
 
-	if _, _, err := engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`)); err != nil {
-		t.Fatalf("Produce() error = %v", err)
+	_, _, err = engine.Produce(context.Background(), "orders", "", []byte(`{"id":1}`))
+	if err == nil || !strings.Contains(err.Error(), "hwm") {
+		t.Fatalf("Produce() error = %v, want hwm persistence failure", err)
 	}
-	// HWM persistence now writes the fixed-size file in place (no temp+rename),
-	// so a broken hwm path surfaces as an open/write/sync failure rather than a
-	// rename ("replace") failure. The contract under test is unchanged: Produce
-	// does not synchronously persist the HWM (it succeeded above despite the
-	// broken path), and the failure surfaces when the flusher persists at Close.
-	if err := engine.logs.CloseAll(); err == nil || !strings.Contains(err.Error(), "hwm") {
-		t.Fatalf("CloseAll() error = %v, want hwm persistence failure", err)
+	var stageErr produceStageError
+	if !errors.As(err, &stageErr) || stageErr.stage != produceStageCommit {
+		t.Fatalf("Produce() error = %v, want commit boundary stage", err)
+	}
+	// The record reached the log (hidden tail) but was never exposed.
+	if got := log.HighWatermark(); got != 0 {
+		t.Fatalf("HighWatermark() = %d, want 0 (record must stay hidden)", got)
+	}
+	if got := log.NextOffset(); got != 1 {
+		t.Fatalf("NextOffset() = %d, want 1 (record appended)", got)
+	}
+	if err := engine.logs.CloseAll(); err != nil {
+		t.Fatalf("CloseAll() error = %v", err)
+	}
+}
+
+// After a successful commit the persisted high-watermark already covers
+// the committed records: a restart can never hide them.
+func TestProducePersistsHighWatermarkBeforeReturning(t *testing.T) {
+	dataDir := t.TempDir()
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
+	engine := newTestEngineWithDir(t, dataDir, ms, &fakeSchemas{}, fixedPartitioner{picked: 0})
+	for i := range 3 {
+		if _, _, err := engine.Produce(context.Background(), "orders", "", fmt.Appendf(nil, `{"id":%d}`, i)); err != nil {
+			t.Fatalf("Produce(%d) error = %v", i, err)
+		}
+		log, err := engine.logs.Get("orders", 0)
+		if err != nil {
+			t.Fatalf("Get log: %v", err)
+		}
+		persisted, err := log.PersistedHighWatermark()
+		if err != nil {
+			t.Fatalf("PersistedHighWatermark() error = %v", err)
+		}
+		if want := int64(i + 1); persisted != want || log.HighWatermark() != want {
+			t.Fatalf("after produce %d: persisted=%d live=%d, want both %d", i, persisted, log.HighWatermark(), want)
+		}
 	}
 }

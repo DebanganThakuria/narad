@@ -78,7 +78,7 @@ jobs:
           }
           run_once 1
           run_once 2
-          # produce line: "produce: N ok, N failed in Xs — R msg/s; latency p50=A p95=B p99=C"
+          # produce line: "produce: N ok, N failed in Xs, R msg/s; latency p50=A p95=B p99=C"
           # consume line: "consume: N msgs in Xs (R msg/s)"
           parse() {
             local log="$RUNNER_TEMP/bench-$1.log"
@@ -110,15 +110,15 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           if [ ! -f .github/bench/baseline.json ]; then
             {
-              echo "| produce msg/s | $PROD | _none_ | — |"
-              echo "| consume msg/s | $CONS | _none_ | — |"
+              echo "| produce msg/s | $PROD | _none_ | n/a |"
+              echo "| consume msg/s | $CONS | _none_ | n/a |"
               echo ""
               echo "No baseline committed yet. Suggested \`.github/bench/baseline.json\`:"
               echo '```json'
               cat "$RESULT"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "no baseline — record-only run"
+            echo "no baseline: record-only run"
             exit 0
           fi
           BPROD=$(jq -r .produce_msgs_per_sec .github/bench/baseline.json)
@@ -132,7 +132,7 @@ jobs:
               return 1
             fi
             if awk "BEGIN{exit !($ratio < 0.85)}"; then
-              echo "::warning::$1 throughput at ${ratio}x of baseline ($2 vs $3 msg/s) — watch it"
+              echo "::warning::$1 throughput at ${ratio}x of baseline ($2 vs $3 msg/s), watch it"
             fi
           }
           FAIL=0

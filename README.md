@@ -1,6 +1,6 @@
 # Narad
 
-> 📚 **Documentation:** [debanganthakuria.github.io/narad](https://debanganthakuria.github.io/narad/) — Client Guide and Internals, with diagrams.
+> 📚 **Documentation:** [debanganthakuria.github.io/narad](https://debanganthakuria.github.io/narad/): Client Guide and Internals, with diagrams.
 
 [![CI](https://github.com/DebanganThakuria/narad/actions/workflows/ci.yml/badge.svg)](https://github.com/DebanganThakuria/narad/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
@@ -15,7 +15,7 @@ It provides durable append-only storage, HTTP produce/consume/ack APIs,
 Raft-backed metadata, Prometheus metrics, and a single static binary that
 is straightforward to run locally or in Kubernetes.
 
-Narad is at **[v1.0.0](https://github.com/DebanganThakuria/narad/releases/tag/v1.0.0)** —
+Narad is at **[v1.0.0](https://github.com/DebanganThakuria/narad/releases/tag/v1.0.0)**,
 graduated after a chaos matrix, multi-day soak windows (300M+ messages at
 1,000 msg/s with zero loss), a 50,000 msg/s full-flow bench, and live
 backup/restore, mixed-version-upgrade, and offset-replay drills. TLS is
@@ -59,15 +59,15 @@ The current release is [`v1.0.0`](https://github.com/DebanganThakuria/narad/rele
 | Cluster metadata | Raft+bbolt control plane |
 | Delivery model | At-least-once; consumers must be idempotent |
 | Security | Basic auth + RBAC + cluster-secret auth (secure by default); TLS terminates at the ingress; no rate limiting yet |
-| Production use | Ready — evidence in the [v1.0.0 release notes](https://github.com/DebanganThakuria/narad/releases/tag/v1.0.0); post-1.0 roadmap below |
+| Production use | Ready: evidence in the [v1.0.0 release notes](https://github.com/DebanganThakuria/narad/releases/tag/v1.0.0); post-1.0 roadmap below |
 
 CI runs race-enabled unit and end-to-end tests, plus local 3-node
 integration and chaos smoke tests.
 
 ## Documentation
 
-Everything below is the developer's quick reference. The real documentation — a client guide, a full
-deployment/configuration/monitoring handbook, and code-level internals with diagrams — lives at:
+Everything below is the developer's quick reference. The real documentation (a client guide, a full
+deployment/configuration/monitoring handbook, and code-level internals with diagrams) lives at:
 
 **https://debanganthakuria.github.io/narad/**
 
@@ -80,7 +80,7 @@ deployment/configuration/monitoring handbook, and code-level internals with diag
 ## Observed benchmark
 
 Bench run, 3-node cluster (4.5 vCPU per node): **50,000 msg/s sustained through the full
-produce → consume → ack flow** — the load generator saturated before the
+produce → consume → ack flow**. The load generator saturated before the
 broker did, so treat that as a floor, not a ceiling. Details:
 [Scaling & Recovery](https://debanganthakuria.github.io/narad/operate/scaling-and-recovery/).
 
@@ -110,7 +110,7 @@ HTTP Consumers ◀── pull ─│                   │                   │
 
 **Control plane.** Three Raft voters (e.g. `narad-0..2`) form a consensus
 cluster; remaining pods are non-voters that receive the full replicated
-state. The Raft leader acts as the **controller** — it assigns partitions
+state. The Raft leader acts as the **controller**: it assigns partitions
 when topics are created and marks pods dead when their heartbeats time out.
 Every pod's local bbolt replica serves metadata reads (topic config,
 partition assignment, member address) without a network round-trip.
@@ -133,12 +133,12 @@ a durable volume, fsynced before `202 Accepted`. (2) When the background
 dispatcher copies a WAL record to the owner partition log, it
 synchronously fsyncs the segment and reads the record back to validate
 its frame CRC *before* the record is made visible (high-watermark
-advanced) and *before* the WAL is allowed to compact past it — so a
+advanced) and *before* the WAL is allowed to compact past it, so a
 record is never lost or served corrupt as long as the owner's volume
 survives. If a pod dies but its volume survives, both logs replay on
 restart. Topics that need to survive volume loss opt into the replica
 pattern: a fan-out child created with `parent` is an asynchronous full
-copy whose partitions are deliberately anti-affine to the parent's —
+copy whose partitions are deliberately anti-affine to the parent's;
 see [the docs](https://debanganthakuria.github.io/narad/client/fanout-and-delay/#replication-when-you-ask-for-it).
 
 ## Layout
@@ -299,7 +299,7 @@ curl -X POST 'localhost:7942/v1/topics/orders/produce?key=customer-42' \
 # Consume with long-poll. Response includes a receipt_handle.
 curl 'localhost:7942/v1/topics/orders/consume?wait=5s'
 
-# Ack — handle is the token returned by Consume.
+# Ack: handle is the token returned by Consume.
 curl -X POST 'localhost:7942/v1/topics/orders/ack?receipt_handle=<token from consume response>'
 
 # Update retention without restart.
@@ -388,7 +388,7 @@ A topic can carry an optional JSON Schema, set at create time or via
 `PATCH /v1/topics/{topic}` with a `schema` field. When present, every
 produced message body must be valid JSON and match the schema; invalid
 payloads are rejected with **400**. Topics without a schema treat
-produced bodies as opaque bytes — JSON, text, or binary all round-trip:
+produced bodies as opaque bytes: JSON, text, or binary all round-trip:
 consume returns JSON verbatim, text as a JSON string, and binary
 base64-encoded with `"payload_encoding":"base64"` flagged alongside
 ([details](https://debanganthakuria.github.io/narad/client/consuming/#the-payload-comes-back-the-way-you-sent-it)).
@@ -397,7 +397,7 @@ Schema changes are **additive-only and backwards-compatible**, enforced
 at registration. You may add optional properties; but removing a
 property, changing the type of an existing property, dropping a
 previously-required field, or adding a new required field is rejected
-with `ErrSchemaIncompatible`. The contract is "extend only, never break —
+with `ErrSchemaIncompatible`. The contract is "extend only, never break;
 once a field exists, it stays."
 
 ## Testing
@@ -423,12 +423,12 @@ logs per test, exposed via `httptest`. Tests are split by feature surface.
 `.github/workflows/ci.yml` runs five jobs in parallel on every push to
 `master` and every PR (all race-enabled):
 
-* **Build & vet** — `go vet ./...` + `go build ./...`
-* **Unit tests** — `go test -race -count=1` for everything except `tests/e2e`
-* **E2E tests** — `go test -race -count=1 ./tests/e2e/...`
-* **Local cluster integration** — boots a real 3-node cluster and exercises
+* **Build & vet**: `go vet ./...` + `go build ./...`
+* **Unit tests**: `go test -race -count=1` for everything except `tests/e2e`
+* **E2E tests**: `go test -race -count=1 ./tests/e2e/...`
+* **Local cluster integration**: boots a real 3-node cluster and exercises
   topic CRUD + produce/consume/ack across nodes
-* **Local cluster chaos** — 3-node smoke test under induced node failures
+* **Local cluster chaos**: 3-node smoke test under induced node failures
 
 `.github/workflows/container.yml` publishes the multi-arch GHCR image on
 `master`, version tags, and manual dispatch.
@@ -441,13 +441,13 @@ delete-branch-on-merge, security scanning, and Dependabot.
 
 Narad is built on top of a small set of well-known Go libraries:
 
-- [`github.com/hashicorp/raft`](https://github.com/hashicorp/raft) — Raft consensus and cluster coordination
-- [`github.com/hashicorp/raft-boltdb/v2`](https://github.com/hashicorp/raft-boltdb) — BoltDB-backed Raft log and stable store
-- [`go.etcd.io/bbolt`](https://github.com/etcd-io/bbolt) — embedded metadata storage
-- [`github.com/quic-go/quic-go`](https://github.com/quic-go/quic-go) — QUIC transport for node-to-node cluster RPC
-- [`github.com/klauspost/compress`](https://github.com/klauspost/compress) — zstd compression for log segments
-- [`github.com/santhosh-tekuri/jsonschema/v6`](https://github.com/santhosh-tekuri/jsonschema) — JSON-Schema validation
-- [`github.com/prometheus/client_golang`](https://github.com/prometheus/client_golang) — Prometheus metrics and instrumentation
+- [`github.com/hashicorp/raft`](https://github.com/hashicorp/raft): Raft consensus and cluster coordination
+- [`github.com/hashicorp/raft-boltdb/v2`](https://github.com/hashicorp/raft-boltdb): BoltDB-backed Raft log and stable store
+- [`go.etcd.io/bbolt`](https://github.com/etcd-io/bbolt): embedded metadata storage
+- [`github.com/quic-go/quic-go`](https://github.com/quic-go/quic-go): QUIC transport for node-to-node cluster RPC
+- [`github.com/klauspost/compress`](https://github.com/klauspost/compress): zstd compression for log segments
+- [`github.com/santhosh-tekuri/jsonschema/v6`](https://github.com/santhosh-tekuri/jsonschema): JSON-Schema validation
+- [`github.com/prometheus/client_golang`](https://github.com/prometheus/client_golang): Prometheus metrics and instrumentation
 
 These libraries make it possible to keep Narad as a pure-Go project with
 no CGO requirement.
@@ -461,7 +461,7 @@ no CGO requirement.
   `prometheus/client_golang` for metrics. All pure Go; no CGO required.
 * **Single binary with subcommands.** `narad serve|client|version`
   keeps the local and deployment surface small.
-* **Controller = Raft leader.** No separate controller election process —
+* **Controller = Raft leader.** No separate controller election process;
   Raft's built-in leader election provides split-brain prevention for free.
 * **Lazy expiry + background purger.** In-flight reservations expire via
   a min-heap; a background goroutine sweeps all shards every second.
@@ -471,7 +471,7 @@ no CGO requirement.
   fan-out parent is a normal produce; children tail the parent's
   committed log with per-(child, partition) cursors on the parent
   partition owners. The parent's retained log doubles as the fan-out
-  buffer (bounded by retention — hence the uniform 1-hour retention
+  buffer (bounded by retention, hence the uniform 1-hour retention
   floor), a lagging child stalls only itself, and cursor offsets
   advance only after the child batch is durably committed.
 * **Operator endpoints separated from data endpoints.** `/metrics` shares
@@ -493,15 +493,15 @@ before the tag was cut; details and numbers live in the
 [v1.0.0 release notes](https://github.com/DebanganThakuria/narad/releases/tag/v1.0.0)
 and the [Operate handbook](https://debanganthakuria.github.io/narad/operate/).
 
-- **Soak** — multi-day windows at 1,000 msg/s across the full
+- **Soak**: multi-day windows at 1,000 msg/s across the full
   produce→consume→ack flow (parent + fan-out child + 60s-delay child):
   300M+ messages in aggregate, zero lost, zero early delay fires.
-- **Chaos** — `kill -9` of partition owners, Raft leaders, and joining
+- **Chaos**: `kill -9` of partition owners, Raft leaders, and joining
   nodes; restarts mid-produce; infrastructure node churn. All zero-loss.
-- **Capacity** — 50,000 msg/s sustained through the full
+- **Capacity**: 50,000 msg/s sustained through the full
   produce → consume → ack flow on a 3-node cluster; the load generator
   saturated before the broker did, so that's a floor.
-- **Operational drills** — backup/restore with demonstrated RPO,
+- **Operational drills**: backup/restore with demonstrated RPO,
   mixed-version rolling upgrade, live scale-out 3→5 under load, and an
   offset-replay hammer with no impact on live consumers.
 
@@ -518,7 +518,7 @@ are workable today; they are the next engineering items, roughly in order.
    a retryable 503 for pinned dead-owner consume/ack (today that path
    can surface 421), and cursor advance on empty polls.
 
-Shipped since 1.0: **partition rebalance + node decommission** — a new
+Shipped since 1.0: **partition rebalance + node decommission**: a new
 node's arrival auto-rebalances existing partitions onto it (verbatim
 copy, last-moment cutover, no record loss), and `narad cluster
 decommission` drains a node off before removal. See

@@ -9,6 +9,7 @@ package storage
 // byte-identical copy.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -32,6 +33,12 @@ type SegmentInfo struct {
 // so the owner can serve it while still writing.
 func ListPartitionSegments(partitionDir string) ([]SegmentInfo, error) {
 	names, err := listSegmentFileNames(partitionDir)
+	if errors.Is(err, os.ErrNotExist) {
+		// The owner never opened this partition (no produce reached it
+		// yet): it has no segments. Reporting that as an error made a
+		// move of an idle partition retry forever.
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
