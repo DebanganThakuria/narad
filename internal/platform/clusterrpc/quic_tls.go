@@ -66,29 +66,32 @@ func quicServerTLSConfig() (*tls.Config, error) {
 // which enforces what is checkable here: TLS 1.3, the pinned ALPN, and
 // exactly one currently valid self-signed leaf.
 var quicClientTLS = &tls.Config{
-	InsecureSkipVerify: true, // replaced by VerifyConnection below, not disabled
-	VerifyConnection:   verifyClusterPeer,
-	NextProtos:         []string{quicALPN},
-	MinVersion:         tls.VersionTLS13,
-	ClientSessionCache: tls.NewLRUClientSessionCache(quicClientSessionCacheSize),
+	// Required to bypass system-root chain building; certificate checking
+	// is NOT disabled: VerifyPeerCertificate below replaces it.
+	InsecureSkipVerify:    true,
+	VerifyPeerCertificate: verifyClusterPeerCertificate,
+	VerifyConnection:      verifyClusterConnection,
+	NextProtos:            []string{quicALPN},
+	MinVersion:            tls.VersionTLS13,
+	ClientSessionCache:    tls.NewLRUClientSessionCache(quicClientSessionCacheSize),
 }
 
-// verifyClusterPeer is the client-side connection check for the cluster
-// RPC transport. It replaces the default certificate-chain verification
+// verifyClusterPeerCertificate is the client-side certificate check for
+// the cluster RPC transport. It replaces the default chain verification
 // (there is no CA: peers use ephemeral self-signed certificates) with
-// the checks that are meaningful for this transport. Membership itself
-// is proven by the per-stream cluster-secret HMAC.
-func verifyClusterPeer(cs tls.ConnectionState) error {
-	if cs.Version < tls.VersionTLS13 {
-		return fmt.Errorf("cluster rpc: peer negotiated TLS 0x%04x, want 1.3", cs.Version)
+// the checks that are meaningful here: exactly one currently valid
+// self-signed leaf whose signature verifies under its own public key,
+// which proves the peer holds the private key for the certificate it
+// presented. Membership itself is proven by the per-stream cluster-secret
+// HMAC. verifiedChains is always nil on this path.
+func verifyClusterPeerCertificate(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+	if len(rawCerts) != 1 {
+		return fmt.Errorf("cluster rpc: peer presented %d certificates, want exactly one ephemeral self-signed leaf", len(rawCerts))
 	}
-	if cs.NegotiatedProtocol != quicALPN {
-		return fmt.Errorf("cluster rpc: peer negotiated ALPN %q, want %q", cs.NegotiatedProtocol, quicALPN)
+	leaf, err := x509.ParseCertificate(rawCerts[0])
+	if err != nil {
+		return fmt.Errorf("cluster rpc: parse peer certificate: %w", err)
 	}
-	if len(cs.PeerCertificates) != 1 {
-		return fmt.Errorf("cluster rpc: peer presented %d certificates, want exactly one ephemeral self-signed leaf", len(cs.PeerCertificates))
-	}
-	leaf := cs.PeerCertificates[0]
 	now := time.Now()
 	if now.Before(leaf.NotBefore) || now.After(leaf.NotAfter) {
 		return fmt.Errorf("cluster rpc: peer certificate not valid at %s (valid %s to %s)", now.Format(time.RFC3339), leaf.NotBefore.Format(time.RFC3339), leaf.NotAfter.Format(time.RFC3339))
@@ -98,6 +101,18 @@ func verifyClusterPeer(cs tls.ConnectionState) error {
 	// certificate, which an ephemeral leaf is not).
 	if err := leaf.CheckSignature(leaf.SignatureAlgorithm, leaf.RawTBSCertificate, leaf.Signature); err != nil {
 		return fmt.Errorf("cluster rpc: peer certificate is not self-signed: %w", err)
+	}
+	return nil
+}
+
+// verifyClusterConnection pins the protocol parameters the certificate
+// check cannot see: TLS 1.3 and the cluster ALPN.
+func verifyClusterConnection(cs tls.ConnectionState) error {
+	if cs.Version < tls.VersionTLS13 {
+		return fmt.Errorf("cluster rpc: peer negotiated TLS 0x%04x, want 1.3", cs.Version)
+	}
+	if cs.NegotiatedProtocol != quicALPN {
+		return fmt.Errorf("cluster rpc: peer negotiated ALPN %q, want %q", cs.NegotiatedProtocol, quicALPN)
 	}
 	return nil
 }
