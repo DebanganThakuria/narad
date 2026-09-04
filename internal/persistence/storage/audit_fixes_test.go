@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 
@@ -276,4 +279,132 @@ func TestPositionalFrameWritesStayContiguousAcrossRoll(t *testing.T) {
 			t.Fatalf("Read %d = %q, want prefix %q", i, got, want)
 		}
 	}
+}
+
+// ReadShared hands out the cached record without copying; Read copies.
+// Both agree on content, and after retention deletes the segment a read
+// of a reaped offset reports ErrOffsetNotFound instead of a closed-file
+// error, even though the read runs outside the log lock.
+func TestReadSharedAliasesCacheAndSurvivesRetention(t *testing.T) {
+	dir := testLogPath(t)
+	opts := slowFlushOpts(t, codec.NewNoopCodec())
+	opts.SegmentBytes = 256
+	// Age-based retention that only fires when the test sweeps by hand:
+	// every sealed segment is "old" but the reaper's own tick is an hour.
+	opts.Retention = RetentionConfig{MaxAge: time.Nanosecond, CheckInterval: time.Hour, Now: func() time.Time { return time.Now().Add(time.Hour) }}
+	l, err := NewLog(dir, opts)
+	if err != nil {
+		t.Fatalf("NewLog: %v", err)
+	}
+	defer l.Close()
+
+	const n = 30
+	for i := range n {
+		if _, err := l.Append(fmt.Appendf(nil, "rec-%03d-%s", i, bytes.Repeat([]byte("x"), 40))); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+		if err := l.Sync(); err != nil {
+			t.Fatalf("Sync %d: %v", i, err)
+		}
+	}
+	shared, err := l.ReadShared(3)
+	if err != nil {
+		t.Fatalf("ReadShared: %v", err)
+	}
+	copied, err := l.Read(3)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !bytes.Equal(shared, copied) {
+		t.Fatalf("ReadShared = %q, Read = %q", shared, copied)
+	}
+	again, _ := l.ReadShared(3)
+	if &again[0] != &shared[0] {
+		t.Fatal("ReadShared must return the cached slice, not a copy")
+	}
+	if &copied[0] == &shared[0] {
+		t.Fatal("Read must return a private copy")
+	}
+
+	// Reap every sealed segment: reads of reaped offsets are gone, not
+	// broken, and reads of retained offsets still work.
+	if l.SegmentCount() < 3 {
+		t.Fatalf("expected rolls, got %d segments", l.SegmentCount())
+	}
+	l.reaper.sweep()
+	oldest := l.OldestOffset()
+	if oldest == 0 {
+		t.Fatal("retention did not delete any segment")
+	}
+	if _, err := l.ReadShared(0); !errors.Is(err, ErrOffsetNotFound) {
+		t.Fatalf("read of reaped offset = %v, want ErrOffsetNotFound", err)
+	}
+	if _, err := l.ReadShared(oldest); err != nil {
+		t.Fatalf("read of oldest retained offset %d: %v", oldest, err)
+	}
+	if _, err := l.ReadShared(n - 1); err != nil {
+		t.Fatalf("read of newest offset: %v", err)
+	}
+}
+
+// Reads race retention deleting segments underneath them without
+// panicking or returning wrong data: every successful read returns the
+// record that was written at that offset.
+func TestReadSharedConcurrentWithRetention(t *testing.T) {
+	dir := testLogPath(t)
+	opts := slowFlushOpts(t, codec.NewNoopCodec())
+	opts.SegmentBytes = 200
+	opts.Retention = RetentionConfig{MaxAge: time.Nanosecond, CheckInterval: time.Hour, Now: func() time.Time { return time.Now().Add(time.Hour) }}
+	l, err := NewLog(dir, opts)
+	if err != nil {
+		t.Fatalf("NewLog: %v", err)
+	}
+	defer l.Close()
+	const n = 200
+	for i := range n {
+		if _, err := l.Append(fmt.Appendf(nil, "r%04d%s", i, bytes.Repeat([]byte("y"), 30))); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		if i%5 == 4 {
+			if err := l.Sync(); err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+		}
+	}
+	if err := l.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				off := int64(rand.IntN(n))
+				rec, err := l.ReadShared(off)
+				if err != nil {
+					if !errors.Is(err, ErrOffsetNotFound) && !errors.Is(err, os.ErrClosed) && !IsCorrupt(err) {
+						t.Errorf("ReadShared(%d): unexpected error %v", off, err)
+					}
+					continue
+				}
+				if want := fmt.Sprintf("r%04d", off); !bytes.HasPrefix(rec, []byte(want)) {
+					t.Errorf("ReadShared(%d) = %q, want prefix %q", off, rec, want)
+				}
+			}
+		}()
+	}
+	for i := 0; i < 20; i++ {
+		l.reaper.sweep()
+		time.Sleep(2 * time.Millisecond)
+	}
+	close(stop)
+	wg.Wait()
 }

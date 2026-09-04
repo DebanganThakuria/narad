@@ -35,7 +35,95 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 	}
 
 	visibilityTimeout := time.Duration(t.VisibilityTimeoutMs) * time.Millisecond
-	return e.consumeQueue(ctx, topicName, scan, visibilityTimeout, opts.Wait)
+	scanStart := e.consumeScanStart(topicName, scan, opts)
+	return e.consumeQueue(ctx, topicName, scan, scanStart, visibilityTimeout, opts.Wait, nil)
+}
+
+// ConsumeWaiter is the state a ConsumeProbe leaves behind so a later
+// ConsumeWait can park on exactly the wake-up channels that were
+// snapshotted BEFORE the probe. That ordering is what makes the
+// handler's ladder (probe locally, ask remote owners, then wait) free
+// of lost wake-ups without probing the local partitions a second time.
+type ConsumeWaiter struct {
+	topic             string
+	scan              []int
+	scanStart         int
+	visibilityTimeout time.Duration
+	chans             []<-chan struct{}
+	start             time.Time
+}
+
+// ConsumeProbe is the non-blocking half of a queue-style Consume: it
+// snapshots the wake-up channels, scans the locally owned partitions
+// once, and returns the first reservable message. When nothing is
+// available it also returns a waiter for ConsumeWait. Replay and
+// pinned-partition options are not supported here (use Consume).
+func (e *Engine) ConsumeProbe(ctx context.Context, topicName string, opts ConsumeOpts) (topic.Message, bool, *ConsumeWaiter, error) {
+	t, err := e.getTopic(ctx, topicName)
+	if err != nil {
+		return topic.Message{}, false, nil, err
+	}
+	if opts.Offset != nil || opts.Partition != nil {
+		return topic.Message{}, false, nil, fmt.Errorf("%w: probe supports queue-style consumes only", ErrInvalid)
+	}
+	scan, err := e.localProbePartitions(topicName, t.Partitions, nil)
+	if err != nil {
+		return topic.Message{}, false, nil, err
+	}
+	w := &ConsumeWaiter{
+		topic:             topicName,
+		scan:              scan,
+		scanStart:         e.consumeScanStart(topicName, scan, opts),
+		visibilityTimeout: time.Duration(t.VisibilityTimeoutMs) * time.Millisecond,
+		start:             time.Now(),
+	}
+	logs, err := e.partitionLogs(topicName, scan)
+	if err != nil {
+		return topic.Message{}, false, nil, err
+	}
+	w.chans = notifyChannelsFor(logs)
+	msg, found, err := e.tryQueueReadLogs(ctx, topicName, scan, logs, w.scanStart, w.visibilityTimeout)
+	if err != nil {
+		if e.metrics != nil {
+			e.metrics.IncError("messaging", "consume")
+		}
+		return msg, false, nil, err
+	}
+	if found {
+		e.recordConsumed(topicName, msg.Partition, len(msg.Payload))
+		e.recordConsumeWait(topicName, "hit", time.Since(w.start))
+		return msg, true, nil, nil
+	}
+	return topic.Message{}, false, w, nil
+}
+
+// ConsumeWait is the blocking half: it parks on the waiter's channel
+// snapshot for up to wait, then continues as a normal long-poll
+// (re-probe, re-snapshot, park) until a message arrives or the wait is
+// spent. Activity that happened after the probe (a commit, an expiry, a
+// nack) closed a snapshotted channel and returns immediately.
+func (e *Engine) ConsumeWait(ctx context.Context, w *ConsumeWaiter, wait time.Duration) (topic.Message, bool, error) {
+	if w == nil {
+		return topic.Message{}, false, fmt.Errorf("%w: nil consume waiter", ErrInvalid)
+	}
+	if wait <= 0 {
+		e.recordConsumeEmpty(w.topic, "no_wait", time.Since(w.start))
+		return topic.Message{}, false, nil
+	}
+	return e.consumeQueue(ctx, w.topic, w.scan, w.scanStart, w.visibilityTimeout, wait, w)
+}
+
+// consumeScanStart picks where a queue scan begins: the requested
+// partition when it is in the scan, else the rotating per-topic cursor.
+func (e *Engine) consumeScanStart(topicName string, scan []int, opts ConsumeOpts) int {
+	if opts.ScanStart != nil {
+		for i, p := range scan {
+			if p == *opts.ScanStart {
+				return i
+			}
+		}
+	}
+	return e.nextConsumeScanStart(topicName, len(scan))
 }
 
 // consumeReplay serves an offset-pinned Consume: an ownership check
@@ -60,12 +148,30 @@ func (e *Engine) consumeReplay(topicName string, partitionIdx int, offset int64,
 // consumeQueue serves a queue-mode Consume over the given partitions:
 // probe for a reservable message, and if none is available long-poll
 // up to wait for partition activity before probing again.
-func (e *Engine) consumeQueue(ctx context.Context, topicName string, scan []int, visibilityTimeout, wait time.Duration) (topic.Message, bool, error) {
-	scanStart := e.nextConsumeScanStart(topicName, len(scan))
-
+//
+// When pending is non-nil the first iteration skips the probe and parks
+// on pending's channel snapshot (a ConsumeProbe already probed after
+// taking it); the deadline is measured from now either way.
+func (e *Engine) consumeQueue(ctx context.Context, topicName string, scan []int, scanStart int, visibilityTimeout, wait time.Duration, pending *ConsumeWaiter) (topic.Message, bool, error) {
 	start := time.Now()
-	deadline := start.Add(wait)
+	if pending != nil {
+		start = pending.start
+	}
+	deadline := time.Now().Add(wait)
 	for {
+		if pending != nil {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				e.recordConsumeEmpty(topicName, "timeout", time.Since(start))
+				return topic.Message{}, false, nil
+			}
+			chans := pending.chans
+			pending = nil
+			if err := e.waitForActivity(ctx, chans, remaining); err != nil {
+				return e.consumeWaitError(topicName, start, err)
+			}
+			continue
+		}
 		// Fetch the notify channels BEFORE probing for data. The
 		// channels are close-and-replace broadcasts, so a snapshot
 		// taken after an empty probe could miss a wake-up that fired
@@ -111,20 +217,26 @@ func (e *Engine) consumeQueue(ctx context.Context, topicName string, scan []int,
 			return topic.Message{}, false, nil
 		}
 		if err := e.waitForActivity(ctx, notifyChans, remaining); err != nil {
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-				outcome := "timeout"
-				if errors.Is(err, context.Canceled) {
-					outcome = "cancelled"
-				}
-				e.recordConsumeEmpty(topicName, outcome, time.Since(start))
-				return topic.Message{}, false, nil
-			}
-			if e.metrics != nil {
-				e.metrics.IncError("messaging", "consume_wait")
-			}
-			return topic.Message{}, false, err
+			return e.consumeWaitError(topicName, start, err)
 		}
 	}
+}
+
+// consumeWaitError maps a waitForActivity failure to the consume result:
+// a timeout or cancellation is an empty consume, anything else an error.
+func (e *Engine) consumeWaitError(topicName string, start time.Time, err error) (topic.Message, bool, error) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		outcome := "timeout"
+		if errors.Is(err, context.Canceled) {
+			outcome = "cancelled"
+		}
+		e.recordConsumeEmpty(topicName, outcome, time.Since(start))
+		return topic.Message{}, false, nil
+	}
+	if e.metrics != nil {
+		e.metrics.IncError("messaging", "consume_wait")
+	}
+	return topic.Message{}, false, err
 }
 
 // recordConsumed bumps the per-partition delivered counters.
@@ -181,7 +293,7 @@ func (e *Engine) replayRead(topicName string, partitionIdx int, offset int64, to
 		// a fact about the request, not a server fault.
 		return topic.Message{}, false, fmt.Errorf("%w: offset %d aged out of retention (oldest retained: %d)", errs.ErrHandleStale, offset, log.OldestOffset())
 	}
-	key, committedAt, payload, err := log.ReadKeyed(offset)
+	key, committedAt, payload, err := log.ReadKeyedShared(offset)
 	if err != nil {
 		if storage.IsCorrupt(err) || errors.Is(err, storage.ErrOffsetNotFound) {
 			// Same fate for a hole the reaper (or corruption skip) left:
@@ -247,7 +359,7 @@ func (e *Engine) tryQueueReadLogs(ctx context.Context, topicName string, partiti
 			if !res.Reserved {
 				break // partition empty, fully reserved, or in-flight cap hit: try the next one
 			}
-			key, committedAt, payload, err := log.ReadKeyed(res.Offset)
+			key, committedAt, payload, err := log.ReadKeyedShared(res.Offset)
 			if err != nil {
 				// A frontier that fell behind retention (the segment holding
 				// the reserved offset was reaped) would otherwise be walked
