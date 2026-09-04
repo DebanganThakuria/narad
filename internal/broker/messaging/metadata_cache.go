@@ -94,15 +94,22 @@ func lookupCached[V any](
 type assignmentSet struct {
 	values []metastore.Assignment
 	byPart map[int]metastore.Assignment
+	// owned is the sorted list of partitions assigned to this node,
+	// computed once per cached set so a consume does not allocate and
+	// sort it on every request. Read-only for callers.
+	owned []int
 }
 
-func newAssignmentSet(rows []metastore.Assignment) assignmentSet {
+func newAssignmentSet(rows []metastore.Assignment, selfID string) assignmentSet {
 	set := assignmentSet{
 		values: rows,
 		byPart: make(map[int]metastore.Assignment, len(rows)),
 	}
 	for _, row := range rows {
 		set.byPart[row.Partition] = row
+	}
+	if selfID != "" {
+		set.owned = sortPartitions(ownerPartitions(rows, selfID))
 	}
 	return set
 }
@@ -193,7 +200,7 @@ func (e *Engine) assignmentsForTopic(topicName string) (assignmentSet, bool, err
 		if err != nil {
 			return assignmentSet{}, err
 		}
-		return newAssignmentSet(rows), nil
+		return newAssignmentSet(rows, e.selfID), nil
 	}
 
 	version, versioned := e.assignmentVersion(topicName)

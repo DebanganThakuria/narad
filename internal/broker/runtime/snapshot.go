@@ -9,8 +9,15 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 )
 
-// partitionAssignmentReader is the optional metastore capability used
-// to resolve partition ownership (implemented by *metastore.Store).
+// partitionAssignmentLister is the preferred metastore capability for
+// resolving partition ownership: one local read transaction per topic
+// (implemented by *metastore.Store).
+type partitionAssignmentLister interface {
+	ListAssignments(topicName string) ([]metastore.Assignment, error)
+}
+
+// partitionAssignmentReader is the per-partition fallback used when the
+// metastore only offers point lookups.
 type partitionAssignmentReader interface {
 	GetAssignment(topicName string, partition int) (metastore.Assignment, error)
 }
@@ -61,7 +68,11 @@ func (s *Snapshotter) Snapshot(ctx context.Context) ([]metrics.TopicSnapshot, er
 			Topic:      t.Name,
 			Partitions: make([]metrics.PartitionSnapshot, 0, t.Partitions),
 		}
+		owned := s.ownedPartitions(t.Name, t.Partitions)
 		for i := 0; i < t.Partitions; i++ {
+			if !owned(i) {
+				continue
+			}
 			ps, ok := s.partitionSnapshot(t.Name, i)
 			if !ok {
 				continue
@@ -73,23 +84,48 @@ func (s *Snapshotter) Snapshot(ctx context.Context) ([]metrics.TopicSnapshot, er
 	return out, nil
 }
 
-// partitionSnapshot builds the snapshot for one partition, or reports
-// ok=false when the partition should be omitted: not locally owned, or
-// its log isn't open on this node.
-func (s *Snapshotter) partitionSnapshot(topicName string, idx int) (metrics.PartitionSnapshot, bool) {
-	if s.selfID != "" {
-		assignments, ok := s.metastore.(partitionAssignmentReader)
-		if ok {
-			// Runtime metrics are intentionally local. In the WAL-first design,
-			// a pod only opens and reports partition logs it currently owns.
-			// Cross-node aggregation belongs in Prometheus/Grafana.
-			assignment, err := assignments.GetAssignment(topicName, idx)
-			if err != nil || assignment.OwnerID != s.selfID {
-				return metrics.PartitionSnapshot{}, false
+// ownedPartitions returns a predicate reporting whether this node owns
+// a partition of the topic. Runtime metrics are intentionally local: in
+// the WAL-first design a pod only opens and reports partition logs it
+// currently owns, and cross-node aggregation belongs in Prometheus.
+// Without a node identity, or a metastore that cannot answer, every
+// partition is considered owned.
+//
+// The assignment set is read in ONE local transaction per topic (a
+// prefix scan under the metastore's read lock) rather than one per
+// partition cluster-wide, which is what the poller's 5s tick used to
+// cost; an unassigned partition, or a listing error, means "not owned"
+// exactly as a failed per-partition lookup did.
+func (s *Snapshotter) ownedPartitions(topicName string, partitions int) func(int) bool {
+	if s.selfID == "" {
+		return func(int) bool { return true }
+	}
+	if lister, ok := s.metastore.(partitionAssignmentLister); ok {
+		assignments, err := lister.ListAssignments(topicName)
+		if err != nil {
+			return func(int) bool { return false }
+		}
+		owned := make([]bool, partitions)
+		for _, a := range assignments {
+			if a.OwnerID == s.selfID && a.Partition >= 0 && a.Partition < partitions {
+				owned[a.Partition] = true
 			}
 		}
+		return func(i int) bool { return owned[i] }
 	}
+	if reader, ok := s.metastore.(partitionAssignmentReader); ok {
+		return func(i int) bool {
+			assignment, err := reader.GetAssignment(topicName, i)
+			return err == nil && assignment.OwnerID == s.selfID
+		}
+	}
+	return func(int) bool { return true }
+}
 
+// partitionSnapshot builds the snapshot for one partition, or reports
+// ok=false when the partition should be omitted because its log isn't
+// open on this node.
+func (s *Snapshotter) partitionSnapshot(topicName string, idx int) (metrics.PartitionSnapshot, bool) {
 	// Peek, never Get: a metrics poll must not lazily open (and mkdir) a
 	// partition log. Opening here would resurrect directories for a topic
 	// being deleted and report partitions this node has never served.

@@ -1,6 +1,6 @@
 # Fan-out & Delay
 
-Sometimes one stream of events needs to feed many independent consumers — analytics wants everything, billing wants everything, and a retry system wants everything *an hour later*. Fan-out does this without producers changing anything.
+Sometimes one stream of events needs to feed many independent consumers: analytics wants everything, billing wants everything, and a retry system wants everything *an hour later*. Fan-out does this without producers changing anything.
 
 ## The idea
 
@@ -33,7 +33,7 @@ Rules to know:
 - Fan-out starts **from the moment of attach**. Messages already in the parent are not backfilled.
 - Copies preserve the message **key**, so related messages stay grouped in each child.
 - A child belongs to one parent; a parent can have up to 108 children; chains (child of a child) are not allowed.
-- If the parent enforces a schema, children must be schema-compatible — attach fails with `409` otherwise.
+- If the parent enforces a schema, children must be schema-compatible; attach fails with `409` otherwise.
 - Detach and re-attach = a fresh start from the parent's tail, never a resume or replay.
 
 ```bash
@@ -43,8 +43,8 @@ curl -u $AUTH -X DELETE $NARAD/v1/topics/orders/children/orders-analytics   # de
 
 ## Creating a child in one call
 
-You can also create-and-attach in a single request — pass `parent` when
-creating the topic:
+You can also create-and-attach in a single request, by passing `parent`
+when creating the topic:
 
 ```bash
 curl -u $AUTH -X POST $NARAD/v1/topics   -H "Content-Type: application/json"   -d '{"name": "orders-analytics", "parent": "orders"}'
@@ -53,11 +53,11 @@ curl -u $AUTH -X POST $NARAD/v1/topics   -H "Content-Type: application/json"   -
 Same rules as attach (the parent must exist, you need manage rights on
 it, `fanout_delay_ms` makes it a delay child), plus two conveniences:
 leave `partitions` at 0 and the child inherits the **parent's** count,
-and if the attach can't complete the create is rolled back — no
+and if the attach can't complete the create is rolled back: no
 half-linked topic left behind.
 
 One-call creation is not just sugar. It's the only way a child's
-partitions can be **placed away from the parent's** — which is the whole
+partitions can be **placed away from the parent's**, which is the whole
 replica pattern below. A topic created standalone gets its partitions
 assigned immediately, before any attach can happen, and assignments
 never move.
@@ -65,8 +65,8 @@ never move.
 ## Replication, when you ask for it
 
 Narad famously keeps one copy of each partition. But a fan-out child IS
-a full second copy of the parent's data — durably committed before the
-fan-out cursor advances — and if its partitions live on *different
+a full second copy of the parent's data (durably committed before the
+fan-out cursor advances), and if its partitions live on *different
 nodes* than the parent's, that copy survives the parent's disk.
 
 That placement is exactly what create-with-`parent` guarantees:
@@ -82,7 +82,7 @@ That placement is exactly what create-with-`parent` guarantees:
 curl -u $AUTH -X POST $NARAD/v1/topics   -d '{"name": "orders-replica", "parent": "orders"}'
 ```
 
-Verify it yourself — partition stats carry `owner_node`:
+Verify it yourself; partition stats carry `owner_node`:
 
 ```bash
 curl -u $AUTH $NARAD/v1/topics/orders | jq '.partitions[] | {index, owner_node}'
@@ -95,13 +95,13 @@ Honest fine print, because a pattern is not a subsystem:
   (typically sub-second). Records committed to the parent but not yet
   fanned out die with the parent's volume. RPO ≈ seconds, not zero.
 - **No automatic failover.** If the parent's node is lost, consumers
-  switch to `orders-replica` themselves — it's a normal topic. This is
+  switch to `orders-replica` themselves; it's a normal topic. This is
   disaster recovery, not transparent HA.
 - **From attach onward.** No backfill; the replica covers what the
   parent committed after it was created.
 - **It costs what fan-out costs**: double the disk and double the write
   IO, only on the topics that opt in.
-- The replica can have **longer retention** than the parent — a cheap
+- The replica can have **longer retention** than the parent: a cheap
   archive tier is the same one line.
 - Children attached the two-step way (create, then attach) keep the
   placement they got at creation, which is *not* anti-affine. For the
@@ -131,11 +131,11 @@ sequenceDiagram
 
 The fine print:
 
-- **Delay is measured from the parent commit time** on the server — your producer's clock doesn't matter.
+- **Delay is measured from the parent commit time** on the server; your producer's clock doesn't matter.
 - Delay is fixed per child (up to 1 year) and **immutable after attach**. Want a different delay? Detach and attach a new child.
-- **You cannot produce directly to a delay child** (`409`) — its whole timeline comes from the parent, which is what makes the delay trustworthy.
+- **You cannot produce directly to a delay child** (`409`): its whole timeline comes from the parent, which is what makes the delay trustworthy.
 - The parent's retention must be at least `delay + 1 hour`, and Narad enforces this at attach time *and* blocks retention changes that would violate it. This guarantees a message can never age out of the parent before its delayed delivery.
-- Delivery is *"no earlier than"* the delay, typically within a second after. Under failures it can be later — never earlier.
+- Delivery is *"no earlier than"* the delay, typically within a second after. Under failures it can be later, never earlier.
 
 ## What fan-out costs you
 

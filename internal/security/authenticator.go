@@ -26,6 +26,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
+	"hash"
 	"log/slog"
 	"sync"
 	"time"
@@ -88,6 +89,11 @@ type Authenticator struct {
 	// credKey is a random per-process key for the in-memory credential
 	// comparator (see credToken). It is never persisted.
 	credKey []byte
+	// macPool recycles keyed HMAC states for credToken so the per-request
+	// fast path allocates nothing: hmac.New builds two SHA-256 states and
+	// copies the key on every call, which showed up as the largest
+	// allocation on an authenticated request.
+	macPool sync.Pool
 
 	group     singleflight.Group
 	verifySem chan struct{}
@@ -115,6 +121,20 @@ type userEntry struct {
 	// tokens/lastRefill implement the decaying failed-attempt bucket.
 	tokens     float64
 	lastRefill time.Time
+	// lastThrottleLog is when "authentication throttled" was last logged
+	// for this user; the log is rate-limited to once per refill interval
+	// so a brute-force burst cannot flood the audit log.
+	lastThrottleLog time.Time
+}
+
+// credMAC is one pooled HMAC state plus scratch buffers: buf stages the
+// password so it is not converted to a fresh []byte per call, and sum
+// receives the digest so the caller's stack array never escapes through
+// the hash.Hash interface.
+type credMAC struct {
+	mac hash.Hash
+	buf []byte
+	sum []byte
 }
 
 // New constructs an Authenticator over the given store.
@@ -125,7 +145,7 @@ func New(store UserStore, logger *slog.Logger) *Authenticator {
 		// run with a predictable comparator key.
 		panic("security: crypto/rand unavailable: " + err.Error())
 	}
-	return &Authenticator{
+	a := &Authenticator{
 		store:     store,
 		logger:    logger,
 		now:       time.Now,
@@ -133,6 +153,10 @@ func New(store UserStore, logger *slog.Logger) *Authenticator {
 		verifySem: make(chan struct{}, maxConcurrentVerify),
 		users:     make(map[string]*userEntry),
 	}
+	a.macPool.New = func() any {
+		return &credMAC{mac: hmac.New(sha256.New, a.credKey)}
+	}
+	return a
 }
 
 // credToken derives the in-memory comparator for a presented password.
@@ -144,11 +168,23 @@ func New(store UserStore, logger *slog.Logger) *Authenticator {
 // random per-process key, never persisted, so cache keys cannot be
 // dictionary-matched even from a memory dump, and it carries none of the
 // offline-crackability concerns of a stored password digest.
+//
+// The keyed state comes from macPool and is Reset before use, so the
+// result is bit-identical to a fresh hmac.New(sha256.New, credKey) over
+// the same password (cache keys do not depend on which pooled state
+// served the call). The password is staged through the pooled scratch
+// buffer, which is wiped before the state goes back to the pool. The
+// whole call allocates nothing.
 func (a *Authenticator) credToken(password string) [32]byte {
-	mac := hmac.New(sha256.New, a.credKey)
-	mac.Write([]byte(password))
+	c := a.macPool.Get().(*credMAC)
+	c.mac.Reset()
+	c.buf = append(c.buf[:0], password...)
+	c.mac.Write(c.buf)
+	c.sum = c.mac.Sum(c.sum[:0])
 	var out [32]byte
-	copy(out[:], mac.Sum(nil))
+	copy(out[:], c.sum)
+	clear(c.buf)
+	a.macPool.Put(c)
 	return out
 }
 
@@ -159,14 +195,24 @@ func (a *Authenticator) Verify(ctx context.Context, username, password string) (
 	cred := a.credToken(password)
 	version := a.store.UsersVersion()
 
-	// Fast path: a version-current entry with this exact credential.
+	// Fast paths under the read lock: a version-current entry either
+	// carries this exact verified credential (allow) or remembers it as
+	// recently rejected (deny). The negative set is only trusted while
+	// the stored hash is unchanged, and an unchanged users version
+	// implies an unchanged hash, so neither path needs the store read
+	// or the write lock the slow path below takes.
 	a.mu.RLock()
 	e := a.users[username]
-	if e != nil && e.version == version && e.hasVerified &&
-		subtle.ConstantTimeCompare(e.verifiedCred[:], cred[:]) == 1 {
-		rec := e.record
-		a.mu.RUnlock()
-		return rec, nil
+	if e != nil && e.version == version {
+		if e.hasVerified && subtle.ConstantTimeCompare(e.verifiedCred[:], cred[:]) == 1 {
+			rec := e.record
+			a.mu.RUnlock()
+			return rec, nil
+		}
+		if at, ok := e.failed[cred]; ok && a.now().Sub(at) < negativeTTL {
+			a.mu.RUnlock()
+			return user.User{}, ErrUnauthorized
+		}
 	}
 	a.mu.RUnlock()
 
@@ -227,7 +273,9 @@ func (a *Authenticator) Verify(ctx context.Context, username, password string) (
 
 	ok, err := a.runBcrypt(ctx, username, cred, storedHash, password)
 	if errors.Is(err, ErrThrottled) {
-		a.logger.Warn("authentication throttled", "component", "audit", "username", username)
+		if a.shouldLogThrottle(username) {
+			a.logger.Warn("authentication throttled", "component", "audit", "username", username)
+		}
 		return user.User{}, ErrThrottled
 	}
 	if err != nil {
@@ -310,8 +358,35 @@ func (a *Authenticator) adjustTokens(username string, delta float64) {
 	}
 }
 
-// dropUser forgets all cached state for username (deleted users).
+// shouldLogThrottle reports whether a throttled attempt for username
+// should be logged: at most once per refill interval per user, so the
+// audit log records that throttling is happening without a line per
+// rejected request.
+func (a *Authenticator) shouldLogThrottle(username string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e := a.users[username]
+	if e == nil {
+		return true
+	}
+	now := a.now()
+	if !e.lastThrottleLog.IsZero() && now.Sub(e.lastThrottleLog) < bucketRefillEvery {
+		return false
+	}
+	e.lastThrottleLog = now
+	return true
+}
+
+// dropUser forgets all cached state for username (deleted users). Most
+// callers are probes for usernames that were never cached, so membership
+// is checked under the read lock before escalating to the write lock.
 func (a *Authenticator) dropUser(username string) {
+	a.mu.RLock()
+	_, cached := a.users[username]
+	a.mu.RUnlock()
+	if !cached {
+		return
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.users, username)

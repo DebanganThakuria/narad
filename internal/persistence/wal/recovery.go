@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"errors"
@@ -42,12 +43,13 @@ func scanSegment(segment segmentInfo, maxRecord int, tolerateCorruptTail bool) (
 	var validEnd int64
 	var maxSeq uint64
 	var sawRecord bool
+	// Buffered sequential read with an arithmetic position; the corrupt
+	// tail probe below uses ReadAt on the raw file, independent of the
+	// buffered reader's position.
+	reader := bufio.NewReaderSize(file, replayReadBufferSize)
+	var offset int64
 	for {
-		offset, err := file.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return 0, 0, false, fmt.Errorf("wal: segment offset: %w", err)
-		}
-		record, ok, err := readFrame(file, segment.base, offset, maxRecord)
+		record, ok, err := readFrame(reader, segment.base, offset, maxRecord)
 		if err != nil {
 			// A corrupt frame in the last (active) segment is only a
 			// torn tail if the corruption runs all the way to EOF. If a
@@ -75,7 +77,8 @@ func scanSegment(segment segmentInfo, maxRecord int, tolerateCorruptTail bool) (
 		}
 
 		sawRecord = true
-		validEnd = offset + frameHeaderSize + int64(len(record.Payload))
+		offset += frameHeaderSize + int64(len(record.Payload))
+		validEnd = offset
 		if record.ID.Seq > maxSeq {
 			maxSeq = record.ID.Seq
 		}

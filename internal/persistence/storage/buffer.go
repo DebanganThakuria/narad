@@ -49,15 +49,21 @@ func (b *buffer) push(record []byte) (int64, bool) {
 	return off, cross
 }
 
-func (b *buffer) pushBatch(records [][]byte) (int64, int64, bool) {
+// pushBatch appends records as one contiguous run. With copyRecords set
+// each record is copied so the caller may reuse its slices; otherwise
+// the buffer takes ownership of them (see Log.AppendBatchOwned).
+func (b *buffer) pushBatch(records [][]byte, copyRecords bool) (int64, int64, bool) {
 	if len(records) == 0 {
 		return 0, -1, false
 	}
-	copies := make([][]byte, len(records))
-	for i, r := range records {
-		cp := make([]byte, len(r))
-		copy(cp, r)
-		copies[i] = cp
+	copies := records
+	if copyRecords {
+		copies = make([][]byte, len(records))
+		for i, r := range records {
+			cp := make([]byte, len(r))
+			copy(cp, r)
+			copies[i] = cp
+		}
 	}
 
 	b.mu.Lock()

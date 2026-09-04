@@ -68,3 +68,15 @@ func (l *Log) ReadKeyed(offset int64) (string, int64, []byte, error) {
 	}
 	return DecodeKeyedRecord(stored)
 }
+
+// ReadKeyedShared is ReadKeyed over ReadShared: the returned payload
+// aliases the log's cache and is read-only (see ReadShared). The consume
+// path uses it so a delivery does not copy the payload just to encode it
+// into the response.
+func (l *Log) ReadKeyedShared(offset int64) (string, int64, []byte, error) {
+	stored, err := l.ReadShared(offset)
+	if err != nil {
+		return "", 0, nil, err
+	}
+	return DecodeKeyedRecord(stored)
+}

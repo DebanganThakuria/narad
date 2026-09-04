@@ -43,7 +43,7 @@ curl -u $AUTH -X POST $NARAD/v1/topics \
 
 ## 2. Produce a message
 
-The request **body is your message** — any bytes, up to 1 MiB. The key goes in the query string:
+The request **body is your message**: any bytes, up to 1 MiB. The key goes in the query string:
 
 ```bash
 curl -u $AUTH -X POST \
@@ -51,7 +51,7 @@ curl -u $AUTH -X POST \
   -d '{"order_id": "ord_123", "amount": 4999}'
 ```
 
-`202 Accepted` means: *your message is durably on disk and will be delivered.* The key groups related messages onto the same partition in normal operation — useful for locality and fan-out, but note that Narad does **not** guarantee ordering (see [Guarantees](guarantees-and-errors.md)).
+`202 Accepted` means: *your message is durably on disk and will be delivered.* The key groups related messages onto the same partition in normal operation (useful for locality and fan-out), but note that Narad does **not** guarantee ordering (see [Guarantees](guarantees-and-errors.md)).
 
 ## 3. Consume it
 
@@ -71,7 +71,7 @@ curl -u $AUTH "$NARAD/v1/topics/orders/consume?wait=10s"
 }
 ```
 
-`wait=10s` long-polls: if nothing is available, the call waits up to 10 seconds before returning `204 No Content`. The message is now **invisible to other consumers** for the topic's visibility timeout (default 30s) — your window to process it.
+`wait=10s` long-polls: if nothing is available, the call waits up to 10 seconds before returning `204 No Content`. The message is now **invisible to other consumers** for the topic's visibility timeout (default 30s): your window to process it.
 
 ## 4. Ack it
 

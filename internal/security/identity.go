@@ -8,8 +8,13 @@ import (
 
 type identityKey struct{}
 
-// WithIdentity returns a context carrying the authenticated user.
+// WithIdentity returns a context carrying the authenticated user. The
+// stored copy has its PasswordHash blanked: authorization only needs the
+// username, admin flag, and grants, and nothing downstream of the auth
+// middleware should be able to reach the hash through a request context
+// (handlers that need it re-read the store).
 func WithIdentity(ctx context.Context, u user.User) context.Context {
+	u.PasswordHash = nil
 	return context.WithValue(ctx, identityKey{}, u)
 }
 

@@ -288,7 +288,7 @@ func TestSyncLockedRefusesWriteAfterLatchedFailure(t *testing.T) {
 	log.fileOps.Unlock()
 
 	log.mu.Lock()
-	_, _, err = log.appendLocked([]byte("later"))
+	_, _, err = log.appendLocked(5, func(dst []byte) []byte { return append(dst, "later"...) })
 	if err != nil {
 		log.mu.Unlock()
 		t.Fatalf("appendLocked() error = %v", err)
