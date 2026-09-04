@@ -2,7 +2,7 @@
 
 The produce path answers one question with two different clocks: *how fast can we make the client safe* (one local fsync), and *how reliably can we finish the job* (asynchronously, retried forever).
 
-## Stage 1 — accept: WAL-first
+## Stage 1 (accept): WAL-first
 
 ```mermaid
 sequenceDiagram
@@ -17,11 +17,11 @@ sequenceDiagram
     H-->>C: 202 Accepted
 ```
 
-Every node has one **ingress WAL** — a segmented append-only log with group commit: concurrent produces are staged into a shared buffer and fsynced together, so under load the per-message fsync cost amortizes toward zero. The record stores topic, key, target partition, payload, and timestamp. Once the fsync returns, the client gets its `202`: the message now survives any crash of this node.
+Every node has one **ingress WAL**, a segmented append-only log with group commit: concurrent produces are staged into a shared buffer and fsynced together, so under load the per-message fsync cost amortizes toward zero. The record stores topic, key, target partition, payload, and timestamp. Once the fsync returns, the client gets its `202`: the message now survives any crash of this node.
 
 The target partition is resolved *at accept time* from the local metastore replica: keyed messages hash; unkeyed rotate; explicit `?partition=` pins.
 
-## Stage 2 — dispatch: the background mover
+## Stage 2 (dispatch): the background mover
 
 A per-node **dispatcher** continuously drains the WAL from a durable checkpoint and commits records to their partition owners:
 
@@ -38,23 +38,24 @@ flowchart LR
 
 The interesting engineering is in the failure handling:
 
-- **Adaptive windows.** The drain window sizes itself so each partition's commit batch stays fat (target ~64 records/partition) — commit batches are one fsync each on the owner, so batch size is the throughput lever.
+- **Adaptive windows.** The drain window sizes itself so each partition's commit batch stays fat (target ~64 records/partition); commit batches are one fsync each on the owner, so batch size is the throughput lever.
 - **Skip-set, not head-of-line blocking.** If partition 7's owner is down, records for it stay uncommitted, but everything else in the window commits and is remembered in a `committedAhead` set. The checkpoint only advances past the stuck record, bounded by a lookahead horizon; nothing is recommitted meanwhile.
-- **Reroute after persistent failure.** If a destination keeps failing (3 passes) and membership agrees the owner is dead, its records are **rerouted to a live sibling partition** of the same topic. This is the availability trade made explicit: messages flow while a node is dead, at the cost of arriving on a different partition. (It is one of the reasons Narad [does not promise ordering](../client/guarantees-and-errors.md) — the client contract is honest about it.)
+- **Reroute after persistent failure.** If a destination keeps failing (3 passes) and membership agrees the owner is dead, its records are **rerouted to a live sibling partition** of the same topic. This is the availability trade made explicit: messages flow while a node is dead, at the cost of arriving on a different partition. (It is one of the reasons Narad [does not promise ordering](../client/guarantees-and-errors.md); the client contract is honest about it.)
 - **At-least-once seams.** The skip-set is memory-only (a crash re-commits the window: duplicates), and a commit RPC that succeeds after its client timed out also duplicates. Both are within the delivery contract.
 
-## Stage 3 — commit: the durability boundary
+## Stage 3 (commit): the durability boundary
 
-On the owner, a commit batch goes through `commitDurable` — the only place in Narad where a message becomes *real*:
+On the owner, a commit batch goes through `commitDurable`, the only place in Narad where a message becomes *real*:
 
 1. Append all records (wrapped in the keyed envelope) to the partition log's buffer.
 2. **Fsync.**
-3. **Read back and CRC-verify** every frame just written — a torn or corrupt write is caught *now*, not at consume time.
-4. Advance the **high-watermark** (records become visible to consumers and fan-out).
+3. **Read back and CRC-verify** every frame just written: a torn or corrupt write is caught *now*, not at consume time.
+4. **Persist the new high-watermark** (8-byte in-place write + fdatasync).
+5. Advance the **high-watermark** in memory (records become visible to consumers and fan-out).
 
-Only after the ack flows back does the dispatcher's checkpoint move — so the WAL copy lives until the partition copy is proven durable and uncorrupted. There is never a moment when a `202`-acked message exists in zero verified places.
+Steps 2 to 5 run as one pass on the partition's flusher goroutine (`storage.CommitDurable`). Only after the ack flows back does the dispatcher's checkpoint move, so the WAL copy lives until the partition copy is proven durable, uncorrupted, and *visible after a restart*: the checkpoint can never pass a batch whose visibility boundary is not on disk. There is never a moment when a `202`-acked message exists in zero verified places.
 
-## Discarding — the one way a WAL record dies unfinished
+## Discarding: the one way a WAL record dies unfinished
 
 If a record's topic was **deleted** while it sat undispatched, committing is impossible forever, and it must be discarded or it would block its partition's lookahead. Discarding a `202`-acked record is destruction, so it takes the full [stale-replica defense](metastore-and-raft.md): the topic must be locally absent **and** the replica caught up **and** the *leader* must confirm the topic is gone (a self-leader must barrier and re-read). Anything less keeps the record for the next pass.
 
@@ -68,19 +69,19 @@ The checkpoint compacts fully-dispatched segments; a fully-dispatched *active* s
 | Ingress WAL sync backstop | 10ms (`ingress_wal_sync_interval_ms`) | group commit fires on every append; this bounds a missed wakeup |
 | Dispatcher poll when idle | 10ms | `defaultProduceDispatchInterval` |
 | Drain window base / hard cap | 4,096 / 65,536 records | `produceDispatchBaseWindow`, `defaultProduceDispatchBatchSize` |
-| Per-partition batch target | 64 records | `produceDispatchTargetPerPartition` — one fsync per batch, so this is the throughput lever |
-| Lookahead past a stuck record | 16 windows | `produceDispatchLookaheadWindows` — bounds skip-set memory too |
+| Per-partition batch target | 64 records | `produceDispatchTargetPerPartition`: one fsync per batch, so this is the throughput lever |
+| Lookahead past a stuck record | 16 windows | `produceDispatchLookaheadWindows`: bounds skip-set memory too |
 | Reroute after | 3 consecutive failed passes | `produceDispatchRerouteAfterPasses` (immediately if membership already says the owner is dead) |
 | Commit RPC timeout / failure backoff | 30s / 1s | generous on purpose: a commit that succeeds after the client gave up = duplicates |
 | Commit fan-out concurrency | 16 buckets in parallel | `defaultProduceDispatchCommitFanout` |
 
 ## Group commit, precisely
 
-`wal.Log.Append` doesn't fsync per message — it stages the record into a shared buffer, wakes the sync loop, and **blocks on the batch's completion channel**. Every producer that arrived in the same instant shares one write+fsync (`syncBatch`); under load the amortized fsync cost per message approaches zero, while each caller still only returns after *its* bytes are durable. One subtlety worth knowing: once a record is staged, `Append` ignores context cancellation and waits for the true sync outcome — reporting failure for a record that actually became durable would make a well-behaved retrying client produce duplicates for no reason.
+`wal.Log.Append` doesn't fsync per message: it stages the record into a shared buffer, wakes the sync loop, and **blocks on the batch's completion channel**. Every producer that arrived in the same instant shares one write+fsync (`syncBatch`); under load the amortized fsync cost per message approaches zero, while each caller still only returns after *its* bytes are durable. One subtlety worth knowing: once a record is staged, `Append` ignores context cancellation and waits for the true sync outcome; reporting failure for a record that actually became durable would make a well-behaved retrying client produce duplicates for no reason.
 
 ## Two produce paths, one honest difference
 
 There are two partition-pickers in `broker/messaging`, and the difference is deliberate:
 
-- **`resolveAcceptedProducePartition`** (the WAL-first accept you use): pure hash, no liveness check — the accept must stay O(local fsync), and the *dispatcher* deals with dead owners later.
-- **`pickProducePartition`** (`routing.go`, the synchronous internal path): walks forward past partitions whose owner is dead per membership, "so a dead node doesn't blackhole its share of the keyspace" — that's a direct quote from the source, and it's one of the documented reasons [ordering is not a contract](../client/guarantees-and-errors.md).
+- **`resolveAcceptedProducePartition`** (the WAL-first accept you use): pure hash, no liveness check; the accept must stay O(local fsync), and the *dispatcher* deals with dead owners later.
+- **`pickProducePartition`** (`routing.go`, the synchronous internal path): walks forward past partitions whose owner is dead per membership, "so a dead node doesn't blackhole its share of the keyspace"; that's a direct quote from the source, and it's one of the documented reasons [ordering is not a contract](../client/guarantees-and-errors.md).

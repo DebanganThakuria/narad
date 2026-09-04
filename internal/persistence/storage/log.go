@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -41,7 +42,8 @@ type Log struct {
 	hwmMu         sync.Mutex
 	lastHWMSync   time.Time
 	hwmPath       string
-	hwmDirSynced  bool // guarded by hwmMu; set after the first hwm-file dir fsync
+	hwmDirSynced  bool     // guarded by hwmMu; set after the first hwm-file dir fsync
+	hwmFile       *os.File // guarded by hwmMu; opened lazily on first persist, closed by Close
 
 	flusher *flusher
 	reaper  *reaper

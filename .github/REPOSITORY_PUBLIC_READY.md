@@ -8,13 +8,13 @@ remain documented in the README.
 
 ## In-repository OSS surface
 
-- `LICENSE` — Apache License 2.0
-- `README.md` — project overview, quickstart, status, benchmark notes,
+- `LICENSE`: Apache License 2.0
+- `README.md`: project overview, quickstart, status, benchmark notes,
   architecture, and production-readiness gates
-- `CONTRIBUTING.md` — contributor workflow and local development commands
-- `CODE_OF_CONDUCT.md` — community expectations
-- `SECURITY.md` — private vulnerability reporting process
-- `SUPPORT.md` — support, questions, and troubleshooting paths
+- `CONTRIBUTING.md`: contributor workflow and local development commands
+- `CODE_OF_CONDUCT.md`: community expectations
+- `SECURITY.md`: private vulnerability reporting process
+- `SUPPORT.md`: support, questions, and troubleshooting paths
 - issue templates for bugs and feature requests
 - pull request template
 - `CODEOWNERS`

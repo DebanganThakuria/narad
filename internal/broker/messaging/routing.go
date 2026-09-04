@@ -19,7 +19,8 @@ type assignmentReader interface {
 // localPartitions returns the sorted partitions this node owns for the
 // topic, or every partition when the node has no cluster identity or
 // the metastore has no assignment support. A nil, nil result means the
-// node verifiably owns nothing.
+// node verifiably owns nothing. The returned slice is shared with the
+// assignment cache and must not be modified.
 func (e *Engine) localPartitions(topicName string, totalPartitions int) ([]int, error) {
 	if e.selfID == "" {
 		return allPartitions(totalPartitions), nil
@@ -27,21 +28,19 @@ func (e *Engine) localPartitions(topicName string, totalPartitions int) ([]int, 
 	if _, ok := e.metastore.(assignmentReader); !ok {
 		return allPartitions(totalPartitions), nil
 	}
-	rows, err := e.listAssignments(topicName)
+	set, ok, err := e.assignmentsForTopic(topicName)
 	if err != nil {
 		// Not a routing verdict: surface as an internal error so callers
 		// retry, instead of coercing a metastore hiccup into "owns
 		// nothing" (which reads as ErrNotPartitionOwner).
 		return nil, fmt.Errorf("messaging: list assignments for %s: %w", topicName, err)
 	}
-	if len(rows) == 0 {
+	if !ok || len(set.owned) == 0 {
 		return nil, nil
 	}
-	owned := ownerPartitions(rows, e.selfID)
-	if len(owned) == 0 {
-		return nil, nil
-	}
-	return sortPartitions(owned), nil
+	// The sorted owned list is computed once per cached assignment set;
+	// callers only read it.
+	return set.owned, nil
 }
 
 // localProbePartitions resolves the partitions a queue-mode Consume

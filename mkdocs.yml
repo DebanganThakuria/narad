@@ -1,5 +1,5 @@
 site_name: Narad
-site_description: A small, sturdy message broker — HTTP in, at-least-once out.
+site_description: "A small, sturdy message broker: HTTP in, at-least-once out."
 site_url: https://debanganthakuria.github.io/narad/
 repo_url: https://github.com/DebanganThakuria/narad
 repo_name: DebanganThakuria/narad
