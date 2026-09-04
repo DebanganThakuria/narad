@@ -10,11 +10,14 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker"
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
 	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
@@ -51,6 +54,12 @@ type RPCServer struct {
 	// are never gated: they could hold a slot while waiting on a node
 	// that is itself waiting on us.
 	messagingSem chan struct{}
+
+	// deliveries remembers messages handed to forwarded consumes whose
+	// client may cancel after the reply was already sent; see
+	// HandleStreamCancel.
+	deliveriesMu sync.Mutex
+	deliveries   map[requestKey]delivery
 }
 
 // NewRPCServer constructs an RPCServer around the local broker.
@@ -108,14 +117,24 @@ func (s *RPCServer) SetBroadcaster(b purgeBroadcaster) {
 	s.broadcaster = b
 }
 
-// HandleStreamFrame serves a node RPC frame, replying asynchronously via
-// respond. It reports whether the frame was one this server handles.
+// HandleStreamFrame serves a node RPC frame under a background context.
+// The stream server prefers HandleStreamRequest; this form remains for
+// callers without a per-request context (tests, older transports).
 func (s *RPCServer) HandleStreamFrame(frame clusterwire.StreamFrame, respond func(clusterwire.StreamFrame)) bool {
+	return s.HandleStreamRequest(context.Background(), frame, respond)
+}
+
+// HandleStreamRequest serves a node RPC frame, replying asynchronously
+// via respond. ctx is cancelled when the client sends a cancel for this
+// request or its stream ends, so a forwarded long-poll stops parking on
+// behalf of a client that is gone. It reports whether the frame was one
+// this server handles.
+func (s *RPCServer) HandleStreamRequest(ctx context.Context, frame clusterwire.StreamFrame, respond func(clusterwire.StreamFrame)) bool {
 	if frame.Type != clusterwire.StreamFrameNodeRequest {
 		return false
 	}
 	go func() {
-		res := s.dispatch(frame.Payload)
+		res := s.dispatch(ctx, requestKey{stream: clusterrpc.StreamIDFromContext(ctx), request: frame.RequestID}, frame.Payload)
 		payload, err := nodewire.EncodeResponse(res)
 		if err != nil {
 			payload, _ = nodewire.EncodeResponse(errorResponse(http.StatusInternalServerError, "encode rpc response failed"))
@@ -129,6 +148,81 @@ func (s *RPCServer) HandleStreamFrame(frame clusterwire.StreamFrame, respond fun
 	return true
 }
 
+// HandleStreamCancel gives back a message that a consume delivered for a
+// request whose client stopped waiting (see clusterwire.StreamFrameCancel).
+// Without it the reservation would hide the message until its lease
+// expired, for a consumer that never saw it.
+func (s *RPCServer) HandleStreamCancel(streamID, requestID uint64) {
+	d, ok := s.takeDelivery(requestKey{stream: streamID, request: requestID})
+	if !ok {
+		return
+	}
+	s.releaseDelivery(d)
+}
+
+// requestKey identifies one in-flight or just-answered RPC request.
+type requestKey struct {
+	stream, request uint64
+}
+
+// delivery is a message a consume handler handed to a client that may
+// have stopped listening.
+type delivery struct {
+	topic  string
+	handle consumer.Handle
+	at     time.Time
+}
+
+// recentDeliveryTTL bounds how long a delivered handle is remembered for
+// a late cancel. A cancel is sent the moment the client gives up, so it
+// arrives within a network round trip; the TTL is generous.
+const recentDeliveryTTL = 30 * time.Second
+
+// rememberDelivery records that the request delivered handle, so a
+// cancel that arrives after the reply was sent can still release it.
+func (s *RPCServer) rememberDelivery(key requestKey, topicName string, h consumer.Handle) {
+	now := time.Now()
+	s.deliveriesMu.Lock()
+	if s.deliveries == nil {
+		s.deliveries = make(map[requestKey]delivery)
+	}
+	if len(s.deliveries) >= 1024 {
+		for k, d := range s.deliveries {
+			if now.Sub(d.at) > recentDeliveryTTL {
+				delete(s.deliveries, k)
+			}
+		}
+	}
+	s.deliveries[key] = delivery{topic: topicName, handle: h, at: now}
+	s.deliveriesMu.Unlock()
+}
+
+// forgetDelivery drops the record once it is clear the client either got
+// the reply or was already handled.
+func (s *RPCServer) forgetDelivery(key requestKey) {
+	s.deliveriesMu.Lock()
+	delete(s.deliveries, key)
+	s.deliveriesMu.Unlock()
+}
+
+func (s *RPCServer) takeDelivery(key requestKey) (delivery, bool) {
+	s.deliveriesMu.Lock()
+	defer s.deliveriesMu.Unlock()
+	d, ok := s.deliveries[key]
+	if ok {
+		delete(s.deliveries, key)
+	}
+	return d, ok
+}
+
+// releaseDelivery nacks a delivered message so it is redeliverable now.
+// A stale handle (already acked or released) is not an error.
+func (s *RPCServer) releaseDelivery(d delivery) {
+	if err := s.broker.Nack(rpcRequestContext(), d.topic, d.handle); err != nil && !errors.Is(err, consumer.ErrHandleStale) && s.logger != nil {
+		s.logger.Warn("release consume delivery after client cancel", "topic", d.topic, "err", err)
+	}
+}
+
 // withMessagingSlot runs handle under the messaging concurrency bound.
 func (s *RPCServer) withMessagingSlot(handle func() nodewire.Response) nodewire.Response {
 	if sem := s.messagingSem; sem != nil {
@@ -138,7 +232,7 @@ func (s *RPCServer) withMessagingSlot(handle func() nodewire.Response) nodewire.
 	return handle()
 }
 
-func (s *RPCServer) dispatch(payload []byte) nodewire.Response {
+func (s *RPCServer) dispatch(ctx context.Context, key requestKey, payload []byte) nodewire.Response {
 	op, err := nodewire.OperationOf(payload)
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid rpc request")
@@ -146,20 +240,20 @@ func (s *RPCServer) dispatch(payload []byte) nodewire.Response {
 	var res nodewire.Response
 	switch op {
 	case nodewire.OpProduce:
-		res = s.handleProduce(payload)
+		res = s.handleProduce(ctx, payload)
 	case nodewire.OpCommitProduce:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleCommitProduce(payload) })
+		res = s.withMessagingSlot(func() nodewire.Response { return s.handleCommitProduce(ctx, payload) })
 	case nodewire.OpCommitProduceBatch:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleCommitProduceBatch(payload) })
+		res = s.withMessagingSlot(func() nodewire.Response { return s.handleCommitProduceBatch(ctx, payload) })
 	case nodewire.OpConsume:
 		// Gated inside the handler: only non-blocking scans take a slot.
-		res = s.handleConsume(payload)
+		res = s.handleConsume(ctx, key, payload)
 	case nodewire.OpAck:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleAck(payload) })
+		res = s.withMessagingSlot(func() nodewire.Response { return s.handleAck(ctx, payload) })
 	case nodewire.OpExtendAck:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleExtendAck(payload) })
+		res = s.withMessagingSlot(func() nodewire.Response { return s.handleExtendAck(ctx, payload) })
 	case nodewire.OpNack:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleNack(payload) })
+		res = s.withMessagingSlot(func() nodewire.Response { return s.handleNack(ctx, payload) })
 	case nodewire.OpGetTopic:
 		res = s.handleGetTopic(payload)
 	case nodewire.OpJoinCluster:

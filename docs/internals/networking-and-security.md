@@ -90,3 +90,7 @@ An unknown opcode gets a clean 400, which is also the mixed-version story during
 | Leader-confirmation RPCs | 5s |
 | Cluster join attempt cadence | one sweep of the peer list every 2s |
 | Forwarded topic create | 75s (the leader may lawfully park it behind its startup create gate) |
+
+## Request cancellation on the cluster stream
+
+Every request frame on a cluster stream gets its own context on the serving node. A client that stops waiting for a reply (its caller's context ended, or its reply timeout fired) sends a `StreamFrameCancel` carrying the request ID; the server cancels that request's context and, for a consume that had already reserved a message the client will never read, nacks it immediately. When a stream ends, every request still running on it is cancelled. Servers that predate the frame answer it with an error frame for a request nobody is waiting on, which the client ignores, so mixed-version clusters are unaffected.

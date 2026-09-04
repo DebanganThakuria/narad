@@ -87,7 +87,7 @@ func TestRPCServerConsumeHonorsConfiguredMaxWait(t *testing.T) {
 	s.SetMaxConsumeWait(10 * time.Second)
 	s.SetMaxConsumeWait(0) // ignored: values <= 0 keep the current ceiling
 
-	res := s.handleConsume(encodeConsumeReq(t, nodewire.ConsumeRequest{Topic: "orders", WaitNanos: int64(24 * time.Hour)}))
+	res := s.handleConsume(context.Background(), requestKey{}, encodeConsumeReq(t, nodewire.ConsumeRequest{Topic: "orders", WaitNanos: int64(24 * time.Hour)}))
 	if res.Status != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", res.Status, http.StatusNoContent)
 	}

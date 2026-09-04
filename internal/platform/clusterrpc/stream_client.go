@@ -132,14 +132,34 @@ func (c *streamClient) requestFrame(ctx context.Context, frameType clusterwire.S
 		// unrelated in-flight RPCs share it. The pool decides whether to
 		// probe the connection (see quicClientPool.probeAfterTimeout).
 		c.removePending(requestID)
+		c.sendCancel(requestID)
 		return clusterwire.StreamFrame{}, fmt.Errorf("cluster rpc reply timed out after %s: %w", c.timeout, errFallbackReplyTimeout)
 	case <-ctx.Done():
 		// Drop only this request's waiter: the stream is multiplexed and
 		// unrelated in-flight RPCs must keep it. The reader discards the
 		// late reply for this RequestID (complete finds no pending entry).
 		c.removePending(requestID)
+		c.sendCancel(requestID)
 		return clusterwire.StreamFrame{}, ctx.Err()
 	}
+}
+
+// cancelFrameWriteTimeout bounds the best-effort cancel notification so
+// a caller that already spent its whole budget is not held much longer
+// by a stalled stream.
+const cancelFrameWriteTimeout = time.Second
+
+// sendCancel tells the server the waiter for requestID is gone (see
+// clusterwire.StreamFrameCancel). Best-effort: a write failure closes
+// the stream like any other, which cancels every server-side request
+// on it anyway.
+func (c *streamClient) sendCancel(requestID uint64) {
+	if c.isClosed() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cancelFrameWriteTimeout)
+	defer cancel()
+	_ = c.writeFrame(ctx, clusterwire.StreamFrame{Type: clusterwire.StreamFrameCancel, RequestID: requestID})
 }
 
 func (c *streamClient) addPending(requestID uint64, ch chan streamResult) {

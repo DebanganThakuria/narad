@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -12,7 +13,7 @@ import (
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
-func (s *RPCServer) handleProduce(payload []byte) nodewire.Response {
+func (s *RPCServer) handleProduce(ctx context.Context, payload []byte) nodewire.Response {
 	req, err := nodewire.DecodeProduceRequest(payload)
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid produce request: "+err.Error())
@@ -20,7 +21,7 @@ func (s *RPCServer) handleProduce(payload []byte) nodewire.Response {
 	if len(req.Payload) == 0 {
 		return errorResponse(http.StatusBadRequest, "message required")
 	}
-	offset, partition, err := s.broker.Produce(rpcRequestContext(), req.Topic, req.Key, req.Payload, req.Partition)
+	offset, partition, err := s.broker.Produce(ctx, req.Topic, req.Key, req.Payload, req.Partition)
 	if err != nil {
 		return s.brokerError("produce", err)
 	}
@@ -30,12 +31,12 @@ func (s *RPCServer) handleProduce(payload []byte) nodewire.Response {
 	})
 }
 
-func (s *RPCServer) handleCommitProduce(payload []byte) nodewire.Response {
+func (s *RPCServer) handleCommitProduce(ctx context.Context, payload []byte) nodewire.Response {
 	req, err := nodewire.DecodeCommitProduceRequest(payload)
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid commit produce request: "+err.Error())
 	}
-	offset, err := s.broker.CommitAcceptedProduce(rpcRequestContext(), ingress.ProduceRecord{
+	offset, err := s.broker.CommitAcceptedProduce(ctx, ingress.ProduceRecord{
 		Topic:           req.Topic,
 		Key:             req.Key,
 		TargetPartition: req.TargetPartition,
@@ -51,7 +52,7 @@ func (s *RPCServer) handleCommitProduce(payload []byte) nodewire.Response {
 	})
 }
 
-func (s *RPCServer) handleCommitProduceBatch(payload []byte) nodewire.Response {
+func (s *RPCServer) handleCommitProduceBatch(ctx context.Context, payload []byte) nodewire.Response {
 	req, err := nodewire.DecodeCommitProduceBatchRequest(payload)
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid commit produce batch request: "+err.Error())
@@ -66,7 +67,7 @@ func (s *RPCServer) handleCommitProduceBatch(payload []byte) nodewire.Response {
 			CreatedAtUnixMs: record.CreatedAtUnixMs,
 		})
 	}
-	offsets, err := s.broker.CommitAcceptedProduceBatch(rpcRequestContext(), records)
+	offsets, err := s.broker.CommitAcceptedProduceBatch(ctx, records)
 	if err != nil {
 		return s.brokerError("commit produce batch", err)
 	}
@@ -91,15 +92,15 @@ func commitBatchResponse(offsets []int64) nodewire.Response {
 	return nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: body}
 }
 
-func (s *RPCServer) handleConsume(payload []byte) nodewire.Response {
+func (s *RPCServer) handleConsume(ctx context.Context, key requestKey, payload []byte) nodewire.Response {
 	req, err := nodewire.DecodeConsumeRequest(payload)
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid consume request: "+err.Error())
 	}
-	// Clamp the wire-supplied wait: broker.Consume runs under a Background
-	// context here (RPC frames carry no caller deadline), so an unclamped
-	// wait would park this server for however long the peer asked;
-	// defense in depth against peers that skipped the router-side clamp.
+	// Clamp the wire-supplied wait: the request context ends when the
+	// client cancels or its stream dies, but a peer that skipped the
+	// router-side clamp must still not park this server for however long
+	// it asked; defense in depth.
 	wait := max(time.Duration(req.WaitNanos), 0)
 	if ceiling := s.consumeWaitCeiling(); wait > ceiling {
 		wait = ceiling
@@ -114,15 +115,33 @@ func (s *RPCServer) handleConsume(payload []byte) nodewire.Response {
 		opts.Offset = &offset
 	}
 	consume := func() nodewire.Response {
-		msg, found, err := s.broker.Consume(rpcRequestContext(), req.Topic, opts)
+		msg, found, err := s.broker.Consume(ctx, req.Topic, opts)
 		if errors.Is(err, brokermsg.ErrNotPartitionOwner) && req.LocalOnly {
 			return nodewire.Response{Status: http.StatusNoContent}
 		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return nodewire.Response{Status: http.StatusNoContent}
+			}
 			return s.brokerError("consume", err)
 		}
 		if !found {
 			return nodewire.Response{Status: http.StatusNoContent}
+		}
+		// The message is reserved for a client that may already be gone.
+		// Remember the handle first, then check the request context: if
+		// the client cancelled, give the message back right away instead
+		// of leaving it invisible until its lease expires. A cancel that
+		// lands after the reply is written is handled by HandleStreamCancel
+		// through the same record.
+		if h, herr := consumer.DecodeHandle(msg.ReceiptHandle); herr == nil {
+			s.rememberDelivery(key, req.Topic, h)
+			if ctx.Err() != nil {
+				if d, ok := s.takeDelivery(key); ok {
+					s.releaseDelivery(d)
+				}
+				return nodewire.Response{Status: http.StatusNoContent}
+			}
 		}
 		// Encode the message the same way the local HTTP path does: one
 		// append-style pass with the payload embedded verbatim. Routing it
@@ -143,12 +162,12 @@ func (s *RPCServer) handleConsume(payload []byte) nodewire.Response {
 	return s.withMessagingSlot(consume)
 }
 
-func (s *RPCServer) handleAck(payload []byte) nodewire.Response {
+func (s *RPCServer) handleAck(ctx context.Context, payload []byte) nodewire.Response {
 	req, err := nodewire.DecodeAckRequest(payload)
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid ack request: "+err.Error())
 	}
-	if err := s.broker.Ack(rpcRequestContext(), req.Topic, consumer.Handle{
+	if err := s.broker.Ack(ctx, req.Topic, consumer.Handle{
 		Partition: req.Partition,
 		Offset:    req.Offset,
 		Nonce:     req.Nonce,
@@ -158,12 +177,12 @@ func (s *RPCServer) handleAck(payload []byte) nodewire.Response {
 	return nodewire.Response{Status: http.StatusNoContent}
 }
 
-func (s *RPCServer) handleExtendAck(payload []byte) nodewire.Response {
+func (s *RPCServer) handleExtendAck(ctx context.Context, payload []byte) nodewire.Response {
 	req, err := nodewire.DecodeExtendAckRequest(payload)
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid extend ack request: "+err.Error())
 	}
-	if err := s.broker.ExtendAck(rpcRequestContext(), req.Topic, consumer.Handle{
+	if err := s.broker.ExtendAck(ctx, req.Topic, consumer.Handle{
 		Partition: req.Partition,
 		Offset:    req.Offset,
 		Nonce:     req.Nonce,
@@ -173,12 +192,12 @@ func (s *RPCServer) handleExtendAck(payload []byte) nodewire.Response {
 	return nodewire.Response{Status: http.StatusNoContent}
 }
 
-func (s *RPCServer) handleNack(payload []byte) nodewire.Response {
+func (s *RPCServer) handleNack(ctx context.Context, payload []byte) nodewire.Response {
 	req, err := nodewire.DecodeNackRequest(payload)
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid nack request: "+err.Error())
 	}
-	if err := s.broker.Nack(rpcRequestContext(), req.Topic, consumer.Handle{
+	if err := s.broker.Nack(ctx, req.Topic, consumer.Handle{
 		Partition: req.Partition,
 		Offset:    req.Offset,
 		Nonce:     req.Nonce,

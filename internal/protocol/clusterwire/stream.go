@@ -36,6 +36,16 @@ const (
 	// when a cluster secret is configured. Its payload proves knowledge
 	// of the shared secret (see internal/platform/clusterrpc auth).
 	StreamFrameAuth StreamFrameType = 10
+	// StreamFrameCancel tells the server that the client gave up waiting
+	// for the reply to RequestID (its caller's context ended or its
+	// reply timeout fired) and will discard any reply. The server cancels
+	// the request's context and, for a consume that already delivered a
+	// message the client will never read, gives the message back. It has
+	// no payload and no reply. Servers that predate it answer with a
+	// StreamFrameError for the request ID, which the client ignores
+	// (the waiter is already gone), so it is safe in a mixed-version
+	// cluster.
+	StreamFrameCancel StreamFrameType = 11
 )
 
 // StreamFrame is one framed message on a cluster stream. On the wire it
