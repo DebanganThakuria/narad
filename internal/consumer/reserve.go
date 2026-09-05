@@ -219,10 +219,18 @@ func (f *InFlight) resolveReserved(topic string, partition int, offset, nonce in
 	}
 
 	sh.mu.Lock()
-	sh.purgeExpiredLocked(f.now())
+	// The inline purge can itself free a cap slot or the frontier hole
+	// (an expired lease evicted here rather than by the purger tick),
+	// and the purger will find nothing left to announce. So a purge that
+	// released anything wakes pollers whatever this resolve then does,
+	// including a stale-handle return.
+	purged := sh.purgeExpiredLocked(f.now()) > 0
 	rsv, ok := sh.entries[offset]
 	if !ok || rsv.nonce != nonce {
 		sh.mu.Unlock()
+		if purged {
+			f.notifyRelease(topic, partition)
+		}
 		return ErrHandleStale
 	}
 
@@ -242,7 +250,7 @@ func (f *InFlight) resolveReserved(topic string, partition int, offset, nonce in
 		if f.onCommit != nil {
 			f.onCommit(topic, partition, advance)
 		}
-		if wasAtCap || aheadWasFull {
+		if purged || wasAtCap || aheadWasFull {
 			f.notifyRelease(topic, partition)
 		}
 		return nil
@@ -251,7 +259,7 @@ func (f *InFlight) resolveReserved(topic string, partition int, offset, nonce in
 	aheadOf(sh)[offset] = struct{}{}
 	delete(sh.entries, offset)
 	sh.mu.Unlock()
-	if wasAtCap {
+	if purged || wasAtCap {
 		f.notifyRelease(topic, partition)
 	}
 	return nil
