@@ -80,3 +80,9 @@ The recurring numbers: bounded duplicates (the at-least-once seams), `OVERDUE = 
 | Heartbeat / dead marking | 5s / 30s |
 | Startup reconcile caught-up wait | ≤60s (sweep skipped on timeout; data outlives impatience) |
 | Self-leader trust | only after a 5s-bounded Raft `Barrier` + re-read |
+
+## Ownership after a restart
+
+A node decides "do I own this partition" from the assignments in its local metastore replica. Right after a restart that replica lags the cluster: it has not heard from the leader yet, and it may be missing every assignment change that happened while the node was down. Acting on that view is how a node once took ownership of partitions that had been reassigned in the meantime (a topic deleted and recreated under the same name while it was down), committed dispatched records into a fresh directory at offset 0, handed them to consumers, and then lost them when the leader-confirmed stale-copy sweep reclaimed the directory.
+
+So `ListAssignments` refuses with `ErrUnavailable` until the replica has caught up with the leader at least once since the process started (`AppliedCaughtUp`: a leader is known, this node has heard from it recently or is it, and the FSM has applied everything it knows to be committed). Every ownership decision flows through that call, and every caller treats the error as transient: the ingress dispatcher leaves its records in the WAL, a forwarded commit or consume is retried by its sender, and HTTP answers 503. The latch never clears once set; steady-state replica lag is coordinated through the move handoff protocol, not through this gate.

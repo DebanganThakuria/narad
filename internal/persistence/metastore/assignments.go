@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"sort"
 
 	bolt "go.etcd.io/bbolt"
@@ -33,7 +35,24 @@ func (s *Store) GetAssignment(topicName string, partition int) (Assignment, erro
 
 // ListAssignments reads all of the topic's partition assignments from
 // the local replica.
+//
+// It refuses (ErrUnavailable) until the replica has caught up with the
+// leader once since this process started. Assignments are the only
+// input to "do I own this partition", and a freshly restarted node's
+// replica lags the cluster until it has heard from the leader and
+// applied what the leader had committed: acting on that view, a node
+// took ownership of partitions that had been reassigned while it was
+// down (a same-named topic recreated in between), committed dispatched
+// records into a fresh directory at offset 0, handed them to consumers,
+// and later lost them when the correctly gated stale-copy sweep
+// reclaimed the directory (seen under SIGKILL chaos). Every caller
+// treats the error as transient: the dispatcher leaves the records in
+// its WAL, forwarded commits are retried by their sender, and HTTP
+// answers 503 until the view is trustworthy, normally within seconds.
 func (s *Store) ListAssignments(topicName string) ([]Assignment, error) {
+	if !s.ownershipViewReady() {
+		return nil, fmt.Errorf("%w: metastore replica has not caught up with the leader since start; partition ownership unknown", errs.ErrUnavailable)
+	}
 	s.fsm.mu.RLock()
 	defer s.fsm.mu.RUnlock()
 	var out []Assignment
