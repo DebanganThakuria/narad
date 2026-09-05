@@ -55,6 +55,15 @@ func (m *Manager) GetTopicDetails(ctx context.Context, name string) (topic.Detai
 	if err != nil {
 		return topic.Details{}, err
 	}
+	// Directory stats are only this topic's if the directory is: a
+	// node that missed the purge of a deleted same-named topic still
+	// holds that incarnation's directory until an open quarantines it,
+	// and its segments and high-watermark must not be described as the
+	// live topic's.
+	dirIsOurs, err := m.logs.TopicIncarnationMatches(name, t.ID)
+	if err != nil {
+		return topic.Details{}, err
+	}
 	stats := make([]topic.PartitionStats, t.Partitions)
 	for i := 0; i < t.Partitions; i++ {
 		stats[i] = topic.PartitionStats{Index: i}
@@ -73,7 +82,7 @@ func (m *Manager) GetTopicDetails(ctx context.Context, name string) (topic.Detai
 			}
 			continue
 		}
-		if !owned {
+		if !owned || !dirIsOurs {
 			continue
 		}
 		dirStats, err := storage.StatPartitionDir(storage.TopicPartitionDir(m.logs.DataDir(), name, i))

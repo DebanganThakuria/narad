@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
@@ -73,5 +74,44 @@ func TestDeleteTopicPurgesItsIncarnationDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(storage.TopicDir(manager.dataDir, testTopicName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("topic directory after DeleteTopic: stat err = %v, want not-exist", err)
+	}
+}
+
+// A describe reads a closed partition from its directory. When that
+// directory belongs to a deleted incarnation (this node missed the
+// purge and nothing has opened the topic since), its segments and
+// high-watermark are not the live topic's and must not be reported.
+func TestGetTopicDetails_IgnoresDirectoryOfAnotherIncarnation(t *testing.T) {
+	ctx := context.Background()
+	ms := newFakeMetastore()
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, ID: "1111111111111111", Partitions: 1}
+	manager := newTestManager(t, ms, nil)
+	t.Cleanup(func() { _ = manager.logs.CloseAll() })
+
+	l, err := manager.logs.Get(testTopicName, 0)
+	if err != nil {
+		t.Fatalf("logs.Get: %v", err)
+	}
+	if _, err := l.Append([]byte("old")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := l.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := l.AdvanceHighWatermark(1); err != nil {
+		t.Fatalf("AdvanceHighWatermark: %v", err)
+	}
+	if err := manager.logs.CloseTopic(testTopicName); err != nil {
+		t.Fatalf("CloseTopic: %v", err)
+	}
+	// The name was deleted and recreated; this node never purged.
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, ID: "2222222222222222", Partitions: 1}
+
+	details, err := manager.GetTopicDetails(ctx, testTopicName)
+	if err != nil {
+		t.Fatalf("GetTopicDetails: %v", err)
+	}
+	if ps := details.Partitions[0]; ps.HighWatermark != 0 || ps.Segments != 0 || ps.SizeBytes != 0 {
+		t.Fatalf("stats of a deleted incarnation's directory reported for the live topic: %+v", ps)
 	}
 }
