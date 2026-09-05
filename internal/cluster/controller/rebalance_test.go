@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -202,4 +203,75 @@ func deadMember(id string) metastore.Member {
 
 func drainingMember(id string) metastore.Member {
 	return metastore.Member{ID: id, Status: metastore.MemberAlive, Draining: true}
+}
+
+// A move whose target node died and stayed dead can never complete: only
+// the destination aborts a move, and a dead destination cannot. Left
+// alone, such moves pin the in-flight budget forever and stop every later
+// rebalance and decommission. The controller must clear the target once
+// the node has been dead past DeadTargetAbortAfter (or is gone from the
+// membership / voter set), and must leave a briefly dead or live target
+// alone so a restarting pod can finish its copy.
+func TestRebalanceAbortsDeadTargetMoves(t *testing.T) {
+	store := newFakeControllerStore("a", "b")
+	longDead := deadMember("dead-long")
+	longDead.LastHeartbeat = time.Now().Add(-10 * time.Minute).Unix()
+	justDead := deadMember("dead-recent")
+	justDead.LastHeartbeat = time.Now().Add(-10 * time.Second).Unix()
+	removed := drainingMember("removed") // decommissioned: drained and out of the voter set
+	store.members = append(store.members, longDead, justDead, removed)
+	store.voters = []string{"a", "b", "dead-long", "dead-recent"} // "removed" is out of Raft
+	store.topics = []topic.Topic{{Name: "orders", Partitions: 5}}
+	store.assignments["orders"] = map[int]string{0: "a", 1: "a", 2: "a", 3: "a", 4: "a"}
+	store.targets["orders"] = map[int]string{
+		0: "dead-long",   // dead past the bound: abort
+		1: "dead-recent", // dead, but recently: keep (pod may restart)
+		2: "b",           // alive: keep
+		3: "vanished",    // not a member at all: abort
+		4: "removed",     // out of the voter set while draining: abort
+	}
+	c := &Controller{store: store, cfg: Config{MaxInFlightMoves: 8, DeadTargetAbortAfter: time.Minute}.withDefaults()}
+
+	c.reconcileRebalance(context.Background())
+
+	for _, p := range []int{0, 3, 4} {
+		if tgt := store.targets["orders"][p]; tgt != "" {
+			t.Fatalf("partition %d still targeted at %q; a move to a gone node must be aborted", p, tgt)
+		}
+	}
+	if tgt := store.targets["orders"][1]; tgt != "dead-recent" {
+		t.Fatalf("partition 1 target = %q, want the recently dead target kept", tgt)
+	}
+	if tgt := store.targets["orders"][2]; tgt != "b" {
+		t.Fatalf("partition 2 target = %q, want the live target kept", tgt)
+	}
+}
+
+// Aborting dead-target moves frees the budget in the same pass: with the
+// cap otherwise saturated by moves to a long-dead node, fresh moves are
+// planned right away instead of waiting a tick.
+func TestRebalanceDeadTargetAbortFreesBudgetSamePass(t *testing.T) {
+	store := newFakeControllerStore("a", "b")
+	longDead := deadMember("dead-long")
+	longDead.LastHeartbeat = time.Now().Add(-10 * time.Minute).Unix()
+	store.members = append(store.members, longDead)
+	store.topics = []topic.Topic{{Name: "orders", Partitions: 6}}
+	store.assignments["orders"] = map[int]string{0: "a", 1: "a", 2: "a", 3: "a", 4: "a", 5: "a"}
+	store.targets["orders"] = map[int]string{0: "dead-long", 1: "dead-long"} // saturate a cap of 2
+	c := &Controller{store: store, cfg: Config{MaxInFlightMoves: 2, DeadTargetAbortAfter: time.Minute}.withDefaults()}
+
+	c.reconcileRebalance(context.Background())
+
+	live := 0
+	for _, tgt := range store.targets["orders"] {
+		if tgt == "dead-long" {
+			t.Fatal("a move to the long-dead node survived the pass")
+		}
+		if tgt == "b" {
+			live++
+		}
+	}
+	if live != 2 {
+		t.Fatalf("fresh moves to b = %d, want 2 (the budget freed by the aborts, used in the same pass)", live)
+	}
 }
