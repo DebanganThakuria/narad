@@ -15,6 +15,7 @@ import (
 // first address.
 func TestSpreadDialerRotatesAcrossResolvedAddresses(t *testing.T) {
 	var dialed []string
+	lookups := 0
 	dial := func(_ context.Context, _ string, addr string) (net.Conn, error) {
 		dialed = append(dialed, addr)
 		return nil, nil
@@ -22,7 +23,12 @@ func TestSpreadDialerRotatesAcrossResolvedAddresses(t *testing.T) {
 	lookup := func(_ context.Context, host string) ([]net.IPAddr, error) {
 		switch host {
 		case "brokers":
-			return []net.IPAddr{{IP: net.ParseIP("10.0.0.1")}, {IP: net.ParseIP("10.0.0.2")}, {IP: net.ParseIP("10.0.0.3")}}, nil
+			// Rotate the answer per query, as CoreDNS does for a headless
+			// service; the dialer must not let that bias the spread.
+			all := []net.IPAddr{{IP: net.ParseIP("10.0.0.1")}, {IP: net.ParseIP("10.0.0.2")}, {IP: net.ParseIP("10.0.0.3")}}
+			lookups++
+			r := lookups % 3
+			return append(append([]net.IPAddr{}, all[r:]...), all[:r]...), nil
 		case "single":
 			return []net.IPAddr{{IP: net.ParseIP("10.0.0.9")}}, nil
 		}
