@@ -487,3 +487,95 @@ func TestFanoutRunnerDelayChildDrainsInDueOrder(t *testing.T) {
 	// Then the second pair becomes due too.
 	env.waitChildTotal(t, 4)
 }
+
+// writeMoveMarker stamps a parent partition directory as installed by a
+// move while the given child link existed, the way the move runner does.
+func writeMoveMarker(t *testing.T, env *fanoutTestEnv, partitionIdx int, child, epoch string) string {
+	t.Helper()
+	dir := storage.TopicPartitionDir(env.dataDir, "parent", partitionIdx)
+	if err := messaging.WriteMoveMarker(dir, messaging.MoveMarker{
+		Source: "node-old", HighWatermark: 5, InstalledAtUnixMs: time.Now().UnixMilli(),
+		Children: map[string]string{child: epoch},
+	}); err != nil {
+		t.Fatalf("WriteMoveMarker: %v", err)
+	}
+	return dir
+}
+
+// A partition installed by a move carries the source's cursor file; the
+// new owner's cursor resumes from it rather than tail-anchoring.
+func TestFanoutCursorResumesFromMovedCursorFile(t *testing.T) {
+	env := newFanoutTestEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := env.store.AttachChild(ctx, "parent", "child", 0); err != nil {
+		t.Fatalf("AttachChild: %v", err)
+	}
+	child, err := env.store.GetTopic(ctx, "child")
+	if err != nil {
+		t.Fatalf("GetTopic(child): %v", err)
+	}
+	// The "installed" partition: 5 records, and the source's cursor had
+	// fanned out the first 2 of them.
+	env.produceToParent(t, 0, 5, 2, 0)
+	dir := writeMoveMarker(t, env, 0, "child", child.AttachEpoch)
+	if err := storage.WriteFanoutCursorIfPartitionDirExists(dir, "child",
+		storage.FanoutCursor{Epoch: child.AttachEpoch, NextOffset: 2}); err != nil {
+		t.Fatalf("write moved cursor: %v", err)
+	}
+
+	runner := env.newRunner(t)
+	runner.Reconcile(ctx)
+	defer func() { cancel(); runner.wg.Wait() }()
+
+	env.waitChildTotal(t, 3)
+	time.Sleep(100 * time.Millisecond)
+	if got := env.childTotal(t); got != 3 {
+		t.Fatalf("child received %d records, want exactly the 3 after the moved cursor (offsets 2..4)", got)
+	}
+}
+
+// A partition installed by a move for a link that already existed, but
+// with NO cursor file (an older source that did not ship them, or a lost
+// file): the cursor must not tail-anchor over the backlog. It resumes
+// from the oldest retained offset, so the child sees every record
+// (duplicates are the worst case, never a silent gap).
+func TestFanoutLostCursorAfterMoveAnchorsAtOldestNotTail(t *testing.T) {
+	env := newFanoutTestEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := env.store.AttachChild(ctx, "parent", "child", 0); err != nil {
+		t.Fatalf("AttachChild: %v", err)
+	}
+	child, err := env.store.GetTopic(ctx, "child")
+	if err != nil {
+		t.Fatalf("GetTopic(child): %v", err)
+	}
+	env.produceToParent(t, 0, 5, 2, 0)
+	writeMoveMarker(t, env, 0, "child", child.AttachEpoch)
+	// Partition 1 also has data but was installed while a DIFFERENT
+	// attachment existed: for this epoch it is a fresh attach and keeps
+	// the no-backfill contract (tail anchor).
+	env.produceToParent(t, 1, 4, 2, 100)
+	writeMoveMarker(t, env, 1, "child", "some-earlier-epoch")
+
+	runner := env.newRunner(t)
+	runner.Reconcile(ctx)
+	defer func() { cancel(); runner.wg.Wait() }()
+
+	env.waitChildTotal(t, 5)
+	time.Sleep(100 * time.Millisecond)
+	if got := env.childTotal(t); got != 5 {
+		t.Fatalf("child received %d records, want exactly the 5 from partition 0's backlog and none from partition 1's", got)
+	}
+	cur, ok, err := storage.ReadFanoutCursor(storage.TopicPartitionDir(env.dataDir, "parent", 0), "child")
+	if err != nil || !ok || cur.NextOffset != 5 {
+		t.Fatalf("partition 0 cursor = %+v (ok %v, err %v), want next 5 after draining the backlog", cur, ok, err)
+	}
+	cur, ok, err = storage.ReadFanoutCursor(storage.TopicPartitionDir(env.dataDir, "parent", 1), "child")
+	if err != nil || !ok || cur.NextOffset != 4 {
+		t.Fatalf("partition 1 cursor = %+v (ok %v, err %v), want tail-anchored at 4 (fresh attach for this epoch)", cur, ok, err)
+	}
+}

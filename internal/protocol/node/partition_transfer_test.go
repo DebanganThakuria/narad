@@ -63,3 +63,37 @@ func TestPrepareHandoffRequestRoundTrip(t *testing.T) {
 		t.Fatalf("round trip = %+v, want %+v", out, in)
 	}
 }
+
+// The freeze token is an optional trailing field: a request without it
+// encodes exactly as before (so older owners keep decoding it), and one
+// with it round-trips.
+func TestPrepareHandoffRequestRoundTripWithAndWithoutToken(t *testing.T) {
+	plain := PrepareHandoffRequest{Topic: "orders", Partition: 2, FreezeTTLNanos: 30_000_000_000}
+	b, err := EncodePrepareHandoffRequest(plain)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if want := 1 + fieldLen("orders") + 4 + 8; len(b) != want {
+		t.Fatalf("token-less encoding is %d bytes, want the pre-token size %d", len(b), want)
+	}
+	out, err := DecodePrepareHandoffRequest(b)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out != plain {
+		t.Fatalf("round trip = %+v, want %+v", out, plain)
+	}
+
+	fenced := PrepareHandoffRequest{Topic: "orders", Partition: 2, FreezeTTLNanos: 30_000_000_000, FreezeToken: "deadbeef01020304"}
+	b, err = EncodePrepareHandoffRequest(fenced)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	out, err = DecodePrepareHandoffRequest(b)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out != fenced {
+		t.Fatalf("round trip = %+v, want %+v", out, fenced)
+	}
+}

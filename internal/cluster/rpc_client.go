@@ -474,14 +474,21 @@ func (c *PeerClient) FetchSegmentChunk(ctx context.Context, addr, topicName stri
 }
 
 // PrepareHandoff asks the owner at addr to freeze (Topic, Partition) for
-// a rebalance handoff and return its final positions.
-func (c *PeerClient) PrepareHandoff(ctx context.Context, addr, topicName string, partition int, freezeTTL time.Duration) (messaging.PartitionTransferInfo, error) {
+// a rebalance handoff and return its final positions. With an empty
+// freezeToken it arms (or idempotently extends) the freeze and returns
+// its token; with a token it only extends the freeze that token names,
+// failing if that freeze lapsed, which is how the destination re-arms
+// while draining and fences the flip.
+func (c *PeerClient) PrepareHandoff(ctx context.Context, addr, topicName string, partition int, freezeTTL time.Duration, freezeToken string) (messaging.PartitionTransferInfo, error) {
 	payload, err := nodewire.EncodePrepareHandoffRequest(nodewire.PrepareHandoffRequest{
-		Topic: topicName, Partition: partition, FreezeTTLNanos: int64(freezeTTL),
+		Topic: topicName, Partition: partition, FreezeTTLNanos: int64(freezeTTL), FreezeToken: freezeToken,
 	})
 	res, err := c.send(ctx, addr, "prepare_handoff", laneProduce, payload, err)
 	if err != nil {
 		return messaging.PartitionTransferInfo{}, err
+	}
+	if res.Status == http.StatusConflict && freezeToken != "" {
+		return messaging.PartitionTransferInfo{}, messaging.ErrHandoffFreezeLapsed
 	}
 	if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
 		return messaging.PartitionTransferInfo{}, fmt.Errorf("prepare handoff returned status %d", res.Status)

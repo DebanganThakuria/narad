@@ -94,7 +94,7 @@ func TestPeerClientOperationLanes(t *testing.T) {
 		"prepare_handoff": {
 			body: "{}",
 			call: func(c *PeerClient) error {
-				_, err := c.PrepareHandoff(ctx, "peer", "orders", 0, time.Second)
+				_, err := c.PrepareHandoff(ctx, "peer", "orders", 0, time.Second, "")
 				return err
 			},
 			want: clusterrpc.LaneProduce,

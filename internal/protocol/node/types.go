@@ -195,6 +195,12 @@ type PrepareHandoffRequest struct {
 	Topic          string
 	Partition      int
 	FreezeTTLNanos int64
+	// FreezeToken, when set, asks the owner to EXTEND the freeze that
+	// token names rather than arm a fresh one, and to fail if that freeze
+	// lapsed. Encoded only when non-empty, so a request without it is
+	// byte-identical to the pre-token format and older owners keep
+	// decoding it.
+	FreezeToken string
 }
 
 // DecommissionRequest asks the leader to mark a member draining (Cancel
