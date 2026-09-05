@@ -115,3 +115,7 @@ narad cluster decommission narad-4 --cancel
 ```
 
 See [Cluster Lifecycle](cluster-lifecycle.md) for how nodes join and how leadership and membership are managed.
+
+### What the handoff freezes on the source
+
+`PrepareHandoff` freezes produce (new records reroute, commits retry to the new owner) and consume: the source hands out no new reservations for the partition, waits up to 500 ms for the leases already out to be acked or released, and only then reports the transfer info. The committed offset it reports is the in-memory frontier, which leads the flushed `consumer.offset` file by up to one flush. Before this, the copied frontier was the file's value and the acks that landed in the last flush interval, or during the copy, were redelivered by the new owner: every co-location move of a freshly created child topic produced a handful of post-ack redeliveries. A lease still out when the drain bound is reached is redelivered by the new owner, as before (at-least-once).

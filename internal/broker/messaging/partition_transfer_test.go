@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
@@ -141,5 +142,93 @@ func TestPrepareHandoffFreezesCommits(t *testing.T) {
 	e.ResumeProduce("orders", 0)
 	if _, err := e.CommitAcceptedProduceBatch(ctx, rec()); err != nil {
 		t.Fatalf("post-resume commit: %v", err)
+	}
+}
+
+// The frontier a handoff reports is the one consumers reached, not the
+// last flushed consumer.offset: acks that landed since the last flush
+// must not be redelivered by the new owner.
+func TestPrepareHandoffReportsInMemoryFrontier(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 30000}
+	e := newTestEngine(t, ms, nil, nil)
+	ctx := context.Background()
+
+	recs := make([]ingress.ProduceRecord, 0, 3)
+	for i := range 3 {
+		recs = append(recs, ingress.ProduceRecord{Topic: "orders", TargetPartition: 0, Key: "k", Payload: []byte{byte('a' + i)}})
+	}
+	if _, err := e.CommitAcceptedProduceBatch(ctx, recs); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	for range 3 {
+		msg, found, err := e.Consume(ctx, "orders", ConsumeOpts{})
+		if err != nil || !found {
+			t.Fatalf("consume: found=%v err=%v", found, err)
+		}
+		h, err := consumer.DecodeHandle(msg.ReceiptHandle)
+		if err != nil {
+			t.Fatalf("decode handle: %v", err)
+		}
+		if err := e.Ack(ctx, "orders", h); err != nil {
+			t.Fatalf("ack: %v", err)
+		}
+	}
+
+	info, err := e.PrepareHandoff(ctx, "orders", 0, time.Minute)
+	if err != nil {
+		t.Fatalf("PrepareHandoff: %v", err)
+	}
+	if !info.HasCommitted || info.CommittedOffset != 2 {
+		t.Fatalf("handoff committed = (%v, %d), want (true, 2): the acked frontier, not the flushed file", info.HasCommitted, info.CommittedOffset)
+	}
+}
+
+// During a handoff the source hands out no new reservations and waits
+// briefly for the leases already out to be acked, so the reported
+// frontier includes them; ResumeProduce reopens consume.
+func TestPrepareHandoffFreezesConsumeAndDrainsLeases(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 30000}
+	e := newTestEngine(t, ms, nil, nil)
+	ctx := context.Background()
+
+	recs := []ingress.ProduceRecord{
+		{Topic: "orders", TargetPartition: 0, Key: "k", Payload: []byte("a")},
+		{Topic: "orders", TargetPartition: 0, Key: "k", Payload: []byte("b")},
+	}
+	if _, err := e.CommitAcceptedProduceBatch(ctx, recs); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	msg, found, err := e.Consume(ctx, "orders", ConsumeOpts{})
+	if err != nil || !found {
+		t.Fatalf("consume: found=%v err=%v", found, err)
+	}
+	h, _ := consumer.DecodeHandle(msg.ReceiptHandle)
+
+	// The lease is out; its ack arrives while PrepareHandoff is draining.
+	acked := make(chan error, 1)
+	go func() {
+		time.Sleep(60 * time.Millisecond)
+		acked <- e.Ack(ctx, "orders", h)
+	}()
+	info, err := e.PrepareHandoff(ctx, "orders", 0, time.Minute)
+	if err != nil {
+		t.Fatalf("PrepareHandoff: %v", err)
+	}
+	if err := <-acked; err != nil {
+		t.Fatalf("ack during drain: %v", err)
+	}
+	if !info.HasCommitted || info.CommittedOffset != 0 {
+		t.Fatalf("handoff committed = (%v, %d), want (true, 0): the drain must include the ack that landed during it", info.HasCommitted, info.CommittedOffset)
+	}
+
+	// Frozen: the second record is not handed out until the freeze lifts.
+	if _, found, err := e.Consume(ctx, "orders", ConsumeOpts{}); err != nil || found {
+		t.Fatalf("consume on a frozen partition: found=%v err=%v, want nothing", found, err)
+	}
+	e.ResumeProduce("orders", 0)
+	if _, found, err := e.Consume(ctx, "orders", ConsumeOpts{}); err != nil || !found {
+		t.Fatalf("consume after resume: found=%v err=%v, want the second record", found, err)
 	}
 }
