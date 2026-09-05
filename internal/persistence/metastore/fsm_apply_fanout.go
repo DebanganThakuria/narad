@@ -119,6 +119,7 @@ func (f *fsmState) applyAttachChild(data []byte) error {
 		child.Parent = p.Parent
 		child.AttachEpoch = p.Epoch
 		child.FanoutDelayMs = p.DelayMs
+		child.AttachOffsets = p.Offsets
 		if err := putTopicRecord(tx, parent); err != nil {
 			return err
 		}
@@ -164,6 +165,7 @@ func (f *fsmState) applyDetachChild(data []byte) error {
 		child.Parent = ""
 		child.AttachEpoch = ""
 		child.FanoutDelayMs = 0
+		child.AttachOffsets = nil
 		if err := putTopicRecord(tx, parent); err != nil {
 			return err
 		}

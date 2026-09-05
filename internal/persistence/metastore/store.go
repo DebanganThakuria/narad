@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -53,6 +54,12 @@ type Store struct {
 	// this process started; see ListAssignments.
 	ownershipReady atomic.Bool
 	fsm            *fsmState
+
+	// attachOffsets, when registered (SetAttachOffsetResolver), observes
+	// the parent's per-partition committed tail for an attach so the
+	// link records its exact starting point; see fanout_anchor.go.
+	attachOffsetsMu sync.RWMutex
+	attachOffsets   AttachOffsetResolver
 }
 
 // New opens or creates the Raft metastore at cfg.DataDir.

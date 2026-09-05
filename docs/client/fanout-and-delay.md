@@ -30,11 +30,12 @@ curl -u $AUTH -X POST $NARAD/v1/topics/orders/children \
 
 Rules to know:
 
-- Fan-out starts **from the moment of attach**. Messages already in the parent are not backfilled.
+- Fan-out starts **from the moment of attach**. Messages already in the parent are not backfilled. The attach point is exact: while the attach is processed, Narad records the parent's committed position on every partition into the child's record (`attach_offsets`), and each partition's copy starts precisely there, even if the copier takes a moment to start. Partitions added to the parent later are copied from their first message.
+- If one of the parent's partition owners cannot be reached while the attach is processed, the attach fails with `503` and nothing is linked; retry it.
 - Copies preserve the message **key**, so related messages stay grouped in each child.
 - A child belongs to one parent; a parent can have up to 108 children; chains (child of a child) are not allowed.
 - If the parent enforces a schema, children must be schema-compatible; attach fails with `409` otherwise.
-- Detach and re-attach = a fresh start from the parent's tail, never a resume or replay.
+- Detach and re-attach = a fresh start from the new attach point, never a resume or replay.
 
 ```bash
 curl -u $AUTH $NARAD/v1/topics/orders/children              # list children + how far behind each is

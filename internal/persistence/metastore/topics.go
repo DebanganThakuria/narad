@@ -39,13 +39,19 @@ func (s *Store) DeleteTopic(ctx context.Context, name string) error {
 // a positive delayMs must fit inside the parent's retention (delay +
 // the minimum floor). Each attach is stamped with a fresh epoch so
 // fan-out cursor state from an earlier attachment can never be
-// resumed. The delay is immutable while attached.
+// resumed, and with the parent's per-partition committed tail (when an
+// AttachOffsetResolver is registered) so fan-out starts exactly at the
+// attach point. The delay is immutable while attached.
 func (s *Store) AttachChild(ctx context.Context, parent, child string, delayMs int64) error {
 	epoch, err := newAttachEpoch()
 	if err != nil {
 		return err
 	}
-	return s.apply(ctx, opAttachChild, childLinkPayload{Parent: parent, Child: child, Epoch: epoch, DelayMs: delayMs})
+	offsets, err := s.resolveAttachOffsets(ctx, parent)
+	if err != nil {
+		return err
+	}
+	return s.apply(ctx, opAttachChild, childLinkPayload{Parent: parent, Child: child, Epoch: epoch, DelayMs: delayMs, Offsets: offsets})
 }
 
 // newAttachEpoch returns a random identifier for one attach. Generated

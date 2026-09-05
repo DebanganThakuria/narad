@@ -41,26 +41,39 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 		next = cur.NextOffset
 	}
 	if next == topic.FanoutTailOffset {
-		// Tail-anchoring skips everything before the current tail and
-		// OVERWRITES the offset file, so it is destructive on two counts —
-		// and this cursor's epoch may have come from a stale replica view.
-		// Anchor only on an epoch the leader confirms is the child's live
-		// attachment; otherwise defer, leaving the file untouched, and let
-		// the reconciler respawn the cursor once the replica catches up.
+		// Anchoring skips everything before the anchor and OVERWRITES
+		// the offset file, so it is destructive on two counts, and this
+		// cursor's epoch may have come from a stale replica view. Anchor
+		// only on an epoch the leader confirms is the child's live
+		// attachment; otherwise defer, leaving the file untouched, and
+		// let the reconciler respawn the cursor once the replica catches
+		// up.
 		if !epochConfirmedByLeader(ctx, r.store, r.peer, r.selfID, key, r.logger) {
 			return
 		}
-		// Fresh attachment: fan out from the parent's current committed
-		// tail (no backfill), and persist that starting point BEFORE
-		// fanning anything so a crash cannot re-anchor at a later tail
-		// and silently skip the window in between.
-		slab, err := r.broker.ReadFanoutSlab(ctx, key.parent, key.partition,
-			topic.FanoutReadOpts{FromOffset: topic.FanoutTailOffset, MaxRecords: 1, MaxBytes: 1})
-		if err != nil {
-			r.cursorReadError(key, err)
-			return
+		if key.anchor != topic.FanoutTailOffset {
+			// Fresh attachment with a recorded attach point (or a
+			// partition newer than the attach, anchor 0): start exactly
+			// there, so nothing committed between the attach and this
+			// first read is skipped. A lost cursor file lands here too
+			// and replays from the attach point: duplicates, never a
+			// gap, the at-least-once side of the contract.
+			next = key.anchor
+		} else {
+			// Attach record without offsets (written before they were
+			// recorded): fan out from the parent's current committed
+			// tail, the older no-backfill anchor.
+			slab, err := r.broker.ReadFanoutSlab(ctx, key.parent, key.partition,
+				topic.FanoutReadOpts{FromOffset: topic.FanoutTailOffset, MaxRecords: 1, MaxBytes: 1})
+			if err != nil {
+				r.cursorReadError(key, err)
+				return
+			}
+			next = slab.NextOffset
 		}
-		next = slab.NextOffset
+		// Persist the starting point BEFORE fanning anything so a crash
+		// cannot re-anchor later and silently skip the window in
+		// between.
 		if !r.persistCursor(key, partitionDir, next) {
 			return
 		}
