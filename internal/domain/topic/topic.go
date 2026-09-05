@@ -137,7 +137,9 @@ type PartitionStats struct {
 	OldestOffset int64 `json:"oldest_offset"`
 	// NextOffset is the offset the next appended record will receive
 	// (total records ever appended). It can briefly lead HighWatermark
-	// while a record is being committed.
+	// while a record is being committed. For a partition whose log is
+	// idle (closed) it is reported equal to HighWatermark: describing
+	// a partition never opens its log.
 	NextOffset int64 `json:"next_offset"`
 	// HighWatermark is the exclusive upper bound of records visible to
 	// consumers — the durably-committed frontier.

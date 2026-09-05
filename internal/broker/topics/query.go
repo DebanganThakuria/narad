@@ -31,13 +31,18 @@ func (m *Manager) GetTopic(ctx context.Context, name string) (topic.Topic, error
 }
 
 // GetTopicDetails returns the topic record plus per-partition runtime
-// stats. Stats are populated only for partitions this node owns
-// (lazy-opening their logs as needed); unowned partitions are read
-// through the non-opening Peek accessor and otherwise report
-// zero-valued stats with just Index set. Opening unowned partition
-// logs here would spawn their flusher/reaper goroutines, mkdir empty
-// partition dirs, and violate the owner-only invariant the metrics
-// snapshotter documents (runtime/snapshot.go).
+// stats. Stats are populated for partitions this node owns and for
+// any partition whose log happens to be open locally; other unowned
+// partitions report zero-valued stats with just Index set.
+//
+// A describe never opens a partition log. An open log is read through
+// the non-opening Peek accessor (its live counters); a closed one is
+// described from its directory (segment files plus the durable
+// high-watermark file, see storage.StatPartitionDir). Opening would
+// spawn flusher/reaper goroutines, mkdir empty partition dirs for
+// unowned partitions, and stamp the log as active, so a monitoring
+// loop that GETs topics would keep every idle log warm and idle
+// eviction could never fire (runtime/evict.go, invariant 1).
 //
 // The result slice always has exactly Topic.Partitions entries in
 // index order: callers (the HTTP ?partition= path and the cluster
@@ -53,41 +58,38 @@ func (m *Manager) GetTopicDetails(ctx context.Context, name string) (topic.Detai
 	stats := make([]topic.PartitionStats, t.Partitions)
 	for i := 0; i < t.Partitions; i++ {
 		stats[i] = topic.PartitionStats{Index: i}
-		l, err := m.partitionLogForStats(name, i)
+		owned, err := m.ownsPartition(name, i)
 		if err != nil {
 			return topic.Details{}, err
 		}
-		if l == nil {
+		if l, ok := m.logs.Peek(name, i); ok {
+			stats[i].Segments = l.SegmentCount()
+			stats[i].OldestOffset = l.OldestOffset()
+			stats[i].NextOffset = l.NextOffset()
+			stats[i].HighWatermark = l.HighWatermark()
+			stats[i].SizeBytes = l.SizeBytes()
+			if mt, ok := l.OldestSegmentAt(); ok {
+				stats[i].OldestSegmentAt = mt
+			}
 			continue
 		}
-		stats[i].Segments = l.SegmentCount()
-		stats[i].OldestOffset = l.OldestOffset()
-		stats[i].NextOffset = l.NextOffset()
-		stats[i].HighWatermark = l.HighWatermark()
-		stats[i].SizeBytes = l.SizeBytes()
-		if mt, ok := l.OldestSegmentAt(); ok {
-			stats[i].OldestSegmentAt = mt
+		if !owned {
+			continue
 		}
+		dirStats, err := storage.StatPartitionDir(storage.TopicPartitionDir(m.logs.DataDir(), name, i))
+		if err != nil {
+			return topic.Details{}, err
+		}
+		stats[i].Segments = dirStats.Segments
+		stats[i].OldestOffset = dirStats.OldestOffset
+		// A closed log's record tail is not recorded separately from
+		// its committed frontier; report the frontier for both.
+		stats[i].NextOffset = dirStats.HighWatermark
+		stats[i].HighWatermark = dirStats.HighWatermark
+		stats[i].SizeBytes = dirStats.SizeBytes
+		stats[i].OldestSegmentAt = dirStats.OldestSegmentAt
 	}
 	return topic.Details{Topic: t, Partitions: stats}, nil
-}
-
-// partitionLogForStats returns the log to read stats from for (name,
-// idx): a lazily-opened log when this node owns the partition, an
-// already-open log via Peek otherwise, or nil when the partition is
-// unowned and not open locally.
-func (m *Manager) partitionLogForStats(name string, idx int) (*storage.Log, error) {
-	owned, err := m.ownsPartition(name, idx)
-	if err != nil {
-		return nil, err
-	}
-	if owned {
-		return m.logs.Get(name, idx)
-	}
-	if l, ok := m.logs.Peek(name, idx); ok {
-		return l, nil
-	}
-	return nil, nil
 }
 
 // ownsPartition reports whether this node owns (topic, idx). A manager

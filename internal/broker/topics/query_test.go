@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -64,14 +65,10 @@ func TestGetTopicDetails_DoesNotOpenUnownedPartitionLogs(t *testing.T) {
 		}
 	}
 
-	// The owned partition was lazily opened as before.
-	if _, ok := manager.logs.Peek(testTopicName, 0); !ok {
-		t.Fatal("GetTopicDetails() did not open the log for owned partition 0")
-	}
-
-	// Unowned / unassigned partitions must not be opened (no flusher or
-	// reaper goroutines, no empty partition dirs) and report zero stats.
-	for _, p := range []int{1, 2} {
+	// No partition log is opened by a describe, owned or not (no
+	// flusher or reaper goroutines, no empty partition dirs, and no
+	// lastAccess stamp that would keep an idle log warm).
+	for _, p := range []int{0, 1, 2} {
 		if _, ok := manager.logs.Peek(testTopicName, p); ok {
 			t.Fatalf("GetTopicDetails() opened a log for partition %d not owned by this node", p)
 		}
@@ -125,12 +122,103 @@ func TestGetTopicDetails_SelfOwnedPartitionsReportFullStats(t *testing.T) {
 	if len(details.Partitions) != 3 {
 		t.Fatalf("GetTopicDetails() partitions = %d, want 3", len(details.Partitions))
 	}
-	// Owning every partition (the single-node case) must still open and
-	// report every partition log, as before the owner-only change.
+	// Owning every partition (the single-node case) reports every
+	// partition, still without opening any log.
 	for i := range 3 {
-		if _, ok := manager.logs.Peek(testTopicName, i); !ok {
-			t.Fatalf("GetTopicDetails() did not open the log for owned partition %d", i)
+		if details.Partitions[i].Index != i {
+			t.Fatalf("partition stats[%d].Index = %d", i, details.Partitions[i].Index)
 		}
+		if _, ok := manager.logs.Peek(testTopicName, i); ok {
+			t.Fatalf("GetTopicDetails() opened the log for owned partition %d", i)
+		}
+	}
+}
+
+// Audit finding 1.7: a describe must report a closed (idle-evicted or
+// never-reopened) partition's real stats from its directory, without
+// opening the log.
+func TestGetTopicDetails_DescribesClosedLogWithoutOpening(t *testing.T) {
+	ms := newFakeMetastore()
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 2}
+	manager := newTestManager(t, ms, nil)
+	t.Cleanup(func() { _ = manager.logs.CloseAll() })
+
+	l, err := manager.logs.Get(testTopicName, 1)
+	if err != nil {
+		t.Fatalf("logs.Get: %v", err)
+	}
+	for i := range 7 {
+		if _, err := l.Append([]byte{byte(i)}); err != nil {
+			t.Fatalf("Append(%d): %v", i, err)
+		}
+	}
+	if err := l.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := l.AdvanceHighWatermark(7); err != nil {
+		t.Fatalf("AdvanceHighWatermark: %v", err)
+	}
+	wantSize := l.SizeBytes()
+	wantAt, _ := l.OldestSegmentAt()
+
+	// Live counters while open.
+	details, err := manager.GetTopicDetails(context.Background(), testTopicName)
+	if err != nil {
+		t.Fatalf("GetTopicDetails() error = %v", err)
+	}
+	if ps := details.Partitions[1]; ps.HighWatermark != 7 || ps.NextOffset != 7 || ps.Segments != 1 || ps.SizeBytes != wantSize {
+		t.Fatalf("open partition stats = %+v, want hwm=7 next=7 segments=1 size=%d", ps, wantSize)
+	}
+
+	// Closed (as idle eviction leaves it): identical numbers from disk,
+	// and the log stays closed.
+	if err := manager.logs.CloseTopic(testTopicName); err != nil {
+		t.Fatalf("CloseTopic: %v", err)
+	}
+	details, err = manager.GetTopicDetails(context.Background(), testTopicName)
+	if err != nil {
+		t.Fatalf("GetTopicDetails() after close error = %v", err)
+	}
+	ps := details.Partitions[1]
+	if ps.HighWatermark != 7 || ps.NextOffset != 7 || ps.Segments != 1 || ps.OldestOffset != 0 ||
+		ps.SizeBytes != wantSize || ps.OldestSegmentAt != wantAt {
+		t.Fatalf("closed partition stats = %+v, want hwm=7 next=7 segments=1 oldest=0 size=%d at=%d", ps, wantSize, wantAt)
+	}
+	if empty := details.Partitions[0]; empty.HighWatermark != 0 || empty.Segments != 0 {
+		t.Fatalf("never-written partition stats = %+v, want zero", empty)
+	}
+	for i := range 2 {
+		if _, ok := manager.logs.Peek(testTopicName, i); ok {
+			t.Fatalf("GetTopicDetails() reopened the closed log for partition %d", i)
+		}
+	}
+}
+
+// Audit finding 1.7: a monitoring loop that GETs a topic must not keep
+// its idle logs warm. Only Get stamps lastAccess; a describe reads
+// through Peek, so the log stays evictable.
+func TestGetTopicDetails_DoesNotKeepIdleLogWarm(t *testing.T) {
+	ms := newFakeMetastore()
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 1} // keep-forever: evictable regardless of segments
+	manager := newTestManager(t, ms, nil)
+	t.Cleanup(func() { _ = manager.logs.CloseAll() })
+
+	if _, err := manager.logs.Get(testTopicName, 0); err != nil {
+		t.Fatalf("logs.Get: %v", err)
+	}
+	const idle = 30 * time.Millisecond
+	time.Sleep(2 * idle)
+
+	// A describe of a warm log reads its live counters...
+	if _, err := manager.GetTopicDetails(context.Background(), testTopicName); err != nil {
+		t.Fatalf("GetTopicDetails() error = %v", err)
+	}
+	// ...and must not have refreshed its idle clock.
+	if evicted := manager.logs.EvictIdleOnce(idle); evicted != 1 {
+		t.Fatalf("EvictIdleOnce() evicted %d logs after a describe, want 1 (the describe kept the log warm)", evicted)
+	}
+	if _, ok := manager.logs.Peek(testTopicName, 0); ok {
+		t.Fatal("log still open after eviction")
 	}
 }
 
@@ -150,8 +238,11 @@ func TestGetTopicDetails_NoClusterIdentityOwnsEverything(t *testing.T) {
 		t.Fatalf("GetTopicDetails() partitions = %d, want 3", len(details.Partitions))
 	}
 	for i := range 3 {
-		if _, ok := manager.logs.Peek(testTopicName, i); !ok {
-			t.Fatalf("GetTopicDetails() did not open the log for partition %d", i)
+		if details.Partitions[i].Index != i {
+			t.Fatalf("partition stats[%d].Index = %d", i, details.Partitions[i].Index)
+		}
+		if _, ok := manager.logs.Peek(testTopicName, i); ok {
+			t.Fatalf("GetTopicDetails() opened the log for partition %d", i)
 		}
 	}
 }
