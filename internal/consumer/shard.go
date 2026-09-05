@@ -183,8 +183,11 @@ func (sh *partitionShard) advanceCommittedLocked() int64 {
 	return sh.committed
 }
 
-// aheadFullLocked reports whether the bounded "ahead of frontier" state
-// (acked-ahead + corrupt-skipped) has hit its cap. Must hold sh.mu.
+// aheadFullLocked reports whether the "ahead of frontier" state
+// (acked-ahead + corrupt-skipped) has reached its cap. The cap gates
+// ReserveNext (no fresh offsets while full), not resolution: offsets
+// already in flight may still resolve into the set, so its true bound is
+// maxAckedAhead + maxInFlight. Must hold sh.mu.
 func (sh *partitionShard) aheadFullLocked() bool {
 	return len(sh.ackedAhead)+len(sh.corrupt) >= sh.maxAckedAhead
 }

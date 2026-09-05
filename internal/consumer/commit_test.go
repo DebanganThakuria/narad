@@ -40,23 +40,42 @@ func TestCommitFillsGapAndWalksForward(t *testing.T) {
 	wantCommitted(t, f, 4)
 }
 
-func TestCommitHandleAckedAheadCapRejects(t *testing.T) {
+// The acked-ahead cap gates delivery, not acks: once the set is full,
+// ReserveNext serves only the frontier hole, but an ack for a message
+// that was already handed out is always accepted (otherwise every
+// consumer holding an in-flight message when the set filled would give
+// up, let its lease expire, and redeliver: the ack-503 spiral).
+func TestCommitHandleAckedAheadCapGatesDeliveryNotAcks(t *testing.T) {
 	t.Parallel()
 	f := newClockedInFlight(1024, 2) // max 2 out-of-order acks
 
-	nonces := reserveN(t, f, 5)
+	nonces := reserveN(t, f, 5) // 0..4 handed out while the set was empty
 
 	// Fill the ackedAhead set.
 	mustCommit(t, f, 2, nonces[2])
 	mustCommit(t, f, 3, nonces[3])
 
-	// Third out-of-order ack must be rejected.
-	wantErr(t, f.CommitHandle(testTopic, testPart, 4, nonces[4]), ErrAckedAheadFull)
+	// A third out-of-order ack for a LIVE reservation is accepted: the
+	// message was delivered before the set filled.
+	mustCommit(t, f, 4, nonces[4])
+	wantSnapshot(t, f, testTopic, testPart, 2, 3) // 0,1 in flight; 2,3,4 ahead
 
-	// ackedAhead must not have grown (no leak from rejected insert).
-	if _, aa := f.Snapshot(testTopic, testPart); aa != 2 {
-		t.Fatalf("ackedAhead size leaked: got %d, want 2", aa)
+	// No fresh offset is handed out while the set is full and the hole
+	// (offset 0) is still reserved.
+	r, err := f.ReserveNext(context.Background(), testTopic, testPart, testVT, testDeepTail)
+	if err != nil {
+		t.Fatalf("ReserveNext: %v", err)
 	}
+	if r.Reserved || r.SkipReason != "ahead_full" {
+		t.Fatalf("ReserveNext while ahead full = %+v, want ahead_full skip", r)
+	}
+
+	// Acking the hole collapses the run; acking 1 then walks to 4.
+	mustCommit(t, f, 0, nonces[0])
+	wantCommitted(t, f, 0)
+	mustCommit(t, f, 1, nonces[1])
+	wantCommitted(t, f, 4)
+	wantSnapshot(t, f, testTopic, testPart, 0, 0)
 }
 
 func TestCommitHandleStaleNonce(t *testing.T) {
@@ -192,14 +211,14 @@ func TestCommitHandleDoesNotCallOnCommitForOutOfOrderAck(t *testing.T) {
 	}
 }
 
-func TestCommitHandleLeavesAckedAheadIntactOnCapError(t *testing.T) {
+func TestCommitHandleAcceptsLiveAckWhenAheadFull(t *testing.T) {
 	t.Parallel()
 	f := newClockedInFlight(10, 1)
 
 	nonces := reserveN(t, f, 3)
-	mustCommit(t, f, 2, nonces[2])
-	wantErr(t, f.CommitHandle(testTopic, testPart, 1, nonces[1]), ErrAckedAheadFull)
-	wantSnapshot(t, f, testTopic, testPart, 2, 1)
+	mustCommit(t, f, 2, nonces[2]) // set full (cap 1)
+	mustCommit(t, f, 1, nonces[1]) // live reservation: accepted, set grows to 2
+	wantSnapshot(t, f, testTopic, testPart, 1, 2)
 }
 
 func TestCommitHandleRejectsStaleAfterDropTopic(t *testing.T) {
@@ -291,13 +310,49 @@ func TestCommitHandleAckedAheadThenDropTopicClearsState(t *testing.T) {
 	wantSnapshot(t, f, testTopic, testPart, 0, 0)
 }
 
-func TestCommitHandleAckedAheadCapAfterRefreshStillEnforced(t *testing.T) {
+// The ahead set is bounded by cap + MaxInFlight: ReserveNext stops at
+// the cap, and only offsets that were already in flight can still land
+// in the set.
+func TestAckedAheadBoundedByCapPlusInFlight(t *testing.T) {
 	t.Parallel()
-	f := newClockedInFlight(10, 2)
-	nonces := reserveN(t, f, 5)
-	mustCommit(t, f, 2, nonces[2])
-	mustCommit(t, f, 3, nonces[3])
-	wantErr(t, f.CommitHandle(testTopic, testPart, 4, nonces[4]), ErrAckedAheadFull)
+	const maxIF, cap = 4, 3
+	f := newClockedInFlight(maxIF, cap)
+
+	hole := mustReserve(t, f, testDeepTail) // offset 0 stays unacked
+	// Ack everything else as it comes: each round reserves up to the
+	// in-flight cap and acks all of it out of order.
+	for round := 0; round < 5; round++ {
+		var live []ReserveResult
+		for {
+			r, err := f.ReserveNext(context.Background(), testTopic, testPart, testVT, testDeepTail)
+			if err != nil {
+				t.Fatalf("ReserveNext: %v", err)
+			}
+			if !r.Reserved {
+				break
+			}
+			live = append(live, r)
+		}
+		for _, r := range live {
+			mustCommit(t, f, r.Offset, r.Nonce)
+		}
+		if _, ahead := f.Snapshot(testTopic, testPart); ahead > cap+maxIF {
+			t.Fatalf("round %d: ahead set = %d, exceeds cap+maxInFlight = %d", round, ahead, cap+maxIF)
+		}
+	}
+	_, ahead := f.Snapshot(testTopic, testPart)
+	if ahead < cap {
+		t.Fatalf("ahead set = %d, expected it to reach the cap %d", ahead, cap)
+	}
+	r, err := f.ReserveNext(context.Background(), testTopic, testPart, testVT, testDeepTail)
+	if err != nil || r.Reserved || r.SkipReason != "ahead_full" {
+		t.Fatalf("ReserveNext = %+v, %v; want ahead_full", r, err)
+	}
+
+	// Acking the hole drains the whole set in one collapse.
+	mustCommit(t, f, hole.Offset, hole.Nonce)
+	wantCommitted(t, f, int64(ahead))
+	wantSnapshot(t, f, testTopic, testPart, 0, 0)
 }
 
 func TestCommitHandleAfterDropTopicReturnsStaleEvenWithFormerNonce(t *testing.T) {

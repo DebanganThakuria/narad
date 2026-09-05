@@ -74,7 +74,7 @@ The frontier file lags acks by up to ~100ms, so a crash can redeliver a few just
 | Offset commit cadence | 100ms | `defaultConsumerOffsetCommitInterval`: the frontier file lags acks by at most this |
 | Expiry purger cadence | 1s | background sweep releasing expired leases (plus purge-on-touch) |
 | Receipt handle | `partition:offset:nonce` | the nonce is a per-shard atomic counter, so handles never collide across re-reservations |
-| In-flight / acked-ahead caps | per topic, default 1024 each | hit the first → consume returns 204; hit the second → ack returns 503 until the gap closes |
+| In-flight / acked-ahead caps | per topic, default 1024 each | hit the first → consume returns 204; hit the second → consume hands out only the frontier hole (204 otherwise) until the gap closes. Acks for messages already handed out are always accepted, so the set is bounded by the sum of the two caps |
 
 ## Where each piece of state lives (and dies)
 

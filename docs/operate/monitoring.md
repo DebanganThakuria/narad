@@ -42,7 +42,7 @@ Honorable mention: `rate(narad_errors_total[5m])` by `component`/`kind` as a cat
 | `narad_oldest_unconsumed_message_age_seconds` | Upper bound on how stale the next message is |
 | `narad_inflight_size` / `narad_acked_ahead_size` | Lease table pressure vs the topic caps |
 | `narad_ack_rejected_total` | 410s: consumers losing races (normal in small doses) |
-| ack `503`s in `narad_http_requests_total` | acked-ahead set full: consumers not retrying acks; the broker throttles fresh deliveries until the frontier unsticks |
+| `narad_acked_ahead_size` at the topic cap | the head of that partition is stuck (a consumer holding it died or never acked): consume returns 204 for fresh offsets until the head redelivers and is acked. Acks are never rejected for it |
 | `narad_ack_extended_total` / `narad_nack_total` | Lease heartbeats and hand-backs |
 
 ### Fan-out

@@ -24,19 +24,28 @@ func (f *InFlight) ExtendHandle(topic string, partition int, offset, nonce int64
 	}
 
 	sh.mu.Lock()
-	defer sh.mu.Unlock()
-
 	now := f.now()
-	sh.purgeExpiredLocked(now)
+	// See resolveReserved: an inline purge that evicted an expired lease
+	// freed something a parked poller is waiting for, and nobody else
+	// will announce it.
+	purged := sh.purgeExpiredLocked(now) > 0
 
 	rsv, ok := sh.entries[offset]
 	if !ok || rsv.nonce != nonce {
+		sh.mu.Unlock()
+		if purged {
+			f.notifyRelease(topic, partition)
+		}
 		return 0, ErrHandleStale
 	}
 
 	exp := now + visibilityTimeout.Milliseconds()
 	sh.entries[offset] = reservation{expiresAtUnixMs: exp, nonce: nonce}
 	heap.Push(&sh.expiry, expiryEntry{offset: offset, expiresAtUnixMs: exp, nonce: nonce})
+	sh.mu.Unlock()
+	if purged {
+		f.notifyRelease(topic, partition)
+	}
 	return exp, nil
 }
 
@@ -53,10 +62,13 @@ func (f *InFlight) ReleaseHandle(topic string, partition int, offset, nonce int6
 	}
 
 	sh.mu.Lock()
-	sh.purgeExpiredLocked(f.now())
+	purged := sh.purgeExpiredLocked(f.now()) > 0
 	rsv, ok := sh.entries[offset]
 	if !ok || rsv.nonce != nonce {
 		sh.mu.Unlock()
+		if purged {
+			f.notifyRelease(topic, partition)
+		}
 		return ErrHandleStale
 	}
 	// The stale heap entry left behind is skipped when popped: the

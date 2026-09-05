@@ -697,7 +697,10 @@ func TestAckRejectsStaleHandleAfterCommit(t *testing.T) {
 	}
 }
 
-func TestAckAckedAheadCapWithNilMetricsReturnsError(t *testing.T) {
+// The acked-ahead cap gates delivery, not acks: an ack for a message
+// that was handed out is accepted even once the set is full, and the
+// engine then stops handing out fresh offsets until the hole is acked.
+func TestAckBeyondAckedAheadCapIsAcceptedForLiveReservation(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
@@ -707,7 +710,7 @@ func TestAckAckedAheadCapWithNilMetricsReturnsError(t *testing.T) {
 
 	// Reserve 0,1,2 up front (the acked-ahead set is empty, so fresh
 	// offsets flow), THEN ack out of order: acking 1 fills the cap-1
-	// set, so acking 2 must overflow it.
+	// set, and acking 2 must still be accepted.
 	if _, err := offsets.ReserveNext(context.Background(), "orders", 0, time.Second, 3); err != nil {
 		t.Fatalf("ReserveNext(offset 0) error = %v", err)
 	}
@@ -724,10 +727,15 @@ func TestAckAckedAheadCapWithNilMetricsReturnsError(t *testing.T) {
 		t.Fatalf("Ack(offset 1) error = %v", err)
 	}
 	handle = consumer.Handle{Partition: 0, Offset: r2.Offset, Nonce: r2.Nonce}
-
-	err = engine.Ack(context.Background(), "orders", handle)
-	if !errors.Is(err, consumer.ErrAckedAheadFull) {
-		t.Fatalf("Ack() error = %v, want %v", err, consumer.ErrAckedAheadFull)
+	if err := engine.Ack(context.Background(), "orders", handle); err != nil {
+		t.Fatalf("Ack(offset 2) error = %v, want accepted (live reservation)", err)
+	}
+	if inflight, ahead := offsets.Snapshot("orders", 0); inflight != 1 || ahead != 2 {
+		t.Fatalf("snapshot = (%d in flight, %d ahead), want (1, 2)", inflight, ahead)
+	}
+	r, err := offsets.ReserveNext(context.Background(), "orders", 0, time.Second, 10)
+	if err != nil || r.Reserved {
+		t.Fatalf("ReserveNext while ahead full = %+v, %v; want no fresh offset", r, err)
 	}
 }
 

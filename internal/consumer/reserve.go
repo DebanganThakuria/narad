@@ -43,13 +43,18 @@ func (f *InFlight) ReserveNext(ctx context.Context, topic string, partition int,
 		return ReserveResult{SkipReason: "empty"}, nil
 	}
 
-	// When the ahead-of-frontier state is at capacity, every ack except
-	// the frontier hole's is doomed to ErrAckedAheadFull — handing out
-	// NEW offsets from here only manufactures deliveries whose acks
-	// bounce, expire, and redeliver (the ack-503 spiral observed under
-	// soak: hundreds of thousands of duplicates in hours). Serve ONLY
-	// the offset the frontier is waiting on; one successful ack there
-	// collapses the whole acked-ahead run and normal service resumes.
+	// The acked-ahead cap is enforced HERE, on delivery, and nowhere
+	// else: once the ahead-of-frontier state is at capacity, no fresh
+	// offset is handed out. Serve ONLY the offset the frontier is waiting
+	// on; one successful ack there collapses the whole acked-ahead run and
+	// normal service resumes. Acks for offsets that were already handed
+	// out are always accepted (see resolveReserved), which bounds the
+	// ahead set at maxAckedAhead + maxInFlight. Rejecting those acks
+	// instead (the previous behaviour) made every consumer holding an
+	// in-flight message at the moment the set filled give up, let its
+	// lease expire, and redeliver: a partition then crawled at one
+	// cap-sized batch per visibility timeout, with a 503 storm on the
+	// way (72k in one load test).
 	if sh.aheadFullLocked() {
 		if sh.resolvedOrReservedLocked(next) {
 			return ReserveResult{SkipReason: "ahead_full"}, nil
@@ -201,7 +206,10 @@ func corruptSet(sh *partitionShard) map[int64]struct{}    { return sh.corrupt }
 // frontier the committed offset advances (collapsing over any contiguous
 // resolved run) and is persisted via onCommit; ahead of the frontier the
 // offset is parked in the set selected by aheadOf (ackedAhead for acks,
-// corrupt for skips), subject to the shared ahead cap. Either way the
+// corrupt for skips). The ahead cap is NOT checked here: a message the
+// broker handed out can always be resolved, because ReserveNext stops
+// handing out fresh offsets once the set is full, so the set can hold
+// at most maxAckedAhead + maxInFlight offsets. Either way the
 // reservation is removed, freeing a MaxInFlight slot, so the release
 // notifier fires after all shard locks are dropped.
 func (f *InFlight) resolveReserved(topic string, partition int, offset, nonce int64, aheadOf func(*partitionShard) map[int64]struct{}) error {
@@ -211,10 +219,18 @@ func (f *InFlight) resolveReserved(topic string, partition int, offset, nonce in
 	}
 
 	sh.mu.Lock()
-	sh.purgeExpiredLocked(f.now())
+	// The inline purge can itself free a cap slot or the frontier hole
+	// (an expired lease evicted here rather than by the purger tick),
+	// and the purger will find nothing left to announce. So a purge that
+	// released anything wakes pollers whatever this resolve then does,
+	// including a stale-handle return.
+	purged := sh.purgeExpiredLocked(f.now()) > 0
 	rsv, ok := sh.entries[offset]
 	if !ok || rsv.nonce != nonce {
 		sh.mu.Unlock()
+		if purged {
+			f.notifyRelease(topic, partition)
+		}
 		return ErrHandleStale
 	}
 
@@ -234,23 +250,16 @@ func (f *InFlight) resolveReserved(topic string, partition int, offset, nonce in
 		if f.onCommit != nil {
 			f.onCommit(topic, partition, advance)
 		}
-		if wasAtCap || aheadWasFull {
+		if purged || wasAtCap || aheadWasFull {
 			f.notifyRelease(topic, partition)
 		}
 		return nil
 	}
 
-	ahead := aheadOf(sh)
-	if _, already := ahead[offset]; !already {
-		if sh.aheadFullLocked() {
-			sh.mu.Unlock()
-			return ErrAckedAheadFull
-		}
-		ahead[offset] = struct{}{}
-	}
+	aheadOf(sh)[offset] = struct{}{}
 	delete(sh.entries, offset)
 	sh.mu.Unlock()
-	if wasAtCap {
+	if purged || wasAtCap {
 		f.notifyRelease(topic, partition)
 	}
 	return nil

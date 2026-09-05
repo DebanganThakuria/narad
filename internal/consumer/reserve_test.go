@@ -527,11 +527,10 @@ func TestReserveNextAfterDropOfDifferentTopicStillWorks(t *testing.T) {
 	wantReserved(t, r, err, 0)
 }
 
-// When the acked-ahead set is at capacity, handing out fresh offsets is
-// pure spiral fuel: their acks bounce with ErrAckedAheadFull, expire,
-// and redeliver. ReserveNext must serve ONLY the frontier hole in that
-// state — the one offset whose ack collapses the backlog — and report
-// "ahead_full" while the hole is out.
+// When the acked-ahead set is at capacity, handing out fresh offsets
+// would grow it without bound. ReserveNext must serve ONLY the frontier
+// hole in that state, the one offset whose ack collapses the backlog,
+// and report "ahead_full" while the hole is out.
 func TestReserveNextServesOnlyFrontierHoleWhenAckedAheadFull(t *testing.T) {
 	const cap = 4
 	f := newClockedInFlight(64, cap)
