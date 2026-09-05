@@ -1,8 +1,11 @@
 // Package cluster carries the operator-facing HTTP handlers for partition
 // rebalance and decommission: marking a node for decommission (draining),
-// and reading the in-flight moves and per-member placement. The mutation is
-// a metastore write, so it runs on the leader — followers forward via the
-// router, exactly like user and topic writes.
+// and reading the in-flight moves and per-member placement. Every route
+// here is admin-only, reads included: member addresses, liveness, drain
+// state, and the topic names of in-flight moves are cluster topology, not
+// something a principal with a single produce grant should see. The
+// mutation is a metastore write, so it runs on the leader; followers
+// forward via the router, exactly like user and topic writes.
 package cluster
 
 import (
@@ -19,9 +22,7 @@ import (
 // drained, remove it from the Raft voter set.
 func Decommission(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		caller, ok := handlers.Identity(r)
-		if ok && !caller.IsAdmin() {
-			s.WriteError(w, http.StatusForbidden, "admin privileges required")
+		if _, ok := s.RequireAdmin(w, r); !ok {
 			return
 		}
 		id := r.PathValue("id")
@@ -57,10 +58,13 @@ type MoveView struct {
 }
 
 // Moves handles GET /v1/cluster/moves: every partition currently mid-move
-// (an assignment with a target set). Served from the local metastore replica
-// — no leader hop needed for a read.
+// (an assignment with a target set). Admin only. Served from the local
+// metastore replica; no leader hop needed for a read.
 func Moves(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := s.RequireAdmin(w, r); !ok {
+			return
+		}
 		topics, _, err := s.Deps.Metastore.ListTopics(r.Context(), metastore.ListOptions{})
 		if err != nil {
 			s.WriteBrokerError(w, "list topics", err)
@@ -101,10 +105,13 @@ type MemberView struct {
 }
 
 // Members handles GET /v1/cluster/members: every registered member with its
-// live placement counts — the operator's view of a rebalance or drain in
-// progress. Served from the local replica.
+// live placement counts, the operator's view of a rebalance or drain in
+// progress. Admin only. Served from the local replica.
 func Members(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := s.RequireAdmin(w, r); !ok {
+			return
+		}
 		members, err := s.Deps.Metastore.ListMembers()
 		if err != nil {
 			s.WriteBrokerError(w, "list members", err)

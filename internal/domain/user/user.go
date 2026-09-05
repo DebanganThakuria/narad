@@ -84,6 +84,24 @@ func (u User) Allowed(action Action, topicName string) bool {
 	return false
 }
 
+// AllowedAny reports whether the user holds any grant matching the named
+// topic, regardless of action. It is the read-visibility test: a
+// principal that can produce to, consume from, or create a topic may
+// also see its metadata. Admin sees everything.
+func (u User) AllowedAny(topicName string) bool {
+	if u.IsAdmin() {
+		return true
+	}
+	for _, g := range u.Grants {
+		for _, p := range g.Patterns {
+			if MatchPattern(p, topicName) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // MatchPattern reports whether a grant pattern matches a topic name.
 // A trailing '*' matches any suffix (including empty); anything else
 // is a literal comparison.
@@ -174,6 +192,25 @@ var patternPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{0,255}\*?$`)
 func ValidateUsername(name string) error {
 	if !usernamePattern.MatchString(name) {
 		return fmt.Errorf("username must match %s", usernamePattern)
+	}
+	return nil
+}
+
+// MaxPasswordBytes is bcrypt's input limit: it hashes at most 72 bytes
+// and the x/crypto implementation rejects longer inputs outright rather
+// than silently truncating them.
+const MaxPasswordBytes = 72
+
+// ValidatePassword rejects empty passwords and passwords over
+// MaxPasswordBytes (bytes, not characters: multi-byte UTF-8 counts). It
+// runs before any hashing so an over-long password is a 400 to the
+// client, never a hashing failure reported as a server error.
+func ValidatePassword(password string) error {
+	if password == "" {
+		return fmt.Errorf("password required")
+	}
+	if len(password) > MaxPasswordBytes {
+		return fmt.Errorf("password must be at most %d bytes", MaxPasswordBytes)
 	}
 	return nil
 }

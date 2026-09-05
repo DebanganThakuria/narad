@@ -319,13 +319,12 @@ func (a *Authenticator) runBcrypt(ctx context.Context, username string, cred [32
 		if !a.takeTokenFor(username) {
 			return false, ErrThrottled
 		}
-		select {
-		case a.verifySem <- struct{}{}:
-		case <-ctx.Done():
+		release, err := a.acquireBcrypt(ctx)
+		if err != nil {
 			a.adjustTokens(username, +1) // not verified; give it back
-			return false, ctx.Err()
+			return false, err
 		}
-		defer func() { <-a.verifySem }()
+		defer release()
 		ok := bcrypt.CompareHashAndPassword(storedHash, []byte(password)) == nil
 		if ok {
 			a.adjustTokens(username, +1)
@@ -336,6 +335,46 @@ func (a *Authenticator) runBcrypt(ctx context.Context, username string, cred [32
 		return false, err
 	}
 	return match.(bool), nil
+}
+
+// acquireBcrypt takes one of the maxConcurrentVerify bcrypt slots,
+// returning the release func, or ctx's error if it is done first.
+func (a *Authenticator) acquireBcrypt(ctx context.Context) (func(), error) {
+	select {
+	case a.verifySem <- struct{}{}:
+		return func() { <-a.verifySem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// HashPassword bcrypt-hashes a new password for storage under the same
+// process-wide concurrency bound as Verify. User create and password
+// reset run bcrypt at full cost per request; without the bound an
+// authenticated caller looping on password changes could pin every
+// core, starving the verification path (and everything else).
+func (a *Authenticator) HashPassword(ctx context.Context, password string) ([]byte, error) {
+	release, err := a.acquireBcrypt(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+}
+
+// ComparePassword checks a presented password against a stored hash
+// under the bcrypt concurrency bound. It bypasses the credential cache
+// and the throttle on purpose: it serves the self-service "prove your
+// current password" step, which is already authenticated and must not
+// spend the caller's login budget or poison the negative cache. A nil
+// error means the password matches.
+func (a *Authenticator) ComparePassword(ctx context.Context, hash []byte, password string) error {
+	release, err := a.acquireBcrypt(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return bcrypt.CompareHashAndPassword(hash, []byte(password))
 }
 
 // takeTokenFor consumes one throttle token for username if available.

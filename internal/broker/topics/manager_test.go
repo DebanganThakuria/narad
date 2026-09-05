@@ -312,9 +312,12 @@ func TestCreateTopic_AppliesDefaultsAndCreatesDirectory(t *testing.T) {
 		t.Fatalf("metastore CreateTopic() topic = %q, want %q", ms.lastCreatedTopic.Name, testTopicName)
 	}
 
+	// Create must not touch disk: the leader may own no partition of the
+	// topic, and an empty directory only inflates the orphan sweep and
+	// the disk-size metrics. Partition logs create their own dirs lazily.
 	topicDir := filepath.Join(manager.dataDir, "topics", testTopicName)
-	if _, err := os.Stat(topicDir); err != nil {
-		t.Fatalf("topic dir stat error = %v", err)
+	if _, err := os.Stat(topicDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("topic dir stat error = %v, want not exists (create must not create the topic directory)", err)
 	}
 }
 

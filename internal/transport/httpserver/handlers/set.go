@@ -74,6 +74,16 @@ type Router interface {
 	RouteDecommissionMember(ctx context.Context, w http.ResponseWriter, r *http.Request, id string, cancel bool) bool
 }
 
+// PasswordHasher runs the bcrypt work behind user create and password
+// change. *security.Authenticator implements it under the same
+// concurrency bound as login verification. Nil (security disabled,
+// tests) runs bcrypt inline.
+type PasswordHasher interface {
+	HashPassword(ctx context.Context, password string) ([]byte, error)
+	// ComparePassword returns nil when password matches hash.
+	ComparePassword(ctx context.Context, hash []byte, password string) error
+}
+
 // LocalConsumeWaiter is the local half of a raced long-poll (see
 // topic.LocalConsumeWaiter).
 type LocalConsumeWaiter = topic.LocalConsumeWaiter
@@ -96,6 +106,9 @@ type Deps struct {
 	// Router is optional. When set, requests are forwarded to the partition
 	// owner instead of being handled locally on non-owner pods.
 	Router Router
+
+	// Passwords is optional; see PasswordHasher.
+	Passwords PasswordHasher
 }
 
 // Set is shared by every handler subpackage. The Deps field is

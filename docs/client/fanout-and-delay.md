@@ -30,6 +30,7 @@ curl -u $AUTH -X POST $NARAD/v1/topics/orders/children \
 
 Rules to know:
 
+- You need manage rights (ownership or `admin`) on **both** topics to attach: the child's schema history is replaced by the parent's and the parent's records start flowing into it, so owning the parent alone does not let you claim someone else's topic. Detaching needs manage rights on either side. Listing children needs any grant on the parent.
 - Fan-out starts **from the moment of attach**. Messages already in the parent are not backfilled. The attach point is exact: while the attach is processed, Narad records the parent's committed position on every partition into the child's record (`attach_offsets`), and each partition's copy starts precisely there, even if the copier takes a moment to start. Partitions added to the parent later are copied from their first message.
 - If one of the parent's partition owners cannot be reached while the attach is processed, the attach fails with `503` and nothing is linked; retry it.
 - Copies preserve the message **key**, so related messages stay grouped in each child.
@@ -52,7 +53,8 @@ curl -u $AUTH -X POST $NARAD/v1/topics   -H "Content-Type: application/json"   -
 ```
 
 Same rules as attach (the parent must exist, you need manage rights on
-it, `fanout_delay_ms` makes it a delay child), plus two conveniences:
+it plus a `create` grant matching the child's name, `fanout_delay_ms`
+makes it a delay child), plus two conveniences:
 leave `partitions` at 0 and the child inherits the **parent's** count,
 and if the attach can't complete the create is rolled back: no
 half-linked topic left behind.

@@ -20,6 +20,7 @@ import (
 	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
@@ -744,12 +745,16 @@ func TestDeleteHandlerBroadcastsAfterLocalPurgeFailure(t *testing.T) {
 	if !broadcasted {
 		t.Fatal("Delete() did not broadcast remote purge after local purge failure")
 	}
-	if res.Code != http.StatusInternalServerError {
-		t.Fatalf("Delete() status = %d, want %d", res.Code, http.StatusInternalServerError)
+	// The metadata delete stood; the leftover directory is the startup
+	// sweep's job. A 5xx here would make the client retry and get 404.
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("Delete() status = %d, want %d (metadata delete stood)", res.Code, http.StatusNoContent)
 	}
 }
 
-func TestDeleteHandlerReturnsBroadcastError(t *testing.T) {
+// A purge broadcast failure on some member is logged, not surfaced: the
+// delete committed, and that member's startup sweep reclaims the files.
+func TestDeleteHandlerAnswers204DespiteBroadcastError(t *testing.T) {
 	s := newTestSetWithRouter(&fakeBroker{deleteTopicFn: func(_ context.Context, _ string) error {
 		return nil
 	}}, &fakeRouter{
@@ -766,8 +771,32 @@ func TestDeleteHandlerReturnsBroadcastError(t *testing.T) {
 	res := httptest.NewRecorder()
 	Delete(s).ServeHTTP(res, req)
 
-	if res.Code != http.StatusInternalServerError {
-		t.Fatalf("Delete() status = %d, want %d", res.Code, http.StatusInternalServerError)
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("Delete() status = %d, want %d (delete committed; purge is best-effort)", res.Code, http.StatusNoContent)
+	}
+}
+
+// A delete that fails BEFORE the metadata commit (topic missing, Raft
+// unavailable) is still an error: nothing was deleted.
+func TestDeleteHandlerStillFailsWhenMetadataDeleteFails(t *testing.T) {
+	broadcasted := false
+	s := newTestSetWithRouter(&fakeBroker{deleteTopicFn: func(context.Context, string) error {
+		return errs.ErrTopicNotFound
+	}}, &fakeRouter{broadcastDeleteTopicFn: func(context.Context, string) error {
+		broadcasted = true
+		return nil
+	}})
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Delete(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("Delete() status = %d, want 404", res.Code)
+	}
+	if broadcasted {
+		t.Fatal("Delete() broadcast a purge although the metadata delete failed")
 	}
 }
 

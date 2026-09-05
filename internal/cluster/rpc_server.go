@@ -364,8 +364,7 @@ func (s *RPCServer) brokerError(op string, err error) nodewire.Response {
 	case errors.Is(err, errs.ErrAckedAheadFull):
 		return errorResponse(http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, errs.ErrInvalidArgument),
-		errors.Is(err, errs.ErrPartitionRequired),
-		errors.Is(err, errs.ErrFanoutDelayTooLong):
+		errors.Is(err, errs.ErrPartitionRequired):
 		return errorResponse(http.StatusBadRequest, err.Error())
 	case errors.Is(err, errs.ErrNotPartitionOwner):
 		return errorResponse(http.StatusMisdirectedRequest, err.Error())
@@ -374,6 +373,7 @@ func (s *RPCServer) brokerError(op string, err error) nodewire.Response {
 		errors.Is(err, errs.ErrFanoutSchemaMismatch),
 		errors.Is(err, errs.ErrFanoutSchemaManaged),
 		errors.Is(err, errs.ErrDelayedChildProduce),
+		errors.Is(err, errs.ErrFanoutDelayTooLong), // 409, as the HTTP layer maps it
 		errors.Is(err, errs.ErrAlreadyExists):
 		return errorResponse(http.StatusConflict, err.Error())
 	case errors.Is(err, errs.ErrNotFound):

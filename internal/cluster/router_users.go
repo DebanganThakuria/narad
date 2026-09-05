@@ -11,7 +11,10 @@ import (
 // the leader. Each Route* returns false when this node is the leader (no
 // member address for "self"), letting the HTTP handler apply the write to
 // the local metastore; otherwise it forwards to the leader and returns
-// true. A 503 is returned when no leader is currently known.
+// true. A leader that cannot be reached (election, partition, rolling
+// restart) is a 503, the same retryable answer topic writes give; a 502
+// here would make clients that treat Bad Gateway as terminal stop
+// retrying user writes during failover.
 
 // RouteCreateUser forwards a user create to the cluster leader.
 func (rt *Router) RouteCreateUser(ctx context.Context, w http.ResponseWriter, _ *http.Request, body []byte) bool {
@@ -44,10 +47,11 @@ func (rt *Router) RouteDeleteUser(ctx context.Context, w http.ResponseWriter, _ 
 }
 
 // writeForwardResult renders a forwarded peer response, mapping a
-// transport error to 502.
+// transport error to 503 via writeLeaderForwardError, exactly like the
+// topic write forwards.
 func writeForwardResult(w http.ResponseWriter, res nodewire.Response, err error) bool {
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeLeaderForwardError(w, err)
 		return true
 	}
 	writePeerResponse(w, res)

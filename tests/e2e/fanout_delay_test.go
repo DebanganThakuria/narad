@@ -86,10 +86,13 @@ func TestFanoutDelayRetentionInvariant(t *testing.T) {
 	e.createTopic("dret-parent", 3, 7_200_000) // 2h: buffers delays up to 1h
 	e.createTopic("dret-child", 3, 0)
 
-	// A delay the retention cannot buffer is a bad request (invalid
-	// delay/retention combination), not a conflict.
+	// A delay the retention cannot buffer is a conflict between two
+	// records (the child's delay vs the parent's retention), answered
+	// 409 on attach, create-as-child and alter alike: the documented
+	// contract in docs/client/guarantees-and-errors.md. A malformed
+	// delay (negative, below) stays a 400.
 	resp := attachChildWithDelay(t, e, "dret-parent", "dret-child", 3_600_001)
-	expectBadRequest(t, resp)
+	expectConflict(t, resp)
 	// A negative delay is a bad request.
 	resp = attachChildWithDelay(t, e, "dret-parent", "dret-child", -5)
 	expectBadRequest(t, resp)
@@ -99,11 +102,10 @@ func TestFanoutDelayRetentionInvariant(t *testing.T) {
 	expectOK(t, resp)
 
 	// ...and now the parent's retention cannot shrink below what the
-	// child's delay requires (1500ms + the 1h floor > 1h). The requested
-	// retention is invalid for this topic's delay config → bad request,
-	// consistent with the create/attach path.
+	// child's delay requires (1500ms + the 1h floor > 1h): 409, as
+	// docs/client/topics.md promises and consistent with attach.
 	resp = e.patch("/v1/topics/dret-parent", map[string]any{"retention_ms": int64(3_600_000)})
-	expectBadRequest(t, resp)
+	expectConflict(t, resp)
 	// Shrinking to something that still buffers the delay is fine.
 	resp = e.patch("/v1/topics/dret-parent", map[string]any{"retention_ms": int64(3_700_000)})
 	expectOK(t, resp)

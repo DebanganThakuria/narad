@@ -161,7 +161,7 @@ func capsResolver(ms metastore.Metastore, defaults config.TopicConfig) consumer.
 }
 
 func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, logs *runtime.Logs, ms *metastore.Store, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, auth *security.Authenticator, log *slog.Logger) *httpserver.Server {
-	handlerSet := handlers.New(handlers.Deps{
+	deps := handlers.Deps{
 		Broker:         br,
 		Logs:           logs,
 		Metastore:      ms,
@@ -169,7 +169,14 @@ func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, l
 		MaxConsumeWait: cfg.HTTP.MaxConsumeWait.D(),
 		ShutdownCtx:    ctx,
 		Router:         router,
-	})
+	}
+	if auth != nil {
+		// Password hashing for user writes shares the authenticator's
+		// bcrypt concurrency bound (a nil *Authenticator must not become
+		// a non-nil interface).
+		deps.Passwords = auth
+	}
+	handlerSet := handlers.New(deps)
 	return httpserver.New(cfg.HTTP, httpserver.NewRouter(handlerSet, log, m, reg, auth), log)
 }
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"regexp"
 	"time"
 
@@ -87,8 +86,9 @@ func (m *Manager) waitCreateGate(ctx context.Context) error {
 	}
 }
 
-// CreateTopic registers a new topic and prepares its on-disk
-// directory. Partition log files are opened lazily on first use.
+// CreateTopic registers a new topic. Nothing is written to disk here:
+// partition log directories and files are created lazily on first use
+// by whichever node owns the partition.
 //
 // Zero values for any policy field inherit the matching default from
 // Config. Negative values and partitions exceeding Config.MaxPartitions
@@ -121,12 +121,16 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 		}
 	}
 
-	dir, err := m.topicDir(opts.Name)
-	if err != nil {
+	// Defense in depth behind validateTopicName: refuse a name that would
+	// escape the topics root before it reaches the metastore. No
+	// directory is created here: the node running a create is the Raft
+	// leader, which may own none of the topic's partitions, and partition
+	// logs create their own directories lazily on first open. An empty
+	// directory on the leader was pure liability: the orphan sweep had to
+	// leader-confirm it after a delete that happened while this node was
+	// down, and the disk-size metrics counted it.
+	if _, err := m.topicDir(opts.Name); err != nil {
 		return topic.Topic{}, err
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return topic.Topic{}, fmt.Errorf("topics: create topic dir: %w", err)
 	}
 
 	if err := m.metastore.CreateTopic(ctx, t); err != nil {
