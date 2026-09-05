@@ -196,6 +196,25 @@ func ValidateUsername(name string) error {
 	return nil
 }
 
+// MaxPasswordBytes is bcrypt's input limit: it hashes at most 72 bytes
+// and the x/crypto implementation rejects longer inputs outright rather
+// than silently truncating them.
+const MaxPasswordBytes = 72
+
+// ValidatePassword rejects empty passwords and passwords over
+// MaxPasswordBytes (bytes, not characters: multi-byte UTF-8 counts). It
+// runs before any hashing so an over-long password is a 400 to the
+// client, never a hashing failure reported as a server error.
+func ValidatePassword(password string) error {
+	if password == "" {
+		return fmt.Errorf("password required")
+	}
+	if len(password) > MaxPasswordBytes {
+		return fmt.Errorf("password must be at most %d bytes", MaxPasswordBytes)
+	}
+	return nil
+}
+
 // ValidateGrants rejects unknown actions, malformed patterns, empty
 // pattern lists on scoped actions, and patterns on the admin action.
 func ValidateGrants(grants []Grant) error {

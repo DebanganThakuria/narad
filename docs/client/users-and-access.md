@@ -53,6 +53,8 @@ curl -u $ADMIN -X PUT $NARAD/v1/users/billing-service/grants \
 curl -u $ADMIN -X DELETE $NARAD/v1/users/billing-service
 ```
 
+Passwords are 1 to 72 **bytes** (bcrypt's limit; multi-byte characters count per byte). Anything longer is rejected with `400` on create and on password change.
+
 Two rules that keep the system honest:
 
 - **No privilege escalation**: you can never grant another user more than you hold yourself.

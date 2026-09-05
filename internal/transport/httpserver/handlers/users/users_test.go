@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -411,5 +412,110 @@ func TestUpdateGrantsIsFieldScoped(t *testing.T) {
 	}
 	if bcrypt.CompareHashAndPassword(got.PasswordHash, []byte("pw1")) != nil {
 		t.Fatal("grants update clobbered the password hash")
+	}
+}
+
+// bcrypt rejects passwords over 72 bytes. That must surface as the
+// client's 400 before any hashing, on create and on both password-change
+// paths, never as a 500 "hash password" with a server error log line.
+func TestPasswordLengthIsValidatedUpFront(t *testing.T) {
+	s := newStore(t)
+	set := newSet(t, s)
+	seedUser(t, s, user.User{Username: "gina"}, "pw")
+	admin := user.User{Username: "root", Root: true}
+	tooLong := strings.Repeat("x", user.MaxPasswordBytes+1)
+	maxLen := strings.Repeat("y", user.MaxPasswordBytes)
+
+	// Create: 73 bytes is 400, 72 bytes is 201.
+	req := asUser(httptest.NewRequest(http.MethodPost, "/v1/users",
+		bytes.NewBufferString(`{"username":"h","password":"`+tooLong+`"}`)), admin)
+	res := httptest.NewRecorder()
+	httpusers.Create(set).ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("create with 73-byte password: status = %d, want 400 (%s)", res.Code, res.Body)
+	}
+	req = asUser(httptest.NewRequest(http.MethodPost, "/v1/users",
+		bytes.NewBufferString(`{"username":"h","password":"`+maxLen+`"}`)), admin)
+	res = httptest.NewRecorder()
+	httpusers.Create(set).ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("create with 72-byte password: status = %d, want 201 (%s)", res.Code, res.Body)
+	}
+
+	// Admin reset.
+	req = asUser(httptest.NewRequest(http.MethodPut, "/v1/users/gina/password",
+		bytes.NewBufferString(`{"new_password":"`+tooLong+`"}`)), admin)
+	req.SetPathValue("username", "gina")
+	res = httptest.NewRecorder()
+	httpusers.UpdatePassword(set).ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("admin reset with 73-byte password: status = %d, want 400 (%s)", res.Code, res.Body)
+	}
+
+	// Self-service: validated before the current-password check, so a
+	// bad new password does not cost a bcrypt compare either.
+	gina, _ := s.GetUser(context.Background(), "gina")
+	req = asUser(httptest.NewRequest(http.MethodPut, "/v1/users/gina/password",
+		bytes.NewBufferString(`{"current_password":"pw","new_password":"`+tooLong+`"}`)), gina)
+	req.SetPathValue("username", "gina")
+	res = httptest.NewRecorder()
+	httpusers.UpdatePassword(set).ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("self-service with 73-byte password: status = %d, want 400 (%s)", res.Code, res.Body)
+	}
+	if bcrypt.CompareHashAndPassword(gina.PasswordHash, []byte("pw")) != nil {
+		t.Fatal("rejected password change altered the stored hash")
+	}
+}
+
+// countingHasher stands in for the authenticator: every bcrypt run the
+// handlers do must go through it, so the process-wide bound applies.
+type countingHasher struct {
+	hashes, compares int
+}
+
+func (c *countingHasher) HashPassword(_ context.Context, password string) ([]byte, error) {
+	c.hashes++
+	return bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+}
+
+func (c *countingHasher) ComparePassword(_ context.Context, hash []byte, password string) error {
+	c.compares++
+	return bcrypt.CompareHashAndPassword(hash, []byte(password))
+}
+
+func TestPasswordWorkGoesThroughDepsPasswords(t *testing.T) {
+	s := newStore(t)
+	hasher := &countingHasher{}
+	set := handlers.New(handlers.Deps{
+		Broker:    stubBroker{},
+		Metastore: s,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Passwords: hasher,
+	})
+	admin := user.User{Username: "root", Root: true}
+
+	req := asUser(httptest.NewRequest(http.MethodPost, "/v1/users",
+		bytes.NewBufferString(`{"username":"hal","password":"pw1"}`)), admin)
+	res := httptest.NewRecorder()
+	httpusers.Create(set).ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("create: status = %d (%s)", res.Code, res.Body)
+	}
+	if hasher.hashes != 1 {
+		t.Fatalf("create hashed %d times through Deps.Passwords, want 1", hasher.hashes)
+	}
+
+	hal, _ := s.GetUser(context.Background(), "hal")
+	req = asUser(httptest.NewRequest(http.MethodPut, "/v1/users/hal/password",
+		bytes.NewBufferString(`{"current_password":"pw1","new_password":"pw2"}`)), hal)
+	req.SetPathValue("username", "hal")
+	res = httptest.NewRecorder()
+	httpusers.UpdatePassword(set).ServeHTTP(res, req)
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("self-service change: status = %d (%s)", res.Code, res.Body)
+	}
+	if hasher.compares != 1 || hasher.hashes != 2 {
+		t.Fatalf("self-service change: compares = %d hashes = %d, want 1 and 2 (both under the bound)", hasher.compares, hasher.hashes)
 	}
 }

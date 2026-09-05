@@ -95,8 +95,8 @@ func UpdatePassword(s *handlers.Set) http.HandlerFunc {
 		if !s.DecodeJSON(w, r, &req) {
 			return
 		}
-		if req.NewPassword == "" {
-			s.WriteError(w, http.StatusBadRequest, "new_password required")
+		if err := user.ValidatePassword(req.NewPassword); err != nil {
+			s.WriteError(w, http.StatusBadRequest, "new_password: "+err.Error())
 			return
 		}
 
@@ -119,13 +119,13 @@ func UpdatePassword(s *handlers.Set) http.HandlerFunc {
 
 		// Self-service (non-admin) must prove the current password.
 		if selfService && !caller.IsAdmin() {
-			if bcryptCompare(target.PasswordHash, req.CurrentPassword) != nil {
+			if bcryptCompare(s, r.Context(), target.PasswordHash, req.CurrentPassword) != nil {
 				s.WriteError(w, http.StatusForbidden, "current password is incorrect")
 				return
 			}
 		}
 
-		hash, err := bcryptHash(req.NewPassword)
+		hash, err := bcryptHash(s, r.Context(), req.NewPassword)
 		if err != nil {
 			s.WriteError(w, http.StatusInternalServerError, "hash password")
 			return

@@ -1,6 +1,9 @@
 package user
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestMatchPattern(t *testing.T) {
 	cases := []struct {
@@ -194,5 +197,24 @@ func TestAllowedAnyMatchesAnyActionOrAdmin(t *testing.T) {
 	}
 	if !(User{Grants: []Grant{{Action: ActionAdmin}}}).AllowedAny("anything") {
 		t.Fatal("admin must see every topic")
+	}
+}
+
+func TestValidatePassword(t *testing.T) {
+	if err := ValidatePassword(""); err == nil {
+		t.Fatal("empty password accepted")
+	}
+	if err := ValidatePassword(strings.Repeat("a", MaxPasswordBytes)); err != nil {
+		t.Fatalf("72-byte password rejected: %v", err)
+	}
+	if err := ValidatePassword(strings.Repeat("a", MaxPasswordBytes+1)); err == nil {
+		t.Fatal("73-byte password accepted")
+	}
+	// Bytes, not runes: 24 three-byte runes are 72 bytes, 25 are 75.
+	if err := ValidatePassword(strings.Repeat("€", 24)); err != nil {
+		t.Fatalf("72-byte multibyte password rejected: %v", err)
+	}
+	if err := ValidatePassword(strings.Repeat("€", 25)); err == nil {
+		t.Fatal("75-byte multibyte password accepted")
 	}
 }

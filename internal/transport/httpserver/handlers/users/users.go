@@ -71,8 +71,8 @@ func Create(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if req.Password == "" {
-			s.WriteError(w, http.StatusBadRequest, "password required")
+		if err := user.ValidatePassword(req.Password); err != nil {
+			s.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if err := user.ValidateGrants(req.Grants); err != nil {
@@ -84,7 +84,7 @@ func Create(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
-		hash, err := bcryptHash(req.Password)
+		hash, err := bcryptHash(s, r.Context(), req.Password)
 		if err != nil {
 			s.WriteError(w, http.StatusInternalServerError, "hash password")
 			return
