@@ -131,6 +131,22 @@ func (f *InFlight) Next(topic string, partition int) int64 {
 	return n
 }
 
+// CommittedOffset returns the in-memory committed frontier of a
+// partition's shard (ok=false when this node holds no shard for it). It
+// leads the persisted consumer.offset by up to one commit flush, so a
+// handoff that reports the persisted value would make the new owner
+// redeliver the last few acked messages.
+func (f *InFlight) CommittedOffset(topic string, partition int) (int64, bool) {
+	sh := f.shard(topic, partition)
+	if sh == nil {
+		return 0, false
+	}
+	sh.mu.Lock()
+	committed := sh.committed
+	sh.mu.Unlock()
+	return committed, true
+}
+
 // Snapshot returns current shard sizes for the metrics poller.
 func (f *InFlight) Snapshot(topic string, partition int) (inFlight, ackedAhead int) {
 	sh := f.shard(topic, partition)

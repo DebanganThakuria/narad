@@ -351,6 +351,9 @@ func (e *Engine) tryQueueReadLogs(ctx context.Context, topicName string, partiti
 		pos := (scanStart + i) % len(partitions)
 		idx := partitions[pos]
 		log := logs[pos]
+		if e.isConsumePaused(topicName, idx) {
+			continue // handing off: the new owner serves it in a moment
+		}
 		for {
 			res, err := e.offsets.ReserveNext(ctx, topicName, idx, visibilityTimeout, log.HighWatermark())
 			if err != nil {

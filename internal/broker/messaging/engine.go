@@ -95,6 +95,11 @@ type Engine struct {
 	// (AP); the TTL auto-resumes if the handoff never completes.
 	pauseMu       sync.Mutex
 	producePauses map[string]int64
+	// consumePauses is the consume-side twin (key -> expiry unix nano):
+	// during a handoff the source hands out no new reservations, so the
+	// frontier it reports is final once the in-flight leases have been
+	// acked or released; see PrepareHandoff.
+	consumePauses map[string]int64
 }
 
 // NewEngine wires an Engine.
