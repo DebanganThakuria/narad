@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -55,11 +55,13 @@ func newCLITransport() *http.Transport {
 // ClusterIP's per-connection roll of the dice) decide it put 5x the
 // produce traffic on one of three brokers in a load test. Names that
 // resolve to a single address, and literal IPs, dial as before.
+//
+// The rotation counter is process-wide, not per transport: bench and
+// sub build one client per worker (each with its own transport) so the
+// workers do not contend on one transport's locks, and a per-transport
+// counter would give every worker's single dial the same first address,
+// which is exactly the pinning this dialer exists to remove.
 func newSpreadDialer(dial func(ctx context.Context, network, addr string) (net.Conn, error), lookup func(ctx context.Context, host string) ([]net.IPAddr, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
-	var (
-		mu   sync.Mutex
-		next uint64
-	)
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil || net.ParseIP(host) != nil {
@@ -69,14 +71,15 @@ func newSpreadDialer(dial func(ctx context.Context, network, addr string) (net.C
 		if err != nil || len(ips) <= 1 {
 			return dial(ctx, network, addr)
 		}
-		mu.Lock()
-		i := next
-		next++
-		mu.Unlock()
+		i := spreadDialCounter.Add(1) - 1
 		ip := ips[i%uint64(len(ips))].IP
 		return dial(ctx, network, net.JoinHostPort(ip.String(), port))
 	}
 }
+
+// spreadDialCounter is shared by every spread dialer in the process; see
+// newSpreadDialer.
+var spreadDialCounter atomic.Uint64
 
 // newContextHTTPClient builds a client from resolved connection
 // settings (context/env/flags), carrying credentials.
