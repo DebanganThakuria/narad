@@ -24,7 +24,7 @@ type fakePeerClient struct {
 	createTopicFn         func(context.Context, string, []byte) (nodewire.Response, error)
 	alterTopicFn          func(context.Context, string, string, []byte) (nodewire.Response, error)
 	deleteTopicFn         func(context.Context, string, string) (nodewire.Response, error)
-	purgeTopicFn          func(context.Context, string, string) (nodewire.Response, error)
+	purgeTopicFn          func(context.Context, string, string, string) (nodewire.Response, error)
 	topicPartitionStatsFn func(context.Context, string, string, int) (topic.PartitionStats, error)
 	registerMemberFn      func(context.Context, string, nodewire.MemberRequest) (nodewire.Response, error)
 	createUserFn          func(context.Context, string, []byte) (nodewire.Response, error)
@@ -149,9 +149,9 @@ func (f fakePeerClient) DeleteTopic(ctx context.Context, addr, topicName string)
 	return nodewire.Response{}, context.DeadlineExceeded
 }
 
-func (f fakePeerClient) PurgeTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error) {
+func (f fakePeerClient) PurgeTopic(ctx context.Context, addr, topicName, id string) (nodewire.Response, error) {
 	if f.purgeTopicFn != nil {
-		return f.purgeTopicFn(ctx, addr, topicName)
+		return f.purgeTopicFn(ctx, addr, topicName, id)
 	}
 	return nodewire.Response{}, context.DeadlineExceeded
 }

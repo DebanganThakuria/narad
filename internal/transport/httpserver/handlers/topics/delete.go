@@ -35,6 +35,14 @@ func Delete(s *handlers.Set) http.HandlerFunc {
 				return
 			}
 		}
+		// The purge fan-out names the incarnation being deleted so a
+		// member that already applied a recreate of the same name purges
+		// the old directory, not the new one. Read it before the delete
+		// removes the record; a lookup failure purges by name.
+		var incarnation string
+		if t, err := s.Deps.Broker.GetTopic(r.Context(), topicName); err == nil {
+			incarnation = t.ID
+		}
 		if err := s.Deps.Broker.DeleteTopic(r.Context(), topicName); err != nil {
 			purgeErr, ok := errors.AsType[brokertopics.PurgeError](err)
 			if !ok {
@@ -45,7 +53,7 @@ func Delete(s *handlers.Set) http.HandlerFunc {
 				"topic", topicName, "err", purgeErr.Err)
 		}
 		if s.Deps.Router != nil {
-			if err := s.Deps.Router.BroadcastDeleteTopic(r.Context(), topicName); err != nil {
+			if err := s.Deps.Router.BroadcastDeleteTopic(r.Context(), topicName, incarnation); err != nil {
 				s.Deps.Logger.Warn("topic deleted but purge broadcast failed on some members; their startup orphan sweep reclaims the directories",
 					"topic", topicName, "err", err)
 			}

@@ -33,7 +33,7 @@ type fakeBroker struct {
 	updateTopicCapsFn         func(context.Context, string, int64, int64) (topic.Topic, error)
 	updateTopicSchemaFn       func(context.Context, string, []byte) (topic.Topic, error)
 	deleteTopicFn             func(context.Context, string) error
-	purgeTopicFn              func(context.Context, string) error
+	purgeTopicFn              func(context.Context, string, string) error
 	getTopicFn                func(context.Context, string) (topic.Topic, error)
 	getTopicDetailsFn         func(context.Context, string) (topic.Details, error)
 	listTopicsFn              func(context.Context, metastore.ListOptions) ([]topic.Topic, string, error)
@@ -75,11 +75,11 @@ func (f *fakeBroker) DeleteTopic(ctx context.Context, name string) error {
 	return f.deleteTopicFn(ctx, name)
 }
 
-func (f *fakeBroker) PurgeTopic(ctx context.Context, name string) error {
+func (f *fakeBroker) PurgeTopic(ctx context.Context, name, id string) error {
 	if f.purgeTopicFn == nil {
 		return nil
 	}
-	return f.purgeTopicFn(ctx, name)
+	return f.purgeTopicFn(ctx, name, id)
 }
 
 func (f *fakeBroker) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
@@ -240,7 +240,7 @@ func (f *fakeRouter) RouteDeleteTopic(context.Context, http.ResponseWriter, *htt
 	return false
 }
 
-func (f *fakeRouter) BroadcastDeleteTopic(context.Context, string) error {
+func (f *fakeRouter) BroadcastDeleteTopic(context.Context, string, string) error {
 	return nil
 }
 

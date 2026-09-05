@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/broker"
 	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -179,6 +180,11 @@ func (s *RPCServer) handleDeleteTopic(payload []byte) nodewire.Response {
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid delete topic request: "+err.Error())
 	}
+	// The purge fan-out below names the incarnation being deleted, so a
+	// member that has already applied a recreate of the same name purges
+	// the old directory and not the new one. Read it before the delete
+	// removes the record; a lookup failure falls back to a purge by name.
+	id := deletedIncarnation(s.broker, req.Topic)
 	if err := s.broker.DeleteTopic(rpcRequestContext(), req.Topic); err != nil {
 		purgeErr, ok := errors.AsType[brokertopics.PurgeError](err)
 		if !ok {
@@ -201,11 +207,22 @@ func (s *RPCServer) handleDeleteTopic(payload []byte) nodewire.Response {
 	// one that is briefly unreachable), so a fan-out failure must not fail
 	// the delete.
 	if s.broadcaster != nil {
-		if err := s.broadcaster.BroadcastDeleteTopic(rpcRequestContext(), req.Topic); err != nil {
+		if err := s.broadcaster.BroadcastDeleteTopic(rpcRequestContext(), req.Topic, id); err != nil {
 			s.logger.Warn("broadcast topic purge after forwarded delete failed; orphans will be reclaimed by startup sweep", "topic", req.Topic, "err", err)
 		}
 	}
 	return nodewire.Response{Status: http.StatusNoContent}
+}
+
+// deletedIncarnation returns the ID of the topic incarnation a delete
+// is about to remove, or "" when it cannot be read (the purge then runs
+// by name, as before incarnation IDs).
+func deletedIncarnation(b broker.Broker, topicName string) string {
+	t, err := b.GetTopic(rpcRequestContext(), topicName)
+	if err != nil {
+		return ""
+	}
+	return t.ID
 }
 
 // purgeApplyWaitTimeout bounds how long a purge waits for the local Raft
@@ -234,11 +251,20 @@ func (s *RPCServer) handlePurgeTopic(payload []byte) nodewire.Response {
 	// off the local replica. If the replica never reflects the deletion
 	// (timeout), we skip the purge rather than risk deleting live data;
 	// the startup orphan sweep is the backstop.
-	if s.store != nil && !s.waitTopicDeletedLocally(req.Topic, purgeApplyWaitTimeout) {
-		s.logger.Warn("skipping purge: local metastore still shows topic; deferring to orphan sweep", "topic", req.Topic)
+	//
+	// "Reflects the deletion" is judged per INCARNATION when the purge
+	// names one: the record is gone, or the name now belongs to a
+	// different incarnation (a recreate applied before this purge
+	// arrived). The purge then proceeds and removes only the old
+	// incarnation's directory. Judging by name alone skipped the purge
+	// whenever the name had been recreated, which left the old data in
+	// place for the new topic to reopen.
+	if s.store != nil && !s.waitIncarnationGoneLocally(req.Topic, req.ID, purgeApplyWaitTimeout) {
+		s.logger.Warn("skipping purge: local metastore still shows the topic incarnation; deferring to orphan sweep",
+			"topic", req.Topic, "incarnation", req.ID)
 		return nodewire.Response{Status: http.StatusNoContent}
 	}
-	if err := s.broker.PurgeTopic(rpcRequestContext(), req.Topic); err != nil {
+	if err := s.broker.PurgeTopic(rpcRequestContext(), req.Topic, req.ID); err != nil {
 		return s.brokerError("purge topic", err)
 	}
 	return nodewire.Response{Status: http.StatusNoContent}
@@ -247,9 +273,24 @@ func (s *RPCServer) handlePurgeTopic(payload []byte) nodewire.Response {
 // waitTopicDeletedLocally returns true once the local metastore no longer
 // has the topic, or false if it still does after the timeout.
 func (s *RPCServer) waitTopicDeletedLocally(topicName string, timeout time.Duration) bool {
+	return s.waitIncarnationGoneLocally(topicName, "", timeout)
+}
+
+// waitIncarnationGoneLocally returns true once the local metastore no
+// longer has the topic incarnation id under topicName: the record is
+// absent, or (when id is set) the record carries a different ID. A
+// record without an ID counts as gone for a purge that names one: the
+// incarnation being purged had an ID, so that record is a different
+// (older-binary) incarnation. Returns false if the incarnation is still
+// present after the timeout.
+func (s *RPCServer) waitIncarnationGoneLocally(topicName, id string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for {
-		if _, err := s.store.GetTopic(rpcRequestContext(), topicName); errors.Is(err, errs.ErrNotFound) {
+		t, err := s.store.GetTopic(rpcRequestContext(), topicName)
+		switch {
+		case errors.Is(err, errs.ErrNotFound):
+			return true
+		case err == nil && id != "" && t.ID != id:
 			return true
 		}
 		if time.Now().After(deadline) {

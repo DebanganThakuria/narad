@@ -563,7 +563,7 @@ func TestBroadcastDeleteTopicSkipsSelfAndDeadMembers(t *testing.T) {
 	}
 
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
-	router.peer = fakePeerClient{purgeTopicFn: func(_ context.Context, addr, topicName string) (nodewire.Response, error) {
+	router.peer = fakePeerClient{purgeTopicFn: func(_ context.Context, addr, topicName, _ string) (nodewire.Response, error) {
 		if addr != "127.0.0.1:2" {
 			t.Fatalf("addr = %q, want %q", addr, "127.0.0.1:2")
 		}
@@ -572,7 +572,7 @@ func TestBroadcastDeleteTopicSkipsSelfAndDeadMembers(t *testing.T) {
 		}
 		return nodewire.Response{Status: http.StatusNoContent}, nil
 	}}
-	if err := router.BroadcastDeleteTopic(context.Background(), "orders"); err != nil {
+	if err := router.BroadcastDeleteTopic(context.Background(), "orders", ""); err != nil {
 		t.Fatalf("BroadcastDeleteTopic() error = %v", err)
 	}
 }
@@ -585,10 +585,10 @@ func TestBroadcastDeleteTopicReturnsErrorOnRemoteFailure(t *testing.T) {
 	}
 
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
-	router.peer = fakePeerClient{purgeTopicFn: func(context.Context, string, string) (nodewire.Response, error) {
+	router.peer = fakePeerClient{purgeTopicFn: func(context.Context, string, string, string) (nodewire.Response, error) {
 		return nodewire.Response{Status: http.StatusInternalServerError}, nil
 	}}
-	if err := router.BroadcastDeleteTopic(context.Background(), "orders"); err == nil {
+	if err := router.BroadcastDeleteTopic(context.Background(), "orders", ""); err == nil {
 		t.Fatal("BroadcastDeleteTopic() error = nil, want error")
 	}
 }
@@ -608,7 +608,7 @@ func TestBroadcastDeleteTopicAttemptsAllMembersDespiteFailure(t *testing.T) {
 	var mu sync.Mutex
 	attempted := map[string]bool{}
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
-	router.peer = fakePeerClient{purgeTopicFn: func(_ context.Context, addr, _ string) (nodewire.Response, error) {
+	router.peer = fakePeerClient{purgeTopicFn: func(_ context.Context, addr, _, _ string) (nodewire.Response, error) {
 		mu.Lock()
 		attempted[addr] = true
 		mu.Unlock()
@@ -619,7 +619,7 @@ func TestBroadcastDeleteTopicAttemptsAllMembersDespiteFailure(t *testing.T) {
 		return nodewire.Response{Status: http.StatusNoContent}, nil
 	}}
 
-	err := router.BroadcastDeleteTopic(ctx, "orders")
+	err := router.BroadcastDeleteTopic(ctx, "orders", "")
 	if err == nil {
 		t.Fatal("BroadcastDeleteTopic() error = nil, want the failed member surfaced")
 	}
@@ -673,12 +673,12 @@ func TestBroadcastDeleteTopicDeadlineCoversPurgeExecution(t *testing.T) {
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	var deadline time.Time
 	var hasDeadline bool
-	router.peer = fakePeerClient{purgeTopicFn: func(ctx context.Context, _, _ string) (nodewire.Response, error) {
+	router.peer = fakePeerClient{purgeTopicFn: func(ctx context.Context, _, _, _ string) (nodewire.Response, error) {
 		deadline, hasDeadline = ctx.Deadline()
 		return nodewire.Response{Status: http.StatusNoContent}, nil
 	}}
 	start := time.Now()
-	if err := router.BroadcastDeleteTopic(ctx, "orders"); err != nil {
+	if err := router.BroadcastDeleteTopic(ctx, "orders", ""); err != nil {
 		t.Fatalf("BroadcastDeleteTopic() error = %v", err)
 	}
 	if !hasDeadline {
@@ -714,7 +714,7 @@ func TestBroadcastDeleteTopicFansOutConcurrentlyUnderOneDeadline(t *testing.T) {
 	var mu sync.Mutex
 	var deadlines []time.Time
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
-	router.peer = fakePeerClient{purgeTopicFn: func(ctx context.Context, _, _ string) (nodewire.Response, error) {
+	router.peer = fakePeerClient{purgeTopicFn: func(ctx context.Context, _, _, _ string) (nodewire.Response, error) {
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			t.Error("purge RPC has no deadline")
@@ -727,7 +727,7 @@ func TestBroadcastDeleteTopicFansOutConcurrentlyUnderOneDeadline(t *testing.T) {
 	}}
 
 	start := time.Now()
-	if err := router.BroadcastDeleteTopic(ctx, "orders"); err != nil {
+	if err := router.BroadcastDeleteTopic(ctx, "orders", ""); err != nil {
 		t.Fatalf("BroadcastDeleteTopic() error = %v", err)
 	}
 	if elapsed := time.Since(start); elapsed >= 2*purgeDelay {
@@ -757,13 +757,13 @@ func TestBroadcastDeleteTopicJoinsFailuresInMemberOrder(t *testing.T) {
 		}
 	}
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
-	router.peer = fakePeerClient{purgeTopicFn: func(_ context.Context, addr, _ string) (nodewire.Response, error) {
+	router.peer = fakePeerClient{purgeTopicFn: func(_ context.Context, addr, _, _ string) (nodewire.Response, error) {
 		if addr == "127.0.0.1:2" {
 			time.Sleep(50 * time.Millisecond) // node-a finishes last
 		}
 		return nodewire.Response{}, errors.New("unreachable")
 	}}
-	err := router.BroadcastDeleteTopic(ctx, "orders")
+	err := router.BroadcastDeleteTopic(ctx, "orders", "")
 	if err == nil {
 		t.Fatal("BroadcastDeleteTopic() error = nil, want both failures")
 	}

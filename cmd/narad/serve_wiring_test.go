@@ -259,7 +259,7 @@ func (stubBroker) UpdateTopicSchema(context.Context, string, []byte) (topic.Topi
 	return topic.Topic{}, nil
 }
 func (stubBroker) DeleteTopic(context.Context, string) error             { return nil }
-func (stubBroker) PurgeTopic(context.Context, string) error              { return nil }
+func (stubBroker) PurgeTopic(context.Context, string, string) error      { return nil }
 func (stubBroker) GetTopic(context.Context, string) (topic.Topic, error) { return topic.Topic{}, nil }
 func (stubBroker) GetTopicDetails(context.Context, string) (topic.Details, error) {
 	return topic.Details{}, nil

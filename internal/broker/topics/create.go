@@ -2,6 +2,8 @@ package topics
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -141,7 +143,7 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	}
 	if len(opts.Schema) > 0 {
 		if err := m.createInitialSchema(ctx, opts.Name, opts.Schema); err != nil {
-			return topic.Topic{}, m.rollbackCreatedTopic(ctx, opts.Name, err)
+			return topic.Topic{}, m.rollbackCreatedTopic(ctx, opts.Name, t.ID, err)
 		}
 	}
 	// Attach BEFORE partition assignment: placement reads the parent
@@ -153,7 +155,7 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 			if errors.Is(err, errs.ErrNotFound) {
 				err = fmt.Errorf("%w: %v", ErrNotFound, err)
 			}
-			return topic.Topic{}, m.rollbackCreatedTopic(ctx, opts.Name, err)
+			return topic.Topic{}, m.rollbackCreatedTopic(ctx, opts.Name, t.ID, err)
 		}
 	}
 	if m.assigner != nil {
@@ -254,8 +256,13 @@ func (m *Manager) topicFromOpts(opts CreateOpts) (topic.Topic, error) {
 		return topic.Topic{}, err
 	}
 
+	id, err := newIncarnationID()
+	if err != nil {
+		return topic.Topic{}, err
+	}
 	return topic.Topic{
 		Name:                      opts.Name,
+		ID:                        id,
 		Partitions:                partitions,
 		RetentionMs:               retentionMs,
 		VisibilityTimeoutMs:       visibilityMs,
@@ -264,6 +271,19 @@ func (m *Manager) topicFromOpts(opts CreateOpts) (topic.Topic, error) {
 		CreatedAt:                 time.Now().Unix(),
 		Owner:                     opts.Owner,
 	}, nil
+}
+
+// newIncarnationID mints the random ID that identifies one incarnation
+// of a topic (16 hex characters). It is generated HERE, by the
+// proposer, and travels inside the Raft-applied create record, so every
+// replica stores the same ID: the FSM itself must derive nothing
+// non-deterministic.
+func newIncarnationID() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("topics: incarnation id: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 // defaultedNonNegative substitutes def when v is zero and rejects
@@ -292,12 +312,12 @@ func checkRetentionFloor(retentionMs int64) error {
 	return nil
 }
 
-func (m *Manager) rollbackCreatedTopic(ctx context.Context, topicName string, cause error) error {
+func (m *Manager) rollbackCreatedTopic(ctx context.Context, topicName, id string, cause error) error {
 	var rollbackErrs []error
 	if err := m.metastore.DeleteTopic(ctx, topicName); err != nil && !errors.Is(err, errs.ErrNotFound) {
 		rollbackErrs = append(rollbackErrs, fmt.Errorf("delete topic metadata: %w", err))
 	}
-	if err := m.purgeTopicLocked(ctx, topicName); err != nil {
+	if err := m.purgeTopicLocked(ctx, topicName, id); err != nil {
 		rollbackErrs = append(rollbackErrs, fmt.Errorf("purge topic data: %w", err))
 	}
 	if len(rollbackErrs) > 0 {
