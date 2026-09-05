@@ -247,3 +247,104 @@ func TestCatchUpBoundedWhenWritersKeepPace(t *testing.T) {
 		t.Fatal("CatchUp ran until the timeout — it looped instead of falling back")
 	}
 }
+
+// The fan-out cursor files in the source's partition directory must move
+// with the partition: a new owner that finds none tail-anchors and skips
+// the child's whole backlog (for a delay child, its entire pending
+// window). Confirmed lost before the fix by the audit's reproduction.
+func TestPartitionMoverCarriesFanoutCursors(t *testing.T) {
+	src := t.TempDir()
+	hwm, _ := buildSourcePartition(t, src, 25)
+	if err := storage.WriteFanoutCursorIfPartitionDirExists(src, "audit-child",
+		storage.FanoutCursor{Epoch: "abc", NextOffset: 10}); err != nil {
+		t.Fatalf("write cursor: %v", err)
+	}
+	fetcher := sidecarFetcher{dirFetcher{dir: src, hwm: hwm, committed: 9, hasCommitted: true}}
+	mover := NewPartitionMover(fetcher, 1<<20, nil)
+	staging := filepath.Join(t.TempDir(), "staged")
+
+	if _, err := mover.Copy(context.Background(), "src-addr", "orders", 0, staging); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	cur, found, err := storage.ReadFanoutCursor(staging, "audit-child")
+	if err != nil || !found {
+		t.Fatalf("staged copy has no fanout-audit-child.offset (found %v, err %v): the new owner would tail-anchor at %d instead of resuming at 10", found, err, hwm)
+	}
+	if cur.Epoch != "abc" || cur.NextOffset != 10 {
+		t.Fatalf("staged cursor = %+v, want epoch abc next 10 (the source's values)", cur)
+	}
+
+	// A force-promote (dead source) carries the last cursor files it saw.
+	sess := mover.Begin("src-addr", "orders", 0, filepath.Join(t.TempDir(), "promoted"))
+	if _, err := sess.CatchUp(context.Background(), 4096, 3, 2); err != nil {
+		t.Fatalf("CatchUp: %v", err)
+	}
+	if _, err := sess.ForcePromote(); err != nil {
+		t.Fatalf("ForcePromote: %v", err)
+	}
+	if cur, found, _ := storage.ReadFanoutCursor(sess.stagingDir, "audit-child"); !found || cur.NextOffset != 10 {
+		t.Fatalf("force-promoted copy cursor = %+v (found %v), want next 10", cur, found)
+	}
+}
+
+// sidecarFetcher serves a partition directory including its fan-out
+// cursor files, as the engine's transfer info does.
+type sidecarFetcher struct{ dirFetcher }
+
+func (f sidecarFetcher) ListPartitionSegments(ctx context.Context, addr, topicName string, partition int) (messaging.PartitionTransferInfo, error) {
+	info, err := f.dirFetcher.ListPartitionSegments(ctx, addr, topicName, partition)
+	if err != nil {
+		return info, err
+	}
+	info.Sidecars, err = storage.ListFanoutCursorFiles(f.dir)
+	return info, err
+}
+
+// hwmDriftFetcher reports a HWM that keeps moving for the first few
+// listings (a commit finishing its fsync under the freeze) and then
+// settles. Finalize must not stop on a single quiet pass that straddles
+// the moving HWM.
+type hwmDriftFetcher struct {
+	dirFetcher
+	mu    sync.Mutex
+	lists int
+	drift int // listings during which the HWM still moves
+}
+
+func (f *hwmDriftFetcher) ListPartitionSegments(ctx context.Context, addr, topicName string, partition int) (messaging.PartitionTransferInfo, error) {
+	f.mu.Lock()
+	f.lists++
+	n := f.lists
+	f.mu.Unlock()
+	info, err := f.dirFetcher.ListPartitionSegments(ctx, addr, topicName, partition)
+	if err != nil {
+		return info, err
+	}
+	if n <= f.drift {
+		info.HighWatermark = f.hwm - int64(f.drift-n+1)
+	}
+	return info, nil
+}
+
+func TestMoveSessionFinalizeRequiresTwoIdenticalHWMPasses(t *testing.T) {
+	src := t.TempDir()
+	wantHWM, _ := buildSourcePartition(t, src, 12)
+	fetcher := &hwmDriftFetcher{dirFetcher: dirFetcher{dir: src, hwm: wantHWM}, drift: 3}
+	mover := NewPartitionMover(fetcher, 1<<20, nil)
+	sess := mover.Begin("addr", "orders", 0, filepath.Join(t.TempDir(), "staging"))
+
+	res, err := sess.Finalize(context.Background())
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if res.HighWatermark != wantHWM {
+		t.Fatalf("finalized hwm = %d, want the settled %d (Finalize stopped while the HWM was still moving)", res.HighWatermark, wantHWM)
+	}
+	fetcher.mu.Lock()
+	lists := fetcher.lists
+	fetcher.mu.Unlock()
+	// drift listings with a moving HWM, then two identical quiet ones.
+	if lists < fetcher.drift+2 {
+		t.Fatalf("Finalize listed %d times, want at least %d (two identical passes after the HWM settled)", lists, fetcher.drift+2)
+	}
+}

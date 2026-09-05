@@ -90,11 +90,12 @@ type Engine struct {
 	consumeCursors sync.Map // topic name -> *atomic.Uint64
 
 	// producePauses holds partitions this node owns but has temporarily
-	// paused for produce during a rebalance handoff (key -> expiry unix
-	// nano). A paused partition reads as not-writable so produce reroutes
-	// (AP); the TTL auto-resumes if the handoff never completes.
+	// paused for produce during a rebalance handoff (key -> expiry plus
+	// the freeze token that fences the flip). A paused partition reads as
+	// not-writable so produce reroutes (AP); the TTL auto-resumes if the
+	// handoff never completes.
 	pauseMu       sync.Mutex
-	producePauses map[string]int64
+	producePauses map[string]producePause
 	// consumePauses is the consume-side twin (key -> expiry unix nano):
 	// during a handoff the source hands out no new reservations, so the
 	// frontier it reports is final once the in-flight leases have been

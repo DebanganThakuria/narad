@@ -49,6 +49,13 @@ type Config struct {
 	// many voters, so a decommission can never drop the cluster below a
 	// quorum-safe size. Default: 3.
 	MinVoters int
+	// DeadTargetAbortAfter is how long a move's TARGET node may stay dead
+	// before the controller clears the target. Only the destination itself
+	// aborts a move, and a dead destination cannot, so without this bound
+	// moves aimed at a node that died pin the in-flight budget forever and
+	// stop every later rebalance and decommission. Generous, so a pod that
+	// restarts finishes its copy instead of being re-planned. Default: 2m.
+	DeadTargetAbortAfter time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -63,6 +70,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MinVoters == 0 {
 		c.MinVoters = 3
+	}
+	if c.DeadTargetAbortAfter == 0 {
+		c.DeadTargetAbortAfter = 2 * time.Minute
 	}
 	return c
 }
