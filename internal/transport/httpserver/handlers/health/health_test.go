@@ -226,3 +226,50 @@ func (f *fakeBroker) ConsumeProbe(ctx context.Context, topicName string, opts br
 func (f *fakeBroker) ConsumeWait(context.Context, *brokermsg.ConsumeWaiter, time.Duration) (topic.Message, bool, error) {
 	return topic.Message{}, false, nil
 }
+
+// /readyz is a LIVE check: a node whose metastore has no leader in view
+// (never admitted, removed from the voter set, quorum lost) answers 503
+// even after startup finished, and a node in contact with a leader with
+// a caught-up ownership view answers 200.
+func TestReadyzConsultsMetastoreLiveness(t *testing.T) {
+	readyBroker := &fakeBroker{readyFn: func(context.Context) error { return nil }}
+	probe := func(ms *metastore.Store) int {
+		t.Helper()
+		s := handlers.New(handlers.Deps{
+			Broker:         readyBroker,
+			Metastore:      ms,
+			Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+			MaxConsumeWait: time.Second,
+		})
+		req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+		res := httptest.NewRecorder()
+		Readyz(s).ServeHTTP(res, req)
+		return res.Code
+	}
+
+	leaderless, err := metastore.New(metastore.Config{
+		NodeID: "unadmitted", DataDir: t.TempDir(), BindAddr: "127.0.0.1:0", AdvertiseAddr: "127.0.0.1:0", JoinOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("metastore.New: %v", err)
+	}
+	t.Cleanup(func() { _ = leaderless.Close() })
+	if code := probe(leaderless); code != http.StatusServiceUnavailable {
+		t.Fatalf("Readyz() on a leaderless node = %d, want %d", code, http.StatusServiceUnavailable)
+	}
+
+	solo, err := metastore.New(metastore.Config{
+		NodeID: "solo", DataDir: t.TempDir(), BindAddr: "127.0.0.1:0", AdvertiseAddr: "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("metastore.New: %v", err)
+	}
+	t.Cleanup(func() { _ = solo.Close() })
+	deadline := time.Now().Add(10 * time.Second)
+	for solo.ClusterReady() != nil && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if code := probe(solo); code != http.StatusOK {
+		t.Fatalf("Readyz() on an elected single node = %d, want %d", code, http.StatusOK)
+	}
+}

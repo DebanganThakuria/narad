@@ -23,7 +23,7 @@ sequenceDiagram
     N->>N: catches up → /readyz true → traffic flows
 ```
 
-Admission typically lands in single-digit seconds. When a node joins, the leader **auto-rebalances**: it computes the minimal set of partition moves that re-balances owned-partition count across the live nodes and relocates them, copying each partition verbatim to its new owner and cutting over with a millisecond freeze at the very end. Moves drain gradually (bounded by an in-flight cap) and never lose a record. Watch it with `narad cluster moves` and `narad cluster members`. See [Rebalance & Decommission](../internals/rebalance.md) for the mechanics.
+Admission typically lands in single-digit seconds. Scaling out changes only `replicaCount`; the peer list every pod carries is pinned to the initial members (`clusterPeerCount`), so the existing pods are **not** rolled while the new one joins. When a node joins, the leader **auto-rebalances**: it computes the minimal set of partition moves that re-balances owned-partition count across the live nodes and relocates them, copying each partition verbatim to its new owner and cutting over with a millisecond freeze at the very end. Moves drain gradually (bounded by an in-flight cap) and never lose a record. Watch it with `narad cluster moves` and `narad cluster members`. See [Rebalance & Decommission](../internals/rebalance.md) for the mechanics.
 
 Real-world footnote from our own cluster: if you ever scaled with `kubectl scale` or patched replicas by hand, Helm's server-side apply may refuse with a field-manager conflict on `.spec.replicas`. Fix: drop the stale manager entry.
 
@@ -46,15 +46,19 @@ narad cluster decommission narad-5
 watch narad cluster members            # owned_partitions for narad-5 -> 0
 
 # 3. Only now scale the StatefulSet down. Because narad-5 owns nothing, this
-#    removes an empty pod; no data lost.
-helm upgrade narad ./charts/narad -n narad --reuse-values --set replicaCount=5
+#    removes an empty pod; no data lost. allowScaleIn is the acknowledgement
+#    the chart demands before it lowers a running StatefulSet's replicas.
+helm upgrade narad ./charts/narad -n narad --reuse-values \
+  --set replicaCount=5 --set allowScaleIn=true
 ```
 
 Draining marks the node so the rebalance planner stops sending it partitions and sheds everything it owns onto the others: the same verbatim-copy machine as scale-out, run in reverse. `narad cluster decommission narad-5 --cancel` aborts a drain in progress.
 
 !!! warning "Order and timing matter"
-    - **Wait for the drain to finish before scaling down.** A decommissioned pod keeps running (the StatefulSet owns it) but, once Raft-removed, reports *not ready*; that's expected. Scaling down before it owns zero partitions would delete a pod whose data hasn't moved yet.
-    - **Don't overlap a decommission with a rolling restart** (`helm upgrade` that changes the pod template). If the draining node's pod is being cycled at the same time, its partitions have no stable source to copy from and the drain stalls until the pod settles.
+    - **Wait for the drain to finish before scaling down.** A decommissioned pod keeps running (the StatefulSet owns it) but, once Raft-removed, reports *not ready* and disappears from `narad cluster members`; that's expected. Scaling down before it owns zero partitions would delete a pod whose data hasn't moved yet.
+    - **Don't overlap a decommission with a rolling restart** (`helm upgrade` that changes the pod template). If the draining node's pod is being cycled at the same time, its partitions have no stable source to copy from and the drain stalls until the pod settles. Scaling `replicaCount` alone no longer changes the pod template, so a plain scale-in does not trigger this.
+    - **A rollback of `replicaCount` is a scale-in.** `helm rollback` to a revision with fewer replicas deletes pods exactly like step 3 does, without the decommission in steps 1 and 2. The chart refuses it unless `allowScaleIn` is set; do not set it to get past the refusal without decommissioning first.
+    - **A removed pod does not come back on its own.** After Raft removal the leader remembers the ID as removed: the still-running pod's heartbeats are refused, and if it is restarted with its old volume it is refused re-admission (it logs why). To re-add a pod under a decommissioned name later (scaling back up to it), delete its PVC first so it starts empty; the leader readmits a fresh node under that ID.
 
 Two safety rails hold: the controller **never removes a node if it would drop the cluster below three Raft voters** (a quorum-safe floor), and it transfers leadership away first if the departing node is the leader. So `initialClusterSize` down to 3 is safe; below 3 the Raft removal is refused by design.
 
@@ -65,9 +69,10 @@ If a source node dies *while its partitions are still draining*, the destination
 | Event | Cluster behavior | Your job |
 |---|---|---|
 | **One pod dies** | Leader failover ≤ ~1s if it led Raft. Its partitions 503 for consume; **produce reroutes to live partitions automatically**. Everything drains on return | Nothing. Maybe watch |
-| **Pod dies and comes back** | Replica catches up; readiness gates traffic; cursors resume from durable positions; leases redeliver | Nothing |
-| **Quorum lost** (2 of 3 down) | Data plane: produce **still accepted** on live nodes, new traffic flows. Control plane: topic/user changes wait for quorum | Bring pods back; don't panic-restart the survivor |
-| **PV destroyed** | That node's partition data is gone (single copy by design) | Restore from your volume snapshots. This is the one you plan for |
+| **Pod dies and comes back** | Replica catches up (it must hear what the leader has committed and apply it; a heartbeat alone is not enough); readiness gates traffic until then; cursors resume from durable positions; leases redeliver | Nothing |
+| **Quorum lost** (2 of 3 down) | Data plane: produce **still accepted** on live nodes, new traffic flows. Control plane: topic/user changes wait for quorum. The survivor reports **not ready** while it has no leader, so a load balancer stops sending it reads of a frozen replica | Bring pods back; don't panic-restart the survivor |
+| **PV destroyed** | That node's partition data is gone (single copy by design). The pod comes back empty, asks its peers, and **joins** the running cluster instead of bootstrapping a rival one; it is not ready until admitted and caught up | Restore from your volume snapshots. This is the one you plan for |
+| **Pod cut off from the leader** (partition, or removed from the voter set) | It flips to not ready within seconds and stays there; a node that sees no leader for 15 s runs the join loop, and the leader decides (a decommissioned ID is refused) | Fix the network, or scale the removed pod away |
 | **Rolling restart** | Leadership hands off gracefully (~150ms); we've force-killed pods *mid-rollout* under load with zero loss | Ship at will |
 
 The one rule under the hood that makes recovery boring: **no node ever destroys data based on its own possibly-stale view**: every cleanup confirms with the Raft leader first, and every failure to confirm keeps the data. The [war stories](../internals/cluster-lifecycle.md) explain why we're this paranoid.
