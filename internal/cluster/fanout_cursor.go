@@ -55,6 +55,7 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 		if !epochConfirmedByLeader(ctx, r.store, r.peer, r.selfID, key, r.logger) {
 			return
 		}
+		freshAnchor := false
 		if key.anchor != topic.FanoutTailOffset {
 			// Fresh attachment with a recorded attach point (or a
 			// partition newer than the attach, anchor 0): start exactly
@@ -63,6 +64,7 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 			// and replays from the attach point: duplicates, never a
 			// gap, the at-least-once side of the contract.
 			next = key.anchor
+			freshAnchor = true
 		} else {
 			// Attach record without offsets (written before they were
 			// recorded): fan out from the parent's current committed
@@ -90,8 +92,20 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 		}
 		// Persist the starting point BEFORE fanning anything so a crash
 		// cannot re-anchor later and silently skip the window in
-		// between.
-		if !r.persistCursor(key, partitionDir, next) {
+		// between. A recorded anchor may land on a parent partition
+		// that has never been produced to and so has no directory yet
+		// (a remote owner answered the attach from directory stats
+		// without opening the log); the link was just confirmed with
+		// the leader, so creating the directory here is safe, whereas
+		// refusing would stop the cursor, have the reconciler respawn
+		// it, and leave the child never catching up.
+		if freshAnchor {
+			if err := storage.WriteFanoutCursorCreating(partitionDir, key.child, storage.FanoutCursor{Epoch: key.epoch, NextOffset: next}); err != nil {
+				r.logger.Error("fanout: persist first cursor",
+					"parent", key.parent, "partition", key.partition, "child", key.child, "err", err)
+				return
+			}
+		} else if !r.persistCursor(key, partitionDir, next) {
 			return
 		}
 	}

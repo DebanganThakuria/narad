@@ -13,6 +13,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -238,4 +240,47 @@ func (f *fakeFanoutBroker) ReadFanoutSlab(_ context.Context, _ string, p int, op
 
 func (f *fakeFanoutBroker) CommitAcceptedProduceBatch(context.Context, []ingress.ProduceRecord) ([]int64, error) {
 	return nil, errors.New("not implemented")
+}
+
+// A recorded anchor must not depend on the parent partition's directory
+// already existing: a fresh parent that has never been produced to has
+// no directory, and the cursor file lives in it. The tail anchor's slab
+// read created it as a side effect; the recorded anchor path must do
+// the same, or the persist fails with "partition removed", the cursor
+// stops, the reconciler respawns it, and the child never catches up
+// (seen as a 460-iteration loop on a fresh soak topology).
+func TestFanoutRunnerRecordedAnchorOnNeverProducedPartition(t *testing.T) {
+	env := newFanoutTestEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runner := env.newRunner(t)
+	if err := env.store.AttachChild(ctx, "parent", "child", 0); err != nil {
+		t.Fatalf("AttachChild: %v", err)
+	}
+	child, err := env.store.GetTopic(ctx, "child")
+	if err != nil {
+		t.Fatalf("GetTopic(child): %v", err)
+	}
+	// The attach-offset resolver opened the local logs to read their
+	// tails; a remote owner answers that from directory stats and never
+	// opens anything. Reproduce that state: close the logs and remove
+	// the parent's directories before the cursors start.
+	if err := env.logs.CloseTopic("parent"); err != nil {
+		t.Fatalf("CloseTopic: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(env.dataDir, "topics", "parent")); err != nil {
+		t.Fatalf("remove parent dirs: %v", err)
+	}
+	runner.Reconcile(ctx)
+	defer func() { cancel(); runner.wg.Wait() }()
+
+	// Every partition's cursor anchors at 0 and persists, without any
+	// produce having created the partition directories.
+	for p := range 3 {
+		waitForCursorAt(t, env, p, child.AttachEpoch, 0)
+	}
+	// And the first records produced afterwards are delivered.
+	env.produceToParent(t, 0, 2, 3, 0)
+	env.waitChildTotal(t, 2)
 }
