@@ -243,7 +243,11 @@ func (f *fsmState) applyAssignPartition(data []byte) error {
 
 // applyMemberJoin upserts the member record. The routing-members version
 // only advances when routing-relevant fields change, so heartbeat-only
-// re-registrations do not invalidate route caches.
+// re-registrations do not invalidate route caches. A member removed by
+// decommission (tombstoned) is refused with ErrMemberRemoved: the
+// removed pod keeps heartbeating through the leader until it is torn
+// down, and that heartbeat must not resurrect it as an alive, draining
+// member forever.
 func (f *fsmState) applyMemberJoin(data []byte) error {
 	var m Member
 	if err := json.Unmarshal(data, &m); err != nil {
@@ -251,6 +255,9 @@ func (f *fsmState) applyMemberJoin(data []byte) error {
 	}
 	routingChanged := false
 	err := f.update(func(tx *bolt.Tx) error {
+		if memberTombstoned(tx, m.ID) {
+			return ErrMemberRemoved
+		}
 		b := tx.Bucket(bucketMembers)
 		raw := b.Get([]byte(m.ID))
 		if raw == nil {

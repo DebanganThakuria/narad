@@ -26,6 +26,7 @@ type controllerStore interface {
 	MarkMemberDead(ctx context.Context, podID string) error
 	Voters() ([]string, error)
 	RemoveServer(id string) error
+	RemoveMember(ctx context.Context, podID string, at int64) error
 	TransferLeadership() error
 	LeaderID() string
 }

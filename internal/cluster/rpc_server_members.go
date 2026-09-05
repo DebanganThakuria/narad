@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -42,6 +43,11 @@ func (s *RPCServer) handleRegisterMember(payload []byte) nodewire.Response {
 	}
 
 	if err := s.store.RegisterMember(rpcRequestContext(), member); err != nil {
+		if errors.Is(err, metastore.ErrMemberRemoved) {
+			// A decommissioned pod still heartbeating: refuse quietly so
+			// it is never resurrected as an alive member.
+			return errorResponse(http.StatusGone, "member was removed from the cluster")
+		}
 		if s.logger != nil {
 			s.logger.Error("register member", "member", member.ID, "err", err)
 		}

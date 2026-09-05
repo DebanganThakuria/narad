@@ -33,6 +33,35 @@ func TestDecommissionRemovesDrainedNode(t *testing.T) {
 	if len(store.removed) != 1 || store.removed[0] != "d" {
 		t.Fatalf("removed = %v, want [d]", store.removed)
 	}
+	// The second half: the member record goes with the voter, so the
+	// departed pod is not listed forever (nor resurrected by heartbeat).
+	if len(store.forgotten) != 1 || store.forgotten[0] != "d" {
+		t.Fatalf("forgotten = %v, want [d]", store.forgotten)
+	}
+	for _, m := range store.members {
+		if m.ID == "d" {
+			t.Fatal("member d still listed after removal")
+		}
+	}
+}
+
+func TestDecommissionForgetsDrainedNodeAlreadyOutOfVoterSet(t *testing.T) {
+	// A leadership change between RemoveServer and RemoveMember leaves a
+	// draining member that is no longer a voter; the new leader must
+	// still forget it rather than skip it as "already removed".
+	store := decomStore(t)
+	store.assignments["orders"] = map[int]string{0: "a", 1: "b", 2: "c"}
+	store.voters = []string{"a", "b", "c"} // d already out of the configuration
+	c := &Controller{store: store, cfg: Config{}.withDefaults()}
+
+	c.reconcileDecommission(context.Background())
+
+	if len(store.removed) != 0 {
+		t.Fatalf("RemoveServer called for a node already out of the configuration: %v", store.removed)
+	}
+	if len(store.forgotten) != 1 || store.forgotten[0] != "d" {
+		t.Fatalf("forgotten = %v, want [d]", store.forgotten)
+	}
 }
 
 func TestDecommissionWaitsWhileNodeStillOwns(t *testing.T) {
@@ -43,8 +72,8 @@ func TestDecommissionWaitsWhileNodeStillOwns(t *testing.T) {
 
 	c.reconcileDecommission(context.Background())
 
-	if len(store.removed) != 0 {
-		t.Fatalf("removed a node that still owns a partition: %v", store.removed)
+	if len(store.removed) != 0 || len(store.forgotten) != 0 {
+		t.Fatalf("acted on a node that still owns a partition: removed %v, forgotten %v", store.removed, store.forgotten)
 	}
 }
 
@@ -59,8 +88,8 @@ func TestDecommissionRespectsMinVoters(t *testing.T) {
 
 	c.reconcileDecommission(context.Background())
 
-	if len(store.removed) != 0 {
-		t.Fatalf("removed a node that would drop voters below MinVoters: %v", store.removed)
+	if len(store.removed) != 0 || len(store.forgotten) != 0 {
+		t.Fatalf("acted on a node that would drop voters below MinVoters: removed %v, forgotten %v", store.removed, store.forgotten)
 	}
 }
 
@@ -75,8 +104,8 @@ func TestDecommissionTransfersLeadershipOffDepartingLeader(t *testing.T) {
 	if store.transferred == 0 {
 		t.Fatal("did not transfer leadership off the departing leader")
 	}
-	if len(store.removed) != 0 {
-		t.Fatalf("removed the leader from its own config: %v", store.removed)
+	if len(store.removed) != 0 || len(store.forgotten) != 0 {
+		t.Fatalf("removed the leader from its own config: removed %v, forgotten %v", store.removed, store.forgotten)
 	}
 }
 

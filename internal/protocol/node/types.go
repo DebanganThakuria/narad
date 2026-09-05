@@ -67,10 +67,15 @@ type AbortMoveRequest struct {
 
 // JoinClusterRequest asks the metastore leader to admit a new node into
 // the Raft voter set (scale-out). ID is the joining node's identity and
-// ClusterAddr its advertised Raft address.
+// ClusterAddr its advertised Raft address. Fresh declares that the
+// joiner starts from an EMPTY data directory: the leader admits a
+// decommissioned (tombstoned) ID again only when its old state is gone,
+// so a removed pod that is merely still running, or restarted with its
+// old volume, cannot undo its own decommission.
 type JoinClusterRequest struct {
 	ID          string
 	ClusterAddr string
+	Fresh       bool
 }
 
 // ProduceRequest asks a node to route and append one record.
