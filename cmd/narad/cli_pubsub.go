@@ -352,6 +352,7 @@ func fetchOne(ctx context.Context, c *httpClient, path string) (consumedMessage,
 	if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
 		return consumedMessage{}, false, fmt.Errorf("parse message: %w", err)
 	}
+	_, _ = io.Copy(io.Discard, resp.Body) // drain so the connection is reused
 	return msg, true, nil
 }
 
