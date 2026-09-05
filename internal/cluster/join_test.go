@@ -68,10 +68,13 @@ func TestJoinOnlyNodeAdmittedByLeaderHandler(t *testing.T) {
 		t.Fatalf("encode join request: %v", err)
 	}
 
-	// A non-leader must refuse so the joiner tries the next peer.
+	// A node with no Raft configuration at all (itself unadmitted) must
+	// say so (412): it is no evidence that a cluster exists, unlike a
+	// configured non-leader's 421. Either way the joiner tries the next
+	// peer.
 	followerServer := NewRPCServer(nil, joiner, log)
-	if res := followerServer.handleJoinCluster(payload); res.Status != http.StatusMisdirectedRequest {
-		t.Fatalf("non-leader join status = %d, want %d", res.Status, http.StatusMisdirectedRequest)
+	if res := followerServer.handleJoinCluster(payload); res.Status != http.StatusPreconditionFailed {
+		t.Fatalf("unconfigured-node join status = %d, want %d", res.Status, http.StatusPreconditionFailed)
 	}
 
 	// The leader admits; the joiner must converge on the leader and
@@ -120,4 +123,74 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// A decommissioned ID must not rejoin with its old state: the pod the
+// StatefulSet keeps running after RemoveServer, or a restart with the
+// old volume, would otherwise undo the decommission through the very
+// loop that exists to recover leaderless nodes. A node declaring an
+// EMPTY data directory is a deliberate re-add and is readmitted.
+func TestJoinRefusesRemovedIDUnlessFresh(t *testing.T) {
+	ctx := context.Background()
+	leaderAddr := freeTCPAddr(t)
+	leader, err := metastore.New(metastore.Config{
+		NodeID:        "node-a",
+		DataDir:       filepath.Join(t.TempDir(), "a"),
+		BindAddr:      leaderAddr,
+		AdvertiseAddr: leaderAddr,
+	})
+	if err != nil {
+		t.Fatalf("metastore.New(leader) error = %v", err)
+	}
+	t.Cleanup(func() { _ = leader.Close() })
+	waitStoreLeader(t, leader)
+
+	if err := leader.RegisterMember(ctx, metastore.Member{ID: "node-z", Addr: "10.0.0.9:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember: %v", err)
+	}
+	if err := leader.RemoveMember(ctx, "node-z", 1); err != nil {
+		t.Fatalf("RemoveMember: %v", err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := NewRPCServer(nil, leader, log)
+
+	// The departed pod's heartbeat is refused, not resurrected.
+	hb, err := nodewire.EncodeMemberRequest(nodewire.MemberRequest{ID: "node-z", Addr: "10.0.0.9:7942", Status: "alive", LastHeartbeat: 2})
+	if err != nil {
+		t.Fatalf("encode member request: %v", err)
+	}
+	if res := server.handleRegisterMember(hb); res.Status != http.StatusGone {
+		t.Fatalf("heartbeat from removed member status = %d, want %d", res.Status, http.StatusGone)
+	}
+	if _, err := leader.GetMember("node-z"); err == nil {
+		t.Fatal("removed member resurrected by heartbeat")
+	}
+
+	// The old incarnation asks to rejoin: refused.
+	stale, err := nodewire.EncodeJoinClusterRequest(nodewire.JoinClusterRequest{ID: "node-z", ClusterAddr: "10.0.0.9:7943"})
+	if err != nil {
+		t.Fatalf("encode join request: %v", err)
+	}
+	if res := server.handleJoinCluster(stale); res.Status != http.StatusConflict {
+		t.Fatalf("stale rejoin status = %d, want %d", res.Status, http.StatusConflict)
+	}
+	if removed, _ := leader.MemberRemoved("node-z"); !removed {
+		t.Fatal("tombstone cleared by a refused join")
+	}
+
+	// A fresh node under the same ID: readmitted and its tombstone
+	// cleared before AddVoter. The address is unreachable here, so the
+	// configuration change may time out (503) once the new voter is
+	// needed for quorum; the tombstone is what this test pins.
+	fresh, err := nodewire.EncodeJoinClusterRequest(nodewire.JoinClusterRequest{ID: "node-z", ClusterAddr: "10.0.0.9:7943", Fresh: true})
+	if err != nil {
+		t.Fatalf("encode join request: %v", err)
+	}
+	res := server.handleJoinCluster(fresh)
+	if res.Status != http.StatusOK && res.Status != http.StatusServiceUnavailable {
+		t.Fatalf("fresh rejoin status = %d, want 200 (or 503 from an unreachable AddVoter)", res.Status)
+	}
+	if removed, _ := leader.MemberRemoved("node-z"); removed {
+		t.Fatal("tombstone not cleared by a fresh rejoin")
+	}
 }

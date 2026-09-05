@@ -25,7 +25,17 @@ const (
 	opCompleteMove
 	opAbortMove
 	opSetMemberDraining
+	opRemoveMember
+	opReadmitMember
 )
+
+// memberRemovalPayload is the body of opRemoveMember and opReadmitMember.
+// At is a Unix timestamp (seconds) supplied by the proposer so Apply
+// stays deterministic; it is recorded on the tombstone.
+type memberRemovalPayload struct {
+	ID string `json:"id"`
+	At int64  `json:"at"`
+}
 
 // memberDrainingPayload marks a member as draining (or clears it). A
 // draining member keeps serving but is excluded from receiving new

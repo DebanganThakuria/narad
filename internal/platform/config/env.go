@@ -21,6 +21,9 @@ func applyEnv(cfg *Config) error {
 	if v, ok := os.LookupEnv("NARAD_CLUSTER_ADDR"); ok {
 		cfg.Cluster.Addr = v
 	}
+	if v, ok := os.LookupEnv("NARAD_CLUSTER_ADVERTISE_ADDR"); ok {
+		cfg.Cluster.AdvertiseAddr = strings.TrimSpace(v)
+	}
 	if v, ok := os.LookupEnv("NARAD_NODE_ID"); ok {
 		cfg.Cluster.NodeID = v
 	}

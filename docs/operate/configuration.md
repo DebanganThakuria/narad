@@ -24,7 +24,8 @@ Every variable, with the compiled-in default when unset. (This table is generate
 |---|---|---|
 | `NARAD_NODE_ID` | pod/host name | The node's identity; must appear in the peer list |
 | `NARAD_CLUSTER_ADDR` | `:7943` | Raft bind address |
-| `NARAD_CLUSTER_PEERS` | (none) | `id@host:7943,…`: the full voter list, identical on every node |
+| `NARAD_CLUSTER_PEERS` | (none) | `id@host:7943,…`: the bootstrap voters, identical on every node. Joining nodes walk it to find the leader; only the initial members are seeded from it |
+| `NARAD_CLUSTER_ADVERTISE_ADDR` | empty | `host:7943` other nodes dial for this node's Raft transport. Required when this node is not listed in `NARAD_CLUSTER_PEERS` (the chart pins the peer list and sets this per pod); otherwise the node borrows the host from its own peer entry |
 | `NARAD_CLUSTER_INITIAL_MEMBERS` | empty | IDs allowed to bootstrap; everyone else joins. Empty = legacy "all bootstrap" |
 | `NARAD_CLUSTER_SECRET` | (none) | Shared secret gating all node-to-node QUIC RPC |
 | `NARAD_CLUSTER_TLS_CERT_FILE` / `_KEY_FILE` / `_CA_FILE` | off | Mutual TLS for Raft; all three or nothing |

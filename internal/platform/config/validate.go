@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -87,14 +88,31 @@ func clusterValidationErrors(httpCfg HTTPConfig, cfg ClusterConfig) []string {
 
 	result := inspectPeers(cfg.Peers, selfID, selfAddr)
 	errs = append(errs, result.errors...)
+	if advertise := strings.TrimSpace(cfg.AdvertiseAddr); advertise != "" {
+		// The node names its own reachable address, so it need not
+		// appear in the peer list (a scale-out pod with a pinned list).
+		// That address must be one peers can actually dial.
+		host, _, err := net.SplitHostPort(advertise)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Sprintf("cluster.advertise_addr %q must be host:port", advertise))
+		case strings.TrimSpace(host) == "":
+			errs = append(errs, fmt.Sprintf("cluster.advertise_addr %q must include a host", advertise))
+		default:
+			if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+				errs = append(errs, fmt.Sprintf("cluster.advertise_addr %q must not be an unspecified address", advertise))
+			}
+		}
+		return errs
+	}
 	if selfID != "" && !result.foundSelfID {
-		errs = append(errs, fmt.Sprintf("cluster.peers must include local node id %q", selfID))
+		errs = append(errs, fmt.Sprintf("cluster.peers must include local node id %q (or set cluster.advertise_addr)", selfID))
 	}
 	if !result.foundSelfAddr {
-		errs = append(errs, fmt.Sprintf("cluster.peers must include local cluster address %q", selfAddr))
+		errs = append(errs, fmt.Sprintf("cluster.peers must include local cluster address %q (or set cluster.advertise_addr)", selfAddr))
 	}
 	if selfID != "" && selfAddr != "" && !result.foundSelfVoter {
-		errs = append(errs, fmt.Sprintf("cluster.peers must include local voter %q@%s", selfID, selfAddr))
+		errs = append(errs, fmt.Sprintf("cluster.peers must include local voter %q@%s (or set cluster.advertise_addr)", selfID, selfAddr))
 	}
 	return errs
 }

@@ -16,6 +16,9 @@ var (
 	bucketAssignments = []byte("assignments")
 	bucketMembers     = []byte("members")
 	bucketUsers       = []byte("users")
+	// bucketRemovedMembers holds tombstones for members removed by
+	// decommission, keyed by member ID; see applyRemoveMember.
+	bucketRemovedMembers = []byte("removed_members")
 )
 
 func schemaKey(topicName string, version int) []byte {
@@ -54,7 +57,7 @@ func openBolt(path string) (*bolt.DB, error) {
 		return nil, err
 	}
 	return db, db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketTopics, bucketSchemas, bucketAssignments, bucketMembers, bucketUsers} {
+		for _, b := range [][]byte{bucketTopics, bucketSchemas, bucketAssignments, bucketMembers, bucketUsers, bucketRemovedMembers} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -118,6 +121,10 @@ func (f *fsmState) Apply(l *raft.Log) any {
 		err = f.applyAbortMove(c.Data)
 	case opSetMemberDraining:
 		err = f.applySetMemberDraining(c.Data)
+	case opRemoveMember:
+		err = f.applyRemoveMember(c.Data)
+	case opReadmitMember:
+		err = f.applyReadmitMember(c.Data)
 	default:
 		return fmt.Errorf("metastore: unknown op %d", c.Op)
 	}

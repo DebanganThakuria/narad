@@ -75,7 +75,8 @@ What healthy failure handling looks like, so you don't page yourself for the sys
 
 - **Node killed** → `consumer_lag` and `fanout_lag` spike on its partitions, drain within ~a minute of its return; `due_lag` spikes then returns to 0; duplicates tick up (at-least-once seams). All expected.
 - **`fanout_due_lag_seconds` plateaus above 0** → *not* expected. That's the frozen-loss signature; go read the [Cluster Lifecycle war stories](../internals/cluster-lifecycle.md) and check the cursor logs.
-- **Readiness down, liveness up on one pod** → it's catching up or waiting for admission. Leave it alone; it knows what it's doing.
+- **Readiness down, liveness up on one pod** → it's catching up, waiting for admission, or has lost sight of the Raft leader (`/readyz` says which in its body). Leave it alone; it knows what it's doing. A decommissioned pod that has been Raft-removed stays in this state until you scale it away; that is expected.
+- **Readiness down on every pod** → no Raft leader: quorum is lost. Bring the missing voters back; don't restart the survivors.
 
 ## pprof
 
