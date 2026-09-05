@@ -1,5 +1,6 @@
 {{- $replicas := int .Values.replicaCount -}}
 {{- $initial := int (default 3 .Values.initialClusterSize) -}}
+{{- $peers := int (include "narad.clusterPeerCount" .) -}}
 {{- if lt $initial 1 -}}
 {{- fail "initialClusterSize must be at least 1." -}}
 {{- end -}}
@@ -8,4 +9,21 @@
 {{- end -}}
 {{- if eq (mod $initial 2) 0 -}}
 {{- fail "initialClusterSize must be odd (Raft quorum)." -}}
+{{- end -}}
+{{- if lt $peers $initial -}}
+{{- fail (printf "clusterPeerCount (%d) must be >= initialClusterSize (%d): the bootstrap set must be in the peer list." $peers $initial) -}}
+{{- end -}}
+{{- /*
+Scale-in guard. Lowering replicaCount (including a rollback to an older
+values file) deletes the highest-ordinal pods; unless they were
+decommissioned first their partition data strands and the surviving
+voters can lose quorum. Compare against the RUNNING StatefulSet (lookup
+is empty under `helm template`, so this only bites on a real upgrade).
+*/ -}}
+{{- $sts := lookup "apps/v1" "StatefulSet" .Release.Namespace (include "narad.fullname" .) -}}
+{{- if and $sts $sts.spec -}}
+{{- $running := int (default 0 $sts.spec.replicas) -}}
+{{- if and (gt $running $replicas) (not .Values.allowScaleIn) -}}
+{{- fail (printf "replicaCount (%d) is below the running StatefulSet's replicas (%d): this is a scale-in. Decommission the pods being removed first (narad cluster decommission <pod>, wait for zero owned partitions), then re-run with --set allowScaleIn=true." $replicas $running) -}}
+{{- end -}}
 {{- end -}}
