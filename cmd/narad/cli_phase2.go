@@ -12,7 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -223,9 +223,7 @@ func newBenchCmd() *cobra.Command {
 			start := time.Now()
 			var wg sync.WaitGroup
 			for w := 0; w < workers; w++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					c := cliClient() // per-worker client: no transport contention
 					for {
 						mu.Lock()
@@ -246,7 +244,7 @@ func newBenchCmd() *cobra.Command {
 						resp.Body.Close()
 						latencies[i] = time.Since(t0)
 					}
-				}()
+				})
 			}
 			wg.Wait()
 			elapsed := time.Since(start)
@@ -261,9 +259,7 @@ func newBenchCmd() *cobra.Command {
 			ctx := cmdContext()
 			var cwg sync.WaitGroup
 			for w := 0; w < workers; w++ {
-				cwg.Add(1)
-				go func() {
-					defer cwg.Done()
+				cwg.Go(func() {
 					c := cliClient()
 					base := "/v1/topics/" + url.PathEscape(args[0]) + "/consume?wait=2s"
 					empty := 0
@@ -285,7 +281,7 @@ func newBenchCmd() *cobra.Command {
 						consumed++
 						mu.Unlock()
 					}
-				}()
+				})
 			}
 			cwg.Wait()
 			celapsed := time.Since(cstart)
@@ -308,7 +304,7 @@ func reportBench(op string, okCount, failed int, elapsed time.Duration, latencie
 			valid = append(valid, l)
 		}
 	}
-	sort.Slice(valid, func(i, j int) bool { return valid[i] < valid[j] })
+	slices.Sort(valid)
 	pct := func(p float64) time.Duration {
 		if len(valid) == 0 {
 			return 0

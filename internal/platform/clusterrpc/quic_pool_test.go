@@ -95,15 +95,13 @@ func TestPoolDialIsSingleflight(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, callers)
 	for i := range callers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			frame, err := p.request(context.Background(), "peer:1", LaneControl, clusterwire.StreamFrameNodeRequest, []byte("hi"))
 			if err == nil && string(frame.Payload) != "hi" {
 				err = errors.New("echo mismatch")
 			}
 			errs[i] = err
-		}()
+		})
 	}
 	// Let every caller reach the dial before releasing it.
 	deadline := time.Now().Add(2 * time.Second)

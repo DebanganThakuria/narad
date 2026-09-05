@@ -179,7 +179,7 @@ func parseClusterPeers(raw string) ([]ClusterPeer, error) {
 // empty entries.
 func splitNonEmpty(raw string) []string {
 	var out []string
-	for _, part := range strings.Split(raw, ",") {
+	for part := range strings.SplitSeq(raw, ",") {
 		if part = strings.TrimSpace(part); part != "" {
 			out = append(out, part)
 		}

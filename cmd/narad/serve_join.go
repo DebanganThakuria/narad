@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,12 +32,7 @@ func joinOnlyNode(nodeID string, initialMembers []string) bool {
 	if len(initialMembers) == 0 {
 		return false
 	}
-	for _, m := range initialMembers {
-		if m == nodeID {
-			return false
-		}
-	}
-	return true
+	return !slices.Contains(initialMembers, nodeID)
 }
 
 // clusterJoiner is the slice of PeerClient the join loop needs.

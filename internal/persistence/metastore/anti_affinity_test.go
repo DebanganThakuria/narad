@@ -24,7 +24,7 @@ func aliveMembers(ids ...string) []metastore.Member {
 
 func TestAntiAffineOwnerAvoidsParentOwner(t *testing.T) {
 	active := aliveMembers("narad-0", "narad-1", "narad-2")
-	for p := 0; p < 9; p++ {
+	for p := range 9 {
 		canonical, _ := metastore.RoundRobinOwner(active, p)
 		owner, ok := metastore.AntiAffineOwner(active, p, canonical)
 		if !ok {
@@ -143,7 +143,7 @@ func TestAssignNewPartitionsAntiAffineForAttachedChild(t *testing.T) {
 	if len(parent) != 6 || len(child) != 6 {
 		t.Fatalf("assigned %d parent / %d child partitions, want 6/6", len(parent), len(child))
 	}
-	for p := 0; p < 6; p++ {
+	for p := range 6 {
 		if parent[p] == child[p] {
 			t.Fatalf("partition %d: parent and child both owned by %q — copies share a disk", p, parent[p])
 		}
@@ -185,7 +185,7 @@ func TestAssignNewPartitionsDefersChildUntilParentAssigned(t *testing.T) {
 	if len(child) != 3 {
 		t.Fatalf("child assignments = %v, want all 3 partitions placed", child)
 	}
-	for p := 0; p < 3; p++ {
+	for p := range 3 {
 		if parent[p] == child[p] {
 			t.Fatalf("partition %d: colocated on %q", p, parent[p])
 		}
@@ -212,7 +212,7 @@ func TestAssignNewPartitionsNeverMovesExisting(t *testing.T) {
 	// Simulate a pre-feature colocated child: same owners as the parent,
 	// assigned before the attach.
 	parent := assignmentsByPartition(t, s, "orders")
-	for p := 0; p < 3; p++ {
+	for p := range 3 {
 		if err := s.AssignPartition(ctx, "orders-replica", p, parent[p]); err != nil {
 			t.Fatalf("seed colocated assignment: %v", err)
 		}
@@ -225,7 +225,7 @@ func TestAssignNewPartitionsNeverMovesExisting(t *testing.T) {
 		t.Fatalf("re-run assign: %v", err)
 	}
 	child := assignmentsByPartition(t, s, "orders-replica")
-	for p := 0; p < 3; p++ {
+	for p := range 3 {
 		if child[p] != parent[p] {
 			t.Fatalf("partition %d moved from %q to %q — assignments must be sticky", p, parent[p], child[p])
 		}

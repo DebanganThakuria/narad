@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
@@ -68,13 +69,7 @@ func (rt *Router) remoteOwnerAddrs(routes cachedRouteTable, dst []string) []stri
 		if addr == "" {
 			continue
 		}
-		seen := false
-		for _, existing := range dst {
-			if existing == addr {
-				seen = true
-				break
-			}
-		}
+		seen := slices.Contains(dst, addr)
 		if !seen {
 			dst = append(dst, addr)
 		}

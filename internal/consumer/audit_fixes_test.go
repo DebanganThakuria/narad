@@ -118,7 +118,7 @@ func TestReserveNextHintMatchesBruteForceOracle(t *testing.T) {
 		return 0, false
 	}
 
-	for step := 0; step < 5000; step++ {
+	for step := range 5000 {
 		switch rng.IntN(5) {
 		case 0, 1: // reserve and compare with the oracle
 			want, ok := oracle()
@@ -166,7 +166,7 @@ func TestReserveNextNoncesAreNotSequential(t *testing.T) {
 	ctx := context.Background()
 	var prev int64
 	sequential := 0
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		res, err := f.ReserveNext(ctx, "t", 0, time.Minute, 1000)
 		if err != nil || !res.Reserved {
 			t.Fatalf("ReserveNext(%d) = %+v, %v", i, res, err)

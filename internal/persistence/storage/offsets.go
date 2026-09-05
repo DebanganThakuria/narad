@@ -1,6 +1,9 @@
 package storage
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // LatestOffset is the offset of the most recently appended record, or
 // 0 for an empty log. Use NextOffset to disambiguate "empty" from
@@ -109,8 +112,7 @@ func (l *Log) OldestSegmentAt() (int64, bool) {
 func (l *Log) SegmentMTimeForOffset(offset int64) (int64, bool) {
 	l.rwmu.RLock()
 	defer l.rwmu.RUnlock()
-	for i := len(l.segments) - 1; i >= 0; i-- {
-		s := l.segments[i]
+	for _, s := range slices.Backward(l.segments) {
 		if offset >= s.baseOffset && offset < s.nextOffset {
 			mt, err := segmentMTime(s)
 			if err != nil {

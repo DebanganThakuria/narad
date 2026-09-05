@@ -1,6 +1,9 @@
 package httpserver
 
-import "net/http"
+import (
+	"net/http"
+	"slices"
+)
 
 // Middleware composes one http.Handler over another.
 type Middleware func(http.Handler) http.Handler
@@ -9,8 +12,8 @@ type Middleware func(http.Handler) http.Handler
 // gives a -> b -> c -> h.
 func Chain(mws ...Middleware) Middleware {
 	return func(h http.Handler) http.Handler {
-		for i := len(mws) - 1; i >= 0; i-- {
-			h = mws[i](h)
+		for _, mw := range slices.Backward(mws) {
+			h = mw(h)
 		}
 		return h
 	}
