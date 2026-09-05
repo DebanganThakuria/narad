@@ -19,7 +19,18 @@ func (s *Store) AssignPartition(ctx context.Context, topicName string, partition
 
 // GetAssignment reads the partition's assignment from the local replica.
 // It returns ErrNotFound if the partition is unassigned.
+//
+// It is gated exactly like ListAssignments: until the replica has
+// caught up with the leader once since this process started it answers
+// ErrUnavailable, never a possibly stale owner. Every single-partition
+// ownership decision (which logs a stats query opens, whether a fan-out
+// cursor is this node's to run, where a child commit is routed) reads
+// through here, and each of those callers treats the error as
+// transient and retries on a later pass.
 func (s *Store) GetAssignment(topicName string, partition int) (Assignment, error) {
+	if !s.ownershipViewReady() {
+		return Assignment{}, fmt.Errorf("%w: metastore replica has not caught up with the leader since start; partition ownership unknown", errs.ErrUnavailable)
+	}
 	s.fsm.mu.RLock()
 	defer s.fsm.mu.RUnlock()
 	var a Assignment
