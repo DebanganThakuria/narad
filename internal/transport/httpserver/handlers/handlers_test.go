@@ -276,7 +276,7 @@ func TestWriteBrokerErrorMapsStatuses(t *testing.T) {
 		{"stale handle", errs.ErrHandleStale, http.StatusGone},
 		{"acked ahead full", errs.ErrAckedAheadFull, http.StatusServiceUnavailable},
 		{"control plane unavailable", errs.ErrUnavailable, http.StatusServiceUnavailable},
-		{"fanout delay too long is a bad request", errs.ErrFanoutDelayTooLong, http.StatusBadRequest},
+		{"fanout delay too long is a conflict", errs.ErrFanoutDelayTooLong, http.StatusConflict},
 		{"internal", errors.New("boom"), http.StatusInternalServerError},
 	}
 

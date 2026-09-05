@@ -47,8 +47,8 @@ On the serving side, the messaging handlers (produce commits, acks, and non-bloc
 
 ## AuthN and AuthZ
 
-- **Authentication**: HTTP Basic against bcrypt-hashed users stored in the Raft metastore; credentials replicate with everything else, so any node can authenticate any request locally. TLS is expected to terminate at the ingress in front of Narad.
-- **Authorization**: per-request grant check, action (`produce`/`consume`/`create`/`admin`) × topic name, with prefix wildcards, plus topic *ownership* for management rights. Enforcement lives in the HTTP handlers, ahead of any routing, so a forwarded request was authorized on the node the client actually reached. Grant semantics from the client's view are in [Users & Access](../client/users-and-access.md).
+- **Authentication**: HTTP Basic against bcrypt-hashed users stored in the Raft metastore; credentials replicate with everything else, so any node can authenticate any request locally. TLS is expected to terminate at the ingress in front of Narad. Each node caches verified credentials keyed by the users domain version, throttles failed attempts per username (5 burst, one back every 12s; the bucket is per node, so N nodes behind a balancer allow 5N), rejects unknown usernames before bcrypt (a deliberate timing leak that bounds bcrypt cost to real users), and bounds bcrypt concurrency process-wide; password hashing for user create and password change runs under that same bound.
+- **Authorization**: per-request grant check, action (`produce`/`consume`/`create`/`admin`) × topic name, with prefix wildcards, plus topic *ownership* for management rights. Topic reads need any grant on the name (or ownership); attaching a child needs manage rights on both ends; cluster topology and user management are admin-only. Enforcement lives in the HTTP handlers, ahead of any routing, so a forwarded request was authorized on the node the client actually reached. Grant semantics from the client's view are in [Users & Access](../client/users-and-access.md).
 - The **root admin** is seeded once, leader-gated, from the operator's secret at first startup.
 
 ## Trust model, honestly stated

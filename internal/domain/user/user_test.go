@@ -1,6 +1,9 @@
 package user
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestMatchPattern(t *testing.T) {
 	cases := []struct {
@@ -168,5 +171,50 @@ func TestValidateGrants(t *testing.T) {
 		if err := ValidateGrants(g); err == nil {
 			t.Errorf("invalid[%d]: expected error", i)
 		}
+	}
+}
+
+func TestAllowedAnyMatchesAnyActionOrAdmin(t *testing.T) {
+	u := User{Grants: []Grant{
+		{Action: ActionProduce, Patterns: []string{"orders-*"}},
+		{Action: ActionConsume, Patterns: []string{"logs"}},
+	}}
+	for name, want := range map[string]bool{
+		"orders-eu": true,  // produce grant, wildcard
+		"logs":      true,  // consume grant, literal
+		"logs-2":    false, // literal does not prefix-match
+		"payments":  false,
+	} {
+		if got := u.AllowedAny(name); got != want {
+			t.Fatalf("AllowedAny(%q) = %v, want %v", name, got, want)
+		}
+	}
+	if (User{}).AllowedAny("orders-eu") {
+		t.Fatal("a user with no grants must not see any topic")
+	}
+	if !(User{Root: true}).AllowedAny("anything") {
+		t.Fatal("root must see every topic")
+	}
+	if !(User{Grants: []Grant{{Action: ActionAdmin}}}).AllowedAny("anything") {
+		t.Fatal("admin must see every topic")
+	}
+}
+
+func TestValidatePassword(t *testing.T) {
+	if err := ValidatePassword(""); err == nil {
+		t.Fatal("empty password accepted")
+	}
+	if err := ValidatePassword(strings.Repeat("a", MaxPasswordBytes)); err != nil {
+		t.Fatalf("72-byte password rejected: %v", err)
+	}
+	if err := ValidatePassword(strings.Repeat("a", MaxPasswordBytes+1)); err == nil {
+		t.Fatal("73-byte password accepted")
+	}
+	// Bytes, not runes: 24 three-byte runes are 72 bytes, 25 are 75.
+	if err := ValidatePassword(strings.Repeat("€", 24)); err != nil {
+		t.Fatalf("72-byte multibyte password rejected: %v", err)
+	}
+	if err := ValidatePassword(strings.Repeat("€", 25)); err == nil {
+		t.Fatal("75-byte multibyte password accepted")
 	}
 }

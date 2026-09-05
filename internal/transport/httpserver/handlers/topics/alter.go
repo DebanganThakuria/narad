@@ -11,18 +11,24 @@ import (
 )
 
 // alterRequest accepts any combination of:
-//   - partitions:                    increase partition count
+//   - partitions:                    increase partition count (never decrease)
 //   - retention_ms:                  update retention duration
 //   - max_in_flight_per_partition:   per-partition in-flight cap
 //   - max_acked_ahead_per_partition: per-partition acked-ahead cap
 //   - schema:                        register a new JSON Schema version
 //
-// At least one field is required. Sending multiple fields applies
-// each change sequentially — if one fails the whole request fails.
+// visibility_timeout_ms is fixed at create time and not alterable.
+//
+// At least one field is required. Sending multiple fields applies each
+// group as its own metastore update, in a fixed order (retention, caps,
+// partitions, schema) with no cross-group transaction: the first
+// failure aborts the sequence and the groups before it stay applied.
+// Clients that need atomicity send one field per request. This is the
+// documented contract (docs/client/topics.md).
 //
 // retention_ms / max_*_per_partition are *int64 (rather than int64)
-// so the caller can distinguish "unset" from "set to zero" — zero
-// means "inherit broker default".
+// so the caller can distinguish "unset" from "set to zero"; zero
+// means "inherit broker default". partitions uses 0 as unset.
 type alterRequest struct {
 	Partitions                int             `json:"partitions"`
 	RetentionMs               *int64          `json:"retention_ms,omitempty"`
@@ -38,7 +44,7 @@ func (req alterRequest) Validate() error {
 	hasSchema := len(req.Schema) > 0
 
 	if req.Partitions < 0 {
-		return errors.New("partitions must be > 0")
+		return errors.New("partitions must be a positive integer (omit or 0 to leave the count unchanged)")
 	}
 	if !hasPartitions && !hasRetention && !hasCaps && !hasSchema {
 		return errors.New("at least one of partitions, retention_ms, max_*_per_partition, or schema is required")
@@ -59,8 +65,8 @@ func (req alterRequest) Validate() error {
 }
 
 // Alter handles PATCH /v1/topics/{topic}. Each supplied field
-// triggers the matching broker call; order is retention → caps →
-// partitions → schema. The returned topic record reflects all
+// triggers the matching broker call; order is retention, caps,
+// partitions, schema. The returned topic record reflects all
 // applied changes.
 func Alter(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -102,9 +108,11 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 	}
 }
 
-// applyAlter applies each supplied field in order: retention → caps →
-// partitions → schema. The returned topic reflects the last applied
-// change.
+// applyAlter applies each supplied field group in order: retention,
+// caps, partitions, schema. Each group is an independent metastore
+// update; a failure aborts the sequence and leaves the earlier groups
+// applied (see alterRequest). The returned topic reflects the last
+// applied change.
 func applyAlter(ctx context.Context, s *handlers.Set, topicName string, req alterRequest) (topic.Topic, error) {
 	var t topic.Topic
 	var err error

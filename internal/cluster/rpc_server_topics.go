@@ -44,6 +44,9 @@ func (b rpcAlterTopicBody) validate() error {
 	hasCaps := b.MaxInFlightPerPartition != nil || b.MaxAckedAheadPerPartition != nil
 	hasSchema := len(b.Schema) > 0
 
+	if b.Partitions < 0 {
+		return errors.New("partitions must be a positive integer (omit or 0 to leave the count unchanged)")
+	}
 	if !hasPartitions && !hasRetention && !hasCaps && !hasSchema {
 		return errors.New("at least one of partitions, retention_ms, max_*_per_partition, or schema is required")
 	}
@@ -124,10 +127,11 @@ func (s *RPCServer) handleAlterTopic(payload []byte) nodewire.Response {
 }
 
 // applyTopicAlterations applies the requested field groups one at a time, in
-// a fixed order, and returns the topic as of the last successful update. An
-// error aborts the sequence, so a multi-field alter can be partially applied
-// — each group is an independent broker update with no cross-group
-// transaction.
+// a fixed order (retention, caps, partitions, schema), and returns the topic
+// as of the last successful update. An error aborts the sequence, so a
+// multi-field alter can be partially applied: each group is an independent
+// broker update with no cross-group transaction. This matches the HTTP
+// handler and the documented contract in docs/client/topics.md.
 func (s *RPCServer) applyTopicAlterations(topicName string, body rpcAlterTopicBody) (topic.Topic, error) {
 	var t topic.Topic
 	var err error
@@ -176,7 +180,17 @@ func (s *RPCServer) handleDeleteTopic(payload []byte) nodewire.Response {
 		return errorResponse(http.StatusBadRequest, "invalid delete topic request: "+err.Error())
 	}
 	if err := s.broker.DeleteTopic(rpcRequestContext(), req.Topic); err != nil {
-		return s.brokerError("delete topic", err)
+		purgeErr, ok := errors.AsType[brokertopics.PurgeError](err)
+		if !ok {
+			return s.brokerError("delete topic", err)
+		}
+		// The metadata delete stood; only this node's file purge failed.
+		// Answer 204 like the HTTP path: the topic is gone for every
+		// client, a 5xx would only make the forwarding follower report a
+		// failure for a delete that happened (and the retry 404), and the
+		// startup orphan sweep reclaims the leftover directory.
+		s.logger.Warn("topic deleted but local purge failed; the startup orphan sweep reclaims the directory",
+			"topic", req.Topic, "err", purgeErr.Err)
 	}
 	// The metastore record is gone and this node's own files are purged.
 	// Fan the purge out to the other members so the partition owners drop

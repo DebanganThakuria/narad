@@ -27,7 +27,9 @@ A **grant** is an action plus a list of topic-name patterns:
 
 Patterns are exact names or **prefix wildcards**: `invoices.*` matches `invoices.eu`, `invoices.us`, and so on.
 
-**Ownership** rides on top: whoever created a topic can alter it, delete it, and manage its fan-out children; no extra grants needed. Admins can do that to any topic.
+**Ownership** rides on top: whoever created a topic can alter it, delete it, read its details, and manage its fan-out children; no extra grants needed. Admins can do that to any topic. Attaching a child needs manage rights on both the parent and the child; detaching needs them on either.
+
+Any grant on a topic also lets you **read** it (`GET /v1/topics/{name}` and its children); `GET /v1/topics` shows only what you could read. Cluster topology (`GET /v1/cluster/members`, `GET /v1/cluster/moves`) and user management are admin-only.
 
 ## Managing users (admin only)
 
@@ -51,10 +53,13 @@ curl -u $ADMIN -X PUT $NARAD/v1/users/billing-service/grants \
 curl -u $ADMIN -X DELETE $NARAD/v1/users/billing-service
 ```
 
+Passwords are 1 to 72 **bytes** (bcrypt's limit; multi-byte characters count per byte). Anything longer is rejected with `400` on create and on password change.
+
 Two rules that keep the system honest:
 
 - **No privilege escalation**: you can never grant another user more than you hold yourself.
 - Users can change **their own password** (`PUT /v1/users/{name}/password` with `current_password`); admins can reset anyone's without it.
+- Updates are **field-scoped**: a password change touches only the password, a grants update only the grants. Two admins editing different fields at once cannot undo each other, and a password change can never bring back a grant that was revoked moments earlier, whichever node it lands on.
 
 ## Practical advice
 

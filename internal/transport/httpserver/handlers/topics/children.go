@@ -6,9 +6,14 @@ package topics
 //	DELETE /v1/topics/{parent}/children/{child}  — detach a child
 //	GET    /v1/topics/{parent}/children          — list children + lag
 //
-// Attach and detach are admin-or-owner operations on the parent (same
-// rule as alter/delete) and, like every metadata write, are forwarded
-// to the cluster leader in multi-node mode.
+// Attach is an admin-or-owner operation on BOTH topics: linking a child
+// rewrites the child's schema history, starts pumping the parent's
+// records into it, and (with a delay) makes it unproducible, so the
+// parent's owner alone must not be able to claim someone else's topic.
+// Detach needs manage rights on either side, since both owners have a
+// stake in the link. Listing children needs any grant on the parent.
+// Like every metadata write, attach and detach are forwarded to the
+// cluster leader in multi-node mode.
 
 import (
 	"errors"
@@ -47,7 +52,7 @@ func AttachChild(s *handlers.Set) http.HandlerFunc {
 		if !s.DecodeAndValidate(w, r, &req) {
 			return
 		}
-		if !s.AuthorizeTopicManage(w, r, parent) {
+		if !s.AuthorizeTopicManage(w, r, parent) || !s.AuthorizeTopicManage(w, r, req.Child) {
 			return
 		}
 		if s.Deps.Router != nil {
@@ -77,7 +82,7 @@ func DetachChild(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, "parent and child topics required")
 			return
 		}
-		if !s.AuthorizeTopicManage(w, r, parent) {
+		if !s.AuthorizeTopicManageAny(w, r, parent, child) {
 			return
 		}
 		if s.Deps.Router != nil {
@@ -117,6 +122,9 @@ func ListChildren(s *handlers.Set) http.HandlerFunc {
 		parent := r.PathValue("parent")
 		if parent == "" {
 			s.WriteError(w, http.StatusBadRequest, "parent topic required")
+			return
+		}
+		if !s.AuthorizeTopicRead(w, r, parent) {
 			return
 		}
 		t, err := s.Deps.Broker.GetTopic(r.Context(), parent)

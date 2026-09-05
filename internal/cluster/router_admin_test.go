@@ -693,3 +693,83 @@ func TestBroadcastDeleteTopicDeadlineCoversPurgeExecution(t *testing.T) {
 		t.Fatalf("purge deadline is %s away, want it bounded near the budgeted window", remaining)
 	}
 }
+
+// Purges fan out concurrently under one shared deadline: three members
+// that each take purgeDelay must cost about purgeDelay in total, not
+// three times that, and every RPC must see the same deadline.
+func TestBroadcastDeleteTopicFansOutConcurrentlyUnderOneDeadline(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	for _, m := range []metastore.Member{
+		{ID: "node-a", Addr: "127.0.0.1:2", Status: metastore.MemberAlive},
+		{ID: "node-b", Addr: "127.0.0.1:3", Status: metastore.MemberAlive},
+		{ID: "node-c", Addr: "127.0.0.1:4", Status: metastore.MemberAlive},
+	} {
+		if err := store.RegisterMember(ctx, m); err != nil {
+			t.Fatalf("RegisterMember(%s) error = %v", m.ID, err)
+		}
+	}
+
+	const purgeDelay = 200 * time.Millisecond
+	var mu sync.Mutex
+	var deadlines []time.Time
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
+	router.peer = fakePeerClient{purgeTopicFn: func(ctx context.Context, _, _ string) (nodewire.Response, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Error("purge RPC has no deadline")
+		}
+		mu.Lock()
+		deadlines = append(deadlines, deadline)
+		mu.Unlock()
+		time.Sleep(purgeDelay)
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	}}
+
+	start := time.Now()
+	if err := router.BroadcastDeleteTopic(ctx, "orders"); err != nil {
+		t.Fatalf("BroadcastDeleteTopic() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 2*purgeDelay {
+		t.Fatalf("broadcast took %s for three %s purges, want them concurrent", elapsed, purgeDelay)
+	}
+	if len(deadlines) != 3 {
+		t.Fatalf("purged %d members, want 3", len(deadlines))
+	}
+	for _, d := range deadlines[1:] {
+		if !d.Equal(deadlines[0]) {
+			t.Fatalf("purge deadlines differ (%v vs %v), want one shared deadline", deadlines[0], d)
+		}
+	}
+}
+
+// Failures are joined in member order, whichever purge finished first,
+// so the logged message is stable.
+func TestBroadcastDeleteTopicJoinsFailuresInMemberOrder(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	for _, m := range []metastore.Member{
+		{ID: "node-a", Addr: "127.0.0.1:2", Status: metastore.MemberAlive},
+		{ID: "node-b", Addr: "127.0.0.1:3", Status: metastore.MemberAlive},
+	} {
+		if err := store.RegisterMember(ctx, m); err != nil {
+			t.Fatalf("RegisterMember(%s) error = %v", m.ID, err)
+		}
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
+	router.peer = fakePeerClient{purgeTopicFn: func(_ context.Context, addr, _ string) (nodewire.Response, error) {
+		if addr == "127.0.0.1:2" {
+			time.Sleep(50 * time.Millisecond) // node-a finishes last
+		}
+		return nodewire.Response{}, errors.New("unreachable")
+	}}
+	err := router.BroadcastDeleteTopic(ctx, "orders")
+	if err == nil {
+		t.Fatal("BroadcastDeleteTopic() error = nil, want both failures")
+	}
+	msg := err.Error()
+	a, b := strings.Index(msg, "node-a"), strings.Index(msg, "node-b")
+	if a < 0 || b < 0 || a > b {
+		t.Fatalf("joined error = %q, want node-a before node-b", msg)
+	}
+}

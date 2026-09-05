@@ -231,6 +231,22 @@ you can disable it with `NARAD_SECURITY_ENABLED=false`. TLS is expected to
 terminate at an ingress in front of Narad; bind the plaintext listener
 only to loopback or a trusted network.
 
+Two deliberate trade-offs in the authenticator, so nobody is surprised:
+
+- **Unknown usernames are rejected without running bcrypt.** This leaks
+  whether a username exists via response time, but it means only real
+  users can ever cost the server bcrypt time, which bounds the whole
+  authentication attack surface.
+- **The failed-login throttle is per node and per username** (5 attempts
+  of burst, one earned back every 12s; successful logins refund their
+  token). Behind a load balancer over N nodes the effective budget for a
+  username is therefore 5N attempts per 12s, not 5. Front Narad with
+  ingress rate limiting if that matters for your threat model; there is
+  no cluster-wide throttle.
+
+Passwords are 1 to 72 bytes (bcrypt's input limit); longer ones are
+rejected with `400`.
+
 ### Container Image
 
 Narad ships as a single static binary inside a small non-root container

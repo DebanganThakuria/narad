@@ -26,6 +26,13 @@ const (
 //	{ "topics": [...], "next_page_token": "..." }
 //
 // next_page_token is "" when no more pages remain.
+//
+// The page is filtered to topics the caller may read (any grant on the
+// name, ownership, or admin; see handlers.CanReadTopic). Filtering
+// happens after pagination so tokens stay stable and cheap: a page can
+// therefore come back shorter than limit, or even empty, while
+// next_page_token is still set. Clients must keep paging until the
+// token is empty, not until a page is short.
 func List(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		limit, ok := parseLimit(s, w, r)
@@ -43,9 +50,13 @@ func List(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusInternalServerError, "list topics failed")
 			return
 		}
-		if ts == nil {
-			ts = []topic.Topic{}
+		visible := make([]topic.Topic, 0, len(ts))
+		for _, t := range ts {
+			if handlers.CanReadTopic(r, t.Owner, t.Name) {
+				visible = append(visible, t)
+			}
 		}
+		ts = visible
 		s.WriteJSON(w, http.StatusOK, map[string]any{
 			"topics":          ts,
 			"next_page_token": nextToken,

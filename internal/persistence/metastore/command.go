@@ -4,6 +4,8 @@ package metastore
 // frozen: changing the opCode values, JSON tags, or payload shapes would
 // break replay of existing Raft logs.
 
+import "github.com/debanganthakuria/narad/internal/domain/user"
+
 type opCode byte
 
 const (
@@ -27,6 +29,8 @@ const (
 	opSetMemberDraining
 	opRemoveMember
 	opReadmitMember
+	opSetUserPassword
+	opSetUserGrants
 )
 
 // memberRemovalPayload is the body of opRemoveMember and opReadmitMember.
@@ -35,6 +39,24 @@ const (
 type memberRemovalPayload struct {
 	ID string `json:"id"`
 	At int64  `json:"at"`
+}
+
+// userPasswordPayload is the body of opSetUserPassword: replace only the
+// stored password hash of an existing user. Field-scoped so a password
+// change proposed from a lagging replica carries nothing else (see
+// fsm_apply_users.go).
+type userPasswordPayload struct {
+	Username     string `json:"u"`
+	PasswordHash []byte `json:"h"`
+	UpdatedAtMs  int64  `json:"t"`
+}
+
+// userGrantsPayload is the body of opSetUserGrants: replace only the
+// grants of an existing user.
+type userGrantsPayload struct {
+	Username    string       `json:"u"`
+	Grants      []user.Grant `json:"g"`
+	UpdatedAtMs int64        `json:"t"`
 }
 
 // memberDrainingPayload marks a member as draining (or clears it). A
