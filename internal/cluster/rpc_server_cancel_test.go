@@ -164,7 +164,7 @@ func TestDeliveryRecordsExpireAfterGraceWithoutScan(t *testing.T) {
 	s.rememberDelivery(requestKey{stream: 1, request: 5}, "orders", handle)
 	now = now.Add(deliveryCancelGrace / 2)
 	s.rememberDelivery(requestKey{stream: 1, request: 5}, "orders", handle) // refreshed
-	now = now.Add(deliveryCancelGrace/2 + time.Millisecond)                   // first deadline passed, second not
+	now = now.Add(deliveryCancelGrace/2 + time.Millisecond)                 // first deadline passed, second not
 	s.rememberDelivery(requestKey{stream: 1, request: 6}, "orders", handle)
 	if _, ok := s.deliveries[requestKey{stream: 1, request: 5}]; !ok {
 		t.Fatal("refreshed record was expired by its stale queue entry")

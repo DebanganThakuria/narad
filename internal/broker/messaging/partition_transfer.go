@@ -66,6 +66,15 @@ func (e *Engine) PartitionTransferInfo(ctx context.Context, topicName string, pa
 	if err != nil {
 		return PartitionTransferInfo{}, err
 	}
+	// The persisted consumer.offset is flushed on a timer and lags the
+	// in-memory frontier by up to one flush; the copy must carry the
+	// frontier the consumers actually reached, or the new owner
+	// redelivers the last acked messages.
+	if e.offsets != nil {
+		if mem, ok := e.offsets.CommittedOffset(topicName, partition); ok && (!hasCommitted || mem > committed) {
+			committed, hasCommitted = mem, true
+		}
+	}
 	return PartitionTransferInfo{
 		Segments:        segs,
 		HighWatermark:   hwm,
