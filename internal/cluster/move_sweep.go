@@ -16,8 +16,10 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"os"
 
+	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
@@ -62,7 +64,22 @@ func (r *MoveRunner) sweepStaleCopies(ctx context.Context) {
 			if !r.assignmentAwayConfirmedByLeader(ctx, t.Name, a.Partition) {
 				continue
 			}
-			if err := r.reclaimer.ReclaimMovedPartition(ctx, t.Name, a.Partition); err != nil {
+			// Learn the position the partition was promoted at on its new
+			// owner before deleting anything: a force-promote leaves the
+			// old owner's copy AHEAD of it when the old owner kept
+			// committing through a network partition, and those records
+			// exist nowhere else. An unreachable owner defers the sweep.
+			guard, ok := r.promotedPosition(ctx, a.OwnerID, t.Name, a.Partition)
+			if !ok {
+				continue
+			}
+			err := r.reclaim(ctx, t.Name, a.Partition, guard)
+			if errors.Is(err, messaging.ErrPartitionQuarantined) {
+				r.logger.Error("move: stale partition copy QUARANTINED, not deleted: it holds records past the hwm the partition was promoted at on its new owner; operator action required",
+					"topic", t.Name, "partition", a.Partition, "owner", a.OwnerID, "promoted_hwm", guard.PromotedHWM, "err", err)
+				continue
+			}
+			if err != nil {
 				r.logger.Warn("move: reclaim stale copy", "topic", t.Name, "partition", a.Partition, "err", err)
 				continue
 			}
@@ -105,4 +122,41 @@ func (r *MoveRunner) assignmentAwayConfirmedByLeader(ctx context.Context, topicN
 		}
 	}
 	return a.OwnerID != "" && a.OwnerID != r.selfID && a.TargetID != r.selfID
+}
+
+// promotedPosition asks the partition's current owner for its transfer
+// info and returns the move marker's promoted HWM as a reclaim guard.
+// ok=false when the owner could not be asked (unknown, no address, RPC
+// failed): the sweep then defers, which is free. An owner that reports
+// no marker (older release, or a copy not installed by a move) yields a
+// guard with Known=false, so the reclaim deletes as it always did.
+func (r *MoveRunner) promotedPosition(ctx context.Context, ownerID, topicName string, partition int) (messaging.ReclaimGuard, bool) {
+	m, err := r.store.GetMember(ownerID)
+	if err != nil || m.Addr == "" {
+		return messaging.ReclaimGuard{}, false
+	}
+	info, err := r.peer.ListPartitionSegments(ctx, m.Addr, topicName, partition)
+	if err != nil {
+		r.logger.Warn("move: sweep could not read the new owner's transfer info; deferring reclaim",
+			"topic", topicName, "partition", partition, "owner", ownerID, "err", err)
+		return messaging.ReclaimGuard{}, false
+	}
+	if info.MoveMarker == nil {
+		return messaging.ReclaimGuard{}, true
+	}
+	return messaging.ReclaimGuard{PromotedHWM: info.MoveMarker.HighWatermark, Known: true}, true
+}
+
+// reclaim runs the guarded reclaim when the broker offers it, else the
+// plain one (a guard the broker cannot honor is logged, never silently
+// dropped).
+func (r *MoveRunner) reclaim(ctx context.Context, topicName string, partition int, guard messaging.ReclaimGuard) error {
+	if g, ok := r.reclaimer.(guardedReclaimer); ok {
+		return g.ReclaimMovedPartitionGuarded(ctx, topicName, partition, guard)
+	}
+	if guard.Known {
+		r.logger.Warn("move: reclaimer cannot compare the local copy against the promoted hwm; reclaiming unguarded",
+			"topic", topicName, "partition", partition, "promoted_hwm", guard.PromotedHWM)
+	}
+	return r.reclaimer.ReclaimMovedPartition(ctx, topicName, partition)
 }

@@ -11,20 +11,30 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
 type fakeReclaimer struct {
-	mu    sync.Mutex
-	calls []string
+	mu     sync.Mutex
+	calls  []string
+	guards []messaging.ReclaimGuard
+	err    error
 }
 
 func (f *fakeReclaimer) ReclaimMovedPartition(_ context.Context, topicName string, partition int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, topicName)
-	return nil
+	return f.err
+}
+
+func (f *fakeReclaimer) ReclaimMovedPartitionGuarded(ctx context.Context, topicName string, partition int, guard messaging.ReclaimGuard) error {
+	f.mu.Lock()
+	f.guards = append(f.guards, guard)
+	f.mu.Unlock()
+	return f.ReclaimMovedPartition(ctx, topicName, partition)
 }
 
 func (f *fakeReclaimer) count() int {
@@ -120,5 +130,46 @@ func TestMoveSweepRefusalGates(t *testing.T) {
 				t.Fatalf("%s: reclaim was called (%d times) — must refuse", tc.name, rec.count())
 			}
 		})
+	}
+}
+
+// Before reclaiming, the sweep asks the new owner for its move marker and
+// hands the promoted HWM to the reclaim, which quarantines a local copy
+// that is ahead of it. An owner that cannot be asked defers the sweep;
+// an owner without a marker (older release) reclaims unguarded.
+func TestMoveSweepPassesPromotedHWMToReclaim(t *testing.T) {
+	store := &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-new"},
+		member:     metastore.Member{ID: "narad-new", Addr: "newaddr", Status: metastore.MemberAlive},
+	}
+	rec := &fakeReclaimer{}
+	dataDir := t.TempDir()
+	peer := movePeerFake{marker: &messaging.MoveMarker{Source: "narad-dst", HighWatermark: 42, ForcePromoted: true}}
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, rec, nil, nil, MoveConfig{})
+	mkLocalPartitionDir(t, dataDir)
+
+	r.sweepStaleCopies(context.Background())
+	if rec.count() != 1 || len(rec.guards) != 1 {
+		t.Fatalf("reclaim calls = %d (guarded %d), want 1 guarded call", rec.count(), len(rec.guards))
+	}
+	if g := rec.guards[0]; !g.Known || g.PromotedHWM != 42 {
+		t.Fatalf("reclaim guard = %+v, want the owner's promoted hwm 42", g)
+	}
+
+	// No marker on the owner: unguarded reclaim, as before.
+	rec = &fakeReclaimer{}
+	r = NewMoveRunner(store, "narad-dst", dataDir, movePeerFake{}, rec, nil, nil, MoveConfig{})
+	r.sweepStaleCopies(context.Background())
+	if len(rec.guards) != 1 || rec.guards[0].Known {
+		t.Fatalf("guards = %+v, want one unguarded reclaim", rec.guards)
+	}
+
+	// Owner has no address: the sweep defers rather than deleting blind.
+	rec = &fakeReclaimer{}
+	store.member.Addr = ""
+	r = NewMoveRunner(store, "narad-dst", dataDir, peer, rec, nil, nil, MoveConfig{})
+	r.sweepStaleCopies(context.Background())
+	if rec.count() != 0 {
+		t.Fatalf("reclaim called %d times with the owner unreachable; must defer", rec.count())
 	}
 }
