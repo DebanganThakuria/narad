@@ -16,6 +16,8 @@ package controller
 
 import (
 	"context"
+	"slices"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -67,7 +69,13 @@ func (c *Controller) reconcileRebalance(ctx context.Context) {
 	}
 	in.Avoid = antiAffinityAvoid(byName, parentOwners)
 
-	budget := c.cfg.MaxInFlightMoves - inFlight
+	// Moves aimed at a node that is gone never finish on their own: only
+	// the destination aborts a move, and a dead destination cannot. Clear
+	// them so they stop pinning the budget; the partition stays with its
+	// owner (untouched by the move) and is re-planned like any other.
+	aborted := c.abortDeadTargetMoves(ctx, inFlight, members)
+
+	budget := c.cfg.MaxInFlightMoves - (len(inFlight) - aborted)
 	if budget <= 0 {
 		return // already at the in-flight cap; let running moves finish
 	}
@@ -87,12 +95,11 @@ func (c *Controller) reconcileRebalance(ctx context.Context) {
 // buildPlanInput reads every topic's assignments once and assembles the
 // planner's view: effective load (in-flight partitions counted at their
 // target), the movable settled partitions, the parent-owner map for
-// anti-affinity, and the current in-flight move count. ok is false on a
-// transient read failure — better to skip a pass than plan from a partial
-// view.
+// anti-affinity, and the in-flight moves. ok is false on a transient
+// read failure; better to skip a pass than plan from a partial view.
 func (c *Controller) buildPlanInput(
 	topics []topic.Topic, receivers []string, aliveSet map[string]bool,
-) (in PlanInput, parentOwners map[string]map[int]string, byName map[string]topic.Topic, inFlight int, ok bool) {
+) (in PlanInput, parentOwners map[string]map[int]string, byName map[string]topic.Topic, inFlight []metastore.Assignment, ok bool) {
 	load := make(map[string]int, len(receivers))
 	for _, r := range receivers {
 		load[r] = 0
@@ -105,13 +112,13 @@ func (c *Controller) buildPlanInput(
 		byName[t.Name] = t
 		assignments, err := c.store.ListAssignments(t.Name)
 		if err != nil {
-			return PlanInput{}, nil, nil, 0, false
+			return PlanInput{}, nil, nil, nil, false
 		}
 		owners := make(map[int]string, len(assignments))
 		for _, a := range assignments {
 			owners[a.Partition] = a.OwnerID
 			if a.TargetID != "" {
-				inFlight++
+				inFlight = append(inFlight, a)
 				// Level-triggered: count an in-flight partition at its
 				// destination and leave it OUT of the movable pool, so the
 				// planner never re-plans a move already running.
@@ -132,6 +139,45 @@ func (c *Controller) buildPlanInput(
 		parentOwners[t.Name] = owners
 	}
 	return PlanInput{Load: load, Movable: movable, Receivers: receivers}, parentOwners, byName, inFlight, true
+}
+
+// abortDeadTargetMoves clears the target of every in-flight move whose
+// destination cannot complete it: the target member is gone from the
+// member list, has been dead longer than DeadTargetAbortAfter, or is out
+// of the Raft voter set while dead or draining (a decommissioned node that
+// has not aged out yet). Returns how many targets were cleared. A briefly
+// dead target (a pod restart) is left alone: its worker resumes the copy
+// when it returns. Clearing the target is safe at any point of the move:
+// the owner never changed, and a destination that comes back finds its
+// guarded CAS refused and discards its staged copy.
+func (c *Controller) abortDeadTargetMoves(ctx context.Context, inFlight []metastore.Assignment, members []metastore.Member) int {
+	if len(inFlight) == 0 {
+		return 0
+	}
+	byID := make(map[string]metastore.Member, len(members))
+	for _, m := range members {
+		byID[m.ID] = m
+	}
+	voters, err := c.store.Voters()
+	if err != nil {
+		voters = nil // unknown: only the membership rules below apply
+	}
+	deadBefore := time.Now().Unix() - int64(c.cfg.DeadTargetAbortAfter.Seconds())
+	aborted := 0
+	for _, a := range inFlight {
+		m, known := byID[a.TargetID]
+		gone := !known || // not a cluster member at all
+			(m.Status == metastore.MemberDead && m.LastHeartbeat < deadBefore) || // dead past the bound
+			(voters != nil && !slices.Contains(voters, a.TargetID) && (m.Status == metastore.MemberDead || m.Draining)) // removed from Raft
+		if !gone {
+			continue
+		}
+		if err := c.store.SetAssignmentTarget(ctx, a.Topic, a.Partition, ""); err != nil {
+			continue
+		}
+		aborted++
+	}
+	return aborted
 }
 
 // antiAffinityAvoid discourages placing a fan-out child's partition on the

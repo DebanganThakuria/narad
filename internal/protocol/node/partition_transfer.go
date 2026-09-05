@@ -81,12 +81,23 @@ func DecodeFetchSegmentChunkRequest(payload []byte) (FetchSegmentChunkRequest, e
 
 // EncodePrepareHandoffRequest encodes an OpPrepareHandoff payload.
 func EncodePrepareHandoffRequest(req PrepareHandoffRequest) ([]byte, error) {
-	w := opWriter(OpPrepareHandoff, fieldLen(req.Topic)+4+8)
+	size := fieldLen(req.Topic) + 4 + 8
+	if req.FreezeToken != "" {
+		size += fieldLen(req.FreezeToken)
+	}
+	w := opWriter(OpPrepareHandoff, size)
 	if err := w.string(req.Topic); err != nil {
 		return nil, err
 	}
 	w.i32(int32(req.Partition))
 	w.i64(req.FreezeTTLNanos)
+	// Optional trailing field: absent means "arm or extend, no fence",
+	// which is exactly what a pre-token destination sends.
+	if req.FreezeToken != "" {
+		if err := w.string(req.FreezeToken); err != nil {
+			return nil, err
+		}
+	}
 	return w.finish(), nil
 }
 
@@ -108,8 +119,15 @@ func DecodePrepareHandoffRequest(payload []byte) (PrepareHandoffRequest, error) 
 	if err != nil {
 		return PrepareHandoffRequest{}, err
 	}
+	var token string
+	if r.remaining() > 0 {
+		token, err = r.string()
+		if err != nil {
+			return PrepareHandoffRequest{}, err
+		}
+	}
 	if err := r.done(); err != nil {
 		return PrepareHandoffRequest{}, err
 	}
-	return PrepareHandoffRequest{Topic: t, Partition: int(pt), FreezeTTLNanos: ttl}, nil
+	return PrepareHandoffRequest{Topic: t, Partition: int(pt), FreezeTTLNanos: ttl, FreezeToken: token}, nil
 }

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
@@ -96,6 +97,30 @@ type MoveSession struct {
 	lastCommitted int64
 	hasCommitted  bool
 	sawInfo       bool
+	// lastSidecars are the fan-out cursor files the source reported on
+	// its last successful list. They are installed into the staged copy
+	// at finalize time (after the last segment pass, so they are as
+	// fresh as the source's cursors got) and by a force-promote, which
+	// has nothing newer.
+	lastSidecars []storage.SidecarFile
+
+	// keepFrozen, when set, is called every keepFrozenEvery during
+	// Finalize to re-arm the source's handoff freeze (whose TTL is
+	// shorter than a slow drain can take). An error means the freeze
+	// lapsed: commits may have landed on the source since, so Finalize
+	// fails and the caller re-freezes and drains again.
+	keepFrozen      func(context.Context) error
+	keepFrozenEvery time.Duration
+}
+
+// KeepFrozen registers the re-arm hook Finalize calls every `every` to
+// keep the source frozen while it drains. Without it (a static source,
+// or tests) Finalize drains unfenced.
+func (s *MoveSession) KeepFrozen(fn func(context.Context) error, every time.Duration) {
+	s.keepFrozen, s.keepFrozenEvery = fn, every
+	if every <= 0 {
+		s.keepFrozenEvery = time.Second
+	}
 }
 
 // Begin starts a copy session.
@@ -117,6 +142,7 @@ func (s *MoveSession) pass(ctx context.Context) (int64, messaging.PartitionTrans
 	// Record the source's last-known visibility boundary before copying, so a
 	// force-promote after the source dies reproduces exactly this HWM.
 	s.lastHWM, s.lastCommitted, s.hasCommitted, s.sawInfo = info.HighWatermark, info.CommittedOffset, info.HasCommitted, true
+	s.lastSidecars = info.Sidecars
 	var newBytes int64
 	for _, seg := range info.Segments {
 		at := s.copied[seg.BaseOffset]
@@ -215,33 +241,100 @@ func (s *MoveSession) CatchUp(ctx context.Context, lagBytes int64, maxRounds, st
 // stable), short enough that catch-up stays responsive.
 const catchUpPassInterval = 50 * time.Millisecond
 
-// Finalize drains the (now-frozen) source until a pass copies zero new
-// bytes, reproduces the source's exact HWM + committed offset, and
-// verifies the staged copy recovers into a log reaching that HWM. Call
-// only AFTER the source is frozen (PrepareHandoff), or against a static
-// source — otherwise it would chase a growing tail.
+// Finalize drains the (now-frozen) source until two consecutive passes
+// copy zero new bytes AND report the same HWM, reproduces the source's
+// exact HWM + committed offset, installs the fan-out cursor sidecars
+// from the last listing, and verifies the staged copy recovers into a
+// log reaching that HWM. Call only AFTER the source is frozen
+// (PrepareHandoff), or against a static source; otherwise it would
+// chase a growing tail. While draining it re-arms the freeze through the
+// KeepFrozen hook; a lapsed freeze fails the drain.
+//
+// The double-quiet rule guards against a commit that passed the freeze
+// gate before the freeze and finished its fsync between two listings:
+// one quiet pass could observe the segment before the append and the
+// HWM after it. Two identical observations in a row, on a source whose
+// freeze holds, cannot straddle a commit.
 func (s *MoveSession) Finalize(ctx context.Context) (CopyResult, error) {
-	var lastHWM, committed int64
-	var hasCommitted bool
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// The re-arm runs on its own ticker, not between passes: a single
+	// pass can outlive the freeze TTL (a non-converged tail is drained
+	// here), and the freeze must be extended while it does. A failed
+	// re-arm cancels the drain; the error surfaces below.
+	var rearmErr error
+	var rearmMu sync.Mutex
+	if s.keepFrozen != nil {
+		done := make(chan struct{})
+		defer func() { cancel(); <-done }()
+		go func() {
+			defer close(done)
+			ticker := time.NewTicker(s.keepFrozenEvery)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := s.keepFrozen(ctx); err != nil && ctx.Err() == nil {
+						rearmMu.Lock()
+						rearmErr = fmt.Errorf("re-arm handoff freeze: %w", err)
+						rearmMu.Unlock()
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+	}
+	lapsed := func() error {
+		rearmMu.Lock()
+		defer rearmMu.Unlock()
+		return rearmErr
+	}
+
+	var last messaging.PartitionTransferInfo
+	quiet := 0
 	for pass := 0; ; pass++ {
 		if err := ctx.Err(); err != nil {
+			if lerr := lapsed(); lerr != nil {
+				return CopyResult{}, lerr
+			}
 			return CopyResult{}, err
 		}
 		newBytes, info, err := s.pass(ctx)
 		if err != nil {
+			if lerr := lapsed(); lerr != nil {
+				return CopyResult{}, lerr
+			}
 			return CopyResult{}, err
 		}
-		lastHWM, committed, hasCommitted = info.HighWatermark, info.CommittedOffset, info.HasCommitted
-		if newBytes == 0 && pass > 0 {
+		if newBytes == 0 && pass > 0 && info.HighWatermark == last.HighWatermark {
+			quiet++
+		} else {
+			quiet = 0
+		}
+		last = info
+		if quiet >= 1 {
+			// This pass and the previous one both copied nothing and saw
+			// the same HWM: the tail is static.
 			break
 		}
 		if newBytes == 0 {
 			if !sleepCtx(ctx, 50*time.Millisecond) {
+				if lerr := lapsed(); lerr != nil {
+					return CopyResult{}, lerr
+				}
 				return CopyResult{}, ctx.Err()
 			}
 		}
 	}
-	return s.finalizeStaged(lastHWM, committed, hasCommitted)
+	// The listings above are only final if the freeze held through the
+	// last one.
+	if lerr := lapsed(); lerr != nil {
+		return CopyResult{}, lerr
+	}
+	return s.finalizeStaged(last.HighWatermark, last.CommittedOffset, last.HasCommitted, last.Sidecars)
 }
 
 // ForcePromote completes a move WITHOUT the source: it promotes whatever the
@@ -267,7 +360,7 @@ func (s *MoveSession) ForcePromote() (CopyResult, error) {
 	if !s.sawInfo {
 		return CopyResult{}, fmt.Errorf("force-promote refused: source was never reached")
 	}
-	return s.finalizeStaged(s.lastHWM, s.lastCommitted, s.hasCommitted)
+	return s.finalizeStaged(s.lastHWM, s.lastCommitted, s.hasCommitted, s.lastSidecars)
 }
 
 // finalizeStaged writes the target HWM + committed offset onto the staged
@@ -275,7 +368,7 @@ func (s *MoveSession) ForcePromote() (CopyResult, error) {
 // result. Shared by Finalize (frozen live source) and ForcePromote (dead
 // source). The verify is the data-safety gate: it fails if the staged copy
 // does not reach hwm.
-func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool) (CopyResult, error) {
+func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool, sidecars []storage.SidecarFile) (CopyResult, error) {
 	// An idle source has no segments, so no pass created the staging
 	// directory; the copy is still a valid (empty) partition.
 	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
@@ -288,6 +381,13 @@ func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool) (C
 		if err := storage.WriteConsumerOffset(s.stagingDir, committed); err != nil {
 			return CopyResult{}, fmt.Errorf("write consumer offset: %w", err)
 		}
+	}
+	// The fan-out cursors travel with the partition. Last, so they are as
+	// fresh as the source's cursors got before the freeze took effect;
+	// anything they fanned out between this copy and the flip is fanned
+	// out again by the new owner (duplicates, never a skipped backlog).
+	if err := installSidecars(s.stagingDir, sidecars); err != nil {
+		return CopyResult{}, err
 	}
 	log, err := storage.NewLog(s.stagingDir, storage.Options{})
 	if err != nil {
@@ -302,6 +402,18 @@ func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool) (C
 		"topic", s.topic, "partition", s.partition, "source", s.sourceAddr,
 		"hwm", hwm, "bytes", s.total)
 	return CopyResult{HighWatermark: hwm, CommittedOffset: committed, HasCommitted: hasCommitted, BytesCopied: s.total}, nil
+}
+
+// installSidecars writes the transferred fan-out cursor files into dir.
+// Every name is validated by storage (a plain fanout-<child>.offset base
+// name) so a transfer can never plant an arbitrary path.
+func installSidecars(dir string, sidecars []storage.SidecarFile) error {
+	for _, f := range sidecars {
+		if err := storage.InstallFanoutCursorFile(dir, f); err != nil {
+			return fmt.Errorf("install sidecar: %w", err)
+		}
+	}
+	return nil
 }
 
 // Copy is Begin+Finalize for a static source (or tests) — it drains

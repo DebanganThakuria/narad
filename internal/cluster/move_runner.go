@@ -14,11 +14,17 @@ package cluster
 //	CatchUp       freeze-free bulk copy until within lagBytes of the tail
 //	PrepareHandoff freeze the source (last moment; produce reroutes, commits
 //	              are rejected and retried at the new owner) with a TTL that
-//	              auto-resumes the source if this worker dies
-//	Finalize      drain the now-static tail, reproduce the exact HWM +
-//	              committed offset, verify the staged copy recovers
-//	install       atomically move the staged dir into the partition's real
-//	              location on this node
+//	              auto-resumes the source if this worker dies, and a token
+//	              that fences everything after
+//	Finalize      drain the now-static tail, re-arming the freeze with the
+//	              token as it goes, reproduce the exact HWM + committed
+//	              offset + fan-out cursor files, verify the staged copy
+//	              recovers
+//	fence         present the token once more: the source refuses if the
+//	              freeze lapsed, so the flip below can only follow a freeze
+//	              that held continuously since the final tail was captured
+//	install       atomically move the staged dir (with its move marker) into
+//	              the partition's real location on this node
 //	CompleteMove  guarded CAS flip: owner := target, only if owner is still
 //	              the source and target is still us — the split-brain guard
 //
@@ -66,8 +72,14 @@ const (
 	// worker dies between PrepareHandoff and the flip. Long enough to cover
 	// Finalize + install + the Raft CAS, short enough that a dead worker
 	// does not strand produce for long.
-	defaultMoveFreezeTTL  = 30 * time.Second
-	defaultMoveChunkBytes = 1 << 20 // 1 MiB
+	defaultMoveFreezeTTL = 30 * time.Second
+	// defaultMoveFreezeRearmDivisor sets how often Finalize re-arms the
+	// freeze while draining: every FreezeTTL / divisor. A drain that
+	// outlives the TTL (a hot partition that did not converge) keeps the
+	// source frozen for as long as it takes; a re-arm that fails means
+	// the freeze lapsed and the attempt restarts under a fresh one.
+	defaultMoveFreezeRearmDivisor = 4
+	defaultMoveChunkBytes         = 1 << 20 // 1 MiB
 	// defaultMoveRetryBackoff paces a worker's retries when a copy attempt
 	// fails (source briefly unreachable, transient RPC error).
 	defaultMoveRetryBackoff = 2 * time.Second
@@ -85,6 +97,7 @@ type MoveConfig struct {
 	CatchUpMaxRounds   int
 	CatchUpStallRounds int
 	FreezeTTL          time.Duration
+	FreezeRearmEvery   time.Duration // default FreezeTTL / 4
 	ChunkBytes         int64
 	RetryBackoff       time.Duration
 	ForcePromoteAfter  time.Duration
@@ -105,6 +118,9 @@ func (c MoveConfig) withDefaults() MoveConfig {
 	}
 	if c.FreezeTTL <= 0 {
 		c.FreezeTTL = defaultMoveFreezeTTL
+	}
+	if c.FreezeRearmEvery <= 0 {
+		c.FreezeRearmEvery = c.FreezeTTL / defaultMoveFreezeRearmDivisor
 	}
 	if c.ChunkBytes <= 0 {
 		c.ChunkBytes = defaultMoveChunkBytes
@@ -141,7 +157,7 @@ type moveStore interface {
 // leader, so it forwards the flip/abort there).
 type movePeer interface {
 	segmentFetcher
-	PrepareHandoff(ctx context.Context, addr, topicName string, partition int, freezeTTL time.Duration) (messaging.PartitionTransferInfo, error)
+	PrepareHandoff(ctx context.Context, addr, topicName string, partition int, freezeTTL time.Duration, freezeToken string) (messaging.PartitionTransferInfo, error)
 	CompleteMove(ctx context.Context, addr, topicName string, partition int, expectedOwner, targetID string) error
 	AbortMove(ctx context.Context, addr, topicName string, partition int, expectedTarget string) error
 	GetAssignment(ctx context.Context, addr, topicName string, partition int) (metastore.Assignment, error)
@@ -152,6 +168,14 @@ type movePeer interface {
 // before deleting — defense in depth behind the sweep's own gates.
 type moveReclaimer interface {
 	ReclaimMovedPartition(ctx context.Context, topicName string, partition int) error
+}
+
+// guardedReclaimer is the reclaim the sweep prefers: it is told the HWM
+// the partition was promoted at on its new owner and quarantines instead
+// of deleting a local copy that is ahead of it (*messaging.Engine
+// implements it; the broker wiring embeds the engine).
+type guardedReclaimer interface {
+	ReclaimMovedPartitionGuarded(ctx context.Context, topicName string, partition int, guard messaging.ReclaimGuard) error
 }
 
 // partitionConsumerStateResetter is the optional broker capability the
@@ -360,7 +384,7 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 			if res, err := sess.ForcePromote(); err == nil {
 				r.logger.Warn("move: force-promoting copy of a dead source",
 					"topic", topicName, "partition", partition, "source", source, "hwm", res.HighWatermark)
-				if r.finishMove(ctx, topicName, partition, source, staging, res) {
+				if r.finishMove(ctx, topicName, partition, source, staging, res, true) {
 					r.observeMoveDone("force_promoted", started, res)
 					return
 				}
@@ -416,16 +440,62 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, sess *MoveSession, topicNa
 		r.logger.Warn("move: pre-copy did not converge (writers keep pace with the copy); freezing with a larger tail — the cutover freeze will be longer",
 			"topic", topicName, "partition", partition)
 	}
-	if _, err := r.peer.PrepareHandoff(ctx, sourceAddr, topicName, partition, r.cfg.FreezeTTL); err != nil {
+	frozen, err := r.peer.PrepareHandoff(ctx, sourceAddr, topicName, partition, r.cfg.FreezeTTL, "")
+	if err != nil {
 		r.logger.Warn("move: prepare-handoff failed; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false, CopyResult{}
 	}
+	token := frozen.FreezeToken
+	if token == "" {
+		// A source running an older release arms an unfenced freeze. The
+		// re-arms below still extend it; the fence can only check that
+		// the source is still reachable and the HWM did not move.
+		r.logger.Warn("move: source does not fence its handoff freeze (older release); cutover relies on the freeze TTL alone",
+			"topic", topicName, "partition", partition, "source", source)
+	}
+	rearm := func(ctx context.Context) (messaging.PartitionTransferInfo, error) {
+		info, err := r.peer.PrepareHandoff(ctx, sourceAddr, topicName, partition, r.cfg.FreezeTTL, token)
+		if err != nil {
+			return messaging.PartitionTransferInfo{}, err
+		}
+		if token != "" && info.FreezeToken != token {
+			return messaging.PartitionTransferInfo{}, fmt.Errorf("%w: source armed a different freeze", messaging.ErrHandoffFreezeLapsed)
+		}
+		return info, nil
+	}
+	sess.KeepFrozen(func(ctx context.Context) error {
+		_, err := rearm(ctx)
+		return err
+	}, r.cfg.FreezeRearmEvery)
 	res, err := sess.Finalize(ctx)
 	if err != nil {
 		r.logger.Warn("move: finalize failed; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false, CopyResult{}
 	}
-	return r.finishMove(ctx, topicName, partition, source, r.stagingDir(topicName, partition), res), res
+	// The fence. The freeze must have held continuously from the final
+	// tail capture to here, or a commit could have landed on the source
+	// behind the copy; the source refuses a lapsed token, and the HWM it
+	// reports now must match what the copy reproduced. This also renews
+	// the TTL so the install + CAS below run under a fresh freeze.
+	fence, err := rearm(ctx)
+	if err != nil {
+		r.logger.Warn("move: handoff freeze lapsed before the flip; not flipping, will re-freeze and drain again",
+			"topic", topicName, "partition", partition, "err", err)
+		return false, CopyResult{}
+	}
+	if fence.HighWatermark != res.HighWatermark {
+		r.logger.Warn("move: source hwm moved under the freeze; not flipping, will re-freeze and drain again",
+			"topic", topicName, "partition", partition, "copied_hwm", res.HighWatermark, "source_hwm", fence.HighWatermark)
+		return false, CopyResult{}
+	}
+	// The source's fan-out cursors kept advancing while frozen (fan-out
+	// only reads); the fence's listing is the freshest view of them.
+	staging := r.stagingDir(topicName, partition)
+	if err := installSidecars(staging, fence.Sidecars); err != nil {
+		r.logger.Warn("move: install fan-out cursor sidecars; will retry", "topic", topicName, "partition", partition, "err", err)
+		return false, CopyResult{}
+	}
+	return r.finishMove(ctx, topicName, partition, source, staging, res, false), res
 }
 
 // finishMove installs the staged copy and proposes the guarded flip (owner
@@ -434,7 +504,21 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, sess *MoveSession, topicNa
 // commits; on a rejected flip it rolls the install back and returns false so
 // the source stays authoritative and the worker retries (a re-plan will
 // cancel the worker).
-func (r *MoveRunner) finishMove(ctx context.Context, topicName string, partition int, source, stagingDir string, res CopyResult) bool {
+func (r *MoveRunner) finishMove(ctx context.Context, topicName string, partition int, source, stagingDir string, res CopyResult, forcePromoted bool) bool {
+	// The marker records how this copy got here. The old owner's sweep
+	// reads it (through the transfer info) to refuse deleting a local copy
+	// that is ahead of the promoted HWM, and the fan-out reconciler reads
+	// it to tell a lost cursor from a fresh attach.
+	if err := messaging.WriteMoveMarker(stagingDir, messaging.MoveMarker{
+		Source:            source,
+		HighWatermark:     res.HighWatermark,
+		ForcePromoted:     forcePromoted,
+		InstalledAtUnixMs: time.Now().UnixMilli(),
+		Children:          r.linkedChildren(ctx, topicName),
+	}); err != nil {
+		r.logger.Warn("move: write move marker; will retry", "topic", topicName, "partition", partition, "err", err)
+		return false
+	}
 	if err := r.install(topicName, partition, stagingDir); err != nil {
 		r.logger.Warn("move: install failed; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
@@ -455,6 +539,28 @@ func (r *MoveRunner) finishMove(ctx context.Context, topicName string, partition
 	r.logger.Info("move: partition moved",
 		"topic", topicName, "partition", partition, "source", source, "hwm", res.HighWatermark, "bytes", res.BytesCopied)
 	return true
+}
+
+// linkedChildren snapshots the child topics attached to topicName (child
+// name -> attach epoch) from the local replica, for the move marker. A
+// read failure yields nil: the fan-out reconciler then treats every
+// missing cursor as a fresh attach, exactly as before the marker existed.
+func (r *MoveRunner) linkedChildren(ctx context.Context, parent string) map[string]string {
+	topics, _, err := r.store.ListTopics(ctx, metastore.ListOptions{})
+	if err != nil {
+		return nil
+	}
+	var children map[string]string
+	for _, t := range topics {
+		if !t.IsChild() || t.Parent != parent {
+			continue
+		}
+		if children == nil {
+			children = map[string]string{}
+		}
+		children[t.Name] = t.AttachEpoch
+	}
+	return children
 }
 
 // sourceDeadEnough reports whether the source has been confirmed dead by the

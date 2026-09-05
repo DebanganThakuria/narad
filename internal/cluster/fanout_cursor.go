@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
+	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -27,12 +28,15 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 	delayMs := key.delayMs
 
 	next := topic.FanoutTailOffset
+	lostByMove := false
 	if cur, ok, err := storage.ReadFanoutCursor(partitionDir, key.child); err != nil {
 		r.logger.Warn("fanout: read cursor failed; cannot resume",
 			"parent", key.parent, "partition", key.partition, "child", key.child, "err", err)
 	} else if !ok {
+		lostByMove = cursorLostByMove(partitionDir, key)
 		r.logger.Warn("fanout: no cursor file; cannot resume (fresh attach, or lost cursor state)",
-			"parent", key.parent, "partition", key.partition, "child", key.child, "epoch", key.epoch)
+			"parent", key.parent, "partition", key.partition, "child", key.child, "epoch", key.epoch,
+			"link_predates_install", lostByMove)
 	} else if cur.Epoch != key.epoch {
 		r.logger.Warn("fanout: cursor file epoch mismatch; cannot resume (re-attached link, or stale replica)",
 			"parent", key.parent, "partition", key.partition, "child", key.child,
@@ -70,6 +74,19 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 				return
 			}
 			next = slab.NextOffset
+			if lostByMove && slab.HighWatermark > 0 {
+				// The link existed when a move installed this partition, so
+				// the source's cursor file should have arrived with it (the
+				// source ran a release that did not ship cursor files, or
+				// the file was lost). Tail-anchoring here would skip the
+				// child's whole backlog (for a delay child, its entire
+				// pending window). Resume from the oldest retained offset
+				// instead: duplicates for the child, never a silent gap.
+				next = slab.OldestOffset
+				r.logger.Warn("fanout: cursor file missing after a partition move for a pre-existing link; resuming from the oldest retained offset instead of the tail (expect duplicates, not loss)",
+					"parent", key.parent, "partition", key.partition, "child", key.child,
+					"from_offset", next, "tail", slab.HighWatermark)
+			}
 		}
 		// Persist the starting point BEFORE fanning anything so a crash
 		// cannot re-anchor later and silently skip the window in
@@ -151,6 +168,22 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 		}
 		r.recordLag(key, hwm-next)
 	}
+}
+
+// cursorLostByMove reports whether the partition directory was installed
+// by a move while this exact (child, attach epoch) link already existed:
+// the move marker's child snapshot names the link. A cursor file missing
+// in that case was lost, not never created, so the cursor must not
+// tail-anchor. A link attached after the install (different or absent
+// epoch in the marker) is a fresh attach and keeps the no-backfill
+// contract.
+func cursorLostByMove(partitionDir string, key fanoutCursorKey) bool {
+	marker, ok, err := messaging.ReadMoveMarker(partitionDir)
+	if err != nil || !ok {
+		return false
+	}
+	epoch, linked := marker.Children[key.child]
+	return linked && epoch == key.epoch
 }
 
 // readBatch reads one fill-or-linger batch starting at next: an
