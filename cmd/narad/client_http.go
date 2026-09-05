@@ -24,8 +24,22 @@ type httpClient struct {
 func newHTTPClient(addr string) *httpClient {
 	return &httpClient{
 		addr: strings.TrimRight(addr, "/"),
-		h:    &http.Client{Timeout: 60 * time.Second},
+		h:    &http.Client{Timeout: 60 * time.Second, Transport: newCLITransport()},
 	}
+}
+
+// newCLITransport is http.DefaultTransport with a connection pool sized
+// for many concurrent workers against one broker. The default keeps only
+// two idle connections per host, so a bench or sub run with dozens of
+// workers opened a fresh TCP connection for almost every request: tens
+// of thousands of TIME_WAIT sockets, ephemeral-port exhaustion reported
+// as failures, and a handshake added to every latency sample.
+func newCLITransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns = 1024
+	t.MaxIdleConnsPerHost = 1024
+	t.IdleConnTimeout = 90 * time.Second
+	return t
 }
 
 // newContextHTTPClient builds a client from resolved connection
@@ -144,6 +158,7 @@ func (c *httpClient) postNoBody(path string, body any) error {
 	if err != nil {
 		return err
 	}
+	_, _ = io.Copy(io.Discard, resp.Body) // drain so the connection is reused
 	resp.Body.Close()
 	return nil
 }
@@ -153,6 +168,7 @@ func (c *httpClient) deleteRequest(path string) error {
 	if err != nil {
 		return err
 	}
+	_, _ = io.Copy(io.Discard, resp.Body) // drain so the connection is reused
 	resp.Body.Close()
 	return nil
 }

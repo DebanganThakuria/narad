@@ -241,6 +241,9 @@ func newBenchCmd() *cobra.Command {
 							mu.Unlock()
 							continue
 						}
+						// Drain before closing so the transport can reuse
+						// the connection instead of discarding it.
+						_, _ = io.Copy(io.Discard, resp.Body)
 						resp.Body.Close()
 						latencies[i] = time.Since(t0)
 					}
