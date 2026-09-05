@@ -60,7 +60,7 @@ func toResponse(u user.User) userResponse {
 // not exceed the caller's own (no privilege escalation).
 func Create(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		caller, ok := requireAdmin(s, w, r)
+		caller, ok := s.RequireAdmin(w, r)
 		if !ok {
 			return
 		}
@@ -120,7 +120,7 @@ func Create(s *handlers.Set) http.HandlerFunc {
 // List handles GET /v1/users. Admin only.
 func List(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := requireAdmin(s, w, r); !ok {
+		if _, ok := s.RequireAdmin(w, r); !ok {
 			return
 		}
 		users, err := s.Deps.Metastore.ListUsers(r.Context())
@@ -139,7 +139,7 @@ func List(s *handlers.Set) http.HandlerFunc {
 // Get handles GET /v1/users/{username}. Admin only.
 func Get(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := requireAdmin(s, w, r); !ok {
+		if _, ok := s.RequireAdmin(w, r); !ok {
 			return
 		}
 		u, err := s.Deps.Metastore.GetUser(r.Context(), r.PathValue("username"))
@@ -155,7 +155,7 @@ func Get(s *handlers.Set) http.HandlerFunc {
 // account cannot be deleted.
 func Delete(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		caller, ok := requireAdmin(s, w, r)
+		caller, ok := s.RequireAdmin(w, r)
 		if !ok {
 			return
 		}

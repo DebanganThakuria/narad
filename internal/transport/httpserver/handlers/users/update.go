@@ -17,7 +17,7 @@ import (
 // self-escalation).
 func UpdateGrants(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		caller, ok := requireAdmin(s, w, r)
+		caller, ok := s.RequireAdmin(w, r)
 		if !ok {
 			return
 		}

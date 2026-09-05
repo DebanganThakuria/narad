@@ -84,6 +84,24 @@ func (u User) Allowed(action Action, topicName string) bool {
 	return false
 }
 
+// AllowedAny reports whether the user holds any grant matching the named
+// topic, regardless of action. It is the read-visibility test: a
+// principal that can produce to, consume from, or create a topic may
+// also see its metadata. Admin sees everything.
+func (u User) AllowedAny(topicName string) bool {
+	if u.IsAdmin() {
+		return true
+	}
+	for _, g := range u.Grants {
+		for _, p := range g.Patterns {
+			if MatchPattern(p, topicName) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // MatchPattern reports whether a grant pattern matches a topic name.
 // A trailing '*' matches any suffix (including empty); anything else
 // is a literal comparison.
