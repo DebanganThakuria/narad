@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -71,9 +72,17 @@ func newSpreadDialer(dial func(ctx context.Context, network, addr string) (net.C
 		if err != nil || len(ips) <= 1 {
 			return dial(ctx, network, addr)
 		}
+		// Sort the answer: CoreDNS rotates the order of a headless
+		// service's records per query, and a rotating index over a
+		// rotating list can favour one address (one broker measured a
+		// third fewer requests than the other two).
+		addrs := make([]string, len(ips))
+		for j, ip := range ips {
+			addrs[j] = ip.IP.String()
+		}
+		slices.Sort(addrs)
 		i := spreadDialCounter.Add(1) - 1
-		ip := ips[i%uint64(len(ips))].IP
-		return dial(ctx, network, net.JoinHostPort(ip.String(), port))
+		return dial(ctx, network, net.JoinHostPort(addrs[i%uint64(len(addrs))], port))
 	}
 }
 
