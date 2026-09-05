@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
@@ -86,7 +84,7 @@ func Create(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
-		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		hash, err := bcryptHash(req.Password)
 		if err != nil {
 			s.WriteError(w, http.StatusInternalServerError, "hash password")
 			return

@@ -5,11 +5,20 @@ import (
 	"net/http"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"github.com/debanganthakuria/narad/internal/domain/user"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
+
+// Updates are field-scoped: a grants update proposes only the new
+// grants, a password update only the new hash. The handler reads the
+// target from the LOCAL replica for its checks (existence, root guards,
+// the current-password proof), and that replica may lag the leader by a
+// few applies. If the whole record were sent through Raft, a password
+// change issued on a lagging follower would carry the stale grants along
+// and re-apply a revocation the leader had already committed. The FSM
+// applies each op against the record as it currently stands, so the
+// fields not being changed are never touched (see metastore.UserUpdate).
 
 // UpdateGrants handles PUT /v1/users/{username}/grants. Admin only; the
 // new grants may not exceed the caller's own, the root account's grants
@@ -50,12 +59,15 @@ func UpdateGrants(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
-		target.Grants = req.Grants
-		target.UpdatedAtMs = time.Now().UnixMilli()
-		if !applyUserUpdate(s, w, r, target, "user.grants") {
+		upd := metastore.UserUpdate{
+			Field: metastore.UserUpdateGrants,
+			User:  user.User{Username: username, Grants: req.Grants, UpdatedAtMs: time.Now().UnixMilli()},
+		}
+		committed, ok := applyUserUpdate(s, w, r, upd, "user.grants")
+		if !ok {
 			return
 		}
-		s.WriteJSON(w, http.StatusOK, toResponse(target))
+		s.WriteJSON(w, http.StatusOK, toResponse(committed))
 	}
 }
 
@@ -70,7 +82,7 @@ func UpdatePassword(s *handlers.Set) http.HandlerFunc {
 		// password. Anything else is forbidden.
 		if !selfService && !(ok && caller.IsAdmin()) {
 			// When security is disabled there is no identity; treat that
-			// as full access (dev mode) — consistent with the other
+			// as full access (dev mode), consistent with the other
 			// handlers' authorization posture.
 			if ok {
 				s.WriteError(w, http.StatusForbidden, "admin required")
@@ -96,7 +108,7 @@ func UpdatePassword(s *handlers.Set) http.HandlerFunc {
 
 		// Only root may change the root password. Without this, any other
 		// admin could reset it, log in as root, and inherit root's
-		// exclusive powers (granting the admin action, root immutability) —
+		// exclusive powers (granting the admin action, root immutability),
 		// defeating the whole point of reserving those to root. Matches the
 		// root guards on Delete and UpdateGrants. Skipped when security is
 		// disabled (ok == false, dev mode).
@@ -107,20 +119,22 @@ func UpdatePassword(s *handlers.Set) http.HandlerFunc {
 
 		// Self-service (non-admin) must prove the current password.
 		if selfService && !caller.IsAdmin() {
-			if bcrypt.CompareHashAndPassword(target.PasswordHash, []byte(req.CurrentPassword)) != nil {
+			if bcryptCompare(target.PasswordHash, req.CurrentPassword) != nil {
 				s.WriteError(w, http.StatusForbidden, "current password is incorrect")
 				return
 			}
 		}
 
-		hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+		hash, err := bcryptHash(req.NewPassword)
 		if err != nil {
 			s.WriteError(w, http.StatusInternalServerError, "hash password")
 			return
 		}
-		target.PasswordHash = hash
-		target.UpdatedAtMs = time.Now().UnixMilli()
-		if !applyUserUpdate(s, w, r, target, "user.password") {
+		upd := metastore.UserUpdate{
+			Field: metastore.UserUpdatePassword,
+			User:  user.User{Username: username, PasswordHash: hash, UpdatedAtMs: time.Now().UnixMilli()},
+		}
+		if _, ok := applyUserUpdate(s, w, r, upd, "user.password"); !ok {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -128,21 +142,30 @@ func UpdatePassword(s *handlers.Set) http.HandlerFunc {
 }
 
 // applyUserUpdate forwards the update to the leader (or applies it
-// locally on the leader) and audits it. It returns false and has
-// already written an error response when the update failed.
-func applyUserUpdate(s *handlers.Set, w http.ResponseWriter, r *http.Request, u user.User, event string) bool {
-	body, err := json.Marshal(u)
+// locally on the leader), audits it, and returns the record as
+// committed. It returns ok=false when the response has already been
+// written: either by the forward (success or failure) or by the error
+// path here.
+func applyUserUpdate(s *handlers.Set, w http.ResponseWriter, r *http.Request, upd metastore.UserUpdate, event string) (user.User, bool) {
+	body, err := json.Marshal(upd)
 	if err != nil {
-		s.WriteError(w, http.StatusInternalServerError, "encode user")
-		return false
+		s.WriteError(w, http.StatusInternalServerError, "encode user update")
+		return user.User{}, false
 	}
-	if s.Deps.Router != nil && s.Deps.Router.RouteUpdateUser(r.Context(), w, r, u.Username, body) {
-		return false // response already written by the forward
+	if s.Deps.Router != nil && s.Deps.Router.RouteUpdateUser(r.Context(), w, r, upd.Username, body) {
+		return user.User{}, false // response already written by the forward
 	}
-	if err := s.Deps.Metastore.UpdateUser(r.Context(), u); err != nil {
+	if err := s.Deps.Metastore.ApplyUserUpdate(r.Context(), upd); err != nil {
 		s.WriteBrokerError(w, "update user", err)
-		return false
+		return user.User{}, false
 	}
-	s.Audit(r, event, u.Username)
-	return true
+	s.Audit(r, event, upd.Username)
+	// The leader's replica reflects its own apply by the time Raft
+	// returns, so this read is the committed record.
+	committed, err := s.Deps.Metastore.GetUser(r.Context(), upd.Username)
+	if err != nil {
+		s.WriteBrokerError(w, "update user", err)
+		return user.User{}, false
+	}
+	return committed, true
 }

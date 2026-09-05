@@ -63,6 +63,10 @@ func (f *fsmState) putNewUser(u user.User) error {
 	return err
 }
 
+// applyUpdateUser is the legacy whole-record replace. New writers use
+// the field-scoped opSetUserPassword / opSetUserGrants below; this stays
+// so Raft logs and snapshots recorded before those ops existed still
+// replay identically.
 func (f *fsmState) applyUpdateUser(data []byte) error {
 	var u user.User
 	if err := json.Unmarshal(data, &u); err != nil {
@@ -90,6 +94,72 @@ func (f *fsmState) applyUpdateUser(data []byte) error {
 			return err
 		}
 		return b.Put([]byte(u.Username), encoded)
+	})
+	if err == nil {
+		f.versions.bumpUsers()
+	}
+	return err
+}
+
+// Field-scoped updates read the CURRENT record inside the FSM and replace
+// one field. The whole-record opUpdateUser let a proposer that read its
+// local replica (which may lag the leader) carry a stale copy of every
+// other field through Raft: a self-service password change issued on a
+// follower that had not yet applied an admin's grant revocation would
+// re-apply the revoked grants. With these ops the proposer never sends
+// the fields it is not changing, so nothing stale can be resurrected.
+
+func (f *fsmState) applySetUserPassword(data []byte) error {
+	var p userPasswordPayload
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	return f.mutateUser(p.Username, func(current *user.User) error {
+		current.PasswordHash = p.PasswordHash
+		current.UpdatedAtMs = p.UpdatedAtMs
+		return nil
+	})
+}
+
+func (f *fsmState) applySetUserGrants(data []byte) error {
+	var p userGrantsPayload
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	return f.mutateUser(p.Username, func(current *user.User) error {
+		// Root's grants are immutable. The HTTP layer refuses this with
+		// a 403 first; the FSM refuses it for any other proposer.
+		if current.Root {
+			return ErrRootProtected
+		}
+		current.Grants = p.Grants
+		current.UpdatedAtMs = p.UpdatedAtMs
+		return nil
+	})
+}
+
+// mutateUser loads the stored record for username, applies fn to it, and
+// writes it back. ErrNotFound when the user does not exist; the users
+// domain version bumps only after a successful write.
+func (f *fsmState) mutateUser(username string, fn func(current *user.User) error) error {
+	err := f.update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketUsers)
+		raw := b.Get([]byte(username))
+		if raw == nil {
+			return ErrNotFound
+		}
+		var current user.User
+		if err := json.Unmarshal(raw, &current); err != nil {
+			return err
+		}
+		if err := fn(&current); err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(username), encoded)
 	})
 	if err == nil {
 		f.versions.bumpUsers()

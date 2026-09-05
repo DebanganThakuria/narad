@@ -57,6 +57,7 @@ Two rules that keep the system honest:
 
 - **No privilege escalation**: you can never grant another user more than you hold yourself.
 - Users can change **their own password** (`PUT /v1/users/{name}/password` with `current_password`); admins can reset anyone's without it.
+- Updates are **field-scoped**: a password change touches only the password, a grants update only the grants. Two admins editing different fields at once cannot undo each other, and a password change can never bring back a grant that was revoked moments earlier, whichever node it lands on.
 
 ## Practical advice
 

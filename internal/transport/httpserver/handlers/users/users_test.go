@@ -294,3 +294,122 @@ func TestListRedactsHashes(t *testing.T) {
 		}
 	}
 }
+
+// forwardingRouter is a handlers.Router whose RouteUpdateUser captures
+// the body an ingress node would send to the leader. Every other method
+// panics on the embedded nil interface, which is fine: only user
+// updates are exercised.
+type forwardingRouter struct {
+	handlers.Router
+	forwarded []byte
+}
+
+func (f *forwardingRouter) RouteUpdateUser(_ context.Context, w http.ResponseWriter, _ *http.Request, _ string, body []byte) bool {
+	f.forwarded = append([]byte(nil), body...)
+	w.WriteHeader(http.StatusNoContent)
+	return true
+}
+
+// The lagging-follower scenario end to end: erin changes her own password
+// on a follower whose replica still shows the admin grant an admin has
+// since revoked on the leader. The forwarded update must carry only the
+// new hash, so applying it on the leader (whose replica already has the
+// revocation) leaves the grants revoked.
+func TestSelfServicePasswordChangeOnLaggingFollowerKeepsRevocation(t *testing.T) {
+	leader := newStore(t)
+	ctx := context.Background()
+	seedUser(t, leader, user.User{Username: "erin", Grants: []user.Grant{{Action: user.ActionAdmin}}}, "oldpw")
+
+	// The follower's stale view of erin: admin grant still present.
+	follower := newStore(t)
+	stale, _ := leader.GetUser(ctx, "erin")
+	if err := follower.CreateUser(ctx, stale); err != nil {
+		t.Fatalf("seed follower replica: %v", err)
+	}
+
+	// Meanwhile the admin revokes erin's admin grant on the leader.
+	if err := leader.SetUserGrants(ctx, "erin", []user.Grant{{Action: user.ActionConsume, Patterns: []string{"logs"}}}, time.Now().UnixMilli()); err != nil {
+		t.Fatalf("SetUserGrants: %v", err)
+	}
+
+	// erin's password change lands on the follower, which forwards it.
+	router := &forwardingRouter{}
+	set := handlers.New(handlers.Deps{
+		Broker:    stubBroker{},
+		Metastore: follower,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Router:    router,
+	})
+	erin := stale // the identity the follower authenticated, admin grant and all
+	req := asUser(httptest.NewRequest(http.MethodPut, "/v1/users/erin/password",
+		bytes.NewBufferString(`{"current_password":"oldpw","new_password":"newpw"}`)), erin)
+	req.SetPathValue("username", "erin")
+	res := httptest.NewRecorder()
+	httpusers.UpdatePassword(set).ServeHTTP(res, req)
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("password change: status = %d, want 204 (%s)", res.Code, res.Body)
+	}
+	if router.forwarded == nil {
+		t.Fatal("password change was not forwarded to the leader")
+	}
+
+	// The leader applies the forwarded body.
+	var upd metastore.UserUpdate
+	if err := json.Unmarshal(router.forwarded, &upd); err != nil {
+		t.Fatalf("decode forwarded body: %v", err)
+	}
+	if upd.Field != metastore.UserUpdatePassword {
+		t.Fatalf("forwarded field = %q, want %q", upd.Field, metastore.UserUpdatePassword)
+	}
+	if len(upd.Grants) != 0 {
+		t.Fatalf("forwarded body carries grants %+v; a password change must not send grants at all", upd.Grants)
+	}
+	if err := leader.ApplyUserUpdate(ctx, upd); err != nil {
+		t.Fatalf("leader ApplyUserUpdate: %v", err)
+	}
+
+	got, _ := leader.GetUser(ctx, "erin")
+	if got.IsAdmin() {
+		t.Fatalf("revoked admin grant resurrected by a password change from a lagging follower: %+v", got.Grants)
+	}
+	if bcrypt.CompareHashAndPassword(got.PasswordHash, []byte("newpw")) != nil {
+		t.Fatal("new password does not verify on the leader")
+	}
+	if !got.Allowed(user.ActionConsume, "logs") {
+		t.Fatalf("grants after password change = %+v, want the admin's revocation to stand", got.Grants)
+	}
+}
+
+// A grants update sends only grants: the password hash on the leader is
+// untouched even when the follower's copy of the hash is stale, and the
+// response reflects the committed record.
+func TestUpdateGrantsIsFieldScoped(t *testing.T) {
+	s := newStore(t)
+	set := newSet(t, s)
+	seedUser(t, s, user.User{Username: "frank"}, "pw1")
+	ctx := context.Background()
+	admin := user.User{Username: "root", Root: true}
+
+	req := asUser(httptest.NewRequest(http.MethodPut, "/v1/users/frank/grants",
+		bytes.NewBufferString(`{"grants":[{"action":"produce","patterns":["x"]}]}`)), admin)
+	req.SetPathValue("username", "frank")
+	res := httptest.NewRecorder()
+	httpusers.UpdateGrants(set).ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("grants update: status = %d (%s)", res.Code, res.Body)
+	}
+	var out struct {
+		Grants      []user.Grant `json:"grants"`
+		UpdatedAtMs int64        `json:"updated_at_ms"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, _ := s.GetUser(ctx, "frank")
+	if len(out.Grants) != 1 || out.UpdatedAtMs != got.UpdatedAtMs {
+		t.Fatalf("response %+v does not match committed record %+v", out, got)
+	}
+	if bcrypt.CompareHashAndPassword(got.PasswordHash, []byte("pw1")) != nil {
+		t.Fatal("grants update clobbered the password hash")
+	}
+}

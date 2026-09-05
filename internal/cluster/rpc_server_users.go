@@ -6,6 +6,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/errs"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
@@ -29,19 +30,32 @@ func (s *RPCServer) handleCreateUser(payload []byte) nodewire.Response {
 	return jsonResponse(http.StatusCreated, redactUser(u))
 }
 
+// handleUpdateUser applies a forwarded user update. The body is a
+// metastore.UserUpdate: field-scoped (password or grants) from current
+// ingress nodes, or a bare user.User (Field empty) from an older build,
+// which still applies as a whole-record replace. The response carries
+// the record as committed, read back from the leader's own replica.
 func (s *RPCServer) handleUpdateUser(payload []byte) nodewire.Response {
 	req, err := nodewire.DecodeUserRequest(payload, nodewire.OpUpdateUser)
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid update user request: "+err.Error())
 	}
-	var u user.User
-	if err := decodeStrictJSON(req.Body, &u); err != nil {
+	var upd metastore.UserUpdate
+	if err := decodeStrictJSON(req.Body, &upd); err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid json: "+err.Error())
 	}
-	if err := s.store.UpdateUser(rpcRequestContext(), u); err != nil {
+	if upd.Username == "" {
+		upd.Username = req.Username
+	}
+	ctx := rpcRequestContext()
+	if err := s.store.ApplyUserUpdate(ctx, upd); err != nil {
 		return userError(err)
 	}
-	return jsonResponse(http.StatusOK, redactUser(u))
+	committed, err := s.store.GetUser(ctx, upd.Username)
+	if err != nil {
+		return userError(err)
+	}
+	return jsonResponse(http.StatusOK, redactUser(committed))
 }
 
 func (s *RPCServer) handleDeleteUser(payload []byte) nodewire.Response {
@@ -62,6 +76,10 @@ func userError(err error) nodewire.Response {
 		return errorResponse(http.StatusConflict, "user already exists")
 	case errors.Is(err, errs.ErrNotFound):
 		return errorResponse(http.StatusNotFound, "user not found")
+	case errors.Is(err, metastore.ErrRootProtected):
+		return errorResponse(http.StatusForbidden, "the root account is protected")
+	case errors.Is(err, errs.ErrInvalidArgument):
+		return errorResponse(http.StatusBadRequest, err.Error())
 	default:
 		return errorResponse(http.StatusServiceUnavailable, "user write failed: "+err.Error())
 	}

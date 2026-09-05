@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/debanganthakuria/narad/internal/errs"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
 
 // jsonAppender lets response types serialize themselves without going
@@ -140,6 +141,8 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 		s.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errs.ErrNotFound):
 		s.WriteError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, metastore.ErrRootProtected):
+		s.WriteError(w, http.StatusForbidden, "the root account is protected")
 	default:
 		status := http.StatusInternalServerError
 		msg := op + " failed"

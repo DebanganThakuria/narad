@@ -118,6 +118,10 @@ func (f *fsmState) Apply(l *raft.Log) any {
 		err = f.applyAbortMove(c.Data)
 	case opSetMemberDraining:
 		err = f.applySetMemberDraining(c.Data)
+	case opSetUserPassword:
+		err = f.applySetUserPassword(c.Data)
+	case opSetUserGrants:
+		err = f.applySetUserGrants(c.Data)
 	default:
 		return fmt.Errorf("metastore: unknown op %d", c.Op)
 	}
