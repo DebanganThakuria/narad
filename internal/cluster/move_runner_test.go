@@ -8,7 +8,9 @@ package cluster
 
 import (
 	"context"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,23 +33,99 @@ type moveForwardRec struct {
 
 // movePeerFake serves a source partition dir and freezes as a no-op (the
 // source dir is already static in the test). fwd, when set, records the
-// leader-forwarded CompleteMove/AbortMove calls.
+// leader-forwarded CompleteMove/AbortMove calls. freeze, when set,
+// simulates the source's fenced freeze (TTL + token); without it the
+// fake behaves like a pre-token source and reports no token.
 type movePeerFake struct {
 	dirFetcher
 	fwd        *moveForwardRec
-	prepareErr error // when set, PrepareHandoff fails (simulates a dead source)
+	prepareErr error                 // when set, PrepareHandoff fails (simulates a dead source)
+	freeze     *fakeFreeze           // when set, PrepareHandoff fences like the engine does
+	marker     *messaging.MoveMarker // reported by ListPartitionSegments (the sweep's owner lookup)
+	listDelay  time.Duration         // slows every listing (a drain that outlives the freeze TTL)
+	lists      *atomic.Int32         // when set, counts listings
 }
 
-func (f movePeerFake) PrepareHandoff(_ context.Context, _, _ string, _ int, _ time.Duration) (messaging.PartitionTransferInfo, error) {
+func (f movePeerFake) ListPartitionSegments(ctx context.Context, addr, topicName string, partition int) (messaging.PartitionTransferInfo, error) {
+	if f.lists != nil {
+		f.lists.Add(1)
+	}
+	if f.listDelay > 0 {
+		time.Sleep(f.listDelay)
+	}
+	info, err := f.dirFetcher.ListPartitionSegments(ctx, addr, topicName, partition)
+	if err != nil {
+		return info, err
+	}
+	info.MoveMarker = f.marker
+	return info, nil
+}
+
+func (f movePeerFake) PrepareHandoff(_ context.Context, _, _ string, _ int, ttl time.Duration, token string) (messaging.PartitionTransferInfo, error) {
 	if f.prepareErr != nil {
 		return messaging.PartitionTransferInfo{}, f.prepareErr
 	}
-	return messaging.PartitionTransferInfo{
+	info := messaging.PartitionTransferInfo{
 		Segments:        mustSegs(f.dir),
 		HighWatermark:   f.hwm,
 		CommittedOffset: f.committed,
 		HasCommitted:    f.hasCommitted,
-	}, nil
+	}
+	if f.freeze != nil {
+		got, err := f.freeze.arm(ttl, token)
+		if err != nil {
+			return messaging.PartitionTransferInfo{}, err
+		}
+		info.FreezeToken = got
+	}
+	return info, nil
+}
+
+// fakeFreeze mirrors the engine's fenced freeze: a token is minted when
+// a freeze is armed, a re-arm with the token extends it, and a re-arm
+// with a token whose freeze lapsed fails. Tests can force a lapse.
+type fakeFreeze struct {
+	mu       sync.Mutex
+	token    string
+	deadline time.Time
+	minted   int
+	rearms   int
+	lapsed   int // fenced re-arms refused
+	lapseOn  int // when >0, the Nth fenced re-arm finds the freeze lapsed
+}
+
+func (f *fakeFreeze) arm(ttl time.Duration, token string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := time.Now()
+	active := f.token != "" && now.Before(f.deadline)
+	if token != "" {
+		f.rearms++
+		if f.lapseOn > 0 && f.rearms == f.lapseOn {
+			active = false
+			f.token = ""
+		}
+		if !active || f.token != token {
+			f.lapsed++
+			return "", messaging.ErrHandoffFreezeLapsed
+		}
+	}
+	if !active {
+		f.minted++
+		f.token = "tok-" + strconv.Itoa(f.minted)
+	}
+	f.deadline = now.Add(ttl)
+	return f.token, nil
+}
+
+// activeToken reports the freeze's current token if it is armed and unexpired.
+func (f *fakeFreeze) activeToken() (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.token == "" || !time.Now().Before(f.deadline) {
+		return "", false
+	}
+	return f.token, true
 }
 
 func (f movePeerFake) CompleteMove(_ context.Context, addr, topicName string, partition int, expectedOwner, targetID string) error {
@@ -86,6 +164,7 @@ type fakeMoveStore struct {
 	completeHook func() // called on every CompleteMove (e.g. to cancel the worker)
 	deadAfter    int    // >0: GetMember(source) reports MemberDead from this call on
 	memberCalls  int
+	topics       []topic.Topic // nil: a single "orders" topic
 }
 
 func (s *fakeMoveStore) AppliedCaughtUp() bool { return true }
@@ -104,6 +183,9 @@ func (s *fakeMoveStore) LeaderID() string {
 }
 
 func (s *fakeMoveStore) ListTopics(context.Context, metastore.ListOptions) ([]topic.Topic, string, error) {
+	if s.topics != nil {
+		return s.topics, "", nil
+	}
 	return []topic.Topic{{Name: "orders", Partitions: 1}}, "", nil
 }
 
@@ -364,5 +446,135 @@ func TestMoveRunnerForwardsFlipToLeaderWhenFollower(t *testing.T) {
 	// The local store's CompleteMove must NOT have been used on a follower.
 	if store.completeArgs != nil {
 		t.Fatalf("follower called local store.CompleteMove (%v) instead of forwarding", store.completeArgs)
+	}
+}
+
+// A drain that outlives the freeze TTL must keep the source frozen: the
+// worker re-arms the freeze with its token while Finalize runs and fences
+// the flip with it. Here every listing takes longer than the TTL, so the
+// freeze would lapse (and the source would resume commits behind the
+// copy) without the re-arm; the move must still flip, and only while the
+// freeze is active.
+func TestMoveRunnerRearmsFreezeAcrossTTLAndFencesFlip(t *testing.T) {
+	src := t.TempDir()
+	wantHWM, _ := buildSourcePartition(t, src, 10)
+	freeze := &fakeFreeze{}
+	var activeAtFlip atomic.Bool
+	store := &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+	}
+	store.completeHook = func() {
+		_, active := freeze.activeToken()
+		activeAtFlip.Store(active)
+	}
+	const ttl = 120 * time.Millisecond
+	peer := movePeerFake{
+		dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true},
+		freeze:     freeze,
+		listDelay:  ttl, // one listing alone outlives the TTL
+	}
+	r := NewMoveRunner(store, "narad-dst", t.TempDir(), peer, nil, nil, nil, MoveConfig{
+		FreezeTTL: ttl, FreezeRearmEvery: ttl / 4, RetryBackoff: 5 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	r.Reconcile(ctx)
+	r.wg.Wait()
+
+	if got := store.completeArgs; len(got) != 3 || got[2] != "narad-dst" {
+		t.Fatalf("move did not flip: %v", got)
+	}
+	if !activeAtFlip.Load() {
+		t.Fatal("the flip was proposed while the source's freeze was NOT active")
+	}
+	freeze.mu.Lock()
+	minted, rearms, lapsed := freeze.minted, freeze.rearms, freeze.lapsed
+	freeze.mu.Unlock()
+	if minted != 1 || lapsed != 0 {
+		t.Fatalf("freeze minted %d times, refused %d re-arms; want a single freeze held continuously", minted, lapsed)
+	}
+	if rearms < 2 {
+		t.Fatalf("fenced re-arms = %d, want at least a periodic re-arm plus the fence", rearms)
+	}
+}
+
+// When the freeze DOES lapse mid-cutover (the source refuses the token),
+// the worker must not flip on the copy it drained: it re-freezes under a
+// fresh token, drains again, and only then proposes the flip.
+func TestMoveRunnerRefusesFlipOnLapsedFreezeAndRefreezes(t *testing.T) {
+	src := t.TempDir()
+	wantHWM, _ := buildSourcePartition(t, src, 10)
+	freeze := &fakeFreeze{lapseOn: 1} // the first fenced re-arm finds the freeze gone
+	var tokenAtFlip atomic.Value
+	store := &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+	}
+	store.completeHook = func() {
+		tok, active := freeze.activeToken()
+		if !active {
+			tok = "<inactive>"
+		}
+		tokenAtFlip.Store(tok)
+	}
+	peer := movePeerFake{
+		dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true},
+		freeze:     freeze,
+	}
+	r := NewMoveRunner(store, "narad-dst", t.TempDir(), peer, nil, nil, nil, MoveConfig{
+		FreezeTTL: time.Minute, RetryBackoff: 5 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	r.Reconcile(ctx)
+	r.wg.Wait()
+
+	if got := store.completeArgs; len(got) != 3 || got[2] != "narad-dst" {
+		t.Fatalf("move did not flip: %v", got)
+	}
+	freeze.mu.Lock()
+	minted, lapsed := freeze.minted, freeze.lapsed
+	freeze.mu.Unlock()
+	if lapsed != 1 || minted != 2 {
+		t.Fatalf("freeze refused %d re-arms and was minted %d times; want 1 refusal then one fresh freeze", lapsed, minted)
+	}
+	if got := tokenAtFlip.Load(); got != "tok-2" {
+		t.Fatalf("flip proposed under freeze token %v, want the fresh freeze tok-2", got)
+	}
+}
+
+// The installed copy carries a move marker: the promoted HWM the old
+// owner's sweep compares against, and the parent's child links at
+// install time, which the fan-out reconciler uses to tell a lost cursor
+// from a fresh attach.
+func TestMoveRunnerWritesMoveMarker(t *testing.T) {
+	src := t.TempDir()
+	wantHWM, _ := buildSourcePartition(t, src, 6)
+	store := &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+		topics: []topic.Topic{
+			{Name: "orders", Partitions: 1, Role: topic.RoleParent, Children: []string{"audit", "other"}},
+			{Name: "audit", Partitions: 1, Role: topic.RoleChild, Parent: "orders", AttachEpoch: "e1"},
+			{Name: "other", Partitions: 1, Role: topic.RoleChild, Parent: "orders", AttachEpoch: "e2"},
+			{Name: "unrelated", Partitions: 1, Role: topic.RoleChild, Parent: "elsewhere", AttachEpoch: "e3"},
+		},
+	}
+	r, dataDir, _ := newMoveTestRunner(t, store, src, wantHWM)
+	r.Reconcile(context.Background())
+	r.wg.Wait()
+
+	marker, ok, err := messaging.ReadMoveMarker(storage.TopicPartitionDir(dataDir, "orders", 0))
+	if err != nil || !ok {
+		t.Fatalf("installed partition has no move marker (ok %v, err %v)", ok, err)
+	}
+	if marker.Source != "narad-src" || marker.HighWatermark != wantHWM || marker.ForcePromoted {
+		t.Fatalf("marker = %+v, want source narad-src, hwm %d, not force-promoted", marker, wantHWM)
+	}
+	if len(marker.Children) != 2 || marker.Children["audit"] != "e1" || marker.Children["other"] != "e2" {
+		t.Fatalf("marker children = %v, want {audit:e1 other:e2}", marker.Children)
 	}
 }
