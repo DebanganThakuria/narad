@@ -48,6 +48,12 @@ type Router interface {
 	RouteProduce(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName, key string, body []byte) bool
 	RouteConsume(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int) (bool, *int)
 	RouteConsumeRemote(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) (bool, bool)
+	// RouteConsumeWait races the local long-poll wait (local.Wait)
+	// against a forwarded long-poll to one remote owner, so a message
+	// produced to a partition another node owns wakes this client too.
+	// Returns false when there is nothing remote to ask; the handler then
+	// runs local.Wait alone.
+	RouteConsumeWait(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, wait time.Duration, local LocalConsumeWaiter) bool
 	RouteAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, handle consumer.Handle) bool
 	RouteExtendAck(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, handle consumer.Handle) bool
 	RouteNack(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, handle consumer.Handle) bool
@@ -67,6 +73,10 @@ type Router interface {
 	RouteDeleteUser(ctx context.Context, w http.ResponseWriter, r *http.Request, username string) bool
 	RouteDecommissionMember(ctx context.Context, w http.ResponseWriter, r *http.Request, id string, cancel bool) bool
 }
+
+// LocalConsumeWaiter is the local half of a raced long-poll (see
+// topic.LocalConsumeWaiter).
+type LocalConsumeWaiter = topic.LocalConsumeWaiter
 
 // Deps is the bag of collaborators every handler needs.
 type Deps struct {
