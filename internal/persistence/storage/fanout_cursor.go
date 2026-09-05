@@ -103,3 +103,71 @@ func ListFanoutCursorChildren(partitionDir string) ([]string, error) {
 	}
 	return children, nil
 }
+
+// SidecarFile is one small per-partition state file carried verbatim
+// alongside the segments when a partition moves: the fan-out cursor
+// files. Name is the file's base name inside the partition directory.
+type SidecarFile struct {
+	Name string `json:"name"`
+	Data []byte `json:"data"`
+}
+
+// IsFanoutCursorFileName reports whether name is a fan-out cursor file's
+// base name (fanout-<child>.offset) with no path component, which is the
+// only kind of sidecar a move installs into a partition directory.
+func IsFanoutCursorFileName(name string) bool {
+	if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return false
+	}
+	if !strings.HasPrefix(name, "fanout-") || !strings.HasSuffix(name, ".offset") {
+		return false
+	}
+	return len(name) > len("fanout-")+len(".offset")
+}
+
+// ListFanoutCursorFiles reads every fan-out cursor file in the partition
+// directory verbatim, so a move can carry them to the new owner. A
+// missing directory yields no files.
+func ListFanoutCursorFiles(partitionDir string) ([]SidecarFile, error) {
+	entries, err := os.ReadDir(partitionDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var files []SidecarFile
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !IsFanoutCursorFileName(name) {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(partitionDir, name))
+		if errors.Is(err, os.ErrNotExist) {
+			continue // rewritten atomically under us; the next listing sees the new file
+		}
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, SidecarFile{Name: name, Data: data})
+	}
+	return files, nil
+}
+
+// InstallFanoutCursorFile atomically writes one transferred cursor file
+// into the partition directory. It refuses any name that is not a plain
+// fan-out cursor file name, so a transfer can never plant an arbitrary
+// path, and validates the payload parses as a cursor.
+func InstallFanoutCursorFile(partitionDir string, f SidecarFile) error {
+	if !IsFanoutCursorFileName(f.Name) {
+		return fmt.Errorf("storage: refusing to install sidecar %q: not a fan-out cursor file name", f.Name)
+	}
+	var c FanoutCursor
+	if err := json.Unmarshal(f.Data, &c); err != nil {
+		return fmt.Errorf("storage: refusing to install sidecar %q: corrupt cursor: %w", f.Name, err)
+	}
+	return writeFileAtomic(partitionDir, f.Name, f.Data)
+}
