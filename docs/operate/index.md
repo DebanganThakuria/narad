@@ -66,7 +66,7 @@ That's the install. Really. (Every knob: [Helm Chart Reference](helm-chart.md).)
 Probes matter and the chart wires them the only correct way:
 
 - **`/healthz`** → startup + liveness. "The process is up." Answers immediately at boot, *before* the node is caught up, so a node recovering from a long outage is never murdered by its own liveness probe mid-recovery.
-- **`/readyz`** → readiness. "Safe to route traffic here." Held false until the metastore replica is caught up (and, for a freshly scaled-out pod, until the leader admits it). A pod that isn't ready receives nothing, including a brand-new node that hasn't joined yet.
+- **`/readyz`** → readiness. "Safe to route traffic here." It is a **live** check, evaluated on every probe, not a flag set once at boot. It answers 200 only while all of these hold: startup reconciliation finished, the node has a Raft leader in view and heard from it within the last 5 seconds (or is the leader), and its replica has caught up with the leader at least once since the process started. A pod that loses its leader (quorum lost on its side, removed from the voter set, cut off by a partition) flips back to not-ready and stops receiving traffic, instead of serving a frozen replica: stale users and grants, stale topic list, 404s for new topics. The catch-up timeout at startup never marks a node ready; it only forfeits the orphan sweep for that boot.
 
 ## Values that matter (grounded in our live cluster)
 

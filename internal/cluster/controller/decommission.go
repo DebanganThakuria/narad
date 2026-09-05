@@ -15,13 +15,24 @@ package controller
 //     current leader the controller transfers leadership away and lets the
 //     new leader finish the removal on its next pass.
 //
+// Removal has two halves that must both land: RemoveServer takes the node
+// out of the Raft configuration, and RemoveMember deletes its member record
+// and tombstones the ID. Without the second half the pod (which the
+// StatefulSet keeps running until the operator scales in) re-registers on
+// every heartbeat and stays listed alive-and-draining forever; after the
+// pod is deleted the record lingers as dead forever. The tombstone makes
+// the FSM refuse that re-registration.
+//
 // Everything is level-triggered: the pass reads state fresh each tick and is
-// a no-op once the node is out of the configuration, so a removal that races
-// a leadership change simply completes on a later tick.
+// a no-op once the node is out of the configuration AND forgotten, so a
+// removal that races a leadership change simply completes on a later tick
+// (a draining member found already outside the voter set just gets the
+// second half).
 
 import (
 	"context"
 	"slices"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
@@ -61,7 +72,7 @@ func (c *Controller) reconcileDecommission(ctx context.Context) {
 		if stillOwns[id] {
 			continue // moves still in flight; wait
 		}
-		c.removeDrainedNode(id)
+		c.removeDrainedNode(ctx, id)
 	}
 }
 
@@ -87,25 +98,30 @@ func (c *Controller) ownersInUse(ctx context.Context) (map[string]bool, bool) {
 }
 
 // removeDrainedNode removes a fully-drained node from the Raft voter set,
-// honoring the MinVoters and leader-off-departing guards.
-func (c *Controller) removeDrainedNode(id string) {
+// honoring the MinVoters and leader-off-departing guards, then forgets its
+// member record. The record is deleted only once the node is out of the
+// configuration: it is the tombstone that stops the departed pod's
+// heartbeats from resurrecting it.
+func (c *Controller) removeDrainedNode(ctx context.Context, id string) {
 	voters, err := c.store.Voters()
 	if err != nil {
 		return
 	}
-	if !containsStr(voters, id) {
-		return // already out of the configuration; nothing to do
+	if containsStr(voters, id) {
+		if len(voters) <= c.cfg.MinVoters {
+			return // removal would drop below the quorum-safe floor; leave it
+		}
+		if c.store.LeaderID() == id {
+			// Can't remove the leader from its own config. Hand leadership off;
+			// the new leader finishes the removal next tick.
+			_ = c.store.TransferLeadership()
+			return
+		}
+		if err := c.store.RemoveServer(id); err != nil {
+			return // still a voter; retry next tick
+		}
 	}
-	if len(voters) <= c.cfg.MinVoters {
-		return // removal would drop below the quorum-safe floor; leave it
-	}
-	if c.store.LeaderID() == id {
-		// Can't remove the leader from its own config. Hand leadership off;
-		// the new leader finishes the removal next tick.
-		_ = c.store.TransferLeadership()
-		return
-	}
-	_ = c.store.RemoveServer(id)
+	_ = c.store.RemoveMember(ctx, id, time.Now().Unix())
 }
 
 func containsStr(ss []string, s string) bool {

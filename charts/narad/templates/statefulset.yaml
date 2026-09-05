@@ -83,6 +83,8 @@ spec:
                   fieldPath: metadata.namespace
             - name: NARAD_CLUSTER_PEERS
               value: {{ include "narad.clusterPeers" . | quote }}
+            - name: NARAD_CLUSTER_ADVERTISE_ADDR
+              value: {{ include "narad.clusterAdvertiseAddr" . | quote }}
             - name: NARAD_CLUSTER_INITIAL_MEMBERS
               value: {{ include "narad.initialMembers" . | quote }}
             - name: NARAD_LOG_LEVEL

@@ -13,8 +13,8 @@ The chart lives in-repo at [`charts/narad`](https://github.com/DebanganThakuria/
 | `ingressroute.yaml` | Traefik `IngressRoute` (optional) | Host routing with path blocking (see below) |
 | `configmap.yaml` | ConfigMap (optional) | Renders `narad.config` into the `--config` JSON file |
 | `servicemonitor.yaml` | ServiceMonitor (optional) | Prometheus-operator scraping |
-| `pdb.yaml` | PodDisruptionBudget | Keeps voluntary evictions from eating your quorum |
-| `validate.yaml` | (none) | Fails fast on nonsense (`replicaCount < initialClusterSize`, even initial sizes) |
+| `pdb.yaml` | PodDisruptionBudget | `maxUnavailable: 1`: voluntary evictions take one pod at a time whatever the size |
+| `validate.yaml` | (none) | Fails fast on nonsense (`replicaCount < initialClusterSize`, even initial sizes, a peer list smaller than the bootstrap set) and refuses a scale-in of a running StatefulSet without `allowScaleIn=true` |
 
 ## The values that matter
 
@@ -22,6 +22,8 @@ The chart lives in-repo at [`charts/narad`](https://github.com/DebanganThakuria/
 # Identity & size
 replicaCount: 3
 initialClusterSize: 3          # bootstrap set: write once, never change
+clusterPeerCount: 0            # pinned peer list size; 0 = initialClusterSize (see below)
+allowScaleIn: false            # must be true to lower replicaCount on a running cluster
 clusterDomain: cluster.local   # for the headless-DNS peer list
 
 image:
@@ -67,6 +69,14 @@ traefik:
   ingressClass: traefik
   blockedPathPrefixes: ["/metrics"]
 ```
+
+### `replicaCount`, `initialClusterSize`, `clusterPeerCount`: what scales and what is pinned
+
+Three numbers, three jobs:
+
+- **`initialClusterSize`** is the set of pods that may bootstrap a brand-new Raft cluster (`narad-0` … `narad-N-1`). The bootstrap configuration is seeded with exactly these pods, so a fresh seven-replica install with `initialClusterSize: 3` needs two of three votes for its first election, not four of seven. Write it once and never change it.
+- **`clusterPeerCount`** sizes the peer list every pod receives in `NARAD_CLUSTER_PEERS`. It defaults to `initialClusterSize` and is deliberately **not** derived from `replicaCount`: the peer list is part of the pod template, and a list that changed with every scale operation would roll every existing member at the same moment as the join or the decommission (the docs tell you never to overlap those, and the chart used to make them inseparable). Each pod advertises its own address through `NARAD_CLUSTER_ADVERTISE_ADDR`, so pods beyond the list join and work normally. Raise it only when you mean to roll the whole cluster.
+- **`replicaCount`** is the only number you change to scale. Raising it adds join-only pods that the leader admits. **Lowering it is a scale-in, and so is a rollback to an older values file**: the StatefulSet deletes the highest-ordinal pods, whose partition data is a single copy. Decommission them first (`narad cluster decommission <pod>`, wait for zero owned partitions and Raft removal), then pass `--set allowScaleIn=true`; the chart refuses to reduce a running StatefulSet's replicas otherwise. `helm rollback` to a smaller `replicaCount` is refused for the same reason unless the release being rolled back to already carried `allowScaleIn: true`, so prefer an explicit `helm upgrade` for scale-ins.
 
 ### `commonLabels` & `podLabels`: the platform-convention escape hatches
 

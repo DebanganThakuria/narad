@@ -40,32 +40,40 @@ const startupReconcileCaughtUpTimeout = 60 * time.Second
 // It runs in a background goroutine during startup while the armed create
 // gate holds topic creates on every transport, so the sweep's
 // topic-existence checks can never race a concurrent create; the caller
-// releases the gate and marks the node ready only after it returns. It
-// returns early on ctx cancellation so shutdown during startup isn't
-// blocked.
-func runStartupReconcile(ctx context.Context, store *metastore.Store, logs *runtime.Logs, peer *cluster.PeerClient, dataDir, nodeID string, log *slog.Logger) {
-	if waitMetastoreCaughtUp(ctx, store, startupReconcileCaughtUpTimeout) {
-		removed, err := runtime.SweepOrphanTopicDirs(dataDir, func(name string) bool {
-			_, getErr := store.GetTopic(ctx, name)
-			if !errors.Is(getErr, errs.ErrNotFound) {
-				return true // present locally (or lookup failed): keep
-			}
-			return !confirmedAbsentOnLeader(ctx, store, peer, nodeID, name, log)
-		}, log)
-		if err != nil {
-			log.Warn("startup orphan sweep encountered errors", "err", err)
+// releases the gate only after it returns. It returns early on ctx
+// cancellation so shutdown during startup isn't blocked.
+//
+// The returned caughtUp reports whether the replica caught up within
+// the timeout. When it did not, the sweep is forfeited for this boot
+// (the gate cannot stay armed forever) and the owned logs are NOT
+// opened (ownership is unknown); the caller keeps waiting and must not
+// mark the node ready until the replica is provably current.
+func runStartupReconcile(ctx context.Context, store *metastore.Store, logs *runtime.Logs, peer *cluster.PeerClient, dataDir, nodeID string, log *slog.Logger) (caughtUp bool) {
+	if !waitMetastoreCaughtUp(ctx, store, startupReconcileCaughtUpTimeout) {
+		if ctx.Err() == nil {
+			log.Warn("skipping startup orphan sweep: metastore not caught up within timeout; node stays not ready until it is")
 		}
-		if len(removed) > 0 {
-			log.Info("startup orphan sweep reclaimed topic directories", "count", len(removed))
+		return false
+	}
+	removed, err := runtime.SweepOrphanTopicDirs(dataDir, func(name string) bool {
+		_, getErr := store.GetTopic(ctx, name)
+		if !errors.Is(getErr, errs.ErrNotFound) {
+			return true // present locally (or lookup failed): keep
 		}
-	} else if ctx.Err() == nil {
-		log.Warn("skipping startup orphan sweep: metastore not caught up within timeout")
+		return !confirmedAbsentOnLeader(ctx, store, peer, nodeID, name, log)
+	}, log)
+	if err != nil {
+		log.Warn("startup orphan sweep encountered errors", "err", err)
+	}
+	if len(removed) > 0 {
+		log.Info("startup orphan sweep reclaimed topic directories", "count", len(removed))
 	}
 	if ctx.Err() != nil {
 		// Shutting down during startup: don't open logs we're about to close.
-		return
+		return true
 	}
 	openOwnedPartitionLogs(ctx, store, logs, nodeID, log)
+	return true
 }
 
 // leaderView is the slice of the metastore the absence check needs;
@@ -122,15 +130,19 @@ func confirmedAbsentOnLeader(ctx context.Context, store leaderView, peer topicGe
 
 // waitMetastoreCaughtUp polls until the local replica has applied all
 // committed entries (with a leader present), ctx is cancelled, or timeout.
+// A timeout <= 0 waits until caught up or cancelled.
 func waitMetastoreCaughtUp(ctx context.Context, store *metastore.Store, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		if store.AppliedCaughtUp() {
 			return true
 		}
-		if time.Now().After(deadline) {
+		if !deadline.IsZero() && time.Now().After(deadline) {
 			return false
 		}
 		select {

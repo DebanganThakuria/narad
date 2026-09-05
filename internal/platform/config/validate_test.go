@@ -277,3 +277,40 @@ func TestValidateRequiresClusterSecretForSecureMultiNode(t *testing.T) {
 		t.Fatalf("Validate() single-node secure = %v, want nil", err)
 	}
 }
+
+// A node outside the pinned peer list (a scale-out pod) is valid when it
+// names its own reachable Raft address; the address itself must be
+// something peers can dial.
+func TestValidateAcceptsNodeOutsidePeersWithAdvertiseAddr(t *testing.T) {
+	cfg := Default()
+	cfg.Security.ClusterSecret = "test-cluster-secret"
+	cfg.Cluster.Addr = ":9101"
+	cfg.Cluster.NodeID = "narad-3"
+	cfg.Cluster.AdvertiseAddr = "narad-3.narad-headless.narad.svc.cluster.local:9101"
+	cfg.Cluster.Peers = []ClusterPeer{
+		{ID: "narad-0", Addr: "narad-0.narad-headless.narad.svc.cluster.local:9101"},
+		{ID: "narad-1", Addr: "narad-1.narad-headless.narad.svc.cluster.local:9101"},
+		{ID: "narad-2", Addr: "narad-2.narad-headless.narad.svc.cluster.local:9101"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+
+	for _, bad := range []string{":9101", "0.0.0.0:9101", "no-port"} {
+		cfg.Cluster.AdvertiseAddr = bad
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "cluster.advertise_addr") {
+			t.Fatalf("Validate() with advertise_addr %q error = %v, want advertise_addr error", bad, err)
+		}
+	}
+}
+
+func TestAdvertiseAddrEnvParsing(t *testing.T) {
+	t.Setenv("NARAD_CLUSTER_ADVERTISE_ADDR", " narad-3.narad-headless:9101 ")
+	cfg := Default()
+	if err := applyEnv(cfg); err != nil {
+		t.Fatalf("applyEnv() error = %v", err)
+	}
+	if cfg.Cluster.AdvertiseAddr != "narad-3.narad-headless:9101" {
+		t.Fatalf("AdvertiseAddr = %q", cfg.Cluster.AdvertiseAddr)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -21,6 +22,7 @@ type fakeControllerStore struct {
 	barrierErr         error
 	voters             []string // nil ⇒ derive from members
 	removed            []string // RemoveServer calls in order
+	forgotten          []string // RemoveMember calls in order
 	transferred        int      // TransferLeadership call count
 	leaderID           string
 }
@@ -90,6 +92,12 @@ func (f *fakeControllerStore) Voters() ([]string, error) {
 		return ids, nil
 	}
 	return f.voters, nil
+}
+
+func (f *fakeControllerStore) RemoveMember(_ context.Context, id string, _ int64) error {
+	f.forgotten = append(f.forgotten, id)
+	f.members = slices.DeleteFunc(f.members, func(m metastore.Member) bool { return m.ID == id })
+	return nil
 }
 
 func (f *fakeControllerStore) RemoveServer(id string) error {

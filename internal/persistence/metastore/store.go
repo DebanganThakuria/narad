@@ -50,9 +50,15 @@ type Peer struct {
 // reads are served from the local bbolt replica.
 type Store struct {
 	r *raft.Raft
-	// ownershipReady latches the first time AppliedCaughtUp holds after
-	// this process started; see ListAssignments.
+	// leaderCommit records the highest commit index a leader has
+	// reported to this node over the Raft transport since the process
+	// started; AppliedCaughtUp compares applied_index against it.
+	leaderCommit *commitObservingTransport
+	// ownershipReady latches the first time the replica is provably
+	// caught up after this process started; see ListAssignments.
+	// latchMu serialises the self-leader Barrier that guards the latch.
 	ownershipReady atomic.Bool
+	latchMu        sync.Mutex
 	fsm            *fsmState
 
 	// attachOffsets, when registered (SetAttachOffsetResolver), observes
@@ -73,22 +79,24 @@ func New(cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("metastore: fsm: %w", err)
 	}
 
-	r, err := newRaft(cfg, fsm)
+	r, transport, err := newRaft(cfg, fsm)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{r: r, fsm: fsm}, nil
+	return &Store{r: r, leaderCommit: transport, fsm: fsm}, nil
 }
 
 // newRaft wires up the Raft node: log/stable store, snapshot store, TCP
 // transport, and — only when no prior state exists on disk — a one-time
-// cluster bootstrap from cfg plus cfg.Peers.
-func newRaft(cfg Config, fsm *fsmState) (*raft.Raft, error) {
+// cluster bootstrap from cfg plus cfg.Peers. It also returns the
+// commit-observing transport wrapper so the store can read the leader's
+// commit index.
+func newRaft(cfg Config, fsm *fsmState) (*raft.Raft, *commitObservingTransport, error) {
 	boltStore, err := raftboltdb.New(raftboltdb.Options{
 		Path: filepath.Join(cfg.DataDir, "raft.db"),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("metastore: raft store: %w", err)
+		return nil, nil, fmt.Errorf("metastore: raft store: %w", err)
 	}
 
 	logOutput := cfg.Logger
@@ -98,13 +106,16 @@ func newRaft(cfg Config, fsm *fsmState) (*raft.Raft, error) {
 
 	snapStore, err := raft.NewFileSnapshotStore(cfg.DataDir, 2, logOutput)
 	if err != nil {
-		return nil, fmt.Errorf("metastore: snapshots: %w", err)
+		return nil, nil, fmt.Errorf("metastore: snapshots: %w", err)
 	}
 
-	transport, advertiseAddr, err := newTransport(cfg, logOutput)
+	rawTransport, advertiseAddr, err := newTransport(cfg, logOutput)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	// Raft only ever sees the wrapper; see leader_commit.go for why the
+	// leader's commit index has to be read off the wire.
+	transport := newCommitObservingTransport(rawTransport)
 
 	rc := raft.DefaultConfig()
 	rc.LocalID = raft.ServerID(cfg.NodeID)
@@ -112,19 +123,50 @@ func newRaft(cfg Config, fsm *fsmState) (*raft.Raft, error) {
 
 	r, err := raft.NewRaft(rc, fsm, boltStore, boltStore, snapStore, transport)
 	if err != nil {
-		return nil, fmt.Errorf("metastore: raft: %w", err)
+		_ = transport.Close()
+		return nil, nil, fmt.Errorf("metastore: raft: %w", err)
 	}
 
 	hasState, err := raft.HasExistingState(boltStore, boltStore, snapStore)
 	if err != nil {
-		return nil, fmt.Errorf("metastore: check state: %w", err)
+		return nil, nil, fmt.Errorf("metastore: check state: %w", err)
 	}
 	if !hasState && !cfg.JoinOnly {
 		if err := bootstrapCluster(r, cfg, advertiseAddr); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return r, nil
+	return r, transport, nil
+}
+
+// HasExistingState reports whether a Raft log, stable store, or snapshot
+// already exists under dataDir, without starting Raft. serve uses it
+// before New to decide whether an initial member that would otherwise
+// bootstrap must instead ask the running cluster for admission (a node
+// whose volume was replaced must not seed a rival cluster).
+func HasExistingState(dataDir string) (bool, error) {
+	raftPath := filepath.Join(dataDir, "raft.db")
+	if _, err := os.Stat(raftPath); errors.Is(err, os.ErrNotExist) {
+		// No log at all. A snapshot without a log is not a state Raft
+		// would start from either, so this is definitive.
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("metastore: stat raft store: %w", err)
+	}
+	boltStore, err := raftboltdb.New(raftboltdb.Options{Path: raftPath})
+	if err != nil {
+		return false, fmt.Errorf("metastore: raft store: %w", err)
+	}
+	defer boltStore.Close()
+	snapStore, err := raft.NewFileSnapshotStore(dataDir, 2, io.Discard)
+	if err != nil {
+		return false, fmt.Errorf("metastore: snapshots: %w", err)
+	}
+	has, err := raft.HasExistingState(boltStore, boltStore, snapStore)
+	if err != nil {
+		return false, fmt.Errorf("metastore: check state: %w", err)
+	}
+	return has, nil
 }
 
 // newTransport validates the bind address and returns a TCP transport
@@ -223,13 +265,42 @@ func classifyRaftError(err error) error {
 // steady-state lag every node has, and partition moves coordinate with
 // the old owner through the handoff protocol rather than through this
 // view. A store without Raft (tests, tools) is always ready.
+//
+// A follower latches once AppliedCaughtUp holds, which requires the
+// FSM to have applied everything the leader reported committed (see
+// leader_commit.go). A node that leads ITSELF must additionally pass a
+// Raft barrier first: election proves a fresh leader's log is complete,
+// not that its FSM has replayed it, and a just-elected node restored
+// from an old snapshot would otherwise latch on a stale view.
 func (s *Store) ownershipViewReady() bool {
 	if s.ownershipReady.Load() {
 		return true
 	}
-	if s.r == nil || s.AppliedCaughtUp() {
+	if s.r == nil {
 		s.ownershipReady.Store(true)
 		return true
 	}
-	return false
+	if !s.AppliedCaughtUp() {
+		return false
+	}
+	if s.r.State() == raft.Leader {
+		s.latchMu.Lock()
+		defer s.latchMu.Unlock()
+		if s.ownershipReady.Load() {
+			return true
+		}
+		if err := s.Barrier(); err != nil {
+			return false
+		}
+	}
+	s.ownershipReady.Store(true)
+	return true
+}
+
+// OwnershipViewReady reports whether the ownership latch is set (setting
+// it if the replica is now provably caught up). Readiness checks use it
+// so a node is only routable once its view of partition ownership is
+// trustworthy.
+func (s *Store) OwnershipViewReady() bool {
+	return s.ownershipViewReady()
 }
