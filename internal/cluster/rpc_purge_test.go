@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker"
+	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
@@ -135,5 +136,22 @@ func TestRPCServerForwardedDeleteNilBroadcaster(t *testing.T) {
 	s := &RPCServer{broker: &deleteOnlyBroker{}, logger: discardLogger()}
 	if res := s.handleDeleteTopic(encodeDeleteReq(t, "orders")); res.Status != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", res.Status)
+	}
+}
+
+// A delete whose metadata commit stood but whose LOCAL file purge failed
+// answers 204 (the topic is gone for every client; the startup sweep
+// reclaims the directory) and still fans the purge out to the others.
+func TestRPCServerForwardedDeleteAnswers204OnLocalPurgeFailure(t *testing.T) {
+	br := &deleteOnlyBroker{deleteErr: brokertopics.PurgeError{Topic: "orders", Err: errors.New("remove dir: EIO")}}
+	bc := &recordingBroadcaster{}
+	s := &RPCServer{broker: br, logger: discardLogger(), broadcaster: bc}
+
+	res := s.handleDeleteTopic(encodeDeleteReq(t, "orders"))
+	if res.Status != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (metadata delete stood)", res.Status)
+	}
+	if got := bc.seen(); len(got) != 1 || got[0] != "orders" {
+		t.Fatalf("broadcast = %v, want [orders] despite the local purge failure", got)
 	}
 }

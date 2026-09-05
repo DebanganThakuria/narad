@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -85,38 +86,55 @@ func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, _
 }
 
 // BroadcastDeleteTopic asks every live member (except this node) to purge the
-// deleted topic's on-disk state. The returned error joins every member that
+// deleted topic's on-disk state. The purges run concurrently under ONE
+// shared deadline, so the whole fan-out costs the slowest member, not the
+// sum of every member: sequential purges on a five-node cluster with two
+// slow members overran the 30s the forwarding follower waits (and the
+// client's own patience), turning an already-committed delete into a 503
+// whose retry then 404s. The returned error joins every member that
 // failed; a nil error means all live members purged.
 func (rt *Router) BroadcastDeleteTopic(ctx context.Context, topicName string) error {
 	members, err := rt.store.ListMembers()
 	if err != nil {
 		return err
 	}
+	// One budget for the lot: a purge legitimately waits up to
+	// purgeApplyWaitTimeout on the remote for its replica to reflect the
+	// deletion, and only THEN starts the purge work itself, which can take
+	// multiple seconds for a topic with many partition directories. Budget
+	// both phases (plus longWaitRPCContext's transfer grace) so the
+	// deadline doesn't expire on a purge that is about to succeed.
+	purgeCtx, cancel := longWaitRPCContext(ctx, purgeApplyWaitTimeout+purgeExecutionAllowance)
+	defer cancel()
+
 	// Attempt every live member even if one fails: a single unreachable
 	// peer must not stop the others from purging. Any member we miss is
 	// reclaimed by its startup orphan sweep.
-	var joined error
+	var targets []metastore.Member
 	for _, member := range members {
 		if member.Status == metastore.MemberDead || strings.TrimSpace(member.ID) == strings.TrimSpace(rt.selfID) {
 			continue
 		}
-		// A purge legitimately waits up to purgeApplyWaitTimeout on the
-		// remote for its replica to reflect the deletion, and only THEN
-		// starts the purge work itself — which can take multiple seconds
-		// for a topic with many partition directories. Budget both phases
-		// (plus longWaitRPCContext's transfer grace) so the leader's
-		// deadline doesn't expire on a purge that is about to succeed,
-		// turning a completed delete into a 500 whose retry then 404s.
-		purgeCtx, cancel := longWaitRPCContext(ctx, purgeApplyWaitTimeout+purgeExecutionAllowance)
-		res, err := rt.peer.PurgeTopic(purgeCtx, member.Addr, topicName)
-		cancel()
-		if err != nil {
-			joined = errors.Join(joined, fmt.Errorf("purge %s on %s: %w", topicName, member.ID, err))
-			continue
-		}
-		if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
-			joined = errors.Join(joined, fmt.Errorf("purge %s returned status %d for %s", topicName, res.Status, member.ID))
-		}
+		targets = append(targets, member)
 	}
-	return joined
+	results := make([]error, len(targets))
+	var wg sync.WaitGroup
+	for i, member := range targets {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := rt.peer.PurgeTopic(purgeCtx, member.Addr, topicName)
+			if err != nil {
+				results[i] = fmt.Errorf("purge %s on %s: %w", topicName, member.ID, err)
+				return
+			}
+			if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
+				results[i] = fmt.Errorf("purge %s returned status %d for %s", topicName, res.Status, member.ID)
+			}
+		}()
+	}
+	wg.Wait()
+	// Joined in member order so the message is stable regardless of
+	// which purge finished first.
+	return errors.Join(results...)
 }

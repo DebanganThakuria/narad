@@ -180,7 +180,17 @@ func (s *RPCServer) handleDeleteTopic(payload []byte) nodewire.Response {
 		return errorResponse(http.StatusBadRequest, "invalid delete topic request: "+err.Error())
 	}
 	if err := s.broker.DeleteTopic(rpcRequestContext(), req.Topic); err != nil {
-		return s.brokerError("delete topic", err)
+		purgeErr, ok := errors.AsType[brokertopics.PurgeError](err)
+		if !ok {
+			return s.brokerError("delete topic", err)
+		}
+		// The metadata delete stood; only this node's file purge failed.
+		// Answer 204 like the HTTP path: the topic is gone for every
+		// client, a 5xx would only make the forwarding follower report a
+		// failure for a delete that happened (and the retry 404), and the
+		// startup orphan sweep reclaims the leftover directory.
+		s.logger.Warn("topic deleted but local purge failed; the startup orphan sweep reclaims the directory",
+			"topic", req.Topic, "err", purgeErr.Err)
 	}
 	// The metastore record is gone and this node's own files are purged.
 	// Fan the purge out to the other members so the partition owners drop

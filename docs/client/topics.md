@@ -83,6 +83,8 @@ curl -u $AUTH -X DELETE $NARAD/v1/topics/orders
 
 `204`. This deletes the metadata **and** the on-disk data on every node, and detaches any fan-out children. There is no undo.
 
+The metadata delete is the commit point: once it stands, the topic is gone for every client and `204` is the answer even if some node could not purge its files right then (a member that is down, or a disk error). Those directories are reclaimed by that node's startup sweep; nothing about them is visible through the API. A delete that fails *before* the commit (unknown topic, control plane unavailable) still answers `404` or `503`.
+
 ## Who can do this
 
 Creating requires a `create` grant matching the topic name; the creator becomes the topic's **owner**. Altering and deleting require ownership or an `admin` grant. Reading a topic requires any grant on it, ownership, or admin. Details in [Users & Access](users-and-access.md).
