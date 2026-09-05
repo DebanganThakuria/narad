@@ -41,8 +41,9 @@ func (f *fsmState) applyCreateTopic(data []byte) error {
 	return err
 }
 
-// applyUpdateTopic overwrites the topic's config. The fan-out link
-// fields (Role/Children/Parent) are preserved from the stored record:
+// applyUpdateTopic overwrites the topic's config. The incarnation ID
+// and the fan-out link fields (Role/Children/Parent) are preserved
+// from the stored record:
 // they change only through attach/detach/delete, so a read-modify-write
 // config update that raced an attach on another node cannot clobber
 // the link.
@@ -56,6 +57,11 @@ func (f *fsmState) applyUpdateTopic(data []byte) error {
 		if err != nil {
 			return err
 		}
+		// The incarnation ID is fixed at create: a proposer that read
+		// an older copy of the record (or an older binary that does
+		// not know the field) must not clear or replace it, or the
+		// on-disk directories stamped with it would read as stale.
+		t.ID = current.ID
 		t.Role = current.Role
 		t.Children = current.Children
 		t.Parent = current.Parent
