@@ -27,9 +27,19 @@ const (
 	opCompleteMove
 	opAbortMove
 	opSetMemberDraining
+	opRemoveMember
+	opReadmitMember
 	opSetUserPassword
 	opSetUserGrants
 )
+
+// memberRemovalPayload is the body of opRemoveMember and opReadmitMember.
+// At is a Unix timestamp (seconds) supplied by the proposer so Apply
+// stays deterministic; it is recorded on the tombstone.
+type memberRemovalPayload struct {
+	ID string `json:"id"`
+	At int64  `json:"at"`
+}
 
 // userPasswordPayload is the body of opSetUserPassword: replace only the
 // stored password hash of an existing user. Field-scoped so a password

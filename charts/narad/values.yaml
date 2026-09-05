@@ -2,9 +2,29 @@ replicaCount: 3
 
 # Number of pods that formed the ORIGINAL cluster (they may bootstrap a
 # brand-new Raft cluster; everyone else joins the existing one via the
-# leader). Set once at first install and never change it — scaling up is
-# done by raising replicaCount only.
+# leader). Set once at first install and never change it. Scaling up is
+# done by raising replicaCount only; the bootstrap configuration is
+# seeded with exactly these pods, never with every replica.
 initialClusterSize: 3
+
+# Size of the PINNED peer list (NARAD_CLUSTER_PEERS) every pod receives.
+# 0 = initialClusterSize. The list is only used to bootstrap the initial
+# members and to give joining pods addresses to walk when looking for the
+# leader; each pod advertises its own address separately, so a pod that
+# is not in the list works fine. Deriving it from replicaCount would put
+# it in the pod template, and every scale operation would then roll every
+# existing member at the same time as the join or decommission. Change
+# this only when you mean to roll the whole cluster (for instance after
+# decommissioning an initial member for good).
+clusterPeerCount: 0
+
+# Lowering replicaCount is a SCALE-IN, including a rollback to an older
+# values file: the pods the StatefulSet deletes must have been
+# decommissioned first (narad cluster decommission <pod>, wait for zero
+# owned partitions and Raft removal), or their partition data strands and
+# the remaining voters may lose quorum. The chart refuses to reduce a
+# running StatefulSet's replicas unless you acknowledge it here.
+allowScaleIn: false
 
 image:
   repository: ghcr.io/debanganthakuria/narad
@@ -174,9 +194,14 @@ updateStrategy:
   type: RollingUpdate
 terminationGracePeriodSeconds: 30
 
+# Voluntary evictions (node drains, cluster upgrades) may take down at
+# most one pod at a time whatever the cluster size: a fixed minAvailable
+# would let a five-node cluster lose three pods and its Raft quorum.
+# minAvailable is honoured only if maxUnavailable is left empty.
 podDisruptionBudget:
   enabled: true
-  minAvailable: 2
+  maxUnavailable: 1
+  minAvailable: ""
 
 serviceMonitor:
   enabled: false

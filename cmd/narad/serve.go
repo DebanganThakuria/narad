@@ -65,12 +65,31 @@ func runServe(args []string) error {
 	if joinOnly {
 		log.Info("node is not an initial member; will join the existing cluster instead of bootstrapping", "node", nodeID)
 	}
+	metastoreDir := filepath.Join(cfg.Storage.DataDir, "metastore")
+	hasState, err := metastore.HasExistingState(metastoreDir)
+	if err != nil {
+		return fmt.Errorf("metastore: %w", err)
+	}
+	fresh := !hasState
+	if !joinOnly && fresh && len(cfg.Cluster.Peers) > 0 {
+		// An initial member with NO Raft state is either part of a
+		// brand-new install or a member whose volume was replaced while
+		// the cluster kept running. Bootstrapping in the second case
+		// seeds a rival configuration; ask the peers first and join
+		// instead if any of them answers for a configured cluster.
+		probe := cluster.NewPeerClient(existingClusterProbeTimeout, cfg.Security.ClusterSecret)
+		if existingClusterAnswers(context.Background(), probe, cfg, nodeID, log) {
+			joinOnly = true
+			log.Warn("initial member has no raft state but a configured cluster answered; joining it instead of bootstrapping", "node", nodeID)
+		}
+		closeWithLog(log, "probe rpc client", probe.Close)
+	}
 	ms, err := metastore.New(metastore.Config{
 		NodeID:        nodeID,
-		DataDir:       filepath.Join(cfg.Storage.DataDir, "metastore"),
+		DataDir:       metastoreDir,
 		BindAddr:      cfg.Cluster.Addr,
-		AdvertiseAddr: advertisedClusterAddr(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
-		Peers:         configPeersToMetastore(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
+		AdvertiseAddr: clusterAdvertiseAddr(cfg, nodeID),
+		Peers:         bootstrapPeers(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers, cfg.Cluster.InitialMembers),
 		JoinOnly:      joinOnly,
 		TLS:           clusterTLS,
 	})
@@ -98,7 +117,10 @@ func runServe(args []string) error {
 	ctx, failServe := context.WithCancelCause(ctx)
 	defer failServe(nil)
 
-	memberAddr := advertisedMemberAddr(nodeID, cfg.HTTP.Addr, cfg.Cluster.Addr, cfg.Cluster.Peers)
+	// The member address borrows its host from the advertised cluster
+	// address, so a pod outside the pinned peer list still registers a
+	// reachable endpoint.
+	memberAddr := advertisedMemberAddr(nodeID, cfg.HTTP.Addr, clusterAdvertiseAddr(cfg, nodeID), cfg.Cluster.Peers)
 	// A multi-node cluster whose advertised member address is unroutable
 	// (a bare 0.0.0.0/:: bind with no host to borrow) will silently fail
 	// member registration — every peer resolves this node as its own
@@ -110,7 +132,7 @@ func runServe(args []string) error {
 	member := metastore.Member{
 		ID:          nodeID,
 		Addr:        memberAddr,
-		ClusterAddr: advertisedClusterAddr(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers),
+		ClusterAddr: clusterAdvertiseAddr(cfg, nodeID),
 		Status:      metastore.MemberAlive,
 	}
 	cs := buildClusterStack(cfg, nodeID, ms, bc, reg, log)
@@ -145,13 +167,17 @@ func runServe(args []string) error {
 	bc.createGate.ArmCreateGate()
 	defer bc.createGate.ReleaseCreateGate()
 
-	if joinOnly {
-		// Scale-out admission: ask the existing leader to add this node
-		// to the Raft voter set. Harmless on a restart of an already-
-		// joined node (exits at the first leader sighting without
-		// sending anything).
-		wg.Go(func() { runClusterJoin(ctx, ms, cs.peerRPC, cfg, nodeID, log) })
-	}
+	// Cluster admission. A join-only node asks the existing leader to
+	// add it to the Raft voter set right away. Every other node (an
+	// initial member with prior state) normally sees a leader within an
+	// election timeout; if it does not, it runs the same loop after a
+	// bounded wait, because a node that was Raft-removed and came back
+	// with its old volume otherwise sits leaderless forever. The loop
+	// exits at the first leader sighting without sending anything, so a
+	// healthy restart never issues a join.
+	wg.Go(func() {
+		runClusterJoinWhenLeaderless(ctx, ms, cs.peerRPC, cfg, nodeID, joinOnly, fresh, log)
+	})
 	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, cs.peerRPC, log) })
 	wg.Go(func() { cs.controller.Run(ctx) })
 	wg.Go(func() { bc.offsets.RunPurger(ctx, time.Second) })
@@ -176,8 +202,9 @@ func runServe(args []string) error {
 	// to kill the pod in a restart loop. Correctness is preserved because
 	// the create gate armed above blocks topic creates on EVERY transport
 	// (HTTP and cluster RPC) until the sweep is done, and MarkReady is
-	// only called once reconcile completes, so /readyz still implies a
-	// reconciled node while /healthz answers from the start.
+	// only called once the replica has provably caught up, so /readyz
+	// still implies a reconciled node while /healthz answers from the
+	// start.
 	wg.Go(func() {
 		if joinOnly {
 			// A join-only node must not reconcile — or mark itself ready —
@@ -187,13 +214,25 @@ func runServe(args []string) error {
 			// here), and admission normally lands within seconds.
 			waitForClusterLeader(ctx, ms)
 		}
-		runStartupReconcile(ctx, ms, bc.logs, cs.peerRPC, cfg.Storage.DataDir, nodeID, log)
+		caughtUp := runStartupReconcile(ctx, ms, bc.logs, cs.peerRPC, cfg.Storage.DataDir, nodeID, log)
 		// The sweep can no longer race a create: open the gate so topic
 		// creates (HTTP and cluster RPC) proceed. Reconcile failures are
 		// non-fatal (logged and skipped inside runStartupReconcile), so
 		// creates must be unblocked here regardless of how it went; the
 		// idempotent deferred release above stays the shutdown safety net.
 		bc.createGate.ReleaseCreateGate()
+		if !caughtUp {
+			// The catch-up timeout is NOT a readiness path. A node whose
+			// replica never caught up (no leader reachable, removed from
+			// the voter set, rival cluster) would otherwise become Ready
+			// and serve a frozen replica: stale users and grants, stale
+			// topics, 503 for everything ownership-related. Keep waiting
+			// with no timeout; /readyz stays false meanwhile.
+			if !waitMetastoreCaughtUp(ctx, ms, 0) {
+				return
+			}
+			openOwnedPartitionLogs(ctx, ms, bc.logs, nodeID, log)
+		}
 		if ctx.Err() == nil {
 			bc.lifecycle.MarkReady()
 		}
@@ -207,7 +246,8 @@ func runServe(args []string) error {
 
 	// Finally build the API server. It serves /healthz immediately;
 	// /readyz turns true only when the reconcile goroutine above calls
-	// MarkReady.
+	// MarkReady AND the metastore's live check (leader in view, recent
+	// contact, ownership latch set) passes on that probe.
 	srv := buildAPIServer(ctx, cfg, bc.broker, bc.logs, ms, cs.router, m, reg, auth, log)
 	defer bc.lifecycle.MarkNotReady()
 
