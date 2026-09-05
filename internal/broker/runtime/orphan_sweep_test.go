@@ -32,7 +32,7 @@ func TestSweepOrphanTopicDirsRemovesAbsentKeepsPresent(t *testing.T) {
 	mkTopicDir(t, dataDir, "orphan-2")
 
 	exists := map[string]bool{"live-1": true, "live-2": true}
-	removed, err := SweepOrphanTopicDirs(dataDir, func(name string) bool { return exists[name] }, nil)
+	removed, err := SweepOrphanTopicDirs(dataDir, func(c OrphanCandidate) bool { return exists[c.Topic] }, nil)
 	if err != nil {
 		t.Fatalf("SweepOrphanTopicDirs() error = %v", err)
 	}
@@ -51,7 +51,7 @@ func TestSweepOrphanTopicDirsRemovesAbsentKeepsPresent(t *testing.T) {
 
 func TestSweepOrphanTopicDirsNoTopicsDir(t *testing.T) {
 	// A data dir with no topics/ subdir must be a no-op, not an error.
-	removed, err := SweepOrphanTopicDirs(t.TempDir(), func(string) bool { return true }, nil)
+	removed, err := SweepOrphanTopicDirs(t.TempDir(), func(OrphanCandidate) bool { return true }, nil)
 	if err != nil {
 		t.Fatalf("SweepOrphanTopicDirs() error = %v, want nil", err)
 	}
@@ -67,7 +67,7 @@ func TestSweepOrphanTopicDirsKeepsEverythingWhenAllExist(t *testing.T) {
 	mkTopicDir(t, dataDir, "a")
 	mkTopicDir(t, dataDir, "b")
 
-	removed, err := SweepOrphanTopicDirs(dataDir, func(string) bool { return true }, nil)
+	removed, err := SweepOrphanTopicDirs(dataDir, func(OrphanCandidate) bool { return true }, nil)
 	if err != nil {
 		t.Fatalf("SweepOrphanTopicDirs() error = %v", err)
 	}
@@ -88,7 +88,7 @@ func TestSweepOrphanTopicDirsIgnoresNonDirEntries(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dataDir, "topics", "README"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	removed, err := SweepOrphanTopicDirs(dataDir, func(string) bool { return false }, nil)
+	removed, err := SweepOrphanTopicDirs(dataDir, func(OrphanCandidate) bool { return false }, nil)
 	if err != nil {
 		t.Fatalf("SweepOrphanTopicDirs() error = %v", err)
 	}

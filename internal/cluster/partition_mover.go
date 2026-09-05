@@ -54,6 +54,10 @@ type CopyResult struct {
 	CommittedOffset int64
 	HasCommitted    bool
 	BytesCopied     int64
+	// IncarnationID is the topic incarnation the source reported its
+	// copy belongs to (empty from an older source). The runner compares
+	// it with the local record before installing.
+	IncarnationID string
 }
 
 // A MoveSession copies one partition from a source owner into a staging
@@ -93,10 +97,11 @@ type MoveSession struct {
 	// visibility boundary (HWM) the source last exposed — never more, never
 	// less. sawInfo guards against force-promoting a session that never
 	// reached the source at all.
-	lastHWM       int64
-	lastCommitted int64
-	hasCommitted  bool
-	sawInfo       bool
+	lastHWM         int64
+	lastCommitted   int64
+	hasCommitted    bool
+	sawInfo         bool
+	lastIncarnation string
 	// lastSidecars are the fan-out cursor files the source reported on
 	// its last successful list. They are installed into the staged copy
 	// at finalize time (after the last segment pass, so they are as
@@ -143,6 +148,7 @@ func (s *MoveSession) pass(ctx context.Context) (int64, messaging.PartitionTrans
 	// force-promote after the source dies reproduces exactly this HWM.
 	s.lastHWM, s.lastCommitted, s.hasCommitted, s.sawInfo = info.HighWatermark, info.CommittedOffset, info.HasCommitted, true
 	s.lastSidecars = info.Sidecars
+	s.lastIncarnation = info.IncarnationID
 	var newBytes int64
 	for _, seg := range info.Segments {
 		at := s.copied[seg.BaseOffset]
@@ -401,7 +407,13 @@ func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool, si
 	s.m.logger.Info("partition copy complete",
 		"topic", s.topic, "partition", s.partition, "source", s.sourceAddr,
 		"hwm", hwm, "bytes", s.total)
-	return CopyResult{HighWatermark: hwm, CommittedOffset: committed, HasCommitted: hasCommitted, BytesCopied: s.total}, nil
+	return CopyResult{
+		HighWatermark:   hwm,
+		CommittedOffset: committed,
+		HasCommitted:    hasCommitted,
+		BytesCopied:     s.total,
+		IncarnationID:   s.lastIncarnation,
+	}, nil
 }
 
 // installSidecars writes the transferred fan-out cursor files into dir.

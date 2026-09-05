@@ -8,6 +8,9 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -19,9 +22,11 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
+	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
 // moveForwardRec records leader-forwarded ownership writes.
@@ -38,12 +43,14 @@ type moveForwardRec struct {
 // fake behaves like a pre-token source and reports no token.
 type movePeerFake struct {
 	dirFetcher
-	fwd        *moveForwardRec
-	prepareErr error                 // when set, PrepareHandoff fails (simulates a dead source)
-	freeze     *fakeFreeze           // when set, PrepareHandoff fences like the engine does
-	marker     *messaging.MoveMarker // reported by ListPartitionSegments (the sweep's owner lookup)
-	listDelay  time.Duration         // slows every listing (a drain that outlives the freeze TTL)
-	lists      *atomic.Int32         // when set, counts listings
+	fwd         *moveForwardRec
+	prepareErr  error                 // when set, PrepareHandoff fails (simulates a dead source)
+	freeze      *fakeFreeze           // when set, PrepareHandoff fences like the engine does
+	marker      *messaging.MoveMarker // reported by ListPartitionSegments (the sweep's owner lookup)
+	leaderTopic *topic.Topic          // answered by GetTopic (the sweep's leader confirmation); nil errors
+	incarnation string                // reported by ListPartitionSegments as the copy's incarnation
+	listDelay   time.Duration         // slows every listing (a drain that outlives the freeze TTL)
+	lists       *atomic.Int32         // when set, counts listings
 }
 
 func (f movePeerFake) ListPartitionSegments(ctx context.Context, addr, topicName string, partition int) (messaging.PartitionTransferInfo, error) {
@@ -58,6 +65,7 @@ func (f movePeerFake) ListPartitionSegments(ctx context.Context, addr, topicName
 		return info, err
 	}
 	info.MoveMarker = f.marker
+	info.IncarnationID = f.incarnation
 	return info, nil
 }
 
@@ -136,6 +144,14 @@ func (f movePeerFake) CompleteMove(_ context.Context, addr, topicName string, pa
 	return nil
 }
 
+func (f movePeerFake) GetTopic(context.Context, string, string) (nodewire.Response, error) {
+	if f.leaderTopic != nil {
+		body, err := json.Marshal(f.leaderTopic)
+		return nodewire.Response{Status: http.StatusOK, Body: body}, err
+	}
+	return nodewire.Response{}, errors.New("no leader topic view")
+}
+
 func (f movePeerFake) GetAssignment(context.Context, string, string, int) (metastore.Assignment, error) {
 	return metastore.Assignment{}, context.DeadlineExceeded
 }
@@ -187,6 +203,16 @@ func (s *fakeMoveStore) ListTopics(context.Context, metastore.ListOptions) ([]to
 		return s.topics, "", nil
 	}
 	return []topic.Topic{{Name: "orders", Partitions: 1}}, "", nil
+}
+
+func (s *fakeMoveStore) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
+	topics, _, _ := s.ListTopics(ctx, metastore.ListOptions{})
+	for _, t := range topics {
+		if t.Name == name {
+			return t, nil
+		}
+	}
+	return topic.Topic{}, errs.ErrNotFound
 }
 
 func (s *fakeMoveStore) ListAssignments(string) ([]metastore.Assignment, error) {

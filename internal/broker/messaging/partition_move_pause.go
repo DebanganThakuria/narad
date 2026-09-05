@@ -208,7 +208,8 @@ func (e *Engine) ConfirmHandoff(ctx context.Context, topicName string, partition
 }
 
 func (e *Engine) prepareHandoff(ctx context.Context, topicName string, partition int, freezeTTL time.Duration, requireToken string) (PartitionTransferInfo, error) {
-	if err := e.checkTransferable(ctx, topicName, partition); err != nil {
+	t, err := e.checkTransferable(ctx, topicName, partition)
+	if err != nil {
 		return PartitionTransferInfo{}, err
 	}
 	token, err := e.armHandoffFreeze(topicName, partition, freezeTTL, requireToken)
@@ -251,5 +252,9 @@ func (e *Engine) prepareHandoff(ctx context.Context, topicName string, partition
 		return PartitionTransferInfo{}, err
 	}
 	info.FreezeToken = token
+	// WithProduceLock opened the log, which verified the directory's
+	// incarnation against the record, so the listing is this
+	// incarnation's.
+	info.IncarnationID = t.ID
 	return info, nil
 }

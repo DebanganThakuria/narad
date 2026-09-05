@@ -51,6 +51,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
+	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
 const (
@@ -144,6 +145,7 @@ type moveStore interface {
 	LeaderID() string
 	Barrier() error
 	GetAssignment(topicName string, partition int) (metastore.Assignment, error)
+	GetTopic(ctx context.Context, name string) (topic.Topic, error)
 	ListTopics(ctx context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error)
 	ListAssignments(topicName string) ([]metastore.Assignment, error)
 	GetMember(id string) (metastore.Member, error)
@@ -161,6 +163,17 @@ type movePeer interface {
 	CompleteMove(ctx context.Context, addr, topicName string, partition int, expectedOwner, targetID string) error
 	AbortMove(ctx context.Context, addr, topicName string, partition int, expectedTarget string) error
 	GetAssignment(ctx context.Context, addr, topicName string, partition int) (metastore.Assignment, error)
+	// GetTopic fetches the leader's topic record: the stale-incarnation
+	// sweep confirms with the leader before setting a directory aside.
+	GetTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error)
+}
+
+// incarnationKeeper is the broker capability the runner uses to prepare
+// a topic directory for the incarnation a copy belongs to before
+// installing it (*messaging.Engine implements it; the broker wiring
+// embeds the engine). Without it the install proceeds as before.
+type incarnationKeeper interface {
+	EnsureTopicIncarnation(topicName, id string) error
 }
 
 // moveReclaimer is the broker slice the stale-copy sweep needs. The
@@ -505,6 +518,28 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, sess *MoveSession, topicNa
 // the source stays authoritative and the worker retries (a re-plan will
 // cancel the worker).
 func (r *MoveRunner) finishMove(ctx context.Context, topicName string, partition int, source, stagingDir string, res CopyResult, forcePromoted bool) bool {
+	// The copy must belong to the incarnation of the topic THIS node
+	// records, or it is a deleted incarnation's data being moved into
+	// the recreated topic (the source never purged it, or this replica
+	// is behind a recreate). Refuse and retry; a re-plan cancels the
+	// worker if the move is no longer wanted.
+	rec, err := r.store.GetTopic(ctx, topicName)
+	if err != nil {
+		r.logger.Warn("move: read topic record before install; will retry", "topic", topicName, "partition", partition, "err", err)
+		return false
+	}
+	if res.IncarnationID != "" && rec.ID != "" && res.IncarnationID != rec.ID {
+		r.logger.Error("move: source copy belongs to another incarnation of the topic; refusing to install it",
+			"topic", topicName, "partition", partition, "source", source,
+			"copy_incarnation", res.IncarnationID, "local_incarnation", rec.ID)
+		return false
+	}
+	if keeper, ok := r.reclaimer.(incarnationKeeper); ok && rec.ID != "" {
+		if err := keeper.EnsureTopicIncarnation(topicName, rec.ID); err != nil {
+			r.logger.Warn("move: prepare topic directory for the incarnation; will retry", "topic", topicName, "partition", partition, "err", err)
+			return false
+		}
+	}
 	// The marker records how this copy got here. The old owner's sweep
 	// reads it (through the transfer info) to refuse deleting a local copy
 	// that is ahead of the promoted HWM, and the fan-out reconciler reads
