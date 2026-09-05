@@ -51,6 +51,8 @@ curl -u $AUTH $NARAD/v1/topics/orders         # one topic + per-partition stats
 
 The single-topic response includes `partition_stats`: per-partition oldest offset, next offset, and segment counts, handy for eyeballing backlog and growth.
 
+Reads are scoped to what you can touch. `GET /v1/topics/{name}` (and `/children`) answers `403` unless you hold **any** grant matching the name (`produce`, `consume`, or `create`), own the topic, or are an admin; a topic you have no grant on and that does not exist still answers `404`. `GET /v1/topics` lists only the topics you could read individually, and admins see everything. The filter runs on each page after pagination, so a page can come back shorter than `limit`, or even empty, while `next_page_token` is still set: keep paging until the token is empty.
+
 ## Changing a topic
 
 ```bash
@@ -71,4 +73,4 @@ curl -u $AUTH -X DELETE $NARAD/v1/topics/orders
 
 ## Who can do this
 
-Creating requires a `create` grant matching the topic name; the creator becomes the topic's **owner**. Altering and deleting require ownership or an `admin` grant. Details in [Users & Access](users-and-access.md).
+Creating requires a `create` grant matching the topic name; the creator becomes the topic's **owner**. Altering and deleting require ownership or an `admin` grant. Reading a topic requires any grant on it, ownership, or admin. Details in [Users & Access](users-and-access.md).

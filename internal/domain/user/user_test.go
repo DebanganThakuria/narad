@@ -170,3 +170,29 @@ func TestValidateGrants(t *testing.T) {
 		}
 	}
 }
+
+func TestAllowedAnyMatchesAnyActionOrAdmin(t *testing.T) {
+	u := User{Grants: []Grant{
+		{Action: ActionProduce, Patterns: []string{"orders-*"}},
+		{Action: ActionConsume, Patterns: []string{"logs"}},
+	}}
+	for name, want := range map[string]bool{
+		"orders-eu": true,  // produce grant, wildcard
+		"logs":      true,  // consume grant, literal
+		"logs-2":    false, // literal does not prefix-match
+		"payments":  false,
+	} {
+		if got := u.AllowedAny(name); got != want {
+			t.Fatalf("AllowedAny(%q) = %v, want %v", name, got, want)
+		}
+	}
+	if (User{}).AllowedAny("orders-eu") {
+		t.Fatal("a user with no grants must not see any topic")
+	}
+	if !(User{Root: true}).AllowedAny("anything") {
+		t.Fatal("root must see every topic")
+	}
+	if !(User{Grants: []Grant{{Action: ActionAdmin}}}).AllowedAny("anything") {
+		t.Fatal("admin must see every topic")
+	}
+}

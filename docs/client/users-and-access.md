@@ -27,7 +27,9 @@ A **grant** is an action plus a list of topic-name patterns:
 
 Patterns are exact names or **prefix wildcards**: `invoices.*` matches `invoices.eu`, `invoices.us`, and so on.
 
-**Ownership** rides on top: whoever created a topic can alter it, delete it, and manage its fan-out children; no extra grants needed. Admins can do that to any topic.
+**Ownership** rides on top: whoever created a topic can alter it, delete it, read its details, and manage its fan-out children; no extra grants needed. Admins can do that to any topic. Attaching a child needs manage rights on both the parent and the child; detaching needs them on either.
+
+Any grant on a topic also lets you **read** it (`GET /v1/topics/{name}` and its children); `GET /v1/topics` shows only what you could read. Cluster topology (`GET /v1/cluster/members`, `GET /v1/cluster/moves`) and user management are admin-only.
 
 ## Managing users (admin only)
 
