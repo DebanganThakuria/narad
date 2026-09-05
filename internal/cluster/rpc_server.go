@@ -57,9 +57,19 @@ type RPCServer struct {
 
 	// deliveries remembers messages handed to forwarded consumes whose
 	// client may cancel after the reply was already sent; see
-	// HandleStreamCancel.
-	deliveriesMu sync.Mutex
-	deliveries   map[requestKey]delivery
+	// HandleStreamCancel. deliveryExpiry is the same records in insertion
+	// order with their deadlines, so expiring old ones is a pop from the
+	// front, never a scan of the map. now is the clock (tests inject one).
+	deliveriesMu   sync.Mutex
+	deliveries     map[requestKey]delivery
+	deliveryExpiry []deliveryDeadline
+	now            func() time.Time
+}
+
+// deliveryDeadline is one entry of the delivery expiry queue.
+type deliveryDeadline struct {
+	key      requestKey
+	expireAt time.Time
 }
 
 // NewRPCServer constructs an RPCServer around the local broker.
@@ -168,33 +178,69 @@ type requestKey struct {
 // delivery is a message a consume handler handed to a client that may
 // have stopped listening.
 type delivery struct {
-	topic  string
-	handle consumer.Handle
-	at     time.Time
+	topic    string
+	handle   consumer.Handle
+	at       time.Time
+	expireAt time.Time
 }
 
-// recentDeliveryTTL bounds how long a delivered handle is remembered for
-// a late cancel. A cancel is sent the moment the client gives up, so it
-// arrives within a network round trip; the TTL is generous.
-const recentDeliveryTTL = 30 * time.Second
+// deliveryCancelGrace bounds how long a delivered handle is remembered
+// after the consume handler produced it. The record only matters for a
+// cancel that races the reply (the client stopped waiting as the reply
+// was being written); a client that read the reply never cancels. So
+// the window is the reply's flight time, not the visibility timeout.
+// Under load a node hands out tens of thousands of forwarded messages
+// per second, and remembering each for 30 s (the previous TTL) kept
+// hundreds of thousands of records that every consume then swept under
+// the mutex: the profile showed 8 to 11% of broker CPU in that sweep
+// and every forwarded consume serialised behind it.
+const deliveryCancelGrace = 2 * time.Second
 
-// rememberDelivery records that the request delivered handle, so a
-// cancel that arrives after the reply was sent can still release it.
+// deliveryExpiryBudget bounds how many expired records one call may
+// drop so a burst never makes a single consume pay for the backlog.
+const deliveryExpiryBudget = 64
+
+func (s *RPCServer) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// rememberDelivery records a handle a forwarded consume is about to
+// answer with, so a cancel that races the reply can give it back.
 func (s *RPCServer) rememberDelivery(key requestKey, topicName string, h consumer.Handle) {
-	now := time.Now()
+	now := s.clock()
 	s.deliveriesMu.Lock()
 	if s.deliveries == nil {
 		s.deliveries = make(map[requestKey]delivery)
 	}
-	if len(s.deliveries) >= 1024 {
-		for k, d := range s.deliveries {
-			if now.Sub(d.at) > recentDeliveryTTL {
-				delete(s.deliveries, k)
-			}
-		}
-	}
-	s.deliveries[key] = delivery{topic: topicName, handle: h, at: now}
+	s.expireDeliveriesLocked(now)
+	expireAt := now.Add(deliveryCancelGrace)
+	s.deliveries[key] = delivery{topic: topicName, handle: h, at: now, expireAt: expireAt}
+	s.deliveryExpiry = append(s.deliveryExpiry, deliveryDeadline{key: key, expireAt: expireAt})
 	s.deliveriesMu.Unlock()
+}
+
+// expireDeliveriesLocked drops records whose grace elapsed, oldest first.
+// A queue entry whose record was already taken (cancelled) or replaced
+// by a later delivery under the same key is skipped. Must hold
+// deliveriesMu.
+func (s *RPCServer) expireDeliveriesLocked(now time.Time) {
+	n := 0
+	for n < len(s.deliveryExpiry) && n < deliveryExpiryBudget && !s.deliveryExpiry[n].expireAt.After(now) {
+		e := s.deliveryExpiry[n]
+		if d, ok := s.deliveries[e.key]; ok && d.expireAt.Equal(e.expireAt) {
+			delete(s.deliveries, e.key)
+		}
+		n++
+	}
+	if n > 0 {
+		// Shift in place; the queue is a FIFO whose head moves forward,
+		// and copying the remainder keeps the backing array from growing
+		// without bound.
+		s.deliveryExpiry = append(s.deliveryExpiry[:0], s.deliveryExpiry[n:]...)
+	}
 }
 
 // forgetDelivery drops the record once it is clear the client either got
