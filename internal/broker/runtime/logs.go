@@ -147,8 +147,22 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 	unlock := g.lockTopic(topicName)
 	defer unlock()
 	g.mu.Lock()
-	defer g.mu.Unlock()
+	l, quarantined, err := g.openLocked(topicName, idx, key)
+	g.mu.Unlock()
+	if quarantined {
+		// A deleted incarnation's directory was set aside: drop the
+		// in-memory state that belonged to it (outside mu, under the
+		// guard).
+		g.notifyRetired(topicName)
+	}
+	return l, err
+}
 
+// openLocked is Get's slow path: re-validate or open the (topic, idx)
+// log under the current incarnation. Caller holds the topic's guard and
+// mu (write). quarantined reports that a directory of another
+// incarnation was set aside on the way.
+func (g *Logs) openLocked(topicName string, idx int, key string) (l *storage.Log, quarantined bool, err error) {
 	var version uint64
 	if g.versions != nil {
 		// Read the version BEFORE the record: a change that lands
@@ -171,9 +185,9 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 			// after the topic's files were purged. The delete path waits
 			// for the local replica to reflect the deletion before
 			// purging, so by purge time this branch is authoritative.
-			return nil, errs.ErrTopicNotFound
+			return nil, false, errs.ErrTopicNotFound
 		default:
-			return nil, fmt.Errorf("broker/runtime: lookup topic for retention: %w", err)
+			return nil, false, fmt.Errorf("broker/runtime: lookup topic for retention: %w", err)
 		}
 	}
 	if e, ok := g.logs[key]; ok {
@@ -182,30 +196,31 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 			// incarnation did not: the open log is still the right one.
 			e.version.Store(version)
 			e.stamp()
-			return e.log, nil
+			return e.log, false, nil
 		}
 		// The topic was deleted and recreated while its logs were
 		// open: every open log under the name belongs to the old
 		// incarnation and must go before the directory is checked.
 		g.closeTopicLocked(topicName)
 	}
-	if err := g.ensureIncarnationLocked(topicName, incarnation); err != nil {
-		return nil, err
+	quarantined, err = g.ensureIncarnationLocked(topicName, incarnation)
+	if err != nil {
+		return nil, quarantined, err
 	}
 	if g.metrics != nil {
 		opts.Metrics = g.metrics.StorageRecorder(topicName, idx)
 	}
 
 	partitionDir := storage.TopicPartitionDir(g.dataDir, topicName, idx)
-	l, err := storage.NewLog(partitionDir, opts)
+	l, err = storage.NewLog(partitionDir, opts)
 	if err != nil {
-		return nil, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)
+		return nil, quarantined, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)
 	}
 	e := &logEntry{log: l, incarnation: incarnation}
 	e.version.Store(version)
 	e.stamp()
 	g.logs[key] = e
-	return l, nil
+	return l, quarantined, nil
 }
 
 // entryCurrent reports whether an open entry can be served without

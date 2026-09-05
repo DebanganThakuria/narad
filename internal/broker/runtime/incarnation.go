@@ -81,27 +81,29 @@ func (g *Logs) lockTopic(topicName string) (unlock func()) {
 // owner of the per-topic in-memory state (consumer reservations and
 // committed frontiers, loaded schemas) drops it there so nothing of the
 // retired incarnation carries over into a same-named successor. fn runs
-// outside the log map lock but under the topic's guard, so it must not
-// call Get.
+// outside the log map lock but under the topic's guard, so it may Peek
+// but must not Get.
 func (g *Logs) SetTopicRetiredHook(fn func(topicName string)) {
 	g.retired = fn
 }
 
 // ensureIncarnationLocked makes topics/<name> the directory of the
-// incarnation id before a partition log is opened in it. Caller holds
-// the topic's guard and mu (write). An empty id is a record without an
-// incarnation: the directory is used as-is.
-func (g *Logs) ensureIncarnationLocked(topicName, id string) error {
+// incarnation id before a partition log is opened in it, and reports
+// whether a directory of another incarnation was quarantined doing so
+// (the caller runs the retired hook once it has released mu). Caller
+// holds the topic's guard and mu (write). An empty id is a record
+// without an incarnation: the directory is used as-is.
+func (g *Logs) ensureIncarnationLocked(topicName, id string) (quarantined bool, err error) {
 	if id == "" {
-		return nil
+		return false, nil
 	}
 	topicDir := storage.TopicDir(g.dataDir, topicName)
 	marker, marked, err := storage.ReadTopicIncarnation(topicDir)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if marked && marker == id {
-		return nil
+		return false, nil
 	}
 	if marked {
 		// The directory belongs to another incarnation of the name: a
@@ -111,26 +113,26 @@ func (g *Logs) ensureIncarnationLocked(topicName, id string) error {
 		// aside for the sweep, and start the current incarnation from
 		// an empty directory.
 		if err := g.closeTopicLocked(topicName); err != nil {
-			return fmt.Errorf("broker/runtime: close stale incarnation of %s: %w", topicName, err)
+			return false, fmt.Errorf("broker/runtime: close stale incarnation of %s: %w", topicName, err)
 		}
-		quarantined, err := storage.QuarantineTopicDir(g.dataDir, topicName, marker)
+		setAside, err := storage.QuarantineTopicDir(g.dataDir, topicName, marker)
 		if err != nil {
-			return fmt.Errorf("broker/runtime: quarantine stale incarnation of %s: %w", topicName, err)
+			return false, fmt.Errorf("broker/runtime: quarantine stale incarnation of %s: %w", topicName, err)
 		}
 		g.logger.Error("topic directory belongs to a deleted incarnation of the topic; quarantined instead of served",
-			"topic", topicName, "directory_incarnation", marker, "current_incarnation", id, "quarantine_dir", quarantined)
-		g.notifyRetired(topicName)
+			"topic", topicName, "directory_incarnation", marker, "current_incarnation", id, "quarantine_dir", setAside)
+		quarantined = true
 	}
 	// Unmarked: a fresh directory, or one written before markers
 	// existed (adopted by the current incarnation, the upgrade path).
 	if err := storage.WriteTopicIncarnation(topicDir, id); err != nil {
-		return fmt.Errorf("broker/runtime: stamp incarnation of %s: %w", topicName, err)
+		return quarantined, fmt.Errorf("broker/runtime: stamp incarnation of %s: %w", topicName, err)
 	}
-	return nil
+	return quarantined, nil
 }
 
-// notifyRetired runs the retired hook. mu may be held: the hook must
-// not re-enter the log map.
+// notifyRetired runs the retired hook. Callers hold the topic's guard
+// and have released mu.
 func (g *Logs) notifyRetired(topicName string) {
 	if g.retired != nil {
 		g.retired(topicName)
@@ -146,8 +148,12 @@ func (g *Logs) EnsureTopicIncarnation(topicName, id string) error {
 	unlock := g.lockTopic(topicName)
 	defer unlock()
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.ensureIncarnationLocked(topicName, id)
+	quarantined, err := g.ensureIncarnationLocked(topicName, id)
+	g.mu.Unlock()
+	if quarantined {
+		g.notifyRetired(topicName)
+	}
+	return err
 }
 
 // TopicIncarnationMatches reports whether topics/<name> may be served
