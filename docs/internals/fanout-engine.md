@@ -70,7 +70,9 @@ flowchart LR
 
 Because commit times are **monotonic per partition** (assigned under the partition lock, a [storage-engine](storage-engine.md) property), the first not-yet-due record proves everything behind it isn't due either. So an idle delay cursor is O(1): peek the head, sleep until its due time (capped so gauges stay fresh). No timer wheels, no scan-the-backlog polling: a million pending delayed messages cost the same as one.
 
-Delivery is therefore *never early* (the gate is checked against the owner's clock at read time) and usually lands within a second of due (long-poll wakeups + the linger window).
+Delivery is therefore *never early on the reading clock* (the gate is checked against the parent partition owner's clock at read time) and usually lands within a second of due (long-poll wakeups + the linger window).
+
+**Two clocks after a move.** `committed_at` is stamped by whichever node committed the record (`produce_commit.go`), while the gate compares it against the clock of the node that *owns the parent partition now*. Those are the same node until the partition moves (rebalance, decommission). After a move, records the old owner stamped are gated by the new owner's clock, so their delivery is early or late by exactly the inter-node skew, in either direction. There is no cheap fix: the reader cannot know what the committing node's clock reads now, and clamping the gate to the newest commit time it has seen would only trade "late on the new owner's clock" for "early on the old owner's", not remove the skew. Under NTP the skew is milliseconds against delays measured in minutes or hours; the guarantee to quote is "never early on the clock of the node currently owning the parent partition", and the way to keep that meaningful is to keep the cluster's clocks synchronised.
 
 ## Edge behaviors
 

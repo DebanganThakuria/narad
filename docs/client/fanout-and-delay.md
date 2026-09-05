@@ -136,7 +136,7 @@ The fine print:
 - Delay is fixed per child (up to 1 year) and **immutable after attach**. Want a different delay? Detach and attach a new child.
 - **You cannot produce directly to a delay child** (`409`): its whole timeline comes from the parent, which is what makes the delay trustworthy.
 - The parent's retention must be at least `delay + 1 hour`, and Narad enforces this at attach time *and* blocks retention changes that would violate it. This guarantees a message can never age out of the parent before its delayed delivery.
-- Delivery is *"no earlier than"* the delay, typically within a second after. Under failures it can be later, never earlier.
+- Delivery is *"no earlier than"* the delay, typically within a second after. Under failures it can be later, never earlier, as measured on the clock of the node that currently holds the parent's partition. The one caveat: if that partition moves to another node (rebalance, decommission), the messages the previous node stamped are timed against the new node's clock, so their delivery shifts by whatever clock skew exists between the two nodes. Keep the cluster's clocks synchronised (NTP) and the shift is milliseconds against delays of minutes or hours.
 
 ## What fan-out costs you
 
