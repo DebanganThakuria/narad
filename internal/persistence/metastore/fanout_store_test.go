@@ -109,3 +109,122 @@ func TestGetTopicNormalizesRole(t *testing.T) {
 		t.Fatalf("ListTopics roles = %+v, want standalone", list)
 	}
 }
+
+// An attach records the parent's per-partition committed tail (the
+// attach point) reported by the registered resolver, keeps it across
+// config updates, and clears it on detach. Without a resolver the
+// record carries no offsets, which is the pre-existing behaviour.
+func TestAttachChildRecordsAttachOffsets(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	for _, name := range []string{"parent", "child", "other"} {
+		if err := s.CreateTopic(ctx, topic.Topic{Name: name, Partitions: 3, RetentionMs: 3_600_000}); err != nil {
+			t.Fatalf("CreateTopic(%s): %v", name, err)
+		}
+	}
+
+	// No resolver registered: today's behaviour, no offsets.
+	if err := s.AttachChild(ctx, "parent", "other", 0); err != nil {
+		t.Fatalf("AttachChild(other): %v", err)
+	}
+	other, err := s.GetTopic(ctx, "other")
+	if err != nil {
+		t.Fatalf("GetTopic(other): %v", err)
+	}
+	if other.AttachOffsets != nil {
+		t.Fatalf("attach without a resolver recorded offsets %v, want none", other.AttachOffsets)
+	}
+
+	var askedFor string
+	s.SetAttachOffsetResolver(func(_ context.Context, parent string) ([]int64, error) {
+		askedFor = parent
+		return []int64{5, 0, 7}, nil
+	})
+	if err := s.AttachChild(ctx, "parent", "child", 0); err != nil {
+		t.Fatalf("AttachChild: %v", err)
+	}
+	if askedFor != "parent" {
+		t.Fatalf("resolver asked for %q, want parent", askedFor)
+	}
+	c, err := s.GetTopic(ctx, "child")
+	if err != nil {
+		t.Fatalf("GetTopic(child): %v", err)
+	}
+	if !slices.Equal(c.AttachOffsets, []int64{5, 0, 7}) {
+		t.Fatalf("child attach offsets = %v, want [5 0 7]", c.AttachOffsets)
+	}
+
+	// A config update of the child is not an attach: the record keeps
+	// its link, epoch, and attach point.
+	c.RetentionMs = 7_200_000
+	c.AttachOffsets = nil
+	if err := s.UpdateTopic(ctx, c); err != nil {
+		t.Fatalf("UpdateTopic(child): %v", err)
+	}
+	c, err = s.GetTopic(ctx, "child")
+	if err != nil {
+		t.Fatalf("GetTopic(child) after update: %v", err)
+	}
+	if !slices.Equal(c.AttachOffsets, []int64{5, 0, 7}) {
+		t.Fatalf("attach offsets after UpdateTopic = %v, want [5 0 7] preserved", c.AttachOffsets)
+	}
+
+	if err := s.DetachChild(ctx, "parent", "child"); err != nil {
+		t.Fatalf("DetachChild: %v", err)
+	}
+	c, err = s.GetTopic(ctx, "child")
+	if err != nil {
+		t.Fatalf("GetTopic(child) after detach: %v", err)
+	}
+	if c.AttachOffsets != nil {
+		t.Fatalf("attach offsets after detach = %v, want cleared", c.AttachOffsets)
+	}
+
+	// Deleting the parent dissolves the remaining link and clears the
+	// other child's record the same way.
+	if err := s.DeleteTopic(ctx, "parent"); err != nil {
+		t.Fatalf("DeleteTopic(parent): %v", err)
+	}
+	other, err = s.GetTopic(ctx, "other")
+	if err != nil {
+		t.Fatalf("GetTopic(other) after parent delete: %v", err)
+	}
+	if other.Role != topic.RoleStandalone || other.AttachEpoch != "" || other.AttachOffsets != nil {
+		t.Fatalf("other after parent delete = %+v, want standalone with no attach state", other)
+	}
+}
+
+// When the attach point cannot be observed (a parent partition owner
+// is unreachable) the attach must fail as retryable and leave no link
+// behind: a guessed offset would skip records or backfill history.
+func TestAttachChildFailsWhenAttachPointUnresolvable(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	for _, name := range []string{"parent", "child"} {
+		if err := s.CreateTopic(ctx, topic.Topic{Name: name, Partitions: 3, RetentionMs: 3_600_000}); err != nil {
+			t.Fatalf("CreateTopic(%s): %v", name, err)
+		}
+	}
+	s.SetAttachOffsetResolver(func(context.Context, string) ([]int64, error) {
+		return nil, errors.New("owner of parent/2 unreachable")
+	})
+	err := s.AttachChild(ctx, "parent", "child", 0)
+	if !errors.Is(err, errs.ErrUnavailable) {
+		t.Fatalf("AttachChild error = %v, want %v", err, errs.ErrUnavailable)
+	}
+	c, err := s.GetTopic(ctx, "child")
+	if err != nil {
+		t.Fatalf("GetTopic(child): %v", err)
+	}
+	if c.Role != topic.RoleStandalone || c.Parent != "" {
+		t.Fatalf("child linked despite the failed attach: %+v", c)
+	}
+
+	// A resolver that reports a negative offset is equally refused.
+	s.SetAttachOffsetResolver(func(context.Context, string) ([]int64, error) {
+		return []int64{0, -1, 0}, nil
+	})
+	if err := s.AttachChild(ctx, "parent", "child", 0); !errors.Is(err, errs.ErrUnavailable) {
+		t.Fatalf("AttachChild with negative offset error = %v, want %v", err, errs.ErrUnavailable)
+	}
+}

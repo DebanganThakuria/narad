@@ -61,6 +61,7 @@ func (f *fsmState) applyUpdateTopic(data []byte) error {
 		t.Parent = current.Parent
 		t.AttachEpoch = current.AttachEpoch
 		t.FanoutDelayMs = current.FanoutDelayMs
+		t.AttachOffsets = current.AttachOffsets
 		// A parent's retained log is the delay buffer for its delay
 		// children: shrinking retention below what an attached child's
 		// delay requires would let scheduled records age out before
@@ -157,6 +158,7 @@ func dissolveFanoutLinks(tx *bolt.Tx, name string) ([]string, error) {
 			child.Parent = ""
 			child.AttachEpoch = ""
 			child.FanoutDelayMs = 0
+			child.AttachOffsets = nil
 			if err := putTopicRecord(tx, child); err != nil {
 				return nil, err
 			}

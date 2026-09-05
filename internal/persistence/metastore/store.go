@@ -60,6 +60,12 @@ type Store struct {
 	ownershipReady atomic.Bool
 	latchMu        sync.Mutex
 	fsm            *fsmState
+
+	// attachOffsets, when registered (SetAttachOffsetResolver), observes
+	// the parent's per-partition committed tail for an attach so the
+	// link records its exact starting point; see fanout_anchor.go.
+	attachOffsetsMu sync.RWMutex
+	attachOffsets   AttachOffsetResolver
 }
 
 // New opens or creates the Raft metastore at cfg.DataDir.

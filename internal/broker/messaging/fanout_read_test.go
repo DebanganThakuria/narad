@@ -303,3 +303,35 @@ func TestDelayedChildRejectsDirectProduce(t *testing.T) {
 		t.Fatalf("CommitAcceptedProduceBatch = (%v, %v), want one offset", offsets, err)
 	}
 }
+
+// Audit finding 1.7: listing a parent's cursor stats (GET children) is
+// a monitoring call. It must read a closed parent partition from its
+// durable HWM file rather than opening the log, or the listing would
+// keep every idle parent warm and defeat idle eviction.
+func TestFanoutCursorStatsDoesNotOpenClosedLogs(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["parent"] = topic.Topic{Name: "parent", Partitions: 2, Role: topic.RoleParent, Children: []string{"child"}}
+	e := newTestEngine(t, ms, nil, nil)
+	commitFanoutFixture(t, e, "parent", 0, 5)
+	dir := storage.TopicPartitionDir(e.logs.DataDir(), "parent", 0)
+	if err := storage.WriteFanoutCursorIfPartitionDirExists(dir, "child", storage.FanoutCursor{Epoch: "e", NextOffset: 2}); err != nil {
+		t.Fatalf("WriteFanoutCursor: %v", err)
+	}
+	if err := e.logs.CloseTopic("parent"); err != nil {
+		t.Fatalf("CloseTopic: %v", err)
+	}
+
+	stats, err := e.FanoutCursorStats(context.Background(), "parent")
+	if err != nil {
+		t.Fatalf("FanoutCursorStats: %v", err)
+	}
+	if len(stats) != 1 || stats[0].Child != "child" || stats[0].Partition != 0 ||
+		stats[0].NextOffset != 2 || stats[0].HighWatermark != 5 {
+		t.Fatalf("stats = %+v, want one entry child/0 next=2 hwm=5", stats)
+	}
+	for p := range 2 {
+		if _, open := e.logs.Peek("parent", p); open {
+			t.Fatalf("FanoutCursorStats opened the closed log for parent/%d", p)
+		}
+	}
+}

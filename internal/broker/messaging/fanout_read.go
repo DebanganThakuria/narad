@@ -108,6 +108,11 @@ func (e *Engine) ReadFanoutSlab(ctx context.Context, topicName string, partition
 // every locally-owned partition of parent, one entry per (child,
 // partition) whose cursor has been anchored. Partitions owned by other
 // nodes are absent — the API layer merges owners' views.
+//
+// Like the slab read, this never opens a log: an open parent partition
+// is read through Peek, a closed one through its durable HWM file
+// (exact for a cleanly closed log). A GET of the children listing is a
+// monitoring call and must not keep idle parents warm.
 func (e *Engine) FanoutCursorStats(ctx context.Context, parent string) ([]topic.FanoutCursorStat, error) {
 	if e.logs == nil {
 		return nil, unavailableError("partition logs")
@@ -124,12 +129,13 @@ func (e *Engine) FanoutCursorStats(ctx context.Context, parent string) ([]topic.
 		if !e.isLocalOwner(parent, p) {
 			continue
 		}
-		log, err := e.logs.Get(parent, p)
-		if err != nil {
+		dir := storage.TopicPartitionDir(e.logs.DataDir(), parent, p)
+		var hwm int64
+		if log, open := e.logs.Peek(parent, p); open {
+			hwm = log.HighWatermark()
+		} else if hwm, _, err = storage.ReadPersistedHighWatermark(dir); err != nil {
 			return nil, err
 		}
-		hwm := log.HighWatermark()
-		dir := storage.TopicPartitionDir(e.logs.DataDir(), parent, p)
 		for _, child := range t.Children {
 			cur, ok, err := storage.ReadFanoutCursor(dir, child)
 			if err != nil || !ok {

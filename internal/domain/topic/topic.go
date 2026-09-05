@@ -62,6 +62,17 @@ type Topic struct {
 	// Direct produce to a delayed child is rejected — the delay is a
 	// guarantee of the topic, not a property of one write path.
 	FanoutDelayMs int64 `json:"fanout_delay_ms,omitempty"`
+	// AttachOffsets is the parent's committed high watermark per parent
+	// partition (index = partition) as observed while the attach was
+	// being committed (child role only; recorded at attach, cleared at
+	// detach). It is the exact "attach point": a fan-out cursor with no
+	// resume point starts here, not at whatever the tail happened to be
+	// when the cursor first read, so records committed between the
+	// attach and the cursor's first read are never skipped. A parent
+	// partition at an index beyond this slice was created after the
+	// attach and starts at offset 0. Nil on records written before the
+	// field existed; such cursors keep the older tail-anchor behaviour.
+	AttachOffsets []int64 `json:"attach_offsets,omitempty"`
 }
 
 // Role classifies a topic's position in fan-out. Roles are exclusive
@@ -126,7 +137,9 @@ type PartitionStats struct {
 	OldestOffset int64 `json:"oldest_offset"`
 	// NextOffset is the offset the next appended record will receive
 	// (total records ever appended). It can briefly lead HighWatermark
-	// while a record is being committed.
+	// while a record is being committed. For a partition whose log is
+	// idle (closed) it is reported equal to HighWatermark: describing
+	// a partition never opens its log.
 	NextOffset int64 `json:"next_offset"`
 	// HighWatermark is the exclusive upper bound of records visible to
 	// consumers — the durably-committed frontier.
