@@ -31,11 +31,12 @@ curl -u $AUTH -X POST $NARAD/v1/topics/orders/children \
 Rules to know:
 
 - You need manage rights (ownership or `admin`) on **both** topics to attach: the child's schema history is replaced by the parent's and the parent's records start flowing into it, so owning the parent alone does not let you claim someone else's topic. Detaching needs manage rights on either side. Listing children needs any grant on the parent.
-- Fan-out starts **from the moment of attach**. Messages already in the parent are not backfilled.
+- Fan-out starts **from the moment of attach**. Messages already in the parent are not backfilled. The attach point is exact: while the attach is processed, Narad records the parent's committed position on every partition into the child's record (`attach_offsets`), and each partition's copy starts precisely there, even if the copier takes a moment to start. Partitions added to the parent later are copied from their first message.
+- If one of the parent's partition owners cannot be reached while the attach is processed, the attach fails with `503` and nothing is linked; retry it.
 - Copies preserve the message **key**, so related messages stay grouped in each child.
 - A child belongs to one parent; a parent can have up to 108 children; chains (child of a child) are not allowed.
 - If the parent enforces a schema, children must be schema-compatible; attach fails with `409` otherwise.
-- Detach and re-attach = a fresh start from the parent's tail, never a resume or replay.
+- Detach and re-attach = a fresh start from the new attach point, never a resume or replay.
 
 ```bash
 curl -u $AUTH $NARAD/v1/topics/orders/children              # list children + how far behind each is
@@ -137,7 +138,7 @@ The fine print:
 - Delay is fixed per child (up to 1 year) and **immutable after attach**. Want a different delay? Detach and attach a new child.
 - **You cannot produce directly to a delay child** (`409`): its whole timeline comes from the parent, which is what makes the delay trustworthy.
 - The parent's retention must be at least `delay + 1 hour`, and Narad enforces this at attach time *and* blocks retention changes that would violate it. This guarantees a message can never age out of the parent before its delayed delivery.
-- Delivery is *"no earlier than"* the delay, typically within a second after. Under failures it can be later, never earlier.
+- Delivery is *"no earlier than"* the delay, typically within a second after. Under failures it can be later, never earlier, as measured on the clock of the node that currently holds the parent's partition. The one caveat: if that partition moves to another node (rebalance, decommission), the messages the previous node stamped are timed against the new node's clock, so their delivery shifts by whatever clock skew exists between the two nodes. Keep the cluster's clocks synchronised (NTP) and the shift is milliseconds against delays of minutes or hours.
 
 ## What fan-out costs you
 

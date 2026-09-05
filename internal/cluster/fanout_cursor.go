@@ -45,40 +45,67 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 		next = cur.NextOffset
 	}
 	if next == topic.FanoutTailOffset {
-		// Tail-anchoring skips everything before the current tail and
-		// OVERWRITES the offset file, so it is destructive on two counts —
-		// and this cursor's epoch may have come from a stale replica view.
-		// Anchor only on an epoch the leader confirms is the child's live
-		// attachment; otherwise defer, leaving the file untouched, and let
-		// the reconciler respawn the cursor once the replica catches up.
+		// Anchoring skips everything before the anchor and OVERWRITES
+		// the offset file, so it is destructive on two counts, and this
+		// cursor's epoch may have come from a stale replica view. Anchor
+		// only on an epoch the leader confirms is the child's live
+		// attachment; otherwise defer, leaving the file untouched, and
+		// let the reconciler respawn the cursor once the replica catches
+		// up.
 		if !epochConfirmedByLeader(ctx, r.store, r.peer, r.selfID, key, r.logger) {
 			return
 		}
-		// Fresh attachment: fan out from the parent's current committed
-		// tail (no backfill), and persist that starting point BEFORE
-		// fanning anything so a crash cannot re-anchor at a later tail
-		// and silently skip the window in between.
-		slab, err := r.broker.ReadFanoutSlab(ctx, key.parent, key.partition,
-			topic.FanoutReadOpts{FromOffset: topic.FanoutTailOffset, MaxRecords: 1, MaxBytes: 1})
-		if err != nil {
-			r.cursorReadError(key, err)
-			return
+		freshAnchor := false
+		if key.anchor != topic.FanoutTailOffset {
+			// Fresh attachment with a recorded attach point (or a
+			// partition newer than the attach, anchor 0): start exactly
+			// there, so nothing committed between the attach and this
+			// first read is skipped. A lost cursor file lands here too
+			// and replays from the attach point: duplicates, never a
+			// gap, the at-least-once side of the contract.
+			next = key.anchor
+			freshAnchor = true
+		} else {
+			// Attach record without offsets (written before they were
+			// recorded): fan out from the parent's current committed
+			// tail, the older no-backfill anchor.
+			slab, err := r.broker.ReadFanoutSlab(ctx, key.parent, key.partition,
+				topic.FanoutReadOpts{FromOffset: topic.FanoutTailOffset, MaxRecords: 1, MaxBytes: 1})
+			if err != nil {
+				r.cursorReadError(key, err)
+				return
+			}
+			next = slab.NextOffset
+			if lostByMove && slab.HighWatermark > 0 {
+				// The link existed when a move installed this partition, so
+				// the source's cursor file should have arrived with it (the
+				// source ran a release that did not ship cursor files, or
+				// the file was lost). Tail-anchoring here would skip the
+				// child's whole backlog (for a delay child, its entire
+				// pending window). Resume from the oldest retained offset
+				// instead: duplicates for the child, never a silent gap.
+				next = slab.OldestOffset
+				r.logger.Warn("fanout: cursor file missing after a partition move for a pre-existing link; resuming from the oldest retained offset instead of the tail (expect duplicates, not loss)",
+					"parent", key.parent, "partition", key.partition, "child", key.child,
+					"from_offset", next, "tail", slab.HighWatermark)
+			}
 		}
-		next = slab.NextOffset
-		if lostByMove && slab.HighWatermark > 0 {
-			// The link existed when a move installed this partition, so
-			// the source's cursor file should have arrived with it (the
-			// source ran a release that did not ship cursor files, or
-			// the file was lost). Tail-anchoring here would skip the
-			// child's whole backlog (for a delay child, its entire
-			// pending window). Resume from the oldest retained offset
-			// instead: duplicates for the child, never a silent gap.
-			next = slab.OldestOffset
-			r.logger.Warn("fanout: cursor file missing after a partition move for a pre-existing link; resuming from the oldest retained offset instead of the tail (expect duplicates, not loss)",
-				"parent", key.parent, "partition", key.partition, "child", key.child,
-				"from_offset", next, "tail", slab.HighWatermark)
-		}
-		if !r.persistCursor(key, partitionDir, next) {
+		// Persist the starting point BEFORE fanning anything so a crash
+		// cannot re-anchor later and silently skip the window in
+		// between. A recorded anchor may land on a parent partition
+		// that has never been produced to and so has no directory yet
+		// (a remote owner answered the attach from directory stats
+		// without opening the log); the link was just confirmed with
+		// the leader, so creating the directory here is safe, whereas
+		// refusing would stop the cursor, have the reconciler respawn
+		// it, and leave the child never catching up.
+		if freshAnchor {
+			if err := storage.WriteFanoutCursorCreating(partitionDir, key.child, storage.FanoutCursor{Epoch: key.epoch, NextOffset: next}); err != nil {
+				r.logger.Error("fanout: persist first cursor",
+					"parent", key.parent, "partition", key.partition, "child", key.child, "err", err)
+				return
+			}
+		} else if !r.persistCursor(key, partitionDir, next) {
 			return
 		}
 	}

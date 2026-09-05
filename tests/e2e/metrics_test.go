@@ -155,10 +155,13 @@ func TestMetrics_PollerUpdatesLagAndInventory(t *testing.T) {
 	if totalLag != 5 {
 		t.Fatalf("total lag from snapshot = %v, want 5", totalLag)
 	}
+	// The snapshot covers the partitions whose logs are open on this
+	// node (the ones that have been produced to; a describe never opens
+	// a log), so only those carry a gauge.
 	var reportedLag float64
-	for partition := range 3 {
+	for _, ps := range snaps[0].Partitions {
 		reportedLag += readGauge(t, env, "narad_consumer_lag_messages",
-			map[string]string{"topic": "poll-me", "partition": fmt.Sprintf("%d", partition)})
+			map[string]string{"topic": "poll-me", "partition": fmt.Sprintf("%d", ps.Partition)})
 	}
 	if reportedLag != 5 {
 		t.Errorf("reported lag sum = %v, want 5", reportedLag)

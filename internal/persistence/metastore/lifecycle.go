@@ -110,6 +110,14 @@ func (s *Store) AppliedCaughtUp() bool {
 	if err != nil {
 		return false
 	}
+	// applied_index is advanced by Raft's main loop when it hands a batch
+	// to the FSM goroutine, before the FSM has applied it; a reader that
+	// trusts it alone can find the store one batch behind "caught up".
+	// fsm_pending is the number of batches queued at the FSM, so both
+	// together mean the FSM state really covers applied_index.
+	if pending, err := strconv.ParseUint(stats["fsm_pending"], 10, 64); err != nil || pending > 0 {
+		return false
+	}
 	if s.r.State() == raft.Leader {
 		return commit > 0 && applied >= commit
 	}

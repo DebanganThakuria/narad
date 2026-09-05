@@ -15,7 +15,12 @@ package cluster
 // parent partition growth) and stop on detach, topic delete, or
 // ownership change. A cursor key includes the link's attach epoch, so
 // a detach followed by a re-attach always starts a fresh cursor at the
-// parent's tail — never resuming (and replaying) the dead one.
+// recorded attach point, never resuming (and replaying) the dead one.
+//
+// The runner is also the node's authority on WHERE a fresh link starts:
+// it registers itself on the metastore as the attach-offset resolver,
+// so an attach proposed on this node records the parent's committed
+// tail per partition (see fanout_anchor.go).
 
 import (
 	"context"
@@ -103,6 +108,11 @@ type fanoutCursorKey struct {
 	// never has to re-resolve it — and can never mistakenly run
 	// ungated after a transient metadata read failure.
 	delayMs int64
+	// anchor is where the cursor starts when it has no cursor file for
+	// this epoch: the recorded attach point (see attachAnchor), or
+	// topic.FanoutTailOffset for records without one. Immutable per
+	// epoch like delayMs.
+	anchor int64
 }
 
 type fanoutCursorHandle struct {
@@ -131,9 +141,11 @@ type FanoutRunner struct {
 	caughtUpSkips   int
 }
 
-// NewFanoutRunner wires a runner. selfID may be empty (single-process /
-// test use), in which case every partition is treated as locally owned.
-// metrics may be nil.
+// NewFanoutRunner wires a runner and registers it on store as the
+// attach-offset resolver (Store.SetAttachOffsetResolver), so attaches
+// proposed on this node record their exact starting point. selfID may
+// be empty (single-process / test use), in which case every partition
+// is treated as locally owned. metrics may be nil.
 func NewFanoutRunner(
 	store *metastore.Store,
 	selfID string,
@@ -148,7 +160,7 @@ func NewFanoutRunner(
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &FanoutRunner{
+	r := &FanoutRunner{
 		store:       store,
 		selfID:      selfID,
 		dataDir:     dataDir,
@@ -160,6 +172,8 @@ func NewFanoutRunner(
 		cfg:         cfg.withDefaults(),
 		cursors:     map[fanoutCursorKey]*fanoutCursorHandle{},
 	}
+	store.SetAttachOffsetResolver(r.AttachOffsets)
+	return r
 }
 
 // Run reconciles the cursor set until ctx is cancelled, then stops and
@@ -228,7 +242,10 @@ func (r *FanoutRunner) Reconcile(ctx context.Context) {
 			if !r.ownsPartition(parent.Name, p) {
 				continue
 			}
-			desired[fanoutCursorKey{parent: parent.Name, partition: p, child: t.Name, epoch: t.AttachEpoch, delayMs: t.FanoutDelayMs}] = struct{}{}
+			desired[fanoutCursorKey{
+				parent: parent.Name, partition: p, child: t.Name,
+				epoch: t.AttachEpoch, delayMs: t.FanoutDelayMs, anchor: attachAnchor(t, p),
+			}] = struct{}{}
 		}
 	}
 

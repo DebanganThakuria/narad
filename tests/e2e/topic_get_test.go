@@ -28,9 +28,27 @@ func TestGetTopic_ReturnsDetailsAndStats(t *testing.T) {
 		if ps.Index != i {
 			t.Errorf("partition[%d].Index: got %d want %d", i, ps.Index, i)
 		}
-		if ps.Segments < 1 {
-			// One pre-allocated active segment per partition.
-			t.Errorf("partition[%d].Segments: got %d want >= 1", i, ps.Segments)
+		// A describe never opens a partition log, so a partition nothing
+		// has been produced to has no segment yet and reports zeros.
+		if ps.Segments != 0 || ps.NextOffset != 0 || ps.HighWatermark != 0 || ps.SizeBytes != 0 {
+			t.Errorf("partition[%d]: got %+v want zero stats for a never-written partition", i, ps)
+		}
+	}
+
+	// After a produce the touched partition reports its segment and
+	// offsets; the others stay untouched.
+	res := mustProduce(t, env, "details", "k", map[string]int{"v": 1})
+	resp = getJSON(t, env.Server.URL+"/v1/topics/details")
+	d = readJSON[topic.Details](t, resp)
+	for i, ps := range d.Partitions {
+		if i == res.Partition {
+			if ps.Segments < 1 || ps.HighWatermark != 1 || ps.NextOffset != 1 {
+				t.Errorf("produced partition[%d]: got %+v want segments >= 1, hwm 1, next 1", i, ps)
+			}
+			continue
+		}
+		if ps.Segments != 0 || ps.HighWatermark != 0 {
+			t.Errorf("untouched partition[%d]: got %+v want zero stats", i, ps)
 		}
 	}
 }

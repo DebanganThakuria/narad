@@ -71,6 +71,21 @@ func WriteFanoutCursorIfPartitionDirExists(partitionDir, child string, c FanoutC
 	return writeFileAtomic(partitionDir, fanoutCursorFileName(child), buf)
 }
 
+// WriteFanoutCursorCreating persists the cursor, creating the partition
+// directory if it does not exist yet. For the first anchor of a link the
+// owner just confirmed with the leader: a parent partition that has
+// never been produced to has no directory, and refusing to create one
+// would leave the cursor unable to anchor (it stops, the reconciler
+// respawns it, and the child never catches up). Every other persist
+// keeps using WriteFanoutCursorIfPartitionDirExists so a concurrent
+// topic delete is never resurrected.
+func WriteFanoutCursorCreating(partitionDir, child string, c FanoutCursor) error {
+	if err := os.MkdirAll(partitionDir, 0o755); err != nil {
+		return err
+	}
+	return WriteFanoutCursorIfPartitionDirExists(partitionDir, child, c)
+}
+
 // RemoveFanoutCursor deletes the persisted cursor for child. Called
 // when the parent→child link is gone (detach or delete) so a later
 // re-attach cannot resume — and thereby replay — a dead cursor.

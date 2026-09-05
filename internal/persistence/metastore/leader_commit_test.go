@@ -233,10 +233,15 @@ func TestFollowerLatchRefusesWhileLeaderCommitAheadOfApplied(t *testing.T) {
 	if err := follower.ClusterReady(); err != nil {
 		t.Fatalf("ClusterReady after catch-up: %v", err)
 	}
-	rows, err := follower.ListAssignments("orders")
-	if err != nil || len(rows) != 1 {
-		t.Fatalf("ListAssignments after catch-up = %v, %v", rows, err)
-	}
+	// The gate is open now; the assignment is visible once the FSM has
+	// applied the entry. The latch's fsm_pending guard makes that
+	// immediate in practice, but the two stats are read one at a time.
+	var rows []Assignment
+	waitUntil(t, 10*time.Second, "assignment to be readable after catch-up", func() bool {
+		var err error
+		rows, err = follower.ListAssignments("orders")
+		return err == nil && len(rows) == 1
+	})
 	if _, err := follower.GetAssignment("orders", 0); err != nil {
 		t.Fatalf("GetAssignment after catch-up: %v", err)
 	}

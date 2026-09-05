@@ -35,9 +35,25 @@ The invariant is the whole guarantee: **the cursor's durable offset only advance
 
 ## Attach epochs: why re-attach never replays
 
-Each attachment gets a fresh **epoch** ID, stamped into the cursor's offset file. Detach + re-attach must start from the parent's *current tail* (the client contract says "no backfill"), so a cursor that finds an offset file from a *different epoch* refuses to resume it. Epochs turn "is this my state?" from a guess into an equality check.
+Each attachment gets a fresh **epoch** ID, stamped into the cursor's offset file. Detach + re-attach must start from the new attach's *attach point* (the client contract says "no backfill"), so a cursor that finds an offset file from a *different epoch* refuses to resume it. Epochs turn "is this my state?" from a guess into an equality check.
 
-Tail-anchoring (the act of skipping to the tail and overwriting the offset file) is the engine's only destructive move, and chaos testing showed a stale metastore replica can fabricate exactly the epoch mismatch that triggers it. So an anchor now requires the **Raft leader to confirm the epoch** (with the barrier rule for self-leaders); anything unconfirmed defers, and the reconciler retries a second later. Cursor offset files get the same protection before deletion. The incident that forced this is told in [Cluster Lifecycle](cluster-lifecycle.md).
+Anchoring (the act of skipping to a starting offset and overwriting the offset file) is the engine's only destructive move, and chaos testing showed a stale metastore replica can fabricate exactly the epoch mismatch that triggers it. So an anchor requires the **Raft leader to confirm the epoch** (with the barrier rule for self-leaders); anything unconfirmed defers, and the reconciler retries a second later. Cursor offset files get the same protection before deletion. The incident that forced this is told in [Cluster Lifecycle](cluster-lifecycle.md).
+
+## The attach point: where a fresh cursor starts
+
+"From the attach forward" needs a definition of *the attach*, per parent partition, or the cursor invents one. The first version anchored at the parent's tail **as of the cursor's first read**, which is not the attach: the cursor spawns one reconcile interval plus a leader round trip after the attach committed, and everything committed in between was silently skipped. A partition added by a partition-count increase was worse: producers hash to it within milliseconds of assignment, its cursor spawned a second later and tail-anchored past all of it, although a brand-new partition has no pre-attach history to skip.
+
+So the attach records its own point. While the attach is being proposed, the proposing node's fan-out runner asks every parent partition owner for its committed high watermark (a local read, or one stats RPC per remote partition, in parallel) and the answer travels inside the Raft attach command into the child's record as `attach_offsets` (index = parent partition). A cursor with no offset file for its epoch then starts:
+
+| Record | Partition | Start |
+|---|---|---|
+| has `attach_offsets` | index within the slice | the recorded offset, exactly |
+| has `attach_offsets` | index beyond the slice (added after the attach) | 0 |
+| no `attach_offsets` (attached before this existed) | any | the live tail at first read (the older behaviour; detach and re-attach to upgrade) |
+
+If any owner cannot be asked, the attach fails with `503` and leaves no link; a guessed offset would either skip records or backfill history, and an attach is cheap to retry. Records committed while the attach is in flight (between the tail reads and the Raft commit) sit at or past the recorded offsets and are delivered: the attach point is "the tail observed while processing the attach", never later.
+
+The same rule decides a *lost* cursor file: with the attach point recorded, a cursor that finds no file replays from that point (duplicates, bounded by the parent's retention through drop-behind) instead of tail-anchoring past whatever it had not yet delivered. At-least-once, in the direction the contract promises.
 
 ## The delay gate
 
@@ -54,13 +70,16 @@ flowchart LR
 
 Because commit times are **monotonic per partition** (assigned under the partition lock, a [storage-engine](storage-engine.md) property), the first not-yet-due record proves everything behind it isn't due either. So an idle delay cursor is O(1): peek the head, sleep until its due time (capped so gauges stay fresh). No timer wheels, no scan-the-backlog polling: a million pending delayed messages cost the same as one.
 
-Delivery is therefore *never early* (the gate is checked against the owner's clock at read time) and usually lands within a second of due (long-poll wakeups + the linger window).
+Delivery is therefore *never early on the reading clock* (the gate is checked against the parent partition owner's clock at read time) and usually lands within a second of due (long-poll wakeups + the linger window).
+
+**Two clocks after a move.** `committed_at` is stamped by whichever node committed the record (`produce_commit.go`), while the gate compares it against the clock of the node that *owns the parent partition now*. Those are the same node until the partition moves (rebalance, decommission). After a move, records the old owner stamped are gated by the new owner's clock, so their delivery is early or late by exactly the inter-node skew, in either direction. There is no cheap fix: the reader cannot know what the committing node's clock reads now, and clamping the gate to the newest commit time it has seen would only trade "late on the new owner's clock" for "early on the old owner's", not remove the skew. Under NTP the skew is milliseconds against delays measured in minutes or hours; the guarantee to quote is "never early on the clock of the node currently owning the parent partition", and the way to keep that meaningful is to keep the cluster's clocks synchronised.
 
 ## Edge behaviors
 
 - **Drop-behind**: if a cursor falls behind the parent's *retention* (child down for days), aged-out offsets are skipped and counted on an explicit loss metric: bounded, alarmed loss instead of a wedged parent. The retention floor (`≥ delay + 1h` for delay children) makes this unreachable in sane configs.
 - **Dead child-partition owner**: fan-out never reroutes to a sibling child partition (unlike produce, a cursor can afford to wait; rerouting would scatter a key's records across child partitions for no availability gain); the cursor stalls on that bucket and retries until the owner returns.
 - **Lag observability**: `fanout_lag_messages` (parent HWM − cursor) is the health signal for normal children; `fanout_due_lag_seconds` (how far behind the *due frontier*) is the one for delay children; raw offset lag on a delay child is permanently ≈ rate × delay *by design*.
+- **Describing is free**: the children listing (`GET /v1/topics/{parent}/children`) and the topic describe (`GET /v1/topics/{topic}`) never open a partition log. An open log is read through the non-stamping `Peek`; a closed one is described from its directory (segment files plus the durable high-watermark file, exact for a cleanly closed log). Only `Get` stamps a log's last access, so a monitoring loop cannot keep idle parents warm and idle eviction still fires. Remote partitions' stats are fetched from their owners concurrently (16 in flight), not one round trip at a time.
 ## The numbers
 
 | Constant | Value |
@@ -84,7 +103,7 @@ topics/orders/p00003/fanout-analytics.offset
 {"epoch":"67953471cc57a32a","next_offset":98332}
 ```
 
-That's the entire recovery story: epoch says *which attachment* this position belongs to; `next_offset` says where to resume. Written via atomic temp+rename only after the batch below it is committed to the child (commit-before-advance). Everything else (running goroutines, batches in flight, lag gauges) is disposable.
+That's the entire recovery story: epoch says *which attachment* this position belongs to; `next_offset` says where to resume. Written via atomic temp+rename only after the batch below it is committed to the child (commit-before-advance). The starting point of a cursor that has no file yet lives in the metastore, in the child's record (`attach_epoch` plus `attach_offsets`). Everything else (running goroutines, batches in flight, lag gauges) is disposable.
 
 ## Reading a slab: fill-or-linger
 
