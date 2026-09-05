@@ -43,13 +43,18 @@ func (f *InFlight) ReserveNext(ctx context.Context, topic string, partition int,
 		return ReserveResult{SkipReason: "empty"}, nil
 	}
 
-	// When the ahead-of-frontier state is at capacity, every ack except
-	// the frontier hole's is doomed to ErrAckedAheadFull — handing out
-	// NEW offsets from here only manufactures deliveries whose acks
-	// bounce, expire, and redeliver (the ack-503 spiral observed under
-	// soak: hundreds of thousands of duplicates in hours). Serve ONLY
-	// the offset the frontier is waiting on; one successful ack there
-	// collapses the whole acked-ahead run and normal service resumes.
+	// The acked-ahead cap is enforced HERE, on delivery, and nowhere
+	// else: once the ahead-of-frontier state is at capacity, no fresh
+	// offset is handed out. Serve ONLY the offset the frontier is waiting
+	// on; one successful ack there collapses the whole acked-ahead run and
+	// normal service resumes. Acks for offsets that were already handed
+	// out are always accepted (see resolveReserved), which bounds the
+	// ahead set at maxAckedAhead + maxInFlight. Rejecting those acks
+	// instead (the previous behaviour) made every consumer holding an
+	// in-flight message at the moment the set filled give up, let its
+	// lease expire, and redeliver: a partition then crawled at one
+	// cap-sized batch per visibility timeout, with a 503 storm on the
+	// way (72k in one load test).
 	if sh.aheadFullLocked() {
 		if sh.resolvedOrReservedLocked(next) {
 			return ReserveResult{SkipReason: "ahead_full"}, nil
@@ -201,7 +206,10 @@ func corruptSet(sh *partitionShard) map[int64]struct{}    { return sh.corrupt }
 // frontier the committed offset advances (collapsing over any contiguous
 // resolved run) and is persisted via onCommit; ahead of the frontier the
 // offset is parked in the set selected by aheadOf (ackedAhead for acks,
-// corrupt for skips), subject to the shared ahead cap. Either way the
+// corrupt for skips). The ahead cap is NOT checked here: a message the
+// broker handed out can always be resolved, because ReserveNext stops
+// handing out fresh offsets once the set is full, so the set can hold
+// at most maxAckedAhead + maxInFlight offsets. Either way the
 // reservation is removed, freeing a MaxInFlight slot, so the release
 // notifier fires after all shard locks are dropped.
 func (f *InFlight) resolveReserved(topic string, partition int, offset, nonce int64, aheadOf func(*partitionShard) map[int64]struct{}) error {
@@ -240,14 +248,7 @@ func (f *InFlight) resolveReserved(topic string, partition int, offset, nonce in
 		return nil
 	}
 
-	ahead := aheadOf(sh)
-	if _, already := ahead[offset]; !already {
-		if sh.aheadFullLocked() {
-			sh.mu.Unlock()
-			return ErrAckedAheadFull
-		}
-		ahead[offset] = struct{}{}
-	}
+	aheadOf(sh)[offset] = struct{}{}
 	delete(sh.entries, offset)
 	sh.mu.Unlock()
 	if wasAtCap {

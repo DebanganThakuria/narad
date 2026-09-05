@@ -27,6 +27,9 @@ var (
 
 	// ErrAckedAheadFull reports that the out-of-order ack set is full,
 	// meaning the head of the queue may be stuck on a poison message.
+	// The consumer package stopped returning it for acks (the cap now
+	// gates delivery); the sentinel and its 503 mapping are kept so older
+	// peers' replies still decode.
 	ErrAckedAheadFull = errors.New("acked-ahead set is full; head of queue may be stuck")
 )
 

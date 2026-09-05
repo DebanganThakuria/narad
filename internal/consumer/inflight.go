@@ -20,8 +20,10 @@ var (
 	// committed, or belonging to a dropped shard.
 	ErrHandleStale = errs.ErrHandleStale
 
-	// ErrAckedAheadFull reports that the bounded ahead-of-frontier
-	// state (out-of-order acks plus corrupt skips) is at capacity.
+	// ErrAckedAheadFull is retained for callers that map it (HTTP 503,
+	// cluster RPC) but is no longer returned by this package: the
+	// ahead-of-frontier cap gates delivery in ReserveNext instead of
+	// rejecting acks for messages that were already handed out.
 	ErrAckedAheadFull = errs.ErrAckedAheadFull
 
 	// ErrInvalidSkip reports a SkipMissingBelow call whose offset is not

@@ -198,9 +198,12 @@ func TestInFlightCapBlocksFurtherReserves(t *testing.T) {
 	}
 }
 
-// TestAckedAheadCapReturns503 covers the ackedAhead-full path.
-// Drives two out-of-order acks (cap=2), then a third triggers 503.
-func TestAckedAheadCapReturns503(t *testing.T) {
+// TestAckedAheadCapGatesDelivery covers the ackedAhead-full path: the
+// cap stops fresh deliveries (consume returns 204 while the frontier
+// hole is out) but never rejects an ack for a message that was already
+// handed out, so consumers holding messages when the set filled can
+// still finish, and acking the hole drains everything.
+func TestAckedAheadCapGatesDelivery(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
 
@@ -211,24 +214,36 @@ func TestAckedAheadCapReturns503(t *testing.T) {
 	})
 	expectStatus(t, resp, http.StatusCreated)
 
-	// Produce 4 messages so we can reserve 0..3.
-	for range 4 {
+	// Produce 5 messages so we can reserve 0..3 and leave 4 in the log.
+	for range 5 {
 		env.produce("stuckhead", "k", `{}`)
 	}
-	// Reserve all 4 in order.
+	// Reserve 0..3 in order.
 	m0 := env.consume("/v1/topics/stuckhead/consume?partition=0")
 	m1 := env.consume("/v1/topics/stuckhead/consume?partition=0")
 	m2 := env.consume("/v1/topics/stuckhead/consume?partition=0")
 	m3 := env.consume("/v1/topics/stuckhead/consume?partition=0")
-	_ = m0 // intentionally unacked — keeps committed at 0
 
-	// Ack m1 and m2 out of order — fills ackedAhead to cap (2).
+	// Ack m1 and m2 out of order: fills ackedAhead to cap (2).
 	env.ack("stuckhead", m1.ReceiptHandle)
 	env.ack("stuckhead", m2.ReceiptHandle)
 
-	// Ack m3 — cap is full, must return 503.
+	// Ack m3: the set is full, but m3 was handed out before it filled,
+	// so the ack is accepted.
 	resp = env.post("/v1/topics/stuckhead/ack?receipt_handle="+url.QueryEscape(m3.ReceiptHandle), nil)
-	expectStatus(t, resp, http.StatusServiceUnavailable)
+	expectStatus(t, resp, http.StatusNoContent)
+
+	// No fresh delivery while the hole (m0) is out: offset 4 stays put.
+	if r := env.get("/v1/topics/stuckhead/consume?partition=0"); r.StatusCode != http.StatusNoContent {
+		t.Fatalf("consume while acked-ahead full: got %d, want 204", r.StatusCode)
+	}
+
+	// Acking the hole collapses 0..3 and offset 4 is delivered.
+	env.ack("stuckhead", m0.ReceiptHandle)
+	m4 := env.consume("/v1/topics/stuckhead/consume?partition=0")
+	if m4.Offset != 4 {
+		t.Fatalf("after the hole was acked, consume returned offset %d, want 4", m4.Offset)
+	}
 }
 
 // TestAlterCapsTakesEffect verifies that altering caps via PATCH

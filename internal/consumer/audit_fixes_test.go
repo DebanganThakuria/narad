@@ -139,7 +139,7 @@ func TestReserveNextHintMatchesBruteForceOracle(t *testing.T) {
 			i := rng.IntN(len(reserved))
 			r := reserved[i]
 			reserved = append(reserved[:i], reserved[i+1:]...)
-			if err := f.CommitHandle("t", 0, r.offset, r.nonce); err != nil && !errors.Is(err, ErrAckedAheadFull) && !errors.Is(err, ErrHandleStale) {
+			if err := f.CommitHandle("t", 0, r.offset, r.nonce); err != nil && !errors.Is(err, ErrHandleStale) {
 				t.Fatalf("CommitHandle: %v", err)
 			}
 		case 3: // nack a random live reservation

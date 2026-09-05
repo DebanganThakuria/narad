@@ -120,9 +120,11 @@ func TestSkipCorruptPersistsAdvancedFrontier(t *testing.T) {
 	}
 }
 
-// The "ahead of frontier" budget is shared between acked-ahead and corrupt so
-// poison offsets can't grow that state without bound.
-func TestSkipCorruptRespectsCombinedAheadCap(t *testing.T) {
+// The "ahead of frontier" budget is shared between acked-ahead and corrupt
+// and gates delivery: once corrupt skips plus out-of-order acks reach the
+// cap, no fresh offset is handed out. A skip for an offset that was
+// already reserved is still accepted, like an ack.
+func TestSkipCorruptSharesAheadCapWithAcks(t *testing.T) {
 	t.Parallel()
 	f := newTestInFlight(10, 2) // MaxAckedAhead = 2
 	withClock(f, 1000)
@@ -132,7 +134,11 @@ func TestSkipCorruptRespectsCombinedAheadCap(t *testing.T) {
 		t.Fatalf("SkipCorrupt(1): %v", err) // corrupt-ahead {1}
 	}
 	mustCommit(t, f, 2, nonces[2]) // acked-ahead {2}; combined ahead = 2 = cap
-	if err := f.SkipCorrupt(testTopic, testPart, 3, nonces[3]); !errors.Is(err, ErrAckedAheadFull) {
-		t.Fatalf("skip beyond combined cap: err=%v, want ErrAckedAheadFull", err)
+	r, err := f.ReserveNext(context.Background(), testTopic, testPart, testVT, testDeepTail)
+	if err != nil || r.Reserved || r.SkipReason != "ahead_full" {
+		t.Fatalf("ReserveNext at combined cap = %+v, %v; want ahead_full", r, err)
+	}
+	if err := f.SkipCorrupt(testTopic, testPart, 3, nonces[3]); err != nil {
+		t.Fatalf("skip of a live reservation beyond the cap: %v, want accepted", err)
 	}
 }
