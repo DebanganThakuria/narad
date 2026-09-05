@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,7 +41,41 @@ func newCLITransport() *http.Transport {
 	t.MaxIdleConns = 1024
 	t.MaxIdleConnsPerHost = 1024
 	t.IdleConnTimeout = 90 * time.Second
+	t.DialContext = newSpreadDialer(t.DialContext, net.DefaultResolver.LookupIPAddr)
 	return t
+}
+
+// newSpreadDialer wraps dial so that consecutive connections to a name
+// that resolves to several addresses (a Kubernetes headless service, a
+// multi-A record for the brokers) are spread across those addresses
+// round-robin instead of all landing on the first one. With a pooled
+// transport every worker keeps its connection for the whole run, so
+// where a connection lands at dial time decides which broker carries
+// that worker's load; letting the resolver's first answer (or a
+// ClusterIP's per-connection roll of the dice) decide it put 5x the
+// produce traffic on one of three brokers in a load test. Names that
+// resolve to a single address, and literal IPs, dial as before.
+func newSpreadDialer(dial func(ctx context.Context, network, addr string) (net.Conn, error), lookup func(ctx context.Context, host string) ([]net.IPAddr, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	var (
+		mu   sync.Mutex
+		next uint64
+	)
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil || net.ParseIP(host) != nil {
+			return dial(ctx, network, addr)
+		}
+		ips, err := lookup(ctx, host)
+		if err != nil || len(ips) <= 1 {
+			return dial(ctx, network, addr)
+		}
+		mu.Lock()
+		i := next
+		next++
+		mu.Unlock()
+		ip := ips[i%uint64(len(ips))].IP
+		return dial(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
 }
 
 // newContextHTTPClient builds a client from resolved connection
