@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -47,8 +48,11 @@ type Peer struct {
 // Store is the Raft-backed metastore. Writes go through Raft consensus;
 // reads are served from the local bbolt replica.
 type Store struct {
-	r   *raft.Raft
-	fsm *fsmState
+	r *raft.Raft
+	// ownershipReady latches the first time AppliedCaughtUp holds after
+	// this process started; see ListAssignments.
+	ownershipReady atomic.Bool
+	fsm            *fsmState
 }
 
 // New opens or creates the Raft metastore at cfg.DataDir.
@@ -203,4 +207,22 @@ func classifyRaftError(err error) error {
 	default:
 		return err
 	}
+}
+
+// ownershipViewReady reports whether the local replica may be used to
+// decide partition ownership: it has caught up with the leader at least
+// once since this process started (ListAssignments explains why). The
+// latch never clears: a replica that later falls behind is the ordinary
+// steady-state lag every node has, and partition moves coordinate with
+// the old owner through the handoff protocol rather than through this
+// view. A store without Raft (tests, tools) is always ready.
+func (s *Store) ownershipViewReady() bool {
+	if s.ownershipReady.Load() {
+		return true
+	}
+	if s.r == nil || s.AppliedCaughtUp() {
+		s.ownershipReady.Store(true)
+		return true
+	}
+	return false
 }
