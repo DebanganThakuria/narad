@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -230,5 +231,17 @@ func TestListTopicsFiltersToReadable(t *testing.T) {
 				t.Fatalf("next_page_token = %q, want %q (must survive filtering)", resp.NextPageToken, "next")
 			}
 		})
+	}
+}
+
+// 0 means "leave partitions alone", so the error for a negative value
+// must say that rather than the misleading "must be > 0".
+func TestAlterNegativePartitionsMessageExplainsZero(t *testing.T) {
+	err := alterRequest{Partitions: -1}.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil for negative partitions")
+	}
+	if !strings.Contains(err.Error(), "unchanged") || strings.Contains(err.Error(), "> 0") {
+		t.Fatalf("Validate() error = %q, want it to explain 0/omitted leaves the count unchanged", err)
 	}
 }

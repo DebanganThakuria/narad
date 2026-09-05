@@ -127,8 +127,7 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 	case errors.Is(err, errs.ErrUnavailable):
 		s.WriteError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, errs.ErrInvalidArgument),
-		errors.Is(err, errs.ErrPartitionRequired),
-		errors.Is(err, errs.ErrFanoutDelayTooLong):
+		errors.Is(err, errs.ErrPartitionRequired):
 		s.WriteError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, errs.ErrNotPartitionOwner):
 		s.WriteError(w, http.StatusMisdirectedRequest, err.Error())
@@ -137,6 +136,11 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 		errors.Is(err, errs.ErrFanoutSchemaMismatch),
 		errors.Is(err, errs.ErrFanoutSchemaManaged),
 		errors.Is(err, errs.ErrDelayedChildProduce),
+		// A delay the parent's retention cannot buffer is a conflict
+		// between two records (child delay vs parent retention), not a
+		// malformed request: the documented contract is 409 on attach,
+		// create-as-child, and a retention shrink alike.
+		errors.Is(err, errs.ErrFanoutDelayTooLong),
 		errors.Is(err, errs.ErrAlreadyExists):
 		s.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errs.ErrNotFound):

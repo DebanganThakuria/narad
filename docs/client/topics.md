@@ -38,7 +38,7 @@ curl -u $AUTH -X POST $NARAD/v1/topics \
 | `max_acked_ahead_per_partition` | Max out-of-order acks held per partition | 1024 | see [Consuming](consuming.md) |
 | `schema` | Optional JSON Schema; payloads are validated on produce | none | rejected payloads get `400` |
 
-**Choosing partition count.** More partitions = more parallel consumers and more spread across the cluster. Pick roughly the number of consumers you expect to run in parallel. Partition count is fixed after creation, so leave headroom.
+**Choosing partition count.** More partitions = more parallel consumers and more spread across the cluster. Pick roughly the number of consumers you expect to run in parallel. Partition count can be increased later but never decreased, so start modest.
 
 **Choosing retention.** Messages are deleted `retention_ms` after they were written, *whether or not they were consumed*. Retention is a safety net for replay and slow consumers, not a substitute for acking promptly.
 
@@ -61,7 +61,19 @@ curl -u $AUTH -X PATCH $NARAD/v1/topics/orders \
   -d '{"retention_ms": 172800000}'
 ```
 
-Retention, visibility timeout, and the per-partition limits can be altered live. Partition count cannot. If the topic has [delay children](fanout-and-delay.md), you can't shrink retention below what the child's delay needs; Narad refuses with `409` instead of letting delayed messages age out before delivery.
+What can change after creation, and what cannot:
+
+| Field | Alterable | Notes |
+|---|---|---|
+| `retention_ms` | yes | applies to all partitions from the next retention pass |
+| `max_in_flight_per_partition`, `max_acked_ahead_per_partition` | yes | send one or both; the other keeps its current value |
+| `partitions` | increase only | must be greater than the current count and within the cluster maximum; omit or `0` to leave it alone |
+| `schema` | yes | registers a new schema version; see [Fan-out & Delay](fanout-and-delay.md) for parent/child rules |
+| `visibility_timeout_ms` | **no** | fixed at create time |
+
+If the topic has [delay children](fanout-and-delay.md), you can't shrink retention below what the child's delay needs; Narad refuses with `409` instead of letting delayed messages age out before delivery.
+
+A request carrying several fields applies them as separate updates in a fixed order (retention, then the per-partition limits, then partitions, then schema), with no transaction across them: the first failure stops the sequence and answers its error, and the fields before it stay applied. Send one field per request when you need all-or-nothing.
 
 ## Deleting a topic
 

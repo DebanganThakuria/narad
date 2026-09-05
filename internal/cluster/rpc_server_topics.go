@@ -44,6 +44,9 @@ func (b rpcAlterTopicBody) validate() error {
 	hasCaps := b.MaxInFlightPerPartition != nil || b.MaxAckedAheadPerPartition != nil
 	hasSchema := len(b.Schema) > 0
 
+	if b.Partitions < 0 {
+		return errors.New("partitions must be a positive integer (omit or 0 to leave the count unchanged)")
+	}
 	if !hasPartitions && !hasRetention && !hasCaps && !hasSchema {
 		return errors.New("at least one of partitions, retention_ms, max_*_per_partition, or schema is required")
 	}
@@ -124,10 +127,11 @@ func (s *RPCServer) handleAlterTopic(payload []byte) nodewire.Response {
 }
 
 // applyTopicAlterations applies the requested field groups one at a time, in
-// a fixed order, and returns the topic as of the last successful update. An
-// error aborts the sequence, so a multi-field alter can be partially applied
-// — each group is an independent broker update with no cross-group
-// transaction.
+// a fixed order (retention, caps, partitions, schema), and returns the topic
+// as of the last successful update. An error aborts the sequence, so a
+// multi-field alter can be partially applied: each group is an independent
+// broker update with no cross-group transaction. This matches the HTTP
+// handler and the documented contract in docs/client/topics.md.
 func (s *RPCServer) applyTopicAlterations(topicName string, body rpcAlterTopicBody) (topic.Topic, error) {
 	var t topic.Topic
 	var err error

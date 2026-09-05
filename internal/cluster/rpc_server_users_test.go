@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/debanganthakuria/narad/internal/domain/user"
@@ -104,5 +105,18 @@ func TestRPCServerUpdateUserMapsErrors(t *testing.T) {
 	body, _ = json.Marshal(metastore.UserUpdate{Field: "bogus", User: user.User{Username: "admin"}})
 	if res := s.handleUpdateUser(encodeUpdateUserReq(t, "admin", body)); res.Status != http.StatusBadRequest {
 		t.Fatalf("unknown field status = %d, want 400", res.Status)
+	}
+}
+
+// The RPC-side alter validation mirrors the HTTP handler: a negative
+// partition count is rejected up front with a message that explains 0
+// leaves the count unchanged.
+func TestRPCAlterBodyRejectsNegativePartitions(t *testing.T) {
+	err := rpcAlterTopicBody{Partitions: -1}.validate()
+	if err == nil || !strings.Contains(err.Error(), "unchanged") {
+		t.Fatalf("validate() = %v, want a negative-partitions error mentioning unchanged", err)
+	}
+	if err := (rpcAlterTopicBody{Partitions: 6}).validate(); err != nil {
+		t.Fatalf("validate(6) = %v, want nil", err)
 	}
 }
