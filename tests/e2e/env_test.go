@@ -295,7 +295,7 @@ func startMetastore(t testing.TB, dataDir string) *metastore.Store {
 
 	ms, err := metastore.New(metastore.Config{
 		NodeID:   "test-0",
-		DataDir:  dir,
+		DataDir:  dataDir,
 		BindAddr: "127.0.0.1:0",
 	})
 	if err != nil {
