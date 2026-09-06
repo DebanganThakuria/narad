@@ -336,3 +336,24 @@ func (g *Logs) ClosePartition(topicName string, idx int) error {
 	g.retireProduceEntries(func(k string) bool { return k == key })
 	return err
 }
+
+// ReplacePartitionDir closes the partition's open log, if any, and runs
+// swap (which replaces the partition directory on disk) while holding
+// the topic's guard, so no Get can open or serve the directory that is
+// being replaced. The move runner installs a copied partition through
+// it: a node that sourced the same partition moments earlier still had
+// its old log open, the install renamed the copy over that directory
+// underneath the open handle, and every later read served the stale
+// files while every later write went to unlinked inodes; records
+// committed on the transient owner were never seen and records
+// committed after the install were lost when the handle closed (the
+// child-topic gap on every join-then-decommission cycle). The next Get
+// opens the installed directory under the current incarnation.
+func (g *Logs) ReplacePartitionDir(topicName string, idx int, swap func() error) error {
+	unlock := g.lockTopic(topicName)
+	defer unlock()
+	if err := g.ClosePartition(topicName, idx); err != nil {
+		return fmt.Errorf("broker/runtime: close %s/%d before replacing its directory: %w", topicName, idx, err)
+	}
+	return swap()
+}
