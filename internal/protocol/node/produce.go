@@ -1,6 +1,9 @@
 package node
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // EncodeProduceRequest encodes an OpProduce payload.
 func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
@@ -11,7 +14,11 @@ func EncodeProduceRequest(req ProduceRequest) ([]byte, error) {
 	if err := w.string(req.Key); err != nil {
 		return nil, err
 	}
-	w.i32(int32(req.Partition))
+	partition, err := partitionField(req.Partition)
+	if err != nil {
+		return nil, err
+	}
+	w.i32(partition)
 	if err := w.bytes(req.Payload); err != nil {
 		return nil, err
 	}
@@ -78,6 +85,9 @@ func EncodeCommitProduceBatchRequest(req CommitProduceBatchRequest) ([]byte, err
 	for _, record := range req.Records {
 		capacity += commitProduceLen(record)
 	}
+	if len(req.Records) > math.MaxInt32 {
+		return nil, fmt.Errorf("commit produce batch too large: %d records", len(req.Records))
+	}
 	w := opWriter(OpCommitProduceBatch, capacity)
 	w.i32(int32(len(req.Records)))
 	for _, record := range req.Records {
@@ -102,10 +112,13 @@ func DecodeCommitProduceBatchRequest(payload []byte) (CommitProduceBatchRequest,
 	if count < 0 {
 		return CommitProduceBatchRequest{}, fmt.Errorf("negative commit produce batch size %d", count)
 	}
-	// Each record consumes several bytes, so count can never exceed the
-	// remaining payload. Cap the preallocation so an attacker-controlled
-	// count can't trigger a multi-gigabyte allocation before decode fails.
-	records := make([]CommitProduceRequest, 0, min(int(count), r.remaining()))
+	// Each record occupies at least minCommitProduceBytes, so count can
+	// never exceed remaining/minCommitProduceBytes. Cap the preallocation
+	// by that bound so a claimed count cannot make the decoder allocate
+	// more than a small multiple of the bytes actually received before it
+	// fails: the old bound of one record per remaining byte let a 16 MiB
+	// frame reserve over 1 GiB of record headers.
+	records := make([]CommitProduceRequest, 0, min(int(count), r.remaining()/minCommitProduceBytes))
 	for range int(count) {
 		record, err := readCommitProduce(r)
 		if err != nil {
@@ -126,7 +139,11 @@ func writeCommitProduce(w *writer, req CommitProduceRequest) error {
 	if err := w.string(req.Key); err != nil {
 		return err
 	}
-	w.i32(int32(req.TargetPartition))
+	partition, err := partitionField(req.TargetPartition)
+	if err != nil {
+		return err
+	}
+	w.i32(partition)
 	if err := w.bytes(req.Payload); err != nil {
 		return err
 	}
@@ -163,6 +180,10 @@ func readCommitProduce(r *reader) (CommitProduceRequest, error) {
 		CreatedAtUnixMs: createdAt,
 	}, nil
 }
+
+// minCommitProduceBytes is the encoded size of an empty commit-produce
+// record: two empty strings, a partition, empty bytes, and a timestamp.
+const minCommitProduceBytes = 4 + 4 + 4 + 4 + 8
 
 // commitProduceLen is the encoded size of one commit-produce record.
 func commitProduceLen(req CommitProduceRequest) int {

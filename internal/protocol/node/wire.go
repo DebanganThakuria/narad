@@ -206,6 +206,16 @@ func (r *reader) remaining() int {
 	return len(r.payload) - r.pos
 }
 
+// partitionField converts a partition number to its int32 wire field,
+// refusing values the field cannot carry: silently truncating one would
+// route a record to the wrong partition on the receiving node.
+func partitionField(partition int) (int32, error) {
+	if partition < math.MinInt32 || partition > math.MaxInt32 {
+		return 0, fmt.Errorf("partition out of int32 range: %d", partition)
+	}
+	return int32(partition), nil
+}
+
 // fieldLen is the encoded size of a length-prefixed string field.
 func fieldLen(v string) int {
 	return 4 + len(v)

@@ -6,7 +6,11 @@ func EncodeCompleteMoveRequest(req CompleteMoveRequest) ([]byte, error) {
 	if err := w.string(req.Topic); err != nil {
 		return nil, err
 	}
-	w.i32(int32(req.Partition))
+	partition, err := partitionField(req.Partition)
+	if err != nil {
+		return nil, err
+	}
+	w.i32(partition)
 	if err := w.string(req.ExpectedOwner); err != nil {
 		return nil, err
 	}
@@ -50,7 +54,11 @@ func EncodeAbortMoveRequest(req AbortMoveRequest) ([]byte, error) {
 	if err := w.string(req.Topic); err != nil {
 		return nil, err
 	}
-	w.i32(int32(req.Partition))
+	partition, err := partitionField(req.Partition)
+	if err != nil {
+		return nil, err
+	}
+	w.i32(partition)
 	if err := w.string(req.ExpectedTarget); err != nil {
 		return nil, err
 	}
@@ -87,7 +95,11 @@ func EncodeGetAssignmentRequest(req GetAssignmentRequest) ([]byte, error) {
 	if err := w.string(req.Topic); err != nil {
 		return nil, err
 	}
-	w.i32(int32(req.Partition))
+	partition, err := partitionField(req.Partition)
+	if err != nil {
+		return nil, err
+	}
+	w.i32(partition)
 	return w.finish(), nil
 }
 
