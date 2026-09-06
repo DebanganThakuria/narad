@@ -45,7 +45,7 @@ func newIncarnationStore(t *testing.T) *metastore.Store {
 
 func appendOld(t *testing.T, l *storage.Log, n int, payload string) {
 	t.Helper()
-	for i := 0; i < n; i++ {
+	for range n {
 		if _, err := l.Append(storage.EncodeKeyedRecord("k", 1, []byte(payload))); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
@@ -360,7 +360,7 @@ func TestPurgeAndGetDoNotInterleave(t *testing.T) {
 	defer logs.CloseAll()
 	partitionDir := storage.TopicPartitionDir(dataDir, "orders", 0)
 
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		if _, err := logs.Get("orders", 0); err != nil {
 			t.Fatalf("Get: %v", err)
 		}

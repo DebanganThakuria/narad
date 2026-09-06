@@ -63,7 +63,7 @@ func TestForwardedAlterIsVisibleOnTheFollowerWhenItAnswers(t *testing.T) {
 		},
 	}
 
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		// Each round registers on a fresh topic so the visibility check is
 		// a strict read-after-write on the follower, not a re-read.
 		name := "orders"

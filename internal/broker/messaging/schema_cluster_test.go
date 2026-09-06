@@ -289,16 +289,14 @@ func TestSchemaSurvivesLeaderKilledMidUpdate(t *testing.T) {
 	before = snapshotSchema(t, nodes, "orders")
 	// Fire a burst of updates and kill the leader in the middle of it.
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for v := 2; v <= 40; v++ {
 			raw := []byte(fmt.Sprintf(`{"type":"object","properties":{"id":{"type":"integer"},"f%d":{"type":"string"}},"required":["id"]}`, v))
 			if err := leader.store.PutSchema(ctx, "orders", v, raw); err != nil {
 				return
 			}
 		}
-	}()
+	})
 	time.Sleep(20 * time.Millisecond)
 	_ = leader.engine.Close()
 	_ = leader.store.Close()

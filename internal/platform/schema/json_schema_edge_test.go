@@ -121,7 +121,7 @@ func TestValidateOneMiBPayload(t *testing.T) {
 func TestValidateLargeEnumBoundsTheErrorMessage(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteString(`{"enum":[`)
-	for i := 0; i < 12000; i++ {
+	for i := range 12000 {
 		if i > 0 {
 			sb.WriteString(",")
 		}
@@ -154,8 +154,7 @@ func TestValidateLargeEnumBoundsTheErrorMessage(t *testing.T) {
 	if !strings.Contains(err.Error(), "more bytes)") {
 		t.Fatalf("truncated error should say how much was cut: %q", err.Error())
 	}
-	var truncated *truncatedError
-	if !errors.As(err, &truncated) {
+	if _, ok := errors.AsType[*truncatedError](err); !ok {
 		t.Fatal("truncated error should be reachable through the chain")
 	}
 }
@@ -194,7 +193,7 @@ func TestValidateDefinitionLimits(t *testing.T) {
 	check("wide schema under the limit", func() string {
 		var sb strings.Builder
 		sb.WriteString(`{"type":"object","properties":{`)
-		for i := 0; i < 5000; i++ {
+		for i := range 5000 {
 			if i > 0 {
 				sb.WriteString(",")
 			}

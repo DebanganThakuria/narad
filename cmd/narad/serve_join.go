@@ -204,7 +204,7 @@ func existingClusterAnswers(ctx context.Context, peer clusterJoiner, cfg *config
 		ClusterAddr: clusterAdvertiseAddr(cfg, nodeID),
 		Fresh:       true,
 	}
-	for round := 0; round < existingClusterProbeRounds; round++ {
+	for range existingClusterProbeRounds {
 		for _, p := range cfg.Cluster.Peers {
 			if p.ID == nodeID {
 				continue

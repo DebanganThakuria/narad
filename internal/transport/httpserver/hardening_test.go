@@ -174,13 +174,11 @@ func TestConsumeInFlightCapPerIdentity(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if resp, err := get("alice"); err == nil {
 			resp.Body.Close()
 		}
-	}()
+	})
 	<-br.started
 
 	resp, err := get("alice")
@@ -194,13 +192,11 @@ func TestConsumeInFlightCapPerIdentity(t *testing.T) {
 	}
 
 	// Another identity has its own budget.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if resp, err := get("bob"); err == nil {
 			resp.Body.Close()
 		}
-	}()
+	})
 	select {
 	case <-br.started:
 	case <-time.After(2 * time.Second):

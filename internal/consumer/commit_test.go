@@ -321,7 +321,7 @@ func TestAckedAheadBoundedByCapPlusInFlight(t *testing.T) {
 	hole := mustReserve(t, f, testDeepTail) // offset 0 stays unacked
 	// Ack everything else as it comes: each round reserves up to the
 	// in-flight cap and acks all of it out of order.
-	for round := 0; round < 5; round++ {
+	for round := range 5 {
 		var live []ReserveResult
 		for {
 			r, err := f.ReserveNext(context.Background(), testTopic, testPart, testVT, testDeepTail)

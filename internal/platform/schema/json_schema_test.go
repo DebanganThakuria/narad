@@ -198,10 +198,8 @@ func TestJSONSchemaReplaceTopicNeverExposesEmptyTopic(t *testing.T) {
 	stop := make(chan struct{})
 	var notFound int
 	var mu sync.Mutex
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 4 {
+		wg.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -215,9 +213,9 @@ func TestJSONSchemaReplaceTopicNeverExposesEmptyTopic(t *testing.T) {
 					mu.Unlock()
 				}
 			}
-		}()
+		})
 	}
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		history := []Version{{1, v1}}
 		if i%2 == 1 {
 			history = append(history, Version{2, v2})

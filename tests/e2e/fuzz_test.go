@@ -91,7 +91,7 @@ func newFuzzHarness(f *testing.F) *fuzzHarness {
 		if !assigned {
 			f.Fatal("fixture topic never got assignments")
 		}
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			rec := h.do(f, http.MethodPost, "/v1/topics/"+fuzzTopic+"/produce?key=k"+string(rune('a'+i)), []byte(`{"n":1}`), e.adminUser, e.adminPass)
 			if rec.Code != http.StatusAccepted {
 				f.Fatalf("produce fixture: %d %s", rec.Code, rec.Body.String())
