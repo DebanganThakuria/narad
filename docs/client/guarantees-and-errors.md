@@ -69,7 +69,7 @@ flowchart LR
 | `401` | anywhere | Missing/wrong credentials | Fix auth |
 | `403` | anywhere | Authenticated but not allowed | You need a grant |
 | `404` | anywhere | Topic/user doesn't exist | Check the name |
-| `409` | create/attach/alter | Conflict: already exists, role conflict, retention-vs-delay violation | Read the error body |
+| `409` | create/attach/alter | Conflict: already exists, role conflict, retention-vs-delay violation, schema update raced another one | Read the error body; for a schema race, re-read the schema and retry |
 | `410` | ack/extend | Your lease lapsed; message was handed elsewhere | Stop working on it; expect a duplicate |
 | `413` | produce | Body over 1 MiB | Shrink the payload |
 | `503` | produce/consume/ack | Temporarily unavailable: partition owner down, acked-ahead full, quorum lost | Back off and retry |

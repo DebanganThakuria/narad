@@ -6,68 +6,47 @@ import (
 	"fmt"
 
 	"github.com/debanganthakuria/narad/internal/errs"
+	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
 // validateProducePayload validates a payload against the topic's
-// schema. A registry miss is not a rejection: persisted schemas are
-// loaded lazily (a peer may have registered one this node hasn't seen)
-// and only then is validation retried; a topic with no schema at all
-// accepts any payload.
+// current schema. The local registry is brought in line with the
+// metastore first (see syncTopicSchemas); a topic with no persisted
+// schema at all accepts any payload.
 func (e *Engine) validateProducePayload(ctx context.Context, topicName string, payload []byte) error {
-	err := e.schemas.Validate(ctx, topicName, payload)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, errs.ErrSchemaNotFound) {
-		return schemaValidationError(err)
-	}
-
-	loaded, err := e.loadPersistedSchemasCached(ctx, topicName)
-	if err != nil {
+	if err := e.syncTopicSchemas(ctx, topicName); err != nil {
 		return err
 	}
-	if !loaded {
+	err := e.schemas.Validate(ctx, topicName, payload)
+	if err == nil || errors.Is(err, errs.ErrSchemaNotFound) {
 		return nil
 	}
-	if err := e.schemas.Validate(ctx, topicName, payload); err != nil {
-		return schemaValidationError(err)
-	}
-	return nil
+	return schemaValidationError(err)
 }
 
-// loadPersistedSchemasCached memoizes loadPersistedSchemas per topic,
-// keyed by the metastore's schema version, so the common "topic has no
-// schema" produce path doesn't rescan the metastore on every request.
-func (e *Engine) loadPersistedSchemasCached(ctx context.Context, topicName string) (bool, error) {
-	version, ok := e.schemaVersion(topicName)
-	if !ok {
-		return e.loadPersistedSchemas(ctx, topicName)
+// syncTopicSchemas keys the registry's loaded history for the topic by
+// the metastore's schema version. The hot path is one atomic version
+// read plus a cache lookup; only when the version differs from the one
+// the registry was last loaded at (a version registered on another
+// node, a delete-and-recreate under the same name, an attach-time
+// adoption) is the whole persisted history reloaded, replacing
+// whatever was there. Loading incrementally on ErrSchemaNotFound, as
+// this used to, meant a node that had ever validated a topic kept its
+// first-loaded version forever.
+func (e *Engine) syncTopicSchemas(ctx context.Context, topicName string) error {
+	version, _ := e.schemaVersion(topicName)
+	e.cacheMu.RLock()
+	entry, hit := e.schemaLoadCache[topicName]
+	e.cacheMu.RUnlock()
+	if hit && entry.version == version {
+		return nil
 	}
-	return lookupCached(&e.cacheMu, e.schemaLoadCache, topicName, version,
+	_, err := lookupCached(&e.cacheMu, e.schemaLoadCache, topicName, version,
 		func() uint64 { v, _ := e.schemaVersion(topicName); return v },
-		func() (bool, error) { return e.loadPersistedSchemas(ctx, topicName) },
+		func() (bool, error) { return schema.Hydrate(ctx, e.metastore, e.schemas, topicName) },
 		nil,
 	)
-}
-
-// loadPersistedSchemas loads every persisted schema version for the
-// topic into the local registry, in order, and reports whether any
-// existed.
-func (e *Engine) loadPersistedSchemas(ctx context.Context, topicName string) (bool, error) {
-	loaded := false
-	for version := 1; ; version++ {
-		raw, err := e.metastore.GetSchema(ctx, topicName, version)
-		if errors.Is(err, errs.ErrNotFound) {
-			return loaded, nil
-		}
-		if err != nil {
-			return false, fmt.Errorf("messaging: load schema %s v%d: %w", topicName, version, err)
-		}
-		if err := e.schemas.Load(ctx, topicName, version, raw); err != nil {
-			return false, fmt.Errorf("messaging: load schema %s v%d: %w", topicName, version, err)
-		}
-		loaded = true
-	}
+	return err
 }
 
 func schemaValidationError(err error) error {

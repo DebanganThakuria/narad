@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -11,13 +12,12 @@ import (
 )
 
 // JSONSchema is a Registry backed by santhosh-tekuri/jsonschema.
-// Schemas are compiled once on Register/Load so repeated Validate calls
-// pay no compilation cost. Safe for concurrent use.
+// Schemas are compiled once on Load/ReplaceTopic so repeated Validate
+// calls pay no compilation cost. Safe for concurrent use.
 type JSONSchema struct {
 	mu       sync.RWMutex
-	versions map[string]int                        // topic → latest version number
+	versions map[string]int                        // topic → latest loaded version number
 	schemas  map[string]map[int]*jsonschema.Schema // topic → version → compiled schema
-	raw      map[string]map[int][]byte             // topic → version → raw schema bytes
 }
 
 // NewJSONSchema returns an empty JSONSchema registry.
@@ -25,7 +25,6 @@ func NewJSONSchema() *JSONSchema {
 	return &JSONSchema{
 		versions: map[string]int{},
 		schemas:  map[string]map[int]*jsonschema.Schema{},
-		raw:      map[string]map[int][]byte{},
 	}
 }
 
@@ -35,64 +34,71 @@ func (r *JSONSchema) ValidateDefinition(_ context.Context, topic string, schemaB
 	return err
 }
 
-// Register compiles the JSON Schema bytes and stores it under topic. It
-// returns the auto-assigned version number (monotonically increasing per
-// topic, starting at 1).
-//
-// If a previous version exists, Register checks backwards compatibility:
-// new schemas must accept every document accepted by the previous version.
-// Specifically: no property removals, no type changes on existing
-// properties, and the old required set must still be valid under the new
-// schema.
-func (r *JSONSchema) Register(_ context.Context, topic string, schemaBytes []byte) (int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if prevVersion := r.versions[topic]; prevVersion > 0 {
-		prevRaw := r.raw[topic][prevVersion]
-		if err := checkCompatible(prevRaw, schemaBytes); err != nil {
-			return 0, fmt.Errorf("%w: %w", ErrIncompatible, err)
-		}
+// CheckCompatible reports whether every document accepted by previous
+// is accepted by next, wrapping the reason in ErrIncompatible when not.
+// The check is structural subsumption over an explicit allowlist of
+// keywords and fails closed on anything else; see checkCompatible for
+// the exact rules and docs/client/topics.md for the user-facing list.
+func (r *JSONSchema) CheckCompatible(_ context.Context, _ string, previous, next []byte) error {
+	if err := checkCompatible(previous, next); err != nil {
+		return fmt.Errorf("%w: %w", ErrIncompatible, err)
 	}
-
-	version := r.versions[topic] + 1
-	if err := r.loadLocked(topic, version, schemaBytes); err != nil {
-		return 0, err
-	}
-	return version, nil
+	return nil
 }
 
-// Load compiles and stores a persisted schema version for startup rehydration.
+// Load compiles and stores one persisted schema version. Other loaded
+// versions of the topic are untouched; the latest pointer moves only
+// forward.
 func (r *JSONSchema) Load(_ context.Context, topic string, version int, schemaBytes []byte) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.loadLocked(topic, version, schemaBytes)
-}
-
-// Unload removes a compiled schema version from the registry.
-func (r *JSONSchema) Unload(_ context.Context, topic string, version int) error {
+	if version <= 0 {
+		return fmt.Errorf("schema: %s: invalid version %d", topic, version)
+	}
+	compiled, err := compileSchema(topic, version, schemaBytes)
+	if err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.schemas[topic] == nil {
-		return nil
+		r.schemas[topic] = map[int]*jsonschema.Schema{}
 	}
-	delete(r.schemas[topic], version)
-	delete(r.raw[topic], version)
-	if r.versions[topic] != version {
-		return nil
+	r.schemas[topic][version] = compiled
+	if version > r.versions[topic] {
+		r.versions[topic] = version
 	}
+	return nil
+}
+
+// ReplaceTopic swaps the topic's loaded history for history in one
+// step. Everything is compiled before the lock is taken, so a
+// concurrent Validate sees either the old history or the new one,
+// never an empty topic in between (which would let a payload through
+// unvalidated). An empty history drops the topic.
+func (r *JSONSchema) ReplaceTopic(_ context.Context, topic string, history []Version) error {
+	compiled := make(map[int]*jsonschema.Schema, len(history))
 	latest := 0
-	for candidate := range r.schemas[topic] {
-		if candidate > latest {
-			latest = candidate
+	for _, v := range history {
+		if v.Number <= 0 {
+			return fmt.Errorf("schema: %s: invalid version %d", topic, v.Number)
+		}
+		s, err := compileSchema(topic, v.Number, v.Raw)
+		if err != nil {
+			return fmt.Errorf("v%d: %w", v.Number, err)
+		}
+		compiled[v.Number] = s
+		if v.Number > latest {
+			latest = v.Number
 		}
 	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if latest == 0 {
 		delete(r.schemas, topic)
-		delete(r.raw, topic)
 		delete(r.versions, topic)
 		return nil
 	}
+	r.schemas[topic] = compiled
 	r.versions[topic] = latest
 	return nil
 }
@@ -104,28 +110,32 @@ func (r *JSONSchema) DropTopic(_ context.Context, topic string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.schemas, topic)
-	delete(r.raw, topic)
 	delete(r.versions, topic)
 	return nil
 }
 
-func (r *JSONSchema) loadLocked(topic string, version int, schemaBytes []byte) error {
-	compiled, err := compileSchema(topic, version, schemaBytes)
-	if err != nil {
-		return err
-	}
-	if r.schemas[topic] == nil {
-		r.schemas[topic] = map[int]*jsonschema.Schema{}
-		r.raw[topic] = map[int][]byte{}
-	}
-	copied := make([]byte, len(schemaBytes))
-	copy(copied, schemaBytes)
-	if version > r.versions[topic] {
-		r.versions[topic] = version
-	}
-	r.schemas[topic][version] = compiled
-	r.raw[topic][version] = copied
-	return nil
+// errExternalRef is the client-facing reason for any $ref or $schema
+// that points outside the document being compiled. It deliberately
+// names nothing about the target: the broker never opens it, and the
+// message must not echo a path or URL the caller could use to probe
+// the filesystem.
+var errExternalRef = errors.New("external $ref is not allowed; only references into the schema document itself (\"#/$defs/...\") resolve")
+
+// noExternalRefs is the URL loader installed on every compiler. The
+// library's default is FileLoader, which would open any file:// URL a
+// client puts in $ref on the broker's filesystem (and echo the OS error
+// for a missing one). Refusing every load means only in-document
+// references and the embedded draft metaschemas resolve.
+type noExternalRefs struct{}
+
+func (noExternalRefs) Load(string) (any, error) { return nil, errExternalRef }
+
+// schemaResourceURL is the opaque absolute URL a topic's schema is
+// registered under. A relative name would be resolved by the compiler
+// against the process working directory and leak it (as file:///...)
+// in every validation error sent to clients.
+func schemaResourceURL(topic string, version int) string {
+	return fmt.Sprintf("narad://schema/%s/%d", topic, version)
 }
 
 func compileSchema(topic string, version int, schemaBytes []byte) (*jsonschema.Schema, error) {
@@ -135,20 +145,40 @@ func compileSchema(topic string, version int, schemaBytes []byte) (*jsonschema.S
 	}
 
 	c := jsonschema.NewCompiler()
-	resource := fmt.Sprintf("%s-%d.json", topic, version)
+	c.UseLoader(noExternalRefs{})
+	resource := schemaResourceURL(topic, version)
 	if err := c.AddResource(resource, schemaDoc); err != nil {
-		return nil, fmt.Errorf("schema: %w", err)
+		return nil, clientSafeCompileError(err)
 	}
 	compiled, err := c.Compile(resource)
 	if err != nil {
-		return nil, fmt.Errorf("schema: %w", err)
+		return nil, clientSafeCompileError(err)
 	}
 	return compiled, nil
 }
 
-// Validate unmarshals the payload and checks it against the latest
-// compiled schema for the topic. Returns ErrSchemaNotFound if no schema
-// has been registered.
+// clientSafeCompileError strips the target URL from a refused load so
+// the 400 body carries the policy, not the caller's probe echoed back.
+func clientSafeCompileError(err error) error {
+	var loadErr *jsonschema.LoadURLError
+	if errors.As(err, &loadErr) {
+		return fmt.Errorf("schema: %w", errExternalRef)
+	}
+	return fmt.Errorf("schema: %w", err)
+}
+
+// Validate decodes the payload and checks it against the latest loaded
+// schema for the topic. Returns ErrSchemaNotFound if none is loaded.
+//
+// The decode is a plain json.Unmarshal into any. The library validates
+// only a decoded document (there is no byte-level or streaming
+// validator), and its own jsonschema.UnmarshalJSON is measurably more
+// expensive here because it copies the payload into a json.Decoder
+// buffer first (BenchmarkValidatePayloadDecode); so this is already
+// the cheapest decode the library accepts. Numbers arrive as float64,
+// which the validator handles; integers above 2^53 lose precision
+// before multipleOf/bounds checks, a limitation documented in
+// docs/client/topics.md.
 func (r *JSONSchema) Validate(_ context.Context, topic string, payload []byte) error {
 	r.mu.RLock()
 	version, ok := r.versions[topic]

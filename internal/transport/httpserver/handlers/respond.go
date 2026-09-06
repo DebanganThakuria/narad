@@ -94,12 +94,10 @@ func (s *Set) logServerError(status int, msg string, attrs ...slog.Attr) {
 	if status < http.StatusInternalServerError {
 		return
 	}
-	logAttrs := make([]slog.Attr, 0, len(attrs)+2)
-	logAttrs = append(logAttrs,
+	logAttrs := append([]slog.Attr{
 		slog.Int("status", status),
 		slog.String("error", msg),
-	)
-	logAttrs = append(logAttrs, attrs...)
+	}, attrs...)
 	s.Deps.Logger.LogAttrs(context.Background(), slog.LevelError, "http server error", logAttrs...)
 }
 

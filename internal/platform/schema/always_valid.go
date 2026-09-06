@@ -10,13 +10,13 @@ type AlwaysValid struct{}
 // NewAlwaysValid returns the permissive stub.
 func NewAlwaysValid() AlwaysValid { return AlwaysValid{} }
 
-// Register pretends to register a schema and always returns version 1.
-func (AlwaysValid) Register(_ context.Context, _ string, _ []byte) (int, error) {
-	return 1, nil
-}
-
 // ValidateDefinition accepts any schema definition.
 func (AlwaysValid) ValidateDefinition(_ context.Context, _ string, _ []byte) error {
+	return nil
+}
+
+// CheckCompatible accepts any evolution.
+func (AlwaysValid) CheckCompatible(_ context.Context, _ string, _, _ []byte) error {
 	return nil
 }
 
@@ -25,8 +25,8 @@ func (AlwaysValid) Load(_ context.Context, _ string, _ int, _ []byte) error {
 	return nil
 }
 
-// Unload drops a schema version.
-func (AlwaysValid) Unload(_ context.Context, _ string, _ int) error {
+// ReplaceTopic accepts any history.
+func (AlwaysValid) ReplaceTopic(_ context.Context, _ string, _ []Version) error {
 	return nil
 }
 
