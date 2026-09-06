@@ -196,6 +196,7 @@ func runServe(args []string) error {
 	wg.Go(func() { serveClusterRPC(ctx, cfg, cs.rpcServer, failServe, log) })
 
 	poller := metrics.NewPoller(m, bc.broker, log, cfg.Storage.DataDir)
+	poller.SetOpenLogCounter(bc.logs.OpenCount)
 	wg.Go(func() { poller.Run(ctx) })
 	wg.Go(func() { bc.logs.RunIdleEviction(ctx, time.Duration(cfg.Storage.IdleLogEvictionMs)*time.Millisecond) })
 

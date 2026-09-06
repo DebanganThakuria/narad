@@ -39,10 +39,24 @@ type Poller struct {
 	DataDirScanInterval time.Duration
 
 	// previousTopics records which topics existed at the last tick;
-	// see pruneDeletedTopics.
-	previousTopics  map[string]struct{}
-	lastDataDirScan time.Time
-	dirScanner      *dirSizeScanner
+	// see pruneDeletedTopics. previousPartitions records which
+	// {topic, partition} pairs this node reported at the last tick; see
+	// clearDepartedPartitions.
+	previousTopics     map[string]struct{}
+	previousPartitions map[gaugeSeriesKey]struct{}
+	lastDataDirScan    time.Time
+	dirScanner         *dirSizeScanner
+
+	// openLogs, when set (SetOpenLogCounter), reports how many
+	// partition logs are open so narad_open_partition_logs is refreshed
+	// on every tick rather than only by the eviction sweep.
+	openLogs func() int
+}
+
+// gaugeSeriesKey identifies one per-partition gauge series.
+type gaugeSeriesKey struct {
+	topic     string
+	partition string
 }
 
 // NewPoller wires the poller. Run must be called for it to do any
@@ -61,7 +75,14 @@ func NewPoller(m *Metrics, broker SnapshotProvider, logger *slog.Logger, dataDir
 		dataDir:             dir,
 		DataDirScanInterval: defaultDataDirScanInterval,
 		previousTopics:      make(map[string]struct{}),
+		previousPartitions:  make(map[gaugeSeriesKey]struct{}),
 	}
+}
+
+// SetOpenLogCounter wires the open-partition-log count the poller
+// publishes as narad_open_partition_logs each tick.
+func (p *Poller) SetOpenLogCounter(count func() int) {
+	p.openLogs = count
 }
 
 // Run blocks until ctx is cancelled. It does an immediate first tick
@@ -96,31 +117,37 @@ func (p *Poller) tick(ctx context.Context) {
 	}
 
 	currentTopics := make(map[string]struct{}, len(snaps))
+	currentPartitions := make(map[gaugeSeriesKey]struct{}, len(p.previousPartitions))
 	var partitionsTotal int
 	nowUnix := time.Now().Unix()
 
 	for _, ts := range snaps {
 		currentTopics[ts.Topic] = struct{}{}
 		partitionsTotal += len(ts.Partitions)
-		p.setTopicGauges(ts, nowUnix)
+		p.setTopicGauges(ts, nowUnix, currentPartitions)
 	}
 
 	p.metrics.TopicsTotal.Set(float64(len(snaps)))
 	p.metrics.PartitionsTotal.Set(float64(partitionsTotal))
+	if p.openLogs != nil {
+		p.metrics.OpenPartitionLogs.Set(float64(p.openLogs()))
+	}
 	p.updateDataDirGauges()
+	p.clearDepartedPartitions(currentPartitions)
 	p.pruneDeletedTopics(currentTopics)
 }
 
-func (p *Poller) setTopicGauges(ts TopicSnapshot, nowUnix int64) {
+func (p *Poller) setTopicGauges(ts TopicSnapshot, nowUnix int64, current map[gaugeSeriesKey]struct{}) {
 	var topicBytes int64
 	for _, ps := range ts.Partitions {
 		topicBytes += ps.SizeBytes
-		p.setPartitionGauges(ts.Topic, ps, nowUnix)
+		current[p.setPartitionGauges(ts.Topic, ps, nowUnix)] = struct{}{}
 	}
 	p.metrics.TopicBytes.WithLabelValues(ts.Topic).Set(float64(topicBytes))
 }
 
-func (p *Poller) setPartitionGauges(topic string, ps PartitionSnapshot, nowUnix int64) {
+// setPartitionGauges sets one partition's gauges and returns its key.
+func (p *Poller) setPartitionGauges(topic string, ps PartitionSnapshot, nowUnix int64) gaugeSeriesKey {
 	partition := strconv.Itoa(ps.Partition)
 
 	p.metrics.PartitionSizeBytes.WithLabelValues(topic, partition).Set(float64(ps.SizeBytes))
@@ -128,7 +155,10 @@ func (p *Poller) setPartitionGauges(topic string, ps PartitionSnapshot, nowUnix 
 	p.metrics.InFlightSize.WithLabelValues(topic, partition).Set(float64(ps.InFlightSize))
 	p.metrics.AckedAheadSize.WithLabelValues(topic, partition).Set(float64(ps.AckedAheadSize))
 
-	lag := max(ps.LogEndOffset-ps.CommittedOffset, 0)
+	// Lag is what a consumer can still read: the committed high
+	// watermark minus the committed frontier. LogEndOffset also counts
+	// buffered and hidden-tail records and would over-report.
+	lag := max(ps.HighWatermark-ps.CommittedOffset, 0)
 	p.metrics.ConsumerLagMessages.WithLabelValues(topic, partition).Set(float64(lag))
 	p.metrics.ConsumerDroppedMessages.WithLabelValues(topic, partition).Set(float64(ps.Dropped))
 
@@ -140,6 +170,25 @@ func (p *Poller) setPartitionGauges(topic string, ps PartitionSnapshot, nowUnix 
 		}
 	}
 	p.metrics.OldestUnconsumedAgeSeconds.WithLabelValues(topic, partition).Set(ageSeconds)
+	return gaugeSeriesKey{topic: topic, partition: partition}
+}
+
+// clearDepartedPartitions drops the per-partition gauge series for
+// pairs this node reported last tick but not this one: a partition
+// that moved to another node (rebalance, decommission) while its topic
+// lives on. Without this the old owner kept exporting its last lag,
+// in-flight size, oldest-unconsumed age and size for the partition
+// indefinitely, so a cluster-wide sum by (topic, partition) double
+// counted and a stale lag read as a stuck consumer. Whole-topic
+// deletion is handled by pruneDeletedTopics.
+func (p *Poller) clearDepartedPartitions(current map[gaugeSeriesKey]struct{}) {
+	for key := range p.previousPartitions {
+		if _, still := current[key]; still {
+			continue
+		}
+		p.metrics.deletePartitionSeries(key.topic, key.partition)
+	}
+	p.previousPartitions = current
 }
 
 // pruneDeletedTopics drops gauge series for topics that disappeared

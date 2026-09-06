@@ -38,7 +38,7 @@ Honorable mention: `rate(narad_errors_total[5m])` by `component`/`kind` as a cat
 
 | Metric | Meaning |
 |---|---|
-| `narad_consumer_lag_messages` | HWM minus committed frontier, per partition |
+| `narad_consumer_lag_messages` | Committed high watermark minus committed frontier, per partition: what a consumer can still read (buffered and hidden-tail records are not counted). Series for a partition that moved to another node are dropped on the next 5 s tick, so `sum by (topic, partition)` across nodes does not double count |
 | `narad_oldest_unconsumed_message_age_seconds` | Upper bound on how stale the next message is |
 | `narad_inflight_size` / `narad_acked_ahead_size` | Lease table pressure vs the topic caps |
 | `narad_ack_rejected_total` | 410s: consumers losing races (normal in small doses) |
@@ -67,7 +67,7 @@ Honorable mention: `rate(narad_errors_total[5m])` by `component`/`kind` as a cat
 
 ### Cluster & misc
 
-`narad_topics_total`, `narad_partitions_total`, `narad_errors_total{component,kind}`, `narad_boot_duration_seconds`.
+`narad_topics_total`, `narad_partitions_total`, `narad_open_partition_logs` (refreshed every poller tick, eviction on or off), `narad_errors_total{component,kind}`, `narad_boot_duration_seconds`.
 
 ## Reading the dashboards under failure
 

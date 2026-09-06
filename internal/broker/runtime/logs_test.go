@@ -380,6 +380,12 @@ func TestSnapshotterSnapshotBuildsPartitionStats(t *testing.T) {
 	if ps.LogStartOffset != 0 || ps.LogEndOffset != 2 {
 		t.Fatalf("partition snapshot offsets = %+v, want start=0 end=2", ps)
 	}
+	// Nothing has been committed: the log's next offset is 2 but the
+	// readable frontier is 0. Lag is measured from the latter, so the
+	// snapshot must carry it separately from LogEndOffset.
+	if ps.HighWatermark != log.HighWatermark() || ps.HighWatermark != 0 {
+		t.Fatalf("partition snapshot high watermark = %d, want %d (uncommitted tail excluded)", ps.HighWatermark, log.HighWatermark())
+	}
 	if ps.CommittedOffset != 0 {
 		t.Fatalf("partition snapshot committed offset = %d, want 0", ps.CommittedOffset)
 	}

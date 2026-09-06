@@ -521,6 +521,19 @@ func (m *Metrics) pruneTopicSeries(topic string) {
 	}
 }
 
+// deletePartitionSeries drops the poller-owned gauge series for one
+// {topic, partition} pair (the gauges setPartitionGauges sets). Counters
+// and histograms are left alone: they are written inline by the data
+// path, and a partition may come back.
+func (m *Metrics) deletePartitionSeries(topic, partition string) {
+	for _, g := range []*prometheus.GaugeVec{
+		m.PartitionSizeBytes, m.Segments, m.InFlightSize, m.AckedAheadSize,
+		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
+	} {
+		g.DeleteLabelValues(topic, partition)
+	}
+}
+
 // storageDurationBuckets is tuned for sub-second IO (flush, fsync,
 // retention sweeps that don't touch the disk). Anything above 1s is
 // already pathological for these paths.
