@@ -77,8 +77,12 @@ Records above the persisted HWM after a crash (fsynced but never exposed: the co
 
 Opening a log scans segments for the valid frame extent:
 
-- A **torn tail** in the active segment (crash mid-write, including a crash in the middle of a commit's frame write) is truncated and the truncate fsynced; those bytes were never acked by this log, and the ingress WAL re-commits the batch at the offset it had.
+- A **torn tail** in the active segment (crash mid-write, including a crash in the middle of a commit's frame write) is truncated and the truncate fsynced; those bytes were never acked by this log, and the ingress WAL re-commits the batch at the offset it had. A last frame whose bytes are all present but do not check out (a zero-filled or scrambled final sector: the file size reached the disk, the data did not) is a torn tail too, as long as no valid frame follows it; left in place, its intact-looking header would shadow the frames the next commits write at the same offsets.
 - **Mid-file corruption** under valid later frames is *not* truncated (that would destroy acked data and regress offsets); it fails loudly at open, and unreadable single records are skipped at consume time with an explicit counter: recorded loss, never silent.
+
+### What a lying fsync costs
+
+Every durability decision above assumes `fdatasync` tells the truth. A drive (or a virtualised disk) that acknowledges a flush it never performed can lose, at a power cut, any record whose commit was acked on the strength of the lie: the frames are gone (the segment sync lied), or the high-watermark that exposed them regressed (the `hwm` sync lied) and they sit in the hidden tail until the ingress WAL re-commits them at fresh offsets. That is the hardware's loss, not the engine's, and it is bounded to exactly those records. What must never happen, and what the disk-fault tests in `storage` and `wal` pin under a lying-fsync simulation (`fault_test.go`, driven by the `syncfile` fault seam that fails or skips a chosen syscall for tests only): a torn or fabricated record served, a crash loop at open, a sparse index that disagrees with the file, a record from a fully honest commit missing, or a high-watermark that grew past what the crash left.
 
 ## Retention
 
