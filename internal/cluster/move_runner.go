@@ -646,16 +646,34 @@ func (r *MoveRunner) leaderAddr() (string, error) {
 // servable here immediately, with no window where we own it but have no data.
 func (r *MoveRunner) install(topicName string, partition int, staging string) error {
 	dir := r.partitionDir(topicName, partition)
-	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
-		return fmt.Errorf("make partition parent: %w", err)
+	swap := func() error {
+		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+			return fmt.Errorf("make partition parent: %w", err)
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("clear destination dir: %w", err)
+		}
+		if err := os.Rename(staging, dir); err != nil {
+			return fmt.Errorf("install staged copy: %w", err)
+		}
+		return nil
 	}
-	if err := os.RemoveAll(dir); err != nil {
-		return fmt.Errorf("clear destination dir: %w", err)
+	// The destination may still hold this partition's log open from an
+	// earlier ownership (it sourced the partition moments ago and the
+	// stale copy was not reclaimed yet). Swapping the directory under an
+	// open handle served the stale files and lost every later write, so
+	// the engine closes the log and holds the open guard across the swap.
+	if pi, ok := r.reclaimer.(partitionInstaller); ok {
+		return pi.InstallPartitionDir(topicName, partition, swap)
 	}
-	if err := os.Rename(staging, dir); err != nil {
-		return fmt.Errorf("install staged copy: %w", err)
-	}
-	return nil
+	return swap()
+}
+
+// partitionInstaller is the optional broker capability install uses to
+// replace a partition directory with its log closed (*messaging.Engine
+// implements it; test fakes may not).
+type partitionInstaller interface {
+	InstallPartitionDir(topicName string, partition int, swap func() error) error
 }
 
 func (r *MoveRunner) partitionDir(topicName string, partition int) string {

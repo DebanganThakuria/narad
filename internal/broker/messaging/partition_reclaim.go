@@ -168,3 +168,16 @@ func (e *Engine) ResetPartitionConsumerState(topicName string, partition int) {
 	}
 	e.ResumeProduce(topicName, partition)
 }
+
+// InstallPartitionDir runs swap, which replaces the partition's directory
+// with a copied one, with the partition's open log closed and the
+// topic's open guard held (see runtime.Logs.ReplacePartitionDir). The
+// move runner uses it on the destination so a log this node still had
+// open from an earlier ownership can never serve or write through the
+// replaced directory.
+func (e *Engine) InstallPartitionDir(topicName string, partition int, swap func() error) error {
+	if e.logs == nil {
+		return swap()
+	}
+	return e.logs.ReplacePartitionDir(topicName, partition, swap)
+}
