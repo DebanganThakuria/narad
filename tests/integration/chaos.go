@@ -27,7 +27,7 @@ func runChaos(cfg config) error {
 
 	lb := &roundRobinClient{
 		nodes:    cfg.nodes,
-		client:   &http.Client{Timeout: 15 * time.Second},
+		client:   &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{MaxIdleConns: 512, MaxIdleConnsPerHost: 128, IdleConnTimeout: 90 * time.Second}},
 		username: cfg.username,
 		password: cfg.password,
 	}
@@ -104,8 +104,8 @@ func runChaos(cfg config) error {
 	}
 
 	elapsed := time.Since(start)
-	fmt.Printf("PASS chaos topics=%d produced=%d deliveries=%d duplicates=%d acked=%d duration=%s\n",
-		len(topics), stats.produced.Load(), stats.consumed.Load(), stats.duplicates.Load(), stats.acked.Load(), elapsed.Round(time.Millisecond))
+	fmt.Printf("PASS chaos topics=%d produced=%d deliveries=%d duplicates=%d acked=%d ambiguous_acks=%d duration=%s\n",
+		len(topics), stats.produced.Load(), stats.consumed.Load(), stats.duplicates.Load(), stats.acked.Load(), stats.ambiguous.Load(), elapsed.Round(time.Millisecond))
 	return nil
 }
 
@@ -208,14 +208,21 @@ func consumeAndAckChaos(ctx context.Context, lb *roundRobinClient, topics []stri
 					stats.duplicates.Add(1)
 				}
 
-				status, err := ackOneStatus(consumeCtx, lb, msg.Topic, msg.ReceiptHandle, 8, http.StatusNoContent, http.StatusGone)
-				if err != nil || status == http.StatusGone {
+				status, ambiguous, err := ackOneStatusAmbiguous(consumeCtx, lb, msg.Topic, msg.ReceiptHandle, 8, http.StatusNoContent, http.StatusGone)
+				if err != nil || (status == http.StatusGone && !ambiguous) {
 					// The ack didn't land (or the handle was already stale);
 					// return the claim so a redelivery can complete it.
 					if !duplicate {
 						claims.release(msg.Payload.ID)
 					}
 					continue
+				}
+				if ambiguous {
+					// A retry answered 410 after an earlier attempt failed: the
+					// first attempt most likely landed and its reply was lost.
+					// Count it as acked so a lost reply is not reported as a
+					// stall; the broker's committed offset is the arbiter.
+					stats.ambiguous.Add(1)
 				}
 
 				if claims.markAcked(msg.Payload.ID) {

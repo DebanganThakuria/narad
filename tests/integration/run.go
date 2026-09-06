@@ -37,7 +37,7 @@ func runLoad(cfg config) error {
 
 	lb := &roundRobinClient{
 		nodes:    cfg.nodes,
-		client:   &http.Client{Timeout: 15 * time.Second},
+		client:   &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{MaxIdleConns: 512, MaxIdleConnsPerHost: 128, IdleConnTimeout: 90 * time.Second}},
 		username: cfg.username,
 		password: cfg.password,
 	}

@@ -82,6 +82,7 @@ type runStats struct {
 	consumed   atomic.Int64
 	acked      atomic.Int64
 	duplicates atomic.Int64
+	ambiguous  atomic.Int64
 }
 
 const messageSchema = `{
