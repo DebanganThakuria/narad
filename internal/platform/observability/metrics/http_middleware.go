@@ -48,7 +48,7 @@ func HTTPMiddleware(m *Metrics) func(http.Handler) http.Handler {
 			}
 			elapsed := time.Since(start).Seconds()
 
-			series := m.httpSeriesFor(route, r.Method, rec.status)
+			series := m.httpSeriesFor(route, methodLabel(r.Method), rec.status)
 			series.requests.Inc()
 			series.duration.Observe(elapsed)
 			if rec.bytes > 0 {
@@ -61,6 +61,23 @@ func HTTPMiddleware(m *Metrics) func(http.Handler) http.Handler {
 				m.IncError("http", "5xx")
 			}
 		})
+	}
+}
+
+// methodLabel bounds the method label to the standard HTTP methods.
+// The method is client-controlled and the middleware runs before
+// authentication, so labelling with the raw token would let anyone
+// mint an unbounded number of series (and cache entries) by inventing
+// methods; a token that is not valid UTF-8 would even make
+// WithLabelValues panic, outside the Recover middleware. Everything
+// else is "other".
+func methodLabel(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
+		return method
+	default:
+		return "other"
 	}
 }
 
