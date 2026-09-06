@@ -85,9 +85,9 @@ func writeOffsetFileInPlace(dir, name string, offset int64) error {
 	path := filepath.Join(dir, name)
 
 	created := false
-	f, err := os.OpenFile(path, os.O_WRONLY, dataFileMode)
+	f, err := syncfile.OpenFile(path, os.O_WRONLY, dataFileMode)
 	if errors.Is(err, os.ErrNotExist) {
-		f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE, dataFileMode)
+		f, err = syncfile.OpenFile(path, os.O_WRONLY|os.O_CREATE, dataFileMode)
 		created = true
 	}
 	if errors.Is(err, os.ErrNotExist) {
@@ -97,7 +97,7 @@ func writeOffsetFileInPlace(dir, name string, offset int64) error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.WriteAt(buf[:], 0); err != nil {
+	if _, err := syncfile.WriteAt(f, buf[:], 0); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -137,7 +137,7 @@ func writeFileAtomic(dir, name string, content []byte) error {
 		_ = os.Remove(tmpName)
 	}()
 
-	if _, err := tmp.Write(content); err != nil {
+	if _, err := syncfile.Write(tmp, content); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -148,7 +148,7 @@ func writeFileAtomic(dir, name string, content []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, filepath.Join(dir, name)); err != nil {
+	if err := syncfile.Rename(tmpName, filepath.Join(dir, name)); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ErrPartitionDirMissing
 		}

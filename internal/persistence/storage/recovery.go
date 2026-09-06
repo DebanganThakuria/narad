@@ -112,22 +112,29 @@ func (l *Log) walkSegment(seg *segment, isActive bool, nextOffset *int64) error 
 				pos = next
 				continue
 			}
-			if isActive {
-				if err := seg.truncate(pos); err != nil {
-					return err
-				}
-			}
-			if seg.nextOffset > *nextOffset {
-				*nextOffset = seg.nextOffset
-			}
-			if isActive {
-				l.setSegmentIndexLocked(seg.baseOffset, entries)
-			}
-			return nil
+			return l.finishTornTail(seg, isActive, pos, entries, nextOffset)
 
 		case errors.Is(err, errBadMagic),
 			errors.Is(err, errCorrupt),
 			errors.Is(err, ErrCorruptRecord):
+			if isActive {
+				// A frame whose bytes are all there but do not check
+				// out, with nothing valid after it, is a torn tail too:
+				// the crash landed after the file size moved and before
+				// the data did (a zero-filled or scrambled last sector).
+				// Left in place, its intact-looking header would shadow
+				// the frames the next commits write at the same offsets
+				// (navigation is header-only), so the first commit after
+				// recovery failed its CRC read-back and, with the
+				// read-back disabled, its records would read as corrupt
+				// for good. Cut it like any other torn tail; mid-file
+				// corruption (a valid frame follows) is still kept.
+				if next := nextValidFramePos(seg.file, pos+1, size); next < size {
+					pos = next
+					continue
+				}
+				return l.finishTornTail(seg, isActive, pos, entries, nextOffset)
+			}
 			pos = nextMagicInSegment(seg.file, pos+1, size)
 
 		default:
@@ -135,6 +142,25 @@ func (l *Log) walkSegment(seg *segment, isActive bool, nextOffset *int64) error 
 		}
 	}
 
+	if seg.nextOffset > *nextOffset {
+		*nextOffset = seg.nextOffset
+	}
+	if isActive {
+		l.setSegmentIndexLocked(seg.baseOffset, entries)
+	}
+	return nil
+}
+
+// finishTornTail ends a segment walk at a tear that runs to EOF: the
+// active segment is truncated at pos (and the truncate fsynced), a
+// sealed one is left alone (see recover), and the recovered bounds and
+// index are installed.
+func (l *Log) finishTornTail(seg *segment, isActive bool, pos int64, entries []indexEntry, nextOffset *int64) error {
+	if isActive {
+		if err := seg.truncate(pos); err != nil {
+			return err
+		}
+	}
 	if seg.nextOffset > *nextOffset {
 		*nextOffset = seg.nextOffset
 	}

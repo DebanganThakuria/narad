@@ -28,6 +28,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
 // IncarnationMarkerFileName is the marker file inside a topic
@@ -108,14 +110,14 @@ func WriteTopicIncarnation(topicDir, id string) error {
 		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := syncfile.Sync(tmp); err != nil {
 		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, filepath.Join(topicDir, IncarnationMarkerFileName)); err != nil {
+	if err := syncfile.Rename(tmpName, filepath.Join(topicDir, IncarnationMarkerFileName)); err != nil {
 		return err
 	}
 	return syncDir(topicDir)
@@ -137,7 +139,7 @@ func QuarantineTopicDir(dataDir, topicName, id string) (string, error) {
 		}
 		target = fmt.Sprintf("%s.%d", StaleTopicDir(dataDir, topicName, id), n)
 	}
-	if err := os.Rename(dir, target); err != nil {
+	if err := syncfile.Rename(dir, target); err != nil {
 		return "", err
 	}
 	return target, syncDir(filepath.Dir(dir))

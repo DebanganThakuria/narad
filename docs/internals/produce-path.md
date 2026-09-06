@@ -79,6 +79,10 @@ The checkpoint compacts fully-dispatched segments; a fully-dispatched *active* s
 
 `wal.Log.Append` doesn't fsync per message: it stages the record into a shared buffer, wakes the sync loop, and **blocks on the batch's completion channel**. Every producer that arrived in the same instant shares one write+fsync (`syncBatch`); under load the amortized fsync cost per message approaches zero, while each caller still only returns after *its* bytes are durable. One subtlety worth knowing: once a record is staged, `Append` ignores context cancellation and waits for the true sync outcome; reporting failure for a record that actually became durable would make a well-behaved retrying client produce duplicates for no reason.
 
+### When the WAL's disk fails
+
+A write or fsync failure on the ingress WAL (`ENOSPC`, `EIO`) fails the whole batch that was in flight: every producer in it gets a `500`, logged as `http server error` and counted in `errors_total{component="http",kind="5xx"}`, and nothing in that batch was acked. The failure is then **latched**: the WAL refuses every later append with the same error, because a second write on top of a region of unknown content could be acked and then lost. The latch clears only when the node restarts, which rescans the WAL and truncates its torn tail; so a node that ran out of disk keeps answering `500` to produce after space is freed until it is restarted, while everything it acked before the failure is replayed and committed after the restart. Records written before the failing point of a failed batch survive the rescan too, so a produce that got a `500` may still be delivered: the at-least-once contract, exactly as for a commit RPC that succeeds after its client timed out.
+
 ## Two produce paths, one honest difference
 
 There are two partition-pickers in `broker/messaging`, and the difference is deliberate:

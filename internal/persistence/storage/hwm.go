@@ -141,13 +141,13 @@ func (l *Log) persistHighWatermark(next int64) error {
 	binary.BigEndian.PutUint64(buf[:], uint64(next))
 
 	if l.hwmFile == nil {
-		f, err := os.OpenFile(l.hwmPath, os.O_WRONLY|os.O_CREATE, dataFileMode)
+		f, err := syncfile.OpenFile(l.hwmPath, os.O_WRONLY|os.O_CREATE, dataFileMode)
 		if err != nil {
 			return fmt.Errorf("storage: open hwm: %w", err)
 		}
 		l.hwmFile = f
 	}
-	if _, err := l.hwmFile.WriteAt(buf[:], 0); err != nil {
+	if _, err := syncfile.WriteAt(l.hwmFile, buf[:], 0); err != nil {
 		l.closeHWMFileLocked()
 		return fmt.Errorf("storage: write hwm: %w", err)
 	}
@@ -197,7 +197,7 @@ func syncDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	syncErr := d.Sync()
+	syncErr := syncfile.Sync(d)
 	closeErr := d.Close()
 	if syncErr != nil {
 		return syncErr
