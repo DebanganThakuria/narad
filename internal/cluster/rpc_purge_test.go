@@ -54,13 +54,19 @@ func (b *deleteOnlyBroker) DeleteTopic(_ context.Context, name string) error {
 	return b.deleteErr
 }
 
+// GetTopic is read by the delete handler to learn the incarnation it
+// broadcasts; this fake has no records, so the purge goes out by name.
+func (b *deleteOnlyBroker) GetTopic(context.Context, string) (topic.Topic, error) {
+	return topic.Topic{}, errs.ErrTopicNotFound
+}
+
 type recordingBroadcaster struct {
 	mu     sync.Mutex
 	topics []string
 	err    error
 }
 
-func (b *recordingBroadcaster) BroadcastDeleteTopic(_ context.Context, topic string) error {
+func (b *recordingBroadcaster) BroadcastDeleteTopic(_ context.Context, topic, _ string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.topics = append(b.topics, topic)

@@ -39,7 +39,7 @@ type peerClient interface {
 	AttachChild(ctx context.Context, addr, parent, child string, delayMs int64) (nodewire.Response, error)
 	DetachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error)
 	FanoutCursors(ctx context.Context, addr, parent string) ([]topic.FanoutCursorStat, error)
-	PurgeTopic(context.Context, string, string) (nodewire.Response, error)
+	PurgeTopic(ctx context.Context, addr, topicName, id string) (nodewire.Response, error)
 	TopicPartitionStats(context.Context, string, string, int) (topic.PartitionStats, error)
 	RegisterMember(context.Context, string, nodewire.MemberRequest) (nodewire.Response, error)
 	CreateUser(ctx context.Context, addr string, body []byte) (nodewire.Response, error)
@@ -230,8 +230,20 @@ func (c *PeerClient) GetTopic(ctx context.Context, addr, topicName string) (node
 	return c.topicNameRequest(ctx, addr, nodewire.OpGetTopic, "get_topic", topicName)
 }
 
-// PurgeTopic asks the peer at addr to purge the topic's on-disk state.
-func (c *PeerClient) PurgeTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error) {
+// PurgeTopic asks the peer at addr to purge the on-disk state of the
+// topic incarnation id (the deleted record's ID). A peer that predates
+// incarnation IDs cannot decode the trailing ID field and answers 400;
+// the request is then repeated by name only, which is the purge that
+// peer has always performed.
+func (c *PeerClient) PurgeTopic(ctx context.Context, addr, topicName, id string) (nodewire.Response, error) {
+	if id == "" {
+		return c.topicNameRequest(ctx, addr, nodewire.OpPurgeTopic, "purge_topic", topicName)
+	}
+	payload, err := nodewire.EncodeTopicNameRequest(nodewire.OpPurgeTopic, nodewire.TopicNameRequest{Topic: topicName, ID: id})
+	res, err := c.send(ctx, addr, "purge_topic", laneControl, payload, err)
+	if err != nil || res.Status != http.StatusBadRequest {
+		return res, err
+	}
 	return c.topicNameRequest(ctx, addr, nodewire.OpPurgeTopic, "purge_topic", topicName)
 }
 

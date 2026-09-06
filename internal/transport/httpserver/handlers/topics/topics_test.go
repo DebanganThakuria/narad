@@ -33,7 +33,7 @@ type fakeBroker struct {
 	updateTopicCapsFn         func(context.Context, string, int64, int64) (topic.Topic, error)
 	updateTopicSchemaFn       func(context.Context, string, []byte) (topic.Topic, error)
 	deleteTopicFn             func(context.Context, string) error
-	purgeTopicFn              func(context.Context, string) error
+	purgeTopicFn              func(context.Context, string, string) error
 	getTopicFn                func(context.Context, string) (topic.Topic, error)
 	getTopicDetailsFn         func(context.Context, string) (topic.Details, error)
 	listTopicsFn              func(context.Context, metastore.ListOptions) ([]topic.Topic, string, error)
@@ -46,7 +46,7 @@ type fakeRouter struct {
 	routeCreateTopicFn     func(context.Context, http.ResponseWriter, *http.Request, []byte) bool
 	routeAlterTopicFn      func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool
 	routeDeleteTopicFn     func(context.Context, http.ResponseWriter, *http.Request, string) bool
-	broadcastDeleteTopicFn func(context.Context, string) error
+	broadcastDeleteTopicFn func(context.Context, string, string) error
 	routeGetTopicFn        func(context.Context, *http.Request, string, topic.Details) (topic.Details, error)
 	routeAttachChildFn     func(context.Context, http.ResponseWriter, *http.Request, string, string, int64) bool
 	routeDetachChildFn     func(context.Context, http.ResponseWriter, *http.Request, string, string) bool
@@ -89,11 +89,11 @@ func (f *fakeRouter) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter
 	return f.routeDeleteTopicFn(ctx, w, r, topicName)
 }
 
-func (f *fakeRouter) BroadcastDeleteTopic(ctx context.Context, topicName string) error {
+func (f *fakeRouter) BroadcastDeleteTopic(ctx context.Context, topicName, id string) error {
 	if f.broadcastDeleteTopicFn == nil {
 		return nil
 	}
-	return f.broadcastDeleteTopicFn(ctx, topicName)
+	return f.broadcastDeleteTopicFn(ctx, topicName, id)
 }
 
 func (f *fakeRouter) RouteCreateUser(context.Context, http.ResponseWriter, *http.Request, []byte) bool {
@@ -160,14 +160,17 @@ func (f *fakeBroker) DeleteTopic(ctx context.Context, name string) error {
 	return f.deleteTopicFn(ctx, name)
 }
 
-func (f *fakeBroker) PurgeTopic(ctx context.Context, name string) error {
+func (f *fakeBroker) PurgeTopic(ctx context.Context, name, id string) error {
 	if f.purgeTopicFn == nil {
 		return nil
 	}
-	return f.purgeTopicFn(ctx, name)
+	return f.purgeTopicFn(ctx, name, id)
 }
 
 func (f *fakeBroker) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
+	if f.getTopicFn == nil {
+		return topic.Topic{}, errs.ErrTopicNotFound
+	}
 	return f.getTopicFn(ctx, name)
 }
 
@@ -698,7 +701,7 @@ func TestDeleteHandlerBroadcastsAfterLocalDelete(t *testing.T) {
 		routeDeleteTopicFn: func(_ context.Context, _ http.ResponseWriter, _ *http.Request, _ string) bool {
 			return false
 		},
-		broadcastDeleteTopicFn: func(_ context.Context, topicName string) error {
+		broadcastDeleteTopicFn: func(_ context.Context, topicName, _ string) error {
 			broadcasted = topicName == "orders"
 			return nil
 		},
@@ -731,7 +734,7 @@ func TestDeleteHandlerBroadcastsAfterLocalPurgeFailure(t *testing.T) {
 		routeDeleteTopicFn: func(_ context.Context, _ http.ResponseWriter, _ *http.Request, _ string) bool {
 			return false
 		},
-		broadcastDeleteTopicFn: func(_ context.Context, topicName string) error {
+		broadcastDeleteTopicFn: func(_ context.Context, topicName, _ string) error {
 			broadcasted = topicName == "orders"
 			return nil
 		},
@@ -761,7 +764,7 @@ func TestDeleteHandlerAnswers204DespiteBroadcastError(t *testing.T) {
 		routeDeleteTopicFn: func(_ context.Context, _ http.ResponseWriter, _ *http.Request, _ string) bool {
 			return false
 		},
-		broadcastDeleteTopicFn: func(context.Context, string) error {
+		broadcastDeleteTopicFn: func(context.Context, string, string) error {
 			return errors.New("boom")
 		},
 	})
@@ -782,7 +785,7 @@ func TestDeleteHandlerStillFailsWhenMetadataDeleteFails(t *testing.T) {
 	broadcasted := false
 	s := newTestSetWithRouter(&fakeBroker{deleteTopicFn: func(context.Context, string) error {
 		return errs.ErrTopicNotFound
-	}}, &fakeRouter{broadcastDeleteTopicFn: func(context.Context, string) error {
+	}}, &fakeRouter{broadcastDeleteTopicFn: func(context.Context, string, string) error {
 		broadcasted = true
 		return nil
 	}})

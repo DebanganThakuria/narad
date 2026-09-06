@@ -20,6 +20,8 @@ import (
 	"os"
 
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
+	"github.com/debanganthakuria/narad/internal/broker/runtime"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
@@ -48,7 +50,15 @@ func (r *MoveRunner) sweepStaleCopies(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	r.sweepStaleIncarnations(ctx, topics)
 	for _, t := range topics {
+		if r.localDirIsOtherIncarnation(t) {
+			// The local directory is a deleted incarnation's, not this
+			// topic's: its partitions are not stale copies of anything
+			// and must not be compared against the new owner's positions.
+			// sweepStaleIncarnations sets it aside once the leader confirms.
+			continue
+		}
 		assignments, err := r.store.ListAssignments(t.Name)
 		if err != nil {
 			continue
@@ -159,4 +169,65 @@ func (r *MoveRunner) reclaim(ctx context.Context, topicName string, partition in
 			"topic", topicName, "partition", partition, "promoted_hwm", guard.PromotedHWM)
 	}
 	return r.reclaimer.ReclaimMovedPartition(ctx, topicName, partition)
+}
+
+// localDirIsOtherIncarnation reports whether topics/<t.Name> on this
+// node carries a marker for an incarnation other than t's. Unreadable
+// or unmarked directories, and records without an ID, report false.
+func (r *MoveRunner) localDirIsOtherIncarnation(t topic.Topic) bool {
+	if t.ID == "" {
+		return false
+	}
+	marker, marked, err := storage.ReadTopicIncarnation(storage.TopicDir(r.dataDir, t.Name))
+	return err == nil && marked && marker != t.ID
+}
+
+// sweepStaleIncarnations is the periodic half of the incarnation
+// reconciliation (the startup orphan sweep is the other). Two cases:
+//
+//   - topics/<name> carries the marker of an incarnation other than the
+//     live topic's: the name was deleted and recreated while this node
+//     was down (or the purge never reached it), and this node owns none
+//     of the new incarnation's partitions, so no open will ever
+//     quarantine it. Once the LEADER confirms the live incarnation, the
+//     directory is set aside exactly as an open would (never deleted
+//     here).
+//   - topics/<name>.stale-<id>: a quarantined directory. Reclaimed once
+//     the leader confirms that incarnation is gone (the record is absent
+//     or carries a different ID). Only quarantined directories are
+//     removed here: a plain directory can be created by a concurrent
+//     lazy open, which the startup sweep excludes with the create gate
+//     and this sweep cannot.
+//
+// Every failure to confirm defers to the next pass.
+func (r *MoveRunner) sweepStaleIncarnations(ctx context.Context, topics []topic.Topic) {
+	keeper, hasKeeper := r.reclaimer.(incarnationKeeper)
+	for _, t := range topics {
+		if !hasKeeper || !r.localDirIsOtherIncarnation(t) {
+			continue
+		}
+		leaderRec, absent, ok := leaderTopicView(ctx, r.store, r.peer, r.selfID, t.Name, r.logger)
+		if !ok || absent || leaderRec.ID == "" {
+			continue
+		}
+		if err := keeper.EnsureTopicIncarnation(t.Name, leaderRec.ID); err != nil {
+			r.logger.Warn("move: set aside stale incarnation directory", "topic", t.Name, "err", err)
+		}
+	}
+	removed, err := runtime.SweepOrphanTopicDirs(r.dataDir, func(c runtime.OrphanCandidate) bool {
+		if !c.Quarantined {
+			return true
+		}
+		leaderRec, absent, ok := leaderTopicView(ctx, r.store, r.peer, r.selfID, c.Topic, r.logger)
+		if !ok {
+			return true
+		}
+		return !absent && !(leaderRec.ID != "" && leaderRec.ID != c.Incarnation)
+	}, r.logger)
+	if err != nil {
+		r.logger.Warn("move: quarantined topic directory sweep", "err", err)
+	}
+	if len(removed) > 0 {
+		r.logger.Info("move: reclaimed quarantined topic directories of deleted incarnations", "count", len(removed), "dirs", removed)
+	}
 }

@@ -60,7 +60,9 @@ type Router interface {
 	RouteCreateTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, body []byte) bool
 	RouteAlterTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, body []byte) bool
 	RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) bool
-	BroadcastDeleteTopic(ctx context.Context, topicName string) error
+	// BroadcastDeleteTopic asks the other members to purge the deleted
+	// topic incarnation (id: the deleted record's topic.Topic.ID).
+	BroadcastDeleteTopic(ctx context.Context, topicName, id string) error
 	RouteGetTopic(ctx context.Context, r *http.Request, topicName string, details topic.Details) (topic.Details, error)
 	RouteAttachChild(ctx context.Context, w http.ResponseWriter, r *http.Request, parent, child string, delayMs int64) bool
 	RouteDetachChild(ctx context.Context, w http.ResponseWriter, r *http.Request, parent, child string) bool

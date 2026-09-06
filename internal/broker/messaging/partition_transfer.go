@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/debanganthakuria/narad/internal/broker/runtime"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
@@ -48,6 +50,13 @@ type PartitionTransferInfo struct {
 	// deleting it: a local copy that is ahead of the promoted position
 	// holds records nobody else has.
 	MoveMarker *MoveMarker `json:"move_marker,omitempty"`
+	// IncarnationID is the ID of the topic incarnation the source's
+	// copy belongs to (its metastore record's topic.Topic.ID). The
+	// destination compares it with its own record before installing
+	// the copy, so a partition of a deleted incarnation is never moved
+	// into the recreated topic. Empty from an older source, or for a
+	// record without an ID.
+	IncarnationID string `json:"incarnation_id,omitempty"`
 }
 
 // MoveMarkerFileName is the marker a move writes into the partition
@@ -122,8 +131,17 @@ func WriteMoveMarker(partitionDir string, m MoveMarker) error {
 // ErrNotPartitionOwner if this node does not own the partition; only
 // the owner's copy is authoritative.
 func (e *Engine) PartitionTransferInfo(ctx context.Context, topicName string, partition int) (PartitionTransferInfo, error) {
-	if err := e.checkTransferable(ctx, topicName, partition); err != nil {
+	t, err := e.checkTransferable(ctx, topicName, partition)
+	if err != nil {
 		return PartitionTransferInfo{}, err
+	}
+	// The listing reads the directory without opening the log, so the
+	// open path's incarnation check does not run: do it here, or a
+	// deleted incarnation's segments would be shipped to a new owner.
+	if ok, err := e.logs.TopicIncarnationMatches(topicName, t.ID); err != nil {
+		return PartitionTransferInfo{}, err
+	} else if !ok {
+		return PartitionTransferInfo{}, fmt.Errorf("%w: %s", runtime.ErrStaleTopicIncarnation, topicName)
 	}
 	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
 	// The copy must expose every committed record. Records are fsynced
@@ -142,26 +160,42 @@ func (e *Engine) PartitionTransferInfo(ctx context.Context, topicName string, pa
 		}
 		hwm = persisted
 	}
-	return e.transferInfoAt(dir, topicName, partition, hwm)
+	info, err := e.transferInfoAt(dir, topicName, partition, hwm)
+	if err != nil {
+		return PartitionTransferInfo{}, err
+	}
+	info.IncarnationID = t.ID
+	return info, nil
 }
 
 // checkTransferable validates the transfer target: topic exists,
-// partition in range, and this node owns it.
-func (e *Engine) checkTransferable(ctx context.Context, topicName string, partition int) error {
+// partition in range, and this node owns it. Returns the topic record.
+func (e *Engine) checkTransferable(ctx context.Context, topicName string, partition int) (topic.Topic, error) {
 	if e.logs == nil {
-		return unavailableError("partition logs")
+		return topic.Topic{}, unavailableError("partition logs")
 	}
 	t, err := e.getTopic(ctx, topicName)
 	if err != nil {
-		return err
+		return topic.Topic{}, err
 	}
 	if partition < 0 || partition >= t.Partitions {
-		return fmt.Errorf("%w: partition out of range", ErrInvalid)
+		return topic.Topic{}, fmt.Errorf("%w: partition out of range", ErrInvalid)
 	}
 	if !e.isLocalOwner(topicName, partition) {
-		return ErrNotPartitionOwner
+		return topic.Topic{}, ErrNotPartitionOwner
 	}
-	return nil
+	return t, nil
+}
+
+// EnsureTopicIncarnation prepares the topic directory for the
+// incarnation id before a moved partition is installed into it: an
+// unmarked directory is adopted, a directory of another incarnation is
+// quarantined, and the marker is stamped. See runtime.Logs.
+func (e *Engine) EnsureTopicIncarnation(topicName, id string) error {
+	if e.logs == nil {
+		return unavailableError("partition logs")
+	}
+	return e.logs.EnsureTopicIncarnation(topicName, id)
 }
 
 // transferInfoAt assembles the transfer info for a partition directory

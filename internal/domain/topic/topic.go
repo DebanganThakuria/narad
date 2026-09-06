@@ -26,7 +26,16 @@ package topic
 // Zero values for retention / visibility / caps inherit from the broker's
 // TopicConfig defaults at create time.
 type Topic struct {
-	Name                      string `json:"name"`
+	Name string `json:"name"`
+	// ID identifies this incarnation of the topic: a random value the
+	// proposer stamps at create time that never changes for the life
+	// of the record (updates preserve it). Two topics that share a name
+	// over time, a delete followed by a recreate, carry different IDs;
+	// that is how a partition directory on disk (stamped with the ID it
+	// was opened under) is told apart from a deleted incarnation's
+	// leftovers. Empty on records created before IDs existed: such a
+	// topic falls back to name-based bookkeeping on disk.
+	ID                        string `json:"id,omitempty"`
 	Partitions                int    `json:"partitions"`
 	RetentionMs               int64  `json:"retention_ms"`
 	VisibilityTimeoutMs       int64  `json:"visibility_timeout_ms"`

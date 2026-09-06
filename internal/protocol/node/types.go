@@ -132,9 +132,14 @@ type TopicBodyRequest struct {
 }
 
 // TopicNameRequest is the shared shape for topic operations that need
-// only the topic name (delete, purge).
+// only the topic name (delete, purge). ID optionally names the topic
+// incarnation the operation is about (topic.Topic.ID): a purge carries
+// the deleted record's ID so the receiver purges that incarnation's
+// directory and no other. It is encoded only when set, as a trailing
+// field, so a sender without one produces the pre-ID payload.
 type TopicNameRequest struct {
 	Topic string
+	ID    string
 }
 
 // ChildLinkRequest is the shared shape for fan-out attach and detach,

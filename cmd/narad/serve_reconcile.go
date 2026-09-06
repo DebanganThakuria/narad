@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -55,12 +56,8 @@ func runStartupReconcile(ctx context.Context, store *metastore.Store, logs *runt
 		}
 		return false
 	}
-	removed, err := runtime.SweepOrphanTopicDirs(dataDir, func(name string) bool {
-		_, getErr := store.GetTopic(ctx, name)
-		if !errors.Is(getErr, errs.ErrNotFound) {
-			return true // present locally (or lookup failed): keep
-		}
-		return !confirmedAbsentOnLeader(ctx, store, peer, nodeID, name, log)
+	removed, err := runtime.SweepOrphanTopicDirs(dataDir, func(c runtime.OrphanCandidate) bool {
+		return keepTopicDir(ctx, store, peer, nodeID, c, log)
 	}, log)
 	if err != nil {
 		log.Warn("startup orphan sweep encountered errors", "err", err)
@@ -91,16 +88,48 @@ type topicGetter interface {
 	GetTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error)
 }
 
+// keepTopicDir decides whether the startup sweep keeps one directory.
+// A directory is kept when the local replica shows its topic live under
+// the same incarnation (or either side has no incarnation: name-based,
+// the pre-ID behaviour), when the local lookup fails, and whenever the
+// leader cannot confirm the incarnation is gone. It is removed only when
+// the LEADER confirms: the topic does not exist, or exists as a
+// DIFFERENT incarnation (deleted and recreated under the same name while
+// this node was down, or a quarantined copy of the old one).
+func keepTopicDir(ctx context.Context, store leaderView, peer topicGetter, nodeID string, c runtime.OrphanCandidate, log *slog.Logger) bool {
+	t, getErr := store.GetTopic(ctx, c.Topic)
+	switch {
+	case getErr == nil:
+		if !c.Quarantined && (c.Incarnation == "" || t.ID == "" || t.ID == c.Incarnation) {
+			return true // live locally under this incarnation (or name-based): keep
+		}
+		// Live locally, but as another incarnation: the directory is a
+		// leftover of the one that was deleted. Confirm before deleting.
+	case !errors.Is(getErr, errs.ErrNotFound):
+		return true // lookup failed: keep
+	}
+	return !confirmedGoneOnLeader(ctx, store, peer, nodeID, c.Topic, c.Incarnation, log)
+}
+
 // confirmedAbsentOnLeader reports whether the LEADER confirms the topic
-// does not exist. Only a definitive 404 from the leader authorizes a
-// deletion; every other outcome (leader unknown, unreachable, non-404
-// answer) keeps the directory. When this node leads itself, its state is
+// does not exist at all (see confirmedGoneOnLeader with no incarnation).
+func confirmedAbsentOnLeader(ctx context.Context, store leaderView, peer topicGetter, nodeID, name string, log *slog.Logger) bool {
+	return confirmedGoneOnLeader(ctx, store, peer, nodeID, name, "", log)
+}
+
+// confirmedGoneOnLeader reports whether the LEADER confirms the topic
+// incarnation id under name is gone: the topic does not exist (a
+// definitive 404), or, when id is set, the leader's record carries a
+// different, non-empty ID (the name was recreated; this incarnation is
+// the deleted one). Every other outcome (leader unknown, unreachable,
+// non-404 answer, undecodable record, a leader record without an ID)
+// keeps the directory. When this node leads itself, its state is
 // authoritative only past a Raft barrier: election guarantees a fresh
 // leader's LOG, not that its FSM has applied it, so a just-elected node
 // restored from an old snapshot must not trust local absence until the
-// replay provably finished — and the absence must be re-checked AFTER
-// the barrier, since the caller's check predates it.
-func confirmedAbsentOnLeader(ctx context.Context, store leaderView, peer topicGetter, nodeID, name string, log *slog.Logger) bool {
+// replay provably finished — and the record must be re-read AFTER the
+// barrier, since the caller's check predates it.
+func confirmedGoneOnLeader(ctx context.Context, store leaderView, peer topicGetter, nodeID, name, id string, log *slog.Logger) bool {
 	leaderID := store.LeaderID()
 	if leaderID == "" {
 		return false
@@ -110,8 +139,11 @@ func confirmedAbsentOnLeader(ctx context.Context, store leaderView, peer topicGe
 			log.Warn("orphan sweep: leader barrier failed; keeping dir", "topic", name, "err", err)
 			return false
 		}
-		_, err := store.GetTopic(ctx, name)
-		return errors.Is(err, errs.ErrNotFound)
+		t, err := store.GetTopic(ctx, name)
+		if errors.Is(err, errs.ErrNotFound) {
+			return true
+		}
+		return err == nil && incarnationSuperseded(t, id)
 	}
 	member, err := store.GetMember(leaderID)
 	if err != nil || member.Addr == "" {
@@ -125,7 +157,25 @@ func confirmedAbsentOnLeader(ctx context.Context, store leaderView, peer topicGe
 			"topic", name, "leader", leaderID, "err", err)
 		return false
 	}
-	return res.Status == http.StatusNotFound
+	switch res.Status {
+	case http.StatusNotFound:
+		return true
+	case http.StatusOK:
+		var t topic.Topic
+		if err := json.Unmarshal(res.Body, &t); err != nil {
+			log.Warn("orphan sweep: leader record undecodable; keeping dir", "topic", name, "err", err)
+			return false
+		}
+		return incarnationSuperseded(t, id)
+	default:
+		return false
+	}
+}
+
+// incarnationSuperseded reports whether the live record t proves the
+// incarnation id is a deleted one: both carry an ID and they differ.
+func incarnationSuperseded(t topic.Topic, id string) bool {
+	return id != "" && t.ID != "" && t.ID != id
 }
 
 // waitMetastoreCaughtUp polls until the local replica has applied all

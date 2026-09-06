@@ -27,7 +27,7 @@ import (
 // forwarded to the leader over RPC still triggers the same owner-pod purge
 // the HTTP handler does for a leader-direct delete.
 type purgeBroadcaster interface {
-	BroadcastDeleteTopic(ctx context.Context, topicName string) error
+	BroadcastDeleteTopic(ctx context.Context, topicName, id string) error
 }
 
 // RPCServer serves node-to-node RPC frames: it decodes each request payload,

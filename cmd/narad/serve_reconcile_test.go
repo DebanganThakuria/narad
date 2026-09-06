@@ -49,6 +49,7 @@ func (f *fakeLeaderView) GetTopic(context.Context, string) (topic.Topic, error) 
 
 type fakeTopicGetter struct {
 	status int
+	body   []byte
 	err    error
 	calls  int
 }
@@ -58,7 +59,7 @@ func (f *fakeTopicGetter) GetTopic(context.Context, string, string) (nodewire.Re
 	if f.err != nil {
 		return nodewire.Response{}, f.err
 	}
-	return nodewire.Response{Status: f.status}, nil
+	return nodewire.Response{Status: f.status, Body: f.body}, nil
 }
 
 func TestConfirmedAbsentOnLeader(t *testing.T) {

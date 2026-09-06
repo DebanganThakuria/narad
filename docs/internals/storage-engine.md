@@ -5,12 +5,29 @@ Every partition is a directory owned by exactly one node. The engine underneath 
 ## On disk
 
 ```
-topics/orders/p00003/
-├── 00000000000000000000.log     ← sealed segment (starts at offset 0)
-├── 00000000000000450832.log     ← active segment (starts at offset 450832)
-├── hwm                          ← 8-byte high-watermark
-└── consumer.offset              ← 8-byte committed consumer frontier
+topics/orders/
+├── incarnation                  ← the topic incarnation this directory belongs to
+└── p00003/
+    ├── 00000000000000000000.log     ← sealed segment (starts at offset 0)
+    ├── 00000000000000450832.log     ← active segment (starts at offset 450832)
+    ├── hwm                          ← 8-byte high-watermark
+    └── consumer.offset              ← 8-byte committed consumer frontier
+topics/orders.stale-3f9a1c0e7b2d4a61/   ← quarantined: a deleted incarnation's leftover
 ```
+
+### The incarnation marker
+
+Topic directories are keyed by name, and a name outlives the topic: delete `orders`, recreate `orders`, and the new topic's partition logs open exactly where the old one's segments, high-watermark and consumer offset sit on any node that missed the purge (it was down, or the purge lost the race with the recreate). Served as-is, the recreated topic would hand consumers the deleted topic's messages and append new produce after them.
+
+So every topic record carries an **incarnation id** (`id`, 16 hex characters, minted by the proposer at create time and preserved by every update), and every topic directory a marker file, `topics/<name>/incarnation`, holding the id of the incarnation it belongs to. The marker is stamped the first time a node opens a partition log for the topic, or installs a moved partition, and every open compares it with the metastore record before serving the directory:
+
+- **match**: served;
+- **no marker**: the directory predates markers and is adopted (stamped with the current id), the one-time upgrade path; a record without an id keeps name-based bookkeeping and stamps nothing;
+- **different marker**: the directory is a deleted incarnation's leftover. Any open logs under the name are closed, the whole directory is renamed to `topics/<name>.stale-<oldid>` (quarantined, never served), an error is logged with both ids, and a fresh directory is opened for the current id.
+
+An already-open log is re-checked whenever the topic's metadata version moves, so a delete plus recreate applied while the log was open retires it rather than serving the old data. The transfer listing a move source serves reads the directory without opening a log, so it performs the same comparison itself and refuses a stale directory.
+
+A quarantined directory is reclaimed only after the **leader** confirms that incarnation is gone (the record is absent, or carries a different id): by the purge for that incarnation if it still arrives, by the startup orphan sweep, or by the periodic sweep the move runner performs. Older binaries never read the marker and ignore the file.
 
 ```mermaid
 flowchart LR

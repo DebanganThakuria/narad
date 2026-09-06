@@ -3,7 +3,6 @@ package topics
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 )
 
@@ -35,48 +34,70 @@ func (m *Manager) DeleteTopic(ctx context.Context, name string) error {
 	unlock := m.lockTopicName(name)
 	defer unlock()
 
-	if _, err := m.GetTopic(ctx, name); err != nil {
+	t, err := m.GetTopic(ctx, name)
+	if err != nil {
 		return err
 	}
 
 	if err := m.metastore.DeleteTopic(ctx, name); err != nil {
 		return err
 	}
-	if err := m.purgeTopicLocked(ctx, name); err != nil {
+	if err := m.purgeTopicLocked(ctx, name, t.ID); err != nil {
 		return PurgeError{Topic: name, Err: err}
 	}
-	m.logger.Info("topic deleted", "topic", name)
+	m.logger.Info("topic deleted", "topic", name, "incarnation", t.ID)
 	return nil
 }
 
-// PurgeTopic drops all local state for a topic (cached logs, in-flight
-// reservations, in-memory schemas, on-disk files). Also invoked
-// directly via the cluster purge broadcast on non-coordinating nodes.
-func (m *Manager) PurgeTopic(ctx context.Context, name string) error {
+// PurgeTopic drops all local state of one incarnation of a topic
+// (cached logs, in-flight reservations, in-memory schemas, on-disk
+// files). Also invoked directly via the cluster purge broadcast on
+// non-coordinating nodes.
+//
+// id names the incarnation being purged (topic.Topic.ID of the deleted
+// record). The on-disk directory is removed only if it belongs to that
+// incarnation: a directory that a same-named RECREATED topic already
+// owns is left alone, and a quarantined copy of the purged incarnation
+// is reclaimed. An empty id (a sender that predates incarnation IDs)
+// purges by name, as it always did.
+func (m *Manager) PurgeTopic(ctx context.Context, name, id string) error {
 	if name == "" {
 		return fmt.Errorf("%w: name required", ErrInvalid)
 	}
 	unlock := m.lockTopicName(name)
 	defer unlock()
-	return m.purgeTopicLocked(ctx, name)
+	return m.purgeTopicLocked(ctx, name, id)
 }
 
 // purgeTopicLocked is PurgeTopic's body; callers must hold the topic's
-// name lock.
-func (m *Manager) purgeTopicLocked(ctx context.Context, name string) error {
-	dir, err := m.topicDir(name)
-	if err != nil {
+// name lock. The directory removal itself runs inside runtime.Logs
+// under the topic's open guard, so a lazy open of the same topic
+// cannot land a log in the directory while it is being unlinked; the
+// in-memory state is dropped through the retired hook (see
+// NewManager) when, and only when, the directory was this
+// incarnation's.
+func (m *Manager) purgeTopicLocked(_ context.Context, name, id string) error {
+	if _, err := m.topicDir(name); err != nil {
 		return err
 	}
-	firstErr := m.logs.CloseTopic(name)
-	m.offsets.DropTopic(name)
-	if err := m.schemas.DropTopic(ctx, name); err != nil && firstErr == nil {
-		firstErr = fmt.Errorf("topics: drop topic schemas: %w", err)
+	_, err := m.logs.PurgeTopic(name, id)
+	return err
+}
+
+// dropTopicState drops the in-memory state a topic incarnation left
+// behind: in-flight reservations and committed frontiers, and loaded
+// schemas. Registered with runtime.Logs as the retired hook so it also
+// runs when an open quarantines a deleted incarnation's directory,
+// where that state would otherwise be resumed by the recreated topic.
+func (m *Manager) dropTopicState(name string) {
+	if m.offsets != nil {
+		m.offsets.DropTopic(name)
 	}
-	if err := os.RemoveAll(dir); err != nil && firstErr == nil {
-		firstErr = fmt.Errorf("topics: remove topic dir: %w", err)
+	if m.schemas != nil {
+		if err := m.schemas.DropTopic(context.Background(), name); err != nil {
+			m.logger.Warn("drop topic schemas after retiring incarnation", "topic", name, "err", err)
+		}
 	}
-	return firstErr
 }
 
 // topicDir resolves the on-disk directory for a topic and verifies —

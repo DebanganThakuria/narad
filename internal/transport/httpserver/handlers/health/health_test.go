@@ -62,7 +62,7 @@ func (f *fakeBroker) DeleteTopic(ctx context.Context, name string) error {
 	return f.deleteTopicFn(ctx, name)
 }
 
-func (f *fakeBroker) PurgeTopic(context.Context, string) error { return nil }
+func (f *fakeBroker) PurgeTopic(context.Context, string, string) error { return nil }
 
 func (f *fakeBroker) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
 	return f.getTopicFn(ctx, name)

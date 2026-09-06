@@ -13,6 +13,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,13 +34,43 @@ type Logs struct {
 	dataDir     string
 	storageOpts storage.Options
 	metastore   metastore.Metastore
-	metrics     *metrics.Metrics
+	// versions, when the metastore exposes per-topic versions, lets
+	// the Get fast path notice that a topic's record changed under an
+	// open log (a delete plus a recreate applied locally) and re-check
+	// the incarnation before serving it. Nil for metastores without
+	// versions (tests): the fast path then trusts the open entry.
+	versions topicVersioner
+	metrics  *metrics.Metrics
+	logger   *slog.Logger
 
 	mu   sync.RWMutex
 	logs map[string]*logEntry
 
+	// guards serializes the slow path (opening a partition log, which
+	// may adopt, verify or quarantine the topic directory) against a
+	// purge of the same topic, per topic name. A purge holds its
+	// topic's guard from closing the logs through unlinking the
+	// directory, so no Get can open a log in a directory that is about
+	// to disappear, and a Get that waited sees the directory gone.
+	// Lock order: guard, then mu.
+	guardMu sync.Mutex
+	guards  map[string]*topicGuard
+
+	// retired, when set, is called after a topic incarnation's local
+	// state has been retired (its directory purged or quarantined) so
+	// the owner of the per-topic in-memory state (consumer reservations,
+	// loaded schemas) drops it too: that state belongs to the retired
+	// incarnation and must not leak into a same-named successor.
+	retired func(topicName string)
+
 	produceMu   sync.Mutex
 	produceSync map[string]*sync.Mutex
+}
+
+// topicVersioner is the optional metastore capability the Get fast
+// path uses to detect a topic record change; *metastore.Store has it.
+type topicVersioner interface {
+	TopicVersion(name string) uint64
 }
 
 // logEntry pairs an open log with the time of its last real use. Get
@@ -47,6 +79,13 @@ type Logs struct {
 type logEntry struct {
 	log        *storage.Log
 	lastAccess atomic.Int64 // unix nanoseconds of the last Get
+	// incarnation is the topic ID the log was opened under (empty for
+	// a record without one) and version the topic's metadata version
+	// observed at that time. A Get whose live version differs
+	// re-reads the record: a different incarnation means the entry
+	// serves a deleted topic's directory and must be retired.
+	incarnation string
+	version     atomic.Uint64
 }
 
 func (e *logEntry) stamp() { e.lastAccess.Store(time.Now().UnixNano()) }
@@ -55,13 +94,27 @@ func (e *logEntry) stamp() { e.lastAccess.Store(time.Now().UnixNano()) }
 // at lazy-open time to fold the topic's RetentionMs into the storage
 // options; metrics may be nil for tests that don't care.
 func NewLogs(dataDir string, storageOpts storage.Options, ms metastore.Metastore, m *metrics.Metrics) *Logs {
-	return &Logs{
+	g := &Logs{
 		dataDir:     dataDir,
 		storageOpts: storageOpts,
 		metastore:   ms,
 		metrics:     m,
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		logs:        make(map[string]*logEntry),
+		guards:      make(map[string]*topicGuard),
 		produceSync: make(map[string]*sync.Mutex),
+	}
+	if v, ok := ms.(topicVersioner); ok {
+		g.versions = v
+	}
+	return g
+}
+
+// SetLogger sets the logger used for incarnation events (a quarantined
+// directory is logged at error level). The default discards.
+func (g *Logs) SetLogger(l *slog.Logger) {
+	if l != nil {
+		g.logger = l
 	}
 }
 
@@ -72,30 +125,58 @@ func (g *Logs) DataDir() string { return g.dataDir }
 // underlying file lazily on first access. Per-topic retention is
 // folded into Options at open time. Cap and visibility-timeout
 // changes do NOT require reopening; only retention does.
+//
+// The directory the log opens in must belong to the topic's CURRENT
+// incarnation: the topic directory's marker is compared with the
+// metastore record's ID, and a directory left behind by a deleted
+// same-named topic is quarantined instead of served (see
+// ensureIncarnationLocked). An already-open log is re-checked whenever
+// the topic's metadata version moves, so a delete plus recreate applied
+// while the log was open retires it rather than serving the old data.
 func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 	key := keyOf(topicName, idx)
 
 	g.mu.RLock()
-	if e, ok := g.logs[key]; ok {
+	if e, ok := g.logs[key]; ok && g.entryCurrent(topicName, e) {
 		e.stamp()
 		g.mu.RUnlock()
 		return e.log, nil
 	}
 	g.mu.RUnlock()
 
+	unlock := g.lockTopic(topicName)
+	defer unlock()
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	if e, ok := g.logs[key]; ok {
-		e.stamp()
-		return e.log, nil
+	l, quarantined, err := g.openLocked(topicName, idx, key)
+	g.mu.Unlock()
+	if quarantined {
+		// A deleted incarnation's directory was set aside: drop the
+		// in-memory state that belonged to it (outside mu, under the
+		// guard).
+		g.notifyRetired(topicName)
 	}
+	return l, err
+}
 
+// openLocked is Get's slow path: re-validate or open the (topic, idx)
+// log under the current incarnation. Caller holds the topic's guard and
+// mu (write). quarantined reports that a directory of another
+// incarnation was set aside on the way.
+func (g *Logs) openLocked(topicName string, idx int, key string) (l *storage.Log, quarantined bool, err error) {
+	var version uint64
+	if g.versions != nil {
+		// Read the version BEFORE the record: a change that lands
+		// between the two is caught by the next Get's re-check.
+		version = g.versions.TopicVersion(topicName)
+	}
 	opts := g.storageOpts
+	var incarnation string
 	if g.metastore != nil {
 		t, err := g.metastore.GetTopic(context.Background(), topicName)
 		switch {
 		case err == nil:
 			opts.Retention = retentionFromTopic(t.RetentionMs, opts.Retention.CheckInterval)
+			incarnation = t.ID
 		case errors.Is(err, errs.ErrNotFound):
 			// Refuse to (re)create a partition log for a topic that the
 			// local metastore no longer knows about. This is the guard
@@ -104,24 +185,52 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 			// after the topic's files were purged. The delete path waits
 			// for the local replica to reflect the deletion before
 			// purging, so by purge time this branch is authoritative.
-			return nil, errs.ErrTopicNotFound
+			return nil, false, errs.ErrTopicNotFound
 		default:
-			return nil, fmt.Errorf("broker/runtime: lookup topic for retention: %w", err)
+			return nil, false, fmt.Errorf("broker/runtime: lookup topic for retention: %w", err)
 		}
+	}
+	if e, ok := g.logs[key]; ok {
+		if e.incarnation == incarnation {
+			// The record changed (an alter, or a version bump) but the
+			// incarnation did not: the open log is still the right one.
+			e.version.Store(version)
+			e.stamp()
+			return e.log, false, nil
+		}
+		// The topic was deleted and recreated while its logs were
+		// open: every open log under the name belongs to the old
+		// incarnation and must go before the directory is checked.
+		g.closeTopicLocked(topicName)
+	}
+	quarantined, err = g.ensureIncarnationLocked(topicName, incarnation)
+	if err != nil {
+		return nil, quarantined, err
 	}
 	if g.metrics != nil {
 		opts.Metrics = g.metrics.StorageRecorder(topicName, idx)
 	}
 
 	partitionDir := storage.TopicPartitionDir(g.dataDir, topicName, idx)
-	l, err := storage.NewLog(partitionDir, opts)
+	l, err = storage.NewLog(partitionDir, opts)
 	if err != nil {
-		return nil, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)
+		return nil, quarantined, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)
 	}
-	e := &logEntry{log: l}
+	e := &logEntry{log: l, incarnation: incarnation}
+	e.version.Store(version)
 	e.stamp()
 	g.logs[key] = e
-	return l, nil
+	return l, quarantined, nil
+}
+
+// entryCurrent reports whether an open entry can be served without
+// consulting the metastore: true when versions are unavailable or the
+// topic's version has not moved since the entry was (re)validated.
+func (g *Logs) entryCurrent(topicName string, e *logEntry) bool {
+	if g.versions == nil {
+		return true
+	}
+	return e.version.Load() == g.versions.TopicVersion(topicName)
 }
 
 // Peek returns the already-open log for (topic, idx) without lazily
@@ -146,16 +255,7 @@ func (g *Logs) Peek(topicName string, idx int) (*storage.Log, bool) {
 func (g *Logs) CloseTopic(topicName string) error {
 	prefix := topicName + "/"
 	g.mu.Lock()
-	var firstErr error
-	for k, e := range g.logs {
-		if !strings.HasPrefix(k, prefix) {
-			continue
-		}
-		if err := e.log.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		delete(g.logs, k)
-	}
+	firstErr := g.closeTopicLocked(topicName)
 	g.mu.Unlock()
 
 	// Retire the topic's produce-serialization mutexes too; otherwise
@@ -183,6 +283,25 @@ func (g *Logs) CloseAll() error {
 	g.mu.Unlock()
 
 	g.retireProduceEntries(func(string) bool { return true })
+	return firstErr
+}
+
+// closeTopicLocked closes and drops every open log under topicName.
+// Caller holds mu (write). Produce mutexes are NOT retired here: that
+// takes each mutex, which a produce commit inside Get may hold while
+// waiting for mu.
+func (g *Logs) closeTopicLocked(topicName string) error {
+	prefix := topicName + "/"
+	var firstErr error
+	for k, e := range g.logs {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		if err := e.log.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		delete(g.logs, k)
+	}
 	return firstErr
 }
 

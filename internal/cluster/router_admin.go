@@ -86,14 +86,17 @@ func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, _
 }
 
 // BroadcastDeleteTopic asks every live member (except this node) to purge the
-// deleted topic's on-disk state. The purges run concurrently under ONE
+// deleted topic incarnation's on-disk state (id is the deleted record's
+// topic.Topic.ID; it lets a member that already applied a recreate of
+// the same name purge the old directory without touching the new one).
+// The purges run concurrently under ONE
 // shared deadline, so the whole fan-out costs the slowest member, not the
 // sum of every member: sequential purges on a five-node cluster with two
 // slow members overran the 30s the forwarding follower waits (and the
 // client's own patience), turning an already-committed delete into a 503
 // whose retry then 404s. The returned error joins every member that
 // failed; a nil error means all live members purged.
-func (rt *Router) BroadcastDeleteTopic(ctx context.Context, topicName string) error {
+func (rt *Router) BroadcastDeleteTopic(ctx context.Context, topicName, id string) error {
 	members, err := rt.store.ListMembers()
 	if err != nil {
 		return err
@@ -123,7 +126,7 @@ func (rt *Router) BroadcastDeleteTopic(ctx context.Context, topicName string) er
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			res, err := rt.peer.PurgeTopic(purgeCtx, member.Addr, topicName)
+			res, err := rt.peer.PurgeTopic(purgeCtx, member.Addr, topicName, id)
 			if err != nil {
 				results[i] = fmt.Errorf("purge %s on %s: %w", topicName, member.ID, err)
 				return

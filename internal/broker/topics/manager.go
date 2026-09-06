@@ -164,7 +164,7 @@ func NewManager(
 	logger *slog.Logger,
 	selfID string,
 ) *Manager {
-	return &Manager{
+	m := &Manager{
 		dataDir:    dataDir,
 		metastore:  ms,
 		assigner:   assigner,
@@ -176,4 +176,9 @@ func NewManager(
 		selfID:     selfID,
 		topicLocks: map[string]*topicLock{},
 	}
+	if logs != nil {
+		logs.SetTopicRetiredHook(m.dropTopicState)
+		logs.SetLogger(logger)
+	}
+	return m
 }

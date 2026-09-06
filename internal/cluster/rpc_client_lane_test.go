@@ -121,7 +121,7 @@ func TestPeerClientOperationLanes(t *testing.T) {
 			want: clusterrpc.LaneControl,
 		},
 		"purge_topic": {
-			call: func(c *PeerClient) error { _, err := c.PurgeTopic(ctx, "peer", "orders"); return err },
+			call: func(c *PeerClient) error { _, err := c.PurgeTopic(ctx, "peer", "orders", ""); return err },
 			want: clusterrpc.LaneControl,
 		},
 		"attach_child": {

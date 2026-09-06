@@ -680,7 +680,7 @@ func TestPurgeTopic_RejectsNamesEscapingTopicsRoot(t *testing.T) {
 	// separator to a nested path — RemoveAll on any of them would destroy
 	// data far beyond a single topic.
 	for _, name := range []string{"..", ".", "nested/" + testTopicName} {
-		if err := manager.PurgeTopic(context.Background(), name); !errors.Is(err, ErrInvalid) {
+		if err := manager.PurgeTopic(context.Background(), name, ""); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("PurgeTopic(%q) error = %v, want %v", name, err, ErrInvalid)
 		}
 	}
