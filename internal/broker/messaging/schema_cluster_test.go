@@ -107,21 +107,59 @@ func waitForLeader(t *testing.T, nodes []*clusterNode) *clusterNode {
 	return nil
 }
 
+// schemaSnap records what a node's replica knew about a topic's schema
+// before a registration: the persisted history length and the per-topic
+// version counter the produce path keys its cache on.
+type schemaSnap struct {
+	history int
+	counter uint64
+}
+
+// snapshotSchema captures every node's schema view for the topic. Take it
+// before each PutSchema and hand it to waitForSchemaVersion.
+func snapshotSchema(t *testing.T, nodes []*clusterNode, topicName string) map[string]schemaSnap {
+	t.Helper()
+	ctx := context.Background()
+	out := make(map[string]schemaSnap, len(nodes))
+	for _, n := range nodes {
+		history, err := schema.PersistedHistory(ctx, n.store, topicName)
+		if err != nil {
+			t.Fatalf("%s: snapshot schema history: %v", n.id, err)
+		}
+		out[n.id] = schemaSnap{history: len(history), counter: n.store.SchemaVersion(topicName)}
+	}
+	return out
+}
+
 // waitForSchemaVersion blocks until every node's replica holds exactly
-// `versions` schema versions for the topic: the moment the produce
-// path on that node enforces the latest one.
-func waitForSchemaVersion(t *testing.T, nodes []*clusterNode, topicName string, versions int) {
+// `versions` schema versions for the topic and its produce path enforces
+// the latest one. The produce path keys its schema cache on the per-topic
+// version counter, which the FSM bumps just after the history row lands,
+// so the wait also requires the counter to have advanced once per new
+// version since the snapshot; a produce issued between the row landing
+// and the bump would otherwise hit the pre-bump cache entry.
+func waitForSchemaVersion(t *testing.T, nodes []*clusterNode, topicName string, versions int, before map[string]schemaSnap) {
 	t.Helper()
 	ctx := context.Background()
 	deadline := time.Now().Add(10 * time.Second)
 	for _, n := range nodes {
+		snap, ok := before[n.id]
+		if !ok {
+			snap = schemaSnap{history: versions, counter: 0}
+		}
+		wantBumps := uint64(0)
+		if versions > snap.history {
+			wantBumps = uint64(versions - snap.history)
+		}
 		for {
 			history, err := schema.PersistedHistory(ctx, n.store, topicName)
-			if err == nil && len(history) == versions {
+			counter := n.store.SchemaVersion(topicName)
+			if err == nil && len(history) == versions && counter-snap.counter >= wantBumps {
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("%s: schema history has %d versions (err %v), want %d", n.id, len(history), err, versions)
+				t.Fatalf("%s: schema history has %d versions (err %v), counter %d (snapshot %d), want %d versions and %d bumps",
+					n.id, len(history), err, counter, snap.counter, versions, wantBumps)
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -152,7 +190,7 @@ func TestSchemaEnforcedOnEveryNode(t *testing.T) {
 			t.Fatalf("AssignPartition(%d): %v", i, err)
 		}
 	}
-	waitForSchemaVersion(t, nodes, "orders", 0)
+	waitForSchemaVersion(t, nodes, "orders", 0, nil)
 	// A follower serves ownership only once its replica has caught up
 	// with the leader since start and applied the assignment; under CI
 	// load that lags the AssignPartition futures by a few hundred ms.
@@ -179,10 +217,11 @@ func TestSchemaEnforcedOnEveryNode(t *testing.T) {
 	}
 
 	v1 := []byte(`{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}`)
+	before := snapshotSchema(t, nodes, "orders")
 	if err := leader.store.PutSchema(ctx, "orders", 1, v1); err != nil {
 		t.Fatalf("PutSchema v1: %v", err)
 	}
-	waitForSchemaVersion(t, nodes, "orders", 1)
+	waitForSchemaVersion(t, nodes, "orders", 1, before)
 	for i, n := range nodes {
 		err := produceOn(t, n, i, `{"id":"not-an-integer"}`)
 		if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "schema") {
@@ -196,10 +235,11 @@ func TestSchemaEnforcedOnEveryNode(t *testing.T) {
 	// Widen on the leader; every node (each of which has v1 loaded and
 	// cached) must validate against v2 on its next produce.
 	v2 := []byte(`{"type":"object","properties":{"id":{"type":["integer","string"]}},"required":["id"]}`)
+	before = snapshotSchema(t, nodes, "orders")
 	if err := leader.store.PutSchema(ctx, "orders", 2, v2); err != nil {
 		t.Fatalf("PutSchema v2: %v", err)
 	}
-	waitForSchemaVersion(t, nodes, "orders", 2)
+	waitForSchemaVersion(t, nodes, "orders", 2, before)
 	for i, n := range nodes {
 		if err := produceOn(t, n, i, `{"id":"now-a-string"}`); err != nil {
 			t.Fatalf("%s after v2: %v", n.id, err)
@@ -240,11 +280,13 @@ func TestSchemaSurvivesLeaderKilledMidUpdate(t *testing.T) {
 			t.Fatalf("AssignPartition(%d): %v", i, err)
 		}
 	}
+	before := snapshotSchema(t, nodes, "orders")
 	if err := leader.store.PutSchema(ctx, "orders", 1, []byte(`{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}`)); err != nil {
 		t.Fatalf("PutSchema v1: %v", err)
 	}
-	waitForSchemaVersion(t, nodes, "orders", 1)
+	waitForSchemaVersion(t, nodes, "orders", 1, before)
 
+	before = snapshotSchema(t, nodes, "orders")
 	// Fire a burst of updates and kill the leader in the middle of it.
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -293,7 +335,7 @@ func TestSchemaSurvivesLeaderKilledMidUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new leader history: %v", err)
 	}
-	waitForSchemaVersion(t, survivors, "orders", len(leaderHistory))
+	waitForSchemaVersion(t, survivors, "orders", len(leaderHistory), before)
 	var histories [2][]schema.Version
 	for i, n := range survivors {
 		h, err := schema.PersistedHistory(ctx, n.store, "orders")
@@ -317,10 +359,11 @@ func TestSchemaSurvivesLeaderKilledMidUpdate(t *testing.T) {
 		t.Fatalf("gap on the new leader error = %v, want %v", err, errs.ErrInvalidArgument)
 	}
 	final := []byte(fmt.Sprintf(`{"type":"object","properties":{"id":{"type":["integer","string"]},"f%d":{"type":"string"}},"required":["id"]}`, latest+1))
+	before = snapshotSchema(t, survivors, "orders")
 	if err := newLeader.store.PutSchema(ctx, "orders", latest+1, final); err != nil {
 		t.Fatalf("PutSchema v%d on the new leader: %v", latest+1, err)
 	}
-	waitForSchemaVersion(t, survivors, "orders", latest+1)
+	waitForSchemaVersion(t, survivors, "orders", latest+1, before)
 
 	// Each survivor enforces the final schema on the partition it owns.
 	for i, n := range nodes {
