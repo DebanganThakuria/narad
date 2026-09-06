@@ -15,6 +15,17 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
+// Data-file and directory modes. Segments carry every message payload,
+// so nothing under the partition directory is group- or world-readable:
+// the same protection fsm.db (password hashes) already has. MkdirAll
+// and O_CREATE never chmod an existing entry, so directories and files
+// created by an older binary keep the mode they were created with;
+// tighten them by hand if that matters on a shared host.
+const (
+	dataFileMode = 0o600
+	dataDirMode  = 0o700
+)
+
 // segment is one file in a partition's directory of segment files.
 // The active segment is the highest-baseOffset entry; older segments
 // are sealed (read-only).
@@ -98,7 +109,7 @@ func listSegmentFileNames(dir string) ([]string, error) {
 }
 
 func openSegment(path string, baseOffset int64) (*segment, error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	f, err := os.OpenFile(path, os.O_RDWR, dataFileMode)
 	if err != nil {
 		return nil, err
 	}
@@ -132,11 +143,11 @@ func openSegment(path string, baseOffset int64) (*segment, error) {
 // first frame lands, so an empty partition still has an "oldest
 // segment at").
 func createSegment(dir string, baseOffset int64, now time.Time) (*segment, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, dataDirMode); err != nil {
 		return nil, fmt.Errorf("storage: ensure segment dir: %w", err)
 	}
 	path := filepath.Join(dir, segmentFileName(baseOffset))
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, dataFileMode)
 	if err != nil {
 		return nil, fmt.Errorf("storage: create segment %s: %w", path, err)
 	}

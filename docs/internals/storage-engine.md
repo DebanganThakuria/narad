@@ -15,6 +15,8 @@ topics/orders/
 topics/orders.stale-3f9a1c0e7b2d4a61/   ← quarantined: a deleted incarnation's leftover
 ```
 
+Everything under the data directory that the engine creates is private to the broker's user: directories `0700`, files `0600` (segments, `hwm`, `consumer.offset`, fan-out cursors, the incarnation marker, transferred segments, and the ingress WAL's directory and segments). Segments carry every message payload, so they get the same protection `fsm.db` (password hashes) already had. Modes are applied at creation only; a file or directory created by an older binary keeps the mode it was created with, so tighten those by hand if the host is shared.
+
 ### The incarnation marker
 
 Topic directories are keyed by name, and a name outlives the topic: delete `orders`, recreate `orders`, and the new topic's partition logs open exactly where the old one's segments, high-watermark and consumer offset sit on any node that missed the purge (it was down, or the purge lost the race with the recreate). Served as-is, the recreated topic would hand consumers the deleted topic's messages and append new produce after them.

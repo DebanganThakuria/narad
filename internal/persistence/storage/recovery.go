@@ -30,7 +30,7 @@ import (
 // An empty directory is initialised with one fresh segment at base
 // offset 0.
 func (l *Log) recover() (int64, error) {
-	if err := os.MkdirAll(l.dir, 0o755); err != nil {
+	if err := os.MkdirAll(l.dir, dataDirMode); err != nil {
 		return 0, fmt.Errorf("storage: ensure partition dir: %w", err)
 	}
 

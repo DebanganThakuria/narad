@@ -66,7 +66,7 @@ func WritePersistedHighWatermark(dir string, hwm int64) error {
 	}
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], uint64(hwm))
-	return os.WriteFile(hwmFilePath(dir), buf[:], 0o644)
+	return os.WriteFile(hwmFilePath(dir), buf[:], dataFileMode)
 }
 
 // ReadPersistedHighWatermark reads a partition directory's durable
@@ -141,7 +141,7 @@ func (l *Log) persistHighWatermark(next int64) error {
 	binary.BigEndian.PutUint64(buf[:], uint64(next))
 
 	if l.hwmFile == nil {
-		f, err := os.OpenFile(l.hwmPath, os.O_WRONLY|os.O_CREATE, 0o644)
+		f, err := os.OpenFile(l.hwmPath, os.O_WRONLY|os.O_CREATE, dataFileMode)
 		if err != nil {
 			return fmt.Errorf("storage: open hwm: %w", err)
 		}
