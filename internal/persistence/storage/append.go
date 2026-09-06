@@ -24,6 +24,9 @@ func (l *Log) Append(data []byte) (int64, error) {
 	if l.closed.Load() {
 		return -1, ErrLogClosed
 	}
+	if err := l.poisoned(); err != nil {
+		return -1, err
+	}
 	if h := appendGateHook; h != nil {
 		h()
 	}
@@ -50,6 +53,9 @@ func (l *Log) AppendBatch(records [][]byte) (firstOffset, lastOffset int64, err 
 	if l.closed.Load() {
 		return -1, -1, ErrLogClosed
 	}
+	if err := l.poisoned(); err != nil {
+		return -1, -1, err
+	}
 	if len(records) == 0 {
 		return 0, -1, nil
 	}
@@ -75,6 +81,9 @@ func (l *Log) AppendBatchOwned(records [][]byte) (firstOffset, lastOffset int64,
 	defer l.appendGate.RUnlock()
 	if l.closed.Load() {
 		return -1, -1, ErrLogClosed
+	}
+	if err := l.poisoned(); err != nil {
+		return -1, -1, err
 	}
 	if len(records) == 0 {
 		return 0, -1, nil

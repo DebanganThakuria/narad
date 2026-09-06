@@ -23,6 +23,7 @@ func TestSparseActiveSegmentIndexReadsAcrossAnchors(t *testing.T) {
 	for i := range total {
 		appendSingleRecordFrame(t, l, fmt.Appendf(nil, "record-%04d-%s", i, bytes.Repeat([]byte("x"), 96)))
 	}
+	syncLog(t, l)
 
 	entries := segmentIndexEntries(t, l)
 	if entries <= 1 {
@@ -159,6 +160,16 @@ func appendSingleRecordFrame(t *testing.T, l *Log, record []byte) {
 	}
 	if err := l.flusher.drainOnce(false, true, nil); err != nil {
 		t.Fatalf("drainOnce: %v", err)
+	}
+}
+
+// syncLog forces an fsync so records written by appendSingleRecordFrame
+// leave the flushing snapshot (which is cleared only after a successful
+// sync) and reads go to the segment file.
+func syncLog(t *testing.T, l *Log) {
+	t.Helper()
+	if err := l.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
 	}
 }
 

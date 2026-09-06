@@ -45,8 +45,17 @@ func (l *Log) Close() error {
 	if err := l.closeHWMFile(); err != nil && firstErr == nil {
 		firstErr = err
 	}
-	for _, s := range l.segments {
-		if err := s.close(); err != nil && firstErr == nil {
+	for i, s := range l.segments {
+		// Only the active segment can hold unsynced bytes; sealed
+		// segments were synced when they rolled, and many of them have
+		// no open handle anyway.
+		var err error
+		if i == len(l.segments)-1 {
+			err = s.close()
+		} else {
+			err = s.release()
+		}
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -57,7 +66,7 @@ func (l *Log) Close() error {
 // Used on NewLog's failure paths, where the recovery error wins.
 func (l *Log) closeSegments() {
 	for _, s := range l.segments {
-		_ = s.close()
+		_ = s.release()
 	}
 	_ = l.closeHWMFile()
 }

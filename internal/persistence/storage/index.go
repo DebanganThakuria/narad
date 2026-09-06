@@ -173,6 +173,10 @@ func (l *Log) scanSegmentFromIndexAnchorLocked(seg *segment, anchor indexEntry, 
 		pos += int64(anchor.frameLen)
 	}
 	size := seg.sizeBytes
+	file, err := seg.handle()
+	if err != nil {
+		return indexEntry{}, 0, false, err
+	}
 	for pos < size {
 		// Navigation only needs frame headers to step frame-to-frame, so this
 		// walks header-only (no payload read, no CRC, no decode). Decoding here
@@ -180,7 +184,7 @@ func (l *Log) scanSegmentFromIndexAnchorLocked(seg *segment, anchor indexEntry, 
 		// lookup with small frames + a sparse index); even reading the payload
 		// to CRC every skipped frame was the next-largest cost. The target frame
 		// is CRC-validated by readFrameAt when it is actually read.
-		h, end, err := frameHeaderAt(seg.file, pos)
+		h, end, err := frameHeaderAt(file, pos)
 		switch {
 		case err == nil:
 			if end > size {
@@ -189,7 +193,7 @@ func (l *Log) scanSegmentFromIndexAnchorLocked(seg *segment, anchor indexEntry, 
 				// exists, resync past the corruption so intact frames
 				// beyond it stay reachable; otherwise it's a genuine torn
 				// tail — not navigable (and not yet readable), not found.
-				if next := nextValidFramePos(seg.file, pos+1, size); next < size {
+				if next := nextValidFramePos(file, pos+1, size); next < size {
 					pos = next
 					continue
 				}
@@ -216,7 +220,7 @@ func (l *Log) scanSegmentFromIndexAnchorLocked(seg *segment, anchor indexEntry, 
 		case errors.Is(err, errBadMagic),
 			errors.Is(err, errCorrupt),
 			errors.Is(err, ErrCorruptRecord):
-			pos = nextMagicInSegment(seg.file, pos+1, size)
+			pos = nextMagicInSegment(file, pos+1, size)
 
 		default:
 			return indexEntry{}, 0, false, err
@@ -238,6 +242,10 @@ func (l *Log) touchSegmentIndexLocked(segmentBaseOffset int64) {
 	idx.lastUsed = l.indexClock
 }
 
+// pruneSegmentIndexesLocked evicts the coldest sealed-segment indexes
+// beyond the hot set and releases their file handles with them: a
+// segment nobody reads keeps neither its index nor a descriptor. The
+// next read reopens the file and rescans the index.
 func (l *Log) pruneSegmentIndexesLocked(preserveSegmentBaseOffset int64) {
 	for len(l.segmentIndexes) > maxHotSegmentIndexes {
 		victim, ok := l.oldestPrunableSegmentIndexLocked(preserveSegmentBaseOffset)
@@ -245,6 +253,9 @@ func (l *Log) pruneSegmentIndexesLocked(preserveSegmentBaseOffset int64) {
 			return
 		}
 		delete(l.segmentIndexes, victim)
+		if seg := l.findSegmentLocked(victim); seg != nil && seg != l.segments[len(l.segments)-1] {
+			_ = seg.release()
+		}
 	}
 }
 
