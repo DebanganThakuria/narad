@@ -237,3 +237,27 @@ func ackOneStatus(ctx context.Context, lb *roundRobinClient, topicName, receiptH
 	})
 	return status, err
 }
+
+// ackOneStatusAmbiguous is ackOneStatus that also reports when a 410 Gone
+// followed a failed attempt. An ack whose response was lost (a timeout, or
+// a forwarding hop cut one way) may have landed on the owner; the retry then
+// answers 410 because the handle is consumed. The caller cannot tell that
+// apart from a lease that expired, so it is reported as ambiguous rather
+// than as a missed ack.
+func ackOneStatusAmbiguous(ctx context.Context, lb *roundRobinClient, topicName, receiptHandle string, attempts int, want ...int) (status int, ambiguous bool, err error) {
+	path := "/v1/topics/" + url.PathEscape(topicName) + "/ack?receipt_handle=" + url.QueryEscape(receiptHandle)
+	failedBefore := false
+	err = retry(ctx, attempts, 100*time.Millisecond, func() error {
+		got, _, err := lb.do(ctx, http.MethodPost, path, nil, nil, want...)
+		if err != nil {
+			failedBefore = true
+			return err
+		}
+		status = got
+		return nil
+	})
+	if err == nil && status == http.StatusGone && failedBefore {
+		ambiguous = true
+	}
+	return status, ambiguous, err
+}
