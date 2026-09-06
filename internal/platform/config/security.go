@@ -46,6 +46,14 @@ type SecurityConfig struct {
 	ClusterTLSKeyFile  string `json:"cluster_tls_key_file"`
 	ClusterTLSCAFile   string `json:"cluster_tls_ca_file"`
 
+	// AllowInsecureCluster is the explicit opt-in for a MULTI-NODE
+	// cluster with security disabled: no API auth, no cluster secret
+	// (the QUIC RPC plane, which listens on the API port over UDP,
+	// accepts any peer) and plaintext Raft. Fine on a laptop, a
+	// mistake anywhere else, so it has to be said.
+	// Env: NARAD_SECURITY_ALLOW_INSECURE_CLUSTER.
+	AllowInsecureCluster bool `json:"allow_insecure_cluster"`
+
 	// AllowPlaintextRaft is the explicit opt-in for running the Raft
 	// transport as plain TCP in a secured multi-node cluster. Raft has
 	// no authentication of its own and the cluster secret does not cover

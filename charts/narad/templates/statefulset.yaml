@@ -120,6 +120,10 @@ spec:
             {{- end }}
             - name: NARAD_SECURITY_ENABLED
               value: {{ .Values.security.enabled | quote }}
+            {{- if and (not .Values.security.enabled) .Values.security.allowInsecureCluster }}
+            - name: NARAD_SECURITY_ALLOW_INSECURE_CLUSTER
+              value: "true"
+            {{- end }}
             {{- if .Values.security.enabled }}
             - name: NARAD_ADMIN_PASSWORD
               valueFrom:

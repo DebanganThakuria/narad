@@ -130,6 +130,13 @@ security:
   # assumed to terminate at the ingress in front of Narad.
   enabled: true
 
+  # With security disabled, a multi-node cluster has an open API, an
+  # open node-to-node RPC plane (QUIC on the API port over UDP) and
+  # plaintext Raft. The broker refuses to start that way unless told
+  # it is deliberate; this is that acknowledgement, only read when
+  # security.enabled is false.
+  allowInsecureCluster: false
+
   # Secrets are read from a Kubernetes Secret, never from values.yaml.
   # By default the chart expects a Secret named "<release>-security" with
   # the keys below. Point existingSecret at your own Secret to override.

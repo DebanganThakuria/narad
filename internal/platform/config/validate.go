@@ -270,8 +270,15 @@ func topicValidationErrors(cfg TopicConfig) []string {
 		errs = append(errs, fmt.Sprintf("topic.default_retention_age_ms (%d) must be >= %d (1 hour) or 0 (keep forever)",
 			cfg.DefaultRetentionAgeMs, topic.MinRetentionMs))
 	}
-	if cfg.DefaultVisibilityTimeoutMs < 0 {
-		errs = append(errs, "topic.default_visibility_timeout_ms must be >= 0")
+	// A zero visibility timeout means every reservation expires on the
+	// purger's next tick, so every message is handed to several
+	// consumers; a timeout longer than retention lets a reserved message
+	// age out under its lease.
+	if cfg.DefaultVisibilityTimeoutMs <= 0 {
+		errs = append(errs, "topic.default_visibility_timeout_ms must be > 0")
+	}
+	if cfg.DefaultRetentionAgeMs > 0 && cfg.DefaultVisibilityTimeoutMs > cfg.DefaultRetentionAgeMs {
+		errs = append(errs, fmt.Sprintf("topic.default_visibility_timeout_ms (%d) must be <= topic.default_retention_age_ms (%d)", cfg.DefaultVisibilityTimeoutMs, cfg.DefaultRetentionAgeMs))
 	}
 	if cfg.DefaultMaxInFlightPerPartition <= 0 {
 		errs = append(errs, "topic.default_max_in_flight_per_partition must be > 0")
@@ -326,6 +333,12 @@ func securityValidationErrors(cfg SecurityConfig, cluster ClusterConfig) []strin
 	// no authentication of its own, so a secured multi-node cluster with
 	// a plaintext Raft transport is only secure if the operator fences
 	// the port by other means; make them say so.
+	// With security off, the QUIC RPC plane (UDP on the API port) and
+	// Raft are both open to anyone who can reach them; that used to be
+	// a runtime warning only. A multi-node cluster must opt into it.
+	if !cfg.Enabled && len(cluster.Peers) > 0 && !cfg.AllowInsecureCluster {
+		errs = append(errs, "security.enabled=false with cluster peers leaves node-to-node RPC (QUIC on the API port over UDP) and raft unauthenticated: set security.allow_insecure_cluster: true (NARAD_SECURITY_ALLOW_INSECURE_CLUSTER=true) to run a multi-node cluster this way deliberately")
+	}
 	if cfg.Enabled && len(cluster.Peers) > 0 && !cfg.ClusterTLSConfigured() && !cfg.AllowPlaintextRaft {
 		errs = append(errs, "security is enabled with cluster peers but the raft transport has no TLS: set security.cluster_tls_cert_file/_key_file/_ca_file (NARAD_CLUSTER_TLS_*_FILE), or set security.allow_plaintext_raft: true (NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true) if the raft port is restricted by network policy")
 	}

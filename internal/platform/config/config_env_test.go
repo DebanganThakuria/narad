@@ -46,3 +46,14 @@ func TestHTTPHardeningEnvParsing(t *testing.T) {
 		t.Fatalf("http env not applied: %+v", cfg.HTTP)
 	}
 }
+
+func TestInsecureClusterEnvParsing(t *testing.T) {
+	t.Setenv("NARAD_SECURITY_ALLOW_INSECURE_CLUSTER", "true")
+	cfg := Default()
+	if err := applyEnv(cfg); err != nil {
+		t.Fatalf("applyEnv() error = %v", err)
+	}
+	if !cfg.Security.AllowInsecureCluster {
+		t.Fatal("AllowInsecureCluster not applied from env")
+	}
+}

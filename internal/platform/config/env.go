@@ -125,6 +125,9 @@ func applyEnv(cfg *Config) error {
 	if err := envBool("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", &cfg.Security.AllowPlaintextRaft); err != nil {
 		return err
 	}
+	if err := envBool("NARAD_SECURITY_ALLOW_INSECURE_CLUSTER", &cfg.Security.AllowInsecureCluster); err != nil {
+		return err
+	}
 	if v, ok := os.LookupEnv("NARAD_CLUSTER_TLS_CERT_FILE"); ok {
 		cfg.Security.ClusterTLSCertFile = v
 	}

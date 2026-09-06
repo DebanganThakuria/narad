@@ -399,3 +399,50 @@ func TestValidateHTTPHardeningFields(t *testing.T) {
 		t.Fatalf("shared diagnostics listener: %v", err)
 	}
 }
+
+// A zero visibility timeout delivers every message to several consumers
+// (each reservation expires on the next purger tick); one longer than
+// retention lets a reserved message age out under its lease.
+func TestValidateVisibilityTimeoutBounds(t *testing.T) {
+	cfg := Default()
+	cfg.Topic.DefaultVisibilityTimeoutMs = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "default_visibility_timeout_ms must be > 0") {
+		t.Fatalf("zero visibility timeout: %v", err)
+	}
+	cfg = Default()
+	cfg.Topic.DefaultVisibilityTimeoutMs = cfg.Topic.DefaultRetentionAgeMs + 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must be <= topic.default_retention_age_ms") {
+		t.Fatalf("visibility timeout above retention: %v", err)
+	}
+	// Keep-forever retention has no upper bound to enforce.
+	cfg.Topic.DefaultRetentionAgeMs = 0
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("visibility timeout with infinite retention: %v", err)
+	}
+}
+
+// security.enabled=false with peers used to be a runtime warning only.
+func TestValidateInsecureMultiNodeIsExplicitOptIn(t *testing.T) {
+	cfg := Default()
+	cfg.Security.Enabled = false
+	cfg.Cluster.Addr = "127.0.0.1:9101"
+	cfg.Cluster.NodeID = "node-1"
+	cfg.Cluster.Peers = []ClusterPeer{
+		{ID: "node-1", Addr: "127.0.0.1:9101"},
+		{ID: "node-2", Addr: "127.0.0.1:9102"},
+		{ID: "node-3", Addr: "127.0.0.1:9103"},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "allow_insecure_cluster") {
+		t.Fatalf("insecure multi-node: %v, want the opt-in requirement", err)
+	}
+	cfg.Security.AllowInsecureCluster = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("insecure multi-node with opt-in: %v", err)
+	}
+	// Single node with security off needs nothing (laptop mode).
+	cfg = Default()
+	cfg.Security.Enabled = false
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("insecure single node: %v", err)
+	}
+}

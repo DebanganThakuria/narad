@@ -54,7 +54,7 @@ Applied when a topic-create omits the field; existing topics keep their values.
 | `NARAD_TOPIC_DEFAULT_PARTITIONS` | `3` |
 | `NARAD_TOPIC_MAX_PARTITIONS` | `108` |
 | `NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS` | `604800000` (7 days) |
-| `NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS` | `30000` |
+| `NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS` | `30000` (must be > 0 and <= the retention default when retention is finite) |
 | `NARAD_TOPIC_DEFAULT_MAX_IN_FLIGHT_PER_PARTITION` | `1024` |
 | `NARAD_TOPIC_DEFAULT_MAX_ACKED_AHEAD_PER_PARTITION` | `1024` |
 
@@ -73,6 +73,7 @@ Applied when a topic-create omits the field; existing topics keep their values.
 | `NARAD_LOG_LEVEL` | `info` | `debug` is chatty, in a good way |
 | `NARAD_LOG_FORMAT` | `json` | or `text` for humans |
 | `NARAD_SECURITY_ENABLED` | `true` | Secure by default; local dev can opt out |
+| `NARAD_SECURITY_ALLOW_INSECURE_CLUSTER` | `false` | Required to run a **multi-node** cluster with security off (open API, open QUIC RPC plane on the API port over UDP, plaintext Raft). Single node needs nothing |
 | `NARAD_ADMIN_PASSWORD` | random, logged once | Seeds the root admin on first cluster start |
 
 ## The config file (`--config narad.json`)
@@ -91,13 +92,14 @@ the loader **rejects** any attempt to set it:
     "compression_level": "fastest",         // zstd: fastest | default | better | best
     "idle_log_eviction_ms": 1800000         // close logs untouched this long; 0 disables
   },
-  "http": { "...": "same knobs as the env vars" },
+  "http": { "...": "same knobs as the env vars; durations are strings with a unit (\"10s\"), a bare number is rejected" },
   "topic": { "...": "same as env" },
   "fanout": { "...": "same as env" },
   "log": { "level": "info", "format": "json" },
   "security": {
     "enabled": true,
     "allow_plaintext_raft": false,          // or set the cluster_tls_*_file paths
+    "allow_insecure_cluster": false,        // multi-node with enabled: false
     "allow_legacy_cluster_auth": false
   }
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -154,13 +155,22 @@ func TestDurationJSONRoundTrip(t *testing.T) {
 	}
 }
 
-func TestDurationUnmarshalSupportsNumericNanoseconds(t *testing.T) {
-	var d Duration
-	if err := json.Unmarshal([]byte(`1000000000`), &d); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
+// "read_timeout": 30 used to mean 30 nanoseconds and pass validation.
+func TestDurationUnmarshalRejectsBareNumbers(t *testing.T) {
+	for _, raw := range []string{`30`, `1000000000`, `0`, `1.5`} {
+		var d Duration
+		if err := json.Unmarshal([]byte(raw), &d); err == nil || !strings.Contains(err.Error(), "unit") {
+			t.Fatalf("Unmarshal(%s) error = %v, want a rejection naming the unit requirement", raw, err)
+		}
 	}
-	if d.D() != time.Second {
-		t.Fatalf("duration = %v, want %v", d.D(), time.Second)
+	var d Duration
+	if err := json.Unmarshal([]byte(`"30s"`), &d); err != nil || d.D() != 30*time.Second {
+		t.Fatalf("Unmarshal(\"30s\") = %v, %v", d, err)
+	}
+	// Through a whole config file, the error points at the field.
+	cfg := Default()
+	if err := json.Unmarshal([]byte(`{"http":{"read_timeout":30}}`), cfg); err == nil {
+		t.Fatal("config with a bare-number duration was accepted")
 	}
 }
 

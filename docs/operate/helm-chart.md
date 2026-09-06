@@ -59,6 +59,7 @@ security:
   allowPlaintextRaft: true     # the broker refuses secure multi-node without
                                # Raft TLS unless this says the port is fenced
   allowLegacyClusterAuth: false # only for the upgrade across the auth change
+  allowInsecureCluster: false  # multi-node with enabled: false needs this
 
 # Observability
 metrics:
