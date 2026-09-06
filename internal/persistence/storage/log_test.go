@@ -1274,21 +1274,24 @@ func TestRetentionDeletesOldSegments(t *testing.T) {
 	}
 }
 
-// Active segment is never deleted, even if it's the only segment and
-// the retention bound says everything should go.
-func TestRetentionRespectsActiveSegment(t *testing.T) {
+// An active segment whose every record has expired is rotated by the
+// reaper (the flusher seals it and opens a fresh one) and then deleted
+// like any sealed segment, so a partition that stops writing still
+// honours retention. The log always keeps an active segment and stays
+// writable.
+func TestRetentionRotatesExpiredActiveSegment(t *testing.T) {
 	clock := newAtomicTime(time.Now())
 	dir := testLogPath(t)
 
 	// Single record into a fresh log with default-ish (large)
-	// segment bytes — no roll, so the only segment IS the active
-	// one.
+	// segment bytes: no size-based roll, so the only segment IS the
+	// active one.
 	noRollOpts := Options{
 		Codec:         codec.NewNoopCodec(),
 		FlushBytes:    1,
 		FlushRecords:  1,
 		FlushInterval: 5 * time.Millisecond,
-		SegmentBytes:  1 << 20, // big — no roll for a single small record
+		SegmentBytes:  1 << 20, // big: no roll for a single small record
 		Retention: RetentionConfig{
 			MaxAge:        1 * time.Nanosecond, // everything is "old"
 			CheckInterval: 1 * time.Hour,
@@ -1314,11 +1317,24 @@ func TestRetentionRespectsActiveSegment(t *testing.T) {
 	clock.Set(clock.Get().Add(1 * time.Hour))
 	l.reaper.sweep()
 
-	if got := len(segmentPaths(t, dir)); got == 0 {
-		t.Fatalf("active segment was deleted")
+	paths := segmentPaths(t, dir)
+	if len(paths) != 1 {
+		t.Fatalf("expected the rotated segment to be reaped and one fresh active segment to remain, got %v", paths)
 	}
-	if _, err := l.Read(0); err != nil {
-		t.Fatalf("Read(0) after sweep: %v", err)
+	if filepath.Base(paths[0]) != segmentFileName(1) {
+		t.Fatalf("active segment after rotation = %s, want %s", filepath.Base(paths[0]), segmentFileName(1))
+	}
+	if _, err := l.Read(0); !errors.Is(err, ErrOffsetNotFound) {
+		t.Fatalf("Read(0) after the expired segment was reaped: err=%v, want ErrOffsetNotFound", err)
+	}
+	if off, err := l.Append([]byte("rec-1")); err != nil || off != 1 {
+		t.Fatalf("Append after rotation = (%d, %v), want (1, nil)", off, err)
+	}
+	if err := l.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if got, err := l.Read(1); err != nil || string(got) != "rec-1" {
+		t.Fatalf("Read(1) = (%q, %v)", got, err)
 	}
 }
 
@@ -1444,7 +1460,7 @@ func TestListSegmentFileNamesSortsAndFilters(t *testing.T) {
 
 func TestSegmentHelpersCoverClosedPaths(t *testing.T) {
 	dir := t.TempDir()
-	seg, err := createSegment(dir, 7)
+	seg, err := createSegment(dir, 7, time.Now())
 	if err != nil {
 		t.Fatalf("createSegment() error = %v", err)
 	}
@@ -1457,8 +1473,8 @@ func TestSegmentHelpersCoverClosedPaths(t *testing.T) {
 	if err := seg.close(); err != nil {
 		t.Fatalf("close() error = %v", err)
 	}
-	if mt, err := segmentMTime(seg); err == nil || mt != 0 {
-		t.Fatalf("segmentMTime(closed) = (%d, %v), want error", mt, err)
+	if mt, ok := segmentMTime(seg); !ok || mt <= 0 {
+		t.Fatalf("segmentMTime(empty) = (%d, %v), want its creation time", mt, ok)
 	}
 	if err := seg.close(); err != nil {
 		t.Fatalf("second close() error = %v", err)

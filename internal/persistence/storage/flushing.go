@@ -2,11 +2,29 @@ package storage
 
 import "time"
 
+// The flushing snapshot holds records from the moment the flusher
+// drains them out of the buffer until their frame is proven durable by
+// a successful fdatasync. Three offsets describe it:
+//
+//	flushingBase                 first record still in the snapshot
+//	flushingWritten              records below this are in the segment
+//	                             file but not yet synced
+//	flushingBase+len(records)    end of the snapshot
+//
+// A failed segment write leaves flushingWritten where it was, so the
+// retry rewrites exactly the unwritten suffix; a successful sync clears
+// everything below the durable tail. Keeping written-but-unsynced
+// records in memory costs nothing on the commit path (every commit
+// forces a sync in the same drain) and means the in-memory copy still
+// exists at the moment a sync fails, so the discard of an uncommitted
+// tail never has to trust bytes the kernel may already have dropped.
+
 // drainBufferForFlush moves buffered records into the flushing snapshot
-// and returns the full snapshot. If a previous writeBatch failed, the
-// snapshot still holds its unwritten records: new records are appended
-// (offsets are contiguous) rather than overwriting, so the retry writes
-// the whole run and no already-acked record is ever dropped.
+// and returns the records that still need writing, with the offset of
+// the first of them. If a previous writeBatch failed, the snapshot
+// still holds its unwritten records: new records are appended (offsets
+// are contiguous) rather than overwriting, so the retry writes the
+// whole unwritten run and no already-acked record is ever dropped.
 //
 // Lock ordering: buffer.mu → flushingMu.
 func (l *Log) drainBufferForFlush() ([][]byte, int64) {
@@ -17,7 +35,7 @@ func (l *Log) drainBufferForFlush() ([][]byte, int64) {
 
 	if len(l.buffer.records) == 0 {
 		if l.flushingValid {
-			return l.flushingRecords, l.flushingBase
+			return l.unwrittenFlushingLocked()
 		}
 		return nil, l.buffer.nextOffset
 	}
@@ -33,18 +51,34 @@ func (l *Log) drainBufferForFlush() ([][]byte, int64) {
 		l.flushingRecords = append(l.flushingRecords, records...)
 	} else {
 		l.flushingBase = base
+		l.flushingWritten = base
 		l.flushingRecords = records
 		l.flushingValid = true
 	}
-	return l.flushingRecords, l.flushingBase
+	return l.unwrittenFlushingLocked()
+}
+
+// unwrittenFlushingLocked returns the snapshot suffix that has not
+// reached the segment file yet. Caller must hold flushingMu.
+func (l *Log) unwrittenFlushingLocked() ([][]byte, int64) {
+	skip := l.flushingWritten - l.flushingBase
+	if skip < 0 {
+		skip = 0
+	}
+	if skip >= int64(len(l.flushingRecords)) {
+		return nil, l.flushingBase + int64(len(l.flushingRecords))
+	}
+	return l.flushingRecords[skip:], l.flushingWritten
 }
 
 // hasPendingFlushing reports whether a previous drain's records are
-// still waiting to reach disk (their writeBatch failed).
+// still waiting to reach the segment file (their writeBatch failed).
+// Records that are written but not yet synced do not count: the sync
+// is the drain's own business, not a retry.
 func (l *Log) hasPendingFlushing() bool {
 	l.flushingMu.Lock()
 	defer l.flushingMu.Unlock()
-	return l.flushingValid
+	return l.flushingValid && l.flushingWritten < l.flushingBase+int64(len(l.flushingRecords))
 }
 
 func (l *Log) readFlushing(offset int64) ([]byte, bool) {
@@ -73,9 +107,24 @@ func (l *Log) readFlushingShared(offset int64) ([]byte, bool) {
 	return l.flushingRecords[idx], true
 }
 
-// clearFlushingThrough drops flushing records below end (exclusive) once
-// their frame is written to the active segment. After a partial batch
-// write the unwritten suffix stays in place for the flusher's retry.
+// markFlushingWritten records that snapshot records below end
+// (exclusive) are now in the segment file. They stay in the snapshot
+// until a sync proves them durable (clearFlushingThrough).
+func (l *Log) markFlushingWritten(end int64) {
+	l.flushingMu.Lock()
+	defer l.flushingMu.Unlock()
+	if !l.flushingValid {
+		return
+	}
+	if end > l.flushingWritten {
+		l.flushingWritten = end
+	}
+}
+
+// clearFlushingThrough drops flushing records below end (exclusive)
+// once their frame is durable in the active segment. After a partial
+// batch write the unwritten suffix stays in place for the flusher's
+// retry.
 func (l *Log) clearFlushingThrough(end int64) {
 	l.flushingMu.Lock()
 	defer l.flushingMu.Unlock()
@@ -84,11 +133,20 @@ func (l *Log) clearFlushingThrough(end int64) {
 	}
 	n := end - l.flushingBase
 	if n >= int64(len(l.flushingRecords)) {
-		l.flushingBase = 0
-		l.flushingRecords = nil
-		l.flushingValid = false
+		l.resetFlushingLocked()
 		return
 	}
 	l.flushingRecords = l.flushingRecords[n:]
 	l.flushingBase = end
+	if l.flushingWritten < end {
+		l.flushingWritten = end
+	}
+}
+
+// resetFlushingLocked empties the snapshot. Caller must hold flushingMu.
+func (l *Log) resetFlushingLocked() {
+	l.flushingBase = 0
+	l.flushingWritten = 0
+	l.flushingRecords = nil
+	l.flushingValid = false
 }

@@ -192,10 +192,19 @@ func dissolveFanoutLinks(tx *bolt.Tx, name string) ([]string, error) {
 	return linked, nil
 }
 
-// applyPutSchema stores a schema version. An attached child's schema
+// applyPutSchema appends a schema version. An attached child's schema
 // is parent-managed, so targeting one directly is rejected; a schema
 // stored on a fan-out parent is propagated to every child in the same
 // transaction so parent and child histories never drift.
+//
+// The version must be exactly one past the topic's persisted latest
+// (and each child's). The proposer computes it from the persisted
+// history it read, so a proposer working from a stale view (a leader
+// whose local registry never saw the topic, or one that lost a race
+// with another put) is refused instead of silently overwriting an
+// earlier version: schema history is append-only and every replica
+// applies the same decision. The payload format is unchanged, so log
+// entries written before this rule replay exactly as they did.
 func (f *fsmState) applyPutSchema(data []byte) error {
 	var p schemaPayload
 	if err := json.Unmarshal(data, &p); err != nil {
@@ -211,6 +220,14 @@ func (f *fsmState) applyPutSchema(data []byte) error {
 			return fmt.Errorf("%w: %q is attached to %q", errs.ErrFanoutSchemaManaged, p.Topic, t.Parent)
 		}
 		childTopics = t.Children
+		if err := checkNextSchemaVersion(tx, p.Topic, p.Version); err != nil {
+			return err
+		}
+		for _, child := range childTopics {
+			if err := checkNextSchemaVersion(tx, child, p.Version); err != nil {
+				return err
+			}
+		}
 		b := tx.Bucket(bucketSchemas)
 		if err := b.Put(schemaKey(p.Topic, p.Version), p.Schema); err != nil {
 			return err

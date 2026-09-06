@@ -355,8 +355,11 @@ func TestProduceFailsWhenNoPartitionHasAliveOwner(t *testing.T) {
 // pass that fsyncs the records, BEFORE the records become visible: a
 // produce whose visibility boundary cannot reach disk must fail (so the
 // ingress dispatcher retries instead of checkpointing past it), and the
-// record must stay hidden. Previously the HWM persist lagged the commit
-// by one batch and a broken hwm path only surfaced at Close.
+// record must not be exposed. The failed commit discards the record
+// from the log altogether (the dispatcher's retry re-appends it at the
+// same offset), so nothing of it remains. Previously the HWM persist
+// lagged the commit by one batch and a broken hwm path only surfaced at
+// Close.
 func TestProduceFailsWhenHighWatermarkCannotPersist(t *testing.T) {
 	dataDir := t.TempDir()
 	ms := newMessagingFakeMetastore()
@@ -382,12 +385,16 @@ func TestProduceFailsWhenHighWatermarkCannotPersist(t *testing.T) {
 	if !errors.As(err, &stageErr) || stageErr.stage != produceStageCommit {
 		t.Fatalf("Produce() error = %v, want commit boundary stage", err)
 	}
-	// The record reached the log (hidden tail) but was never exposed.
+	// The record was never exposed, and the failed commit discarded it so
+	// the retry lands exactly one copy at offset 0.
 	if got := log.HighWatermark(); got != 0 {
-		t.Fatalf("HighWatermark() = %d, want 0 (record must stay hidden)", got)
+		t.Fatalf("HighWatermark() = %d, want 0 (record must not be exposed)", got)
 	}
-	if got := log.NextOffset(); got != 1 {
-		t.Fatalf("NextOffset() = %d, want 1 (record appended)", got)
+	if got := log.NextOffset(); got != 0 {
+		t.Fatalf("NextOffset() = %d, want 0 (uncommitted tail discarded)", got)
+	}
+	if _, err := log.Read(0); !errors.Is(err, errs.ErrOffsetNotFound) {
+		t.Fatalf("Read(0) = %v, want ErrOffsetNotFound (nothing of the failed batch remains)", err)
 	}
 	if err := engine.logs.CloseAll(); err != nil {
 		t.Fatalf("CloseAll() error = %v", err)

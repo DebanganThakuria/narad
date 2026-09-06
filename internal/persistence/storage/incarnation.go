@@ -95,7 +95,7 @@ func WriteTopicIncarnation(topicDir, id string) error {
 	if id == "" {
 		return errors.New("storage: incarnation id required")
 	}
-	if err := os.MkdirAll(topicDir, 0o755); err != nil {
+	if err := os.MkdirAll(topicDir, dataDirMode); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(topicDir, IncarnationMarkerFileName+".*")

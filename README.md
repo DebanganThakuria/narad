@@ -413,11 +413,16 @@ base64-encoded with `"payload_encoding":"base64"` flagged alongside
 ([details](https://debanganthakuria.github.io/narad/client/consuming/#the-payload-comes-back-the-way-you-sent-it)).
 
 Schema changes are **additive-only and backwards-compatible**, enforced
-at registration. You may add optional properties; but removing a
-property, changing the type of an existing property, dropping a
-previously-required field, or adding a new required field is rejected
-with `ErrSchemaIncompatible`. The contract is "extend only, never break;
-once a field exists, it stays."
+at registration against the latest version persisted in the metastore
+(history is append-only; a version is never overwritten). You may add
+optional properties, widen types and value sets, and loosen bounds;
+removing a property, narrowing a type, adding a required field, closing
+`additionalProperties`, or tightening any bound is rejected with
+`ErrSchemaIncompatible`. The check fails closed: a construct it does not
+model (`oneOf`, `not`, `if/then/else`, ...) may only stay identical.
+`$ref` resolves only inside the schema document; `file://` and remote
+references are refused. The full keyword list is in
+[docs/client/topics.md](docs/client/topics.md#schema-evolution).
 
 ## Testing
 

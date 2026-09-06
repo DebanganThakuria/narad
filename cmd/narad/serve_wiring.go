@@ -192,24 +192,17 @@ func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, l
 }
 
 // initializeSchemas loads every persisted schema version into the registry
-// so validation works from the first request after a restart.
+// so validation works from the first request after a restart. It uses
+// the same hydration path the produce engine uses when the metastore's
+// schema version moves, so both agree on what "loaded" means.
 func initializeSchemas(ctx context.Context, ms metastore.Metastore, schemas schema.Registry) error {
 	topics, _, err := ms.ListTopics(ctx, metastore.ListOptions{})
 	if err != nil {
 		return err
 	}
 	for _, topicCfg := range topics {
-		for version := 1; ; version++ {
-			raw, err := ms.GetSchema(ctx, topicCfg.Name, version)
-			if err != nil {
-				if errors.Is(err, metastore.ErrNotFound) {
-					break
-				}
-				return err
-			}
-			if err := schemas.Load(ctx, topicCfg.Name, version, raw); err != nil {
-				return err
-			}
+		if _, err := schema.Hydrate(ctx, ms, schemas, topicCfg.Name); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -50,6 +51,11 @@ type Options struct {
 	// Metrics is an optional observability plug. When nil, every
 	// instrumented call site short-circuits to a noop.
 	Metrics MetricsRecorder
+
+	// Logger receives the log's operational messages (a poisoned log, a
+	// discarded uncommitted tail, a failed retention unlink). Nil means
+	// slog.Default.
+	Logger *slog.Logger
 }
 
 // DefaultOptions returns the production defaults: fast zstd compression,
