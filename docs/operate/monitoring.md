@@ -1,6 +1,6 @@
 # Monitoring
 
-`GET /metrics` on any node serves Prometheus metrics (unauthenticated by design: it's a scrape target, not a secret). The chart ships a `ServiceMonitor` when `metrics.enabled: true`. Namespace prefix: `narad_`.
+`GET /metrics` on any node serves Prometheus metrics. The exposition names every topic with its partition count, lag, throughput and fan-out graph, the same inventory topic listing only shows to grant holders, so it is not served to anyone who can reach the API port: by default it lives on its **own listener** (`NARAD_HTTP_METRICS_ADDR`, `:9100` in the chart, which is what the `ServiceMonitor` scrapes, credential-free and cluster-internal) and is a 404 on the API port; with no metrics listener it is served on the API port **behind the same Basic auth as the API** (Prometheus supports `basic_auth` per scrape job), unless `NARAD_HTTP_METRICS_UNAUTHENTICATED=true` restores the old open behaviour. Namespace prefix: `narad_`.
 
 **Don't build a dashboard; import ours.** The repo ships a ready-to-go Grafana dashboard at
 [`ops/monitoring/grafana/dashboards/narad-node-dashboard.json`](https://github.com/DebanganThakuria/narad/blob/master/ops/monitoring/grafana/dashboards/narad-node-dashboard.json):
@@ -80,4 +80,4 @@ What healthy failure handling looks like, so you don't page yourself for the sys
 
 ## pprof
 
-`narad.pprof.enabled: true` serves the full `net/http/pprof` suite on `:6060`. We keep it on in staging; CPU profiles during soak tests are how the produce hot path stayed honest.
+`narad.pprof.enabled: true` serves the full `net/http/pprof` suite on `:6060`. We keep it on in staging; CPU profiles during soak tests are how the produce hot path stayed honest. Like the metrics listener it is unauthenticated and must stay loopback or cluster-internal (the ingress never routes to it; a NetworkPolicy keeps other namespaces out). The two may share one address.

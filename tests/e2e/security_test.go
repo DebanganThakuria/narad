@@ -25,6 +25,7 @@ func (e *env) authReq(t *testing.T, method, path string, body any, username, pas
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
+	req.Header.Set("Content-Type", "application/json")
 	if username != "" {
 		req.SetBasicAuth(username, password)
 	}

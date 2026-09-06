@@ -52,6 +52,21 @@ func applyEnv(cfg *Config) error {
 	if err := envDuration("NARAD_HTTP_MAX_CONSUME_WAIT", &cfg.HTTP.MaxConsumeWait); err != nil {
 		return err
 	}
+	if err := envInt("NARAD_HTTP_MAX_HEADER_BYTES", &cfg.HTTP.MaxHeaderBytes); err != nil {
+		return err
+	}
+	if err := envInt("NARAD_HTTP_MAX_CONNECTIONS", &cfg.HTTP.MaxConnections); err != nil {
+		return err
+	}
+	if err := envInt("NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY", &cfg.HTTP.MaxConsumeInFlightPerIdentity); err != nil {
+		return err
+	}
+	if v, ok := os.LookupEnv("NARAD_HTTP_METRICS_ADDR"); ok {
+		cfg.HTTP.MetricsAddr = strings.TrimSpace(v)
+	}
+	if err := envBool("NARAD_HTTP_METRICS_UNAUTHENTICATED", &cfg.HTTP.MetricsUnauthenticated); err != nil {
+		return err
+	}
 
 	if v, ok := os.LookupEnv("NARAD_DATA_DIR"); ok {
 		cfg.Storage.DataDir = v

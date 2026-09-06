@@ -73,6 +73,10 @@ service:
     api: 7942
     cluster: 7943
     pprof: 6060
+    # Prometheus exposition. Served on its own listener (never on the
+    # API port) when metrics.enabled is true, so scrapes need no
+    # credentials and /metrics is not reachable through the public API.
+    metrics: 9100
 
   headless:
     annotations: {}
@@ -173,9 +177,11 @@ security:
   allowPlaintextRaft: true
 
 metrics:
+  # Serve /metrics on the dedicated metrics port (service.ports.metrics)
+  # instead of the API port. When false, /metrics stays on the API port
+  # and requires the same Basic credentials as the API.
   enabled: true
   path: /metrics
-  port: "7942"
   annotations: {}
 
 persistence:
@@ -237,11 +243,12 @@ traefik:
   annotations: {}
   labels: {}
   middlewares: []
-  # Paths excluded from the PUBLIC ingress route. /metrics is auth-exempt
-  # (for in-cluster Prometheus, which scrapes pods directly via the
-  # ServiceMonitor) and leaks topic names + traffic volumes, so it must
-  # not be reachable from the public host. Add /healthz and /readyz here
-  # too if external probes don't need them.
+  # Paths excluded from the PUBLIC ingress route. With metrics.enabled
+  # the exposition is on its own port and /metrics on the API port is
+  # 404; with it off, /metrics on the API port needs API credentials but
+  # still leaks topic names + traffic volumes to any credential holder,
+  # so keep it off the public host. Add /healthz and /readyz here too if
+  # external probes don't need them.
   blockedPathPrefixes:
     - /metrics
 

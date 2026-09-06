@@ -59,8 +59,9 @@ That's the install. Really. (Every knob: [Helm Chart Reference](helm-chart.md).)
 
 | Port | Protocol | What |
 |---|---|---|
-| `7942` | HTTP (TCP) + QUIC (UDP) | Client API, `/healthz` `/readyz` `/metrics` on TCP; node RPC over QUIC on the same port number over UDP |
+| `7942` | HTTP (TCP) + QUIC (UDP) | Client API, `/healthz` `/readyz` on TCP; node RPC over QUIC on the same port number over UDP |
 | `7943` | TCP (mTLS-capable) | Raft replication |
+| `9100` | HTTP | `/metrics`, on its own listener so scrapes need no credentials (`metrics.enabled`); with it off, `/metrics` is on 7942 behind API credentials |
 | `6060` | HTTP | pprof, only if enabled |
 
 Probes matter and the chart wires them the only correct way:
@@ -105,7 +106,9 @@ Two of those deserve a second look:
 
 ## Rate limiting: bring your own
 
-Narad has request-size caps (1 MiB bodies) and per-partition flow control, but **no built-in request rate limiting**: a hostile or buggy client can send requests as fast as you'll accept them. Put a rate limiter at your ingress (every ingress controller has one), same place your TLS terminates. Narad's job is not losing messages; your ingress's job is deciding who gets to send them.
+Narad has request-size caps (1 MiB bodies, 64 KiB headers), a per-node connection cap (`NARAD_HTTP_MAX_CONNECTIONS`, 4096), and a per-user cap on concurrent consumes (`NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY`, 1024, answered `429` beyond it), but **no built-in request rate limiting**: a hostile or buggy client can send requests as fast as you'll accept them. Put a rate limiter at your ingress (every ingress controller has one), same place your TLS terminates. Narad's job is not losing messages; your ingress's job is deciding who gets to send them.
+
+One thing the API does refuse on its own: a `POST`, `PUT` or `PATCH` without `Content-Type: application/json` (or `application/octet-stream` for produce) and without an `X-Narad-Client` header gets `415`. That is the cross-site request forgery guard for Basic-auth sessions: a browser attaches cached Basic credentials to cross-origin requests, and only those "simple" requests skip the CORS preflight. Set the header in `curl` (`-H 'Content-Type: application/json'`, also on body-less acks) and you never see it; the CLI sends `X-Narad-Client` on every request.
 
 ## TLS story
 

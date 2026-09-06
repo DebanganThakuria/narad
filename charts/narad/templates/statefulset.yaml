@@ -23,7 +23,7 @@ spec:
       annotations:
         {{- if .Values.metrics.enabled }}
         prometheus.io/path: {{ .Values.metrics.path | quote }}
-        prometheus.io/port: {{ .Values.metrics.port | quote }}
+        prometheus.io/port: {{ .Values.service.ports.metrics | quote }}
         prometheus.io/scrape: "true"
         {{- with .Values.metrics.annotations }}
         {{- toYaml . | nindent 8 }}
@@ -72,6 +72,11 @@ spec:
               containerPort: {{ .Values.service.ports.pprof }}
               protocol: TCP
             {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.service.ports.metrics }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: POD_NAME
               valueFrom:
@@ -108,6 +113,10 @@ spec:
             {{- if .Values.narad.pprof.enabled }}
             - name: NARAD_HTTP_PPROF_ADDR
               value: {{ printf ":%v" .Values.service.ports.pprof | quote }}
+            {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - name: NARAD_HTTP_METRICS_ADDR
+              value: {{ printf ":%v" .Values.service.ports.metrics | quote }}
             {{- end }}
             - name: NARAD_SECURITY_ENABLED
               value: {{ .Values.security.enabled | quote }}

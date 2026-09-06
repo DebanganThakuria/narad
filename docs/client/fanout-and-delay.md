@@ -82,7 +82,7 @@ That placement is exactly what create-with-`parent` guarantees:
 
 ```bash
 # One line of replication:
-curl -u $AUTH -X POST $NARAD/v1/topics   -d '{"name": "orders-replica", "parent": "orders"}'
+curl -u $AUTH -X POST $NARAD/v1/topics   -H "Content-Type: application/json"   -d '{"name": "orders-replica", "parent": "orders"}'
 ```
 
 Verify it yourself; partition stats carry `owner_node`:

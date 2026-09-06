@@ -9,24 +9,38 @@ import (
 	"github.com/debanganthakuria/narad/internal/security"
 )
 
-// authExempt lists the paths served without credentials: Kubernetes
-// probes must never need them, and Prometheus scrapes are assumed to
-// come from inside the trust boundary.
-var authExempt = map[string]bool{
-	"/healthz": true,
-	"/readyz":  true,
-	"/metrics": true,
+// authExemptPaths lists the paths served without credentials. The
+// Kubernetes probes must never need them. /metrics is exempt only when
+// the operator says so (RouterOptions.MetricsRequireAuth false): the
+// exposition names every topic with its lag, throughput and fan-out
+// graph, which is the same inventory topic listing only shows to grant
+// holders.
+func authExemptPaths(metricsUnauthenticated bool) map[string]bool {
+	exempt := map[string]bool{
+		"/healthz": true,
+		"/readyz":  true,
+	}
+	if metricsUnauthenticated {
+		exempt["/metrics"] = true
+	}
+	return exempt
 }
 
-// Auth returns the Basic-authentication middleware. A nil authenticator
-// disables authentication entirely (dev mode, tests).
+// Auth returns the Basic-authentication middleware with only the
+// probes exempt. A nil authenticator disables authentication entirely
+// (dev mode, tests).
 func Auth(auth *security.Authenticator, log *slog.Logger) Middleware {
+	return AuthExempting(auth, log, authExemptPaths(false))
+}
+
+// AuthExempting is Auth with an explicit set of credential-free paths.
+func AuthExempting(auth *security.Authenticator, log *slog.Logger, exempt map[string]bool) Middleware {
 	if auth == nil {
 		return func(next http.Handler) http.Handler { return next }
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if authExempt[r.URL.Path] {
+			if exempt[r.URL.Path] {
 				next.ServeHTTP(w, r)
 				return
 			}

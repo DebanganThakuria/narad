@@ -11,7 +11,11 @@ flowchart TB
 
 ## The HTTP plane
 
-Everything a client does is plain HTTP under `/v1` (topics CRUD, produce/consume/ack, children, users) plus unauthenticated `/healthz`, `/readyz`, and `/metrics`. `/healthz` means "process up"; `/readyz` means "safe to route traffic here": held down until the node's metastore is caught up (and, for a joining node, until it's admitted).
+Everything a client does is plain HTTP under `/v1` (topics CRUD, produce/consume/ack, children, users) plus unauthenticated `/healthz` and `/readyz`. `/healthz` means "process up"; `/readyz` means "safe to route traffic here": held down until the node's metastore is caught up (and, for a joining node, until it's admitted). `/metrics` is served on its own listener when `http.metrics_addr` is set (the chart's default) and is otherwise on the API port behind the API's Basic auth: the exposition names every topic.
+
+The listener itself is bounded: 64 KiB of headers, a 5 s header read budget, a cap on open connections (`http.max_connections`, via `netutil.LimitListener`; extra clients wait in the accept backlog rather than each getting a goroutine), and a per-identity cap on concurrent consume requests (`http.max_consume_in_flight_per_identity`, `429` beyond it), since every long-poll pins a goroutine and, on a non-owner node, a forwarded RPC stream slot for up to `max_consume_wait`.
+
+State-changing requests (`POST`, `PUT`, `PATCH`) must carry `Content-Type: application/json` or `application/octet-stream`, or an `X-Narad-Client` header, else `415`. This is the cross-site request forgery guard for Basic-auth sessions: browsers attach cached Basic credentials to cross-origin requests, and a `POST` with `text/plain` or a form encoding needs no CORS preflight, so a hostile page could otherwise create topics, produce, ack, or decommission a member on behalf of an operator who used the API from that browser. The API content types and any custom header force a preflight, which Narad never approves. `DELETE` is preflighted by construction.
 
 ## Routing: any node serves any request
 
@@ -52,6 +56,7 @@ On the serving side, the messaging handlers (produce commits, acks, and non-bloc
 ## AuthN and AuthZ
 
 - **Authentication**: HTTP Basic against bcrypt-hashed users stored in the Raft metastore; credentials replicate with everything else, so any node can authenticate any request locally. TLS is expected to terminate at the ingress in front of Narad. Each node caches verified credentials keyed by the users domain version, throttles failed attempts per username (5 burst, one back every 12s; the bucket is per node, so N nodes behind a balancer allow 5N), rejects unknown usernames before bcrypt (a deliberate timing leak that bounds bcrypt cost to real users), and bounds bcrypt concurrency process-wide; password hashing for user create and password change runs under that same bound.
+- **Cross-site guard**: see the HTTP plane above; it sits inside the auth middleware, so an anonymous request is still a `401` first.
 - **Authorization**: per-request grant check, action (`produce`/`consume`/`create`/`admin`) × topic name, with prefix wildcards, plus topic *ownership* for management rights. Topic reads need any grant on the name (or ownership); attaching a child needs manage rights on both ends; cluster topology and user management are admin-only. Enforcement lives in the HTTP handlers, ahead of any routing, so a forwarded request was authorized on the node the client actually reached. Grant semantics from the client's view are in [Users & Access](../client/users-and-access.md).
 - The **root admin** is seeded once, leader-gated, from the operator's secret at first startup.
 

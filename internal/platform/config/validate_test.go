@@ -362,3 +362,40 @@ func TestValidateRequiresRaftTLSOrExplicitPlaintextForSecureMultiNode(t *testing
 		t.Fatalf("Validate() single node = %v, want nil", err)
 	}
 }
+
+func TestValidateHTTPHardeningFields(t *testing.T) {
+	cfg := Default()
+	if cfg.HTTP.MaxHeaderBytes != 64<<10 || cfg.HTTP.MaxConnections != 4096 || cfg.HTTP.MaxConsumeInFlightPerIdentity != 1024 {
+		t.Fatalf("defaults = %+v", cfg.HTTP)
+	}
+	cfg.HTTP.MaxHeaderBytes = 100
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_header_bytes") {
+		t.Fatalf("tiny header cap: %v", err)
+	}
+	cfg = Default()
+	cfg.HTTP.MaxConnections = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_connections") {
+		t.Fatalf("negative connection cap: %v", err)
+	}
+	cfg = Default()
+	cfg.HTTP.MaxConsumeInFlightPerIdentity = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_consume_in_flight") {
+		t.Fatalf("negative consume cap: %v", err)
+	}
+	cfg = Default()
+	cfg.HTTP.MetricsAddr = cfg.HTTP.Addr
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "metrics_addr") {
+		t.Fatalf("metrics on the API addr: %v", err)
+	}
+	cfg = Default()
+	cfg.HTTP.PprofAddr = cfg.Cluster.Addr
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "pprof_addr") {
+		t.Fatalf("pprof on the cluster addr: %v", err)
+	}
+	// pprof and metrics may share one diagnostics listener.
+	cfg = Default()
+	cfg.HTTP.PprofAddr, cfg.HTTP.MetricsAddr = ":6060", ":6060"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("shared diagnostics listener: %v", err)
+	}
+}

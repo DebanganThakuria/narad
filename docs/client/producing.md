@@ -5,6 +5,7 @@
 ```bash
 curl -u $AUTH -X POST \
   "$NARAD/v1/topics/orders/produce?key=customer-42" \
+  -H "Content-Type: application/octet-stream" \
   --data-binary @message.json
 ```
 

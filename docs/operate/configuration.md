@@ -16,7 +16,12 @@ Every variable, with the compiled-in default when unset. (This table is generate
 | `NARAD_HTTP_IDLE_TIMEOUT` | `60s` | |
 | `NARAD_HTTP_SHUTDOWN_GRACE` | `10s` | Drain window on SIGTERM |
 | `NARAD_HTTP_MAX_CONSUME_WAIT` | `10s` | Server-side ceiling on `?wait=` long-polls |
-| `NARAD_HTTP_PPROF_ADDR` | off | e.g. `:6060`; unauthenticated; keep it cluster-internal |
+| `NARAD_HTTP_MAX_HEADER_BYTES` | `65536` | Request header cap (Go's default is 1 MiB) |
+| `NARAD_HTTP_MAX_CONNECTIONS` | `4096` | Open client connections per node; extra ones wait in the accept backlog. `0` = unlimited |
+| `NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY` | `1024` | Concurrent consumes (long-polls included) per user, or per client IP with security off; extra ones get `429`. `0` = unlimited |
+| `NARAD_HTTP_METRICS_ADDR` | off | e.g. `:9100`; serves `/metrics` on its own listener (unauthenticated, keep it cluster-internal) and removes it from the API port. Off = `/metrics` on the API port behind API credentials |
+| `NARAD_HTTP_METRICS_UNAUTHENTICATED` | `false` | Serve `/metrics` on the API port without credentials (it names every topic) |
+| `NARAD_HTTP_PPROF_ADDR` | off | e.g. `:6060`; unauthenticated; keep it cluster-internal. May equal the metrics addr |
 
 ### Cluster
 

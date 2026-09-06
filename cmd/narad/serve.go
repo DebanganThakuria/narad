@@ -192,7 +192,7 @@ func runServe(args []string) error {
 	wg.Go(func() { cs.dispatcher.Run(ctx) })
 	wg.Go(func() { cs.fanout.Run(ctx) })
 	wg.Go(func() { cs.mover.Run(ctx) })
-	startPprofServer(ctx, &wg, cfg.HTTP.PprofAddr, log)
+	startDiagnosticsServers(ctx, &wg, cfg.HTTP, reg, log)
 	wg.Go(func() { serveClusterRPC(ctx, cfg, cs.rpcServer, failServe, log) })
 
 	poller := metrics.NewPoller(m, bc.broker, log, cfg.Storage.DataDir)

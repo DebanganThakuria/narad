@@ -315,8 +315,11 @@ curl -X POST 'localhost:7942/v1/topics/orders/produce?key=customer-42' \
 # Consume with long-poll. Response includes a receipt_handle.
 curl 'localhost:7942/v1/topics/orders/consume?wait=5s'
 
-# Ack: handle is the token returned by Consume.
-curl -X POST 'localhost:7942/v1/topics/orders/ack?receipt_handle=<token from consume response>'
+# Ack: handle is the token returned by Consume. Every POST/PUT/PATCH needs an
+# API content type (or an X-Narad-Client header), body or not: that is the
+# cross-site request forgery guard for Basic-auth sessions.
+curl -X POST 'localhost:7942/v1/topics/orders/ack?receipt_handle=<token from consume response>' \
+  -H 'Content-Type: application/json'
 
 # Update retention without restart.
 curl -X PATCH localhost:7942/v1/topics/orders \

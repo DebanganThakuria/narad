@@ -63,8 +63,29 @@ func httpValidationErrors(cfg HTTPConfig) []string {
 	if cfg.ShutdownGrace > 0 && cfg.MaxConsumeWait > cfg.ShutdownGrace {
 		errs = append(errs, fmt.Sprintf("http.max_consume_wait (%s) must be <= http.shutdown_grace (%s)", cfg.MaxConsumeWait, cfg.ShutdownGrace))
 	}
+	if cfg.MaxHeaderBytes < minHeaderBytes {
+		errs = append(errs, fmt.Sprintf("http.max_header_bytes (%d) must be >= %d", cfg.MaxHeaderBytes, minHeaderBytes))
+	}
+	if cfg.MaxConnections < 0 {
+		errs = append(errs, "http.max_connections must be >= 0 (0 disables the cap)")
+	}
+	if cfg.MaxConsumeInFlightPerIdentity < 0 {
+		errs = append(errs, "http.max_consume_in_flight_per_identity must be >= 0 (0 disables the cap)")
+	}
+	// The diagnostics listeners must not collide with the API listener;
+	// a collision used to surface only as a listen failure logged at
+	// runtime. pprof and metrics may share one address.
+	for name, addr := range map[string]string{"http.pprof_addr": cfg.PprofAddr, "http.metrics_addr": cfg.MetricsAddr} {
+		if addr != "" && addr == cfg.Addr {
+			errs = append(errs, fmt.Sprintf("%s must differ from http.addr", name))
+		}
+	}
 	return errs
 }
+
+// minHeaderBytes is the smallest header cap that still fits a Basic
+// Authorization header, a few cookies, and the usual proxy headers.
+const minHeaderBytes = 4096
 
 func clusterValidationErrors(httpCfg HTTPConfig, cfg ClusterConfig) []string {
 	var errs []string
@@ -75,6 +96,11 @@ func clusterValidationErrors(httpCfg HTTPConfig, cfg ClusterConfig) []string {
 	}
 	if httpCfg.Addr == cfg.Addr {
 		errs = append(errs, "http.addr and cluster.addr must differ")
+	}
+	for name, addr := range map[string]string{"http.pprof_addr": httpCfg.PprofAddr, "http.metrics_addr": httpCfg.MetricsAddr} {
+		if addr != "" && addr == cfg.Addr {
+			errs = append(errs, fmt.Sprintf("%s must differ from cluster.addr", name))
+		}
 	}
 	if len(cfg.Peers) == 0 {
 		return errs
