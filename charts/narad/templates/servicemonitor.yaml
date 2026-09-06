@@ -14,7 +14,7 @@ spec:
       {{- include "narad.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: api
   endpoints:
-    - port: api
+    - port: {{ ternary "metrics" "api" .Values.metrics.enabled }}
       path: {{ .Values.metrics.path }}
       interval: {{ .Values.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}

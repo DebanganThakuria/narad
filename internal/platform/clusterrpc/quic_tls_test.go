@@ -90,14 +90,14 @@ func TestVerifyClusterConnection(t *testing.T) {
 // The client config keeps the custom verifier wired in and pins TLS 1.3,
 // so a future edit cannot silently drop back to unverified connections.
 func TestQUICClientTLSConfigUsesClusterVerifier(t *testing.T) {
-	cfg := quicClientTLSConfig()
+	cfg := quicClientTLSConfig(false)
 	if cfg.VerifyPeerCertificate == nil || cfg.VerifyConnection == nil {
 		t.Fatal("client TLS config lost its custom verifiers; certificate checking would be fully disabled")
 	}
 	if cfg.MinVersion != tls.VersionTLS13 {
 		t.Fatalf("MinVersion = 0x%04x, want TLS 1.3", cfg.MinVersion)
 	}
-	srv, err := quicServerTLSConfig()
+	srv, err := quicServerTLSConfig(false)
 	if err != nil {
 		t.Fatalf("quicServerTLSConfig: %v", err)
 	}

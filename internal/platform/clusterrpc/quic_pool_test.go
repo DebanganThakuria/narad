@@ -3,6 +3,7 @@ package clusterrpc
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"sync"
@@ -32,6 +33,8 @@ func (c *fakePoolConn) openStream(context.Context) (streamConn, error) {
 	return client, nil
 }
 
+func (c *fakePoolConn) tlsState() (tls.ConnectionState, bool) { return tls.ConnectionState{}, false }
+
 func (c *fakePoolConn) done() <-chan struct{} { return c.closedCh }
 
 func (c *fakePoolConn) close(cause error) {
@@ -56,7 +59,7 @@ func serveEcho(c *fakePoolConn) {
 	for {
 		select {
 		case server := <-c.serverEnds:
-			go ServeStreamConn(server, server, "", nil, echoHandler{})
+			go ServeStreamConn(server, server, nil, echoHandler{})
 		case <-c.closedCh:
 			return
 		}
@@ -67,7 +70,7 @@ func serveEcho(c *fakePoolConn) {
 // so tests that exercise the fallback path stay fast.
 func newFakePool(t *testing.T, timeout time.Duration, dial func(ctx context.Context, addr string) (poolConn, error)) *quicClientPool {
 	t.Helper()
-	p := newQUICClientPool(timeout, "")
+	p := newQUICClientPool(timeout, "", false)
 	p.dial = dial
 	p.pingTimeout = timeout
 	t.Cleanup(func() { _ = p.close() })

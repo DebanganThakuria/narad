@@ -9,9 +9,18 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
+
+	"golang.org/x/net/netutil"
 
 	"github.com/debanganthakuria/narad/internal/platform/config"
 )
+
+// maxReadHeaderTimeout bounds how long a client may take to send its
+// request headers. ReadTimeout (10 s by default) used to cover it; a
+// slowloris-style client can hold a connection that long per attempt,
+// so headers get a tighter, separate budget.
+const maxReadHeaderTimeout = 5 * time.Second
 
 // Server owns an *http.Server, runs it, and handles graceful shutdown
 // when the context is cancelled.
@@ -28,14 +37,35 @@ func New(cfg config.HTTPConfig, h http.Handler, log *slog.Logger) *Server {
 		cfg:    cfg,
 		logger: log,
 		srv: &http.Server{
-			Addr:         cfg.Addr,
-			Handler:      h,
-			ReadTimeout:  cfg.ReadTimeout.D(),
-			WriteTimeout: cfg.WriteTimeout.D(),
-			IdleTimeout:  cfg.IdleTimeout.D(),
-			ErrorLog:     slog.NewLogLogger(log.Handler(), slog.LevelError),
+			Addr:              cfg.Addr,
+			Handler:           h,
+			ReadTimeout:       cfg.ReadTimeout.D(),
+			ReadHeaderTimeout: readHeaderTimeout(cfg.ReadTimeout.D()),
+			WriteTimeout:      cfg.WriteTimeout.D(),
+			IdleTimeout:       cfg.IdleTimeout.D(),
+			MaxHeaderBytes:    cfg.MaxHeaderBytes,
+			ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelError),
 		},
 	}
+}
+
+// readHeaderTimeout is maxReadHeaderTimeout, or the read timeout when
+// that is shorter.
+func readHeaderTimeout(readTimeout time.Duration) time.Duration {
+	if readTimeout > 0 && readTimeout < maxReadHeaderTimeout {
+		return readTimeout
+	}
+	return maxReadHeaderTimeout
+}
+
+// limitListener caps the connections accepted from ln at maxConns;
+// further connections wait in the kernel's accept backlog until one
+// closes. maxConns <= 0 returns ln unchanged.
+func limitListener(ln net.Listener, maxConns int) net.Listener {
+	if maxConns <= 0 {
+		return ln
+	}
+	return netutil.LimitListener(ln, maxConns)
 }
 
 // Run blocks until ctx is cancelled or the server fails to start. On
@@ -46,7 +76,8 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	s.logger.Info("http listening", "addr", ln.Addr().String())
+	s.logger.Info("http listening", "addr", ln.Addr().String(), "max_connections", s.cfg.MaxConnections)
+	ln = limitListener(ln, s.cfg.MaxConnections)
 
 	serveErr := make(chan error, 1)
 	go func() {

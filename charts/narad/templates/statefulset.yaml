@@ -23,7 +23,7 @@ spec:
       annotations:
         {{- if .Values.metrics.enabled }}
         prometheus.io/path: {{ .Values.metrics.path | quote }}
-        prometheus.io/port: {{ .Values.metrics.port | quote }}
+        prometheus.io/port: {{ .Values.service.ports.metrics | quote }}
         prometheus.io/scrape: "true"
         {{- with .Values.metrics.annotations }}
         {{- toYaml . | nindent 8 }}
@@ -72,6 +72,11 @@ spec:
               containerPort: {{ .Values.service.ports.pprof }}
               protocol: TCP
             {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.service.ports.metrics }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: POD_NAME
               valueFrom:
@@ -109,8 +114,16 @@ spec:
             - name: NARAD_HTTP_PPROF_ADDR
               value: {{ printf ":%v" .Values.service.ports.pprof | quote }}
             {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - name: NARAD_HTTP_METRICS_ADDR
+              value: {{ printf ":%v" .Values.service.ports.metrics | quote }}
+            {{- end }}
             - name: NARAD_SECURITY_ENABLED
               value: {{ .Values.security.enabled | quote }}
+            {{- if and (not .Values.security.enabled) .Values.security.allowInsecureCluster }}
+            - name: NARAD_SECURITY_ALLOW_INSECURE_CLUSTER
+              value: "true"
+            {{- end }}
             {{- if .Values.security.enabled }}
             - name: NARAD_ADMIN_PASSWORD
               valueFrom:
@@ -123,6 +136,14 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.security.existingSecret | default (printf "%s-security" (include "narad.fullname" .)) }}
                   key: {{ .Values.security.clusterSecretKey }}
+            {{- if .Values.security.allowLegacyClusterAuth }}
+            - name: NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH
+              value: "true"
+            {{- end }}
+            {{- if and (not .Values.security.clusterTLS.enabled) .Values.security.allowPlaintextRaft }}
+            - name: NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT
+              value: "true"
+            {{- end }}
             {{- if .Values.security.clusterTLS.enabled }}
             - name: NARAD_CLUSTER_TLS_CERT_FILE
               value: {{ printf "%s/%s" .Values.security.clusterTLS.mountPath .Values.security.clusterTLS.certKey | quote }}

@@ -143,7 +143,7 @@ func TestMetrics_PollerUpdatesLagAndInventory(t *testing.T) {
 	var totalLag float64
 	for _, ts := range snaps {
 		for _, ps := range ts.Partitions {
-			lag := ps.LogEndOffset - ps.CommittedOffset
+			lag := ps.HighWatermark - ps.CommittedOffset
 			env.Metrics.ConsumerLagMessages.WithLabelValues(ts.Topic, fmt.Sprintf("%d", ps.Partition)).Set(float64(lag))
 			totalLag += float64(lag)
 		}

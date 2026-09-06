@@ -44,7 +44,8 @@ The rule for consumers: **if `payload_encoding` is `"base64"`, decode it; otherw
 ## Acking
 
 ```bash
-curl -u $AUTH -X POST "$NARAD/v1/topics/orders/ack?receipt_handle=$HANDLE"
+curl -u $AUTH -X POST "$NARAD/v1/topics/orders/ack?receipt_handle=$HANDLE" \
+  -H "Content-Type: application/json"
 ```
 
 `204`: settled forever. Acks are per-message and may arrive out of order (up to `max_acked_ahead_per_partition` outstanding).
@@ -56,7 +57,7 @@ If you're too late (the visibility window lapsed and the message was handed to s
 Slow job? Heartbeat it instead of raising the topic-wide timeout:
 
 ```bash
-curl -u $AUTH -X POST \
+curl -u $AUTH -X POST -H "Content-Type: application/json" \
   "$NARAD/v1/topics/orders/ack?receipt_handle=$HANDLE&extend=true"
 ```
 
@@ -67,7 +68,7 @@ curl -u $AUTH -X POST \
 Can't process it right now: dependency down, wrong worker, poison pill you want retried elsewhere?
 
 ```bash
-curl -u $AUTH -X POST \
+curl -u $AUTH -X POST -H "Content-Type: application/json" \
   "$NARAD/v1/topics/orders/ack?receipt_handle=$HANDLE&extend=0"
 ```
 

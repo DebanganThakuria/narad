@@ -26,9 +26,15 @@ type TopicSnapshot struct {
 // retention-deleted (Dropped > 0), or the segment file was
 // unreadable.
 type PartitionSnapshot struct {
-	Partition          int
-	LogStartOffset     int64
+	Partition      int
+	LogStartOffset int64
+	// LogEndOffset is the log's next offset: it counts buffered,
+	// unflushed and hidden-tail records too. HighWatermark is the
+	// committed frontier a consumer can actually read; consumer lag is
+	// measured from it, not from LogEndOffset, so a hidden tail after a
+	// crash does not over-report lag until the WAL re-commits it.
 	LogEndOffset       int64
+	HighWatermark      int64
 	SegmentCount       int
 	SizeBytes          int64
 	CommittedOffset    int64

@@ -63,8 +63,29 @@ func httpValidationErrors(cfg HTTPConfig) []string {
 	if cfg.ShutdownGrace > 0 && cfg.MaxConsumeWait > cfg.ShutdownGrace {
 		errs = append(errs, fmt.Sprintf("http.max_consume_wait (%s) must be <= http.shutdown_grace (%s)", cfg.MaxConsumeWait, cfg.ShutdownGrace))
 	}
+	if cfg.MaxHeaderBytes < minHeaderBytes {
+		errs = append(errs, fmt.Sprintf("http.max_header_bytes (%d) must be >= %d", cfg.MaxHeaderBytes, minHeaderBytes))
+	}
+	if cfg.MaxConnections < 0 {
+		errs = append(errs, "http.max_connections must be >= 0 (0 disables the cap)")
+	}
+	if cfg.MaxConsumeInFlightPerIdentity < 0 {
+		errs = append(errs, "http.max_consume_in_flight_per_identity must be >= 0 (0 disables the cap)")
+	}
+	// The diagnostics listeners must not collide with the API listener;
+	// a collision used to surface only as a listen failure logged at
+	// runtime. pprof and metrics may share one address.
+	for name, addr := range map[string]string{"http.pprof_addr": cfg.PprofAddr, "http.metrics_addr": cfg.MetricsAddr} {
+		if addr != "" && addr == cfg.Addr {
+			errs = append(errs, fmt.Sprintf("%s must differ from http.addr", name))
+		}
+	}
 	return errs
 }
+
+// minHeaderBytes is the smallest header cap that still fits a Basic
+// Authorization header, a few cookies, and the usual proxy headers.
+const minHeaderBytes = 4096
 
 func clusterValidationErrors(httpCfg HTTPConfig, cfg ClusterConfig) []string {
 	var errs []string
@@ -75,6 +96,11 @@ func clusterValidationErrors(httpCfg HTTPConfig, cfg ClusterConfig) []string {
 	}
 	if httpCfg.Addr == cfg.Addr {
 		errs = append(errs, "http.addr and cluster.addr must differ")
+	}
+	for name, addr := range map[string]string{"http.pprof_addr": httpCfg.PprofAddr, "http.metrics_addr": httpCfg.MetricsAddr} {
+		if addr != "" && addr == cfg.Addr {
+			errs = append(errs, fmt.Sprintf("%s must differ from cluster.addr", name))
+		}
 	}
 	if len(cfg.Peers) == 0 {
 		return errs
@@ -244,8 +270,15 @@ func topicValidationErrors(cfg TopicConfig) []string {
 		errs = append(errs, fmt.Sprintf("topic.default_retention_age_ms (%d) must be >= %d (1 hour) or 0 (keep forever)",
 			cfg.DefaultRetentionAgeMs, topic.MinRetentionMs))
 	}
-	if cfg.DefaultVisibilityTimeoutMs < 0 {
-		errs = append(errs, "topic.default_visibility_timeout_ms must be >= 0")
+	// A zero visibility timeout means every reservation expires on the
+	// purger's next tick, so every message is handed to several
+	// consumers; a timeout longer than retention lets a reserved message
+	// age out under its lease.
+	if cfg.DefaultVisibilityTimeoutMs <= 0 {
+		errs = append(errs, "topic.default_visibility_timeout_ms must be > 0")
+	}
+	if cfg.DefaultRetentionAgeMs > 0 && cfg.DefaultVisibilityTimeoutMs > cfg.DefaultRetentionAgeMs {
+		errs = append(errs, fmt.Sprintf("topic.default_visibility_timeout_ms (%d) must be <= topic.default_retention_age_ms (%d)", cfg.DefaultVisibilityTimeoutMs, cfg.DefaultRetentionAgeMs))
 	}
 	if cfg.DefaultMaxInFlightPerPartition <= 0 {
 		errs = append(errs, "topic.default_max_in_flight_per_partition must be > 0")
@@ -292,6 +325,22 @@ func securityValidationErrors(cfg SecurityConfig, cluster ClusterConfig) []strin
 	// around RBAC. Single-node clusters (no peers) don't expose it.
 	if cfg.Enabled && len(cluster.Peers) > 0 && strings.TrimSpace(cfg.ClusterSecret) == "" {
 		errs = append(errs, "security.cluster_secret (NARAD_CLUSTER_SECRET) is required when security is enabled with cluster peers")
+	}
+	if cfg.clusterTLSPartial() {
+		errs = append(errs, "security.cluster_tls_cert_file, security.cluster_tls_key_file and security.cluster_tls_ca_file must be set together")
+	}
+	// The cluster secret authenticates the QUIC RPC plane only. Raft has
+	// no authentication of its own, so a secured multi-node cluster with
+	// a plaintext Raft transport is only secure if the operator fences
+	// the port by other means; make them say so.
+	// With security off, the QUIC RPC plane (UDP on the API port) and
+	// Raft are both open to anyone who can reach them; that used to be
+	// a runtime warning only. A multi-node cluster must opt into it.
+	if !cfg.Enabled && len(cluster.Peers) > 0 && !cfg.AllowInsecureCluster {
+		errs = append(errs, "security.enabled=false with cluster peers leaves node-to-node RPC (QUIC on the API port over UDP) and raft unauthenticated: set security.allow_insecure_cluster: true (NARAD_SECURITY_ALLOW_INSECURE_CLUSTER=true) to run a multi-node cluster this way deliberately")
+	}
+	if cfg.Enabled && len(cluster.Peers) > 0 && !cfg.ClusterTLSConfigured() && !cfg.AllowPlaintextRaft {
+		errs = append(errs, "security is enabled with cluster peers but the raft transport has no TLS: set security.cluster_tls_cert_file/_key_file/_ca_file (NARAD_CLUSTER_TLS_*_FILE), or set security.allow_plaintext_raft: true (NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true) if the raft port is restricted by network policy")
 	}
 	return errs
 }

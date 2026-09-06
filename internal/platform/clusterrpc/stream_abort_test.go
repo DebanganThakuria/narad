@@ -65,14 +65,12 @@ func TestClientCloseFallsBackToCloseOnPlainConn(t *testing.T) {
 func TestServerFailurePathAbortsQUICStream(t *testing.T) {
 	for name, drive := range map[string]func(t *testing.T, peer net.Conn){
 		"invalid auth": func(t *testing.T, peer net.Conn) {
-			if err := clusterwire.WriteStreamFrame(peer, authFrame("wrong")); err != nil {
+			if err := clusterwire.WriteStreamFrame(peer, authFrame(clientProof("wrong", testSessionKey))); err != nil {
 				t.Fatalf("write auth: %v", err)
 			}
 		},
 		"corrupt frame": func(t *testing.T, peer net.Conn) {
-			if err := clusterwire.WriteStreamFrame(peer, authFrame("sekret")); err != nil {
-				t.Fatalf("write auth: %v", err)
-			}
+			handshakeAsClient(t, peer, "sekret")
 			// Exactly one header's worth of garbage: the server reads a
 			// 20-byte header, rejects the magic, and stops reading.
 			if _, err := peer.Write([]byte("not a frame header! ")); err != nil {
@@ -87,7 +85,7 @@ func TestServerFailurePathAbortsQUICStream(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				ServeStreamConn(conn, conn, "sekret", nil, echoHandler{})
+				serveStreamConn(conn, conn, testConnAuth("sekret"), nil, echoHandler{})
 			}()
 			_ = peer.SetDeadline(time.Now().Add(2 * time.Second))
 			drive(t, peer)
@@ -111,7 +109,7 @@ func TestServerCleanEOFClosesSendSide(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		ServeStreamConn(conn, conn, "", nil, echoHandler{})
+		ServeStreamConn(conn, conn, nil, echoHandler{})
 	}()
 	_ = peer.SetDeadline(time.Now().Add(2 * time.Second))
 	req := clusterwire.StreamFrame{Type: clusterwire.StreamFrameNodeRequest, RequestID: 1, Payload: []byte("x")}

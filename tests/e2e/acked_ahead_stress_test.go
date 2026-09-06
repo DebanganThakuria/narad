@@ -127,6 +127,7 @@ func TestAckedAheadStressNeverRejectsLiveAcks(t *testing.T) {
 				}
 
 				req, _ := http.NewRequest(http.MethodPost, ackURL+url.QueryEscape(m.ReceiptHandle), nil)
+				req.Header.Set("Content-Type", "application/json")
 				ackResp, err := http.DefaultClient.Do(req)
 				if err != nil {
 					t.Errorf("worker %d ack: %v", w, err)

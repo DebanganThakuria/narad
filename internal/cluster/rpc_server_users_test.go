@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -118,5 +119,32 @@ func TestRPCAlterBodyRejectsNegativePartitions(t *testing.T) {
 	}
 	if err := (rpcAlterTopicBody{Partitions: 6}).validate(); err != nil {
 		t.Fatalf("validate(6) = %v, want nil", err)
+	}
+}
+
+// A member's heartbeat is stamped on the leader's clock when the
+// registration is applied; the sender's own timestamp is ignored. A
+// member with a slow clock used to be declared dead while healthy, and
+// one with a fast clock was never declared dead after it died.
+func TestRPCServerRegisterMemberStampsHeartbeatOnLeaderClock(t *testing.T) {
+	store := newTestStore(t)
+	leaderNow := time.Unix(1_700_000_000, 0)
+	s := &RPCServer{store: store, logger: discardLogger(), now: func() time.Time { return leaderNow }}
+
+	for _, sent := range []int64{0, 1, leaderNow.Unix() - 3600, leaderNow.Unix() + 3600} {
+		payload, err := nodewire.EncodeMemberRequest(nodewire.MemberRequest{ID: "narad-9", Addr: "narad-9:7942", Status: "alive", LastHeartbeat: sent})
+		if err != nil {
+			t.Fatalf("EncodeMemberRequest: %v", err)
+		}
+		if res := roundTripRPC(t, s, payload); res.Status != http.StatusNoContent {
+			t.Fatalf("register member status = %d: %s", res.Status, res.Body)
+		}
+		m, err := store.GetMember("narad-9")
+		if err != nil {
+			t.Fatalf("GetMember: %v", err)
+		}
+		if m.LastHeartbeat != leaderNow.Unix() {
+			t.Fatalf("sent LastHeartbeat=%d: stored %d, want the leader's clock %d", sent, m.LastHeartbeat, leaderNow.Unix())
+		}
 	}
 }

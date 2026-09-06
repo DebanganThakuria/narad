@@ -73,6 +73,10 @@ service:
     api: 7942
     cluster: 7943
     pprof: 6060
+    # Prometheus exposition. Served on its own listener (never on the
+    # API port) when metrics.enabled is true, so scrapes need no
+    # credentials and /metrics is not reachable through the public API.
+    metrics: 9100
 
   headless:
     annotations: {}
@@ -126,6 +130,13 @@ security:
   # assumed to terminate at the ingress in front of Narad.
   enabled: true
 
+  # With security disabled, a multi-node cluster has an open API, an
+  # open node-to-node RPC plane (QUIC on the API port over UDP) and
+  # plaintext Raft. The broker refuses to start that way unless told
+  # it is deliberate; this is that acknowledgement, only read when
+  # security.enabled is false.
+  allowInsecureCluster: false
+
   # Secrets are read from a Kubernetes Secret, never from values.yaml.
   # By default the chart expects a Secret named "<release>-security" with
   # the keys below. Point existingSecret at your own Secret to override.
@@ -137,6 +148,13 @@ security:
   existingSecret: ""
   adminPasswordKey: admin-password
   clusterSecretKey: cluster-secret
+
+  # One-release compatibility for a rolling upgrade from a release whose
+  # node-to-node auth was a fixed token (before session-bound proofs).
+  # Set true, roll every pod, then set false and roll again; leaving it
+  # on keeps accepting the replayable token from any peer that asks for
+  # it. Not needed for a fresh install.
+  allowLegacyClusterAuth: false
 
   # Mutual TLS on the Raft metadata transport (which replicates user
   # password hashes and grants). When enabled, mount a Secret holding a
@@ -154,10 +172,23 @@ security:
     keyKey: tls.key
     caKey: ca.crt
 
+  # Raft has no authentication of its own and the cluster secret does
+  # not cover it: with clusterTLS off, anything that can reach the
+  # cluster port (7943/tcp) can force elections or rewrite the metadata.
+  # The broker refuses to start a secured multi-node cluster without
+  # Raft TLS unless told the port is fenced some other way. The chart's
+  # default is that acknowledgement, because clusterTLS is off by
+  # default; enable clusterTLS for production, or keep this true only
+  # with a NetworkPolicy that restricts 7943/tcp (and 7942/udp, the
+  # QUIC node RPC plane) to the narad pods.
+  allowPlaintextRaft: true
+
 metrics:
+  # Serve /metrics on the dedicated metrics port (service.ports.metrics)
+  # instead of the API port. When false, /metrics stays on the API port
+  # and requires the same Basic credentials as the API.
   enabled: true
   path: /metrics
-  port: "7942"
   annotations: {}
 
 persistence:
@@ -219,11 +250,12 @@ traefik:
   annotations: {}
   labels: {}
   middlewares: []
-  # Paths excluded from the PUBLIC ingress route. /metrics is auth-exempt
-  # (for in-cluster Prometheus, which scrapes pods directly via the
-  # ServiceMonitor) and leaks topic names + traffic volumes, so it must
-  # not be reachable from the public host. Add /healthz and /readyz here
-  # too if external probes don't need them.
+  # Paths excluded from the PUBLIC ingress route. With metrics.enabled
+  # the exposition is on its own port and /metrics on the API port is
+  # 404; with it off, /metrics on the API port needs API credentials but
+  # still leaks topic names + traffic volumes to any credential holder,
+  # so keep it off the public host. Add /healthz and /readyz here too if
+  # external probes don't need them.
   blockedPathPrefixes:
     - /metrics
 
