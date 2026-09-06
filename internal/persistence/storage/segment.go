@@ -147,7 +147,7 @@ func createSegment(dir string, baseOffset int64, now time.Time) (*segment, error
 		return nil, fmt.Errorf("storage: ensure segment dir: %w", err)
 	}
 	path := filepath.Join(dir, segmentFileName(baseOffset))
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, dataFileMode)
+	f, err := syncfile.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, dataFileMode)
 	if err != nil {
 		return nil, fmt.Errorf("storage: create segment %s: %w", path, err)
 	}
@@ -156,7 +156,12 @@ func createSegment(dir string, baseOffset int64, now time.Time) (*segment, error
 	// lose the whole segment (data present, name absent). The ingress WAL
 	// roll does the same.
 	if err := syncDir(dir); err != nil {
+		// Leave nothing behind: the roll is retried before the next
+		// write, and the retry's O_EXCL create would fail with EEXIST
+		// forever on the file this attempt created, so the partition
+		// could never roll again (and never reap) until a restart.
 		_ = f.Close()
+		_ = os.Remove(path)
 		return nil, fmt.Errorf("storage: sync dir for segment %s: %w", path, err)
 	}
 	return &segment{
@@ -212,9 +217,9 @@ func (s *segment) release() error {
 // retry overwrites the torn bytes even if the truncate itself failed.
 func (s *segment) writeEncodedFrame(frame []byte) (pos int64, n int, err error) {
 	pos = s.sizeBytes
-	n, err = s.file.WriteAt(frame, pos)
+	n, err = syncfile.WriteAt(s.file, frame, pos)
 	if err != nil {
-		_ = s.file.Truncate(pos)
+		_ = syncfile.Truncate(s.file, pos)
 		return pos, n, fmt.Errorf("storage: segment write: %w", err)
 	}
 	return pos, n, nil
@@ -257,13 +262,13 @@ func (s *segment) closeNoSync() error { return s.release() }
 // metadata, and a crash that kept the old size would resurrect frames
 // this process has already given up on.
 func (s *segment) truncate(pos int64) error {
-	if err := s.file.Truncate(pos); err != nil {
+	if err := syncfile.Truncate(s.file, pos); err != nil {
 		return err
 	}
 	if _, err := s.file.Seek(pos, io.SeekStart); err != nil {
 		return err
 	}
-	if err := s.file.Sync(); err != nil {
+	if err := syncfile.Sync(s.file); err != nil {
 		return err
 	}
 	s.sizeBytes = pos
