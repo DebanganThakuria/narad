@@ -14,6 +14,11 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
 
+// StatusClientClosedRequest is the (non-standard, nginx-originated)
+// status for a request whose client went away before the reply. It is
+// a client-side outcome and deliberately not a 5xx.
+const StatusClientClosedRequest = 499
+
 // jsonAppender lets response types serialize themselves without going
 // through encoding/json reflection on the hot path.
 type jsonAppender interface {
@@ -150,6 +155,13 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 		s.WriteError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, metastore.ErrRootProtected):
 		s.WriteError(w, http.StatusForbidden, "the root account is protected")
+	case errors.Is(err, context.Canceled):
+		// The request context is cancelled when the client goes away
+		// (net/http cancels it on connection close, including a client
+		// that half-closed after sending its request). Nobody may read
+		// the reply, but it must not be recorded and logged as a server
+		// failure: the server did nothing wrong.
+		s.WriteError(w, StatusClientClosedRequest, "client closed request")
 	default:
 		status := http.StatusInternalServerError
 		msg := op + " failed"

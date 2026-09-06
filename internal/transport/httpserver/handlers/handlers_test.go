@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -281,6 +282,8 @@ func TestWriteBrokerErrorMapsStatuses(t *testing.T) {
 		{"acked ahead full", errs.ErrAckedAheadFull, http.StatusServiceUnavailable},
 		{"control plane unavailable", errs.ErrUnavailable, http.StatusServiceUnavailable},
 		{"fanout delay too long is a conflict", errs.ErrFanoutDelayTooLong, http.StatusConflict},
+		{"client went away", context.Canceled, StatusClientClosedRequest},
+		{"wrapped client went away", fmt.Errorf("apply: %w", context.Canceled), StatusClientClosedRequest},
 		{"internal", errors.New("boom"), http.StatusInternalServerError},
 	}
 

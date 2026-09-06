@@ -10,7 +10,11 @@ func EncodePartitionSegmentsRequest(req PartitionSegmentsRequest) ([]byte, error
 	if err := w.string(req.Topic); err != nil {
 		return nil, err
 	}
-	w.i32(int32(req.Partition))
+	partition, err := partitionField(req.Partition)
+	if err != nil {
+		return nil, err
+	}
+	w.i32(partition)
 	return w.finish(), nil
 }
 
@@ -40,7 +44,11 @@ func EncodeFetchSegmentChunkRequest(req FetchSegmentChunkRequest) ([]byte, error
 	if err := w.string(req.Topic); err != nil {
 		return nil, err
 	}
-	w.i32(int32(req.Partition))
+	partition, err := partitionField(req.Partition)
+	if err != nil {
+		return nil, err
+	}
+	w.i32(partition)
 	w.i64(req.BaseOffset)
 	w.i64(req.At)
 	w.i64(req.Length)
@@ -89,7 +97,11 @@ func EncodePrepareHandoffRequest(req PrepareHandoffRequest) ([]byte, error) {
 	if err := w.string(req.Topic); err != nil {
 		return nil, err
 	}
-	w.i32(int32(req.Partition))
+	partition, err := partitionField(req.Partition)
+	if err != nil {
+		return nil, err
+	}
+	w.i32(partition)
 	w.i64(req.FreezeTTLNanos)
 	// Optional trailing field: absent means "arm or extend, no fence",
 	// which is exactly what a pre-token destination sends.

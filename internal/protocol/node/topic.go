@@ -88,7 +88,11 @@ func EncodeTopicPartitionStatsRequest(req TopicPartitionStatsRequest) ([]byte, e
 	if err := w.string(req.Topic); err != nil {
 		return nil, err
 	}
-	w.i32(int32(req.Partition))
+	partition, err := partitionField(req.Partition)
+	if err != nil {
+		return nil, err
+	}
+	w.i32(partition)
 	return w.finish(), nil
 }
 

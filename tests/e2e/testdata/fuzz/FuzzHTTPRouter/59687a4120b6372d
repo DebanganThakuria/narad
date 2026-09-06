@@ -1,0 +1,12 @@
+go test fuzz v1
+string("\xa9ET")
+string("/readyz")
+byte('\x00')
+string("user")
+string("pass")
+string("")
+string("")
+string("")
+string("")
+[]byte("")
+int8(0)

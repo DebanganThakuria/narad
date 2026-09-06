@@ -23,7 +23,7 @@ type createTopicReq struct {
 
 // mustCreateTopic creates a topic and waits until every partition has an
 // assignment, so follow-up produces and consumes don't race the controller.
-func mustCreateTopic(t *testing.T, e *env, req createTopicReq) topic.Topic {
+func mustCreateTopic(t testing.TB, e *env, req createTopicReq) topic.Topic {
 	t.Helper()
 
 	body := map[string]any{"name": req.Name}
@@ -80,7 +80,7 @@ type produceResult struct {
 // visible in a partition log. Produce is asynchronous (202 + ingress WAL),
 // so returning at accept time would let follow-up consumes race the
 // dispatcher.
-func mustProduce(t *testing.T, e *env, topicName, key string, val any) produceResult {
+func mustProduce(t testing.TB, e *env, topicName, key string, val any) produceResult {
 	t.Helper()
 	payload, err := json.Marshal(val)
 	if err != nil {
@@ -96,7 +96,7 @@ func (e *env) produce(topicName, key, msg string) (offset int64, partition int) 
 	return res.Offset, res.Partition
 }
 
-func produceAndAwaitVisibility(t *testing.T, e *env, topicName, key string, payload []byte) produceResult {
+func produceAndAwaitVisibility(t testing.TB, e *env, topicName, key string, payload []byte) produceResult {
 	t.Helper()
 
 	before := topicNextOffsets(t, e, topicName)
@@ -116,7 +116,7 @@ func produceAndAwaitVisibility(t *testing.T, e *env, topicName, key string, payl
 
 // topicNextOffsets snapshots NextOffset for every partition; the produce
 // helpers diff against it to detect where a new record landed.
-func topicNextOffsets(t *testing.T, e *env, topicName string) []int64 {
+func topicNextOffsets(t testing.TB, e *env, topicName string) []int64 {
 	t.Helper()
 	details, err := e.Broker.GetTopicDetails(context.Background(), topicName)
 	if err != nil {
@@ -132,7 +132,7 @@ func topicNextOffsets(t *testing.T, e *env, topicName string) []int64 {
 // waitForAnyVisibleOffset polls until some partition's high watermark
 // moves past its snapshot in previousNext, then returns the offset the
 // new record landed at and its partition.
-func waitForAnyVisibleOffset(t *testing.T, e *env, topicName string, previousNext []int64) (int64, int) {
+func waitForAnyVisibleOffset(t testing.TB, e *env, topicName string, previousNext []int64) (int64, int) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -153,7 +153,7 @@ func waitForAnyVisibleOffset(t *testing.T, e *env, topicName string, previousNex
 
 // waitForVisibleDelta polls until at least want records (summed across
 // partitions) became visible since the previousNext snapshot.
-func waitForVisibleDelta(t *testing.T, e *env, topicName string, previousNext []int64, want int64) {
+func waitForVisibleDelta(t testing.TB, e *env, topicName string, previousNext []int64, want int64) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -186,7 +186,7 @@ type consumeQuery struct {
 
 // mustConsume issues a GET /v1/topics/{topic}/consume with optional query
 // parameters. Returns (message, true) on 200, (zero, false) on 204.
-func mustConsume(t *testing.T, e *env, topicName string, q consumeQuery) (topic.Message, bool) {
+func mustConsume(t testing.TB, e *env, topicName string, q consumeQuery) (topic.Message, bool) {
 	t.Helper()
 
 	query := url.Values{}
@@ -227,7 +227,7 @@ func (e *env) consume(path string) topic.Message {
 }
 
 // mustAck acks a message by its receipt handle and fatals on non-204.
-func mustAck(t *testing.T, e *env, topicName, receiptHandle string) {
+func mustAck(t testing.TB, e *env, topicName, receiptHandle string) {
 	t.Helper()
 	resp := jsonReq(t, http.MethodPost, e.url("/v1/topics/"+topicName+"/ack?receipt_handle="+url.QueryEscape(receiptHandle)), nil)
 	if resp.StatusCode != http.StatusNoContent {

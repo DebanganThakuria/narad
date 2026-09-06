@@ -188,8 +188,14 @@ var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 var patternPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{0,255}\*?$`)
 
 // ValidateUsername rejects usernames that are empty, over-long, or
-// contain characters outside the topic-name charset.
+// contain characters outside the topic-name charset. "." and ".." are
+// refused like topic names: the ServeMux cleans them out of
+// /v1/users/{username}, so such a user could be created but never
+// fetched, updated, or deleted through the API.
 func ValidateUsername(name string) error {
+	if name == "." || name == ".." {
+		return fmt.Errorf("username must not be %q", name)
+	}
 	if !usernamePattern.MatchString(name) {
 		return fmt.Errorf("username must match %s", usernamePattern)
 	}
