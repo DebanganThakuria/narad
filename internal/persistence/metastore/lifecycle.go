@@ -3,6 +3,7 @@ package metastore
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -26,9 +27,26 @@ const appliedCaughtUpContactWindow = 5 * time.Second
 // fsm.db, or a reopen of the directory in the same process (an
 // embedded restart, a test) waits out boltOpenTimeout and fails as if
 // another process held the files.
+//
+// The transfer is best effort: when it fails the node still exits and
+// the other voters elect a leader after their heartbeat timeout, which
+// costs them about one election timeout of stalled consensus instead
+// of the few milliseconds a transfer takes. Raft reports why only at
+// debug level, so the outcome is logged here; a rolling restart that
+// keeps stalling is diagnosable from the leader's last lines.
 func (s *Store) Close() error {
 	if s.r.State() == raft.Leader {
-		s.r.LeadershipTransfer() //nolint:errcheck
+		log := s.log
+		if log == nil {
+			log = slog.New(slog.DiscardHandler)
+		}
+		started := time.Now()
+		if err := s.r.LeadershipTransfer().Error(); err != nil {
+			log.Warn("leadership transfer on shutdown failed; peers will elect a leader after their heartbeat timeout",
+				"error", err, "took", time.Since(started).Round(time.Millisecond))
+		} else {
+			log.Info("leadership transferred before shutdown", "took", time.Since(started).Round(time.Millisecond))
+		}
 	}
 	shutdownErr := s.r.Shutdown().Error()
 	var logStoreErr error
