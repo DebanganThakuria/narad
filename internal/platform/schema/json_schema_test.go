@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -301,5 +302,60 @@ func TestCheckCompatible(t *testing.T) {
 				t.Fatalf("checkCompatible() error = %v, want nil", err)
 			}
 		})
+	}
+}
+
+// Validation errors are sent to clients verbatim. The schema is
+// registered under an opaque narad:// URL so the message never carries
+// the broker's working directory (the relative resource name the
+// compiler used to get was resolved to file:///<cwd>/...).
+func TestJSONSchemaValidationErrorCarriesOpaqueResourceURL(t *testing.T) {
+	registry := NewJSONSchema()
+	if err := registry.Load(context.Background(), "orders", 2, []byte(`{"type":"object","properties":{"qty":{"type":"string"}}}`)); err != nil {
+		t.Fatal(err)
+	}
+	err := registry.Validate(context.Background(), "orders", []byte(`{"qty":1}`))
+	if err == nil {
+		t.Fatal("Validate() error = nil, want violation")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "file://") || strings.Contains(msg, "/Users/") || strings.Contains(msg, "/home/") {
+		t.Fatalf("validation error leaks a filesystem path: %s", msg)
+	}
+	if !strings.Contains(msg, "narad://schema/orders/2") {
+		t.Fatalf("validation error = %q, want the opaque narad://schema/orders/2 resource URL", msg)
+	}
+}
+
+func TestJSONSchemaInDocumentRefStillResolves(t *testing.T) {
+	registry := NewJSONSchema()
+	schemaBytes := []byte(`{
+		"type":"object",
+		"properties":{"qty":{"$ref":"#/$defs/count"}},
+		"$defs":{"count":{"type":"integer","minimum":0}}
+	}`)
+	if err := registry.Load(context.Background(), "orders", 1, schemaBytes); err != nil {
+		t.Fatalf("Load() with in-document $ref error = %v", err)
+	}
+	if err := registry.Validate(context.Background(), "orders", []byte(`{"qty":3}`)); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if err := registry.Validate(context.Background(), "orders", []byte(`{"qty":-1}`)); err == nil {
+		t.Fatal("Validate() accepted a payload the $ref target rejects")
+	}
+}
+
+func TestJSONSchemaExternalMetaschemaIsRefused(t *testing.T) {
+	registry := NewJSONSchema()
+	err := registry.ValidateDefinition(context.Background(), "orders", []byte(`{"$schema":"https://example.invalid/meta","type":"object"}`))
+	if err == nil {
+		t.Fatal("ValidateDefinition() with a remote $schema error = nil, want refusal")
+	}
+	if strings.Contains(err.Error(), "example.invalid") {
+		t.Fatalf("error echoes the client-supplied URL: %v", err)
+	}
+	// The embedded drafts still work.
+	if err := registry.ValidateDefinition(context.Background(), "orders", []byte(`{"$schema":"http://json-schema.org/draft-07/schema#","type":"object"}`)); err != nil {
+		t.Fatalf("ValidateDefinition() with the embedded draft-07 metaschema error = %v", err)
 	}
 }

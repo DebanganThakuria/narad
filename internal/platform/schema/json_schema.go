@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -128,6 +129,30 @@ func (r *JSONSchema) loadLocked(topic string, version int, schemaBytes []byte) e
 	return nil
 }
 
+// errExternalRef is the client-facing reason for any $ref or $schema
+// that points outside the document being compiled. It deliberately
+// names nothing about the target: the broker never opens it, and the
+// message must not echo a path or URL the caller could use to probe
+// the filesystem.
+var errExternalRef = errors.New("external $ref is not allowed; only references into the schema document itself (\"#/$defs/...\") resolve")
+
+// noExternalRefs is the URL loader installed on every compiler. The
+// library's default is FileLoader, which would open any file:// URL a
+// client puts in $ref on the broker's filesystem (and echo the OS error
+// for a missing one). Refusing every load means only in-document
+// references and the embedded draft metaschemas resolve.
+type noExternalRefs struct{}
+
+func (noExternalRefs) Load(string) (any, error) { return nil, errExternalRef }
+
+// schemaResourceURL is the opaque absolute URL a topic's schema is
+// registered under. A relative name would be resolved by the compiler
+// against the process working directory and leak it (as file:///...)
+// in every validation error sent to clients.
+func schemaResourceURL(topic string, version int) string {
+	return fmt.Sprintf("narad://schema/%s/%d", topic, version)
+}
+
 func compileSchema(topic string, version int, schemaBytes []byte) (*jsonschema.Schema, error) {
 	schemaDoc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaBytes))
 	if err != nil {
@@ -135,15 +160,26 @@ func compileSchema(topic string, version int, schemaBytes []byte) (*jsonschema.S
 	}
 
 	c := jsonschema.NewCompiler()
-	resource := fmt.Sprintf("%s-%d.json", topic, version)
+	c.UseLoader(noExternalRefs{})
+	resource := schemaResourceURL(topic, version)
 	if err := c.AddResource(resource, schemaDoc); err != nil {
-		return nil, fmt.Errorf("schema: %w", err)
+		return nil, clientSafeCompileError(err)
 	}
 	compiled, err := c.Compile(resource)
 	if err != nil {
-		return nil, fmt.Errorf("schema: %w", err)
+		return nil, clientSafeCompileError(err)
 	}
 	return compiled, nil
+}
+
+// clientSafeCompileError strips the target URL from a refused load so
+// the 400 body carries the policy, not the caller's probe echoed back.
+func clientSafeCompileError(err error) error {
+	var loadErr *jsonschema.LoadURLError
+	if errors.As(err, &loadErr) {
+		return fmt.Errorf("schema: %w", errExternalRef)
+	}
+	return fmt.Errorf("schema: %w", err)
 }
 
 // Validate unmarshals the payload and checks it against the latest
