@@ -34,7 +34,7 @@ Every variable, with the compiled-in default when unset. (This table is generate
 | `NARAD_CLUSTER_INITIAL_MEMBERS` | empty | IDs allowed to bootstrap; everyone else joins. Empty = legacy "all bootstrap" |
 | `NARAD_CLUSTER_SECRET` | (none) | Shared secret gating all node-to-node QUIC RPC (proven per stream, bound to the TLS session, in both directions) |
 | `NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH` | `false` | Rolling-upgrade compatibility with nodes that used the fixed-token cluster auth; on for the roll, off after |
-| `NARAD_CLUSTER_TLS_CERT_FILE` / `_KEY_FILE` / `_CA_FILE` | off | Mutual TLS for Raft; all three or nothing. Required for a secured multi-node cluster unless the next flag is set |
+| `NARAD_CLUSTER_TLS_CERT_FILE` / `_KEY_FILE` / `_CA_FILE` | off | Mutual TLS for Raft; all three or nothing. Required for a secured multi-node cluster unless the next flag is set. Read once at startup: to renew or rotate, see [Rotating the Raft TLS certificates](raft-tls-rotation.md) |
 | `NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT` | `false` | Explicit acknowledgement that Raft (7943/tcp, which has no authentication of its own) runs plaintext and is fenced by network policy instead |
 | `NARAD_CLUSTER_RAFT_SNAPSHOT_THRESHOLD` | `8192` | Applied Raft entries since the last metastore snapshot before the next one is taken (hashicorp/raft default) |
 | `NARAD_CLUSTER_RAFT_SNAPSHOT_INTERVAL` | `120s` | How often Raft checks the threshold; the check is jittered up to 2x. Minimum `5ms` |
