@@ -401,25 +401,37 @@ If you leave peers unset, Narad keeps the single-node bootstrap path.
 ## Schema validation & evolution
 
 A topic can carry an optional JSON Schema, set at create time or via
-`PATCH /v1/topics/{topic}` with a `schema` field. When present, every
-produced message body must be valid JSON and match the schema; invalid
-payloads are rejected with **400**. Topics without a schema treat
-produced bodies as opaque bytes: JSON, text, or binary all round-trip:
-consume returns JSON verbatim, text as a JSON string, and binary
-base64-encoded with `"payload_encoding":"base64"` flagged alongside
+`PATCH /v1/topics/{topic}` with a `schema` field (`narad topic add|edit
+--schema`). When present, every produced body must be one JSON text in
+valid UTF-8 that validates against the current version; anything else
+(text, binary, trailing data, invalid UTF-8, a schema violation) is
+rejected with **400**, with the reason capped at 2 KiB. Numbers are
+validated exactly (integers beyond 2^53 keep their value), `format` is
+asserted on every draft, and `pattern` is RE2 (linear time). Topics
+without a schema treat produced bodies as opaque bytes: JSON, text, or
+binary all round-trip: consume returns JSON verbatim, text as a JSON
+string, and binary base64-encoded with `"payload_encoding":"base64"`
+flagged alongside
 ([details](https://debanganthakuria.github.io/narad/client/consuming/#the-payload-comes-back-the-way-you-sent-it)).
 
+`GET /v1/topics/{topic}` reports `schema_version` and the current
+`schema`; `GET /v1/topics/{topic}/schema` returns the whole history.
 Schema changes are **additive-only and backwards-compatible**, enforced
 at registration against the latest version persisted in the metastore
-(history is append-only; a version is never overwritten). You may add
-optional properties, widen types and value sets, and loosen bounds;
-removing a property, narrowing a type, adding a required field, closing
-`additionalProperties`, or tightening any bound is rejected with
-`ErrSchemaIncompatible`. The check fails closed: a construct it does not
-model (`oneOf`, `not`, `if/then/else`, ...) may only stay identical.
-`$ref` resolves only inside the schema document; `file://` and remote
-references are refused. The full keyword list is in
-[docs/client/topics.md](docs/client/topics.md#schema-evolution).
+(history is append-only, capped at 1000 versions; a version is never
+overwritten or removed). Re-registering the current schema is a no-op,
+and `schema_base_version` makes an update conditional on the current
+version (**409** otherwise). You may add optional properties, widen
+types and value sets, and loosen bounds; removing a property, narrowing
+a type, adding a required field, closing `additionalProperties`, or
+tightening any bound is rejected with `ErrSchemaIncompatible`. The
+check fails closed: a construct it does not model (`oneOf`, `not`,
+`if/then/else`, ...) may only stay identical. `$ref` resolves only
+inside the schema document; `file://` and remote references are
+refused, and documents over 256 KiB or 64 levels deep are refused at
+registration. Fan-out children adopt the parent's history and are
+parent-managed while attached. The full contract is in
+[docs/client/topics.md](docs/client/topics.md#schemas).
 
 ## Testing
 
