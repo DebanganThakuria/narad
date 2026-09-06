@@ -62,18 +62,40 @@ func ListPartitionSegments(partitionDir string) ([]SegmentInfo, error) {
 	return out, nil
 }
 
-// ReadSegmentRange reads len bytes at offset from the segment file with
-// the given base offset in partitionDir. Used to stream a segment to a
-// destination in bounded chunks. A read past EOF returns the available
-// bytes (short read), never an error — the active segment grows under a
-// concurrent writer, so callers re-list to learn the final size.
+// MaxSegmentReadBytes bounds one ReadSegmentRange call. The length
+// arrives from the wire on OpFetchSegmentChunk, so it must never size an
+// allocation on its own: a peer asking for 1 TiB used to be a 1 TiB
+// make([]byte) and an OOM kill. The mover reads 1 MiB chunks; 4 MiB
+// leaves room for a bigger chunk without letting any single request
+// pin more than that.
+const MaxSegmentReadBytes = 4 << 20
+
+// ReadSegmentRange reads up to length bytes at offset at from the
+// segment file with the given base offset in partitionDir. Used to
+// stream a segment to a destination in bounded chunks. length is clamped
+// to MaxSegmentReadBytes and to the bytes the file holds past at, so the
+// allocation is bounded by both; a negative at or length is an error. A
+// read at or past EOF returns no bytes, never an error: the active
+// segment grows under a concurrent writer, so callers re-list to learn
+// the final size.
 func ReadSegmentRange(partitionDir string, baseOffset, at, length int64) ([]byte, error) {
+	if at < 0 || length < 0 {
+		return nil, fmt.Errorf("storage: read segment range: negative position (at=%d, length=%d)", at, length)
+	}
 	path := filepath.Join(partitionDir, segmentFileName(baseOffset))
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	length = min(length, MaxSegmentReadBytes, max(fi.Size()-at, 0))
+	if length == 0 {
+		return []byte{}, nil
+	}
 	buf := make([]byte, length)
 	n, err := f.ReadAt(buf, at)
 	if err != nil && err != io.EOF {

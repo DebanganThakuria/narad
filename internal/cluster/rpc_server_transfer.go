@@ -11,8 +11,15 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
+
+// maxFetchSegmentChunkBytes caps a wire-supplied chunk length before it
+// reaches the storage read (which clamps again, to the file size). The
+// mover asks for 1 MiB; a request for more is served the cap, not an
+// error, so a future mover with a larger chunk keeps working.
+const maxFetchSegmentChunkBytes = storage.MaxSegmentReadBytes
 
 // handoffConfirmer is the fenced re-arm a broker exposes when it fences
 // its handoff freeze with a token (*messaging.Engine does). A broker
@@ -39,7 +46,11 @@ func (s *RPCServer) handleFetchSegmentChunk(payload []byte) nodewire.Response {
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid fetch-segment request: "+err.Error())
 	}
-	data, err := s.broker.ReadPartitionSegment(rpcRequestContext(), req.Topic, req.Partition, req.BaseOffset, req.At, req.Length)
+	if req.At < 0 || req.Length <= 0 {
+		return errorResponse(http.StatusBadRequest, "invalid fetch-segment request: at must be >= 0 and length > 0")
+	}
+	length := min(req.Length, maxFetchSegmentChunkBytes)
+	data, err := s.broker.ReadPartitionSegment(rpcRequestContext(), req.Topic, req.Partition, req.BaseOffset, req.At, length)
 	if err != nil {
 		return s.brokerError("fetch segment", err)
 	}
