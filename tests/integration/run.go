@@ -75,7 +75,7 @@ func runLoad(cfg config) error {
 
 	stats := &runStats{}
 	fmt.Printf("producing messages: %d messages concurrency=%d\n", len(jobs), cfg.produceConcurrency)
-	if err := produceMessages(ctx, lb, jobs, cfg.produceConcurrency, stats); err != nil {
+	if err := produceMessages(ctx, lb, jobs, cfg.produceConcurrency, cfg.produceRate, stats); err != nil {
 		return err
 	}
 

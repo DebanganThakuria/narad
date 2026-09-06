@@ -44,6 +44,13 @@ type Config struct {
 	// TLS, when non-nil, secures the Raft transport with mutual TLS.
 	// Nil runs it as plain TCP (relying on network isolation).
 	TLS *TLSConfig
+	// SnapshotThreshold, SnapshotInterval and TrailingLogs override
+	// hashicorp/raft's log compaction defaults (8192 entries, 120s,
+	// 10240 entries); a zero value keeps the default for that field.
+	// See config.ClusterConfig for what they mean.
+	SnapshotThreshold uint64
+	SnapshotInterval  time.Duration
+	TrailingLogs      uint64
 }
 
 // startupLog returns cfg.Log or a discarding logger.
@@ -84,6 +91,12 @@ type Store struct {
 	// link records its exact starting point; see fanout_anchor.go.
 	attachOffsetsMu sync.RWMutex
 	attachOffsets   AttachOffsetResolver
+
+	// logs is Raft's log store; AppliedCaughtUp reads entry types from
+	// it to tell "the FSM is behind" from "the trailing entries are
+	// no-ops the FSM never sees".
+	logs raft.LogStore
+	log  *slog.Logger
 }
 
 // New opens or creates the Raft metastore at cfg.DataDir.
@@ -108,7 +121,7 @@ func New(cfg Config) (*Store, error) {
 		_ = fsm.db.Close()
 		return nil, err
 	}
-	return &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore}, nil
+	return &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore, logs: logStore, log: cfg.startupLog()}, nil
 }
 
 // newRaft wires up the Raft node: log/stable store, snapshot store, TCP
@@ -153,6 +166,15 @@ func newRaft(cfg Config, fsm *fsmState) (r *raft.Raft, transport *commitObservin
 	rc := raft.DefaultConfig()
 	rc.LocalID = raft.ServerID(cfg.NodeID)
 	rc.LogOutput = logOutput
+	if cfg.SnapshotThreshold > 0 {
+		rc.SnapshotThreshold = cfg.SnapshotThreshold
+	}
+	if cfg.SnapshotInterval > 0 {
+		rc.SnapshotInterval = cfg.SnapshotInterval
+	}
+	if cfg.TrailingLogs > 0 {
+		rc.TrailingLogs = cfg.TrailingLogs
+	}
 
 	r, err = raft.NewRaft(rc, fsm, boltStore, boltStore, snapStore, transport)
 	if err != nil {

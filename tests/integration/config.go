@@ -19,6 +19,7 @@ func parseConfig(args []string) (config, error) {
 	flagSet.IntVar(&cfg.partitions, "partitions", 6, "partitions per topic")
 	flagSet.IntVar(&cfg.produceConcurrency, "produce-concurrency", 32, "concurrent producer workers")
 	flagSet.IntVar(&cfg.consumeConcurrency, "consume-concurrency", 32, "concurrent consumer workers")
+	flagSet.IntVar(&cfg.produceRate, "produce-rate", 0, "cap on produces per second across all workers; 0 = as fast as the cluster accepts them (a scripted scenario uses it to keep load flowing for a known duration)")
 	flagSet.DurationVar(&cfg.timeout, "timeout", 2*time.Minute, "overall driver timeout")
 	flagSet.DurationVar(&cfg.assignmentTimeout, "assignment-timeout", 20*time.Second, "maximum time to wait for topic assignments to become visible")
 	flagSet.DurationVar(&cfg.visibilityTimeout, "visibility-timeout", 30*time.Second, "topic visibility timeout")
@@ -48,6 +49,9 @@ func parseConfig(args []string) (config, error) {
 	}
 	if cfg.produceConcurrency <= 0 || cfg.consumeConcurrency <= 0 {
 		return cfg, errors.New("concurrency values must be > 0")
+	}
+	if cfg.produceRate < 0 {
+		return cfg, errors.New("--produce-rate must be >= 0")
 	}
 	if cfg.timeout <= 0 {
 		return cfg, errors.New("--timeout must be > 0")

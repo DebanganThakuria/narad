@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,17 +54,18 @@ func runChaos(cfg config) error {
 	}
 
 	stats := &runStats{}
+	claims := newClaimTable(len(expected))
 	chaosCtx, stop := context.WithCancel(ctx)
 	defer stop()
 
 	producerDone := make(chan error, 1)
 	go func() {
-		producerDone <- produceMessages(chaosCtx, lb, jobs, cfg.produceConcurrency, stats)
+		producerDone <- produceMessages(chaosCtx, lb, jobs, cfg.produceConcurrency, cfg.produceRate, stats)
 	}()
 
 	consumerDone := make(chan error, 1)
 	go func() {
-		consumerDone <- consumeAndAckChaos(chaosCtx, lb, topics, expected, cfg.consumeConcurrency, stats)
+		consumerDone <- consumeAndAckChaos(chaosCtx, lb, topics, expected, cfg.consumeConcurrency, stats, claims)
 	}()
 
 	producerComplete := false
@@ -84,7 +86,7 @@ func runChaos(cfg config) error {
 			consumerComplete = true
 		case <-ctx.Done():
 			stop()
-			return fmt.Errorf("%w during chaos: produced=%d acked=%d want=%d", ctx.Err(), stats.produced.Load(), stats.acked.Load(), len(expected))
+			return fmt.Errorf("%w during chaos: produced=%d acked=%d want=%d; never acked: %s", ctx.Err(), stats.produced.Load(), stats.acked.Load(), len(expected), claims.missing(expected, 60))
 		}
 	}
 
@@ -156,6 +158,27 @@ func (c *claimTable) markAcked(id string) bool {
 	return true
 }
 
+// missing lists up to limit expected messages that were never acked, as
+// topic/key#sequence, so a loss can be traced to a partition (the key
+// picks it) and an offset range.
+func (c *claimTable) missing(expected map[string]messageJob, limit int) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var ids []string
+	total := 0
+	for id, job := range expected {
+		if c.states[id] == chaosStateAcked {
+			continue
+		}
+		total++
+		if len(ids) < limit {
+			ids = append(ids, fmt.Sprintf("%s/%s#%d", job.Topic, job.Key, job.Body.Sequence))
+		}
+	}
+	sort.Strings(ids)
+	return fmt.Sprintf("%d messages: %s", total, strings.Join(ids, " "))
+}
+
 func (c *claimTable) ackedCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -168,12 +191,11 @@ func (c *claimTable) ackedCount() int {
 	return count
 }
 
-func consumeAndAckChaos(ctx context.Context, lb *roundRobinClient, topics []string, expected map[string]messageJob, concurrency int, stats *runStats) error {
+func consumeAndAckChaos(ctx context.Context, lb *roundRobinClient, topics []string, expected map[string]messageJob, concurrency int, stats *runStats, claims *claimTable) error {
 	consumeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	var topicCursor atomic.Uint64
-	claims := newClaimTable(len(expected))
 	errCh := make(chan error, 1)
 	var wg sync.WaitGroup
 

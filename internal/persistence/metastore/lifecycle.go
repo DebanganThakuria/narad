@@ -3,6 +3,7 @@ package metastore
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -26,9 +27,26 @@ const appliedCaughtUpContactWindow = 5 * time.Second
 // fsm.db, or a reopen of the directory in the same process (an
 // embedded restart, a test) waits out boltOpenTimeout and fails as if
 // another process held the files.
+//
+// The transfer is best effort: when it fails the node still exits and
+// the other voters elect a leader after their heartbeat timeout, which
+// costs them about one election timeout of stalled consensus instead
+// of the few milliseconds a transfer takes. Raft reports why only at
+// debug level, so the outcome is logged here; a rolling restart that
+// keeps stalling is diagnosable from the leader's last lines.
 func (s *Store) Close() error {
 	if s.r.State() == raft.Leader {
-		s.r.LeadershipTransfer() //nolint:errcheck
+		log := s.log
+		if log == nil {
+			log = slog.New(slog.DiscardHandler)
+		}
+		started := time.Now()
+		if err := s.r.LeadershipTransfer().Error(); err != nil {
+			log.Warn("leadership transfer on shutdown failed; peers will elect a leader after their heartbeat timeout",
+				"error", err, "took", time.Since(started).Round(time.Millisecond))
+		} else {
+			log.Info("leadership transferred before shutdown", "took", time.Since(started).Round(time.Millisecond))
+		}
 	}
 	shutdownErr := s.r.Shutdown().Error()
 	var logStoreErr error
@@ -117,12 +135,23 @@ func (s *Store) AppliedCaughtUp() bool {
 	if err != nil {
 		return false
 	}
-	// applied_index is advanced by Raft's main loop when it hands a batch
-	// to the FSM goroutine, before the FSM has applied it; a reader that
-	// trusts it alone can find the store one batch behind "caught up".
-	// fsm_pending is the number of batches queued at the FSM, so both
-	// together mean the FSM state really covers applied_index.
+	// applied_index is advanced by Raft's main loop when it has QUEUED a
+	// batch for the FSM goroutine, before the FSM has applied it, and
+	// fsm_pending counts only the batches still queued, not the one
+	// being applied. A restarting node with no recent snapshot replays
+	// its whole log from index 1 into the FSM in batches of 64, and on
+	// those two numbers it read as caught up while the FSM was still
+	// applying the last batch, the one holding the newest entries. The
+	// ownership latch then set on a view that predated a partition
+	// flip, the node treated a partition it had just handed off as its
+	// own, committed replayed produce records into its stale copy, and
+	// the sweep later quarantined them: accepted messages no consumer
+	// ever saw. So the FSM's own durable index has to cover applied_index
+	// as well (fsmCoversApplied).
 	if pending, err := strconv.ParseUint(stats["fsm_pending"], 10, 64); err != nil || pending > 0 {
+		return false
+	}
+	if !s.fsmCoversApplied(applied) {
 		return false
 	}
 	if s.r.State() == raft.Leader {
@@ -183,6 +212,34 @@ func (s *Store) ClusterReady() error {
 		return fmt.Errorf("%w: replica has not caught up with the leader since start", ErrNotReady)
 	}
 	return nil
+}
+
+// fsmCoversApplied reports whether the FSM has durably applied every
+// command Raft has handed it up to raftApplied. The FSM's own index
+// (fsmState.applied) only moves on LogCommand entries, and Raft never
+// shows the FSM its no-op and configuration entries, so the two indexes
+// legitimately differ by the trailing non-command entries (a fresh
+// leader's term starts with a no-op). The log store settles it: any
+// LogCommand between the FSM's index and raftApplied is still being
+// applied. The scan is bounded by that gap, which is a couple of
+// entries when caught up and returns at the first entry when the FSM
+// is far behind. An index the log no longer holds was covered by the
+// snapshot the FSM was restored from.
+func (s *Store) fsmCoversApplied(raftApplied uint64) bool {
+	fsmApplied := s.fsm.applied.Load()
+	if s.logs == nil {
+		return true
+	}
+	for idx := raftApplied; idx > fsmApplied; idx-- {
+		var l raft.Log
+		if err := s.logs.GetLog(idx, &l); err != nil {
+			return errors.Is(err, raft.ErrLogNotFound)
+		}
+		if l.Type == raft.LogCommand {
+			return false
+		}
+	}
+	return true
 }
 
 var _ Metastore = (*Store)(nil)

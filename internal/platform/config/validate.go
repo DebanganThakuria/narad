@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/platform/netaddr"
@@ -15,6 +16,11 @@ import (
 // below three voters is a config mistake. Larger (odd) sizes are fine —
 // scale-out grows the peer list with the StatefulSet.
 const minClusterPeers = 3
+
+// minRaftSnapshotInterval is hashicorp/raft's own floor for the
+// snapshot check interval (raft.ValidateConfig); failing here gives the
+// operator the config key instead of a Raft startup error.
+const minRaftSnapshotInterval = Duration(5 * time.Millisecond)
 
 // Validate enforces invariants the rest of the system relies on. Callers
 // should fail fast on a Validate error — Narad refuses to start with bad
@@ -101,6 +107,12 @@ func clusterValidationErrors(httpCfg HTTPConfig, cfg ClusterConfig) []string {
 		if addr != "" && addr == cfg.Addr {
 			errs = append(errs, fmt.Sprintf("%s must differ from cluster.addr", name))
 		}
+	}
+	if cfg.RaftSnapshotThreshold == 0 {
+		errs = append(errs, "cluster.raft_snapshot_threshold must be > 0")
+	}
+	if cfg.RaftSnapshotInterval < minRaftSnapshotInterval {
+		errs = append(errs, fmt.Sprintf("cluster.raft_snapshot_interval (%s) must be >= %s", cfg.RaftSnapshotInterval, minRaftSnapshotInterval))
 	}
 	if len(cfg.Peers) == 0 {
 		return errs

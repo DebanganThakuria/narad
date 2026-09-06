@@ -37,6 +37,15 @@ func applyEnv(cfg *Config) error {
 		}
 		cfg.Cluster.Peers = peers
 	}
+	if err := envUint64("NARAD_CLUSTER_RAFT_SNAPSHOT_THRESHOLD", &cfg.Cluster.RaftSnapshotThreshold); err != nil {
+		return err
+	}
+	if err := envDuration("NARAD_CLUSTER_RAFT_SNAPSHOT_INTERVAL", &cfg.Cluster.RaftSnapshotInterval); err != nil {
+		return err
+	}
+	if err := envUint64("NARAD_CLUSTER_RAFT_TRAILING_LOGS", &cfg.Cluster.RaftTrailingLogs); err != nil {
+		return err
+	}
 	if err := envDuration("NARAD_HTTP_READ_TIMEOUT", &cfg.HTTP.ReadTimeout); err != nil {
 		return err
 	}
@@ -186,6 +195,19 @@ func envInt64(key string, dst *int64) error {
 		return nil
 	}
 	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return fmt.Errorf("%s: %w", key, err)
+	}
+	*dst = n
+	return nil
+}
+
+func envUint64(key string, dst *uint64) error {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return nil
+	}
+	n, err := strconv.ParseUint(v, 10, 64)
 	if err != nil {
 		return fmt.Errorf("%s: %w", key, err)
 	}
