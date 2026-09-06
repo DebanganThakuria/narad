@@ -3,6 +3,7 @@ package topics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -33,6 +34,8 @@ type fakeMetastore struct {
 	deleteTopicErr       error
 	getTopicErr          error
 	putSchemaErr         error
+	putSchemaConflicts   int
+	putSchemaCalls       int
 	attachChildErr       error
 	detachChildErr       error
 	lastCreatedTopic     topic.Topic
@@ -135,9 +138,30 @@ func (f *fakeMetastore) DetachChild(_ context.Context, parent, child string) err
 	return nil
 }
 
+// PutSchema mirrors the FSM's append-only rule: only latest+1 is
+// accepted, so the fake refuses the same overwrites the real metastore
+// does. putSchemaConflicts simulates a put that lost a race (the FSM
+// answering ErrAlreadyExists) that many times before accepting.
 func (f *fakeMetastore) PutSchema(_ context.Context, topicName string, version int, raw []byte) error {
 	if f.putSchemaErr != nil {
 		return f.putSchemaErr
+	}
+	f.putSchemaCalls++
+	if f.putSchemaConflicts > 0 {
+		f.putSchemaConflicts--
+		return fmt.Errorf("%w: simulated concurrent put", errs.ErrAlreadyExists)
+	}
+	latest := 0
+	for v := range f.schemas[topicName] {
+		if v > latest {
+			latest = v
+		}
+	}
+	if version <= latest {
+		return fmt.Errorf("%w: schema version %d for %q (latest is %d)", errs.ErrAlreadyExists, version, topicName, latest)
+	}
+	if version != latest+1 {
+		return fmt.Errorf("%w: schema version %d for %q skips versions (latest is %d)", errs.ErrInvalidArgument, version, topicName, latest)
 	}
 	if f.schemas[topicName] == nil {
 		f.schemas[topicName] = map[int][]byte{}
@@ -184,18 +208,18 @@ func (f *fakePartitionAssigner) AssignNewPartitions(_ context.Context, topicName
 
 type fakeSchemaRegistry struct {
 	validateDefinitionErr error
-	registerVersion       int
-	registerErr           error
+	compatErr             error
 	loadErr               error
 	lastValidatedTopic    string
 	lastValidatedSchema   []byte
-	lastTopic             string
-	lastSchema            []byte
+	compatCalls           int
+	lastCompatPrevious    []byte
+	lastCompatNext        []byte
 	lastLoadedTopic       string
 	lastLoadedVersion     int
 	lastLoadedSchema      []byte
-	lastUnloadedTopic     string
-	lastUnloadedVersion   int
+	lastReplacedTopic     string
+	lastReplacedHistory   []schema.Version
 	lastDroppedTopic      string
 }
 
@@ -205,16 +229,11 @@ func (f *fakeSchemaRegistry) ValidateDefinition(_ context.Context, topic string,
 	return f.validateDefinitionErr
 }
 
-func (f *fakeSchemaRegistry) Register(_ context.Context, topic string, raw []byte) (int, error) {
-	if f.registerErr != nil {
-		return 0, f.registerErr
-	}
-	f.lastTopic = topic
-	f.lastSchema = append([]byte(nil), raw...)
-	if f.registerVersion == 0 {
-		f.registerVersion = 1
-	}
-	return f.registerVersion, nil
+func (f *fakeSchemaRegistry) CheckCompatible(_ context.Context, _ string, previous, next []byte) error {
+	f.compatCalls++
+	f.lastCompatPrevious = append([]byte(nil), previous...)
+	f.lastCompatNext = append([]byte(nil), next...)
+	return f.compatErr
 }
 
 func (f *fakeSchemaRegistry) Load(_ context.Context, topic string, version int, raw []byte) error {
@@ -227,9 +246,9 @@ func (f *fakeSchemaRegistry) Load(_ context.Context, topic string, version int, 
 	return nil
 }
 
-func (f *fakeSchemaRegistry) Unload(_ context.Context, topic string, version int) error {
-	f.lastUnloadedTopic = topic
-	f.lastUnloadedVersion = version
+func (f *fakeSchemaRegistry) ReplaceTopic(_ context.Context, topic string, history []schema.Version) error {
+	f.lastReplacedTopic = topic
+	f.lastReplacedHistory = history
 	return nil
 }
 
@@ -583,12 +602,20 @@ func TestUpdateTopicCaps_UsesDefaultsAndPersists(t *testing.T) {
 	}
 }
 
-func TestUpdateTopicSchema_RegistersAndPersists(t *testing.T) {
+// The version is computed from the persisted history, never from the
+// local registry: with six versions in the metastore the update is
+// checked against v6 and stored as v7, then loaded locally as v7.
+func TestUpdateTopicSchema_VersionsFromPersistedHistory(t *testing.T) {
 	ms := newFakeMetastore()
 	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
-	reg := &fakeSchemaRegistry{registerVersion: 7}
+	for v := 1; v <= 6; v++ {
+		if err := ms.PutSchema(context.Background(), testTopicName, v, []byte(fmt.Sprintf(`{"title":"v%d","type":"object"}`, v))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reg := &fakeSchemaRegistry{}
 	manager := newTestManager(t, ms, reg)
-	rawSchema := []byte(`{"type":"object"}`)
+	rawSchema := []byte(`{"title":"v7","type":"object"}`)
 
 	updated, err := manager.UpdateTopicSchema(context.Background(), testTopicName, rawSchema)
 	if err != nil {
@@ -597,8 +624,9 @@ func TestUpdateTopicSchema_RegistersAndPersists(t *testing.T) {
 	if updated.Name != testTopicName {
 		t.Fatalf("UpdateTopicSchema() topic = %q, want %q", updated.Name, testTopicName)
 	}
-	if reg.lastTopic != testTopicName {
-		t.Fatalf("schema Register() topic = %q, want %q", reg.lastTopic, testTopicName)
+	if reg.compatCalls != 1 || string(reg.lastCompatPrevious) != `{"title":"v6","type":"object"}` || string(reg.lastCompatNext) != string(rawSchema) {
+		t.Fatalf("CheckCompatible() calls = %d previous %q next %q, want 1 call against the persisted v6",
+			reg.compatCalls, reg.lastCompatPrevious, reg.lastCompatNext)
 	}
 	if ms.lastSchemaVersion != 7 {
 		t.Fatalf("PutSchema() version = %d, want 7", ms.lastSchemaVersion)
@@ -606,28 +634,109 @@ func TestUpdateTopicSchema_RegistersAndPersists(t *testing.T) {
 	if string(ms.lastSchemaBytes) != string(rawSchema) {
 		t.Fatalf("PutSchema() raw schema = %q, want %q", string(ms.lastSchemaBytes), string(rawSchema))
 	}
+	if reg.lastLoadedTopic != testTopicName || reg.lastLoadedVersion != 7 || string(reg.lastLoadedSchema) != string(rawSchema) {
+		t.Fatalf("Load() = topic %q version %d schema %q, want %q v7", reg.lastLoadedTopic, reg.lastLoadedVersion, reg.lastLoadedSchema, testTopicName)
+	}
 }
 
-func TestUpdateTopicSchema_RollsBackRegistryWhenPersistFails(t *testing.T) {
+// A first schema on a topic that never had one skips the compatibility
+// check and is stored as v1.
+func TestUpdateTopicSchema_FirstVersionSkipsCompatibilityCheck(t *testing.T) {
+	ms := newFakeMetastore()
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
+	reg := &fakeSchemaRegistry{compatErr: schema.ErrIncompatible}
+	manager := newTestManager(t, ms, reg)
+
+	if _, err := manager.UpdateTopicSchema(context.Background(), testTopicName, []byte(`{"type":"object"}`)); err != nil {
+		t.Fatalf("UpdateTopicSchema() error = %v", err)
+	}
+	if reg.compatCalls != 0 {
+		t.Fatalf("CheckCompatible() calls = %d, want 0 for the first version", reg.compatCalls)
+	}
+	if ms.lastSchemaVersion != 1 {
+		t.Fatalf("PutSchema() version = %d, want 1", ms.lastSchemaVersion)
+	}
+}
+
+// An incompatible schema is refused before anything is proposed, and
+// the previous version stays exactly as it was.
+func TestUpdateTopicSchema_IncompatibleIsRefusedBeforePersist(t *testing.T) {
+	ms := newFakeMetastore()
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
+	v1 := []byte(`{"type":"object","properties":{"id":{"type":"string"}}}`)
+	if err := ms.PutSchema(context.Background(), testTopicName, 1, v1); err != nil {
+		t.Fatal(err)
+	}
+	reg := &fakeSchemaRegistry{compatErr: schema.ErrIncompatible}
+	manager := newTestManager(t, ms, reg)
+	putsBefore := ms.putSchemaCalls
+
+	_, err := manager.UpdateTopicSchema(context.Background(), testTopicName, []byte(`{"type":"object"}`))
+	if !errors.Is(err, ErrInvalid) || !errors.Is(err, errs.ErrSchemaIncompatible) {
+		t.Fatalf("UpdateTopicSchema() error = %v, want %v wrapping %v", err, ErrInvalid, errs.ErrSchemaIncompatible)
+	}
+	if ms.putSchemaCalls != putsBefore {
+		t.Fatalf("PutSchema() was called %d times for a refused update, want 0", ms.putSchemaCalls-putsBefore)
+	}
+	if got := string(ms.schemas[testTopicName][1]); got != string(v1) {
+		t.Fatalf("schema v1 = %s after refused update, want unchanged", got)
+	}
+	if reg.lastLoadedVersion != 0 {
+		t.Fatalf("Load() called with version %d for a refused update", reg.lastLoadedVersion)
+	}
+}
+
+// When the metastore refuses the proposed version (another put landed
+// first), the history is re-read and the update is re-checked against
+// the new latest before being proposed again as the next version.
+func TestUpdateTopicSchema_RetriesOnVersionConflict(t *testing.T) {
+	ms := newFakeMetastore()
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
+	if err := ms.PutSchema(context.Background(), testTopicName, 1, []byte(`{"title":"v1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	ms.putSchemaConflicts = 1
+	reg := &fakeSchemaRegistry{}
+	manager := newTestManager(t, ms, reg)
+
+	if _, err := manager.UpdateTopicSchema(context.Background(), testTopicName, []byte(`{"title":"v2"}`)); err != nil {
+		t.Fatalf("UpdateTopicSchema() error = %v", err)
+	}
+	if reg.compatCalls != 2 {
+		t.Fatalf("CheckCompatible() calls = %d, want 2 (once per attempt)", reg.compatCalls)
+	}
+	if ms.lastSchemaVersion != 2 {
+		t.Fatalf("PutSchema() version = %d, want 2", ms.lastSchemaVersion)
+	}
+
+	// A conflict that never resolves surfaces as ErrAlreadyExists.
+	ms.putSchemaConflicts = schemaPutAttempts
+	_, err := manager.UpdateTopicSchema(context.Background(), testTopicName, []byte(`{"title":"v3"}`))
+	if !errors.Is(err, errs.ErrAlreadyExists) {
+		t.Fatalf("UpdateTopicSchema() under persistent conflict error = %v, want %v", err, errs.ErrAlreadyExists)
+	}
+}
+
+func TestUpdateTopicSchema_PersistFailureDoesNotLoadLocally(t *testing.T) {
 	ms := newFakeMetastore()
 	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
 	ms.putSchemaErr = errors.New("persist failed")
-	reg := &fakeSchemaRegistry{registerVersion: 7}
+	reg := &fakeSchemaRegistry{}
 	manager := newTestManager(t, ms, reg)
 
 	_, err := manager.UpdateTopicSchema(context.Background(), testTopicName, []byte(`{"type":"object"}`))
 	if err == nil || !strings.Contains(err.Error(), "persist schema") {
 		t.Fatalf("UpdateTopicSchema() error = %v, want persist schema error", err)
 	}
-	if reg.lastUnloadedTopic != testTopicName || reg.lastUnloadedVersion != 7 {
-		t.Fatalf("Unload() = topic %q version %d, want %q version 7", reg.lastUnloadedTopic, reg.lastUnloadedVersion, testTopicName)
+	if reg.lastLoadedTopic != "" {
+		t.Fatalf("Load() = topic %q after a failed persist, want no load", reg.lastLoadedTopic)
 	}
 }
 
 func TestUpdateTopicSchema_RejectsEmptyOrInvalidSchema(t *testing.T) {
 	ms := newFakeMetastore()
 	ms.topics[testTopicName] = topic.Topic{Name: testTopicName}
-	manager := newTestManager(t, ms, &fakeSchemaRegistry{registerErr: schema.ErrIncompatible})
+	manager := newTestManager(t, ms, &fakeSchemaRegistry{validateDefinitionErr: errors.New("does not compile")})
 
 	_, err := manager.UpdateTopicSchema(context.Background(), testTopicName, nil)
 	if err == nil || !strings.Contains(err.Error(), "schema must not be empty") {

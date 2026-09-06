@@ -7,6 +7,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
+	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
 // IncreaseTopicPartitions raises the partition count of an existing
@@ -163,10 +164,23 @@ func (m *Manager) UpdateTopicCaps(ctx context.Context, name string, maxInFlight,
 	return updated, nil
 }
 
+// schemaPutAttempts bounds the re-read-and-retry loop in
+// UpdateTopicSchema when the metastore refuses a version because
+// another put landed between reading the history and proposing.
+const schemaPutAttempts = 3
+
 // UpdateTopicSchema registers a new JSON Schema version for the topic.
-// The schema registry enforces backwards compatibility: new schemas
-// must be additive-only with no type changes on existing fields. The
-// raw schema bytes are persisted via the metastore.
+//
+// The metastore, not this node's in-memory registry, is the source of
+// truth for the topic's history: the persisted versions are read first,
+// the new schema is checked for backwards compatibility against the
+// persisted latest, and the result is proposed as exactly latest+1. A
+// leader elected after the schema was created elsewhere, which has
+// never loaded the topic locally, therefore still checks against the
+// real previous version instead of treating the update as a fresh v1
+// and overwriting history. The Raft state machine refuses any version
+// other than latest+1 as a second line of defence; on that refusal the
+// history is re-read and the check repeated.
 func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema []byte) (topic.Topic, error) {
 	if name == "" {
 		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalid)
@@ -192,15 +206,44 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 		return topic.Topic{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 
-	version, err := m.schemas.Register(ctx, name, rawSchema)
-	if err != nil {
-		return topic.Topic{}, fmt.Errorf("%w: %w", ErrInvalid, err)
-	}
-	if err := m.metastore.PutSchema(ctx, name, version, rawSchema); err != nil {
-		if unloadErr := m.schemas.Unload(ctx, name, version); unloadErr != nil {
-			return topic.Topic{}, fmt.Errorf("topics: persist schema: %w; rollback schema registry: %v", err, unloadErr)
+	var version int
+	for attempt := 1; ; attempt++ {
+		history, err := schema.PersistedHistory(ctx, m.metastore, name)
+		if err != nil {
+			return topic.Topic{}, fmt.Errorf("topics: read schema history: %w", err)
+		}
+		version = 1
+		if n := len(history); n > 0 {
+			latest := history[n-1]
+			version = latest.Number + 1
+			if err := m.schemas.CheckCompatible(ctx, name, latest.Raw, rawSchema); err != nil {
+				return topic.Topic{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+			}
+		}
+
+		err = m.metastore.PutSchema(ctx, name, version, rawSchema)
+		if err == nil {
+			break
+		}
+		if errors.Is(err, errs.ErrAlreadyExists) && attempt < schemaPutAttempts {
+			m.logger.Warn("schema version conflict; re-reading history",
+				"topic", name, "version", version, "attempt", attempt, "err", err)
+			continue
+		}
+		if errors.Is(err, errs.ErrNotFound) {
+			return topic.Topic{}, ErrNotFound
 		}
 		return topic.Topic{}, fmt.Errorf("topics: persist schema: %w", err)
+	}
+
+	// The persisted history is authoritative and the produce path
+	// re-hydrates the registry whenever the metastore's schema version
+	// moves, so a failure to load the local copy here is not a failure
+	// of the update (and must not make the client retry, which would
+	// register the same schema again as the next version).
+	if err := m.schemas.Load(ctx, name, version, rawSchema); err != nil {
+		m.logger.Error("schema persisted but not loaded locally; produce will reload it from the metastore",
+			"topic", name, "version", version, "err", err)
 	}
 
 	m.logger.Info("topic schema updated",
