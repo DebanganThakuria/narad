@@ -88,6 +88,7 @@ curl -u $AUTH -X POST -H "Content-Type: application/json" \
 ## Where to next
 
 - Tune partitions, retention, and limits → [Topics](topics.md)
+- Validate every payload at the broker, and evolve the contract safely → [Schemas](schemas.md)
 - Keys, partition routing, and batching advice → [Producing](producing.md)
 - Visibility timeouts, extend, nack, replay → [Consuming](consuming.md)
 - Copy every message to other topics, or delay them → [Fan-out & Delay](fanout-and-delay.md)

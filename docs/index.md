@@ -174,6 +174,10 @@ Boring to operate. Readable to the bottom. That's not a limitation; that's the w
 
     Users, bcrypt, per-action grants with prefix wildcards, topic ownership. Give billing `produce` on `invoices.*` and nothing else. No plugin, no gateway.
 
+- :material-code-json: **Schemas, enforced at the broker**
+
+    Give a topic a JSON Schema and every produce is validated before it is written: a bad payload gets a `400` naming the field, never a slot in the log. Versions are append-only and compatibility-checked, so v1 consumers survive v2. No registry service, no serializer library. [Schemas →](client/schemas.md)
+
 - :material-magnify: **Replay on demand**
 
     Everything is a retained log underneath. Point a consume at any offset within retention and re-read history, without disturbing the live queue. Debugging a poison message means *reading it again*, not grepping logs.

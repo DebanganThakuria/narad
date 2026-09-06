@@ -434,7 +434,7 @@ inside the schema document; `file://` and remote references are
 refused, and documents over 256 KiB or 64 levels deep are refused at
 registration. Fan-out children adopt the parent's history and are
 parent-managed while attached. The full contract is in
-[docs/client/topics.md](docs/client/topics.md#schemas).
+[docs/client/schemas.md](docs/client/schemas.md).
 
 ## Testing
 

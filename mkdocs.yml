@@ -71,6 +71,7 @@ nav:
       - Getting Started: client/index.md
       - The CLI: client/cli.md
       - Topics: client/topics.md
+      - Schemas: client/schemas.md
       - Producing: client/producing.md
       - Consuming: client/consuming.md
       - Handling Retries: client/handling-retries.md
