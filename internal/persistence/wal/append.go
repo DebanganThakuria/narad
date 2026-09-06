@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
 // appendLocked stages a size-byte payload, produced by fill, into the
@@ -57,26 +59,36 @@ func (l *Log) rollLocked() error {
 	l.fileOps.Lock()
 	defer l.fileOps.Unlock()
 
-	if err := l.file.Close(); err != nil {
-		return fmt.Errorf("wal: close rolled segment: %w", err)
-	}
-	l.segmentBase = l.nextSeq
-	l.segmentSize = 0
-	// The segment just sealed may become deletable: force the next
-	// CompactBefore to list the directory again.
-	l.compactFloor = 0
-
-	path := segmentPath(l.dir, l.segmentBase)
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o600)
+	// Create the next segment before touching the current one: if the
+	// create or the directory sync fails (ENOSPC, EIO) the active file
+	// stays open and the failed append is the only casualty; the next
+	// append retries the roll. Closing first left a closed descriptor
+	// as the active file, so every later append failed and latched the
+	// log until a restart, long after the disk had space again.
+	path := segmentPath(l.dir, l.nextSeq)
+	file, err := syncfile.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("wal: create segment: %w", err)
 	}
 	// Make the new segment file durable before any appends can target it.
 	if err := syncDir(l.dir); err != nil {
+		// Nothing left behind: the retry's O_EXCL create would
+		// otherwise fail on this very file.
 		_ = file.Close()
+		_ = os.Remove(path)
 		return err
 	}
+	if err := l.file.Close(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("wal: close rolled segment: %w", err)
+	}
 	l.file = file
+	l.segmentBase = l.nextSeq
+	l.segmentSize = 0
+	// The segment just sealed may become deletable: force the next
+	// CompactBefore to list the directory again.
+	l.compactFloor = 0
 	return nil
 }
 
