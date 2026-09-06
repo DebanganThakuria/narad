@@ -88,7 +88,7 @@ func banner(port int) {
 
   Or plain curl:
 
-    curl -X POST 'http://127.0.0.1:%d/v1/topics' -d '{"name":"demo"}'
+    curl -X POST 'http://127.0.0.1:%d/v1/topics' -H 'Content-Type: application/json' -d '{"name":"demo"}'
 
 `, bold("narad"), port)
 }
