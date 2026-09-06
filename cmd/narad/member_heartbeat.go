@@ -48,7 +48,11 @@ func runMemberHeartbeater(ctx context.Context, store *metastore.Store, member me
 
 // registerMember records the member in the local store; when that fails
 // (this node is not the leader) it forwards the registration to the
-// leader over peer RPC.
+// leader over peer RPC. The heartbeat timestamp is only meaningful on
+// the leader's clock: the local write happens only when this node IS
+// the leader, and a forwarded registration is re-stamped by the leader
+// (handleRegisterMember), which ignores the value sent here. It is still
+// sent for leaders that predate the re-stamping.
 func registerMember(ctx context.Context, store *metastore.Store, member metastore.Member, registrar memberRegistrar) error {
 	member.LastHeartbeat = time.Now().Unix()
 	if err := store.RegisterMember(ctx, member); err == nil {

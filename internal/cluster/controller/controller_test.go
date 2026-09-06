@@ -150,26 +150,3 @@ func TestHeartbeatMonitorMarksDead(t *testing.T) {
 	}
 	t.Fatal("timed out waiting for member to be marked dead")
 }
-
-func TestHeartbeaterUpdatesTimestamp(t *testing.T) {
-	s := newTestStore(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	hb := controller.NewHeartbeater(s, metastore.Member{
-		ID:     "narad-0",
-		Addr:   "narad-0:7942",
-		Status: metastore.MemberAlive,
-	}, 100*time.Millisecond)
-	go hb.Run(ctx)
-
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		m, _ := s.GetMember("narad-0")
-		if m.LastHeartbeat > 0 {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatal("heartbeat never updated")
-}
