@@ -91,6 +91,12 @@ type Store struct {
 	// link records its exact starting point; see fanout_anchor.go.
 	attachOffsetsMu sync.RWMutex
 	attachOffsets   AttachOffsetResolver
+
+	// logs is Raft's log store; AppliedCaughtUp reads entry types from
+	// it to tell "the FSM is behind" from "the trailing entries are
+	// no-ops the FSM never sees".
+	logs raft.LogStore
+	log  *slog.Logger
 }
 
 // New opens or creates the Raft metastore at cfg.DataDir.
@@ -115,7 +121,7 @@ func New(cfg Config) (*Store, error) {
 		_ = fsm.db.Close()
 		return nil, err
 	}
-	return &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore}, nil
+	return &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore, logs: logStore, log: cfg.startupLog()}, nil
 }
 
 // newRaft wires up the Raft node: log/stable store, snapshot store, TCP
