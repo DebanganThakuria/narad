@@ -19,12 +19,7 @@ func (rt *Router) RouteAttachChild(ctx context.Context, w http.ResponseWriter, _
 		return false
 	}
 	res, err := rt.peer.AttachChild(ctx, memberAddr, parent, child, delayMs)
-	if err != nil {
-		writeLeaderForwardError(w, err)
-		return true
-	}
-	writePeerResponse(w, res)
-	return true
+	return rt.writeForwardedWrite(ctx, w, memberAddr, res, err)
 }
 
 // RouteDetachChild forwards a fan-out detach to the cluster leader.
@@ -34,12 +29,7 @@ func (rt *Router) RouteDetachChild(ctx context.Context, w http.ResponseWriter, _
 		return false
 	}
 	res, err := rt.peer.DetachChild(ctx, memberAddr, parent, child)
-	if err != nil {
-		writeLeaderForwardError(w, err)
-		return true
-	}
-	writePeerResponse(w, res)
-	return true
+	return rt.writeForwardedWrite(ctx, w, memberAddr, res, err)
 }
 
 // CollectFanoutCursors merges the fan-out cursor stats of every parent

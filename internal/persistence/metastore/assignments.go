@@ -5,8 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/debanganthakuria/narad/internal/errs"
 	"sort"
+
+	"github.com/debanganthakuria/narad/internal/errs"
 
 	bolt "go.etcd.io/bbolt"
 )

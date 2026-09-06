@@ -14,6 +14,7 @@ import (
 )
 
 type fakePeerClient struct {
+	appliedIndexFn        func(ctx context.Context, addr string) (uint64, error)
 	produceFn             func(context.Context, string, nodewire.ProduceRequest) (nodewire.Response, error)
 	commitProduceFn       func(context.Context, string, nodewire.CommitProduceRequest) (nodewire.Response, error)
 	commitProduceBatchFn  func(context.Context, string, nodewire.CommitProduceBatchRequest) (nodewire.Response, error)
@@ -80,6 +81,13 @@ func (f fakePeerClient) UpdateUser(ctx context.Context, addr, username string, b
 		return f.updateUserFn(ctx, addr, username, body)
 	}
 	return nodewire.Response{}, context.DeadlineExceeded
+}
+
+func (f fakePeerClient) AppliedIndex(ctx context.Context, addr string) (uint64, error) {
+	if f.appliedIndexFn != nil {
+		return f.appliedIndexFn(ctx, addr)
+	}
+	return 0, fmt.Errorf("applied index: unsupported rpc operation")
 }
 
 func (f fakePeerClient) DeleteUser(ctx context.Context, addr, username string) (nodewire.Response, error) {

@@ -46,6 +46,7 @@ type peerClient interface {
 	UpdateUser(ctx context.Context, addr, username string, body []byte) (nodewire.Response, error)
 	DeleteUser(ctx context.Context, addr, username string) (nodewire.Response, error)
 	DecommissionMember(ctx context.Context, addr, id string, cancel bool) (nodewire.Response, error)
+	AppliedIndex(ctx context.Context, addr string) (uint64, error)
 }
 
 // frameTransport is the request/reply surface PeerClient needs from the
@@ -215,6 +216,27 @@ func (c *PeerClient) CreateTopic(ctx context.Context, addr string, body []byte) 
 func (c *PeerClient) AlterTopic(ctx context.Context, addr, topicName string, body []byte) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeTopicBodyRequest(nodewire.OpAlterTopic, nodewire.TopicBodyRequest{Topic: topicName, Body: body})
 	return c.send(ctx, addr, "alter_topic", laneControl, payload, err)
+}
+
+// AppliedIndex asks the peer at addr, the leader a control-plane write
+// was just forwarded to, for the highest log index its FSM has applied.
+// The caller waits for its own replica to reach that index before
+// answering the client (Router.settleForwardedWrite). A peer that is
+// not the leader, or predates the operation, is an error the caller
+// treats as "no bound available".
+func (c *PeerClient) AppliedIndex(ctx context.Context, addr string) (uint64, error) {
+	res, err := c.send(ctx, addr, "applied_index", laneControl, nodewire.EncodeAppliedIndexRequest(), nil)
+	if err != nil {
+		return 0, err
+	}
+	if res.Status != http.StatusOK {
+		return 0, fmt.Errorf("applied index: peer answered %d", res.Status)
+	}
+	var body appliedIndexResponse
+	if err := json.Unmarshal(res.Body, &body); err != nil {
+		return 0, fmt.Errorf("applied index: decode: %w", err)
+	}
+	return body.AppliedIndex, nil
 }
 
 // DeleteTopic asks the peer at addr to delete the topic.

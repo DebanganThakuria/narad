@@ -264,6 +264,7 @@ func (c *countingRecorder) IncRetentionDeletion(string, int64, int64) {
 	c.dels++
 	c.mu.Unlock()
 }
+
 func (c *countingRecorder) IncStorageError(kind string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
