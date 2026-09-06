@@ -566,10 +566,18 @@ func TestCheckCompatible(t *testing.T) {
 			wantErr: `$ref "#/$defs/missing" does not resolve`,
 		},
 		{
-			name:    "$ref cycle",
-			prev:    `{"properties":{"q":{"$ref":"#/$defs/a"}},"$defs":{"a":{"$ref":"#/$defs/b"},"b":{"$ref":"#/$defs/a"}}}`,
-			next:    `{"properties":{"q":{}}}`,
-			wantErr: "$ref chain longer",
+			// A chain of nothing but $ref that loops is the validator's
+			// "reference cycle" failure: it accepts no document, so the
+			// previous version accepted nothing at q and {} is wider.
+			name: "$ref cycle in the previous version accepts nothing",
+			prev: `{"properties":{"q":{"$ref":"#/$defs/a"}},"$defs":{"a":{"$ref":"#/$defs/b"},"b":{"$ref":"#/$defs/a"}}}`,
+			next: `{"properties":{"q":{}}}`,
+		},
+		{
+			name:    "$ref cycle in the new version rejects everything",
+			prev:    `{"properties":{"q":{}}}`,
+			next:    `{"properties":{"q":{"$ref":"#/$defs/a"}},"$defs":{"a":{"$ref":"#/$defs/b"},"b":{"$ref":"#/$defs/a"}}}`,
+			wantErr: "new schema is false",
 		},
 		{
 			name:    "malformed properties",
