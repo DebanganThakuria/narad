@@ -5,10 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"unicode/utf8"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/santhosh-tekuri/jsonschema/v6/kind"
+	"golang.org/x/text/language"
+	"golang.org/x/text/message"
 )
 
 // Registration limits. They bound what a topic owner can make every
@@ -32,6 +37,15 @@ const (
 	// large enum otherwise turns a six-byte produce into a 400 body
 	// listing every allowed value (half a megabyte for 50k values).
 	maxValidationErrorBytes = 2048
+	// MaxNumberExponent bounds the exponent part of a number literal,
+	// in payloads at validation and in schemas at registration. Numbers
+	// are validated exactly, which means expanding 1eN into an N-digit
+	// integer: at N = 999999 that costs about 12 ms per literal (a
+	// 1 MiB payload holds 130k of them), and beyond 10^6 the big.Rat
+	// parser refuses the literal and the validator dereferences the nil
+	// result. Every literal that fits in a float64 (and far more: 1e400
+	// is fine) stays well within this bound.
+	MaxNumberExponent = 1000
 )
 
 // JSONSchema is a Registry backed by santhosh-tekuri/jsonschema.
@@ -62,8 +76,84 @@ func (r *JSONSchema) ValidateDefinition(_ context.Context, topic string, schemaB
 	if err := checkDefinitionLimits(schemaBytes); err != nil {
 		return err
 	}
-	_, err := compileSchema(topic, 0, schemaBytes)
-	return err
+	schemaDoc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaBytes))
+	if err != nil {
+		return fmt.Errorf("schema: invalid JSON: %w", err)
+	}
+	// Checked after decoding so malformed JSON is reported as such.
+	if err := checkNumberExponents(schemaBytes); err != nil {
+		return fmt.Errorf("schema: %w", err)
+	}
+	if err := checkInDocumentRefs(schemaDoc); err != nil {
+		return fmt.Errorf("schema: %w", err)
+	}
+	if _, err := compileDecoded(topic, 0, schemaDoc); err != nil {
+		return err
+	}
+	// After compiling, so the analysis sees a well-formed document.
+	if err := checkRevalidation(schemaDoc); err != nil {
+		return fmt.Errorf("schema: %w", err)
+	}
+	return nil
+}
+
+// checkInDocumentRefs refuses every reference that is not a fragment
+// ("#...") anywhere a subschema can sit, including $defs nobody
+// points at yet. The compiler only compiles what the root reaches, so
+// an external $ref in an unreferenced definition would otherwise
+// register (nothing loads it, but the documented rule is that it is
+// refused, and a later version that references it would fail at
+// registration for a reason its author did not introduce). An empty
+// reference and an absolute URL that happens to equal the schema's own
+// $id resolve in-document for the compiler, but they are the relative
+// and http(s) forms the contract refuses.
+func checkInDocumentRefs(doc any) error {
+	var walk func(v any, depth int) error
+	walk = func(v any, depth int) error {
+		if depth > MaxSchemaDepth {
+			return nil // the depth limit reports this
+		}
+		obj, ok := v.(map[string]any)
+		if !ok {
+			return nil
+		}
+		for _, k := range []string{"$ref", "$dynamicRef", "$recursiveRef"} {
+			if ref, ok := obj[k].(string); ok && !strings.HasPrefix(ref, "#") {
+				return errExternalRef
+			}
+		}
+		for k, child := range obj {
+			var err error
+			switch k {
+			case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies":
+				if m, ok := child.(map[string]any); ok {
+					for _, sub := range m {
+						if err = walk(sub, depth+1); err != nil {
+							return err
+						}
+					}
+				}
+			case "allOf", "anyOf", "oneOf", "prefixItems", "items":
+				if arr, ok := child.([]any); ok {
+					for _, sub := range arr {
+						if err = walk(sub, depth+1); err != nil {
+							return err
+						}
+					}
+				} else {
+					err = walk(child, depth+1)
+				}
+			case "additionalProperties", "additionalItems", "not", "if", "then", "else", "contains",
+				"propertyNames", "unevaluatedProperties", "unevaluatedItems", "contentSchema":
+				err = walk(child, depth+1)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(doc, 0)
 }
 
 // checkDefinitionLimits enforces the registration limits with one
@@ -121,6 +211,64 @@ func jsonNestingDepth(doc []byte) int {
 		}
 	}
 	return deepest
+}
+
+// checkNumberExponents scans a JSON text (already known to decode) and
+// refuses any number literal whose exponent part lies outside
+// ±MaxNumberExponent. Strings are skipped; outside strings an 'e' or
+// 'E' followed by an optional sign and digits can only be a number's
+// exponent (the 'e' in true and false is followed by a delimiter).
+func checkNumberExponents(doc []byte) error {
+	inString, escaped := false, false
+	for i := 0; i < len(doc); i++ {
+		b := doc[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case b == '\\':
+				escaped = true
+			case b == '"':
+				inString = false
+			}
+			continue
+		}
+		switch b {
+		case '"':
+			inString = true
+		case 'e', 'E':
+			j := i + 1
+			if j < len(doc) && (doc[j] == '+' || doc[j] == '-') {
+				j++
+			}
+			first := j
+			for j < len(doc) && doc[j] == '0' {
+				j++
+			}
+			significant := j
+			for j < len(doc) && doc[j] >= '0' && doc[j] <= '9' {
+				j++
+			}
+			if j == first {
+				continue // not an exponent
+			}
+			digits := doc[significant:j]
+			over := len(digits) > 4
+			if !over && len(digits) == 4 {
+				n, _ := strconv.Atoi(string(digits))
+				over = n > MaxNumberExponent
+			}
+			if over {
+				lit := doc[i:j]
+				if len(lit) > 24 {
+					lit = append(append([]byte{}, lit[:21]...), "..."...)
+				}
+				return fmt.Errorf("number exponent %q is outside ±%d; numbers are validated exactly and a larger exponent is unbounded work", lit, MaxNumberExponent)
+			}
+			i = j - 1
+		}
+	}
+	return nil
 }
 
 // CheckCompatible reports whether every document accepted by previous
@@ -237,7 +385,13 @@ func compileSchema(topic string, version int, schemaBytes []byte) (*jsonschema.S
 	if err != nil {
 		return nil, fmt.Errorf("schema: invalid JSON: %w", err)
 	}
+	return compileDecoded(topic, version, schemaDoc)
+}
 
+// compileDecoded compiles an already decoded schema document. It
+// applies no registration limit: persisted schemas go through here on
+// every hydrate and must keep loading.
+func compileDecoded(topic string, version int, schemaDoc any) (*jsonschema.Schema, error) {
 	c := jsonschema.NewCompiler()
 	c.UseLoader(noExternalRefs{})
 	// The library asserts "format" only for draft-07 and earlier and
@@ -295,6 +449,9 @@ func (r *JSONSchema) Validate(_ context.Context, topic string, payload []byte) e
 	if err != nil {
 		return fmt.Errorf("schema: invalid JSON payload: %w", err)
 	}
+	if err := checkNumberExponents(payload); err != nil {
+		return fmt.Errorf("schema: invalid JSON payload: %w", err)
+	}
 
 	if err := compiled.Validate(instance); err != nil {
 		return fmt.Errorf("schema: %w", boundedError(err, maxValidationErrorBytes))
@@ -303,17 +460,89 @@ func (r *JSONSchema) Validate(_ context.Context, topic string, payload []byte) e
 }
 
 // boundedError caps err's message at limit bytes (on a rune boundary)
-// while keeping the original reachable through Unwrap.
+// while keeping the original reachable through Unwrap. The message is
+// rendered under the cap rather than rendered whole and then cut: the
+// library's Error() writes one line per failing value, each listing
+// every allowed enum value, so a 1 MiB array against a 20k-value enum
+// produced a multi-gigabyte string (and took minutes) before the cap
+// could apply.
 func boundedError(err error, limit int) error {
-	msg := err.Error()
+	var verr *jsonschema.ValidationError
+	if !errors.As(err, &verr) {
+		return truncateMessage(err, err.Error(), limit)
+	}
+	var sb strings.Builder
+	omitted := renderBounded(&sb, verr, 0, limit)
+	msg := sb.String()
+	if omitted == 0 && len(msg) <= limit {
+		return &truncatedError{msg: msg, cause: err}
+	}
+	if len(msg) > limit {
+		return truncateMessage(err, msg, limit)
+	}
+	return &truncatedError{msg: msg + fmt.Sprintf("... (%d more errors)", omitted), cause: err}
+}
+
+// renderBounded writes err and its causes in the library's own layout
+// ("at '/loc': reason", nested causes indented with "- "), stopping
+// once the builder holds limit bytes. It returns the number of errors
+// left unrendered.
+func renderBounded(sb *strings.Builder, e *jsonschema.ValidationError, indent, limit int) int {
+	if sb.Len() >= limit {
+		return countErrors(e)
+	}
+	// A reference error with a single cause is transparent in the
+	// library's rendering; keep that so messages stay familiar.
+	if _, isRef := e.ErrorKind.(*kind.Reference); !(isRef && len(e.Causes) == 1) {
+		if indent > 0 {
+			sb.WriteByte('\n')
+			for i := 0; i < indent-1; i++ {
+				sb.WriteString("  ")
+			}
+			sb.WriteString("- ")
+		}
+		indent++
+		if _, isSchema := e.ErrorKind.(*kind.Schema); isSchema {
+			sb.WriteString(e.ErrorKind.LocalizedString(errorPrinter))
+		} else {
+			fmt.Fprintf(sb, "at '%s': %s", instancePointer(e.InstanceLocation), e.ErrorKind.LocalizedString(errorPrinter))
+		}
+	}
+	omitted := 0
+	for _, cause := range e.Causes {
+		omitted += renderBounded(sb, cause, indent, limit)
+	}
+	return omitted
+}
+
+func countErrors(e *jsonschema.ValidationError) int {
+	n := 1
+	for _, c := range e.Causes {
+		n += countErrors(c)
+	}
+	return n
+}
+
+func instancePointer(loc []string) string {
+	var sb strings.Builder
+	for _, tok := range loc {
+		sb.WriteByte('/')
+		sb.WriteString(strings.ReplaceAll(strings.ReplaceAll(tok, "~", "~0"), "/", "~1"))
+	}
+	return sb.String()
+}
+
+var errorPrinter = message.NewPrinter(language.English)
+
+func truncateMessage(cause error, msg string, limit int) error {
 	if len(msg) <= limit {
-		return err
+		return cause
 	}
 	cut := limit
 	for cut > 0 && !utf8.RuneStart(msg[cut]) {
 		cut--
 	}
-	return &truncatedError{msg: msg[:cut] + fmt.Sprintf("... (%d more bytes)", len(msg)-cut), cause: err}
+	return &truncatedError{msg: msg[:cut] + fmt.Sprintf("... (%d more bytes)", len(msg)-cut), cause: cause}
 }
 
 type truncatedError struct {

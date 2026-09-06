@@ -88,7 +88,7 @@ What "one JSON text" means, exactly:
 - Non-JSON text, binary, an empty body, a body with trailing data after the value (`{"id":1} {"id":2}`), a UTF-8 BOM, a raw control character inside a string, and invalid UTF-8 inside a string are all `400`.
 - Any JSON value is a candidate: `[1,2]` and `"text"` validate like objects do. A schema of `true` or `{}` therefore means "must be JSON" and nothing more.
 - Duplicate keys in an object follow encoding/json: the last value wins and is what gets validated.
-- Numbers are validated **exactly**, not as 64-bit floats: `9007199254740993` is odd under `multipleOf: 2`, `9223372036854775808` exceeds `maximum: 9223372036854775807`, and `1e400` is a valid `number`. `1.0` and `1e2` are integers; `1.5` is not.
+- Numbers are validated **exactly**, not as 64-bit floats: `9007199254740993` is odd under `multipleOf: 2`, `9223372036854775808` exceeds `maximum: 9223372036854775807`, and `1e400` is a valid `number`. `1.0` and `1e2` are integers; `1.5` is not. Exact validation expands `1eN` into N digits, so a literal whose exponent lies outside ±1000 (`1e1001`) is refused as an invalid payload; the same bound applies to numbers in a schema at registration.
 - `maxLength`/`minLength` count Unicode characters, not bytes.
 - `pattern` and `patternProperties` use Go RE2 syntax and run in linear time; a lookahead or backreference is refused at registration, and a pathological pattern cannot stall a produce.
 - `format` is **asserted on every draft**, including the default 2020-12 (the library alone would only assert it for draft-07 and earlier). Known formats such as `email`, `date-time`, `uuid`, `ipv4`, `uri` reject bad values; an unknown format name is ignored.
@@ -106,7 +106,12 @@ Both follow the [topic read rule](#reading-a-topic): any grant on the topic, own
 
 ### Registering a schema
 
-The document must be a JSON object or `true`. `false` (which would reject every message), `null`, strings, numbers and arrays are refused with `400`, as are documents over **256 KiB** or nested deeper than **64 levels** (compile time grows steeply with depth, and every node compiles the schema the first time it validates a produce after a change). A body over 1 MiB is `413` before any of this. `$ref` resolves only inside the document itself (`#/$defs/...`, `#anchor`, `$dynamicRef`); `file://`, `http(s)://` and relative references, and any `$schema` other than the built-in drafts (2020-12 default, 2019-09, 07, 06, 04), are refused at registration and the error never echoes the reference. `$id` is accepted and loads nothing.
+The document must be a JSON object or `true`. `false` (which would reject every message), `null`, strings, numbers and arrays are refused with `400`, as are documents over **256 KiB** or nested deeper than **64 levels** (compile time grows steeply with depth, and every node compiles the schema the first time it validates a produce after a change). A body over 1 MiB is `413` before any of this. `$ref` resolves only inside the document itself (`#/$defs/...`, `#anchor`, `$dynamicRef`); `file://`, `http(s)://` and relative references (an empty `$ref`, or an absolute URL that happens to equal the schema's own `$id`, count as such), anywhere in the document including `$defs` entries nothing points at yet, and any `$schema` other than the built-in drafts (2020-12 default, 2019-09, 07, 06, 04), are refused at registration and the error never echoes the reference. `$id` is accepted and loads nothing.
+
+Two shapes of recursion are refused at registration because of how the validator evaluates them:
+
+- A schema that reaches the same value through **more than one path per nesting level**, such as `"allOf": [{"items": {"$ref": "#"}}, {"items": {"$ref": "#"}}]`, or an `anyOf` that lists the same recursive `$ref` twice. The validator memoises nothing, so every nested value is validated once per path, and the work grows exponentially with payload depth (a 21-byte payload nested ten deep against four such branches costs over a second). Ordinary recursive schemas, where the recursion goes through different property names or through `items` for arrays and `additionalProperties` for objects, reach each value once and are accepted. The error names the two paths.
+- A `$ref` cycle that applies a subschema to the value already being validated, without descending into a child, through `not`, `if` or `oneOf` (`"not": {"$ref": "#"}`). The validator fails such a cycle at the node it visits twice, so under a negation the outcome depends on where the cycle was entered. The same cycle through `allOf`, `anyOf`, `then` or `else` is accepted (it can only ever fail that branch), as is a chain of nothing but `$ref` that loops, which accepts no value at all.
 
 ## Schema evolution
 
@@ -125,7 +130,7 @@ What it understands:
 | Keyword | Allowed change |
 |---|---|
 | `type` | add types to the set; `integer` may become `number`; drop the keyword |
-| `enum`, `const` | add values (`const` may become an `enum` containing it); drop |
+| `enum`, `const` | add values (`const` may become an `enum` containing it); drop. Both on one node are their intersection |
 | `minimum`, `exclusiveMinimum`, `maximum`, `exclusiveMaximum` | loosen or drop; never add |
 | `multipleOf` | change to a divisor of the old value; drop |
 | `minLength`, `minItems`, `minProperties` | decrease or drop; may appear only as `0` |
@@ -133,15 +138,15 @@ What it understands:
 | `pattern`, `format` | keep identical or drop |
 | `uniqueItems` | `true` may become `false`/absent; never add |
 | `required` | remove names; never add |
-| `properties` | add optional properties; never remove one; each existing property is checked recursively with these same rules |
+| `properties` | add optional properties; never remove one; each existing property is checked recursively with these same rules. A new property whose name matches a previous `patternProperties` pattern must accept everything that pattern's schema did |
 | `additionalProperties` | `false` may open up (to absent, `true`, or a schema); a schema may only widen; a closed model or a schema may not appear where there was none |
 | `items` | widen recursively or drop; never add (array-form tuples are not supported) |
 | `anyOf` | every old branch must be covered by some new branch |
 | `allOf` | every new branch must be implied by some old branch |
-| `$ref` | only `#/...` pointers into the same document, with no sibling keywords; resolved on both sides before comparing |
+| `$ref` | only `#/...` pointers into the same document, with no sibling keywords (annotations, `$schema` and a root `$id` aside); resolved on both sides before comparing. Recursive schemas are compared the way recursive types are: a pair of subschemas already being compared further up is assumed compatible. A chain of nothing but `$ref` that loops accepts nothing, so anything may replace it and it may replace nothing |
 | `$schema` | must not change |
 
-`oneOf`, `not`, `if`/`then`/`else`, `contains`, `propertyNames`, `dependentRequired`, `dependentSchemas` and `patternProperties` may be kept identical or removed (`patternProperties` only while `additionalProperties` stays open; `prefixItems` only when `items` goes with it). `unevaluatedProperties`, `unevaluatedItems` and `$dynamicRef` are accepted only in a subschema that is byte-for-byte unchanged. Titles, descriptions, defaults, examples and `$defs` can change freely.
+`oneOf`, `not`, `if`/`then`/`else`, `contains`, `propertyNames`, `dependentRequired`, `dependentSchemas` and `patternProperties` may be kept identical or removed (`patternProperties` only while `additionalProperties` stays open; `prefixItems` only when `items` goes with it). "Identical" follows `$ref`: a `not` that points at `#/$defs/x` counts as changed when `x` changes. A nested subschema may always become `true` or `{}`, which accepts everything at its position. Keywords the schema's draft does not define (`const` before draft-06, `if`/`then`/`else` before draft-07, `prefixItems` before 2020-12, `additionalItems` from 2020-12 on) are annotations to the validator, and the check treats them as annotations too. `unevaluatedProperties`, `unevaluatedItems` and `$dynamicRef` are accepted only in a subschema that is byte-for-byte unchanged. Titles, descriptions, defaults, examples and `$defs` can change freely.
 
 Two things to know:
 
