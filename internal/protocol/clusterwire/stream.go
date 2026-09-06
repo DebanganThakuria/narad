@@ -6,6 +6,7 @@ package clusterwire
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -157,7 +158,9 @@ func EncodeStreamError(message string) ([]byte, error) {
 }
 
 // DecodeStreamError decodes a StreamError payload produced by
-// EncodeStreamError.
+// EncodeStreamError. The payload must be exactly the length prefix and
+// the message: trailing bytes mean a framing bug or a tampered payload
+// and are rejected like every other codec in the cluster protocol.
 func DecodeStreamError(payload []byte) (StreamError, error) {
 	if len(payload) < 2 {
 		return StreamError{}, io.ErrUnexpectedEOF
@@ -165,6 +168,9 @@ func DecodeStreamError(payload []byte) (StreamError, error) {
 	msgLen := int(binary.BigEndian.Uint16(payload[0:2]))
 	if len(payload) < 2+msgLen {
 		return StreamError{}, io.ErrUnexpectedEOF
+	}
+	if len(payload) != 2+msgLen {
+		return StreamError{}, errors.New("trailing stream error payload data")
 	}
 	return StreamError{Message: string(payload[2 : 2+msgLen])}, nil
 }
