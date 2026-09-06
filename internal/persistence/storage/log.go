@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"log/slog"
 	"os"
 	"sort"
 	"sync"
@@ -13,9 +14,14 @@ import (
 // Log is an append-only record log backed by a directory of segment
 // files with an in-memory buffer in front of the disk.
 type Log struct {
-	dir   string
-	codec codec.Codec
-	opts  Options
+	dir    string
+	codec  codec.Codec
+	opts   Options
+	logger *slog.Logger
+	// clock is Options.Retention.Now (time.Now by default): the source of
+	// segment write times, so retention tests can drive both the roll and
+	// the reaper from one fake clock.
+	clock func() time.Time
 
 	// rwmu serializes file writes and segment-list mutations against
 	// the read path.
@@ -33,8 +39,13 @@ type Log struct {
 	// write so a failed write can be retried; see flushing.go.
 	flushingMu      sync.Mutex
 	flushingBase    int64
+	flushingWritten int64
 	flushingRecords [][]byte
 	flushingValid   bool
+
+	// poisonErr latches the first fsync failure; see discard.go.
+	poisonMu  sync.Mutex
+	poisonErr error
 
 	highWatermark atomic.Int64
 	durableTail   atomic.Int64
@@ -94,10 +105,20 @@ type Log struct {
 func NewLog(dir string, opts Options) (*Log, error) {
 	opts = opts.withDefaults()
 
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	clock := opts.Retention.Now
+	if clock == nil {
+		clock = time.Now
+	}
 	l := &Log{
 		dir:            dir,
 		codec:          opts.Codec,
 		opts:           opts,
+		logger:         logger,
+		clock:          clock,
 		segmentIndexes: make(map[int64]*segmentIndex),
 		notify:         make(chan struct{}),
 		hwmPath:        hwmFilePath(dir),
@@ -120,6 +141,12 @@ func NewLog(dir string, opts Options) (*Log, error) {
 	l.durableTail.Store(nextOffset)
 	l.lastHWMSync = time.Now()
 	l.flusher = newFlusher(l, &l.rwmu, opts.FlushInterval)
+	// A recovered active segment that is already full (the previous
+	// process filled it and stopped before rolling) rolls before the
+	// next write, exactly as if this process had filled it.
+	if active := l.segments[len(l.segments)-1]; active.sizeBytes >= opts.SegmentBytes {
+		l.flusher.rollPending = true
+	}
 	l.reaper = newReaper(l, opts.Retention)
 	go l.flusher.run()
 	go l.reaper.run()
@@ -148,4 +175,26 @@ func (l *Log) findSegmentForOffsetLocked(offset int64) *segment {
 		return nil
 	}
 	return s
+}
+
+// now is the log's clock (see Log.clock).
+func (l *Log) now() time.Time { return l.clock() }
+
+// segmentAgedOutLocked reports whether the active segment has held
+// records for longer than the retention roll age, so the next write
+// should start a fresh segment. Caller must hold rwmu (either side).
+func (l *Log) segmentAgedOutLocked(active *segment) bool {
+	rollAge := l.opts.Retention.rollAge()
+	if rollAge <= 0 || active.sizeBytes == 0 || active.firstWriteAt.IsZero() {
+		return false
+	}
+	return l.now().Sub(active.firstWriteAt) >= rollAge
+}
+
+// countError bumps the storage error counter for kind when the metrics
+// recorder supports it (see ErrorRecorder).
+func (l *Log) countError(kind string) {
+	if r, ok := l.opts.Metrics.(ErrorRecorder); ok && r != nil {
+		r.IncStorageError(kind)
+	}
 }

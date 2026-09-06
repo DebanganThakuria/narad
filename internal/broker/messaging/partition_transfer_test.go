@@ -404,3 +404,41 @@ func TestPrepareHandoffWaitsForInFlightCommitUnderProduceLock(t *testing.T) {
 		t.Fatalf("frozen hwm = %d, want 2 (the in-flight commit must be part of the final tail)", info.HighWatermark)
 	}
 }
+
+// A node that sourced a move keeps its handoff freeze until the TTL
+// lapses. When the same partition is installed on it again within that
+// window (a rebalance onto a joining node followed by that node's
+// decommission), the install must lift the stale freeze, or every
+// commit for the partition is refused as a non-owner until the TTL
+// runs out.
+func TestResetPartitionConsumerStateLiftsStaleHandoffFreeze(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1, VisibilityTimeoutMs: 30000}
+	e := newTestEngine(t, ms, nil, nil)
+	ctx := context.Background()
+
+	rec := func() []ingress.ProduceRecord {
+		return []ingress.ProduceRecord{{Topic: "orders", TargetPartition: 0, Key: "k", Payload: []byte("x")}}
+	}
+	if _, err := e.CommitAcceptedProduceBatch(ctx, rec()); err != nil {
+		t.Fatalf("commit before the move: %v", err)
+	}
+	if _, err := e.PrepareHandoff(ctx, "orders", 0, time.Minute); err != nil {
+		t.Fatalf("PrepareHandoff: %v", err)
+	}
+	if _, err := e.CommitAcceptedProduceBatch(ctx, rec()); err == nil {
+		t.Fatal("commit during the freeze must be refused")
+	}
+
+	// The partition comes back: the install path resets consumer state.
+	e.ResetPartitionConsumerState("orders", 0)
+	if e.isProducePaused("orders", 0) || e.isConsumePaused("orders", 0) {
+		t.Fatal("stale handoff freeze survived the reinstall")
+	}
+	if _, err := e.CommitAcceptedProduceBatch(ctx, rec()); err != nil {
+		t.Fatalf("commit after the reinstall: %v", err)
+	}
+	if _, found, err := e.Consume(ctx, "orders", ConsumeOpts{}); err != nil || !found {
+		t.Fatalf("consume after the reinstall: found=%v err=%v", found, err)
+	}
+}

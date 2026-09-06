@@ -42,7 +42,7 @@ func ReadConsumerOffset(partitionDir string) (int64, bool, error) {
 // WriteConsumerOffset durably persists the committed consumer offset,
 // creating the partition directory if needed.
 func WriteConsumerOffset(partitionDir string, offset int64) error {
-	if err := os.MkdirAll(partitionDir, 0o755); err != nil {
+	if err := os.MkdirAll(partitionDir, dataDirMode); err != nil {
 		return err
 	}
 	return writeOffsetFileInPlace(partitionDir, consumerOffsetFileName, offset)
@@ -85,9 +85,9 @@ func writeOffsetFileInPlace(dir, name string, offset int64) error {
 	path := filepath.Join(dir, name)
 
 	created := false
-	f, err := os.OpenFile(path, os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_WRONLY, dataFileMode)
 	if errors.Is(err, os.ErrNotExist) {
-		f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o644)
+		f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE, dataFileMode)
 		created = true
 	}
 	if errors.Is(err, os.ErrNotExist) {

@@ -67,7 +67,7 @@ func (l *Log) rollLocked() error {
 	l.compactFloor = 0
 
 	path := segmentPath(l.dir, l.segmentBase)
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("wal: create segment: %w", err)
 	}

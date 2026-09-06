@@ -30,7 +30,7 @@ import (
 // An empty directory is initialised with one fresh segment at base
 // offset 0.
 func (l *Log) recover() (int64, error) {
-	if err := os.MkdirAll(l.dir, 0o755); err != nil {
+	if err := os.MkdirAll(l.dir, dataDirMode); err != nil {
 		return 0, fmt.Errorf("storage: ensure partition dir: %w", err)
 	}
 
@@ -40,7 +40,7 @@ func (l *Log) recover() (int64, error) {
 	}
 
 	if len(names) == 0 {
-		seg, err := createSegment(l.dir, 0)
+		seg, err := createSegment(l.dir, 0, l.now())
 		if err != nil {
 			return 0, err
 		}
@@ -57,8 +57,14 @@ func (l *Log) recover() (int64, error) {
 		}
 		isActive := i == len(names)-1
 		if err := l.walkSegment(seg, isActive, &nextOffset); err != nil {
-			_ = seg.close()
+			_ = seg.release()
 			return 0, err
+		}
+		if !isActive {
+			// Sealed: the scan is done and nothing reads it yet. The
+			// first read reopens it (segment.handle), so a partition
+			// with days of history does not pin a descriptor per file.
+			_ = seg.release()
 		}
 		l.segments = append(l.segments, seg)
 	}
@@ -156,13 +162,17 @@ func (l *Log) scanSegmentIndex(seg *segment) ([]indexEntry, error) {
 	pos := int64(0)
 	size := seg.sizeBytes
 	entries := make([]indexEntry, 0)
+	file, err := seg.handle()
+	if err != nil {
+		return nil, err
+	}
 
 	for pos < size {
 		// Building the index of a sealed segment only needs frame headers to
 		// find frame boundaries — no payload read, no CRC, no decode (see
 		// frameHeaderAt). Sealed segments are complete, so a frame whose end
 		// runs past the segment is a torn/corrupt tail: stop there.
-		h, end, err := frameHeaderAt(seg.file, pos)
+		h, end, err := frameHeaderAt(file, pos)
 		switch {
 		case err == nil:
 			if end > size {
@@ -183,7 +193,7 @@ func (l *Log) scanSegmentIndex(seg *segment) ([]indexEntry, error) {
 		case errors.Is(err, errBadMagic),
 			errors.Is(err, errCorrupt),
 			errors.Is(err, ErrCorruptRecord):
-			pos = nextMagicInSegment(seg.file, pos+1, size)
+			pos = nextMagicInSegment(file, pos+1, size)
 
 		default:
 			return nil, err

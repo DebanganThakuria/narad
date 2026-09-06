@@ -85,24 +85,24 @@ func ReadSegmentRange(partitionDir string, baseOffset, at, length int64) ([]byte
 // WriteSegmentFile installs received bytes as a segment file in
 // partitionDir (creating the directory if needed). The destination
 // writes each fetched segment here, then opens the directory as a Log
-// to recover a byte-identical copy. Written 0644 to match openSegment.
+// to recover a byte-identical copy. Written 0600 like every data file.
 func WriteSegmentFile(partitionDir string, baseOffset int64, data []byte) error {
-	if err := os.MkdirAll(partitionDir, 0o755); err != nil {
+	if err := os.MkdirAll(partitionDir, dataDirMode); err != nil {
 		return err
 	}
 	path := filepath.Join(partitionDir, segmentFileName(baseOffset))
-	return os.WriteFile(path, data, 0o644)
+	return os.WriteFile(path, data, dataFileMode)
 }
 
 // AppendToSegmentFile appends bytes to an existing staging segment file
 // (used while tailing the source's active segment as it grows). Creates
 // the file if absent.
 func AppendToSegmentFile(partitionDir string, baseOffset int64, data []byte) error {
-	if err := os.MkdirAll(partitionDir, 0o755); err != nil {
+	if err := os.MkdirAll(partitionDir, dataDirMode); err != nil {
 		return err
 	}
 	path := filepath.Join(partitionDir, segmentFileName(baseOffset))
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, dataFileMode)
 	if err != nil {
 		return err
 	}

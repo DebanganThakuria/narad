@@ -152,8 +152,19 @@ func quarantinePartitionDir(dir string) (string, error) {
 // after installing a copied partition (a node that owned the partition
 // earlier may still hold the old shard), and reclaim calls it on the
 // source.
+//
+// It also lifts any handoff freeze this node still holds for the
+// partition. A node that receives a partition back within the freeze
+// TTL of a move it sourced moments earlier (a rebalance onto a joining
+// node, then that node's decommission returning the partition) would
+// otherwise refuse every commit for it as a non-owner until the TTL
+// lapsed: a minute-long fan-out and produce stall seen on every
+// join-then-decommission cycle. The freeze only ever protects a move
+// this node is the source of; at install this node is the destination,
+// and at reclaim the move is over.
 func (e *Engine) ResetPartitionConsumerState(topicName string, partition int) {
 	if e.offsets != nil {
 		e.offsets.DropPartition(topicName, partition)
 	}
+	e.ResumeProduce(topicName, partition)
 }

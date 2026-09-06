@@ -80,7 +80,7 @@ func WriteFanoutCursorIfPartitionDirExists(partitionDir, child string, c FanoutC
 // keeps using WriteFanoutCursorIfPartitionDirExists so a concurrent
 // topic delete is never resurrected.
 func WriteFanoutCursorCreating(partitionDir, child string, c FanoutCursor) error {
-	if err := os.MkdirAll(partitionDir, 0o755); err != nil {
+	if err := os.MkdirAll(partitionDir, dataDirMode); err != nil {
 		return err
 	}
 	return WriteFanoutCursorIfPartitionDirExists(partitionDir, child, c)

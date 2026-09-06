@@ -60,7 +60,7 @@ type syncBatch struct {
 // active segment, and starts the background sync loop.
 func Open(dir string, opts Options) (*Log, error) {
 	opts = normalizeOptions(opts)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("wal: create dir: %w", err)
 	}
 
@@ -107,7 +107,7 @@ func Open(dir string, opts Options) (*Log, error) {
 // openActiveSegment opens the last segment for appending, discarding any
 // bytes past validEnd (a torn tail detected by the open-time scan).
 func openActiveSegment(path string, validEnd int64) (*os.File, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("wal: open active segment: %w", err)
 	}

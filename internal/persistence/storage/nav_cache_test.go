@@ -154,6 +154,7 @@ func TestNavCacheEliminatesSequentialRewalk(t *testing.T) {
 	for i := range total {
 		appendSingleRecordFrame(t, l, fmt.Appendf(nil, "record-%04d", i))
 	}
+	syncLog(t, l)
 
 	read := func(off int64) []byte {
 		t.Helper()

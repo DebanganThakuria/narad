@@ -30,3 +30,14 @@ type MetricsRecorder interface {
 	// was deleted.
 	ObserveRetentionRun(duration time.Duration)
 }
+
+// ErrorRecorder is an optional extension of MetricsRecorder for the
+// storage error counter. kind is one of:
+//
+//	fsync_poisoned    an fdatasync failed and the log is poisoned
+//	commit_discard    a failed commit discarded its uncommitted tail
+//	discard_truncate  that discard could not truncate the segment
+//	retention_unlink  the reaper could not remove a segment file
+type ErrorRecorder interface {
+	IncStorageError(kind string)
+}
