@@ -68,12 +68,52 @@ What can change after creation, and what cannot:
 | `retention_ms` | yes | applies to all partitions from the next retention pass |
 | `max_in_flight_per_partition`, `max_acked_ahead_per_partition` | yes | send one or both; the other keeps its current value |
 | `partitions` | increase only | must be greater than the current count and within the cluster maximum; omit or `0` to leave it alone |
-| `schema` | yes | registers a new schema version; see [Fan-out & Delay](fanout-and-delay.md) for parent/child rules |
+| `schema` | yes | registers a new schema version; see [Schema evolution](#schema-evolution) below and [Fan-out & Delay](fanout-and-delay.md) for parent/child rules |
 | `visibility_timeout_ms` | **no** | fixed at create time |
 
 If the topic has [delay children](fanout-and-delay.md), you can't shrink retention below what the child's delay needs; Narad refuses with `409` instead of letting delayed messages age out before delivery.
 
 A request carrying several fields applies them as separate updates in a fixed order (retention, then the per-partition limits, then partitions, then schema), with no transaction across them: the first failure stops the sequence and answers its error, and the fields before it stay applied. Send one field per request when you need all-or-nothing.
+
+## Schema evolution
+
+A topic's schema history is append-only and lives in the metastore: every `PATCH` with a `schema` field is checked against the **latest persisted version** on whichever node handles it and stored as the next version number. A version can never be overwritten; if two updates race, the loser gets `409` and should re-read the current schema before retrying.
+
+The check enforces "every message the previous version accepted stays valid". It is a structural comparison that **fails closed**: a construct it cannot reason about is only allowed to stay exactly as it was (or, where removing it can only widen the schema, to disappear). Anything else answers `400` with a message naming the keyword and its location (`at /properties/qty: type "integer" no longer allowed`).
+
+What it understands:
+
+| Keyword | Allowed change |
+|---|---|
+| `type` | add types to the set; `integer` may become `number`; drop the keyword |
+| `enum`, `const` | add values (`const` may become an `enum` containing it); drop |
+| `minimum`, `exclusiveMinimum`, `maximum`, `exclusiveMaximum` | loosen or drop; never add |
+| `multipleOf` | change to a divisor of the old value; drop |
+| `minLength`, `minItems`, `minProperties` | decrease or drop; may appear only as `0` |
+| `maxLength`, `maxItems`, `maxProperties` | increase or drop; never add |
+| `pattern`, `format` | keep identical or drop |
+| `uniqueItems` | `true` may become `false`/absent; never add |
+| `required` | remove names; never add |
+| `properties` | add optional properties; never remove one; each existing property is checked recursively with these same rules |
+| `additionalProperties` | `false` may open up (to absent, `true`, or a schema); a schema may only widen; a closed model or a schema may not appear where there was none |
+| `items` | widen recursively or drop; never add (array-form tuples are not supported) |
+| `anyOf` | every old branch must be covered by some new branch |
+| `allOf` | every new branch must be implied by some old branch |
+| `$ref` | only `#/...` pointers into the same document, with no sibling keywords; resolved on both sides before comparing |
+| `$schema` | must not change |
+
+`oneOf`, `not`, `if`/`then`/`else`, `contains`, `propertyNames`, `dependentRequired`, `dependentSchemas` and `patternProperties` may be kept identical or removed (`patternProperties` only while `additionalProperties` stays open; `prefixItems` only when `items` goes with it). `unevaluatedProperties`, `unevaluatedItems` and `$dynamicRef` are accepted only in a subschema that is byte-for-byte unchanged. Titles, descriptions, defaults, examples and `$defs` can change freely.
+
+Two things to know:
+
+- **Adding an optional property under an open content model is allowed** even though, strictly, a message that already carried that key with a different type was valid before. This is the one deliberate exception; use `"additionalProperties": false` when you need exact semantics.
+- The check only compares a keyword with the same keyword in the previous version. A change that is safe only because of a *different* keyword (dropping `const: 5` for `minimum: 3`, say) is rejected: make the new schema wider keyword by keyword.
+
+### What a schema may reference
+
+`$ref` resolves only inside the schema document itself (`#/$defs/...`). `file://`, `http(s)://` and relative references are refused at registration with `400`; the broker never reads its filesystem or the network on a client's behalf. The standard draft metaschemas (`$schema`) are built in; any other `$schema` URL is refused the same way.
+
+Payload numbers are validated as 64-bit floats, so integers above 2^53 lose precision before `multipleOf` and bound checks.
 
 ## Deleting a topic
 

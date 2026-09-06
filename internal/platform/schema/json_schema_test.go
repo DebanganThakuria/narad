@@ -1,11 +1,15 @@
 package schema
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 func TestAlwaysValidAcceptsAnyPayload(t *testing.T) {
@@ -322,4 +326,42 @@ func TestJSONSchemaExternalMetaschemaIsRefused(t *testing.T) {
 	if err := registry.ValidateDefinition(context.Background(), "orders", []byte(`{"$schema":"http://json-schema.org/draft-07/schema#","type":"object"}`)); err != nil {
 		t.Fatalf("ValidateDefinition() with the embedded draft-07 metaschema error = %v", err)
 	}
+}
+
+// BenchmarkValidatePayloadDecode documents why Validate keeps
+// json.Unmarshal: the library validates only a decoded document, and
+// its own UnmarshalJSON copies the payload through a json.Decoder
+// first, which costs more here than the direct unmarshal.
+func BenchmarkValidatePayloadDecode(b *testing.B) {
+	payload := []byte(`{"id":"o_12345","qty":3,"price":19.99,"tags":["a","b","c"],"customer":{"name":"Ada","email":"ada@example.com","tier":2},"lines":[{"sku":"x1","n":1},{"sku":"x2","n":4}]}`)
+	registry := NewJSONSchema()
+	schemaBytes := []byte(`{"type":"object","properties":{"id":{"type":"string"},"qty":{"type":"integer"},"price":{"type":"number"},"tags":{"type":"array","items":{"type":"string"}}},"required":["id"]}`)
+	if err := registry.Load(context.Background(), "orders", 1, schemaBytes); err != nil {
+		b.Fatal(err)
+	}
+	b.Run("Validate", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if err := registry.Validate(context.Background(), "orders", payload); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("decode-only/json.Unmarshal", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			var v any
+			if err := json.Unmarshal(payload, &v); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("decode-only/jsonschema.UnmarshalJSON", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := jsonschema.UnmarshalJSON(bytes.NewReader(payload)); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }

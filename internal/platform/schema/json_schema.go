@@ -169,6 +169,16 @@ func clientSafeCompileError(err error) error {
 
 // Validate decodes the payload and checks it against the latest loaded
 // schema for the topic. Returns ErrSchemaNotFound if none is loaded.
+//
+// The decode is a plain json.Unmarshal into any. The library validates
+// only a decoded document (there is no byte-level or streaming
+// validator), and its own jsonschema.UnmarshalJSON is measurably more
+// expensive here because it copies the payload into a json.Decoder
+// buffer first (BenchmarkValidatePayloadDecode); so this is already
+// the cheapest decode the library accepts. Numbers arrive as float64,
+// which the validator handles; integers above 2^53 lose precision
+// before multipleOf/bounds checks, a limitation documented in
+// docs/client/topics.md.
 func (r *JSONSchema) Validate(_ context.Context, topic string, payload []byte) error {
 	r.mu.RLock()
 	version, ok := r.versions[topic]

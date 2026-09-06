@@ -71,6 +71,8 @@ Assignments are **sticky**: a dead node's partitions are *not* reassigned, becau
 | `Barrier` timeout | 5s |
 | Startup reconcile wait for caught-up | up to 60s, then the destructive sweep is skipped (never rushed) |
 
+Schema history is **append-only**: `opPutSchema` is applied only when the version is exactly the topic's persisted latest plus one (and the same for every fan-out child's copy). The proposer (the topics manager on the leader) reads the persisted history, checks compatibility against the persisted latest and proposes latest+1; a proposer working from a stale view can therefore never overwrite an earlier version on any replica, and gets `ErrAlreadyExists` to re-read and retry. The produce path keys its loaded copy of the history by the topic's schema version counter and reloads the whole history when that moves, so a version registered on another node, a delete-and-recreate under the same name, or an attach-time adoption is picked up on the next produce.
+
 Every write is one `command` envelope (an op byte plus a JSON payload) applied identically on every node's FSM. Op families bump per-domain **version counters** (topics version, members version, …) that the hot paths use as cache keys: a produce checks its cached topic record against the topic version in one atomic load instead of a bbolt read per message.
 
 ## Boot order is load-bearing
