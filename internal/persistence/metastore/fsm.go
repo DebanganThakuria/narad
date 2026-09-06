@@ -58,6 +58,12 @@ type fsmState struct {
 	dbPath   string
 	version  atomic.Uint64
 	versions metadataDomainVersions
+	// applied is the index of the last log entry whose effects are
+	// committed to db. Raft's own applied_index advances when a batch is
+	// handed to the FSM goroutine, and fsm_pending only counts batches
+	// still queued, so neither says the entry's bbolt transaction has
+	// finished; this does. Store.WaitApplied builds read-your-writes on it.
+	applied atomic.Uint64
 }
 
 func newFSM(path string) (*fsmState, error) {
@@ -147,11 +153,15 @@ func (f *fsmState) Apply(l *raft.Log) any {
 	case opSetUserGrants:
 		err = f.applySetUserGrants(c.Data)
 	default:
-		return fmt.Errorf("metastore: unknown op %d", c.Op)
+		err = fmt.Errorf("metastore: unknown op %d", c.Op)
 	}
 	if err == nil {
 		f.version.Add(1)
 	}
+	// Every path above has finished its bbolt transaction (or refused
+	// to start one), so the entry's effects are in db before the index
+	// moves. Set on error too: a rejected command is consumed all the same.
+	f.applied.Store(l.Index)
 	return err
 }
 

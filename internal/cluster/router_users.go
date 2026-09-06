@@ -23,7 +23,7 @@ func (rt *Router) RouteCreateUser(ctx context.Context, w http.ResponseWriter, _ 
 		return false
 	}
 	res, err := rt.peer.CreateUser(ctx, addr, body)
-	return writeForwardResult(w, res, err)
+	return rt.writeForwardedWrite(ctx, w, addr, res, err)
 }
 
 // RouteUpdateUser forwards a user update to the cluster leader.
@@ -33,7 +33,7 @@ func (rt *Router) RouteUpdateUser(ctx context.Context, w http.ResponseWriter, _ 
 		return false
 	}
 	res, err := rt.peer.UpdateUser(ctx, addr, username, body)
-	return writeForwardResult(w, res, err)
+	return rt.writeForwardedWrite(ctx, w, addr, res, err)
 }
 
 // RouteDeleteUser forwards a user delete to the cluster leader.
@@ -43,7 +43,7 @@ func (rt *Router) RouteDeleteUser(ctx context.Context, w http.ResponseWriter, _ 
 		return false
 	}
 	res, err := rt.peer.DeleteUser(ctx, addr, username)
-	return writeForwardResult(w, res, err)
+	return rt.writeForwardedWrite(ctx, w, addr, res, err)
 }
 
 // writeForwardResult renders a forwarded peer response, mapping a

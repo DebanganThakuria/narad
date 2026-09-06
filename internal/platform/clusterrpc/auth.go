@@ -157,6 +157,7 @@ func sessionProof(secret string, role, key []byte) []byte {
 func clientProof(secret string, key []byte) []byte {
 	return sessionProof(secret, clientProofContext, key)
 }
+
 func serverProof(secret string, key []byte) []byte {
 	return sessionProof(secret, serverProofContext, key)
 }

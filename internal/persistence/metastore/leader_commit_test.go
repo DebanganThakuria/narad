@@ -40,15 +40,19 @@ func (f *fakeTransport) Close() error                                           
 func (f *fakeTransport) AppendEntriesPipeline(raft.ServerID, raft.ServerAddress) (raft.AppendPipeline, error) {
 	return nil, errors.New("unsupported")
 }
+
 func (f *fakeTransport) AppendEntries(raft.ServerID, raft.ServerAddress, *raft.AppendEntriesRequest, *raft.AppendEntriesResponse) error {
 	return errors.New("unsupported")
 }
+
 func (f *fakeTransport) RequestVote(raft.ServerID, raft.ServerAddress, *raft.RequestVoteRequest, *raft.RequestVoteResponse) error {
 	return errors.New("unsupported")
 }
+
 func (f *fakeTransport) InstallSnapshot(raft.ServerID, raft.ServerAddress, *raft.InstallSnapshotRequest, *raft.InstallSnapshotResponse, io.Reader) error {
 	return errors.New("unsupported")
 }
+
 func (f *fakeTransport) TimeoutNow(raft.ServerID, raft.ServerAddress, *raft.TimeoutNowRequest, *raft.TimeoutNowResponse) error {
 	return errors.New("unsupported")
 }

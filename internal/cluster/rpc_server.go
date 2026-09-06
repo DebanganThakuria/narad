@@ -421,6 +421,8 @@ func (s *RPCServer) controlHandler(op nodewire.Operation) (handle func([]byte) n
 		return s.handleDetachChild, true
 	case nodewire.OpFanoutCursors:
 		return s.handleFanoutCursors, true
+	case nodewire.OpAppliedIndex:
+		return s.handleAppliedIndex, true
 	default:
 		return nil, false
 	}

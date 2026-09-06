@@ -14,7 +14,7 @@ flowchart LR
     RAFT <-->|"AppendEntries / elections<br/>(mutual TLS)"| PEERS[other nodes' Raft]
 ```
 
-- **Writes** (create topic, register member, attach child…) are Raft commands: forwarded to the leader, committed by quorum, then applied to every node's FSM. Each command family bumps a per-domain **version counter**, so caches (topic lookups on the hot path) invalidate precisely.
+- **Writes** (create topic, register member, attach child…) are Raft commands: forwarded to the leader, committed by quorum, then applied to every node's FSM. A node that forwarded a write does not answer the client until its own FSM has applied it (it asks the leader for the index it applied and waits, bounded, for its replica to reach it), so a read on the same node right after the response is never behind the write. Each command family bumps a per-domain **version counter**, so caches (topic lookups on the hot path) invalidate precisely.
 - **Reads** are local: every node answers topic lookups from its own bbolt replica, no network hop. This is what makes request routing fast, and it's also the sharpest knife in the system (below).
 - The FSM persists in **bbolt**; Raft keeps its log in boltdb and periodic **snapshots** on disk. A restarting node restores FSM state from the latest snapshot, then replays the log tail.
 

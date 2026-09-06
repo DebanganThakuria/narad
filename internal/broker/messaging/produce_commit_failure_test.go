@@ -39,8 +39,10 @@ func TestCommitAcceptedProduceBatchRetryAfterFailureDeliversOnce(t *testing.T) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 
 	record := func(id string, payload string) ingress.ProduceRecord {
-		return ingress.ProduceRecord{Topic: topicName, Key: id, TargetPartition: 0, Payload: []byte(payload),
-			CreatedAtUnixMs: time.Now().UnixMilli()}
+		return ingress.ProduceRecord{
+			Topic: topicName, Key: id, TargetPartition: 0, Payload: []byte(payload),
+			CreatedAtUnixMs: time.Now().UnixMilli(),
+		}
 	}
 	commit := func(recs ...ingress.ProduceRecord) ([]int64, error) {
 		return engine.CommitAcceptedProduceBatch(context.Background(), recs)

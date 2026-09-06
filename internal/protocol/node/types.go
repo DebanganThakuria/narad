@@ -44,6 +44,7 @@ const (
 	OpCompleteMove
 	OpAbortMove
 	OpGetAssignment
+	OpAppliedIndex
 )
 
 // CompleteMoveRequest asks the leader to perform the guarded ownership flip

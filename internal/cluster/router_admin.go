@@ -39,12 +39,7 @@ func (rt *Router) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, _
 	createCtx, cancel := longWaitRPCContext(ctx, createForwardTimeout)
 	defer cancel()
 	res, err := rt.peer.CreateTopic(createCtx, memberAddr, body)
-	if err != nil {
-		writeLeaderForwardError(w, err)
-		return true
-	}
-	writePeerResponse(w, res)
-	return true
+	return rt.writeForwardedWrite(ctx, w, memberAddr, res, err)
 }
 
 // RouteAlterTopic forwards a topic alter request to the cluster leader.
@@ -54,12 +49,7 @@ func (rt *Router) RouteAlterTopic(ctx context.Context, w http.ResponseWriter, _ 
 		return false
 	}
 	res, err := rt.peer.AlterTopic(ctx, memberAddr, topicName, body)
-	if err != nil {
-		writeLeaderForwardError(w, err)
-		return true
-	}
-	writePeerResponse(w, res)
-	return true
+	return rt.writeForwardedWrite(ctx, w, memberAddr, res, err)
 }
 
 // deleteTopicForwardTimeout bounds a follower's delete forward to the
@@ -77,12 +67,7 @@ func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, _
 	deleteCtx, cancel := longWaitRPCContext(ctx, deleteTopicForwardTimeout)
 	defer cancel()
 	res, err := rt.peer.DeleteTopic(deleteCtx, memberAddr, topicName)
-	if err != nil {
-		writeLeaderForwardError(w, err)
-		return true
-	}
-	writePeerResponse(w, res)
-	return true
+	return rt.writeForwardedWrite(ctx, w, memberAddr, res, err)
 }
 
 // BroadcastDeleteTopic asks every live member (except this node) to purge the
