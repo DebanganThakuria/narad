@@ -99,7 +99,14 @@ func runServe(args []string) error {
 		Peers:         bootstrapPeers(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers, cfg.Cluster.InitialMembers),
 		JoinOnly:      joinOnly,
 		Log:           log,
-		TLS:           clusterTLS,
+		// Raft's own log lines (elections, snapshot installs, transport
+		// and TLS handshake failures) go to the process log; they used
+		// to be discarded.
+		Logger:            metastore.NewRaftLogWriter(log),
+		TLS:               clusterTLS,
+		SnapshotThreshold: cfg.Cluster.RaftSnapshotThreshold,
+		SnapshotInterval:  cfg.Cluster.RaftSnapshotInterval.D(),
+		TrailingLogs:      cfg.Cluster.RaftTrailingLogs,
 	})
 	if err != nil {
 		return fmt.Errorf("metastore: %w", err)

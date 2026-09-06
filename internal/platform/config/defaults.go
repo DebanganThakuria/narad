@@ -26,7 +26,10 @@ func Default() *Config {
 			MaxConsumeInFlightPerIdentity: 1024,
 		},
 		Cluster: ClusterConfig{
-			Addr: ":7943",
+			Addr:                  ":7943",
+			RaftSnapshotThreshold: DefaultRaftSnapshotThreshold,
+			RaftSnapshotInterval:  DefaultRaftSnapshotInterval,
+			RaftTrailingLogs:      DefaultRaftTrailingLogs,
 		},
 		Storage: StorageConfig{
 			DataDir:                     "data",
