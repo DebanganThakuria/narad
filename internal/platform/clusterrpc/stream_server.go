@@ -54,7 +54,7 @@ var nextStreamID atomic.Uint64
 type streamServerConn struct {
 	conn     streamConn
 	reader   io.Reader
-	expected []byte // expected auth token; nil disables auth
+	auth     *connAuth // per-connection proofs; nil disables auth
 	logger   *slog.Logger
 	handler  StreamFrameHandler
 	writeMu  sync.Mutex
@@ -70,16 +70,19 @@ type streamServerConn struct {
 	cancelAll  context.CancelFunc
 }
 
-// ServeStreamConn serves cluster-RPC frames on a single stream. When
-// secret is non-empty, the stream's first frame must be a valid auth
-// proof or the stream is closed without serving any request.
-func ServeStreamConn(conn streamConn, reader io.Reader, secret string, logger *slog.Logger, handlers ...StreamFrameHandler) {
-	serveStreamConn(conn, reader, expectedAuthToken(secret), logger, firstStreamFrameHandler(handlers))
+// ServeStreamConn serves cluster-RPC frames on a single UNAUTHENTICATED
+// stream: it is for transports that carry no cluster secret (tests,
+// in-memory pipes). Authenticated streams are served by the QUIC
+// listener, which derives the per-connection proofs from the TLS
+// session (see serveQUICConn and auth.go).
+func ServeStreamConn(conn streamConn, reader io.Reader, logger *slog.Logger, handlers ...StreamFrameHandler) {
+	serveStreamConn(conn, reader, nil, logger, firstStreamFrameHandler(handlers))
 }
 
-// serveStreamConn is ServeStreamConn with the auth token already derived
-// (once per listener, not once per stream).
-func serveStreamConn(conn streamConn, reader io.Reader, expectedToken []byte, logger *slog.Logger, handler StreamFrameHandler) {
+// serveStreamConn serves one stream. auth carries the proofs expected
+// and sent on this stream's connection (derived once per connection,
+// not once per stream); nil disables auth.
+func serveStreamConn(conn streamConn, reader io.Reader, auth *connAuth, logger *slog.Logger, handler StreamFrameHandler) {
 	if reader == nil {
 		reader = conn
 	}
@@ -87,7 +90,7 @@ func serveStreamConn(conn streamConn, reader io.Reader, expectedToken []byte, lo
 	c := &streamServerConn{
 		conn:      conn,
 		reader:    reader,
-		expected:  expectedToken,
+		auth:      auth,
 		logger:    logger,
 		handler:   handler,
 		streamID:  StreamIDFromContext(baseCtx),
@@ -141,11 +144,18 @@ func (c *streamServerConn) serve() {
 // receive buffer indefinitely.
 const authHandshakeTimeout = 5 * time.Second
 
-// authenticate consumes and verifies the stream's first frame when a
-// cluster secret is configured. With no secret it is a no-op. A missing
-// or invalid proof closes the stream (returns false).
+// authenticate runs the server side of the stream auth handshake when
+// a cluster secret is configured. With no secret it is a no-op. The
+// stream's first frame must carry the client's proof, read under the
+// 64-byte pre-auth cap (an unauthenticated peer cannot make this node
+// allocate a 16 MiB buffer per stream by lying in the frame header);
+// the server then answers with its own session-bound proof so the
+// client can tell a real node from an impostor. A missing or invalid
+// proof closes the stream (returns false). In legacy mode (peer on the
+// old ALPN) the fixed token is checked and no reply is sent, because
+// old clients do not read one.
 func (c *streamServerConn) authenticate() bool {
-	if c.expected == nil {
+	if c.auth == nil {
 		return true
 	}
 	// Bound the wait for the auth frame, then clear the deadline so the
@@ -153,20 +163,25 @@ func (c *streamServerConn) authenticate() bool {
 	_ = c.conn.SetReadDeadline(time.Now().Add(authHandshakeTimeout))
 	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
 
-	frame, err := clusterwire.ReadStreamFrame(c.reader, clusterwire.MaxStreamFramePayloadBytes)
+	frame, err := clusterwire.ReadStreamFrame(c.reader, maxAuthFramePayloadBytes)
 	if err != nil {
 		if c.logger != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 			c.logger.Debug("cluster stream auth read", "err", err)
 		}
 		return false
 	}
-	if !verifyAuthToken(c.expected, frame) {
+	if !verifyAuthToken(c.auth.expectedClient, frame) {
 		if c.logger != nil {
-			c.logger.Warn("cluster stream rejected: invalid auth", "component", "audit")
+			c.logger.Warn("cluster stream rejected: invalid auth", "component", "audit", "legacy", c.auth.legacy)
 		}
 		return false
 	}
-	return true
+	if c.auth.legacy {
+		return true
+	}
+	// Prove the secret back. writeFrame aborts the stream on failure, so
+	// a client that went away mid-handshake cannot leave it half-open.
+	return c.writeFrame(authFrame(c.auth.serverReply))
 }
 
 func (c *streamServerConn) handleFrame(frame clusterwire.StreamFrame) {
@@ -188,7 +203,7 @@ func (c *streamServerConn) handleFrame(frame clusterwire.StreamFrame) {
 				return
 			}
 			c.endRequest(frame.RequestID)
-		} else if c.handler != nil && c.handler.HandleStreamFrame(frame, c.writeFrame) {
+		} else if c.handler != nil && c.handler.HandleStreamFrame(frame, c.respond) {
 			return
 		}
 		c.writeError(frame.RequestID, fmt.Sprintf("unsupported stream frame type %d", frame.Type))
@@ -256,7 +271,15 @@ func replyWriteTimeout(payloadBytes int) time.Duration {
 	return defaultStreamTimeout + time.Duration(payloadBytes/(256<<10))*time.Second
 }
 
-func (c *streamServerConn) writeFrame(frame clusterwire.StreamFrame) {
+// respond is writeFrame as a handler callback (the result is not the
+// handler's concern; a failed write already aborted the stream).
+func (c *streamServerConn) respond(frame clusterwire.StreamFrame) {
+	c.writeFrame(frame)
+}
+
+// writeFrame writes one frame and reports whether it succeeded; a
+// failed write aborts the stream.
+func (c *streamServerConn) writeFrame(frame clusterwire.StreamFrame) bool {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	// Bound reply writes (mirrors the client's write-deadline convention):
@@ -276,5 +299,7 @@ func (c *streamServerConn) writeFrame(frame clusterwire.StreamFrame) {
 		// stream is unrecoverable. Aborting both directions also unblocks
 		// the serve loop's Read on a QUIC stream.
 		abortStream(c.conn)
+		return false
 	}
+	return true
 }

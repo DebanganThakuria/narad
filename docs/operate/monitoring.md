@@ -1,6 +1,6 @@
 # Monitoring
 
-`GET /metrics` on any node serves Prometheus metrics (unauthenticated by design: it's a scrape target, not a secret). The chart ships a `ServiceMonitor` when `metrics.enabled: true`. Namespace prefix: `narad_`.
+`GET /metrics` on any node serves Prometheus metrics. The exposition names every topic with its partition count, lag, throughput and fan-out graph, the same inventory topic listing only shows to grant holders, so it is not served to anyone who can reach the API port: by default it lives on its **own listener** (`NARAD_HTTP_METRICS_ADDR`, `:9100` in the chart, which is what the `ServiceMonitor` scrapes, credential-free and cluster-internal) and is a 404 on the API port; with no metrics listener it is served on the API port **behind the same Basic auth as the API** (Prometheus supports `basic_auth` per scrape job), unless `NARAD_HTTP_METRICS_UNAUTHENTICATED=true` restores the old open behaviour. Namespace prefix: `narad_`.
 
 **Don't build a dashboard; import ours.** The repo ships a ready-to-go Grafana dashboard at
 [`ops/monitoring/grafana/dashboards/narad-node-dashboard.json`](https://github.com/DebanganThakuria/narad/blob/master/ops/monitoring/grafana/dashboards/narad-node-dashboard.json):
@@ -38,7 +38,7 @@ Honorable mention: `rate(narad_errors_total[5m])` by `component`/`kind` as a cat
 
 | Metric | Meaning |
 |---|---|
-| `narad_consumer_lag_messages` | HWM minus committed frontier, per partition |
+| `narad_consumer_lag_messages` | Committed high watermark minus committed frontier, per partition: what a consumer can still read (buffered and hidden-tail records are not counted). Series for a partition that moved to another node are dropped on the next 5 s tick, so `sum by (topic, partition)` across nodes does not double count |
 | `narad_oldest_unconsumed_message_age_seconds` | Upper bound on how stale the next message is |
 | `narad_inflight_size` / `narad_acked_ahead_size` | Lease table pressure vs the topic caps |
 | `narad_ack_rejected_total` | 410s: consumers losing races (normal in small doses) |
@@ -67,7 +67,7 @@ Honorable mention: `rate(narad_errors_total[5m])` by `component`/`kind` as a cat
 
 ### Cluster & misc
 
-`narad_topics_total`, `narad_partitions_total`, `narad_errors_total{component,kind}`, `narad_boot_duration_seconds`.
+`narad_topics_total`, `narad_partitions_total`, `narad_open_partition_logs` (refreshed every poller tick, eviction on or off), `narad_errors_total{component,kind}`, `narad_boot_duration_seconds`.
 
 ## Reading the dashboards under failure
 
@@ -80,4 +80,4 @@ What healthy failure handling looks like, so you don't page yourself for the sys
 
 ## pprof
 
-`narad.pprof.enabled: true` serves the full `net/http/pprof` suite on `:6060`. We keep it on in staging; CPU profiles during soak tests are how the produce hot path stayed honest.
+`narad.pprof.enabled: true` serves the full `net/http/pprof` suite on `:6060`. We keep it on in staging; CPU profiles during soak tests are how the produce hot path stayed honest. Like the metrics listener it is unauthenticated and must stay loopback or cluster-internal (the ingress never routes to it; a NetworkPolicy keeps other namespaces out). The two may share one address.

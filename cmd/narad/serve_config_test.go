@@ -102,6 +102,7 @@ func TestLoadServeConfigUsesAdvertisedAddrWhenClusterPortProvided(t *testing.T) 
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@127.0.0.1:9456,node-c@127.0.0.1:9457,node-d@127.0.0.1:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig([]string{"--cluster-port", "9456"})
 	if err != nil {
 		t.Fatalf("loadServeConfig() error = %v", err)
@@ -115,6 +116,7 @@ func TestLoadServeConfigUsesClusterAddrFallbackWhenPeerMissing(t *testing.T) {
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-c@127.0.0.1:9457,node-d@127.0.0.1:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig([]string{"--cluster-port", "9456"})
 	if err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
@@ -128,6 +130,7 @@ func TestLoadServeConfigRemovesAdvertisedLocalPeerWhenClusterPortProvided(t *tes
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@127.0.0.1:9456,node-c@127.0.0.1:9457,node-d@127.0.0.1:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig([]string{"--cluster-port", "9456"})
 	if err != nil {
 		t.Fatalf("loadServeConfig() error = %v", err)
@@ -142,6 +145,7 @@ func TestLoadServeConfigKeepsAllPeersWhenAdvertisedLocalPeerMissing(t *testing.T
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-c@127.0.0.1:9457,node-d@127.0.0.1:9458,node-e@127.0.0.1:9459")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig([]string{"--cluster-port", "9456"})
 	if err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
@@ -155,6 +159,7 @@ func TestLoadServeConfigAcceptsClusterPortWithHostnamePeers(t *testing.T) {
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@narad-0.local:9456,node-c@narad-1.local:9457,node-d@narad-2.local:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig([]string{"--cluster-port", "9456"})
 	if err != nil {
 		t.Fatalf("loadServeConfig() error = %v", err)
@@ -168,6 +173,7 @@ func TestLoadServeConfigAcceptsClusterPortWithIPv6Peers(t *testing.T) {
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@[::1]:9456,node-c@[::1]:9457,node-d@[::1]:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig([]string{"--cluster-port", "9456"})
 	if err != nil {
 		t.Fatalf("loadServeConfig() error = %v", err)
@@ -181,6 +187,7 @@ func TestLoadServeConfigAcceptsClusterPortWithPortOnlyPeers(t *testing.T) {
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@:9456,node-c@:9457,node-d@:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig([]string{"--cluster-port", "9456"})
 	if err != nil {
 		t.Fatalf("loadServeConfig() error = %v", err)
@@ -194,6 +201,7 @@ func TestLoadServeConfigRejectsClusterPortWithWrongLocalPeerPort(t *testing.T) {
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@127.0.0.1:9457,node-c@127.0.0.1:9458,node-d@127.0.0.1:9459")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig([]string{"--cluster-port", "9456"}); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
 	}
@@ -203,6 +211,7 @@ func TestLoadServeConfigRejectsClusterPortWithWrongLocalPeerPortPortOnly(t *test
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@:9457,node-c@:9458,node-d@:9459")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig([]string{"--cluster-port", "9456"}); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
 	}
@@ -212,6 +221,7 @@ func TestLoadServeConfigRejectsClusterPortWithWrongLocalPeerPortHostname(t *test
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@narad-0.local:9457,node-c@narad-1.local:9458,node-d@narad-2.local:9459")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig([]string{"--cluster-port", "9456"}); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
 	}
@@ -221,6 +231,7 @@ func TestLoadServeConfigRejectsClusterPortWithWrongLocalPeerPortIPv6(t *testing.
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@[::1]:9457,node-c@[::1]:9458,node-d@[::1]:9459")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig([]string{"--cluster-port", "9456"}); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
 	}
@@ -230,6 +241,7 @@ func TestLoadServeConfigRejectsClusterPortWithDifferentNodeIDButMatchingAddr(t *
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-x@127.0.0.1:9456,node-c@127.0.0.1:9457,node-d@127.0.0.1:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig([]string{"--cluster-port", "9456"}); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
 	}
@@ -239,6 +251,7 @@ func TestLoadServeConfigRejectsClusterPortWithDifferentNodeIDButMatchingPortOnly
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-x@:9456,node-c@:9457,node-d@:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig([]string{"--cluster-port", "9456"}); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
 	}
@@ -248,6 +261,7 @@ func TestLoadServeConfigRejectsClusterPortWithDifferentNodeIDButMatchingHostname
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-x@narad-0.local:9456,node-c@narad-1.local:9457,node-d@narad-2.local:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig([]string{"--cluster-port", "9456"}); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
 	}
@@ -257,6 +271,7 @@ func TestLoadServeConfigRejectsClusterPortWithDifferentNodeIDButMatchingIPv6Addr
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-x@[::1]:9456,node-c@[::1]:9457,node-d@[::1]:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig([]string{"--cluster-port", "9456"}); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
 	}
@@ -267,6 +282,7 @@ func TestLoadServeConfigAcceptsExactHostfulAddrWithMatchingPeer(t *testing.T) {
 	t.Setenv("NARAD_CLUSTER_ADDR", "127.0.0.1:9456")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@127.0.0.1:9456,node-c@127.0.0.1:9457,node-d@127.0.0.1:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig(nil)
 	if err != nil {
 		t.Fatalf("loadServeConfig() error = %v", err)
@@ -281,6 +297,7 @@ func TestLoadServeConfigAcceptsExactHostfulAddrWithPortOnlyPeerFallback(t *testi
 	t.Setenv("NARAD_CLUSTER_ADDR", "127.0.0.1:9456")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@:9456,node-c@:9457,node-d@:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig(nil)
 	if err != nil {
 		t.Fatalf("loadServeConfig() error = %v", err)
@@ -295,6 +312,7 @@ func TestLoadServeConfigRejectsExactHostfulAddrWithDifferentHostSamePort(t *test
 	t.Setenv("NARAD_CLUSTER_ADDR", "127.0.0.1:9456")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@127.0.0.2:9456,node-c@127.0.0.1:9457,node-d@127.0.0.1:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig(nil); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
 	}
@@ -305,6 +323,7 @@ func TestLoadServeConfigRejectsExactHostfulAddrWithDifferentHostHostnameSamePort
 	t.Setenv("NARAD_CLUSTER_ADDR", "narad-0.local:9456")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@narad-1.local:9456,node-c@narad-2.local:9457,node-d@narad-3.local:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig(nil); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
 	}
@@ -315,6 +334,7 @@ func TestLoadServeConfigRejectsExactHostfulAddrWithDifferentIPv6HostSamePort(t *
 	t.Setenv("NARAD_CLUSTER_ADDR", "[::1]:9456")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@[::2]:9456,node-c@[::1]:9457,node-d@[::1]:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig(nil); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
 	}
@@ -325,6 +345,7 @@ func TestLoadServeConfigRejectsExactHostfulAddrWithDifferentPortSameHost(t *test
 	t.Setenv("NARAD_CLUSTER_ADDR", "127.0.0.1:9456")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@127.0.0.1:9457,node-c@127.0.0.1:9458,node-d@127.0.0.1:9459")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig(nil); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
 	}
@@ -335,6 +356,7 @@ func TestLoadServeConfigRejectsExactHostfulAddrWithDifferentPortSameHostname(t *
 	t.Setenv("NARAD_CLUSTER_ADDR", "narad-0.local:9456")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@narad-0.local:9457,node-c@narad-1.local:9458,node-d@narad-2.local:9459")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig(nil); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
 	}
@@ -345,6 +367,7 @@ func TestLoadServeConfigRejectsExactHostfulAddrWithDifferentPortSameIPv6Host(t *
 	t.Setenv("NARAD_CLUSTER_ADDR", "[::1]:9456")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@[::1]:9457,node-c@[::1]:9458,node-d@[::1]:9459")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig(nil); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want validation error")
 	}
@@ -355,6 +378,7 @@ func TestLoadServeConfigAcceptsExactHostfulAddrWithMatchingHostnamePeer(t *testi
 	t.Setenv("NARAD_CLUSTER_ADDR", "narad-0.local:9456")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@narad-0.local:9456,node-c@narad-1.local:9457,node-d@narad-2.local:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig(nil)
 	if err != nil {
 		t.Fatalf("loadServeConfig() error = %v", err)
@@ -369,6 +393,7 @@ func TestLoadServeConfigAcceptsExactHostfulAddrWithMatchingIPv6Peer(t *testing.T
 	t.Setenv("NARAD_CLUSTER_ADDR", "[::1]:9456")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@[::1]:9456,node-c@[::1]:9457,node-d@[::1]:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig(nil)
 	if err != nil {
 		t.Fatalf("loadServeConfig() error = %v", err)
@@ -383,6 +408,7 @@ func TestLoadServeConfigRejectsSharedPeersWithoutLocalVoter(t *testing.T) {
 	t.Setenv("NARAD_NODE_ID", "node-1")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-2@127.0.0.1:9102,node-3@127.0.0.1:9103,node-4@127.0.0.1:9104")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig(nil); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want error")
 	}
@@ -393,6 +419,7 @@ func TestLoadServeConfigAcceptsSharedThreeVoterListFromEnv(t *testing.T) {
 	t.Setenv("NARAD_NODE_ID", "node-1")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-1@127.0.0.1:9101,node-2@127.0.0.1:9102,node-3@127.0.0.1:9103")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig(nil)
 	if err != nil {
 		t.Fatalf("loadServeConfig() error = %v", err)
@@ -406,6 +433,7 @@ func TestLoadServeConfigAppliesNodeIDFlagToSharedPeers(t *testing.T) {
 	t.Setenv("NARAD_CLUSTER_ADDR", "127.0.0.1:9101")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@127.0.0.1:9101,node-c@127.0.0.1:9102,node-d@127.0.0.1:9103")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig([]string{"--node-id", "node-b"})
 	if err != nil {
 		t.Fatalf("loadServeConfig() error = %v", err)
@@ -419,6 +447,7 @@ func TestLoadServeConfigAppliesClusterPortFlagToSharedPeers(t *testing.T) {
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@:9456,node-c@:9457,node-d@:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig([]string{"--cluster-port", "9456"})
 	if err != nil {
 		t.Fatalf("loadServeConfig() error = %v", err)
@@ -432,6 +461,7 @@ func TestLoadServeConfigAcceptsClusterPortFlagWithHostfulSharedPeers(t *testing.
 	t.Setenv("NARAD_NODE_ID", "node-b")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-b@127.0.0.1:9456,node-c@127.0.0.1:9457,node-d@127.0.0.1:9458")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	cfg, err := loadServeConfig([]string{"--cluster-port", "9456"})
 	if err != nil {
 		t.Fatalf("loadServeConfig() error = %v", err)
@@ -446,6 +476,7 @@ func TestLoadServeConfigRejectsSharedPeersWhenClusterAddrDoesNotMatch(t *testing
 	t.Setenv("NARAD_NODE_ID", "node-1")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-1@127.0.0.1:9101,node-2@127.0.0.1:9102,node-3@127.0.0.1:9103")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig(nil); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want error")
 	}
@@ -455,6 +486,7 @@ func TestLoadServeConfigRejectsSharedPeersMissingLocalAddrWithFlag(t *testing.T)
 	t.Setenv("NARAD_NODE_ID", "node-1")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-1@127.0.0.1:9101,node-2@127.0.0.1:9102,node-3@127.0.0.1:9103")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig([]string{"--cluster-port", "9456"}); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want error")
 	}
@@ -465,6 +497,7 @@ func TestLoadServeConfigRejectsRemoteOnlyPeerListFromEnv(t *testing.T) {
 	t.Setenv("NARAD_NODE_ID", "node-1")
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-2@127.0.0.1:9102,node-3@127.0.0.1:9103")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig(nil); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want error")
 	}
@@ -473,6 +506,7 @@ func TestLoadServeConfigRejectsRemoteOnlyPeerListFromEnv(t *testing.T) {
 func TestLoadServeConfigRejectsMalformedPeersFromEnv(t *testing.T) {
 	t.Setenv("NARAD_CLUSTER_PEERS", "node-2,node-3@127.0.0.1:9103")
 	t.Setenv("NARAD_CLUSTER_SECRET", "test-secret")
+	t.Setenv("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", "true")
 	if _, err := loadServeConfig(nil); err == nil {
 		t.Fatal("loadServeConfig() error = nil, want error")
 	}

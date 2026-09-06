@@ -54,6 +54,12 @@ func (lb *roundRobinClient) doRawTo(ctx context.Context, node, method, path stri
 // JSON into out.
 func (lb *roundRobinClient) send(ctx context.Context, node, method, path string, body io.Reader, contentType string, out any, want []int) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, method, node+path, body)
+	if err == nil {
+		// State-changing routes require a JSON or octet-stream content
+		// type or this header (cross-site request hardening); acks and
+		// other body-less POSTs would otherwise answer 415.
+		req.Header.Set("X-Narad-Client", "local-cluster-driver")
+	}
 	if err != nil {
 		return 0, nil, err
 	}

@@ -43,7 +43,17 @@ narad ctx select staging
 narad topic ls                    # now talks to staging
 ```
 
-Stored at `~/.config/narad/contexts.json` (mode 0600, it can hold credentials). Precedence per field: `--server/--user/--password` flags → `NARAD_ADDR`/`NARAD_USER`/`NARAD_PASS` → the selected context → localhost.
+Stored at `~/.config/narad/contexts.json`, mode 0600 in a 0700 directory, **with the password in clear**: anyone who obtains that file (a backup, dotfile sync, a shared home directory) has your credentials, so treat it like an SSH private key or leave the password out and use `NARAD_PASS`. Precedence per field: `--server/--user/--password` flags → `NARAD_ADDR`/`NARAD_USER`/`NARAD_PASS` → the selected context → localhost.
+
+Passwords on the command line (`--password`, `ctx add --password`, `user add --user-password`) end up in `ps`, shell history and audit logs. Every one of them has a `-stdin` twin that reads the first line of stdin instead:
+
+```sh
+narad ctx add staging --server https://narad.stage.example --user admin --password-stdin < ~/.narad-stage-pass
+pass show narad/stage | narad --user admin --password-stdin topic ls
+narad user add billing --user-password-stdin --grant "produce:invoices.*" <<< "$(openssl rand -base64 24)"
+```
+
+`NARAD_PASS` is the non-interactive path (CI, cron). The CLI warns on stderr whenever it is about to send credentials over plain `http://` to a host other than this machine: the broker expects TLS to terminate in front of it, so use an `https://` server URL for anything remote.
 
 ## The two personalities of `narad sub`
 

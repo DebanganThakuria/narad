@@ -69,7 +69,9 @@ func jsonReq(t *testing.T, method, url string, body any) *http.Response {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	if body != nil {
+	// Body or not: the server's cross-site guard wants an API content
+	// type on every state-changing request (a body-less ack included).
+	if body != nil || method != http.MethodGet {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := http.DefaultClient.Do(req)

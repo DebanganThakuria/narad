@@ -52,6 +52,12 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Read by every cluster RPC listener and client built below, so it
+	// must be set before the first of them (the existing-cluster probe).
+	clusterrpc.SetLegacyAuthCompat(cfg.Security.AllowLegacyClusterAuth)
+	if cfg.Security.AllowLegacyClusterAuth {
+		log.Warn("legacy fixed-token cluster auth compatibility is ON; turn security.allow_legacy_cluster_auth off once every node runs session-bound auth", "component", "audit")
+	}
 	clusterTLS, err := clusterTLSConfig(cfg.Security)
 	if err != nil {
 		return fmt.Errorf("cluster tls: %w", err)
@@ -59,7 +65,8 @@ func runServe(args []string) error {
 	if clusterTLS != nil {
 		log.Info("raft metadata transport secured with mutual TLS")
 	} else {
-		log.Warn("raft metadata transport is plaintext; restrict the cluster port by network policy")
+		log.Warn("raft metadata transport is plaintext (security.allow_plaintext_raft); raft has no authentication of its own, so restrict the cluster port by network policy",
+			"component", "audit", "cluster_addr", cfg.Cluster.Addr)
 	}
 	joinOnly := joinOnlyNode(nodeID, cfg.Cluster.InitialMembers)
 	if joinOnly {
@@ -91,6 +98,7 @@ func runServe(args []string) error {
 		AdvertiseAddr: clusterAdvertiseAddr(cfg, nodeID),
 		Peers:         bootstrapPeers(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers, cfg.Cluster.InitialMembers),
 		JoinOnly:      joinOnly,
+		Log:           log,
 		TLS:           clusterTLS,
 	})
 	if err != nil {
@@ -184,10 +192,11 @@ func runServe(args []string) error {
 	wg.Go(func() { cs.dispatcher.Run(ctx) })
 	wg.Go(func() { cs.fanout.Run(ctx) })
 	wg.Go(func() { cs.mover.Run(ctx) })
-	startPprofServer(ctx, &wg, cfg.HTTP.PprofAddr, log)
+	startDiagnosticsServers(ctx, &wg, cfg.HTTP, reg, log)
 	wg.Go(func() { serveClusterRPC(ctx, cfg, cs.rpcServer, failServe, log) })
 
 	poller := metrics.NewPoller(m, bc.broker, log, cfg.Storage.DataDir)
+	poller.SetOpenLogCounter(bc.logs.OpenCount)
 	wg.Go(func() { poller.Run(ctx) })
 	wg.Go(func() { bc.logs.RunIdleEviction(ctx, time.Duration(cfg.Storage.IdleLogEvictionMs)*time.Millisecond) })
 

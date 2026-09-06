@@ -2,6 +2,7 @@ package clusterrpc
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -53,6 +54,9 @@ const (
 // adapted by quicPoolConn, tests supply in-memory fakes.
 type poolConn interface {
 	openStream(ctx context.Context) (streamConn, error)
+	// tlsState is the negotiated TLS session the auth proofs are bound
+	// to; ok is false for a transport without one (in-memory fakes).
+	tlsState() (cs tls.ConnectionState, ok bool)
 	// done is closed once the connection is dead (peer close, idle
 	// timeout, stateless reset), so the pool can evict it proactively.
 	done() <-chan struct{}
@@ -65,6 +69,10 @@ type quicPoolConn struct {
 
 func (c quicPoolConn) openStream(ctx context.Context) (streamConn, error) {
 	return c.conn.OpenStreamSync(ctx)
+}
+
+func (c quicPoolConn) tlsState() (tls.ConnectionState, bool) {
+	return c.conn.ConnectionState().TLS, true
 }
 
 func (c quicPoolConn) done() <-chan struct{} {
@@ -114,6 +122,9 @@ type quicClientPool struct {
 	timeout     time.Duration
 	pingTimeout time.Duration
 	secret      string
+	// allowLegacy lets this client fall back to the fixed-token
+	// handshake with a peer that only speaks the legacy ALPN.
+	allowLegacy bool
 
 	// dial establishes a connection; the default dials QUIC through the
 	// pool's shared transport. Tests substitute in-memory fakes.
@@ -138,7 +149,7 @@ type quicClientPool struct {
 	transportErr  error
 }
 
-func newQUICClientPool(timeout time.Duration, secret string) *quicClientPool {
+func newQUICClientPool(timeout time.Duration, secret string, allowLegacy bool) *quicClientPool {
 	if timeout <= 0 {
 		timeout = defaultStreamTimeout
 	}
@@ -146,6 +157,7 @@ func newQUICClientPool(timeout time.Duration, secret string) *quicClientPool {
 		timeout:     timeout,
 		pingTimeout: quicStreamPingTimeout,
 		secret:      secret,
+		allowLegacy: allowLegacy,
 		now:         time.Now,
 		conns:       make(map[string]poolConn),
 		streams:     make(map[streamKey]*pooledStream),
@@ -226,12 +238,15 @@ func (p *quicClientPool) openStream(ctx context.Context, key streamKey) (*pooled
 			}
 			return nil, err
 		}
-		// Prove secret knowledge as the stream's first frame; the server
-		// rejects the stream otherwise. Safe to write directly: the stream
-		// is not yet shared (readLoop unstarted, not in the pool map).
+		// Run the auth handshake as the stream's first exchange. Safe to
+		// do synchronously: the stream is not yet shared (readLoop
+		// unstarted, not in the pool map). A server that cannot prove
+		// the secret is an impostor, so the whole connection is dropped,
+		// not just the stream.
 		if p.secret != "" {
-			if err := clusterwire.WriteStreamFrame(stream, authFrame(p.secret)); err != nil {
+			if err := p.authenticateStream(opCtx, conn, stream); err != nil {
 				abortStream(stream)
+				p.closeConn(key.addr, conn, err)
 				return nil, err
 			}
 		}
@@ -249,6 +264,43 @@ func (p *quicClientPool) openStream(ctx context.Context, key streamKey) (*pooled
 		p.streams[key] = ps
 		return ps, nil
 	}
+}
+
+// authenticateStream runs the client side of the stream auth handshake:
+// send the session-bound client proof, then read and verify the server's
+// proof before the stream carries any request. The server's reply is
+// read under the same 64-byte cap the server applies to ours. On the
+// legacy ALPN (only reachable with allowLegacy) it sends the fixed token
+// and expects no reply, as old servers send none.
+func (p *quicClientPool) authenticateStream(ctx context.Context, conn poolConn, stream streamConn) error {
+	cs, ok := conn.tlsState()
+	if !ok {
+		return errNoTLSSession
+	}
+	binding, err := sessionBindingFrom(cs, p.allowLegacy)
+	if err != nil {
+		return err
+	}
+	if binding.legacy {
+		return clusterwire.WriteStreamFrame(stream, authFrame(legacyAuthToken(p.secret)))
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(p.timeout)
+	}
+	_ = stream.SetDeadline(deadline)
+	defer func() { _ = stream.SetDeadline(time.Time{}) }()
+	if err := clusterwire.WriteStreamFrame(stream, authFrame(clientProof(p.secret, binding.key))); err != nil {
+		return err
+	}
+	reply, err := clusterwire.ReadStreamFrame(stream, maxAuthFramePayloadBytes)
+	if err != nil {
+		return fmt.Errorf("cluster rpc: read server auth proof: %w", err)
+	}
+	if !verifyAuthToken(serverProof(p.secret, binding.key), reply) {
+		return errors.New("cluster rpc: peer failed to prove the cluster secret; refusing to use it")
+	}
+	return nil
 }
 
 // getConn returns the pooled connection for addr, dialing when there is
@@ -349,7 +401,7 @@ func (p *quicClientPool) dialQUIC(ctx context.Context, addr string) (poolConn, e
 	if err != nil {
 		return nil, err
 	}
-	conn, err := tr.Dial(ctx, udpAddr, quicClientTLSConfig(), quicConfig())
+	conn, err := tr.Dial(ctx, udpAddr, quicClientTLSConfig(p.allowLegacy), quicConfig())
 	if err != nil {
 		return nil, err
 	}

@@ -49,6 +49,7 @@ curl -u $ADMIN -X POST $NARAD/v1/users \
 curl -u $ADMIN $NARAD/v1/users                       # list
 curl -u $ADMIN $NARAD/v1/users/billing-service        # inspect
 curl -u $ADMIN -X PUT $NARAD/v1/users/billing-service/grants \
+  -H "Content-Type: application/json" \
   -d '{"grants": [{"action": "produce", "patterns": ["invoices.*", "receipts.*"]}]}'
 curl -u $ADMIN -X DELETE $NARAD/v1/users/billing-service
 ```

@@ -141,3 +141,41 @@ func TestPartitionCopyRoundTripsIdentically(t *testing.T) {
 		}
 	}
 }
+
+// The read length comes from the wire on OpFetchSegmentChunk. It must
+// never size an allocation by itself: clamp to MaxSegmentReadBytes and
+// to what the file holds past the offset, refuse negatives, and answer
+// a read at or past EOF with no bytes.
+func TestReadSegmentRangeBoundsAllocation(t *testing.T) {
+	dir := t.TempDir()
+	const size = 5 << 20
+	if err := WriteSegmentFile(dir, 0, bytes.Repeat([]byte{7}, size)); err != nil {
+		t.Fatal(err)
+	}
+
+	// A 1 TiB request is served the cap, not a 1 TiB buffer (the test
+	// would be OOM-killed otherwise).
+	data, err := ReadSegmentRange(dir, 0, 0, 1<<40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != MaxSegmentReadBytes {
+		t.Fatalf("len = %d, want cap %d", len(data), MaxSegmentReadBytes)
+	}
+	// Past the cap, the file size bounds the read.
+	if data, err = ReadSegmentRange(dir, 0, size-100, 1<<40); err != nil || len(data) != 100 {
+		t.Fatalf("tail read: len=%d err=%v, want 100", len(data), err)
+	}
+	if data, err = ReadSegmentRange(dir, 0, size, 1<<20); err != nil || len(data) != 0 {
+		t.Fatalf("read at EOF: len=%d err=%v, want 0 bytes and no error", len(data), err)
+	}
+	if data, err = ReadSegmentRange(dir, 0, size+10, 1<<20); err != nil || len(data) != 0 {
+		t.Fatalf("read past EOF: len=%d err=%v, want 0 bytes and no error", len(data), err)
+	}
+	if _, err = ReadSegmentRange(dir, 0, -1, 10); err == nil {
+		t.Fatal("negative offset accepted")
+	}
+	if _, err = ReadSegmentRange(dir, 0, 0, -1); err == nil {
+		t.Fatal("negative length accepted")
+	}
+}
