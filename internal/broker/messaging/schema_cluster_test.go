@@ -153,6 +153,22 @@ func TestSchemaEnforcedOnEveryNode(t *testing.T) {
 		}
 	}
 	waitForSchemaVersion(t, nodes, "orders", 0)
+	// A follower serves ownership only once its replica has caught up
+	// with the leader since start and applied the assignment; under CI
+	// load that lags the AssignPartition futures by a few hundred ms.
+	for i, n := range nodes {
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			a, err := n.store.GetAssignment("orders", i)
+			if err == nil && a.OwnerID == n.id {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s never saw itself as owner of partition %d: %+v, %v", n.id, i, a, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
 
 	// Before any schema: every node takes anything, and their registries
 	// now hold "no schema" for the topic.

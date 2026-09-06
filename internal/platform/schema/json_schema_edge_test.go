@@ -110,7 +110,9 @@ func TestValidateOneMiBPayload(t *testing.T) {
 	if err := r.Validate(context.Background(), "t", []byte(payload)); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if d := time.Since(start); d > 5*time.Second {
+	// A hang guard, not a benchmark: CI runs this under -race on a busy
+	// runner, where 1 MiB of JSON decoding legitimately takes seconds.
+	if d := time.Since(start); d > 60*time.Second {
 		t.Fatalf("1 MiB payload took %v", d)
 	}
 }
