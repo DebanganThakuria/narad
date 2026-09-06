@@ -151,7 +151,21 @@ func (s *MoveSession) pass(ctx context.Context) (int64, messaging.PartitionTrans
 	s.lastIncarnation = info.IncarnationID
 	var newBytes int64
 	for _, seg := range info.Segments {
-		at := s.copied[seg.BaseOffset]
+		at, seen := s.copied[seg.BaseOffset]
+		if seg.SizeBytes == 0 && !seen {
+			// A retained log whose records have all aged out keeps one empty
+			// segment whose file name carries the partition's base offset.
+			// The chunk loop below never runs for it, so stage the empty
+			// file explicitly: recovery of the staged copy takes its next
+			// offset from that name, and without it an aged-out partition
+			// recovers to offset 0 and the finalize verify can never reach
+			// the source's high watermark (the move retries forever).
+			if err := storage.WriteSegmentFile(s.stagingDir, seg.BaseOffset, nil); err != nil {
+				return 0, messaging.PartitionTransferInfo{}, err
+			}
+			s.copied[seg.BaseOffset] = 0
+			continue
+		}
 		for at < seg.SizeBytes {
 			want := s.m.chunkSize
 			if rem := seg.SizeBytes - at; rem < want {
