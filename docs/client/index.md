@@ -48,6 +48,7 @@ The request **body is your message**: any bytes, up to 1 MiB. The key goes in th
 ```bash
 curl -u $AUTH -X POST \
   "$NARAD/v1/topics/orders/produce?key=customer-42" \
+  -H "Content-Type: application/json" \
   -d '{"order_id": "ord_123", "amount": 4999}'
 ```
 
@@ -76,7 +77,7 @@ curl -u $AUTH "$NARAD/v1/topics/orders/consume?wait=10s"
 ## 4. Ack it
 
 ```bash
-curl -u $AUTH -X POST \
+curl -u $AUTH -X POST -H "Content-Type: application/json" \
   "$NARAD/v1/topics/orders/ack?receipt_handle=2:0:861651"
 ```
 

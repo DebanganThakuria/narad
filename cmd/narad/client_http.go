@@ -132,6 +132,11 @@ func (c *httpClient) doRaw(method, path string, body []byte) (*http.Response, er
 // send executes the request and converts 4xx/5xx responses into errors
 // carrying the server's error message.
 func (c *httpClient) send(req *http.Request) (*http.Response, error) {
+	// Marks the request as an API client's, not a browser's: the server
+	// refuses state-changing requests without it or an API content type
+	// (its cross-site request forgery guard), and a bodyless POST such
+	// as an ack has no content type.
+	req.Header.Set("X-Narad-Client", "narad-cli")
 	if c.user != "" {
 		req.SetBasicAuth(c.user, c.password)
 	}

@@ -19,4 +19,10 @@ spec:
       port: {{ .Values.service.ports.api }}
       targetPort: api
       protocol: TCP
+    {{- if .Values.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.service.ports.metrics }}
+      targetPort: metrics
+      protocol: TCP
+    {{- end }}
 {{- end }}

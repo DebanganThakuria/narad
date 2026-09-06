@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
@@ -19,12 +18,19 @@ func (s *RPCServer) handleRegisterMember(payload []byte) nodewire.Response {
 		return errorResponse(http.StatusBadRequest, "invalid member request: "+err.Error())
 	}
 
+	// LastHeartbeat is stamped HERE, on the leader's clock, and the
+	// sender's value is ignored. The controller compares it with the
+	// leader's clock (checkHeartbeats), so a member whose clock ran 30 s
+	// slow was marked dead while healthy (partitions rerouted and moved
+	// away) and one whose clock ran fast was never marked dead after it
+	// really died. The value still lives in the Raft proposal, so the
+	// FSM stays deterministic.
 	member := metastore.Member{
 		ID:            strings.TrimSpace(req.ID),
 		Addr:          strings.TrimSpace(req.Addr),
 		ClusterAddr:   strings.TrimSpace(req.ClusterAddr),
 		Status:        metastore.MemberStatus(strings.TrimSpace(req.Status)),
-		LastHeartbeat: req.LastHeartbeat,
+		LastHeartbeat: s.clock().Unix(),
 	}
 	if member.ID == "" {
 		return errorResponse(http.StatusBadRequest, "member id is required")
@@ -38,10 +44,6 @@ func (s *RPCServer) handleRegisterMember(payload []byte) nodewire.Response {
 	if member.Status != metastore.MemberAlive && member.Status != metastore.MemberDead {
 		return errorResponse(http.StatusBadRequest, "member status is invalid")
 	}
-	if member.LastHeartbeat == 0 {
-		member.LastHeartbeat = time.Now().Unix()
-	}
-
 	if err := s.store.RegisterMember(rpcRequestContext(), member); err != nil {
 		if errors.Is(err, metastore.ErrMemberRemoved) {
 			// A decommissioned pod still heartbeating: refuse quietly so

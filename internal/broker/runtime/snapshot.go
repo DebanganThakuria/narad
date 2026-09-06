@@ -144,6 +144,7 @@ func (s *Snapshotter) partitionSnapshot(topicName string, idx int) (metrics.Part
 		Partition:       idx,
 		LogStartOffset:  logStart,
 		LogEndOffset:    logEnd,
+		HighWatermark:   log.HighWatermark(),
 		SegmentCount:    log.SegmentCount(),
 		SizeBytes:       log.SizeBytes(),
 		CommittedOffset: committed,

@@ -86,14 +86,23 @@ func TestAuthMiddlewareAcceptsValidCredentialsAndSetsIdentity(t *testing.T) {
 	}
 }
 
-func TestAuthMiddlewareExemptsProbesAndMetrics(t *testing.T) {
+func TestAuthMiddlewareExemptsProbesButNotMetrics(t *testing.T) {
 	h := newAuthTestHandler(t)
-	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {
+	for _, path := range []string{"/healthz", "/readyz"} {
 		res := httptest.NewRecorder()
 		h.ServeHTTP(res, httptest.NewRequest(http.MethodGet, path, nil))
 		if res.Code != http.StatusOK {
 			t.Fatalf("%s: status = %d, want 200 without credentials", path, res.Code)
 		}
+	}
+	// /metrics names every topic: credentials by default.
+	res := httptest.NewRecorder()
+	h.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("/metrics: status = %d, want 401 without credentials", res.Code)
+	}
+	if !authExemptPaths(true)["/metrics"] || authExemptPaths(false)["/metrics"] {
+		t.Fatal("authExemptPaths does not follow the metrics setting")
 	}
 }
 

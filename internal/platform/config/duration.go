@@ -6,10 +6,13 @@ import (
 	"time"
 )
 
-// Duration is a JSON-friendly time.Duration. It marshals/unmarshals as a
-// string parseable by time.ParseDuration (e.g. "10s", "500ms", "1h30m"),
-// and falls back to a numeric nanosecond value if the JSON contains a
-// number — so existing zero-value defaults still round-trip.
+// Duration is a JSON-friendly time.Duration. It marshals and unmarshals
+// as a string parseable by time.ParseDuration ("10s", "500ms", "1h30m").
+// A bare JSON number is REJECTED: it used to be read as nanoseconds, so
+// an operator who wrote "read_timeout": 30 instead of "30s" got a
+// server whose every request timed out after 30 ns, and validation
+// (which only checks > 0) let it start. The defaults round-trip as
+// strings, so nothing legitimate relied on the numeric form.
 //
 // Callers that need a stdlib time.Duration use Duration.D() or convert
 // directly: time.Duration(d).
@@ -26,22 +29,16 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 	return json.Marshal(time.Duration(d).String())
 }
 
-// UnmarshalJSON accepts either a duration string ("10s") or a numeric
-// nanosecond value.
+// UnmarshalJSON accepts a duration string ("10s") and nothing else.
 func (d *Duration) UnmarshalJSON(b []byte) error {
 	var s string
-	if err := json.Unmarshal(b, &s); err == nil {
-		parsed, err := time.ParseDuration(s)
-		if err != nil {
-			return fmt.Errorf("config: parse duration %q: %w", s, err)
-		}
-		*d = Duration(parsed)
-		return nil
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("config: duration must be a string with a unit (e.g. \"10s\", \"500ms\"), got %s", string(b))
 	}
-	var n int64
-	if err := json.Unmarshal(b, &n); err != nil {
-		return fmt.Errorf("config: duration must be a string (e.g. \"10s\") or a number of nanoseconds")
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("config: parse duration %q: %w", s, err)
 	}
-	*d = Duration(n)
+	*d = Duration(parsed)
 	return nil
 }

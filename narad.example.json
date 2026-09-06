@@ -35,5 +35,9 @@
   "log": {
     "level":  "info",
     "format": "json"
+  },
+  "security": {
+    "enabled": true,
+    "allow_plaintext_raft": true
   }
 }

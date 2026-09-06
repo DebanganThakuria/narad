@@ -20,6 +20,10 @@ func Default() *Config {
 			IdleTimeout:    Duration(60 * time.Second),
 			ShutdownGrace:  Duration(10 * time.Second),
 			MaxConsumeWait: Duration(10 * time.Second),
+
+			MaxHeaderBytes:                64 << 10,
+			MaxConnections:                4096,
+			MaxConsumeInFlightPerIdentity: 1024,
 		},
 		Cluster: ClusterConfig{
 			Addr: ":7943",

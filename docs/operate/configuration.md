@@ -16,7 +16,12 @@ Every variable, with the compiled-in default when unset. (This table is generate
 | `NARAD_HTTP_IDLE_TIMEOUT` | `60s` | |
 | `NARAD_HTTP_SHUTDOWN_GRACE` | `10s` | Drain window on SIGTERM |
 | `NARAD_HTTP_MAX_CONSUME_WAIT` | `10s` | Server-side ceiling on `?wait=` long-polls |
-| `NARAD_HTTP_PPROF_ADDR` | off | e.g. `:6060`; unauthenticated; keep it cluster-internal |
+| `NARAD_HTTP_MAX_HEADER_BYTES` | `65536` | Request header cap (Go's default is 1 MiB) |
+| `NARAD_HTTP_MAX_CONNECTIONS` | `4096` | Open client connections per node; extra ones wait in the accept backlog. `0` = unlimited |
+| `NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY` | `1024` | Concurrent consumes (long-polls included) per user, or per client IP with security off; extra ones get `429`. `0` = unlimited |
+| `NARAD_HTTP_METRICS_ADDR` | off | e.g. `:9100`; serves `/metrics` on its own listener (unauthenticated, keep it cluster-internal) and removes it from the API port. Off = `/metrics` on the API port behind API credentials |
+| `NARAD_HTTP_METRICS_UNAUTHENTICATED` | `false` | Serve `/metrics` on the API port without credentials (it names every topic) |
+| `NARAD_HTTP_PPROF_ADDR` | off | e.g. `:6060`; unauthenticated; keep it cluster-internal. May equal the metrics addr |
 
 ### Cluster
 
@@ -27,8 +32,10 @@ Every variable, with the compiled-in default when unset. (This table is generate
 | `NARAD_CLUSTER_PEERS` | (none) | `id@host:7943,…`: the bootstrap voters, identical on every node. Joining nodes walk it to find the leader; only the initial members are seeded from it |
 | `NARAD_CLUSTER_ADVERTISE_ADDR` | empty | `host:7943` other nodes dial for this node's Raft transport. Required when this node is not listed in `NARAD_CLUSTER_PEERS` (the chart pins the peer list and sets this per pod); otherwise the node borrows the host from its own peer entry |
 | `NARAD_CLUSTER_INITIAL_MEMBERS` | empty | IDs allowed to bootstrap; everyone else joins. Empty = legacy "all bootstrap" |
-| `NARAD_CLUSTER_SECRET` | (none) | Shared secret gating all node-to-node QUIC RPC |
-| `NARAD_CLUSTER_TLS_CERT_FILE` / `_KEY_FILE` / `_CA_FILE` | off | Mutual TLS for Raft; all three or nothing |
+| `NARAD_CLUSTER_SECRET` | (none) | Shared secret gating all node-to-node QUIC RPC (proven per stream, bound to the TLS session, in both directions) |
+| `NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH` | `false` | Rolling-upgrade compatibility with nodes that used the fixed-token cluster auth; on for the roll, off after |
+| `NARAD_CLUSTER_TLS_CERT_FILE` / `_KEY_FILE` / `_CA_FILE` | off | Mutual TLS for Raft; all three or nothing. Required for a secured multi-node cluster unless the next flag is set |
+| `NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT` | `false` | Explicit acknowledgement that Raft (7943/tcp, which has no authentication of its own) runs plaintext and is fenced by network policy instead |
 
 ### Storage & data
 
@@ -47,7 +54,7 @@ Applied when a topic-create omits the field; existing topics keep their values.
 | `NARAD_TOPIC_DEFAULT_PARTITIONS` | `3` |
 | `NARAD_TOPIC_MAX_PARTITIONS` | `108` |
 | `NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS` | `604800000` (7 days) |
-| `NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS` | `30000` |
+| `NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS` | `30000` (must be > 0 and <= the retention default when retention is finite) |
 | `NARAD_TOPIC_DEFAULT_MAX_IN_FLIGHT_PER_PARTITION` | `1024` |
 | `NARAD_TOPIC_DEFAULT_MAX_ACKED_AHEAD_PER_PARTITION` | `1024` |
 
@@ -66,6 +73,7 @@ Applied when a topic-create omits the field; existing topics keep their values.
 | `NARAD_LOG_LEVEL` | `info` | `debug` is chatty, in a good way |
 | `NARAD_LOG_FORMAT` | `json` | or `text` for humans |
 | `NARAD_SECURITY_ENABLED` | `true` | Secure by default; local dev can opt out |
+| `NARAD_SECURITY_ALLOW_INSECURE_CLUSTER` | `false` | Required to run a **multi-node** cluster with security off (open API, open QUIC RPC plane on the API port over UDP, plaintext Raft). Single node needs nothing |
 | `NARAD_ADMIN_PASSWORD` | random, logged once | Seeds the root admin on first cluster start |
 
 ## The config file (`--config narad.json`)
@@ -84,11 +92,16 @@ the loader **rejects** any attempt to set it:
     "compression_level": "fastest",         // zstd: fastest | default | better | best
     "idle_log_eviction_ms": 1800000         // close logs untouched this long; 0 disables
   },
-  "http": { "...": "same knobs as the env vars" },
+  "http": { "...": "same knobs as the env vars; durations are strings with a unit (\"10s\"), a bare number is rejected" },
   "topic": { "...": "same as env" },
   "fanout": { "...": "same as env" },
   "log": { "level": "info", "format": "json" },
-  "security": { "enabled": true }
+  "security": {
+    "enabled": true,
+    "allow_plaintext_raft": false,          // or set the cluster_tls_*_file paths
+    "allow_insecure_cluster": false,        // multi-node with enabled: false
+    "allow_legacy_cluster_auth": false
+  }
 }
 ```
 

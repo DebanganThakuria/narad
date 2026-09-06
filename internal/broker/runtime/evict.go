@@ -124,6 +124,17 @@ func (g *Logs) EvictIdleOnce(idleAfter time.Duration) int {
 	return evicted
 }
 
+// OpenCount is the number of partition logs currently open on this
+// node. The metrics poller sets narad_open_partition_logs from it on
+// every tick; the eviction sweep used to be the gauge's only writer, so
+// with eviction disabled it stayed at 0 forever and otherwise lagged by
+// up to a sweep interval.
+func (g *Logs) OpenCount() int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return len(g.logs)
+}
+
 // evictable reports whether an entry may be closed: idle past the
 // cutoff, and not deferred by pending retention work (invariant 2).
 func evictable(e *logEntry, cutoffUnixNano int64) bool {

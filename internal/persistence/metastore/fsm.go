@@ -5,10 +5,27 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
+
+// boltOpenTimeout bounds how long a bbolt open waits for the file lock.
+// bbolt takes an exclusive flock and, with no timeout, waits for it
+// forever: a stale process on the same data directory, a double start
+// on bare metal, or an operator's inspection tool holding fsm.db made
+// `narad serve` hang inside metastore.New with no log line and no
+// error, so /healthz never came up and Kubernetes restarted the pod in
+// a loop with nothing to show for it. With the timeout the open fails
+// with bolt.ErrTimeout and the error names the file. A var so tests can
+// shorten it.
+var boltOpenTimeout = 5 * time.Second
+
+// boltOptions is the option set every bbolt open in this package uses.
+func boltOptions() *bolt.Options {
+	return &bolt.Options{Timeout: boltOpenTimeout}
+}
 
 var (
 	bucketTopics      = []byte("topics")
@@ -52,9 +69,9 @@ func newFSM(path string) (*fsmState, error) {
 }
 
 func openBolt(path string) (*bolt.DB, error) {
-	db, err := bolt.Open(path, 0o600, nil)
+	db, err := bolt.Open(path, 0o600, boltOptions())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	return db, db.Update(func(tx *bolt.Tx) error {
 		for _, b := range [][]byte{bucketTopics, bucketSchemas, bucketAssignments, bucketMembers, bucketUsers, bucketRemovedMembers} {

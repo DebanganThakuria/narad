@@ -12,8 +12,27 @@ import (
 )
 
 // quicALPN identifies Narad's cluster-RPC QUIC protocol during the TLS
-// handshake. All nodes in a cluster must agree on it.
-const quicALPN = "narad-cluster-quic-v1"
+// handshake. v2 carries the session-bound auth handshake (auth.go);
+// quicALPNLegacy is the fixed-token protocol of earlier releases, offered
+// and accepted only while SetLegacyAuthCompat is on. The ALPN is what
+// tells each end which handshake the other speaks, so a v2-only node and
+// a legacy node fail the TLS handshake outright ("no application
+// protocol") rather than mis-authenticating.
+const (
+	quicALPN       = "narad-cluster-quic-v2"
+	quicALPNLegacy = "narad-cluster-quic-v1"
+)
+
+// alpnList returns the protocols to offer: the current one, plus the
+// legacy one when compatibility is on. Order matters on the server
+// (Go picks the first server-listed protocol the client also offers),
+// so v2 always wins between two upgraded nodes.
+func alpnList(allowLegacy bool) []string {
+	if allowLegacy {
+		return []string{quicALPN, quicALPNLegacy}
+	}
+	return []string{quicALPN}
+}
 
 // quicClientSessionCacheSize bounds the TLS session tickets a client keeps
 // for resumption: one per peer is plenty, so 64 covers any cluster size
@@ -26,7 +45,7 @@ const quicClientSessionCacheSize = 64
 // verifying certificates (see quicClientTLSConfig). The key is ECDSA
 // P-256: it generates in milliseconds rather than the hundreds of
 // milliseconds RSA-2048 needs, and signs handshakes far faster.
-func quicServerTLSConfig() (*tls.Config, error) {
+func quicServerTLSConfig(allowLegacy bool) (*tls.Config, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -47,26 +66,31 @@ func quicServerTLSConfig() (*tls.Config, error) {
 			Certificate: [][]byte{der},
 			PrivateKey:  key,
 		}},
-		NextProtos: []string{quicALPN},
+		NextProtos: alpnList(allowLegacy),
 		MinVersion: tls.VersionTLS13,
 	}, nil
 }
 
-// quicClientSelfSignedTLS is the shared client configuration. quic-go clones it
-// per dial, so sharing is safe; the point of sharing is the session
-// cache, which lets a redial to a peer resume its TLS session instead of
-// running a full handshake.
+// quicClientSelfSignedTLS and quicClientSelfSignedTLSLegacy are the
+// shared client configurations (strict, and with the legacy ALPN also
+// offered). quic-go clones them per dial, so sharing is safe; the point
+// of sharing is the session cache, which lets a redial to a peer resume
+// its TLS session instead of running a full handshake.
 //
 // Peer AUTHENTICATION on this transport is not certificate-based: every
 // node presents an ephemeral self-signed certificate (see
-// quicServerTLSConfig) and proves membership with the cluster-secret
-// HMAC exchanged on every stream (auth.go). TLS provides confidentiality
-// and integrity. So the default chain verification against system roots
-// is bypassed (it could never succeed) and replaced by
-// verifyClusterPeerCertificate and verifyClusterConnection, which enforce
-// what is checkable here: exactly one currently valid self-signed leaf,
-// TLS 1.3, and the pinned ALPN.
-var quicClientSelfSignedTLS = newSelfSignedClusterClientTLS()
+// quicServerTLSConfig) and proves membership with the session-bound
+// cluster-secret proof exchanged on every stream (auth.go). TLS
+// provides confidentiality, integrity, and the per-session key the
+// proof is bound to. So the default chain verification against system
+// roots is bypassed (it could never succeed) and replaced by
+// verifyClusterPeerCertificate and verifyClusterConnection, which
+// enforce what is checkable here: exactly one currently valid
+// self-signed leaf, TLS 1.3, and the pinned ALPN.
+var (
+	quicClientSelfSignedTLS       = newSelfSignedClusterClientTLS(false)
+	quicClientSelfSignedTLSLegacy = newSelfSignedClusterClientTLS(true)
+)
 
 // newSelfSignedClusterClientTLS builds the client configuration for a
 // transport whose peers present ephemeral self-signed certificates.
@@ -74,12 +98,12 @@ var quicClientSelfSignedTLS = newSelfSignedClusterClientTLS()
 // cannot succeed for a self-signed leaf; certificate verification is NOT
 // disabled: VerifyPeerCertificate replaces it with the self-signed leaf
 // checks, and VerifyConnection pins TLS 1.3 and the ALPN.
-func newSelfSignedClusterClientTLS() *tls.Config {
+func newSelfSignedClusterClientTLS(allowLegacy bool) *tls.Config {
 	return &tls.Config{
 		InsecureSkipVerify:    true, // replaced by VerifyPeerCertificate, see above
 		VerifyPeerCertificate: verifyClusterPeerCertificate,
-		VerifyConnection:      verifyClusterConnection,
-		NextProtos:            []string{quicALPN},
+		VerifyConnection:      clusterConnectionVerifier(allowLegacy),
+		NextProtos:            alpnList(allowLegacy),
 		MinVersion:            tls.VersionTLS13,
 		ClientSessionCache:    tls.NewLRUClientSessionCache(quicClientSessionCacheSize),
 	}
@@ -115,17 +139,33 @@ func verifyClusterPeerCertificate(rawCerts [][]byte, _ [][]*x509.Certificate) er
 }
 
 // verifyClusterConnection pins the protocol parameters the certificate
-// check cannot see: TLS 1.3 and the cluster ALPN.
+// check cannot see: TLS 1.3 and the cluster ALPN (strict: v2 only).
 func verifyClusterConnection(cs tls.ConnectionState) error {
-	if cs.Version < tls.VersionTLS13 {
-		return fmt.Errorf("cluster rpc: peer negotiated TLS 0x%04x, want 1.3", cs.Version)
-	}
-	if cs.NegotiatedProtocol != quicALPN {
-		return fmt.Errorf("cluster rpc: peer negotiated ALPN %q, want %q", cs.NegotiatedProtocol, quicALPN)
-	}
-	return nil
+	return clusterConnectionVerifier(false)(cs)
 }
 
-func quicClientTLSConfig() *tls.Config {
+// clusterConnectionVerifier returns the connection check for the given
+// compatibility setting: TLS 1.3, and an ALPN from alpnList.
+func clusterConnectionVerifier(allowLegacy bool) func(tls.ConnectionState) error {
+	accepted := alpnList(allowLegacy)
+	return func(cs tls.ConnectionState) error {
+		if cs.Version < tls.VersionTLS13 {
+			return fmt.Errorf("cluster rpc: peer negotiated TLS 0x%04x, want 1.3", cs.Version)
+		}
+		for _, alpn := range accepted {
+			if cs.NegotiatedProtocol == alpn {
+				return nil
+			}
+		}
+		return fmt.Errorf("cluster rpc: peer negotiated ALPN %q, want one of %q", cs.NegotiatedProtocol, accepted)
+	}
+}
+
+// quicClientTLSConfig returns the shared client configuration for the
+// compatibility setting.
+func quicClientTLSConfig(allowLegacy bool) *tls.Config {
+	if allowLegacy {
+		return quicClientSelfSignedTLSLegacy
+	}
 	return quicClientSelfSignedTLS
 }

@@ -238,6 +238,7 @@ func TestPollerUpdatesGauges(t *testing.T) {
 				Partition:          0,
 				LogStartOffset:     0,
 				LogEndOffset:       100,
+				HighWatermark:      100,
 				CommittedOffset:    40,
 				SegmentCount:       2,
 				SizeBytes:          1024,
@@ -275,8 +276,9 @@ func TestPollerPrunesDeletedTopics(t *testing.T) {
 		snaps: []TopicSnapshot{{
 			Topic: "doomed",
 			Partitions: []PartitionSnapshot{{
-				Partition:    0,
-				LogEndOffset: 10,
+				Partition:     0,
+				LogEndOffset:  10,
+				HighWatermark: 10,
 			}},
 		}},
 	}

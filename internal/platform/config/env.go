@@ -52,6 +52,21 @@ func applyEnv(cfg *Config) error {
 	if err := envDuration("NARAD_HTTP_MAX_CONSUME_WAIT", &cfg.HTTP.MaxConsumeWait); err != nil {
 		return err
 	}
+	if err := envInt("NARAD_HTTP_MAX_HEADER_BYTES", &cfg.HTTP.MaxHeaderBytes); err != nil {
+		return err
+	}
+	if err := envInt("NARAD_HTTP_MAX_CONNECTIONS", &cfg.HTTP.MaxConnections); err != nil {
+		return err
+	}
+	if err := envInt("NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY", &cfg.HTTP.MaxConsumeInFlightPerIdentity); err != nil {
+		return err
+	}
+	if v, ok := os.LookupEnv("NARAD_HTTP_METRICS_ADDR"); ok {
+		cfg.HTTP.MetricsAddr = strings.TrimSpace(v)
+	}
+	if err := envBool("NARAD_HTTP_METRICS_UNAUTHENTICATED", &cfg.HTTP.MetricsUnauthenticated); err != nil {
+		return err
+	}
 
 	if v, ok := os.LookupEnv("NARAD_DATA_DIR"); ok {
 		cfg.Storage.DataDir = v
@@ -104,6 +119,15 @@ func applyEnv(cfg *Config) error {
 	if v, ok := os.LookupEnv("NARAD_CLUSTER_SECRET"); ok {
 		cfg.Security.ClusterSecret = v
 	}
+	if err := envBool("NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH", &cfg.Security.AllowLegacyClusterAuth); err != nil {
+		return err
+	}
+	if err := envBool("NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT", &cfg.Security.AllowPlaintextRaft); err != nil {
+		return err
+	}
+	if err := envBool("NARAD_SECURITY_ALLOW_INSECURE_CLUSTER", &cfg.Security.AllowInsecureCluster); err != nil {
+		return err
+	}
 	if v, ok := os.LookupEnv("NARAD_CLUSTER_TLS_CERT_FILE"); ok {
 		cfg.Security.ClusterTLSCertFile = v
 	}
@@ -127,6 +151,19 @@ func envDuration(key string, dst *Duration) error {
 		return fmt.Errorf("%s: %w", key, err)
 	}
 	*dst = Duration(d)
+	return nil
+}
+
+func envBool(key string, dst *bool) error {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fmt.Errorf("%s: %w", key, err)
+	}
+	*dst = b
 	return nil
 }
 

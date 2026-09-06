@@ -55,6 +55,19 @@ type RPCServer struct {
 	// that is itself waiting on us.
 	messagingSem chan struct{}
 
+	// transferSem bounds the partition-transfer ops (segment listing and
+	// chunk reads): each chunk read pins up to storage.MaxSegmentReadBytes,
+	// so an unbounded number of them from one peer is an unbounded amount
+	// of memory and disk reads. controlSem bounds the remaining control
+	// ops (topic lookups, stats, membership, moves, users, fan-out
+	// cursors) so a peer cannot run thousands of them at once either. Ops
+	// that call OTHER peers or may park for a long time (delete_topic's
+	// purge broadcast, create_topic behind the startup create gate) are
+	// never gated: a held slot waiting on another node is how deadlocks
+	// and heartbeat starvation start. nil disables a gate.
+	transferSem chan struct{}
+	controlSem  chan struct{}
+
 	// deliveries remembers messages handed to forwarded consumes whose
 	// client may cancel after the reply was already sent; see
 	// HandleStreamCancel. deliveryExpiry is the same records in insertion
@@ -76,8 +89,21 @@ type deliveryDeadline struct {
 func NewRPCServer(br broker.Broker, store *metastore.Store, logger *slog.Logger) *RPCServer {
 	s := &RPCServer{broker: br, store: store, logger: logger}
 	s.SetMessagingConcurrency(defaultMessagingConcurrency())
+	s.SetTransferConcurrency(defaultTransferConcurrency)
+	s.SetControlConcurrency(defaultControlConcurrency)
 	return s
 }
+
+// defaultTransferConcurrency is the transfer-op ceiling: at
+// storage.MaxSegmentReadBytes per read that is at most 32 MiB of chunk
+// buffers in flight per node, while the mover (one sequential chunk
+// stream per move) never queues behind it in practice.
+const defaultTransferConcurrency = 8
+
+// defaultControlConcurrency is the control-op ceiling. Control ops are
+// short local reads and metastore writes; the bound only has to stop a
+// runaway peer, not shape normal traffic.
+const defaultControlConcurrency = 64
 
 // defaultMessagingConcurrency is the messaging-handler ceiling applied
 // by NewRPCServer: bounded so a burst of forwarded traffic degrades into
@@ -100,6 +126,25 @@ func (s *RPCServer) SetMessagingConcurrency(n int) {
 		return
 	}
 	s.messagingSem = make(chan struct{}, n)
+}
+
+// SetTransferConcurrency bounds concurrently executing partition-transfer
+// handlers to n; n <= 0 disables the bound. Call before serving.
+func (s *RPCServer) SetTransferConcurrency(n int) {
+	s.transferSem = newSemaphore(n)
+}
+
+// SetControlConcurrency bounds concurrently executing control handlers
+// to n; n <= 0 disables the bound. Call before serving.
+func (s *RPCServer) SetControlConcurrency(n int) {
+	s.controlSem = newSemaphore(n)
+}
+
+func newSemaphore(n int) chan struct{} {
+	if n <= 0 {
+		return nil
+	}
+	return make(chan struct{}, n)
 }
 
 // SetMaxConsumeWait wires the configured long-poll consume wait ceiling
@@ -278,6 +323,22 @@ func (s *RPCServer) withMessagingSlot(handle func() nodewire.Response) nodewire.
 	return handle()
 }
 
+// withSlot runs handle under sem, or answers 503 if the request is
+// cancelled (client gone, stream closed) before a slot frees up. A nil
+// sem runs handle directly.
+func (s *RPCServer) withSlot(ctx context.Context, sem chan struct{}, handle func() nodewire.Response) nodewire.Response {
+	if sem == nil {
+		return handle()
+	}
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		return errorResponse(http.StatusServiceUnavailable, "request cancelled while waiting for a handler slot")
+	}
+	defer func() { <-sem }()
+	return handle()
+}
+
 func (s *RPCServer) dispatch(ctx context.Context, key requestKey, payload []byte) nodewire.Response {
 	op, err := nodewire.OperationOf(payload)
 	if err != nil {
@@ -300,52 +361,69 @@ func (s *RPCServer) dispatch(ctx context.Context, key requestKey, payload []byte
 		res = s.withMessagingSlot(func() nodewire.Response { return s.handleExtendAck(ctx, payload) })
 	case nodewire.OpNack:
 		res = s.withMessagingSlot(func() nodewire.Response { return s.handleNack(ctx, payload) })
-	case nodewire.OpGetTopic:
-		res = s.handleGetTopic(payload)
-	case nodewire.OpJoinCluster:
-		res = s.handleJoinCluster(payload)
 	case nodewire.OpListPartitionSegments:
-		res = s.handleListPartitionSegments(payload)
+		res = s.withSlot(ctx, s.transferSem, func() nodewire.Response { return s.handleListPartitionSegments(payload) })
 	case nodewire.OpFetchSegmentChunk:
-		res = s.handleFetchSegmentChunk(payload)
-	case nodewire.OpPrepareHandoff:
-		res = s.handlePrepareHandoff(payload)
-	case nodewire.OpDecommissionMember:
-		res = s.handleDecommissionMember(payload)
-	case nodewire.OpCompleteMove:
-		res = s.handleCompleteMove(payload)
-	case nodewire.OpAbortMove:
-		res = s.handleAbortMove(payload)
-	case nodewire.OpGetAssignment:
-		res = s.handleGetAssignment(payload)
+		res = s.withSlot(ctx, s.transferSem, func() nodewire.Response { return s.handleFetchSegmentChunk(payload) })
 	case nodewire.OpCreateTopic:
+		// Ungated: may park behind the startup create gate for up to the
+		// forwarded-create timeout.
 		res = s.handleCreateTopic(payload)
-	case nodewire.OpAlterTopic:
-		res = s.handleAlterTopic(payload)
 	case nodewire.OpDeleteTopic:
+		// Ungated: broadcasts the purge to the partition owners.
 		res = s.handleDeleteTopic(payload)
-	case nodewire.OpPurgeTopic:
-		res = s.handlePurgeTopic(payload)
-	case nodewire.OpTopicPartitionStats:
-		res = s.handleTopicPartitionStats(payload)
-	case nodewire.OpRegisterMember:
-		res = s.handleRegisterMember(payload)
-	case nodewire.OpCreateUser:
-		res = s.handleCreateUser(payload)
-	case nodewire.OpUpdateUser:
-		res = s.handleUpdateUser(payload)
-	case nodewire.OpDeleteUser:
-		res = s.handleDeleteUser(payload)
-	case nodewire.OpAttachChild:
-		res = s.handleAttachChild(payload)
-	case nodewire.OpDetachChild:
-		res = s.handleDetachChild(payload)
-	case nodewire.OpFanoutCursors:
-		res = s.handleFanoutCursors(payload)
 	default:
-		res = errorResponse(http.StatusBadRequest, fmt.Sprintf("unsupported rpc operation %d", op))
+		handle, ok := s.controlHandler(op)
+		if !ok {
+			res = errorResponse(http.StatusBadRequest, fmt.Sprintf("unsupported rpc operation %d", op))
+			break
+		}
+		res = s.withSlot(ctx, s.controlSem, func() nodewire.Response { return handle(payload) })
 	}
 	return res
+}
+
+// controlHandler maps a control op to its handler; ok is false for an
+// op this server does not serve. Control ops run under controlSem.
+func (s *RPCServer) controlHandler(op nodewire.Operation) (handle func([]byte) nodewire.Response, ok bool) {
+	switch op {
+	case nodewire.OpGetTopic:
+		return s.handleGetTopic, true
+	case nodewire.OpJoinCluster:
+		return s.handleJoinCluster, true
+	case nodewire.OpPrepareHandoff:
+		return s.handlePrepareHandoff, true
+	case nodewire.OpDecommissionMember:
+		return s.handleDecommissionMember, true
+	case nodewire.OpCompleteMove:
+		return s.handleCompleteMove, true
+	case nodewire.OpAbortMove:
+		return s.handleAbortMove, true
+	case nodewire.OpGetAssignment:
+		return s.handleGetAssignment, true
+	case nodewire.OpAlterTopic:
+		return s.handleAlterTopic, true
+	case nodewire.OpPurgeTopic:
+		return s.handlePurgeTopic, true
+	case nodewire.OpTopicPartitionStats:
+		return s.handleTopicPartitionStats, true
+	case nodewire.OpRegisterMember:
+		return s.handleRegisterMember, true
+	case nodewire.OpCreateUser:
+		return s.handleCreateUser, true
+	case nodewire.OpUpdateUser:
+		return s.handleUpdateUser, true
+	case nodewire.OpDeleteUser:
+		return s.handleDeleteUser, true
+	case nodewire.OpAttachChild:
+		return s.handleAttachChild, true
+	case nodewire.OpDetachChild:
+		return s.handleDetachChild, true
+	case nodewire.OpFanoutCursors:
+		return s.handleFanoutCursors, true
+	default:
+		return nil, false
+	}
 }
 
 // brokerError maps a broker failure onto the RPC status vocabulary shared

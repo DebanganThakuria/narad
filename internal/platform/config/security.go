@@ -22,18 +22,59 @@ type SecurityConfig struct {
 	AdminPassword string `json:"-"`
 
 	// ClusterSecret authenticates node-to-node cluster RPC. Required
-	// when security is enabled and cluster peers are configured.
-	// Env: NARAD_CLUSTER_SECRET.
+	// when security is enabled and cluster peers are configured. Every
+	// stream proves it with a MAC bound to the QUIC connection's TLS
+	// session, in both directions. Env: NARAD_CLUSTER_SECRET.
 	ClusterSecret string `json:"-"`
+
+	// AllowLegacyClusterAuth is the one-release compatibility path for
+	// a rolling upgrade from nodes that proved the cluster secret with
+	// a fixed (replayable, one-way) token. While true, this node also
+	// offers the legacy protocol to peers that speak nothing else and
+	// logs every such connection. Set it on every node for the upgrade,
+	// then turn it off once all nodes run the session-bound protocol.
+	// Env: NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH.
+	AllowLegacyClusterAuth bool `json:"allow_legacy_cluster_auth"`
 
 	// ClusterTLSCertFile, ClusterTLSKeyFile, and ClusterTLSCAFile enable
 	// mutual TLS on the Raft metadata transport (which replicates user
-	// password hashes and grants). All three must be set together; leaving
-	// them empty runs the transport as plain TCP, relying on network
-	// isolation. These are file paths (typically a mounted secret), not
-	// secret values, so they are file-configurable.
+	// password hashes and grants). All three must be set together. These
+	// are file paths (typically a mounted secret), not secret values, so
+	// they are file-configurable.
 	// Env: NARAD_CLUSTER_TLS_CERT_FILE / _KEY_FILE / _CA_FILE.
 	ClusterTLSCertFile string `json:"cluster_tls_cert_file"`
 	ClusterTLSKeyFile  string `json:"cluster_tls_key_file"`
 	ClusterTLSCAFile   string `json:"cluster_tls_ca_file"`
+
+	// AllowInsecureCluster is the explicit opt-in for a MULTI-NODE
+	// cluster with security disabled: no API auth, no cluster secret
+	// (the QUIC RPC plane, which listens on the API port over UDP,
+	// accepts any peer) and plaintext Raft. Fine on a laptop, a
+	// mistake anywhere else, so it has to be said.
+	// Env: NARAD_SECURITY_ALLOW_INSECURE_CLUSTER.
+	AllowInsecureCluster bool `json:"allow_insecure_cluster"`
+
+	// AllowPlaintextRaft is the explicit opt-in for running the Raft
+	// transport as plain TCP in a secured multi-node cluster. Raft has
+	// no authentication of its own and the cluster secret does not cover
+	// it: anything that can reach the Raft port can force elections,
+	// replace the metadata (users, grants, topics) with AppendEntries
+	// as a fake leader, or install a snapshot. With security enabled and
+	// peers configured, the Raft TLS files are therefore required unless
+	// this is set, which says the operator restricts the port some other
+	// way (a NetworkPolicy, a private network).
+	// Env: NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT.
+	AllowPlaintextRaft bool `json:"allow_plaintext_raft"`
+}
+
+// ClusterTLSConfigured reports whether all three Raft TLS files are set.
+func (c SecurityConfig) ClusterTLSConfigured() bool {
+	return c.ClusterTLSCertFile != "" && c.ClusterTLSKeyFile != "" && c.ClusterTLSCAFile != ""
+}
+
+// clusterTLSPartial reports whether some but not all Raft TLS files are
+// set, which is always a mistake.
+func (c SecurityConfig) clusterTLSPartial() bool {
+	any := c.ClusterTLSCertFile != "" || c.ClusterTLSKeyFile != "" || c.ClusterTLSCAFile != ""
+	return any && !c.ClusterTLSConfigured()
 }
