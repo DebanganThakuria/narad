@@ -452,6 +452,8 @@ func (s *RPCServer) brokerError(op string, err error) nodewire.Response {
 		errors.Is(err, errs.ErrFanoutSchemaManaged),
 		errors.Is(err, errs.ErrDelayedChildProduce),
 		errors.Is(err, errs.ErrFanoutDelayTooLong), // 409, as the HTTP layer maps it
+		errors.Is(err, errs.ErrSchemaVersionConflict),
+		errors.Is(err, errs.ErrSchemaHistoryFull),
 		errors.Is(err, errs.ErrAlreadyExists):
 		return errorResponse(http.StatusConflict, err.Error())
 	case errors.Is(err, errs.ErrNotFound):

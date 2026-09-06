@@ -1,16 +1,19 @@
 package main
 
 // `narad topic ...` — topic lifecycle with human units: durations for
-// retention/visibility (12h, 30s) instead of raw milliseconds, and
-// create-as-child via --parent/--delay.
+// retention/visibility (12h, 30s) instead of raw milliseconds,
+// create-as-child via --parent/--delay, and JSON Schema registration
+// via --schema (inline JSON, @file, or - for stdin).
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -23,8 +26,35 @@ func newTopicCmd() *cobra.Command {
 		Short:   "create, inspect, and manage topics",
 	}
 	topic.AddCommand(topicAddCmd(), topicLsCmd(), topicInfoCmd(), topicEditCmd(),
-		topicRmCmd(), topicAttachCmd(), topicDetachCmd(), topicChildrenCmd())
+		topicRmCmd(), topicAttachCmd(), topicDetachCmd(), topicChildrenCmd(), topicSchemaCmd())
 	return topic
+}
+
+// schemaSource reads the value of a --schema flag: "@path" reads a
+// file, "-" reads stdin, anything else is the schema document itself.
+// The result must be a JSON value; the server decides whether it is a
+// schema.
+func schemaSource(flag string) (json.RawMessage, error) {
+	var raw []byte
+	var err error
+	switch {
+	case flag == "":
+		return nil, nil
+	case flag == "-":
+		raw, err = io.ReadAll(os.Stdin)
+	case strings.HasPrefix(flag, "@"):
+		raw, err = os.ReadFile(flag[1:])
+	default:
+		raw = []byte(flag)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read schema: %w", err)
+	}
+	raw = bytes.TrimSpace(raw)
+	if !json.Valid(raw) {
+		return nil, fmt.Errorf("--schema is not valid JSON (pass the document inline, @file, or - for stdin)")
+	}
+	return json.RawMessage(raw), nil
 }
 
 func topicAddCmd() *cobra.Command {
@@ -35,6 +65,7 @@ func topicAddCmd() *cobra.Command {
 		parent              string
 		delay               time.Duration
 		maxInFlight, maxAck int
+		schemaFlag          string
 	)
 	cmd := &cobra.Command{
 		Use:   "add <name>",
@@ -42,6 +73,11 @@ func topicAddCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			body := map[string]any{"name": args[0]}
+			if schema, err := schemaSource(schemaFlag); err != nil {
+				return err
+			} else if schema != nil {
+				body["schema"] = schema
+			}
 			if partitions > 0 {
 				body["partitions"] = partitions
 			}
@@ -75,6 +111,7 @@ func topicAddCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&delay, "delay", 0, "delivery delay for a delayed child (requires --parent)")
 	cmd.Flags().IntVar(&maxInFlight, "max-in-flight", 0, "per-partition in-flight cap")
 	cmd.Flags().IntVar(&maxAck, "max-acked-ahead", 0, "per-partition out-of-order ack cap")
+	cmd.Flags().StringVar(&schemaFlag, "schema", "", "JSON Schema every message must satisfy: inline JSON, @file, or - for stdin")
 	return cmd
 }
 
@@ -175,21 +212,41 @@ func topicEditCmd() *cobra.Command {
 	var (
 		retention, visibility time.Duration
 		partitions            int
+		schemaFlag            string
+		schemaBase            int
 	)
 	cmd := &cobra.Command{
 		Use:   "edit <name>",
-		Short: "alter retention, visibility, or partition count",
-		Args:  cobra.ExactArgs(1),
+		Short: "alter retention, partition count, or register a new schema version",
+		Long: `Alter a topic. Each flag is one field of PATCH /v1/topics/{name}.
+
+--schema registers a new schema version (inline JSON, @file, or - for
+stdin). The server checks it is backwards compatible with the current
+version; re-registering the current schema is a no-op. --schema-base-version
+makes the update conditional: it is applied only if the topic's current
+schema version is exactly that number, and fails with 409 otherwise, so two
+operators editing the schema at the same time cannot silently stack.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			body := map[string]any{}
 			if retention > 0 {
 				body["retention_ms"] = retention.Milliseconds()
 			}
 			if visibility > 0 {
-				body["visibility_timeout_ms"] = visibility.Milliseconds()
+				return fmt.Errorf("visibility is fixed at create time and cannot be edited")
 			}
 			if partitions > 0 {
 				body["partitions"] = partitions
+			}
+			if schema, err := schemaSource(schemaFlag); err != nil {
+				return err
+			} else if schema != nil {
+				body["schema"] = schema
+				if schemaBase > 0 {
+					body["schema_base_version"] = schemaBase
+				}
+			} else if schemaBase > 0 {
+				return fmt.Errorf("--schema-base-version requires --schema")
 			}
 			if len(body) == 0 {
 				return fmt.Errorf("nothing to change (see --help)")
@@ -198,8 +255,59 @@ func topicEditCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().DurationVar(&retention, "retention", 0, "new retention window")
-	cmd.Flags().DurationVar(&visibility, "visibility", 0, "new visibility timeout")
+	cmd.Flags().DurationVar(&visibility, "visibility", 0, "(not editable; visibility is fixed at create time)")
 	cmd.Flags().IntVar(&partitions, "partitions", 0, "new partition count (grow only)")
+	cmd.Flags().StringVar(&schemaFlag, "schema", "", "new JSON Schema version: inline JSON, @file, or - for stdin")
+	cmd.Flags().IntVar(&schemaBase, "schema-base-version", 0, "apply --schema only if the current schema version is exactly this")
+	return cmd
+}
+
+// topicSchemaCmd prints a topic's schema history: every version in
+// order and which one is current. --current prints only the latest
+// document, which is what a producer pastes into its own validator.
+func topicSchemaCmd() *cobra.Command {
+	var current bool
+	cmd := &cobra.Command{
+		Use:   "schema <name>",
+		Short: "show a topic's schema history (or just the current schema with --current)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			path := "/v1/topics/" + url.PathEscape(args[0]) + "/schema"
+			if !current {
+				return cliClient().getAndPrint(path)
+			}
+			c := cliClient()
+			resp, err := c.do(http.MethodGet, path, nil)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return printResponse(resp)
+			}
+			var history struct {
+				Version  int `json:"version"`
+				Versions []struct {
+					Version int             `json:"version"`
+					Schema  json.RawMessage `json:"schema"`
+				} `json:"versions"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&history); err != nil {
+				return fmt.Errorf("parse schema response: %w", err)
+			}
+			if history.Version == 0 {
+				fmt.Println("no schema")
+				return nil
+			}
+			var pretty bytes.Buffer
+			if err := json.Indent(&pretty, history.Versions[len(history.Versions)-1].Schema, "", "  "); err != nil {
+				return err
+			}
+			fmt.Println(pretty.String())
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&current, "current", false, "print only the current schema document")
 	return cmd
 }
 

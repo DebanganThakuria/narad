@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"net/url"
 	"slices"
 	"strconv"
@@ -876,7 +877,18 @@ func jsonEqual(a, b any) bool {
 			}
 		}
 		return true
-	case json.Number, float64, int, int64:
+	case json.Number:
+		// Two decoded numbers compare exactly: a float64 comparison
+		// would call 2^53+1 and 2^53 equal.
+		if bn, ok := b.(json.Number); ok {
+			ar, aok := new(big.Rat).SetString(string(av))
+			br, bok := new(big.Rat).SetString(string(bn))
+			return aok && bok && ar.Cmp(br) == 0
+		}
+		af, _ := numberOf(av)
+		bf, ok := numberOf(b)
+		return ok && af == bf
+	case float64, int, int64:
 		af, _ := numberOf(av)
 		bf, ok := numberOf(b)
 		return ok && af == bf

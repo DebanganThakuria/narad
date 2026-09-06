@@ -328,10 +328,12 @@ func TestJSONSchemaExternalMetaschemaIsRefused(t *testing.T) {
 	}
 }
 
-// BenchmarkValidatePayloadDecode documents why Validate keeps
-// json.Unmarshal: the library validates only a decoded document, and
-// its own UnmarshalJSON copies the payload through a json.Decoder
-// first, which costs more here than the direct unmarshal.
+// BenchmarkValidatePayloadDecode documents what the exact-number decode
+// costs: Validate uses jsonschema.UnmarshalJSON (json.Number, so
+// integers beyond 2^53 keep their value), which runs about a fifth
+// slower than a float64 json.Unmarshal because it goes through a
+// json.Decoder. The difference is well under a microsecond per produce
+// and buys the documented number contract.
 func BenchmarkValidatePayloadDecode(b *testing.B) {
 	payload := []byte(`{"id":"o_12345","qty":3,"price":19.99,"tags":["a","b","c"],"customer":{"name":"Ada","email":"ada@example.com","tier":2},"lines":[{"sku":"x1","n":1},{"sku":"x2","n":4}]}`)
 	registry := NewJSONSchema()

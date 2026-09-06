@@ -63,6 +63,7 @@ func NewRouterWithOptions(h *handlers.Set, log *slog.Logger, m *metrics.Metrics,
 	mux.HandleFunc("GET /v1/topics/{topic}", httptopics.Get(h))
 	mux.HandleFunc("PATCH /v1/topics/{topic}", httptopics.Alter(h))
 	mux.HandleFunc("DELETE /v1/topics/{topic}", httptopics.Delete(h))
+	mux.HandleFunc("GET /v1/topics/{topic}/schema", httptopics.SchemaHistory(h))
 
 	// Fan-out child management
 	mux.HandleFunc("POST /v1/topics/{parent}/children", httptopics.AttachChild(h))

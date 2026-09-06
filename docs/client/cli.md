@@ -71,6 +71,9 @@ narad server start [--dev]         run a broker (--dev: loopback, auth off, ~/.n
 narad server report                every topic: partitions, messages, size, owner spread
 
 narad topic add|ls|info|edit|rm    human units: --retention 12h, --visibility 30s
+narad topic add orders --schema @orders.json     # JSON Schema: inline, @file, or - (stdin)
+narad topic edit orders --schema @v2.json --schema-base-version 1   # conditional evolution
+narad topic schema orders [--current]            # schema history, or just the current document
 narad topic add replica --parent orders          # the replication pattern, one flag
 narad topic attach|detach|children               # fan-out & delay management
 

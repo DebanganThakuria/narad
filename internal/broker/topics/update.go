@@ -7,8 +7,31 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
+
+// TopicSchemaHistory returns every persisted schema version of the
+// topic in ascending order. A topic without a schema has an empty
+// history and version 0.
+func (m *Manager) TopicSchemaHistory(ctx context.Context, name string) (topic.SchemaHistory, error) {
+	if name == "" {
+		return topic.SchemaHistory{}, fmt.Errorf("%w: name required", ErrInvalid)
+	}
+	if _, err := m.GetTopic(ctx, name); err != nil {
+		return topic.SchemaHistory{}, err
+	}
+	history, err := schema.PersistedHistory(ctx, m.metastore, name)
+	if err != nil {
+		return topic.SchemaHistory{}, fmt.Errorf("topics: read schema history: %w", err)
+	}
+	out := topic.SchemaHistory{Topic: name, Versions: make([]topic.SchemaVersion, 0, len(history))}
+	for _, v := range history {
+		out.Versions = append(out.Versions, topic.SchemaVersion{Version: v.Number, Schema: v.Raw})
+		out.Version = v.Number
+	}
+	return out, nil
+}
 
 // IncreaseTopicPartitions raises the partition count of an existing
 // topic. Increase-only — decreasing would require renumbering offsets,
@@ -181,12 +204,25 @@ const schemaPutAttempts = 3
 // and overwriting history. The Raft state machine refuses any version
 // other than latest+1 as a second line of defence; on that refusal the
 // history is re-read and the check repeated.
-func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema []byte) (topic.Topic, error) {
+//
+// The update is idempotent: a schema that is the same JSON value as
+// the current latest registers nothing and returns success, so a
+// client that retries after a lost response does not grow the history.
+//
+// baseVersion, when positive, is a precondition: the update is applied
+// only if the topic's current version is exactly baseVersion, and
+// answers errs.ErrSchemaVersionConflict otherwise. Two clients that
+// each read v1 and PATCH cannot both land as v2 and v3 without one of
+// them noticing. Zero means no precondition.
+func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema []byte, baseVersion int) (topic.Topic, error) {
 	if name == "" {
 		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalid)
 	}
 	if len(rawSchema) == 0 {
 		return topic.Topic{}, fmt.Errorf("%w: schema must not be empty", ErrInvalid)
+	}
+	if baseVersion < 0 {
+		return topic.Topic{}, fmt.Errorf("%w: schema_base_version must be >= 0", ErrInvalid)
 	}
 	unlock := m.lockTopicName(name)
 	defer unlock()
@@ -215,10 +251,25 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 		version = 1
 		if n := len(history); n > 0 {
 			latest := history[n-1]
+			if baseVersion > 0 && baseVersion != latest.Number {
+				return topic.Topic{}, fmt.Errorf("%w: schema_base_version %d does not match the current version %d of %q",
+					errs.ErrSchemaVersionConflict, baseVersion, latest.Number, name)
+			}
+			if schema.Equal(latest.Raw, rawSchema) {
+				m.logger.Info("topic schema unchanged", "topic", name, "version", latest.Number)
+				return t, nil
+			}
+			if latest.Number >= metastore.MaxSchemaVersions {
+				return topic.Topic{}, fmt.Errorf("%w: %q already has %d schema versions, the maximum",
+					errs.ErrSchemaHistoryFull, name, latest.Number)
+			}
 			version = latest.Number + 1
 			if err := m.schemas.CheckCompatible(ctx, name, latest.Raw, rawSchema); err != nil {
 				return topic.Topic{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 			}
+		} else if baseVersion > 0 {
+			return topic.Topic{}, fmt.Errorf("%w: schema_base_version %d given but %q has no schema yet",
+				errs.ErrSchemaVersionConflict, baseVersion, name)
 		}
 
 		err = m.metastore.PutSchema(ctx, name, version, rawSchema)

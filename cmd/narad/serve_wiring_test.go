@@ -255,7 +255,11 @@ func (stubBroker) UpdateTopicCaps(context.Context, string, int64, int64) (topic.
 	return topic.Topic{}, nil
 }
 
-func (stubBroker) UpdateTopicSchema(context.Context, string, []byte) (topic.Topic, error) {
+func (stubBroker) TopicSchemaHistory(context.Context, string) (topic.SchemaHistory, error) {
+	return topic.SchemaHistory{}, nil
+}
+
+func (stubBroker) UpdateTopicSchema(context.Context, string, []byte, int) (topic.Topic, error) {
 	return topic.Topic{}, nil
 }
 func (stubBroker) DeleteTopic(context.Context, string) error             { return nil }

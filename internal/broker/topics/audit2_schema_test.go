@@ -29,7 +29,7 @@ func TestAudit2SchemaUpdateOnColdRegistryBypassesCompatAndOverwritesV1(t *testin
 
 	// Incompatible with v1: "id" removed, new required property added.
 	incompatible := []byte(`{"type":"object","properties":{"name":{"type":"integer"}},"required":["name"]}`)
-	_, err := m.UpdateTopicSchema(context.Background(), testTopicName, incompatible)
+	_, err := m.UpdateTopicSchema(context.Background(), testTopicName, incompatible, 0)
 	if err == nil {
 		t.Errorf("incompatible schema was accepted (want %v)", errs.ErrSchemaIncompatible)
 	} else if !errors.Is(err, errs.ErrSchemaIncompatible) {

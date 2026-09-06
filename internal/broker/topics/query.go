@@ -3,11 +3,13 @@ package topics
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
 // partitionAssignmentReader is the optional metastore capability used
@@ -55,6 +57,18 @@ func (m *Manager) GetTopicDetails(ctx context.Context, name string) (topic.Detai
 	if err != nil {
 		return topic.Details{}, err
 	}
+	// The current schema comes from the persisted history, the same
+	// source the produce path validates against, so a describe on any
+	// node reports what that node's replica enforces.
+	history, err := schema.PersistedHistory(ctx, m.metastore, name)
+	if err != nil {
+		return topic.Details{}, fmt.Errorf("topics: read schema history: %w", err)
+	}
+	details := topic.Details{Topic: t}
+	if n := len(history); n > 0 {
+		details.SchemaVersion = history[n-1].Number
+		details.Schema = history[n-1].Raw
+	}
 	// Directory stats are only this topic's if the directory is: a
 	// node that missed the purge of a deleted same-named topic still
 	// holds that incarnation's directory until an open quarantines it,
@@ -98,7 +112,8 @@ func (m *Manager) GetTopicDetails(ctx context.Context, name string) (topic.Detai
 		stats[i].SizeBytes = dirStats.SizeBytes
 		stats[i].OldestSegmentAt = dirStats.OldestSegmentAt
 	}
-	return topic.Details{Topic: t, Partitions: stats}, nil
+	details.Partitions = stats
+	return details, nil
 }
 
 // ownsPartition reports whether this node owns (topic, idx). A manager
