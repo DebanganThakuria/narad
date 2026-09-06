@@ -1,12 +1,14 @@
 package httpserver
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
 
 	"github.com/debanganthakuria/narad/internal/security"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
 // authExemptPaths lists the paths served without credentials. The
@@ -66,6 +68,11 @@ func AuthExempting(auth *security.Authenticator, log *slog.Logger, exempt map[st
 				writeAuthError(w, http.StatusTooManyRequests, "too many failed authentication attempts")
 			case errors.Is(err, security.ErrUnauthorized):
 				unauthorized(w)
+			case errors.Is(err, context.Canceled):
+				// The client went away while its credentials were being
+				// verified (the request context is cancelled on connection
+				// close). Not a store failure: no error log, no 5xx.
+				writeAuthError(w, handlers.StatusClientClosedRequest, "client closed request")
 			default:
 				log.Error("authentication store failure", "err", err)
 				writeAuthError(w, http.StatusInternalServerError, "authentication unavailable")

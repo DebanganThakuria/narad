@@ -171,3 +171,38 @@ func TestAuthPreservesRouteLabelForMetrics(t *testing.T) {
 		t.Fatalf("route label = %q, want %q (authenticated request bucketed as unmatched)", gotRoute, wantRoute)
 	}
 }
+
+// ctxAwareStore honours request cancellation like the metastore does.
+type ctxAwareStore struct{ staticUserStore }
+
+func (s ctxAwareStore) GetUser(ctx context.Context, name string) (user.User, error) {
+	if err := ctx.Err(); err != nil {
+		return user.User{}, err
+	}
+	return s.staticUserStore.GetUser(ctx, name)
+}
+
+// A client that disconnects while its credentials are being verified
+// cancels the request context; the store read fails with that
+// cancellation, which must surface as a client-side status, not as a
+// 500 "authentication unavailable" store failure.
+func TestAuthMiddlewareClientCancelIsNotAStoreFailure(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	auth := security.New(ctxAwareStore{staticUserStore{users: map[string]user.User{}}}, log)
+	h := Auth(auth, log)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics", nil).WithContext(ctx)
+	req.SetBasicAuth("alice", "pw")
+	res := httptest.NewRecorder()
+	h.ServeHTTP(res, req)
+	if res.Code >= 500 {
+		t.Fatalf("cancelled request: status = %d, want a non-5xx", res.Code)
+	}
+	if res.Code == http.StatusOK {
+		t.Fatal("cancelled request was authenticated")
+	}
+}
