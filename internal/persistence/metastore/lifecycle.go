@@ -20,17 +20,24 @@ var errPreVoteUnsupported = errors.New("metastore: transport does not support pr
 const appliedCaughtUpContactWindow = 5 * time.Second
 
 // Close hands leadership to another voter if this node leads, shuts
-// Raft down, and closes the FSM database.
+// Raft down, and closes the Raft log store and the FSM database. The
+// databases are closed even when the shutdown reports an error: a
+// Store that is gone must not keep the bbolt locks on raft.db and
+// fsm.db, or a reopen of the directory in the same process (an
+// embedded restart, a test) waits out boltOpenTimeout and fails as if
+// another process held the files.
 func (s *Store) Close() error {
 	if s.r.State() == raft.Leader {
 		s.r.LeadershipTransfer() //nolint:errcheck
 	}
-	if err := s.r.Shutdown().Error(); err != nil {
-		return err
+	shutdownErr := s.r.Shutdown().Error()
+	var logStoreErr error
+	if s.logStore != nil {
+		logStoreErr = s.logStore.Close()
 	}
 	s.fsm.mu.Lock()
 	defer s.fsm.mu.Unlock()
-	return s.fsm.db.Close()
+	return errors.Join(shutdownErr, logStoreErr, s.fsm.db.Close())
 }
 
 // IsLeader reports whether this node is the current Raft leader.

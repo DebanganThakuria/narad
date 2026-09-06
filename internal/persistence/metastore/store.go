@@ -74,6 +74,10 @@ type Store struct {
 	ownershipReady atomic.Bool
 	latchMu        sync.Mutex
 	fsm            *fsmState
+	// logStore is the bbolt-backed Raft log and stable store. Raft's
+	// Shutdown does not close it, so Close must, or the file lock on
+	// raft.db outlives the Store.
+	logStore io.Closer
 
 	// attachOffsets, when registered (SetAttachOffsetResolver), observes
 	// the parent's per-partition committed tail for an attach so the
@@ -99,11 +103,12 @@ func New(cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("metastore: fsm: %w", err)
 	}
 
-	r, transport, err := newRaft(cfg, fsm)
+	r, transport, logStore, err := newRaft(cfg, fsm)
 	if err != nil {
+		_ = fsm.db.Close()
 		return nil, err
 	}
-	return &Store{r: r, leaderCommit: transport, fsm: fsm}, nil
+	return &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore}, nil
 }
 
 // newRaft wires up the Raft node: log/stable store, snapshot store, TCP
@@ -111,7 +116,7 @@ func New(cfg Config) (*Store, error) {
 // cluster bootstrap from cfg plus cfg.Peers. It also returns the
 // commit-observing transport wrapper so the store can read the leader's
 // commit index.
-func newRaft(cfg Config, fsm *fsmState) (*raft.Raft, *commitObservingTransport, error) {
+func newRaft(cfg Config, fsm *fsmState) (r *raft.Raft, transport *commitObservingTransport, logStore *raftboltdb.BoltStore, err error) {
 	raftPath := filepath.Join(cfg.DataDir, "raft.db")
 	cfg.startupLog().Info("opening raft log store (waits up to the lock timeout if another process holds it)", "path", raftPath, "lock_timeout", boltOpenTimeout)
 	boltStore, err := raftboltdb.New(raftboltdb.Options{
@@ -119,8 +124,13 @@ func newRaft(cfg Config, fsm *fsmState) (*raft.Raft, *commitObservingTransport, 
 		BoltOptions: boltOptions(),
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("metastore: raft store %s: %w", raftPath, err)
+		return nil, nil, nil, fmt.Errorf("metastore: raft store %s: %w", raftPath, err)
 	}
+	defer func() {
+		if err != nil {
+			_ = boltStore.Close()
+		}
+	}()
 
 	logOutput := cfg.Logger
 	if logOutput == nil {
@@ -129,37 +139,37 @@ func newRaft(cfg Config, fsm *fsmState) (*raft.Raft, *commitObservingTransport, 
 
 	snapStore, err := raft.NewFileSnapshotStore(cfg.DataDir, 2, logOutput)
 	if err != nil {
-		return nil, nil, fmt.Errorf("metastore: snapshots: %w", err)
+		return nil, nil, nil, fmt.Errorf("metastore: snapshots: %w", err)
 	}
 
 	rawTransport, advertiseAddr, err := newTransport(cfg, logOutput)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// Raft only ever sees the wrapper; see leader_commit.go for why the
 	// leader's commit index has to be read off the wire.
-	transport := newCommitObservingTransport(rawTransport)
+	transport = newCommitObservingTransport(rawTransport)
 
 	rc := raft.DefaultConfig()
 	rc.LocalID = raft.ServerID(cfg.NodeID)
 	rc.LogOutput = logOutput
 
-	r, err := raft.NewRaft(rc, fsm, boltStore, boltStore, snapStore, transport)
+	r, err = raft.NewRaft(rc, fsm, boltStore, boltStore, snapStore, transport)
 	if err != nil {
 		_ = transport.Close()
-		return nil, nil, fmt.Errorf("metastore: raft: %w", err)
+		return nil, nil, nil, fmt.Errorf("metastore: raft: %w", err)
 	}
 
 	hasState, err := raft.HasExistingState(boltStore, boltStore, snapStore)
 	if err != nil {
-		return nil, nil, fmt.Errorf("metastore: check state: %w", err)
+		return nil, nil, nil, fmt.Errorf("metastore: check state: %w", err)
 	}
 	if !hasState && !cfg.JoinOnly {
 		if err := bootstrapCluster(r, cfg, advertiseAddr); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
-	return r, transport, nil
+	return r, transport, boltStore, nil
 }
 
 // HasExistingState reports whether a Raft log, stable store, or snapshot
