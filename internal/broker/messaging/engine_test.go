@@ -174,8 +174,8 @@ func (f *fakeSchemas) ValidateDefinition(_ context.Context, _ string, _ []byte) 
 	return nil
 }
 
-func (f *fakeSchemas) Register(_ context.Context, _ string, _ []byte) (int, error) {
-	return 1, nil
+func (f *fakeSchemas) CheckCompatible(_ context.Context, _ string, _, _ []byte) error {
+	return nil
 }
 
 func (f *fakeSchemas) Load(_ context.Context, topic string, version int, raw []byte) error {
@@ -186,7 +186,18 @@ func (f *fakeSchemas) Load(_ context.Context, topic string, version int, raw []b
 	return nil
 }
 
-func (f *fakeSchemas) Unload(_ context.Context, _ string, _ int) error {
+// ReplaceTopic records each version as a load (the tests count them)
+// and, like the real registry, makes the topic validate once a history
+// is present.
+func (f *fakeSchemas) ReplaceTopic(_ context.Context, topic string, history []schema.Version) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, v := range history {
+		f.loads = append(f.loads, schemaLoad{topic: topic, version: v.Number, raw: append([]byte(nil), v.Raw...)})
+	}
+	if len(history) > 0 {
+		f.validateErr = nil
+	}
 	return nil
 }
 
