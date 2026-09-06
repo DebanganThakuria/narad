@@ -127,6 +127,10 @@ spec:
             - name: NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH
               value: "true"
             {{- end }}
+            {{- if and (not .Values.security.clusterTLS.enabled) .Values.security.allowPlaintextRaft }}
+            - name: NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT
+              value: "true"
+            {{- end }}
             {{- if .Values.security.clusterTLS.enabled }}
             - name: NARAD_CLUSTER_TLS_CERT_FILE
               value: {{ printf "%s/%s" .Values.security.clusterTLS.mountPath .Values.security.clusterTLS.certKey | quote }}

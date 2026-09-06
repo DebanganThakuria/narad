@@ -175,6 +175,7 @@ func TestValidateRejectsClusterPeersWithoutLocalVoter(t *testing.T) {
 func TestValidateAcceptsClusterPeersIncludingSelf(t *testing.T) {
 	cfg := Default()
 	cfg.Security.ClusterSecret = "test-cluster-secret"
+	cfg.Security.AllowPlaintextRaft = true
 	cfg.Cluster.Addr = "127.0.0.1:9101"
 	cfg.Cluster.NodeID = "node-1"
 	cfg.Cluster.Peers = []ClusterPeer{
@@ -191,6 +192,7 @@ func TestValidateAcceptsClusterPeersIncludingSelf(t *testing.T) {
 func TestValidateAcceptsClusterPeersWithPortLikeAddr(t *testing.T) {
 	cfg := Default()
 	cfg.Security.ClusterSecret = "test-cluster-secret"
+	cfg.Security.AllowPlaintextRaft = true
 	cfg.Cluster.Addr = ":9101"
 	cfg.Cluster.NodeID = "node-1"
 	cfg.Cluster.Peers = []ClusterPeer{
@@ -207,6 +209,7 @@ func TestValidateAcceptsClusterPeersWithPortLikeAddr(t *testing.T) {
 func TestValidateAcceptsClusterPeersWithClusterPortAndHostfulPeerAddr(t *testing.T) {
 	cfg := Default()
 	cfg.Security.ClusterSecret = "test-cluster-secret"
+	cfg.Security.AllowPlaintextRaft = true
 	cfg.Cluster.Addr = ":9101"
 	cfg.Cluster.NodeID = "node-1"
 	cfg.Cluster.Peers = []ClusterPeer{
@@ -265,8 +268,9 @@ func TestValidateRequiresClusterSecretForSecureMultiNode(t *testing.T) {
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "security.cluster_secret") {
 		t.Fatalf("Validate() error = %v, want cluster_secret requirement", err)
 	}
-	// Providing the secret clears it.
+	// Providing the secret (and acknowledging plaintext raft) clears it.
 	cfg.Security.ClusterSecret = "shared"
+	cfg.Security.AllowPlaintextRaft = true
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() with secret = %v, want nil", err)
 	}
@@ -284,6 +288,7 @@ func TestValidateRequiresClusterSecretForSecureMultiNode(t *testing.T) {
 func TestValidateAcceptsNodeOutsidePeersWithAdvertiseAddr(t *testing.T) {
 	cfg := Default()
 	cfg.Security.ClusterSecret = "test-cluster-secret"
+	cfg.Security.AllowPlaintextRaft = true
 	cfg.Cluster.Addr = ":9101"
 	cfg.Cluster.NodeID = "narad-3"
 	cfg.Cluster.AdvertiseAddr = "narad-3.narad-headless.narad.svc.cluster.local:9101"
@@ -312,5 +317,48 @@ func TestAdvertiseAddrEnvParsing(t *testing.T) {
 	}
 	if cfg.Cluster.AdvertiseAddr != "narad-3.narad-headless:9101" {
 		t.Fatalf("AdvertiseAddr = %q", cfg.Cluster.AdvertiseAddr)
+	}
+}
+
+// A secured multi-node cluster must either run the Raft transport over
+// mutual TLS or say explicitly that it runs it plaintext: the cluster
+// secret only covers the QUIC RPC plane, and Raft accepts anything that
+// reaches its port.
+func TestValidateRequiresRaftTLSOrExplicitPlaintextForSecureMultiNode(t *testing.T) {
+	cfg := Default()
+	cfg.Security.ClusterSecret = "shared"
+	cfg.Cluster.Addr = "127.0.0.1:9101"
+	cfg.Cluster.NodeID = "node-1"
+	cfg.Cluster.Peers = []ClusterPeer{
+		{ID: "node-1", Addr: "127.0.0.1:9101"},
+		{ID: "node-2", Addr: "127.0.0.1:9102"},
+		{ID: "node-3", Addr: "127.0.0.1:9103"},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "allow_plaintext_raft") {
+		t.Fatalf("Validate() error = %v, want the raft TLS requirement", err)
+	}
+
+	cfg.Security.AllowPlaintextRaft = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with explicit plaintext opt-in = %v, want nil", err)
+	}
+
+	cfg.Security.AllowPlaintextRaft = false
+	cfg.Security.ClusterTLSCertFile, cfg.Security.ClusterTLSKeyFile, cfg.Security.ClusterTLSCAFile = "c.pem", "k.pem", "ca.pem"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with raft TLS files = %v, want nil", err)
+	}
+
+	// Two of three files is a mistake, not a configuration.
+	cfg.Security.ClusterTLSCAFile = ""
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "set together") {
+		t.Fatalf("Validate() with partial raft TLS files = %v, want 'set together'", err)
+	}
+
+	// Single-node and security-off deployments are not held to it.
+	cfg = Default()
+	cfg.Security.ClusterSecret = "shared"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() single node = %v, want nil", err)
 	}
 }

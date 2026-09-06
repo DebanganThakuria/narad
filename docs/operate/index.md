@@ -109,7 +109,7 @@ Narad has request-size caps (1 MiB bodies) and per-partition flow control, but *
 
 ## TLS story
 
-Client TLS terminates at your ingress; Narad serves plain HTTP behind it. Node-to-node QUIC is authenticated by the cluster secret, proven on every stream in both directions with a MAC bound to that connection's TLS session (nothing replayable crosses the wire, and a node refuses a peer that cannot prove the secret back). Raft can additionally run mutual TLS (`NARAD_CLUSTER_TLS_{CERT,KEY,CA}_FILE`). Restrict 7943/tcp and 7942/udp with a NetworkPolicy either way; the QUIC plane rides the API port number over UDP.
+Client TLS terminates at your ingress; Narad serves plain HTTP behind it. Node-to-node QUIC is authenticated by the cluster secret, proven on every stream in both directions with a MAC bound to that connection's TLS session (nothing replayable crosses the wire, and a node refuses a peer that cannot prove the secret back). Raft is a separate plane with **no authentication of its own**: the cluster secret does not cover it, and anything that reaches 7943/tcp can force elections or rewrite the metadata as a fake leader. So a secured multi-node cluster must run Raft over mutual TLS (`NARAD_CLUSTER_TLS_{CERT,KEY,CA}_FILE`, `security.clusterTLS` in the chart) or say explicitly that the port is fenced another way (`NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true`; the chart sets it by default because `clusterTLS` is off by default, so enable one or the other before you go to production). Restrict 7943/tcp and 7942/udp with a NetworkPolicy either way; the QUIC plane rides the API port number over UDP.
 
 ## Single-node / laptop mode
 

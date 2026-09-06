@@ -29,7 +29,8 @@ Every variable, with the compiled-in default when unset. (This table is generate
 | `NARAD_CLUSTER_INITIAL_MEMBERS` | empty | IDs allowed to bootstrap; everyone else joins. Empty = legacy "all bootstrap" |
 | `NARAD_CLUSTER_SECRET` | (none) | Shared secret gating all node-to-node QUIC RPC (proven per stream, bound to the TLS session, in both directions) |
 | `NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH` | `false` | Rolling-upgrade compatibility with nodes that used the fixed-token cluster auth; on for the roll, off after |
-| `NARAD_CLUSTER_TLS_CERT_FILE` / `_KEY_FILE` / `_CA_FILE` | off | Mutual TLS for Raft; all three or nothing |
+| `NARAD_CLUSTER_TLS_CERT_FILE` / `_KEY_FILE` / `_CA_FILE` | off | Mutual TLS for Raft; all three or nothing. Required for a secured multi-node cluster unless the next flag is set |
+| `NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT` | `false` | Explicit acknowledgement that Raft (7943/tcp, which has no authentication of its own) runs plaintext and is fenced by network policy instead |
 
 ### Storage & data
 
@@ -89,7 +90,11 @@ the loader **rejects** any attempt to set it:
   "topic": { "...": "same as env" },
   "fanout": { "...": "same as env" },
   "log": { "level": "info", "format": "json" },
-  "security": { "enabled": true }
+  "security": {
+    "enabled": true,
+    "allow_plaintext_raft": false,          // or set the cluster_tls_*_file paths
+    "allow_legacy_cluster_auth": false
+  }
 }
 ```
 

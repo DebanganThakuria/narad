@@ -161,6 +161,17 @@ security:
     keyKey: tls.key
     caKey: ca.crt
 
+  # Raft has no authentication of its own and the cluster secret does
+  # not cover it: with clusterTLS off, anything that can reach the
+  # cluster port (7943/tcp) can force elections or rewrite the metadata.
+  # The broker refuses to start a secured multi-node cluster without
+  # Raft TLS unless told the port is fenced some other way. The chart's
+  # default is that acknowledgement, because clusterTLS is off by
+  # default; enable clusterTLS for production, or keep this true only
+  # with a NetworkPolicy that restricts 7943/tcp (and 7942/udp, the
+  # QUIC node RPC plane) to the narad pods.
+  allowPlaintextRaft: true
+
 metrics:
   enabled: true
   path: /metrics

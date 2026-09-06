@@ -293,5 +293,15 @@ func securityValidationErrors(cfg SecurityConfig, cluster ClusterConfig) []strin
 	if cfg.Enabled && len(cluster.Peers) > 0 && strings.TrimSpace(cfg.ClusterSecret) == "" {
 		errs = append(errs, "security.cluster_secret (NARAD_CLUSTER_SECRET) is required when security is enabled with cluster peers")
 	}
+	if cfg.clusterTLSPartial() {
+		errs = append(errs, "security.cluster_tls_cert_file, security.cluster_tls_key_file and security.cluster_tls_ca_file must be set together")
+	}
+	// The cluster secret authenticates the QUIC RPC plane only. Raft has
+	// no authentication of its own, so a secured multi-node cluster with
+	// a plaintext Raft transport is only secure if the operator fences
+	// the port by other means; make them say so.
+	if cfg.Enabled && len(cluster.Peers) > 0 && !cfg.ClusterTLSConfigured() && !cfg.AllowPlaintextRaft {
+		errs = append(errs, "security is enabled with cluster peers but the raft transport has no TLS: set security.cluster_tls_cert_file/_key_file/_ca_file (NARAD_CLUSTER_TLS_*_FILE), or set security.allow_plaintext_raft: true (NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true) if the raft port is restricted by network policy")
+	}
 	return errs
 }

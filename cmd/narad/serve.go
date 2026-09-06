@@ -65,7 +65,8 @@ func runServe(args []string) error {
 	if clusterTLS != nil {
 		log.Info("raft metadata transport secured with mutual TLS")
 	} else {
-		log.Warn("raft metadata transport is plaintext; restrict the cluster port by network policy")
+		log.Warn("raft metadata transport is plaintext (security.allow_plaintext_raft); raft has no authentication of its own, so restrict the cluster port by network policy",
+			"component", "audit", "cluster_addr", cfg.Cluster.Addr)
 	}
 	joinOnly := joinOnlyNode(nodeID, cfg.Cluster.InitialMembers)
 	if joinOnly {

@@ -28,7 +28,9 @@ func clusterTLSConfig(sec config.SecurityConfig) (*metastore.TLSConfig, error) {
 	if cert == "" && key == "" && ca == "" {
 		return nil, nil
 	}
-	if cert == "" || key == "" || ca == "" {
+	if !sec.ClusterTLSConfigured() {
+		// Also a config validation error; kept here for callers that
+		// build a SecurityConfig without validating.
 		return nil, errors.New("cluster TLS requires cert, key, and CA files to be set together")
 	}
 	keyPair, err := tls.LoadX509KeyPair(cert, key)

@@ -55,6 +55,10 @@ narad:
 security:
   enabled: true
   existingSecret: ""           # defaults to <release>-security
+  clusterTLS: { enabled: false } # mTLS on Raft; turn on for production
+  allowPlaintextRaft: true     # the broker refuses secure multi-node without
+                               # Raft TLS unless this says the port is fenced
+  allowLegacyClusterAuth: false # only for the upgrade across the auth change
 
 # Observability
 metrics:
