@@ -49,6 +49,14 @@ type envOpts struct {
 	metrics                    bool // when true, wire real Prometheus metrics and /metrics endpoint
 	security                   bool // when true, enable Basic auth + RBAC and seed an admin
 	logOptions                 storage.Options
+	// dataDir, when set, holds the partition logs, the ingress WAL and
+	// the broker's other files instead of a fresh temp dir, so a test
+	// can put them on a chosen volume or reopen them after a restart.
+	dataDir string
+	// metastoreDir, when set, holds the Raft metastore; it defaults to
+	// <dataDir>/metastore. A test that starves dataDir of disk space
+	// keeps the metastore elsewhere so topic metadata stays writable.
+	metastoreDir string
 }
 
 func defaultOpts() envOpts {
@@ -98,6 +106,21 @@ func withSecurity() envOption {
 	return func(o *envOpts) { o.security = true }
 }
 
+// withDataDir pins the broker's data directory (partition logs, ingress
+// WAL). Reusing the same directory across two envs restarts the node.
+func withDataDir(dir string) envOption {
+	return func(o *envOpts) { o.dataDir = dir }
+}
+
+// withMetastoreDir pins the metastore directory; see envOpts.
+func withMetastoreDir(dir string) envOption {
+	return func(o *envOpts) { o.metastoreDir = dir }
+}
+
+func withLogOptions(opts storage.Options) envOption {
+	return func(o *envOpts) { o.logOptions = opts }
+}
+
 // env bundles a running server, its broker, and request helpers for a
 // single test. Call env.close() to clean up.
 type env struct {
@@ -138,8 +161,15 @@ func newTestEnv(t *testing.T, opts ...envOption) *env {
 func newEnv(t *testing.T, opts envOpts) *env {
 	t.Helper()
 
-	dataDir := t.TempDir()
-	ms := startMetastore(t, dataDir)
+	dataDir := opts.dataDir
+	if dataDir == "" {
+		dataDir = t.TempDir()
+	}
+	metastoreDir := opts.metastoreDir
+	if metastoreDir == "" {
+		metastoreDir = filepath.Join(dataDir, "metastore")
+	}
+	ms := startMetastore(t, metastoreDir)
 	controllerCancel, controllerDone := startController(t, ms)
 	log := newTestLogger()
 
@@ -260,12 +290,12 @@ func seedTestAdmin(t *testing.T, ms *metastore.Store, username, password string)
 // startMetastore boots a single-node Raft metastore, waits for it to
 // elect itself leader (topic operations fail on a leaderless store), and
 // registers three alive members so replica placement has somewhere to go.
-func startMetastore(t *testing.T, dataDir string) *metastore.Store {
+func startMetastore(t *testing.T, dir string) *metastore.Store {
 	t.Helper()
 
 	ms, err := metastore.New(metastore.Config{
 		NodeID:   "test-0",
-		DataDir:  filepath.Join(dataDir, "metastore"),
+		DataDir:  dir,
 		BindAddr: "127.0.0.1:0",
 	})
 	if err != nil {
