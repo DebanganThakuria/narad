@@ -15,6 +15,7 @@ type config struct {
 	partitions         int
 	produceConcurrency int
 	consumeConcurrency int
+	produceRate        int
 	timeout            time.Duration
 	assignmentTimeout  time.Duration
 	visibilityTimeout  time.Duration

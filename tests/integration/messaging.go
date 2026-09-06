@@ -35,14 +35,33 @@ func messageJobs(cfg config, topics []string) []messageJob {
 	return jobs
 }
 
-func produceMessages(ctx context.Context, lb *roundRobinClient, jobs []messageJob, concurrency int, stats *runStats) error {
+// produceMessages pushes every job through concurrency workers, with an
+// optional cap of ratePerSecond produces per second shared by all of
+// them (0 = no cap). Each worker waits for the next tick before its next
+// produce, so the aggregate rate is bounded and the load lasts a
+// predictable time.
+func produceMessages(ctx context.Context, lb *roundRobinClient, jobs []messageJob, concurrency, ratePerSecond int, stats *runStats) error {
 	jobCh := make(chan messageJob)
 	errCh := make(chan error, 1)
 	var wg sync.WaitGroup
 
+	var pace <-chan time.Time
+	if ratePerSecond > 0 {
+		ticker := time.NewTicker(time.Second / time.Duration(ratePerSecond))
+		defer ticker.Stop()
+		pace = ticker.C
+	}
+
 	for range concurrency {
 		wg.Go(func() {
 			for job := range jobCh {
+				if pace != nil {
+					select {
+					case <-pace:
+					case <-ctx.Done():
+						return
+					}
+				}
 				if err := produceOne(ctx, lb, job); err != nil {
 					sendErr(errCh, err)
 					return
