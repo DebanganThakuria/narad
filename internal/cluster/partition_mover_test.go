@@ -9,6 +9,8 @@ package cluster
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -346,5 +348,46 @@ func TestMoveSessionFinalizeRequiresTwoIdenticalHWMPasses(t *testing.T) {
 	// drift listings with a moving HWM, then two identical quiet ones.
 	if lists < fetcher.drift+2 {
 		t.Fatalf("Finalize listed %d times, want at least %d (two identical passes after the HWM settled)", lists, fetcher.drift+2)
+	}
+}
+
+// TestPartitionMoverCopiesAgedOutPartition moves a partition whose
+// retained log is empty: retention removed every record and the log keeps
+// one empty segment named for the base offset, with the high watermark
+// well above zero. The staged copy must recover to that offset, or the
+// finalize verify fails and the move retries forever (seen on a devstack
+// rebalance toward a freshly joined node: every move of an old, fully
+// expired benchmark topic looped on "staged copy next offset 0 < source
+// hwm").
+func TestPartitionMoverCopiesAgedOutPartition(t *testing.T) {
+	const base = int64(5168020)
+	src := t.TempDir()
+	if err := storage.WriteSegmentFile(src, base, nil); err != nil {
+		t.Fatalf("WriteSegmentFile: %v", err)
+	}
+	if err := storage.WritePersistedHighWatermark(src, base); err != nil {
+		t.Fatalf("WritePersistedHighWatermark: %v", err)
+	}
+	srcLog, err := storage.NewLog(src, storage.Options{})
+	if err != nil {
+		t.Fatalf("NewLog(source): %v", err)
+	}
+	if got := srcLog.NextOffset(); got != base {
+		t.Fatalf("precondition: source recovers next offset %d, want %d", got, base)
+	}
+	_ = srcLog.Close()
+
+	staging := filepath.Join(t.TempDir(), "staging")
+	mover := NewPartitionMover(dirFetcher{dir: src, hwm: base}, 1<<16, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if _, err := mover.Copy(context.Background(), "source", "orders", 0, staging); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	staged, err := storage.NewLog(staging, storage.Options{})
+	if err != nil {
+		t.Fatalf("NewLog(staged): %v", err)
+	}
+	defer staged.Close()
+	if got := staged.NextOffset(); got != base {
+		t.Fatalf("staged copy recovers next offset %d, want %d", got, base)
 	}
 }
