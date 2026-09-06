@@ -97,6 +97,7 @@ func runServe(args []string) error {
 		AdvertiseAddr: clusterAdvertiseAddr(cfg, nodeID),
 		Peers:         bootstrapPeers(nodeID, cfg.Cluster.Addr, cfg.Cluster.Peers, cfg.Cluster.InitialMembers),
 		JoinOnly:      joinOnly,
+		Log:           log,
 		TLS:           clusterTLS,
 	})
 	if err != nil {

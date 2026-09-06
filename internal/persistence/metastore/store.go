@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -34,10 +35,23 @@ type Config struct {
 	// OpJoinCluster RPC). Without it, a scale-out node would bootstrap a
 	// phantom cluster from its peer list and never join the real one.
 	JoinOnly bool
-	Logger   io.Writer
+	// Logger receives hashicorp/raft's own log output; nil discards it.
+	Logger io.Writer
+	// Log, when non-nil, receives the store's startup log lines (which
+	// database file is being opened, and so on), so a hang or failure
+	// on the data directory is attributable from the process log.
+	Log *slog.Logger
 	// TLS, when non-nil, secures the Raft transport with mutual TLS.
 	// Nil runs it as plain TCP (relying on network isolation).
 	TLS *TLSConfig
+}
+
+// startupLog returns cfg.Log or a discarding logger.
+func (cfg Config) startupLog() *slog.Logger {
+	if cfg.Log != nil {
+		return cfg.Log
+	}
+	return slog.New(slog.DiscardHandler)
 }
 
 // Peer is a known Raft voter used for cluster bootstrap.
@@ -74,7 +88,13 @@ func New(cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("metastore: mkdir: %w", err)
 	}
 
-	fsm, err := newFSM(filepath.Join(cfg.DataDir, "fsm.db"))
+	// Logged BEFORE the open: the open takes the bbolt file lock, and a
+	// locked file used to be a silent hang. Now it is a bounded wait
+	// (boltOpenTimeout) that ends in an error naming the file, and this
+	// line says what the process was doing if it does wait.
+	fsmPath := filepath.Join(cfg.DataDir, "fsm.db")
+	cfg.startupLog().Info("opening metastore database (waits up to the lock timeout if another process holds it)", "path", fsmPath, "lock_timeout", boltOpenTimeout)
+	fsm, err := newFSM(fsmPath)
 	if err != nil {
 		return nil, fmt.Errorf("metastore: fsm: %w", err)
 	}
@@ -92,11 +112,14 @@ func New(cfg Config) (*Store, error) {
 // commit-observing transport wrapper so the store can read the leader's
 // commit index.
 func newRaft(cfg Config, fsm *fsmState) (*raft.Raft, *commitObservingTransport, error) {
+	raftPath := filepath.Join(cfg.DataDir, "raft.db")
+	cfg.startupLog().Info("opening raft log store (waits up to the lock timeout if another process holds it)", "path", raftPath, "lock_timeout", boltOpenTimeout)
 	boltStore, err := raftboltdb.New(raftboltdb.Options{
-		Path: filepath.Join(cfg.DataDir, "raft.db"),
+		Path:        raftPath,
+		BoltOptions: boltOptions(),
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("metastore: raft store: %w", err)
+		return nil, nil, fmt.Errorf("metastore: raft store %s: %w", raftPath, err)
 	}
 
 	logOutput := cfg.Logger
@@ -153,9 +176,9 @@ func HasExistingState(dataDir string) (bool, error) {
 	} else if err != nil {
 		return false, fmt.Errorf("metastore: stat raft store: %w", err)
 	}
-	boltStore, err := raftboltdb.New(raftboltdb.Options{Path: raftPath})
+	boltStore, err := raftboltdb.New(raftboltdb.Options{Path: raftPath, BoltOptions: boltOptions()})
 	if err != nil {
-		return false, fmt.Errorf("metastore: raft store: %w", err)
+		return false, fmt.Errorf("metastore: raft store %s: %w", raftPath, err)
 	}
 	defer boltStore.Close()
 	snapStore, err := raft.NewFileSnapshotStore(dataDir, 2, io.Discard)
