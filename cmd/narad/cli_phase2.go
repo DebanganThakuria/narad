@@ -114,6 +114,7 @@ func newUserCmd() *cobra.Command {
 	}
 
 	var password string
+	var passwordStdin bool
 	var grants []string
 	add := &cobra.Command{
 		Use:   "add <username>",
@@ -124,6 +125,13 @@ func newUserCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if password == "" && !passwordStdin {
+				return fmt.Errorf("one of --user-password or --user-password-stdin is required")
+			}
+			password, err := resolvePasswordFlags(password, passwordStdin, "user-password")
+			if err != nil {
+				return err
+			}
 			body := map[string]any{"username": args[0], "password": password}
 			if len(g) > 0 {
 				body["grants"] = g
@@ -131,9 +139,9 @@ func newUserCmd() *cobra.Command {
 			return cliClient().postAndPrint("/v1/users", body)
 		},
 	}
-	add.Flags().StringVar(&password, "user-password", "", "the new user's password (required)")
-	add.Flags().StringArrayVar(&grants, "grant", nil, `grant as action:pattern[,pattern] — e.g. --grant "produce:orders-*" (actions: produce, consume, create, admin)`)
-	_ = add.MarkFlagRequired("user-password")
+	add.Flags().StringVar(&password, "user-password", "", "the new user's password (or --user-password-stdin; argv is visible in ps and shell history)")
+	add.Flags().BoolVar(&passwordStdin, "user-password-stdin", false, "read the new user's password from the first line of stdin")
+	add.Flags().StringArrayVar(&grants, "grant", nil, `grant as action:pattern[,pattern], e.g. --grant "produce:orders-*" (actions: produce, consume, create, admin)`)
 
 	var setGrants []string
 	grant := &cobra.Command{

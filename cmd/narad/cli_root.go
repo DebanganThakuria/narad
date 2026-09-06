@@ -16,13 +16,35 @@ import (
 
 // Connection flags shared by every command that talks to a broker.
 var (
-	flagServer   string
-	flagUser     string
-	flagPassword string
+	flagServer        string
+	flagUser          string
+	flagPassword      string
+	flagPasswordStdin bool
 )
 
 func cliClient() *httpClient {
-	return newContextHTTPClient(resolveContext(flagServer, flagUser, flagPassword))
+	c, err := cliConnection()
+	if err != nil {
+		// Commands call cliClient() inline; a bad --password-stdin is
+		// the only failure and is reported the way cobra reports flag
+		// errors.
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	return newContextHTTPClient(c)
+}
+
+// cliConnection resolves the connection settings from flags, env and
+// the selected context, reading the password from stdin when asked,
+// and warns when credentials would travel over plain http off-box.
+func cliConnection() (cliContext, error) {
+	password, err := resolvePasswordFlags(flagPassword, flagPasswordStdin, "password")
+	if err != nil {
+		return cliContext{}, err
+	}
+	c := resolveContext(flagServer, flagUser, password)
+	warnPlaintextCredentials(os.Stderr, c)
+	return c, nil
 }
 
 func newRootCmd() *cobra.Command {
@@ -35,7 +57,8 @@ func newRootCmd() *cobra.Command {
 	}
 	root.PersistentFlags().StringVarP(&flagServer, "server", "s", "", "broker URL (default: active context, NARAD_ADDR, or "+defaultServer+")")
 	root.PersistentFlags().StringVarP(&flagUser, "user", "u", "", "basic auth user (default: active context or NARAD_USER)")
-	root.PersistentFlags().StringVarP(&flagPassword, "password", "p", "", "basic auth password (default: active context or NARAD_PASS)")
+	root.PersistentFlags().StringVarP(&flagPassword, "password", "p", "", "basic auth password (default: active context or NARAD_PASS); prefer --password-stdin or NARAD_PASS, argv is visible in ps and shell history")
+	root.PersistentFlags().BoolVar(&flagPasswordStdin, "password-stdin", false, "read the basic auth password from the first line of stdin")
 
 	root.AddCommand(
 		newTopicCmd(),
@@ -77,9 +100,11 @@ func newCtxCmd() *cobra.Command {
 	}
 
 	var server, user, password string
+	var passwordStdin bool
 	add := &cobra.Command{
 		Use:   "add <name>",
 		Short: "add or update a context",
+		Long:  "Add or update a named context. The password is stored IN CLEAR in contexts.json (mode 0600 in a 0700 directory): anyone who obtains the file (backups, dotfile sync) has the credentials. Prefer --password-stdin over --password so the secret never appears in argv.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			s, err := loadContextStore()
@@ -88,6 +113,10 @@ func newCtxCmd() *cobra.Command {
 			}
 			if server == "" {
 				return fmt.Errorf("--server is required")
+			}
+			password, err := resolvePasswordFlags(password, passwordStdin, "password")
+			if err != nil {
+				return err
 			}
 			s.Contexts[args[0]] = cliContext{Server: server, User: user, Password: password}
 			if s.Current == "" {
@@ -102,7 +131,8 @@ func newCtxCmd() *cobra.Command {
 	}
 	add.Flags().StringVar(&server, "server", "", "broker URL (required)")
 	add.Flags().StringVar(&user, "user", "", "basic auth user")
-	add.Flags().StringVar(&password, "password", "", "basic auth password (stored 0600 in your config dir)")
+	add.Flags().StringVar(&password, "password", "", "basic auth password (stored in clear, 0600, in your config dir)")
+	add.Flags().BoolVar(&passwordStdin, "password-stdin", false, "read the password from the first line of stdin instead of argv")
 
 	sel := &cobra.Command{
 		Use:   "select <name>",
