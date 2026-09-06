@@ -15,6 +15,8 @@ topics/orders/
 topics/orders.stale-3f9a1c0e7b2d4a61/   ← quarantined: a deleted incarnation's leftover
 ```
 
+Everything under the data directory that the engine creates is private to the broker's user: directories `0700`, files `0600` (segments, `hwm`, `consumer.offset`, fan-out cursors, the incarnation marker, transferred segments, and the ingress WAL's directory and segments). Segments carry every message payload, so they get the same protection `fsm.db` (password hashes) already had. Modes are applied at creation only; a file or directory created by an older binary keeps the mode it was created with, so tighten those by hand if the host is shared.
+
 ### The incarnation marker
 
 Topic directories are keyed by name, and a name outlives the topic: delete `orders`, recreate `orders`, and the new topic's partition logs open exactly where the old one's segments, high-watermark and consumer offset sit on any node that missed the purge (it was down, or the purge lost the race with the recreate). Served as-is, the recreated topic would hand consumers the deleted topic's messages and append new produce after them.
@@ -39,13 +41,25 @@ flowchart LR
     F1 --- F2 --- F3
 ```
 
-- **Segments** are capped at 64 MiB; an append that would overflow seals the segment and rolls a new one named by its first offset. Sealed segments are immutable: the unit of retention deletion.
+- **Segments** are capped at 64 MiB. A frame that pushes the active segment past the cap marks it full and fsyncs it; the roll itself (a new segment named by its first offset) happens at the end of the commit that filled it, at Close, or right before the next frame write, whichever comes first, and a segment also rolls before the first write that finds its oldest record older than the retention roll age (see Retention). Sealed segments are immutable: the unit of retention deletion.
 - **Frames** are the write unit: all records drained in one flush become one frame: length-prefixed records, compressed together (zstd by default), CRC over the stored bytes. Frame size therefore tracks batch size: trickle traffic gives per-record frames (~40% compression on JSON-ish payloads); busy traffic gives multi-hundred-record frames (~95%+, since similar records compress against each other).
 - **Records** carry the keyed envelope: `[version][key][commit-time][payload]`. Commit time is assigned under the partition lock, so it is monotonic per partition, the property the [delay gate](fanout-engine.md) relies on.
 
 ## Write path: buffer → flush → sync
 
 Appends go into an in-memory buffer; a flusher goroutine drains it into frames and writes them out; fsync policy is configurable (per-write or batched). The **commit path bypasses the leniency**: `Log.CommitDurable` forces drain + fsync synchronously on the flusher goroutine, re-reads and CRC-verifies the new frames, persists the new high-watermark, and only then advances it in memory. Buffered data lost in a crash was, by construction, never acked to anyone.
+
+Records drained out of the buffer sit in a **flushing snapshot** until an fsync proves their frame durable; a failed segment write is retried from the unwritten suffix on the next drain, and the in-memory copy is released only after the sync. On the commit path the sync is part of the same drain, so the snapshot never outlives a commit.
+
+### When a commit fails
+
+A commit can fail at the write (`ENOSPC`, `EIO`), the fsync, the CRC read-back, the segment roll, or the high-watermark persist. The records are acked to the producer only by the ingress WAL, which re-commits any batch whose `CommitDurable` did not return success by appending the same records again. So a failed commit must leave **nothing** of the batch behind: if the first copy stayed in the log (in the snapshot, or already written and fsynced), the retry would append a second copy at fresh offsets and its commit would advance the high-watermark past both, delivering every record of the batch twice, permanently, without any crash.
+
+Before the error reaches the caller, the flusher discards the uncommitted tail: everything above the high-watermark is dropped from the buffer and the snapshot, the active segment is truncated back to the first frame at or above the high-watermark (and the truncate fsynced), the sparse index and the caches forget the cut frames, and the next append is assigned the offset the failed batch had. The retry lands exactly one copy at the same offsets. The lazy roll above is what makes this always possible: a commit's frames are never sealed into an immutable segment before the commit has returned.
+
+### When fsync fails
+
+An fsync failure is final for the log. After a failed `fdatasync` the kernel may already have dropped the dirty pages (Linux marks them clean and reports the error once), so a second fsync that "succeeds" proves nothing about the bytes that failed, and the tail of the segment past the last good sync is of unknown content. This is the PostgreSQL fsyncgate lesson: the only sound recovery is the one a crash would get. Narad does not crash the node (other partitions on it are fine), but it treats the log as crashed: the error is **latched** (`storage.ErrLogPoisoned`, wrapping the original error), every later append and commit on that log fails with it, the failure is logged at error level and counted (`errors_total{component="storage",kind="fsync_poisoned"}`), and the state clears only when the log is reopened and its files rescanned. Reads of committed records keep working. Nothing acked is lost: records above the last durable tail are still in the ingress WAL, which reroutes them to a sibling partition after a few failed passes and re-commits them here after the reopen.
 
 ## The high-watermark and the hidden tail
 
@@ -63,12 +77,19 @@ Records above the persisted HWM after a crash (fsynced but never exposed: the co
 
 Opening a log scans segments for the valid frame extent:
 
-- A **torn tail** in the active segment (crash mid-write) is truncated; those bytes were never acked.
+- A **torn tail** in the active segment (crash mid-write, including a crash in the middle of a commit's frame write) is truncated and the truncate fsynced; those bytes were never acked by this log, and the ingress WAL re-commits the batch at the offset it had.
 - **Mid-file corruption** under valid later frames is *not* truncated (that would destroy acked data and regress offsets); it fails loudly at open, and unreadable single records are skipped at consume time with an explicit counter: recorded loss, never silent.
 
 ## Retention
 
-A per-partition reaper sweeps every minute and deletes **sealed segments whose last write is older than the topic's `retention_ms`**. Granularity is the segment: data lives until its whole 64 MiB segment ages out, so real retention oscillates between `retention` and `retention + one segment's fill time`. Deletions export bytes/messages counters (`reason="age"`).
+A per-partition reaper sweeps every minute and deletes **sealed segments whose last write is older than the topic's `retention_ms`**. Granularity is the segment, and two rules keep a segment from outliving retention on a partition that never fills one:
+
+- **Time-based roll.** The flusher rolls the active segment before the first write that finds the segment's oldest record older than the roll age (`RetentionConfig.MaxSegmentAge`, which defaults to `MaxAge`). A partition writing 1 MiB a day with a 7-day retention used to keep its oldest records for months (until the 64 MiB segment filled, then one more retention period); now the segment is sealed after at most one retention period of writes.
+- **Rotation of an idle active segment.** A partition that stops writing never triggers the roll, so the reaper asks the flusher to seal an active segment whose last write is older than `MaxAge` (every record in it has expired) and deletes it in the same sweep. Only a fully committed segment is rotated; one that still holds records above the high-watermark waits for the ingress WAL to re-commit them first, so the failed-commit discard above always finds them in the active segment.
+
+Together these bound a record's lifetime by `MaxSegmentAge + MaxAge + CheckInterval`, so with the defaults a record is gone within about twice the retention age of its write. For a segment recovered from disk the roll age counts from the file's mtime (its last write), the only write time the inode keeps, so such a segment can live up to one write-span longer.
+
+The reaper's bookkeeping is cheap: every segment caches its first and last write time (the reaper never stats a file per sweep), a sweep detaches expired segments under the write lock but unlinks the files after releasing it (a restart with a backlog of expired segments no longer stalls the partition's readers and flusher for the whole batch of unlinks), and a failed unlink is logged and counted (`errors_total{component="storage",kind="retention_unlink"}`) rather than silently dropped while the file keeps consuming disk. Sealed segments do not pin a file descriptor: recovery releases a sealed segment's handle after scanning it, the first read reopens it lazily, and the handle goes away with the segment's sparse index when it leaves the two-segment hot set, so a partition with days of history holds a handful of descriptors, not one per segment. Deletions export bytes/messages counters (`reason="age"`).
 
 The consumer frontier (`consumer.offset`, 8 bytes overwritten in place as a single-sector atomic write + fdatasync, ~100ms cadence; an empty file left by a crash between create and first write reads as "no offset") is recovered lazily when a partition's queue state is first touched, from the file on disk, deliberately *not* from a boot-time metastore scan, so a stale replica at startup can't misplace consumption progress.
 ## The frame format, byte by byte

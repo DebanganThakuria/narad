@@ -51,7 +51,7 @@ func segmentPath(dir string, base uint64) string {
 }
 
 func createEmptySegment(path string) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("wal: create first segment: %w", err)
 	}

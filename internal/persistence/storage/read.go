@@ -35,7 +35,20 @@ func (l *Log) ReadShared(offset int64) ([]byte, error) {
 	if rec, ok := l.readFlushingShared(offset); ok {
 		return rec, nil
 	}
+	// A sealed segment's file handle can be released between the index
+	// lookup and the read (its index left the hot set, or retention
+	// deleted it). The read then fails with os.ErrClosed; re-resolving
+	// reopens the file or reports the offset as gone.
+	const maxAttempts = 3
+	for attempt := 1; ; attempt++ {
+		rec, err := l.readSegmentShared(offset)
+		if err == nil || !errors.Is(err, os.ErrClosed) || attempt == maxAttempts {
+			return rec, err
+		}
+	}
+}
 
+func (l *Log) readSegmentShared(offset int64) ([]byte, error) {
 	entry, idx, unlock, ok, err := l.indexEntryForRead(offset)
 	if err != nil {
 		return nil, err
@@ -47,18 +60,27 @@ func (l *Log) ReadShared(offset int64) ([]byte, error) {
 	// BEFORE the disk read and decode. Go's RWMutex blocks new readers
 	// once a writer is queued, so one slow pread under the read lock
 	// stalled every consumer on the partition and the flusher's next
-	// frame write. The handle stays valid: retention closes a deleted
-	// segment's file (ReadAt then fails with os.ErrClosed, handled
-	// below) but never reuses the *os.File, and segment base offsets
-	// are never reused, so the cache key cannot collide.
+	// frame write. The handle stays valid until the segment is deleted
+	// or its handle released (ReadAt then fails with os.ErrClosed,
+	// handled by the caller's retry); segment base offsets are never
+	// reused, so the cache key cannot collide.
 	seg := l.findSegmentLocked(entry.segmentBaseOffset)
 	var file *os.File
 	if seg != nil {
-		file = seg.file
+		if l.closed.Load() {
+			// Close released the handles; a lazy reopen here would serve
+			// a closed log (and leak the descriptor).
+			err = ErrLogClosed
+		} else {
+			file, err = seg.handle()
+		}
 	}
 	unlock()
 	if seg == nil {
 		return nil, ErrCorruptRecord
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	key := frameKey{segmentBase: entry.segmentBaseOffset, framePos: entry.framePos}
@@ -74,7 +96,7 @@ func (l *Log) ReadShared(offset int64) ([]byte, error) {
 		if errors.Is(err, os.ErrClosed) {
 			// Retention deleted the segment between the index lookup and
 			// the read. Report the offset as gone when it really is, and
-			// as a transient failure otherwise (a reopen race).
+			// let the caller re-resolve otherwise.
 			if offset < l.OldestOffset() {
 				return nil, ErrOffsetNotFound
 			}
@@ -125,7 +147,12 @@ func (l *Log) verifyDurable(first, last int64, buf *[]byte) error {
 			unlock()
 			return ErrCorruptRecord
 		}
-		h, _, verr := verifyFrameAtBuffered(seg.file, entry.framePos, buf)
+		file, err := seg.handle()
+		if err != nil {
+			unlock()
+			return err
+		}
+		h, _, verr := verifyFrameAtBuffered(file, entry.framePos, buf)
 		unlock()
 		if verr != nil {
 			return verr

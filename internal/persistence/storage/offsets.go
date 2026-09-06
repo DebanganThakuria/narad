@@ -91,11 +91,7 @@ func (l *Log) OldestSegmentAt() (int64, bool) {
 	if len(l.segments) == 0 {
 		return 0, false
 	}
-	mt, err := segmentMTime(l.segments[0])
-	if err != nil {
-		return 0, false
-	}
-	return mt, true
+	return segmentMTime(l.segments[0])
 }
 
 // SegmentMTimeForOffset returns the Unix-seconds mtime of the
@@ -114,11 +110,7 @@ func (l *Log) SegmentMTimeForOffset(offset int64) (int64, bool) {
 	defer l.rwmu.RUnlock()
 	for _, s := range slices.Backward(l.segments) {
 		if offset >= s.baseOffset && offset < s.nextOffset {
-			mt, err := segmentMTime(s)
-			if err != nil {
-				return 0, false
-			}
-			return mt, true
+			return segmentMTime(s)
 		}
 	}
 	return 0, false

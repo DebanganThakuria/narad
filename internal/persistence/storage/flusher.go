@@ -8,6 +8,12 @@ import (
 
 const minTimerFlushAge = time.Second
 
+// fsyncHook, when non-nil, runs on the flusher goroutine right before
+// every segment fdatasync; a non-nil result is treated as the fsync's
+// error. Nil in production; tests use it to inject a sync failure at
+// the exact point of the commit protocol where it would happen.
+var fsyncHook func(*segment) error
+
 // flusher is the single goroutine that drains a Log's buffer to the
 // active segment file. "Single writer per partition" lives here.
 type flusher struct {
@@ -23,6 +29,16 @@ type flusher struct {
 	mu            *sync.RWMutex
 	lastSync      time.Time
 	unsyncedBytes int64
+
+	// rollPending marks the active segment as full: it was fsynced when
+	// it crossed SegmentBytes, and it is sealed by the next roll, which
+	// happens at the end of the next successful commit, at Close, or
+	// right before the next frame write, whichever comes first. Never
+	// rolling inside a commit before that commit has returned keeps the
+	// commit's frames in the active segment, where a failed commit can
+	// still truncate them (see discardUncommittedTail); a sealed segment
+	// is never touched.
+	rollPending bool
 
 	// hwmForce is a per-drain flag: set when this drain must persist the
 	// high-watermark unconditionally (a forced sync, a segment roll, or
@@ -47,14 +63,21 @@ type flusher struct {
 // commitRequest is one synchronous flush+fsync request handed to the
 // flusher goroutine. A plain Sync carries hwm < 0; a commit carries the
 // offset range to verify and the high-watermark to advance to once the
-// range is proven durable.
+// range is proven durable; rotate asks for the active segment to be
+// sealed after the drain (the reaper's time-based rotation).
 type commitRequest struct {
 	done   chan error
 	first  int64
 	last   int64
 	hwm    int64
 	verify bool
+	rotate bool
 }
+
+// isCommit reports whether the request exposes records: only then does
+// a failure discard the uncommitted tail. A plain Sync or a rotation
+// leaves the snapshot in place for a later retry.
+func (r *commitRequest) isCommit() bool { return r != nil && r.hwm >= 0 }
 
 func newFlusher(log *Log, mu *sync.RWMutex, interval time.Duration) *flusher {
 	return &flusher{
@@ -92,9 +115,19 @@ func (l *Log) Sync() error {
 // boundary had not reached disk: after CommitDurable returns, a restart
 // recovers a high-watermark of at least last+1.
 //
+// A failed commit leaves no trace of the batch: every record above the
+// high-watermark (the batch, anything appended after it, and any earlier
+// uncommitted tail in the active segment) is discarded from memory and
+// truncated from the active segment before the error is returned, and
+// the next append is assigned the offset the batch had. The caller owns
+// the records (the ingress WAL still holds them) and re-appends them on
+// retry, so the retry lands exactly one copy instead of committing a
+// hidden first copy next to a second one. See discardUncommittedTail.
+//
 // A CRC mismatch is returned as a VerifyError so callers can classify it
 // separately from a write or sync failure. Returns ErrLogClosed if the
-// log is closing.
+// log is closing and ErrLogPoisoned (wrapping the original fsync error)
+// once an fsync has failed on this log.
 func (l *Log) CommitDurable(first, last int64) error {
 	if last < first {
 		return nil
@@ -173,46 +206,103 @@ func (f *flusher) run() {
 // then persist the high-watermark once. The HWM persist is the last
 // step so a commit's advance lands in the same pass that fsynced its
 // records.
+//
+// Any failure of a commit request, at whatever step, discards the
+// uncommitted tail before the error is reported (see CommitDurable).
 func (f *flusher) drainOnce(forceSync, forceDrain bool, commit *commitRequest) error {
 	f.hwmForce = forceSync
 
-	var err error
-	// A pending flushing snapshot means an earlier writeBatch failed;
-	// retry it on every drain regardless of buffer thresholds.
-	if !forceDrain && !f.log.hasPendingFlushing() && !f.log.buffer.shouldFlushByAge(f.timerFlushAge()) {
-		err = f.syncIfNeeded(forceSync, nil)
-	} else {
-		records, baseOffset := f.log.drainBufferForFlush()
-		if len(records) == 0 {
-			err = f.syncIfNeeded(forceSync, nil)
-		} else {
-			err = f.writeBatch(records, baseOffset, forceSync)
+	if err := f.log.poisoned(); err != nil {
+		// An earlier fsync failed: nothing this process writes to the
+		// segment can be trusted until the log is reopened, so do not
+		// even try. A commit's records are dropped from memory (the
+		// caller re-appends after the reopen); the file is left alone.
+		if commit.isCommit() {
+			f.discardUncommittedTail(err, false)
 		}
-	}
-	if err != nil {
 		return err
 	}
 
-	if commit != nil {
-		if commit.verify && commit.last >= commit.first {
-			if verr := f.log.verifyDurable(commit.first, commit.last, &f.verifyBuf); verr != nil {
-				return VerifyError{First: commit.first, Last: commit.last, Err: verr}
-			}
+	err := f.drainAndSync(forceSync, forceDrain)
+	if err == nil && commit != nil {
+		err = f.finishRequest(commit)
+	}
+	if err != nil {
+		if commit.isCommit() {
+			f.discardUncommittedTail(err, f.log.poisoned() == nil)
 		}
-		if commit.hwm >= 0 {
-			// Persist first, then expose: if the persist fails the records
-			// stay hidden and the commit reports failure, so the caller
-			// (the ingress dispatcher) retries instead of checkpointing past
-			// a batch whose visibility boundary never reached disk.
-			if perr := f.log.persistHighWatermarkAtLeast(commit.hwm); perr != nil {
-				return perr
-			}
-			if aerr := f.log.AdvanceHighWatermark(commit.hwm); aerr != nil {
-				return aerr
-			}
-		}
+		return err
+	}
+	if commit.isCommit() || commit == nil && forceSync {
+		// The batch is committed (or this is the shutdown drain): a
+		// full active segment can be sealed now. A failure here must not
+		// fail the commit, which is already durable and visible: the
+		// roll stays pending and is retried before the next write, where
+		// its failure fails that commit before anything is written.
+		f.rollIfPending()
 	}
 	return f.log.syncHighWatermark(f.hwmForce)
+}
+
+// rollIfPending seals a full active segment outside any commit's
+// critical path. Errors are logged, not returned: see drainOnce.
+func (f *flusher) rollIfPending() {
+	f.mu.RLock()
+	pending := f.rollPending
+	var active *segment
+	if len(f.log.segments) > 0 {
+		active = f.log.segments[len(f.log.segments)-1]
+	}
+	f.mu.RUnlock()
+	if !pending || active == nil {
+		return
+	}
+	if _, err := f.roll(active); err != nil {
+		f.log.logger.Warn("storage: segment roll deferred", "dir", f.log.dir, "err", err)
+	}
+}
+
+// drainAndSync is the write half of a pass: drain the buffer if the
+// thresholds (or the caller) say so, write the frames, and sync when
+// required.
+func (f *flusher) drainAndSync(forceSync, forceDrain bool) error {
+	// A pending flushing snapshot means an earlier writeBatch failed;
+	// retry it on every drain regardless of buffer thresholds.
+	if !forceDrain && !f.log.hasPendingFlushing() && !f.log.buffer.shouldFlushByAge(f.timerFlushAge()) {
+		return f.syncIfNeeded(forceSync, nil)
+	}
+	records, baseOffset := f.log.drainBufferForFlush()
+	if len(records) == 0 {
+		return f.syncIfNeeded(forceSync, nil)
+	}
+	return f.writeBatch(records, baseOffset, forceSync)
+}
+
+// finishRequest runs the request-specific tail of a pass after the
+// drain succeeded: the commit's verify and high-watermark advance, or
+// the reaper's rotation.
+func (f *flusher) finishRequest(commit *commitRequest) error {
+	if commit.verify && commit.last >= commit.first {
+		if verr := f.log.verifyDurable(commit.first, commit.last, &f.verifyBuf); verr != nil {
+			return VerifyError{First: commit.first, Last: commit.last, Err: verr}
+		}
+	}
+	if commit.hwm >= 0 {
+		// Persist first, then expose: if the persist fails the records
+		// stay hidden and the commit reports failure, so the caller
+		// (the ingress dispatcher) retries instead of checkpointing past
+		// a batch whose visibility boundary never reached disk.
+		if perr := f.log.persistHighWatermarkAtLeast(commit.hwm); perr != nil {
+			return perr
+		}
+		if aerr := f.log.AdvanceHighWatermark(commit.hwm); aerr != nil {
+			return aerr
+		}
+	}
+	if commit.rotate {
+		return f.rotateActive()
+	}
+	return nil
 }
 
 func (f *flusher) timerFlushAge() time.Duration {
@@ -269,13 +359,10 @@ func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool)
 		return err
 	}
 
-	f.mu.RLock()
-	if len(f.log.segments) == 0 {
-		f.mu.RUnlock()
-		return fmt.Errorf("storage: flusher: no active segment")
+	active, err := f.activeForWrite()
+	if err != nil {
+		return err
 	}
-	active := f.log.segments[len(f.log.segments)-1]
-	f.mu.RUnlock()
 
 	// The write syscall runs outside rwmu. This goroutine is the only
 	// writer of the active segment, so its size and offset fields cannot
@@ -288,6 +375,11 @@ func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool)
 	}
 
 	f.mu.Lock()
+	now := f.log.now()
+	if active.firstWriteAt.IsZero() {
+		active.firstWriteAt = now
+	}
+	active.lastWriteAt = now
 	active.sizeBytes = pos + int64(n)
 	active.nextOffset = baseOffset + int64(len(records))
 	f.log.appendIndexLocked(indexEntry{
@@ -297,8 +389,11 @@ func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool)
 		framePos:          pos,
 		frameLen:          int32(n),
 	})
-	f.log.clearFlushingThrough(baseOffset + int64(len(records)))
-	shouldRoll := active.sizeBytes >= f.log.opts.SegmentBytes
+	f.log.markFlushingWritten(active.nextOffset)
+	if active.sizeBytes >= f.log.opts.SegmentBytes {
+		f.rollPending = true
+	}
+	full := f.rollPending
 
 	if m := f.log.opts.Metrics; m != nil {
 		m.ObserveFlush(time.Since(flushStart), int64(n))
@@ -307,26 +402,88 @@ func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool)
 	f.unsyncedBytes += int64(n)
 	f.mu.Unlock()
 
-	if err := f.syncIfNeeded(forceSync || shouldRoll, active); err != nil {
-		return err
-	}
+	// A full segment is synced now so the roll before the next write
+	// finds it durable.
+	return f.syncIfNeeded(forceSync || full, active)
+}
 
-	if shouldRoll {
-		f.mu.Lock()
-		newActive, err := createSegment(f.log.dir, active.nextOffset)
-		if err != nil {
-			f.mu.Unlock()
-			return fmt.Errorf("storage: flusher roll: %w", err)
-		}
-		f.log.segments = append(f.log.segments, newActive)
-		f.mu.Unlock()
+// activeForWrite returns the segment the next frame goes into, rolling
+// first when the current one is full (rollPending) or has held records
+// for longer than the retention roll age. The roll fsyncs the old
+// active segment, then installs the new one under the write lock.
+func (f *flusher) activeForWrite() (*segment, error) {
+	f.mu.RLock()
+	if len(f.log.segments) == 0 {
+		f.mu.RUnlock()
+		return nil, fmt.Errorf("storage: flusher: no active segment")
 	}
-	return nil
+	active := f.log.segments[len(f.log.segments)-1]
+	needRoll := f.rollPending || f.log.segmentAgedOutLocked(active)
+	f.mu.RUnlock()
+	if !needRoll {
+		return active, nil
+	}
+	return f.roll(active)
+}
+
+// roll seals active (after making sure it is synced) and installs a
+// fresh segment after it. Returns the new active segment.
+func (f *flusher) roll(active *segment) (*segment, error) {
+	if err := f.syncIfNeeded(true, active); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if cur := f.log.segments[len(f.log.segments)-1]; cur != active {
+		return cur, nil
+	}
+	newActive, err := createSegment(f.log.dir, active.nextOffset, f.log.now())
+	if err != nil {
+		return nil, fmt.Errorf("storage: flusher roll: %w", err)
+	}
+	f.log.segments = append(f.log.segments, newActive)
+	f.rollPending = false
+	f.hwmForce = true
+	return newActive, nil
+}
+
+// rotateActive is the reaper's time-based rotation: seal the active
+// segment so the sweep can delete it once its records are older than
+// the retention age. Only a fully committed segment is rotated (its
+// records are all at or below the high-watermark), so a hidden tail
+// never moves into a sealed segment where a failed commit could not
+// truncate it; a segment that still has an uncommitted tail is
+// rotated on a later sweep, after the ingress WAL has re-committed it.
+func (f *flusher) rotateActive() error {
+	f.mu.RLock()
+	if len(f.log.segments) == 0 {
+		f.mu.RUnlock()
+		return nil
+	}
+	active := f.log.segments[len(f.log.segments)-1]
+	eligible := active.sizeBytes > 0 && active.nextOffset <= f.log.highWatermark.Load()
+	f.mu.RUnlock()
+	if !eligible {
+		return nil
+	}
+	_, err := f.roll(active)
+	return err
 }
 
 // syncIfNeeded fdatasyncs the active segment when forced or when the
 // batched-sync thresholds say so. It does not persist the high-watermark;
 // drainOnce does that once per pass, after any commit advance.
+//
+// An fsync failure is final for this Log. After a failed fdatasync the
+// kernel may have dropped the dirty pages (Linux marks them clean and
+// reports the error once), so a second fsync that "succeeds" proves
+// nothing about the bytes that failed, and the segment tail past the
+// last good sync is of unknown content. The only sound recovery is the
+// one a crash would get: reopen the log and rescan the files. So the
+// error is latched (poison): every later append and commit fails with
+// it until the log is reopened, and the node logs it at error level.
+// Records above the last durable tail are not lost; the ingress WAL
+// still holds them and re-commits them after the reopen.
 func (f *flusher) syncIfNeeded(force bool, active *segment) error {
 	if f.unsyncedBytes <= 0 {
 		return nil
@@ -346,12 +503,22 @@ func (f *flusher) syncIfNeeded(force bool, active *segment) error {
 	}
 
 	syncStart := time.Now()
-	if err := active.sync(); err != nil {
-		return fmt.Errorf("storage: flusher fsync: %w", err)
+	var err error
+	if h := fsyncHook; h != nil {
+		err = h(active)
+	}
+	if err == nil {
+		err = active.sync()
+	}
+	if err != nil {
+		return f.log.poison(err)
 	}
 	f.lastSync = time.Now()
 	f.unsyncedBytes = 0
 	f.log.durableTail.Store(active.nextOffset)
+	// The snapshot is released only now: the records are durable, so
+	// nothing can need the in-memory copy again.
+	f.log.clearFlushingThrough(active.nextOffset)
 	if m := f.log.opts.Metrics; m != nil {
 		m.ObserveFsync(time.Since(syncStart))
 	}

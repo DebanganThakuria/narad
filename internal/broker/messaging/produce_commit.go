@@ -179,6 +179,14 @@ func (e *Engine) appendAndCommit(log *storage.Log, payload []byte) (int64, error
 //     after the ingress WAL checkpoints past this batch can never leave
 //     the records durable-but-hidden.
 //
+// A failed CommitDurable leaves nothing of the batch in the log: the
+// storage layer discards every record above the high-watermark and
+// rewinds its next offset, so the ingress dispatcher's retry (which
+// appends the same WAL records again) lands exactly one copy at the
+// offsets the failed batch had. This is what makes "retry by
+// re-appending" safe; the caller must never try to re-commit the old
+// offsets instead.
+//
 // firstOffset is the offset of the first record; the count records are
 // contiguous. The caller must hold the partition produce lock.
 func (e *Engine) commitDurable(log *storage.Log, firstOffset int64, count int) error {

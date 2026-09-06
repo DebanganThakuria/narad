@@ -137,3 +137,10 @@ func (r *storageRecorder) IncRetentionDeletion(reason string, bytesDeleted, mess
 func (r *storageRecorder) ObserveRetentionRun(duration time.Duration) {
 	r.live().retentionRun.Observe(duration.Seconds())
 }
+
+// IncStorageError implements storage.ErrorRecorder: a poisoned log, a
+// discarded uncommitted tail, or a segment the reaper could not unlink
+// land in errors_total{component="storage"}.
+func (r *storageRecorder) IncStorageError(kind string) {
+	r.m.IncError("storage", kind)
+}
