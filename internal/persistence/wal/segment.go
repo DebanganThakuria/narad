@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
 // Segment files are named <base zero-padded to 20 digits>.wal, where
@@ -51,7 +53,7 @@ func segmentPath(dir string, base uint64) string {
 }
 
 func createEmptySegment(path string) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o600)
+	file, err := syncfile.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("wal: create first segment: %w", err)
 	}
@@ -69,7 +71,7 @@ func syncDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("wal: open dir for sync: %w", err)
 	}
-	if err := handle.Sync(); err != nil {
+	if err := syncfile.Sync(handle); err != nil {
 		_ = handle.Close()
 		return fmt.Errorf("wal: sync dir: %w", err)
 	}

@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"sync"
+
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
 // Log is a segmented write-ahead log. Concurrent appends are staged into
@@ -111,7 +113,7 @@ func openActiveSegment(path string, validEnd int64) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wal: open active segment: %w", err)
 	}
-	if err := file.Truncate(validEnd); err != nil {
+	if err := syncfile.Truncate(file, validEnd); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("wal: truncate active segment: %w", err)
 	}

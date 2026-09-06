@@ -157,9 +157,9 @@ func completeBatch(batch *syncBatch, err error) {
 
 // writeFull writes all of data, treating a zero-length write as an error
 // so a stalled writer cannot loop forever.
-func writeFull(w io.Writer, data []byte) error {
+func writeFull(f *os.File, data []byte) error {
 	for len(data) > 0 {
-		n, err := w.Write(data)
+		n, err := syncfile.Write(f, data)
 		if err != nil {
 			return fmt.Errorf("wal: write frame batch: %w", err)
 		}

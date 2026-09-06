@@ -75,7 +75,7 @@ func (w *checkpointWriter) store(nextSeq uint64) error {
 		w.file = f
 		w.dirSynced = !created
 	}
-	if _, err := w.file.WriteAt(buf[:], 0); err != nil {
+	if _, err := syncfile.WriteAt(w.file, buf[:], 0); err != nil {
 		w.reset()
 		return fmt.Errorf("ingress: write checkpoint: %w", err)
 	}
@@ -88,7 +88,7 @@ func (w *checkpointWriter) store(nextSeq uint64) error {
 		if err != nil {
 			return fmt.Errorf("ingress: open checkpoint dir: %w", err)
 		}
-		syncErr := dirFile.Sync()
+		syncErr := syncfile.Sync(dirFile)
 		_ = dirFile.Close()
 		if syncErr != nil {
 			return fmt.Errorf("ingress: sync checkpoint dir: %w", syncErr)
