@@ -46,9 +46,7 @@ func runAppendLoad(t *testing.T, l *Log, workers, perWorker int) faultLoadResult
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for w := range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range perWorker {
 				payload := fmt.Sprintf("w%02d-i%04d-%s", w, i, strings.Repeat("x", 40+(i%50)))
 				mu.Lock()
@@ -66,7 +64,7 @@ func runAppendLoad(t *testing.T, l *Log, workers, perWorker int) faultLoadResult
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	return res

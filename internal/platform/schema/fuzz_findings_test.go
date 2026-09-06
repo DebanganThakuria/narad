@@ -117,7 +117,7 @@ func TestFindingErrorRenderingUnbounded(t *testing.T) {
 	schema := `{"items":{"enum":[` + strings.Join(values, ",") + `]}}`
 	var b strings.Builder
 	b.WriteByte('[')
-	for i := 0; i < 20000; i++ {
+	for i := range 20000 {
 		if i > 0 {
 			b.WriteByte(',')
 		}
@@ -143,8 +143,7 @@ func TestFindingErrorRenderingUnbounded(t *testing.T) {
 	if !strings.Contains(msg, "at '/0'") || !strings.Contains(msg, "more") {
 		t.Fatalf("message lost its first error or its truncation marker: %.300s", msg)
 	}
-	var verr *jsonschema.ValidationError
-	if !errors.As(err, &verr) {
+	if _, ok := errors.AsType[*jsonschema.ValidationError](err); !ok {
 		t.Fatalf("the library error is no longer reachable through Unwrap")
 	}
 

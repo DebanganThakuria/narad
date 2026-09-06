@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"math/big"
+	"slices"
 	"time"
 )
 
@@ -152,10 +153,8 @@ func clusterConnectionVerifier(allowLegacy bool) func(tls.ConnectionState) error
 		if cs.Version < tls.VersionTLS13 {
 			return fmt.Errorf("cluster rpc: peer negotiated TLS 0x%04x, want 1.3", cs.Version)
 		}
-		for _, alpn := range accepted {
-			if cs.NegotiatedProtocol == alpn {
-				return nil
-			}
+		if slices.Contains(accepted, cs.NegotiatedProtocol) {
+			return nil
 		}
 		return fmt.Errorf("cluster rpc: peer negotiated ALPN %q, want one of %q", cs.NegotiatedProtocol, accepted)
 	}

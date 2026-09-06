@@ -198,7 +198,7 @@ func TestSchemaRegistrationLimits(t *testing.T) {
 	e.createTopic("lim-enum", 3, 0)
 	var sb strings.Builder
 	sb.WriteString(`{"enum":[`)
-	for i := 0; i < 8000; i++ {
+	for i := range 8000 {
 		if i > 0 {
 			sb.WriteString(",")
 		}

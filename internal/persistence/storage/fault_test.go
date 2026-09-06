@@ -149,9 +149,7 @@ func (c *commitLoad) run(t *testing.T, l *Log, workers, rounds, batchSize int, l
 	var commitMu sync.Mutex
 	var wg sync.WaitGroup
 	for w := range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for r := range rounds {
 				batch := make([][]byte, batchSize)
 				for i := range batch {
@@ -162,7 +160,7 @@ func (c *commitLoad) run(t *testing.T, l *Log, workers, rounds, batchSize int, l
 					c.submitted[string(b)] = true
 				}
 				c.mu.Unlock()
-				for attempt := 0; attempt < 4; attempt++ {
+				for range 4 {
 					commitMu.Lock()
 					owned := make([][]byte, len(batch))
 					for i, b := range batch {
@@ -202,7 +200,7 @@ func (c *commitLoad) run(t *testing.T, l *Log, workers, rounds, batchSize int, l
 					time.Sleep(2 * time.Millisecond)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -440,7 +438,7 @@ func assertExactlyOnce(t *testing.T, l *Log, load *commitLoad) {
 	defer load.mu.Unlock()
 	hwm := l.HighWatermark()
 	seen := make(map[string]int)
-	for off := int64(0); off < hwm; off++ {
+	for off := range hwm {
 		rec, err := l.Read(off)
 		if err != nil {
 			t.Fatalf("Read(%d): %v", off, err)
@@ -687,7 +685,7 @@ func TestFaultLyingFsyncCrash(t *testing.T) {
 	// not-found: the consume path and the fan-out reader skip such an
 	// offset with the corrupt-skipped counter (recorded loss, never a
 	// stall, never a fabricated record).
-	for off := int64(0); off < hwm; off++ {
+	for off := range hwm {
 		rec, err := l2.Read(off)
 		if err != nil {
 			if errors.Is(err, ErrOffsetNotFound) || IsCorrupt(err) {
@@ -814,7 +812,7 @@ func assertCleanPrefix(t *testing.T, l *Log, load *commitLoad, maxHWM int64) {
 	if hwm > l.NextOffset() {
 		t.Fatalf("hwm %d > next %d", hwm, l.NextOffset())
 	}
-	for off := int64(0); off < hwm; off++ {
+	for off := range hwm {
 		rec, err := l.Read(off)
 		if err != nil {
 			if errors.Is(err, ErrOffsetNotFound) || IsCorrupt(err) {

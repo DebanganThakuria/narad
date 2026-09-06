@@ -217,7 +217,7 @@ func FuzzValidateDefinitionBytes(f *testing.F) {
 // combinators, patterns, formats and unicode, plus garbage values.
 func FuzzGeneratedSchema(f *testing.F) {
 	rng := rand.New(rand.NewSource(1))
-	for i := 0; i < 24; i++ {
+	for range 24 {
 		b := make([]byte, 8+rng.Intn(400))
 		rng.Read(b)
 		f.Add(b)
@@ -283,7 +283,7 @@ func checkPayloadInvariants(t *testing.T, r *JSONSchema, raw, payload []byte) er
 // against generated well-formed schemas.
 func FuzzValidatePayload(f *testing.F) {
 	rng := rand.New(rand.NewSource(2))
-	for i := 0; i < 16; i++ {
+	for range 16 {
 		seed := make([]byte, 8+rng.Intn(200))
 		rng.Read(seed)
 		for _, p := range []string{`{"id":1}`, `[1,2,3]`, `"s"`, `1e99999999`, `9007199254740993`, "\xff", `{"a":"\x00"}`, strings.Repeat("[", 200) + strings.Repeat("]", 200), `-0`, `1e-999999`, `{"p0":"x-1","extra_1":null}`} {
@@ -364,7 +364,7 @@ func compatRound(t *testing.T, data []byte, payloads int, st *compatStats) {
 		return
 	}
 	st.accepted++
-	for i := 0; i < payloads; i++ {
+	for range payloads {
 		payload := mustJSON(genPayload(src, oldDoc))
 		instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(payload))
 		if err != nil {
@@ -384,7 +384,7 @@ func compatRound(t *testing.T, data []byte, payloads int, st *compatStats) {
 // FuzzCompatibility property-tests CheckCompatible.
 func FuzzCompatibility(f *testing.F) {
 	rng := rand.New(rand.NewSource(3))
-	for i := 0; i < 32; i++ {
+	for range 32 {
 		b := make([]byte, 16+rng.Intn(300))
 		rng.Read(b)
 		f.Add(b)
@@ -462,7 +462,7 @@ func TestPropertyExactNumbers(t *testing.T) {
 		}
 		return r.Validate(context.Background(), "t", []byte(payload)) == nil
 	}
-	for i := 0; i < 1500; i++ {
+	for range 1500 {
 		v := randRat()
 		lit := spell(v)
 		parsed, ok := new(big.Rat).SetString(lit)

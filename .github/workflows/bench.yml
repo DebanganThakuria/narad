@@ -46,29 +46,44 @@ jobs:
       - name: Start dev broker
         run: |
           nohup ./narad server start --dev --data-dir "$RUNNER_TEMP/narad-data" > "$RUNNER_TEMP/server.log" 2>&1 &
-          for i in $(seq 1 30); do
-            if curl -sf -o /dev/null http://127.0.0.1:7942/v1/topics; then
+          # /readyz, not GET /v1/topics: a read is served off the local
+          # replica and answers 200 before Raft has elected a leader, so
+          # gating on it lets the topic create below race the election.
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://127.0.0.1:7942/readyz; then
               echo "broker ready after ${i}s"; exit 0
             fi
             sleep 1
           done
-          echo "broker did not become ready"; tail -50 "$RUNNER_TEMP/server.log"; exit 1
+          echo "broker did not become ready"
+          curl -s http://127.0.0.1:7942/readyz
+          tail -50 "$RUNNER_TEMP/server.log"; exit 1
 
       - name: Create topic + warmup
         run: |
-          curl -sf -X POST http://127.0.0.1:7942/v1/topics -d '{"name":"bench","partitions":6}' -o /dev/null
+          # State-changing requests must carry an API content type or the
+          # X-Narad-Client header; without one the CSRF guard answers 415.
+          curl -sf -X POST http://127.0.0.1:7942/v1/topics \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"bench","partitions":6}' -o /dev/null
           # Assignments propagate to the dispatcher asynchronously after
           # topic create (~10s on a cold single node); until then produced
           # messages are acked but not yet consumable and a fast bench
           # measures an empty topic. Gate on one full produce->consume
           # round trip before benching.
+          consumable=""
           for i in $(seq 1 60); do
-            curl -sf -X POST http://127.0.0.1:7942/v1/topics/bench/produce -d probe -o /dev/null || true
+            curl -sf -X POST http://127.0.0.1:7942/v1/topics/bench/produce \
+              -H 'Content-Type: application/octet-stream' -d probe -o /dev/null || true
             if curl -sf "http://127.0.0.1:7942/v1/topics/bench/consume?wait=1s" | grep -q receipt_handle; then
-              echo "first message consumable after ${i} probe(s)"; break
+              echo "first message consumable after ${i} probe(s)"; consumable=yes; break
             fi
             sleep 1
           done
+          if [ -z "$consumable" ]; then
+            echo "no message became consumable in 60s; benching now would measure an empty topic"
+            tail -50 "$RUNNER_TEMP/server.log"; exit 1
+          fi
           ./narad bench bench --server http://127.0.0.1:7942 --count 5000 --size 256 --workers 16 --consume 2>&1 | tail -3
 
       - name: Bench (best of two)

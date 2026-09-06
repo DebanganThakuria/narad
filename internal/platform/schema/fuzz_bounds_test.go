@@ -95,15 +95,15 @@ func TestBoundsCompile(t *testing.T) {
 		}),
 		"64-level properties nesting, wide": fill(func(n int) string {
 			var b strings.Builder
-			for i := 0; i < 63; i++ {
+			for range 63 {
 				b.WriteString(`{"type":"object","properties":{`)
-				for j := 0; j < n; j++ {
+				for j := range n {
 					fmt.Fprintf(&b, `"w%d":{"type":"integer"},`, j)
 				}
 				b.WriteString(`"n":`)
 			}
 			b.WriteString(`{"type":"integer"}`)
-			for i := 0; i < 63; i++ {
+			for range 63 {
 				b.WriteString(`}}`)
 			}
 			return b.String()
@@ -111,7 +111,7 @@ func TestBoundsCompile(t *testing.T) {
 		"64-deep $ref chain": func() string {
 			var b strings.Builder
 			b.WriteString(`{"$ref":"#/$defs/d0","$defs":{`)
-			for i := 0; i < 62; i++ {
+			for i := range 62 {
 				fmt.Fprintf(&b, `"d%d":{"$ref":"#/$defs/d%d"},`, i, i+1)
 			}
 			b.WriteString(`"d62":{"type":"integer"}}}`)
@@ -136,11 +136,11 @@ func TestBoundsCompile(t *testing.T) {
 		}),
 		"allOf/anyOf/oneOf alternating 60 deep": func() string {
 			var b strings.Builder
-			for i := 0; i < 60; i++ {
+			for i := range 60 {
 				b.WriteString(`{"` + []string{"allOf", "anyOf", "oneOf"}[i%3] + `":[`)
 			}
 			b.WriteString(`{"type":"integer"}`)
-			for i := 0; i < 60; i++ {
+			for range 60 {
 				b.WriteString(`]}`)
 			}
 			return b.String()
@@ -204,7 +204,7 @@ func TestBoundsValidate(t *testing.T) {
 	intArray := func(n int) string {
 		var b strings.Builder
 		b.WriteByte('[')
-		for i := 0; i < n; i++ {
+		for i := range n {
 			if i > 0 {
 				b.WriteByte(',')
 			}
@@ -216,7 +216,7 @@ func TestBoundsValidate(t *testing.T) {
 	strArray := func(n int) string {
 		var b strings.Builder
 		b.WriteByte('[')
-		for i := 0; i < n; i++ {
+		for i := range n {
 			if i > 0 {
 				b.WriteByte(',')
 			}
@@ -228,7 +228,7 @@ func TestBoundsValidate(t *testing.T) {
 	objKeys := func(n int) string {
 		var b strings.Builder
 		b.WriteByte('{')
-		for i := 0; i < n; i++ {
+		for i := range n {
 			if i > 0 {
 				b.WriteByte(',')
 			}

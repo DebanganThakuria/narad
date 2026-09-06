@@ -108,9 +108,7 @@ func (rt *Router) BroadcastDeleteTopic(ctx context.Context, topicName, id string
 	results := make([]error, len(targets))
 	var wg sync.WaitGroup
 	for i, member := range targets {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			res, err := rt.peer.PurgeTopic(purgeCtx, member.Addr, topicName, id)
 			if err != nil {
 				results[i] = fmt.Errorf("purge %s on %s: %w", topicName, member.ID, err)
@@ -119,7 +117,7 @@ func (rt *Router) BroadcastDeleteTopic(ctx context.Context, topicName, id string
 			if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
 				results[i] = fmt.Errorf("purge %s returned status %d for %s", topicName, res.Status, member.ID)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	// Joined in member order so the message is stable regardless of

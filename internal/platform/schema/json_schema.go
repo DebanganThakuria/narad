@@ -413,8 +413,7 @@ func compileDecoded(topic string, version int, schemaDoc any) (*jsonschema.Schem
 // clientSafeCompileError strips the target URL from a refused load so
 // the 400 body carries the policy, not the caller's probe echoed back.
 func clientSafeCompileError(err error) error {
-	var loadErr *jsonschema.LoadURLError
-	if errors.As(err, &loadErr) {
+	if _, ok := errors.AsType[*jsonschema.LoadURLError](err); ok {
 		return fmt.Errorf("schema: %w", errExternalRef)
 	}
 	return fmt.Errorf("schema: %w", err)

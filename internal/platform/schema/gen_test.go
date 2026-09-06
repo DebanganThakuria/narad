@@ -283,7 +283,7 @@ func (g *schemaGen) refTo() string {
 func (g *schemaGen) branches(depth int) []any {
 	n := 1 + g.src.n(3)
 	out := make([]any, 0, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		out = append(out, g.genNode(depth+1))
 	}
 	return out
@@ -295,7 +295,7 @@ func (g *schemaGen) objectKeywords(node map[string]any, depth int) {
 	if nprops > 0 {
 		props := map[string]any{}
 		var names []string
-		for i := 0; i < nprops; i++ {
+		for i := range nprops {
 			name := fmt.Sprintf("p%d", i)
 			if src.chance(15) {
 				name = unicodeSamples[src.n(len(unicodeSamples))] + strconv.Itoa(i)
@@ -913,10 +913,7 @@ func spellRat(src *byteSrc, v *big.Rat) string {
 	if den.Cmp(big.NewInt(1)) != 0 {
 		return v.FloatString(20) // inexact; the oracle decides
 	}
-	prec := twos
-	if fives > prec {
-		prec = fives
-	}
+	prec := max(fives, twos)
 	s := v.FloatString(prec)
 	if src.chance(30) {
 		// Shift the point into an exponent: 2.5 -> 25e-1.
@@ -1409,7 +1406,7 @@ func (m *mutator) widen(node map[string]any) (mutation, bool) {
 		},
 	}
 	start := src.n(len(ops))
-	for i := 0; i < len(ops); i++ {
+	for i := range ops {
 		if name, ok := ops[(start+i)%len(ops)](); ok {
 			return mutation{name: "widen: " + name, expectAccept: true}, true
 		}
@@ -1607,7 +1604,7 @@ func (m *mutator) narrow(node map[string]any) (mutation, bool) {
 		},
 	}
 	start := src.n(len(ops))
-	for i := 0; i < len(ops); i++ {
+	for i := range ops {
 		if name, ok := ops[(start+i)%len(ops)](); ok {
 			return mutation{name: "narrow: " + name}, true
 		}

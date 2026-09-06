@@ -497,7 +497,7 @@ func resolvePointer(root any, ref string) (any, error) {
 		return nil, fmt.Errorf("$ref %q: %w", ref, err)
 	}
 	cur := root
-	for _, tok := range strings.Split(frag, "/") {
+	for tok := range strings.SplitSeq(frag, "/") {
 		tok = strings.ReplaceAll(strings.ReplaceAll(tok, "~1", "/"), "~0", "~")
 		switch node := cur.(type) {
 		case map[string]any:

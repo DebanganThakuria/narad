@@ -61,10 +61,7 @@ func (l *Log) drainBufferForFlush() ([][]byte, int64) {
 // unwrittenFlushingLocked returns the snapshot suffix that has not
 // reached the segment file yet. Caller must hold flushingMu.
 func (l *Log) unwrittenFlushingLocked() ([][]byte, int64) {
-	skip := l.flushingWritten - l.flushingBase
-	if skip < 0 {
-		skip = 0
-	}
+	skip := max(l.flushingWritten-l.flushingBase, 0)
 	if skip >= int64(len(l.flushingRecords)) {
 		return nil, l.flushingBase + int64(len(l.flushingRecords))
 	}
