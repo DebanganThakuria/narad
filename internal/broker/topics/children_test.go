@@ -84,7 +84,7 @@ func TestUpdateTopicSchema_RejectsAttachedChild(t *testing.T) {
 	ms.topics["child"] = topic.Topic{Name: "child", Partitions: 3, Role: topic.RoleChild, Parent: "parent"}
 	manager := newTestManager(t, ms, nil)
 
-	_, err := manager.UpdateTopicSchema(context.Background(), "child", []byte(`{"type":"object"}`))
+	_, err := manager.UpdateTopicSchema(context.Background(), "child", []byte(`{"type":"object"}`), 0)
 	if !errors.Is(err, errs.ErrFanoutSchemaManaged) {
 		t.Fatalf("UpdateTopicSchema() on attached child error = %v, want %v", err, errs.ErrFanoutSchemaManaged)
 	}

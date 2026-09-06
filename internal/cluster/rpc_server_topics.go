@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -37,6 +38,7 @@ type rpcAlterTopicBody struct {
 	MaxInFlightPerPartition   *int64          `json:"max_in_flight_per_partition,omitempty"`
 	MaxAckedAheadPerPartition *int64          `json:"max_acked_ahead_per_partition,omitempty"`
 	Schema                    json.RawMessage `json:"schema,omitempty"`
+	SchemaBaseVersion         int             `json:"schema_base_version,omitempty"`
 }
 
 func (b rpcAlterTopicBody) validate() error {
@@ -62,6 +64,17 @@ func (b rpcAlterTopicBody) validate() error {
 	}
 	if hasSchema && !json.Valid(b.Schema) {
 		return errors.New("schema is not valid JSON")
+	}
+	if hasSchema && bytes.Equal(bytes.TrimSpace(b.Schema), []byte("null")) {
+		// A schema cannot be removed; null is neither "unset" nor a
+		// schema. Say so instead of forwarding the literal to the broker.
+		return errors.New("schema must be a JSON Schema object (a schema cannot be removed; register a wider one instead)")
+	}
+	if b.SchemaBaseVersion < 0 {
+		return errors.New("schema_base_version must be >= 0")
+	}
+	if b.SchemaBaseVersion > 0 && !hasSchema {
+		return errors.New("schema_base_version requires schema")
 	}
 	return nil
 }
@@ -168,7 +181,7 @@ func (s *RPCServer) applyTopicAlterations(topicName string, body rpcAlterTopicBo
 		}
 	}
 	if len(body.Schema) > 0 {
-		if t, err = s.broker.UpdateTopicSchema(rpcRequestContext(), topicName, body.Schema); err != nil {
+		if t, err = s.broker.UpdateTopicSchema(rpcRequestContext(), topicName, body.Schema, body.SchemaBaseVersion); err != nil {
 			return topic.Topic{}, err
 		}
 	}

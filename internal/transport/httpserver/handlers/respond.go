@@ -139,6 +139,11 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 		// malformed request: the documented contract is 409 on attach,
 		// create-as-child, and a retention shrink alike.
 		errors.Is(err, errs.ErrFanoutDelayTooLong),
+		// A schema update whose precondition failed or whose topic has
+		// no room for another version is a conflict with the topic's
+		// current state, not a malformed request.
+		errors.Is(err, errs.ErrSchemaVersionConflict),
+		errors.Is(err, errs.ErrSchemaHistoryFull),
 		errors.Is(err, errs.ErrAlreadyExists):
 		s.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errs.ErrNotFound):

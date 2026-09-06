@@ -47,8 +47,14 @@ type Broker interface {
 	UpdateTopicRetention(ctx context.Context, name string, retentionMs int64) (topic.Topic, error)
 	UpdateTopicCaps(ctx context.Context, name string, maxInFlightPerPartition, maxAckedAheadPerPartition int64) (topic.Topic, error)
 	// UpdateTopicSchema registers a new JSON Schema version for the
-	// topic, enforcing backwards compatibility.
-	UpdateTopicSchema(ctx context.Context, name string, schema []byte) (topic.Topic, error)
+	// topic, enforcing backwards compatibility. Re-registering the
+	// current schema is a no-op. A positive baseVersion makes the
+	// update conditional on the current version being exactly that
+	// (errs.ErrSchemaVersionConflict otherwise); zero is unconditional.
+	UpdateTopicSchema(ctx context.Context, name string, schema []byte, baseVersion int) (topic.Topic, error)
+	// TopicSchemaHistory lists every schema version of the topic in
+	// ascending order (empty, version 0, for a topic without a schema).
+	TopicSchemaHistory(ctx context.Context, name string) (topic.SchemaHistory, error)
 	DeleteTopic(ctx context.Context, name string) error
 	// PurgeTopic drops this node's local state of one incarnation of a
 	// deleted topic (id is the deleted record's ID; empty purges by

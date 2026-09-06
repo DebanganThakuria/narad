@@ -7,6 +7,8 @@
 // any layout-dependent encoding.
 package topic
 
+import "encoding/json"
+
 // Topic is the user-facing logical stream. Partitions can grow via
 // IncreaseTopicPartitions (never shrink); Retention, visibility, and the
 // in-flight caps can be altered post-create without affecting existing
@@ -132,10 +134,31 @@ func (t Topic) IsParent() bool { return t.EffectiveRole() == RoleParent }
 func (t Topic) IsChild() bool { return t.EffectiveRole() == RoleChild }
 
 // Details is the response shape for "describe a topic": the topic
-// record plus per-partition runtime stats.
+// record, its current schema, plus per-partition runtime stats.
 type Details struct {
 	Topic
+	// SchemaVersion is the number of the topic's current (latest)
+	// schema version, 0 when the topic has no schema.
+	SchemaVersion int `json:"schema_version"`
+	// Schema is the current schema document, absent when the topic has
+	// none. Every produce is validated against exactly this document.
+	Schema     json.RawMessage  `json:"schema,omitempty"`
 	Partitions []PartitionStats `json:"partition_stats"`
+}
+
+// SchemaVersion is one entry of a topic's append-only schema history.
+type SchemaVersion struct {
+	Version int             `json:"version"`
+	Schema  json.RawMessage `json:"schema"`
+}
+
+// SchemaHistory is the response shape of "list a topic's schema
+// versions": every version in ascending order, and the number of the
+// current one (0 when the topic has no schema).
+type SchemaHistory struct {
+	Topic    string          `json:"topic"`
+	Version  int             `json:"version"`
+	Versions []SchemaVersion `json:"versions"`
 }
 
 // PartitionStats reports runtime storage stats for one partition.

@@ -71,6 +71,16 @@ var (
 	// ErrSchemaIncompatible reports a schema that breaks backwards
 	// compatibility with the previous version.
 	ErrSchemaIncompatible = errors.New("schema incompatible with previous version")
+
+	// ErrSchemaVersionConflict reports a schema update whose
+	// schema_base_version precondition no longer matches the topic's
+	// current version: another update landed first. Re-read the
+	// current schema before retrying.
+	ErrSchemaVersionConflict = errors.New("schema version conflict")
+
+	// ErrSchemaHistoryFull reports a schema update on a topic whose
+	// append-only history has reached the per-topic version cap.
+	ErrSchemaHistoryFull = errors.New("schema history is full")
 )
 
 // Fan-out (parent/child topic links).

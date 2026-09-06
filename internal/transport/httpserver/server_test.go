@@ -58,8 +58,12 @@ func (f *fakeBroker) UpdateTopicCaps(ctx context.Context, name string, maxInFlig
 	return f.updateTopicCapsFn(ctx, name, maxInFlightPerPartition, maxAckedAheadPerPartition)
 }
 
-func (f *fakeBroker) UpdateTopicSchema(ctx context.Context, name string, schema []byte) (topic.Topic, error) {
+func (f *fakeBroker) UpdateTopicSchema(ctx context.Context, name string, schema []byte, _ int) (topic.Topic, error) {
 	return f.updateTopicSchemaFn(ctx, name, schema)
+}
+
+func (f *fakeBroker) TopicSchemaHistory(context.Context, string) (topic.SchemaHistory, error) {
+	return topic.SchemaHistory{}, nil
 }
 
 func (f *fakeBroker) DeleteTopic(ctx context.Context, name string) error {

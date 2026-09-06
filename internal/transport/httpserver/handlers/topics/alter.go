@@ -1,6 +1,7 @@
 package topics
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,9 @@ import (
 //   - max_in_flight_per_partition:   per-partition in-flight cap
 //   - max_acked_ahead_per_partition: per-partition acked-ahead cap
 //   - schema:                        register a new JSON Schema version
+//   - schema_base_version:           optional precondition for schema:
+//     apply only if the current schema
+//     version is exactly this (409 otherwise)
 //
 // visibility_timeout_ms is fixed at create time and not alterable.
 //
@@ -35,6 +39,7 @@ type alterRequest struct {
 	MaxInFlightPerPartition   *int64          `json:"max_in_flight_per_partition,omitempty"`
 	MaxAckedAheadPerPartition *int64          `json:"max_acked_ahead_per_partition,omitempty"`
 	Schema                    json.RawMessage `json:"schema,omitempty"`
+	SchemaBaseVersion         int             `json:"schema_base_version,omitempty"`
 }
 
 func (req alterRequest) Validate() error {
@@ -60,6 +65,17 @@ func (req alterRequest) Validate() error {
 	}
 	if hasSchema && !json.Valid(req.Schema) {
 		return errors.New("schema is not valid JSON")
+	}
+	if hasSchema && bytes.Equal(bytes.TrimSpace(req.Schema), []byte("null")) {
+		// A schema cannot be removed; null is neither "unset" nor a
+		// schema. Say so instead of forwarding the literal to the broker.
+		return errors.New("schema must be a JSON Schema object (a schema cannot be removed; register a wider one instead)")
+	}
+	if req.SchemaBaseVersion < 0 {
+		return errors.New("schema_base_version must be >= 0")
+	}
+	if req.SchemaBaseVersion > 0 && !hasSchema {
+		return errors.New("schema_base_version requires schema")
 	}
 	return nil
 }
@@ -136,7 +152,7 @@ func applyAlter(ctx context.Context, s *handlers.Set, topicName string, req alte
 		}
 	}
 	if len(req.Schema) > 0 {
-		t, err = s.Deps.Broker.UpdateTopicSchema(ctx, topicName, req.Schema)
+		t, err = s.Deps.Broker.UpdateTopicSchema(ctx, topicName, req.Schema, req.SchemaBaseVersion)
 		if err != nil {
 			return topic.Topic{}, err
 		}

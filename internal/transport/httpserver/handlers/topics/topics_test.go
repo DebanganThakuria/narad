@@ -31,7 +31,8 @@ type fakeBroker struct {
 	increaseTopicPartitionsFn func(context.Context, string, int) (topic.Topic, error)
 	updateTopicRetentionFn    func(context.Context, string, int64) (topic.Topic, error)
 	updateTopicCapsFn         func(context.Context, string, int64, int64) (topic.Topic, error)
-	updateTopicSchemaFn       func(context.Context, string, []byte) (topic.Topic, error)
+	updateTopicSchemaFn       func(context.Context, string, []byte, int) (topic.Topic, error)
+	topicSchemaHistoryFn      func(context.Context, string) (topic.SchemaHistory, error)
 	deleteTopicFn             func(context.Context, string) error
 	purgeTopicFn              func(context.Context, string, string) error
 	getTopicFn                func(context.Context, string) (topic.Topic, error)
@@ -152,8 +153,15 @@ func (f *fakeBroker) UpdateTopicCaps(ctx context.Context, name string, maxInFlig
 	return f.updateTopicCapsFn(ctx, name, maxInFlightPerPartition, maxAckedAheadPerPartition)
 }
 
-func (f *fakeBroker) UpdateTopicSchema(ctx context.Context, name string, schema []byte) (topic.Topic, error) {
-	return f.updateTopicSchemaFn(ctx, name, schema)
+func (f *fakeBroker) UpdateTopicSchema(ctx context.Context, name string, schema []byte, baseVersion int) (topic.Topic, error) {
+	return f.updateTopicSchemaFn(ctx, name, schema, baseVersion)
+}
+
+func (f *fakeBroker) TopicSchemaHistory(ctx context.Context, name string) (topic.SchemaHistory, error) {
+	if f.topicSchemaHistoryFn == nil {
+		return topic.SchemaHistory{}, errs.ErrTopicNotFound
+	}
+	return f.topicSchemaHistoryFn(ctx, name)
 }
 
 func (f *fakeBroker) DeleteTopic(ctx context.Context, name string) error {
@@ -994,7 +1002,7 @@ func TestAlterHandlerAppliesOperationsInOrder(t *testing.T) {
 			calls = append(calls, "partitions")
 			return topic.Topic{Name: "orders", Partitions: 4}, nil
 		},
-		updateTopicSchemaFn: func(context.Context, string, []byte) (topic.Topic, error) {
+		updateTopicSchemaFn: func(context.Context, string, []byte, int) (topic.Topic, error) {
 			calls = append(calls, "schema")
 			return topic.Topic{Name: "orders"}, nil
 		},
