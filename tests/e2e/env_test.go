@@ -124,7 +124,7 @@ func withLogOptions(opts storage.Options) envOption {
 // env bundles a running server, its broker, and request helpers for a
 // single test. Call env.close() to clean up.
 type env struct {
-	t      *testing.T
+	t      testing.TB
 	Broker broker.Broker
 	Server *httptest.Server
 	ms     *metastore.Store
@@ -147,7 +147,7 @@ type env struct {
 }
 
 // newTestEnv builds an env with t.Cleanup wired for close.
-func newTestEnv(t *testing.T, opts ...envOption) *env {
+func newTestEnv(t testing.TB, opts ...envOption) *env {
 	t.Helper()
 	o := defaultOpts()
 	for _, opt := range opts {
@@ -158,7 +158,7 @@ func newTestEnv(t *testing.T, opts ...envOption) *env {
 	return e
 }
 
-func newEnv(t *testing.T, opts envOpts) *env {
+func newEnv(t testing.TB, opts envOpts) *env {
 	t.Helper()
 
 	dataDir := opts.dataDir
@@ -273,7 +273,7 @@ func newEnv(t *testing.T, opts envOpts) *env {
 
 // seedTestAdmin creates the root admin directly in the metastore so a
 // secured env has working admin credentials from the first request.
-func seedTestAdmin(t *testing.T, ms *metastore.Store, username, password string) {
+func seedTestAdmin(t testing.TB, ms *metastore.Store, username, password string) {
 	t.Helper()
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
 	if err != nil {
@@ -290,7 +290,7 @@ func seedTestAdmin(t *testing.T, ms *metastore.Store, username, password string)
 // startMetastore boots a single-node Raft metastore, waits for it to
 // elect itself leader (topic operations fail on a leaderless store), and
 // registers three alive members so replica placement has somewhere to go.
-func startMetastore(t *testing.T, dir string) *metastore.Store {
+func startMetastore(t testing.TB, dataDir string) *metastore.Store {
 	t.Helper()
 
 	ms, err := metastore.New(metastore.Config{
@@ -329,7 +329,7 @@ func startMetastore(t *testing.T, dir string) *metastore.Store {
 // topics get partition assignments. The t.Cleanup here is a backstop for
 // tests that fatal before an env is fully constructed; env.close performs
 // the same shutdown in the normal path.
-func startController(t *testing.T, ms *metastore.Store) (context.CancelFunc, chan struct{}) {
+func startController(t testing.TB, ms *metastore.Store) (context.CancelFunc, chan struct{}) {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -404,7 +404,7 @@ func (e *env) close() {
 	})
 }
 
-func waitDone(t *testing.T, name string, done <-chan struct{}) {
+func waitDone(t testing.TB, name string, done <-chan struct{}) {
 	t.Helper()
 	if done == nil {
 		return

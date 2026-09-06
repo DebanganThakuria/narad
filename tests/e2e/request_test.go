@@ -55,7 +55,7 @@ func (e *env) rawPost(path, rawBody string) *http.Response {
 }
 
 // jsonReq sends a JSON-encoded body with the given method and URL.
-func jsonReq(t *testing.T, method, url string, body any) *http.Response {
+func jsonReq(t testing.TB, method, url string, body any) *http.Response {
 	t.Helper()
 	var r io.Reader
 	if body != nil {
@@ -82,13 +82,13 @@ func jsonReq(t *testing.T, method, url string, body any) *http.Response {
 }
 
 // getJSON issues a GET and returns the response.
-func getJSON(t *testing.T, url string) *http.Response {
+func getJSON(t testing.TB, url string) *http.Response {
 	t.Helper()
 	return jsonReq(t, http.MethodGet, url, nil)
 }
 
 // rawReq sends raw bytes.
-func rawReq(t *testing.T, method, url string, body []byte) *http.Response {
+func rawReq(t testing.TB, method, url string, body []byte) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(method, url, bytes.NewReader(body))
 	if err != nil {
@@ -105,7 +105,7 @@ func rawReq(t *testing.T, method, url string, body []byte) *http.Response {
 // ---- response helpers ------------------------------------------------------
 
 // readJSON decodes the response body into T and closes the body.
-func readJSON[T any](t *testing.T, resp *http.Response) T {
+func readJSON[T any](t testing.TB, resp *http.Response) T {
 	t.Helper()
 	defer resp.Body.Close()
 	var v T
@@ -116,7 +116,7 @@ func readJSON[T any](t *testing.T, resp *http.Response) T {
 }
 
 // readError extracts the "error" field from a JSON error response.
-func readError(t *testing.T, resp *http.Response) string {
+func readError(t testing.TB, resp *http.Response) string {
 	t.Helper()
 	return readJSON[map[string]string](t, resp)["error"]
 }
@@ -128,29 +128,29 @@ func readBody(resp *http.Response) string {
 	return string(b)
 }
 
-func expectStatus(t *testing.T, resp *http.Response, want int) {
+func expectStatus(t testing.TB, resp *http.Response, want int) {
 	t.Helper()
 	if resp.StatusCode != want {
 		t.Fatalf("status: got %d, want %d (body: %s)", resp.StatusCode, want, readBody(resp))
 	}
 }
 
-func expectOK(t *testing.T, resp *http.Response) {
+func expectOK(t testing.TB, resp *http.Response) {
 	t.Helper()
 	expectStatus(t, resp, http.StatusOK)
 }
 
-func expectBadRequest(t *testing.T, resp *http.Response) {
+func expectBadRequest(t testing.TB, resp *http.Response) {
 	t.Helper()
 	expectStatus(t, resp, http.StatusBadRequest)
 }
 
-func expectNotFound(t *testing.T, resp *http.Response) {
+func expectNotFound(t testing.TB, resp *http.Response) {
 	t.Helper()
 	expectStatus(t, resp, http.StatusNotFound)
 }
 
-func expectConflict(t *testing.T, resp *http.Response) {
+func expectConflict(t testing.TB, resp *http.Response) {
 	t.Helper()
 	expectStatus(t, resp, http.StatusConflict)
 }

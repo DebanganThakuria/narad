@@ -9,7 +9,7 @@ import (
 
 // authReq issues an HTTP request with optional Basic credentials against
 // the running secured server.
-func (e *env) authReq(t *testing.T, method, path string, body any, username, password string) *http.Response {
+func (e *env) authReq(t testing.TB, method, path string, body any, username, password string) *http.Response {
 	t.Helper()
 	var reader *bytes.Reader
 	if body != nil {
