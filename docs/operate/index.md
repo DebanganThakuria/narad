@@ -59,7 +59,7 @@ That's the install. Really. (Every knob: [Helm Chart Reference](helm-chart.md).)
 
 | Port | Protocol | What |
 |---|---|---|
-| `7942` | HTTP + QUIC | Client API, `/healthz` `/readyz` `/metrics`, and node RPC (QUIC) |
+| `7942` | HTTP (TCP) + QUIC (UDP) | Client API, `/healthz` `/readyz` `/metrics` on TCP; node RPC over QUIC on the same port number over UDP |
 | `7943` | TCP (mTLS-capable) | Raft replication |
 | `6060` | HTTP | pprof, only if enabled |
 
@@ -109,7 +109,7 @@ Narad has request-size caps (1 MiB bodies) and per-partition flow control, but *
 
 ## TLS story
 
-Client TLS terminates at your ingress; Narad serves plain HTTP behind it. Node-to-node QUIC is authenticated by the cluster secret; Raft can additionally run mutual TLS (`NARAD_CLUSTER_TLS_{CERT,KEY,CA}_FILE`). Without certs, Raft is plaintext and the node says so loudly in its logs; restrict port 7943 with a NetworkPolicy either way.
+Client TLS terminates at your ingress; Narad serves plain HTTP behind it. Node-to-node QUIC is authenticated by the cluster secret, proven on every stream in both directions with a MAC bound to that connection's TLS session (nothing replayable crosses the wire, and a node refuses a peer that cannot prove the secret back). Raft can additionally run mutual TLS (`NARAD_CLUSTER_TLS_{CERT,KEY,CA}_FILE`). Restrict 7943/tcp and 7942/udp with a NetworkPolicy either way; the QUIC plane rides the API port number over UDP.
 
 ## Single-node / laptop mode
 

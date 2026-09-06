@@ -104,6 +104,9 @@ func applyEnv(cfg *Config) error {
 	if v, ok := os.LookupEnv("NARAD_CLUSTER_SECRET"); ok {
 		cfg.Security.ClusterSecret = v
 	}
+	if err := envBool("NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH", &cfg.Security.AllowLegacyClusterAuth); err != nil {
+		return err
+	}
 	if v, ok := os.LookupEnv("NARAD_CLUSTER_TLS_CERT_FILE"); ok {
 		cfg.Security.ClusterTLSCertFile = v
 	}
@@ -127,6 +130,19 @@ func envDuration(key string, dst *Duration) error {
 		return fmt.Errorf("%s: %w", key, err)
 	}
 	*dst = Duration(d)
+	return nil
+}
+
+func envBool(key string, dst *bool) error {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fmt.Errorf("%s: %w", key, err)
+	}
+	*dst = b
 	return nil
 }
 

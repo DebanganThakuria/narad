@@ -138,6 +138,13 @@ security:
   adminPasswordKey: admin-password
   clusterSecretKey: cluster-secret
 
+  # One-release compatibility for a rolling upgrade from a release whose
+  # node-to-node auth was a fixed token (before session-bound proofs).
+  # Set true, roll every pod, then set false and roll again; leaving it
+  # on keeps accepting the replayable token from any peer that asks for
+  # it. Not needed for a fresh install.
+  allowLegacyClusterAuth: false
+
   # Mutual TLS on the Raft metadata transport (which replicates user
   # password hashes and grants). When enabled, mount a Secret holding a
   # cluster CA + a node cert/key whose SAN includes "narad-cluster.local".

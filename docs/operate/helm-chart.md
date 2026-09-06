@@ -121,3 +121,5 @@ helm upgrade narad ./charts/narad -n narad --reuse-values --set image.tag=v0.2.0
 ```
 
 Rolling update, reverse ordinal order, leadership hands off gracefully; we ship under live traffic routinely, and we've force-killed pods mid-rollout under a loss-detecting harness for fun. Scale-out is the same command with a bigger `replicaCount` ([details](scaling-and-recovery.md)).
+
+**Upgrading across the node-to-node auth change** (fixed token to session-bound proofs): nodes on either side of it cannot talk to each other. Roll twice: first with `--set security.allowLegacyClusterAuth=true` so upgraded pods still speak the old protocol to the pods that have not rolled yet, then, once every pod is on the new image, with it back to `false`. Skipping the first roll works too; forwarded requests between old and new pods just fail until the roll finishes.

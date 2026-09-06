@@ -16,3 +16,18 @@ func TestInitialMembersEnvParsing(t *testing.T) {
 		t.Fatalf("InitialMembers = %v, want %v", cfg.Cluster.InitialMembers, want)
 	}
 }
+
+func TestSecurityFlagEnvParsing(t *testing.T) {
+	t.Setenv("NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH", "true")
+	cfg := Default()
+	if err := applyEnv(cfg); err != nil {
+		t.Fatalf("applyEnv() error = %v", err)
+	}
+	if !cfg.Security.AllowLegacyClusterAuth {
+		t.Fatal("AllowLegacyClusterAuth not applied from env")
+	}
+	t.Setenv("NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH", "maybe")
+	if err := applyEnv(Default()); err == nil {
+		t.Fatal("non-boolean NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH accepted")
+	}
+}

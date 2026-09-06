@@ -52,6 +52,12 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Read by every cluster RPC listener and client built below, so it
+	// must be set before the first of them (the existing-cluster probe).
+	clusterrpc.SetLegacyAuthCompat(cfg.Security.AllowLegacyClusterAuth)
+	if cfg.Security.AllowLegacyClusterAuth {
+		log.Warn("legacy fixed-token cluster auth compatibility is ON; turn security.allow_legacy_cluster_auth off once every node runs session-bound auth", "component", "audit")
+	}
 	clusterTLS, err := clusterTLSConfig(cfg.Security)
 	if err != nil {
 		return fmt.Errorf("cluster tls: %w", err)

@@ -12,16 +12,26 @@ import (
 
 // ServeQUIC listens for cluster-RPC connections over QUIC and dispatches
 // each request frame to the supplied handlers (e.g. the cluster RPC
-// server). When secret is non-empty, every stream must present a valid
-// auth frame first or it is closed unserved. It blocks until ctx is
+// server). When secret is non-empty, every stream must complete the
+// session-bound auth handshake first or it is closed unserved. It
+// honours the process-wide legacy compatibility setting
+// (SetLegacyAuthCompat) as read at call time. It blocks until ctx is
 // cancelled.
 func ServeQUIC(ctx context.Context, addr, secret string, logger *slog.Logger, handlers ...StreamFrameHandler) error {
-	server, err := listenQUIC(addr, secret)
+	allowLegacy := LegacyAuthCompat()
+	server, err := listenQUIC(addr, secret, allowLegacy)
 	if err != nil {
 		return err
 	}
 	defer server.close()
-	return serveQUICListener(ctx, server.listener, expectedAuthToken(secret), logger, handlers...)
+	return serveQUICListener(ctx, server.listener, listenerAuth{secret: secret, allowLegacy: allowLegacy}, logger, handlers...)
+}
+
+// listenerAuth is the auth policy of one listener: the secret every
+// stream must prove, and whether peers on the legacy ALPN are served.
+type listenerAuth struct {
+	secret      string
+	allowLegacy bool
 }
 
 // quicServer is a bound cluster-RPC listener and the transport under it.
@@ -37,8 +47,8 @@ type quicServer struct {
 // connection IDs it no longer knows with a reset the peer can verify
 // (the pre-restart process handed out tokens from the same key), so
 // peers drop dead connections immediately instead of at MaxIdleTimeout.
-func listenQUIC(addr, secret string) (*quicServer, error) {
-	tlsConf, err := quicServerTLSConfig()
+func listenQUIC(addr, secret string, allowLegacy bool) (*quicServer, error) {
+	tlsConf, err := quicServerTLSConfig(allowLegacy)
 	if err != nil {
 		return nil, fmt.Errorf("quic cluster tls: %w", err)
 	}
@@ -77,7 +87,7 @@ func (s *quicServer) close() {
 	_ = s.udpConn.Close()
 }
 
-func serveQUICListener(ctx context.Context, listener *quic.Listener, expectedToken []byte, logger *slog.Logger, handlers ...StreamFrameHandler) error {
+func serveQUICListener(ctx context.Context, listener *quic.Listener, auth listenerAuth, logger *slog.Logger, handlers ...StreamFrameHandler) error {
 	defer listener.Close()
 	go func() {
 		<-ctx.Done()
@@ -93,12 +103,40 @@ func serveQUICListener(ctx context.Context, listener *quic.Listener, expectedTok
 			}
 			return err
 		}
-		go serveQUICConn(ctx, conn, expectedToken, logger, handler)
+		go serveQUICConn(ctx, conn, auth, logger, handler)
 	}
 }
 
-func serveQUICConn(ctx context.Context, conn *quic.Conn, expectedToken []byte, logger *slog.Logger, handler StreamFrameHandler) {
+// connErrorCodeAuth is the application error code a connection is closed
+// with when its TLS session cannot carry the auth handshake.
+const connErrorCodeAuth quic.ApplicationErrorCode = 2
+
+// serveQUICConn serves every stream of one connection. The auth proofs
+// are derived ONCE here from the connection's TLS session (the exported
+// keying material is per connection, so every stream on it shares the
+// same proofs) and handed to each stream server.
+func serveQUICConn(ctx context.Context, conn *quic.Conn, auth listenerAuth, logger *slog.Logger, handler StreamFrameHandler) {
 	defer conn.CloseWithError(0, "cluster quic connection closed")
+
+	var streamAuth *connAuth
+	if auth.secret != "" {
+		binding, err := sessionBindingFrom(conn.ConnectionState().TLS, auth.allowLegacy)
+		if err != nil {
+			if logger != nil {
+				logger.Warn("cluster quic connection rejected", "component", "audit", "remote", conn.RemoteAddr().String(), "err", err)
+			}
+			_ = conn.CloseWithError(connErrorCodeAuth, "cluster auth binding unavailable")
+			return
+		}
+		if binding.legacy && logger != nil {
+			// One line per connection, not per stream: connections are
+			// long-lived and carry dozens of pooled streams.
+			logger.Warn("peer negotiated legacy fixed-token cluster auth; upgrade it and turn security.allow_legacy_cluster_auth off",
+				"component", "audit", "remote", conn.RemoteAddr().String())
+		}
+		streamAuth = newConnAuth(auth.secret, binding)
+	}
+
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
@@ -107,6 +145,6 @@ func serveQUICConn(ctx context.Context, conn *quic.Conn, expectedToken []byte, l
 			}
 			return
 		}
-		go serveStreamConn(stream, stream, expectedToken, logger, handler)
+		go serveStreamConn(stream, stream, streamAuth, logger, handler)
 	}
 }

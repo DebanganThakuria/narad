@@ -22,9 +22,19 @@ type SecurityConfig struct {
 	AdminPassword string `json:"-"`
 
 	// ClusterSecret authenticates node-to-node cluster RPC. Required
-	// when security is enabled and cluster peers are configured.
-	// Env: NARAD_CLUSTER_SECRET.
+	// when security is enabled and cluster peers are configured. Every
+	// stream proves it with a MAC bound to the QUIC connection's TLS
+	// session, in both directions. Env: NARAD_CLUSTER_SECRET.
 	ClusterSecret string `json:"-"`
+
+	// AllowLegacyClusterAuth is the one-release compatibility path for
+	// a rolling upgrade from nodes that proved the cluster secret with
+	// a fixed (replayable, one-way) token. While true, this node also
+	// offers the legacy protocol to peers that speak nothing else and
+	// logs every such connection. Set it on every node for the upgrade,
+	// then turn it off once all nodes run the session-bound protocol.
+	// Env: NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH.
+	AllowLegacyClusterAuth bool `json:"allow_legacy_cluster_auth"`
 
 	// ClusterTLSCertFile, ClusterTLSKeyFile, and ClusterTLSCAFile enable
 	// mutual TLS on the Raft metadata transport (which replicates user

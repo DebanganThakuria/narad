@@ -74,12 +74,13 @@ type QUICFrameClient struct {
 // NewQUICFrameClient returns a client whose reply waits and dials fall
 // back to timeout when the caller's context carries no deadline. A
 // non-positive timeout selects the package default. secret, when
-// non-empty, is presented on every new stream to authenticate to peers
-// that require a cluster secret; it also derives the QUIC stateless
+// non-empty, is proven on every new stream (session-bound, see auth.go)
+// and the peer must prove it back; it also derives the QUIC stateless
 // reset key, so the client and its peers can recognise each other's
-// resets across restarts.
+// resets across restarts. The legacy compatibility setting
+// (SetLegacyAuthCompat) is read at construction.
 func NewQUICFrameClient(timeout time.Duration, secret string) *QUICFrameClient {
-	return &QUICFrameClient{pool: newQUICClientPool(timeout, secret)}
+	return &QUICFrameClient{pool: newQUICClientPool(timeout, secret, LegacyAuthCompat())}
 }
 
 // Request sends one request frame to addr on the control lane and waits
