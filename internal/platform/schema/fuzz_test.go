@@ -150,7 +150,14 @@ func checkDefinitionInvariants(t *testing.T, raw []byte) error {
 			for end < len(msg) && msg[end] != '"' && msg[end] != ' ' && msg[end] != '\'' {
 				end++
 			}
-			if !bytes.Contains(raw, []byte(msg[i:end])) {
+			token := msg[i:end]
+			// A fragment the compiler appended to the caller's own $id
+			// ("file:///tmp/x#dyn" for a $dynamicRef under that $id) is
+			// still the caller's text.
+			if j := strings.IndexByte(token, '#'); j > 0 {
+				token = token[:j]
+			}
+			if !bytes.Contains(raw, []byte(token)) {
 				t.Fatalf("error leaks a path: %s", msg)
 			}
 		}
