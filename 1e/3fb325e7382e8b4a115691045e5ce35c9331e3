@@ -1,0 +1,4 @@
+internal/broker/messaging/consume.go
+  de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T10:10:34.419Z 178-206,208-215
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T10:10:34.419Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 37, "overriden_lines": 0}}}
