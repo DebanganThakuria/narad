@@ -79,7 +79,7 @@ The properties that make it work:
 - **A token reserves nothing.** It says only "I am here, tell me if records show up". That is what removes the whole give-back problem: an owner that never hears back from a peer has stranded no record, because it never took one out of circulation. Only the *claim* reserves, and it is aimed at exactly one node.
 - **One token, one record, one peer told.** Never a broadcast. An `outstanding` counter gates notifications against the available-record estimate, so the same record is never promised to two peers; a peer that declines (`pass`) retires its claim at once and the record is offered to the next holder a round trip later, rather than after a deadline.
 - **Tokens are single use and connection scoped.** Firing one consumes it, so a stale token costs exactly one notification rather than one per record for its whole life. They die with the peer's connection, which is why crash recovery for this subsystem is *do nothing*: a restarting node rebuilds them by registering again.
-- **Registration doubles as a read.** The first contact with an owner is the ordinary non-blocking consume probe carrying a token: give me a record if you have one, and remember me if you don't. A cold start therefore costs no extra round trip, and a broker restarting with a backlog needs no recovery scan: the next consumer to ask drains it.
+- **The probe comes first, registration second.** A consumer asks every remote owner for a record with an ordinary non-blocking probe, and only registers tokens with them once those probes come back empty. Registration is a separate batched frame rather than a field on the probe, so a cold start does cost one extra round trip per owner beyond the probe. What it buys is that a broker restarting with a backlog needs no recovery scan: the next consumer to register drains it, because registering marks the topic and wakes the owner's pump.
 - **TTLs travel as durations, never deadlines.** The sender subtracts on its own clock and the receiver adds on its own, so skew between two nodes can never expire a live consumer's token early. Same reasoning that keeps `LastHeartbeat` on the leader's clock.
 - **Retirement is free.** When a consumer is served, the tokens it left with the *other* owners are stale. They are dropped in the next batched frame already going to those peers, rather than paying a cancel RPC per stale token on every delivery.
 
@@ -100,6 +100,8 @@ Under load the first two dominate: a busy topic rarely empties, so the notificat
 ## Routing
 
 Consume requests land on any node. Queue-style consumes prefer local partitions (cheapest), then probe every remote owner once over node RPC, and only then spend the client's `wait`, parked on the local waiter queue and on tokens left with the owners rather than polling anything. Replay-style consumes (`offset=` + `partition=`) route straight to that partition's owner and bypass the queue state entirely: read-only time travel within retention.
+
+The token path applies on a node that owns at least one partition of the topic, because the cross-node wake is folded into the same select as the local wait and there has to be a local wait to fold it into. A node that owns none of the topic's partitions is a pure gateway: it still falls back to re-probing the owners on a backoff, so it is correct but not woken. Deployments that put consumers on nodes holding no data get the old latency profile.
 
 ## Recovery story, end to end
 

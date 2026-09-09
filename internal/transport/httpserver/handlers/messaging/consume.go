@@ -73,9 +73,10 @@ func Consume(s *handlers.Set) http.HandlerFunc {
 // starting at the router-selected one, then remote owners, and only
 // then the requested wait long-polling locally. The scan and the wait
 // are the two halves of one broker consume (ConsumeProbe/ConsumeWait):
-// the wake-up channels are snapshotted before the scan, so a commit
-// that lands while the remote owners are being asked still wakes the
-// wait, and the local partitions are not scanned again before parking.
+// the probe hands back a waiter, and the wait enqueues that waiter on
+// the topic's dispatcher queue, where the pump hands it a record. There
+// is no channel snapshot to get wrong any more, and the local
+// partitions are not scanned again before parking.
 func queueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts, localPartition int) {
 	wait := opts.Wait
 
@@ -101,11 +102,12 @@ func queueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r *http.
 		return
 	}
 
-	// The wait phase: the local long-poll raced against a forwarded
-	// long-poll to a remote owner, so a message that lands on a
-	// partition this node does not own wakes this client too. Without
-	// a remote owner to ask the router declines and the local wait runs
-	// alone.
+	// The wait phase: the local wait raced against the token protocol.
+	// A token is left with every remote owner and the cross-node wake is
+	// folded into the same select as the local one, so a message landing
+	// on a partition this node does not own reaches this client too.
+	// Without a remote owner to ask the router declines and the local
+	// wait runs alone.
 	local := &localConsumeWaiter{s: s, topic: topicName, waiter: waiter}
 	if s.Deps.Router.RouteConsumeWait(r.Context(), w, r, topicName, wait, local) {
 		return

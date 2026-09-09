@@ -44,6 +44,15 @@ func (s *RPCServer) handleTokenNotify(payload []byte) nodewire.Response {
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid token notify: "+err.Error())
 	}
+	// The sender's address is the only thing a woken consumer has to aim
+	// its claim at, so a notification without one is unanswerable. Taking
+	// it anyway is worse than refusing: waking a consumer answers
+	// "claiming", which makes the owner hold that record for its whole
+	// deadline while the claim goes to an address that cannot be dialled.
+	// handleTokenRegister refuses an empty From for the same reason.
+	if req.From == "" {
+		return errorResponse(http.StatusBadRequest, "token notify missing sender address")
+	}
 	claiming := false
 	if s.demand != nil {
 		claiming = s.demand.WakeOneWaiter(req.Topic, req.From)

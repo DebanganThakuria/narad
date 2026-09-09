@@ -3,7 +3,6 @@ package cluster
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -133,8 +132,4 @@ func writeConsumeMessage(w http.ResponseWriter, msg topic.Message) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
-}
-
-func (rt *Router) logConsumeWait(what, topicName string, err error) {
-	slog.Default().Warn(what, "topic", topicName, "err", err)
 }

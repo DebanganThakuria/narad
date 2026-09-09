@@ -17,9 +17,18 @@ import (
 // Retention has no per-partition timing requirement: nothing observes
 // when a sweep happens, only that expired segments eventually go. So
 // one goroutine walks the registered logs and sweeps the ones that are
-// due. The walk is O(open logs) but runs on the order of once a minute,
-// not once a second, so it costs a rounding error of CPU where the old
-// shape cost a timer per log.
+// due, replacing a timer per log with a single loop.
+//
+// The walk is O(registered logs) and it happens every reaperSweepFloor,
+// so the cost is a map iteration per second rather than the per-log
+// timer fires it replaced. That is a good trade at the partition counts
+// this was built for and a bad one at very high ones: a node holding
+// tens of thousands of logs with retention pays a tens-of-thousands
+// entry scan every second, under the lock that log open and close both
+// need. If that becomes the shape, the fix is a heap or timing wheel
+// keyed on each entry's next deadline so a tick touches only what is
+// actually due; the per-entry `next` field is already what such a
+// structure would order on.
 //
 // Logs with no age bound are never registered at all: no goroutine, no
 // entry, no work.

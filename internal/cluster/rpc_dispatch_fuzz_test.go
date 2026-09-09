@@ -176,6 +176,8 @@ func FuzzRPCDispatch(f *testing.F) {
 		must(nodewire.EncodeAckRequest(nodewire.AckRequest{Topic: "orders", Partition: 0, Offset: 1, Nonce: 2})),
 		must(nodewire.EncodeExtendAckRequest(nodewire.AckRequest{Topic: "orders", Offset: 1, Nonce: 2})),
 		must(nodewire.EncodeNackRequest(nodewire.AckRequest{Topic: "orders", Offset: 1, Nonce: 2})),
+		must(nodewire.EncodeTokenDelta(nodewire.TokenDelta{From: "narad-1:7942", Add: []nodewire.TokenRegistration{{Topic: "orders", TTLNanos: 1e9, MinRecords: 1}}, Drop: []string{"orders"}})),
+		must(nodewire.EncodeTokenNotifyRequest(nodewire.TokenNotifyRequest{From: "narad-1:7942", Topic: "orders", Available: 3})),
 		must(nodewire.EncodeTopicBodyRequest(nodewire.OpCreateTopic, nodewire.TopicBodyRequest{Topic: "orders", Body: body})),
 		must(nodewire.EncodeTopicBodyRequest(nodewire.OpCreateTopic, nodewire.TopicBodyRequest{Topic: "orders", Body: []byte(`{"name":"orders","unknown":1}`)})),
 		must(nodewire.EncodeTopicBodyRequest(nodewire.OpAlterTopic, nodewire.TopicBodyRequest{Topic: "orders", Body: []byte(`{"partitions":8,"retention_ms":1000}`)})),
@@ -292,6 +294,10 @@ func wireRejects(payload []byte) bool {
 		_, err = nodewire.DecodeGetAssignmentRequest(payload)
 	case nodewire.OpAppliedIndex:
 		err = nodewire.DecodeAppliedIndexRequest(payload)
+	case nodewire.OpTokenRegister:
+		_, err = nodewire.DecodeTokenDelta(payload)
+	case nodewire.OpTokenNotify:
+		_, err = nodewire.DecodeTokenNotifyRequest(payload)
 	default:
 		return true
 	}
