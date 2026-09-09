@@ -24,6 +24,7 @@ curl -u $AUTH "$NARAD/v1/topics/orders/consume?wait=10s"
 
 - `200` with a message, or `204` if nothing turned up within `wait`.
 - `wait` long-polls (up to the server's cap, typically 10s). Loop on it: that's the intended pattern; an idle loop costs one cheap request per `wait`.
+- Ask for longer than the cap and you get the cap, not an error. The response then carries **`X-Narad-Wait-Clamped`** with the value actually used, so a `204` that arrives sooner than you asked for is explained rather than mysterious. Worth logging the first time you see it: without it, a client that requested `wait=25s` and got answered at 10s looks like it is losing messages.
 - The response's `receipt_handle` is your proof of possession. Treat it as **opaque**: echo it back on ack, never parse it.
 - The message is now invisible to everyone else for `visibility_timeout_ms` (topic setting, default 30s). Your job is to finish and ack within that window.
 

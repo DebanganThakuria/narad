@@ -34,6 +34,9 @@ x-node: &node
     NARAD_HTTP_MAX_CONSUME_WAIT: "25s"
     NARAD_HTTP_WRITE_TIMEOUT: "60s"
     NARAD_HTTP_SHUTDOWN_GRACE: "30s"
+    # pprof on its own port so the scale run can attribute goroutines
+    # and heap to creation sites, not just count them.
+    NARAD_HTTP_PPROF_ADDR: ":6060"
     NARAD_LOG_FORMAT: "text"
     NARAD_LOG_LEVEL: "info"
   command: ["serve"]

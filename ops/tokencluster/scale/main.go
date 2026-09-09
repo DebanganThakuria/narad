@@ -1,15 +1,17 @@
-// Command scale measures what token storage actually costs.
+// Command scale answers what thousands of sparse topics actually cost.
 //
-// It creates N sparse topics, parks one consumer per topic on a single
-// node, and reads the heap on an OWNER node before and after. Every
-// parked consumer leaves one token at each remote owner, so the delta
-// divided by N is the real per-token cost including map overhead,
-// the per-topic dispatch state it forces into existence, and the
-// inbound RPC bookkeeping — not just the size of the struct.
+// It runs INSIDE the cluster's docker network on purpose. Driving this
+// from the host through Colima's userspace port-forwarder wedged the
+// forwarder and took the Docker daemon down at ~2000 concurrent
+// connections — not an OOM, and nothing to do with narad. Talking to
+// narad-1:7942 directly removes that hop entirely.
+//
+// It reports goroutines, heap and CPU at each step, so the question
+// "which of these scale linearly with topics" is answered with numbers
+// rather than inference.
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -21,110 +23,140 @@ import (
 	"time"
 )
 
-var client = &http.Client{Timeout: 90 * time.Second}
+var client = &http.Client{Timeout: 120 * time.Second}
 
 func metric(node, name string) float64 {
-	resp, err := client.Get(node + "/metrics")
+	resp, err := client.Get("http://" + node + ":7942/metrics")
 	if err != nil {
-		return 0
+		return -1
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	for _, line := range strings.Split(string(body), "\n") {
 		if strings.HasPrefix(line, name+" ") {
-			v, _ := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, name+" ")), 64)
+			v, _ := strconv.ParseFloat(strings.TrimSpace(line[len(name)+1:]), 64)
 			return v
 		}
 	}
-	return 0
+	return -1
 }
 
-func snapshot(nodes []string, label string) {
-	fmt.Printf("  %-22s", label)
-	for i, n := range nodes {
-		fmt.Printf(" n%d=%5.1fMB/%5dg", i+1, metric(n, "go_memstats_heap_inuse_bytes")/(1<<20),
-			int(metric(n, "go_goroutines")))
+type sample struct {
+	goroutines, heapMB, cpu float64
+}
+
+func take(node string) sample {
+	return sample{
+		goroutines: metric(node, "go_goroutines"),
+		heapMB:     metric(node, "go_memstats_heap_inuse_bytes") / (1 << 20),
+		cpu:        metric(node, "process_cpu_seconds_total"),
 	}
-	fmt.Println()
 }
 
-func main() {
-	var nodesCSV string
-	var topics, parallel int
-	flag.StringVar(&nodesCSV, "nodes", "http://127.0.0.1:17942,http://127.0.0.1:17943,http://127.0.0.1:17944,http://127.0.0.1:17945", "")
-	flag.IntVar(&topics, "topics", 2000, "sparse topics to create")
-	flag.IntVar(&parallel, "parallel", 64, "concurrent topic creations")
-	flag.Parse()
-	nodes := strings.Split(nodesCSV, ",")
-
-	fmt.Printf("scale: %d sparse topics, one parked consumer each\n\n", topics)
-	snapshot(nodes, "baseline")
-
-	// --- create topics ---
+func createTopics(nodes []string, from, to, parallel int) (int, time.Duration) {
 	t0 := time.Now()
-	var created atomic.Int64
+	var ok atomic.Int64
 	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
-	for i := range topics {
+	for i := from; i < to; i++ {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(i int) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			body := strings.NewReader(fmt.Sprintf(`{"name":"sc-%d","partitions":3}`, i))
-			req, _ := http.NewRequest("POST", nodes[i%len(nodes)]+"/v1/topics", body)
+			req, _ := http.NewRequest("POST", "http://"+nodes[i%len(nodes)]+":7942/v1/topics", body)
 			req.Header.Set("content-type", "application/json")
 			resp, err := client.Do(req)
-			if err == nil {
-				io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
-				if resp.StatusCode < 300 {
-					created.Add(1)
+			if err != nil {
+				return
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode < 300 {
+				ok.Add(1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	return int(ok.Load()), time.Since(t0)
+}
+
+// touch opens each topic's partition logs by consuming once with no
+// wait. Creating a topic is only metadata; the logs (and whatever they
+// cost) do not exist until something reads or writes them, and that
+// distinction is most of the answer.
+func touch(nodes []string, from, to, parallel int) {
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
+	for i := from; i < to; i++ {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			for _, n := range nodes {
+				resp, err := client.Get(fmt.Sprintf("http://%s:7942/v1/topics/sc-%d/consume?wait=0", n, i))
+				if err == nil {
+					io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
 				}
 			}
 		}(i)
 	}
 	wg.Wait()
-	fmt.Printf("\n  created %d topics in %.1fs\n\n", created.Load(), time.Since(t0).Seconds())
-	time.Sleep(5 * time.Second)
-	snapshot(nodes, "topics, no tokens")
+}
 
-	// --- park one consumer per topic, all on node 1 ---
-	ctx, cancel := context.WithCancel(context.Background())
-	var parked atomic.Int64
-	var pwg sync.WaitGroup
-	for i := range topics {
-		pwg.Add(1)
-		go func(i int) {
-			defer pwg.Done()
-			url := fmt.Sprintf("%s/v1/topics/sc-%d/consume?wait=25s", nodes[0], i)
-			req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-			parked.Add(1)
-			resp, err := client.Do(req)
-			if err == nil {
-				io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
-			}
-		}(i)
-		if i%200 == 0 {
-			time.Sleep(150 * time.Millisecond) // spread the registration burst
+func report(label string, nodes []string, prev map[string]sample, window float64) map[string]sample {
+	cur := map[string]sample{}
+	fmt.Printf("  %-26s", label)
+	for _, n := range nodes {
+		s := take(n)
+		cur[n] = s
+		cpu := ""
+		if p, ok := prev[n]; ok && window > 0 {
+			cpu = fmt.Sprintf(" cpu=%4.1f%%", (s.cpu-p.cpu)/window*100)
 		}
+		fmt.Printf(" %s:%5.0fg/%6.1fMB%s", strings.TrimPrefix(n, "narad-"), s.goroutines, s.heapMB, cpu)
 	}
+	fmt.Println()
+	return cur
+}
 
-	// Let every consumer register its tokens with the other three nodes.
-	time.Sleep(12 * time.Second)
-	fmt.Printf("\n  %d consumers parked; each holds a token on every remote owner\n\n", parked.Load())
-	snapshot(nodes, "tokens registered")
+func main() {
+	var nodesCSV, steps string
+	var parallel int
+	flag.StringVar(&nodesCSV, "nodes", "narad-1,narad-2,narad-3,narad-4", "")
+	flag.StringVar(&steps, "steps", "1000,5000,10000", "cumulative topic counts")
+	flag.IntVar(&parallel, "parallel", 96, "")
+	flag.Parse()
+	nodes := strings.Split(nodesCSV, ",")
 
-	base := metric(nodes[1], "go_memstats_heap_inuse_bytes")
-	cancel()
-	pwg.Wait()
-	time.Sleep(10 * time.Second)
-	snapshot(nodes, "after consumers left")
+	fmt.Println("scale: sparse topics, 3 partitions each\n")
+	prev := report("baseline", nodes, nil, 0)
 
-	fmt.Printf("\n  owner-side heap with %d tokens: %.1f MB\n", topics, base/(1<<20))
-	fmt.Printf("  extrapolated 10k topics: %.1f MB\n", base/(1<<20)*10000/float64(topics))
-	fmt.Printf("  extrapolated 50k topics: %.1f MB\n", base/(1<<20)*50000/float64(topics))
-	fmt.Println("\n  (extrapolation is linear and therefore generous: it carries the\n" +
-		"   fixed baseline into every multiple. Read the per-token delta below.)")
+	created := 0
+	for _, s := range strings.Split(steps, ",") {
+		target, err := strconv.Atoi(strings.TrimSpace(s))
+		if err != nil {
+			continue
+		}
+		n, took := createTopics(nodes, created, target, parallel)
+		created = target
+		fmt.Printf("\n  +%d topics in %.1fs (%.0f/s)\n", n, took.Seconds(), float64(n)/took.Seconds())
+
+		time.Sleep(4 * time.Second)
+		report(fmt.Sprintf("%d topics, logs closed", created), nodes, nil, 0)
+
+		// Open every partition log: this is where per-log cost appears.
+		touch(nodes, created-n, created, parallel)
+		time.Sleep(4 * time.Second)
+		before := report(fmt.Sprintf("%d topics, logs OPEN", created), nodes, nil, 0)
+
+		// Idle CPU over a fixed window at this size.
+		time.Sleep(20 * time.Second)
+		prev = report(fmt.Sprintf("%d topics, idle 20s", created), nodes, before, 20)
+	}
+	_ = prev
+	fmt.Println("\n  goroutines per open log = (goroutines at OPEN - baseline) / (topics * 3 partitions owned locally)")
 }

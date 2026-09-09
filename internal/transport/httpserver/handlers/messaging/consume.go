@@ -284,6 +284,12 @@ func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) 
 			ceiling = handlers.DefaultMaxConsumeWait
 		}
 		if d > ceiling {
+			// Say so. Silently serving a shorter wait than was asked for
+			// makes a client look like it is losing messages: it believes
+			// it polled for 25s, gets a 204 at 10s, and nothing anywhere
+			// indicates the request was altered. The header costs nothing
+			// and turns a confusing timeout into an obvious one.
+			w.Header().Set("X-Narad-Wait-Clamped", ceiling.String())
 			d = ceiling
 		}
 		opts.Wait = d

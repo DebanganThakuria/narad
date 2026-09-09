@@ -235,33 +235,92 @@ def t_inflight_cap_no_hot_loop():
 
 
 def t_rebalance_under_live_tokens():
-    """Ownership moving while tokens are live. A token at a node that no
-    longer owns any of the topic is dead weight; the consumer must be
-    served by whoever holds the partitions now."""
+    """A REAL ownership move, not a restart.
+
+    Decommissioning a member migrates its partitions to the others. A
+    consumer holding a token at a node that no longer owns any of the
+    topic must still be served by whoever holds the partitions now — its
+    token there is dead weight, and nothing re-registers it
+    automatically for an in-flight request.
+
+    The earlier version of this test restarted a node instead, which
+    proved much less: a restart returns ownership to the same node.
+    """
     topic = "e2-rebalance"
     mktopic(topic)
     drain(topic)
 
-    # Park consumers so tokens are spread everywhere, then move
-    # ownership by taking a node out and bringing it back.
-    outs = [{} for _ in range(3)]
-    ts = [park(NODES[i], topic, "25s", outs[i]) for i in range(3)]
-    time.sleep(1.5)
-    subprocess.run(COMPOSE + ["restart", "narad-4"], capture_output=True)
-    time.sleep(10)
+    victim = "narad-4"
+    survivors = NODES[:3]
 
-    for i in range(3):
-        produce(NODES[i], topic, f"rebal-{i}")
+    # Produce a backlog first so there is something to serve regardless
+    # of when the move lands.
+    sent = set()
+    for i in range(12):
+        mid = f"rebal-{i}"
+        if produce(survivors[i % 3], topic, mid):
+            sent.add(mid)
+
+    got, lock, stop = set(), threading.Lock(), threading.Event()
+
+    def loop(node):
+        while not stop.is_set():
+            b = consume(node, topic, wait="3s", timeout=15)
+            if b:
+                with lock:
+                    got.add(mid_of(b))
+                ack(node, topic, b["receipt_handle"])
+
+    ts = [threading.Thread(target=loop, args=(n,), daemon=True) for n in survivors]
     for t in ts:
-        t.join()
+        t.start()
+    time.sleep(1.0)
 
-    got = [mid_of(o["body"]) for o in outs if o.get("body")]
-    for i, o in enumerate(outs):
-        if o.get("body"):
-            ack(NODES[i], topic, o["body"]["receipt_handle"])
-    ok = len(got) >= 2
-    record("consumers still served while ownership churns", ok,
-           f"{len(got)}/3 delivered during a node restart")
+    # Move ownership off the victim for real.
+    st, _ = call("POST", f"{NODES[0]}/v1/cluster/members/{victim}/decommission", {}, timeout=30)
+    moved = st in (200, 202, 204)
+
+    # Wait for the victim to actually shed its partitions.
+    drained = False
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        _, body = call("GET", f"{NODES[0]}/v1/cluster/members", timeout=10)
+        if body:
+            for m in body.get("members", []):
+                if m.get("id") == victim and m.get("owned_partitions", 1) == 0:
+                    drained = True
+            if drained:
+                break
+        time.sleep(2)
+
+    # Produce again, now that the victim owns nothing.
+    for i in range(12, 20):
+        mid = f"rebal-{i}"
+        if produce(survivors[i % 3], topic, mid):
+            sent.add(mid)
+
+    # Generous: a record reserved at the instant its partition moved is
+    # redelivered only after its visibility timeout (30s default), and
+    # the move itself takes time, so a short window would report a
+    # delayed record as a lost one.
+    end = time.time() + 150
+    while time.time() < end:
+        with lock:
+            if got >= sent:
+                break
+        time.sleep(1)
+    stop.set()
+    time.sleep(1)
+
+    # Undo, so later tests see a whole cluster.
+    call("DELETE", f"{NODES[0]}/v1/cluster/members/{victim}/decommission", {}, timeout=30)
+    time.sleep(5)
+
+    missing = sent - got
+    ok = moved and not missing
+    record("consumers keep being served across a real ownership move", ok,
+           f"decommission={'accepted' if moved else 'REFUSED'}, "
+           f"victim drained={drained}, {len(got)}/{len(sent)} delivered, {len(missing)} lost")
 
 
 def t_delete_topic_with_live_tokens():

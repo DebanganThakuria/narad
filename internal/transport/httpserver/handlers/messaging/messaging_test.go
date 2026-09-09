@@ -1287,3 +1287,44 @@ func (f *fakeBroker) RegisterRemoteDemand(context.Context, string, brokermsg.Rem
 }
 
 func (f *fakeBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}
+
+// A wait longer than the configured ceiling is clamped, and the client
+// must be told. Silently serving a shorter wait makes a consumer look
+// like it is losing messages: it believes it polled for 25s, gets a 204
+// at the ceiling, and nothing indicates the request was altered.
+func TestConsumeAnnouncesAClampedWait(t *testing.T) {
+	// newTestSet configures a 1s ceiling.
+	s := newTestSet(&fakeBroker{
+		consumeFn: func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+			return topic.Message{}, false, nil
+		},
+	}, nil)
+
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=25s", nil)
+	req.SetPathValue("topic", "orders")
+	Consume(s)(res, req)
+
+	if got := res.Header().Get("X-Narad-Wait-Clamped"); got != "1s" {
+		t.Fatalf("X-Narad-Wait-Clamped = %q, want %q", got, "1s")
+	}
+}
+
+// A wait inside the ceiling is served as asked, with no header: the
+// signal has to mean something, so it must not fire on every request.
+func TestConsumeDoesNotAnnounceAnUnclampedWait(t *testing.T) {
+	s := newTestSet(&fakeBroker{
+		consumeFn: func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+			return topic.Message{}, false, nil
+		},
+	}, nil)
+
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=100ms", nil)
+	req.SetPathValue("topic", "orders")
+	Consume(s)(res, req)
+
+	if got := res.Header().Get("X-Narad-Wait-Clamped"); got != "" {
+		t.Fatalf("X-Narad-Wait-Clamped = %q on an unclamped wait, want empty", got)
+	}
+}
