@@ -1,0 +1,8 @@
+internal/cluster/token_requester.go
+  de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T13:09:17.559Z 179-193,196,198,200,204-209
+ops/tokencluster/edgecases2.py
+  de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T12:48:59.397Z 1-2,4-9,11-18,20-23,26-38,41-43,46-49,52-54,57-59,62-64,67-71,74-76,79-83,86,88-89,91-98,100-106,108-112,114-119,122-123,125-130,132-137,139-146,149-155,157-164,166-172,175-182,184-186,188-201,204-211,213-215,217-223,225-234,237-243,245-251,253-256,258-264,267-273,275-280,282-293,296-303,305-319,322-331,333-339,342-343
+ops/tokencluster/scale/main.go
+  de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T12:55:18.534Z 1-9,11-22,24,26-40,42-49,51-58,60-61,63-90,92-112,114-117,119-123,125-130
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T13:09:17.559Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 24, "overriden_lines": 0}, "de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T12:48:59.397Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 280, "overriden_lines": 0}, "de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T12:55:18.534Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 119, "overriden_lines": 0}}}
