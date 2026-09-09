@@ -303,3 +303,11 @@ func (f *fakeBroker) ConsumeProbe(ctx context.Context, topicName string, opts br
 func (f *fakeBroker) ConsumeWait(context.Context, *brokermsg.ConsumeWaiter, time.Duration) (topic.Message, bool, error) {
 	return topic.Message{}, false, nil
 }
+
+// The token protocol is a cluster-layer concern; these handler fakes
+// only need to satisfy the interface.
+func (f *fakeBroker) RegisterRemoteDemand(context.Context, string, brokermsg.RemoteDemand) error {
+	return nil
+}
+
+func (f *fakeBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}

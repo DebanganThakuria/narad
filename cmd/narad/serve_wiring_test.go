@@ -335,3 +335,9 @@ func (stubBroker) ConsumeProbe(context.Context, string, brokermsg.ConsumeOpts) (
 func (stubBroker) ConsumeWait(context.Context, *brokermsg.ConsumeWaiter, time.Duration) (topic.Message, bool, error) {
 	return topic.Message{}, false, nil
 }
+
+func (stubBroker) RegisterRemoteDemand(context.Context, string, brokermsg.RemoteDemand) error {
+	return nil
+}
+
+func (stubBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}

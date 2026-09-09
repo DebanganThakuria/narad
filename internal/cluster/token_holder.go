@@ -96,6 +96,10 @@ type demandRegistrar interface {
 type tokenHolder struct {
 	broker demandRegistrar
 	peer   peerClient
+	// selfAddr is what this node puts in a notification so the peer can
+	// aim its claim at exactly the node holding the record, rather than
+	// asking every owner in turn.
+	selfAddr string
 
 	mu sync.Mutex
 	// live indexes tokens by peer and topic so a drop, or a peer whose
@@ -103,11 +107,12 @@ type tokenHolder struct {
 	live map[string]map[string]*peerToken
 }
 
-func newTokenHolder(broker demandRegistrar, peer peerClient) *tokenHolder {
+func newTokenHolder(broker demandRegistrar, peer peerClient, selfAddr string) *tokenHolder {
 	return &tokenHolder{
-		broker: broker,
-		peer:   peer,
-		live:   make(map[string]map[string]*peerToken),
+		broker:   broker,
+		peer:     peer,
+		selfAddr: selfAddr,
+		live:     make(map[string]map[string]*peerToken),
 	}
 }
 
@@ -203,9 +208,18 @@ func (h *tokenHolder) forget(tok *peerToken) {
 // failure reads as a pass: the record goes to somebody else immediately
 // rather than being held for a claim that is not coming.
 func (h *tokenHolder) notify(ctx context.Context, addr, topicName string) bool {
-	res, err := h.peer.NotifyToken(ctx, addr, nodewire.TokenNotifyRequest{Topic: topicName})
+	res, err := h.peer.NotifyToken(ctx, addr, nodewire.TokenNotifyRequest{
+		From:  h.selfAddr,
+		Topic: topicName,
+	})
 	if err != nil {
 		return false
 	}
 	return nodewire.DecodeTokenNotifyReply(res.Body).Claiming
+}
+
+// NewTokenHolder builds the owner half: the store of tokens peers have
+// left with this node, and the client used to spend them.
+func NewTokenHolder(broker demandRegistrar, peer *PeerClient, selfAddr string) *tokenHolder {
+	return newTokenHolder(broker, peer, selfAddr)
 }

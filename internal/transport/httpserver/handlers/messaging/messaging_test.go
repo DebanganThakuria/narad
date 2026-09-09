@@ -1278,3 +1278,11 @@ func (f *fakeRouter) RouteNack(ctx context.Context, w http.ResponseWriter, r *ht
 	}
 	return f.routeNackFn(ctx, w, r, topicName, handle)
 }
+
+// The token protocol is a cluster-layer concern; these handler fakes
+// only need to satisfy the interface.
+func (f *fakeBroker) RegisterRemoteDemand(context.Context, string, brokermsg.RemoteDemand) error {
+	return nil
+}
+
+func (f *fakeBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}

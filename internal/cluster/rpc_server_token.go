@@ -46,7 +46,7 @@ func (s *RPCServer) handleTokenNotify(payload []byte) nodewire.Response {
 	}
 	claiming := false
 	if s.demand != nil {
-		claiming = s.demand.WakeOneWaiter(req.Topic)
+		claiming = s.demand.WakeOneWaiter(req.Topic, req.From)
 	}
 	return nodewire.Response{
 		Status:      http.StatusOK,
@@ -59,9 +59,10 @@ func (s *RPCServer) handleTokenNotify(payload []byte) nodewire.Response {
 // node has a consumer parked on a topic and can wake one to claim.
 // *Router satisfies it.
 type localDemand interface {
-	// WakeOneWaiter reports whether a consumer was woken to claim. False
-	// is a pass: nobody here wants this any more.
-	WakeOneWaiter(topicName string) bool
+	// WakeOneWaiter hands the owner's address to a parked consumer and
+	// reports whether one took it. False is a pass: nobody here wants
+	// this any more, so the owner should offer it elsewhere at once.
+	WakeOneWaiter(topicName, from string) bool
 }
 
 // SetTokenHolder wires the owner half: the store of tokens peers have

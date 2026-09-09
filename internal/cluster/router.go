@@ -42,6 +42,12 @@ type Router struct {
 	// SetMaxConsumeWait so the router honors the same ceiling as the HTTP
 	// handlers.
 	maxConsumeWait time.Duration
+
+	// tokens is the requester half of the token protocol: this node's
+	// parked consumers and the interest it has registered with the owners
+	// of the topics they wait on. Disabled until SetSelfAddr supplies a
+	// return address for owners to call back on.
+	tokens *tokenRequester
 }
 
 // defaultMaxConsumeWait is the ceiling applied to a long-poll consume wait
@@ -56,7 +62,7 @@ const defaultMaxConsumeWait = 30 * time.Second
 // work unwired; serve.go replaces it with the process-wide client via
 // SetPeerClient so the node holds one connection pool per peer.
 func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager, clusterSecret string) *Router {
-	return &Router{
+	rt := &Router{
 		store:                     store,
 		selfID:                    selfID,
 		partitions:                mgr,
@@ -67,7 +73,21 @@ func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager, clu
 		consumeReprobeMaxInterval: remoteConsumeReprobeMaxInterval,
 		maxConsumeWait:            defaultMaxConsumeWait,
 	}
+	rt.tokens = newTokenRequester(rt, "")
+	return rt
 }
+
+// SetSelfAddr supplies the address peers should call back on and turns
+// the token protocol on for this node. Without it a token could never be
+// spent, so registering one would only strand it; the router falls back
+// to the polling path instead. Call before serving.
+func (rt *Router) SetSelfAddr(addr string) {
+	rt.tokens = newTokenRequester(rt, addr)
+}
+
+// LocalDemand exposes the requester half to the RPC server, which turns
+// an inbound notification into a woken consumer.
+func (rt *Router) LocalDemand() *tokenRequester { return rt.tokens }
 
 // SetPeerClient makes the router forward through pc instead of the client
 // NewRouter built. A nil pc keeps the current client. Call before serving.

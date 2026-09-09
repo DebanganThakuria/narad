@@ -112,6 +112,12 @@ type Broker interface {
 	// messaging.Engine.ConsumeProbe.
 	ConsumeProbe(ctx context.Context, topicName string, opts messaging.ConsumeOpts) (msg topic.Message, found bool, waiter *messaging.ConsumeWaiter, err error)
 	ConsumeWait(ctx context.Context, waiter *messaging.ConsumeWaiter, wait time.Duration) (msg topic.Message, found bool, err error)
+	// RegisterRemoteDemand and DropRemoteDemand let the cluster layer put
+	// a peer's token in the same delivery queue as local consumers. The
+	// peer is only ever TOLD that records exist and claims them itself,
+	// so nothing is reserved on its behalf. See messaging.RemoteDemand.
+	RegisterRemoteDemand(ctx context.Context, topicName string, rd messaging.RemoteDemand) error
+	DropRemoteDemand(topicName string, rd messaging.RemoteDemand)
 	// Ack accepts a decoded receipt handle returned by a prior Consume
 	// call. The broker commits only if the handle still matches an
 	// active reservation.

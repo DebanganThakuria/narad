@@ -61,7 +61,7 @@ func TestTokenDeltaRejectsOversizedBatch(t *testing.T) {
 }
 
 func TestTokenNotifyRoundTrip(t *testing.T) {
-	payload, err := EncodeTokenNotifyRequest(TokenNotifyRequest{Topic: "orders", Available: 7})
+	payload, err := EncodeTokenNotifyRequest(TokenNotifyRequest{From: "node-a:7942", Topic: "orders", Available: 7})
 	if err != nil {
 		t.Fatalf("EncodeTokenNotifyRequest() error = %v", err)
 	}
@@ -69,8 +69,8 @@ func TestTokenNotifyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeTokenNotifyRequest() error = %v", err)
 	}
-	if got.Topic != "orders" || got.Available != 7 {
-		t.Fatalf("decoded %+v, want orders/7", got)
+	if got.From != "node-a:7942" || got.Topic != "orders" || got.Available != 7 {
+		t.Fatalf("decoded %+v, want node-a:7942/orders/7", got)
 	}
 }
 

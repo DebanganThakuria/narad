@@ -273,6 +273,10 @@ type TokenRegistration struct {
 // topic it holds a token on. Available is what the owner believes is
 // ready right now; it is an estimate and may over-report.
 type TokenNotifyRequest struct {
+	// From is the owner's own node address. The claim has to be aimed at
+	// the node that actually has the record, so the notification says who
+	// is calling rather than making the receiver guess or ask everyone.
+	From      string
 	Topic     string
 	Available int32
 }

@@ -277,3 +277,11 @@ func TestReadyzConsultsMetastoreLiveness(t *testing.T) {
 		t.Fatalf("Readyz() on an elected single node = %d, want %d", code, http.StatusOK)
 	}
 }
+
+// The token protocol is a cluster-layer concern; these handler fakes
+// only need to satisfy the interface.
+func (f *fakeBroker) RegisterRemoteDemand(context.Context, string, brokermsg.RemoteDemand) error {
+	return nil
+}
+
+func (f *fakeBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}

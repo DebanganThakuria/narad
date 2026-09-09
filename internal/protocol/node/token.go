@@ -107,7 +107,10 @@ func DecodeTokenDelta(payload []byte) (TokenDelta, error) {
 // EncodeTokenNotifyRequest encodes an OpTokenNotify payload: the frame
 // an owner sends to spend one of a peer's tokens.
 func EncodeTokenNotifyRequest(req TokenNotifyRequest) ([]byte, error) {
-	w := opWriter(OpTokenNotify, fieldLen(req.Topic)+4)
+	w := opWriter(OpTokenNotify, fieldLen(req.From)+fieldLen(req.Topic)+4)
+	if err := w.string(req.From); err != nil {
+		return nil, err
+	}
 	if err := w.string(req.Topic); err != nil {
 		return nil, err
 	}
@@ -118,6 +121,10 @@ func EncodeTokenNotifyRequest(req TokenNotifyRequest) ([]byte, error) {
 // DecodeTokenNotifyRequest decodes an OpTokenNotify payload.
 func DecodeTokenNotifyRequest(payload []byte) (TokenNotifyRequest, error) {
 	r, err := opReader(payload, OpTokenNotify)
+	if err != nil {
+		return TokenNotifyRequest{}, err
+	}
+	from, err := r.string()
 	if err != nil {
 		return TokenNotifyRequest{}, err
 	}
@@ -132,7 +139,7 @@ func DecodeTokenNotifyRequest(payload []byte) (TokenNotifyRequest, error) {
 	if err := r.done(); err != nil {
 		return TokenNotifyRequest{}, err
 	}
-	return TokenNotifyRequest{Topic: topic, Available: available}, nil
+	return TokenNotifyRequest{From: from, Topic: topic, Available: available}, nil
 }
 
 // EncodeTokenNotifyReply encodes the verdict body: one byte, because

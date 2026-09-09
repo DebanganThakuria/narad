@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 )
@@ -410,19 +411,41 @@ func (d *dispatcher) pumpTopic(topicName string) {
 	}
 }
 
-// resolveOutstanding retires one in-flight notification. A peer that
-// declined frees its record immediately, so the pump is kicked to offer
-// it to whoever is next.
+// claimDeadline is how long a peer that said it would claim holds its
+// record. It can be aggressive, because being wrong costs one wasted
+// round trip and never a double delivery: two peers claiming the same
+// record both call ReserveNext, which is atomic, so one wins and the
+// other gets an empty answer and re-registers. Contrast the visibility
+// timeout, which must stay conservative precisely because being wrong
+// there hands one record to two consumers.
+//
+// TODO: derive this per peer from observed claim latency, so a slow but
+// healthy peer is not written off on every notification.
+const claimDeadline = time.Second
+
+// resolveOutstanding retires one in-flight notification.
+//
+// A peer that DECLINED frees its record at once, so the pump is kicked
+// to offer it to whoever is next. A peer that said it would claim keeps
+// its hold until the deadline: retiring it immediately would let the
+// pump promise the very same record to a second peer while the first is
+// still on its way to collect it.
 func (d *dispatcher) resolveOutstanding(topicName string, claiming bool) {
+	if claiming {
+		time.AfterFunc(claimDeadline, func() { d.retireOutstanding(topicName) })
+		return
+	}
+	d.retireOutstanding(topicName)
+	d.markDirty(topicName)
+}
+
+func (d *dispatcher) retireOutstanding(topicName string) {
 	st := d.stateFor(topicName)
 	st.mu.Lock()
 	if st.outstanding > 0 {
 		st.outstanding--
 	}
 	st.mu.Unlock()
-	if !claiming {
-		d.markDirty(topicName)
-	}
 }
 
 // registerRemote adds a peer's interest to the topic's demand queue.

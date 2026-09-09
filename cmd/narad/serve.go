@@ -321,7 +321,16 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 	// forward and re-probe paths to the same ceiling the HTTP handlers use.
 	router.SetMaxConsumeWait(cfg.HTTP.MaxConsumeWait.D())
 
+	// The token protocol needs a return address so owners can call back
+	// when they have a record; without one the router falls back to the
+	// polling path.
+	router.SetSelfAddr(cfg.Cluster.AdvertiseAddr)
+
 	rpcServer := cluster.NewRPCServer(bc.broker, ms, log)
+	// Owner half: the tokens peers leave here. Requester half: how an
+	// inbound notification reaches a consumer parked on this node.
+	rpcServer.SetTokenHolder(cluster.NewTokenHolder(bc.broker, peerRPC, cfg.Cluster.AdvertiseAddr))
+	rpcServer.SetLocalDemand(router.LocalDemand())
 	// The RPC-side clamp on wire-supplied consume waits must agree with
 	// the router's and the HTTP handlers' ceiling.
 	rpcServer.SetMaxConsumeWait(cfg.HTTP.MaxConsumeWait.D())

@@ -297,3 +297,9 @@ func wireRejects(payload []byte) bool {
 	}
 	return err != nil
 }
+
+func (stubBroker) RegisterRemoteDemand(context.Context, string, brokermsg.RemoteDemand) error {
+	return nil
+}
+
+func (stubBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}
