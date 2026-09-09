@@ -30,6 +30,26 @@ func (l *Log) notifyAll() {
 		l.notify = make(chan struct{})
 		l.notifyWaiters = false
 	}
+	wake := l.wakeNotifier
+	l.notifyMu.Unlock()
+	// Outside notifyMu: the callback belongs to a higher layer and must
+	// never be able to re-enter the log under the notify lock. It is
+	// invoked unconditionally, NOT gated on notifyWaiters, because a
+	// consumer parked in the dispatcher never fetches a notify channel
+	// and so would never set that flag.
+	if wake != nil {
+		wake()
+	}
+}
+
+// SetWakeNotifier registers fn to run whenever this log broadcasts that
+// records may have become deliverable — a high-watermark advance, a
+// Wake (nack, lease expiry, freed cap slot), or Close. It runs on the
+// committing goroutine, so fn must not block and must not call back
+// into the log. Passing nil clears it.
+func (l *Log) SetWakeNotifier(fn func()) {
+	l.notifyMu.Lock()
+	l.wakeNotifier = fn
 	l.notifyMu.Unlock()
 }
 

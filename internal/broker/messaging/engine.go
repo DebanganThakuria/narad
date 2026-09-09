@@ -33,6 +33,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
@@ -101,6 +102,11 @@ type Engine struct {
 	// frontier it reports is final once the in-flight leases have been
 	// acked or released; see PrepareHandoff.
 	consumePauses map[string]int64
+
+	// dispatch owns the per-topic waiter queues and the single pump
+	// goroutine that hands records to them; see dispatch.go. Queue-style
+	// long-poll consumes park there instead of scanning.
+	dispatch *dispatcher
 }
 
 // NewEngine wires an Engine.
@@ -131,7 +137,7 @@ func NewEngine(
 			}
 		})
 	}
-	return &Engine{
+	e := &Engine{
 		metastore:       ms,
 		schemas:         schemas,
 		partitions:      partitions,
@@ -146,6 +152,17 @@ func NewEngine(
 		memberCache:     make(map[string]cached[routingMember]),
 		schemaLoadCache: make(map[string]cached[bool]),
 	}
+	e.dispatch = newDispatcher(e)
+	e.dispatch.start()
+	if logs != nil {
+		// Every partition log tells the dispatcher when records may have
+		// become deliverable. Installed at open time because a log has no
+		// idea which topic it belongs to; the closure carries that.
+		logs.SetOpened(func(topicName string, _ int, l *storage.Log) {
+			l.SetWakeNotifier(e.dispatch.wakeNotifier(topicName))
+		})
+	}
+	return e
 }
 
 // nextConsumeScanStart rotates the queue-mode scan start across a
@@ -168,6 +185,11 @@ func (e *Engine) nextConsumeScanStart(topicName string, partitions int) int {
 // Close releases the ingress WAL, if any. Partition logs are owned by
 // runtime.Logs and closed by the broker lifecycle.
 func (e *Engine) Close() error {
+	if e.dispatch != nil {
+		// Stops the pump and wakes every parked consumer, so no consume
+		// outlives the engine.
+		e.dispatch.close()
+	}
 	if e.ingress != nil {
 		return e.ingress.Close()
 	}

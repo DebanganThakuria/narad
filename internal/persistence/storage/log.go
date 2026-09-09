@@ -71,9 +71,14 @@ type Log struct {
 	// waiters snapshot the channel BEFORE their final data probe: a
 	// broadcast ordered before NotifyC is not needed (the probe sees the
 	// data), and one ordered after sees the flag set.
+	// wakeNotifier, when set, is invoked on every broadcast (outside
+	// notifyMu) so a higher layer can be told that records may have
+	// become deliverable without parking a goroutine on the channel.
+	// See SetWakeNotifier.
 	notifyMu      sync.Mutex
 	notify        chan struct{}
 	notifyWaiters bool
+	wakeNotifier  func()
 
 	// appendGate makes Append/AppendBatch atomic with respect to Close:
 	// appends hold the read side across the closed-check + buffer push,

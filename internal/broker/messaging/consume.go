@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/consumer"
@@ -36,28 +35,55 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 
 	visibilityTimeout := time.Duration(t.VisibilityTimeoutMs) * time.Millisecond
 	scanStart := e.consumeScanStart(topicName, scan, opts)
-	return e.consumeQueue(ctx, topicName, scan, scanStart, visibilityTimeout, opts.Wait, nil)
+	start := time.Now()
+
+	msg, found, err := e.tryQueueRead(ctx, topicName, scan, scanStart, visibilityTimeout)
+	if err != nil {
+		if e.metrics != nil {
+			e.metrics.IncError("messaging", "consume")
+		}
+		return msg, false, err
+	}
+	if found {
+		e.recordConsumed(topicName, msg.Partition, len(msg.Payload))
+		e.recordConsumeWait(topicName, "hit", time.Since(start))
+		return msg, true, nil
+	}
+	if opts.Wait <= 0 {
+		e.recordConsumeEmpty(topicName, "no_wait", time.Since(start))
+		return topic.Message{}, false, nil
+	}
+	// Park on the topic's waiter queue rather than scanning again: the
+	// dispatcher hands this consumer a record when one becomes
+	// reservable. Same path the split ConsumeProbe/ConsumeWait pair
+	// uses, so a forwarded consume behaves exactly like a local one.
+	return e.ConsumeWait(ctx, &ConsumeWaiter{
+		topic:             topicName,
+		scan:              scan,
+		scanStart:         scanStart,
+		visibilityTimeout: visibilityTimeout,
+		start:             start,
+	}, opts.Wait)
 }
 
 // ConsumeWaiter is the state a ConsumeProbe leaves behind so a later
-// ConsumeWait can park on exactly the wake-up channels that were
-// snapshotted BEFORE the probe. That ordering is what makes the
-// handler's ladder (probe locally, ask remote owners, then wait) free
-// of lost wake-ups without probing the local partitions a second time.
+// ConsumeWait can park without re-scanning. There is no wake-up channel
+// snapshot to get wrong any more: the dispatcher notices new data
+// through the log's wake notifier and hands a record to whichever
+// waiter is at the head of the topic's queue.
 type ConsumeWaiter struct {
 	topic             string
 	scan              []int
 	scanStart         int
 	visibilityTimeout time.Duration
-	chans             []<-chan struct{}
 	start             time.Time
 }
 
 // ConsumeProbe is the non-blocking half of a queue-style Consume: it
-// snapshots the wake-up channels, scans the locally owned partitions
-// once, and returns the first reservable message. When nothing is
-// available it also returns a waiter for ConsumeWait. Replay and
-// pinned-partition options are not supported here (use Consume).
+// scans the locally owned partitions once and returns the first
+// reservable message. When nothing is available it also returns a
+// waiter for ConsumeWait. Replay and pinned-partition options are not
+// supported here (use Consume).
 func (e *Engine) ConsumeProbe(ctx context.Context, topicName string, opts ConsumeOpts) (topic.Message, bool, *ConsumeWaiter, error) {
 	t, err := e.getTopic(ctx, topicName)
 	if err != nil {
@@ -77,12 +103,7 @@ func (e *Engine) ConsumeProbe(ctx context.Context, topicName string, opts Consum
 		visibilityTimeout: time.Duration(t.VisibilityTimeoutMs) * time.Millisecond,
 		start:             time.Now(),
 	}
-	logs, err := e.partitionLogs(topicName, scan)
-	if err != nil {
-		return topic.Message{}, false, nil, err
-	}
-	w.chans = notifyChannelsFor(logs)
-	msg, found, err := e.tryQueueReadLogs(ctx, topicName, scan, logs, w.scanStart, w.visibilityTimeout)
+	msg, found, err := e.tryQueueRead(ctx, topicName, scan, w.scanStart, w.visibilityTimeout)
 	if err != nil {
 		if e.metrics != nil {
 			e.metrics.IncError("messaging", "consume")
@@ -97,11 +118,15 @@ func (e *Engine) ConsumeProbe(ctx context.Context, topicName string, opts Consum
 	return topic.Message{}, false, w, nil
 }
 
-// ConsumeWait is the blocking half: it parks on the waiter's channel
-// snapshot for up to wait, then continues as a normal long-poll
-// (re-probe, re-snapshot, park) until a message arrives or the wait is
-// spent. Activity that happened after the probe (a commit, an expiry, a
-// nack) closed a snapshotted channel and returns immediately.
+// ConsumeWait is the blocking half. It does not scan and it does not
+// race: the caller is enqueued on the topic's waiter FIFO and parks on
+// one channel until the dispatcher's pump hands it a record, the wait
+// expires, or ctx ends.
+//
+// The pump reserves only once it has taken a waiter off that queue, so
+// a consumer that gives up can still find a record was handed to it in
+// the meantime. That record is reserved, so it is released here rather
+// than left invisible until its visibility timeout.
 func (e *Engine) ConsumeWait(ctx context.Context, w *ConsumeWaiter, wait time.Duration) (topic.Message, bool, error) {
 	if w == nil {
 		return topic.Message{}, false, fmt.Errorf("%w: nil consume waiter", ErrInvalid)
@@ -110,7 +135,60 @@ func (e *Engine) ConsumeWait(ctx context.Context, w *ConsumeWaiter, wait time.Du
 		e.recordConsumeEmpty(w.topic, "no_wait", time.Since(w.start))
 		return topic.Message{}, false, nil
 	}
-	return e.consumeQueue(ctx, w.topic, w.scan, w.scanStart, w.visibilityTimeout, wait, w)
+
+	pw := &waiter{cw: w, ch: make(chan waiterDelivery, 1)}
+	e.dispatch.enqueue(w.topic, pw)
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	var outcome string
+	select {
+	case dl, ok := <-pw.ch:
+		if !ok {
+			// The dispatcher shut down under us.
+			e.recordConsumeEmpty(w.topic, "cancelled", time.Since(w.start))
+			return topic.Message{}, false, nil
+		}
+		e.recordConsumeWait(w.topic, "hit", time.Since(w.start))
+		return dl.msg, true, nil
+	case <-timer.C:
+		outcome = "timeout"
+	case <-ctx.Done():
+		outcome = "cancelled"
+	}
+
+	if dl, handed := e.dispatch.dequeue(w.topic, pw); handed {
+		if outcome == "timeout" {
+			// It arrived in the instant the budget ran out. The caller is
+			// still there and asked for a message, so serving it beats
+			// throwing it away.
+			e.recordConsumeWait(w.topic, "hit", time.Since(w.start))
+			return dl.msg, true, nil
+		}
+		// The client is gone, so nobody can receive this. It is reserved,
+		// so give it back now instead of leaving it invisible for a full
+		// visibility timeout.
+		e.releaseUndelivered(w.topic, dl.msg)
+	}
+	e.recordConsumeEmpty(w.topic, outcome, time.Since(w.start))
+	return topic.Message{}, false, nil
+}
+
+// releaseUndelivered gives back a record the dispatcher reserved for a
+// consumer that vanished before it could be handed over. Best effort: a
+// handle that is already stale means something else resolved it, which
+// is the outcome we wanted anyway.
+func (e *Engine) releaseUndelivered(topicName string, msg topic.Message) {
+	h, err := consumer.DecodeHandle(msg.ReceiptHandle)
+	if err != nil {
+		return
+	}
+	if err := e.offsets.ReleaseHandle(topicName, h.Partition, h.Offset, h.Nonce); err != nil &&
+		!errors.Is(err, consumer.ErrHandleStale) {
+		e.logger.Warn("release record reserved for a consumer that left",
+			"topic", topicName, "partition", h.Partition, "offset", h.Offset, "err", err)
+	}
 }
 
 // consumeScanStart picks where a queue scan begins: the requested
@@ -143,100 +221,6 @@ func (e *Engine) consumeReplay(topicName string, partitionIdx int, offset int64,
 		e.recordConsumed(topicName, msg.Partition, len(msg.Payload))
 	}
 	return msg, found, err
-}
-
-// consumeQueue serves a queue-mode Consume over the given partitions:
-// probe for a reservable message, and if none is available long-poll
-// up to wait for partition activity before probing again.
-//
-// When pending is non-nil the first iteration skips the probe and parks
-// on pending's channel snapshot (a ConsumeProbe already probed after
-// taking it); the deadline is measured from now either way.
-func (e *Engine) consumeQueue(ctx context.Context, topicName string, scan []int, scanStart int, visibilityTimeout, wait time.Duration, pending *ConsumeWaiter) (topic.Message, bool, error) {
-	start := time.Now()
-	if pending != nil {
-		start = pending.start
-	}
-	deadline := time.Now().Add(wait)
-	for {
-		if pending != nil {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				e.recordConsumeEmpty(topicName, "timeout", time.Since(start))
-				return topic.Message{}, false, nil
-			}
-			chans := pending.chans
-			pending = nil
-			if err := e.waitForActivity(ctx, chans, remaining); err != nil {
-				return e.consumeWaitError(topicName, start, err)
-			}
-			continue
-		}
-		// Fetch the notify channels BEFORE probing for data. The
-		// channels are close-and-replace broadcasts, so a snapshot
-		// taken after an empty probe could miss a wake-up that fired
-		// in between; fetching first guarantees any post-probe
-		// activity closes a channel we are (about to be) waiting on.
-		// Re-fetched every iteration because each broadcast installs a
-		// fresh channel.
-		//
-		// The partition logs are resolved once per iteration and shared by
-		// the notify snapshot and the probe (each Logs.Get is a map lookup
-		// under a process-wide lock plus a key allocation); re-resolved
-		// every iteration so a reopened log after CloseTopic is picked up.
-		logs, err := e.partitionLogs(topicName, scan)
-		if err != nil {
-			return topic.Message{}, false, err
-		}
-		var notifyChans []<-chan struct{}
-		if wait > 0 {
-			notifyChans = notifyChannelsFor(logs)
-		}
-
-		msg, found, err := e.tryQueueReadLogs(ctx, topicName, scan, logs, scanStart, visibilityTimeout)
-		if err != nil {
-			if e.metrics != nil {
-				e.metrics.IncError("messaging", "consume")
-			}
-			return msg, false, err
-		}
-		if found {
-			e.recordConsumed(topicName, msg.Partition, len(msg.Payload))
-			e.recordConsumeWait(topicName, "hit", time.Since(start))
-			return msg, true, nil
-		}
-
-		if wait <= 0 {
-			e.recordConsumeEmpty(topicName, "no_wait", time.Since(start))
-			return topic.Message{}, false, nil
-		}
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			e.recordConsumeEmpty(topicName, "timeout", time.Since(start))
-			return topic.Message{}, false, nil
-		}
-		if err := e.waitForActivity(ctx, notifyChans, remaining); err != nil {
-			return e.consumeWaitError(topicName, start, err)
-		}
-	}
-}
-
-// consumeWaitError maps a waitForActivity failure to the consume result:
-// a timeout or cancellation is an empty consume, anything else an error.
-func (e *Engine) consumeWaitError(topicName string, start time.Time, err error) (topic.Message, bool, error) {
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		outcome := "timeout"
-		if errors.Is(err, context.Canceled) {
-			outcome = "cancelled"
-		}
-		e.recordConsumeEmpty(topicName, outcome, time.Since(start))
-		return topic.Message{}, false, nil
-	}
-	if e.metrics != nil {
-		e.metrics.IncError("messaging", "consume_wait")
-	}
-	return topic.Message{}, false, err
 }
 
 // recordConsumed bumps the per-partition delivered counters.
@@ -424,55 +408,4 @@ func (e *Engine) tryQueueReadLogs(ctx context.Context, topicName string, partiti
 		}
 	}
 	return topic.Message{}, false, nil
-}
-
-// notifyChannels snapshots the partitions' current broadcast notify
-// channels. The snapshot must be taken before probing for data (see
-// consumeQueue) and re-taken before every wait, because each broadcast
-// closes the channel and installs a fresh one.
-func (e *Engine) notifyChannels(topicName string, partitions []int) ([]<-chan struct{}, error) {
-	logs, err := e.partitionLogs(topicName, partitions)
-	if err != nil {
-		return nil, err
-	}
-	return notifyChannelsFor(logs), nil
-}
-
-// notifyChannelsFor is notifyChannels over pre-resolved logs.
-func notifyChannelsFor(logs []*storage.Log) []<-chan struct{} {
-	chans := make([]<-chan struct{}, len(logs))
-	for i, log := range logs {
-		chans[i] = log.NotifyC()
-	}
-	return chans
-}
-
-// waitForActivity blocks until any of the given broadcast channels is
-// closed, the timeout elapses, or ctx is cancelled. The channels are
-// closed (never sent on) to wake ALL waiters at once — a single commit
-// can make records available to many blocked long-pollers.
-func (e *Engine) waitForActivity(ctx context.Context, notifyChans []<-chan struct{}, timeout time.Duration) error {
-	cases := make([]reflect.SelectCase, 0, len(notifyChans)+2)
-	for _, ch := range notifyChans {
-		cases = append(cases, reflect.SelectCase{
-			Dir:  reflect.SelectRecv,
-			Chan: reflect.ValueOf(ch),
-		})
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	cases = append(cases,
-		reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ctx.Done())},
-		reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(timer.C)},
-	)
-
-	chosen, _, _ := reflect.Select(cases)
-	switch chosen {
-	case len(cases) - 2: // ctx
-		return ctx.Err()
-	case len(cases) - 1: // timer
-		return context.DeadlineExceeded
-	default:
-		return nil
-	}
 }
