@@ -76,7 +76,8 @@ vet: ## Run go vet.
 	$(GO) vet $(PKGS)
 
 .PHONY: fmt
-fmt: ## Auto-format the tree with gofumpt + goimports.
+fmt: ## Auto-format the tree with go fix + gofumpt + goimports.
+	$(GO) fix $(PKGS)
 	$(GOFUMPT) -w .
 	$(GOIMPORTS) -w .
 
