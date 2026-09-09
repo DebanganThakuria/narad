@@ -475,9 +475,20 @@ func (d *dispatcher) resolveOutstanding(topicName string, claiming bool) {
 		return
 	}
 	d.retireOutstanding(topicName)
-	d.markDirty(topicName)
 }
 
+// retireOutstanding gives back one notification's claim on a record and
+// wakes the pump.
+//
+// The wake is the load-bearing half. Retiring frees capacity the gate
+// `consumable() <= outstanding` was withholding, and the pump only ever
+// looks at a topic it has been told about. Without the kick, a peer that
+// said it would claim and then did not (its consumer left, or it lost
+// the race for the record) leaves that record sitting there with the
+// gate now open and nobody looking: every other parked consumer, on this
+// node and on every peer, waits out its whole budget while a deliverable
+// record goes unoffered. Nothing else would wake the topic either, since
+// no produce, nack or expiry has to follow.
 func (d *dispatcher) retireOutstanding(topicName string) {
 	st := d.stateFor(topicName)
 	st.mu.Lock()
@@ -485,6 +496,7 @@ func (d *dispatcher) retireOutstanding(topicName string) {
 		st.outstanding--
 	}
 	st.mu.Unlock()
+	d.markDirty(topicName)
 }
 
 // registerRemote adds a peer's interest to the topic's demand queue.
