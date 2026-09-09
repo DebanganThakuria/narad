@@ -1,0 +1,12 @@
+# Thin image over a host-built binary. The repo Dockerfile builds from
+# source inside the image, which is right for releases but slow to
+# iterate on and needs network for `go mod download`; this one exists
+# purely so the four-node cluster can be rebuilt in seconds.
+FROM alpine:3.23
+RUN apk add --no-cache ca-certificates && \
+	adduser -S -D -H -u 10001 narad && \
+	mkdir -p /var/lib/narad && chown -R narad /var/lib/narad
+COPY narad /usr/local/bin/narad
+USER narad
+WORKDIR /var/lib/narad
+ENTRYPOINT ["/usr/local/bin/narad"]

@@ -1,0 +1,70 @@
+# Four-node cluster for exercising the cross-node consume path.
+#
+# NARAD_CLUSTER_ADVERTISE_ADDR is set explicitly on every node and is the
+# reason this file exists. It is the address an owner puts in a token
+# notification, and the address the receiver aims its claim at, so it
+# MUST be the same string peers already dial. Left unset it is empty and
+# the token protocol quietly disables itself, which would make every test
+# below pass while measuring the old fallback path instead.
+#
+#   docker compose -f ops/tokencluster/docker-compose.yml up -d --build
+#   go run ./ops/tokencluster/driver --nodes http://127.0.0.1:17942,...
+
+x-node: &node
+  build:
+    context: ./build
+  environment: &node-env
+    NARAD_HTTP_ADDR: "0.0.0.0:7942"
+    # Port-only: binds every interface AND matches this node's own entry
+    # in the peer list by port, so bootstrap excludes self from the voter
+    # set. A bind-all "0.0.0.0:7943" does not match "narad-N:7943" and
+    # seeds raft with a duplicate ID.
+    NARAD_CLUSTER_ADDR: ":7943"
+    NARAD_CLUSTER_PEERS: "narad-1@narad-1:7943,narad-2@narad-2:7943,narad-3@narad-3:7943,narad-4@narad-4:7943"
+    NARAD_DATA_DIR: "/var/lib/narad"
+    NARAD_SECURITY_ENABLED: "false"
+    NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT: "true"
+    NARAD_SECURITY_ALLOW_INSECURE_CLUSTER: "true"
+    NARAD_CLUSTER_SECRET: "token-cluster-secret"
+    NARAD_LOG_FORMAT: "text"
+    NARAD_LOG_LEVEL: "info"
+  command: ["serve"]
+  healthcheck:
+    test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7942/v1/topics"]
+    interval: 2s
+    timeout: 2s
+    retries: 45
+  restart: "no"
+
+services:
+  narad-1:
+    <<: *node
+    environment:
+      <<: *node-env
+      NARAD_NODE_ID: "narad-1"
+      NARAD_CLUSTER_ADVERTISE_ADDR: "narad-1:7943"
+    ports: ["17942:7942"]
+
+  narad-2:
+    <<: *node
+    environment:
+      <<: *node-env
+      NARAD_NODE_ID: "narad-2"
+      NARAD_CLUSTER_ADVERTISE_ADDR: "narad-2:7943"
+    ports: ["17943:7942"]
+
+  narad-3:
+    <<: *node
+    environment:
+      <<: *node-env
+      NARAD_NODE_ID: "narad-3"
+      NARAD_CLUSTER_ADVERTISE_ADDR: "narad-3:7943"
+    ports: ["17944:7942"]
+
+  narad-4:
+    <<: *node
+    environment:
+      <<: *node-env
+      NARAD_NODE_ID: "narad-4"
+      NARAD_CLUSTER_ADVERTISE_ADDR: "narad-4:7943"
+    ports: ["17945:7942"]
