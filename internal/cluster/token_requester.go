@@ -223,11 +223,9 @@ func (q *tokenRequester) broadcast(ctx context.Context, addrs []string, delta no
 	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tokenSendTimeout)
 	var pending sync.WaitGroup
 	for _, addr := range addrs {
-		pending.Add(1)
-		go func() {
-			defer pending.Done()
+		pending.Go(func() {
 			_, _ = q.router.peer.RegisterTokens(sendCtx, addr, delta)
-		}()
+		})
 	}
 	// Release the timeout once the last send finishes, without holding
 	// the caller: cancel() must outlive the sends, not the request.

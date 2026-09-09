@@ -32,7 +32,7 @@ func metric(node, name string) float64 {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	for _, line := range strings.Split(string(body), "\n") {
+	for line := range strings.SplitSeq(string(body), "\n") {
 		if strings.HasPrefix(line, name+" ") {
 			v, _ := strconv.ParseFloat(strings.TrimSpace(line[len(name)+1:]), 64)
 			return v
@@ -132,11 +132,12 @@ func main() {
 	flag.Parse()
 	nodes := strings.Split(nodesCSV, ",")
 
-	fmt.Println("scale: sparse topics, 3 partitions each\n")
+	fmt.Println("scale: sparse topics, 3 partitions each")
+	fmt.Println()
 	prev := report("baseline", nodes, nil, 0)
 
 	created := 0
-	for _, s := range strings.Split(steps, ",") {
+	for s := range strings.SplitSeq(steps, ",") {
 		target, err := strconv.Atoi(strings.TrimSpace(s))
 		if err != nil {
 			continue

@@ -191,13 +191,11 @@ func TestConsumeWaitReleasesRecordWhenClientLeaves(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if _, got, _, err := engine.ConsumeWait(ctx, w, 5*time.Second, nil); err != nil || got {
 			t.Errorf("ConsumeWait() = (found %v, err %v), want empty after cancellation", got, err)
 		}
-	}()
+	})
 
 	time.Sleep(30 * time.Millisecond)
 	// Cancel and commit together so the delivery races the cancellation.

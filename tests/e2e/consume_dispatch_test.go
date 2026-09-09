@@ -64,15 +64,13 @@ func TestConsume_OneRecordWakesExactlyOneWaiter(t *testing.T) {
 	var served []int64
 	var wg sync.WaitGroup
 	for range waiters {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if msg, ok, _ := tryConsume(e, "one-waiter", "4s"); ok {
 				mu.Lock()
 				served = append(served, msg.Offset)
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	// Let every consumer park before anything is available, so this
 	// exercises the wake path rather than the inline probe.
@@ -99,15 +97,13 @@ func TestConsume_ManyRecordsReachManyWaiters(t *testing.T) {
 	seen := map[int64]int{}
 	var wg sync.WaitGroup
 	for range waiters {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if msg, ok, _ := tryConsume(e, "many-waiter", "6s"); ok {
 				mu.Lock()
 				seen[msg.Offset]++
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	time.Sleep(500 * time.Millisecond)
 	for i := range records {
