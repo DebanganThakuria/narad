@@ -1,0 +1,12 @@
+docs/internals/consume-path.md
+  de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T19:32:09.708Z 82,104
+internal/cluster/rpc_dispatch_fuzz_test.go
+  de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T19:30:54.600Z 179-180,297-300
+internal/cluster/rpc_server_token.go
+  de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T19:31:10.718Z 47-55
+internal/persistence/storage/reaper_pool.go
+  de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T19:32:26.440Z 20-31
+internal/transport/httpserver/handlers/messaging/consume.go
+  de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T19:31:38.765Z 76-79,105-110
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T19:32:09.708Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 2, "overriden_lines": 0}, "de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T19:30:54.600Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 6, "overriden_lines": 0}, "de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T19:31:10.718Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 9, "overriden_lines": 0}, "de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T19:32:26.440Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 12, "overriden_lines": 0}, "de4318fa-dfea-47d8-a168-31046ebbc472:2026-09-09T19:31:38.765Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 10, "overriden_lines": 0}}}
