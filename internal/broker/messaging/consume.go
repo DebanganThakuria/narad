@@ -175,6 +175,45 @@ func (e *Engine) ConsumeWait(ctx context.Context, w *ConsumeWaiter, wait time.Du
 	return topic.Message{}, false, nil
 }
 
+// RegisterRemoteDemand records a peer's standing interest in a topic:
+// its token. The peer joins the same queue as local consumers, but it
+// is only ever *told* that records may be available and claims them
+// itself with an ordinary consume, so nothing is reserved on its
+// behalf and there is no give-back if it never returns.
+//
+// Registering is idempotent in effect rather than in bookkeeping: a
+// peer that wants more than one turn registers more than once, and the
+// cluster layer caps how many it may hold.
+func (e *Engine) RegisterRemoteDemand(ctx context.Context, topicName string, rd RemoteDemand) error {
+	if rd == nil {
+		return fmt.Errorf("%w: nil remote demand", ErrInvalid)
+	}
+	t, err := e.getTopic(ctx, topicName)
+	if err != nil {
+		return err
+	}
+	scan, err := e.localProbePartitions(topicName, t.Partitions, nil)
+	if err != nil {
+		return err
+	}
+	if len(scan) == 0 {
+		// This node owns nothing of the topic, so it can never serve the
+		// interest. Refusing beats holding a token that cannot be spent.
+		return ErrNotPartitionOwner
+	}
+	e.dispatch.registerRemote(topicName, scan, rd)
+	return nil
+}
+
+// DropRemoteDemand removes a peer's interest ahead of its expiry, for a
+// connection that died or a peer that said it no longer wants the
+// topic.
+func (e *Engine) DropRemoteDemand(topicName string, rd RemoteDemand) {
+	if rd != nil {
+		e.dispatch.dropRemote(topicName, rd)
+	}
+}
+
 // releaseUndelivered gives back a record the dispatcher reserved for a
 // consumer that vanished before it could be handed over. Best effort: a
 // handle that is already stale means something else resolved it, which

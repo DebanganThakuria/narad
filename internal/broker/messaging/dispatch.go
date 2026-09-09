@@ -52,52 +52,125 @@ type waiter struct {
 	ch chan waiterDelivery
 }
 
-// waiterQueue is a FIFO of parked consumers for one topic. head lets a
-// pop be undone in O(1) when the reservation that followed it failed;
-// pushFront is only ever called to undo the pop immediately above it.
-type waiterQueue struct {
-	items []*waiter
+// RemoteDemand is a peer's standing interest in a topic, registered by
+// the cluster layer. It sits in the same queue as local consumers and
+// the pump cannot tell the two apart, except in one decisive way: a
+// local waiter is handed a reserved record, whereas remote demand is
+// only *told* that records may be available and claims them itself with
+// an ordinary consume. Nothing is ever reserved on a peer's behalf, so
+// there is no give-back if that peer never comes back.
+type RemoteDemand interface {
+	// Notify asks the cluster layer to tell the peer records may be
+	// available. It must not block on the network: queue the frame and
+	// return. done is invoked later with whether the peer said it would
+	// claim; a false verdict frees the record for someone else at once.
+	//
+	// Reporting false means nothing was spent (the peer's outbound queue
+	// was full, say), and the pump leaves this entry in place and stops
+	// rather than dropping the interest on the floor.
+	Notify(topicName string, done func(claiming bool)) bool
+
+	// Expired reports that this interest is finished — spent, timed out,
+	// or its connection is gone — and should leave the queue.
+	Expired() bool
+}
+
+// queueEntry is one unit of demand: exactly one field is set.
+type queueEntry struct {
+	waiter *waiter
+	remote RemoteDemand
+}
+
+// entryQueue is the per-topic demand FIFO. Local waiters are popped
+// when served; remote demand rotates to the back so a peer with a lot
+// of outstanding interest cannot take every turn ahead of one with a
+// little. head lets a pop be undone in O(1) when the reservation that
+// followed it failed.
+type entryQueue struct {
+	items []queueEntry
 	head  int
 }
 
-func (q *waiterQueue) len() int { return len(q.items) - q.head }
+func (q *entryQueue) len() int { return len(q.items) - q.head }
 
-func (q *waiterQueue) push(w *waiter) { q.items = append(q.items, w) }
+func (q *entryQueue) push(e queueEntry) {
+	q.items = append(q.items, e)
+	q.compact()
+}
 
-func (q *waiterQueue) pop() *waiter {
+func (q *entryQueue) peek() (queueEntry, bool) {
 	if q.head >= len(q.items) {
-		return nil
+		return queueEntry{}, false
 	}
-	w := q.items[q.head]
-	q.items[q.head] = nil
+	return q.items[q.head], true
+}
+
+func (q *entryQueue) pop() (queueEntry, bool) {
+	if q.head >= len(q.items) {
+		return queueEntry{}, false
+	}
+	e := q.items[q.head]
+	q.items[q.head] = queueEntry{}
 	q.head++
 	if q.head == len(q.items) {
 		q.items, q.head = q.items[:0], 0
 	}
-	return w
+	return e, true
 }
 
-// pushFront returns a popped waiter to the head. Valid only immediately
+// pushFront returns a popped entry to the head. Valid only immediately
 // after a pop, which guarantees the slot is free.
-func (q *waiterQueue) pushFront(w *waiter) {
+func (q *entryQueue) pushFront(e queueEntry) {
 	if q.head > 0 {
 		q.head--
-		q.items[q.head] = w
+		q.items[q.head] = e
 		return
 	}
-	q.items = append([]*waiter{w}, q.items...)
+	q.items = append([]queueEntry{e}, q.items...)
 }
 
-// remove drops w from the queue if it is still there, reporting whether
-// it was found. A waiter the pump already took is gone from the queue
-// and its delivery (if any) is drained by the caller.
-func (q *waiterQueue) remove(w *waiter) bool {
+// rotate moves the head entry to the back. Remote demand rotates rather
+// than being consumed so turns spread across peers.
+func (q *entryQueue) rotate() {
+	if e, ok := q.pop(); ok {
+		q.push(e)
+	}
+}
+
+// compact reclaims the popped prefix once it dominates the slice, so a
+// long-lived rotating entry cannot grow the backing array without
+// bound.
+func (q *entryQueue) compact() {
+	if q.head == 0 || q.head < len(q.items)/2 {
+		return
+	}
+	n := copy(q.items, q.items[q.head:])
+	for i := n; i < len(q.items); i++ {
+		q.items[i] = queueEntry{}
+	}
+	q.items, q.head = q.items[:n], 0
+}
+
+// removeWaiter drops a local waiter if it is still queued, reporting
+// whether it was found. One the pump already took is gone from the
+// queue and its delivery is drained by the caller.
+func (q *entryQueue) removeWaiter(w *waiter) bool {
+	return q.removeMatching(func(e queueEntry) bool { return e.waiter == w })
+}
+
+// removeRemote drops a peer's interest, used when its connection dies
+// or it tells us it no longer wants the topic.
+func (q *entryQueue) removeRemote(d RemoteDemand) bool {
+	return q.removeMatching(func(e queueEntry) bool { return e.remote == d })
+}
+
+func (q *entryQueue) removeMatching(match func(queueEntry) bool) bool {
 	for i := q.head; i < len(q.items); i++ {
-		if q.items[i] != w {
+		if !match(q.items[i]) {
 			continue
 		}
 		copy(q.items[i:], q.items[i+1:])
-		q.items[len(q.items)-1] = nil
+		q.items[len(q.items)-1] = queueEntry{}
 		q.items = q.items[:len(q.items)-1]
 		return true
 	}
@@ -111,7 +184,15 @@ type topicDispatch struct {
 	hasWaiters atomic.Bool
 
 	mu    sync.Mutex
-	queue waiterQueue
+	queue entryQueue
+	// outstanding counts notifications sent to peers that have not yet
+	// resolved. Each one is a claim on one record, so the pump will not
+	// promise the same record to a second peer.
+	outstanding int
+	// scan is the topic's locally owned partitions, captured when demand
+	// is registered so the pump can size consumable() without a metadata
+	// lookup on every visit.
+	scan []int
 }
 
 // dispatcher owns every topic's waiter set and the single pump
@@ -246,20 +327,69 @@ func (d *dispatcher) run() {
 	}
 }
 
-// pumpTopic hands out as many records as this topic has waiters and
+// consumable estimates how many records on the topic's local partitions
+// are free to hand out: everything between the reservation frontier and
+// the visible tail. Both halves are O(1), so the pump can gate on this
+// without scanning. It is an estimate on purpose and may over-report
+// (a partition paused for handoff, or one at its in-flight cap), which
+// costs at most a notification the peer answers empty.
+func (d *dispatcher) consumable(topicName string, scan []int) int {
+	total := 0
+	for _, p := range scan {
+		log, ok := d.engine.logs.Peek(topicName, p)
+		if !ok {
+			continue
+		}
+		if free := log.HighWatermark() - d.engine.offsets.Next(topicName, p); free > 0 {
+			total += int(free)
+		}
+	}
+	return total
+}
+
+// pumpTopic hands out as many records as this topic has demand and
 // reservable records, then returns. It stops on the first reservation
 // that finds nothing, which is also what makes "a record someone else
-// already took" free: the waiters are never disturbed.
+// already took" free: the queue is never disturbed.
 func (d *dispatcher) pumpTopic(topicName string) {
 	st := d.stateFor(topicName)
 	for {
 		st.mu.Lock()
-		w := st.queue.pop()
-		if w == nil {
+		e, ok := st.queue.peek()
+		if !ok {
 			st.hasWaiters.Store(false)
 			st.mu.Unlock()
 			return
 		}
+
+		if e.remote != nil {
+			if e.remote.Expired() {
+				st.queue.pop()
+				st.mu.Unlock()
+				continue
+			}
+			// Never promise the same record to two peers: every
+			// notification in flight is a claim on one of them.
+			if d.consumable(topicName, st.scan) <= st.outstanding {
+				st.mu.Unlock()
+				return
+			}
+			st.outstanding++
+			st.queue.rotate()
+			st.mu.Unlock()
+			if !e.remote.Notify(topicName, func(claiming bool) {
+				d.resolveOutstanding(topicName, claiming)
+			}) {
+				// Nothing was spent, so take the claim back and stop.
+				// Backpressure, not a lost interest.
+				d.resolveOutstanding(topicName, false)
+				return
+			}
+			continue
+		}
+
+		w := e.waiter
+		st.queue.pop()
 		st.mu.Unlock()
 
 		// The reservation runs with a waiter already in hand and outside
@@ -269,7 +399,7 @@ func (d *dispatcher) pumpTopic(topicName string) {
 			w.cw.scan, w.cw.scanStart, w.cw.visibilityTimeout)
 		if err != nil || !found {
 			st.mu.Lock()
-			st.queue.pushFront(w)
+			st.queue.pushFront(queueEntry{waiter: w})
 			st.mu.Unlock()
 			return
 		}
@@ -280,12 +410,55 @@ func (d *dispatcher) pumpTopic(topicName string) {
 	}
 }
 
+// resolveOutstanding retires one in-flight notification. A peer that
+// declined frees its record immediately, so the pump is kicked to offer
+// it to whoever is next.
+func (d *dispatcher) resolveOutstanding(topicName string, claiming bool) {
+	st := d.stateFor(topicName)
+	st.mu.Lock()
+	if st.outstanding > 0 {
+		st.outstanding--
+	}
+	st.mu.Unlock()
+	if !claiming {
+		d.markDirty(topicName)
+	}
+}
+
+// registerRemote adds a peer's interest to the topic's demand queue.
+// scan is the topic's locally owned partitions, kept so the pump can
+// size consumable() without a metadata lookup per visit.
+func (d *dispatcher) registerRemote(topicName string, scan []int, rd RemoteDemand) {
+	st := d.stateFor(topicName)
+	st.mu.Lock()
+	st.scan = scan
+	st.queue.push(queueEntry{remote: rd})
+	st.hasWaiters.Store(true)
+	st.mu.Unlock()
+	d.markDirty(topicName)
+}
+
+// dropRemote removes a peer's interest, for a connection that died or a
+// peer that said it no longer wants the topic.
+func (d *dispatcher) dropRemote(topicName string, rd RemoteDemand) {
+	st := d.stateFor(topicName)
+	st.mu.Lock()
+	st.queue.removeRemote(rd)
+	if st.queue.len() == 0 {
+		st.hasWaiters.Store(false)
+	}
+	st.mu.Unlock()
+}
+
 // enqueue parks a waiter and wakes the pump, because a new waiter can
 // satisfy the gate just as new data can.
 func (d *dispatcher) enqueue(topicName string, w *waiter) {
 	st := d.stateFor(topicName)
 	st.mu.Lock()
-	st.queue.push(w)
+	st.queue.push(queueEntry{waiter: w})
+	if st.scan == nil {
+		st.scan = w.cw.scan
+	}
 	st.hasWaiters.Store(true)
 	st.mu.Unlock()
 	d.markDirty(topicName)
@@ -298,7 +471,7 @@ func (d *dispatcher) enqueue(topicName string, w *waiter) {
 func (d *dispatcher) dequeue(topicName string, w *waiter) (waiterDelivery, bool) {
 	st := d.stateFor(topicName)
 	st.mu.Lock()
-	removed := st.queue.remove(w)
+	removed := st.queue.removeWaiter(w)
 	if st.queue.len() == 0 {
 		st.hasWaiters.Store(false)
 	}
@@ -328,11 +501,13 @@ func (d *dispatcher) releaseAll() {
 	for _, st := range states {
 		st.mu.Lock()
 		for {
-			w := st.queue.pop()
-			if w == nil {
+			e, ok := st.queue.pop()
+			if !ok {
 				break
 			}
-			close(w.ch)
+			if e.waiter != nil {
+				close(e.waiter.ch)
+			}
 		}
 		st.hasWaiters.Store(false)
 		st.mu.Unlock()
