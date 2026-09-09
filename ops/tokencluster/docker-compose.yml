@@ -26,6 +26,14 @@ x-node: &node
     NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT: "true"
     NARAD_SECURITY_ALLOW_INSECURE_CLUSTER: "true"
     NARAD_CLUSTER_SECRET: "token-cluster-secret"
+    # Default max_consume_wait is 10s, which silently clamps longer
+    # waits and makes a test that parks across a node restart expire
+    # before it is ever served. Raising it means raising write_timeout
+    # and shutdown_grace too: config validation requires
+    # max_consume_wait < write_timeout and <= shutdown_grace.
+    NARAD_HTTP_MAX_CONSUME_WAIT: "25s"
+    NARAD_HTTP_WRITE_TIMEOUT: "60s"
+    NARAD_HTTP_SHUTDOWN_GRACE: "30s"
     NARAD_LOG_FORMAT: "text"
     NARAD_LOG_LEVEL: "info"
   command: ["serve"]

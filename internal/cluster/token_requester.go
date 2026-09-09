@@ -176,22 +176,37 @@ func (q *tokenRequester) drop(ctx context.Context, topicName, servedBy string) {
 	q.broadcast(ctx, targets, nodewire.TokenDelta{From: q.selfAddr, Drop: []string{topicName}})
 }
 
-// broadcast sends one delta to every address concurrently and waits for
-// them to finish, so no owner's latency is stacked behind another's.
-// The context is detached from the request that triggered it: a drop
-// must still land after the consumer it belongs to has been served.
+// broadcast sends one delta to every address concurrently and does NOT
+// wait for them. Blocking here would put a round trip to every owner in
+// front of the consumer that triggered it, on every single consume,
+// which is the cost this protocol exists to avoid.
+//
+// Not waiting is safe because a token landing late is self-correcting: a
+// record produced before the token arrives is still sitting there when
+// it does, and registering marks the topic dirty, so the owner's pump
+// notifies on the spot. The window costs a moment of latency, never a
+// missed record.
+//
+// The context is detached from the request that triggered it for the
+// same reason: a drop must still land after the consumer it belongs to
+// has been served, and a register must not be cancelled by the consumer
+// parking.
 func (q *tokenRequester) broadcast(ctx context.Context, addrs []string, delta nodewire.TokenDelta) {
 	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tokenSendTimeout)
-	var wg sync.WaitGroup
+	var pending sync.WaitGroup
 	for _, addr := range addrs {
-		wg.Add(1)
+		pending.Add(1)
 		go func() {
-			defer wg.Done()
+			defer pending.Done()
 			_, _ = q.router.peer.RegisterTokens(sendCtx, addr, delta)
 		}()
 	}
-	wg.Wait()
-	cancel()
+	// Release the timeout once the last send finishes, without holding
+	// the caller: cancel() must outlive the sends, not the request.
+	go func() {
+		pending.Wait()
+		cancel()
+	}()
 }
 
 // tokenSendTimeout bounds one register or drop. Tokens are advisory, so
