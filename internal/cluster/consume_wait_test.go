@@ -53,25 +53,24 @@ type fakeLocalWaiter struct {
 	waitCalled bool
 }
 
-func (f *fakeLocalWaiter) Wait(ctx context.Context, wait time.Duration) (topic.Message, bool, error) {
+func (f *fakeLocalWaiter) Wait(ctx context.Context, wait time.Duration, external <-chan struct{}) (topic.Message, bool, bool, error) {
 	f.mu.Lock()
 	f.waitCalled = true
 	f.mu.Unlock()
 	timer := time.NewTimer(min(f.delay, wait))
 	defer timer.Stop()
 	select {
+	case <-external:
+		// The cross-node half woke us; the real broker reports this the
+		// same way rather than returning a local message.
+		return topic.Message{}, false, true, nil
 	case <-ctx.Done():
-		if f.onCancel && f.found {
-			// Reserved a message just as the cancel arrived: the classic
-			// loser-with-a-delivery case.
-			return f.msg, true, nil
-		}
-		return topic.Message{}, false, ctx.Err()
+		return topic.Message{}, false, false, ctx.Err()
 	case <-timer.C:
 		if f.onCancel {
-			return topic.Message{}, false, nil
+			return topic.Message{}, false, false, nil
 		}
-		return f.msg, f.found, nil
+		return f.msg, f.found, false, nil
 	}
 }
 

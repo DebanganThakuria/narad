@@ -154,7 +154,9 @@ func NewLog(dir string, opts Options) (*Log, error) {
 	}
 	l.reaper = newReaper(l, opts.Retention)
 	go l.flusher.run()
-	go l.reaper.run()
+	// Retention runs on ONE process-wide goroutine, not one per log.
+	// A log with no age bound is never enrolled and costs nothing.
+	sharedReaper.register(l.reaper)
 
 	return l, nil
 }

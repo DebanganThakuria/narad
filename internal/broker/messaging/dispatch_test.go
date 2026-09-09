@@ -40,7 +40,7 @@ func parkConsumer(t *testing.T, e *Engine, topicName string, wait time.Duration)
 	ready := make(chan struct{})
 	go func() {
 		close(ready)
-		_, got, err := e.ConsumeWait(context.Background(), w, wait)
+		_, got, _, err := e.ConsumeWait(context.Background(), w, wait, nil)
 		if err != nil {
 			t.Errorf("ConsumeWait() error = %v", err)
 		}
@@ -164,7 +164,7 @@ func TestConsumeWaitReleasesRecordWhenClientLeaves(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if _, got, err := engine.ConsumeWait(ctx, w, 5*time.Second); err != nil || got {
+		if _, got, _, err := engine.ConsumeWait(ctx, w, 5*time.Second, nil); err != nil || got {
 			t.Errorf("ConsumeWait() = (found %v, err %v), want empty after cancellation", got, err)
 		}
 	}()

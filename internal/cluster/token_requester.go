@@ -26,10 +26,40 @@ import (
 const tokenTTLFloor = 50 * time.Millisecond
 
 // localWaiter is one consumer parked here, waiting to be told where to
-// claim. ch is buffered so a notification never blocks the RPC handler
-// answering it, and carries the owner address to aim the claim at.
+// claim.
+//
+// The signal and the payload are separate on purpose: ch is a plain
+// struct{} channel so it can be selected on inside the broker's local
+// wait, which lets one goroutine cover both halves of the race instead
+// of two. The owner address rides alongside it in from, published
+// before the signal and read after, so the claim can be aimed at
+// exactly the node that has the record.
 type localWaiter struct {
-	ch chan string
+	ch   chan struct{}
+	mu   sync.Mutex
+	from string
+}
+
+// take returns the address of the owner that woke this waiter.
+func (w *localWaiter) take() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.from
+}
+
+// offer publishes the owner address and signals, reporting whether the
+// waiter took it. The signal is non-blocking: a waiter already woken by
+// another owner simply is not available.
+func (w *localWaiter) offer(from string) bool {
+	w.mu.Lock()
+	w.from = from
+	w.mu.Unlock()
+	select {
+	case w.ch <- struct{}{}:
+		return true
+	default:
+		return false
+	}
 }
 
 // topicDemand is the set of consumers parked on one topic.
@@ -84,7 +114,7 @@ func (q *tokenRequester) demandFor(topicName string) *topicDemand {
 // it. The caller selects on the waiter's channel.
 func (q *tokenRequester) park(topicName string) (*localWaiter, func()) {
 	d := q.demandFor(topicName)
-	w := &localWaiter{ch: make(chan string, 1)}
+	w := &localWaiter{ch: make(chan struct{}, 1)}
 	d.mu.Lock()
 	d.waiters = append(d.waiters, w)
 	d.mu.Unlock()
@@ -128,12 +158,10 @@ func (q *tokenRequester) WakeOneWaiter(topicName, from string) bool {
 	for len(d.waiters) > 0 {
 		w := d.waiters[0]
 		d.waiters = d.waiters[1:]
-		select {
-		case w.ch <- from:
+		if w.offer(from) {
 			return true
-		default:
-			// Already woken by another owner; try the next one.
 		}
+		// Already woken by another owner; try the next one.
 	}
 	return false
 }

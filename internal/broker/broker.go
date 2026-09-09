@@ -111,7 +111,12 @@ type Broker interface {
 	// local long-poll without re-scanning or losing a wake-up. See
 	// messaging.Engine.ConsumeProbe.
 	ConsumeProbe(ctx context.Context, topicName string, opts messaging.ConsumeOpts) (msg topic.Message, found bool, waiter *messaging.ConsumeWaiter, err error)
-	ConsumeWait(ctx context.Context, waiter *messaging.ConsumeWaiter, wait time.Duration) (msg topic.Message, found bool, err error)
+	// external, when non-nil, is a second wake source folded into the
+	// same select as the local wait, so a consumer racing the local and
+	// cross-node halves costs ONE parked goroutine rather than two.
+	// wokeExternal reports that it, rather than a local record, is what
+	// woke the wait.
+	ConsumeWait(ctx context.Context, waiter *messaging.ConsumeWaiter, wait time.Duration, external <-chan struct{}) (msg topic.Message, found bool, wokeExternal bool, err error)
 	// RegisterRemoteDemand and DropRemoteDemand let the cluster layer put
 	// a peer's token in the same delivery queue as local consumers. The
 	// peer is only ever TOLD that records exist and claims them itself,

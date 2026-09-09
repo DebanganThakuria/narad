@@ -493,7 +493,7 @@ func TestConsumeWaitReturnsEmptyAfterBudget(t *testing.T) {
 		t.Fatalf("ConsumeProbe() = (found %v, err %v), want a waiter on an empty topic", found, err)
 	}
 	start := time.Now()
-	if _, found, err := engine.ConsumeWait(context.Background(), w, 40*time.Millisecond); err != nil || found {
+	if _, found, _, err := engine.ConsumeWait(context.Background(), w, 40*time.Millisecond, nil); err != nil || found {
 		t.Fatalf("ConsumeWait() = (found %v, err %v), want empty", found, err)
 	}
 	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
@@ -516,7 +516,7 @@ func TestConsumeWaitReturnsOnContextCancellation(t *testing.T) {
 	cancel()
 
 	start := time.Now()
-	if _, found, err := engine.ConsumeWait(ctx, w, 10*time.Second); err != nil || found {
+	if _, found, _, err := engine.ConsumeWait(ctx, w, 10*time.Second, nil); err != nil || found {
 		t.Fatalf("ConsumeWait() = (found %v, err %v), want empty", found, err)
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
@@ -951,7 +951,7 @@ func TestConsumeWaitDeliversOnHighWatermarkAdvance(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		msg, found, err := engine.ConsumeWait(context.Background(), w, 3*time.Second)
+		msg, found, _, err := engine.ConsumeWait(context.Background(), w, 3*time.Second, nil)
 		done <- result{msg, found, err}
 	}()
 

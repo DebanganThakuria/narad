@@ -332,8 +332,8 @@ func (stubBroker) ConsumeProbe(context.Context, string, brokermsg.ConsumeOpts) (
 	return topic.Message{}, false, &brokermsg.ConsumeWaiter{}, nil
 }
 
-func (stubBroker) ConsumeWait(context.Context, *brokermsg.ConsumeWaiter, time.Duration) (topic.Message, bool, error) {
-	return topic.Message{}, false, nil
+func (stubBroker) ConsumeWait(context.Context, *brokermsg.ConsumeWaiter, time.Duration, <-chan struct{}) (topic.Message, bool, bool, error) {
+	return topic.Message{}, false, false, nil
 }
 
 func (stubBroker) RegisterRemoteDemand(context.Context, string, brokermsg.RemoteDemand) error {

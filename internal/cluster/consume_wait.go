@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
@@ -65,43 +64,31 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 	// Every owner is told at once: one round trip total, not one each.
 	rt.tokens.register(ctx, topicName, wait)
 
-	localCtx, cancelLocal := context.WithCancel(ctx)
-	defer cancelLocal()
-	localCh := make(chan localWaitResult, 1)
-	go func() {
-		msg, found, err := local.Wait(localCtx, wait)
-		localCh <- localWaitResult{msg: msg, found: found, err: err}
-	}()
-
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-
-	var lr localWaitResult
-	haveLocal := false
+	// One goroutine, not two. The local wait and the cross-node
+	// notification are folded into a single select inside the broker, so
+	// a parked consumer costs one goroutine rather than one for the
+	// request plus one racing it. With thousands parked on a gateway
+	// node that difference is most of the per-waiter cost.
 	for {
-		select {
-		case r := <-localCh:
-			lr, haveLocal = r, true
-			if r.found && r.err == nil {
-				// The local partitions had it. Retire the tokens we left
-				// elsewhere so those owners do not waste a notification on
-				// a consumer that has been served.
-				rt.tokens.drop(ctx, topicName, "")
-				writeConsumeMessage(w, r.msg)
-				return true
-			}
-			// Finished without a message. Keep riding the tokens for what
-			// is left of the budget rather than answering 204 early.
-			localCh = nil
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			w.WriteHeader(http.StatusNoContent)
+			return true
+		}
+		msg, found, wokeExternal, err := local.Wait(ctx, remaining, parked.ch)
 
-		case from := <-parked.ch:
-			// An owner has something. Claim it: this is the only call that
-			// reserves anything, and it is aimed at exactly one node.
+		switch {
+		case found && err == nil:
+			// The local partitions had it. Retire the tokens left
+			// elsewhere so those owners do not spend a notification on a
+			// consumer that has been served.
+			rt.tokens.drop(ctx, topicName, "")
+			writeConsumeMessage(w, msg)
+			return true
+
+		case wokeExternal:
+			from := parked.take()
 			if res, ok := rt.claimFrom(ctx, from, topicName); ok {
-				cancelLocal()
-				if haveLocal || collectLocal(localCh, &lr) {
-					rt.releaseLostLocal(ctx, topicName, lr, local)
-				}
 				rt.tokens.drop(ctx, topicName, from)
 				writePeerResponse(w, res)
 				return true
@@ -112,66 +99,15 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 			rt.tokens.repark(topicName, parked)
 			rt.tokens.register(ctx, topicName, time.Until(deadline))
 
-		case <-timer.C:
-			cancelLocal()
-			return rt.finishConsumeWait(ctx, w, topicName, localCh, lr, haveLocal, local)
+		case err != nil && !errors.Is(err, context.Canceled):
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return true
 
-		case <-ctx.Done():
-			cancelLocal()
-			return rt.finishConsumeWait(ctx, w, topicName, localCh, lr, haveLocal, local)
+		default:
+			// Budget spent, or the client left.
+			w.WriteHeader(http.StatusNoContent)
+			return true
 		}
-	}
-}
-
-// localWaitResult is one local ConsumeWait outcome, moved off the
-// waiting goroutine so it can be raced against the token protocol.
-type localWaitResult struct {
-	msg   topic.Message
-	found bool
-	err   error
-}
-
-// collectLocal drains the local wait if it is still running, reporting
-// whether a result arrived.
-func collectLocal(ch chan localWaitResult, into *localWaitResult) bool {
-	if ch == nil {
-		return false
-	}
-	*into = <-ch
-	return true
-}
-
-// finishConsumeWait answers once the budget is spent or the client has
-// gone, giving back a local message that arrived too late to serve.
-func (rt *Router) finishConsumeWait(ctx context.Context, w http.ResponseWriter, topicName string,
-	localCh chan localWaitResult, lr localWaitResult, haveLocal bool, local LocalConsumeWaiter) bool {
-	if !haveLocal {
-		haveLocal = collectLocal(localCh, &lr)
-	}
-	if haveLocal && lr.found && lr.err == nil {
-		// It landed as the budget ran out. The caller is still there and
-		// asked for a message, so serving it beats discarding it.
-		rt.tokens.drop(ctx, topicName, "")
-		writeConsumeMessage(w, lr.msg)
-		return true
-	}
-	if haveLocal && lr.err != nil && !errors.Is(lr.err, context.Canceled) {
-		http.Error(w, lr.err.Error(), http.StatusInternalServerError)
-		return true
-	}
-	w.WriteHeader(http.StatusNoContent)
-	return true
-}
-
-// releaseLostLocal gives back a local message reserved after a remote
-// claim already won, so it is redeliverable now rather than after its
-// visibility timeout.
-func (rt *Router) releaseLostLocal(ctx context.Context, topicName string, lr localWaitResult, local LocalConsumeWaiter) {
-	if !lr.found || lr.err != nil {
-		return
-	}
-	if err := local.Release(ctx, lr.msg); err != nil && !errors.Is(err, consumer.ErrHandleStale) {
-		rt.logConsumeWait("release local delivery that lost the wait race", topicName, err)
 	}
 }
 

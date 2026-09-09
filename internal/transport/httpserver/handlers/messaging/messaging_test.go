@@ -142,16 +142,17 @@ func (f *fakeBroker) ConsumeProbe(ctx context.Context, topicName string, opts br
 	return topic.Message{}, false, w, nil
 }
 
-func (f *fakeBroker) ConsumeWait(ctx context.Context, w *brokermsg.ConsumeWaiter, wait time.Duration) (topic.Message, bool, error) {
+func (f *fakeBroker) ConsumeWait(ctx context.Context, w *brokermsg.ConsumeWaiter, wait time.Duration, _ <-chan struct{}) (topic.Message, bool, bool, error) {
 	f.probeMu.Lock()
 	p, ok := f.probeWaiters[w]
 	f.probeMu.Unlock()
 	if !ok {
-		return topic.Message{}, false, errors.New("fakeBroker: unknown waiter")
+		return topic.Message{}, false, false, errors.New("fakeBroker: unknown waiter")
 	}
 	opts := p.opts
 	opts.Wait = wait
-	return f.consumeFn(ctx, p.topic, opts)
+	msg, found, err := f.consumeFn(ctx, p.topic, opts)
+	return msg, found, false, err
 }
 
 type fakeProbe struct {

@@ -111,7 +111,7 @@ func queueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r *http.
 		return
 	}
 
-	msg, found, err = s.Deps.Broker.ConsumeWait(r.Context(), waiter, wait)
+	msg, found, _, err = s.Deps.Broker.ConsumeWait(r.Context(), waiter, wait, nil)
 	if err != nil && !errors.Is(err, brokermsg.ErrNotPartitionOwner) {
 		s.WriteBrokerError(w, "consume", err)
 		return
@@ -132,12 +132,12 @@ type localConsumeWaiter struct {
 	waiter *brokermsg.ConsumeWaiter
 }
 
-func (l *localConsumeWaiter) Wait(ctx context.Context, wait time.Duration) (topic.Message, bool, error) {
-	msg, found, err := l.s.Deps.Broker.ConsumeWait(ctx, l.waiter, wait)
+func (l *localConsumeWaiter) Wait(ctx context.Context, wait time.Duration, external <-chan struct{}) (topic.Message, bool, bool, error) {
+	msg, found, wokeExternal, err := l.s.Deps.Broker.ConsumeWait(ctx, l.waiter, wait, external)
 	if errors.Is(err, brokermsg.ErrNotPartitionOwner) {
-		return topic.Message{}, false, nil
+		return topic.Message{}, false, wokeExternal, nil
 	}
-	return msg, found, err
+	return msg, found, wokeExternal, err
 }
 
 func (l *localConsumeWaiter) Release(ctx context.Context, msg topic.Message) error {

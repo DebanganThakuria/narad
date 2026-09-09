@@ -69,6 +69,10 @@ func newReaper(log *Log, cfg RetentionConfig) *reaper {
 	}
 }
 
+// run is retained only for tests that drive one reaper directly. The
+// production path enrols the reaper in sharedReaper instead, so
+// retention costs one goroutine for the process rather than one per
+// partition log.
 func (r *reaper) run() {
 	defer close(r.done)
 

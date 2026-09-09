@@ -121,8 +121,8 @@ func (stubBroker) ConsumeProbe(context.Context, string, brokermsg.ConsumeOpts) (
 	return topic.Message{}, false, nil, errs.ErrTopicNotFound
 }
 
-func (stubBroker) ConsumeWait(context.Context, *brokermsg.ConsumeWaiter, time.Duration) (topic.Message, bool, error) {
-	return topic.Message{}, false, errs.ErrTopicNotFound
+func (stubBroker) ConsumeWait(context.Context, *brokermsg.ConsumeWaiter, time.Duration, <-chan struct{}) (topic.Message, bool, bool, error) {
+	return topic.Message{}, false, false, errs.ErrTopicNotFound
 }
 func (stubBroker) Ack(context.Context, string, consumer.Handle) error { return errs.ErrHandleStale }
 func (stubBroker) ExtendAck(context.Context, string, consumer.Handle) error {

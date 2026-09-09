@@ -335,8 +335,8 @@ func (f *fakeBroker) ConsumeProbe(ctx context.Context, topicName string, opts br
 	return msg, found, &brokermsg.ConsumeWaiter{}, err
 }
 
-func (f *fakeBroker) ConsumeWait(context.Context, *brokermsg.ConsumeWaiter, time.Duration) (topic.Message, bool, error) {
-	return topic.Message{}, false, nil
+func (f *fakeBroker) ConsumeWait(context.Context, *brokermsg.ConsumeWaiter, time.Duration, <-chan struct{}) (topic.Message, bool, bool, error) {
+	return topic.Message{}, false, false, nil
 }
 
 // The token protocol is a cluster-layer concern; these handler fakes

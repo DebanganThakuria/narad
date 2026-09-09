@@ -57,13 +57,14 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 	// dispatcher hands this consumer a record when one becomes
 	// reservable. Same path the split ConsumeProbe/ConsumeWait pair
 	// uses, so a forwarded consume behaves exactly like a local one.
-	return e.ConsumeWait(ctx, &ConsumeWaiter{
+	msg, found, _, err = e.ConsumeWait(ctx, &ConsumeWaiter{
 		topic:             topicName,
 		scan:              scan,
 		scanStart:         scanStart,
 		visibilityTimeout: visibilityTimeout,
 		start:             start,
-	}, opts.Wait)
+	}, opts.Wait, nil)
+	return msg, found, err
 }
 
 // ConsumeWaiter is the state a ConsumeProbe leaves behind so a later
@@ -127,13 +128,13 @@ func (e *Engine) ConsumeProbe(ctx context.Context, topicName string, opts Consum
 // a consumer that gives up can still find a record was handed to it in
 // the meantime. That record is reserved, so it is released here rather
 // than left invisible until its visibility timeout.
-func (e *Engine) ConsumeWait(ctx context.Context, w *ConsumeWaiter, wait time.Duration) (topic.Message, bool, error) {
+func (e *Engine) ConsumeWait(ctx context.Context, w *ConsumeWaiter, wait time.Duration, external <-chan struct{}) (topic.Message, bool, bool, error) {
 	if w == nil {
-		return topic.Message{}, false, fmt.Errorf("%w: nil consume waiter", ErrInvalid)
+		return topic.Message{}, false, false, fmt.Errorf("%w: nil consume waiter", ErrInvalid)
 	}
 	if wait <= 0 {
 		e.recordConsumeEmpty(w.topic, "no_wait", time.Since(w.start))
-		return topic.Message{}, false, nil
+		return topic.Message{}, false, false, nil
 	}
 
 	pw := &waiter{cw: w, ch: make(chan waiterDelivery, 1)}
@@ -148,10 +149,21 @@ func (e *Engine) ConsumeWait(ctx context.Context, w *ConsumeWaiter, wait time.Du
 		if !ok {
 			// The dispatcher shut down under us.
 			e.recordConsumeEmpty(w.topic, "cancelled", time.Since(w.start))
-			return topic.Message{}, false, nil
+			return topic.Message{}, false, false, nil
 		}
 		e.recordConsumeWait(w.topic, "hit", time.Since(w.start))
-		return dl.msg, true, nil
+		return dl.msg, true, false, nil
+	case <-external:
+		// The cross-node half has something. Retire this waiter first so
+		// the pump cannot hand it a local record we are no longer going
+		// to read, then let the caller go and claim.
+		if dl, handed := e.dispatch.dequeue(w.topic, pw); handed {
+			// A local record arrived in the same instant. Serving it is
+			// better than claiming remotely, and it saves a round trip.
+			e.recordConsumeWait(w.topic, "hit", time.Since(w.start))
+			return dl.msg, true, false, nil
+		}
+		return topic.Message{}, false, true, nil
 	case <-timer.C:
 		outcome = "timeout"
 	case <-ctx.Done():
@@ -164,7 +176,7 @@ func (e *Engine) ConsumeWait(ctx context.Context, w *ConsumeWaiter, wait time.Du
 			// still there and asked for a message, so serving it beats
 			// throwing it away.
 			e.recordConsumeWait(w.topic, "hit", time.Since(w.start))
-			return dl.msg, true, nil
+			return dl.msg, true, false, nil
 		}
 		// The client is gone, so nobody can receive this. It is reserved,
 		// so give it back now instead of leaving it invisible for a full
@@ -172,7 +184,7 @@ func (e *Engine) ConsumeWait(ctx context.Context, w *ConsumeWaiter, wait time.Du
 		e.releaseUndelivered(w.topic, dl.msg)
 	}
 	e.recordConsumeEmpty(w.topic, outcome, time.Since(w.start))
-	return topic.Message{}, false, nil
+	return topic.Message{}, false, false, nil
 }
 
 // RegisterRemoteDemand records a peer's standing interest in a topic:

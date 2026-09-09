@@ -1,7 +1,8 @@
 package storage
 
-// Close stops the reaper and the flusher (the latter does one final
-// drain), then closes every segment file. Idempotent.
+// Close deregisters the log from the shared reaper and stops the
+// flusher (which does one final drain), then closes every segment
+// file. Idempotent.
 func (l *Log) Close() error {
 	if !l.closed.CompareAndSwap(false, true) {
 		return nil
@@ -16,8 +17,12 @@ func (l *Log) Close() error {
 	// Stop the background goroutines first, WITHOUT holding rwmu: the
 	// flusher takes rwmu in writeBatch, so closing segments under rwmu
 	// before it stops would deadlock.
+	// Retention runs on the process-wide loop, so stopping it is a
+	// deregistration rather than a goroutine join. A sweep already in
+	// flight for this log is harmless: it takes rwmu and finds a closed
+	// log with nothing to do.
+	sharedReaper.unregister(l)
 	l.reaper.requestStop()
-	l.reaper.waitDone()
 	l.flusher.requestStop()
 	l.flusher.waitDone()
 
