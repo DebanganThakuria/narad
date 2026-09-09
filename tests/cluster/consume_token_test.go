@@ -5,6 +5,7 @@ package cluster
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"testing"
@@ -37,9 +38,51 @@ func tokenTopic(t *testing.T, c *cluster, name string) {
 	c.apiWant(0, http.MethodPost, "/v1/topics", map[string]any{
 		"name": name, "partitions": 6,
 	}, 30*time.Second, http.StatusOK, http.StatusCreated, http.StatusConflict)
-	// Assignments propagate through raft; without this a consume can run
-	// before any node believes it owns anything.
-	time.Sleep(3 * time.Second)
+
+	// Wait for every node to agree on who owns what, rather than sleeping
+	// and hoping. Assignments propagate through raft, and a consume that
+	// runs before they land does NOT wait: the router picks a local
+	// partition from the assignment view, ConsumeProbe recomputes local
+	// ownership, disagrees, and returns ErrNotPartitionOwner with a nil
+	// waiter, which the handler answers 204 on the spot. The client asked
+	// for six seconds and is answered in one millisecond, so any test that
+	// parks consumers before this settles is really measuring the race.
+	deadline := time.Now().Add(45 * time.Second)
+	for {
+		settled := true
+		for node := range 3 {
+			_, body := c.apiWant(node, http.MethodGet, "/v1/topics/"+name, nil,
+				30*time.Second, http.StatusOK)
+			var got struct {
+				Stats []struct {
+					OwnerNode string `json:"owner_node"`
+				} `json:"partition_stats"`
+			}
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("decode topic %s from node %d: %v", name, node, err)
+			}
+			if len(got.Stats) != 6 {
+				settled = false
+				break
+			}
+			for _, s := range got.Stats {
+				if s.OwnerNode == "" {
+					settled = false
+					break
+				}
+			}
+			if !settled {
+				break
+			}
+		}
+		if settled {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("partition ownership for %s never settled across all nodes", name)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 func tokenProduce(t *testing.T, c *cluster, node int, topicName, key string) bool {
@@ -157,18 +200,31 @@ func TestTokenConsume_OneRecordServesOneNode(t *testing.T) {
 
 	var mu sync.Mutex
 	var got []tokenMsg
+	var outcomes []string
 	var wg sync.WaitGroup
 	for node := range 3 {
 		for range 3 { // three consumers per node
 			wg.Add(1)
 			go func(n int) {
 				defer wg.Done()
-				if m, ok := tokenConsume(c, n, "tok-once", "6s"); ok {
-					mu.Lock()
-					got = append(got, m)
-					mu.Unlock()
-					tokenAck(c, n, "tok-once", m.ReceiptHandle)
+				start := time.Now()
+				status, body, err := c.api(n, http.MethodGet,
+					"/v1/topics/tok-once/consume?wait=6s", nil)
+				mu.Lock()
+				outcomes = append(outcomes, fmt.Sprintf("node %d: status=%d err=%v after %v body=%.120s",
+					n, status, err, time.Since(start).Round(time.Millisecond), string(body)))
+				mu.Unlock()
+				if err != nil || status != http.StatusOK {
+					return
 				}
+				var m tokenMsg
+				if json.Unmarshal(body, &m) != nil {
+					return
+				}
+				mu.Lock()
+				got = append(got, m)
+				mu.Unlock()
+				tokenAck(c, n, "tok-once", m.ReceiptHandle)
 			}(node)
 		}
 	}
@@ -179,6 +235,21 @@ func TestTokenConsume_OneRecordServesOneNode(t *testing.T) {
 	wg.Wait()
 
 	if len(got) != 1 {
+		// Post-mortem: say WHERE the record went, so a failure separates
+		// "delivered twice" from "never delivered at all" without a rerun.
+		for _, o := range outcomes {
+			t.Logf("consumer outcome: %s", o)
+		}
+		for i := range 3 {
+			if m, ok := tokenConsume(c, i, "tok-once", "2s"); ok {
+				t.Logf("post-mortem: node %d still finds partition %d offset %d unclaimed",
+					i, m.Partition, m.Offset)
+			} else {
+				t.Logf("post-mortem: node %d finds nothing", i)
+			}
+		}
+		_, body := c.apiWant(0, http.MethodGet, "/v1/topics/tok-once", nil, 20*time.Second, http.StatusOK)
+		t.Logf("post-mortem topic state: %s", string(body))
 		t.Fatalf("one record reached %d consumers across the cluster, want exactly 1", len(got))
 	}
 }
@@ -319,6 +390,39 @@ func pinnedOwner(t *testing.T, c *cluster, topicName, key string, via, n int) (p
 	}
 }
 
+// consumeLongPoll is tokenConsume for a budget longer than the harness
+// client allows.
+//
+// c.http carries a 15s timeout, which is right for ordinary calls and
+// wrong for a consume deliberately parked across a process restart: the
+// client gives up at 15s and the caller sees a transport error that
+// looks exactly like "nothing was delivered". This uses its own client
+// so the server's answer is what the test measures.
+func consumeLongPoll(c *cluster, node int, topicName, wait string, timeout time.Duration) (tokenMsg, bool) {
+	req, err := http.NewRequest(http.MethodGet,
+		c.url(node)+"/v1/topics/"+topicName+"/consume?wait="+wait, nil)
+	if err != nil {
+		return tokenMsg{}, false
+	}
+	req.SetBasicAuth("admin", adminPassword)
+	req.Header.Set("X-Narad-Client", "cluster-test")
+
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return tokenMsg{}, false
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return tokenMsg{}, false
+	}
+	var m tokenMsg
+	if json.Unmarshal(body, &m) != nil {
+		return tokenMsg{}, false
+	}
+	return m, true
+}
+
 // partitionOwner reports which node owns one partition right now, so a
 // test can prove ownership did not quietly move underneath it.
 func partitionOwner(t *testing.T, c *cluster, via int, topicName string, partition int) int {
@@ -413,7 +517,7 @@ func TestTokenConsume_ResurrectedOwnerDeliversItsBacklog(t *testing.T) {
 	done := make(chan result, 1)
 	go func() {
 		start := time.Now()
-		m, ok := tokenConsume(c, reader, "tok-resurrect", "40s")
+		m, ok := consumeLongPoll(c, reader, "tok-resurrect", "40s", 60*time.Second)
 		done <- result{m, ok, time.Since(start)}
 	}()
 
