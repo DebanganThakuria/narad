@@ -4,6 +4,7 @@ package cluster
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
@@ -261,4 +262,203 @@ func TestTokenConsume_SurvivesAnOwnerDying(t *testing.T) {
 		}
 	}
 	t.Logf("delivered %d of %d produced with one of three owners killed mid-stream", len(got), len(sent))
+}
+
+// pinnedOwner produces n records under one key, so they all land on one
+// partition, and reports that partition's owning node. Ownership is what
+// decides which process has to be killed for a test about resurrection
+// to be about resurrection at all.
+func pinnedOwner(t *testing.T, c *cluster, topicName, key string, via, n int) (partition, owner int) {
+	t.Helper()
+	for range n {
+		if !tokenProduce(t, c, via, topicName, key) {
+			t.Fatalf("produce to %s failed", topicName)
+		}
+	}
+	// Describe aggregates per-partition stats from their owners over RPC,
+	// so the records are not visible here the instant produce returns.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		_, body := c.apiWant(via, http.MethodGet, "/v1/topics/"+topicName, nil,
+			30*time.Second, http.StatusOK)
+		var got struct {
+			Stats []struct {
+				Index         int    `json:"index"`
+				HighWatermark int64  `json:"high_watermark"`
+				OwnerNode     string `json:"owner_node"`
+			} `json:"partition_stats"`
+		}
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("decode topic %s: %v", topicName, err)
+		}
+		found, holding := 0, 0
+		for _, s := range got.Stats {
+			if s.HighWatermark == 0 {
+				continue
+			}
+			found++
+			holding += int(s.HighWatermark)
+			partition = s.Index
+			// Node ids are narad-1..narad-N for harness indices 0..N-1.
+			if _, err := fmt.Sscanf(s.OwnerNode, "narad-%d", &owner); err != nil {
+				t.Fatalf("unexpected owner_node %q", s.OwnerNode)
+			}
+			owner--
+		}
+		if found > 1 {
+			t.Fatalf("%d partitions hold records, want exactly 1: key %q did not pin them", found, key)
+		}
+		if found == 1 && holding >= n {
+			return partition, owner
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d records visible on %d partitions after producing under key %q",
+				holding, n, found, key)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// partitionOwner reports which node owns one partition right now, so a
+// test can prove ownership did not quietly move underneath it.
+func partitionOwner(t *testing.T, c *cluster, via int, topicName string, partition int) int {
+	t.Helper()
+	_, body := c.apiWant(via, http.MethodGet, "/v1/topics/"+topicName, nil,
+		30*time.Second, http.StatusOK)
+	var got struct {
+		Stats []struct {
+			Index     int    `json:"index"`
+			OwnerNode string `json:"owner_node"`
+		} `json:"partition_stats"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode topic %s: %v", topicName, err)
+	}
+	for _, s := range got.Stats {
+		if s.Index != partition {
+			continue
+		}
+		owner := 0
+		if _, err := fmt.Sscanf(s.OwnerNode, "narad-%d", &owner); err != nil {
+			t.Fatalf("unexpected owner_node %q", s.OwnerNode)
+		}
+		return owner - 1
+	}
+	t.Fatalf("topic %s has no partition %d", topicName, partition)
+	return -1
+}
+
+// TestTokenConsume_ResurrectedOwnerDeliversItsBacklog covers the case
+// the tests above leave open, and it only means anything in this precise
+// order: the owner of the records is killed FIRST, a consumer parks on a
+// survivor while it is down, and only then does it come back.
+//
+// Order is the whole test. A consumer that parks after the owner is
+// already up finds the backlog with its opening fan-out probe, which is
+// an ordinary local_only consume and involves no token at all. Parking
+// while the owner is dead removes that path: the probe cannot reach it,
+// so the consumer parks having left tokens only with the nodes that were
+// alive, and the resurrected node holds records that nobody has asked
+// it for.
+//
+// Nothing is produced after the restart either, so the records that come
+// back are the pre-crash ones and no new write can be what woke anybody.
+// Tokens are soft state and die with the process, so the resurrected node
+// starts with an empty table: whatever reaches this consumer has to be
+// established after the node is back. If nothing is, the consumer waits
+// out its whole budget and the client only sees the backlog on its next
+// poll, which is a full long-poll of added latency every time a node
+// returns.
+//
+// The delivered record must come from the pinned partition, which the
+// reader does not own and which stays owned by the node that died. That
+// is what rules out the two ways this could pass without meaning
+// anything: ownership quietly moving during the outage, and the reader
+// being served from its own partitions.
+func TestTokenConsume_ResurrectedOwnerDeliversItsBacklog(t *testing.T) {
+	c := newCluster(t, clusterOptions{env: map[string]string{
+		// The consumer has to stay parked across a process restart, which
+		// is longer than the default ten second ceiling allows. Raising
+		// the ceiling drags write_timeout and shutdown_grace with it:
+		// config refuses a wait a response could not outlive.
+		"NARAD_HTTP_MAX_CONSUME_WAIT": "45s",
+		"NARAD_HTTP_WRITE_TIMEOUT":    "90s",
+		"NARAD_HTTP_SHUTDOWN_GRACE":   "50s",
+	}})
+	c.startAll()
+	c.waitAllReady(90 * time.Second)
+	c.waitAdmin(60 * time.Second)
+	defer c.teardown()
+	tokenTopic(t, c, "tok-resurrect")
+
+	const backlog = 4
+	partition, owner := pinnedOwner(t, c, "tok-resurrect", "pinned", 0, backlog)
+	reader := (owner + 1) % 3
+	t.Logf("%d records on partition %d owned by node %d; reading from node %d",
+		backlog, partition, owner, reader)
+
+	// Let the records reach disk before the process is killed: the
+	// durability of the un-flushed window is a different property.
+	time.Sleep(2 * time.Second)
+	c.kill(owner)
+	time.Sleep(2 * time.Second)
+
+	// Park a consumer while the owner is down, so its opening probe
+	// cannot see the backlog and it genuinely has to be told about it.
+	type result struct {
+		msg     tokenMsg
+		ok      bool
+		elapsed time.Duration
+	}
+	done := make(chan result, 1)
+	go func() {
+		start := time.Now()
+		m, ok := tokenConsume(c, reader, "tok-resurrect", "40s")
+		done <- result{m, ok, time.Since(start)}
+	}()
+
+	// Long enough that the consumer is parked and has registered its
+	// tokens with the survivors, and short enough to be sure it is still
+	// parked when the owner returns.
+	time.Sleep(3 * time.Second)
+	select {
+	case r := <-done:
+		t.Fatalf("the consumer returned (ok=%v) after %v while the owner was still dead: "+
+			"it should have been parked with nothing to serve it", r.ok, r.elapsed)
+	default:
+	}
+
+	c.start(owner)
+	c.waitReady(owner, 90*time.Second)
+	back := time.Now()
+
+	select {
+	case r := <-done:
+		if !r.ok {
+			t.Fatalf("the parked consumer came back empty after %v: a resurrected owner is "+
+				"sitting on %d records and nobody is telling the consumer they exist",
+				r.elapsed, backlog)
+		}
+		lat := time.Since(back)
+		if lat > 15*time.Second {
+			t.Fatalf("delivered %v after the owner came back: the consumer is not being told "+
+				"about a node that returned, it is outlasting something else", lat)
+		}
+		if r.msg.Partition != partition {
+			t.Fatalf("served partition %d, want the pinned partition %d: this consumer was "+
+				"satisfied from somewhere other than the node that came back, so the test "+
+				"proves nothing about resurrection", r.msg.Partition, partition)
+		}
+		if now := partitionOwner(t, c, reader, "tok-resurrect", partition); now != owner {
+			t.Fatalf("partition %d is owned by node %d at delivery but was owned by node %d "+
+				"before the kill: ownership moved during the outage, so the record could have "+
+				"come from a new owner rather than from the node that came back",
+				partition, now, owner)
+		}
+		t.Logf("delivered %v after the owner came back (consumer had been parked %v), partition %d offset %d",
+			lat, r.elapsed, r.msg.Partition, r.msg.Offset)
+		tokenAck(c, reader, "tok-resurrect", r.msg.ReceiptHandle)
+	case <-time.After(45 * time.Second):
+		t.Fatalf("the parked consumer never returned at all")
+	}
 }
