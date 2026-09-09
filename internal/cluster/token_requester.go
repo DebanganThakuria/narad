@@ -1,7 +1,10 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -79,14 +82,85 @@ type tokenRequester struct {
 
 	mu     sync.RWMutex
 	topics map[string]*topicDemand
+
+	// legacyMu guards legacyPeers, the set of peers that answered a
+	// registration with "unsupported rpc operation": nodes too old to
+	// speak this protocol. See noteRegisterResult.
+	legacyMu    sync.Mutex
+	legacyPeers map[string]bool
 }
 
 func newTokenRequester(rt *Router, selfAddr string) *tokenRequester {
 	return &tokenRequester{
-		router:   rt,
-		selfAddr: selfAddr,
-		topics:   make(map[string]*topicDemand),
+		router:      rt,
+		selfAddr:    selfAddr,
+		topics:      make(map[string]*topicDemand),
+		legacyPeers: make(map[string]bool),
 	}
+}
+
+// noteRegisterResult records whether a peer understood a registration,
+// and logs each change of state exactly once per peer.
+//
+// A node that predates this protocol answers OpTokenRegister with 400
+// "unsupported rpc operation", so during a rolling upgrade an upgraded
+// node leaves tokens that some owners silently discard. The consequence
+// is bounded and self-healing: the opening probe is an ordinary consume
+// that old nodes serve, so a record on an old owner is still found, just
+// on the consumer's NEXT poll rather than by notification. The cost is
+// up to one wait budget of extra latency per record on a not-yet-
+// upgraded owner, for the length of the rollout.
+//
+// What is not acceptable is that being invisible. Consume latency rising
+// during a rollout with nothing in the logs to explain it is the kind of
+// thing that gets diagnosed as a mystery. So the transition is logged in
+// BOTH directions: once when a peer is first seen refusing, and again
+// when that same peer starts accepting, which is how an operator watches
+// the rollout drain to zero.
+//
+// Registrations are still sent to peers on the legacy list. Skipping
+// them would save an RPC and cost correctness: nothing else tells this
+// node the peer has been upgraded, so a peer written off once would
+// never be offered a token again until this process restarted.
+func (q *tokenRequester) noteRegisterResult(addr string, res nodewire.Response, err error) {
+	if err != nil {
+		// A transport failure says nothing about what the peer speaks.
+		return
+	}
+	legacy := res.Status == http.StatusBadRequest &&
+		bytes.Contains(res.Body, []byte("unsupported rpc operation"))
+
+	q.legacyMu.Lock()
+	was := q.legacyPeers[addr]
+	if legacy == was {
+		q.legacyMu.Unlock()
+		return
+	}
+	if legacy {
+		q.legacyPeers[addr] = true
+	} else {
+		delete(q.legacyPeers, addr)
+	}
+	remaining := len(q.legacyPeers)
+	q.legacyMu.Unlock()
+
+	if legacy {
+		slog.Default().Warn("peer does not speak the consume token protocol; "+
+			"records on its partitions reach consumers here on the next poll "+
+			"rather than by notification, until it is upgraded",
+			"peer", addr, "legacy_peers", remaining)
+		return
+	}
+	slog.Default().Info("peer now speaks the consume token protocol",
+		"peer", addr, "legacy_peers", remaining)
+}
+
+// legacyPeerCount is how many owners are currently known not to speak
+// the token protocol. Zero on a fully upgraded cluster.
+func (q *tokenRequester) legacyPeerCount() int {
+	q.legacyMu.Lock()
+	defer q.legacyMu.Unlock()
+	return len(q.legacyPeers)
 }
 
 // enabled reports whether this node can take part: it needs a return
@@ -179,7 +253,7 @@ func (q *tokenRequester) register(ctx context.Context, topicName string, remaini
 	}
 	delta := nodewire.TokenDelta{
 		From: q.selfAddr,
-		Add:  []nodewire.TokenRegistration{{Topic: topicName, TTLNanos: int64(remaining), MinRecords: 1}},
+		Add:  []nodewire.TokenRegistration{{Topic: topicName, TTLNanos: int64(remaining)}},
 	}
 	q.broadcast(ctx, owners, delta)
 }
@@ -224,7 +298,11 @@ func (q *tokenRequester) broadcast(ctx context.Context, addrs []string, delta no
 	var pending sync.WaitGroup
 	for _, addr := range addrs {
 		pending.Go(func() {
-			_, _ = q.router.peer.RegisterTokens(sendCtx, addr, delta)
+			res, err := q.router.peer.RegisterTokens(sendCtx, addr, delta)
+			// The send stays fire-and-forget; the REPLY is still worth
+			// reading, because it is the only place a peer tells us it
+			// does not speak this protocol.
+			q.noteRegisterResult(addr, res, err)
 		})
 	}
 	// Release the timeout once the last send finishes, without holding
