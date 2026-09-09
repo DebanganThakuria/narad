@@ -41,8 +41,7 @@ type peerToken struct {
 	// expiresAt is derived from the peer's TTL on THIS node's clock. The
 	// peer sends a duration, never a timestamp, so skew between the two
 	// clocks can never expire a live consumer's token early.
-	expiresAt  time.Time
-	minRecords int
+	expiresAt time.Time
 
 	mu    sync.Mutex
 	spent bool
@@ -129,11 +128,10 @@ func (h *tokenHolder) ApplyDelta(ctx context.Context, delta nodewire.TokenDelta)
 			continue
 		}
 		tok := &peerToken{
-			holder:     h,
-			addr:       delta.From,
-			topic:      add.Topic,
-			expiresAt:  now.Add(time.Duration(add.TTLNanos)),
-			minRecords: int(add.MinRecords),
+			holder:    h,
+			addr:      delta.From,
+			topic:     add.Topic,
+			expiresAt: now.Add(time.Duration(add.TTLNanos)),
 		}
 		if err := h.broker.RegisterRemoteDemand(ctx, add.Topic, tok); err != nil {
 			// This node owns nothing of the topic, or does not know it.

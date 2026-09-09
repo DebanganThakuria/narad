@@ -264,21 +264,21 @@ type TokenRegistration struct {
 	// clock and the receiver adds on its own, so clock skew between the
 	// two can never expire a live consumer's token early.
 	TTLNanos int64
-	// MinRecords suppresses a notification until at least this many
-	// records are ready. Zero or one means "tell me about anything".
-	MinRecords int32
 }
 
 // TokenNotifyRequest tells a peer that records may be available for a
-// topic it holds a token on. Available is what the owner believes is
-// ready right now; it is an estimate and may over-report.
+// topic it holds a token on.
+//
+// It deliberately carries no count. The receiver's next move is a single
+// ordinary consume either way, and any number the owner put here would
+// be an estimate that a racing claim can invalidate before the frame
+// lands. The frame says only "look now", and the claim finds out.
 type TokenNotifyRequest struct {
 	// From is the owner's own node address. The claim has to be aimed at
 	// the node that actually has the record, so the notification says who
 	// is calling rather than making the receiver guess or ask everyone.
-	From      string
-	Topic     string
-	Available int32
+	From  string
+	Topic string
 }
 
 // TokenNotifyReply is the peer's verdict. Claiming false is a "pass":

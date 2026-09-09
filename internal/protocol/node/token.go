@@ -20,7 +20,7 @@ func EncodeTokenDelta(delta TokenDelta) ([]byte, error) {
 	}
 	size := fieldLen(delta.From) + 4 + 4
 	for _, a := range delta.Add {
-		size += fieldLen(a.Topic) + 8 + 4
+		size += fieldLen(a.Topic) + 8
 	}
 	for _, t := range delta.Drop {
 		size += fieldLen(t)
@@ -35,7 +35,6 @@ func EncodeTokenDelta(delta TokenDelta) ([]byte, error) {
 			return nil, err
 		}
 		w.i64(a.TTLNanos)
-		w.i32(a.MinRecords)
 	}
 	w.i32(int32(len(delta.Drop)))
 	for _, t := range delta.Drop {
@@ -73,13 +72,7 @@ func DecodeTokenDelta(payload []byte) (TokenDelta, error) {
 		if err != nil {
 			return TokenDelta{}, err
 		}
-		minRecords, err := r.i32()
-		if err != nil {
-			return TokenDelta{}, err
-		}
-		delta.Add = append(delta.Add, TokenRegistration{
-			Topic: topic, TTLNanos: ttl, MinRecords: minRecords,
-		})
+		delta.Add = append(delta.Add, TokenRegistration{Topic: topic, TTLNanos: ttl})
 	}
 	dropCount, err := r.i32()
 	if err != nil {
@@ -98,23 +91,26 @@ func DecodeTokenDelta(payload []byte) (TokenDelta, error) {
 		}
 		delta.Drop = append(delta.Drop, topic)
 	}
-	if err := r.done(); err != nil {
-		return TokenDelta{}, err
-	}
+	// Deliberately NOT r.done(). Trailing bytes are a NEWER peer sending a
+	// field this build does not know about, and the fields above are
+	// enough to act on, so the frame is accepted and the tail ignored.
+	// That is what lets this format gain fields without burning an opcode
+	// or breaking a mixed-version cluster, the same way
+	// PrepareHandoffRequest.FreezeToken does it. Anything a future field
+	// makes REQUIRED needs a new opcode, not a silent tail.
 	return delta, nil
 }
 
 // EncodeTokenNotifyRequest encodes an OpTokenNotify payload: the frame
 // an owner sends to spend one of a peer's tokens.
 func EncodeTokenNotifyRequest(req TokenNotifyRequest) ([]byte, error) {
-	w := opWriter(OpTokenNotify, fieldLen(req.From)+fieldLen(req.Topic)+4)
+	w := opWriter(OpTokenNotify, fieldLen(req.From)+fieldLen(req.Topic))
 	if err := w.string(req.From); err != nil {
 		return nil, err
 	}
 	if err := w.string(req.Topic); err != nil {
 		return nil, err
 	}
-	w.i32(req.Available)
 	return w.finish(), nil
 }
 
@@ -132,14 +128,9 @@ func DecodeTokenNotifyRequest(payload []byte) (TokenNotifyRequest, error) {
 	if err != nil {
 		return TokenNotifyRequest{}, err
 	}
-	available, err := r.i32()
-	if err != nil {
-		return TokenNotifyRequest{}, err
-	}
-	if err := r.done(); err != nil {
-		return TokenNotifyRequest{}, err
-	}
-	return TokenNotifyRequest{From: from, Topic: topic, Available: available}, nil
+	// Trailing bytes are tolerated so the frame can gain fields later;
+	// see DecodeTokenDelta.
+	return TokenNotifyRequest{From: from, Topic: topic}, nil
 }
 
 // EncodeTokenNotifyReply encodes the verdict body: one byte, because

@@ -9,8 +9,8 @@ func TestTokenDeltaRoundTrip(t *testing.T) {
 	want := TokenDelta{
 		From: "node-a.example:7942",
 		Add: []TokenRegistration{
-			{Topic: "orders", TTLNanos: int64(28 * time.Second), MinRecords: 1},
-			{Topic: "payments", TTLNanos: int64(5 * time.Second), MinRecords: 64},
+			{Topic: "orders", TTLNanos: int64(28 * time.Second)},
+			{Topic: "payments", TTLNanos: int64(5 * time.Second)},
 		},
 		Drop: []string{"shipments", "refunds"},
 	}
@@ -61,7 +61,7 @@ func TestTokenDeltaRejectsOversizedBatch(t *testing.T) {
 }
 
 func TestTokenNotifyRoundTrip(t *testing.T) {
-	payload, err := EncodeTokenNotifyRequest(TokenNotifyRequest{From: "node-a:7942", Topic: "orders", Available: 7})
+	payload, err := EncodeTokenNotifyRequest(TokenNotifyRequest{From: "node-a:7942", Topic: "orders"})
 	if err != nil {
 		t.Fatalf("EncodeTokenNotifyRequest() error = %v", err)
 	}
@@ -69,8 +69,42 @@ func TestTokenNotifyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeTokenNotifyRequest() error = %v", err)
 	}
-	if got.From != "node-a:7942" || got.Topic != "orders" || got.Available != 7 {
-		t.Fatalf("decoded %+v, want node-a:7942/orders/7", got)
+	if got.From != "node-a:7942" || got.Topic != "orders" {
+		t.Fatalf("decoded %+v, want node-a:7942/orders", got)
+	}
+}
+
+// Both token frames must accept a payload with bytes they do not
+// understand on the end, because that is a NEWER peer sending a field
+// this build predates. Rejecting the tail would mean a mixed-version
+// cluster stops exchanging tokens the moment the format grows, which is
+// exactly the rolling-upgrade hole this protocol already has once.
+func TestTokenFramesTolerateTrailingBytes(t *testing.T) {
+	delta, err := EncodeTokenDelta(TokenDelta{
+		From: "node-a:7942",
+		Add:  []TokenRegistration{{Topic: "orders", TTLNanos: int64(time.Second)}},
+	})
+	if err != nil {
+		t.Fatalf("EncodeTokenDelta() error = %v", err)
+	}
+	gotDelta, err := DecodeTokenDelta(append(delta, 0xde, 0xad, 0xbe, 0xef))
+	if err != nil {
+		t.Fatalf("DecodeTokenDelta() with a future field appended: error = %v", err)
+	}
+	if len(gotDelta.Add) != 1 || gotDelta.Add[0].Topic != "orders" {
+		t.Fatalf("decoded %+v, want the orders registration intact", gotDelta)
+	}
+
+	notify, err := EncodeTokenNotifyRequest(TokenNotifyRequest{From: "node-a:7942", Topic: "orders"})
+	if err != nil {
+		t.Fatalf("EncodeTokenNotifyRequest() error = %v", err)
+	}
+	gotNotify, err := DecodeTokenNotifyRequest(append(notify, 0x01, 0x02))
+	if err != nil {
+		t.Fatalf("DecodeTokenNotifyRequest() with a future field appended: error = %v", err)
+	}
+	if gotNotify.From != "node-a:7942" || gotNotify.Topic != "orders" {
+		t.Fatalf("decoded %+v, want node-a:7942/orders", gotNotify)
 	}
 }
 
