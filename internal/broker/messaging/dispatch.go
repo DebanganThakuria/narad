@@ -48,9 +48,23 @@ type waiterDelivery struct {
 // waiter is one parked queue-style consume. ch is buffered so the pump
 // never blocks handing over, and receives at most one delivery because
 // the waiter is removed from the queue before the send.
+//
+// abandoned covers the window in which the pump has taken this waiter
+// off the queue but has not finished reserving for it: the waiter is in
+// neither the queue nor the channel, so a consumer that gives up in
+// that instant cannot see the record it is about to be handed. The flag
+// is guarded by the topic's mutex, and the pump reads it under that
+// same lock immediately before the send, so exactly one of the two ends
+// up owning the record: either the pump delivers it, or it learns
+// nobody is left to read it and gives it back. Getting this wrong
+// leaves a reserved record invisible until its visibility timeout, and
+// under load that treadmill is indistinguishable from a stall.
 type waiter struct {
 	cw *ConsumeWaiter
 	ch chan waiterDelivery
+
+	// guarded by the owning topicDispatch's mu.
+	abandoned bool
 }
 
 // RemoteDemand is a peer's standing interest in a topic, registered by
@@ -400,14 +414,39 @@ func (d *dispatcher) pumpTopic(topicName string) {
 			w.cw.scan, w.cw.scanStart, w.cw.visibilityTimeout)
 		if err != nil || !found {
 			st.mu.Lock()
-			st.queue.pushFront(queueEntry{waiter: w})
+			// A consumer that gave up while the read was running is no
+			// longer waiting for anything, so it does not go back on the
+			// queue. Nothing was reserved, so there is nothing to release.
+			if !w.abandoned {
+				st.queue.pushFront(queueEntry{waiter: w})
+			}
+			if st.queue.len() == 0 {
+				st.hasWaiters.Store(false)
+			}
 			st.mu.Unlock()
 			return
 		}
+
+		// Resolve against a consumer that may have given up during the
+		// read. Both this check and dequeue's flag write happen under
+		// st.mu, so the send is ordered before any observation of the
+		// queue that could conclude the record was never handed over.
+		st.mu.Lock()
+		abandoned := w.abandoned
+		if !abandoned {
+			// Buffered, and this waiter is off the queue, so exactly one
+			// delivery can ever be sent and the send cannot block.
+			w.ch <- waiterDelivery{msg: msg}
+		}
+		st.mu.Unlock()
+
+		if abandoned {
+			// Reserved for someone who is gone. Give it back now rather
+			// than leaving it invisible for a whole visibility timeout.
+			d.engine.releaseUndelivered(topicName, msg)
+			continue
+		}
 		d.engine.recordConsumed(topicName, msg.Partition, len(msg.Payload))
-		// Buffered, and this waiter is off the queue, so exactly one
-		// delivery can ever be sent and the send cannot block.
-		w.ch <- waiterDelivery{msg: msg}
 	}
 }
 
@@ -495,6 +534,14 @@ func (d *dispatcher) dequeue(topicName string, w *waiter) (waiterDelivery, bool)
 	st := d.stateFor(topicName)
 	st.mu.Lock()
 	removed := st.queue.removeWaiter(w)
+	if !removed {
+		// The pump has this waiter off the queue and may be reserving on
+		// its behalf right now. Say so before releasing the lock: from
+		// here the pump either has already put a delivery in the buffer
+		// (the receive below finds it) or will see this flag and give the
+		// record back itself.
+		w.abandoned = true
+	}
 	if st.queue.len() == 0 {
 		st.hasWaiters.Store(false)
 	}

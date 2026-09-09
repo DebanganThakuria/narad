@@ -6,9 +6,39 @@ import (
 	"testing"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
+
+// parkedResult is what a parked consumer came back with, for tests that
+// need the message itself and not just whether one arrived.
+type parkedResult struct {
+	msg   topic.Message
+	found bool
+}
+
+// parkForMessage is parkConsumer where the caller needs the delivered
+// message, typically so it can ack it.
+func parkForMessage(t *testing.T, e *Engine, topicName string, wait time.Duration) <-chan parkedResult {
+	t.Helper()
+	_, found, w, err := e.ConsumeProbe(context.Background(), topicName, ConsumeOpts{})
+	if err != nil || found {
+		t.Fatalf("ConsumeProbe() = (found %v, err %v), want a waiter", found, err)
+	}
+	out := make(chan parkedResult, 1)
+	ready := make(chan struct{})
+	go func() {
+		close(ready)
+		msg, got, _, err := e.ConsumeWait(context.Background(), w, wait, nil)
+		if err != nil {
+			t.Errorf("ConsumeWait() error = %v", err)
+		}
+		out <- parkedResult{msg: msg, found: got}
+	}()
+	<-ready
+	return out
+}
 
 // commitRecords appends n records to (topic, 0) and advances the high
 // watermark so they are visible to consumers.
@@ -193,6 +223,109 @@ func TestConsumeWaitReleasesRecordWhenClientLeaves(t *testing.T) {
 			t.Fatal("the record was never released: it stayed reserved for a consumer that had already gone")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestGivingUpMidReservationStrandsNothing targets the window the test
+// above almost never lands in. Between the pump taking a waiter off the
+// queue and the delivery reaching its channel, the waiter is in neither
+// place, so a consumer that gives up right then cannot see the record it
+// is about to be handed: it reports "nothing arrived" and releases
+// nothing, while the pump hands a reserved record to a channel nobody
+// will ever read.
+//
+// Each round times a commit to land on a consumer's expiry, so some
+// rounds fall inside that window. The visibility timeout is 60s, which
+// is what makes a strand fatal rather than merely slow: a record left
+// reserved for a departed consumer cannot come back on its own, so one
+// occurrence in the whole run fails the test. In production the same bug
+// is a treadmill, every strand costing a full visibility timeout, which
+// reads as a stall rather than as loss.
+func TestGivingUpMidReservationStrandsNothing(t *testing.T) {
+	const rounds = 300
+	const wait = 20 * time.Millisecond
+
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{
+		Name: "orders", Partitions: 1, VisibilityTimeoutMs: 60_000,
+		MaxInFlightPerPartition: 64, MaxAckedAheadPerPartition: 64,
+	}
+	engine := newTestEngine(t, ms, nil, nil)
+
+	log, err := engine.logs.Get("orders", 0)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	// Every record this test takes is acked, so reservations cannot pile
+	// up against the in-flight cap and make a later round look stranded.
+	ack := func(round int, msg topic.Message) {
+		t.Helper()
+		h, err := consumer.DecodeHandle(msg.ReceiptHandle)
+		if err != nil {
+			t.Fatalf("round %d: DecodeHandle() error = %v", round, err)
+		}
+		if err := engine.Ack(context.Background(), "orders", h); err != nil {
+			t.Fatalf("round %d: Ack() error = %v", round, err)
+		}
+	}
+
+	committed := 0
+	served, recovered := 0, 0
+	for round := range rounds {
+		out := parkForMessage(t, engine, "orders", wait)
+
+		// Aim the commit at the moment the consumer's budget runs out,
+		// sweeping either side of it so the abandonment lands before,
+		// during and after the pump's reservation across the run.
+		time.Sleep(wait - time.Millisecond + time.Duration(round%20)*100*time.Microsecond)
+		if _, err := log.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":1}`))); err != nil {
+			t.Fatalf("Append(%d) error = %v", round, err)
+		}
+		committed++
+		if err := log.AdvanceHighWatermark(int64(committed)); err != nil {
+			t.Fatalf("AdvanceHighWatermark(%d) error = %v", committed, err)
+		}
+
+		select {
+		case got := <-out:
+			if got.found {
+				ack(round, got.msg)
+				served++
+				continue
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: the parked consumer never returned", round)
+		}
+
+		// The consumer left empty-handed, so the record it did not get
+		// must come back for the next consumer. The give-back runs on the
+		// pump, so allow a moment for it; two seconds against a sixty
+		// second visibility timeout keeps the assertion sharp, since a
+		// record that really was stranded cannot reappear inside it.
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			msg, found, _, err := engine.ConsumeProbe(context.Background(), "orders", ConsumeOpts{})
+			if err != nil {
+				t.Fatalf("round %d: ConsumeProbe() error = %v", round, err)
+			}
+			if found {
+				ack(round, msg)
+				recovered++
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("round %d: a record was reserved for a consumer that had already given up, "+
+					"and is now invisible until its visibility timeout (%d served, %d recovered of %d committed)",
+					round, served, recovered, committed)
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+
+	if served+recovered != committed {
+		t.Fatalf("accounted for %d records (%d served, %d recovered) of %d committed",
+			served+recovered, served, recovered, committed)
 	}
 }
 

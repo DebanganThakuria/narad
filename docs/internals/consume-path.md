@@ -45,17 +45,61 @@ Details that carry the correctness:
 - **Reservation before read**: an offset is claimed first, then read; two consumers can never receive the same live copy.
 - **Ack validation is (offset, nonce)**: an expired-then-re-reserved offset has a new nonce, so the late original acker gets `410 Gone` instead of silently settling someone else's lease. **Extend** (heartbeat) validates the same way and re-arms the expiry; **nack** releases the lease and wakes long-pollers immediately.
 - **Expiry is proactive**: a min-heap purge runs on every touch plus a background purger, so redelivery latency after a consumer death is the visibility timeout, not "whenever someone next polls."
-- **Long-poll wiring**: an empty partition parks the consumer on the log's broadcast channel; new commits (high-watermark advances), lease expiries, nacks, and acks that free a cap slot or end an ahead-full stall all wake it. An ack that relieves nothing wakes nobody. No polling loops server-side.
-- **The owner-node ladder is one consume in two halves.** `ConsumeProbe` snapshots the wake-up channels, scans the local partitions once (starting at the router's pick), and hands back a waiter; the handler asks the remote owners; `ConsumeWait` then parks on that same snapshot for the requested wait. A commit that lands while the remote owners are being asked closes a snapshotted channel and wakes the wait, and the local partitions are not scanned a second time before parking.
-- **The wait on an owner node also listens to the other owners.** Parking only on the local wake-up channel meant a message produced meanwhile to a partition another node owns was seen only when the wait expired and the client re-polled. The wait phase now races the local `ConsumeWait` against one forwarded local-only long-poll (`ConsumeRequest{LocalOnly: true, WaitNanos: remaining}`) to a rotated remote owner, moving to the next owner with the remaining budget if one answers empty early. Whichever delivers first wins and the loser's delivery is given back: a local win cancels the remote RPC (the cancel frame makes the owner nack anything it had reserved for that request, and a reply that still carries a message is nacked explicitly); a remote win cancels the local wait, and a message the local path reserved in the meantime is nacked. One extra goroutine per waiting client, bounded process-wide (4096); past the bound, or on a node with no remote owners to ask, the wait runs locally as before.
-- **A forwarded long-poll stops when its client leaves.** The cluster RPC client sends a cancel frame for a request it stops waiting on (context ended or reply timeout); the owner cancels the parked consume, and if it had already reserved a message for that request it nacks it at once instead of leaving it invisible until the lease expires.
+- **Nobody scans and nobody races.** An empty consume does not park on a broadcast channel. It enqueues itself on the topic's waiter FIFO and blocks on one buffered channel; a single **pump** goroutine per broker does the reservation once and hands the record to exactly one waiter. The shape this replaced closed a broadcast channel on every commit, so every parked consumer woke, rebuilt a `reflect.SelectCase` slice, took the partition shard mutex and scanned, and all but one found nothing. Cost per commit now scales with *messages delivered* rather than with *consumers waiting*.
+- **The pump gates on two things at once**, and is therefore woken by a change to either: a waiter arrived (enqueue kicks it), or records became available (the log's wake notifier fires on a high-watermark advance, a nack, a lease expiry, or a close). Waking on only one of them is the classic bug: a consumer that arrives *after* the data would wait for a record that has already landed.
+- **Nothing is reserved speculatively.** The pump reserves only once it has taken a waiter off the queue, so there is no local give-back path at all. The single exception is explicit: a record handed over at the instant its request is cancelled has nobody to receive it, so it is released immediately rather than left invisible until its visibility timeout.
+- **Idle costs nothing.** No polling, no timers; the wake notifier short-circuits on an atomic flag when a topic has no waiter, keeping the produce path allocation-free. Measured: 600 consumers parked across a four-node cluster moved idle CPU by less than the noise floor.
+
+## Cross-node consume: the token protocol
+
+A consumer's request lands on whichever node the load balancer picked, which usually does not own the partition its record arrives on. Narad takes partitions from Kafka and a routing-unaware client from SQS, and the cross-node gather is the interaction term of those two choices. Neither parent has it, because Kafka's client goes straight to the leader and SQS exposes no partitions at all.
+
+The node holding the consumer leaves a **token** with every remote owner of the topic:
+
+```mermaid
+sequenceDiagram
+    participant c as consumer
+    participant B as Broker B (gateway)
+    participant A as Broker A (owner)
+    c->>B: GET /consume?wait=30s
+    B->>B: probe own partitions, empty
+    B->>A: token (batched, to every owner at once)
+    Note over B,A: idle. no polling, no timers, nothing running.
+    A->>A: record commits, pump wakes
+    A->>B: spends ONE token: notification
+    B-->>A: dibbing
+    B->>A: claim: consume{wait:0}
+    A-->>B: the record
+    B-->>c: 200
+    B->>B: drop the now-stale tokens at the other owners
+```
+
+The properties that make it work:
+
+- **A token reserves nothing.** It says only "I am here, tell me if records show up". That is what removes the whole give-back problem: an owner that never hears back from a peer has stranded no record, because it never took one out of circulation. Only the *claim* reserves, and it is aimed at exactly one node.
+- **One token, one record, one peer told.** Never a broadcast. An `outstanding` counter gates notifications against the available-record estimate, so the same record is never promised to two peers; a peer that declines (`pass`) retires its claim at once and the record is offered to the next holder a round trip later, rather than after a deadline.
+- **Tokens are single use and connection scoped.** Firing one consumes it, so a stale token costs exactly one notification rather than one per record for its whole life. They die with the peer's connection, which is why crash recovery for this subsystem is *do nothing*: a restarting node rebuilds them by registering again.
+- **Registration doubles as a read.** The first contact with an owner is the ordinary non-blocking consume probe carrying a token: give me a record if you have one, and remember me if you don't. A cold start therefore costs no extra round trip, and a broker restarting with a backlog needs no recovery scan: the next consumer to ask drains it.
+- **TTLs travel as durations, never deadlines.** The sender subtracts on its own clock and the receiver adds on its own, so skew between two nodes can never expire a live consumer's token early. Same reasoning that keeps `LastHeartbeat` on the leader's clock.
+- **Retirement is free.** When a consumer is served, the tokens it left with the *other* owners are stale. They are dropped in the next batched frame already going to those peers, rather than paying a cancel RPC per stale token on every delivery.
+
+Three delivery speeds fall out of this, and which one applies depends only on whether the consumer arrived before or after the data:
+
+| | when |
+|---|---|
+| **0 round trips** | the record is on a partition this node owns |
+| **1 round trip** | the data was already there when the consumer asked, so the probe returns it inline |
+| **2 round trips** | the consumer waited, then data arrived: notify, then claim |
+
+Under load the first two dominate: a busy topic rarely empties, so the notification path is taken only on the empty-to-non-empty edge. Busy topics use the pump *less* than quiet ones.
+
 - **Retention outran the consumer**: when the reserved offset is below the oldest retained offset, the frontier jumps to the oldest retained offset in one step (logged, persisted) instead of skipping one missing offset per request.
 - **Receipt-handle nonces** are drawn from a per-partition random stream, not a counter, so a handle cannot be forged by a principal that did not receive the message.
 - **Corrupt records don't wedge the queue**: an offset whose frame is permanently unreadable is skipped with a counter and a loud log, recorded in the shard so the frontier can advance over it: bounded, visible loss instead of an immortal head-of-line block.
 
 ## Routing
 
-Consume requests land on any node. Queue-style consumes prefer local partitions (cheapest), then probe remote owners over node RPC, and only then spend the client's `wait` long-polling. Replay-style consumes (`offset=` + `partition=`) route straight to that partition's owner and bypass the queue state entirely: read-only time travel within retention.
+Consume requests land on any node. Queue-style consumes prefer local partitions (cheapest), then probe every remote owner once over node RPC, and only then spend the client's `wait`, parked on the local waiter queue and on tokens left with the owners rather than polling anything. Replay-style consumes (`offset=` + `partition=`) route straight to that partition's owner and bypass the queue state entirely: read-only time travel within retention.
 
 ## Recovery story, end to end
 

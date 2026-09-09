@@ -24,10 +24,11 @@ import (
 // Logs with no age bound are never registered at all: no goroutine, no
 // entry, no work.
 
-// reaperSweepFloor bounds how often the shared loop wakes, however
-// short a topic's configured check interval is. Retention is not
-// latency-sensitive, and waking more often than this would trade the
-// per-log timers we just removed for one busy timer.
+// reaperSweepFloor is how often the shared loop wakes, and therefore the
+// granularity of every log's check interval. Retention is not
+// latency-sensitive: a sweep a second late is invisible, whereas waking
+// more often would trade the per-log timers this removed for one busy
+// timer. A log asking for a shorter interval than this gets this.
 const reaperSweepFloor = time.Second
 
 // sharedReaper is the process-wide retention loop. Lazily started on
@@ -44,9 +45,6 @@ type reaperPool struct {
 	mu      sync.Mutex
 	logs    map[*Log]*reaperEntry
 	started bool
-	// tick is the loop's period: the shortest check interval any
-	// registered log asked for, floored at reaperSweepFloor.
-	tick time.Duration
 }
 
 // register enrolls a log's reaper in the shared loop. A reaper with no
@@ -56,14 +54,9 @@ func (p *reaperPool) register(r *reaper) {
 	if r == nil || r.cfg.MaxAge <= 0 {
 		return
 	}
-	interval := max(r.cfg.CheckInterval, reaperSweepFloor)
-
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.logs[r.log] = &reaperEntry{r: r, next: r.cfg.Now().Add(r.cfg.CheckInterval)}
-	if p.tick == 0 || interval < p.tick {
-		p.tick = interval
-	}
 	if !p.started {
 		p.started = true
 		go p.run()
@@ -80,11 +73,15 @@ func (p *reaperPool) unregister(l *Log) {
 // run is the single retention goroutine. It never exits: the pool is
 // process-wide, and a node that closed every log will simply find
 // nothing to sweep.
+// The tick is FIXED rather than derived from the registered intervals.
+// Each entry carries its own next-sweep time, so per-log intervals are
+// honoured by sweepDue regardless of how often the loop wakes; the tick
+// only sets the granularity. Deriving it from the shortest registered
+// interval was a bug: the ticker is created once, so a log registered
+// later with a shorter interval was swept on the older, longer period.
+// TestSharedReaperHonoursPerLogIntervals is the regression test.
 func (p *reaperPool) run() {
-	p.mu.Lock()
-	tick := p.tick
-	p.mu.Unlock()
-	ticker := time.NewTicker(tick)
+	ticker := time.NewTicker(reaperSweepFloor)
 	defer ticker.Stop()
 
 	for range ticker.C {
