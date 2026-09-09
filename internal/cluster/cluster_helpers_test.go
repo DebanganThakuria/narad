@@ -35,6 +35,8 @@ type fakePeerClient struct {
 	attachChildFn         func(context.Context, string, string, string, int64) (nodewire.Response, error)
 	detachChildFn         func(context.Context, string, string, string) (nodewire.Response, error)
 	fanoutCursorsFn       func(context.Context, string, string) ([]topic.FanoutCursorStat, error)
+	notifyTokenFn         func(context.Context, string, nodewire.TokenNotifyRequest) (nodewire.Response, error)
+	registerTokensFn      func(context.Context, string, nodewire.TokenDelta) (nodewire.Response, error)
 }
 
 func (f fakePeerClient) GetTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error) {
@@ -327,4 +329,21 @@ func (f fakePeerClient) Nack(ctx context.Context, addr string, req nodewire.AckR
 		return f.nackFn(ctx, addr, req)
 	}
 	return nodewire.Response{}, context.DeadlineExceeded
+}
+
+// notifyTokenFn and registerTokensFn let a test script the token
+// protocol; unset, both succeed with an empty pass so a fake peer that
+// does not care about tokens keeps working.
+func (f fakePeerClient) NotifyToken(ctx context.Context, addr string, req nodewire.TokenNotifyRequest) (nodewire.Response, error) {
+	if f.notifyTokenFn != nil {
+		return f.notifyTokenFn(ctx, addr, req)
+	}
+	return nodewire.Response{Status: 200, Body: nodewire.EncodeTokenNotifyReply(nodewire.TokenNotifyReply{})}, nil
+}
+
+func (f fakePeerClient) RegisterTokens(ctx context.Context, addr string, delta nodewire.TokenDelta) (nodewire.Response, error) {
+	if f.registerTokensFn != nil {
+		return f.registerTokensFn(ctx, addr, delta)
+	}
+	return nodewire.Response{Status: 204}, nil
 }

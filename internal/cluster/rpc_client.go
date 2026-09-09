@@ -41,6 +41,8 @@ type peerClient interface {
 	FanoutCursors(ctx context.Context, addr, parent string) ([]topic.FanoutCursorStat, error)
 	PurgeTopic(ctx context.Context, addr, topicName, id string) (nodewire.Response, error)
 	TopicPartitionStats(context.Context, string, string, int) (topic.PartitionStats, error)
+	NotifyToken(context.Context, string, nodewire.TokenNotifyRequest) (nodewire.Response, error)
+	RegisterTokens(context.Context, string, nodewire.TokenDelta) (nodewire.Response, error)
 	RegisterMember(context.Context, string, nodewire.MemberRequest) (nodewire.Response, error)
 	CreateUser(ctx context.Context, addr string, body []byte) (nodewire.Response, error)
 	UpdateUser(ctx context.Context, addr, username string, body []byte) (nodewire.Response, error)
@@ -551,4 +553,25 @@ func (c *PeerClient) GetAssignment(ctx context.Context, addr, topicName string, 
 		return metastore.Assignment{}, err
 	}
 	return a, nil
+}
+
+// NotifyToken spends one of a peer's tokens: it tells that peer records
+// may be available for a topic and reports what it said back. The reply
+// is a single verdict byte, so this is about as small as an RPC gets.
+//
+// A failure is not retried. The token is spent either way, and telling
+// a peer twice about one record means two claims for one consumer; the
+// peer re-registers on its own if it still wants a turn.
+func (c *PeerClient) NotifyToken(ctx context.Context, addr string, req nodewire.TokenNotifyRequest) (nodewire.Response, error) {
+	payload, err := nodewire.EncodeTokenNotifyRequest(req)
+	return c.send(ctx, addr, "token_notify", laneControl, payload, err)
+}
+
+// RegisterTokens sends one peer its batched token delta: the topics this
+// node now wants to hear about, and the ones it no longer does. Both
+// travel together so retiring stale interest costs bytes in a frame that
+// was already going out rather than an RPC of its own.
+func (c *PeerClient) RegisterTokens(ctx context.Context, addr string, delta nodewire.TokenDelta) (nodewire.Response, error) {
+	payload, err := nodewire.EncodeTokenDelta(delta)
+	return c.send(ctx, addr, "token_register", laneControl, payload, err)
 }

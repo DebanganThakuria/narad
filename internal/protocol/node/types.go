@@ -45,6 +45,8 @@ const (
 	OpAbortMove
 	OpGetAssignment
 	OpAppliedIndex
+	OpTokenRegister
+	OpTokenNotify
 )
 
 // CompleteMoveRequest asks the leader to perform the guarded ownership flip
@@ -231,4 +233,53 @@ func OperationOf(payload []byte) (Operation, error) {
 		return 0, io.ErrUnexpectedEOF
 	}
 	return Operation(payload[0]), nil
+}
+
+// TokenDelta is one batched update to the standing interest this node
+// has registered with a peer. Adds and drops travel together so a
+// consumer that was served elsewhere can retire its unused interest in
+// a frame that was already going out, rather than paying an RPC per
+// stale token.
+//
+// A token reserves nothing. It says only "I am here, tell me if records
+// show up", which is why losing one costs a round trip and never
+// correctness.
+type TokenDelta struct {
+	// From is the sender's own node address, self-advertised the same
+	// way RegisterMember does it, so the owner can reach back through
+	// the normal peer client to spend a token.
+	From string
+	// Add carries the topics this node now wants to hear about.
+	Add []TokenRegistration
+	// Drop carries topics it no longer wants. Best effort: a lost drop
+	// costs one wasted notification that the peer declines.
+	Drop []string
+}
+
+// TokenRegistration is one topic's worth of interest.
+type TokenRegistration struct {
+	Topic string
+	// TTLNanos is how much longer the interest is useful, expressed as a
+	// DURATION rather than a deadline: the sender subtracts on its own
+	// clock and the receiver adds on its own, so clock skew between the
+	// two can never expire a live consumer's token early.
+	TTLNanos int64
+	// MinRecords suppresses a notification until at least this many
+	// records are ready. Zero or one means "tell me about anything".
+	MinRecords int32
+}
+
+// TokenNotifyRequest tells a peer that records may be available for a
+// topic it holds a token on. Available is what the owner believes is
+// ready right now; it is an estimate and may over-report.
+type TokenNotifyRequest struct {
+	Topic     string
+	Available int32
+}
+
+// TokenNotifyReply is the peer's verdict. Claiming false is a "pass":
+// the interest is spent and the owner should offer the record to
+// somebody else immediately rather than waiting out a deadline.
+type TokenNotifyReply struct {
+	Claiming bool
 }
