@@ -42,6 +42,14 @@ func (l *Log) AdvanceHighWatermark(newHWM int64) error {
 	// Broadcast: one commit can make many records visible, so EVERY
 	// long-poll waiter must wake and re-check, not just one.
 	l.notifyAll()
+	// The advance leaves the persisted high-watermark behind, which is a
+	// pass the flusher now owes. On the commit path it is about to run
+	// one anyway, and this is a no-op; from anywhere else it is what
+	// stops the boundary sitting in memory unwritten, because the
+	// flusher's timer is armed only while work is outstanding and
+	// nothing else here would arm it. Cheap and idempotent, so it is
+	// done unconditionally rather than by guessing the caller.
+	l.flusher.noteHighWatermarkAdvance()
 	return nil
 }
 

@@ -30,14 +30,22 @@ func newBuffer(startOffset int64, flushBytes, flushRecords int) *buffer {
 	}
 }
 
-// push returns the assigned offset and reports whether the
-// byte/record threshold is now crossed.
-func (b *buffer) push(record []byte) (int64, bool) {
+// push returns the assigned offset, whether the byte/record threshold
+// is now crossed, and whether this record entered an EMPTY buffer.
+//
+// The two flags mean different things to the flusher. Crossing a
+// threshold is work to do now. Filling an empty buffer is not: it means
+// the flusher has to be holding a timer again, because from here the
+// record's durability rides on the age-based flush. Telling the two
+// apart is what keeps a lazily-armed flusher from turning every first
+// append into its own tiny write.
+func (b *buffer) push(record []byte) (offset int64, crossed, wasEmpty bool) {
 	cp := make([]byte, len(record))
 	copy(cp, record)
 
 	b.mu.Lock()
-	if len(b.records) == 0 {
+	wasEmpty = len(b.records) == 0
+	if wasEmpty {
 		b.firstAt = time.Now()
 	}
 	off := b.nextOffset
@@ -46,15 +54,24 @@ func (b *buffer) push(record []byte) (int64, bool) {
 	b.bytes += len(cp)
 	cross := b.crossedThresholdLocked()
 	b.mu.Unlock()
-	return off, cross
+	return off, cross, wasEmpty
+}
+
+// pending reports whether the buffer holds records the flusher still
+// owes a write to. Read by the flusher when deciding whether its timer
+// is still needed.
+func (b *buffer) pending() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.records) > 0
 }
 
 // pushBatch appends records as one contiguous run. With copyRecords set
 // each record is copied so the caller may reuse its slices; otherwise
 // the buffer takes ownership of them (see Log.AppendBatchOwned).
-func (b *buffer) pushBatch(records [][]byte, copyRecords bool) (int64, int64, bool) {
+func (b *buffer) pushBatch(records [][]byte, copyRecords bool) (first, last int64, crossed, wasEmpty bool) {
 	if len(records) == 0 {
-		return 0, -1, false
+		return 0, -1, false, false
 	}
 	copies := records
 	if copyRecords {
@@ -67,19 +84,20 @@ func (b *buffer) pushBatch(records [][]byte, copyRecords bool) (int64, int64, bo
 	}
 
 	b.mu.Lock()
-	if len(b.records) == 0 {
+	wasEmpty = len(b.records) == 0
+	if wasEmpty {
 		b.firstAt = time.Now()
 	}
-	first := b.nextOffset
+	first = b.nextOffset
 	b.records = append(b.records, copies...)
 	b.nextOffset += int64(len(copies))
 	for _, cp := range copies {
 		b.bytes += len(cp)
 	}
-	last := b.nextOffset - 1
-	cross := b.crossedThresholdLocked()
+	last = b.nextOffset - 1
+	crossed = b.crossedThresholdLocked()
 	b.mu.Unlock()
-	return first, last, cross
+	return first, last, crossed, wasEmpty
 }
 
 func (b *buffer) shouldFlushByAge(maxAge time.Duration) bool {

@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,21 +15,36 @@ const minTimerFlushAge = time.Second
 // the exact point of the commit protocol where it would happen.
 var fsyncHook func(*segment) error
 
+// flushPassHook, when non-nil, runs at the top of every flusher pass.
+// Nil in production; tests use it to count passes, which is the only
+// way to assert the property the lazy timer exists for — that an idle
+// log runs NO passes at all, rather than cheap ones.
+var flushPassHook func()
+
 // flusher is the single goroutine that drains a Log's buffer to the
 // active segment file. "Single writer per partition" lives here.
 type flusher struct {
 	log *Log
 
-	wakeup   chan struct{}
+	wakeup chan struct{}
+	// armReq asks for the timer back without asking for a drain: a
+	// record entered an empty buffer, so age-based flushing has to be
+	// scheduled again. See notePush.
+	armReq   chan struct{}
 	syncReqs chan commitRequest
 	stop     chan struct{}
 	done     chan struct{}
 	once     sync.Once
 	interval time.Duration
 
-	mu            *sync.RWMutex
-	lastSync      time.Time
-	unsyncedBytes int64
+	mu       *sync.RWMutex
+	lastSync time.Time
+	// unsyncedBytes counts segment bytes written but not yet fsynced.
+	// Atomic because it is not exclusively the flusher goroutine's:
+	// tests drive drainOnce directly, and it was already read and
+	// zeroed in syncIfNeeded without the lock writeFrame increments it
+	// under.
+	unsyncedBytes atomic.Int64
 
 	// rollPending marks the active segment as full: it was fsynced when
 	// it crossed SegmentBytes, and it is sealed by the next roll, which
@@ -83,6 +99,7 @@ func newFlusher(log *Log, mu *sync.RWMutex, interval time.Duration) *flusher {
 	return &flusher{
 		log:      log,
 		wakeup:   make(chan struct{}, 1),
+		armReq:   make(chan struct{}, 1),
 		syncReqs: make(chan commitRequest),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
@@ -160,44 +177,167 @@ func (f *flusher) signal() {
 	}
 }
 
+// notePush tells the flusher what an append just did to the buffer.
+//
+// A crossed threshold is work owed now, and wakes the flusher to drain.
+// A record landing in an empty buffer is not work owed now: its
+// durability rides on the age-based flush, so all it needs is for the
+// timer to be armed again. Waking with a forced drain there would turn
+// the first append after every drain into its own one-record write and
+// destroy batching, which is why the two are separate channels rather
+// than one.
+//
+// Both sends are non-blocking into capacity-one channels. Dropping a
+// duplicate is safe because the flusher re-reads the whole buffer and
+// snapshot state on every wake: a signal says "look again", never "here
+// is the work". What must never happen is a push whose signal is
+// dropped while the flusher is on its way to sleep, and that cannot
+// happen: the flusher consumes a channel's value BEFORE doing the pass
+// that decides whether to disarm, so a push after that consume always
+// finds the channel empty and its send always lands.
+func (f *flusher) notePush(crossed, wasEmpty bool) {
+	if crossed {
+		f.signal()
+		return
+	}
+	if wasEmpty {
+		select {
+		case f.armReq <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// noteHighWatermarkAdvance asks for the timer back after the visible
+// boundary moved ahead of the persisted one.
+//
+// Like notePush's empty-buffer case this asks for scheduling, not for
+// work: syncHighWatermark decides for itself whether HWMSyncInterval
+// has elapsed. Safe to call from any goroutine and before the flusher
+// has started.
+func (f *flusher) noteHighWatermarkAdvance() {
+	if f == nil {
+		return
+	}
+	select {
+	case f.armReq <- struct{}{}:
+	default:
+	}
+}
+
+// needsTimer reports whether a periodic pass is still owed, and so
+// whether the timer has to stay armed. Read on the flusher goroutine
+// only, after every pass.
+//
+// These four conditions are exactly what the old always-armed timer
+// existed to service; there is deliberately no fifth. A pending segment
+// roll is NOT one of them: rollIfPending runs only for a commit or the
+// shutdown drain (see drainOnce), and any roll the timer would have
+// missed is taken by activeForWrite before the next frame is written.
+// The reaper's time-based rotation arrives as its own commit request,
+// not on this timer.
+func (f *flusher) needsTimer() bool {
+	l := f.log
+	switch {
+	case l.buffer.pending():
+		// Records waiting on the age-based flush (shouldFlushByAge).
+		return true
+	case f.unsyncedBytes.Load() > 0:
+		// Bytes in the segment file that SyncInterval still owes an
+		// fsync.
+		return true
+	case l.hasPendingFlushing():
+		// An earlier writeBatch failed; the retry rides the timer.
+		return true
+	case l.highWatermark.Load() > l.persistedHWM.Load():
+		// syncHighWatermark deferred the persist behind HWMSyncInterval.
+		return true
+	}
+	return false
+}
+
+// run is the flusher goroutine.
+//
+// The timer is armed only while a pass is actually owed. An idle log
+// used to wake ten times a second forever to discover it had nothing to
+// do; at tens of thousands of open partitions that was the single
+// largest source of background CPU on a node, most of it inside the
+// runtime's timer heap rather than in this package at all. Now a log
+// with an empty buffer, nothing unsynced, no failed write to retry and
+// its high-watermark already on disk holds no timer and costs nothing
+// until a producer or a commit reaches it.
+//
+// Disarming is expressed as a nil timerC: a receive from a nil channel
+// blocks forever, so that select arm simply stops existing.
 func (f *flusher) run() {
 	defer close(f.done)
 
-	timer := time.NewTimer(f.interval)
-	defer timer.Stop()
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+
+	// rearm re-evaluates whether a periodic pass is still owed and arms
+	// or disarms accordingly. Called after EVERY pass, so the decision is
+	// always made against post-pass state.
+	rearm := func() {
+		stopTimer := func() {
+			if timer != nil && !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}
+		if !f.needsTimer() {
+			stopTimer()
+			timerC = nil
+			return
+		}
+		stopTimer()
+		if timer == nil {
+			timer = time.NewTimer(f.interval)
+		} else {
+			timer.Reset(f.interval)
+		}
+		timerC = timer.C
+	}
+
+	rearm()
 
 	for {
 		forceDrain := false
 		select {
 		case <-f.wakeup:
 			forceDrain = true
+		case <-f.armReq:
+			// A record entered an empty buffer. Nothing is due, so do no
+			// work at all: put the timer back and go straight back to
+			// sleep. Running a pass here would drain nothing (the record
+			// is younger than timerFlushAge) while making the flusher
+			// goroutine touch the log on every idle-to-active
+			// transition, which is both wasted work and a needless
+			// widening of what runs concurrently with a commit.
+			rearm()
+			continue
 		case req := <-f.syncReqs:
 			// Synchronous flush+fsync: drain the buffer and force an
 			// fsync so the caller can treat the record as durable on
 			// return. Stays on the single flusher goroutine so the
 			// "one writer per partition" invariant holds.
 			req.done <- f.drainOnce(true, true, &req)
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(f.interval)
+			rearm()
 			continue
-		case <-timer.C:
+		case <-timerC:
 		case <-f.stop:
 			f.closeErr = f.drainOnce(true, true, nil)
 			return
 		}
 		_ = f.drainOnce(false, forceDrain, nil)
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timer.Reset(f.interval)
+		rearm()
 	}
 }
 
@@ -210,6 +350,9 @@ func (f *flusher) run() {
 // Any failure of a commit request, at whatever step, discards the
 // uncommitted tail before the error is reported (see CommitDurable).
 func (f *flusher) drainOnce(forceSync, forceDrain bool, commit *commitRequest) error {
+	if h := flushPassHook; h != nil {
+		h()
+	}
 	f.hwmForce = forceSync
 
 	if err := f.log.poisoned(); err != nil {
@@ -399,7 +542,7 @@ func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool)
 		m.ObserveFlush(time.Since(flushStart), int64(n))
 	}
 
-	f.unsyncedBytes += int64(n)
+	f.unsyncedBytes.Add(int64(n))
 	f.mu.Unlock()
 
 	// A full segment is synced now so the roll before the next write
@@ -485,7 +628,7 @@ func (f *flusher) rotateActive() error {
 // Records above the last durable tail are not lost; the ingress WAL
 // still holds them and re-commits them after the reopen.
 func (f *flusher) syncIfNeeded(force bool, active *segment) error {
-	if f.unsyncedBytes <= 0 {
+	if f.unsyncedBytes.Load() <= 0 {
 		return nil
 	}
 	if !force && !f.shouldSync() {
@@ -514,7 +657,7 @@ func (f *flusher) syncIfNeeded(force bool, active *segment) error {
 		return f.log.poison(err)
 	}
 	f.lastSync = time.Now()
-	f.unsyncedBytes = 0
+	f.unsyncedBytes.Store(0)
 	f.log.durableTail.Store(active.nextOffset)
 	// The snapshot is released only now: the records are durable, so
 	// nothing can need the in-memory copy again.
@@ -533,7 +676,7 @@ func (f *flusher) shouldSync() bool {
 	if f.log.opts.SyncMode == SyncPerWrite {
 		return true
 	}
-	if f.log.opts.SyncBytes > 0 && f.unsyncedBytes >= f.log.opts.SyncBytes {
+	if f.log.opts.SyncBytes > 0 && f.unsyncedBytes.Load() >= f.log.opts.SyncBytes {
 		return true
 	}
 	return time.Since(f.lastSync) >= f.log.opts.SyncInterval
