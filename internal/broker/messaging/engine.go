@@ -81,6 +81,12 @@ type Engine struct {
 	metrics    *metrics.Metrics
 	logger     *slog.Logger
 	selfID     string
+	// now is the clock every handoff-freeze and consume-pause deadline is
+	// judged against. time.Now in production; tests substitute a fake so
+	// a TTL lapses when the test says it does, not when a loaded
+	// scheduler happens to get around to it. Same idiom as
+	// storage.RetentionConfig.Now.
+	now func() time.Time
 
 	cacheMu         sync.RWMutex
 	topicCache      map[string]cached[topic.Topic]
@@ -147,6 +153,7 @@ func NewEngine(
 		metrics:         m,
 		logger:          logger,
 		selfID:          selfID,
+		now:             time.Now,
 		topicCache:      make(map[string]cached[topic.Topic]),
 		assignmentCache: make(map[string]cached[assignmentSet]),
 		memberCache:     make(map[string]cached[routingMember]),

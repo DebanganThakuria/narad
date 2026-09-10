@@ -67,7 +67,7 @@ func (e *Engine) armHandoffFreeze(topicName string, partition int, ttl time.Dura
 		ttl = 30 * time.Second
 	}
 	key := producePauseKey(topicName, partition)
-	now := time.Now().UnixNano()
+	now := e.now().UnixNano()
 	e.pauseMu.Lock()
 	defer e.pauseMu.Unlock()
 	if e.producePauses == nil {
@@ -118,7 +118,7 @@ func (e *Engine) PauseConsumeForHandoff(topicName string, partition int, ttl tim
 	if e.consumePauses == nil {
 		e.consumePauses = make(map[string]int64)
 	}
-	e.consumePauses[producePauseKey(topicName, partition)] = time.Now().Add(ttl).UnixNano()
+	e.consumePauses[producePauseKey(topicName, partition)] = e.now().Add(ttl).UnixNano()
 	e.pauseMu.Unlock()
 }
 
@@ -132,7 +132,7 @@ func (e *Engine) isConsumePaused(topicName string, partition int) bool {
 	if !ok {
 		return false
 	}
-	if time.Now().UnixNano() >= exp {
+	if e.now().UnixNano() >= exp {
 		delete(e.consumePauses, key)
 		return false
 	}
@@ -157,7 +157,7 @@ func (e *Engine) isProducePaused(topicName string, partition int) bool {
 	if !ok {
 		return false
 	}
-	if time.Now().UnixNano() >= p.expiresUnixNano {
+	if e.now().UnixNano() >= p.expiresUnixNano {
 		delete(e.producePauses, key)
 		return false
 	}
@@ -171,7 +171,7 @@ func (e *Engine) handoffFreezeActive(topicName string, partition int, token stri
 	e.pauseMu.Lock()
 	defer e.pauseMu.Unlock()
 	p, ok := e.producePauses[key]
-	return ok && p.token == token && time.Now().UnixNano() < p.expiresUnixNano
+	return ok && p.token == token && e.now().UnixNano() < p.expiresUnixNano
 }
 
 // PrepareHandoff freezes a locally-owned partition and returns its now-
@@ -224,6 +224,11 @@ func (e *Engine) prepareHandoff(ctx context.Context, topicName string, partition
 	// move of a freshly created child topic).
 	e.PauseConsumeForHandoff(topicName, partition, freezeTTL)
 	if e.offsets != nil {
+		// Real time on purpose, not e.now(): this waits on real in-flight
+		// leases being acked by real consumers. On the injected clock a
+		// test that never advances it would spin here forever whenever
+		// anything is in flight. The freeze TTL above is what the clock
+		// governs; this bound is not TTL semantics.
 		deadline := time.Now().Add(min(handoffDrainWait, max(freezeTTL/4, 10*time.Millisecond)))
 		for {
 			inFlight, _ := e.offsets.Snapshot(topicName, partition)
