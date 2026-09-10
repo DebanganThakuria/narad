@@ -89,6 +89,8 @@ curl -u $AUTH -X DELETE $NARAD/v1/topics/orders
 
 The metadata delete is the commit point: once it stands, the topic is gone for every client and `204` is the answer even if some node could not purge its files right then (a member that is down, or a disk error). Those directories are reclaimed by that node's startup sweep; nothing about them is visible through the API. A delete that fails *before* the commit (unknown topic, control plane unavailable) still answers `404` or `503`.
 
+Consumers parked in a long poll on the topic are woken by the delete and answered right away (`204` or `404`, depending on whether the delete had committed when they checked), rather than sleeping out their `wait`.
+
 ## Who can do this
 
 Creating requires a `create` grant matching the topic name; the creator becomes the topic's **owner**. Altering and deleting require ownership or an `admin` grant. Reading a topic requires any grant on it, ownership, or admin. Details in [Users & Access](users-and-access.md).
