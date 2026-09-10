@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,21 +15,37 @@ const minTimerFlushAge = time.Second
 // the exact point of the commit protocol where it would happen.
 var fsyncHook func(*segment) error
 
+// flushPassHook, when non-nil, runs at the top of every flusher pass.
+// Nil in production; tests use it to count passes, which is the only
+// way to assert the property the lazy timer exists for — that an idle
+// log runs NO passes at all, rather than cheap ones.
+var flushPassHook func()
+
 // flusher is the single goroutine that drains a Log's buffer to the
 // active segment file. "Single writer per partition" lives here.
 type flusher struct {
 	log *Log
 
-	wakeup   chan struct{}
+	wakeup chan struct{}
+	// armReq asks for the timer back WITHOUT asking for a drain. Two
+	// senders: notePush when a record enters an empty buffer, and
+	// noteHighWatermarkAdvance when the visible boundary moves ahead of
+	// the persisted one. Both mean "scheduling is owed", never "here is
+	// work to do now" -- needsTimer decides what, if anything, is due.
+	armReq   chan struct{}
 	syncReqs chan commitRequest
 	stop     chan struct{}
 	done     chan struct{}
 	once     sync.Once
 	interval time.Duration
 
-	mu            *sync.RWMutex
-	lastSync      time.Time
-	unsyncedBytes int64
+	mu       *sync.RWMutex
+	lastSync time.Time
+	// unsyncedBytes counts segment bytes written but not yet fsynced.
+	// Written only by the flusher goroutine (writeFrame, syncIfNeeded,
+	// discardUncommittedTail) and read from other goroutines through
+	// needsTimer's pollers, hence atomic; f.mu does not govern it.
+	unsyncedBytes atomic.Int64
 
 	// rollPending marks the active segment as full: it was fsynced when
 	// it crossed SegmentBytes, and it is sealed by the next roll, which
@@ -83,6 +100,7 @@ func newFlusher(log *Log, mu *sync.RWMutex, interval time.Duration) *flusher {
 	return &flusher{
 		log:      log,
 		wakeup:   make(chan struct{}, 1),
+		armReq:   make(chan struct{}, 1),
 		syncReqs: make(chan commitRequest),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
@@ -160,44 +178,212 @@ func (f *flusher) signal() {
 	}
 }
 
+// notePush tells the flusher what an append just did to the buffer.
+//
+// A crossed threshold is work owed now, and wakes the flusher to drain.
+// A record landing in an empty buffer is not work owed now: its
+// durability rides on the age-based flush, so all it needs is for the
+// timer to be armed again. Waking with a forced drain there would turn
+// the first append after every drain into its own one-record write and
+// destroy batching, which is why the two are separate channels rather
+// than one.
+//
+// Both sends are non-blocking into capacity-one channels. Dropping a
+// duplicate is safe because the flusher re-reads the whole buffer and
+// snapshot state on every wake: a signal says "look again", never "here
+// is the work". What must never happen is a push whose signal is
+// dropped while the flusher is on its way to sleep, and that cannot
+// happen: the flusher consumes a channel's value BEFORE doing the pass
+// that decides whether to disarm, so a push after that consume always
+// finds the channel empty and its send always lands.
+func (f *flusher) notePush(crossed, wasEmpty bool) {
+	if crossed {
+		f.signal()
+		return
+	}
+	if wasEmpty {
+		f.requestArm()
+	}
+}
+
+// requestArm asks the flusher for its timer back. Non-blocking into a
+// capacity-one channel, so a duplicate is dropped; that is safe because
+// the flusher treats the signal as "look again" and re-reads state via
+// needsTimer, which is the only source of truth about what is owed.
+func (f *flusher) requestArm() {
+	if f == nil {
+		return
+	}
+	select {
+	case f.armReq <- struct{}{}:
+	default:
+	}
+}
+
+// noteHighWatermarkAdvance asks for the timer back after the visible
+// boundary moved ahead of the persisted one.
+//
+// Like notePush's empty-buffer case this asks for scheduling, not for
+// work: syncHighWatermark decides for itself whether HWMSyncInterval
+// has elapsed. Safe to call from any goroutine and before the flusher
+// has started.
+func (f *flusher) noteHighWatermarkAdvance() {
+	f.requestArm()
+}
+
+// needsTimer reports whether a periodic pass is still owed, and so
+// whether the timer has to stay armed. It is the flusher goroutine's
+// post-pass arming decision, and it is also polled from test
+// goroutines, so every field it reads must be safe to read from another
+// goroutine: buffer.pending() and hasPendingFlushing() take their own
+// mutexes, and the rest are atomics. A fifth condition has to satisfy
+// that same constraint.
+//
+// These four conditions are exactly what the old always-armed timer
+// existed to service; there is deliberately no fifth. A pending segment
+// roll is NOT one of them: rollIfPending runs only for a commit or the
+// shutdown drain (see drainOnce), and any roll the timer would have
+// missed is taken by activeForWrite before the next frame is written.
+// The reaper's time-based rotation arrives as its own commit request,
+// not on this timer.
+func (f *flusher) needsTimer() bool {
+	l := f.log
+	switch {
+	case l.poisoned() != nil:
+		// A poisoned log can never make progress: every pass returns at
+		// drainOnce's poison check before touching anything. So nothing is
+		// owed, because nothing CAN be done until the owner reopens the
+		// log.
+		//
+		// This case has to come first, because the unsynced counter below
+		// is latched above zero on a poisoned log forever: the fsync that
+		// poisoned it returned through poison() without clearing the
+		// counter, and no later pass gets far enough to clear it. Without
+		// this the timer would stay armed for the life of the process,
+		// running no-op passes ten times a second on every partition at
+		// once after a disk-level failure, which is the exact load this
+		// change exists to remove and the worst moment to add it.
+		return false
+	case l.buffer.pending():
+		// Records waiting on the age-based flush (shouldFlushByAge).
+		return true
+	case f.unsyncedBytes.Load() > 0:
+		// Bytes in the segment file that SyncInterval still owes an
+		// fsync.
+		return true
+	case l.hasPendingFlushing():
+		// An earlier writeBatch failed; the retry rides the timer.
+		return true
+	case l.highWatermark.Load() > l.persistedHWM.Load():
+		// syncHighWatermark deferred the persist behind HWMSyncInterval.
+		return true
+	}
+	return false
+}
+
+// run is the flusher goroutine.
+//
+// The timer is armed only while a pass is actually owed. An idle log
+// used to wake ten times a second forever to discover it had nothing to
+// do; at tens of thousands of open partitions that was the single
+// largest source of background CPU on a node, most of it inside the
+// runtime's timer heap rather than in this package at all. Now a log
+// with an empty buffer, nothing unsynced, no failed write to retry and
+// its high-watermark already on disk holds no timer and costs nothing
+// until a producer or a commit reaches it.
+//
+// Disarming is expressed as a nil timerC: a receive from a nil channel
+// blocks forever, so that select arm simply stops existing.
 func (f *flusher) run() {
 	defer close(f.done)
 
-	timer := time.NewTimer(f.interval)
-	defer timer.Stop()
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+
+	// rearm re-evaluates whether a periodic pass is still owed and arms
+	// or disarms accordingly. Called after EVERY pass, so the decision is
+	// always made against post-pass state.
+	rearm := func() {
+		// Consume a pending arm request BEFORE deciding, so a token that
+		// is already satisfied by this decision cannot cause a second,
+		// redundant wake. Every commit produces one, via
+		// AdvanceHighWatermark, and without this each commit paid an
+		// extra select round plus a needsTimer evaluation and a timer
+		// stop/reset.
+		//
+		// Order matters and is the safe one: draining first means
+		// needsTimer below is evaluated AFTER the drain, so a push that
+		// lands during the evaluation either is seen by needsTimer or
+		// leaves a fresh token behind. Draining afterwards could discard
+		// a token whose record the evaluation had already missed.
+		select {
+		case <-f.armReq:
+		default:
+		}
+		stopTimer := func() {
+			if timer != nil && !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}
+		if !f.needsTimer() {
+			stopTimer()
+			timerC = nil
+			return
+		}
+		stopTimer()
+		if timer == nil {
+			timer = time.NewTimer(f.interval)
+		} else {
+			timer.Reset(f.interval)
+		}
+		timerC = timer.C
+	}
+
+	rearm()
 
 	for {
 		forceDrain := false
 		select {
 		case <-f.wakeup:
 			forceDrain = true
+		case <-f.armReq:
+			// Scheduling is owed, not necessarily work. Either a record
+			// entered an empty buffer (nothing is due yet: it is younger
+			// than timerFlushAge) or the high-watermark moved ahead of the
+			// persisted one (a pass IS owed, and the timer is the right
+			// place for it since syncHighWatermark defers behind
+			// HWMSyncInterval anyway). rearm decides which via needsTimer.
+			//
+			// No pass runs inline either way. Draining here would do
+			// nothing for the first case, and for both it would make the
+			// flusher goroutine touch the log on every idle-to-active
+			// transition, widening what runs concurrently with a commit
+			// for no gain.
+			rearm()
+			continue
 		case req := <-f.syncReqs:
 			// Synchronous flush+fsync: drain the buffer and force an
 			// fsync so the caller can treat the record as durable on
 			// return. Stays on the single flusher goroutine so the
 			// "one writer per partition" invariant holds.
 			req.done <- f.drainOnce(true, true, &req)
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(f.interval)
+			rearm()
 			continue
-		case <-timer.C:
+		case <-timerC:
 		case <-f.stop:
 			f.closeErr = f.drainOnce(true, true, nil)
 			return
 		}
 		_ = f.drainOnce(false, forceDrain, nil)
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timer.Reset(f.interval)
+		rearm()
 	}
 }
 
@@ -210,6 +396,9 @@ func (f *flusher) run() {
 // Any failure of a commit request, at whatever step, discards the
 // uncommitted tail before the error is reported (see CommitDurable).
 func (f *flusher) drainOnce(forceSync, forceDrain bool, commit *commitRequest) error {
+	if h := flushPassHook; h != nil {
+		h()
+	}
 	f.hwmForce = forceSync
 
 	if err := f.log.poisoned(); err != nil {
@@ -399,7 +588,7 @@ func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool)
 		m.ObserveFlush(time.Since(flushStart), int64(n))
 	}
 
-	f.unsyncedBytes += int64(n)
+	f.unsyncedBytes.Add(int64(n))
 	f.mu.Unlock()
 
 	// A full segment is synced now so the roll before the next write
@@ -485,7 +674,7 @@ func (f *flusher) rotateActive() error {
 // Records above the last durable tail are not lost; the ingress WAL
 // still holds them and re-commits them after the reopen.
 func (f *flusher) syncIfNeeded(force bool, active *segment) error {
-	if f.unsyncedBytes <= 0 {
+	if f.unsyncedBytes.Load() <= 0 {
 		return nil
 	}
 	if !force && !f.shouldSync() {
@@ -514,7 +703,7 @@ func (f *flusher) syncIfNeeded(force bool, active *segment) error {
 		return f.log.poison(err)
 	}
 	f.lastSync = time.Now()
-	f.unsyncedBytes = 0
+	f.unsyncedBytes.Store(0)
 	f.log.durableTail.Store(active.nextOffset)
 	// The snapshot is released only now: the records are durable, so
 	// nothing can need the in-memory copy again.
@@ -529,11 +718,14 @@ func (f *flusher) syncIfNeeded(force bool, active *segment) error {
 	return nil
 }
 
+// shouldSync gates the batched fsync. Returning false defers it to a
+// later pass, which is only safe because needsTimer keeps the timer
+// armed while unsyncedBytes > 0.
 func (f *flusher) shouldSync() bool {
 	if f.log.opts.SyncMode == SyncPerWrite {
 		return true
 	}
-	if f.log.opts.SyncBytes > 0 && f.unsyncedBytes >= f.log.opts.SyncBytes {
+	if f.log.opts.SyncBytes > 0 && f.unsyncedBytes.Load() >= f.log.opts.SyncBytes {
 		return true
 	}
 	return time.Since(f.lastSync) >= f.log.opts.SyncInterval

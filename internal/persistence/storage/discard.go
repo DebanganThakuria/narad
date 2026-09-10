@@ -79,11 +79,11 @@ func (f *flusher) discardUncommittedTail(cause error, truncateDisk bool) {
 		}
 	}
 
-	if truncated || (truncateDisk && f.unsyncedBytes == 0) {
+	if truncated || (truncateDisk && f.unsyncedBytes.Load() == 0) {
 		// Everything left in the file is synced: the truncate fsynced it,
 		// or nothing unsynced was ever written.
 		l.durableTail.Store(cut)
-		f.unsyncedBytes = 0
+		f.unsyncedBytes.Store(0)
 	} else if l.durableTail.Load() > cut {
 		l.durableTail.Store(cut)
 	}

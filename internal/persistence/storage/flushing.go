@@ -68,6 +68,9 @@ func (l *Log) unwrittenFlushingLocked() ([][]byte, int64) {
 	return l.flushingRecords[skip:], l.flushingWritten
 }
 
+// Read by flusher.needsTimer: while this is true the flusher keeps its
+// timer armed so the retry actually happens.
+//
 // hasPendingFlushing reports whether a previous drain's records are
 // still waiting to reach the segment file (their writeBatch failed).
 // Records that are written but not yet synced do not count: the sync

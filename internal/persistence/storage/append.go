@@ -30,16 +30,14 @@ func (l *Log) Append(data []byte) (int64, error) {
 	if h := appendGateHook; h != nil {
 		h()
 	}
-	offset, crossed := l.buffer.push(data)
+	offset, crossed, wasEmpty := l.buffer.push(data)
 
 	// No broadcast here: long-poll waiters (queue consumers, the fan-out
 	// reader) gate on the high-watermark, so waking them for a buffered,
 	// not-yet-visible record only costs a full re-probe that finds
 	// nothing. AdvanceHighWatermark broadcasts when records become
 	// visible.
-	if crossed {
-		l.flusher.signal()
-	}
+	l.flusher.notePush(crossed, wasEmpty)
 	return offset, nil
 }
 
@@ -62,11 +60,9 @@ func (l *Log) AppendBatch(records [][]byte) (firstOffset, lastOffset int64, err 
 	if h := appendGateHook; h != nil {
 		h()
 	}
-	first, last, crossed := l.buffer.pushBatch(records, true)
+	first, last, crossed, wasEmpty := l.buffer.pushBatch(records, true)
 
-	if crossed {
-		l.flusher.signal()
-	}
+	l.flusher.notePush(crossed, wasEmpty)
 	return first, last, nil
 }
 
@@ -91,10 +87,8 @@ func (l *Log) AppendBatchOwned(records [][]byte) (firstOffset, lastOffset int64,
 	if h := appendGateHook; h != nil {
 		h()
 	}
-	first, last, crossed := l.buffer.pushBatch(records, false)
+	first, last, crossed, wasEmpty := l.buffer.pushBatch(records, false)
 
-	if crossed {
-		l.flusher.signal()
-	}
+	l.flusher.notePush(crossed, wasEmpty)
 	return first, last, nil
 }
