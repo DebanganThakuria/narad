@@ -1,0 +1,10 @@
+docs/client/guarantees-and-errors.md
+  05514477-701a-4978-9021-1b559527d0cd:2026-09-10T17:16:05.536Z 84
+docs/client/topics.md
+  05514477-701a-4978-9021-1b559527d0cd:2026-09-10T17:16:05.536Z 92
+docs/internals/consume-path.md
+  05514477-701a-4978-9021-1b559527d0cd:2026-09-10T17:16:05.536Z 80-81
+docs/internals/storage-engine.md
+  05514477-701a-4978-9021-1b559527d0cd:2026-09-10T17:16:05.536Z 89,98
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"05514477-701a-4978-9021-1b559527d0cd:2026-09-10T17:16:05.536Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 1, "overriden_lines": 0}}}
