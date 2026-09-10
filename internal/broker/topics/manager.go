@@ -92,8 +92,12 @@ type Manager struct {
 	schemas   schema.Registry
 	offsets   *consumer.InFlight
 	logs      *runtime.Logs
-	cfg       Config
-	logger    *slog.Logger
+	// waiters, when set, is told when a topic's state is dropped so the
+	// consumers parked on it are woken instead of sleeping out their
+	// wait. Nil in tests and embedded use.
+	waiters TopicWaiterReleaser
+	cfg     Config
+	logger  *slog.Logger
 	// selfID is this node's cluster ID, used to resolve partition
 	// ownership for stat queries. Empty means "no cluster identity"
 	// (tests / embedded use): the manager then treats every partition
@@ -182,3 +186,12 @@ func NewManager(
 	}
 	return m
 }
+
+// TopicWaiterReleaser wakes the consumers parked on a topic. The
+// messaging engine satisfies it.
+type TopicWaiterReleaser interface {
+	ReleaseTopicWaiters(topicName string)
+}
+
+// SetWaiterReleaser wires the release of parked consumers on delete.
+func (m *Manager) SetWaiterReleaser(r TopicWaiterReleaser) { m.waiters = r }

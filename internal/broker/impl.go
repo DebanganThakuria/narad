@@ -88,9 +88,14 @@ func New(d Deps) (Broker, error) {
 		assigner = store
 	}
 
+	mgr := topics.NewManager(d.DataDir, d.Metastore, assigner, d.Schemas, d.ConsumerOffsets, logs, topicCfg, d.Logger, d.SelfID)
+	eng := messaging.NewEngine(d.Metastore, d.Schemas, d.Partitions, d.ConsumerOffsets, logs, ingressManager, d.Metrics, d.Logger, d.SelfID)
+	// A delete wakes the consumers parked on the topic instead of
+	// leaving them to sleep out their wait.
+	mgr.SetWaiterReleaser(eng)
 	return &impl{
-		Manager:     topics.NewManager(d.DataDir, d.Metastore, assigner, d.Schemas, d.ConsumerOffsets, logs, topicCfg, d.Logger, d.SelfID),
-		Engine:      messaging.NewEngine(d.Metastore, d.Schemas, d.Partitions, d.ConsumerOffsets, logs, ingressManager, d.Metrics, d.Logger, d.SelfID),
+		Manager:     mgr,
+		Engine:      eng,
 		Snapshotter: runtime.NewSnapshotter(d.Metastore, d.ConsumerOffsets, logs, d.Logger, d.SelfID),
 		Lifecycle:   lifecycle,
 		deps:        d,

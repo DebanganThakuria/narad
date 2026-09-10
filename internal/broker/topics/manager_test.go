@@ -871,3 +871,41 @@ func TestDeleteTopic_ReturnsPurgeErrorAfterMetadataDelete(t *testing.T) {
 		t.Fatalf("DeleteTopic() deleted topic = %q, want %q", ms.lastDeletedTopicName, testTopicName)
 	}
 }
+
+// recordingReleaser records every topic whose parked consumers were
+// released, in call order.
+type recordingReleaser struct{ released []string }
+
+func (r *recordingReleaser) ReleaseTopicWaiters(name string) { r.released = append(r.released, name) }
+
+// TestDeleteTopicReleasesParkedConsumers pins the wiring of the release:
+// a delete wakes the consumers parked on the topic before the purge
+// (so a node that never held the topic's files still wakes them) and
+// again from the retired hook that drops the incarnation's state. A
+// manager without a releaser (tests, embedded use) deletes as before.
+func TestDeleteTopicReleasesParkedConsumers(t *testing.T) {
+	ms := newFakeMetastore()
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
+	reg := &fakeSchemaRegistry{}
+	manager := newTestManager(t, ms, reg)
+	rel := &recordingReleaser{}
+	manager.SetWaiterReleaser(rel)
+	if err := os.MkdirAll(filepath.Join(manager.dataDir, "topics", testTopicName), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	if err := manager.DeleteTopic(context.Background(), testTopicName); err != nil {
+		t.Fatalf("DeleteTopic() error = %v", err)
+	}
+	if len(rel.released) < 2 {
+		t.Fatalf("ReleaseTopicWaiters calls = %v, want one before the purge and one from the retired hook", rel.released)
+	}
+	for _, name := range rel.released {
+		if name != testTopicName {
+			t.Fatalf("released %q, want only %q", name, testTopicName)
+		}
+	}
+	if reg.lastDroppedTopic != testTopicName {
+		t.Fatalf("retired hook did not run: dropped schema topic = %q", reg.lastDroppedTopic)
+	}
+}

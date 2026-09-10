@@ -80,6 +80,14 @@ func (m *Manager) purgeTopicLocked(_ context.Context, name, id string) error {
 	if _, err := m.topicDir(name); err != nil {
 		return err
 	}
+	// Wake the consumers parked on the topic on THIS node before the
+	// purge, and regardless of whether this node holds any of its files:
+	// a node that only ever served the topic's long polls has no
+	// directory to purge, so the retired hook below would never fire for
+	// it and its consumers would sleep out their wait.
+	if m.waiters != nil {
+		m.waiters.ReleaseTopicWaiters(name)
+	}
 	_, err := m.logs.PurgeTopic(name, id)
 	return err
 }
@@ -90,6 +98,11 @@ func (m *Manager) purgeTopicLocked(_ context.Context, name, id string) error {
 // runs when an open quarantines a deleted incarnation's directory,
 // where that state would otherwise be resumed by the recreated topic.
 func (m *Manager) dropTopicState(name string) {
+	if m.waiters != nil {
+		// First, so a consumer woken here cannot be handed a record from
+		// state that is being torn down under it.
+		m.waiters.ReleaseTopicWaiters(name)
+	}
 	if m.offsets != nil {
 		m.offsets.DropTopic(name)
 	}
