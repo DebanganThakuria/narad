@@ -321,7 +321,21 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 	// forward and re-probe paths to the same ceiling the HTTP handlers use.
 	router.SetMaxConsumeWait(cfg.HTTP.MaxConsumeWait.D())
 
+	// The token protocol needs a return address so owners can call back
+	// when they have a record, and it must be the NODE-RPC address peers
+	// actually dial. A notification's sender is what the receiver aims
+	// its claim at, and claims travel on the node RPC port, not the raft
+	// metadata port. cfg.Cluster.AdvertiseAddr is the raft one and is
+	// empty altogether in the ordinary peer-list deployment, so the
+	// address is resolved the same way a peer's member address is.
+	selfAddr := peerMemberAddr(clusterAdvertiseAddr(cfg, nodeID), cfg.HTTP.Addr)
+	router.SetSelfAddr(selfAddr)
+
 	rpcServer := cluster.NewRPCServer(bc.broker, ms, log)
+	// Owner half: the tokens peers leave here. Requester half: how an
+	// inbound notification reaches a consumer parked on this node.
+	rpcServer.SetTokenHolder(cluster.NewTokenHolder(bc.broker, peerRPC, selfAddr))
+	rpcServer.SetLocalDemand(router.LocalDemand())
 	// The RPC-side clamp on wire-supplied consume waits must agree with
 	// the router's and the HTTP handlers' ceiling.
 	rpcServer.SetMaxConsumeWait(cfg.HTTP.MaxConsumeWait.D())

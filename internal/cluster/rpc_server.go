@@ -73,6 +73,14 @@ type RPCServer struct {
 	// HandleStreamCancel. deliveryExpiry is the same records in insertion
 	// order with their deadlines, so expiring old ones is a pop from the
 	// front, never a scan of the map. now is the clock (tests inject one).
+	// tokens holds the standing interest peers have registered with this
+	// node (the owner half of the token protocol); demand is how an
+	// inbound notification reaches a consumer parked here (the requester
+	// half). Both nil disables the protocol, and peers fall back to the
+	// polling path.
+	tokens *tokenHolder
+	demand localDemand
+
 	deliveriesMu   sync.Mutex
 	deliveries     map[requestKey]delivery
 	deliveryExpiry []deliveryDeadline
@@ -407,6 +415,10 @@ func (s *RPCServer) controlHandler(op nodewire.Operation) (handle func([]byte) n
 		return s.handlePurgeTopic, true
 	case nodewire.OpTopicPartitionStats:
 		return s.handleTopicPartitionStats, true
+	case nodewire.OpTokenRegister:
+		return s.handleTokenRegister, true
+	case nodewire.OpTokenNotify:
+		return s.handleTokenNotify, true
 	case nodewire.OpRegisterMember:
 		return s.handleRegisterMember, true
 	case nodewire.OpCreateUser:

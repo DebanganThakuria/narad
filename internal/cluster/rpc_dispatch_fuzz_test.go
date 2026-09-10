@@ -121,8 +121,8 @@ func (stubBroker) ConsumeProbe(context.Context, string, brokermsg.ConsumeOpts) (
 	return topic.Message{}, false, nil, errs.ErrTopicNotFound
 }
 
-func (stubBroker) ConsumeWait(context.Context, *brokermsg.ConsumeWaiter, time.Duration) (topic.Message, bool, error) {
-	return topic.Message{}, false, errs.ErrTopicNotFound
+func (stubBroker) ConsumeWait(context.Context, *brokermsg.ConsumeWaiter, time.Duration, <-chan struct{}) (topic.Message, bool, bool, error) {
+	return topic.Message{}, false, false, errs.ErrTopicNotFound
 }
 func (stubBroker) Ack(context.Context, string, consumer.Handle) error { return errs.ErrHandleStale }
 func (stubBroker) ExtendAck(context.Context, string, consumer.Handle) error {
@@ -176,6 +176,8 @@ func FuzzRPCDispatch(f *testing.F) {
 		must(nodewire.EncodeAckRequest(nodewire.AckRequest{Topic: "orders", Partition: 0, Offset: 1, Nonce: 2})),
 		must(nodewire.EncodeExtendAckRequest(nodewire.AckRequest{Topic: "orders", Offset: 1, Nonce: 2})),
 		must(nodewire.EncodeNackRequest(nodewire.AckRequest{Topic: "orders", Offset: 1, Nonce: 2})),
+		must(nodewire.EncodeTokenDelta(nodewire.TokenDelta{From: "narad-1:7942", Add: []nodewire.TokenRegistration{{Topic: "orders", TTLNanos: 1e9}}, Drop: []string{"orders"}})),
+		must(nodewire.EncodeTokenNotifyRequest(nodewire.TokenNotifyRequest{From: "narad-1:7942", Topic: "orders"})),
 		must(nodewire.EncodeTopicBodyRequest(nodewire.OpCreateTopic, nodewire.TopicBodyRequest{Topic: "orders", Body: body})),
 		must(nodewire.EncodeTopicBodyRequest(nodewire.OpCreateTopic, nodewire.TopicBodyRequest{Topic: "orders", Body: []byte(`{"name":"orders","unknown":1}`)})),
 		must(nodewire.EncodeTopicBodyRequest(nodewire.OpAlterTopic, nodewire.TopicBodyRequest{Topic: "orders", Body: []byte(`{"partitions":8,"retention_ms":1000}`)})),
@@ -292,8 +294,18 @@ func wireRejects(payload []byte) bool {
 		_, err = nodewire.DecodeGetAssignmentRequest(payload)
 	case nodewire.OpAppliedIndex:
 		err = nodewire.DecodeAppliedIndexRequest(payload)
+	case nodewire.OpTokenRegister:
+		_, err = nodewire.DecodeTokenDelta(payload)
+	case nodewire.OpTokenNotify:
+		_, err = nodewire.DecodeTokenNotifyRequest(payload)
 	default:
 		return true
 	}
 	return err != nil
 }
+
+func (stubBroker) RegisterRemoteDemand(context.Context, string, brokermsg.RemoteDemand) error {
+	return nil
+}
+
+func (stubBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}

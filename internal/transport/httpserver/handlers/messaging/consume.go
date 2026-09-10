@@ -73,9 +73,10 @@ func Consume(s *handlers.Set) http.HandlerFunc {
 // starting at the router-selected one, then remote owners, and only
 // then the requested wait long-polling locally. The scan and the wait
 // are the two halves of one broker consume (ConsumeProbe/ConsumeWait):
-// the wake-up channels are snapshotted before the scan, so a commit
-// that lands while the remote owners are being asked still wakes the
-// wait, and the local partitions are not scanned again before parking.
+// the probe hands back a waiter, and the wait enqueues that waiter on
+// the topic's dispatcher queue, where the pump hands it a record. There
+// is no channel snapshot to get wrong any more, and the local
+// partitions are not scanned again before parking.
 func queueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts, localPartition int) {
 	wait := opts.Wait
 
@@ -101,17 +102,18 @@ func queueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r *http.
 		return
 	}
 
-	// The wait phase: the local long-poll raced against a forwarded
-	// long-poll to a remote owner, so a message that lands on a
-	// partition this node does not own wakes this client too. Without
-	// a remote owner to ask the router declines and the local wait runs
-	// alone.
+	// The wait phase: the local wait raced against the token protocol.
+	// A token is left with every remote owner and the cross-node wake is
+	// folded into the same select as the local one, so a message landing
+	// on a partition this node does not own reaches this client too.
+	// Without a remote owner to ask the router declines and the local
+	// wait runs alone.
 	local := &localConsumeWaiter{s: s, topic: topicName, waiter: waiter}
 	if s.Deps.Router.RouteConsumeWait(r.Context(), w, r, topicName, wait, local) {
 		return
 	}
 
-	msg, found, err = s.Deps.Broker.ConsumeWait(r.Context(), waiter, wait)
+	msg, found, _, err = s.Deps.Broker.ConsumeWait(r.Context(), waiter, wait, nil)
 	if err != nil && !errors.Is(err, brokermsg.ErrNotPartitionOwner) {
 		s.WriteBrokerError(w, "consume", err)
 		return
@@ -132,12 +134,12 @@ type localConsumeWaiter struct {
 	waiter *brokermsg.ConsumeWaiter
 }
 
-func (l *localConsumeWaiter) Wait(ctx context.Context, wait time.Duration) (topic.Message, bool, error) {
-	msg, found, err := l.s.Deps.Broker.ConsumeWait(ctx, l.waiter, wait)
+func (l *localConsumeWaiter) Wait(ctx context.Context, wait time.Duration, external <-chan struct{}) (topic.Message, bool, bool, error) {
+	msg, found, wokeExternal, err := l.s.Deps.Broker.ConsumeWait(ctx, l.waiter, wait, external)
 	if errors.Is(err, brokermsg.ErrNotPartitionOwner) {
-		return topic.Message{}, false, nil
+		return topic.Message{}, false, wokeExternal, nil
 	}
-	return msg, found, err
+	return msg, found, wokeExternal, err
 }
 
 func (l *localConsumeWaiter) Release(ctx context.Context, msg topic.Message) error {
@@ -284,6 +286,12 @@ func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) 
 			ceiling = handlers.DefaultMaxConsumeWait
 		}
 		if d > ceiling {
+			// Say so. Silently serving a shorter wait than was asked for
+			// makes a client look like it is losing messages: it believes
+			// it polled for 25s, gets a 204 at 10s, and nothing anywhere
+			// indicates the request was altered. The header costs nothing
+			// and turns a confusing timeout into an obvious one.
+			w.Header().Set("X-Narad-Wait-Clamped", ceiling.String())
 			d = ceiling
 		}
 		opts.Wait = d

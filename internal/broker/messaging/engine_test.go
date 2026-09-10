@@ -309,7 +309,9 @@ func newTestEngineWithDir(t *testing.T, dataDir string, ms *messagingFakeMetasto
 			}
 		}
 	}
-	return NewEngine(ms, schemas, partitioner, offsets, logs, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+	e := NewEngine(ms, schemas, partitioner, offsets, logs, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+	t.Cleanup(func() { e.dispatch.close() })
+	return e
 }
 
 func decodeHandleForTest(t *testing.T, receiptHandle string) consumer.Handle {
@@ -479,35 +481,46 @@ func TestAllPartitions(t *testing.T) {
 	}
 }
 
-func TestWaitForActivityReturnsDeadlineExceededOnTimeout(t *testing.T) {
+// A long-poll that nothing satisfies honors its full budget and answers
+// empty. The wait is a park on the topic's waiter queue, not a scan.
+func TestConsumeWaitReturnsEmptyAfterBudget(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngine(t, ms, nil, nil)
 
-	chans, err := engine.notifyChannels("orders", []int{0})
-	if err != nil {
-		t.Fatalf("notifyChannels() error = %v", err)
+	_, found, w, err := engine.ConsumeProbe(context.Background(), "orders", ConsumeOpts{})
+	if err != nil || found {
+		t.Fatalf("ConsumeProbe() = (found %v, err %v), want a waiter on an empty topic", found, err)
 	}
-	err = engine.waitForActivity(context.Background(), chans, 10*time.Millisecond)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("waitForActivity() error = %v, want %v", err, context.DeadlineExceeded)
+	start := time.Now()
+	if _, found, _, err := engine.ConsumeWait(context.Background(), w, 40*time.Millisecond, nil); err != nil || found {
+		t.Fatalf("ConsumeWait() = (found %v, err %v), want empty", found, err)
+	}
+	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
+		t.Fatalf("returned after %v, want the full 40ms budget honored", elapsed)
 	}
 }
 
-func TestWaitForActivityReturnsContextCancellation(t *testing.T) {
+// A cancelled request stops waiting promptly instead of burning its
+// budget, and reports empty rather than an error.
+func TestConsumeWaitReturnsOnContextCancellation(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngine(t, ms, nil, nil)
+
+	_, found, w, err := engine.ConsumeProbe(context.Background(), "orders", ConsumeOpts{})
+	if err != nil || found {
+		t.Fatalf("ConsumeProbe() = (found %v, err %v), want a waiter", found, err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	chans, err := engine.notifyChannels("orders", []int{0})
-	if err != nil {
-		t.Fatalf("notifyChannels() error = %v", err)
+	start := time.Now()
+	if _, found, _, err := engine.ConsumeWait(ctx, w, 10*time.Second, nil); err != nil || found {
+		t.Fatalf("ConsumeWait() = (found %v, err %v), want empty", found, err)
 	}
-	err = engine.waitForActivity(ctx, chans, time.Second)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("waitForActivity() error = %v, want %v", err, context.Canceled)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("took %v to notice cancellation, want prompt", elapsed)
 	}
 }
 
@@ -914,7 +927,11 @@ func TestConsumeReplayReturnsNoMessagePastTail(t *testing.T) {
 	}
 }
 
-func TestWaitForActivityReturnsNilWhenPartitionNotifies(t *testing.T) {
+// A buffered record is not deliverable: the commit's high-watermark
+// advance is what makes it visible, and that is what reaches a parked
+// consumer. The dispatcher hands the record over without the consumer
+// ever scanning for it.
+func TestConsumeWaitDeliversOnHighWatermarkAdvance(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	engine := newTestEngine(t, ms, nil, nil)
@@ -923,37 +940,44 @@ func TestWaitForActivityReturnsNilWhenPartitionNotifies(t *testing.T) {
 		t.Fatalf("Get() error = %v", err)
 	}
 
-	chans, err := engine.notifyChannels("orders", []int{0})
-	if err != nil {
-		t.Fatalf("notifyChannels() error = %v", err)
+	_, found, w, err := engine.ConsumeProbe(context.Background(), "orders", ConsumeOpts{})
+	if err != nil || found {
+		t.Fatalf("ConsumeProbe() = (found %v, err %v), want a waiter", found, err)
 	}
-	errCh := make(chan error, 1)
+	type result struct {
+		msg   topic.Message
+		found bool
+		err   error
+	}
+	done := make(chan result, 1)
 	go func() {
-		errCh <- engine.waitForActivity(context.Background(), chans, time.Second)
+		msg, found, _, err := engine.ConsumeWait(context.Background(), w, 3*time.Second, nil)
+		done <- result{msg, found, err}
 	}()
 
 	time.Sleep(20 * time.Millisecond)
 	if _, err := log.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
-	// A buffered record is not yet deliverable; the commit's
-	// high-watermark advance is what wakes waiters.
 	select {
-	case err := <-errCh:
-		t.Fatalf("waitForActivity() returned %v before the record became visible", err)
+	case r := <-done:
+		t.Fatalf("ConsumeWait() returned %+v before the record became visible", r)
 	case <-time.After(50 * time.Millisecond):
 	}
+
 	if err := log.AdvanceHighWatermark(1); err != nil {
 		t.Fatalf("AdvanceHighWatermark() error = %v", err)
 	}
-
 	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("waitForActivity() error = %v, want nil", err)
+	case r := <-done:
+		if r.err != nil || !r.found {
+			t.Fatalf("ConsumeWait() = (found %v, err %v), want the committed record", r.found, r.err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("waitForActivity() timed out waiting for notification")
+		if r.msg.Offset != 0 {
+			t.Fatalf("delivered offset %d, want 0", r.msg.Offset)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ConsumeWait() never received the committed record")
 	}
 }
 

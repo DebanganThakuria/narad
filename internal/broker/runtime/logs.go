@@ -63,6 +63,12 @@ type Logs struct {
 	// incarnation and must not leak into a same-named successor.
 	retired func(topicName string)
 
+	// opened, when set, is called with every partition log just after it
+	// is opened, so an owner of per-topic delivery state can install its
+	// hooks on it (see storage.Log.SetWakeNotifier). Called under the
+	// topic guard and mu, so it must not block or reopen a log.
+	opened func(topicName string, idx int, l *storage.Log)
+
 	produceMu   sync.Mutex
 	produceSync map[string]*sync.Mutex
 }
@@ -220,7 +226,16 @@ func (g *Logs) openLocked(topicName string, idx int, key string) (l *storage.Log
 	e.version.Store(version)
 	e.stamp()
 	g.logs[key] = e
+	if g.opened != nil {
+		g.opened(topicName, idx, l)
+	}
 	return l, quarantined, nil
+}
+
+// SetOpened registers a hook invoked with every partition log just
+// after it is opened. Call before serving; a nil fn clears it.
+func (g *Logs) SetOpened(fn func(topicName string, idx int, l *storage.Log)) {
+	g.opened = fn
 }
 
 // entryCurrent reports whether an open entry can be served without

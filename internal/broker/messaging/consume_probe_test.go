@@ -34,7 +34,7 @@ func TestConsumeProbeThenWaitSeesCommitInBetween(t *testing.T) {
 	var gotFound bool
 	var gotErr error
 	go func() {
-		got, gotFound, gotErr = engine.ConsumeWait(ctx, waiter, 5*time.Second)
+		got, gotFound, _, gotErr = engine.ConsumeWait(ctx, waiter, 5*time.Second, nil)
 		close(done)
 	}()
 	select {
@@ -71,7 +71,7 @@ func TestConsumeProbeScanStartOrdersScan(t *testing.T) {
 	if _, _, _, err := engine.ConsumeProbe(ctx, "orders", ConsumeOpts{Partition: &start}); err == nil {
 		t.Fatal("ConsumeProbe must reject pinned-partition options")
 	}
-	if _, _, err := engine.ConsumeWait(ctx, nil, time.Second); err == nil {
+	if _, _, _, err := engine.ConsumeWait(ctx, nil, time.Second, nil); err == nil {
 		t.Fatal("ConsumeWait must reject a nil waiter")
 	}
 }
