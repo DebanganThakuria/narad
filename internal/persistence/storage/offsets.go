@@ -43,12 +43,15 @@ func (l *Log) AdvanceHighWatermark(newHWM int64) error {
 	// long-poll waiter must wake and re-check, not just one.
 	l.notifyAll()
 	// The advance leaves the persisted high-watermark behind, which is a
-	// pass the flusher now owes. On the commit path it is about to run
-	// one anyway, and this is a no-op; from anywhere else it is what
-	// stops the boundary sitting in memory unwritten, because the
-	// flusher's timer is armed only while work is outstanding and
-	// nothing else here would arm it. Cheap and idempotent, so it is
-	// done unconditionally rather than by guessing the caller.
+	// pass the flusher now owes, and the flusher's timer is armed only
+	// while something is owed. Nothing else here would arm it, so without
+	// this the boundary can sit in memory unwritten.
+	//
+	// Asked for unconditionally rather than by guessing the caller. On
+	// the commit path the request is redundant, since that pass ends in
+	// syncHighWatermark and then re-arms anyway; rearm drains a pending
+	// request before deciding, so the redundant one costs nothing rather
+	// than an extra wake per commit.
 	l.flusher.noteHighWatermarkAdvance()
 	return nil
 }

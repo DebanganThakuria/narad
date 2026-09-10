@@ -100,6 +100,9 @@ func (b *buffer) pushBatch(records [][]byte, copyRecords bool) (first, last int6
 	return first, last, crossed, wasEmpty
 }
 
+// shouldFlushByAge is the age-based drain gate. Records it declines to
+// flush yet stay durable only because flusher.needsTimer keeps the timer
+// armed while pending() is true.
 func (b *buffer) shouldFlushByAge(maxAge time.Duration) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()

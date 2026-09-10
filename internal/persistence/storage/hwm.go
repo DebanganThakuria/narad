@@ -218,6 +218,10 @@ func (l *Log) syncHighWatermark(force bool) error {
 	if target < 0 || target <= l.persistedHWM.Load() {
 		return nil
 	}
+	// Deferring is only safe because flusher.needsTimer keeps the timer
+	// armed while highWatermark > persistedHWM. A new deferral here needs
+	// a matching condition there, or the work is silently never scheduled
+	// once the log goes idle.
 	if !force && time.Since(l.lastHWMSync) < l.opts.HWMSyncInterval {
 		return nil
 	}

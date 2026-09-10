@@ -131,9 +131,10 @@ flowchart LR
     W --> S["fsync: batched mode syncs on<br/>sync_interval 1s / sync_bytes 8MiB /<br/>segment roll / Close / explicit Sync()"]
 ```
 
-Two things make this safe rather than sloppy:
+Three things make this safe rather than sloppy:
 
 - **The commit path doesn't negotiate.** `Log.CommitDurable` (called by `commitDurable` on every produce commit) synchronously drains, writes, fsyncs, verifies, and persists the high-watermark; the lazy timers above only govern data nobody has been promised yet.
+- **`flush_interval` is not a heartbeat.** The flusher holds a timer only while a pass is actually owed: records sitting in the buffer, bytes written but not yet fsynced, a failed write waiting to retry, or a high-watermark ahead of the persisted one. An idle partition holds no timer and burns no CPU; an append into an empty buffer or a high-watermark advance re-arms it. That matters at scale, because the cost is per open partition: measured on 500 idle logs, an always-armed 100ms timer cost 2.7% of a core doing nothing, and the runtime's timer heap was most of it. It also means any new "do it later, the timer will pick it up" path needs a matching condition in `flusher.needsTimer`, or it is silently never scheduled once the partition goes quiet.
 - **Reads are self-verifying.** Every frame decode re-checks the CRC; the commit path re-reads the just-written frames (streamed through a reused buffer, no per-frame allocation) *before* the high-watermark moves. Decoded frames and frame positions are cached (`frameCache`, `navCache`), both invalidated under the write lock when retention deletes a segment.
 
 ## Long-poll wiring, since everyone asks
