@@ -133,3 +133,29 @@ func TestPollerSetsOpenPartitionLogsEveryTick(t *testing.T) {
 		t.Fatalf("open_partition_logs after change = %v, want 1", got)
 	}
 }
+
+// TestPollerSetsReaperRestartsEveryTick pins the wiring of
+// narad_reaper_restarts: with no counter wired the gauge is left
+// alone, and once wired it is copied from the source on every tick so a
+// replacement loop started between polls shows up on the next scrape.
+func TestPollerSetsReaperRestartsEveryTick(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	p := NewPoller(m, fakeSnapshotProvider{}, discardLogger())
+	m.ReaperRestarts.Set(7)
+	p.tick(context.Background())
+	if got := readGauge(t, reg, "narad_reaper_restarts", nil); got != 7 {
+		t.Fatalf("reaper_restarts without a wired counter = %v, want 7 untouched", got)
+	}
+	restarts := int64(0)
+	p.SetReaperRestartCounter(func() int64 { return restarts })
+	p.tick(context.Background())
+	if got := readGauge(t, reg, "narad_reaper_restarts", nil); got != 0 {
+		t.Fatalf("reaper_restarts = %v, want 0", got)
+	}
+	restarts = 2
+	p.tick(context.Background())
+	if got := readGauge(t, reg, "narad_reaper_restarts", nil); got != 2 {
+		t.Fatalf("reaper_restarts after a restart = %v, want 2", got)
+	}
+}

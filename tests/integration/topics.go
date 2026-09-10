@@ -35,16 +35,56 @@ func verifyReady(ctx context.Context, lb *roundRobinClient) error {
 	return nil
 }
 
+// Every topic the driver creates uses these bounds: an hour of retention
+// (the floor) and caps wide enough that the driver's own concurrency is
+// never what limits delivery.
+const (
+	driverTopicRetention  = time.Hour
+	driverTopicInFlight   = 4096
+	driverTopicAckedAhead = 4096
+)
+
+// newTopicRecord is the one place the driver's topic shape is defined.
+func newTopicRecord(name string, partitions int, visibility time.Duration) topicRecord {
+	return topicRecord{
+		Name:                      name,
+		Partitions:                partitions,
+		RetentionMs:               int64(driverTopicRetention / time.Millisecond),
+		VisibilityTimeoutMs:       int64(visibility / time.Millisecond),
+		MaxInFlightPerPartition:   driverTopicInFlight,
+		MaxAckedAheadPerPartition: driverTopicAckedAhead,
+	}
+}
+
+// partitionOwners reads the topic and returns partition index -> owner
+// node id from the partition_stats entries.
+func partitionOwners(ctx context.Context, lb *roundRobinClient, topicName string) (map[int]string, error) {
+	var raw struct {
+		Partitions []struct {
+			Index     int    `json:"index"`
+			OwnerNode string `json:"owner_node"`
+		} `json:"partition_stats"`
+	}
+	if _, _, err := lb.do(ctx, http.MethodGet, "/v1/topics/"+url.PathEscape(topicName), nil, &raw, http.StatusOK); err != nil {
+		return nil, fmt.Errorf("get topic: %w", err)
+	}
+	out := make(map[int]string, len(raw.Partitions))
+	for _, p := range raw.Partitions {
+		if p.OwnerNode != "" {
+			out[p.Index] = p.OwnerNode
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("topic %s: no owner_node in partition_stats", topicName)
+	}
+	return out, nil
+}
+
 func createTopics(ctx context.Context, lb *roundRobinClient, cfg config, topics []string) error {
 	for _, topicName := range topics {
-		req := topicRecord{
-			Name:                      topicName,
-			Partitions:                cfg.partitions,
-			RetentionMs:               int64((1 * time.Hour) / time.Millisecond),
-			VisibilityTimeoutMs:       int64(cfg.visibilityTimeout / time.Millisecond),
-			MaxInFlightPerPartition:   4096,
-			MaxAckedAheadPerPartition: 4096,
-			Schema:                    json.RawMessage(messageSchema),
+		req := newTopicRecord(topicName, cfg.partitions, cfg.visibilityTimeout)
+		if !cfg.noSchema {
+			req.Schema = json.RawMessage(messageSchema)
 		}
 		var created topicRecord
 		if err := retry(ctx, 10, 200*time.Millisecond, func() error {

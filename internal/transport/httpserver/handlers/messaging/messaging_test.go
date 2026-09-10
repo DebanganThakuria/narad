@@ -1328,3 +1328,5 @@ func TestConsumeDoesNotAnnounceAnUnclampedWait(t *testing.T) {
 		t.Fatalf("X-Narad-Wait-Clamped = %q on an unclamped wait, want empty", got)
 	}
 }
+
+func (*fakeBroker) NoteRemoteClaim(string) {}

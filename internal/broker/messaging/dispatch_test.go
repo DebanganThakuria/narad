@@ -469,3 +469,336 @@ func waitFor(t *testing.T, cond func() bool, msg string) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// TestRemoteClaimReleasesHoldAtOnce pins the fix for the one-second floor
+// on cross-node delivery: a notification a peer said it would claim held
+// its record until claimDeadline even after the claim had been served, and
+// that hold gated the pump for every later record on the topic. The
+// claim's arrival must release it, so a second record produced right
+// after the first is offered immediately.
+func TestRemoteClaimReleasesHoldAtOnce(t *testing.T) {
+	engine := remoteTestEngine(t)
+	rd := &fakeRemote{}
+	if err := engine.RegisterRemoteDemand(context.Background(), "orders", rd); err != nil {
+		t.Fatalf("RegisterRemoteDemand() error = %v", err)
+	}
+	commitRecords(t, engine, "orders", 1)
+	waitFor(t, func() bool { return rd.count() == 1 }, "the peer was never notified")
+
+	// The peer claims: a local-only consume reserves the record, and the
+	// cluster layer reports the claim's arrival.
+	if _, found, _, err := engine.ConsumeProbe(context.Background(), "orders", ConsumeOpts{}); err != nil || !found {
+		t.Fatalf("claim: found=%v err=%v", found, err)
+	}
+	engine.NoteRemoteClaim("orders")
+
+	// The peer re-registers (its token was single use) and a second
+	// record lands. Before the fix this notification waited out the
+	// first one's claimDeadline.
+	if err := engine.RegisterRemoteDemand(context.Background(), "orders", rd); err != nil {
+		t.Fatalf("RegisterRemoteDemand() error = %v", err)
+	}
+	// commitRecords sets the high-watermark to n rather than advancing
+	// it, so asking for 2 here appends two more records and makes offset
+	// 1 the one newly visible record.
+	start := time.Now()
+	commitRecords(t, engine, "orders", 2)
+	waitFor(t, func() bool { return rd.count() == 2 }, "the second record was never offered")
+	if elapsed := time.Since(start); elapsed > claimDeadline/2 {
+		t.Fatalf("second notification took %s: the served claim's hold was not released", elapsed)
+	}
+}
+
+// TestConsumableExcludesRecordsAlreadyHandedOut pins the estimate the
+// pump gates on: a record reserved by a consumer (in flight, not yet
+// acked) is not free, so a peer registering afterwards must not be
+// offered it. Before the fix the estimate used the ack frontier and the
+// spurious offer cost the peer an empty claim and the topic a
+// claimDeadline of silence.
+func TestConsumableExcludesRecordsAlreadyHandedOut(t *testing.T) {
+	engine := remoteTestEngine(t)
+	commitRecords(t, engine, "orders", 1)
+	if _, found, _, err := engine.ConsumeProbe(context.Background(), "orders", ConsumeOpts{}); err != nil || !found {
+		t.Fatalf("local reserve: found=%v err=%v", found, err)
+	}
+	rd := &fakeRemote{}
+	if err := engine.RegisterRemoteDemand(context.Background(), "orders", rd); err != nil {
+		t.Fatalf("RegisterRemoteDemand() error = %v", err)
+	}
+	st := engine.dispatch.stateFor("orders")
+	if n := engine.dispatch.consumable("orders", st.scan); n != 0 {
+		t.Fatalf("consumable = %d, want 0 with the only record in flight", n)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if n := rd.count(); n != 0 {
+		t.Fatalf("peer was offered %d records that were already in flight", n)
+	}
+}
+
+// TestConsumableExcludesAckedAheadRecords covers the other term: a record
+// acked ahead of a gap sits above the frontier too, and is not free.
+func TestConsumableExcludesAckedAheadRecords(t *testing.T) {
+	engine := remoteTestEngine(t)
+	commitRecords(t, engine, "orders", 2)
+	if _, found, _, err := engine.ConsumeProbe(context.Background(), "orders", ConsumeOpts{}); err != nil || !found {
+		t.Fatalf("reserve offset 0: found=%v err=%v", found, err)
+	}
+	second, found, _, err := engine.ConsumeProbe(context.Background(), "orders", ConsumeOpts{})
+	if err != nil || !found {
+		t.Fatalf("reserve offset 1: found=%v err=%v", found, err)
+	}
+	h, err := consumer.DecodeHandle(second.ReceiptHandle)
+	if err != nil {
+		t.Fatalf("DecodeHandle() error = %v", err)
+	}
+	if err := engine.Ack(context.Background(), "orders", h); err != nil {
+		t.Fatalf("Ack() error = %v", err)
+	}
+	// Offset 0 in flight, offset 1 acked ahead of it: nothing is free.
+	rd := &fakeRemote{}
+	if err := engine.RegisterRemoteDemand(context.Background(), "orders", rd); err != nil {
+		t.Fatalf("RegisterRemoteDemand() error = %v", err)
+	}
+	st := engine.dispatch.stateFor("orders")
+	if n := engine.dispatch.consumable("orders", st.scan); n != 0 {
+		t.Fatalf("consumable = %d, want 0 (1 in flight + 1 acked ahead)", n)
+	}
+}
+
+// TestReleaseTopicWaitersWakesParkedConsumers pins the delete path: a
+// consumer parked on a topic returns empty at once when the topic's
+// waiters are released, rather than at the end of its wait.
+func TestReleaseTopicWaitersWakesParkedConsumers(t *testing.T) {
+	engine := remoteTestEngine(t)
+	_, _, w, err := engine.ConsumeProbe(context.Background(), "orders", ConsumeOpts{})
+	if err != nil {
+		t.Fatalf("Consume() error = %v", err)
+	}
+	if w == nil {
+		t.Fatal("expected a waiter for an empty topic")
+	}
+	type res struct {
+		found bool
+		took  time.Duration
+	}
+	done := make(chan res, 1)
+	go func() {
+		start := time.Now()
+		_, found, _, _ := engine.ConsumeWait(context.Background(), w, 10*time.Second, nil)
+		done <- res{found: found, took: time.Since(start)}
+	}()
+	waitFor(t, func() bool { return engine.dispatch.stateFor("orders").hasWaiters.Load() }, "the consumer never parked")
+	engine.ReleaseTopicWaiters("orders")
+	select {
+	case r := <-done:
+		if r.found {
+			t.Fatal("a released waiter was handed a record")
+		}
+		if r.took > 2*time.Second {
+			t.Fatalf("the parked consumer took %s to return after the release", r.took)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the parked consumer did not return after ReleaseTopicWaiters")
+	}
+}
+
+// holdState reads a topic's hold bookkeeping under its lock.
+func holdState(e *Engine, topicName string) (outstanding, holds int) {
+	st := e.dispatch.stateFor(topicName)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.outstanding, len(st.holds)
+}
+
+// setOutstanding seeds a topic's in-flight notification count so the
+// hold paths can be driven without a pump round trip.
+func setOutstanding(e *Engine, topicName string, n int) {
+	st := e.dispatch.stateFor(topicName)
+	st.mu.Lock()
+	st.outstanding = n
+	st.mu.Unlock()
+}
+
+// addHold records a notification the way the pump does right before it
+// leaves: outstanding is already counted, the hold waits for a claim or
+// its deadline.
+func addHold(e *Engine, topicName string) *claimHold {
+	st := e.dispatch.stateFor(topicName)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return e.dispatch.addHoldLocked(topicName, st)
+}
+
+// TestHoldExpiresWhenNoClaimArrives pins the deadline path: a peer that
+// said it would claim and never came has its hold given back at
+// claimDeadline, so the record it was promised is free for the next
+// peer rather than held forever.
+func TestHoldExpiresWhenNoClaimArrives(t *testing.T) {
+	engine := remoteTestEngine(t)
+	setOutstanding(engine, "orders", 1)
+	addHold(engine, "orders")
+	if out, holds := holdState(engine, "orders"); out != 1 || holds != 1 {
+		t.Fatalf("after a notification outstanding=%d holds=%d, want 1/1 (the record stays held until the deadline)", out, holds)
+	}
+	waitFor(t, func() bool {
+		out, holds := holdState(engine, "orders")
+		return out == 0 && holds == 0
+	}, "the hold never expired at claimDeadline")
+}
+
+// TestExpiredHoldAlreadyClaimedIsSkipped pins exactly-once retirement: a
+// hold that a claim already retired is no longer in the list, so the
+// deadline callback firing afterwards must not retire a second
+// notification, which would let the pump promise a record still held for
+// another peer.
+func TestExpiredHoldAlreadyClaimedIsSkipped(t *testing.T) {
+	engine := remoteTestEngine(t)
+	d := engine.dispatch
+	setOutstanding(engine, "orders", 2)
+	h := addHold(engine, "orders")
+
+	d.claimArrived("orders")
+	if out, holds := holdState(engine, "orders"); out != 1 || holds != 0 {
+		t.Fatalf("after the claim outstanding=%d holds=%d, want 1/0", out, holds)
+	}
+	// The deadline fires for the hold the claim already retired.
+	d.expireHold("orders", h)
+	if out, holds := holdState(engine, "orders"); out != 1 || holds != 0 {
+		t.Fatalf("after the stale deadline outstanding=%d holds=%d, want 1/0 (a hold is retired exactly once)", out, holds)
+	}
+}
+
+// TestClaimArrivedWithoutHoldsIsNoOp pins the probe case: a local-only
+// consume that answers no notification (a probe, or a claim for a
+// hold that already expired) finds no hold and must not retire a
+// notification that belongs to some other peer.
+func TestClaimArrivedWithoutHoldsIsNoOp(t *testing.T) {
+	engine := remoteTestEngine(t)
+	setOutstanding(engine, "orders", 1)
+	engine.NoteRemoteClaim("orders")
+	if out, holds := holdState(engine, "orders"); out != 1 || holds != 0 {
+		t.Fatalf("outstanding=%d holds=%d after a claim with no hold, want 1/0 untouched", out, holds)
+	}
+}
+
+// TestReleaseTopicUnknownTopicIsNoOp pins the delete of a topic this node
+// never served a long poll for: there is no state to drop, and the
+// release must not create any (stateFor would), so a same-name recreate
+// still starts from nothing.
+func TestReleaseTopicUnknownTopicIsNoOp(t *testing.T) {
+	engine := remoteTestEngine(t)
+	engine.ReleaseTopicWaiters("never-seen")
+	engine.dispatch.mu.RLock()
+	_, ok := engine.dispatch.topics["never-seen"]
+	engine.dispatch.mu.RUnlock()
+	if ok {
+		t.Fatal("releasing an unknown topic created dispatch state for it")
+	}
+}
+
+// TestReleaseTopicDropsPeersAndCancelsHolds pins the peer half of the
+// delete path: a peer's standing token leaves the queue, the holds its
+// claims were promised are cancelled, and the topic's state is reset
+// outright so a recreate under the same name starts clean.
+func TestReleaseTopicDropsPeersAndCancelsHolds(t *testing.T) {
+	engine := remoteTestEngine(t)
+	d := engine.dispatch
+	rd := &fakeRemote{refuse: true} // never notified, so the token stays queued
+	if err := engine.RegisterRemoteDemand(context.Background(), "orders", rd); err != nil {
+		t.Fatalf("RegisterRemoteDemand() error = %v", err)
+	}
+	setOutstanding(engine, "orders", 1)
+	addHold(engine, "orders")
+	old := d.stateFor("orders")
+	old.mu.Lock()
+	queued, holds := old.queue.len(), len(old.holds)
+	old.mu.Unlock()
+	if queued != 1 || holds != 1 {
+		t.Fatalf("precondition: queued=%d holds=%d, want 1/1", queued, holds)
+	}
+
+	engine.ReleaseTopicWaiters("orders")
+
+	old.mu.Lock()
+	queued, holds, outstanding, has := old.queue.len(), len(old.holds), old.outstanding, old.hasWaiters.Load()
+	old.mu.Unlock()
+	if queued != 0 || holds != 0 || outstanding != 0 || has {
+		t.Fatalf("after release queued=%d holds=%d outstanding=%d hasWaiters=%v, want all cleared", queued, holds, outstanding, has)
+	}
+	// The state stays in the map (open logs' wake notifiers point at it)
+	// and is reused by a same-name recreate, with its generation bumped
+	// so a pump mid-read notices the release.
+	if fresh := d.stateFor("orders"); fresh != old {
+		t.Fatal("a release replaced the dispatch state instead of resetting it in place")
+	}
+	old.mu.Lock()
+	gen := old.gen
+	old.mu.Unlock()
+	if gen != 1 {
+		t.Fatalf("release generation = %d, want 1", gen)
+	}
+}
+
+// TestReleasedWaiterNeverYieldsAPhantomRecord pins dequeue's closed-channel
+// handling: a consumer whose topic was released while its wait was ending
+// must come back empty, never with the zero message a closed channel
+// would otherwise hand it.
+func TestReleasedWaiterNeverYieldsAPhantomRecord(t *testing.T) {
+	engine := remoteTestEngine(t)
+	for range 20 {
+		_, _, w, err := engine.ConsumeProbe(context.Background(), "orders", ConsumeOpts{})
+		if err != nil || w == nil {
+			t.Fatalf("ConsumeProbe: waiter=%v err=%v", w, err)
+		}
+		type res struct {
+			found bool
+			msg   topic.Message
+		}
+		done := make(chan res, 1)
+		go func() {
+			msg, found, _, _ := engine.ConsumeWait(context.Background(), w, 5*time.Millisecond, nil)
+			done <- res{found: found, msg: msg}
+		}()
+		// Release right around the wait's end so the timer and the close
+		// race inside the select.
+		time.Sleep(4 * time.Millisecond)
+		engine.ReleaseTopicWaiters("orders")
+		r := <-done
+		if r.found {
+			t.Fatalf("a released waiter reported found=true with %+v", r.msg)
+		}
+	}
+}
+
+// TestParkedConsumerWakesAfterATopicRelease pins the in-place reset: the
+// wake notifier an open log captured at open time must keep working
+// after the topic's waiters were released (a delete-and-recreate opens
+// the new log before the old state is retired), so a consumer parked
+// afterwards is still woken by a produce.
+func TestParkedConsumerWakesAfterATopicRelease(t *testing.T) {
+	engine := remoteTestEngine(t)
+	if _, err := engine.logs.Get("orders", 0); err != nil { // installs the notifier
+		t.Fatalf("Get() error = %v", err)
+	}
+	engine.ReleaseTopicWaiters("orders")
+
+	_, _, w, err := engine.ConsumeProbe(context.Background(), "orders", ConsumeOpts{})
+	if err != nil || w == nil {
+		t.Fatalf("ConsumeProbe: waiter=%v err=%v", w, err)
+	}
+	done := make(chan bool, 1)
+	go func() {
+		_, found, _, _ := engine.ConsumeWait(context.Background(), w, 5*time.Second, nil)
+		done <- found
+	}()
+	waitFor(t, func() bool { return engine.dispatch.stateFor("orders").hasWaiters.Load() }, "the consumer never parked")
+	commitRecords(t, engine, "orders", 1)
+	select {
+	case found := <-done:
+		if !found {
+			t.Fatal("the parked consumer was not handed the record after a release")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the parked consumer was never woken after a release: the log's wake notifier points at dead state")
+	}
+}

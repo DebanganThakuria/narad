@@ -65,6 +65,13 @@ Honorable mention: `rate(narad_errors_total[5m])` by `component`/`kind` as a cat
 | `narad_storage_retention_bytes_deleted_total` / `_messages_deleted_total` | Reaper activity, labeled by reason |
 | `narad_data_dir_size_bytes` / `_available_bytes`, `narad_topic_bytes`, `narad_partition_size_bytes`, `narad_segments` | Disk accounting at every zoom level |
 
+### Storage housekeeping
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `narad_cold_retention_swept_total` | counter | Closed partitions the cold-retention walk opened, reaped and closed again because a segment had expired. Rises only on idle topics with expired data. |
+| `narad_reaper_restarts` | gauge | Times the shared retention loop was replaced because it stopped ticking. Any value above zero deserves a look at the log. |
+
 ### Cluster & misc
 
 `narad_topics_total`, `narad_partitions_total`, `narad_open_partition_logs` (refreshed every poller tick, eviction on or off), `narad_errors_total{component,kind}`, `narad_boot_duration_seconds`.

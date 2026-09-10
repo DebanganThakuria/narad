@@ -87,32 +87,12 @@ func (g *Logs) EvictIdleOnce(idleAfter time.Duration) int {
 
 	evicted := 0
 	for _, c := range candidates {
-		topicName, idx, ok := splitKey(c.key)
-		if !ok {
-			continue
-		}
-		unlock := g.lockProduce(topicName, idx)
-		g.mu.Lock()
 		// Re-verify under the locks: same entry still installed, still
 		// idle, retention still owes nothing. A Get since the scan
 		// (which stamped it) or a CloseTopic (which removed it) aborts.
-		cur, present := g.logs[c.key]
-		if !present || cur != c.entry || !evictable(cur, cutoff) {
-			g.mu.Unlock()
-			unlock()
-			continue
+		if closed, _ := g.closeIfStill(c.key, c.entry, func(cur *logEntry) bool { return evictable(cur, cutoff) }, "idle_evict_close"); closed {
+			evicted++
 		}
-		delete(g.logs, c.key)
-		// Close under g.mu, like CloseTopic: Get blocks until the old
-		// log has fully flushed and released its files, then reopens
-		// fresh. Close is nearly instant here — an idle log's buffer is
-		// empty and its HWM already synced.
-		if err := c.entry.log.Close(); err != nil && g.metrics != nil {
-			g.metrics.IncError("storage", "idle_evict_close")
-		}
-		g.mu.Unlock()
-		unlock()
-		evicted++
 	}
 
 	if g.metrics != nil {
@@ -122,6 +102,37 @@ func (g *Logs) EvictIdleOnce(idleAfter time.Duration) int {
 		g.metrics.OpenPartitionLogs.Set(float64(openCount - evicted))
 	}
 	return evicted
+}
+
+// closeIfStill closes and forgets one open log under the full lock
+// discipline (invariants 3-5): the partition's produce mutex, then the
+// registry write lock, then a re-check that the same entry is still
+// installed and still satisfies `still`. A Get that raced in (stamping
+// the entry, or reopening it) makes the check fail and the log stays
+// open for its caller. Close runs under g.mu, like CloseTopic: a Get
+// blocks until the old log has fully flushed and released its files,
+// then reopens fresh. A close error is counted under errKind.
+func (g *Logs) closeIfStill(key string, entry *logEntry, still func(*logEntry) bool, errKind string) (closed bool, err error) {
+	topicName, idx, ok := splitKey(key)
+	if !ok {
+		return false, nil
+	}
+	unlock := g.lockProduce(topicName, idx)
+	defer unlock()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	cur, present := g.logs[key]
+	if !present || cur != entry || !still(cur) {
+		return false, nil
+	}
+	delete(g.logs, key)
+	if err := cur.log.Close(); err != nil {
+		if g.metrics != nil {
+			g.metrics.IncError("storage", errKind)
+		}
+		return true, err
+	}
+	return true, nil
 }
 
 // OpenCount is the number of partition logs currently open on this

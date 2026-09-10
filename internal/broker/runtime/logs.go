@@ -71,6 +71,12 @@ type Logs struct {
 
 	produceMu   sync.Mutex
 	produceSync map[string]*sync.Mutex
+
+	// coldDefer holds partitions the cold-retention walk opened and found
+	// nothing to reap in, keyed by keyOf, with the time before which the
+	// walk leaves them alone.
+	coldMu    sync.Mutex
+	coldDefer map[string]time.Time
 }
 
 // topicVersioner is the optional metastore capability the Get fast
@@ -92,9 +98,17 @@ type logEntry struct {
 	// serves a deleted topic's directory and must be retired.
 	incarnation string
 	version     atomic.Uint64
+	// walkOwned is set by the cold-retention walk in the critical section
+	// that installs this entry for a sweep, and cleared by any Get since
+	// (stamp). The walk closes the log only while it is still set, so a
+	// consumer that opened the log after it is never cut off mid-read.
+	walkOwned atomic.Bool
 }
 
-func (e *logEntry) stamp() { e.lastAccess.Store(time.Now().UnixNano()) }
+func (e *logEntry) stamp() {
+	e.walkOwned.Store(false)
+	e.lastAccess.Store(time.Now().UnixNano())
+}
 
 // NewLogs constructs a partition-log manager. metastore is consulted
 // at lazy-open time to fold the topic's RetentionMs into the storage
@@ -256,7 +270,11 @@ func (g *Logs) Peek(topicName string, idx int) (*storage.Log, bool) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	e, ok := g.logs[keyOf(topicName, idx)]
-	if !ok {
+	if !ok || e.walkOwned.Load() {
+		// A log the cold-retention walk opened for a sweep is not open
+		// to observers: it was closed a moment ago and will be closed
+		// again in milliseconds, and a reader that found it here would be
+		// cut off mid-read.
 		return nil, false
 	}
 	return e.log, true

@@ -123,6 +123,10 @@ type Broker interface {
 	// so nothing is reserved on its behalf. See messaging.RemoteDemand.
 	RegisterRemoteDemand(ctx context.Context, topicName string, rd messaging.RemoteDemand) error
 	DropRemoteDemand(topicName string, rd messaging.RemoteDemand)
+	// NoteRemoteClaim reports that a peer's claim (a local-only consume
+	// sent in answer to a notification) has arrived for the topic, so
+	// the dispatcher can release that notification's hold at once.
+	NoteRemoteClaim(topicName string)
 	// Ack accepts a decoded receipt handle returned by a prior Consume
 	// call. The broker commits only if the handle still matches an
 	// active reservation.

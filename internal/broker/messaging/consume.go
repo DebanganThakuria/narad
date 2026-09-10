@@ -217,6 +217,22 @@ func (e *Engine) RegisterRemoteDemand(ctx context.Context, topicName string, rd 
 	return nil
 }
 
+// ReleaseTopicWaiters wakes every consumer parked on topicName with an
+// empty answer and drops the topic's dispatch state. The topic manager
+// calls it when a topic is deleted, so a long poll on a deleted topic
+// returns at once rather than at its wait's end.
+func (e *Engine) ReleaseTopicWaiters(topicName string) {
+	e.dispatch.releaseTopic(topicName)
+}
+
+// NoteRemoteClaim tells the dispatcher that a peer's claim for the topic
+// has arrived, so the notification it answers is resolved now rather
+// than at its deadline. The cluster layer calls it on every local-only
+// consume it serves for a peer.
+func (e *Engine) NoteRemoteClaim(topicName string) {
+	e.dispatch.claimArrived(topicName)
+}
+
 // DropRemoteDemand removes a peer's interest ahead of its expiry, for a
 // connection that died or a peer that said it no longer wants the
 // topic.

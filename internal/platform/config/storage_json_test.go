@@ -49,3 +49,30 @@ func TestStorageConfigRejectsInternalKeys(t *testing.T) {
 		}
 	}
 }
+
+// TestStorageConfigAppliesColdRetentionWalk pins the file field: a
+// present value replaces the default, and an omitted one leaves the
+// default alone rather than zeroing (disabling) the walk.
+func TestStorageConfigAppliesColdRetentionWalk(t *testing.T) {
+	c := StorageConfig{ColdRetentionWalkMs: 300_000}
+	if err := json.Unmarshal([]byte(`{"cold_retention_walk_ms":0}`), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.ColdRetentionWalkMs != 0 {
+		t.Errorf("cold_retention_walk_ms = %d, want 0 (an explicit zero disables the walk)", c.ColdRetentionWalkMs)
+	}
+	c = StorageConfig{ColdRetentionWalkMs: 300_000}
+	if err := json.Unmarshal([]byte(`{"data_dir":"e"}`), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.ColdRetentionWalkMs != 300_000 {
+		t.Errorf("omitted cold_retention_walk_ms changed to %d, want the default 300000 preserved", c.ColdRetentionWalkMs)
+	}
+	c = StorageConfig{}
+	if err := json.Unmarshal([]byte(`{"cold_retention_walk_ms":120000}`), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.ColdRetentionWalkMs != 120_000 {
+		t.Errorf("cold_retention_walk_ms = %d, want 120000", c.ColdRetentionWalkMs)
+	}
+}

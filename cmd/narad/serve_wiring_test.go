@@ -341,3 +341,5 @@ func (stubBroker) RegisterRemoteDemand(context.Context, string, brokermsg.Remote
 }
 
 func (stubBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}
+
+func (stubBroker) NoteRemoteClaim(string) {}

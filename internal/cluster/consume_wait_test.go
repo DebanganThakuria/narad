@@ -387,3 +387,60 @@ func multiOwnerRouter(t *testing.T, peer fakePeerClient, remotes int) *Router {
 	router.peer = peer
 	return router
 }
+
+// TestClaimFromFallsBackToAPlainProbeForALegacyOwner pins the rolling-
+// upgrade path: an owner that refuses the Claim flag (400) is retried at
+// once with a plain probe and remembered, later claims skip the flag
+// until the TTL passes, and after it the flag is tried again.
+func TestClaimFromFallsBackToAPlainProbeForALegacyOwner(t *testing.T) {
+	var mu sync.Mutex
+	var seen []bool // Claim flag of each request, in order
+	acceptsFlag := false
+	peer := fakePeerClient{
+		consumeFn: func(_ context.Context, _ string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
+			mu.Lock()
+			seen = append(seen, req.Claim)
+			accepts := acceptsFlag
+			mu.Unlock()
+			if req.Claim && !accepts {
+				// What an owner on the previous release answers.
+				return nodewire.Response{Status: http.StatusBadRequest, Body: []byte("invalid consume request: trailing node rpc payload data")}, nil
+			}
+			return remoteMessageResponse(0, 7, consumer.EncodeHandle(consumer.Handle{Partition: 0, Offset: 7, Nonce: 99})), nil
+		},
+	}
+	router := tokenRouter(t, peer)
+	const owner = "old.example:7942"
+
+	if _, ok := router.claimFrom(context.Background(), owner, "orders"); !ok {
+		t.Fatal("first claim: the plain fallback should have succeeded")
+	}
+	if _, ok := router.claimFrom(context.Background(), owner, "orders"); !ok {
+		t.Fatal("second claim: the remembered owner should be claimed unflagged")
+	}
+	mu.Lock()
+	got := append([]bool(nil), seen...)
+	mu.Unlock()
+	if want := []bool{true, false, false}; len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("Claim flags sent = %v, want %v (flagged, refused, then unflagged; then unflagged from the cache)", got, want)
+	}
+
+	// The TTL passes and the owner has been upgraded: the flag is tried
+	// again and sticks.
+	router.legacyClaim.Store(owner, time.Now().Add(-time.Second))
+	mu.Lock()
+	acceptsFlag = true
+	mu.Unlock()
+	if _, ok := router.claimFrom(context.Background(), owner, "orders"); !ok {
+		t.Fatal("claim after the TTL: the flagged claim should have succeeded")
+	}
+	mu.Lock()
+	last := seen[len(seen)-1]
+	mu.Unlock()
+	if !last {
+		t.Fatal("after the TTL the claim went out unflagged: the legacy entry never expires")
+	}
+	if _, still := router.legacyClaim.Load(owner); still {
+		t.Fatal("an expired legacy entry was kept")
+	}
+}

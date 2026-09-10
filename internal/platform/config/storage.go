@@ -54,6 +54,14 @@ type StorageConfig struct {
 	// descriptors, and buffers of used-then-abandoned topics. Zero
 	// disables eviction.
 	IdleLogEvictionMs int `json:"idle_log_eviction_ms"`
+
+	// ColdRetentionWalkMs is how often the node walks the partition
+	// directories on disk and reaps expired segments of partitions whose
+	// log is NOT open (idle-evicted, or never opened since a restart).
+	// The shared reaper only sees open logs, so without this walk an
+	// idle topic keeps its expired data until something touches it.
+	// Zero disables the walk.
+	ColdRetentionWalkMs int `json:"cold_retention_walk_ms"`
 }
 
 // FsyncMode controls how aggressively the storage layer flushes

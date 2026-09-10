@@ -94,6 +94,24 @@ func (r *reaper) run() {
 	}
 }
 
+// SweepRetentionNow runs one retention pass synchronously on the calling
+// goroutine: the age-based roll of an expired active segment and the
+// deletion of expired sealed segments. The cold-partition walk uses it
+// to reap a log it opened only for that purpose, without waiting for
+// the shared reaper's next turn. It reports whether the pass changed
+// the segment set, so a partition the reaper cannot reap yet (its
+// active segment holds records above the persisted high-watermark) is
+// not counted as swept. A log without an age bound does nothing.
+func (l *Log) SweepRetentionNow() (changed bool) {
+	if l == nil || l.reaper == nil || l.reaper.cfg.MaxAge <= 0 {
+		return false
+	}
+	beforeOldest, beforeCount := l.OldestOffset(), l.SegmentCount()
+	l.reaper.sweep()
+	afterOldest, afterCount := l.OldestOffset(), l.SegmentCount()
+	return afterOldest != beforeOldest || afterCount != beforeCount
+}
+
 // sweep is one retention pass: rotate an active segment whose records
 // have all expired, pick the sealed segments to delete under RLock,
 // detach them under Lock, and unlink the files with no lock held. The
@@ -108,48 +126,16 @@ func (r *reaper) sweep() {
 
 	r.rotateExpiredActive()
 
-	r.log.rwmu.RLock()
-	if len(r.log.segments) <= 1 {
-		r.log.rwmu.RUnlock()
+	sealed := r.sealedSnapshot()
+	if len(sealed) == 0 {
 		return
 	}
-	sealed := make([]*segment, len(r.log.segments)-1)
-	copy(sealed, r.log.segments[:len(r.log.segments)-1])
-	r.log.rwmu.RUnlock()
-
 	toDelete := r.candidatesForDeletion(sealed)
 	if len(toDelete) == 0 {
 		return
 	}
 
-	type detached struct {
-		seg    *segment
-		reason string
-	}
-	var removed []detached
-
-	r.log.rwmu.Lock()
-	if len(r.log.segments) == 0 {
-		r.log.rwmu.Unlock()
-		return
-	}
-	active := r.log.segments[len(r.log.segments)-1]
-	delete(toDelete, active)
-	if len(toDelete) == 0 {
-		r.log.rwmu.Unlock()
-		return
-	}
-	kept := make([]*segment, 0, len(r.log.segments))
-	for _, s := range r.log.segments {
-		if reason, drop := toDelete[s]; drop {
-			r.detachSegmentLocked(s)
-			removed = append(removed, detached{seg: s, reason: reason})
-			continue
-		}
-		kept = append(kept, s)
-	}
-	r.log.segments = kept
-	r.log.rwmu.Unlock()
+	removed := r.detachExpired(toDelete)
 
 	// The unlinks run with no lock held: after a restart with a backlog
 	// of expired segments a sweep may delete dozens of files, and every
@@ -160,27 +146,83 @@ func (r *reaper) sweep() {
 	}
 }
 
+// sealedSnapshot copies the sealed segments (everything but the active
+// one) under the read lock.
+func (r *reaper) sealedSnapshot() []*segment {
+	r.log.rwmu.RLock()
+	defer r.log.rwmu.RUnlock()
+	if len(r.log.segments) <= 1 {
+		return nil
+	}
+	sealed := make([]*segment, len(r.log.segments)-1)
+	copy(sealed, r.log.segments[:len(r.log.segments)-1])
+	return sealed
+}
+
+type detachedSegment struct {
+	seg    *segment
+	reason string
+}
+
+// detachExpired takes the picked segments out of the log under the write
+// lock and returns them for unlinking. The lock is released by defer and
+// the new segment list is installed BEFORE any handle is closed, so a
+// panic anywhere in here (the shared reaper survives one) can neither
+// strand the lock nor leave a half-detached segment listed: the list is
+// either the old one or the new one.
+func (r *reaper) detachExpired(toDelete map[*segment]string) []detachedSegment {
+	r.log.rwmu.Lock()
+	defer r.log.rwmu.Unlock()
+	if len(r.log.segments) == 0 {
+		return nil
+	}
+	active := r.log.segments[len(r.log.segments)-1]
+	delete(toDelete, active)
+	if len(toDelete) == 0 {
+		return nil
+	}
+	kept := make([]*segment, 0, len(r.log.segments))
+	var removed []detachedSegment
+	for _, s := range r.log.segments {
+		if reason, drop := toDelete[s]; drop {
+			removed = append(removed, detachedSegment{seg: s, reason: reason})
+			continue
+		}
+		kept = append(kept, s)
+	}
+	r.log.segments = kept
+	for _, d := range removed {
+		r.detachSegmentLocked(d.seg)
+	}
+	return removed
+}
+
 // rotateExpiredActive asks the flusher to seal the active segment when
 // its last write is older than MaxAge: every record in it has expired,
 // but a segment that is never written again would otherwise never
 // roll, and so never be reaped. The flusher only rotates a segment
 // whose records are all committed (see flusher.rotateActive).
+// activeExpired reports whether every record in the active segment is
+// older than MaxAge and committed, under the read lock (released by
+// defer, so a panicking clock cannot strand it).
+func (r *reaper) activeExpired() bool {
+	r.log.rwmu.RLock()
+	defer r.log.rwmu.RUnlock()
+	if len(r.log.segments) == 0 {
+		return false
+	}
+	active := r.log.segments[len(r.log.segments)-1]
+	return active.sizeBytes > 0 &&
+		!active.lastWriteAt.IsZero() &&
+		active.lastWriteAt.Before(r.cfg.Now().Add(-r.cfg.MaxAge)) &&
+		active.nextOffset <= r.log.highWatermark.Load()
+}
+
 func (r *reaper) rotateExpiredActive() {
 	if r.cfg.MaxAge <= 0 {
 		return
 	}
-	r.log.rwmu.RLock()
-	if len(r.log.segments) == 0 {
-		r.log.rwmu.RUnlock()
-		return
-	}
-	active := r.log.segments[len(r.log.segments)-1]
-	expired := active.sizeBytes > 0 &&
-		!active.lastWriteAt.IsZero() &&
-		active.lastWriteAt.Before(r.cfg.Now().Add(-r.cfg.MaxAge)) &&
-		active.nextOffset <= r.log.highWatermark.Load()
-	r.log.rwmu.RUnlock()
-	if !expired {
+	if !r.activeExpired() {
 		return
 	}
 	if err := r.log.submitCommit(commitRequest{hwm: -1, rotate: true}); err != nil && !errors.Is(err, ErrLogClosed) {

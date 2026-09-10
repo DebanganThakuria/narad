@@ -116,6 +116,17 @@ func (s *RPCServer) handleConsume(ctx context.Context, key requestKey, payload [
 	}
 	consume := func() nodewire.Response {
 		msg, found, err := s.broker.Consume(ctx, req.Topic, opts)
+		if req.Claim && req.LocalOnly && wait == 0 && err == nil && found {
+			// A claim that WON its record resolves the notification it
+			// answers, so the owner releases that hold now rather than at
+			// the claim deadline. An empty claim keeps the hold to its
+			// deadline on purpose: the pump's free-record estimate can be
+			// wrong (a partition at its in-flight cap, or paused for a
+			// handoff), and the deadline is the backoff that keeps a wrong
+			// estimate from becoming a notify/claim loop at RPC speed. A
+			// plain probe is not a claim and never releases a hold.
+			s.broker.NoteRemoteClaim(req.Topic)
+		}
 		if errors.Is(err, brokermsg.ErrNotPartitionOwner) && req.LocalOnly {
 			return nodewire.Response{Status: http.StatusNoContent}
 		}
