@@ -23,6 +23,16 @@ type config struct {
 	cleanup            bool
 	username           string
 	password           string
+	duration           time.Duration
+	drainTimeout       time.Duration
+	// fatalDupAfterAck aborts the run on a redelivery after ack. Off for
+	// restart tests: acks ahead of a gap live in memory by design, so any
+	// broker restart legitimately redelivers a few.
+	fatalDupAfterAck bool
+	// noSchema creates the run's topics without a message schema, to
+	// measure what produce-side schema validation costs.
+	noSchema    bool
+	reportEvery time.Duration
 }
 
 type roundRobinClient struct {

@@ -10,13 +10,16 @@ import (
 )
 
 const (
-	modeLoad  = "load"
-	modeChaos = "chaos"
+	modeLoad   = "load"
+	modeChaos  = "chaos"
+	modeSteady = "steady"
+	modeXnode  = "xnode"
+	modeEdge   = "edge"
 )
 
 func validMode(mode string) bool {
 	switch mode {
-	case modeLoad, modeChaos:
+	case modeLoad, modeChaos, modeSteady, modeXnode, modeEdge:
 		return true
 	default:
 		return false
@@ -26,6 +29,15 @@ func validMode(mode string) bool {
 func run(cfg config) error {
 	if cfg.mode == modeChaos {
 		return runChaos(cfg)
+	}
+	if cfg.mode == modeSteady {
+		return runSteady(cfg)
+	}
+	if cfg.mode == modeXnode {
+		return runXnode(cfg)
+	}
+	if cfg.mode == modeEdge {
+		return runEdge(cfg)
 	}
 	return runLoad(cfg)
 }

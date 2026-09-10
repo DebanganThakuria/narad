@@ -12,7 +12,7 @@ func parseConfig(args []string) (config, error) {
 	var nodesCSV string
 	cfg := config{mode: modeLoad}
 	flagSet := flag.NewFlagSet("local-cluster-driver", flag.ContinueOnError)
-	flagSet.StringVar(&cfg.mode, "mode", modeLoad, "driver mode: load, chaos")
+	flagSet.StringVar(&cfg.mode, "mode", modeLoad, "driver mode: load, chaos, steady, xnode, edge")
 	flagSet.StringVar(&nodesCSV, "nodes", "http://127.0.0.1:18081,http://127.0.0.1:18082,http://127.0.0.1:18083", "comma-separated Narad node base URLs")
 	flagSet.IntVar(&cfg.topics, "topics", 10, "number of topics to create")
 	flagSet.IntVar(&cfg.messages, "messages", 1000, "total messages to produce and consume")
@@ -27,6 +27,11 @@ func parseConfig(args []string) (config, error) {
 	flagSet.BoolVar(&cfg.cleanup, "cleanup", true, "delete created topics at the end")
 	flagSet.StringVar(&cfg.username, "username", "", "HTTP Basic auth username (empty = no auth)")
 	flagSet.StringVar(&cfg.password, "password", "", "HTTP Basic auth password")
+	flagSet.DurationVar(&cfg.duration, "duration", 60*time.Second, "steady mode: how long producers run")
+	flagSet.DurationVar(&cfg.drainTimeout, "drain-timeout", 90*time.Second, "steady mode: how long consumers get to ack everything after producers stop")
+	flagSet.DurationVar(&cfg.reportEvery, "report-every", 10*time.Second, "steady mode: progress report interval")
+	flagSet.BoolVar(&cfg.fatalDupAfterAck, "fatal-dup-after-ack", true, "steady mode: abort on a message redelivered after its ack (off for broker-restart runs; the count is still reported)")
+	flagSet.BoolVar(&cfg.noSchema, "no-schema", false, "create topics without a message schema (measures the cost of produce-side schema validation)")
 	if err := flagSet.Parse(args); err != nil {
 		return cfg, err
 	}
