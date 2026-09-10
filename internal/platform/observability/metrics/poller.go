@@ -51,6 +51,9 @@ type Poller struct {
 	// partition logs are open so narad_open_partition_logs is refreshed
 	// on every tick rather than only by the eviction sweep.
 	openLogs func() int
+	// reaperRestarts, when set (SetReaperRestartCounter), reports how
+	// many times the shared retention loop had to be replaced.
+	reaperRestarts func() int64
 }
 
 // gaugeSeriesKey identifies one per-partition gauge series.
@@ -83,6 +86,11 @@ func NewPoller(m *Metrics, broker SnapshotProvider, logger *slog.Logger, dataDir
 // publishes as narad_open_partition_logs each tick.
 func (p *Poller) SetOpenLogCounter(count func() int) {
 	p.openLogs = count
+}
+
+// SetReaperRestartCounter wires the source of narad_reaper_restarts.
+func (p *Poller) SetReaperRestartCounter(count func() int64) {
+	p.reaperRestarts = count
 }
 
 // Run blocks until ctx is cancelled. It does an immediate first tick
@@ -131,6 +139,9 @@ func (p *Poller) tick(ctx context.Context) {
 	p.metrics.PartitionsTotal.Set(float64(partitionsTotal))
 	if p.openLogs != nil {
 		p.metrics.OpenPartitionLogs.Set(float64(p.openLogs()))
+	}
+	if p.reaperRestarts != nil {
+		p.metrics.ReaperRestarts.Set(float64(p.reaperRestarts()))
 	}
 	p.updateDataDirGauges()
 	p.clearDepartedPartitions(currentPartitions)

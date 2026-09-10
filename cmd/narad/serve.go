@@ -204,8 +204,10 @@ func runServe(args []string) error {
 
 	poller := metrics.NewPoller(m, bc.broker, log, cfg.Storage.DataDir)
 	poller.SetOpenLogCounter(bc.logs.OpenCount)
+	poller.SetReaperRestartCounter(bc.logs.ReaperRestarts)
 	wg.Go(func() { poller.Run(ctx) })
 	wg.Go(func() { bc.logs.RunIdleEviction(ctx, time.Duration(cfg.Storage.IdleLogEvictionMs)*time.Millisecond) })
+	wg.Go(func() { bc.logs.RunColdRetention(ctx, time.Duration(cfg.Storage.ColdRetentionWalkMs)*time.Millisecond) })
 
 	// Startup reconciliation: once this node's metastore replica is caught
 	// up, reclaim orphaned topic dirs (crash safety) and open owned

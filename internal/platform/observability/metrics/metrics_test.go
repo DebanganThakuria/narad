@@ -45,6 +45,8 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	m.ConsumeEmptyTotal.WithLabelValues("t").Inc()
 	m.TopicsTotal.Set(1)
 	m.PartitionsTotal.Set(1)
+	m.ColdRetentionSweptTotal.Add(1)
+	m.ReaperRestarts.Set(0)
 	m.DataDirSizeBytes.Set(1)
 	m.DataDirAvailableBytes.Set(1)
 	m.TopicBytes.WithLabelValues("t").Set(1)
@@ -82,6 +84,8 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 		"narad_consume_empty_total",
 		"narad_topics_total",
 		"narad_partitions_total",
+		"narad_cold_retention_swept_total",
+		"narad_reaper_restarts",
 		"narad_data_dir_size_bytes",
 		"narad_data_dir_available_bytes",
 		"narad_topic_bytes",

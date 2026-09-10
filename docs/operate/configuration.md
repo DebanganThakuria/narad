@@ -93,7 +93,8 @@ the loader **rejects** any attempt to set it:
     "data_dir": "data",
     "codec": "none",                        // "none" | "zstd" (yes, OFF by default)
     "compression_level": "fastest",         // zstd: fastest | default | better | best
-    "idle_log_eviction_ms": 1800000         // close logs untouched this long; 0 disables
+    "idle_log_eviction_ms": 1800000,        // close logs untouched this long; 0 disables
+    "cold_retention_walk_ms": 300000        // reap expired segments of partitions whose log is closed; 0 disables
   },
   "http": { "...": "same knobs as the env vars; durations are strings with a unit (\"10s\"), a bare number is rejected" },
   "cluster": {
@@ -123,6 +124,13 @@ buffers, and topics people create and abandon would hold them forever.
 So Narad closes any partition log untouched for `idle_log_eviction_ms`
 (default 30 minutes) and reopens it lazily, invisibly, on the next
 produce, consume, or replay. Details that make this safe:
+
+Retention only runs on open logs, so an evicted (or never reopened) partition
+would keep its expired segments forever. Every `cold_retention_walk_ms`
+(default 5 minutes, minimum 60000, 0 disables) the node walks the partition
+directories on disk, and for a closed partition holding an expired segment
+opens it, runs one retention sweep, and closes it again. The
+`narad_cold_retention_swept_total` counter shows how many it reaped.
 
 - A topic that was **never** used opens nothing anywhere: creation is
   just a metastore entry.

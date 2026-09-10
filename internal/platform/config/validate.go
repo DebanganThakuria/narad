@@ -11,6 +11,11 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/netaddr"
 )
 
+// minBackgroundWalkMs is the floor for the periodic background walks
+// (idle eviction, cold retention): a minute, so a misconfiguration cannot
+// turn a housekeeping loop into a busy one.
+const minBackgroundWalkMs = 60_000
+
 // minClusterPeers is the smallest multi-node peer list that makes
 // sense: a Raft cluster of two cannot survive any failure, so anything
 // below three voters is a config mistake. Larger (odd) sizes are fine —
@@ -255,8 +260,11 @@ func storageValidationErrors(cfg StorageConfig) []string {
 	// The floor keeps eviction far above request lifetimes: every
 	// long-poll and read finishes in seconds, so a minutes-scale window
 	// makes "log closed while a holder still uses it" unreachable.
-	if cfg.IdleLogEvictionMs != 0 && cfg.IdleLogEvictionMs < 60_000 {
-		errs = append(errs, fmt.Sprintf("storage.idle_log_eviction_ms (%d) must be 0 (disabled) or >= 60000", cfg.IdleLogEvictionMs))
+	if cfg.IdleLogEvictionMs != 0 && cfg.IdleLogEvictionMs < minBackgroundWalkMs {
+		errs = append(errs, fmt.Sprintf("storage.idle_log_eviction_ms (%d) must be 0 (disabled) or >= %d", cfg.IdleLogEvictionMs, minBackgroundWalkMs))
+	}
+	if cfg.ColdRetentionWalkMs != 0 && cfg.ColdRetentionWalkMs < minBackgroundWalkMs {
+		errs = append(errs, fmt.Sprintf("storage.cold_retention_walk_ms (%d) must be 0 (disabled) or >= %d", cfg.ColdRetentionWalkMs, minBackgroundWalkMs))
 	}
 	if cfg.RetentionCheckIntervalMs <= 0 {
 		errs = append(errs, "storage.retention_check_interval_ms must be > 0")

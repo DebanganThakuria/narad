@@ -23,6 +23,9 @@ func TestDefaultReturnsExpectedValues(t *testing.T) {
 	if cfg.Storage.IngressWALSyncIntervalMs != 10 {
 		t.Fatalf("Default() ingress WAL sync = %+v", cfg.Storage)
 	}
+	if cfg.Storage.ColdRetentionWalkMs != 300_000 {
+		t.Fatalf("Default() cold retention walk = %d ms, want 300000 (5 minutes)", cfg.Storage.ColdRetentionWalkMs)
+	}
 	if cfg.Topic.DefaultPartitions != 3 || cfg.Topic.MaxPartitions != 108 {
 		t.Fatalf("Default() topic defaults = %+v", cfg.Topic)
 	}

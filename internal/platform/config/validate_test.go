@@ -446,3 +446,26 @@ func TestValidateInsecureMultiNodeIsExplicitOptIn(t *testing.T) {
 		t.Fatalf("insecure single node: %v", err)
 	}
 }
+
+// TestValidateColdRetentionWalkFloor pins the walk's bounds: zero
+// disables it, anything below a minute is rejected (a walk that lists
+// every partition directory must not run at request cadence), and the
+// floor itself is accepted.
+func TestValidateColdRetentionWalkFloor(t *testing.T) {
+	cfg := Default()
+	cfg.Storage.ColdRetentionWalkMs = 59_999
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want rejection of a sub-minute cold retention walk")
+	}
+	if want := "storage.cold_retention_walk_ms (59999) must be 0 (disabled) or >= 60000"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("Validate() error = %q, want substring %q", err.Error(), want)
+	}
+
+	for _, ok := range []int{0, 60_000, 300_000} {
+		cfg.Storage.ColdRetentionWalkMs = ok
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() with cold_retention_walk_ms=%d error = %v, want nil", ok, err)
+		}
+	}
+}

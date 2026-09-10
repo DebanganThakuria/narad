@@ -47,6 +47,8 @@ type Metrics struct {
 	PartitionsTotal            prometheus.Gauge
 	OpenPartitionLogs          prometheus.Gauge
 	IdleLogsEvictedTotal       prometheus.Counter
+	ColdRetentionSweptTotal    prometheus.Counter
+	ReaperRestarts             prometheus.Gauge
 	DataDirSizeBytes           prometheus.Gauge
 	DataDirAvailableBytes      prometheus.Gauge
 	TopicBytes                 *prometheus.GaugeVec // topic
@@ -229,6 +231,18 @@ func New(reg prometheus.Registerer) *Metrics {
 			Namespace: Namespace,
 			Name:      "idle_logs_evicted_total",
 			Help:      "Partition logs closed by idle eviction; the next access reopens them lazily.",
+		}),
+
+		ColdRetentionSweptTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "cold_retention_swept_total",
+			Help:      "Closed partitions the cold-retention walk opened, reaped and closed again because a segment had expired.",
+		}),
+
+		ReaperRestarts: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Name:      "reaper_restarts",
+			Help:      "Times the shared retention loop was replaced because it stopped ticking. Any value above zero deserves a look at the log.",
 		}),
 
 		DataDirSizeBytes: prometheus.NewGauge(prometheus.GaugeOpts{
@@ -460,7 +474,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.BytesProducedTotal, m.BytesConsumedTotal,
 		m.ProduceRejectionsTotal,
 		m.ConsumeWaitSeconds, m.ConsumeEmptyTotal,
-		m.TopicsTotal, m.PartitionsTotal, m.OpenPartitionLogs, m.IdleLogsEvictedTotal, m.DataDirSizeBytes, m.DataDirAvailableBytes,
+		m.TopicsTotal, m.PartitionsTotal, m.OpenPartitionLogs, m.IdleLogsEvictedTotal, m.ColdRetentionSweptTotal, m.ReaperRestarts, m.DataDirSizeBytes, m.DataDirAvailableBytes,
 		m.TopicBytes, m.PartitionSizeBytes, m.Segments,
 		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
 		m.InFlightSize, m.AckedAheadSize, m.AckRejected, m.AckExtendedTotal, m.NackTotal,
