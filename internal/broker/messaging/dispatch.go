@@ -208,6 +208,23 @@ type topicDispatch struct {
 	// is registered so the pump can size consumable() without a metadata
 	// lookup on every visit.
 	scan []int
+	// holds are the notifications a peer said it would claim, oldest
+	// first, each with its deadline timer. A claim arriving retires the
+	// oldest one at once instead of letting it run out (see claimArrived).
+	holds []*claimHold
+	// gen counts releases of this topic's state. Entries are never removed
+	// from the map (an open log's wake notifier holds a pointer to one),
+	// so a release resets the state in place and bumps gen; a pump that
+	// took a waiter off the queue before the release sees the change and
+	// wakes the waiter empty instead of re-queuing it on dead state.
+	gen uint64
+}
+
+// claimHold is one notification a peer promised to claim. Its identity
+// is what the deadline callback and claimArrived agree on; the timer is
+// only ever touched under the topic's mutex.
+type claimHold struct {
+	timer *time.Timer
 }
 
 // dispatcher owns every topic's waiter set and the single pump
@@ -261,6 +278,18 @@ func (d *dispatcher) close() {
 // Entries are never removed: one empty struct per topic name this node
 // has served a long-poll consume for is cheap, and dropping them would
 // race the wake notifier holding a pointer to one.
+// peekState returns the topic's dispatch state without creating one.
+// Paths driven by peers (a claim arriving, a hold expiring, a retire
+// after a release) use it so an RPC naming a topic this node has no
+// interest in cannot grow the map: with no state there is nothing to
+// retire.
+func (d *dispatcher) peekState(topicName string) *topicDispatch {
+	d.mu.RLock()
+	st := d.topics[topicName]
+	d.mu.RUnlock()
+	return st
+}
+
 func (d *dispatcher) stateFor(topicName string) *topicDispatch {
 	d.mu.RLock()
 	st, ok := d.topics[topicName]
@@ -355,7 +384,14 @@ func (d *dispatcher) consumable(topicName string, scan []int) int {
 		if !ok {
 			continue
 		}
-		if free := log.HighWatermark() - d.engine.offsets.Next(topicName, p); free > 0 {
+		// Next is the ack frontier, so records handed out but not yet
+		// acked (in flight) and records acked ahead of a gap both sit
+		// above it and are not free. Counting them offered records that
+		// were already taken, and every such offer cost the peer a claim
+		// that came back empty and this topic a claimDeadline of silence.
+		next, inFlight, ackedAhead := d.engine.offsets.Reservable(topicName, p)
+		free := log.HighWatermark() - next - int64(inFlight+ackedAhead)
+		if free > 0 {
 			total += int(free)
 		}
 	}
@@ -390,14 +426,22 @@ func (d *dispatcher) pumpTopic(topicName string) {
 				return
 			}
 			st.outstanding++
+			// The hold exists BEFORE the notification goes out: the peer's
+			// claim can reach this node before the notify round trip has
+			// even returned, and it must find the hold it resolves.
+			h := d.addHoldLocked(topicName, st)
 			st.queue.rotate()
 			st.mu.Unlock()
 			if !e.remote.Notify(topicName, func(claiming bool) {
-				d.resolveOutstanding(topicName, claiming)
+				if !claiming {
+					// The peer passed: nothing is coming to claim, so free
+					// the record for the next peer at once.
+					d.retireHold(topicName, h)
+				}
 			}) {
 				// Nothing was spent, so take the claim back and stop.
 				// Backpressure, not a lost interest.
-				d.resolveOutstanding(topicName, false)
+				d.retireHold(topicName, h)
 				return
 			}
 			continue
@@ -405,6 +449,7 @@ func (d *dispatcher) pumpTopic(topicName string) {
 
 		w := e.waiter
 		st.queue.pop()
+		gen := st.gen
 		st.mu.Unlock()
 
 		// The reservation runs with a waiter already in hand and outside
@@ -418,7 +463,15 @@ func (d *dispatcher) pumpTopic(topicName string) {
 			// longer waiting for anything, so it does not go back on the
 			// queue. Nothing was reserved, so there is nothing to release.
 			if !w.abandoned {
-				st.queue.pushFront(queueEntry{waiter: w})
+				if st.gen == gen {
+					st.queue.pushFront(queueEntry{waiter: w})
+				} else {
+					// The topic was released (deleted) while the read ran:
+					// the queue this waiter came from was drained and its
+					// siblings woken, so wake it empty now rather than
+					// leaving it to sleep out its wait on a fresh queue.
+					close(w.ch)
+				}
 			}
 			if st.queue.len() == 0 {
 				st.hasWaiters.Store(false)
@@ -433,6 +486,14 @@ func (d *dispatcher) pumpTopic(topicName string) {
 		// queue that could conclude the record was never handed over.
 		st.mu.Lock()
 		abandoned := w.abandoned
+		if !abandoned && st.gen != gen {
+			// The topic was released (deleted) while the read ran: the
+			// record belongs to state being torn down and the consumer
+			// must not be handed it. Wake it empty and give the record
+			// back.
+			close(w.ch)
+			abandoned = true
+		}
 		if !abandoned {
 			// Buffered, and this waiter is off the queue, so exactly one
 			// delivery can ever be sent and the send cannot block.
@@ -462,40 +523,106 @@ func (d *dispatcher) pumpTopic(topicName string) {
 // healthy peer is not written off on every notification.
 const claimDeadline = time.Second
 
-// resolveOutstanding retires one in-flight notification.
+// addHoldLocked records a notification a peer is about to be sent, with
+// the deadline after which the record is offered elsewhere if no claim
+// arrived. Called with st.mu held, before the notification leaves.
 //
-// A peer that DECLINED frees its record at once, so the pump is kicked
-// to offer it to whoever is next. A peer that said it would claim keeps
-// its hold until the deadline: retiring it immediately would let the
-// pump promise the very same record to a second peer while the first is
-// still on its way to collect it.
-func (d *dispatcher) resolveOutstanding(topicName string, claiming bool) {
-	if claiming {
-		time.AfterFunc(claimDeadline, func() { d.retireOutstanding(topicName) })
-		return
-	}
-	d.retireOutstanding(topicName)
+// A peer that DECLINES frees its record at once (retireHold from the
+// notify callback), so the pump is kicked to offer it to whoever is
+// next. A peer that said it would claim keeps its hold until the claim
+// arrives (claimArrived) or the deadline fires (expireHold): retiring it
+// earlier would let the pump promise the very same record to a second
+// peer while the first is still on its way to collect it.
+func (d *dispatcher) addHoldLocked(topicName string, st *topicDispatch) *claimHold {
+	h := &claimHold{}
+	// The callback captures h, allocated before the timer exists, so it
+	// never reads a field written after AfterFunc returned.
+	h.timer = time.AfterFunc(claimDeadline, func() { d.expireHold(topicName, h) })
+	st.holds = append(st.holds, h)
+	return h
 }
 
-// retireOutstanding gives back one notification's claim on a record and
-// wakes the pump.
-//
-// The wake is the load-bearing half. Retiring frees capacity the gate
-// `consumable() <= outstanding` was withholding, and the pump only ever
-// looks at a topic it has been told about. Without the kick, a peer that
-// said it would claim and then did not (its consumer left, or it lost
-// the race for the record) leaves that record sitting there with the
-// gate now open and nobody looking: every other parked consumer, on this
-// node and on every peer, waits out its whole budget while a deliverable
-// record goes unoffered. Nothing else would wake the topic either, since
-// no produce, nack or expiry has to follow.
-func (d *dispatcher) retireOutstanding(topicName string) {
-	st := d.stateFor(topicName)
+// retireHold gives back one specific hold, if it is still held: the
+// peer declined, the notification was never spent, or the deadline
+// fired. A hold that claimArrived already retired is no longer in the
+// list and is skipped, so each hold is retired exactly once.
+func (d *dispatcher) retireHold(topicName string, h *claimHold) {
+	st := d.peekState(topicName)
+	if st == nil {
+		// Released with the topic; its holds were cancelled there.
+		return
+	}
 	st.mu.Lock()
-	if st.outstanding > 0 {
+	found := false
+	for i, held := range st.holds {
+		if held == h {
+			st.holds = append(st.holds[:i], st.holds[i+1:]...)
+			found = true
+			break
+		}
+	}
+	if found && st.outstanding > 0 {
+		// Same critical section as the removal, so a release in between
+		// cannot leave the next generation's count one below its holds.
 		st.outstanding--
 	}
 	st.mu.Unlock()
+	if found {
+		h.timer.Stop()
+		// The wake is the load-bearing half: retiring frees capacity the
+		// gate `consumable() <= outstanding` was withholding, and the
+		// pump only ever looks at a topic it has been told about.
+		d.markDirty(topicName)
+	}
+}
+
+// expireHold is the deadline path: the peer never came to claim (or its
+// claim lost the race and it re-registered), so the hold is given back.
+func (d *dispatcher) expireHold(topicName string, h *claimHold) {
+	d.retireHold(topicName, h)
+}
+
+// claimArrived retires the oldest hold the moment a peer's claim reaches
+// this node. The hold only ever existed to keep the pump from promising
+// the claimant's record to a second peer while the claim was in flight;
+// once the claim is here that record is either reserved or lost, and
+// either way the count of free records has moved on. Left to the
+// deadline, the hold gated every later record on this topic for up to
+// claimDeadline: a consumer parked on another node saw each message of
+// a sparse stream arrive a full second late, since the hold from the
+// previous message was still counted against the next one.
+//
+// Only a request flagged as a claim reaches here (the wire's Claim
+// field); a probe never does, so it cannot release a hold promised to
+// another peer. A claim for a topic with no state or no holds does
+// nothing.
+func (d *dispatcher) claimArrived(topicName string) {
+	st := d.peekState(topicName)
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	if len(st.holds) == 0 {
+		st.mu.Unlock()
+		return
+	}
+	// Oldest first: notifications and their claims travel in order, so
+	// the oldest hold is the one this claim answers. A claim that arrives
+	// after its own hold already expired retires the next peer's live
+	// hold instead; the pump may then offer that record to a third peer,
+	// which costs one empty claim and never a double delivery, since
+	// ReserveNext is atomic.
+	h := st.holds[0]
+	st.holds = st.holds[1:]
+	if st.outstanding > 0 {
+		st.outstanding--
+	}
+	timer := h.timer
+	st.mu.Unlock()
+	// Stopping may fail because the deadline is firing right now; that
+	// callback will not find the hold in the list and skips, so the
+	// single retirement here is still the only one.
+	timer.Stop()
 	d.markDirty(topicName)
 }
 
@@ -563,7 +690,13 @@ func (d *dispatcher) dequeue(topicName string, w *waiter) (waiterDelivery, bool)
 		return waiterDelivery{}, false
 	}
 	select {
-	case dl := <-w.ch:
+	case dl, ok := <-w.ch:
+		if !ok {
+			// Closed by a release (the topic was deleted): nothing was
+			// handed over, and the zero value must never be served as a
+			// record.
+			return waiterDelivery{}, false
+		}
 		return dl, true
 	default:
 		return waiterDelivery{}, false
@@ -594,6 +727,46 @@ func (d *dispatcher) releaseAll() {
 		st.hasWaiters.Store(false)
 		st.mu.Unlock()
 	}
+}
+
+// releaseTopic wakes every consumer parked on a topic that no longer
+// exists and resets the topic's dispatch state in place. Each local
+// waiter's channel is closed, which ConsumeWait reads as "the dispatcher
+// shut down under us" and turns into an empty answer, so a consumer
+// parked on a deleted topic learns at once instead of sleeping out its
+// wait. Peers' tokens are dropped from the queue and their holds
+// cancelled; the peers re-register if they still care, and find the
+// topic gone.
+//
+// The map entry itself stays: every open partition log carries a wake
+// notifier that captured a pointer to this state at open time, and a
+// same-name recreate opens its logs before the old incarnation's state
+// is retired, so removing the entry would leave those notifiers marking
+// a state nobody pumps. Resetting in place and bumping gen keeps every
+// pointer valid.
+func (d *dispatcher) releaseTopic(topicName string) {
+	st := d.peekState(topicName)
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	for {
+		e, ok := st.queue.pop()
+		if !ok {
+			break
+		}
+		if e.waiter != nil {
+			close(e.waiter.ch)
+		}
+	}
+	for _, h := range st.holds {
+		h.timer.Stop()
+	}
+	st.holds = nil
+	st.outstanding = 0
+	st.hasWaiters.Store(false)
+	st.gen++
+	st.mu.Unlock()
 }
 
 // wakeNotifier returns the callback installed on a partition log for

@@ -116,6 +116,14 @@ type ConsumeRequest struct {
 	HasOffset    bool
 	WaitNanos    int64
 	LocalOnly    bool
+	// Claim marks a local-only consume sent in answer to a token
+	// notification: the owner retires that notification's hold the
+	// moment it arrives instead of at the claim deadline. A plain probe
+	// (the re-probe fallback also sends LocalOnly) leaves it false so it
+	// never releases a hold promised to someone else. Encoded as an
+	// optional trailing field, so a request from an older peer decodes
+	// with Claim=false and keeps the deadline behaviour.
+	Claim bool
 }
 
 // AckRequest acknowledges a reserved record identified by its receipt

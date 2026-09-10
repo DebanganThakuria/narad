@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -116,11 +117,41 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 func (rt *Router) claimFrom(ctx context.Context, addr, topicName string) (nodewire.Response, bool) {
 	claimCtx, cancel := context.WithTimeout(ctx, consumeProbeTimeout)
 	defer cancel()
-	res, err := rt.peer.Consume(claimCtx, addr, nodewire.ConsumeRequest{Topic: topicName, LocalOnly: true})
+	legacy := rt.legacyOwner(addr)
+	res, err := rt.peer.Consume(claimCtx, addr, nodewire.ConsumeRequest{Topic: topicName, LocalOnly: true, Claim: !legacy})
+	if err == nil && res.Status == http.StatusBadRequest && !legacy && bytes.Contains(res.Body, []byte("trailing")) {
+		// An owner on the previous release rejects the trailing Claim
+		// byte outright. Fall back to the plain probe it understands (it
+		// reserves the record just the same, the hold merely runs to its
+		// deadline) and remember the peer for a while so the roll costs
+		// one refused claim per owner per TTL, not one per record.
+		rt.legacyClaim.Store(addr, time.Now().Add(legacyClaimTTL))
+		res, err = rt.peer.Consume(claimCtx, addr, nodewire.ConsumeRequest{Topic: topicName, LocalOnly: true})
+	}
 	if err != nil || res.Status != http.StatusOK {
 		return nodewire.Response{}, false
 	}
 	return res, true
+}
+
+// legacyClaimTTL is how long a claim keeps going out unflagged to an
+// owner that refused the flag. Long enough that a roll costs one refused
+// claim per owner per TTL, short enough that an owner upgraded mid-roll
+// is back on the fast path in minutes.
+const legacyClaimTTL = 2 * time.Minute
+
+// legacyOwner reports whether claims to addr must go out unflagged, and
+// forgets an entry whose TTL has passed so the flag is tried again.
+func (rt *Router) legacyOwner(addr string) bool {
+	v, ok := rt.legacyClaim.Load(addr)
+	if !ok {
+		return false
+	}
+	if time.Now().Before(v.(time.Time)) {
+		return true
+	}
+	rt.legacyClaim.Delete(addr)
+	return false
 }
 
 // writeConsumeMessage encodes a locally delivered message the way the

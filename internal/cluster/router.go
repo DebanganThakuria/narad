@@ -26,6 +26,16 @@ type Router struct {
 	routes        map[string]cachedRouteTable
 	consumeMu     sync.Mutex
 	consumeCursor map[string]uint64
+	// legacyClaim remembers owners (by address) that refused the Claim
+	// flag on the node consume RPC: a release before the flag existed
+	// answers 400 to any trailing byte. Claims to them go out as plain
+	// local-only probes, which they accept and which still reserve the
+	// record; they simply keep the deadline behaviour for the hold. Each
+	// entry carries an expiry (a time.Time, legacyClaimTTL ahead): once
+	// it passes the flag is tried again, so an owner upgraded mid-roll is
+	// back on the fast path within a TTL at the cost of one refused claim
+	// per owner per TTL while it is still old.
+	legacyClaim sync.Map
 
 	// consumeReprobeInterval is the first interval of the remote re-probe
 	// loop for queue-style long-poll consumes on nodes that own no

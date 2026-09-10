@@ -6,7 +6,7 @@ func EncodeConsumeRequest(req ConsumeRequest) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := opWriter(OpConsume, fieldLen(req.Topic)+4+1+8+1+8+1)
+	w := opWriter(OpConsume, fieldLen(req.Topic)+4+1+8+1+8+1+1)
 	if err := w.string(req.Topic); err != nil {
 		return nil, err
 	}
@@ -16,6 +16,13 @@ func EncodeConsumeRequest(req ConsumeRequest) ([]byte, error) {
 	w.bool(req.HasOffset)
 	w.i64(req.WaitNanos)
 	w.bool(req.LocalOnly)
+	if req.Claim {
+		// Written only when set, so an owner on an older release still
+		// decodes every probe we send it. It refuses a flagged claim with
+		// 400; the requester then falls back to a plain probe for that
+		// owner (cluster.Router.claimFrom).
+		w.bool(true)
+	}
 	return w.finish(), nil
 }
 
@@ -53,6 +60,13 @@ func DecodeConsumeRequest(payload []byte) (ConsumeRequest, error) {
 	if err != nil {
 		return ConsumeRequest{}, err
 	}
+	claim := false
+	if r.pos < len(r.payload) {
+		// Optional trailing field; absent from older peers' requests.
+		if claim, err = r.bool(); err != nil {
+			return ConsumeRequest{}, err
+		}
+	}
 	if err := r.done(); err != nil {
 		return ConsumeRequest{}, err
 	}
@@ -63,6 +77,7 @@ func DecodeConsumeRequest(payload []byte) (ConsumeRequest, error) {
 		Offset:       offset,
 		HasOffset:    hasOffset,
 		WaitNanos:    waitNanos,
+		Claim:        claim,
 		LocalOnly:    localOnly,
 	}, nil
 }

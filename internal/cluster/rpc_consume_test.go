@@ -126,3 +126,74 @@ func TestRPCServerConsumeNormalizesNegativeWait(t *testing.T) {
 		t.Fatalf("broker wait = %s, want 0 for a negative wire wait", gotWait)
 	}
 }
+
+// NoteRemoteClaim is a no-op: the embedded Broker is nil, and the
+// local-only consume under test would otherwise reach it.
+func (*consumeOnlyBroker) NoteRemoteClaim(string) {}
+
+// notingBroker records the topics NoteRemoteClaim was called for.
+type notingBroker struct {
+	consumeOnlyBroker
+	noted []string
+}
+
+func (b *notingBroker) NoteRemoteClaim(topicName string) { b.noted = append(b.noted, topicName) }
+
+// TestRPCServerLocalOnlyConsumeNotesRemoteClaim pins the hold release:
+// every local-only consume is a peer's claim, so the owner is told the
+// claim arrived whether it won the record, found nothing, or hit a
+// partition this node no longer owns; a consume that is not a claim
+// (a routed consume with a partition pinned) reports nothing.
+func TestRPCServerLocalOnlyConsumeNotesRemoteClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		found bool
+		err   error
+		notes int
+	}{
+		// Only a claim that reserved a record releases the hold; an empty
+		// claim leaves it to the deadline, the backoff for a wrong
+		// free-record estimate.
+		{name: "won", found: true, notes: 1},
+		{name: "empty", notes: 0},
+		{name: "not-owner", err: brokermsg.ErrNotPartitionOwner, notes: 0},
+	} {
+		br := &notingBroker{consumeOnlyBroker: consumeOnlyBroker{consumeFn: func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+			return topic.Message{Topic: "orders", ReceiptHandle: "h"}, tc.found, tc.err
+		}}}
+		s := &RPCServer{broker: br}
+		s.handleConsume(context.Background(), requestKey{}, encodeConsumeReq(t, nodewire.ConsumeRequest{Topic: "orders", LocalOnly: true, Claim: true}))
+		if len(br.noted) != tc.notes {
+			t.Fatalf("%s: NoteRemoteClaim calls = %v, want %d", tc.name, br.noted, tc.notes)
+		}
+	}
+	// The flag is honoured only on a non-blocking local-only consume.
+	blocking := &notingBroker{consumeOnlyBroker: consumeOnlyBroker{consumeFn: func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+		return topic.Message{Topic: "orders", ReceiptHandle: "h"}, true, nil
+	}}}
+	bs := &RPCServer{broker: blocking}
+	bs.handleConsume(context.Background(), requestKey{}, encodeConsumeReq(t, nodewire.ConsumeRequest{Topic: "orders", Claim: true, WaitNanos: int64(time.Second)}))
+	if len(blocking.noted) != 0 {
+		t.Fatalf("a blocking consume with the claim flag reported a claim: %v", blocking.noted)
+	}
+
+	// A plain local-only probe (the re-probe fallback) is not a claim and
+	// must not release a hold promised to another peer.
+	probe := &notingBroker{consumeOnlyBroker: consumeOnlyBroker{consumeFn: func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+		return topic.Message{}, false, nil
+	}}}
+	ps := &RPCServer{broker: probe}
+	ps.handleConsume(context.Background(), requestKey{}, encodeConsumeReq(t, nodewire.ConsumeRequest{Topic: "orders", LocalOnly: true}))
+	if len(probe.noted) != 0 {
+		t.Fatalf("a local-only probe without the claim flag reported a claim: %v", probe.noted)
+	}
+
+	br := &notingBroker{consumeOnlyBroker: consumeOnlyBroker{consumeFn: func(context.Context, string, brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+		return topic.Message{Topic: "orders", ReceiptHandle: "h"}, true, nil
+	}}}
+	s := &RPCServer{broker: br}
+	s.handleConsume(context.Background(), requestKey{}, encodeConsumeReq(t, nodewire.ConsumeRequest{Topic: "orders", HasPartition: true, Partition: 0}))
+	if len(br.noted) != 0 {
+		t.Fatalf("a consume that is not local-only reported a claim: %v", br.noted)
+	}
+}

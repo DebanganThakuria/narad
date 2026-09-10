@@ -73,7 +73,8 @@ var decoders = []decoder{
 			v, err := DecodeConsumeRequest(b)
 			return v, len(v.Topic), err
 		},
-		encode: func(v any) ([]byte, error) { return EncodeConsumeRequest(v.(ConsumeRequest)) },
+		encode:       func(v any) ([]byte, error) { return EncodeConsumeRequest(v.(ConsumeRequest)) },
+		optionalTail: true, // the Claim flag is a trailing optional byte
 	},
 	{
 		name: "Ack",
@@ -314,6 +315,7 @@ func seedPayloads(t testing.TB) [][]byte {
 		must(EncodeCommitProduceBatchRequest(CommitProduceBatchRequest{})),
 		must(EncodeConsumeRequest(ConsumeRequest{Topic: "orders", Partition: 2, HasPartition: true, Offset: 10, HasOffset: true, WaitNanos: 5e9})),
 		must(EncodeConsumeRequest(ConsumeRequest{Topic: "orders", LocalOnly: true})),
+		must(EncodeConsumeRequest(ConsumeRequest{Topic: "orders", LocalOnly: true, Claim: true})),
 		must(EncodeAckRequest(AckRequest{Topic: "orders", Partition: 1, Offset: 7, Nonce: 99})),
 		must(EncodeExtendAckRequest(AckRequest{Topic: "orders", Partition: 1, Offset: 7, Nonce: 99})),
 		must(EncodeNackRequest(AckRequest{Topic: "orders", Partition: 1, Offset: 7, Nonce: 99})),

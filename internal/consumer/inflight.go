@@ -136,6 +136,24 @@ func (f *InFlight) Next(topic string, partition int) int64 {
 // leads the persisted consumer.offset by up to one commit flush, so a
 // handoff that reports the persisted value would make the new owner
 // redeliver the last few acked messages.
+// Reservable reports, in one lock acquisition, the next offset above the
+// committed frontier together with how many offsets above it are
+// already taken: reserved (in flight) or acked ahead of a gap. The
+// dispatcher's pump gates remote notifications on it, so it must not
+// cost the two shard lookups Next plus Snapshot would.
+func (f *InFlight) Reservable(topic string, partition int) (next int64, inFlight, ackedAhead int) {
+	sh := f.shard(topic, partition)
+	if sh == nil {
+		return 0, 0, 0
+	}
+	sh.mu.Lock()
+	next = sh.committed + 1
+	inFlight = len(sh.entries)
+	ackedAhead = len(sh.ackedAhead)
+	sh.mu.Unlock()
+	return next, inFlight, ackedAhead
+}
+
 func (f *InFlight) CommittedOffset(topic string, partition int) (int64, bool) {
 	sh := f.shard(topic, partition)
 	if sh == nil {

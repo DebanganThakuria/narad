@@ -1120,3 +1120,5 @@ func (f *fakeBroker) RegisterRemoteDemand(context.Context, string, brokermsg.Rem
 }
 
 func (f *fakeBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}
+
+func (*fakeBroker) NoteRemoteClaim(string) {}
