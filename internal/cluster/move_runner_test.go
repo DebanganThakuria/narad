@@ -494,7 +494,14 @@ func TestMoveRunnerRearmsFreezeAcrossTTLAndFencesFlip(t *testing.T) {
 		_, active := freeze.activeToken()
 		activeAtFlip.Store(active)
 	}
-	const ttl = 120 * time.Millisecond
+	// The freeze here is judged on the wall clock (fakeFreeze and the
+	// runner's re-arm ticker both are), so the intervals have to dwarf
+	// scheduler jitter or the test measures the machine's load instead of
+	// the runner. At 120ms with a 30ms re-arm, one delayed tick under the
+	// full suite lapsed the freeze and failed the assertion below at
+	// random. The production ratio (re-arm every TTL/4) is kept; only the
+	// absolute scale is raised so a 30-50ms stall is noise, not a lapse.
+	const ttl = time.Second
 	peer := movePeerFake{
 		dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true},
 		freeze:     freeze,

@@ -10,6 +10,7 @@ package messaging
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -291,10 +292,35 @@ func TestPartitionTransferInfoCarriesFanoutCursorSidecars(t *testing.T) {
 // it extends the freeze, and once the freeze lapsed (TTL passed with no
 // re-arm) the token is refused forever, so a slow cutover can never flip
 // over commits the source accepted after its freeze silently expired.
+// fakeClock is the Engine clock under test control. Goroutine-safe
+// because isProducePaused reads it from the commit path.
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	c.mu.Unlock()
+}
+
+// The freeze TTL is judged on an injected clock, so a lapse happens when
+// this test advances the clock past it, never because a 20ms sleep on a
+// loaded machine took 60ms. That is exactly what made this test fail at
+// random under the full suite: the re-arm loop raced the wall clock.
 func TestConfirmHandoffRefusesLapsedFreeze(t *testing.T) {
 	ms := newMessagingFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	e := newTestEngine(t, ms, nil, nil)
+	clock := &fakeClock{now: time.Now()}
+	e.now = clock.Now
 	ctx := context.Background()
 	rec := func() []ingress.ProduceRecord {
 		return []ingress.ProduceRecord{{Topic: "orders", TargetPartition: 0, Key: "k", Payload: []byte("x")}}
@@ -314,7 +340,7 @@ func TestConfirmHandoffRefusesLapsedFreeze(t *testing.T) {
 	}
 	// Re-arming with the token keeps the freeze alive across its TTL.
 	for range 4 {
-		time.Sleep(20 * time.Millisecond)
+		clock.advance(20 * time.Millisecond)
 		if _, err := e.ConfirmHandoff(ctx, "orders", 0, 40*time.Millisecond, token); err != nil {
 			t.Fatalf("ConfirmHandoff while re-arming: %v", err)
 		}
@@ -332,7 +358,7 @@ func TestConfirmHandoffRefusesLapsedFreeze(t *testing.T) {
 	// Let the freeze lapse: the source resumes commits (AP), and the old
 	// token is dead. A fenced flip on it must be refused; a fresh
 	// PrepareHandoff mints a new token instead.
-	time.Sleep(60 * time.Millisecond)
+	clock.advance(60 * time.Millisecond)
 	if _, err := e.CommitAcceptedProduceBatch(ctx, rec()); err != nil {
 		t.Fatalf("commit after the freeze lapsed: %v (the TTL must auto-resume)", err)
 	}
