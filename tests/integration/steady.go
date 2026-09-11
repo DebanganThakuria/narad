@@ -400,7 +400,7 @@ drain:
 		return fmt.Errorf("correctness violation: %w", v.(error))
 	}
 	if len(never) > 0 {
-		return fmt.Errorf("LOSS: %d messages produced (202) but never delivered within the %s drain window", len(never), cfg.drainTimeout)
+		return fmt.Errorf("UNDELIVERED: %d messages produced (202) were not delivered within the %s drain window: a backlog the consumers did not drain, or a loss; compare with narad_consumer_lag_messages on the brokers", len(never), cfg.drainTimeout)
 	}
 	if len(unacked) > 0 {
 		// Delivered, our ack errored, and it never came back: after a
