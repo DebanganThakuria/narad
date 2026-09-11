@@ -27,6 +27,7 @@ flowchart LR
 Narad is explicit about this where other brokers are shy: **there is no delivery-order guarantee.** In steady state, keyed messages stick to one partition and tend to arrive in produce order, but three deliberate mechanisms reorder, and your design must assume them:
 
 - **Redelivery**: a crashed or slow consumer's message reappears after newer ones were consumed.
+- **Broker restart**: acks are persisted in batches (every 100ms by default), including acks that landed out of order, so a crash can redeliver the messages acked in the last batch. A graceful restart redelivers nothing that was acked.
 - **Dead-owner skip**: while a node is marked dead, keyed produces walk forward to a live partition: the key-to-partition mapping itself moves.
 - **Dispatch reroute**: accepted messages destined for an unreachable owner are committed to a live sibling partition rather than delayed indefinitely.
 

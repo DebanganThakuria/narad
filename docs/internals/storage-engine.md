@@ -11,7 +11,8 @@ topics/orders/
     ├── 00000000000000000000.log     ← sealed segment (starts at offset 0)
     ├── 00000000000000450832.log     ← active segment (starts at offset 450832)
     ├── hwm                          ← 8-byte high-watermark
-    └── consumer.offset              ← 8-byte committed consumer frontier
+    ├── consumer.offset              ← 8-byte committed consumer frontier
+    └── consumer.ahead               ← offsets acked out of order above it (two checksummed 4 KiB slots)
 topics/orders.stale-3f9a1c0e7b2d4a61/   ← quarantined: a deleted incarnation's leftover
 ```
 

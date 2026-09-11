@@ -109,17 +109,17 @@ The token path applies on a node that owns at least one partition of the topic, 
 ```mermaid
 flowchart LR
     CRASH[owner crashes] --> BOOT[restart]
-    BOOT --> LAZY["first consume touches partition:<br/>read consumer.offset from disk"]
-    LAZY --> SEED["shard seeded: committed = file value,<br/>no leases"]
-    SEED --> REDELIVER["everything above frontier<br/>redelivers naturally"]
+    BOOT --> LAZY["first consume touches partition:<br/>read consumer.offset and consumer.ahead from disk"]
+    LAZY --> SEED["shard seeded: committed = file value,<br/>acked-ahead set restored, no leases"]
+    SEED --> REDELIVER["everything above the frontier that was<br/>not acked ahead redelivers naturally"]
 ```
 
-The frontier file lags acks by up to ~100ms, so a crash can redeliver a few just-acked messages: duplicates, per contract. The file is read **lazily at first touch, from disk** rather than from a boot-time metastore scan: disk is ground truth for what this node settled, and it stays correct even while the node's metastore replica is still catching up.
+Both files lag acks by up to one flush (~100ms), so a crash can redeliver the messages acked in that window: duplicates, per contract. A graceful shutdown flushes everything, so a rolling restart redelivers nothing that was acked. Both files are read **lazily at first touch, from disk** rather than from a boot-time metastore scan: disk is ground truth for what this node settled, and it stays correct even while the node's metastore replica is still catching up.
 ## The numbers
 
 | Constant | Value | Meaning |
 |---|---|---|
-| Offset commit cadence | 100ms | `defaultConsumerOffsetCommitInterval`: the frontier file lags acks by at most this |
+| Offset commit cadence | 100ms | `storage.flush_interval_ms`: the frontier and acked-ahead files lag acks by at most this; each is rewritten only when it changed |
 | Expiry purger cadence | 1s | background sweep releasing expired leases (plus purge-on-touch) |
 | Receipt handle | `partition:offset:nonce` | the nonce is a per-shard atomic counter, so handles never collide across re-reservations |
 | In-flight / acked-ahead caps | per topic, default 1024 each | hit the first → consume returns 204; hit the second → consume hands out only the frontier hole (204 otherwise) until the gap closes. Acks for messages already handed out are always accepted, so the set is bounded by the sum of the two caps |
@@ -129,7 +129,7 @@ The frontier file lags acks by up to ~100ms, so a crash can redeliver a few just
 | State | Lives | Survives a crash? | Consequence |
 |---|---|---|---|
 | Reservations + nonces | shard memory | no | leases evaporate → messages redeliver. The whole crash story |
-| Acked-ahead set | shard memory | no | out-of-order acks above the frontier replay as duplicates |
+| Acked-ahead set | shard memory + `consumer.ahead` file (two 4 KiB slots overwritten alternately in place, checksummed, fdatasynced) | yes | at most ~100ms of out-of-order acks redeliver; a set too large for a slot keeps its lowest offsets and the tail redelivers |
 | Committed frontier | `consumer.offset` file (8 bytes overwritten in place, fdatasynced) | yes | at most ~100ms of just-acked messages redeliver |
 | Corrupt-skip set | shard memory + metrics | no* | *the skip is re-derived on re-read; the counter is the audit trail |
 

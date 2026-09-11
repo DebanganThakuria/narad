@@ -108,6 +108,9 @@ type MoveSession struct {
 	// fresh as the source's cursors got) and by a force-promote, which
 	// has nothing newer.
 	lastSidecars []storage.SidecarFile
+	// lastAhead is the acked-ahead set the source reported with its
+	// last listing; written into the staged copy next to the frontier.
+	lastAhead []int64
 
 	// keepFrozen, when set, is called every keepFrozenEvery during
 	// Finalize to re-arm the source's handoff freeze (whose TTL is
@@ -148,6 +151,7 @@ func (s *MoveSession) pass(ctx context.Context) (int64, messaging.PartitionTrans
 	// force-promote after the source dies reproduces exactly this HWM.
 	s.lastHWM, s.lastCommitted, s.hasCommitted, s.sawInfo = info.HighWatermark, info.CommittedOffset, info.HasCommitted, true
 	s.lastSidecars = info.Sidecars
+	s.lastAhead = info.AckedAhead
 	s.lastIncarnation = info.IncarnationID
 	var newBytes int64
 	for _, seg := range info.Segments {
@@ -354,7 +358,7 @@ func (s *MoveSession) Finalize(ctx context.Context) (CopyResult, error) {
 	if lerr := lapsed(); lerr != nil {
 		return CopyResult{}, lerr
 	}
-	return s.finalizeStaged(last.HighWatermark, last.CommittedOffset, last.HasCommitted, last.Sidecars)
+	return s.finalizeStaged(last.HighWatermark, last.CommittedOffset, last.HasCommitted, last.AckedAhead, last.Sidecars)
 }
 
 // ForcePromote completes a move WITHOUT the source: it promotes whatever the
@@ -380,7 +384,7 @@ func (s *MoveSession) ForcePromote() (CopyResult, error) {
 	if !s.sawInfo {
 		return CopyResult{}, fmt.Errorf("force-promote refused: source was never reached")
 	}
-	return s.finalizeStaged(s.lastHWM, s.lastCommitted, s.hasCommitted, s.lastSidecars)
+	return s.finalizeStaged(s.lastHWM, s.lastCommitted, s.hasCommitted, s.lastAhead, s.lastSidecars)
 }
 
 // finalizeStaged writes the target HWM + committed offset onto the staged
@@ -388,7 +392,7 @@ func (s *MoveSession) ForcePromote() (CopyResult, error) {
 // result. Shared by Finalize (frozen live source) and ForcePromote (dead
 // source). The verify is the data-safety gate: it fails if the staged copy
 // does not reach hwm.
-func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool, sidecars []storage.SidecarFile) (CopyResult, error) {
+func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool, ackedAhead []int64, sidecars []storage.SidecarFile) (CopyResult, error) {
 	// An idle source has no segments, so no pass created the staging
 	// directory; the copy is still a valid (empty) partition.
 	if err := os.MkdirAll(s.stagingDir, 0o755); err != nil {
@@ -400,6 +404,11 @@ func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool, si
 	if hasCommitted {
 		if err := storage.WriteConsumerOffset(s.stagingDir, committed); err != nil {
 			return CopyResult{}, fmt.Errorf("write consumer offset: %w", err)
+		}
+		if len(ackedAhead) > 0 {
+			if err := storage.WriteConsumerAhead(s.stagingDir, 0, uint64(time.Now().UnixNano()), committed, ackedAhead); err != nil {
+				return CopyResult{}, fmt.Errorf("write consumer ahead: %w", err)
+			}
 		}
 	}
 	// The fan-out cursors travel with the partition. Last, so they are as

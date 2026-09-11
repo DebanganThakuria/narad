@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -23,6 +24,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/security"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/health"
 )
 
 func buildMetrics() (*prometheus.Registry, *metrics.Metrics) {
@@ -76,6 +78,19 @@ func buildBroker(
 		}
 		return committed, ok
 	})
+	// The acked-ahead set recovers from the same directory; a damaged
+	// or missing file only means those acks redeliver once.
+	offsets.SetAheadRecovery(func(topicName string, partition int) (int64, []int64, bool) {
+		dir := storage.TopicPartitionDir(cfg.Storage.DataDir, topicName, partition)
+		rec, ok, err := storage.ReadConsumerAhead(dir)
+		if err != nil {
+			log.Error("consumer acked-ahead recovery failed; acked-ahead messages will redeliver", "topic", topicName, "partition", partition, "err", err)
+			return 0, nil, false
+		}
+		return rec.Committed, rec.Offsets, ok
+	})
+	offsetCommitter.SetAheadSource(offsets.AheadSnapshot)
+	offsets.SetDropNotifier(offsetCommitter.Forget)
 	logs := runtime.NewLogs(cfg.Storage.DataDir, storageOpts, ms, m)
 	lifecycle := runtime.NewLifecycle(logs, offsetCommitter.Close)
 
@@ -158,6 +173,17 @@ func capsResolver(ms metastore.Metastore, defaults config.TopicConfig) consumer.
 		}
 		return caps, nil
 	}
+}
+
+// healthHandler serves /healthz and /readyz off the API listener (on
+// the metrics port) with the same handlers and inputs the API router
+// uses, so both listeners answer the same thing.
+func healthHandler(ctx context.Context, br broker.Broker, logs *runtime.Logs, ms *metastore.Store, log *slog.Logger) http.Handler {
+	set := handlers.New(handlers.Deps{Broker: br, Logs: logs, Metastore: ms, Logger: log, ShutdownCtx: ctx})
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", health.Healthz(set))
+	mux.HandleFunc("GET /readyz", health.Readyz(set))
+	return mux
 }
 
 func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, logs *runtime.Logs, ms *metastore.Store, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, auth *security.Authenticator, log *slog.Logger) *httpserver.Server {

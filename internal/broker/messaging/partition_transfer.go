@@ -29,6 +29,11 @@ type PartitionTransferInfo struct {
 	HighWatermark   int64                 `json:"high_watermark"`
 	CommittedOffset int64                 `json:"committed_offset"`
 	HasCommitted    bool                  `json:"has_committed"`
+	// AckedAhead are the offsets acked out of order above
+	// CommittedOffset, from the source's live shard, so the new owner
+	// does not redeliver them. An older source omits it and an older
+	// destination ignores it: duplicates on that move, never loss.
+	AckedAhead []int64 `json:"acked_ahead,omitempty"`
 	// Sidecars are the fan-out cursor files living in the partition
 	// directory (fanout-<child>.offset), verbatim. They must move with
 	// the partition: the cursor runs on the parent partition's owner,
@@ -214,9 +219,29 @@ func (e *Engine) transferInfoAt(dir, topicName string, partition int, hwm int64)
 	// in-memory frontier by up to one flush; the copy must carry the
 	// frontier the consumers actually reached, or the new owner
 	// redelivers the last acked messages.
+	// The acked-ahead set comes from the live shard when this node has
+	// one, and from consumer.ahead on disk otherwise (a restarted owner
+	// nobody consumed from yet): either way the copy carries every ack.
+	var ackedAhead []int64
+	live := false
 	if e.offsets != nil {
-		if mem, ok := e.offsets.CommittedOffset(topicName, partition); ok && (!hasCommitted || mem > committed) {
-			committed, hasCommitted = mem, true
+		if mem, offsets, _, ok := e.offsets.AheadSnapshot(topicName, partition); ok {
+			if !hasCommitted || mem > committed {
+				committed, hasCommitted = mem, true
+			}
+			ackedAhead, live = offsets, true
+		}
+	}
+	if !live {
+		rec, ok, err := storage.ReadConsumerAhead(dir)
+		if err != nil {
+			return PartitionTransferInfo{}, err
+		}
+		if ok {
+			if !hasCommitted || rec.Committed > committed {
+				committed, hasCommitted = rec.Committed, true
+			}
+			ackedAhead = rec.Offsets
 		}
 	}
 	sidecars, err := storage.ListFanoutCursorFiles(dir)
@@ -228,6 +253,7 @@ func (e *Engine) transferInfoAt(dir, topicName string, partition int, hwm int64)
 		HighWatermark:   hwm,
 		CommittedOffset: committed,
 		HasCommitted:    hasCommitted,
+		AckedAhead:      ackedAhead,
 		Sidecars:        sidecars,
 	}
 	if marker, ok, err := ReadMoveMarker(dir); err != nil {
