@@ -22,3 +22,6 @@ site/
 # one case 91M of rebuilt binary.
 ops/*
 !ops/monitoring/
+
+# test driver binary built at the repo root by mistake once (#185); never track it
+/integration

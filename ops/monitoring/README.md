@@ -94,3 +94,23 @@ Stop local processes:
 make local-soak-stop
 make local-monitoring-stop
 ```
+
+## Devstack dashboard (Narad Stage)
+
+`grafana/dashboards/narad-stage-dashboard.json` is the source of the org Grafana
+dashboard `narad-stage`. The devstack pods are scraped every 60s through pod
+annotations, and the datasource does not declare that interval, so
+`$__rate_interval` would be sized for 15s scrapes and a 60s burst would be
+averaged away. The dashboard therefore uses an explicit `$window` rate window
+(default 2m, two scrapes), a 1m minimum step, and a row of run totals and peak
+rates (`Produced in range`, `Acked in range`, `Peak produce/s`, `Peak ack/s`)
+that are independent of the window. `fix-stage-dashboard.py` applies the same
+treatment to a dashboard exported from Grafana.
+
+To upload a change, wrap it and POST it with a Grafana session:
+
+```bash
+python3 ops/monitoring/wrap-dashboard.py ops/monitoring/grafana/dashboards/narad-stage-dashboard.json /tmp/narad-stage-payload.json
+curl -s -H "Cookie: grafana_session=<session>" -H "Content-Type: application/json" \
+  -X POST https://grafana.np.razorpay.in/api/dashboards/db --data-binary @/tmp/narad-stage-payload.json
+```
