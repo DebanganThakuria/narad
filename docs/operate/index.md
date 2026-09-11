@@ -104,6 +104,42 @@ Two of those deserve a second look:
 - **`initialClusterSize`** is the set of pods allowed to *bootstrap* a brand-new Raft cluster (`narad-0/1/2` at 3). Every pod beyond it joins the existing cluster instead. It is consulted only on an empty disk; set it once and forget it exists. Changing it later does nothing good and possibly something educational.
 - **`narad.config.storage.codec: zstd`**: on-disk compression is **off by default**. We run zstd/fastest: ~40% smaller at low rate, up to ~95% smaller under real load for JSON-ish payloads, for near-zero CPU. Turn it on unless your payloads are already compressed.
 
+## Recovering after a node outage
+
+A node coming back is not the end of the recovery. For a while after it,
+some partitions deliver in bursts with quiet gaps between them, and the
+quiet gaps are as long as the topic's **visibility timeout** (30s by
+default). Consumers see `204` during them and the consumer lag gauge
+stops falling, which looks exactly like a stuck broker and is not one.
+
+What is happening: an outage strands leases. A consumer that was holding
+a message when its node died never acks it, so the committed frontier
+for that partition stays where it is. Meanwhile the messages above it
+were consumed and acked out of order, so there is genuinely nothing left
+to hand out. The partition serves nothing until the stranded lease hits
+the visibility timeout, at which point the message is redelivered,
+acked, and the frontier collapses over the whole acked run at once: the
+burst you then see is the backlog becoming reservable in one step.
+
+Nothing is lost and no operator action helps it along. Two things follow
+for running it:
+
+- **Size a drain window against the visibility timeout, not the
+  throughput.** A consumer fleet draining a backlog after an outage
+  needs more than `visibility_timeout` of patience before "it stopped
+  moving" means anything. Our own load driver called a 90-second drain
+  short for a 30-second timeout and reported messages undelivered that
+  were sitting on disk, free, and consumable a minute later.
+- **A shorter visibility timeout shortens the gaps**, one for one: it is
+  the time a dead consumer keeps a message to itself. Set it per topic
+  (`visibility_timeout_ms`) to what your slowest legitimate handler
+  needs and no more. In a local three-node reproduction, dropping it
+  from 30s to 3s removed the quiet windows entirely.
+
+This is inherent to a single committed frontier per partition and is not
+new in any release; it is documented here because it is easy to read as
+an outage that has not finished.
+
 ## Rate limiting: bring your own
 
 Narad has request-size caps (1 MiB bodies, 64 KiB headers), a per-node connection cap (`NARAD_HTTP_MAX_CONNECTIONS`, 4096), and a per-user cap on concurrent consumes (`NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY`, 1024, answered `429` beyond it), but **no built-in request rate limiting**: a hostile or buggy client can send requests as fast as you'll accept them. Put a rate limiter at your ingress (every ingress controller has one), same place your TLS terminates. Narad's job is not losing messages; your ingress's job is deciding who gets to send them.

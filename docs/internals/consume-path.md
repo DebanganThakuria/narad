@@ -115,6 +115,23 @@ flowchart LR
 ```
 
 Both files lag acks by up to one flush (~100ms), so a crash can redeliver the messages acked in that window: duplicates, per contract. A graceful shutdown flushes everything, so a rolling restart redelivers nothing that was acked. Both files are read **lazily at first touch, from disk** rather than from a boot-time metastore scan: disk is ground truth for what this node settled, and it stays correct even while the node's metastore replica is still catching up.
+## After an outage: why a partition can go quiet
+
+The frontier is one watermark per partition, so the lowest unacked
+offset decides when anything above it can be reclaimed. An outage
+strands leases, and a stranded lease sits exactly there: the consumer
+that took it is gone, the offsets above it were acked out of order into
+the acked-ahead set, and `ReserveNext` correctly reports
+`all_reserved` because every offset in the window is either in flight or
+resolved. The partition serves nothing until the lease lapses, then
+serves the whole run at once.
+
+The quiet window is one visibility timeout, and consumers see `204`
+through it. It is arithmetic, not a stall: shrinking the visibility
+timeout shrinks it one for one. `tests/cluster/crash_drain_test.go`
+pins the property that matters underneath it, which is that nothing is
+lost while this happens.
+
 ## The numbers
 
 | Constant | Value | Meaning |
