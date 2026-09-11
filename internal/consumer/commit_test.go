@@ -111,14 +111,14 @@ func TestOnCommitCalledWhenFrontierAdvances(t *testing.T) {
 	nonces := reserveN(t, f, 3)
 
 	mustCommit(t, f, 0, nonces[0]) // frontier → 0; onCommit(0)
-	mustCommit(t, f, 2, nonces[2]) // out-of-order; no onCommit
+	mustCommit(t, f, 2, nonces[2]) // out-of-order: frontier stays 0, but the acked-ahead set changed and is persisted with it; onCommit(0) marks the partition dirty
 	mustCommit(t, f, 1, nonces[1]) // frontier → 1 then walks to 2; onCommit(2)
 
-	if len(called) != 2 {
-		t.Fatalf("onCommit called %d times, want 2; values=%v", len(called), called)
+	if len(called) != 3 {
+		t.Fatalf("onCommit called %d times, want 3; values=%v", len(called), called)
 	}
-	if called[0] != 0 || called[1] != 2 {
-		t.Fatalf("onCommit values: got %v, want [0 2]", called)
+	if called[0] != 0 || called[1] != 0 || called[2] != 2 {
+		t.Fatalf("onCommit values: got %v, want [0 0 2]", called)
 	}
 }
 
@@ -158,7 +158,10 @@ func TestCommitHandleRejectsWrongNonce(t *testing.T) {
 	wantErr(t, f.CommitHandle(testTopic, testPart, r.Offset, r.Nonce+1), ErrHandleStale)
 }
 
-func TestCommitHandleAdvancesThroughAckedAheadAndCallsOnCommitOnce(t *testing.T) {
+// Out-of-order acks report the unchanged frontier (the acked-ahead set
+// is persisted alongside it, so the partition is dirty); the final
+// in-order ack reports the collapsed frontier.
+func TestCommitHandleAdvancesThroughAckedAheadAndReportsEachChange(t *testing.T) {
 	t.Parallel()
 
 	var commits []int64
@@ -173,8 +176,8 @@ func TestCommitHandleAdvancesThroughAckedAheadAndCallsOnCommitOnce(t *testing.T)
 	mustCommit(t, f, 0, nonces[0])
 
 	wantCommitted(t, f, 2)
-	if len(commits) != 1 || commits[0] != 2 {
-		t.Fatalf("onCommit offsets = %v, want [2]", commits)
+	if len(commits) != 3 || commits[0] != -1 || commits[1] != -1 || commits[2] != 2 {
+		t.Fatalf("onCommit offsets = %v, want [-1 -1 2]", commits)
 	}
 }
 
@@ -196,18 +199,22 @@ func TestCommitHandleOutOfOrderDeletesEntryAndParksAckedAhead(t *testing.T) {
 	wantSnapshot(t, f, testTopic, testPart, 2, 1)
 }
 
-func TestCommitHandleDoesNotCallOnCommitForOutOfOrderAck(t *testing.T) {
+// An out-of-order ack reports the unchanged frontier once (the
+// acked-ahead set changed and is persisted with it), never an advance.
+func TestCommitHandleOutOfOrderAckReportsNoAdvance(t *testing.T) {
 	t.Parallel()
 	var called atomic.Int64
-	f := NewInFlight(fixedCaps(10, 10), func(string, int, int64) {
+	var last atomic.Int64
+	f := NewInFlight(fixedCaps(10, 10), func(_ string, _ int, off int64) {
 		called.Add(1)
+		last.Store(off)
 	})
 	withClock(f, 1000)
 
 	nonces := reserveN(t, f, 3)
 	mustCommit(t, f, 2, nonces[2])
-	if got := called.Load(); got != 0 {
-		t.Fatalf("onCommit calls = %d, want 0", got)
+	if got := called.Load(); got != 1 || last.Load() != -1 {
+		t.Fatalf("onCommit calls = %d (last %d), want 1 with the unchanged frontier -1", got, last.Load())
 	}
 }
 
@@ -507,15 +514,17 @@ func TestCommitHandleOutOfOrderLeavesLowerOffsetsReservableAfterExpiry(t *testin
 func TestCommitHandleOutOfOrderThenHeadAdvancesOnce(t *testing.T) {
 	t.Parallel()
 	var commits []int64
-	f := NewInFlight(fixedCaps(10, 10), func(string, int, int64) {
-		commits = append(commits, 0)
+	f := NewInFlight(fixedCaps(10, 10), func(_ string, _ int, off int64) {
+		commits = append(commits, off)
 	})
 	withClock(f, 1000)
 	nonces := reserveN(t, f, 2)
 	mustCommit(t, f, 1, nonces[1])
 	mustCommit(t, f, 0, nonces[0])
-	if len(commits) != 1 {
-		t.Fatalf("onCommit calls = %d, want 1", len(commits))
+	// The out-of-order ack reports -1 (dirty, no advance); the head ack
+	// reports the single advance to 1.
+	if len(commits) != 2 || commits[0] != -1 || commits[1] != 1 {
+		t.Fatalf("onCommit offsets = %v, want [-1 1]", commits)
 	}
 }
 
@@ -606,17 +615,22 @@ func TestCommitHandleCanAdvanceFromSeededPartitionAfterRefresh(t *testing.T) {
 	wantCommitted(t, f, 2)
 }
 
-func TestCommitHandleOutOfOrderDoesNotCallOnCommit(t *testing.T) {
+// An out-of-order ack does not move the frontier but does change the
+// acked-ahead set, which is persisted with it: onCommit fires once with
+// the unchanged frontier so the committer flushes the partition.
+func TestCommitHandleOutOfOrderReportsUnchangedFrontier(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int64
-	f := NewInFlight(fixedCaps(10, 10), func(string, int, int64) {
+	var last atomic.Int64
+	f := NewInFlight(fixedCaps(10, 10), func(_ string, _ int, off int64) {
 		calls.Add(1)
+		last.Store(off)
 	})
 	withClock(f, 1000)
 	nonces := reserveN(t, f, 2)
 	mustCommit(t, f, 1, nonces[1])
-	if got := calls.Load(); got != 0 {
-		t.Fatalf("onCommit calls = %d, want 0", got)
+	if got := calls.Load(); got != 1 || last.Load() != -1 {
+		t.Fatalf("onCommit calls = %d (last %d), want 1 call with the unchanged frontier -1", got, last.Load())
 	}
 }
 
@@ -630,8 +644,8 @@ func TestCommitHandleHeadAfterOutOfOrderCallsOnCommit(t *testing.T) {
 	nonces := reserveN(t, f, 2)
 	mustCommit(t, f, 1, nonces[1])
 	mustCommit(t, f, 0, nonces[0])
-	if len(commits) != 1 {
-		t.Fatalf("onCommit calls = %d, want 1", len(commits))
+	if len(commits) != 2 {
+		t.Fatalf("onCommit calls = %d, want 2 (the out-of-order ack, then the head ack)", len(commits))
 	}
 }
 

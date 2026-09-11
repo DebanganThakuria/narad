@@ -161,6 +161,7 @@ func (f *InFlight) SkipMissingBelow(topic string, partition int, offset, nonce, 
 	for off := range sh.ackedAhead {
 		if off < oldest {
 			delete(sh.ackedAhead, off)
+			sh.aheadVersion++
 		}
 	}
 	for off := range sh.corrupt {
@@ -257,8 +258,21 @@ func (f *InFlight) resolveReserved(topic string, partition int, offset, nonce in
 	}
 
 	aheadOf(sh)[offset] = struct{}{}
+	// Only the acked-ahead set is persisted; a corrupt skip resolves into
+	// the other set and must not cost a flush.
+	_, persisted := sh.ackedAhead[offset]
+	if persisted {
+		sh.aheadVersion++
+	}
 	delete(sh.entries, offset)
+	committed := sh.committed
 	sh.mu.Unlock()
+	// The frontier did not move, but the acked-ahead set did, and it is
+	// persisted alongside the frontier: tell the committer the partition
+	// is dirty so the next flush carries the new entry.
+	if persisted && f.onCommit != nil {
+		f.onCommit(topic, partition, committed)
+	}
 	if purged || wasAtCap {
 		f.notifyRelease(topic, partition)
 	}
