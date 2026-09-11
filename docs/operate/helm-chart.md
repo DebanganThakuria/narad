@@ -100,7 +100,7 @@ Neither ever touches two places, by hard-won design: the **StatefulSet selector*
 
 ### The Traefik route and the `/metrics` hole
 
-`/metrics` is deliberately auth-exempt (it's a scrape target), which means it leaks topic names and traffic volumes: fine in-cluster, not fine on a public host. The IngressRoute template therefore **excludes `blockedPathPrefixes` from the public match** (`/metrics` by default; add `/healthz`, `/readyz` if nothing external probes them). Prometheus still scrapes pods directly through the ServiceMonitor. If you use a different ingress controller, replicate the same idea:
+`/metrics` is deliberately auth-exempt (it's a scrape target), which means it leaks topic names and traffic volumes: fine in-cluster, not fine on a public host. The IngressRoute template therefore **excludes `blockedPathPrefixes` from the public match** (`/metrics` by default; add `/healthz`, `/readyz` if nothing external probes them). The metrics listener also serves `/healthz` and `/readyz`, and the chart's probes use it whenever `metrics.enabled` is on, so kubelet never waits behind client traffic on the API port; with metrics off the probes fall back to the API port. Prometheus still scrapes pods directly through the ServiceMonitor. If you use a different ingress controller, replicate the same idea:
 
 ```yaml
 # generic Ingress equivalent: route everything, then deny /metrics

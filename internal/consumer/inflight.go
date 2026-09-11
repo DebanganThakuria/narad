@@ -6,6 +6,7 @@ package consumer
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -31,10 +32,12 @@ var (
 	ErrInvalidSkip = errors.New("consumer: skip target is not below the oldest retained offset")
 )
 
-// CommitFunc is called after the committed-offset frontier advances for
-// a partition. Implementations write the new offset to the per-partition
-// .offsets log for crash-recovery durability. Errors are handled inside
-// the implementation; the caller does not fail if the write fails.
+// CommitFunc is called with the current committed frontier whenever a
+// partition's persisted consumer state changed: the frontier advanced,
+// or an offset was acked out of order above it. Implementations flush
+// consumer.offset and consumer.ahead for crash recovery. Errors are
+// handled inside the implementation; the caller does not fail if the
+// write fails.
 type CommitFunc func(topic string, partition int, offset int64)
 
 // CapsResolver returns per-topic in-flight limits. Called once at shard
@@ -52,6 +55,14 @@ type CapsResolver func(ctx context.Context, topic string) (Caps, error)
 // partition before.
 type CommittedRecoverFunc func(topic string, partition int) (int64, bool)
 
+// AheadRecoverFunc returns the persisted acked-ahead record for a
+// partition: the frontier it was written against and the offsets acked
+// out of order above it (ok=false when none was persisted). Wired to
+// the per-partition consumer.ahead file. The record's frontier is a
+// value the shard reached, so recovery takes the larger of it and the
+// consumer.offset frontier; offsets at or below that are ignored.
+type AheadRecoverFunc func(topic string, partition int) (committed int64, offsets []int64, ok bool)
+
 // Caps bounds per-partition in-flight state.
 type Caps struct {
 	MaxInFlight   int
@@ -68,20 +79,26 @@ type Caps struct {
 type ReleaseFunc func(topic string, partition int)
 
 // InFlight tracks in-flight message reservations per partition.
-// All state is in-memory — a restart clears reservations, causing
-// at-most one redelivery per message (visibility timeout).
+// Reservations are in-memory only: a restart clears them, causing at
+// most one redelivery per leased message. The committed frontier and the
+// acked-ahead set are persisted through CommitFunc and recovered lazily.
 type InFlight struct {
-	mu       sync.RWMutex
-	shards   map[shardKey]*partitionShard
-	onCommit CommitFunc
-	resolve  CapsResolver
-	recover  CommittedRecoverFunc
+	mu           sync.RWMutex
+	shards       map[shardKey]*partitionShard
+	onCommit     CommitFunc
+	resolve      CapsResolver
+	recover      CommittedRecoverFunc
+	recoverAhead AheadRecoverFunc
 
 	clockMu sync.RWMutex
 	timeNow func() int64 // replaced in tests
 
 	notifyMu  sync.RWMutex
 	onRelease ReleaseFunc
+
+	// onDrop is set once at wiring, like recover and recoverAhead, and
+	// read without a lock.
+	onDrop func(topic string, partition int)
 }
 
 // NewInFlight creates an InFlight tracker. onCommit may be nil (no
@@ -99,6 +116,37 @@ func NewInFlight(resolve CapsResolver, onCommit CommitFunc) *InFlight {
 // when a shard is created lazily. Call once during wiring, before serving.
 func (f *InFlight) SetCommittedRecovery(fn CommittedRecoverFunc) {
 	f.recover = fn
+}
+
+// SetAheadRecovery registers fn as the source of the persisted
+// acked-ahead set consulted when a shard is created lazily, alongside
+// the committed frontier. Call once during wiring, before serving.
+func (f *InFlight) SetAheadRecovery(fn AheadRecoverFunc) {
+	f.recoverAhead = fn
+}
+
+// AheadSnapshot returns the committed frontier, the acked-ahead offsets
+// above it (ascending) and the set's version for one partition;
+// ok=false when this node holds no shard for it. The version changes
+// on every insert into or drain from the set, so a persister that
+// remembers the last version it wrote can skip an unchanged set.
+func (f *InFlight) AheadSnapshot(topic string, partition int) (committed int64, offsets []int64, version uint64, ok bool) {
+	sh := f.shard(topic, partition)
+	if sh == nil {
+		return 0, nil, 0, false
+	}
+	sh.mu.Lock()
+	committed = sh.committed
+	version = sh.aheadVersion
+	if len(sh.ackedAhead) > 0 {
+		offsets = make([]int64, 0, len(sh.ackedAhead))
+		for off := range sh.ackedAhead {
+			offsets = append(offsets, off)
+		}
+	}
+	sh.mu.Unlock()
+	slices.Sort(offsets)
+	return committed, offsets, version, true
 }
 
 // Init seeds a partition shard with a known committed offset, resolving
@@ -203,13 +251,20 @@ func (f *InFlight) RefreshCaps(ctx context.Context, topic string) error {
 
 // DropTopic removes all shards for a topic. Called on topic deletion.
 func (f *InFlight) DropTopic(topic string) {
+	var dropped []int
 	f.mu.Lock()
 	for k := range f.shards {
 		if k.topic == topic {
 			delete(f.shards, k)
+			dropped = append(dropped, k.partition)
 		}
 	}
 	f.mu.Unlock()
+	if f.onDrop != nil {
+		for _, p := range dropped {
+			f.onDrop(topic, p)
+		}
+	}
 }
 
 // DropPartition removes one partition's shard. Called when the
@@ -221,6 +276,17 @@ func (f *InFlight) DropPartition(topic string, partition int) {
 	f.mu.Lock()
 	delete(f.shards, shardKey{topic, partition})
 	f.mu.Unlock()
+	if f.onDrop != nil {
+		f.onDrop(topic, partition)
+	}
+}
+
+// SetDropNotifier registers fn to run after DropPartition removes a
+// shard, so the persister can forget what it last wrote for the
+// partition (its files were replaced or removed under it). Call once
+// during wiring, before serving.
+func (f *InFlight) SetDropNotifier(fn func(topic string, partition int)) {
+	f.onDrop = fn
 }
 
 // SetReleaseNotifier registers fn to be invoked whenever a live
@@ -284,7 +350,21 @@ func (f *InFlight) shardOrCreate(ctx context.Context, topic string, partition in
 			committed = off
 		}
 	}
+	var ahead []int64
+	if f.recoverAhead != nil {
+		if aheadCommitted, offsets, ok := f.recoverAhead(topic, partition); ok {
+			// Both files hold frontier values the shard reached; the
+			// ahead record may be the fresher of the two when the crash
+			// landed between the two writes of one flush.
+			committed = max(committed, aheadCommitted)
+			ahead = offsets
+		}
+	}
 	fresh := newPartitionShard(committed, caps)
+	// Seeding can collapse the frontier over a run of recovered
+	// acked-ahead offsets that starts right above it (the frontier file
+	// lagged the set); persist that advance like any other.
+	advanced := fresh.seedAheadLocked(ahead)
 
 	f.mu.Lock()
 	if existing := f.shards[key]; existing != nil {
@@ -293,6 +373,9 @@ func (f *InFlight) shardOrCreate(ctx context.Context, topic string, partition in
 	}
 	f.shards[key] = fresh
 	f.mu.Unlock()
+	if advanced > committed && f.onCommit != nil {
+		f.onCommit(topic, partition, advanced)
+	}
 	return fresh, nil
 }
 

@@ -221,8 +221,10 @@ func TestSkipMissingBelowJumpsFrontierToOldestRetained(t *testing.T) {
 	if got := f.Next("t", 0); got != 500 {
 		t.Fatalf("Next() = %d, want 500", got)
 	}
-	if *commits != 1 || wakes != 1 {
-		t.Fatalf("commits=%d wakes=%d, want 1 and 1", *commits, wakes)
+	// Two commits: the out-of-order ack marks the partition dirty (the
+	// acked-ahead set is persisted), then the skip reports the jump.
+	if *commits != 2 || wakes != 1 {
+		t.Fatalf("commits=%d wakes=%d, want 2 and 1", *commits, wakes)
 	}
 	if inFlight, ahead := f.Snapshot("t", 0); inFlight != 0 || ahead != 0 {
 		t.Fatalf("Snapshot after skip = (%d, %d), want (0, 0)", inFlight, ahead)

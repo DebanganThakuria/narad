@@ -57,6 +57,11 @@ type envOpts struct {
 	// <dataDir>/metastore. A test that starves dataDir of disk space
 	// keeps the metastore elsewhere so topic metadata stays writable.
 	metastoreDir string
+	// persistOffsets wires the consumer offset committer and the
+	// recovery hooks exactly as serve.go does, with a short flush
+	// interval, so a restart test sees the frontier and the acked-ahead
+	// set come back from disk.
+	persistOffsets bool
 }
 
 func defaultOpts() envOpts {
@@ -121,6 +126,11 @@ func withLogOptions(opts storage.Options) envOption {
 	return func(o *envOpts) { o.logOptions = opts }
 }
 
+// withOffsetPersistence wires consumer offset persistence; see envOpts.
+func withOffsetPersistence() envOption {
+	return func(o *envOpts) { o.persistOffsets = true }
+}
+
 // env bundles a running server, its broker, and request helpers for a
 // single test. Call env.close() to clean up.
 type env struct {
@@ -139,6 +149,8 @@ type env struct {
 
 	Registry *prometheus.Registry // non-nil only when metrics:true
 	Metrics  *obsmetrics.Metrics  // non-nil only when metrics:true
+
+	committer *runtime.ConsumerOffsetCommitter // non-nil only when persistOffsets
 
 	// adminUser/adminPass are the seeded root credentials when
 	// security:true; empty otherwise.
@@ -188,6 +200,30 @@ func newEnv(t testing.TB, opts envOpts) *env {
 	if err != nil {
 		t.Fatalf("ingress: %v", err)
 	}
+	var committer *runtime.ConsumerOffsetCommitter
+	offsets := consumer.NewInFlight(capsResolver(ms), nil)
+	if opts.persistOffsets {
+		committer = runtime.NewConsumerOffsetCommitter(dataDir, 10*time.Millisecond, log)
+		offsets = consumer.NewInFlight(capsResolver(ms), committer.Commit)
+		offsets.SetCommittedRecovery(func(topicName string, partition int) (int64, bool) {
+			committed, ok, err := storage.ReadConsumerOffset(storage.TopicPartitionDir(dataDir, topicName, partition))
+			if err != nil {
+				t.Errorf("consumer offset recovery %s/%d: %v", topicName, partition, err)
+				return 0, false
+			}
+			return committed, ok
+		})
+		offsets.SetAheadRecovery(func(topicName string, partition int) (int64, []int64, bool) {
+			rec, ok, err := storage.ReadConsumerAhead(storage.TopicPartitionDir(dataDir, topicName, partition))
+			if err != nil {
+				t.Errorf("consumer ahead recovery %s/%d: %v", topicName, partition, err)
+				return 0, nil, false
+			}
+			return rec.Committed, rec.Offsets, ok
+		})
+		committer.SetAheadSource(offsets.AheadSnapshot)
+		offsets.SetDropNotifier(committer.Forget)
+	}
 	br, err := broker.New(broker.Deps{
 		DataDir:        dataDir,
 		StorageOptions: opts.logOptions,
@@ -202,7 +238,7 @@ func newEnv(t testing.TB, opts envOpts) *env {
 		Metastore:       ms,
 		Partitions:      partition.NewHashRoundRobin(),
 		Schemas:         schema.NewJSONSchema(),
-		ConsumerOffsets: consumer.NewInFlight(capsResolver(ms), nil),
+		ConsumerOffsets: offsets,
 		Logs:            logs,
 		Ingress:         ingressManager,
 		Logger:          log,
@@ -268,6 +304,7 @@ func newEnv(t testing.TB, opts envOpts) *env {
 		controllerDone:   controllerDone,
 		Registry:         reg,
 		Metrics:          m,
+		committer:        committer,
 	}
 }
 
@@ -397,6 +434,9 @@ func (e *env) close() {
 		}
 		if e.Broker != nil {
 			_ = e.Broker.Close()
+		}
+		if e.committer != nil {
+			_ = e.committer.Close()
 		}
 		if e.ms != nil {
 			_ = e.ms.Close()

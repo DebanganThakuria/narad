@@ -30,6 +30,12 @@ type partitionShard struct {
 	// frontier. The frontier collapses over them once the gap closes.
 	ackedAhead map[int64]struct{}
 
+	// aheadVersion counts every change to ackedAhead (an insert, or a
+	// frontier advance draining it), so the offset committer can tell
+	// whether the persisted consumer.ahead record is stale without
+	// comparing sets.
+	aheadVersion uint64
+
 	// corrupt holds offsets skipped because their on-disk frame is permanently
 	// unreadable (corruption). Like ackedAhead they are "resolved" offsets the
 	// committed frontier may advance over, but they are skipped data (lost),
@@ -167,6 +173,7 @@ func (sh *partitionShard) advanceCommittedLocked() int64 {
 		next := sh.committed + 1
 		if _, ok := sh.ackedAhead[next]; ok {
 			delete(sh.ackedAhead, next)
+			sh.aheadVersion++
 			sh.committed = next
 			continue
 		}
@@ -181,6 +188,20 @@ func (sh *partitionShard) advanceCommittedLocked() int64 {
 		sh.nextFree = sh.committed + 1
 	}
 	return sh.committed
+}
+
+// seedAheadLocked installs offsets recovered from consumer.ahead into
+// the acked-ahead set, ignoring anything at or below the frontier, and
+// collapses the frontier over the contiguous run above it. Returns the
+// frontier after the collapse. Must hold sh.mu.
+func (sh *partitionShard) seedAheadLocked(offsets []int64) int64 {
+	for _, off := range offsets {
+		if off > sh.committed {
+			sh.ackedAhead[off] = struct{}{}
+			sh.aheadVersion++
+		}
+	}
+	return sh.advanceCommittedLocked()
 }
 
 // aheadFullLocked reports whether the "ahead of frontier" state
