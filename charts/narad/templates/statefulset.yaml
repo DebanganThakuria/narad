@@ -161,20 +161,21 @@ spec:
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- $probePort := ternary "metrics" "api" .Values.metrics.enabled }}
           startupProbe:
             httpGet:
               path: /healthz
-              port: api
+              port: {{ $probePort }}
             {{- toYaml .Values.startupProbe | nindent 12 }}
           livenessProbe:
             httpGet:
               path: /healthz
-              port: api
+              port: {{ $probePort }}
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
             httpGet:
               path: /readyz
-              port: api
+              port: {{ $probePort }}
             {{- toYaml .Values.readinessProbe | nindent 12 }}
           {{- with .Values.resources }}
           resources:

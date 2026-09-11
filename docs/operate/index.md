@@ -61,10 +61,10 @@ That's the install. Really. (Every knob: [Helm Chart Reference](helm-chart.md).)
 |---|---|---|
 | `7942` | HTTP (TCP) + QUIC (UDP) | Client API, `/healthz` `/readyz` on TCP; node RPC over QUIC on the same port number over UDP |
 | `7943` | TCP (mTLS-capable) | Raft replication |
-| `9100` | HTTP | `/metrics`, on its own listener so scrapes need no credentials (`metrics.enabled`); with it off, `/metrics` is on 7942 behind API credentials |
+| `9100` | HTTP | `/metrics`, `/healthz` and `/readyz` on their own listener so scrapes need no credentials and probes never queue behind client traffic (`metrics.enabled`); with it off, `/metrics` is on 7942 behind API credentials and the probes go to 7942 |
 | `6060` | HTTP | pprof, only if enabled |
 
-Probes matter and the chart wires them the only correct way:
+Probes matter and the chart wires them the only correct way. They go to the metrics port (9100), not the API port: a saturated but healthy broker answers a probe on the API listener late, and a 1-second liveness timeout there killed a node under load, which then could not pass its startup probe while clients kept hammering the API port. The chart's timeouts (5s startup and liveness, 6 liveness failures, 3s readiness) assume a busy broker.
 
 - **`/healthz`** → startup + liveness. "The process is up." Answers immediately at boot, *before* the node is caught up, so a node recovering from a long outage is never murdered by its own liveness probe mid-recovery.
 - **`/readyz`** → readiness. "Safe to route traffic here." It is a **live** check, evaluated on every probe, not a flag set once at boot. It answers 200 only while all of these hold: startup reconciliation finished, the node has a Raft leader in view and heard from it within the last 5 seconds (or is the leader), and its replica has caught up with the leader at least once since the process started. A pod that loses its leader (quorum lost on its side, removed from the voter set, cut off by a partition) flips back to not-ready and stops receiving traffic, instead of serving a frozen replica: stale users and grants, stale topic list, 404s for new topics. The catch-up timeout at startup never marks a node ready; it only forfeits the orphan sweep for that boot.

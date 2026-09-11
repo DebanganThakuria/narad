@@ -76,6 +76,8 @@ kubectl get pods,svc,pvc -n narad
 kubectl port-forward -n narad svc/narad 7942:7942
 curl http://127.0.0.1:7942/healthz
 curl http://127.0.0.1:7942/readyz
+
+The same two paths are served on the metrics port (9100) when `metrics.enabled` is on, and that is where the chart points the startup, liveness and readiness probes, so kubelet never queues behind client traffic on the API port.
 ```
 
 ## Storage Permissions
