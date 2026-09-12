@@ -28,7 +28,7 @@ func parseConfig(args []string) (config, error) {
 	flagSet.StringVar(&cfg.username, "username", "", "HTTP Basic auth username (empty = no auth)")
 	flagSet.StringVar(&cfg.password, "password", "", "HTTP Basic auth password")
 	flagSet.DurationVar(&cfg.duration, "duration", 60*time.Second, "steady mode: how long producers run")
-	flagSet.DurationVar(&cfg.drainTimeout, "drain-timeout", 90*time.Second, "steady mode: how long consumers get to ack everything after producers stop")
+	flagSet.DurationVar(&cfg.drainTimeout, "drain-timeout", 240*time.Second, "steady mode: how long consumers get to ack everything after producers stop; keep it several times the visibility timeout, since a consumer lost in an outage pins its partition for one of those before the message is redelivered")
 	flagSet.DurationVar(&cfg.reportEvery, "report-every", 10*time.Second, "steady mode: progress report interval")
 	flagSet.BoolVar(&cfg.fatalDupAfterAck, "fatal-dup-after-ack", true, "steady mode: abort on a message redelivered after its ack (off for broker-restart runs; the count is still reported)")
 	flagSet.BoolVar(&cfg.noSchema, "no-schema", false, "create topics without a message schema (measures the cost of produce-side schema validation)")
