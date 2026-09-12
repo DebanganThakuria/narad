@@ -77,7 +77,7 @@ kubectl port-forward -n narad svc/narad 7942:7942
 curl http://127.0.0.1:7942/healthz
 curl http://127.0.0.1:7942/readyz
 
-The same two paths are served on the metrics port (9100) when `metrics.enabled` is on, and that is where the chart points the startup, liveness and readiness probes, so kubelet never queues behind client traffic on the API port.
+The same two paths are served on the metrics port (9100) when `metrics.enabled` is on. The chart points the startup and liveness probes there, so a queue of client traffic on the API port cannot get a healthy node killed. Readiness stays on the API port: it decides whether traffic is routed here, so a wedged API listener has to fail it.
 ```
 
 ## Storage Permissions

@@ -161,21 +161,26 @@ spec:
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- $probePort := ternary "metrics" "api" .Values.metrics.enabled }}
+          {{- /* Liveness and startup answer "is this process alive and booted",
+                 which a saturated broker is: they go to the metrics port so a
+                 queue of client traffic can never get a healthy node killed.
+                 Readiness answers "should traffic come here", so it stays on
+                 the API port, where failing to answer is the signal. */}}
+          {{- $healthPort := ternary "metrics" "api" .Values.metrics.enabled }}
           startupProbe:
             httpGet:
               path: /healthz
-              port: {{ $probePort }}
+              port: {{ $healthPort }}
             {{- toYaml .Values.startupProbe | nindent 12 }}
           livenessProbe:
             httpGet:
               path: /healthz
-              port: {{ $probePort }}
+              port: {{ $healthPort }}
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
             httpGet:
               path: /readyz
-              port: {{ $probePort }}
+              port: api
             {{- toYaml .Values.readinessProbe | nindent 12 }}
           {{- with .Values.resources }}
           resources:
