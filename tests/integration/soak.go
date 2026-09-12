@@ -231,6 +231,14 @@ func (t *soakTracker) produced(seq uint64, now time.Time) bool {
 	return true
 }
 
+// forget drops a sequence the produce never placed, so a failed produce
+// does not age into a report of a message the cluster never saw.
+func (t *soakTracker) forget(seq uint64) {
+	t.mu.Lock()
+	delete(t.pending, seq)
+	t.mu.Unlock()
+}
+
 // delivered records a delivery and reports whether this sequence was
 // already acked (a redelivery after ack) and the produce-to-delivery
 // latency when it is known.
@@ -330,7 +338,7 @@ func newSoakMetrics(reg *prometheus.Registry) *soakMetrics {
 		consumeErrors:      counter("consume_errors_total", "failed consumes by outcome", "topic", "outcome"),
 		ackErrors:          counter("ack_errors_total", "failed acks by outcome", "topic", "outcome"),
 		dupAfterAck:        counter("dup_after_ack_total", "messages redelivered after this pod acked them: an exactly-once violation outside a broker restart", "topic"),
-		unknownSeq:         counter("unknown_sequence_total", "deliveries whose sequence this process produced but no longer remembers, because the acked window rolled past it", "topic"),
+		unknownSeq:         counter("unknown_sequence_total", "deliveries of a sequence this process does not remember: an ambiguous produce that was accepted after all, or a redelivery arriving later than the acked window keeps", "topic"),
 		priorEpoch:         counter("prior_epoch_total", "deliveries this pod produced before its current process started: acked, not verified", "topic"),
 		neverDelivered:     counter("never_delivered_total", "messages produced and never delivered before the loss deadline: the loss signal", "topic"),
 		deliveredUnacked:   counter("delivered_unacked_total", "messages delivered but never acked before the loss deadline: stranded leases, which the poison fraction creates on purpose", "topic"),
@@ -573,14 +581,27 @@ func soakProduce(ctx context.Context, lb *roundRobinClient, p soakProfile, cfg c
 		}
 		path := "/v1/topics/" + url.PathEscape(p.name) + "/produce?key=" + url.QueryEscape(key)
 		started := time.Now()
+		// Recorded BEFORE the request, because a consumer in this same
+		// process can be handed the message before the producer's next
+		// statement runs. Recording it afterwards made roughly half a
+		// percent of deliveries arrive for a sequence the tracker had
+		// not heard of yet, which read as a mystery and was a race in
+		// the harness.
+		tracked := tracker.produced(n, started)
+		if !tracked {
+			m.overflow.WithLabelValues(p.name).Inc()
+		}
 		status, _, err := lb.doRaw(ctx, http.MethodPost, path, body, nil, http.StatusAccepted)
 		m.produceLatency.WithLabelValues(p.name).Observe(time.Since(started).Seconds())
 		if err != nil {
+			// The cluster may still have taken it (an ambiguous produce),
+			// in which case its delivery later counts as an unknown
+			// sequence. That is the honest place for the doubt.
+			if tracked {
+				tracker.forget(n)
+			}
 			m.produceErrors.WithLabelValues(p.name, soakOutcome(status, err)).Inc()
 			return
-		}
-		if !tracker.produced(n, started) {
-			m.overflow.WithLabelValues(p.name).Inc()
 		}
 		m.produced.WithLabelValues(p.name).Inc()
 	}

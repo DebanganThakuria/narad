@@ -83,6 +83,7 @@ nav:
       - Helm Chart Reference: operate/helm-chart.md
       - Configuration Reference: operate/configuration.md
       - Monitoring: operate/monitoring.md
+      - Running the soak: operate/soak.md
       - Scaling & Recovery: operate/scaling-and-recovery.md
       - Rotating the Raft TLS certificates: operate/raft-tls-rotation.md
   - Internals:

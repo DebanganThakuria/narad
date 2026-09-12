@@ -1,0 +1,74 @@
+# The soak workload: see docs/operate/soak.md.
+#
+# Apply it into the namespace the cluster runs in. It needs the admin
+# password secret the cluster was installed with, and an image pull
+# secret if the registry is private.
+apiVersion: v1
+kind: Service
+metadata:
+  name: narad-soak
+  labels: { app: narad-soak }
+spec:
+  clusterIP: None
+  selector: { app: narad-soak }
+  ports: [{ name: metrics, port: 9300, targetPort: 9300 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: narad-soak
+  labels: { app: narad-soak }
+spec:
+  serviceName: narad-soak
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app: narad-soak }
+  template:
+    metadata:
+      labels: { app: narad-soak }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9300"
+        prometheus.io/path: /metrics
+    spec:
+      imagePullSecrets: [{ name: registry }]
+      securityContext: { runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001 }
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels: { app: narad-soak }
+      containers:
+      - name: soak
+        image: ghcr.io/debanganthakuria/narad-driver:latest
+        # The driver ships in its own image, so a pod rescheduled onto a
+        # fresh node comes back on its own with nothing to copy in.
+        command: ["/usr/local/bin/narad-driver"]
+        args:
+          - -mode=soak
+          - -nodes=$(NARAD_ENDPOINT)
+          - -username=admin
+          - -password=$(NARAD_ADMIN_PASSWORD)
+          - -rate-scale=$(RATE_SCALE)
+          - -metrics-addr=:9300
+          - -report-every=60s
+          - -timeout=0
+        env:
+        - name: POD_NAME
+          valueFrom: { fieldRef: { fieldPath: metadata.name } }
+        - name: NARAD_ADMIN_PASSWORD
+          valueFrom: { secretKeyRef: { name: narad-security, key: admin-password } }
+        # The cluster this soak drives. Every request goes through it,
+        # so a load balancer here is what keeps the cross-node consume
+        # path under continuous test.
+        - { name: NARAD_ENDPOINT, value: "https://narad.example.internal" }
+        - { name: RATE_SCALE, value: "0.334" }
+        - { name: GOMAXPROCS, value: "2" }
+        ports: [{ name: metrics, containerPort: 9300 }]
+        resources:
+          requests: { cpu: 500m, memory: 512Mi }
+          limits: { memory: 2Gi }
