@@ -1,0 +1,43 @@
+ARG BUILDPLATFORM=linux/amd64
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+
+WORKDIR /src
+
+RUN apk add --no-cache git
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# TARGETOS/TARGETARCH are populated per target platform by buildx; see
+# the note in Dockerfile.
+ARG TARGETOS
+ARG TARGETARCH
+ARG GIT_REV=dev
+
+ENV CGO_ENABLED=0
+
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+	go build -trimpath -ldflags="-s -w -X 'main.version=${GIT_REV}'" \
+	-o /out/narad-driver ./tests/integration
+
+# The load and soak driver, packaged separately from the broker.
+#
+# It is test tooling: it belongs nowhere near the image users run, and
+# equally it cannot be a binary someone copies into a pod by hand, which
+# is what a soak meant to run for months would otherwise depend on. A
+# second image costs one workflow job and makes the soak a plain
+# deployment that survives a pod being rescheduled onto a fresh node.
+FROM alpine:3.23
+
+RUN apk add --no-cache ca-certificates tzdata && \
+	addgroup -S narad && \
+	adduser -S -D -H -u 10001 -G narad narad
+
+COPY --from=builder /out/narad-driver /usr/local/bin/narad-driver
+
+USER narad
+WORKDIR /tmp
+
+ENTRYPOINT ["/usr/local/bin/narad-driver"]
