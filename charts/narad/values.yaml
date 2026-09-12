@@ -205,14 +205,23 @@ resources:
     memory: 512Mi
   limits: {}
 
-# Probes hit /healthz and /readyz on the metrics port when
-# metrics.enabled (the default), so kubelet never queues behind client
-# traffic on the API port; with metrics off they fall back to the API
-# port. The timeouts assume a busy broker: under saturation a healthy
-# process can take seconds to answer, and a liveness kill then costs a
-# restart storm (the restarting pod cannot pass its startup probe while
-# clients keep hammering it). Readiness is the quick one on purpose: a
-# node that is slow to answer should stop receiving traffic, not die.
+# The probes are deliberately split across ports.
+#
+# Startup and liveness ask whether the process is alive and booted, which
+# a saturated broker is, so they hit /healthz on the metrics port when
+# metrics.enabled (the default) and fall back to the API port with
+# metrics off. Keeping them off the API listener is what stops a queue of
+# client traffic from getting a healthy node killed: a 1s timeout there
+# once cost a restart storm, because the restarting pod could not pass
+# its startup probe while clients kept hammering it.
+#
+# Readiness asks whether traffic should come here, so it stays on the API
+# port on purpose. A wedged API listener (fd exhaustion, a stuck accept
+# path, a TLS fault) must take the pod out of the service, and a probe
+# answered from another listener would report ready while nothing can
+# reach it. Failing readiness sheds traffic and recovers on its own,
+# which is the cheap outcome; the timeouts below give a busy node room
+# before that happens.
 startupProbe:
   failureThreshold: 30
   periodSeconds: 2
