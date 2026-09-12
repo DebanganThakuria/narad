@@ -1,0 +1,26 @@
+# Build context for Dockerfile.driver. BuildKit prefers
+# <dockerfile>.dockerignore over .dockerignore, which is what lets the
+# broker image keep excluding tests/ while the driver image includes it.
+.git
+.github
+.claude
+.idea
+
+bin
+charts/narad
+data
+tmp
+docs
+
+*.log
+.DS_Store
+todo-plan.local.md
+
+# Nothing below ships in the binary; keeping it out of the build context
+# stops docs/brand churn from busting the go build cache.
+assets
+# tests IS the point of this image: the driver lives in tests/integration.
+mkdocs.yml
+site
+*.md
+LICENSE
