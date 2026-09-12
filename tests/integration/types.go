@@ -33,6 +33,12 @@ type config struct {
 	// measure what produce-side schema validation costs.
 	noSchema    bool
 	reportEvery time.Duration
+	// soak mode only: where to serve Prometheus metrics, how much of
+	// each profile's modelled rate this pod carries, and an optional
+	// comma-separated profile filter.
+	metricsAddr  string
+	rateScale    float64
+	soakProfiles string
 }
 
 type roundRobinClient struct {
