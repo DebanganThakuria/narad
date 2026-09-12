@@ -105,18 +105,25 @@ type soakProfile struct {
 // soakProfiles is the modelled company. Rates are per driver pod, so N
 // pods multiply them; the totals here come to roughly 1000 messages a
 // second with one pod.
+//
+// Retentions are hours, not days, for two reasons. A soak that runs for
+// months has to be a good neighbour on a shared volume: at these rates
+// the steady state is a few gigabytes across the cluster, and every hour
+// added to a firehose topic costs about half a gigabyte more. And a
+// short retention exercises expiry constantly, which is the point, where
+// a long one would mostly measure how fast a disk fills.
 var soakProfiles = []soakProfile{
 	{
 		// The firehose: every authorization, handled by a fast service.
 		name: "soak-payments-authorized", partitions: 12,
-		retention: 6 * time.Hour, visibility: 30 * time.Second,
+		retention: 2 * time.Hour, visibility: 30 * time.Second,
 		rate: 400, payloadBytes: 420, keys: 5000,
 		consumers: 8, consumeWait: 2 * time.Second,
 		minWork: time.Millisecond, maxWork: 6 * time.Millisecond,
 	},
 	{
 		name: "soak-payments-captured", partitions: 12,
-		retention: 6 * time.Hour, visibility: 30 * time.Second,
+		retention: 2 * time.Hour, visibility: 30 * time.Second,
 		rate: 250, payloadBytes: 420, keys: 5000,
 		consumers: 6, consumeWait: 2 * time.Second,
 		minWork: time.Millisecond, maxWork: 8 * time.Millisecond,
@@ -126,7 +133,7 @@ var soakProfiles = []soakProfile{
 		// are slow, uneven, and sometimes give up. This is the profile
 		// that fills the acked-ahead set and strands leases.
 		name: "soak-webhooks-outbound", partitions: 6,
-		retention: 2 * time.Hour, visibility: 60 * time.Second,
+		retention: time.Hour, visibility: 60 * time.Second,
 		rate: 200, payloadBytes: 1100, keys: 2000,
 		// 16 handlers per pod against a 180ms average: capacity has to
 		// clear the rate or the backlog only ever grows.
@@ -137,7 +144,7 @@ var soakProfiles = []soakProfile{
 	{
 		// Refunds: low volume, slow handlers talking to a bank.
 		name: "soak-refunds-initiated", partitions: 3,
-		retention: 12 * time.Hour, visibility: 120 * time.Second,
+		retention: 4 * time.Hour, visibility: 120 * time.Second,
 		rate: 40, payloadBytes: 640, keys: 800,
 		consumers: 8, consumeWait: 5 * time.Second,
 		minWork: 200 * time.Millisecond, maxWork: 600 * time.Millisecond,
@@ -146,7 +153,7 @@ var soakProfiles = []soakProfile{
 	{
 		// Settlement batches: idle, then a pile of fat records at once.
 		name: "soak-settlements-batch", partitions: 3,
-		retention: 24 * time.Hour, visibility: 300 * time.Second,
+		retention: 6 * time.Hour, visibility: 300 * time.Second,
 		rate: 2, payloadBytes: 8200, keys: 200,
 		consumers: 2, consumeWait: 5 * time.Second,
 		minWork: 100 * time.Millisecond, maxWork: 900 * time.Millisecond,
