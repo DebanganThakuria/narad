@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -84,6 +85,31 @@ type topicDemand struct {
 // owner of a topic with parked consumers holds a live token from here.
 const keepAliveInterval = 500 * time.Millisecond
 
+// registrationRefresh bounds how long a registration is trusted before
+// the keeper sends it again. The owner's reply says only that the frame
+// arrived: it may have discarded the token (its assignment view lagged
+// ours), it may restart and lose it, or a retiring consumer's drop may
+// land after a newer consumer's add. Re-registering replaces the token,
+// so repeating it every few seconds while consumers are parked repairs
+// all three at the cost of one small frame per owner per interval.
+const registrationRefresh = 5 * time.Second
+
+// longestRemainingLocked returns the longest wait budget among the
+// parked consumers other than exclude (nil to count them all), and
+// whether there was any. Must hold mu.
+func (d *topicDemand) longestRemainingLocked(now time.Time, exclude *localWaiter) (remaining time.Duration, any bool) {
+	for _, w := range d.waiters {
+		if w == exclude {
+			continue
+		}
+		any = true
+		if left := w.deadline.Sub(now); left > remaining {
+			remaining = left
+		}
+	}
+	return remaining, any
+}
+
 // tokenRequester tracks what this node is waiting for and keeps the
 // matching tokens alive at the owners.
 type tokenRequester struct {
@@ -131,10 +157,13 @@ func newTokenRequester(rt *Router, selfAddr string) *tokenRequester {
 // when that same peer starts accepting, which is how an operator watches
 // the rollout drain to zero.
 //
-// Registrations are still sent to peers on the legacy list. Skipping
-// them would save an RPC and cost correctness: nothing else tells this
-// node the peer has been upgraded, so a peer written off once would
-// never be offered a token again until this process restarted.
+// Registrations from a parking consumer are still sent to peers on the
+// legacy list. Skipping them would save an RPC and cost correctness:
+// nothing else tells this node the peer has been upgraded, so a peer
+// written off once would never be offered a token again until this
+// process restarted. Only the keeper's periodic refresh skips them, so a
+// not-yet-upgraded owner is not asked twice a second for the length of
+// the roll; the next consumer to park re-tests it.
 func (q *tokenRequester) noteRegisterResult(addr string, res nodewire.Response, err error) {
 	if err != nil {
 		// A transport failure says nothing about what the peer speaks.
@@ -226,19 +255,9 @@ func (q *tokenRequester) park(topicName string, deadline time.Time) (*localWaite
 // same.
 func (q *tokenRequester) othersParked(topicName string, self *localWaiter) (remaining time.Duration, ok bool) {
 	d := q.demandFor(topicName)
-	now := time.Now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for _, w := range d.waiters {
-		if w == self {
-			continue
-		}
-		ok = true
-		if left := w.deadline.Sub(now); left > remaining {
-			remaining = left
-		}
-	}
-	return remaining, ok
+	return d.longestRemainingLocked(time.Now(), self)
 }
 
 // repark returns a waiter to the queue after its claim lost the race.
@@ -288,6 +307,15 @@ func (q *tokenRequester) register(ctx context.Context, topicName string, remaini
 	if len(owners) == 0 {
 		return
 	}
+	// The token is shared by every consumer parked here, so it carries
+	// the longest budget among them: a short poll registering after a
+	// long one must not shorten the token the long one relies on.
+	d := q.demandFor(topicName)
+	d.mu.Lock()
+	if longest, _ := d.longestRemainingLocked(time.Now(), nil); longest > remaining {
+		remaining = longest
+	}
+	d.mu.Unlock()
 	q.send(ctx, topicName, owners, remaining)
 }
 
@@ -296,7 +324,7 @@ func (q *tokenRequester) register(ctx context.Context, topicName string, remaini
 // entry when the failure is known, and the keeper tries that owner
 // again on its next pass.
 func (q *tokenRequester) send(ctx context.Context, topicName string, addrs []string, remaining time.Duration) {
-	until := time.Now().Add(remaining)
+	until := time.Now().Add(min(remaining, registrationRefresh))
 	d := q.demandFor(topicName)
 	d.mu.Lock()
 	if d.owners == nil {
@@ -354,33 +382,29 @@ func (q *tokenRequester) keepAlive(ctx context.Context) {
 	}
 	q.mu.RUnlock()
 	for _, topicName := range topics {
+		// The plain owner list, not the rotated one the probe path uses:
+		// a keeper pass must not advance the probe cursor.
+		owners := q.router.remoteOwnerAddrsForTopic(topicName)
+		if len(owners) == 0 {
+			continue
+		}
 		d := q.demandFor(topicName)
 		now := time.Now()
+		var missing []string
 		d.mu.Lock()
-		var remaining time.Duration
-		for _, w := range d.waiters {
-			if left := w.deadline.Sub(now); left > remaining {
-				remaining = left
+		remaining, _ := d.longestRemainingLocked(now, nil)
+		if remaining >= tokenTTLFloor {
+			for _, addr := range owners {
+				if !d.owners[addr].After(now) {
+					missing = append(missing, addr)
+				}
 			}
 		}
 		d.mu.Unlock()
-		if remaining < tokenTTLFloor {
+		if len(missing) == 0 {
 			continue
 		}
-		var missing []string
-		for _, addr := range q.router.remoteConsumeCandidates(topicName) {
-			if q.isLegacyPeer(addr) {
-				// It would refuse the registration; the next consumer to
-				// park re-tests it (see noteRegisterResult).
-				continue
-			}
-			d.mu.Lock()
-			live := d.owners[addr].After(now)
-			d.mu.Unlock()
-			if !live {
-				missing = append(missing, addr)
-			}
-		}
+		missing = slices.DeleteFunc(missing, q.isLegacyPeer)
 		if len(missing) > 0 {
 			q.send(ctx, topicName, missing, remaining)
 		}

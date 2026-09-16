@@ -447,29 +447,27 @@ func (d *dispatcher) run() {
 func (d *dispatcher) consumable(topicName string, scan []int) int {
 	total := 0
 	for _, p := range scan {
-		var tail int64
-		if log, ok := d.engine.logs.Peek(topicName, p); ok {
-			tail = log.HighWatermark()
-		} else {
-			// Not open: idle-evicted, or not yet touched since a restart.
-			// The persisted boundary is exact for a cleanly closed log
-			// and lags only after a crash, and it is the only thing that
-			// can tell a token holder about a backlog nobody has read
-			// since the process started. Read from disk rather than
-			// opening the log: observing must never resurrect a deleted
-			// topic's directory (see runtime.Logs.Peek).
-			hwm, ok, err := storage.ReadPersistedHighWatermark(storage.TopicPartitionDir(d.engine.logs.DataDir(), topicName, p))
-			if err != nil || !ok {
-				continue
-			}
-			tail = hwm
+		// Live when the log is open, persisted when it is not: a backlog
+		// in a log nobody has opened since a restart or an idle eviction
+		// is exactly what a token holder needs to hear about.
+		tail, ok := d.engine.logs.PeekHighWatermark(topicName, p)
+		if !ok {
+			continue
 		}
 		// Next is the ack frontier, so records handed out but not yet
 		// acked (in flight) and records acked ahead of a gap both sit
 		// above it and are not free. Counting them offered records that
 		// were already taken, and every such offer cost the peer a claim
 		// that came back empty and this topic a claimDeadline of silence.
-		next, inFlight, ackedAhead := d.engine.offsets.Reservable(topicName, p)
+		next, inFlight, ackedAhead, ok := d.engine.offsets.Reservable(topicName, p)
+		if !ok {
+			// No shard yet (nothing touched the partition since the
+			// process started): the frontier is the persisted one. Without
+			// it a fully drained partition reads as its whole history.
+			if committed, found, err := storage.ReadConsumerOffset(storage.TopicPartitionDir(d.engine.logs.DataDir(), topicName, p)); err == nil && found {
+				next = committed + 1
+			}
+		}
 		free := tail - next - int64(inFlight+ackedAhead)
 		if free > 0 {
 			total += int(free)
@@ -558,6 +556,7 @@ func (d *dispatcher) pumpQueue(topicName string, st *topicDispatch, q *entryQueu
 		// consumers and nothing is ever reserved speculatively.
 		msg, found, err := d.engine.readForWaiter(w.cw)
 		if err != nil || !found {
+			dead := err != nil && unservable(err)
 			st.mu.Lock()
 			// A consumer that gave up while the read was running is no
 			// longer waiting for anything, so it does not go back on the
@@ -570,7 +569,7 @@ func (d *dispatcher) pumpQueue(topicName string, st *topicDispatch, q *entryQueu
 					// siblings woken, so wake it empty now rather than
 					// leaving it to sleep out its wait on a fresh queue.
 					close(w.ch)
-				case unservable(err):
+				case dead:
 					// Nothing on this node can serve it any more (its
 					// partition moved away, or the topic is gone). Wake it
 					// empty; the client's next poll is routed afresh.
@@ -581,7 +580,7 @@ func (d *dispatcher) pumpQueue(topicName string, st *topicDispatch, q *entryQueu
 			}
 			st.hasWaiters.Store(st.anyDemandLocked())
 			st.mu.Unlock()
-			if err != nil && !unservable(err) {
+			if err != nil && !dead {
 				d.logReadError(topicName, st, err)
 			}
 			return
