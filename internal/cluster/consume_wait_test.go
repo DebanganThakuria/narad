@@ -109,6 +109,9 @@ func tokenRouter(t *testing.T, peer fakePeerClient) *Router {
 	t.Helper()
 	router := mixedOwnerRouter(t, peer)
 	router.SetSelfAddr("node-self.example:7942")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go router.RunTokenKeeper(ctx)
 	return router
 }
 
@@ -442,5 +445,187 @@ func TestClaimFromFallsBackToAPlainProbeForALegacyOwner(t *testing.T) {
 	}
 	if _, still := router.legacyClaim.Load(owner); still {
 		t.Fatal("an expired legacy entry was kept")
+	}
+}
+
+// registrationLog counts the token adds and drops a fake owner receives,
+// per (owner address, topic).
+type registrationLog struct {
+	mu    sync.Mutex
+	adds  map[string]int
+	drops map[string]int
+}
+
+func newRegistrationLog() *registrationLog {
+	return &registrationLog{adds: map[string]int{}, drops: map[string]int{}}
+}
+
+func (l *registrationLog) registerTokens(_ context.Context, addr string, delta nodewire.TokenDelta) (nodewire.Response, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, a := range delta.Add {
+		l.adds[addr+"/"+a.Topic]++
+	}
+	for _, topicName := range delta.Drop {
+		l.drops[addr+"/"+topicName]++
+	}
+	return nodewire.Response{Status: 204}, nil
+}
+
+func (l *registrationLog) counts(key string) (adds, drops int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.adds[key], l.drops[key]
+}
+
+// TestRouteConsumeWaitKeepsTokensWhileOthersAreParked pins the shared
+// token: an owner holds ONE token per (this node, topic), so a consumer
+// served locally must not retire it while another consumer is still
+// parked here for the topic. Retiring it stranded the other consumer for
+// the rest of its wait.
+func TestRouteConsumeWaitKeepsTokensWhileOthersAreParked(t *testing.T) {
+	reg := newRegistrationLog()
+	router := tokenRouter(t, fakePeerClient{registerTokensFn: reg.registerTokens})
+
+	// The second consumer parks for its whole budget.
+	stayed := make(chan struct{})
+	go func() {
+		defer close(stayed)
+		res := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=600ms", nil)
+		router.RouteConsumeWait(context.Background(), res, req, "orders", 600*time.Millisecond, &fakeLocalWaiter{delay: time.Hour})
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	// The first is served by its local partitions almost at once.
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=5s", nil)
+	local := &fakeLocalWaiter{delay: 20 * time.Millisecond, found: true,
+		msg: topic.Message{Topic: "orders", Partition: 1, Offset: 3, ReceiptHandle: "1:3:5"}}
+	if !router.RouteConsumeWait(context.Background(), res, req, "orders", 5*time.Second, local) {
+		t.Fatal("RouteConsumeWait() = false, want handled")
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.Code)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, drops := reg.counts("remote.example:7942/orders"); drops != 0 {
+		t.Fatalf("token dropped %d times while another consumer was still parked on the topic", drops)
+	}
+	<-stayed
+}
+
+// TestRouteConsumeWaitReRegistersAfterAClaimWhenOthersAreParked pins the
+// other half: a claim spends the token at the owner that notified us, so
+// when other consumers are still parked here a fresh token goes back to
+// that owner, and nothing is dropped anywhere. Without it the owner's
+// next record reached nobody on this node until a new consumer arrived.
+func TestRouteConsumeWaitReRegistersAfterAClaimWhenOthersAreParked(t *testing.T) {
+	reg := newRegistrationLog()
+	handle := consumer.EncodeHandle(consumer.Handle{Partition: 0, Offset: 7, Nonce: 99})
+	peer := fakePeerClient{
+		registerTokensFn: reg.registerTokens,
+		consumeFn: func(context.Context, string, nodewire.ConsumeRequest) (nodewire.Response, error) {
+			return remoteMessageResponse(0, 7, handle), nil
+		},
+	}
+	router := tokenRouter(t, peer)
+
+	// Two consumers park; the owner spends the token on one of them.
+	results := make(chan int, 2)
+	for range 2 {
+		go func() {
+			res := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=800ms", nil)
+			router.RouteConsumeWait(context.Background(), res, req, "orders", 800*time.Millisecond, &fakeLocalWaiter{delay: time.Hour})
+			results <- res.Code
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	if adds, _ := reg.counts("remote.example:7942/orders"); adds != 2 {
+		t.Fatalf("registered %d tokens before the offer, want one per parked consumer", adds)
+	}
+	notifyWhenParked(router, "orders", "remote.example:7942")
+
+	codes := []int{<-results, <-results}
+	served := 0
+	for _, c := range codes {
+		if c == http.StatusOK {
+			served++
+		}
+	}
+	if served != 1 {
+		t.Fatalf("statuses %v, want exactly one 200 (the claim) and one 204 (the budget)", codes)
+	}
+	adds, drops := reg.counts("remote.example:7942/orders")
+	if adds < 3 {
+		t.Fatalf("owner received %d registrations, want a third one after the claim spent its token while a consumer was still parked", adds)
+	}
+	if drops != 0 {
+		t.Fatalf("token dropped %d times with a consumer still parked", drops)
+	}
+}
+
+// TestTokenKeeperRegistersWithAnOwnerThatComesBack pins the keeper: a
+// consumer parks while an owner is unreachable, so its registration
+// never lands there. When the owner is back, the keeper registers with
+// it without any new consumer arriving, and the owner's notification
+// reaches the consumer that was parked all along. Without it the
+// consumer waited out its whole budget while the owner sat on records.
+func TestTokenKeeperRegistersWithAnOwnerThatComesBack(t *testing.T) {
+	var mu sync.Mutex
+	ownerUp := false
+	landed := make(chan struct{}, 8)
+	handle := consumer.EncodeHandle(consumer.Handle{Partition: 0, Offset: 4, Nonce: 77})
+	peer := fakePeerClient{
+		registerTokensFn: func(_ context.Context, addr string, delta nodewire.TokenDelta) (nodewire.Response, error) {
+			mu.Lock()
+			up := ownerUp
+			mu.Unlock()
+			if !up {
+				return nodewire.Response{}, context.DeadlineExceeded
+			}
+			if len(delta.Add) > 0 {
+				landed <- struct{}{}
+			}
+			return nodewire.Response{Status: 204}, nil
+		},
+		consumeFn: func(context.Context, string, nodewire.ConsumeRequest) (nodewire.Response, error) {
+			return remoteMessageResponse(0, 4, handle), nil
+		},
+	}
+	router := tokenRouter(t, peer)
+
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=5s", nil)
+	done := make(chan bool, 1)
+	go func() {
+		done <- router.RouteConsumeWait(context.Background(), res, req, "orders", 5*time.Second, &fakeLocalWaiter{delay: time.Hour})
+	}()
+
+	// Parked with the owner down: the registration failed.
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-landed:
+		t.Fatal("a registration landed while the owner was down")
+	default:
+	}
+
+	// The owner returns. The keeper must register without a new consumer.
+	mu.Lock()
+	ownerUp = true
+	mu.Unlock()
+	select {
+	case <-landed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("keeper never registered with the owner after it came back")
+	}
+	// ...and the owner's notification then serves the parked consumer.
+	notifyWhenParked(router, "orders", "remote.example:7942")
+	if !<-done {
+		t.Fatal("RouteConsumeWait() = false, want handled")
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: the consumer parked through the outage was not served", res.Code)
 	}
 }

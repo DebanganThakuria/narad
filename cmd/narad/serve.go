@@ -195,6 +195,9 @@ func runServe(args []string) error {
 	})
 	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, cs.peerRPC, log) })
 	wg.Go(func() { cs.controller.Run(ctx) })
+	// Re-registers consume tokens with owners that come back or are
+	// newly assigned while consumers are parked here.
+	wg.Go(func() { cs.router.RunTokenKeeper(ctx) })
 	wg.Go(func() { bc.offsets.RunPurger(ctx, time.Second) })
 	wg.Go(func() { cs.dispatcher.Run(ctx) })
 	wg.Go(func() { cs.fanout.Run(ctx) })

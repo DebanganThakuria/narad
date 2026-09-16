@@ -254,10 +254,11 @@ func TestTokenConsume_OneRecordServesOneNode(t *testing.T) {
 	}
 }
 
-// TestTokenConsume_SurvivesAnOwnerDying pins that tokens are connection
-// scoped. A node holding this consumer's tokens is killed; the tokens
-// die with it, and the survivors must keep delivering records on the
-// partitions they still own. Nothing acknowledged may be lost.
+// TestTokenConsume_SurvivesAnOwnerDying pins that a dead owner takes
+// nothing with it. A node holding this consumer's tokens is killed; the
+// tokens it held are gone with its memory, and the survivors must keep
+// delivering records on the partitions they still own. Nothing
+// acknowledged may be lost.
 func TestTokenConsume_SurvivesAnOwnerDying(t *testing.T) {
 	c := newTokenCluster(t)
 	defer c.teardown()
@@ -565,4 +566,82 @@ func TestTokenConsume_ResurrectedOwnerDeliversItsBacklog(t *testing.T) {
 	case <-time.After(45 * time.Second):
 		t.Fatalf("the parked consumer never returned at all")
 	}
+}
+
+// TestTokenConsume_SecondParkedConsumerIsServed pins the shared token.
+// Two consumers park on node 0 for a topic whose partition lives on
+// another node, and two records are produced to it one after the other.
+// Both must be delivered promptly. The owner holds ONE token per (node,
+// topic): when the first consumer's claim spent it and then dropped the
+// rest, the second consumer sat out its whole budget with its record
+// waiting at the owner.
+func TestTokenConsume_SecondParkedConsumerIsServed(t *testing.T) {
+	c := newTokenCluster(t)
+	defer c.teardown()
+	tokenTopic(t, c, "tok-second")
+
+	// A partition node 0 (narad-1) does not own.
+	_, body := c.apiWant(0, http.MethodGet, "/v1/topics/tok-second", nil, 30*time.Second, http.StatusOK)
+	var got struct {
+		Stats []struct {
+			Index     int    `json:"index"`
+			OwnerNode string `json:"owner_node"`
+		} `json:"partition_stats"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode topic: %v", err)
+	}
+	remote := -1
+	for _, s := range got.Stats {
+		if s.OwnerNode != "narad-1" {
+			remote = s.Index
+			break
+		}
+	}
+	if remote < 0 {
+		t.Fatal("node 0 owns every partition; nothing to test")
+	}
+
+	type result struct {
+		msg     tokenMsg
+		ok      bool
+		elapsed time.Duration
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			start := time.Now()
+			m, ok := tokenConsume(c, 0, "tok-second", "8s")
+			results <- result{m, ok, time.Since(start)}
+		}()
+	}
+	time.Sleep(1500 * time.Millisecond) // both parked, tokens registered
+
+	produce := func(key string) {
+		status, _, err := c.api(2, http.MethodPost,
+			fmt.Sprintf("/v1/topics/tok-second/produce?partition=%d", remote), map[string]any{"id": key})
+		if err != nil || (status != http.StatusAccepted && status != http.StatusOK) {
+			t.Fatalf("produce %s: status=%d err=%v", key, status, err)
+		}
+	}
+
+	produce("first")
+	r1 := <-results
+	if !r1.ok {
+		t.Fatalf("first parked consumer returned empty after %v", r1.elapsed)
+	}
+	tokenAck(c, 0, "tok-second", r1.msg.ReceiptHandle)
+
+	produced := time.Now()
+	produce("second")
+	r2 := <-results
+	lat := time.Since(produced)
+	if !r2.ok {
+		t.Fatalf("second parked consumer returned empty after %v: no live token at the owner once the first was served", r2.elapsed)
+	}
+	if lat > 3*time.Second {
+		t.Fatalf("second delivery took %v after the produce: the consumer waited out its budget instead of being notified", lat)
+	}
+	tokenAck(c, 0, "tok-second", r2.msg.ReceiptHandle)
+	t.Logf("second consumer served %v after its record was produced", lat)
 }
