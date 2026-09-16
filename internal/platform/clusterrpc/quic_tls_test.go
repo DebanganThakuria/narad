@@ -32,12 +32,17 @@ func selfSignedLeaf(t *testing.T, notBefore, notAfter time.Time) *x509.Certifica
 
 // The client replaces default chain verification (no CA exists for the
 // ephemeral certificates) with checks that are meaningful for the cluster
-// transport: exactly one valid self-signed leaf, plus TLS 1.3 and the
-// pinned ALPN on the connection.
+// transport: exactly one self-signed leaf, plus TLS 1.3 and the pinned
+// ALPN on the connection. Validity dates are not among them: an expired
+// leaf and a not-yet-valid one are both accepted, because the
+// certificate carries no trust and enforcing its dates only ever
+// partitioned clusters whose nodes outlived the lifetime minted at
+// startup (24 hours, before v3.0.1).
 func TestVerifyClusterPeerCertificate(t *testing.T) {
 	now := time.Now()
 	good := selfSignedLeaf(t, now.Add(-time.Minute), now.Add(time.Hour))
 	expired := selfSignedLeaf(t, now.Add(-2*time.Hour), now.Add(-time.Hour))
+	future := selfSignedLeaf(t, now.Add(2*time.Hour), now.Add(3*time.Hour))
 	other := selfSignedLeaf(t, now.Add(-time.Minute), now.Add(time.Hour))
 	tampered := append([]byte(nil), good.Raw...)
 	tampered[len(tampered)-1] ^= 0x01 // corrupt the signature bytes
@@ -50,7 +55,8 @@ func TestVerifyClusterPeerCertificate(t *testing.T) {
 		{"valid", [][]byte{good.Raw}, ""},
 		{"no cert", nil, "presented 0 certificates"},
 		{"chain", [][]byte{good.Raw, other.Raw}, "presented 2 certificates"},
-		{"expired", [][]byte{expired.Raw}, "not valid at"},
+		{"expired", [][]byte{expired.Raw}, ""},
+		{"not yet valid", [][]byte{future.Raw}, ""},
 		{"bad signature", [][]byte{tampered}, ""}, // filled below: parse or signature error, either is a rejection
 	}
 	for _, tc := range cases {
@@ -130,5 +136,16 @@ func TestServerCertificateOutlivesAnyProcess(t *testing.T) {
 	}
 	if err := verifyClusterPeerCertificate([][]byte{leaf.Raw}, nil); err != nil {
 		t.Fatalf("freshly minted certificate rejected by the client verifier: %v", err)
+	}
+}
+
+// A node that outlives its certificate stays dialable: the whole reason
+// the dates are not checked. Simulated with a leaf whose lifetime has
+// already run out.
+func TestPeerThatOutlivedItsCertificateStaysDialable(t *testing.T) {
+	now := time.Now()
+	long := selfSignedLeaf(t, now.Add(-400*24*time.Hour), now.Add(-35*24*time.Hour))
+	if err := verifyClusterPeerCertificate([][]byte{long.Raw}, nil); err != nil {
+		t.Fatalf("peer up longer than its certificate lifetime rejected: %v", err)
 	}
 }
