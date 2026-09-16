@@ -40,6 +40,19 @@ func alpnList(allowLegacy bool) []string {
 // this transport is designed for.
 const quicClientSessionCacheSize = 64
 
+// clusterCertLifetime is how long the certificate a node presents on its
+// cluster RPC listener stays valid. Nothing renews it while the process
+// runs, and the dialling side refuses an expired one, so the lifetime
+// must exceed any process lifetime a deployment will see. It was 24
+// hours: every node that stayed up longer than a day became undialable
+// by its peers, and once all of them had, the whole data plane was
+// partitioned with nothing but a restart to clear it. The certificate
+// carries no trust (membership is the per-stream secret proof, auth.go)
+// and its key never leaves the process, so a long lifetime costs
+// nothing. A year is longer than any node is left running between
+// releases.
+const clusterCertLifetime = 365 * 24 * time.Hour
+
 // quicServerTLSConfig generates an ephemeral self-signed certificate at
 // startup. QUIC requires TLS, but cluster traffic stays inside the
 // deployment's trust boundary, so peers pin the ALPN protocol instead of
@@ -53,10 +66,12 @@ func quicServerTLSConfig(allowLegacy bool) (*tls.Config, error) {
 	}
 	template := x509.Certificate{
 		SerialNumber: big.NewInt(time.Now().UnixNano()),
-		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		// Backdated an hour so a peer whose clock runs behind this one
+		// still sees a certificate that is already valid.
+		NotBefore:   time.Now().Add(-time.Hour),
+		NotAfter:    time.Now().Add(clusterCertLifetime),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
 	if err != nil {
