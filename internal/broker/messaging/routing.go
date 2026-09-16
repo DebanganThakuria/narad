@@ -1,9 +1,11 @@
 package messaging
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
 
@@ -51,7 +53,11 @@ func (e *Engine) localProbePartitions(topicName string, totalPartitions int, pin
 		if *pinnedPartition < 0 || *pinnedPartition >= totalPartitions {
 			return nil, fmt.Errorf("%w: partition out of range", ErrInvalid)
 		}
-		if !e.isLocalOwner(topicName, *pinnedPartition) {
+		owner, err := e.localOwnerCheck(topicName, *pinnedPartition)
+		if err != nil {
+			return nil, err
+		}
+		if !owner {
 			return nil, ErrNotPartitionOwner
 		}
 		return []int{*pinnedPartition}, nil
@@ -115,6 +121,29 @@ func (e *Engine) isWritableLocalProducePartition(topicName string, partition int
 		return false
 	}
 	return assignment.OwnerID == e.selfID && e.produceAssignmentWritable(assignment)
+}
+
+// localOwnerCheck is isLocalOwner with the assignment lookup's failure
+// kept apart from "not ours": a metastore hiccup is an error callers
+// retry, whereas a missing assignment means the partition is not owned
+// here. The pinned consume path needs the difference, because the pump
+// wakes a parked pinned consumer empty on a not-owner verdict and must
+// not do so for a transient failure.
+func (e *Engine) localOwnerCheck(topicName string, partition int) (bool, error) {
+	if e.selfID == "" {
+		return true, nil
+	}
+	if _, ok := e.metastore.(assignmentReader); !ok {
+		return true, nil
+	}
+	assignment, err := e.getAssignment(topicName, partition)
+	if errors.Is(err, errs.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("messaging: assignment for %s/%d: %w", topicName, partition, err)
+	}
+	return assignment.OwnerID == e.selfID, nil
 }
 
 // isLocalOwner reports whether this node owns the partition. Nodes

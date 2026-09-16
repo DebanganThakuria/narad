@@ -1,12 +1,13 @@
 package messaging
 
 import (
-	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
 // Queue-style consume delivery.
@@ -218,6 +219,72 @@ type topicDispatch struct {
 	// took a waiter off the queue before the release sees the change and
 	// wakes the waiter empty instead of re-queuing it on dead state.
 	gen uint64
+	// pinned holds the waiters of partition-pinned long-polls, one FIFO
+	// per partition, apart from queue. The pump stops a FIFO at the first
+	// waiter it cannot serve, which is right only when every waiter in it
+	// scans the same partitions: a pinned waiter at the head of the shared
+	// queue stalled every unpinned waiter behind it for as long as its one
+	// partition stayed empty. Queues are never removed from the map (a
+	// pump may hold one across the topic lock); a topic has at most one
+	// per partition.
+	pinned map[int]*entryQueue
+	// lastReadErrLog is the unix time in nanoseconds of the last log line
+	// about a read the pump could not complete, so a broken disk under a
+	// busy topic logs once every few seconds rather than once per commit.
+	lastReadErrLog atomic.Int64
+}
+
+// queueFor returns the FIFO a waiter belongs on: the per-partition one
+// for a pinned consume, the shared one otherwise. With create false a
+// missing pinned FIFO reads as nil. Must hold mu.
+func (st *topicDispatch) queueFor(w *waiter, create bool) *entryQueue {
+	if w.cw.pinned == nil {
+		return &st.queue
+	}
+	p := *w.cw.pinned
+	q, ok := st.pinned[p]
+	if !ok && create {
+		if st.pinned == nil {
+			st.pinned = make(map[int]*entryQueue)
+		}
+		q = &entryQueue{}
+		st.pinned[p] = q
+	}
+	return q
+}
+
+// anyDemandLocked reports whether any FIFO of the topic still holds an
+// entry. Must hold mu.
+func (st *topicDispatch) anyDemandLocked() bool {
+	if st.queue.len() > 0 {
+		return true
+	}
+	for _, q := range st.pinned {
+		if q.len() > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// drainLocked empties every FIFO, closing each local waiter's channel so
+// its ConsumeWait answers empty at once. Must hold mu.
+func (st *topicDispatch) drainLocked() {
+	drain := func(q *entryQueue) {
+		for {
+			e, ok := q.pop()
+			if !ok {
+				return
+			}
+			if e.waiter != nil {
+				close(e.waiter.ch)
+			}
+		}
+	}
+	drain(&st.queue)
+	for _, q := range st.pinned {
+		drain(q)
+	}
 }
 
 // claimHold is one notification a peer promised to claim. Its identity
@@ -380,7 +447,10 @@ func (d *dispatcher) run() {
 func (d *dispatcher) consumable(topicName string, scan []int) int {
 	total := 0
 	for _, p := range scan {
-		log, ok := d.engine.logs.Peek(topicName, p)
+		// Live when the log is open, persisted when it is not: a backlog
+		// in a log nobody has opened since a restart or an idle eviction
+		// is exactly what a token holder needs to hear about.
+		tail, ok := d.engine.logs.PeekHighWatermark(topicName, p)
 		if !ok {
 			continue
 		}
@@ -389,8 +459,16 @@ func (d *dispatcher) consumable(topicName string, scan []int) int {
 		// above it and are not free. Counting them offered records that
 		// were already taken, and every such offer cost the peer a claim
 		// that came back empty and this topic a claimDeadline of silence.
-		next, inFlight, ackedAhead := d.engine.offsets.Reservable(topicName, p)
-		free := log.HighWatermark() - next - int64(inFlight+ackedAhead)
+		next, inFlight, ackedAhead, ok := d.engine.offsets.Reservable(topicName, p)
+		if !ok {
+			// No shard yet (nothing touched the partition since the
+			// process started): the frontier is the persisted one. Without
+			// it a fully drained partition reads as its whole history.
+			if committed, found, err := storage.ReadConsumerOffset(storage.TopicPartitionDir(d.engine.logs.DataDir(), topicName, p)); err == nil && found {
+				next = committed + 1
+			}
+		}
+		free := tail - next - int64(inFlight+ackedAhead)
 		if free > 0 {
 			total += int(free)
 		}
@@ -399,23 +477,44 @@ func (d *dispatcher) consumable(topicName string, scan []int) int {
 }
 
 // pumpTopic hands out as many records as this topic has demand and
-// reservable records, then returns. It stops on the first reservation
-// that finds nothing, which is also what makes "a record someone else
-// already took" free: the queue is never disturbed.
+// reservable records, then returns. Pinned waiters go first: each can
+// take from one partition only, so serving them first costs the
+// unpinned waiters nothing they could not get elsewhere, and it keeps a
+// pinned consumer from starving behind consumers that scan every
+// partition. The shared queue (unpinned waiters and peers' tokens) is
+// pumped last.
 func (d *dispatcher) pumpTopic(topicName string) {
 	st := d.stateFor(topicName)
+	st.mu.Lock()
+	pinned := make([]*entryQueue, 0, len(st.pinned))
+	for _, q := range st.pinned {
+		pinned = append(pinned, q)
+	}
+	st.mu.Unlock()
+	for _, q := range pinned {
+		d.pumpQueue(topicName, st, q)
+	}
+	d.pumpQueue(topicName, st, &st.queue)
+}
+
+// pumpQueue is pumpTopic for one FIFO. It stops on the first reservation
+// that finds nothing, which is also what makes "a record someone else
+// already took" free: the queue is never disturbed. Every waiter in one
+// FIFO scans the same partitions, so a miss for the head is a miss for
+// all of them.
+func (d *dispatcher) pumpQueue(topicName string, st *topicDispatch, q *entryQueue) {
 	for {
 		st.mu.Lock()
-		e, ok := st.queue.peek()
+		e, ok := q.peek()
 		if !ok {
-			st.hasWaiters.Store(false)
+			st.hasWaiters.Store(st.anyDemandLocked())
 			st.mu.Unlock()
 			return
 		}
 
 		if e.remote != nil {
 			if e.remote.Expired() {
-				st.queue.pop()
+				q.pop()
 				st.mu.Unlock()
 				continue
 			}
@@ -430,7 +529,7 @@ func (d *dispatcher) pumpTopic(topicName string) {
 			// claim can reach this node before the notify round trip has
 			// even returned, and it must find the hold it resolves.
 			h := d.addHoldLocked(topicName, st)
-			st.queue.rotate()
+			q.rotate()
 			st.mu.Unlock()
 			if !e.remote.Notify(topicName, func(claiming bool) {
 				if !claiming {
@@ -448,35 +547,42 @@ func (d *dispatcher) pumpTopic(topicName string) {
 		}
 
 		w := e.waiter
-		st.queue.pop()
+		q.pop()
 		gen := st.gen
 		st.mu.Unlock()
 
 		// The reservation runs with a waiter already in hand and outside
 		// the topic lock, so a slow log read never blocks arriving
 		// consumers and nothing is ever reserved speculatively.
-		msg, found, err := d.engine.tryQueueRead(context.Background(), topicName,
-			w.cw.scan, w.cw.scanStart, w.cw.visibilityTimeout)
+		msg, found, err := d.engine.readForWaiter(w.cw)
 		if err != nil || !found {
+			dead := err != nil && unservable(err)
 			st.mu.Lock()
 			// A consumer that gave up while the read was running is no
 			// longer waiting for anything, so it does not go back on the
 			// queue. Nothing was reserved, so there is nothing to release.
 			if !w.abandoned {
-				if st.gen == gen {
-					st.queue.pushFront(queueEntry{waiter: w})
-				} else {
+				switch {
+				case st.gen != gen:
 					// The topic was released (deleted) while the read ran:
 					// the queue this waiter came from was drained and its
 					// siblings woken, so wake it empty now rather than
 					// leaving it to sleep out its wait on a fresh queue.
 					close(w.ch)
+				case dead:
+					// Nothing on this node can serve it any more (its
+					// partition moved away, or the topic is gone). Wake it
+					// empty; the client's next poll is routed afresh.
+					close(w.ch)
+				default:
+					q.pushFront(queueEntry{waiter: w})
 				}
 			}
-			if st.queue.len() == 0 {
-				st.hasWaiters.Store(false)
-			}
+			st.hasWaiters.Store(st.anyDemandLocked())
 			st.mu.Unlock()
+			if err != nil && !dead {
+				d.logReadError(topicName, st, err)
+			}
 			return
 		}
 
@@ -509,6 +615,29 @@ func (d *dispatcher) pumpTopic(topicName string) {
 		}
 		d.engine.recordConsumed(topicName, msg.Partition, len(msg.Payload))
 	}
+}
+
+// unservable reports a read error that no later wake can fix on this
+// node: the waiter's partition is not owned here, or its topic is gone.
+func unservable(err error) bool {
+	return errors.Is(err, ErrNotPartitionOwner) || errors.Is(err, ErrTopicNotFound)
+}
+
+// readErrLogInterval bounds how often one topic logs a failed pump read.
+const readErrLogInterval = 5 * time.Second
+
+// logReadError reports a read the pump could not complete for a parked
+// consumer, at most once per readErrLogInterval per topic. The consumer
+// stays parked and is retried on the next wake; without a line here a
+// broken disk looked exactly like an idle topic.
+func (d *dispatcher) logReadError(topicName string, st *topicDispatch, err error) {
+	now := time.Now().UnixNano()
+	last := st.lastReadErrLog.Load()
+	if now-last < int64(readErrLogInterval) || !st.lastReadErrLog.CompareAndSwap(last, now) {
+		return
+	}
+	d.engine.logger.Warn("dispatcher could not read for a parked consumer; it stays parked until the next wake",
+		"topic", topicName, "err", err)
 }
 
 // claimDeadline is how long a peer that said it would claim holds its
@@ -645,9 +774,7 @@ func (d *dispatcher) dropRemote(topicName string, rd RemoteDemand) {
 	st := d.stateFor(topicName)
 	st.mu.Lock()
 	st.queue.removeRemote(rd)
-	if st.queue.len() == 0 {
-		st.hasWaiters.Store(false)
-	}
+	st.hasWaiters.Store(st.anyDemandLocked())
 	st.mu.Unlock()
 }
 
@@ -656,8 +783,8 @@ func (d *dispatcher) dropRemote(topicName string, rd RemoteDemand) {
 func (d *dispatcher) enqueue(topicName string, w *waiter) {
 	st := d.stateFor(topicName)
 	st.mu.Lock()
-	st.queue.push(queueEntry{waiter: w})
-	if st.scan == nil {
+	st.queueFor(w, true).push(queueEntry{waiter: w})
+	if st.scan == nil && w.cw.pinned == nil {
 		st.scan = w.cw.scan
 	}
 	st.hasWaiters.Store(true)
@@ -672,7 +799,10 @@ func (d *dispatcher) enqueue(topicName string, w *waiter) {
 func (d *dispatcher) dequeue(topicName string, w *waiter) (waiterDelivery, bool) {
 	st := d.stateFor(topicName)
 	st.mu.Lock()
-	removed := st.queue.removeWaiter(w)
+	removed := false
+	if q := st.queueFor(w, false); q != nil {
+		removed = q.removeWaiter(w)
+	}
 	if !removed {
 		// The pump has this waiter off the queue and may be reserving on
 		// its behalf right now. Say so before releasing the lock: from
@@ -681,9 +811,7 @@ func (d *dispatcher) dequeue(topicName string, w *waiter) (waiterDelivery, bool)
 		// record back itself.
 		w.abandoned = true
 	}
-	if st.queue.len() == 0 {
-		st.hasWaiters.Store(false)
-	}
+	st.hasWaiters.Store(st.anyDemandLocked())
 	st.mu.Unlock()
 	if removed {
 		// Still queued, so the pump never took it and no delivery exists.
@@ -715,15 +843,7 @@ func (d *dispatcher) releaseAll() {
 	d.mu.RUnlock()
 	for _, st := range states {
 		st.mu.Lock()
-		for {
-			e, ok := st.queue.pop()
-			if !ok {
-				break
-			}
-			if e.waiter != nil {
-				close(e.waiter.ch)
-			}
-		}
+		st.drainLocked()
 		st.hasWaiters.Store(false)
 		st.mu.Unlock()
 	}
@@ -750,15 +870,7 @@ func (d *dispatcher) releaseTopic(topicName string) {
 		return
 	}
 	st.mu.Lock()
-	for {
-		e, ok := st.queue.pop()
-		if !ok {
-			break
-		}
-		if e.waiter != nil {
-			close(e.waiter.ch)
-		}
-	}
+	st.drainLocked()
 	for _, h := range st.holds {
 		h.timer.Stop()
 	}

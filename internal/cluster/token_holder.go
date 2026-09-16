@@ -18,6 +18,13 @@ import (
 // between the notification and the claim strands nothing: the record was
 // never taken out of circulation.
 //
+// Tokens are bounded by their TTL, which the peer sizes to its consumer's
+// remaining wait. A peer that dies keeps its tokens here until they run
+// out; the first record to arrive spends one on a notification that
+// fails, which reads as a pass, and the rest lapse unused. There is no
+// connection-scoped cleanup: a peer keeps several streams to this node
+// and any of them may close while its consumers are still parked.
+//
 // The notification is sent through the normal peer client, so it reuses
 // the existing connection pool. It is issued from a goroutine rather
 // than inline because the dispatcher's pump must never block on a peer's
@@ -75,12 +82,23 @@ func (t *peerToken) Notify(topicName string, done func(claiming bool)) bool {
 }
 
 // Expired reports that this token should leave the queue: already
-// spent, or its TTL has run out on this node's clock.
+// spent, or its TTL has run out on this node's clock. A token that ran
+// out is also dropped from the holder's index here, since nothing else
+// would: a spent one is forgotten by Notify, but a peer that stopped
+// re-registering (it went away, or its consumers did) left its last
+// token indexed for good.
 func (t *peerToken) Expired() bool {
 	t.mu.Lock()
 	spent := t.spent
 	t.mu.Unlock()
-	return spent || time.Now().After(t.expiresAt)
+	if spent {
+		return true
+	}
+	if time.Now().After(t.expiresAt) {
+		t.holder.forget(t)
+		return true
+	}
+	return false
 }
 
 // demandRegistrar is the broker surface the holder needs. *Engine (via
@@ -139,19 +157,6 @@ func (h *tokenHolder) ApplyDelta(ctx context.Context, delta nodewire.TokenDelta)
 			continue
 		}
 		h.remember(tok)
-	}
-}
-
-// DropPeer retires every token a peer holds. Tokens are connection
-// scoped, so a dead connection is the signal that they are worthless:
-// there is no TTL to wait out and no cleanup protocol to run.
-func (h *tokenHolder) DropPeer(addr string) {
-	h.mu.Lock()
-	byTopic := h.live[addr]
-	delete(h.live, addr)
-	h.mu.Unlock()
-	for topicName, tok := range byTopic {
-		h.broker.DropRemoteDemand(topicName, tok)
 	}
 }
 

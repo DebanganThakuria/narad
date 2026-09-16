@@ -99,6 +99,11 @@ func (rt *Router) SetSelfAddr(addr string) {
 // an inbound notification into a woken consumer.
 func (rt *Router) LocalDemand() *tokenRequester { return rt.tokens }
 
+// RunTokenKeeper keeps this node's tokens registered with the owners of
+// every topic that has consumers parked here, until ctx ends. Call after
+// SetSelfAddr; without a return address there is nothing to keep.
+func (rt *Router) RunTokenKeeper(ctx context.Context) { rt.tokens.Run(ctx) }
+
 // SetPeerClient makes the router forward through pc instead of the client
 // NewRouter built. A nil pc keeps the current client. Call before serving.
 func (rt *Router) SetPeerClient(pc *PeerClient) {

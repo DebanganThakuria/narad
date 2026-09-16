@@ -60,6 +60,7 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 	msg, found, _, err = e.ConsumeWait(ctx, &ConsumeWaiter{
 		topic:             topicName,
 		scan:              scan,
+		pinned:            opts.Partition,
 		scanStart:         scanStart,
 		visibilityTimeout: visibilityTimeout,
 		start:             start,
@@ -73,11 +74,42 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 // through the log's wake notifier and hands a record to whichever
 // waiter is at the head of the topic's queue.
 type ConsumeWaiter struct {
-	topic             string
-	scan              []int
+	topic string
+	// scan is the partition list the probe scanned. The pump does not
+	// reuse it (see readForWaiter); it only seeds the dispatcher's
+	// estimate of what this node owns.
+	scan []int
+	// pinned is the one partition a partition-pinned consume may take
+	// from; nil for a queue-style consume over every owned partition.
+	// The dispatcher keeps pinned waiters on their own per-partition
+	// FIFO, because one of them at the head of the shared queue would
+	// stall every waiter behind it whenever its partition was empty.
+	pinned            *int
 	scanStart         int
 	visibilityTimeout time.Duration
 	start             time.Time
+}
+
+// readForWaiter is the pump's reservation attempt for one parked
+// consumer. The partitions to scan are resolved afresh rather than
+// taken from the probe that parked it: a waiter can sit for its whole
+// wait, and in that time this node may have gained a partition of the
+// topic, which the probe's list would never look at, or lost one, which
+// a lazy log open on the probe's list would recreate as an empty
+// directory on a node that no longer owns it. ErrNotPartitionOwner and
+// ErrTopicNotFound mean nothing here can serve the waiter any more.
+func (e *Engine) readForWaiter(w *ConsumeWaiter) (topic.Message, bool, error) {
+	ctx := context.Background()
+	t, err := e.getTopic(ctx, w.topic)
+	if err != nil {
+		return topic.Message{}, false, err
+	}
+	scan, err := e.localProbePartitions(w.topic, t.Partitions, w.pinned)
+	if err != nil {
+		return topic.Message{}, false, err
+	}
+	visibility := time.Duration(t.VisibilityTimeoutMs) * time.Millisecond
+	return e.tryQueueRead(ctx, w.topic, scan, w.scanStart, visibility)
 }
 
 // ConsumeProbe is the non-blocking half of a queue-style Consume: it
@@ -193,9 +225,10 @@ func (e *Engine) ConsumeWait(ctx context.Context, w *ConsumeWaiter, wait time.Du
 // itself with an ordinary consume, so nothing is reserved on its
 // behalf and there is no give-back if it never returns.
 //
-// Registering is idempotent in effect rather than in bookkeeping: a
-// peer that wants more than one turn registers more than once, and the
-// cluster layer caps how many it may hold.
+// A token is one turn. The cluster layer keeps exactly one live token
+// per (peer, topic) and replaces it on re-registration, so a peer with
+// several consumers parked on the topic registers again after each
+// turn it spends; see cluster.Router.RouteConsumeWait.
 func (e *Engine) RegisterRemoteDemand(ctx context.Context, topicName string, rd RemoteDemand) error {
 	if rd == nil {
 		return fmt.Errorf("%w: nil remote demand", ErrInvalid)
@@ -283,11 +316,10 @@ func (e *Engine) consumeReplay(topicName string, partitionIdx int, offset int64,
 		return topic.Message{}, false, ErrNotPartitionOwner
 	}
 
-	msg, found, err := e.replayRead(topicName, partitionIdx, offset, totalPartitions)
-	if found {
-		e.recordConsumed(topicName, msg.Partition, len(msg.Payload))
-	}
-	return msg, found, err
+	// Not counted as consumed: a replay reserves nothing and settles
+	// nothing, and `narad sub --peek` is documented as invisible to the
+	// production consumers whose drain rate the counter reports.
+	return e.replayRead(topicName, partitionIdx, offset, totalPartitions)
 }
 
 // recordConsumed bumps the per-partition delivered counters.

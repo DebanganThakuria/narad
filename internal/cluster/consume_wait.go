@@ -59,7 +59,7 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 	}
 	deadline := time.Now().Add(wait)
 
-	parked, unpark := rt.tokens.park(topicName)
+	parked, unpark := rt.tokens.park(topicName, deadline)
 	defer unpark()
 	// Every owner is told at once: one round trip total, not one each.
 	rt.tokens.register(ctx, topicName, wait)
@@ -79,17 +79,28 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 
 		switch {
 		case found && err == nil:
-			// The local partitions had it. Retire the tokens left
-			// elsewhere so those owners do not spend a notification on a
-			// consumer that has been served.
-			rt.tokens.drop(ctx, topicName, "")
+			// The local partitions had it. The tokens left with the
+			// owners are shared by every consumer parked here for the
+			// topic, so they are retired only when this was the last one;
+			// otherwise the others still need the notification.
+			if _, others := rt.tokens.othersParked(topicName, parked); !others {
+				rt.tokens.drop(ctx, topicName, "")
+			}
 			writeConsumeMessage(w, msg)
 			return true
 
 		case wokeExternal:
 			from := parked.take()
 			if res, ok := rt.claimFrom(ctx, from, topicName); ok {
-				rt.tokens.drop(ctx, topicName, from)
+				// The owner spent this node's token on us. If others are
+				// still parked here, leave it a fresh one so its next
+				// record reaches them too; if not, retire the tokens at
+				// the other owners.
+				if remaining, others := rt.tokens.othersParked(topicName, parked); others {
+					rt.tokens.registerAt(ctx, topicName, from, remaining)
+				} else {
+					rt.tokens.drop(ctx, topicName, from)
+				}
 				writePeerResponse(w, res)
 				return true
 			}

@@ -74,7 +74,7 @@ flowchart LR
 | `409` | create/attach/alter | Conflict: already exists, role conflict, retention-vs-delay violation, schema `schema_base_version` no longer current, schema history full, schema of an attached child | Read the error body; for a schema conflict, re-read `schema_version` and retry with the new base |
 | `410` | ack/extend | Your lease lapsed; message was handed elsewhere | Stop working on it; expect a duplicate |
 | `413` | produce, topic create/alter | Body over 1 MiB (a schema document itself is capped at 256 KiB, answered as `400`) | Shrink the payload |
-| `503` | produce/consume/ack | Temporarily unavailable: partition owner down, acked-ahead full, quorum lost | Back off and retry |
+| `503` | produce/consume/ack | Temporarily unavailable: partition owner down, quorum lost | Back off and retry |
 
 ## Retry cheat sheet
 

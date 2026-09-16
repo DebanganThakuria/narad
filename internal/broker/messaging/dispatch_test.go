@@ -802,3 +802,98 @@ func TestParkedConsumerWakesAfterATopicRelease(t *testing.T) {
 		t.Fatal("the parked consumer was never woken after a release: the log's wake notifier points at dead state")
 	}
 }
+
+// parkPinnedConsumer parks a partition-pinned long-poll and reports its
+// outcome on the returned channel.
+func parkPinnedConsumer(t *testing.T, e *Engine, topicName string, partition int, wait time.Duration) <-chan parkedResult {
+	t.Helper()
+	out := make(chan parkedResult, 1)
+	ready := make(chan struct{})
+	go func() {
+		close(ready)
+		msg, found, err := e.Consume(context.Background(), topicName, ConsumeOpts{Partition: new(partition), Wait: wait})
+		if err != nil {
+			t.Errorf("pinned Consume() error = %v", err)
+		}
+		out <- parkedResult{msg: msg, found: found}
+	}()
+	<-ready
+	return out
+}
+
+// commitRecordsOn is commitRecords for an arbitrary partition.
+func commitRecordsOn(t *testing.T, e *Engine, topicName string, partition, n int) {
+	t.Helper()
+	log, err := e.logs.Get(topicName, partition)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	for i := range n {
+		if _, err := log.Append(storage.EncodeKeyedRecord("", 1, []byte(`{"id":1}`))); err != nil {
+			t.Fatalf("Append(%d) error = %v", i, err)
+		}
+	}
+	if err := log.AdvanceHighWatermark(log.NextOffset()); err != nil {
+		t.Fatalf("AdvanceHighWatermark() error = %v", err)
+	}
+}
+
+// TestPinnedWaiterDoesNotBlockTheTopicQueue pins the head-of-line bug: a
+// partition-pinned long-poll parked first, on a partition that stays
+// empty, must not keep the pump from serving an unpinned waiter behind
+// it when a record lands on another partition. The pump stops a FIFO at
+// the first waiter it cannot serve, so pinned waiters get a FIFO of
+// their own.
+func TestPinnedWaiterDoesNotBlockTheTopicQueue(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, VisibilityTimeoutMs: 60_000}
+	engine := newTestEngine(t, ms, nil, nil)
+
+	pinned := parkPinnedConsumer(t, engine, "orders", 1, 3*time.Second)
+	time.Sleep(100 * time.Millisecond)
+	unpinned := parkConsumer(t, engine, "orders", 3*time.Second)
+	time.Sleep(50 * time.Millisecond)
+
+	commitRecords(t, engine, "orders", 1) // partition 0
+
+	select {
+	case got := <-unpinned:
+		if !got {
+			t.Fatal("unpinned waiter returned empty with a record on partition 0")
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("unpinned waiter not served: a pinned waiter on an empty partition blocked the topic queue")
+	}
+	if r := <-pinned; r.found {
+		t.Fatalf("pinned waiter on partition 1 was handed %+v from partition %d", r.msg, r.msg.Partition)
+	}
+}
+
+// TestPinnedWaiterIsServedFromItsPartition is the other half: a pinned
+// waiter still gets the record that lands on its own partition, and it
+// gets it ahead of an unpinned waiter parked earlier, since that one can
+// be served from anywhere.
+func TestPinnedWaiterIsServedFromItsPartition(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, VisibilityTimeoutMs: 60_000}
+	engine := newTestEngine(t, ms, nil, nil)
+
+	unpinned := parkConsumer(t, engine, "orders", 2*time.Second)
+	time.Sleep(50 * time.Millisecond)
+	pinned := parkPinnedConsumer(t, engine, "orders", 1, 2*time.Second)
+	time.Sleep(100 * time.Millisecond)
+
+	commitRecordsOn(t, engine, "orders", 1, 1)
+
+	select {
+	case r := <-pinned:
+		if !r.found || r.msg.Partition != 1 {
+			t.Fatalf("pinned waiter got (found %v, partition %d), want the record on partition 1", r.found, r.msg.Partition)
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("pinned waiter not served from its own partition")
+	}
+	if got := <-unpinned; got {
+		t.Fatal("unpinned waiter was served the record the pinned waiter had precedence for")
+	}
+}

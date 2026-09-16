@@ -60,6 +60,16 @@ func (rt *Router) remoteConsumeCandidates(topicName string) []string {
 	return rotated
 }
 
+// remoteOwnerAddrsForTopic returns the topic's live remote owner
+// addresses in partition order, without touching the probe cursor.
+func (rt *Router) remoteOwnerAddrsForTopic(topicName string) []string {
+	routes, ok := rt.routesForTopic(topicName)
+	if !ok {
+		return nil
+	}
+	return rt.remoteOwnerAddrs(routes, nil)
+}
+
 // remoteOwnerAddrs appends the unique live remote owner addresses of the
 // route table to dst (in partition order) and returns it.
 func (rt *Router) remoteOwnerAddrs(routes cachedRouteTable, dst []string) []string {

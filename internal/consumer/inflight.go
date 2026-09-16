@@ -186,20 +186,23 @@ func (f *InFlight) Next(topic string, partition int) int64 {
 // redeliver the last few acked messages.
 // Reservable reports, in one lock acquisition, the next offset above the
 // committed frontier together with how many offsets above it are
-// already taken: reserved (in flight) or acked ahead of a gap. The
-// dispatcher's pump gates remote notifications on it, so it must not
-// cost the two shard lookups Next plus Snapshot would.
-func (f *InFlight) Reservable(topic string, partition int) (next int64, inFlight, ackedAhead int) {
+// already taken: reserved (in flight) or acked ahead of a gap. ok is
+// false when this node holds no shard for the partition (nothing has
+// touched it since the process started); the frontier then lives only
+// in the persisted consumer.offset. The dispatcher's pump gates remote
+// notifications on it, so it must not cost the two shard lookups Next
+// plus Snapshot would.
+func (f *InFlight) Reservable(topic string, partition int) (next int64, inFlight, ackedAhead int, ok bool) {
 	sh := f.shard(topic, partition)
 	if sh == nil {
-		return 0, 0, 0
+		return 0, 0, 0, false
 	}
 	sh.mu.Lock()
 	next = sh.committed + 1
 	inFlight = len(sh.entries)
 	ackedAhead = len(sh.ackedAhead)
 	sh.mu.Unlock()
-	return next, inFlight, ackedAhead
+	return next, inFlight, ackedAhead, true
 }
 
 func (f *InFlight) CommittedOffset(topic string, partition int) (int64, bool) {

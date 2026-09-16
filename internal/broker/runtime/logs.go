@@ -280,6 +280,26 @@ func (g *Logs) Peek(topicName string, idx int) (*storage.Log, bool) {
 	return e.log, true
 }
 
+// PeekHighWatermark returns the partition's visible tail without
+// opening its log: the live high-watermark when the log is open, else
+// the persisted one on disk. ok is false when neither exists (no log
+// was ever opened for the partition here, or its directory is gone).
+// The persisted boundary is exact for a cleanly closed log and lags
+// only after a crash. Observers use it where Peek's "closed means
+// nothing" would hide a backlog nobody has read since a restart or an
+// idle eviction, and reading the file rather than opening the log keeps
+// observation from resurrecting a deleted topic's directory.
+func (g *Logs) PeekHighWatermark(topicName string, idx int) (int64, bool) {
+	if l, ok := g.Peek(topicName, idx); ok {
+		return l.HighWatermark(), true
+	}
+	hwm, ok, err := storage.ReadPersistedHighWatermark(storage.TopicPartitionDir(g.dataDir, topicName, idx))
+	if err != nil || !ok {
+		return 0, false
+	}
+	return hwm, true
+}
+
 // CloseTopic flushes and closes every cached log under the given
 // topic. Subsequent Get calls reopen with whatever options reflect
 // the current metastore record. Returns the first close error, if

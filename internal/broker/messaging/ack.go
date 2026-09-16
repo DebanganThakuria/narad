@@ -2,7 +2,6 @@ package messaging
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -26,13 +25,7 @@ func (e *Engine) Ack(ctx context.Context, topicName string, h consumer.Handle) e
 		return err
 	}
 
-	if err := e.offsets.CommitHandle(topicName, h.Partition, h.Offset, h.Nonce); err != nil {
-		if errors.Is(err, consumer.ErrAckedAheadFull) && e.metrics != nil {
-			e.metrics.IncAckRejected("cap")
-		}
-		return err
-	}
-	return nil
+	return e.offsets.CommitHandle(topicName, h.Partition, h.Offset, h.Nonce)
 }
 
 // ExtendAck renews the visibility window of a reserved message to a

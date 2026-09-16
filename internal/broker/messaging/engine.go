@@ -166,7 +166,13 @@ func NewEngine(
 		// become deliverable. Installed at open time because a log has no
 		// idea which topic it belongs to; the closure carries that.
 		logs.SetOpened(func(topicName string, _ int, l *storage.Log) {
-			l.SetWakeNotifier(e.dispatch.wakeNotifier(topicName))
+			wake := e.dispatch.wakeNotifier(topicName)
+			l.SetWakeNotifier(wake)
+			// Opening a log is itself a wake: the records it holds were
+			// invisible to the pump's estimate while it was closed (a
+			// restart, an idle eviction), and demand registered meanwhile
+			// would otherwise wait for the next commit to learn of them.
+			wake()
 		})
 	}
 	return e

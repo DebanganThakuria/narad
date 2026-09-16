@@ -105,3 +105,30 @@ func TestQUICClientTLSConfigUsesClusterVerifier(t *testing.T) {
 		t.Fatalf("server MinVersion = 0x%04x, want TLS 1.3", srv.MinVersion)
 	}
 }
+
+// The server certificate is minted once per process and never renewed,
+// and the client refuses an expired one. A node up for longer than the
+// lifetime therefore cannot be dialled by anybody, and once every node
+// has been, the data plane is partitioned until something restarts. The
+// lifetime was 24 hours; this pins it at a year and keeps the backdate
+// that tolerates a peer clock running behind.
+func TestServerCertificateOutlivesAnyProcess(t *testing.T) {
+	cfg, err := quicServerTLSConfig(false)
+	if err != nil {
+		t.Fatalf("quicServerTLSConfig: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(cfg.Certificates[0].Certificate[0])
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	now := time.Now()
+	if leaf.NotAfter.Before(now.Add(364 * 24 * time.Hour)) {
+		t.Fatalf("NotAfter = %v, want at least a year out (a 24h certificate partitioned a cluster after one day of uptime)", leaf.NotAfter)
+	}
+	if leaf.NotBefore.After(now.Add(-30 * time.Minute)) {
+		t.Fatalf("NotBefore = %v, want backdated so a peer clock behind ours still accepts it", leaf.NotBefore)
+	}
+	if err := verifyClusterPeerCertificate([][]byte{leaf.Raw}, nil); err != nil {
+		t.Fatalf("freshly minted certificate rejected by the client verifier: %v", err)
+	}
+}
