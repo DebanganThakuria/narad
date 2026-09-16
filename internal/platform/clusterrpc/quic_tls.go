@@ -42,15 +42,12 @@ const quicClientSessionCacheSize = 64
 
 // clusterCertLifetime is how long the certificate a node presents on its
 // cluster RPC listener stays valid. Nothing renews it while the process
-// runs, and the dialling side refuses an expired one, so the lifetime
-// must exceed any process lifetime a deployment will see. It was 24
-// hours: every node that stayed up longer than a day became undialable
-// by its peers, and once all of them had, the whole data plane was
-// partitioned with nothing but a restart to clear it. The certificate
-// carries no trust (membership is the per-stream secret proof, auth.go)
-// and its key never leaves the process, so a long lifetime costs
-// nothing. A year is longer than any node is left running between
-// releases.
+// runs. Dialers on this release no longer check the dates at all (see
+// verifyClusterPeerCertificate), so the lifetime only matters to peers
+// on releases that still do: it was 24 hours, and every node that
+// stayed up longer than a day became undialable by such peers, until
+// the whole data plane was partitioned with nothing but a restart to
+// clear it. A year keeps a mixed-version roll from hitting that.
 const clusterCertLifetime = 365 * 24 * time.Hour
 
 // quicServerTLSConfig generates an ephemeral self-signed certificate at
@@ -128,11 +125,19 @@ func newSelfSignedClusterClientTLS(allowLegacy bool) *tls.Config {
 // verifyClusterPeerCertificate is the client-side certificate check for
 // the cluster RPC transport. It replaces the default chain verification
 // (there is no CA: peers use ephemeral self-signed certificates) with
-// the checks that are meaningful here: exactly one currently valid
-// self-signed leaf whose signature verifies under its own public key,
-// which proves the peer holds the private key for the certificate it
-// presented. Membership itself is proven by the per-stream cluster-secret
-// HMAC. verifiedChains is always nil on this path.
+// the checks that are meaningful here: exactly one self-signed leaf
+// whose signature verifies under its own public key, which proves the
+// peer holds the private key for the certificate it presented.
+// Membership itself is proven by the per-stream cluster-secret HMAC.
+// verifiedChains is always nil on this path.
+//
+// The certificate's validity dates are deliberately NOT checked. The
+// certificate carries no trust, so its dates carry none either; the
+// only thing enforcing them ever did was partition a cluster once its
+// nodes had been up longer than the lifetime minted at startup, and
+// refuse a peer whose clock ran ahead of the minting node's. A peer
+// that could present a forged certificate could present one with valid
+// dates just as easily, so the check protected nothing.
 func verifyClusterPeerCertificate(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 	if len(rawCerts) != 1 {
 		return fmt.Errorf("cluster rpc: peer presented %d certificates, want exactly one ephemeral self-signed leaf", len(rawCerts))
@@ -140,10 +145,6 @@ func verifyClusterPeerCertificate(rawCerts [][]byte, _ [][]*x509.Certificate) er
 	leaf, err := x509.ParseCertificate(rawCerts[0])
 	if err != nil {
 		return fmt.Errorf("cluster rpc: parse peer certificate: %w", err)
-	}
-	now := time.Now()
-	if now.Before(leaf.NotBefore) || now.After(leaf.NotAfter) {
-		return fmt.Errorf("cluster rpc: peer certificate not valid at %s (valid %s to %s)", now.Format(time.RFC3339), leaf.NotBefore.Format(time.RFC3339), leaf.NotAfter.Format(time.RFC3339))
 	}
 	// Self-signed: the certificate's signature must verify under its own
 	// public key (CheckSignatureFrom would additionally demand a CA
