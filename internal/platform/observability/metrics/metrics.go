@@ -174,7 +174,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		MessagesConsumedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Name:      "messages_consumed_total",
-			Help:      "Messages returned by Consume (queue or replay).",
+			Help:      "Messages handed to queue consumers. Replay reads (narad sub --peek) are not counted.",
 		}, []string{"topic", "partition"}),
 
 		BytesProducedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
