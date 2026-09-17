@@ -1,0 +1,6 @@
+CONTRIBUTING.md
+  9a24376c-2c58-47ca-a53b-7be39ff58dd7:2026-09-17T14:34:43.667Z 11,27,30-33,35-37,39-42
+docs/operate/index.md
+  9a24376c-2c58-47ca-a53b-7be39ff58dd7:2026-09-17T14:34:43.667Z 58,60-62,64-68,70-72,74-75
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"9a24376c-2c58-47ca-a53b-7be39ff58dd7:2026-09-17T14:34:43.667Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 13, "overriden_lines": 0}}}
