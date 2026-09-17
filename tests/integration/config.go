@@ -41,6 +41,7 @@ func parseConfigTo(w io.Writer, args []string) (config, error) {
 	flagSet.DurationVar(&cfg.reportEvery, "report-every", 10*time.Second, "steady mode: progress report interval")
 	flagSet.BoolVar(&cfg.fatalDupAfterAck, "fatal-dup-after-ack", true, "steady mode: abort on a message redelivered after its ack (off for broker-restart runs; the count is still reported)")
 	flagSet.BoolVar(&cfg.noSchema, "no-schema", false, "create topics without a message schema (measures the cost of produce-side schema validation)")
+	flagSet.StringVar(&cfg.historyPath, "history", "", "steady mode: write a JSONL operation history to this path for tests/linearizability to check")
 	if err := flagSet.Parse(args); err != nil {
 		return cfg, err
 	}

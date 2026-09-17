@@ -16,9 +16,13 @@ summarized more briefly than the 1.x and later entries.
 - Container images are signed with Sigstore cosign (keyless, no long-lived key) and carry an SBOM and SLSA build provenance. This starts with the first image built after the v3.0.1 release; verifying an earlier tag fails because those images were published without them.
 - A `govulncheck` job in CI, run on every pull request and weekly against the latest vulnerability database, so an advisory against a dependency surfaces without waiting for a code change.
 - `scripts/check-release-refs.sh`, wired into `make check` and CI, which fails when a pinned image tag in the documentation has drifted from the newest release tag.
+- A nightly linearizability check. A three-node cluster takes load while nodes are killed and cut off from their peers on the cluster plane; every client operation is recorded with the interval it was in flight for, and the history is checked against a sequential specification of the delivery contract. A message redelivered after a confirmed ack now has to sit inside a fault window, and one that does not fails the run. A second leg injects no faults and runs strict, which asserts that a healthy broker never redelivers an acked message.
+- The load driver records an operation history with `--history`, in a format shared with the checker (`tests/linearizability/history`).
+- Documentation for all of it, including what the check cannot catch: [Checking the Delivery Contract](docs/internals/linearizability.md).
 
 ### Changed
 - Released images report their release version from `narad version` instead of a commit SHA.
+- The formatters are pinned rather than installed at `@latest`, and CI now runs the format check. A formatter that moves version on its own reformats files nobody touched, and the first person to find out is whoever's unrelated pull request fails; a file had already drifted on `master`, so the documented `make check` failed for anyone who ran it.
 - `SECURITY.md` states which versions receive fixes, target response times, and which documented configurations are out of scope, replacing a supported-versions note that still described the project as pre-1.0.
 - The README carries a project status section: what the tests cover, and the three structural limits (no ordering guarantee, no synchronous replication, months of track record rather than years).
 

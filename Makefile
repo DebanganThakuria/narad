@@ -135,10 +135,17 @@ local-monitoring-stop: ## Stop local Prometheus. Pass ARGS='--grafana' to stop H
 
 # ---- developer setup -----------------------------------------------------
 
+# Pinned, not @latest. A formatter that silently moves version reformats
+# files nobody touched, and the first person to notice is whoever's
+# unrelated pull request suddenly fails the format check. Bumping these
+# is a deliberate change with its own diff.
+GOFUMPT_VERSION   ?= v0.7.0
+GOIMPORTS_VERSION ?= v0.50.0
+
 .PHONY: tools-install
-tools-install: ## Install gofumpt and goimports to $(go env GOPATH)/bin.
-	$(GO) install mvdan.cc/gofumpt@latest
-	$(GO) install golang.org/x/tools/cmd/goimports@latest
+tools-install: ## Install the pinned gofumpt and goimports to $(go env GOPATH)/bin.
+	$(GO) install mvdan.cc/gofumpt@$(GOFUMPT_VERSION)
+	$(GO) install golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
 
 # ---- housekeeping --------------------------------------------------------
 

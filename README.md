@@ -84,7 +84,7 @@ Three limits are structural rather than unfinished, and they are the ones to wei
 
 - **No ordering guarantee.** Five documented mechanisms reorder. Carry a sequence in the payload if you need one, and make handlers idempotent, which at-least-once already requires. See [Guarantees](https://debanganthakuria.github.io/narad/client/guarantees-and-errors/).
 - **No synchronous replication.** Partitions have a single owner. Losing a node's volume loses that node's unreplicated data, so volume snapshots and the async [replica pattern](https://debanganthakuria.github.io/narad/client/fanout-and-delay/) are the tools against disk loss. This is the top item on the roadmap.
-- **Months of track record, not years.** The evidence is the project's own chaos matrix and soaks, self-administered, and worth exactly that.
+- **Months of track record, not years.** The evidence is the project's own test suites, self-administered, and worth exactly that. Every night a three-node cluster takes load while nodes are killed and cut off from their peers, and a [linearizability checker](https://debanganthakuria.github.io/narad/internals/linearizability/) requires every anomaly to be accounted for. That is a real gate. It is not the same as years of other people's production traffic.
 
 The full concession list, with what to pick instead when one of these is a hard requirement,
 is in [Compare](https://debanganthakuria.github.io/narad/compare/). Which versions get

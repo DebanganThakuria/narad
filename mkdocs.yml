@@ -95,3 +95,4 @@ nav:
       - Cluster Lifecycle: internals/cluster-lifecycle.md
       - Rebalance & Decommission: internals/rebalance.md
       - Networking & Security: internals/networking-and-security.md
+      - Checking the Delivery Contract: internals/linearizability.md

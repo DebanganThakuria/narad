@@ -31,6 +31,15 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Formatting was checked only by `make check` on developer
+      # machines, so a file drifted out of format on master and the
+      # documented `make check` failed for everyone who ran it.
+      - name: Install the pinned formatters
+        run: make tools-install
+
+      - name: gofmt / goimports check
+        run: make fmt-check
+
       - name: go vet
         run: go vet ./...
 
