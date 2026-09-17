@@ -55,6 +55,25 @@ kubectl get pods -n narad -w
 
 That's the install. Really. (Every knob: [Helm Chart Reference](helm-chart.md).)
 
+## Verifying the image
+
+Published images are signed keyless with [cosign](https://github.com/sigstore/cosign) and
+carry an SBOM and build provenance, all produced by the publishing workflow with no
+long-lived key. Check a tag before you run it:
+
+```bash
+cosign verify ghcr.io/debanganthakuria/narad:v3.0.1 \
+  --certificate-identity-regexp '^https://github\.com/DebanganThakuria/narad/\.github/workflows/container\.yml@refs/(heads/master|tags/v.*)$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+The identity is pinned to one workflow file on `master` or a release tag, not just to the
+repository. Matching the repository alone would accept a signature from any workflow on any
+branch, which is a weaker claim than it looks.
+
+Signing, SBOM, and provenance start with the first image built after the `v3.0.1` release;
+verifying an earlier tag fails because those images were published without them.
+
 ## Ports and probes
 
 | Port | Protocol | What |

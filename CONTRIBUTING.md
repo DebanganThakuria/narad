@@ -8,6 +8,7 @@ Thanks for contributing to Narad.
 - Keep pull requests focused. Small, reviewable changes are easier to land than broad refactors.
 - If the change affects behavior, tests are expected in the same pull request.
 - Use `SUPPORT.md` for questions and troubleshooting paths.
+- Participation is covered by the [Code of Conduct](./CODE_OF_CONDUCT.md).
 
 ## Development setup
 
@@ -23,7 +24,22 @@ Useful targeted commands:
 go test ./cmd/narad
 go test ./internal/...
 go test ./tests/e2e/... -race
+go test ./tests/linearizability/...
 ```
+
+One suite does not run under `make test`: the nightly delivery-contract
+check. It starts a three-node cluster on loopback, kills and partitions
+nodes under load, and checks the recorded history against a sequential
+specification of at-least-once delivery.
+
+```sh
+./scripts/linearizability-nightly.sh
+```
+
+Partition faults need `iptables` and passwordless `sudo`; without them it
+injects kills only, which is the normal case on a laptop. The verdicts, the
+flags, and what the check does not catch are in
+[Checking the Delivery Contract](https://debanganthakuria.github.io/narad/internals/linearizability/).
 
 ## Coding guidelines
 
