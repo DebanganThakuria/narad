@@ -102,8 +102,12 @@ fmt-check: ## Strict format check (no rewrites; suitable for CI).
 tidy: ## go mod tidy.
 	$(GO) mod tidy
 
+.PHONY: check-release-refs
+check-release-refs: ## Fail if a pinned image version in the docs has drifted from the newest release tag.
+	./scripts/check-release-refs.sh
+
 .PHONY: check
-check: fmt-check vet test ## Strict check: fmt-check + vet + test (no auto-fix).
+check: fmt-check vet check-release-refs test ## Strict check: fmt-check + vet + docs versions + test (no auto-fix).
 
 .PHONY: local-cluster-e2e
 local-cluster-e2e: ## Run a local 3-node cluster integration/load test. Pass ARGS='--topics 10 --messages 1000' to override.

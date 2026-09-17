@@ -1,6 +1,7 @@
 # Narad
 
 [![CI](https://github.com/DebanganThakuria/narad/actions/workflows/ci.yml/badge.svg)](https://github.com/DebanganThakuria/narad/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/DebanganThakuria/narad?sort=semver)](https://github.com/DebanganThakuria/narad/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/DebanganThakuria/narad)](./go.mod)
 
@@ -15,7 +16,7 @@ child topics, retained logs make replay a read, and topics can enforce a JSON Sc
 broker. Raft keeps the metadata, Prometheus gets the metrics, and the whole thing runs on a
 laptop unchanged from how it runs in Kubernetes.
 
-Current release: **[v2.2.0](https://github.com/DebanganThakuria/narad/releases/tag/v2.2.0)**.
+[Changelog](./CHANGELOG.md) · [Releases](https://github.com/DebanganThakuria/narad/releases/latest) · [Project status](#project-status) · [Maintainers](./MAINTAINERS.md)
 
 ## Documentation
 
@@ -53,12 +54,41 @@ Terminate TLS at an ingress in front of Narad. Details in
 ## Container image
 
 ```sh
-docker run --rm -p 7942:7942 -p 7943:7943 ghcr.io/debanganthakuria/narad:v2.2.0
+docker run --rm -p 7942:7942 -p 7943:7943 ghcr.io/debanganthakuria/narad:v3.0.1
 ```
 
 Port `7942` is the API, `7943` is cluster traffic, `/var/lib/narad` is the data directory.
 Images are multi-arch, non-root, and published for every tag and every commit on `master`.
 For Kubernetes use the [Helm chart](https://debanganthakuria.github.io/narad/operate/helm-chart/).
+
+Images carry a signature, an SBOM, and build provenance, all produced by the publishing
+workflow with no long-lived key. Verify before you run:
+
+```sh
+cosign verify ghcr.io/debanganthakuria/narad:latest \
+  --certificate-identity-regexp '^https://github\.com/DebanganThakuria/narad/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Signing, SBOM, and provenance start with the first image built after the `v3.0.1` release;
+verifying an earlier tag fails because those images were published without them.
+
+## Project status
+
+Narad has been public since June 2026 and is on its third major release. The delivery
+contract, the storage engine, and cluster membership are covered by unit, end-to-end, fault
+injection, and chaos suites that run on every pull request. It is used in a development
+cluster, not yet at scale in production by anyone the project knows of.
+
+Three limits are structural rather than unfinished, and they are the ones to weigh:
+
+- **No ordering guarantee.** Five documented mechanisms reorder. Carry a sequence in the payload if you need one, and make handlers idempotent, which at-least-once already requires. See [Guarantees](https://debanganthakuria.github.io/narad/client/guarantees-and-errors/).
+- **No synchronous replication.** Partitions have a single owner. Losing a node's volume loses that node's unreplicated data, so volume snapshots and the async [replica pattern](https://debanganthakuria.github.io/narad/client/fanout-and-delay/) are the tools against disk loss. This is the top item on the roadmap.
+- **Months of track record, not years.** The evidence is the project's own chaos matrix and soaks, self-administered, and worth exactly that.
+
+The full concession list, with what to pick instead when one of these is a hard requirement,
+is in [Compare](https://debanganthakuria.github.io/narad/compare/). Which versions get
+security fixes is in [SECURITY.md](./SECURITY.md).
 
 ## Developing
 
@@ -71,6 +101,9 @@ make build           # bin/narad
 The layout is under `cmd/narad` (CLI and server entry point) and `internal/` (broker, cluster,
 persistence, transport). Start with
 [Architecture](https://debanganthakuria.github.io/narad/internals/) before reading code.
+
+Contributions are welcome: see [CONTRIBUTING.md](./CONTRIBUTING.md) for the workflow and
+[MAINTAINERS.md](./MAINTAINERS.md) for who reviews them and how fast to expect an answer.
 
 ## License
 

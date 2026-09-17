@@ -163,7 +163,7 @@ No Kubernetes required for a test drive:
 ```bash
 docker run -p 7942:7942 -v narad-data:/var/lib/narad \
   -e NARAD_SECURITY_ENABLED=false \
-  ghcr.io/debanganthakuria/narad:v0.2.0-beta.3
+  ghcr.io/debanganthakuria/narad:v3.0.1
 curl -X POST "localhost:7942/v1/topics" -d '{"name":"hello","partitions":3}' -H "Content-Type: application/json"
 ```
 
