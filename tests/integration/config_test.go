@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -11,9 +12,9 @@ import (
 // scripts/local-cluster-chaos.sh, make cluster-load) rely on.
 
 func TestParseConfigDefaultsParse(t *testing.T) {
-	cfg, err := parseConfig(nil)
+	cfg, err := parseConfigTo(io.Discard, nil)
 	if err != nil {
-		t.Fatalf("parseConfig(nil): %v", err)
+		t.Fatalf("parseConfigTo(io.Discard, nil): %v", err)
 	}
 	if cfg.mode != modeLoad {
 		t.Fatalf("default mode = %q, want %q", cfg.mode, modeLoad)
@@ -30,7 +31,7 @@ func TestParseConfigDefaultsParse(t *testing.T) {
 }
 
 func TestParseConfigExplicitValues(t *testing.T) {
-	cfg, err := parseConfig([]string{
+	cfg, err := parseConfigTo(io.Discard, []string{
 		"--mode", "chaos",
 		"--nodes", "127.0.0.1:18081/, http://127.0.0.1:18082,,",
 		"--timeout", "30s",
@@ -71,7 +72,7 @@ func TestValidMode(t *testing.T) {
 }
 
 func TestParseConfigRejectsSoakMode(t *testing.T) {
-	_, err := parseConfig([]string{"--mode", "soak"})
+	_, err := parseConfigTo(io.Discard, []string{"--mode", "soak"})
 	if err == nil {
 		t.Fatal("expected --mode soak to be rejected")
 	}
@@ -85,7 +86,7 @@ func TestParseConfigRejectsNonPositiveTimeoutInEveryMode(t *testing.T) {
 	// mode; now it is never legal, whatever the mode.
 	for _, mode := range []string{modeLoad, modeChaos, modeSteady, modeXnode, modeEdge} {
 		for _, timeout := range []string{"0", "0s", "-1s"} {
-			_, err := parseConfig([]string{"--mode", mode, "--timeout", timeout})
+			_, err := parseConfigTo(io.Discard, []string{"--mode", mode, "--timeout", timeout})
 			if err == nil {
 				t.Errorf("mode=%s timeout=%s: expected an error", mode, timeout)
 				continue
@@ -103,7 +104,7 @@ func TestParseConfigRemovedSoakFlagsAreUnknown(t *testing.T) {
 		{"--rate-scale", "0.2"},
 		{"--soak-profiles", "firehose"},
 	} {
-		_, err := parseConfig(args)
+		_, err := parseConfigTo(io.Discard, args)
 		if err == nil {
 			t.Errorf("%v: expected a flag parse error", args)
 			continue
@@ -129,7 +130,7 @@ func TestParseConfigOtherValidationStillApplies(t *testing.T) {
 		{[]string{"--visibility-timeout", "0"}, "--visibility-timeout must be > 0"},
 	}
 	for _, tc := range cases {
-		_, err := parseConfig(tc.args)
+		_, err := parseConfigTo(io.Discard, tc.args)
 		if err == nil || err.Error() != tc.want {
 			t.Errorf("%v: error = %v, want %q", tc.args, err, tc.want)
 		}

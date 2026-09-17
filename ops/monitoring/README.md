@@ -6,11 +6,14 @@ local Narad cluster, plus the source of the devstack `narad-stage` dashboard.
 Start three nodes yourself (`make local-cluster-e2e` tears its cluster down
 when the driver exits, so it is not what you want here). Each node gets a
 dedicated metrics listener on 9101-9103, which is what `prometheus.yml`
-scrapes, and a pprof listener on 6061-6063:
+scrapes, and a pprof listener on 6061-6063. Auth and cluster TLS are off
+here only because every address is 127.0.0.1; do not reuse these flags on
+a routable address.
 
 ```bash
 make build
 mkdir -p tmp/local-monitoring/logs
+: > tmp/local-monitoring/narad.pids
 PEERS="narad-1@127.0.0.1:19081,narad-2@127.0.0.1:19082,narad-3@127.0.0.1:19083"
 for i in 1 2 3; do
   NARAD_NODE_ID="narad-$i" \
@@ -24,6 +27,7 @@ for i in 1 2 3; do
   NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true \
   NARAD_SECURITY_ALLOW_INSECURE_CLUSTER=true \
     bin/narad serve >"tmp/local-monitoring/logs/narad-$i.log" 2>&1 &
+  echo $! >> tmp/local-monitoring/narad.pids
 done
 ```
 
@@ -92,7 +96,7 @@ Stop Prometheus, then the nodes:
 
 ```bash
 make local-monitoring-stop
-pkill -f 'bin/narad serve'
+kill $(cat tmp/local-monitoring/narad.pids)
 ```
 
 ## Devstack dashboard (Narad Stage)

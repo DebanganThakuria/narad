@@ -4,8 +4,8 @@ on:
   push:
     branches: [master]
     # Nothing the root .dockerignore drops from the build context (docs,
-    # brand assets, charts, tests, markdown) can change the image; don't
-    # burn a build+publish on it. Tag pushes always build.
+    # brand assets, charts, tests, scripts, ops, markdown) can change the
+    # image; don't burn a build+publish on it. Tag pushes always build.
     paths-ignore:
       - "docs/**"
       - "assets/**"
