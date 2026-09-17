@@ -1,0 +1,6 @@
+CHANGELOG.md
+  9a24376c-2c58-47ca-a53b-7be39ff58dd7:2026-09-17T16:10:09.465Z 35-36
+go.mod
+  9a24376c-2c58-47ca-a53b-7be39ff58dd7:2026-09-17T16:09:40.397Z 3
+---
+{"schema_version": "authorship/3.0.0", "base_commit_sha": "HEAD~1", "prompts": {"9a24376c-2c58-47ca-a53b-7be39ff58dd7:2026-09-17T16:10:09.465Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 2, "overriden_lines": 0}, "9a24376c-2c58-47ca-a53b-7be39ff58dd7:2026-09-17T16:09:40.397Z": {"agent_id": {"tool": "claude_code", "model": ""}, "human_author": "debangan.thakuria@razorpay.com", "accepted_lines": 1, "overriden_lines": 0}}}
