@@ -63,9 +63,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # Pinned to an exact release: cosign-installer publishes no
-      # floating major tag, so `@v4` does not resolve. Dependabot keeps
-      # this current along with the other actions.
+      # Pinned to an exact release. A floating major tag is mutable, and
+      # this job holds the OIDC token that mints signatures, so it is the
+      # last place to accept a moving target. Upstream has not cut a `v4`
+      # tag in any case. Dependabot keeps this current.
       - name: Install cosign
         uses: sigstore/cosign-installer@v4.1.2
 
@@ -124,7 +125,7 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           cosign verify "${IMAGE}@${DIGEST}" \
-            --certificate-identity-regexp "^https://github\.com/${GITHUB_REPOSITORY}/" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/container.yml@${GITHUB_REF}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             > /dev/null
           echo "Signed and verified: ${IMAGE}@${DIGEST}"

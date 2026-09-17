@@ -17,7 +17,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 readonly IMAGE="ghcr.io/debanganthakuria/narad"
-readonly PATTERN="${IMAGE}:v[0-9]+\.[0-9]+\.[0-9]+"
+# The pre-release suffix is part of the match on purpose. Without it the
+# pattern has no right anchor, so a docs pin of v1.2.0-rc.1 matched only
+# as far as "v1.2.0" and compared equal to a v1.2.0 release: the one
+# thing the comment below says must never happen would have passed.
+#
+# The suffix is spelled as dot-separated alphanumeric groups rather than
+# "anything that is not whitespace", so ordinary punctuation after a
+# reference is not swallowed into the version. A ref that ends a
+# sentence, or sits inside a Markdown link, would otherwise read as
+# "v3.0.1." or "v3.0.1](https://..." and fail against a correct v3.0.1.
+readonly PATTERN="${IMAGE}:v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?"
 
 # Stable tags only: a pre-release (v1.0.0-rc.1) must never become the
 # version the docs tell people to run.
@@ -43,13 +53,20 @@ fi
 failed=0
 while IFS= read -r hit; do
 	[[ -n "${hit}" ]] || continue
-	# hit is path:line:content; pull the version out of the content.
-	found="$(printf '%s' "${hit}" | grep -oE "${PATTERN}" | head -1 | sed "s|${IMAGE}:||")"
+	# hit is path:line:content. grep -rnE reports one line per source
+	# line, not per match, so a line carrying two pins has to be checked
+	# twice: taking only the first let a stale second pin through.
 	location="$(printf '%s' "${hit}" | cut -d: -f1,2)"
-	if [[ "${found}" != "${latest}" ]]; then
-		echo "${location}: pins ${found}, newest release is ${latest}"
-		failed=1
-	fi
+	while IFS= read -r found; do
+		[[ -n "${found}" ]] || continue
+		found="${found#"${IMAGE}":}"
+		if [[ "${found}" != "${latest}" ]]; then
+			echo "${location}: pins ${found}, newest release is ${latest}"
+			failed=1
+		fi
+	done <<INNER
+$(printf '%s' "${hit}" | grep -oE "${PATTERN}" || true)
+INNER
 done <<EOF
 ${hits}
 EOF

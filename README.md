@@ -86,9 +86,13 @@ workflow with no long-lived key. Verify before you run:
 
 ```sh
 cosign verify ghcr.io/debanganthakuria/narad:latest \
-  --certificate-identity-regexp '^https://github\.com/DebanganThakuria/narad/' \
+  --certificate-identity-regexp '^https://github\.com/DebanganThakuria/narad/\.github/workflows/container\.yml@refs/(heads/master|tags/v.*)$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
+
+The identity is pinned to one workflow file on `master` or a release tag, not just to
+the repository. Matching the repository alone would accept a signature from any workflow
+on any branch, which is a weaker claim than it looks.
 
 Signing, SBOM, and provenance start with the first image built after the `v3.0.1` release;
 verifying an earlier tag fails because those images were published without them.

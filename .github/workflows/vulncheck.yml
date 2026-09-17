@@ -35,11 +35,14 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Deliberately @latest rather than pinned: a scanner pinned to an
-      # old version reports an old view of the vulnerability database,
-      # which is the one failure this job exists to prevent.
+      # Pinned, like the formatters in the Makefile. govulncheck fetches
+      # the advisory data from vuln.go.dev at scan time, so pinning the
+      # binary costs nothing in database freshness. What it buys is a
+      # required status check that cannot start failing on every open PR
+      # because upstream cut a release, and one less unpinned third-party
+      # binary running in CI.
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
 
       - name: Scan module
         run: govulncheck ./...
