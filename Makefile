@@ -121,16 +121,8 @@ cluster-load: ## Run the integration/load driver against existing nodes. Use NAR
 	fi
 	$(GO) run ./tests/integration --nodes "$(NARAD_NODES)" $(ARGS)
 
-.PHONY: local-soak-cluster
-local-soak-cluster: ## Start a persistent local 3-node cluster for soak/perf testing.
-	./scripts/local-soak-cluster.sh
-
-.PHONY: local-soak-stop
-local-soak-stop: ## Stop the persistent local soak cluster, keeping data/logs.
-	./scripts/local-soak-stop.sh
-
 .PHONY: local-monitoring-start
-local-monitoring-start: ## Start local Prometheus and import the Grafana soak dashboard.
+local-monitoring-start: ## Start local Prometheus and import the Grafana dashboards.
 	./scripts/local-monitoring-start.sh
 
 .PHONY: local-monitoring-stop
