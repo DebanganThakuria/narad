@@ -1,6 +1,6 @@
 module github.com/debanganthakuria/narad
 
-go 1.26.0
+go 1.26.6
 
 require (
 	github.com/anishathalye/porcupine v1.3.0

@@ -32,6 +32,9 @@ summarized more briefly than the 1.x and later entries.
 - `SECURITY.md` states which versions receive fixes, target response times, and which documented configurations are out of scope, replacing a supported-versions note that still described the project as pre-1.0.
 - The README carries a project status section: what the tests cover, and the three structural limits (no ordering guarantee, no synchronous replication, months of track record rather than years).
 
+### Security
+- The Go toolchain is pinned to 1.26.6, which carries fixes for four standard-library advisories the new `govulncheck` job found on its first run against 1.26.0: quadratic complexity in `net/url` path resolution (GO-2026-6218), unbounded post-handshake messages in `crypto/tls` (GO-2026-6090), `ReadHeaderTimeout` not applied during the unencrypted HTTP/2 check in `net/http` (GO-2026-6089), and unbounded recursion in `encoding/asn1` (GO-2026-5972).
+
 ### Fixed
 - Stale version references in the documentation. The README advertised v2.2.0 and the deployment page told people to run a v0.2.0 beta image, five releases after it was superseded.
 - A link on the schemas page that pointed at an anchor on a different page, so it silently went nowhere.
