@@ -15,8 +15,8 @@
 //
 //	linearizability -history run.jsonl [-faults faults.jsonl] [flags]
 //
-// Exit codes: 0 for OK and OVERDUE, 1 for ANOMALY, VIOLATION and
-// UNKNOWN, 2 for a usage or I/O error.
+// Exit codes: 0 for OK and OVERDUE, 1 for ANOMALY, STALLED, VIOLATION
+// and UNKNOWN, 2 for a usage or I/O error.
 package main
 
 import (
@@ -38,16 +38,18 @@ func main() {
 
 func run(args []string) error {
 	var (
-		historyPath   string
-		faultsPath    string
-		strict        bool
-		grace         time.Duration
-		timeout       time.Duration
-		samples       int
-		minOperations int
-		jsonPath      string
-		markdownPath  string
-		visualizePath string
+		historyPath      string
+		faultsPath       string
+		strict           bool
+		grace            time.Duration
+		timeout          time.Duration
+		samples          int
+		minOperations    int
+		maxOverdue       float64
+		maxFaultCoverage float64
+		jsonPath         string
+		markdownPath     string
+		visualizePath    string
 	)
 	flags := flag.NewFlagSet("linearizability", flag.ContinueOnError)
 	flags.StringVar(&historyPath, "history", "", "JSONL operation history written by the load driver (required)")
@@ -57,6 +59,8 @@ func run(args []string) error {
 	flags.DurationVar(&timeout, "timeout", 5*time.Minute, "bound on the linearizability search")
 	flags.IntVar(&samples, "samples", 20, "how many examples of each finding to print")
 	flags.IntVar(&minOperations, "min-operations", 1, "report UNKNOWN rather than OK below this many checked operations; a run that recorded nothing proves nothing")
+	flags.Float64Var(&maxOverdue, "max-overdue", 0.05, "report STALLED rather than OVERDUE above this fraction of messages left undelivered or unacked; past it the reading is a broken ack path, not a backlog")
+	flags.Float64Var(&maxFaultCoverage, "max-fault-coverage", 0.75, "report UNKNOWN rather than OK above this fraction of the run spent inside a fault window and its grace; past it every redelivery is explained by construction")
 	flags.StringVar(&jsonPath, "json", "", "also write the result as JSON to this path")
 	flags.StringVar(&markdownPath, "markdown", "", "also write a Markdown summary to this path, for a CI job summary")
 	flags.StringVar(&visualizePath, "visualize", "", "on a violation, write porcupine's interactive HTML visualization here")
@@ -69,6 +73,12 @@ func run(args []string) error {
 	}
 	if samples < 0 {
 		return fmt.Errorf("-samples must be >= 0")
+	}
+	if maxOverdue < 0 || maxOverdue > 1 {
+		return fmt.Errorf("-max-overdue must be between 0 and 1")
+	}
+	if maxFaultCoverage < 0 || maxFaultCoverage > 1 {
+		return fmt.Errorf("-max-fault-coverage must be between 0 and 1")
 	}
 
 	paths := []string{historyPath}
@@ -88,12 +98,14 @@ func run(args []string) error {
 	}
 
 	opts := checkOptions{
-		Strict:        strict,
-		Grace:         grace,
-		Timeout:       timeout,
-		Samples:       samples,
-		MinOperations: minOperations,
-		Visualize:     visualizePath != "",
+		Strict:           strict,
+		Grace:            grace,
+		Timeout:          timeout,
+		Samples:          samples,
+		MinOperations:    minOperations,
+		MaxOverdue:       maxOverdue,
+		MaxFaultCoverage: maxFaultCoverage,
+		Visualize:        visualizePath != "",
 	}
 	if opts.Grace == 0 {
 		opts.Grace = defaultGrace(log)

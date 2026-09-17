@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -164,6 +165,24 @@ func TestReadMissingFileIsAnError(t *testing.T) {
 		t.Fatal("Read should fail on a missing file")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("error should wrap os.ErrNotExist, got %v", err)
+	}
+}
+
+// Records are small and fixed-shape; a line past the cap is a corrupt
+// file, not a large record, and this is what stands between that and an
+// unbounded read.
+func TestReadRejectsAnOversizedLine(t *testing.T) {
+	t.Parallel()
+
+	huge := strings.Repeat("a", maxLineBytes+1)
+	path := writeFile(t, "h.jsonl", huge+"\n")
+
+	_, err := Read(path)
+	if err == nil {
+		t.Fatal("Read should reject a line larger than the cap")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("error should say the line exceeds the cap, got: %v", err)
 	}
 }
 

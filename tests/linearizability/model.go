@@ -21,7 +21,11 @@ import (
 // The consequence is stated plainly because it bounds the whole check:
 // two deliveries of one message that overlap in real time are a genuine
 // double-lease, and this model accepts them. Catching those needs the
-// lease clock, which the driver counts separately as dupBeforeAck.
+// lease clock, which the driver has: when one consumer confirms a
+// message while another is mid-ack on the same message, both get 204 and
+// the two held it at once. The driver counts that as dupBeforeAck and
+// aborts the run on it, so the gap in this model is covered by the other
+// leg rather than merely noted here.
 
 // leaseState is the per-partition state. Porcupine compares states with
 // == by default, which an int satisfies.

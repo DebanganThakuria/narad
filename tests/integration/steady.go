@@ -314,7 +314,12 @@ func runSteady(cfg config) (err error) {
 					st.produced.Add(1)
 					st.ambiguousProduce.Add(1)
 				}
-				if rec.acked.Load() {
+				// Held, because the ack below re-uses it. A redelivery
+				// after an ack is acked again and answers 204, so without
+				// this the double-lease check downstream would fire on
+				// every one of them.
+				redeliveredAfterAck := rec.acked.Load()
+				if redeliveredAfterAck {
 					// Redelivered after we acked it. Legitimate only if our
 					// ack was lost in flight or a broker restarted (acks ahead
 					// of a gap live in memory by design); otherwise
@@ -352,8 +357,24 @@ func runSteady(cfg config) (err error) {
 					if rec.acked.CompareAndSwap(false, true) {
 						st.acked.Add(1)
 						st.latE2E.observe(time.Since(rec.producedAt))
-					} else {
+					} else if !redeliveredAfterAck {
+						// A second 204 for a message this delivery did not
+						// find already acked: another consumer confirmed it
+						// between the check above and this swap. The two
+						// held it at the same time, which is the safety
+						// property a visibility timeout exists to provide.
+						//
+						// The redeliveredAfterAck guard is what keeps this
+						// honest. A redelivery after an ack is acked again
+						// on the path above and also lands here with the
+						// swap failing, but that is sequential, expected
+						// under at-least-once, and already counted as
+						// dupAfterAck. A lapsed lease answers 410 and is
+						// counted as ackGone. Neither is a double lease.
 						st.dupBeforeAck.Add(1)
+						if cfg.fatalDupBeforeAck {
+							fatal.CompareAndSwap(nil, fmt.Errorf("message %q was acked twice concurrently, so two consumers held it at once", msg.Payload.ID))
+						}
 					}
 				case astatus == http.StatusGone:
 					// The lease lapsed before our ack: the message will be

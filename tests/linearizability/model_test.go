@@ -97,3 +97,22 @@ func TestLeaseStateString(t *testing.T) {
 		}
 	}
 }
+
+// opKind.String() feeds directly into describeIllegal's output, which a
+// person reads while debugging a failing run, so its every case is worth
+// pinning the same way leaseState's is above.
+func TestOpKindString(t *testing.T) {
+	t.Parallel()
+
+	for kind, want := range map[opKind]string{
+		kindProduce:          "produce",
+		kindProduceAmbiguous: "produce?",
+		kindDeliver:          "deliver",
+		kindAck:              "ack",
+		opKind(9):            "kind(9)",
+	} {
+		if got := kind.String(); got != want {
+			t.Errorf("opKind(%d).String() = %q, want %q", int(kind), got, want)
+		}
+	}
+}

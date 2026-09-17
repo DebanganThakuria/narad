@@ -20,6 +20,11 @@ const (
 	// result: a backlog the consumers did not drain, not a broken
 	// promise, so it does not fail the run on its own.
 	verdictOverdue verdict = "OVERDUE"
+	// verdictStalled means so much of the run never finished that
+	// calling it a backlog would be generous. It is the same measurement
+	// OVERDUE reports, past the point where the honest reading is that
+	// delivery or acking is broken rather than slow.
+	verdictStalled verdict = "STALLED"
 	// verdictAnomaly means a message was provably redelivered after its
 	// ack at a moment when no fault was in flight. The delivery contract
 	// permits redelivery, so this is not a contract violation; it is an
@@ -60,6 +65,23 @@ type checkOptions struct {
 	// linearizes perfectly, and reporting that as OK would turn a driver
 	// that died on its first request into a green nightly.
 	MinOperations int
+	// MaxOverdue bounds the fraction of the run's messages that may
+	// still be undelivered or unacked when it ends.
+	//
+	// Below the bound this is a liveness footnote: consumers did not
+	// finish draining, which OVERDUE reports without failing. Above it
+	// the reading flips. A broker that answers 410 to every ack leaves
+	// every message unacked, and treating that as a backlog let the
+	// worst ack-path failure there is exit zero.
+	MaxOverdue float64
+	// MaxFaultCoverage bounds the fraction of the run's wall time that
+	// may sit inside a fault window and its grace period.
+	//
+	// Past the bound a clean result carries no information, because
+	// every redelivery is explained by construction. The figure was
+	// already computed and reported for exactly this reason; leaving it
+	// to a human to notice in a nightly log made it decoration.
+	MaxFaultCoverage float64
 }
 
 // postAckRedelivery is a delivery that began strictly after an ack for
@@ -91,9 +113,20 @@ type faultWindow struct {
 	End int64
 }
 
+// Why a run came back UNKNOWN. The verdict alone does not say, and the
+// three causes call for different responses: wait longer, run longer, or
+// inject fewer faults.
+const (
+	undecidedTooFewOps = "too-few-operations"
+	undecidedTimeout   = "search-timeout"
+	undecidedCoverage  = "fault-coverage"
+)
+
 // result is everything the report needs.
 type result struct {
 	Verdict verdict `json:"verdict"`
+	// UndecidedBecause is set only on UNKNOWN.
+	UndecidedBecause string `json:"undecided_because,omitempty"`
 
 	Partitions int `json:"partitions"`
 	Messages   int `json:"messages"`
@@ -230,20 +263,63 @@ func decide(res *result, opts checkOptions) verdict {
 	case string(porcupine.Illegal):
 		return verdictViolation
 	case string(porcupine.Unknown):
+		res.UndecidedBecause = undecidedTimeout
 		return verdictUnknown
+	}
+	// Stated rather than inherited. A misroute already reaches the case
+	// above, because a delivery on an undeclared path builds a partition
+	// with no produce operation and the model rejects it. That is an
+	// emergent property of two other decisions, and report.go names a
+	// misroute as the reason for a VIOLATION, so the rule belongs here
+	// where a later change to the model cannot quietly drop it.
+	if res.Misrouted > 0 {
+		return verdictViolation
 	}
 	// Checked before the clean paths below, so "we proved nothing"
 	// never renders as "nothing was wrong".
 	if res.Operations < opts.MinOperations {
+		res.UndecidedBecause = undecidedTooFewOps
 		return verdictUnknown
 	}
 	if res.PostAckUnexplained > 0 {
 		return verdictAnomaly
 	}
+	// After the anomaly check, deliberately. A redelivery that landed
+	// outside every window is a real finding whatever the coverage was,
+	// and reporting it as "we proved nothing" would throw away the one
+	// thing this run did prove.
+	if opts.MaxFaultCoverage > 0 && res.FaultCoverage > opts.MaxFaultCoverage {
+		res.UndecidedBecause = undecidedCoverage
+		return verdictUnknown
+	}
+	// Zero means unbounded, like MaxFaultCoverage above. A caller that
+	// has not set a ceiling gets the old reading, where any backlog is
+	// OVERDUE; only a caller that states a bound can trip STALLED.
+	if opts.MaxOverdue > 0 && overdueFraction(res) > opts.MaxOverdue {
+		return verdictStalled
+	}
 	if res.Undelivered > 0 || res.Unacked > 0 {
 		return verdictOverdue
 	}
 	return verdictOK
+}
+
+// overdueFraction is the share of the run's partitions that never
+// finished. A partition counts once even when it is both undelivered and
+// unacked, because analyseLoss puts it in one bucket or the other.
+//
+// The denominator is partitions rather than messages, and the difference
+// is not cosmetic. Undelivered and Unacked are counted per (message,
+// path) partition, so under fan-out one message can contribute several,
+// and dividing those by a message count can exceed 1. Messages also
+// counts ids whose only produce was refused, which never become
+// partitions at all, so it dilutes the fraction in exactly the direction
+// that would hide a broken run.
+func overdueFraction(res *result) float64 {
+	if res.Partitions <= 0 {
+		return 0
+	}
+	return float64(res.Undelivered+res.Unacked) / float64(res.Partitions)
 }
 
 // pathSet answers, for a message, which paths it must be delivered on.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -740,5 +741,247 @@ func TestAProvisionalFaultAloneStillExplains(t *testing.T) {
 	}
 	if res.Faults != 1 {
 		t.Errorf("faults = %d, want 1", res.Faults)
+	}
+}
+
+// TestVerdictSentenceAgreesWithItsCounts stops short of VIOLATION and
+// UNKNOWN, and each has two distinct reasons the sentence has to tell
+// apart, so they get their own table.
+func TestVerdictSentenceCoversViolationAndUnknown(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		res  *result
+		want string
+	}{
+		{
+			"violation from a misroute",
+			&result{Verdict: verdictViolation, Misrouted: 1},
+			"1 message was delivered on a path the run never declared for its topic.",
+		},
+		{
+			"violation from several misroutes",
+			&result{Verdict: verdictViolation, Misrouted: 2},
+			"2 messages were delivered on a path the run never declared for its topic.",
+		},
+		{
+			"violation with no misroute is a bare model rejection",
+			&result{Verdict: verdictViolation},
+			"A partition admits no valid ordering: the broker did something the delivery contract does not allow.",
+		},
+		{
+			"unknown from too few operations",
+			&result{Verdict: verdictUnknown, Porcupine: "Ok", Operations: 3},
+			"Only 3 operations were recorded, too few for a clean result to mean anything. The run proves nothing either way.",
+		},
+		{
+			"unknown from a porcupine timeout",
+			&result{Verdict: verdictUnknown, Porcupine: "Unknown"},
+			"The search did not finish within its timeout, so this run proves nothing either way.",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := verdictSentence(tc.res); got != tc.want {
+				t.Errorf("verdictSentence()\n got: %s\nwant: %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// The Markdown report leans on badge() to put a glyph next to the
+// verdict; every verdict must resolve to one rather than falling through
+// to Go's zero value for a string.
+func TestBadgeCoversEveryVerdict(t *testing.T) {
+	t.Parallel()
+
+	for v, want := range map[verdict]string{
+		verdictOK:        "✅",
+		verdictOverdue:   "⏳",
+		verdictAnomaly:   "❌",
+		verdictViolation: "❌",
+		verdictUnknown:   "❌",
+	} {
+		if got := badge(v); got != want {
+			t.Errorf("badge(%s) = %q, want %q", v, got, want)
+		}
+	}
+}
+
+// A broker that answers 410 to every ack leaves every message unacked.
+// That used to read as OVERDUE and exit zero, which made the worst
+// ack-path failure there is indistinguishable from a slow drain.
+func TestAnAckPathThatNeverConfirmsIsStalledNotOverdue(t *testing.T) {
+	t.Parallel()
+
+	var ops []op
+	for i := range 20 {
+		msg := fmt.Sprintf("m%02d", i)
+		base := int64(i * 10)
+		ops = append(ops,
+			produce(msg, "orders", base, base+1),
+			deliver(msg, "orders", base+2, base+3),
+			// The broker answered and said no, so the checker excludes
+			// the ack and the message stays unacked.
+			ack(msg, "orders", base+4, base+5).with(history.OutcomeRejected),
+		)
+	}
+	opts := defaultOpts()
+	opts.MaxOverdue = 0.05
+
+	res := check(buildLog(ops), opts)
+
+	if res.Verdict != verdictStalled {
+		t.Fatalf("verdict = %s, want STALLED when nothing was ever acked", res.Verdict)
+	}
+	if !res.failed() {
+		t.Error("a run where no ack was ever confirmed must exit non-zero")
+	}
+	if res.Unacked != 20 {
+		t.Errorf("unacked = %d, want 20", res.Unacked)
+	}
+}
+
+// The ceiling only trips past the bound. A small tail is still the
+// liveness footnote OVERDUE was written for.
+func TestASmallBacklogStaysOverdueUnderTheCeiling(t *testing.T) {
+	t.Parallel()
+
+	var ops []op
+	for i := range 40 {
+		msg := fmt.Sprintf("m%02d", i)
+		base := int64(i * 10)
+		ops = append(ops, produce(msg, "orders", base, base+1), deliver(msg, "orders", base+2, base+3))
+		if i > 0 { // one message of forty left unacked: 2.5%
+			ops = append(ops, ack(msg, "orders", base+4, base+5))
+		}
+	}
+	opts := defaultOpts()
+	opts.MaxOverdue = 0.05
+
+	res := check(buildLog(ops), opts)
+
+	if res.Verdict != verdictOverdue {
+		t.Fatalf("verdict = %s, want OVERDUE for a 2.5%% tail under a 5%% ceiling", res.Verdict)
+	}
+	if res.failed() {
+		t.Error("a backlog under the ceiling must not fail the run")
+	}
+}
+
+// Zero means unbounded, so a caller that states no ceiling keeps the
+// reading it had before the ceiling existed.
+func TestWithoutACeilingAnyBacklogIsStillOverdue(t *testing.T) {
+	t.Parallel()
+
+	log := buildLog([]op{
+		produce("m1", "orders", 0, 5),
+		produce("m2", "orders", 1, 6),
+		deliver("m2", "orders", 10, 12),
+	})
+	opts := defaultOpts() // MaxOverdue unset
+	if res := check(log, opts); res.Verdict != verdictOverdue {
+		t.Fatalf("verdict = %s, want OVERDUE with no ceiling set", res.Verdict)
+	}
+}
+
+// Coverage was computed and reported as the number that bounds what a
+// clean result is worth, and then never consulted. Saturate it and the
+// answer has to be "this run decided nothing", not "OK".
+func TestSaturatedFaultCoverageIsUndecidedNotClean(t *testing.T) {
+	t.Parallel()
+
+	ops := []op{
+		produce("m1", "orders", 0, 5),
+		deliver("m1", "orders", 10, 12),
+		ack("m1", "orders", 15, 17),
+	}
+	// One fault spanning the whole run, so every moment sits inside a
+	// window and its grace.
+	log := buildLog(ops, fault(history.FaultKill, "narad-1", 0, 100))
+	opts := defaultOpts()
+	opts.MaxFaultCoverage = 0.75
+
+	res := check(log, opts)
+
+	if res.Verdict != verdictUnknown {
+		t.Fatalf("verdict = %s, want UNKNOWN at saturated coverage", res.Verdict)
+	}
+	if res.UndecidedBecause != undecidedCoverage {
+		t.Errorf("undecided because %q, want %q", res.UndecidedBecause, undecidedCoverage)
+	}
+	if !res.failed() {
+		t.Error("an undecided run must exit non-zero")
+	}
+	if got := verdictSentence(res); !strings.Contains(got, "explained by construction") {
+		t.Errorf("sentence = %q, want it to say why the run decided nothing", got)
+	}
+}
+
+// An unexplained redelivery is a real finding whatever the coverage was,
+// so the anomaly has to outrank the coverage ceiling.
+func TestAnUnexplainedRedeliveryOutranksTheCoverageCeiling(t *testing.T) {
+	t.Parallel()
+
+	ops := []op{
+		produce("m1", "orders", 0, 5),
+		deliver("m1", "orders", 10, 12),
+		ack("m1", "orders", 15, 17),
+		// Past the fault's end at 100ms plus the 5s grace.
+		deliver("m1", "orders", 8000, 8002),
+	}
+	log := buildLog(ops, fault(history.FaultKill, "narad-1", 0, 100))
+	opts := defaultOpts()
+	opts.MaxFaultCoverage = 0.1 // deliberately trippable
+
+	res := check(log, opts)
+
+	if res.Verdict != verdictAnomaly {
+		t.Fatalf("verdict = %s, want ANOMALY: the redelivery is a finding regardless of coverage", res.Verdict)
+	}
+}
+
+// The overdue fraction counts partitions, not message ids. Under fan-out
+// one message is several partitions, so dividing by the message count
+// could exceed 1 and made the ceiling fire at half its stated value.
+func TestOverdueFractionIsPerPartitionUnderFanOut(t *testing.T) {
+	t.Parallel()
+
+	paths := map[string][]string{"orders": {"orders", "orders-replica"}}
+	var ops []op
+	for i := range 10 {
+		msg := fmt.Sprintf("m%02d", i)
+		base := int64(i * 10)
+		ops = append(ops, produce(msg, "orders", base, base+1))
+		for _, path := range []string{"orders", "orders-replica"} {
+			ops = append(ops,
+				deliver(msg, path, base+2, base+3),
+				ack(msg, path, base+4, base+5),
+			)
+		}
+	}
+	res := check(buildLogWithPaths(paths, ops), defaultOpts())
+
+	if res.Partitions != 20 {
+		t.Fatalf("partitions = %d, want 20 (10 messages over 2 paths)", res.Partitions)
+	}
+	if res.Messages != 10 {
+		t.Fatalf("messages = %d, want 10", res.Messages)
+	}
+	if got := overdueFraction(res); got != 0 {
+		t.Fatalf("overdue fraction = %v, want 0 on a complete run", got)
+	}
+
+	// Now strand one whole message: two partitions of twenty, which is
+	// 10% of partitions and would read as 20% against the message count.
+	stranded := ops[:len(ops)-4]
+	res = check(buildLogWithPaths(paths, stranded), defaultOpts())
+	if got := overdueFraction(res); got < 0.09 || got > 0.11 {
+		t.Fatalf("overdue fraction = %v, want ~0.10 of partitions", got)
+	}
+	if got := overdueFraction(res); got > 1 {
+		t.Fatalf("overdue fraction = %v, must never exceed 1", got)
 	}
 }

@@ -131,6 +131,11 @@ func verdictSentence(res *result) string {
 		return fmt.Sprintf("No safety problem. %s undelivered and %s unacked when the run ended.",
 			count(res.Undelivered, "message was still", "messages were still"),
 			count(res.Unacked, "was still", "were still"))
+	case verdictStalled:
+		return fmt.Sprintf("%.0f%% of the run never finished: %s undelivered and %s unacked. That is too much to read as a backlog.",
+			overdueFraction(res)*100,
+			count(res.Undelivered, "message was still", "messages were still"),
+			count(res.Unacked, "was still", "were still"))
 	case verdictAnomaly:
 		return fmt.Sprintf("%s redelivered after a confirmed ack with no fault to account for it.",
 			count(res.PostAckUnexplained, "message was", "messages were"))
@@ -141,11 +146,18 @@ func verdictSentence(res *result) string {
 		}
 		return "A partition admits no valid ordering: the broker did something the delivery contract does not allow."
 	case verdictUnknown:
-		if res.Porcupine != string(porcupine.Unknown) {
+		switch {
+		case res.UndecidedBecause == undecidedCoverage:
+			return fmt.Sprintf("Faults covered %.0f%% of the run, so every redelivery is explained by construction and a clean result would mean nothing.",
+				res.FaultCoverage*100)
+		// The Porcupine fallback keeps a result assembled by hand, rather
+		// than by decide, reading correctly.
+		case res.UndecidedBecause == undecidedTimeout || res.Porcupine == string(porcupine.Unknown):
+			return "The search did not finish within its timeout, so this run proves nothing either way."
+		default:
 			return fmt.Sprintf("Only %d operations were recorded, too few for a clean result to mean anything. The run proves nothing either way.",
 				res.Operations)
 		}
-		return "The search did not finish within its timeout, so this run proves nothing either way."
 	default:
 		return ""
 	}
@@ -190,7 +202,11 @@ func writeMarkdown(w io.Writer, res *result) {
 	fmt.Fprintf(w, "| Operations | %d |\n", res.Operations)
 	fmt.Fprintf(w, "| Produced | %d accepted, %d ambiguous, %d refused |\n", res.ProducedOK, res.ProducedAmbiguous, res.ProducedRejected)
 	fmt.Fprintf(w, "| Delivered | %d |\n", res.Deliveries)
-	fmt.Fprintf(w, "| Acked | %d confirmed |\n", res.AcksOK)
+	// The excluded count travels with the confirmed one. An ack the
+	// broker refused is the loudest available signal that the lease
+	// machinery is broken, and the job summary is the only surface most
+	// people read.
+	fmt.Fprintf(w, "| Acked | %d confirmed, %d excluded as undecidable |\n", res.AcksOK, res.AcksExcluded)
 	fmt.Fprintf(w, "| Faults injected | %d%s |\n", res.Faults, faultBreakdown(res))
 	if res.Faults > 0 {
 		fmt.Fprintf(w, "| Fault coverage | %.0f%% of the run |\n", res.FaultCoverage*100)
