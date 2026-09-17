@@ -8,6 +8,7 @@ Thanks for contributing to Narad.
 - Keep pull requests focused. Small, reviewable changes are easier to land than broad refactors.
 - If the change affects behavior, tests are expected in the same pull request.
 - Use `SUPPORT.md` for questions and troubleshooting paths.
+- Participation is covered by the [Code of Conduct](./CODE_OF_CONDUCT.md).
 
 ## Development setup
 
@@ -23,7 +24,22 @@ Useful targeted commands:
 go test ./cmd/narad
 go test ./internal/...
 go test ./tests/e2e/... -race
+go test ./tests/linearizability/...
 ```
+
+One suite does not run under `make test`: the nightly delivery-contract
+check. It starts a three-node cluster on loopback, kills and partitions
+nodes under load, and checks the recorded history against a sequential
+specification of at-least-once delivery.
+
+```sh
+./scripts/linearizability-nightly.sh
+```
+
+Partition faults need `iptables` and passwordless `sudo`; without them it
+injects kills only, which is the normal case on a laptop. The verdicts, the
+flags, and what the check does not catch are in
+[Checking the Delivery Contract](https://debanganthakuria.github.io/narad/internals/linearizability/).
 
 ## Coding guidelines
 
@@ -37,8 +53,9 @@ go test ./tests/e2e/... -race
 Before opening a pull request, make sure you have:
 
 - [ ] added or updated tests for the change
-- [ ] run `make test` locally
+- [ ] run `make check` locally (format, vet, docs version check, tests)
 - [ ] updated docs if behavior or configuration changed
+- [ ] added an entry under `## [Unreleased]` in `CHANGELOG.md` if the change is user-visible
 - [ ] described the motivation and scope clearly in the PR
 
 ## Commit style
@@ -54,6 +71,20 @@ When filing a bug, include:
 - expected behavior
 - actual behavior
 - relevant logs, stack traces, or failing requests
+
+## Releasing
+
+Maintainers only, and the order matters because CI enforces part of it.
+
+1. Move the `## [Unreleased]` entries in `CHANGELOG.md` under a new version heading with today's date, add the compare link at the bottom, and leave `## [Unreleased]` empty above it.
+2. Update any pinned `ghcr.io/debanganthakuria/narad:vX.Y.Z` reference in `README.md` and `docs/` to the version about to ship. `make check-release-refs` fails until the tag exists, which is expected at this point.
+3. Land both on `master`.
+4. Tag the merge commit and push the tag. The container workflow builds, signs, and publishes the image, stamping the tag into `narad version`.
+5. Write the GitHub release notes from the changelog entry.
+
+Step 2 before step 4 is what keeps the documentation from advertising a
+version that is one release behind, which is the drift
+`scripts/check-release-refs.sh` exists to catch.
 
 ## Security issues
 

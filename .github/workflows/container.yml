@@ -25,6 +25,9 @@ on:
 permissions:
   contents: read
   packages: write
+  # Keyless signing: cosign exchanges this short-lived OIDC token for a
+  # Fulcio certificate, so there is no private key to store or rotate.
+  id-token: write
 
 jobs:
   publish:
@@ -40,11 +43,32 @@ jobs:
         run: |
           echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
+      # A released image should say which release it is. Stamping the
+      # commit SHA into every build meant `narad version` inside the
+      # v3.0.1 image reported a hex string, which is useless in a bug
+      # report. Tag builds stamp the tag; master builds stay honest
+      # about being untagged.
+      - name: Resolve version stamp
+        id: version
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "stamp=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "stamp=dev+${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+
+      # Pinned to an exact release. A floating major tag is mutable, and
+      # this job holds the OIDC token that mints signatures, so it is the
+      # last place to accept a moving target. Upstream has not cut a `v4`
+      # tag in any case. Dependabot keeps this current.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -65,14 +89,57 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           build-args: |
-            GIT_REV=${{ github.sha }}
+            GIT_REV=${{ steps.version.outputs.stamp }}
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ steps.meta.outputs.tags }}
           push: true
+          # An SBOM answers "does this image contain the package in that
+          # advisory" without a rebuild; max provenance records how the
+          # image was built, back to this workflow and commit. Both are
+          # pushed to the registry beside the image.
+          sbom: true
+          provenance: mode=max
 
+      # Signing binds the digest, not a tag: a tag can be moved, a digest
+      # cannot. Verification therefore always names the digest or resolves
+      # the tag to one first.
+      - name: Sign the image
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      # Verifying here means a broken signing setup fails the publish that
+      # produced it, rather than being discovered by the first user who
+      # tries to verify.
+      - name: Verify the signature
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign verify "${IMAGE}@${DIGEST}" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/container.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            > /dev/null
+          echo "Signed and verified: ${IMAGE}@${DIGEST}"
+
+      - name: Summary
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          STAMP: ${{ steps.version.outputs.stamp }}
+        run: |
+          {
+            echo "### Published"
+            echo
+            echo "- Image: \`${IMAGE}@${DIGEST}\`"
+            echo "- Version stamp: \`${STAMP}\`"
+            echo "- Signed (keyless), SBOM and provenance attached."
+          } >> "$GITHUB_STEP_SUMMARY"

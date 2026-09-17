@@ -102,7 +102,7 @@ What "one JSON text" means, exactly:
 {"topic":"orders","version":2,"versions":[{"version":1,"schema":{...}},{"version":2,"schema":{...}}]}
 ```
 
-Both follow the [topic read rule](#reading-a-topic): any grant on the topic, ownership, or admin. Changing the schema follows the manage rule (owner or admin), so a `produce` grant can read the schema it has to satisfy but never change it.
+Both follow the [topic read rule](topics.md#reading-a-topic): any grant on the topic, ownership, or admin. Changing the schema follows the manage rule (owner or admin), so a `produce` grant can read the schema it has to satisfy but never change it.
 
 ### Registering a schema
 

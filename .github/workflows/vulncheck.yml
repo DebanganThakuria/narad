@@ -1,0 +1,48 @@
+# Dependency vulnerability scanning, separate from CodeQL: CodeQL looks
+# for flaws in our code, govulncheck asks whether a known advisory
+# affects a dependency along a call path we actually reach. The
+# reachability filter is why this can be a required check without
+# drowning pull requests in advisories against code nobody calls.
+#
+# The weekly run matters as much as the pull-request run. Advisories are
+# published against dependencies that have not changed, so a repository
+# that only scans on code change learns about them whenever it next
+# happens to change code.
+name: Vulnerability scan
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "41 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Pinned, like the formatters in the Makefile. govulncheck fetches
+      # the advisory data from vuln.go.dev at scan time, so pinning the
+      # binary costs nothing in database freshness. What it buys is a
+      # required status check that cannot start failing on every open PR
+      # because upstream cut a release, and one less unpinned third-party
+      # binary running in CI.
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+
+      - name: Scan module
+        run: govulncheck ./...

@@ -29,10 +29,25 @@ type config struct {
 	// restart tests: acks ahead of a gap live in memory by design, so any
 	// broker restart legitimately redelivers a few.
 	fatalDupAfterAck bool
+	// fatalDupBeforeAck aborts the run when two acks for one message both
+	// come back 204.
+	//
+	// That is not the ordinary lease expiry, which answers 410 and is
+	// counted as ackGone. Two confirmations mean two consumers each held
+	// a reservation the broker considered live and each committed it,
+	// which is a double-lease: the one safety property a visibility-
+	// timeout broker exists to provide. On by default, because nothing
+	// else in the pipeline can catch it. The linearizability model is
+	// untimed, so it cannot see two deliveries overlapping in real time,
+	// and it says so where it is defined.
+	fatalDupBeforeAck bool
 	// noSchema creates the run's topics without a message schema, to
 	// measure what produce-side schema validation costs.
 	noSchema    bool
 	reportEvery time.Duration
+	// historyPath, when set, writes a JSONL operation history for
+	// tests/linearizability to check. Steady mode only.
+	historyPath string
 }
 
 type roundRobinClient struct {

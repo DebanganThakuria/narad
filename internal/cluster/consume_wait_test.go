@@ -500,8 +500,10 @@ func TestRouteConsumeWaitKeepsTokensWhileOthersAreParked(t *testing.T) {
 	// The first is served by its local partitions almost at once.
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=5s", nil)
-	local := &fakeLocalWaiter{delay: 20 * time.Millisecond, found: true,
-		msg: topic.Message{Topic: "orders", Partition: 1, Offset: 3, ReceiptHandle: "1:3:5"}}
+	local := &fakeLocalWaiter{
+		delay: 20 * time.Millisecond, found: true,
+		msg: topic.Message{Topic: "orders", Partition: 1, Offset: 3, ReceiptHandle: "1:3:5"},
+	}
 	if !router.RouteConsumeWait(context.Background(), res, req, "orders", 5*time.Second, local) {
 		t.Fatal("RouteConsumeWait() = false, want handled")
 	}

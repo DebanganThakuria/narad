@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/debanganthakuria/narad/tests/linearizability/history"
 )
 
 // Steady mode: producers and consumers run CONCURRENTLY for a fixed
@@ -105,7 +107,7 @@ type inFlightRecord struct {
 	delivered atomic.Bool
 }
 
-func runSteady(cfg config) error {
+func runSteady(cfg config) (err error) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.duration+cfg.drainTimeout+2*time.Minute)
 	defer cancel()
@@ -135,6 +137,32 @@ func runSteady(cfg config) error {
 		}()
 	}
 
+	recorder, rerr := history.NewRecorder(cfg.historyPath)
+	if rerr != nil {
+		return rerr
+	}
+	// A history that stopped part way through is the dangerous case: it
+	// ends at a clean record boundary, so nothing about the file says it
+	// is short, and a checker would happily return a green verdict over a
+	// prefix of the run. Failing the run is the only way that gets
+	// noticed.
+	defer func() {
+		if cerr := recorder.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("history was not fully written, so any verdict over it would cover only part of this run: %w", cerr)
+		}
+	}()
+	if recorder != nil {
+		// No fan-out in this mode: every topic is its own only path. The
+		// checker needs that stated rather than inferred, so that a
+		// delivery on any other path is the misroute it would be.
+		paths := make(map[string][]string, len(topics))
+		for _, name := range topics {
+			paths[name] = []string{name}
+		}
+		recorder.Meta(cfg.runID, topics, paths, cfg.visibilityTimeout)
+		fmt.Printf("recording operation history to %s\n", recorder.Path())
+	}
+
 	var st steadyStats
 	var expected sync.Map // id -> *inFlightRecord
 	seqByTopic := make([]atomic.Int64, len(topics))
@@ -150,7 +178,7 @@ func runSteady(cfg config) error {
 
 	// Producers.
 	var pwg sync.WaitGroup
-	for range cfg.produceConcurrency {
+	for producer := range cfg.produceConcurrency {
 		pwg.Go(func() {
 			// Checked BEFORE each request and never mid-request: cancelling an
 			// in-flight produce disowns a record the server may already hold,
@@ -188,6 +216,16 @@ func runSteady(cfg config) error {
 				status, _, err := lb.doRaw(ctx, http.MethodPost, path, body, nil,
 					http.StatusAccepted, http.StatusTooManyRequests, http.StatusServiceUnavailable)
 				st.latProduce.observe(time.Since(rec0.producedAt))
+				recorder.Record(history.Record{
+					Op:      history.OpProduce,
+					Msg:     rec.ID,
+					Path:    topicName,
+					Client:  producer,
+					Call:    rec0.producedAt.UnixNano(),
+					Ret:     time.Now().UnixNano(),
+					Status:  status,
+					Outcome: history.ProduceOutcome(status, err),
+				})
 				switch {
 				case status == http.StatusAccepted && err == nil:
 					st.produced.Add(1)
@@ -216,7 +254,7 @@ func runSteady(cfg config) error {
 	var cwg sync.WaitGroup
 	var topicCursor atomic.Uint64
 	var fatal atomic.Value // first correctness violation, as error
-	for range cfg.consumeConcurrency {
+	for consumer := range cfg.consumeConcurrency {
 		cwg.Go(func() {
 			for consumeCtx.Err() == nil {
 				topicName := topics[int(topicCursor.Add(1)-1)%len(topics)]
@@ -224,7 +262,8 @@ func runSteady(cfg config) error {
 				t0 := time.Now()
 				status, body, err := lb.do(consumeCtx, http.MethodGet, path, nil, nil,
 					http.StatusOK, http.StatusNoContent, http.StatusTooManyRequests, http.StatusServiceUnavailable)
-				st.latConsume.observe(time.Since(t0))
+				deliveredAt := time.Now()
+				st.latConsume.observe(deliveredAt.Sub(t0))
 				if err != nil {
 					if consumeCtx.Err() == nil {
 						st.consumeErr.Add(1)
@@ -247,6 +286,21 @@ func runSteady(cfg config) error {
 					continue
 				}
 				st.consumed.Add(1)
+				// Only deliveries that handed us a message are operations on
+				// one. An empty poll is not an event in any message's
+				// history, and recording every one of them was what made an
+				// earlier version of this file grow by hundreds of megabytes
+				// an hour.
+				recorder.Record(history.Record{
+					Op:      history.OpDeliver,
+					Msg:     msg.Payload.ID,
+					Path:    msg.Topic,
+					Client:  consumer,
+					Call:    t0.UnixNano(),
+					Ret:     deliveredAt.UnixNano(),
+					Status:  status,
+					Outcome: history.OutcomeOK,
+				})
 				v, ok := expected.Load(msg.Payload.ID)
 				if !ok {
 					st.unknownID.Add(1)
@@ -260,7 +314,12 @@ func runSteady(cfg config) error {
 					st.produced.Add(1)
 					st.ambiguousProduce.Add(1)
 				}
-				if rec.acked.Load() {
+				// Held, because the ack below re-uses it. A redelivery
+				// after an ack is acked again and answers 204, so without
+				// this the double-lease check downstream would fire on
+				// every one of them.
+				redeliveredAfterAck := rec.acked.Load()
+				if redeliveredAfterAck {
 					// Redelivered after we acked it. Legitimate only if our
 					// ack was lost in flight or a broker restarted (acks ahead
 					// of a gap live in memory by design); otherwise
@@ -279,6 +338,16 @@ func runSteady(cfg config) error {
 				astatus, _, aerr := lb.do(consumeCtx, http.MethodPost, apath, nil, nil,
 					http.StatusNoContent, http.StatusGone, http.StatusTooManyRequests, http.StatusServiceUnavailable)
 				st.latAck.observe(time.Since(a0))
+				recorder.Record(history.Record{
+					Op:      history.OpAck,
+					Msg:     msg.Payload.ID,
+					Path:    msg.Topic,
+					Client:  consumer,
+					Call:    a0.UnixNano(),
+					Ret:     time.Now().UnixNano(),
+					Status:  astatus,
+					Outcome: history.AckOutcome(astatus, aerr),
+				})
 				switch {
 				case aerr != nil:
 					if consumeCtx.Err() == nil {
@@ -288,8 +357,24 @@ func runSteady(cfg config) error {
 					if rec.acked.CompareAndSwap(false, true) {
 						st.acked.Add(1)
 						st.latE2E.observe(time.Since(rec.producedAt))
-					} else {
+					} else if !redeliveredAfterAck {
+						// A second 204 for a message this delivery did not
+						// find already acked: another consumer confirmed it
+						// between the check above and this swap. The two
+						// held it at the same time, which is the safety
+						// property a visibility timeout exists to provide.
+						//
+						// The redeliveredAfterAck guard is what keeps this
+						// honest. A redelivery after an ack is acked again
+						// on the path above and also lands here with the
+						// swap failing, but that is sequential, expected
+						// under at-least-once, and already counted as
+						// dupAfterAck. A lapsed lease answers 410 and is
+						// counted as ackGone. Neither is a double lease.
 						st.dupBeforeAck.Add(1)
+						if cfg.fatalDupBeforeAck {
+							fatal.CompareAndSwap(nil, fmt.Errorf("message %q was acked twice concurrently, so two consumers held it at once", msg.Payload.ID))
+						}
 					}
 				case astatus == http.StatusGone:
 					// The lease lapsed before our ack: the message will be

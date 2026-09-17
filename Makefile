@@ -102,8 +102,12 @@ fmt-check: ## Strict format check (no rewrites; suitable for CI).
 tidy: ## go mod tidy.
 	$(GO) mod tidy
 
+.PHONY: check-release-refs
+check-release-refs: ## Fail if a pinned image version in the docs has drifted from the newest release tag.
+	./scripts/check-release-refs.sh
+
 .PHONY: check
-check: fmt-check vet test ## Strict check: fmt-check + vet + test (no auto-fix).
+check: fmt-check vet check-release-refs test ## Strict check: fmt-check + vet + docs versions + test (no auto-fix).
 
 .PHONY: local-cluster-e2e
 local-cluster-e2e: ## Run a local 3-node cluster integration/load test. Pass ARGS='--topics 10 --messages 1000' to override.
@@ -131,10 +135,17 @@ local-monitoring-stop: ## Stop local Prometheus. Pass ARGS='--grafana' to stop H
 
 # ---- developer setup -----------------------------------------------------
 
+# Pinned, not @latest. A formatter that silently moves version reformats
+# files nobody touched, and the first person to notice is whoever's
+# unrelated pull request suddenly fails the format check. Bumping these
+# is a deliberate change with its own diff.
+GOFUMPT_VERSION   ?= v0.7.0
+GOIMPORTS_VERSION ?= v0.50.0
+
 .PHONY: tools-install
-tools-install: ## Install gofumpt and goimports to $(go env GOPATH)/bin.
-	$(GO) install mvdan.cc/gofumpt@latest
-	$(GO) install golang.org/x/tools/cmd/goimports@latest
+tools-install: ## Install the pinned gofumpt and goimports to $(go env GOPATH)/bin.
+	$(GO) install mvdan.cc/gofumpt@$(GOFUMPT_VERSION)
+	$(GO) install golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
 
 # ---- housekeeping --------------------------------------------------------
 

@@ -1,1 +1,4 @@
+# Every path routes to the maintainers listed in /MAINTAINERS.md.
+# That file also states what a single-maintainer project means for
+# review turnaround and bus factor.
 * @DebanganThakuria

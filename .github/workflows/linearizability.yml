@@ -1,0 +1,122 @@
+# Nightly linearizability check.
+#
+# A three-node cluster takes real load while nodes are killed and cut off
+# from their peers, every client operation is recorded with the interval
+# it was in flight for, and the resulting history is checked against a
+# sequential specification of the delivery contract.
+#
+# The gate is not "did anything break". The load driver already answers
+# that, and it runs on every pull request. The gate here is "is every
+# anomaly accounted for": Narad promises at-least-once, so a message that
+# returns after its ack is permitted, but it has to have happened while a
+# broker was being killed or partitioned. One that happens with nothing
+# in flight to explain it fails this job, because an anomaly nobody can
+# account for is a bug that has not been found yet.
+#
+# Two legs, and the second is the sharper claim:
+#
+#   faults        kills and partitions, checked against the contract.
+#   steady state  no faults at all, checked under --strict, where any
+#                 post-ack redelivery is a failure. This is what asserts
+#                 that a healthy Narad never redelivers an acked message.
+#
+# Nightly rather than per-pull-request because it takes minutes of real
+# time and its failures are usually about timing under load, which is
+# exactly the thing a per-commit gate reports flakily.
+name: Linearizability
+
+on:
+  schedule:
+    - cron: "17 2 * * *" # nightly, ~07:47 IST
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Seconds of load"
+        required: false
+        default: "180"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linearizability
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: faults
+            name: Under kills and partitions
+            args: "--duration 180 --drain 150 --rate 300"
+          - id: steady
+            name: Steady state, strict
+            args: "--no-faults --duration 120 --drain 90 --rate 300 --strict"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Partition faults drop inbound traffic to a node's cluster plane.
+      # Runners give passwordless sudo, so this leg actually exercises
+      # them; the script degrades to kills alone wherever it cannot.
+      - name: Check iptables is usable
+        run: |
+          if sudo -n iptables -L INPUT -n >/dev/null 2>&1; then
+            echo "partition faults available"
+          else
+            echo "::warning::iptables unavailable; this run will inject kills only"
+          fi
+
+      - name: Run
+        id: run
+        # The dispatch input arrives through the environment rather than
+        # being pasted into the script text.
+        env:
+          DURATION: ${{ inputs.duration }}
+          LEG: ${{ matrix.id }}
+        run: |
+          # An array, not a string. Splitting an unquoted "$EXTRA" on
+          # whitespace let a dispatch input of "180 --no-faults" smuggle a
+          # second option in and quietly turn the faults leg into a
+          # baseline, which is the one thing that leg must not be.
+          EXTRA=()
+          if [[ -n "$DURATION" && "$LEG" == "faults" ]]; then
+            EXTRA=(--duration "$DURATION")
+          fi
+          ./scripts/linearizability-nightly.sh ${{ matrix.args }} "${EXTRA[@]}" --out "${{ runner.temp }}/linearizability"
+
+      - name: Publish the verdict
+        # Runs on failure too: a bad verdict is the one most worth
+        # reading, and it is the reason this job exists.
+        if: always()
+        run: |
+          SUMMARY="${{ runner.temp }}/linearizability/verdict.md"
+          if [[ -f "$SUMMARY" ]]; then
+            cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Linearizability: no verdict produced" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "The run failed before the checker produced one. See the job log and the artifact." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Publish the history
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linearizability-${{ matrix.id }}
+          # The history is the evidence behind the verdict: it is what
+          # lets a verdict be re-derived under a stricter model later, or
+          # disputed, without repeating the run.
+          path: ${{ runner.temp }}/linearizability
+          retention-days: 30
+          if-no-files-found: warn

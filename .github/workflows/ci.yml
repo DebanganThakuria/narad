@@ -21,17 +21,35 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # Full history so release tags are visible to the
+          # documentation staleness check below.
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
+      # Formatting was checked only by `make check` on developer
+      # machines, so a file drifted out of format on master and the
+      # documented `make check` failed for everyone who ran it.
+      - name: Install the pinned formatters
+        run: make tools-install
+
+      - name: gofmt / goimports check
+        run: make fmt-check
+
       - name: go vet
         run: go vet ./...
 
       - name: go build
         run: go build ./...
+
+      # Catches a pinned image tag in the docs that a release left
+      # behind. Cheap here, embarrassing when a reader finds it.
+      - name: Check pinned versions in docs
+        run: ./scripts/check-release-refs.sh
 
   unit-tests:
     name: Unit tests

@@ -60,6 +60,8 @@ branches:
           - E2E tests
           - Local cluster integration
           - Local cluster chaos
+          - govulncheck
+          - CodeQL analysis
       enforce_admins: false
       restrictions: null
       required_linear_history: true

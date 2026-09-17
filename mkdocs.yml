@@ -66,10 +66,10 @@ extra_javascript:
 
 nav:
   - Home: index.md
-  - Design Report: paper.md
   - Compare: compare.md
   - Client Guide:
       - Getting Started: client/index.md
+      - Go SDK: client/go-sdk.md
       - The CLI: client/cli.md
       - Topics: client/topics.md
       - Schemas: client/schemas.md
@@ -96,3 +96,4 @@ nav:
       - Cluster Lifecycle: internals/cluster-lifecycle.md
       - Rebalance & Decommission: internals/rebalance.md
       - Networking & Security: internals/networking-and-security.md
+      - Checking the Delivery Contract: internals/linearizability.md
