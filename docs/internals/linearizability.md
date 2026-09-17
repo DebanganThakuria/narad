@@ -30,8 +30,18 @@ nodes on loopback, injects faults, and prints a verdict. Useful flags:
 | `--strict` | Fail on *any* post-ack redelivery, not just unexplained ones |
 | `--no-partition-faults` | Kills only |
 | `--out DIR` | Where to leave the history, the faults, and the verdict |
-| `--grace D` | Override how long a fault's after-effects are attributed to it |
-| `--min-operations N` | Report `UNKNOWN` rather than `OK` below this much evidence |
+| `--duration N` | Seconds of load (default 180) |
+| `--drain N` | Seconds the consumers get afterwards (default 150) |
+| `--rate N` | Produces per second (default 300) |
+| `--topics N` | Topics (default 3) |
+| `--partitions N` | Partitions per topic (default 6) |
+| `--visibility N` | Visibility timeout in seconds (default 5) |
+
+The script rejects anything else. `--grace` and `--min-operations` belong to
+the checker, not the script: the script derives both from the run it just
+performed, the grace from `--visibility` and the evidence floor from
+`--duration` times `--rate`. Pass them yourself when re-checking a saved
+history, as below.
 
 Partition faults need `iptables` and passwordless `sudo`. Without them
 the script says so and injects kills only, which is the normal case on a
@@ -41,6 +51,15 @@ To check a history you already have:
 
 ```bash
 go run ./tests/linearizability --history history.jsonl --faults faults.jsonl
+```
+
+The nightly compresses its history before uploading it, and the checker
+reads plain JSONL, so a run's artifact needs unpacking first:
+
+```bash
+gunzip history.jsonl.gz
+go run ./tests/linearizability --history history.jsonl --faults faults.jsonl \
+  --visualize violation.html
 ```
 
 ## What gets recorded
@@ -122,10 +141,11 @@ the history.
 | Verdict | Meaning | Exit |
 |---|---|---|
 | `OK` | Every partition linearized, and every post-ack redelivery sat inside a fault window | 0 |
-| `OVERDUE` | No safety problem; messages were still undelivered or unacked when the run ended. Liveness, not a broken promise | 0 |
+| `OVERDUE` | No safety problem; a tail of messages was still undelivered or unacked when the run ended. Liveness, not a broken promise | 0 |
+| `STALLED` | The same measurement past `--max-overdue`, where the honest reading is that delivery or acking is broken rather than slow | 1 |
 | `ANOMALY` | A message was provably redelivered after a confirmed ack with no fault to account for it | 1 |
 | `VIOLATION` | A partition admits no valid ordering at all | 1 |
-| `UNKNOWN` | The search did not finish in time, or too few operations were recorded for a clean result to mean anything | 1 |
+| `UNKNOWN` | The search did not finish in time, too few operations were recorded, or faults covered so much of the run that a clean result would mean nothing | 1 |
 
 A `VIOLATION` also covers a **misroute**: a message handed to a consumer
 polling a topic it was never produced to. The report names the leak.
@@ -135,9 +155,27 @@ history linearizes perfectly, so without a floor a driver that died on
 its first request would report "every partition linearized" and exit
 zero. The nightly sets the floor from its own expected volume.
 
-On a `VIOLATION` the checker writes Porcupine's interactive
-visualization next to the history, and names the first partition that
-could not linearize.
+The split between `OVERDUE` and `STALLED` exists for the same reason. A
+broker that answers `410` to every ack leaves every message unacked, and
+without a ceiling that reads as a backlog and exits zero: the worst
+ack-path failure there is, reported as a liveness footnote. `STALLED` is
+where that stops being generous.
+
+Fault coverage is enforced rather than merely printed. Where coverage
+approaches 100%, every redelivery falls inside some fault's grace and is
+explained by construction, so a green run proves nothing. Past
+`--max-fault-coverage` the checker says exactly that and exits non-zero,
+instead of leaving a person to notice the figure in a nightly log.
+
+On a `VIOLATION` the checker names the first partition that could not
+linearize. Pass `--visualize FILE` to also get Porcupine's interactive
+visualization. The nightly does not, because that flag puts Porcupine in
+verbose mode, which retains every partial linearization and gives up its
+early abort on the first illegal partition: the wrong trade on a run that
+is already failing, and pure waste on the green runs that are the common
+case. Re-check the saved history with the flag when you want the picture,
+or set `NARAD_LINEARIZABILITY_VISUALIZE=1` to have the script ask for one
+in place.
 
 ## Redelivery after an ack
 

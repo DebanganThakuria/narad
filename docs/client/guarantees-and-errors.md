@@ -24,7 +24,7 @@ flowchart LR
 
 ## Ordering: not guaranteed
 
-Narad is explicit about this where other brokers are shy: **there is no delivery-order guarantee.** In steady state, keyed messages stick to one partition and tend to arrive in produce order, but three deliberate mechanisms reorder, and your design must assume them:
+Narad is explicit about this where other brokers are shy: **there is no delivery-order guarantee.** In steady state, keyed messages stick to one partition and tend to arrive in produce order, but five deliberate mechanisms reorder, and your design must assume them:
 
 - **Redelivery**: a crashed or slow consumer's message reappears after newer ones were consumed.
 - **A dead consumer holds its partition's frontier**: a message leased by a consumer that never comes back is redelivered when its visibility timeout expires, and until then that partition can run out of anything else to serve (everything above it is acked). Expect quiet windows up to `visibility_timeout_ms` after an outage.

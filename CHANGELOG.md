@@ -22,6 +22,11 @@ summarized more briefly than the 1.x and later entries.
 - A [Go SDK](https://github.com/DebanganThakuria/narad-go) in its own repository, depending on nothing but the standard library, with a guide on the documentation site. Three calls cover almost everything, and the consumer handles the visibility lease: it renews the lease while a handler runs, cancels the handler if the lease is lost, acks on success and hands the message back on failure.
 
 ### Changed
+- The linearizability verdict can now fail on a broker that never finishes. `OVERDUE` used to cover any backlog and exit zero, so a broker refusing every ack left every message unacked and still passed; past `--max-overdue` the verdict is `STALLED` and the run fails.
+- Fault coverage is enforced rather than only reported. Where faults cover most of the run, every redelivery is explained by construction and a clean result means nothing, so past `--max-fault-coverage` the verdict is `UNKNOWN` with that as the stated reason.
+- The load driver aborts when two consumers confirm the same message concurrently. That is a double lease, and the linearizability model is untimed, so it is the only leg that can see one.
+- The fault injector's spacing is derived from the visibility timeout rather than hardcoded, so a run with a longer timeout cannot overlap consecutive grace periods into one continuous excuse. The evidence floor is derived from the requested rate for the same reason: a flat floor was a fraction of a percent of what a run records.
+- The nightly fails when its fault injector recorded nothing. The injector is a background process, and a run that lost it was reporting `PASS` on evidence it never gathered.
 - Released images report their release version from `narad version` instead of a commit SHA.
 - The formatters are pinned rather than installed at `@latest`, and CI now runs the format check. A formatter that moves version on its own reformats files nobody touched, and the first person to find out is whoever's unrelated pull request fails; a file had already drifted on `master`, so the documented `make check` failed for anyone who ran it.
 - `SECURITY.md` states which versions receive fixes, target response times, and which documented configurations are out of scope, replacing a supported-versions note that still described the project as pre-1.0.
@@ -30,6 +35,10 @@ summarized more briefly than the 1.x and later entries.
 ### Fixed
 - Stale version references in the documentation. The README advertised v2.2.0 and the deployment page told people to run a v0.2.0 beta image, five releases after it was superseded.
 - A link on the schemas page that pointed at an anchor on a different page, so it silently went nowhere.
+- The signature verification recipe in the README pinned only the repository, so it would have accepted a signature from any workflow on any branch. It now pins the publishing workflow on `master` or a release tag, and CI verifies the exact identity it just signed with.
+- `scripts/check-release-refs.sh` no longer passes a pinned pre-release. Its pattern had no right anchor, so `v1.2.0-rc.1` matched as far as `v1.2.0` and compared equal to the release, which is the one case the check exists to catch. It also checks every reference on a line rather than the first.
+- The nightly heals leftover firewall rules before it starts. Its cleanup does not run on `SIGKILL`, so a cancelled run left `DROP` rules on the ports the next run uses, which then failed while pointing at the broker.
+- The nightly's numeric options are validated before they reach shell arithmetic, and the workflow passes its dispatch input as a single argument. Neither an arithmetic payload nor a smuggled second option can reach the run.
 
 ### Removed
 - The design report from the documentation site.
