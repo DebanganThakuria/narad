@@ -17,6 +17,9 @@ todo-plan.local.md
 # stops docs/brand churn from busting the go build cache.
 assets
 tests
+scripts
+ops
+Makefile
 mkdocs.yml
 site
 *.md

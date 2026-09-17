@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${NARAD_PPROF_OUT_DIR:-$ROOT_DIR/tmp/pprof}"
-BIN="${NARAD_PPROF_BINARY:-$ROOT_DIR/tmp/local-soak/narad}"
+BIN="${NARAD_PPROF_BINARY:-$ROOT_DIR/bin/narad}"
 PORTS=(${NARAD_PPROF_PORTS:-6061 6062 6063})
 CPU_SECONDS="${NARAD_PPROF_CPU_SECONDS:-30}"
 

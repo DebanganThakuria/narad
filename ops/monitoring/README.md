@@ -1,44 +1,47 @@
-# Local Soak Monitoring
+# Local Monitoring
 
-This directory contains the Prometheus scrape config and Grafana dashboard for a long-running local Narad soak.
+This directory holds the Prometheus scrape config and Grafana dashboards for a
+local Narad cluster, plus the source of the devstack `narad-stage` dashboard.
 
-Start the three-node cluster:
+Start three nodes yourself (`make local-cluster-e2e` tears its cluster down
+when the driver exits, so it is not what you want here). Each node gets a
+dedicated metrics listener on 9101-9103, which is what `prometheus.yml`
+scrapes, and a pprof listener on 6061-6063. Auth and cluster TLS are off
+here only because every address is 127.0.0.1; do not reuse these flags on
+a routable address.
 
 ```bash
-make local-soak-cluster
+make build
+mkdir -p tmp/local-monitoring/logs
+: > tmp/local-monitoring/narad.pids
+PEERS="narad-1@127.0.0.1:19081,narad-2@127.0.0.1:19082,narad-3@127.0.0.1:19083"
+for i in 1 2 3; do
+  NARAD_NODE_ID="narad-$i" \
+  NARAD_HTTP_ADDR="127.0.0.1:1808$i" \
+  NARAD_HTTP_METRICS_ADDR="127.0.0.1:910$i" \
+  NARAD_HTTP_PPROF_ADDR="127.0.0.1:606$i" \
+  NARAD_CLUSTER_ADDR="127.0.0.1:1908$i" \
+  NARAD_CLUSTER_PEERS="$PEERS" \
+  NARAD_DATA_DIR="tmp/local-monitoring/narad-$i" \
+  NARAD_SECURITY_ENABLED=false \
+  NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true \
+  NARAD_SECURITY_ALLOW_INSECURE_CLUSTER=true \
+    bin/narad serve >"tmp/local-monitoring/logs/narad-$i.log" 2>&1 &
+  echo $! >> tmp/local-monitoring/narad.pids
+done
 ```
 
-Start Prometheus and import the Grafana dashboard:
+Then start Prometheus and import the Grafana dashboards:
 
 ```bash
 make local-monitoring-start
 ```
 
-Start the tester:
-
-```bash
-make local-soak-tester
-```
-
-By default the local tester starts at `50 msg/sec`, adds `10 msg/sec` every
-`10m`, caps at `100000 msg/sec`, then holds that rate. With the default step,
-reaching the cap from `50 msg/sec` takes about 69 days.
-
-Useful overrides:
-
-```bash
-NARAD_TESTER_MESSAGES_PER_SECOND=100 NARAD_TESTER_MAX_MESSAGES_PER_SECOND=500 make local-soak-tester
-NARAD_TESTER_RATE_RAMP_STEP=1000 NARAD_TESTER_RATE_RAMP_INTERVAL=1m make local-soak-tester
-NARAD_TESTER_RATE_RAMP_STEP=0 make local-soak-tester
-NARAD_TESTER_TOPICS=20 NARAD_TESTER_PARTITIONS=24 make local-soak-tester
-NARAD_TESTER_RUN_ID=month-1 NARAD_TESTER_MAX_OUTSTANDING_MESSAGES=1000000 make local-soak-tester
-```
-
-The tester exposes metrics on `127.0.0.1:9095` and keeps live correctness state in memory. Produced messages stay in the outstanding set until first valid consumption. Consumed sequences are tracked exactly for duplicate classification, so the duplicate and unknown counters are not affected by a recent-message cache cap. New produces are throttled when outstanding messages reach `NARAD_TESTER_MAX_OUTSTANDING_MESSAGES`.
+Drive load through the same nodes with
+`make cluster-load NARAD_NODES='http://127.0.0.1:18081,http://127.0.0.1:18082,http://127.0.0.1:18083'`.
 
 Dashboards:
 
-- `Narad Local Soak`: tester plus Narad end-to-end soak view.
 - `Narad Nodes`: Narad-native API, broker, storage, CPU, memory, runtime, and disk metrics.
 
 Narad exposes process CPU and memory through the Prometheus Go/process collectors. Use `process_resident_memory_bytes{job="narad"}` as the local stand-in for Kubernetes memory usage; it is resident process memory. `go_memstats_heap_alloc_bytes` is only live Go heap and is usually lower than real process memory because it excludes goroutine stacks, mmap/file mappings, allocator overhead, and runtime metadata.
@@ -56,7 +59,7 @@ Narad also exposes `narad_data_dir_size_bytes` and `narad_data_dir_available_byt
 
 ## pprof
 
-The local soak scripts expose pprof on one loopback port per Narad node:
+With the nodes started as above (`NARAD_HTTP_PPROF_ADDR`, or `--pprof-addr`, one loopback address per node):
 
 - node 1: `http://127.0.0.1:6061/debug/pprof/`
 - node 2: `http://127.0.0.1:6062/debug/pprof/`
@@ -74,25 +77,26 @@ for node in 1 2 3; do
 done
 ```
 
-Inspect a heap profile:
+Inspect a heap profile (the binary must be the one the nodes are running;
+`scripts/capture-local-pprof.sh` takes it as `NARAD_PPROF_BINARY`):
 
 ```bash
-go tool pprof -top tmp/local-soak/narad tmp/pprof/narad-1.heap.pb.gz
-go tool pprof -http=:0 tmp/local-soak/narad tmp/pprof/narad-1.heap.pb.gz
+go tool pprof -top bin/narad tmp/pprof/narad-1.heap.pb.gz
+go tool pprof -http=:0 bin/narad tmp/pprof/narad-1.heap.pb.gz
 ```
 
 Capture a 30-second CPU profile from node 1:
 
 ```bash
 curl -fsS -o tmp/pprof/narad-1.cpu.pb.gz "http://127.0.0.1:6061/debug/pprof/profile?seconds=30"
-go tool pprof -top tmp/local-soak/narad tmp/pprof/narad-1.cpu.pb.gz
+go tool pprof -top bin/narad tmp/pprof/narad-1.cpu.pb.gz
 ```
 
-Stop local processes:
+Stop Prometheus, then the nodes:
 
 ```bash
-make local-soak-stop
 make local-monitoring-stop
+kill $(cat tmp/local-monitoring/narad.pids)
 ```
 
 ## Devstack dashboard (Narad Stage)

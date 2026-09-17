@@ -9,16 +9,12 @@ scrape_configs:
       - targets:
           - 127.0.0.1:9090
 
+  # The nodes' dedicated metrics listeners (NARAD_HTTP_METRICS_ADDR), which
+  # serve /metrics without the API credentials; see README.md.
   - job_name: narad
     metrics_path: /metrics
     static_configs:
       - targets:
-          - 127.0.0.1:18081
-          - 127.0.0.1:18082
-          - 127.0.0.1:18083
-
-  - job_name: narad-tester
-    metrics_path: /metrics
-    static_configs:
-      - targets:
-          - 127.0.0.1:9095
+          - 127.0.0.1:9101
+          - 127.0.0.1:9102
+          - 127.0.0.1:9103
