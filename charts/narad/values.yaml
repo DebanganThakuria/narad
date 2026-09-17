@@ -103,8 +103,8 @@ narad:
   logLevel: info
   logFormat: json
 
-  # Keep the default chart retention small for cluster soak tests. Topics can
-  # still override retention during creation.
+  # Keep the default retention short so a test cluster does not fill its
+  # disk. Topics can still override retention during creation.
   defaultRetentionAgeMs: 43200000
   defaultVisibilityTimeoutMs: 30000
   defaultPartitions: 3

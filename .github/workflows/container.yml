@@ -3,15 +3,21 @@ name: Publish Container
 on:
   push:
     branches: [master]
-    # Docs, brand assets, and chart/markdown changes never reach the
-    # image; don't burn a build+publish on them. Tag pushes always build.
+    # Nothing the root .dockerignore drops from the build context (docs,
+    # brand assets, charts, tests, markdown) can change the image; don't
+    # burn a build+publish on it. Tag pushes always build.
     paths-ignore:
       - "docs/**"
       - "assets/**"
       - "charts/**"
+      - "tests/**"
+      - "scripts/**"
+      - "ops/**"
+      - "Makefile"
       - "mkdocs.yml"
       - "**.md"
       - ".github/workflows/docs.yml"
+      - ".github/workflows/ci.yml"
     tags:
       - "v*"
   workflow_dispatch:

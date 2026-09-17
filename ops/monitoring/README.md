@@ -3,13 +3,38 @@
 This directory holds the Prometheus scrape config and Grafana dashboards for a
 local Narad cluster, plus the source of the devstack `narad-stage` dashboard.
 
-Start a local three-node cluster with `make local-cluster-e2e` (or run the
-nodes yourself on ports 18081-18083, which is what `prometheus.yml` scrapes),
-then start Prometheus and import the Grafana dashboards:
+Start three nodes yourself (`make local-cluster-e2e` tears its cluster down
+when the driver exits, so it is not what you want here). Each node gets a
+dedicated metrics listener on 9101-9103, which is what `prometheus.yml`
+scrapes, and a pprof listener on 6061-6063:
+
+```bash
+make build
+mkdir -p tmp/local-monitoring/logs
+PEERS="narad-1@127.0.0.1:19081,narad-2@127.0.0.1:19082,narad-3@127.0.0.1:19083"
+for i in 1 2 3; do
+  NARAD_NODE_ID="narad-$i" \
+  NARAD_HTTP_ADDR="127.0.0.1:1808$i" \
+  NARAD_HTTP_METRICS_ADDR="127.0.0.1:910$i" \
+  NARAD_HTTP_PPROF_ADDR="127.0.0.1:606$i" \
+  NARAD_CLUSTER_ADDR="127.0.0.1:1908$i" \
+  NARAD_CLUSTER_PEERS="$PEERS" \
+  NARAD_DATA_DIR="tmp/local-monitoring/narad-$i" \
+  NARAD_SECURITY_ENABLED=false \
+  NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true \
+  NARAD_SECURITY_ALLOW_INSECURE_CLUSTER=true \
+    bin/narad serve >"tmp/local-monitoring/logs/narad-$i.log" 2>&1 &
+done
+```
+
+Then start Prometheus and import the Grafana dashboards:
 
 ```bash
 make local-monitoring-start
 ```
+
+Drive load through the same nodes with
+`make cluster-load NARAD_NODES='http://127.0.0.1:18081,http://127.0.0.1:18082,http://127.0.0.1:18083'`.
 
 Dashboards:
 
@@ -30,7 +55,7 @@ Narad also exposes `narad_data_dir_size_bytes` and `narad_data_dir_available_byt
 
 ## pprof
 
-With `narad.pprof.enabled: true` and one loopback pprof address per node, for example:
+With the nodes started as above (`NARAD_HTTP_PPROF_ADDR`, or `--pprof-addr`, one loopback address per node):
 
 - node 1: `http://127.0.0.1:6061/debug/pprof/`
 - node 2: `http://127.0.0.1:6062/debug/pprof/`
@@ -48,7 +73,8 @@ for node in 1 2 3; do
 done
 ```
 
-Inspect a heap profile:
+Inspect a heap profile (the binary must be the one the nodes are running;
+`scripts/capture-local-pprof.sh` takes it as `NARAD_PPROF_BINARY`):
 
 ```bash
 go tool pprof -top bin/narad tmp/pprof/narad-1.heap.pb.gz
@@ -62,10 +88,11 @@ curl -fsS -o tmp/pprof/narad-1.cpu.pb.gz "http://127.0.0.1:6061/debug/pprof/prof
 go tool pprof -top bin/narad tmp/pprof/narad-1.cpu.pb.gz
 ```
 
-Stop Prometheus:
+Stop Prometheus, then the nodes:
 
 ```bash
 make local-monitoring-stop
+pkill -f 'bin/narad serve'
 ```
 
 ## Devstack dashboard (Narad Stage)

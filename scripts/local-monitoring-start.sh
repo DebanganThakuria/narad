@@ -6,7 +6,7 @@ RUN_DIR="${NARAD_LOCAL_MONITORING_DIR:-$ROOT_DIR/tmp/local-monitoring}"
 PROM_PID_FILE="$RUN_DIR/prometheus.pid"
 PROM_LOG="$RUN_DIR/prometheus.log"
 PROM_DATA="$RUN_DIR/prometheus-data"
-PROM_CONFIG="$ROOT_DIR/ops/local-monitoring/prometheus.yml"
+PROM_CONFIG="$ROOT_DIR/ops/monitoring/prometheus.yml"
 GRAFANA_URL="${GRAFANA_URL:-http://127.0.0.1:3000}"
 GRAFANA_AUTH="${GRAFANA_AUTH:-admin:admin}"
 
@@ -65,10 +65,10 @@ if curl -fsS "$GRAFANA_URL/api/health" >/dev/null 2>&1; then
     >/dev/null 2>&1 || true
 
   if command -v python3 >/dev/null 2>&1; then
-    for dashboard in "$ROOT_DIR"/ops/local-monitoring/grafana/dashboards/*.json; do
+    for dashboard in "$ROOT_DIR"/ops/monitoring/grafana/dashboards/*.json; do
       [[ -f "$dashboard" ]] || continue
       payload="$RUN_DIR/dashboard-payload-$(basename "$dashboard")"
-      python3 "$ROOT_DIR/ops/local-monitoring/wrap-dashboard.py" "$dashboard" "$payload"
+      python3 "$ROOT_DIR/ops/monitoring/wrap-dashboard.py" "$dashboard" "$payload"
       curl -fsS -u "$GRAFANA_AUTH" \
         -H "Content-Type: application/json" \
         -X POST "$GRAFANA_URL/api/dashboards/db" \
@@ -76,7 +76,7 @@ if curl -fsS "$GRAFANA_URL/api/health" >/dev/null 2>&1; then
         >/dev/null 2>&1 || true
     done
   else
-    echo "python3 not found; import the dashboard JSON manually from ops/local-monitoring/grafana/dashboards" >&2
+    echo "python3 not found; import the dashboard JSON manually from ops/monitoring/grafana/dashboards" >&2
   fi
 else
   echo "Grafana is not reachable at $GRAFANA_URL; import the dashboard JSON manually after Grafana starts" >&2
