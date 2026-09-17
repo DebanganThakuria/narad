@@ -28,6 +28,7 @@ laptop unchanged from how it runs in Kubernetes.
 | Run it: Helm chart, configuration, monitoring, scaling, recovery | [Operate](https://debanganthakuria.github.io/narad/operate/) |
 | Understand it: every subsystem, with the real function names | [Internals](https://debanganthakuria.github.io/narad/internals/) |
 | Decide whether it fits: an honest matrix against Kafka, NATS, RabbitMQ, SQS, Redis, Pulsar | [Compare](https://debanganthakuria.github.io/narad/compare/) |
+| Write Go against it | [Go SDK](https://debanganthakuria.github.io/narad/client/go-sdk/) |
 
 ## Quickstart
 
@@ -45,6 +46,25 @@ narad topic add demo
 narad sub demo --peek                                   # live, read-only tail
 narad pub demo '{"hello":"narad"}' --count 100 --rate 20
 ```
+
+From Go, use the client rather than `curl`. It handles the visibility
+lease, retries with jitter, and per-node circuit breakers, and it depends
+on nothing but the standard library:
+
+```go
+import narad "github.com/debanganthakuria/narad-go"
+
+client, _ := narad.New("narad-1:7942,narad-2:7942,narad-3:7942")
+defer client.Close()
+
+client.Consume(ctx, "orders", narad.HandlerFunc(
+    func(ctx context.Context, msg *narad.Message) error {
+        return process(ctx, msg)
+    }))
+```
+
+It lives at [DebanganThakuria/narad-go](https://github.com/DebanganThakuria/narad-go),
+with the guide in [the docs](https://debanganthakuria.github.io/narad/client/go-sdk/).
 
 Security is on outside `--dev`: a root `admin` user is seeded at first start (set
 `NARAD_ADMIN_PASSWORD` or read the one-time log line) and every call needs HTTP Basic auth.

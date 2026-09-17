@@ -20,6 +20,11 @@ sequenceDiagram
     N-->>C: 204 done, never delivered again
 ```
 
+!!! tip "Writing Go?"
+    Everything below works with `curl` so you can see the API plainly.
+    For a service, use the [Go SDK](go-sdk.md): it handles the visibility
+    lease, retries and failover for you.
+
 ## Authentication
 
 Every API call uses HTTP **Basic auth**:

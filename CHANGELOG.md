@@ -19,6 +19,7 @@ summarized more briefly than the 1.x and later entries.
 - A nightly linearizability check. A three-node cluster takes load while nodes are killed and cut off from their peers on the cluster plane; every client operation is recorded with the interval it was in flight for, and the history is checked against a sequential specification of the delivery contract. A message redelivered after a confirmed ack now has to sit inside a fault window, and one that does not fails the run. A second leg injects no faults and runs strict, which asserts that a healthy broker never redelivers an acked message.
 - The load driver records an operation history with `--history`, in a format shared with the checker (`tests/linearizability/history`).
 - Documentation for all of it, including what the check cannot catch: [Checking the Delivery Contract](docs/internals/linearizability.md).
+- A [Go SDK](https://github.com/DebanganThakuria/narad-go) in its own repository, depending on nothing but the standard library, with a guide on the documentation site. Three calls cover almost everything, and the consumer handles the visibility lease: it renews the lease while a handler runs, cancels the handler if the lease is lost, acks on success and hands the message back on failure.
 
 ### Changed
 - Released images report their release version from `narad version` instead of a commit SHA.

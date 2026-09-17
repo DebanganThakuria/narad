@@ -69,6 +69,7 @@ nav:
   - Compare: compare.md
   - Client Guide:
       - Getting Started: client/index.md
+      - Go SDK: client/go-sdk.md
       - The CLI: client/cli.md
       - Topics: client/topics.md
       - Schemas: client/schemas.md
