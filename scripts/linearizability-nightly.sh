@@ -74,20 +74,66 @@ FAULT_PID=""
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--duration) DURATION_SECONDS="$2"; shift 2 ;;
-	--drain) DRAIN_SECONDS="$2"; shift 2 ;;
-	--rate) RATE="$2"; shift 2 ;;
-	--topics) TOPICS="$2"; shift 2 ;;
-	--partitions) PARTITIONS="$2"; shift 2 ;;
-	--visibility) VISIBILITY_SECONDS="$2"; shift 2 ;;
+	# "${2:-}" rather than "$2": under `set -u` a trailing option with no
+	# value would abort with "$2: unbound variable" instead of the usage
+	# error the validation below gives.
+	--duration) DURATION_SECONDS="${2:-}"; shift 2 || set -- ;;
+	--drain) DRAIN_SECONDS="${2:-}"; shift 2 || set -- ;;
+	--rate) RATE="${2:-}"; shift 2 || set -- ;;
+	--topics) TOPICS="${2:-}"; shift 2 || set -- ;;
+	--partitions) PARTITIONS="${2:-}"; shift 2 || set -- ;;
+	--visibility) VISIBILITY_SECONDS="${2:-}"; shift 2 || set -- ;;
 	--no-faults) FAULTS_ENABLED=0; shift ;;
 	--no-partition-faults) PARTITION_FAULTS=0; shift ;;
 	--strict) STRICT=1; shift ;;
-	--out) OUT_DIR="$2"; shift 2 ;;
-	-h | --help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	--out)
+		if [[ -z "${2:-}" ]]; then
+			echo "--out takes a directory" >&2
+			exit 2
+		fi
+		OUT_DIR="$2"; shift 2 || set -- ;;
+	-h | --help) sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
+
+# The numeric options land in arithmetic contexts ($((DURATION_SECONDS -
+# 30)) and friends), and bash arithmetic recursively evaluates an
+# identifier-shaped operand, so `--duration 'a[$(cmd)]'` would execute
+# cmd. The workflow passes a dispatch input straight through, so this is
+# the boundary where it has to stop being arbitrary text.
+#
+# Leading zeros are rejected rather than accepted, because bash arithmetic
+# reads them as octal: `--visibility 010` would quietly run with 8, and
+# `--rate 08` would abort mid-run with "value too great for base".
+#
+# Everything but --drain needs a positive value. A zero rate in
+# particular is not harmless: it means "unthrottled" to the driver, and
+# it would take the evidence floor, which is derived from the rate, down
+# to nothing on the highest-throughput run there is.
+for pair in "duration:$DURATION_SECONDS:1" "drain:$DRAIN_SECONDS:0" "rate:$RATE:1" \
+	"topics:$TOPICS:1" "partitions:$PARTITIONS:1" "visibility:$VISIBILITY_SECONDS:1"; do
+	name="${pair%%:*}"
+	rest="${pair#*:}"
+	value="${rest%:*}"
+	floor="${rest##*:}"
+	if [[ ! "$value" =~ ^(0|[1-9][0-9]*)$ ]]; then
+		echo "--${name} takes a whole number without leading zeros, got: ${value}" >&2
+		exit 2
+	fi
+	if ((value < floor)); then
+		echo "--${name} must be at least ${floor}, got: ${value}" >&2
+		exit 2
+	fi
+done
+unset pair name rest value floor
+
+# The checker attributes a fault's after-effects for the visibility
+# timeout plus a 20s margin (graceMargin in tests/linearizability). Faults
+# have to be spaced wider than that, or consecutive grace periods overlap
+# and the run explains every redelivery by construction.
+GRACE_SECONDS=$((VISIBILITY_SECONDS + 20))
+FAULT_GAP_SECONDS=$((GRACE_SECONDS + 5))
 
 if [[ -z "$OUT_DIR" ]]; then
 	OUT_DIR="$TMP_DIR/out"
@@ -301,6 +347,12 @@ cleanup() {
 		# binaries and three node data directories can go. Repeated local
 		# runs were leaving write-ahead logs behind in /tmp.
 		rm -rf "$TMP_DIR"
+	else
+		# OUT_DIR defaults to inside the temp tree, so the branch above
+		# cannot fire on a plain `./scripts/linearizability-nightly.sh`.
+		# That is the common local invocation, and it was the one leaving
+		# the write-ahead logs behind with no message saying where.
+		echo "artifacts kept at: $OUT_DIR" >&2
 	fi
 }
 trap cleanup EXIT
@@ -349,7 +401,14 @@ fault_loop() {
 		# merge into one continuous excuse. Fault coverage well below
 		# 100% is what leaves the check something to discriminate with,
 		# and the verdict reports the figure.
-		sleep $((25 + RANDOM % 11))
+		#
+		# Derived rather than hardcoded: the checker's grace is the
+		# run's visibility timeout plus a 20s margin, so a fixed 25-35s
+		# gap only happens to clear it at the default --visibility 5.
+		# Raising visibility past that made every window's grace swallow
+		# the next window's start, coverage went to ~100%, and every
+		# redelivery became explained by construction.
+		sleep $((FAULT_GAP_SECONDS + RANDOM % 11))
 	done
 	echo "fault: window closed, leaving the drain quiet"
 }
@@ -368,6 +427,14 @@ echo "building narad, driver and checker"
 detect_clock
 
 PEERS="narad-1@127.0.0.1:${CLUSTER_PORTS[0]},narad-2@127.0.0.1:${CLUSTER_PORTS[1]},narad-3@127.0.0.1:${CLUSTER_PORTS[2]}"
+
+# Start from a known firewall state. The EXIT trap heals partitions, but
+# it does not run on SIGKILL: a cancelled CI job, a runner timeout or the
+# OOM killer leaves DROP rules on exactly the ports this run is about to
+# use, and the next run then fails at wait_ready and blames the broker.
+# The function is idempotent and keeps no state, which is what makes
+# calling it on the way in safe.
+heal_all_partitions
 
 for i in 0 1 2; do start_node "$i"; done
 for i in 0 1 2; do wait_ready "$i"; done
@@ -423,16 +490,49 @@ if [[ -n "${FAULT_PID:-}" ]] && kill -0 "$FAULT_PID" 2>/dev/null; then
 fi
 heal_all_partitions
 
+# A faults run that injected nothing is a baseline run wearing the wrong
+# name, and it would report PASS on the strength of evidence it never
+# gathered. The injector is a background subshell under `set -e`, so a
+# failure in stop_node, start_node or now_ns ends it silently and the
+# parent's `kill -0` simply finds it already gone.
+FAULTS_RECORDED=0
+[[ -s "$FAULTS" ]] && FAULTS_RECORDED="$(grep -c '"op":"fault"' "$FAULTS" || true)"
+if [[ "$FAULTS_ENABLED" -eq 1 && "$FAULTS_RECORDED" -eq 0 ]]; then
+	echo "FAIL the fault injector recorded nothing: this run proves less than the baseline it imitates" >&2
+	exit 1
+fi
+
 echo
 echo "checking $(wc -l <"$HISTORY" | tr -d ' ') recorded operations against the model"
-# A run this size records tens of thousands of operations. Anything near
-# zero means the driver died early or never recorded, and a clean verdict
-# over it would be meaningless; the checker reports UNKNOWN below this.
-MIN_OPERATIONS=$((DURATION_SECONDS * 3))
+# A run this size records three operations per message: produce, deliver,
+# ack. Anything near zero means the driver died early or never recorded,
+# and a clean verdict over it would be meaningless; the checker reports
+# UNKNOWN below this.
+#
+# Derived from the load actually requested, not from duration alone. A
+# flat floor of three per second was 0.3% of what the CI leg records, so
+# a driver that died two seconds in still cleared it and reported OK.
+# Half the expected produce count leaves generous slack for a slow runner
+# while still catching a driver that never really ran.
+MIN_OPERATIONS=$((DURATION_SECONDS * RATE / 2))
 CHECK_ARGS=(--history "$HISTORY" --faults "$FAULTS"
 	--json "$VERDICT_JSON" --markdown "$VERDICT_MD"
 	--min-operations "$MIN_OPERATIONS"
-	--visualize "$OUT_DIR/violation.html")
+	# A tail of undrained messages is a backlog; most of the run left
+	# undelivered or unacked is a broken broker, and the checker needs a
+	# number to tell those apart. Likewise for fault coverage: past the
+	# ceiling every redelivery is explained by construction and a clean
+	# result carries no information.
+	--max-overdue 0.05
+	--max-fault-coverage 0.75)
+# Not on by default: --visualize puts porcupine in verbose mode, which
+# retains every partial linearization and disables its early abort on the
+# first illegal partition. That is the wrong trade for a run that is
+# already failing, and pure waste on the green runs that are the common
+# case. The history is kept as an artifact, so a violation is re-checked
+# with --visualize against the same evidence.
+[[ "${NARAD_LINEARIZABILITY_VISUALIZE:-0}" == "1" ]] &&
+	CHECK_ARGS+=(--visualize "$OUT_DIR/violation.html")
 [[ "$STRICT" -eq 1 ]] && CHECK_ARGS+=(--strict)
 
 CHECK_STATUS=0

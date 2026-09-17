@@ -85,11 +85,15 @@ jobs:
           DURATION: ${{ inputs.duration }}
           LEG: ${{ matrix.id }}
         run: |
-          EXTRA=""
+          # An array, not a string. Splitting an unquoted "$EXTRA" on
+          # whitespace let a dispatch input of "180 --no-faults" smuggle a
+          # second option in and quietly turn the faults leg into a
+          # baseline, which is the one thing that leg must not be.
+          EXTRA=()
           if [[ -n "$DURATION" && "$LEG" == "faults" ]]; then
-            EXTRA="--duration $DURATION"
+            EXTRA=(--duration "$DURATION")
           fi
-          ./scripts/linearizability-nightly.sh ${{ matrix.args }} $EXTRA --out "${{ runner.temp }}/linearizability"
+          ./scripts/linearizability-nightly.sh ${{ matrix.args }} "${EXTRA[@]}" --out "${{ runner.temp }}/linearizability"
 
       - name: Publish the verdict
         # Runs on failure too: a bad verdict is the one most worth
