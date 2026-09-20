@@ -41,8 +41,13 @@ jobs:
       # required status check that cannot start failing on every open PR
       # because upstream cut a release, and one less unpinned third-party
       # binary running in CI.
+      #
+      # The pin does have to move with the Go toolchain: v1.1.4 vendors
+      # x/tools v0.29.0, whose type traversal panics ("panic: Int") on the
+      # type forms Go 1.27 introduced, so it crashes instead of scanning.
+      # Re-pin whenever the go directive crosses a major Go release.
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
 
       - name: Scan module
         run: govulncheck ./...
