@@ -10,8 +10,16 @@
 #
 # Baseline lives in .github/bench/baseline.json. When a legitimate
 # change moves throughput (either direction), rerun via
-# workflow_dispatch, take the suggested baseline from the job summary,
-# and commit it.
+# workflow_dispatch and commit a new one.
+#
+# Take the MEDIAN of the last few runs, not the number the job summary
+# suggests. The summary can only see tonight, and best-of-two absorbs
+# noise within a job but not between them: consume has ranged 5927 to
+# 7278 msg/s on unchanged code. A baseline set from a peak run warns on
+# every ordinary night, and one set from a trough (consume sat at 5241
+# while the broker sustained ~6000, so a 39% regression would have
+# passed) stops detecting anything. The median is what the runner
+# actually does.
 name: Bench
 
 on:
