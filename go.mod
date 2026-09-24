@@ -3,7 +3,7 @@ module github.com/debanganthakuria/narad
 go 1.27.1
 
 require (
-	github.com/anishathalye/porcupine v1.3.0
+	github.com/anishathalye/porcupine v1.3.1
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/raft v1.7.3
 	github.com/hashicorp/raft-boltdb/v2 v2.3.1
