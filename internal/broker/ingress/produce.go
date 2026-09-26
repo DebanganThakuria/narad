@@ -167,6 +167,15 @@ func (m *Manager) AcceptProduceWithTopicID(ctx context.Context, topicName, topic
 	}, nil
 }
 
+// Healthy reports whether the ingress WAL still accepts produce
+// requests. It turns false for good once a WAL write or sync fails:
+// the WAL latches the failure and every later accept fails until the
+// process restarts, so an operator needs to see it (metrics, readiness)
+// rather than infer it from 5xx rates.
+func (m *Manager) Healthy() bool {
+	return m != nil && m.log != nil && m.log.Err() == nil
+}
+
 // DurableProduceNext returns the sequence one past the newest record
 // known to be durable in the ingress WAL.
 func (m *Manager) DurableProduceNext() uint64 {

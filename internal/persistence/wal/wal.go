@@ -219,6 +219,16 @@ func (l *Log) NextSeq() uint64 {
 	return l.nextSeq
 }
 
+// Err returns the latched write or sync failure, or nil while the log is
+// healthy. Once set it never clears: the log refuses every append (and
+// fails every waiting one) until it is reopened, because the bytes after
+// the failure point are of unknown durability.
+func (l *Log) Err() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.syncErr
+}
+
 // Close stops the sync loop, flushes any buffered records, and closes
 // the active segment. It returns the latched sync error, if any.
 func (l *Log) Close() error {
