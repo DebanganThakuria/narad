@@ -43,7 +43,7 @@ type Message struct {
 // omitempty handling; an empty Payload encodes as null.
 func (m Message) AppendJSON(dst []byte) []byte {
 	dst = append(dst, `{"topic":`...)
-	dst = appendJSONQuoted(dst, m.Topic)
+	dst = AppendJSONQuoted(dst, m.Topic)
 	dst = append(dst, `,"partition":`...)
 	dst = strconv.AppendInt(dst, int64(m.Partition), 10)
 	dst = append(dst, `,"offset":`...)
@@ -51,7 +51,7 @@ func (m Message) AppendJSON(dst []byte) []byte {
 	if m.Key != "" {
 		dst = append(dst, `,"key":`...)
 		if utf8.ValidString(m.Key) {
-			dst = appendJSONQuoted(dst, m.Key)
+			dst = AppendJSONQuoted(dst, m.Key)
 		} else {
 			// Binary key (a hash, a packed ID): base64-wrap and flag it,
 			// as for a binary payload.
@@ -82,22 +82,24 @@ func (m Message) AppendJSON(dst []byte) []byte {
 	dst = strconv.AppendInt(dst, m.Timestamp, 10)
 	if m.ReceiptHandle != "" {
 		dst = append(dst, `,"receipt_handle":`...)
-		dst = appendJSONQuoted(dst, m.ReceiptHandle)
+		dst = AppendJSONQuoted(dst, m.ReceiptHandle)
 	}
 	dst = append(dst, '}')
 	return dst
 }
 
-// appendJSONQuoted appends s as a JSON string literal without
+// AppendJSONQuoted appends s as a JSON string literal without
 // allocating. strconv.AppendQuote is not a substitute: it emits Go
 // escapes (\x01, \v, \U000e0067) that JSON forbids, so one odd byte in
-// a key made the whole consume response unparseable. Printable ASCII
+// a key made the whole consume response unparseable. Exported for the
+// HTTP layer's hand-built error bodies, whose messages can carry a
+// decoded path value. Printable ASCII
 // other than '"' and '\\' is copied in runs, which is every topic name,
 // receipt handle and typical key. The rest follows encoding/json:
 // control bytes are escaped, as are U+2028 and U+2029 (valid JSON but
 // line terminators to JavaScript), and an invalid UTF-8 byte becomes
 // U+FFFD. Other runes, printable or not, are valid JSON as they are.
-func appendJSONQuoted(dst []byte, s string) []byte {
+func AppendJSONQuoted(dst []byte, s string) []byte {
 	const hex = "0123456789abcdef"
 	dst = append(dst, '"')
 	start := 0

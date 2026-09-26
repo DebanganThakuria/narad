@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/security"
 )
 
@@ -84,7 +85,7 @@ func writeTooManyInFlight(w http.ResponseWriter, max int) {
 	msg := "too many in-flight consume requests for this identity (limit " + strconv.Itoa(max) + " per node)"
 	body := make([]byte, 0, len(msg)+14)
 	body = append(body, `{"error":`...)
-	body = strconv.AppendQuote(body, msg)
+	body = topic.AppendJSONQuoted(body, msg)
 	body = append(body, "}\n"...)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))

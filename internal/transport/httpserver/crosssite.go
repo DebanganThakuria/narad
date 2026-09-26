@@ -4,6 +4,8 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 )
 
 // ClientHeader is a request header whose mere presence marks a request
@@ -67,7 +69,7 @@ func writeUnsupportedMediaType(w http.ResponseWriter) {
 	msg := "state-changing requests must send Content-Type: application/json or application/octet-stream, or an " + ClientHeader + " header"
 	body := make([]byte, 0, len(msg)+14)
 	body = append(body, `{"error":`...)
-	body = strconv.AppendQuote(body, msg)
+	body = topic.AppendJSONQuoted(body, msg)
 	body = append(body, "}\n"...)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
