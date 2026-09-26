@@ -136,12 +136,14 @@ func (l *Log) readSegmentShared(offset int64) ([]byte, error) {
 // full torn/corrupt-write check with zero decode: one CRC per frame instead
 // of one decode per record.
 func (l *Log) VerifyDurable(first, last int64) error {
-	var buf []byte
-	return l.verifyDurable(first, last, &buf)
+	buf := verifyChunks.get()
+	defer verifyChunks.put(buf)
+	return l.verifyDurable(first, last, buf)
 }
 
-// verifyDurable is VerifyDurable with a caller-owned CRC buffer, so the
-// commit path (which verifies on every batch) never allocates per frame.
+// verifyDurable is VerifyDurable with a caller-provided CRC buffer, so
+// the commit path (which verifies on every batch) never allocates per
+// frame.
 func (l *Log) verifyDurable(first, last int64, buf *[]byte) error {
 	for off := first; off <= last; {
 		entry, _, writeLocked, ok, err := l.lockIndexEntry(off)

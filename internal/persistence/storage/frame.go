@@ -7,6 +7,8 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"runtime"
+	"sync"
 
 	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 )
@@ -54,9 +56,9 @@ func decodeRecordsPayload(payload []byte, recordCount int32) ([][]byte, error) {
 	return out, nil
 }
 
-// encodeFrame builds one frame with fresh buffers. The flusher uses a
-// frameEncoder to reuse its buffers across flushes; this form serves
-// tests and one-off callers.
+// encodeFrame builds one frame with fresh buffers. The flusher borrows
+// a frameEncoder (frameEncoders) to reuse buffers across flushes; this
+// form serves tests and one-off callers.
 func encodeFrame(records [][]byte, baseOffset int64, c codec.Codec) ([]byte, error) {
 	var enc frameEncoder
 	frame, err := enc.encodeFrame(records, baseOffset, c)
@@ -80,10 +82,20 @@ type frameEncoder struct {
 	frame []byte
 }
 
+// frameEncoders lends encoders to the flushers for one frame at a time.
+// Each Log used to own one, so the encode buffers of the largest batch a
+// partition ever wrote (up to 2 x maxRetainedFrameBuffer) stayed pinned
+// for the life of the Log on every partition that ever committed; the
+// pool bounds them by the frames being encoded at once, and the GC
+// drops idle ones.
+var frameEncoders = sync.Pool{New: func() any { return new(frameEncoder) }}
+
 // encodeFrame encodes records into a frame: header, then the codec's
 // output. The codec appends straight into the frame buffer after the
 // header slot (both codecs append to dst), so there is no intermediate
-// "encoded" buffer and no copy.
+// "encoded" buffer and no copy. An uncompressed frame's payload is the
+// record stream itself, so it is built in place after the header with
+// no staging buffer at all.
 func (enc *frameEncoder) encodeFrame(records [][]byte, baseOffset int64, c codec.Codec) ([]byte, error) {
 	if len(records) == 0 {
 		return nil, errors.New("storage: encodeFrame: empty batch")
@@ -93,42 +105,50 @@ func (enc *frameEncoder) encodeFrame(records [][]byte, baseOffset int64, c codec
 	for _, r := range records {
 		innerSize += 4 + len(r)
 	}
-	if cap(enc.inner) < innerSize {
-		enc.inner = make([]byte, 0, innerSize)
+	var frame []byte
+	if c.Flag() == codec.FlagNone {
+		if cap(enc.frame) < headerSize+innerSize {
+			enc.frame = make([]byte, 0, headerSize+innerSize)
+		}
+		frame = encodeRecordsPayload(enc.frame[:headerSize], records)
+	} else {
+		if cap(enc.inner) < innerSize {
+			enc.inner = make([]byte, 0, innerSize)
+		}
+		inner := encodeRecordsPayload(enc.inner[:0], records)
+		if cap(enc.frame) < headerSize {
+			enc.frame = make([]byte, 0, headerSize+innerSize)
+		}
+		frame = c.Encode(enc.frame[:headerSize], inner)
+		if cap(inner) <= maxRetainedFrameBuffer {
+			enc.inner = inner[:0]
+		} else {
+			enc.inner = nil
+		}
 	}
-	inner := encodeRecordsPayload(enc.inner[:0], records)
-
-	if cap(enc.frame) < headerSize {
-		enc.frame = make([]byte, 0, headerSize+innerSize)
-	}
-	frame := c.Encode(enc.frame[:headerSize], inner)
 	encodedLen := len(frame) - headerSize
 
 	// Mirror decodeHeader's read-time bound: a frame past maxFrameBytes
 	// would be written but rejected as corrupt on every read (a poison
 	// frame), so refuse it at write time instead.
-	if len(inner) > maxFrameBytes || encodedLen > maxFrameBytes {
+	if innerSize > maxFrameBytes || encodedLen > maxFrameBytes {
 		enc.release()
-		return nil, fmt.Errorf("storage: frame too large: uncompressed=%d compressed=%d", len(inner), encodedLen)
+		return nil, fmt.Errorf("storage: frame too large: uncompressed=%d compressed=%d", innerSize, encodedLen)
 	}
 
 	encodeHeader(frame[:headerSize], frameHeader{
 		flags:        c.Flag() & codecMask,
 		recordCount:  int32(len(records)),
 		baseOffset:   baseOffset,
-		uncompressed: int32(len(inner)),
+		uncompressed: int32(innerSize),
 		compressed:   int32(encodedLen),
 	})
 
 	crc := crc32cOf(frame[2:23], frame[headerSize:])
 	binary.BigEndian.PutUint32(frame[23:27], crc)
 
-	// Keep the (possibly grown) buffers for the next flush, within bounds.
-	if cap(inner) <= maxRetainedFrameBuffer {
-		enc.inner = inner[:0]
-	} else {
-		enc.inner = nil
-	}
+	// Keep the (possibly grown) frame buffer for the next flush, within
+	// bounds.
 	if cap(frame) <= maxRetainedFrameBuffer {
 		enc.frame = frame[:0]
 	} else {
@@ -305,9 +325,39 @@ func verifyFrameAt(r io.ReaderAt, pos int64) (frameHeader, int64, error) {
 // path never allocates a whole frame just to hash it.
 const verifyChunkBytes = 64 << 10
 
+// verifyChunks lends verifyFrameAtBuffered its read buffer for one
+// verify. Each Log's flusher used to keep its own: 64 KiB of heap on
+// every partition that ever committed, however small its frames. The
+// list holds at most one chunk per P, whoever returned it. (A sync.Pool
+// keeps a lone chunk in the private slot of the P that put it back, out
+// of reach of a flusher that next runs on another P, so a migrating
+// flusher kept allocating fresh ones.)
+var verifyChunks = make(chunkList, runtime.GOMAXPROCS(0))
+
+// chunkList is a bounded free list of verifyChunkBytes buffers.
+type chunkList chan *[]byte
+
+func (c chunkList) get() *[]byte {
+	select {
+	case b := <-c:
+		return b
+	default:
+		b := make([]byte, verifyChunkBytes)
+		return &b
+	}
+}
+
+func (c chunkList) put(b *[]byte) {
+	select {
+	case c <- b:
+	default:
+	}
+}
+
 // verifyFrameAtBuffered is verifyFrameAt without the frame-sized payload
-// allocation: it streams the payload through *buf (grown once, reused
-// across calls) while computing the CRC. Same errors as readFrameRaw.
+// allocation: it streams the payload through *buf (grown to
+// verifyChunkBytes if smaller) while computing the CRC. Same errors as
+// readFrameRaw.
 func verifyFrameAtBuffered(r io.ReaderAt, pos int64, buf *[]byte) (frameHeader, int64, error) {
 	var hdrBuf [headerSize]byte
 	n, err := readAt(r, hdrBuf[:], pos)

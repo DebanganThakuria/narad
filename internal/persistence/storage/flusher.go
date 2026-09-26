@@ -62,15 +62,6 @@ type flusher struct {
 	// SyncPerWrite). Reset at the start of every drainOnce.
 	hwmForce bool
 
-	// enc holds the frame encode buffers, reused across flushes. Only the
-	// flusher goroutine touches them and nothing retains an encoded frame
-	// past writeEncodedFrame, so reuse cannot alias live data.
-	enc frameEncoder
-
-	// verifyBuf is the reusable CRC read buffer for VerifyDurable on the
-	// commit path (no per-frame payload allocation).
-	verifyBuf []byte
-
 	// closeErr records the final shutdown drain's error so Close can
 	// surface it. Written only by run() before done closes; read only
 	// after waitDone returns.
@@ -472,7 +463,7 @@ func (f *flusher) drainAndSync(forceSync, forceDrain bool) error {
 // the reaper's rotation.
 func (f *flusher) finishRequest(commit *commitRequest) error {
 	if commit.verify && commit.last >= commit.first {
-		if verr := f.log.verifyDurable(commit.first, commit.last, &f.verifyBuf); verr != nil {
+		if verr := f.log.VerifyDurable(commit.first, commit.last); verr != nil {
 			return VerifyError{First: commit.first, Last: commit.last, Err: verr}
 		}
 	}
@@ -564,22 +555,11 @@ func (l *Log) cacheWrittenFrames() bool {
 
 func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync, cache bool) error {
 	flushStart := time.Now()
-	frame, err := f.enc.encodeFrame(records, baseOffset, f.log.codec)
-	if err != nil {
-		return err
-	}
-
-	active, err := f.activeForWrite()
-	if err != nil {
-		return err
-	}
-
-	// The write syscall runs outside rwmu. This goroutine is the only
-	// writer of the active segment, so its size and offset fields cannot
-	// change underneath us; readers bound their scans by sizeBytes, which
-	// is only advanced (under the write lock) after the bytes are in
-	// place, so they never observe a partially written frame.
-	pos, n, err := active.writeEncodedFrame(frame)
+	enc := frameEncoders.Get().(*frameEncoder)
+	pos, n, active, err := f.encodeAndWrite(enc, records, baseOffset)
+	// Nothing references the encoded frame once it is written, so the
+	// buffers go back for the next frame, whichever flusher encodes it.
+	frameEncoders.Put(enc)
 	if err != nil {
 		return err
 	}
@@ -629,6 +609,31 @@ func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync, cach
 	// A full segment is synced now so the roll before the next write
 	// finds it durable.
 	return f.syncIfNeeded(forceSync || full, active)
+}
+
+// encodeAndWrite encodes records into a frame with enc and writes it at
+// the end of the active segment, rolling first if the segment is due.
+func (f *flusher) encodeAndWrite(enc *frameEncoder, records [][]byte, baseOffset int64) (int64, int, *segment, error) {
+	frame, err := enc.encodeFrame(records, baseOffset, f.log.codec)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+
+	active, err := f.activeForWrite()
+	if err != nil {
+		return 0, 0, nil, err
+	}
+
+	// The write syscall runs outside rwmu. This goroutine is the only
+	// writer of the active segment, so its size and offset fields cannot
+	// change underneath us; readers bound their scans by sizeBytes, which
+	// is only advanced (under the write lock) after the bytes are in
+	// place, so they never observe a partially written frame.
+	pos, n, err := active.writeEncodedFrame(frame)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	return pos, n, active, nil
 }
 
 // cacheWrittenFrame puts the records of the frame just written into the
