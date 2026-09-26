@@ -31,7 +31,14 @@ import (
 // fields are the payload the dispatcher commits to the target
 // partition.
 type ProduceRecord struct {
-	Topic           string
+	Topic string
+	// TopicID is the incarnation (topic.Topic.ID) the record was
+	// validated and accepted against, so a record still in the WAL when
+	// its topic is deleted and a topic of the same name is created can
+	// be told apart from the new topic's records. Empty for records
+	// accepted before incarnations were stamped (format 1) and for
+	// topics created before topic IDs existed.
+	TopicID         string
 	Key             string
 	TargetPartition int
 	Payload         []byte
@@ -107,8 +114,17 @@ func OpenManager(dataDir string, opts wal.Options) (*Manager, error) {
 // AcceptProduce validates and durably appends one produce request to
 // the ingress WAL, returning its receipt. The record is not yet
 // visible to consumers — the dispatcher commits it to the partition
-// log later.
+// log later. The record carries no topic incarnation; the broker's
+// accept path uses AcceptProduceWithTopicID.
 func (m *Manager) AcceptProduce(ctx context.Context, topicName, key string, targetPartition int, payload []byte) (AcceptedProduce, error) {
+	return m.AcceptProduceWithTopicID(ctx, topicName, "", key, targetPartition, payload)
+}
+
+// AcceptProduceWithTopicID is AcceptProduce for a record stamped with
+// the incarnation (topic.Topic.ID) of the topic it was validated
+// against; see ProduceRecord.TopicID. An empty topicID writes the same
+// record AcceptProduce does.
+func (m *Manager) AcceptProduceWithTopicID(ctx context.Context, topicName, topicID, key string, targetPartition int, payload []byte) (AcceptedProduce, error) {
 	if m == nil || m.log == nil {
 		return AcceptedProduce{}, errors.New("ingress: manager is nil")
 	}
@@ -124,6 +140,7 @@ func (m *Manager) AcceptProduce(ctx context.Context, topicName, key string, targ
 
 	record := ProduceRecord{
 		Topic:           topicName,
+		TopicID:         topicID,
 		Key:             key,
 		TargetPartition: targetPartition,
 		Payload:         payload,
