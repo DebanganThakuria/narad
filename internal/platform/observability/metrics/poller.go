@@ -54,6 +54,9 @@ type Poller struct {
 	// reaperRestarts, when set (SetReaperRestartCounter), reports how
 	// many times the shared retention loop had to be replaced.
 	reaperRestarts func() int64
+	// ingressHealthy, when set (SetIngressWALHealth), reports whether
+	// the ingress WAL still accepts produce.
+	ingressHealthy func() bool
 }
 
 // gaugeSeriesKey identifies one per-partition gauge series.
@@ -91,6 +94,13 @@ func (p *Poller) SetOpenLogCounter(count func() int) {
 // SetReaperRestartCounter wires the source of narad_reaper_restarts.
 func (p *Poller) SetReaperRestartCounter(count func() int64) {
 	p.reaperRestarts = count
+}
+
+// SetIngressWALHealth wires the source of narad_ingress_wal_failed:
+// healthy reports whether the ingress WAL still accepts produce
+// (ingress.Manager.Healthy).
+func (p *Poller) SetIngressWALHealth(healthy func() bool) {
+	p.ingressHealthy = healthy
 }
 
 // Run blocks until ctx is cancelled. It does an immediate first tick
@@ -142,6 +152,13 @@ func (p *Poller) tick(ctx context.Context) {
 	}
 	if p.reaperRestarts != nil {
 		p.metrics.ReaperRestarts.Set(float64(p.reaperRestarts()))
+	}
+	if p.ingressHealthy != nil {
+		failed := 0.0
+		if !p.ingressHealthy() {
+			failed = 1
+		}
+		p.metrics.IngressWALFailed.Set(failed)
 	}
 	p.updateDataDirGauges()
 	p.clearDepartedPartitions(currentPartitions)
