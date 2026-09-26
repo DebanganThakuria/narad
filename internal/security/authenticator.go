@@ -313,13 +313,23 @@ func (a *Authenticator) Verify(ctx context.Context, username, password string) (
 // credential costs one token, not one per connection — and it is
 // refunded when the credential turns out to be correct, so only failed
 // verifications drain the budget.
+//
+// The shared call belongs to no single caller: it waits for its bcrypt
+// slot under a context detached from the leader's cancellation, and
+// each caller waits on its own context for the result. Under the
+// leader's context, a leader whose client disconnected while queued
+// failed every follower with context.Canceled (a 499) although their
+// clients were still connected. A caller that gives up returns at once
+// and the call finishes for the rest, so its throttle accounting is
+// never cut short either.
 func (a *Authenticator) runBcrypt(ctx context.Context, username string, cred [32]byte, storedHash []byte, password string) (bool, error) {
 	key := username + "\x00" + string(cred[:])
-	match, err, _ := a.group.Do(key, func() (any, error) {
+	shared := context.WithoutCancel(ctx)
+	ch := a.group.DoChan(key, func() (any, error) {
 		if !a.takeTokenFor(username) {
 			return false, ErrThrottled
 		}
-		release, err := a.acquireBcrypt(ctx)
+		release, err := a.acquireBcrypt(shared)
 		if err != nil {
 			a.adjustTokens(username, +1) // not verified; give it back
 			return false, err
@@ -331,10 +341,15 @@ func (a *Authenticator) runBcrypt(ctx context.Context, username string, cred [32
 		}
 		return ok, nil
 	})
-	if err != nil {
-		return false, err
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return false, res.Err
+		}
+		return res.Val.(bool), nil
+	case <-ctx.Done():
+		return false, ctx.Err()
 	}
-	return match.(bool), nil
 }
 
 // acquireBcrypt takes one of the maxConcurrentVerify bcrypt slots,
