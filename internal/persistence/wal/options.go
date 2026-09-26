@@ -1,7 +1,6 @@
 package wal
 
 import (
-	"runtime"
 	"time"
 )
 
@@ -84,9 +83,13 @@ const defaultPreparedWriteLimit = 16 << 20
 type SegmentPrealloc int8
 
 const (
-	// PreallocAuto prepares segments where it pays: on Linux. APFS
-	// (macOS) and the other platforms showed no difference between an
-	// extending and an overwriting data sync, so there it is off.
+	// PreallocAuto is the default and currently means off everywhere.
+	// Preparation changes crash recovery (a tear inside the bounded write
+	// window of a prepared segment is truncated rather than refused, and
+	// a binary from before preparation refuses such a segment), and its
+	// fdatasync win was measured on ext4 but not yet on the volumes Narad
+	// runs on, so operators opt in with PreallocOn. APFS (macOS) showed
+	// no difference between an extending and an overwriting data sync.
 	PreallocAuto SegmentPrealloc = iota
 	// PreallocOn always prepares segments.
 	PreallocOn
@@ -95,8 +98,9 @@ const (
 	PreallocOff
 )
 
-// preallocDefault is what PreallocAuto resolves to on this platform.
-var preallocDefault = runtime.GOOS == "linux"
+// preallocDefault is what PreallocAuto resolves to. Off until the win
+// is measured on production volumes; see PreallocAuto.
+var preallocDefault = false
 
 // enabled reports whether p prepares segments on this platform.
 func (p SegmentPrealloc) enabled() bool {
