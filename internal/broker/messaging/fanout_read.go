@@ -33,6 +33,12 @@ import (
 // advances past everything returned, dropped, or skipped — but never
 // past a record blocked by the due gate. The caller persists it only
 // after the records are durably committed downstream.
+//
+// Record payloads alias the log's buffer, flushing snapshot, or
+// decoded-frame cache and are READ-ONLY (see storage.Log.ReadShared).
+// The child commit copies each payload into its own envelope or RPC
+// frame anyway, so a private copy here would be garbage the moment it
+// was made.
 func (e *Engine) ReadFanoutSlab(ctx context.Context, topicName string, partition int, opts topic.FanoutReadOpts) (topic.FanoutSlab, error) {
 	if e.logs == nil {
 		return topic.FanoutSlab{}, unavailableError("partition logs")
@@ -79,7 +85,7 @@ func (e *Engine) ReadFanoutSlab(ctx context.Context, topicName string, partition
 			notify = log.NotifyC()
 		}
 
-		slab, err := e.readFanoutSlabOnce(log, opts)
+		slab, err := e.readFanoutSlabOnce(sharedFanoutLog{log}, opts)
 		if err != nil {
 			return topic.FanoutSlab{}, err
 		}
@@ -154,11 +160,22 @@ func (e *Engine) FanoutCursorStats(ctx context.Context, parent string) ([]topic.
 
 // fanoutLog is the slice of *storage.Log the slab read uses; narrowed
 // so drop-behind arithmetic is unit-testable without forcing real
-// segment retention.
+// segment retention. ReadKeyed may return a payload that aliases the
+// log (sharedFanoutLog does); the slab read never writes to it.
 type fanoutLog interface {
 	HighWatermark() int64
 	OldestOffset() int64
 	ReadKeyed(offset int64) (string, int64, []byte, error)
+}
+
+// sharedFanoutLog serves the slab read's ReadKeyed from the log's
+// zero-copy ReadKeyedShared. The payloads only feed the child commit,
+// which copies them again, so the private copy ReadKeyed makes cost one
+// allocation of the full record per record per child for nothing.
+type sharedFanoutLog struct{ *storage.Log }
+
+func (l sharedFanoutLog) ReadKeyed(offset int64) (string, int64, []byte, error) {
+	return l.ReadKeyedShared(offset)
 }
 
 // readFanoutSlabOnce performs one non-blocking slab read.
