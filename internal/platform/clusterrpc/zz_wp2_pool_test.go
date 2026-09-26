@@ -66,6 +66,30 @@ func zzWP2Server(t *testing.T, h StreamFrameHandler) string {
 	return server.addr().String()
 }
 
+// zzWP2QUICPool is a client pool for a zzWP2Server peer. Its dial
+// timeout is generous: on a loaded machine the default second can run
+// out mid-handshake, and these tests are not about dialing.
+func zzWP2QUICPool(t *testing.T) *quicClientPool {
+	t.Helper()
+	pool := newQUICClientPool(5*time.Second, "sekret", false)
+	pool.dialTimeout = 5 * time.Second
+	t.Cleanup(func() { _ = pool.close() })
+	return pool
+}
+
+// zzWP2Await waits for signal, failing the test at once if req (the
+// request that should raise it) ends first, and after a bound otherwise.
+func zzWP2Await(t *testing.T, signal <-chan struct{}, req <-chan error, what string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case err := <-req:
+		t.Fatalf("%s: the request ended first: %v", what, err)
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s: timed out", what)
+	}
+}
+
 // zzWP2Go runs fn on a goroutine and returns a channel with its error.
 func zzWP2Go(fn func() error) <-chan error {
 	ch := make(chan error, 1)
@@ -174,8 +198,7 @@ func TestZZWP2CloseCancelsDialInFlight(t *testing.T) {
 // context must not arm the shared dial backoff for everyone else.
 func TestZZWP2CancelledDialLeaderDoesNotArmBackoff(t *testing.T) {
 	addr := zzWP2Server(t, newZZWP2ParkHandler())
-	pool := newQUICClientPool(5*time.Second, "sekret", false)
-	t.Cleanup(func() { _ = pool.close() })
+	pool := zzWP2QUICPool(t)
 
 	parent, cancelParent := context.WithCancel(context.Background())
 	cancelParent()
@@ -268,8 +291,7 @@ func TestZZWP2GenuineDialFailureStillBacksOff(t *testing.T) {
 func TestZZWP2CancelledCallerKeepsConnection(t *testing.T) {
 	h := newZZWP2ParkHandler()
 	addr := zzWP2Server(t, h)
-	pool := newQUICClientPool(5*time.Second, "sekret", false)
-	t.Cleanup(func() { _ = pool.close() })
+	pool := zzWP2QUICPool(t)
 
 	parked := zzWP2Go(func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -280,7 +302,7 @@ func TestZZWP2CancelledCallerKeepsConnection(t *testing.T) {
 		}
 		return err
 	})
-	<-h.parked
+	zzWP2Await(t, h.parked, parked, "parking the long-poll")
 	pool.mu.Lock()
 	conn := pool.conns[addr]
 	pool.mu.Unlock()

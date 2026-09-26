@@ -18,8 +18,7 @@ import (
 func TestZZWP2ExpiredDeadlineKeepsSharedStream(t *testing.T) {
 	h := newZZWP2ParkHandler()
 	addr := zzWP2Server(t, h)
-	pool := newQUICClientPool(5*time.Second, "sekret", false)
-	t.Cleanup(func() { _ = pool.close() })
+	pool := zzWP2QUICPool(t)
 
 	pool.nextShard.Store(0)
 	parked := zzWP2Go(func() error {
@@ -28,7 +27,7 @@ func TestZZWP2ExpiredDeadlineKeepsSharedStream(t *testing.T) {
 		_, err := pool.request(ctx, addr, LaneConsume, clusterwire.StreamFrameNodeRequest, []byte("park"))
 		return err
 	})
-	<-h.parked
+	zzWP2Await(t, h.parked, parked, "parking the long-poll")
 
 	pool.nextShard.Store(0) // same (lane, shard): same stream
 	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Millisecond))
@@ -52,8 +51,7 @@ func TestZZWP2QueuedCallerGivesUpWithoutKillingStream(t *testing.T) {
 	h := newZZWP2ParkHandler()
 	h.blockFor = 900 * time.Millisecond
 	addr := zzWP2Server(t, h)
-	pool := newQUICClientPool(5*time.Second, "sekret", false)
-	t.Cleanup(func() { _ = pool.close() })
+	pool := zzWP2QUICPool(t)
 
 	onShard0 := func(ctx context.Context, payload []byte) error {
 		pool.nextShard.Store(0)
@@ -71,7 +69,7 @@ func TestZZWP2QueuedCallerGivesUpWithoutKillingStream(t *testing.T) {
 	}
 
 	parked := long([]byte("park"))
-	<-h.parked
+	zzWP2Await(t, h.parked, parked, "parking the long-poll")
 	blocked := long([]byte("block"))
 	time.Sleep(50 * time.Millisecond)
 	big := long(bytes.Repeat([]byte("z"), 4<<20))

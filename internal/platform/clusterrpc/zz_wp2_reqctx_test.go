@@ -210,8 +210,15 @@ func TestZZWP2DerivedRequestContextsFollowCancel(t *testing.T) {
 		_, err := client.requestFrame(ctx, clusterwire.StreamFrameNodeRequest, []byte("x"))
 		return err
 	})
-	if grew := <-started; grew > children/4 {
-		t.Fatalf("deriving %d contexts started %d goroutines", children, grew)
+	select {
+	case grew := <-started:
+		if grew > children/4 {
+			t.Fatalf("deriving %d contexts started %d goroutines", children, grew)
+		}
+	case err := <-res:
+		t.Fatalf("request ended before the handler ran: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the handler never ran")
 	}
 	cancel()
 	if err := zzWP2Result(t, res, "cancelled request"); !errors.Is(err, context.Canceled) {
@@ -247,10 +254,11 @@ func TestZZWP2StreamEndCancelsUntouchedRequestContext(t *testing.T) {
 		checked <- zzWP2RequireCancelled(ctx)
 	}
 	client, clientConn, served := zzWP2ServeFunc(t, h)
-	go func() {
-		_, _ = client.requestFrame(context.Background(), clusterwire.StreamFrameNodeRequest, []byte("x"))
-	}()
-	<-arrived
+	req := zzWP2Go(func() error {
+		_, err := client.requestFrame(context.Background(), clusterwire.StreamFrameNodeRequest, []byte("x"))
+		return err
+	})
+	zzWP2Await(t, arrived, req, "delivering the request")
 	_ = clientConn.Close()
 	select {
 	case <-served:

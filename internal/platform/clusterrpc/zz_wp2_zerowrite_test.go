@@ -181,8 +181,7 @@ func (h *zzWP2GateHandler) sawSize(n int) bool {
 func TestZZWP2QUICZeroByteWriteTimeoutKeepsStream(t *testing.T) {
 	h := newZZWP2GateHandler()
 	addr := zzWP2Server(t, h)
-	pool := newQUICClientPool(5*time.Second, "sekret", false)
-	t.Cleanup(func() { _ = pool.close() })
+	pool := zzWP2QUICPool(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -212,9 +211,9 @@ func TestZZWP2QUICZeroByteWriteTimeoutKeepsStream(t *testing.T) {
 		})
 	}
 	parked := send([]byte("park"))
-	<-h.parked
+	zzWP2Await(t, h.parked, parked, "parking the long-poll")
 	stall := send([]byte("stall"))
-	<-h.stalled
+	zzWP2Await(t, h.stalled, stall, "stalling the serve loop")
 
 	// The server has stopped reading, and it has read too little to have
 	// moved the stream's receive window: the client may send up to
@@ -271,8 +270,7 @@ func TestZZWP2QUICZeroByteWriteTimeoutKeepsStream(t *testing.T) {
 func TestZZWP2QUICSpentBudgetAtWriteKeepsStream(t *testing.T) {
 	h := newZZWP2ParkHandler()
 	addr := zzWP2Server(t, h)
-	pool := newQUICClientPool(5*time.Second, "sekret", false)
-	t.Cleanup(func() { _ = pool.close() })
+	pool := zzWP2QUICPool(t)
 
 	pool.nextShard.Store(0)
 	parked := zzWP2Go(func() error {
@@ -281,7 +279,7 @@ func TestZZWP2QUICSpentBudgetAtWriteKeepsStream(t *testing.T) {
 		_, err := pool.request(ctx, addr, LaneConsume, clusterwire.StreamFrameNodeRequest, []byte("park"))
 		return err
 	})
-	<-h.parked
+	zzWP2Await(t, h.parked, parked, "parking the long-poll")
 	key := streamKey{addr: quicAddr(addr), lane: LaneConsume, shard: 0}
 	pool.mu.Lock()
 	ps := pool.streams[key]
