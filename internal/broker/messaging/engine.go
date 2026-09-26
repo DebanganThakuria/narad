@@ -27,6 +27,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/consumer"
@@ -93,6 +95,9 @@ type Engine struct {
 	assignmentCache map[string]cached[assignmentSet]
 	memberCache     map[string]cached[routingMember]
 	schemaLoadCache map[string]cached[bool]
+	// schemaFlights runs one schema reload per topic at a time; see
+	// syncTopicSchemas.
+	schemaFlights singleflight.Group
 
 	consumeCursors sync.Map // topic name -> *atomic.Uint64
 
