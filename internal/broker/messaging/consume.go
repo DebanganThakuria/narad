@@ -456,6 +456,14 @@ func (e *Engine) tryQueueReadLogs(ctx context.Context, topicName string, partiti
 				if errors.Is(err, storage.ErrOffsetNotFound) {
 					if oldest := log.OldestOffset(); res.Offset < oldest {
 						skipped, serr := e.offsets.SkipMissingBelow(topicName, idx, res.Offset, res.Nonce, oldest)
+						if errors.Is(serr, consumer.ErrHandleStale) {
+							// A concurrent consume skipped the same gap first, and
+							// dropped this reservation with everything else below
+							// oldest. The gap is resolved: reserve again, from at
+							// or above oldest. Returning the error answered a
+							// plain consume, which never held a handle, with 410.
+							continue
+						}
 						if serr != nil {
 							return topic.Message{}, false, serr
 						}
@@ -472,7 +480,15 @@ func (e *Engine) tryQueueReadLogs(ctx context.Context, topicName string, partiti
 				// and moving on could stall a long-poll for the full Wait even
 				// though data is available here.
 				if storage.IsCorrupt(err) || errors.Is(err, storage.ErrOffsetNotFound) {
-					if serr := e.offsets.SkipCorrupt(topicName, idx, res.Offset, res.Nonce); serr != nil {
+					serr := e.offsets.SkipCorrupt(topicName, idx, res.Offset, res.Nonce)
+					if errors.Is(serr, consumer.ErrHandleStale) {
+						// The reservation lapsed or was dropped while the read
+						// failed, so the offset is no longer this consume's to
+						// resolve. Reserve again rather than fail a consume that
+						// never held a handle.
+						continue
+					}
+					if serr != nil {
 						return topic.Message{}, false, serr
 					}
 					if e.metrics != nil {
