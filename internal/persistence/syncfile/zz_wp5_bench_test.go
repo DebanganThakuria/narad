@@ -30,9 +30,7 @@ func BenchmarkZZWP5AllocDuringSyncData(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer f.Close()
 			buf := make([]byte, 4096)
 			for {
@@ -51,7 +49,7 @@ func BenchmarkZZWP5AllocDuringSyncData(b *testing.B) {
 				}
 				syncs.Add(1)
 			}
-		}()
+		})
 	}
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)

@@ -628,7 +628,7 @@ func TestZZWP5PreallocDirectoryStaysReadableByOlderBinaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := 0
-	for rolls := 0; rolls < 4; rolls++ {
+	for range 4 {
 		n = zzWP5AppendThroughRolls(t, l, n, 1)
 		zzWP5CheckOlderBinaryReadable(t, dir)
 		for range 3 {
