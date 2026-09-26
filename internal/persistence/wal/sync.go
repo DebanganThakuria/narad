@@ -46,7 +46,10 @@ func (l *Log) flushSync() {
 	file := l.file
 	buffer := l.writeBuffer
 	batch := l.pending
-	l.writeBuffer = nil
+	// Hand the next batch the spare (nil on the first flush): appends
+	// that arrive during this write and sync fill it in place.
+	l.writeBuffer = l.spare
+	l.spare = nil
 	l.pending = nil
 
 	var err error
@@ -67,6 +70,7 @@ func (l *Log) flushSync() {
 		l.syncErr = err
 		pending := l.pending
 		l.writeBuffer = nil
+		l.spare = nil
 		l.pending = nil
 		l.mu.Unlock()
 		completeBatch(pending, err)
@@ -76,22 +80,29 @@ func (l *Log) flushSync() {
 	completeBatch(batch, err)
 }
 
-// maxRecycledBuffer bounds the write buffer kept between batches so one
-// burst does not pin its peak size forever.
+// maxRecycledBuffer bounds each of the two buffers kept between batches
+// (the write buffer and the spare) so one burst does not pin its peak
+// size forever.
 const maxRecycledBuffer = 4 << 20
 
-// recycleBuffer hands a written-out buffer back for the next batch. The
+// recycleBuffer hands a written-out buffer back for a later batch. The
 // buffer was detached under mu and nothing retains it after the write
-// (replay reads from disk), so reuse cannot alias a live batch. Only an
-// empty slot takes it: appends that arrived during the write already
-// started a fresh buffer.
+// (replay reads from disk), so reuse cannot alias a live batch. It
+// becomes the write buffer when that slot is empty, and otherwise the
+// spare that the next flush swaps in: under load appends arrive during
+// every write, so the slot is always taken and two buffers ping-pong,
+// each sized to the peak batch. Without the spare every batch started
+// from a one-frame allocation and doubled its way back up.
 func (l *Log) recycleBuffer(buffer []byte) {
 	if cap(buffer) == 0 || cap(buffer) > maxRecycledBuffer {
 		return
 	}
 	l.mu.Lock()
-	if l.writeBuffer == nil {
+	switch {
+	case l.writeBuffer == nil:
 		l.writeBuffer = buffer[:0]
+	case l.spare == nil:
+		l.spare = buffer[:0]
 	}
 	l.mu.Unlock()
 }
@@ -115,6 +126,7 @@ func (l *Log) syncLocked() (*syncBatch, error) {
 	l.pending = nil
 	if err != nil {
 		l.syncErr = fmt.Errorf("wal: write and sync: %w", err)
+		l.spare = nil // the log is latched: nothing will be staged again
 		return batch, l.syncErr
 	}
 	if cap(buffer) <= maxRecycledBuffer && l.writeBuffer == nil {

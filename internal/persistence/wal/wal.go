@@ -30,9 +30,15 @@ type Log struct {
 	segmentSize int64
 	nextSeq     uint64
 	writeBuffer []byte
-	pending     *syncBatch
-	closed      bool
-	syncErr     error
+	// spare (guarded by mu) is the last written-out buffer, kept empty
+	// for the next batch. flushSync swaps it in as writeBuffer when it
+	// detaches a batch, so records staged while that batch's write and
+	// sync are in flight land in a buffer already sized to the previous
+	// batch instead of regrowing from a single frame. See recycleBuffer.
+	spare   []byte
+	pending *syncBatch
+	closed  bool
+	syncErr error
 	// writeFailed is guarded by fileOps, not mu. It latches the first
 	// write or fsync failure on the active file so that no later batch
 	// is written on top of a possibly torn region and acked.
