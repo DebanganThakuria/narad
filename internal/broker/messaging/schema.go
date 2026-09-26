@@ -19,13 +19,16 @@ func (e *Engine) validateProducePayload(ctx context.Context, topicName string, p
 		return err
 	}
 	err = e.schemas.Validate(ctx, topicName, payload)
-	if hasSchema && errors.Is(err, errs.ErrSchemaNotFound) {
+	for hasSchema && errors.Is(err, errs.ErrSchemaNotFound) {
 		// The registry lost a schema that was loaded (the topic manager
 		// drops a retired incarnation's compiled schemas by name, and a
 		// same-named successor may be live): load it again rather than
-		// let the payload through unvalidated.
+		// let the payload through unvalidated. Another pass needs yet
+		// another drop to land between the reload and the check (a purge
+		// drops twice, once from the retired hook), so this ends as soon
+		// as the drops stop.
 		e.forgetSchemaLoad(topicName)
-		if _, err = e.syncTopicSchemas(ctx, topicName); err != nil {
+		if hasSchema, err = e.syncTopicSchemas(ctx, topicName); err != nil {
 			return err
 		}
 		err = e.schemas.Validate(ctx, topicName, payload)
