@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -18,31 +20,62 @@ type memberRegistrar interface {
 	RegisterMember(context.Context, string, nodewire.MemberRequest) (nodewire.Response, error)
 }
 
-// runMemberHeartbeater re-registers this node's membership on every tick
+// memberRegisterRetryInterval is how soon the heartbeater tries again
+// while this process has not yet registered even once.
+const memberRegisterRetryInterval = 250 * time.Millisecond
+
+// errMemberRemoved reports that the leader refused the registration
+// because decommission removed this member. Retrying cannot succeed.
+var errMemberRemoved = errors.New("register member: member was removed from the cluster")
+
+// runMemberHeartbeater re-registers this node's membership every interval
 // (and once immediately) so the controller keeps seeing it alive. It runs
-// until ctx is cancelled; failures are logged at debug and retried on the
-// next tick.
+// until ctx is cancelled; failures are logged at debug and retried.
+//
+// Until the first registration succeeds it retries every
+// memberRegisterRetryInterval instead of every interval. On a fresh or
+// fully restarted cluster the first attempt runs before any leader
+// exists and fails; at the full interval the member table then stayed
+// empty for several seconds after /readyz went green, and a topic
+// created in that window got no partition owners until the
+// controller's next reconcile tick. A follower also needs the leader's
+// own member record before it can forward, so a slow cadence cost it
+// one more interval on top.
 func runMemberHeartbeater(ctx context.Context, store *metastore.Store, member metastore.Member, interval time.Duration, registrar memberRegistrar, log *slog.Logger) {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
-
-	send := func() {
-		if err := registerMember(ctx, store, member, registrar); err != nil {
+	heartbeatLoop(ctx, interval, min(memberRegisterRetryInterval, interval), func() error {
+		err := registerMember(ctx, store, member, registrar)
+		if err != nil {
 			log.Debug("member heartbeat failed", "member", member.ID, "err", err)
 		}
-	}
+		return err
+	})
+}
 
-	send()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+// heartbeatLoop calls send at once and then every interval until ctx
+// is cancelled. Until send first succeeds, a failure is retried after
+// retry instead. errMemberRemoved is the exception: a removed member can
+// never register again, and each attempt costs the leader a Raft entry
+// that is only refused, so it keeps the full interval.
+func heartbeatLoop(ctx context.Context, interval, retry time.Duration, send func() error) {
+	registered := false
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			send()
+		case <-timer.C:
 		}
+		next := interval
+		if err := send(); err == nil {
+			registered = true
+		} else if !registered && !errors.Is(err, errMemberRemoved) {
+			next = retry
+		}
+		timer.Reset(next)
 	}
 }
 
@@ -75,6 +108,9 @@ func registerMember(ctx context.Context, store *metastore.Store, member metastor
 	})
 	if err != nil {
 		return err
+	}
+	if res.Status == http.StatusGone {
+		return errMemberRemoved
 	}
 	if res.Status < 200 || res.Status >= 300 {
 		return fmt.Errorf("register member returned status %d", res.Status)
