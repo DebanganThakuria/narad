@@ -118,6 +118,13 @@ type Engine struct {
 	// frontier it reports is final once the in-flight leases have been
 	// acked or released; see PrepareHandoff.
 	consumePauses map[string]int64
+	// producePausesActive and consumePausesActive count the entries of
+	// the two maps above. Each is raised before its map insert and
+	// lowered after its delete, both under pauseMu, so reading zero
+	// proves nothing is paused and the per-partition checks on the
+	// produce and consume paths skip pauseMu and the key build.
+	producePausesActive atomic.Int32
+	consumePausesActive atomic.Int32
 
 	// dispatch owns the per-topic waiter queues and the single pump
 	// goroutine that hands records to them; see dispatch.go. Queue-style
