@@ -197,9 +197,15 @@ func TestConsumerOffsetCommitterForgetRewritesAfterReplacement(t *testing.T) {
 	}
 }
 
+// mustModTime returns the file's mtime, or the zero time when the file
+// does not exist (a flush whose consumer.ahead carried the frontier
+// never creates consumer.offset).
 func mustModTime(t *testing.T, dir, name string) time.Time {
 	t.Helper()
 	info, err := os.Stat(dir + "/" + name)
+	if errors.Is(err, os.ErrNotExist) {
+		return time.Time{}
+	}
 	if err != nil {
 		t.Fatalf("stat %s: %v", name, err)
 	}
