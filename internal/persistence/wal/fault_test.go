@@ -121,7 +121,9 @@ func assertReplayContract(t *testing.T, records []Record, res faultLoadResult) {
 // operations would race these tests' "fail the Nth call" rules, and the
 // crash model (restore each file to its last honestly synced length)
 // cannot express lost writes inside a file whose length never changes.
-// The prepared-segment fault tests live in zz_wp5_prealloc_test.go.
+// The prepared-segment fault tests live in zz_wp5_prealloc_test.go, and
+// its crash model (any subset of the unsynced write's sectors reaching
+// the disk) in zz_wp5_tear_test.go.
 func faultOptions() Options {
 	return Options{SegmentBytes: 48 << 10, MaxRecord: 1 << 20, Prealloc: PreallocOff}
 }

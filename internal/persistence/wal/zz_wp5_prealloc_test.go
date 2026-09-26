@@ -20,6 +20,10 @@ import (
 
 const zzWP5SegmentBytes = 16 << 10
 
+// zzWP5PreparedSize is the size of a prepared segment file: its zeros
+// and the trailer after them.
+const zzWP5PreparedSize = zzWP5SegmentBytes + prepTrailerSize
+
 func zzWP5PreallocOptions() Options {
 	return Options{SegmentBytes: zzWP5SegmentBytes, MaxRecord: 4 << 10, Prealloc: PreallocOn}
 }
@@ -102,7 +106,7 @@ func zzWP5FileSize(t *testing.T, path string) int64 {
 }
 
 // A roll on the append path brings in the prepared segment: the new
-// segment is SegmentBytes long before anything is written to it, so
+// segment is full size before anything is written to it, so
 // appends overwrite rather than extend it (the file size never changes,
 // which is what keeps each group commit's data sync out of the file
 // system journal). The roll that seals it trims it back to its data
@@ -124,15 +128,15 @@ func TestZZWP5PreallocRollUsesPreparedSegment(t *testing.T) {
 		t.Fatal("the roll did not use the prepared segment")
 	}
 	activePath := segmentPath(dir, active)
-	if size := zzWP5FileSize(t, activePath); size != zzWP5SegmentBytes {
-		t.Fatalf("prepared active segment is %d bytes, want %d", size, zzWP5SegmentBytes)
+	if size := zzWP5FileSize(t, activePath); size != zzWP5PreparedSize {
+		t.Fatalf("prepared active segment is %d bytes, want %d", size, zzWP5PreparedSize)
 	}
 	for range 10 {
 		if _, err := l.Append(context.Background(), zzWP5Payload(n)); err != nil {
 			t.Fatal(err)
 		}
 		n++
-		if size := zzWP5FileSize(t, activePath); size != zzWP5SegmentBytes {
+		if size := zzWP5FileSize(t, activePath); size != zzWP5PreparedSize {
 			t.Fatalf("an append changed the prepared segment's size to %d", size)
 		}
 	}
@@ -329,7 +333,13 @@ func TestZZWP5PreallocConcurrentAppendAndLiveReplay(t *testing.T) {
 // would. It returns the number of records and the active segment's path.
 func zzWP5PreparedLog(t *testing.T, dir string) (int, string) {
 	t.Helper()
-	l, err := Open(dir, zzWP5PreallocOptions())
+	return zzWP5PreparedLogWith(t, dir, zzWP5PreallocOptions())
+}
+
+// zzWP5PreparedLogWith is zzWP5PreparedLog with opts.
+func zzWP5PreparedLogWith(t *testing.T, dir string, opts Options) (int, string) {
+	t.Helper()
+	l, err := Open(dir, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,8 +356,8 @@ func zzWP5PreparedLog(t *testing.T, dir string) (int, string) {
 	if err := l.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if size := zzWP5FileSize(t, active); size != zzWP5SegmentBytes {
-		t.Fatalf("active segment %d bytes, want a prepared %d", size, zzWP5SegmentBytes)
+	if size, want := zzWP5FileSize(t, active), opts.SegmentBytes+prepTrailerSize; size != want {
+		t.Fatalf("active segment %d bytes, want a prepared %d", size, want)
 	}
 	return n, active
 }
@@ -438,13 +448,23 @@ func TestZZWP5PreallocTornTailInPreparedSegment(t *testing.T) {
 
 // Zeros end the active segment's data only if nothing valid follows
 // them. A zeroed frame with acked frames after it is lost data, and
-// recovery must fail loudly rather than truncate the later frames away,
-// in the active and in a sealed segment alike.
+// recovery must fail loudly rather than truncate the later frames away:
+// in a sealed segment always, and in the active segment whenever the
+// valid frames reach farther past the zeros than the one write a crash
+// can have torn there (the segment's write limit, here 256 bytes against
+// five frames of 169 to 299 bytes). Within that limit the same bytes are what a
+// crash leaves of a write that never completed its sync; see
+// TestZZWP5PreallocTornBatchHoleThenValidOpens.
 func TestZZWP5PreallocZeroedFrameBeforeValidDataFailsOpen(t *testing.T) {
 	for _, sealed := range []bool{false, true} {
 		t.Run(fmt.Sprint("sealed=", sealed), func(t *testing.T) {
 			dir := t.TempDir()
-			n, active := zzWP5PreparedLog(t, dir)
+			opts := zzWP5PreallocOptions()
+			opts.preparedWriteLimit = 256
+			n, active := zzWP5PreparedLogWith(t, dir, opts)
+			if zzWP5DataEnd(t, active) <= 3*opts.preparedWriteLimit {
+				t.Fatal("too little data after the zeroed frame to reach past the write limit")
+			}
 			if sealed {
 				// A later (empty) segment makes the prepared one sealed.
 				if err := os.WriteFile(segmentPath(dir, uint64(n)), nil, 0o600); err != nil {
@@ -592,7 +612,9 @@ func TestZZWP5PreallocFaults(t *testing.T) {
 // segment holds valid frames back to back up to its end of file (such a
 // binary reads anything else in a sealed segment as corruption and
 // refuses to start), and the last segment holds valid frames followed by
-// nothing but zeros (which such a binary truncates as a torn tail).
+// nothing but zeros and possibly the prepared-segment trailer, which
+// holds no frame magic (such a binary truncates all of it as a torn
+// tail).
 func zzWP5CheckOlderBinaryReadable(t *testing.T, dir string) {
 	t.Helper()
 	segments, err := listSegments(dir)
@@ -611,7 +633,14 @@ func zzWP5CheckOlderBinaryReadable(t *testing.T, dir string) {
 			}
 			continue
 		}
-		if tail := data[end:]; len(bytes.Trim(tail, "\x00")) != 0 {
+		tail := data[end:]
+		if at := len(tail) - prepTrailerSize; at >= 0 && bytes.Equal(tail[at:at+8], prepTrailerMagic[:]) {
+			if bytes.Contains(tail[at:], []byte("NWAL")) {
+				t.Fatalf("last segment %s: the trailer holds frame magic", filepath.Base(s.path))
+			}
+			tail = tail[:at]
+		}
+		if len(bytes.Trim(tail, "\x00")) != 0 {
 			t.Fatalf("last segment %s: non-zero bytes after its frames", filepath.Base(s.path))
 		}
 	}

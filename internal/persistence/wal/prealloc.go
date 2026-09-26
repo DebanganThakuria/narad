@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -20,15 +21,29 @@ import (
 // data sync no longer changes the file's size. A roll that finds no
 // ready spare creates an empty segment exactly as before.
 //
-// Readers see a prepared segment as its frames followed by zeros. Replay
-// stops at an all-zero frame header as at end of file, and the open log's
-// replay never reads past the synced size anyway (Log.ReplayFromCursor).
-// Open reads the zeros as a torn tail, exactly as binaries that predate
-// preparation do, and truncates the active segment to its data as it
-// always has, so a torn frame can never sit behind the next append. The
-// roll that seals a prepared segment first trims it back to its data,
-// so a sealed segment never ends in zeros: the unused space is freed and
-// every segment stays readable by those older binaries.
+// Readers see a prepared segment as its frames followed by zeros and
+// the prepTrailer. Replay stops at an all-zero frame header as at end of
+// file, and the open log's replay never reads past the synced size
+// anyway (Log.ReplayFromCursor). Open reads the zeros as a torn tail,
+// exactly as binaries that predate preparation do, and truncates the
+// active segment to its data as it always has, so a torn frame can never
+// sit behind the next append. The roll that seals a prepared segment
+// first trims it back to its data, so a sealed segment never ends in
+// zeros: the unused space is freed and every segment stays readable by
+// those older binaries.
+//
+// Overwriting in place changes what a crash can leave behind. A segment
+// that grows by appending on ext4 (data=ordered) loses an unsynced write
+// from its end: the new size reaches the disk only after the data it
+// covers, so the torn write is past the end of file or complete, and
+// recovery has always read valid frames after a bad one as corruption of
+// synced data. In a prepared segment the size never changes, and the
+// device may persist any subset of an unsynced write's pages: a hole of
+// zeros can sit in front of valid frames of the same write. Writes into a prepared
+// segment are therefore bounded (Options.preparedWriteLimit), the
+// trailer records the bound, and recovery accepts a hole followed by
+// valid frames as a torn tail only within that bound of the hole and
+// only in a segment that ends in the trailer (tornPreparedWrite).
 
 // prepFileName is the name a segment is prepared under. It does not end
 // in segmentSuffix, so listSegments (recovery, replay, compaction, and
@@ -43,6 +58,27 @@ const prepChunkBytes = 256 << 10
 
 // prepZeros is the source of every zero-filling write.
 var prepZeros [prepChunkBytes]byte
+
+// A prepared segment ends in a trailer, just past its SegmentBytes of
+// zeros: prepTrailerMagic, then the segment's write limit
+// (Options.preparedWriteLimit) as a big-endian uint64. It tells recovery
+// that the segment was zero-filled up to the trailer and that no write
+// into it was larger than the limit (see tornPreparedWrite). It holds no
+// frame magic, so binaries that predate preparation, and this one when
+// nothing is torn, truncate it with the zeros in front of it. Appends
+// never reach it: a roll comes first, except for a first frame larger
+// than the whole segment, which overwrites it and so leaves an
+// unmarked segment that recovery treats like any other.
+const prepTrailerSize = 16
+
+var prepTrailerMagic = [8]byte{'N', 'W', 'P', 'R', 'E', 'P', '0', '1'}
+
+// appendPrepTrailer appends the trailer for a segment whose writes are
+// at most limit bytes.
+func appendPrepTrailer(dst []byte, limit int64) []byte {
+	dst = append(dst, prepTrailerMagic[:]...)
+	return binary.BigEndian.AppendUint64(dst, uint64(limit))
+}
 
 // errPrepStopped aborts a preparation because the log is closing.
 var errPrepStopped = errors.New("wal: log closing")
@@ -89,10 +125,11 @@ func (l *Log) prepLoop() {
 	}
 }
 
-// prepareSpare creates prepFileName and zero-fills it to SegmentBytes.
-// On any failure (a full disk, an I/O error, Close) the file is removed:
-// a roll then creates an empty segment, as without preparation, and the
-// next roll's successor is asked for again.
+// prepareSpare creates prepFileName, zero-fills it to SegmentBytes and
+// writes the prepTrailer after the zeros. On any failure (a full disk,
+// an I/O error, Close) the file is removed: a roll then creates an empty
+// segment, as without preparation, and the next roll's successor is
+// asked for again.
 func (l *Log) prepareSpare() (err error) {
 	path := filepath.Join(l.dir, prepFileName)
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -124,6 +161,14 @@ func (l *Log) prepareSpare() (err error) {
 			return fmt.Errorf("wal: sync prepared segment: %w", err)
 		}
 		written += n
+	}
+	// The trailer is synced after the zeros, so a segment that ends in
+	// one is zero-filled in front of it.
+	if err := writeFull(file, appendPrepTrailer(nil, l.opts.preparedWriteLimit)); err != nil {
+		return err
+	}
+	if err := syncfile.SyncData(file); err != nil {
+		return fmt.Errorf("wal: sync prepared segment: %w", err)
 	}
 	return nil
 }

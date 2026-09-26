@@ -58,13 +58,28 @@ func scanSegment(segment segmentInfo, maxRecord int, tolerateCorruptTail bool) (
 			// destroy those acked records and regress nextSeq, and
 			// resyncing past the gap would break the dense-seq invariant
 			// the dispatcher checkpoint relies on. That case stays a
-			// loud Open failure, like corruption in earlier segments.
+			// loud Open failure, like corruption in earlier segments,
+			// with one exception: in a prepared segment a crash can tear
+			// the last, unsynced write into a hole followed by valid
+			// frames of the same write (tornPreparedWrite).
 			if tolerateCorruptTail && errors.Is(err, errCorruptFrame) {
 				laterValid, scanErr := hasLaterValidFrame(file, offset+1, maxRecord)
 				if scanErr != nil {
 					return 0, 0, false, scanErr
 				}
-				if !laterValid {
+				torn := !laterValid
+				if laterValid {
+					// The frame at offset carries the seq after the
+					// last valid one, or the segment's base.
+					firstSeq := segment.base
+					if sawRecord {
+						firstSeq = maxSeq + 1
+					}
+					if torn, scanErr = tornPreparedWrite(file, offset, firstSeq, maxRecord); scanErr != nil {
+						return 0, 0, false, scanErr
+					}
+				}
+				if torn {
 					// Genuine torn tail: stop here so Open truncates
 					// to the last valid frame end.
 					return validEnd, maxSeq, sawRecord, nil
@@ -137,26 +152,128 @@ func nextMagicPos(f *os.File, start, size int64) int64 {
 // frameValidAt reports whether a complete frame passing magic, length,
 // and CRC verification starts at pos.
 func frameValidAt(f *os.File, pos, size int64, maxRecord int) bool {
+	_, ok := frameAt(f, pos, size, maxRecord)
+	return ok
+}
+
+// frameAt returns the header of the frame starting at pos if it is
+// complete below size and passes magic, length, and CRC verification.
+func frameAt(f *os.File, pos, size int64, maxRecord int) (frameHeader, bool) {
 	if pos+frameHeaderSize > size {
-		return false
+		return frameHeader{}, false
 	}
 	var header [frameHeaderSize]byte
 	if _, err := f.ReadAt(header[:], pos); err != nil {
-		return false
+		return frameHeader{}, false
 	}
 	if binary.BigEndian.Uint32(header[0:4]) != frameMagic {
-		return false
+		return frameHeader{}, false
 	}
 	n := binary.BigEndian.Uint32(header[4:8])
 	if n == 0 || int(n) > maxRecord {
-		return false
+		return frameHeader{}, false
 	}
 	if pos+frameHeaderSize+int64(n) > size {
-		return false
+		return frameHeader{}, false
 	}
 	payload := make([]byte, int(n))
 	if _, err := f.ReadAt(payload, pos+frameHeaderSize); err != nil {
-		return false
+		return frameHeader{}, false
 	}
-	return crc32.ChecksumIEEE(payload) == binary.BigEndian.Uint32(header[16:20])
+	h := frameHeader{
+		seq:  binary.BigEndian.Uint64(header[8:16]),
+		size: int(n),
+		crc:  binary.BigEndian.Uint32(header[16:20]),
+	}
+	return h, crc32.ChecksumIEEE(payload) == h.crc
+}
+
+// tornPreparedWrite reports whether the damage at offset bad of the last
+// segment, with valid frames after it, is what a crash leaves of a write
+// into a prepared segment that was not yet synced. There the device may
+// persist any subset of the write's pages, so a hole of zeros can sit in
+// front of valid frames of the same write (see prealloc.go). Truncating
+// at bad then drops only frames whose write never completed its sync, so
+// none of them was acked. That is the case only if:
+//
+//   - the segment ends in the prepTrailer, so it was zero-filled up to
+//     the trailer and no write into it exceeded the limit the trailer
+//     records. The write that tore started at or before bad, at the end
+//     of the synced data, so it ended within limit bytes of bad;
+//   - every byte from there to the trailer is still zero;
+//   - every valid frame after bad ends within that window and carries a
+//     seq that continues the run: after firstSeq (the seq of the frame
+//     at bad), increasing, and no higher than the frames that fit
+//     between bad and it allow.
+//
+// Anything else is corruption of synced data and stays a loud failure.
+// Within the window the two cannot be told apart: synced frames there
+// damaged after the fact are read as a torn write too, just as damage
+// to the last frame of any active segment always has been.
+func tornPreparedWrite(file *os.File, bad int64, firstSeq uint64, maxRecord int) (bool, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return false, fmt.Errorf("wal: stat segment: %w", err)
+	}
+	zerosEnd := info.Size() - prepTrailerSize
+	if zerosEnd <= bad {
+		return false, nil
+	}
+	var trailer [prepTrailerSize]byte
+	if _, err := file.ReadAt(trailer[:], zerosEnd); err != nil {
+		return false, fmt.Errorf("wal: read segment trailer: %w", err)
+	}
+	if [8]byte(trailer[:8]) != prepTrailerMagic {
+		return false, nil
+	}
+	limit := binary.BigEndian.Uint64(trailer[8:])
+	if limit == 0 {
+		return false, nil
+	}
+	windowEnd := zerosEnd
+	if limit < uint64(zerosEnd-bad) {
+		windowEnd = bad + int64(limit)
+	}
+	zero, err := allZero(file, windowEnd, zerosEnd)
+	if err != nil || !zero {
+		return false, err
+	}
+	// Frame magic has no zero byte, so with the zeros checked every
+	// magic that could start a frame lies below windowEnd.
+	prevSeq := firstSeq
+	for pos := nextMagicPos(file, bad+1, windowEnd); pos < windowEnd; {
+		h, ok := frameAt(file, pos, zerosEnd, maxRecord)
+		if !ok {
+			pos = nextMagicPos(file, pos+1, windowEnd)
+			continue
+		}
+		end := pos + frameHeaderSize + int64(h.size)
+		// Each frame from bad on is at least frameHeaderSize+1 bytes, so
+		// at most (pos-bad)/(frameHeaderSize+1) of them precede this one.
+		if end > windowEnd || h.seq <= prevSeq || h.seq-firstSeq > uint64(pos-bad)/(frameHeaderSize+1) {
+			return false, nil
+		}
+		prevSeq = h.seq
+		pos = nextMagicPos(file, end, windowEnd)
+	}
+	return true, nil
+}
+
+// allZero reports whether every byte of f in [start, end) is zero.
+func allZero(f *os.File, start, end int64) (bool, error) {
+	if start >= end {
+		return true, nil
+	}
+	buf := make([]byte, min(end-start, replayReadBufferSize))
+	for pos := start; pos < end; {
+		n := min(end-pos, int64(len(buf)))
+		if _, err := f.ReadAt(buf[:n], pos); err != nil {
+			return false, fmt.Errorf("wal: read segment: %w", err)
+		}
+		if !bytes.Equal(buf[:n], prepZeros[:n]) {
+			return false, nil
+		}
+		pos += n
+	}
+	return true, nil
 }
