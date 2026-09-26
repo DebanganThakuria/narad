@@ -64,7 +64,12 @@ type waiter struct {
 	cw *ConsumeWaiter
 	ch chan waiterDelivery
 
-	// guarded by the owning topicDispatch's mu.
+	// st is the topic state the waiter was queued on, set by enqueue. A
+	// forgotten topic's name can map to a fresh state later, so the give-
+	// up path goes back to this one rather than looking the name up.
+	st *topicDispatch
+
+	// guarded by st.mu.
 	abandoned bool
 }
 
@@ -198,6 +203,11 @@ func (q *entryQueue) removeMatching(match func(queueEntry) bool) bool {
 // atomic load, never a mutex acquisition.
 type topicDispatch struct {
 	hasWaiters atomic.Bool
+	// retired is set, under mu and the dispatcher's map lock, when forget
+	// removes this state from the map. Whoever still holds a pointer to it
+	// goes back to the map instead: demand queued here would never be
+	// pumped, and a wake would be read off a state nobody queues on.
+	retired atomic.Bool
 
 	mu    sync.Mutex
 	queue entryQueue
@@ -213,12 +223,16 @@ type topicDispatch struct {
 	// first, each with its deadline timer. A claim arriving retires the
 	// oldest one at once instead of letting it run out (see claimArrived).
 	holds []*claimHold
-	// gen counts releases of this topic's state. Entries are never removed
-	// from the map (an open log's wake notifier holds a pointer to one),
-	// so a release resets the state in place and bumps gen; a pump that
-	// took a waiter off the queue before the release sees the change and
-	// wakes the waiter empty instead of re-queuing it on dead state.
+	// gen counts releases of this topic's state. A release resets the
+	// state in place and bumps gen, and so does forget; a pump that took a
+	// waiter off the queue before either sees the change and wakes the
+	// waiter empty instead of re-queuing it on dead state.
 	gen uint64
+	// held counts the waiters the pump has taken off a FIFO and not yet
+	// served or put back. They are in no FIFO meanwhile, so forget checks
+	// it apart from the FIFOs: it must not drop a state the pump is still
+	// serving.
+	held int
 	// pinned holds the waiters of partition-pinned long-polls, one FIFO
 	// per partition, apart from queue. The pump stops a FIFO at the first
 	// waiter it cannot serve, which is right only when every waiter in it
@@ -341,10 +355,6 @@ func (d *dispatcher) close() {
 	<-d.done
 }
 
-// stateFor returns the topic's waiter set, creating it on first use.
-// Entries are never removed: one empty struct per topic name this node
-// has served a long-poll consume for is cheap, and dropping them would
-// race the wake notifier holding a pointer to one.
 // peekState returns the topic's dispatch state without creating one.
 // Paths driven by peers (a claim arriving, a hold expiring, a retire
 // after a release) use it so an RPC naming a topic this node has no
@@ -357,6 +367,9 @@ func (d *dispatcher) peekState(topicName string) *topicDispatch {
 	return st
 }
 
+// stateFor returns the topic's waiter set, creating it on first use.
+// Entries live until forget drops a retired topic's, which it does only
+// once nothing is queued, held or promised on them.
 func (d *dispatcher) stateFor(topicName string) *topicDispatch {
 	d.mu.RLock()
 	st, ok := d.topics[topicName]
@@ -504,7 +517,12 @@ func persistedFrontier(dir string) (next int64, ackedAhead int) {
 // partition. The shared queue (unpinned waiters and peers' tokens) is
 // pumped last.
 func (d *dispatcher) pumpTopic(topicName string) {
-	st := d.stateFor(topicName)
+	st := d.peekState(topicName)
+	if st == nil {
+		// Forgotten since it was marked: nothing is queued, and a new
+		// waiter's enqueue creates the state and marks it again.
+		return
+	}
 	st.mu.Lock()
 	pinned := make([]*entryQueue, 0, len(st.pinned))
 	for _, q := range st.pinned {
@@ -568,6 +586,7 @@ func (d *dispatcher) pumpQueue(topicName string, st *topicDispatch, q *entryQueu
 
 		w := e.waiter
 		q.pop()
+		st.held++
 		gen := st.gen
 		st.mu.Unlock()
 
@@ -578,6 +597,7 @@ func (d *dispatcher) pumpQueue(topicName string, st *topicDispatch, q *entryQueu
 		if err != nil || !found {
 			dead := err != nil && unservable(err)
 			st.mu.Lock()
+			st.held--
 			// A consumer that gave up while the read was running is no
 			// longer waiting for anything, so it does not go back on the
 			// queue. Nothing was reserved, so there is nothing to release.
@@ -622,6 +642,7 @@ func (d *dispatcher) pumpQueue(topicName string, st *topicDispatch, q *entryQueu
 		// st.mu, so the send is ordered before any observation of the
 		// queue that could conclude the record was never handed over.
 		st.mu.Lock()
+		st.held--
 		abandoned := w.abandoned
 		if !abandoned && st.gen != gen {
 			// The topic was released (deleted) while the read ran: the
@@ -790,8 +811,7 @@ func (d *dispatcher) claimArrived(topicName string) {
 // scan is the topic's locally owned partitions, kept so the pump can
 // size consumable() without a metadata lookup per visit.
 func (d *dispatcher) registerRemote(topicName string, scan []int, rd RemoteDemand) {
-	st := d.stateFor(topicName)
-	st.mu.Lock()
+	st := d.lockLiveState(topicName)
 	st.scan = scan
 	st.queue.push(queueEntry{remote: rd})
 	st.hasWaiters.Store(true)
@@ -802,7 +822,11 @@ func (d *dispatcher) registerRemote(topicName string, scan []int, rd RemoteDeman
 // dropRemote removes a peer's interest, for a connection that died or a
 // peer that said it no longer wants the topic.
 func (d *dispatcher) dropRemote(topicName string, rd RemoteDemand) {
-	st := d.stateFor(topicName)
+	st := d.peekState(topicName)
+	if st == nil {
+		// Forgotten, so it holds no token to drop.
+		return
+	}
 	st.mu.Lock()
 	st.queue.removeRemote(rd)
 	st.hasWaiters.Store(st.anyDemandLocked())
@@ -812,8 +836,8 @@ func (d *dispatcher) dropRemote(topicName string, rd RemoteDemand) {
 // enqueue parks a waiter and wakes the pump, because a new waiter can
 // satisfy the gate just as new data can.
 func (d *dispatcher) enqueue(topicName string, w *waiter) {
-	st := d.stateFor(topicName)
-	st.mu.Lock()
+	st := d.lockLiveState(topicName)
+	w.st = st
 	st.queueFor(w, true).push(queueEntry{waiter: w})
 	if st.scan == nil && w.cw.pinned == nil {
 		st.scan = w.cw.scan
@@ -823,12 +847,26 @@ func (d *dispatcher) enqueue(topicName string, w *waiter) {
 	d.markDirty(topicName)
 }
 
+// lockLiveState returns the topic's state locked, creating it if needed,
+// and never a retired one: demand added to a state forget has just
+// dropped would sit where no pump and no wake ever looks.
+func (d *dispatcher) lockLiveState(topicName string) *topicDispatch {
+	for {
+		st := d.stateFor(topicName)
+		st.mu.Lock()
+		if !st.retired.Load() {
+			return st
+		}
+		st.mu.Unlock()
+	}
+}
+
 // dequeue removes a waiter that gave up. It returns any delivery the
 // pump handed over in the meantime so the caller can give the message
 // back: that record is reserved, and dropping it here would leave it
 // invisible until its visibility timeout.
 func (d *dispatcher) dequeue(topicName string, w *waiter) (waiterDelivery, bool) {
-	st := d.stateFor(topicName)
+	st := w.st
 	st.mu.Lock()
 	removed := false
 	if q := st.queueFor(w, false); q != nil {
@@ -889,12 +927,11 @@ func (d *dispatcher) releaseAll() {
 // cancelled; the peers re-register if they still care, and find the
 // topic gone.
 //
-// The map entry itself stays: every open partition log carries a wake
-// notifier that captured a pointer to this state at open time, and a
-// same-name recreate opens its logs before the old incarnation's state
-// is retired, so removing the entry would leave those notifiers marking
-// a state nobody pumps. Resetting in place and bumping gen keeps every
-// pointer valid.
+// The map entry itself stays: a same-name recreate can open its logs,
+// whose wake notifiers capture this state, before the old incarnation's
+// state is retired, and consumers of the new incarnation may already be
+// queued on it. Resetting in place keeps all of that working; forget
+// drops the entry afterwards, once it is empty.
 func (d *dispatcher) releaseTopic(topicName string) {
 	st := d.peekState(topicName)
 	if st == nil {
@@ -912,13 +949,50 @@ func (d *dispatcher) releaseTopic(topicName string) {
 	st.mu.Unlock()
 }
 
+// forget drops a retired topic's dispatch state so the map does not keep
+// an entry per topic name this node ever served, but only while nothing
+// is queued, held by the pump or promised to a peer on it. The topic
+// manager releases the topic's waiters first (releaseTopic), so that is
+// the usual case; demand that arrived since keeps the state. Anything
+// still holding a pointer to a dropped state sees retired and goes back
+// to the map: an enqueue finds or makes the live state, and a log's
+// wake notifier follows it (see wakeNotifier).
+func (d *dispatcher) forget(topicName string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st := d.topics[topicName]
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.anyDemandLocked() || st.held > 0 || len(st.holds) > 0 {
+		return
+	}
+	delete(d.topics, topicName)
+	st.retired.Store(true)
+	st.hasWaiters.Store(false)
+	st.gen++
+}
+
 // wakeNotifier returns the callback installed on a partition log for
 // (topicName, _). It runs on the committing goroutine, so it does the
-// least possible work: one atomic load, and nothing at all unless this
-// topic actually has a parked consumer.
+// least possible work: two atomic loads, and nothing more unless this
+// topic actually has a parked consumer. The state it reads is the one
+// the topic had at open time until forget retires that; then it follows
+// the topic's current state, or does nothing while there is none (the
+// first waiter's enqueue creates it and kicks the pump itself).
 func (d *dispatcher) wakeNotifier(topicName string) func() {
-	st := d.stateFor(topicName)
+	var cur atomic.Pointer[topicDispatch]
+	cur.Store(d.stateFor(topicName))
 	return func() {
+		st := cur.Load()
+		if st.retired.Load() {
+			if st = d.peekState(topicName); st == nil {
+				return
+			}
+			cur.Store(st)
+		}
 		if !st.hasWaiters.Load() {
 			return
 		}
