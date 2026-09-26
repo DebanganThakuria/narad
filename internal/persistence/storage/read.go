@@ -29,11 +29,21 @@ func (l *Log) Read(offset int64) ([]byte, error) {
 // reads the payload while encoding the response, so the copy per
 // message was pure overhead.
 func (l *Log) ReadShared(offset int64) ([]byte, error) {
-	if rec, ok := l.buffer.readBuffered(offset); ok {
-		return rec, nil
-	}
-	if rec, ok := l.readFlushingShared(offset); ok {
-		return rec, nil
+	// Below the durable tail a record is in a synced, indexed frame, and
+	// the flusher has already released it from the write buffer and the
+	// flushing snapshot (syncIfNeeded clears them right after moving the
+	// durable tail, and the high-watermark only advances after that).
+	// Every consume read is below the high-watermark, which never passes
+	// the durable tail, so it skips two probes that cannot hit and whose
+	// mutexes it would share with the appenders and the flusher. A stale
+	// (lower) durable tail only means probing anyway.
+	if offset >= l.durableTail.Load() {
+		if rec, ok := l.buffer.readBuffered(offset); ok {
+			return rec, nil
+		}
+		if rec, ok := l.readFlushingShared(offset); ok {
+			return rec, nil
+		}
 	}
 	// A sealed segment's file handle can be released between the index
 	// lookup and the read (its index left the hot set, or retention
@@ -49,7 +59,7 @@ func (l *Log) ReadShared(offset int64) ([]byte, error) {
 }
 
 func (l *Log) readSegmentShared(offset int64) ([]byte, error) {
-	entry, idx, unlock, ok, err := l.indexEntryForRead(offset)
+	entry, idx, writeLocked, ok, err := l.lockIndexEntry(offset)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +85,7 @@ func (l *Log) readSegmentShared(offset int64) ([]byte, error) {
 			file, err = seg.handle()
 		}
 	}
-	unlock()
+	l.unlockIndex(writeLocked)
 	if seg == nil {
 		return nil, ErrCorruptRecord
 	}
@@ -135,7 +145,7 @@ func (l *Log) VerifyDurable(first, last int64) error {
 // commit path (which verifies on every batch) never allocates per frame.
 func (l *Log) verifyDurable(first, last int64, buf *[]byte) error {
 	for off := first; off <= last; {
-		entry, _, unlock, ok, err := l.indexEntryForRead(off)
+		entry, _, writeLocked, ok, err := l.lockIndexEntry(off)
 		if err != nil {
 			return err
 		}
@@ -144,16 +154,16 @@ func (l *Log) verifyDurable(first, last int64, buf *[]byte) error {
 		}
 		seg := l.findSegmentLocked(entry.segmentBaseOffset)
 		if seg == nil {
-			unlock()
+			l.unlockIndex(writeLocked)
 			return ErrCorruptRecord
 		}
 		file, err := seg.handle()
 		if err != nil {
-			unlock()
+			l.unlockIndex(writeLocked)
 			return err
 		}
 		h, _, verr := verifyFrameAtBuffered(file, entry.framePos, buf)
-		unlock()
+		l.unlockIndex(writeLocked)
 		if verr != nil {
 			return verr
 		}
@@ -165,28 +175,55 @@ func (l *Log) verifyDurable(first, last int64, buf *[]byte) error {
 	return nil
 }
 
-// indexEntryForRead resolves the frame containing offset and returns it
-// with the Log lock held (the unlock func releases it). A sealed
-// segment whose sparse index was pruned is re-scanned OUTSIDE the lock:
-// the scan is tens of thousands of header preads on a 64 MiB segment,
-// and holding the write lock for it stalled every reader and the
-// flusher. Sealed segments are immutable, so the unlocked scan is
+// indexEntryForRead is lockIndexEntry with the release as a func, for
+// callers off the hot path.
+func (l *Log) indexEntryForRead(offset int64) (indexEntry, int32, func(), bool, error) {
+	entry, idx, writeLocked, ok, err := l.lockIndexEntry(offset)
+	if err != nil || !ok {
+		return indexEntry{}, 0, nil, ok, err
+	}
+	if writeLocked {
+		return entry, idx, l.rwmu.Unlock, true, nil
+	}
+	return entry, idx, l.rwmu.RUnlock, true, nil
+}
+
+// unlockIndex releases the Log lock lockIndexEntry returned with.
+func (l *Log) unlockIndex(writeLocked bool) {
+	if writeLocked {
+		l.rwmu.Unlock()
+		return
+	}
+	l.rwmu.RUnlock()
+}
+
+// lockIndexEntry resolves the frame containing offset and returns it
+// with the Log lock held: the write side when writeLocked, else the read
+// side, released by unlockIndex. It reports which side instead of
+// returning the unlock method as a func value, because that value
+// escapes and cost every read an allocation. Nothing is held when ok is
+// false or err is set.
+//
+// A sealed segment whose sparse index was pruned is re-scanned OUTSIDE
+// the lock: the scan is tens of thousands of header preads on a 64 MiB
+// segment, and holding the write lock for it stalled every reader and
+// the flusher. Sealed segments are immutable, so the unlocked scan is
 // race-free; the result is installed under the write lock only if the
 // segment is still present and nobody installed an index first.
-func (l *Log) indexEntryForRead(offset int64) (indexEntry, int32, func(), bool, error) {
+func (l *Log) lockIndexEntry(offset int64) (entry indexEntry, idx int32, writeLocked, ok bool, err error) {
 	l.rwmu.RLock()
-	entry, idx, ok, err := l.findIndexLocked(offset)
+	entry, idx, ok, err = l.findIndexLocked(offset)
 	if err != nil {
 		l.rwmu.RUnlock()
-		return indexEntry{}, 0, nil, false, err
+		return indexEntry{}, 0, false, false, err
 	}
 	if ok {
-		return entry, idx, l.rwmu.RUnlock, true, nil
+		return entry, idx, false, true, nil
 	}
 	seg := l.findSegmentForOffsetLocked(offset)
 	if seg == nil {
 		l.rwmu.RUnlock()
-		return indexEntry{}, 0, nil, false, nil
+		return indexEntry{}, 0, false, false, nil
 	}
 	sealed := seg != l.segments[len(l.segments)-1]
 	needScan := l.segmentIndexes[seg.baseOffset] == nil
@@ -199,7 +236,7 @@ func (l *Log) indexEntryForRead(offset int64) (indexEntry, int32, func(), bool, 
 		// (transient), never a wrong index.
 		scanned, err = l.scanSegmentIndex(seg)
 		if err != nil {
-			return indexEntry{}, 0, nil, false, err
+			return indexEntry{}, 0, false, false, err
 		}
 	}
 
@@ -207,24 +244,24 @@ func (l *Log) indexEntryForRead(offset int64) (indexEntry, int32, func(), bool, 
 	if l.findSegmentLocked(seg.baseOffset) != seg {
 		// Deleted by retention between the two lock sections.
 		l.rwmu.Unlock()
-		return indexEntry{}, 0, nil, false, nil
+		return indexEntry{}, 0, false, false, nil
 	}
 	if l.segmentIndexes[seg.baseOffset] == nil {
 		if scanned != nil {
 			l.setSegmentIndexLocked(seg.baseOffset, scanned)
-		} else if err := l.loadSegmentIndexLocked(seg); err != nil {
+		} else if err = l.loadSegmentIndexLocked(seg); err != nil {
 			l.rwmu.Unlock()
-			return indexEntry{}, 0, nil, false, err
+			return indexEntry{}, 0, false, false, err
 		}
 	}
 	entry, idx, ok, err = l.findIndexLocked(offset)
 	if err != nil {
 		l.rwmu.Unlock()
-		return indexEntry{}, 0, nil, false, err
+		return indexEntry{}, 0, false, false, err
 	}
 	if !ok {
 		l.rwmu.Unlock()
-		return indexEntry{}, 0, nil, false, nil
+		return indexEntry{}, 0, false, false, nil
 	}
-	return entry, idx, l.rwmu.Unlock, true, nil
+	return entry, idx, true, true, nil
 }
