@@ -91,9 +91,12 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 }
 
 // recordProduceError classifies a produce failure into an error-metric
-// reason.
+// reason. A commit turned away by the owner, freeze or incarnation check
+// is a rejection the dispatcher reroutes or retries, not a failure: the
+// check before the produce lock never counted one, and its repeat under
+// the lock does not either.
 func (e *Engine) recordProduceError(err error) {
-	if e.metrics == nil {
+	if e.metrics == nil || errors.Is(err, ErrNotPartitionOwner) || errors.Is(err, ErrTopicIncarnationMismatch) {
 		return
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
