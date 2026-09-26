@@ -385,8 +385,8 @@ func TestProduceHandlerDoesNotInterpretLegacyJSONEnvelope(t *testing.T) {
 	if res.Code != http.StatusAccepted {
 		t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
 	}
-	if gotKey == "" || gotKey == "body-key" {
-		t.Fatalf("Produce() key = %q, want generated key unrelated to body", gotKey)
+	if gotKey != "" {
+		t.Fatalf("Produce() key = %q, want none: the body is not a key envelope", gotKey)
 	}
 	if string(gotPayload) != body {
 		t.Fatalf("Produce() payload = %q, want full raw body", string(gotPayload))
@@ -453,7 +453,7 @@ func TestProduceHandlerPassesPinnedPartition(t *testing.T) {
 	}
 }
 
-func TestProduceHandlerGeneratesKeyWhenMissingOrEmpty(t *testing.T) {
+func TestProduceHandlerKeepsKeyEmptyWhenMissingOrEmpty(t *testing.T) {
 	tests := []struct {
 		name string
 		url  string
@@ -479,8 +479,8 @@ func TestProduceHandlerGeneratesKeyWhenMissingOrEmpty(t *testing.T) {
 			if res.Code != http.StatusAccepted {
 				t.Fatalf("Produce() status = %d, want %d", res.Code, http.StatusAccepted)
 			}
-			if gotKey == "" {
-				t.Fatal("Produce() did not generate a key")
+			if gotKey != "" {
+				t.Fatalf("Produce() key = %q, want empty", gotKey)
 			}
 		})
 	}
@@ -528,7 +528,7 @@ func TestProduceHandlerIgnoresUnknownQueryParams(t *testing.T) {
 	}
 }
 
-func TestProduceHandlerAcceptsWithGeneratedKeyAndDoesNotRoute(t *testing.T) {
+func TestProduceHandlerAcceptsKeylessAndDoesNotRoute(t *testing.T) {
 	routerCalled := false
 	var gotKey string
 	s := newTestSet(&fakeBroker{acceptProduceFn: func(_ context.Context, _ string, key string, _ []byte, _ ...int) (ingress.AcceptedProduce, error) {
@@ -561,8 +561,8 @@ func TestProduceHandlerAcceptsWithGeneratedKeyAndDoesNotRoute(t *testing.T) {
 	if routerCalled {
 		t.Fatal("Produce() called router")
 	}
-	if gotKey == "" {
-		t.Fatal("Produce() did not generate a key")
+	if gotKey != "" {
+		t.Fatalf("Produce() key = %q, want empty", gotKey)
 	}
 }
 
