@@ -159,3 +159,41 @@ func TestZZWP5TopicInternerBounded(t *testing.T) {
 		t.Fatalf("nil interner = %q", got)
 	}
 }
+
+// The dispatcher's stuck mode re-reads its whole lookahead horizon every
+// pass, most of it records it already committed. With a peek it can pass
+// over those before they are read off the frame and decoded: they cost
+// nothing, and the records it does want arrive decoded as usual.
+func TestZZWP5ReplayProducePeekSkipsBeforeDecoding(t *testing.T) {
+	m, err := OpenManager(t.TempDir(), wal.Options{SegmentBytes: 64 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	const n = 256
+	zzWP5AcceptConcurrently(t, m, n)
+	committedAhead := func(id wal.RecordID, _ wal.Cursor) (bool, error) { return id.Seq%8 != 0, nil }
+
+	delivered := 0
+	if err := m.ReplayProduceFromCursorPeek(wal.Cursor{}, committedAhead, func(r ProduceRecord, _ wal.Cursor) error {
+		var i int
+		if _, err := fmt.Sscanf(r.Key, "k%d", &i); err != nil || r.WAL.Seq%8 != 0 || !bytes.Equal(r.Payload, zzWP5Payload(i)) {
+			return fmt.Errorf("record %+v", r)
+		}
+		delivered++
+		return nil
+	}); err != nil || delivered != n/8 {
+		t.Fatalf("peek replay: err=%v delivered=%d", err, delivered)
+	}
+
+	allocs := testing.AllocsPerRun(20, func() {
+		if err := m.ReplayProduceFromCursorPeek(wal.Cursor{}, committedAhead, func(ProduceRecord, wal.Cursor) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// Two objects (frame and key) per delivered record, plus the fixed
+	// per-pass cost; the skipped seven eighths cost nothing.
+	if limit := float64(2*n/8 + 32); allocs > limit {
+		t.Fatalf("peek replay allocated %.0f objects per pass, want at most %.0f", allocs, limit)
+	}
+}

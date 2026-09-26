@@ -121,3 +121,29 @@ func BenchmarkZZWP5AcceptProduceParallel(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkZZWP5ReplayProducePeekStuck is a stuck-mode dispatcher pass:
+// the window is 4096 records of which the dispatcher already committed
+// seven in eight on earlier passes, and passes over them with a peek.
+func BenchmarkZZWP5ReplayProducePeekStuck(b *testing.B) {
+	m, err := OpenManager(b.TempDir(), wal.Options{SegmentBytes: 64 << 20})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer m.Close()
+	const n = 4096
+	zzWP5FillManager(b, m, n)
+	committedAhead := func(id wal.RecordID, _ wal.Cursor) (bool, error) { return id.Seq%8 != 0, nil }
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		count := 0
+		if err := m.ReplayProduceFromCursorPeek(wal.Cursor{}, committedAhead, func(ProduceRecord, wal.Cursor) error {
+			count++
+			return nil
+		}); err != nil || count != n/8 {
+			b.Fatalf("replay: %v count=%d", err, count)
+		}
+	}
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/n, "ns/record")
+}

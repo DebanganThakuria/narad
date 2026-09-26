@@ -206,10 +206,22 @@ func (m *Manager) ReplayProduce(from uint64, fn func(ProduceRecord) error) error
 // (wal.Log.ReplayFromCursor), and it skips listing the WAL directory
 // while the cursor is in the active segment.
 func (m *Manager) ReplayProduceFromCursor(cursor wal.Cursor, fn func(ProduceRecord, wal.Cursor) error) error {
+	return m.ReplayProduceFromCursorPeek(cursor, nil, fn)
+}
+
+// ReplayProduceFromCursorPeek is ReplayProduceFromCursor with a filter
+// that sees each record's WAL id and resume cursor before the record is
+// read off its frame (see wal.Peek). A record peek skips is checksummed
+// but never allocated, decoded or handed to fn: that is how a dispatcher
+// passes over the records it committed on an earlier pass (held above
+// its checkpoint by a stuck one) without paying for them on every pass.
+func (m *Manager) ReplayProduceFromCursorPeek(cursor wal.Cursor, peek wal.Peek, fn func(ProduceRecord, wal.Cursor) error) error {
 	if m == nil || m.log == nil {
 		return errors.New("ingress: manager is nil")
 	}
-	return replayProduce(m.log.ReplayFromCursor, cursor, fn)
+	return replayProduce(func(cursor wal.Cursor, fn func(wal.Record, wal.Cursor) error) error {
+		return m.log.ReplayFromCursorPeek(cursor, peek, fn)
+	}, cursor, fn)
 }
 
 // CompactProduceBefore drops WAL segments wholly below seq. Callers

@@ -137,6 +137,13 @@ func putFrameReader(fr *frameReader) {
 	frameReaderPool.Put(fr)
 }
 
+// frameHeader is a validated frame header.
+type frameHeader struct {
+	seq  uint64
+	size int // payload length, never zero
+	crc  uint32
+}
+
 // readFrame decodes the next frame. It returns ok=false without an error
 // on a clean or truncated EOF (a torn tail), errZeroHeader for an
 // all-zero header, and wraps validation failures in errCorruptFrame so
@@ -144,43 +151,89 @@ func putFrameReader(fr *frameReader) {
 // a fresh allocation that the reader never touches again, so a caller
 // may keep it or alias into it.
 func (fr *frameReader) readFrame(segmentBase uint64, offset int64, maxRecord int) (Record, bool, error) {
-	r := fr.r
+	h, ok, err := fr.readHeader(offset, maxRecord)
+	if err != nil || !ok {
+		return Record{}, false, err
+	}
+	payload, ok, err := fr.readPayload(h, offset)
+	if err != nil || !ok {
+		return Record{}, false, err
+	}
+	return Record{
+		ID:      RecordID{SegmentBase: segmentBase, Offset: offset, Seq: h.seq},
+		Payload: payload,
+	}, true, nil
+}
+
+// readHeader reads and validates the header of the next frame, which
+// starts at offset. Errors and ok as for readFrame; the payload is left
+// for readPayload or skipPayload.
+func (fr *frameReader) readHeader(offset int64, maxRecord int) (frameHeader, bool, error) {
 	header := &fr.header
-	if _, err := io.ReadFull(r, header[:]); err != nil {
+	if _, err := io.ReadFull(fr.r, header[:]); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return Record{}, false, nil
+			return frameHeader{}, false, nil
 		}
-		return Record{}, false, fmt.Errorf("wal: read frame header: %w", err)
+		return frameHeader{}, false, fmt.Errorf("wal: read frame header: %w", err)
 	}
 	if *header == ([frameHeaderSize]byte{}) {
-		return Record{}, false, errZeroHeader
+		return frameHeader{}, false, errZeroHeader
 	}
 	if got := binary.BigEndian.Uint32(header[0:4]); got != frameMagic {
-		return Record{}, false, fmt.Errorf("wal: bad frame magic at offset %d: %w", offset, errCorruptFrame)
+		return frameHeader{}, false, fmt.Errorf("wal: bad frame magic at offset %d: %w", offset, errCorruptFrame)
 	}
 	n := binary.BigEndian.Uint32(header[4:8])
 	if n == 0 {
-		return Record{}, false, fmt.Errorf("wal: empty frame at offset %d: %w", offset, errCorruptFrame)
+		return frameHeader{}, false, fmt.Errorf("wal: empty frame at offset %d: %w", offset, errCorruptFrame)
 	}
 	if int(n) > maxRecord {
-		return Record{}, false, fmt.Errorf("wal: frame size %d exceeds max %d: %w", n, maxRecord, errCorruptFrame)
+		return frameHeader{}, false, fmt.Errorf("wal: frame size %d exceeds max %d: %w", n, maxRecord, errCorruptFrame)
 	}
-
-	seq := binary.BigEndian.Uint64(header[8:16])
-	wantCRC := binary.BigEndian.Uint32(header[16:20])
-	payload := make([]byte, int(n))
-	if _, err := io.ReadFull(r, payload); err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return Record{}, false, nil
-		}
-		return Record{}, false, fmt.Errorf("wal: read frame payload: %w", err)
-	}
-	if got := crc32.ChecksumIEEE(payload); got != wantCRC {
-		return Record{}, false, fmt.Errorf("wal: checksum mismatch at offset %d: %w", offset, errCorruptFrame)
-	}
-
-	return Record{
-		ID:      RecordID{SegmentBase: segmentBase, Offset: offset, Seq: seq},
-		Payload: payload,
+	return frameHeader{
+		seq:  binary.BigEndian.Uint64(header[8:16]),
+		size: int(n),
+		crc:  binary.BigEndian.Uint32(header[16:20]),
 	}, true, nil
+}
+
+// readPayload reads the payload of the frame whose header readHeader
+// just returned into a fresh allocation and verifies its checksum.
+// ok=false on a truncated EOF.
+func (fr *frameReader) readPayload(h frameHeader, offset int64) ([]byte, bool, error) {
+	payload := make([]byte, h.size)
+	if _, err := io.ReadFull(fr.r, payload); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("wal: read frame payload: %w", err)
+	}
+	if got := crc32.ChecksumIEEE(payload); got != h.crc {
+		return nil, false, fmt.Errorf("wal: checksum mismatch at offset %d: %w", offset, errCorruptFrame)
+	}
+	return payload, true, nil
+}
+
+// skipPayload consumes the payload of the frame whose header readHeader
+// just returned without keeping it: the checksum is computed over the
+// bytes as they pass through the read buffer, so a skipped record is
+// verified exactly like a delivered one but never allocated. ok=false
+// on a truncated EOF.
+func (fr *frameReader) skipPayload(h frameHeader, offset int64) (bool, error) {
+	var sum uint32
+	for left := h.size; left > 0; {
+		chunk, err := fr.r.Peek(min(left, fr.r.Size()))
+		sum = crc32.Update(sum, crc32.IEEETable, chunk)
+		_, _ = fr.r.Discard(len(chunk))
+		left -= len(chunk)
+		if err != nil && left > 0 {
+			if errors.Is(err, io.EOF) {
+				return false, nil
+			}
+			return false, fmt.Errorf("wal: read frame payload: %w", err)
+		}
+	}
+	if sum != h.crc {
+		return false, fmt.Errorf("wal: checksum mismatch at offset %d: %w", offset, errCorruptFrame)
+	}
+	return true, nil
 }
