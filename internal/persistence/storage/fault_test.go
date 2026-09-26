@@ -327,8 +327,10 @@ func reopenLog(t *testing.T, dir string, m MetricsRecorder) *Log {
 // The Nth fdatasync of a segment fails under load: the commit that ran
 // into it fails, the log is poisoned (every later append and commit
 // refuses with ErrLogPoisoned, counted as fsync_poisoned), reads of
-// committed records keep working, and a reopen recovers the committed
-// prefix and accepts the retried batches.
+// committed records keep working, and a reopen recovers every committed
+// record, plus whatever frames of the failed batch survived (visible
+// then: the ingress WAL may re-commit them, duplicates never loss), and
+// accepts the retried batches.
 func TestFaultSegmentSyncFailsPoisonsLog(t *testing.T) {
 	dir := testLogPath(t)
 	m := &faultMetrics{}
@@ -370,8 +372,8 @@ func TestFaultSegmentSyncFailsPoisonsLog(t *testing.T) {
 	if l2.Poisoned() != nil {
 		t.Fatal("reopened log is still poisoned")
 	}
-	if got := l2.HighWatermark(); got != hwmBefore {
-		t.Fatalf("hwm after reopen = %d, want %d", got, hwmBefore)
+	if got := l2.HighWatermark(); got < hwmBefore || got != l2.NextOffset() {
+		t.Fatalf("hwm after reopen = %d, want the recovered tail %d, at least %d", got, l2.NextOffset(), hwmBefore)
 	}
 	load.verifyLog(t, l2)
 
@@ -385,46 +387,59 @@ func TestFaultSegmentSyncFailsPoisonsLog(t *testing.T) {
 	t.Logf("committed=%d failures=%d hwm=%d next=%d", len(load.committed), load.failures, l2.HighWatermark(), l2.NextOffset())
 }
 
-// The Nth fdatasync of the high-watermark file fails (the partition's
-// visibility index): the commit fails and discards its tail, the log is
-// NOT poisoned (the 8-byte file is rewritten whole on the next persist),
-// the retry lands exactly one copy, and nothing is delivered twice.
-func TestFaultHWMSyncFailsCommitRetriesExactlyOnce(t *testing.T) {
+// The high-watermark file breaks under load: its syncs and writes fail
+// from early on, for every lazy persist. Commits do not touch the file,
+// so none fails and none is discarded, the log is NOT poisoned, and every
+// record is visible exactly once. Close reports the failed final persist.
+// Once the disk recovers, a reopen recovers the boundary from the record
+// tail regardless of the stale file, rewrites the file, and every record
+// is still visible exactly once.
+func TestFaultHWMFileFailsCommitsUnaffected(t *testing.T) {
 	dir := testLogPath(t)
 	m := &faultMetrics{}
 	inj := faulttest.New(t)
 	rules := []*faulttest.Rule{
-		inj.FailNth(syncfile.OpSyncData, hwmFileName, 7, syscall.EIO),
-		inj.FailNth(syncfile.OpSyncData, hwmFileName, 30, syscall.EIO),
-		inj.FailNth(syncfile.OpWrite, hwmFileName, 45, syscall.EIO),
+		inj.FailFrom(syncfile.OpSyncData, hwmFileName, 2, syscall.EIO),
+		inj.FailFrom(syncfile.OpWrite, hwmFileName, 4, syscall.EIO),
 	}
 
-	l, err := NewLog(dir, faultOptions(m))
+	opts := faultOptions(m)
+	opts.HWMSyncInterval = 2 * time.Millisecond
+	l, err := NewLog(dir, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	load := newCommitLoad("hwm")
 	load.run(t, l, 8, 12, 4, nil)
-	for i, r := range rules {
-		if r.Fired() != 1 {
-			t.Fatalf("hwm fault %d fired %d times, want 1", i, r.Fired())
-		}
-	}
-	if load.failures == 0 {
-		t.Fatal("no commit observed the hwm persist failure")
+	if load.failures != 0 {
+		t.Fatalf("%d commits failed on a broken high-watermark file (last: %v)", load.failures, load.lastCommitE)
 	}
 	if load.poisoned != 0 || l.Poisoned() != nil {
 		t.Fatalf("hwm persist failure must not poison the log: poisoned workers=%d err=%v", load.poisoned, l.Poisoned())
 	}
-	if got := m.count("commit_discard"); got == 0 {
-		t.Fatal("failed commits did not count commit_discard")
+	if got := m.count("commit_discard"); got != 0 {
+		t.Fatalf("commit_discard counted %d times, want 0", got)
 	}
 	assertExactlyOnce(t, l, load)
 	load.verifyLog(t, l)
-	if err := l.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	hwm := l.HighWatermark()
+	if err := l.Close(); !errors.Is(err, syscall.EIO) {
+		t.Fatalf("Close = %v, want the failed high-watermark persist (EIO)", err)
 	}
+	for i, r := range rules {
+		if r.Fired() == 0 {
+			t.Fatalf("hwm fault %d never fired", i)
+		}
+		inj.Remove(r)
+	}
+
 	l2 := reopenLog(t, dir, m)
+	if got := l2.HighWatermark(); got != hwm {
+		t.Fatalf("hwm after reopen = %d, want %d", got, hwm)
+	}
+	if got, ok, err := ReadPersistedHighWatermark(dir); err != nil || !ok || got != hwm {
+		t.Fatalf("persisted after reopen = (%d, %v, %v), want %d", got, ok, err, hwm)
+	}
 	assertExactlyOnce(t, l2, load)
 	load.verifyLog(t, l2)
 }
@@ -617,13 +632,11 @@ func TestFaultConsumerOffsetSyncFails(t *testing.T) {
 //   - accept new commits afterwards and survive a second reopen.
 //
 // What is lost: records whose commit was acked on the strength of a
-// lying fsync. Either their frames are gone (segment sync lied) or the
-// high-watermark that exposed them regressed (hwm sync lied), in which
-// case they sit in the hidden tail and the ingress WAL re-commits them
-// at fresh offsets (duplicates, never silent loss, exactly the
-// documented crash semantics). That is the disk's fault, not the
-// engine's; what must never happen is a served torn record, a crash
-// loop at open, or an index that disagrees with the file.
+// lying fsync, whose frames are gone (segment sync lied). A lying
+// high-watermark sync loses nothing: recovery takes the boundary from
+// the record tail. That is the disk's fault, not the engine's; what must
+// never happen is a served torn record, a crash loop at open, or an
+// index that disagrees with the file.
 func TestFaultLyingFsyncCrash(t *testing.T) {
 	dir := testLogPath(t)
 	m := &faultMetrics{}
@@ -678,6 +691,10 @@ func TestFaultLyingFsyncCrash(t *testing.T) {
 				lost++
 			}
 		}
+	}
+	if hidden != 0 {
+		load.mu.Unlock()
+		t.Fatalf("%d committed records survived the crash but are hidden: recovery must take the boundary from the record tail", hidden)
 	}
 	// Recovery serves only submitted records below the hwm. An offset
 	// with no frame at all (the tail of a sealed segment whose last

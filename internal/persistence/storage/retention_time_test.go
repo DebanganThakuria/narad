@@ -336,19 +336,14 @@ func TestStorageErrorCounters(t *testing.T) {
 	}
 	defer l.Close()
 
-	if err := l.closeHWMFile(); err != nil {
-		t.Fatal(err)
-	}
-	goodPath := l.hwmPath
-	l.hwmPath = l.dir
+	wp3FailReadBackOnce(t, l)
 	off, err := l.Append([]byte("x"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := l.CommitDurable(off, off); err == nil {
-		t.Fatal("CommitDurable succeeded with an unwritable hwm path")
+		t.Fatal("CommitDurable succeeded although its read-back failed")
 	}
-	l.hwmPath = goodPath
 	if got := rec.count("commit_discard"); got != 1 {
 		t.Fatalf("commit_discard = %d, want 1", got)
 	}

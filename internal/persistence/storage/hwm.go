@@ -17,49 +17,66 @@ func hwmFilePath(dir string) string {
 	return filepath.Join(dir, hwmFileName)
 }
 
-// loadHighWatermark restores the persisted HWM on recovery. The HWM is the
-// durable VISIBILITY boundary and is deliberately allowed to lag the durable
-// tail (nextOffset): records written+fsynced but whose commit did not advance
-// the HWM are a "hidden tail" that must stay hidden across restart, because the
-// WAL replays and re-commits them at fresh offsets — exposing the hidden copy
-// would double-deliver. So recovery trusts the persisted file (clamped to the
-// recovered tail), NOT nextOffset.
+// loadHighWatermark sets the recovered high-watermark to the recovered
+// record tail (nextOffset): every CRC-valid frame the scan found is
+// visible. It never hides a record that was visible before the restart,
+// because a commit fsyncs its frames before it advances the boundary, so
+// no committed frame is past the tail. That is what lets a commit skip a
+// second fsync for the boundary file (see CommitDurable).
+//
+// Records written and fsynced by a commit that never returned (a crash
+// mid-commit, a failed commit whose truncate failed, a poisoned log) are
+// exposed by this too: the ingress WAL still owns them and re-commits
+// them at fresh offsets, so they can be delivered twice, never lost.
+// The file used to keep such a tail hidden across a restart, but only
+// until the next commit on the partition (the WAL's re-commit itself)
+// advanced the boundary over it, so it only changed when the
+// duplicates appeared.
+//
+// The file is still kept for readers of a closed log (see
+// ReadPersistedHighWatermark). Close writes it exactly; after a crash it
+// lags the recovered boundary by up to HWMSyncInterval, so when it
+// differs it is rewritten here, before anything can read the log, which
+// bounds the lag by the reopen. A failed rewrite does not fail the open:
+// the in-memory boundary is right, and the flusher retries the write.
 func (l *Log) loadHighWatermark(nextOffset int64) error {
-	data, err := os.ReadFile(l.hwmPath)
-	if errors.Is(err, os.ErrNotExist) {
-		l.bootstrapHighWatermark(nextOffset)
-		return nil
-	}
+	persisted, ok, err := ReadPersistedHighWatermark(l.dir)
 	if err != nil {
-		return fmt.Errorf("storage: read hwm: %w", err)
+		return err
 	}
-	if len(data) == 0 {
-		l.bootstrapHighWatermark(nextOffset)
+	nextOffset = max(nextOffset, 0)
+	l.highWatermark.Store(nextOffset)
+	if (ok && persisted == nextOffset) || (!ok && nextOffset == 0) {
+		// Up to date, or an empty partition that needs no file yet.
+		l.persistedHWM.Store(nextOffset)
 		return nil
-	}
-	if len(data) != 8 {
-		return fmt.Errorf("storage: invalid hwm file size %d", len(data))
 	}
 
-	persisted := min(max(int64(binary.BigEndian.Uint64(data)), 0), nextOffset)
-	l.highWatermark.Store(persisted)
-	l.persistedHWM.Store(persisted)
+	l.hwmMu.Lock()
+	defer l.hwmMu.Unlock()
+	start := time.Now()
+	if err := l.persistHighWatermark(nextOffset); err != nil {
+		l.observeHighWatermarkPersist(time.Since(start), "error")
+		l.logger.Warn("storage: could not persist the recovered high-watermark; readers of the closed log see the old one until a later persist",
+			"dir", l.dir, "high_watermark", nextOffset, "err", err)
+		// Unknown file content: any boundary is ahead of it, so the
+		// flusher's timer and Close both retry the write.
+		l.persistedHWM.Store(-1)
+		return nil
+	}
+	l.observeHighWatermarkPersist(time.Since(start), "ok")
+	l.persistedHWM.Store(nextOffset)
+	l.lastHWMSync = time.Now()
 	return nil
 }
 
-func (l *Log) bootstrapHighWatermark(nextOffset int64) {
-	if nextOffset < 0 {
-		nextOffset = 0
-	}
-	l.highWatermark.Store(nextOffset)
-	l.persistedHWM.Store(nextOffset)
-}
-
 // WritePersistedHighWatermark writes the durable high-watermark file
-// for a partition directory. Used by a rebalance copy to reproduce the
-// source's exact visibility boundary (which may lag the record tail —
-// the hidden tail must stay hidden so a reopened copy does not
-// double-expose records the WAL will re-commit). 8 bytes, big-endian.
+// for a partition directory: the boundary readers of the closed
+// directory see. Used by a rebalance copy to carry the source's
+// boundary. Opening the directory as a Log recovers the boundary from
+// the record tail instead (see loadHighWatermark) and rewrites the file
+// to match, so records the copy holds past hwm become visible then.
+// 8 bytes, big-endian.
 func WritePersistedHighWatermark(dir string, hwm int64) error {
 	if hwm < 0 {
 		hwm = 0
@@ -74,7 +91,9 @@ func WritePersistedHighWatermark(dir string, hwm int64) error {
 // (or the directory) does not exist or is empty — an empty partition.
 // Close force-syncs the HWM file, so for a cleanly closed log this
 // value is exact, not lagging; idle-evicted logs rely on that to
-// answer "is there committed backlog?" without reopening.
+// answer "is there committed backlog?" without reopening. After a crash
+// it can lag the log's visible records by up to HWMSyncInterval until
+// the log is opened again, which rewrites it (see loadHighWatermark).
 func ReadPersistedHighWatermark(dir string) (int64, bool, error) {
 	data, err := os.ReadFile(hwmFilePath(dir))
 	if err != nil {
@@ -92,41 +111,38 @@ func ReadPersistedHighWatermark(dir string) (int64, bool, error) {
 	return max(int64(binary.BigEndian.Uint64(data)), 0), true, nil
 }
 
-// PersistedHighWatermark reads the HWM back from disk — the value a
-// restart would recover — falling back to the in-memory HWM when no
-// file has been written yet. Used to verify durability, not on any hot
-// path.
+// PersistedHighWatermark is the high-watermark a restart would recover
+// at least: the durable record tail (recovery rebuilds the boundary from
+// the CRC-verified tail, see loadHighWatermark), or the persisted file
+// when that is higher. The file is read from disk, so a broken one
+// reports its error. Used to verify durability, not on any hot path.
 func (l *Log) PersistedHighWatermark() (int64, error) {
 	data, err := os.ReadFile(l.hwmPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return l.HighWatermark(), nil
-		}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return 0, fmt.Errorf("storage: read persisted hwm: %w", err)
 	}
-	if len(data) == 0 {
-		return l.HighWatermark(), nil
-	}
-	if len(data) != 8 {
+	var persisted int64
+	switch len(data) {
+	case 0:
+	case 8:
+		persisted = max(int64(binary.BigEndian.Uint64(data)), 0)
+	default:
 		return 0, fmt.Errorf("storage: invalid hwm file size %d", len(data))
 	}
-
-	persisted := max(int64(binary.BigEndian.Uint64(data)), 0)
-	return persisted, nil
+	return max(persisted, l.durableTail.Load()), nil
 }
 
 // persistHighWatermark durably writes the 8-byte HWM in place.
 //
-// The HWM is persisted on every commit (durability of the visible boundary is
-// required — a record once exposed must stay exposed across a crash). The cost
-// must therefore be minimal. The previous temp-file + fsync + rename made a new
-// inode and a directory mutation on EVERY commit across every partition; under
-// load that metadata churn — not the value write — was the dominant disk cost
-// (≈50ms p95). An 8-byte value fits in a single sector, and a single-sector
-// write is atomic across a crash (the reader sees the old or new 8 bytes, never
-// a torn mix), so the temp+rename dance — which exists only to make
-// variable-length writes atomic — is unnecessary. We overwrite the fixed-size
-// file in place and fsync, eliminating the inode/dir churn.
+// It runs every HWMSyncInterval while the boundary moves, on the forced
+// passes (Sync, rotation, the shutdown drain), at Close, and at open when
+// recovery moved the boundary; not per commit (see loadHighWatermark for
+// why recovery does not need it). An 8-byte value fits in a single
+// sector, and a single-sector write is atomic across a crash (the reader
+// sees the old or new 8 bytes, never a torn mix), so there is no temp
+// file and rename, which exists only to make variable-length writes
+// atomic and cost a new inode and a directory mutation per persist. The
+// fixed-size file is overwritten in place and fsynced.
 //
 // The file descriptor is opened on the first persist and kept open for
 // the life of the Log (closed by Close): the open/close pair per commit
@@ -153,16 +169,15 @@ func (l *Log) persistHighWatermark(next int64) error {
 	}
 	// Data-only sync: an in-place single-sector overwrite has no
 	// metadata worth journaling (first-creation durability is the dir
-	// fsync below), and this runs once per commit: the hottest of the
-	// small-file syncs.
+	// fsync below).
 	if err := syncfile.SyncData(l.hwmFile); err != nil {
 		l.closeHWMFileLocked()
 		return fmt.Errorf("storage: sync hwm: %w", err)
 	}
 	// The open above may have CREATED the file, and file creation is only
 	// durable once the parent directory is fsynced. Without it a crash
-	// can lose the file entirely; recovery would then bootstrap the HWM
-	// from the tail and expose the hidden tail (double-delivery). One dir
+	// can lose the file entirely, and readers of the closed log would
+	// take the partition for empty until it is opened again. One dir
 	// fsync per Log lifetime covers the first-creation case cheaply.
 	if !l.hwmDirSynced {
 		if err := syncDir(l.dir); err != nil {
@@ -219,9 +234,10 @@ func (l *Log) syncHighWatermark(force bool) error {
 		return nil
 	}
 	// Deferring is only safe because flusher.needsTimer keeps the timer
-	// armed while highWatermark > persistedHWM. A new deferral here needs
-	// a matching condition there, or the work is silently never scheduled
-	// once the log goes idle.
+	// armed while highWatermark > persistedHWM (for hwmPersistDeadline,
+	// when this stops deferring). A new deferral here needs a matching
+	// condition there, or the work is silently never scheduled once the
+	// log goes idle.
 	if !force && time.Since(l.lastHWMSync) < l.opts.HWMSyncInterval {
 		return nil
 	}
@@ -231,40 +247,9 @@ func (l *Log) syncHighWatermark(force bool) error {
 	if err := l.persistHighWatermark(target); err != nil {
 		outcome = "error"
 		l.observeHighWatermarkPersist(time.Since(start), outcome)
-		return err
-	}
-	l.persistedHWM.Store(target)
-	l.lastHWMSync = time.Now()
-	l.observeHighWatermarkPersist(time.Since(start), outcome)
-	return nil
-}
-
-// persistHighWatermarkAtLeast durably writes target (or the current
-// in-memory high-watermark if that is higher) unconditionally, unless
-// the persisted value already covers it. The commit path calls it BEFORE
-// advancing the in-memory high-watermark, so a record is never visible
-// with an unpersisted boundary. The following AdvanceHighWatermark then
-// finds persistedHWM already at target and the pass-ending
-// syncHighWatermark is a no-op.
-func (l *Log) persistHighWatermarkAtLeast(target int64) error {
-	if cur := l.highWatermark.Load(); cur > target {
-		target = cur
-	}
-	if target < 0 || target <= l.persistedHWM.Load() {
-		return nil
-	}
-
-	l.hwmMu.Lock()
-	defer l.hwmMu.Unlock()
-
-	if target <= l.persistedHWM.Load() {
-		return nil
-	}
-	start := time.Now()
-	outcome := "ok"
-	if err := l.persistHighWatermark(target); err != nil {
-		outcome = "error"
-		l.observeHighWatermarkPersist(time.Since(start), outcome)
+		// Retried on the same cadence as a deferred persist, not on
+		// every flusher pass while the file stays broken.
+		l.lastHWMSync = time.Now()
 		return err
 	}
 	l.persistedHWM.Store(target)

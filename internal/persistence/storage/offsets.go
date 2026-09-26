@@ -29,8 +29,9 @@ func (l *Log) HighWatermark() int64 {
 }
 
 // AdvanceHighWatermark moves the visible tail forward and wakes long-poll
-// consumers waiting on new committed records. Persistence is batched by the
-// storage flusher; the produce path must not fsync this metadata per record.
+// consumers waiting on new committed records. Persistence is deferred to the
+// storage flusher (HWMSyncInterval) and Close; nothing on the produce path
+// fsyncs this metadata, since recovery rebuilds it from the record tail.
 func (l *Log) AdvanceHighWatermark(newHWM int64) error {
 	cur := l.highWatermark.Load()
 	if newHWM <= cur {
@@ -48,10 +49,9 @@ func (l *Log) AdvanceHighWatermark(newHWM int64) error {
 	// this the boundary can sit in memory unwritten.
 	//
 	// Asked for unconditionally rather than by guessing the caller. On
-	// the commit path the request is redundant, since that pass ends in
-	// syncHighWatermark and then re-arms anyway; rearm drains a pending
-	// request before deciding, so the redundant one costs nothing rather
-	// than an extra wake per commit.
+	// the commit path the request is redundant, since that pass re-arms
+	// anyway; rearm drains a pending request before deciding, so the
+	// redundant one costs nothing rather than an extra wake per commit.
 	l.flusher.noteHighWatermarkAdvance()
 	return nil
 }

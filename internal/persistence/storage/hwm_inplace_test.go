@@ -9,10 +9,8 @@ import (
 // The high-watermark is persisted in place (fixed 8-byte overwrite + fsync, no
 // temp file or rename) on every forced sync. This verifies that mechanism is
 // durable mid-run — without a clean Close — and that the file never grows or
-// leaves stale tail bytes across repeated overwrites, so a restart restores the
-// exact last-persisted value. (Per-commit persistence of the visible boundary
-// is a durability requirement: a record once exposed must stay exposed across a
-// crash; the in-place write only makes that persist cheap, not less frequent.)
+// leaves stale tail bytes across repeated overwrites, so readers of the closed
+// log and a restart see the exact last-persisted value.
 func TestHighWatermarkInPlacePersistDurableMidRun(t *testing.T) {
 	path := testLogPath(t)
 	l, err := NewLog(path, slowFlushOpts(t, nil))
