@@ -98,9 +98,10 @@ func (m *Manager) purgeTopicLocked(_ context.Context, name, id string) error {
 
 // dropTopicState drops the in-memory state a topic incarnation left
 // behind: in-flight reservations and committed frontiers, loaded
-// schemas and the engine's cached metadata. Registered with runtime.Logs as the retired hook so it also
-// runs when an open quarantines a deleted incarnation's directory,
-// where that state would otherwise be resumed by the recreated topic.
+// schemas and the engine's cached metadata. Registered with
+// runtime.Logs as the retired hook so it also runs when an open
+// quarantines a deleted incarnation's directory, where that state
+// would otherwise be resumed by the recreated topic.
 func (m *Manager) dropTopicState(name string) {
 	if m.waiters != nil {
 		// First, so a consumer woken here cannot be handed a record from
@@ -130,7 +131,7 @@ type topicCacheForgetter interface {
 func (m *Manager) dropTopicCaches(name string) {
 	if m.schemas != nil {
 		if err := m.schemas.DropTopic(context.Background(), name); err != nil {
-			m.logger.Warn("drop topic schemas after retiring incarnation", "topic", name, "err", err)
+			m.logger.Warn("drop topic schemas after retiring or purging it", "topic", name, "err", err)
 		}
 	}
 	if f, ok := m.waiters.(topicCacheForgetter); ok {
