@@ -49,6 +49,9 @@ func TestWP3ReadBelowDurableTailSkipsWriteBufferLocks(t *testing.T) {
 
 // A read served by the frame cache allocates nothing.
 func TestWP3CachedReadAllocatesNothing(t *testing.T) {
+	if wp3RaceEnabled {
+		t.Skip("allocation counts differ under the race detector")
+	}
 	l, err := NewLog(filepath.Join(t.TempDir(), "p0"), Options{})
 	if err != nil {
 		t.Fatal(err)

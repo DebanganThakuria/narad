@@ -104,7 +104,7 @@ func (l *Log) readSegmentShared(offset int64) ([]byte, error) {
 		return recs[idx], nil
 	}
 
-	_, records, _, err := readFrameAt(file, entry.framePos, l)
+	h, records, _, err := readFrameAt(file, entry.framePos, l)
 	if err != nil {
 		if errors.Is(err, os.ErrClosed) {
 			// Retention deleted the segment between the index lookup and
@@ -121,15 +121,11 @@ func (l *Log) readSegmentShared(offset int64) ([]byte, error) {
 		return nil, ErrCorruptRecord
 	}
 
-	// Some codecs reuse internal buffers; copy out before caching.
-	cached := make([][]byte, len(records))
-	for i, r := range records {
-		cp := make([]byte, len(r))
-		copy(cp, r)
-		cached[i] = cp
-	}
-	l.frameCache.put(key, cached)
-	return cached[int(idx)], nil
+	// The records are slices of the buffer this read decoded into, which
+	// nothing else holds (see readFrameAt), so they are cached as they
+	// are. The cache accounts for the whole buffer they pin.
+	l.frameCache.putSized(key, records, int(h.uncompressed))
+	return records[idx], nil
 }
 
 // VerifyDurable re-reads the frames covering [first,last] and validates each

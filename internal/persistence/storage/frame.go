@@ -31,9 +31,8 @@ func encodeRecordsPayload(dst []byte, records [][]byte) []byte {
 	return dst
 }
 
-// decodeRecordsPayload returns slices that reference the input. Caller
-// must copy if it needs to retain them past the codec buffer's
-// lifetime.
+// decodeRecordsPayload splits a record stream into slices of payload,
+// not copies: they share its lifetime and its memory.
 func decodeRecordsPayload(payload []byte, recordCount int32) ([][]byte, error) {
 	out := make([][]byte, 0, recordCount)
 	pos := 0
@@ -204,19 +203,29 @@ func readFrameRaw(r io.ReaderAt, pos int64) (frameHeader, []byte, error) {
 // readFrameAt reads, CRC-checks, and decodes the frame at pos, returning
 // its records and the position just after the frame. Errors are those of
 // readFrameRaw, plus errCorrupt when the decoded record stream is invalid.
+//
+// The records are slices of one buffer this call allocated (the payload
+// read from the file for an uncompressed frame, the codec's output
+// otherwise) that nothing else references, so a caller may keep them
+// without copying; they pin that buffer while it does.
 func readFrameAt(r io.ReaderAt, pos int64, log *Log) (frameHeader, [][]byte, int64, error) {
 	h, payload, err := readFrameRaw(r, pos)
 	if err != nil {
 		return h, nil, pos, err
 	}
 
-	c, err := codecForFlag(h.codec(), log.codec)
-	if err != nil {
-		return h, nil, pos, err
-	}
-	decoded, err := c.Decode(nil, payload, int(h.uncompressed))
-	if err != nil {
-		return h, nil, pos, fmt.Errorf("%w: decode: %v", errCorrupt, err)
+	// An uncompressed frame's payload IS the record stream: split it in
+	// place instead of copying it through the noop codec.
+	decoded := payload
+	if h.codec() != codec.FlagNone {
+		c, err := codecForFlag(h.codec(), log.codec)
+		if err != nil {
+			return h, nil, pos, err
+		}
+		decoded, err = c.Decode(nil, payload, int(h.uncompressed))
+		if err != nil {
+			return h, nil, pos, fmt.Errorf("%w: decode: %v", errCorrupt, err)
+		}
 	}
 	if len(decoded) != int(h.uncompressed) {
 		return h, nil, pos, fmt.Errorf("%w: decoded size %d != header.uncompressed %d", errCorrupt, len(decoded), h.uncompressed)

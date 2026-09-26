@@ -27,7 +27,10 @@ type Codec interface {
 	// Encode appends the compressed form of src to dst.
 	Encode(dst, src []byte) []byte
 	// Decode appends the decompressed form of src to dst.
-	// dstSizeHint, when > 0, is the expected uncompressed size.
+	// dstSizeHint, when > 0, is the expected uncompressed size. The
+	// returned slice belongs to the caller: an implementation must not
+	// retain or later reuse it (or dst), because the storage layer keeps
+	// slices of it as cached records.
 	Decode(dst, src []byte, dstSizeHint int) ([]byte, error)
 }
 
