@@ -31,6 +31,33 @@ const maxRetainedWriteBuffer = 256 << 10
 // the connection should be probed.
 var errFallbackReplyTimeout = fmt.Errorf("reply wait fell back to client timeout: %w", context.DeadlineExceeded)
 
+// errRequestTimeout ends a request whose own budget ran out (see
+// QUICFrameClient.RequestOnLaneTimeout). Like an expired context deadline
+// it unwraps to context.DeadlineExceeded; it is deliberately not
+// errFallbackReplyTimeout, which is reserved for callers without a
+// deadline.
+var errRequestTimeout = fmt.Errorf("cluster rpc request timed out: %w", context.DeadlineExceeded)
+
+// timerPool recycles the timers that bound reply and queue waits, so a
+// request carrying a timeout does not allocate one. Reuse is safe: since
+// Go 1.23 (this module's language version), Stop and Reset guarantee
+// that no value from before the call is received from the channel
+// afterwards.
+var timerPool sync.Pool
+
+func getTimer(d time.Duration) *time.Timer {
+	if t, ok := timerPool.Get().(*time.Timer); ok {
+		t.Reset(d)
+		return t
+	}
+	return time.NewTimer(d)
+}
+
+func putTimer(t *time.Timer) {
+	t.Stop()
+	timerPool.Put(t)
+}
+
 // streamErrorCodeAborted is the application-level QUIC stream error code
 // this transport uses when it abandons a stream.
 const streamErrorCodeAborted quic.StreamErrorCode = 1
@@ -108,50 +135,85 @@ type streamResult struct {
 // frame (correlated by RequestID). This is the generic cluster-RPC
 // transport primitive used by the peer client.
 func (c *streamClient) requestFrame(ctx context.Context, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
+	frame, _, err := c.roundTrip(ctx, time.Time{}, frameType, payload)
+	return frame, err
+}
+
+// roundTrip is requestFrame with an optional deadline of the caller's
+// own (zero for none), enforced alongside ctx: whichever is earlier ends
+// the request, the caller's own with errRequestTimeout. timedOut reports
+// that the request ended because a deadline passed (ctx's, the caller's
+// own or the client's fallback timeout), not on a cancellation or a
+// stream failure.
+func (c *streamClient) roundTrip(ctx context.Context, deadline time.Time, frameType clusterwire.StreamFrameType, payload []byte) (frame clusterwire.StreamFrame, timedOut bool, err error) {
 	// A caller whose context has already ended fails without touching
 	// the shared stream: nothing registered, nothing written.
 	if err := ctx.Err(); err != nil {
-		return clusterwire.StreamFrame{}, err
+		return clusterwire.StreamFrame{}, errors.Is(err, context.DeadlineExceeded), err
 	}
+	// limit is when the request must end; own marks it as the caller's
+	// deadline rather than ctx's. ctx.Done() already fires at ctx's, the
+	// caller's own needs a timer.
+	limit, hasLimit := ctx.Deadline()
+	own := !deadline.IsZero() && (!hasLimit || deadline.Before(limit))
+	if own {
+		limit, hasLimit = deadline, true
+	}
+
 	requestID := c.nextID.Add(1)
 	resultCh := make(chan streamResult, 1)
 	c.addPending(requestID, resultCh)
-	if err := c.writeFrame(ctx, clusterwire.StreamFrame{
+	if err := c.writeFrame(ctx, limit, own, clusterwire.StreamFrame{
 		Type:      frameType,
 		RequestID: requestID,
 		Payload:   payload,
 	}); err != nil {
 		c.removePending(requestID)
-		return clusterwire.StreamFrame{}, err
+		return clusterwire.StreamFrame{}, errors.Is(err, context.DeadlineExceeded), err
 	}
 
-	// A caller without a deadline must not block forever on a peer that
-	// accepted the frame but never replies: fall back to the configured
-	// client timeout for the reply wait. Callers with legitimately longer
-	// waits (e.g. long-poll consume forwards) pass an explicit deadline.
+	var (
+		timer      *time.Timer
+		timeoutErr error
+	)
+	switch {
+	case own:
+		timer = getTimer(time.Until(limit))
+		timeoutErr = errRequestTimeout
+	case !hasLimit && c.timeout > 0:
+		// A caller without a deadline must not block forever on a peer
+		// that accepted the frame but never replies: fall back to the
+		// configured client timeout for the reply wait. Callers with
+		// legitimately longer waits (e.g. long-poll consume forwards)
+		// pass an explicit deadline.
+		timer = getTimer(c.timeout)
+	}
 	var timeoutCh <-chan time.Time
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline && c.timeout > 0 {
-		timer := time.NewTimer(c.timeout)
-		defer timer.Stop()
+	if timer != nil {
+		defer putTimer(timer)
 		timeoutCh = timer.C
 	}
 	select {
 	case result := <-resultCh:
-		return result.frame, result.err
+		return result.frame, false, result.err
 	case <-timeoutCh:
 		// The stream stays open: a slow handler is not a dead peer, and
 		// unrelated in-flight RPCs share it. The pool decides whether to
 		// probe the connection (see quicClientPool.probeAfterTimeout).
 		c.removePending(requestID)
 		c.sendCancel(requestID)
-		return clusterwire.StreamFrame{}, fmt.Errorf("cluster rpc reply timed out after %s: %w", c.timeout, errFallbackReplyTimeout)
+		if timeoutErr == nil {
+			timeoutErr = fmt.Errorf("cluster rpc reply timed out after %s: %w", c.timeout, errFallbackReplyTimeout)
+		}
+		return clusterwire.StreamFrame{}, true, timeoutErr
 	case <-ctx.Done():
 		// Drop only this request's waiter: the stream is multiplexed and
 		// unrelated in-flight RPCs must keep it. The reader discards the
 		// late reply for this RequestID (complete finds no pending entry).
 		c.removePending(requestID)
 		c.sendCancel(requestID)
-		return clusterwire.StreamFrame{}, ctx.Err()
+		err := ctx.Err()
+		return clusterwire.StreamFrame{}, errors.Is(err, context.DeadlineExceeded), err
 	}
 }
 
@@ -177,8 +239,8 @@ func (c *streamClient) sendCancel(requestID uint64) {
 	default:
 	}
 	go func() {
-		timer := time.NewTimer(cancelFrameWriteTimeout)
-		defer timer.Stop()
+		timer := getTimer(cancelFrameWriteTimeout)
+		defer putTimer(timer)
 		select {
 		case c.writeSem <- struct{}{}:
 			c.writeCancel(frame)
@@ -216,11 +278,11 @@ func (c *streamClient) complete(requestID uint64, result streamResult) {
 	ch <- result
 }
 
-// writeFrame writes one frame, bounded by ctx's deadline (the client
-// timeout when it has none). Frames go out one at a time; a caller whose
-// context ends while it waits its turn gives up with the context's
-// error, having written nothing.
-func (c *streamClient) writeFrame(ctx context.Context, frame clusterwire.StreamFrame) error {
+// writeFrame writes one frame, bounded by limit (see roundTrip; the
+// client timeout when limit is zero). Frames go out one at a time; a
+// caller whose context ends while it waits its turn, or whose own
+// deadline (own) passes, gives up having written nothing.
+func (c *streamClient) writeFrame(ctx context.Context, limit time.Time, own bool, frame clusterwire.StreamFrame) error {
 	if c.isClosed() {
 		return c.closeError()
 	}
@@ -228,37 +290,57 @@ func (c *streamClient) writeFrame(ctx context.Context, frame clusterwire.StreamF
 		// Refused before a byte is written: the stream is untouched.
 		return fmt.Errorf("stream frame payload too large: %d bytes", len(frame.Payload))
 	}
-	if err := c.lockWrite(ctx); err != nil {
+	var until time.Time
+	if own {
+		until = limit
+	}
+	if err := c.lockWrite(ctx, until); err != nil {
 		return err
 	}
 	defer c.unlockWrite()
 
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(c.timeout)
+	writeDeadline := limit
+	if writeDeadline.IsZero() {
+		writeDeadline = time.Now().Add(c.timeout)
 	}
-	err := c.writeLocked(deadline, frame)
-	if ok && err != nil && !c.isClosed() {
-		// The caller's own deadline cut the write off before any of the
-		// frame went out: report it as the context's.
+	err := c.writeLocked(writeDeadline, frame)
+	if err == nil || c.isClosed() {
+		return err
+	}
+	// writeLocked leaves the stream open only when the write timed out
+	// before any of the frame went out; report whose deadline that was.
+	switch {
+	case own:
+		return errRequestTimeout
+	case !limit.IsZero():
 		return context.DeadlineExceeded
+	default:
+		return fmt.Errorf("cluster rpc write stalled for %s: %w", c.timeout, context.DeadlineExceeded)
 	}
-	return err
 }
 
-// lockWrite takes the write slot, or returns ctx's error if ctx ends
-// first. The uncontended case is a single non-blocking send.
-func (c *streamClient) lockWrite(ctx context.Context) error {
+// lockWrite takes the write slot, or gives up with ctx's error if ctx
+// ends first, or with errRequestTimeout at until when it is set. The
+// uncontended case is a single non-blocking send.
+func (c *streamClient) lockWrite(ctx context.Context, until time.Time) error {
 	select {
 	case c.writeSem <- struct{}{}:
 		return nil
 	default:
+	}
+	var timeoutCh <-chan time.Time
+	if !until.IsZero() {
+		timer := getTimer(time.Until(until))
+		defer putTimer(timer)
+		timeoutCh = timer.C
 	}
 	select {
 	case c.writeSem <- struct{}{}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-timeoutCh:
+		return errRequestTimeout
 	}
 }
 

@@ -190,6 +190,17 @@ func newQUICClientPool(timeout time.Duration, secret string, allowLegacy bool) *
 }
 
 func (p *quicClientPool) request(ctx context.Context, addr string, lane Lane, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
+	return p.requestWithin(ctx, addr, lane, 0, frameType, payload)
+}
+
+// requestWithin is request with a budget of the caller's own: a positive
+// timeout bounds the whole call, the wait for a dial or stream open
+// included, alongside ctx (see QUICFrameClient.RequestOnLaneTimeout).
+func (p *quicClientPool) requestWithin(ctx context.Context, addr string, lane Lane, timeout time.Duration, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
 	lane = lane.normalize()
 	key := streamKey{
 		addr:  quicAddr(addr),
@@ -204,13 +215,13 @@ func (p *quicClientPool) request(ctx context.Context, addr string, lane Lane, fr
 	p.mu.Unlock()
 	if ps == nil || ps.client.isClosed() {
 		var err error
-		ps, err = p.stream(ctx, key)
+		ps, err = p.stream(ctx, deadline, key)
 		if err != nil {
 			return clusterwire.StreamFrame{}, err
 		}
 	}
 
-	frame, err := ps.client.requestFrame(ctx, frameType, payload)
+	frame, _, err := ps.client.roundTrip(ctx, deadline, frameType, payload)
 	if err != nil {
 		switch {
 		case ps.client.isClosed():
@@ -246,8 +257,10 @@ func (p *quicClientPool) probeAfterTimeout(key streamKey, ps *pooledStream) {
 // caller that is cancelled or runs out of time fails alone. Were the open
 // run under the caller's context, its cancellation would look like a dead
 // connection and take every stream on it down (see openStream). A caller
-// whose context has already ended does not start an open at all.
-func (p *quicClientPool) stream(ctx context.Context, key streamKey) (*pooledStream, error) {
+// whose context has already ended does not start an open at all. A
+// non-zero deadline is the caller's own budget (see requestWithin): the
+// caller stops waiting there with errRequestTimeout.
+func (p *quicClientPool) stream(ctx context.Context, deadline time.Time, key streamKey) (*pooledStream, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -267,11 +280,19 @@ func (p *quicClientPool) stream(ctx context.Context, key streamKey) (*pooledStre
 		go p.openShared(key, call)
 	}
 	p.mu.Unlock()
+	var timeoutCh <-chan time.Time
+	if !deadline.IsZero() {
+		timer := getTimer(time.Until(deadline))
+		defer putTimer(timer)
+		timeoutCh = timer.C
+	}
 	select {
 	case <-call.done:
 		return call.ps, call.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	case <-timeoutCh:
+		return nil, errRequestTimeout
 	}
 }
 
