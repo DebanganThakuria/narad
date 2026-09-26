@@ -120,6 +120,7 @@ type dialFailure struct {
 // all traffic.
 type quicClientPool struct {
 	timeout     time.Duration
+	dialTimeout time.Duration
 	pingTimeout time.Duration
 	secret      string
 	// allowLegacy lets this client fall back to the fixed-token
@@ -131,6 +132,13 @@ type quicClientPool struct {
 	dial func(ctx context.Context, addr string) (poolConn, error)
 	now  func() time.Time
 
+	// ctx is the pool's own context, cancelled by close. Shared work that
+	// many callers wait on (dials) runs under it rather than under any one
+	// caller's context, so one caller giving up cannot fail it for the
+	// rest.
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	nextShard atomic.Uint64
 
 	mu       sync.Mutex
@@ -141,20 +149,21 @@ type quicClientPool struct {
 	closed   bool
 
 	// transport is the client-side QUIC transport: one UDP socket for
-	// every outgoing connection, created on first dial. It carries the
-	// stateless reset key so peers can recognise this node's resets.
-	transportOnce sync.Once
+	// every outgoing connection, created on first dial under mu. It
+	// carries the stateless reset key so peers can recognise this node's
+	// resets.
 	transport     *quic.Transport
 	transportConn *net.UDPConn
-	transportErr  error
 }
 
 func newQUICClientPool(timeout time.Duration, secret string, allowLegacy bool) *quicClientPool {
 	if timeout <= 0 {
 		timeout = defaultStreamTimeout
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	p := &quicClientPool{
 		timeout:     timeout,
+		dialTimeout: quicDialTimeout,
 		pingTimeout: quicStreamPingTimeout,
 		secret:      secret,
 		allowLegacy: allowLegacy,
@@ -163,6 +172,8 @@ func newQUICClientPool(timeout time.Duration, secret string, allowLegacy bool) *
 		streams:     make(map[streamKey]*pooledStream),
 		dialing:     make(map[string]*dialCall),
 		dialFail:    make(map[string]dialFailure),
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 	p.dial = p.dialQUIC
 	return p
@@ -304,10 +315,17 @@ func (p *quicClientPool) authenticateStream(ctx context.Context, conn poolConn, 
 }
 
 // getConn returns the pooled connection for addr, dialing when there is
-// none. Concurrent callers share one dial (singleflight); after a failed
-// dial, callers fail fast with the cached error until the backoff
-// window elapses.
+// none. Concurrent callers share one dial (singleflight). The dial runs
+// on its own goroutine under the pool's context and dial timeout, never
+// under a caller's: every caller, the first included, waits for it or
+// for its own context, so a caller that gives up (or arrives already
+// cancelled) fails alone and cannot make the others fail or arm the
+// backoff with its cancellation. After a failed dial, callers fail fast
+// with the cached error until the backoff window elapses.
 func (p *quicClientPool) getConn(ctx context.Context, addr string) (poolConn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -321,31 +339,39 @@ func (p *quicClientPool) getConn(ctx context.Context, addr string) (poolConn, er
 		p.mu.Unlock()
 		return nil, fmt.Errorf("quic dial %s backing off (%s): %w", addr, failure.backoff, failure.err)
 	}
-	if call := p.dialing[addr]; call != nil {
-		p.mu.Unlock()
-		select {
-		case <-call.done:
-			return call.conn, call.err
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	call := p.dialing[addr]
+	if call == nil {
+		call = &dialCall{done: make(chan struct{})}
+		p.dialing[addr] = call
+		go p.dialShared(addr, call)
 	}
-	call := &dialCall{done: make(chan struct{})}
-	p.dialing[addr] = call
 	p.mu.Unlock()
+	select {
+	case <-call.done:
+		return call.conn, call.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 
-	conn, err := p.dialConn(ctx, addr)
+// dialShared runs the one dial to addr that getConn's callers wait on
+// and publishes its outcome to them. No caller's context reaches it, so
+// any failure, a timeout included, is the peer's and arms the backoff.
+func (p *quicClientPool) dialShared(addr string, call *dialCall) {
+	dialCtx, cancel := context.WithTimeout(p.ctx, p.dialTimeout)
+	conn, err := p.dial(dialCtx, addr)
+	cancel()
 
 	p.mu.Lock()
 	delete(p.dialing, addr)
 	var orphan poolConn
 	switch {
-	case err != nil:
-		p.recordDialFailure(addr, err)
 	case p.closed:
 		// The pool closed while we were dialing; the connection has no
 		// home. Fail the waiters and drop it once the lock is released.
 		orphan, conn, err = conn, nil, errPoolClosed
+	case err != nil:
+		p.recordDialFailure(addr, err)
 	default:
 		delete(p.dialFail, addr)
 		p.conns[addr] = conn
@@ -357,7 +383,6 @@ func (p *quicClientPool) getConn(ctx context.Context, addr string) (poolConn, er
 	if orphan != nil {
 		orphan.close(errPoolClosed)
 	}
-	return conn, err
 }
 
 var errPoolClosed = errors.New("quic client pool closed")
@@ -374,12 +399,6 @@ func (p *quicClientPool) recordDialFailure(addr string, err error) {
 	failure.err = err
 	failure.until = p.now().Add(failure.backoff)
 	p.dialFail[addr] = failure
-}
-
-func (p *quicClientPool) dialConn(ctx context.Context, addr string) (poolConn, error) {
-	dialCtx, cancel := p.dialContext(ctx)
-	defer cancel()
-	return p.dial(dialCtx, addr)
 }
 
 // watchConn evicts conn from the pool as soon as it dies, so a stateless
@@ -410,21 +429,27 @@ func (p *quicClientPool) dialQUIC(ctx context.Context, addr string) (poolConn, e
 
 // clientTransport lazily creates the pool's QUIC transport. It binds one
 // wildcard UDP socket (the same choice quic.DialAddr makes) and carries
-// the stateless reset key derived from the cluster secret.
+// the stateless reset key derived from the cluster secret. Creation is
+// under mu so a dial still running when the pool closes cannot create a
+// transport that close has already passed over.
 func (p *quicClientPool) clientTransport() (*quic.Transport, error) {
-	p.transportOnce.Do(func() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil, errPoolClosed
+	}
+	if p.transport == nil {
 		udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 		if err != nil {
-			p.transportErr = err
-			return
+			return nil, err
 		}
 		p.transportConn = udpConn
 		p.transport = &quic.Transport{
 			Conn:              udpConn,
 			StatelessResetKey: statelessResetKey(p.secret),
 		}
-	})
-	return p.transport, p.transportErr
+	}
+	return p.transport, nil
 }
 
 // closeConn removes the connection and every stream client pooled on it,
@@ -468,17 +493,19 @@ func (p *quicClientPool) close() error {
 		return nil
 	}
 	p.closed = true
+	p.cancel()
 	conns := p.conns
 	p.conns = make(map[string]poolConn)
+	tr, trConn := p.transport, p.transportConn
 	p.mu.Unlock()
 
 	for addr, conn := range conns {
 		p.closeConn(addr, conn, errPoolClosed)
 	}
 	var err error
-	if p.transport != nil {
-		err = p.transport.Close()
-		if closeErr := p.transportConn.Close(); err == nil {
+	if tr != nil {
+		err = tr.Close()
+		if closeErr := trConn.Close(); err == nil {
 			err = closeErr
 		}
 	}
@@ -492,13 +519,6 @@ func (p *quicClientPool) operationContext(ctx context.Context) (context.Context,
 		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, p.timeout)
-}
-
-func (p *quicClientPool) dialContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= quicDialTimeout {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, quicDialTimeout)
 }
 
 // quicAddr normalizes an address that may have been copied from an HTTP
