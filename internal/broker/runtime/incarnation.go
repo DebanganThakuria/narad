@@ -89,13 +89,14 @@ func (g *Logs) SetTopicRetiredHook(fn func(topicName string)) {
 	g.retired = fn
 }
 
-// ensureIncarnationLocked makes topics/<name> the directory of the
+// ensureIncarnationGuarded makes topics/<name> the directory of the
 // incarnation id before a partition log is opened in it, and reports
 // whether a directory of another incarnation was quarantined doing so
-// (the caller runs the retired hook once it has released mu). Caller
-// holds the topic's guard and mu (write). An empty id is a record
-// without an incarnation: the directory is used as-is.
-func (g *Logs) ensureIncarnationLocked(topicName, id string) (quarantined bool, err error) {
+// (the caller runs the retired hook). Caller holds the topic's guard and
+// not mu: the marker read, the quarantine rename and the marker write
+// are file I/O that must not stall other topics. An empty id is a
+// record without an incarnation: the directory is used as-is.
+func (g *Logs) ensureIncarnationGuarded(topicName, id string) (quarantined bool, err error) {
 	if id == "" {
 		return false, nil
 	}
@@ -114,7 +115,7 @@ func (g *Logs) ensureIncarnationLocked(topicName, id string) (quarantined bool, 
 		// topic under the current incarnation), set the directory
 		// aside for the sweep, and start the current incarnation from
 		// an empty directory.
-		if err := g.closeTopicLocked(topicName); err != nil {
+		if err := g.closeTopicGuarded(topicName); err != nil {
 			return false, fmt.Errorf("broker/runtime: close stale incarnation of %s: %w", topicName, err)
 		}
 		setAside, err := storage.QuarantineTopicDir(g.dataDir, topicName, marker)
@@ -134,7 +135,7 @@ func (g *Logs) ensureIncarnationLocked(topicName, id string) (quarantined bool, 
 }
 
 // notifyRetired runs the retired hook. Callers hold the topic's guard
-// and have released mu.
+// and not mu.
 func (g *Logs) notifyRetired(topicName string) {
 	if g.retired != nil {
 		g.retired(topicName)
@@ -149,9 +150,7 @@ func (g *Logs) notifyRetired(topicName string) {
 func (g *Logs) EnsureTopicIncarnation(topicName, id string) error {
 	unlock := g.lockTopic(topicName)
 	defer unlock()
-	g.mu.Lock()
-	quarantined, err := g.ensureIncarnationLocked(topicName, id)
-	g.mu.Unlock()
+	quarantined, err := g.ensureIncarnationGuarded(topicName, id)
 	if quarantined {
 		g.notifyRetired(topicName)
 	}

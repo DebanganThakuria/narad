@@ -190,7 +190,7 @@ func (g *Logs) DataDir() string { return g.dataDir }
 // incarnation: the topic directory's marker is compared with the
 // metastore record's ID, and a directory left behind by a deleted
 // same-named topic is quarantined instead of served (see
-// ensureIncarnationLocked). An already-open log is re-checked whenever
+// ensureIncarnationGuarded). An already-open log is re-checked whenever
 // the topic's metadata version moves, so a delete plus recreate applied
 // while the log was open retires it rather than serving the old data.
 func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
@@ -206,9 +206,7 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 
 	unlock := g.lockTopic(topicName)
 	defer unlock()
-	g.mu.Lock()
-	l, quarantined, err := g.openLocked(topicName, idx, key)
-	g.mu.Unlock()
+	l, _, quarantined, err := g.openGuarded(topicName, idx, false)
 	if quarantined {
 		// A deleted incarnation's directory was set aside: drop the
 		// in-memory state that belonged to it (outside mu, under the
@@ -218,11 +216,19 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 	return l, err
 }
 
-// openLocked is Get's slow path: re-validate or open the (topic, idx)
-// log under the current incarnation. Caller holds the topic's guard and
-// mu (write). quarantined reports that a directory of another
-// incarnation was set aside on the way.
-func (g *Logs) openLocked(topicName string, idx int, key logKey) (l *storage.Log, quarantined bool, err error) {
+// openGuarded is Get's slow path: re-validate or open the (topic, idx)
+// log under the current incarnation, and return it with its entry.
+// Caller holds the topic's guard and not mu. The metastore lookup, the
+// incarnation check and storage.NewLog, whose recovery reads every
+// retained segment of the partition, all run under the guard alone:
+// they stall only callers that need this topic's slow path, never the
+// fast path of every Get on the node. Only this topic's guard holders
+// add or drop its entries, so the entry found here stays put until the
+// new one is installed under mu. walk marks a newly installed entry as
+// the cold-retention walk's (see openForWalk) in the same critical
+// section. quarantined reports that a directory of another incarnation
+// was set aside on the way.
+func (g *Logs) openGuarded(topicName string, idx int, walk bool) (l *storage.Log, entry *logEntry, quarantined bool, err error) {
 	var version uint64
 	if g.versions != nil {
 		// Read the version BEFORE the record: a change that lands
@@ -245,27 +251,31 @@ func (g *Logs) openLocked(topicName string, idx int, key logKey) (l *storage.Log
 			// after the topic's files were purged. The delete path waits
 			// for the local replica to reflect the deletion before
 			// purging, so by purge time this branch is authoritative.
-			return nil, false, errs.ErrTopicNotFound
+			return nil, nil, false, errs.ErrTopicNotFound
 		default:
-			return nil, false, fmt.Errorf("broker/runtime: lookup topic for retention: %w", err)
+			return nil, nil, false, fmt.Errorf("broker/runtime: lookup topic for retention: %w", err)
 		}
 	}
-	if e, ok := g.logs[key]; ok {
+	key := keyOf(topicName, idx)
+	g.mu.RLock()
+	e, open := g.logs[key]
+	g.mu.RUnlock()
+	if open {
 		if e.incarnation == incarnation {
 			// The record changed (an alter, or a version bump) but the
 			// incarnation did not: the open log is still the right one.
 			e.version.Store(version)
 			e.stamp()
-			return e.log, false, nil
+			return e.log, e, false, nil
 		}
 		// The topic was deleted and recreated while its logs were
 		// open: every open log under the name belongs to the old
 		// incarnation and must go before the directory is checked.
-		g.closeTopicLocked(topicName)
+		_ = g.closeTopicGuarded(topicName)
 	}
-	quarantined, err = g.ensureIncarnationLocked(topicName, incarnation)
+	quarantined, err = g.ensureIncarnationGuarded(topicName, incarnation)
 	if err != nil {
-		return nil, quarantined, err
+		return nil, nil, quarantined, err
 	}
 	if g.metrics != nil {
 		opts.Metrics = g.metrics.StorageRecorder(topicName, idx)
@@ -274,16 +284,19 @@ func (g *Logs) openLocked(topicName string, idx int, key logKey) (l *storage.Log
 	partitionDir := storage.TopicPartitionDir(g.dataDir, topicName, idx)
 	l, err = storage.NewLog(partitionDir, opts)
 	if err != nil {
-		return nil, quarantined, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)
+		return nil, nil, quarantined, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)
 	}
-	e := &logEntry{log: l, incarnation: incarnation}
+	e = &logEntry{log: l, incarnation: incarnation}
 	e.version.Store(version)
-	e.stamp()
+	e.lastAccess.Store(time.Now().UnixNano())
+	e.walkOwned.Store(walk)
+	g.mu.Lock()
 	g.logs[key] = e
 	if g.opened != nil {
 		g.opened(topicName, idx, l)
 	}
-	return l, quarantined, nil
+	g.mu.Unlock()
+	return l, e, quarantined, nil
 }
 
 // SetOpened registers a hook invoked with every partition log just
@@ -455,14 +468,22 @@ func (g *Logs) onlyOpenLocked(topicName string, idxs []int) bool {
 	return true
 }
 
-// openTopics returns the names of the topics with an open log, sorted.
+// openTopics returns the names of the topics with an open log or a
+// guard holder, sorted. A guard holder may be an open in progress (a
+// NewLog under the guard alone), which CloseAll must wait for and close
+// rather than leave to install its log after shutdown closed the rest.
 func (g *Logs) openTopics() []string {
-	g.mu.RLock()
 	seen := make(map[string]struct{})
+	g.mu.RLock()
 	for k := range g.logs {
 		seen[k.topic] = struct{}{}
 	}
 	g.mu.RUnlock()
+	g.guardMu.Lock()
+	for name := range g.guards {
+		seen[name] = struct{}{}
+	}
+	g.guardMu.Unlock()
 	names := make([]string, 0, len(seen))
 	for name := range seen {
 		names = append(names, name)
@@ -528,23 +549,6 @@ func (g *Logs) closeTopicGuarded(topicName string) error {
 	claimed := g.claimTopicLocked(topicName)
 	g.mu.Unlock()
 	return g.closeClaimed(claimed)
-}
-
-// closeTopicLocked closes and drops every open log under topicName.
-// Caller holds the topic's guard and mu (write); only the open path,
-// which retires a replaced incarnation's logs, still closes under mu.
-func (g *Logs) closeTopicLocked(topicName string) error {
-	var firstErr error
-	for k, e := range g.logs {
-		if k.topic != topicName {
-			continue
-		}
-		if err := e.log.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		delete(g.logs, k)
-	}
-	return firstErr
 }
 
 // retentionFromTopic folds a topic's retention into storage options.

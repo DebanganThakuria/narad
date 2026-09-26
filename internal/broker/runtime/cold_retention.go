@@ -44,11 +44,12 @@ import (
 )
 
 // coldWalkPause is the gap between two partitions the walk opens. Opening
-// goes through the registry's slow path, which holds the global log
-// lock while the segment tail is recovered, so a backlog of thousands of
-// due partitions (every one is due after a restart) must not be opened
-// back to back: the pause keeps the walk to at most ~100 opens a second
-// and lets produce and consume through between them.
+// goes through the registry's slow path, which holds the topic's guard
+// while the partition is recovered (every retained segment is read), so
+// a backlog of thousands of due partitions (every one is due after a
+// restart) must not be opened back to back: the pause keeps the walk to
+// at most ~100 opens a second and to a share of the disk, and lets the
+// topic's own opens and closes through between them.
 const coldWalkPause = 10 * time.Millisecond
 
 // ReaperRestarts reports how many times the process-wide retention loop
@@ -206,7 +207,8 @@ func (g *Logs) coldRetentionTopic(ctx context.Context, topicDir, topicName strin
 		}
 		// Pace the opens: at least coldWalkPause, and no faster than one
 		// open per open-duration, so a partition with a large tail to
-		// recover cannot make the walk hold the global lock back to back.
+		// recover cannot make the walk hold the topic's guard back to
+		// back.
 		pause := max(coldWalkPause, time.Since(opened))
 		select {
 		case <-ctx.Done():
@@ -349,31 +351,19 @@ var errColdWalkRaced = errors.New("cold retention: partition opened by someone e
 // end of the sweep only happens while the flag is still set. An entry
 // that already exists is left alone with errColdWalkRaced.
 func (g *Logs) openForWalk(topicName string, idx int) (*storage.Log, *logEntry, error) {
-	key := keyOf(topicName, idx)
 	unlock := g.lockTopic(topicName)
 	defer unlock()
-	g.mu.Lock()
-	if _, open := g.logs[key]; open {
-		g.mu.Unlock()
+	if g.isOpen(keyOf(topicName, idx)) {
 		return nil, nil, errColdWalkRaced
 	}
-	l, quarantined, err := g.openLocked(topicName, idx, key)
-	var entry *logEntry
-	if err == nil {
-		entry = g.logs[key]
-		if entry != nil {
-			entry.walkOwned.Store(true)
-		}
-	}
-	g.mu.Unlock()
+	// Nothing else can open the partition while the guard is held, so
+	// the entry openGuarded returns is the one it installed for the walk.
+	l, entry, quarantined, err := g.openGuarded(topicName, idx, true)
 	if quarantined {
 		g.notifyRetired(topicName)
 	}
 	if err != nil {
 		return nil, nil, err
-	}
-	if entry == nil {
-		return nil, nil, errColdWalkRaced
 	}
 	return l, entry, nil
 }
