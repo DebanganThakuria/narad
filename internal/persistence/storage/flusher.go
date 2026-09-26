@@ -474,8 +474,13 @@ func (f *flusher) drainOnce(forceSync, forceDrain bool, commit *commitRequest) e
 	return f.log.syncHighWatermark(f.hwmForce)
 }
 
-// rollIfPending seals a full active segment outside any commit's
-// critical path. Errors are logged, not returned: see drainOnce.
+// rollIfPending seals a full active segment once the commit that filled
+// it is durable and visible, so a failed commit never has to truncate a
+// sealed segment. It is not off that commit's latency path: it runs
+// before the commit's reply, and roll creates the next segment (a file
+// create and a directory fsync) under the Log's write lock, which also
+// holds off every reader of the partition. That is once per SegmentBytes
+// written. Errors are logged, not returned: see drainOnce.
 func (f *flusher) rollIfPending() {
 	f.mu.RLock()
 	pending := f.rollPending
