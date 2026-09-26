@@ -47,14 +47,14 @@ type cached[V any] struct {
 // stale entry so the next lookup doesn't keep serving a value for a
 // key that now fails to load.
 //
-// forgets is the engine's ForgetTopic counter, bumped under mu. A load
-// that overlapped a forget still returns its value but does not cache
-// it, so a request racing a topic delete cannot put back an entry the
-// delete just dropped.
+// fence, when non-nil, records the forgets of the cache's keys (it is
+// written under mu). A load that overlapped a forget of its own key
+// still returns its value but does not cache it, so a request racing a
+// topic delete cannot put back an entry the delete just dropped.
 func lookupCached[V any](
 	mu *sync.RWMutex,
 	cache map[string]cached[V],
-	forgets *atomic.Uint64,
+	fence *forgetFence,
 	key string,
 	version uint64,
 	currentVersion func() uint64,
@@ -74,7 +74,7 @@ func lookupCached[V any](
 			continue
 		}
 
-		epoch := forgets.Load()
+		token := fence.begin()
 		value, err := load()
 		if current := currentVersion(); current != version {
 			version = current
@@ -91,12 +91,84 @@ func lookupCached[V any](
 		}
 
 		mu.Lock()
-		if forgets.Load() == epoch {
+		if fence.clean(key, token) {
 			cache[key] = cached[V]{value: value, version: version}
 		}
 		mu.Unlock()
 		return value, nil
 	}
+}
+
+// fenceWindow is how many of the latest forgets a forgetFence remembers.
+const fenceWindow = 256
+
+// forgetFence tells a cache load whether a forget of its own key landed
+// while it ran. It numbers the forgets and remembers the keys of the
+// latest fenceWindow of them; a load notes the count when it begins
+// and, before storing, looks for its key among the forgets numbered
+// since. So a forget of one topic never fences a load of another: the
+// engine-wide counter this replaces fenced every load in flight on any
+// forget, which let a churn of deletes of other topics keep a topic's
+// schema flight redoing its load, and every produce waiting on it
+// blocked, for as long as the churn lasted. Its size is fixed, however
+// many names are forgotten.
+//
+// A load that more than fenceWindow forgets overlapped sees only the
+// latest of them and is clean if its key is not among those. Both
+// users stay correct when that happens, at the cost of the fence's
+// tidiness only: lookupCached stores only a value whose version did not
+// move during the load, so the worst it can put back is an entry a
+// delete dropped, which the delete's version bump keeps from ever being
+// served; and a schema marker stored over a registry that lost the
+// topic's schemas meanwhile is reloaded by validateProducePayload.
+//
+// forget and clean run under the fenced cache's write lock, which
+// orders them, so a forget cannot land between a load's check and its
+// store; begin is one atomic load.
+type forgetFence struct {
+	count atomic.Uint64
+	// keys[n%fenceWindow] is forget n's key; allocated by the first
+	// forget, so an engine that never forgets does not carry it.
+	keys *[fenceWindow]string
+}
+
+// begin returns the token a load hands to clean. A nil fence fences
+// nothing.
+func (f *forgetFence) begin() uint64 {
+	if f == nil {
+		return 0
+	}
+	return f.count.Load()
+}
+
+// clean reports whether no forget of key is known to have landed since
+// the load that got token began. The caller holds the cache's write
+// lock and stores the load's value under it.
+func (f *forgetFence) clean(key string, token uint64) bool {
+	if f == nil {
+		return true
+	}
+	n := f.count.Load()
+	if n-token > fenceWindow {
+		token = n - fenceWindow
+	}
+	for ; n > token; n-- {
+		if f.keys[n%fenceWindow] == key {
+			return false
+		}
+	}
+	return true
+}
+
+// forget records a forget of key. The caller holds the cache's write
+// lock and drops key's entry under it.
+func (f *forgetFence) forget(key string) {
+	if f.keys == nil {
+		f.keys = new([fenceWindow]string)
+	}
+	n := f.count.Load() + 1
+	f.keys[n%fenceWindow] = key
+	f.count.Store(n)
 }
 
 // ForgetTopic drops every cached view this engine holds of topicName:
@@ -108,7 +180,7 @@ func lookupCached[V any](
 // live same-named successor only costs a reload.
 func (e *Engine) ForgetTopic(topicName string) {
 	e.cacheMu.Lock()
-	e.cacheForgets.Add(1)
+	e.cacheForgets.forget(topicName)
 	delete(e.topicCache, topicName)
 	delete(e.assignmentCache, topicName)
 	delete(e.schemaLoadCache, topicName)
@@ -120,7 +192,7 @@ func (e *Engine) ForgetTopic(topicName string) {
 // sync reloads the registry.
 func (e *Engine) forgetSchemaLoad(topicName string) {
 	e.cacheMu.Lock()
-	e.cacheForgets.Add(1)
+	e.cacheForgets.forget(topicName)
 	delete(e.schemaLoadCache, topicName)
 	e.cacheMu.Unlock()
 }
@@ -283,7 +355,7 @@ func (e *Engine) getRoutingMember(id string) (routingMember, error) {
 	if !versioned {
 		return loadRoutingMember(assignments, id)
 	}
-	return lookupCached(&e.cacheMu, e.memberCache, &e.cacheForgets, id, version,
+	return lookupCached(&e.cacheMu, e.memberCache, nil, id, version,
 		func() uint64 { v, _ := e.routingMembersVersion(); return v },
 		func() (routingMember, error) { return loadRoutingMember(assignments, id) },
 		func(error) bool { return true },

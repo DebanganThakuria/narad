@@ -92,12 +92,14 @@ func (e *Engine) syncTopicSchemas(ctx context.Context, topicName string) (hasSch
 // one would otherwise leave the node validating against the older
 // schema while the cache said the newer one was loaded.
 //
-// A ForgetTopic that overlaps the load (see forgetSchemaLoad too) means
-// the registry's copy may have been dropped after this load wrote it,
-// so the load is redone before anything is recorded.
+// A forget of this topic that overlaps the load (ForgetTopic or
+// forgetSchemaLoad, both after the registry lost the topic's schemas)
+// means the registry's copy may have been dropped after this load wrote
+// it, so the load is redone before anything is recorded. Only a forget
+// of this topic does that: the fence is per topic, so deletes of other
+// topics never make a flight redo its load.
 func (e *Engine) hydrateTopicSchemas(ctx context.Context, topicName string) (schemaFlightResult, error) {
 	for {
-		forgets := e.cacheForgets.Load()
 		version, _ := e.schemaVersion(topicName)
 		e.cacheMu.RLock()
 		entry, hit := e.schemaLoadCache[topicName]
@@ -106,6 +108,7 @@ func (e *Engine) hydrateTopicSchemas(ctx context.Context, topicName string) (sch
 			// An earlier flight loaded this version already.
 			return schemaFlightResult{version: version, hasSchema: entry.value}, nil
 		}
+		token := e.cacheForgets.begin()
 		has, err := schema.Hydrate(ctx, e.metastore, e.schemas, topicName)
 		if current, _ := e.schemaVersion(topicName); current != version {
 			continue
@@ -114,7 +117,7 @@ func (e *Engine) hydrateTopicSchemas(ctx context.Context, topicName string) (sch
 			return schemaFlightResult{version: version}, err
 		}
 		e.cacheMu.Lock()
-		stored := e.cacheForgets.Load() == forgets
+		stored := e.cacheForgets.clean(topicName, token)
 		if stored {
 			e.schemaLoadCache[topicName] = cached[bool]{value: has, version: version}
 		}

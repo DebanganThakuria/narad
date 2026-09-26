@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -232,27 +231,28 @@ func TestWP4BForgetDuringSchemaLoadReloads(t *testing.T) {
 }
 
 // TestWP4BForgetDuringLookupDoesNotCache: a metadata load that
-// overlapped a ForgetTopic returns its value but does not store it.
+// overlapped a ForgetTopic of its key returns its value but does not
+// store it.
 func TestWP4BForgetDuringLookupDoesNotCache(t *testing.T) {
 	var (
-		mu      sync.RWMutex
-		forgets atomic.Uint64
+		mu    sync.RWMutex
+		fence forgetFence
 	)
 	cache := map[string]cached[int]{}
 	load := func() (int, error) {
 		mu.Lock()
-		forgets.Add(1) // a ForgetTopic landing mid-load
+		fence.forget("t") // a ForgetTopic landing mid-load
 		mu.Unlock()
 		return 7, nil
 	}
-	v, err := lookupCached(&mu, cache, &forgets, "t", 1, func() uint64 { return 1 }, load, nil)
+	v, err := lookupCached(&mu, cache, &fence, "t", 1, func() uint64 { return 1 }, load, nil)
 	if err != nil || v != 7 {
 		t.Fatalf("lookupCached = %d, %v; want 7, nil", v, err)
 	}
 	if _, ok := cache["t"]; ok {
 		t.Fatal("a load that overlapped a forget was cached")
 	}
-	v, err = lookupCached(&mu, cache, &forgets, "t", 1, func() uint64 { return 1 }, func() (int, error) { return 8, nil }, nil)
+	v, err = lookupCached(&mu, cache, &fence, "t", 1, func() uint64 { return 1 }, func() (int, error) { return 8, nil }, nil)
 	if err != nil || v != 8 {
 		t.Fatalf("lookupCached = %d, %v; want 8, nil", v, err)
 	}
