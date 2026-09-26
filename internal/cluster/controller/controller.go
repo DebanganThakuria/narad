@@ -19,8 +19,10 @@ type controllerStore interface {
 	LeaderCh() <-chan bool
 	Barrier() error
 	ListMembers() ([]metastore.Member, error)
+	RoutingMembersVersion() uint64
 	ListTopics(ctx context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error)
 	ListAssignments(topicName string) ([]metastore.Assignment, error)
+	LockAssignments() (unlock func())
 	AssignPartition(ctx context.Context, topicName string, partition int, ownerID string) error
 	SetAssignmentTarget(ctx context.Context, topicName string, partition int, targetID string) error
 	MarkMemberDead(ctx context.Context, podID string) error
@@ -50,6 +52,13 @@ type Config struct {
 	// many voters, so a decommission can never drop the cluster below a
 	// quorum-safe size. Default: 3.
 	MinVoters int
+	// MemberSettleDelay is how long the leader waits, after a member turns
+	// alive, for more members to arrive before it runs an out-of-cycle
+	// assignment and rebalance pass. It does not wait once every Raft
+	// voter is alive. Without the pass, partitions of a topic created
+	// before any member registered stayed unowned until the next
+	// ReconcileInterval tick. Default: 1s.
+	MemberSettleDelay time.Duration
 	// DeadTargetAbortAfter is how long a move's TARGET node may stay dead
 	// before the controller clears the target. Only the destination itself
 	// aborts a move, and a dead destination cannot, so without this bound
@@ -71,6 +80,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MinVoters == 0 {
 		c.MinVoters = 3
+	}
+	if c.MemberSettleDelay == 0 {
+		c.MemberSettleDelay = time.Second
 	}
 	if c.DeadTargetAbortAfter == 0 {
 		c.DeadTargetAbortAfter = 2 * time.Minute

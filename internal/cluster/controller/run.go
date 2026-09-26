@@ -67,7 +67,11 @@ func (c *Controller) startLeaderLoop(ctx context.Context) context.CancelFunc {
 
 // runAsLeader performs an immediate reconciliation then loops on a ticker
 // until ctx is cancelled (i.e. leadership is lost or node is shutting down).
+// Between ticks it also runs assignment and rebalance soon after a member
+// turns alive (see memberWatch).
 func (c *Controller) runAsLeader(ctx context.Context) {
+	watch := c.newMemberWatch()
+
 	c.reconcileAssignments(ctx)
 	c.checkHeartbeats(ctx)
 	c.reconcileRebalance(ctx)
@@ -75,6 +79,8 @@ func (c *Controller) runAsLeader(ctx context.Context) {
 
 	ticker := time.NewTicker(c.cfg.ReconcileInterval)
 	defer ticker.Stop()
+	watchTicker := time.NewTicker(memberWatchInterval)
+	defer watchTicker.Stop()
 
 	for {
 		select {
@@ -85,6 +91,11 @@ func (c *Controller) runAsLeader(ctx context.Context) {
 			c.checkHeartbeats(ctx)
 			c.reconcileRebalance(ctx)
 			c.reconcileDecommission(ctx)
+		case now := <-watchTicker.C:
+			if c.memberPassDue(watch, now) {
+				c.reconcileAssignments(ctx)
+				c.reconcileRebalance(ctx)
+			}
 		}
 	}
 }

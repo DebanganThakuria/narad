@@ -59,10 +59,17 @@ func (c *Controller) reconcileAssignments(ctx context.Context) {
 // against its parent's same-index owners (the replica pattern); child
 // partitions whose parent counterpart is still unassigned are deferred
 // to the next tick.
+//
+// The store's assignment lock is held from reading the assignments to
+// the last write, so a topic create placing the same partitions through
+// AssignNewPartitions cannot interleave with this pass and have one
+// placement overwrite the other.
 func (c *Controller) assignTopic(ctx context.Context, t topic.Topic, active []metastore.Member, partitionCounts map[string]int) {
 	if len(active) == 0 {
 		return
 	}
+	unlock := c.store.LockAssignments()
+	defer unlock()
 
 	var parentOwners map[int]string
 	var parentPartitions int
