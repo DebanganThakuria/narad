@@ -204,7 +204,7 @@ func (g *Logs) PurgeTopic(topicName, id string) (purged bool, err error) {
 		// finishes first. That commit may be inside Get waiting for the
 		// guard, which is why this runs only after the guard is
 		// released.
-		g.retireProduceEntries(func(k string) bool { return strings.HasPrefix(k, topicName+"/") })
+		g.retireProduceEntries(func(k logKey) bool { return k.topic == topicName })
 	}
 	return purged, err
 }

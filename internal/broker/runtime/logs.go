@@ -15,8 +15,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,7 +42,7 @@ type Logs struct {
 	logger   *slog.Logger
 
 	mu   sync.RWMutex
-	logs map[string]*logEntry
+	logs map[logKey]*logEntry
 
 	// guards serializes the slow path (opening a partition log, which
 	// may adopt, verify or quarantine the topic directory) against a
@@ -70,13 +68,26 @@ type Logs struct {
 	opened func(topicName string, idx int, l *storage.Log)
 
 	produceMu   sync.Mutex
-	produceSync map[string]*sync.Mutex
+	produceSync map[logKey]*sync.Mutex
 
 	// coldDefer holds partitions the cold-retention walk opened and found
-	// nothing to reap in, keyed by keyOf, with the time before which the
-	// walk leaves them alone.
+	// nothing to reap in, with the time before which the walk leaves them
+	// alone.
 	coldMu    sync.Mutex
-	coldDefer map[string]time.Time
+	coldDefer map[logKey]time.Time
+}
+
+// logKey names one partition log: the key of logs, produceSync and
+// coldDefer. A struct rather than a "topic/idx" string, so looking an
+// entry up on the Get fast path (once per partition per consume scan,
+// once per produce commit batch) allocates nothing.
+type logKey struct {
+	topic string
+	idx   int
+}
+
+func keyOf(topicName string, idx int) logKey {
+	return logKey{topic: topicName, idx: idx}
 }
 
 // topicVersioner is the optional metastore capability the Get fast
@@ -105,9 +116,22 @@ type logEntry struct {
 	walkOwned atomic.Bool
 }
 
+// stampEvery bounds how far lastAccess may lag the last Get. Idle
+// eviction asks only whether a log went unused for its whole window,
+// which is at least a minute (the config floor), so a stamp up to a
+// second old changes no eviction decision (evict.go invariant 5).
+// Skipping the store on the other calls keeps a hot entry's cache line
+// from bouncing between the cores that read the log.
+const stampEvery = int64(time.Second)
+
 func (e *logEntry) stamp() {
-	e.walkOwned.Store(false)
-	e.lastAccess.Store(time.Now().UnixNano())
+	if e.walkOwned.Load() {
+		e.walkOwned.Store(false)
+	}
+	now := time.Now().UnixNano()
+	if now-e.lastAccess.Load() >= stampEvery {
+		e.lastAccess.Store(now)
+	}
 }
 
 // NewLogs constructs a partition-log manager. metastore is consulted
@@ -120,9 +144,9 @@ func NewLogs(dataDir string, storageOpts storage.Options, ms metastore.Metastore
 		metastore:   ms,
 		metrics:     m,
 		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		logs:        make(map[string]*logEntry),
+		logs:        make(map[logKey]*logEntry),
 		guards:      make(map[string]*topicGuard),
-		produceSync: make(map[string]*sync.Mutex),
+		produceSync: make(map[logKey]*sync.Mutex),
 	}
 	if v, ok := ms.(topicVersioner); ok {
 		g.versions = v
@@ -182,7 +206,7 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 // log under the current incarnation. Caller holds the topic's guard and
 // mu (write). quarantined reports that a directory of another
 // incarnation was set aside on the way.
-func (g *Logs) openLocked(topicName string, idx int, key string) (l *storage.Log, quarantined bool, err error) {
+func (g *Logs) openLocked(topicName string, idx int, key logKey) (l *storage.Log, quarantined bool, err error) {
 	var version uint64
 	if g.versions != nil {
 		// Read the version BEFORE the record: a change that lands
@@ -306,7 +330,6 @@ func (g *Logs) PeekHighWatermark(topicName string, idx int) (int64, bool) {
 // any — remaining logs are still removed from the map so retries
 // pick up clean state.
 func (g *Logs) CloseTopic(topicName string) error {
-	prefix := topicName + "/"
 	g.mu.Lock()
 	firstErr := g.closeTopicLocked(topicName)
 	g.mu.Unlock()
@@ -318,7 +341,7 @@ func (g *Logs) CloseTopic(topicName string) error {
 	// disappears from the map — combined with lockProduce's revalidation
 	// this keeps produce mutual exclusion intact even when CloseTopic
 	// runs against a LIVE topic (e.g. UpdateTopicRetention).
-	g.retireProduceEntries(func(k string) bool { return strings.HasPrefix(k, prefix) })
+	g.retireProduceEntries(func(k logKey) bool { return k.topic == topicName })
 	return firstErr
 }
 
@@ -335,7 +358,7 @@ func (g *Logs) CloseAll() error {
 	}
 	g.mu.Unlock()
 
-	g.retireProduceEntries(func(string) bool { return true })
+	g.retireProduceEntries(func(logKey) bool { return true })
 	return firstErr
 }
 
@@ -344,10 +367,9 @@ func (g *Logs) CloseAll() error {
 // takes each mutex, which a produce commit inside Get may hold while
 // waiting for mu.
 func (g *Logs) closeTopicLocked(topicName string) error {
-	prefix := topicName + "/"
 	var firstErr error
 	for k, e := range g.logs {
-		if !strings.HasPrefix(k, prefix) {
+		if k.topic != topicName {
 			continue
 		}
 		if err := e.log.Close(); err != nil && firstErr == nil {
@@ -356,10 +378,6 @@ func (g *Logs) closeTopicLocked(topicName string) error {
 		delete(g.logs, k)
 	}
 	return firstErr
-}
-
-func keyOf(topicName string, idx int) string {
-	return topicName + "/" + strconv.Itoa(idx)
 }
 
 // retentionFromTopic folds a topic's retention into storage options.
@@ -386,7 +404,7 @@ func (g *Logs) ClosePartition(topicName string, idx int) error {
 		delete(g.logs, key)
 	}
 	g.mu.Unlock()
-	g.retireProduceEntries(func(k string) bool { return k == key })
+	g.retireProduceEntries(func(k logKey) bool { return k == key })
 	return err
 }
 

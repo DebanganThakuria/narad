@@ -35,7 +35,6 @@ package runtime
 
 import (
 	"context"
-	"strings"
 	"time"
 )
 
@@ -71,7 +70,7 @@ func (g *Logs) EvictIdleOnce(idleAfter time.Duration) int {
 	// Snapshot candidates under the read lock; all closing happens
 	// per-candidate under the full lock discipline below.
 	type candidate struct {
-		key   string
+		key   logKey
 		entry *logEntry
 	}
 	g.mu.RLock()
@@ -112,13 +111,9 @@ func (g *Logs) EvictIdleOnce(idleAfter time.Duration) int {
 // open for its caller. Close runs under g.mu, like CloseTopic: a Get
 // blocks until the old log has fully flushed and released its files,
 // then reopens fresh. A close error is counted under errKind.
-func (g *Logs) closeIfStill(key string, entry *logEntry, still func(*logEntry) bool, errKind string) (closed bool, err error) {
-	topicName, idx, ok := splitKey(key)
-	if !ok {
-		return false, nil
-	}
-	unlock := g.lockProduce(topicName, idx)
-	defer unlock()
+func (g *Logs) closeIfStill(key logKey, entry *logEntry, still func(*logEntry) bool, errKind string) (closed bool, err error) {
+	produceMu := g.lockProduce(key.topic, key.idx)
+	defer produceMu.Unlock()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	cur, present := g.logs[key]
@@ -153,21 +148,4 @@ func evictable(e *logEntry, cutoffUnixNano int64) bool {
 		return false
 	}
 	return e.log.RetentionMaxAge() == 0 || e.log.SegmentCount() <= 1
-}
-
-// splitKey reverses keyOf. Topic names cannot contain '/', so the last
-// separator is unambiguous.
-func splitKey(key string) (topicName string, idx int, ok bool) {
-	i := strings.LastIndexByte(key, '/')
-	if i <= 0 || i == len(key)-1 {
-		return "", 0, false
-	}
-	n := 0
-	for _, ch := range key[i+1:] {
-		if ch < '0' || ch > '9' {
-			return "", 0, false
-		}
-		n = n*10 + int(ch-'0')
-	}
-	return key[:i], n, true
 }

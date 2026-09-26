@@ -224,7 +224,7 @@ const coldWalkRetryAfter = 30 * time.Minute
 // isOpen reports whether the partition's log is open, walk-owned or not
 // (Peek hides walk-owned entries on purpose; the walk itself must see
 // them so it never opens one twice).
-func (g *Logs) isOpen(key string) bool {
+func (g *Logs) isOpen(key logKey) bool {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	_, open := g.logs[key]
@@ -233,7 +233,7 @@ func (g *Logs) isOpen(key string) bool {
 
 // coldDeferred reports whether the walk deferred this partition and the
 // deferral still stands; an elapsed one is dropped.
-func (g *Logs) coldDeferred(key string, now time.Time) bool {
+func (g *Logs) coldDeferred(key logKey, now time.Time) bool {
 	g.coldMu.Lock()
 	defer g.coldMu.Unlock()
 	until, ok := g.coldDefer[key]
@@ -247,11 +247,11 @@ func (g *Logs) coldDeferred(key string, now time.Time) bool {
 	return false
 }
 
-func (g *Logs) deferCold(key string, until time.Time) {
+func (g *Logs) deferCold(key logKey, until time.Time) {
 	g.coldMu.Lock()
 	defer g.coldMu.Unlock()
 	if g.coldDefer == nil {
-		g.coldDefer = make(map[string]time.Time)
+		g.coldDefer = make(map[logKey]time.Time)
 	}
 	g.coldDefer[key] = until
 }
