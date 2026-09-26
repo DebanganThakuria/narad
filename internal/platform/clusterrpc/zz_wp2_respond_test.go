@@ -2,7 +2,10 @@ package clusterrpc
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,6 +43,52 @@ func TestZZWP2RespondDoesNotRetainThePayload(t *testing.T) {
 		}
 		if string(reply.Payload) != want {
 			t.Fatalf("reply %d = %q, want %q", i, reply.Payload, want)
+		}
+	}
+}
+
+// zzWP2BigReusingHandler replies to a one-byte request with a big buffer
+// full of that byte, which it scribbles over as soon as respond returns.
+type zzWP2BigReusingHandler struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (h *zzWP2BigReusingHandler) HandleStreamFrame(frame clusterwire.StreamFrame, respond func(clusterwire.StreamFrame)) bool {
+	if frame.Type != clusterwire.StreamFrameNodeRequest || len(frame.Payload) != 1 {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := range h.buf {
+		h.buf[i] = frame.Payload[0]
+	}
+	respond(clusterwire.StreamFrame{Type: clusterwire.StreamFrameNodeReply, RequestID: frame.RequestID, Payload: h.buf})
+	for i := range h.buf {
+		h.buf[i] = 'X'
+	}
+	return true
+}
+
+// A reply too big to stage is written from the handler's own buffer
+// rather than copied (see clusterwire.WriteStreamFrameStaged), so the
+// contract rests on the stream's Write: over real QUIC it must not keep
+// the payload once it returns.
+func TestZZWP2RespondDoesNotRetainABigPayload(t *testing.T) {
+	addr := zzWP2Server(t, &zzWP2BigReusingHandler{buf: make([]byte, 1<<20)})
+	pool := zzWP2QUICPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for _, b := range []byte("abcdefgh") {
+		reply, err := pool.request(ctx, addr, LaneProduce, clusterwire.StreamFrameNodeRequest, []byte{b})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(reply.Payload) != 1<<20 {
+			t.Fatalf("reply %q is %d bytes, want %d", b, len(reply.Payload), 1<<20)
+		}
+		if i := bytes.IndexFunc(reply.Payload, func(r rune) bool { return r != rune(b) }); i >= 0 {
+			t.Fatalf("reply %q has %q at byte %d: the payload changed after respond returned", b, reply.Payload[i], i)
 		}
 	}
 }
