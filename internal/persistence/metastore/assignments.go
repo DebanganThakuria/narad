@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -11,6 +12,13 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 )
+
+// ErrNoAliveMembers is returned by AssignNewPartitions when no member is
+// alive to own the new partitions, as on a fresh cluster before any node
+// has registered. The partitions stay unassigned and the controller
+// places them once members register; the error only makes that visible
+// to the create and alter paths, which log it.
+var ErrNoAliveMembers = errors.New("metastore: no alive member to own new partitions")
 
 // AssignPartition records ownerID as the single owner of the partition
 // through Raft, replacing any previous owner.
@@ -93,6 +101,11 @@ func (s *Store) ListAssignments(topicName string) ([]Assignment, error) {
 // and child copy live on different nodes (the replica pattern). A child
 // partition whose parent counterpart is still unassigned is deferred —
 // the controller's reconcile sweep retries once the parent is placed.
+//
+// With no alive member it assigns nothing and returns ErrNoAliveMembers
+// rather than nil: a create that returned success with every partition
+// unowned used to leave produces waiting in the ingress WAL and
+// consumers getting empty answers, with nothing in the log to say why.
 func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromPartition, toPartition int) error {
 	members, err := s.ListMembers()
 	if err != nil {
@@ -100,7 +113,10 @@ func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromP
 	}
 	active := AliveMembers(members)
 	if len(active) == 0 {
-		return nil
+		if fromPartition >= toPartition {
+			return nil
+		}
+		return ErrNoAliveMembers
 	}
 	active = RoundRobinMembers(active)
 
