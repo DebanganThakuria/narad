@@ -110,6 +110,11 @@ type userEntry struct {
 	version uint64
 	// record is the user as of version (grants served to authorization).
 	record user.User
+	// identity is record without its PasswordHash, built whenever record
+	// is refreshed and never modified after: the fast path hands this
+	// one pointer to every request of the user until the next version,
+	// so attaching it to a request context copies nothing.
+	identity *user.User
 	// verifiedCred is the credToken of the plaintext that bcrypt-verified
 	// against record.PasswordHash; zero when nothing is verified yet.
 	verifiedCred [32]byte
@@ -159,6 +164,12 @@ func New(store UserStore, logger *slog.Logger) *Authenticator {
 	return a
 }
 
+// credential is a presented username or password: a string from
+// Verify's callers, or bytes AuthenticateBasic decoded from the
+// Authorization header into a stack buffer. The fast path handles
+// either form without copying it to the heap.
+type credential interface{ ~string | ~[]byte }
+
 // credToken derives the in-memory comparator for a presented password.
 //
 // This is NOT password hashing for storage — bcrypt does that, against
@@ -172,10 +183,11 @@ func New(store UserStore, logger *slog.Logger) *Authenticator {
 // The keyed state comes from macPool and is Reset before use, so the
 // result is bit-identical to a fresh hmac.New(sha256.New, credKey) over
 // the same password (cache keys do not depend on which pooled state
-// served the call). The password is staged through the pooled scratch
-// buffer, which is wiped before the state goes back to the pool. The
-// whole call allocates nothing.
-func (a *Authenticator) credToken(password string) [32]byte {
+// served the call, or on whether the password arrived as a string or as
+// bytes). The password is staged through the pooled scratch buffer,
+// which is wiped before the state goes back to the pool. The whole call
+// allocates nothing.
+func credToken[S credential](a *Authenticator, password S) [32]byte {
 	c := a.macPool.Get().(*credMAC)
 	c.mac.Reset()
 	c.buf = append(c.buf[:0], password...)
@@ -189,10 +201,22 @@ func (a *Authenticator) credToken(password string) [32]byte {
 }
 
 // Verify authenticates username/password and returns the user record
-// (for authorization) on success. Failures are ErrUnauthorized or
-// ErrThrottled; any other error is an internal store failure.
+// (for authorization) on success, without its PasswordHash. Failures
+// are ErrUnauthorized or ErrThrottled; any other error is an internal
+// store failure.
 func (a *Authenticator) Verify(ctx context.Context, username, password string) (user.User, error) {
-	cred := a.credToken(password)
+	id, err := verify(ctx, a, username, password)
+	if err != nil {
+		return user.User{}, err
+	}
+	return *id, nil
+}
+
+// verify is Verify and AuthenticateBasic over either credential form.
+// On success it returns the cache entry's shared identity, which the
+// caller must not modify.
+func verify[S credential](ctx context.Context, a *Authenticator, username, password S) (*user.User, error) {
+	cred := credToken(a, password)
 	version := a.store.UsersVersion()
 
 	// Fast paths under the read lock: a version-current entry either
@@ -200,25 +224,35 @@ func (a *Authenticator) Verify(ctx context.Context, username, password string) (
 	// recently rejected (deny). The negative set is only trusted while
 	// the stored hash is unchanged, and an unchanged users version
 	// implies an unchanged hash, so neither path needs the store read
-	// or the write lock the slow path below takes.
+	// or the write lock the slow path takes. A version bump (password,
+	// grant or user change) fails the check, so the next request goes
+	// to the slow path and never sees a stale identity.
 	a.mu.RLock()
-	e := a.users[username]
+	e := a.users[string(username)]
 	if e != nil && e.version == version {
 		if e.hasVerified && subtle.ConstantTimeCompare(e.verifiedCred[:], cred[:]) == 1 {
-			rec := e.record
+			id := e.identity
 			a.mu.RUnlock()
-			return rec, nil
+			return id, nil
 		}
 		if at, ok := e.failed[cred]; ok && a.now().Sub(at) < negativeTTL {
 			a.mu.RUnlock()
-			return user.User{}, ErrUnauthorized
+			return nil, ErrUnauthorized
 		}
 	}
 	a.mu.RUnlock()
 
+	// The conversions copy the credentials, so a caller's stack buffer
+	// never escapes through the slow path.
+	return a.verifySlow(ctx, string(username), string(password), cred)
+}
+
+// verifySlow re-reads the user record, refreshes its cache entry and,
+// unless the refreshed entry already decides, runs bcrypt.
+func (a *Authenticator) verifySlow(ctx context.Context, username, password string, cred [32]byte) (*user.User, error) {
 	// Read the version BEFORE the record: if a change lands in between,
 	// the entry is stored already-stale and re-validates next request.
-	version = a.store.UsersVersion()
+	version := a.store.UsersVersion()
 	rec, err := a.store.GetUser(ctx, username)
 	if errors.Is(err, errs.ErrNotFound) {
 		// Unknown users are rejected instantly. Deliberate trade-off:
@@ -226,14 +260,14 @@ func (a *Authenticator) Verify(ctx context.Context, username, password string) (
 		// real users can ever cost bcrypt time, which bounds the whole
 		// authentication attack surface. Documented in the README.
 		a.dropUser(username)
-		return user.User{}, ErrUnauthorized
+		return nil, ErrUnauthorized
 	}
 	if err != nil {
-		return user.User{}, err
+		return nil, err
 	}
 
 	a.mu.Lock()
-	e = a.users[username]
+	e := a.users[username]
 	if e == nil {
 		// Bound the cache: it holds one entry per distinct real user seen,
 		// and stale entries (e.g. deleted users never re-probed) would
@@ -253,20 +287,22 @@ func (a *Authenticator) Verify(ctx context.Context, username, password string) (
 		clear(e.failed)
 	}
 	e.record = rec
+	e.identity = identityOf(rec)
 	e.version = version
 
 	// Re-check the positive credential against the refreshed record —
 	// this is the "grants changed, password did not" path that skips
 	// bcrypt entirely.
 	if e.hasVerified && subtle.ConstantTimeCompare(e.verifiedCred[:], cred[:]) == 1 {
+		id := e.identity
 		a.mu.Unlock()
-		return rec, nil
+		return id, nil
 	}
 
 	// Negative cache: the same wrong plaintext again is an instant 401.
 	if at, ok := e.failed[cred]; ok && a.now().Sub(at) < negativeTTL {
 		a.mu.Unlock()
-		return user.User{}, ErrUnauthorized
+		return nil, ErrUnauthorized
 	}
 	storedHash := rec.PasswordHash
 	a.mu.Unlock()
@@ -276,10 +312,10 @@ func (a *Authenticator) Verify(ctx context.Context, username, password string) (
 		if a.shouldLogThrottle(username) {
 			a.logger.Warn("authentication throttled", "component", "audit", "username", username)
 		}
-		return user.User{}, ErrThrottled
+		return nil, ErrThrottled
 	}
 	if err != nil {
-		return user.User{}, err
+		return nil, err
 	}
 
 	a.mu.Lock()
@@ -287,7 +323,7 @@ func (a *Authenticator) Verify(ctx context.Context, username, password string) (
 	e = a.users[username]
 	if e == nil {
 		// Deleted while we were verifying.
-		return user.User{}, ErrUnauthorized
+		return nil, ErrUnauthorized
 	}
 	if !ok {
 		if len(e.failed) >= negativeCapPerUser {
@@ -295,7 +331,7 @@ func (a *Authenticator) Verify(ctx context.Context, username, password string) (
 		}
 		e.failed[cred] = a.now()
 		a.logger.Warn("authentication failed", "component", "audit", "username", username)
-		return user.User{}, ErrUnauthorized
+		return nil, ErrUnauthorized
 	}
 	// Success: remember the credential — but only if the stored hash is
 	// still the one we verified against.
@@ -303,7 +339,15 @@ func (a *Authenticator) Verify(ctx context.Context, username, password string) (
 		e.verifiedCred = cred
 		e.hasVerified = true
 	}
-	return e.record, nil
+	return e.identity, nil
+}
+
+// identityOf is the identity view of rec: the same user without its
+// PasswordHash, in a fresh allocation so an identity already handed to
+// requests is never modified by a later refresh.
+func identityOf(rec user.User) *user.User {
+	rec.PasswordHash = nil
+	return &rec
 }
 
 // runBcrypt performs the slow comparison, deduplicating concurrent
