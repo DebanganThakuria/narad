@@ -225,8 +225,10 @@ func (m *Manager) ReplayProduceFromCursorPeek(cursor wal.Cursor, peek wal.Peek, 
 }
 
 // CompactProduceBefore drops WAL segments wholly below seq. Callers
-// must only pass a persisted dispatch checkpoint — compacting past
-// undispatched records loses them.
+// must only pass a stored dispatch checkpoint — compacting past
+// undispatched records loses them. The store need not be synced yet:
+// every seq below a stored checkpoint is committed, and a replay from
+// an older, synced value starts at the first segment that is left.
 func (m *Manager) CompactProduceBefore(seq uint64) error {
 	if m == nil || m.log == nil {
 		return errors.New("ingress: manager is nil")
@@ -243,7 +245,13 @@ func (m *Manager) LoadProduceCheckpoint() (uint64, error) {
 	return loadCheckpoint(filepath.Join(m.produceDir, produceCheckpointFile))
 }
 
-// StoreProduceCheckpoint durably persists the dispatch checkpoint.
+// StoreProduceCheckpoint persists the dispatch checkpoint. The value is
+// written at once, so it survives a process crash, and flushed to disk
+// within checkpointSyncDelay (or by Close), so an OS crash or power
+// loss can bring back an older value: the dispatcher then re-commits
+// what it had already committed since, as duplicates, and loses
+// nothing. A background flush that failed is reported by the next
+// call.
 func (m *Manager) StoreProduceCheckpoint(nextSeq uint64) error {
 	if m == nil {
 		return errors.New("ingress: manager is nil")

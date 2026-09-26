@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
@@ -34,6 +36,13 @@ func loadCheckpoint(path string) (uint64, error) {
 	return binary.BigEndian.Uint64(data), nil
 }
 
+// checkpointSyncDelay is how long a stored checkpoint may sit written
+// but not yet fdatasynced. The value only bounds crash-replay
+// duplicates (every seq below it is committed to its partition), so
+// deferring the flush costs at most this much re-dispatch after an OS
+// crash or power loss, never a record.
+const checkpointSyncDelay = 250 * time.Millisecond
+
 // checkpointWriter persists the dispatch checkpoint by overwriting a
 // fixed 8-byte file in place through a descriptor it keeps open.
 //
@@ -43,25 +52,60 @@ func loadCheckpoint(path string) (uint64, error) {
 // flushes and a directory mutation to move 8 bytes. An 8-byte value fits
 // in one sector and a single-sector overwrite is atomic across a crash
 // (the reader sees the old or the new value), the same argument the
-// partition high-watermark file relies on. So: one WriteAt, one
-// fdatasync. The directory is fsynced once, when the file is first
-// created, so the name is durable.
+// partition high-watermark file relies on. So: one WriteAt per store.
+// The directory is fsynced once, when the file is first created, so the
+// name is durable.
+//
+// The fdatasync is off the dispatcher's path: a store writes the value
+// (a process crash keeps it in the page cache) and a background flush
+// makes it durable within checkpointSyncDelay, one flush for however
+// many stores landed meanwhile. On macOS every flush is a device-wide
+// F_FULLFSYNC that the WAL group commit also waits behind. close syncs
+// whatever is still pending.
 type checkpointWriter struct {
-	path      string
+	path  string
+	delay time.Duration
+
+	mu        sync.Mutex
+	idle      sync.Cond // signalled when a background sync finishes
 	file      *os.File
 	dirSynced bool
+	// dirty is set by a store and cleared when a sync of the file
+	// starts; a store landing during that sync sets it again.
+	dirty bool
+	// flushArmed is true while a background flush is scheduled.
+	flushArmed bool
+	// syncing is true while a background flush runs without mu, so
+	// reset and close wait for it before closing the descriptor.
+	syncing bool
+	// syncErr is a failed background flush, reported by the next store.
+	syncErr error
 }
 
 func newCheckpointWriter(dir, name string) *checkpointWriter {
-	return &checkpointWriter{path: filepath.Join(dir, name)}
+	w := &checkpointWriter{path: filepath.Join(dir, name), delay: checkpointSyncDelay}
+	w.idle.L = &w.mu
+	return w
 }
 
-// store durably writes nextSeq. Not safe for concurrent use; the
-// dispatcher is the single writer and Close runs after it stops.
+// store writes nextSeq and schedules its fdatasync. Stores are
+// serialized by the caller (the dispatcher is the single writer) and
+// Close runs after it stops; the background flush is the only other
+// goroutine touching the file.
 func (w *checkpointWriter) store(nextSeq uint64) error {
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], nextSeq)
 
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.syncErr != nil {
+		// A background flush failed: report it once, reopen, and
+		// write the value again so it is flushed afresh.
+		err := w.syncErr
+		w.syncErr = nil
+		w.resetLocked()
+		return fmt.Errorf("ingress: sync checkpoint: %w", err)
+	}
 	if w.file == nil {
 		created := false
 		f, err := os.OpenFile(w.path, os.O_WRONLY, 0o644)
@@ -76,14 +120,16 @@ func (w *checkpointWriter) store(nextSeq uint64) error {
 		w.dirSynced = !created
 	}
 	if _, err := syncfile.WriteAt(w.file, buf[:], 0); err != nil {
-		w.reset()
+		w.resetLocked()
 		return fmt.Errorf("ingress: write checkpoint: %w", err)
 	}
-	if err := syncfile.SyncData(w.file); err != nil {
-		w.reset()
-		return fmt.Errorf("ingress: sync checkpoint: %w", err)
-	}
 	if !w.dirSynced {
+		// A new name must be durable before anything relies on it:
+		// flush the data and the directory now, once.
+		if err := syncfile.SyncData(w.file); err != nil {
+			w.resetLocked()
+			return fmt.Errorf("ingress: sync checkpoint: %w", err)
+		}
 		dirFile, err := os.Open(filepath.Dir(w.path))
 		if err != nil {
 			return fmt.Errorf("ingress: open checkpoint dir: %w", err)
@@ -94,24 +140,81 @@ func (w *checkpointWriter) store(nextSeq uint64) error {
 			return fmt.Errorf("ingress: sync checkpoint dir: %w", syncErr)
 		}
 		w.dirSynced = true
+		return nil
+	}
+	w.dirty = true
+	if !w.flushArmed {
+		w.flushArmed = true
+		time.AfterFunc(w.delay, w.flush)
 	}
 	return nil
 }
 
-// reset drops the held descriptor after a failure so the next store
-// reopens the file.
-func (w *checkpointWriter) reset() {
+// flush is the background fdatasync a store schedules.
+func (w *checkpointWriter) flush() {
+	w.mu.Lock()
+	w.flushArmed = false
+	if w.file == nil || !w.dirty || w.syncing {
+		w.mu.Unlock()
+		return
+	}
+	f := w.file
+	w.dirty = false
+	w.syncing = true
+	w.mu.Unlock()
+
+	err := syncfile.SyncData(f)
+
+	w.mu.Lock()
+	w.syncing = false
+	if err != nil {
+		w.dirty = true
+		w.syncErr = err
+	}
+	w.idle.Broadcast()
+	w.mu.Unlock()
+}
+
+// waitIdleLocked waits for a running background flush to finish, so
+// the descriptor it uses is not closed under it.
+func (w *checkpointWriter) waitIdleLocked() {
+	for w.syncing {
+		w.idle.Wait()
+	}
+}
+
+// resetLocked drops the held descriptor after a failure so the next
+// store reopens the file. The value is rewritten by that store.
+func (w *checkpointWriter) resetLocked() {
+	w.waitIdleLocked()
 	if w.file != nil {
 		_ = w.file.Close()
 		w.file = nil
 	}
+	w.dirty = false
 }
 
+// close syncs a written-but-unsynced value and closes the descriptor.
 func (w *checkpointWriter) close() error {
-	if w == nil || w.file == nil {
+	if w == nil {
 		return nil
 	}
-	err := w.file.Close()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.waitIdleLocked()
+	if w.file == nil {
+		return nil
+	}
+	var err error
+	if w.dirty {
+		if serr := syncfile.SyncData(w.file); serr != nil {
+			err = fmt.Errorf("ingress: sync checkpoint: %w", serr)
+		}
+		w.dirty = false
+	}
+	if cerr := w.file.Close(); cerr != nil && err == nil {
+		err = cerr
+	}
 	w.file = nil
 	return err
 }
