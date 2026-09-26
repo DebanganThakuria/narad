@@ -131,9 +131,12 @@ func (f *fsmState) applyDeleteTopic(data []byte) error {
 		return nil
 	})
 	if err == nil {
-		f.versions.bumpTopic(name)
-		f.versions.bumpAssignment(name)
-		f.versions.bumpSchema(name)
+		// Retire rather than bump the deleted name's three versions: they
+		// advance exactly as the bumps would, and its cells become
+		// tombstones that are pruned in batches, so a churn of uniquely
+		// named topics does not leave a cell per name ever deleted. The
+		// fan-out partners stay live and are bumped.
+		f.versions.retireTopic(name)
 		for _, linked := range linkedTopics {
 			f.versions.bumpTopic(linked)
 		}
