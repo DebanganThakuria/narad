@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/debanganthakuria/narad/internal/errs"
 
@@ -19,6 +20,28 @@ import (
 // places them once members register; the error only makes that visible
 // to the create and alter paths, which log it.
 var ErrNoAliveMembers = errors.New("metastore: no alive member to own new partitions")
+
+// assignMu orders the read-then-assign sequences that place unassigned
+// partitions: AssignNewPartitions (topic create and alter) and the
+// controller's reconcile sweep, which takes it through LockAssignments.
+// Each reads a topic's assignments and then writes an owner for every
+// partition it found unassigned, and AssignPartition replaces whatever
+// owner is on record. Unordered, both could place the same partition: a
+// create that read the member table before the other members
+// registered and a sweep that read it after picked different owners,
+// and the later write moved the partition away from an owner that
+// might already have committed records to it. One lock per process is
+// enough: a process runs one metastore, and only the leader assigns.
+var assignMu sync.Mutex
+
+// LockAssignments takes the lock that orders every read-then-assign
+// sequence for unassigned partitions (see assignMu) and returns the
+// matching unlock. Hold it from reading a topic's assignments until the
+// partitions found unassigned have been assigned.
+func (s *Store) LockAssignments() (unlock func()) {
+	assignMu.Lock()
+	return assignMu.Unlock
+}
 
 // AssignPartition records ownerID as the single owner of the partition
 // through Raft, replacing any previous owner.
@@ -106,7 +129,14 @@ func (s *Store) ListAssignments(topicName string) ([]Assignment, error) {
 // rather than nil: a create that returned success with every partition
 // unowned used to leave produces waiting in the ingress WAL and
 // consumers getting empty answers, with nothing in the log to say why.
+//
+// It holds the assignment lock throughout, so a concurrent controller
+// sweep either finishes first (and this call finds those partitions
+// assigned) or waits until this call is done.
 func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromPartition, toPartition int) error {
+	unlock := s.LockAssignments()
+	defer unlock()
+
 	members, err := s.ListMembers()
 	if err != nil {
 		return err

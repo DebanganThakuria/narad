@@ -21,6 +21,7 @@ type controllerStore interface {
 	ListMembers() ([]metastore.Member, error)
 	ListTopics(ctx context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error)
 	ListAssignments(topicName string) ([]metastore.Assignment, error)
+	LockAssignments() (unlock func())
 	AssignPartition(ctx context.Context, topicName string, partition int, ownerID string) error
 	SetAssignmentTarget(ctx context.Context, topicName string, partition int, targetID string) error
 	MarkMemberDead(ctx context.Context, podID string) error

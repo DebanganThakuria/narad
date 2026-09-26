@@ -63,6 +63,8 @@ func (f *fakeControllerStore) ListAssignments(topicName string) ([]metastore.Ass
 	return out, nil
 }
 
+func (f *fakeControllerStore) LockAssignments() func() { return func() {} }
+
 func (f *fakeControllerStore) SetAssignmentTarget(_ context.Context, topicName string, partition int, targetID string) error {
 	if f.targets[topicName] == nil {
 		f.targets[topicName] = map[int]string{}
