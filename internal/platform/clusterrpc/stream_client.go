@@ -20,10 +20,11 @@ const defaultStreamTimeout = 5 * time.Second
 
 // maxRetainedWriteBuffer caps the frame staging buffer a stream keeps
 // between writes. Frames up to this size are staged in it and written in
-// one Write; a larger one (a segment chunk, say) is written as header and
-// payload without staging (see clusterwire.WriteStreamFrameStaged), so an
-// occasional bulk transfer neither pins megabytes per pooled stream nor
-// allocates a buffer of its size.
+// one Write; for a larger one (a segment chunk, say) only the header and
+// the start of the payload are staged, and the rest is written in place
+// (see clusterwire.WriteStreamFrameStaged), so an occasional bulk
+// transfer neither pins megabytes per pooled stream nor allocates a
+// buffer of its size.
 const maxRetainedWriteBuffer = 256 << 10
 
 // errFallbackReplyTimeout marks a reply wait that ended because the

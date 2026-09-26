@@ -82,6 +82,24 @@ func (w *zzWP2WriteLog) requireZeroByteTimeout(t *testing.T, size int) {
 	t.Fatalf("no %d-byte Write timed out with nothing written; writes = %+v", size, w.writes)
 }
 
+// requireSplitFrameUnsent fails unless nothing was written since the
+// log held before bytes and the last Write, the first of a frame too big
+// to stage, timed out having written nothing. That Write carries the
+// frame's header and the start of its payload (see
+// clusterwire.WriteStreamFrameStaged), never the header alone.
+func (w *zzWP2WriteLog) requireSplitFrameUnsent(t *testing.T, before int) {
+	t.Helper()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.writes) > 0 {
+		last := w.writes[len(w.writes)-1]
+		if w.written == before && last.size > zzWP2FrameHeaderBytes && last.n == 0 && errors.Is(last.err, os.ErrDeadlineExceeded) {
+			return
+		}
+	}
+	t.Fatalf("%d bytes written since %d, want none and a first Write past the header that timed out; writes = %+v", w.written-before, before, w.writes)
+}
+
 // Over a pipe: the peer takes one request, then stops reading, so the
 // next request's Write blocks inside Write until its caller's deadline.
 func TestZZWP2ZeroByteWriteTimeoutKeepsStream(t *testing.T) {
@@ -176,10 +194,21 @@ func (h *zzWP2GateHandler) sawSize(n int) bool {
 // Over real QUIC, the shape of a stalled peer: the server stops reading
 // the stream, a large request fills the stream's flow-control window
 // and leaves a little of its frame queued in quic-go's send buffer, so
-// the next small request cannot be buffered and blocks inside Write
-// until its deadline. The stream and the requests already on it (a
-// parked long-poll and the large request) must survive that timeout.
+// the next request cannot be buffered and blocks inside Write until its
+// deadline. The stream and the requests already on it (a parked
+// long-poll and the large request) must survive that timeout, whether
+// the late frame is small (one Write) or too big to stage (a header and
+// lead that quic-go must not take on its own, then the payload).
 func TestZZWP2QUICZeroByteWriteTimeoutKeepsStream(t *testing.T) {
+	t.Run("small frame", func(t *testing.T) {
+		zzWP2QUICStalledWrite(t, 400)
+	})
+	t.Run("big frame", func(t *testing.T) {
+		zzWP2QUICStalledWrite(t, maxRetainedWriteBuffer+1)
+	})
+}
+
+func zzWP2QUICStalledWrite(t *testing.T, lateBytes int) {
 	h := newZZWP2GateHandler()
 	addr := zzWP2Server(t, h)
 	pool := zzWP2QUICPool(t)
@@ -235,13 +264,19 @@ func TestZZWP2QUICZeroByteWriteTimeoutKeepsStream(t *testing.T) {
 		}
 	}
 
-	// leftover plus this frame is more than quic-go buffers for a stream
-	// (protocol.MaxPacketBufferSize, 1452 bytes): Write blocks.
-	late := make([]byte, 400)
+	// leftover plus a small frame, or a big frame's header and lead, is
+	// more than quic-go buffers for a stream (protocol.MaxPacketBufferSize,
+	// 1452 bytes): Write blocks. A big frame's header alone would fit.
+	late := make([]byte, lateBytes)
 	lateCtx, lateCancel := context.WithTimeout(ctx, 150*time.Millisecond)
 	defer lateCancel()
+	before := log.total()
 	_, err = client.requestFrame(lateCtx, clusterwire.StreamFrameNodeRequest, late)
-	log.requireZeroByteTimeout(t, zzWP2FrameHeaderBytes+len(late))
+	if zzWP2FrameHeaderBytes+lateBytes <= maxRetainedWriteBuffer {
+		log.requireZeroByteTimeout(t, zzWP2FrameHeaderBytes+lateBytes)
+	} else {
+		log.requireSplitFrameUnsent(t, before)
+	}
 	if client.isClosed() {
 		t.Fatalf("a zero-byte write timeout closed the shared stream: %v", client.closeError())
 	}
@@ -310,9 +345,10 @@ func TestZZWP2QUICSpentBudgetAtWriteKeepsStream(t *testing.T) {
 	}
 }
 
-// A frame too big for the staging buffer goes out as header then
-// payload. When the header's Write times out with nothing written the
-// framing is intact, so the stream must survive as for a staged frame.
+// A frame too big for the staging buffer goes out as its header and
+// lead, then the rest of its payload. When the first Write times out
+// with nothing written the framing is intact, so the stream must
+// survive as for a staged frame.
 func TestZZWP2BigFrameZeroByteTimeoutKeepsStream(t *testing.T) {
 	clientEnd, server := net.Pipe()
 	t.Cleanup(func() { _ = clientEnd.Close(); _ = server.Close() })
@@ -332,8 +368,9 @@ func TestZZWP2BigFrameZeroByteTimeoutKeepsStream(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
+	before := zzWP2FrameHeaderBytes + len("park") // the request in flight
 	_, err = client.requestFrame(ctx, clusterwire.StreamFrameNodeRequest, make([]byte, 1<<20))
-	log.requireZeroByteTimeout(t, zzWP2FrameHeaderBytes)
+	log.requireSplitFrameUnsent(t, before)
 	if client.isClosed() {
 		t.Fatalf("a zero-byte write timeout closed the shared stream: %v", client.closeError())
 	}

@@ -95,16 +95,28 @@ func WriteStreamFrameInto(w io.Writer, buf []byte, frame StreamFrame) ([]byte, e
 	return buf, err
 }
 
+// stagedLeadBytes is how much of a big frame's payload
+// WriteStreamFrameStaged sends with the header, in the first Write. A
+// header on its own is small enough for a QUIC stream to take into its
+// send buffer at once (quic-go buffers up to one packet, 1452 bytes),
+// even when flow control lets nothing be sent. A frame that then made no
+// progress at all would look cut off after its header rather than
+// unsent, and the caller would tear down a stream whose framing is
+// intact. A first Write well past a packet either gets some of the frame
+// out or reports nothing written at its deadline.
+const stagedLeadBytes = 16 << 10
+
 // WriteStreamFrameStaged is WriteStreamFrameInto without the copy for
 // big frames. A frame of at most maxStaged bytes, header included, is
 // assembled in buf and handed to w in one Write, exactly as
 // WriteStreamFrameInto does. A larger one goes out in two: its header
-// (from buf) and then its payload in place. One more Write is noise next
-// to such a frame, while staging it would cost a buffer of its size and a
+// and the start of its payload (see stagedLeadBytes) from buf, then the
+// rest of the payload in place. One more Write is noise next to such a
+// frame, while staging all of it would cost a buffer of its size and a
 // copy into it, per frame. The wire bytes are the same either way. It
-// returns buf (grown only to stage a frame) and how many bytes of the
-// frame were written, so a caller can tell a write that sent nothing
-// from one cut off part-way.
+// returns buf (grown only to stage a frame or a lead) and how many bytes
+// of the frame were written, so a caller can tell a write that sent
+// nothing from one cut off part-way.
 func WriteStreamFrameStaged(w io.Writer, buf []byte, frame StreamFrame, maxStaged int) ([]byte, int, error) {
 	if len(frame.Payload) > MaxStreamFramePayloadBytes {
 		return buf, 0, fmt.Errorf("stream frame payload too large: %d bytes", len(frame.Payload))
@@ -114,12 +126,16 @@ func WriteStreamFrameStaged(w io.Writer, buf []byte, frame StreamFrame, maxStage
 		n, err := w.Write(buf)
 		return buf, n, err
 	}
+	// The frame is bigger than maxStaged, so the lead is shorter than
+	// the payload.
+	lead := max(min(stagedLeadBytes, maxStaged-streamFrameHeaderBytes), 0)
 	buf = appendStreamFrameHeader(buf[:0], frame)
+	buf = append(buf, frame.Payload[:lead]...)
 	n, err := w.Write(buf)
 	if err != nil {
 		return buf, n, err
 	}
-	m, err := w.Write(frame.Payload)
+	m, err := w.Write(frame.Payload[lead:])
 	return buf, n + m, err
 }
 
