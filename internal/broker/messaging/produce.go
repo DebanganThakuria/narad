@@ -82,6 +82,10 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 	}
 
 	offset, err := e.logs.WithProduceLockResult(topicName, partIdx, func(log *storage.Log) (int64, error) {
+		// The same gate as the WAL-first commit, for the same handoff race.
+		if err := e.commitGateLocked(ctx, topicName, partIdx); err != nil {
+			return 0, err
+		}
 		return e.appendAndCommit(log, storage.EncodeKeyedRecord(key, time.Now().UnixMilli(), payload))
 	})
 	if err != nil {

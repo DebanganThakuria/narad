@@ -42,6 +42,9 @@ func (e *Engine) CommitAcceptedProduce(ctx context.Context, record ingress.Produ
 	}
 
 	offset, err := e.logs.WithProduceLockResult(record.Topic, record.TargetPartition, func(log *storage.Log) (int64, error) {
+		if err := e.commitGateLocked(ctx, record.Topic, record.TargetPartition); err != nil {
+			return 0, err
+		}
 		return e.appendAndCommit(log, storage.EncodeKeyedRecord(record.Key, time.Now().UnixMilli(), record.Payload))
 	})
 	if err != nil {
@@ -80,6 +83,8 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 	if partition < 0 || partition >= t.Partitions {
 		return nil, fmt.Errorf("%w: partition out of range", ErrInvalid)
 	}
+	// A fast path only: the commit checks the gate again under the
+	// produce lock, which is what makes a handoff freeze airtight.
 	if !e.isLocalOwner(topicName, partition) || e.isProducePaused(topicName, partition) {
 		// Frozen for handoff — see the single-commit path above.
 		return nil, ErrNotPartitionOwner
@@ -99,6 +104,9 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 
 	var offsets []int64
 	err = e.logs.WithProduceLock(topicName, partition, func(log *storage.Log) error {
+		if err := e.commitGateLocked(ctx, topicName, partition); err != nil {
+			return err
+		}
 		// The envelopes were built above for this call only and are never
 		// read again (commitDurable needs just their count), so the log may
 		// take ownership instead of copying every record a second time.
@@ -125,6 +133,21 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 
 	e.recordProduceCommitted(topicName, partition, len(records), payloadBytes)
 	return offsets, nil
+}
+
+// commitGateLocked is the owner and freeze gate again, under the produce
+// lock. A handoff arms its freeze and only then takes this lock to read
+// the final high-watermark, so a commit that passed the outer gate
+// before the freeze but reaches the lock after that read is turned away
+// here, with nothing appended, instead of landing after the fence and
+// stranding acknowledged records on the old owner. A caller that gave up
+// meanwhile (its RPC timed out, say) is not appended either: it retries
+// anyway, and appending it now would only commit a duplicate.
+func (e *Engine) commitGateLocked(ctx context.Context, topicName string, partition int) error {
+	if !e.isLocalOwner(topicName, partition) || e.isProducePaused(topicName, partition) {
+		return ErrNotPartitionOwner
+	}
+	return ctx.Err()
 }
 
 // singleBatchTarget validates that every record in the batch is

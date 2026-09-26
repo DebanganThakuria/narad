@@ -169,7 +169,10 @@ const handoffDrainWait = 500 * time.Millisecond
 // isProducePaused reports whether the partition is currently paused for
 // handoff, lazily expiring a lapsed pause (auto-resume) so a dead
 // destination can never wedge produce forever. With nothing paused
-// anywhere it answers from one atomic load.
+// anywhere it answers from one atomic load. Commits ask it again under
+// the produce lock, after prepareHandoff armed the freeze (count raised
+// first) and released that lock, so a zero read there can never hide a
+// freeze the handoff is relying on.
 func (e *Engine) isProducePaused(topicName string, partition int) bool {
 	if e.producePausesActive.Load() == 0 {
 		return false
@@ -270,7 +273,8 @@ func (e *Engine) prepareHandoff(ctx context.Context, topicName string, partition
 	// the gate before the freeze may still be inside its append+fsync
 	// under the produce lock. Taking that lock here waits for it to
 	// finish, so the HWM reported is final: nothing can advance it
-	// afterwards while the freeze holds.
+	// afterwards while the freeze holds, because every commit checks the
+	// gate again once it holds this lock.
 	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
 	var info PartitionTransferInfo
 	err = e.logs.WithProduceLock(topicName, partition, func(log *storage.Log) error {
