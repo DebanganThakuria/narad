@@ -4,9 +4,8 @@
 // Logs is the single owner of the map from (topic, partition) to
 // *storage.Log. Every other broker subpackage that needs to read or
 // write a partition's log goes through Logs — there is no sharing of
-// the underlying map. CloseTopic / CloseAll are the only paths that
-// retire entries; UpdateTopicRetention and DeleteTopic call
-// CloseTopic so the next access reopens with fresh options.
+// the underlying map. UpdateTopicRetention calls CloseTopic so the next
+// access reopens with fresh options; DeleteTopic purges (PurgeTopic).
 package runtime
 
 import (
@@ -29,6 +28,13 @@ import (
 // Logs is the partition-log manager. All access is concurrency-safe;
 // the map is RWMutex-guarded for the lazy-open fast path. The produce
 // serialization mutexes live in produce_lock.go.
+//
+// Lock order: a partition's produce mutex, then its topic's guard, then
+// mu. Every close of a topic's logs holds that topic's guard, and mu
+// only long enough to claim or drop map entries: the log I/O (Close's
+// flush and fsyncs, a purge's unlink) runs under the guard alone, so it
+// stalls callers that need that topic and nobody else. A Get that finds
+// an entry being closed takes the slow path and waits on the guard.
 type Logs struct {
 	dataDir     string
 	storageOpts storage.Options
@@ -45,13 +51,13 @@ type Logs struct {
 	mu   sync.RWMutex
 	logs map[logKey]*logEntry
 
-	// guards serializes the slow path (opening a partition log, which
-	// may adopt, verify or quarantine the topic directory) against a
-	// purge of the same topic, per topic name. A purge holds its
-	// topic's guard from closing the logs through unlinking the
-	// directory, so no Get can open a log in a directory that is about
-	// to disappear, and a Get that waited sees the directory gone.
-	// Lock order: guard, then mu.
+	// guards serializes, per topic name, everything that adds or drops
+	// the topic's map entries: the slow path (opening a partition log,
+	// which may adopt, verify or quarantine the topic directory) and
+	// every close, a purge's included. A purge holds its topic's guard
+	// from closing the logs through unlinking the directory, so no Get
+	// can open a log in a directory that is about to disappear, and a
+	// Get that waited sees the directory gone. Lock order: see Logs.
 	guardMu sync.Mutex
 	guards  map[string]*topicGuard
 
@@ -115,6 +121,15 @@ type logEntry struct {
 	// (stamp). The walk closes the log only while it is still set, so a
 	// consumer that opened the log after it is never cut off mid-read.
 	walkOwned atomic.Bool
+	// closing is set under mu, by a close holding the topic's guard,
+	// before the log is closed outside mu; the entry leaves the map once
+	// Close returns, and closed is closed then. Get treats a closing
+	// entry as absent and goes to the slow path, where it waits on the
+	// guard. Peek waits on closed instead of reporting the partition
+	// closed early: its callers read the high-watermark file of a closed
+	// log, and Close is still writing it.
+	closing bool
+	closed  chan struct{}
 }
 
 // stampEvery bounds how far lastAccess may lag the last Get. Idle
@@ -182,7 +197,7 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 	key := keyOf(topicName, idx)
 
 	g.mu.RLock()
-	if e, ok := g.logs[key]; ok && g.entryCurrent(topicName, e) {
+	if e, ok := g.logs[key]; ok && !e.closing && g.entryCurrent(topicName, e) {
 		e.stamp()
 		g.mu.RUnlock()
 		return e.log, nil
@@ -291,18 +306,36 @@ func (g *Logs) entryCurrent(topicName string, e *logEntry) bool {
 // opening one. Read-only observers (the metrics snapshotter) use it so a
 // poll never creates a partition directory or resurrects a log that a
 // concurrent topic delete just retired.
+//
+// Peek of a partition whose log is being closed waits for the close:
+// "not open" must keep meaning the log's high-watermark file is final,
+// which it is only once Close returns. Observers of other partitions
+// never wait.
 func (g *Logs) Peek(topicName string, idx int) (*storage.Log, bool) {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	e, ok := g.logs[keyOf(topicName, idx)]
-	if !ok || e.walkOwned.Load() {
-		// A log the cold-retention walk opened for a sweep is not open
-		// to observers: it was closed a moment ago and will be closed
-		// again in milliseconds, and a reader that found it here would be
-		// cut off mid-read.
-		return nil, false
+	key := keyOf(topicName, idx)
+	for {
+		g.mu.RLock()
+		e, ok := g.logs[key]
+		switch {
+		case !ok:
+			g.mu.RUnlock()
+			return nil, false
+		case e.closing:
+			closed := e.closed
+			g.mu.RUnlock()
+			<-closed
+			continue
+		case e.walkOwned.Load():
+			// A log the cold-retention walk opened for a sweep is not open
+			// to observers: it was closed a moment ago and will be closed
+			// again in milliseconds, and a reader that found it here would
+			// be cut off mid-read.
+			g.mu.RUnlock()
+			return nil, false
+		}
+		g.mu.RUnlock()
+		return e.log, true
 	}
-	return e.log, true
 }
 
 // PeekHighWatermark returns the partition's visible tail without
@@ -358,15 +391,15 @@ func (g *Logs) CloseAll() error {
 }
 
 // closeTopicBetweenCommits closes every open log of topicName while
-// holding each one's produce mutex, taken in partition order before mu
-// (the order WithProduceLock and Get use), so no produce commit sits
-// between its append and its CommitDurable when a log closes. One that
-// did would lose its commit (ErrLogClosed) after Close's final drain had
-// already made its batch durable with no commit attached, and the
-// dispatcher's retry would then append the same records a second time
-// under a high-watermark that covers both copies. A partition opened
-// after the mutexes were taken sends the loop around again with it
-// included.
+// holding each one's produce mutex, taken in partition order before the
+// topic's guard (the order WithProduceLock and Get use), so no produce
+// commit sits between its append and its CommitDurable when a log
+// closes. One that did would lose its commit (ErrLogClosed) after
+// Close's final drain had already made its batch durable with no commit
+// attached, and the dispatcher's retry would then append the same
+// records a second time under a high-watermark that covers both copies.
+// A partition opened after the mutexes were taken sends the loop around
+// again with it included.
 func (g *Logs) closeTopicBetweenCommits(topicName string) error {
 	for {
 		idxs := g.openPartitions(topicName)
@@ -374,13 +407,16 @@ func (g *Logs) closeTopicBetweenCommits(topicName string) error {
 		for _, idx := range idxs {
 			held = append(held, g.lockProduce(topicName, idx))
 		}
+		unlock := g.lockTopic(topicName)
 		g.mu.Lock()
 		covered := g.onlyOpenLocked(topicName, idxs)
-		var err error
+		var claimed []claimedEntry
 		if covered {
-			err = g.closeTopicLocked(topicName)
+			claimed = g.claimTopicLocked(topicName)
 		}
 		g.mu.Unlock()
+		err := g.closeClaimed(claimed)
+		unlock()
 		for _, mu := range held {
 			mu.Unlock()
 		}
@@ -435,10 +471,68 @@ func (g *Logs) openTopics() []string {
 	return names
 }
 
+// claimedEntry is a map entry a close has claimed (marked closing) and
+// will close and drop.
+type claimedEntry struct {
+	key   logKey
+	entry *logEntry
+}
+
+// claimLocked marks e as being closed. Caller holds the topic's guard
+// and mu (write), and must pass the entry to closeClaimed.
+func claimLocked(e *logEntry) {
+	e.closing = true
+	e.closed = make(chan struct{})
+}
+
+// claimTopicLocked claims every open log of topicName. Caller holds the
+// topic's guard and mu (write).
+func (g *Logs) claimTopicLocked(topicName string) []claimedEntry {
+	var claimed []claimedEntry
+	for k, e := range g.logs {
+		if k.topic == topicName {
+			claimLocked(e)
+			claimed = append(claimed, claimedEntry{key: k, entry: e})
+		}
+	}
+	return claimed
+}
+
+// closeClaimed closes each claimed log, then drops its entry and
+// releases the Peek callers waiting on it, and returns the first close
+// error; an entry is dropped whether or not its close failed, so the
+// next Get starts clean. Caller holds the guard of each entry's topic
+// and not mu: the closes run outside the log map lock.
+func (g *Logs) closeClaimed(claimed []claimedEntry) error {
+	var firstErr error
+	for _, c := range claimed {
+		if err := c.entry.log.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		g.mu.Lock()
+		if g.logs[c.key] == c.entry {
+			delete(g.logs, c.key)
+		}
+		g.mu.Unlock()
+		close(c.entry.closed)
+	}
+	return firstErr
+}
+
+// closeTopicGuarded closes and drops every open log under topicName.
+// Caller holds the topic's guard and not mu. Produce mutexes are NOT
+// taken or retired here: a produce commit inside Get may hold one while
+// waiting for the guard.
+func (g *Logs) closeTopicGuarded(topicName string) error {
+	g.mu.Lock()
+	claimed := g.claimTopicLocked(topicName)
+	g.mu.Unlock()
+	return g.closeClaimed(claimed)
+}
+
 // closeTopicLocked closes and drops every open log under topicName.
-// Caller holds mu (write). Produce mutexes are NOT retired here: that
-// takes each mutex, which a produce commit inside Get may hold while
-// waiting for mu.
+// Caller holds the topic's guard and mu (write); only the open path,
+// which retires a replaced incarnation's logs, still closes under mu.
 func (g *Logs) closeTopicLocked(topicName string) error {
 	var firstErr error
 	for k, e := range g.logs {
@@ -473,23 +567,27 @@ func retentionFromTopic(r int64, checkInterval time.Duration) storage.RetentionC
 func (g *Logs) ClosePartition(topicName string, idx int) error {
 	key := keyOf(topicName, idx)
 	produceMu := g.lockProduce(topicName, idx)
-	err := g.closePartition(key)
+	unlock := g.lockTopic(topicName)
+	err := g.closePartitionGuarded(key)
+	unlock()
 	produceMu.Unlock()
 	g.retireProduceEntries(func(k logKey) bool { return k == key })
 	return err
 }
 
-// closePartition closes and drops one partition's open log, if any.
-// Caller holds its produce mutex.
-func (g *Logs) closePartition(key logKey) error {
+// closePartitionGuarded closes and drops one partition's open log, if
+// any. Caller holds its produce mutex and its topic's guard, not mu.
+func (g *Logs) closePartitionGuarded(key logKey) error {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	e, ok := g.logs[key]
+	if ok {
+		claimLocked(e)
+	}
+	g.mu.Unlock()
 	if !ok {
 		return nil
 	}
-	delete(g.logs, key)
-	return e.log.Close()
+	return g.closeClaimed([]claimedEntry{{key: key, entry: e}})
 }
 
 // ReplacePartitionDir closes the partition's open log, if any, and runs
@@ -516,7 +614,7 @@ func (g *Logs) ReplacePartitionDir(topicName string, idx int, swap func() error)
 	defer produceMu.Unlock()
 	unlock := g.lockTopic(topicName)
 	defer unlock()
-	if err := g.closePartition(keyOf(topicName, idx)); err != nil {
+	if err := g.closePartitionGuarded(keyOf(topicName, idx)); err != nil {
 		return fmt.Errorf("broker/runtime: close %s/%d before replacing its directory: %w", topicName, idx, err)
 	}
 	return swap()

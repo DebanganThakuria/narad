@@ -25,7 +25,9 @@ package runtime
 //     incarnation alone;
 //   - a purge holds the topic's guard from closing the open logs
 //     through unlinking the directory, so an open of the same topic
-//     waits and then sees the directory gone.
+//     waits and then sees the directory gone. It holds the log map lock
+//     only to claim and drop the topic's entries, never across the
+//     closes or the unlink.
 //
 // A record without an ID (created before IDs existed) keeps the old
 // name-based behaviour: nothing is stamped, nothing is quarantined.
@@ -229,10 +231,11 @@ func (g *Logs) purgeTopicGuarded(topicName, id string) (purged bool, err error) 
 		}
 	}
 
-	g.mu.Lock()
-	closeErr := g.closeTopicLocked(topicName)
+	// Under the guard only: the closes (a flush and fsyncs per open
+	// partition) and the unlink of every segment file stall callers of
+	// this topic, which must wait for the purge anyway, and nobody else.
+	closeErr := g.closeTopicGuarded(topicName)
 	rmErr := os.RemoveAll(dir)
-	g.mu.Unlock()
 	if closeErr != nil {
 		err = closeErr
 	}
