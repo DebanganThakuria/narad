@@ -87,6 +87,12 @@ func (c *frameCache) put(k frameKey, recs [][]byte) {
 	for _, r := range recs {
 		bytes += len(r)
 	}
+	c.putSized(k, recs, bytes)
+}
+
+// putSized is put with the frame's memory footprint supplied by the
+// caller, which knows it without walking the records.
+func (c *frameCache) putSized(k frameKey, recs [][]byte, bytes int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e, ok := c.items[k]; ok {

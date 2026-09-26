@@ -71,25 +71,33 @@ func (c *navCache) bestAnchor(segmentBase, offset int64) (indexEntry, bool) {
 	}
 
 	// Slow path: closest cached frame at or below the offset (boundary crossings
-	// and non-sequential reads).
+	// and non-sequential reads). A frame that contains the offset ends the walk
+	// wherever it sits: frames of one segment never overlap, so no other entry
+	// can start closer below the offset. Readers at the frontier take turns on
+	// the few newest frames, so the covering one is almost always a step or two
+	// from the front; only an offset no cached frame covers walks the list.
 	var (
-		best    indexEntry
-		bestEl  *list.Element
-		bestSet bool
+		best   *indexEntry
+		bestEl *list.Element
 	)
 	for el := c.ll.Front(); el != nil; el = el.Next() {
-		e := el.Value.(*navCacheEntry).entry
+		e := &el.Value.(*navCacheEntry).entry
 		if e.segmentBaseOffset != segmentBase || e.baseOffset > offset {
 			continue
 		}
-		if !bestSet || e.baseOffset > best.baseOffset {
-			best, bestEl, bestSet = e, el, true
+		if offset < e.baseOffset+int64(e.recordCount) {
+			best, bestEl = e, el
+			break
+		}
+		if best == nil || e.baseOffset > best.baseOffset {
+			best, bestEl = e, el
 		}
 	}
-	if bestSet {
-		c.ll.MoveToFront(bestEl)
+	if best == nil {
+		return indexEntry{}, false
 	}
-	return best, bestSet
+	c.ll.MoveToFront(bestEl)
+	return *best, true
 }
 
 // put inserts (or refreshes) a resolved frame.

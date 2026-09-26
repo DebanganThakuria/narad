@@ -6,8 +6,10 @@ package storage
 // reaper goroutines, takes file descriptors, and stamps the log as
 // active so idle eviction can never fire. Everything a describe needs
 // is on disk: the segment files (count, sizes, oldest base offset and
-// mtime) and the durable high-watermark file, which Close force-syncs,
-// so for a closed log it is exact.
+// mtime) and the durable high-watermark file, which Close writes
+// exactly, so for a cleanly closed log it is exact (after a crash it
+// reads as 0 until the log is opened and closed again, see
+// ReadPersistedHighWatermark).
 
 import (
 	"errors"

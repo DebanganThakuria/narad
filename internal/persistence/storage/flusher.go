@@ -27,11 +27,10 @@ type flusher struct {
 	log *Log
 
 	wakeup chan struct{}
-	// armReq asks for the timer back WITHOUT asking for a drain. Two
-	// senders: notePush when a record enters an empty buffer, and
-	// noteHighWatermarkAdvance when the visible boundary moves ahead of
-	// the persisted one. Both mean "scheduling is owed", never "here is
-	// work to do now" -- needsTimer decides what, if anything, is due.
+	// armReq asks for the timer back WITHOUT asking for a drain. Its
+	// sender, notePush when a record enters an empty buffer, means
+	// "scheduling is owed", never "here is work to do now" -- needsTimer
+	// decides what, if anything, is due.
 	armReq   chan struct{}
 	syncReqs chan commitRequest
 	stop     chan struct{}
@@ -56,20 +55,6 @@ type flusher struct {
 	// still truncate them (see discardUncommittedTail); a sealed segment
 	// is never touched.
 	rollPending bool
-
-	// hwmForce is a per-drain flag: set when this drain must persist the
-	// high-watermark unconditionally (a forced sync, a segment roll, or
-	// SyncPerWrite). Reset at the start of every drainOnce.
-	hwmForce bool
-
-	// enc holds the frame encode buffers, reused across flushes. Only the
-	// flusher goroutine touches them and nothing retains an encoded frame
-	// past writeEncodedFrame, so reuse cannot alias live data.
-	enc frameEncoder
-
-	// verifyBuf is the reusable CRC read buffer for VerifyDurable on the
-	// commit path (no per-frame payload allocation).
-	verifyBuf []byte
 
 	// closeErr records the final shutdown drain's error so Close can
 	// surface it. Written only by run() before done closes; read only
@@ -114,7 +99,7 @@ func newFlusher(log *Log, mu *sync.RWMutex, interval time.Duration) *flusher {
 // fsyncs it, blocking until the data is durable on disk. Use it when a
 // record must be durable but visibility is managed by the caller (tests,
 // transfers). The commit path uses CommitDurable instead so the
-// high-watermark advance and its persistence ride the same drain.
+// high-watermark advance rides the same drain.
 // Returns ErrLogClosed if the log is closing.
 func (l *Log) Sync() error {
 	return l.submitCommit(commitRequest{hwm: -1})
@@ -124,14 +109,16 @@ func (l *Log) Sync() error {
 // offsets [first, last]. On the flusher goroutine it: drains and writes
 // any buffered records, fdatasyncs the active segment, re-reads the
 // frames covering [first, last] to validate their on-disk CRC (unless
-// the log was opened with DisableCommitVerify), advances the
-// high-watermark to last+1 so the records become visible, and persists
-// the advanced high-watermark before returning.
+// the log was opened with DisableCommitVerify), and advances the
+// high-watermark to last+1 so the records become visible.
 //
-// Persisting the high-watermark inside the same drain closes the window
-// where a batch was fsynced and checkpointed upstream but its visibility
-// boundary had not reached disk: after CommitDurable returns, a restart
-// recovers a high-watermark of at least last+1.
+// After CommitDurable returns, a restart recovers a high-watermark of at
+// least last+1: the first advance of the Log's life empties the hwm
+// file, recovery then rebuilds the boundary from the CRC-verified record
+// tail, and the records were fsynced before they became visible. So the
+// commit does not also fsync the boundary file, which used to be a
+// second serial fsync on every commit under the produce lock; Close
+// writes the exact boundary for readers of the closed log (see hwm.go).
 //
 // A failed commit leaves no trace of the batch: every record above the
 // high-watermark (the batch, anything appended after it, and any earlier
@@ -220,32 +207,22 @@ func (f *flusher) requestArm() {
 	}
 }
 
-// noteHighWatermarkAdvance asks for the timer back after the visible
-// boundary moved ahead of the persisted one.
-//
-// Like notePush's empty-buffer case this asks for scheduling, not for
-// work: syncHighWatermark decides for itself whether HWMSyncInterval
-// has elapsed. Safe to call from any goroutine and before the flusher
-// has started.
-func (f *flusher) noteHighWatermarkAdvance() {
-	f.requestArm()
-}
-
 // needsTimer reports whether a periodic pass is still owed, and so
 // whether the timer has to stay armed. It is the flusher goroutine's
 // post-pass arming decision, and it is also polled from test
 // goroutines, so every field it reads must be safe to read from another
 // goroutine: buffer.pending() and hasPendingFlushing() take their own
-// mutexes, and the rest are atomics. A fifth condition has to satisfy
+// mutexes, and the rest are atomics. A further condition has to satisfy
 // that same constraint.
 //
-// These four conditions are exactly what the old always-armed timer
-// existed to service; there is deliberately no fifth. A pending segment
-// roll is NOT one of them: rollIfPending runs only for a commit or the
-// shutdown drain (see drainOnce), and any roll the timer would have
-// missed is taken by activeForWrite before the next frame is written.
-// The reaper's time-based rotation arrives as its own commit request,
-// not on this timer.
+// These conditions are exactly what the old always-armed timer existed
+// to service. A pending segment roll is NOT one of them: rollIfPending
+// runs only for a commit or the shutdown drain (see drainOnce), and any
+// roll the timer would have missed is taken by activeForWrite before
+// the next frame is written. The reaper's time-based rotation arrives as
+// its own commit request, not on this timer. Neither is the
+// high-watermark: an advance leaves nothing to write until Close (see
+// hwm.go).
 func (f *flusher) needsTimer() bool {
 	l := f.log
 	switch {
@@ -273,9 +250,6 @@ func (f *flusher) needsTimer() bool {
 		return true
 	case l.hasPendingFlushing():
 		// An earlier writeBatch failed; the retry rides the timer.
-		return true
-	case l.highWatermark.Load() > l.persistedHWM.Load():
-		// syncHighWatermark deferred the persist behind HWMSyncInterval.
 		return true
 	}
 	return false
@@ -311,10 +285,9 @@ func (f *flusher) run() {
 	rearm := func() {
 		// Consume a pending arm request BEFORE deciding, so a token that
 		// is already satisfied by this decision cannot cause a second,
-		// redundant wake. Every commit produces one, via
-		// AdvanceHighWatermark, and without this each commit paid an
-		// extra select round plus a needsTimer evaluation and a timer
-		// stop/reset.
+		// redundant wake: a push racing the pass that already drained
+		// its record would otherwise cost an extra select round plus a
+		// needsTimer evaluation and a timer stop/reset.
 		//
 		// Order matters and is the safe one: draining first means
 		// needsTimer below is evaluated AFTER the drain, so a push that
@@ -355,18 +328,14 @@ func (f *flusher) run() {
 		case <-f.wakeup:
 			forceDrain = true
 		case <-f.armReq:
-			// Scheduling is owed, not necessarily work. Either a record
-			// entered an empty buffer (nothing is due yet: it is younger
-			// than timerFlushAge) or the high-watermark moved ahead of the
-			// persisted one (a pass IS owed, and the timer is the right
-			// place for it since syncHighWatermark defers behind
-			// HWMSyncInterval anyway). rearm decides which via needsTimer.
+			// Scheduling is owed, not work: a record entered an empty
+			// buffer, and nothing is due yet (it is younger than
+			// timerFlushAge). rearm arms the timer via needsTimer.
 			//
-			// No pass runs inline either way. Draining here would do
-			// nothing for the first case, and for both it would make the
-			// flusher goroutine touch the log on every idle-to-active
-			// transition, widening what runs concurrently with a commit
-			// for no gain.
+			// No pass runs inline. Draining here would do nothing, and it
+			// would make the flusher goroutine touch the log on every
+			// idle-to-active transition, widening what runs concurrently
+			// with a commit for no gain.
 			rearm()
 			continue
 		case req := <-f.syncReqs:
@@ -388,10 +357,8 @@ func (f *flusher) run() {
 }
 
 // drainOnce is one flusher pass: write whatever needs writing, sync if
-// required, run the commit's verify + high-watermark advance (if any),
-// then persist the high-watermark once. The HWM persist is the last
-// step so a commit's advance lands in the same pass that fsynced its
-// records.
+// required, then run the commit's verify + high-watermark advance (if
+// any). No pass persists the high-watermark: see CommitDurable.
 //
 // Any failure of a commit request, at whatever step, discards the
 // uncommitted tail before the error is reported (see CommitDurable).
@@ -399,7 +366,6 @@ func (f *flusher) drainOnce(forceSync, forceDrain bool, commit *commitRequest) e
 	if h := flushPassHook; h != nil {
 		h()
 	}
-	f.hwmForce = forceSync
 
 	if err := f.log.poisoned(); err != nil {
 		// An earlier fsync failed: nothing this process writes to the
@@ -430,11 +396,16 @@ func (f *flusher) drainOnce(forceSync, forceDrain bool, commit *commitRequest) e
 		// its failure fails that commit before anything is written.
 		f.rollIfPending()
 	}
-	return f.log.syncHighWatermark(f.hwmForce)
+	return nil
 }
 
-// rollIfPending seals a full active segment outside any commit's
-// critical path. Errors are logged, not returned: see drainOnce.
+// rollIfPending seals a full active segment once the commit that filled
+// it is durable and visible, so a failed commit never has to truncate a
+// sealed segment. It is not off that commit's latency path: it runs
+// before the commit's reply, and roll creates the next segment (a file
+// create and a directory fsync) under the Log's write lock, which also
+// holds off every reader of the partition. That is once per SegmentBytes
+// written. Errors are logged, not returned: see drainOnce.
 func (f *flusher) rollIfPending() {
 	f.mu.RLock()
 	pending := f.rollPending
@@ -472,18 +443,11 @@ func (f *flusher) drainAndSync(forceSync, forceDrain bool) error {
 // the reaper's rotation.
 func (f *flusher) finishRequest(commit *commitRequest) error {
 	if commit.verify && commit.last >= commit.first {
-		if verr := f.log.verifyDurable(commit.first, commit.last, &f.verifyBuf); verr != nil {
+		if verr := f.log.VerifyDurable(commit.first, commit.last); verr != nil {
 			return VerifyError{First: commit.first, Last: commit.last, Err: verr}
 		}
 	}
 	if commit.hwm >= 0 {
-		// Persist first, then expose: if the persist fails the records
-		// stay hidden and the commit reports failure, so the caller
-		// (the ingress dispatcher) retries instead of checkpointing past
-		// a batch whose visibility boundary never reached disk.
-		if perr := f.log.persistHighWatermarkAtLeast(commit.hwm); perr != nil {
-			return perr
-		}
 		if aerr := f.log.AdvanceHighWatermark(commit.hwm); aerr != nil {
 			return aerr
 		}
@@ -530,9 +494,10 @@ func frameSplitLen(records [][]byte) int {
 // so every frame stays under the decodeHeader read limit. Offsets stay
 // continuous across the split frames.
 func (f *flusher) writeBatch(records [][]byte, baseOffset int64, forceSync bool) error {
+	cache := f.log.cacheWrittenFrames()
 	for len(records) > 0 {
 		n := frameSplitLen(records)
-		if err := f.writeFrame(records[:n], baseOffset, forceSync); err != nil {
+		if err := f.writeFrame(records[:n], baseOffset, forceSync, cache); err != nil {
 			return err
 		}
 		baseOffset += int64(n)
@@ -541,28 +506,44 @@ func (f *flusher) writeBatch(records [][]byte, baseOffset int64, forceSync bool)
 	return nil
 }
 
-func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool) error {
+// maxCachedWriteFrameBytes bounds the frames writeFrame puts into the
+// decoded-frame cache: a backlog drain can write frames of megabytes,
+// and one of those would evict every frame the partition's consumers
+// are reading.
+const maxCachedWriteFrameBytes = maxDecodeCacheBytes / 8
+
+// cacheWrittenFrames reports whether the batch about to be written also
+// goes into the decoded-frame cache. Every frame a consumer reads at the
+// frontier used to miss the cache, because the flusher dropped the
+// in-memory records at fsync and the first readers woken by the commit
+// then re-read and re-decoded the frame from the file, each of them.
+// The records are immutable and exactly what the frame holds, so caching
+// them as written is free of I/O. Only when something read the log since
+// the last batch (readSeen), so partitions nobody reads keep empty
+// caches; and only with the commit read-back on, so a record served from
+// memory is one whose on-disk CRC the commit verified.
+func (l *Log) cacheWrittenFrames() bool {
+	return !l.opts.DisableCommitVerify && l.readSeen.CompareAndSwap(true, false)
+}
+
+func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync, cache bool) error {
 	flushStart := time.Now()
-	frame, err := f.enc.encodeFrame(records, baseOffset, f.log.codec)
+	enc := frameEncoders.Get().(*frameEncoder)
+	pos, n, active, err := f.encodeAndWrite(enc, records, baseOffset)
+	// Nothing references the encoded frame once it is written, so the
+	// buffers go back for the next frame, whichever flusher encodes it.
+	frameEncoders.Put(enc)
 	if err != nil {
 		return err
 	}
 
-	active, err := f.activeForWrite()
-	if err != nil {
-		return err
+	entry := indexEntry{
+		segmentBaseOffset: active.baseOffset,
+		baseOffset:        baseOffset,
+		recordCount:       int32(len(records)),
+		framePos:          pos,
+		frameLen:          int32(n),
 	}
-
-	// The write syscall runs outside rwmu. This goroutine is the only
-	// writer of the active segment, so its size and offset fields cannot
-	// change underneath us; readers bound their scans by sizeBytes, which
-	// is only advanced (under the write lock) after the bytes are in
-	// place, so they never observe a partially written frame.
-	pos, n, err := active.writeEncodedFrame(frame)
-	if err != nil {
-		return err
-	}
-
 	f.mu.Lock()
 	now := f.log.now()
 	if active.firstWriteAt.IsZero() {
@@ -571,13 +552,7 @@ func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool)
 	active.lastWriteAt = now
 	active.sizeBytes = pos + int64(n)
 	active.nextOffset = baseOffset + int64(len(records))
-	f.log.appendIndexLocked(indexEntry{
-		segmentBaseOffset: active.baseOffset,
-		baseOffset:        baseOffset,
-		recordCount:       int32(len(records)),
-		framePos:          pos,
-		frameLen:          int32(n),
-	})
+	f.log.appendIndexLocked(entry)
 	f.log.markFlushingWritten(active.nextOffset)
 	if active.sizeBytes >= f.log.opts.SegmentBytes {
 		f.rollPending = true
@@ -591,9 +566,68 @@ func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool)
 	f.unsyncedBytes.Add(int64(n))
 	f.mu.Unlock()
 
+	// The exact position of the frame just written. The sparse index
+	// keeps only an anchor every 32 KiB, so without this the commit's
+	// read-back (and the first consumer) found the frame by walking the
+	// whole navigation cache and then reading the previous frame's
+	// header from the file. A failed commit that truncates the frame
+	// drops the segment's cached positions (discardUncommittedTail), and
+	// one that cannot truncate leaves the frame in place, so the entry
+	// never outlives its bytes.
+	f.log.navCache.put(entry)
+	if cache {
+		f.cacheWrittenFrame(entry, records)
+	}
+
 	// A full segment is synced now so the roll before the next write
 	// finds it durable.
 	return f.syncIfNeeded(forceSync || full, active)
+}
+
+// encodeAndWrite encodes records into a frame with enc and writes it at
+// the end of the active segment, rolling first if the segment is due.
+func (f *flusher) encodeAndWrite(enc *frameEncoder, records [][]byte, baseOffset int64) (int64, int, *segment, error) {
+	frame, err := enc.encodeFrame(records, baseOffset, f.log.codec)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+
+	active, err := f.activeForWrite()
+	if err != nil {
+		return 0, 0, nil, err
+	}
+
+	// The write syscall runs outside rwmu. This goroutine is the only
+	// writer of the active segment, so its size and offset fields cannot
+	// change underneath us; readers bound their scans by sizeBytes, which
+	// is only advanced (under the write lock) after the bytes are in
+	// place, so they never observe a partially written frame.
+	pos, n, err := active.writeEncodedFrame(frame)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	return pos, n, active, nil
+}
+
+// cacheWrittenFrame puts the records of the frame just written into the
+// decoded-frame cache (see cacheWrittenFrames). Only after the write and
+// the index update succeeded, so a failed write never leaves an entry;
+// a failed commit that truncates the frame drops the segment's cached
+// frames with it (discardUncommittedTail). records aliases the drain's
+// backing array, so the cache gets its own copy of the slice headers:
+// caching the sub-slice would pin every record of the drain and escape
+// the cache's byte accounting.
+func (f *flusher) cacheWrittenFrame(entry indexEntry, records [][]byte) {
+	size := 0
+	for _, r := range records {
+		size += len(r)
+	}
+	if size > maxCachedWriteFrameBytes {
+		return
+	}
+	recs := make([][]byte, len(records))
+	copy(recs, records)
+	f.log.frameCache.putSized(frameKey{segmentBase: entry.segmentBaseOffset, framePos: entry.framePos}, recs, size)
 }
 
 // activeForWrite returns the segment the next frame goes into, rolling
@@ -632,7 +666,6 @@ func (f *flusher) roll(active *segment) (*segment, error) {
 	}
 	f.log.segments = append(f.log.segments, newActive)
 	f.rollPending = false
-	f.hwmForce = true
 	return newActive, nil
 }
 
@@ -660,8 +693,7 @@ func (f *flusher) rotateActive() error {
 }
 
 // syncIfNeeded fdatasyncs the active segment when forced or when the
-// batched-sync thresholds say so. It does not persist the high-watermark;
-// drainOnce does that once per pass, after any commit advance.
+// batched-sync thresholds say so.
 //
 // An fsync failure is final for this Log. After a failed fdatasync the
 // kernel may have dropped the dirty pages (Linux marks them clean and
@@ -710,10 +742,6 @@ func (f *flusher) syncIfNeeded(force bool, active *segment) error {
 	f.log.clearFlushingThrough(active.nextOffset)
 	if m := f.log.opts.Metrics; m != nil {
 		m.ObserveFsync(time.Since(syncStart))
-	}
-
-	if force || f.log.opts.SyncMode == SyncPerWrite {
-		f.hwmForce = true
 	}
 	return nil
 }

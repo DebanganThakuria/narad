@@ -159,6 +159,8 @@ func TestRoundTripAfterFlushAndReopen(t *testing.T) {
 	}
 }
 
+// Close writes the exact high-watermark for readers of the closed log,
+// and a reopen restores it: the record at offset 2 stays hidden.
 func TestHighWatermarkPersistsAcrossRestart(t *testing.T) {
 	path := testLogPath(t)
 	mustWriteAndClose(t, path, slowFlushOpts(t, nil), func(l *Log) {
@@ -171,6 +173,9 @@ func TestHighWatermarkPersistsAcrossRestart(t *testing.T) {
 			t.Fatalf("AdvanceHighWatermark: %v", err)
 		}
 	})
+	if got, ok, err := ReadPersistedHighWatermark(path); err != nil || !ok || got != 2 {
+		t.Fatalf("persisted after Close = (%d, %v, %v), want exactly 2", got, ok, err)
+	}
 
 	l, err := NewLog(path, slowFlushOpts(t, nil))
 	if err != nil {
@@ -325,8 +330,10 @@ func TestBatchedSyncDoesNotFsyncEveryFlush(t *testing.T) {
 	if got := metrics.fsyncs.Load(); got != 0 {
 		t.Fatalf("fsyncs before close = %d, want 0", got)
 	}
-	if got := metrics.hwms.Load(); got != 0 {
-		t.Fatalf("hwm persists before close = %d, want 0", got)
+	// One: the release that emptied the hwm file before the first
+	// advance. The advances after it write nothing.
+	if got := metrics.hwms.Load(); got != 1 {
+		t.Fatalf("hwm persists before close = %d, want 1", got)
 	}
 
 	if err := l.Close(); err != nil {
@@ -335,8 +342,8 @@ func TestBatchedSyncDoesNotFsyncEveryFlush(t *testing.T) {
 	if got := metrics.fsyncs.Load(); got != 1 {
 		t.Fatalf("fsyncs after close = %d, want 1", got)
 	}
-	if got := metrics.hwms.Load(); got != 1 {
-		t.Fatalf("hwm persists after close = %d, want 1", got)
+	if got := metrics.hwms.Load(); got != 2 {
+		t.Fatalf("hwm persists after close = %d, want 2", got)
 	}
 }
 

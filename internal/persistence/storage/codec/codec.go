@@ -27,7 +27,10 @@ type Codec interface {
 	// Encode appends the compressed form of src to dst.
 	Encode(dst, src []byte) []byte
 	// Decode appends the decompressed form of src to dst.
-	// dstSizeHint, when > 0, is the expected uncompressed size.
+	// dstSizeHint, when > 0, is the expected uncompressed size. The
+	// returned slice belongs to the caller: an implementation must not
+	// retain or later reuse it (or dst), because the storage layer keeps
+	// slices of it as cached records.
 	Decode(dst, src []byte, dstSizeHint int) ([]byte, error)
 }
 
@@ -82,14 +85,7 @@ func zstdPoolWorkers() int {
 // zstd's decompression speed is independent of the encoder level —
 // there is no read-side cost to using SpeedBestCompression.
 func NewZstdCodec(level zstd.EncoderLevel) (Codec, error) {
-	workers := zstdPoolWorkers()
-	c := &zstdCodec{
-		level:   level,
-		encPool: make(chan *zstd.Encoder, workers),
-		encSem:  make(chan struct{}, workers),
-		decPool: make(chan *zstd.Decoder, workers),
-		decSem:  make(chan struct{}, workers),
-	}
+	c := newZstdCodec(level)
 	c.encSem <- struct{}{}
 	enc, err := c.newEncoder()
 	if err != nil {
@@ -97,14 +93,47 @@ func NewZstdCodec(level zstd.EncoderLevel) (Codec, error) {
 		return nil, err
 	}
 	c.putEncoder(enc)
-	c.decSem <- struct{}{}
-	dec, err := c.newDecoder()
-	if err != nil {
-		<-c.decSem
+	if err := c.primeDecoder(); err != nil {
 		return nil, err
 	}
-	c.putDecoder(dec)
 	return c, nil
+}
+
+// NewZstdDecoder returns a zstd codec for reading: it builds no encoder
+// up front (NewZstdCodec builds one to surface a bad level early), only
+// a decoder. Encode still works and builds an encoder at SpeedDefault on
+// first use. For reading zstd frames with a log whose own codec is not
+// zstd.
+func NewZstdDecoder() (Codec, error) {
+	c := newZstdCodec(zstd.SpeedDefault)
+	if err := c.primeDecoder(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func newZstdCodec(level zstd.EncoderLevel) *zstdCodec {
+	workers := zstdPoolWorkers()
+	return &zstdCodec{
+		level:   level,
+		encPool: make(chan *zstd.Encoder, workers),
+		encSem:  make(chan struct{}, workers),
+		decPool: make(chan *zstd.Decoder, workers),
+		decSem:  make(chan struct{}, workers),
+	}
+}
+
+// primeDecoder builds the first pooled decoder, surfacing an init error
+// at construction rather than on the first Decode.
+func (z *zstdCodec) primeDecoder() error {
+	z.decSem <- struct{}{}
+	dec, err := z.newDecoder()
+	if err != nil {
+		<-z.decSem
+		return err
+	}
+	z.putDecoder(dec)
+	return nil
 }
 
 func (z *zstdCodec) Flag() uint8 { return FlagZstd }
