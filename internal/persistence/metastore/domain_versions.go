@@ -11,19 +11,27 @@ import (
 // cache and invalidate precisely (e.g. only when a specific topic's
 // assignments change).
 //
-// Each domain has a whole-domain floor (the *All fields, bumped by
-// snapshot restores) and a per-key table; a key's effective version is
-// the max of the two. All versions are drawn from the shared next
+// Each keyed domain publishes an immutable table: a cell per key it has
+// seen, and a floor, the version every key without a cell reads. A
+// snapshot restore swaps in an empty table whose floor is above every
+// version handed out so far. All versions are drawn from the shared next
 // counter.
 //
 // Reads are lock-free: the hot paths (produce, consume, routing) read
 // several versions per request, and a shared RWMutex around the per-key
-// maps was measurable on every one of them. Each per-key table is an
-// immutable map from key to a *atomic.Uint64 cell, published through an
-// atomic pointer; readers do one pointer load, one map lookup, and one
-// cell load. Writers hold mu: bumping a known key stores into its cell in
-// place, bumping a new key copies the table (O(keys), paid once per key,
-// on topic creation), and bumpAll swaps in empty tables.
+// maps was measurable on every one of them. The table is published
+// through an atomic pointer; readers do one pointer load, one map
+// lookup, and one cell load. Writers hold mu: bumping a known key stores
+// into its cell in place, bumping a new key copies the table (O(keys),
+// paid once per key, on topic creation), and bumpAll swaps in empty
+// tables.
+//
+// retireTopic keeps a deleted topic's cells as tombstones and prunes
+// them maxRetiredKeys at a time, so the tables can track live names
+// rather than every name ever used. The FSM's topic delete does not call
+// it yet: applyDeleteTopic still bumps the three domains one by one,
+// which leaves a cell per deleted name until it calls retireTopic in
+// their place.
 type metadataDomainVersions struct {
 	// mu serialises writers only. Every bump draws its version from next
 	// and publishes it while holding mu, so per-key versions are
@@ -39,62 +47,115 @@ type metadataDomainVersions struct {
 	users          atomic.Uint64
 }
 
-// keyedVersions is one domain's versions: the whole-domain floor and the
-// immutable per-key table.
+// maxRetiredKeys is how many deleted names a domain keeps as tombstones
+// before pruning them. A prune raises the floor, which moves the version
+// of every key without a cell (never seen, or not bumped since the last
+// snapshot restore) and so makes their cached reads reload once; doing
+// it in batches keeps that to once per this many topic deletes while
+// bounding what unique-name churn can leave behind.
+const maxRetiredKeys = 1024
+
+// keyedVersions is one domain's versions.
 type keyedVersions struct {
-	all   atomic.Uint64
-	table atomic.Pointer[map[string]*atomic.Uint64]
+	table atomic.Pointer[versionTable]
+	// retired holds the keys whose cells are tombstones of deleted
+	// names, awaiting a prune. Guarded by metadataDomainVersions.mu.
+	retired map[string]struct{}
+}
+
+// versionTable is one immutable snapshot of a domain's per-key versions.
+// The map is never written after publication; the cells are, in place.
+type versionTable struct {
+	cells map[string]*atomic.Uint64
+	// floor is the version of every key without a cell.
+	floor uint64
 }
 
 func newMetadataDomainVersions() metadataDomainVersions {
 	return metadataDomainVersions{}
 }
 
-// version returns max(floor, per-key) for key, lock-free.
+// version returns key's version, lock-free.
+//
+// A key's reads never go backwards. Tables are published in order under
+// the writers' lock, and each read uses one table: a cell only ever
+// stores newer versions; a cell that replaces a pruned or reset one
+// starts from a version drawn after the old cell's last store; a table's
+// floor is copied forward or raised, never lowered; and a key that gains
+// a cell gets a version drawn after the floor it read before. So a
+// cached (value, version) pair can only look current while the key has
+// not changed.
 func (k *keyedVersions) version(key string) uint64 {
-	// Load the table before the floor. bumpAll stores the raised floor
-	// first and swaps in the empty table second, so a reader that sees
-	// the new table is guaranteed to see the raised floor, and one that
-	// still sees the old table returns max(old key, floor), which is
-	// never below what it returned before.
-	var v uint64
-	if t := k.table.Load(); t != nil {
-		if cell := (*t)[key]; cell != nil {
-			v = cell.Load()
-		}
+	t := k.table.Load()
+	if t == nil {
+		return 0
 	}
-	return max(v, k.all.Load())
+	if cell := t.cells[key]; cell != nil {
+		return cell.Load()
+	}
+	return t.floor
 }
 
 // set publishes version for key. Caller holds metadataDomainVersions.mu.
 func (k *keyedVersions) set(key string, version uint64) {
 	old := k.table.Load()
 	if old != nil {
-		if cell := (*old)[key]; cell != nil {
+		if cell := old.cells[key]; cell != nil {
 			cell.Store(version)
+			// A bump means the name is in use again (a recreate).
+			delete(k.retired, key)
 			return
 		}
 	}
+	next := &versionTable{}
 	size := 1
 	if old != nil {
-		size += len(*old)
+		size += len(old.cells)
+		next.floor = old.floor
 	}
-	next := make(map[string]*atomic.Uint64, size)
+	next.cells = make(map[string]*atomic.Uint64, size)
 	if old != nil {
-		maps.Copy(next, *old)
+		maps.Copy(next.cells, old.cells)
 	}
 	cell := new(atomic.Uint64)
 	cell.Store(version)
-	next[key] = cell
-	k.table.Store(&next)
+	next.cells[key] = cell
+	k.table.Store(next)
 }
 
-// reset raises the floor to version and drops the per-key table. Caller
-// holds metadataDomainVersions.mu.
+// retire publishes version for a deleted key and marks its cell a
+// tombstone. When maxRetiredKeys tombstones have piled up, they go in
+// one step: a table without them whose floor, drawn from next, is newer
+// than any cell, so each pruned name still reads a version above
+// everything it read before. Caller holds metadataDomainVersions.mu.
+func (k *keyedVersions) retire(key string, version uint64, next *atomic.Uint64) {
+	k.set(key, version)
+	if k.retired == nil {
+		k.retired = make(map[string]struct{})
+	}
+	k.retired[key] = struct{}{}
+	if len(k.retired) < maxRetiredKeys {
+		return
+	}
+	old := k.table.Load()
+	pruned := &versionTable{
+		cells: make(map[string]*atomic.Uint64, len(old.cells)-len(k.retired)),
+		floor: next.Add(1),
+	}
+	for name, cell := range old.cells {
+		if _, gone := k.retired[name]; !gone {
+			pruned.cells[name] = cell
+		}
+	}
+	k.table.Store(pruned)
+	clear(k.retired)
+}
+
+// reset drops every cell and raises the floor to version. Caller holds
+// metadataDomainVersions.mu.
 func (k *keyedVersions) reset(version uint64) {
-	k.all.Store(version)
-	empty := make(map[string]*atomic.Uint64)
-	k.table.Store(&empty)
+	k.table.Store(&versionTable{cells: map[string]*atomic.Uint64{}, floor: version})
+	clear(k.retired)
 }
 
 func (v *metadataDomainVersions) bumpTopic(name string) {
@@ -154,6 +215,20 @@ func (v *metadataDomainVersions) routingMembersVersion() uint64 {
 
 func (v *metadataDomainVersions) usersVersion() uint64 {
 	return v.users.Load()
+}
+
+// retireTopic advances a deleted topic's topic, assignment and schema
+// versions, exactly as bumping all three would, and marks its cells as
+// tombstones so that a churn of uniquely named topics does not keep a
+// cell per name ever created (see keyedVersions.retire). It is meant to
+// replace applyDeleteTopic's three bumps for the deleted name; the
+// fan-out partners that delete also bumps stay live and keep bumpTopic.
+func (v *metadataDomainVersions) retireTopic(name string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.topics.retire(name, v.next.Add(1), &v.next)
+	v.assignments.retire(name, v.next.Add(1), &v.next)
+	v.schemas.retire(name, v.next.Add(1), &v.next)
 }
 
 func (v *metadataDomainVersions) bumpKey(domain *keyedVersions, key string) {
