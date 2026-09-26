@@ -17,6 +17,9 @@ import (
 
 // StreamFrameHandler handles a decoded cluster-RPC request frame and
 // writes its reply via respond. It returns true if it handled the frame.
+// respond writes the reply before it returns and keeps no reference to
+// its payload, so a handler may reuse the payload's buffer afterwards
+// (for example, one it encoded the reply into with node.AppendResponse).
 type StreamFrameHandler interface {
 	HandleStreamFrame(frame clusterwire.StreamFrame, respond func(clusterwire.StreamFrame)) bool
 }
@@ -27,7 +30,8 @@ type StreamFrameHandler interface {
 // stream ends, so a handler parked on the client's behalf (a forwarded
 // long-poll) stops as soon as the client is gone. The context carries
 // the serving stream's identity (StreamIDFromContext). A handler that
-// implements it is preferred over HandleStreamFrame.
+// implements it is preferred over HandleStreamFrame. respond behaves as
+// described on StreamFrameHandler.
 type StreamRequestHandler interface {
 	HandleStreamRequest(ctx context.Context, frame clusterwire.StreamFrame, respond func(clusterwire.StreamFrame)) bool
 }
