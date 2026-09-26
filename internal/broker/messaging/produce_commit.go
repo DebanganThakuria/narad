@@ -10,6 +10,16 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
+// ErrTopicIncarnationMismatch rejects a commit whose records were
+// accepted for another incarnation of the topic than the one this node
+// holds under the name: the topic was deleted and recreated while they
+// waited in an ingress WAL, or this node's metadata lags the accepting
+// node's. Nothing is appended. The rejection is retriable on purpose:
+// only the accepting node's dispatcher, with the leader's confirmation,
+// may decide that the records belong to a deleted incarnation and drop
+// them.
+var ErrTopicIncarnationMismatch = errors.New("messaging: records were accepted for another incarnation of the topic")
+
 // CommitAcceptedProduce appends an ingress WAL record to this node's
 // partition log and advances the partition high-watermark. It is the
 // owner-side visibility step for the WAL-first produce design.
@@ -40,9 +50,12 @@ func (e *Engine) CommitAcceptedProduce(ctx context.Context, record ingress.Produ
 		// the ingress dispatcher retries and delivers to the new owner.
 		return 0, ErrNotPartitionOwner
 	}
+	if record.TopicID != "" && record.TopicID != t.ID {
+		return 0, incarnationMismatch(record.Topic, record.TopicID, t.ID)
+	}
 
 	offset, err := e.logs.WithProduceLockResult(record.Topic, record.TargetPartition, func(log *storage.Log) (int64, error) {
-		if err := e.commitGateLocked(ctx, record.Topic, record.TargetPartition); err != nil {
+		if err := e.commitGateLocked(ctx, record.Topic, record.TargetPartition, record.TopicID); err != nil {
 			return 0, err
 		}
 		return e.appendAndCommit(log, storage.EncodeKeyedRecord(record.Key, time.Now().UnixMilli(), record.Payload))
@@ -89,6 +102,10 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 		// Frozen for handoff — see the single-commit path above.
 		return nil, ErrNotPartitionOwner
 	}
+	incarnation, err := batchIncarnation(topicName, records, t.ID)
+	if err != nil {
+		return nil, err
+	}
 
 	// Records are stored wrapped in the keyed envelope so the produce
 	// key and commit time survive the commit (fan-out re-keys parent
@@ -104,7 +121,7 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 
 	var offsets []int64
 	err = e.logs.WithProduceLock(topicName, partition, func(log *storage.Log) error {
-		if err := e.commitGateLocked(ctx, topicName, partition); err != nil {
+		if err := e.commitGateLocked(ctx, topicName, partition, incarnation); err != nil {
 			return err
 		}
 		// The envelopes were built above for this call only and are never
@@ -142,12 +159,55 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 // here, with nothing appended, instead of landing after the fence and
 // stranding acknowledged records on the old owner. A caller that gave up
 // meanwhile (its RPC timed out, say) is not appended either: it retries
-// anyway, and appending it now would only commit a duplicate.
-func (e *Engine) commitGateLocked(ctx context.Context, topicName string, partition int) error {
+// anyway, and appending it now would only commit a duplicate. Records
+// accepted for an incarnation (non-empty) must still find it live: a
+// delete and recreate while the commit waited turns them away.
+func (e *Engine) commitGateLocked(ctx context.Context, topicName string, partition int, incarnation string) error {
 	if !e.isLocalOwner(topicName, partition) || e.isProducePaused(topicName, partition) {
 		return ErrNotPartitionOwner
 	}
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if incarnation == "" {
+		return nil
+	}
+	// Cached and versioned: the metastore is read only when the topic's
+	// record changed.
+	t, err := e.getTopic(context.Background(), topicName)
+	if err != nil {
+		return err
+	}
+	if t.ID != incarnation {
+		return incarnationMismatch(topicName, incarnation, t.ID)
+	}
+	return nil
+}
+
+// batchIncarnation returns the topic incarnation the batch was accepted
+// for, after checking it against liveID, the incarnation this node holds
+// under the name. A record with no TopicID was accepted before
+// incarnations were stamped and is committed by name, as it always was;
+// a batch of only such records returns "". Every stamped record must
+// carry liveID.
+func batchIncarnation(topicName string, records []ingress.ProduceRecord, liveID string) (string, error) {
+	var id string
+	for i := range records {
+		rid := records[i].TopicID
+		if rid == "" {
+			continue
+		}
+		if rid != liveID {
+			return "", incarnationMismatch(topicName, rid, liveID)
+		}
+		id = rid
+	}
+	return id, nil
+}
+
+func incarnationMismatch(topicName, recordID, liveID string) error {
+	return fmt.Errorf("%w: %s is incarnation %q here, the records were accepted for %q",
+		ErrTopicIncarnationMismatch, topicName, liveID, recordID)
 }
 
 // singleBatchTarget validates that every record in the batch is
