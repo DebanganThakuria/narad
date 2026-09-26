@@ -32,7 +32,10 @@ package runtime
 //  5. Candidacy is re-checked under the write lock, in the critical
 //     section that claims the entry: a Get that stamped the entry after
 //     the scan aborts the eviction, and one that comes after the claim
-//     waits for the close and reopens.
+//     waits for the close and reopens. A Get skips the store while
+//     lastAccess is under a second old (stampEvery), and such a stamp
+//     is far inside any idle window (a minute at least), so the
+//     re-check still sees the log in use.
 //
 // Close itself force-syncs the high-watermark file and wakes any
 // long-poll waiters, so an evicted log leaves exact durable state and
