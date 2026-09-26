@@ -37,6 +37,13 @@ func storageOptions(sc config.StorageConfig) (storage.Options, error) {
 	}, nil
 }
 
+// consumerOffsetCommitInterval is the consumer offset committer's
+// cadence: its own setting, not the storage flush interval it used to
+// borrow.
+func consumerOffsetCommitInterval(sc config.StorageConfig) time.Duration {
+	return time.Duration(sc.ConsumerOffsetCommitIntervalMs) * time.Millisecond
+}
+
 // ingressWALOptions applies the storage config's ingress-WAL sync tuning
 // on top of the ingress defaults.
 func ingressWALOptions(sc config.StorageConfig) wal.Options {

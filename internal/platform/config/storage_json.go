@@ -15,6 +15,9 @@ var configurableStorageKeys = map[string]bool{
 	"compression_level":      true,
 	"idle_log_eviction_ms":   true,
 	"cold_retention_walk_ms": true,
+	// The offset commit cadence trades crash redelivery against device
+	// flushes, a per-deployment choice like the others above.
+	"consumer_offset_commit_interval_ms": true,
 }
 
 // UnmarshalJSON keeps file-based storage configuration intentionally narrow:
@@ -38,6 +41,8 @@ func (c *StorageConfig) UnmarshalJSON(data []byte) error {
 		CompressionLevel    string `json:"compression_level"`
 		IdleLogEvictionMs   *int   `json:"idle_log_eviction_ms"`
 		ColdRetentionWalkMs *int   `json:"cold_retention_walk_ms"`
+
+		ConsumerOffsetCommitIntervalMs *int `json:"consumer_offset_commit_interval_ms"`
 	}
 	if err := json.Unmarshal(data, &fileConfig); err != nil {
 		return err
@@ -58,6 +63,9 @@ func (c *StorageConfig) UnmarshalJSON(data []byte) error {
 	}
 	if fileConfig.ColdRetentionWalkMs != nil {
 		c.ColdRetentionWalkMs = *fileConfig.ColdRetentionWalkMs
+	}
+	if fileConfig.ConsumerOffsetCommitIntervalMs != nil {
+		c.ConsumerOffsetCommitIntervalMs = *fileConfig.ConsumerOffsetCommitIntervalMs
 	}
 	return nil
 }
