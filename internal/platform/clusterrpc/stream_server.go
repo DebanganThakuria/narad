@@ -1,6 +1,7 @@
 package clusterrpc
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -119,6 +120,14 @@ func (c *streamServerConn) serve() {
 		// failure now rather than at connection teardown.
 		abortStream(c.conn)
 		return
+	}
+	// Past the handshake, read through a buffer: a run of small frames
+	// costs one stream read instead of two per frame, and the header is
+	// parsed in place rather than in a per-frame heap array (see
+	// clusterwire.ReadStreamFrame). The handshake reads unbuffered, so a
+	// peer that never authenticates is not given a buffer.
+	if _, ok := c.reader.(*bufio.Reader); !ok {
+		c.reader = bufio.NewReader(c.reader)
 	}
 	for {
 		frame, err := clusterwire.ReadStreamFrame(c.reader, clusterwire.MaxStreamFramePayloadBytes)
