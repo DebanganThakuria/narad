@@ -2,16 +2,19 @@ package cluster
 
 // The per-(child, parentPartition) fan-out cursor loop: read a large
 // slab of committed parent records (fill-or-linger), re-key each with
-// the child's partitioner, commit per-child-partition batches (local
-// or one RPC to the owner), and only then advance the persisted
-// offset. Commit-before-advance makes delivery at-least-once: a crash
-// mid-flight re-commits the last slab as duplicates, never loses it.
+// the child's partitioner, commit the per-child-partition batches
+// concurrently (local, or one RPC to the owner each), and only then
+// advance the persisted offset. Commit-before-advance makes delivery
+// at-least-once: a crash mid-flight re-commits the last slab as
+// duplicates, never loses it.
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
@@ -159,13 +162,7 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 		}
 
 		if !r.commitBatch(ctx, key, batch) {
-			// Commit could not complete: back off and re-read from the
-			// unadvanced cursor. Already-committed buckets of this slab
-			// will re-commit — the at-least-once duplicate path.
-			if !sleepCtx(ctx, defaultFanoutRetryBackoff) {
-				return
-			}
-			continue
+			return // stopped mid-commit; the cursor stays at next
 		}
 
 		next = newNext
@@ -296,43 +293,177 @@ func (r *FanoutRunner) recordDueLag(key fanoutCursorKey, delayMs int64, batch []
 	r.metrics.FanoutDueLagSeconds.WithLabelValues(key.parent, key.child, fanoutPartitionLabel(key.partition)).Set(lagSeconds)
 }
 
-// commitBatch re-keys the batch with the child's partitioner and
-// commits one batch per touched child partition. Returns false when
-// the batch could not be fully committed — the caller re-reads and
-// retries; the cursor never advances past an uncommitted record.
+// fanoutCommitConcurrency bounds how many child-partition batches of
+// one slab commit at once, the produce dispatcher's fan-out
+// (defaultProduceDispatchCommitFanout).
+const fanoutCommitConcurrency = 16
+
+// fanoutBucket is one child partition's share of a slab, in slab order.
+type fanoutBucket struct {
+	partition int
+	records   []ingress.ProduceRecord
+}
+
+// commitBatch commits the slab to the child: one batch per touched
+// child partition, the partitions concurrently. A partition whose
+// commit fails (after commitBucket's quick retries) is retried on its
+// own after defaultFanoutRetryBackoff, until it commits. The partitions
+// that already committed are never sent again, and the retry works
+// from the records in hand rather than a re-read: a re-read from the
+// unadvanced cursor can come back longer (linger top-up refills it), so
+// it would not line up with what already committed. Returns true once
+// every record is committed, false only if ctx ended first; the cursor
+// never advances past an uncommitted record.
 func (r *FanoutRunner) commitBatch(ctx context.Context, key fanoutCursorKey, batch []topic.KeyedRecord) bool {
+	pending := batch
+	for {
+		pending = r.commitBatchOnce(ctx, key, pending)
+		if len(pending) == 0 {
+			return true
+		}
+		if !sleepCtx(ctx, defaultFanoutRetryBackoff) {
+			return false
+		}
+	}
+}
+
+// commitBatchOnce makes one pass over records: re-validate the link,
+// bucket by child partition under the child's current partition count,
+// and commit every bucket. Returns the records whose partition did not
+// commit, in slab order (nil when all did).
+func (r *FanoutRunner) commitBatchOnce(ctx context.Context, key fanoutCursorKey, records []topic.KeyedRecord) []topic.KeyedRecord {
 	child, err := r.store.GetTopic(ctx, key.child)
 	if err != nil || !child.IsChild() || child.Parent != key.parent || child.AttachEpoch != key.epoch {
-		// The link dissolved (or the child is gone) mid-batch: drop the
-		// batch and let the reconciler stop this cursor.
-		return false
+		// The link dissolved (or the child is gone) mid-batch: commit
+		// nothing and let the reconciler stop this cursor.
+		return records
+	}
+	buckets, picks, ok := r.bucketByChildPartition(key, records, child.Partitions)
+	if !ok {
+		return records
+	}
+	failed := r.commitBuckets(ctx, key, buckets, child.Partitions)
+	if failed == nil {
+		return nil
+	}
+	return pendingRecords(records, picks, failed)
+}
+
+// bucketByChildPartition re-keys records with the child's partitioner
+// into one bucket per touched child partition, each in slab order (a
+// key maps to one partition, so its records keep their order). The
+// buckets share one backing array; picks[i] is record i's partition.
+// ok=false when the partitioner answered outside [0, partitions).
+func (r *FanoutRunner) bucketByChildPartition(key fanoutCursorKey, records []topic.KeyedRecord, partitions int) ([]fanoutBucket, []int, bool) {
+	picks := make([]int, len(records))
+	counts := make([]int, max(partitions, 0))
+	for i, rec := range records {
+		p := r.partitioner.Pick(key.child, rec.Key, partitions)
+		if p < 0 || p >= partitions {
+			r.logger.Error("fanout: partitioner picked a child partition out of range",
+				"child", key.child, "partition", p, "partitions", partitions)
+			return nil, nil, false
+		}
+		picks[i] = p
+		counts[p]++
 	}
 
+	all := make([]ingress.ProduceRecord, len(records))
+	pos := make([]int, len(counts))
+	buckets := make([]fanoutBucket, 0, min(len(counts), len(records)))
+	off := 0
+	for p, n := range counts {
+		if n == 0 {
+			continue
+		}
+		buckets = append(buckets, fanoutBucket{partition: p, records: all[off : off+n : off+n]})
+		pos[p] = off
+		off += n
+	}
 	now := time.Now().UnixMilli()
-	buckets := map[int][]ingress.ProduceRecord{}
-	for _, rec := range batch {
-		p := r.partitioner.Pick(key.child, rec.Key, child.Partitions)
-		buckets[p] = append(buckets[p], ingress.ProduceRecord{
+	for i, rec := range records {
+		p := picks[i]
+		all[pos[p]] = ingress.ProduceRecord{
 			Topic:           key.child,
 			Key:             rec.Key,
 			TargetPartition: p,
 			Payload:         rec.Payload,
 			CreatedAtUnixMs: now,
-		})
+		}
+		pos[p]++
 	}
-	for p, records := range buckets {
-		if !r.commitBucket(ctx, key, p, records) {
-			return false
+	return buckets, picks, true
+}
+
+// commitBuckets commits every bucket, up to fanoutCommitConcurrency at
+// once, and waits for all of them. The calling goroutine is one of the
+// workers, so a slab that touches a single child partition spawns
+// nothing. Returns nil when all committed; otherwise failed[p] marks
+// each child partition that did not.
+func (r *FanoutRunner) commitBuckets(ctx context.Context, key fanoutCursorKey, buckets []fanoutBucket, partitions int) []bool {
+	ok := make([]bool, len(buckets))
+	var next atomic.Int64
+	work := func() {
+		for {
+			i := int(next.Add(1) - 1)
+			if i >= len(buckets) {
+				return
+			}
+			ok[i] = r.commitBucket(ctx, key, buckets[i].partition, buckets[i].records)
 		}
 	}
-	return true
+	var wg sync.WaitGroup
+	for range min(len(buckets), fanoutCommitConcurrency) - 1 {
+		wg.Go(work)
+	}
+	work()
+	wg.Wait()
+	var failed []bool
+	for i, b := range buckets {
+		if ok[i] {
+			continue
+		}
+		if failed == nil {
+			failed = make([]bool, partitions)
+		}
+		failed[b.partition] = true
+	}
+	return failed
+}
+
+// pendingRecords returns the records whose child partition failed, in
+// slab order, with their payloads copied into one fresh buffer: a retry
+// lasts as long as the child owner stays down, and the slab's payloads
+// alias the parent log's decoded frames, which they would pin all that
+// time.
+func pendingRecords(records []topic.KeyedRecord, picks []int, failed []bool) []topic.KeyedRecord {
+	n, size := 0, 0
+	for i, rec := range records {
+		if failed[picks[i]] {
+			n++
+			size += len(rec.Payload)
+		}
+	}
+	out := make([]topic.KeyedRecord, 0, n)
+	arena := make([]byte, 0, size)
+	for i, rec := range records {
+		if !failed[picks[i]] {
+			continue
+		}
+		start := len(arena)
+		arena = append(arena, rec.Payload...)
+		rec.Payload = arena[start:len(arena):len(arena)]
+		out = append(out, rec)
+	}
+	return out
 }
 
 // commitBucket commits one child-partition batch, retrying transient
-// failures a few times before giving the slab back to the read loop.
-// Fan-out never reroutes to a sibling partition — that would break
-// per-key ordering — so a dead child-partition owner stalls only this
-// cursor until drop-behind resolves it.
+// failures a few times before reporting it failed to commitBatch.
+// Fan-out never reroutes to a sibling partition (that would break
+// per-key ordering), so a dead child-partition owner stalls only this
+// cursor, which retries just that partition's records until the owner
+// is back.
 func (r *FanoutRunner) commitBucket(ctx context.Context, key fanoutCursorKey, childPartition int, records []ingress.ProduceRecord) bool {
 	const quickRetries = 3
 	for attempt := 1; ctx.Err() == nil; attempt++ {
