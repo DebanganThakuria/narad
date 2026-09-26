@@ -353,13 +353,17 @@ func (g *Logs) Peek(topicName string, idx int) (*storage.Log, bool) {
 
 // PeekHighWatermark returns the partition's visible tail without
 // opening its log: the live high-watermark when the log is open, else
-// the persisted one on disk. ok is false when neither exists (no log
-// was ever opened for the partition here, or its directory is gone).
-// The persisted boundary is exact for a cleanly closed log and lags
-// only after a crash. Observers use it where Peek's "closed means
-// nothing" would hide a backlog nobody has read since a restart or an
-// idle eviction, and reading the file rather than opening the log keeps
-// observation from resurrecting a deleted topic's directory.
+// the boundary a clean Close wrote to disk. ok is false when there is
+// none: no log was ever opened for the partition here, its directory is
+// gone, or the node crashed while the log was open. Storage empties the
+// file before an open log's first advance and writes the exact boundary
+// only at Close, so after a crash the file stays empty (ok=false) until
+// the log is opened and closed again. Observers use it where Peek's
+// "closed means nothing" would hide a backlog nobody has read since a
+// restart or an idle eviction, and reading the file rather than opening
+// the log keeps observation from resurrecting a deleted topic's
+// directory. A log that is being closed is waited for (see Peek), so
+// the file is never read while Close is writing it.
 func (g *Logs) PeekHighWatermark(topicName string, idx int) (int64, bool) {
 	if l, ok := g.Peek(topicName, idx); ok {
 		return l.HighWatermark(), true
