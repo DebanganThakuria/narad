@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -417,4 +418,76 @@ func BenchmarkWP3FrontierSim(b *testing.B) {
 	close(stop)
 	wg.Wait()
 	b.ReportMetric(float64(consumed.Load())/float64(b.N), "reads/commit")
+}
+
+// BenchmarkWP3LogLifecycle is one partition reopened, committed to once
+// and closed, with the real syncs: what a partition's life costs on top
+// of its commits (an idle eviction and the next produce, or a restart).
+func BenchmarkWP3LogLifecycle(b *testing.B) {
+	m := &wp3Metrics{}
+	opts := DefaultOptions()
+	opts.Metrics = m
+	dir := filepath.Join(b.TempDir(), "p0")
+	l, err := NewLog(dir, opts)
+	if err != nil {
+		b.Fatal(err)
+	}
+	wp3CommitBatch(b, l, wp3KeyedBatch(24, 0))
+	if err := l.Close(); err != nil {
+		b.Fatal(err)
+	}
+	m.fsyncN.Store(0)
+	m.hwmN.Store(0)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l, err := NewLog(dir, opts)
+		if err != nil {
+			b.Fatal(err)
+		}
+		wp3CommitBatch(b, l, wp3KeyedBatch(24, i))
+		if err := l.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(m.hwmN.Load())/float64(b.N), "hwmPersists/cycle")
+	b.ReportMetric(float64(m.fsyncN.Load())/float64(b.N), "segFsyncs/cycle")
+}
+
+// BenchmarkWP3CommitRoundTrip is the commit path with no disk I/O at
+// all: segment writes and every sync report success without the
+// syscall, and the read-back is off. What is left is the CPU of a
+// commit round trip through the flusher goroutine (drain, encode,
+// index, advance, wake), which a loaded machine's device stalls would
+// otherwise drown.
+func BenchmarkWP3CommitRoundTrip(b *testing.B) {
+	restore := syncfile.SetFaultHook(func(op syncfile.Op, path string) error {
+		switch {
+		case op == syncfile.OpSyncData || op == syncfile.OpSync:
+			return syncfile.ErrLie
+		case op == syncfile.OpWrite && strings.HasSuffix(path, segmentFileSuffix):
+			return syncfile.ErrLie
+		}
+		return nil
+	})
+	b.Cleanup(restore)
+	opts := Options{DisableCommitVerify: true}
+	l, err := NewLog(filepath.Join(b.TempDir(), "p0"), opts)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer l.Close()
+	recs := wp3Records(7, 190)
+	wp3CommitBatch(b, l, recs)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		first, last, err := l.AppendBatch(recs)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := l.CommitDurable(first, last); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
