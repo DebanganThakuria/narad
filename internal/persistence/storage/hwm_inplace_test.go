@@ -6,73 +6,73 @@ import (
 	"testing"
 )
 
-// The high-watermark is persisted in place (fixed 8-byte overwrite + fsync, no
-// temp file or rename) on every forced sync. This verifies that mechanism is
-// durable mid-run — without a clean Close — and that the file never grows or
-// leaves stale tail bytes across repeated overwrites, so readers of the closed
-// log and a restart see the exact last-persisted value.
+// The high-watermark file is emptied before a log's first advance and
+// written in place (fixed 8-byte overwrite + fsync, no temp file or
+// rename) at Close. This verifies that mid-run, without a clean Close, a
+// restart would still recover every exposed record; that Close leaves
+// exactly 8 bytes (never a grown file or a stale tail, which
+// loadHighWatermark would reject), fsyncing the directory for a file
+// the log created; and that a restart restores the exact value.
 func TestHighWatermarkInPlacePersistDurableMidRun(t *testing.T) {
 	path := testLogPath(t)
-	l, err := NewLog(path, slowFlushOpts(t, nil))
-	if err != nil {
-		t.Fatalf("NewLog: %v", err)
-	}
-
 	var want int64
-	for i := range 5 {
-		if _, err := l.Append(fmt.Appendf(nil, "rec-%d", i)); err != nil {
-			t.Fatalf("Append %d: %v", i, err)
+	for life := range 2 {
+		l, err := NewLog(path, slowFlushOpts(t, nil))
+		if err != nil {
+			t.Fatalf("NewLog: %v", err)
 		}
-		want = int64(i + 1)
-		if err := l.AdvanceHighWatermark(want); err != nil {
-			t.Fatalf("AdvanceHighWatermark(%d): %v", want, err)
+		if got := l.HighWatermark(); got != want {
+			t.Fatalf("life %d: HWM after restart = %d, want %d", life, got, want)
 		}
-		// Forced sync persists the current HWM in place.
-		if err := l.Sync(); err != nil {
-			t.Fatalf("Sync %d: %v", i, err)
+		for i := range 5 {
+			if _, err := l.Append(fmt.Appendf(nil, "rec-%d-%d", life, i)); err != nil {
+				t.Fatalf("Append %d: %v", i, err)
+			}
+			if err := l.Sync(); err != nil {
+				t.Fatalf("Sync %d: %v", i, err)
+			}
+			want++
+			if err := l.AdvanceHighWatermark(want); err != nil {
+				t.Fatalf("AdvanceHighWatermark(%d): %v", want, err)
+			}
 		}
-	}
 
-	// The first persist CREATES the hwm file; that creation is only durable
-	// once the parent directory has been fsynced (otherwise a crash can lose
-	// the file and recovery would expose the hidden tail).
-	l.hwmMu.Lock()
-	dirSynced := l.hwmDirSynced
-	l.hwmMu.Unlock()
-	if !dirSynced {
-		t.Fatalf("partition dir not fsynced after first hwm persist")
-	}
+		// Durable mid-run: what a restart would recover right now covers
+		// every exposed record (i.e. it would survive a crash here),
+		// because the released file defers to the record tail.
+		if info, err := os.Stat(hwmFilePath(path)); err != nil || info.Size() != 0 {
+			t.Fatalf("life %d: hwm file mid-run = (%v, %v), want an empty file", life, info, err)
+		}
+		persisted, err := l.PersistedHighWatermark()
+		if err != nil {
+			t.Fatalf("PersistedHighWatermark: %v", err)
+		}
+		if persisted != want {
+			t.Fatalf("life %d: persisted HWM = %d, want %d", life, persisted, want)
+		}
+		if err := l.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
 
-	// Fixed-size file: an in-place 8-byte overwrite must never grow the file or
-	// leave a stale tail (which loadHighWatermark would reject as != 8 bytes).
-	info, err := os.Stat(hwmFilePath(path))
-	if err != nil {
-		t.Fatalf("stat hwm: %v", err)
-	}
-	if info.Size() != 8 {
-		t.Fatalf("hwm file size = %d, want 8", info.Size())
-	}
-
-	// Durable mid-run: the persisted value is readable from disk without a
-	// clean Close (i.e. it would survive a crash here).
-	persisted, err := l.PersistedHighWatermark()
-	if err != nil {
-		t.Fatalf("PersistedHighWatermark: %v", err)
-	}
-	if persisted != want {
-		t.Fatalf("persisted HWM = %d, want %d", persisted, want)
-	}
-	if err := l.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	// Restart restores the exact persisted HWM.
-	l2, err := NewLog(path, slowFlushOpts(t, nil))
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	defer l2.Close()
-	if got := l2.HighWatermark(); got != want {
-		t.Fatalf("HWM after restart = %d, want %d", got, want)
+		// In the first life the release CREATED the file, and a new name
+		// is only durable once the parent directory has been fsynced;
+		// Close does that when it writes the boundary (otherwise a crash
+		// can lose the file and recovery would expose the hidden tail).
+		l.hwmMu.Lock()
+		dirSynced := l.hwmDirSynced
+		l.hwmMu.Unlock()
+		if !dirSynced {
+			t.Fatalf("life %d: partition dir not fsynced for the hwm file", life)
+		}
+		info, err := os.Stat(hwmFilePath(path))
+		if err != nil {
+			t.Fatalf("stat hwm: %v", err)
+		}
+		if info.Size() != 8 {
+			t.Fatalf("life %d: hwm file size = %d, want 8", life, info.Size())
+		}
+		if got, ok, err := ReadPersistedHighWatermark(path); err != nil || !ok || got != want {
+			t.Fatalf("life %d: persisted after Close = (%d, %v, %v), want %d", life, got, ok, err, want)
+		}
 	}
 }

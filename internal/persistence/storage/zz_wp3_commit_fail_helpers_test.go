@@ -10,8 +10,8 @@ import (
 // wp3FailReadBackOnce makes the next commit on l fail after its frames
 // are written and fsynced: that fsync scribbles over the last bytes of
 // the frame just written, so the commit's CRC read-back rejects it. The
-// commit fails at the same point a failed high-watermark persist used to
-// fail it, before commits stopped persisting the high-watermark.
+// commit fails after its frames are durable and before they are exposed,
+// which is also where a failed high-watermark release fails one.
 func wp3FailReadBackOnce(t *testing.T, l *Log) {
 	t.Helper()
 	var armed atomic.Bool

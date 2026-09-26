@@ -102,7 +102,9 @@ func (m *wp3Metrics) IncRetentionDeletion(string, int64, int64) {}
 func (m *wp3Metrics) ObserveRetentionRun(time.Duration)         {}
 
 // BenchmarkWP3CommitFsync is one producer committing keyed batches with
-// the real segment and high-watermark syncs: the per-commit disk time.
+// the real syncs: the per-commit disk time. hwmPersists/commit counts the
+// high-watermark file syncs a commit pays (none once the log's first
+// commit has released the file).
 func BenchmarkWP3CommitFsync(b *testing.B) {
 	for _, n := range []int{24, 72} {
 		b.Run(fmt.Sprintf("batch=%d", n), func(b *testing.B) {
@@ -114,7 +116,7 @@ func BenchmarkWP3CommitFsync(b *testing.B) {
 				b.Fatal(err)
 			}
 			defer l.Close()
-			wp3CommitBatch(b, l, wp3KeyedBatch(n, 0)) // creates the hwm file
+			wp3CommitBatch(b, l, wp3KeyedBatch(n, 0)) // releases the hwm file
 			m.fsyncN.Store(0)
 			m.hwmN.Store(0)
 			b.ResetTimer()

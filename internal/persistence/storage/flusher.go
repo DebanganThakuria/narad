@@ -27,11 +27,10 @@ type flusher struct {
 	log *Log
 
 	wakeup chan struct{}
-	// armReq asks for the timer back WITHOUT asking for a drain. Two
-	// senders: notePush when a record enters an empty buffer, and
-	// noteHighWatermarkAdvance when the visible boundary moves ahead of
-	// the persisted one. Both mean "scheduling is owed", never "here is
-	// work to do now" -- needsTimer decides what, if anything, is due.
+	// armReq asks for the timer back WITHOUT asking for a drain. Its
+	// sender, notePush when a record enters an empty buffer, means
+	// "scheduling is owed", never "here is work to do now" -- needsTimer
+	// decides what, if anything, is due.
 	armReq   chan struct{}
 	syncReqs chan commitRequest
 	stop     chan struct{}
@@ -56,12 +55,6 @@ type flusher struct {
 	// still truncate them (see discardUncommittedTail); a sealed segment
 	// is never touched.
 	rollPending bool
-
-	// hwmForce is a per-drain flag: set when this drain must persist the
-	// high-watermark unconditionally (a forced sync, a segment roll, or
-	// SyncPerWrite). Reset at the start of every drainOnce. A commit's
-	// drain never persists it (see CommitDurable), forced or not.
-	hwmForce bool
 
 	// closeErr records the final shutdown drain's error so Close can
 	// surface it. Written only by run() before done closes; read only
@@ -106,7 +99,7 @@ func newFlusher(log *Log, mu *sync.RWMutex, interval time.Duration) *flusher {
 // fsyncs it, blocking until the data is durable on disk. Use it when a
 // record must be durable but visibility is managed by the caller (tests,
 // transfers). The commit path uses CommitDurable instead so the
-// high-watermark advance and its persistence ride the same drain.
+// high-watermark advance rides the same drain.
 // Returns ErrLogClosed if the log is closing.
 func (l *Log) Sync() error {
 	return l.submitCommit(commitRequest{hwm: -1})
@@ -120,12 +113,12 @@ func (l *Log) Sync() error {
 // high-watermark to last+1 so the records become visible.
 //
 // After CommitDurable returns, a restart recovers a high-watermark of at
-// least last+1: recovery rebuilds the boundary from the CRC-verified
-// record tail (see loadHighWatermark), and the records were fsynced
-// before they became visible. So the commit does not also fsync the
-// boundary file, which used to be a second serial fsync on every commit
-// under the produce lock; the file is persisted lazily (HWMSyncInterval)
-// and exactly at Close, for readers of a closed log.
+// least last+1: the first advance of the Log's life empties the hwm
+// file, recovery then rebuilds the boundary from the CRC-verified record
+// tail, and the records were fsynced before they became visible. So the
+// commit does not also fsync the boundary file, which used to be a
+// second serial fsync on every commit under the produce lock; Close
+// writes the exact boundary for readers of the closed log (see hwm.go).
 //
 // A failed commit leaves no trace of the batch: every record above the
 // high-watermark (the batch, anything appended after it, and any earlier
@@ -214,41 +207,23 @@ func (f *flusher) requestArm() {
 	}
 }
 
-// noteHighWatermarkAdvance asks for the timer back after the visible
-// boundary moved ahead of the persisted one.
-//
-// Like notePush's empty-buffer case this asks for scheduling, not for
-// work: syncHighWatermark decides for itself whether HWMSyncInterval
-// has elapsed. Safe to call from any goroutine and before the flusher
-// has started.
-func (f *flusher) noteHighWatermarkAdvance() {
-	f.requestArm()
-}
-
 // needsTimer reports whether a periodic pass is still owed, and so
 // whether the timer has to stay armed. It is the flusher goroutine's
 // post-pass arming decision, and it is also polled from test
 // goroutines, so every field it reads must be safe to read from another
 // goroutine: buffer.pending() and hasPendingFlushing() take their own
-// mutexes, and the rest are atomics. A fifth condition has to satisfy
+// mutexes, and the rest are atomics. A further condition has to satisfy
 // that same constraint.
 //
-// These four conditions are exactly what the old always-armed timer
-// existed to service; there is deliberately no fifth. A pending segment
-// roll is NOT one of them: rollIfPending runs only for a commit or the
-// shutdown drain (see drainOnce), and any roll the timer would have
-// missed is taken by activeForWrite before the next frame is written.
-// The reaper's time-based rotation arrives as its own commit request,
-// not on this timer.
+// These conditions are exactly what the old always-armed timer existed
+// to service. A pending segment roll is NOT one of them: rollIfPending
+// runs only for a commit or the shutdown drain (see drainOnce), and any
+// roll the timer would have missed is taken by activeForWrite before
+// the next frame is written. The reaper's time-based rotation arrives as
+// its own commit request, not on this timer. Neither is the
+// high-watermark: an advance leaves nothing to write until Close (see
+// hwm.go).
 func (f *flusher) needsTimer() bool {
-	owed, _ := f.owedPass()
-	return owed
-}
-
-// owedPass is needsTimer's decision, also reporting whether the deferred
-// high-watermark persist is the only thing owed (hwmOnly), in which case
-// the pass is not due before HWMSyncInterval (see rearm).
-func (f *flusher) owedPass() (owed, hwmOnly bool) {
 	l := f.log
 	switch {
 	case l.poisoned() != nil:
@@ -265,32 +240,19 @@ func (f *flusher) owedPass() (owed, hwmOnly bool) {
 		// running no-op passes ten times a second on every partition at
 		// once after a disk-level failure, which is the exact load this
 		// change exists to remove and the worst moment to add it.
-		return false, false
+		return false
 	case l.buffer.pending():
 		// Records waiting on the age-based flush (shouldFlushByAge).
-		return true, false
+		return true
 	case f.unsyncedBytes.Load() > 0:
 		// Bytes in the segment file that SyncInterval still owes an
 		// fsync.
-		return true, false
+		return true
 	case l.hasPendingFlushing():
 		// An earlier writeBatch failed; the retry rides the timer.
-		return true, false
-	case l.highWatermark.Load() > l.persistedHWM.Load():
-		// syncHighWatermark deferred the persist behind HWMSyncInterval.
-		// Every commit leaves this owed.
-		return true, true
+		return true
 	}
-	return false, false
-}
-
-// hwmPersistDeadline is when syncHighWatermark stops deferring an
-// unforced persist: HWMSyncInterval after the last one.
-func (f *flusher) hwmPersistDeadline() time.Time {
-	l := f.log
-	l.hwmMu.Lock()
-	defer l.hwmMu.Unlock()
-	return l.lastHWMSync.Add(l.opts.HWMSyncInterval)
+	return false
 }
 
 // run is the flusher goroutine.
@@ -311,7 +273,6 @@ func (f *flusher) run() {
 
 	var timer *time.Timer
 	var timerC <-chan time.Time
-	var armedFor time.Time // when the armed timer fires
 	defer func() {
 		if timer != nil {
 			timer.Stop()
@@ -324,10 +285,9 @@ func (f *flusher) run() {
 	rearm := func() {
 		// Consume a pending arm request BEFORE deciding, so a token that
 		// is already satisfied by this decision cannot cause a second,
-		// redundant wake. Every commit produces one, via
-		// AdvanceHighWatermark, and without this each commit paid an
-		// extra select round plus a needsTimer evaluation and a timer
-		// stop/reset.
+		// redundant wake: a push racing the pass that already drained
+		// its record would otherwise cost an extra select round plus a
+		// needsTimer evaluation and a timer stop/reset.
 		//
 		// Order matters and is the safe one: draining first means
 		// needsTimer below is evaluated AFTER the drain, so a push that
@@ -346,37 +306,18 @@ func (f *flusher) run() {
 				}
 			}
 		}
-		owed, hwmOnly := f.owedPass()
-		if !owed {
+		if !f.needsTimer() {
 			stopTimer()
 			timerC = nil
 			return
 		}
-		// When only the deferred high-watermark persist is owed, which
-		// every commit leaves behind, the pass is due exactly when
-		// syncHighWatermark stops deferring: HWMSyncInterval after the
-		// last persist. Firing every interval until then would wake each
-		// partition that committed fifty times for one write, the idle
-		// cost this lazy timer removed; and pushing it a full interval
-		// out on every pass, as the other cases do, would starve it
-		// under a steady stream of commits. Commits in a row keep the
-		// same deadline, so the armed timer is left alone rather than
-		// reset per commit.
-		fireAt := time.Now().Add(f.interval)
-		if hwmOnly {
-			fireAt = f.hwmPersistDeadline()
-			if timerC != nil && armedFor.Equal(fireAt) {
-				return
-			}
-		}
 		stopTimer()
 		if timer == nil {
-			timer = time.NewTimer(time.Until(fireAt))
+			timer = time.NewTimer(f.interval)
 		} else {
-			timer.Reset(time.Until(fireAt))
+			timer.Reset(f.interval)
 		}
 		timerC = timer.C
-		armedFor = fireAt
 	}
 
 	rearm()
@@ -387,18 +328,14 @@ func (f *flusher) run() {
 		case <-f.wakeup:
 			forceDrain = true
 		case <-f.armReq:
-			// Scheduling is owed, not necessarily work. Either a record
-			// entered an empty buffer (nothing is due yet: it is younger
-			// than timerFlushAge) or the high-watermark moved ahead of the
-			// persisted one (a pass IS owed, and the timer is the right
-			// place for it since syncHighWatermark defers behind
-			// HWMSyncInterval anyway). rearm decides which via needsTimer.
+			// Scheduling is owed, not work: a record entered an empty
+			// buffer, and nothing is due yet (it is younger than
+			// timerFlushAge). rearm arms the timer via needsTimer.
 			//
-			// No pass runs inline either way. Draining here would do
-			// nothing for the first case, and for both it would make the
-			// flusher goroutine touch the log on every idle-to-active
-			// transition, widening what runs concurrently with a commit
-			// for no gain.
+			// No pass runs inline. Draining here would do nothing, and it
+			// would make the flusher goroutine touch the log on every
+			// idle-to-active transition, widening what runs concurrently
+			// with a commit for no gain.
 			rearm()
 			continue
 		case req := <-f.syncReqs:
@@ -410,9 +347,6 @@ func (f *flusher) run() {
 			rearm()
 			continue
 		case <-timerC:
-			// Spent: the next rearm must arm it again even for the same
-			// deadline (a persist that failed keeps it).
-			armedFor = time.Time{}
 		case <-f.stop:
 			f.closeErr = f.drainOnce(true, true, nil)
 			return
@@ -423,9 +357,8 @@ func (f *flusher) run() {
 }
 
 // drainOnce is one flusher pass: write whatever needs writing, sync if
-// required, run the commit's verify + high-watermark advance (if any),
-// then persist the high-watermark if this pass owes it. A commit pass
-// never does: see CommitDurable.
+// required, then run the commit's verify + high-watermark advance (if
+// any). No pass persists the high-watermark: see CommitDurable.
 //
 // Any failure of a commit request, at whatever step, discards the
 // uncommitted tail before the error is reported (see CommitDurable).
@@ -433,7 +366,6 @@ func (f *flusher) drainOnce(forceSync, forceDrain bool, commit *commitRequest) e
 	if h := flushPassHook; h != nil {
 		h()
 	}
-	f.hwmForce = forceSync
 
 	if err := f.log.poisoned(); err != nil {
 		// An earlier fsync failed: nothing this process writes to the
@@ -464,14 +396,7 @@ func (f *flusher) drainOnce(forceSync, forceDrain bool, commit *commitRequest) e
 		// its failure fails that commit before anything is written.
 		f.rollIfPending()
 	}
-	if commit.isCommit() {
-		// The batch is durable and visible, and a restart would recover
-		// its boundary from the record tail. The boundary file is left to
-		// the timer (armed by the advance, see rearm) and Close, so its
-		// fsync never delays a commit and its failure never fails one.
-		return nil
-	}
-	return f.log.syncHighWatermark(f.hwmForce)
+	return nil
 }
 
 // rollIfPending seals a full active segment once the commit that filled
@@ -741,7 +666,6 @@ func (f *flusher) roll(active *segment) (*segment, error) {
 	}
 	f.log.segments = append(f.log.segments, newActive)
 	f.rollPending = false
-	f.hwmForce = true
 	return newActive, nil
 }
 
@@ -769,8 +693,7 @@ func (f *flusher) rotateActive() error {
 }
 
 // syncIfNeeded fdatasyncs the active segment when forced or when the
-// batched-sync thresholds say so. It does not persist the high-watermark;
-// drainOnce does that once per pass, after any commit advance.
+// batched-sync thresholds say so.
 //
 // An fsync failure is final for this Log. After a failed fdatasync the
 // kernel may have dropped the dirty pages (Linux marks them clean and
@@ -819,10 +742,6 @@ func (f *flusher) syncIfNeeded(force bool, active *segment) error {
 	f.log.clearFlushingThrough(active.nextOffset)
 	if m := f.log.opts.Metrics; m != nil {
 		m.ObserveFsync(time.Since(syncStart))
-	}
-
-	if force || f.log.opts.SyncMode == SyncPerWrite {
-		f.hwmForce = true
 	}
 	return nil
 }

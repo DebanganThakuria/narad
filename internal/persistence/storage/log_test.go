@@ -159,9 +159,8 @@ func TestRoundTripAfterFlushAndReopen(t *testing.T) {
 	}
 }
 
-// Close writes the exact high-watermark for readers of the closed log;
-// a reopen recovers the boundary from the record tail and rewrites the
-// file to match before anything can read the log.
+// Close writes the exact high-watermark for readers of the closed log,
+// and a reopen restores it: the record at offset 2 stays hidden.
 func TestHighWatermarkPersistsAcrossRestart(t *testing.T) {
 	path := testLogPath(t)
 	mustWriteAndClose(t, path, slowFlushOpts(t, nil), func(l *Log) {
@@ -184,14 +183,11 @@ func TestHighWatermarkPersistsAcrossRestart(t *testing.T) {
 	}
 	defer l.Close()
 
-	if got := l.HighWatermark(); got != 3 {
-		t.Fatalf("HighWatermark() = %d, want the recovered tail 3", got)
+	if got := l.HighWatermark(); got != 2 {
+		t.Fatalf("HighWatermark() = %d, want 2", got)
 	}
 	if got := l.NextOffset(); got != 3 {
 		t.Fatalf("NextOffset() = %d, want 3", got)
-	}
-	if got, ok, err := ReadPersistedHighWatermark(path); err != nil || !ok || got != 3 {
-		t.Fatalf("persisted after reopen = (%d, %v, %v), want 3", got, ok, err)
 	}
 }
 
@@ -262,12 +258,7 @@ func TestHighWatermarkClampsToRecoveredTail(t *testing.T) {
 	}
 }
 
-// Records written and synced but never exposed by a commit (a crash
-// mid-commit leaves such a tail) are visible after a restart: recovery
-// takes the boundary from the record tail. The ingress WAL, which still
-// owns them, may re-commit them (duplicates, never loss); before, the
-// file kept them hidden only until that re-commit exposed them anyway.
-func TestHighWatermarkUnexposedTailVisibleAfterRestart(t *testing.T) {
+func TestHighWatermarkHiddenTailSurvivesRestart(t *testing.T) {
 	path := testLogPath(t)
 	mustWriteAndClose(t, path, slowFlushOpts(t, nil), func(l *Log) {
 		for i := range 3 {
@@ -289,8 +280,8 @@ func TestHighWatermarkUnexposedTailVisibleAfterRestart(t *testing.T) {
 	if l.NextOffset() != 3 {
 		t.Fatalf("NextOffset after reopen want 3 got %d", l.NextOffset())
 	}
-	if got := l.HighWatermark(); got != 3 {
-		t.Fatalf("HighWatermark() = %d, want the recovered tail 3", got)
+	if got := l.HighWatermark(); got != 1 {
+		t.Fatalf("HighWatermark() = %d, want 1", got)
 	}
 	for i := range int64(3) {
 		got, err := l.Read(i)
@@ -339,8 +330,10 @@ func TestBatchedSyncDoesNotFsyncEveryFlush(t *testing.T) {
 	if got := metrics.fsyncs.Load(); got != 0 {
 		t.Fatalf("fsyncs before close = %d, want 0", got)
 	}
-	if got := metrics.hwms.Load(); got != 0 {
-		t.Fatalf("hwm persists before close = %d, want 0", got)
+	// One: the release that emptied the hwm file before the first
+	// advance. The advances after it write nothing.
+	if got := metrics.hwms.Load(); got != 1 {
+		t.Fatalf("hwm persists before close = %d, want 1", got)
 	}
 
 	if err := l.Close(); err != nil {
@@ -349,8 +342,8 @@ func TestBatchedSyncDoesNotFsyncEveryFlush(t *testing.T) {
 	if got := metrics.fsyncs.Load(); got != 1 {
 		t.Fatalf("fsyncs after close = %d, want 1", got)
 	}
-	if got := metrics.hwms.Load(); got != 1 {
-		t.Fatalf("hwm persists after close = %d, want 1", got)
+	if got := metrics.hwms.Load(); got != 2 {
+		t.Fatalf("hwm persists after close = %d, want 2", got)
 	}
 }
 

@@ -108,7 +108,7 @@ func TestIdleLogRunsNoFlusherPasses(t *testing.T) {
 	l, _ := lazyTimerLog(t, nil)
 
 	// Write and commit, so the log has done real work and settled: the
-	// buffer drains, the bytes sync, the high-watermark persists. From
+	// buffer drains, the bytes sync, the high-watermark advances. From
 	// here nothing is owed and the timer must be gone.
 	if _, err := l.Append(EncodeKeyedRecord("", 1, []byte(`{"a":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
@@ -198,18 +198,16 @@ func TestUnsyncedBytesStillGetFsyncedOnTheTimer(t *testing.T) {
 	}
 }
 
-// TestHighWatermarkStillPersistsOnTheTimer pins the third reason. A
-// commit advances the high-watermark, but syncHighWatermark can defer
-// writing it behind HWMSyncInterval. If the timer is not held for that,
-// the visibility boundary never reaches disk and a restart silently
-// redelivers everything above the last persisted value.
-func TestHighWatermarkStillPersistsOnTheTimer(t *testing.T) {
-	l, _ := lazyTimerLog(t, func(o *Options) {
-		// Long enough that the persist cannot land before the assertion
-		// below, so the assertion is never silently skipped on a slow
-		// machine.
-		o.HWMSyncInterval = 2 * time.Second
-	})
+// TestHighWatermarkAdvanceOwesTheTimerNothing pins why the
+// high-watermark is not one of the reasons. The first advance of a log's
+// life empties the hwm file, and from then on a restart takes the
+// boundary from the durable record tail, so an advance leaves nothing to
+// write until Close. If it armed the timer anyway, every partition that
+// ever committed would keep waking up; if the boundary it exposed were
+// not recoverable, a crash would hide committed records.
+func TestHighWatermarkAdvanceOwesTheTimerNothing(t *testing.T) {
+	passes := countPasses(t)
+	l, dir := lazyTimerLog(t, nil)
 
 	if _, err := l.Append(EncodeKeyedRecord("", 1, []byte(`{"a":1}`))); err != nil {
 		t.Fatalf("Append() error = %v", err)
@@ -217,25 +215,33 @@ func TestHighWatermarkStillPersistsOnTheTimer(t *testing.T) {
 	if err := l.Sync(); err != nil {
 		t.Fatalf("Sync() error = %v", err)
 	}
-	// Advance visibility without a commit, so nothing forces the persist.
+	settled := passes()
+	// Advance visibility without a commit, as a caller outside the
+	// flusher may.
 	if err := l.AdvanceHighWatermark(1); err != nil {
 		t.Fatalf("AdvanceHighWatermark() error = %v", err)
 	}
-
-	if l.persistedHWM.Load() >= 1 {
-		t.Fatal("the high-watermark persisted before the assertion could run: " +
-			"raise HWMSyncInterval so this test still means something")
+	if l.flusher.needsTimer() {
+		t.Fatal("needsTimer() = true after a high-watermark advance: " +
+			"a log that exposed a record would never go quiet")
 	}
-	if !l.flusher.needsTimer() {
-		t.Fatal("needsTimer() = false with the high-watermark ahead of the " +
-			"persisted one: the persist would never run")
+	if got, err := l.PersistedHighWatermark(); err != nil || got != 1 {
+		t.Fatalf("PersistedHighWatermark() = (%d, %v), want 1: a crash here "+
+			"would hide the exposed record", got, err)
 	}
-	waitFor(t, 10*time.Second, "the high-watermark to reach disk", func() bool {
-		return l.persistedHWM.Load() >= 1
-	})
+	time.Sleep(300 * time.Millisecond) // 15 fires at FlushInterval=20ms, if armed
+	if got := passes() - settled; got != 0 {
+		t.Fatalf("an advance cost %d flusher passes, want 0", got)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if got, ok, err := ReadPersistedHighWatermark(dir); err != nil || !ok || got != 1 {
+		t.Fatalf("ReadPersistedHighWatermark() after Close = (%d, %v, %v), want 1", got, ok, err)
+	}
 }
 
-// TestPendingFlushingRetriesOnTheTimer pins the fourth reason. A failed
+// TestPendingFlushingRetriesOnTheTimer pins the third reason. A failed
 // segment write leaves records in the flushing snapshot, and the retry
 // rides the timer. Disarming with a snapshot outstanding strands acked
 // records that the log still believes it is holding for a retry.
@@ -316,8 +322,8 @@ func TestLazyTimerRecordSurvivesACrash(t *testing.T) {
 		t.Fatalf("Append() error = %v", err)
 	}
 	// Wait for the flusher to report nothing outstanding: buffer drained,
-	// bytes synced, high-watermark persisted. Everything from here is what
-	// a crash would leave behind.
+	// bytes synced. Everything from here is what a crash would leave
+	// behind.
 	waitFor(t, 5*time.Second, "the record to become durable on the timer alone", func() bool {
 		return !l.flusher.needsTimer()
 	})

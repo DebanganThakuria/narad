@@ -31,8 +31,11 @@ type Options struct {
 	SyncInterval time.Duration
 	SyncBytes    int64
 
-	// HWMSyncInterval bounds how long an advanced high-watermark may
-	// stay unpersisted when nothing forces a sync.
+	// HWMSyncInterval is unused and kept so existing configs still load:
+	// an open log no longer persists its high-watermark while it runs
+	// (the hwm file is emptied before the first advance and written
+	// exactly at Close, see hwm.go), so there is no deferred persist to
+	// bound.
 	HWMSyncInterval time.Duration
 
 	// SegmentBytes is the size at which the active segment is rolled.

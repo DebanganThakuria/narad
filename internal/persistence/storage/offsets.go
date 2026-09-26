@@ -29,13 +29,21 @@ func (l *Log) HighWatermark() int64 {
 }
 
 // AdvanceHighWatermark moves the visible tail forward and wakes long-poll
-// consumers waiting on new committed records. Persistence is deferred to the
-// storage flusher (HWMSyncInterval) and Close; nothing on the produce path
-// fsyncs this metadata, since recovery rebuilds it from the record tail.
+// consumers waiting on new committed records. The first advance of the
+// Log's life empties the hwm file (releaseHighWatermarkFile) and fails if
+// it cannot; after that nothing here touches the disk, since a restart
+// recovers the boundary from the record tail and Close writes the exact
+// one. The caller must have made the records durable first: recovery
+// can only bring back what the segment holds.
 func (l *Log) AdvanceHighWatermark(newHWM int64) error {
 	cur := l.highWatermark.Load()
 	if newHWM <= cur {
 		return nil
+	}
+	if !l.hwmReleased.Load() {
+		if err := l.releaseHighWatermarkFile(); err != nil {
+			return err
+		}
 	}
 	for newHWM > cur && !l.highWatermark.CompareAndSwap(cur, newHWM) {
 		cur = l.highWatermark.Load()
@@ -43,16 +51,6 @@ func (l *Log) AdvanceHighWatermark(newHWM int64) error {
 	// Broadcast: one commit can make many records visible, so EVERY
 	// long-poll waiter must wake and re-check, not just one.
 	l.notifyAll()
-	// The advance leaves the persisted high-watermark behind, which is a
-	// pass the flusher now owes, and the flusher's timer is armed only
-	// while something is owed. Nothing else here would arm it, so without
-	// this the boundary can sit in memory unwritten.
-	//
-	// Asked for unconditionally rather than by guessing the caller. On
-	// the commit path the request is redundant, since that pass re-arms
-	// anyway; rearm drains a pending request before deciding, so the
-	// redundant one costs nothing rather than an extra wake per commit.
-	l.flusher.noteHighWatermarkAdvance()
 	return nil
 }
 
