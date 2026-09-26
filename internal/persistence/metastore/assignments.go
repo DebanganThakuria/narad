@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/errs"
 
@@ -41,6 +42,23 @@ var assignMu sync.Mutex
 func (s *Store) LockAssignments() (unlock func()) {
 	assignMu.Lock()
 	return assignMu.Unlock
+}
+
+// joinWait bounds how long AssignNewPartitions waits for Raft voters that
+// have not registered as members yet (see awaitVotersRegistered).
+const joinWait = 2 * time.Second
+
+// joinPollInterval is how often that wait re-reads the member table.
+const joinPollInterval = 50 * time.Millisecond
+
+// joinSeen records when AssignNewPartitions first found the cluster still
+// forming; the first call that finds it formed clears it. The wait is
+// bounded from that moment, not per call, so a voter that never
+// registers (a node that never started) costs one bounded wait rather
+// than one per create.
+var joinSeen struct {
+	mu    sync.Mutex
+	since time.Time
 }
 
 // AssignPartition records ownerID as the single owner of the partition
@@ -130,10 +148,21 @@ func (s *Store) ListAssignments(topicName string) ([]Assignment, error) {
 // unowned used to leave produces waiting in the ingress WAL and
 // consumers getting empty answers, with nothing in the log to say why.
 //
-// It holds the assignment lock throughout, so a concurrent controller
-// sweep either finishes first (and this call finds those partitions
-// assigned) or waits until this call is done.
+// While the cluster is still forming it first waits, briefly, for the
+// voters that have not registered yet (awaitVotersRegistered), so a
+// topic created right after /readyz is spread over every node instead
+// of landing whole on the first one to register and then being moved.
+//
+// It holds the assignment lock from reading the members to the last
+// write, so a concurrent controller sweep either finishes first (and
+// this call finds those partitions assigned) or waits until this call
+// is done.
 func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromPartition, toPartition int) error {
+	if fromPartition >= toPartition {
+		return nil
+	}
+	s.awaitVotersRegistered(ctx)
+
 	unlock := s.LockAssignments()
 	defer unlock()
 
@@ -143,9 +172,6 @@ func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromP
 	}
 	active := AliveMembers(members)
 	if len(active) == 0 {
-		if fromPartition >= toPartition {
-			return nil
-		}
 		return ErrNoAliveMembers
 	}
 	active = RoundRobinMembers(active)
@@ -180,6 +206,72 @@ func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromP
 		}
 	}
 	return nil
+}
+
+// awaitVotersRegistered waits until every Raft voter has a member record,
+// the cluster has been seen forming for joinWait, or ctx ends, whichever
+// comes first. It returns at once when the cluster is not forming.
+//
+// On a fresh cluster the nodes register a few hundred milliseconds
+// apart, and /readyz can go green in between. A create placed then put
+// every partition on the members registered so far, usually the leader
+// alone, and the controller's rebalance then moved most of them to the
+// others while producers and consumers were already using them. Waiting
+// here is cheaper than those moves: the create returns a little later
+// with its partitions already spread.
+func (s *Store) awaitVotersRegistered(ctx context.Context) {
+	for {
+		members, err := s.ListMembers()
+		if err != nil {
+			return
+		}
+		joinSeen.mu.Lock()
+		if !s.votersJoining(members) {
+			joinSeen.since = time.Time{}
+			joinSeen.mu.Unlock()
+			return
+		}
+		if joinSeen.since.IsZero() {
+			joinSeen.since = time.Now()
+		}
+		expired := time.Since(joinSeen.since) >= joinWait
+		joinSeen.mu.Unlock()
+		if expired {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(joinPollInterval):
+		}
+	}
+}
+
+// votersJoining reports whether the cluster is still forming: some Raft
+// voter has a member record and some voter has none yet. A voter whose
+// record says dead has registered before; it may be gone for good, and
+// nothing waits for it. When no voter has registered at all there is
+// nothing to wait against either: the members registered so far (if
+// any) are used as they are, and with none the caller reports
+// ErrNoAliveMembers and the controller places the partitions later.
+func (s *Store) votersJoining(members []Member) bool {
+	voters, err := s.Voters()
+	if err != nil {
+		return false
+	}
+	registered := make(map[string]bool, len(members))
+	for _, m := range members {
+		registered[m.ID] = true
+	}
+	anyRegistered, anyMissing := false, false
+	for _, id := range voters {
+		if registered[id] {
+			anyRegistered = true
+		} else {
+			anyMissing = true
+		}
+	}
+	return anyRegistered && anyMissing
 }
 
 // parentOwnersFor resolves the anti-affinity constraint for a topic's
