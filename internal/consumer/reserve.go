@@ -1,7 +1,6 @@
 package consumer
 
 import (
-	"container/heap"
 	"context"
 	"time"
 )
@@ -97,7 +96,7 @@ func (sh *partitionShard) reserveLocked(off, now int64, visibilityTimeout time.D
 	nonce := sh.nextNonceLocked()
 	exp := now + visibilityTimeout.Milliseconds()
 	sh.entries[off] = reservation{expiresAtUnixMs: exp, nonce: nonce}
-	heap.Push(&sh.expiry, expiryEntry{offset: off, expiresAtUnixMs: exp, nonce: nonce})
+	sh.expiry.push(expiryEntry{offset: off, expiresAtUnixMs: exp, nonce: nonce})
 	// The scan that chose off found everything below it (from nextFree)
 	// reserved or resolved, so the hint may move past it.
 	if off >= sh.nextFree {
