@@ -109,9 +109,9 @@ func (c *ConsumerOffsetCommitter) SetAheadSource(fn AheadSource) {
 
 // Commit queues an offset for the next flush. Offsets only move
 // forward: a smaller offset never overwrites a pending larger one, nor
-// one a previous flush already wrote. A
-// call with the current frontier (no advance) still marks the partition
-// dirty, which is how an out-of-order ack reaches the next flush.
+// one a previous flush already made durable. A call with the current
+// frontier (no advance) still marks the partition dirty, which is how
+// an out-of-order ack reaches the next flush.
 func (c *ConsumerOffsetCommitter) Commit(topic string, partition int, offset int64) {
 	key := offsetCommitKey{topic: topic, partition: partition}
 	c.mu.Lock()
