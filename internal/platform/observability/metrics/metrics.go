@@ -125,6 +125,16 @@ type Metrics struct {
 	partitionCounters sync.Map
 	pruneMu           sync.Mutex
 	pruneGeneration   atomic.Uint64
+
+	// epoch orders the birth of storage recorders and cached counter
+	// sets against the poller's topic listings: the poller advances it
+	// just before it lists topics (snapshotEpoch), and anything born
+	// before the listing that did not include its topic belongs to a
+	// deleted topic. See pruneTopicSeries and pruneOrphanedTopics.
+	epoch atomic.Uint64
+	// topicLives holds the live topicLife of each topic name that has
+	// storage recorders. Guarded by pruneMu.
+	topicLives map[string]*topicLife
 }
 
 // New constructs the metrics struct and registers every collector with
@@ -132,6 +142,8 @@ type Metrics struct {
 // so duplicates are a programming error.
 func New(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
+		topicLives: make(map[string]*topicLife),
+
 		HTTPRequestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Subsystem: "http",
@@ -502,6 +514,13 @@ func New(reg prometheus.Registerer) *Metrics {
 	return m
 }
 
+// snapshotEpoch advances the birth epoch and returns the new value.
+// The poller calls it just before it lists topics, and passes it to
+// the prunes that listing leads to.
+func (m *Metrics) snapshotEpoch() uint64 {
+	return m.epoch.Add(1)
+}
+
 // pruneTopicSeries drops every series labeled with the given topic across
 // all topic-labeled collectors. It is called when a topic disappears so
 // the exposition does not leak series for the process lifetime under topic
@@ -513,11 +532,22 @@ func New(reg prometheus.Registerer) *Metrics {
 // same critical section and the prune generation is advanced, so a
 // recreated topic re-binds live children instead of incrementing the
 // detached ones that DeletePartialMatch left behind.
-func (m *Metrics) pruneTopicSeries(topic string) {
+//
+// The topic's storage recorders born before epoch (the listing that no
+// longer had the topic) are retired for good: a deleted topic's log
+// can stay open for a while (a skipped or failed purge keeps it until
+// idle eviction), and its flushes and retention sweeps must not bring
+// the series back. Recorders born later belong to a same-named
+// successor and stay live.
+func (m *Metrics) pruneTopicSeries(topic string, epoch uint64) {
 	m.pruneMu.Lock()
 	defer m.pruneMu.Unlock()
 	defer m.pruneGeneration.Add(1)
 	m.dropPartitionCounters(topic)
+	if life := m.topicLives[topic]; life != nil {
+		life.deadBefore = max(life.deadBefore, epoch)
+		delete(m.topicLives, topic)
+	}
 
 	sel := prometheus.Labels{"topic": topic}
 	for _, c := range []interface{ DeletePartialMatch(prometheus.Labels) int }{
@@ -542,6 +572,40 @@ func (m *Metrics) pruneTopicSeries(topic string) {
 	} {
 		c.DeletePartialMatch(prometheus.Labels{"parent": topic})
 		c.DeletePartialMatch(prometheus.Labels{"child": topic})
+	}
+}
+
+// pruneOrphanedTopics re-prunes topics that are not in current (the
+// listing taken at epoch) but whose children were bound again before
+// that listing: a request that straddled the topic's delete bumped its
+// partition counters after the prune, or a log opened just as the
+// topic was deleted. Neither would otherwise be pruned again, because
+// the poller prunes a topic only on the tick it disappears. Costs one
+// pass over the counter cache and the recorder topics per tick.
+func (m *Metrics) pruneOrphanedTopics(current map[string]struct{}, epoch uint64) {
+	var orphaned map[string]struct{}
+	add := func(topic string) {
+		if orphaned == nil {
+			orphaned = make(map[string]struct{})
+		}
+		orphaned[topic] = struct{}{}
+	}
+	m.partitionCounters.Range(func(k, v any) bool {
+		topic := k.(partitionKey).topic
+		if _, live := current[topic]; !live && v.(*PartitionCounters).born < epoch {
+			add(topic)
+		}
+		return true
+	})
+	m.pruneMu.Lock()
+	for topic, life := range m.topicLives {
+		if _, live := current[topic]; !live && life.born < epoch {
+			add(topic)
+		}
+	}
+	m.pruneMu.Unlock()
+	for topic := range orphaned {
+		m.pruneTopicSeries(topic, epoch)
 	}
 }
 

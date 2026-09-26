@@ -29,6 +29,9 @@ type PartitionCounters struct {
 	MessagesConsumed prometheus.Counter
 	BytesConsumed    prometheus.Counter
 	CorruptSkipped   prometheus.Counter
+
+	// born is the epoch the set was resolved at; see pruneOrphanedTopics.
+	born uint64
 }
 
 // PartitionCounters returns the cached counter set for the pair,
@@ -62,6 +65,7 @@ func (m *Metrics) resolvePartitionCounters(key partitionKey) *PartitionCounters 
 		MessagesConsumed: m.MessagesConsumedTotal.WithLabelValues(key.topic, p),
 		BytesConsumed:    m.BytesConsumedTotal.WithLabelValues(key.topic, p),
 		CorruptSkipped:   m.CorruptSkippedTotal.WithLabelValues(key.topic, p),
+		born:             m.epoch.Load(),
 	}
 	m.partitionCounters.Store(key, pc)
 	return pc
