@@ -563,6 +563,13 @@ func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool)
 		return err
 	}
 
+	entry := indexEntry{
+		segmentBaseOffset: active.baseOffset,
+		baseOffset:        baseOffset,
+		recordCount:       int32(len(records)),
+		framePos:          pos,
+		frameLen:          int32(n),
+	}
 	f.mu.Lock()
 	now := f.log.now()
 	if active.firstWriteAt.IsZero() {
@@ -571,13 +578,7 @@ func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool)
 	active.lastWriteAt = now
 	active.sizeBytes = pos + int64(n)
 	active.nextOffset = baseOffset + int64(len(records))
-	f.log.appendIndexLocked(indexEntry{
-		segmentBaseOffset: active.baseOffset,
-		baseOffset:        baseOffset,
-		recordCount:       int32(len(records)),
-		framePos:          pos,
-		frameLen:          int32(n),
-	})
+	f.log.appendIndexLocked(entry)
 	f.log.markFlushingWritten(active.nextOffset)
 	if active.sizeBytes >= f.log.opts.SegmentBytes {
 		f.rollPending = true
@@ -590,6 +591,16 @@ func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool)
 
 	f.unsyncedBytes.Add(int64(n))
 	f.mu.Unlock()
+
+	// The exact position of the frame just written. The sparse index
+	// keeps only an anchor every 32 KiB, so without this the commit's
+	// read-back (and the first consumer) found the frame by walking the
+	// whole navigation cache and then reading the previous frame's
+	// header from the file. A failed commit that truncates the frame
+	// drops the segment's cached positions (discardUncommittedTail), and
+	// one that cannot truncate leaves the frame in place, so the entry
+	// never outlives its bytes.
+	f.log.navCache.put(entry)
 
 	// A full segment is synced now so the roll before the next write
 	// finds it durable.

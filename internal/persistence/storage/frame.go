@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"os"
 
 	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 )
@@ -142,6 +143,21 @@ func (enc *frameEncoder) release() {
 	enc.frame = nil
 }
 
+// readAt is r.ReadAt that lets b stay on the caller's stack. A slice
+// passed through the io.ReaderAt interface escapes, which cost every
+// frame header read on the commit and read paths a heap allocation; a
+// segment is always an *os.File, whose ReadAt does not retain b. Other
+// readers (tests) read into a copy.
+func readAt(r io.ReaderAt, b []byte, off int64) (int, error) {
+	if f, ok := r.(*os.File); ok {
+		return f.ReadAt(b, off)
+	}
+	tmp := make([]byte, len(b))
+	n, err := r.ReadAt(tmp, off)
+	copy(b, tmp[:n])
+	return n, err
+}
+
 // readFrameRaw reads the header and raw (still-encoded) payload of the
 // frame at pos and validates the CRC — no decode. Shared by readFrameAt
 // (which goes on to decode) and verifyFrameAt (which deliberately does
@@ -153,7 +169,7 @@ func (enc *frameEncoder) release() {
 //   - io.ErrUnexpectedEOF: torn tail
 func readFrameRaw(r io.ReaderAt, pos int64) (frameHeader, []byte, error) {
 	var hdrBuf [headerSize]byte
-	n, err := r.ReadAt(hdrBuf[:], pos)
+	n, err := readAt(r, hdrBuf[:], pos)
 	if err != nil && err != io.EOF {
 		return frameHeader{}, nil, err
 	}
@@ -165,7 +181,12 @@ func readFrameRaw(r io.ReaderAt, pos int64) (frameHeader, []byte, error) {
 		return h, nil, err
 	}
 
-	payload := make([]byte, h.compressed)
+	// The header rides in front of the payload in one allocation: the CRC
+	// covers both, and hashing hdrBuf itself would move it to the heap
+	// (crc32 leaks its input), a second allocation per frame read.
+	buf := make([]byte, headerSize+int(h.compressed))
+	copy(buf, hdrBuf[:])
+	payload := buf[headerSize:]
 	n, err = r.ReadAt(payload, pos+headerSize)
 	if err != nil && err != io.EOF {
 		return h, nil, err
@@ -174,7 +195,7 @@ func readFrameRaw(r io.ReaderAt, pos int64) (frameHeader, []byte, error) {
 		return h, nil, io.ErrUnexpectedEOF
 	}
 
-	if want, got := h.crc, crc32cOf(hdrBuf[2:23], payload); want != got {
+	if want, got := h.crc, crc32cOf(buf[2:23], payload); want != got {
 		return h, nil, fmt.Errorf("%w: crc want=0x%x got=0x%x at pos=%d", errCorrupt, want, got, pos)
 	}
 	return h, payload, nil
@@ -234,7 +255,7 @@ func frameHeaderAt(r io.ReaderAt, pos int64) (frameHeader, int64, error) {
 		frameHeaderReadHook()
 	}
 	var hdrBuf [headerSize]byte
-	n, err := r.ReadAt(hdrBuf[:], pos)
+	n, err := readAt(r, hdrBuf[:], pos)
 	if err != nil && err != io.EOF {
 		return frameHeader{}, pos, err
 	}
@@ -280,7 +301,7 @@ const verifyChunkBytes = 64 << 10
 // across calls) while computing the CRC. Same errors as readFrameRaw.
 func verifyFrameAtBuffered(r io.ReaderAt, pos int64, buf *[]byte) (frameHeader, int64, error) {
 	var hdrBuf [headerSize]byte
-	n, err := r.ReadAt(hdrBuf[:], pos)
+	n, err := readAt(r, hdrBuf[:], pos)
 	if err != nil && err != io.EOF {
 		return frameHeader{}, pos, err
 	}
@@ -297,24 +318,25 @@ func verifyFrameAtBuffered(r io.ReaderAt, pos int64, buf *[]byte) (frameHeader, 
 	}
 	chunk := (*buf)[:verifyChunkBytes]
 
-	c := crc32.New(crc32cTable)
-	c.Write(hdrBuf[2:23])
+	// Hash the header from the chunk, not from hdrBuf: crc32 leaks its
+	// input, which would move hdrBuf to the heap on every commit.
+	crc := crc32.Update(0, crc32cTable, chunk[:copy(chunk, hdrBuf[2:23])])
 	remaining := int64(h.compressed)
 	at := pos + headerSize
 	for remaining > 0 {
 		want := min(remaining, int64(len(chunk)))
-		got, rerr := r.ReadAt(chunk[:want], at)
+		got, rerr := readAt(r, chunk[:want], at)
 		if rerr != nil && rerr != io.EOF {
 			return h, pos, rerr
 		}
 		if int64(got) < want {
 			return h, pos, io.ErrUnexpectedEOF
 		}
-		c.Write(chunk[:got])
+		crc = crc32.Update(crc, crc32cTable, chunk[:got])
 		remaining -= want
 		at += want
 	}
-	if want, got := h.crc, c.Sum32(); want != got {
+	if want, got := h.crc, crc; want != got {
 		return h, pos, fmt.Errorf("%w: crc want=0x%x got=0x%x at pos=%d", errCorrupt, want, got, pos)
 	}
 	return h, pos + int64(headerSize) + int64(h.compressed), nil
