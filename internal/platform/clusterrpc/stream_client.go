@@ -19,9 +19,11 @@ import (
 const defaultStreamTimeout = 5 * time.Second
 
 // maxRetainedWriteBuffer caps the frame staging buffer a stream keeps
-// between writes. Frames up to this size reuse the buffer; a larger one
-// (a segment chunk, say) is staged in a throwaway buffer so an
-// occasional bulk transfer does not pin megabytes per pooled stream.
+// between writes. Frames up to this size are staged in it and written in
+// one Write; a larger one (a segment chunk, say) is written as header and
+// payload without staging (see clusterwire.WriteStreamFrameStaged), so an
+// occasional bulk transfer neither pins megabytes per pooled stream nor
+// allocates a buffer of its size.
 const maxRetainedWriteBuffer = 256 << 10
 
 // errFallbackReplyTimeout marks a reply wait that ended because the
@@ -366,19 +368,18 @@ func (c *streamClient) unlockWrite() {
 	<-c.writeSem
 }
 
-// writeLocked writes frame in one Write call under a write deadline. The
-// caller holds the write slot. A write that times out before any of the
-// frame went out leaves the stream's framing intact, so only this frame
-// fails and the stream keeps serving the RPCs multiplexed on it. Any
-// other failure, or a frame cut off part-way (which corrupts the
-// framing), closes the stream and fails every request on it.
+// writeLocked writes frame under a write deadline. The caller holds the
+// write slot. A write that times out before any of the frame went out
+// leaves the stream's framing intact, so only this frame fails and the
+// stream keeps serving the RPCs multiplexed on it. Any other failure, or
+// a frame cut off part-way (which corrupts the framing), closes the
+// stream and fails every request on it.
 func (c *streamClient) writeLocked(deadline time.Time, frame clusterwire.StreamFrame) error {
 	if c.isClosed() {
 		return c.closeError()
 	}
-	buf := clusterwire.AppendStreamFrame(c.writeBuf[:0], frame)
 	_ = c.conn.SetWriteDeadline(deadline)
-	n, err := c.conn.Write(buf)
+	buf, n, err := clusterwire.WriteStreamFrameStaged(c.conn, c.writeBuf, frame, maxRetainedWriteBuffer)
 	_ = c.conn.SetWriteDeadline(time.Time{})
 	if cap(buf) <= maxRetainedWriteBuffer {
 		c.writeBuf = buf[:0]

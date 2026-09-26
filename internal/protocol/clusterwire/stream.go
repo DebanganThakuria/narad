@@ -95,18 +95,51 @@ func WriteStreamFrameInto(w io.Writer, buf []byte, frame StreamFrame) ([]byte, e
 	return buf, err
 }
 
+// WriteStreamFrameStaged is WriteStreamFrameInto without the copy for
+// big frames. A frame of at most maxStaged bytes, header included, is
+// assembled in buf and handed to w in one Write, exactly as
+// WriteStreamFrameInto does. A larger one goes out in two: its header
+// (from buf) and then its payload in place. One more Write is noise next
+// to such a frame, while staging it would cost a buffer of its size and a
+// copy into it, per frame. The wire bytes are the same either way. It
+// returns buf (grown only to stage a frame) and how many bytes of the
+// frame were written, so a caller can tell a write that sent nothing
+// from one cut off part-way.
+func WriteStreamFrameStaged(w io.Writer, buf []byte, frame StreamFrame, maxStaged int) ([]byte, int, error) {
+	if len(frame.Payload) > MaxStreamFramePayloadBytes {
+		return buf, 0, fmt.Errorf("stream frame payload too large: %d bytes", len(frame.Payload))
+	}
+	if streamFrameHeaderBytes+len(frame.Payload) <= maxStaged {
+		buf = AppendStreamFrame(buf[:0], frame)
+		n, err := w.Write(buf)
+		return buf, n, err
+	}
+	buf = appendStreamFrameHeader(buf[:0], frame)
+	n, err := w.Write(buf)
+	if err != nil {
+		return buf, n, err
+	}
+	m, err := w.Write(frame.Payload)
+	return buf, n + m, err
+}
+
 // AppendStreamFrame appends frame's wire encoding (header then payload)
 // to dst and returns the extended slice. It performs no size check; use
 // WriteStreamFrameInto for the checked path.
 func AppendStreamFrame(dst []byte, frame StreamFrame) []byte {
+	dst = appendStreamFrameHeader(dst, frame)
+	return append(dst, frame.Payload...)
+}
+
+// appendStreamFrameHeader appends frame's 20-byte header to dst.
+func appendStreamFrameHeader(dst []byte, frame StreamFrame) []byte {
 	var header [streamFrameHeaderBytes]byte
 	binary.BigEndian.PutUint32(header[0:4], streamMagic)
 	header[4] = streamVersion
 	header[5] = byte(frame.Type)
 	binary.BigEndian.PutUint64(header[8:16], frame.RequestID)
 	binary.BigEndian.PutUint32(header[16:20], uint32(len(frame.Payload)))
-	dst = append(dst, header[:]...)
-	return append(dst, frame.Payload...)
+	return append(dst, header[:]...)
 }
 
 // ReadStreamFrame reads one frame from r, rejecting payloads larger

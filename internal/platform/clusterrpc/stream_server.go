@@ -396,7 +396,7 @@ func (c *streamServerConn) writeFrame(frame clusterwire.StreamFrame) bool {
 	// each request frame spawns a reply goroutine, so a stalled peer must
 	// not pile them up on writeMu/flow control until the idle timeout.
 	_ = c.conn.SetWriteDeadline(time.Now().Add(replyWriteTimeout(len(frame.Payload))))
-	buf, err := clusterwire.WriteStreamFrameInto(c.conn, c.writeBuf, frame)
+	buf, _, err := clusterwire.WriteStreamFrameStaged(c.conn, c.writeBuf, frame, maxRetainedWriteBuffer)
 	_ = c.conn.SetWriteDeadline(time.Time{})
 	if cap(buf) <= maxRetainedWriteBuffer {
 		c.writeBuf = buf[:0]

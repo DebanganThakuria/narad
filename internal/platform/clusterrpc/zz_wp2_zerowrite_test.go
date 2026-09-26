@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"sync"
@@ -306,5 +307,86 @@ func TestZZWP2QUICSpentBudgetAtWriteKeepsStream(t *testing.T) {
 	close(h.release)
 	if err := zzWP2Result(t, parked, "long-poll"); err != nil {
 		t.Fatalf("long-poll error = %v", err)
+	}
+}
+
+// A frame too big for the staging buffer goes out as header then
+// payload. When the header's Write times out with nothing written the
+// framing is intact, so the stream must survive as for a staged frame.
+func TestZZWP2BigFrameZeroByteTimeoutKeepsStream(t *testing.T) {
+	clientEnd, server := net.Pipe()
+	t.Cleanup(func() { _ = clientEnd.Close(); _ = server.Close() })
+	log := &zzWP2WriteLog{streamConn: clientEnd}
+	client := newStreamClient(log, 5*time.Second)
+	go client.readLoop()
+	reader := bufio.NewReader(server)
+
+	parked := zzWP2Go(func() error {
+		_, err := client.requestFrame(context.Background(), clusterwire.StreamFrameNodeRequest, []byte("park"))
+		return err
+	})
+	first, err := clusterwire.ReadStreamFrame(reader, clusterwire.MaxStreamFramePayloadBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err = client.requestFrame(ctx, clusterwire.StreamFrameNodeRequest, make([]byte, 1<<20))
+	log.requireZeroByteTimeout(t, zzWP2FrameHeaderBytes)
+	if client.isClosed() {
+		t.Fatalf("a zero-byte write timeout closed the shared stream: %v", client.closeError())
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("big request error = %v, want context.DeadlineExceeded", err)
+	}
+	writeReply(t, server, first.RequestID, []byte("ok"))
+	if err := zzWP2Result(t, parked, "request in flight"); err != nil {
+		t.Fatalf("request in flight error = %v", err)
+	}
+}
+
+// A big frame whose header went out but whose payload was cut off leaves
+// a torn frame on the stream, which must close.
+func TestZZWP2BigFramePartialWriteClosesStream(t *testing.T) {
+	client, server := newTestStreamClient(t, 5*time.Second)
+	go func() {
+		// Take the header and part of the payload, then stop reading.
+		_, _ = io.ReadFull(server, make([]byte, 100))
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := client.requestFrame(ctx, clusterwire.StreamFrameNodeRequest, make([]byte, 1<<20)); err == nil {
+		t.Fatal("torn write reported success")
+	}
+	if !client.isClosed() {
+		t.Fatal("stream left open after a partial frame write")
+	}
+}
+
+// Neither side stages a frame too big for its retained buffer: writing a
+// 1 MiB frame allocates nothing (it used to cost a 1 MiB buffer and a
+// copy per frame).
+func TestZZWP2BigFrameWritesAllocateNothing(t *testing.T) {
+	if zzWP2Race {
+		t.Skip("allocation counts differ under the race detector")
+	}
+	frame := clusterwire.StreamFrame{Type: clusterwire.StreamFrameNodeRequest, RequestID: 1, Payload: make([]byte, 1<<20)}
+	client := newStreamClient(zzWP2DiscardConn{}, 5*time.Second)
+	deadline := time.Now().Add(time.Hour)
+	if got := testing.AllocsPerRun(20, func() {
+		if err := client.writeLocked(deadline, frame); err != nil {
+			t.Fatal(err)
+		}
+	}); got != 0 {
+		t.Fatalf("client allocs per 1 MiB frame = %v, want 0", got)
+	}
+	server := newStreamServerConn(zzWP2DiscardConn{}, nil, nil, nil, nil)
+	if got := testing.AllocsPerRun(20, func() {
+		if !server.writeFrame(frame) {
+			t.Fatal("write failed")
+		}
+	}); got != 0 {
+		t.Fatalf("server allocs per 1 MiB frame = %v, want 0", got)
 	}
 }
