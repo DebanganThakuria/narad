@@ -13,9 +13,11 @@
 //
 //	Linux   fdatasync(2) — data + size, skips the metadata journal
 //	        write that fsync(2) pays on every group commit.
-//	macOS   fcntl(F_FULLFSYNC) via os.File.Sync — Darwin has no
-//	        fdatasync, and its plain fsync does not force the drive
-//	        cache; F_FULLFSYNC is the only durable option.
+//	macOS   fcntl(F_FULLFSYNC) — Darwin has no fdatasync, and its
+//	        plain fsync does not force the drive cache; F_FULLFSYNC is
+//	        the only durable option. Issued through x/sys rather than
+//	        os.File.Sync so the flush does not pin a scheduler P (see
+//	        syncdata_darwin.go).
 //	Windows FlushFileBuffers via os.File.Sync — NT has no data-only
 //	        variant.
 //	other   os.File.Sync — correct everywhere Go runs.

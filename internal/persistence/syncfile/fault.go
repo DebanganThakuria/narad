@@ -123,12 +123,14 @@ func SyncData(f *os.File) error {
 }
 
 // Sync is os.File.Sync: the full fsync, for directory handles and for a
-// truncate whose new size must survive a crash.
+// truncate whose new size must survive a crash. On Darwin it issues the
+// same F_FULLFSYNC as os.File.Sync through a path that releases the
+// scheduler's P during the flush; see syncdata_darwin.go.
 func Sync(f *os.File) error {
 	if skip, err := consult(OpSync, f.Name()); skip {
 		return err
 	}
-	return f.Sync()
+	return fullSync(f)
 }
 
 // Write is os.File.Write. A lying hook reports the whole buffer
