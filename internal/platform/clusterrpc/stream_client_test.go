@@ -16,12 +16,7 @@ import (
 func newTestStreamClient(t *testing.T, timeout time.Duration) (*streamClient, net.Conn) {
 	t.Helper()
 	clientConn, serverConn := net.Pipe()
-	client := &streamClient{
-		conn:    clientConn,
-		reader:  bufio.NewReader(clientConn),
-		timeout: timeout,
-		pending: make(map[uint64]chan streamResult),
-	}
+	client := newStreamClient(clientConn, timeout)
 	go client.readLoop()
 	t.Cleanup(func() {
 		_ = clientConn.Close()

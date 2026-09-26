@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,7 +74,11 @@ type streamClient struct {
 	reader  *bufio.Reader
 	timeout time.Duration
 
-	writeMu  sync.Mutex
+	// writeSem serializes frame writes: a one-slot semaphore rather than a
+	// mutex, so a caller queued behind a stalled write can give up when
+	// its context ends, having written nothing. writeBuf is the frame
+	// staging buffer; the slot holder owns it.
+	writeSem chan struct{}
 	writeBuf []byte
 	nextID   atomic.Uint64
 	closed   atomic.Bool
@@ -86,10 +91,11 @@ type streamClient struct {
 
 func newStreamClient(conn streamConn, timeout time.Duration) *streamClient {
 	return &streamClient{
-		conn:    conn,
-		reader:  bufio.NewReader(conn),
-		timeout: timeout,
-		pending: make(map[uint64]chan streamResult),
+		conn:     conn,
+		reader:   bufio.NewReader(conn),
+		timeout:  timeout,
+		writeSem: make(chan struct{}, 1),
+		pending:  make(map[uint64]chan streamResult),
 	}
 }
 
@@ -102,6 +108,11 @@ type streamResult struct {
 // frame (correlated by RequestID). This is the generic cluster-RPC
 // transport primitive used by the peer client.
 func (c *streamClient) requestFrame(ctx context.Context, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
+	// A caller whose context has already ended fails without touching
+	// the shared stream: nothing registered, nothing written.
+	if err := ctx.Err(); err != nil {
+		return clusterwire.StreamFrame{}, err
+	}
 	requestID := c.nextID.Add(1)
 	resultCh := make(chan streamResult, 1)
 	c.addPending(requestID, resultCh)
@@ -144,22 +155,42 @@ func (c *streamClient) requestFrame(ctx context.Context, frameType clusterwire.S
 	}
 }
 
-// cancelFrameWriteTimeout bounds the best-effort cancel notification so
-// a caller that already spent its whole budget is not held much longer
-// by a stalled stream.
+// cancelFrameWriteTimeout bounds the best-effort cancel notification:
+// the wait for the write slot and the write each.
 const cancelFrameWriteTimeout = time.Second
 
 // sendCancel tells the server the waiter for requestID is gone (see
-// clusterwire.StreamFrameCancel). Best-effort: a write failure closes
-// the stream like any other, which cancels every server-side request
-// on it anyway.
+// clusterwire.StreamFrameCancel). Best-effort and off the caller's path:
+// when another frame is being written the cancel is queued on its own
+// goroutine rather than holding a caller whose budget is already spent,
+// and it is dropped if the slot does not free up in time (the server's
+// reservation then just runs out its lease).
 func (c *streamClient) sendCancel(requestID uint64) {
 	if c.isClosed() {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), cancelFrameWriteTimeout)
-	defer cancel()
-	_ = c.writeFrame(ctx, clusterwire.StreamFrame{Type: clusterwire.StreamFrameCancel, RequestID: requestID})
+	frame := clusterwire.StreamFrame{Type: clusterwire.StreamFrameCancel, RequestID: requestID}
+	select {
+	case c.writeSem <- struct{}{}:
+		c.writeCancel(frame)
+		return
+	default:
+	}
+	go func() {
+		timer := time.NewTimer(cancelFrameWriteTimeout)
+		defer timer.Stop()
+		select {
+		case c.writeSem <- struct{}{}:
+			c.writeCancel(frame)
+		case <-timer.C:
+		}
+	}()
+}
+
+// writeCancel writes a cancel frame. The caller holds the write slot.
+func (c *streamClient) writeCancel(frame clusterwire.StreamFrame) {
+	defer c.unlockWrite()
+	_ = c.writeLocked(time.Now().Add(cancelFrameWriteTimeout), frame)
 }
 
 func (c *streamClient) addPending(requestID uint64, ch chan streamResult) {
@@ -185,28 +216,81 @@ func (c *streamClient) complete(requestID uint64, result streamResult) {
 	ch <- result
 }
 
+// writeFrame writes one frame, bounded by ctx's deadline (the client
+// timeout when it has none). Frames go out one at a time; a caller whose
+// context ends while it waits its turn gives up with the context's
+// error, having written nothing.
 func (c *streamClient) writeFrame(ctx context.Context, frame clusterwire.StreamFrame) error {
 	if c.isClosed() {
 		return c.closeError()
 	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	if len(frame.Payload) > clusterwire.MaxStreamFramePayloadBytes {
+		// Refused before a byte is written: the stream is untouched.
+		return fmt.Errorf("stream frame payload too large: %d bytes", len(frame.Payload))
+	}
+	if err := c.lockWrite(ctx); err != nil {
+		return err
+	}
+	defer c.unlockWrite()
 
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(c.timeout)
 	}
+	err := c.writeLocked(deadline, frame)
+	if ok && err != nil && !c.isClosed() {
+		// The caller's own deadline cut the write off before any of the
+		// frame went out: report it as the context's.
+		return context.DeadlineExceeded
+	}
+	return err
+}
+
+// lockWrite takes the write slot, or returns ctx's error if ctx ends
+// first. The uncontended case is a single non-blocking send.
+func (c *streamClient) lockWrite(ctx context.Context) error {
+	select {
+	case c.writeSem <- struct{}{}:
+		return nil
+	default:
+	}
+	select {
+	case c.writeSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *streamClient) unlockWrite() {
+	<-c.writeSem
+}
+
+// writeLocked writes frame in one Write call under a write deadline. The
+// caller holds the write slot. A write that times out before any of the
+// frame went out leaves the stream's framing intact, so only this frame
+// fails and the stream keeps serving the RPCs multiplexed on it. Any
+// other failure, or a frame cut off part-way (which corrupts the
+// framing), closes the stream and fails every request on it.
+func (c *streamClient) writeLocked(deadline time.Time, frame clusterwire.StreamFrame) error {
+	if c.isClosed() {
+		return c.closeError()
+	}
+	buf := clusterwire.AppendStreamFrame(c.writeBuf[:0], frame)
 	_ = c.conn.SetWriteDeadline(deadline)
-	buf, err := clusterwire.WriteStreamFrameInto(c.conn, c.writeBuf, frame)
+	n, err := c.conn.Write(buf)
 	_ = c.conn.SetWriteDeadline(time.Time{})
 	if cap(buf) <= maxRetainedWriteBuffer {
 		c.writeBuf = buf[:0]
 	}
-	if err != nil {
-		c.closeWithError(err)
+	if err == nil {
+		return nil
+	}
+	if n == 0 && errors.Is(err, os.ErrDeadlineExceeded) {
 		return err
 	}
-	return nil
+	c.closeWithError(err)
+	return err
 }
 
 func (c *streamClient) readLoop() {
