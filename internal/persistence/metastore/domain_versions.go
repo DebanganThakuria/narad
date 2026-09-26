@@ -26,9 +26,12 @@ import (
 // paid once per key, on topic creation), and bumpAll swaps in empty
 // tables.
 //
-// A deleted topic's cells are kept as tombstones (retireTopic) and
-// pruned maxRetiredKeys at a time, so the tables track live names
-// rather than every name ever used.
+// retireTopic keeps a deleted topic's cells as tombstones and prunes
+// them maxRetiredKeys at a time, so the tables can track live names
+// rather than every name ever used. The FSM's topic delete does not call
+// it yet: applyDeleteTopic still bumps the three domains one by one,
+// which leaves a cell per deleted name until it calls retireTopic in
+// their place.
 type metadataDomainVersions struct {
 	// mu serialises writers only. Every bump draws its version from next
 	// and publishes it while holding mu, so per-key versions are
@@ -217,7 +220,9 @@ func (v *metadataDomainVersions) usersVersion() uint64 {
 // retireTopic advances a deleted topic's topic, assignment and schema
 // versions, exactly as bumping all three would, and marks its cells as
 // tombstones so that a churn of uniquely named topics does not keep a
-// cell per name ever created (see keyedVersions.retire).
+// cell per name ever created (see keyedVersions.retire). It is meant to
+// replace applyDeleteTopic's three bumps for the deleted name; the
+// fan-out partners that delete also bumps stay live and keep bumpTopic.
 func (v *metadataDomainVersions) retireTopic(name string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
