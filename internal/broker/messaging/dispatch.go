@@ -461,12 +461,7 @@ func (d *dispatcher) consumable(topicName string, scan []int) int {
 		// that came back empty and this topic a claimDeadline of silence.
 		next, inFlight, ackedAhead, ok := d.engine.offsets.Reservable(topicName, p)
 		if !ok {
-			// No shard yet (nothing touched the partition since the
-			// process started): the frontier is the persisted one. Without
-			// it a fully drained partition reads as its whole history.
-			if committed, found, err := storage.ReadConsumerOffset(storage.TopicPartitionDir(d.engine.logs.DataDir(), topicName, p)); err == nil && found {
-				next = committed + 1
-			}
+			next, ackedAhead = persistedFrontier(storage.TopicPartitionDir(d.engine.logs.DataDir(), topicName, p))
 		}
 		free := tail - next - int64(inFlight+ackedAhead)
 		if free > 0 {
@@ -474,6 +469,31 @@ func (d *dispatcher) consumable(topicName string, scan []int) int {
 		}
 	}
 	return total
+}
+
+// persistedFrontier is Reservable for a partition with no shard yet
+// (nothing touched it since the process started): the next offset above
+// the persisted frontier, and how many offsets at or above it were
+// acked ahead of a gap. Without it a fully drained partition reads as
+// its whole history. The frontier is the larger of the two files'
+// (consumer.offset, and the frontier consumer.ahead was written
+// against), as shard recovery takes it: the ahead record can be the
+// fresher one, and the offset committer may write only that one.
+func persistedFrontier(dir string) (next int64, ackedAhead int) {
+	if committed, found, err := storage.ReadConsumerOffset(dir); err == nil && found {
+		next = committed + 1
+	}
+	rec, found, err := storage.ReadConsumerAhead(dir)
+	if err != nil || !found {
+		return next, 0
+	}
+	next = max(next, rec.Committed+1)
+	for _, off := range rec.Offsets {
+		if off >= next {
+			ackedAhead++
+		}
+	}
+	return next, ackedAhead
 }
 
 // pumpTopic hands out as many records as this topic has demand and
