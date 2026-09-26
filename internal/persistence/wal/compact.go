@@ -99,5 +99,5 @@ func (l *Log) rotateFullyCompacted(seq uint64) error {
 	if err != nil {
 		return err
 	}
-	return l.rollLocked()
+	return l.rollLocked(false)
 }

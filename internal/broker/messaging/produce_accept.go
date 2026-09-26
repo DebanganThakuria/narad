@@ -42,7 +42,11 @@ func (e *Engine) AcceptProduce(ctx context.Context, topicName, key string, paylo
 		return ingress.AcceptedProduce{}, err
 	}
 
-	return e.ingress.AcceptProduce(ctx, topicName, key, partIdx, payload)
+	// Stamp the incarnation the payload was validated against: if the
+	// topic is deleted and recreated under the same name while the record
+	// waits in the ingress WAL, the ID tells it apart from the new topic's
+	// records.
+	return e.ingress.AcceptProduceWithTopicID(ctx, topicName, t.ID, key, partIdx, payload)
 }
 
 // resolveAcceptedProducePartition picks the target partition for a

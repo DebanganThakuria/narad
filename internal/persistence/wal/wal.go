@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
@@ -30,9 +31,15 @@ type Log struct {
 	segmentSize int64
 	nextSeq     uint64
 	writeBuffer []byte
-	pending     *syncBatch
-	closed      bool
-	syncErr     error
+	// spare (guarded by mu) is the last written-out buffer, kept empty
+	// for the next batch. flushSync swaps it in as writeBuffer when it
+	// detaches a batch, so records staged while that batch's write and
+	// sync are in flight land in a buffer already sized to the previous
+	// batch instead of regrowing from a single frame. See recycleBuffer.
+	spare   []byte
+	pending *syncBatch
+	closed  bool
+	syncErr error
 	// writeFailed is guarded by fileOps, not mu. It latches the first
 	// write or fsync failure on the active file so that no later batch
 	// is written on top of a possibly torn region and acked.
@@ -43,6 +50,27 @@ type Log struct {
 	// last directory listing; 0 means unknown (list on the next call).
 	// See CompactBefore.
 	compactFloor uint64
+
+	// durableSize (guarded by mu) is how many bytes of the active
+	// segment are known written and synced. Log.ReplayFromCursor reads
+	// the active segment only that far, so it never parses a frame that
+	// is still being written, nor the zero-filled space after the data
+	// of a prepared segment.
+	durableSize int64
+
+	// Segment preparation (see SegmentPrealloc), all guarded by mu.
+	// activePrepared marks an active segment that was prepared (it has a
+	// zero tail up to SegmentBytes, trimmed by the roll that seals it);
+	// prepRequested is set once the active segment passes half its size
+	// and cleared by the next roll; spareReady marks a fully prepared
+	// file waiting under prepFileName. prepWake and prepDone are nil when
+	// preparation is off.
+	prealloc       bool
+	activePrepared bool
+	prepRequested  bool
+	spareReady     bool
+	prepWake       chan struct{}
+	prepDone       chan struct{}
 
 	wakeup chan struct{}
 	stop   chan struct{}
@@ -85,7 +113,15 @@ func Open(dir string, opts Options) (*Log, error) {
 	if nextSeq < last.base {
 		nextSeq = last.base
 	}
+	// A preparation interrupted by a stop or a crash is never resumed:
+	// its file may be partly written. Nothing reads it, and the preparer
+	// removes it before preparing again, so a failed remove is harmless.
+	_ = os.Remove(filepath.Join(dir, prepFileName))
 
+	// The active segment is truncated to its data, prepared or not (the
+	// scan reads a prepared segment's zeros as a torn tail), so nothing
+	// can sit behind the next append; it grows by appending until the
+	// next roll brings in a prepared successor.
 	file, err := openActiveSegment(last.path, lastValidEnd)
 	if err != nil {
 		return nil, err
@@ -97,10 +133,17 @@ func Open(dir string, opts Options) (*Log, error) {
 		file:        file,
 		segmentBase: last.base,
 		segmentSize: lastValidEnd,
+		durableSize: lastValidEnd,
 		nextSeq:     nextSeq,
+		prealloc:    opts.Prealloc.enabled(),
 		wakeup:      make(chan struct{}, 1),
 		stop:        make(chan struct{}),
 		done:        make(chan struct{}),
+	}
+	if l.prealloc {
+		l.prepWake = make(chan struct{}, 1)
+		l.prepDone = make(chan struct{})
+		go l.prepLoop()
 	}
 	go l.syncLoop()
 	return l, nil
@@ -213,11 +256,28 @@ func (l *Log) NextSeq() uint64 {
 	return l.nextSeq
 }
 
-// Close stops the sync loop, flushes any buffered records, and closes
-// the active segment. It returns the latched sync error, if any.
+// Err returns the latched write or sync failure, or nil while the log is
+// healthy. Once set it never clears: the log refuses every append (and
+// fails every waiting one) until it is reopened, because the bytes after
+// the failure point are of unknown durability.
+func (l *Log) Err() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.syncErr
+}
+
+// Close stops the sync loop and the segment preparer, flushes any
+// buffered records, and closes the active segment. It returns the
+// latched sync error, if any.
 func (l *Log) Close() error {
 	l.once.Do(func() { close(l.stop) })
 	<-l.done
+	if l.prepDone != nil {
+		<-l.prepDone
+		// A prepared spare is not kept across restarts (Open discards
+		// it), so do not leave it holding disk.
+		_ = os.Remove(filepath.Join(l.dir, prepFileName))
+	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()

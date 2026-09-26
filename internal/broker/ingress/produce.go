@@ -31,7 +31,14 @@ import (
 // fields are the payload the dispatcher commits to the target
 // partition.
 type ProduceRecord struct {
-	Topic           string
+	Topic string
+	// TopicID is the incarnation (topic.Topic.ID) the record was
+	// validated and accepted against, so a record still in the WAL when
+	// its topic is deleted and a topic of the same name is created can
+	// be told apart from the new topic's records. Empty for records
+	// accepted before incarnations were stamped (format 1) and for
+	// topics created before topic IDs existed.
+	TopicID         string
 	Key             string
 	TargetPartition int
 	Payload         []byte
@@ -107,8 +114,17 @@ func OpenManager(dataDir string, opts wal.Options) (*Manager, error) {
 // AcceptProduce validates and durably appends one produce request to
 // the ingress WAL, returning its receipt. The record is not yet
 // visible to consumers — the dispatcher commits it to the partition
-// log later.
+// log later. The record carries no topic incarnation; the broker's
+// accept path uses AcceptProduceWithTopicID.
 func (m *Manager) AcceptProduce(ctx context.Context, topicName, key string, targetPartition int, payload []byte) (AcceptedProduce, error) {
+	return m.AcceptProduceWithTopicID(ctx, topicName, "", key, targetPartition, payload)
+}
+
+// AcceptProduceWithTopicID is AcceptProduce for a record stamped with
+// the incarnation (topic.Topic.ID) of the topic it was validated
+// against; see ProduceRecord.TopicID. An empty topicID writes the same
+// record AcceptProduce does.
+func (m *Manager) AcceptProduceWithTopicID(ctx context.Context, topicName, topicID, key string, targetPartition int, payload []byte) (AcceptedProduce, error) {
 	if m == nil || m.log == nil {
 		return AcceptedProduce{}, errors.New("ingress: manager is nil")
 	}
@@ -124,6 +140,7 @@ func (m *Manager) AcceptProduce(ctx context.Context, topicName, key string, targ
 
 	record := ProduceRecord{
 		Topic:           topicName,
+		TopicID:         topicID,
 		Key:             key,
 		TargetPartition: targetPartition,
 		Payload:         payload,
@@ -150,6 +167,15 @@ func (m *Manager) AcceptProduce(ctx context.Context, topicName, key string, targ
 	}, nil
 }
 
+// Healthy reports whether the ingress WAL still accepts produce
+// requests. It turns false for good once a WAL write or sync fails:
+// the WAL latches the failure and every later accept fails until the
+// process restarts, so an operator needs to see it (metrics, readiness)
+// rather than infer it from 5xx rates.
+func (m *Manager) Healthy() bool {
+	return m != nil && m.log != nil && m.log.Err() == nil
+}
+
 // DurableProduceNext returns the sequence one past the newest record
 // known to be durable in the ingress WAL.
 func (m *Manager) DurableProduceNext() uint64 {
@@ -160,21 +186,42 @@ func (m *Manager) DurableProduceNext() uint64 {
 }
 
 // ReplayProduce replays this node's ingress WAL from the given
-// sequence. See the package-level ReplayProduce.
+// sequence. See the package-level ReplayProduce; unlike it, this reads
+// the live WAL only up to what has been synced (wal.Log.ReplayFromCursor).
 func (m *Manager) ReplayProduce(from uint64, fn func(ProduceRecord) error) error {
-	if m == nil {
+	if m == nil || m.log == nil {
 		return errors.New("ingress: manager is nil")
 	}
-	return ReplayProduce(m.produceDir, from, fn)
+	if fn == nil {
+		return nil
+	}
+	return replayProduce(m.log.ReplayFromCursor, wal.Cursor{Seq: from}, func(record ProduceRecord, _ wal.Cursor) error {
+		return fn(record)
+	})
 }
 
 // ReplayProduceFromCursor replays this node's ingress WAL from an
-// exact byte cursor. See the package-level ReplayProduceFromCursor.
+// exact byte cursor. See the package-level ReplayProduceFromCursor;
+// unlike it, this reads the live WAL only up to what has been synced
+// (wal.Log.ReplayFromCursor), and it skips listing the WAL directory
+// while the cursor is in the active segment.
 func (m *Manager) ReplayProduceFromCursor(cursor wal.Cursor, fn func(ProduceRecord, wal.Cursor) error) error {
-	if m == nil {
+	return m.ReplayProduceFromCursorPeek(cursor, nil, fn)
+}
+
+// ReplayProduceFromCursorPeek is ReplayProduceFromCursor with a filter
+// that sees each record's WAL id and resume cursor before the record is
+// read off its frame (see wal.Peek). A record peek skips is checksummed
+// but never allocated, decoded or handed to fn: that is how a dispatcher
+// passes over the records it committed on an earlier pass (held above
+// its checkpoint by a stuck one) without paying for them on every pass.
+func (m *Manager) ReplayProduceFromCursorPeek(cursor wal.Cursor, peek wal.Peek, fn func(ProduceRecord, wal.Cursor) error) error {
+	if m == nil || m.log == nil {
 		return errors.New("ingress: manager is nil")
 	}
-	return ReplayProduceFromCursor(m.produceDir, cursor, fn)
+	return replayProduce(func(cursor wal.Cursor, fn func(wal.Record, wal.Cursor) error) error {
+		return m.log.ReplayFromCursorPeek(cursor, peek, fn)
+	}, cursor, fn)
 }
 
 // CompactProduceBefore drops WAL segments wholly below seq. Callers

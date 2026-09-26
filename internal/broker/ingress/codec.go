@@ -8,9 +8,22 @@ import (
 	"math"
 )
 
-// produceRecordFormat versions the on-disk record layout. Bump only
-// with a decoder that still accepts every prior format.
-const produceRecordFormat byte = 1
+// Produce record formats version the on-disk record layout. Add a
+// format only with a decoder that still accepts every prior one.
+//
+//	1  topic, key, partition, createdAt, payload
+//	2  topic, topic ID, key, partition, createdAt, payload
+//
+// A record with a TopicID is written as format 2, one without as format
+// 1, byte for byte what binaries before format 2 wrote. Format 2 is a
+// one-way upgrade for the WAL: a binary that predates it cannot decode a
+// format-2 record, so its dispatcher stops at the first one until the
+// newer binary is back. Downgrade only with the ingress WAL drained (the
+// dispatch checkpoint equal to the durable next seq).
+const (
+	produceRecordFormatV1 byte = 1
+	produceRecordFormatV2 byte = 2
+)
 
 // EncodeProduceRecord serializes a record into the ingress WAL payload
 // format: a format byte followed by length-prefixed fields, all
@@ -45,7 +58,11 @@ func validateProduceRecord(record ProduceRecord) error {
 
 // produceRecordSize is the exact encoded size of a valid record.
 func produceRecordSize(record ProduceRecord) int {
-	return 1 + stringSize(record.Topic) + stringSize(record.Key) + 4 + 8 + bytesSize(record.Payload)
+	size := 1 + stringSize(record.Topic) + stringSize(record.Key) + 4 + 8 + bytesSize(record.Payload)
+	if record.TopicID != "" {
+		size += stringSize(record.TopicID)
+	}
+	return size
 }
 
 // appendProduceRecord appends the encoding of a validated record to dst.
@@ -57,8 +74,14 @@ func appendProduceRecord(dst []byte, record ProduceRecord) []byte {
 		panic("ingress: appendProduceRecord: unvalidated target partition")
 	}
 	partition := uint32(record.TargetPartition)
-	dst = append(dst, produceRecordFormat)
-	dst = appendString(dst, record.Topic)
+	if record.TopicID == "" {
+		dst = append(dst, produceRecordFormatV1)
+		dst = appendString(dst, record.Topic)
+	} else {
+		dst = append(dst, produceRecordFormatV2)
+		dst = appendString(dst, record.Topic)
+		dst = appendString(dst, record.TopicID)
+	}
 	dst = appendString(dst, record.Key)
 	dst = binary.BigEndian.AppendUint32(dst, partition)
 	dst = binary.BigEndian.AppendUint64(dst, uint64(record.CreatedAtUnixMs))
@@ -68,20 +91,46 @@ func appendProduceRecord(dst []byte, record ProduceRecord) []byte {
 // DecodeProduceRecord parses a payload written by EncodeProduceRecord.
 // It rejects unknown formats, truncated fields, and trailing bytes, so
 // a corrupt WAL frame can never decode into a plausible-looking record.
+// The returned record never aliases data.
 func DecodeProduceRecord(data []byte) (ProduceRecord, error) {
+	return decodeProduceRecord(data, false, nil)
+}
+
+// decodeProduceRecord is DecodeProduceRecord with the replay path's two
+// allocation savers. With alias set, Payload is a subslice of data
+// rather than a copy: only for data handed over for good, such as a WAL
+// frame payload, which replay allocates fresh per record and never
+// reuses (the payload is the last field, so the subslice is also capped
+// at its own length and an append cannot run into anything). topics,
+// when non-nil, interns Topic so a pass over thousands of records of a
+// few topics allocates each name (and topic ID) once. Key is always
+// copied: keys are
+// high-cardinality, and a string aliasing the frame would pin the whole
+// frame for as long as anything kept the key.
+func decodeProduceRecord(data []byte, alias bool, topics *topicInterner) (ProduceRecord, error) {
 	r := byteReader{data: data}
 	format, err := r.u8()
 	if err != nil {
 		return ProduceRecord{}, err
 	}
-	if format != produceRecordFormat {
+	if format != produceRecordFormatV1 && format != produceRecordFormatV2 {
 		return ProduceRecord{}, fmt.Errorf("ingress: unsupported produce record format %d", format)
 	}
-	topicName, err := r.string()
+	topicBytes, err := r.view()
 	if err != nil {
 		return ProduceRecord{}, err
 	}
-	key, err := r.string()
+	var topicID []byte
+	if format == produceRecordFormatV2 {
+		if topicID, err = r.view(); err != nil {
+			return ProduceRecord{}, err
+		}
+		if len(topicID) == 0 {
+			// The encoder writes format 1 for a record without an ID.
+			return ProduceRecord{}, errors.New("ingress: empty topic id in a format 2 record")
+		}
+	}
+	keyBytes, err := r.view()
 	if err != nil {
 		return ProduceRecord{}, err
 	}
@@ -93,20 +142,58 @@ func DecodeProduceRecord(data []byte) (ProduceRecord, error) {
 	if err != nil {
 		return ProduceRecord{}, err
 	}
-	payload, err := r.bytes()
+	payload, err := r.view()
 	if err != nil {
 		return ProduceRecord{}, err
 	}
 	if err := r.done(); err != nil {
 		return ProduceRecord{}, err
 	}
-	return ProduceRecord{
-		Topic:           topicName,
-		Key:             key,
+	if !alias {
+		payload = append([]byte(nil), payload...)
+	}
+	record := ProduceRecord{
+		Topic:           topics.intern(topicBytes),
+		Key:             string(keyBytes),
 		TargetPartition: int(partition),
 		Payload:         payload,
 		CreatedAtUnixMs: int64(createdAt),
-	}, nil
+	}
+	if topicID != nil {
+		record.TopicID = topics.intern(topicID)
+	}
+	return record, nil
+}
+
+// maxInternedTopics bounds a topicInterner: a pass over a WAL holding
+// more distinct topics than this copies the rest per record, as it did
+// before interning, instead of growing without limit.
+const maxInternedTopics = 1024
+
+// topicInterner hands out one string per distinct topic name (or topic
+// ID) seen in a replay pass. The zero value is ready to use; a nil interner copies
+// every name. Not safe for concurrent use.
+type topicInterner struct {
+	names map[string]string
+}
+
+// intern returns b as a string, reusing an earlier copy of the same
+// name. The lookup converts b without allocating.
+func (t *topicInterner) intern(b []byte) string {
+	if t == nil {
+		return string(b)
+	}
+	if name, ok := t.names[string(b)]; ok {
+		return name
+	}
+	name := string(b)
+	if t.names == nil {
+		t.names = make(map[string]string)
+	}
+	if len(t.names) < maxInternedTopics {
+		t.names[name] = name
+	}
+	return name
 }
 
 func stringSize(s string) int {
@@ -127,9 +214,9 @@ func appendBytes(dst []byte, b []byte) []byte {
 	return append(dst, b...)
 }
 
-// byteReader is a bounds-checked cursor over an encoded record. bytes
-// copies out of the backing slice so decoded records never alias WAL
-// read buffers.
+// byteReader is a bounds-checked cursor over an encoded record. view
+// returns length-prefixed fields as subslices of the backing slice; the
+// decoder decides per field whether to copy.
 type byteReader struct {
 	data []byte
 	off  int
@@ -162,24 +249,19 @@ func (r *byteReader) u64() (uint64, error) {
 	return v, nil
 }
 
-func (r *byteReader) string() (string, error) {
-	data, err := r.bytes()
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
-}
-
-func (r *byteReader) bytes() ([]byte, error) {
+// view reads a length-prefixed field and returns it as a subslice of
+// the backing data, capped at its own length.
+func (r *byteReader) view() ([]byte, error) {
 	n, err := r.u32()
 	if err != nil {
 		return nil, err
 	}
-	if len(r.data)-r.off < int(n) {
+	if uint64(len(r.data)-r.off) < uint64(n) {
 		return nil, io.ErrUnexpectedEOF
 	}
-	out := append([]byte(nil), r.data[r.off:r.off+int(n)]...)
-	r.off += int(n)
+	end := r.off + int(n)
+	out := r.data[r.off:end:end]
+	r.off = end
 	return out, nil
 }
 

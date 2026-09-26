@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -46,7 +47,13 @@ func (l *Log) flushSync() {
 	file := l.file
 	buffer := l.writeBuffer
 	batch := l.pending
-	l.writeBuffer = nil
+	limit := l.writeLimitLocked()
+	// The buffer ends where the active segment's staged data ends.
+	base, end := l.segmentBase, l.segmentSize
+	// Hand the next batch the spare (nil on the first flush): appends
+	// that arrive during this write and sync fill it in place.
+	l.writeBuffer = l.spare
+	l.spare = nil
 	l.pending = nil
 
 	var err error
@@ -58,7 +65,7 @@ func (l *Log) flushSync() {
 		// close this file before this detached buffer is written and synced.
 		l.fileOps.Lock()
 		l.mu.Unlock()
-		err = l.writeAndSyncFileOps(file, buffer)
+		err = l.writeAndSyncFileOps(file, buffer, limit)
 		l.fileOps.Unlock()
 	}
 	if err != nil {
@@ -67,33 +74,53 @@ func (l *Log) flushSync() {
 		l.syncErr = err
 		pending := l.pending
 		l.writeBuffer = nil
+		l.spare = nil
 		l.pending = nil
 		l.mu.Unlock()
 		completeBatch(pending, err)
 	} else {
-		l.recycleBuffer(buffer)
+		l.flushed(base, end, buffer)
 	}
 	completeBatch(batch, err)
 }
 
-// maxRecycledBuffer bounds the write buffer kept between batches so one
-// burst does not pin its peak size forever.
+// flushed records a successful flush before its batch is completed: the
+// segment the buffer went to is durable up to end (unless a roll sealed
+// it meanwhile, having synced it whole first), and the buffer goes back
+// for reuse.
+func (l *Log) flushed(base uint64, end int64, buffer []byte) {
+	l.mu.Lock()
+	if l.segmentBase == base && end > l.durableSize {
+		l.durableSize = end
+	}
+	l.recycleBufferLocked(buffer)
+	l.mu.Unlock()
+}
+
+// maxRecycledBuffer bounds each of the two buffers kept between batches
+// (the write buffer and the spare) so one burst does not pin its peak
+// size forever.
 const maxRecycledBuffer = 4 << 20
 
-// recycleBuffer hands a written-out buffer back for the next batch. The
+// recycleBufferLocked hands a written-out buffer back for a later batch. The
 // buffer was detached under mu and nothing retains it after the write
-// (replay reads from disk), so reuse cannot alias a live batch. Only an
-// empty slot takes it: appends that arrived during the write already
-// started a fresh buffer.
-func (l *Log) recycleBuffer(buffer []byte) {
+// (replay reads from disk), so reuse cannot alias a live batch. It
+// becomes the write buffer when that slot is empty, and otherwise the
+// spare that the next flush swaps in: under load appends arrive during
+// every write, so the slot is always taken and two buffers ping-pong,
+// each sized to the peak batch. Without the spare every batch started
+// from a one-frame allocation and doubled its way back up. Caller must
+// hold mu.
+func (l *Log) recycleBufferLocked(buffer []byte) {
 	if cap(buffer) == 0 || cap(buffer) > maxRecycledBuffer {
 		return
 	}
-	l.mu.Lock()
-	if l.writeBuffer == nil {
+	switch {
+	case l.writeBuffer == nil:
 		l.writeBuffer = buffer[:0]
+	case l.spare == nil:
+		l.spare = buffer[:0]
 	}
-	l.mu.Unlock()
 }
 
 // syncLocked flushes the write buffer inline and returns the batch it
@@ -108,19 +135,33 @@ func (l *Log) syncLocked() (*syncBatch, error) {
 	l.writeBuffer = nil
 
 	l.fileOps.Lock()
-	err := l.writeAndSyncFileOps(l.file, buffer)
+	err := l.writeAndSyncFileOps(l.file, buffer, l.writeLimitLocked())
 	l.fileOps.Unlock()
 
 	batch := l.pending
 	l.pending = nil
 	if err != nil {
 		l.syncErr = fmt.Errorf("wal: write and sync: %w", err)
+		l.spare = nil // the log is latched: nothing will be staged again
 		return batch, l.syncErr
 	}
+	// fileOps waited out any flush in flight, so everything staged in
+	// the segment is now synced.
+	l.durableSize = l.segmentSize
 	if cap(buffer) <= maxRecycledBuffer && l.writeBuffer == nil {
 		l.writeBuffer = buffer[:0]
 	}
 	return batch, nil
+}
+
+// writeLimitLocked is the write limit writeAndSyncFileOps applies to the
+// active segment: its preparedWriteLimit if it is a prepared segment, 0
+// (none) if it grows by appending. Caller must hold mu.
+func (l *Log) writeLimitLocked() int64 {
+	if l.activePrepared {
+		return l.opts.preparedWriteLimit
+	}
+	return 0
 }
 
 // writeAndSyncFileOps writes buffer to file and fsyncs it. It must be called
@@ -128,22 +169,59 @@ func (l *Log) syncLocked() (*syncBatch, error) {
 // the same fileOps critical section, so a writer that was waiting on fileOps
 // (e.g. the roll path's syncLocked) cannot write and ack a later batch on top
 // of a possibly torn region.
-func (l *Log) writeAndSyncFileOps(file *os.File, buffer []byte) error {
+//
+// With a limit (a prepared segment) a buffer longer than limit is written
+// and synced in runs of whole frames of at most limit bytes, so that no
+// more than that is ever written and unsynced at once: the most a crash
+// can tear there, and what recovery allows for (see
+// Options.preparedWriteLimit). A run that fails fails the whole batch,
+// though earlier runs are durable; the batch's appends then may or may
+// not be replayed, as with any failed sync.
+func (l *Log) writeAndSyncFileOps(file *os.File, buffer []byte, limit int64) error {
 	if l.writeFailed != nil {
 		return l.writeFailed
 	}
-	err := writeFull(file, buffer)
-	if err == nil {
-		// Data-only sync: the WAL is append-only, so fdatasync's
-		// contract (data + the size needed to read it back) is exactly
-		// the durability the 202 promises. Cheaper than fsync on Linux;
-		// identical elsewhere. See internal/persistence/syncfile.
-		err = syncfile.SyncData(file)
+	var err error
+	for len(buffer) > 0 && err == nil {
+		run := buffer
+		if limit > 0 && int64(len(buffer)) > limit {
+			run = buffer[:frameRunEnd(buffer, limit)]
+		}
+		buffer = buffer[len(run):]
+		err = writeFull(file, run)
+		if err == nil {
+			// Data-only sync: the WAL is append-only, so fdatasync's
+			// contract (data + the size needed to read it back) is exactly
+			// the durability the 202 promises. Cheaper than fsync on Linux;
+			// identical elsewhere. See internal/persistence/syncfile.
+			err = syncfile.SyncData(file)
+		}
 	}
 	if err != nil {
 		l.writeFailed = err
 	}
 	return err
+}
+
+// frameRunEnd is the length of the longest prefix of buffer, whole
+// frames as staged by appendFrameWith, that ends on a frame boundary and
+// is at most limit bytes long; or of the first frame alone if that is
+// longer than limit.
+func frameRunEnd(buffer []byte, limit int64) int {
+	end := 0
+	for end+frameHeaderSize <= len(buffer) {
+		next := end + frameHeaderSize + int(binary.BigEndian.Uint32(buffer[end+4:end+8]))
+		if end > 0 && int64(next) > limit {
+			return end
+		}
+		end = next
+	}
+	if end == 0 || end > len(buffer) {
+		// Staged frames fill the buffer exactly. A malformed buffer is
+		// written whole rather than sliced out of range or not at all.
+		return len(buffer)
+	}
+	return end
 }
 
 // completeBatch publishes err to every append waiting on batch.
