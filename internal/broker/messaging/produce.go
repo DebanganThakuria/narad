@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/errs"
-	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
 type produceStage string
@@ -81,13 +79,7 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 		return 0, 0, err
 	}
 
-	offset, err := e.logs.WithProduceLockResult(topicName, partIdx, func(log *storage.Log) (int64, error) {
-		// The same gate as the WAL-first commit, for the same handoff race.
-		if err := e.commitGateLocked(ctx, topicName, partIdx, ""); err != nil {
-			return 0, err
-		}
-		return e.appendAndCommit(log, storage.EncodeKeyedRecord(key, time.Now().UnixMilli(), payload))
-	})
+	offset, err := e.commitPayload(ctx, topicName, partIdx, key, payload)
 	if err != nil {
 		e.recordProduceError(err)
 		return 0, 0, err

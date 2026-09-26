@@ -126,6 +126,11 @@ type Engine struct {
 	producePausesActive atomic.Int32
 	consumePausesActive atomic.Int32
 
+	// combiners holds each partition's group-commit queue; see
+	// commitCombined.
+	combineMu sync.RWMutex
+	combiners map[partitionKey]*produceCombiner
+
 	// dispatch owns the per-topic waiter queues and the single pump
 	// goroutine that hands records to them; see dispatch.go. Queue-style
 	// long-poll consumes park there instead of scanning.

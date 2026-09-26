@@ -1,9 +1,13 @@
 package messaging
 
 import (
+	"cmp"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
@@ -22,58 +26,22 @@ var ErrTopicIncarnationMismatch = errors.New("messaging: records were accepted f
 
 // CommitAcceptedProduce appends an ingress WAL record to this node's
 // partition log and advances the partition high-watermark. It is the
-// owner-side visibility step for the WAL-first produce design.
+// owner-side visibility step for the WAL-first produce design, and a
+// one-record CommitAcceptedProduceBatch.
 func (e *Engine) CommitAcceptedProduce(ctx context.Context, record ingress.ProduceRecord) (int64, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if e.logs == nil {
-		return 0, unavailableError("partition logs")
-	}
-	if record.Topic == "" {
-		return 0, fmt.Errorf("%w: topic required", ErrInvalid)
-	}
-	if len(record.Payload) == 0 {
-		return 0, fmt.Errorf("%w: payload required", ErrInvalid)
-	}
-
-	t, err := e.getTopic(ctx, record.Topic)
+	offsets, err := e.CommitAcceptedProduceBatch(ctx, []ingress.ProduceRecord{record})
 	if err != nil {
 		return 0, err
 	}
-	if record.TargetPartition < 0 || record.TargetPartition >= t.Partitions {
-		return 0, fmt.Errorf("%w: partition out of range", ErrInvalid)
-	}
-	if !e.isLocalOwner(record.Topic, record.TargetPartition) || e.isProducePaused(record.Topic, record.TargetPartition) {
-		// A partition frozen for a rebalance handoff rejects commits so
-		// nothing lands after the destination captured the final tail;
-		// the ingress dispatcher retries and delivers to the new owner.
-		return 0, ErrNotPartitionOwner
-	}
-	if record.TopicID != "" && record.TopicID != t.ID {
-		return 0, incarnationMismatch(record.Topic, record.TopicID, t.ID)
-	}
-
-	offset, err := e.logs.WithProduceLockResult(record.Topic, record.TargetPartition, func(log *storage.Log) (int64, error) {
-		if err := e.commitGateLocked(ctx, record.Topic, record.TargetPartition, record.TopicID); err != nil {
-			return 0, err
-		}
-		return e.appendAndCommit(log, storage.EncodeKeyedRecord(record.Key, time.Now().UnixMilli(), record.Payload))
-	})
-	if err != nil {
-		e.recordProduceError(err)
-		return 0, err
-	}
-
-	e.recordProduceCommitted(record.Topic, record.TargetPartition, 1, len(record.Payload))
-	return offset, nil
+	return offsets[0], nil
 }
 
 // CommitAcceptedProduceBatch commits a batch of ingress WAL records to
-// one locally owned topic partition under a single produce lock, with
-// one append+fsync+verify cycle and a single high-watermark advance.
-// All records must target the same (topic, partition). Returns the
-// assigned offsets in record order.
+// one locally owned topic partition with one append+fsync+verify cycle
+// and a single high-watermark advance. Batches that reach the same
+// partition while another commit holds its produce lock ride one shared
+// cycle (see commitCombined). All records must target the same (topic,
+// partition). Returns the assigned offsets in record order.
 func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingress.ProduceRecord) ([]int64, error) {
 	if len(records) == 0 {
 		return nil, nil
@@ -96,10 +64,12 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 	if partition < 0 || partition >= t.Partitions {
 		return nil, fmt.Errorf("%w: partition out of range", ErrInvalid)
 	}
-	// A fast path only: the commit checks the gate again under the
+	// A fast path only: the commit cycle checks the gate again under the
 	// produce lock, which is what makes a handoff freeze airtight.
 	if !e.isLocalOwner(topicName, partition) || e.isProducePaused(topicName, partition) {
-		// Frozen for handoff — see the single-commit path above.
+		// A partition frozen for a rebalance handoff rejects commits so
+		// nothing lands after the destination captured the final tail;
+		// the ingress dispatcher retries and delivers to the new owner.
 		return nil, ErrNotPartitionOwner
 	}
 	incarnation, err := batchIncarnation(topicName, records, t.ID)
@@ -111,6 +81,9 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 	// key and commit time survive the commit (fan-out re-keys parent
 	// records with the key, delay children anchor due times to the
 	// commit time, and consumers get Message.Key/Timestamp from them).
+	// The envelopes are built here, outside the produce lock; the commit
+	// cycle raises the time under the lock if another commit stamped a
+	// later one first (see commitBatchLocked).
 	committedAt := time.Now().UnixMilli()
 	payloads := make([][]byte, len(records))
 	payloadBytes := 0
@@ -119,69 +92,54 @@ func (e *Engine) CommitAcceptedProduceBatch(ctx context.Context, records []ingre
 		payloadBytes += len(record.Payload)
 	}
 
-	var offsets []int64
-	err = e.logs.WithProduceLock(topicName, partition, func(log *storage.Log) error {
-		if err := e.commitGateLocked(ctx, topicName, partition, incarnation); err != nil {
-			return err
-		}
-		// The envelopes were built above for this call only and are never
-		// read again (commitDurable needs just their count), so the log may
-		// take ownership instead of copying every record a second time.
-		first, last, err := log.AppendBatchOwned(payloads)
-		if err != nil {
-			return produceStageError{stage: produceStageAppend, err: err}
-		}
-		if last < first {
-			return nil
-		}
-		if err := e.commitDurable(log, first, len(payloads)); err != nil {
-			return err
-		}
-		offsets = make([]int64, len(records))
-		for i := range records {
-			offsets[i] = first + int64(i)
-		}
-		return nil
-	})
-	if err != nil {
+	req := &commitRequest{ctx: ctx, incarnation: incarnation, payloads: payloads, committedAt: committedAt}
+	if err := e.commitCombined(topicName, partition, req); err != nil {
 		e.recordProduceError(err)
 		return nil, err
 	}
-
+	offsets := make([]int64, len(records))
+	for i := range offsets {
+		offsets[i] = req.first + int64(i)
+	}
 	e.recordProduceCommitted(topicName, partition, len(records), payloadBytes)
 	return offsets, nil
 }
 
-// commitGateLocked is the owner and freeze gate again, under the produce
-// lock. A handoff arms its freeze and only then takes this lock to read
-// the final high-watermark, so a commit that passed the outer gate
-// before the freeze but reaches the lock after that read is turned away
-// here, with nothing appended, instead of landing after the fence and
-// stranding acknowledged records on the old owner. A caller that gave up
-// meanwhile (its RPC timed out, say) is not appended either: it retries
-// anyway, and appending it now would only commit a duplicate. Records
-// accepted for an incarnation (non-empty) must still find it live: a
-// delete and recreate while the commit waited turns them away.
-func (e *Engine) commitGateLocked(ctx context.Context, topicName string, partition int, incarnation string) error {
-	if !e.isLocalOwner(topicName, partition) || e.isProducePaused(topicName, partition) {
-		return ErrNotPartitionOwner
+// commitPayload is the synchronous Produce path's commit: one record
+// through the same combined cycle as the WAL-first path, so it passes
+// the same gate under the produce lock and gets its commit time from the
+// same per-partition clock.
+func (e *Engine) commitPayload(ctx context.Context, topicName string, partition int, key string, payload []byte) (int64, error) {
+	committedAt := time.Now().UnixMilli()
+	req := &commitRequest{
+		ctx:         ctx,
+		payloads:    [][]byte{storage.EncodeKeyedRecord(key, committedAt, payload)},
+		committedAt: committedAt,
 	}
-	if err := ctx.Err(); err != nil {
-		return err
+	if err := e.commitCombined(topicName, partition, req); err != nil {
+		return 0, err
 	}
-	if incarnation == "" {
-		return nil
+	return req.first, nil
+}
+
+// singleBatchTarget validates that every record in the batch is
+// well-formed and targets the same (topic, partition), returning that
+// target.
+func singleBatchTarget(records []ingress.ProduceRecord) (string, int, error) {
+	topicName := records[0].Topic
+	partition := records[0].TargetPartition
+	for _, record := range records {
+		if record.Topic == "" {
+			return "", 0, fmt.Errorf("%w: topic required", ErrInvalid)
+		}
+		if record.Topic != topicName || record.TargetPartition != partition {
+			return "", 0, fmt.Errorf("%w: accepted produce batch must target one topic partition", ErrInvalid)
+		}
+		if len(record.Payload) == 0 {
+			return "", 0, fmt.Errorf("%w: payload required", ErrInvalid)
+		}
 	}
-	// Cached and versioned: the metastore is read only when the topic's
-	// record changed.
-	t, err := e.getTopic(context.Background(), topicName)
-	if err != nil {
-		return err
-	}
-	if t.ID != incarnation {
-		return incarnationMismatch(topicName, incarnation, t.ID)
-	}
-	return nil
+	return topicName, partition, nil
 }
 
 // batchIncarnation returns the topic incarnation the batch was accepted
@@ -210,40 +168,319 @@ func incarnationMismatch(topicName, recordID, liveID string) error {
 		ErrTopicIncarnationMismatch, topicName, liveID, recordID)
 }
 
-// singleBatchTarget validates that every record in the batch is
-// well-formed and targets the same (topic, partition), returning that
-// target.
-func singleBatchTarget(records []ingress.ProduceRecord) (string, int, error) {
-	topicName := records[0].Topic
-	partition := records[0].TargetPartition
-	for _, record := range records {
-		if record.Topic == "" {
-			return "", 0, fmt.Errorf("%w: topic required", ErrInvalid)
-		}
-		if record.Topic != topicName || record.TargetPartition != partition {
-			return "", 0, fmt.Errorf("%w: accepted produce batch must target one topic partition", ErrInvalid)
-		}
-		if len(record.Payload) == 0 {
-			return "", 0, fmt.Errorf("%w: payload required", ErrInvalid)
-		}
-	}
-	return topicName, partition, nil
+// Group commit. Every node's dispatcher sends each partition its own
+// batch per pass, and the fan-out runner adds its own, so batches for one
+// partition often arrive together. The produce lock spans append and
+// durable commit (a failed commit discards everything above the
+// high-watermark, including another caller's records, so the two can
+// never be split), which used to make each of those batches pay its own
+// write, fdatasync and read-back, back to back.
+//
+// Flat combining keeps that lock discipline and shares the cycle
+// instead. A caller queues its batch on the partition's combiner. With no
+// cycle running it becomes the leader: it takes the produce lock, drains
+// every batch queued by then (its own included), appends them as one run
+// and commits them with one CommitDurable. Everyone in the cycle shares
+// its outcome: offsets on success, the same error on failure, which the
+// ingress dispatcher and the fan-out runner already retry by appending
+// again. Batches that arrive during a cycle wait for the next one, which
+// the leader hands to the oldest of them on its way out, so no caller
+// waits behind more than the cycle in progress and one more.
+
+// commitRequest is one caller's batch in a combined commit.
+type commitRequest struct {
+	ctx context.Context
+	// incarnation is the topic ID the records were accepted for, checked
+	// again under the produce lock; "" skips the check.
+	incarnation string
+	// payloads are the encoded envelopes. The log takes ownership of them
+	// once appended.
+	payloads    [][]byte
+	committedAt int64
+
+	// Written by the cycle that commits the request, before its caller is
+	// woken.
+	first int64
+	err   error
+
+	// wake is made only for a caller that finds a cycle running. The
+	// leader sends on it once the request is done, or once it has handed
+	// the caller the next cycle (lead).
+	wake chan struct{}
+	lead bool
 }
 
-// appendAndCommit is the single durability chokepoint shared by the
-// synchronous Produce path and the WAL-first commit path. It appends one
-// payload to the partition log, then runs commitDurable.
-//
-// The caller must hold the partition produce lock.
-func (e *Engine) appendAndCommit(log *storage.Log, payload []byte) (int64, error) {
-	offset, err := log.Append(payload)
+// produceCombiner queues the commits of one partition.
+type produceCombiner struct {
+	mu    sync.Mutex
+	queue []*commitRequest
+	// spare is the previous cycle's drained queue, emptied, which the
+	// next drain installs as the queue so steady commits reuse two
+	// backing arrays instead of allocating one per cycle.
+	spare   []*commitRequest
+	leading bool
+
+	// lastCommittedAt is the newest commit time stamped into the
+	// partition by this process. Read and written only under the
+	// partition's produce lock.
+	lastCommittedAt int64
+}
+
+// partitionKey names one topic partition in the engine's maps.
+type partitionKey struct {
+	topic     string
+	partition int
+}
+
+// combinerFor returns the partition's combiner, creating it on first
+// use. ForgetTopic drops a retired topic's combiners.
+func (e *Engine) combinerFor(topicName string, partition int) *produceCombiner {
+	key := partitionKey{topic: topicName, partition: partition}
+	e.combineMu.RLock()
+	c := e.combiners[key]
+	e.combineMu.RUnlock()
+	if c != nil {
+		return c
+	}
+	e.combineMu.Lock()
+	defer e.combineMu.Unlock()
+	if c = e.combiners[key]; c == nil {
+		if e.combiners == nil {
+			e.combiners = make(map[partitionKey]*produceCombiner)
+		}
+		c = &produceCombiner{}
+		e.combiners[key] = c
+	}
+	return c
+}
+
+// forgetCombiners drops a retired topic's combiners. A cycle still
+// running on one finishes on it; a commit that arrives afterwards starts
+// a fresh combiner, and the produce lock keeps the two apart. The fresh
+// one's commit-time floor starts over, so a batch stamped before the
+// forget can land a millisecond or so below one committed just before
+// it; only a same-named topic created around the delete can see that.
+func (e *Engine) forgetCombiners(topicName string) {
+	e.combineMu.Lock()
+	for key := range e.combiners {
+		if key.topic == topicName {
+			delete(e.combiners, key)
+		}
+	}
+	e.combineMu.Unlock()
+}
+
+// commitCombined commits req's records in a combined cycle and returns
+// the cycle's outcome for them. On success req.first is the offset of
+// the first record; the rest follow contiguously.
+func (e *Engine) commitCombined(topicName string, partition int, req *commitRequest) error {
+	c := e.combinerFor(topicName, partition)
+	c.mu.Lock()
+	c.queue = append(c.queue, req)
+	if c.leading {
+		req.wake = make(chan struct{}, 1)
+		c.mu.Unlock()
+		<-req.wake
+		if !req.lead {
+			return req.err
+		}
+	} else {
+		c.leading = true
+		c.mu.Unlock()
+	}
+
+	e.runCommitCycle(topicName, partition, c, req)
+
+	// Hand the next cycle to the oldest caller that queued during this
+	// one, or stand down.
+	c.mu.Lock()
+	if len(c.queue) == 0 {
+		c.leading = false
+		c.mu.Unlock()
+		return req.err
+	}
+	next := c.queue[0]
+	next.lead = true
+	c.mu.Unlock()
+	next.wake <- struct{}{}
+	return req.err
+}
+
+// runCommitCycle runs one combined cycle under the partition's produce
+// lock, then wakes every caller it served except self, the leader.
+func (e *Engine) runCommitCycle(topicName string, partition int, c *produceCombiner, self *commitRequest) {
+	var batch []*commitRequest
+	err := e.logs.WithProduceLock(topicName, partition, func(log *storage.Log) error {
+		// Drained under the produce lock, so every batch that queued while
+		// the leader waited for it rides this cycle.
+		batch = c.drain()
+		e.commitBatchLocked(topicName, partition, c, log, batch)
+		return nil
+	})
+	if batch == nil {
+		// The partition's log could not be opened, so the cycle never ran:
+		// every queued batch shares that failure.
+		batch = c.drain()
+		for _, r := range batch {
+			r.err = err
+		}
+	}
+	for _, r := range batch {
+		if r != self {
+			r.wake <- struct{}{}
+		}
+	}
+	// Nobody reads batch any more: the woken callers only read their own
+	// request.
+	clear(batch)
+	c.mu.Lock()
+	c.spare = batch[:0]
+	c.mu.Unlock()
+}
+
+// drain takes everything queued, leaving the spare array as the queue.
+func (c *produceCombiner) drain() []*commitRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	batch := c.queue
+	c.queue, c.spare = c.spare, nil
+	return batch
+}
+
+// commitBatchLocked appends and durably commits every request in batch
+// that may still be committed, as one run, and records each request's
+// outcome. The caller holds the partition's produce lock.
+func (e *Engine) commitBatchLocked(topicName string, partition int, c *produceCombiner, log *storage.Log, batch []*commitRequest) {
+	// The owner and freeze gate again, now under the produce lock. A
+	// handoff arms its freeze and only then takes this lock to read the
+	// final high-watermark, so a commit that passed the outer gate before
+	// the freeze but reaches the lock after that read is turned away
+	// here, with nothing appended, instead of landing after the fence and
+	// stranding acknowledged records on the old owner.
+	if !e.isLocalOwner(topicName, partition) || e.isProducePaused(topicName, partition) {
+		for _, r := range batch {
+			r.err = ErrNotPartitionOwner
+		}
+		return
+	}
+
+	live := batch
+	if refused := e.refuseUncommittable(topicName, batch); refused > 0 {
+		if refused == len(batch) {
+			return
+		}
+		live = make([]*commitRequest, 0, len(batch)-refused)
+		for _, r := range batch {
+			if r.err == nil {
+				live = append(live, r)
+			}
+		}
+	}
+	if len(live) > 1 {
+		// No order holds between different callers' batches, so append
+		// them oldest commit time first; that leaves the clamp below
+		// nothing to rewrite unless an earlier cycle ran ahead.
+		slices.SortStableFunc(live, func(a, b *commitRequest) int { return cmp.Compare(a.committedAt, b.committedAt) })
+	}
+
+	// Commit times never go backwards along the partition: a batch
+	// stamped before the lock can land after a later-stamped one (it was
+	// still encoding, or lost the race for the lock), and the wall clock
+	// can step back. The fan-out delay gate stops at the first record not
+	// yet due, so an inversion would hold due records back.
+	stamp := c.lastCommittedAt
+	for _, r := range live {
+		if r.committedAt < stamp {
+			restampKeyedRecords(r.payloads, stamp)
+			r.committedAt = stamp
+		}
+		stamp = r.committedAt
+	}
+	c.lastCommittedAt = stamp
+
+	payloads := live[0].payloads
+	if len(live) > 1 {
+		total := 0
+		for _, r := range live {
+			total += len(r.payloads)
+		}
+		payloads = make([][]byte, 0, total)
+		for _, r := range live {
+			payloads = append(payloads, r.payloads...)
+		}
+	}
+	// One append for the whole cycle: an append is all-or-nothing, so a
+	// failure cannot leave one caller's records above the high-watermark
+	// for the next commit to expose. The envelopes were built for this
+	// commit only and are never read again (commitDurable needs just
+	// their count), so the log may take ownership instead of copying.
+	first, _, err := log.AppendBatchOwned(payloads)
 	if err != nil {
-		return 0, produceStageError{stage: produceStageAppend, err: err}
+		err = produceStageError{stage: produceStageAppend, err: err}
+	} else {
+		err = e.commitDurable(log, first, len(payloads))
 	}
-	if err := e.commitDurable(log, offset, 1); err != nil {
-		return 0, err
+	if err != nil {
+		// A failed commit discarded the whole run, so every caller in it
+		// retries by appending again.
+		for _, r := range live {
+			r.err = err
+		}
+		return
 	}
-	return offset, nil
+	next := first
+	for _, r := range live {
+		r.first = next
+		next += int64(len(r.payloads))
+	}
+}
+
+// refuseUncommittable records an error on every request in batch that
+// may no longer be committed and returns how many it refused. A caller
+// that gave up (its RPC timed out, say) is not appended: it retries
+// anyway, and appending it now would only commit a duplicate. A batch
+// accepted for another incarnation than the one this node now holds is
+// turned away with ErrTopicIncarnationMismatch.
+func (e *Engine) refuseUncommittable(topicName string, batch []*commitRequest) int {
+	refused := 0
+	liveID, resolved := "", false
+	var lookupErr error
+	for _, r := range batch {
+		if err := r.ctx.Err(); err != nil {
+			r.err = err
+			refused++
+			continue
+		}
+		if r.incarnation == "" {
+			continue
+		}
+		if !resolved {
+			// Cached and versioned: the metastore is read only when the
+			// topic's record changed.
+			t, err := e.getTopic(context.Background(), topicName)
+			liveID, lookupErr, resolved = t.ID, err, true
+		}
+		switch {
+		case lookupErr != nil:
+			r.err = lookupErr
+			refused++
+		case r.incarnation != liveID:
+			r.err = incarnationMismatch(topicName, r.incarnation, liveID)
+			refused++
+		}
+	}
+	return refused
+}
+
+// restampKeyedRecords rewrites the commit time of keyed envelopes built
+// by storage.EncodeKeyedRecord in this file, in place: the 8 bytes after
+// the version byte, the uvarint key length and the key.
+func restampKeyedRecords(payloads [][]byte, committedAt int64) {
+	for _, env := range payloads {
+		keyLen, n := binary.Uvarint(env[1:])
+		at := 1 + n + int(keyLen)
+		binary.BigEndian.PutUint64(env[at:at+8], uint64(committedAt))
+	}
 }
 
 // commitDurable is the no-follower durability boundary. Narad has no
