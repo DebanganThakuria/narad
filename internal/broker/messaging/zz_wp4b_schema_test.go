@@ -165,12 +165,18 @@ func TestWP4BSchemaHydrateRaceKeepsNewestSchema(t *testing.T) {
 // wp4bCountingStore counts the metastore's schema reads.
 type wp4bCountingStore struct {
 	*metastore.Store
-	gets atomic.Int64
+	gets    atomic.Int64
+	latests atomic.Int64
 }
 
 func (c *wp4bCountingStore) GetSchema(ctx context.Context, topicName string, version int) ([]byte, error) {
 	c.gets.Add(1)
 	return c.Store.GetSchema(ctx, topicName, version)
+}
+
+func (c *wp4bCountingStore) LatestSchema(ctx context.Context, topicName string) (int, []byte, error) {
+	c.latests.Add(1)
+	return c.Store.LatestSchema(ctx, topicName)
 }
 
 // wp4bCountingRegistry counts ReplaceTopic calls, each one a compile of
@@ -188,7 +194,8 @@ func (c *wp4bCountingRegistry) ReplaceTopic(ctx context.Context, topicName strin
 // TestWP4BSchemaHydrateHerdSharesOneLoad fires 200 produces at a topic
 // right after its schema changed. Before the fix every one of them read
 // the whole history and compiled the schema itself (200 compiles, 200 x
-// versions reads); now one hydrate serves them all.
+// versions reads); now one hydrate serves them all, and it reads only
+// the latest version.
 func TestWP4BSchemaHydrateHerdSharesOneLoad(t *testing.T) {
 	const versions, herd = 20, 200
 	base := wp4bNewStore(t)
@@ -213,6 +220,7 @@ func TestWP4BSchemaHydrateHerdSharesOneLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.gets.Store(0)
+	store.latests.Store(0)
 	reg.replaces.Store(0)
 
 	start := make(chan struct{})
@@ -233,8 +241,8 @@ func TestWP4BSchemaHydrateHerdSharesOneLoad(t *testing.T) {
 	if got := reg.replaces.Load(); got != 1 {
 		t.Errorf("schema compiles after one version change = %d, want 1", got)
 	}
-	if got := store.gets.Load(); got > versions+1 {
-		t.Errorf("GetSchema calls after one version change = %d, want at most one history walk (%d)", got, versions+1)
+	if gets, latests := store.gets.Load(), store.latests.Load(); gets != 0 || latests != 1 {
+		t.Errorf("schema reads after one version change: GetSchema=%d LatestSchema=%d, want 0 and 1", gets, latests)
 	}
 	// The shared load is the current schema: v20 caps field_00001_20 at
 	// 101 characters.
