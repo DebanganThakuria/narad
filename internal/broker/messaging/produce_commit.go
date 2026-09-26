@@ -174,10 +174,12 @@ func (e *Engine) appendAndCommit(log *storage.Log, payload []byte) (int64, error
 //     stored bytes (guards against a torn or corrupt write; no decode,
 //     because decoding per record was the cause of the commit-throughput
 //     collapse),
-//  3. advances the high-watermark to make the records visible,
-//  4. persists the advanced high-watermark before returning, so a crash
-//     after the ingress WAL checkpoints past this batch can never leave
-//     the records durable-but-hidden.
+//  3. advances the high-watermark to make the records visible. Before
+//     an open log's first advance it empties the hwm file once (the file
+//     holds a boundary only while the log is closed), so a crash after
+//     the ingress WAL checkpoints past this batch recovers the boundary
+//     from the fsynced tail and can never leave the records
+//     durable-but-hidden.
 //
 // A failed CommitDurable leaves nothing of the batch in the log: the
 // storage layer discards every record above the high-watermark and
