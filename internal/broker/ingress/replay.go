@@ -11,14 +11,8 @@ func ReplayProduce(dir string, from uint64, fn func(ProduceRecord) error) error 
 	if fn == nil {
 		return nil
 	}
-	var topics topicInterner
-	return wal.Replay(dir, from, 0, func(record wal.Record) error {
-		produce, err := decodeProduceRecord(record.Payload, true, &topics)
-		if err != nil {
-			return err
-		}
-		produce.WAL = record.ID
-		return fn(produce)
+	return ReplayProduceFromCursor(dir, wal.Cursor{Seq: from}, func(record ProduceRecord, _ wal.Cursor) error {
+		return fn(record)
 	})
 }
 
@@ -30,11 +24,20 @@ func ReplayProduce(dir string, from uint64, fn func(ProduceRecord) error) error 
 // call: the dispatcher runs this every few milliseconds, and copying
 // every payload and name twice per record was most of its garbage.
 func ReplayProduceFromCursor(dir string, cursor wal.Cursor, fn func(ProduceRecord, wal.Cursor) error) error {
+	return replayProduce(func(cursor wal.Cursor, fn func(wal.Record, wal.Cursor) error) error {
+		return wal.ReplayFromCursor(dir, cursor, 0, fn)
+	}, cursor, fn)
+}
+
+// replayProduce decodes the records a WAL replay (the package-level one
+// over a directory, or an open log's) hands out, aliasing payloads and
+// interning topic names as ReplayProduceFromCursor describes.
+func replayProduce(replay func(wal.Cursor, func(wal.Record, wal.Cursor) error) error, cursor wal.Cursor, fn func(ProduceRecord, wal.Cursor) error) error {
 	if fn == nil {
 		return nil
 	}
 	var topics topicInterner
-	return wal.ReplayFromCursor(dir, cursor, 0, func(record wal.Record, next wal.Cursor) error {
+	return replay(cursor, func(record wal.Record, next wal.Cursor) error {
 		produce, err := decodeProduceRecord(record.Payload, true, &topics)
 		if err != nil {
 			return err

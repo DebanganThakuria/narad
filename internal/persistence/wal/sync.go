@@ -46,6 +46,8 @@ func (l *Log) flushSync() {
 	file := l.file
 	buffer := l.writeBuffer
 	batch := l.pending
+	// The buffer ends where the active segment's staged data ends.
+	base, end := l.segmentBase, l.segmentSize
 	// Hand the next batch the spare (nil on the first flush): appends
 	// that arrive during this write and sync fill it in place.
 	l.writeBuffer = l.spare
@@ -75,9 +77,22 @@ func (l *Log) flushSync() {
 		l.mu.Unlock()
 		completeBatch(pending, err)
 	} else {
-		l.recycleBuffer(buffer)
+		l.flushed(base, end, buffer)
 	}
 	completeBatch(batch, err)
+}
+
+// flushed records a successful flush before its batch is completed: the
+// segment the buffer went to is durable up to end (unless a roll sealed
+// it meanwhile, having synced it whole first), and the buffer goes back
+// for reuse.
+func (l *Log) flushed(base uint64, end int64, buffer []byte) {
+	l.mu.Lock()
+	if l.segmentBase == base && end > l.durableSize {
+		l.durableSize = end
+	}
+	l.recycleBufferLocked(buffer)
+	l.mu.Unlock()
 }
 
 // maxRecycledBuffer bounds each of the two buffers kept between batches
@@ -85,26 +100,25 @@ func (l *Log) flushSync() {
 // size forever.
 const maxRecycledBuffer = 4 << 20
 
-// recycleBuffer hands a written-out buffer back for a later batch. The
+// recycleBufferLocked hands a written-out buffer back for a later batch. The
 // buffer was detached under mu and nothing retains it after the write
 // (replay reads from disk), so reuse cannot alias a live batch. It
 // becomes the write buffer when that slot is empty, and otherwise the
 // spare that the next flush swaps in: under load appends arrive during
 // every write, so the slot is always taken and two buffers ping-pong,
 // each sized to the peak batch. Without the spare every batch started
-// from a one-frame allocation and doubled its way back up.
-func (l *Log) recycleBuffer(buffer []byte) {
+// from a one-frame allocation and doubled its way back up. Caller must
+// hold mu.
+func (l *Log) recycleBufferLocked(buffer []byte) {
 	if cap(buffer) == 0 || cap(buffer) > maxRecycledBuffer {
 		return
 	}
-	l.mu.Lock()
 	switch {
 	case l.writeBuffer == nil:
 		l.writeBuffer = buffer[:0]
 	case l.spare == nil:
 		l.spare = buffer[:0]
 	}
-	l.mu.Unlock()
 }
 
 // syncLocked flushes the write buffer inline and returns the batch it
@@ -129,6 +143,9 @@ func (l *Log) syncLocked() (*syncBatch, error) {
 		l.spare = nil // the log is latched: nothing will be staged again
 		return batch, l.syncErr
 	}
+	// fileOps waited out any flush in flight, so everything staged in
+	// the segment is now synced.
+	l.durableSize = l.segmentSize
 	if cap(buffer) <= maxRecycledBuffer && l.writeBuffer == nil {
 		l.writeBuffer = buffer[:0]
 	}

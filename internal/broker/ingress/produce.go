@@ -186,21 +186,30 @@ func (m *Manager) DurableProduceNext() uint64 {
 }
 
 // ReplayProduce replays this node's ingress WAL from the given
-// sequence. See the package-level ReplayProduce.
+// sequence. See the package-level ReplayProduce; unlike it, this reads
+// the live WAL only up to what has been synced (wal.Log.ReplayFromCursor).
 func (m *Manager) ReplayProduce(from uint64, fn func(ProduceRecord) error) error {
-	if m == nil {
+	if m == nil || m.log == nil {
 		return errors.New("ingress: manager is nil")
 	}
-	return ReplayProduce(m.produceDir, from, fn)
+	if fn == nil {
+		return nil
+	}
+	return replayProduce(m.log.ReplayFromCursor, wal.Cursor{Seq: from}, func(record ProduceRecord, _ wal.Cursor) error {
+		return fn(record)
+	})
 }
 
 // ReplayProduceFromCursor replays this node's ingress WAL from an
-// exact byte cursor. See the package-level ReplayProduceFromCursor.
+// exact byte cursor. See the package-level ReplayProduceFromCursor;
+// unlike it, this reads the live WAL only up to what has been synced
+// (wal.Log.ReplayFromCursor), and it skips listing the WAL directory
+// while the cursor is in the active segment.
 func (m *Manager) ReplayProduceFromCursor(cursor wal.Cursor, fn func(ProduceRecord, wal.Cursor) error) error {
-	if m == nil {
+	if m == nil || m.log == nil {
 		return errors.New("ingress: manager is nil")
 	}
-	return ReplayProduceFromCursor(m.produceDir, cursor, fn)
+	return replayProduce(m.log.ReplayFromCursor, cursor, fn)
 }
 
 // CompactProduceBefore drops WAL segments wholly below seq. Callers

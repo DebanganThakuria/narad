@@ -31,7 +31,7 @@ func (l *Log) appendLocked(size int, fill func(dst []byte) []byte) (RecordID, *s
 		if err != nil {
 			return RecordID{}, nil, err
 		}
-		if err := l.rollLocked(); err != nil {
+		if err := l.rollLocked(true); err != nil {
 			return RecordID{}, nil, err
 		}
 	}
@@ -49,15 +49,35 @@ func (l *Log) appendLocked(size int, fill func(dst []byte) []byte) (RecordID, *s
 	l.writeBuffer = buffer
 	l.segmentSize += int64(frameSize)
 	l.nextSeq++
+	l.requestPrepLocked()
 	return id, batch, nil
 }
 
 // rollLocked closes the active segment and creates the next one, whose
-// base is the next unassigned seq. Caller must hold mu; fileOps is taken
-// so an in-flight flush cannot race the file swap.
-func (l *Log) rollLocked() error {
+// base is the next unassigned seq. With usePrepared set (the append
+// path) a prepared spare becomes the new segment when one is ready; the
+// compaction rotation passes false so an idle log does not trade a small
+// empty segment for a full-size prepared one. Caller must hold mu;
+// fileOps is taken so an in-flight flush cannot race the file swap.
+func (l *Log) rollLocked(usePrepared bool) error {
 	l.fileOps.Lock()
 	defer l.fileOps.Unlock()
+
+	// A prepared segment is cut back to its data, and the new size
+	// synced, before its successor exists, so a sealed segment never
+	// keeps a zero tail: binaries that predate preparation read a bad
+	// header in a sealed segment as corruption and refuse to open. Until
+	// the successor exists this is still the last segment, whose zero
+	// tail every binary truncates on open. Once per SegmentBytes.
+	if l.activePrepared {
+		if err := syncfile.Truncate(l.file, l.segmentSize); err != nil {
+			return fmt.Errorf("wal: trim prepared segment: %w", err)
+		}
+		if err := syncfile.Sync(l.file); err != nil {
+			return fmt.Errorf("wal: sync trimmed segment: %w", err)
+		}
+		l.activePrepared = false
+	}
 
 	// Create the next segment before touching the current one: if the
 	// create or the directory sync fails (ENOSPC, EIO) the active file
@@ -66,9 +86,9 @@ func (l *Log) rollLocked() error {
 	// as the active file, so every later append failed and latched the
 	// log until a restart, long after the disk had space again.
 	path := segmentPath(l.dir, l.nextSeq)
-	file, err := syncfile.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o600)
+	file, prepared, err := l.createSegmentLocked(path, usePrepared)
 	if err != nil {
-		return fmt.Errorf("wal: create segment: %w", err)
+		return err
 	}
 	// Make the new segment file durable before any appends can target it.
 	if err := syncDir(l.dir); err != nil {
@@ -86,6 +106,10 @@ func (l *Log) rollLocked() error {
 	l.file = file
 	l.segmentBase = l.nextSeq
 	l.segmentSize = 0
+	l.durableSize = 0
+	l.activePrepared = prepared
+	// The new segment asks for its own successor at its half-way point.
+	l.prepRequested = false
 	// The segment just sealed may become deletable: force the next
 	// CompactBefore to list the directory again.
 	l.compactFloor = 0

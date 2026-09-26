@@ -28,6 +28,16 @@ const (
 // corrupt frame in the last (active) segment as a torn tail to truncate.
 var errCorruptFrame = errors.New("corrupt frame")
 
+// errZeroHeader is readFrame's report of a frame header that is all zero
+// bytes: the unwritten space of a prepared segment (see SegmentPrealloc),
+// where the active segment's data ends. It wraps errCorruptFrame, so
+// Open-time recovery treats it exactly like the bad magic it is to older
+// binaries: the end of the last segment when no valid frame follows
+// (truncated like any torn tail), corruption anywhere else. Rolls trim a
+// prepared segment before sealing it, so a sealed segment never ends in
+// zeros. Replay stops at it as it does at end of file.
+var errZeroHeader = fmt.Errorf("wal: zero frame header: %w", errCorruptFrame)
+
 // appendFrame encodes one record onto dst, growing it geometrically like
 // append so repeated staging into the shared write buffer stays cheap.
 func appendFrame(dst []byte, seq uint64, payload []byte) []byte {
@@ -128,10 +138,11 @@ func putFrameReader(fr *frameReader) {
 }
 
 // readFrame decodes the next frame. It returns ok=false without an error
-// on a clean or truncated EOF (a torn tail), and wraps validation
-// failures in errCorruptFrame so callers can distinguish them from I/O
-// errors. The returned payload is a fresh allocation that the reader
-// never touches again, so a caller may keep it or alias into it.
+// on a clean or truncated EOF (a torn tail), errZeroHeader for an
+// all-zero header, and wraps validation failures in errCorruptFrame so
+// callers can distinguish them from I/O errors. The returned payload is
+// a fresh allocation that the reader never touches again, so a caller
+// may keep it or alias into it.
 func (fr *frameReader) readFrame(segmentBase uint64, offset int64, maxRecord int) (Record, bool, error) {
 	r := fr.r
 	header := &fr.header
@@ -140,6 +151,9 @@ func (fr *frameReader) readFrame(segmentBase uint64, offset int64, maxRecord int
 			return Record{}, false, nil
 		}
 		return Record{}, false, fmt.Errorf("wal: read frame header: %w", err)
+	}
+	if *header == ([frameHeaderSize]byte{}) {
+		return Record{}, false, errZeroHeader
 	}
 	if got := binary.BigEndian.Uint32(header[0:4]); got != frameMagic {
 		return Record{}, false, fmt.Errorf("wal: bad frame magic at offset %d: %w", offset, errCorruptFrame)

@@ -3,7 +3,14 @@ package wal
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
 // Produce-path benchmarks for the ingress WAL. Every append waits for
@@ -113,4 +120,63 @@ func BenchmarkZZWP5ReplayFromCursor(b *testing.B) {
 	}
 	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/n, "ns/record")
 	_ = sink
+}
+
+// BenchmarkZZWP5AppendSerialWithNeighbour is AppendSerial while another
+// file on the same file system grows by 8 KiB write plus data sync in a
+// loop, the way a partition log's commits do. neighbour-us is that
+// file's mean write+sync latency: segment preparation writes and syncs
+// in the background, and must not push its cost onto other syncers.
+func BenchmarkZZWP5AppendSerialWithNeighbour(b *testing.B) {
+	dir := b.TempDir()
+	l, err := Open(filepath.Join(dir, "wal"), Options{SegmentBytes: 4 << 20})
+	if err != nil {
+		b.Fatal(err)
+	}
+	neighbour, err := os.Create(filepath.Join(dir, "neighbour"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	stop := make(chan struct{})
+	var syncs, total atomic.Int64
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		buf := make([]byte, 8<<10)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			start := time.Now()
+			if _, err := neighbour.Write(buf); err != nil {
+				b.Error(err)
+				return
+			}
+			if err := syncfile.SyncData(neighbour); err != nil {
+				b.Error(err)
+				return
+			}
+			total.Add(int64(time.Since(start)))
+			syncs.Add(1)
+		}
+	})
+	payload := bytes.Repeat([]byte("s"), 8<<10-frameHeaderSize)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := l.Append(context.Background(), payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	close(stop)
+	wg.Wait()
+	_ = neighbour.Close()
+	if n := syncs.Load(); n > 0 {
+		b.ReportMetric(float64(total.Load())/float64(n)/1e3, "neighbour-us")
+	}
+	if err := l.Close(); err != nil {
+		b.Fatal(err)
+	}
 }
