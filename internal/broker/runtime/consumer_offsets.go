@@ -53,7 +53,12 @@ type ConsumerOffsetCommitter struct {
 	mu      sync.Mutex
 	pending map[offsetCommitKey]int64
 	// lastOffset is the frontier last written per partition; a flush
-	// that finds the same value skips the write and its fdatasync.
+	// that finds the same value or a lower one skips the write and its
+	// fdatasync. A lower one is not stale data to repair: acks call
+	// Commit after dropping the shard lock, so two frontier advances can
+	// reach the committer in reverse order, and when the flush that
+	// wrote the higher one runs in between, the lower one arrives alone
+	// in the next window.
 	lastOffset map[offsetCommitKey]int64
 	lastAhead  map[offsetCommitKey]aheadWritten
 	ahead      AheadSource
@@ -93,7 +98,8 @@ func (c *ConsumerOffsetCommitter) SetAheadSource(fn AheadSource) {
 }
 
 // Commit queues an offset for the next flush. Offsets only move
-// forward: a smaller offset never overwrites a pending larger one. A
+// forward: a smaller offset never overwrites a pending larger one, nor
+// one a previous flush already wrote. A
 // call with the current frontier (no advance) still marks the partition
 // dirty, which is how an out-of-order ack reaches the next flush.
 func (c *ConsumerOffsetCommitter) Commit(topic string, partition int, offset int64) {
@@ -170,12 +176,14 @@ func (c *ConsumerOffsetCommitter) flush() error {
 	return firstErr
 }
 
-// writeOffset persists the frontier unless it is the value last written.
+// writeOffset persists the frontier unless it is at or below the value
+// last written: the frontier never moves backwards, and Forget clears
+// the memory whenever the directory is replaced or removed.
 func (c *ConsumerOffsetCommitter) writeOffset(partitionDir string, commit offsetCommit) error {
 	c.mu.Lock()
 	last, seen := c.lastOffset[commit.key]
 	c.mu.Unlock()
-	if seen && last == commit.offset {
+	if seen && commit.offset <= last {
 		return nil
 	}
 	if err := storage.WriteConsumerOffsetIfPartitionDirExists(partitionDir, commit.offset); err != nil {
