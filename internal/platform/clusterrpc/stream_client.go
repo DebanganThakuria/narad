@@ -27,8 +27,7 @@ const maxRetainedWriteBuffer = 256 << 10
 // errFallbackReplyTimeout marks a reply wait that ended because the
 // caller supplied no deadline and the client's own timeout fired. It
 // unwraps to context.DeadlineExceeded so callers checking for a timeout
-// keep working; the pool checks for it specifically to decide whether
-// the connection should be probed.
+// keep working.
 var errFallbackReplyTimeout = fmt.Errorf("reply wait fell back to client timeout: %w", context.DeadlineExceeded)
 
 // errRequestTimeout ends a request whose own budget ran out (see
@@ -107,6 +106,10 @@ type streamClient struct {
 	// staging buffer; the slot holder owns it.
 	writeSem chan struct{}
 	writeBuf []byte
+	// reads counts reads from the stream that returned data; the pool
+	// compares snapshots to tell a connection still delivering from a
+	// dead one (see quicClientPool.runProbe).
+	reads    atomic.Uint64
 	nextID   atomic.Uint64
 	closed   atomic.Bool
 	closeMu  sync.Mutex
@@ -117,13 +120,28 @@ type streamClient struct {
 }
 
 func newStreamClient(conn streamConn, timeout time.Duration) *streamClient {
-	return &streamClient{
+	c := &streamClient{
 		conn:     conn,
-		reader:   bufio.NewReader(conn),
 		timeout:  timeout,
 		writeSem: make(chan struct{}, 1),
 		pending:  make(map[uint64]chan streamResult),
 	}
+	c.reader = bufio.NewReader(countingReader{r: conn, reads: &c.reads})
+	return c
+}
+
+// countingReader counts the reads of r that returned data.
+type countingReader struct {
+	r     io.Reader
+	reads *atomic.Uint64
+}
+
+func (r countingReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	if n > 0 {
+		r.reads.Add(1)
+	}
+	return n, err
 }
 
 type streamResult struct {
@@ -199,7 +217,7 @@ func (c *streamClient) roundTrip(ctx context.Context, deadline time.Time, frameT
 	case <-timeoutCh:
 		// The stream stays open: a slow handler is not a dead peer, and
 		// unrelated in-flight RPCs share it. The pool decides whether to
-		// probe the connection (see quicClientPool.probeAfterTimeout).
+		// probe the connection (see quicClientPool.probe).
 		c.removePending(requestID)
 		c.sendCancel(requestID)
 		if timeoutErr == nil {

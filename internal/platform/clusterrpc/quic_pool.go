@@ -44,9 +44,10 @@ const (
 	quicDialBackoffMax = 2 * time.Second
 
 	// quicStreamPingTimeout bounds the liveness ping sent on a stream
-	// whose reply wait hit the fallback client timeout. A live peer
-	// answers a ping from its stream read loop, independent of any
-	// slow handler; no answer means the connection is dead.
+	// whose request timed out (see quicClientPool.probe). A live peer
+	// answers a ping from its stream read loop, independent of any slow
+	// handler. It is also the minimum interval between two probes of one
+	// connection.
 	quicStreamPingTimeout = time.Second
 )
 
@@ -153,6 +154,7 @@ type quicClientPool struct {
 	conns    map[string]poolConn
 	streams  map[streamKey]*pooledStream
 	opening  map[streamKey]*openCall
+	probing  map[poolConn]struct{}
 	dialing  map[string]*dialCall
 	dialFail map[string]dialFailure
 	closed   bool
@@ -180,6 +182,7 @@ func newQUICClientPool(timeout time.Duration, secret string, allowLegacy bool) *
 		conns:       make(map[string]poolConn),
 		streams:     make(map[streamKey]*pooledStream),
 		opening:     make(map[streamKey]*openCall),
+		probing:     make(map[poolConn]struct{}),
 		dialing:     make(map[string]*dialCall),
 		dialFail:    make(map[string]dialFailure),
 		ctx:         ctx,
@@ -221,32 +224,88 @@ func (p *quicClientPool) requestWithin(ctx context.Context, addr string, lane La
 		}
 	}
 
-	frame, _, err := ps.client.roundTrip(ctx, deadline, frameType, payload)
+	frame, timedOut, err := ps.client.roundTrip(ctx, deadline, frameType, payload)
 	if err != nil {
 		switch {
 		case ps.client.isClosed():
 			p.closeStream(key, ps, err)
-		case errors.Is(err, errFallbackReplyTimeout):
-			p.probeAfterTimeout(key, ps)
+		case timedOut:
+			p.probe(key, ps)
 		}
 	}
 	return frame, err
 }
 
-// probeAfterTimeout runs when a reply wait hit the fallback client
-// timeout (the caller supplied no deadline). A slow handler and a dead
-// connection look identical from the reply wait, so ping the stream: the
-// server answers pings from its read loop without touching any handler.
-// No pong within pingTimeout means the connection is gone (a peer that
-// restarted without a stateless reset reaching us, a black-holed path);
-// close it so every pooled stream on it fails now and the next request
-// re-dials instead of waiting out MaxIdleTimeout.
-func (p *quicClientPool) probeAfterTimeout(key streamKey, ps *pooledStream) {
-	pingCtx, cancel := context.WithTimeout(context.Background(), p.pingTimeout)
-	defer cancel()
-	if _, err := ps.client.requestFrame(pingCtx, clusterwire.StreamFramePing, nil); err != nil {
-		p.closeConn(key.addr, ps.conn, fmt.Errorf("peer %s unresponsive after reply timeout: %w", key.addr, err))
+// probe checks, off the caller's path, whether the connection under a
+// request that just timed out is still alive. A slow handler and a dead
+// connection look the same from a timed-out request; a dead one (a peer
+// that restarted at a new address, a black-holed path: cases where no
+// stateless reset reaches us) would otherwise stay pooled, failing every
+// request, until QUIC's idle timeout. At most one probe per connection
+// runs at a time, and a connection is probed at most once per
+// pingTimeout, so a burst of timeouts under load costs one ping.
+func (p *quicClientPool) probe(key streamKey, ps *pooledStream) {
+	p.mu.Lock()
+	if _, running := p.probing[ps.conn]; running || p.closed {
+		p.mu.Unlock()
+		return
 	}
+	p.probing[ps.conn] = struct{}{}
+	p.mu.Unlock()
+	go p.runProbe(key, ps)
+}
+
+// runProbe pings the timed-out request's stream: the server answers
+// pings from its read loop without touching any handler. The connection
+// is closed, failing every stream on it so the next request re-dials,
+// only when the ping goes unanswered AND no stream on the connection
+// received anything meanwhile. A busy connection whose pong is merely
+// queued behind other replies is alive, and closing it would fail every
+// request in flight on it.
+func (p *quicClientPool) runProbe(key streamKey, ps *pooledStream) {
+	defer func() {
+		timer := getTimer(p.pingTimeout)
+		select {
+		case <-timer.C:
+		case <-p.ctx.Done():
+		}
+		putTimer(timer)
+		p.mu.Lock()
+		delete(p.probing, ps.conn)
+		p.mu.Unlock()
+	}()
+	clients, reads := p.connReads(ps.conn)
+	pingCtx, cancel := context.WithTimeout(p.ctx, p.pingTimeout)
+	_, err := ps.client.requestFrame(pingCtx, clusterwire.StreamFramePing, nil)
+	cancel()
+	if err == nil || ps.client.isClosed() || p.ctx.Err() != nil {
+		// Answered; or the stream itself failed, which the next request
+		// on it handles; or the pool is closing.
+		return
+	}
+	for i, client := range clients {
+		if client.reads.Load() != reads[i] {
+			return
+		}
+	}
+	p.closeConn(key.addr, ps.conn, fmt.Errorf("peer %s unresponsive after a request timed out: %w", key.addr, err))
+}
+
+// connReads snapshots the read counters of every stream pooled on conn.
+func (p *quicClientPool) connReads(conn poolConn) ([]*streamClient, []uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var (
+		clients []*streamClient
+		reads   []uint64
+	)
+	for _, ps := range p.streams {
+		if ps.conn == conn {
+			clients = append(clients, ps.client)
+			reads = append(reads, ps.client.reads.Load())
+		}
+	}
+	return clients, reads
 }
 
 // stream returns the pooled stream for key, opening it when there is
