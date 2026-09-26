@@ -578,8 +578,19 @@ func (d *dispatcher) pumpQueue(topicName string, st *topicDispatch, q *entryQueu
 					q.pushFront(queueEntry{waiter: w})
 				}
 			}
-			st.hasWaiters.Store(st.anyDemandLocked())
+			// While the read ran, the waiter was in no FIFO, so the last
+			// other one leaving (a timeout's dequeue, a dropRemote) stored
+			// hasWaiters false, and a commit landing then was dropped by
+			// the wake notifier after this read had passed its partition.
+			// The waiter is back, so if the flag had gone false, look
+			// again: this pass may have missed that record. A second pass
+			// finds the flag true, so this cannot loop.
+			demand := st.anyDemandLocked()
+			rekick := !st.hasWaiters.Swap(demand) && demand
 			st.mu.Unlock()
+			if rekick {
+				d.markDirty(topicName)
+			}
 			if err != nil && !dead {
 				d.logReadError(topicName, st, err)
 			}
