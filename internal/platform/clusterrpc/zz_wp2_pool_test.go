@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -257,5 +258,167 @@ func TestZZWP2GenuineDialFailureStillBacksOff(t *testing.T) {
 	_, err := p.getConn(context.Background(), "peer:1")
 	if err == nil || !strings.Contains(err.Error(), "backing off") {
 		t.Fatalf("second dial error = %v, want a cached backoff", err)
+	}
+}
+
+// cluster-rpc-transport#0: a probe whose parent context is already
+// cancelled (probeCandidates keeps looping after the HTTP client left)
+// lands on a lane with no pooled stream. It must fail alone: the
+// connection and an unrelated request in flight on another lane stay up.
+func TestZZWP2CancelledCallerKeepsConnection(t *testing.T) {
+	h := newZZWP2ParkHandler()
+	addr := zzWP2Server(t, h)
+	pool := newQUICClientPool(5*time.Second, "sekret", false)
+	t.Cleanup(func() { _ = pool.close() })
+
+	parked := zzWP2Go(func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		frame, err := pool.request(ctx, addr, LaneProduce, clusterwire.StreamFrameNodeRequest, []byte("park"))
+		if err == nil && string(frame.Payload) != "unparked" {
+			err = errors.New("unexpected reply " + string(frame.Payload))
+		}
+		return err
+	})
+	<-h.parked
+	pool.mu.Lock()
+	conn := pool.conns[addr]
+	pool.mu.Unlock()
+
+	parent, cancelParent := context.WithCancel(context.Background())
+	cancelParent()
+	probeCtx, cancelProbe := context.WithTimeout(parent, 500*time.Millisecond)
+	defer cancelProbe()
+	if _, err := pool.request(probeCtx, addr, LaneConsume, clusterwire.StreamFrameNodeRequest, []byte("probe")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled probe error = %v, want context.Canceled", err)
+	}
+
+	zzWP2Pending(t, parked, "unrelated in-flight request")
+	pool.mu.Lock()
+	still := pool.conns[addr]
+	pool.mu.Unlock()
+	if still == nil || still != conn {
+		t.Fatal("a cancelled caller evicted the shared connection")
+	}
+	close(h.release)
+	if err := zzWP2Result(t, parked, "unrelated in-flight request"); err != nil {
+		t.Fatalf("unrelated in-flight request error = %v", err)
+	}
+}
+
+// zzWP2GateConn is a fake connection whose stream opens block until
+// release is closed (or the open's own context ends), counting opens.
+type zzWP2GateConn struct {
+	*fakePoolConn
+	release chan struct{}
+	opens   atomic.Int32
+}
+
+func (c *zzWP2GateConn) openStream(ctx context.Context) (streamConn, error) {
+	c.opens.Add(1)
+	select {
+	case <-c.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return c.fakePoolConn.openStream(ctx)
+}
+
+// cluster-rpc-transport#0: a caller whose deadline runs out while its
+// stream is being opened gives up alone; the open is not failed on its
+// behalf, the connection stays, and the next caller finds the stream.
+func TestZZWP2ExpiringCallerDoesNotFailStreamOpen(t *testing.T) {
+	base := newFakePoolConn()
+	go serveEcho(base)
+	conn := &zzWP2GateConn{fakePoolConn: base, release: make(chan struct{})}
+	p := newFakePool(t, 5*time.Second, func(context.Context, string) (poolConn, error) { return conn, nil })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := p.request(ctx, "peer:1", LaneAck, clusterwire.StreamFrameNodeRequest, []byte("x")); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expiring caller error = %v, want context.DeadlineExceeded", err)
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Fatalf("expiring caller waited %s for an open it gave up on", waited)
+	}
+	if conn.isClosed() {
+		t.Fatalf("connection closed because one caller's deadline ran out: %v", conn.closeCause)
+	}
+	close(conn.release)
+	p.nextShard.Store(0)
+	if _, err := p.request(context.Background(), "peer:1", LaneAck, clusterwire.StreamFrameNodeRequest, []byte("y")); err != nil {
+		t.Fatalf("next request error = %v", err)
+	}
+	if n := conn.opens.Load(); n != 1 {
+		t.Fatalf("opens = %d, want 1 (the abandoned open completed and was pooled)", n)
+	}
+}
+
+// zzWP2CountingConn counts stream opens and stands in a short delay for
+// the auth round trip.
+type zzWP2CountingConn struct {
+	*fakePoolConn
+	opens atomic.Int32
+}
+
+func (c *zzWP2CountingConn) openStream(ctx context.Context) (streamConn, error) {
+	c.opens.Add(1)
+	time.Sleep(time.Millisecond)
+	return c.fakePoolConn.openStream(ctx)
+}
+
+// cluster-rpc-transport#3: a burst of requests on a cold pool opens each
+// (lane, shard) stream once, not once per request.
+func TestZZWP2StreamOpenSingleflight(t *testing.T) {
+	base := newFakePoolConn()
+	base.serverEnds = make(chan net.Conn, 4096)
+	conn := &zzWP2CountingConn{fakePoolConn: base}
+	go serveEcho(base)
+	p := newFakePool(t, 5*time.Second, func(context.Context, string) (poolConn, error) { return conn, nil })
+
+	const callers = 256
+	var wg sync.WaitGroup
+	var failed atomic.Int32
+	for range callers {
+		wg.Go(func() {
+			if _, err := p.request(context.Background(), "peer:1", LaneAck, clusterwire.StreamFrameNodeRequest, []byte("ack")); err != nil {
+				failed.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+	if n := failed.Load(); n != 0 {
+		t.Fatalf("%d requests failed", n)
+	}
+	if n := conn.opens.Load(); n != quicAckLanes {
+		t.Fatalf("%d concurrent requests opened %d streams, want %d (one per shard)", callers, n, quicAckLanes)
+	}
+}
+
+// Closing the pool while a stream open is in flight fails its waiters
+// with errPoolClosed and does not leave the half-built stream pooled.
+func TestZZWP2CloseDuringStreamOpen(t *testing.T) {
+	base := newFakePoolConn()
+	go serveEcho(base)
+	conn := &zzWP2GateConn{fakePoolConn: base, release: make(chan struct{})}
+	p := newFakePool(t, 5*time.Second, func(context.Context, string) (poolConn, error) { return conn, nil })
+
+	waiter := zzWP2Go(func() error {
+		_, err := p.request(context.Background(), "peer:1", LaneAck, clusterwire.StreamFrameNodeRequest, []byte("x"))
+		return err
+	})
+	for conn.opens.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	_ = p.close()
+	if err := zzWP2Result(t, waiter, "open waiter"); !errors.Is(err, errPoolClosed) {
+		t.Fatalf("open waiter error = %v, want errPoolClosed", err)
+	}
+	p.mu.Lock()
+	streams, opening := len(p.streams), len(p.opening)
+	p.mu.Unlock()
+	if streams != 0 || opening != 0 {
+		t.Fatalf("closed pool holds streams=%d opening=%d", streams, opening)
 	}
 }

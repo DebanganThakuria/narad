@@ -106,6 +106,14 @@ type dialCall struct {
 	err  error
 }
 
+// openCall is an in-flight stream open that concurrent requests for the
+// same stream key wait on instead of each opening their own (singleflight).
+type openCall struct {
+	done chan struct{}
+	ps   *pooledStream
+	err  error
+}
+
 // dialFailure is the cached outcome of the last failed dial to an
 // address, honoured until `until`.
 type dialFailure struct {
@@ -133,9 +141,9 @@ type quicClientPool struct {
 	now  func() time.Time
 
 	// ctx is the pool's own context, cancelled by close. Shared work that
-	// many callers wait on (dials) runs under it rather than under any one
-	// caller's context, so one caller giving up cannot fail it for the
-	// rest.
+	// many callers wait on (dials, stream opens) runs under it rather than
+	// under any one caller's context, so one caller giving up cannot fail
+	// it for the rest.
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -144,6 +152,7 @@ type quicClientPool struct {
 	mu       sync.Mutex
 	conns    map[string]poolConn
 	streams  map[streamKey]*pooledStream
+	opening  map[streamKey]*openCall
 	dialing  map[string]*dialCall
 	dialFail map[string]dialFailure
 	closed   bool
@@ -170,6 +179,7 @@ func newQUICClientPool(timeout time.Duration, secret string, allowLegacy bool) *
 		now:         time.Now,
 		conns:       make(map[string]poolConn),
 		streams:     make(map[streamKey]*pooledStream),
+		opening:     make(map[streamKey]*openCall),
 		dialing:     make(map[string]*dialCall),
 		dialFail:    make(map[string]dialFailure),
 		ctx:         ctx,
@@ -194,7 +204,7 @@ func (p *quicClientPool) request(ctx context.Context, addr string, lane Lane, fr
 	p.mu.Unlock()
 	if ps == nil || ps.client.isClosed() {
 		var err error
-		ps, err = p.openStream(ctx, key)
+		ps, err = p.stream(ctx, key)
 		if err != nil {
 			return clusterwire.StreamFrame{}, err
 		}
@@ -228,26 +238,91 @@ func (p *quicClientPool) probeAfterTimeout(key streamKey, ps *pooledStream) {
 	}
 }
 
-// openStream opens (or, racing another caller, adopts) the pooled stream
-// for key. A stream open that fails on a pooled connection evicts that
-// connection and retries once on a fresh dial, so a connection that died
-// silently costs one extra round trip rather than a failed request.
-func (p *quicClientPool) openStream(ctx context.Context, key streamKey) (*pooledStream, error) {
-	opCtx, cancel := p.operationContext(ctx)
-	defer cancel()
+// stream returns the pooled stream for key, opening it when there is
+// none. Concurrent callers for one key share a single open (a burst on a
+// cold pool opens each shard once, not once per request). The open runs
+// on its own goroutine under the pool's context and timeout, never under
+// a caller's: every caller waits for it or for its own context, so a
+// caller that is cancelled or runs out of time fails alone. Were the open
+// run under the caller's context, its cancellation would look like a dead
+// connection and take every stream on it down (see openStream). A caller
+// whose context has already ended does not start an open at all.
+func (p *quicClientPool) stream(ctx context.Context, key streamKey) (*pooledStream, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, errPoolClosed
+	}
+	if ps := p.streams[key]; ps != nil && !ps.client.isClosed() {
+		p.mu.Unlock()
+		return ps, nil
+	}
+	call := p.opening[key]
+	if call == nil {
+		call = &openCall{done: make(chan struct{})}
+		p.opening[key] = call
+		go p.openShared(key, call)
+	}
+	p.mu.Unlock()
+	select {
+	case <-call.done:
+		return call.ps, call.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 
+// openShared runs the one open of key that stream's callers wait on,
+// pools the result and publishes it to them. A stream opened for callers
+// that have all gone is pooled all the same, for the next request.
+func (p *quicClientPool) openShared(key streamKey, call *openCall) {
+	ctx, cancel := context.WithTimeout(p.ctx, p.timeout)
+	client, conn, err := p.openStream(ctx, key)
+	cancel()
+
+	p.mu.Lock()
+	delete(p.opening, key)
+	var orphan *streamClient
+	switch {
+	case p.closed:
+		// The pool closed while we were opening (which is also why an
+		// open fails at this point): the stream has no home.
+		orphan, err = client, errPoolClosed
+	case err != nil:
+	default:
+		call.ps = &pooledStream{client: client, conn: conn}
+		p.streams[key] = call.ps
+	}
+	call.err = err
+	p.mu.Unlock()
+	close(call.done)
+	if orphan != nil {
+		orphan.closeWithError(errPoolClosed)
+	}
+}
+
+// openStream opens and authenticates a new stream for key. ctx is the
+// pool-owned open context, so an error here is the connection's (or the
+// pool's, once it closes), never a caller's. A stream open that fails on
+// a pooled connection evicts that connection and retries once on a fresh
+// dial, so a connection that died silently costs one extra round trip
+// rather than a failed request.
+func (p *quicClientPool) openStream(ctx context.Context, key streamKey) (*streamClient, poolConn, error) {
 	for attempt := 0; ; attempt++ {
-		conn, err := p.getConn(opCtx, key.addr)
+		conn, err := p.getConn(ctx, key.addr)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		stream, err := conn.openStream(opCtx)
+		stream, err := conn.openStream(ctx)
 		if err != nil {
 			p.closeConn(key.addr, conn, err)
-			if attempt == 0 && opCtx.Err() == nil {
+			if attempt == 0 && ctx.Err() == nil {
 				continue
 			}
-			return nil, err
+			return nil, nil, err
 		}
 		// Run the auth handshake as the stream's first exchange. Safe to
 		// do synchronously: the stream is not yet shared (readLoop
@@ -255,25 +330,16 @@ func (p *quicClientPool) openStream(ctx context.Context, key streamKey) (*pooled
 		// the secret is an impostor, so the whole connection is dropped,
 		// not just the stream.
 		if p.secret != "" {
-			if err := p.authenticateStream(opCtx, conn, stream); err != nil {
+			if err := p.authenticateStream(ctx, conn, stream); err != nil {
 				abortStream(stream)
 				p.closeConn(key.addr, conn, err)
-				return nil, err
+				return nil, nil, err
 			}
 		}
 
 		client := newStreamClient(stream, p.timeout)
 		go client.readLoop()
-
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if existing := p.streams[key]; existing != nil && !existing.client.isClosed() {
-			client.closeWithError(errors.New("superseded by existing quic stream client"))
-			return existing, nil
-		}
-		ps := &pooledStream{client: client, conn: conn}
-		p.streams[key] = ps
-		return ps, nil
+		return client, conn, nil
 	}
 }
 
@@ -510,15 +576,6 @@ func (p *quicClientPool) close() error {
 		}
 	}
 	return err
-}
-
-// operationContext bounds callers that pass no deadline by the pool
-// timeout so a stalled open/dial cannot block forever.
-func (p *quicClientPool) operationContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	if _, ok := ctx.Deadline(); ok || p.timeout <= 0 {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, p.timeout)
 }
 
 // quicAddr normalizes an address that may have been copied from an HTTP
