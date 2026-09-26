@@ -29,6 +29,9 @@ func (l *Log) Read(offset int64) ([]byte, error) {
 // reads the payload while encoding the response, so the copy per
 // message was pure overhead.
 func (l *Log) ReadShared(offset int64) ([]byte, error) {
+	if !l.readSeen.Load() {
+		l.readSeen.Store(true)
+	}
 	// Below the durable tail a record is in a synced, indexed frame, and
 	// the flusher has already released it from the write buffer and the
 	// flushing snapshot (syncIfNeeded clears them right after moving the

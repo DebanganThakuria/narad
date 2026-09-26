@@ -101,6 +101,13 @@ type Log struct {
 	// re-walking header-by-header from the sparse index anchor.
 	navCache *navCache
 
+	// readSeen records that something read the log since the flusher
+	// last looked. Set by every ReadShared, cleared by the flusher when
+	// it decides whether a batch it writes also goes into frameCache
+	// (see cacheWrittenFrames), so a partition nobody reads never fills
+	// its cache with frames nobody asked for.
+	readSeen atomic.Bool
+
 	closed atomic.Bool
 }
 

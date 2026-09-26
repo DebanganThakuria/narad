@@ -530,9 +530,10 @@ func frameSplitLen(records [][]byte) int {
 // so every frame stays under the decodeHeader read limit. Offsets stay
 // continuous across the split frames.
 func (f *flusher) writeBatch(records [][]byte, baseOffset int64, forceSync bool) error {
+	cache := f.log.cacheWrittenFrames()
 	for len(records) > 0 {
 		n := frameSplitLen(records)
-		if err := f.writeFrame(records[:n], baseOffset, forceSync); err != nil {
+		if err := f.writeFrame(records[:n], baseOffset, forceSync, cache); err != nil {
 			return err
 		}
 		baseOffset += int64(n)
@@ -541,7 +542,27 @@ func (f *flusher) writeBatch(records [][]byte, baseOffset int64, forceSync bool)
 	return nil
 }
 
-func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool) error {
+// maxCachedWriteFrameBytes bounds the frames writeFrame puts into the
+// decoded-frame cache: a backlog drain can write frames of megabytes,
+// and one of those would evict every frame the partition's consumers
+// are reading.
+const maxCachedWriteFrameBytes = maxDecodeCacheBytes / 8
+
+// cacheWrittenFrames reports whether the batch about to be written also
+// goes into the decoded-frame cache. Every frame a consumer reads at the
+// frontier used to miss the cache, because the flusher dropped the
+// in-memory records at fsync and the first readers woken by the commit
+// then re-read and re-decoded the frame from the file, each of them.
+// The records are immutable and exactly what the frame holds, so caching
+// them as written is free of I/O. Only when something read the log since
+// the last batch (readSeen), so partitions nobody reads keep empty
+// caches; and only with the commit read-back on, so a record served from
+// memory is one whose on-disk CRC the commit verified.
+func (l *Log) cacheWrittenFrames() bool {
+	return !l.opts.DisableCommitVerify && l.readSeen.CompareAndSwap(true, false)
+}
+
+func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync, cache bool) error {
 	flushStart := time.Now()
 	frame, err := f.enc.encodeFrame(records, baseOffset, f.log.codec)
 	if err != nil {
@@ -601,10 +622,34 @@ func (f *flusher) writeFrame(records [][]byte, baseOffset int64, forceSync bool)
 	// one that cannot truncate leaves the frame in place, so the entry
 	// never outlives its bytes.
 	f.log.navCache.put(entry)
+	if cache {
+		f.cacheWrittenFrame(entry, records)
+	}
 
 	// A full segment is synced now so the roll before the next write
 	// finds it durable.
 	return f.syncIfNeeded(forceSync || full, active)
+}
+
+// cacheWrittenFrame puts the records of the frame just written into the
+// decoded-frame cache (see cacheWrittenFrames). Only after the write and
+// the index update succeeded, so a failed write never leaves an entry;
+// a failed commit that truncates the frame drops the segment's cached
+// frames with it (discardUncommittedTail). records aliases the drain's
+// backing array, so the cache gets its own copy of the slice headers:
+// caching the sub-slice would pin every record of the drain and escape
+// the cache's byte accounting.
+func (f *flusher) cacheWrittenFrame(entry indexEntry, records [][]byte) {
+	size := 0
+	for _, r := range records {
+		size += len(r)
+	}
+	if size > maxCachedWriteFrameBytes {
+		return
+	}
+	recs := make([][]byte, len(records))
+	copy(recs, records)
+	f.log.frameCache.putSized(frameKey{segmentBase: entry.segmentBaseOffset, framePos: entry.framePos}, recs, size)
 }
 
 // activeForWrite returns the segment the next frame goes into, rolling
