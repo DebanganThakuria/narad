@@ -14,14 +14,33 @@ import (
 // metastore first (see syncTopicSchemas); a topic with no persisted
 // schema at all accepts any payload.
 func (e *Engine) validateProducePayload(ctx context.Context, topicName string, payload []byte) error {
-	if err := e.syncTopicSchemas(ctx, topicName); err != nil {
+	hasSchema, err := e.syncTopicSchemas(ctx, topicName)
+	if err != nil {
 		return err
 	}
-	err := e.schemas.Validate(ctx, topicName, payload)
+	err = e.schemas.Validate(ctx, topicName, payload)
+	if hasSchema && errors.Is(err, errs.ErrSchemaNotFound) {
+		// The registry lost a schema that was loaded (the topic manager
+		// drops a retired incarnation's compiled schemas by name, and a
+		// same-named successor may be live): load it again rather than
+		// let the payload through unvalidated.
+		e.forgetSchemaLoad(topicName)
+		if _, err = e.syncTopicSchemas(ctx, topicName); err != nil {
+			return err
+		}
+		err = e.schemas.Validate(ctx, topicName, payload)
+	}
 	if err == nil || errors.Is(err, errs.ErrSchemaNotFound) {
 		return nil
 	}
 	return schemaValidationError(err)
+}
+
+// schemaFlightResult is a schema flight's result: the schema version the
+// registry was loaded at and whether the topic has a schema.
+type schemaFlightResult struct {
+	version   uint64
+	hasSchema bool
 }
 
 // syncTopicSchemas keys the registry's loaded history for the topic by
@@ -39,24 +58,26 @@ func (e *Engine) validateProducePayload(ctx context.Context, topicName string, p
 // metastore read and one compile per node rather than one per produce
 // in flight. The flight's result carries the version it loaded at; a
 // produce that joined a flight begun before the version it observed
-// moved again runs another.
-func (e *Engine) syncTopicSchemas(ctx context.Context, topicName string) error {
+// moved again runs another. hasSchema reports whether the topic has a
+// persisted schema as of the loaded version.
+func (e *Engine) syncTopicSchemas(ctx context.Context, topicName string) (hasSchema bool, err error) {
 	version, _ := e.schemaVersion(topicName)
 	e.cacheMu.RLock()
 	entry, hit := e.schemaLoadCache[topicName]
 	e.cacheMu.RUnlock()
 	if hit && entry.version == version {
-		return nil
+		return entry.value, nil
 	}
 	// The flight is shared, so one caller's cancellation must not fail
 	// it for the others; the work is bounded either way.
 	flightCtx := context.WithoutCancel(ctx)
 	for {
-		loaded, err, _ := e.schemaFlights.Do(topicName, func() (any, error) {
+		result, err, _ := e.schemaFlights.Do(topicName, func() (any, error) {
 			return e.hydrateTopicSchemas(flightCtx, topicName)
 		})
-		if current, _ := e.schemaVersion(topicName); loaded.(uint64) == current {
-			return err
+		loaded := result.(schemaFlightResult)
+		if current, _ := e.schemaVersion(topicName); loaded.version == current {
+			return loaded.hasSchema, err
 		}
 	}
 }
@@ -70,27 +91,37 @@ func (e *Engine) syncTopicSchemas(ctx context.Context, topicName string) error {
 // than trusted, because a slower, older load finishing after a newer
 // one would otherwise leave the node validating against the older
 // schema while the cache said the newer one was loaded.
-func (e *Engine) hydrateTopicSchemas(ctx context.Context, topicName string) (uint64, error) {
+//
+// A ForgetTopic that overlaps the load (see forgetSchemaLoad too) means
+// the registry's copy may have been dropped after this load wrote it,
+// so the load is redone before anything is recorded.
+func (e *Engine) hydrateTopicSchemas(ctx context.Context, topicName string) (schemaFlightResult, error) {
 	for {
+		forgets := e.cacheForgets.Load()
 		version, _ := e.schemaVersion(topicName)
 		e.cacheMu.RLock()
 		entry, hit := e.schemaLoadCache[topicName]
 		e.cacheMu.RUnlock()
 		if hit && entry.version == version {
 			// An earlier flight loaded this version already.
-			return version, nil
+			return schemaFlightResult{version: version, hasSchema: entry.value}, nil
 		}
 		has, err := schema.Hydrate(ctx, e.metastore, e.schemas, topicName)
 		if current, _ := e.schemaVersion(topicName); current != version {
 			continue
 		}
 		if err != nil {
-			return version, err
+			return schemaFlightResult{version: version}, err
 		}
 		e.cacheMu.Lock()
-		e.schemaLoadCache[topicName] = cached[bool]{value: has, version: version}
+		stored := e.cacheForgets.Load() == forgets
+		if stored {
+			e.schemaLoadCache[topicName] = cached[bool]{value: has, version: version}
+		}
 		e.cacheMu.Unlock()
-		return version, nil
+		if stored {
+			return schemaFlightResult{version: version, hasSchema: has}, nil
+		}
 	}
 }
 

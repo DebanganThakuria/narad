@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -45,9 +46,15 @@ type cached[V any] struct {
 // dropOnError, when non-nil and true for the load error, evicts the
 // stale entry so the next lookup doesn't keep serving a value for a
 // key that now fails to load.
+//
+// forgets is the engine's ForgetTopic counter, bumped under mu. A load
+// that overlapped a forget still returns its value but does not cache
+// it, so a request racing a topic delete cannot put back an entry the
+// delete just dropped.
 func lookupCached[V any](
 	mu *sync.RWMutex,
 	cache map[string]cached[V],
+	forgets *atomic.Uint64,
 	key string,
 	version uint64,
 	currentVersion func() uint64,
@@ -67,6 +74,7 @@ func lookupCached[V any](
 			continue
 		}
 
+		epoch := forgets.Load()
 		value, err := load()
 		if current := currentVersion(); current != version {
 			version = current
@@ -83,10 +91,38 @@ func lookupCached[V any](
 		}
 
 		mu.Lock()
-		cache[key] = cached[V]{value: value, version: version}
+		if forgets.Load() == epoch {
+			cache[key] = cached[V]{value: value, version: version}
+		}
 		mu.Unlock()
 		return value, nil
 	}
+}
+
+// ForgetTopic drops every cached view this engine holds of topicName:
+// its record, its assignments, its schema load marker and its consume
+// cursor. The topic manager calls it when a topic incarnation's local
+// state is retired, after dropping the topic's compiled schemas, so a
+// deleted topic stops costing memory on every node it was used on. Any
+// of it reloads from the metastore on the next use, so forgetting a
+// live same-named successor only costs a reload.
+func (e *Engine) ForgetTopic(topicName string) {
+	e.cacheMu.Lock()
+	e.cacheForgets.Add(1)
+	delete(e.topicCache, topicName)
+	delete(e.assignmentCache, topicName)
+	delete(e.schemaLoadCache, topicName)
+	e.cacheMu.Unlock()
+	e.consumeCursors.Delete(topicName)
+}
+
+// forgetSchemaLoad drops the topic's schema load marker so the next
+// sync reloads the registry.
+func (e *Engine) forgetSchemaLoad(topicName string) {
+	e.cacheMu.Lock()
+	e.cacheForgets.Add(1)
+	delete(e.schemaLoadCache, topicName)
+	e.cacheMu.Unlock()
 }
 
 // assignmentSet holds a topic's partition assignments in both list and
@@ -147,7 +183,7 @@ func (e *Engine) getTopic(ctx context.Context, name string) (topic.Topic, error)
 	if !ok {
 		return e.loadTopic(ctx, name)
 	}
-	return lookupCached(&e.cacheMu, e.topicCache, name, version,
+	return lookupCached(&e.cacheMu, e.topicCache, &e.cacheForgets, name, version,
 		func() uint64 { v, _ := e.topicVersion(name); return v },
 		func() (topic.Topic, error) { return e.loadTopic(ctx, name) },
 		func(err error) bool { return errors.Is(err, ErrTopicNotFound) },
@@ -188,8 +224,19 @@ func (e *Engine) getAssignment(topicName string, partition int) (metastore.Assig
 	return assignment, nil
 }
 
+// errNoAssignments is the assignment loader's way of keeping an empty
+// row set out of the cache (see assignmentsForTopic); it never reaches
+// a caller.
+var errNoAssignments = errors.New("messaging: topic has no partition assignments")
+
 // assignmentsForTopic returns the topic's assignments. ok is false
 // when the metastore has no assignment support at all.
+//
+// An empty row set is returned but not cached: it is what a deleted
+// topic reads as (ListAssignments of an unknown topic is nil, nil), and
+// caching it let every straggling request for a deleted name put back
+// the entry its delete had dropped. A live topic has rows from the
+// moment its partitions are placed.
 func (e *Engine) assignmentsForTopic(topicName string) (assignmentSet, bool, error) {
 	assignments, ok := e.metastore.(assignmentReader)
 	if !ok {
@@ -200,19 +247,29 @@ func (e *Engine) assignmentsForTopic(topicName string) (assignmentSet, bool, err
 		if err != nil {
 			return assignmentSet{}, err
 		}
+		if len(rows) == 0 {
+			return assignmentSet{}, errNoAssignments
+		}
 		return newAssignmentSet(rows, e.selfID), nil
 	}
 
 	version, versioned := e.assignmentVersion(topicName)
-	if !versioned {
-		set, err := load()
-		return set, true, err
-	}
-	set, err := lookupCached(&e.cacheMu, e.assignmentCache, topicName, version,
-		func() uint64 { v, _ := e.assignmentVersion(topicName); return v },
-		load,
-		nil,
+	var (
+		set assignmentSet
+		err error
 	)
+	if versioned {
+		set, err = lookupCached(&e.cacheMu, e.assignmentCache, &e.cacheForgets, topicName, version,
+			func() uint64 { v, _ := e.assignmentVersion(topicName); return v },
+			load,
+			func(err error) bool { return errors.Is(err, errNoAssignments) },
+		)
+	} else {
+		set, err = load()
+	}
+	if errors.Is(err, errNoAssignments) {
+		return assignmentSet{}, true, nil
+	}
 	return set, true, err
 }
 
@@ -226,7 +283,7 @@ func (e *Engine) getRoutingMember(id string) (routingMember, error) {
 	if !versioned {
 		return loadRoutingMember(assignments, id)
 	}
-	return lookupCached(&e.cacheMu, e.memberCache, id, version,
+	return lookupCached(&e.cacheMu, e.memberCache, &e.cacheForgets, id, version,
 		func() uint64 { v, _ := e.routingMembersVersion(); return v },
 		func() (routingMember, error) { return loadRoutingMember(assignments, id) },
 		func(error) bool { return true },

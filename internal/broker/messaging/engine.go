@@ -95,6 +95,11 @@ type Engine struct {
 	assignmentCache map[string]cached[assignmentSet]
 	memberCache     map[string]cached[routingMember]
 	schemaLoadCache map[string]cached[bool]
+	// cacheForgets counts ForgetTopic calls; bumped under cacheMu. A
+	// cache load that overlapped one does not store its result (see
+	// lookupCached), so a request racing a topic delete cannot put back
+	// what the delete dropped.
+	cacheForgets atomic.Uint64
 	// schemaFlights runs one schema reload per topic at a time; see
 	// syncTopicSchemas.
 	schemaFlights singleflight.Group

@@ -75,7 +75,7 @@ func (m *Manager) PurgeTopic(ctx context.Context, name, id string) error {
 // cannot land a log in the directory while it is being unlinked; the
 // in-memory state is dropped through the retired hook (see
 // NewManager) when, and only when, the directory was this
-// incarnation's.
+// incarnation's. Caches that reload on use are dropped either way.
 func (m *Manager) purgeTopicLocked(_ context.Context, name, id string) error {
 	if _, err := m.topicDir(name); err != nil {
 		return err
@@ -89,12 +89,16 @@ func (m *Manager) purgeTopicLocked(_ context.Context, name, id string) error {
 		m.waiters.ReleaseTopicWaiters(name)
 	}
 	_, err := m.logs.PurgeTopic(name, id)
+	// Also regardless of the directory: a node that only accepted
+	// produces for the topic compiled its schema and cached its metadata
+	// all the same.
+	m.dropTopicCaches(name)
 	return err
 }
 
 // dropTopicState drops the in-memory state a topic incarnation left
-// behind: in-flight reservations and committed frontiers, and loaded
-// schemas. Registered with runtime.Logs as the retired hook so it also
+// behind: in-flight reservations and committed frontiers, loaded
+// schemas and the engine's cached metadata. Registered with runtime.Logs as the retired hook so it also
 // runs when an open quarantines a deleted incarnation's directory,
 // where that state would otherwise be resumed by the recreated topic.
 func (m *Manager) dropTopicState(name string) {
@@ -106,10 +110,31 @@ func (m *Manager) dropTopicState(name string) {
 	if m.offsets != nil {
 		m.offsets.DropTopic(name)
 	}
+	m.dropTopicCaches(name)
+}
+
+// topicCacheForgetter is the messaging engine's ForgetTopic, reached
+// through the waiter releaser it is wired as.
+type topicCacheForgetter interface {
+	ForgetTopic(topicName string)
+}
+
+// dropTopicCaches drops what this node only caches about a topic: its
+// compiled schemas and the messaging engine's cached record,
+// assignments, schema load marker and consume cursor. Without this a
+// deleted topic's entries stayed on every node it was used on, one set
+// per name ever deleted. All of it reloads from the metastore on next
+// use, so dropping it under a live same-named successor only costs a
+// reload. The engine forgets after the registry drop: a schema reload
+// racing the drop is then redone rather than recorded as loaded.
+func (m *Manager) dropTopicCaches(name string) {
 	if m.schemas != nil {
 		if err := m.schemas.DropTopic(context.Background(), name); err != nil {
 			m.logger.Warn("drop topic schemas after retiring incarnation", "topic", name, "err", err)
 		}
+	}
+	if f, ok := m.waiters.(topicCacheForgetter); ok {
+		f.ForgetTopic(name)
 	}
 }
 
