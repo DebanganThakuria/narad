@@ -1,7 +1,6 @@
 package wal
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -59,13 +58,6 @@ func shouldSkipSegment(segments []segmentInfo, i int, cursor Cursor) bool {
 	return false
 }
 
-// replayReadBufferSize is the read-ahead used when replaying a segment.
-// Reading through a buffer turns the three syscalls per record of the
-// unbuffered form (seek, header read, payload read) into one large read
-// per 64 KiB; the byte position is tracked arithmetically, which is
-// exactly what CursorAfter already assumes.
-const replayReadBufferSize = 64 << 10
-
 func replaySegmentFrom(segment segmentInfo, from uint64, offset int64, maxRecord int, fn func(Record, Cursor) error) error {
 	file, err := os.Open(segment.path)
 	if err != nil {
@@ -78,9 +70,10 @@ func replaySegmentFrom(segment segmentInfo, from uint64, offset int64, maxRecord
 			return fmt.Errorf("wal: seek segment: %w", err)
 		}
 	}
-	reader := bufio.NewReaderSize(file, replayReadBufferSize)
+	reader := getFrameReader(file)
+	defer putFrameReader(reader)
 	for {
-		record, ok, err := readFrame(reader, segment.base, offset, maxRecord)
+		record, ok, err := reader.readFrame(segment.base, offset, maxRecord)
 		if err != nil {
 			return err
 		}

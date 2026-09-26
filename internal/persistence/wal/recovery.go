@@ -1,7 +1,6 @@
 package wal
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/binary"
 	"errors"
@@ -46,10 +45,11 @@ func scanSegment(segment segmentInfo, maxRecord int, tolerateCorruptTail bool) (
 	// Buffered sequential read with an arithmetic position; the corrupt
 	// tail probe below uses ReadAt on the raw file, independent of the
 	// buffered reader's position.
-	reader := bufio.NewReaderSize(file, replayReadBufferSize)
+	reader := getFrameReader(file)
+	defer putFrameReader(reader)
 	var offset int64
 	for {
-		record, ok, err := readFrame(reader, segment.base, offset, maxRecord)
+		record, ok, err := reader.readFrame(segment.base, offset, maxRecord)
 		if err != nil {
 			// A corrupt frame in the last (active) segment is only a
 			// torn tail if the corruption runs all the way to EOF. If a

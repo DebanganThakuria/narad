@@ -1,11 +1,13 @@
 package wal
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
+	"sync"
 )
 
 // A frame is the on-disk encoding of one record, all fields big endian:
@@ -88,12 +90,51 @@ func appendFrameWith(dst []byte, seq uint64, size int, fill func(dst []byte) []b
 	return dst, nil
 }
 
-// readFrame decodes the next frame from r. It returns ok=false without an
-// error on a clean or truncated EOF (a torn tail), and wraps validation
+// replayReadBufferSize is the read-ahead used when scanning a segment.
+// Reading through a buffer turns the three syscalls per record of the
+// unbuffered form (seek, header read, payload read) into one large read
+// per 64 KiB; the byte position is tracked arithmetically, which is
+// exactly what CursorAfter already assumes.
+const replayReadBufferSize = 64 << 10
+
+// frameReader reads frames sequentially from one segment through a
+// buffered reader. Readers are pooled: the dispatcher replays the WAL
+// every few milliseconds, and a fresh 64 KiB buffer per pass was most of
+// its garbage. The header is read into the reader's own array rather
+// than a local one, which escaped to the heap once per frame through the
+// io.Reader call.
+type frameReader struct {
+	r      *bufio.Reader
+	header [frameHeaderSize]byte
+}
+
+var frameReaderPool = sync.Pool{
+	New: func() any { return &frameReader{r: bufio.NewReaderSize(nil, replayReadBufferSize)} },
+}
+
+// getFrameReader returns a pooled frameReader reading from src. Release
+// it with putFrameReader once the scan is done.
+func getFrameReader(src io.Reader) *frameReader {
+	fr := frameReaderPool.Get().(*frameReader)
+	fr.r.Reset(src)
+	return fr
+}
+
+// putFrameReader returns fr to the pool, dropping its source so the pool
+// does not keep a closed file reachable.
+func putFrameReader(fr *frameReader) {
+	fr.r.Reset(nil)
+	frameReaderPool.Put(fr)
+}
+
+// readFrame decodes the next frame. It returns ok=false without an error
+// on a clean or truncated EOF (a torn tail), and wraps validation
 // failures in errCorruptFrame so callers can distinguish them from I/O
-// errors.
-func readFrame(r io.Reader, segmentBase uint64, offset int64, maxRecord int) (Record, bool, error) {
-	var header [frameHeaderSize]byte
+// errors. The returned payload is a fresh allocation that the reader
+// never touches again, so a caller may keep it or alias into it.
+func (fr *frameReader) readFrame(segmentBase uint64, offset int64, maxRecord int) (Record, bool, error) {
+	r := fr.r
+	header := &fr.header
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return Record{}, false, nil
