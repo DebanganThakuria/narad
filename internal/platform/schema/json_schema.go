@@ -428,9 +428,9 @@ func clientSafeCompileError(err error) error {
 // verbatim inside a JSON envelope. Numbers are decoded as json.Number,
 // so integers beyond 2^53 and exponents beyond float64 keep their
 // exact value for type, multipleOf and bound checks; the library does
-// the arithmetic in big.Rat. That costs about a fifth more than a
-// float64 decode (BenchmarkValidatePayloadDecode) and is the
-// documented contract.
+// the arithmetic in big.Rat. The decode itself is decodePayload's
+// token walk, which accepts and rejects exactly what encoding/json
+// does (BenchmarkValidatePayloadDecode compares the two).
 func (r *JSONSchema) Validate(_ context.Context, topic string, payload []byte) error {
 	r.mu.RLock()
 	version, ok := r.versions[topic]
@@ -444,11 +444,8 @@ func (r *JSONSchema) Validate(_ context.Context, topic string, payload []byte) e
 	if !utf8.Valid(payload) {
 		return errors.New("schema: invalid JSON payload: not valid UTF-8")
 	}
-	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(payload))
+	instance, err := decodePayload(payload)
 	if err != nil {
-		return fmt.Errorf("schema: invalid JSON payload: %w", err)
-	}
-	if err := checkNumberExponents(payload); err != nil {
 		return fmt.Errorf("schema: invalid JSON payload: %w", err)
 	}
 
