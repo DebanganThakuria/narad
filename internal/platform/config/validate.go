@@ -256,9 +256,8 @@ func storageValidationErrors(cfg StorageConfig) []string {
 	if cfg.SyncBytes < 0 {
 		errs = append(errs, "storage.sync_bytes must be >= 0")
 	}
-	if cfg.HighWatermarkSyncIntervalMs <= 0 {
-		errs = append(errs, "storage.high_watermark_sync_interval_ms must be > 0")
-	}
+	// storage.high_watermark_sync_interval_ms is deprecated and ignored,
+	// so any value is accepted.
 	if cfg.IngressWALSyncIntervalMs <= 0 {
 		errs = append(errs, "storage.ingress_wal_sync_interval_ms must be > 0")
 	}

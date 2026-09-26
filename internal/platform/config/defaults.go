@@ -43,6 +43,7 @@ func Default() *Config {
 			SyncBytes:                      8 << 20,
 			HighWatermarkSyncIntervalMs:    5000,
 			IngressWALSyncIntervalMs:       10,
+			IngressWALPrealloc:             false,     // opt-in; see StorageConfig.IngressWALPrealloc
 			ConsumerOffsetCommitIntervalMs: 100,       // the flush cadence it used to borrow: same crash redelivery window
 			SegmentBytes:                   64 << 20,  // 64 MiB
 			RetentionCheckIntervalMs:       60_000,    // 1 minute

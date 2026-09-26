@@ -18,6 +18,8 @@ var configurableStorageKeys = map[string]bool{
 	// The offset commit cadence trades crash redelivery against device
 	// flushes, a per-deployment choice like the others above.
 	"consumer_offset_commit_interval_ms": true,
+	// Segment preparation depends on the volume's file system.
+	"ingress_wal_prealloc": true,
 }
 
 // UnmarshalJSON keeps file-based storage configuration intentionally narrow:
@@ -42,7 +44,8 @@ func (c *StorageConfig) UnmarshalJSON(data []byte) error {
 		IdleLogEvictionMs   *int   `json:"idle_log_eviction_ms"`
 		ColdRetentionWalkMs *int   `json:"cold_retention_walk_ms"`
 
-		ConsumerOffsetCommitIntervalMs *int `json:"consumer_offset_commit_interval_ms"`
+		ConsumerOffsetCommitIntervalMs *int  `json:"consumer_offset_commit_interval_ms"`
+		IngressWALPrealloc             *bool `json:"ingress_wal_prealloc"`
 	}
 	if err := json.Unmarshal(data, &fileConfig); err != nil {
 		return err
@@ -66,6 +69,9 @@ func (c *StorageConfig) UnmarshalJSON(data []byte) error {
 	}
 	if fileConfig.ConsumerOffsetCommitIntervalMs != nil {
 		c.ConsumerOffsetCommitIntervalMs = *fileConfig.ConsumerOffsetCommitIntervalMs
+	}
+	if fileConfig.IngressWALPrealloc != nil {
+		c.IngressWALPrealloc = *fileConfig.IngressWALPrealloc
 	}
 	return nil
 }

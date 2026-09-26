@@ -51,3 +51,40 @@ func TestWP8ConsumerOffsetCommitInterval(t *testing.T) {
 		}
 	}
 }
+
+// TestWP8IngressWALPrealloc pins the segment-preparation opt-in: off
+// by default, settable from the config file, and an omitted key keeps
+// the default.
+func TestWP8IngressWALPrealloc(t *testing.T) {
+	if Default().Storage.IngressWALPrealloc {
+		t.Fatal("ingress_wal_prealloc defaults to true, want false (opt-in)")
+	}
+	c := Default().Storage
+	if err := json.Unmarshal([]byte(`{"ingress_wal_prealloc":true}`), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !c.IngressWALPrealloc {
+		t.Fatal("ingress_wal_prealloc = false after setting it true in the file")
+	}
+	if err := json.Unmarshal([]byte(`{"data_dir":"e"}`), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !c.IngressWALPrealloc {
+		t.Fatal("an omitted ingress_wal_prealloc reset the value")
+	}
+	if err := json.Unmarshal([]byte(`{"ingress_wal_prealloc":"yes"}`), &c); err == nil {
+		t.Fatal("a non-boolean ingress_wal_prealloc was accepted")
+	}
+}
+
+// TestWP8HighWatermarkSyncIntervalIsIgnored pins the deprecation: the
+// setting no longer does anything, so no value fails validation.
+func TestWP8HighWatermarkSyncIntervalIsIgnored(t *testing.T) {
+	for _, v := range []int{-1, 0, 5000} {
+		cfg := Default()
+		cfg.Storage.HighWatermarkSyncIntervalMs = v
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() with high_watermark_sync_interval_ms=%d error = %v, want nil (deprecated, ignored)", v, err)
+		}
+	}
+}
