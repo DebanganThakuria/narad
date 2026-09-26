@@ -5,6 +5,7 @@
 package clusterwire
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -94,53 +95,140 @@ func WriteStreamFrameInto(w io.Writer, buf []byte, frame StreamFrame) ([]byte, e
 	return buf, err
 }
 
+// stagedLeadBytes is how much of a big frame's payload
+// WriteStreamFrameStaged sends with the header, in the first Write. A
+// header on its own is small enough for a QUIC stream to take into its
+// send buffer at once (quic-go buffers up to one packet, 1452 bytes),
+// even when flow control lets nothing be sent. A frame that then made no
+// progress at all would look cut off after its header rather than
+// unsent, and the caller would tear down a stream whose framing is
+// intact. A first Write well past a packet either gets some of the frame
+// out or reports nothing written at its deadline.
+const stagedLeadBytes = 16 << 10
+
+// WriteStreamFrameStaged is WriteStreamFrameInto without the copy for
+// big frames. A frame of at most maxStaged bytes, header included, is
+// assembled in buf and handed to w in one Write, exactly as
+// WriteStreamFrameInto does. A larger one goes out in two: its header
+// and the start of its payload (see stagedLeadBytes) from buf, then the
+// rest of the payload in place. One more Write is noise next to such a
+// frame, while staging all of it would cost a buffer of its size and a
+// copy into it, per frame. The wire bytes are the same either way. It
+// returns buf (grown only to stage a frame or a lead) and how many bytes
+// of the frame were written, so a caller can tell a write that sent
+// nothing from one cut off part-way.
+func WriteStreamFrameStaged(w io.Writer, buf []byte, frame StreamFrame, maxStaged int) ([]byte, int, error) {
+	if len(frame.Payload) > MaxStreamFramePayloadBytes {
+		return buf, 0, fmt.Errorf("stream frame payload too large: %d bytes", len(frame.Payload))
+	}
+	if streamFrameHeaderBytes+len(frame.Payload) <= maxStaged {
+		buf = AppendStreamFrame(buf[:0], frame)
+		n, err := w.Write(buf)
+		return buf, n, err
+	}
+	// The frame is bigger than maxStaged, so the lead is shorter than
+	// the payload.
+	lead := max(min(stagedLeadBytes, maxStaged-streamFrameHeaderBytes), 0)
+	buf = appendStreamFrameHeader(buf[:0], frame)
+	buf = append(buf, frame.Payload[:lead]...)
+	n, err := w.Write(buf)
+	if err != nil {
+		return buf, n, err
+	}
+	m, err := w.Write(frame.Payload[lead:])
+	return buf, n + m, err
+}
+
 // AppendStreamFrame appends frame's wire encoding (header then payload)
 // to dst and returns the extended slice. It performs no size check; use
 // WriteStreamFrameInto for the checked path.
 func AppendStreamFrame(dst []byte, frame StreamFrame) []byte {
+	dst = appendStreamFrameHeader(dst, frame)
+	return append(dst, frame.Payload...)
+}
+
+// appendStreamFrameHeader appends frame's 20-byte header to dst.
+func appendStreamFrameHeader(dst []byte, frame StreamFrame) []byte {
 	var header [streamFrameHeaderBytes]byte
 	binary.BigEndian.PutUint32(header[0:4], streamMagic)
 	header[4] = streamVersion
 	header[5] = byte(frame.Type)
 	binary.BigEndian.PutUint64(header[8:16], frame.RequestID)
 	binary.BigEndian.PutUint32(header[16:20], uint32(len(frame.Payload)))
-	dst = append(dst, header[:]...)
-	return append(dst, frame.Payload...)
+	return append(dst, header[:]...)
 }
 
 // ReadStreamFrame reads one frame from r, rejecting payloads larger
 // than maxPayloadBytes. A maxPayloadBytes <= 0 means
-// MaxStreamFramePayloadBytes.
+// MaxStreamFramePayloadBytes. When r is a *bufio.Reader the header is
+// parsed in place in its buffer; frame readers on the hot path pass one.
 func ReadStreamFrame(r io.Reader, maxPayloadBytes int) (StreamFrame, error) {
 	if maxPayloadBytes <= 0 {
 		maxPayloadBytes = MaxStreamFramePayloadBytes
 	}
 
-	var header [streamFrameHeaderBytes]byte
-	if _, err := io.ReadFull(r, header[:]); err != nil {
+	var (
+		frame      StreamFrame
+		payloadLen int
+		err        error
+	)
+	if br, ok := r.(*bufio.Reader); ok && br.Size() >= streamFrameHeaderBytes {
+		frame, payloadLen, err = readBufferedStreamFrameHeader(br)
+	} else {
+		// A header array handed to io.ReadFull through an interface
+		// escapes, so this path allocates it; the buffered path does not.
+		var header [streamFrameHeaderBytes]byte
+		if _, err := io.ReadFull(r, header[:]); err != nil {
+			return StreamFrame{}, err
+		}
+		frame, payloadLen, err = parseStreamFrameHeader(header[:])
+	}
+	if err != nil {
 		return StreamFrame{}, err
 	}
-	if got := binary.BigEndian.Uint32(header[0:4]); got != streamMagic {
-		return StreamFrame{}, fmt.Errorf("invalid stream magic: 0x%x", got)
-	}
-	if got := header[4]; got != streamVersion {
-		return StreamFrame{}, fmt.Errorf("unsupported stream version: %d", got)
-	}
-
-	payloadLen := int(binary.BigEndian.Uint32(header[16:20]))
 	if payloadLen > maxPayloadBytes {
 		return StreamFrame{}, fmt.Errorf("stream frame payload too large: %d bytes", payloadLen)
 	}
 
-	payload := make([]byte, payloadLen)
-	if _, err := io.ReadFull(r, payload); err != nil {
+	frame.Payload = make([]byte, payloadLen)
+	if _, err := io.ReadFull(r, frame.Payload); err != nil {
 		return StreamFrame{}, err
+	}
+	return frame, nil
+}
+
+// readBufferedStreamFrameHeader reads a frame header straight out of
+// br's buffer (Peek, parse, Discard), with io.ReadFull's error semantics:
+// io.EOF when the stream ends cleanly between frames, io.ErrUnexpectedEOF
+// when it ends inside a header.
+func readBufferedStreamFrameHeader(br *bufio.Reader) (StreamFrame, int, error) {
+	header, err := br.Peek(streamFrameHeaderBytes)
+	if len(header) < streamFrameHeaderBytes {
+		if len(header) > 0 && errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
+		return StreamFrame{}, 0, err
+	}
+	frame, payloadLen, err := parseStreamFrameHeader(header)
+	if _, discardErr := br.Discard(streamFrameHeaderBytes); err == nil {
+		err = discardErr
+	}
+	return frame, payloadLen, err
+}
+
+// parseStreamFrameHeader validates a 20-byte frame header and returns the
+// frame it describes (without its payload) and the payload length.
+func parseStreamFrameHeader(header []byte) (StreamFrame, int, error) {
+	if got := binary.BigEndian.Uint32(header[0:4]); got != streamMagic {
+		return StreamFrame{}, 0, fmt.Errorf("invalid stream magic: 0x%x", got)
+	}
+	if got := header[4]; got != streamVersion {
+		return StreamFrame{}, 0, fmt.Errorf("unsupported stream version: %d", got)
 	}
 	return StreamFrame{
 		Type:      StreamFrameType(header[5]),
 		RequestID: binary.BigEndian.Uint64(header[8:16]),
-		Payload:   payload,
-	}, nil
+	}, int(binary.BigEndian.Uint32(header[16:20])), nil
 }
 
 // EncodeStreamError encodes a StreamError payload: a big-endian uint16

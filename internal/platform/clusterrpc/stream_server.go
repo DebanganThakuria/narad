@@ -1,6 +1,7 @@
 package clusterrpc
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -16,17 +17,23 @@ import (
 
 // StreamFrameHandler handles a decoded cluster-RPC request frame and
 // writes its reply via respond. It returns true if it handled the frame.
+// respond writes the reply before it returns and keeps no reference to
+// its payload, so a handler may reuse the payload's buffer afterwards
+// (for example, one it encoded the reply into with node.AppendResponse).
 type StreamFrameHandler interface {
 	HandleStreamFrame(frame clusterwire.StreamFrame, respond func(clusterwire.StreamFrame)) bool
 }
 
 // StreamRequestHandler is the context-aware form of StreamFrameHandler.
 // The server derives one context per request frame and cancels it when
-// the client sends a StreamFrameCancel for that request or when the
-// stream ends, so a handler parked on the client's behalf (a forwarded
-// long-poll) stops as soon as the client is gone. The context carries
-// the serving stream's identity (StreamIDFromContext). A handler that
-// implements it is preferred over HandleStreamFrame.
+// the client sends a StreamFrameCancel for that request, when the stream
+// ends, or when the handler responds, so a handler parked on the
+// client's behalf (a forwarded long-poll) stops as soon as the client is
+// gone. The context carries the serving stream's identity
+// (StreamIDFromContext). A handler that implements it is preferred over
+// HandleStreamFrame. respond behaves as described on StreamFrameHandler;
+// it finds the request by the reply's RequestID, which must be the
+// request's (the client correlates the reply by it too).
 type StreamRequestHandler interface {
 	HandleStreamRequest(ctx context.Context, frame clusterwire.StreamFrame, respond func(clusterwire.StreamFrame)) bool
 }
@@ -61,13 +68,18 @@ type streamServerConn struct {
 	writeBuf []byte
 
 	// streamID identifies this stream in request contexts and cancel
-	// notifications; inflight maps a request ID to its context's cancel
-	// func while its handler is running.
-	streamID   uint64
-	inflightMu sync.Mutex
-	inflight   map[uint64]context.CancelFunc
-	baseCtx    context.Context
-	cancelAll  context.CancelFunc
+	// notifications (streamIDValue is it boxed once, for Value); inflight
+	// maps a request ID to its context while its handler is running.
+	streamID      uint64
+	streamIDValue any
+	inflightMu    sync.Mutex
+	inflight      map[uint64]*requestContext
+
+	// respondRequest and respondFrame are the respond callbacks handed to
+	// StreamRequestHandler and StreamFrameHandler, made once per stream
+	// rather than once per request.
+	respondRequest func(clusterwire.StreamFrame)
+	respondFrame   func(clusterwire.StreamFrame)
 }
 
 // ServeStreamConn serves cluster-RPC frames on a single UNAUTHENTICATED
@@ -83,25 +95,31 @@ func ServeStreamConn(conn streamConn, reader io.Reader, logger *slog.Logger, han
 // and sent on this stream's connection (derived once per connection,
 // not once per stream); nil disables auth.
 func serveStreamConn(conn streamConn, reader io.Reader, auth *connAuth, logger *slog.Logger, handler StreamFrameHandler) {
+	c := newStreamServerConn(conn, reader, auth, logger, handler)
+	// When the stream ends every request still running on it is
+	// cancelled: the client can no longer receive their replies.
+	defer c.cancelInflight()
+	c.serve()
+}
+
+func newStreamServerConn(conn streamConn, reader io.Reader, auth *connAuth, logger *slog.Logger, handler StreamFrameHandler) *streamServerConn {
 	if reader == nil {
 		reader = conn
 	}
-	baseCtx, cancelAll := context.WithCancel(context.WithValue(context.Background(), streamIDKey{}, nextStreamID.Add(1)))
+	streamID := nextStreamID.Add(1)
 	c := &streamServerConn{
-		conn:      conn,
-		reader:    reader,
-		auth:      auth,
-		logger:    logger,
-		handler:   handler,
-		streamID:  StreamIDFromContext(baseCtx),
-		inflight:  make(map[uint64]context.CancelFunc),
-		baseCtx:   baseCtx,
-		cancelAll: cancelAll,
+		conn:          conn,
+		reader:        reader,
+		auth:          auth,
+		logger:        logger,
+		handler:       handler,
+		streamID:      streamID,
+		streamIDValue: streamID,
+		inflight:      make(map[uint64]*requestContext),
 	}
-	// When the stream ends every request still running on it is
-	// cancelled: the client can no longer receive their replies.
-	defer cancelAll()
-	c.serve()
+	c.respondRequest = c.finishRequest
+	c.respondFrame = c.respond
+	return c
 }
 
 func firstStreamFrameHandler(handlers []StreamFrameHandler) StreamFrameHandler {
@@ -119,6 +137,14 @@ func (c *streamServerConn) serve() {
 		// failure now rather than at connection teardown.
 		abortStream(c.conn)
 		return
+	}
+	// Past the handshake, read through a buffer: a run of small frames
+	// costs one stream read instead of two per frame, and the header is
+	// parsed in place rather than in a per-frame heap array (see
+	// clusterwire.ReadStreamFrame). The handshake reads unbuffered, so a
+	// peer that never authenticates is not given a buffer.
+	if _, ok := c.reader.(*bufio.Reader); !ok {
+		c.reader = bufio.NewReader(c.reader)
 	}
 	for {
 		frame, err := clusterwire.ReadStreamFrame(c.reader, clusterwire.MaxStreamFramePayloadBytes)
@@ -198,42 +224,46 @@ func (c *streamServerConn) handleFrame(frame clusterwire.StreamFrame) {
 		}
 	default:
 		if h, ok := c.handler.(StreamRequestHandler); ok {
-			ctx, respond := c.beginRequest(frame.RequestID)
-			if h.HandleStreamRequest(ctx, frame, respond) {
+			if h.HandleStreamRequest(c.beginRequest(frame.RequestID), frame, c.respondRequest) {
 				return
 			}
 			c.endRequest(frame.RequestID)
-		} else if c.handler != nil && c.handler.HandleStreamFrame(frame, c.respond) {
+		} else if c.handler != nil && c.handler.HandleStreamFrame(frame, c.respondFrame) {
 			return
 		}
 		c.writeError(frame.RequestID, fmt.Sprintf("unsupported stream frame type %d", frame.Type))
 	}
 }
 
-// beginRequest derives the request's context and returns it with a
-// respond func that retires the context entry before writing the reply.
-func (c *streamServerConn) beginRequest(requestID uint64) (context.Context, func(clusterwire.StreamFrame)) {
-	ctx, cancel := context.WithCancel(c.baseCtx)
+// beginRequest creates the request's context and registers it so a
+// client cancel, the handler's reply or the stream's end can cancel it.
+func (c *streamServerConn) beginRequest(requestID uint64) *requestContext {
+	r := &requestContext{stream: c}
 	c.inflightMu.Lock()
-	if prev := c.inflight[requestID]; prev != nil {
-		prev() // a reused request ID: the earlier one can only be stale
-	}
-	c.inflight[requestID] = cancel
+	prev := c.inflight[requestID]
+	c.inflight[requestID] = r
 	c.inflightMu.Unlock()
-	return ctx, func(frame clusterwire.StreamFrame) {
-		c.endRequest(requestID)
-		c.writeFrame(frame)
+	if prev != nil {
+		prev.cancel() // a reused request ID: the earlier one can only be stale
 	}
+	return r
 }
 
-// endRequest releases the request's context entry (and its resources).
+// finishRequest is the respond callback of a StreamRequestHandler: it
+// retires the request's context before writing the reply.
+func (c *streamServerConn) finishRequest(frame clusterwire.StreamFrame) {
+	c.endRequest(frame.RequestID)
+	c.writeFrame(frame)
+}
+
+// endRequest releases the request's context entry and cancels it.
 func (c *streamServerConn) endRequest(requestID uint64) {
 	c.inflightMu.Lock()
-	cancel := c.inflight[requestID]
+	r := c.inflight[requestID]
 	delete(c.inflight, requestID)
 	c.inflightMu.Unlock()
-	if cancel != nil {
-		cancel()
+	if r != nil {
+		r.cancel()
 	}
 }
 
@@ -243,10 +273,90 @@ func (c *streamServerConn) endRequest(requestID uint64) {
 // client, which is harmless.
 func (c *streamServerConn) cancelRequest(requestID uint64) {
 	c.inflightMu.Lock()
-	cancel := c.inflight[requestID]
+	r := c.inflight[requestID]
 	c.inflightMu.Unlock()
-	if cancel != nil {
-		cancel()
+	if r != nil {
+		r.cancel()
+	}
+}
+
+// cancelInflight cancels every request still running on the stream,
+// once the stream has ended (serve has returned, so none can begin).
+func (c *streamServerConn) cancelInflight() {
+	c.inflightMu.Lock()
+	requests := make([]*requestContext, 0, len(c.inflight))
+	for _, r := range c.inflight {
+		requests = append(requests, r)
+	}
+	c.inflightMu.Unlock()
+	for _, r := range requests {
+		r.cancel()
+	}
+}
+
+// requestContext is the context of one request frame (see
+// StreamRequestHandler). It costs one small allocation per request:
+// until a handler asks for Done, directly or by deriving a context from
+// it, cancellation is only a recorded error. Acks and commits never ask;
+// a handler that parks (a long-poll consume, a wait for a handler slot)
+// does, and gets a context.WithCancel context made on the spot, which
+// also keeps derived contexts on the context package's own propagation
+// (no goroutine per child).
+type requestContext struct {
+	stream *streamServerConn
+
+	mu    sync.Mutex
+	err   error              // set once, by cancel
+	inner context.Context    // made by the first Done; cancelled with err set
+	stop  context.CancelFunc // cancels inner
+}
+
+func (r *requestContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+
+func (r *requestContext) Done() <-chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.inner == nil {
+		r.inner, r.stop = context.WithCancel(context.Background())
+		if r.err != nil {
+			r.stop()
+		}
+	}
+	return r.inner.Done()
+}
+
+func (r *requestContext) Err() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.err
+}
+
+func (r *requestContext) Value(key any) any {
+	if _, ok := key.(streamIDKey); ok {
+		return r.stream.streamIDValue
+	}
+	r.mu.Lock()
+	inner := r.inner
+	r.mu.Unlock()
+	if inner != nil {
+		// Only the context package's own key resolves here: it is how a
+		// derived context finds inner to register with.
+		return inner.Value(key)
+	}
+	return nil
+}
+
+// cancel ends the request with context.Canceled. Err is set and Done
+// closed under one lock hold, as the Context contract requires.
+func (r *requestContext) cancel() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return
+	}
+	r.err = context.Canceled
+	if r.stop != nil {
+		r.stop()
 	}
 }
 
@@ -286,7 +396,7 @@ func (c *streamServerConn) writeFrame(frame clusterwire.StreamFrame) bool {
 	// each request frame spawns a reply goroutine, so a stalled peer must
 	// not pile them up on writeMu/flow control until the idle timeout.
 	_ = c.conn.SetWriteDeadline(time.Now().Add(replyWriteTimeout(len(frame.Payload))))
-	buf, err := clusterwire.WriteStreamFrameInto(c.conn, c.writeBuf, frame)
+	buf, _, err := clusterwire.WriteStreamFrameStaged(c.conn, c.writeBuf, frame, maxRetainedWriteBuffer)
 	_ = c.conn.SetWriteDeadline(time.Time{})
 	if cap(buf) <= maxRetainedWriteBuffer {
 		c.writeBuf = buf[:0]

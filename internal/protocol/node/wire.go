@@ -100,21 +100,19 @@ type reader struct {
 }
 
 // opReader starts decoding a request payload, verifying that its
-// leading operation byte matches expected.
-func opReader(payload []byte, expected Operation) (*reader, error) {
-	r := newReader(payload)
+// leading operation byte matches expected. The reader is returned by
+// value so it lives on the decoder's stack: every inbound node RPC is
+// decoded through here, and a pointer escaped to the heap on each one.
+func opReader(payload []byte, expected Operation) (reader, error) {
+	r := reader{payload: payload}
 	op, err := r.op()
 	if err != nil {
-		return nil, err
+		return reader{}, err
 	}
 	if op != expected {
-		return nil, fmt.Errorf("unexpected operation %d, want %d", op, expected)
+		return reader{}, fmt.Errorf("unexpected operation %d, want %d", op, expected)
 	}
 	return r, nil
-}
-
-func newReader(payload []byte) *reader {
-	return &reader{payload: payload}
 }
 
 func (r *reader) op() (Operation, error) {

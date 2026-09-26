@@ -68,7 +68,7 @@ func DecodeCommitProduceRequest(payload []byte) (CommitProduceRequest, error) {
 	if err != nil {
 		return CommitProduceRequest{}, err
 	}
-	record, err := readCommitProduce(r)
+	record, err := readCommitProduce(&r)
 	if err != nil {
 		return CommitProduceRequest{}, err
 	}
@@ -120,7 +120,7 @@ func DecodeCommitProduceBatchRequest(payload []byte) (CommitProduceBatchRequest,
 	// frame reserve over 1 GiB of record headers.
 	records := make([]CommitProduceRequest, 0, min(int(count), r.remaining()/minCommitProduceBytes))
 	for range int(count) {
-		record, err := readCommitProduce(r)
+		record, err := readCommitProduce(&r)
 		if err != nil {
 			return CommitProduceBatchRequest{}, err
 		}
