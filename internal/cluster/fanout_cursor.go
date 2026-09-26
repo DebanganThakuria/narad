@@ -540,11 +540,12 @@ func (r *FanoutRunner) resolveOwner(topicName string, partitionIdx int) (bool, s
 }
 
 // persistCursor durably records the cursor position (commit-before-
-// advance: call only after the records below next are committed).
-// Returns false when the cursor must stop — its parent partition
-// directory is gone (topic deleted) or the write failed.
+// advance: call only after the records below next are committed), in
+// place once the cursor file exists. Returns false when the cursor must
+// stop: its parent partition directory is gone (topic deleted) or the
+// write failed.
 func (r *FanoutRunner) persistCursor(key fanoutCursorKey, partitionDir string, next int64) bool {
-	err := storage.WriteFanoutCursorIfPartitionDirExists(partitionDir, key.child,
+	err := storage.AdvanceFanoutCursor(partitionDir, key.child,
 		storage.FanoutCursor{Epoch: key.epoch, NextOffset: next})
 	if err == nil {
 		return true
