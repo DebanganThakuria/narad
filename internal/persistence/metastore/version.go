@@ -56,3 +56,20 @@ func (s *Store) RoutingMembersVersion() uint64 {
 	}
 	return s.fsm.versions.routingMembersVersion()
 }
+
+// LatestDomainVersion returns the newest version any of the per-domain
+// versions above has taken, for any key: it advances whenever a topic,
+// assignment, schema, users or routing-members version does, including
+// after a snapshot restore. Unlike MetadataVersion it holds still across
+// applies that change none of them (member heartbeats, which every
+// member sends every few seconds, and drain flags). Versions advance
+// only after the change is committed to the local replica, so a reader
+// that takes this value before reading the replica and sees it again
+// later knows none of those domains changed in between; background
+// reconcilers use that to skip passes over unchanged metadata.
+func (s *Store) LatestDomainVersion() uint64 {
+	if s == nil || s.fsm == nil {
+		return 0
+	}
+	return s.fsm.versions.latest()
+}

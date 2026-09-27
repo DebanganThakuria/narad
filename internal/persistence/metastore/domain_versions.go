@@ -215,6 +215,13 @@ func (v *metadataDomainVersions) usersVersion() uint64 {
 	return v.users.Load()
 }
 
+// latest returns the newest version handed out to any domain. Every
+// bump, retire, prune and bumpAll draws from next, so it moves whenever
+// any domain's version does and at no other time.
+func (v *metadataDomainVersions) latest() uint64 {
+	return v.next.Load()
+}
+
 // retireTopic advances a deleted topic's topic, assignment and schema
 // versions, exactly as bumping all three would, and marks its cells as
 // tombstones so that a churn of uniquely named topics does not keep a

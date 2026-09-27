@@ -13,7 +13,10 @@ package cluster
 // The runner polls the local metastore replica and diffs the desired
 // cursor set against the running one: cursors spawn on attach (and on
 // parent partition growth) and stop on detach, topic delete, or
-// ownership change. A cursor key includes the link's attach epoch, so
+// ownership change. A poll whose inputs cannot have changed is skipped
+// (see reconcileGate): the diff decodes every topic record, and a large
+// cluster with no links would otherwise pay that on every node, every
+// second, for nothing. A cursor key includes the link's attach epoch, so
 // a detach followed by a re-attach always starts a fresh cursor at the
 // recorded attach point, never resuming (and replaying) the dead one.
 //
@@ -24,9 +27,11 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
@@ -52,13 +57,77 @@ const (
 	// sleep immediately regardless.
 	defaultFanoutDueWakeCap = 30 * time.Second
 
-	// fanoutCursorFileSweepEvery is how many reconcile passes elapse
-	// between sweeps for orphaned cursor files (links that dissolved
-	// while this node was down). The sweep walks partition directories,
-	// so it runs at a fraction of the reconcile cadence; live-link
-	// bookkeeping doesn't depend on it.
+	// fanoutCursorFileSweepEvery is how many caught-up reconcile ticks
+	// elapse between sweeps for orphaned cursor files (links that
+	// dissolved while this node was down). The sweep walks partition
+	// directories, so it runs at a fraction of the reconcile cadence;
+	// live-link bookkeeping doesn't depend on it. A tick whose pass was
+	// skipped counts, so the cadence does not depend on metadata churn,
+	// and a sweep tick always runs a full pass: the sweep works from the
+	// topic list the pass reads.
 	fanoutCursorFileSweepEvery = 30
+
+	// reconcileForcedPassEvery bounds how long a reconciler goes without
+	// a full pass while reconcileGate skips its ticks: a safety net for
+	// any input that could reach the desired set without moving the
+	// store's domain versions.
+	reconcileForcedPassEvery = 30 * time.Second
 )
+
+// reconcileGate lets a reconciler (FanoutRunner, MoveRunner) skip a
+// tick's pass when the pass could only reproduce the last one. A pass
+// derives its desired set from topics and assignments in the local
+// replica, so it can be skipped while the store's LatestDomainVersion
+// holds still, provided the last pass settled everything it found. The
+// global MetadataVersion is no use here: member heartbeats advance it
+// every few seconds.
+//
+// A pass runs regardless of the version when:
+//   - the last pass failed, or left work for a later pass (a cancelled
+//     worker still draining, ownership it could not read);
+//   - a worker exited since the last pass began (workers exit on their
+//     own after some failures, and only a pass respawns them);
+//   - the replica was not caught up on an earlier tick;
+//   - the caller forces it (the fan-out orphan sweep's ticks), or
+//     reconcileForcedPassEvery has passed since the last full pass.
+//
+// Only the reconcile loop touches it, except exited, which workers set.
+type reconcileGate struct {
+	version  uint64    // LatestDomainVersion read before the last pass listed anything
+	settled  bool      // the last pass completed and left nothing for a later one
+	lastPass time.Time // when the last full pass started
+	exited   atomic.Bool
+}
+
+// skip reports whether this tick's pass can be skipped. version must be
+// read before the pass reads the replica: versions advance only after a
+// change is committed, so a pass that listed after reading version saw
+// every change up to it. When skip returns false a pass is starting,
+// and the gate stays unsettled until finish records its outcome.
+func (g *reconcileGate) skip(version uint64, now time.Time, force bool) bool {
+	exited := g.exited.Swap(false)
+	if !force && !exited && g.settled && version == g.version && now.Sub(g.lastPass) < reconcileForcedPassEvery {
+		return true
+	}
+	g.settled = false
+	return false
+}
+
+// finish records a completed pass that started at now after reading
+// version. pending means it left something for a later pass.
+func (g *reconcileGate) finish(version uint64, now time.Time, pending bool) {
+	g.version = version
+	g.lastPass = now
+	g.settled = !pending
+}
+
+// invalidate makes the next tick run a full pass.
+func (g *reconcileGate) invalidate() { g.settled = false }
+
+// workerExited records that a worker stopped. Call it after the
+// worker's done channel is closed, so the pass it triggers finds the
+// worker finished.
+func (g *reconcileGate) workerExited() { g.exited.Store(true) }
 
 // FanoutConfig holds the cursor engine tunables. Zero values use the
 // defaults above. Batch size trades latency for throughput: bigger
@@ -139,6 +208,7 @@ type FanoutRunner struct {
 
 	reconcilePasses int
 	caughtUpSkips   int
+	gate            reconcileGate
 }
 
 // NewFanoutRunner wires a runner and registers it on store as the
@@ -216,9 +286,17 @@ func (r *FanoutRunner) Reconcile(ctx context.Context) {
 		if r.caughtUpSkips == 1 || r.caughtUpSkips%30 == 0 {
 			r.logger.Warn("fanout: metastore replica not caught up with leader; skipping reconcile", "consecutive_skips", r.caughtUpSkips)
 		}
+		r.gate.invalidate()
 		return
 	}
 	r.caughtUpSkips = 0
+	version := r.store.LatestDomainVersion()
+	now := time.Now()
+	sweep := r.reconcilePasses%fanoutCursorFileSweepEvery == 0
+	if r.gate.skip(version, now, sweep) {
+		r.reconcilePasses++
+		return
+	}
 	topics, _, err := r.store.ListTopics(ctx, metastore.ListOptions{})
 	if err != nil {
 		r.logger.Error("fanout: list topics", "err", err)
@@ -229,6 +307,9 @@ func (r *FanoutRunner) Reconcile(ctx context.Context) {
 		byName[t.Name] = t
 	}
 
+	// pending: this pass left something for a later one, which must run
+	// even if no metadata changes.
+	pending := false
 	desired := map[fanoutCursorKey]struct{}{}
 	for _, t := range topics {
 		if !t.IsChild() || t.Parent == "" {
@@ -239,7 +320,11 @@ func (r *FanoutRunner) Reconcile(ctx context.Context) {
 			continue
 		}
 		for p := range parent.Partitions {
-			if !r.ownsPartition(parent.Name, p) {
+			owned, err := r.ownsPartition(parent.Name, p)
+			if err != nil {
+				pending = true // ownership unknown; decide on a later pass
+			}
+			if !owned {
 				continue
 			}
 			desired[fanoutCursorKey{
@@ -292,16 +377,21 @@ func (r *FanoutRunner) Reconcile(ctx context.Context) {
 		r.wg.Add(1)
 		go func(key fanoutCursorKey) {
 			defer r.wg.Done()
+			defer r.gate.workerExited()
 			defer close(h.done)
 			r.runCursor(cursorCtx, key)
 		}(key)
 	}
+	// A draining cursor is reaped (and a spawn it blocked is made) only
+	// by a later pass.
+	pending = pending || len(draining) > 0
 	r.mu.Unlock()
 
 	r.reconcilePasses++
-	if r.reconcilePasses%fanoutCursorFileSweepEvery == 1 {
+	if sweep {
 		r.sweepOrphanCursorFiles(ctx, byName)
 	}
+	r.gate.finish(version, now, pending)
 }
 
 // cleanUpStoppedCursor removes the offset file and metric series of a
@@ -350,7 +440,7 @@ func (r *FanoutRunner) sweepOrphanCursorFiles(ctx context.Context, byName map[st
 	}
 	for _, t := range byName {
 		for p := range t.Partitions {
-			if !r.ownsPartition(t.Name, p) {
+			if owned, _ := r.ownsPartition(t.Name, p); !owned {
 				continue
 			}
 			dir := storage.TopicPartitionDir(r.dataDir, t.Name, p)
@@ -409,13 +499,23 @@ func fanoutCursorFileBusyAny(cursors map[fanoutCursorKey]*fanoutCursorHandle, pa
 }
 
 // ownsPartition reports whether this node owns the partition. An empty
-// selfID (no cluster identity: tests, embedded use) owns everything.
-func (r *FanoutRunner) ownsPartition(topicName string, partitionIdx int) bool {
+// selfID (no cluster identity: tests, embedded use) owns everything. An
+// unassigned partition is nobody's; any other read failure leaves
+// ownership unknown and is returned alongside false, so the caller can
+// decide again later (assigning a partition moves the domain versions a
+// skipped pass waits on; the replica becoming readable does not).
+func (r *FanoutRunner) ownsPartition(topicName string, partitionIdx int) (bool, error) {
 	if r.selfID == "" {
-		return true
+		return true, nil
 	}
 	a, err := r.store.GetAssignment(topicName, partitionIdx)
-	return err == nil && a.OwnerID == r.selfID
+	if errors.Is(err, metastore.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return a.OwnerID == r.selfID, nil
 }
 
 func fanoutPartitionLabel(p int) string { return strconv.Itoa(p) }
