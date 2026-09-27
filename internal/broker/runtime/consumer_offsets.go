@@ -5,12 +5,32 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
 const defaultConsumerOffsetCommitInterval = 100 * time.Millisecond
+
+// committerFlushWorkers bounds how many partitions one flush writes at
+// once. Each dirty partition costs a data sync of its own file; one
+// after another, those kept a flush of a few dozen partitions busy for
+// most of its interval. The files are independent, so their syncs can
+// overlap, and the bound keeps a burst from flooding the device queue
+// that produce's segment and high-watermark syncs share.
+//
+// Overlap only compresses the syncs a tick owes into a shorter burst;
+// it must not add syncs. Once the committer cannot keep up (the writes
+// of one flush, added up, took longer than the interval), a faster
+// flush would only come round sooner and sync every partition more
+// often, taking device time from produce: measured on macOS with 64
+// dirty partitions, a produce commit took 2.3 times as long beside an
+// 8-way committer that kept flushing back to back. So a flush whose
+// writes have added up to the interval finishes one partition at a
+// time, and the flush after it starts that way, as a serial committer
+// would.
+const committerFlushWorkers = 8
 
 type offsetCommitKey struct {
 	topic     string
@@ -71,6 +91,11 @@ type ConsumerOffsetCommitter struct {
 	offsetFile map[offsetCommitKey]int64
 	lastAhead  map[offsetCommitKey]aheadWritten
 	ahead      AheadSource
+
+	// saturated is set by a flush whose writes, added up, took longer
+	// than the interval, and makes the next one write serially (see
+	// committerFlushWorkers). Only the goroutine flushing touches it.
+	saturated bool
 
 	stop chan struct{}
 	done chan struct{}
@@ -166,27 +191,97 @@ func (c *ConsumerOffsetCommitter) run() {
 	}
 }
 
-// flush drains the pending map and writes each dirty partition's files.
-// A purged partition directory is skipped silently (the topic is gone);
-// any other failure re-queues the partition for the next flush so a
-// transient error can't lose the recovery seed.
+// flush drains the pending map and writes each dirty partition's files,
+// up to committerFlushWorkers partitions at once while the committer
+// keeps up (see committerFlushWorkers). A purged partition directory is
+// skipped silently (the topic is gone); any other failure re-queues the
+// partition for the next flush so a transient error can't lose the
+// recovery seed.
 func (c *ConsumerOffsetCommitter) flush() error {
 	commits, ahead := c.drain()
-	var firstErr error
-	for _, commit := range commits {
+	if len(commits) == 0 {
+		return nil
+	}
+	workers := committerFlushWorkers
+	if c.saturated {
+		workers = 1
+	}
+	var errs firstError
+	var busy atomic.Int64
+	// Overlapping writes wait on each other, so their sum overstates
+	// what a serial flush would have taken: the check errs toward
+	// writing serially.
+	overran := func() bool { return time.Duration(busy.Load()) > c.interval }
+	eachPartition(commits, workers, overran, func(commit offsetCommit) {
+		start := time.Now()
 		partitionDir := storage.TopicPartitionDir(c.dataDir, commit.key.topic, commit.key.partition)
-		if err := c.persist(partitionDir, commit, ahead); err != nil {
+		err := c.persist(partitionDir, commit, ahead)
+		busy.Add(int64(time.Since(start)))
+		if err != nil {
 			if errors.Is(err, storage.ErrPartitionDirMissing) {
 				c.Forget(commit.key.topic, commit.key.partition)
-				continue
+				return
 			}
-			if firstErr == nil {
-				firstErr = fmt.Errorf("persist consumer state %s/%d: %w", commit.key.topic, commit.key.partition, err)
-			}
+			errs.note(fmt.Errorf("persist consumer state %s/%d: %w", commit.key.topic, commit.key.partition, err))
 			c.Commit(commit.key.topic, commit.key.partition, commit.offset)
 		}
+	})
+	c.saturated = overran()
+	return errs.get()
+}
+
+// eachPartition calls fn for every commit, on up to workers goroutines,
+// and returns once every call has. Once narrow (when not nil) reports
+// true, the goroutines but one stop taking commits, so the rest go one
+// at a time. A drain holds each partition once, so two writes of one
+// partition never run together, and nothing of the next drain starts
+// before all of this one finished, so a later frontier is never
+// overwritten by an earlier one.
+func eachPartition(commits []offsetCommit, workers int, narrow func() bool, fn func(offsetCommit)) {
+	workers = min(len(commits), workers)
+	if workers <= 1 {
+		for _, commit := range commits {
+			fn(commit)
+		}
+		return
 	}
-	return firstErr
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			for {
+				if w > 0 && narrow != nil && narrow() {
+					return
+				}
+				i := next.Add(1) - 1
+				if i >= int64(len(commits)) {
+					return
+				}
+				fn(commits[i])
+			}
+		})
+	}
+	wg.Wait()
+}
+
+// firstError keeps the first error its concurrent callers note.
+type firstError struct {
+	mu  sync.Mutex
+	err error
+}
+
+func (e *firstError) note(err error) {
+	e.mu.Lock()
+	if e.err == nil {
+		e.err = err
+	}
+	e.mu.Unlock()
+}
+
+func (e *firstError) get() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.err
 }
 
 // persist makes one dirty partition durable, normally with a single
@@ -244,24 +339,22 @@ func (c *ConsumerOffsetCommitter) levelOffsetFiles() error {
 		}
 	}
 	c.mu.Unlock()
-	var firstErr error
-	for _, commit := range behind {
+	var errs firstError
+	eachPartition(behind, committerFlushWorkers, nil, func(commit offsetCommit) {
 		partitionDir := storage.TopicPartitionDir(c.dataDir, commit.key.topic, commit.key.partition)
 		if err := storage.WriteConsumerOffsetIfPartitionDirExists(partitionDir, commit.offset); err != nil {
 			if errors.Is(err, storage.ErrPartitionDirMissing) {
 				c.Forget(commit.key.topic, commit.key.partition)
-				continue
+				return
 			}
-			if firstErr == nil {
-				firstErr = fmt.Errorf("level consumer offset %s/%d: %w", commit.key.topic, commit.key.partition, err)
-			}
-			continue
+			errs.note(fmt.Errorf("level consumer offset %s/%d: %w", commit.key.topic, commit.key.partition, err))
+			return
 		}
 		c.mu.Lock()
 		c.offsetFile[commit.key] = commit.offset
 		c.mu.Unlock()
-	}
-	return firstErr
+	})
+	return errs.get()
 }
 
 // writeAhead persists the acked-ahead set unless its version is the one
