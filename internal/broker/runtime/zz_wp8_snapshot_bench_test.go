@@ -16,13 +16,15 @@ import (
 // BenchmarkWP8Snapshot times one metrics snapshot of a node owning 64
 // partitions. open: every log open with a consumer shard (the busy
 // case, polled every 5s). closed: every log idle-evicted with a
-// backlog and no shard, the case the poller used to skip. closed-reread
-// drops the cached readings before every snapshot, the cost paid once
-// per coldRefresh.
+// backlog and no shard, the case the poller used to skip. closed-shard:
+// evicted while a consumer shard holds a lease, so the frontier and
+// sizes come from the shard. closed-reread drops the cached readings
+// before every snapshot, the cost paid once per coldRefresh.
 func BenchmarkWP8Snapshot(b *testing.B) {
 	const parts = 64
-	for _, mode := range []string{"open", "closed", "closed-reread"} {
+	for _, mode := range []string{"open", "closed", "closed-shard", "closed-reread"} {
 		name, closed, reread := mode, mode != "open", mode == "closed-reread"
+		shard := mode == "open" || mode == "closed-shard"
 		b.Run(fmt.Sprintf("%s/parts=%d", name, parts), func(b *testing.B) {
 			dataDir := b.TempDir()
 			ms := newRuntimeFakeMetastore()
@@ -44,7 +46,7 @@ func BenchmarkWP8Snapshot(b *testing.B) {
 				if err := l.AdvanceHighWatermark(10); err != nil {
 					b.Fatal(err)
 				}
-				if !closed {
+				if shard {
 					if _, err := offsets.ReserveNext(ctx, "t", p, time.Minute, 10); err != nil {
 						b.Fatal(err)
 					}

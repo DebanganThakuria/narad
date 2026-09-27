@@ -143,15 +143,23 @@ func TestWP8ShardlessPartitionReportsPersistedFrontier(t *testing.T) {
 }
 
 // TestWP8ClosedPartitionMatchesTheLiveSnapshot: what the files say
-// about a closed partition is what the open log said.
+// about a closed partition is what the open log said, and the shard's
+// leases and out-of-order acks, which outlive the eviction, still
+// show: a partition stuck at its acked-ahead cap must not read 0 once
+// its log closes.
 func TestWP8ClosedPartitionMatchesTheLiveSnapshot(t *testing.T) {
 	env := newWP8SnapshotEnv(t, 100)
 	ctx := context.Background()
-	// A consumer took the first 30 and acked them in order.
-	for range 30 {
-		r, err := env.offsets.ReserveNext(ctx, "billing", 0, time.Minute, 100)
-		if err != nil || !r.Reserved {
-			t.Fatalf("reserve: %+v %v", r, err)
+	// A consumer took the first 30 and acked them in order, then took
+	// 30 to 34 and acked only 31 to 33: 30 and 34 stay leased and the
+	// three acks wait ahead of 30.
+	for i := range 35 {
+		r, err := env.offsets.ReserveNext(ctx, "billing", 0, time.Hour, 100)
+		if err != nil || !r.Reserved || r.Offset != int64(i) {
+			t.Fatalf("reserve %d: %+v %v", i, r, err)
+		}
+		if i == 30 || i == 34 {
+			continue
 		}
 		if err := env.offsets.CommitHandle("billing", 0, r.Offset, r.Nonce); err != nil {
 			t.Fatal(err)
@@ -172,6 +180,9 @@ func TestWP8ClosedPartitionMatchesTheLiveSnapshot(t *testing.T) {
 	}
 	if cold.CommittedOffset != 30 || cold.HighWatermark != 100 || cold.SegmentCount != 1 || cold.SizeBytes == 0 {
 		t.Fatalf("closed snapshot %+v, want next 30 (shard), hwm 100, one non-empty segment", cold)
+	}
+	if cold.InFlightSize != 2 || cold.AckedAheadSize != 3 {
+		t.Fatalf("closed snapshot in-flight %d, acked-ahead %d, want the shard's 2 and 3", cold.InFlightSize, cold.AckedAheadSize)
 	}
 }
 

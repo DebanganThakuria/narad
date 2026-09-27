@@ -195,7 +195,10 @@ func (s *Snapshotter) ownedPartitions(topicName string, partitions int) func(int
 //
 // The frontier is the consumer shard's when there is one, else the
 // persisted one; a shardless partition used to report 0, which counted
-// its whole log as lag after every restart.
+// its whole log as lag after every restart. The in-flight and
+// acked-ahead sizes are always the shard's (0 without one): idle
+// eviction closes the log but keeps the shard, and its leases and
+// out-of-order acks are what shows a stalled consumer.
 func (s *Snapshotter) partitionSnapshot(topicName, topicID string, idx int, now time.Time) (metrics.PartitionSnapshot, bool) {
 	next, inFlight, ackedAhead, hasShard := s.offsets.Reservable(topicName, idx)
 	// Peek, never Get: a metrics poll must not lazily open (and mkdir) a
@@ -222,7 +225,7 @@ func (s *Snapshotter) partitionSnapshot(topicName, topicID string, idx int, now 
 	if open {
 		return liveSnapshot(log, idx, next, inFlight, ackedAhead), true
 	}
-	if ps, ok := e.snapshot(topicID, idx, next, now); ok {
+	if ps, ok := e.snapshot(topicID, idx, next, inFlight, ackedAhead, now); ok {
 		return ps, true
 	}
 	// The log may have opened since the Peek (its first advance empties
@@ -277,9 +280,9 @@ func (e *coldPartition) persistedNext(now time.Time) int64 {
 }
 
 // snapshot builds a closed partition's snapshot from its files, read
-// at most once per coldRefresh. ok=false when there is no persisted
-// log to report.
-func (e *coldPartition) snapshot(topicID string, idx int, next int64, now time.Time) (metrics.PartitionSnapshot, bool) {
+// at most once per coldRefresh, with the given frontier and shard
+// sizes. ok=false when there is no persisted log to report.
+func (e *coldPartition) snapshot(topicID string, idx int, next int64, inFlight, ackedAhead int, now time.Time) (metrics.PartitionSnapshot, bool) {
 	if e.logAt.IsZero() || now.Sub(e.logAt) >= coldRefresh {
 		e.load(topicID)
 		e.logAt = now
@@ -299,6 +302,8 @@ func (e *coldPartition) snapshot(topicID string, idx int, next int64, now time.T
 		SegmentCount:    len(e.segs),
 		SizeBytes:       e.sizeBytes,
 		CommittedOffset: next,
+		InFlightSize:    inFlight,
+		AckedAheadSize:  ackedAhead,
 	}
 	if next < logStart {
 		ps.Dropped = logStart - next
