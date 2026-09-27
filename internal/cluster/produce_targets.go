@@ -81,6 +81,16 @@ func (d *ProduceDispatcher) dispatchTargetsForTopic(topicName string) (cachedPro
 		if err != nil {
 			return cachedProduceDispatchTargets{}, fmt.Errorf("lookup assignment: %w", err)
 		}
+		if len(assignments) == 0 {
+			// The topic is deleted, or new and not assigned yet. Drop
+			// the entry rather than cache an empty table (as
+			// route_cache.go does): the cache would otherwise keep one
+			// entry for every topic name ever dispatched.
+			d.targetMu.Lock()
+			delete(d.targetCache, topicName)
+			d.targetMu.Unlock()
+			return cachedProduceDispatchTargets{assignmentVersion: assignmentVersion, routingMembersVersion: routingMembersVersion}, nil
+		}
 
 		targets := cachedProduceDispatchTargets{
 			assignmentVersion:     assignmentVersion,
