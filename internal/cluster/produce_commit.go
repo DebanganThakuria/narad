@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
+	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/errs"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
@@ -346,6 +347,25 @@ func (d *ProduceDispatcher) finish(ctx context.Context, st *produceDispatchState
 		// so the records go back to the WAL for whoever reads it next.
 		d.releaseAll(st, dest, failed, failedOrigs)
 		st.noteErr(res.err)
+		return
+	}
+	if errors.Is(res.err, brokermsg.ErrTopicIncarnationMismatch) {
+		// The owner answered, with another incarnation of the topic than
+		// the records': a delete and recreate raced them, or its replica
+		// or this one lags. That says nothing about the owner, so the
+		// destination is not failing and nothing is rerouted: the records,
+		// and what queued behind them, go back to the WAL in order, and the
+		// rescan checks each against the current incarnation again (see
+		// place), which discards it once the leader confirms its
+		// incarnation is gone, or commits it where it belongs once the
+		// owner has caught up.
+		d.logger.Warn("owner refused produce records accepted for another topic incarnation; checking them again",
+			"topic", dest.key.topic, "partition", dest.key.partition, "owner", job.target.addr,
+			"records", len(failed)+len(dest.queue), "err", res.err)
+		dest.failingSince = time.Time{}
+		delete(st.waiting, dest)
+		d.releaseAll(st, dest, failed, failedOrigs)
+		st.forget(dest)
 		return
 	}
 
@@ -704,6 +724,12 @@ func (d *ProduceDispatcher) commitRemote(ctx context.Context, addr string, recor
 	}
 	if err != nil {
 		return err
+	}
+	if res.Status == http.StatusPreconditionFailed {
+		// The owner holds another incarnation of the topic under the name
+		// (see RPCServer.brokerErrorStatus): the same outcome as a local
+		// commit's, so finish handles both alike.
+		return fmt.Errorf("commit produce batch to %s: %w", addr, brokermsg.ErrTopicIncarnationMismatch)
 	}
 	if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
 		return fmt.Errorf("commit produce batch returned status %d", res.Status)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker"
+	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -631,6 +632,16 @@ func (s *RPCServer) brokerErrorStatus(op string, err error) (int, string) {
 		return http.StatusConflict, err.Error()
 	case errors.Is(err, errs.ErrNotFound):
 		return http.StatusNotFound, err.Error()
+	case errors.Is(err, brokermsg.ErrTopicIncarnationMismatch):
+		// Records accepted for another incarnation of the topic than the
+		// one this node holds under the name: a delete and recreate raced
+		// them, or this replica or the sender's lags. Expected and
+		// retriable, so it gets its own status, which the produce
+		// dispatcher recognizes (see commitRemote), and no error line.
+		if s.logger != nil {
+			s.logger.Info(op+" refused: records accepted for another topic incarnation", "err", err)
+		}
+		return http.StatusPreconditionFailed, err.Error()
 	default:
 		if s.logger != nil {
 			s.logger.Error(op, "err", err)
