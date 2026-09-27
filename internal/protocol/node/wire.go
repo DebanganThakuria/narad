@@ -32,6 +32,10 @@ func newWriter(capacity int) *writer {
 	return &writer{buf: make([]byte, 0, capacity)}
 }
 
+func (w *writer) u8(v uint8) {
+	w.buf = append(w.buf, v)
+}
+
 func (w *writer) u16(v uint16) {
 	var b [2]byte
 	binary.BigEndian.PutUint16(b[:], v)
@@ -122,6 +126,15 @@ func (r *reader) op() (Operation, error) {
 	op := Operation(r.payload[r.pos])
 	r.pos++
 	return op, nil
+}
+
+func (r *reader) u8() (uint8, error) {
+	if r.remaining() < 1 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	v := r.payload[r.pos]
+	r.pos++
+	return v, nil
 }
 
 func (r *reader) u16() (uint16, error) {

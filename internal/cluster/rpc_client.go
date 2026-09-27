@@ -576,7 +576,7 @@ func setContentHeaders(h http.Header, contentType string) {
 // a 503 tells clients to back off and try again, where falling through to
 // local handling would surface a terminal-looking 421.
 func writeOwnerDown(w http.ResponseWriter) {
-	http.Error(w, "partition owner is down; retry later", http.StatusServiceUnavailable)
+	http.Error(w, ownerDownMessage, http.StatusServiceUnavailable)
 }
 
 // ListPartitionSegments asks the owner at addr for a partition's segment
