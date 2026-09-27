@@ -13,6 +13,7 @@ import (
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
@@ -212,12 +213,23 @@ func (s *RPCServer) consume(ctx context.Context, key requestKey, req *nodewire.C
 const maxForwardedConsumeBatch = 100
 
 // forwardedConsumeBatchBytes bounds the key and payload bytes a
-// forwarded batch takes (ConsumeOpts.MaxBytes), so that its reply fits in
-// one cluster RPC frame (clusterwire.MaxStreamFramePayloadBytes, 16 MiB)
-// whatever the payload sizes: at most this plus one record past it (1 MiB
-// by the produce cap), grown by a third where base64 applies, plus the
-// JSON around each record.
+// forwarded batch reserves (ConsumeOpts.MaxBytes). It keeps the reserving
+// in step with what the reply can carry for the usual records: JSON goes
+// out as it is and binary grows by a third, so their reply stays under
+// forwardedConsumeReplyBytes. It does not bound the reply itself: text
+// that is not JSON goes out as a JSON string, where a control byte or one
+// of < > & takes six bytes, and keys are escaped the same way.
 const forwardedConsumeBatchBytes = 4 << 20
+
+// forwardedConsumeReplyBytes bounds the encoded records of a forwarded
+// batch's reply, which must fit one cluster RPC frame
+// (clusterwire.MaxStreamFramePayloadBytes). A reply over the frame
+// cannot be written: the stream aborts, the requester sees an error and
+// moves on, and every record in the reply stays reserved until its lease
+// lapses. The first record always goes, as a single consume's reply
+// would carry it; half the frame, as for a remote produce commit, leaves
+// the rest for its framing.
+const forwardedConsumeReplyBytes = clusterwire.MaxStreamFramePayloadBytes / 2
 
 // consumeBatch answers a consume that asked for up to req.Max records: a
 // batch consume forwarded by a node that owns none of the topic's
@@ -227,6 +239,13 @@ const forwardedConsumeBatchBytes = 4 << 20
 // scan. The reply is 200 {"messages":[...]}, each record encoded as a
 // single consume's reply encodes it, or 204 with none; failures are
 // answered as for a single consume.
+//
+// The reply carries the records in the order taken until the next one
+// would take it past forwardedConsumeReplyBytes. Those left out are
+// given back at once (a nack each), so the next consume takes them. In
+// practice only records whose escaping makes them several times their
+// size are left out: the reserving stops near forwardedConsumeBatchBytes
+// of raw bytes, which JSON and binary records keep well inside the bound.
 //
 // A reply is remembered for a cancel that races it (rememberDelivery)
 // by its first record only, since that record holds one handle per
@@ -310,13 +329,25 @@ func (s *RPCServer) consumeBatch(ctx context.Context, key requestKey, req *nodew
 	for i := range msgs {
 		size += len(msgs[i].Key) + len(msgs[i].Payload) + 160
 	}
-	body := make([]byte, 0, size)
+	body := make([]byte, 0, min(size, forwardedConsumeReplyBytes))
 	body = append(body, `{"messages":[`...)
 	for i := range msgs {
+		mark := len(body)
 		if i > 0 {
 			body = append(body, ',')
 		}
 		body = msgs[i].AppendJSON(body)
+		if i > 0 && len(body)+len("]}\n") > forwardedConsumeReplyBytes {
+			// Encoded, this record would take the reply past what one
+			// frame carries: it and the rest go back for the next consume.
+			body = body[:mark]
+			for j := i; j < len(msgs); j++ {
+				if h, herr := consumer.DecodeHandle(msgs[j].ReceiptHandle); herr == nil {
+					s.releaseDelivery(delivery{topic: req.Topic, handle: h})
+				}
+			}
+			break
+		}
 	}
 	body = append(body, "]}\n"...)
 	return nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: body}
