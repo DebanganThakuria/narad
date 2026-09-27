@@ -105,6 +105,41 @@ func (s *RPCServer) handleConsume(ctx context.Context, key requestKey, payload [
 	if ceiling := s.consumeWaitCeiling(); wait > ceiling {
 		wait = ceiling
 	}
+	if wait > 0 {
+		// A long-poll parks inside the broker for up to the wait ceiling
+		// while consuming no CPU. Holding a messaging slot for that long
+		// would let a handful of forwarded long-polls starve acks and
+		// probes, so only non-blocking scans are gated.
+		return s.consume(ctx, key, &req, wait)
+	}
+	// A non-blocking consume whose requester already gave up (its probe
+	// or claim budget ran out, or its client left), typically while it
+	// waited for a messaging slot, is answered without reserving a
+	// record for nobody, reading it and releasing it again.
+	if !s.acquireMessagingSlot(ctx) {
+		return s.abandonConsume(&req)
+	}
+	defer s.releaseMessagingSlot()
+	if ctx.Err() != nil {
+		return s.abandonConsume(&req)
+	}
+	return s.consume(ctx, key, &req, wait)
+}
+
+// abandonConsume answers a non-blocking consume whose requester gave up
+// before it ran. A claim still retires the hold its notification put on
+// a record, so the record goes to somebody else now rather than at the
+// hold's deadline; that is what reserving and releasing it did before.
+func (s *RPCServer) abandonConsume(req *nodewire.ConsumeRequest) nodewire.Response {
+	if req.Claim && req.LocalOnly {
+		s.broker.NoteRemoteClaim(req.Topic)
+	}
+	return nodewire.Response{Status: http.StatusNoContent}
+}
+
+// consume runs a decoded consume against the broker, wait already
+// clamped.
+func (s *RPCServer) consume(ctx context.Context, key requestKey, req *nodewire.ConsumeRequest, wait time.Duration) nodewire.Response {
 	opts := brokermsg.ConsumeOpts{Wait: wait}
 	if req.HasPartition {
 		partition := req.Partition
@@ -114,63 +149,53 @@ func (s *RPCServer) handleConsume(ctx context.Context, key requestKey, payload [
 		offset := req.Offset
 		opts.Offset = &offset
 	}
-	consume := func() nodewire.Response {
-		msg, found, err := s.broker.Consume(ctx, req.Topic, opts)
-		if req.Claim && req.LocalOnly && wait == 0 && err == nil && found {
-			// A claim that WON its record resolves the notification it
-			// answers, so the owner releases that hold now rather than at
-			// the claim deadline. An empty claim keeps the hold to its
-			// deadline on purpose: the pump's free-record estimate can be
-			// wrong (a partition at its in-flight cap, or paused for a
-			// handoff), and the deadline is the backoff that keeps a wrong
-			// estimate from becoming a notify/claim loop at RPC speed. A
-			// plain probe is not a claim and never releases a hold.
-			s.broker.NoteRemoteClaim(req.Topic)
-		}
-		if errors.Is(err, brokermsg.ErrNotPartitionOwner) && req.LocalOnly {
+	msg, found, err := s.broker.Consume(ctx, req.Topic, opts)
+	if req.Claim && req.LocalOnly && wait == 0 && err == nil && found {
+		// A claim that WON its record resolves the notification it
+		// answers, so the owner releases that hold now rather than at
+		// the claim deadline. An empty claim keeps the hold to its
+		// deadline on purpose: the pump's free-record estimate can be
+		// wrong (a partition at its in-flight cap, or paused for a
+		// handoff), and the deadline is the backoff that keeps a wrong
+		// estimate from becoming a notify/claim loop at RPC speed. A
+		// plain probe is not a claim and never releases a hold.
+		s.broker.NoteRemoteClaim(req.Topic)
+	}
+	if errors.Is(err, brokermsg.ErrNotPartitionOwner) && req.LocalOnly {
+		return nodewire.Response{Status: http.StatusNoContent}
+	}
+	if err != nil {
+		if ctx.Err() != nil {
 			return nodewire.Response{Status: http.StatusNoContent}
 		}
-		if err != nil {
-			if ctx.Err() != nil {
-				return nodewire.Response{Status: http.StatusNoContent}
+		return s.brokerError("consume", err)
+	}
+	if !found {
+		return nodewire.Response{Status: http.StatusNoContent}
+	}
+	// The message is reserved for a client that may already be gone.
+	// Remember the handle first, then check the request context: if
+	// the client cancelled, give the message back right away instead
+	// of leaving it invisible until its lease expires. A cancel that
+	// lands after the reply is written is handled by HandleStreamCancel
+	// through the same record.
+	if h, herr := consumer.DecodeHandle(msg.ReceiptHandle); herr == nil {
+		s.rememberDelivery(key, req.Topic, h)
+		if ctx.Err() != nil {
+			if d, ok := s.takeDelivery(key); ok {
+				s.releaseDelivery(d)
 			}
-			return s.brokerError("consume", err)
-		}
-		if !found {
 			return nodewire.Response{Status: http.StatusNoContent}
 		}
-		// The message is reserved for a client that may already be gone.
-		// Remember the handle first, then check the request context: if
-		// the client cancelled, give the message back right away instead
-		// of leaving it invisible until its lease expires. A cancel that
-		// lands after the reply is written is handled by HandleStreamCancel
-		// through the same record.
-		if h, herr := consumer.DecodeHandle(msg.ReceiptHandle); herr == nil {
-			s.rememberDelivery(key, req.Topic, h)
-			if ctx.Err() != nil {
-				if d, ok := s.takeDelivery(key); ok {
-					s.releaseDelivery(d)
-				}
-				return nodewire.Response{Status: http.StatusNoContent}
-			}
-		}
-		// Encode the message the same way the local HTTP path does: one
-		// append-style pass with the payload embedded verbatim. Routing it
-		// through json.Marshal re-validated and compacted the payload (so
-		// a forwarded consume returned different bytes than a local one)
-		// and copied the body three times.
-		body := msg.AppendJSON(make([]byte, 0, len(msg.Payload)+128))
-		body = append(body, '\n')
-		return nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: body}
 	}
-	if wait > 0 {
-		// A long-poll parks inside the broker for up to the wait ceiling
-		// while consuming no CPU. Holding a messaging slot for that long
-		// would let a handful of forwarded long-polls starve produce
-		// commits and acks, so only non-blocking scans are gated.
-		return consume()
-	}
-	return s.withMessagingSlot(consume)
+	// Encode the message the same way the local HTTP path does: one
+	// append-style pass with the payload embedded verbatim. Routing it
+	// through json.Marshal re-validated and compacted the payload (so
+	// a forwarded consume returned different bytes than a local one)
+	// and copied the body three times.
+	body := msg.AppendJSON(make([]byte, 0, len(msg.Payload)+128))
+	body = append(body, '\n')
+	return nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: body}
 }
 
 func (s *RPCServer) handleAck(ctx context.Context, payload []byte) nodewire.Response {

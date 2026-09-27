@@ -204,17 +204,112 @@ func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *ht
 	if hadCandidates {
 		// The handler contract says wait > 0 long-polls up to the wait
 		// for a message. Honor that budget even though this node owns no
-		// partitions of the topic: keep re-probing the remote owners
-		// until a message materializes. Answering 204 immediately would
-		// make long-poll behavior depend on which node a load balancer
-		// picked and degrade clients into busy-polling.
-		if rt.longPollConsumeRemote(ctx, w, r, topicName) {
-			return true, nil
+		// partitions of the topic. Answering 204 immediately would make
+		// long-poll behavior depend on which node a load balancer picked
+		// and degrade clients into busy-polling. The HTTP handler already
+		// rejected malformed wait values, so a parse failure here
+		// conservatively degrades to no wait.
+		wait, err := consumeWaitFromHTTP(r, rt.maxConsumeWait)
+		if err != nil {
+			wait = 0
 		}
-		w.WriteHeader(http.StatusNoContent)
+		rt.consumeRemoteWait(ctx, w, topicName, wait)
+		return true, nil
+	}
+	if rt.awaitConsumeRoute(ctx, w, r, topicName) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// consumeRemoteWait serves the wait phase of a queue-style long-poll on
+// a node that owns none of the topic's partitions, after the opening
+// probe found nothing, and writes the response.
+//
+// It parks the consumer on tokens exactly as an owning node does, with
+// nothing local to race: an owner that gets a record notifies, and the
+// consumer claims from it, two round trips after the record lands and
+// no network at all while nothing does. It falls back to re-probing
+// every owner on a backoff (longPollConsumeRemote) when this node has
+// no return address for notifications, or when an owner recently
+// refused a registration (a node on the previous release during a
+// rolling upgrade), since a token left there is discarded and a record
+// on it would wait out the whole budget.
+func (rt *Router) consumeRemoteWait(ctx context.Context, w http.ResponseWriter, topicName string, wait time.Duration) {
+	if wait > 0 && rt.tokens.enabled() && !rt.tokens.pollingOwner(topicName) {
+		rt.waitOnTokens(ctx, w, topicName, wait, gatewayWait{reprobe: gatewayReprobeInterval})
+		return
+	}
+	if rt.longPollConsumeRemote(ctx, w, topicName, wait) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// routeWaitPoll is how often awaitConsumeRoute checks the route table's
+// versions. Each check is two atomic loads, and the window it covers
+// (a topic created moments ago, the first seconds of a cold cluster) is
+// about a second long.
+const routeWaitPoll = 50 * time.Millisecond
+
+// awaitConsumeRoute holds a queue-style long-poll for a topic that exists
+// but has no partition this node can reach: none assigned yet (a topic
+// created moments ago, the first seconds of a cold cluster) or every
+// owner down. Answering 204 at once turned every looping consumer into
+// a busy poll for as long as that lasted. It waits for the budget, or
+// until the route table changes and gives the consumer somewhere to go:
+// remote owners are then tried with what is left of the budget, and a
+// partition that became this node's is answered 204 so the client's
+// next poll takes the local path with its full wait.
+//
+// It reports whether it wrote the response. False leaves the request to
+// the caller as before: no wait was asked for, or the topic is unknown
+// (the caller answers 404) or has no partitions.
+func (rt *Router) awaitConsumeRoute(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) bool {
+	wait, err := consumeWaitFromHTTP(r, rt.maxConsumeWait)
+	if err != nil || wait <= 0 {
+		return false
+	}
+	if t, err := rt.store.GetTopic(ctx, topicName); err != nil || t.Partitions <= 0 {
+		return false
+	}
+	deadline := time.Now().Add(wait)
+	assignmentVersion, membersVersion := rt.store.AssignmentVersion(topicName), rt.store.RoutingMembersVersion()
+	budget := time.NewTimer(wait)
+	defer budget.Stop()
+	poll := time.NewTicker(routeWaitPoll)
+	defer poll.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			w.WriteHeader(http.StatusNoContent)
+			return true
+		case <-budget.C:
+			w.WriteHeader(http.StatusNoContent)
+			return true
+		case <-poll.C:
+		}
+		av, mv := rt.store.AssignmentVersion(topicName), rt.store.RoutingMembersVersion()
+		if av == assignmentVersion && mv == membersVersion {
+			continue
+		}
+		assignmentVersion, membersVersion = av, mv
+		routes, ok := rt.routesForTopic(topicName)
+		switch {
+		case !ok:
+			continue
+		case len(routes.localEntries) > 0:
+			w.WriteHeader(http.StatusNoContent)
+			return true
+		case !rt.hasRemoteOwner(topicName):
+			continue
+		}
+		if forwarded, _ := rt.RouteConsumeRemote(ctx, w, r, topicName); forwarded {
+			return true
+		}
+		rt.consumeRemoteWait(ctx, w, topicName, time.Until(deadline))
+		return true
+	}
 }
 
 // longWaitRPCGrace is added on top of a known server-side wait when
@@ -258,7 +353,8 @@ const (
 )
 
 // longPollConsumeRemote honors a queue-style long-poll on a node that owns
-// no partitions of the topic: it re-probes every remote owner, backing off
+// no partitions of the topic when the token protocol cannot (see
+// consumeRemoteWait): it re-probes every remote owner, backing off
 // between rounds, until a message materializes (response written, returns
 // true), the wait budget expires, or the request context is done (returns
 // false; the caller answers 204). Re-probing all owners each round is
@@ -267,11 +363,8 @@ const (
 // individually bounded by consumeProbeTimeout, so unlike a pinned
 // long-poll forward the loop needs no longWaitRPCContext-stretched
 // deadline. The owner list is rebuilt only when the route table changes.
-func (rt *Router) longPollConsumeRemote(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) bool {
-	// The HTTP handler already rejected malformed wait values, so a parse
-	// failure here conservatively degrades to no wait.
-	wait, err := consumeWaitFromHTTP(r, rt.maxConsumeWait)
-	if err != nil || wait <= 0 {
+func (rt *Router) longPollConsumeRemote(ctx context.Context, w http.ResponseWriter, topicName string, wait time.Duration) bool {
+	if wait <= 0 {
 		return false
 	}
 	interval := rt.consumeReprobeInterval
@@ -313,12 +406,12 @@ func (rt *Router) longPollConsumeRemote(ctx context.Context, w http.ResponseWrit
 // client's HTTP request that long. Timing out is safe: acks are
 // idempotent by nonce (the owner commits only if the handle's nonce
 // still matches the active reservation), so a client retry after a
-// timeout cannot double-commit a record.
+// timeout cannot double-commit a record. The bound is handed to the
+// transport as the call's budget rather than derived as a
+// context.WithTimeout per ack: the transport already runs a timer for
+// the reply wait, and the derived context cost four allocations and a
+// lock on the request's context for every forwarded ack.
 const ackForwardTimeout = 2 * time.Second
-
-func ackForwardContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, ackForwardTimeout)
-}
 
 // RouteAck forwards an ack request to the owner of the handle partition.
 // Returns true if forwarded.
@@ -331,9 +424,7 @@ func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.R
 	if addr == "" {
 		return false
 	}
-	ackCtx, cancel := ackForwardContext(ctx)
-	defer cancel()
-	res, err := rt.peer.Ack(ackCtx, addr, nodewire.AckRequest{
+	res, err := rt.peer.AckWithin(ctx, addr, ackForwardTimeout, nodewire.AckRequest{
 		Topic:     topicName,
 		Partition: handle.Partition,
 		Offset:    handle.Offset,
@@ -358,9 +449,7 @@ func (rt *Router) RouteExtendAck(ctx context.Context, w http.ResponseWriter, _ *
 	if addr == "" {
 		return false
 	}
-	ackCtx, cancel := ackForwardContext(ctx)
-	defer cancel()
-	res, err := rt.peer.ExtendAck(ackCtx, addr, nodewire.AckRequest{
+	res, err := rt.peer.ExtendAckWithin(ctx, addr, ackForwardTimeout, nodewire.AckRequest{
 		Topic:     topicName,
 		Partition: handle.Partition,
 		Offset:    handle.Offset,
@@ -385,9 +474,7 @@ func (rt *Router) RouteNack(ctx context.Context, w http.ResponseWriter, _ *http.
 	if addr == "" {
 		return false
 	}
-	ackCtx, cancel := ackForwardContext(ctx)
-	defer cancel()
-	res, err := rt.peer.Nack(ackCtx, addr, nodewire.AckRequest{
+	res, err := rt.peer.NackWithin(ctx, addr, ackForwardTimeout, nodewire.AckRequest{
 		Topic:     topicName,
 		Partition: handle.Partition,
 		Offset:    handle.Offset,

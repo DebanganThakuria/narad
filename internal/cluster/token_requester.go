@@ -20,9 +20,13 @@ import (
 // show up". An owner spends one by calling back, this node wakes one
 // parked consumer, and that consumer claims with an ordinary consume.
 //
-// Registration and retirement both go out to every owner CONCURRENTLY.
-// Doing them one owner at a time would put a round trip per owner in
-// front of the very consumer they exist to serve.
+// Registration goes out to every owner CONCURRENTLY. Doing it one owner
+// at a time would put a round trip per owner in front of the very
+// consumer it exists to serve. It also goes out only where it is
+// needed: consumers parking in quick succession share the token the
+// first of them left (see registerShareWindow), and a token nobody here
+// wants any more is left to lapse rather than retired with a frame of
+// its own (see register).
 
 // tokenTTLFloor is the shortest remaining budget worth registering. A
 // token that expires before a notification and a claim could complete
@@ -45,25 +49,32 @@ type localWaiter struct {
 	// longest remaining budget among them.
 	deadline time.Time
 	mu       sync.Mutex
-	from     string
+	// from is the owner of an offer this waiter accepted and has not yet
+	// acted on: set by offer, cleared by take.
+	from string
 }
 
-// take returns the address of the owner that woke this waiter.
+// take returns the address of the owner that woke this waiter, or ""
+// if none did since the last take.
 func (w *localWaiter) take() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.from
+	from := w.from
+	w.from = ""
+	return from
 }
 
 // offer publishes the owner address and signals, reporting whether the
 // waiter took it. The signal is non-blocking: a waiter already woken by
-// another owner simply is not available.
+// another owner simply is not available. The address is set under the
+// same lock hold as the signal, so take sees it once the signal is
+// received, and a refused offer leaves no address behind.
 func (w *localWaiter) offer(from string) bool {
 	w.mu.Lock()
-	w.from = from
-	w.mu.Unlock()
+	defer w.mu.Unlock()
 	select {
 	case w.ch <- struct{}{}:
+		w.from = from
 		return true
 	default:
 		return false
@@ -74,12 +85,45 @@ func (w *localWaiter) offer(from string) bool {
 type topicDemand struct {
 	mu      sync.Mutex
 	waiters []*localWaiter
-	// owners records, per remote owner address, until when this node
-	// believes that owner holds its live token for the topic: stamped
-	// when a registration is sent, cleared when the send fails. The
-	// keeper (Run) registers wherever an entry is missing or past.
-	owners map[string]time.Time
+	// owners records, per remote owner address, the token this node
+	// believes that owner holds for the topic: stamped when a
+	// registration is sent, cleared when the send fails or the owner
+	// spends the token on a notification. The keeper (Run) registers
+	// wherever an entry is missing or due for a refresh.
+	owners map[string]ownerToken
 }
+
+// ownerToken is this node's record of one registration at one owner.
+type ownerToken struct {
+	// sentAt is when the registration went out.
+	sentAt time.Time
+	// refreshAt is when the keeper sends it again: the registered budget
+	// or registrationRefresh after sentAt, whichever is sooner.
+	refreshAt time.Time
+	// expiresAt is when the owner lets the token lapse: sentAt plus the
+	// TTL the registration carried.
+	expiresAt time.Time
+}
+
+// registerShareWindow is how long a registration is shared by consumers
+// parking after it. A consumer parking here for a topic whose owners
+// already hold a token from this node, sent within the window and
+// lasting past its deadline, sends nothing: the owner holds one token
+// per (node, topic) and a new registration would only replace it. With
+// hundreds of consumers re-parking on a sparse topic that was one
+// registration per consumer per owner, each replacing the last.
+//
+// The window is short on purpose. The owner's reply only says the frame
+// arrived; the token may have been discarded (its assignment view
+// lagged ours) or lost to a restart. Re-registering on park repairs
+// that at once, so sharing is trusted only briefly, and a consumer
+// parking after the window re-sends. A token spent on a notification is
+// forgotten outright (see WakeOneWaiter).
+//
+// Registrations carry the window on top of the budget, so a consumer
+// parking inside the window with the same wait as the one that
+// registered is still covered.
+const registerShareWindow = 250 * time.Millisecond
 
 // keepAliveInterval is how often the keeper checks that every remote
 // owner of a topic with parked consumers holds a live token from here.
@@ -88,10 +132,9 @@ const keepAliveInterval = 500 * time.Millisecond
 // registrationRefresh bounds how long a registration is trusted before
 // the keeper sends it again. The owner's reply says only that the frame
 // arrived: it may have discarded the token (its assignment view lagged
-// ours), it may restart and lose it, or a retiring consumer's drop may
-// land after a newer consumer's add. Re-registering replaces the token,
-// so repeating it every few seconds while consumers are parked repairs
-// all three at the cost of one small frame per owner per interval.
+// ours), or it may restart and lose it. Re-registering replaces the
+// token, so repeating it every few seconds while consumers are parked
+// repairs both at the cost of one small frame per owner per interval.
 const registrationRefresh = 5 * time.Second
 
 // longestRemainingLocked returns the longest wait budget among the
@@ -122,11 +165,12 @@ type tokenRequester struct {
 	mu     sync.RWMutex
 	topics map[string]*topicDemand
 
-	// legacyMu guards legacyPeers, the set of peers that answered a
-	// registration with "unsupported rpc operation": nodes too old to
-	// speak this protocol. See noteRegisterResult.
+	// legacyMu guards legacyPeers, the peers that answered a
+	// registration with "unsupported rpc operation" (nodes too old to
+	// speak this protocol), each with when it last did. See
+	// noteRegisterResult.
 	legacyMu    sync.Mutex
-	legacyPeers map[string]bool
+	legacyPeers map[string]time.Time
 }
 
 func newTokenRequester(rt *Router, selfAddr string) *tokenRequester {
@@ -134,7 +178,7 @@ func newTokenRequester(rt *Router, selfAddr string) *tokenRequester {
 		router:      rt,
 		selfAddr:    selfAddr,
 		topics:      make(map[string]*topicDemand),
-		legacyPeers: make(map[string]bool),
+		legacyPeers: make(map[string]time.Time),
 	}
 }
 
@@ -173,14 +217,17 @@ func (q *tokenRequester) noteRegisterResult(addr string, res nodewire.Response, 
 		bytes.Contains(res.Body, []byte("unsupported rpc operation"))
 
 	q.legacyMu.Lock()
-	was := q.legacyPeers[addr]
+	_, was := q.legacyPeers[addr]
+	if legacy {
+		// Refreshed on every refusal: a gateway polls a topic for
+		// legacyRetest after its owner last refused (see pollingOwner).
+		q.legacyPeers[addr] = time.Now()
+	}
 	if legacy == was {
 		q.legacyMu.Unlock()
 		return
 	}
-	if legacy {
-		q.legacyPeers[addr] = true
-	} else {
+	if !legacy {
 		delete(q.legacyPeers, addr)
 	}
 	remaining := len(q.legacyPeers)
@@ -227,14 +274,22 @@ func (q *tokenRequester) demandFor(topicName string) *topicDemand {
 }
 
 // park adds a waiter and returns it with a release func that removes
-// it. The caller selects on the waiter's channel.
+// it. The caller selects on the waiter's channel. The release func is
+// for the caller's goroutine only.
 func (q *tokenRequester) park(topicName string, deadline time.Time) (*localWaiter, func()) {
 	d := q.demandFor(topicName)
 	w := &localWaiter{ch: make(chan struct{}, 1), deadline: deadline}
 	d.mu.Lock()
 	d.waiters = append(d.waiters, w)
 	d.mu.Unlock()
+	released := false
 	return w, func() {
+		// Idempotent: a consumer leaves the queue as soon as it stops
+		// waiting and again, as a no-op, when it returns.
+		if released {
+			return
+		}
+		released = true
 		d.mu.Lock()
 		for i, other := range d.waiters {
 			if other == w {
@@ -278,6 +333,15 @@ func (q *tokenRequester) repark(topicName string, w *localWaiter) {
 //
 // The waiter is removed before the send, so its buffered channel gets
 // exactly one address and the send can never block the RPC handler.
+//
+// A notification spends the owner's token whatever the verdict, so the
+// owner is forgotten here: the keeper then puts a token back within
+// keepAliveInterval if anyone is still parked, and the next consumer to
+// park registers there. Without it a consumer woken as it was leaving
+// (served locally at that instant, or at the end of its budget) took
+// the token with it, and the keeper, still trusting the old stamp, left
+// the consumers parked behind it with no token at that owner for up to
+// registrationRefresh.
 func (q *tokenRequester) WakeOneWaiter(topicName, from string) bool {
 	if q == nil {
 		return false
@@ -285,6 +349,7 @@ func (q *tokenRequester) WakeOneWaiter(topicName, from string) bool {
 	d := q.demandFor(topicName)
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	delete(d.owners, from)
 	for len(d.waiters) > 0 {
 		w := d.waiters[0]
 		d.waiters = d.waiters[1:]
@@ -296,54 +361,95 @@ func (q *tokenRequester) WakeOneWaiter(topicName, from string) bool {
 	return false
 }
 
-// register leaves a token with every remote owner of the topic, all at
-// once. Failures are ignored: a token that never lands costs this
-// consumer its notification, and the wait budget is the backstop.
+// register leaves a token with every remote owner of the topic that
+// does not already hold one covering this consumer, all at once.
+// Failures are ignored: a token that never lands costs this consumer
+// its notification, and the wait budget is the backstop.
+//
+// Nothing retires the tokens when the last consumer leaves. A token
+// nobody here wants any more costs at most one notification, answered
+// "pass", before it lapses at its TTL, where retiring it cost a frame
+// to every owner each time the parked count touched zero, and the next
+// consumer to park had to register all over again.
 func (q *tokenRequester) register(ctx context.Context, topicName string, remaining time.Duration) {
 	if !q.enabled() || remaining < tokenTTLFloor {
 		return
 	}
-	owners := q.router.remoteConsumeCandidates(topicName)
+	// The plain owner list, not the rotated one the probe path uses:
+	// registering must not advance the probe cursor.
+	owners := q.router.remoteOwnerAddrsForTopic(topicName)
 	if len(owners) == 0 {
 		return
 	}
+	d := q.demandFor(topicName)
+	now := time.Now()
+	d.mu.Lock()
 	// The token is shared by every consumer parked here, so it carries
 	// the longest budget among them: a short poll registering after a
 	// long one must not shorten the token the long one relies on.
-	d := q.demandFor(topicName)
-	d.mu.Lock()
-	if longest, _ := d.longestRemainingLocked(time.Now(), nil); longest > remaining {
+	if longest, _ := d.longestRemainingLocked(now, nil); longest > remaining {
 		remaining = longest
 	}
+	need := now.Add(remaining)
+	targets := owners[:0]
+	for _, addr := range owners {
+		if tok, ok := d.owners[addr]; ok && now.Sub(tok.sentAt) < registerShareWindow && !tok.expiresAt.Before(need) {
+			continue
+		}
+		targets = append(targets, addr)
+	}
+	stamp := d.stampLocked(targets, now, remaining)
 	d.mu.Unlock()
-	q.send(ctx, topicName, owners, remaining)
+	q.dispatch(ctx, topicName, d, targets, remaining, stamp)
 }
 
-// send leaves a token with each of addrs and records the attempt in the
-// topic's owners table, optimistically: a send that fails clears its
-// entry when the failure is known, and the keeper tries that owner
-// again on its next pass.
+// send leaves a token with each of addrs.
 func (q *tokenRequester) send(ctx context.Context, topicName string, addrs []string, remaining time.Duration) {
-	until := time.Now().Add(min(remaining, registrationRefresh))
 	d := q.demandFor(topicName)
 	d.mu.Lock()
+	stamp := d.stampLocked(addrs, time.Now(), remaining)
+	d.mu.Unlock()
+	q.dispatch(ctx, topicName, d, addrs, remaining, stamp)
+}
+
+// stampLocked records a registration of remaining to each of addrs,
+// optimistically: dispatch clears an entry whose send is known to have
+// failed, and the keeper tries that owner again on its next pass. Must
+// hold mu.
+func (d *topicDemand) stampLocked(addrs []string, now time.Time, remaining time.Duration) ownerToken {
+	stamp := ownerToken{
+		sentAt:    now,
+		refreshAt: now.Add(min(remaining, registrationRefresh)),
+		expiresAt: now.Add(remaining + registerShareWindow),
+	}
+	if len(addrs) == 0 {
+		return stamp
+	}
 	if d.owners == nil {
-		d.owners = make(map[string]time.Time)
+		d.owners = make(map[string]ownerToken)
 	}
 	for _, addr := range addrs {
-		d.owners[addr] = until
+		d.owners[addr] = stamp
 	}
-	d.mu.Unlock()
+	return stamp
+}
+
+// dispatch sends the registration stamped for addrs. Its TTL carries
+// registerShareWindow on top of the budget, matching the stamp's expiry.
+func (q *tokenRequester) dispatch(ctx context.Context, topicName string, d *topicDemand, addrs []string, remaining time.Duration, stamp ownerToken) {
+	if len(addrs) == 0 {
+		return
+	}
 	delta := nodewire.TokenDelta{
 		From: q.selfAddr,
-		Add:  []nodewire.TokenRegistration{{Topic: topicName, TTLNanos: int64(remaining)}},
+		Add:  []nodewire.TokenRegistration{{Topic: topicName, TTLNanos: int64(remaining + registerShareWindow)}},
 	}
 	q.broadcast(ctx, addrs, delta, func(addr string, err error) {
 		if err == nil {
 			return
 		}
 		d.mu.Lock()
-		if d.owners[addr].Equal(until) {
+		if tok, ok := d.owners[addr]; ok && tok.sentAt.Equal(stamp.sentAt) {
 			delete(d.owners, addr)
 		}
 		d.mu.Unlock()
@@ -395,7 +501,7 @@ func (q *tokenRequester) keepAlive(ctx context.Context) {
 		remaining, _ := d.longestRemainingLocked(now, nil)
 		if remaining >= tokenTTLFloor {
 			for _, addr := range owners {
-				if !d.owners[addr].After(now) {
+				if !d.owners[addr].refreshAt.After(now) {
 					missing = append(missing, addr)
 				}
 			}
@@ -414,7 +520,44 @@ func (q *tokenRequester) keepAlive(ctx context.Context) {
 func (q *tokenRequester) isLegacyPeer(addr string) bool {
 	q.legacyMu.Lock()
 	defer q.legacyMu.Unlock()
-	return q.legacyPeers[addr]
+	_, legacy := q.legacyPeers[addr]
+	return legacy
+}
+
+// legacyRetest is how long a node that owns none of a topic's
+// partitions keeps polling it after one of its owners refused a
+// registration. Past it the node parks its consumers on tokens again,
+// and the registration that sends is what tests the owner once more, so
+// an owner upgraded mid-roll is back on notifications within this
+// interval.
+const legacyRetest = 2 * time.Minute
+
+// pollingOwner reports whether any live remote owner of the topic
+// refused a registration within legacyRetest. A consumer on a node that
+// owns none of the topic's partitions then polls instead of parking on
+// tokens: a token left with that owner is discarded, and a record on it
+// would wait out the consumer's whole budget.
+func (q *tokenRequester) pollingOwner(topicName string) bool {
+	q.legacyMu.Lock()
+	none := len(q.legacyPeers) == 0
+	q.legacyMu.Unlock()
+	if none {
+		return false
+	}
+	routes, ok := q.router.routesForTopic(topicName)
+	if !ok {
+		return false
+	}
+	now := time.Now()
+	q.legacyMu.Lock()
+	defer q.legacyMu.Unlock()
+	for _, entry := range routes.remoteEntries {
+		addr := q.router.consumeOwnerAddr(entry)
+		if at, legacy := q.legacyPeers[addr]; legacy && addr != "" && now.Sub(at) < legacyRetest {
+			return true
+		}
+	}
+	return false
 }
 
 // registerAt leaves a fresh token with one owner: the one that just
@@ -426,35 +569,6 @@ func (q *tokenRequester) registerAt(ctx context.Context, topicName, addr string,
 		return
 	}
 	q.send(ctx, topicName, []string{addr}, remaining)
-}
-
-// drop retires this node's token at every owner except the one that
-// served us. Only called once nobody else is parked here for the topic:
-// the token is shared by every consumer on this node, so retiring it
-// early would strand the rest. Best effort and fire-and-forget: a lost
-// drop costs one notification the owner's next record wastes on us,
-// never correctness.
-func (q *tokenRequester) drop(ctx context.Context, topicName, servedBy string) {
-	if !q.enabled() {
-		return
-	}
-	owners := q.router.remoteConsumeCandidates(topicName)
-	targets := owners[:0:0]
-	for _, addr := range owners {
-		if addr != servedBy {
-			targets = append(targets, addr)
-		}
-	}
-	if len(targets) == 0 {
-		return
-	}
-	d := q.demandFor(topicName)
-	d.mu.Lock()
-	for _, addr := range targets {
-		delete(d.owners, addr)
-	}
-	d.mu.Unlock()
-	q.broadcast(ctx, targets, nodewire.TokenDelta{From: q.selfAddr, Drop: []string{topicName}}, nil)
 }
 
 // broadcast sends one delta to every address concurrently and does NOT
@@ -469,19 +583,19 @@ func (q *tokenRequester) drop(ctx context.Context, topicName, servedBy string) {
 // missed record.
 //
 // The context is detached from the request that triggered it for the
-// same reason: a drop must still land after the consumer it belongs to
-// has been served, and a register must not be cancelled by the consumer
-// parking.
+// same reason: a register must not be cancelled by the consumer parking
+// or being served.
 //
 // done, when set, is told how each send ended (nil for any reply, the
 // transport error otherwise), so a registration that never reached its
 // owner can be tried again.
 func (q *tokenRequester) broadcast(ctx context.Context, addrs []string, delta nodewire.TokenDelta, done func(addr string, err error)) {
-	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tokenSendTimeout)
-	var pending sync.WaitGroup
+	// Each send carries its own budget, so nothing has to outlive the
+	// sends just to release a shared timeout.
+	sendCtx := context.WithoutCancel(ctx)
 	for _, addr := range addrs {
-		pending.Go(func() {
-			res, err := q.router.peer.RegisterTokens(sendCtx, addr, delta)
+		go func() {
+			res, err := q.router.peer.RegisterTokensWithin(sendCtx, addr, tokenSendTimeout, delta)
 			// The send stays fire-and-forget; the REPLY is still worth
 			// reading, because it is the only place a peer tells us it
 			// does not speak this protocol.
@@ -489,17 +603,11 @@ func (q *tokenRequester) broadcast(ctx context.Context, addrs []string, delta no
 			if done != nil {
 				done(addr, err)
 			}
-		})
+		}()
 	}
-	// Release the timeout once the last send finishes, without holding
-	// the caller: cancel() must outlive the sends, not the request.
-	go func() {
-		pending.Wait()
-		cancel()
-	}()
 }
 
-// tokenSendTimeout bounds one register or drop. Tokens are advisory, so
-// a slow owner is dropped from this round rather than holding up the
+// tokenSendTimeout bounds one registration. Tokens are advisory, so a
+// slow owner is dropped from this round rather than holding up the
 // consumer that triggered it.
 const tokenSendTimeout = 2 * time.Second

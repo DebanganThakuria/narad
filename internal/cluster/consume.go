@@ -60,6 +60,21 @@ func (rt *Router) remoteConsumeCandidates(topicName string) []string {
 	return rotated
 }
 
+// hasRemoteOwner reports whether the topic has a live remote owner,
+// without building the owner list or touching the probe cursor.
+func (rt *Router) hasRemoteOwner(topicName string) bool {
+	routes, ok := rt.routesForTopic(topicName)
+	if !ok {
+		return false
+	}
+	for _, entry := range routes.remoteEntries {
+		if rt.consumeOwnerAddr(entry) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // remoteOwnerAddrsForTopic returns the topic's live remote owner
 // addresses in partition order, without touching the probe cursor.
 func (rt *Router) remoteOwnerAddrsForTopic(topicName string) []string {
@@ -120,9 +135,15 @@ func (rt *Router) reprobeRemote(ctx context.Context, w http.ResponseWriter, topi
 
 // probeCandidates probes each candidate once, starting at index start and
 // wrapping around, and writes the first delivered message to w. It
-// reports whether a message was written.
+// reports whether a message was written. It stops early once ctx is
+// done.
 func (rt *Router) probeCandidates(ctx context.Context, w http.ResponseWriter, topicName string, candidates []string, start int) bool {
 	for i := range candidates {
+		if ctx.Err() != nil {
+			// The client is gone: probing the rest would only reserve a
+			// record for nobody and release it again.
+			return false
+		}
 		addr := candidates[(start+i)%len(candidates)]
 		result := rt.callConsumeProbe(ctx, topicName, addr)
 		if result.err != nil {
@@ -148,9 +169,7 @@ func (rt *Router) callConsumeProbe(ctx context.Context, topicName, addr string) 
 		Topic:     topicName,
 		LocalOnly: true,
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, consumeProbeTimeout)
-	defer cancel()
-	res, err := rt.peer.Consume(probeCtx, addr, req)
+	res, err := rt.peer.ConsumeWithin(ctx, addr, consumeProbeTimeout, req)
 	if err != nil {
 		return consumeProbeResult{err: fmt.Errorf("consume probe %s: %w", addr, err)}
 	}
