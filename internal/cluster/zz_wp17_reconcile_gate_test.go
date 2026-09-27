@@ -26,26 +26,21 @@ import (
 // topic, a skipped tick a fixed handful regardless of the topic count.
 const zzWP17MaxAllocsPerTopic = 0.5
 
-func TestZZWP17FanoutUnchangedTickSkipsTopicScan(t *testing.T) {
+// An unchanged tick decodes neither the topic table (fan-out) nor every
+// topic's assignments (move). One store serves both runners: seeding
+// and electing it is most of the test's time.
+func TestZZWP17UnchangedTickSkipsTableScans(t *testing.T) {
 	const n = 500
 	store := zzWP17SeededStore(t, n)
-	fanout, _ := zzWP17Runners(t, store)
+	fanout, move := zzWP17Runners(t, store)
 	ctx := context.Background()
+
 	fanout.Reconcile(ctx)
-	allocs := testing.AllocsPerRun(20, func() { fanout.Reconcile(ctx) })
-	if allocs >= zzWP17MaxAllocsPerTopic*n {
+	if allocs := testing.AllocsPerRun(20, func() { fanout.Reconcile(ctx) }); allocs >= zzWP17MaxAllocsPerTopic*n {
 		t.Fatalf("unchanged fan-out tick allocates %.0f times with %d topics; it still decodes the topic table", allocs, n)
 	}
-}
-
-func TestZZWP17MoveUnchangedTickSkipsAssignmentScan(t *testing.T) {
-	const n = 500
-	store := zzWP17SeededStore(t, n)
-	_, move := zzWP17Runners(t, store)
-	ctx := context.Background()
 	move.Reconcile(ctx)
-	allocs := testing.AllocsPerRun(20, func() { move.Reconcile(ctx) })
-	if allocs >= zzWP17MaxAllocsPerTopic*n {
+	if allocs := testing.AllocsPerRun(20, func() { move.Reconcile(ctx) }); allocs >= zzWP17MaxAllocsPerTopic*n {
 		t.Fatalf("unchanged move tick allocates %.0f times with %d topics; it still decodes topics and assignments", allocs, n)
 	}
 }
