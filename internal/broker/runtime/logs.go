@@ -270,8 +270,8 @@ func (g *Logs) GetMany(topicName string, idxs []int, dst []*storage.Log) ([]*sto
 // openGuarded is Get's slow path: re-validate or open the (topic, idx)
 // log under the current incarnation, and return it with its entry.
 // Caller holds the topic's guard and not mu. The metastore lookup, the
-// incarnation check and storage.NewLog, whose recovery reads every
-// retained segment of the partition, all run under the guard alone:
+// incarnation check and storage.NewLog, whose recovery reads the
+// partition's active segment, all run under the guard alone:
 // they stall only callers that need this topic's slow path, never the
 // fast path of every Get on the node. Only this topic's guard holders
 // add or drop its entries, so the entry found here stays put until the

@@ -45,11 +45,11 @@ import (
 
 // coldWalkPause is the gap between two partitions the walk opens. Opening
 // goes through the registry's slow path, which holds the topic's guard
-// while the partition is recovered (every retained segment is read), so
-// a backlog of thousands of due partitions (every one is due after a
-// restart) must not be opened back to back: the pause keeps the walk to
-// at most ~100 opens a second and to a share of the disk, and lets the
-// topic's own opens and closes through between them.
+// while the partition's active segment is recovered, so a backlog of
+// thousands of due partitions (every one is due after a restart) must
+// not be opened back to back: the pause keeps the walk to at most ~100
+// opens a second and to a share of the disk, and lets the topic's own
+// opens and closes through between them.
 const coldWalkPause = 10 * time.Millisecond
 
 // ReaperRestarts reports how many times the process-wide retention loop
