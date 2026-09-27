@@ -235,6 +235,71 @@ func (l *Log) AppendWith(ctx context.Context, size int, fill func(dst []byte) []
 	return id, batch.err
 }
 
+// AppendManyWith is AppendWith for several records that are acked
+// together: record i is sizes[i] bytes, appended by fill(i, dst) under
+// the rules AppendWith sets for its fill. The records are staged in
+// slice order under one hold of the append lock, so they take
+// consecutive seqs, nothing is staged between them, and they share one
+// group commit: the call wakes the sync loop once, waits once, and
+// returns the records' IDs in slice order once all of them are durable.
+// A batch that outgrows the room left in the active segment rolls it
+// between two records exactly as single appends would (the records
+// before the roll are synced first, inline), so no frame spans two
+// segments.
+//
+// On disk a batch is the frames len(sizes) single appends would have
+// written, and replay cannot tell the two apart. A crash can keep a
+// prefix of a batch but never a gap: frames are written in order and
+// recovery truncates at the first torn one.
+//
+// An error means the batch is not durable as a whole and none of it
+// may be acked. Records a roll had already synced before it failed
+// stay in the log and are replayed, as with any failed sync, so a
+// caller that retries may duplicate them. A fill that fails or panics
+// withdraws the records staged since the last such roll.
+func (l *Log) AppendManyWith(ctx context.Context, sizes []int, fill func(i int, dst []byte) []byte) ([]RecordID, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(sizes) == 0 {
+		return nil, errors.New("wal: no records")
+	}
+	for i, size := range sizes {
+		if size <= 0 {
+			return nil, fmt.Errorf("wal: record %d: empty payload", i)
+		}
+		if size > l.opts.MaxRecord {
+			return nil, fmt.Errorf("wal: record %d: payload size %d exceeds max %d", i, size, l.opts.MaxRecord)
+		}
+	}
+	if fill == nil {
+		return nil, errors.New("wal: nil fill")
+	}
+
+	ids, batch, err := l.stageMany(sizes, fill)
+	if err != nil {
+		return nil, err
+	}
+
+	l.signalSync()
+	<-batch.done // see Append for why ctx is not honoured past this point
+	if batch.err != nil {
+		return nil, batch.err
+	}
+	return ids, nil
+}
+
+// stageMany runs appendManyLocked under mu, unlocking on a panic in fill
+// as stage does.
+func (l *Log) stageMany(sizes []int, fill func(i int, dst []byte) []byte) ([]RecordID, *syncBatch, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.appendManyLocked(sizes, fill)
+}
+
 // stage runs appendLocked under mu. The unlock is deferred so a panic
 // inside a caller-supplied fill cannot leave the log locked forever (an
 // HTTP handler's recover middleware would otherwise hide the panic and
