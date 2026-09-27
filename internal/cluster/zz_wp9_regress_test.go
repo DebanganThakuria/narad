@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/broker"
+	"github.com/debanganthakuria/narad/internal/broker/ingress"
+	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -556,5 +559,133 @@ func TestZZWP9ForwardsHandTheirBudgetToTheTransport(t *testing.T) {
 	}
 	if len(got) != 2 || got[0] <= 0 || got[1] <= 0 {
 		t.Fatalf("token budgets = %v, want both bounded by the transport", got)
+	}
+}
+
+// zzWP9SlotBroker blocks acks and commits until released and counts the
+// consumes, nacks and claim notes it sees.
+type zzWP9SlotBroker struct {
+	broker.Broker
+	gate     chan struct{}
+	consumes atomic.Int32
+	nacks    atomic.Int32
+	claims   atomic.Int32
+	acks     atomic.Int32
+}
+
+func (b *zzWP9SlotBroker) Ack(context.Context, string, consumer.Handle) error {
+	b.acks.Add(1)
+	<-b.gate
+	return nil
+}
+
+func (b *zzWP9SlotBroker) CommitAcceptedProduceBatch(context.Context, []ingress.ProduceRecord) ([]int64, error) {
+	<-b.gate
+	return []int64{1}, nil
+}
+
+func (b *zzWP9SlotBroker) Consume(_ context.Context, topicName string, _ brokermsg.ConsumeOpts) (topic.Message, bool, error) {
+	b.consumes.Add(1)
+	return topic.Message{Topic: topicName, Partition: 0, Offset: 1, Payload: []byte(`{}`), ReceiptHandle: consumer.EncodeHandle(consumer.Handle{Partition: 0, Offset: 1, Nonce: 7})}, true, nil
+}
+
+func (b *zzWP9SlotBroker) Nack(context.Context, string, consumer.Handle) error {
+	b.nacks.Add(1)
+	return nil
+}
+
+func (b *zzWP9SlotBroker) NoteRemoteClaim(string) { b.claims.Add(1) }
+
+// zzWP9QueuedBehindSlot holds the only messaging slot with an ack, then
+// sends req with a context cancelled while it waits, and returns the
+// reply once the slot frees.
+func zzWP9QueuedBehindSlot(t *testing.T, br *zzWP9SlotBroker, req nodewire.ConsumeRequest) nodewire.Response {
+	t.Helper()
+	s := &RPCServer{broker: br}
+	s.SetMessagingConcurrency(1)
+	ack, err := nodewire.EncodeAckRequest(nodewire.AckRequest{Topic: "orders", Partition: 0, Offset: 1, Nonce: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.HandleStreamRequest(context.Background(), clusterwire.StreamFrame{Type: clusterwire.StreamFrameNodeRequest, RequestID: 1, Payload: ack}, func(clusterwire.StreamFrame) {})
+	for br.acks.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	replies := make(chan nodewire.Response, 1)
+	payload, err := nodewire.EncodeConsumeRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.HandleStreamRequest(ctx, clusterwire.StreamFrame{Type: clusterwire.StreamFrameNodeRequest, RequestID: 2, Payload: payload}, func(f clusterwire.StreamFrame) {
+		res, _ := nodewire.DecodeResponse(append([]byte(nil), f.Payload...))
+		replies <- res
+	})
+	time.Sleep(20 * time.Millisecond)
+	cancel() // the requester's probe budget ran out while it was queued
+	time.Sleep(20 * time.Millisecond)
+	close(br.gate)
+	select {
+	case res := <-replies:
+		return res
+	case <-time.After(5 * time.Second):
+		t.Fatal("no reply")
+		return nodewire.Response{}
+	}
+}
+
+// A probe whose requester gave up while it waited for a messaging slot
+// is answered without reserving, reading and releasing a record.
+func TestZZWP9CancelledProbeSkipsTheBroker(t *testing.T) {
+	br := &zzWP9SlotBroker{gate: make(chan struct{})}
+	res := zzWP9QueuedBehindSlot(t, br, nodewire.ConsumeRequest{Topic: "orders", LocalOnly: true})
+	if res.Status != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", res.Status)
+	}
+	if n := br.consumes.Load(); n != 0 {
+		t.Fatalf("a cancelled probe reserved %d records", n)
+	}
+}
+
+// A claim whose requester gave up still retires the owner's hold, so the
+// record goes to somebody else now, but reserves nothing.
+func TestZZWP9CancelledClaimRetiresTheHoldWithoutReserving(t *testing.T) {
+	br := &zzWP9SlotBroker{gate: make(chan struct{})}
+	res := zzWP9QueuedBehindSlot(t, br, nodewire.ConsumeRequest{Topic: "orders", LocalOnly: true, Claim: true})
+	if res.Status != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", res.Status)
+	}
+	if n := br.consumes.Load(); n != 0 {
+		t.Fatalf("a cancelled claim reserved %d records", n)
+	}
+	if n := br.claims.Load(); n != 1 {
+		t.Fatalf("hold retirements = %d, want 1", n)
+	}
+}
+
+// Probes and acks do not queue behind commit batches: a commit holds its
+// slot across fsyncs, a probe or an ack is in-memory bookkeeping and at
+// most one read.
+func TestZZWP9MessagingOpsDoNotWaitBehindCommits(t *testing.T) {
+	br := &zzWP9SlotBroker{gate: make(chan struct{})}
+	defer close(br.gate)
+	s := &RPCServer{broker: br}
+	s.SetMessagingConcurrency(1)
+	commit, err := nodewire.EncodeCommitProduceBatchRequest(nodewire.CommitProduceBatchRequest{Records: []nodewire.CommitProduceRequest{{Topic: "orders", Payload: []byte("x")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.HandleStreamRequest(context.Background(), clusterwire.StreamFrame{Type: clusterwire.StreamFrameNodeRequest, RequestID: 1, Payload: commit}, func(clusterwire.StreamFrame) {})
+	time.Sleep(20 * time.Millisecond)
+	probe, err := nodewire.EncodeConsumeRequest(nodewire.ConsumeRequest{Topic: "orders", LocalOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replies := make(chan struct{}, 1)
+	s.HandleStreamRequest(context.Background(), clusterwire.StreamFrame{Type: clusterwire.StreamFrameNodeRequest, RequestID: 2, Payload: probe}, func(clusterwire.StreamFrame) { replies <- struct{}{} })
+	select {
+	case <-replies:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a probe queued behind a commit batch holding the messaging slot")
 	}
 }

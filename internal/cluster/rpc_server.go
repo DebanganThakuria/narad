@@ -45,15 +45,21 @@ type RPCServer struct {
 	// agrees with the router's and the HTTP handlers'.
 	maxConsumeWait time.Duration
 
-	// messagingSem bounds how many messaging handlers (produce commits,
-	// acks, non-blocking consumes) execute at once. The read loop still
-	// spawns a goroutine per frame so it never blocks; the goroutine
-	// waits here before touching the broker. nil disables gating
-	// (zero-value servers in tests); NewRPCServer sizes it to
-	// 4*GOMAXPROCS. Ops that call peers (delete_topic's purge broadcast)
-	// are never gated: they could hold a slot while waiting on a node
-	// that is itself waiting on us.
+	// messagingSem bounds how many messaging handlers (acks, extends,
+	// nacks, non-blocking consumes) execute at once, and commitSem how
+	// many produce commits do. The read loop still spawns a goroutine
+	// per frame so it never blocks; the goroutine waits here before
+	// touching the broker. The two are separate because a commit holds
+	// its slot across a segment fsync and an HWM fdatasync, while an ack
+	// or a probe is in-memory bookkeeping and at most one read: sharing
+	// one gate queued them behind the disk whenever commit fan-in
+	// approached its size. nil disables gating (zero-value servers in
+	// tests); NewRPCServer sizes both to max(64, 4*GOMAXPROCS). Ops that
+	// call peers (delete_topic's purge broadcast) are never gated: they
+	// could hold a slot while waiting on a node that is itself waiting
+	// on us.
 	messagingSem chan struct{}
+	commitSem    chan struct{}
 
 	// transferSem bounds the partition-transfer ops (segment listing and
 	// chunk reads): each chunk read pins up to storage.MaxSegmentReadBytes,
@@ -127,13 +133,11 @@ func defaultMessagingConcurrency() int {
 const minMessagingConcurrency = 64
 
 // SetMessagingConcurrency bounds concurrently executing messaging
-// handlers to n; n <= 0 disables the bound. Call before serving.
+// handlers to n, and concurrently executing produce commits to another
+// n; n <= 0 disables both bounds. Call before serving.
 func (s *RPCServer) SetMessagingConcurrency(n int) {
-	if n <= 0 {
-		s.messagingSem = nil
-		return
-	}
-	s.messagingSem = make(chan struct{}, n)
+	s.messagingSem = newSemaphore(n)
+	s.commitSem = newSemaphore(n)
 }
 
 // SetTransferConcurrency bounds concurrently executing partition-transfer
@@ -322,13 +326,68 @@ func (s *RPCServer) releaseDelivery(d delivery) {
 	}
 }
 
-// withMessagingSlot runs handle under the messaging concurrency bound.
-func (s *RPCServer) withMessagingSlot(handle func() nodewire.Response) nodewire.Response {
+// acquireMessagingSlot takes a slot under the messaging concurrency
+// bound, or reports false if ctx ends first: the requester gave up (its
+// budget ran out, or its client left), and the caller answers without
+// touching the broker. The uncontended case is one non-blocking send,
+// and never asks the request context for its Done channel, which the
+// transport makes only on demand. A true result must be paired with
+// releaseMessagingSlot.
+func (s *RPCServer) acquireMessagingSlot(ctx context.Context) bool {
+	sem := s.messagingSem
+	if sem == nil {
+		return true
+	}
+	select {
+	case sem <- struct{}{}:
+		return true
+	default:
+	}
+	select {
+	case sem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (s *RPCServer) releaseMessagingSlot() {
 	if sem := s.messagingSem; sem != nil {
+		<-sem
+	}
+}
+
+// withCommitSlot runs handle under the produce-commit concurrency bound.
+// A commit is not abandoned while it waits: whether a batch the
+// requester stopped waiting for may be skipped is the produce path's
+// decision, not the gate's.
+func (s *RPCServer) withCommitSlot(handle func() nodewire.Response) nodewire.Response {
+	if sem := s.commitSem; sem != nil {
 		sem <- struct{}{}
 		defer func() { <-sem }()
 	}
 	return handle()
+}
+
+// handleAckFamily runs an ack, extend or nack under the messaging
+// bound. One whose requester gave up while it waited for a slot is
+// answered 503 unapplied. Skipping it is safe: acks are idempotent by
+// nonce, the requester already answered its client with an error, and a
+// retry is applied on its own; applying the stale one as well would
+// only make the retry look stale.
+func (s *RPCServer) handleAckFamily(ctx context.Context, op nodewire.Operation, payload []byte) nodewire.Response {
+	if !s.acquireMessagingSlot(ctx) {
+		return errorResponse(http.StatusServiceUnavailable, "request cancelled while waiting for a handler slot")
+	}
+	defer s.releaseMessagingSlot()
+	switch op {
+	case nodewire.OpAck:
+		return s.handleAck(ctx, payload)
+	case nodewire.OpExtendAck:
+		return s.handleExtendAck(ctx, payload)
+	default:
+		return s.handleNack(ctx, payload)
+	}
 }
 
 // withSlot runs handle under sem, or answers 503 if the request is
@@ -357,18 +416,14 @@ func (s *RPCServer) dispatch(ctx context.Context, key requestKey, payload []byte
 	case nodewire.OpProduce:
 		res = s.handleProduce(ctx, payload)
 	case nodewire.OpCommitProduce:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleCommitProduce(ctx, payload) })
+		res = s.withCommitSlot(func() nodewire.Response { return s.handleCommitProduce(ctx, payload) })
 	case nodewire.OpCommitProduceBatch:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleCommitProduceBatch(ctx, payload) })
+		res = s.withCommitSlot(func() nodewire.Response { return s.handleCommitProduceBatch(ctx, payload) })
 	case nodewire.OpConsume:
 		// Gated inside the handler: only non-blocking scans take a slot.
 		res = s.handleConsume(ctx, key, payload)
-	case nodewire.OpAck:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleAck(ctx, payload) })
-	case nodewire.OpExtendAck:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleExtendAck(ctx, payload) })
-	case nodewire.OpNack:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleNack(ctx, payload) })
+	case nodewire.OpAck, nodewire.OpExtendAck, nodewire.OpNack:
+		res = s.handleAckFamily(ctx, op, payload)
 	case nodewire.OpListPartitionSegments:
 		res = s.withSlot(ctx, s.transferSem, func() nodewire.Response { return s.handleListPartitionSegments(payload) })
 	case nodewire.OpFetchSegmentChunk:
