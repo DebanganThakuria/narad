@@ -92,7 +92,15 @@ type ProduceRequest struct {
 // CommitProduceRequest asks the owner of TargetPartition to durably
 // commit one already-routed record.
 type CommitProduceRequest struct {
-	Topic           string
+	Topic string
+	// TopicID is the incarnation (topic.Topic.ID) the record was
+	// accepted against, so an owner can refuse a record of a deleted
+	// topic whose name now belongs to a new one. Empty for records
+	// accepted before incarnations were stamped. It travels as an
+	// optional trailing field (see EncodeCommitProduceBatchRequest),
+	// written only when set, and an owner on an older release refuses
+	// a frame that carries it.
+	TopicID         string
 	Key             string
 	TargetPartition int
 	Payload         []byte

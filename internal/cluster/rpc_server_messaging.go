@@ -61,6 +61,7 @@ func (s *RPCServer) handleCommitProduceBatch(ctx context.Context, payload []byte
 	for _, record := range req.Records {
 		records = append(records, ingress.ProduceRecord{
 			Topic:           record.Topic,
+			TopicID:         record.TopicID,
 			Key:             record.Key,
 			TargetPartition: record.TargetPartition,
 			Payload:         record.Payload,
