@@ -42,6 +42,8 @@ func runServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("logger: %w", err)
 	}
+	// Before anything allocates in earnest; see memlimit.go.
+	applyContainerMemoryLimit(log)
 	reg, m := buildMetrics()
 
 	if err = os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil {
