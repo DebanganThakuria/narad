@@ -46,7 +46,7 @@ Honorable mention: `rate(narad_errors_total[5m])` by `component`/`kind` as a cat
 | `narad_acked_ahead_size` at the topic cap | the head of that partition is stuck (a consumer holding it died or never acked): consume returns 204 for fresh offsets until the head redelivers and is acked. Acks are never rejected for it |
 | `narad_ack_extended_total` / `narad_nack_total` | Lease heartbeats and hand-backs |
 
-The per-partition series (lag, oldest unconsumed age, in-flight and acked-ahead sizes, `narad_partition_size_bytes`, `narad_segments`) are exported for every partition the node owns, open log or not. Before, a partition whose log was idle-evicted, or not yet opened since a restart, dropped out of them, which hid exactly the untouched backlog they exist to show. For such a partition the file-derived values (size, segments, the high watermark) are cached for up to 30 s, so a cold-retention sweep between two polls can leave them stale for that long; the frontier and the in-flight and acked-ahead sizes are always current. A deleted topic's series stay pruned even while one of its logs is still open on a node.
+The per-partition series (lag, oldest unconsumed age, in-flight and acked-ahead sizes, `narad_partition_size_bytes`, `narad_segments`) are exported for every partition the node owns, open log or not, as long as its files hold a boundary: a closed partition whose `hwm` file is empty (as a crash leaves it, until the log is opened and closed again) has no series. Before, a partition whose log was idle-evicted, or not yet opened since a restart, dropped out of them, which hid exactly the untouched backlog they exist to show. For such a partition the file-derived values (size, segments, the high watermark) are cached for up to 30 s, so a cold-retention sweep between two polls can leave them stale for that long; the frontier and the in-flight and acked-ahead sizes are always current. A deleted topic's series stay pruned even while one of its logs is still open on a node.
 
 ### Fan-out
 
@@ -64,7 +64,7 @@ The per-partition series (lag, oldest unconsumed age, in-flight and acked-ahead 
 |---|---|
 | `narad_storage_fsync_duration_seconds` | Your disk's honesty meter |
 | `narad_storage_flush_duration_seconds` / `_flush_bytes_total` | Flusher throughput |
-| `narad_storage_high_watermark_persist_duration_seconds` | Cost of writing the `hwm` file: once per log open (emptying it before the first commit) plus once per close (the exact boundary). Commits no longer write it, so a dashboard or alert that read it as a per-commit cost now reads near zero |
+| `narad_storage_high_watermark_persist_duration_seconds` | Cost of writing the `hwm` file: at most once per log open (the first commit after the open empties it) and at most once per close (the exact boundary, skipped when the file already holds it). Commits no longer write it, so its rate no longer tracks commits, and a dashboard or alert that read it as a per-commit cost no longer measures one |
 | `narad_storage_retention_bytes_deleted_total` / `_messages_deleted_total` | Reaper activity, labeled by reason |
 | `narad_data_dir_size_bytes` / `_available_bytes`, `narad_topic_bytes`, `narad_partition_size_bytes`, `narad_segments` | Disk accounting at every zoom level |
 

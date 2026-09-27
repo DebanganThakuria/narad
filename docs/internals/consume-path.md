@@ -153,7 +153,7 @@ lost while this happens.
 | Committed frontier | `consumer.offset` file (8 bytes overwritten in place, fdatasynced), or `consumer.ahead` when that was written in the same commit | yes | about one commit interval of just-acked messages redeliver. `consumer.offset` is written only when `consumer.ahead` did not already carry the frontier, so after a crash the newest frontier may live only there; after a graceful stop `consumer.offset` alone is exact. Neither file's frontier ever moves backwards |
 | Corrupt-skip set | shard memory + metrics | no* | *the skip is re-derived on re-read; the counter is the audit trail |
 
-The asymmetry is the design: everything cheap to reconstruct is memory; the one thing that must never move backwards-then-forwards inconsistently (the frontier) is a single fsynced 8-byte file per partition.
+The asymmetry is the design: everything cheap to reconstruct is memory; the one thing that must never move backwards-then-forwards inconsistently (the frontier) is fsynced in place per partition, in the 8-byte `consumer.offset` or in the `consumer.ahead` record that carries it.
 
 ## Ack validation, precisely
 

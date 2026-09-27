@@ -17,7 +17,7 @@ sequenceDiagram
     H-->>C: 202 Accepted
 ```
 
-Every node has one **ingress WAL**, a segmented append-only log with group commit: concurrent produces are staged into a shared buffer and fsynced together, so under load the per-message fsync cost amortizes toward zero. The record stores the topic and its incarnation id (the `id` of the topic record the payload was validated against), the key (none for a keyless produce), the target partition, the payload, and a timestamp. Once the fsync returns, the client gets its `202`: the message now survives any crash of this node.
+Every node has one **ingress WAL**, a segmented append-only log with group commit: concurrent produces are staged into a shared buffer and fsynced together, so under load the per-message fsync cost amortizes toward zero. The record stores the topic and its incarnation id (the `id` of the topic record the payload was validated against, when the record has one), the key (none for a keyless produce), the target partition, the payload, and a timestamp. Once the fsync returns, the client gets its `202`: the message now survives any crash of this node.
 
 The target partition is resolved *at accept time* from the local metastore replica: keyed messages hash; unkeyed ones rotate round-robin and are stored with no key at all; explicit `?partition=` pins.
 
@@ -56,7 +56,7 @@ Steps 2 to 4 run as one pass on the partition's flusher goroutine (`storage.Comm
 
 ### Batches that arrive together share one commit
 
-The partition's produce lock spans the append and the durable commit: a failed commit discards everything above the high-watermark, another caller's records included, so the two can never be split. Commit batches for one partition often arrive together (every node's dispatcher sends each partition its own batch per pass, and fan-out cursors add theirs), and each used to pay its own write, fsync and read-back back to back behind that lock.
+The partition's produce lock spans the append and the durable commit: a failed commit discards everything above the high-watermark, another caller's records included, so the two can never be split. Commit batches for one partition often arrive together (each node's dispatcher sends its own, and fan-out cursors add theirs), and each used to pay its own write, fsync and read-back back to back behind that lock.
 
 Now a batch queues on the partition's combiner. With no cycle running, its caller becomes the leader: it takes the produce lock, drains every batch queued by then, appends them as one run and commits them with one `CommitDurable`, never releasing the lock in between. Everyone in the cycle shares the outcome: contiguous offsets on success, or the same error on failure, which the ingress dispatcher and the fan-out runner already handle by appending again. Batches that arrive during a cycle wait for the next one, which the leader hands to the oldest of them on its way out.
 
@@ -78,7 +78,7 @@ The checkpoint compacts fully-dispatched segments; a fully-dispatched *active* s
 
 ### Record formats
 
-A WAL record starts with a format byte. Format 1 holds topic, key, partition, timestamp and payload; format 2, which every accept now writes, adds the topic's incarnation id after the topic name. The decoder reads both, so a WAL written by an older binary replays unchanged. The reverse is not true: a binary from before format 2 (v3.0.1 and earlier) cannot decode a format-2 record, and its dispatcher stops at the first one, with everything the node accepts after it waiting behind it. Nothing is lost, and delivery resumes once a newer binary is back. Downgrading a node therefore needs its ingress WAL drained first (every accepted record dispatched); see [Rolling back to an earlier release](../operate/helm-chart.md#rolling-back-to-an-earlier-release).
+A WAL record starts with a format byte. Format 1 holds topic, key, partition, timestamp and payload; format 2, which every accept for a topic with an incarnation id now writes, adds that id after the topic name (a topic created before v2.2.0 has no id, and its records stay format 1). The decoder reads both, so a WAL written by an older binary replays unchanged. The reverse is not true: a binary from before format 2 (v3.0.1 and earlier) cannot decode a format-2 record, and its dispatcher stops at the first one, with everything the node accepts after it waiting behind it. Nothing is lost, and delivery resumes once a newer binary is back. Downgrading a node therefore needs its ingress WAL drained first (every accepted record dispatched); see [Rolling back to an earlier release](../operate/helm-chart.md#rolling-back-to-an-earlier-release).
 
 ### Segment preparation (opt-in)
 
@@ -86,7 +86,7 @@ With `storage.ingress_wal_prealloc: true` (off by default, see [Configuration](.
 
 Overwriting in place changes what a power loss can leave. An appended write that tears loses its end; an overwrite can leave a hole of zeros in front of valid frames of the same write. So writes into a prepared segment are bounded: a group commit larger than 16 MiB is written and synced in runs of whole frames of at most 16 MiB, and recovery accepts "a bad frame followed by valid frames" as a torn tail only in the last segment, only when it ends in the trailer, and only within 16 MiB of the bad frame. It then truncates at the bad frame; anything else is still a loud corruption failure at open. The cost of the rule: inside that window, damage to frames that were already synced cannot be told apart from a tear and is truncated too, as damage to the last frame of any active segment always was.
 
-Preparation costs up to two segments of extra disk (the active prepared segment and a ready spare) and one extra segment of background zero-filling per segment. Its latency win was measured on ext4 only; APFS showed no difference. A binary from before preparation opens a cleanly stopped prepared WAL without losing records, but refuses to start (`bad frame magic ... corrupt frame`) on a WAL whose prepared segment was torn by a crash: start the new binary once to recover it before rolling back.
+Preparation costs up to two segments of extra disk (the active prepared segment and a ready spare) and one extra segment of background zero-filling per segment. Its latency win was measured on ext4 only; APFS showed no difference. A binary from before preparation opens a cleanly stopped prepared WAL without losing records, but can refuse to start (a `corrupt frame` error) on a WAL where a crash tore a write inside a prepared segment and left valid frames behind a hole: start the new binary once to recover it before rolling back.
 
 ## The numbers (compiled-in, grep-able)
 

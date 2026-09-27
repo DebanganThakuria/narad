@@ -10,7 +10,7 @@ topics/orders/
 └── p00003/
     ├── 00000000000000000000.log     ← sealed segment (starts at offset 0)
     ├── 00000000000000450832.log     ← active segment (starts at offset 450832)
-    ├── hwm                          ← 8-byte high-watermark of the closed log (empty while it is open)
+    ├── hwm                          ← 8-byte high-watermark written at close (emptied by the first commit after an open)
     ├── consumer.offset              ← 8-byte committed consumer frontier
     └── consumer.ahead               ← offsets acked out of order above it, plus the frontier (two checksummed 4 KiB slots)
 topics/orders.stale-3f9a1c0e7b2d4a61/   ← quarantined: a deleted incarnation's leftover
@@ -72,7 +72,7 @@ The **HWM** is the exclusive bound of what consumers may see. An open log keeps 
 
 The record tail never hides a visible record, because a commit fsyncs and verifies its frames before it advances the boundary. So a crash while the log is open leaves an empty file and every committed record visible, and a commit pays one fsync (the segment) where it used to pay a second, serial one for the boundary file under the produce lock. Emptying the file rather than letting it lag the commits is what keeps a rollback safe: releases before this one persisted the file on every commit, and recover an 8-byte file as `min(file, tail)` and an empty one as the tail. A file that lagged the acked commits would make such a binary, started after a crash, hide acked records, and its failed-commit discard would then truncate them.
 
-After a crash the file stays empty until the log is opened and closed again, and a reader of the closed partition finds no boundary on disk. Startup opens every partition the node owns before it reports ready (a partition whose topic or assignment lookup fails at that point is skipped and logged), so in practice every owned partition is open until idle eviction closes it and writes the exact boundary.
+After a crash the file stays empty until the log is opened and closed again, and a reader of the closed partition finds no boundary on disk. Startup opens every partition the node owns before it reports ready (one whose assignment lookup or open fails at that point is skipped), so in practice every owned partition is open until idle eviction closes it and writes the exact boundary.
 
 Records can sit above the HWM, which is a deliberate artifact:
 

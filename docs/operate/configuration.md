@@ -173,13 +173,13 @@ your own volumes before relying on it. What it changes:
 - **Disk**: up to two extra segments per node (the prepared active segment and
   a ready spare, `next-segment.prep` in `<data_dir>/ingress/produce`), and one
   segment's worth of background zero-filling per segment. If the disk is full,
-  preparation fails and the WAL falls back to plain segments.
+  preparation fails and the next roll creates a plain segment instead.
 - **Crash recovery**: a torn write inside a prepared segment is truncated
   rather than refused. The details, including the one kind of damage recovery
   can no longer tell from a tear, are in [Produce
   Path](../internals/produce-path.md#segment-preparation-opt-in).
-- **Rollback**: a binary from before preparation (v3.0.1 and earlier) refuses to
-  start on a WAL whose prepared segment was torn by a crash; see [Rolling back
+- **Rollback**: a binary from before preparation (v3.0.1 and earlier) can refuse
+  to start on a WAL whose prepared segment a crash tore; see [Rolling back
   to an earlier release](helm-chart.md#rolling-back-to-an-earlier-release).
   Turning the setting off again needs nothing: the next start trims the
   prepared segment and removes the spare.

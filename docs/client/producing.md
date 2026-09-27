@@ -12,7 +12,7 @@ curl -u $AUTH -X POST \
 - The **body is the message**: raw bytes, up to **1 MiB**. JSON, protobuf, plain text, an image: Narad doesn't care (unless the topic has a [schema](schemas.md), in which case the body must be JSON that validates against it). No client-side encoding, ever; see [how each kind comes back](consuming.md#the-payload-comes-back-the-way-you-sent-it).
 - `key` (query param, optional): messages with the same key stick to the same partition in normal operation: locality for fan-out and consumers, not an ordering guarantee.
 - `partition` (query param, optional): pin the message to an exact partition, overriding key hashing. Most apps never need this.
-- No key and no partition? Narad spreads messages across partitions round-robin. Such a message is stored without a key, and consumers get no `key` field for it. (Older releases invented a `key-<n>` key for it; nothing does now.) Fan-out copies of a keyless message are spread round-robin over the child's partitions too.
+- No key and no partition? Narad spreads messages across partitions round-robin. Such a message is stored without a key, and consumers get no `key` field for it. (Older releases invented a `key-<n>` key for it; nothing does now, but messages they stored keep theirs.) Fan-out copies of a keyless message are spread round-robin over the child's partitions too.
 - A key does not have to be text: one that is not valid UTF-8 is stored as sent, and consumers get it base64-encoded and flagged (see [Consuming](consuming.md#the-payload-comes-back-the-way-you-sent-it)).
 
 ## What `202 Accepted` means: read this once, carefully
