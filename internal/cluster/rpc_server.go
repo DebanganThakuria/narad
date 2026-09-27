@@ -80,8 +80,9 @@ type RPCServer struct {
 	// deliveries remembers messages handed to forwarded consumes whose
 	// client may cancel after the reply was already sent; see
 	// HandleStreamCancel. deliveryExpiry is the same records in insertion
-	// order with their deadlines, so expiring old ones is a pop from the
-	// front, never a scan of the map. now is the clock (tests inject one).
+	// order with their deadlines, from deliveryHead on, so expiring old
+	// ones is a pop from the front, never a scan of the map. now is the
+	// clock (tests inject one).
 	// tokens holds the standing interest peers have registered with this
 	// node (the owner half of the token protocol); demand is how an
 	// inbound notification reaches a consumer parked here (the requester
@@ -93,6 +94,7 @@ type RPCServer struct {
 	deliveriesMu   sync.Mutex
 	deliveries     map[requestKey]delivery
 	deliveryExpiry []deliveryDeadline
+	deliveryHead   int
 	now            func() time.Time
 }
 
@@ -321,20 +323,32 @@ func (s *RPCServer) rememberDelivery(key requestKey, topicName string, h consume
 // A queue entry whose record was already taken (cancelled) or replaced
 // by a later delivery under the same key is skipped. Must hold
 // deliveriesMu.
+//
+// The queue's head moves forward over the spent entries rather than
+// shifting the rest down on every pop: once the queue is full, nearly
+// every delivery expires one, and the shift cost a copy of the whole
+// queue each time (57 us per delivery at 50k a second). The live
+// entries move to the front only once the spent ones are more than
+// half the array, which the pops since the last move have paid for, so
+// a delivery costs O(1) amortized and the array stays within about
+// twice the live entries.
 func (s *RPCServer) expireDeliveriesLocked(now time.Time) {
-	n := 0
-	for n < len(s.deliveryExpiry) && n < deliveryExpiryBudget && !s.deliveryExpiry[n].expireAt.After(now) {
-		e := s.deliveryExpiry[n]
+	q, head := s.deliveryExpiry, s.deliveryHead
+	for n := 0; head < len(q) && n < deliveryExpiryBudget && !q[head].expireAt.After(now); n++ {
+		e := q[head]
 		if d, ok := s.deliveries[e.key]; ok && d.expireAt.Equal(e.expireAt) {
 			delete(s.deliveries, e.key)
 		}
-		n++
+		head++
 	}
-	if n > 0 {
-		// Shift in place; the queue is a FIFO whose head moves forward,
-		// and copying the remainder keeps the backing array from growing
-		// without bound.
-		s.deliveryExpiry = append(s.deliveryExpiry[:0], s.deliveryExpiry[n:]...)
+	switch {
+	case head == s.deliveryHead:
+	case head == len(q):
+		s.deliveryExpiry, s.deliveryHead = q[:0], 0
+	case head > len(q)/2:
+		s.deliveryExpiry, s.deliveryHead = append(q[:0], q[head:]...), 0
+	default:
+		s.deliveryHead = head
 	}
 }
 
