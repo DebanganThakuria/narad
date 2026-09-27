@@ -4,9 +4,8 @@
 // Logs is the single owner of the map from (topic, partition) to
 // *storage.Log. Every other broker subpackage that needs to read or
 // write a partition's log goes through Logs — there is no sharing of
-// the underlying map. CloseTopic / CloseAll are the only paths that
-// retire entries; UpdateTopicRetention and DeleteTopic call
-// CloseTopic so the next access reopens with fresh options.
+// the underlying map. UpdateTopicRetention calls CloseTopic so the next
+// access reopens with fresh options; DeleteTopic purges (PurgeTopic).
 package runtime
 
 import (
@@ -15,8 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"strconv"
-	"strings"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,6 +28,13 @@ import (
 // Logs is the partition-log manager. All access is concurrency-safe;
 // the map is RWMutex-guarded for the lazy-open fast path. The produce
 // serialization mutexes live in produce_lock.go.
+//
+// Lock order: a partition's produce mutex, then its topic's guard, then
+// mu. Every close of a topic's logs holds that topic's guard, and mu
+// only long enough to claim or drop map entries: the log I/O (Close's
+// flush and fsyncs, a purge's unlink) runs under the guard alone, so it
+// stalls callers that need that topic and nobody else. A Get that finds
+// an entry being closed takes the slow path and waits on the guard.
 type Logs struct {
 	dataDir     string
 	storageOpts storage.Options
@@ -44,15 +49,15 @@ type Logs struct {
 	logger   *slog.Logger
 
 	mu   sync.RWMutex
-	logs map[string]*logEntry
+	logs map[logKey]*logEntry
 
-	// guards serializes the slow path (opening a partition log, which
-	// may adopt, verify or quarantine the topic directory) against a
-	// purge of the same topic, per topic name. A purge holds its
-	// topic's guard from closing the logs through unlinking the
-	// directory, so no Get can open a log in a directory that is about
-	// to disappear, and a Get that waited sees the directory gone.
-	// Lock order: guard, then mu.
+	// guards serializes, per topic name, everything that adds or drops
+	// the topic's map entries: the slow path (opening a partition log,
+	// which may adopt, verify or quarantine the topic directory) and
+	// every close, a purge's included. A purge holds its topic's guard
+	// from closing the logs through unlinking the directory, so no Get
+	// can open a log in a directory that is about to disappear, and a
+	// Get that waited sees the directory gone. Lock order: see Logs.
 	guardMu sync.Mutex
 	guards  map[string]*topicGuard
 
@@ -70,13 +75,26 @@ type Logs struct {
 	opened func(topicName string, idx int, l *storage.Log)
 
 	produceMu   sync.Mutex
-	produceSync map[string]*sync.Mutex
+	produceSync map[logKey]*sync.Mutex
 
 	// coldDefer holds partitions the cold-retention walk opened and found
-	// nothing to reap in, keyed by keyOf, with the time before which the
-	// walk leaves them alone.
+	// nothing to reap in, with the time before which the walk leaves them
+	// alone.
 	coldMu    sync.Mutex
-	coldDefer map[string]time.Time
+	coldDefer map[logKey]time.Time
+}
+
+// logKey names one partition log: the key of logs, produceSync and
+// coldDefer. A struct rather than a "topic/idx" string, so looking an
+// entry up on the Get fast path (once per partition per consume scan,
+// once per produce commit batch) allocates nothing.
+type logKey struct {
+	topic string
+	idx   int
+}
+
+func keyOf(topicName string, idx int) logKey {
+	return logKey{topic: topicName, idx: idx}
 }
 
 // topicVersioner is the optional metastore capability the Get fast
@@ -103,11 +121,37 @@ type logEntry struct {
 	// (stamp). The walk closes the log only while it is still set, so a
 	// consumer that opened the log after it is never cut off mid-read.
 	walkOwned atomic.Bool
+	// closing is set under mu, by a close holding the topic's guard,
+	// before the log is closed outside mu; the entry leaves the map once
+	// Close returns, and closed is closed then. Get treats a closing
+	// entry as absent and goes to the slow path, where it waits on the
+	// guard. Peek waits on closed instead of reporting the partition
+	// closed early: its callers read the high-watermark file of a closed
+	// log, and Close is still writing it.
+	closing bool
+	closed  chan struct{}
 }
 
+// stampEvery bounds how far lastAccess may lag the last Get. Idle
+// eviction asks only whether a log went unused for its whole window,
+// which is at least a minute (the config floor), so a stamp up to a
+// second old changes no eviction decision (evict.go invariant 5).
+// Skipping the store on the other calls keeps a hot entry's cache line
+// from bouncing between the cores that read the log.
+const stampEvery = int64(time.Second)
+
 func (e *logEntry) stamp() {
-	e.walkOwned.Store(false)
-	e.lastAccess.Store(time.Now().UnixNano())
+	e.stampAt(time.Now().UnixNano())
+}
+
+// stampAt is stamp with the clock already read (unix nanoseconds).
+func (e *logEntry) stampAt(now int64) {
+	if e.walkOwned.Load() {
+		e.walkOwned.Store(false)
+	}
+	if now-e.lastAccess.Load() >= stampEvery {
+		e.lastAccess.Store(now)
+	}
 }
 
 // NewLogs constructs a partition-log manager. metastore is consulted
@@ -120,9 +164,9 @@ func NewLogs(dataDir string, storageOpts storage.Options, ms metastore.Metastore
 		metastore:   ms,
 		metrics:     m,
 		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		logs:        make(map[string]*logEntry),
+		logs:        make(map[logKey]*logEntry),
 		guards:      make(map[string]*topicGuard),
-		produceSync: make(map[string]*sync.Mutex),
+		produceSync: make(map[logKey]*sync.Mutex),
 	}
 	if v, ok := ms.(topicVersioner); ok {
 		g.versions = v
@@ -150,14 +194,14 @@ func (g *Logs) DataDir() string { return g.dataDir }
 // incarnation: the topic directory's marker is compared with the
 // metastore record's ID, and a directory left behind by a deleted
 // same-named topic is quarantined instead of served (see
-// ensureIncarnationLocked). An already-open log is re-checked whenever
+// ensureIncarnationGuarded). An already-open log is re-checked whenever
 // the topic's metadata version moves, so a delete plus recreate applied
 // while the log was open retires it rather than serving the old data.
 func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 	key := keyOf(topicName, idx)
 
 	g.mu.RLock()
-	if e, ok := g.logs[key]; ok && g.entryCurrent(topicName, e) {
+	if e, ok := g.logs[key]; ok && !e.closing && g.entryCurrent(topicName, e) {
 		e.stamp()
 		g.mu.RUnlock()
 		return e.log, nil
@@ -166,9 +210,7 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 
 	unlock := g.lockTopic(topicName)
 	defer unlock()
-	g.mu.Lock()
-	l, quarantined, err := g.openLocked(topicName, idx, key)
-	g.mu.Unlock()
+	l, _, quarantined, err := g.openGuarded(topicName, idx, false)
 	if quarantined {
 		// A deleted incarnation's directory was set aside: drop the
 		// in-memory state that belonged to it (outside mu, under the
@@ -178,11 +220,65 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 	return l, err
 }
 
-// openLocked is Get's slow path: re-validate or open the (topic, idx)
-// log under the current incarnation. Caller holds the topic's guard and
-// mu (write). quarantined reports that a directory of another
-// incarnation was set aside on the way.
-func (g *Logs) openLocked(topicName string, idx int, key string) (l *storage.Log, quarantined bool, err error) {
+// GetMany resolves the logs of several partitions of one topic, as a Get
+// of each would, into dst[i] for idxs[i], and returns dst. dst is reused
+// when it has the capacity, so a caller that keeps it across calls
+// allocates nothing. A consume scan resolves every local partition of
+// the topic before it probes them: GetMany finds the open ones under one
+// read lock, one topic-version read and one clock read, where a Get per
+// partition would pay each of those per partition, and sends only the
+// rest (not open, being closed, or opened under an older version of the
+// topic record) through Get's slow path, in idxs order. On an error it
+// returns nil and the error; the partitions it opened stay open.
+func (g *Logs) GetMany(topicName string, idxs []int, dst []*storage.Log) ([]*storage.Log, error) {
+	dst = slices.Grow(dst[:0], len(idxs))[:len(idxs)]
+	missing := false
+	g.mu.RLock()
+	var version uint64
+	if g.versions != nil {
+		version = g.versions.TopicVersion(topicName)
+	}
+	now := time.Now().UnixNano()
+	for i, idx := range idxs {
+		e, ok := g.logs[keyOf(topicName, idx)]
+		if ok && !e.closing && (g.versions == nil || e.version.Load() == version) {
+			e.stampAt(now)
+			dst[i] = e.log
+			continue
+		}
+		dst[i] = nil
+		missing = true
+	}
+	g.mu.RUnlock()
+	if !missing {
+		return dst, nil
+	}
+	for i, idx := range idxs {
+		if dst[i] != nil {
+			continue
+		}
+		l, err := g.Get(topicName, idx)
+		if err != nil {
+			return nil, err
+		}
+		dst[i] = l
+	}
+	return dst, nil
+}
+
+// openGuarded is Get's slow path: re-validate or open the (topic, idx)
+// log under the current incarnation, and return it with its entry.
+// Caller holds the topic's guard and not mu. The metastore lookup, the
+// incarnation check and storage.NewLog, whose recovery reads every
+// retained segment of the partition, all run under the guard alone:
+// they stall only callers that need this topic's slow path, never the
+// fast path of every Get on the node. Only this topic's guard holders
+// add or drop its entries, so the entry found here stays put until the
+// new one is installed under mu. walk marks a newly installed entry as
+// the cold-retention walk's (see openForWalk) in the same critical
+// section. quarantined reports that a directory of another incarnation
+// was set aside on the way.
+func (g *Logs) openGuarded(topicName string, idx int, walk bool) (l *storage.Log, entry *logEntry, quarantined bool, err error) {
 	var version uint64
 	if g.versions != nil {
 		// Read the version BEFORE the record: a change that lands
@@ -205,27 +301,31 @@ func (g *Logs) openLocked(topicName string, idx int, key string) (l *storage.Log
 			// after the topic's files were purged. The delete path waits
 			// for the local replica to reflect the deletion before
 			// purging, so by purge time this branch is authoritative.
-			return nil, false, errs.ErrTopicNotFound
+			return nil, nil, false, errs.ErrTopicNotFound
 		default:
-			return nil, false, fmt.Errorf("broker/runtime: lookup topic for retention: %w", err)
+			return nil, nil, false, fmt.Errorf("broker/runtime: lookup topic for retention: %w", err)
 		}
 	}
-	if e, ok := g.logs[key]; ok {
+	key := keyOf(topicName, idx)
+	g.mu.RLock()
+	e, open := g.logs[key]
+	g.mu.RUnlock()
+	if open {
 		if e.incarnation == incarnation {
 			// The record changed (an alter, or a version bump) but the
 			// incarnation did not: the open log is still the right one.
 			e.version.Store(version)
 			e.stamp()
-			return e.log, false, nil
+			return e.log, e, false, nil
 		}
 		// The topic was deleted and recreated while its logs were
 		// open: every open log under the name belongs to the old
 		// incarnation and must go before the directory is checked.
-		g.closeTopicLocked(topicName)
+		_ = g.closeTopicGuarded(topicName)
 	}
-	quarantined, err = g.ensureIncarnationLocked(topicName, incarnation)
+	quarantined, err = g.ensureIncarnationGuarded(topicName, incarnation)
 	if err != nil {
-		return nil, quarantined, err
+		return nil, nil, quarantined, err
 	}
 	if g.metrics != nil {
 		opts.Metrics = g.metrics.StorageRecorder(topicName, idx)
@@ -234,16 +334,19 @@ func (g *Logs) openLocked(topicName string, idx int, key string) (l *storage.Log
 	partitionDir := storage.TopicPartitionDir(g.dataDir, topicName, idx)
 	l, err = storage.NewLog(partitionDir, opts)
 	if err != nil {
-		return nil, quarantined, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)
+		return nil, nil, quarantined, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)
 	}
-	e := &logEntry{log: l, incarnation: incarnation}
+	e = &logEntry{log: l, incarnation: incarnation}
 	e.version.Store(version)
-	e.stamp()
+	e.lastAccess.Store(time.Now().UnixNano())
+	e.walkOwned.Store(walk)
+	g.mu.Lock()
 	g.logs[key] = e
 	if g.opened != nil {
 		g.opened(topicName, idx, l)
 	}
-	return l, quarantined, nil
+	g.mu.Unlock()
+	return l, e, quarantined, nil
 }
 
 // SetOpened registers a hook invoked with every partition log just
@@ -266,29 +369,51 @@ func (g *Logs) entryCurrent(topicName string, e *logEntry) bool {
 // opening one. Read-only observers (the metrics snapshotter) use it so a
 // poll never creates a partition directory or resurrects a log that a
 // concurrent topic delete just retired.
+//
+// Peek of a partition whose log is being closed waits for the close:
+// "not open" must keep meaning the log's high-watermark file is final,
+// which it is only once Close returns. Observers of other partitions
+// never wait.
 func (g *Logs) Peek(topicName string, idx int) (*storage.Log, bool) {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	e, ok := g.logs[keyOf(topicName, idx)]
-	if !ok || e.walkOwned.Load() {
-		// A log the cold-retention walk opened for a sweep is not open
-		// to observers: it was closed a moment ago and will be closed
-		// again in milliseconds, and a reader that found it here would be
-		// cut off mid-read.
-		return nil, false
+	key := keyOf(topicName, idx)
+	for {
+		g.mu.RLock()
+		e, ok := g.logs[key]
+		switch {
+		case !ok:
+			g.mu.RUnlock()
+			return nil, false
+		case e.closing:
+			closed := e.closed
+			g.mu.RUnlock()
+			<-closed
+			continue
+		case e.walkOwned.Load():
+			// A log the cold-retention walk opened for a sweep is not open
+			// to observers: it was closed a moment ago and will be closed
+			// again in milliseconds, and a reader that found it here would
+			// be cut off mid-read.
+			g.mu.RUnlock()
+			return nil, false
+		}
+		g.mu.RUnlock()
+		return e.log, true
 	}
-	return e.log, true
 }
 
 // PeekHighWatermark returns the partition's visible tail without
 // opening its log: the live high-watermark when the log is open, else
-// the persisted one on disk. ok is false when neither exists (no log
-// was ever opened for the partition here, or its directory is gone).
-// The persisted boundary is exact for a cleanly closed log and lags
-// only after a crash. Observers use it where Peek's "closed means
-// nothing" would hide a backlog nobody has read since a restart or an
-// idle eviction, and reading the file rather than opening the log keeps
-// observation from resurrecting a deleted topic's directory.
+// the boundary a clean Close wrote to disk. ok is false when there is
+// none: no log was ever opened for the partition here, its directory is
+// gone, or the node crashed while the log was open. Storage empties the
+// file before an open log's first advance and writes the exact boundary
+// only at Close, so after a crash the file stays empty (ok=false) until
+// the log is opened and closed again. Observers use it where Peek's
+// "closed means nothing" would hide a backlog nobody has read since a
+// restart or an idle eviction, and reading the file rather than opening
+// the log keeps observation from resurrecting a deleted topic's
+// directory. A log that is being closed is waited for (see Peek), so
+// the file is never read while Close is writing it.
 func (g *Logs) PeekHighWatermark(topicName string, idx int) (int64, bool) {
 	if l, ok := g.Peek(topicName, idx); ok {
 		return l.HighWatermark(), true
@@ -306,10 +431,7 @@ func (g *Logs) PeekHighWatermark(topicName string, idx int) (int64, bool) {
 // any — remaining logs are still removed from the map so retries
 // pick up clean state.
 func (g *Logs) CloseTopic(topicName string) error {
-	prefix := topicName + "/"
-	g.mu.Lock()
-	firstErr := g.closeTopicLocked(topicName)
-	g.mu.Unlock()
+	firstErr := g.closeTopicBetweenCommits(topicName)
 
 	// Retire the topic's produce-serialization mutexes too; otherwise
 	// topic churn leaks one entry per (topic, partition) forever. Each
@@ -318,48 +440,169 @@ func (g *Logs) CloseTopic(topicName string) error {
 	// disappears from the map — combined with lockProduce's revalidation
 	// this keeps produce mutual exclusion intact even when CloseTopic
 	// runs against a LIVE topic (e.g. UpdateTopicRetention).
-	g.retireProduceEntries(func(k string) bool { return strings.HasPrefix(k, prefix) })
+	g.retireProduceEntries(func(k logKey) bool { return k.topic == topicName })
 	return firstErr
 }
 
 // CloseAll flushes and closes every cached log. Called on broker
 // shutdown.
 func (g *Logs) CloseAll() error {
-	g.mu.Lock()
 	var firstErr error
-	for k, e := range g.logs {
-		if err := e.log.Close(); err != nil && firstErr == nil {
+	for _, name := range g.openTopics() {
+		if err := g.closeTopicBetweenCommits(name); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		delete(g.logs, k)
 	}
-	g.mu.Unlock()
-
-	g.retireProduceEntries(func(string) bool { return true })
+	g.retireProduceEntries(func(logKey) bool { return true })
 	return firstErr
 }
 
-// closeTopicLocked closes and drops every open log under topicName.
-// Caller holds mu (write). Produce mutexes are NOT retired here: that
-// takes each mutex, which a produce commit inside Get may hold while
-// waiting for mu.
-func (g *Logs) closeTopicLocked(topicName string) error {
-	prefix := topicName + "/"
-	var firstErr error
-	for k, e := range g.logs {
-		if !strings.HasPrefix(k, prefix) {
+// closeTopicBetweenCommits closes every open log of topicName while
+// holding each one's produce mutex, taken in partition order before the
+// topic's guard (the order WithProduceLock and Get use), so no produce
+// commit sits between its append and its CommitDurable when a log
+// closes. One that did would lose its commit (ErrLogClosed) after
+// Close's final drain had already made its batch durable with no commit
+// attached, and the dispatcher's retry would then append the same
+// records a second time under a high-watermark that covers both copies.
+// A partition opened after the mutexes were taken sends the loop around
+// again with it included.
+func (g *Logs) closeTopicBetweenCommits(topicName string) error {
+	for {
+		idxs := g.openPartitions(topicName)
+		held := make([]*sync.Mutex, 0, len(idxs))
+		for _, idx := range idxs {
+			held = append(held, g.lockProduce(topicName, idx))
+		}
+		unlock := g.lockTopic(topicName)
+		g.mu.Lock()
+		covered := g.onlyOpenLocked(topicName, idxs)
+		var claimed []claimedEntry
+		if covered {
+			claimed = g.claimTopicLocked(topicName)
+		}
+		g.mu.Unlock()
+		err := g.closeClaimed(claimed)
+		unlock()
+		for _, mu := range held {
+			mu.Unlock()
+		}
+		if covered {
+			return err
+		}
+	}
+}
+
+// openPartitions returns the partitions of topicName with an open log,
+// in ascending order: the order their produce mutexes are taken in.
+func (g *Logs) openPartitions(topicName string) []int {
+	g.mu.RLock()
+	var idxs []int
+	for k := range g.logs {
+		if k.topic == topicName {
+			idxs = append(idxs, k.idx)
+		}
+	}
+	g.mu.RUnlock()
+	slices.Sort(idxs)
+	return idxs
+}
+
+// onlyOpenLocked reports whether every open log of topicName is one of
+// idxs (ascending). Caller holds mu.
+func (g *Logs) onlyOpenLocked(topicName string, idxs []int) bool {
+	for k := range g.logs {
+		if k.topic != topicName {
 			continue
 		}
-		if err := e.log.Close(); err != nil && firstErr == nil {
+		if _, found := slices.BinarySearch(idxs, k.idx); !found {
+			return false
+		}
+	}
+	return true
+}
+
+// openTopics returns the names of the topics with an open log or a
+// guard holder, sorted. A guard holder may be an open in progress (a
+// NewLog under the guard alone), which CloseAll must wait for and close
+// rather than leave to install its log after shutdown closed the rest.
+func (g *Logs) openTopics() []string {
+	seen := make(map[string]struct{})
+	g.mu.RLock()
+	for k := range g.logs {
+		seen[k.topic] = struct{}{}
+	}
+	g.mu.RUnlock()
+	g.guardMu.Lock()
+	for name := range g.guards {
+		seen[name] = struct{}{}
+	}
+	g.guardMu.Unlock()
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// claimedEntry is a map entry a close has claimed (marked closing) and
+// will close and drop.
+type claimedEntry struct {
+	key   logKey
+	entry *logEntry
+}
+
+// claimLocked marks e as being closed. Caller holds the topic's guard
+// and mu (write), and must pass the entry to closeClaimed.
+func claimLocked(e *logEntry) {
+	e.closing = true
+	e.closed = make(chan struct{})
+}
+
+// claimTopicLocked claims every open log of topicName. Caller holds the
+// topic's guard and mu (write).
+func (g *Logs) claimTopicLocked(topicName string) []claimedEntry {
+	var claimed []claimedEntry
+	for k, e := range g.logs {
+		if k.topic == topicName {
+			claimLocked(e)
+			claimed = append(claimed, claimedEntry{key: k, entry: e})
+		}
+	}
+	return claimed
+}
+
+// closeClaimed closes each claimed log, then drops its entry and
+// releases the Peek callers waiting on it, and returns the first close
+// error; an entry is dropped whether or not its close failed, so the
+// next Get starts clean. Caller holds the guard of each entry's topic
+// and not mu: the closes run outside the log map lock.
+func (g *Logs) closeClaimed(claimed []claimedEntry) error {
+	var firstErr error
+	for _, c := range claimed {
+		if err := c.entry.log.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		delete(g.logs, k)
+		g.mu.Lock()
+		if g.logs[c.key] == c.entry {
+			delete(g.logs, c.key)
+		}
+		g.mu.Unlock()
+		close(c.entry.closed)
 	}
 	return firstErr
 }
 
-func keyOf(topicName string, idx int) string {
-	return topicName + "/" + strconv.Itoa(idx)
+// closeTopicGuarded closes and drops every open log under topicName.
+// Caller holds the topic's guard and not mu. Produce mutexes are NOT
+// taken or retired here: a produce commit inside Get may hold one while
+// waiting for the guard.
+func (g *Logs) closeTopicGuarded(topicName string) error {
+	g.mu.Lock()
+	claimed := g.claimTopicLocked(topicName)
+	g.mu.Unlock()
+	return g.closeClaimed(claimed)
 }
 
 // retentionFromTopic folds a topic's retention into storage options.
@@ -377,35 +620,59 @@ func retentionFromTopic(r int64, checkInterval time.Duration) storage.RetentionC
 // when it is not open) and retires its produce mutex. Used when a
 // partition's local data is reclaimed after a rebalance moved it to
 // another node — the log must be closed before its files are deleted.
+// The close waits out a produce commit in flight on the partition (see
+// closeTopicBetweenCommits).
 func (g *Logs) ClosePartition(topicName string, idx int) error {
 	key := keyOf(topicName, idx)
+	produceMu := g.lockProduce(topicName, idx)
+	unlock := g.lockTopic(topicName)
+	err := g.closePartitionGuarded(key)
+	unlock()
+	produceMu.Unlock()
+	g.retireProduceEntries(func(k logKey) bool { return k == key })
+	return err
+}
+
+// closePartitionGuarded closes and drops one partition's open log, if
+// any. Caller holds its produce mutex and its topic's guard, not mu.
+func (g *Logs) closePartitionGuarded(key logKey) error {
 	g.mu.Lock()
-	var err error
-	if e, ok := g.logs[key]; ok {
-		err = e.log.Close()
-		delete(g.logs, key)
+	e, ok := g.logs[key]
+	if ok {
+		claimLocked(e)
 	}
 	g.mu.Unlock()
-	g.retireProduceEntries(func(k string) bool { return k == key })
-	return err
+	if !ok {
+		return nil
+	}
+	return g.closeClaimed([]claimedEntry{{key: key, entry: e}})
 }
 
 // ReplacePartitionDir closes the partition's open log, if any, and runs
 // swap (which replaces the partition directory on disk) while holding
-// the topic's guard, so no Get can open or serve the directory that is
-// being replaced. The move runner installs a copied partition through
-// it: a node that sourced the same partition moments earlier still had
-// its old log open, the install renamed the copy over that directory
-// underneath the open handle, and every later read served the stale
-// files while every later write went to unlinked inodes; records
-// committed on the transient owner were never seen and records
+// the partition's produce mutex and then the topic's guard, so no
+// commit is in flight and no Get can open or serve the directory that
+// is being replaced. The move runner installs a copied partition
+// through it: a node that sourced the same partition moments earlier
+// still had its old log open, the install renamed the copy over that
+// directory underneath the open handle, and every later read served
+// the stale files while every later write went to unlinked inodes;
+// records committed on the transient owner were never seen and records
 // committed after the install were lost when the handle closed (the
 // child-topic gap on every join-then-decommission cycle). The next Get
 // opens the installed directory under the current incarnation.
+//
+// The produce mutex comes first and stays: a commit takes it before the
+// guard (WithProduceLock, then Get's slow path), so taking or retiring
+// it with the guard held would deadlock against such a commit. The
+// partition is live here after the install, so its mutex is not
+// retired.
 func (g *Logs) ReplacePartitionDir(topicName string, idx int, swap func() error) error {
+	produceMu := g.lockProduce(topicName, idx)
+	defer produceMu.Unlock()
 	unlock := g.lockTopic(topicName)
 	defer unlock()
-	if err := g.ClosePartition(topicName, idx); err != nil {
+	if err := g.closePartitionGuarded(keyOf(topicName, idx)); err != nil {
 		return fmt.Errorf("broker/runtime: close %s/%d before replacing its directory: %w", topicName, idx, err)
 	}
 	return swap()

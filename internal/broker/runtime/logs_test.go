@@ -171,8 +171,8 @@ func newRuntimeTestLogs(t *testing.T, ms metastore.Metastore) *Logs {
 }
 
 func TestKeyOf(t *testing.T) {
-	if got := keyOf("orders", 3); got != "orders/3" {
-		t.Fatalf("keyOf() = %q, want %q", got, "orders/3")
+	if got, want := keyOf("orders", 3), (logKey{topic: "orders", idx: 3}); got != want {
+		t.Fatalf("keyOf() = %+v, want %+v", got, want)
 	}
 }
 

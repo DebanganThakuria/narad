@@ -213,24 +213,3 @@ func TestEvictionRacesProduceSafely(t *testing.T) {
 		t.Fatalf("NextOffset = %d, want %d (records lost across evictions)", l.NextOffset(), records)
 	}
 }
-
-func TestSplitKey(t *testing.T) {
-	for _, tt := range []struct {
-		key   string
-		topic string
-		idx   int
-		ok    bool
-	}{
-		{"orders/0", "orders", 0, true},
-		{"my.topic-2/17", "my.topic-2", 17, true},
-		{"orders/", "", 0, false},
-		{"/3", "", 0, false},
-		{"orders/x1", "", 0, false},
-	} {
-		topicName, idx, ok := splitKey(tt.key)
-		if topicName != tt.topic || idx != tt.idx || ok != tt.ok {
-			t.Fatalf("splitKey(%q) = (%q, %d, %v), want (%q, %d, %v)",
-				tt.key, topicName, idx, ok, tt.topic, tt.idx, tt.ok)
-		}
-	}
-}
