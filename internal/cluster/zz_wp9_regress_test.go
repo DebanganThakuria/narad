@@ -18,6 +18,59 @@ import (
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
+// Consumers parking one after another on the same topic share the token
+// the first one left: the owner hears one registration, not one per
+// consumer. The last one leaving does not send a drop of its own.
+func TestZZWP9ParkedConsumersShareOneRegistration(t *testing.T) {
+	reg := newRegistrationLog()
+	router := tokenRouter(t, fakePeerClient{registerTokensFn: reg.registerTokens})
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Go(func() {
+			res := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=1s", nil)
+			router.RouteConsumeWait(context.Background(), res, req, "orders", time.Second, &fakeLocalWaiter{delay: time.Hour})
+		})
+		time.Sleep(15 * time.Millisecond)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if adds, _ := reg.counts("remote.example:7942/orders"); adds > 2 {
+		t.Fatalf("owner received %d registrations for 10 consumers parked within 150ms, want one shared token", adds)
+	}
+	wg.Wait()
+
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=1s", nil)
+	router.RouteConsumeWait(context.Background(), res, req, "orders", time.Second, &fakeLocalWaiter{
+		delay: 20 * time.Millisecond, found: true,
+		msg: topic.Message{Topic: "orders", Partition: 1, Offset: 3, ReceiptHandle: "1:3:5"},
+	})
+	time.Sleep(100 * time.Millisecond)
+	if _, drops := reg.counts("remote.example:7942/orders"); drops != 0 {
+		t.Fatalf("the last consumer leaving sent %d drop frames, want the token left to lapse", drops)
+	}
+}
+
+// A registration older than the sharing window is sent again by the next
+// consumer to park, so a token the owner silently discarded is repaired
+// by ordinary traffic and not only by the keeper's refresh.
+func TestZZWP9StaleRegistrationIsResent(t *testing.T) {
+	reg := newRegistrationLog()
+	router := tokenRouter(t, fakePeerClient{registerTokensFn: reg.registerTokens})
+	park := func() {
+		res := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=2s", nil)
+		router.RouteConsumeWait(context.Background(), res, req, "orders", 2*time.Second, &fakeLocalWaiter{delay: time.Hour})
+	}
+	go park()
+	time.Sleep(400 * time.Millisecond) // past the sharing window
+	go park()
+	time.Sleep(50 * time.Millisecond)
+	if adds, _ := reg.counts("remote.example:7942/orders"); adds < 2 {
+		t.Fatalf("owner received %d registrations, want the second consumer to re-send an old one", adds)
+	}
+}
+
 // zzWP9HandedOnWake mimics broker ConsumeWait's external branch when the
 // pump handed the waiter a local record in the same instant.
 type zzWP9HandedOnWake struct{}

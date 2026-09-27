@@ -20,9 +20,13 @@ import (
 // show up". An owner spends one by calling back, this node wakes one
 // parked consumer, and that consumer claims with an ordinary consume.
 //
-// Registration and retirement both go out to every owner CONCURRENTLY.
-// Doing them one owner at a time would put a round trip per owner in
-// front of the very consumer they exist to serve.
+// Registration goes out to every owner CONCURRENTLY. Doing it one owner
+// at a time would put a round trip per owner in front of the very
+// consumer it exists to serve. It also goes out only where it is
+// needed: consumers parking in quick succession share the token the
+// first of them left (see registerShareWindow), and a token nobody here
+// wants any more is left to lapse rather than retired with a frame of
+// its own (see register).
 
 // tokenTTLFloor is the shortest remaining budget worth registering. A
 // token that expires before a notification and a claim could complete
@@ -81,13 +85,45 @@ func (w *localWaiter) offer(from string) bool {
 type topicDemand struct {
 	mu      sync.Mutex
 	waiters []*localWaiter
-	// owners records, per remote owner address, until when this node
-	// believes that owner holds its live token for the topic: stamped
-	// when a registration is sent, cleared when the send fails or the
-	// owner spends the token on a notification. The keeper (Run)
-	// registers wherever an entry is missing or past.
-	owners map[string]time.Time
+	// owners records, per remote owner address, the token this node
+	// believes that owner holds for the topic: stamped when a
+	// registration is sent, cleared when the send fails or the owner
+	// spends the token on a notification. The keeper (Run) registers
+	// wherever an entry is missing or due for a refresh.
+	owners map[string]ownerToken
 }
+
+// ownerToken is this node's record of one registration at one owner.
+type ownerToken struct {
+	// sentAt is when the registration went out.
+	sentAt time.Time
+	// refreshAt is when the keeper sends it again: the registered budget
+	// or registrationRefresh after sentAt, whichever is sooner.
+	refreshAt time.Time
+	// expiresAt is when the owner lets the token lapse: sentAt plus the
+	// TTL the registration carried.
+	expiresAt time.Time
+}
+
+// registerShareWindow is how long a registration is shared by consumers
+// parking after it. A consumer parking here for a topic whose owners
+// already hold a token from this node, sent within the window and
+// lasting past its deadline, sends nothing: the owner holds one token
+// per (node, topic) and a new registration would only replace it. With
+// hundreds of consumers re-parking on a sparse topic that was one
+// registration per consumer per owner, each replacing the last.
+//
+// The window is short on purpose. The owner's reply only says the frame
+// arrived; the token may have been discarded (its assignment view
+// lagged ours) or lost to a restart. Re-registering on park repairs
+// that at once, so sharing is trusted only briefly, and a consumer
+// parking after the window re-sends. A token spent on a notification is
+// forgotten outright (see WakeOneWaiter).
+//
+// Registrations carry the window on top of the budget, so a consumer
+// parking inside the window with the same wait as the one that
+// registered is still covered.
+const registerShareWindow = 250 * time.Millisecond
 
 // keepAliveInterval is how often the keeper checks that every remote
 // owner of a topic with parked consumers holds a live token from here.
@@ -96,10 +132,9 @@ const keepAliveInterval = 500 * time.Millisecond
 // registrationRefresh bounds how long a registration is trusted before
 // the keeper sends it again. The owner's reply says only that the frame
 // arrived: it may have discarded the token (its assignment view lagged
-// ours), it may restart and lose it, or a retiring consumer's drop may
-// land after a newer consumer's add. Re-registering replaces the token,
-// so repeating it every few seconds while consumers are parked repairs
-// all three at the cost of one small frame per owner per interval.
+// ours), or it may restart and lose it. Re-registering replaces the
+// token, so repeating it every few seconds while consumers are parked
+// repairs both at the cost of one small frame per owner per interval.
 const registrationRefresh = 5 * time.Second
 
 // longestRemainingLocked returns the longest wait budget among the
@@ -322,9 +357,16 @@ func (q *tokenRequester) WakeOneWaiter(topicName, from string) bool {
 	return false
 }
 
-// register leaves a token with every remote owner of the topic, all at
-// once. Failures are ignored: a token that never lands costs this
-// consumer its notification, and the wait budget is the backstop.
+// register leaves a token with every remote owner of the topic that
+// does not already hold one covering this consumer, all at once.
+// Failures are ignored: a token that never lands costs this consumer
+// its notification, and the wait budget is the backstop.
+//
+// Nothing retires the tokens when the last consumer leaves. A token
+// nobody here wants any more costs at most one notification, answered
+// "pass", before it lapses at its TTL, where retiring it cost a frame
+// to every owner each time the parked count touched zero, and the next
+// consumer to park had to register all over again.
 func (q *tokenRequester) register(ctx context.Context, topicName string, remaining time.Duration) {
 	if !q.enabled() || remaining < tokenTTLFloor {
 		return
@@ -335,43 +377,75 @@ func (q *tokenRequester) register(ctx context.Context, topicName string, remaini
 	if len(owners) == 0 {
 		return
 	}
+	d := q.demandFor(topicName)
+	now := time.Now()
+	d.mu.Lock()
 	// The token is shared by every consumer parked here, so it carries
 	// the longest budget among them: a short poll registering after a
 	// long one must not shorten the token the long one relies on.
-	d := q.demandFor(topicName)
-	d.mu.Lock()
-	if longest, _ := d.longestRemainingLocked(time.Now(), nil); longest > remaining {
+	if longest, _ := d.longestRemainingLocked(now, nil); longest > remaining {
 		remaining = longest
 	}
+	need := now.Add(remaining)
+	targets := owners[:0]
+	for _, addr := range owners {
+		if tok, ok := d.owners[addr]; ok && now.Sub(tok.sentAt) < registerShareWindow && !tok.expiresAt.Before(need) {
+			continue
+		}
+		targets = append(targets, addr)
+	}
+	stamp := d.stampLocked(targets, now, remaining)
 	d.mu.Unlock()
-	q.send(ctx, topicName, owners, remaining)
+	q.dispatch(ctx, topicName, d, targets, remaining, stamp)
 }
 
-// send leaves a token with each of addrs and records the attempt in the
-// topic's owners table, optimistically: a send that fails clears its
-// entry when the failure is known, and the keeper tries that owner
-// again on its next pass.
+// send leaves a token with each of addrs.
 func (q *tokenRequester) send(ctx context.Context, topicName string, addrs []string, remaining time.Duration) {
-	until := time.Now().Add(min(remaining, registrationRefresh))
 	d := q.demandFor(topicName)
 	d.mu.Lock()
+	stamp := d.stampLocked(addrs, time.Now(), remaining)
+	d.mu.Unlock()
+	q.dispatch(ctx, topicName, d, addrs, remaining, stamp)
+}
+
+// stampLocked records a registration of remaining to each of addrs,
+// optimistically: dispatch clears an entry whose send is known to have
+// failed, and the keeper tries that owner again on its next pass. Must
+// hold mu.
+func (d *topicDemand) stampLocked(addrs []string, now time.Time, remaining time.Duration) ownerToken {
+	stamp := ownerToken{
+		sentAt:    now,
+		refreshAt: now.Add(min(remaining, registrationRefresh)),
+		expiresAt: now.Add(remaining + registerShareWindow),
+	}
+	if len(addrs) == 0 {
+		return stamp
+	}
 	if d.owners == nil {
-		d.owners = make(map[string]time.Time)
+		d.owners = make(map[string]ownerToken)
 	}
 	for _, addr := range addrs {
-		d.owners[addr] = until
+		d.owners[addr] = stamp
 	}
-	d.mu.Unlock()
+	return stamp
+}
+
+// dispatch sends the registration stamped for addrs. Its TTL carries
+// registerShareWindow on top of the budget, matching the stamp's expiry.
+func (q *tokenRequester) dispatch(ctx context.Context, topicName string, d *topicDemand, addrs []string, remaining time.Duration, stamp ownerToken) {
+	if len(addrs) == 0 {
+		return
+	}
 	delta := nodewire.TokenDelta{
 		From: q.selfAddr,
-		Add:  []nodewire.TokenRegistration{{Topic: topicName, TTLNanos: int64(remaining)}},
+		Add:  []nodewire.TokenRegistration{{Topic: topicName, TTLNanos: int64(remaining + registerShareWindow)}},
 	}
 	q.broadcast(ctx, addrs, delta, func(addr string, err error) {
 		if err == nil {
 			return
 		}
 		d.mu.Lock()
-		if d.owners[addr].Equal(until) {
+		if tok, ok := d.owners[addr]; ok && tok.sentAt.Equal(stamp.sentAt) {
 			delete(d.owners, addr)
 		}
 		d.mu.Unlock()
@@ -423,7 +497,7 @@ func (q *tokenRequester) keepAlive(ctx context.Context) {
 		remaining, _ := d.longestRemainingLocked(now, nil)
 		if remaining >= tokenTTLFloor {
 			for _, addr := range owners {
-				if !d.owners[addr].After(now) {
+				if !d.owners[addr].refreshAt.After(now) {
 					missing = append(missing, addr)
 				}
 			}
@@ -456,35 +530,6 @@ func (q *tokenRequester) registerAt(ctx context.Context, topicName, addr string,
 	q.send(ctx, topicName, []string{addr}, remaining)
 }
 
-// drop retires this node's token at every owner except the one that
-// served us. Only called once nobody else is parked here for the topic:
-// the token is shared by every consumer on this node, so retiring it
-// early would strand the rest. Best effort and fire-and-forget: a lost
-// drop costs one notification the owner's next record wastes on us,
-// never correctness.
-func (q *tokenRequester) drop(ctx context.Context, topicName, servedBy string) {
-	if !q.enabled() {
-		return
-	}
-	owners := q.router.remoteOwnerAddrsForTopic(topicName)
-	targets := owners[:0:0]
-	for _, addr := range owners {
-		if addr != servedBy {
-			targets = append(targets, addr)
-		}
-	}
-	if len(targets) == 0 {
-		return
-	}
-	d := q.demandFor(topicName)
-	d.mu.Lock()
-	for _, addr := range targets {
-		delete(d.owners, addr)
-	}
-	d.mu.Unlock()
-	q.broadcast(ctx, targets, nodewire.TokenDelta{From: q.selfAddr, Drop: []string{topicName}}, nil)
-}
-
 // broadcast sends one delta to every address concurrently and does NOT
 // wait for them. Blocking here would put a round trip to every owner in
 // front of the consumer that triggered it, on every single consume,
@@ -497,9 +542,8 @@ func (q *tokenRequester) drop(ctx context.Context, topicName, servedBy string) {
 // missed record.
 //
 // The context is detached from the request that triggered it for the
-// same reason: a drop must still land after the consumer it belongs to
-// has been served, and a register must not be cancelled by the consumer
-// parking.
+// same reason: a register must not be cancelled by the consumer parking
+// or being served.
 //
 // done, when set, is told how each send ended (nil for any reply, the
 // transport error otherwise), so a registration that never reached its
@@ -522,7 +566,7 @@ func (q *tokenRequester) broadcast(ctx context.Context, addrs []string, delta no
 	}
 }
 
-// tokenSendTimeout bounds one register or drop. Tokens are advisory, so
-// a slow owner is dropped from this round rather than holding up the
+// tokenSendTimeout bounds one registration. Tokens are advisory, so a
+// slow owner is dropped from this round rather than holding up the
 // consumer that triggered it.
 const tokenSendTimeout = 2 * time.Second

@@ -93,12 +93,8 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 		case found && err == nil:
 			// The local partitions had it. The tokens left with the
 			// owners are shared by every consumer parked here for the
-			// topic, so they are retired only when this was the last one;
-			// otherwise the others still need the notification.
+			// topic and stay for the others, or lapse (see register).
 			leave()
-			if _, others := rt.tokens.othersParked(topicName, parked); !others {
-				rt.tokens.drop(ctx, topicName, "")
-			}
 			writeConsumeMessage(w, msg)
 			return true
 
@@ -107,12 +103,9 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 			if res, ok := rt.claimFrom(ctx, from, topicName); ok {
 				// The owner spent this node's token on us. If others are
 				// still parked here, leave it a fresh one so its next
-				// record reaches them too; if not, retire the tokens at
-				// the other owners.
+				// record reaches them too.
 				if remaining, others := rt.tokens.othersParked(topicName, parked); others {
 					rt.tokens.registerAt(ctx, topicName, from, remaining)
-				} else {
-					rt.tokens.drop(ctx, topicName, from)
 				}
 				writePeerResponse(w, res)
 				return true
