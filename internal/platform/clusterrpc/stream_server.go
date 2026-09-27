@@ -388,7 +388,9 @@ func (c *streamServerConn) respond(frame clusterwire.StreamFrame) {
 }
 
 // writeFrame writes one frame and reports whether it succeeded; a
-// failed write aborts the stream.
+// failed write aborts the stream. Small frames are staged in writeBuf and
+// written once, as the client does; maxRetainedWriteBuffer has the
+// measurements behind the copy.
 func (c *streamServerConn) writeFrame(frame clusterwire.StreamFrame) bool {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()

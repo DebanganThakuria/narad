@@ -25,6 +25,23 @@ const defaultStreamTimeout = 5 * time.Second
 // (see clusterwire.WriteStreamFrameStaged), so an occasional bulk
 // transfer neither pins megabytes per pooled stream nor allocates a
 // buffer of its size.
+//
+// Staging costs a small frame one copy of its payload. The copy-free
+// alternative, header and payload as two Writes, was measured over QUIC
+// loopback (Apple M4 Pro, count=6, benchstat, September 2026) and was
+// never measurably faster:
+//   - pooled ack round trips from parallel callers (BenchmarkZZWP2QUICAck):
+//     3.09 us staged, 3.63 us split (+17%); over net.Pipe +27% to +50%;
+//   - one frame at a time on one stream (BenchmarkZZWP17QUICFrameWrite):
+//     no difference at 64 B and 1 KiB (round trip about 35 us, one way
+//     1.05 us and 7.7 us per frame), and at 16 KiB split is 7% slower
+//     round trip, 4% slower one way, with 8% more CPU.
+//
+// Each Write is its own hand-off to the connection's send loop, and a
+// second one lengthens the time a frame holds the stream's write slot,
+// which is what parallel callers queue on. One Write also keeps a small
+// frame whole when its write deadline fires: with the header already
+// buffered, a timed-out payload would cut the frame and close the stream.
 const maxRetainedWriteBuffer = 256 << 10
 
 // errFallbackReplyTimeout marks a reply wait that ended because the
@@ -369,7 +386,9 @@ func (c *streamClient) unlockWrite() {
 	<-c.writeSem
 }
 
-// writeLocked writes frame under a write deadline. The caller holds the
+// writeLocked writes frame under a write deadline, staged in the
+// stream's retained buffer (see maxRetainedWriteBuffer for why a small
+// frame is copied rather than written in two parts). The caller holds the
 // write slot. A write that times out before any of the frame went out
 // leaves the stream's framing intact, so only this frame fails and the
 // stream keeps serving the RPCs multiplexed on it. Any other failure, or
