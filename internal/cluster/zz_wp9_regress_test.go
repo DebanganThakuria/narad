@@ -17,6 +17,41 @@ import (
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
+// Parking, registering and the wait check must not advance the probe
+// cursor: with three remote owners a probe, a park and a registration
+// used to advance it by exactly three, pinning every first probe to the
+// same owner.
+func TestZZWP9ProbeRotationSpreadsAcrossOwners(t *testing.T) {
+	var mu sync.Mutex
+	first := ""
+	peer := fakePeerClient{consumeFn: func(_ context.Context, addr string, _ nodewire.ConsumeRequest) (nodewire.Response, error) {
+		mu.Lock()
+		if first == "" {
+			first = addr
+		}
+		mu.Unlock()
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	}}
+	router := multiOwnerRouter(t, peer, 3)
+	router.SetSelfAddr("node-self.example:7942")
+	seen := map[string]bool{}
+	for range 6 {
+		mu.Lock()
+		first = ""
+		mu.Unlock()
+		res := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=60ms", nil)
+		router.RouteConsumeRemote(context.Background(), res, req, "orders")
+		router.RouteConsumeWait(context.Background(), res, req, "orders", 60*time.Millisecond, &fakeLocalWaiter{delay: time.Hour})
+		mu.Lock()
+		seen[first] = true
+		mu.Unlock()
+	}
+	if len(seen) < 3 {
+		t.Fatalf("first owner probed over 6 cycles: %v, want the start to rotate across all three", seen)
+	}
+}
+
 // The remaining owners are not probed once the client is gone.
 func TestZZWP9ProbeStopsWhenTheClientLeaves(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

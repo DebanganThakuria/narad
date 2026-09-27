@@ -60,6 +60,21 @@ func (rt *Router) remoteConsumeCandidates(topicName string) []string {
 	return rotated
 }
 
+// hasRemoteOwner reports whether the topic has a live remote owner,
+// without building the owner list or touching the probe cursor.
+func (rt *Router) hasRemoteOwner(topicName string) bool {
+	routes, ok := rt.routesForTopic(topicName)
+	if !ok {
+		return false
+	}
+	for _, entry := range routes.remoteEntries {
+		if rt.consumeOwnerAddr(entry) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // remoteOwnerAddrsForTopic returns the topic's live remote owner
 // addresses in partition order, without touching the probe cursor.
 func (rt *Router) remoteOwnerAddrsForTopic(topicName string) []string {

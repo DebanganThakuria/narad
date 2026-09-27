@@ -51,7 +51,7 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 	if wait <= 0 || local == nil {
 		return false
 	}
-	if !rt.tokens.enabled() || len(rt.remoteConsumeCandidates(topicName)) == 0 {
+	if !rt.tokens.enabled() || !rt.hasRemoteOwner(topicName) {
 		return false
 	}
 	if wait > rt.maxConsumeWait && rt.maxConsumeWait > 0 {

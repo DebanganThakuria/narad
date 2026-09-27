@@ -303,7 +303,9 @@ func (q *tokenRequester) register(ctx context.Context, topicName string, remaini
 	if !q.enabled() || remaining < tokenTTLFloor {
 		return
 	}
-	owners := q.router.remoteConsumeCandidates(topicName)
+	// The plain owner list, not the rotated one the probe path uses:
+	// registering must not advance the probe cursor.
+	owners := q.router.remoteOwnerAddrsForTopic(topicName)
 	if len(owners) == 0 {
 		return
 	}
@@ -438,7 +440,7 @@ func (q *tokenRequester) drop(ctx context.Context, topicName, servedBy string) {
 	if !q.enabled() {
 		return
 	}
-	owners := q.router.remoteConsumeCandidates(topicName)
+	owners := q.router.remoteOwnerAddrsForTopic(topicName)
 	targets := owners[:0:0]
 	for _, addr := range owners {
 		if addr != servedBy {
