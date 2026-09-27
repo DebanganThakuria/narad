@@ -35,6 +35,10 @@ type impl struct {
 // stay reachable through the facade via the embedded topics.Manager.
 var _ CreateGater = (*impl)(nil)
 
+// Compile-time check: batch consume stays reachable through the facade
+// via the embedded messaging.Engine.
+var _ BatchConsumer = (*impl)(nil)
+
 // New constructs a Broker from the supplied dependencies. It
 // validates required fields and TopicConfig bounds, then wires each
 // sub-manager with the slice of dependencies it needs.
