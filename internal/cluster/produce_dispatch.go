@@ -30,10 +30,11 @@ var errProduceReplayBoundary = errors.New("produce replay reached durable bounda
 // where it is, which the lookahead horizon bounds. Batching comes from
 // the queueing itself: the longer a commit takes, the more records the
 // next one carries, so a busy owner gets fewer, fatter commits (one
-// fsync each). While other commits are in flight, a destination below
-// the batch floor also lingers briefly for more records rather than
-// sending each WAL group commit's handful on its own (see lingerUntil);
-// an idle dispatcher commits at once.
+// fsync each), up to what fits in one stream frame for a remote owner
+// (see remoteBatchLen). While other commits are in flight, a
+// destination below the batch floor also lingers briefly for more
+// records rather than sending each WAL group commit's handful on its
+// own (see lingerUntil); an idle dispatcher commits at once.
 //
 // A record is left in the WAL (skipped) rather than held when holding
 // it would cost memory for nothing or break partition order: its

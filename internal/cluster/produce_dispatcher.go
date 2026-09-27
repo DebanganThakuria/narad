@@ -11,6 +11,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/wal"
+	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 )
 
 const (
@@ -35,6 +36,18 @@ const (
 	// whole window to a lone hot partition per round trip, and a
 	// latency-bound destination must not get less.
 	produceDispatchBaseWindow = 4096
+
+	// produceRemoteBatchBytes bounds the encoded size of one commit to a
+	// remote owner (see remoteBatchLen). The stream client refuses a
+	// frame payload over clusterwire.MaxStreamFramePayloadBytes before
+	// sending it, and a refused batch fails the same way every time it
+	// is retried; the record count alone lets a base window of records
+	// of a few KiB each exceed it. Half the frame limit keeps one commit
+	// from holding the produce lane for long and still carries a whole
+	// base window of records just under 2 KiB each. A local commit needs
+	// no bound: the partition log splits a large batch into frames
+	// itself.
+	produceRemoteBatchBytes = clusterwire.MaxStreamFramePayloadBytes / 2
 
 	// produceDispatchTargetPerPartition is the per-partition batch size
 	// the adaptive window aims for: the window is sized to target *

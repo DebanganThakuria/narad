@@ -144,7 +144,9 @@ func (st *produceDispatchState) noteLatency(owner string, took time.Duration) {
 }
 
 // startCommit sends dest's queued records as one batch, or, for a
-// failing destination, its first record as a probe.
+// failing destination, its first record as a probe. A batch for a remote
+// owner takes only as many records as fit in one stream frame (see
+// remoteBatchLen); the rest stay queued and go out once it lands.
 func (d *ProduceDispatcher) startCommit(ctx context.Context, st *produceDispatchState, dest *dispatchDest, now time.Time) {
 	if dest.inflight || len(dest.queue) == 0 {
 		return
@@ -166,8 +168,11 @@ func (d *ProduceDispatcher) startCommit(ctx context.Context, st *produceDispatch
 	}
 	n := len(dest.queue)
 	probe := dest.failing()
-	if probe {
+	switch {
+	case probe:
 		n = 1
+	case !target.local:
+		n = remoteBatchLen(dest.queue)
 	}
 	job := &dispatchJob{
 		dest:    dest,
@@ -186,6 +191,27 @@ func (d *ProduceDispatcher) startCommit(ctx context.Context, st *produceDispatch
 	st.active++
 	st.outstanding++
 	go d.runJob(ctx, job)
+}
+
+// produceRemoteRecordOverhead is what one record adds to an encoded
+// commit batch beyond its topic, key, payload and topic ID: four length
+// prefixes and the created-at time, plus a topic-ID run header, counted
+// as if every record started a run so the estimate never falls short.
+const produceRemoteRecordOverhead = 4 + 4 + 4 + 4 + 8 + 4 + 4
+
+// remoteBatchLen is how many of records, from the front, one remote
+// commit carries: as many as fit in produceRemoteBatchBytes of encoded
+// batch. Always at least one, so a record larger than the budget still
+// goes out, on its own.
+func remoteBatchLen(records []ingress.ProduceRecord) int {
+	size := 0
+	for i, rec := range records {
+		size += produceRemoteRecordOverhead + len(rec.Topic) + len(rec.Key) + len(rec.Payload) + len(rec.TopicID)
+		if size > produceRemoteBatchBytes && i > 0 {
+			return i
+		}
+	}
+	return len(records)
 }
 
 // unresolvedAtLaunch handles a destination whose owner stopped
