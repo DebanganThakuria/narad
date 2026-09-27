@@ -63,6 +63,10 @@ type Manager struct {
 	produceDir  string
 	log         *wal.Log
 	durableNext atomic.Uint64
+	// durableAdvanced holds at most one pending wakeup: an append that
+	// moves durableNext leaves one unless one is already waiting, so the
+	// dispatcher wakes as soon as there is something new to read.
+	durableAdvanced chan struct{}
 
 	checkpointMu sync.Mutex
 	checkpoint   *checkpointWriter
@@ -103,9 +107,10 @@ func OpenManager(dataDir string, opts wal.Options) (*Manager, error) {
 		return nil, fmt.Errorf("ingress: produce checkpoint %d is ahead of recovered WAL next seq %d (missing WAL segments?)", checkpoint, nextSeq)
 	}
 	manager := &Manager{
-		produceDir: produceDir,
-		log:        log,
-		checkpoint: newCheckpointWriter(produceDir, produceCheckpointFile),
+		produceDir:      produceDir,
+		log:             log,
+		durableAdvanced: make(chan struct{}, 1),
+		checkpoint:      newCheckpointWriter(produceDir, produceCheckpointFile),
 	}
 	manager.durableNext.Store(nextSeq)
 	return manager, nil
@@ -185,6 +190,18 @@ func (m *Manager) DurableProduceNext() uint64 {
 	return m.durableNext.Load()
 }
 
+// DurableProduceAdvanced returns a channel that receives after
+// DurableProduceNext moves, so a dispatcher can sleep until there is
+// something new to read instead of polling. A receive is only a hint:
+// one can stand for many advances, and DurableProduceNext stays the
+// authority. Nil for a nil manager, which never receives.
+func (m *Manager) DurableProduceAdvanced() <-chan struct{} {
+	if m == nil {
+		return nil
+	}
+	return m.durableAdvanced
+}
+
 // ReplayProduce replays this node's ingress WAL from the given
 // sequence. See the package-level ReplayProduce; unlike it, this reads
 // the live WAL only up to what has been synced (wal.Log.ReplayFromCursor).
@@ -225,8 +242,10 @@ func (m *Manager) ReplayProduceFromCursorPeek(cursor wal.Cursor, peek wal.Peek, 
 }
 
 // CompactProduceBefore drops WAL segments wholly below seq. Callers
-// must only pass a persisted dispatch checkpoint — compacting past
-// undispatched records loses them.
+// must only pass a stored dispatch checkpoint — compacting past
+// undispatched records loses them. The store need not be synced yet:
+// every seq below a stored checkpoint is committed, and a replay from
+// an older, synced value starts at the first segment that is left.
 func (m *Manager) CompactProduceBefore(seq uint64) error {
 	if m == nil || m.log == nil {
 		return errors.New("ingress: manager is nil")
@@ -243,7 +262,13 @@ func (m *Manager) LoadProduceCheckpoint() (uint64, error) {
 	return loadCheckpoint(filepath.Join(m.produceDir, produceCheckpointFile))
 }
 
-// StoreProduceCheckpoint durably persists the dispatch checkpoint.
+// StoreProduceCheckpoint persists the dispatch checkpoint. The value is
+// written at once, so it survives a process crash, and flushed to disk
+// within checkpointSyncDelay (or by Close), so an OS crash or power
+// loss can bring back an older value: the dispatcher then re-commits
+// what it had already committed since, as duplicates, and loses
+// nothing. A background flush that failed is reported by the next
+// call.
 func (m *Manager) StoreProduceCheckpoint(nextSeq uint64) error {
 	if m == nil {
 		return errors.New("ingress: manager is nil")
@@ -275,7 +300,7 @@ func (m *Manager) Close() error {
 }
 
 // advanceDurableNext lifts durableNext to next unless a concurrent
-// append already advanced it further.
+// append already advanced it further, and signals durableAdvanced.
 func (m *Manager) advanceDurableNext(next uint64) {
 	for {
 		current := m.durableNext.Load()
@@ -283,6 +308,12 @@ func (m *Manager) advanceDurableNext(next uint64) {
 			return
 		}
 		if m.durableNext.CompareAndSwap(current, next) {
+			// Under load a wakeup is almost always pending already, and
+			// a send to a full channel returns without taking its lock.
+			select {
+			case m.durableAdvanced <- struct{}{}:
+			default:
+			}
 			return
 		}
 	}
