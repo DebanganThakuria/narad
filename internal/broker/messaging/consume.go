@@ -408,15 +408,91 @@ func (e *Engine) replayRead(topicName string, partitionIdx int, offset int64, to
 // Ack — the broker rejects acks for offsets the consumer did not
 // reserve, and acks whose visibility window has elapsed.
 func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions []int, scanStart int, visibilityTimeout time.Duration) (topic.Message, bool, error) {
-	for i := range partitions {
-		pos := (scanStart + i) % len(partitions)
+	if len(partitions) == 0 {
+		return topic.Message{}, false, nil
+	}
+	// The first partition is resolved on its own, so a consume that hits
+	// there opens and stamps nothing else; the rest are resolved only
+	// once it has nothing (tryQueueReadRest). The reservation loop is
+	// written out here and again there rather than shared through a
+	// function: the extra call cost a single-partition consume and a hit
+	// on the first partition 1.5 to 2.5%. The log is resolved before the
+	// pause check, so a paused partition's log is still opened and kept
+	// warm; a paused partition is handing off, and the new owner serves
+	// it in a moment.
+	pos := scanStart % len(partitions)
+	idx := partitions[pos]
+	log, err := e.logs.Get(topicName, idx)
+	if err != nil {
+		return topic.Message{}, false, err
+	}
+	if !e.isConsumePaused(topicName, idx) {
+		for {
+			res, err := e.offsets.ReserveNext(ctx, topicName, idx, visibilityTimeout, log.HighWatermark())
+			if err != nil {
+				return topic.Message{}, false, err
+			}
+			if !res.Reserved {
+				break // partition empty, fully reserved, or in-flight cap hit: try the next one
+			}
+			key, committedAt, payload, err := log.ReadKeyedShared(res.Offset)
+			if err != nil {
+				if err := e.resolveUnreadable(topicName, idx, log, res, err); err != nil {
+					return topic.Message{}, false, err
+				}
+				continue
+			}
+			return topic.Message{
+				Topic:     topicName,
+				Partition: idx,
+				Offset:    res.Offset,
+				Key:       key,
+				Payload:   payload,
+				Timestamp: committedAt / 1000,
+				ReceiptHandle: consumer.EncodeHandle(consumer.Handle{
+					Partition: idx,
+					Offset:    res.Offset,
+					Nonce:     res.Nonce,
+				}),
+			}, true, nil
+		}
+	}
+	if len(partitions) == 1 {
+		return topic.Message{}, false, nil
+	}
+	return e.tryQueueReadRest(ctx, topicName, partitions, pos, visibilityTimeout)
+}
+
+// tryQueueReadRest is tryQueueRead past a first partition that had
+// nothing: the rest of the scan, in order from the partition after
+// partitions[first]. Their logs are resolved in one Logs.GetMany, which
+// finds the open ones under one read lock, one topic-version read and
+// one clock read, where a Get each paid for those per partition. It is
+// a function of its own so that the buffer GetMany fills is set up on a
+// miss only, never on a hit on the first partition.
+//
+// A topic with more local partitions than the buffer holds, or a
+// GetMany that fails, resolves each log as the scan reaches it, as
+// before: a partition that cannot be opened then fails the scan only
+// once the scan gets to it, so it does not hide a record on a partition
+// before it.
+func (e *Engine) tryQueueReadRest(ctx context.Context, topicName string, partitions []int, first int, visibilityTimeout time.Duration) (topic.Message, bool, error) {
+	var buf [16]*storage.Log
+	var logs []*storage.Log
+	if len(partitions) <= len(buf) {
+		logs, _ = e.logs.GetMany(topicName, partitions, buf[:0])
+	}
+	for i := 1; i < len(partitions); i++ {
+		pos := (first + i) % len(partitions)
 		idx := partitions[pos]
-		// Resolved as the scan reaches the partition, so a consume that
-		// hits early does not open and stamp the rest. Before the pause
-		// check, so a paused partition's log is still opened and kept warm.
-		log, err := e.logs.Get(topicName, idx)
-		if err != nil {
-			return topic.Message{}, false, err
+		var log *storage.Log
+		if logs != nil {
+			log = logs[pos]
+		} else {
+			var err error
+			if log, err = e.logs.Get(topicName, idx); err != nil {
+				return topic.Message{}, false, err
+			}
 		}
 		if e.isConsumePaused(topicName, idx) {
 			continue // handing off: the new owner serves it in a moment
@@ -431,65 +507,10 @@ func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions 
 			}
 			key, committedAt, payload, err := log.ReadKeyedShared(res.Offset)
 			if err != nil {
-				// A frontier that fell behind retention (the segment holding
-				// the reserved offset was reaped) would otherwise be walked
-				// one poison offset per round trip, each with a log line and
-				// a frontier persist. Jump it to the oldest retained offset
-				// in one step; the loss is already visible on the consumer
-				// lag/dropped gauges.
-				if errors.Is(err, storage.ErrOffsetNotFound) {
-					if oldest := log.OldestOffset(); res.Offset < oldest {
-						skipped, serr := e.offsets.SkipMissingBelow(topicName, idx, res.Offset, res.Nonce, oldest)
-						if errors.Is(serr, consumer.ErrHandleStale) {
-							// A concurrent consume skipped the same gap first, and
-							// dropped this reservation with everything else below
-							// oldest. The gap is resolved: reserve again, from at
-							// or above oldest. Returning the error answered a
-							// plain consume, which never held a handle, with 410.
-							continue
-						}
-						if serr != nil {
-							return topic.Message{}, false, serr
-						}
-						e.logger.Warn("consumer frontier fell behind retention; skipped to oldest retained offset",
-							"topic", topicName, "partition", idx, "from", res.Offset, "to", oldest, "skipped", skipped)
-						continue
-					}
+				if err := e.resolveUnreadable(topicName, idx, log, res, err); err != nil {
+					return topic.Message{}, false, err
 				}
-				// A permanently-unreadable (corrupt) frame, or a gap left by a
-				// corrupt frame recovery skipped, would otherwise head-of-line-block
-				// this partition forever (the offset can never be acked). Skip past
-				// it (recorded loss, never silent) and retry the SAME partition:
-				// the record after the skipped frame may be immediately deliverable,
-				// and moving on could stall a long-poll for the full Wait even
-				// though data is available here.
-				if storage.IsCorrupt(err) || errors.Is(err, storage.ErrOffsetNotFound) {
-					serr := e.offsets.SkipCorrupt(topicName, idx, res.Offset, res.Nonce)
-					if errors.Is(serr, consumer.ErrHandleStale) {
-						// The reservation lapsed or was dropped while the read
-						// failed, so the offset is no longer this consume's to
-						// resolve. Reserve again rather than fail a consume that
-						// never held a handle.
-						continue
-					}
-					if serr != nil {
-						return topic.Message{}, false, serr
-					}
-					if e.metrics != nil {
-						e.metrics.IncCorruptSkipped(topicName, idx)
-					}
-					e.logger.Warn("skipped permanently-unreadable record",
-						"topic", topicName, "partition", idx, "offset", res.Offset, "err", err)
-					continue
-				}
-				// Transient error (I/O, log closed): give the reservation
-				// back right away. Leaving it in place would hide the message
-				// for the full visibility timeout after a 500 the consumer
-				// will retry immediately.
-				if rerr := e.offsets.ReleaseHandle(topicName, idx, res.Offset, res.Nonce); rerr != nil && !errors.Is(rerr, consumer.ErrHandleStale) {
-					e.logger.Warn("release reservation after read error", "topic", topicName, "partition", idx, "offset", res.Offset, "err", rerr)
-				}
-				return topic.Message{}, false, err
+				continue
 			}
 			return topic.Message{
 				Topic:     topicName,
@@ -507,4 +528,70 @@ func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions 
 		}
 	}
 	return topic.Message{}, false, nil
+}
+
+// resolveUnreadable handles a record the scan reserved (res) but could
+// not read (readErr). nil means it was skipped as recorded loss, or
+// someone else resolved it, and the scan reserves again on the same
+// partition; an error ends the scan with it.
+func (e *Engine) resolveUnreadable(topicName string, idx int, log *storage.Log, res consumer.ReserveResult, readErr error) error {
+	// A frontier that fell behind retention (the segment holding
+	// the reserved offset was reaped) would otherwise be walked
+	// one poison offset per round trip, each with a log line and
+	// a frontier persist. Jump it to the oldest retained offset
+	// in one step; the loss is already visible on the consumer
+	// lag/dropped gauges.
+	if errors.Is(readErr, storage.ErrOffsetNotFound) {
+		if oldest := log.OldestOffset(); res.Offset < oldest {
+			skipped, serr := e.offsets.SkipMissingBelow(topicName, idx, res.Offset, res.Nonce, oldest)
+			if errors.Is(serr, consumer.ErrHandleStale) {
+				// A concurrent consume skipped the same gap first, and
+				// dropped this reservation with everything else below
+				// oldest. The gap is resolved: reserve again, from at
+				// or above oldest. Returning the error answered a
+				// plain consume, which never held a handle, with 410.
+				return nil
+			}
+			if serr != nil {
+				return serr
+			}
+			e.logger.Warn("consumer frontier fell behind retention; skipped to oldest retained offset",
+				"topic", topicName, "partition", idx, "from", res.Offset, "to", oldest, "skipped", skipped)
+			return nil
+		}
+	}
+	// A permanently-unreadable (corrupt) frame, or a gap left by a
+	// corrupt frame recovery skipped, would otherwise head-of-line-block
+	// this partition forever (the offset can never be acked). Skip past
+	// it (recorded loss, never silent) and retry the SAME partition:
+	// the record after the skipped frame may be immediately deliverable,
+	// and moving on could stall a long-poll for the full Wait even
+	// though data is available here.
+	if storage.IsCorrupt(readErr) || errors.Is(readErr, storage.ErrOffsetNotFound) {
+		serr := e.offsets.SkipCorrupt(topicName, idx, res.Offset, res.Nonce)
+		if errors.Is(serr, consumer.ErrHandleStale) {
+			// The reservation lapsed or was dropped while the read
+			// failed, so the offset is no longer this consume's to
+			// resolve. Reserve again rather than fail a consume that
+			// never held a handle.
+			return nil
+		}
+		if serr != nil {
+			return serr
+		}
+		if e.metrics != nil {
+			e.metrics.IncCorruptSkipped(topicName, idx)
+		}
+		e.logger.Warn("skipped permanently-unreadable record",
+			"topic", topicName, "partition", idx, "offset", res.Offset, "err", readErr)
+		return nil
+	}
+	// Transient error (I/O, log closed): give the reservation
+	// back right away. Leaving it in place would hide the message
+	// for the full visibility timeout after a 500 the consumer
+	// will retry immediately.
+	if rerr := e.offsets.ReleaseHandle(topicName, idx, res.Offset, res.Nonce); rerr != nil && !errors.Is(rerr, consumer.ErrHandleStale) {
+		e.logger.Warn("release reservation after read error", "topic", topicName, "partition", idx, "offset", res.Offset, "err", rerr)
+	}
+	return readErr
 }
