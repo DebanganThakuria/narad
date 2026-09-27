@@ -8,6 +8,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/security"
+	httpmessaging "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/messaging"
 )
 
 // inFlightLimiter caps concurrent requests per caller identity. Each
@@ -17,18 +18,27 @@ import (
 // thousands of long-polls on a node. The identity is the authenticated
 // username, or the client IP when security is off.
 type inFlightLimiter struct {
-	max    int
+	max int
+	// what names the requests it counts in its 429 ("consume").
+	what   string
 	mu     sync.Mutex
 	counts map[string]int
 }
 
-// newInFlightLimiter returns a limiter allowing max concurrent requests
-// per identity; max <= 0 disables limiting (wrap returns the handler).
+// newInFlightLimiter returns a limiter allowing max concurrent consume
+// requests per identity; max <= 0 disables limiting (wrap returns the
+// handler).
 func newInFlightLimiter(max int) *inFlightLimiter {
+	return newInFlightLimiterFor(max, "consume")
+}
+
+// newInFlightLimiterFor is newInFlightLimiter for the requests what
+// names.
+func newInFlightLimiterFor(max int, what string) *inFlightLimiter {
 	if max <= 0 {
 		return nil
 	}
-	return &inFlightLimiter{max: max, counts: make(map[string]int)}
+	return &inFlightLimiter{max: max, what: what, counts: make(map[string]int)}
 }
 
 // wrap gates next: a request beyond the identity's cap is answered 429
@@ -47,12 +57,31 @@ func (l *inFlightLimiter) wrap(next http.Handler, weight func(*http.Request) int
 			n = min(max(weight(r), 1), l.max)
 		}
 		if !l.acquireN(key, n) {
-			writeTooManyInFlight(w, l.max)
+			writeTooManyInFlightFor(w, l.what, l.max)
 			return
 		}
 		defer l.releaseN(key, n)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// gate is wrap for a handler that learns a request's weight only from
+// its body (a batch produce weighs its message count): the handler calls
+// the gate once it knows. The weight is clamped as wrap clamps it. Nil
+// when limiting is off.
+func (l *inFlightLimiter) gate() httpmessaging.InFlightGate {
+	if l == nil {
+		return nil
+	}
+	return func(w http.ResponseWriter, r *http.Request, n int) (func(), bool) {
+		key := requestIdentity(r)
+		n = min(max(n, 1), l.max)
+		if !l.acquireN(key, n) {
+			writeTooManyInFlightFor(w, l.what, l.max)
+			return nil, false
+		}
+		return func() { l.releaseN(key, n) }, true
+	}
 }
 
 func (l *inFlightLimiter) acquire(key string) bool { return l.acquireN(key, 1) }
@@ -93,7 +122,11 @@ func requestIdentity(r *http.Request) string {
 }
 
 func writeTooManyInFlight(w http.ResponseWriter, max int) {
-	msg := "too many in-flight consume requests for this identity (limit " + strconv.Itoa(max) + " per node)"
+	writeTooManyInFlightFor(w, "consume", max)
+}
+
+func writeTooManyInFlightFor(w http.ResponseWriter, what string, max int) {
+	msg := "too many in-flight " + what + " requests for this identity (limit " + strconv.Itoa(max) + " per node)"
 	body := make([]byte, 0, len(msg)+14)
 	body = append(body, `{"error":`...)
 	body = topic.AppendJSONQuoted(body, msg)
