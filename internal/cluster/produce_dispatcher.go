@@ -40,8 +40,17 @@ const (
 	// the adaptive window aims for: the window is sized to target *
 	// (distinct partitions seen), so there is room for fat
 	// per-partition commit batches, hence few fsyncs, however many
-	// partitions the WAL interleaves.
+	// partitions the WAL interleaves. It is also the batch floor below
+	// which a destination lingers while other commits are in flight
+	// (see lingerUntil).
 	produceDispatchTargetPerPartition = 64
+
+	// produceDispatchMaxLinger caps how long a destination below the
+	// batch floor waits for more records while other commits are in
+	// flight. The wait is twice its owner's recent commit latency, so a
+	// fast disk waits a few milliseconds and an fsync-bound or distant
+	// owner up to this.
+	produceDispatchMaxLinger = 50 * time.Millisecond
 
 	// produceDispatchLookaheadWindows caps how far past the checkpoint
 	// the dispatcher reads, as a multiple of the current window: nothing
@@ -326,7 +335,8 @@ func (d *ProduceDispatcher) drainResults(ctx context.Context, st *produceDispatc
 
 // nextWake is how long Run may sleep before something is due: the idle
 // backstop (the failure backoff after a stalled round), a running commit
-// turning slow, a failing destination's retry, or the rescan backstop.
+// turning slow, a lingering batch's deadline, a failing destination's
+// retry, or the rescan backstop.
 func (d *ProduceDispatcher) nextWake(st *produceDispatchState) time.Duration {
 	now := d.now()
 	wake := now.Add(d.interval)
@@ -338,6 +348,14 @@ func (d *ProduceDispatcher) nextWake(st *produceDispatchState) time.Duration {
 			if at := job.start.Add(produceDispatchSlowAfter); at.Before(wake) {
 				wake = at
 			}
+		}
+	}
+	for _, dest := range st.ready {
+		// Only a deadline still ahead: one that passed while the
+		// fan-out is full waits for a commit to land, which wakes the
+		// loop anyway.
+		if until, ok := d.lingerUntil(st, dest); ok && until.After(now) && until.Before(wake) {
+			wake = until
 		}
 	}
 	for dest := range st.waiting {
@@ -441,6 +459,7 @@ func newProduceDispatchState(nextSeq uint64, window int) *produceDispatchState {
 		dests:       map[produceDispatchStuckKey]*dispatchDest{},
 		waiting:     map[*dispatchDest]struct{}{},
 		jobs:        map[*dispatchJob]struct{}{},
+		latency:     map[string]time.Duration{},
 		goneIDs:     map[string]struct{}{},
 		unsure:      map[string]time.Time{},
 		topics:      map[string]cachedDispatchTopic{},

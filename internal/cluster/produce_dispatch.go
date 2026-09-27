@@ -30,7 +30,10 @@ var errProduceReplayBoundary = errors.New("produce replay reached durable bounda
 // where it is, which the lookahead horizon bounds. Batching comes from
 // the queueing itself: the longer a commit takes, the more records the
 // next one carries, so a busy owner gets fewer, fatter commits (one
-// fsync each).
+// fsync each). While other commits are in flight, a destination below
+// the batch floor also lingers briefly for more records rather than
+// sending each WAL group commit's handful on its own (see lingerUntil);
+// an idle dispatcher commits at once.
 //
 // A record is left in the WAL (skipped) rather than held when holding
 // it would cost memory for nothing or break partition order: its
@@ -183,6 +186,10 @@ type produceDispatchState struct {
 	jobs        map[*dispatchJob]struct{}
 	active      int
 	outstanding int
+	// latency is each owner's recent commit latency (keyed by address,
+	// "" for this node), an EWMA over the commits that succeeded before
+	// turning slow. It sets how long a small batch lingers.
+	latency map[string]time.Duration
 
 	// skipped counts skipped records. A rescan reads them again from
 	// rescanFrom (when rescanDue) or, on the backstop, from the lowest
@@ -244,6 +251,14 @@ type dispatchDest struct {
 	inflight bool
 	slow     bool
 	inReady  bool
+	// queuedAt is when the oldest record now on queue was queued; a
+	// small batch lingers from then (see lingerUntil).
+	queuedAt time.Time
+	// owner is the address commits to this destination last went to
+	// ("" for this node), once ownerKnown; it picks the commit latency
+	// a small batch lingers by.
+	owner      string
+	ownerKnown bool
 	// held counts this destination's records queued or in flight.
 	held int
 
@@ -532,6 +547,9 @@ func (d *ProduceDispatcher) place(ctx context.Context, st *produceDispatchState,
 // accepted for.
 func (d *ProduceDispatcher) hold(st *produceDispatchState, dest *dispatchDest, rec ingress.ProduceRecord, origPartition int) {
 	st.marks.set(rec.WAL.Seq, seqHeld)
+	if len(dest.queue) == 0 {
+		dest.queuedAt = d.now()
+	}
 	dest.queue = append(dest.queue, rec)
 	dest.origs = append(dest.origs, origPartition)
 	dest.held++

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
@@ -67,8 +66,8 @@ func (d *ProduceDispatcher) markSlow(st *produceDispatchState, now time.Time) {
 }
 
 // launch starts a commit for each ready destination, oldest first, up
-// to the fan-out. Destinations waiting out a retry rejoin the list when
-// it falls due.
+// to the fan-out, except those lingering for a fuller batch. Destinations
+// waiting out a retry rejoin the list when it falls due.
 func (d *ProduceDispatcher) launch(ctx context.Context, st *produceDispatchState) {
 	now := d.now()
 	for dest := range st.waiting {
@@ -78,13 +77,70 @@ func (d *ProduceDispatcher) launch(ctx context.Context, st *produceDispatchState
 		}
 	}
 	fanout := max(d.commitConcurrency, 1)
-	i := 0
-	for ; i < len(st.ready) && st.active < fanout; i++ {
+	// Destinations that do not go now keep their place, in order.
+	// startCommit can append to st.ready (a reroute), so its length is
+	// read on every turn.
+	kept := 0
+	for i := 0; i < len(st.ready); i++ {
 		dest := st.ready[i]
+		if st.active >= fanout {
+			kept += copy(st.ready[kept:], st.ready[i:])
+			break
+		}
+		if until, ok := d.lingerUntil(st, dest); ok && now.Before(until) {
+			st.ready[kept] = dest
+			kept++
+			continue
+		}
 		dest.inReady = false
 		d.startCommit(ctx, st, dest, now)
 	}
-	st.ready = slices.Delete(st.ready, 0, i)
+	clear(st.ready[kept:])
+	st.ready = st.ready[:kept]
+}
+
+// lingerUntil reports whether dest's next commit waits for a fuller
+// batch, and until when. While other commits are in flight, a batch
+// below the floor (produceDispatchTargetPerPartition records) waits up to
+// twice its owner's recent commit latency, capped at
+// produceDispatchMaxLinger: the loop wakes on every WAL group commit,
+// and without the wait each one would go out as a handful of records
+// per partition, an fsync each, on the same disks the WAL group commit
+// waits for. The latency is the owner's own, so a slow owner does not
+// hold back another's partitions. An idle dispatcher, an owner with no
+// commit measured yet, a failing or unresolved destination, and
+// DispatchAvailable commit at once.
+func (d *ProduceDispatcher) lingerUntil(st *produceDispatchState, dest *dispatchDest) (time.Time, bool) {
+	if st.manual || st.active == 0 || dest.failing() || dest.unresolved || len(dest.queue) == 0 ||
+		len(dest.queue) >= min(produceDispatchTargetPerPartition, d.perDestCap(st)) {
+		return time.Time{}, false
+	}
+	if !dest.ownerKnown {
+		target, err := d.dispatchTarget(ingress.ProduceRecord{Topic: dest.key.topic, TargetPartition: dest.key.partition})
+		if err != nil {
+			return time.Time{}, false
+		}
+		dest.owner, dest.ownerKnown = target.addr, true
+	}
+	latency, ok := st.latency[dest.owner]
+	if !ok {
+		return time.Time{}, false
+	}
+	return dest.queuedAt.Add(min(2*latency, produceDispatchMaxLinger)), true
+}
+
+// noteLatency folds a commit's duration into its owner's EWMA; the first
+// commit to an owner sets it.
+func (st *produceDispatchState) noteLatency(owner string, took time.Duration) {
+	prev, ok := st.latency[owner]
+	if !ok {
+		if len(st.latency) >= produceDispatchMemoLimit {
+			clear(st.latency)
+		}
+		st.latency[owner] = took
+		return
+	}
+	st.latency[owner] = prev + (took-prev)/8
 }
 
 // startCommit sends dest's queued records as one batch, or, for a
@@ -102,6 +158,7 @@ func (d *ProduceDispatcher) startCommit(ctx context.Context, st *produceDispatch
 		return
 	}
 	dest.unresolved = false
+	dest.owner, dest.ownerKnown = target.addr, true
 	d.dropReplaced(st, dest)
 	if len(dest.queue) == 0 {
 		st.forget(dest)
@@ -221,6 +278,9 @@ func (d *ProduceDispatcher) finish(ctx context.Context, st *produceDispatchState
 	d.unhold(st, dest, len(job.records))
 
 	if res.err == nil {
+		if !job.slow {
+			st.noteLatency(job.target.addr, d.now().Sub(job.start))
+		}
 		for _, rec := range job.records {
 			st.marks.set(rec.WAL.Seq, seqDone)
 		}
@@ -336,6 +396,9 @@ func (d *ProduceDispatcher) releaseAll(st *produceDispatchState, dest *dispatchD
 // holdAll queues records that are not currently counted as held on
 // dest, keeping their order.
 func (d *ProduceDispatcher) holdAll(st *produceDispatchState, dest *dispatchDest, records []ingress.ProduceRecord, origs []int) {
+	if len(dest.queue) == 0 && len(records) > 0 {
+		dest.queuedAt = d.now()
+	}
 	for i, rec := range records {
 		rec.TargetPartition = dest.key.partition
 		st.marks.set(rec.WAL.Seq, seqHeld)
