@@ -18,30 +18,38 @@ import (
 // cluster RPCs are acks, one per consumed message.
 //
 // A forwarded ack still goes out on its own, at once, whenever fewer
-// than ackCoalesceInFlight acks to its owner are in flight, so at low
-// load nothing changes: the same OpAck, sent as soon as it arrives.
-// Only when every one of those slots is busy does a further ack wait,
-// and the acks that pile up behind one owner leave together as one
-// OpAckBatch the moment a slot frees. That is Nagle's algorithm with a
-// few packets allowed in flight: batches form exactly when acks to one
-// owner overlap, and grow with how much they overlap.
+// than ackInFlightLimit acks to its owner are in flight: the same OpAck,
+// sent as soon as it arrives. Only when every one of those slots is
+// busy does a further ack wait, and the acks that pile up behind one
+// owner leave together as one OpAckBatch the moment a slot frees. That
+// is Nagle's algorithm with a wide window: batches form only when many
+// acks to one owner overlap, and grow with how much they overlap.
+//
+// The window has to be wide because a queued ack waits for some other
+// ack's round trip to end, a wait that shrinks as the window grows. A
+// window of 4 made every ack past the 4th in flight wait: with a 1 ms
+// round trip, forwarded acks at 5 to 64 in flight were 38% to 93% slower
+// than one RPC each. At twice the owner's handler bound (128 on a small node)
+// the queue forms only far past where most gateways run, and there the
+// batch saves more than the wait costs.
 //
 // Acks are idempotent by nonce, so sharing an RPC changes nothing about
 // what they do. Each record keeps its own outcome: the owner answers
 // every record of a batch separately, and each HTTP ack gets the status
 // and body its own single RPC would have got.
 
-const (
-	// ackCoalesceInFlight is how many ack RPCs to one owner may be in
-	// flight before further acks queue for a shared batch. More than one,
-	// so a single slow reply (a GC pause on the owner, a lost packet)
-	// holds back only the acks queued behind it and the others keep
-	// flowing.
-	ackCoalesceInFlight = 4
-	// ackCoalesceMax caps one coalesced batch. A burst larger than this
-	// forms several batches, which leave one per freed slot.
-	ackCoalesceMax = 64
-)
+// ackCoalesceMax caps one coalesced batch. A burst larger than this
+// forms several batches, which leave one per freed slot.
+const ackCoalesceMax = 64
+
+// ackInFlightLimit is how many ack RPCs to one owner may be in flight
+// before further acks queue for a shared batch: twice the
+// messaging-handler bound every node serves with (see
+// defaultMessagingConcurrency), since an ack holds an owner's handler
+// slot only while it runs there, not while it crosses the network. It
+// is read once per owner, when the owner's state is created, because
+// runtime.GOMAXPROCS takes a scheduler lock.
+func ackInFlightLimit() int { return 2 * defaultMessagingConcurrency() }
 
 // ackCoalescer is the router's per-owner ack state. The zero value is
 // ready to use.
@@ -54,7 +62,7 @@ func (c *ackCoalescer) owner(addr string) *ackOwner {
 	if v, ok := c.owners.Load(addr); ok {
 		return v.(*ackOwner)
 	}
-	v, _ := c.owners.LoadOrStore(addr, &ackOwner{})
+	v, _ := c.owners.LoadOrStore(addr, &ackOwner{limit: ackInFlightLimit()})
 	return v.(*ackOwner)
 }
 
@@ -62,6 +70,7 @@ func (c *ackCoalescer) owner(addr string) *ackOwner {
 // every slot is busy: a freed slot passes straight to the queue's head.
 type ackOwner struct {
 	mu       sync.Mutex
+	limit    int // slots; see ackInFlightLimit
 	inflight int
 	queue    []*ackBatch
 }
@@ -97,7 +106,7 @@ func (rt *Router) forwardAck(ctx context.Context, addr string, item nodewire.Ack
 	}
 	o := rt.acks.owner(addr)
 	o.mu.Lock()
-	if o.inflight < ackCoalesceInFlight {
+	if o.inflight < o.limit {
 		o.inflight++
 		o.mu.Unlock()
 		res, err := rt.sendSingleAck(ctx, addr, ackForwardTimeout, item)
@@ -105,7 +114,7 @@ func (rt *Router) forwardAck(ctx context.Context, addr string, item nodewire.Ack
 		return res, err
 	}
 	// The budget covers the wait for a slot as well as the round trip,
-	// so a queued ack is answered no later than a single one would be.
+	// so a queued ack gives up no later than a single one would.
 	deadline := time.Now().Add(ackForwardTimeout)
 	b, idx := o.join(item, deadline)
 	o.mu.Unlock()
