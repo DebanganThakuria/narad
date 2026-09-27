@@ -94,7 +94,7 @@ bytes ≈ (cluster msg/s ÷ nodes) × avg_stored_record × retention_seconds × 
 - `avg_stored_record` ≈ payload + ~20B envelope, then × your compression ratio (zstd: measure; we see 0.05–0.6 depending on batch fatness; compression improves under load because frames get fatter).
 - `× 1.3` covers the retention sawtooth: deletion is per 64 MiB segment, so a partition holds up to `retention + one segment's fill time` of data.
 - Fan-out children each store their **own full copy**; count them as separate topics in the math.
-- Add the metastore (~tens of MB) and ingress WAL (self-reclaiming, sub-MB steady state) as rounding errors.
+- Add the metastore (~tens of MB) and ingress WAL (self-reclaiming, sub-MB steady state; up to two 64 MiB prepared segments more with `storage.ingress_wal_prealloc` on) as rounding errors.
 
 Worked example from our soak: 100 msg/s × ~250B JSON × 12h retention × 3 topic copies ≈ 1.4GB cluster-wide with zstd. Disk is cheap; run the math anyway.
 

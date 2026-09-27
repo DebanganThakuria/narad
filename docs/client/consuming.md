@@ -42,6 +42,8 @@ Produce takes raw bytes, so the response's `payload` field adapts to what was pr
 
 The rule for consumers: **if `payload_encoding` is `"base64"`, decode it; otherwise use the payload as-is.** JSON strings can't carry arbitrary bytes, so base64 is the one case where Narad must wrap, and it always tells you when it did. Text and JSON round-trip untouched.
 
+The message's `key` follows the same rule. It is present only when the message was produced with one (a keyless message has no `key` field at all), and it is a plain JSON string, control characters escaped the way any JSON encoder escapes them. A key that is not valid UTF-8 (a raw hash, a packed ID) comes back as base64 with **`"key_encoding": "base64"`** beside it: decode it when that field says so, use it as-is otherwise.
+
 ## Acking
 
 ```bash
@@ -79,5 +81,5 @@ curl -u $AUTH -X POST -H "Content-Type: application/json" \
 
 - **`max_in_flight_per_partition`**: once that many messages are out and unacked on a partition, consume returns `204` until acks arrive. Stops one stuck consumer fleet from vacuuming the queue.
 - **`max_acked_ahead_per_partition`**: bound on out-of-order acks held while an earlier message is still unacked. Once it is reached, consume stops handing out fresh messages on that partition and serves only the one blocking the frontier; acks for messages you already hold are always accepted, so nothing you were given can bounce.
-- **Retry `503` acks. This is not optional.** A `503` on ack means the partition's owner is unreachable right now. An ack you drop on the floor becomes a redelivery 30 seconds later, whose ack can bounce again; we watched a consumer that didn't retry generate 600,000 duplicate deliveries in one evening. Treat a failed ack like a failed write, and retry it with backoff.
+- **Retry `503` (and `502`) acks. This is not optional.** A `503` on ack means the partition's owner is unreachable right now; a `502` means the node you reached got no answer from the owner in time. An ack you drop on the floor becomes a redelivery 30 seconds later, whose ack can bounce again; we watched a consumer that didn't retry generate 600,000 duplicate deliveries in one evening. Treat a failed ack like a failed write, and retry it with backoff.
 - **Duplicates are normal.** Crashes, timeouts, and nacks all cause redelivery. Use the message key or an ID in the payload to deduplicate in your handler.
