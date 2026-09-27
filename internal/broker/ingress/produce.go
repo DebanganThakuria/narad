@@ -63,6 +63,10 @@ type Manager struct {
 	produceDir  string
 	log         *wal.Log
 	durableNext atomic.Uint64
+	// durableAdvanced holds at most one pending wakeup: an append that
+	// moves durableNext leaves one unless one is already waiting, so the
+	// dispatcher wakes as soon as there is something new to read.
+	durableAdvanced chan struct{}
 
 	checkpointMu sync.Mutex
 	checkpoint   *checkpointWriter
@@ -103,9 +107,10 @@ func OpenManager(dataDir string, opts wal.Options) (*Manager, error) {
 		return nil, fmt.Errorf("ingress: produce checkpoint %d is ahead of recovered WAL next seq %d (missing WAL segments?)", checkpoint, nextSeq)
 	}
 	manager := &Manager{
-		produceDir: produceDir,
-		log:        log,
-		checkpoint: newCheckpointWriter(produceDir, produceCheckpointFile),
+		produceDir:      produceDir,
+		log:             log,
+		durableAdvanced: make(chan struct{}, 1),
+		checkpoint:      newCheckpointWriter(produceDir, produceCheckpointFile),
 	}
 	manager.durableNext.Store(nextSeq)
 	return manager, nil
@@ -183,6 +188,18 @@ func (m *Manager) DurableProduceNext() uint64 {
 		return 0
 	}
 	return m.durableNext.Load()
+}
+
+// DurableProduceAdvanced returns a channel that receives after
+// DurableProduceNext moves, so a dispatcher can sleep until there is
+// something new to read instead of polling. A receive is only a hint:
+// one can stand for many advances, and DurableProduceNext stays the
+// authority. Nil for a nil manager, which never receives.
+func (m *Manager) DurableProduceAdvanced() <-chan struct{} {
+	if m == nil {
+		return nil
+	}
+	return m.durableAdvanced
 }
 
 // ReplayProduce replays this node's ingress WAL from the given
@@ -283,7 +300,7 @@ func (m *Manager) Close() error {
 }
 
 // advanceDurableNext lifts durableNext to next unless a concurrent
-// append already advanced it further.
+// append already advanced it further, and signals durableAdvanced.
 func (m *Manager) advanceDurableNext(next uint64) {
 	for {
 		current := m.durableNext.Load()
@@ -291,6 +308,12 @@ func (m *Manager) advanceDurableNext(next uint64) {
 			return
 		}
 		if m.durableNext.CompareAndSwap(current, next) {
+			// Under load a wakeup is almost always pending already, and
+			// a send to a full channel returns without taking its lock.
+			select {
+			case m.durableAdvanced <- struct{}{}:
+			default:
+			}
 			return
 		}
 	}

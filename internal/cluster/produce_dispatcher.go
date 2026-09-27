@@ -14,10 +14,11 @@ import (
 )
 
 const (
-	// defaultProduceDispatchInterval is the idle poll: Run wakes at
-	// least this often when nothing else wakes it (a commit completing,
-	// a retry falling due). It is also how often a destination whose
-	// owner cannot be resolved is looked up again.
+	// defaultProduceDispatchInterval is the idle backstop: Run wakes at
+	// least this often when nothing else wakes it (a record becoming
+	// durable, a commit completing, a retry falling due). It is also how
+	// often a destination whose owner cannot be resolved is looked up
+	// again.
 	defaultProduceDispatchInterval = 10 * time.Millisecond
 
 	// defaultProduceDispatchBatchSize is the hard ceiling on the adaptive
@@ -241,6 +242,7 @@ func (d *ProduceDispatcher) run(ctx context.Context) {
 	st.manual = false
 	timer := time.NewTimer(d.interval)
 	defer timer.Stop()
+	advanced := d.ingress.DurableProduceAdvanced()
 	var lastLogged time.Time
 	for ctx.Err() == nil {
 		st.pass++
@@ -262,10 +264,20 @@ func (d *ProduceDispatcher) run(ctx context.Context) {
 			}
 		}
 		timer.Reset(d.nextWake(st))
+		// A record becoming durable wakes the loop at once rather than
+		// on the idle poll. Not after a round that could not read the
+		// WAL or store the checkpoint: the retry then waits out the
+		// backoff instead of running once per accept. A failing
+		// destination does not count: its retries go by its own clock.
+		wake := advanced
+		if st.stalled {
+			wake = nil
+		}
 		select {
 		case <-ctx.Done():
 		case res := <-d.results:
 			d.finish(ctx, st, res)
+		case <-wake:
 		case <-timer.C:
 		}
 	}
