@@ -1,15 +1,18 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/broker"
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/consumer"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
@@ -141,6 +144,9 @@ func (s *RPCServer) abandonConsume(req *nodewire.ConsumeRequest) nodewire.Respon
 // consume runs a decoded consume against the broker, wait already
 // clamped.
 func (s *RPCServer) consume(ctx context.Context, key requestKey, req *nodewire.ConsumeRequest, wait time.Duration) nodewire.Response {
+	if req.Max > 1 && !req.HasOffset {
+		return s.consumeBatch(ctx, key, req, wait)
+	}
 	opts := brokermsg.ConsumeOpts{Wait: wait}
 	if req.HasPartition {
 		partition := req.Partition
@@ -196,6 +202,123 @@ func (s *RPCServer) consume(ctx context.Context, key requestKey, req *nodewire.C
 	// and copied the body three times.
 	body := msg.AppendJSON(make([]byte, 0, len(msg.Payload)+128))
 	body = append(body, '\n')
+	return nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: body}
+}
+
+// maxForwardedConsumeBatch caps the records one forwarded batch consume
+// takes, whatever the requester asked for. It is the HTTP layer's own
+// cap on ?max= (messaging.MaxConsumeBatch there), restated because this
+// package sits below the transport.
+const maxForwardedConsumeBatch = 100
+
+// forwardedConsumeBatchBytes bounds the key and payload bytes a
+// forwarded batch takes (ConsumeOpts.MaxBytes), so that its reply fits in
+// one cluster RPC frame (clusterwire.MaxStreamFramePayloadBytes, 16 MiB)
+// whatever the payload sizes: at most this plus one record past it (1 MiB
+// by the produce cap), grown by a third where base64 applies, plus the
+// JSON around each record.
+const forwardedConsumeBatchBytes = 4 << 20
+
+// consumeBatch answers a consume that asked for up to req.Max records: a
+// batch consume forwarded by a node that owns none of the topic's
+// partitions (or not the pinned one). It reserves up to that many in one
+// non-blocking scan; with none there and a wait it parks as a single
+// consume does and tops up the record the wait delivers with another
+// scan. The reply is 200 {"messages":[...]}, each record encoded as a
+// single consume's reply encodes it, or 204 with none; failures are
+// answered as for a single consume.
+//
+// A reply is remembered for a cancel that races it (rememberDelivery)
+// by its first record only, since that record holds one handle per
+// request: such a cancel gives the first record back at once, and the
+// rest when their leases lapse. A cancel that arrives before the reply is
+// written gives every record back.
+func (s *RPCServer) consumeBatch(ctx context.Context, key requestKey, req *nodewire.ConsumeRequest, wait time.Duration) nodewire.Response {
+	bc, ok := s.broker.(broker.BatchConsumer)
+	if !ok {
+		// A broker without the batch surface serves one record, answered
+		// in the batch shape the requester asked for.
+		single := *req
+		single.Max = 0
+		res := s.consume(ctx, key, &single, wait)
+		if res.Status != http.StatusOK {
+			return res
+		}
+		body := make([]byte, 0, len(res.Body)+16)
+		body = append(body, `{"messages":[`...)
+		body = append(body, bytes.TrimRight(res.Body, "\n")...)
+		body = append(body, "]}\n"...)
+		return nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: body}
+	}
+
+	opts := brokermsg.ConsumeOpts{MaxBytes: forwardedConsumeBatchBytes}
+	if req.HasPartition {
+		partition := req.Partition
+		opts.Partition = &partition
+	}
+	max := min(req.Max, maxForwardedConsumeBatch)
+	msgs, waiter, err := bc.ConsumeBatch(ctx, req.Topic, opts, max, nil)
+	if err == nil && len(msgs) == 0 && wait > 0 && waiter != nil {
+		var msg topic.Message
+		var found bool
+		msg, found, _, err = s.broker.ConsumeWait(ctx, waiter, wait, nil)
+		if err == nil && found {
+			msgs = append(msgs, msg)
+			// The wait wakes on the first record of a burst; the rest are
+			// usually right behind it. A failed top-up only ends the batch.
+			top := opts
+			top.MaxBytes -= len(msg.Key) + len(msg.Payload)
+			if max > 1 && top.MaxBytes > 0 {
+				if more, _, terr := bc.ConsumeBatch(ctx, req.Topic, top, max-1, msgs); terr == nil {
+					msgs = more
+				}
+			}
+		}
+	}
+	if req.Claim && req.LocalOnly && wait == 0 && err == nil && len(msgs) > 0 {
+		// A claim that won records resolves its notification, as a single
+		// claim does (see consume).
+		s.broker.NoteRemoteClaim(req.Topic)
+	}
+	if errors.Is(err, brokermsg.ErrNotPartitionOwner) && req.LocalOnly {
+		return nodewire.Response{Status: http.StatusNoContent}
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return nodewire.Response{Status: http.StatusNoContent}
+		}
+		return s.brokerError("consume", err)
+	}
+	if len(msgs) == 0 {
+		return nodewire.Response{Status: http.StatusNoContent}
+	}
+	if h, herr := consumer.DecodeHandle(msgs[0].ReceiptHandle); herr == nil {
+		s.rememberDelivery(key, req.Topic, h)
+	}
+	if ctx.Err() != nil {
+		// The requester is gone: give every record back now rather than
+		// leave them hidden until their leases lapse.
+		s.takeDelivery(key)
+		for i := range msgs {
+			if h, herr := consumer.DecodeHandle(msgs[i].ReceiptHandle); herr == nil {
+				s.releaseDelivery(delivery{topic: req.Topic, handle: h})
+			}
+		}
+		return nodewire.Response{Status: http.StatusNoContent}
+	}
+	size := 16
+	for i := range msgs {
+		size += len(msgs[i].Key) + len(msgs[i].Payload) + 160
+	}
+	body := make([]byte, 0, size)
+	body = append(body, `{"messages":[`...)
+	for i := range msgs {
+		if i > 0 {
+			body = append(body, ',')
+		}
+		body = msgs[i].AppendJSON(body)
+	}
+	body = append(body, "]}\n"...)
 	return nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: body}
 }
 

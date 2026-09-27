@@ -69,6 +69,11 @@ type ConsumeOpts struct {
 	// separate pinned probe the handler used to make first, so one scan
 	// covers both. Ignored when Partition or Offset is set.
 	ScanStart *int
+	// MaxBytes, when positive, ends a ConsumeBatch once the key and
+	// payload bytes it has reserved reach it; the first record is always
+	// taken. A forwarded batch sets it so its reply fits in one cluster
+	// RPC frame whatever the payload sizes. Zero is no bound.
+	MaxBytes int
 }
 
 // Engine handles produce, consume, and ack. Constructed once at
