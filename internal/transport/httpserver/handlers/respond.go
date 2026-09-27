@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
@@ -82,7 +83,7 @@ func (s *Set) WriteError(w http.ResponseWriter, status int, msg string) {
 func (s *Set) writeError(w http.ResponseWriter, status int, msg string) {
 	body := make([]byte, 0, len(msg)+14)
 	body = append(body, `{"error":`...)
-	body = strconv.AppendQuote(body, msg)
+	body = topic.AppendJSONQuoted(body, msg)
 	body = append(body, "}\n"...)
 
 	w.Header().Set("Content-Type", "application/json")

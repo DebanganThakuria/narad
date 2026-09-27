@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -61,7 +60,7 @@ func buildBroker(
 		return nil, fmt.Errorf("storage options: %w", err)
 	}
 
-	offsetCommitter := runtime.NewConsumerOffsetCommitter(cfg.Storage.DataDir, time.Duration(cfg.Storage.FlushIntervalMs)*time.Millisecond, log)
+	offsetCommitter := runtime.NewConsumerOffsetCommitter(cfg.Storage.DataDir, consumerOffsetCommitInterval(cfg.Storage), log)
 	offsets := consumer.NewInFlight(capsResolver(ms, cfg.Topic), offsetCommitter.Commit)
 	// Committed consumer offsets recover lazily from the per-partition
 	// file when a shard is first touched. Recovering from DISK — not from

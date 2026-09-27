@@ -54,6 +54,9 @@ type Poller struct {
 	// reaperRestarts, when set (SetReaperRestartCounter), reports how
 	// many times the shared retention loop had to be replaced.
 	reaperRestarts func() int64
+	// ingressHealthy, when set (SetIngressWALHealth), reports whether
+	// the ingress WAL still accepts produce.
+	ingressHealthy func() bool
 }
 
 // gaugeSeriesKey identifies one per-partition gauge series.
@@ -93,6 +96,13 @@ func (p *Poller) SetReaperRestartCounter(count func() int64) {
 	p.reaperRestarts = count
 }
 
+// SetIngressWALHealth wires the source of narad_ingress_wal_failed:
+// healthy reports whether the ingress WAL still accepts produce
+// (ingress.Manager.Healthy).
+func (p *Poller) SetIngressWALHealth(healthy func() bool) {
+	p.ingressHealthy = healthy
+}
+
 // Run blocks until ctx is cancelled. It does an immediate first tick
 // so /metrics returns useful values before the first 5-second
 // interval elapses.
@@ -117,6 +127,10 @@ func (p *Poller) Run(ctx context.Context) {
 }
 
 func (p *Poller) tick(ctx context.Context) {
+	// Taken before the topic listing inside Snapshot: anything bound for
+	// a topic before this point, and absent from the listing, belongs to
+	// a deleted topic. See pruneDeletedTopics.
+	epoch := p.metrics.snapshotEpoch()
 	snaps, err := p.broker.Snapshot(ctx)
 	if err != nil {
 		p.logger.Warn("metrics: snapshot failed", "err", err)
@@ -143,9 +157,16 @@ func (p *Poller) tick(ctx context.Context) {
 	if p.reaperRestarts != nil {
 		p.metrics.ReaperRestarts.Set(float64(p.reaperRestarts()))
 	}
+	if p.ingressHealthy != nil {
+		failed := 0.0
+		if !p.ingressHealthy() {
+			failed = 1
+		}
+		p.metrics.IngressWALFailed.Set(failed)
+	}
 	p.updateDataDirGauges()
 	p.clearDepartedPartitions(currentPartitions)
-	p.pruneDeletedTopics(currentTopics)
+	p.pruneDeletedTopics(currentTopics, epoch)
 }
 
 func (p *Poller) setTopicGauges(ts TopicSnapshot, nowUnix int64, current map[gaugeSeriesKey]struct{}) {
@@ -205,14 +226,18 @@ func (p *Poller) clearDepartedPartitions(current map[gaugeSeriesKey]struct{}) {
 // pruneDeletedTopics drops gauge series for topics that disappeared
 // since the previous tick. Without this, deleted topics would leak
 // series in /metrics for the lifetime of the process — unbounded under
-// topic churn.
-func (p *Poller) pruneDeletedTopics(current map[string]struct{}) {
+// topic churn. The prune also retires the topic's storage recorders,
+// and a topic that got counters or a recorder bound again after its
+// prune (a request that straddled the delete, a log opened just as it
+// happened) is pruned again, since it is never "disappearing" twice.
+func (p *Poller) pruneDeletedTopics(current map[string]struct{}, epoch uint64) {
 	for topic := range p.previousTopics {
 		if _, still := current[topic]; still {
 			continue
 		}
-		p.metrics.pruneTopicSeries(topic)
+		p.metrics.pruneTopicSeries(topic, epoch)
 	}
+	p.metrics.pruneOrphanedTopics(current, epoch)
 	p.previousTopics = current
 }
 

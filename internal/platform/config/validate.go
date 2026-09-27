@@ -16,6 +16,14 @@ import (
 // turn a housekeeping loop into a busy one.
 const minBackgroundWalkMs = 60_000
 
+// Bounds for storage.consumer_offset_commit_interval_ms. The floor keeps
+// the committer loop from spinning; the ceiling bounds how many acks a
+// crash can redeliver.
+const (
+	minConsumerOffsetCommitIntervalMs = 10
+	maxConsumerOffsetCommitIntervalMs = 60_000
+)
+
 // minClusterPeers is the smallest multi-node peer list that makes
 // sense: a Raft cluster of two cannot survive any failure, so anything
 // below three voters is a config mistake. Larger (odd) sizes are fine —
@@ -248,11 +256,14 @@ func storageValidationErrors(cfg StorageConfig) []string {
 	if cfg.SyncBytes < 0 {
 		errs = append(errs, "storage.sync_bytes must be >= 0")
 	}
-	if cfg.HighWatermarkSyncIntervalMs <= 0 {
-		errs = append(errs, "storage.high_watermark_sync_interval_ms must be > 0")
-	}
+	// storage.high_watermark_sync_interval_ms is deprecated and ignored,
+	// so any value is accepted.
 	if cfg.IngressWALSyncIntervalMs <= 0 {
 		errs = append(errs, "storage.ingress_wal_sync_interval_ms must be > 0")
+	}
+	if cfg.ConsumerOffsetCommitIntervalMs < minConsumerOffsetCommitIntervalMs || cfg.ConsumerOffsetCommitIntervalMs > maxConsumerOffsetCommitIntervalMs {
+		errs = append(errs, fmt.Sprintf("storage.consumer_offset_commit_interval_ms (%d) must be between %d and %d",
+			cfg.ConsumerOffsetCommitIntervalMs, minConsumerOffsetCommitIntervalMs, maxConsumerOffsetCommitIntervalMs))
 	}
 	if cfg.SegmentBytes < 4096 {
 		errs = append(errs, fmt.Sprintf("storage.segment_bytes (%d) must be >= 4096", cfg.SegmentBytes))

@@ -32,21 +32,23 @@ func Default() *Config {
 			RaftTrailingLogs:      DefaultRaftTrailingLogs,
 		},
 		Storage: StorageConfig{
-			DataDir:                     "data",
-			Fsync:                       FsyncBatched,
-			Codec:                       "none",
-			CompressionLevel:            "fastest",
-			FlushBytes:                  1 << 20, // 1 MiB
-			FlushRecords:                1000,
-			FlushIntervalMs:             100,
-			SyncIntervalMs:              1000,
-			SyncBytes:                   8 << 20,
-			HighWatermarkSyncIntervalMs: 5000,
-			IngressWALSyncIntervalMs:    10,
-			SegmentBytes:                64 << 20,  // 64 MiB
-			RetentionCheckIntervalMs:    60_000,    // 1 minute
-			IdleLogEvictionMs:           1_800_000, // 30 minutes
-			ColdRetentionWalkMs:         300_000,   // 5 minutes
+			DataDir:                        "data",
+			Fsync:                          FsyncBatched,
+			Codec:                          "none",
+			CompressionLevel:               "fastest",
+			FlushBytes:                     1 << 20, // 1 MiB
+			FlushRecords:                   1000,
+			FlushIntervalMs:                100,
+			SyncIntervalMs:                 1000,
+			SyncBytes:                      8 << 20,
+			HighWatermarkSyncIntervalMs:    5000,
+			IngressWALSyncIntervalMs:       10,
+			IngressWALPrealloc:             false,     // opt-in; see StorageConfig.IngressWALPrealloc
+			ConsumerOffsetCommitIntervalMs: 100,       // the flush cadence it used to borrow: same crash redelivery window
+			SegmentBytes:                   64 << 20,  // 64 MiB
+			RetentionCheckIntervalMs:       60_000,    // 1 minute
+			IdleLogEvictionMs:              1_800_000, // 30 minutes
+			ColdRetentionWalkMs:            300_000,   // 5 minutes
 		},
 		Topic: TopicConfig{
 			DefaultPartitions:                3,
