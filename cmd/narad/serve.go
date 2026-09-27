@@ -209,6 +209,7 @@ func runServe(args []string) error {
 	poller.SetOpenLogCounter(bc.logs.OpenCount)
 	poller.SetReaperRestartCounter(bc.logs.ReaperRestarts)
 	poller.SetIngressWALHealth(bc.ingress.Healthy)
+	poller.SetIngressDispatchBacklog(bc.ingress.DispatchBacklog)
 	wg.Go(func() { poller.Run(ctx) })
 	wg.Go(func() { bc.logs.RunIdleEviction(ctx, time.Duration(cfg.Storage.IdleLogEvictionMs)*time.Millisecond) })
 	wg.Go(func() { bc.logs.RunColdRetention(ctx, time.Duration(cfg.Storage.ColdRetentionWalkMs)*time.Millisecond) })

@@ -57,6 +57,9 @@ type Poller struct {
 	// ingressHealthy, when set (SetIngressWALHealth), reports whether
 	// the ingress WAL still accepts produce.
 	ingressHealthy func() bool
+	// ingressBacklog, when set (SetIngressDispatchBacklog), reports the
+	// ingress WAL records a restart would replay.
+	ingressBacklog func() uint64
 }
 
 // gaugeSeriesKey identifies one per-partition gauge series.
@@ -103,6 +106,15 @@ func (p *Poller) SetIngressWALHealth(healthy func() bool) {
 	p.ingressHealthy = healthy
 }
 
+// SetIngressDispatchBacklog wires the source of
+// narad_ingress_dispatch_backlog_records: backlog reports the durable
+// next seq minus the stored dispatch checkpoint
+// (ingress.Manager.DispatchBacklog). It must be cheap: it is read on
+// every tick.
+func (p *Poller) SetIngressDispatchBacklog(backlog func() uint64) {
+	p.ingressBacklog = backlog
+}
+
 // Run blocks until ctx is cancelled. It does an immediate first tick
 // so /metrics returns useful values before the first 5-second
 // interval elapses.
@@ -127,6 +139,11 @@ func (p *Poller) Run(ctx context.Context) {
 }
 
 func (p *Poller) tick(ctx context.Context) {
+	// First, so a failing snapshot does not leave it stale: an operator
+	// waits for it to read 0 before a rollback.
+	if p.ingressBacklog != nil {
+		p.metrics.IngressDispatchBacklog.Set(float64(p.ingressBacklog()))
+	}
 	// Taken before the topic listing inside Snapshot: anything bound for
 	// a topic before this point, and absent from the listing, belongs to
 	// a deleted topic. See pruneDeletedTopics.
