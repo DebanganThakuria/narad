@@ -63,7 +63,7 @@ flowchart LR
 
 | Code | Where | Meaning | What you should do |
 |---|---|---|---|
-| `200` | consume, reads | Here's your data | Process it |
+| `200` | consume, reads, batch ack | Here's your data; for a [batch ack](consuming.md#acking-in-batches), one result per handle, each with the status a single ack would have got | Process it; retry the batch-ack handles answered `502` or `503` |
 | `201` | topic/user create | Created | Nothing |
 | `202` | produce | Durably accepted: the delivery promise | Nothing. Never retry a 202 |
 | `204` | ack/extend/nack, delete, empty consume | Done / nothing available | Loop or move on |
@@ -73,13 +73,14 @@ flowchart LR
 | `404` | anywhere | Topic/user doesn't exist | Check the name |
 | `409` | create/attach/alter | Conflict: already exists, role conflict, retention-vs-delay violation, schema `schema_base_version` no longer current, schema history full, schema of an attached child | Read the error body; for a schema conflict, re-read `schema_version` and retry with the new base |
 | `410` | ack/extend | Your lease lapsed; message was handed elsewhere | Stop working on it; expect a duplicate |
-| `413` | produce, topic create/alter | Body over 1 MiB (a schema document itself is capped at 256 KiB, answered as `400`) | Shrink the payload |
+| `413` | produce, topic create/alter, batch ack | Body over 1 MiB (a schema document itself is capped at 256 KiB, answered as `400`); a batch ack body over 64 KiB | Shrink the payload |
+| `429` | consume | Too many concurrent consumes for your identity on this node (`http.max_consume_in_flight_per_identity`, 1024 by default; a [batch consume](consuming.md#consuming-in-batches) counts as its `max`) | Back off and retry, or run fewer concurrent long-polls |
 | `502` | ack/extend/nack, partition-pinned consume | The node you reached forwarded the request to the partition's owner and got no answer (the owner stopped responding, or the connection to it failed) | Back off and retry, as for `503`; an ack can never settle twice, so retrying one that had already landed changes nothing (the retry answers `410`) |
 | `503` | produce/consume/ack | Temporarily unavailable: partition owner down, quorum lost | Back off and retry |
 
 ## Retry cheat sheet
 
-- `202` → never retry. `4xx` → never retry unchanged. `502`, `503` and timeouts → retry with backoff.
+- `202` → never retry. `4xx` → never retry unchanged, except `429`, which is a retry-later. `502`, `503` and timeouts → retry with backoff; for a batch ack, retry just the handles whose result says so.
 - A **timed-out produce is ambiguous**: the message may have been accepted. Retrying may duplicate it; that's fine, because your consumer is idempotent. Right?
 
 ## API stability
