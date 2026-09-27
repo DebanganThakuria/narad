@@ -11,11 +11,121 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/consumer"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
 	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
+
+// zzWP9HandedOnWake mimics broker ConsumeWait's external branch when the
+// pump handed the waiter a local record in the same instant.
+type zzWP9HandedOnWake struct{}
+
+func (zzWP9HandedOnWake) Wait(ctx context.Context, wait time.Duration, external <-chan struct{}) (topic.Message, bool, bool, error) {
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-external:
+		return topic.Message{Topic: "orders", Partition: 1, Offset: 3, ReceiptHandle: "1:3:5"}, true, false, nil
+	case <-t.C:
+		return topic.Message{}, false, false, nil
+	case <-ctx.Done():
+		return topic.Message{}, false, false, ctx.Err()
+	}
+}
+
+func (zzWP9HandedOnWake) Release(context.Context, topic.Message) error { return nil }
+
+// zzWP9LocalHit returns a local record after delay.
+type zzWP9LocalHit struct{ delay time.Duration }
+
+func (l zzWP9LocalHit) Wait(ctx context.Context, wait time.Duration, external <-chan struct{}) (topic.Message, bool, bool, error) {
+	t := time.NewTimer(min(l.delay, wait))
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return topic.Message{Topic: "orders", Partition: 1, Offset: 3, ReceiptHandle: "1:3:5"}, true, false, nil
+	case <-external:
+		return topic.Message{}, false, true, nil
+	case <-ctx.Done():
+		return topic.Message{}, false, false, ctx.Err()
+	}
+}
+
+func (zzWP9LocalHit) Release(context.Context, topic.Message) error { return nil }
+
+// zzWP9BlockingWriter holds the response body write until released.
+type zzWP9BlockingWriter struct {
+	*httptest.ResponseRecorder
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *zzWP9BlockingWriter) Write(p []byte) (int, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return b.ResponseRecorder.Write(p)
+}
+
+// zzWP9Strand: consumer A is woken by an owner's notification while it
+// is leaving without claiming, and consumer B stays parked. The owner
+// spent this node's token on A, so something must put a token back
+// there for B well before B's budget runs out.
+func zzWP9Strand(t *testing.T, served bool) {
+	reg := newRegistrationLog()
+	router := tokenRouter(t, fakePeerClient{registerTokensFn: reg.registerTokens})
+	const key = "remote.example:7942/orders"
+
+	aDone := make(chan struct{})
+	var bw *zzWP9BlockingWriter
+	if served {
+		bw = &zzWP9BlockingWriter{ResponseRecorder: httptest.NewRecorder(), entered: make(chan struct{}), release: make(chan struct{})}
+		go func() {
+			defer close(aDone)
+			router.RouteConsumeWait(context.Background(), bw, httptest.NewRequest(http.MethodGet, "/", nil), "orders", 5*time.Second, zzWP9LocalHit{delay: 300 * time.Millisecond})
+		}()
+	} else {
+		go func() {
+			defer close(aDone)
+			router.RouteConsumeWait(context.Background(), httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil), "orders", 5*time.Second, zzWP9HandedOnWake{})
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	bDone := make(chan struct{})
+	go func() {
+		defer close(bDone)
+		router.RouteConsumeWait(context.Background(), httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil), "orders", 4*time.Second, &fakeLocalWaiter{delay: time.Hour})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	before, _ := reg.counts(key)
+	if bw != nil {
+		<-bw.entered // A has its record and is writing the response
+	}
+	router.LocalDemand().WakeOneWaiter("orders", "remote.example:7942")
+	wokeAt := time.Now()
+	if bw != nil {
+		close(bw.release)
+	}
+	<-aDone
+	for time.Since(wokeAt) < 1500*time.Millisecond {
+		if adds, _ := reg.counts(key); adds > before {
+			<-bDone
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the owner's token was spent on a consumer that left, and nothing re-registered for the one still parked")
+}
+
+func TestZZWP9WakeOnALeavingConsumerDoesNotStrandOthers(t *testing.T) {
+	zzWP9Strand(t, false)
+}
+
+func TestZZWP9WakeWhileServingDoesNotStrandOthers(t *testing.T) {
+	zzWP9Strand(t, true)
+}
 
 // Parking, registering and the wait check must not advance the probe
 // cursor: with three remote owners a probe, a park and a registration

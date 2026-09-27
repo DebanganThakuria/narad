@@ -64,6 +64,17 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 	// Every owner is told at once: one round trip total, not one each.
 	rt.tokens.register(ctx, topicName, wait)
 
+	// leave takes the consumer off the queue before it answers, so no
+	// notification lands on it from here on, and passes on one that
+	// already did: the owner holds that record for a claim, and a
+	// consumer that leaves without claiming would waste the hold.
+	leave := func() {
+		unpark()
+		if from := parked.take(); from != "" {
+			rt.tokens.WakeOneWaiter(topicName, from)
+		}
+	}
+
 	// One goroutine, not two. The local wait and the cross-node
 	// notification are folded into a single select inside the broker, so
 	// a parked consumer costs one goroutine rather than one for the
@@ -72,6 +83,7 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
+			leave()
 			w.WriteHeader(http.StatusNoContent)
 			return true
 		}
@@ -83,6 +95,7 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 			// owners are shared by every consumer parked here for the
 			// topic, so they are retired only when this was the last one;
 			// otherwise the others still need the notification.
+			leave()
 			if _, others := rt.tokens.othersParked(topicName, parked); !others {
 				rt.tokens.drop(ctx, topicName, "")
 			}
@@ -111,11 +124,13 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 			rt.tokens.register(ctx, topicName, time.Until(deadline))
 
 		case err != nil && !errors.Is(err, context.Canceled):
+			leave()
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return true
 
 		default:
 			// Budget spent, or the client left.
+			leave()
 			w.WriteHeader(http.StatusNoContent)
 			return true
 		}

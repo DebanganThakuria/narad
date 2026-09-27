@@ -45,25 +45,32 @@ type localWaiter struct {
 	// longest remaining budget among them.
 	deadline time.Time
 	mu       sync.Mutex
-	from     string
+	// from is the owner of an offer this waiter accepted and has not yet
+	// acted on: set by offer, cleared by take.
+	from string
 }
 
-// take returns the address of the owner that woke this waiter.
+// take returns the address of the owner that woke this waiter, or ""
+// if none did since the last take.
 func (w *localWaiter) take() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.from
+	from := w.from
+	w.from = ""
+	return from
 }
 
 // offer publishes the owner address and signals, reporting whether the
 // waiter took it. The signal is non-blocking: a waiter already woken by
-// another owner simply is not available.
+// another owner simply is not available. The address is set under the
+// same lock hold as the signal, so take sees it once the signal is
+// received, and a refused offer leaves no address behind.
 func (w *localWaiter) offer(from string) bool {
 	w.mu.Lock()
-	w.from = from
-	w.mu.Unlock()
+	defer w.mu.Unlock()
 	select {
 	case w.ch <- struct{}{}:
+		w.from = from
 		return true
 	default:
 		return false
@@ -76,8 +83,9 @@ type topicDemand struct {
 	waiters []*localWaiter
 	// owners records, per remote owner address, until when this node
 	// believes that owner holds its live token for the topic: stamped
-	// when a registration is sent, cleared when the send fails. The
-	// keeper (Run) registers wherever an entry is missing or past.
+	// when a registration is sent, cleared when the send fails or the
+	// owner spends the token on a notification. The keeper (Run)
+	// registers wherever an entry is missing or past.
 	owners map[string]time.Time
 }
 
@@ -227,14 +235,22 @@ func (q *tokenRequester) demandFor(topicName string) *topicDemand {
 }
 
 // park adds a waiter and returns it with a release func that removes
-// it. The caller selects on the waiter's channel.
+// it. The caller selects on the waiter's channel. The release func is
+// for the caller's goroutine only.
 func (q *tokenRequester) park(topicName string, deadline time.Time) (*localWaiter, func()) {
 	d := q.demandFor(topicName)
 	w := &localWaiter{ch: make(chan struct{}, 1), deadline: deadline}
 	d.mu.Lock()
 	d.waiters = append(d.waiters, w)
 	d.mu.Unlock()
+	released := false
 	return w, func() {
+		// Idempotent: a consumer leaves the queue as soon as it stops
+		// waiting and again, as a no-op, when it returns.
+		if released {
+			return
+		}
+		released = true
 		d.mu.Lock()
 		for i, other := range d.waiters {
 			if other == w {
@@ -278,6 +294,15 @@ func (q *tokenRequester) repark(topicName string, w *localWaiter) {
 //
 // The waiter is removed before the send, so its buffered channel gets
 // exactly one address and the send can never block the RPC handler.
+//
+// A notification spends the owner's token whatever the verdict, so the
+// owner is forgotten here: the keeper then puts a token back within
+// keepAliveInterval if anyone is still parked, and the next consumer to
+// park registers there. Without it a consumer woken as it was leaving
+// (served locally at that instant, or at the end of its budget) took
+// the token with it, and the keeper, still trusting the old stamp, left
+// the consumers parked behind it with no token at that owner for up to
+// registrationRefresh.
 func (q *tokenRequester) WakeOneWaiter(topicName, from string) bool {
 	if q == nil {
 		return false
@@ -285,6 +310,7 @@ func (q *tokenRequester) WakeOneWaiter(topicName, from string) bool {
 	d := q.demandFor(topicName)
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	delete(d.owners, from)
 	for len(d.waiters) > 0 {
 		w := d.waiters[0]
 		d.waiters = d.waiters[1:]
