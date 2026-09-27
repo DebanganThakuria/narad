@@ -51,7 +51,10 @@ type Metrics struct {
 	ReaperRestarts          prometheus.Gauge
 	// IngressWALFailed is 1 once the ingress WAL has latched a write or
 	// sync failure (updated by poller). See its Help.
-	IngressWALFailed           prometheus.Gauge
+	IngressWALFailed prometheus.Gauge
+	// IngressDispatchBacklog is the ingress WAL records a restart would
+	// replay (updated by poller). See its Help.
+	IngressDispatchBacklog     prometheus.Gauge
 	DataDirSizeBytes           prometheus.Gauge
 	DataDirAvailableBytes      prometheus.Gauge
 	TopicBytes                 *prometheus.GaugeVec // topic
@@ -265,6 +268,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			Subsystem: "ingress",
 			Name:      "wal_failed",
 			Help:      "1 once a write or sync of the ingress WAL has failed, else 0. The failure is latched on purpose (acking records stacked on bytes of unknown durability is unsafe): every produce on this node answers 500 until the process restarts, while consume keeps working and /readyz stays 200. Alert on any value of 1 and restart the node once the disk is healthy.",
+		}),
+
+		IngressDispatchBacklog: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "ingress",
+			Name:      "dispatch_backlog_records",
+			Help:      "Records in this node's ingress WAL that a restart would replay: the durable next sequence minus the stored dispatch checkpoint. It is 0 once everything the node accepted has been committed to its partition owner and the checkpoint stored past it. Before rolling a node back to a release that cannot read the current ingress WAL record format, stop producing to it and wait for 0. A value that stays above 0 with producers idle means records are not reaching their owners.",
 		}),
 
 		DataDirSizeBytes: prometheus.NewGauge(prometheus.GaugeOpts{
@@ -496,7 +506,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.BytesProducedTotal, m.BytesConsumedTotal,
 		m.ProduceRejectionsTotal,
 		m.ConsumeWaitSeconds, m.ConsumeEmptyTotal,
-		m.TopicsTotal, m.PartitionsTotal, m.OpenPartitionLogs, m.IdleLogsEvictedTotal, m.ColdRetentionSweptTotal, m.ReaperRestarts, m.IngressWALFailed, m.DataDirSizeBytes, m.DataDirAvailableBytes,
+		m.TopicsTotal, m.PartitionsTotal, m.OpenPartitionLogs, m.IdleLogsEvictedTotal, m.ColdRetentionSweptTotal, m.ReaperRestarts, m.IngressWALFailed, m.IngressDispatchBacklog, m.DataDirSizeBytes, m.DataDirAvailableBytes,
 		m.TopicBytes, m.PartitionSizeBytes, m.Segments,
 		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
 		m.InFlightSize, m.AckedAheadSize, m.AckRejected, m.AckExtendedTotal, m.NackTotal,

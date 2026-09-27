@@ -657,11 +657,11 @@ func (d *ProduceDispatcher) commitLocal(ctx context.Context, records []ingress.P
 	return nil
 }
 
-// commitRemote sends a batch to its owner. The records carry their topic
-// incarnation so the owner can refuse a replaced one; an owner on an
-// older release refuses the whole frame for its trailing field, and then
-// gets the batch again without it and is remembered for
-// produceLegacyOwnerTTL.
+// commitRemote sends a batch to its owner within timeout. The records
+// carry their topic incarnation so the owner can refuse a replaced one;
+// an owner on an older release refuses the whole frame for its trailing
+// field, and then gets the batch again without it, on what is left of
+// the same budget, and is remembered for produceLegacyOwnerTTL.
 func (d *ProduceDispatcher) commitRemote(ctx context.Context, addr string, records []ingress.ProduceRecord, timeout time.Duration) error {
 	if d.peer == nil {
 		return errors.New("produce dispatcher peer client is nil")
@@ -683,18 +683,24 @@ func (d *ProduceDispatcher) commitRemote(ctx context.Context, addr string, recor
 		}
 		req.Records = append(req.Records, r)
 	}
-	// Explicit deadline: without one the transport's short default reply
+	// An explicit budget: without one the transport's short default reply
 	// timeout applies, and a slow-but-successful remote commit would be
-	// re-committed as duplicates (see produceCommitRPCTimeout).
-	rpcCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	res, err := d.peer.CommitProduceBatch(rpcCtx, addr, req)
+	// re-committed as duplicates (see produceCommitRPCTimeout). It goes
+	// to the transport rather than into a context derived per commit,
+	// and runs out as an error wrapping context.DeadlineExceeded, as a
+	// ctx deadline would; ctx still carries cancellation.
+	start := time.Now()
+	res, err := d.peer.CommitProduceBatchWithin(ctx, addr, timeout, req)
 	if err == nil && withIDs && res.Status == http.StatusBadRequest && bytes.Contains(res.Body, []byte("trailing")) {
 		d.legacyOwners.Store(addr, d.now().Add(produceLegacyOwnerTTL))
 		for i := range req.Records {
 			req.Records[i].TopicID = ""
 		}
-		res, err = d.peer.CommitProduceBatch(rpcCtx, addr, req)
+		left, spent := remainingBudget(timeout, start)
+		if spent != nil {
+			return fmt.Errorf("commit produce batch without topic ids: %w", spent)
+		}
+		res, err = d.peer.CommitProduceBatchWithin(ctx, addr, left, req)
 	}
 	if err != nil {
 		return err
@@ -703,6 +709,21 @@ func (d *ProduceDispatcher) commitRemote(ctx context.Context, addr string, recor
 		return fmt.Errorf("commit produce batch returned status %d", res.Status)
 	}
 	return nil
+}
+
+// remainingBudget is what is left at this moment of a per-call budget of
+// timeout that started at start. A budget of zero or less bounds
+// nothing and stays as it is; one that has run out is an error wrapping
+// context.DeadlineExceeded, as the transport reports its own.
+func remainingBudget(timeout time.Duration, start time.Time) (time.Duration, error) {
+	if timeout <= 0 {
+		return timeout, nil
+	}
+	left := timeout - time.Since(start)
+	if left <= 0 {
+		return 0, fmt.Errorf("budget of %s spent: %w", timeout, context.DeadlineExceeded)
+	}
+	return left, nil
 }
 
 // legacyOwner reports whether commits to addr must go out without topic

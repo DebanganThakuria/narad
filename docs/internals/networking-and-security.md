@@ -13,7 +13,7 @@ flowchart TB
 
 Everything a client does is plain HTTP under `/v1` (topics CRUD, produce/consume/ack, children, users) plus unauthenticated `/healthz` and `/readyz`. `/healthz` means "process up"; `/readyz` means "safe to route traffic here": held down until the node's metastore is caught up (and, for a joining node, until it's admitted). `/metrics` is served on its own listener when `http.metrics_addr` is set (the chart's default) and is otherwise on the API port behind the API's Basic auth: the exposition names every topic.
 
-The listener itself is bounded: 64 KiB of headers, a 5 s header read budget, a cap on open connections (`http.max_connections`, via `netutil.LimitListener`; extra clients wait in the accept backlog rather than each getting a goroutine), and a per-identity cap on concurrent consume requests (`http.max_consume_in_flight_per_identity`, `429` beyond it), since every long-poll pins a goroutine and, on a non-owner node, a forwarded RPC stream slot for up to `max_consume_wait`. A request body is not allocated at its declared `Content-Length` before it arrives: up to 64 KiB is read into one exact-size buffer, and a larger body starts at 64 KiB and grows fourfold as it fills, so a client that declares 1 MiB and then stalls pins at most 64 KiB or four times what it actually sent, whichever is larger.
+The listener itself is bounded: 64 KiB of headers, a 5 s header read budget, a cap on open connections (`http.max_connections`, via `netutil.LimitListener`; extra clients wait in the accept backlog rather than each getting a goroutine), and a per-identity cap on concurrent consume requests (`http.max_consume_in_flight_per_identity`, `429` beyond it; a batch consume of N counts as N, clamped to the cap), since every long-poll pins a goroutine and, on a non-owner node, a forwarded RPC stream slot for up to `max_consume_wait`. A request body is not allocated at its declared `Content-Length` before it arrives: up to 64 KiB is read into one exact-size buffer, and a larger body starts at 64 KiB and grows fourfold as it fills, so a client that declares 1 MiB and then stalls pins at most 64 KiB or four times what it actually sent, whichever is larger.
 
 State-changing requests (`POST`, `PUT`, `PATCH`) must carry `Content-Type: application/json` or `application/octet-stream`, or an `X-Narad-Client` header, else `415`. This is the cross-site request forgery guard for Basic-auth sessions: browsers attach cached Basic credentials to cross-origin requests, and a `POST` with `text/plain` or a form encoding needs no CORS preflight, so a hostile page could otherwise create topics, produce, ack, or decommission a member on behalf of an operator who used the API from that browser. The API content types and any custom header force a preflight, which Narad never approves. `DELETE` is preflighted by construction.
 
@@ -53,7 +53,7 @@ Note that the QUIC listener shares the **API port number over UDP** (7942/udp by
 
 **Upgrading from the fixed-token protocol.** Releases before session binding proved the secret with one fixed token (`HMAC(secret, "narad-cluster-auth-v1")`, ALPN `narad-cluster-quic-v1`), sent one way. A node running the new protocol will not talk to one running the old (no shared ALPN, so the TLS handshake fails rather than mis-authenticating). For a rolling upgrade with no cross-node RPC outage, set `security.allow_legacy_cluster_auth: true` (`NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH=true`, `security.allowLegacyClusterAuth` in the chart) on every node for the roll: upgraded nodes then also offer the legacy ALPN, accept the fixed token from old peers (logging each such connection), and fall back to it when dialling an old peer, while two upgraded nodes always negotiate the new protocol. Once every node runs the new release, turn the flag off and roll once more; while it is on, any peer that asks for the legacy ALPN is served with the replayable token. Without the flag, an upgrade still works, but forwarded requests between old and new nodes fail for the duration of the roll (Raft is unaffected).
 
-On the serving side, produce commits run under one concurrency bound and the other messaging handlers (acks, extends, nacks, non-blocking consume scans) under another of the same size, max(64, 4 x GOMAXPROCS): a commit holds its slot across a segment fsync, and sharing one gate queued acks and probes behind the disk. Acks and non-blocking consumes wait for a slot only while their request is live: one whose requester gave up while it queued is answered without touching the broker (a probe or claim with `204`, a claim's hold retired; an ack, extend or nack with `503`, unapplied, which is safe because acks are idempotent by nonce). Commits wait regardless. Partition-transfer ops (segment listings and chunk reads, 8 at a time) keep their slot until the reply has been written, so the bound covers the memory a chunk reply holds. The frame read loop never blocks, and long-poll consumes and any op that calls other peers are exempt from the bounds. Replies are encoded into recycled buffers, and a forwarded reply without a body (a successful forwarded ack, extend or nack, and every forwarded `204`) is written to the client as a bare status. Peer RPCs are observable as `narad_cluster_rpc_requests_total{op,outcome}` and `narad_cluster_rpc_request_seconds{op}`.
+On the serving side, produce commits run under one concurrency bound and the other messaging handlers (acks, extends, nacks, non-blocking consume scans) under another of the same size, max(64, 4 x GOMAXPROCS): a commit holds its slot across a segment fsync, and sharing one gate queued acks and probes behind the disk. Acks and non-blocking consumes wait for a slot only while their request is live: one whose requester gave up while it queued is answered without touching the broker (a probe or claim with `204`, a claim's hold retired; an ack, extend or nack with `503`, unapplied, which is safe because acks are idempotent by nonce). Commits wait regardless. An `AckBatch` takes one messaging slot for all its records ([Forwarded acks](consume-path.md#forwarded-acks-one-rpc-per-owner-under-load)). Partition-transfer ops (segment listings and chunk reads, 8 at a time) keep their slot until the reply has been written, so the bound covers the memory a chunk reply holds. The frame read loop never blocks, and long-poll consumes and any op that calls other peers are exempt from the bounds. Replies are encoded into recycled buffers, and a forwarded reply without a body (a successful forwarded ack, extend or nack, and every forwarded `204`) is written to the client as a bare status. Peer RPCs are observable as `narad_cluster_rpc_requests_total{op,outcome}` and `narad_cluster_rpc_request_seconds{op}`.
 
 ## AuthN and AuthZ
 
@@ -73,26 +73,32 @@ The full opcode registry (`internal/protocol/node/types.go`; values are stable o
 
 | Op | Name | Op | Name |
 |---|---|---|---|
-| 1 | Produce | 11 | CommitProduceBatch |
-| 2 | Consume | 12 | CreateUser |
-| 3 | Ack | 13 | UpdateUser |
-| 4 | CreateTopic | 14 | DeleteUser |
-| 5 | AlterTopic | 15 | AttachChild |
-| 6 | DeleteTopic | 16 | DetachChild |
-| 7 | PurgeTopic | 17 | FanoutCursors |
-| 8 | TopicPartitionStats | 18 | ExtendAck |
-| 9 | RegisterMember | 19 | Nack |
-| 10 | CommitProduce | 20 | GetTopic · 21 JoinCluster |
+| 1 | Produce | 17 | FanoutCursors |
+| 2 | Consume | 18 | ExtendAck |
+| 3 | Ack | 19 | Nack |
+| 4 | CreateTopic | 20 | GetTopic |
+| 5 | AlterTopic | 21 | JoinCluster |
+| 6 | DeleteTopic | 22 | ListPartitionSegments |
+| 7 | PurgeTopic | 23 | FetchSegmentChunk |
+| 8 | TopicPartitionStats | 24 | PrepareHandoff |
+| 9 | RegisterMember | 25 | DecommissionMember |
+| 10 | CommitProduce | 26 | CompleteMove |
+| 11 | CommitProduceBatch | 27 | AbortMove |
+| 12 | CreateUser | 28 | GetAssignment |
+| 13 | UpdateUser | 29 | AppliedIndex |
+| 14 | DeleteUser | 30 | TokenRegister |
+| 15 | AttachChild | 31 | TokenNotify |
+| 16 | DetachChild | 32 | AckBatch |
 
-An unknown opcode gets a clean 400, which is also the mixed-version story during rolling upgrades: an old node politely declines ops it hasn't heard of, and the caller retries elsewhere or later.
+An unknown opcode gets a clean 400 (`unsupported rpc operation`), and so does a trailing field the decoder does not know. That is the mixed-version story during rolling upgrades: an old node politely declines what it hasn't heard of, and the caller sends it again in a shape the old node understands, and keeps doing so for that node for 2 minutes: an `AckBatch` becomes single acks, a commit batch goes out without its topic ids, a claim becomes a plain probe.
 
 ## Timeouts worth knowing
 
 | Path | Timeout |
 |---|---|
 | Default peer RPC reply | 5s for a caller without a deadline. After any request that ends on a deadline, a 1s liveness ping decides whether the connection is dropped |
-| Produce/fan-out commit RPC | 30s (a slow fsync is not a dead node) |
-| Forwarded ack / extend / nack | 2s, covering the dial and stream open too (acks are idempotent by nonce, so a retry after a timeout cannot double-commit) |
+| Produce/fan-out commit RPC | 30s (a slow fsync is not a dead node); 5s for the one-record probe of a failing produce destination. The produce dispatcher hands its budget to the transport rather than deriving a context per commit |
+| Forwarded ack / extend / nack | 2s, covering the dial and stream open too, and for an ack queued behind busy slots its wait for one (acks are idempotent by nonce, so a retry after a timeout cannot double-commit). A batch ack's `AckBatch` to each owner gets the same 2s |
 | Non-blocking remote consume probe | 500ms per owner, covering the dial and stream open too (a stalled owner is skipped for the round; a consumer that leaves stops the round before the next owner) |
 | Remote consume re-probe pacing | 100ms after an empty round, doubling to 1s, within the client's wait budget |
 | Forwarded long-poll consume | the client's wait (capped by `http.max_consume_wait` on the router and the RPC server alike) plus 2s grace |

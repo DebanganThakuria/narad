@@ -75,6 +75,7 @@ The per-partition series (lag, oldest unconsumed age, in-flight and acked-ahead 
 | `narad_cold_retention_swept_total` | counter | Closed partitions the cold-retention walk opened, reaped and closed again because a segment had expired. Rises only on idle topics with expired data. |
 | `narad_reaper_restarts` | gauge | Times the shared retention loop was replaced because it stopped ticking. Any value above zero deserves a look at the log. |
 | `narad_ingress_wal_failed` | gauge | 1 once a write or sync of the ingress WAL has failed (latched until restart; produce answers `500` meanwhile), else 0. Alert on 1. |
+| `narad_ingress_dispatch_backlog_records` | gauge | Records in this node's ingress WAL that a restart would replay: the WAL's durable next sequence minus the dispatch checkpoint last stored, refreshed on every 5 s poller tick. Small on a healthy node (produce raises it, and it falls as the dispatcher commits records to their partition owners and stores its checkpoint); a value that stays above 0 while producers are idle means records are not reaching their owners. It is what to watch before a rollback: pause producers and [roll a node back](helm-chart.md#rolling-back-to-an-earlier-release) only once it reads 0 on every node, in a sample taken after the pause. |
 
 ### Cluster & misc
 

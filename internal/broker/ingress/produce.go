@@ -70,6 +70,10 @@ type Manager struct {
 
 	checkpointMu sync.Mutex
 	checkpoint   *checkpointWriter
+	// storedCheckpoint mirrors the last dispatch checkpoint read at open
+	// or written by StoreProduceCheckpoint, so DispatchBacklog costs two
+	// atomic loads rather than a file read.
+	storedCheckpoint atomic.Uint64
 }
 
 // DefaultWALOptions returns the WAL options used for the ingress
@@ -113,6 +117,7 @@ func OpenManager(dataDir string, opts wal.Options) (*Manager, error) {
 		checkpoint:      newCheckpointWriter(produceDir, produceCheckpointFile),
 	}
 	manager.durableNext.Store(nextSeq)
+	manager.storedCheckpoint.Store(checkpoint)
 	return manager, nil
 }
 
@@ -188,6 +193,25 @@ func (m *Manager) DurableProduceNext() uint64 {
 		return 0
 	}
 	return m.durableNext.Load()
+}
+
+// DispatchBacklog returns how many WAL sequence numbers lie between the
+// stored dispatch checkpoint and the durable next seq: the records a
+// process started now would replay from this WAL, committed or not. It
+// is 0 once everything durable has been dispatched and the checkpoint
+// stored past it, which is what a rollback to a release that cannot
+// read every record format needs (see the upgrade notes). Two atomic
+// loads; 0 for a nil manager.
+func (m *Manager) DispatchBacklog() uint64 {
+	if m == nil {
+		return 0
+	}
+	durable := m.durableNext.Load()
+	stored := m.storedCheckpoint.Load()
+	if stored >= durable {
+		return 0
+	}
+	return durable - stored
 }
 
 // DurableProduceAdvanced returns a channel that receives after
@@ -278,7 +302,11 @@ func (m *Manager) StoreProduceCheckpoint(nextSeq uint64) error {
 	if m.checkpoint == nil {
 		m.checkpoint = newCheckpointWriter(m.produceDir, produceCheckpointFile)
 	}
-	return m.checkpoint.store(nextSeq)
+	if err := m.checkpoint.store(nextSeq); err != nil {
+		return err
+	}
+	m.storedCheckpoint.Store(nextSeq)
+	return nil
 }
 
 // Close closes the underlying WAL and the checkpoint file. Safe on a nil

@@ -107,6 +107,8 @@ A partition-pinned long-poll (`partition=N&wait=...`) parks on a FIFO of its own
 
 A node that owns none of the topic's partitions (a pure gateway) parks its consumers on tokens too: its only wake is an owner's notification, and as a safety net for a lost notification or a token an owner silently dropped (a restart, a lagging assignment view) it re-probes every owner once every 2 s of the wait. It falls back to re-probing the owners on a backoff (100 ms doubling to 1 s) in two cases: an owner of the topic refused a registration within the last 2 minutes (a node on an older release during a rolling upgrade, whose tokens would be discarded), or this node has no advertised address for owners to call back.
 
+A batch consume (`max=N`, see [Consuming](../client/consuming.md#consuming-in-batches)) takes up to N records in one non-blocking scan of this node's partitions, each reserved exactly as a single consume reserves it, with its own nonce, lease and place under its partition's in-flight cap. The scan starts where a single consume's would and stays on a partition until it runs dry or reaches its in-flight cap, so a batch takes a partition's backlog in offset order rather than one record from each. Only when the scan finds nothing does the request fall back on the single-record path above (the remote owners, then the wait and the tokens) for one record, which it tops up with a second local scan. Remote owners are never asked for more than one record, so a batch through a node that owns none of the topic's partitions carries at most one.
+
 ## Recovery story, end to end
 
 ```mermaid
@@ -158,3 +160,15 @@ The asymmetry is the design: everything cheap to reconstruct is memory; the one 
 ## Ack validation, precisely
 
 `CommitHandle` accepts an ack only if the offset has a **live reservation with the same nonce**. Expired-then-re-reserved offsets carry a new nonce → the late acker gets `410 Gone` instead of silently settling someone else's lease. Extends re-validate the same way and push a *fresh* entry into the expiry heap (the stale heap slot is skipped on pop via nonce+expiry comparison; a lease can never be evicted by its own superseded deadline).
+
+## Forwarded acks: one RPC per owner under load
+
+An ack, extend or nack for a partition another node owns is forwarded to the owner on the ack lane with a 2 s budget. At the throughput ceiling most cluster RPCs are acks, one per consumed message, and each was a request frame, a reply frame, a server goroutine and a handler slot for a few bytes of bookkeeping. So the router coalesces them per owner, the way Nagle's algorithm does with a few packets allowed in flight:
+
+- While fewer than 4 ack RPCs to an owner are in flight, an ack goes out at once, on its own, as the same `Ack`, `ExtendAck` or `Nack` op as ever. At low load nothing changes.
+- When all 4 are busy, further acks for that owner queue, and the queue leaves as one `AckBatch` RPC the moment a slot frees: up to 64 records, a bigger pile forming several batches that leave one per freed slot, and a queue of one leaving as a plain single op. Batches therefore form exactly when acks to one owner overlap, and grow with how much they overlap.
+- The 2 s budget covers the wait for a slot as well as the round trip, so a queued ack is answered no later than a single one would be, and an ack whose client gives up before its batch leaves is taken out of it.
+- The owner applies an `AckBatch` under one handler slot, record by record in order, and answers each record on its own with the status and message the single op would have answered; a batch whose requester gave up while it waited for the slot is answered `503` unapplied, as a single ack is. Each HTTP ack therefore gets exactly the response its own RPC would have produced: the bare `204`, or the owner's error. Acks are idempotent by nonce, so sharing an RPC changes nothing about what they do.
+- An owner on a release before `AckBatch` answers it `400` (`unsupported rpc operation`). Its queued records are then sent one at a time on what is left of their budgets, and it gets single ops only for the next 2 minutes, after which a batch is tried again.
+
+A client's [batch ack](../client/consuming.md#acking-in-batches) uses the same op directly: its handles are grouped by owner, and each owner gets one `AckBatch` (or single ops, for a group of one or an owner on an older release), the owners in parallel, each on the 2 s budget. A handle whose owner is down is answered `503` without an RPC, and a transport failure answers `502` for that owner's handles only. Handles this node owns are applied locally.

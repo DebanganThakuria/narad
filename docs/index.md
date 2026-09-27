@@ -128,8 +128,8 @@ PATCH  /v1/topics/{t}                   tune retention & limits
 DELETE /v1/topics/{t}                   delete
 
 POST   /v1/topics/{t}/produce           send   (body = your message)
-GET    /v1/topics/{t}/consume           receive (long-poll with ?wait=)
-POST   /v1/topics/{t}/ack               settle · extend · nack
+GET    /v1/topics/{t}/consume           receive (long-poll with ?wait=, batch with ?max=)
+POST   /v1/topics/{t}/ack               settle · extend · nack (one, or a batch)
 
 POST   /v1/topics/{p}/children          attach fan-out / delay child
 GET    /v1/topics/{p}/children          list children + lag
