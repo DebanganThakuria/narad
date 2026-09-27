@@ -689,3 +689,32 @@ func TestZZWP9MessagingOpsDoNotWaitBehindCommits(t *testing.T) {
 		t.Fatal("a probe queued behind a commit batch holding the messaging slot")
 	}
 }
+
+// Replies encoded into recycled buffers never leak into one another,
+// however many are in flight.
+func TestZZWP9ConcurrentRepliesStayIntact(t *testing.T) {
+	msg := topic.Message{Topic: "orders", Partition: 0, Offset: 7, Payload: []byte(`{"k":"v"}`), ReceiptHandle: "0:7:9"}
+	s := NewRPCServer(&zzWP9Broker{msg: msg, found: true}, nil, nil)
+	ack, _ := nodewire.EncodeAckRequest(nodewire.AckRequest{Topic: "orders", Partition: 0, Offset: 1, Nonce: 2})
+	probe, _ := nodewire.EncodeConsumeRequest(nodewire.ConsumeRequest{Topic: "orders", LocalOnly: true})
+	var wg sync.WaitGroup
+	var bad atomic.Int32
+	for i := range 400 {
+		payload, want := ack, http.StatusNoContent
+		if i%2 == 1 {
+			payload, want = probe, http.StatusOK
+		}
+		wg.Add(1)
+		s.HandleStreamRequest(context.Background(), clusterwire.StreamFrame{Type: clusterwire.StreamFrameNodeRequest, RequestID: uint64(i), Payload: payload}, func(f clusterwire.StreamFrame) {
+			defer wg.Done()
+			res, err := nodewire.DecodeResponse(f.Payload)
+			if err != nil || res.Status != want || (want == http.StatusOK && len(res.Body) == 0) {
+				bad.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+	if n := bad.Load(); n != 0 {
+		t.Fatalf("%d replies decoded wrong", n)
+	}
+}
