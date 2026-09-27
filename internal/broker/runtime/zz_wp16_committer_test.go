@@ -1,7 +1,10 @@
 package runtime
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -161,5 +164,112 @@ func TestZZWP16CommitterCloseReportsAFailedPartition(t *testing.T) {
 		if rec, _, _ := storage.ReadConsumerAhead(storage.TopicPartitionDir(dataDir, "t", p)); rec.Committed != 20 {
 			t.Fatalf("partition %d after Close: committed %d, want 20", p, rec.Committed)
 		}
+	}
+}
+
+// zzWP16LogSink collects what a JSON slog handler writes, one record a
+// line.
+type zzWP16LogSink struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *zzWP16LogSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+// records returns the records logged at level with message prefix msg.
+func (s *zzWP16LogSink) records(t *testing.T, level, msg string) []map[string]any {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []map[string]any
+	for line := range strings.Lines(s.buf.String()) {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if rec["level"] == level && strings.HasPrefix(rec["msg"].(string), msg) {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// zzWP16LoggedLoop runs a committer's own loop for d over parts
+// partitions that a feeder keeps dirty, every consumer-state sync taking
+// syncTime, and returns what it logged.
+func zzWP16LoggedLoop(t *testing.T, parts int, interval, syncTime, d time.Duration) *zzWP16LogSink {
+	t.Helper()
+	dataDir := t.TempDir()
+	for p := range parts {
+		mustCreatePartitionDir(t, dataDir, "t", p)
+	}
+	zzWP16SlowSyncs(t, syncTime)
+	sink := &zzWP16LogSink{}
+	c := NewConsumerOffsetCommitter(dataDir, interval, slog.New(slog.NewJSONHandler(sink, nil)))
+	var version atomic.Uint64
+	c.SetAheadSource(func(string, int) (int64, []int64, uint64, bool) {
+		v := version.Load()
+		return int64(v) * 10, []int64{int64(v)*10 + 2}, v, true
+	})
+	stop := make(chan struct{})
+	var fed sync.WaitGroup
+	fed.Go(func() {
+		tick := time.NewTicker(interval / 10)
+		defer tick.Stop()
+		for {
+			v := version.Add(1)
+			for p := range parts {
+				c.Commit("t", p, int64(v)*10)
+			}
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+			}
+		}
+	})
+	time.Sleep(d)
+	close(stop)
+	fed.Wait()
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return sink
+}
+
+// cross-cutting#5: a flush that takes longer than the interval leaves
+// persisted offsets lagging acks by the flush time, not the interval the
+// docs promise, and the committer holding the disk the whole time. That
+// used to go unsaid; it is logged, once a minute at most, with what an
+// operator needs to see why.
+func TestZZWP16CommitterWarnsWhenItCannotKeepToItsInterval(t *testing.T) {
+	const parts = 8
+	// 8 partitions of 20ms each: every flush takes about 160ms, more
+	// than three 50ms intervals.
+	sink := zzWP16LoggedLoop(t, parts, 50*time.Millisecond, 20*time.Millisecond, time.Second)
+	warned := sink.records(t, "WARN", "consumer offset commits cannot keep to their interval")
+	if len(warned) != 1 {
+		t.Fatalf("%d warnings over several overrunning flushes, want exactly 1 (once a minute)", len(warned))
+	}
+	rec := warned[0]
+	if rec["partitions"] != float64(parts) || rec["interval"] != float64(50*time.Millisecond) {
+		t.Errorf("warning attributes %v, want partitions=%d interval=50ms", rec, parts)
+	}
+	if took, _ := rec["flush_took"].(float64); time.Duration(took) <= 50*time.Millisecond {
+		t.Errorf("warning flush_took=%v, want more than the interval", rec["flush_took"])
+	}
+}
+
+// A committer that keeps up says nothing. (The interval leaves room for
+// the first flush, which creates every partition's consumer.ahead and
+// syncs its directory for real.)
+func TestZZWP16CommitterThatKeepsUpDoesNotWarn(t *testing.T) {
+	sink := zzWP16LoggedLoop(t, 8, 250*time.Millisecond, time.Millisecond, time.Second)
+	if warned := sink.records(t, "WARN", "consumer offset commits"); len(warned) != 0 {
+		t.Fatalf("a committer that keeps up warned: %v", warned)
 	}
 }
