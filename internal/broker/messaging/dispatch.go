@@ -71,6 +71,9 @@ type waiter struct {
 
 	// guarded by st.mu.
 	abandoned bool
+	// queued is set while the waiter's entry stands in its FIFO and was
+	// not removed (see entryQueue). guarded by st.mu.
+	queued bool
 }
 
 // RemoteDemand is a peer's standing interest in a topic, registered by
@@ -107,26 +110,56 @@ type queueEntry struct {
 // of outstanding interest cannot take every turn ahead of one with a
 // little. head lets a pop be undone in O(1) when the reservation that
 // followed it failed.
+//
+// A removal marks its entry where it stands instead of splicing it out.
+// A peer replaces its token on every re-registration and a consumer
+// that gives up leaves, and a scan and copy of the FIFO for each, under
+// the lock the pump and every enqueue need, cost time in proportion to
+// the consumers parked on the topic. A waiter carries its own mark
+// (queued); a peer's token cannot, so the queue counts per token how
+// many of its entries are marked. peek and pop step over marked
+// entries, and purge sweeps them out once they outnumber the live ones,
+// so a removal is O(1) amortized and the order of the rest is kept.
 type entryQueue struct {
 	items []queueEntry
 	head  int
+	// dead counts the marked entries in items[head:].
+	dead int
+	// remotes counts each peer token's entries in items[head:], live and
+	// marked. Entries of one token are interchangeable, so a mark goes
+	// to whichever of them is reached first.
+	remotes map[RemoteDemand]remoteCount
 }
 
-func (q *entryQueue) len() int { return len(q.items) - q.head }
+type remoteCount struct{ live, dead int }
+
+// len counts the live entries.
+func (q *entryQueue) len() int { return len(q.items) - q.head - q.dead }
 
 func (q *entryQueue) push(e queueEntry) {
+	if e.waiter != nil {
+		e.waiter.queued = true
+	} else {
+		q.countRemote(e.remote, 1, 0)
+	}
 	q.items = append(q.items, e)
 	q.compact()
 }
 
 func (q *entryQueue) peek() (queueEntry, bool) {
-	if q.head >= len(q.items) {
-		return queueEntry{}, false
+	if q.dead > 0 {
+		q.skipMarked()
 	}
-	return q.items[q.head], true
+	if q.head < len(q.items) {
+		return q.items[q.head], true
+	}
+	return queueEntry{}, false
 }
 
 func (q *entryQueue) pop() (queueEntry, bool) {
+	if q.dead > 0 {
+		q.skipMarked()
+	}
 	if q.head >= len(q.items) {
 		return queueEntry{}, false
 	}
@@ -136,12 +169,22 @@ func (q *entryQueue) pop() (queueEntry, bool) {
 	if q.head == len(q.items) {
 		q.items, q.head = q.items[:0], 0
 	}
+	if e.waiter != nil {
+		e.waiter.queued = false
+	} else {
+		q.countRemote(e.remote, -1, 0)
+	}
 	return e, true
 }
 
 // pushFront returns a popped entry to the head. Valid only immediately
 // after a pop, which guarantees the slot is free.
 func (q *entryQueue) pushFront(e queueEntry) {
+	if e.waiter != nil {
+		e.waiter.queued = true
+	} else {
+		q.countRemote(e.remote, 1, 0)
+	}
 	if q.head > 0 {
 		q.head--
 		q.items[q.head] = e
@@ -153,9 +196,17 @@ func (q *entryQueue) pushFront(e queueEntry) {
 // rotate moves the head entry to the back. Remote demand rotates rather
 // than being consumed so turns spread across peers.
 func (q *entryQueue) rotate() {
-	if e, ok := q.pop(); ok {
-		q.push(e)
+	if q.dead > 0 {
+		q.skipMarked()
 	}
+	if q.head >= len(q.items) {
+		return
+	}
+	e := q.items[q.head]
+	q.items[q.head] = queueEntry{}
+	q.head++
+	q.items = append(q.items, e)
+	q.compact()
 }
 
 // compact reclaims the popped prefix once it dominates the slice, so a
@@ -176,26 +227,87 @@ func (q *entryQueue) compact() {
 // whether it was found. One the pump already took is gone from the
 // queue and its delivery is drained by the caller.
 func (q *entryQueue) removeWaiter(w *waiter) bool {
-	return q.removeMatching(func(e queueEntry) bool { return e.waiter == w })
+	if !w.queued {
+		return false
+	}
+	w.queued = false
+	q.marked()
+	return true
 }
 
 // removeRemote drops a peer's interest, used when its connection dies
 // or it tells us it no longer wants the topic.
 func (q *entryQueue) removeRemote(d RemoteDemand) bool {
-	return q.removeMatching(func(e queueEntry) bool { return e.remote == d })
+	if q.remotes[d].live == 0 {
+		return false
+	}
+	q.countRemote(d, -1, 1)
+	q.marked()
+	return true
 }
 
-func (q *entryQueue) removeMatching(match func(queueEntry) bool) bool {
-	for i := q.head; i < len(q.items); i++ {
-		if !match(q.items[i]) {
-			continue
-		}
-		copy(q.items[i:], q.items[i+1:])
-		q.items[len(q.items)-1] = queueEntry{}
-		q.items = q.items[:len(q.items)-1]
-		return true
+// countRemote moves a peer token's counts of live and marked entries by
+// live and dead, dropping the token once it has neither.
+func (q *entryQueue) countRemote(d RemoteDemand, live, dead int) {
+	c := q.remotes[d]
+	c.live += live
+	c.dead += dead
+	if c.live == 0 && c.dead == 0 {
+		delete(q.remotes, d)
+		return
 	}
-	return false
+	if q.remotes == nil {
+		q.remotes = make(map[RemoteDemand]remoteCount)
+	}
+	q.remotes[d] = c
+}
+
+// takeMark reports whether e is a marked entry, which the caller then
+// drops, and uses up its mark.
+func (q *entryQueue) takeMark(e queueEntry) bool {
+	if e.waiter != nil {
+		return !e.waiter.queued
+	}
+	if q.remotes[e.remote].dead == 0 {
+		return false
+	}
+	q.countRemote(e.remote, 0, -1)
+	return true
+}
+
+// marked counts one more marked entry and sweeps them all out once they
+// outnumber the live ones: each sweep costs at most twice the marks it
+// clears.
+func (q *entryQueue) marked() {
+	q.dead++
+	if q.dead > q.len() {
+		q.purge()
+	}
+}
+
+// skipMarked drops the marked entries at the head.
+func (q *entryQueue) skipMarked() {
+	for q.dead > 0 && q.head < len(q.items) && q.takeMark(q.items[q.head]) {
+		q.items[q.head] = queueEntry{}
+		q.head++
+		q.dead--
+	}
+	if q.head == len(q.items) {
+		q.items, q.head = q.items[:0], 0
+	}
+}
+
+// purge sweeps every marked entry out, keeping the live ones in order.
+func (q *entryQueue) purge() {
+	n := 0
+	for i := q.head; i < len(q.items); i++ {
+		if e := q.items[i]; !q.takeMark(e) {
+			q.items[n] = e
+			n++
+		}
+	}
+	clear(q.items[n:])
+	q.items, q.head, q.dead = q.items[:n], 0, 0
 }
 
 // topicDispatch is the per-topic waiter set. hasWaiters is read on the

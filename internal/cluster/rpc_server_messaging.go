@@ -31,6 +31,10 @@ func (s *RPCServer) handleProduce(ctx context.Context, payload []byte) nodewire.
 	})
 }
 
+// handleCommitProduce commits one accepted record. No release's
+// dispatcher sends this op (they commit through the batch op); it stays
+// so a peer that does is still served, and it hands the owner the
+// record's incarnation as the batch op does.
 func (s *RPCServer) handleCommitProduce(ctx context.Context, payload []byte) nodewire.Response {
 	req, err := nodewire.DecodeCommitProduceRequest(payload)
 	if err != nil {
@@ -38,6 +42,7 @@ func (s *RPCServer) handleCommitProduce(ctx context.Context, payload []byte) nod
 	}
 	offset, err := s.broker.CommitAcceptedProduce(ctx, ingress.ProduceRecord{
 		Topic:           req.Topic,
+		TopicID:         req.TopicID,
 		Key:             req.Key,
 		TargetPartition: req.TargetPartition,
 		Payload:         req.Payload,

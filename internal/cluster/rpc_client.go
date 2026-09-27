@@ -25,7 +25,6 @@ const defaultPeerRPCTimeout = 5 * time.Second
 // *PeerClient implements it; tests substitute fakes.
 type peerClient interface {
 	Produce(context.Context, string, nodewire.ProduceRequest) (nodewire.Response, error)
-	CommitProduce(context.Context, string, nodewire.CommitProduceRequest) (nodewire.Response, error)
 	CommitProduceBatch(context.Context, string, nodewire.CommitProduceBatchRequest) (nodewire.Response, error)
 	Consume(context.Context, string, nodewire.ConsumeRequest) (nodewire.Response, error)
 	Ack(context.Context, string, nodewire.AckRequest) (nodewire.Response, error)
@@ -202,12 +201,6 @@ const (
 func (c *PeerClient) Produce(ctx context.Context, addr string, req nodewire.ProduceRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeProduceRequest(req)
 	return c.send(ctx, addr, "produce", laneProduce, payload, err)
-}
-
-// CommitProduce commits a single accepted produce record on the peer at addr.
-func (c *PeerClient) CommitProduce(ctx context.Context, addr string, req nodewire.CommitProduceRequest) (nodewire.Response, error) {
-	payload, err := nodewire.EncodeCommitProduceRequest(req)
-	return c.send(ctx, addr, "commit_produce", laneProduce, payload, err)
 }
 
 // CommitProduceBatch commits a batch of accepted produce records on the peer

@@ -148,17 +148,42 @@ func (c *ConsumerOffsetCommitter) Close() error {
 	return err
 }
 
+// run flushes every interval. A flush that takes longer than the
+// interval is followed at once by the next, so the committer keeps the
+// disk busy the whole time and persisted offsets lag acks by about the
+// flush time rather than the interval. That is logged, at most once a
+// minute: a longer interval gives produce the disk back, and fewer
+// partitions per node or a faster disk shorten the lag.
+//
+// The partitions of a flush are written one at a time on purpose.
+// Overlapping their data syncs, 8 at once, makes a flush 2.4 to 3.7
+// times shorter, but on macOS the overlapped bursts held back the
+// produce syncs sharing the disk: beside 12 dirty partitions an owner's
+// 24-record commit went from 10ms to 22ms at p99. A committer that
+// overlapped and paced itself to hold the disk half the time halved
+// the lag of 64 partitions, and cost 8 concurrent commit streams 17% of
+// their throughput and 2.6 times their p99 (see
+// BenchmarkZZWP16OwnerCommitUnderOffsetFlush and
+// BenchmarkZZWP16SpreadCommitUnderOffsetFlush in the messaging package).
 func (c *ConsumerOffsetCommitter) run() {
 	defer close(c.done)
 
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 
+	var lastWarned time.Time
 	for {
 		select {
 		case <-ticker.C:
-			if err := c.flush(); err != nil && c.log != nil {
+			start := time.Now()
+			commits, ahead := c.drain()
+			if err := c.persistAll(commits, ahead); err != nil && c.log != nil {
 				c.log.Error("consumer offset batch write failed", "err", err)
+			}
+			if took := time.Since(start); took > c.interval && c.log != nil && time.Since(lastWarned) >= time.Minute {
+				lastWarned = time.Now()
+				c.log.Warn("consumer offset commits cannot keep to their interval: persisted offsets lag acks by about the flush time",
+					"partitions", len(commits), "flush_took", took, "interval", c.interval)
 			}
 		case <-c.stop:
 			return
@@ -167,11 +192,16 @@ func (c *ConsumerOffsetCommitter) run() {
 }
 
 // flush drains the pending map and writes each dirty partition's files.
-// A purged partition directory is skipped silently (the topic is gone);
-// any other failure re-queues the partition for the next flush so a
-// transient error can't lose the recovery seed.
 func (c *ConsumerOffsetCommitter) flush() error {
 	commits, ahead := c.drain()
+	return c.persistAll(commits, ahead)
+}
+
+// persistAll writes the drained partitions' files, one partition at a
+// time (see run). A purged partition directory is skipped silently (the
+// topic is gone); any other failure re-queues the partition for the next
+// flush so a transient error can't lose the recovery seed.
+func (c *ConsumerOffsetCommitter) persistAll(commits []offsetCommit, ahead AheadSource) error {
 	var firstErr error
 	for _, commit := range commits {
 		partitionDir := storage.TopicPartitionDir(c.dataDir, commit.key.topic, commit.key.partition)
