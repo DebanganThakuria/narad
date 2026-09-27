@@ -117,6 +117,12 @@ defaults, and the loader **rejects** any attempt to set it:
 }
 ```
 
+`consumer_offset_commit_interval_ms` and `ingress_wal_prealloc` are new since
+v3.0.1, whose loader rejects both. Remove them from the file before rolling a
+node back to v3.0.1 or earlier, even where they hold the defaults shown above,
+or it fails to start; see [Rolling back to an earlier
+release](helm-chart.md#rolling-back-to-an-earlier-release).
+
 Secrets (`NARAD_CLUSTER_SECRET`, `NARAD_ADMIN_PASSWORD`) are deliberately **not** file-configurable: files end up in git, and git ends up on the internet.
 
 ### Idle topics cost (almost) nothing
@@ -181,6 +187,9 @@ your own volumes before relying on it. What it changes:
 - **Rollback**: a binary from before preparation (v3.0.1 and earlier) can refuse
   to start on a WAL whose prepared segment a crash tore; see [Rolling back
   to an earlier release](helm-chart.md#rolling-back-to-an-earlier-release).
+  Rolling back only after a clean stop avoids that, but those binaries also
+  reject the `ingress_wal_prealloc` key itself, `true` or `false`: remove it
+  from the config file before the rollback, or the node fails to start.
   Turning the setting off again needs nothing: the next start trims the
   prepared segment and removes the spare.
 
