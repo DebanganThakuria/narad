@@ -12,6 +12,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
 	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
@@ -372,6 +373,79 @@ func TestZZWP9ProbeStopsWhenTheClientLeaves(t *testing.T) {
 	router.RouteConsumeRemote(ctx, res, req, "orders")
 	if n := probes.Load(); n != 1 {
 		t.Fatalf("probed %d owners after the client left during the first probe, want 1", n)
+	}
+}
+
+// zzWP9UnassignedRouter is a router for a topic that exists but has no
+// partition assigned yet, the state of a topic created moments ago.
+func zzWP9UnassignedRouter(t *testing.T, peer fakePeerClient) (*Router, *metastore.Store) {
+	t.Helper()
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 2}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "remote.example:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember() error = %v", err)
+	}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
+	router.peer = peer
+	return router, store
+}
+
+// A long-poll on a topic with no partition assigned waits out its
+// budget instead of answering 204 at once, which turned a looping
+// consumer into a busy poll for as long as the window lasted.
+func TestZZWP9UnassignedTopicHonoursTheWait(t *testing.T) {
+	router, _ := zzWP9UnassignedRouter(t, fakePeerClient{})
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=300ms", nil)
+	start := time.Now()
+	forwarded, local := router.RouteConsume(context.Background(), res, req, "orders", nil)
+	if !forwarded || local != nil || res.Code != http.StatusNoContent {
+		t.Fatalf("RouteConsume() = (%v, %v), status %d; want a written 204", forwarded, local, res.Code)
+	}
+	if elapsed := time.Since(start); elapsed < 250*time.Millisecond {
+		t.Fatalf("answered after %s, want the 300ms budget honoured", elapsed)
+	}
+}
+
+// Once the partitions are assigned, the waiting consumer is routed to
+// the new owner with what is left of its budget.
+func TestZZWP9UnassignedTopicRoutesOnceAssigned(t *testing.T) {
+	handle := consumer.EncodeHandle(consumer.Handle{Partition: 0, Offset: 7, Nonce: 99})
+	router, store := zzWP9UnassignedRouter(t, fakePeerClient{consumeFn: func(context.Context, string, nodewire.ConsumeRequest) (nodewire.Response, error) {
+		return remoteMessageResponse(0, 7, handle), nil
+	}})
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = store.AssignPartition(context.Background(), "orders", 0, "node-remote")
+		_ = store.AssignPartition(context.Background(), "orders", 1, "node-remote")
+	}()
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=5s", nil)
+	start := time.Now()
+	forwarded, _ := router.RouteConsume(context.Background(), res, req, "orders", nil)
+	if !forwarded || res.Code != http.StatusOK {
+		t.Fatalf("forwarded=%v status=%d, want the new owner's record", forwarded, res.Code)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("served after %s, want soon after the assignment", elapsed)
+	}
+}
+
+// An unknown topic is still left to the caller at once (it answers 404).
+func TestZZWP9UnknownTopicIsNotHeld(t *testing.T) {
+	router := NewRouter(newTestStore(t), "node-self", partition.NewHashRoundRobin(), "")
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/nope/consume?wait=2s", nil)
+	start := time.Now()
+	forwarded, _ := router.RouteConsume(context.Background(), res, req, "nope", nil)
+	if forwarded {
+		t.Fatal("RouteConsume() handled an unknown topic, want it left to the caller")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("unknown topic held for %s", elapsed)
 	}
 }
 

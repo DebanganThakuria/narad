@@ -216,6 +216,9 @@ func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *ht
 		rt.consumeRemoteWait(ctx, w, topicName, wait)
 		return true, nil
 	}
+	if rt.awaitConsumeRoute(ctx, w, r, topicName) {
+		return true, nil
+	}
 	return false, nil
 }
 
@@ -241,6 +244,72 @@ func (rt *Router) consumeRemoteWait(ctx context.Context, w http.ResponseWriter, 
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// routeWaitPoll is how often awaitConsumeRoute checks the route table's
+// versions. Each check is two atomic loads, and the window it covers
+// (a topic created moments ago, the first seconds of a cold cluster) is
+// about a second long.
+const routeWaitPoll = 50 * time.Millisecond
+
+// awaitConsumeRoute holds a queue-style long-poll for a topic that exists
+// but has no partition this node can reach: none assigned yet (a topic
+// created moments ago, the first seconds of a cold cluster) or every
+// owner down. Answering 204 at once turned every looping consumer into
+// a busy poll for as long as that lasted. It waits for the budget, or
+// until the route table changes and gives the consumer somewhere to go:
+// remote owners are then tried with what is left of the budget, and a
+// partition that became this node's is answered 204 so the client's
+// next poll takes the local path with its full wait.
+//
+// It reports whether it wrote the response. False leaves the request to
+// the caller as before: no wait was asked for, or the topic is unknown
+// (the caller answers 404) or has no partitions.
+func (rt *Router) awaitConsumeRoute(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) bool {
+	wait, err := consumeWaitFromHTTP(r, rt.maxConsumeWait)
+	if err != nil || wait <= 0 {
+		return false
+	}
+	if t, err := rt.store.GetTopic(ctx, topicName); err != nil || t.Partitions <= 0 {
+		return false
+	}
+	deadline := time.Now().Add(wait)
+	assignmentVersion, membersVersion := rt.store.AssignmentVersion(topicName), rt.store.RoutingMembersVersion()
+	budget := time.NewTimer(wait)
+	defer budget.Stop()
+	poll := time.NewTicker(routeWaitPoll)
+	defer poll.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			w.WriteHeader(http.StatusNoContent)
+			return true
+		case <-budget.C:
+			w.WriteHeader(http.StatusNoContent)
+			return true
+		case <-poll.C:
+		}
+		av, mv := rt.store.AssignmentVersion(topicName), rt.store.RoutingMembersVersion()
+		if av == assignmentVersion && mv == membersVersion {
+			continue
+		}
+		assignmentVersion, membersVersion = av, mv
+		routes, ok := rt.routesForTopic(topicName)
+		switch {
+		case !ok:
+			continue
+		case len(routes.localEntries) > 0:
+			w.WriteHeader(http.StatusNoContent)
+			return true
+		case !rt.hasRemoteOwner(topicName):
+			continue
+		}
+		if forwarded, _ := rt.RouteConsumeRemote(ctx, w, r, topicName); forwarded {
+			return true
+		}
+		rt.consumeRemoteWait(ctx, w, topicName, time.Until(deadline))
+		return true
+	}
 }
 
 // longWaitRPCGrace is added on top of a known server-side wait when
