@@ -10,9 +10,9 @@ topics/orders/
 └── p00003/
     ├── 00000000000000000000.log     ← sealed segment (starts at offset 0)
     ├── 00000000000000450832.log     ← active segment (starts at offset 450832)
-    ├── hwm                          ← 8-byte high-watermark
+    ├── hwm                          ← 8-byte high-watermark written at close (emptied by the first commit after an open)
     ├── consumer.offset              ← 8-byte committed consumer frontier
-    └── consumer.ahead               ← offsets acked out of order above it (two checksummed 4 KiB slots)
+    └── consumer.ahead               ← offsets acked out of order above it, plus the frontier (two checksummed 4 KiB slots)
 topics/orders.stale-3f9a1c0e7b2d4a61/   ← quarantined: a deleted incarnation's leftover
 ```
 
@@ -44,17 +44,17 @@ flowchart LR
 
 - **Segments** are capped at 64 MiB. A frame that pushes the active segment past the cap marks it full and fsyncs it; the roll itself (a new segment named by its first offset) happens at the end of the commit that filled it, at Close, or right before the next frame write, whichever comes first, and a segment also rolls before the first write that finds its oldest record older than the retention roll age (see Retention). Sealed segments are immutable: the unit of retention deletion.
 - **Frames** are the write unit: all records drained in one flush become one frame: length-prefixed records, compressed together (zstd by default), CRC over the stored bytes. Frame size therefore tracks batch size: trickle traffic gives per-record frames (~40% compression on JSON-ish payloads); busy traffic gives multi-hundred-record frames (~95%+, since similar records compress against each other).
-- **Records** carry the keyed envelope: `[version][key][commit-time][payload]`. Commit time is assigned under the partition lock, so it is monotonic per partition, the property the [delay gate](fanout-engine.md) relies on.
+- **Records** carry the keyed envelope: `[version][key][commit-time][payload]`. Commit time is stamped when the envelope is built, just before the commit takes the partition's produce lock, and under that lock it is raised to the newest commit time the partition has seen if it is lower (a batch that lost the race for the lock, or a wall-clock step back). So it never decreases along a partition, the property the [delay gate](fanout-engine.md) relies on. The floor is kept in memory, so it starts over after a restart or after the topic is forgotten on delete.
 
 ## Write path: buffer → flush → sync
 
-Appends go into an in-memory buffer; a flusher goroutine drains it into frames and writes them out; fsync policy is configurable (per-write or batched). The **commit path bypasses the leniency**: `Log.CommitDurable` forces drain + fsync synchronously on the flusher goroutine, re-reads and CRC-verifies the new frames, persists the new high-watermark, and only then advances it in memory. Buffered data lost in a crash was, by construction, never acked to anyone.
+Appends go into an in-memory buffer; a flusher goroutine drains it into frames and writes them out; fsync policy is configurable (per-write or batched). The **commit path bypasses the leniency**: `Log.CommitDurable` forces drain + fsync synchronously on the flusher goroutine, re-reads and CRC-verifies the new frames, and only then advances the high-watermark in memory. That is one fsync per commit: the boundary itself is not written to disk on the way (see [below](#the-high-watermark-and-the-hidden-tail) for why a restart still finds it). Buffered data lost in a crash was, by construction, never acked to anyone.
 
 Records drained out of the buffer sit in a **flushing snapshot** until an fsync proves their frame durable; a failed segment write is retried from the unwritten suffix on the next drain, and the in-memory copy is released only after the sync. On the commit path the sync is part of the same drain, so the snapshot never outlives a commit.
 
 ### When a commit fails
 
-A commit can fail at the write (`ENOSPC`, `EIO`), the fsync, the CRC read-back, the segment roll, or the high-watermark persist. The records are acked to the producer only by the ingress WAL, which re-commits any batch whose `CommitDurable` did not return success by appending the same records again. So a failed commit must leave **nothing** of the batch behind: if the first copy stayed in the log (in the snapshot, or already written and fsynced), the retry would append a second copy at fresh offsets and its commit would advance the high-watermark past both, delivering every record of the batch twice, permanently, without any crash.
+A commit can fail at the write (`ENOSPC`, `EIO`), the fsync, the CRC read-back, the segment roll, or the release of the `hwm` file (below), which each commit attempts until it has succeeded once since the log was opened. The records are acked to the producer only by the ingress WAL, which re-commits any batch whose `CommitDurable` did not return success by appending the same records again. So a failed commit must leave **nothing** of the batch behind: if the first copy stayed in the log (in the snapshot, or already written and fsynced), the retry would append a second copy at fresh offsets and its commit would advance the high-watermark past both, delivering every record of the batch twice, permanently, without any crash.
 
 Before the error reaches the caller, the flusher discards the uncommitted tail: everything above the high-watermark is dropped from the buffer and the snapshot, the active segment is truncated back to the first frame at or above the high-watermark (and the truncate fsynced), the sparse index and the caches forget the cut frames, and the next append is assigned the offset the failed batch had. The retry lands exactly one copy at the same offsets. The lazy roll above is what makes this always possible: a commit's frames are never sealed into an immutable segment before the commit has returned.
 
@@ -64,15 +64,25 @@ An fsync failure is final for the log. After a failed `fdatasync` the kernel may
 
 ## The high-watermark and the hidden tail
 
-The **HWM** is the exclusive bound of what consumers may see. A commit persists it (single-sector atomic write + fdatasync, through a descriptor kept open for the life of the log) *before* advancing it in memory, so a committed record is never visible with an unpersisted boundary; a bounded interval covers any other advance. Recovery trusts the persisted file, clamped to the recovered tail, which creates a deliberate artifact:
+The **HWM** is the exclusive bound of what consumers may see. An open log keeps it in memory; the `hwm` file holds a boundary only while the log is **closed**:
+
+- **Close writes it.** Once the flusher has stopped, `Close` writes the exact HWM (8 bytes overwritten in place, a single-sector atomic write + fdatasync) unless the file already holds it. Readers that answer without opening the log (the topic describe, the consume pump's backlog estimate, fan-out reads of a closed parent, the partition transfer listing, the metrics poller) read that value, and for a cleanly closed log it is exact.
+- **Open trusts it, clamped.** An 8-byte file recovers as `min(file, record tail)`. Opening writes nothing.
+- **The first advance empties it.** Before the first HWM advance of a log's life (inside the first commit after the log was opened) the file is truncated to empty and fsynced, once. No later commit touches it. An empty or missing file tells recovery to take the boundary from the CRC-verified record tail.
+
+The record tail never hides a visible record, because a commit fsyncs and verifies its frames before it advances the boundary. So a crash while the log is open leaves an empty file and every committed record visible, and a commit pays one fsync (the segment) where it used to pay a second, serial one for the boundary file under the produce lock. Emptying the file rather than letting it lag the commits is what keeps a rollback safe: releases before this one persisted the file on every commit, and recover an 8-byte file as `min(file, tail)` and an empty one as the tail. A file that lagged the acked commits would make such a binary, started after a crash, hide acked records, and its failed-commit discard would then truncate them.
+
+After a crash the file stays empty until the log is opened and closed again, and a reader of the closed partition finds no boundary on disk. Startup opens every partition the node owns before it reports ready (one whose assignment lookup or open fails at that point is skipped), so in practice every owned partition is open until idle eviction closes it and writes the exact boundary.
+
+Records can sit above the HWM, which is a deliberate artifact:
 
 ```mermaid
 flowchart LR
-    A["offsets 0 .. H-1<br/>visible"] --> B["offsets H .. T-1<br/>hidden tail after crash"]
+    A["offsets 0 .. H-1<br/>visible"] --> B["offsets H .. T-1<br/>hidden tail"]
     B --> C["offset T = next append"]
 ```
 
-Records above the persisted HWM after a crash (fsynced but never exposed: the commit failed or the crash landed between the fsync and the HWM persist) stay hidden on purpose: for produce-path records, the ingress WAL **re-commits them at fresh offsets** (its checkpoint never passes a batch whose commit did not return, and a commit only returns once the HWM is persisted), so exposing the hidden copy would double-deliver. New commits append past the hidden tail and advance the HWM over it, at which point the duplicates become visible: duplicates, never loss, and only around crashes.
+They are fsynced but were never exposed: a crash landed between a commit's fsync and its advance, or a failed commit could not truncate them (the log is then poisoned, see above). For produce-path records the ingress WAL still owns them and **re-commits them at fresh offsets** (its checkpoint never passes a batch whose commit did not return), so the hidden copy is a duplicate in waiting. A clean `Close` writes the boundary below them, so they stay hidden across a clean restart until a new commit appends past them and advances the HWM over them. After a crash the empty file exposes them at reopen instead. Either way the outcome is duplicates, never loss, and only around crashes and poisoned logs.
 
 ## Recovery
 
@@ -83,7 +93,7 @@ Opening a log scans segments for the valid frame extent:
 
 ### What a lying fsync costs
 
-Every durability decision above assumes `fdatasync` tells the truth. A drive (or a virtualised disk) that acknowledges a flush it never performed can lose, at a power cut, any record whose commit was acked on the strength of the lie: the frames are gone (the segment sync lied), or the high-watermark that exposed them regressed (the `hwm` sync lied) and they sit in the hidden tail until the ingress WAL re-commits them at fresh offsets. That is the hardware's loss, not the engine's, and it is bounded to exactly those records. What must never happen, and what the disk-fault tests in `storage` and `wal` pin under a lying-fsync simulation (`fault_test.go`, driven by the `syncfile` fault seam that fails or skips a chosen syscall for tests only): a torn or fabricated record served, a crash loop at open, a sparse index that disagrees with the file, a record from a fully honest commit missing, or a high-watermark that grew past what the crash left.
+Every durability decision above assumes `fdatasync` tells the truth. A drive (or a virtualised disk) that acknowledges a flush it never performed can lose, at a power cut, any record whose commit was acked on the strength of the lie: the frames are gone (the segment sync lied), or the sync that empties the `hwm` file before a log's first advance lied, so the previous `Close`'s boundary is still on disk and the records above it sit in the hidden tail until a later commit advances the boundary over them. Commits never sync that file otherwise, so the second exposure is once per log open, not once per commit. That is the hardware's loss, not the engine's, and it is bounded to exactly those records. What must never happen, and what the disk-fault tests in `storage` and `wal` pin under a lying-fsync simulation (`fault_test.go`, driven by the `syncfile` fault seam that fails or skips a chosen syscall for tests only): a torn or fabricated record served, a crash loop at open, a sparse index that disagrees with the file, a record from a fully honest commit missing, or a high-watermark that grew past what the crash left.
 
 ## Retention
 
@@ -98,7 +108,14 @@ The reaper's bookkeeping is cheap: every segment caches its first and last write
 
 Two things keep retention running when the happy path does not. The shared loop is supervised: a sweep that panics is logged and skipped for that partition rather than taking retention down for every partition on the node, and a loop that stops ticking for a minute is replaced (`narad_reaper_restarts` counts the replacements; past a cap the log line is the alarm). And the loop only sees *open* logs, so a partition closed by idle eviction, or never reopened since a restart, would keep its expired segments until something touched it. The cold-retention walk (`storage.cold_retention_walk_ms`, see [Configuration](../operate/configuration.md)) lists the partition directories on disk every few minutes, stats the closed ones without opening them, and for one holding an expired segment opens the log, runs a single sweep through the same roll, detach and unlink path, and closes it again (`narad_cold_retention_swept_total`).
 
-The consumer frontier (`consumer.offset`, 8 bytes overwritten in place as a single-sector atomic write + fdatasync, ~100ms cadence; an empty file left by a crash between create and first write reads as "no offset") is recovered lazily when a partition's queue state is first touched, from the file on disk, deliberately *not* from a boot-time metastore scan, so a stale replica at startup can't misplace consumption progress.
+The consumer frontier is persisted every `storage.consumer_offset_commit_interval_ms` (100ms by default) with one data sync per partition that changed: to `consumer.ahead` when the out-of-order ack set changed (its record carries the frontier too), otherwise to `consumer.offset` (8 bytes overwritten in place as a single-sector atomic write + fdatasync; an empty file left by a crash between create and first write reads as "no offset"). So while acks arrive out of order, `consumer.offset` can trail the frontier in `consumer.ahead`; a graceful `Close` brings it level, and a persisted frontier never moves backwards. It is recovered lazily when a partition's queue state is first touched, from both files on disk (the larger frontier wins), deliberately *not* from a boot-time metastore scan, so a stale replica at startup can't misplace consumption progress.
+
+## Opening and closing partition logs
+
+A node's partition logs live in one map (`runtime.Logs`), opened lazily on first use and closed by idle eviction, a retention change, a partition reclaim or move, a topic delete, and shutdown. Opening a log means recovery (a CRC read of its segments, O(retained bytes) for a cold partition) and closing one means a final flush plus fsyncs, so neither runs under the map's lock. The lock order is: the partition's produce mutex, then the topic's guard, then the map lock. The map lock is held only to look up, claim, install or drop an entry; the metastore lookup, the incarnation check, the open, the close and a purge's unlink all run under the per-topic guard. Opening or closing one topic's logs therefore stalls callers of that topic and nobody else, where it used to stall produce and consume of every topic on the node for the length of the I/O.
+
+Every close of a live log (retention change, reclaim, move install, shutdown, idle eviction) takes the partition's produce mutex first, so it lands between two commits, never between a commit's append and its `CommitDurable`. Otherwise the commit could fail with `ErrLogClosed` after the close's final drain had already written its records: the ingress WAL would re-commit them, and the first copy would surface as duplicates once a later commit advanced past it. Only a purge and the retirement of a stale incarnation skip the produce mutex, since the topic they close has no valid commit left to protect. A peek at a partition that is being closed (`Peek`, `PeekHighWatermark`) waits for the close to finish rather than reading a half-written `hwm` file.
+
 ## The frame format, byte by byte
 
 From `storage/format.go`, and yes, the magic is `0xCAFE`:
@@ -122,7 +139,7 @@ Inside each record sits the **keyed envelope** (`storage/keyed_record.go`):
 [version:1B = 0x02][keyLen:uvarint][key][committedAtUnixMs:8B BE][payload]
 ```
 
-The commit timestamp is assigned under the partition produce lock; that's the per-partition monotonicity the delay gate stands on.
+The commit timestamp is written when the envelope is built and raised under the partition produce lock if an earlier commit on the partition carried a later one; that's the per-partition monotonicity the delay gate stands on.
 
 ## The flusher pipeline, with its actual knobs
 
@@ -136,9 +153,9 @@ flowchart LR
 
 Three things make this safe rather than sloppy:
 
-- **The commit path doesn't negotiate.** `Log.CommitDurable` (called by `commitDurable` on every produce commit) synchronously drains, writes, fsyncs, verifies, and persists the high-watermark; the lazy timers above only govern data nobody has been promised yet.
-- **`flush_interval` is not a heartbeat.** The flusher holds a timer only while a pass is actually owed: records sitting in the buffer, bytes written but not yet fsynced, a failed write waiting to retry, or a high-watermark ahead of the persisted one. An idle partition holds no timer and burns no CPU; an append into an empty buffer or a high-watermark advance re-arms it. That matters at scale, because the cost is per open partition: measured on 500 idle logs, an always-armed 100ms timer cost 2.7% of a core doing nothing, and the runtime's timer heap was most of it. It also means any new "do it later, the timer will pick it up" path needs a matching condition in `flusher.needsTimer`, or it is silently never scheduled once the partition goes quiet.
-- **Reads are self-verifying.** Every frame decode re-checks the CRC; the commit path re-reads the just-written frames (streamed through a reused buffer, no per-frame allocation) *before* the high-watermark moves. Decoded frames and frame positions are cached (`frameCache`, `navCache`), both invalidated under the write lock when retention deletes a segment.
+- **The commit path doesn't negotiate.** `Log.CommitDurable` (called by `commitDurable` on every produce commit) synchronously drains, writes, fsyncs, verifies, and advances the high-watermark; the lazy timers above only govern data nobody has been promised yet.
+- **`flush_interval` is not a heartbeat.** The flusher holds a timer only while a pass is actually owed: records sitting in the buffer, bytes written but not yet fsynced, or a failed write waiting to retry. A high-watermark advance owes nothing (the boundary is written only at `Close`). An idle partition holds no timer and burns no CPU; an append into an empty buffer re-arms it. That matters at scale, because the cost is per open partition: measured on 500 idle logs, an always-armed 100ms timer cost 2.7% of a core doing nothing, and the runtime's timer heap was most of it. It also means any new "do it later, the timer will pick it up" path needs a matching condition in `flusher.needsTimer`, or it is silently never scheduled once the partition goes quiet.
+- **Reads are self-verifying.** Every frame decode re-checks the CRC; the commit path re-reads the just-written frames *before* the high-watermark moves, streamed through a buffer from a process-wide free list (at most one per P) rather than one pinned per partition. Decoded frames and frame positions are cached (`frameCache`, `navCache`). When something has read the partition since the previous write, a frame of up to 1 MiB goes into `frameCache` as it is written, so a consumer at the tail is served without a disk read or a decode; a failed commit's truncate drops those entries, and both caches are invalidated under the write lock when retention deletes a segment. Decoded records alias the frame's decode buffer rather than being copied one by one, which is why a codec's `Decode` must not retain or reuse its output.
 
 ## Long-poll wiring, since everyone asks
 

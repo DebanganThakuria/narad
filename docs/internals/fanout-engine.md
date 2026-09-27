@@ -25,13 +25,15 @@ A reconciler on every node diffs *desired cursors* (from the metastore: links ×
 ```mermaid
 flowchart TD
     READ["read slab of committed parent records<br/>(fill-or-linger batching)"] --> REKEY["re-key each record with the<br/>child's partitioner (key preserved)"]
-    REKEY --> COMMIT["commit per-child-partition batches<br/>(local or one RPC to the owner)"]
+    REKEY --> COMMIT["commit per-child-partition batches<br/>concurrently, up to 16 at once<br/>(local or one RPC to the owner)"]
     COMMIT -->|all batches acked| PERSIST["persist cursor offset"]
     PERSIST --> READ
-    COMMIT -->|any failure| RETRY["back off, re-read from<br/>unadvanced offset"] --> READ
+    COMMIT -->|some batches failed| RETRY["back off, retry only the failed<br/>partitions' records, from memory"] --> COMMIT
 ```
 
 The invariant is the whole guarantee: **the cursor's durable offset only advances past records whose child commits were acknowledged** (and child commits are the same fsync-and-verify as any produce). A crash mid-flight re-commits the last slab: duplicates into the child, never a gap.
+
+The records are bucketed per child partition with a counting sort, so each bucket keeps slab order (and per-key order with it). When some buckets fail, the cursor keeps only the failed partitions' records in memory, copied off the parent log so a long outage does not pin its read buffers, and retries just those after the backoff: partitions that committed are not sent again. Each retry re-checks the link's attach epoch and re-buckets the records under the child's current partition count. It never re-reads the slab; re-reading is what used to send the whole slab again, duplicates into the healthy partitions included, on every retry. A keyless record has no key to hash, so the child's partitioner places it round-robin, afresh on each retry.
 
 ## Attach epochs: why re-attach never replays
 
@@ -68,7 +70,7 @@ flowchart LR
     GATE -->|"not yet: sleep until r₂ is due"| r2
 ```
 
-Because commit times are **monotonic per partition** (assigned under the partition lock, a [storage-engine](storage-engine.md) property), the first not-yet-due record proves everything behind it isn't due either. So an idle delay cursor is O(1): peek the head, sleep until its due time (capped so gauges stay fresh). No timer wheels, no scan-the-backlog polling: a million pending delayed messages cost the same as one.
+Because commit times **never decrease along a partition** (stamped just before the commit takes the partition's produce lock and raised under it to the newest time the partition has committed, a [storage-engine](storage-engine.md) property), the first not-yet-due record proves everything behind it isn't due either. The floor lives in the committing process, so it starts over after a restart: a wall-clock step back across a restart can still leave a small inversion, which holds due records back by at most the size of the step. So an idle delay cursor is O(1): peek the head, sleep until its due time (capped so gauges stay fresh). No timer wheels, no scan-the-backlog polling: a million pending delayed messages cost the same as one.
 
 Delivery is therefore *never early on the reading clock* (the gate is checked against the parent partition owner's clock at read time) and usually lands within a second of due (long-poll wakeups + the linger window).
 
@@ -77,7 +79,7 @@ Delivery is therefore *never early on the reading clock* (the gate is checked ag
 ## Edge behaviors
 
 - **Drop-behind**: if a cursor falls behind the parent's *retention* (child down for days), aged-out offsets are skipped and counted on an explicit loss metric: bounded, alarmed loss instead of a wedged parent. The retention floor (`≥ delay + 1h` for delay children) makes this unreachable in sane configs.
-- **Dead child-partition owner**: fan-out never reroutes to a sibling child partition (unlike produce, a cursor can afford to wait; rerouting would scatter a key's records across child partitions for no availability gain); the cursor stalls on that bucket and retries until the owner returns.
+- **Dead child-partition owner**: fan-out never reroutes to a sibling child partition (unlike produce, a cursor can afford to wait; rerouting would scatter a key's records across child partitions for no availability gain); the cursor stalls on that bucket and retries until the owner returns. Keyless records are the exception: each retry places them round-robin again, so they can land in a healthy partition. Only that partition's records are retried; the child partitions that committed are not sent the slab again on every retry cycle, as they were when a failure meant re-reading the whole slab. The held records (at most one slab, `fanout.max_batch_bytes`, 4 MiB by default, per cursor) stay in memory until the owner returns, so records that age out of the parent's retention during the outage but were already read are still delivered rather than counted as drop-behind.
 - **Lag observability**: `fanout_lag_messages` (parent HWM − cursor) is the health signal for normal children; `fanout_due_lag_seconds` (how far behind the *due frontier*) is the one for delay children; raw offset lag on a delay child is permanently ≈ rate × delay *by design*.
 - **Describing is free**: the children listing (`GET /v1/topics/{parent}/children`) and the topic describe (`GET /v1/topics/{topic}`) never open a partition log. An open log is read through the non-stamping `Peek`; a closed one is described from its directory (segment files plus the durable high-watermark file, exact for a cleanly closed log). Only `Get` stamps a log's last access, so a monitoring loop cannot keep idle parents warm and idle eviction still fires. Remote partitions' stats are fetched from their owners concurrently (16 in flight), not one round trip at a time.
 ## The numbers
@@ -86,6 +88,7 @@ Delivery is therefore *never early on the reading clock* (the gate is checked ag
 |---|---|
 | Reconcile interval (desired vs running cursors) | 1s |
 | Slab long-poll / retry backoff | 1s / 1s |
+| Child-partition commits in flight per slab | 16 |
 | Batch caps | 4,096 records / 4 MiB (`fanout.max_batch_records/bytes`) |
 | Linger to fatten a partial batch | 25ms |
 | Delay cursor max sleep (metadata freshness bound) | 30s (`defaultFanoutDueWakeCap`) |
@@ -100,11 +103,11 @@ One JSON file per (parent partition, child), living next to the log it indexes:
 
 ```
 topics/orders/p00003/fanout-analytics.offset
-{"epoch":"67953471cc57a32a","next_offset":98332}
+{"crc":"5e9303c4","epoch":"67953471cc57a32a","next_offset":98332}
 ```
 
-That's the entire recovery story: epoch says *which attachment* this position belongs to; `next_offset` says where to resume. Written via atomic temp+rename only after the batch below it is committed to the child (commit-before-advance). The starting point of a cursor that has no file yet lives in the metastore, in the child's record (`attach_epoch` plus `attach_offsets`). Everything else (running goroutines, batches in flight, lag gauges) is disposable.
+That's the entire recovery story: epoch says *which attachment* this position belongs to; `next_offset` says where to resume. The record is padded with spaces and a newline to a fixed 256 bytes, and advanced in place (one write at offset 0 and one `fdatasync`) only after the batch below it is committed to the child (commit-before-advance). `crc` is a CRC-32C over everything after it, padding included: a reader that catches the writer mid-copy (a move listing the file, the cursor stats handler) or a record torn by a crash would otherwise parse a splice of two offsets as a valid cursor ahead of the true position. Readers re-read a record that fails the check a few times before calling it corrupt, which takes the existing corrupt-cursor path. The atomic temp+rename (plus a directory fsync) is kept for the first anchor, for replacing a file in the older variable-length format, and for an epoch too long to pad. Older binaries parse the new record (they ignore the `crc` field and the padding), and the new one reads and migrates the old format. The starting point of a cursor that has no file yet lives in the metastore, in the child's record (`attach_epoch` plus `attach_offsets`). Everything else (running goroutines, batches in flight, lag gauges) is disposable.
 
 ## Reading a slab: fill-or-linger
 
-`readBatch` long-polls the parent for up to 1s, then tops up until the batch hits 4,096 records / 4 MiB or a 25ms linger expires, so a busy parent produces fat child commits (one fsync each on the child side) while a trickling parent still ships within ~25ms. For a delay child, every read carries `MaxCommittedAt = now − delay`; the reader stops at the first undue record and reports *when* it becomes due, which is what lets the cursor sleep instead of spin.
+`readBatch` long-polls the parent for up to 1s (the records it returns alias the parent log's decoded frames rather than being copied, since the child commit copies them anyway), then tops up until the batch hits 4,096 records / 4 MiB or a 25ms linger expires, so a busy parent produces fat child commits (one fsync each on the child side) while a trickling parent still ships within ~25ms. For a delay child, every read carries `MaxCommittedAt = now − delay`; the reader stops at the first undue record and reports *when* it becomes due, which is what lets the cursor sleep instead of spin.

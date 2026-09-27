@@ -28,7 +28,7 @@ Narad is explicit about this where other brokers are shy: **there is no delivery
 
 - **Redelivery**: a crashed or slow consumer's message reappears after newer ones were consumed.
 - **A dead consumer holds its partition's frontier**: a message leased by a consumer that never comes back is redelivered when its visibility timeout expires, and until then that partition can run out of anything else to serve (everything above it is acked). Expect quiet windows up to `visibility_timeout_ms` after an outage.
-- **Broker restart**: acks are persisted in batches (every 100ms by default), including acks that landed out of order, so a crash can redeliver the messages acked in the last batch. A graceful restart redelivers nothing that was acked.
+- **Broker restart**: acks are persisted in batches (every 100ms by default, the broker's `storage.consumer_offset_commit_interval_ms`), including acks that landed out of order, so a crash can redeliver the messages acked in about the last interval. A graceful restart redelivers nothing that was acked.
 - **Dead-owner skip**: while a node is marked dead, keyed produces walk forward to a live partition: the key-to-partition mapping itself moves.
 - **Dispatch reroute**: accepted messages destined for an unreachable owner are committed to a live sibling partition rather than delayed indefinitely.
 
@@ -74,11 +74,12 @@ flowchart LR
 | `409` | create/attach/alter | Conflict: already exists, role conflict, retention-vs-delay violation, schema `schema_base_version` no longer current, schema history full, schema of an attached child | Read the error body; for a schema conflict, re-read `schema_version` and retry with the new base |
 | `410` | ack/extend | Your lease lapsed; message was handed elsewhere | Stop working on it; expect a duplicate |
 | `413` | produce, topic create/alter | Body over 1 MiB (a schema document itself is capped at 256 KiB, answered as `400`) | Shrink the payload |
+| `502` | ack/extend/nack, partition-pinned consume | The node you reached forwarded the request to the partition's owner and got no answer (the owner stopped responding, or the connection to it failed) | Back off and retry, as for `503`; an ack can never settle twice, so retrying one that had already landed changes nothing (the retry answers `410`) |
 | `503` | produce/consume/ack | Temporarily unavailable: partition owner down, quorum lost | Back off and retry |
 
 ## Retry cheat sheet
 
-- `202` → never retry. `4xx` → never retry unchanged. `503` and timeouts → retry with backoff.
+- `202` → never retry. `4xx` → never retry unchanged. `502`, `503` and timeouts → retry with backoff.
 - A **timed-out produce is ambiguous**: the message may have been accepted. Retrying may duplicate it; that's fine, because your consumer is idempotent. Right?
 
 ## API stability
