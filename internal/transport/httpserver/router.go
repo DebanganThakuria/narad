@@ -26,7 +26,8 @@ type RouterOptions struct {
 	// Basic credentials as the API. Ignored when auth is nil.
 	MetricsRequireAuth bool
 	// ConsumeInFlightPerIdentity caps concurrent consume requests per
-	// authenticated user (or per client IP without auth); 0 disables.
+	// authenticated user (or per client IP without auth); 0 disables. A
+	// batch consume (?max=N) counts N.
 	ConsumeInFlightPerIdentity int
 }
 
@@ -72,7 +73,7 @@ func NewRouterWithOptions(h *handlers.Set, log *slog.Logger, m *metrics.Metrics,
 
 	// Data plane
 	mux.HandleFunc("POST /v1/topics/{topic}/produce", httpmessaging.Produce(h))
-	mux.Handle("GET /v1/topics/{topic}/consume", consumeLimit.wrap(httpmessaging.Consume(h)))
+	mux.Handle("GET /v1/topics/{topic}/consume", consumeLimit.wrap(httpmessaging.Consume(h), httpmessaging.ConsumeWeight))
 	mux.HandleFunc("POST /v1/topics/{topic}/ack", httpmessaging.Ack(h))
 
 	// User administration. Registered only when a metastore is wired in

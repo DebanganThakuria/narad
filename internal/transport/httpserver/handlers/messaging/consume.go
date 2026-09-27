@@ -18,10 +18,11 @@ import (
 
 // Consume handles GET /v1/topics/{topic}/consume.
 //
-// Query params: partition, offset, wait. No offset = queue-style
+// Query params: partition, offset, wait, max. No offset = queue-style
 // pull. Offset set = replay (partition required). wait > 0 =
 // long-poll up to MaxConsumeWait. Returns 204 if no message
-// materializes within wait.
+// materializes within wait. max asks for up to that many records in one
+// response (see consumeBatch); without it the body is one message.
 func Consume(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")
@@ -33,39 +34,47 @@ func Consume(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 
-		opts, localOnly, ok := parseConsumeQuery(s, w, r)
+		opts, localOnly, batch, ok := parseConsumeRequest(s, w, r)
 		if !ok {
 			return
 		}
-
-		// local_only marks a peer's fan-out probe. Answer it strictly
-		// from local partitions without waiting; routing it onward
-		// would bounce the probe around the cluster.
-		if localOnly && isQueueConsume(opts) {
-			opts.Wait = 0
-			if consumeOnce(s, w, r, topicName, opts) {
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
+		if batch > 0 {
+			consumeBatch(s, w, r, topicName, opts, localOnly, batch)
 			return
 		}
+		consumeSingle(s, w, r, topicName, opts, localOnly)
+	}
+}
 
-		if s.Deps.Router != nil {
-			forwarded, localPartition := s.Deps.Router.RouteConsume(r.Context(), w, r, topicName, opts.Partition)
-			if forwarded {
-				return
-			}
-			if localPartition != nil && isQueueConsume(opts) {
-				queueConsumeWithLocalOwner(s, w, r, topicName, opts, *localPartition)
-				return
-			}
-		}
-
+// consumeSingle serves a consume that returns one message.
+func consumeSingle(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts, localOnly bool) {
+	// local_only marks a peer's fan-out probe. Answer it strictly
+	// from local partitions without waiting; routing it onward
+	// would bounce the probe around the cluster.
+	if localOnly && isQueueConsume(opts) {
+		opts.Wait = 0
 		if consumeOnce(s, w, r, topicName, opts) {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+		return
 	}
+
+	if s.Deps.Router != nil {
+		forwarded, localPartition := s.Deps.Router.RouteConsume(r.Context(), w, r, topicName, opts.Partition)
+		if forwarded {
+			return
+		}
+		if localPartition != nil && isQueueConsume(opts) {
+			queueConsumeWithLocalOwner(s, w, r, topicName, opts, *localPartition)
+			return
+		}
+	}
+
+	if consumeOnce(s, w, r, topicName, opts) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // queueConsumeWithLocalOwner serves a queue-style consume on a node
@@ -183,9 +192,10 @@ type consumeQuery struct {
 	offset    string
 	wait      string
 	localOnly string
+	max       string
 }
 
-// consumeQueryFromRawQuery extracts Consume's four parameters in one
+// consumeQueryFromRawQuery extracts Consume's parameters in one
 // walk of the raw query string: consume is on the hot path, and
 // r.URL.Query() allocates a map (plus a slice per key) for every
 // request. It reproduces url.ParseQuery's observable behaviour for
@@ -202,7 +212,7 @@ type consumeQuery struct {
 // Components are unescaped only when they contain an escape character.
 func consumeQueryFromRawQuery(raw string) consumeQuery {
 	var out consumeQuery
-	var seenPartition, seenOffset, seenWait, seenLocalOnly bool
+	var seenPartition, seenOffset, seenWait, seenLocalOnly, seenMax bool
 	for raw != "" {
 		var part string
 		part, raw, _ = strings.Cut(raw, "&")
@@ -228,6 +238,8 @@ func consumeQueryFromRawQuery(raw string) consumeQuery {
 			dst, seen = &out.wait, &seenWait
 		case "local_only":
 			dst, seen = &out.localOnly, &seenLocalOnly
+		case "max":
+			dst, seen = &out.max, &seenMax
 		default:
 			continue
 		}
@@ -248,15 +260,21 @@ func consumeQueryFromRawQuery(raw string) consumeQuery {
 }
 
 func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) (brokermsg.ConsumeOpts, bool, bool) {
+	opts, localOnly, _, ok := parseConsumeRequest(s, w, r)
+	return opts, localOnly, ok
+}
+
+// parseConsumeRequest is parseConsumeQuery plus the batch size a max
+// parameter asks for (0 without one).
+func parseConsumeRequest(s *handlers.Set, w http.ResponseWriter, r *http.Request) (opts brokermsg.ConsumeOpts, localOnly bool, batch int, ok bool) {
 	q := consumeQueryFromRawQuery(r.URL.RawQuery)
-	opts := brokermsg.ConsumeOpts{}
-	localOnly := q.localOnly == "1"
+	localOnly = q.localOnly == "1"
 
 	if v := q.partition; v != "" {
 		p, err := strconv.Atoi(v)
 		if err != nil {
 			s.WriteError(w, http.StatusBadRequest, "invalid partition: "+err.Error())
-			return opts, false, false
+			return opts, false, 0, false
 		}
 		opts.Partition = &p
 	}
@@ -264,11 +282,11 @@ func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) 
 		o, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
 			s.WriteError(w, http.StatusBadRequest, "invalid offset: "+err.Error())
-			return opts, false, false
+			return opts, false, 0, false
 		}
 		if o < 0 {
 			s.WriteError(w, http.StatusBadRequest, "invalid offset: must be >= 0")
-			return opts, false, false
+			return opts, false, 0, false
 		}
 		opts.Offset = &o
 	}
@@ -276,7 +294,7 @@ func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) 
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			s.WriteError(w, http.StatusBadRequest, "invalid wait: "+err.Error())
-			return opts, false, false
+			return opts, false, 0, false
 		}
 		if d < 0 {
 			d = 0
@@ -296,5 +314,17 @@ func parseConsumeQuery(s *handlers.Set, w http.ResponseWriter, r *http.Request) 
 		}
 		opts.Wait = d
 	}
-	return opts, localOnly, true
+	if v := q.max; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > MaxConsumeBatch {
+			s.WriteError(w, http.StatusBadRequest, "invalid max: want an integer from 1 to "+strconv.Itoa(MaxConsumeBatch))
+			return opts, false, 0, false
+		}
+		if opts.Offset != nil {
+			s.WriteError(w, http.StatusBadRequest, "max cannot be combined with offset: a replay reads one record")
+			return opts, false, 0, false
+		}
+		batch = n
+	}
+	return opts, localOnly, batch, true
 }
