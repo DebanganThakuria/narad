@@ -45,10 +45,17 @@ func releaseResponseBuffer(buf *bytes.Buffer) {
 	responseBufferPool.Put(buf)
 }
 
+// headerJSON is the Content-Type value of every JSON response. It is
+// assigned to the header map directly rather than through Header.Set,
+// which allocates a fresh one-element slice per call; net/http only
+// reads it, and Add or Set replace the slice rather than writing into
+// it (its capacity is its length).
+var headerJSON = []string{"application/json"}
+
 // WriteJSON encodes v as the JSON response body with the given
 // status. Nil values produce a header-only response.
 func (s *Set) WriteJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header()["Content-Type"] = headerJSON
 	if v == nil {
 		w.WriteHeader(status)
 		return
@@ -68,6 +75,27 @@ func (s *Set) WriteJSON(w http.ResponseWriter, status int, v any) {
 	}
 
 	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+	w.WriteHeader(status)
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		s.Deps.Logger.Error("write response", "err", err)
+	}
+}
+
+// WriteMessage writes msg as the JSON response body with the given
+// status: the bytes and headers WriteJSON(w, status, msg) writes, for
+// the one response every delivered record gets. Passing the message by
+// pointer keeps it off the heap; boxed into WriteJSON's interface it
+// escaped on every local consume.
+func (s *Set) WriteMessage(w http.ResponseWriter, status int, msg *topic.Message) {
+	buf := responseBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer releaseResponseBuffer(buf)
+	buf.Write(msg.AppendJSON(buf.AvailableBuffer()))
+	buf.WriteByte('\n')
+
+	h := w.Header()
+	h["Content-Type"] = headerJSON
+	h.Set("Content-Length", strconv.Itoa(buf.Len()))
 	w.WriteHeader(status)
 	if _, err := w.Write(buf.Bytes()); err != nil {
 		s.Deps.Logger.Error("write response", "err", err)

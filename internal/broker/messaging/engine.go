@@ -69,6 +69,13 @@ type ConsumeOpts struct {
 	// separate pinned probe the handler used to make first, so one scan
 	// covers both. Ignored when Partition or Offset is set.
 	ScanStart *int
+	// MaxBytes, when positive, ends a ConsumeBatch once the key and
+	// payload bytes it has reserved reach it; the first record is always
+	// taken. A forwarded batch sets it so it reserves about what its reply
+	// can carry. These are raw bytes: a record's JSON encoding can be up
+	// to six times as large (escaped text), so a caller bounding an
+	// encoded reply checks that as it encodes. Zero is no bound.
+	MaxBytes int
 }
 
 // Engine handles produce, consume, and ack. Constructed once at

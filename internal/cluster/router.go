@@ -3,6 +3,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"sync"
@@ -36,6 +37,10 @@ type Router struct {
 	// back on the fast path within a TTL at the cost of one refused claim
 	// per owner per TTL while it is still old.
 	legacyClaim sync.Map
+	// legacyBatchConsume is legacyClaim for the Max field: owners that
+	// refused a batch consume (a release before the field existed) and
+	// are asked for one record at a time until the entry's expiry.
+	legacyBatchConsume sync.Map
 
 	// consumeReprobeInterval is the first interval of the remote re-probe
 	// loop for queue-style long-poll consumes on nodes that own no
@@ -225,6 +230,123 @@ func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *ht
 		return true, nil
 	}
 	return false, nil
+}
+
+// RouteConsumeBatch is RouteConsume for a batch consume (?max=N): each
+// forward asks the owner for up to max records (nodewire
+// ConsumeRequest.Max) where RouteConsume's ask for one, so a node that
+// owns none of the topic's partitions (or not the pinned one) serves a
+// batch in one round trip. The remote owners are probed in turn and the
+// first that has records answers the whole request; the request is not
+// held to fill max from several owners, as a local batch is not.
+//
+// batch reports that a 200 it wrote is already {"messages":[...]}. It is
+// false for a single message the caller wraps: from an owner that does
+// not take Max yet (asked again for one record, see consumeFrom), or
+// from the wait phase, which is RouteConsume's and delivers one record.
+// forwarded and localPartition mean what they mean for RouteConsume.
+func (rt *Router) RouteConsumeBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int, max int) (forwarded, batch bool, localPartition *int) {
+	if pinnedPartition != nil {
+		addr, unavailable := rt.ownerRoute(topicName, *pinnedPartition)
+		if unavailable {
+			writeOwnerDown(w)
+			return true, false, nil
+		}
+		if addr == "" {
+			return false, false, nil
+		}
+		req, err := consumeRPCRequestFromHTTP(r, topicName, pinnedPartition, false, rt.maxConsumeWait)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return true, false, nil
+		}
+		consumeCtx, cancel := longWaitRPCContext(ctx, time.Duration(req.WaitNanos))
+		defer cancel()
+		res, isBatch, err := rt.consumeFrom(consumeCtx, addr, req, max, 0)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return true, false, nil
+		}
+		writePeerResponse(w, res)
+		return true, isBatch, nil
+	}
+
+	if localPartition, ok := rt.localConsumePartition(topicName); ok {
+		return false, false, &localPartition
+	}
+
+	if candidates := rt.remoteConsumeCandidates(topicName); len(candidates) > 0 {
+		for _, addr := range candidates {
+			if ctx.Err() != nil {
+				// The client is gone: probing the rest would only reserve
+				// records for nobody and release them again.
+				break
+			}
+			res, isBatch, err := rt.consumeFrom(ctx, addr, nodewire.ConsumeRequest{Topic: topicName, LocalOnly: true}, max, consumeProbeTimeout)
+			if err != nil || res.Status != http.StatusOK {
+				// As for a single probe: an owner that failed, timed out or
+				// just lost the partition is skipped for this round.
+				continue
+			}
+			writePeerResponse(w, res)
+			return true, isBatch, nil
+		}
+		// The wait phase, exactly as RouteConsume's (see there).
+		wait, err := consumeWaitFromHTTP(r, rt.maxConsumeWait)
+		if err != nil {
+			wait = 0
+		}
+		rt.consumeRemoteWait(ctx, w, topicName, wait)
+		return true, false, nil
+	}
+	if rt.awaitConsumeRoute(ctx, w, r, topicName) {
+		return true, false, nil
+	}
+	return false, false, nil
+}
+
+// consumeFrom sends req to the owner at addr asking for up to max
+// records, and reports whether the reply answers a batch. timeout bounds
+// the call as ConsumeWithin does (0: the transport's own bound, or ctx's
+// deadline). An owner on a release before Max refuses the field with
+// 400 (trailing payload): it is asked again for one record within what
+// is left of the budget and remembered for legacyClaimTTL, so a rolling
+// upgrade costs one refused request per owner per TTL, not one per
+// consume.
+func (rt *Router) consumeFrom(ctx context.Context, addr string, req nodewire.ConsumeRequest, max int, timeout time.Duration) (nodewire.Response, bool, error) {
+	legacy := rt.legacyBatchOwner(addr)
+	if !legacy {
+		req.Max = max
+	}
+	deadline := time.Now().Add(timeout)
+	res, err := rt.peer.ConsumeWithin(ctx, addr, timeout, req)
+	if err == nil && req.Max > 1 && res.Status == http.StatusBadRequest && bytes.Contains(res.Body, []byte("trailing")) {
+		rt.legacyBatchConsume.Store(addr, time.Now().Add(legacyClaimTTL))
+		req.Max = 0
+		left := time.Duration(0)
+		if timeout > 0 {
+			if left = time.Until(deadline); left <= 0 {
+				return nodewire.Response{}, false, context.DeadlineExceeded
+			}
+		}
+		res, err = rt.peer.ConsumeWithin(ctx, addr, left, req)
+	}
+	return res, req.Max > 1, err
+}
+
+// legacyBatchOwner reports whether consumes to addr must ask for one
+// record, and forgets an entry whose TTL has passed so Max is tried
+// again.
+func (rt *Router) legacyBatchOwner(addr string) bool {
+	v, ok := rt.legacyBatchConsume.Load(addr)
+	if !ok {
+		return false
+	}
+	if time.Now().Before(v.(time.Time)) {
+		return true
+	}
+	rt.legacyBatchConsume.Delete(addr)
+	return false
 }
 
 // consumeRemoteWait serves the wait phase of a queue-style long-poll on

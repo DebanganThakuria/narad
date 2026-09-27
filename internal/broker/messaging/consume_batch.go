@@ -19,6 +19,9 @@ import (
 // waiter to park on with ConsumeWait, as ConsumeProbe does; the caller
 // can top up the one record a wait delivers with another ConsumeBatch.
 //
+// opts.MaxBytes, when set, ends the batch early once the records taken
+// carry that many key and payload bytes.
+//
 // The scan starts where a single consume's would (opts.ScanStart, else
 // the rotating cursor) and stays on a partition until it runs dry or
 // reaches its in-flight cap, then moves on, so a batch takes a
@@ -47,8 +50,8 @@ func (e *Engine) ConsumeBatch(ctx context.Context, topicName string, opts Consum
 	scanStart := e.consumeScanStart(topicName, scan, opts)
 	start := time.Now()
 
-	pos, got := scanStart, 0
-	for got < max {
+	pos, got, size := scanStart, 0, 0
+	for got < max && (opts.MaxBytes <= 0 || size < opts.MaxBytes) {
 		msg, found, err := e.tryQueueRead(ctx, topicName, scan, pos, visibilityTimeout)
 		if err != nil {
 			if got > 0 {
@@ -64,6 +67,7 @@ func (e *Engine) ConsumeBatch(ctx context.Context, topicName string, opts Consum
 		}
 		dst = append(dst, msg)
 		got++
+		size += len(msg.Key) + len(msg.Payload)
 		e.recordConsumed(topicName, msg.Partition, len(msg.Payload))
 		// Resume on the partition this record came from: the next one
 		// is most likely right behind it.

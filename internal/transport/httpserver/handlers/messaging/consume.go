@@ -99,7 +99,7 @@ func queueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r *http.
 		return
 	}
 	if found {
-		s.WriteJSON(w, http.StatusOK, msg)
+		s.WriteMessage(w, http.StatusOK, &msg)
 		return
 	}
 
@@ -128,7 +128,7 @@ func queueConsumeWithLocalOwner(s *handlers.Set, w http.ResponseWriter, r *http.
 		return
 	}
 	if found {
-		s.WriteJSON(w, http.StatusOK, msg)
+		s.WriteMessage(w, http.StatusOK, &msg)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -175,7 +175,7 @@ func consumeOnce(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicN
 	if !found {
 		return false
 	}
-	s.WriteJSON(w, http.StatusOK, msg)
+	s.WriteMessage(w, http.StatusOK, &msg)
 	return true
 }
 

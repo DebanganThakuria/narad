@@ -1,6 +1,7 @@
 package messaging
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -69,10 +70,22 @@ func consumeBatch(s *handlers.Set, w http.ResponseWriter, r *http.Request, topic
 	}
 	if s.Deps.Router != nil {
 		c := &captureWriter{}
-		forwarded, localPartition := s.Deps.Router.RouteConsume(r.Context(), c, r, topicName, opts.Partition)
+		var forwarded, batch bool
+		var localPartition *int
+		if br, ok := s.Deps.Router.(batchConsumeRouter); ok {
+			forwarded, batch, localPartition = br.RouteConsumeBatch(r.Context(), c, r, topicName, opts.Partition, max)
+		} else {
+			forwarded, localPartition = s.Deps.Router.RouteConsume(r.Context(), c, r, topicName, opts.Partition)
+		}
 		if forwarded {
 			// Served by another node (a pinned partition it owns, or the
-			// remote owners of a topic this node holds none of).
+			// remote owners of a topic this node holds none of): a batch
+			// the owner built goes out as it is, and anything else as a
+			// single-record flow's outcome.
+			if batch && c.code() == http.StatusOK {
+				writeBatchBody(w, c.body)
+				return
+			}
 			writeCapturedBatch(w, c, nil)
 			return
 		}
@@ -82,6 +95,16 @@ func consumeBatch(s *handlers.Set, w http.ResponseWriter, r *http.Request, topic
 		}
 	}
 	b.local(opts)
+}
+
+// batchConsumeRouter is the batch form of the router's RouteConsume;
+// the cluster router implements it. Its forwards ask the owner for up
+// to max records instead of one, and batch reports that a 200 it wrote
+// is already a {"messages":[...]} body rather than a single message for
+// the caller to wrap. forwarded and localPartition mean what they mean
+// for RouteConsume.
+type batchConsumeRouter interface {
+	RouteConsumeBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int, max int) (forwarded, batch bool, localPartition *int)
 }
 
 // batchConsume is one batch consume request in flight.
@@ -222,6 +245,16 @@ func writeMessages(w http.ResponseWriter, first []byte, msgs []topic.Message) {
 		body = msgs[i].AppendJSON(body)
 	}
 	body = append(body, "]}\n"...)
+	h := w.Header()
+	h.Set("Content-Type", "application/json")
+	h.Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+// writeBatchBody answers 200 with a batch body another node built, with
+// the headers writeMessages sends.
+func writeBatchBody(w http.ResponseWriter, body []byte) {
 	h := w.Header()
 	h.Set("Content-Type", "application/json")
 	h.Set("Content-Length", strconv.Itoa(len(body)))
