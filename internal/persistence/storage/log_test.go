@@ -1057,7 +1057,7 @@ func TestMidSegmentCorruptionInSealedSegmentSkipped(t *testing.T) {
 		}
 	}
 
-	// Record 1 (in segment[1]) is now a gap; the rest readable.
+	// Record 1 (in segment[1]) is now unreadable; the rest readable.
 	for _, off := range []int64{0, 2, 3, 4, 5} {
 		want := fmt.Appendf(nil, "frame-%d", off)
 		got, err := l.Read(off)
@@ -1068,8 +1068,11 @@ func TestMidSegmentCorruptionInSealedSegmentSkipped(t *testing.T) {
 			t.Fatalf("Read %d got %q want %q", off, got, want)
 		}
 	}
-	if _, err := l.Read(1); !errors.Is(err, ErrOffsetNotFound) {
-		t.Fatalf("Read(1) want ErrOffsetNotFound got %v", err)
+	// Recovery does not read sealed segments, so the read is what finds
+	// the bad frame: it fails its CRC, and the consume path skips it as
+	// corrupt, exactly as it skips a gap.
+	if _, err := l.Read(1); !IsCorrupt(err) {
+		t.Fatalf("Read(1) want a corrupt-record error got %v", err)
 	}
 }
 
