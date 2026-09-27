@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -155,4 +156,42 @@ func (d *ProduceDispatcher) dispatchTargetsForTopic(topicName string) (cachedPro
 		d.targetMu.Unlock()
 		return targets, nil
 	}
+}
+
+// cachedDispatchTopic is the part of a topic's record the dispatcher
+// reads per record: whether it exists, its incarnation and its
+// partition count, cached by the store's topic version.
+type cachedDispatchTopic struct {
+	version    uint64
+	exists     bool
+	id         string
+	partitions int
+}
+
+// topicInfo returns topicName's cached record from the local replica.
+// The version is re-read after the lookup, so an entry is only cached
+// once it is known to match a version. An absent topic is not cached at
+// all, so a churn of deleted names cannot grow the cache, and neither is
+// a failed read, so the next call tries again.
+func (d *ProduceDispatcher) topicInfo(st *produceDispatchState, topicName string) cachedDispatchTopic {
+	version := d.store.TopicVersion(topicName)
+	if cached, ok := st.topics[topicName]; ok && cached.version == version {
+		return cached
+	}
+	t, err := d.store.GetTopic(context.Background(), topicName)
+	info := cachedDispatchTopic{version: version, exists: err == nil, id: t.ID, partitions: t.Partitions}
+	if err != nil && !errors.Is(err, errs.ErrNotFound) {
+		// Unreadable: treat it as present without an incarnation, so
+		// nothing is discarded on its account.
+		info.exists = true
+	}
+	if err != nil || d.store.TopicVersion(topicName) != version {
+		delete(st.topics, topicName)
+		return info
+	}
+	if len(st.topics) >= produceDispatchMemoLimit {
+		clear(st.topics)
+	}
+	st.topics[topicName] = info
+	return info
 }

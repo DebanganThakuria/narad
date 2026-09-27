@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/persistence/wal"
@@ -10,377 +11,628 @@ import (
 
 var errProduceReplayBoundary = errors.New("produce replay reached durable boundary")
 
-// dispatchWindow is the outcome of one scan pass: the records that still need
-// committing plus the bookkeeping the checkpoint advance needs afterwards.
-type dispatchWindow struct {
-	// records are the window's not-yet-committed records, in WAL-seq order.
-	records []ingress.ProduceRecord
-	// scanStart and scanEnd bound the seqs examined this pass; scanned is
-	// false when the replay saw nothing at or above the checkpoint.
-	scanStart uint64
-	scanEnd   uint64
-	scanned   bool
-	// done marks scanned seqs that need no further commit work: committed
-	// (this pass or a previous one), discarded for a deleted topic, or
-	// successfully rerouted.
-	done map[uint64]bool
-	// cursorAfterSeq records the resume cursor sitting just after each
-	// scanned seq, so the next pass can resume from the new checkpoint.
-	cursorAfterSeq seqCursors
+// How the dispatcher moves records, in brief.
+//
+// Every seq in [checkpoint, read frontier) is in one of three states
+// (seqMarks): done (committed, discarded for a deleted topic or a
+// replaced incarnation, or a hole in the WAL), held (in memory, queued
+// for or in flight to a destination partition), or skipped (left in the
+// WAL, to be read again). The checkpoint is the first seq that is not
+// done; compaction never deletes WAL records at or past it, so a record
+// that is not yet committed always survives a crash.
+//
+// The reader reads each newly durable record once and places it on its
+// destination partition's queue. Each destination has at most one
+// commit in flight: when it lands, whatever queued meanwhile goes out
+// as the next batch. Different destinations commit independently (up
+// to the fan-out), so a slow or unreachable owner holds up its own
+// partitions and nothing else; the records it pins keep the checkpoint
+// where it is, which the lookahead horizon bounds. Batching comes from
+// the queueing itself: the longer a commit takes, the more records the
+// next one carries, so a busy owner gets fewer, fatter commits (one
+// fsync each).
+//
+// A record is left in the WAL (skipped) rather than held when holding
+// it would cost memory for nothing or break partition order: its
+// destination is failing and already holds its probe, its commit has
+// been in flight for produceDispatchSlowAfter, its queue is at
+// perDestCap, an earlier record of the same destination is still
+// skipped, or a delete or incarnation change is not yet confirmed.
+// Skipped records are read again, in WAL order, by a rescan: when their
+// destination recovers or drains, and on the rescan backstop.
+//
+// A record whose destination cannot take commits must not block
+// delivery: because every destination shares this one WAL, a single
+// dead partition owner would otherwise stop newer records for ALL
+// topics and partitions while producers keep getting 2xx. The
+// dispatcher therefore REROUTES such records to another partition of
+// the same topic whose owner is alive — deliberately sacrificing
+// per-key partition ordering to preserve availability, the exact trade
+// the accept path already makes when it skips dead-owner partitions at
+// partition-selection time (messaging.Engine.pickProducePartition). Two
+// tiers trigger a reroute:
+//
+//   - target resolution fails for a live topic (owner dead or missing
+//     per membership): membership death is authoritative, so the record
+//     is rerouted immediately, with the same authority as the
+//     accept-time skip;
+//   - commits keep failing while membership still says the owner is
+//     alive: for produceDispatchRerouteGrace the destination's records
+//     retry on their own partition (one probe record, once per
+//     failureBackoff), and after that its records are rerouted, while
+//     a probe still goes to the destination once per failureBackoff so
+//     it gets its records back the moment it recovers.
+//
+// Only when NO live-owner partition of the topic exists does a record
+// stay stuck and pin the checkpoint; records up to the lookahead
+// horizon keep committing past it.
+//
+// Records of a destination whose commit is still in flight are never
+// re-sent or rerouted: they are held by that commit until it finishes.
+// In steady state each record is therefore delivered exactly once;
+// delivery degrades to at-least-once on two paths:
+//
+//   - crash replay: which records above the checkpoint committed lives
+//     only in memory, and the stored checkpoint may trail the in-memory
+//     one (the store is written every pass but synced lazily), so a
+//     crash re-commits records;
+//   - commit-RPC timeout: remote commits carry no idempotency token on
+//     the wire, so a commit that exceeds its deadline yet succeeds on
+//     the remote is retried (and, past the reroute grace, rerouted),
+//     duplicating the batch. The generous timeout makes this rare, not
+//     impossible; a probe's shorter one risks a single record.
+
+// seqMark is the state of one seq between the checkpoint and the read
+// frontier.
+type seqMark uint8
+
+const (
+	seqSkipped seqMark = iota // in the WAL, to be read again
+	seqHeld                   // queued or in flight
+	seqDone                   // needs no further work
+)
+
+// seqMarks holds a seqMark for every seq in [base, base+len). WAL seqs
+// are dense, so a slice indexed from the checkpoint replaces a per-seq
+// map; the lookahead horizon bounds its length.
+type seqMarks struct {
+	base  uint64
+	marks []seqMark
+	head  int
 }
 
-// seqCursors maps scanned seqs to their resume cursors. WAL seqs are
-// dense and the scan visits them in order, so a slice indexed from the
-// first scanned seq replaces a map with one entry per scanned seq (up to
-// the whole lookahead horizon per pass).
-type seqCursors struct {
-	base    uint64
-	cursors []wal.Cursor
-	present []bool
+func (m *seqMarks) end() uint64 { return m.base + uint64(len(m.marks)-m.head) }
+
+func (m *seqMarks) get(seq uint64) seqMark {
+	return m.marks[m.head+int(seq-m.base)]
 }
 
-func (c *seqCursors) set(seq uint64, cursor wal.Cursor) {
-	if c.cursors == nil {
-		c.base = seq
-	}
-	if seq < c.base {
-		return // never happens: the scan is monotonic
-	}
-	idx := int(seq - c.base)
-	for len(c.cursors) <= idx {
-		c.cursors = append(c.cursors, wal.Cursor{})
-		c.present = append(c.present, false)
-	}
-	c.cursors[idx] = cursor
-	c.present[idx] = true
+func (m *seqMarks) set(seq uint64, mark seqMark) {
+	m.marks[m.head+int(seq-m.base)] = mark
 }
 
-func (c *seqCursors) get(seq uint64) (wal.Cursor, bool) {
-	if c.cursors == nil || seq < c.base {
-		return wal.Cursor{}, false
+// extendTo appends seq and marks the seqs between the old end and it
+// done: a gap in the WAL's seq space is records the WAL no longer
+// holds (a lying disk's lost tail), and waiting for them would pin the
+// checkpoint forever.
+func (m *seqMarks) extendTo(seq uint64) {
+	for m.end() < seq {
+		m.marks = append(m.marks, seqDone)
 	}
-	idx := int(seq - c.base)
-	if idx >= len(c.cursors) || !c.present[idx] {
-		return wal.Cursor{}, false
-	}
-	return c.cursors[idx], true
+	m.marks = append(m.marks, seqSkipped)
 }
 
-// dispatch drains up to the adaptive window (state.windowLimit) of
-// not-yet-committed records from the ingress WAL, groups them by destination
-// (topic,partition,owner), commits the groups as large per-partition batches
-// concurrently, then advances the checkpoint to the lowest WAL seq not
-// yet durably committed and compacts up to it.
-//
-// Grouping is the throughput lever: the WAL interleaves every partition, so
-// flushing on each target change produced ~1-record batches (one fsync
-// each). Bucketing a whole window by partition turns N interleaved records
-// into a handful of large batches — one fsync per batch — committed in
-// parallel across partitions and owners. The window grows with the observed
-// fan-out (see windowLimit) so per-partition batches stay fat even when
-// hundreds of partitions interleave, keeping the fsync count low.
-//
-// Checkpoint = the first scanned seq that did not durably commit (records
-// discarded for a deleted topic count as done). Compaction never deletes WAL
-// records past the checkpoint, so a buffered-but-uncommitted record always
-// survives a crash.
-//
-// A record whose destination cannot take commits must not block delivery:
-// because every destination shares this one WAL, a single dead partition
-// owner would otherwise stop newer records for ALL topics and partitions
-// while producers keep getting 2xx. The dispatcher therefore REROUTES such
-// records to another partition of the same topic whose owner is alive —
-// deliberately sacrificing per-key partition ordering to preserve
-// availability, the exact trade the accept path already makes when it skips
-// dead-owner partitions at partition-selection time
-// (messaging.Engine.pickProducePartition). Two tiers trigger a reroute:
-//
-//   - target resolution fails for a live topic (owner dead or missing per
-//     membership): membership death is authoritative, so the record is
-//     rerouted immediately, with the same authority as the accept-time skip;
-//   - the commit RPC itself keeps failing while membership still says the
-//     owner is alive: a single failed pass is a transient blip and retries
-//     on the original partition, but after a destination has stayed stuck
-//     for produceDispatchRerouteAfterPasses consecutive passes it is treated
-//     as dead and its records are rerouted too. The commit attempt that
-//     keeps failing doubles as the recovery probe, so rerouting is per-pass,
-//     never sticky: one successful commit sends new records back to their
-//     original partition.
-//
-// A successfully rerouted record counts as done — the checkpoint advances
-// past it exactly as if it had committed to its original partition.
-//
-// Only when NO live-owner partition of the topic exists does a record stay
-// stuck and pin the checkpoint, and only then does the bounded skip-ahead
-// matter: the window admits up to windowLimit records that still need
-// committing, scanning at most windowLimit*produceDispatchLookaheadWindows
-// seqs above the checkpoint (the lookahead horizon). Within the horizon:
-//
-//   - seqs already committed on an earlier pass (state.committedAhead) are
-//     counted done and skipped without consuming window budget, so they are
-//     never re-committed and never crowd out fresh records;
-//   - destinations that failed on the previous pass (state.stuck) and have
-//     nowhere to reroute contribute only their first record as a recovery
-//     probe, so a dead owner's growing backlog cannot re-fill the window
-//     either.
-//
-// Records beyond the horizon stay frozen until the stuck record clears —
-// the deliberate memory/scan bound: committedAhead and per-pass scan work
-// never exceed the horizon. In steady state each record is delivered exactly
-// once; delivery degrades to at-least-once on two paths:
-//
-//   - crash replay: the committedAhead set is in-memory only, so a process
-//     crash replays committed-ahead records;
-//   - commit-RPC timeout: remote commits carry no idempotency token on the
-//     wire, so a commit that exceeds produceCommitRPCTimeout yet succeeds
-//     on the remote is retried (and, once the destination has been stuck
-//     for produceDispatchRerouteAfterPasses, rerouted) — duplicating the
-//     batch. The generous timeout makes this rare, not impossible.
-func (d *ProduceDispatcher) dispatch(ctx context.Context, state *produceDispatchState) (int, error) {
-	limit := state.windowLimit
-	if limit <= 0 {
-		limit = d.clampWindow(produceDispatchBaseWindow)
-		state.windowLimit = limit
+// popDone drops the leading done seqs and returns how many it dropped.
+func (m *seqMarks) popDone() uint64 {
+	n := 0
+	for m.head+n < len(m.marks) && m.marks[m.head+n] == seqDone {
+		n++
 	}
-	durableNext := d.ingress.DurableProduceNext()
-	if state.nextSeq >= durableNext {
-		return 0, nil
+	m.head += n
+	m.base += uint64(n)
+	if m.head == len(m.marks) {
+		m.marks, m.head = m.marks[:0], 0
+	} else if m.head >= 4096 && m.head*2 >= len(m.marks) {
+		m.marks = append(m.marks[:0], m.marks[m.head:]...)
+		m.head = 0
 	}
-
-	win, err := d.scanWindow(ctx, state, limit, durableNext)
-	if err != nil {
-		return 0, err
-	}
-	if !win.scanned {
-		return 0, nil
-	}
-
-	buckets, nextStuck, firstErr := d.bucketByTarget(ctx, &win, state)
-
-	// Size the next window to this pass's fan-out: aim for ~target records per
-	// distinct partition so per-partition commit batches (one fsync each) stay
-	// fat no matter how many partitions the WAL interleaves. Converges in one
-	// pass — the base window already samples enough records to see the spread.
-	if n := len(buckets); n > 0 {
-		state.windowLimit = d.clampWindow(produceDispatchTargetPerPartition * n)
-	}
-
-	// Commit the buckets concurrently. Different partitions use different
-	// logs/locks (safe to parallelise); each bucket keeps WAL-seq order so
-	// per-partition offsets stay monotonic. Destinations whose bucket fails
-	// are marked stuck for the next pass; a destination that has stayed stuck
-	// for produceDispatchRerouteAfterPasses consecutive passes has its failed
-	// records rerouted to a live-owner partition instead of pinning the
-	// checkpoint.
-	failed, commitErr := d.commitBuckets(ctx, buckets, win.done)
-	if commitErr != nil && firstErr == nil {
-		firstErr = commitErr
-	}
-	d.rerouteFailedBuckets(ctx, failed, state.stuck, nextStuck, win.done)
-	state.stuck = nextStuck
-
-	return d.advanceCheckpoint(state, win, firstErr)
+	return uint64(n)
 }
 
-// scanWindow drains up to limit records that still need committing (no
-// commits yet), recording the resume cursor that sits just after each scanned
-// record. Already-committed seqs are marked done without consuming the window
-// budget; records of known-stuck destinations beyond their probe are skipped
-// entirely. The scan never looks past the lookahead horizon, bounding both
-// the work per pass and the skip-set size.
-func (d *ProduceDispatcher) scanWindow(ctx context.Context, state *produceDispatchState, limit int, durableNext uint64) (dispatchWindow, error) {
-	scanHorizon := state.nextSeq + uint64(limit)*produceDispatchLookaheadWindows
-	win := dispatchWindow{
-		done: make(map[uint64]bool),
-	}
-	probed := make(map[produceDispatchStuckKey]bool, len(state.stuck))
-	rerouteReady := make(map[produceDispatchStuckKey]bool, len(state.stuck))
-	err := d.ingress.ReplayProduceFromCursor(state.cursor, func(record ingress.ProduceRecord, cursor wal.Cursor) error {
-		if cerr := ctx.Err(); cerr != nil {
-			return cerr
-		}
-		seq := record.WAL.Seq
-		if seq < state.nextSeq {
-			return nil
-		}
-		if seq >= durableNext || seq >= scanHorizon || len(win.records) >= limit {
-			return errProduceReplayBoundary
-		}
-		if !win.scanned {
-			win.scanStart = seq
-			win.scanned = true
-		}
-		win.scanEnd = seq + 1
-		win.cursorAfterSeq.set(seq, cursor)
-		// Already committed on an earlier pass but held above the
-		// checkpoint by a lower stuck seq: count it done, never re-commit,
-		// and keep looking for fresh records.
-		if state.committedAhead[seq] {
-			win.done[seq] = true
-			return nil
-		}
-		if len(state.stuck) > 0 {
-			key := produceDispatchStuckKey{topic: record.Topic, partition: record.TargetPartition}
-			if passes := state.stuck[key]; passes > 0 {
-				// A destination stuck long enough to reroute flows freely
-				// only when a live-owner sibling partition actually exists;
-				// otherwise probe-only admission keeps its backlog from
-				// re-filling the window.
-				canFlow := false
-				if passes >= produceDispatchRerouteAfterPasses {
-					ready, checked := rerouteReady[key]
-					if !checked {
-						_, ready = d.rerouteTarget(key.topic, key.partition, state.stuck, nil)
-						rerouteReady[key] = ready
-					}
-					canFlow = ready
-				}
-				if !canFlow {
-					if probed[key] {
-						// Beyond the destination's recovery probe: leave it
-						// for a later pass without spending window budget.
-						return nil
-					}
-					probed[key] = true
-				}
-			}
-		}
-		win.records = append(win.records, record)
-		return nil
-	})
-	if errors.Is(err, errProduceReplayBoundary) {
-		err = nil
-	}
-	if err != nil {
-		return dispatchWindow{}, err
-	}
-	return win, nil
+// produceDispatchState is the dispatcher's state. Only the loop
+// goroutine (Run's, or DispatchAvailable's caller) touches it; commit
+// goroutines hand their outcome back through ProduceDispatcher.results.
+type produceDispatchState struct {
+	// nextSeq is the checkpoint: every seq below it is done.
+	nextSeq uint64
+	// storedSeq is the last checkpoint written to disk; compaction never
+	// goes past it.
+	storedSeq uint64
+	// readSeq is the first seq the reader has not seen, and readCursor
+	// the WAL position to resume reading from.
+	readSeq    uint64
+	readCursor wal.Cursor
+	// marks covers [nextSeq, readSeq).
+	marks seqMarks
+
+	// windowLimit is the adaptive window: the most records held in
+	// memory at once and, times produceDispatchLookaheadWindows, the
+	// horizon past the checkpoint. It grows toward
+	// produceDispatchTargetPerPartition * (distinct destinations) as
+	// soon as that fan-out is seen and shrinks back only after a whole
+	// window of records has shown less, clamped to [base, BatchSize].
+	windowLimit  int
+	epochDests   map[produceDispatchStuckKey]struct{}
+	epochRecords int
+
+	dests map[produceDispatchStuckKey]*dispatchDest
+	// ready lists, in order, the destinations with queued records and
+	// no commit in flight; waiting holds the failing or unresolved ones
+	// until their retry is due.
+	ready   []*dispatchDest
+	waiting map[*dispatchDest]struct{}
+	// held counts records queued or in flight, and slowHeld the part of
+	// them in slow commits, which the window does not count: a hung
+	// owner's batches stay in memory until their RPCs give up, but must
+	// not stop everyone else's records from being read.
+	held     int
+	slowHeld int
+	// jobs are the commits in flight; active counts those still charged
+	// to the fan-out, outstanding all of them.
+	jobs        map[*dispatchJob]struct{}
+	active      int
+	outstanding int
+
+	// skipped counts skipped records. A rescan reads them again from
+	// rescanFrom (when rescanDue) or, on the backstop, from the lowest
+	// firstSkipped of any destination.
+	skipped    int
+	rescanDue  bool
+	rescanFrom wal.Cursor
+	rescanSet  bool
+	lastRescan time.Time
+	// lastSweep is when sweepIdle last ran.
+	lastSweep time.Time
+
+	// pass numbers the loop's rounds (each DispatchAvailable call is one
+	// pass); readEpoch numbers the reader's calls. Memos key off them.
+	pass      uint64
+	readEpoch uint64
+	manual    bool
+	// err is the first error of the pass that left records uncommitted.
+	err error
+	// stalled is set by a round that could not read the WAL or store
+	// the checkpoint; Run then waits out failureBackoff (see nextWake).
+	stalled bool
+
+	// Per-read memos and caches for the incarnation and delete checks
+	// (see produce_commit.go).
+	goneIDs      map[string]struct{}
+	unsure       map[string]time.Time
+	deleted      map[string]bool
+	deletedEpoch uint64
+	topics       map[string]cachedDispatchTopic
+	// rerouteMemo is rerouteFor's answer per destination for the read
+	// numbered rerouteEpoch (-1: nowhere to reroute).
+	rerouteMemo  map[produceDispatchStuckKey]int
+	rerouteEpoch uint64
+	// rerouted counts, per original destination, the records rerouted
+	// in the current read, for one log line each.
+	rerouted map[produceDispatchStuckKey]rerouteNote
 }
 
-// bucketByTarget resolves each window record's target and buckets it by
-// destination. A record whose topic is gone from the local replica is
-// discarded (done). A target that cannot be resolved for a still-live topic
-// (its owner is dead or missing per membership) is rerouted to a live-owner
-// partition of the same topic; only when no such partition exists is it left
-// uncommitted, bounding the checkpoint and marking its destination stuck for
-// the next pass. Returns the buckets, the next pass's stuck set (so far), and
-// the first resolution error.
-func (d *ProduceDispatcher) bucketByTarget(ctx context.Context, win *dispatchWindow, state *produceDispatchState) (map[produceDispatchTarget][]ingress.ProduceRecord, map[produceDispatchStuckKey]int, error) {
-	buckets := make(map[produceDispatchTarget][]ingress.ProduceRecord)
-	nextStuck := make(map[produceDispatchStuckKey]int)
-	rerouted := make(map[produceDispatchStuckKey]int)
-	reroutedTo := make(map[produceDispatchStuckKey]int)
-
-	// Memoize rerouteTarget per destination for this pass (the scan phase's
-	// rerouteReady memo is the same pattern): every rerouteTarget call is an
-	// uncached store.GetTopic (bbolt tx + JSON unmarshal), and the first
-	// pass after an owner dies can admit the full window of one partition's
-	// records — thousands of redundant lookups without the memo. Caveat: a
-	// fresh call filters candidates against nextStuck, which grows as this
-	// loop marks other destinations stuck, so a memoized answer can point at
-	// a partition that became stuck later in the SAME pass. That is
-	// acceptable — all records of one destination get the same answer within
-	// a pass anyway, and a commit to a bad alternative just fails and marks
-	// it stuck for the next pass.
-	type rerouteResult struct {
-		target produceDispatchTarget
-		ok     bool
+func (st *produceDispatchState) noteErr(err error) {
+	if st.err == nil && err != nil {
+		st.err = err
 	}
-	rerouteMemo := make(map[produceDispatchStuckKey]rerouteResult)
-	rerouteTargetFor := func(key produceDispatchStuckKey) (produceDispatchTarget, bool) {
-		if res, cached := rerouteMemo[key]; cached {
-			return res.target, res.ok
-		}
-		target, ok := d.rerouteTarget(key.topic, key.partition, state.stuck, nextStuck)
-		rerouteMemo[key] = rerouteResult{target: target, ok: ok}
-		return target, ok
-	}
+}
 
-	var firstErr error
-	for _, rec := range win.records {
-		target, err := d.dispatchTarget(rec)
-		if err == nil {
-			buckets[target] = append(buckets[target], rec)
+// dispatchDest is one destination partition: where its records queue
+// for commit, and, as the partition records were accepted for, how many
+// of them sit skipped in the WAL.
+type dispatchDest struct {
+	key produceDispatchStuckKey
+	// queue holds this destination's records waiting for the next
+	// commit, in WAL-seq order, and origs the partition each was
+	// accepted for (it differs for a rerouted record).
+	queue []ingress.ProduceRecord
+	origs []int
+	// inflight is set while a commit to this destination runs, and slow
+	// once that commit has run for produceDispatchSlowAfter; inReady
+	// while the destination is on state.ready.
+	inflight bool
+	slow     bool
+	inReady  bool
+	// held counts this destination's records queued or in flight.
+	held int
+
+	// skipped counts records accepted for this partition that sit
+	// skipped in the WAL, and firstSkipped is a cursor at or below the
+	// lowest of them. blockedRead is the read (state.readEpoch) in which
+	// a rescan skipped one of them again, so later ones in that rescan
+	// follow suit.
+	skipped      int
+	firstSkipped wal.Cursor
+	blockedRead  uint64
+
+	// failingSince is the start of the first commit attempt in the
+	// current run of failures, zero while commits succeed; retryAt is
+	// when the next attempt may go. probedPass is the pass whose retry
+	// already went out, for DispatchAvailable, which retries once per
+	// pass rather than by the clock.
+	failingSince time.Time
+	retryAt      time.Time
+	probedPass   uint64
+	// unresolved is set while the destination's owner cannot be
+	// resolved and no other partition could take its records.
+	unresolved bool
+}
+
+func (dest *dispatchDest) failing() bool { return !dest.failingSince.IsZero() }
+
+type rerouteNote struct {
+	to      int
+	records int
+}
+
+// dest returns the destination for key, creating it on first use.
+func (st *produceDispatchState) dest(key produceDispatchStuckKey) *dispatchDest {
+	dest, ok := st.dests[key]
+	if !ok {
+		dest = &dispatchDest{key: key}
+		st.dests[key] = dest
+	}
+	return dest
+}
+
+// forget drops a destination that holds nothing, skips nothing and is
+// healthy, so the map tracks active partitions rather than every one
+// ever seen.
+func (st *produceDispatchState) forget(dest *dispatchDest) {
+	if dest.held == 0 && dest.skipped == 0 && !dest.failing() && !dest.unresolved && !dest.inReady {
+		delete(st.dests, dest.key)
+		delete(st.waiting, dest)
+	}
+}
+
+// sweepIdle drops destinations that hold and skip nothing but still
+// carry a failure, once their topic is gone from the local replica, so
+// deleting topics whose owners were failing cannot grow the map. A live
+// topic's destination keeps its failure: that is what makes its next
+// record a probe rather than a full batch.
+func (d *ProduceDispatcher) sweepIdle(st *produceDispatchState) {
+	if d.store == nil {
+		return
+	}
+	for key, dest := range st.dests {
+		if dest.held > 0 || dest.skipped > 0 || dest.inReady || dest.inflight {
 			continue
 		}
-		if d.topicConfirmedDeleted(ctx, rec.Topic) {
+		if d.topicInfo(st, key.topic).exists {
+			continue
+		}
+		delete(st.dests, key)
+		delete(st.waiting, dest)
+	}
+}
+
+// perDestCap is the most records one destination may hold queued: a
+// share of the window, so one hot or slow partition cannot take all of
+// it and stall the others.
+func (st *produceDispatchState) perDestCap() int {
+	return max(st.windowLimit/4, 1)
+}
+
+// read reads newly durable records, or, when a rescan is due, the
+// skipped ones first, and places each. It stops at the durable frontier,
+// the lookahead horizon, or once the window's worth of records is held.
+func (d *ProduceDispatcher) read(ctx context.Context, st *produceDispatchState) {
+	now := d.now()
+	durableNext := d.ingress.DurableProduceNext()
+	limit := st.windowLimit
+	horizon := st.nextSeq + uint64(limit)*produceDispatchLookaheadWindows
+
+	start := st.readCursor
+	rescan := false
+	if st.skipped > 0 && (st.rescanDue || now.Sub(st.lastRescan) >= produceDispatchRescanInterval) {
+		start, rescan = d.rescanStart(st)
+	}
+	st.rescanDue, st.rescanSet = false, false
+	if !rescan && (st.readSeq >= durableNext || st.readSeq >= horizon || st.held-st.slowHeld >= limit) {
+		return
+	}
+	if rescan {
+		st.lastRescan = now
+	}
+	st.readEpoch++
+	rescanFrom := start.Seq
+	oldReadSeq := st.readSeq
+	complete := true
+	var stopped wal.Cursor
+
+	peek := func(id wal.RecordID, _ wal.Cursor) (bool, error) {
+		seq := id.Seq
+		if seq < st.nextSeq {
+			return true, nil
+		}
+		if seq >= durableNext || seq >= horizon || st.held-st.slowHeld >= limit {
+			if seq < oldReadSeq {
+				complete = false
+				stopped = wal.Cursor{SegmentBase: id.SegmentBase, Offset: id.Offset, Seq: seq}
+			}
+			return false, errProduceReplayBoundary
+		}
+		if seq < st.readSeq {
+			// Already read: only skipped records are read again.
+			return st.marks.get(seq) != seqSkipped, nil
+		}
+		return false, nil
+	}
+	fn := func(rec ingress.ProduceRecord, next wal.Cursor) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		seq := rec.WAL.Seq
+		orig := st.dest(produceDispatchStuckKey{topic: rec.Topic, partition: rec.TargetPartition})
+		if seq >= st.readSeq {
+			st.marks.extendTo(seq)
+			st.readSeq = seq + 1
+			st.readCursor = next
+			st.epochRecords++
+			d.place(ctx, st, rec, orig, orig.skipped > 0, false, rescanFrom, now)
+			st.forget(orig)
+			return nil
+		}
+		// A skipped record read again. It stays behind an earlier
+		// skipped record of its partition that this rescan re-skipped
+		// or does not reach (below its start).
+		orig.skipped--
+		st.skipped--
+		blocked := orig.blockedRead == st.readEpoch || (orig.skipped > 0 && orig.firstSkipped.Seq < rescanFrom)
+		d.place(ctx, st, rec, orig, blocked, true, rescanFrom, now)
+		st.forget(orig)
+		return nil
+	}
+	err := d.ingress.ReplayProduceFromCursorPeek(start, peek, fn)
+	if err != nil && !errors.Is(err, errProduceReplayBoundary) {
+		st.noteErr(err)
+		st.stalled = ctx.Err() == nil
+		complete = false
+	}
+	if rescan && !complete && stopped.Seq > 0 {
+		// Destinations the rescan did not finish with keep their
+		// remaining skipped records past where it stopped.
+		for _, dest := range st.dests {
+			if dest.skipped > 0 && dest.blockedRead != st.readEpoch &&
+				dest.firstSkipped.Seq >= rescanFrom && dest.firstSkipped.Seq < stopped.Seq {
+				dest.firstSkipped = stopped
+			}
+		}
+	}
+	d.resizeWindow(st)
+	d.logReroutes(st)
+}
+
+// rescanStart picks where a rescan starts: the lowest firstSkipped of
+// the destinations that asked for one, or, on the backstop and in
+// DispatchAvailable, of all of them.
+func (d *ProduceDispatcher) rescanStart(st *produceDispatchState) (wal.Cursor, bool) {
+	if st.rescanDue && st.rescanSet && !st.manual {
+		return st.rescanFrom, true
+	}
+	found := false
+	var low wal.Cursor
+	for _, dest := range st.dests {
+		if dest.skipped > 0 && (!found || dest.firstSkipped.Seq < low.Seq) {
+			low, found = dest.firstSkipped, true
+		}
+	}
+	return low, found
+}
+
+// requestRescan asks the next read to rescan from dest's first skipped
+// record.
+func (st *produceDispatchState) requestRescan(dest *dispatchDest) {
+	if dest.skipped == 0 {
+		return
+	}
+	if !st.rescanSet || dest.firstSkipped.Seq < st.rescanFrom.Seq {
+		st.rescanFrom = dest.firstSkipped
+		st.rescanSet = true
+	}
+	st.rescanDue = true
+}
+
+// place decides what happens to one record just read: done, held on a
+// destination's queue, or skipped. blocked says an earlier record of
+// the same partition is still skipped, which keeps this one behind it;
+// reseen that a rescan is reading it again.
+func (d *ProduceDispatcher) place(ctx context.Context, st *produceDispatchState, rec ingress.ProduceRecord, orig *dispatchDest, blocked, reseen bool, rescanFrom uint64, now time.Time) {
+	skip := func() { d.skip(st, rec, orig, reseen, rescanFrom) }
+	if blocked {
+		skip()
+		return
+	}
+	switch d.incarnationState(ctx, st, rec) {
+	case incarnationGone:
+		d.logger.Warn("discarding undispatched record of a deleted topic incarnation",
+			"topic", rec.Topic, "topic_id", rec.TopicID, "partition", rec.TargetPartition, "seq", rec.WAL.Seq)
+		st.marks.set(rec.WAL.Seq, seqDone)
+		return
+	case incarnationUnconfirmed:
+		skip()
+		return
+	}
+
+	if _, err := d.dispatchTarget(rec); err != nil {
+		if d.topicDeleted(ctx, st, rec.Topic) {
 			d.logger.Warn("discarding undispatched record for deleted topic",
 				"topic", rec.Topic, "partition", rec.TargetPartition,
 				"seq", rec.WAL.Seq, "err", err)
-			win.done[rec.WAL.Seq] = true
-			continue
+			st.marks.set(rec.WAL.Seq, seqDone)
+			return
 		}
-		key := produceDispatchStuckKey{topic: rec.Topic, partition: rec.TargetPartition}
-		if alt, ok := rerouteTargetFor(key); ok {
-			rec.TargetPartition = alt.partition
-			buckets[alt] = append(buckets[alt], rec)
-			rerouted[key]++
-			reroutedTo[key] = alt.partition
-			continue
+		if alt, ok := d.rerouteFor(st, orig.key); ok {
+			d.reroute(st, rec, orig, alt)
+			return
 		}
-		nextStuck[key] = state.stuck[key] + 1
-		if firstErr == nil {
-			firstErr = err
+		orig.unresolved = true
+		st.noteErr(err)
+		if orig.held > 0 {
+			skip()
+			return
 		}
+		d.hold(st, orig, rec, orig.key.partition)
+		return
 	}
-	for key, count := range rerouted {
-		d.logger.Warn("rerouting produce records for dead partition owner",
-			"topic", key.topic, "from_partition", key.partition,
-			"to_partition", reroutedTo[key], "records", count)
+	orig.unresolved = false
+
+	if orig.failing() {
+		// Commits to this destination keep failing. Past the grace,
+		// its records go to a sibling while a probe still tries it
+		// once per backoff. Within the grace, or with no sibling, it
+		// holds a single probe and leaves the rest in the WAL.
+		if now.Sub(orig.failingSince) >= produceDispatchRerouteGrace && (orig.inflight || !d.retryDue(st, orig, now)) {
+			if alt, ok := d.rerouteFor(st, orig.key); ok {
+				d.reroute(st, rec, orig, alt)
+				return
+			}
+		}
+		if orig.held > 0 {
+			skip()
+			return
+		}
+		d.hold(st, orig, rec, orig.key.partition)
+		return
 	}
-	return buckets, nextStuck, firstErr
+	if orig.slow || len(orig.queue) >= st.perDestCap() {
+		// Nothing queues behind a commit that has stopped answering:
+		// the window stays free for everyone else until it lands.
+		skip()
+		return
+	}
+	d.hold(st, orig, rec, orig.key.partition)
 }
 
-// advanceCheckpoint moves the checkpoint to the first scanned seq that is not
-// done, persists it, prunes the skip-set, and compacts the WAL behind it.
-// firstErr is threaded through so a partially failed pass still reports its
-// original cause alongside any checkpoint/compaction failure.
-func (d *ProduceDispatcher) advanceCheckpoint(state *produceDispatchState, win dispatchWindow, firstErr error) (int, error) {
-	checkpointSeq := win.scanEnd
-	for s := win.scanStart; s < win.scanEnd; s++ {
-		if !win.done[s] {
-			checkpointSeq = s
-			break
+// hold queues rec on dest; origPartition is the partition it was
+// accepted for.
+func (d *ProduceDispatcher) hold(st *produceDispatchState, dest *dispatchDest, rec ingress.ProduceRecord, origPartition int) {
+	st.marks.set(rec.WAL.Seq, seqHeld)
+	dest.queue = append(dest.queue, rec)
+	dest.origs = append(dest.origs, origPartition)
+	dest.held++
+	st.held++
+	st.epochDests[dest.key] = struct{}{}
+	st.enqueue(dest)
+}
+
+// reroute holds rec on the sibling partition alt instead of orig.
+func (d *ProduceDispatcher) reroute(st *produceDispatchState, rec ingress.ProduceRecord, orig, alt *dispatchDest) {
+	rec.TargetPartition = alt.key.partition
+	d.hold(st, alt, rec, orig.key.partition)
+	if st.rerouted == nil {
+		st.rerouted = map[produceDispatchStuckKey]rerouteNote{}
+	}
+	note := st.rerouted[orig.key]
+	note.to = alt.key.partition
+	note.records++
+	st.rerouted[orig.key] = note
+}
+
+// skip leaves a record just read in the WAL, accounted to orig, the
+// partition it was accepted for.
+func (d *ProduceDispatcher) skip(st *produceDispatchState, rec ingress.ProduceRecord, orig *dispatchDest, reseen bool, rescanFrom uint64) {
+	at := walCursorAt(rec.WAL)
+	st.marks.set(at.Seq, seqSkipped)
+	switch {
+	case orig.skipped == 0:
+		orig.firstSkipped = at
+	case reseen && orig.blockedRead != st.readEpoch && orig.firstSkipped.Seq >= rescanFrom:
+		// The first record of orig this rescan skips again, with all
+		// of orig's skipped records in its range: the rescan reads in
+		// order, so it is the lowest one left.
+		orig.firstSkipped = at
+	case at.Seq < orig.firstSkipped.Seq:
+		orig.firstSkipped = at
+	}
+	orig.skipped++
+	st.skipped++
+	if reseen {
+		orig.blockedRead = st.readEpoch
+	}
+}
+
+// release returns a held record to the WAL: it is marked skipped,
+// accounted to orig, and read again by a later rescan.
+func (st *produceDispatchState) release(rec ingress.ProduceRecord, orig *dispatchDest) {
+	at := walCursorAt(rec.WAL)
+	st.marks.set(at.Seq, seqSkipped)
+	if orig.skipped == 0 || at.Seq < orig.firstSkipped.Seq {
+		orig.firstSkipped = at
+	}
+	orig.skipped++
+	st.skipped++
+}
+
+// walCursorAt is the cursor a replay starts from to read the record id
+// itself.
+func walCursorAt(id wal.RecordID) wal.Cursor {
+	return wal.Cursor{SegmentBase: id.SegmentBase, Offset: id.Offset, Seq: id.Seq}
+}
+
+// enqueue puts dest on the ready list if it has queued records and
+// nothing in flight.
+func (st *produceDispatchState) enqueue(dest *dispatchDest) {
+	if dest.inReady || dest.inflight || len(dest.queue) == 0 {
+		return
+	}
+	if _, waiting := st.waiting[dest]; waiting {
+		return
+	}
+	dest.inReady = true
+	st.ready = append(st.ready, dest)
+}
+
+// resizeWindow adapts the window to the fan-out seen: it grows as soon
+// as more destinations show up than it has room for, and is re-sized
+// (possibly smaller) once a whole window of records has been read.
+func (d *ProduceDispatcher) resizeWindow(st *produceDispatchState) {
+	target := d.clampWindow(produceDispatchTargetPerPartition * len(st.epochDests))
+	if target > st.windowLimit {
+		st.windowLimit = target
+	}
+	if st.epochRecords >= st.windowLimit {
+		if len(st.epochDests) > 0 {
+			st.windowLimit = target
 		}
+		clear(st.epochDests)
+		st.epochRecords = 0
 	}
+}
 
-	// Merge this pass's committed seqs into the carried-forward skip set,
-	// in place (rebuilding the map every pass copied the whole horizon).
-	// Seqs below the checkpoint are pruned only AFTER the checkpoint is
-	// durably stored: if the store fails, the next pass replays from the
-	// old checkpoint and must still skip everything that already committed,
-	// or the whole window would be re-committed as duplicates.
-	if state.committedAhead == nil {
-		state.committedAhead = make(map[uint64]bool, len(win.done))
+// logReroutes logs the reroutes of the last read, one line per partition.
+func (d *ProduceDispatcher) logReroutes(st *produceDispatchState) {
+	for key, note := range st.rerouted {
+		d.logger.Warn("rerouting produce records for unavailable partition owner",
+			"topic", key.topic, "from_partition", key.partition,
+			"to_partition", note.to, "records", note.records)
 	}
-	ahead := state.committedAhead
-	for s := range win.done {
-		ahead[s] = true
-	}
+	clear(st.rerouted)
+}
 
-	processed := int(checkpointSeq - win.scanStart)
-	if processed <= 0 {
-		return 0, firstErr
+// advanceCheckpoint moves the checkpoint over the done seqs at its
+// front, stores it, and compacts the WAL behind the stored value. A
+// failed store is retried by the next call; the in-memory checkpoint
+// does not wait for it (nothing is read below it again) and compaction
+// stays behind the last value that was written.
+func (d *ProduceDispatcher) advanceCheckpoint(st *produceDispatchState) error {
+	st.nextSeq += st.marks.popDone()
+	if st.nextSeq == st.storedSeq {
+		return nil
 	}
-
-	nextCursor := state.cursor
-	if c, ok := win.cursorAfterSeq.get(checkpointSeq - 1); ok {
-		nextCursor = c
+	if err := d.ingress.StoreProduceCheckpoint(st.nextSeq); err != nil {
+		return err
 	}
-	if checkpointErr := d.ingress.StoreProduceCheckpoint(checkpointSeq); checkpointErr != nil {
-		return processed, errors.Join(firstErr, checkpointErr)
-	}
-	// The checkpoint is durable: drop skip-set entries it has passed — the
-	// next pass starts at checkpointSeq and never re-reads them.
-	for s := range ahead {
-		if s < checkpointSeq {
-			delete(ahead, s)
-		}
-	}
-	state.nextSeq = checkpointSeq
-	state.cursor = nextCursor
-	if compactErr := d.ingress.CompactProduceBefore(checkpointSeq); compactErr != nil {
-		return processed, errors.Join(firstErr, compactErr)
-	}
-	return processed, firstErr
+	st.storedSeq = st.nextSeq
+	return d.ingress.CompactProduceBefore(st.storedSeq)
 }
