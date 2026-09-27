@@ -58,6 +58,11 @@ type Router struct {
 	// of the topics they wait on. Disabled until SetSelfAddr supplies a
 	// return address for owners to call back on.
 	tokens *tokenRequester
+
+	// acks lets forwarded acks to one owner share an RPC when they
+	// overlap (see ack_coalescer.go), and remembers the owners too old to
+	// take a batch.
+	acks ackCoalescer
 }
 
 // defaultMaxConsumeWait is the ceiling applied to a long-poll consume wait
@@ -416,56 +421,24 @@ const ackForwardTimeout = 2 * time.Second
 // RouteAck forwards an ack request to the owner of the handle partition.
 // Returns true if forwarded.
 func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, handle consumer.Handle) bool {
-	addr, unavailable := rt.ownerRoute(topicName, handle.Partition)
-	if unavailable {
-		writeOwnerDown(w)
-		return true
-	}
-	if addr == "" {
-		return false
-	}
-	res, err := rt.peer.AckWithin(ctx, addr, ackForwardTimeout, nodewire.AckRequest{
-		Topic:     topicName,
-		Partition: handle.Partition,
-		Offset:    handle.Offset,
-		Nonce:     handle.Nonce,
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return true
-	}
-	writePeerResponse(w, res)
-	return true
+	return rt.routeAckShaped(ctx, w, topicName, handle, nodewire.AckModeAck)
 }
 
 // RouteExtendAck forwards a visibility-window extension to the owner of
 // the handle partition. Returns true if forwarded.
 func (rt *Router) RouteExtendAck(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, handle consumer.Handle) bool {
-	addr, unavailable := rt.ownerRoute(topicName, handle.Partition)
-	if unavailable {
-		writeOwnerDown(w)
-		return true
-	}
-	if addr == "" {
-		return false
-	}
-	res, err := rt.peer.ExtendAckWithin(ctx, addr, ackForwardTimeout, nodewire.AckRequest{
-		Topic:     topicName,
-		Partition: handle.Partition,
-		Offset:    handle.Offset,
-		Nonce:     handle.Nonce,
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return true
-	}
-	writePeerResponse(w, res)
-	return true
+	return rt.routeAckShaped(ctx, w, topicName, handle, nodewire.AckModeExtend)
 }
 
 // RouteNack forwards an immediate reservation release to the owner of
 // the handle partition. Returns true if forwarded.
 func (rt *Router) RouteNack(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, handle consumer.Handle) bool {
+	return rt.routeAckShaped(ctx, w, topicName, handle, nodewire.AckModeNack)
+}
+
+// routeAckShaped forwards an ack, extend or nack to the owner of the
+// handle partition, through the owner's ack coalescer (see forwardAck).
+func (rt *Router) routeAckShaped(ctx context.Context, w http.ResponseWriter, topicName string, handle consumer.Handle, mode nodewire.AckMode) bool {
 	addr, unavailable := rt.ownerRoute(topicName, handle.Partition)
 	if unavailable {
 		writeOwnerDown(w)
@@ -474,11 +447,12 @@ func (rt *Router) RouteNack(ctx context.Context, w http.ResponseWriter, _ *http.
 	if addr == "" {
 		return false
 	}
-	res, err := rt.peer.NackWithin(ctx, addr, ackForwardTimeout, nodewire.AckRequest{
+	res, err := rt.forwardAck(ctx, addr, nodewire.AckBatchItem{
 		Topic:     topicName,
 		Partition: handle.Partition,
 		Offset:    handle.Offset,
 		Nonce:     handle.Nonce,
+		Mode:      mode,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)

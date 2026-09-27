@@ -476,6 +476,11 @@ func (s *RPCServer) serve(ctx context.Context, key requestKey, payload []byte) (
 		return s.handleConsume(ctx, key, payload), nil
 	case nodewire.OpAck, nodewire.OpExtendAck, nodewire.OpNack:
 		return s.handleAckFamily(ctx, op, payload), nil
+	case nodewire.OpAckBatch:
+		// Here rather than in serveOther for the same reason as the ack
+		// family: a batch of two is common under load, and serveOther's
+		// frame would cost it a stack growth.
+		return s.handleAckBatch(ctx, payload), nil
 	default:
 		return s.serveOther(ctx, op, payload)
 	}
@@ -592,22 +597,28 @@ func (s *RPCServer) controlHandler(op nodewire.Operation) (handle func([]byte) n
 // with the HTTP layer. Unrecognized errors are logged and reported as opaque
 // 500s so internal details never cross the wire.
 func (s *RPCServer) brokerError(op string, err error) nodewire.Response {
+	return errorResponse(s.brokerErrorStatus(op, err))
+}
+
+// brokerErrorStatus is brokerError's mapping as a status and message, for
+// a reply that carries several outcomes in one body (see handleAckBatch).
+func (s *RPCServer) brokerErrorStatus(op string, err error) (int, string) {
 	switch {
 	case errors.Is(err, errs.ErrTopicNotFound):
-		return errorResponse(http.StatusNotFound, "topic not found")
+		return http.StatusNotFound, "topic not found"
 	case errors.Is(err, errs.ErrTopicAlreadyExists):
-		return errorResponse(http.StatusConflict, "topic already exists")
+		return http.StatusConflict, "topic already exists"
 	case errors.Is(err, errs.ErrHandleMalformed):
-		return errorResponse(http.StatusBadRequest, err.Error())
+		return http.StatusBadRequest, err.Error()
 	case errors.Is(err, errs.ErrHandleStale):
-		return errorResponse(http.StatusGone, err.Error())
+		return http.StatusGone, err.Error()
 	case errors.Is(err, errs.ErrAckedAheadFull):
-		return errorResponse(http.StatusServiceUnavailable, err.Error())
+		return http.StatusServiceUnavailable, err.Error()
 	case errors.Is(err, errs.ErrInvalidArgument),
 		errors.Is(err, errs.ErrPartitionRequired):
-		return errorResponse(http.StatusBadRequest, err.Error())
+		return http.StatusBadRequest, err.Error()
 	case errors.Is(err, errs.ErrNotPartitionOwner):
-		return errorResponse(http.StatusMisdirectedRequest, err.Error())
+		return http.StatusMisdirectedRequest, err.Error()
 	case errors.Is(err, errs.ErrFanoutRoleConflict),
 		errors.Is(err, errs.ErrFanoutChildLimit),
 		errors.Is(err, errs.ErrFanoutSchemaMismatch),
@@ -617,14 +628,14 @@ func (s *RPCServer) brokerError(op string, err error) nodewire.Response {
 		errors.Is(err, errs.ErrSchemaVersionConflict),
 		errors.Is(err, errs.ErrSchemaHistoryFull),
 		errors.Is(err, errs.ErrAlreadyExists):
-		return errorResponse(http.StatusConflict, err.Error())
+		return http.StatusConflict, err.Error()
 	case errors.Is(err, errs.ErrNotFound):
-		return errorResponse(http.StatusNotFound, err.Error())
+		return http.StatusNotFound, err.Error()
 	default:
 		if s.logger != nil {
 			s.logger.Error(op, "err", err)
 		}
-		return errorResponse(http.StatusInternalServerError, op+" failed")
+		return http.StatusInternalServerError, op + " failed"
 	}
 }
 

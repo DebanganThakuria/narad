@@ -32,40 +32,51 @@ func newInFlightLimiter(max int) *inFlightLimiter {
 }
 
 // wrap gates next: a request beyond the identity's cap is answered 429
-// without reaching it.
-func (l *inFlightLimiter) wrap(next http.Handler) http.Handler {
+// without reaching it. weight, when not nil, is how much of the cap a
+// request takes (a batch consume of N records takes N); it is clamped
+// to [1, max], so a request the cap could never hold is still served
+// when it is the identity's only one. nil counts every request as 1.
+func (l *inFlightLimiter) wrap(next http.Handler, weight func(*http.Request) int) http.Handler {
 	if l == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := requestIdentity(r)
-		if !l.acquire(key) {
+		n := 1
+		if weight != nil {
+			n = min(max(weight(r), 1), l.max)
+		}
+		if !l.acquireN(key, n) {
 			writeTooManyInFlight(w, l.max)
 			return
 		}
-		defer l.release(key)
+		defer l.releaseN(key, n)
 		next.ServeHTTP(w, r)
 	})
 }
 
-func (l *inFlightLimiter) acquire(key string) bool {
+func (l *inFlightLimiter) acquire(key string) bool { return l.acquireN(key, 1) }
+
+func (l *inFlightLimiter) release(key string) { l.releaseN(key, 1) }
+
+func (l *inFlightLimiter) acquireN(key string, n int) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.counts[key] >= l.max {
+	if l.counts[key]+n > l.max {
 		return false
 	}
-	l.counts[key]++
+	l.counts[key] += n
 	return true
 }
 
-func (l *inFlightLimiter) release(key string) {
+func (l *inFlightLimiter) releaseN(key string, n int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.counts[key] <= 1 {
+	if l.counts[key] <= n {
 		delete(l.counts, key)
 		return
 	}
-	l.counts[key]--
+	l.counts[key] -= n
 }
 
 // requestIdentity keys the cap: the authenticated user when there is
