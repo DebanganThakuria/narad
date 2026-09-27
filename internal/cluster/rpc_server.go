@@ -64,7 +64,9 @@ type RPCServer struct {
 	// transferSem bounds the partition-transfer ops (segment listing and
 	// chunk reads): each chunk read pins up to storage.MaxSegmentReadBytes,
 	// so an unbounded number of them from one peer is an unbounded amount
-	// of memory and disk reads. controlSem bounds the remaining control
+	// of memory and disk reads. A transfer op keeps its slot until its
+	// reply has been written, since encoding and writing the reply is
+	// where the chunk's memory lives. controlSem bounds the remaining control
 	// ops (topic lookups, stats, membership, moves, users, fan-out
 	// cursors) so a peer cannot run thousands of them at once either. Ops
 	// that call OTHER peers or may park for a long time (delete_topic's
@@ -110,8 +112,9 @@ func NewRPCServer(br broker.Broker, store *metastore.Store, logger *slog.Logger)
 
 // defaultTransferConcurrency is the transfer-op ceiling: at
 // storage.MaxSegmentReadBytes per read that is at most 32 MiB of chunk
-// buffers in flight per node, while the mover (one sequential chunk
-// stream per move) never queues behind it in practice.
+// replies in flight per node (twice that for an instant while a reply
+// is encoded from its read buffer), while the mover (one sequential
+// chunk stream per move) never queues behind it in practice.
 const defaultTransferConcurrency = 8
 
 // defaultControlConcurrency is the control-op ceiling. Control ops are
@@ -201,16 +204,16 @@ func (s *RPCServer) HandleStreamRequest(ctx context.Context, frame clusterwire.S
 		return false
 	}
 	go func() {
-		res := s.dispatch(ctx, requestKey{stream: clusterrpc.StreamIDFromContext(ctx), request: frame.RequestID}, frame.Payload)
-		writeReply(frame.RequestID, res, respond)
+		res, held := s.serve(ctx, requestKey{stream: clusterrpc.StreamIDFromContext(ctx), request: frame.RequestID}, frame.Payload)
+		writeReply(frame.RequestID, res, held, respond)
 	}()
 	return true
 }
 
 // writeReply encodes res into a recycled buffer and hands it to respond.
 // respond writes the reply and keeps no reference to it (see
-// clusterrpc.StreamFrameHandler), so once it returns the buffer is free
-// again.
+// clusterrpc.StreamFrameHandler), so once it returns the buffer, and any
+// slot the reply held, is free again.
 //
 // It is kept out of line so its frame is not part of the request
 // goroutine's while the handler runs: every request starts on a fresh
@@ -218,7 +221,7 @@ func (s *RPCServer) HandleStreamRequest(ctx context.Context, frame clusterwire.S
 // copy per request.
 //
 //go:noinline
-func writeReply(requestID uint64, res nodewire.Response, respond func(clusterwire.StreamFrame)) {
+func writeReply(requestID uint64, res nodewire.Response, held chan struct{}, respond func(clusterwire.StreamFrame)) {
 	buf := replyBuffers.Get().(*[]byte)
 	payload, err := nodewire.AppendResponse((*buf)[:0], res)
 	if err != nil {
@@ -229,6 +232,9 @@ func writeReply(requestID uint64, res nodewire.Response, respond func(clusterwir
 		RequestID: requestID,
 		Payload:   payload,
 	})
+	if held != nil {
+		<-held
+	}
 	if cap(payload) <= maxPooledReplyBytes {
 		*buf = payload[:0]
 		replyBuffers.Put(buf)
@@ -425,30 +431,51 @@ func (s *RPCServer) handleAckFamily(ctx context.Context, op nodewire.Operation, 
 // cancelled (client gone, stream closed) before a slot frees up. A nil
 // sem runs handle directly.
 func (s *RPCServer) withSlot(ctx context.Context, sem chan struct{}, handle func() nodewire.Response) nodewire.Response {
+	res, held := s.withHeldSlot(ctx, sem, handle)
+	if held != nil {
+		<-held
+	}
+	return res
+}
+
+// withHeldSlot is withSlot for a handler whose reply must keep the slot
+// until it has been written: the slot is returned still held, and the
+// caller frees it (a receive from held) once the reply is out. held is
+// nil when no slot was taken.
+func (s *RPCServer) withHeldSlot(ctx context.Context, sem chan struct{}, handle func() nodewire.Response) (res nodewire.Response, held chan struct{}) {
 	if sem == nil {
-		return handle()
+		return handle(), nil
 	}
 	select {
 	case sem <- struct{}{}:
 	case <-ctx.Done():
-		return errorResponse(http.StatusServiceUnavailable, "request cancelled while waiting for a handler slot")
+		return errorResponse(http.StatusServiceUnavailable, "request cancelled while waiting for a handler slot"), nil
 	}
-	defer func() { <-sem }()
-	return handle()
+	return handle(), sem
 }
 
 func (s *RPCServer) dispatch(ctx context.Context, key requestKey, payload []byte) nodewire.Response {
+	res, held := s.serve(ctx, key, payload)
+	if held != nil {
+		<-held
+	}
+	return res
+}
+
+// serve runs one request. held, when not nil, is a semaphore slot the
+// reply still holds; the caller frees it once the reply is written.
+func (s *RPCServer) serve(ctx context.Context, key requestKey, payload []byte) (res nodewire.Response, held chan struct{}) {
 	op, err := nodewire.OperationOf(payload)
 	if err != nil {
-		return errorResponse(http.StatusBadRequest, "invalid rpc request")
+		return errorResponse(http.StatusBadRequest, "invalid rpc request"), nil
 	}
 	switch op {
 	case nodewire.OpConsume:
 		// Gated inside the handler: only non-blocking scans take a slot.
 		reserveConsumeStack()
-		return s.handleConsume(ctx, key, payload)
+		return s.handleConsume(ctx, key, payload), nil
 	case nodewire.OpAck, nodewire.OpExtendAck, nodewire.OpNack:
-		return s.handleAckFamily(ctx, op, payload)
+		return s.handleAckFamily(ctx, op, payload), nil
 	default:
 		return s.serveOther(ctx, op, payload)
 	}
@@ -460,7 +487,7 @@ func (s *RPCServer) dispatch(ctx context.Context, key requestKey, payload []byte
 const consumeStackReserve = 3 << 10
 
 // reserveConsumeStack grows the request goroutine's stack before a
-// consume runs, while the only frames on it are dispatch's and its
+// consume runs, while the only frames on it are serve's and its
 // caller's. Every request runs on a new goroutine with a small stack,
 // and a broker consume outgrows it twice on the way down
 // (Engine.Consume's own frame is nearly 1 KiB). Each growth copies
@@ -481,9 +508,8 @@ func reserveConsumeStack() {
 func touchStack(*[consumeStackReserve]byte) {}
 
 // serveOther runs every op but the per-message consume and ack family,
-// which dispatch keeps to a small frame of their own (see writeReply).
-func (s *RPCServer) serveOther(ctx context.Context, op nodewire.Operation, payload []byte) nodewire.Response {
-	var res nodewire.Response
+// which serve keeps to a small frame of their own (see writeReply).
+func (s *RPCServer) serveOther(ctx context.Context, op nodewire.Operation, payload []byte) (res nodewire.Response, held chan struct{}) {
 	switch op {
 	case nodewire.OpProduce:
 		res = s.handleProduce(ctx, payload)
@@ -492,9 +518,9 @@ func (s *RPCServer) serveOther(ctx context.Context, op nodewire.Operation, paylo
 	case nodewire.OpCommitProduceBatch:
 		res = s.withCommitSlot(func() nodewire.Response { return s.handleCommitProduceBatch(ctx, payload) })
 	case nodewire.OpListPartitionSegments:
-		res = s.withSlot(ctx, s.transferSem, func() nodewire.Response { return s.handleListPartitionSegments(payload) })
+		return s.withHeldSlot(ctx, s.transferSem, func() nodewire.Response { return s.handleListPartitionSegments(payload) })
 	case nodewire.OpFetchSegmentChunk:
-		res = s.withSlot(ctx, s.transferSem, func() nodewire.Response { return s.handleFetchSegmentChunk(payload) })
+		return s.withHeldSlot(ctx, s.transferSem, func() nodewire.Response { return s.handleFetchSegmentChunk(payload) })
 	case nodewire.OpCreateTopic:
 		// Ungated: may park behind the startup create gate for up to the
 		// forwarded-create timeout.
@@ -510,7 +536,7 @@ func (s *RPCServer) serveOther(ctx context.Context, op nodewire.Operation, paylo
 		}
 		res = s.withSlot(ctx, s.controlSem, func() nodewire.Response { return handle(payload) })
 	}
-	return res
+	return res, nil
 }
 
 // controlHandler maps a control op to its handler; ok is false for an

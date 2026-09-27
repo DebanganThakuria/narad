@@ -690,6 +690,50 @@ func TestZZWP9MessagingOpsDoNotWaitBehindCommits(t *testing.T) {
 	}
 }
 
+// zzWP9ChunkBroker counts segment reads.
+type zzWP9ChunkBroker struct {
+	broker.Broker
+	reads atomic.Int32
+}
+
+func (b *zzWP9ChunkBroker) ReadPartitionSegment(context.Context, string, int, int64, int64, int64) ([]byte, error) {
+	b.reads.Add(1)
+	return make([]byte, 1<<10), nil
+}
+
+// A chunk reply keeps its transfer slot until it has been written: the
+// slot is what bounds chunk memory, and the reply's encoding and write
+// are where that memory lives.
+func TestZZWP9TransferSlotHeldUntilTheReplyIsWritten(t *testing.T) {
+	br := &zzWP9ChunkBroker{}
+	s := &RPCServer{broker: br}
+	s.SetTransferConcurrency(1)
+	payload, err := nodewire.EncodeFetchSegmentChunkRequest(nodewire.FetchSegmentChunkRequest{Topic: "orders", Length: 1 << 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writing := make(chan struct{})
+	release := make(chan struct{})
+	s.HandleStreamRequest(context.Background(), clusterwire.StreamFrame{Type: clusterwire.StreamFrameNodeRequest, RequestID: 1, Payload: payload}, func(clusterwire.StreamFrame) {
+		close(writing)
+		<-release // a slow reply write
+	})
+	<-writing
+	done := make(chan struct{})
+	s.HandleStreamRequest(context.Background(), clusterwire.StreamFrame{Type: clusterwire.StreamFrameNodeRequest, RequestID: 2, Payload: payload}, func(clusterwire.StreamFrame) { close(done) })
+	time.Sleep(50 * time.Millisecond)
+	if n := br.reads.Load(); n != 1 {
+		close(release)
+		t.Fatalf("segment reads = %d while the first reply was still being written, want 1", n)
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second chunk never served after the first reply was written")
+	}
+}
+
 // Replies encoded into recycled buffers never leak into one another,
 // however many are in flight.
 func TestZZWP9ConcurrentRepliesStayIntact(t *testing.T) {
@@ -716,5 +760,38 @@ func TestZZWP9ConcurrentRepliesStayIntact(t *testing.T) {
 	wg.Wait()
 	if n := bad.Load(); n != 0 {
 		t.Fatalf("%d replies decoded wrong", n)
+	}
+}
+
+// Partition-transfer RPCs ride a transport of their own, so a
+// multi-megabyte segment chunk never sits on a stream, or a connection,
+// ahead of a commit batch's reply.
+func TestZZWP9BulkTransfersRideTheirOwnTransport(t *testing.T) {
+	ctx := context.Background()
+	main := &laneRecorder{body: []byte("{}")}
+	bulk := &laneRecorder{body: []byte("[]")}
+	client := &PeerClient{frames: main, bulk: bulk}
+	if _, err := client.FetchSegmentChunk(ctx, "peer", "orders", 0, 0, 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	bulk.body = []byte("{}")
+	if _, err := client.PrepareHandoff(ctx, "peer", "orders", 0, time.Second, ""); err != nil {
+		t.Fatal(err)
+	}
+	bulk.body = []byte("[]")
+	if _, err := client.FanoutCursors(ctx, "peer", "orders"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CommitProduceBatch(ctx, "peer", nodewire.CommitProduceBatchRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(bulk.lanes) != 3 || len(main.lanes) != 1 || main.lanes[0] != clusterrpc.LaneProduce {
+		t.Fatalf("bulk transport carried %d requests and the main one %v; want the 3 transfers on bulk and the commit on the main produce lane", len(bulk.lanes), main.lanes)
+	}
+
+	built := NewPeerClient(time.Second, "")
+	defer built.Close()
+	if built.bulk == nil || built.bulk == built.frames {
+		t.Fatal("NewPeerClient did not give transfers a transport of their own")
 	}
 }

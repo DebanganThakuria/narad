@@ -125,7 +125,19 @@ func (m *PrometheusRPCMetrics) ObserveRPC(op, outcome string, elapsed time.Durat
 // PeerClient issues node RPCs to peers over the QUIC frame transport. It is
 // the client side of RPCServer.
 type PeerClient struct {
-	frames  frameTransport
+	frames frameTransport
+	// bulk carries the partition-transfer RPCs (segment chunks of up to
+	// storage.MaxSegmentReadBytes, handoff preparation, fan-out cursors)
+	// on a connection of their own. On the produce lane they shared
+	// streams with commit batches, and a commit reply queued behind a
+	// multi-megabyte chunk on the same stream for as long as the chunk
+	// took to cross (a p99 of 16 ms against 0.4 ms on loopback, the
+	// chunk's transfer time on a real network); on the same connection
+	// they would still share its flow-control window and congestion
+	// state. Its socket and its connection to a peer are made on first
+	// use, so a node that never moves a partition or lists fan-out
+	// cursors never opens either. nil sends them on frames.
+	bulk    frameTransport
 	metrics RPCMetrics
 }
 
@@ -143,19 +155,25 @@ func NewPeerClient(timeout time.Duration, secret string) *PeerClient {
 	if timeout <= 0 {
 		timeout = defaultPeerRPCTimeout
 	}
-	return &PeerClient{frames: clusterrpc.NewQUICFrameClient(timeout, secret)}
+	return &PeerClient{
+		frames: clusterrpc.NewQUICFrameClient(timeout, secret),
+		bulk:   clusterrpc.NewQUICFrameClient(timeout, secret),
+	}
 }
 
-// Close releases the transport's pooled connections and socket. A nil
+// Close releases the transports' pooled connections and sockets. A nil
 // client is a no-op.
 func (c *PeerClient) Close() error {
 	if c == nil {
 		return nil
 	}
-	if closer, ok := c.frames.(io.Closer); ok {
-		return closer.Close()
+	var errs []error
+	for _, frames := range []frameTransport{c.frames, c.bulk} {
+		if closer, ok := frames.(io.Closer); ok {
+			errs = append(errs, closer.Close())
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // Lanes per operation. The transport pools 16 streams per bulk lane and
@@ -168,7 +186,8 @@ func (c *PeerClient) Close() error {
 //   - consume replies carry record payloads: consume lane.
 //   - ack, extend_ack, nack are small but high-rate: ack lane.
 //   - fan-out cursors, segment chunks, and prepare_handoff are bulk
-//     transfers: produce lane (the bulk data lane).
+//     transfers: their own connection (see PeerClient.bulk), on its
+//     produce lane.
 //   - everything else (topic/user/member admin, leader confirmations,
 //     move coordination) is light control traffic: control lane.
 const (
@@ -320,7 +339,7 @@ func (c *PeerClient) DetachChild(ctx context.Context, addr, parent, child string
 // holds for the parent's partitions it owns.
 func (c *PeerClient) FanoutCursors(ctx context.Context, addr, parent string) ([]topic.FanoutCursorStat, error) {
 	payload, err := nodewire.EncodeTopicNameRequest(nodewire.OpFanoutCursors, nodewire.TopicNameRequest{Topic: parent})
-	res, err := c.send(ctx, addr, "fanout_cursors", laneProduce, payload, err)
+	res, err := c.sendBulk(ctx, addr, "fanout_cursors", payload, err)
 	if err != nil {
 		return nil, err
 	}
@@ -446,28 +465,44 @@ func (c *PeerClient) sendWithin(ctx context.Context, addr, operation string, lan
 	return c.request(ctx, addr, operation, lane, timeout, payload)
 }
 
+// sendBulk is send for the partition-transfer RPCs: they ride the bulk
+// transport (see PeerClient.bulk) when the client has one.
+func (c *PeerClient) sendBulk(ctx context.Context, addr, operation string, payload []byte, encodeErr error) (nodewire.Response, error) {
+	if encodeErr != nil {
+		return nodewire.Response{}, encodeErr
+	}
+	if c != nil && c.bulk != nil {
+		return c.requestOn(ctx, c.bulk, addr, operation, laneProduce, 0, payload)
+	}
+	return c.request(ctx, addr, operation, laneProduce, 0, payload)
+}
+
 func (c *PeerClient) request(ctx context.Context, addr, operation string, lane clusterrpc.Lane, timeout time.Duration, payload []byte) (nodewire.Response, error) {
 	if c == nil || c.frames == nil {
 		return nodewire.Response{}, fmt.Errorf("peer rpc client is nil")
 	}
+	return c.requestOn(ctx, c.frames, addr, operation, lane, timeout, payload)
+}
+
+func (c *PeerClient) requestOn(ctx context.Context, frames frameTransport, addr, operation string, lane clusterrpc.Lane, timeout time.Duration, payload []byte) (nodewire.Response, error) {
 	if c.metrics == nil {
-		return c.roundTrip(ctx, addr, lane, timeout, payload)
+		return roundTrip(ctx, frames, addr, lane, timeout, payload)
 	}
 	start := time.Now()
-	res, err := c.roundTrip(ctx, addr, lane, timeout, payload)
+	res, err := roundTrip(ctx, frames, addr, lane, timeout, payload)
 	c.metrics.ObserveRPC(operation, rpcOutcome(res, err), time.Since(start))
 	return res, err
 }
 
-func (c *PeerClient) roundTrip(ctx context.Context, addr string, lane clusterrpc.Lane, timeout time.Duration, payload []byte) (nodewire.Response, error) {
+func roundTrip(ctx context.Context, frames frameTransport, addr string, lane clusterrpc.Lane, timeout time.Duration, payload []byte) (nodewire.Response, error) {
 	var (
 		frame clusterwire.StreamFrame
 		err   error
 	)
 	if timeout > 0 {
-		frame, err = c.frames.RequestOnLaneTimeout(ctx, addr, lane, timeout, clusterwire.StreamFrameNodeRequest, payload)
+		frame, err = frames.RequestOnLaneTimeout(ctx, addr, lane, timeout, clusterwire.StreamFrameNodeRequest, payload)
 	} else {
-		frame, err = c.frames.RequestOnLane(ctx, addr, lane, clusterwire.StreamFrameNodeRequest, payload)
+		frame, err = frames.RequestOnLane(ctx, addr, lane, clusterwire.StreamFrameNodeRequest, payload)
 	}
 	if err != nil {
 		return nodewire.Response{}, err
@@ -568,7 +603,7 @@ func (c *PeerClient) FetchSegmentChunk(ctx context.Context, addr, topicName stri
 	payload, err := nodewire.EncodeFetchSegmentChunkRequest(nodewire.FetchSegmentChunkRequest{
 		Topic: topicName, Partition: partition, BaseOffset: baseOffset, At: at, Length: length,
 	})
-	res, err := c.send(ctx, addr, "fetch_segment_chunk", laneProduce, payload, err)
+	res, err := c.sendBulk(ctx, addr, "fetch_segment_chunk", payload, err)
 	if err != nil {
 		return nil, err
 	}
@@ -588,7 +623,7 @@ func (c *PeerClient) PrepareHandoff(ctx context.Context, addr, topicName string,
 	payload, err := nodewire.EncodePrepareHandoffRequest(nodewire.PrepareHandoffRequest{
 		Topic: topicName, Partition: partition, FreezeTTLNanos: int64(freezeTTL), FreezeToken: freezeToken,
 	})
-	res, err := c.send(ctx, addr, "prepare_handoff", laneProduce, payload, err)
+	res, err := c.sendBulk(ctx, addr, "prepare_handoff", payload, err)
 	if err != nil {
 		return messaging.PartitionTransferInfo{}, err
 	}
