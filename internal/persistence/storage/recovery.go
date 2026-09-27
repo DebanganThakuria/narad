@@ -104,14 +104,19 @@ func (l *Log) walkActiveSegment(seg *segment, nextOffset *int64) error {
 	pos := int64(0)
 	size := seg.sizeBytes
 	entries := make([]indexEntry, 0)
+	buf := verifyChunks.get()
+	defer verifyChunks.put(buf)
 
 	for pos < size {
 		// Recovery only needs frame headers + CRC to find the durable tail and
 		// build the index; decoding every frame on startup is pure waste (and a
-		// cold-start CPU spike on a large log). verifyFrameAt validates each
-		// frame's CRC over the raw bytes, so corruption is still caught: an
+		// cold-start CPU spike on a large log). verifyFrameAtBuffered validates
+		// each frame's CRC over the raw bytes, so corruption is still caught: an
 		// intact CRC means the compressed payload is byte-good and would decode.
-		h, end, err := verifyFrameAt(seg.file, pos)
+		// It streams the payload through one reused chunk, where reading each
+		// frame whole allocated the segment's size in garbage per open (and a
+		// corrupt length field could ask for a 256 MiB buffer).
+		h, end, err := verifyFrameAtBuffered(seg.file, pos, buf)
 
 		switch {
 		case err == nil:

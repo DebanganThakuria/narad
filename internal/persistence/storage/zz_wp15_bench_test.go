@@ -83,3 +83,37 @@ func BenchmarkWP15ReadSealed(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkWP15OpenActive is NewLog on a partition whose only segment is
+// a nearly full 60 MiB active one, the part of an open that recovery
+// still reads and CRC-checks in full, at the same three frame sizes.
+func BenchmarkWP15OpenActive(b *testing.B) {
+	for _, per := range []int{16, 64, 1024} {
+		frameBytes := per * (4 + len(wp15Record(0, 256)))
+		b.Run(fmt.Sprintf("frame=%dKiB", frameBytes>>10), func(b *testing.B) {
+			wp3NoFsync(b)
+			dir := filepath.Join(b.TempDir(), "p0")
+			wp15WriteLayout(b, dir, 0, 0, (60<<20)/frameBytes, per, 256)
+			l, err := NewLog(dir, Options{})
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := l.Close(); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				l, err := NewLog(dir, Options{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.StopTimer()
+				if err := l.Close(); err != nil {
+					b.Fatal(err)
+				}
+				b.StartTimer()
+			}
+		})
+	}
+}

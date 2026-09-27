@@ -230,6 +230,41 @@ func TestWP15OpenDoesNotReadSealedPayloads(t *testing.T) {
 	wp15AppendAfterReopen(t, l, lay.next)
 }
 
+// The active segment is still read and CRC-checked in full at open, but
+// through one reused buffer: reading each frame whole allocated the
+// segment's size in garbage per open, on the path every restart and every
+// reopen of an idle partition takes.
+func TestWP15ActiveWalkStreamsFrames(t *testing.T) {
+	const per, recSize = 64, 256
+	dir := filepath.Join(t.TempDir(), "p0")
+	frameBytes := per * (4 + len(wp15Record(0, recSize)))
+	lay := wp15WriteLayout(t, dir, 0, 0, (16<<20)/frameBytes, per, recSize)
+	activeBytes := wp15FileSizes(t, lay)[0]
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	l, err := NewLog(dir, Options{})
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatalf("NewLog: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	allocated := int64(after.TotalAlloc - before.TotalAlloc)
+	if allocated > activeBytes/8 {
+		t.Fatalf("NewLog allocated %d bytes to walk a %d-byte active segment: recovery reads each frame into its own buffer", allocated, activeBytes)
+	}
+	t.Logf("NewLog allocated %d bytes to walk a %d-byte active segment", allocated, activeBytes)
+	if got := l.NextOffset(); got != lay.next {
+		t.Fatalf("NextOffset = %d, want %d", got, lay.next)
+	}
+	for off := int64(0); off < lay.next; off += 331 {
+		wp15ExpectRecord(t, l, off, recSize)
+	}
+	wp15AppendAfterReopen(t, l, lay.next)
+}
+
 // A torn tail in a sealed segment (the last sync before the roll lied,
 // and the segment the roll created survived) is left on disk, bounds
 // nothing, and is never served. The segment's range ends where its
