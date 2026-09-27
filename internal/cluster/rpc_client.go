@@ -49,6 +49,7 @@ type peerClient interface {
 	// with an error wrapping context.DeadlineExceeded, exactly like a
 	// ctx deadline, while ctx still carries cancellation. The hot paths
 	// use them instead of deriving a context.WithTimeout per call.
+	CommitProduceBatchWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.CommitProduceBatchRequest) (nodewire.Response, error)
 	ConsumeWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.ConsumeRequest) (nodewire.Response, error)
 	AckWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.AckRequest) (nodewire.Response, error)
 	ExtendAckWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.AckRequest) (nodewire.Response, error)
@@ -212,8 +213,14 @@ func (c *PeerClient) CommitProduce(ctx context.Context, addr string, req nodewir
 // CommitProduceBatch commits a batch of accepted produce records on the peer
 // at addr.
 func (c *PeerClient) CommitProduceBatch(ctx context.Context, addr string, req nodewire.CommitProduceBatchRequest) (nodewire.Response, error) {
+	return c.CommitProduceBatchWithin(ctx, addr, 0, req)
+}
+
+// CommitProduceBatchWithin is CommitProduceBatch bounded by timeout (see
+// peerClient).
+func (c *PeerClient) CommitProduceBatchWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.CommitProduceBatchRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeCommitProduceBatchRequest(req)
-	return c.send(ctx, addr, "commit_produce_batch", laneProduce, payload, err)
+	return c.sendWithin(ctx, addr, "commit_produce_batch", laneProduce, timeout, payload, err)
 }
 
 // Consume forwards a consume request to the peer at addr.

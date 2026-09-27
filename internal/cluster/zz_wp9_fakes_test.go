@@ -22,6 +22,12 @@ func zzWP9Within(ctx context.Context, timeout time.Duration) (context.Context, c
 	return context.WithTimeout(ctx, timeout)
 }
 
+func (f fakePeerClient) CommitProduceBatchWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.CommitProduceBatchRequest) (nodewire.Response, error) {
+	ctx, cancel := zzWP9Within(ctx, timeout)
+	defer cancel()
+	return f.CommitProduceBatch(ctx, addr, req)
+}
+
 func (f fakePeerClient) ConsumeWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.ConsumeRequest) (nodewire.Response, error) {
 	ctx, cancel := zzWP9Within(ctx, timeout)
 	defer cancel()
