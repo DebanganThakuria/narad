@@ -91,11 +91,12 @@ func TestZZWP12CoalescerBatchesWhenSlotsBusy(t *testing.T) {
 	gate := newZZWP12Gate()
 	peer := &zzWP12Peer{single: gate.single}
 	router := zzWP12Router(t, peer)
+	slots := router.acks.owner(zzWP12AddrA).limit
 	results := make(chan zzWP12Result, 32)
-	for i := range ackCoalesceInFlight {
+	for i := range slots {
 		go zzWP12Ack(router, context.Background(), consumer.Handle{Partition: 0, Offset: int64(i), Nonce: 1}, results)
 	}
-	zzWP12Eventually(t, "every slot to be busy", func() bool { return gate.held.Load() == ackCoalesceInFlight })
+	zzWP12Eventually(t, "every slot to be busy", func() bool { return int(gate.held.Load()) == slots })
 	const queued = 10
 	for i := range queued {
 		nonce := int64(100 + i)
@@ -108,7 +109,7 @@ func TestZZWP12CoalescerBatchesWhenSlotsBusy(t *testing.T) {
 	close(gate.release)
 
 	var stale zzWP12Result
-	for range ackCoalesceInFlight + queued {
+	for range slots + queued {
 		r := <-results
 		if r.nonce == zzWP12StaleNonce {
 			stale = r
@@ -131,8 +132,8 @@ func TestZZWP12CoalescerBatchesWhenSlotsBusy(t *testing.T) {
 	if len(batch) != queued {
 		t.Fatalf("batch carried %d records, want the %d queued acks: %+v", len(batch), queued, calls)
 	}
-	if len(calls) != ackCoalesceInFlight+1 {
-		t.Fatalf("%d RPCs for %d acks, want %d singles and one batch", len(calls), ackCoalesceInFlight+queued, ackCoalesceInFlight)
+	if len(calls) != slots+1 {
+		t.Fatalf("%d RPCs for %d acks, want %d singles and one batch", len(calls), slots+queued, slots)
 	}
 
 	// The stale ack's response is what a single OpAck of it produces.
@@ -156,17 +157,18 @@ func TestZZWP12CoalescerLegacyOwner(t *testing.T) {
 		},
 	}
 	router := zzWP12Router(t, peer)
+	slots := router.acks.owner(zzWP12AddrA).limit
 	results := make(chan zzWP12Result, 32)
-	for i := range ackCoalesceInFlight {
+	for i := range slots {
 		go zzWP12Ack(router, context.Background(), consumer.Handle{Partition: 0, Offset: int64(i), Nonce: 1}, results)
 	}
-	zzWP12Eventually(t, "every slot to be busy", func() bool { return gate.held.Load() == ackCoalesceInFlight })
+	zzWP12Eventually(t, "every slot to be busy", func() bool { return int(gate.held.Load()) == slots })
 	for i := range 5 {
 		go zzWP12Ack(router, context.Background(), consumer.Handle{Partition: 0, Offset: int64(50 + i), Nonce: 2}, results)
 	}
 	zzWP12Eventually(t, "the acks to queue", func() bool { return zzWP12Queued(router, zzWP12AddrA) == 5 })
 	close(gate.release)
-	for range ackCoalesceInFlight + 5 {
+	for range slots + 5 {
 		if r := <-results; r.code != http.StatusNoContent {
 			t.Fatalf("ack answered %d %q", r.code, r.body)
 		}
@@ -189,11 +191,12 @@ func TestZZWP12CoalescerQueuedCallerLeaves(t *testing.T) {
 	gate := newZZWP12Gate()
 	peer := &zzWP12Peer{single: gate.single}
 	router := zzWP12Router(t, peer)
+	slots := router.acks.owner(zzWP12AddrA).limit
 	results := make(chan zzWP12Result, 32)
-	for i := range ackCoalesceInFlight {
+	for i := range slots {
 		go zzWP12Ack(router, context.Background(), consumer.Handle{Partition: 0, Offset: int64(i), Nonce: 1}, results)
 	}
-	zzWP12Eventually(t, "every slot to be busy", func() bool { return gate.held.Load() == ackCoalesceInFlight })
+	zzWP12Eventually(t, "every slot to be busy", func() bool { return int(gate.held.Load()) == slots })
 	ctx, cancel := context.WithCancel(context.Background())
 	go zzWP12Ack(router, ctx, consumer.Handle{Partition: 0, Offset: 70, Nonce: 70}, results)
 	go zzWP12Ack(router, context.Background(), consumer.Handle{Partition: 0, Offset: 71, Nonce: 71}, results)
@@ -205,7 +208,7 @@ func TestZZWP12CoalescerQueuedCallerLeaves(t *testing.T) {
 		t.Fatalf("first answer = %+v, want the cancelled ack's 502", r)
 	}
 	close(gate.release)
-	for range ackCoalesceInFlight + 2 {
+	for range slots + 2 {
 		if r := <-results; r.code != http.StatusNoContent {
 			t.Fatalf("ack %d answered %d", r.nonce, r.code)
 		}
@@ -251,6 +254,9 @@ func TestZZWP12CoalescerRace(t *testing.T) {
 		},
 	}
 	router := zzWP12Router(t, peer)
+	// A narrow window, so 48 callers keep both owners' queues busy: the
+	// queue works the same at any width.
+	zzWP12Window(router, 4, zzWP12AddrA, zzWP12AddrB)
 	const workers, each = 48, 60
 	var wg sync.WaitGroup
 	var bad atomic.Int32
@@ -304,5 +310,47 @@ func TestZZWP12CoalescerRace(t *testing.T) {
 			defer o.mu.Unlock()
 			return o.inflight == 0 && len(o.queue) == 0
 		})
+	}
+}
+
+// zzWP12Window sets the in-flight window for the given owners before
+// their first ack.
+func zzWP12Window(router *Router, slots int, addrs ...string) {
+	for _, addr := range addrs {
+		router.acks.owners.Store(addr, &ackOwner{limit: slots})
+	}
+}
+
+// Well past what a gateway usually has in flight to one owner, an ack
+// never waits for another one's round trip: it goes out at once, as on
+// a release without coalescing. With a window of 4, the 5th of 16
+// concurrent acks waited for a whole round trip, which on a 1 ms
+// network made forwarded acks up to 93% slower.
+func TestZZWP14CoalescerWindowIsWide(t *testing.T) {
+	gate := newZZWP12Gate()
+	peer := &zzWP12Peer{single: gate.single}
+	router := zzWP12Router(t, peer)
+	const concurrent = 16
+	results := make(chan zzWP12Result, concurrent)
+	for i := range concurrent {
+		go zzWP12Ack(router, context.Background(), consumer.Handle{Partition: 0, Offset: int64(i), Nonce: 1}, results)
+	}
+	zzWP12Eventually(t, "every ack to reach the owner", func() bool { return gate.held.Load() == concurrent })
+	if n := zzWP12Queued(router, zzWP12AddrA); n != 0 {
+		t.Fatalf("%d acks queued with %d in flight", n, concurrent)
+	}
+	close(gate.release)
+	for range concurrent {
+		if r := <-results; r.code != http.StatusNoContent {
+			t.Fatalf("ack answered %d %q", r.code, r.body)
+		}
+	}
+	for _, c := range peer.snapshot() {
+		if c.batch {
+			t.Fatalf("an owner below its window got a batch: %+v", c)
+		}
+	}
+	if slots, want := router.acks.owner(zzWP12AddrA).limit, 2*defaultMessagingConcurrency(); slots != want {
+		t.Fatalf("window = %d, want twice the owner's messaging bound, %d", slots, want)
 	}
 }

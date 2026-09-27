@@ -313,6 +313,12 @@ type claimHold struct {
 type dispatcher struct {
 	engine *Engine
 
+	// mu guards the topics map and nothing else, and it is a leaf: no
+	// other lock is ever taken while it is held. A topic's lock may be
+	// held while taking it (forget), and so may Logs.mu (a log open calls
+	// stateFor from its opened hook). Waiting on any lock under mu closes
+	// a cycle through the pump, which holds a topic's lock across Logs
+	// reads.
 	mu     sync.RWMutex
 	topics map[string]*topicDispatch
 
@@ -957,19 +963,30 @@ func (d *dispatcher) releaseTopic(topicName string) {
 // still holding a pointer to a dropped state sees retired and goes back
 // to the map: an enqueue finds or makes the live state, and a log's
 // wake notifier follows it (see wakeNotifier).
+//
+// The topic's lock comes first and the map lock only inside it, for the
+// delete (see dispatcher.mu). Waiting for the topic's lock with the map
+// lock held deadlocked the node: the pump holds the topic's lock across
+// consumable(), which takes Logs.mu, while a log open holds Logs.mu and
+// calls stateFor from its opened hook.
 func (d *dispatcher) forget(topicName string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	st := d.topics[topicName]
+	st := d.peekState(topicName)
 	if st == nil {
 		return
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.anyDemandLocked() || st.held > 0 || len(st.holds) > 0 {
+	if st.retired.Load() || st.anyDemandLocked() || st.held > 0 || len(st.holds) > 0 {
+		// Retired: a concurrent forget dropped it while this one waited.
 		return
 	}
-	delete(d.topics, topicName)
+	// Only forget removes an entry, and it marks it retired under st.mu,
+	// so a state that is not retired is still the map's.
+	d.mu.Lock()
+	if d.topics[topicName] == st {
+		delete(d.topics, topicName)
+	}
+	d.mu.Unlock()
 	st.retired.Store(true)
 	st.hasWaiters.Store(false)
 	st.gen++
