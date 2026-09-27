@@ -91,6 +91,9 @@ func httpValidationErrors(cfg HTTPConfig) []string {
 	if cfg.MaxConsumeInFlightPerIdentity < 0 {
 		errs = append(errs, "http.max_consume_in_flight_per_identity must be >= 0 (0 disables the cap)")
 	}
+	if cfg.MaxProduceInFlightPerIdentity < 0 {
+		errs = append(errs, "http.max_produce_in_flight_per_identity must be >= 0 (0 disables the cap)")
+	}
 	// The diagnostics listeners must not collide with the API listener;
 	// a collision used to surface only as a listen failure logged at
 	// runtime. pprof and metrics may share one address.

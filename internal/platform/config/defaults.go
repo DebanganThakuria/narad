@@ -24,6 +24,7 @@ func Default() *Config {
 			MaxHeaderBytes:                64 << 10,
 			MaxConnections:                4096,
 			MaxConsumeInFlightPerIdentity: 1024,
+			MaxProduceInFlightPerIdentity: 0, // off; see HTTPConfig.MaxProduceInFlightPerIdentity
 		},
 		Cluster: ClusterConfig{
 			Addr:                  ":7943",

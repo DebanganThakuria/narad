@@ -202,18 +202,24 @@ func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, l
 		deps.Passwords = auth
 	}
 	handlerSet := handlers.New(deps)
-	opts := httpserver.RouterOptions{
-		// With a dedicated metrics listener, /metrics leaves the API port
-		// entirely; otherwise it stays there behind the API credentials
-		// unless the operator opted out.
-		MetricsOnAPI:               cfg.HTTP.MetricsAddr == "",
-		MetricsRequireAuth:         !cfg.HTTP.MetricsUnauthenticated,
-		ConsumeInFlightPerIdentity: cfg.HTTP.MaxConsumeInFlightPerIdentity,
-	}
+	opts := apiRouterOptions(cfg.HTTP)
 	if cfg.HTTP.MetricsUnauthenticated && opts.MetricsOnAPI && auth != nil {
 		log.Warn("/metrics is served on the API port without credentials (http.metrics_unauthenticated); it names every topic", "component", "audit")
 	}
 	return httpserver.New(cfg.HTTP, httpserver.NewRouterWithOptions(handlerSet, log, m, reg, auth, opts), log)
+}
+
+// apiRouterOptions is the API router's policy from the http config.
+func apiRouterOptions(cfg config.HTTPConfig) httpserver.RouterOptions {
+	return httpserver.RouterOptions{
+		// With a dedicated metrics listener, /metrics leaves the API port
+		// entirely; otherwise it stays there behind the API credentials
+		// unless the operator opted out.
+		MetricsOnAPI:               cfg.MetricsAddr == "",
+		MetricsRequireAuth:         !cfg.MetricsUnauthenticated,
+		ConsumeInFlightPerIdentity: cfg.MaxConsumeInFlightPerIdentity,
+		ProduceInFlightPerIdentity: cfg.MaxProduceInFlightPerIdentity,
+	}
 }
 
 // initializeSchemas loads every persisted schema version into the registry

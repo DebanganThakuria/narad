@@ -30,6 +30,16 @@ type HTTPConfig struct {
 	// Env: NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY.
 	MaxConsumeInFlightPerIdentity int `json:"max_consume_in_flight_per_identity"`
 
+	// MaxProduceInFlightPerIdentity caps concurrent produce requests per
+	// authenticated user, or per client IP when security is off; extra
+	// ones are answered 429. A batch produce counts its message count,
+	// clamped to the cap. 0 disables it, the default: a produce holds
+	// its goroutine only until the ingress WAL's group commit, not for a
+	// long-poll's wait, so the consume cap's reason does not carry over,
+	// and a default cap would turn away a busy producer that works today.
+	// Env: NARAD_HTTP_MAX_PRODUCE_IN_FLIGHT_PER_IDENTITY.
+	MaxProduceInFlightPerIdentity int `json:"max_produce_in_flight_per_identity"`
+
 	// MetricsAddr, when set, serves /metrics on its own listener (like
 	// pprof; the two may share an address) and NOT on the API port, so
 	// the scrape target can stay cluster-internal without credentials.
