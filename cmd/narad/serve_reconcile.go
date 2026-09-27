@@ -6,6 +6,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	goruntime "runtime"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
@@ -203,34 +206,62 @@ func waitMetastoreCaughtUp(ctx context.Context, store *metastore.Store, timeout 
 	}
 }
 
+// warmupOpenTopics bounds how many topics openOwnedPartitionLogs opens
+// at once (further capped by GOMAXPROCS). Opening a partition reads its
+// active segment, so a few topics in parallel overlap that I/O and the
+// CRC work without letting a node with thousands of partitions flood the
+// disk while it restarts.
+const warmupOpenTopics = 8
+
 // openOwnedPartitionLogs opens the partition logs this node owns so their
 // retention reapers run regardless of produce/consume activity. Logs.Get
 // refuses topics absent from the metastore, so deleted topics are never
 // reopened here.
+//
+// An open holds only its topic's guard, so different topics open
+// concurrently, up to warmupOpenTopics at a time; one topic's partitions
+// open one after another, as they would anyway. It returns once every
+// owned partition is open or has failed, so the readiness the caller
+// marks afterwards still covers all of them.
 func openOwnedPartitionLogs(ctx context.Context, store *metastore.Store, logs *runtime.Logs, nodeID string, log *slog.Logger) {
 	topics, _, err := store.ListTopics(ctx, metastore.ListOptions{})
 	if err != nil {
 		log.Warn("retention warmup: list topics failed", "err", err)
 		return
 	}
-	opened := 0
+	var (
+		opened atomic.Int64
+		wg     sync.WaitGroup
+		slots  = make(chan struct{}, min(warmupOpenTopics, goruntime.GOMAXPROCS(0)))
+	)
 	for _, t := range topics {
 		assignments, err := store.ListAssignments(t.Name)
 		if err != nil {
 			continue
 		}
+		var owned []int
 		for _, a := range assignments {
-			if a.OwnerID != nodeID {
-				continue
+			if a.OwnerID == nodeID {
+				owned = append(owned, a.Partition)
 			}
-			if _, err := logs.Get(t.Name, a.Partition); err != nil {
-				log.Debug("retention warmup: open owned partition failed", "topic", t.Name, "partition", a.Partition, "err", err)
-				continue
-			}
-			opened++
 		}
+		if len(owned) == 0 {
+			continue
+		}
+		slots <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-slots }()
+			for _, p := range owned {
+				if _, err := logs.Get(t.Name, p); err != nil {
+					log.Debug("retention warmup: open owned partition failed", "topic", t.Name, "partition", p, "err", err)
+					continue
+				}
+				opened.Add(1)
+			}
+		})
 	}
-	if opened > 0 {
-		log.Info("retention warmup: opened owned partition logs", "count", opened)
+	wg.Wait()
+	if n := opened.Load(); n > 0 {
+		log.Info("retention warmup: opened owned partition logs", "count", n)
 	}
 }
