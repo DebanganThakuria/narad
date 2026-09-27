@@ -82,10 +82,15 @@ func WriteStreamFrame(w io.Writer, frame StreamFrame) error {
 // WriteStreamFrameInto is WriteStreamFrame with a caller-supplied staging
 // buffer. The frame is assembled (header followed by payload) into buf,
 // grown as needed, and handed to w in ONE Write call: on a QUIC stream
-// every Write is a trip through the send loop, so splitting header and
-// payload doubled the per-frame cost. The (possibly reallocated) buffer
-// is returned so a serialized writer can keep it for the next frame.
-// The wire bytes are identical to two separate header/payload writes.
+// every Write is a hand-off to the send loop, and a second one holds the
+// stream's write slot longer, which parallel callers queue on. Measured
+// against a header Write plus a payload Write, one Write was 17% faster
+// on pooled ack round trips from parallel callers, no different for one
+// frame at a time at 64 B and 1 KiB, and 4-7% faster at 16 KiB (numbers
+// and benchmarks on clusterrpc's maxRetainedWriteBuffer). The (possibly
+// reallocated) buffer is returned so a serialized writer can keep it for
+// the next frame. The wire bytes are identical to two separate
+// header/payload writes.
 func WriteStreamFrameInto(w io.Writer, buf []byte, frame StreamFrame) ([]byte, error) {
 	if len(frame.Payload) > MaxStreamFramePayloadBytes {
 		return buf, fmt.Errorf("stream frame payload too large: %d bytes", len(frame.Payload))
