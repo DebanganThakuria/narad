@@ -495,21 +495,44 @@ func rpcOutcome(res nodewire.Response, err error) string {
 }
 
 func writePeerResponse(w http.ResponseWriter, res nodewire.Response) {
-	contentType := res.ContentType
-	if contentType == "" {
-		// Never let net/http content-sniff a proxied body: a payload that
-		// happens to look like HTML must not be served as text/html.
-		contentType = "application/octet-stream"
-	}
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if res.Status == 0 {
 		res.Status = http.StatusOK
 	}
-	w.WriteHeader(res.Status)
-	if len(res.Body) > 0 {
-		_, _ = w.Write(res.Body)
+	if len(res.Body) == 0 {
+		// Nothing to type or sniff, which is every forwarded ack. Not
+		// touching the header map spares net/http building one and
+		// cloning it at WriteHeader, the way a local ack's bare 204 does.
+		w.WriteHeader(res.Status)
+		return
 	}
+	setContentHeaders(w.Header(), res.ContentType)
+	w.WriteHeader(res.Status)
+	_, _ = w.Write(res.Body)
+}
+
+// Header values shared by every response that carries a body. Assigned
+// directly rather than through Header.Set, which allocates a fresh
+// one-element slice per call; net/http only reads them, and Add or Set
+// replace the slice rather than writing into it.
+var (
+	headerJSON        = []string{nodewire.ContentTypeJSON}
+	headerOctetStream = []string{"application/octet-stream"}
+	headerNoSniff     = []string{"nosniff"}
+)
+
+// setContentHeaders types a proxied body. An untyped one is served as
+// application/octet-stream and never content-sniffed: a payload that
+// happens to look like HTML must not be served as text/html.
+func setContentHeaders(h http.Header, contentType string) {
+	switch contentType {
+	case nodewire.ContentTypeJSON:
+		h["Content-Type"] = headerJSON
+	case "", "application/octet-stream":
+		h["Content-Type"] = headerOctetStream
+	default:
+		h.Set("Content-Type", contentType)
+	}
+	h["X-Content-Type-Options"] = headerNoSniff
 }
 
 // writeOwnerDown answers a partition-pinned consume/ack whose owner node is

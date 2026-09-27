@@ -11,9 +11,43 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
+	"github.com/debanganthakuria/narad/internal/platform/partition"
 	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
+
+// A forwarded 204 is written bare: a bodiless reply has nothing to type
+// or sniff, and setting the headers cost a header map and its clone on
+// every forwarded ack. A reply with a body keeps both headers.
+func TestZZWP9ForwardedNoContentIsBare(t *testing.T) {
+	store := newTestStore(t)
+	seedTopicRouteState(t, store)
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
+	router.peer = fakePeerClient{ackFn: func(context.Context, string, nodewire.AckRequest) (nodewire.Response, error) {
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	}}
+	rec := httptest.NewRecorder()
+	if !router.RouteAck(context.Background(), rec, nil, "orders", consumer.Handle{Partition: 1, Offset: 3, Nonce: 4}) {
+		t.Fatal("ack not forwarded")
+	}
+	if rec.Code != http.StatusNoContent || len(rec.Header()) != 0 {
+		t.Fatalf("forwarded ack: status %d headers %v, want a bare 204", rec.Code, rec.Header())
+	}
+
+	rec = httptest.NewRecorder()
+	writePeerResponse(rec, nodewire.Response{Status: http.StatusOK, Body: []byte("<html>")})
+	if got := rec.Header().Get("Content-Type"); got != "application/octet-stream" {
+		t.Fatalf("Content-Type = %q, want application/octet-stream for an untyped body", got)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	rec = httptest.NewRecorder()
+	writePeerResponse(rec, nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: []byte("{}")})
+	if got := rec.Header().Get("Content-Type"); got != nodewire.ContentTypeJSON {
+		t.Fatalf("Content-Type = %q, want %q", got, nodewire.ContentTypeJSON)
+	}
+}
 
 // zzWP9Budgets is a frameTransport that records, per request, the budget
 // the caller handed the transport and whether ctx carried a deadline.

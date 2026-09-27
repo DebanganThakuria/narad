@@ -174,8 +174,7 @@ func (rt *Router) legacyOwner(addr string) bool {
 func writeConsumeMessage(w http.ResponseWriter, msg topic.Message) {
 	body := msg.AppendJSON(make([]byte, 0, len(msg.Payload)+128))
 	body = append(body, '\n')
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	setContentHeaders(w.Header(), nodewire.ContentTypeJSON)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
