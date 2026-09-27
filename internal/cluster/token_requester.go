@@ -165,11 +165,12 @@ type tokenRequester struct {
 	mu     sync.RWMutex
 	topics map[string]*topicDemand
 
-	// legacyMu guards legacyPeers, the set of peers that answered a
-	// registration with "unsupported rpc operation": nodes too old to
-	// speak this protocol. See noteRegisterResult.
+	// legacyMu guards legacyPeers, the peers that answered a
+	// registration with "unsupported rpc operation" (nodes too old to
+	// speak this protocol), each with when it last did. See
+	// noteRegisterResult.
 	legacyMu    sync.Mutex
-	legacyPeers map[string]bool
+	legacyPeers map[string]time.Time
 }
 
 func newTokenRequester(rt *Router, selfAddr string) *tokenRequester {
@@ -177,7 +178,7 @@ func newTokenRequester(rt *Router, selfAddr string) *tokenRequester {
 		router:      rt,
 		selfAddr:    selfAddr,
 		topics:      make(map[string]*topicDemand),
-		legacyPeers: make(map[string]bool),
+		legacyPeers: make(map[string]time.Time),
 	}
 }
 
@@ -216,14 +217,17 @@ func (q *tokenRequester) noteRegisterResult(addr string, res nodewire.Response, 
 		bytes.Contains(res.Body, []byte("unsupported rpc operation"))
 
 	q.legacyMu.Lock()
-	was := q.legacyPeers[addr]
+	_, was := q.legacyPeers[addr]
+	if legacy {
+		// Refreshed on every refusal: a gateway polls a topic for
+		// legacyRetest after its owner last refused (see pollingOwner).
+		q.legacyPeers[addr] = time.Now()
+	}
 	if legacy == was {
 		q.legacyMu.Unlock()
 		return
 	}
-	if legacy {
-		q.legacyPeers[addr] = true
-	} else {
+	if !legacy {
 		delete(q.legacyPeers, addr)
 	}
 	remaining := len(q.legacyPeers)
@@ -516,7 +520,44 @@ func (q *tokenRequester) keepAlive(ctx context.Context) {
 func (q *tokenRequester) isLegacyPeer(addr string) bool {
 	q.legacyMu.Lock()
 	defer q.legacyMu.Unlock()
-	return q.legacyPeers[addr]
+	_, legacy := q.legacyPeers[addr]
+	return legacy
+}
+
+// legacyRetest is how long a node that owns none of a topic's
+// partitions keeps polling it after one of its owners refused a
+// registration. Past it the node parks its consumers on tokens again,
+// and the registration that sends is what tests the owner once more, so
+// an owner upgraded mid-roll is back on notifications within this
+// interval.
+const legacyRetest = 2 * time.Minute
+
+// pollingOwner reports whether any live remote owner of the topic
+// refused a registration within legacyRetest. A consumer on a node that
+// owns none of the topic's partitions then polls instead of parking on
+// tokens: a token left with that owner is discarded, and a record on it
+// would wait out the consumer's whole budget.
+func (q *tokenRequester) pollingOwner(topicName string) bool {
+	q.legacyMu.Lock()
+	none := len(q.legacyPeers) == 0
+	q.legacyMu.Unlock()
+	if none {
+		return false
+	}
+	routes, ok := q.router.routesForTopic(topicName)
+	if !ok {
+		return false
+	}
+	now := time.Now()
+	q.legacyMu.Lock()
+	defer q.legacyMu.Unlock()
+	for _, entry := range routes.remoteEntries {
+		addr := q.router.consumeOwnerAddr(entry)
+		if at, legacy := q.legacyPeers[addr]; legacy && addr != "" && now.Sub(at) < legacyRetest {
+			return true
+		}
+	}
+	return false
 }
 
 // registerAt leaves a fresh token with one owner: the one that just

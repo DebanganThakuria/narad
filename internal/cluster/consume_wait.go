@@ -54,6 +54,13 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 	if !rt.tokens.enabled() || !rt.hasRemoteOwner(topicName) {
 		return false
 	}
+	rt.waitOnTokens(ctx, w, topicName, wait, local)
+	return true
+}
+
+// waitOnTokens parks the consumer on this node's tokens, races that
+// against local's wait, and writes the response.
+func (rt *Router) waitOnTokens(ctx context.Context, w http.ResponseWriter, topicName string, wait time.Duration, local LocalConsumeWaiter) {
 	if wait > rt.maxConsumeWait && rt.maxConsumeWait > 0 {
 		wait = rt.maxConsumeWait
 	}
@@ -80,12 +87,13 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 	// a parked consumer costs one goroutine rather than one for the
 	// request plus one racing it. With thousands parked on a gateway
 	// node that difference is most of the per-waiter cost.
+	var owners remoteCandidateCache
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			leave()
 			w.WriteHeader(http.StatusNoContent)
-			return true
+			return
 		}
 		msg, found, wokeExternal, err := local.Wait(ctx, remaining, parked.ch)
 
@@ -96,7 +104,7 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 			// topic and stay for the others, or lapse (see register).
 			leave()
 			writeConsumeMessage(w, msg)
-			return true
+			return
 
 		case wokeExternal:
 			from := parked.take()
@@ -108,7 +116,7 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 					rt.tokens.registerAt(ctx, topicName, from, remaining)
 				}
 				writePeerResponse(w, res)
-				return true
+				return
 			}
 			// Someone beat us to it. Being woken took this consumer off
 			// the queue, so put it back before re-registering, or the
@@ -116,19 +124,73 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 			rt.tokens.repark(topicName, parked)
 			rt.tokens.register(ctx, topicName, time.Until(deadline))
 
+		case errors.Is(err, errReprobeOwners):
+			// A node that owns none of the topic's partitions scans the
+			// owners now and then while parked (see gatewayWait).
+			forwarded, hadOwners := rt.reprobeRemote(ctx, w, topicName, &owners)
+			if forwarded {
+				leave()
+				return
+			}
+			if !hadOwners {
+				// Ownership moved under us; the next poll routes afresh.
+				leave()
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+
 		case err != nil && !errors.Is(err, context.Canceled):
 			leave()
 			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return true
+			return
 
 		default:
 			// Budget spent, or the client left.
 			leave()
 			w.WriteHeader(http.StatusNoContent)
-			return true
+			return
 		}
 	}
 }
+
+// gatewayReprobeInterval is how often a consumer parked on a node that
+// owns none of the topic's partitions scans the owners anyway. The
+// token is its only wake, so a notification lost on the way, or a token
+// an owner silently dropped (a restart, a lagging assignment view),
+// would otherwise hold a record back until the keeper's refresh, up to
+// registrationRefresh later. The polling this replaced scanned every
+// owner at least once a second for the whole wait.
+const gatewayReprobeInterval = 2 * time.Second
+
+// errReprobeOwners is gatewayWait's signal that a re-probe is due.
+var errReprobeOwners = errors.New("cluster: re-probe the remote owners")
+
+// gatewayWait is the local side of the race on a node that owns none of
+// the topic's partitions. There is nothing local to find, so its wait
+// ends on the owner's notification, the client leaving, or the budget,
+// and every reprobe it hands back errReprobeOwners so the router scans
+// the owners once.
+type gatewayWait struct{ reprobe time.Duration }
+
+func (g gatewayWait) Wait(ctx context.Context, wait time.Duration, external <-chan struct{}) (topic.Message, bool, bool, error) {
+	var due error
+	if g.reprobe > 0 && wait > g.reprobe {
+		wait, due = g.reprobe, errReprobeOwners
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-external:
+		return topic.Message{}, false, true, nil
+	case <-ctx.Done():
+		return topic.Message{}, false, false, nil
+	case <-timer.C:
+		return topic.Message{}, false, false, due
+	}
+}
+
+// Release is never called: a gateway wait delivers nothing.
+func (gatewayWait) Release(context.Context, topic.Message) error { return nil }
 
 // claimFrom takes the record an owner said it had. A 204 means somebody
 // else claimed it first, which costs one round trip and nothing else:

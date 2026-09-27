@@ -204,17 +204,43 @@ func (rt *Router) RouteConsume(ctx context.Context, w http.ResponseWriter, r *ht
 	if hadCandidates {
 		// The handler contract says wait > 0 long-polls up to the wait
 		// for a message. Honor that budget even though this node owns no
-		// partitions of the topic: keep re-probing the remote owners
-		// until a message materializes. Answering 204 immediately would
-		// make long-poll behavior depend on which node a load balancer
-		// picked and degrade clients into busy-polling.
-		if rt.longPollConsumeRemote(ctx, w, r, topicName) {
-			return true, nil
+		// partitions of the topic. Answering 204 immediately would make
+		// long-poll behavior depend on which node a load balancer picked
+		// and degrade clients into busy-polling. The HTTP handler already
+		// rejected malformed wait values, so a parse failure here
+		// conservatively degrades to no wait.
+		wait, err := consumeWaitFromHTTP(r, rt.maxConsumeWait)
+		if err != nil {
+			wait = 0
 		}
-		w.WriteHeader(http.StatusNoContent)
+		rt.consumeRemoteWait(ctx, w, topicName, wait)
 		return true, nil
 	}
 	return false, nil
+}
+
+// consumeRemoteWait serves the wait phase of a queue-style long-poll on
+// a node that owns none of the topic's partitions, after the opening
+// probe found nothing, and writes the response.
+//
+// It parks the consumer on tokens exactly as an owning node does, with
+// nothing local to race: an owner that gets a record notifies, and the
+// consumer claims from it, two round trips after the record lands and
+// no network at all while nothing does. It falls back to re-probing
+// every owner on a backoff (longPollConsumeRemote) when this node has
+// no return address for notifications, or when an owner recently
+// refused a registration (a node on the previous release during a
+// rolling upgrade), since a token left there is discarded and a record
+// on it would wait out the whole budget.
+func (rt *Router) consumeRemoteWait(ctx context.Context, w http.ResponseWriter, topicName string, wait time.Duration) {
+	if wait > 0 && rt.tokens.enabled() && !rt.tokens.pollingOwner(topicName) {
+		rt.waitOnTokens(ctx, w, topicName, wait, gatewayWait{reprobe: gatewayReprobeInterval})
+		return
+	}
+	if rt.longPollConsumeRemote(ctx, w, topicName, wait) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // longWaitRPCGrace is added on top of a known server-side wait when
@@ -258,7 +284,8 @@ const (
 )
 
 // longPollConsumeRemote honors a queue-style long-poll on a node that owns
-// no partitions of the topic: it re-probes every remote owner, backing off
+// no partitions of the topic when the token protocol cannot (see
+// consumeRemoteWait): it re-probes every remote owner, backing off
 // between rounds, until a message materializes (response written, returns
 // true), the wait budget expires, or the request context is done (returns
 // false; the caller answers 204). Re-probing all owners each round is
@@ -267,11 +294,8 @@ const (
 // individually bounded by consumeProbeTimeout, so unlike a pinned
 // long-poll forward the loop needs no longWaitRPCContext-stretched
 // deadline. The owner list is rebuilt only when the route table changes.
-func (rt *Router) longPollConsumeRemote(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string) bool {
-	// The HTTP handler already rejected malformed wait values, so a parse
-	// failure here conservatively degrades to no wait.
-	wait, err := consumeWaitFromHTTP(r, rt.maxConsumeWait)
-	if err != nil || wait <= 0 {
+func (rt *Router) longPollConsumeRemote(ctx context.Context, w http.ResponseWriter, topicName string, wait time.Duration) bool {
+	if wait <= 0 {
 		return false
 	}
 	interval := rt.consumeReprobeInterval

@@ -18,6 +18,148 @@ import (
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
+// zzWP9Gateway is a router on a node that owns no partition of "orders"
+// (node-remote owns its only partition), with the token protocol on and
+// the keeper running. probes counts the non-claim consumes the owner
+// sees, adds the token registrations.
+type zzWP9Gateway struct {
+	router *Router
+	probes atomic.Int32
+	claims atomic.Int32
+	adds   atomic.Int32
+	// ready makes the owner's next probe or claim win a record.
+	ready atomic.Bool
+}
+
+func newZZWP9Gateway(t *testing.T) *zzWP9Gateway {
+	t.Helper()
+	g := &zzWP9Gateway{}
+	handle := consumer.EncodeHandle(consumer.Handle{Partition: 0, Offset: 7, Nonce: 99})
+	g.router = remoteOnlyConsumeRouter(t, func(_ context.Context, _ string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
+		if req.Claim {
+			g.claims.Add(1)
+		} else {
+			g.probes.Add(1)
+		}
+		if g.ready.CompareAndSwap(true, false) {
+			return remoteMessageResponse(0, 7, handle), nil
+		}
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	})
+	// Production pacing for the polling fallback.
+	g.router.consumeReprobeInterval = remoteConsumeReprobeInterval
+	g.router.consumeReprobeMaxInterval = remoteConsumeReprobeMaxInterval
+	peer := g.router.peer.(fakePeerClient)
+	peer.registerTokensFn = func(_ context.Context, _ string, delta nodewire.TokenDelta) (nodewire.Response, error) {
+		g.adds.Add(int32(len(delta.Add)))
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	}
+	g.router.peer = peer
+	g.router.SetSelfAddr("node-self.example:7942")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go g.router.RunTokenKeeper(ctx)
+	return g
+}
+
+func (g *zzWP9Gateway) consume(wait string) (*httptest.ResponseRecorder, bool) {
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait="+wait, nil)
+	forwarded, _ := g.router.RouteConsume(context.Background(), res, req, "orders", nil)
+	return res, forwarded
+}
+
+// A consumer long-polling through a node that owns none of the topic's
+// partitions parks on a token instead of re-probing the owner on a
+// backoff: an idle wait costs one probe and one registration.
+func TestZZWP9GatewayIdleWaitParksOnAToken(t *testing.T) {
+	g := newZZWP9Gateway(t)
+	start := time.Now()
+	res, forwarded := g.consume("1500ms")
+	if !forwarded || res.Code != http.StatusNoContent {
+		t.Fatalf("forwarded=%v status=%d, want a 204 after the budget", forwarded, res.Code)
+	}
+	if elapsed := time.Since(start); elapsed < 1400*time.Millisecond {
+		t.Fatalf("answered after %s, want the 1.5s budget honoured", elapsed)
+	}
+	if n := g.probes.Load(); n > 1 {
+		t.Fatalf("owner probed %d times in an idle 1.5s wait, want 1 (then parked on a token)", n)
+	}
+	if n := g.adds.Load(); n < 1 {
+		t.Fatal("no token was registered with the owner")
+	}
+}
+
+// When the owner spends the token, the parked gateway consumer claims
+// at once rather than at its next re-probe round.
+func TestZZWP9GatewayClaimsAsSoonAsTheOwnerNotifies(t *testing.T) {
+	g := newZZWP9Gateway(t)
+	var wokeAt atomic.Int64
+	go func() {
+		time.Sleep(1250 * time.Millisecond)
+		g.ready.Store(true)
+		for range 2000 {
+			if g.router.LocalDemand().WakeOneWaiter("orders", "remote.example:7942") {
+				wokeAt.Store(time.Now().UnixNano())
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	res, forwarded := g.consume("5s")
+	done := time.Now()
+	if !forwarded || res.Code != http.StatusOK {
+		t.Fatalf("forwarded=%v status=%d, want the owner's record", forwarded, res.Code)
+	}
+	if wokeAt.Load() == 0 {
+		t.Fatal("the owner's notification found no parked consumer")
+	}
+	if late := done.Sub(time.Unix(0, wokeAt.Load())); late > 200*time.Millisecond {
+		t.Fatalf("record delivered %s after the owner notified, want a claim at once", late)
+	}
+	if n := g.claims.Load(); n != 1 {
+		t.Fatalf("claims = %d, want 1", n)
+	}
+}
+
+// A gateway keeps polling while any owner of the topic is known not to
+// speak the token protocol: a token left there would be discarded, and a
+// record on that owner would wait for the consumer's whole budget.
+func TestZZWP9GatewayPollsWhileAnOwnerIsLegacy(t *testing.T) {
+	g := newZZWP9Gateway(t)
+	g.router.tokens.noteRegisterResult("remote.example:7942",
+		nodewire.Response{Status: http.StatusBadRequest, Body: []byte("unsupported rpc operation 13")}, nil)
+	res, forwarded := g.consume("800ms")
+	if !forwarded || res.Code != http.StatusNoContent {
+		t.Fatalf("forwarded=%v status=%d, want 204", forwarded, res.Code)
+	}
+	if n := g.adds.Load(); n != 0 {
+		t.Fatalf("registered %d tokens with a legacy owner, want polling", n)
+	}
+	if n := g.probes.Load(); n < 3 {
+		t.Fatalf("probes = %d, want the polling fallback's re-probes", n)
+	}
+}
+
+// A gateway consumer still re-probes now and then while parked, so a
+// token the owner silently lost (a restart, a lost notification) costs
+// at most one re-probe interval rather than the keeper's refresh.
+func TestZZWP9GatewayReprobesWhileParked(t *testing.T) {
+	g := newZZWP9Gateway(t)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		g.ready.Store(true) // a record, and no notification ever comes
+	}()
+	start := time.Now()
+	res, forwarded := g.consume("10s")
+	if !forwarded || res.Code != http.StatusOK {
+		t.Fatalf("forwarded=%v status=%d, want the record found by a re-probe", forwarded, res.Code)
+	}
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Fatalf("record found after %s, want within a re-probe interval", elapsed)
+	}
+}
+
 // Consumers parking one after another on the same topic share the token
 // the first one left: the owner hears one registration, not one per
 // consumer. The last one leaving does not send a drop of its own.
