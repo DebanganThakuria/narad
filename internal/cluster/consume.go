@@ -148,9 +148,7 @@ func (rt *Router) callConsumeProbe(ctx context.Context, topicName, addr string) 
 		Topic:     topicName,
 		LocalOnly: true,
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, consumeProbeTimeout)
-	defer cancel()
-	res, err := rt.peer.Consume(probeCtx, addr, req)
+	res, err := rt.peer.ConsumeWithin(ctx, addr, consumeProbeTimeout, req)
 	if err != nil {
 		return consumeProbeResult{err: fmt.Errorf("consume probe %s: %w", addr, err)}
 	}

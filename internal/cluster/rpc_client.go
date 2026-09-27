@@ -43,6 +43,18 @@ type peerClient interface {
 	TopicPartitionStats(context.Context, string, string, int) (topic.PartitionStats, error)
 	NotifyToken(context.Context, string, nodewire.TokenNotifyRequest) (nodewire.Response, error)
 	RegisterTokens(context.Context, string, nodewire.TokenDelta) (nodewire.Response, error)
+
+	// The Within forms bound one call by a budget of the caller's own
+	// (see clusterrpc.QUICFrameClient.RequestOnLaneTimeout): it runs out
+	// with an error wrapping context.DeadlineExceeded, exactly like a
+	// ctx deadline, while ctx still carries cancellation. The hot paths
+	// use them instead of deriving a context.WithTimeout per call.
+	ConsumeWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.ConsumeRequest) (nodewire.Response, error)
+	AckWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.AckRequest) (nodewire.Response, error)
+	ExtendAckWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.AckRequest) (nodewire.Response, error)
+	NackWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.AckRequest) (nodewire.Response, error)
+	NotifyTokenWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.TokenNotifyRequest) (nodewire.Response, error)
+	RegisterTokensWithin(ctx context.Context, addr string, timeout time.Duration, delta nodewire.TokenDelta) (nodewire.Response, error)
 	RegisterMember(context.Context, string, nodewire.MemberRequest) (nodewire.Response, error)
 	CreateUser(ctx context.Context, addr string, body []byte) (nodewire.Response, error)
 	UpdateUser(ctx context.Context, addr, username string, body []byte) (nodewire.Response, error)
@@ -56,6 +68,7 @@ type peerClient interface {
 // substitute a fake to observe which lane each operation selects.
 type frameTransport interface {
 	RequestOnLane(ctx context.Context, addr string, lane clusterrpc.Lane, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error)
+	RequestOnLaneTimeout(ctx context.Context, addr string, lane clusterrpc.Lane, timeout time.Duration, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error)
 }
 
 // RPCMetrics receives one observation per peer RPC issued by a
@@ -186,26 +199,46 @@ func (c *PeerClient) CommitProduceBatch(ctx context.Context, addr string, req no
 
 // Consume forwards a consume request to the peer at addr.
 func (c *PeerClient) Consume(ctx context.Context, addr string, req nodewire.ConsumeRequest) (nodewire.Response, error) {
+	return c.ConsumeWithin(ctx, addr, 0, req)
+}
+
+// ConsumeWithin is Consume bounded by timeout (see peerClient).
+func (c *PeerClient) ConsumeWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.ConsumeRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeConsumeRequest(req)
-	return c.send(ctx, addr, "consume", laneConsume, payload, err)
+	return c.sendWithin(ctx, addr, "consume", laneConsume, timeout, payload, err)
 }
 
 // Ack forwards an ack request to the peer at addr.
 func (c *PeerClient) Ack(ctx context.Context, addr string, req nodewire.AckRequest) (nodewire.Response, error) {
+	return c.AckWithin(ctx, addr, 0, req)
+}
+
+// AckWithin is Ack bounded by timeout (see peerClient).
+func (c *PeerClient) AckWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.AckRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeAckRequest(req)
-	return c.send(ctx, addr, "ack", laneAck, payload, err)
+	return c.sendWithin(ctx, addr, "ack", laneAck, timeout, payload, err)
 }
 
 // ExtendAck forwards a visibility-window extension to the peer at addr.
 func (c *PeerClient) ExtendAck(ctx context.Context, addr string, req nodewire.AckRequest) (nodewire.Response, error) {
+	return c.ExtendAckWithin(ctx, addr, 0, req)
+}
+
+// ExtendAckWithin is ExtendAck bounded by timeout (see peerClient).
+func (c *PeerClient) ExtendAckWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.AckRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeExtendAckRequest(req)
-	return c.send(ctx, addr, "extend_ack", laneAck, payload, err)
+	return c.sendWithin(ctx, addr, "extend_ack", laneAck, timeout, payload, err)
 }
 
 // Nack forwards an immediate reservation release to the peer at addr.
 func (c *PeerClient) Nack(ctx context.Context, addr string, req nodewire.AckRequest) (nodewire.Response, error) {
+	return c.NackWithin(ctx, addr, 0, req)
+}
+
+// NackWithin is Nack bounded by timeout (see peerClient).
+func (c *PeerClient) NackWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.AckRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeNackRequest(req)
-	return c.send(ctx, addr, "nack", laneAck, payload, err)
+	return c.sendWithin(ctx, addr, "nack", laneAck, timeout, payload, err)
 }
 
 // CreateTopic forwards a raw topic create body to the peer at addr.
@@ -402,27 +435,40 @@ func (c *PeerClient) topicNameRequest(ctx context.Context, addr string, op nodew
 
 // send performs the request round trip once the encode step succeeded.
 func (c *PeerClient) send(ctx context.Context, addr, operation string, lane clusterrpc.Lane, payload []byte, encodeErr error) (nodewire.Response, error) {
+	return c.sendWithin(ctx, addr, operation, lane, 0, payload, encodeErr)
+}
+
+// sendWithin is send bounded by timeout; <= 0 adds no budget of its own.
+func (c *PeerClient) sendWithin(ctx context.Context, addr, operation string, lane clusterrpc.Lane, timeout time.Duration, payload []byte, encodeErr error) (nodewire.Response, error) {
 	if encodeErr != nil {
 		return nodewire.Response{}, encodeErr
 	}
-	return c.request(ctx, addr, operation, lane, payload)
+	return c.request(ctx, addr, operation, lane, timeout, payload)
 }
 
-func (c *PeerClient) request(ctx context.Context, addr, operation string, lane clusterrpc.Lane, payload []byte) (nodewire.Response, error) {
+func (c *PeerClient) request(ctx context.Context, addr, operation string, lane clusterrpc.Lane, timeout time.Duration, payload []byte) (nodewire.Response, error) {
 	if c == nil || c.frames == nil {
 		return nodewire.Response{}, fmt.Errorf("peer rpc client is nil")
 	}
 	if c.metrics == nil {
-		return c.roundTrip(ctx, addr, lane, payload)
+		return c.roundTrip(ctx, addr, lane, timeout, payload)
 	}
 	start := time.Now()
-	res, err := c.roundTrip(ctx, addr, lane, payload)
+	res, err := c.roundTrip(ctx, addr, lane, timeout, payload)
 	c.metrics.ObserveRPC(operation, rpcOutcome(res, err), time.Since(start))
 	return res, err
 }
 
-func (c *PeerClient) roundTrip(ctx context.Context, addr string, lane clusterrpc.Lane, payload []byte) (nodewire.Response, error) {
-	frame, err := c.frames.RequestOnLane(ctx, addr, lane, clusterwire.StreamFrameNodeRequest, payload)
+func (c *PeerClient) roundTrip(ctx context.Context, addr string, lane clusterrpc.Lane, timeout time.Duration, payload []byte) (nodewire.Response, error) {
+	var (
+		frame clusterwire.StreamFrame
+		err   error
+	)
+	if timeout > 0 {
+		frame, err = c.frames.RequestOnLaneTimeout(ctx, addr, lane, timeout, clusterwire.StreamFrameNodeRequest, payload)
+	} else {
+		frame, err = c.frames.RequestOnLane(ctx, addr, lane, clusterwire.StreamFrameNodeRequest, payload)
+	}
 	if err != nil {
 		return nodewire.Response{}, err
 	}
@@ -563,8 +609,13 @@ func (c *PeerClient) GetAssignment(ctx context.Context, addr, topicName string, 
 // a peer twice about one record means two claims for one consumer; the
 // peer re-registers on its own if it still wants a turn.
 func (c *PeerClient) NotifyToken(ctx context.Context, addr string, req nodewire.TokenNotifyRequest) (nodewire.Response, error) {
+	return c.NotifyTokenWithin(ctx, addr, 0, req)
+}
+
+// NotifyTokenWithin is NotifyToken bounded by timeout (see peerClient).
+func (c *PeerClient) NotifyTokenWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.TokenNotifyRequest) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeTokenNotifyRequest(req)
-	return c.send(ctx, addr, "token_notify", laneControl, payload, err)
+	return c.sendWithin(ctx, addr, "token_notify", laneControl, timeout, payload, err)
 }
 
 // RegisterTokens sends one peer its batched token delta: the topics this
@@ -572,6 +623,12 @@ func (c *PeerClient) NotifyToken(ctx context.Context, addr string, req nodewire.
 // travel together so retiring stale interest costs bytes in a frame that
 // was already going out rather than an RPC of its own.
 func (c *PeerClient) RegisterTokens(ctx context.Context, addr string, delta nodewire.TokenDelta) (nodewire.Response, error) {
+	return c.RegisterTokensWithin(ctx, addr, 0, delta)
+}
+
+// RegisterTokensWithin is RegisterTokens bounded by timeout (see
+// peerClient).
+func (c *PeerClient) RegisterTokensWithin(ctx context.Context, addr string, timeout time.Duration, delta nodewire.TokenDelta) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeTokenDelta(delta)
-	return c.send(ctx, addr, "token_register", laneControl, payload, err)
+	return c.sendWithin(ctx, addr, "token_register", laneControl, timeout, payload, err)
 }

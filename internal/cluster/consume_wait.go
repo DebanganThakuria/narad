@@ -126,10 +126,10 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 // else claimed it first, which costs one round trip and nothing else:
 // the consumer stays parked and the record stays available.
 func (rt *Router) claimFrom(ctx context.Context, addr, topicName string) (nodewire.Response, bool) {
-	claimCtx, cancel := context.WithTimeout(ctx, consumeProbeTimeout)
-	defer cancel()
+	// One budget covers the claim and a legacy owner's plain retry.
+	deadline := time.Now().Add(consumeProbeTimeout)
 	legacy := rt.legacyOwner(addr)
-	res, err := rt.peer.Consume(claimCtx, addr, nodewire.ConsumeRequest{Topic: topicName, LocalOnly: true, Claim: !legacy})
+	res, err := rt.peer.ConsumeWithin(ctx, addr, consumeProbeTimeout, nodewire.ConsumeRequest{Topic: topicName, LocalOnly: true, Claim: !legacy})
 	if err == nil && res.Status == http.StatusBadRequest && !legacy && bytes.Contains(res.Body, []byte("trailing")) {
 		// An owner on the previous release rejects the trailing Claim
 		// byte outright. Fall back to the plain probe it understands (it
@@ -137,7 +137,11 @@ func (rt *Router) claimFrom(ctx context.Context, addr, topicName string) (nodewi
 		// deadline) and remember the peer for a while so the roll costs
 		// one refused claim per owner per TTL, not one per record.
 		rt.legacyClaim.Store(addr, time.Now().Add(legacyClaimTTL))
-		res, err = rt.peer.Consume(claimCtx, addr, nodewire.ConsumeRequest{Topic: topicName, LocalOnly: true})
+		if left := time.Until(deadline); left > 0 {
+			res, err = rt.peer.ConsumeWithin(ctx, addr, left, nodewire.ConsumeRequest{Topic: topicName, LocalOnly: true})
+		} else {
+			err = context.DeadlineExceeded
+		}
 	}
 	if err != nil || res.Status != http.StatusOK {
 		return nodewire.Response{}, false

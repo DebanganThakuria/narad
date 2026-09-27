@@ -313,12 +313,12 @@ func (rt *Router) longPollConsumeRemote(ctx context.Context, w http.ResponseWrit
 // client's HTTP request that long. Timing out is safe: acks are
 // idempotent by nonce (the owner commits only if the handle's nonce
 // still matches the active reservation), so a client retry after a
-// timeout cannot double-commit a record.
+// timeout cannot double-commit a record. The bound is handed to the
+// transport as the call's budget rather than derived as a
+// context.WithTimeout per ack: the transport already runs a timer for
+// the reply wait, and the derived context cost four allocations and a
+// lock on the request's context for every forwarded ack.
 const ackForwardTimeout = 2 * time.Second
-
-func ackForwardContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, ackForwardTimeout)
-}
 
 // RouteAck forwards an ack request to the owner of the handle partition.
 // Returns true if forwarded.
@@ -331,9 +331,7 @@ func (rt *Router) RouteAck(ctx context.Context, w http.ResponseWriter, _ *http.R
 	if addr == "" {
 		return false
 	}
-	ackCtx, cancel := ackForwardContext(ctx)
-	defer cancel()
-	res, err := rt.peer.Ack(ackCtx, addr, nodewire.AckRequest{
+	res, err := rt.peer.AckWithin(ctx, addr, ackForwardTimeout, nodewire.AckRequest{
 		Topic:     topicName,
 		Partition: handle.Partition,
 		Offset:    handle.Offset,
@@ -358,9 +356,7 @@ func (rt *Router) RouteExtendAck(ctx context.Context, w http.ResponseWriter, _ *
 	if addr == "" {
 		return false
 	}
-	ackCtx, cancel := ackForwardContext(ctx)
-	defer cancel()
-	res, err := rt.peer.ExtendAck(ackCtx, addr, nodewire.AckRequest{
+	res, err := rt.peer.ExtendAckWithin(ctx, addr, ackForwardTimeout, nodewire.AckRequest{
 		Topic:     topicName,
 		Partition: handle.Partition,
 		Offset:    handle.Offset,
@@ -385,9 +381,7 @@ func (rt *Router) RouteNack(ctx context.Context, w http.ResponseWriter, _ *http.
 	if addr == "" {
 		return false
 	}
-	ackCtx, cancel := ackForwardContext(ctx)
-	defer cancel()
-	res, err := rt.peer.Nack(ackCtx, addr, nodewire.AckRequest{
+	res, err := rt.peer.NackWithin(ctx, addr, ackForwardTimeout, nodewire.AckRequest{
 		Topic:     topicName,
 		Partition: handle.Partition,
 		Offset:    handle.Offset,

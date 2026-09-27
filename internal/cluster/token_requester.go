@@ -477,11 +477,12 @@ func (q *tokenRequester) drop(ctx context.Context, topicName, servedBy string) {
 // transport error otherwise), so a registration that never reached its
 // owner can be tried again.
 func (q *tokenRequester) broadcast(ctx context.Context, addrs []string, delta nodewire.TokenDelta, done func(addr string, err error)) {
-	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tokenSendTimeout)
-	var pending sync.WaitGroup
+	// Each send carries its own budget, so nothing has to outlive the
+	// sends just to release a shared timeout.
+	sendCtx := context.WithoutCancel(ctx)
 	for _, addr := range addrs {
-		pending.Go(func() {
-			res, err := q.router.peer.RegisterTokens(sendCtx, addr, delta)
+		go func() {
+			res, err := q.router.peer.RegisterTokensWithin(sendCtx, addr, tokenSendTimeout, delta)
 			// The send stays fire-and-forget; the REPLY is still worth
 			// reading, because it is the only place a peer tells us it
 			// does not speak this protocol.
@@ -489,14 +490,8 @@ func (q *tokenRequester) broadcast(ctx context.Context, addrs []string, delta no
 			if done != nil {
 				done(addr, err)
 			}
-		})
+		}()
 	}
-	// Release the timeout once the last send finishes, without holding
-	// the caller: cancel() must outlive the sends, not the request.
-	go func() {
-		pending.Wait()
-		cancel()
-	}()
 }
 
 // tokenSendTimeout bounds one register or drop. Tokens are advisory, so

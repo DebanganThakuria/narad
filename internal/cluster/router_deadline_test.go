@@ -10,7 +10,9 @@ import (
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
+	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
@@ -68,23 +70,35 @@ func TestRouteConsumePinnedForwardIsNotProbeClamped(t *testing.T) {
 	}
 }
 
-// Forwarded ack, extend, and nack carry a 2s deadline. Acks are
-// idempotent by nonce, so timing out and retrying is safe.
+// budgetRecorder is a frameTransport that records the budget each call
+// handed the transport and the deadline its context carried.
+type budgetRecorder struct {
+	budgets   []time.Duration
+	deadlines []time.Time
+}
+
+func (r *budgetRecorder) RequestOnLane(ctx context.Context, addr string, lane clusterrpc.Lane, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
+	return r.RequestOnLaneTimeout(ctx, addr, lane, 0, frameType, payload)
+}
+
+func (r *budgetRecorder) RequestOnLaneTimeout(ctx context.Context, _ string, _ clusterrpc.Lane, timeout time.Duration, _ clusterwire.StreamFrameType, _ []byte) (clusterwire.StreamFrame, error) {
+	deadline, _ := ctx.Deadline()
+	r.budgets = append(r.budgets, timeout)
+	r.deadlines = append(r.deadlines, deadline)
+	payload, err := nodewire.EncodeResponse(nodewire.Response{Status: http.StatusNoContent})
+	return clusterwire.StreamFrame{Type: clusterwire.StreamFrameNodeReply, Payload: payload}, err
+}
+
+// Forwarded ack, extend, and nack are each bounded by 2s, handed to the
+// transport as the call's budget (it covers the dial and stream open as
+// well as the reply wait). Acks are idempotent by nonce, so timing out
+// and retrying is safe.
 func TestRouteAckFamilyForwardsCarryDeadline(t *testing.T) {
 	store := newTestStore(t)
 	seedTopicRouteState(t, store)
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
-
-	var deadlines []time.Duration
-	capture := func(ctx context.Context, _ string, _ nodewire.AckRequest) (nodewire.Response, error) {
-		deadline, ok := ctx.Deadline()
-		if !ok {
-			t.Fatal("forwarded ack carries no deadline")
-		}
-		deadlines = append(deadlines, time.Until(deadline))
-		return nodewire.Response{Status: http.StatusNoContent}, nil
-	}
-	router.peer = fakePeerClient{ackFn: capture, extendAckFn: capture, nackFn: capture}
+	frames := &budgetRecorder{}
+	router.peer = &PeerClient{frames: frames}
 	handle := consumer.Handle{Partition: 1, Offset: 3, Nonce: 4}
 	ctx := context.Background()
 	for name, call := range map[string]func(http.ResponseWriter) bool{
@@ -100,21 +114,23 @@ func TestRouteAckFamilyForwardsCarryDeadline(t *testing.T) {
 			t.Fatalf("%s: status = %d", name, rec.Code)
 		}
 	}
-	if len(deadlines) != 3 {
-		t.Fatalf("captured %d deadlines, want 3", len(deadlines))
+	if len(frames.budgets) != 3 {
+		t.Fatalf("captured %d forwards, want 3", len(frames.budgets))
 	}
-	for _, remaining := range deadlines {
-		if remaining <= 0 || remaining > ackForwardTimeout {
-			t.Fatalf("forwarded ack deadline %s away, want within %s", remaining, ackForwardTimeout)
+	for i, budget := range frames.budgets {
+		if budget != ackForwardTimeout {
+			t.Fatalf("forward %d budget = %s, want %s", i, budget, ackForwardTimeout)
 		}
 	}
-	// A shorter caller deadline wins over the ack timeout.
+	// The caller's own deadline still reaches the transport, which ends
+	// the call at whichever comes first.
 	short, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
-	deadlines = nil
+	want, _ := short.Deadline()
+	frames.budgets, frames.deadlines = nil, nil
 	router.RouteAck(short, httptest.NewRecorder(), nil, "orders", handle)
-	if len(deadlines) != 1 || deadlines[0] > 100*time.Millisecond {
-		t.Fatalf("caller deadline not honored: %v", deadlines)
+	if len(frames.deadlines) != 1 || !frames.deadlines[0].Equal(want) || frames.budgets[0] != ackForwardTimeout {
+		t.Fatalf("caller deadline not passed through: deadlines %v budgets %v", frames.deadlines, frames.budgets)
 	}
 }
 
