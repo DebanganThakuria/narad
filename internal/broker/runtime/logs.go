@@ -141,10 +141,14 @@ type logEntry struct {
 const stampEvery = int64(time.Second)
 
 func (e *logEntry) stamp() {
+	e.stampAt(time.Now().UnixNano())
+}
+
+// stampAt is stamp with the clock already read (unix nanoseconds).
+func (e *logEntry) stampAt(now int64) {
 	if e.walkOwned.Load() {
 		e.walkOwned.Store(false)
 	}
-	now := time.Now().UnixNano()
 	if now-e.lastAccess.Load() >= stampEvery {
 		e.lastAccess.Store(now)
 	}
@@ -214,6 +218,52 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 		g.notifyRetired(topicName)
 	}
 	return l, err
+}
+
+// GetMany resolves the logs of several partitions of one topic, as a Get
+// of each would, into dst[i] for idxs[i], and returns dst. dst is reused
+// when it has the capacity, so a caller that keeps it across calls
+// allocates nothing. A consume scan resolves every local partition of
+// the topic before it probes them: GetMany finds the open ones under one
+// read lock, one topic-version read and one clock read, where a Get per
+// partition would pay each of those per partition, and sends only the
+// rest (not open, being closed, or opened under an older version of the
+// topic record) through Get's slow path, in idxs order. On an error it
+// returns nil and the error; the partitions it opened stay open.
+func (g *Logs) GetMany(topicName string, idxs []int, dst []*storage.Log) ([]*storage.Log, error) {
+	dst = slices.Grow(dst[:0], len(idxs))[:len(idxs)]
+	missing := false
+	g.mu.RLock()
+	var version uint64
+	if g.versions != nil {
+		version = g.versions.TopicVersion(topicName)
+	}
+	now := time.Now().UnixNano()
+	for i, idx := range idxs {
+		e, ok := g.logs[keyOf(topicName, idx)]
+		if ok && !e.closing && (g.versions == nil || e.version.Load() == version) {
+			e.stampAt(now)
+			dst[i] = e.log
+			continue
+		}
+		dst[i] = nil
+		missing = true
+	}
+	g.mu.RUnlock()
+	if !missing {
+		return dst, nil
+	}
+	for i, idx := range idxs {
+		if dst[i] != nil {
+			continue
+		}
+		l, err := g.Get(topicName, idx)
+		if err != nil {
+			return nil, err
+		}
+		dst[i] = l
+	}
+	return dst, nil
 }
 
 // openGuarded is Get's slow path: re-validate or open the (topic, idx)
