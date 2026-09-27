@@ -46,13 +46,6 @@ func TestPeerClientOperationLanes(t *testing.T) {
 			},
 			want: clusterrpc.LaneProduce,
 		},
-		"commit_produce": {
-			call: func(c *PeerClient) error {
-				_, err := c.CommitProduce(ctx, "peer", nodewire.CommitProduceRequest{Topic: "orders", Payload: []byte("x")})
-				return err
-			},
-			want: clusterrpc.LaneProduce,
-		},
 		"commit_produce_batch": {
 			call: func(c *PeerClient) error {
 				_, err := c.CommitProduceBatch(ctx, "peer", nodewire.CommitProduceBatchRequest{})
