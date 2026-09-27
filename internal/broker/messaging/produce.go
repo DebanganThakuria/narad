@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/errs"
-	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
 type produceStage string
@@ -81,9 +79,7 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 		return 0, 0, err
 	}
 
-	offset, err := e.logs.WithProduceLockResult(topicName, partIdx, func(log *storage.Log) (int64, error) {
-		return e.appendAndCommit(log, storage.EncodeKeyedRecord(key, time.Now().UnixMilli(), payload))
-	})
+	offset, err := e.commitPayload(ctx, topicName, partIdx, key, payload)
 	if err != nil {
 		e.recordProduceError(err)
 		return 0, 0, err
@@ -95,9 +91,12 @@ func (e *Engine) Produce(ctx context.Context, topicName, key string, payload []b
 }
 
 // recordProduceError classifies a produce failure into an error-metric
-// reason.
+// reason. A commit turned away by the owner, freeze or incarnation check
+// is a rejection the dispatcher reroutes or retries, not a failure: the
+// check before the produce lock never counted one, and its repeat under
+// the lock does not either.
 func (e *Engine) recordProduceError(err error) {
-	if e.metrics == nil {
+	if e.metrics == nil || errors.Is(err, ErrNotPartitionOwner) || errors.Is(err, ErrTopicIncarnationMismatch) {
 		return
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

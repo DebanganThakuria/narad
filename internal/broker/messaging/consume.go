@@ -129,14 +129,10 @@ func (e *Engine) ConsumeProbe(ctx context.Context, topicName string, opts Consum
 	if err != nil {
 		return topic.Message{}, false, nil, err
 	}
-	w := &ConsumeWaiter{
-		topic:             topicName,
-		scan:              scan,
-		scanStart:         e.consumeScanStart(topicName, scan, opts),
-		visibilityTimeout: time.Duration(t.VisibilityTimeoutMs) * time.Millisecond,
-		start:             time.Now(),
-	}
-	msg, found, err := e.tryQueueRead(ctx, topicName, scan, w.scanStart, w.visibilityTimeout)
+	scanStart := e.consumeScanStart(topicName, scan, opts)
+	visibilityTimeout := time.Duration(t.VisibilityTimeoutMs) * time.Millisecond
+	start := time.Now()
+	msg, found, err := e.tryQueueRead(ctx, topicName, scan, scanStart, visibilityTimeout)
 	if err != nil {
 		if e.metrics != nil {
 			e.metrics.IncError("messaging", "consume")
@@ -145,10 +141,17 @@ func (e *Engine) ConsumeProbe(ctx context.Context, topicName string, opts Consum
 	}
 	if found {
 		e.recordConsumed(topicName, msg.Partition, len(msg.Payload))
-		e.recordConsumeWait(topicName, "hit", time.Since(w.start))
+		e.recordConsumeWait(topicName, "hit", time.Since(start))
 		return msg, true, nil, nil
 	}
-	return topic.Message{}, false, w, nil
+	// Built only on a miss: a hit never parks, so it has no use for one.
+	return topic.Message{}, false, &ConsumeWaiter{
+		topic:             topicName,
+		scan:              scan,
+		scanStart:         scanStart,
+		visibilityTimeout: visibilityTimeout,
+		start:             start,
+	}, nil
 }
 
 // ConsumeWait is the blocking half. It does not scan and it does not
@@ -405,35 +408,16 @@ func (e *Engine) replayRead(topicName string, partitionIdx int, offset int64, to
 // Ack — the broker rejects acks for offsets the consumer did not
 // reserve, and acks whose visibility window has elapsed.
 func (e *Engine) tryQueueRead(ctx context.Context, topicName string, partitions []int, scanStart int, visibilityTimeout time.Duration) (topic.Message, bool, error) {
-	logs, err := e.partitionLogs(topicName, partitions)
-	if err != nil {
-		return topic.Message{}, false, err
-	}
-	return e.tryQueueReadLogs(ctx, topicName, partitions, logs, scanStart, visibilityTimeout)
-}
-
-// partitionLogs resolves the log of every partition in the scan, in scan
-// order. One Logs.Get per partition per consume iteration, shared by the
-// notify snapshot and the probe.
-func (e *Engine) partitionLogs(topicName string, partitions []int) ([]*storage.Log, error) {
-	logs := make([]*storage.Log, len(partitions))
-	for i, idx := range partitions {
-		log, err := e.logs.Get(topicName, idx)
-		if err != nil {
-			return nil, err
-		}
-		logs[i] = log
-	}
-	return logs, nil
-}
-
-// tryQueueReadLogs is tryQueueRead over pre-resolved logs (logs[i] is
-// the log of partitions[i]).
-func (e *Engine) tryQueueReadLogs(ctx context.Context, topicName string, partitions []int, logs []*storage.Log, scanStart int, visibilityTimeout time.Duration) (topic.Message, bool, error) {
 	for i := range partitions {
 		pos := (scanStart + i) % len(partitions)
 		idx := partitions[pos]
-		log := logs[pos]
+		// Resolved as the scan reaches the partition, so a consume that
+		// hits early does not open and stamp the rest. Before the pause
+		// check, so a paused partition's log is still opened and kept warm.
+		log, err := e.logs.Get(topicName, idx)
+		if err != nil {
+			return topic.Message{}, false, err
+		}
 		if e.isConsumePaused(topicName, idx) {
 			continue // handing off: the new owner serves it in a moment
 		}
@@ -456,6 +440,14 @@ func (e *Engine) tryQueueReadLogs(ctx context.Context, topicName string, partiti
 				if errors.Is(err, storage.ErrOffsetNotFound) {
 					if oldest := log.OldestOffset(); res.Offset < oldest {
 						skipped, serr := e.offsets.SkipMissingBelow(topicName, idx, res.Offset, res.Nonce, oldest)
+						if errors.Is(serr, consumer.ErrHandleStale) {
+							// A concurrent consume skipped the same gap first, and
+							// dropped this reservation with everything else below
+							// oldest. The gap is resolved: reserve again, from at
+							// or above oldest. Returning the error answered a
+							// plain consume, which never held a handle, with 410.
+							continue
+						}
 						if serr != nil {
 							return topic.Message{}, false, serr
 						}
@@ -472,7 +464,15 @@ func (e *Engine) tryQueueReadLogs(ctx context.Context, topicName string, partiti
 				// and moving on could stall a long-poll for the full Wait even
 				// though data is available here.
 				if storage.IsCorrupt(err) || errors.Is(err, storage.ErrOffsetNotFound) {
-					if serr := e.offsets.SkipCorrupt(topicName, idx, res.Offset, res.Nonce); serr != nil {
+					serr := e.offsets.SkipCorrupt(topicName, idx, res.Offset, res.Nonce)
+					if errors.Is(serr, consumer.ErrHandleStale) {
+						// The reservation lapsed or was dropped while the read
+						// failed, so the offset is no longer this consume's to
+						// resolve. Reserve again rather than fail a consume that
+						// never held a handle.
+						continue
+					}
+					if serr != nil {
 						return topic.Message{}, false, serr
 					}
 					if e.metrics != nil {

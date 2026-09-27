@@ -172,12 +172,14 @@ func (f *forgetFence) forget(key string) {
 }
 
 // ForgetTopic drops every cached view this engine holds of topicName:
-// its record, its assignments, its schema load marker and its consume
-// cursor. The topic manager calls it when a topic incarnation's local
-// state is retired, after dropping the topic's compiled schemas, so a
-// deleted topic stops costing memory on every node it was used on. Any
-// of it reloads from the metastore on the next use, so forgetting a
-// live same-named successor only costs a reload.
+// its record, its assignments, its schema load marker, its consume
+// cursor, its partitions' commit combiners and, when nothing is parked
+// on it any more, its dispatch state. The topic manager calls it when a
+// topic incarnation's local state is retired, after dropping the topic's
+// compiled schemas and releasing its waiters, so a deleted topic stops
+// costing memory on every node it was used on. Any of it reloads from
+// the metastore or is rebuilt on the next use, so forgetting a live
+// same-named successor only costs a reload.
 func (e *Engine) ForgetTopic(topicName string) {
 	e.cacheMu.Lock()
 	e.cacheForgets.forget(topicName)
@@ -186,6 +188,10 @@ func (e *Engine) ForgetTopic(topicName string) {
 	delete(e.schemaLoadCache, topicName)
 	e.cacheMu.Unlock()
 	e.consumeCursors.Delete(topicName)
+	e.forgetCombiners(topicName)
+	if e.dispatch != nil {
+		e.dispatch.forget(topicName)
+	}
 }
 
 // forgetSchemaLoad drops the topic's schema load marker so the next

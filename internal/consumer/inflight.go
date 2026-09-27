@@ -8,6 +8,7 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -83,15 +84,21 @@ type ReleaseFunc func(topic string, partition int)
 // most one redelivery per leased message. The committed frontier and the
 // acked-ahead set are persisted through CommitFunc and recovered lazily.
 type InFlight struct {
-	mu           sync.RWMutex
-	shards       map[shardKey]*partitionShard
+	// shards maps shardKey to *partitionShard. Every reserve, ack,
+	// extend and nack looks its shard up, from every core, while the set
+	// only changes when a partition is first touched, moves or is
+	// deleted; a sync.Map serves those lookups without writing a shared
+	// lock word.
+	shards       sync.Map
 	onCommit     CommitFunc
 	resolve      CapsResolver
 	recover      CommittedRecoverFunc
 	recoverAhead AheadRecoverFunc
 
-	clockMu sync.RWMutex
-	timeNow func() int64 // replaced in tests
+	// clock, when set, replaces the wall clock (Unix ms); only tests set
+	// it. Every reserve and ack reads it, so it is an atomic pointer
+	// rather than a field behind a process-wide lock.
+	clock atomic.Pointer[func() int64]
 
 	notifyMu  sync.RWMutex
 	onRelease ReleaseFunc
@@ -105,10 +112,8 @@ type InFlight struct {
 // persistence, useful for tests or early development).
 func NewInFlight(resolve CapsResolver, onCommit CommitFunc) *InFlight {
 	return &InFlight{
-		shards:   make(map[shardKey]*partitionShard),
 		onCommit: onCommit,
 		resolve:  resolve,
-		timeNow:  nowUnixMs,
 	}
 }
 
@@ -159,9 +164,7 @@ func (f *InFlight) Init(ctx context.Context, topic string, partition int, commit
 		return err
 	}
 
-	f.mu.Lock()
-	f.shards[shardKey{topic, partition}] = newPartitionShard(committed, caps)
-	f.mu.Unlock()
+	f.shards.Store(shardKey{topic, partition}, newPartitionShard(committed, caps))
 	return nil
 }
 
@@ -238,31 +241,31 @@ func (f *InFlight) RefreshCaps(ctx context.Context, topic string) error {
 		return err
 	}
 
-	f.mu.RLock()
-	for k, sh := range f.shards {
-		if k.topic != topic {
-			continue
+	f.shards.Range(func(k, v any) bool {
+		if k.(shardKey).topic != topic {
+			return true
 		}
+		sh := v.(*partitionShard)
 		sh.mu.Lock()
 		sh.maxInFlight = caps.MaxInFlight
 		sh.maxAckedAhead = caps.MaxAckedAhead
 		sh.mu.Unlock()
-	}
-	f.mu.RUnlock()
+		return true
+	})
 	return nil
 }
 
 // DropTopic removes all shards for a topic. Called on topic deletion.
 func (f *InFlight) DropTopic(topic string) {
 	var dropped []int
-	f.mu.Lock()
-	for k := range f.shards {
-		if k.topic == topic {
-			delete(f.shards, k)
-			dropped = append(dropped, k.partition)
+	f.shards.Range(func(k, v any) bool {
+		// Only the shard seen here: one recreated for the name since is
+		// a shard of the successor.
+		if key := k.(shardKey); key.topic == topic && f.shards.CompareAndDelete(k, v) {
+			dropped = append(dropped, key.partition)
 		}
-	}
-	f.mu.Unlock()
+		return true
+	})
 	if f.onDrop != nil {
 		for _, p := range dropped {
 			f.onDrop(topic, p)
@@ -276,9 +279,7 @@ func (f *InFlight) DropTopic(topic string) {
 // moves away and back never resumes from a stale in-memory frontier
 // instead of the persisted consumer.offset the move carried over.
 func (f *InFlight) DropPartition(topic string, partition int) {
-	f.mu.Lock()
-	delete(f.shards, shardKey{topic, partition})
-	f.mu.Unlock()
+	f.shards.Delete(shardKey{topic, partition})
 	if f.onDrop != nil {
 		f.onDrop(topic, partition)
 	}
@@ -327,10 +328,10 @@ func (f *InFlight) notifyRelease(topic string, partition int) {
 
 // shard returns the live shard for (topic, partition), or nil.
 func (f *InFlight) shard(topic string, partition int) *partitionShard {
-	f.mu.RLock()
-	sh := f.shards[shardKey{topic, partition}]
-	f.mu.RUnlock()
-	return sh
+	if v, ok := f.shards.Load(shardKey{topic, partition}); ok {
+		return v.(*partitionShard)
+	}
+	return nil
 }
 
 // shardOrCreate returns the live shard for (topic, partition), creating
@@ -369,13 +370,9 @@ func (f *InFlight) shardOrCreate(ctx context.Context, topic string, partition in
 	// lagged the set); persist that advance like any other.
 	advanced := fresh.seedAheadLocked(ahead)
 
-	f.mu.Lock()
-	if existing := f.shards[key]; existing != nil {
-		f.mu.Unlock()
-		return existing, nil
+	if existing, loaded := f.shards.LoadOrStore(key, fresh); loaded {
+		return existing.(*partitionShard), nil
 	}
-	f.shards[key] = fresh
-	f.mu.Unlock()
 	if advanced > committed && f.onCommit != nil {
 		f.onCommit(topic, partition, advanced)
 	}
@@ -395,18 +392,12 @@ func (f *InFlight) resolvedCaps(ctx context.Context, topic string) (Caps, error)
 }
 
 func (f *InFlight) now() int64 {
-	f.clockMu.RLock()
-	now := f.timeNow
-	f.clockMu.RUnlock()
-	return now()
+	if c := f.clock.Load(); c != nil {
+		return (*c)()
+	}
+	return time.Now().UnixMilli()
 }
 
 func (f *InFlight) setTimeNow(now func() int64) {
-	f.clockMu.Lock()
-	f.timeNow = now
-	f.clockMu.Unlock()
-}
-
-func nowUnixMs() int64 {
-	return time.Now().UnixMilli()
+	f.clock.Store(&now)
 }

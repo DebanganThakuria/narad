@@ -76,6 +76,7 @@ func (e *Engine) armHandoffFreeze(topicName string, partition int, ttl time.Dura
 	cur, active := e.producePauses[key]
 	if active && now >= cur.expiresUnixNano {
 		delete(e.producePauses, key)
+		e.producePausesActive.Add(-1)
 		active = false
 	}
 	if requireToken != "" && (!active || cur.token != requireToken) {
@@ -84,6 +85,8 @@ func (e *Engine) armHandoffFreeze(topicName string, partition int, ttl time.Dura
 	token := cur.token
 	if !active {
 		token = newFreezeToken()
+		// Counted before it is visible: see producePausesActive.
+		e.producePausesActive.Add(1)
 	}
 	e.producePauses[key] = producePause{expiresUnixNano: now + int64(ttl), token: token}
 	return token, nil
@@ -101,8 +104,14 @@ func (e *Engine) PauseProduceForHandoff(topicName string, partition int, ttl tim
 func (e *Engine) ResumeProduce(topicName string, partition int) {
 	key := producePauseKey(topicName, partition)
 	e.pauseMu.Lock()
-	delete(e.producePauses, key)
-	delete(e.consumePauses, key)
+	if _, ok := e.producePauses[key]; ok {
+		delete(e.producePauses, key)
+		e.producePausesActive.Add(-1)
+	}
+	if _, ok := e.consumePauses[key]; ok {
+		delete(e.consumePauses, key)
+		e.consumePausesActive.Add(-1)
+	}
 	e.pauseMu.Unlock()
 }
 
@@ -114,17 +123,27 @@ func (e *Engine) PauseConsumeForHandoff(topicName string, partition int, ttl tim
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}
+	key := producePauseKey(topicName, partition)
 	e.pauseMu.Lock()
 	if e.consumePauses == nil {
 		e.consumePauses = make(map[string]int64)
 	}
-	e.consumePauses[producePauseKey(topicName, partition)] = e.now().Add(ttl).UnixNano()
+	if _, ok := e.consumePauses[key]; !ok {
+		// Counted before it is visible: see consumePausesActive.
+		e.consumePausesActive.Add(1)
+	}
+	e.consumePauses[key] = e.now().Add(ttl).UnixNano()
 	e.pauseMu.Unlock()
 }
 
 // isConsumePaused reports whether new reservations are frozen for the
-// partition, lazily expiring a lapsed pause.
+// partition, lazily expiring a lapsed pause. Every consume scan asks it
+// for every partition it visits, so when nothing is paused anywhere it
+// answers from one atomic load instead of the engine-wide pauseMu.
 func (e *Engine) isConsumePaused(topicName string, partition int) bool {
+	if e.consumePausesActive.Load() == 0 {
+		return false
+	}
 	key := producePauseKey(topicName, partition)
 	e.pauseMu.Lock()
 	defer e.pauseMu.Unlock()
@@ -134,6 +153,7 @@ func (e *Engine) isConsumePaused(topicName string, partition int) bool {
 	}
 	if e.now().UnixNano() >= exp {
 		delete(e.consumePauses, key)
+		e.consumePausesActive.Add(-1)
 		return false
 	}
 	return true
@@ -148,8 +168,15 @@ const handoffDrainWait = 500 * time.Millisecond
 
 // isProducePaused reports whether the partition is currently paused for
 // handoff, lazily expiring a lapsed pause (auto-resume) so a dead
-// destination can never wedge produce forever.
+// destination can never wedge produce forever. With nothing paused
+// anywhere it answers from one atomic load. Commits ask it again under
+// the produce lock, after prepareHandoff armed the freeze (count raised
+// first) and released that lock, so a zero read there can never hide a
+// freeze the handoff is relying on.
 func (e *Engine) isProducePaused(topicName string, partition int) bool {
+	if e.producePausesActive.Load() == 0 {
+		return false
+	}
 	key := producePauseKey(topicName, partition)
 	e.pauseMu.Lock()
 	defer e.pauseMu.Unlock()
@@ -159,6 +186,7 @@ func (e *Engine) isProducePaused(topicName string, partition int) bool {
 	}
 	if e.now().UnixNano() >= p.expiresUnixNano {
 		delete(e.producePauses, key)
+		e.producePausesActive.Add(-1)
 		return false
 	}
 	return true
@@ -245,7 +273,8 @@ func (e *Engine) prepareHandoff(ctx context.Context, topicName string, partition
 	// the gate before the freeze may still be inside its append+fsync
 	// under the produce lock. Taking that lock here waits for it to
 	// finish, so the HWM reported is final: nothing can advance it
-	// afterwards while the freeze holds.
+	// afterwards while the freeze holds, because every commit checks the
+	// gate again once it holds this lock.
 	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
 	var info PartitionTransferInfo
 	err = e.logs.WithProduceLock(topicName, partition, func(log *storage.Log) error {
