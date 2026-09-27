@@ -120,9 +120,15 @@ func (rt *Router) reprobeRemote(ctx context.Context, w http.ResponseWriter, topi
 
 // probeCandidates probes each candidate once, starting at index start and
 // wrapping around, and writes the first delivered message to w. It
-// reports whether a message was written.
+// reports whether a message was written. It stops early once ctx is
+// done.
 func (rt *Router) probeCandidates(ctx context.Context, w http.ResponseWriter, topicName string, candidates []string, start int) bool {
 	for i := range candidates {
+		if ctx.Err() != nil {
+			// The client is gone: probing the rest would only reserve a
+			// record for nobody and release it again.
+			return false
+		}
 		addr := candidates[(start+i)%len(candidates)]
 		result := rt.callConsumeProbe(ctx, topicName, addr)
 		if result.err != nil {

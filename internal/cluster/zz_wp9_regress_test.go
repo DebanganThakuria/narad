@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,24 @@ import (
 	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
+
+// The remaining owners are not probed once the client is gone.
+func TestZZWP9ProbeStopsWhenTheClientLeaves(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var probes atomic.Int32
+	router := multiOwnerRouter(t, fakePeerClient{consumeFn: func(context.Context, string, nodewire.ConsumeRequest) (nodewire.Response, error) {
+		probes.Add(1)
+		cancel()
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	}}, 3)
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume", nil)
+	router.RouteConsumeRemote(ctx, res, req, "orders")
+	if n := probes.Load(); n != 1 {
+		t.Fatalf("probed %d owners after the client left during the first probe, want 1", n)
+	}
+}
 
 // A forwarded 204 is written bare: a bodiless reply has nothing to type
 // or sniff, and setting the headers cost a header map and its clone on
