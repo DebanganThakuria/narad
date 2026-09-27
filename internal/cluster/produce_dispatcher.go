@@ -30,8 +30,10 @@ const (
 
 	// produceDispatchBaseWindow is the window used before any fan-out has
 	// been observed and the floor it never drops below (clamped to the
-	// BatchSize cap). At low fan-out this already yields large
-	// per-partition batches.
+	// BatchSize cap). It is also the least one destination may queue for
+	// a single commit (see perDestCap): the pass-based dispatcher sent a
+	// whole window to a lone hot partition per round trip, and a
+	// latency-bound destination must not get less.
 	produceDispatchBaseWindow = 4096
 
 	// produceDispatchTargetPerPartition is the per-partition batch size

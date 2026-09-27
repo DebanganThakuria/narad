@@ -298,7 +298,7 @@ func (d *ProduceDispatcher) finish(ctx context.Context, st *produceDispatchState
 // the commit, and asks for its records left in the WAL for want of room
 // once its queue has drained.
 func (d *ProduceDispatcher) afterCommit(st *produceDispatchState, dest *dispatchDest) {
-	if dest.skipped > 0 && !dest.failing() && !dest.unresolved && len(dest.queue) < st.perDestCap()/2 {
+	if dest.skipped > 0 && !dest.failing() && !dest.unresolved && len(dest.queue) < d.perDestCap(st)/2 {
 		st.requestRescan(dest)
 	}
 	st.enqueue(dest)

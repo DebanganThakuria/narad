@@ -155,9 +155,10 @@ type produceDispatchState struct {
 	// marks covers [nextSeq, readSeq).
 	marks seqMarks
 
-	// windowLimit is the adaptive window: the most records held in
-	// memory at once and, times produceDispatchLookaheadWindows, the
-	// horizon past the checkpoint. It grows toward
+	// windowLimit is the adaptive window: it sets how many records may
+	// be held in memory at once (holdLimit) and, times
+	// produceDispatchLookaheadWindows, the horizon past the checkpoint.
+	// It grows toward
 	// produceDispatchTargetPerPartition * (distinct destinations) as
 	// soon as that fan-out is seen and shrinks back only after a whole
 	// window of records has shown less, clamped to [base, BatchSize].
@@ -172,7 +173,7 @@ type produceDispatchState struct {
 	ready   []*dispatchDest
 	waiting map[*dispatchDest]struct{}
 	// held counts records queued or in flight, and slowHeld the part of
-	// them in slow commits, which the window does not count: a hung
+	// them in slow commits, which holdLimit does not count: a hung
 	// owner's batches stay in memory until their RPCs give up, but must
 	// not stop everyone else's records from being read.
 	held     int
@@ -316,21 +317,34 @@ func (d *ProduceDispatcher) sweepIdle(st *produceDispatchState) {
 	}
 }
 
-// perDestCap is the most records one destination may hold queued: a
-// share of the window, so one hot or slow partition cannot take all of
-// it and stall the others.
-func (st *produceDispatchState) perDestCap() int {
-	return max(st.windowLimit/4, 1)
+// perDestCap is the most records one destination may queue for its next
+// commit: a quarter of the window, and never less than
+// produceDispatchBaseWindow (a quarter of the BatchSize cap when that is
+// smaller). A latency-bound destination commits one queue per round
+// trip, so a lone hot partition gets as much per commit as the
+// pass-based dispatcher gave it.
+func (d *ProduceDispatcher) perDestCap(st *produceDispatchState) int {
+	return max(st.windowLimit/4, min(produceDispatchBaseWindow, d.batchSize/4), 1)
+}
+
+// holdLimit is how many records may be held (queued or in flight, slow
+// commits aside) before the reader stops: the window, but at least four
+// destinations' caps, within the BatchSize cap. One destination holds at
+// most two caps (a batch in flight and a full queue), so a hot or slow
+// partition never takes more than half of it and the others' records
+// keep being read while its commit runs.
+func (d *ProduceDispatcher) holdLimit(st *produceDispatchState) int {
+	return min(max(st.windowLimit, 4*d.perDestCap(st)), max(d.batchSize, 1))
 }
 
 // read reads newly durable records, or, when a rescan is due, the
 // skipped ones first, and places each. It stops at the durable frontier,
-// the lookahead horizon, or once the window's worth of records is held.
+// the lookahead horizon, or once holdLimit records are held.
 func (d *ProduceDispatcher) read(ctx context.Context, st *produceDispatchState) {
 	now := d.now()
 	durableNext := d.ingress.DurableProduceNext()
-	limit := st.windowLimit
-	horizon := st.nextSeq + uint64(limit)*produceDispatchLookaheadWindows
+	limit := d.holdLimit(st)
+	horizon := st.nextSeq + uint64(st.windowLimit)*produceDispatchLookaheadWindows
 
 	start := st.readCursor
 	rescan := false
@@ -505,7 +519,7 @@ func (d *ProduceDispatcher) place(ctx context.Context, st *produceDispatchState,
 		d.hold(st, orig, rec, orig.key.partition)
 		return
 	}
-	if orig.slow || len(orig.queue) >= st.perDestCap() {
+	if orig.slow || len(orig.queue) >= d.perDestCap(st) {
 		// Nothing queues behind a commit that has stopped answering:
 		// the window stays free for everyone else until it lands.
 		skip()
