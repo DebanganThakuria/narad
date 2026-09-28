@@ -120,6 +120,10 @@ type ConsumerOffsetCommitter struct {
 	// began: a snapshot taken before a Forget must not be written
 	// through a descriptor opened after it.
 	forgotten map[offsetCommitKey]struct{}
+	// stranded holds the partitions whose directory was removed or
+	// replaced under the state the committer held for them, until their
+	// next Forget: no snapshot primes them meanwhile (see strandLocked).
+	stranded map[offsetCommitKey]struct{}
 	// clean lists the durable partitions holding a descriptor, least
 	// recently written first: the only ones the descriptor cap evicts.
 	clean  offsetLRU
@@ -289,6 +293,7 @@ func newConsumerOffsetCommitter(dataDir string, interval time.Duration, log *slo
 		pending:   make(map[offsetCommitKey]int64),
 		parts:     make(map[offsetCommitKey]*offsetPart),
 		forgotten: make(map[offsetCommitKey]struct{}),
+		stranded:  make(map[offsetCommitKey]struct{}),
 		maxFDs:    offsetFDCap(),
 		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
@@ -342,11 +347,12 @@ func (c *ConsumerOffsetCommitter) Commit(topic string, partition int, offset int
 // installs a copy, a reclaim quarantines it, a purge removes it) and
 // again after; once Forget returns, no snapshot taken before it is
 // written, and the next tick for the partition starts from the files
-// then on disk.
+// then on disk. It also lifts a strand (see strandLocked).
 func (c *ConsumerOffsetCommitter) Forget(topic string, partition int) {
 	key := offsetCommitKey{topic: topic, partition: partition}
 	c.ioMu.Lock()
 	c.forgotten[key] = struct{}{}
+	delete(c.stranded, key)
 	if st := c.parts[key]; st != nil {
 		c.dropLocked(st)
 	}
@@ -559,6 +565,11 @@ func (c *ConsumerOffsetCommitter) prime(wants []offsetWant, hasSource bool, errs
 			}
 			continue
 		}
+		if _, stranded := c.stranded[w.key]; stranded {
+			// A snapshot of the shard whose directory went away: it
+			// belongs to no directory now at the path.
+			continue
+		}
 		st := c.parts[w.key]
 		if st == nil {
 			st = c.newPart(w.key)
@@ -570,7 +581,7 @@ func (c *ConsumerOffsetCommitter) prime(wants []offsetWant, hasSource bool, errs
 		}
 		p, err := c.primeLocked(st)
 		if errors.Is(err, errOffsetDirGone) {
-			c.dropLocked(st)
+			c.strandLocked(st)
 			continue
 		}
 		if err != nil {
@@ -637,6 +648,9 @@ func (c *ConsumerOffsetCommitter) primeLocked(st *offsetPart) (offsetSync, error
 	if !dirInfo.IsDir() {
 		return offsetSync{}, fmt.Errorf("consumer state partition path is not a directory: %s", st.dir)
 	}
+	// From here st's shard is being persisted into this directory: if it
+	// goes away, the partition is stranded.
+	st.dirInfo = dirInfo
 	path := filepath.Join(st.dir, storage.ConsumerAheadFileName)
 	created := false
 	f, err := syncfile.OpenFile(path, os.O_RDWR, storage.ConsumerStateFileMode)
@@ -786,7 +800,7 @@ func (c *ConsumerOffsetCommitter) writeWindows(now time.Time, wants []offsetWant
 		rec := storage.EncodeConsumerAhead(seq, committed, w.offsets)
 		f, transient, err := c.fdLocked(st)
 		if errors.Is(err, errOffsetDirGone) {
-			c.dropLocked(st)
+			c.strandLocked(st)
 			continue
 		}
 		if err == nil {
@@ -834,7 +848,7 @@ func (c *ConsumerOffsetCommitter) writeWindows(now time.Time, wants []offsetWant
 		if due {
 			f, transient, err := c.fdLocked(st)
 			if errors.Is(err, errOffsetDirGone) {
-				c.dropLocked(st)
+				c.strandLocked(st)
 				continue
 			}
 			if err != nil {
@@ -980,7 +994,7 @@ func (c *ConsumerOffsetCommitter) flip(now, flipAt time.Time, syncs []offsetSync
 		}
 		switch {
 		case s.gone:
-			c.dropLocked(st)
+			c.strandLocked(st)
 		case s.err != nil:
 			errs.add(st.key, "sync", s.err)
 			if s.window {
@@ -1066,6 +1080,30 @@ func sameFileAt(f *os.File, path string) bool {
 	}
 	now, err := os.Stat(path)
 	return err == nil && os.SameFile(held, now)
+}
+
+// strandLocked drops st, whose directory was removed or replaced under
+// it, and strands its partition until the next Forget: no snapshot
+// primes it meanwhile. st is not dead, so no Forget came since the
+// snapshot that created it; every drop of a shard Forgets, so the shard
+// st was written for is still the live one, and it predates whatever
+// the path names from now on (a move's copy, a recreated topic). Priming
+// that by path with the shard's snapshots would hand the new lineage an
+// old frontier. The reset that follows an install or a quarantine drops
+// the shard, and its Forget lifts the strand. A st that never opened a
+// directory (dirInfo nil) knows nothing of the path and is only
+// dropped, as is every st of a committer without a source, which has no
+// shard to tie a commit to. Caller holds ioMu.
+func (c *ConsumerOffsetCommitter) strandLocked(st *offsetPart) {
+	if !st.dead && st.dirInfo != nil {
+		c.mu.Lock()
+		hasSource := c.ahead != nil
+		c.mu.Unlock()
+		if hasSource {
+			c.stranded[st.key] = struct{}{}
+		}
+	}
+	c.dropLocked(st)
 }
 
 // dropLocked forgets st: closes its descriptor and removes it, so the
