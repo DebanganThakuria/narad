@@ -2,11 +2,12 @@ package cluster
 
 // The per-(child, parentPartition) fan-out cursor loop: read a large
 // slab of committed parent records (fill-or-linger), re-key each with
-// the child's partitioner, commit the per-child-partition batches
-// concurrently (local, or one RPC to the owner each), and only then
-// advance the persisted offset. Commit-before-advance makes delivery
-// at-least-once: a crash mid-flight re-commits the last slab as
-// duplicates, never loses it.
+// the child's partitioner (a keyless record keeps its parent
+// partition's index when the partition counts match), commit the
+// per-child-partition batches concurrently (local, or one RPC to the
+// owner each), and only then advance the persisted offset.
+// Commit-before-advance makes delivery at-least-once: a crash
+// mid-flight re-commits the last slab as duplicates, never loses it.
 
 import (
 	"context"
@@ -338,7 +339,11 @@ func (r *FanoutRunner) commitBatchOnce(ctx context.Context, key fanoutCursorKey,
 		// nothing and let the reconciler stop this cursor.
 		return records
 	}
-	buckets, picks, ok := r.bucketByChildPartition(key, records, child.Partitions)
+	keepIndex, ok := r.keylessKeepsIndex(ctx, key, records, child.Partitions)
+	if !ok {
+		return records
+	}
+	buckets, picks, ok := r.bucketByChildPartition(key, records, child.Partitions, keepIndex)
 	if !ok {
 		return records
 	}
@@ -349,16 +354,52 @@ func (r *FanoutRunner) commitBatchOnce(ctx context.Context, key fanoutCursorKey,
 	return pendingRecords(records, picks, failed)
 }
 
+// keylessKeepsIndex reports whether the keyless records of this slab
+// keep their parent partition's index in the child: when the child has
+// as many partitions as the parent. That is the replica pattern's shape
+// (a child created with parent keeps the inherited count), where
+// placement puts child partition p on a different node than parent
+// partition p; a keyed record reaches the same index by its key's hash,
+// and keeping the index gives a keyless record the same two nodes. It
+// also keeps the parent partition's keyless records in their order.
+// When the counts differ there is no index to keep and no placement
+// promise: keyless records go round-robin over the child's partitions.
+// The parent is read only for a slab that holds a keyless record;
+// ok=false when that read fails (the cursor retries the slab).
+func (r *FanoutRunner) keylessKeepsIndex(ctx context.Context, key fanoutCursorKey, records []topic.KeyedRecord, childPartitions int) (keep, ok bool) {
+	keyless := false
+	for i := range records {
+		if records[i].Key == "" {
+			keyless = true
+			break
+		}
+	}
+	if !keyless {
+		return false, true
+	}
+	parent, err := r.store.GetTopic(ctx, key.parent)
+	if err != nil {
+		return false, false
+	}
+	return parent.Partitions == childPartitions && key.partition < childPartitions, true
+}
+
 // bucketByChildPartition re-keys records with the child's partitioner
 // into one bucket per touched child partition, each in slab order (a
-// key maps to one partition, so its records keep their order). The
-// buckets share one backing array; picks[i] is record i's partition.
-// ok=false when the partitioner answered outside [0, partitions).
-func (r *FanoutRunner) bucketByChildPartition(key fanoutCursorKey, records []topic.KeyedRecord, partitions int) ([]fanoutBucket, []int, bool) {
+// key maps to one partition, so its records keep their order). With
+// keepIndex, a keyless record goes to the parent partition's index
+// instead (see keylessKeepsIndex); otherwise the partitioner places it
+// round-robin. The buckets share one backing array; picks[i] is record
+// i's partition. ok=false when the partitioner answered outside
+// [0, partitions).
+func (r *FanoutRunner) bucketByChildPartition(key fanoutCursorKey, records []topic.KeyedRecord, partitions int, keepIndex bool) ([]fanoutBucket, []int, bool) {
 	picks := make([]int, len(records))
 	counts := make([]int, max(partitions, 0))
 	for i, rec := range records {
-		p := r.partitioner.Pick(key.child, rec.Key, partitions)
+		p := key.partition
+		if rec.Key != "" || !keepIndex {
+			p = r.partitioner.Pick(key.child, rec.Key, partitions)
+		}
 		if p < 0 || p >= partitions {
 			r.logger.Error("fanout: partitioner picked a child partition out of range",
 				"child", key.child, "partition", p, "partitions", partitions)
