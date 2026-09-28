@@ -210,13 +210,7 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 
 	unlock := g.lockTopic(topicName)
 	defer unlock()
-	l, _, quarantined, err := g.openGuarded(topicName, idx, false)
-	if quarantined {
-		// A deleted incarnation's directory was set aside: drop the
-		// in-memory state that belonged to it (outside mu, under the
-		// guard).
-		g.notifyRetired(topicName)
-	}
+	l, _, err := g.openGuarded(topicName, idx, false)
 	return l, err
 }
 
@@ -277,9 +271,10 @@ func (g *Logs) GetMany(topicName string, idxs []int, dst []*storage.Log) ([]*sto
 // add or drop its entries, so the entry found here stays put until the
 // new one is installed under mu. walk marks a newly installed entry as
 // the cold-retention walk's (see openForWalk) in the same critical
-// section. quarantined reports that a directory of another incarnation
-// was set aside on the way.
-func (g *Logs) openGuarded(topicName string, idx int, walk bool) (l *storage.Log, entry *logEntry, quarantined bool, err error) {
+// section. A directory of another incarnation found on the way is
+// quarantined and that incarnation retired before the log's directory
+// is made (see ensureIncarnationGuarded).
+func (g *Logs) openGuarded(topicName string, idx int, walk bool) (l *storage.Log, entry *logEntry, err error) {
 	var version uint64
 	if g.versions != nil {
 		// Read the version BEFORE the record: a change that lands
@@ -302,9 +297,9 @@ func (g *Logs) openGuarded(topicName string, idx int, walk bool) (l *storage.Log
 			// after the topic's files were purged. The delete path waits
 			// for the local replica to reflect the deletion before
 			// purging, so by purge time this branch is authoritative.
-			return nil, nil, false, errs.ErrTopicNotFound
+			return nil, nil, errs.ErrTopicNotFound
 		default:
-			return nil, nil, false, fmt.Errorf("broker/runtime: lookup topic for retention: %w", err)
+			return nil, nil, fmt.Errorf("broker/runtime: lookup topic for retention: %w", err)
 		}
 	}
 	key := keyOf(topicName, idx)
@@ -317,16 +312,15 @@ func (g *Logs) openGuarded(topicName string, idx int, walk bool) (l *storage.Log
 			// incarnation did not: the open log is still the right one.
 			e.version.Store(version)
 			e.stamp()
-			return e.log, e, false, nil
+			return e.log, e, nil
 		}
 		// The topic was deleted and recreated while its logs were
 		// open: every open log under the name belongs to the old
 		// incarnation and must go before the directory is checked.
 		_ = g.closeTopicGuarded(topicName)
 	}
-	quarantined, err = g.ensureIncarnationGuarded(topicName, incarnation)
-	if err != nil {
-		return nil, nil, quarantined, err
+	if err = g.ensureIncarnationGuarded(topicName, incarnation); err != nil {
+		return nil, nil, err
 	}
 	if g.metrics != nil {
 		opts.Metrics = g.metrics.StorageRecorder(topicName, idx)
@@ -335,7 +329,7 @@ func (g *Logs) openGuarded(topicName string, idx int, walk bool) (l *storage.Log
 	partitionDir := storage.TopicPartitionDir(g.dataDir, topicName, idx)
 	l, err = storage.NewLog(partitionDir, opts)
 	if err != nil {
-		return nil, nil, quarantined, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)
+		return nil, nil, fmt.Errorf("broker/runtime: open partition log %s: %w", partitionDir, err)
 	}
 	e = &logEntry{log: l, incarnation: incarnation}
 	e.version.Store(version)
@@ -347,7 +341,7 @@ func (g *Logs) openGuarded(topicName string, idx int, walk bool) (l *storage.Log
 		g.opened(topicName, idx, l)
 	}
 	g.mu.Unlock()
-	return l, e, quarantined, nil
+	return l, e, nil
 }
 
 // SetOpened registers a hook invoked with every partition log just

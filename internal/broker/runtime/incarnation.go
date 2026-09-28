@@ -85,28 +85,35 @@ func (g *Logs) lockTopic(topicName string) (unlock func()) {
 // retired incarnation carries over into a same-named successor. fn runs
 // outside the log map lock but under the topic's guard, so it may Peek
 // but must not Get.
+//
+// Until fn has run, the retired incarnation's consumer shards are live,
+// and the offset committer persists their commits by path, into
+// whatever directory the path names by then. So fn runs while no other
+// incarnation's directory is under the name: a quarantine runs it after
+// the rename, before the successor's marker and partition directories
+// are made.
 func (g *Logs) SetTopicRetiredHook(fn func(topicName string)) {
 	g.retired = fn
 }
 
 // ensureIncarnationGuarded makes topics/<name> the directory of the
-// incarnation id before a partition log is opened in it, and reports
-// whether a directory of another incarnation was quarantined doing so
-// (the caller runs the retired hook). Caller holds the topic's guard and
-// not mu: the marker read, the quarantine rename and the marker write
-// are file I/O that must not stall other topics. An empty id is a
-// record without an incarnation: the directory is used as-is.
-func (g *Logs) ensureIncarnationGuarded(topicName, id string) (quarantined bool, err error) {
+// incarnation id before a partition log is opened in it. A directory of
+// another incarnation is quarantined, and the retired hook runs then.
+// Caller holds the topic's guard and not mu: the marker read, the
+// quarantine rename and the marker write are file I/O that must not
+// stall other topics. An empty id is a record without an incarnation:
+// the directory is used as-is.
+func (g *Logs) ensureIncarnationGuarded(topicName, id string) error {
 	if id == "" {
-		return false, nil
+		return nil
 	}
 	topicDir := storage.TopicDir(g.dataDir, topicName)
 	marker, marked, err := storage.ReadTopicIncarnation(topicDir)
 	if err != nil {
-		return false, err
+		return err
 	}
 	if marked && marker == id {
-		return false, nil
+		return nil
 	}
 	if marked {
 		// The directory belongs to another incarnation of the name: a
@@ -116,22 +123,36 @@ func (g *Logs) ensureIncarnationGuarded(topicName, id string) (quarantined bool,
 		// aside for the sweep, and start the current incarnation from
 		// an empty directory.
 		if err := g.closeTopicGuarded(topicName); err != nil {
-			return false, fmt.Errorf("broker/runtime: close stale incarnation of %s: %w", topicName, err)
+			return fmt.Errorf("broker/runtime: close stale incarnation of %s: %w", topicName, err)
 		}
 		setAside, err := storage.QuarantineTopicDir(g.dataDir, topicName, marker)
 		if err != nil {
-			return false, fmt.Errorf("broker/runtime: quarantine stale incarnation of %s: %w", topicName, err)
+			return fmt.Errorf("broker/runtime: quarantine stale incarnation of %s: %w", topicName, err)
 		}
 		g.logger.Error("topic directory belongs to a deleted incarnation of the topic; quarantined instead of served",
 			"topic", topicName, "directory_incarnation", marker, "current_incarnation", id, "quarantine_dir", setAside)
-		quarantined = true
+		// Retire the deleted incarnation now, while nothing is under
+		// the name: its directory was just renamed away, and the current
+		// incarnation's partition directories are made only after this
+		// returns (the caller's storage.NewLog, a move's install). Until
+		// the hook drops them, its consumer shards are live, and the
+		// offset committer persists their commits by path. Retired after
+		// the NewLog, as it was before, a commit in between wrote the
+		// deleted incarnation's frontier into the new directory, and the
+		// recreated topic skipped its own first records. A shard made
+		// again after this, by a consumer still holding a log of the
+		// deleted incarnation, recovers nothing of it: none of its files
+		// are under the path any more. The hook runs only here: run
+		// again after the open, it could drop a shard of the current
+		// incarnation, whose log the Get fast path already serves.
+		g.notifyRetired(topicName)
 	}
 	// Unmarked: a fresh directory, or one written before markers
 	// existed (adopted by the current incarnation, the upgrade path).
 	if err := storage.WriteTopicIncarnation(topicDir, id); err != nil {
-		return quarantined, fmt.Errorf("broker/runtime: stamp incarnation of %s: %w", topicName, err)
+		return fmt.Errorf("broker/runtime: stamp incarnation of %s: %w", topicName, err)
 	}
-	return quarantined, nil
+	return nil
 }
 
 // notifyRetired runs the retired hook. Callers hold the topic's guard
@@ -150,11 +171,7 @@ func (g *Logs) notifyRetired(topicName string) {
 func (g *Logs) EnsureTopicIncarnation(topicName, id string) error {
 	unlock := g.lockTopic(topicName)
 	defer unlock()
-	quarantined, err := g.ensureIncarnationGuarded(topicName, id)
-	if quarantined {
-		g.notifyRetired(topicName)
-	}
-	return err
+	return g.ensureIncarnationGuarded(topicName, id)
 }
 
 // TopicIncarnationMatches reports whether topics/<name> may be served
