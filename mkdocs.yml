@@ -63,7 +63,6 @@ markdown_extensions:
       permalink: true
   - pymdownx.details
   - pymdownx.highlight:
-      anchor_linenums: true
       line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
@@ -75,11 +74,15 @@ markdown_extensions:
   - pymdownx.tabbed:
       alternate_style: true
 
+hooks:
+  - overrides/hooks/table_breaks.py
+
 extra_css:
   - stylesheets/extra.css
 
 extra_javascript:
   - javascripts/mermaid-lines.js
+  - javascripts/drawer.js
   - javascripts/goatcounter.js
 
 nav:

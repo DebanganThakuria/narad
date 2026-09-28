@@ -8,6 +8,13 @@
   font-display: swap, and the fallback stacks live in extra.css.
 -#}
 {% block extrahead %}
+  {#- First visit with the OS in dark mode: the HTML is light first, and
+      Material only switches to slate once its bundle runs, so the page
+      flashed paper before going dark. Store the dark choice before the
+      header's palette script reads it; this is the same object Material
+      stores itself after the first load. __md_get and __md_set are
+      defined earlier in <head>. -#}
+  <script>try{if(!__md_get("__palette")&&matchMedia("(prefers-color-scheme: dark)").matches){__md_set("__palette",{index:1,color:{media:"(prefers-color-scheme: dark)",scheme:"slate",primary:"custom",accent:"custom"}})}}catch(e){}</script>
   <link rel="preconnect" href="https://api.fontshare.com">
   <link rel="preconnect" href="https://cdn.fontshare.com" crossorigin>
   <link rel="preconnect" href="https://fonts.googleapis.com">
