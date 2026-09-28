@@ -633,6 +633,14 @@ func (c *ConsumerOffsetCommitter) primeLocked(st *offsetPart) (offsetSync, error
 		return offsetSync{}, err
 	}
 	defer root.Close()
+	// A prime that failed after opening a directory (st.dirInfo) and is
+	// retried must find the same one: st's shard was being persisted
+	// there, and no Forget has come since (st is not dead), so a
+	// different directory under the path is another lineage's, a move's
+	// copy installed in between.
+	if st.dirInfo != nil && !os.SameFile(dirInfo, st.dirInfo) {
+		return offsetSync{}, errOffsetDirGone
+	}
 	// From here st's shard is being persisted into this directory: if it
 	// goes away, the partition is stranded.
 	st.dirInfo = dirInfo
