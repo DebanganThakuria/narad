@@ -1,6 +1,8 @@
 package httpserver
 
-// The OpenAPI contract test: api/openapi.yaml against the code.
+// The OpenAPI contract test: docs/reference/openapi.yaml against the code.
+// That file is the one spec: the docs site publishes it, and
+// scripts/gen_http_api.py renders the HTTP API reference page from it.
 //
 // TestOpenAPIContractRoutes fails when router.go registers a route the
 // spec does not document, or the spec documents one the router does not
@@ -44,7 +46,7 @@ import (
 
 const (
 	contractRepoRoot = "../../.."
-	contractSpecPath = contractRepoRoot + "/api/openapi.yaml"
+	contractSpecPath = contractRepoRoot + "/docs/reference/openapi.yaml"
 	contractModule   = "github.com/debanganthakuria/narad/"
 	// contractTree is the import path of the packages the status
 	// analysis reads: this package and the handlers under it.
@@ -64,13 +66,13 @@ func TestOpenAPIContractRoutes(t *testing.T) {
 
 	for _, key := range sortedKeys(routes) {
 		if _, ok := spec.ops[key]; !ok {
-			t.Errorf("router.go registers %s, but api/openapi.yaml does not document it", key)
+			t.Errorf("router.go registers %s, but docs/reference/openapi.yaml does not document it", key)
 		}
 	}
 	for _, key := range sortedKeys(spec.ops) {
 		if _, ok := routes[key]; !ok {
 			op := spec.ops[key]
-			t.Errorf("api/openapi.yaml documents %s (%s, line %d), but router.go does not register it",
+			t.Errorf("docs/reference/openapi.yaml documents %s (%s, line %d), but router.go does not register it",
 				key, op.id, op.line)
 		}
 	}
@@ -118,13 +120,13 @@ func TestOpenAPIContractStatusCodes(t *testing.T) {
 			case external && r.code >= 200 && r.code < 300:
 				// The external handler's own answer: not checkable here.
 			case !allowed[r.code]:
-				t.Errorf("%s (%s): api/openapi.yaml documents %d at line %d, but neither the handler nor its middleware can answer it",
+				t.Errorf("%s (%s): docs/reference/openapi.yaml documents %d at line %d, but neither the handler nor its middleware can answer it",
 					key, op.id, r.code, r.line)
 			}
 		}
 		for _, code := range sortedInts(handlerCodes) {
 			if code >= 200 && code < 300 && !documented[code] {
-				t.Errorf("%s (%s): the handler can answer %d, but api/openapi.yaml does not document it", key, op.id, code)
+				t.Errorf("%s (%s): the handler can answer %d, but docs/reference/openapi.yaml does not document it", key, op.id, code)
 			}
 		}
 	}
