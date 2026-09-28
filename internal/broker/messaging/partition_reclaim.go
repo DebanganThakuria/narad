@@ -62,7 +62,10 @@ func (e *Engine) ReclaimMovedPartition(ctx context.Context, topicName string, pa
 // owned by a different node with no move targeting this node; an
 // unreadable assignment, an unassigned partition, or any reference to
 // this node all refuse. The open log (if any) is closed first so no
-// writer resurrects the directory.
+// writer resurrects the directory. The directory is then acted on under
+// the topic's guard, and only while the topic marker is absent or names
+// the incarnation the reclaim read: a directory of another incarnation
+// under the path (a recreate this node served meanwhile) refuses.
 //
 // When guard.Known, the local copy is recovered and its next offset
 // compared with guard.PromotedHWM: a copy that is AHEAD holds records the
@@ -88,12 +91,42 @@ func (e *Engine) ReclaimMovedPartitionGuarded(ctx context.Context, topicName str
 	if assignment.OwnerID == "" || assignment.OwnerID == e.selfID || assignment.TargetID == e.selfID {
 		return fmt.Errorf("%w: partition is (or is becoming) locally owned", ErrInvalid)
 	}
+	// The incarnation this reclaim is about. The directory is acted on
+	// only under the topic's guard and while its marker still names this
+	// incarnation (or none): a delete and recreate of the name after the
+	// checks above, with this node opening the successor's partition,
+	// quarantines the old topic directory and makes the successor's
+	// directory under the path, and removing or renaming that destroys
+	// the successor's records and consumer state.
+	rec, err := e.getTopic(ctx, topicName)
+	if err != nil {
+		return fmt.Errorf("reclaim refused: topic unreadable: %w", err)
+	}
 	if err := e.logs.ClosePartition(topicName, partition); err != nil {
 		return fmt.Errorf("reclaim: close partition log: %w", err)
 	}
 	// The in-memory reservation shard would otherwise outlive the data and
 	// be resumed verbatim if the partition ever moved back here.
 	e.ResetPartitionConsumerState(topicName, partition)
+	// ReplacePartitionDir holds the partition's produce mutex and the
+	// topic's guard across fn, with the partition's log closed, so no
+	// open of the name runs between the marker check and the removal.
+	return e.logs.ReplacePartitionDir(topicName, partition, func() error {
+		marker, marked, err := storage.ReadTopicIncarnation(storage.TopicDir(e.logs.DataDir(), topicName))
+		if err != nil {
+			return fmt.Errorf("reclaim refused: read topic incarnation: %w", err)
+		}
+		if marked && marker != rec.ID {
+			return fmt.Errorf("%w: topic directory belongs to incarnation %s, not %s", ErrInvalid, marker, rec.ID)
+		}
+		return e.reclaimPartitionDirGuarded(topicName, partition, assignment.OwnerID, guard)
+	})
+}
+
+// reclaimPartitionDirGuarded is the reclaim's action on the partition
+// directory: quarantine a copy ahead of guard.PromotedHWM, remove it
+// otherwise. Caller holds the topic's guard with the log closed.
+func (e *Engine) reclaimPartitionDirGuarded(topicName string, partition int, owner string, guard ReclaimGuard) error {
 	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
 	if guard.Known {
 		next, err := recoveredNextOffset(dir)
@@ -106,7 +139,7 @@ func (e *Engine) ReclaimMovedPartitionGuarded(ctx context.Context, topicName str
 				return fmt.Errorf("reclaim refused: local copy is ahead of the promoted hwm (%d > %d) and quarantine failed: %w", next, guard.PromotedHWM, qerr)
 			}
 			e.logger.Error("reclaim: local partition copy is AHEAD of the position it was promoted at elsewhere; quarantined instead of deleted, records after the promoted hwm exist only here",
-				"topic", topicName, "partition", partition, "owner", assignment.OwnerID,
+				"topic", topicName, "partition", partition, "owner", owner,
 				"local_next_offset", next, "promoted_hwm", guard.PromotedHWM, "quarantine_dir", quarantined)
 			return fmt.Errorf("%w: %s/%d local next offset %d > promoted hwm %d, kept at %s",
 				ErrPartitionQuarantined, topicName, partition, next, guard.PromotedHWM, quarantined)
