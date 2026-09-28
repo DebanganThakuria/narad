@@ -54,6 +54,18 @@ func offsetFlushDevice(f *os.File) error {
 	return syncfile.Sync(f)
 }
 
+// offsetSyncDir makes a directory's new entry durable with the files
+// of the same tick: Linux fsyncs it, macOS writes it out with fsync(2)
+// and leaves the drive cache to the tick's offsetFlushDevice, as for
+// file data, rather than an F_FULLFSYNC per created file (a first tick
+// after an upgrade creates consumer.ahead for every acked partition).
+func offsetSyncDir(dir *os.File) error {
+	if runtime.GOOS != "darwin" {
+		return syncfile.Sync(dir)
+	}
+	return offsetWriteOut(dir)
+}
+
 // offsetDevice is the device a file lives on, so a tick issues one
 // offsetFlushDevice per device it wrote out.
 func offsetDevice(info os.FileInfo) uint64 {

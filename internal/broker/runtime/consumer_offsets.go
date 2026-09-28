@@ -300,7 +300,7 @@ func newConsumerOffsetCommitter(dataDir string, interval time.Duration, log *slo
 		c.io.flushDevice = offsetFlushDevice
 	}
 	if c.io.syncDir == nil {
-		c.io.syncDir = syncfile.Sync
+		c.io.syncDir = offsetSyncDir
 	}
 	if opts.maxFDs > 0 {
 		c.maxFDs = opts.maxFDs

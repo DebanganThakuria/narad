@@ -15,8 +15,8 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
-// P1: the platform primitives. Both work on an open file and fail on a
-// closed one; on Linux the writeout is syncfile.SyncData (fdatasync)
+// P1: the platform primitives. They work on an open file (the
+// directory sync on a directory) and fail on a closed one; on Linux the writeout is syncfile.SyncData (fdatasync)
 // and the device flush a no-op, on macOS the writeout is fsync(2) and
 // the flush syncfile.Sync (F_FULLFSYNC, falling back to fsync where
 // unsupported), each consulting the syncfile fault hook where it goes
@@ -35,6 +35,14 @@ func TestZZWP23Primitives(t *testing.T) {
 	if err := offsetFlushDevice(f); err != nil {
 		t.Fatalf("flush device: %v", err)
 	}
+	dir, err := os.Open(filepath.Dir(f.Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := offsetSyncDir(dir); err != nil {
+		t.Fatalf("sync directory: %v", err)
+	}
+	_ = dir.Close()
 
 	restore := syncfile.SetFaultHook(func(syncfile.Op, string) error { return syscall.EIO })
 	writeErr, flushErr := offsetWriteOut(f), offsetFlushDevice(f)

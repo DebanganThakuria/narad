@@ -15,6 +15,9 @@ func offsetWriteOut(f *os.File) error { return syncfile.SyncData(f) }
 // offsetFlushDevice has nothing left to do: offsetWriteOut was durable.
 func offsetFlushDevice(*os.File) error { return nil }
 
+// offsetSyncDir makes a directory's new entry durable on its own.
+func offsetSyncDir(dir *os.File) error { return syncfile.Sync(dir) }
+
 // offsetDevice groups every file on one device: offsetFlushDevice is a
 // no-op here.
 func offsetDevice(os.FileInfo) uint64 { return 0 }
