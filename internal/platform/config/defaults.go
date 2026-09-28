@@ -45,7 +45,7 @@ func Default() *Config {
 			HighWatermarkSyncIntervalMs:    5000,
 			IngressWALSyncIntervalMs:       10,
 			IngressWALPrealloc:             false,     // opt-in; see StorageConfig.IngressWALPrealloc
-			ConsumerOffsetCommitIntervalMs: 100,       // the flush cadence it used to borrow: same crash redelivery window
+			ConsumerOffsetCommitIntervalMs: 1000,      // durability interval: a power loss redelivers about 1s of acks, a process crash about 100ms
 			SegmentBytes:                   64 << 20,  // 64 MiB
 			RetentionCheckIntervalMs:       60_000,    // 1 minute
 			IdleLogEvictionMs:              1_800_000, // 30 minutes

@@ -29,6 +29,17 @@ func (l *Log) Read(offset int64) ([]byte, error) {
 // reads the payload while encoding the response, so the copy per
 // message was pure overhead.
 func (l *Log) ReadShared(offset int64) ([]byte, error) {
+	// A closed log answers ErrLogClosed and nothing else. A consume still
+	// holding the closed log of a retired incarnation can read an offset
+	// it reserved on the successor's shard (shards are keyed by topic
+	// name); "not found" or "corrupt" there reads as a gap in the
+	// successor and skips its frontier past records it never delivered.
+	// Every retire closes the old logs before it drops their shards, so a
+	// reservation on a shard made after the drop is read here after the
+	// close.
+	if l.closed.Load() {
+		return nil, ErrLogClosed
+	}
 	if !l.readSeen.Load() {
 		l.readSeen.Store(true)
 	}

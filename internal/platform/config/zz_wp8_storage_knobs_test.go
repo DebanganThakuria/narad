@@ -7,14 +7,15 @@ import (
 )
 
 // TestWP8ConsumerOffsetCommitInterval pins the committer's own knob: it
-// defaults to the 100 ms cadence it used to borrow from
-// storage.flush_interval_ms, an operator may set it in the config file,
-// and values that would spin the loop or stretch the crash redelivery
-// window past a minute are rejected.
+// defaults to a 1s durability interval (the committer writes to the
+// page cache every 100ms and syncs each partition once an interval),
+// an operator may set it in the config file (100 restores the older
+// power-loss window), and values that would spin the loop or stretch
+// the redelivery window past a minute are rejected.
 func TestWP8ConsumerOffsetCommitInterval(t *testing.T) {
 	cfg := Default()
-	if got := cfg.Storage.ConsumerOffsetCommitIntervalMs; got != 100 {
-		t.Fatalf("default consumer_offset_commit_interval_ms = %d, want 100", got)
+	if got := cfg.Storage.ConsumerOffsetCommitIntervalMs; got != 1000 {
+		t.Fatalf("default consumer_offset_commit_interval_ms = %d, want 1000", got)
 	}
 
 	c := Default().Storage
@@ -31,7 +32,7 @@ func TestWP8ConsumerOffsetCommitInterval(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"data_dir":"e"}`), &c); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if c.ConsumerOffsetCommitIntervalMs != 100 {
+	if c.ConsumerOffsetCommitIntervalMs != 1000 {
 		t.Fatalf("omitted consumer_offset_commit_interval_ms changed to %d, want the default kept", c.ConsumerOffsetCommitIntervalMs)
 	}
 

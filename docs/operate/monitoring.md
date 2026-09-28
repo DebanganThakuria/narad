@@ -6,7 +6,12 @@
 [`ops/monitoring/grafana/dashboards/narad-node-dashboard.json`](https://github.com/DebanganThakuria/narad/blob/master/ops/monitoring/grafana/dashboards/narad-node-dashboard.json):
 14 panels covering throughput, consumer backlog, errors & rejections, disk, storage fsync
 latency, and process health. It's the exact dashboard the 47-hour, 170M-message 1.0 soak
-was judged on.
+was judged on. Some of its panels read differently since the batch forms and
+the `hwm` change: the HTTP panels count requests, which stop tracking messages
+once clients batch (see Traffic below; Message Throughput plots the message
+rates), and the Storage Latency panel still plots
+`narad_storage_high_watermark_persist_duration_seconds`, which no longer
+measures a commit (see Storage engine below).
 
 ## The five alerts that matter
 
@@ -33,7 +38,9 @@ Honorable mention: `rate(narad_errors_total[5m])` by `component`/`kind` as a cat
 | `narad_produce_rejections_total` | counter | topic, reason (`schema`, `delayed_child`, …) |
 | `narad_consume_wait_seconds` | histogram | long-poll latency shape |
 | `narad_consume_empty_total` | counter | 204s: idle consumers polling |
-| `narad_http_requests_total`, `_request_duration_seconds`, `_requests_in_flight`, `_request_bytes_in_total`, `_response_bytes_out_total` | (various) | the usual HTTP suspects |
+| `narad_http_requests_total`, `_request_duration_seconds`, `_requests_in_flight`, `_request_bytes_in_total`, `_response_bytes_out_total` | (various) | the usual HTTP suspects: route (the matched pattern), method and status, except in-flight (unlabeled) and the byte counters (route only) |
+
+The HTTP series count requests, not messages. A batch produce has its own route, `POST /v1/topics/{topic}/produce/batch`; a batch consume and a batch ack share the single-message routes (`GET /v1/topics/{topic}/consume`, `POST /v1/topics/{topic}/ack`), and a batch ack is answered `200` whatever its handles' outcomes, where a single ack is answered `204`. One batch request carries up to 100 messages, so once clients batch, take message rates from `narad_messages_produced_total` and `_consumed_total`. A panel that selects produces with `route=~".*/produce"` misses the batch route, and one that counts acks as `status="204"` misses batch acks.
 
 ### Queue health
 
@@ -80,6 +87,13 @@ Three more series are built from the same set of partitions and changed with it.
 | `narad_ingress_dispatch_backlog_records` | gauge | Records in this node's ingress WAL that a restart would replay: the WAL's durable next sequence minus the dispatch checkpoint last stored, refreshed on every 5 s poller tick. Small on a healthy node (produce raises it, and it falls as the dispatcher commits records to their partition owners and stores its checkpoint); a value that stays above 0 while producers are idle means records are not reaching their owners. It is what to watch before a rollback: pause producers and [roll a node back](helm-chart.md#rolling-back-to-an-earlier-release) only once it reads 0 on every node, in a sample taken after the pause. |
 
 ### Cluster & misc
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `narad_cluster_rpc_requests_total` | counter | Peer RPCs this node issued, by `op` and `outcome` (`ok`, `rejected` for a 4xx, `failed` for a 5xx, `timeout`, `error`) |
+| `narad_cluster_rpc_request_seconds` | histogram | Their round-trip time, by `op` |
+
+Both count RPCs, not records. Forwarded acks, extends and nacks to one owner travel together under heavy load, and a client batch ack's handles for one owner always do when there are two or more, as a single `op="ack_batch"` RPC; those are not counted under `op="ack"`, `op="extend_ack"` or `op="nack"`, so add `ack_batch` to a panel that reads those as the forwarded-ack rate or latency. A node on an older release never sends it.
 
 `narad_topics_total`, `narad_partitions_total` (the owned partitions that have per-partition series, open log or closed, as described under Queue health), `narad_open_partition_logs` (refreshed every poller tick, eviction on or off), `narad_errors_total{component,kind}`, `narad_boot_duration_seconds`.
 

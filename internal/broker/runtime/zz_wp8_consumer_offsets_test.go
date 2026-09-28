@@ -20,7 +20,7 @@ import (
 func TestWP8CommitterNeverWritesALowerFrontier(t *testing.T) {
 	dataDir := t.TempDir()
 	dir := mustCreatePartitionDir(t, dataDir, "t", 0)
-	c := NewConsumerOffsetCommitter(dataDir, time.Hour, nil)
+	c := zzWP23ManualCommitter(dataDir)
 	c.Commit("t", 0, 11)
 	if err := c.flush(); err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func wp8RecoveredInFlight(dataDir string) *consumer.InFlight {
 func TestWP8GracefulRestartKeepsTheAckedFrontier(t *testing.T) {
 	dataDir := t.TempDir()
 	mustCreatePartitionDir(t, dataDir, "t", 0)
-	c := NewConsumerOffsetCommitter(dataDir, time.Hour, nil)
+	c := zzWP23ManualCommitter(dataDir)
 	park, parked := make(chan struct{}), make(chan struct{})
 	var first sync.Once
 	onCommit := func(topicName string, p int, off int64) {

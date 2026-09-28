@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
@@ -52,7 +51,7 @@ func zzWP16Committer(tb testing.TB, parts int) (*ConsumerOffsetCommitter, *zzWP1
 			tb.Fatal(err)
 		}
 	}
-	c := NewConsumerOffsetCommitter(dataDir, time.Hour, nil)
+	c := zzWP23ManualCommitter(dataDir)
 	tb.Cleanup(func() { _ = c.Close() })
 	src := newZZWP16Source(parts)
 	c.SetAheadSource(src.source)

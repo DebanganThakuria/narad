@@ -3,14 +3,37 @@ package runtime
 import (
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
-const defaultConsumerOffsetCommitInterval = 100 * time.Millisecond
+const (
+	// defaultConsumerOffsetCommitInterval is the durability interval D
+	// when none is configured: how long an acked frontier can wait for a
+	// device flush.
+	defaultConsumerOffsetCommitInterval = time.Second
+	// consumerOffsetMaxTick caps the write cadence T: every tick hands
+	// the changed records to the page cache, so a process crash loses
+	// at most this much of acks whatever D is.
+	consumerOffsetMaxTick = 100 * time.Millisecond
+	// consumerOffsetLevelEvery is how often, at most, a partition's
+	// consumer.offset is brought up to the frontier consumer.ahead
+	// carries while the broker runs.
+	consumerOffsetLevelEvery = 30 * time.Second
+	// consumerOffsetMaxFDs caps the consumer.ahead descriptors held open
+	// (see offsetFDCap).
+	consumerOffsetMaxFDs = 4096
+	// consumerAheadFileSize is both slots.
+	consumerAheadFileSize = 2 * storage.ConsumerAheadSlotSize
+)
 
 type offsetCommitKey struct {
 	topic     string
@@ -29,89 +52,286 @@ type offsetCommit struct {
 // source.
 type AheadSource func(topic string, partition int) (committed int64, offsets []int64, version uint64, ok bool)
 
-// aheadWritten remembers what the last consumer.ahead write for a
-// partition carried, so an unchanged set is not rewritten and the next
-// write lands in the other slot.
-type aheadWritten struct {
-	version uint64
-	slot    int
-	seq     uint64
-}
-
-// ConsumerOffsetCommitter batches best-effort consumer offset persistence.
-// Ack commits are authoritative in memory; this writer only seeds recovery.
+// ConsumerOffsetCommitter persists acked consumer state, best effort:
+// ack commits are authoritative in memory and this writer only seeds
+// recovery. It runs at two cadences.
 //
-// A partition is dirty when its frontier advanced or its acked-ahead
-// set changed, and a flush makes it durable with one data sync: to
-// consumer.ahead (the offsets acked out of order above the frontier)
-// when that set changed, else to consumer.offset (the frontier). The
-// consumer.ahead record carries the frontier too, and recovery takes
-// the larger of the two files' frontiers, so while acks arrive out of
-// order consumer.offset is left behind rather than synced a second
-// time; Close brings it level. Every reader of the persisted frontier
-// must therefore read both files.
+// Every tick (T, the durability interval capped at 100ms) each
+// partition whose acked state changed gets its consumer.ahead record,
+// the frontier and the offsets acked out of order above it, written
+// into the page cache through a held descriptor, with no sync. A
+// process crash loses no page-cache write, so it redelivers about a
+// tick of acks.
+//
+// Every durability interval (D, storage.consumer_offset_commit_interval_ms)
+// each partition written since is written out (fdatasync on Linux,
+// fsync(2) on macOS) and, on macOS, the tick then flushes the drive
+// cache once per device for all of them (F_FULLFSYNC) instead of once
+// per partition. A power loss or kernel crash redelivers at most about
+// D plus a tick plus the writeout time of acks. The writeouts of an
+// interval are spread over its ticks by a hash of the partition, so
+// they do not arrive at the disk in one burst.
+//
+// consumer.ahead has two slots. The anchor holds the newest record
+// known durable and is never written while it is the anchor; ticks
+// write the other slot, the window, and a successful writeout flips
+// the two. A torn window fails its checksum and recovery falls back to
+// the anchor, so no crash of the process or of the machine leaves a
+// partition with neither, and every record holds only acked values, so
+// a recovered frontier never passes an acked one.
+//
+// consumer.offset, the 8-byte frontier file that older binaries and
+// operators read, is levelled with consumer.ahead's frontier at a
+// partition's writeout when it was last levelled more than 30s ago, and
+// at Close, which leaves both files exact. Recovery takes the larger
+// frontier of the two, and so must every reader of a persisted
+// frontier. The file formats are v3.0.1's, so a rollback reads them.
 type ConsumerOffsetCommitter struct {
-	dataDir  string
-	interval time.Duration
-	log      *slog.Logger
+	dataDir string
+	// durable is D, tick is T, and every is D/T: a dirty partition is
+	// written out on one tick of every such run of ticks.
+	durable time.Duration
+	tick    time.Duration
+	every   uint64
+	log     *slog.Logger
+	io      offsetIO
+	burst   bool
+	crash   func(point offsetPoint, key offsetCommitKey) bool
 
 	mu      sync.Mutex
 	pending map[offsetCommitKey]int64
-	// lastOffset is the highest frontier made durable per partition,
-	// by either file; a flush that finds the same value or a lower one
-	// skips the consumer.offset write and its fdatasync. A lower one is
-	// not stale data to repair: acks call Commit after dropping the
-	// shard lock, so two frontier advances can reach the committer in
-	// reverse order, and when the flush that wrote the higher one runs
-	// in between, the lower one arrives alone in the next window.
-	lastOffset map[offsetCommitKey]int64
-	// offsetFile is what this process last wrote to consumer.offset per
-	// partition. It trails lastOffset while consumer.ahead carries the
-	// frontier.
-	offsetFile map[offsetCommitKey]int64
-	lastAhead  map[offsetCommitKey]aheadWritten
-	ahead      AheadSource
+	ahead   AheadSource
+
+	// tickMu serializes ticks: the loop's, flush's and Close's.
+	tickMu    sync.Mutex
+	tickNo    uint64
+	lastAge   time.Time
+	lastSlow  time.Time
+	lastStats offsetTickStats
+
+	// ioMu guards the per-partition state and every open of a consumer
+	// state file by path. Forget takes it, so a by-path open either
+	// finishes before a Forget returns or sees it; the ack path never
+	// takes it (Commit uses mu).
+	ioMu sync.Mutex
+	// parts is what the committer knows about each partition it wrote.
+	parts map[offsetCommitKey]*offsetPart
+	// forgotten holds the partitions forgotten since the running tick
+	// began: a snapshot taken before a Forget must not be written
+	// through a descriptor opened after it.
+	forgotten map[offsetCommitKey]struct{}
+	// stranded holds the partitions whose directory was removed or
+	// replaced under the state the committer held for them, until their
+	// next Forget: no snapshot primes them meanwhile (see strandLocked).
+	stranded map[offsetCommitKey]struct{}
+	// clean lists the durable partitions holding a descriptor, least
+	// recently written first: the only ones the descriptor cap evicts.
+	clean  offsetLRU
+	held   int
+	maxFDs int
 
 	stop chan struct{}
 	done chan struct{}
 	once sync.Once
 }
 
-// NewConsumerOffsetCommitter starts the background flush loop. A
-// non-positive interval falls back to the default. Callers must Close
-// to stop the loop and flush what's pending.
+// offsetIO is the committer's durability seam: the platform's
+// primitives in production, a model of the disk in crash tests.
+type offsetIO struct {
+	writeOut    func(*os.File) error
+	flushDevice func(*os.File) error
+	syncDir     func(*os.File) error
+}
+
+// offsetPoint names a step of a tick, for the crash tests' hook.
+type offsetPoint uint8
+
+const (
+	offsetPointPrimed     offsetPoint = iota + 1 // a prime read and extended its file, before its writeout
+	offsetPointPrimeOut                          // the primes were written out, before their device flush
+	offsetPointWrite                             // one partition's window was written
+	offsetPointWritten                           // every window of the tick was written, before any writeout
+	offsetPointLevel                             // one consumer.offset was levelled, before its writeout
+	offsetPointWrittenOut                        // the writeouts ran, before the device flush
+	offsetPointFlushed                           // the device flush ran, before the flips
+)
+
+// errOffsetCrash ends a tick at a crash point a test chose; nothing
+// after the point is written, as if the process died there.
+var errOffsetCrash = errors.New("consumer offsets: test crash point")
+
+// errOffsetDirGone reports a partition directory that no longer holds
+// the files the committer primed: removed, or replaced by another
+// directory. The committer drops its state and never recreates it.
+var errOffsetDirGone = errors.New("consumer offsets: partition directory removed or replaced")
+
+// offsetPart is the committer's state for one partition. The
+// descriptor is a cache entry: the state survives its eviction.
+type offsetPart struct {
+	key   offsetCommitKey
+	dir   string
+	phase uint64
+
+	// f is the held consumer.ahead descriptor, nil when evicted.
+	f *os.File
+	// file and dirInfo identify the consumer.ahead and the partition
+	// directory the prime opened; dev is their device.
+	file    os.FileInfo
+	dirInfo os.FileInfo
+	dev     uint64
+
+	// primed: the slots were read and anchor is known. syncing: the
+	// prime's writeout has not completed, so no window may be written.
+	primed  bool
+	syncing bool
+	// anchor is the slot of the newest durable record (-1: none valid).
+	anchor int
+	// seq is the highest record sequence written or read.
+	seq uint64
+	// durable is the anchor record's frontier (-1: none).
+	durable int64
+
+	// written is what the last window write carried, which after a flip
+	// is also the anchor's content.
+	written offsetWritten
+	// dirtySince is when the window first held a record that is not
+	// yet durable; zero when the window matches the anchor.
+	dirtySince time.Time
+	// needsRewrite: a write or writeout failed, so the next tick must
+	// write the window in full even when the snapshot did not change
+	// (after a failed sync the page cache is not to be trusted).
+	needsRewrite bool
+	// reprime: the last prime's writeout failed, so the next prime
+	// writes the anchor's bytes back before its writeout (a kernel may
+	// mark pages clean after failing to write them back).
+	reprime bool
+
+	// level is what this process knows consumer.offset holds (-1: none
+	// or unknown); levelAt is when this process last wrote it.
+	level   int64
+	levelAt time.Time
+
+	dead             bool
+	lruPrev, lruNext *offsetPart
+	inLRU            bool
+}
+
+type offsetWritten struct {
+	version   uint64
+	committed int64
+	ok        bool
+}
+
+// window is the slot ticks write: the one that is not the anchor.
+func (st *offsetPart) window() int {
+	if st.anchor == 0 {
+		return 1
+	}
+	return 0
+}
+
+// frontier is the newest frontier this process wrote or read for the
+// partition, -1 when none.
+func (st *offsetPart) frontier() int64 {
+	if st.written.ok {
+		return st.written.committed
+	}
+	return st.durable
+}
+
+// offsetTickStats is what one tick did, for the warnings and tests.
+type offsetTickStats struct {
+	written, wroteOut, levelled, primed int
+	flushes                             int
+	// late counts partitions whose writes waited, or have waited so
+	// far, more than twice the durability interval for their writeout;
+	// oldest is the longest such wait.
+	late   int
+	oldest time.Duration
+}
+
+// committerOptions are the test hooks of newConsumerOffsetCommitter.
+type committerOptions struct {
+	// io replaces the durability primitives; a nil field keeps the
+	// platform's.
+	io offsetIO
+	// manual runs no loop: ticks happen only through flush, tickAt and
+	// Close.
+	manual bool
+	// maxFDs overrides the descriptor cap when positive.
+	maxFDs int
+	// burst puts every partition in phase 0, so every dirty partition is
+	// written out on the same tick of each interval: the shape the hash
+	// spread replaced, kept for A/B runs.
+	burst bool
+	// crash, when it returns true, ends the tick at that point.
+	crash func(point offsetPoint, key offsetCommitKey) bool
+}
+
+// NewConsumerOffsetCommitter starts the background loop. interval is
+// the durability interval D; a non-positive one falls back to the
+// default. Callers must Close to stop the loop and persist what is
+// pending.
 func NewConsumerOffsetCommitter(dataDir string, interval time.Duration, log *slog.Logger) *ConsumerOffsetCommitter {
+	return newConsumerOffsetCommitter(dataDir, interval, log, committerOptions{})
+}
+
+func newConsumerOffsetCommitter(dataDir string, interval time.Duration, log *slog.Logger, opts committerOptions) *ConsumerOffsetCommitter {
 	if interval <= 0 {
 		interval = defaultConsumerOffsetCommitInterval
 	}
+	tick := min(interval, consumerOffsetMaxTick)
 	c := &ConsumerOffsetCommitter{
-		dataDir:    dataDir,
-		interval:   interval,
-		log:        log,
-		pending:    make(map[offsetCommitKey]int64),
-		lastOffset: make(map[offsetCommitKey]int64),
-		offsetFile: make(map[offsetCommitKey]int64),
-		lastAhead:  make(map[offsetCommitKey]aheadWritten),
-		stop:       make(chan struct{}),
-		done:       make(chan struct{}),
+		dataDir:   dataDir,
+		durable:   interval,
+		tick:      tick,
+		every:     uint64(max(1, interval/tick)),
+		log:       log,
+		io:        opts.io,
+		burst:     opts.burst,
+		crash:     opts.crash,
+		pending:   make(map[offsetCommitKey]int64),
+		parts:     make(map[offsetCommitKey]*offsetPart),
+		forgotten: make(map[offsetCommitKey]struct{}),
+		stranded:  make(map[offsetCommitKey]struct{}),
+		maxFDs:    offsetFDCap(),
+		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
 	}
-	go c.run()
+	if c.io.writeOut == nil {
+		c.io.writeOut = offsetWriteOut
+	}
+	if c.io.flushDevice == nil {
+		c.io.flushDevice = offsetFlushDevice
+	}
+	if c.io.syncDir == nil {
+		c.io.syncDir = offsetSyncDir
+	}
+	if opts.maxFDs > 0 {
+		c.maxFDs = opts.maxFDs
+	}
+	if opts.manual {
+		close(c.done)
+	} else {
+		go c.run()
+	}
 	return c
 }
 
 // SetAheadSource registers the acked-ahead snapshot source. Without one
-// only the frontier is persisted. Call before serving.
+// only the frontier Commit reports is persisted. Call before serving.
 func (c *ConsumerOffsetCommitter) SetAheadSource(fn AheadSource) {
 	c.mu.Lock()
 	c.ahead = fn
 	c.mu.Unlock()
 }
 
-// Commit queues an offset for the next flush. Offsets only move
-// forward: a smaller offset never overwrites a pending larger one, nor
-// one a previous flush already made durable. A call with the current
-// frontier (no advance) still marks the partition dirty, which is how
-// an out-of-order ack reaches the next flush.
+// Commit marks a partition dirty for the next tick, which persists the
+// source's snapshot of it. Without a source the offset itself is the
+// frontier, and offsets only move forward: a smaller one never
+// overwrites a pending larger one. A call with the current frontier (no
+// advance) still marks the partition dirty, which is how an
+// out-of-order ack reaches the next tick.
 func (c *ConsumerOffsetCommitter) Commit(topic string, partition int, offset int64) {
 	key := offsetCommitKey{topic: topic, partition: partition}
 	c.mu.Lock()
@@ -121,226 +341,886 @@ func (c *ConsumerOffsetCommitter) Commit(topic string, partition int, offset int
 	c.mu.Unlock()
 }
 
-// Forget drops what the committer remembers about a partition, so the
-// next flush for it writes both files unconditionally. Call when the
-// partition's directory was replaced or removed under the committer (a
-// move installed a copy, a reclaim quarantined it).
+// Forget drops everything the committer holds for a partition: its
+// descriptor, its state and what is pending. Call before a partition's
+// directory is replaced or removed under the committer (a move
+// installs a copy, a reclaim quarantines it, a purge removes it) and
+// again after; once Forget returns, no snapshot taken before it is
+// written, and the next tick for the partition starts from the files
+// then on disk. It also lifts a strand (see strandLocked).
 func (c *ConsumerOffsetCommitter) Forget(topic string, partition int) {
 	key := offsetCommitKey{topic: topic, partition: partition}
+	c.ioMu.Lock()
+	c.forgotten[key] = struct{}{}
+	delete(c.stranded, key)
+	if st := c.parts[key]; st != nil {
+		c.dropLocked(st)
+	}
+	c.ioMu.Unlock()
 	c.mu.Lock()
 	delete(c.pending, key)
-	delete(c.lastOffset, key)
-	delete(c.offsetFile, key)
-	delete(c.lastAhead, key)
 	c.mu.Unlock()
 }
 
-// Close stops the flush loop, performs a final flush and brings every
-// consumer.offset that consumer.ahead left behind up to the frontier,
-// so after a graceful stop the frontier file alone is exact. Idempotent.
+// Close stops the loop and runs a final tick that writes out every
+// partition written since its last writeout and levels every
+// consumer.offset behind its consumer.ahead, all in one batch with one
+// device flush, so after a graceful stop both files are exact and
+// durable. It then closes the held descriptors. Idempotent.
 func (c *ConsumerOffsetCommitter) Close() error {
 	c.once.Do(func() { close(c.stop) })
 	<-c.done
-	err := c.flush()
-	if lerr := c.levelOffsetFiles(); err == nil {
-		err = lerr
+	err := c.tickAt(time.Now(), offsetTickClose)
+	c.ioMu.Lock()
+	for _, st := range c.parts {
+		c.releaseLocked(st)
 	}
+	c.ioMu.Unlock()
 	return err
 }
 
-// run flushes every interval. A flush that takes longer than the
-// interval is followed at once by the next, so the committer keeps the
-// disk busy the whole time and persisted offsets lag acks by about the
-// flush time rather than the interval. That is logged, at most once a
-// minute: a longer interval gives produce the disk back, and fewer
-// partitions per node or a faster disk shorten the lag.
+// run ticks every T. A tick that takes longer than T is followed at
+// once by the next; that is logged, at most once a minute (a tick that
+// primed partitions excepted), as is a partition whose writes have
+// waited more than twice D for their writeout: persisted offsets then
+// lag acks by more than the setting says.
 //
-// The partitions of a flush are written one at a time on purpose.
-// Overlapping their data syncs, 8 at once, makes a flush 2.4 to 3.7
+// A tick writes out its partitions one at a time on purpose.
+// Overlapping their data syncs, 8 at once, made a flush 2.4 to 3.7
 // times shorter, but on macOS the overlapped bursts held back the
 // produce syncs sharing the disk: beside 12 dirty partitions an owner's
-// 24-record commit went from 10ms to 22ms at p99. A committer that
-// overlapped and paced itself to hold the disk half the time halved
-// the lag of 64 partitions, and cost 8 concurrent commit streams 17% of
-// their throughput and 2.6 times their p99 (see
+// 24-record commit went from 10ms to 22ms at p99 (see
 // BenchmarkZZWP16OwnerCommitUnderOffsetFlush and
 // BenchmarkZZWP16SpreadCommitUnderOffsetFlush in the messaging package).
 func (c *ConsumerOffsetCommitter) run() {
 	defer close(c.done)
 
-	ticker := time.NewTicker(c.interval)
+	ticker := time.NewTicker(c.tick)
 	defer ticker.Stop()
-
-	var lastWarned time.Time
 	for {
 		select {
 		case <-ticker.C:
 			start := time.Now()
-			commits, ahead := c.drain()
-			if err := c.persistAll(commits, ahead); err != nil && c.log != nil {
+			if err := c.tickAt(start, offsetTickNormal); err != nil && c.log != nil {
 				c.log.Error("consumer offset batch write failed", "err", err)
 			}
-			if took := time.Since(start); took > c.interval && c.log != nil && time.Since(lastWarned) >= time.Minute {
-				lastWarned = time.Now()
-				c.log.Warn("consumer offset commits cannot keep to their interval: persisted offsets lag acks by about the flush time",
-					"partitions", len(commits), "flush_took", took, "interval", c.interval)
-			}
+			c.warn(start, time.Since(start))
 		case <-c.stop:
 			return
 		}
 	}
 }
 
-// flush drains the pending map and writes each dirty partition's files.
+// warn logs, at most once a minute each, a tick that overran T and
+// partitions whose writes waited more than 2D for their writeout.
+func (c *ConsumerOffsetCommitter) warn(now time.Time, took time.Duration) {
+	if c.log == nil {
+		return
+	}
+	c.tickMu.Lock()
+	stats := c.lastStats
+	// A tick that primed partitions paid for their first touch (after a
+	// start, most of them at once); only the steady cost counts.
+	slow := took > c.tick && stats.primed == 0 && now.Sub(c.lastSlow) >= time.Minute
+	if slow {
+		c.lastSlow = now
+	}
+	late := stats.late > 0 && now.Sub(c.lastAge) >= time.Minute
+	if late {
+		c.lastAge = now
+	}
+	c.tickMu.Unlock()
+	if slow {
+		c.log.Warn("consumer offset commits cannot keep to their interval: persisted offsets lag acks by about the flush time",
+			"partitions", max(stats.written, stats.wroteOut), "flush_took", took, "interval", c.tick)
+	}
+	if late {
+		c.log.Warn("consumer offsets wait longer than their durability interval for a device flush: a power loss would redeliver more acks than it promises",
+			"partitions", stats.late, "oldest", stats.oldest, "durability_interval", c.durable)
+	}
+}
+
+// flush runs one tick that writes out every dirty partition, whatever
+// its phase. Tests use it to drive the committer by hand.
 func (c *ConsumerOffsetCommitter) flush() error {
-	commits, ahead := c.drain()
-	return c.persistAll(commits, ahead)
+	return c.tickAt(time.Now(), offsetTickFlush)
 }
 
-// persistAll writes the drained partitions' files, one partition at a
-// time (see run). A purged partition directory is skipped silently (the
-// topic is gone); any other failure re-queues the partition for the next
-// flush so a transient error can't lose the recovery seed.
-func (c *ConsumerOffsetCommitter) persistAll(commits []offsetCommit, ahead AheadSource) error {
-	var firstErr error
-	for _, commit := range commits {
-		partitionDir := storage.TopicPartitionDir(c.dataDir, commit.key.topic, commit.key.partition)
-		if err := c.persist(partitionDir, commit, ahead); err != nil {
-			if errors.Is(err, storage.ErrPartitionDirMissing) {
-				c.Forget(commit.key.topic, commit.key.partition)
-				continue
-			}
-			if firstErr == nil {
-				firstErr = fmt.Errorf("persist consumer state %s/%d: %w", commit.key.topic, commit.key.partition, err)
-			}
-			c.Commit(commit.key.topic, commit.key.partition, commit.offset)
-		}
-	}
-	return firstErr
+// offsetTickMode is what a tick writes out.
+type offsetTickMode uint8
+
+const (
+	// offsetTickNormal writes out the dirty partitions whose phase this
+	// tick is or that have waited D.
+	offsetTickNormal offsetTickMode = iota
+	// offsetTickFlush writes out every dirty partition.
+	offsetTickFlush
+	// offsetTickClose also levels every consumer.offset behind its
+	// frontier.
+	offsetTickClose
+)
+
+// offsetWant is one partition's snapshot for a tick.
+type offsetWant struct {
+	key       offsetCommitKey
+	committed int64
+	offsets   []int64
+	version   uint64
+	st        *offsetPart
 }
 
-// persist makes one dirty partition durable, normally with a single
-// data sync. consumer.ahead goes first when its set changed; its record
-// carries the source's frontier, which is at least the queued commit
-// unless that commit outlived its shard, so writeOffset then finds
-// nothing above what is durable and skips the second sync. A failed
-// consumer.ahead write still lets the frontier through consumer.offset.
-func (c *ConsumerOffsetCommitter) persist(partitionDir string, commit offsetCommit, source AheadSource) error {
-	var aheadErr error
-	if source != nil {
-		aheadErr = c.writeAhead(partitionDir, commit.key, source)
-		if errors.Is(aheadErr, storage.ErrPartitionDirMissing) {
-			return aheadErr
-		}
-	}
-	if err := c.writeOffset(partitionDir, commit); err != nil {
+// offsetSync is one file a tick writes out: a primed consumer.ahead, a
+// window, or a levelled consumer.offset.
+type offsetSync struct {
+	st        *offsetPart
+	f         *os.File
+	dev       uint64
+	transient bool
+	// dir, when set, is synced after f: f was created.
+	dir *os.File
+	// window: f is st's consumer.ahead and its window flips on success.
+	window bool
+	// level is the frontier written when f is consumer.offset (neither
+	// a prime nor a window).
+	level int64
+	// requeue is the commit a failed prime queues again.
+	requeue int64
+	err     error
+	gone    bool
+}
+
+// tickAt runs one tick at now: snapshot the partitions committed since
+// the last tick, prime the ones seen for the first time, write their
+// windows, then write out the partitions due (see offsetTickMode) and
+// flip them.
+func (c *ConsumerOffsetCommitter) tickAt(now time.Time, mode offsetTickMode) error {
+	c.tickMu.Lock()
+	defer c.tickMu.Unlock()
+	start := time.Now()
+	c.tickNo++
+	c.lastStats = offsetTickStats{}
+
+	c.ioMu.Lock()
+	clear(c.forgotten)
+	c.ioMu.Unlock()
+
+	commits, source := c.drain()
+	wants := c.snapshots(commits, source)
+
+	var errs offsetErrs
+	primes, err := c.prime(wants, source != nil, &errs)
+	if err != nil {
 		return err
 	}
-	return aheadErr
+	if err := c.syncPrimes(primes, &errs); err != nil {
+		return err
+	}
+	syncs, err := c.writeWindows(now, wants, source != nil, mode, &errs)
+	if err != nil {
+		return err
+	}
+	if err := c.writeOut(syncs); err != nil {
+		return err
+	}
+	// now may be a test's clock: the flips happen the tick's own
+	// duration after it.
+	c.flip(now, now.Add(time.Since(start)), syncs, &errs)
+	return errs.err
 }
 
-// writeOffset persists the frontier unless it is at or below the
-// highest one already durable: the frontier never moves backwards, and
-// Forget clears the memory whenever the directory is replaced or
-// removed.
-func (c *ConsumerOffsetCommitter) writeOffset(partitionDir string, commit offsetCommit) error {
-	c.mu.Lock()
-	last, seen := c.lastOffset[commit.key]
-	c.mu.Unlock()
-	if seen && commit.offset <= last {
-		return nil
-	}
-	if err := storage.WriteConsumerOffsetIfPartitionDirExists(partitionDir, commit.offset); err != nil {
-		return fmt.Errorf("write consumer offset %d: %w", commit.offset, err)
-	}
-	c.mu.Lock()
-	c.lastOffset[commit.key] = commit.offset
-	c.offsetFile[commit.key] = commit.offset
-	c.mu.Unlock()
-	return nil
-}
-
-// levelOffsetFiles writes consumer.offset for every partition whose
-// latest frontier only consumer.ahead holds, so a reader of the
-// frontier file alone (the dispatcher's free-record estimate for a
-// partition with no shard, an older binary) sees where consumers got
-// to after a graceful stop. Called by Close, after the loop stopped.
-func (c *ConsumerOffsetCommitter) levelOffsetFiles() error {
-	c.mu.Lock()
-	var behind []offsetCommit
-	for key, frontier := range c.lastOffset {
-		if written, ok := c.offsetFile[key]; !ok || written < frontier {
-			behind = append(behind, offsetCommit{key: key, offset: frontier})
+// snapshots takes each committed partition's acked state from source,
+// outside every lock of the committer. A partition the source holds no
+// shard for is skipped: its commit came from a shard that was dropped
+// (acks call Commit after releasing the shard lock), and the directory
+// under its name may already be another lineage's.
+func (c *ConsumerOffsetCommitter) snapshots(commits []offsetCommit, source AheadSource) []offsetWant {
+	wants := make([]offsetWant, 0, len(commits))
+	for _, commit := range commits {
+		if source == nil {
+			wants = append(wants, offsetWant{key: commit.key, committed: commit.offset})
+			continue
 		}
+		committed, offsets, version, ok := source(commit.key.topic, commit.key.partition)
+		if !ok {
+			continue
+		}
+		wants = append(wants, offsetWant{key: commit.key, committed: committed, offsets: offsets, version: version})
 	}
-	c.mu.Unlock()
-	var firstErr error
-	for _, commit := range behind {
-		partitionDir := storage.TopicPartitionDir(c.dataDir, commit.key.topic, commit.key.partition)
-		if err := storage.WriteConsumerOffsetIfPartitionDirExists(partitionDir, commit.offset); err != nil {
-			if errors.Is(err, storage.ErrPartitionDirMissing) {
-				c.Forget(commit.key.topic, commit.key.partition)
-				continue
-			}
-			if firstErr == nil {
-				firstErr = fmt.Errorf("level consumer offset %s/%d: %w", commit.key.topic, commit.key.partition, err)
+	return wants
+}
+
+// prime resolves each snapshot's state, creating it on first touch,
+// and primes the ones not primed yet. Under ioMu, so no Forget lands
+// between the forgotten check and a by-path open.
+func (c *ConsumerOffsetCommitter) prime(wants []offsetWant, hasSource bool, errs *offsetErrs) ([]offsetSync, error) {
+	c.ioMu.Lock()
+	defer c.ioMu.Unlock()
+	var primes []offsetSync
+	for i := range wants {
+		w := &wants[i]
+		if _, gone := c.forgotten[w.key]; gone {
+			if hasSource {
+				// The snapshot may be of the dropped shard: take it again.
+				c.Commit(w.key.topic, w.key.partition, w.committed)
 			}
 			continue
 		}
-		c.mu.Lock()
-		c.offsetFile[commit.key] = commit.offset
-		c.mu.Unlock()
-	}
-	return firstErr
-}
-
-// writeAhead persists the acked-ahead set unless its version is the one
-// last written. Writes alternate slots and carry a rising sequence so
-// the previous record survives a torn write. A written record raises
-// the durable frontier to the one it carries.
-func (c *ConsumerOffsetCommitter) writeAhead(partitionDir string, key offsetCommitKey, source AheadSource) error {
-	committed, offsets, version, ok := source(key.topic, key.partition)
-	if !ok {
-		return nil
-	}
-	c.mu.Lock()
-	last, seen := c.lastAhead[key]
-	c.mu.Unlock()
-	if seen && last.version == version {
-		return nil
-	}
-	if !seen {
-		// First write for this partition in this process: resume from the
-		// record on disk so the write lands in the other slot (a torn
-		// first write must not destroy the newest record) with a higher
-		// seq than it (a clock that stepped back must not make the reader
-		// prefer the stale record).
-		if rec, ok, err := storage.ReadConsumerAhead(partitionDir); err == nil && ok {
-			last = aheadWritten{slot: rec.Slot, seq: rec.Seq}
+		if _, stranded := c.stranded[w.key]; stranded {
+			// A snapshot of the shard whose directory went away: it
+			// belongs to no directory now at the path.
+			continue
+		}
+		st := c.parts[w.key]
+		if st == nil {
+			st = c.newPart(w.key)
+			c.parts[w.key] = st
+		}
+		w.st = st
+		if st.primed {
+			continue
+		}
+		p, err := c.primeLocked(st)
+		if errors.Is(err, errOffsetDirGone) {
+			c.strandLocked(st)
+			continue
+		}
+		if err != nil {
+			errs.add(w.key, "prime", err)
+			c.Commit(w.key.topic, w.key.partition, w.committed)
+			continue
+		}
+		p.requeue = w.committed
+		primes = append(primes, p)
+		c.lastStats.primed++
+		if c.crashed(offsetPointPrimed, w.key) {
+			return nil, errOffsetCrash
 		}
 	}
-	if !seen && len(offsets) == 0 {
-		// Nothing acked ahead and nothing written by this process yet:
-		// a record would only say "empty", which is what a missing file
-		// already means. Remember the version so the next change writes.
-		last.version = version
-		c.mu.Lock()
-		c.lastAhead[key] = last
-		c.mu.Unlock()
+	return primes, nil
+}
+
+func (c *ConsumerOffsetCommitter) newPart(key offsetCommitKey) *offsetPart {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(key.topic))
+	_, _ = h.Write([]byte(strconv.Itoa(key.partition)))
+	phase := h.Sum64() % c.every
+	if c.burst {
+		phase = 0
+	}
+	return &offsetPart{
+		key:     key,
+		dir:     storage.TopicPartitionDir(c.dataDir, key.topic, key.partition),
+		phase:   phase,
+		anchor:  -1,
+		durable: -1,
+		level:   -1,
+	}
+}
+
+// primeLocked opens a partition's consumer.ahead for the first time
+// since the committer started, since a Forget, or since its directory
+// changed: it extends a file shorter than both slots (a move's copy
+// writes slot 0 only; a fresh one is empty), reads both slots through
+// the descriptor, and anchors on the newest valid record. That record
+// may exist only in the page cache, left by a process that crashed
+// before its writeout, and the first window write overwrites the other
+// slot, which may hold the only durable record; so the caller writes
+// the file out before any window write (syncPrimes). A missing
+// directory is never recreated. Caller holds ioMu.
+func (c *ConsumerOffsetCommitter) primeLocked(st *offsetPart) (offsetSync, error) {
+	root, dirInfo, err := openPartitionDir(st.dir)
+	if err != nil {
+		return offsetSync{}, err
+	}
+	defer root.Close()
+	// A prime that failed after opening a directory (st.dirInfo) and is
+	// retried must find the same one: st's shard was being persisted
+	// there, and no Forget has come since (st is not dead), so a
+	// different directory under the path is another lineage's, a move's
+	// copy installed in between.
+	if st.dirInfo != nil && !os.SameFile(dirInfo, st.dirInfo) {
+		return offsetSync{}, errOffsetDirGone
+	}
+	// From here st's shard is being persisted into this directory: if it
+	// goes away, the partition is stranded.
+	st.dirInfo = dirInfo
+	f, created, err := openStateFile(root, st.dir, dirInfo, storage.ConsumerAheadFileName, os.O_RDWR)
+	if err != nil {
+		return offsetSync{}, err
+	}
+	// A created file's directory entry is synced with the prime's
+	// writeout, through the directory it was created in.
+	var dir *os.File
+	if created {
+		if dir, err = root.Open("."); err != nil {
+			_ = f.Close()
+			return offsetSync{}, err
+		}
+	}
+	fail := func(err error) (offsetSync, error) {
+		_ = f.Close()
+		if dir != nil {
+			_ = dir.Close()
+		}
+		return offsetSync{}, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return fail(err)
+	}
+	if info.Size() < consumerAheadFileSize {
+		if err := syncfile.Truncate(f, consumerAheadFileSize); err != nil {
+			return fail(err)
+		}
+	}
+	buf := make([]byte, consumerAheadFileSize)
+	if n, err := f.ReadAt(buf, 0); err != nil && n < len(buf) {
+		return fail(err)
+	}
+	st.anchor, st.seq, st.durable = -1, 0, -1
+	for slot := range 2 {
+		rec, ok := storage.DecodeConsumerAheadSlot(buf[slot*storage.ConsumerAheadSlotSize : (slot+1)*storage.ConsumerAheadSlotSize])
+		if !ok {
+			continue
+		}
+		// The reader keeps the first of two equal sequences; so does the
+		// anchor.
+		if st.anchor < 0 || rec.Seq > st.seq {
+			st.anchor, st.durable = slot, rec.Committed
+		}
+		st.seq = max(st.seq, rec.Seq)
+	}
+	if st.reprime && st.anchor >= 0 {
+		lo := st.anchor * storage.ConsumerAheadSlotSize
+		if _, err := syncfile.WriteAt(f, buf[lo:lo+storage.ConsumerAheadSlotSize], int64(lo)); err != nil {
+			return fail(err)
+		}
+	}
+	if level, ok, err := storage.ReadConsumerOffset(st.dir); err == nil && ok {
+		st.level = level
+	}
+	st.file, st.dirInfo, st.dev = info, dirInfo, offsetDevice(info)
+	st.primed, st.syncing = true, true
+	st.written = offsetWritten{}
+	st.dirtySince = time.Time{}
+	st.needsRewrite = false
+	p := offsetSync{st: st, f: f, dev: st.dev, dir: dir}
+	if c.held < c.maxFDs || c.evictLocked() {
+		st.f = f
+		c.held++
+	} else {
+		p.transient = true
+	}
+	return p, nil
+}
+
+// openPartitionDir opens a partition directory as the root every open of
+// its consumer state goes through, and reports what the directory is. A
+// missing directory is errOffsetDirGone: the committer never recreates
+// one.
+//
+// The open root pins the directory: while it is open, the directory
+// cannot be removed and replaced by one that reuses its inode, and a
+// file opened or created through it lands in it whatever the path names
+// by then.
+func openPartitionDir(dir string) (*os.Root, os.FileInfo, error) {
+	root, err := os.OpenRoot(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, errOffsetDirGone
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, nil, err
+	}
+	return root, info, nil
+}
+
+// openStateFile opens name, a consumer state file, in the partition
+// directory root pins, whose path is dir and identity dirInfo, creating
+// it when missing (created reports that).
+//
+// An existing file is opened by path, through syncfile, so the fault
+// hook sees the open. A move can rename its copy over dir between the
+// caller's checks and that open, and the open then names the copy's
+// file; so the path must still name the pinned directory after the
+// open. A pinned directory is not replaced by one reusing its inode, and
+// nothing renames a replaced partition directory back, so a path that
+// names it after the open named it at the open. A missing file is
+// created through root, never by path: a create by path after such an
+// install would add the file to the copy. Either failure is
+// errOffsetDirGone, and nothing has been written.
+func openStateFile(root *os.Root, dir string, dirInfo os.FileInfo, name string, flag int) (f *os.File, created bool, err error) {
+	f, err = syncfile.OpenFile(filepath.Join(dir, name), flag, storage.ConsumerStateFileMode)
+	if errors.Is(err, os.ErrNotExist) {
+		f, err = root.OpenFile(name, flag|os.O_CREATE, storage.ConsumerStateFileMode)
+		created = true
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		// The pinned directory was removed: nothing can be created in it.
+		return nil, false, errOffsetDirGone
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if now, err := os.Stat(dir); err != nil || !os.SameFile(now, dirInfo) {
+		_ = f.Close()
+		return nil, false, errOffsetDirGone
+	}
+	return f, created, nil
+}
+
+// syncPrimes writes out every file primed this tick and flushes their
+// devices, before the tick writes any window. A failed one is closed
+// and primed again next tick.
+func (c *ConsumerOffsetCommitter) syncPrimes(primes []offsetSync, errs *offsetErrs) error {
+	if len(primes) == 0 {
 		return nil
 	}
-	slot := (last.slot + 1) % 2
-	seq := max(last.seq+1, uint64(time.Now().UnixNano()))
-	if err := storage.WriteConsumerAhead(partitionDir, slot, seq, committed, offsets); err != nil {
-		return fmt.Errorf("write consumer ahead (%d offsets): %w", len(offsets), err)
+	for i := range primes {
+		p := &primes[i]
+		p.err = c.io.writeOut(p.f)
+		if p.err == nil && p.dir != nil {
+			p.err = c.io.syncDir(p.dir)
+		}
 	}
-	c.mu.Lock()
-	c.lastAhead[key] = aheadWritten{version: version, slot: slot, seq: seq}
-	if last, seen := c.lastOffset[key]; !seen || committed > last {
-		c.lastOffset[key] = committed
+	if c.crashed(offsetPointPrimeOut, offsetCommitKey{}) {
+		return errOffsetCrash
 	}
-	c.mu.Unlock()
+	c.flushDevices(primes)
+
+	c.ioMu.Lock()
+	defer c.ioMu.Unlock()
+	for i := range primes {
+		p := &primes[i]
+		if p.dir != nil {
+			_ = p.dir.Close()
+		}
+		if p.transient {
+			_ = p.f.Close()
+		}
+		st := p.st
+		if st.dead {
+			continue
+		}
+		if p.err != nil {
+			errs.add(st.key, "prime sync", p.err)
+			c.releaseLocked(st)
+			st.primed, st.reprime = false, true
+			c.Commit(st.key.topic, st.key.partition, p.requeue)
+			continue
+		}
+		st.syncing, st.reprime = false, false
+		c.cleanLocked(st)
+	}
 	return nil
+}
+
+// writeWindows writes each changed snapshot into its partition's
+// window, through the held descriptor, into the page cache, and
+// collects the files due for writeout: the dirty partitions whose
+// phase this tick is or that have waited D, and the consumer.offset
+// files due a level.
+func (c *ConsumerOffsetCommitter) writeWindows(now time.Time, wants []offsetWant, hasSource bool, mode offsetTickMode, errs *offsetErrs) ([]offsetSync, error) {
+	c.ioMu.Lock()
+	defer c.ioMu.Unlock()
+	for i := range wants {
+		w := &wants[i]
+		st := w.st
+		if st == nil || st.dead || !st.primed || st.syncing {
+			continue
+		}
+		committed := w.committed
+		if !hasSource {
+			// No source: the commit is the frontier, which never moves
+			// back.
+			committed = max(committed, st.frontier())
+		}
+		if st.written.ok && st.written.version == w.version && st.written.committed == committed && !st.needsRewrite {
+			continue
+		}
+		seq := max(st.seq+1, uint64(now.UnixNano()))
+		rec := storage.EncodeConsumerAhead(seq, committed, w.offsets)
+		f, transient, err := c.fdLocked(st)
+		if errors.Is(err, errOffsetDirGone) {
+			c.strandLocked(st)
+			continue
+		}
+		if err == nil {
+			_, err = syncfile.WriteAt(f, rec, int64(st.window())*storage.ConsumerAheadSlotSize)
+			if transient {
+				_ = f.Close()
+			}
+		}
+		if err != nil {
+			errs.add(st.key, "write", err)
+			st.needsRewrite = true
+			// A failed write leaves the descriptor suspect; reopen.
+			c.releaseLocked(st)
+			c.Commit(st.key.topic, st.key.partition, committed)
+			continue
+		}
+		st.seq = seq
+		st.written = offsetWritten{version: w.version, committed: committed, ok: true}
+		st.needsRewrite = false
+		if st.dirtySince.IsZero() {
+			st.dirtySince = now
+			c.lruRemoveLocked(st)
+		}
+		c.lastStats.written++
+		if c.crashed(offsetPointWrite, st.key) {
+			return nil, errOffsetCrash
+		}
+	}
+	if c.crashed(offsetPointWritten, offsetCommitKey{}) {
+		return nil, errOffsetCrash
+	}
+
+	var syncs []offsetSync
+	for _, st := range c.parts {
+		if st.dead || !st.primed || st.syncing {
+			continue
+		}
+		dirty := !st.dirtySince.IsZero()
+		// A window whose last write failed is not written out: its bytes
+		// are not a record until the rewrite.
+		due := dirty && !st.needsRewrite && (mode != offsetTickNormal || c.tickNo%c.every == st.phase || now.Sub(st.dirtySince) >= c.durable)
+		if dirty && !due {
+			c.noteAge(now.Sub(st.dirtySince))
+		}
+		if due {
+			f, transient, err := c.fdLocked(st)
+			if errors.Is(err, errOffsetDirGone) {
+				c.strandLocked(st)
+				continue
+			}
+			if err != nil {
+				errs.add(st.key, "reopen", err)
+				c.Commit(st.key.topic, st.key.partition, st.frontier())
+				continue
+			}
+			syncs = append(syncs, offsetSync{st: st, f: f, dev: st.dev, transient: transient, window: true})
+		}
+		// consumer.offset is levelled with a partition's writeout, or on
+		// its phase once it went quiet, at most every 30s; Close levels
+		// every one.
+		frontier := st.frontier()
+		levelAll := mode == offsetTickClose
+		onTick := due || (!dirty && c.tickNo%c.every == st.phase)
+		if frontier <= st.level || !(levelAll || onTick && now.Sub(st.levelAt) >= consumerOffsetLevelEvery) {
+			continue
+		}
+		lv, err := c.levelLocked(st, frontier)
+		if errors.Is(err, errOffsetDirGone) {
+			// The directory changed under st. A window of st queued
+			// above is not written out: writeOut finds its descriptor
+			// closed or naming another file, and flip finds st dead.
+			c.strandLocked(st)
+			continue
+		}
+		if err != nil {
+			errs.add(st.key, "level", err)
+			continue
+		}
+		syncs = append(syncs, lv)
+		if c.crashed(offsetPointLevel, st.key) {
+			return nil, errOffsetCrash
+		}
+	}
+	return syncs, nil
+}
+
+// levelLocked writes frontier into the partition's consumer.offset in
+// place, through a transient descriptor the caller writes out with the
+// tick's batch. It writes only into the directory the partition was
+// primed in: that directory is pinned for the whole level, it must be
+// the one primed, its consumer.ahead must be the file the committer
+// holds, and consumer.offset is opened inside it (openStateFile). A
+// move that installs its copy over the path at any point of the level
+// gets nothing from it; the level reports errOffsetDirGone. Caller holds
+// ioMu.
+func (c *ConsumerOffsetCommitter) levelLocked(st *offsetPart, frontier int64) (offsetSync, error) {
+	root, dirInfo, err := openPartitionDir(st.dir)
+	if err != nil {
+		return offsetSync{}, err
+	}
+	defer root.Close()
+	if !os.SameFile(dirInfo, st.dirInfo) {
+		return offsetSync{}, errOffsetDirGone
+	}
+	if err := c.checkFileLocked(st, root); err != nil {
+		return offsetSync{}, err
+	}
+	f, created, err := openStateFile(root, st.dir, dirInfo, storage.ConsumerOffsetFileName, os.O_WRONLY)
+	if err != nil {
+		return offsetSync{}, err
+	}
+	lv := offsetSync{st: st, f: f, dev: st.dev, transient: true, level: frontier}
+	if created {
+		if lv.dir, err = root.Open("."); err != nil {
+			_ = f.Close()
+			return offsetSync{}, err
+		}
+	}
+	buf := storage.EncodeConsumerOffset(frontier)
+	if _, err := syncfile.WriteAt(f, buf[:], 0); err != nil {
+		_ = f.Close()
+		if lv.dir != nil {
+			_ = lv.dir.Close()
+		}
+		return offsetSync{}, err
+	}
+	return lv, nil
+}
+
+// writeOut writes out the tick's batch one file at a time (see run),
+// then flushes each device once. A window whose path no longer names
+// the file written (the directory was removed or replaced) is not
+// written out; flip drops its state.
+func (c *ConsumerOffsetCommitter) writeOut(syncs []offsetSync) error {
+	for i := range syncs {
+		s := &syncs[i]
+		if s.window && !sameFileAt(s.f, filepath.Join(s.st.dir, storage.ConsumerAheadFileName)) {
+			s.gone = true
+			continue
+		}
+		s.err = c.io.writeOut(s.f)
+		if s.err == nil && s.dir != nil {
+			s.err = c.io.syncDir(s.dir)
+		}
+	}
+	if c.crashed(offsetPointWrittenOut, offsetCommitKey{}) {
+		return errOffsetCrash
+	}
+	c.flushDevices(syncs)
+	if c.crashed(offsetPointFlushed, offsetCommitKey{}) {
+		return errOffsetCrash
+	}
+	return nil
+}
+
+// flushDevices completes the durability point of every file written
+// out: one flushDevice per device, through any of that device's files
+// (a concurrent Forget may have closed one). A failed flush fails every
+// file of its device.
+func (c *ConsumerOffsetCommitter) flushDevices(syncs []offsetSync) {
+	byDev := make(map[uint64][]int, 1)
+	for i := range syncs {
+		if syncs[i].err == nil && !syncs[i].gone {
+			byDev[syncs[i].dev] = append(byDev[syncs[i].dev], i)
+		}
+	}
+	for _, idx := range byDev {
+		var err error
+		for _, i := range idx {
+			if err = c.io.flushDevice(syncs[i].f); !errors.Is(err, os.ErrClosed) {
+				break
+			}
+		}
+		c.lastStats.flushes++
+		if err != nil {
+			for _, i := range idx {
+				syncs[i].err = err
+			}
+		}
+	}
+}
+
+// flip completes the tick: a window written out and flushed becomes the
+// anchor, a level becomes known; a failure leaves the anchor alone and
+// queues the partition again, its window to be rewritten in full.
+func (c *ConsumerOffsetCommitter) flip(now, flipAt time.Time, syncs []offsetSync, errs *offsetErrs) {
+	c.ioMu.Lock()
+	defer c.ioMu.Unlock()
+	for i := range syncs {
+		s := &syncs[i]
+		if s.transient {
+			_ = s.f.Close()
+		}
+		if s.dir != nil {
+			_ = s.dir.Close()
+		}
+		st := s.st
+		if st.dead {
+			continue
+		}
+		switch {
+		case s.gone:
+			c.strandLocked(st)
+		case s.err != nil:
+			errs.add(st.key, "sync", s.err)
+			if s.window {
+				st.needsRewrite = true
+				c.Commit(st.key.topic, st.key.partition, st.frontier())
+			}
+		case s.window:
+			c.noteAge(flipAt.Sub(st.dirtySince))
+			st.anchor = st.window()
+			st.durable = st.written.committed
+			st.dirtySince = time.Time{}
+			c.cleanLocked(st)
+			c.lastStats.wroteOut++
+		default:
+			st.level, st.levelAt = s.level, now
+			c.lastStats.levelled++
+		}
+	}
+}
+
+// fdLocked returns a descriptor for st's consumer.ahead: the held one,
+// or one reopened by path and verified to be the file primed. Past the
+// descriptor cap the least recently written clean partition gives its
+// up; when none is clean the descriptor is transient and the caller
+// closes it. Caller holds ioMu.
+func (c *ConsumerOffsetCommitter) fdLocked(st *offsetPart) (*os.File, bool, error) {
+	if st.f != nil {
+		return st.f, false, nil
+	}
+	f, err := syncfile.OpenFile(filepath.Join(st.dir, storage.ConsumerAheadFileName), os.O_RDWR, storage.ConsumerStateFileMode)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, errOffsetDirGone
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, false, err
+	}
+	dirInfo, err := os.Stat(st.dir)
+	if err != nil || !os.SameFile(info, st.file) || !os.SameFile(dirInfo, st.dirInfo) {
+		_ = f.Close()
+		return nil, false, errOffsetDirGone
+	}
+	if c.held < c.maxFDs || c.evictLocked() {
+		st.f = f
+		c.held++
+		return f, false, nil
+	}
+	return f, true, nil
+}
+
+// checkFileLocked reports errOffsetDirGone when the partition directory
+// root pins no longer holds the consumer.ahead the committer primed.
+// Caller holds ioMu.
+func (c *ConsumerOffsetCommitter) checkFileLocked(st *offsetPart, root *os.Root) error {
+	info, err := root.Stat(storage.ConsumerAheadFileName)
+	if errors.Is(err, os.ErrNotExist) {
+		return errOffsetDirGone
+	}
+	if err != nil {
+		return err
+	}
+	want := st.file
+	if st.f != nil {
+		if held, err := st.f.Stat(); err == nil {
+			want = held
+		}
+	}
+	if !os.SameFile(info, want) {
+		return errOffsetDirGone
+	}
+	return nil
+}
+
+// sameFileAt reports whether path still names the file f has open.
+func sameFileAt(f *os.File, path string) bool {
+	held, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	now, err := os.Stat(path)
+	return err == nil && os.SameFile(held, now)
+}
+
+// strandLocked drops st, whose directory was removed or replaced under
+// it, and strands its partition until the next Forget: no snapshot
+// primes it meanwhile. st is not dead, so no Forget came since the
+// snapshot that created it; every drop of a shard Forgets, so the shard
+// st was written for is still the live one, and it predates whatever
+// the path names from now on (a move's copy, a recreated topic). Priming
+// that by path with the shard's snapshots would hand the new lineage an
+// old frontier. The reset that follows an install or a quarantine drops
+// the shard, and its Forget lifts the strand. A st that never opened a
+// directory (dirInfo nil) knows nothing of the path and is only
+// dropped, as is every st of a committer without a source, which has no
+// shard to tie a commit to. Caller holds ioMu.
+func (c *ConsumerOffsetCommitter) strandLocked(st *offsetPart) {
+	if !st.dead && st.dirInfo != nil {
+		c.mu.Lock()
+		hasSource := c.ahead != nil
+		c.mu.Unlock()
+		if hasSource {
+			c.stranded[st.key] = struct{}{}
+		}
+	}
+	c.dropLocked(st)
+}
+
+// dropLocked forgets st: closes its descriptor and removes it, so the
+// next tick for the partition primes from the files then on disk. A
+// tick still holding st sees it dead. Caller holds ioMu.
+func (c *ConsumerOffsetCommitter) dropLocked(st *offsetPart) {
+	c.releaseLocked(st)
+	st.dead = true
+	if c.parts[st.key] == st {
+		delete(c.parts, st.key)
+	}
+}
+
+// releaseLocked closes st's held descriptor, if any. Caller holds ioMu.
+func (c *ConsumerOffsetCommitter) releaseLocked(st *offsetPart) {
+	c.lruRemoveLocked(st)
+	if st.f != nil {
+		_ = st.f.Close()
+		st.f = nil
+		c.held--
+	}
+}
+
+// cleanLocked records that st's window matches its anchor: a clean
+// partition holding a descriptor is the cap's to evict. Caller holds
+// ioMu.
+func (c *ConsumerOffsetCommitter) cleanLocked(st *offsetPart) {
+	if st.f != nil && st.dirtySince.IsZero() {
+		c.lruRemoveLocked(st)
+		c.clean.pushBack(st)
+	}
+}
+
+func (c *ConsumerOffsetCommitter) lruRemoveLocked(st *offsetPart) {
+	if st.inLRU {
+		c.clean.remove(st)
+	}
+}
+
+// evictLocked closes the least recently written clean partition's
+// descriptor; false when there is none. Caller holds ioMu.
+func (c *ConsumerOffsetCommitter) evictLocked() bool {
+	st := c.clean.front()
+	if st == nil {
+		return false
+	}
+	c.releaseLocked(st)
+	return true
+}
+
+// noteAge records how long a partition's writes waited, or have
+// waited so far, for their durability point, for the warning past 2D.
+func (c *ConsumerOffsetCommitter) noteAge(age time.Duration) {
+	if age > 2*c.durable {
+		c.lastStats.late++
+		c.lastStats.oldest = max(c.lastStats.oldest, age)
+	}
+}
+
+// crashed consults the crash tests' hook; false in production.
+func (c *ConsumerOffsetCommitter) crashed(point offsetPoint, key offsetCommitKey) bool {
+	return c.crash != nil && c.crash(point, key)
 }
 
 func (c *ConsumerOffsetCommitter) drain() ([]offsetCommit, AheadSource) {
@@ -356,3 +1236,42 @@ func (c *ConsumerOffsetCommitter) drain() ([]offsetCommit, AheadSource) {
 	clear(c.pending)
 	return commits, c.ahead
 }
+
+// offsetErrs keeps a tick's first error.
+type offsetErrs struct{ err error }
+
+func (e *offsetErrs) add(key offsetCommitKey, op string, err error) {
+	if e.err == nil {
+		e.err = fmt.Errorf("persist consumer state %s/%d: %s: %w", key.topic, key.partition, op, err)
+	}
+}
+
+// offsetLRU is an intrusive list of clean partitions holding a
+// descriptor, least recently written first.
+type offsetLRU struct{ head, tail *offsetPart }
+
+func (l *offsetLRU) pushBack(st *offsetPart) {
+	st.lruPrev, st.lruNext, st.inLRU = l.tail, nil, true
+	if l.tail != nil {
+		l.tail.lruNext = st
+	} else {
+		l.head = st
+	}
+	l.tail = st
+}
+
+func (l *offsetLRU) remove(st *offsetPart) {
+	if st.lruPrev != nil {
+		st.lruPrev.lruNext = st.lruNext
+	} else {
+		l.head = st.lruNext
+	}
+	if st.lruNext != nil {
+		st.lruNext.lruPrev = st.lruPrev
+	} else {
+		l.tail = st.lruPrev
+	}
+	st.lruPrev, st.lruNext, st.inLRU = nil, nil, false
+}
+
+func (l *offsetLRU) front() *offsetPart { return l.head }
