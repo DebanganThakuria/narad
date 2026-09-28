@@ -24,6 +24,23 @@ func (g *Logs) WithProduceLock(topicName string, idx int, fn func(*storage.Log) 
 	return fn(log)
 }
 
+// WithProduceLockIncarnation is WithProduceLock for a caller that must
+// know which incarnation of the topic the log belongs to: fn also gets
+// the topic ID the log was opened under ("" for a topic record without
+// one, or when the Logs has no metastore). The log map re-checks an
+// open log against the topic record only on a Get, so a caller that
+// commits records which arrived after this Get pairs it with Current.
+func (g *Logs) WithProduceLockIncarnation(topicName string, idx int, fn func(log *storage.Log, incarnation string) error) error {
+	mu := g.lockProduce(topicName, idx)
+	defer mu.Unlock()
+
+	log, incarnation, err := g.get(topicName, idx)
+	if err != nil {
+		return err
+	}
+	return fn(log, incarnation)
+}
+
 // WithProduceLockResult is WithProduceLock for callbacks that return
 // an offset.
 func (g *Logs) WithProduceLockResult(topicName string, idx int, fn func(*storage.Log) (int64, error)) (int64, error) {
