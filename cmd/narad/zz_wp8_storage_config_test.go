@@ -18,8 +18,8 @@ func TestWP8ConsumerOffsetCommitIntervalIsItsOwnKnob(t *testing.T) {
 	if got := consumerOffsetCommitInterval(sc); got != 250*time.Millisecond {
 		t.Fatalf("consumerOffsetCommitInterval = %v, want 250ms (flush interval 20ms must not leak in)", got)
 	}
-	if got := consumerOffsetCommitInterval(config.Default().Storage); got != 100*time.Millisecond {
-		t.Fatalf("default consumerOffsetCommitInterval = %v, want 100ms", got)
+	if got := consumerOffsetCommitInterval(config.Default().Storage); got != time.Second {
+		t.Fatalf("default consumerOffsetCommitInterval = %v, want 1s", got)
 	}
 }
 

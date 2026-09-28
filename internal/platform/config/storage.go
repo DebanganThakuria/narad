@@ -38,13 +38,19 @@ type StorageConfig struct {
 	// and any value accepted, so existing configs still load.
 	HighWatermarkSyncIntervalMs int `json:"high_watermark_sync_interval_ms"`
 
-	// ConsumerOffsetCommitIntervalMs is how often acked consumer
-	// frontiers and acked-ahead sets are made durable (consumer.offset,
-	// consumer.ahead), one data sync per partition acked since the last
-	// commit. A crash redelivers roughly the acks of the last interval
-	// (within the at-least-once contract); a graceful stop redelivers
-	// none. It is its own setting rather than FlushIntervalMs so tuning
-	// the storage flush does not change how often offsets are synced.
+	// ConsumerOffsetCommitIntervalMs is the durability interval of
+	// acked consumer frontiers and acked-ahead sets (consumer.ahead,
+	// consumer.offset). Every 100ms, or every interval when it is
+	// shorter, the changed ones are written to the page cache, so a
+	// process crash redelivers about 100ms of acks; every interval each
+	// partition acked since is synced once (fdatasync on Linux, fsync
+	// plus one F_FULLFSYNC per tick on macOS), so a power loss or kernel
+	// crash redelivers at most about the interval plus 100ms. Both are
+	// within the at-least-once contract; a graceful stop redelivers
+	// none. 100 keeps the power-loss window of releases before the
+	// two-cadence committer. It is its own setting rather than
+	// FlushIntervalMs so tuning the storage flush does not change how
+	// often offsets are synced.
 	ConsumerOffsetCommitIntervalMs int `json:"consumer_offset_commit_interval_ms"`
 
 	// IngressWALSyncIntervalMs is the backstop cadence for the ingress WAL

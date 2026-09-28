@@ -18,7 +18,7 @@ const minBackgroundWalkMs = 60_000
 
 // Bounds for storage.consumer_offset_commit_interval_ms. The floor keeps
 // the committer loop from spinning; the ceiling bounds how many acks a
-// crash can redeliver.
+// power loss can redeliver.
 const (
 	minConsumerOffsetCommitIntervalMs = 10
 	maxConsumerOffsetCommitIntervalMs = 60_000
