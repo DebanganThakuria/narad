@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{#-
+  Signal Line theme. theme.font is false in mkdocs.yml, so the fonts are
+  loaded here instead of from Material's Google Fonts block:
+  Satoshi (display) from Fontshare, Atkinson Hyperlegible Next (body) and
+  Atkinson Hyperlegible Mono (code) from Google Fonts. All use
+  font-display: swap, and the fallback stacks live in extra.css.
+-#}
+{% block extrahead %}
+  <link rel="preconnect" href="https://api.fontshare.com">
+  <link rel="preconnect" href="https://cdn.fontshare.com" crossorigin>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://api.fontshare.com/v2/css?f[]=satoshi@500,700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;600&family=Atkinson+Hyperlegible+Next:ital,wght@0,400;0,600;1,400&display=swap">
+  {#- PNG fallback first, then the SVG again so browsers that read
+      both still prefer the scheme-aware vector. -#}
+  <link rel="icon" type="image/png" sizes="32x32" href="{{ 'assets/narad-favicon-32.png' | url }}">
+  <link rel="icon" type="image/svg+xml" href="{{ config.theme.favicon | url }}">
+  <link rel="apple-touch-icon" href="{{ 'assets/narad-apple-touch-icon.png' | url }}">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F5F6F3">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0B0D0E">
+{% endblock %}

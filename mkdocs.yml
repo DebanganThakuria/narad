@@ -7,39 +7,49 @@ edit_uri: edit/master/docs/
 
 theme:
   name: material
-  logo: assets/narad-icon.png
-  favicon: assets/narad-icon.png
-  font:
-    text: Inter
-    code: JetBrains Mono
+  custom_dir: overrides
+  logo: assets/narad-mark.svg
+  favicon: assets/narad-favicon.svg
+  # Fonts are loaded in overrides/main.html (Satoshi from Fontshare,
+  # Atkinson Hyperlegible Next and Mono from Google Fonts).
+  font: false
   features:
     - navigation.tabs
     - navigation.instant
+    - navigation.instant.progress
+    - navigation.instant.prefetch
     - navigation.tracking
     - navigation.sections
+    - navigation.path
     - navigation.top
     - navigation.footer
     - toc.follow
     - search.suggest
     - search.highlight
     - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.action.edit
+  # Light first: the built HTML carries the first palette's scheme, so a
+  # visitor without JavaScript (and the first paint) gets paper, not ink.
   palette:
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: custom
-      accent: custom
-      toggle:
-        icon: material/weather-sunny
-        name: Light mode
     - media: "(prefers-color-scheme: light)"
       scheme: default
       primary: custom
       accent: custom
       toggle:
         icon: material/weather-night
-        name: Dark mode
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
   icon:
     repo: fontawesome/brands/github
+    edit: material/pencil-outline
 
 markdown_extensions:
   - admonition
@@ -52,48 +62,56 @@ markdown_extensions:
   - toc:
       permalink: true
   - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
           class: mermaid
           format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
 
 extra_css:
   - stylesheets/extra.css
 
 extra_javascript:
+  - javascripts/mermaid-lines.js
   - javascripts/goatcounter.js
 
 nav:
   - Home: index.md
-  - Compare: compare.md
-  - Client Guide:
-      - Getting Started: client/index.md
+  - Build:
+      - Getting started: client/index.md
       - Go SDK: client/go-sdk.md
       - The CLI: client/cli.md
       - Topics: client/topics.md
       - Schemas: client/schemas.md
       - Producing: client/producing.md
       - Consuming: client/consuming.md
-      - Handling Retries: client/handling-retries.md
-      - Fan-out & Delay: client/fanout-and-delay.md
-      - Users & Access: client/users-and-access.md
-      - Guarantees & Errors: client/guarantees-and-errors.md
+      - Handling retries: client/handling-retries.md
+      - Fan-out & delay: client/fanout-and-delay.md
+      - Users & access: client/users-and-access.md
+      - Guarantees & errors: client/guarantees-and-errors.md
   - Operate:
       - Deployment: operate/index.md
-      - Helm Chart Reference: operate/helm-chart.md
-      - Configuration Reference: operate/configuration.md
+      - Helm chart reference: operate/helm-chart.md
+      - Configuration reference: operate/configuration.md
       - Monitoring: operate/monitoring.md
-      - Scaling & Recovery: operate/scaling-and-recovery.md
+      - Scaling & recovery: operate/scaling-and-recovery.md
       - Rotating the Raft TLS certificates: operate/raft-tls-rotation.md
-  - Internals:
+  - Understand:
       - Architecture: internals/index.md
       - Metastore & Raft: internals/metastore-and-raft.md
-      - Produce Path: internals/produce-path.md
-      - Storage Engine: internals/storage-engine.md
-      - Consume Path: internals/consume-path.md
-      - Fan-out Engine: internals/fanout-engine.md
-      - Cluster Lifecycle: internals/cluster-lifecycle.md
-      - Rebalance & Decommission: internals/rebalance.md
-      - Networking & Security: internals/networking-and-security.md
-      - Checking the Delivery Contract: internals/linearizability.md
+      - Produce path: internals/produce-path.md
+      - Storage engine: internals/storage-engine.md
+      - Consume path: internals/consume-path.md
+      - Fan-out engine: internals/fanout-engine.md
+      - Cluster lifecycle: internals/cluster-lifecycle.md
+      - Rebalance & decommission: internals/rebalance.md
+      - Networking & security: internals/networking-and-security.md
+      - Checking the delivery contract: internals/linearizability.md
+  - Compare: compare.md

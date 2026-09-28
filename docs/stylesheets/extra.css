@@ -1,211 +1,1393 @@
-/* ── Narad brand: deep navy + veena gold ─────────────────────────── */
-:root {
-  --narad-navy: #010816;      /* sampled from the logo lockup */
-  --narad-navy-2: #0c142c;
-  --narad-navy-3: #131c3a;
-  --narad-gold: #c9963f;
-  --narad-gold-bright: #e2b163;
-  --narad-ink: #e9ecf5;
+/* ==========================================================================
+   Signal Line: the Narad docs theme
+   Ink on paper, one lime signal. Type, hairlines and space do the work.
+   Lime only ever means "here": the current tab, page and TOC heading,
+   the one next action, and the message in flight.
+
+   Sizes: Material sets the root to 125%, so 1rem is 20px at the default
+   browser size. Body text is .85rem (17px).
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. Tokens
+   -------------------------------------------------------------------------- */
+
+/* Raw values, light. Material puts the scheme attribute on <body>, so the
+   raw values are set per scheme and the Material mapping below is declared
+   on every scheme element, where it resolves against the right values. */
+:root,
+[data-md-color-scheme="default"] {
+  --nr-paper: #F5F6F3;        /* page, header and footer: one surface */
+  --nr-surface: #ECEDEA;      /* code blocks, table header, search field */
+  --nr-rule: #D9DAD7;         /* hairlines */
+  --nr-faint: #9C9E9B;        /* icons at rest */
+  --nr-text: #272929;         /* body text */
+  --nr-ink: #0B0D0E;          /* headings and link text */
+  --nr-muted: #646665;        /* secondary text, 5.3:1 on paper */
+  --nr-signal: #528A00;       /* never text: markers, underlines, focus, load bar */
+  --nr-lime: #B8F53A;         /* hover fill and primary button, ink text on it */
+  --nr-lime-wash: rgba(184, 245, 58, 0.28);
+  --nr-on-lime: #0B0D0E;
+  --nr-danger: #B42318;       /* data-loss warnings only */
+  --nr-line-tint: #DFEFBE;    /* highlighted code lines */
+  --nr-string: #3D5A73;       /* the one quiet tone in code, 6.1:1 on surface */
 }
 
-/* Typography: a little more air, a little less default */
+/* Raw values, dark */
+[data-md-color-scheme="slate"] {
+  --nr-paper: #0B0D0E;        /* ground */
+  --nr-surface: #171919;
+  --nr-rule: #2C2E2E;
+  --nr-faint: #6E706F;
+  --nr-text: #D4D5D3;
+  --nr-ink: #F5F6F3;          /* headings and link text */
+  --nr-muted: #939493;        /* 6.4:1 on ground */
+  --nr-signal: #B8F53A;
+  --nr-lime: #B8F53A;
+  --nr-lime-wash: rgba(184, 245, 58, 0.16);
+  --nr-on-lime: #0B0D0E;
+  --nr-danger: #FF8A7A;
+  --nr-line-tint: #2E381E;
+  --nr-string: #9DB8CC;       /* 8.5:1 on surface */
+  color-scheme: dark;
+}
+
+/* Constants and the Material mapping, for every scheme */
+:root,
+[data-md-color-scheme] {
+  /* The terminal panel is ink in both schemes */
+  --nr-term-bg: #0B0D0E;
+  --nr-term-text: #D4D5D3;
+  --nr-term-strong: #F5F6F3;
+  --nr-term-muted: #939493;
+  --nr-term-rule: #2C2E2E;
+  --nr-term-payload: #B8F53A;
+
+  /* Type and measures */
+  --nr-font-display: "Satoshi", "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+  --nr-measure: 32rem;        /* 640px: the prose column (40rem at a 16px root) */
+  --nr-strip: 1.9rem;         /* code block title strip */
+
+  --md-text-font: "Atkinson Hyperlegible Next";
+  --md-code-font: "Atkinson Hyperlegible Mono";
+
+  --md-default-bg-color: var(--nr-paper);
+  --md-default-bg-color--light: color-mix(in srgb, var(--nr-paper) 70%, transparent);
+  --md-default-bg-color--lighter: color-mix(in srgb, var(--nr-paper) 30%, transparent);
+  --md-default-bg-color--lightest: color-mix(in srgb, var(--nr-paper) 12%, transparent);
+  --md-default-fg-color: var(--nr-text);
+  --md-default-fg-color--light: var(--nr-muted);
+  --md-default-fg-color--lighter: var(--nr-faint);
+  --md-default-fg-color--lightest: var(--nr-rule);
+
+  --md-primary-fg-color: var(--nr-paper);
+  --md-primary-fg-color--light: var(--nr-paper);
+  --md-primary-fg-color--dark: var(--nr-surface);
+  --md-primary-bg-color: var(--nr-ink);
+  --md-primary-bg-color--light: var(--nr-muted);
+
+  --md-accent-fg-color: var(--nr-ink);
+  --md-accent-fg-color--transparent: var(--nr-lime-wash);
+  --md-accent-bg-color: var(--nr-paper);
+  --md-accent-bg-color--light: var(--nr-paper);
+
+  --md-typeset-color: var(--nr-text);
+  --md-typeset-a-color: var(--nr-ink);
+  --md-typeset-mark-color: var(--nr-lime);
+  --md-typeset-table-color: var(--nr-rule);
+  --md-typeset-table-color--light: var(--nr-surface);
+  --md-typeset-kbd-color: var(--nr-paper);
+  --md-typeset-kbd-accent-color: var(--nr-paper);
+  --md-typeset-kbd-border-color: var(--nr-rule);
+
+  --md-code-fg-color: var(--nr-text);
+  --md-code-bg-color: var(--nr-surface);
+  --md-code-bg-color--light: color-mix(in srgb, var(--nr-surface) 90%, transparent);
+  --md-code-bg-color--lighter: color-mix(in srgb, var(--nr-surface) 60%, transparent);
+  --md-code-hl-color: var(--nr-signal);
+  --md-code-hl-color--light: var(--nr-line-tint);
+  --md-code-hl-keyword-color: var(--nr-ink);
+  --md-code-hl-name-color: var(--nr-text);
+  --md-code-hl-function-color: var(--nr-ink);
+  --md-code-hl-constant-color: var(--nr-ink);
+  --md-code-hl-number-color: var(--nr-text);
+  --md-code-hl-special-color: var(--nr-text);
+  --md-code-hl-string-color: var(--nr-string);
+  --md-code-hl-variable-color: var(--nr-text);
+  --md-code-hl-operator-color: var(--nr-muted);
+  --md-code-hl-punctuation-color: var(--nr-muted);
+  --md-code-hl-comment-color: var(--nr-muted);
+  --md-code-hl-generic-color: var(--nr-muted);
+
+  --md-admonition-fg-color: var(--nr-text);
+  --md-admonition-bg-color: transparent;
+
+  --md-footer-fg-color: var(--nr-ink);
+  --md-footer-fg-color--light: var(--nr-muted);
+  --md-footer-fg-color--lighter: var(--nr-muted);
+  --md-footer-bg-color: var(--nr-paper);
+  --md-footer-bg-color--dark: var(--nr-paper);
+
+  /* Hairlines where Material draws shadows */
+  --md-shadow-z1: 0 0 0 1px var(--nr-rule);
+  --md-shadow-z2: 0 0 0 1px var(--nr-rule);
+  --md-shadow-z3: 0 0 0 1px var(--nr-rule);
+
+  /* Mermaid: paper boxes with ink outlines, ink lines and arrowheads.
+     In the dark scheme the same mapping gives ground boxes with paper
+     outlines, and paper sequence numbers with ink digits. */
+  --md-mermaid-font-family: var(--md-text-font-family);
+  --md-mermaid-node-bg-color: var(--nr-paper);
+  --md-mermaid-node-fg-color: var(--nr-ink);
+  --md-mermaid-edge-color: var(--nr-ink);
+  --md-mermaid-label-bg-color: var(--nr-paper);
+  --md-mermaid-label-fg-color: var(--nr-ink);
+  --md-mermaid-sequence-actor-bg-color: var(--nr-paper);
+  --md-mermaid-sequence-actor-border-color: var(--nr-ink);
+  --md-mermaid-sequence-actor-fg-color: var(--nr-ink);
+  --md-mermaid-sequence-actor-line-color: var(--nr-muted);
+  --md-mermaid-sequence-actorman-bg-color: var(--nr-paper);
+  --md-mermaid-sequence-actorman-line-color: var(--nr-ink);
+  --md-mermaid-sequence-message-fg-color: var(--nr-text);
+  --md-mermaid-sequence-message-line-color: var(--nr-ink);
+  --md-mermaid-sequence-note-bg-color: var(--nr-surface);
+  --md-mermaid-sequence-note-border-color: var(--nr-muted);
+  --md-mermaid-sequence-note-fg-color: var(--nr-text);
+  --md-mermaid-sequence-loop-bg-color: var(--nr-paper);
+  --md-mermaid-sequence-loop-border-color: var(--nr-muted);
+  --md-mermaid-sequence-loop-fg-color: var(--nr-text);
+  --md-mermaid-sequence-label-bg-color: var(--nr-surface);
+  --md-mermaid-sequence-label-fg-color: var(--nr-ink);
+  --md-mermaid-sequence-box-bg-color: var(--nr-surface);
+  --md-mermaid-sequence-box-fg-color: var(--nr-text);
+  --md-mermaid-sequence-number-bg-color: var(--nr-ink);
+  --md-mermaid-sequence-number-fg-color: var(--nr-paper);
+}
+
+/* --------------------------------------------------------------------------
+   2. Base: type, focus, selection, motion
+   -------------------------------------------------------------------------- */
+
+html {
+  /* Keep focused and targeted elements clear of the sticky header */
+  scroll-padding-top: 3.4rem;
+}
+
 body {
   -webkit-font-smoothing: antialiased;
-}
-.md-typeset h1, .md-typeset h2 {
-  font-weight: 700;
-  letter-spacing: -0.015em;
-}
-.md-typeset h1 {
-  color: var(--md-default-fg-color);
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--nr-paper);
 }
 
-/* Header: brand navy with a whisper of gold underline */
-.md-header, .md-tabs {
-  background: linear-gradient(180deg, #010816 0%, #0a1128 100%);
-}
-.md-header {
-  border-bottom: 1px solid rgba(201, 150, 63, 0.28);
-}
-.md-header__button.md-logo img {
-  border-radius: 50%;
+::selection {
+  background-color: var(--nr-lime);
+  color: var(--nr-on-lime);
 }
 
-/* ── Dark scheme tuned to the brand ──────────────────────────────── */
-[data-md-color-scheme="slate"] {
-  --md-default-bg-color: #060c1e;
-  --md-default-fg-color: rgba(233, 236, 245, 0.88);
-  --md-default-fg-color--light: rgba(233, 236, 245, 0.62);
-  --md-default-fg-color--lighter: rgba(233, 236, 245, 0.36);
-  --md-typeset-a-color: var(--narad-gold-bright);
-  --md-accent-fg-color: #f0c67e;
-  --md-primary-fg-color: #010816;
-  --md-code-bg-color: #0e1631;
-  --md-code-fg-color: #dfe5f3;
-  --md-typeset-table-color: rgba(233, 236, 245, 0.10);
-  --md-footer-bg-color: #010816;
-  --md-footer-bg-color--dark: #01060f;
-}
-[data-md-color-scheme="slate"] .md-typeset code {
-  border: 1px solid rgba(201, 150, 63, 0.12);
+/* One visible focus style everywhere: 2px signal, 2px off the element */
+:focus-visible,
+.md-typeset :focus-visible,
+.md-typeset .focus-visible,
+.md-nav__link.focus-visible,
+.md-tabs__link.focus-visible,
+.md-clipboard.focus-visible,
+.md-code__button.focus-visible {
+  outline: 2px solid var(--nr-signal) !important;
+  outline-offset: 2px !important;
 }
 
-/* ── Light scheme: ivory paper, navy text, gold accents ──────────── */
-[data-md-color-scheme="default"] {
-  --md-default-bg-color: #fcfbf8;
-  --md-typeset-a-color: #a1721f;
-  --md-accent-fg-color: #c9963f;
-  --md-primary-fg-color: #010816;
-  --md-primary-fg-color--light: #2a3452;
-  --md-code-bg-color: #f4f1ea;
-}
-
-/* ── Landing hero ─────────────────────────────────────────────────── */
-.narad-hero {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  padding: 1.2rem 0 2.2rem;
-}
-.narad-hero img.narad-hero-logo {
-  width: min(380px, 78vw);
-  border-radius: 28px;
-  box-shadow: 0 24px 80px rgba(1, 8, 22, 0.45), 0 0 0 1px rgba(201, 150, 63, 0.25);
-}
-[data-md-color-scheme="slate"] .narad-hero img.narad-hero-logo {
-  box-shadow: 0 0 90px rgba(201, 150, 63, 0.16), 0 0 0 1px rgba(201, 150, 63, 0.22);
-}
-.narad-hero .narad-tagline {
-  margin: 1.4rem 0 0.2rem;
-  font-size: 1.35rem;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-  background: linear-gradient(90deg, var(--narad-gold) 0%, var(--narad-gold-bright) 50%, var(--narad-gold) 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-.narad-hero .narad-sub {
-  max-width: 34rem;
+.md-typeset {
   font-size: 0.85rem;
-  color: var(--md-default-fg-color--light);
+  line-height: 1.65;
+  font-variant-numeric: normal;
 }
-.narad-hero .md-button {
-  margin: 0.25rem 0.35rem;
-  border-radius: 999px;
-  padding: 0.55em 1.6em;
+
+/* The prose column: text runs 40rem (at a 16px root); code, tables and
+   diagrams may use the full content width */
+.md-typeset > :is(p, ul, ol, dl, blockquote, h1, h2, h3, h4, h5, h6, hr, .admonition, details, .footnote) {
+  max-width: var(--nr-measure);
 }
-.narad-hero .md-button--primary {
-  background: linear-gradient(135deg, #c9963f, #e2b163);
-  border-color: transparent;
-  color: #0b1023;
+
+.md-typeset :is(h1, h2) {
+  font-family: var(--nr-font-display);
+  color: var(--nr-ink);
+  letter-spacing: -0.02em;
+  text-transform: none;
+}
+
+.md-typeset h1 {
+  font-size: 2.35em;
   font-weight: 700;
-}
-.narad-hero .md-button--primary:hover {
-  background: linear-gradient(135deg, #d8a54c, #efc27a);
-  color: #01060f;
+  line-height: 1.12;
+  margin: 0 0 0.8em;
 }
 
-/* ── Cards: lift on hover, gold hairline ─────────────────────────── */
-.md-typeset .grid.cards > ul > li,
-.md-typeset .grid > .card {
-  border-radius: 16px;
-  border: 1px solid rgba(201, 150, 63, 0.22);
-  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
-}
-.md-typeset .grid.cards > ul > li:hover {
-  transform: translateY(-3px);
-  border-color: rgba(201, 150, 63, 0.55);
-  box-shadow: 0 12px 32px rgba(1, 8, 22, 0.25);
+.md-typeset h2 {
+  font-size: 1.55em;
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 2.2em 0 0.7em;
 }
 
-/* ── Tables and admonitions: soften the chrome ───────────────────── */
-.md-typeset table:not([class]) {
-  border-radius: 12px;
-  overflow: hidden;
-  border: 1px solid var(--md-typeset-table-color);
-}
-.md-typeset table:not([class]) th {
-  background: rgba(201, 150, 63, 0.10);
-}
-.md-typeset .admonition, .md-typeset details {
-  border-radius: 12px;
+.md-typeset h3 {
+  font-size: 1.18em;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: -0.005em;
+  color: var(--nr-ink);
+  margin: 1.8em 0 0.6em;
 }
 
-/* Mermaid diagrams breathe a little */
-.md-typeset .mermaid {
-  text-align: center;
+.md-typeset h4,
+.md-typeset h5,
+.md-typeset h6 {
+  font-weight: 600;
+  color: var(--nr-ink);
+  letter-spacing: 0;
+  text-transform: none;
 }
 
-/* Hide the auto-generated page title on the hero landing page */
-.md-content article:has(.narad-hero) > h1:first-child {
+.md-typeset strong {
+  font-weight: 600;
+  color: var(--nr-ink);
+}
+
+.md-typeset hr {
+  border-bottom: 1px solid var(--nr-rule);
+}
+
+/* Links: heading-colour text on a 1.5px signal underline; hover puts
+   a lime fill behind ink text */
+.md-typeset a {
+  color: var(--nr-ink);
+  text-decoration: underline;
+  text-decoration-color: var(--nr-signal);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+  transition: none;
+}
+
+.md-typeset a:is(:hover, :focus-visible) {
+  color: var(--nr-on-lime);
+  background-color: var(--nr-lime);
+  text-decoration-color: currentColor;
+}
+
+.md-typeset a code {
+  color: inherit;
+}
+
+.md-typeset a:is(:hover, :focus-visible) code {
+  background-color: transparent;
+}
+
+/* Things that are links but not prose links */
+.md-typeset :is(a.headerlink, a.md-button, a.md-content__button, a.footnote-backref) {
+  text-decoration: none;
+}
+
+.md-typeset :is(a.headerlink, a.md-content__button, a.footnote-backref):is(:hover, :focus-visible) {
+  background-color: transparent;
+}
+
+/* Content tab labels are links too; they get the tab treatment instead */
+.md-typeset .tabbed-labels > label > a,
+.md-typeset .tabbed-labels > label > a:is(:hover, :focus-visible) {
+  color: inherit;
+  background-color: transparent;
+  text-decoration: none;
+}
+
+.md-typeset .headerlink {
+  color: var(--nr-muted);
+}
+
+.md-typeset .headerlink:is(:hover, :focus-visible),
+.md-typeset :target > .headerlink {
+  color: var(--nr-ink);
+}
+
+/* The edit action sits quietly beside the title */
+.md-typeset .md-content__button {
+  color: var(--nr-muted);
+}
+
+.md-typeset .md-content__button:is(:hover, :focus-visible) {
+  color: var(--nr-ink);
+}
+
+/* Inline code */
+.md-typeset code {
+  font-size: 0.88em;
+  background-color: var(--nr-surface);
+  color: var(--nr-text);
+  border-radius: 2px;
+  padding: 0.08em 0.3em;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+}
+
+.md-typeset kbd {
+  font-family: var(--md-code-font-family);
+  box-shadow: 0 0 0 1px var(--nr-rule);
+  border-radius: 2px;
+}
+
+.md-typeset mark {
+  background-color: var(--nr-lime);
+  color: var(--nr-on-lime);
+}
+
+/* Minimal-functional motion: only the page-load bar moves */
+.md-progress {
+  background-color: var(--nr-signal);
+  height: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   3. Header, tabs, breadcrumbs
+   -------------------------------------------------------------------------- */
+
+.md-header {
+  background-color: var(--nr-paper);
+  color: var(--nr-ink);
+  box-shadow: none;
+}
+
+.md-header--shadow {
+  box-shadow: 0 1px 0 var(--nr-rule);
+}
+
+@media screen and (max-width: 76.234375em) {
+  .md-header {
+    box-shadow: 0 1px 0 var(--nr-rule);
+  }
+}
+
+.md-header__title {
+  font-family: var(--nr-font-display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.md-header__button.md-logo {
+  padding: 0.4rem;
+}
+
+.md-header__button.md-logo img {
+  height: 1.2rem;
+  width: 1.2rem;
+}
+
+/* One logo image per scheme (beats Material's .md-logo img display) */
+.md-logo .nr-logo.nr-logo--dark,
+[data-md-color-scheme="slate"] .md-logo .nr-logo.nr-logo--light {
   display: none;
 }
 
-/* Secondary hero button must read on navy */
-.narad-hero .md-button:not(.md-button--primary) {
-  border-color: rgba(201, 150, 63, 0.55);
-  color: var(--narad-gold-bright);
-}
-.narad-hero .md-button:not(.md-button--primary):hover {
-  background: rgba(201, 150, 63, 0.12);
-  border-color: var(--narad-gold-bright);
-  color: #f0c67e;
-}
-[data-md-color-scheme="default"] .narad-hero .md-button:not(.md-button--primary) {
-  color: #8a6420;
-  border-color: rgba(138, 100, 32, 0.6);
+[data-md-color-scheme="slate"] .md-logo .nr-logo.nr-logo--dark {
+  display: block;
 }
 
-/* ── Landing sections ─────────────────────────────────────────────── */
-.narad-section {
-  max-width: 46rem;
-  margin: 0 auto;
-  padding: 1.6rem 0 0.8rem;
-}
-.narad-section > h2 {
-  text-align: center;
-  font-size: 1.6rem;
-  margin-bottom: 0.8rem;
-}
-.narad-section > p {
-  font-size: 0.78rem;
-}
-.narad-final > h2 {
-  margin-top: 1rem;
+.md-header__button:not([hidden]):hover,
+.md-header__source:hover {
+  opacity: 1;
 }
 
-/* Stat chips */
-.narad-stats {
-  display: flex;
-  gap: 0.8rem;
-  justify-content: center;
-  flex-wrap: wrap;
-  margin: 1.4rem 0;
+.md-header__button:hover {
+  color: var(--nr-ink);
 }
-.narad-stat {
-  flex: 1 1 10rem;
-  max-width: 13rem;
-  text-align: center;
-  padding: 1rem 0.8rem;
-  border-radius: 16px;
-  border: 1px solid rgba(201, 150, 63, 0.30);
-  background: linear-gradient(180deg, rgba(201, 150, 63, 0.07), transparent);
+
+/* Search: a quiet surface field */
+@media screen and (min-width: 60em) {
+  .md-search__form {
+    background-color: var(--nr-surface);
+    border-radius: 2px;
+  }
+
+  .md-search__form:hover {
+    background-color: var(--nr-surface);
+    box-shadow: 0 0 0 1px var(--nr-rule);
+  }
+
+  .md-search__input::placeholder,
+  .md-search__icon[for="__search"] {
+    color: var(--nr-muted);
+  }
+
+  .md-search__input {
+    color: var(--nr-ink);
+  }
 }
-.narad-stat-num {
+
+[data-md-toggle="search"]:checked ~ .md-header .md-search__form {
+  background-color: var(--nr-paper);
+  box-shadow: 0 0 0 1px var(--nr-rule);
+}
+
+.md-search__output {
+  box-shadow: 0 0 0 1px var(--nr-rule);
+}
+
+.md-search-result__meta {
+  background-color: var(--nr-surface);
+  color: var(--nr-muted);
+}
+
+.md-search-result__link:is(:hover, :focus),
+.md-search-result__more > summary:is(:hover, :focus) > div {
+  background-color: var(--md-accent-fg-color--transparent);
+}
+
+/* Tabs: sentence case, the current one carries the signal bar */
+.md-tabs {
+  background-color: var(--nr-paper);
+  color: var(--nr-text);
+  border-bottom: 1px solid var(--nr-rule);
+}
+
+.md-tabs__item {
+  height: 2.5rem;
+  padding: 0 0.6rem;
+}
+
+.md-tabs__link {
+  font-family: var(--nr-font-display);
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  margin-top: 0.75rem;
+  opacity: 1;
+  color: var(--nr-text);
+  text-underline-offset: 4px;
+  transition: none;
+}
+
+.md-tabs__link:is(:hover, :focus-visible) {
+  color: var(--nr-ink);
+  text-decoration: underline;
+  text-decoration-color: var(--nr-signal);
+  text-decoration-thickness: 1.5px;
+}
+
+.md-tabs__item--active {
+  box-shadow: inset 0 -3px 0 var(--nr-signal);
+}
+
+.md-tabs__item--active .md-tabs__link {
+  color: var(--nr-ink);
+  font-weight: 700;
+}
+
+.md-tabs__item--active .md-tabs__link:hover {
+  text-decoration: none;
+}
+
+/* Breadcrumbs above the H1 */
+.md-path {
+  font-family: var(--nr-font-display);
+  font-size: 0.7rem;
+  font-weight: 500;
+  padding-top: 1.4rem;
+}
+
+.md-path__link {
+  color: var(--nr-muted);
+}
+
+.md-path__link:is(:hover, :focus-visible) {
+  color: var(--nr-ink);
+  text-decoration: underline;
+  text-decoration-color: var(--nr-signal);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+}
+
+.md-path__item:not(:first-child)::before {
+  background-color: var(--nr-muted);
+}
+
+/* --------------------------------------------------------------------------
+   4. Layout: a wider grid so code can run past the prose column
+   -------------------------------------------------------------------------- */
+
+.md-grid {
+  max-width: 72rem;
+}
+
+.md-main__inner {
+  margin-top: 0;
+}
+
+.md-content__inner {
+  padding-top: 0.8rem;
+  margin-bottom: 2.4rem;
+}
+
+.md-content__inner > h1:first-child,
+.md-content__inner > .md-content__button + h1 {
+  margin-top: 0.4em;
+}
+
+/* --------------------------------------------------------------------------
+   5. Sidebars: navigation and table of contents
+   -------------------------------------------------------------------------- */
+
+.md-nav {
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.md-nav--primary .md-nav__link {
+  font-family: var(--nr-font-display);
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+
+.md-nav__link {
+  color: var(--nr-text);
+}
+
+.md-nav__link:is(:hover, :focus-visible),
+.md-nav__link[for]:is(:hover, :focus-visible) {
+  color: var(--nr-ink);
+}
+
+.md-nav__link:hover .md-ellipsis {
+  text-decoration: underline;
+  text-decoration-color: var(--nr-signal);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+}
+
+/* Section labels in the sidebar */
+.md-nav--primary .md-nav__item--section > .md-nav__link,
+.md-nav--lifted > .md-nav__list > .md-nav__item > [for],
+.md-nav__title {
+  color: var(--nr-ink);
+  font-family: var(--nr-font-display);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* The marker rail: every link reserves 3px, the current one fills it */
+@media screen and (min-width: 76.25em) {
+  .md-nav--primary .md-nav__item:not(.md-nav__item--section) > .md-nav__link,
+  .md-nav--secondary .md-nav__link {
+    border-left: 3px solid transparent;
+    padding-left: 0.55rem;
+    margin-top: 0.3em;
+    padding-top: 0.15em;
+    padding-bottom: 0.15em;
+  }
+}
+
+.md-nav__item .md-nav__link--active,
+.md-nav__item .md-nav__link--active code {
+  color: var(--nr-ink);
+  font-weight: 700;
+}
+
+.md-nav--primary .md-nav__link--active,
+.md-nav--secondary .md-nav__link--active {
+  border-left-color: var(--nr-signal) !important;
+}
+
+.md-nav--secondary .md-nav__title {
+  font-size: 0.72rem;
+  color: var(--nr-muted);
+  font-weight: 500;
+  box-shadow: none;
+  background: transparent;
+}
+
+.md-nav--secondary .md-nav__link {
+  font-family: var(--md-text-font-family);
+}
+
+.md-nav--secondary .md-nav__link--passed {
+  color: var(--nr-muted);
+}
+
+.md-nav--secondary .md-nav__link--active {
+  color: var(--nr-ink);
+  font-weight: 600;
+}
+
+.md-sidebar__scrollwrap {
+  scrollbar-color: var(--nr-rule) transparent;
+}
+
+/* Mobile drawer: the same paper surface, hairlines instead of fills */
+@media screen and (max-width: 76.234375em) {
+  .md-nav--primary .md-nav__title[for="__drawer"] {
+    background-color: var(--nr-paper);
+    color: var(--nr-ink);
+    border-bottom: 1px solid var(--nr-rule);
+  }
+
+  .md-nav--primary .md-nav__title {
+    background-color: var(--nr-paper);
+    box-shadow: none;
+  }
+
+  .md-nav__source {
+    background-color: var(--nr-surface);
+    color: var(--nr-ink);
+  }
+
+  .md-nav--primary .md-nav__item {
+    border-top: 1px solid var(--nr-rule);
+  }
+
+  .md-nav--primary .md-nav__link--active {
+    box-shadow: inset 3px 0 0 var(--nr-signal);
+  }
+}
+
+.md-sidebar--primary {
+  background-color: var(--nr-paper);
+}
+
+/* --------------------------------------------------------------------------
+   6. Code blocks: a title strip that holds the copy button
+   -------------------------------------------------------------------------- */
+
+.md-typeset .highlight,
+.md-typeset .highlighttable {
+  position: relative;
+  margin: 1.2em 0;
+  background-color: var(--nr-surface);
+  border: 1px solid var(--nr-rule);
+  border-radius: 2px;
+}
+
+.md-typeset .highlight pre,
+.md-typeset .highlight pre > code {
+  margin: 0;
+  border-radius: 0;
+  background-color: transparent;
+}
+
+.md-typeset pre > code {
+  font-size: 0.75rem;
+  line-height: 1.6;
+  padding: 0.85em 1em;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  scrollbar-color: var(--nr-rule) transparent;
+}
+
+/* The strip: the language, or the title given with title="..." */
+.md-typeset .highlight > span.filename,
+.md-typeset .highlight:not(:has(> span.filename))::before {
   display: block;
-  font-size: 2.4rem;
-  font-weight: 800;
-  line-height: 1.1;
-  background: linear-gradient(90deg, var(--narad-gold), var(--narad-gold-bright));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-.narad-stat-label {
-  display: block;
-  margin-top: 0.3rem;
+  box-sizing: border-box;
+  height: var(--nr-strip);
+  margin: 0;
+  padding: 0 3.2rem 0 1rem;
+  border-bottom: 1px solid var(--nr-rule);
+  border-radius: 0;
+  background-color: transparent;
+  color: var(--nr-muted);
+  font-family: var(--md-code-font-family);
   font-size: 0.66rem;
-  color: var(--md-default-fg-color--light);
+  font-weight: 600;
+  line-height: calc(var(--nr-strip) - 1px);
+  letter-spacing: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.md-typeset .highlight:not(:has(> span.filename))::before {
+  content: "Code";
+}
+
+.md-typeset .highlight:is(.language-bash, .language-sh, .language-shell, .language-zsh, .language-console):not(:has(> span.filename))::before { content: "Shell"; }
+.md-typeset .highlight.language-json:not(:has(> span.filename))::before { content: "JSON"; }
+.md-typeset .highlight:is(.language-yaml, .language-yml):not(:has(> span.filename))::before { content: "YAML"; }
+.md-typeset .highlight.language-go:not(:has(> span.filename))::before { content: "Go"; }
+.md-typeset .highlight.language-text:not(:has(> span.filename))::before { content: "Text"; }
+.md-typeset .highlight.language-http:not(:has(> span.filename))::before { content: "HTTP"; }
+.md-typeset .highlight.language-python:not(:has(> span.filename))::before { content: "Python"; }
+.md-typeset .highlight:is(.language-promql, .language-prometheus):not(:has(> span.filename))::before { content: "PromQL"; }
+.md-typeset .highlight.language-toml:not(:has(> span.filename))::before { content: "TOML"; }
+.md-typeset .highlight.language-ini:not(:has(> span.filename))::before { content: "INI"; }
+.md-typeset .highlight.language-dockerfile:not(:has(> span.filename))::before { content: "Dockerfile"; }
+.md-typeset .highlight.language-sql:not(:has(> span.filename))::before { content: "SQL"; }
+.md-typeset .highlight.language-js:not(:has(> span.filename))::before { content: "JavaScript"; }
+
+/* The copy button lives in the strip, so it never covers code */
+.md-typeset .highlight .md-code__nav {
+  top: calc(-1 * var(--nr-strip) + 0.2rem);
+  right: 0.35rem;
+  padding: 0.1rem;
+  background-color: transparent;
+}
+
+.md-typeset .highlight:hover .md-code__nav,
+.md-typeset .highlight .md-code__nav:hover {
+  background-color: transparent;
+}
+
+.md-code__button,
+.md-clipboard {
+  color: var(--nr-muted);
+  border-radius: 2px;
+}
+
+.md-code__button:is(:hover, .focus-visible),
+.md-clipboard:is(:hover, .focus-visible),
+:hover > * > .md-code__button {
+  color: var(--nr-ink);
+}
+
+/* Near-monochrome highlighting: keywords carry weight, not colour */
+.md-typeset .highlight :is(.k, .kc, .kd, .kn, .kp, .kr, .kt, .ow, .nt, .nb) {
+  font-weight: 600;
+}
+
+.md-typeset .highlight :is(.c, .c1, .cm, .ch, .cs, .cp, .cpf, .sd) {
+  font-style: normal;
+}
+
+/* Highlighted lines: the line tint with a 3px signal bar */
+.md-typeset .highlight .hll {
+  background-color: var(--nr-line-tint);
+  box-shadow: inset 3px 0 0 var(--nr-signal);
+  margin: 0 -1em;
+  padding: 0 1em;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .highlight .hll :is(.c, .c1, .cm, .ch, .cs) {
+  color: var(--nr-text);
+}
+
+/* Code annotations: ink markers, lime only when open */
+.md-annotation__index::after {
+  background-color: var(--nr-muted);
+}
+
+.md-annotation__index:is(:hover, :focus-visible)::after,
+:focus-within > .md-annotation__index::after {
+  background-color: var(--nr-ink);
+}
+
+.md-tooltip {
+  background-color: var(--nr-paper);
+  box-shadow: 0 0 0 1px var(--nr-rule);
+  border-radius: 2px;
+}
+
+/* Content tabs */
+.md-typeset .tabbed-set {
+  margin: 1.2em 0;
+}
+
+.md-typeset .tabbed-labels {
+  box-shadow: inset 0 -1px 0 var(--nr-rule);
+}
+
+.md-typeset .tabbed-labels > label {
+  font-family: var(--nr-font-display);
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--nr-text);
+  padding: 0.7em 0.9em 0.6em;
+}
+
+.md-typeset .tabbed-labels > label:hover {
+  color: var(--nr-ink);
+}
+
+.md-typeset .tabbed-set > input:checked + label,
+.md-typeset .tabbed-alternate.tabbed-set > .tabbed-labels > label.tabbed-label--active {
+  color: var(--nr-ink);
+  font-weight: 700;
+}
+
+.md-typeset .tabbed-labels::before {
+  background-color: var(--nr-signal);
+  height: 3px;
+}
+
+.md-typeset .tabbed-content > .highlight:first-child,
+.md-typeset .tabbed-block > .highlight:first-child {
+  margin-top: 0.8em;
+}
+
+/* --------------------------------------------------------------------------
+   7. Tables: body size, hairline rows, tabular figures
+   -------------------------------------------------------------------------- */
+
+.md-typeset table:not([class]) {
+  font-size: 1em;
+  line-height: 1.5;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background-color: transparent;
+  font-variant-numeric: tabular-nums;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.md-typeset table:not([class]) th {
+  background-color: var(--nr-surface);
+  color: var(--nr-ink);
+  font-weight: 600;
+  min-width: 0;
+  padding: 0.6em 1em;
+  border-top: 1px solid var(--nr-rule);
+  border-bottom: 1px solid var(--nr-rule);
+  vertical-align: bottom;
+}
+
+.md-typeset table:not([class]) td {
+  padding: 0.65em 1em;
+  border-top: 0;
+  border-bottom: 1px solid var(--nr-rule);
+  vertical-align: top;
+}
+
+.md-typeset table:not([class]) tbody tr:hover {
+  background-color: transparent;
+  box-shadow: none;
+}
+
+.md-typeset table:not([class]) :is(th, td):first-child {
+  padding-left: 0.5em;
+}
+
+.md-typeset__table {
+  padding: 0;
+}
+
+.md-typeset__scrollwrap {
+  margin: 1.2em 0;
+}
+
+/* Phones: scroll sideways, with the first column pinned */
+@media screen and (max-width: 44.984375em) {
+  .md-typeset__scrollwrap {
+    margin-left: -0.8rem;
+    margin-right: -0.8rem;
+  }
+
+  .md-typeset__table {
+    padding: 0 0.8rem;
+  }
+
+  .md-typeset table:not([class]) :is(th, td):first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background-color: var(--nr-paper);
+    box-shadow: 1px 0 0 var(--nr-rule);
+  }
+
+  .md-typeset table:not([class]) th:first-child {
+    background-color: var(--nr-surface);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   8. Callouts: a 3px left rule and a text label, no fills, no icons
+   -------------------------------------------------------------------------- */
+
+.md-typeset .admonition,
+.md-typeset details {
+  background-color: transparent;
+  border: 0;
+  border-left: 3px solid var(--nr-ink);
+  border-radius: 0;
+  box-shadow: none;
+  font-size: 1em;
+  margin: 1.6em 0;
+  padding: 0.1em 0 0.1em 1.1em;
+}
+
+.md-typeset :is(.admonition, details) > :is(.admonition-title, summary) {
+  background-color: transparent;
+  border: 0;
+  margin: 0 0 0.3em;
+  padding: 0;
+  font-family: var(--nr-font-display);
+  font-weight: 700;
+  font-size: 1em;
+  letter-spacing: -0.01em;
+  color: var(--nr-ink);
+}
+
+.md-typeset :is(.admonition, details) > :is(.admonition-title, summary)::before {
+  display: none;
+}
+
+.md-typeset details > summary {
+  cursor: pointer;
+  padding-right: 1.6em;
+}
+
+.md-typeset details > summary::after {
+  background-color: var(--nr-muted);
+  top: 0.35em;
+  right: 0;
+}
+
+.md-typeset :is(.admonition, details) > :is(p, ul, ol):last-child {
+  margin-bottom: 0.2em;
+}
+
+/* Every callout type gets the same ink rule (beats Material's per-type colours) */
+.md-typeset .admonition[class],
+.md-typeset details[class] {
+  border-left-color: var(--nr-ink);
+}
+
+/* Data-loss warnings: danger red, rule and label */
+.md-typeset :is(.admonition, details):is(.warning, .danger, .caution, .attention, .error, .failure, .bug) {
+  border-left-color: var(--nr-danger);
+}
+
+.md-typeset :is(.admonition, details):is(.warning, .danger, .caution, .attention, .error, .failure, .bug) > :is(.admonition-title, summary) {
+  color: var(--nr-danger);
+}
+
+/* --------------------------------------------------------------------------
+   9. Buttons: square, flat, one primary
+   -------------------------------------------------------------------------- */
+
+.md-typeset .md-button {
+  font-family: var(--nr-font-display);
+  font-weight: 700;
+  font-size: 0.85rem;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  padding: 0.7em 1.3em;
+  border: 2px solid var(--nr-ink);
+  border-radius: 2px;
+  color: var(--nr-ink);
+  background-color: transparent;
+  transition: none;
+}
+
+.md-typeset .md-button:is(:hover, :focus, :focus-visible, :active) {
+  background-color: var(--nr-lime);
+  border-color: var(--nr-ink);
+  color: var(--nr-on-lime);
+}
+
+.md-typeset .md-button--primary {
+  background-color: var(--nr-lime);
+  border-color: var(--nr-lime);
+  color: var(--nr-on-lime);
+}
+
+.md-typeset .md-button--primary:is(:hover, :focus, :focus-visible, :active) {
+  background-color: var(--nr-lime);
+  border-color: var(--nr-ink);
+  color: var(--nr-on-lime);
+}
+
+/* Back to top: a flat square with a hairline */
+.md-top {
+  font-family: var(--nr-font-display);
+  font-weight: 500;
+  border-radius: 2px;
+  background-color: var(--nr-paper);
+  color: var(--nr-ink);
+  box-shadow: 0 0 0 1px var(--nr-rule);
+}
+
+.md-top:is(:hover, :focus-visible) {
+  background-color: var(--nr-lime);
+  color: var(--nr-on-lime);
+}
+
+/* --------------------------------------------------------------------------
+   10. Mermaid: left-aligned on the grid, full content width
+   -------------------------------------------------------------------------- */
+
+.md-typeset .mermaid {
+  margin: 1.4em 0;
+  text-align: left;
+  overflow-x: auto;
+}
+
+/* --------------------------------------------------------------------------
+   11. Footer: the same paper, a hairline above
+   -------------------------------------------------------------------------- */
+
+.md-footer {
+  background-color: var(--nr-paper);
+  color: var(--nr-ink);
+  border-top: 1px solid var(--nr-rule);
+}
+
+.md-footer__link {
+  opacity: 1;
+}
+
+.md-footer__link:is(:hover, :focus-visible) .md-footer__title {
+  text-decoration: underline;
+  text-decoration-color: var(--nr-signal);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+}
+
+.md-footer__title {
+  font-family: var(--nr-font-display);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.md-footer__direction {
+  color: var(--nr-muted);
+  opacity: 1;
+}
+
+.md-footer-meta {
+  background-color: var(--nr-paper);
+  border-top: 1px solid var(--nr-rule);
+}
+
+.md-footer-meta__inner,
+.md-copyright {
+  color: var(--nr-muted);
+}
+
+html .md-footer-meta.md-typeset a {
+  color: var(--nr-muted);
+}
+
+html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
+  color: var(--nr-ink);
+  background-color: transparent;
+}
+
+.md-social__link svg {
+  fill: var(--nr-muted);
+}
+
+/* --------------------------------------------------------------------------
+   12. Utilities
+   -------------------------------------------------------------------------- */
+
+.nr-sr {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --------------------------------------------------------------------------
+   13. Home page
+   -------------------------------------------------------------------------- */
+
+.nr-home .md-content__inner {
+  margin: 0 0.8rem 3.2rem;
+  padding-top: 0;
+}
+
+@media screen and (min-width: 76.25em) {
+  .nr-home .md-content__inner {
+    margin-left: 1.2rem;
+    margin-right: 1.2rem;
+  }
+}
+
+.nr-home .md-typeset > * {
+  max-width: none;
+}
+
+/* First screen: a two-column grid, nothing centred */
+.nr-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr);
+  column-gap: 3.2rem;
+  align-items: start;
+  padding: 2.8rem 0 3.2rem;
+}
+
+.nr-hero__intro > :first-child {
+  margin-top: 0;
+}
+
+.md-typeset .nr-hero h1 {
+  font-size: 2.9rem;            /* 58px */
+  line-height: 1.04;
+  letter-spacing: -0.025em;
+  margin: 0 0 0.45em;
+  max-width: 11.5em;
+}
+
+.md-typeset .nr-lead {
+  font-size: 1rem;              /* 20px */
+  line-height: 1.55;
+  color: var(--nr-text);
+  max-width: 30rem;
+  margin: 0 0 1.4rem;
+}
+
+.md-typeset .nr-lead code {
+  font-size: 0.85em;
+}
+
+.nr-hero .md-button {
+  margin: 0 0 2rem;
+}
+
+/* The three doors: hairline rows that open each tab */
+.md-typeset .nr-doors > ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--nr-rule);
+  max-width: 34rem;
+}
+
+.md-typeset .nr-doors > ul > li {
+  margin: 0;
+  padding: 0;
+  border-bottom: 1px solid var(--nr-rule);
+}
+
+.md-typeset .nr-doors > ul > li > a {
+  display: grid;
+  grid-template-columns: 6.2rem minmax(0, 1fr);
+  column-gap: 0.8rem;
+  align-items: baseline;
+  padding: 0.85rem 0;
+  color: var(--nr-text);
+  text-decoration: none;
+}
+
+.md-typeset .nr-doors__tab {
+  font-family: var(--nr-font-display);
+  font-weight: 700;
+  font-size: 1.05em;
+  letter-spacing: -0.02em;
+  color: var(--nr-ink);
+  justify-self: start;
+  text-decoration: underline;
+  text-decoration-color: var(--nr-signal);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 4px;
+}
+
+.md-typeset .nr-doors > ul > li > a:is(:hover, :focus-visible) {
+  background-color: transparent;
+  color: var(--nr-ink);
+}
+
+.md-typeset .nr-doors > ul > li > a:is(:hover, :focus-visible) .nr-doors__tab {
+  background-color: var(--nr-lime);
+  color: var(--nr-on-lime);
+  text-decoration-color: currentColor;
+}
+
+/* The terminal: ink in both schemes; the payload is the only colour */
+.md-typeset .nr-term {
+  text-align: left;
+}
+
+.nr-term {
+  margin: 0;
+  background-color: var(--nr-term-bg);
+  color: var(--nr-term-text);
+  border: 1px solid var(--nr-term-bg);
+  border-radius: 2px;
+}
+
+[data-md-color-scheme="slate"] .nr-term {
+  border-color: var(--nr-term-rule);
+}
+
+.nr-term__bar {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0 1rem;
+  height: var(--nr-strip);
+  line-height: calc(var(--nr-strip) - 1px);
+  border-bottom: 1px solid var(--nr-term-rule);
+  font-family: var(--md-code-font-family);
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: var(--nr-term-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.md-typeset .nr-term pre {
+  margin: 0;
+  padding: 0.9rem 1rem 1rem;
+  background: transparent;
+  color: var(--nr-term-text);
+  font-family: var(--md-code-font-family);
+  font-size: 0.66rem;           /* 13.2px */
+  line-height: 1.6;
+  overflow-x: auto;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  scrollbar-color: var(--nr-term-rule) transparent;
+}
+
+.md-typeset .nr-term pre code {
+  display: block;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+  white-space: pre;
+}
+
+.nr-term .p,
+.nr-term .h {
+  color: var(--nr-term-muted);
+}
+
+.nr-term .s {
+  color: var(--nr-term-strong);
+  font-weight: 600;
+}
+
+.nr-term .payload {
+  color: var(--nr-term-payload);
+}
+
+.nr-term ::selection {
+  background-color: var(--nr-term-strong);
+  color: var(--nr-term-bg);
+}
+
+.nr-term .md-code__nav {
+  display: none;
+}
+
+.md-typeset .nr-term figcaption {
+  font-style: normal;
+  margin: 0;
+  padding: 0.6rem 1rem 0.7rem;
+  max-width: none;
+  border-top: 1px solid var(--nr-term-rule);
+  font-size: 0.66rem;
+  line-height: 1.5;
+  color: var(--nr-term-muted);
+  text-align: left;
+}
+
+.md-typeset .nr-term figcaption code {
+  white-space: nowrap;
+  background: transparent;
+  color: var(--nr-term-text);
+  padding: 0;
+  font-size: 1em;
+}
+
+/* Below the first screen: short, literal sections */
+.nr-sections {
+  border-top: 1px solid var(--nr-rule);
+}
+
+.nr-section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr);
+  column-gap: 3.2rem;
+  padding: 2rem 0 2.2rem;
+  border-bottom: 1px solid var(--nr-rule);
+}
+
+.nr-section__text > :first-child {
+  margin-top: 0;
+}
+
+.md-typeset .nr-section h2 {
+  font-size: 1.45em;
+  margin: 0 0 0.5em;
+}
+
+.md-typeset .nr-section p {
+  max-width: 30rem;
+  margin: 0 0 0.8em;
+}
+
+.md-typeset .nr-section .nr-more {
+  font-family: var(--nr-font-display);
+  font-weight: 500;
+}
+
+.nr-section__example > :first-child {
+  margin-top: 0.15rem;
+}
+
+.nr-section__example > :last-child {
+  margin-bottom: 0;
+}
+
+/* Tablet and phone: stack; the terminal follows the introduction */
+@media screen and (max-width: 59.984375em) {
+  .nr-hero,
+  .nr-section {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .nr-hero {
+    padding: 1.8rem 0 2.4rem;
+    row-gap: 2rem;
+  }
+
+  .nr-section {
+    padding: 1.6rem 0 1.8rem;
+  }
+}
+
+@media screen and (max-width: 44.984375em) {
+  .md-typeset .nr-hero h1 {
+    font-size: 1.8rem;          /* 36px */
+    line-height: 1.08;
+  }
+
+  .md-typeset .nr-doors > ul > li > a {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 0.15rem;
+    padding: 0.75rem 0;
+  }
+
+  /* On a phone the transcript keeps its lines and scrolls sideways,
+     as a narrow terminal would; every line still starts in view */
+  .md-typeset .nr-term pre {
+    font-size: 0.62rem;
+    padding: 0.8rem 0.7rem 0.9rem;
+  }
+
+  .nr-term__bar {
+    padding: 0 0.7rem;
+  }
+
+  .md-typeset .nr-term figcaption {
+    padding: 0.6rem 0.7rem 0.7rem;
+  }
+}
+
+.nr-nowrap {
+  white-space: nowrap;
 }
