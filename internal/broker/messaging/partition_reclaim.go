@@ -149,9 +149,9 @@ func quarantinePartitionDir(dir string) (string, error) {
 // ResetPartitionConsumerState drops this node's in-memory reservation
 // state for a partition so the next consume rebuilds it from the
 // persisted consumer.offset. The move runner calls it on the destination
-// after installing a copied partition (a node that owned the partition
-// earlier may still hold the old shard), and reclaim calls it on the
-// source.
+// before and after installing a copied partition (a node that owned the
+// partition earlier may still hold the old shard, whose acks must not
+// reach the copy), and reclaim calls it on the source.
 //
 // It also lifts any handoff freeze this node still holds for the
 // partition. A node that receives a partition back within the freeze

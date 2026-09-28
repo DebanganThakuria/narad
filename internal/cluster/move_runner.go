@@ -199,7 +199,8 @@ type guardedReclaimer interface {
 }
 
 // partitionConsumerStateResetter is the optional broker capability the
-// runner uses after installing a copied partition (see finishMove).
+// runner uses before and after installing a copied partition (see
+// finishMove).
 type partitionConsumerStateResetter interface {
 	ResetPartitionConsumerState(topicName string, partition int)
 }
@@ -583,16 +584,28 @@ func (r *MoveRunner) finishMove(ctx context.Context, topicName string, partition
 		r.logger.Warn("move: write move marker; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
+	// A node that owned this partition before it moved away may still
+	// hold the old in-memory reservation shard, and the installed copy
+	// carries the source's consumer.offset, which must win. The shard is
+	// dropped before the install as well as after it. Its acks persist
+	// through the offset committer by path, into whatever directory the
+	// partition's path names: a shard still alive when the copy lands
+	// would write its frontier into the copy, and the new owner would
+	// skip every record between the two. With no shard during the
+	// install, its late commits find none and write nothing. Nothing
+	// creates one here before the flip: only a consume reserves, and it
+	// takes only partitions this node owns (localProbePartitions).
+	resetConsumerState := func() {
+		if rs, ok := r.reclaimer.(partitionConsumerStateResetter); ok {
+			rs.ResetPartitionConsumerState(topicName, partition)
+		}
+	}
+	resetConsumerState()
 	if err := r.install(topicName, partition, stagingDir); err != nil {
 		r.logger.Warn("move: install failed; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
-	// A node that owned this partition before it moved away may still
-	// hold the old in-memory reservation shard; the installed copy carries
-	// the source's consumer.offset, which must win.
-	if rs, ok := r.reclaimer.(partitionConsumerStateResetter); ok {
-		rs.ResetPartitionConsumerState(topicName, partition)
-	}
+	resetConsumerState()
 	if err := r.completeMove(ctx, topicName, partition, source); err != nil {
 		r.logger.Warn("move: flip rejected (CAS guard or not applied)", "topic", topicName, "partition", partition, "err", err)
 		if rmErr := os.RemoveAll(r.partitionDir(topicName, partition)); rmErr != nil {
