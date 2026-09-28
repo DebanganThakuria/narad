@@ -66,14 +66,31 @@ func ConsumeWeight(r *http.Request) int {
 // It answers 204 when none materializes within wait, as a single consume
 // does.
 //
-// The records come from one non-blocking scan of this node's partitions
-// (Engine.ConsumeBatch). Only when that finds nothing does the request
-// fall back on the single-record machinery (remote owners, the long-poll
-// and the token protocol), which delivers one record; a record that
-// arrives by a wait is topped up with another local scan. The request is
-// never held to fill N: a caller that wants N records soon asks with a
-// wait and gets what is there when the first one lands. A scan reserves
-// at most consumeBatchReserveBytes, and the response carries at most
+// Where the records come from depends on what this node owns:
+//
+//   - A single node, a pinned partition this node owns, or a peer's
+//     local-only probe (local): one non-blocking scan of this node's
+//     partitions (Engine.ConsumeBatch), then the local wait, whose record
+//     is topped up with another scan.
+//   - A node that owns some of the topic's partitions (withLocalOwner):
+//     one scan of them first. Only when that finds nothing does the
+//     request fall back on the single-record machinery: a probe of the
+//     remote owners, whose one record goes out alone, then the long-poll
+//     raced against the token protocol, whose one record is topped up
+//     with another local scan.
+//   - A node that owns none of the topic's partitions, or not the pinned
+//     one: the router forwards the request (RouteConsumeBatch) and asks
+//     the owner for up to N, in the opening probes and in the wait phase
+//     alike (the token claim, the re-probe and the polling fallback). The
+//     owner builds the batch, and its {"messages":[...]} body goes out as
+//     it is, without touching this node's broker. So such a node's batch,
+//     parked or not, holds up to N records and up to the owner's reply
+//     bound (8 MiB, as consumeBatchReplyBytes here), not one record.
+//
+// The request is never held to fill N, nor filled from several owners: a
+// caller that wants N records soon asks with a wait and gets what is
+// there when the first one lands. A scan reserves at most
+// consumeBatchReserveBytes, and the response carries at most
 // consumeBatchReplyBytes of encoded records.
 func consumeBatch(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName string, opts brokermsg.ConsumeOpts, localOnly bool, max int) {
 	bc, ok := s.Deps.Broker.(broker.BatchConsumer)
