@@ -92,7 +92,10 @@ func (g *Logs) lockTopic(topicName string) (unlock func()) {
 // incarnation's directory is under the name: a quarantine runs it after
 // the rename, before the successor's marker and partition directories
 // are made, and a purge runs it before removing the directory as well
-// as after.
+// as after. The drop fn makes must wait for a shard create that read
+// the partition's files before the rename or the removal, and drop the
+// shard it stores (consumer.InFlight.DropTopic does), or that shard
+// outlives the retire with the retired incarnation's frontier.
 func (g *Logs) SetTopicRetiredHook(fn func(topicName string)) {
 	g.retired = fn
 }
@@ -140,12 +143,17 @@ func (g *Logs) ensureIncarnationGuarded(topicName, id string) error {
 		// offset committer persists their commits by path. Retired after
 		// the NewLog, as it was before, a commit in between wrote the
 		// deleted incarnation's frontier into the new directory, and the
-		// recreated topic skipped its own first records. A shard made
-		// again after this, by a consumer still holding a log of the
-		// deleted incarnation, recovers nothing of it: none of its files
-		// are under the path any more. The hook runs only here: run
-		// again after the open, it could drop a shard of the current
-		// incarnation, whose log the Get fast path already serves.
+		// recreated topic skipped its own first records. A consumer
+		// still holding a log of the deleted incarnation may be making
+		// a shard from files it read before the rename; the hook's drop
+		// waits for that create to store its shard and drops it (the
+		// create fence of consumer.InFlight), so the shard never serves
+		// the current incarnation or reaches the committer. A shard made
+		// after the hook recovers nothing of the deleted incarnation:
+		// none of its files are under the path any more. The hook runs
+		// only here: run again after the open, it could drop a shard of
+		// the current incarnation, whose log the Get fast path already
+		// serves.
 		g.notifyRetired(topicName)
 	}
 	// Unmarked: a fresh directory, or one written before markers
@@ -262,7 +270,11 @@ func (g *Logs) purgeTopicGuarded(topicName, id string) (purged bool, err error) 
 	// incarnation's frontier. The retire comes after the closes: a
 	// closed log serves no reads, so no record reaches a consumer
 	// through a shard made again after the retire, and the retire after
-	// the removal drops such a shard.
+	// the removal drops such a shard. Each retire's drop also waits for
+	// a shard create already reading the files and drops what it stores
+	// (the create fence of consumer.InFlight), so a create that read
+	// before the removal cannot store its shard after the last retire
+	// and hand the purged frontier to a successor of the name.
 	g.notifyRetired(topicName)
 	rmErr := g.removeAll(dir)
 	if closeErr != nil {
