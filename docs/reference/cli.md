@@ -1,3 +1,7 @@
+---
+description: "Look up every narad command, its flags, and what it prints."
+---
+
 # CLI command reference
 
 Look up every `narad` command, its flags, and what it prints.

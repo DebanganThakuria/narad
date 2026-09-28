@@ -29,9 +29,9 @@ var rollbackDocs = []struct {
 	path    string // from the repository root
 	heading string // the section that must carry the instruction
 }{
-	{"docs/operate/helm-chart.md", "### Rolling back to an earlier release"},
+	{"docs/operate/upgrade.md", "## Roll back {#roll-back}"},
 	{"CHANGELOG.md", "### Upgrade and rollback notes"}, // the first one is the unreleased section
-	{"docs/operate/configuration.md", "## The config file (`--config narad.json`)"},
+	{"docs/reference/configuration.md", "## Config file {#config-file}"},
 }
 
 var wordRemove = regexp.MustCompile(`(?i)\bremove\b`)

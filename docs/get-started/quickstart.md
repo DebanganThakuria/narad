@@ -1,3 +1,9 @@
+---
+description: "Run Narad on your machine, then create a topic and produce, consume and ack one message with curl, in about five minutes."
+search:
+  boost: 2
+---
+
 # Quickstart: send your first message
 
 Run Narad on your machine, then create a topic and produce, consume and ack one message with curl, in about five minutes.

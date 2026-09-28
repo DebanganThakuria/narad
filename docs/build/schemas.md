@@ -1,3 +1,7 @@
+---
+description: "Give a topic a JSON Schema so the broker refuses every message that does not match it, then evolve the schema without breaking consumers."
+---
+
 # Enforce schemas on a topic
 
 Give a topic a JSON Schema so the broker refuses every message that does not match it, then evolve the schema without breaking consumers.

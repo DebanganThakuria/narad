@@ -1,3 +1,7 @@
+---
+description: "Look up the terms these docs use for Narad's parts and behaviour, each with the page that covers it in full."
+---
+
 # Glossary
 
 Look up the terms these docs use for Narad's parts and behaviour, each with the page that covers it in full.

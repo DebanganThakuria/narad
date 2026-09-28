@@ -27,11 +27,11 @@ laptop unchanged from how it runs in Kubernetes.
 
 | You want | Go to |
 |---|---|
-| Use it: produce, consume, retries, fan-out, delay, schemas, access control | [Client Guide](https://debanganthakuria.github.io/narad/client/) |
-| Run it: Helm chart, configuration, monitoring, scaling, recovery | [Operate](https://debanganthakuria.github.io/narad/operate/) |
-| Understand it: every subsystem, with the real function names | [Internals](https://debanganthakuria.github.io/narad/internals/) |
-| Decide whether it fits: an honest matrix against Kafka, NATS, RabbitMQ, SQS, Redis, Pulsar | [Compare](https://debanganthakuria.github.io/narad/compare/) |
-| Write Go against it | [Go SDK](https://debanganthakuria.github.io/narad/client/go-sdk/) |
+| Use it: produce, consume, retries, fan-out, delay, schemas, access control | [Build](https://debanganthakuria.github.io/narad/build/connect/) |
+| Run it: Helm chart, configuration, monitoring, scaling, recovery | [Operate](https://debanganthakuria.github.io/narad/operate/deploy-kubernetes/) |
+| Understand it: every subsystem, with the real function names | [Understand](https://debanganthakuria.github.io/narad/understand/) |
+| Decide whether it fits: an honest matrix against Kafka, NATS, RabbitMQ, SQS, Redis, Pulsar | [Compare](https://debanganthakuria.github.io/narad/get-started/compare/) |
+| Write Go against it | [Go SDK](https://debanganthakuria.github.io/narad/build/go-sdk/) |
 
 ## Quickstart
 
@@ -67,12 +67,12 @@ client.Consume(ctx, "orders", narad.HandlerFunc(
 ```
 
 It lives at [DebanganThakuria/narad-go](https://github.com/DebanganThakuria/narad-go),
-with the guide in [the docs](https://debanganthakuria.github.io/narad/client/go-sdk/).
+with the guide in [the docs](https://debanganthakuria.github.io/narad/build/go-sdk/).
 
 Security is on outside `--dev`: a root `admin` user is seeded at first start (set
 `NARAD_ADMIN_PASSWORD` or read the one-time log line) and every call needs HTTP Basic auth.
 Terminate TLS at an ingress in front of Narad. Details in
-[Getting Started](https://debanganthakuria.github.io/narad/client/).
+[Connect and authenticate](https://debanganthakuria.github.io/narad/build/connect/).
 
 ## Container image
 
@@ -82,7 +82,7 @@ docker run --rm -p 7942:7942 -p 7943:7943 ghcr.io/debanganthakuria/narad:v3.0.1
 
 Port `7942` is the API, `7943` is cluster traffic, `/var/lib/narad` is the data directory.
 Images are multi-arch, non-root, and published for every tag and every commit on `master`.
-For Kubernetes use the [Helm chart](https://debanganthakuria.github.io/narad/operate/helm-chart/).
+For Kubernetes use the [Helm chart](https://debanganthakuria.github.io/narad/operate/deploy-kubernetes/).
 
 Images carry a signature, an SBOM, and build provenance, all produced by the publishing
 workflow with no long-lived key. Verify before you run:
@@ -109,12 +109,12 @@ cluster, not yet at scale in production by anyone the project knows of.
 
 Three limits are structural rather than unfinished, and they are the ones to weigh:
 
-- **No ordering guarantee.** Five documented mechanisms reorder. Carry a sequence in the payload if you need one, and make handlers idempotent, which at-least-once already requires. See [Guarantees](https://debanganthakuria.github.io/narad/client/guarantees-and-errors/).
-- **No synchronous replication.** Partitions have a single owner. Losing a node's volume loses that node's unreplicated data, so volume snapshots and the async [replica pattern](https://debanganthakuria.github.io/narad/client/fanout-and-delay/) are the tools against disk loss. This is the top item on the roadmap.
-- **Months of track record, not years.** The evidence is the project's own test suites, self-administered, and worth exactly that. Every night a three-node cluster takes load while nodes are killed and cut off from their peers, and a [linearizability checker](https://debanganthakuria.github.io/narad/internals/linearizability/) requires every anomaly to be accounted for. That is a real gate. It is not the same as years of other people's production traffic.
+- **No ordering guarantee.** Five documented mechanisms reorder. Carry a sequence in the payload if you need one, and make handlers idempotent, which at-least-once already requires. See [Guarantees](https://debanganthakuria.github.io/narad/understand/delivery-contract/).
+- **No synchronous replication.** Partitions have a single owner. Losing a node's volume loses that node's unreplicated data, so volume snapshots and the async [replica pattern](https://debanganthakuria.github.io/narad/operate/backups/#replica-children) are the tools against disk loss. This is the top item on the roadmap.
+- **Months of track record, not years.** The evidence is the project's own test suites, self-administered, and worth exactly that. Every night a three-node cluster takes load while nodes are killed and cut off from their peers, and a [linearizability checker](https://debanganthakuria.github.io/narad/understand/linearizability/) requires every anomaly to be accounted for. That is a real gate. It is not the same as years of other people's production traffic.
 
 The full concession list, with what to pick instead when one of these is a hard requirement,
-is in [Compare](https://debanganthakuria.github.io/narad/compare/). Which versions get
+is in [Compare](https://debanganthakuria.github.io/narad/get-started/compare/). Which versions get
 security fixes is in [SECURITY.md](./SECURITY.md).
 
 ## Developing
@@ -127,7 +127,7 @@ make build           # bin/narad
 
 The layout is under `cmd/narad` (CLI and server entry point) and `internal/` (broker, cluster,
 persistence, transport). Start with
-[Architecture](https://debanganthakuria.github.io/narad/internals/) before reading code.
+[Architecture](https://debanganthakuria.github.io/narad/understand/) before reading code.
 
 Contributions are welcome: see [CONTRIBUTING.md](./CONTRIBUTING.md) for the workflow and
 [MAINTAINERS.md](./MAINTAINERS.md) for who reviews them and how fast to expect an answer.

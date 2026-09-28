@@ -1,3 +1,7 @@
+---
+description: "Look up the throughput Narad has been measured at, and estimate how much disk each node needs."
+---
+
 # Capacity and disk sizing
 
 Look up the throughput Narad has been measured at, and estimate how much disk each node needs.

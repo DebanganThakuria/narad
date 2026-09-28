@@ -1,3 +1,7 @@
+---
+description: "Learn the handful of ideas every Narad client uses: topics, partitions, keys, leases, acks, child topics and grants."
+---
+
 # Core concepts
 
 Learn the handful of ideas every Narad client uses: topics, partitions, keys, leases, acks, child topics and grants.

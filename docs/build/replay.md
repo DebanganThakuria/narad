@@ -1,3 +1,7 @@
+---
+description: "Read a partition's retained history from any offset without taking leases, so the consumers doing real work never notice."
+---
+
 # Replay messages from an offset
 
 Read a partition's retained history from any offset without taking leases, so the consumers doing real work never notice.

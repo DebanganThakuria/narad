@@ -1,3 +1,9 @@
+---
+description: "Look up every setting narad serve reads: its environment variable, its config file key, its default, and the values it accepts."
+search:
+  boost: 2
+---
+
 # Configuration reference
 
 Look up every setting `narad serve` reads: its environment variable, its config file key, its default, and the values it accepts.
@@ -176,7 +182,7 @@ The two secrets can only be set in the environment, so config files and ConfigMa
 
 The file named by `--config` is JSON. It is strict:
 
-- A key the loader does not know, at any level, stops the node from starting. That includes a key from a newer release, which matters when rolling back ([Upgrade Narad](../operate/upgrade.md#version-notes)).
+- A key the loader does not know, at any level, stops the node from starting. That includes a key from a newer release, which matters when rolling back: remove `storage.consumer_offset_commit_interval_ms`, `storage.ingress_wal_prealloc` and `http.max_produce_in_flight_per_identity` from the file before a node runs v3.0.1 or earlier ([Upgrade Narad](../operate/upgrade.md#roll-back)).
 - Durations are strings with a unit, such as `"10s"` or `"500ms"`. A bare number is refused.
 - JSON has no comments.
 

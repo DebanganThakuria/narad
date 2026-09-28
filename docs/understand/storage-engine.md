@@ -1,3 +1,9 @@
+---
+description: "Learn how Narad stores a partition on disk: segments of CRC-checked frames, the high watermark that bounds what consumers see, crash recovery and retention."
+search:
+  boost: 0.5
+---
+
 # Storage engine
 
 Learn how Narad stores a partition on disk: segments of CRC-checked frames, the high watermark that bounds what consumers see, crash recovery and retention.

@@ -30,7 +30,7 @@ import (
 // The drain budget here is deliberately longer than the 30s visibility
 // timeout so the test measures loss, not that arithmetic. Shrinking the
 // visibility timeout removes the quiet windows entirely, which is the
-// operator's knob and is documented in docs/operate/index.md.
+// operator's knob and is documented in docs/operate/troubleshooting.md.
 func TestSteadyLoadSurvivesACrashWithNoLoss(t *testing.T) {
 	c := newCluster(t, clusterOptions{})
 	c.startAll()

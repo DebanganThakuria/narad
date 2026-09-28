@@ -1,3 +1,7 @@
+---
+description: "Look up every Prometheus series a Narad node exports: its type, its labels and what it measures."
+---
+
 # Metrics reference
 
 Look up every Prometheus series a Narad node exports: its type, its labels and what it measures.

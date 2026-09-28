@@ -1,3 +1,9 @@
+---
+description: "Look up every Narad Helm chart value, the objects the chart creates, its ports and probes, and the settings each value controls."
+search:
+  boost: 2
+---
+
 # Helm values reference
 
 Look up every Narad Helm chart value, the objects the chart creates, its ports and probes, and the settings each value controls.

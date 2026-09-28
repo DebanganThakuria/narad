@@ -1,3 +1,7 @@
+---
+description: "Produce, consume and replay from a Go service with a client that manages leases, retries and failing nodes for you."
+---
+
 # Go SDK: produce and consume from Go
 
 Produce, consume and replay from a Go service with a client that manages leases, retries and failing nodes for you.

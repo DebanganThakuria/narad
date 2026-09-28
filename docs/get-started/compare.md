@@ -1,3 +1,7 @@
+---
+description: "See how Narad compares with Kafka, NATS JetStream, RabbitMQ, SQS, Redis Streams and Pulsar, and which problems each one fits best."
+---
+
 # Compare Narad with other brokers
 
 See how Narad compares with Kafka, NATS JetStream, RabbitMQ, SQS, Redis Streams and Pulsar, and which problems each one fits best.

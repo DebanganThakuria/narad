@@ -1,3 +1,7 @@
+---
+description: "Look up which grant, ownership rule or admin right each Narad request needs."
+---
+
 # Access model and grants
 
 Look up which grant, ownership rule or admin right each Narad request needs.

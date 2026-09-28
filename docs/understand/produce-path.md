@@ -1,3 +1,9 @@
+---
+description: "Learn how a produce becomes a durable, visible record: the local write behind the 202, the background dispatch, and the commit on the owner."
+search:
+  boost: 0.5
+---
+
 # Produce path
 
 Learn how a produce becomes a durable, visible record: the local write behind the `202`, the background dispatch, and the commit on the owner.

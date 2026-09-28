@@ -1,3 +1,7 @@
+---
+description: "Look up exactly which payloads a topic's JSON Schema accepts, which schema documents Narad registers, and which changes between versions it allows."
+---
+
 # Schema validation rules
 
 Look up exactly which payloads a topic's JSON Schema accepts, which schema documents Narad registers, and which changes between versions it allows.

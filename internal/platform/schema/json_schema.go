@@ -275,7 +275,7 @@ func checkNumberExponents(doc []byte) error {
 // is accepted by next, wrapping the reason in ErrIncompatible when not.
 // The check is structural subsumption over an explicit allowlist of
 // keywords and fails closed on anything else; see checkCompatible for
-// the exact rules and docs/client/topics.md for the user-facing list.
+// the exact rules and docs/reference/schema-rules.md for the user-facing list.
 func (r *JSONSchema) CheckCompatible(_ context.Context, _ string, previous, next []byte) error {
 	if err := checkCompatible(previous, next); err != nil {
 		return fmt.Errorf("%w: %w", ErrIncompatible, err)

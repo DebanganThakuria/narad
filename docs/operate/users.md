@@ -1,3 +1,7 @@
+---
+description: "Create a user for each service and give it only the grants it needs."
+---
+
 # Manage users and grants
 
 Create a user for each service and give it only the grants it needs.

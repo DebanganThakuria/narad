@@ -1,3 +1,9 @@
+---
+description: "Install a three-node Narad cluster on Kubernetes with the Helm chart, then check that it answers."
+search:
+  boost: 2
+---
+
 # Deploy on Kubernetes
 
 Install a three-node Narad cluster on Kubernetes with the Helm chart, then check that it answers.

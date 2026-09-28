@@ -1,3 +1,9 @@
+---
+description: "Learn how a Narad cluster forms, grows, recovers from crashes, and handles a topic that is deleted and recreated under the same name."
+search:
+  boost: 0.5
+---
+
 # Cluster lifecycle
 
 Learn how a Narad cluster forms, grows, recovers from crashes, and handles a topic that is deleted and recreated under the same name.

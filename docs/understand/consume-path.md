@@ -1,3 +1,9 @@
+---
+description: "Learn how Narad hands each message to one consumer at a time: in-memory leases, a durable frontier of settled messages, and consumes across nodes."
+search:
+  boost: 0.5
+---
+
 # Consume path
 
 Learn how Narad hands each message to one consumer at a time: in-memory leases, a durable frontier of settled messages, and consumes across nodes.

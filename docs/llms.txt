@@ -1,0 +1,76 @@
+# Narad
+
+> Narad is a message broker in one Go binary: POST a message to any node over HTTP and get 202 once it is fsynced; consumers pull it under a lease and ack. Delivery is at least once, with no ordering guarantee.
+
+These docs track the master branch; the latest release is v3.0.1, and anything newer is marked "Unreleased" on its page.
+
+## Start here
+
+- [Quickstart: send your first message](https://debanganthakuria.github.io/narad/get-started/quickstart/): Run Narad on your machine, then create a topic and produce, consume and ack one message with curl, in about five minutes.
+- [Core concepts](https://debanganthakuria.github.io/narad/get-started/concepts/): Learn the handful of ideas every Narad client uses: topics, partitions, keys, leases, acks, child topics and grants.
+- [Delivery contract](https://debanganthakuria.github.io/narad/understand/delivery-contract/): Learn what Narad promises about delivery, durability, ordering and availability, and what each kind of failure does to your messages.
+- [HTTP API reference](https://debanganthakuria.github.io/narad/reference/http-api/): Look up every Narad HTTP endpoint: its parameters, request body, the grant it needs, the status codes it returns and a real example.
+- [OpenAPI 3.1 spec](https://debanganthakuria.github.io/narad/reference/openapi.yaml): The HTTP API as a machine-readable OpenAPI 3.1 file.
+- [Status codes and errors](https://debanganthakuria.github.io/narad/reference/status-codes/): Look up any status code Narad returns, what it means, and whether to retry the request.
+- [Deploy on Kubernetes](https://debanganthakuria.github.io/narad/operate/deploy-kubernetes/): Install a three-node Narad cluster on Kubernetes with the Helm chart, then check that it answers.
+- [Troubleshooting](https://debanganthakuria.github.io/narad/operate/troubleshooting/): Match what you see, a status code, a readiness answer, a metric or a log line, to its cause, a check and a fix.
+- [Glossary](https://debanganthakuria.github.io/narad/reference/glossary/): Look up the terms these docs use for Narad's parts and behaviour, each with the page that covers it in full.
+
+## Get started
+
+- [Quickstart: send your first message](https://debanganthakuria.github.io/narad/get-started/quickstart/): Run Narad on your machine, then create a topic and produce, consume and ack one message with curl, in about five minutes.
+- [Core concepts](https://debanganthakuria.github.io/narad/get-started/concepts/): Learn the handful of ideas every Narad client uses: topics, partitions, keys, leases, acks, child topics and grants.
+- [Compare Narad with other brokers](https://debanganthakuria.github.io/narad/get-started/compare/): See how Narad compares with Kafka, NATS JetStream, RabbitMQ, SQS, Redis Streams and Pulsar, and which problems each one fits best.
+
+## Build
+
+- [Connect and authenticate](https://debanganthakuria.github.io/narad/build/connect/): Point any HTTP client at a Narad node and authenticate each request with a username and password.
+- [Manage topics](https://debanganthakuria.github.io/narad/build/topics/): Create, inspect, change and delete the topics your services produce to and consume from.
+- [Produce messages](https://debanganthakuria.github.io/narad/build/producing/): Send a message to a topic with one HTTP POST; the request body is the message, stored byte for byte.
+- [Consume and acknowledge messages](https://debanganthakuria.github.io/narad/build/consuming/): Take messages from a topic, process them, and acknowledge each one so that Narad never delivers it again.
+- [Handle retries and dead letters](https://debanganthakuria.github.io/narad/build/handling-retries/): Bound retries, space them out and park messages that keep failing, using only topics, leases and acks in your consumer.
+- [Replay messages from an offset](https://debanganthakuria.github.io/narad/build/replay/): Read a partition's retained history from any offset without taking leases, so the consumers doing real work never notice.
+- [Fan out and delay messages](https://debanganthakuria.github.io/narad/build/fanout-and-delay/): Copy every message of one topic into other topics, at once or after a fixed delay, without changing your producers.
+- [Enforce schemas on a topic](https://debanganthakuria.github.io/narad/build/schemas/): Give a topic a JSON Schema so the broker refuses every message that does not match it, then evolve the schema without breaking consumers.
+- [Go SDK: produce and consume from Go](https://debanganthakuria.github.io/narad/build/go-sdk/): Produce, consume and replay from a Go service with a client that manages leases, retries and failing nodes for you.
+- [Narad CLI](https://debanganthakuria.github.io/narad/build/cli/): Use the narad command to run a local broker, watch a topic, send test messages and switch between clusters from a terminal.
+
+## Operate
+
+- [Deploy on Kubernetes](https://debanganthakuria.github.io/narad/operate/deploy-kubernetes/): Install a three-node Narad cluster on Kubernetes with the Helm chart, then check that it answers.
+- [Production checklist](https://debanganthakuria.github.io/narad/operate/production-checklist/): Check a Narad deployment against this list before it takes production traffic.
+- [Raft TLS certificates: enable and rotate](https://debanganthakuria.github.io/narad/operate/raft-tls/): Turn on mutual TLS for the Raft port, then renew and rotate its certificates without losing messages.
+- [Manage users and grants](https://debanganthakuria.github.io/narad/operate/users/): Create a user for each service and give it only the grants it needs.
+- [Monitor and alert](https://debanganthakuria.github.io/narad/operate/monitoring/): Scrape Narad's Prometheus metrics, import the ready-made Grafana dashboard, and set up the five alerts that catch real trouble.
+- [Scale out and in](https://debanganthakuria.github.io/narad/operate/scaling/): Add nodes to a running Narad cluster, or drain nodes and remove them, without stranding any partition.
+- [Back up and replicate topics](https://debanganthakuria.github.io/narad/operate/backups/): Keep a second copy of a topic on other nodes, and restore a node from a volume snapshot when its disk is lost.
+- [Upgrade Narad](https://debanganthakuria.github.io/narad/operate/upgrade/): Move a cluster to a new Narad release with a rolling restart, and roll it back safely if you need to.
+- [Troubleshooting](https://debanganthakuria.github.io/narad/operate/troubleshooting/): Match what you see, a status code, a readiness answer, a metric or a log line, to its cause, a check and a fix.
+
+## Understand
+
+- [Architecture overview](https://debanganthakuria.github.io/narad/understand/): Learn how Narad is put together: what every node runs, where data lives, and how one message travels from producer to consumer.
+- [Delivery contract](https://debanganthakuria.github.io/narad/understand/delivery-contract/): Learn what Narad promises about delivery, durability, ordering and availability, and what each kind of failure does to your messages.
+- [Linearizability check: the contract, tested nightly](https://debanganthakuria.github.io/narad/understand/linearizability/): Learn how a nightly run checks Narad's delivery contract: what it records, how a model judges the history, and what it cannot catch.
+- [Produce path](https://debanganthakuria.github.io/narad/understand/produce-path/): Learn how a produce becomes a durable, visible record: the local write behind the 202, the background dispatch, and the commit on the owner.
+- [Storage engine](https://debanganthakuria.github.io/narad/understand/storage-engine/): Learn how Narad stores a partition on disk: segments of CRC-checked frames, the high watermark that bounds what consumers see, crash recovery and retention.
+- [Consume path](https://debanganthakuria.github.io/narad/understand/consume-path/): Learn how Narad hands each message to one consumer at a time: in-memory leases, a durable frontier of settled messages, and consumes across nodes.
+- [Fan-out engine](https://debanganthakuria.github.io/narad/understand/fanout-engine/): Learn how Narad copies a parent topic's messages to its children: cursors that tail the parent's committed log and never skip a record.
+- [Metastore and Raft](https://debanganthakuria.github.io/narad/understand/metastore-and-raft/): Learn how Narad keeps its metadata: a Raft-replicated state machine on every node, read locally, and the rules that keep stale replicas from destroying data.
+- [Networking and security](https://debanganthakuria.github.io/narad/understand/networking-and-security/): Learn how Narad nodes talk to clients and to each other over HTTP, QUIC and Raft, and how each path is authenticated and bounded.
+- [Cluster lifecycle](https://debanganthakuria.github.io/narad/understand/cluster-lifecycle/): Learn how a Narad cluster forms, grows, recovers from crashes, and handles a topic that is deleted and recreated under the same name.
+- [Rebalance and decommission](https://debanganthakuria.github.io/narad/understand/rebalance/): Learn how rebalance and decommission move a partition between nodes: a verbatim copy, then an ownership switch that loses no record.
+
+## Reference
+
+- [HTTP API reference](https://debanganthakuria.github.io/narad/reference/http-api/): Look up every Narad HTTP endpoint: its parameters, request body, the grant it needs, the status codes it returns and a real example.
+- [Status codes and errors](https://debanganthakuria.github.io/narad/reference/status-codes/): Look up any status code Narad returns, what it means, and whether to retry the request.
+- [Access model and grants](https://debanganthakuria.github.io/narad/reference/access-model/): Look up which grant, ownership rule or admin right each Narad request needs.
+- [Schema validation rules](https://debanganthakuria.github.io/narad/reference/schema-rules/): Look up exactly which payloads a topic's JSON Schema accepts, which schema documents Narad registers, and which changes between versions it allows.
+- [API stability and versions](https://debanganthakuria.github.io/narad/reference/api-stability/): Look up what can change in Narad's /v1 HTTP API, how nodes on different releases work together, and which release these docs describe.
+- [Configuration reference](https://debanganthakuria.github.io/narad/reference/configuration/): Look up every setting narad serve reads: its environment variable, its config file key, its default, and the values it accepts.
+- [Helm values reference](https://debanganthakuria.github.io/narad/reference/helm-values/): Look up every Narad Helm chart value, the objects the chart creates, its ports and probes, and the settings each value controls.
+- [Metrics reference](https://debanganthakuria.github.io/narad/reference/metrics/): Look up every Prometheus series a Narad node exports: its type, its labels and what it measures.
+- [Capacity and disk sizing](https://debanganthakuria.github.io/narad/reference/capacity/): Look up the throughput Narad has been measured at, and estimate how much disk each node needs.
+- [CLI command reference](https://debanganthakuria.github.io/narad/reference/cli/): Look up every narad command, its flags, and what it prints.
+- [Glossary](https://debanganthakuria.github.io/narad/reference/glossary/): Look up the terms these docs use for Narad's parts and behaviour, each with the page that covers it in full.

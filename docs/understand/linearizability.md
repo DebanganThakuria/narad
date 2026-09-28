@@ -1,3 +1,9 @@
+---
+description: "Learn how a nightly run checks Narad's delivery contract: what it records, how a model judges the history, and what it cannot catch."
+search:
+  boost: 0.5
+---
+
 # Linearizability check: the contract, tested nightly
 
 Learn how a nightly run checks Narad's delivery contract: what it records, how a model judges the history, and what it cannot catch.

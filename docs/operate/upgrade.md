@@ -1,3 +1,7 @@
+---
+description: "Move a cluster to a new Narad release with a rolling restart, and roll it back safely if you need to."
+---
+
 # Upgrade Narad
 
 Move a cluster to a new Narad release with a rolling restart, and roll it back safely if you need to.

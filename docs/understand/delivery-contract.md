@@ -1,3 +1,7 @@
+---
+description: "Learn what Narad promises about delivery, durability, ordering and availability, and what each kind of failure does to your messages."
+---
+
 # Delivery contract
 
 Learn what Narad promises about delivery, durability, ordering and availability, and what each kind of failure does to your messages.

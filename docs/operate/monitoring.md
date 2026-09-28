@@ -1,3 +1,7 @@
+---
+description: "Scrape Narad's Prometheus metrics, import the ready-made Grafana dashboard, and set up the five alerts that catch real trouble."
+---
+
 # Monitor and alert
 
 Scrape Narad's Prometheus metrics, import the ready-made Grafana dashboard, and set up the five alerts that catch real trouble.

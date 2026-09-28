@@ -43,10 +43,10 @@ hide:
 
 <div class="nr-doors" markdown>
 
-- [<span class="nr-doors__tab">Build<span class="nr-sr">:</span></span> <span class="nr-doors__what">Produce, consume and ack from your service.</span>](client/index.md)
-- [<span class="nr-doors__tab">Operate<span class="nr-sr">:</span></span> <span class="nr-doors__what">Deploy with Helm, monitor, scale, upgrade.</span>](operate/index.md)
-- [<span class="nr-doors__tab">Understand<span class="nr-sr">:</span></span> <span class="nr-doors__what">Storage, Raft, rebalance, the delivery contract.</span>](internals/index.md)
-- [<span class="nr-doors__tab">Compare<span class="nr-sr">:</span></span> <span class="nr-doors__what">Kafka, NATS, RabbitMQ, SQS, Redis, Pulsar.</span>](compare.md)
+- [<span class="nr-doors__tab">Build<span class="nr-sr">:</span></span> <span class="nr-doors__what">Produce, consume and ack from your service.</span>](build/connect.md)
+- [<span class="nr-doors__tab">Operate<span class="nr-sr">:</span></span> <span class="nr-doors__what">Deploy with Helm, monitor, scale, upgrade.</span>](operate/deploy-kubernetes.md)
+- [<span class="nr-doors__tab">Understand<span class="nr-sr">:</span></span> <span class="nr-doors__what">Storage, Raft, rebalance, the delivery contract.</span>](understand/index.md)
+- [<span class="nr-doors__tab">Compare<span class="nr-sr">:</span></span> <span class="nr-doors__what">Kafka, NATS, RabbitMQ, SQS, Redis, Pulsar.</span>](get-started/compare.md)
 
 </div>
 
@@ -61,7 +61,7 @@ Put every pod behind one load balancer and send it every produce, consume and ac
 
 That pod appends the message to its own write-ahead log and fsyncs before it answers `202`, so you wait for one local fsync. After the `202` it hands the message to the partition's owner and retries until the owner has fsynced it, read it back and verified it. Only then do consumers see it.
 
-[The produce path, step by step](internals/produce-path.md){ .nr-more }
+[The produce path, step by step](understand/produce-path.md){ .nr-more }
 
 </div>
 <figure class="nr-dia">
@@ -177,7 +177,7 @@ No consumer groups, no partition assignment, and nothing rebalances when a worke
 
 If a worker dies mid-job, its lease runs out and the message goes to the next worker that asks. A slow worker extends its lease; one that gives up hands the message back at once. A late ack gets `410 Gone`, so you know the work may run twice.
 
-[Consuming: leases, acks, extends and nacks](client/consuming.md){ .nr-more }
+[Consuming: leases, acks, extends and nacks](build/consuming.md){ .nr-more }
 
 </div>
 <figure class="nr-dia">
@@ -273,7 +273,7 @@ Any live node accepts a produce with a local fsync: no leader election and no qu
 
 The price, stated up front: **ordering is not guaranteed.** Messages already stored on the dead node wait for it to come back, and their partition answers `503` until then. If you need a sequence, carry one in the payload.
 
-[The availability trade, in full](client/guarantees-and-errors.md#availability-the-deliberate-trade){ .nr-more }
+[The availability trade, in full](understand/delivery-contract.md#availability){ .nr-more }
 
 </div>
 <figure class="nr-dia">
@@ -379,7 +379,7 @@ helm install narad ./charts/narad \
   --set image.tag=v3.0.1
 ```
 
-[Deployment, step by step](operate/index.md){ .nr-more }
+[Deployment, step by step](operate/deploy-kubernetes.md){ .nr-more }
 
 </div>
 <figure class="nr-dia nr-dia--pano">
@@ -505,10 +505,10 @@ What a `202` promises, and what Narad trades for it.
 </div>
 <div class="nr-rows nr-rows--one" markdown>
 
-- **A `202` means fsynced to disk.** Delivery is at least once, so handlers must be idempotent. A nightly run kills and partitions a three-node cluster at 300 messages a second, and fails on any anomaly the contract does not explain. [The delivery contract, checked nightly](internals/linearizability.md){ .nr-more }
-- **Ordering is not guaranteed.** Redelivery and rerouting around a dead node both reorder messages. Carry a sequence in the payload if you need one. [Every way order breaks](client/guarantees-and-errors.md#ordering-not-guaranteed){ .nr-more }
-- **Each partition is one copy on one volume.** Crashes and restarts lose nothing; a destroyed disk loses that node's partitions. For a second copy, add a replica child or snapshot the volumes. [Replication, when you ask for it](client/fanout-and-delay.md#replication-when-you-ask-for-it){ .nr-more }
-- **Fsync costs throughput.** On one shared 2 CPU / 2 GB box with 256-byte messages, Narad produced 5,597 msg/s, last of six brokers; RabbitMQ's quorum queue, the only other one there that fsyncs before it confirms, was about 2.3 times faster. [Same compute, measured](compare.md#same-compute-measured-ourselves){ .nr-more }
+- **A `202` means fsynced to disk.** Delivery is at least once, so handlers must be idempotent. A nightly run kills and partitions a three-node cluster at 300 messages a second, and fails on any anomaly the contract does not explain. [The delivery contract, checked nightly](understand/linearizability.md){ .nr-more }
+- **Ordering is not guaranteed.** Redelivery and rerouting around a dead node both reorder messages. Carry a sequence in the payload if you need one. [Every way order breaks](understand/delivery-contract.md#ordering){ .nr-more }
+- **Each partition is one copy on one volume.** Crashes and restarts lose nothing; a destroyed disk loses that node's partitions. For a second copy, add a replica child or snapshot the volumes. [Replication, when you ask for it](operate/backups.md#replica-children){ .nr-more }
+- **Fsync costs throughput.** On one shared 2 CPU / 2 GB box with 256-byte messages, Narad produced 5,597 msg/s, last of six brokers; RabbitMQ's quorum queue, the only other one there that fsyncs before it confirms, was about 2.3 times faster. [Same compute, measured](get-started/compare.md#same-compute-measured-ourselves){ .nr-more }
 
 </div>
 </section>
@@ -519,12 +519,12 @@ What a `202` promises, and what Narad trades for it.
 
 <div class="nr-rows" markdown>
 
-- **[Fan-out children](client/fanout-and-delay.md)** Every message committed to a parent is copied into each child, with its own consumers and retention. Producers change nothing.
-- **[Replica children](client/fanout-and-delay.md#replication-when-you-ask-for-it)** A child whose partitions are placed on other nodes than the parent's: an async second copy of a topic, from one API call.
-- **[Delay children](client/fanout-and-delay.md#delay-children)** A child with `delay_ms` receives each message that long after the parent committed it: delayed work with no scheduler.
-- **[Schemas at the broker](client/schemas.md)** Give a topic a JSON Schema and a produce that does not fit gets `400` naming the field. It never reaches the log.
-- **[Any payload](client/consuming.md#the-payload-comes-back-the-way-you-sent-it)** Send JSON, text or raw bytes as `application/octet-stream`. JSON comes back verbatim, text as text, and binary as base64 with a flag that says so.
-- **[A Go SDK and a CLI](client/go-sdk.md)** The Go client renews leases, retries with jitter and trips per-node circuit breakers, on the standard library alone. The `narad` binary is the broker and the CLI in one.
+- **[Fan-out children](build/fanout-and-delay.md)** Every message committed to a parent is copied into each child, with its own consumers and retention. Producers change nothing.
+- **[Replica children](operate/backups.md#replica-children)** A child whose partitions are placed on other nodes than the parent's: an async second copy of a topic, from one API call.
+- **[Delay children](build/fanout-and-delay.md#delay-children)** A child with `delay_ms` receives each message that long after the parent committed it: delayed work with no scheduler.
+- **[Schemas at the broker](build/schemas.md)** Give a topic a JSON Schema and a produce that does not fit gets `400` naming the field. It never reaches the log.
+- **[Any payload](build/consuming.md#the-payload-comes-back-the-way-you-sent-it)** Send JSON, text or raw bytes as `application/octet-stream`. JSON comes back verbatim, text as text, and binary as base64 with a flag that says so.
+- **[A Go SDK and a CLI](build/go-sdk.md)** The Go client renews leases, retries with jitter and trips per-node circuit breakers, on the standard library alone. The `narad` binary is the broker and the CLI in one.
 
 </div>
 
@@ -537,7 +537,7 @@ What a `202` promises, and what Narad trades for it.
 
 The `narad` binary is both the broker and the CLI. `narad server start --dev` runs one node on `127.0.0.1:7942` with auth off, and the Docker command runs the same. That is what the session at the top of this page talked to.
 
-[The sixty-second demo](client/cli.md#the-sixty-second-demo){ .nr-more } · [Getting started](client/index.md){ .nr-more } · [Go SDK](client/go-sdk.md){ .nr-more }
+[The sixty-second demo](build/cli.md#watch-messages-flow){ .nr-more } · [Getting started](get-started/quickstart.md){ .nr-more } · [Go SDK](build/go-sdk.md){ .nr-more }
 
 </div>
 <div class="nr-try__code" markdown>

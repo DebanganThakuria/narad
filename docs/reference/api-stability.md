@@ -1,3 +1,7 @@
+---
+description: "Look up what can change in Narad's /v1 HTTP API, how nodes on different releases work together, and which release these docs describe."
+---
+
 # API stability and versions
 
 Look up what can change in Narad's `/v1` HTTP API, how nodes on different releases work together, and which release these docs describe.

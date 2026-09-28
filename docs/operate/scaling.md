@@ -1,3 +1,7 @@
+---
+description: "Add nodes to a running Narad cluster, or drain nodes and remove them, without stranding any partition."
+---
+
 # Scale out and in
 
 Add nodes to a running Narad cluster, or drain nodes and remove them, without stranding any partition.

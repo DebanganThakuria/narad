@@ -1,3 +1,7 @@
+---
+description: "Turn on mutual TLS for the Raft port, then renew and rotate its certificates without losing messages."
+---
+
 # Raft TLS certificates: enable and rotate
 
 Turn on mutual TLS for the Raft port, then renew and rotate its certificates without losing messages.

@@ -1,3 +1,7 @@
+---
+description: "Copy every message of one topic into other topics, at once or after a fixed delay, without changing your producers."
+---
+
 # Fan out and delay messages
 
 Copy every message of one topic into other topics, at once or after a fixed delay, without changing your producers.

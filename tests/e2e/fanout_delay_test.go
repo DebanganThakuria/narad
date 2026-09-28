@@ -89,7 +89,7 @@ func TestFanoutDelayRetentionInvariant(t *testing.T) {
 	// A delay the retention cannot buffer is a conflict between two
 	// records (the child's delay vs the parent's retention), answered
 	// 409 on attach, create-as-child and alter alike: the documented
-	// contract in docs/client/guarantees-and-errors.md. A malformed
+	// contract in docs/build/fanout-and-delay.md. A malformed
 	// delay (negative, below) stays a 400.
 	resp := attachChildWithDelay(t, e, "dret-parent", "dret-child", 3_600_001)
 	expectConflict(t, resp)
@@ -103,7 +103,7 @@ func TestFanoutDelayRetentionInvariant(t *testing.T) {
 
 	// ...and now the parent's retention cannot shrink below what the
 	// child's delay requires (1500ms + the 1h floor > 1h): 409, as
-	// docs/client/topics.md promises and consistent with attach.
+	// docs/build/topics.md promises and consistent with attach.
 	resp = e.patch("/v1/topics/dret-parent", map[string]any{"retention_ms": int64(3_600_000)})
 	expectConflict(t, resp)
 	// Shrinking to something that still buffers the delay is fine.

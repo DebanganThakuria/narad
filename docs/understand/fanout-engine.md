@@ -1,3 +1,9 @@
+---
+description: "Learn how Narad copies a parent topic's messages to its children: cursors that tail the parent's committed log and never skip a record."
+search:
+  boost: 0.5
+---
+
 # Fan-out engine
 
 Learn how Narad copies a parent topic's messages to its children: cursors that tail the parent's committed log and never skip a record.

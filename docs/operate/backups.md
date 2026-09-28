@@ -1,3 +1,7 @@
+---
+description: "Keep a second copy of a topic on other nodes, and restore a node from a volume snapshot when its disk is lost."
+---
+
 # Back up and replicate topics
 
 Keep a second copy of a topic on other nodes, and restore a node from a volume snapshot when its disk is lost.

@@ -1,3 +1,9 @@
+---
+description: "Look up any status code Narad returns, what it means, and whether to retry the request."
+search:
+  boost: 2
+---
+
 # Status codes and errors
 
 Look up any status code Narad returns, what it means, and whether to retry the request.

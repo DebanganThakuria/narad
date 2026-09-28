@@ -5,13 +5,14 @@ on:
     branches: [master]
     paths:
       - "docs/**"
+      - "includes/**"
       - "overrides/**"
       - "mkdocs.yml"
+      - "requirements-docs.txt"
       - ".github/workflows/docs.yml"
       # The HTTP API reference page is generated from the spec, and the
       # check below also compares the spec with the router.
-      - "api/**"
-      - "scripts/gen-http-api-docs.py"
+      - "scripts/gen_http_api.py"
       - "internal/transport/httpserver/router.go"
   workflow_dispatch:
 
@@ -32,13 +33,18 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: pip install mkdocs-material
+      - run: pip install -r requirements-docs.txt
       # Fails when docs/reference/http-api.md is not what
-      # api/openapi.yaml renders to, or when the spec and router.go list
-      # different routes. PyYAML comes with MkDocs.
+      # docs/reference/openapi.yaml renders to, when the spec and
+      # router.go list different routes, or when a status code in the
+      # spec has no heading on the status codes page.
       - name: Check the generated HTTP API page
-        run: python scripts/gen-http-api-docs.py --check
+        run: python scripts/gen_http_api.py --check
+      # No -q: with -q, MkDocs 1.6 drops warnings before --strict counts
+      # them, so a broken link or #anchor would pass.
       - run: mkdocs build --strict
+        env:
+          NO_MKDOCS_2_WARNING: "1"
       - uses: actions/upload-pages-artifact@v5
         with:
           path: site

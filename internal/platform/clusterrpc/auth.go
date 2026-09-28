@@ -43,7 +43,7 @@ import (
 // (quicALPNLegacy). That token is replayable and the server side of it
 // is unauthenticated, so it is only honoured when the operator turns on
 // SetLegacyAuthCompat for the duration of a rolling upgrade; see
-// docs/operate/index.md for the upgrade order.
+// docs/operate/upgrade.md for the upgrade order.
 
 // ekmLabel is the TLS exporter label for the per-session auth key.
 const ekmLabel = "narad-cluster-auth-v1"

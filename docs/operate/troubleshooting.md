@@ -1,3 +1,9 @@
+---
+description: "Match what you see, a status code, a readiness answer, a metric or a log line, to its cause, a check and a fix."
+search:
+  boost: 2
+---
+
 # Troubleshooting
 
 Match what you see, a status code, a readiness answer, a metric or a log line, to its cause, a check and a fix.

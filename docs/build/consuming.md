@@ -1,3 +1,9 @@
+---
+description: "Take messages from a topic, process them, and acknowledge each one so that Narad never delivers it again."
+search:
+  boost: 2
+---
+
 # Consume and acknowledge messages
 
 Take messages from a topic, process them, and acknowledge each one so that Narad never delivers it again.

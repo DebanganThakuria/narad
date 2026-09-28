@@ -1,3 +1,9 @@
+---
+description: "Point any HTTP client at a Narad node and authenticate each request with a username and password."
+search:
+  boost: 2
+---
+
 # Connect and authenticate
 
 Point any HTTP client at a Narad node and authenticate each request with a username and password.

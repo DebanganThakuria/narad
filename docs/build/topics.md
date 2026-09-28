@@ -1,3 +1,7 @@
+---
+description: "Create, inspect, change and delete the topics your services produce to and consume from."
+---
+
 # Manage topics
 
 Create, inspect, change and delete the topics your services produce to and consume from.

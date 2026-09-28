@@ -1,3 +1,7 @@
+---
+description: "Learn how Narad is put together: what every node runs, where data lives, and how one message travels from producer to consumer."
+---
+
 # Architecture overview
 
 Learn how Narad is put together: what every node runs, where data lives, and how one message travels from producer to consumer.

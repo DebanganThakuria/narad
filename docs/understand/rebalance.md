@@ -1,3 +1,9 @@
+---
+description: "Learn how rebalance and decommission move a partition between nodes: a verbatim copy, then an ownership switch that loses no record."
+search:
+  boost: 0.5
+---
+
 # Rebalance and decommission
 
 Learn how rebalance and decommission move a partition between nodes: a verbatim copy, then an ownership switch that loses no record.

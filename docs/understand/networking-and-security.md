@@ -1,3 +1,9 @@
+---
+description: "Learn how Narad nodes talk to clients and to each other over HTTP, QUIC and Raft, and how each path is authenticated and bounded."
+search:
+  boost: 0.5
+---
+
 # Networking and security
 
 Learn how Narad nodes talk to clients and to each other over HTTP, QUIC and Raft, and how each path is authenticated and bounded.

@@ -1,3 +1,9 @@
+---
+description: "Learn how Narad keeps its metadata: a Raft-replicated state machine on every node, read locally, and the rules that keep stale replicas from destroying data."
+search:
+  boost: 0.5
+---
+
 # Metastore and Raft
 
 Learn how Narad keeps its metadata: a Raft-replicated state machine on every node, read locally, and the rules that keep stale replicas from destroying data.

@@ -1,3 +1,9 @@
+---
+description: "Bound retries, space them out and park messages that keep failing, using only topics, leases and acks in your consumer."
+search:
+  boost: 2
+---
+
 # Handle retries and dead letters
 
 Bound retries, space them out and park messages that keep failing, using only topics, leases and acks in your consumer.

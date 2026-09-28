@@ -1,3 +1,7 @@
+---
+description: "Check a Narad deployment against this list before it takes production traffic."
+---
+
 # Production checklist
 
 Check a Narad deployment against this list before it takes production traffic.

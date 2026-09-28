@@ -1,3 +1,7 @@
+---
+description: "Use the narad command to run a local broker, watch a topic, send test messages and switch between clusters from a terminal."
+---
+
 # Narad CLI
 
 Use the `narad` command to run a local broker, watch a topic, send test messages and switch between clusters from a terminal.

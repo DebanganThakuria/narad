@@ -1,3 +1,9 @@
+---
+description: "Send a message to a topic with one HTTP POST; the request body is the message, stored byte for byte."
+search:
+  boost: 2
+---
+
 # Produce messages
 
 Send a message to a topic with one HTTP `POST`; the request body is the message, stored byte for byte.
