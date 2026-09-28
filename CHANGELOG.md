@@ -100,6 +100,7 @@ summarized more briefly than the 1.x and later entries.
 - The Go toolchain is pinned to 1.27.1. The pin started at 1.26.6, which carried fixes for four standard-library advisories the new `govulncheck` job found on its first run against 1.26.0: quadratic complexity in `net/url` path resolution (GO-2026-6218), unbounded post-handshake messages in `crypto/tls` (GO-2026-6090), `ReadHeaderTimeout` not applied during the unencrypted HTTP/2 check in `net/http` (GO-2026-6089), and unbounded recursion in `encoding/asn1` (GO-2026-5972). A scan on 1.27.1 reports none of them, and no others.
 
 ### Fixed
+- `narad sub`, `narad sub --peek` and `narad replay` printed a wrong time on every message, a time of day from January 1970. The server sends a message's `timestamp` in Unix seconds and the CLI read it as milliseconds. The CLI now prints the local time the message was committed, to the second.
 - Stale version references in the documentation. The README advertised v2.2.0 and the deployment page told people to run a v0.2.0 beta image, five releases after it was superseded.
 - A link on the schemas page that pointed at an anchor on a different page, so it silently went nowhere.
 - The signature verification recipe in the README pinned only the repository, so it would have accepted a signature from any workflow on any branch. It now pins the publishing workflow on `master` or a release tag, and CI verifies the exact identity it just signed with.
