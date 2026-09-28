@@ -533,7 +533,7 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, sess *MoveSession, topicNa
 	// The source's fan-out cursors kept advancing while frozen (fan-out
 	// only reads); the fence's listing is the freshest view of them.
 	staging := r.stagingDir(topicName, partition)
-	if err := installSidecars(staging, fence.Sidecars); err != nil {
+	if err := installSidecars(staging, fence.Sidecars, res.HighWatermark); err != nil {
 		r.logger.Warn("move: install fan-out cursor sidecars; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false, CopyResult{}
 	}

@@ -376,3 +376,26 @@ func InstallFanoutCursorFile(partitionDir string, f SidecarFile) error {
 	}
 	return writeFileAtomic(partitionDir, f.Name, f.Data)
 }
+
+// FanoutCursorFileAtMost returns f with its cursor's next offset lowered
+// to limit when it points past it, re-encoded; changed reports whether
+// it was. A move installs the source's cursor files into a copy promoted
+// at a high watermark: a cursor past that boundary would skip the parent
+// records the new owner later writes below it, and the child would never
+// get them. Lowered, it fans some records out again at most. A cursor at
+// or below limit is returned verbatim.
+func FanoutCursorFileAtMost(f SidecarFile, limit int64) (SidecarFile, bool, error) {
+	c, err := decodeFanoutCursor(f.Data)
+	if err != nil {
+		return f, false, fmt.Errorf("storage: sidecar %q: corrupt cursor: %w", f.Name, err)
+	}
+	if c.NextOffset <= limit {
+		return f, false, nil
+	}
+	c.NextOffset = limit
+	data, err := encodeFanoutCursor(c)
+	if err != nil {
+		return f, false, fmt.Errorf("storage: sidecar %q: %w", f.Name, err)
+	}
+	return SidecarFile{Name: f.Name, Data: data}, true, nil
+}
