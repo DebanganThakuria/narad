@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -67,6 +68,10 @@ type Logs struct {
 	// loaded schemas) drops it too: that state belongs to the retired
 	// incarnation and must not leak into a same-named successor.
 	retired func(topicName string)
+
+	// removeAll removes a purged topic's directory: os.RemoveAll, which
+	// tests replace to act between its unlinks and its rmdirs.
+	removeAll func(path string) error
 
 	// opened, when set, is called with every partition log just after it
 	// is opened, so an owner of per-topic delivery state can install its
@@ -167,6 +172,7 @@ func NewLogs(dataDir string, storageOpts storage.Options, ms metastore.Metastore
 		logs:        make(map[logKey]*logEntry),
 		guards:      make(map[string]*topicGuard),
 		produceSync: make(map[logKey]*sync.Mutex),
+		removeAll:   os.RemoveAll,
 	}
 	if v, ok := ms.(topicVersioner); ok {
 		g.versions = v

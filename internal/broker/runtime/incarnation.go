@@ -91,7 +91,8 @@ func (g *Logs) lockTopic(topicName string) (unlock func()) {
 // whatever directory the path names by then. So fn runs while no other
 // incarnation's directory is under the name: a quarantine runs it after
 // the rename, before the successor's marker and partition directories
-// are made.
+// are made, and a purge runs it before removing the directory as well
+// as after.
 func (g *Logs) SetTopicRetiredHook(fn func(topicName string)) {
 	g.retired = fn
 }
@@ -251,7 +252,19 @@ func (g *Logs) purgeTopicGuarded(topicName, id string) (purged bool, err error) 
 	// partition) and the unlink of every segment file stall callers of
 	// this topic, which must wait for the purge anyway, and nobody else.
 	closeErr := g.closeTopicGuarded(topicName)
-	rmErr := os.RemoveAll(dir)
+	// Retire the incarnation before the removal as well as after it. Its
+	// consumer shards are live until the hook drops them, and the offset
+	// committer persists their commits by path, creating a missing
+	// consumer file in the partition directory. os.RemoveAll lists and
+	// unlinks a directory's entries and only then removes the directory:
+	// a file created in between fails that rmdir, the unmarked leftover
+	// survives, and a same-named successor adopts it with the purged
+	// incarnation's frontier. The retire comes after the closes: a
+	// closed log serves no reads, so no record reaches a consumer
+	// through a shard made again after the retire, and the retire after
+	// the removal drops such a shard.
+	g.notifyRetired(topicName)
+	rmErr := g.removeAll(dir)
 	if closeErr != nil {
 		err = closeErr
 	}
