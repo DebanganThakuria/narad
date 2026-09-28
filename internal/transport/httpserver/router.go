@@ -32,7 +32,10 @@ type RouterOptions struct {
 	// ProduceInFlightPerIdentity caps concurrent produce requests per
 	// identity, as ConsumeInFlightPerIdentity does for consume; 0
 	// disables. A batch produce counts its message count, so batching
-	// does not multiply what one identity may have in flight.
+	// does not multiply what one identity may have in flight, and counts
+	// one while it reads and decodes its body, before that count is
+	// known: an identity's batch bodies in flight are bounded by the cap
+	// too.
 	ProduceInFlightPerIdentity int
 }
 

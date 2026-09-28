@@ -306,21 +306,48 @@ func (e *Engine) commitCombined(topicName string, partition int, req *commitRequ
 	return req.err
 }
 
+// staleLogAttempts bounds how many times one cycle resolves the
+// partition's log (see runCommitCycle). Each extra attempt follows a
+// change to the topic's record that landed during the cycle, so a second
+// one is already rare.
+const staleLogAttempts = 3
+
 // runCommitCycle runs one combined cycle under the partition's produce
 // lock, then wakes every caller it served except self, the leader.
+//
+// The cycle writes every batch it drained into the one log it resolved,
+// and batches keep queueing until the drain. So a delete plus recreate
+// of the topic that the owner applies after the resolution (during a
+// lazy open, or while the leader waited for the lock) could send a
+// batch of the new incarnation into the old incarnation's log, to be
+// acked and then quarantined with it. commitBatchLocked asks whether the
+// log is still current after the drain; when it is not, the cycle lets
+// go of the lock and resolves the log again, with the same batches, so
+// they are checked against the log they will be written to.
 func (e *Engine) runCommitCycle(topicName string, partition int, c *produceCombiner, self *commitRequest) {
 	var batch []*commitRequest
-	err := e.logs.WithProduceLock(topicName, partition, func(log *storage.Log) error {
-		// Drained under the produce lock, so every batch that queued while
-		// the leader waited for it rides this cycle.
-		batch = c.drain()
-		e.commitBatchLocked(topicName, partition, c, log, batch)
-		return nil
-	})
-	if batch == nil {
-		// The partition's log could not be opened, so the cycle never ran:
-		// every queued batch shares that failure.
-		batch = c.drain()
+	var err error
+	for attempt := 1; ; attempt++ {
+		stale := false
+		err = e.logs.WithProduceLockIncarnation(topicName, partition, func(log *storage.Log, incarnation string) error {
+			if batch == nil {
+				// Drained under the produce lock, so every batch that queued
+				// while the leader waited for it rides this cycle.
+				batch = c.drain()
+			}
+			stale = !e.commitBatchLocked(topicName, partition, c, log, incarnation, batch, attempt == staleLogAttempts)
+			return nil
+		})
+		if err != nil || !stale {
+			break
+		}
+	}
+	if err != nil {
+		// The partition's log could not be resolved, so nothing in the
+		// cycle was committed: every queued batch shares that failure.
+		if batch == nil {
+			batch = c.drain()
+		}
 		for _, r := range batch {
 			r.err = err
 		}
@@ -348,9 +375,16 @@ func (c *produceCombiner) drain() []*commitRequest {
 }
 
 // commitBatchLocked appends and durably commits every request in batch
-// that may still be committed, as one run, and records each request's
-// outcome. The caller holds the partition's produce lock.
-func (e *Engine) commitBatchLocked(topicName string, partition int, c *produceCombiner, log *storage.Log, batch []*commitRequest) {
+// that may still be committed, as one run, into log, which was opened
+// under the topic incarnation logIncarnation, and records each
+// request's outcome. The caller holds the partition's produce lock.
+//
+// It returns false, having touched no request, when log is no longer
+// current (see runCommitCycle) and last is not set; the caller then
+// resolves the log again and calls it with the same batch. With last
+// set, a stale log refuses the whole batch with ErrNotPartitionOwner,
+// which every caller retries.
+func (e *Engine) commitBatchLocked(topicName string, partition int, c *produceCombiner, log *storage.Log, logIncarnation string, batch []*commitRequest, last bool) bool {
 	// The owner and freeze gate again, now under the produce lock. A
 	// handoff arms its freeze and only then takes this lock to read the
 	// final high-watermark, so a commit that passed the outer gate before
@@ -361,13 +395,27 @@ func (e *Engine) commitBatchLocked(topicName string, partition int, c *produceCo
 		for _, r := range batch {
 			r.err = ErrNotPartitionOwner
 		}
-		return
+		return true
+	}
+	// The log was resolved before the drain, so the topic's record may
+	// have changed since: a batch that queued after a delete plus
+	// recreate would be checked below against the new incarnation and
+	// written into the old one's log. A current log was re-checked
+	// against the record as it is now, after every drained batch queued.
+	if !e.logs.Current(topicName, partition, log) {
+		if !last {
+			return false
+		}
+		for _, r := range batch {
+			r.err = ErrNotPartitionOwner
+		}
+		return true
 	}
 
 	live := batch
-	if refused := e.refuseUncommittable(topicName, batch); refused > 0 {
+	if refused := e.refuseUncommittable(topicName, logIncarnation, batch); refused > 0 {
 		if refused == len(batch) {
-			return
+			return true
 		}
 		live = make([]*commitRequest, 0, len(batch)-refused)
 		for _, r := range batch {
@@ -426,22 +474,24 @@ func (e *Engine) commitBatchLocked(topicName string, partition int, c *produceCo
 		for _, r := range live {
 			r.err = err
 		}
-		return
+		return true
 	}
 	next := first
 	for _, r := range live {
 		r.first = next
 		next += int64(len(r.payloads))
 	}
+	return true
 }
 
 // refuseUncommittable records an error on every request in batch that
 // may no longer be committed and returns how many it refused. A caller
 // that gave up (its RPC timed out, say) is not appended: it retries
 // anyway, and appending it now would only commit a duplicate. A batch
-// accepted for another incarnation than the one this node now holds is
-// turned away with ErrTopicIncarnationMismatch.
-func (e *Engine) refuseUncommittable(topicName string, batch []*commitRequest) int {
+// accepted for another incarnation than the one this node now holds, or
+// than the one the log it would be written to belongs to
+// (logIncarnation), is turned away with ErrTopicIncarnationMismatch.
+func (e *Engine) refuseUncommittable(topicName, logIncarnation string, batch []*commitRequest) int {
 	refused := 0
 	liveID, resolved := "", false
 	var lookupErr error
@@ -466,6 +516,13 @@ func (e *Engine) refuseUncommittable(topicName string, batch []*commitRequest) i
 			refused++
 		case r.incarnation != liveID:
 			r.err = incarnationMismatch(topicName, r.incarnation, liveID)
+			refused++
+		case r.incarnation != logIncarnation:
+			// The live record moved on after the log was checked (the
+			// check and this lookup are not one read): the batch belongs
+			// to a log this cycle does not hold. Retriable, and the next
+			// cycle resolves the log again.
+			r.err = incarnationMismatch(topicName, r.incarnation, logIncarnation)
 			refused++
 		}
 	}

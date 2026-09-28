@@ -38,19 +38,31 @@ func hwmFilePath(dir string) string {
 // binary, started after a crash (a rollback), hide acked records, and
 // its failed-commit discard would then truncate them.
 //
-// The cost of a crash is duplicates, never loss: records written and
-// fsynced by a commit that never returned (a crash mid-commit, a failed
-// commit whose truncate failed, a poisoned log) are exposed by the tail
-// too, and the ingress WAL, which still owns them, re-commits them at
-// fresh offsets. The next commit on the partition exposed such a tail
-// anyway, since it advances the boundary over it.
+// The tail an open recovers is read through the page cache, so after a
+// process crash it can hold frames the dead process wrote but never saw
+// fsynced (it died inside a commit's fsync, or before it). Exposing
+// those as they are would serve records a later power loss can take
+// back, after consumers acked them and the offset files recorded that:
+// the offsets would then be reused by other records. So before an open
+// takes the boundary from the tail it fsyncs the active segment
+// (syncRecoveredTail), and everything it exposes is durable. Sealed
+// segments need no sync: a roll fsyncs the active segment before it
+// creates the next one.
+//
+// The cost of a crash is then duplicates, never loss: records written
+// by a commit that never returned (a crash mid-commit, a failed commit
+// whose truncate failed, a poisoned log) are exposed by the tail too,
+// and the ingress WAL, which still owns them, re-commits them at fresh
+// offsets. The next commit on the partition exposed such a tail anyway,
+// since it fsyncs the segment and advances the boundary over it.
 
 // loadHighWatermark restores the boundary on open. A file of 8 bytes is
 // the boundary a clean Close wrote (or a rebalance copy carried, see
 // WritePersistedHighWatermark), clamped to the recovered tail; an empty
-// or missing file means the tail (see the file comment above).
+// or missing file means the tail, which is fsynced first (see the file
+// comment above).
 //
-// Nothing is written here. The file is only read while the log is
+// The hwm file is not written here. It is only read while the log is
 // closed, the first advance empties it, and Close writes it again.
 func (l *Log) loadHighWatermark(nextOffset int64) error {
 	nextOffset = max(nextOffset, 0)
@@ -64,6 +76,11 @@ func (l *Log) loadHighWatermark(nextOffset int64) error {
 	l.hwmDirSynced = err == nil
 	switch len(data) {
 	case 0:
+		if nextOffset > 0 {
+			if err := l.syncRecoveredTail(); err != nil {
+				return err
+			}
+		}
 		l.highWatermark.Store(nextOffset)
 		if nextOffset == 0 {
 			// An empty partition needs no file: missing already means 0.
@@ -79,6 +96,20 @@ func (l *Log) loadHighWatermark(nextOffset int64) error {
 		l.persistedHWM.Store(persisted)
 	default:
 		return fmt.Errorf("storage: invalid hwm file size %d", len(data))
+	}
+	return nil
+}
+
+// syncRecoveredTail fsyncs the recovered active segment, so a boundary
+// taken from its tail covers only durable frames. A failure fails the
+// open: the bytes past the last good sync are of unknown durability (see
+// flusher.syncIfNeeded), and the next open retries. It costs one fsync
+// per open that takes the boundary from the tail (after a crash, or for
+// a log that was never closed), never one on the commit path.
+func (l *Log) syncRecoveredTail() error {
+	active := l.segments[len(l.segments)-1]
+	if err := active.sync(); err != nil {
+		return fmt.Errorf("storage: sync recovered tail: %w", err)
 	}
 	return nil
 }

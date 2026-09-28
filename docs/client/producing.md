@@ -57,7 +57,8 @@ curl -u $AUTH -X POST -H "Content-Type: application/json" \
 - **A timeout or 5xx is ambiguous for the whole batch**: some or all of it may have been accepted, so a retry may duplicate part of it. That is the single-produce rule, applied to every message at once.
 - Messages go into the write-ahead log in batch order, so messages that share a key reach their partition in batch order in normal operation. That is still steady-state behaviour, not a contract: the [ordering section](#ordering-there-is-no-ordering-guarantee) applies to batches too.
 - A batch waits for one write-ahead log fsync however many messages it carries (two when the log rolls to a new segment in the middle of it), so it costs far less per message than single produces. Measured at the write-ahead log on macOS, where an fsync flushes the whole device, with one caller at a time: about 51 µs per message in batches of 100 and 0.5 ms in batches of 10, against about 4.7 ms for a single produce. For one message, use a single produce: the batch envelope costs a little more CPU and buys nothing.
-- A batch counts as its message count (clamped to the cap) against your per-identity cap on concurrent produces, `http.max_produce_in_flight_per_identity`, which answers `429` beyond it. The cap is off by default.
+- A batch counts as its message count (clamped to the cap) against your per-identity cap on concurrent produces, `http.max_produce_in_flight_per_identity`, which answers `429` beyond it, and as one while its body is still being read, before that count is known. The cap is off by default.
+- More than 100 messages is `400` (`too many messages: more than 100 (max 100)`): the server stops reading the batch at the 101st rather than counting the rest.
 - Batches need a server that knows them. A node on a release before batch produce answers `404`, so fall back to single produces for as long as a client can reach such a node.
 
 ## Ordering: there is no ordering guarantee

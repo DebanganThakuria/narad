@@ -2,6 +2,7 @@ package messaging
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -14,10 +15,10 @@ import (
 // of a few dozen bytes each, with room to spare for whitespace.
 const maxAckBatchBodyBytes = 64 << 10
 
-// ackBatchRequest is the body of a batch ack.
-type ackBatchRequest struct {
-	ReceiptHandles []string `json:"receipt_handles"`
-}
+// tooManyReceiptHandles answers a batch ack past MaxConsumeBatch
+// handles. The decode stops at the first handle past the bound, so the
+// answer does not count the rest.
+var tooManyReceiptHandles = "too many receipt_handles: more than " + strconv.Itoa(MaxConsumeBatch) + " (max " + strconv.Itoa(MaxConsumeBatch) + ")"
 
 // batchAckRouter is the batch form of the router's RouteAck family; the
 // cluster router implements it. It settles the handles whose partitions
@@ -46,17 +47,21 @@ func ackBatch(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName
 	if !ok {
 		return
 	}
-	var req ackBatchRequest
-	if !s.DecodeJSONBytes(w, body, &req) {
+	// Decoded one handle at a time and refused at handle
+	// MaxConsumeBatch+1, so a body of anything but handles costs no more
+	// than a full batch (see decodeBoundedList).
+	raws, err := decodeBoundedList[string](body, "receipt_handles", MaxConsumeBatch)
+	if errors.Is(err, errListTooLong) {
+		s.WriteError(w, http.StatusBadRequest, tooManyReceiptHandles)
 		return
 	}
-	n := len(req.ReceiptHandles)
+	if err != nil {
+		s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	n := len(raws)
 	if n == 0 {
 		s.WriteError(w, http.StatusBadRequest, "receipt_handles required")
-		return
-	}
-	if n > MaxConsumeBatch {
-		s.WriteError(w, http.StatusBadRequest, "too many receipt_handles: "+strconv.Itoa(n)+" (max "+strconv.Itoa(MaxConsumeBatch)+")")
 		return
 	}
 
@@ -64,7 +69,7 @@ func ackBatch(s *handlers.Set, w http.ResponseWriter, r *http.Request, topicName
 	handles := make([]consumer.Handle, n)
 	statuses := make([]int, n)
 	msgs := make([]string, n)
-	for i, raw := range req.ReceiptHandles {
+	for i, raw := range raws {
 		h, err := consumer.DecodeHandle(raw)
 		if err != nil {
 			statuses[i], msgs[i] = brokerOutcome(s, "ack", err)

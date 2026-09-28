@@ -198,26 +198,57 @@ func (g *Logs) DataDir() string { return g.dataDir }
 // the topic's metadata version moves, so a delete plus recreate applied
 // while the log was open retires it rather than serving the old data.
 func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
+	l, _, err := g.get(topicName, idx)
+	return l, err
+}
+
+// get is Get that also returns the topic incarnation the log was opened
+// under ("" for a topic record without an ID, or when the Logs has no
+// metastore).
+func (g *Logs) get(topicName string, idx int) (*storage.Log, string, error) {
 	key := keyOf(topicName, idx)
 
 	g.mu.RLock()
 	if e, ok := g.logs[key]; ok && !e.closing && g.entryCurrent(topicName, e) {
 		e.stamp()
 		g.mu.RUnlock()
-		return e.log, nil
+		return e.log, e.incarnation, nil
 	}
 	g.mu.RUnlock()
 
 	unlock := g.lockTopic(topicName)
 	defer unlock()
-	l, _, quarantined, err := g.openGuarded(topicName, idx, false)
+	l, e, quarantined, err := g.openGuarded(topicName, idx, false)
 	if quarantined {
 		// A deleted incarnation's directory was set aside: drop the
 		// in-memory state that belonged to it (outside mu, under the
 		// guard).
 		g.notifyRetired(topicName)
 	}
-	return l, err
+	if err != nil {
+		return nil, "", err
+	}
+	return l, e.incarnation, nil
+}
+
+// Current reports whether l is still the log Get would serve for (topic,
+// idx) without re-validating it: its entry is in the map, is not being
+// closed, and the topic's metadata version has not moved since the entry
+// was last checked against the topic record. A false answer means the
+// record changed under the log (an alter, or a delete plus recreate) and
+// the next Get re-checks it; it does not say the log is wrong.
+//
+// A produce commit that resolved its log earlier asks this before it
+// appends records that queued after the resolution (see messaging's
+// combined commit): a delete plus recreate that landed in between would
+// otherwise send them into the old incarnation's log. Without topic
+// versions (a metastore that has none) an open entry is always current,
+// as it is to Get.
+func (g *Logs) Current(topicName string, idx int, l *storage.Log) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	e, ok := g.logs[keyOf(topicName, idx)]
+	return ok && e.log == l && !e.closing && g.entryCurrent(topicName, e)
 }
 
 // GetMany resolves the logs of several partitions of one topic, as a Get
