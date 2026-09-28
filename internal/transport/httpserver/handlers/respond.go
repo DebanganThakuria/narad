@@ -140,10 +140,12 @@ func (s *Set) logServerError(status int, msg string, attrs ...slog.Attr) {
 // the generic 5xx body.
 //
 // Receipt-handle errors are mapped to discrete codes so clients can
-// distinguish "you sent garbage or used the wrong topic" (400) from
-// "you took too long / it was already redelivered" (410). Out-of-order
-// ack rejected by ackedAhead-cap maps to 503 — the head is genuinely
-// stuck and the client should back off.
+// distinguish "the handle cannot be decoded" (400) from "no active
+// reservation matches it" (410): the lease ran out, the message was
+// redelivered, or the handle came from another topic or names a
+// partition this topic does not have (a handle carries no topic).
+// Out-of-order ack rejected by ackedAhead-cap maps to 503: the head is
+// genuinely stuck and the client should back off.
 func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 	switch {
 	case errors.Is(err, errs.ErrTopicNotFound):
