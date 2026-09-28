@@ -1495,7 +1495,20 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   background-color: var(--nr-band);
   --nr-rule: var(--nr-band-edge);
   --nr-surface: var(--nr-inset);
-  /* halfway to the edge tone: groups in a drawing */
+  /* halfway to the edge tone: groups in a drawing. A group always
+     carries a name ("Topic", "Narad cluster", "StatefulSet"), because
+     the tint alone is only 1.09 to 1.16:1 against its band. Text on the
+     tint (ratios measured):
+       light  mint   muted 5.22  text 12.22  ink 16.26
+              sky    muted 5.02  text 11.74  ink 15.63
+              lilac  muted 4.94  text 11.56  ink 15.40
+              butter muted 5.37  text 12.56  ink 16.73
+       dark   mint   muted 5.71  text 10.68  ink 13.69
+              sky    muted 5.81  text 10.85  ink 13.90
+              lilac  muted 5.99  text 11.19  ink 14.34
+              butter muted 5.91  text 11.05  ink 14.15
+     Recheck these if a band or edge colour changes: muted on the lilac
+     tint is the thinnest margin on the page. */
   --nr-band-deep: color-mix(in srgb, var(--nr-band-edge) 50%, var(--nr-band));
 }
 
@@ -1532,6 +1545,14 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   border-top: 1px solid var(--nr-rule);
 }
 
+/* The palette keeps dark butter neutral (a warm dark reads brown), so
+   the drawing on it carries the hue instead: its group and its storage
+   (Raft and the volumes) take a little of the butter accent */
+[data-md-color-scheme="slate"] .nr-tint--butter {
+  --nr-band-edge: color-mix(in srgb, var(--nr-butter-mark) 16%, var(--nr-butter));
+  --nr-band-deep: color-mix(in srgb, var(--nr-butter-mark) 7%, var(--nr-butter));
+}
+
 /* A white section that follows a white section takes a hairline */
 .nr-also:not(.nr-tint + .nr-also),
 .nr-try:not(.nr-tint) {
@@ -1561,7 +1582,9 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
 .nr-hero > .nr-doors { grid-area: doors; }
 
 .md-typeset .nr-hero h1 {
-  font-size: clamp(3rem, 5.4vw, 3.9rem);   /* 78px at 1440px */
+  /* 78px at 1440px; the 48px floor keeps a 720px window (1440 at 200%
+     zoom) to three lines, so the lead still starts on the first screen */
+  font-size: clamp(2.4rem, 5.4vw, 3.9rem);
   line-height: 1;
   letter-spacing: -0.035em;
   margin: 0 0 0.5em;
@@ -1768,6 +1791,32 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   grid-row: 1;
 }
 
+/* The last pitch breaks the zigzag once: its heading runs across the
+   band, the copy sits in two columns under it, and the drawing gets the
+   band's full width, a third wider than the others at the same scale */
+.nr-band--wide {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+}
+
+.nr-band--wide > h2,
+.nr-band--wide > .nr-dia {
+  grid-column: 1 / -1;
+}
+
+.md-typeset .nr-band--wide > h2 {
+  margin-bottom: 0.7em;
+}
+
+.md-typeset .nr-band--wide > .nr-dia {
+  max-width: 1160px;
+  margin-top: 3rem;
+}
+
+.md-typeset .nr-band--wide .nr-band__copy p:only-child {
+  margin-top: 0;
+}
+
 .nr-band__copy > :first-child {
   margin-top: 0;
 }
@@ -1801,15 +1850,22 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
 
 /* ---- Diagrams: drawn straight on the band, in four flat tones. The
    band is the ground; a deeper tint gathers what belongs together (the
-   cluster, the topic, the StatefulSet); Narad's pods sit on it as white
-   boxes with ink strokes, and storage inside them takes the band's edge
-   tone. Your own code is solid ink. A pod still to come is a dashed
-   outline, a dead one is hatched, and the message is the one lime
-   shape. Every colour is a token, so the dark scheme redraws it. ---- */
+   cluster, the topic, the StatefulSet) and carries the group's name;
+   Narad's pods sit on it as white boxes with ink strokes, and storage
+   inside them takes the band's edge tone. Your own code is solid (ink
+   in light, a mid grey in dark, so it never outshines the message).
+   A request is a heavy line with a filled head, its answer a thin line
+   with an open head. Dashes mean later or never: a road not taken, a
+   blocked hand-off, a lease that ran out, a pod still to come. A dead
+   node is hatched, and the message is the one lime shape. Every colour
+   is a token, so the dark scheme redraws it. Each wide drawing's
+   viewBox starts at its leftmost shape, so the drawing, its caption and
+   the caption's rule share one left edge. ---- */
 
 .md-typeset .nr-dia {
   display: block;
   width: auto;
+  max-width: 860px;
   margin: 0;
   text-align: left;
 }
@@ -1839,10 +1895,32 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   display: none;
 }
 
+/* The full-width drawing is 1160 units wide: 14px labels need 902px or
+   more, so below 960px it hands over to its tall copy instead */
+.md-typeset .nr-dia--pano .nr-dia__wide {
+  min-width: 0;
+  max-width: 1160px;
+}
+
+@media screen and (max-width: 59.984375em) {
+  .md-typeset .nr-dia--pano .nr-dia__wide {
+    display: none;
+  }
+
+  .md-typeset .nr-dia--pano .nr-dia__narrow {
+    display: block;
+    min-width: 336px;
+    max-width: 440px;
+  }
+}
+
+/* The figure is as wide as its drawing, so the caption's rule runs the
+   drawing's width while the text keeps a 34rem measure */
 .md-typeset .nr-dia figcaption {
-  max-width: 34rem;
+  max-width: none;
   margin: 1.4rem 0 0;
   padding-top: 0.9rem;
+  padding-right: max(0px, 100% - 34rem);
   border-top: 1px solid var(--nr-rule);
   font-size: 0.8rem;             /* 16px */
   font-style: normal;
@@ -1855,8 +1933,10 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   font-size: 0.9em;
 }
 
-/* Type: Satoshi for every label; mono only for the literal HTTP lines,
-   the topic name and the message id */
+/* Type: Satoshi for every label; mono only for literals a reader could
+   type: the HTTP lines, the topic name, the message id and the pod
+   names (Satoshi's zero reads as a capital O, so "narad-0" is mono,
+   with the same slashed zero as the prose and the code around it) */
 .nr-dia text {
   font-family: var(--nr-font-display);
   fill: var(--nr-ink);
@@ -1894,6 +1974,15 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   font-weight: 600;
 }
 
+.nr-dia .pod {
+  font-family: var(--md-code-font-family);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  fill: var(--nr-ink);
+  text-anchor: middle;
+}
+
 .nr-dia .mu {
   fill: var(--nr-muted);
 }
@@ -1911,11 +2000,30 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   fill: var(--nr-band-deep);
 }
 
+.nr-dia .ah {
+  fill: var(--nr-ink);
+}
+
 .nr-dia .sc,
 .nr-dia .ink,
-.nr-dia .ah,
 .nr-dia .you {
-  fill: var(--nr-ink);
+  fill: var(--nr-you);
+}
+
+/* An answer's open arrowhead */
+.nr-dia .ah-o {
+  fill: none;
+  stroke: var(--nr-ink);
+  stroke-width: 1.5;
+  stroke-linejoin: miter;
+  stroke-linecap: butt;
+}
+
+/* The hairline above a tall drawing's legend */
+.nr-dia .sep {
+  fill: none;
+  stroke: var(--nr-rule);
+  stroke-width: 1;
 }
 
 /* Text on your code and in the step circles */
@@ -2008,6 +2116,7 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
 /* The tall drawing for phones: same story, 15 units and up, so 14px at
    its 336px floor */
 .nr-dia__narrow .lb { font-size: 17px; }
+.nr-dia__narrow .pod { font-size: 16px; }
 .nr-dia__narrow :is(.an, .cd, .rl) { font-size: 15px; }
 .nr-dia__narrow .cdb { font-size: 18px; }
 .nr-dia__narrow .sn { font-size: 15px; }
@@ -2118,6 +2227,26 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   margin-top: 0.15rem;
 }
 
+.md-typeset .nr-try__code > p {
+  margin: 1.2rem 0 0.6rem;
+  max-width: 34rem;
+}
+
+.md-typeset .nr-try__code > .highlight:last-child {
+  margin-bottom: 0;
+}
+
+/* A link's words stay on one line */
+.md-typeset .nr-try__copy .nr-more {
+  white-space: nowrap;
+}
+
+/* Which half of the terminal's caption shows: the whole session is
+   wrapped by character on a phone, only the consume response elsewhere */
+.nr-term .nr-when-narrow {
+  display: none;
+}
+
 /* ---- Tablet: everything stacks, copy first, drawing below ---- */
 @media screen and (max-width: 76.234375em) {
   .nr-hero,
@@ -2143,6 +2272,19 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
 
   .md-typeset .nr-band__copy p {
     max-width: 34rem;
+  }
+
+  /* Stacked, the wide band reads as one column of prose */
+  .nr-band.nr-band--wide {
+    row-gap: 0;
+  }
+
+  .nr-band--wide > .nr-band__copy + .nr-band__copy {
+    margin-top: 0.95rem;
+  }
+
+  .md-typeset .nr-band--wide > .nr-dia {
+    margin-top: 2.4rem;
   }
 
   .nr-hero {
@@ -2176,6 +2318,11 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
     max-width: 440px;
   }
 
+  .md-typeset .nr-hero h1 {
+    font-size: min(2.1rem, 10.5vw);   /* 42px, smaller below 400px */
+    line-height: 1.04;
+  }
+
   .nr-dia__frame {
     margin-left: -0.8rem;
     margin-right: -0.8rem;
@@ -2188,11 +2335,6 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   .nr-hero {
     padding: 2.2rem 0 2.8rem;
     row-gap: 2rem;
-  }
-
-  .md-typeset .nr-hero h1 {
-    font-size: min(2.1rem, 10.5vw);   /* 42px, smaller below 400px */
-    line-height: 1.04;
   }
 
   .md-typeset .nr-lead {
@@ -2221,6 +2363,44 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
 
   .nr-term__bar {
     padding: 0 0.7rem;
+  }
+
+  .nr-term .nr-when-narrow {
+    display: inline;
+  }
+
+  .nr-term .nr-when-wide {
+    display: none;
+  }
+
+  /* Commands to copy wrap instead of hiding their end past a scrollbar
+     a phone does not show; a wrapped line hangs 2ch in, so it reads as
+     the same line. Copying still takes the command as written. */
+  .md-typeset :is(.nr-try, .nr-band) pre > code {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    text-indent: 2ch hanging each-line;
+    /* 39 characters to a line from 360px up: every line but the
+       Homebrew tap's fits whole, and that one breaks at its space */
+    font-size: min(0.725rem, 3.7vw);
+  }
+
+  /* and run to the screen's edges, as Material does for code on a
+     phone, so most lines fit whole */
+  .md-typeset :is(.nr-try__code, .nr-band__copy) > :is(.highlight, .tabbed-set) {
+    margin-left: -0.8rem;
+    margin-right: -0.8rem;
+  }
+
+  .md-typeset :is(.nr-try__code, .nr-band__copy) > .highlight,
+  .md-typeset .nr-try__code > .tabbed-set .highlight {
+    border-left: 0;
+    border-right: 0;
+    border-radius: 0;
+  }
+
+  .md-typeset .nr-try__code > .tabbed-set > .tabbed-labels {
+    padding-left: 0.8rem;
   }
 
   .md-typeset .nr-term figcaption {
@@ -2257,4 +2437,40 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
 
 .nr-nowrap {
   white-space: nowrap;
+}
+
+/* ---- Forced colours (Windows High Contrast): the bands become the
+   system Canvas, but SVG fills and strokes are not forced, so ink on a
+   black Canvas would vanish. Map every shape to system colours. ---- */
+@media (forced-colors: active) {
+  .nr-dia text:not(.sn, .on, .msg-t),
+  .nr-dia :is(.ink, .ah, .sc, .you) {
+    fill: CanvasText;
+  }
+
+  .nr-dia :is(.sn, .on) {
+    fill: Canvas;
+  }
+
+  .nr-dia :is(.ln, .ln1, .ln2, .x, .bx, .dead, .hl, .ah-o, .sep) {
+    stroke: CanvasText;
+  }
+
+  .nr-dia :is(.bx, .bx.tn, .rg, .hb, .plate, .hb.deep, .plate.deep) {
+    fill: Canvas;
+  }
+
+  .nr-dia .rg {
+    stroke: CanvasText;
+    stroke-width: 1;
+  }
+
+  .nr-dia .msg {
+    fill: Highlight;
+    stroke: CanvasText;
+  }
+
+  .nr-dia .msg-t {
+    fill: HighlightText;
+  }
 }
