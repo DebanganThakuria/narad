@@ -38,6 +38,10 @@ type aheadWritten struct {
 	seq     uint64
 }
 
+// errNoShard reports a commit for a partition the ahead source holds no
+// shard for (see persist).
+var errNoShard = errors.New("consumer offsets: no shard for the partition")
+
 // ConsumerOffsetCommitter batches best-effort consumer offset persistence.
 // Ack commits are authoritative in memory; this writer only seeds recovery.
 //
@@ -225,12 +229,21 @@ func (c *ConsumerOffsetCommitter) persistAll(commits []offsetCommit, ahead Ahead
 // unless that commit outlived its shard, so writeOffset then finds
 // nothing above what is durable and skips the second sync. A failed
 // consumer.ahead write still lets the frontier through consumer.offset.
+//
+// A partition the source holds no shard for is not written at all: its
+// commit came from a shard dropped since (acks call Commit after
+// releasing the shard lock), and the directory under its name may
+// already hold another lineage's state, a copy a move installed, whose
+// frontier the dropped shard's would overwrite.
 func (c *ConsumerOffsetCommitter) persist(partitionDir string, commit offsetCommit, source AheadSource) error {
 	var aheadErr error
 	if source != nil {
 		aheadErr = c.writeAhead(partitionDir, commit.key, source)
 		if errors.Is(aheadErr, storage.ErrPartitionDirMissing) {
 			return aheadErr
+		}
+		if errors.Is(aheadErr, errNoShard) {
+			return nil
 		}
 	}
 	if err := c.writeOffset(partitionDir, commit); err != nil {
@@ -295,13 +308,14 @@ func (c *ConsumerOffsetCommitter) levelOffsetFiles() error {
 }
 
 // writeAhead persists the acked-ahead set unless its version is the one
-// last written. Writes alternate slots and carry a rising sequence so
-// the previous record survives a torn write. A written record raises
-// the durable frontier to the one it carries.
+// last written, and reports errNoShard when the source holds no shard.
+// Writes alternate slots and carry a rising sequence so the previous
+// record survives a torn write. A written record raises the durable
+// frontier to the one it carries.
 func (c *ConsumerOffsetCommitter) writeAhead(partitionDir string, key offsetCommitKey, source AheadSource) error {
 	committed, offsets, version, ok := source(key.topic, key.partition)
 	if !ok {
-		return nil
+		return errNoShard
 	}
 	c.mu.Lock()
 	last, seen := c.lastAhead[key]
