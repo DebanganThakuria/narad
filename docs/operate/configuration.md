@@ -222,13 +222,18 @@ your own volumes before relying on it. What it changes:
   can no longer tell from a tear, are in [Produce
   Path](../internals/produce-path.md#segment-preparation-opt-in).
 - **Rollback**: a binary from before preparation (v3.0.1 and earlier) can refuse
-  to start on a WAL whose prepared segment a crash tore; see [Rolling back
-  to an earlier release](helm-chart.md#rolling-back-to-an-earlier-release).
-  Rolling back only after a clean stop avoids that, but those binaries also
-  reject the `ingress_wal_prealloc` key itself, `true` or `false`: remove it
-  from the config file before the rollback, or the node fails to start.
-  Turning the setting off again needs nothing: the next start trims the
-  prepared segment and removes the spare.
+  to start on a WAL whose prepared segment a crash tore, and it rejects the
+  `ingress_wal_prealloc` key itself, `true` or `false`. Turning the setting
+  off needs nothing: the next start trims the prepared segment and removes the
+  spare. So roll back in two steps: remove the key from the config file and
+  restart each node once on this release, then roll it back. The WAL then
+  grows by appending, as older binaries expect, so they open
+  it even if the stop before the rollback is not clean. A clean stop with the
+  setting on removes the spare too, but a node rolled back straight after an
+  unclean stop keeps `next-segment.prep` (64 MiB) for good, since older
+  binaries never list or remove it; it is safe to delete once the older binary
+  is running. See [Rolling back to an earlier
+  release](helm-chart.md#rolling-back-to-an-earlier-release).
 
 ### Deprecated: `high_watermark_sync_interval_ms`
 
