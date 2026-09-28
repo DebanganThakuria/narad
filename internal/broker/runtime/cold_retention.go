@@ -358,10 +358,7 @@ func (g *Logs) openForWalk(topicName string, idx int) (*storage.Log, *logEntry, 
 	}
 	// Nothing else can open the partition while the guard is held, so
 	// the entry openGuarded returns is the one it installed for the walk.
-	l, entry, quarantined, err := g.openGuarded(topicName, idx, true)
-	if quarantined {
-		g.notifyRetired(topicName)
-	}
+	l, entry, err := g.openGuarded(topicName, idx, true)
 	if err != nil {
 		return nil, nil, err
 	}

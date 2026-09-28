@@ -12,6 +12,38 @@ import (
 
 const consumerOffsetFileName = "consumer.offset"
 
+// The consumer offset committer (broker/runtime) keeps a partition's
+// consumer state files open between writes and batches their syncs, so
+// it writes them itself. These are the names, sizes, mode and codecs it
+// needs; the formats stay defined in this package.
+const (
+	// ConsumerOffsetFileName is the 8-byte frontier file.
+	ConsumerOffsetFileName = consumerOffsetFileName
+	// ConsumerAheadFileName is the two-slot acked-ahead file.
+	ConsumerAheadFileName = consumerAheadFileName
+	// ConsumerAheadSlotSize is one consumer.ahead slot; the file holds
+	// two, slot 1 right after slot 0.
+	ConsumerAheadSlotSize = consumerAheadSlotSize
+	// ConsumerStateFileMode is the mode both files are created with.
+	ConsumerStateFileMode = dataFileMode
+)
+
+// EncodeConsumerOffset is consumer.offset's content for offset: the
+// frontier as 8 big-endian bytes.
+func EncodeConsumerOffset(offset int64) [8]byte {
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(offset))
+	return buf
+}
+
+// DecodeConsumerAheadSlot validates one consumer.ahead slot exactly as
+// ReadConsumerAhead validates each slot it reads. ok=false for anything
+// that is not a complete, checksummed record of a known version. The
+// record's Slot is left zero: the caller knows which slot it read.
+func DecodeConsumerAheadSlot(slot []byte) (ConsumerAhead, bool) {
+	return decodeConsumerAheadSlot(slot)
+}
+
 // ErrPartitionDirMissing reports that a consumer offset write was
 // refused because the partition directory no longer exists (e.g. the
 // topic was deleted concurrently).
@@ -80,8 +112,7 @@ func WriteConsumerOffsetIfPartitionDirExists(partitionDir string, offset int64) 
 // durable; a crash between create and write leaves an empty file, which
 // ReadConsumerOffset reads as "no offset".
 func writeOffsetFileInPlace(dir, name string, offset int64) error {
-	var buf [8]byte
-	binary.BigEndian.PutUint64(buf[:], uint64(offset))
+	buf := EncodeConsumerOffset(offset)
 	path := filepath.Join(dir, name)
 
 	created := false

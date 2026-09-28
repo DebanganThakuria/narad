@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,15 +18,12 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
-// zzWP16SlowSyncs makes every consumer-state data sync take d (skipping
-// the real one) and reports the most that ran at once.
-func zzWP16SlowSyncs(t *testing.T, d time.Duration) (maxInFlight func() int64) {
-	t.Helper()
+// zzWP16SlowSyncs is a committer durability seam whose every writeout
+// takes d (skipping the real one); maxInFlight reports the most that
+// ran at once.
+func zzWP16SlowSyncs(d time.Duration) (io offsetIO, maxInFlight func() int64) {
 	var inFlight, peak atomic.Int64
-	restore := syncfile.SetFaultHook(func(op syncfile.Op, path string) error {
-		if op != syncfile.OpSyncData || !strings.HasPrefix(filepath.Base(path), "consumer.") {
-			return nil
-		}
+	io.writeOut = func(*os.File) error {
 		n := inFlight.Add(1)
 		for {
 			p := peak.Load()
@@ -35,20 +33,22 @@ func zzWP16SlowSyncs(t *testing.T, d time.Duration) (maxInFlight func() int64) {
 		}
 		time.Sleep(d)
 		inFlight.Add(-1)
-		return syncfile.ErrLie
-	})
-	t.Cleanup(restore)
-	return peak.Load
+		return nil
+	}
+	io.flushDevice = func(*os.File) error { return nil }
+	io.syncDir = func(*os.File) error { return nil }
+	return io, peak.Load
 }
 
 // consume-local#0: overlapping a flush's partition syncs shortened the
 // flush but held back the produce syncs that share the disk (on macOS
 // an owner's commit beside 12 dirty partitions went from 10ms to 22ms
-// at p99), so a flush syncs one partition at a time.
+// at p99), so a tick writes its partitions out one at a time.
 func TestZZWP16CommitterSyncsOnePartitionAtATime(t *testing.T) {
 	const parts = 16
 	c, src, _ := zzWP16Committer(t, parts)
-	peak := zzWP16SlowSyncs(t, 2*time.Millisecond)
+	var peak func() int64
+	c.io, peak = zzWP16SlowSyncs(2 * time.Millisecond)
 	src.step(c, 1)
 	if err := c.flush(); err != nil {
 		t.Fatal(err)
@@ -146,13 +146,12 @@ func TestZZWP16CommitterCloseReportsAFailedPartition(t *testing.T) {
 	const parts = 10
 	c, src, dataDir := zzWP16Committer(t, parts)
 	failing := storage.TopicPartitionDir(dataDir, "t", 3)
-	restore := syncfile.SetFaultHook(func(op syncfile.Op, path string) error {
-		if op == syncfile.OpSyncData && filepath.Dir(path) == failing {
+	c.io.writeOut = func(f *os.File) error {
+		if filepath.Dir(f.Name()) == failing {
 			return syscall.EIO
 		}
-		return nil
-	})
-	defer restore()
+		return offsetWriteOut(f)
+	}
 	src.step(c, 1)
 	if err := c.Close(); !errors.Is(err, syscall.EIO) {
 		t.Fatalf("Close error = %v, want partition 3's EIO", err)
@@ -207,9 +206,9 @@ func zzWP16LoggedLoop(t *testing.T, parts int, interval, syncTime, d time.Durati
 	for p := range parts {
 		mustCreatePartitionDir(t, dataDir, "t", p)
 	}
-	zzWP16SlowSyncs(t, syncTime)
+	io, _ := zzWP16SlowSyncs(syncTime)
 	sink := &zzWP16LogSink{}
-	c := NewConsumerOffsetCommitter(dataDir, interval, slog.New(slog.NewJSONHandler(sink, nil)))
+	c := newConsumerOffsetCommitter(dataDir, interval, slog.New(slog.NewJSONHandler(sink, nil)), committerOptions{io: io})
 	var version atomic.Uint64
 	c.SetAheadSource(func(string, int) (int64, []int64, uint64, bool) {
 		v := version.Load()
@@ -264,12 +263,12 @@ func TestZZWP16CommitterWarnsWhenItCannotKeepToItsInterval(t *testing.T) {
 	}
 }
 
-// A committer that keeps up says nothing. (The interval leaves room for
-// the first flush, which creates every partition's consumer.ahead and
-// syncs its directory for real.)
+// A committer that keeps up says nothing. (The first tick, which
+// creates every partition's consumer.ahead, is not held to the
+// interval.)
 func TestZZWP16CommitterThatKeepsUpDoesNotWarn(t *testing.T) {
 	sink := zzWP16LoggedLoop(t, 8, 250*time.Millisecond, time.Millisecond, time.Second)
-	if warned := sink.records(t, "WARN", "consumer offset commits"); len(warned) != 0 {
+	if warned := sink.records(t, "WARN", "consumer offset"); len(warned) != 0 {
 		t.Fatalf("a committer that keeps up warned: %v", warned)
 	}
 }

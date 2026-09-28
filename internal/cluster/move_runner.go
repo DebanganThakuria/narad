@@ -39,6 +39,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -199,7 +200,8 @@ type guardedReclaimer interface {
 }
 
 // partitionConsumerStateResetter is the optional broker capability the
-// runner uses after installing a copied partition (see finishMove).
+// runner uses before and after installing a copied partition (see
+// finishMove).
 type partitionConsumerStateResetter interface {
 	ResetPartitionConsumerState(topicName string, partition int)
 }
@@ -563,11 +565,20 @@ func (r *MoveRunner) finishMove(ctx context.Context, topicName string, partition
 			"copy_incarnation", res.IncarnationID, "local_incarnation", rec.ID)
 		return false
 	}
+	// expectID is the incarnation the topic directory was prepared for.
+	// The check above and EnsureTopicIncarnation release the topic's
+	// guard before the install acts on the partition's path, and a
+	// delete and recreate of the name can land in between, or while the
+	// flip is in flight, with this node opening the successor's partition
+	// under the path. So the install's swap and the rollback act only
+	// while the topic marker still names expectID (see install).
+	var expectID string
 	if keeper, ok := r.reclaimer.(incarnationKeeper); ok && rec.ID != "" {
 		if err := keeper.EnsureTopicIncarnation(topicName, rec.ID); err != nil {
 			r.logger.Warn("move: prepare topic directory for the incarnation; will retry", "topic", topicName, "partition", partition, "err", err)
 			return false
 		}
+		expectID = rec.ID
 	}
 	// The marker records how this copy got here. The old owner's sweep
 	// reads it (through the transfer info) to refuse deleting a local copy
@@ -583,19 +594,32 @@ func (r *MoveRunner) finishMove(ctx context.Context, topicName string, partition
 		r.logger.Warn("move: write move marker; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
-	if err := r.install(topicName, partition, stagingDir); err != nil {
+	// A node that owned this partition before it moved away may still
+	// hold the old in-memory reservation shard, and the installed copy
+	// carries the source's consumer.offset, which must win. The shard is
+	// dropped before the install as well as after it. Its acks persist
+	// through the offset committer by path, into whatever directory the
+	// partition's path names: a shard still alive when the copy lands
+	// would write its frontier into the copy, and the new owner would
+	// skip every record between the two. With no shard during the
+	// install, its late commits find none and write nothing. Nothing
+	// creates one here before the flip: only a consume reserves, and it
+	// takes only partitions this node owns (localProbePartitions).
+	resetConsumerState := func() {
+		if rs, ok := r.reclaimer.(partitionConsumerStateResetter); ok {
+			rs.ResetPartitionConsumerState(topicName, partition)
+		}
+	}
+	resetConsumerState()
+	installed, err := r.install(topicName, partition, stagingDir, expectID)
+	if err != nil {
 		r.logger.Warn("move: install failed; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
-	// A node that owned this partition before it moved away may still
-	// hold the old in-memory reservation shard; the installed copy carries
-	// the source's consumer.offset, which must win.
-	if rs, ok := r.reclaimer.(partitionConsumerStateResetter); ok {
-		rs.ResetPartitionConsumerState(topicName, partition)
-	}
+	resetConsumerState()
 	if err := r.completeMove(ctx, topicName, partition, source); err != nil {
 		r.logger.Warn("move: flip rejected (CAS guard or not applied)", "topic", topicName, "partition", partition, "err", err)
-		if rmErr := os.RemoveAll(r.partitionDir(topicName, partition)); rmErr != nil {
+		if rmErr := r.rollbackInstall(topicName, partition, expectID, installed); rmErr != nil {
 			r.logger.Warn("move: roll back install", "topic", topicName, "partition", partition, "err", rmErr)
 		}
 		return false
@@ -670,12 +694,26 @@ func (r *MoveRunner) leaderAddr() (string, error) {
 }
 
 // install atomically replaces the partition's real directory with the
-// staged copy. Same-filesystem rename (staging lives under dataDir), so it
-// is atomic. Called before the flip: after CompleteMove the partition is
-// servable here immediately, with no window where we own it but have no data.
-func (r *MoveRunner) install(topicName string, partition int, staging string) error {
+// staged copy and reports the installed directory's identity. Same-
+// filesystem rename (staging lives under dataDir), so it is atomic.
+// Called before the flip: after CompleteMove the partition is servable
+// here immediately, with no window where we own it but have no data.
+//
+// expectID, when set, is the incarnation finishMove prepared the topic
+// directory for. The swap runs under the topic's guard (see below) and
+// refuses unless the topic marker still names it: a delete and recreate
+// in between, with this node opening the successor's partition,
+// quarantined the prepared directory and made the successor's under the
+// path, and clearing the destination would remove the successor's
+// records and consumer state. A marker gone altogether is a purge: the
+// copy would land in an unmarked directory the successor adopts.
+func (r *MoveRunner) install(topicName string, partition int, staging, expectID string) (os.FileInfo, error) {
 	dir := r.partitionDir(topicName, partition)
+	var installed os.FileInfo
 	swap := func() error {
+		if err := r.checkTopicIncarnation(topicName, expectID); err != nil {
+			return err
+		}
 		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 			return fmt.Errorf("make partition parent: %w", err)
 		}
@@ -685,6 +723,11 @@ func (r *MoveRunner) install(topicName string, partition int, staging string) er
 		if err := os.Rename(staging, dir); err != nil {
 			return fmt.Errorf("install staged copy: %w", err)
 		}
+		info, err := os.Stat(dir)
+		if err != nil {
+			return fmt.Errorf("stat installed copy: %w", err)
+		}
+		installed = info
 		return nil
 	}
 	// The destination may still hold this partition's log open from an
@@ -692,10 +735,70 @@ func (r *MoveRunner) install(topicName string, partition int, staging string) er
 	// stale copy was not reclaimed yet). Swapping the directory under an
 	// open handle served the stale files and lost every later write, so
 	// the engine closes the log and holds the open guard across the swap.
-	if pi, ok := r.reclaimer.(partitionInstaller); ok {
-		return pi.InstallPartitionDir(topicName, partition, swap)
+	if err := r.replacePartitionDir(topicName, partition, swap); err != nil {
+		return nil, err
 	}
-	return swap()
+	return installed, nil
+}
+
+// rollbackInstall removes the copy install put in place, after the flip
+// was rejected. The flip is rejected exactly when the topic was deleted
+// under the move, and the name may have been recreated, with this node
+// serving the successor's partition under the path, while the flip was
+// in flight. So the removal runs like the install, under the topic's
+// guard with the partition's log closed, and only while the topic
+// marker still names expectID and the path still names the directory
+// install put there (installed). Otherwise the copy was quarantined with
+// the rest of its incarnation's directory, and the sweep reclaims it.
+func (r *MoveRunner) rollbackInstall(topicName string, partition int, expectID string, installed os.FileInfo) error {
+	dir := r.partitionDir(topicName, partition)
+	return r.replacePartitionDir(topicName, partition, func() error {
+		if err := r.checkTopicIncarnation(topicName, expectID); err != nil {
+			r.logger.Info("move: installed copy no longer under the partition's path; left for the sweep",
+				"topic", topicName, "partition", partition, "reason", err)
+			return nil
+		}
+		now, err := os.Stat(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(now, installed) {
+			r.logger.Info("move: the partition's path names another directory than the installed copy; left in place",
+				"topic", topicName, "partition", partition)
+			return nil
+		}
+		return os.RemoveAll(dir)
+	})
+}
+
+// replacePartitionDir runs fn, which replaces or removes the partition's
+// directory, with the partition's log closed and the topic's open guard
+// held when the broker supports it (partitionInstaller).
+func (r *MoveRunner) replacePartitionDir(topicName string, partition int, fn func() error) error {
+	if pi, ok := r.reclaimer.(partitionInstaller); ok {
+		return pi.InstallPartitionDir(topicName, partition, fn)
+	}
+	return fn()
+}
+
+// checkTopicIncarnation reports an error unless topics/<name>'s marker
+// names expectID. An empty expectID checks nothing (a record without an
+// incarnation, or a broker that does not prepare directories for one).
+func (r *MoveRunner) checkTopicIncarnation(topicName, expectID string) error {
+	if expectID == "" {
+		return nil
+	}
+	marker, marked, err := storage.ReadTopicIncarnation(storage.TopicDir(r.dataDir, topicName))
+	if err != nil {
+		return err
+	}
+	if !marked || marker != expectID {
+		return fmt.Errorf("topic directory no longer belongs to incarnation %s (marker %q)", expectID, marker)
+	}
+	return nil
 }
 
 // partitionInstaller is the optional broker capability install uses to
