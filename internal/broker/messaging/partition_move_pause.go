@@ -279,7 +279,9 @@ func (e *Engine) prepareHandoff(ctx context.Context, topicName string, partition
 	var info PartitionTransferInfo
 	err = e.logs.WithProduceLock(topicName, partition, func(log *storage.Log) error {
 		var ierr error
-		info, ierr = e.transferInfoAt(dir, topicName, partition, log.HighWatermark())
+		info, ierr = e.transferInfoAt(dir, topicName, partition, func() (int64, error) {
+			return log.HighWatermark(), nil
+		})
 		return ierr
 	})
 	if err != nil {

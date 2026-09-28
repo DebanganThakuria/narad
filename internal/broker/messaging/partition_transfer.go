@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -149,28 +150,67 @@ func (e *Engine) PartitionTransferInfo(ctx context.Context, topicName string, pa
 		return PartitionTransferInfo{}, fmt.Errorf("%w: %s", runtime.ErrStaleTopicIncarnation, topicName)
 	}
 	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
-	// The copy must expose every committed record. Records are fsynced
-	// into the segment files on commit, but the durable HWM file is
-	// batched and can lag the live HWM — so use the open log's current
-	// HWM when it is open (Peek, never Get: observing must not resurrect
-	// an idle-evicted log), falling back to the durable file (which
-	// Close force-syncs) only when the log is closed.
-	var hwm int64
-	if log, open := e.logs.Peek(topicName, partition); open {
-		hwm = log.HighWatermark()
-	} else {
-		persisted, _, perr := storage.ReadPersistedHighWatermark(dir)
-		if perr != nil {
-			return PartitionTransferInfo{}, perr
-		}
-		hwm = persisted
-	}
-	info, err := e.transferInfoAt(dir, topicName, partition, hwm)
+	info, err := e.transferInfoAt(dir, topicName, partition, func() (int64, error) {
+		return e.transferHighWatermark(dir, topicName, partition)
+	})
 	if err != nil {
 		return PartitionTransferInfo{}, err
 	}
 	info.IncarnationID = t.ID
 	return info, nil
+}
+
+// transferHighWatermark is the visibility boundary a listing of an
+// unfrozen partition ships. The copy must expose every committed
+// record, and the hwm file holds the boundary only while the log is
+// closed (Close writes it; an open log empties it before its first
+// advance). So the open log's live HWM is used when it is open (Peek,
+// never Get: observing must not resurrect an idle-evicted log, whose
+// file holds the exact boundary anyway), and the file when it is closed.
+//
+// A closed log whose file holds no boundary is either one that opened
+// between the Peek and the read (asked again), a partition that never
+// exposed a record, or a crash image nothing has opened yet: a
+// restarted owner serves cluster RPCs before startup opens its
+// partitions. Shipping 0 for a crash image put every listed frontier
+// above the boundary, and made a force-promote's gate (staged next
+// offset >= boundary) accept a copy of any length, hiding records the
+// source had made visible. Only an open recovers that boundary (the
+// CRC-verified record tail), and this node owns the partition, so the
+// log is opened here as startup would.
+func (e *Engine) transferHighWatermark(dir, topicName string, partition int) (int64, error) {
+	if log, open := e.logs.Peek(topicName, partition); open {
+		return log.HighWatermark(), nil
+	}
+	persisted, ok, err := storage.ReadPersistedHighWatermark(dir)
+	if err != nil {
+		return 0, err
+	}
+	if ok {
+		return persisted, nil
+	}
+	if log, open := e.logs.Peek(topicName, partition); open {
+		return log.HighWatermark(), nil
+	}
+	segs, err := storage.ListPartitionSegments(dir)
+	if err != nil {
+		return 0, err
+	}
+	// With no record bytes the answer is exact without an open: the
+	// offset the newest segment is named for, which is where recovery
+	// puts the tail (0 when the partition has no segment at all).
+	var tail int64
+	for _, seg := range segs {
+		if seg.SizeBytes > 0 {
+			log, err := e.logs.Get(topicName, partition)
+			if err != nil {
+				return 0, fmt.Errorf("open partition for its high watermark: %w", err)
+			}
+			return log.HighWatermark(), nil
+		}
+		tail = max(tail, seg.BaseOffset)
+	}
+	return tail, nil
 }
 
 // checkTransferable validates the transfer target: topic exists,
@@ -203,50 +243,40 @@ func (e *Engine) EnsureTopicIncarnation(topicName, id string) error {
 	return e.logs.EnsureTopicIncarnation(topicName, id)
 }
 
-// transferInfoAt assembles the transfer info for a partition directory
-// at a caller-determined HWM: the segment listing, the consumer
-// frontier, the fan-out cursor sidecars, and the move marker.
-func (e *Engine) transferInfoAt(dir, topicName string, partition int, hwm int64) (PartitionTransferInfo, error) {
-	segs, err := storage.ListPartitionSegments(dir)
+// transferInfoAt assembles the transfer info for a partition directory:
+// the consumer frontier, the fan-out cursor sidecars, the high watermark
+// hwmAt reports, the segment listing, and the move marker.
+//
+// The order makes one listing consistent. The frontier and the fan-out
+// cursors only ever cover visible records, so read before the boundary
+// they sit below it (the frontier) or at most at it (a cursor's next
+// offset); the boundary is read before the segments, which only grow,
+// so the listed bytes cover it. The other way round (the boundary
+// first, the frontier last), a record committed, delivered and acked
+// between the reads shipped a frontier at or above the boundary, and a
+// force-promote working from that listing gave the new owner a frontier
+// past its log end: the records it later wrote below that frontier were
+// never delivered. The clamp below keeps the invariant even for a
+// frontier this node recovered from a file that was already past it.
+func (e *Engine) transferInfoAt(dir, topicName string, partition int, hwmAt func() (int64, error)) (PartitionTransferInfo, error) {
+	committed, hasCommitted, ackedAhead, err := e.consumerFrontier(dir, topicName, partition)
 	if err != nil {
 		return PartitionTransferInfo{}, err
-	}
-	committed, hasCommitted, err := storage.ReadConsumerOffset(dir)
-	if err != nil {
-		return PartitionTransferInfo{}, err
-	}
-	// The persisted consumer.offset is flushed on a timer and lags the
-	// in-memory frontier by up to one flush; the copy must carry the
-	// frontier the consumers actually reached, or the new owner
-	// redelivers the last acked messages.
-	// The acked-ahead set comes from the live shard when this node has
-	// one, and from consumer.ahead on disk otherwise (a restarted owner
-	// nobody consumed from yet): either way the copy carries every ack.
-	var ackedAhead []int64
-	live := false
-	if e.offsets != nil {
-		if mem, offsets, _, ok := e.offsets.AheadSnapshot(topicName, partition); ok {
-			if !hasCommitted || mem > committed {
-				committed, hasCommitted = mem, true
-			}
-			ackedAhead, live = offsets, true
-		}
-	}
-	if !live {
-		rec, ok, err := storage.ReadConsumerAhead(dir)
-		if err != nil {
-			return PartitionTransferInfo{}, err
-		}
-		if ok {
-			if !hasCommitted || rec.Committed > committed {
-				committed, hasCommitted = rec.Committed, true
-			}
-			ackedAhead = rec.Offsets
-		}
 	}
 	sidecars, err := storage.ListFanoutCursorFiles(dir)
 	if err != nil {
 		return PartitionTransferInfo{}, err
+	}
+	hwm, err := hwmAt()
+	if err != nil {
+		return PartitionTransferInfo{}, err
+	}
+	segs, err := storage.ListPartitionSegments(dir)
+	if err != nil {
+		return PartitionTransferInfo{}, err
+	}
+	if hasCommitted {
+		committed, ackedAhead = FrontierBelowBoundary(hwm, committed, ackedAhead)
 	}
 	info := PartitionTransferInfo{
 		Segments:        segs,
@@ -262,6 +292,63 @@ func (e *Engine) transferInfoAt(dir, topicName string, partition int, hwm int64)
 		info.MoveMarker = &marker
 	}
 	return info, nil
+}
+
+// consumerFrontier reads the partition's consumer frontier for a
+// transfer: the committed offset and the offsets acked ahead of it.
+//
+// The persisted consumer.offset is flushed on a timer and lags the
+// in-memory frontier by up to one flush; the copy must carry the
+// frontier the consumers actually reached, or the new owner redelivers
+// the last acked messages. The acked-ahead set comes from the live shard
+// when this node has one, and from consumer.ahead on disk otherwise (a
+// restarted owner nobody consumed from yet): either way the copy carries
+// every ack.
+func (e *Engine) consumerFrontier(dir, topicName string, partition int) (committed int64, hasCommitted bool, ackedAhead []int64, err error) {
+	committed, hasCommitted, err = storage.ReadConsumerOffset(dir)
+	if err != nil {
+		return 0, false, nil, err
+	}
+	if e.offsets != nil {
+		if mem, offsets, _, ok := e.offsets.AheadSnapshot(topicName, partition); ok {
+			if !hasCommitted || mem > committed {
+				committed, hasCommitted = mem, true
+			}
+			return committed, hasCommitted, offsets, nil
+		}
+	}
+	rec, ok, err := storage.ReadConsumerAhead(dir)
+	if err != nil {
+		return 0, false, nil, err
+	}
+	if ok {
+		if !hasCommitted || rec.Committed > committed {
+			committed, hasCommitted = rec.Committed, true
+		}
+		ackedAhead = rec.Offsets
+	}
+	return committed, hasCommitted, ackedAhead, nil
+}
+
+// FrontierBelowBoundary clamps a consumer frontier to a partition's
+// visibility boundary hwm: the committed offset to at most hwm-1, and
+// the acked-ahead set to the offsets strictly between the result and
+// hwm. It returns a new slice when it drops anything and never modifies
+// ackedAhead.
+//
+// A copy promoted at hwm holds no visible record at or above it, and a
+// first commit that fails there discards the hidden tail and hands its
+// offsets to new records. A frontier at or above hwm would make the new
+// owner skip whatever it writes there: records committed and readable,
+// never delivered. Clamping only ever redelivers records the source's
+// consumers had acked, never skips one.
+func FrontierBelowBoundary(hwm, committed int64, ackedAhead []int64) (int64, []int64) {
+	committed = min(committed, hwm-1)
+	outside := func(off int64) bool { return off <= committed || off >= hwm }
+	if !slices.ContainsFunc(ackedAhead, outside) {
+		return committed, ackedAhead
+	}
+	return committed, slices.DeleteFunc(slices.Clone(ackedAhead), outside)
 }
 
 // ReadPartitionSegment returns up to length bytes at offset `at` of the

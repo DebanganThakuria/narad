@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"os"
 	"slices"
 	"testing"
 	"time"
@@ -69,7 +68,24 @@ func TestPartitionTransferInfoFallsBackToAheadFile(t *testing.T) {
 	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
 	dataDir := t.TempDir()
 	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// Eight committed records, so the frontier below sits under the
+	// boundary (a listing clamps one that does not).
+	src, err := storage.NewLog(dir, storage.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 8 {
+		if _, err := src.Append(storage.EncodeKeyedRecord("k", int64(i), []byte("v"))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := src.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.AdvanceHighWatermark(src.NextOffset()); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := storage.WriteConsumerOffset(dir, 2); err != nil {

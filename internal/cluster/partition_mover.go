@@ -387,11 +387,23 @@ func (s *MoveSession) ForcePromote() (CopyResult, error) {
 	return s.finalizeStaged(s.lastHWM, s.lastCommitted, s.hasCommitted, s.lastAhead, s.lastSidecars)
 }
 
-// finalizeStaged writes the target HWM + committed offset onto the staged
-// copy, verifies it recovers into a log reaching that HWM, and returns the
-// result. Shared by Finalize (frozen live source) and ForcePromote (dead
-// source). The verify is the data-safety gate: it fails if the staged copy
-// does not reach hwm.
+// finalizeStaged writes the target HWM, the consumer frontier and the
+// fan-out cursors onto the staged copy, verifies it recovers into a log
+// reaching that HWM, and returns the result. Shared by Finalize (frozen
+// live source) and ForcePromote (dead source). The verify is the
+// data-safety gate: it fails if the staged copy does not reach hwm.
+//
+// Every position is clamped to hwm first. A listing is consistent only
+// when the source read its frontier before its boundary; a source that
+// reads the boundary first (every release before this check) ships a
+// frontier at or above it when a record is committed, delivered and
+// acked between the two reads. The frozen Finalize never sees that (the
+// freeze holds the boundary still, and the fence refuses one that
+// moved), but ForcePromote works from whatever CatchUp listing came
+// last, and the new owner then started with its frontier past its own
+// log end: every record it later wrote below that frontier was
+// committed, readable and never delivered. Clamped, the new owner
+// redelivers what the source's consumers acked in that window instead.
 func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool, ackedAhead []int64, sidecars []storage.SidecarFile) (CopyResult, error) {
 	// An idle source has no segments, so no pass created the staging
 	// directory; the copy is still a valid (empty) partition.
@@ -402,20 +414,31 @@ func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool, ac
 		return CopyResult{}, fmt.Errorf("write hwm: %w", err)
 	}
 	if hasCommitted {
+		clamped, ahead := messaging.FrontierBelowBoundary(hwm, committed, ackedAhead)
+		if clamped != committed || len(ahead) != len(ackedAhead) {
+			s.m.logger.Warn("move: source frontier reached past the copy's high watermark; clamped (the new owner redelivers those acked records)",
+				"topic", s.topic, "partition", s.partition, "source", s.sourceAddr,
+				"hwm", hwm, "committed", committed, "clamped_to", clamped,
+				"acked_ahead_dropped", len(ackedAhead)-len(ahead))
+		}
+		committed, ackedAhead = clamped, ahead
 		if err := storage.WriteConsumerOffset(s.stagingDir, committed); err != nil {
 			return CopyResult{}, fmt.Errorf("write consumer offset: %w", err)
 		}
-		if len(ackedAhead) > 0 {
-			if err := storage.WriteConsumerAhead(s.stagingDir, 0, uint64(time.Now().UnixNano()), committed, ackedAhead); err != nil {
-				return CopyResult{}, fmt.Errorf("write consumer ahead: %w", err)
-			}
+		// Written even with nothing acked ahead: this can run more than
+		// once on one staging directory (a failed fence sends the move
+		// back to catch-up, and a force-promote can follow), and the new
+		// owner recovers the larger of the two files' frontiers, so an
+		// earlier attempt's record must not outlive this one.
+		if err := storage.WriteConsumerAhead(s.stagingDir, 0, uint64(time.Now().UnixNano()), committed, ackedAhead); err != nil {
+			return CopyResult{}, fmt.Errorf("write consumer ahead: %w", err)
 		}
 	}
 	// The fan-out cursors travel with the partition. Last, so they are as
 	// fresh as the source's cursors got before the freeze took effect;
 	// anything they fanned out between this copy and the flip is fanned
 	// out again by the new owner (duplicates, never a skipped backlog).
-	if err := installSidecars(s.stagingDir, sidecars); err != nil {
+	if err := installSidecars(s.stagingDir, sidecars, hwm); err != nil {
 		return CopyResult{}, err
 	}
 	log, err := storage.NewLog(s.stagingDir, storage.Options{})
@@ -439,11 +462,19 @@ func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool, ac
 	}, nil
 }
 
-// installSidecars writes the transferred fan-out cursor files into dir.
-// Every name is validated by storage (a plain fanout-<child>.offset base
-// name) so a transfer can never plant an arbitrary path.
-func installSidecars(dir string, sidecars []storage.SidecarFile) error {
+// installSidecars writes the transferred fan-out cursor files into dir,
+// each lowered to hwm when it points past it: like the consumer
+// frontier, a cursor from a listing that read the boundary first can sit
+// above it, and would skip the parent records the new owner writes
+// there. Every name is validated by storage (a plain
+// fanout-<child>.offset base name) so a transfer can never plant an
+// arbitrary path.
+func installSidecars(dir string, sidecars []storage.SidecarFile, hwm int64) error {
 	for _, f := range sidecars {
+		f, _, err := storage.FanoutCursorFileAtMost(f, hwm)
+		if err != nil {
+			return fmt.Errorf("install sidecar: %w", err)
+		}
 		if err := storage.InstallFanoutCursorFile(dir, f); err != nil {
 			return fmt.Errorf("install sidecar: %w", err)
 		}
