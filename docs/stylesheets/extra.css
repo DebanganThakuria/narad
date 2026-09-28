@@ -89,16 +89,18 @@
   color-scheme: dark;
 }
 
-/* Constants and the Material mapping, for every scheme */
+/* Constants and the Material mapping, for every scheme, and again on
+   the home page's tinted bands, which re-point the surface and the
+   hairlines, so code and links there resolve against the band */
 :root,
-[data-md-color-scheme] {
+[data-md-color-scheme],
+.nr-tint {
   /* The terminal panel is ink in both schemes */
   --nr-term-bg: #0B0D0E;
   --nr-term-text: #D4D5D3;
   --nr-term-strong: #F5F6F3;
   --nr-term-muted: #939493;
   --nr-term-rule: #2C2E2E;
-  --nr-term-payload: #B8F53A;
 
   /* Type and measures */
   --nr-font-display: "Satoshi", "Avenir Next", "Helvetica Neue", Arial, sans-serif;
@@ -1397,13 +1399,21 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
 }
 
 /* --------------------------------------------------------------------------
-   13. Home page
+   13. Home page: the one page that argues. A white first screen with the
+   contract working, then four pitches on edge-to-edge pastel bands (mint,
+   sky, lilac, butter), one hand-drawn diagram each, then the fine print
+   and the rest on white. Everything else on the site stays calm.
    -------------------------------------------------------------------------- */
+
+/* Bands run edge to edge; nothing may scroll the page sideways */
+.md-main:has(.nr-home) {
+  overflow-x: clip;
+}
 
 /* 0.8rem sides at every width: the headline starts on the same 16px line
    as the logo and the tab labels */
 .nr-home .md-content__inner {
-  margin: 0 0.8rem 3.2rem;
+  margin: 0 0.8rem;
   padding-top: 0;
 }
 
@@ -1417,41 +1427,149 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
 }
 
 /* Short commands and codes stay whole instead of splitting into two chips */
-.nr-home .md-typeset :is(.nr-lead, .nr-section p) code {
+.nr-home .md-typeset :is(.nr-lead, .nr-band__copy p, .nr-rows li, .nr-try__copy p, .nr-print__head p) code {
   white-space: nowrap;
 }
 
-/* First screen: a two-column grid, nothing centred */
+.md-typeset .nr-more {
+  font-family: var(--nr-font-display);
+  font-weight: 500;
+}
+
+/* Full bleed: the ground reaches both edges, the content keeps the
+   grid's column */
+.nr-band,
+.nr-print,
+.nr-also,
+.nr-try {
+  margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
+  padding-left: calc(50vw - 50%);
+  padding-right: calc(50vw - 50%);
+}
+
+/* Without :has() nothing clips the bleed, so the sections stay in the
+   column instead of scrolling the page sideways, and a tinted one keeps
+   some room inside its colour */
+@supports not selector(:has(*)) {
+  .nr-band,
+  .nr-print,
+  .nr-also,
+  .nr-try {
+    margin-left: 0;
+    margin-right: 0;
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .nr-tint {
+    padding-left: 1.2rem;
+    padding-right: 1.2rem;
+  }
+}
+
+/* The bands. A tint paints the section and re-points what sits on it:
+   hairlines take the band's edge, and code panels, inline code and the
+   diagram's boxes sit on the inset tone (white; the ground in dark). The
+   change of colour is the divider, so tinted sections draw no rule. */
+.nr-home {
+  --nr-band: var(--nr-paper);
+  --nr-band-edge: var(--nr-surface);
+  --nr-band-deep: var(--nr-surface);
+  /* the scheme's slate, kept here because a tint re-points --nr-surface */
+  --nr-slate: var(--nr-surface);
+  --nr-slate-edge: var(--nr-rule);
+}
+
+.nr-tint {
+  background-color: var(--nr-band);
+  --nr-rule: var(--nr-band-edge);
+  --nr-surface: var(--nr-inset);
+  /* halfway to the edge tone: groups in a drawing */
+  --nr-band-deep: color-mix(in srgb, var(--nr-band-edge) 50%, var(--nr-band));
+}
+
+.nr-tint--mint {
+  --nr-band: var(--nr-mint);
+  --nr-band-edge: var(--nr-mint-edge);
+}
+
+.nr-tint--sky {
+  --nr-band: var(--nr-sky);
+  --nr-band-edge: var(--nr-sky-edge);
+}
+
+.nr-tint--lilac {
+  --nr-band: var(--nr-lilac);
+  --nr-band-edge: var(--nr-lilac-edge);
+}
+
+.nr-tint--butter {
+  --nr-band: var(--nr-butter);
+  --nr-band-edge: var(--nr-butter-edge);
+}
+
+/* The fine print sits on the pale slate of the code surface: the one
+   neutral band, for the part that reads like a contract */
+.nr-tint--slate {
+  --nr-band: var(--nr-slate);
+  --nr-band-edge: var(--nr-slate-edge);
+}
+
+/* In the dark scheme butter is a neutral graphite, one step from the
+   slate, so the fine print marks its edge with a hairline */
+[data-md-color-scheme="slate"] .nr-tint--slate {
+  border-top: 1px solid var(--nr-rule);
+}
+
+/* A white section that follows a white section takes a hairline */
+.nr-also:not(.nr-tint + .nr-also),
+.nr-try:not(.nr-tint) {
+  border-top: 1px solid var(--nr-rule);
+}
+
+/* ---- First screen: the headline across the page, then the pitch and
+   the doors on the left and the recorded session on the right. Stacked,
+   the session comes straight after the button and the doors follow it. */
+
 .nr-hero {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr);
-  column-gap: 3.2rem;
+  grid-template-columns: minmax(0, 4fr) minmax(0, 7fr);
+  grid-template-rows: auto auto 1fr;
+  grid-template-areas:
+    "head  head"
+    "pitch term"
+    "doors term";
+  column-gap: 3rem;
   align-items: start;
-  padding: 2.8rem 0 3.2rem;
+  padding: 2.8rem 0 3.6rem;
 }
 
-.nr-hero__intro > :first-child {
-  margin-top: 0;
-}
+.nr-hero > h1 { grid-area: head; }
+.nr-hero > .nr-hero__pitch { grid-area: pitch; }
+.nr-hero > .nr-term { grid-area: term; }
+.nr-hero > .nr-doors { grid-area: doors; }
 
 .md-typeset .nr-hero h1 {
-  font-size: clamp(2.4rem, 4.4vw, 2.9rem);  /* 58px at 1320px and up */
-  line-height: 1.04;
-  letter-spacing: -0.025em;
-  margin: 0 0 0.45em;
-  max-width: 11.5em;
+  font-size: clamp(3rem, 5.4vw, 3.9rem);   /* 78px at 1440px */
+  line-height: 1;
+  letter-spacing: -0.035em;
+  margin: 0 0 0.5em;
 }
 
-/* One sentence per block, each wrapped at a phrase: "A small, sturdy /
-   message broker. / HTTP in, / at-least-once out." */
+/* One sentence per block, each wrapped at a phrase */
 .nr-hero h1 .nr-line {
   display: block;
   text-wrap: balance;
 }
 
+.nr-hero__pitch > :first-child {
+  margin-top: 0;
+}
+
 .md-typeset .nr-lead {
-  font-size: 1rem;              /* 20px */
-  line-height: 1.55;
+  font-size: 1.1rem;             /* 22px */
+  line-height: 1.5;
   color: var(--nr-text);
   max-width: 30rem;
   margin: 0 0 1.4rem;
@@ -1465,7 +1583,11 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   margin: 0 0 2rem;
 }
 
-/* The three doors: hairline rows that open each tab */
+.md-typeset .nr-hero__pitch p:last-child {
+  margin-bottom: 0;
+}
+
+/* The four doors: hairline rows that open each tab */
 .md-typeset .nr-doors > ul {
   list-style: none;
   margin: 0;
@@ -1514,7 +1636,8 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   text-decoration-color: currentColor;
 }
 
-/* The terminal: ink in both schemes; the payload is the only colour */
+/* The terminal: ink in both schemes, and no colour at all. The payload
+   and the two status lines are set strong; lime stays on the button. */
 .md-typeset .nr-term {
   text-align: left;
 }
@@ -1539,7 +1662,7 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   line-height: calc(var(--nr-strip) - 1px);
   border-bottom: 1px solid var(--nr-term-rule);
   font-family: var(--md-code-font-family);
-  font-size: 0.66rem;
+  font-size: 0.7rem;
   font-weight: 600;
   color: var(--nr-term-muted);
   white-space: nowrap;
@@ -1552,7 +1675,7 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   background: transparent;
   color: var(--nr-term-text);
   font-family: var(--md-code-font-family);
-  font-size: 0.66rem;           /* 13.2px */
+  font-size: 0.7rem;             /* 14px */
   line-height: 1.6;
   overflow-x: auto;
   font-variant-ligatures: none;
@@ -1575,13 +1698,10 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   color: var(--nr-term-muted);
 }
 
-.nr-term .s {
+.nr-term .s,
+.nr-term .payload {
   color: var(--nr-term-strong);
   font-weight: 600;
-}
-
-.nr-term .payload {
-  color: var(--nr-term-payload);
 }
 
 .nr-term ::selection {
@@ -1599,7 +1719,7 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   padding: 0.6rem 1rem 0.7rem;
   max-width: none;
   border-top: 1px solid var(--nr-term-rule);
-  font-size: 0.66rem;
+  font-size: 0.7rem;
   line-height: 1.5;
   color: var(--nr-term-muted);
   text-align: left;
@@ -1613,71 +1733,460 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   font-size: 1em;
 }
 
-/* Below the first screen: short, literal sections */
-.nr-sections {
-  border-top: 1px solid var(--nr-rule);
-}
+/* ---- The four bands ---- */
 
-.nr-section {
+.nr-band {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr);
-  column-gap: 3.2rem;
-  padding: 2rem 0 2.2rem;
-  border-bottom: 1px solid var(--nr-rule);
+  grid-template-columns: minmax(0, 4fr) minmax(0, 7fr);
+  column-gap: 3rem;
+  align-items: center;
+  padding-top: 3.8rem;
+  padding-bottom: 4.2rem;
 }
 
-.nr-section__text > :first-child {
+.nr-band--flip {
+  grid-template-columns: minmax(0, 7fr) minmax(0, 4fr);
+}
+
+.nr-band--flip > .nr-band__copy {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.nr-band--flip > .nr-dia {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.nr-band__copy > :first-child {
   margin-top: 0;
 }
 
-.md-typeset .nr-section h2 {
-  font-size: 1.45em;
-  margin: 0 0 0.5em;
-}
-
-.md-typeset .nr-section p {
-  max-width: 30rem;
-  margin: 0 0 0.8em;
-}
-
-.md-typeset .nr-section .nr-more {
-  font-family: var(--nr-font-display);
-  font-weight: 500;
-}
-
-.nr-section__example > :first-child {
-  margin-top: 0.15rem;
-}
-
-.md-typeset .nr-section__example > .tabbed-set:first-child {
-  margin-top: 0.15rem;
-}
-
-.nr-section__example > :last-child {
+.nr-band__copy > :last-child {
   margin-bottom: 0;
 }
 
-/* Tablet and phone: stack; the terminal follows the introduction */
-@media screen and (max-width: 59.984375em) {
-  .nr-hero,
-  .nr-section {
-    grid-template-columns: minmax(0, 1fr);
-  }
+.md-typeset :is(.nr-band, .nr-print, .nr-also, .nr-try) h2 {
+  font-size: 2.25em;             /* 38px */
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+  margin: 0 0 0.6em;
+  text-wrap: balance;
+}
 
-  .nr-hero {
-    padding: 1.8rem 0 2.4rem;
-    row-gap: 2rem;
-  }
+.md-typeset .nr-band__copy p {
+  font-size: 1.06em;             /* 18px */
+  line-height: 1.62;
+  max-width: 31rem;
+  margin: 0 0 0.9em;
+}
 
-  .nr-section {
-    padding: 1.6rem 0 1.8rem;
+.md-typeset .nr-band__copy p:last-child {
+  margin-top: 1.4em;
+}
+
+.md-typeset .nr-band__copy .highlight {
+  margin: 1.2em 0 0;
+}
+
+/* ---- Diagrams: drawn straight on the band, in four flat tones. The
+   band is the ground; a deeper tint gathers what belongs together (the
+   cluster, the topic, the StatefulSet); Narad's pods sit on it as white
+   boxes with ink strokes, and storage inside them takes the band's edge
+   tone. Your own code is solid ink. A pod still to come is a dashed
+   outline, a dead one is hatched, and the message is the one lime
+   shape. Every colour is a token, so the dark scheme redraws it. ---- */
+
+.md-typeset .nr-dia {
+  display: block;
+  width: auto;
+  margin: 0;
+  text-align: left;
+}
+
+.nr-dia__frame {
+  overflow-x: auto;
+  scrollbar-color: var(--nr-rule) transparent;
+}
+
+.md-typeset .nr-dia svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: none;
+  overflow: visible;
+}
+
+/* Every label is 18 units or more, so it renders at 14px or more down
+   to this width; the band grid keeps the drawing wider than this from
+   768px up, so it never scrolls there */
+.md-typeset .nr-dia .nr-dia__wide {
+  min-width: 670px;
+  max-width: 860px;
+}
+
+.md-typeset .nr-dia .nr-dia__narrow {
+  display: none;
+}
+
+.md-typeset .nr-dia figcaption {
+  max-width: 34rem;
+  margin: 1.4rem 0 0;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--nr-rule);
+  font-size: 0.8rem;             /* 16px */
+  font-style: normal;
+  line-height: 1.5;
+  color: var(--nr-text);
+  text-align: left;
+}
+
+.md-typeset .nr-dia figcaption code {
+  font-size: 0.9em;
+}
+
+/* Type: Satoshi for every label; mono only for the literal HTTP lines,
+   the topic name and the message id */
+.nr-dia text {
+  font-family: var(--nr-font-display);
+  fill: var(--nr-ink);
+}
+
+.nr-dia .lb {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.nr-dia .an {
+  font-size: 18px;
+  font-weight: 500;
+  fill: var(--nr-text);
+}
+
+/* A group's name, set small and quiet at the group's corner */
+.nr-dia .rl {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.005em;
+  fill: var(--nr-muted);
+}
+
+.nr-dia .cd {
+  font-family: var(--md-code-font-family);
+  font-size: 18px;
+  font-weight: 400;
+  fill: var(--nr-ink);
+}
+
+.nr-dia .cdb {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.nr-dia .mu {
+  fill: var(--nr-muted);
+}
+
+.nr-dia .mid {
+  text-anchor: middle;
+}
+
+.nr-dia .end {
+  text-anchor: end;
+}
+
+/* Shapes */
+.nr-dia .rg {
+  fill: var(--nr-band-deep);
+}
+
+.nr-dia .sc,
+.nr-dia .ink,
+.nr-dia .ah,
+.nr-dia .you {
+  fill: var(--nr-ink);
+}
+
+/* Text on your code and in the step circles */
+.nr-dia .sn,
+.nr-dia .on {
+  fill: var(--nr-paper);
+}
+
+.nr-dia .sn {
+  font-size: 18px;
+  font-weight: 700;
+  text-anchor: middle;
+}
+
+.nr-dia :is(.ln, .ln2, .ln1, .x) {
+  fill: none;
+  stroke: var(--nr-ink);
+  stroke-linejoin: round;
+}
+
+.nr-dia .ln { stroke-width: 2.5; }
+.nr-dia .ln2 { stroke-width: 1.75; }
+.nr-dia .ln1 { stroke-width: 1.5; }
+
+.nr-dia .x {
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.nr-dia .dash {
+  stroke-dasharray: 8 6;
+}
+
+.nr-dia .bx {
+  fill: var(--nr-inset);
+  stroke: var(--nr-ink);
+  stroke-width: 1.75;
+}
+
+.nr-dia .bx.tn {
+  fill: var(--nr-band-edge);
+}
+
+.nr-dia .bx3 { stroke-width: 2.5; }
+.nr-dia .bxq { stroke-width: 1.25; }
+
+.nr-dia .bx.ghost {
+  fill: none;
+  stroke-width: 1.5;
+  stroke-dasharray: 7 6;
+}
+
+.nr-dia .dead {
+  stroke: var(--nr-ink);
+  stroke-width: 1.75;
+  stroke-dasharray: 8 6;
+}
+
+/* The hatch's ground and a label's backing take whatever the dead node
+   sits on: the band, or the group's deeper tint */
+.nr-dia .hb,
+.nr-dia .plate {
+  fill: var(--nr-band);
+}
+
+.nr-dia :is(.hb, .plate).deep {
+  fill: var(--nr-band-deep);
+}
+
+.nr-dia .hl {
+  stroke: var(--nr-ink);
+  stroke-width: 1.25;
+}
+
+.nr-dia .msg {
+  fill: var(--nr-lime);
+  stroke: var(--nr-on-lime);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+
+.nr-dia .msg-t {
+  font-family: var(--md-code-font-family);
+  font-size: 18px;
+  font-weight: 600;
+  fill: var(--nr-on-lime);
+  text-anchor: middle;
+}
+
+/* The tall drawing for phones: same story, 15 units and up, so 14px at
+   its 336px floor */
+.nr-dia__narrow .lb { font-size: 17px; }
+.nr-dia__narrow :is(.an, .cd, .rl) { font-size: 15px; }
+.nr-dia__narrow .cdb { font-size: 18px; }
+.nr-dia__narrow .sn { font-size: 15px; }
+.nr-dia__narrow .msg-t { font-size: 15px; }
+
+/* ---- Hairline rows: the fine print and the one-binary list ---- */
+
+.md-typeset .nr-rows > ul {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 3rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--nr-rule);
+}
+
+.md-typeset .nr-rows--one > ul {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+[dir] .md-typeset .nr-rows > ul > li {
+  margin: 0;
+  padding: 1.1rem 0 1.2rem;
+  border-bottom: 1px solid var(--nr-rule);
+  font-size: 1em;
+  line-height: 1.55;
+  color: var(--nr-text);
+}
+
+.md-typeset .nr-rows > ul > li > strong:first-child {
+  display: block;
+  margin-bottom: 0.25rem;
+  font-family: var(--nr-font-display);
+  font-size: 1.12em;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--nr-ink);
+}
+
+/* A row's receipt link sits on its own line under the sentence */
+.md-typeset .nr-rows > ul > li > .nr-more {
+  display: table;
+  margin-top: 0.4rem;
+}
+
+/* The fine print: the heading beside four rows */
+.nr-print {
+  display: grid;
+  grid-template-columns: minmax(0, 4fr) minmax(0, 7fr);
+  column-gap: 3rem;
+  align-items: start;
+  padding-top: 3.6rem;
+  padding-bottom: 4rem;
+}
+
+.nr-print__head > :first-child {
+  margin-top: 0;
+}
+
+/* Four rows run long, so the heading stays in view beside them, and the
+   rows keep a reading measure */
+@media screen and (min-width: 76.25em) {
+  .nr-print__head {
+    position: sticky;
+    top: 4.4rem;
   }
 }
 
-@media screen and (max-width: 44.984375em) {
+.md-typeset .nr-print .nr-rows > ul {
+  max-width: 40rem;
+}
+
+.md-typeset .nr-print__head p {
+  font-size: 1.06em;
+  line-height: 1.55;
+  max-width: 24rem;
+  margin: 0;
+}
+
+.nr-also {
+  padding-top: 3.6rem;
+  padding-bottom: 4rem;
+}
+
+/* ---- Sixty seconds on your laptop ---- */
+
+.nr-try {
+  display: grid;
+  grid-template-columns: minmax(0, 4fr) minmax(0, 7fr);
+  column-gap: 3rem;
+  align-items: start;
+  padding-top: 4rem;
+  padding-bottom: 4.4rem;
+}
+
+.nr-try__copy > :first-child {
+  margin-top: 0;
+}
+
+.md-typeset .nr-try__copy > p {
+  font-size: 1.06em;
+  line-height: 1.62;
+  max-width: 31rem;
+}
+
+.md-typeset .nr-try__code > .tabbed-set:first-child {
+  margin-top: 0.15rem;
+}
+
+/* ---- Tablet: everything stacks, copy first, drawing below ---- */
+@media screen and (max-width: 76.234375em) {
+  .nr-hero,
+  .nr-band,
+  .nr-band--flip,
+  .nr-print,
+  .nr-try {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 2.4rem;
+  }
+
+  .nr-band,
+  .nr-band--flip {
+    padding-top: 3.6rem;
+    padding-bottom: 3.8rem;
+  }
+
+  .nr-band--flip > .nr-band__copy,
+  .nr-band--flip > .nr-dia {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .md-typeset .nr-band__copy p {
+    max-width: 34rem;
+  }
+
+  .nr-hero {
+    grid-template-rows: none;
+    grid-template-areas:
+      "head"
+      "pitch"
+      "term"
+      "doors";
+  }
+
   .md-typeset .nr-hero h1 {
-    font-size: 1.8rem;          /* 36px */
-    line-height: 1.08;
+    margin-bottom: 0.1em;
+  }
+
+  .nr-hero .md-button {
+    margin-bottom: 0;
+  }
+}
+
+/* ---- Below 768px: the tall drawings, which may use the full width
+   of the screen ---- */
+@media screen and (max-width: 47.984375em) {
+  .md-typeset .nr-dia .nr-dia__wide {
+    display: none;
+  }
+
+  .md-typeset .nr-dia .nr-dia__narrow {
+    display: block;
+    min-width: 336px;
+    max-width: 440px;
+  }
+
+  .nr-dia__frame {
+    margin-left: -0.8rem;
+    margin-right: -0.8rem;
+    padding: 0 0.8rem;
+  }
+}
+
+/* ---- Phone ---- */
+@media screen and (max-width: 44.984375em) {
+  .nr-hero {
+    padding: 2.2rem 0 2.8rem;
+    row-gap: 2rem;
+  }
+
+  .md-typeset .nr-hero h1 {
+    font-size: min(2.1rem, 10.5vw);   /* 42px, smaller below 400px */
+    line-height: 1.04;
+  }
+
+  .md-typeset .nr-lead {
+    font-size: 0.9rem;           /* 18px */
   }
 
   .md-typeset .nr-doors > ul > li > a {
@@ -1689,10 +2198,8 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
   /* On a phone the transcript wraps instead of scrolling, so the payload
      is in view going in and coming out. It wraps by character, as a
      terminal does, and wrapped lines hang 4ch in so they read as
-     continuations (browsers without "hanging each-line" start them at
-     the margin, which still reads). */
+     continuations. */
   .md-typeset .nr-term pre {
-    font-size: 0.62rem;
     padding: 0.8rem 0.7rem 0.9rem;
   }
 
@@ -1708,6 +2215,33 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
 
   .md-typeset .nr-term figcaption {
     padding: 0.6rem 0.7rem 0.7rem;
+  }
+
+  .nr-band,
+  .nr-band--flip,
+  .nr-try {
+    padding-top: 2.8rem;
+    padding-bottom: 3rem;
+    row-gap: 2rem;
+  }
+
+  .nr-print,
+  .nr-also {
+    padding-top: 2.8rem;
+    padding-bottom: 3.2rem;
+  }
+
+  .md-typeset :is(.nr-band, .nr-print, .nr-also, .nr-try) h2 {
+    font-size: 1.75em;           /* 30px */
+  }
+
+  .md-typeset :is(.nr-band__copy, .nr-print__head) p,
+  .md-typeset .nr-try__copy > p {
+    font-size: 1em;
+  }
+
+  .md-typeset .nr-rows > ul {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
