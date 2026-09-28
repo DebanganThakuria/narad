@@ -5,7 +5,6 @@ import (
 	"os"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
@@ -42,7 +41,7 @@ func BenchmarkWP8CommitterFlush(b *testing.B) {
 					b.Fatal(err)
 				}
 			}
-			c := NewConsumerOffsetCommitter(dataDir, time.Hour, nil)
+			c := zzWP23ManualCommitter(dataDir)
 			b.Cleanup(func() { _ = c.Close() })
 			src := &wp8BenchSource{
 				committed: make([]int64, parts),
