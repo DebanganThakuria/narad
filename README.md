@@ -6,7 +6,10 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/DebanganThakuria/narad)](./go.mod)
 
 <p align="center">
-  <img src="./assets/narad.png" alt="Narad logo: durable messages, timeless connections" width="420">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/narad-lockup-dark.svg">
+    <img src="./assets/narad-lockup-light.svg" alt="Narad" width="400" height="160">
+  </picture>
 </p>
 
 Narad is a queue-first message broker in a single Go binary: plain HTTP in, at-least-once out.
