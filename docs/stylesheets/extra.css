@@ -1,6 +1,8 @@
 /* ==========================================================================
    Signal Line: the Narad docs theme
-   Ink on paper, one lime signal. Type, hairlines and space do the work.
+   Ink on white, pastel grounds, one lime signal. Type, hairlines and
+   space do the work; mint, sky, lilac and butter carry the home page's
+   bands and the callouts, and a pale slate carries code.
    Lime only ever means "here": the current tab, page and TOC heading,
    the one next action, and the message in flight.
 
@@ -17,37 +19,73 @@
    on every scheme element, where it resolves against the right values. */
 :root,
 [data-md-color-scheme="default"] {
-  --nr-paper: #F5F6F3;        /* page, header and footer: one surface */
-  --nr-surface: #ECEDEA;      /* code blocks, table header, search field */
-  --nr-rule: #D9DAD7;         /* hairlines */
-  --nr-text: #272929;         /* body text */
+  --nr-paper: #FFFFFF;        /* page, header and footer: one clean white */
+  --nr-surface: #F3F5F8;      /* pale slate: code blocks, table header, search field */
+  --nr-rule: #DFE3E9;         /* cool neutral hairlines */
+  --nr-text: #272929;         /* body text, 14.6:1 on paper */
   --nr-ink: #0B0D0E;          /* headings and link text */
-  --nr-muted: #646665;        /* secondary text, 5.3:1 on paper */
+  --nr-muted: #5A616B;        /* secondary text, 6.3:1 on paper, 5.5:1 on lilac */
   --nr-signal: #528A00;       /* never text: markers, underlines, focus, load bar */
   --nr-lime: #B8F53A;         /* hover fill and primary button, ink text on it */
   --nr-lime-wash: rgba(184, 245, 58, 0.28);
   --nr-on-lime: #0B0D0E;
   --nr-danger: #B42318;       /* data-loss warnings only */
-  --nr-line-tint: #DFEFBE;    /* highlighted code lines */
-  --nr-string: #5C5346;       /* the one quiet tone in code: a warm grey,
-                                 6.4:1 on surface, 6.2:1 on the line tint */
+  --nr-line-tint: #E7F5CC;    /* highlighted code lines: lime means "here" */
+  --nr-string: #3D5A73;       /* the one quiet tone in code: a slate blue,
+                                 6.6:1 on surface, 6.3:1 on the line tint */
+
+  /* Pastels: the home page's bands, callout fills and diagram tints.
+     Each has an edge (hairlines and tinted shapes on it) and a mark
+     (the 3px callout rule). */
+  --nr-mint: #E9F8F0;
+  --nr-mint-edge: #C9E9D7;
+  --nr-mint-mark: #2E8A5E;    /* 3.9:1 on mint (UI) */
+  --nr-sky: #E9F3FD;
+  --nr-sky-edge: #C9DEF3;
+  --nr-sky-mark: #2F6FAE;     /* 4.7:1 on sky (UI) */
+  --nr-lilac: #F1EEFC;
+  --nr-lilac-edge: #DCD5F3;
+  --nr-lilac-mark: #6A56C0;   /* 5.0:1 on lilac (UI) */
+  --nr-butter: #FFF9DF;
+  --nr-butter-edge: #F0E3AE;
+  --nr-butter-mark: #977100;  /* 4.3:1 on butter (UI) */
+  --nr-rose: #FDEEEC;
+  --nr-rose-edge: #F4D0CC;
+  --nr-inset: #FFFFFF;        /* code, inline code and boxes sitting on a pastel */
 }
 
-/* Raw values, dark */
+/* Raw values, dark: a neutral near-black; the pastels become quiet
+   tints with light accent tones */
 [data-md-color-scheme="slate"] {
-  --nr-paper: #0B0D0E;        /* ground */
-  --nr-surface: #171919;
-  --nr-rule: #2C2E2E;
-  --nr-text: #D4D5D3;
-  --nr-ink: #F5F6F3;          /* headings and link text */
-  --nr-muted: #939493;        /* 6.4:1 on ground */
+  --nr-paper: #101214;        /* ground */
+  --nr-surface: #191C20;
+  --nr-rule: #2B2F35;
+  --nr-text: #D9DCE1;         /* 13.6:1 on ground */
+  --nr-ink: #F5F7FA;          /* headings and link text */
+  --nr-muted: #9CA2AB;        /* 7.3:1 on ground */
   --nr-signal: #B8F53A;
   --nr-lime: #B8F53A;
   --nr-lime-wash: rgba(184, 245, 58, 0.16);
   --nr-on-lime: #0B0D0E;
   --nr-danger: #FF8A7A;
-  --nr-line-tint: #2E381E;
-  --nr-string: #B5AC9E;       /* 7.9:1 on surface, 5.5:1 on the line tint */
+  --nr-line-tint: #2A3521;
+  --nr-string: #9DC4EA;       /* pastel sky, 9.4:1 on surface, 7.1:1 on the line tint */
+
+  --nr-mint: #10201D;
+  --nr-mint-edge: #1F3833;
+  --nr-mint-mark: #8EDDB5;
+  --nr-sky: #131C26;
+  --nr-sky-edge: #23344A;
+  --nr-sky-mark: #9CC9F2;
+  --nr-lilac: #1A1827;
+  --nr-lilac-edge: #302B48;
+  --nr-lilac-mark: #BFB2F5;
+  --nr-butter: #18191B;       /* neutral graphite: a warm dark reads brown */
+  --nr-butter-edge: #303236;
+  --nr-butter-mark: #F0D78A;
+  --nr-rose: #24161A;
+  --nr-rose-edge: #43272C;
+  --nr-inset: #101214;        /* code and boxes on a band sit on the ground */
   color-scheme: dark;
 }
 
@@ -134,25 +172,25 @@
   --md-shadow-z2: 0 0 0 1px var(--nr-rule);
   --md-shadow-z3: 0 0 0 1px var(--nr-rule);
 
-  /* Mermaid: paper boxes with ink outlines, ink lines and arrowheads.
-     In the dark scheme the same mapping gives ground boxes with paper
-     outlines, and paper sequence numbers with ink digits. */
+  /* Mermaid: sky boxes with ink outlines, ink lines and arrowheads,
+     butter notes. In the dark scheme the same mapping gives deep sky
+     boxes with light outlines, and light sequence numbers with ink digits. */
   --md-mermaid-font-family: var(--md-text-font-family);
-  --md-mermaid-node-bg-color: var(--nr-paper);
+  --md-mermaid-node-bg-color: var(--nr-sky);
   --md-mermaid-node-fg-color: var(--nr-ink);
   --md-mermaid-edge-color: var(--nr-ink);
   --md-mermaid-label-bg-color: var(--nr-paper);
   --md-mermaid-label-fg-color: var(--nr-ink);
-  --md-mermaid-sequence-actor-bg-color: var(--nr-paper);
+  --md-mermaid-sequence-actor-bg-color: var(--nr-sky);
   --md-mermaid-sequence-actor-border-color: var(--nr-ink);
   --md-mermaid-sequence-actor-fg-color: var(--nr-ink);
   --md-mermaid-sequence-actor-line-color: var(--nr-muted);
-  --md-mermaid-sequence-actorman-bg-color: var(--nr-paper);
+  --md-mermaid-sequence-actorman-bg-color: var(--nr-sky);
   --md-mermaid-sequence-actorman-line-color: var(--nr-ink);
   --md-mermaid-sequence-message-fg-color: var(--nr-text);
   --md-mermaid-sequence-message-line-color: var(--nr-ink);
-  --md-mermaid-sequence-note-bg-color: var(--nr-surface);
-  --md-mermaid-sequence-note-border-color: var(--nr-muted);
+  --md-mermaid-sequence-note-bg-color: var(--nr-butter);
+  --md-mermaid-sequence-note-border-color: var(--nr-butter-mark);
   --md-mermaid-sequence-note-fg-color: var(--nr-text);
   --md-mermaid-sequence-loop-bg-color: var(--nr-paper);
   --md-mermaid-sequence-loop-border-color: var(--nr-muted);
@@ -1133,7 +1171,8 @@ body {
 }
 
 /* --------------------------------------------------------------------------
-   8. Callouts: a 3px left rule and a text label, no fills, no icons
+   8. Callouts: a pastel fill by type, a 3px rule in the same family and a
+   text label; no icons
    -------------------------------------------------------------------------- */
 
 .md-typeset .admonition,
@@ -1179,15 +1218,40 @@ body {
   margin-bottom: 0.2em;
 }
 
-/* Every callout type gets the same ink rule (beats Material's per-type colours) */
+/* Every type gets a pastel fill and a rule in the same family (beats
+   Material's per-type colours). A fill needs inner room, so a filled
+   callout gets padding on every side. Notes and anything untyped are
+   sky, tips mint, examples and questions lilac. */
 .md-typeset .admonition[class],
 .md-typeset details[class] {
-  border-left-color: var(--nr-ink);
+  --nr-callout: var(--nr-sky);
+  --nr-callout-mark: var(--nr-sky-mark);
+  background-color: var(--nr-callout);
+  border-left-color: var(--nr-callout-mark);
+  border-radius: 0 2px 2px 0;
+  padding: 0.75em 1em 0.75em 1.1em;
 }
 
-/* Data-loss warnings: danger red, rule and label */
+.md-typeset :is(.admonition, details):is(.tip, .hint, .important, .success, .check, .done) {
+  --nr-callout: var(--nr-mint);
+  --nr-callout-mark: var(--nr-mint-mark);
+}
+
+.md-typeset :is(.admonition, details):is(.example, .question, .help, .faq, .quote, .cite, .abstract, .summary, .tldr) {
+  --nr-callout: var(--nr-lilac);
+  --nr-callout-mark: var(--nr-lilac-mark);
+}
+
+/* Code inside a filled callout sits on white (the ground, in dark), not
+   on the slate it would share a tone with */
+.md-typeset :is(.admonition, details) {
+  --nr-surface: var(--nr-inset);
+}
+
+/* Data-loss warnings: a rose fill, a danger rule and a danger label */
 .md-typeset :is(.admonition, details):is(.warning, .danger, .caution, .attention, .error, .failure, .bug) {
-  border-left-color: var(--nr-danger);
+  --nr-callout: var(--nr-rose);
+  --nr-callout-mark: var(--nr-danger);
 }
 
 .md-typeset :is(.admonition, details):is(.warning, .danger, .caution, .attention, .error, .failure, .bug) > :is(.admonition-title, summary) {
@@ -1261,7 +1325,7 @@ body {
 }
 
 /* --------------------------------------------------------------------------
-   11. Footer: the same paper, a hairline above
+   11. Footer: the same white, a hairline above
    -------------------------------------------------------------------------- */
 
 .md-footer {
