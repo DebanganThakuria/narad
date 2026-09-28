@@ -1,11 +1,19 @@
-/* Signal Line: 1.5px outlines and lines in Mermaid diagrams.
+/* Signal Line: Mermaid diagrams in the theme's lines and colours.
 
    Material renders each diagram in a closed shadow root and themes it only
-   through the --md-mermaid-* colour variables, so line weights cannot come
-   from extra.css. Material lazy-loads Mermaid, which then assigns
-   globalThis.mermaid; this setter catches that assignment and appends a few
-   rules to the themeCSS that Material passes to mermaid.initialize. If
-   anything here fails, diagrams still render with Material's own styles. */
+   through the --md-mermaid-* colour variables, so line weights and the
+   diagram types Material does not style cannot come from extra.css.
+   Material lazy-loads Mermaid, which then assigns globalThis.mermaid; this
+   setter catches that assignment and adds to the config Material passes
+   to mermaid.initialize:
+
+   - a few rules appended to themeCSS (1.5px lines, arrowheads, edge
+     labels on the ground, and the timeline type in ink and paper);
+   - useMaxWidth: false, so a wide diagram keeps its natural size and its
+     host scrolls sideways, instead of shrinking its text to 7-10px.
+
+   A host that scrolls is made keyboard-reachable below. If anything here
+   fails, diagrams still render with Material's own styles. */
 (function () {
   var EXTRA =
     ".node rect,.node circle,.node ellipse,.node polygon,.node path{stroke-width:1.5px}" +
@@ -21,7 +29,23 @@
        #arrowhead and #sequencenumber rules no longer match */
     "[id$='-arrowhead'] path,[id$='-filled-head'] path{fill:var(--md-mermaid-sequence-message-line-color)!important;stroke:none!important}" +
     "[id$='-crosshead'] path{fill:none!important;stroke:var(--md-mermaid-sequence-message-line-color)!important}" +
-    "[id$='-sequencenumber']{fill:var(--md-mermaid-sequence-number-bg-color)!important}";
+    "[id$='-sequencenumber']{fill:var(--md-mermaid-sequence-number-bg-color)!important}" +
+    /* Edge labels sit on the ground with no box around them (Mermaid 11
+       wraps them in a half-transparent grey .labelBkg) */
+    ".labelBkg{background-color:var(--md-mermaid-label-bg-color)!important}" +
+    ".edgeLabel rect{stroke:none!important}" +
+    /* Timeline: Material leaves Mermaid's rainbow section fills in place,
+       which puts paper text on yellow in the dark scheme. Paper boxes with
+       a 1.5px ink outline, ink text, ink connectors, like every node. */
+    ".timeline-node .node-bkg{fill:var(--md-mermaid-node-bg-color)!important;stroke:var(--md-mermaid-node-fg-color)!important;stroke-width:1.5px}" +
+    ".timeline-node text,.timeline-node tspan{fill:var(--md-mermaid-node-fg-color)!important;font-family:var(--md-mermaid-font-family)}" +
+    ".timeline-node line{stroke:none!important}" +
+    ".lineWrapper line{stroke:var(--md-mermaid-edge-color)!important;stroke-width:1.5px}" +
+    ".eventWrapper{filter:none!important}" +
+    /* The timeline title is a bare <text font-size="4ex"> */
+    "text[font-size='4ex']{fill:var(--md-mermaid-label-fg-color)!important;font-family:var(--md-mermaid-font-family)}";
+
+  var NATURAL = { useMaxWidth: false };
 
   function patch(m) {
     if (!m || typeof m.initialize !== "function" || m.__signalLine) return m;
@@ -29,6 +53,9 @@
     m.initialize = function (config) {
       var next = Object.assign({}, config);
       next.themeCSS = (next.themeCSS || "") + EXTRA;
+      ["flowchart", "sequence", "state", "timeline", "class", "er"].forEach(function (type) {
+        next[type] = Object.assign({}, next[type], NATURAL);
+      });
       return initialize(next);
     };
     m.__signalLine = true;
@@ -38,20 +65,64 @@
   try {
     if (typeof window.mermaid !== "undefined") {
       patch(window.mermaid);
-      return;
+    } else {
+      var current;
+      Object.defineProperty(window, "mermaid", {
+        configurable: true,
+        enumerable: true,
+        get: function () {
+          return current;
+        },
+        set: function (value) {
+          current = patch(value);
+        }
+      });
     }
-    var current;
-    Object.defineProperty(window, "mermaid", {
-      configurable: true,
-      enumerable: true,
-      get: function () {
-        return current;
-      },
-      set: function (value) {
-        current = patch(value);
-      }
-    });
   } catch (e) {
     /* Leave Mermaid untouched */
+  }
+
+  /* A diagram wider than the column scrolls inside its host. Make that
+     host a named, focusable group so the keyboard can scroll it too, and
+     drop it from the Tab order again when it fits. */
+  try {
+    var watching = typeof WeakSet === "function" ? new WeakSet() : null;
+    var sizes = new ResizeObserver(function (entries) {
+      entries.forEach(function (entry) {
+        var host = entry.target;
+        if (host.scrollWidth > host.clientWidth + 1) {
+          host.setAttribute("tabindex", "0");
+          host.setAttribute("role", "group");
+          host.setAttribute("aria-label", "Diagram, scrolls sideways");
+        } else if (host.hasAttribute("tabindex")) {
+          host.removeAttribute("tabindex");
+          host.removeAttribute("role");
+          host.removeAttribute("aria-label");
+        }
+      });
+    });
+
+    var watch = function (root) {
+      var hosts = root.querySelectorAll ? root.querySelectorAll("div.mermaid") : [];
+      for (var i = 0; i < hosts.length; i++) {
+        if (watching && watching.has(hosts[i])) continue;
+        if (watching) watching.add(hosts[i]);
+        sizes.observe(hosts[i]);
+      }
+    };
+
+    new MutationObserver(function (records) {
+      records.forEach(function (record) {
+        record.addedNodes.forEach(function (node) {
+          if (node.nodeType !== 1) return;
+          if (node.matches && node.matches("div.mermaid")) watch(node.parentNode);
+          else watch(node);
+        });
+      });
+    }).observe(document.documentElement, { childList: true, subtree: true });
+
+    watch(document);
+  } catch (e) {
+    /* Diagrams still scroll with a pointer */
   }
 })();
