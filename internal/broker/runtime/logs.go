@@ -223,14 +223,14 @@ func (g *Logs) Get(topicName string, idx int) (*storage.Log, error) {
 // GetMany resolves the logs of several partitions of one topic, as a Get
 // of each would, into dst[i] for idxs[i], and returns dst. dst is reused
 // when it has the capacity, so a caller that keeps it across calls
-// allocates nothing. It is for a caller that needs every one of them,
-// such as a consume scan that found nothing on its first partition:
-// GetMany finds the open ones under one read lock, one topic-version
-// read and one clock read, where a Get per partition would pay each of
-// those per partition, and sends only the rest (not open, being closed,
-// or opened under an older version of the topic record) through Get's
-// slow path, in idxs order. On an error it returns nil and the error;
-// the partitions it opened stay open.
+// allocates nothing. It is for a caller that needs every one of them:
+// the consume scan calls it once its first partition had nothing
+// (messaging's tryQueueReadRest). GetMany finds the open ones under one
+// read lock, one topic-version read and one clock read, where a Get per
+// partition would pay each of those per partition, and sends only the
+// rest (not open, being closed, or opened under an older version of the
+// topic record) through Get's slow path, in idxs order. On an error it
+// returns nil and the error; the partitions it opened stay open.
 func (g *Logs) GetMany(topicName string, idxs []int, dst []*storage.Log) ([]*storage.Log, error) {
 	dst = slices.Grow(dst[:0], len(idxs))[:len(idxs)]
 	missing := false
@@ -270,8 +270,8 @@ func (g *Logs) GetMany(topicName string, idxs []int, dst []*storage.Log) ([]*sto
 // openGuarded is Get's slow path: re-validate or open the (topic, idx)
 // log under the current incarnation, and return it with its entry.
 // Caller holds the topic's guard and not mu. The metastore lookup, the
-// incarnation check and storage.NewLog, whose recovery reads every
-// retained segment of the partition, all run under the guard alone:
+// incarnation check and storage.NewLog, whose recovery reads the
+// partition's active segment, all run under the guard alone:
 // they stall only callers that need this topic's slow path, never the
 // fast path of every Get on the node. Only this topic's guard holders
 // add or drop its entries, so the entry found here stays put until the

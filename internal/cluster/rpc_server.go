@@ -80,8 +80,9 @@ type RPCServer struct {
 	// deliveries remembers messages handed to forwarded consumes whose
 	// client may cancel after the reply was already sent; see
 	// HandleStreamCancel. deliveryExpiry is the same records in insertion
-	// order with their deadlines, so expiring old ones is a pop from the
-	// front, never a scan of the map. now is the clock (tests inject one).
+	// order with their deadlines, from deliveryHead on, so expiring old
+	// ones is a pop from the front, never a scan of the map. now is the
+	// clock (tests inject one).
 	// tokens holds the standing interest peers have registered with this
 	// node (the owner half of the token protocol); demand is how an
 	// inbound notification reaches a consumer parked here (the requester
@@ -93,6 +94,7 @@ type RPCServer struct {
 	deliveriesMu   sync.Mutex
 	deliveries     map[requestKey]delivery
 	deliveryExpiry []deliveryDeadline
+	deliveryHead   int
 	now            func() time.Time
 }
 
@@ -271,11 +273,14 @@ type requestKey struct {
 }
 
 // delivery is a message a consume handler handed to a client that may
-// have stopped listening.
+// have stopped listening. rest holds the receipt handles of the other
+// records of a batch reply, as they went out; a single record has none.
+// They stay encoded because a cancel is rare: decoding one per record
+// on every batch would cost more than the record keeping.
 type delivery struct {
 	topic    string
 	handle   consumer.Handle
-	at       time.Time
+	rest     []string
 	expireAt time.Time
 }
 
@@ -305,6 +310,14 @@ func (s *RPCServer) clock() time.Time {
 // rememberDelivery records a handle a forwarded consume is about to
 // answer with, so a cancel that races the reply can give it back.
 func (s *RPCServer) rememberDelivery(key requestKey, topicName string, h consumer.Handle) {
+	s.rememberDeliveries(key, topicName, h, nil)
+}
+
+// rememberDeliveries is rememberDelivery for a reply that carries
+// several records: h is the first one's handle, and rest the receipt
+// handles of the others. A cancel that races the reply gives them all
+// back.
+func (s *RPCServer) rememberDeliveries(key requestKey, topicName string, h consumer.Handle, rest []string) {
 	now := s.clock()
 	s.deliveriesMu.Lock()
 	if s.deliveries == nil {
@@ -312,7 +325,7 @@ func (s *RPCServer) rememberDelivery(key requestKey, topicName string, h consume
 	}
 	s.expireDeliveriesLocked(now)
 	expireAt := now.Add(deliveryCancelGrace)
-	s.deliveries[key] = delivery{topic: topicName, handle: h, at: now, expireAt: expireAt}
+	s.deliveries[key] = delivery{topic: topicName, handle: h, rest: rest, expireAt: expireAt}
 	s.deliveryExpiry = append(s.deliveryExpiry, deliveryDeadline{key: key, expireAt: expireAt})
 	s.deliveriesMu.Unlock()
 }
@@ -321,20 +334,32 @@ func (s *RPCServer) rememberDelivery(key requestKey, topicName string, h consume
 // A queue entry whose record was already taken (cancelled) or replaced
 // by a later delivery under the same key is skipped. Must hold
 // deliveriesMu.
+//
+// The queue's head moves forward over the spent entries rather than
+// shifting the rest down on every pop: once the queue is full, nearly
+// every delivery expires one, and the shift cost a copy of the whole
+// queue each time (57 us per delivery at 50k a second). The live
+// entries move to the front only once the spent ones are more than
+// half the array, which the pops since the last move have paid for, so
+// a delivery costs O(1) amortized and the array stays within about
+// twice the live entries.
 func (s *RPCServer) expireDeliveriesLocked(now time.Time) {
-	n := 0
-	for n < len(s.deliveryExpiry) && n < deliveryExpiryBudget && !s.deliveryExpiry[n].expireAt.After(now) {
-		e := s.deliveryExpiry[n]
+	q, head := s.deliveryExpiry, s.deliveryHead
+	for n := 0; head < len(q) && n < deliveryExpiryBudget && !q[head].expireAt.After(now); n++ {
+		e := q[head]
 		if d, ok := s.deliveries[e.key]; ok && d.expireAt.Equal(e.expireAt) {
 			delete(s.deliveries, e.key)
 		}
-		n++
+		head++
 	}
-	if n > 0 {
-		// Shift in place; the queue is a FIFO whose head moves forward,
-		// and copying the remainder keeps the backing array from growing
-		// without bound.
-		s.deliveryExpiry = append(s.deliveryExpiry[:0], s.deliveryExpiry[n:]...)
+	switch {
+	case head == s.deliveryHead:
+	case head == len(q):
+		s.deliveryExpiry, s.deliveryHead = q[:0], 0
+	case head > len(q)/2:
+		s.deliveryExpiry, s.deliveryHead = append(q[:0], q[head:]...), 0
+	default:
+		s.deliveryHead = head
 	}
 }
 
@@ -356,11 +381,22 @@ func (s *RPCServer) takeDelivery(key requestKey) (delivery, bool) {
 	return d, ok
 }
 
-// releaseDelivery nacks a delivered message so it is redeliverable now.
-// A stale handle (already acked or released) is not an error.
+// releaseDelivery nacks a delivered message, and every other record of
+// its batch, so they are redeliverable now. A stale handle (already
+// acked or released) is not an error.
 func (s *RPCServer) releaseDelivery(d delivery) {
-	if err := s.broker.Nack(rpcRequestContext(), d.topic, d.handle); err != nil && !errors.Is(err, consumer.ErrHandleStale) && s.logger != nil {
-		s.logger.Warn("release consume delivery after client cancel", "topic", d.topic, "err", err)
+	s.releaseHandle(d.topic, d.handle)
+	for _, rh := range d.rest {
+		if h, err := consumer.DecodeHandle(rh); err == nil {
+			s.releaseHandle(d.topic, h)
+		}
+	}
+}
+
+// releaseHandle nacks one delivered record; see releaseDelivery.
+func (s *RPCServer) releaseHandle(topicName string, h consumer.Handle) {
+	if err := s.broker.Nack(rpcRequestContext(), topicName, h); err != nil && !errors.Is(err, consumer.ErrHandleStale) && s.logger != nil {
+		s.logger.Warn("release consume delivery after client cancel", "topic", topicName, "err", err)
 	}
 }
 

@@ -54,13 +54,16 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 	if !rt.tokens.enabled() || !rt.hasRemoteOwner(topicName) {
 		return false
 	}
-	rt.waitOnTokens(ctx, w, topicName, wait, local)
+	rt.waitOnTokens(ctx, w, topicName, wait, local, 0)
 	return true
 }
 
 // waitOnTokens parks the consumer on this node's tokens, races that
-// against local's wait, and writes the response.
-func (rt *Router) waitOnTokens(ctx context.Context, w http.ResponseWriter, topicName string, wait time.Duration, local LocalConsumeWaiter) {
+// against local's wait, and writes the response. A max above 1 is a
+// batch consume: the claim and the re-probe ask the owner for up to max
+// records, and batch reports that what was written is the owner's
+// {"messages":[...]} body rather than one message.
+func (rt *Router) waitOnTokens(ctx context.Context, w http.ResponseWriter, topicName string, wait time.Duration, local LocalConsumeWaiter, max int) (batch bool) {
 	if wait > rt.maxConsumeWait && rt.maxConsumeWait > 0 {
 		wait = rt.maxConsumeWait
 	}
@@ -93,7 +96,7 @@ func (rt *Router) waitOnTokens(ctx context.Context, w http.ResponseWriter, topic
 		if remaining <= 0 {
 			leave()
 			w.WriteHeader(http.StatusNoContent)
-			return
+			return false
 		}
 		msg, found, wokeExternal, err := local.Wait(ctx, remaining, parked.ch)
 
@@ -104,11 +107,11 @@ func (rt *Router) waitOnTokens(ctx context.Context, w http.ResponseWriter, topic
 			// topic and stay for the others, or lapse (see register).
 			leave()
 			writeConsumeMessage(w, msg)
-			return
+			return false
 
 		case wokeExternal:
 			from := parked.take()
-			if res, ok := rt.claimFrom(ctx, from, topicName); ok {
+			if res, isBatch, ok := rt.claimUpTo(ctx, from, topicName, max); ok {
 				// The owner spent this node's token on us. If others are
 				// still parked here, leave it a fresh one so its next
 				// record reaches them too.
@@ -116,7 +119,7 @@ func (rt *Router) waitOnTokens(ctx context.Context, w http.ResponseWriter, topic
 					rt.tokens.registerAt(ctx, topicName, from, remaining)
 				}
 				writePeerResponse(w, res)
-				return
+				return isBatch
 			}
 			// Someone beat us to it. Being woken took this consumer off
 			// the queue, so put it back before re-registering, or the
@@ -127,28 +130,28 @@ func (rt *Router) waitOnTokens(ctx context.Context, w http.ResponseWriter, topic
 		case errors.Is(err, errReprobeOwners):
 			// A node that owns none of the topic's partitions scans the
 			// owners now and then while parked (see gatewayWait).
-			forwarded, hadOwners := rt.reprobeRemote(ctx, w, topicName, &owners)
+			forwarded, hadOwners, isBatch := rt.reprobeRemoteUpTo(ctx, w, topicName, &owners, max)
 			if forwarded {
 				leave()
-				return
+				return isBatch
 			}
 			if !hadOwners {
 				// Ownership moved under us; the next poll routes afresh.
 				leave()
 				w.WriteHeader(http.StatusNoContent)
-				return
+				return false
 			}
 
 		case err != nil && !errors.Is(err, context.Canceled):
 			leave()
 			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			return false
 
 		default:
 			// Budget spent, or the client left.
 			leave()
 			w.WriteHeader(http.StatusNoContent)
-			return
+			return false
 		}
 	}
 }
@@ -196,27 +199,47 @@ func (gatewayWait) Release(context.Context, topic.Message) error { return nil }
 // else claimed it first, which costs one round trip and nothing else:
 // the consumer stays parked and the record stays available.
 func (rt *Router) claimFrom(ctx context.Context, addr, topicName string) (nodewire.Response, bool) {
-	// One budget covers the claim and a legacy owner's plain retry.
+	res, _, ok := rt.claimUpTo(ctx, addr, topicName, 0)
+	return res, ok
+}
+
+// claimUpTo is claimFrom for a consume that takes up to max records: a
+// max above 1 asks the owner for a batch, as the probes of a batch
+// consume do, and batch reports that the reply is one.
+func (rt *Router) claimUpTo(ctx context.Context, addr, topicName string, max int) (res nodewire.Response, batch, ok bool) {
+	// One budget covers the claim and a legacy owner's retries.
 	deadline := time.Now().Add(consumeProbeTimeout)
-	legacy := rt.legacyOwner(addr)
-	res, err := rt.peer.ConsumeWithin(ctx, addr, consumeProbeTimeout, nodewire.ConsumeRequest{Topic: topicName, LocalOnly: true, Claim: !legacy})
-	if err == nil && res.Status == http.StatusBadRequest && !legacy && bytes.Contains(res.Body, []byte("trailing")) {
-		// An owner on the previous release rejects the trailing Claim
-		// byte outright. Fall back to the plain probe it understands (it
-		// reserves the record just the same, the hold merely runs to its
-		// deadline) and remember the peer for a while so the roll costs
-		// one refused claim per owner per TTL, not one per record.
-		rt.legacyClaim.Store(addr, time.Now().Add(legacyClaimTTL))
-		if left := time.Until(deadline); left > 0 {
-			res, err = rt.peer.ConsumeWithin(ctx, addr, left, nodewire.ConsumeRequest{Topic: topicName, LocalOnly: true})
+	req := nodewire.ConsumeRequest{Topic: topicName, LocalOnly: true, Claim: !rt.legacyOwner(addr)}
+	if max > 1 && !rt.legacyBatchOwner(addr) {
+		req.Max = max
+	}
+	res, err := rt.peer.ConsumeWithin(ctx, addr, consumeProbeTimeout, req)
+	for err == nil && res.Status == http.StatusBadRequest && (req.Claim || req.Max > 1) && bytes.Contains(res.Body, []byte("trailing")) {
+		// An owner on an earlier release rejects a trailing field it does
+		// not know outright, and the reply does not say which. Drop the
+		// newest first: Max, then the Claim byte, which leaves the plain
+		// probe every release understands (it reserves the record just
+		// the same, the hold merely runs to its deadline). Each refusal
+		// is remembered for a while, so the roll costs one refused claim
+		// per owner per TTL, not one per record.
+		if req.Max > 1 {
+			rt.legacyBatchConsume.Store(addr, time.Now().Add(legacyClaimTTL))
+			req.Max = 0
 		} else {
-			err = context.DeadlineExceeded
+			rt.legacyClaim.Store(addr, time.Now().Add(legacyClaimTTL))
+			req.Claim = false
 		}
+		left := time.Until(deadline)
+		if left <= 0 {
+			err = context.DeadlineExceeded
+			break
+		}
+		res, err = rt.peer.ConsumeWithin(ctx, addr, left, req)
 	}
 	if err != nil || res.Status != http.StatusOK {
-		return nodewire.Response{}, false
+		return nodewire.Response{}, false, false
 	}
-	return res, true
+	return res, req.Max > 1, true
 }
 
 // legacyClaimTTL is how long a claim keeps going out unflagged to an

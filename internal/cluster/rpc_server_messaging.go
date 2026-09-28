@@ -252,11 +252,9 @@ const forwardedConsumeReplyBytes = clusterwire.MaxStreamFramePayloadBytes / 2
 // size are left out: the reserving stops near forwardedConsumeBatchBytes
 // of raw bytes, which JSON and binary records keep well inside the bound.
 //
-// A reply is remembered for a cancel that races it (rememberDelivery)
-// by its first record only, since that record holds one handle per
-// request: such a cancel gives the first record back at once, and the
-// rest when their leases lapse. A cancel that arrives before the reply is
-// written gives every record back.
+// Every record the reply carries is remembered for a cancel that races
+// it (rememberDeliveries), so such a cancel gives them all back at once,
+// as does one that arrives before the reply is written.
 func (s *RPCServer) consumeBatch(ctx context.Context, key requestKey, req *nodewire.ConsumeRequest, wait time.Duration) nodewire.Response {
 	bc, ok := s.broker.(broker.BatchConsumer)
 	if !ok {
@@ -316,26 +314,13 @@ func (s *RPCServer) consumeBatch(ctx context.Context, key requestKey, req *nodew
 	if len(msgs) == 0 {
 		return nodewire.Response{Status: http.StatusNoContent}
 	}
-	if h, herr := consumer.DecodeHandle(msgs[0].ReceiptHandle); herr == nil {
-		s.rememberDelivery(key, req.Topic, h)
-	}
-	if ctx.Err() != nil {
-		// The requester is gone: give every record back now rather than
-		// leave them hidden until their leases lapse.
-		s.takeDelivery(key)
-		for i := range msgs {
-			if h, herr := consumer.DecodeHandle(msgs[i].ReceiptHandle); herr == nil {
-				s.releaseDelivery(delivery{topic: req.Topic, handle: h})
-			}
-		}
-		return nodewire.Response{Status: http.StatusNoContent}
-	}
 	size := 16
 	for i := range msgs {
 		size += len(msgs[i].Key) + len(msgs[i].Payload) + 160
 	}
 	body := make([]byte, 0, min(size, forwardedConsumeReplyBytes))
 	body = append(body, `{"messages":[`...)
+	sent := len(msgs)
 	for i := range msgs {
 		mark := len(body)
 		if i > 0 {
@@ -346,13 +331,36 @@ func (s *RPCServer) consumeBatch(ctx context.Context, key requestKey, req *nodew
 			// Encoded, this record would take the reply past what one
 			// frame carries: it and the rest go back for the next consume.
 			body = body[:mark]
-			for j := i; j < len(msgs); j++ {
-				if h, herr := consumer.DecodeHandle(msgs[j].ReceiptHandle); herr == nil {
-					s.releaseDelivery(delivery{topic: req.Topic, handle: h})
-				}
-			}
+			sent = i
 			break
 		}
+	}
+	for _, m := range msgs[sent:] {
+		if h, herr := consumer.DecodeHandle(m.ReceiptHandle); herr == nil {
+			s.releaseHandle(req.Topic, h)
+		}
+	}
+	// The records are reserved for a requester that may already be gone.
+	// Remember them all first, then check the request context, as a
+	// single consume does: a cancel that lands after the check finds the
+	// record (HandleStreamCancel).
+	if h, herr := consumer.DecodeHandle(msgs[0].ReceiptHandle); herr == nil {
+		var rest []string
+		if sent > 1 {
+			rest = make([]string, sent-1)
+			for i := range rest {
+				rest[i] = msgs[i+1].ReceiptHandle
+			}
+		}
+		s.rememberDeliveries(key, req.Topic, h, rest)
+	}
+	if ctx.Err() != nil {
+		// The requester is gone: give every record back now rather than
+		// leave them hidden until their leases lapse.
+		if d, ok := s.takeDelivery(key); ok {
+			s.releaseDelivery(d)
+		}
+		return nodewire.Response{Status: http.StatusNoContent}
 	}
 	body = append(body, "]}\n"...)
 	return nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: body}
