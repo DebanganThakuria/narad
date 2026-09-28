@@ -12,36 +12,49 @@ The Understand pages describe the code on `master`. Where v3.0.1 behaves differe
 
 Every Narad node runs the same binary with the same components. Nodes differ only in which data they own and whether they currently lead Raft.
 
+Inside one node, a request takes this path:
+
 ```mermaid
 flowchart TB
-    accTitle: Components of a three-node Narad cluster
-    accDescr: A load balancer sends requests to any node. On node narad-0 the HTTP API hands requests to the router, which writes produces to the ingress WAL and sends consumes to the broker engine and the partition logs. The produce dispatcher commits accepted messages to partition logs on other nodes over QUIC, the fan-out runner commits copies to child partitions, and the metastore on every node is a Raft replica. The controller runs only on the Raft leader.
-    LB[Load balancer] --> H0
-    subgraph node0["node narad-0"]
-        H0[HTTP API] --> R0[Router]
-        R0 --> ING0[Ingress WAL]
-        ING0 --> D0[Produce dispatcher]
-        R0 --> B0[Broker engine]
-        B0 --> S0[("partition logs<br/>(owned partitions)")]
-        F0[Fan-out runner] --> S0
-        MS0[("metastore<br/>Raft replica")]
-        C0[Controller*]
+    accTitle: The request path inside one node
+    accDescr: A load balancer sends each request to any node. Inside the node, the HTTP API hands it to the router. The router writes a produce to the ingress WAL, and the produce dispatcher commits it to the partition's owner, this node or another one over QUIC. The router sends a consume or an ack to the broker engine, which works on the partition logs this node owns. The fan-out runner copies committed records into child partitions.
+    LB[Load balancer] --> H
+    subgraph node["one node"]
+        direction TB
+        H[HTTP API] --> R[Router]
+        R -->|produce| ING[Ingress WAL]
+        ING --> D[Produce dispatcher]
+        R -->|"consume, ack"| B[Broker engine]
+        D -->|"commit, here or<br/>on the owner (QUIC)"| S[("partition logs<br/>(owned partitions)")]
+        B --> S
+        F[Fan-out runner] -->|child commits| S
     end
-    subgraph node1["node narad-1"]
+```
+
+Across the cluster, every node holds a full copy of the metadata and the partitions it owns:
+
+```mermaid
+flowchart LR
+    accTitle: Three nodes of a Narad cluster
+    accDescr: Each of three nodes holds a Raft replica of the metastore and the partition logs it owns. The metastore replicas stay in step over Raft. The nodes commit messages to each other's partition logs over QUIC. The controller runs only on the node that leads Raft, here narad-0.
+    subgraph n0["narad-0"]
+        MS0[("metastore<br/>Raft replica")]
+        S0[("partition logs")]
+        C0["controller<br/>(Raft leader only)"]
+    end
+    subgraph n1["narad-1"]
         MS1[("metastore<br/>Raft replica")]
         S1[("partition logs")]
     end
-    subgraph node2["node narad-2"]
+    subgraph n2["narad-2"]
         MS2[("metastore<br/>Raft replica")]
         S2[("partition logs")]
     end
-    D0 -->|"commit RPC (QUIC)"| S1
-    F0 -->|"child commit RPC"| S2
     MS0 <-->|Raft| MS1
-    MS0 <-->|Raft| MS2
+    MS1 <-->|Raft| MS2
+    S0 <-.->|QUIC| S1
+    S1 <-.->|QUIC| S2
 ```
-
-*\*The controller runs only on the Raft leader.*
 
 ## Five design ideas {#design-ideas}
 
@@ -55,23 +68,22 @@ A produce is fsynced into the receiving node's [ingress WAL](../reference/glossa
 Topics, users, assignments and fan-out links live in the Raft-replicated [metastore](../reference/glossary.md#metastore): every node holds a full replica, and one node leads. Message data is not replicated: one owner, one copy, fsynced and verified. See [Metastore and Raft](metastore-and-raft.md) and [One copy per partition](delivery-contract.md#one-copy).
 
 **4. Consume is a queue with leases.**
-Each message is reserved on its own, even in a batch consume (unreleased), which takes up to 100 in one request. A reservation is a [lease](../reference/glossary.md#lease) that lasts the [visibility timeout](../reference/glossary.md#visibility-timeout), held in the owner's memory, with a durable [committed frontier](../reference/glossary.md#committed-frontier) behind it. Acks move the frontier forward; a crash only means redelivery. See [Consume path](consume-path.md).
+Each message is reserved on its own, even in a batch consume (unreleased), which takes up to 100 in one request. A reservation is a [lease](../reference/glossary.md#lease) that lasts the [visibility timeout](../reference/glossary.md#visibility-timeout), held in the owner's memory, with a durable [committed frontier](../reference/glossary.md#committed-frontier) behind it. Acks move the frontier forward, and a background committer [writes it to disk](consume-path.md#how-acks-reach-the-disk); a crash only means redelivery. See [Consume path](consume-path.md).
 
 **5. Fan-out tails the parent's log.**
 A child topic is fed by a cursor on the owner of each parent partition. The cursor reads committed parent records in bulk, commits them to the child, and keeps its own durable position, so no parent message is skipped and none is copied twice except by at-least-once retries. A delay child adds a due-time gate to the same cursor. See [Fan-out engine](fanout-engine.md).
 
 ## One message, end to end {#message-end-to-end}
 
+A produce is accepted by any node and committed on the partition's owner:
+
 ```mermaid
 sequenceDiagram
-    accTitle: One message from producer to consumer
-    accDescr: The producer posts to any node, which fsyncs the message into its ingress WAL and answers 202. The dispatcher commits it to the partition owner, which appends, fsyncs, verifies and advances the high watermark, then confirms so the WAL entry can be reclaimed. A fan-out cursor reads the committed records and commits copies to child partitions. A consumer gets the message with a receipt handle from the owner and acks it.
+    accTitle: One message from producer to owner
+    accDescr: The producer posts to any node, which fsyncs the message into its ingress WAL and answers 202. That node's dispatcher commits it to the partition owner, which appends, fsyncs, verifies the checksum and advances the high watermark, so the message becomes visible, then confirms so the WAL entry can be reclaimed.
     participant P as Producer
     participant A as Accepting node
     participant O as Partition owner
-    participant F as Fan-out cursor
-    participant CH as Child owner
-    participant C as Consumer
     P->>A: POST /produce
     A->>A: fsync into ingress WAL
     A-->>P: 202
@@ -79,6 +91,18 @@ sequenceDiagram
     O->>O: append + fsync + CRC verify
     O->>O: advance high watermark (visible)
     O-->>A: committed (WAL entry now reclaimable)
+```
+
+Once it is visible, a fan-out cursor copies it to child topics and a consumer takes it from the owner:
+
+```mermaid
+sequenceDiagram
+    accTitle: One message from owner to consumer
+    accDescr: A fan-out cursor on the owner reads the committed records and commits copies to the owners of the child partitions. A consumer gets the message with a receipt handle from the owner and acks it.
+    participant F as Fan-out cursor
+    participant O as Partition owner
+    participant CH as Child owner
+    participant C as Consumer
     F->>O: read committed slab
     F->>CH: commit copies to child partitions
     C->>O: GET /consume
@@ -103,7 +127,7 @@ The pages in this section follow the path of a message, then the cluster around 
 2. [Linearizability check](linearizability.md): how a nightly run checks that contract.
 3. [Produce path](produce-path.md): from a produce request to a durable, visible record.
 4. [Storage engine](storage-engine.md): segments, frames, the high watermark and retention.
-5. [Consume path](consume-path.md): leases, acks, and consumes that cross nodes.
+5. [Consume path](consume-path.md): leases, acks and how they reach the disk, and consumes that cross nodes.
 6. [Fan-out engine](fanout-engine.md): cursors that copy a parent's log to its children.
 7. [Metastore and Raft](metastore-and-raft.md): the replicated metadata, and the stale-replica problem.
 8. [Networking and security](networking-and-security.md): the HTTP and QUIC planes, authentication and authorization.

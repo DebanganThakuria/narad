@@ -67,17 +67,17 @@ narad pub demo '{"hello":"narad"}' --count 100 --rate 20
 ```
 
 ```text title="Output"
-accepted 100 messages in 5.006s (20 msg/s)
+accepted 100 messages in 5.008s (20 msg/s)
 ```
 
-The messages appear in the second terminal as they are committed, one line each: partition, offset, a time and the payload.
+The messages appear in the second terminal as they are committed, one line each: partition, offset, the local time the message was committed (to the second) and the payload. The CLI of v3.0.1 prints a wrong time there, a time of day from January 1970 (unreleased fix).
 
 ```text title="Output in the second terminal, first lines"
-[p0 @0] 22:53:44.574 {"hello":"narad"}
-[p0 @1] 22:53:44.575 {"hello":"narad"}
-[p1 @0] 22:53:44.574 {"hello":"narad"}
-[p1 @1] 22:53:44.575 {"hello":"narad"}
-[p1 @2] 22:53:44.575 {"hello":"narad"}
+[p0 @0] 03:07:33 {"hello":"narad"}
+[p0 @1] 03:07:33 {"hello":"narad"}
+[p1 @0] 03:07:32 {"hello":"narad"}
+[p1 @1] 03:07:33 {"hello":"narad"}
+[p1 @2] 03:07:33 {"hello":"narad"}
 ```
 
 Stop it with Ctrl-C, and it prints how many messages it saw.

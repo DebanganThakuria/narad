@@ -54,12 +54,12 @@ Before you start: your user needs a `consume` grant on the topic. To choose wher
     ```
 
     ```text title="Output"
-    [p4 @0] key=customer-42 22:53:43.277 {"order_id": "ord_123", "amount": 4999}
-    [p4 @1] key=customer-42 22:53:43.305 {"order_id": "ord_124", "amount": 1250}
-    [p4 @2] key=customer-42 22:53:43.346 hello world
-    [p4 @3] key=customer-42 22:53:43.346 (binary, 8 bytes)
+    [p4 @0] key=customer-42 03:06:49 {"order_id": "ord_123", "amount": 4999}
+    [p4 @1] key=customer-42 03:07:03 {"order_id": "ord_124", "amount": 1250}
+    [p4 @2] key=customer-42 03:07:04 hello world
+    [p4 @3] key=customer-42 03:07:04 (binary, 8 bytes)
     89504e470d0a1a0a
-    [p4 @4] key=customer-42 22:53:43.352 {"order_id": "ord_125", "amount": 1250}
+    [p4 @4] key=customer-42 03:07:05 {"order_id": "ord_125", "amount": 1250}
     5 message(s) replayed from p4 [0, 5)
     ```
 
@@ -99,12 +99,12 @@ narad sub orders --peek
 ```
 
 ```text title="Output"
-[p1 @0] 22:53:43.397 {"hello":"narad"}
-[p2 @1] 22:53:43.397 {"hello":"narad"}
-[p3 @1] 22:53:43.397 {"hello":"narad"}
-[p4 @5] key=customer-42 22:53:43.397 {"order_id": "ord_127", "amount": 300}
-[p4 @6] 22:53:43.397 {"hello":"narad"}
-[p5 @0] 22:53:43.397 {"hello":"narad"}
+[p0 @0] 03:07:19 {"hello":"narad"}
+[p1 @0] 03:07:19 {"hello":"narad"}
+[p2 @0] 03:07:19 {"hello":"narad"}
+[p4 @5] key=customer-42 03:07:19 {"order_id": "ord_126", "amount": 300}
+[p3 @0] 03:07:20 {"hello":"narad"}
+[p4 @6] 03:07:20 {"hello":"narad"}
 ```
 
 - The CLI also prints a status line when it starts and a message count when you stop it with Ctrl-C.

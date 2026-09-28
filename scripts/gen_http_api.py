@@ -162,23 +162,32 @@ def field_rows(spec, schema, prefix="", required_names=None, expand_objects=True
     return rows
 
 
+def name_cell(name, since, facts):
+    """The first column of a field or parameter table.
+
+    The name, then on a second line its type and the other short facts
+    (where it goes, whether it is required, its default). Folding them
+    into one cell leaves two columns, so the description, the column
+    people read, starts on screen on a phone as well.
+    """
+    cell = "`%s`" % name
+    if since == "unreleased":
+        cell += " (unreleased)"
+    facts = [f for f in facts if f]
+    if facts:
+        cell += "<br>" + ", ".join(facts)
+    return cell
+
+
 def render_fields_table(rows, with_required):
-    out = []
-    if with_required:
-        out.append("| Field | Type | Required | Default | Description |")
-        out.append("|---|---|---|---|---|")
-    else:
-        out.append("| Field | Type | Description |")
-        out.append("|---|---|---|")
+    out = ["| Field | Description |", "|---|---|"]
     for name, kind, required, default, desc, since in rows:
-        cell = "`%s`" % name
-        if since == "unreleased":
-            cell += " (unreleased)"
+        facts = [kind]
         if with_required:
-            dflt = "`%s`" % default if default != "" else ""
-            out.append("| %s | %s | %s | %s | %s |" % (cell, kind, required, dflt, one_line(desc)))
-        else:
-            out.append("| %s | %s | %s |" % (cell, kind, one_line(desc)))
+            facts.append("required" if required else "optional")
+            if default != "":
+                facts.append("default `%s`" % default)
+        out.append("| %s | %s |" % (name_cell(name, since, facts), one_line(desc)))
     return out
 
 
@@ -216,20 +225,18 @@ def render_operation(spec, method, path, shared, op):
     if params:
         out.append("**Parameters**")
         out.append("")
-        out.append("| Name | In | Type | Required | Default | Description |")
-        out.append("|---|---|---|---|---|---|")
+        out.append("| Name | Description |")
+        out.append("|---|---|")
         for p in params:
             schema = p.get("schema", {})
-            cell = "`%s`" % p["name"]
-            if p.get("x-narad-since") == "unreleased":
-                cell += " (unreleased)"
             default = schema.get("default", "")
-            out.append("| %s | %s | %s | %s | %s | %s |" % (
-                cell,
-                p["in"],
-                type_of(spec, schema),
-                "yes" if p.get("required") else "",
-                "`%s`" % default if default != "" else "",
+            facts = [
+                "%s, %s" % (p["in"], type_of(spec, schema)),
+                "required" if p.get("required") else "optional",
+                "default `%s`" % default if default != "" else "",
+            ]
+            out.append("| %s | %s |" % (
+                name_cell(p["name"], p.get("x-narad-since"), facts),
                 one_line(p.get("description", "")),
             ))
         out.append("")

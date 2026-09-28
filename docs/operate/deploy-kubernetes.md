@@ -11,6 +11,51 @@ Install a three-node Narad cluster on Kubernetes with the Helm chart, then check
 Before you start: a Kubernetes cluster with a default storage class, `kubectl`, Helm 3 or later, `git` and `openssl`.
 {: #prerequisites }
 
+## Decide before you install {#values}
+
+Three choices are cheap before the install and costly after it: the disk size, the Raft transport and the founding cluster size. Keep them, and the rest of your settings, in a values file. This one covers the choices most production clusters make:
+
+```yaml title="narad-values.yaml"
+replicaCount: 3
+initialClusterSize: 3        # set once, at the first install
+
+image:
+  tag: v3.0.1                # pin a release
+
+persistence:
+  size: 50Gi                 # per pod; fixed once installed
+
+narad:
+  defaultRetentionAgeMs: 604800000  # 7 days; the chart's default is 12 hours
+  config:                    # rendered to the --config JSON file
+    storage:
+      codec: zstd            # compression is off by default
+      compression_level: fastest
+
+security:
+  clusterTLS:
+    enabled: true            # needs the narad-cluster-tls secret
+  allowPlaintextRaft: false
+
+resources:
+  limits:
+    memory: 2Gi
+
+extraEnv:
+  GOMEMLIMIT: 1800MiB        # about 90% of the memory limit
+```
+
+Save it as `narad-values.yaml` in the clone you make under [Install](#install), or pass its path to `-f`.
+
+- **`persistence.size`** is the volume of each pod. The StatefulSet fixes it once installed, and a `helm upgrade` that changes it fails. Size it with [Capacity and disk sizing](../reference/capacity.md#disk-sizing).
+- **`narad.defaultRetentionAgeMs`** is the retention of a topic created without `retention_ms`. The chart's default is 12 hours and the binary's is 7 days. Retention deletes unacked messages too, so pick a value longer than your longest consumer outage.
+- **Raft TLS.** For production, create the TLS secret now ([Create the certificates](raft-tls.md#create-certificates)) and keep `security.clusterTLS.enabled: true` and `security.allowPlaintextRaft: false` in the file. Turning TLS on later needs a pause of topic and user changes ([Enable on a running cluster](raft-tls.md#enable-running-cluster)).
+- **`initialClusterSize`** is the set of pods allowed to create a new cluster. Pods beyond it join the existing one. It is read only on an empty disk, so set it at the first install and leave it.
+- **`codec: zstd`** turns on compression of stored messages. Measure the saving on your own payloads; already compressed payloads gain little.
+- **`GOMEMLIMIT`** gives the Go runtime a soft memory limit, so it collects garbage harder before the pod reaches its memory limit. Builds after v3.0.1 set it to 90% of the pod's memory limit on their own when it is unset (unreleased).
+
+Every value, with its default, is in the [Helm values reference](../reference/helm-values.md#values).
+
 ## Install {#install}
 
 The chart lives in the repository, so the install starts from a clone of the release you mean to run.
@@ -32,9 +77,15 @@ The chart lives in the repository, so the install starts from a clone of the rel
       --from-literal=admin-password="$(openssl rand -base64 24)"
     ```
 
-    `cluster-secret` authenticates the nodes to each other and is required. `admin-password` becomes the password of the root user, `admin`. It is optional: without it, one node generates a password and logs it once (see [Manage users and grants](users.md#root-admin)).
+    `cluster-secret` authenticates the nodes to each other and is required. `admin-password` becomes the password of the root user, `admin`. It is optional: without it, one node generates a password and logs it once (see [Manage users and grants](users.md#root-admin)). With Raft TLS on, also create the `narad-cluster-tls` secret now ([Create the certificates](raft-tls.md#create-certificates)).
 
-3. Install the chart:
+3. Install the chart with your values file:
+
+    ```bash
+    helm install narad ./charts/narad -n narad -f narad-values.yaml
+    ```
+
+    For a trial, skip the file and set the few values that matter on the command line. This runs the Raft port without TLS, which the chart allows by default:
 
     ```bash
     helm install narad ./charts/narad -n narad \
@@ -43,7 +94,7 @@ The chart lives in the repository, so the install starts from a clone of the rel
       --set image.tag=v3.0.1
     ```
 
-    Pin `image.tag` to a release. The chart's default is `latest`, which follows `master`.
+    Pin `image.tag` to a release either way. The chart's default is `latest`, which follows `master`.
 
 4. Wait for the rollout:
 
@@ -53,7 +104,7 @@ The chart lives in the repository, so the install starts from a clone of the rel
 
     A pod reports ready once it has finished starting, is in contact with the Raft leader and has caught up with it. The rollout is done when all three pods are ready.
 
-This install runs the Raft port without TLS, which the chart allows by default. Work through the [Production checklist](production-checklist.md) before the cluster takes real traffic.
+Work through the [Production checklist](production-checklist.md) before the cluster takes real traffic.
 
 ## Verify {#verify}
 
@@ -99,41 +150,13 @@ cosign verify ghcr.io/debanganthakuria/narad:v3.0.1 \
 
 The identity is pinned to one workflow file, on `master` or on a release tag. Matching the repository alone would accept a signature from any workflow on any branch.
 
-## Choose values {#values}
+## Change values later {#change-values}
 
-For anything beyond a trial, keep the settings in a values file. This one covers the choices most clusters make:
-
-```yaml title="narad-values.yaml"
-replicaCount: 3
-initialClusterSize: 3        # set once at the first install
-
-image:
-  tag: v3.0.1                # pin a release
-
-persistence:
-  size: 50Gi                 # per pod
-
-narad:
-  config:                    # rendered to the --config JSON file
-    storage:
-      codec: zstd            # compression is off by default
-      compression_level: fastest
-
-resources:
-  limits:
-    memory: 2Gi
-
-extraEnv:
-  GOMEMLIMIT: 1800MiB        # about 90% of the memory limit
-```
+Edit the values file and upgrade:
 
 ```bash
 helm upgrade narad ./charts/narad -n narad -f narad-values.yaml
 ```
-
-- **`initialClusterSize`** is the set of pods allowed to create a new cluster. Pods beyond it join the existing one. It is read only on an empty disk, so set it at the first install and leave it.
-- **`codec: zstd`** turns on compression of stored messages. Measure the saving on your own payloads; already compressed payloads gain little.
-- **`GOMEMLIMIT`** gives the Go runtime a soft memory limit, so it collects garbage harder before the pod reaches its memory limit. Builds after v3.0.1 set it to 90% of the pod's memory limit on their own when it is unset (unreleased).
 
 Adding or removing `narad.config` as a whole changes the pods, so Helm rolls them. A change inside it only rewrites the ConfigMap, and a pod reads its config file only when it starts, so restart the pods after one:
 
@@ -141,10 +164,8 @@ Adding or removing `narad.config` as a whole changes the pods, so Helm rolls the
 kubectl rollout restart statefulset/narad -n narad
 ```
 
-Every value, with its default, is in the [Helm values reference](../reference/helm-values.md#values). For disk size, see [Capacity and disk sizing](../reference/capacity.md#disk-sizing).
-
 ## Next steps
 
 - [Production checklist](production-checklist.md): secure and size the cluster before it takes real traffic.
-- [Monitor and alert](monitoring.md): scrape the metrics and set up the five alerts.
+- [Monitor and alert](monitoring.md): scrape the metrics and set up the six alerts.
 - [Helm values reference](../reference/helm-values.md): look up every chart value and the ports and probes.

@@ -40,7 +40,7 @@ What a v3.0.1 node does with the unreleased HTTP features, checked against a v3.
 | Batch consume, `GET .../consume?max=N` | ignores `max` and answers with one message, in the single-message shape |
 | Batch ack, a `receipt_handles` body | answers `400` (`receipt_handle required`) |
 | A produce without a key | stores an invented key, `key-<n>`, which consumers see |
-| `http.max_produce_in_flight_per_identity` in the config file | refuses to start: `json: unknown field "max_produce_in_flight_per_identity"` |
-| `storage.consumer_offset_commit_interval_ms` or `storage.ingress_wal_prealloc` in the config file | refuses to start: `... is an internal setting and cannot be configured` |
+| `http.max_produce_in_flight_per_identity` in the config file | refuses to start with an `unknown field` error |
+| `storage.consumer_offset_commit_interval_ms` or `storage.ingress_wal_prealloc` in the config file | refuses to start: the key is an internal setting there and cannot be configured |
 
 A client that must work against both releases can send single produces, consumes and acks, and should always send a key when it relies on seeing one. To find the release a node runs, read the image tag it was deployed with: `narad version` on a v3.0.1 image prints a commit, not a version number.

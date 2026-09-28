@@ -93,33 +93,33 @@ This example takes a five-node cluster down to four.
       "moves": [
         {
           "topic": "orders",
-          "partition": 0,
-          "from": "narad-2",
-          "to": "narad-0"
-        },
-        {
-          "topic": "orders",
-          "partition": 1,
-          "from": "narad-2",
-          "to": "narad-1"
-        },
-        {
-          "topic": "orders",
-          "partition": 2,
-          "from": "narad-2",
-          "to": "narad-0"
-        },
-        {
-          "topic": "orders",
           "partition": 4,
-          "from": "narad-2",
+          "from": "narad-4",
+          "to": "narad-0"
+        },
+        {
+          "topic": "orders",
+          "partition": 9,
+          "from": "narad-4",
           "to": "narad-1"
+        },
+        {
+          "topic": "orders",
+          "partition": 14,
+          "from": "narad-4",
+          "to": "narad-2"
+        },
+        {
+          "topic": "orders",
+          "partition": 19,
+          "from": "narad-4",
+          "to": "narad-3"
         }
       ]
     }
     ```
 
-    (This output comes from a three-node test cluster draining `narad-2`.)
+    This output comes from a five-node test cluster on one machine, with one topic of 20 partitions.
 
 2. Wait until `narad cluster members` shows `owned_partitions: 0` for `narad-4`. The leader then removes it from the Raft voters, and it drops out of the list. The pod keeps running, reports not ready, and its heartbeats are refused.
 
@@ -152,7 +152,7 @@ A node that starts with an empty data directory under a decommissioned ID is adm
 
 ### Source node failure during a move {#source-dies}
 
-If a node dies while its partitions are still being copied away, the destinations that had caught up with it promote their copies after 2 minutes instead of waiting for it. This [force-promote](../reference/glossary.md#force-promote) can deliver again messages that consumers acked on the dead node in its last moments; it never skips one. What can be lost, and why, is in the [failure matrix](../understand/delivery-contract.md#failure-matrix).
+If a node dies while its partitions are still being copied away, the destinations that had caught up with it promote their copies after 2 minutes instead of waiting for it. This [force-promote](../reference/glossary.md#force-promote) can deliver again messages that consumers acked on the dead node in its last moments. On master it never skips one; on v3.0.1 a force-promote could leave records committed after it undelivered (see [Rebalance and decommission](../understand/rebalance.md#what-if-the-source-dies-mid-move)). What can be lost, and why, is in the [failure matrix](../understand/delivery-contract.md#failure-matrix).
 
 ## Next steps
 

@@ -60,7 +60,7 @@ Before you start: your user needs a `consume` grant that matches the topic. The 
     ```
 
     ```text title="Output"
-    [p4 @0] key=customer-42 22:53:43.957 {"order_id": "ord_123", "amount": 4999}
+    [p4 @0] key=customer-42 03:06:49 {"order_id": "ord_123", "amount": 4999}
     ```
 
     `narad sub` consumes and acks every message it prints, so it competes with your real consumers. Use `narad sub orders --peek` to watch without taking anything; see [Replay messages](replay.md#peek).

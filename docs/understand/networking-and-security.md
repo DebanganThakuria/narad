@@ -59,9 +59,9 @@ flowchart TD
     accDescr: A request arrives at node X. A produce is accepted into X's own WAL, and the dispatcher moves it later. A consume for a partition X owns is served from the local log. A consume for a partition node Y owns is forwarded to Y over node RPC. A metadata write is forwarded to the Raft leader.
     REQ[request arrives at node X] --> Q{who handles this?}
     Q -->|"produce"| WAL["accept into X's own WAL<br/>(dispatcher moves it later)"]
-    Q -->|"consume, partition owned by X"| LOCAL[serve from local log]
-    Q -->|"consume, partition owned by Y"| FWD[forward over node RPC to Y]
-    Q -->|"metadata write"| LEADER[forward to the Raft leader]
+    Q -->|"consume, X owns it"| LOCAL["serve from<br/>the local log"]
+    Q -->|"consume, Y owns it"| FWD["forward to Y<br/>over node RPC"]
+    Q -->|"metadata write"| LEADER["forward to<br/>the Raft leader"]
 ```
 
 Produce is the special case that keeps the cluster fast: it is *always* local (WAL first), wherever the partition lives. Queue consumes prefer local partitions, then probe remote owners, then long-poll (see [Consume routing](consume-path.md#routing)).

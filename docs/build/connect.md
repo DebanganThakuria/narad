@@ -8,7 +8,19 @@ search:
 
 Point any HTTP client at a Narad node and authenticate each request with a username and password.
 
-Before you start: the address of a Narad node or of the load balancer in front of the nodes, and a username and password from your operator. A local `narad server start --dev`{.nr-nowrap} node needs no password.
+Before you start: the address of a Narad node or of the load balancer in front of the nodes, and a username and password from your operator. No cluster yet? [Quickstart](../get-started/quickstart.md) runs one on your machine in a minute; leave `$AUTH` empty for it.
+
+Set the base URL and your credentials once per shell:
+
+```sh
+export NARAD="http://127.0.0.1:7942"
+export AUTH="billing-service:your-password"
+```
+
+- `$NARAD` is the base URL of any Narad node, or of the load balancer in front of them, for example `http://127.0.0.1:7942`.
+- `$AUTH` is `username:password` for a user your operator created, here `billing-service`. Quote it, so a password with shell characters survives. A local node with authentication off, such as `narad server start --dev`{.nr-nowrap}, needs none: `export AUTH=""`.
+
+Then call the node:
 
 ```sh title="List the topics you can see"
 curl -i -u "$AUTH" "$NARAD/v1/topics"
@@ -37,18 +49,6 @@ Date: Mon, 28 Sep 2026 19:30:07 GMT
     }
   ]
 }
-```
-
-What to put in place of each part:
-
-- `$NARAD` is the base URL of any Narad node, or of the load balancer in front of them, for example `http://127.0.0.1:7942`.
-- `$AUTH` is `username:password` for a user your operator created, here `billing-service`. Quote it, so a password with shell characters survives.
-
-Set both once per shell:
-
-```sh
-export NARAD="http://127.0.0.1:7942"
-export AUTH="billing-service:your-password"
 ```
 
 The list holds only the topics you may read, so an empty list can mean there are none or that you hold no grant on any.

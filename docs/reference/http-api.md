@@ -19,7 +19,32 @@ Content-Length: 456
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 
-{"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":172800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"parent","children":["orders-audit"],"schema_version":0,"partition_stats":[{"index":1,"segments":1,"oldest_offset":0,"next_offset":2,"high_watermark":2,"size_bytes":166,"oldest_segment_at":1790623903,"owner_node":"narad-0"}]}
+{
+  "name": "orders",
+  "id": "681a429c0b683b2d",
+  "partitions": 3,
+  "retention_ms": 172800000,
+  "visibility_timeout_ms": 30000,
+  "max_in_flight_per_partition": 1024,
+  "max_acked_ahead_per_partition": 1024,
+  "created_at": 1790623903,
+  "owner": "admin",
+  "role": "parent",
+  "children": ["orders-audit"],
+  "schema_version": 0,
+  "partition_stats": [
+    {
+      "index": 1,
+      "segments": 1,
+      "oldest_offset": 0,
+      "next_offset": 2,
+      "high_watermark": 2,
+      "size_bytes": 166,
+      "oldest_segment_at": 1790623903,
+      "owner_node": "narad-0"
+    }
+  ]
+}
 ```
 
 - `$NARAD` is the base URL of any node or of the load balancer in front
@@ -79,14 +104,16 @@ sending state-changing requests with an operator's cached credentials.
 |---|---|---|
 | Request body | 1 MiB (1,048,576 bytes) | [`413`](status-codes.md#status-413); `400` on the user and attach-child routes |
 | Batch ack body (unreleased) | 64 KiB | [`413`](status-codes.md#status-413) |
-| Request headers | 64 KiB (`http.max_header_bytes`) | [`431`](status-codes.md#status-431) |
+| Request headers | 64 KiB by default | [`431`](status-codes.md#status-431) |
 | Messages per batch produce, records per batch consume, handles per batch ack (unreleased) | 100 | [`400`](status-codes.md#status-400) |
-| Consume `wait` | `http.max_consume_wait`, 10 s by default | clamped, with an `X-Narad-Wait-Clamped` response header |
-| Concurrent consumes per user (or per client IP with security off), per node | 1024 (`http.max_consume_in_flight_per_identity`) | [`429`](status-codes.md#status-429) |
-| Concurrent produces per user, per node (unreleased) | off (`http.max_produce_in_flight_per_identity`) | [`429`](status-codes.md#status-429) |
+| Consume `wait` | 10 s by default | clamped, with an `X-Narad-Wait-Clamped` response header |
+| Concurrent consumes per user (or per client IP with security off), per node | 1024 by default | [`429`](status-codes.md#status-429) |
+| Concurrent produces per user, per node (unreleased) | off by default | [`429`](status-codes.md#status-429) |
 
-The settings in the table are in the
-[Configuration reference](configuration.md#http).
+The limits marked "by default" are settings: `http.max_header_bytes`,
+`http.max_consume_wait`, `http.max_consume_in_flight_per_identity` and
+`http.max_produce_in_flight_per_identity` (unreleased), in that order,
+all in the [Configuration reference](configuration.md#http).
 
 ### Errors
 
@@ -98,8 +125,9 @@ An error answer carries a JSON body with one field:
 
 A few answers are plain text instead: a route or method the server does
 not know (`404`, `405`), a header block that is too large (`431`), and
-some failures of a request forwarded to another node (`502`, and `503`
-when a partition owner is down or the cluster leader cannot be reached).
+some answers to a request forwarded to another node. Those are `502`,
+`503` when a partition owner is down or the cluster leader cannot be
+reached, and some `500` and `400` answers to a consume.
 Read the status code first and treat the body as a message for people.
 
 Each endpoint below lists the codes it answers. On top of those, any
@@ -154,18 +182,18 @@ the server default.
 
 **Request body**
 
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `name` | string | yes |  | 1 to 255 characters from `A-Z a-z 0-9 . _ -`, not `.` or `..`. |
-| `partitions` | integer |  |  | At least 3 and at most `topic.max_partitions` (108 by default). Defaults to `topic.default_partitions` (3), or to the parent's count when `parent` is set. It can grow later, never shrink. |
-| `retention_ms` | integer |  |  | How long a message is kept after it is written, whether or not it was consumed. At least 3,600,000 (1 hour). Defaults to `topic.default_retention_age_ms`: 7 days in the binary, 12 hours in the Helm chart. |
-| `visibility_timeout_ms` | integer |  | `30000` | How long a consumer's lease lasts before the message is delivered again. Defaults to `topic.default_visibility_timeout_ms`. Fixed after creation. |
-| `max_in_flight_per_partition` | integer |  | `1024` | Most messages of one partition leased at once. At the cap, consumes find nothing new in that partition until a lease ends. Defaults to `topic.default_max_in_flight_per_partition`. |
-| `max_acked_ahead_per_partition` | integer |  | `1024` | Most acks one partition holds above its oldest unacked message. At the cap the partition delivers no new messages until that message is acked. Defaults to `topic.default_max_acked_ahead_per_partition`. |
-| `schema` | JSON |  |  | A JSON Schema every message must match; registered as version 1. A JSON object or `true`. |
-| `parent` | string |  |  | Create the topic as a fan-out child of this existing topic. Its partitions are placed on other nodes than the parent's where the cluster allows, which is what makes a [replica child](../operate/backups.md#replica-children). |
-| `fanout_delay_ms` | integer |  |  | With `parent`, make the topic a delay child that receives each message this long after the parent committed it. At most 31,536,000,000 (one year). Attaching an existing topic takes `delay_ms` instead. |
-| `owner` | string |  |  | Ignored. The server sets the owner to the caller. |
+| Field | Description |
+|---|---|
+| `name`<br>string, required | 1 to 255 characters from `A-Z a-z 0-9 . _ -`, not `.` or `..`. |
+| `partitions`<br>integer, optional | At least 3 and at most the server's maximum (108 by default). Defaults to the server default (3), or to the parent's count when `parent` is set. It can grow later, never shrink. Both server settings are in the [Configuration reference](configuration.md#topic-defaults). |
+| `retention_ms`<br>integer, optional | How long a message is kept after it is written, whether or not it was consumed. At least 3,600,000 (1 hour). Defaults to the server default ([Configuration reference](configuration.md#topic-defaults)): 7 days in the binary, 12 hours in the Helm chart. |
+| `visibility_timeout_ms`<br>integer, optional, default `30000` | How long a consumer's lease lasts before the message is delivered again. Defaults to the server default ([Configuration reference](configuration.md#topic-defaults)). Fixed after creation. |
+| `max_in_flight_per_partition`<br>integer, optional, default `1024` | Most messages of one partition leased at once. At the cap, consumes find nothing new in that partition until a lease ends. Defaults to the server default ([Configuration reference](configuration.md#topic-defaults)). |
+| `max_acked_ahead_per_partition`<br>integer, optional, default `1024` | Most acks one partition holds above its oldest unacked message. At the cap the partition delivers no new messages until that message is acked. Defaults to the server default ([Configuration reference](configuration.md#topic-defaults)). |
+| `schema`<br>JSON, optional | A JSON Schema every message must match; registered as version 1. A JSON object or `true`. |
+| `parent`<br>string, optional | Create the topic as a fan-out child of this existing topic. Its partitions are placed on other nodes than the parent's where the cluster allows, which is what makes a [replica child](../operate/backups.md#replica-children). |
+| `fanout_delay_ms`<br>integer, optional | With `parent`, make the topic a delay child that receives each message this long after the parent committed it. At most 31,536,000,000 (one year). Attaching an existing topic takes `delay_ms` instead. |
+| `owner`<br>string, optional | Ignored. The server sets the owner to the caller. |
 
 **Responses**
 
@@ -209,10 +237,10 @@ Lists topics in name order, one page at a time. See
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `limit` | query | integer |  | `100` | Page size. Values above 1000 are treated as 1000. |
-| `page_token` | query | string |  |  | The `next_page_token` of the previous page. Leave it out for the first page. |
+| Name | Description |
+|---|---|
+| `limit`<br>query, integer, optional, default `100` | Page size. Values above 1000 are treated as 1000. |
+| `page_token`<br>query, string, optional | The `next_page_token` of the previous page. Leave it out for the first page. |
 
 **Responses**
 
@@ -225,10 +253,10 @@ Lists topics in name order, one page at a time. See
 
 **Response body (`200`)**
 
-| Field | Type | Description |
-|---|---|---|
-| `topics` | array of [Topic](#topic-object) | Topics the caller can read. |
-| `next_page_token` | string | Pass as `page_token` for the next page; empty when there are no more. |
+| Field | Description |
+|---|---|
+| `topics`<br>array of [Topic](#topic-object) | Topics the caller can read. |
+| `next_page_token`<br>string | Pass as `page_token` for the next page; empty when there are no more. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" "$NARAD/v1/topics?limit=2"
@@ -255,10 +283,10 @@ its statistics.
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `topic` | path | string | yes |  | Name of the topic. |
-| `partition` | query | integer |  |  | Return statistics for this partition only. |
+| Name | Description |
+|---|---|
+| `topic`<br>path, string, required | Name of the topic. |
+| `partition`<br>query, integer, optional | Return statistics for this partition only. |
 
 **Responses**
 
@@ -273,11 +301,11 @@ its statistics.
 
 **Response body (`200`)**: every field of a [Topic](#topic-object), plus:
 
-| Field | Type | Description |
-|---|---|---|
-| `schema_version` | integer | Current schema version, `0` without a schema. |
-| `schema` | JSON | The current schema document. Absent without a schema. |
-| `partition_stats` | array of [Partition statistics](#partition-stats-object) | One entry per partition, or only the one `partition` asked for. |
+| Field | Description |
+|---|---|
+| `schema_version`<br>integer | Current schema version, `0` without a schema. |
+| `schema`<br>JSON | The current schema document. Absent without a schema. |
+| `partition_stats`<br>array of [Partition statistics](#partition-stats-object) | One entry per partition, or only the one `partition` asked for. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" "$NARAD/v1/topics/orders?partition=1"
@@ -310,20 +338,20 @@ you need all or nothing.
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `topic` | path | string | yes |  | Name of the topic. |
+| Name | Description |
+|---|---|
+| `topic`<br>path, string, required | Name of the topic. |
 
 **Request body**
 
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `retention_ms` | integer |  |  | New retention. At least 3,600,000 (1 hour); `0` sets the server default. |
-| `max_in_flight_per_partition` | integer |  |  | New in-flight cap; `0` sets the server default. A cap left out keeps its value. |
-| `max_acked_ahead_per_partition` | integer |  |  | New acked-ahead cap; `0` sets the server default. A cap left out keeps its value. |
-| `partitions` | integer |  |  | New partition count, larger than the current one and at most `topic.max_partitions`. New keys may then map to other partitions. |
-| `schema` | JSON |  |  | A new schema version, checked for compatibility with the current one. Sending the current schema again changes nothing and answers `200`. A schema cannot be removed (`null` gets `400`). |
-| `schema_base_version` | integer |  |  | With `schema`, apply it only if the current version is exactly this number; `409` otherwise. |
+| Field | Description |
+|---|---|
+| `retention_ms`<br>integer, optional | New retention. At least 3,600,000 (1 hour); `0` sets the server default. |
+| `max_in_flight_per_partition`<br>integer, optional | New in-flight cap; `0` sets the server default. A cap left out keeps its value. |
+| `max_acked_ahead_per_partition`<br>integer, optional | New acked-ahead cap; `0` sets the server default. A cap left out keeps its value. |
+| `partitions`<br>integer, optional | New partition count, larger than the current one and at most the server's maximum (108 by default). New keys may then map to other partitions. |
+| `schema`<br>JSON, optional | A new schema version, checked for compatibility with the current one. Sending the current schema again changes nothing and answers `200`. A schema cannot be removed (`null` gets `400`). |
+| `schema_base_version`<br>integer, optional | With `schema`, apply it only if the current version is exactly this number; `409` otherwise. |
 
 **Responses**
 
@@ -370,9 +398,9 @@ it next starts.
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `topic` | path | string | yes |  | Name of the topic. |
+| Name | Description |
+|---|---|
+| `topic`<br>path, string, required | Name of the topic. |
 
 **Responses**
 
@@ -406,9 +434,9 @@ and an empty list. The rules for schemas are in
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `topic` | path | string | yes |  | Name of the topic. |
+| Name | Description |
+|---|---|
+| `topic`<br>path, string, required | Name of the topic. |
 
 **Responses**
 
@@ -421,13 +449,13 @@ and an empty list. The rules for schemas are in
 
 **Response body (`200`)**
 
-| Field | Type | Description |
-|---|---|---|
-| `topic` | string | Topic name. |
-| `version` | integer | Current version, `0` without a schema. |
-| `versions` | array of object | Every version, oldest first. |
-| `versions[].version` | integer | Version number, from 1. |
-| `versions[].schema` | JSON | The schema document. |
+| Field | Description |
+|---|---|
+| `topic`<br>string | Topic name. |
+| `version`<br>integer | Current version, `0` without a schema. |
+| `versions`<br>array of object | Every version, oldest first. |
+| `versions[].version`<br>integer | Version number, from 1. |
+| `versions[].schema`<br>JSON | The schema document. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" "$NARAD/v1/topics/payments/schema"
@@ -466,16 +494,16 @@ instead.
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `parent` | path | string | yes |  | Name of the parent topic. |
+| Name | Description |
+|---|---|
+| `parent`<br>path, string, required | Name of the parent topic. |
 
 **Request body**
 
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `child` | string | yes |  | Name of the existing topic to attach. |
-| `delay_ms` | integer |  |  | Make the child a delay child that receives each message this long after the parent committed it. At most one year. Fixed while attached. |
+| Field | Description |
+|---|---|
+| `child`<br>string, required | Name of the existing topic to attach. |
+| `delay_ms`<br>integer, optional | Make the child a delay child that receives each message this long after the parent committed it. At most one year. Fixed while attached. |
 
 **Responses**
 
@@ -518,9 +546,9 @@ each is behind.
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `parent` | path | string | yes |  | Name of the parent topic. |
+| Name | Description |
+|---|---|
+| `parent`<br>path, string, required | Name of the parent topic. |
 
 **Responses**
 
@@ -533,14 +561,14 @@ each is behind.
 
 **Response body (`200`)**
 
-| Field | Type | Description |
-|---|---|---|
-| `parent` | string | Parent topic name. |
-| `children` | array of object |  |
-| `children[].name` | string | Child topic name. |
-| `children[].delay_ms` | integer | The child's delay, `0` for an immediate child. |
-| `children[].lag_messages` | integer | Parent messages not yet copied into the child, summed over partitions. |
-| `children[].lag_complete` | boolean | `false` while some partitions have not reported, so `lag_messages` is a lower bound. |
+| Field | Description |
+|---|---|
+| `parent`<br>string | Parent topic name. |
+| `children`<br>array of object |  |
+| `children[].name`<br>string | Child topic name. |
+| `children[].delay_ms`<br>integer | The child's delay, `0` for an immediate child. |
+| `children[].lag_messages`<br>integer | Parent messages not yet copied into the child, summed over partitions. |
+| `children[].lag_complete`<br>boolean | `false` while some partitions have not reported, so `lag_messages` is a lower bound. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" "$NARAD/v1/topics/orders/children"
@@ -566,10 +594,10 @@ history it already has and becomes a standalone topic again.
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `parent` | path | string | yes |  | Name of the parent topic. |
-| `child` | path | string | yes |  | Name of the child topic. |
+| Name | Description |
+|---|---|
+| `parent`<br>path, string, required | Name of the parent topic. |
+| `child`<br>path, string, required | Name of the child topic. |
 
 **Responses**
 
@@ -619,11 +647,11 @@ the body must be one JSON text that the current schema accepts
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `topic` | path | string | yes |  | Name of the topic. |
-| `key` | query | string |  |  | Routes the message: messages with the same key go to the same partition while the partition count is unchanged and its owner is up. This is not an ordering guarantee. Without a key, messages are spread round-robin. |
-| `partition` | query | integer |  |  | Pins the message to this partition. Wins over `key`. |
+| Name | Description |
+|---|---|
+| `topic`<br>path, string, required | Name of the topic. |
+| `key`<br>query, string, optional | Routes the message: messages with the same key go to the same partition while the partition count is unchanged and its owner is up. This is not an ordering guarantee. Without a key, messages are spread round-robin. |
+| `partition`<br>query, integer, optional | Pins the message to this partition. Wins over `key`. |
 
 **Request body**
 
@@ -641,7 +669,7 @@ The message, 1 byte to 1 MiB. Content types: `application/json`, `application/oc
 | [`409`](status-codes.md#status-409) | The topic is a delay child, which only its parent can feed. |
 | [`413`](status-codes.md#status-413) | The body is over 1 MiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
-| [`429`](status-codes.md#status-429) | Too many produces in flight for this user on this node (only when `http.max_produce_in_flight_per_identity` is set). |
+| [`429`](status-codes.md#status-429) | Too many produces in flight for this user on this node, only when the operator set a produce cap ([Configuration reference](configuration.md#http)). |
 | [`500`](status-codes.md#status-500) | The node could not write to its ingress WAL. It answers every produce this way until it restarts. |
 
 ```sh title="Request"
@@ -679,22 +707,22 @@ to single produces.
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `topic` | path | string | yes |  | Name of the topic. |
+| Name | Description |
+|---|---|
+| `topic`<br>path, string, required | Name of the topic. |
 
 **Request body**
 
 At most 1 MiB in total.
 
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `messages` | array of object | yes |  | 1 to 100 messages, stored in this order. |
-| `messages[].payload` | JSON | yes |  | A JSON value, stored exactly as written (a JSON string keeps its quotes). With `payload_encoding`, a base64 string of any bytes. |
-| `messages[].payload_encoding` | string: `base64` |  |  | Set to `base64` for a payload that is not JSON. |
-| `messages[].key` | string |  |  | The message's key. Absent or empty means no key. |
-| `messages[].key_encoding` | string: `base64` |  |  | Set to `base64` for a key that is not valid UTF-8. |
-| `messages[].partition` | integer |  |  | Pin the message to this partition. |
+| Field | Description |
+|---|---|
+| `messages`<br>array of object, required | 1 to 100 messages, stored in this order. |
+| `messages[].payload`<br>JSON, required | A JSON value, stored exactly as written (a JSON string keeps its quotes). With `payload_encoding`, a base64 string of any bytes. |
+| `messages[].payload_encoding`<br>string: `base64`, optional | Set to `base64` for a payload that is not JSON. |
+| `messages[].key`<br>string, optional | The message's key. Absent or empty means no key. |
+| `messages[].key_encoding`<br>string: `base64`, optional | Set to `base64` for a key that is not valid UTF-8. |
+| `messages[].partition`<br>integer, optional | Pin the message to this partition. |
 
 **Responses**
 
@@ -713,9 +741,9 @@ At most 1 MiB in total.
 
 **Response body (`202`)**
 
-| Field | Type | Description |
-|---|---|---|
-| `accepted` | integer | How many messages were stored. |
+| Field | Description |
+|---|---|
+| `accepted`<br>integer | How many messages were stored. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/produce/batch" \
@@ -755,13 +783,13 @@ has no `receipt_handle` and nothing needs acking.
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `topic` | path | string | yes |  | Name of the topic. |
-| `wait` | query | string |  | `0s` | How long to wait for a message before answering `204`, as a Go duration such as `500ms` or `10s`. Without it the answer is immediate. Values above the server's `http.max_consume_wait` are cut to it, and the response then carries `X-Narad-Wait-Clamped` with the value used. |
-| `partition` | query | integer |  |  | Take messages from this partition only. Required with `offset`. |
-| `offset` | query | integer |  |  | Replay the record at this offset of `partition`. An offset past the end of the partition answers `204`; one that aged out of retention answers `410`. |
-| `max` (unreleased) | query | integer |  |  | Take up to this many messages in one answer, `{"messages": [...]}`, each with its own lease. The request does not wait to fill `max`. It counts as `max` against the per-user consume cap. Cannot be combined with `offset`. A v3.0.1 node ignores it and answers with one message in the single-message shape. |
+| Name | Description |
+|---|---|
+| `topic`<br>path, string, required | Name of the topic. |
+| `wait`<br>query, string, optional, default `0s` | How long to wait for a message before answering `204`, as a Go duration such as `500ms` or `10s`. Without it the answer is immediate. Values above the server's maximum (10 s by default, [Configuration reference](configuration.md#http)) are cut to it, and the response then carries `X-Narad-Wait-Clamped` with the value used. |
+| `partition`<br>query, integer, optional | Take messages from this partition only. Required with `offset`. |
+| `offset`<br>query, integer, optional | Replay the record at this offset of `partition`. An offset past the end of the partition answers `204`; one that aged out of retention answers `410`. |
+| `max` (unreleased)<br>query, integer, optional | Take up to this many messages in one answer, `{"messages": [...]}`, each with its own lease. The request does not wait to fill `max`. It counts as `max` against the per-user consume cap. Cannot be combined with `offset`. A v3.0.1 node ignores it and answers with one message in the single-message shape. |
 
 **Responses**
 
@@ -833,19 +861,19 @@ The request is a `POST`, so it needs the `Content-Type` or
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `topic` | path | string | yes |  | Name of the topic. |
-| `receipt_handle` | query | string |  |  | The `receipt_handle` from the consume answer. Required unless the body lists handles. |
-| `extend` | query | string: `false`, `true`, `1`, `0` |  |  | Leave it out (or `false`) to ack, `true` or `1` to extend the lease, `0` to nack. Any other value gets `400`. |
+| Name | Description |
+|---|---|
+| `topic`<br>path, string, required | Name of the topic. |
+| `receipt_handle`<br>query, string, optional | The `receipt_handle` from the consume answer. Required unless the body lists handles. |
+| `extend`<br>query, string: `false`, `true`, `1`, `0`, optional | Leave it out (or `false`) to ack, `true` or `1` to extend the lease, `0` to nack. Any other value gets `400`. |
 
 **Request body**
 
 Only for a batch ack, at most 64 KiB.
 
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `receipt_handles` (unreleased) | array of string | yes |  | 1 to 100 receipt handles of this topic. |
+| Field | Description |
+|---|---|
+| `receipt_handles` (unreleased)<br>array of string, required | 1 to 100 receipt handles of this topic. |
 
 **Responses**
 
@@ -853,11 +881,11 @@ Only for a batch ack, at most 64 KiB.
 |---|---|
 | [`204`](status-codes.md#status-204) | Settled. |
 | [`200`](status-codes.md#status-200) | A batch ack. One result per handle, each the status a single ack of that handle would have answered. |
-| [`400`](status-codes.md#status-400) | No handle, a malformed handle, a handle for another topic, a bad `extend`, or more than 100 handles. |
+| [`400`](status-codes.md#status-400) | No `receipt_handle`, a handle that cannot be decoded, a bad `extend`, or more than 100 handles. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No `consume` grant on the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist. |
-| [`410`](status-codes.md#status-410) | The lease ran out, or the message was already settled or delivered again under a new handle. |
+| [`410`](status-codes.md#status-410) | The lease ran out, or the message was already settled or delivered again under a new handle. A handle from another topic, or for a partition this topic does not have, also answers `410`. |
 | [`413`](status-codes.md#status-413) | A batch body over 64 KiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`421`](status-codes.md#status-421) | The partition moved to another node while the request was served. Retry. |
@@ -866,11 +894,11 @@ Only for a batch ack, at most 64 KiB.
 
 **Response body (`200`)**
 
-| Field | Type | Description |
-|---|---|---|
-| `results` | array of object | One result per handle, in request order. |
-| `results[].status` | integer | The status a single ack of this handle would have answered. |
-| `results[].error` | string | The error message, for a failed handle. |
+| Field | Description |
+|---|---|
+| `results`<br>array of object | One result per handle, in request order. |
+| `results[].status`<br>integer | The status a single ack of this handle would have answered. |
+| `results[].error`<br>string | The error message, for a failed handle. |
 
 ```sh title="Request: one handle"
 curl -i -u "$AUTH" -X POST \
@@ -919,11 +947,11 @@ Creates a user with a password and a list of
 
 **Request body**
 
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `username` | string | yes |  | 1 to 64 characters from `A-Z a-z 0-9 . _ -`, not `.` or `..`. |
-| `password` | string | yes |  | 1 to 72 bytes. A character outside ASCII counts as more than one byte. |
-| `grants` | array of [Grant](#grant-object) |  |  | What the user may do. Leave it out for a user with no grants. |
+| Field | Description |
+|---|---|
+| `username`<br>string, required | 1 to 64 characters from `A-Z a-z 0-9 . _ -`, not `.` or `..`. |
+| `password`<br>string, required | 1 to 72 bytes. A character outside ASCII counts as more than one byte. |
+| `grants`<br>array of [Grant](#grant-object), optional | What the user may do. Leave it out for a user with no grants. |
 
 **Responses**
 
@@ -1002,9 +1030,9 @@ Returns one user and its grants.
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `username` | path | string | yes |  | The username. |
+| Name | Description |
+|---|---|
+| `username`<br>path, string, required | The username. |
 
 **Responses**
 
@@ -1040,9 +1068,9 @@ Deletes a user. The root admin and the caller's own account cannot be deleted.
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `username` | path | string | yes |  | The username. |
+| Name | Description |
+|---|---|
+| `username`<br>path, string, required | The username. |
 
 **Responses**
 
@@ -1075,15 +1103,15 @@ can change their own grants.
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `username` | path | string | yes |  | The username. |
+| Name | Description |
+|---|---|
+| `username`<br>path, string, required | The username. |
 
 **Request body**
 
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `grants` | array of [Grant](#grant-object) | yes |  | The complete new list; it replaces the old one. An empty list removes every grant. |
+| Field | Description |
+|---|---|
+| `grants`<br>array of [Grant](#grant-object), required | The complete new list; it replaces the old one. An empty list removes every grant. |
 
 **Responses**
 
@@ -1127,16 +1155,16 @@ root admin can change. Grants are not touched.
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `username` | path | string | yes |  | The username. |
+| Name | Description |
+|---|---|
+| `username`<br>path, string, required | The username. |
 
 **Request body**
 
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `new_password` | string | yes |  | 1 to 72 bytes. |
-| `current_password` | string |  |  | The user's current password. Required when a user who is not `admin` changes their own. |
+| Field | Description |
+|---|---|
+| `new_password`<br>string, required | 1 to 72 bytes. |
+| `current_password`<br>string, optional | The user's current password. Required when a user who is not `admin` changes their own. |
 
 **Responses**
 
@@ -1187,15 +1215,15 @@ partitions it owns and how many are moving off it.
 
 **Response body (`200`)**
 
-| Field | Type | Description |
-|---|---|---|
-| `members` | array of object |  |
-| `members[].id` | string | Node ID. |
-| `members[].addr` | string | The node's API address. |
-| `members[].status` | string: `alive`, `dead` | `dead` once the node stopped sending heartbeats. |
-| `members[].draining` | boolean | `true` while the node is being decommissioned. |
-| `members[].owned_partitions` | integer | Partitions the node owns. |
-| `members[].outbound_moves` | integer | Partitions moving off the node. |
+| Field | Description |
+|---|---|
+| `members`<br>array of object |  |
+| `members[].id`<br>string | Node ID. |
+| `members[].addr`<br>string | The node's API address. |
+| `members[].status`<br>string: `alive`, `dead` | `dead` once the node stopped sending heartbeats. |
+| `members[].draining`<br>boolean | `true` while the node is being decommissioned. |
+| `members[].owned_partitions`<br>integer | Partitions the node owns. |
+| `members[].outbound_moves`<br>integer | Partitions moving off the node. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" "$NARAD/v1/cluster/members"
@@ -1228,13 +1256,13 @@ Lists every partition that is moving between nodes right now.
 
 **Response body (`200`)**
 
-| Field | Type | Description |
-|---|---|---|
-| `moves` | array of object |  |
-| `moves[].topic` | string | Topic name. |
-| `moves[].partition` | integer | Partition number. |
-| `moves[].from` | string | Node that owns the partition now. |
-| `moves[].to` | string | Node the partition is moving to. |
+| Field | Description |
+|---|---|
+| `moves`<br>array of object |  |
+| `moves[].topic`<br>string | Topic name. |
+| `moves[].partition`<br>integer | Partition number. |
+| `moves[].from`<br>string | Node that owns the partition now. |
+| `moves[].to`<br>string | Node the partition is moving to. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" "$NARAD/v1/cluster/moves"
@@ -1262,9 +1290,9 @@ the Raft voters. Remove the node only after that; the steps are in
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `id` | path | string | yes |  | The node ID, as `GET /v1/cluster/members` lists it (the pod name under the Helm chart). |
+| Name | Description |
+|---|---|
+| `id`<br>path, string, required | The node ID, as `GET /v1/cluster/members` lists it (the pod name under the Helm chart). |
 
 **Responses**
 
@@ -1299,9 +1327,9 @@ they are; the node keeps the rest.
 
 **Parameters**
 
-| Name | In | Type | Required | Default | Description |
-|---|---|---|---|---|---|
-| `id` | path | string | yes |  | The node ID, as `GET /v1/cluster/members` lists it (the pod name under the Helm chart). |
+| Name | Description |
+|---|---|
+| `id`<br>path, string, required | The node ID, as `GET /v1/cluster/members` lists it (the pod name under the Helm chart). |
 
 **Responses**
 
@@ -1349,9 +1377,9 @@ credentials. It is also served on the metrics listener when
 
 **Response body (`200`)**
 
-| Field | Type | Description |
-|---|---|---|
-| `status` | string | `ok` for `/healthz`, `ready` for `/readyz`. |
+| Field | Description |
+|---|---|
+| `status`<br>string | `ok` for `/healthz`, `ready` for `/readyz`. |
 
 ```sh title="Request"
 curl -i "$NARAD/healthz"
@@ -1388,9 +1416,9 @@ The check runs on every request. It never needs credentials.
 
 **Response body (`200`)**
 
-| Field | Type | Description |
-|---|---|---|
-| `status` | string | `ok` for `/healthz`, `ready` for `/readyz`. |
+| Field | Description |
+|---|---|
+| `status`<br>string | `ok` for `/healthz`, `ready` for `/readyz`. |
 
 ```sh title="Request"
 curl -i "$NARAD/readyz"
@@ -1443,66 +1471,66 @@ Bodies that several endpoints share.
 
 ### Topic object {#topic-object}
 
-| Field | Type | Description |
-|---|---|---|
-| `name` | string | Topic name. |
-| `id` | string | The [incarnation](glossary.md#incarnation) ID, 16 hex characters. A topic deleted and created again under the same name gets a new one. Absent on a topic created before v2.2.0. |
-| `partitions` | integer | Partition count. |
-| `retention_ms` | integer | Retention in milliseconds; `0` keeps messages forever. |
-| `visibility_timeout_ms` | integer | Lease length in milliseconds. |
-| `max_in_flight_per_partition` | integer | In-flight cap per partition. |
-| `max_acked_ahead_per_partition` | integer | Acked-ahead cap per partition. |
-| `created_at` | integer | Creation time, Unix seconds. |
-| `owner` | string | The user that created the topic. Absent when security was off. |
-| `role` | string: `standalone`, `parent`, `child` | Fan-out role. Absent in the answer to a create without `parent`, which means `standalone`. |
-| `children` | array of string | A parent's children, in attach order. |
-| `parent` | string | A child's parent. |
-| `attach_epoch` | string | A child's current attachment; it changes on every attach. |
-| `fanout_delay_ms` | integer | A delay child's delay in milliseconds. |
-| `attach_offsets` | array of integer | A child's attach point, one offset per parent partition. |
+| Field | Description |
+|---|---|
+| `name`<br>string | Topic name. |
+| `id`<br>string | The [incarnation](glossary.md#incarnation) ID, 16 hex characters. A topic deleted and created again under the same name gets a new one. Absent on a topic created before v2.2.0. |
+| `partitions`<br>integer | Partition count. |
+| `retention_ms`<br>integer | Retention in milliseconds; `0` keeps messages forever. |
+| `visibility_timeout_ms`<br>integer | Lease length in milliseconds. |
+| `max_in_flight_per_partition`<br>integer | In-flight cap per partition. |
+| `max_acked_ahead_per_partition`<br>integer | Acked-ahead cap per partition. |
+| `created_at`<br>integer | Creation time, Unix seconds. |
+| `owner`<br>string | The user that created the topic. Absent when security was off. |
+| `role`<br>string: `standalone`, `parent`, `child` | Fan-out role. Absent in the answer to a create without `parent`, which means `standalone`. |
+| `children`<br>array of string | A parent's children, in attach order. |
+| `parent`<br>string | A child's parent. |
+| `attach_epoch`<br>string | A child's current attachment; it changes on every attach. |
+| `fanout_delay_ms`<br>integer | A delay child's delay in milliseconds. |
+| `attach_offsets`<br>array of integer | A child's attach point, one offset per parent partition. |
 
 ### Partition statistics object {#partition-stats-object}
 
-| Field | Type | Description |
-|---|---|---|
-| `index` | integer | Partition number. |
-| `segments` | integer | Segment files on disk. |
-| `oldest_offset` | integer | Lowest offset still kept. |
-| `next_offset` | integer | Offset the next record will get. It can lead `high_watermark` while a commit runs. |
-| `high_watermark` | integer | One past the last offset consumers can see. |
-| `size_bytes` | integer | Bytes on disk. |
-| `oldest_segment_at` | integer | Time of the oldest segment, Unix seconds. Absent when unknown. |
-| `owner_node` | string | ID of the node that owns the partition. |
+| Field | Description |
+|---|---|
+| `index`<br>integer | Partition number. |
+| `segments`<br>integer | Segment files on disk. |
+| `oldest_offset`<br>integer | Lowest offset still kept. |
+| `next_offset`<br>integer | Offset the next record will get. It can lead `high_watermark` while a commit runs. |
+| `high_watermark`<br>integer | One past the last offset consumers can see. |
+| `size_bytes`<br>integer | Bytes on disk. |
+| `oldest_segment_at`<br>integer | Time of the oldest segment, Unix seconds. Absent when unknown. |
+| `owner_node`<br>string | ID of the node that owns the partition. |
 
 ### Message object {#message-object}
 
 One message. A batch consume answers `{"messages": [...]}` with one of these per message.
 
-| Field | Type | Description |
-|---|---|---|
-| `topic` | string | Topic name. |
-| `partition` | integer | Partition the message is stored in. |
-| `offset` | integer | Position in the partition. |
-| `key` | string | The produce key. Absent for a message produced without one. |
-| `key_encoding` (unreleased) | string: `base64` | `base64` when the key is not valid UTF-8 and `key` holds it in base64. |
-| `payload` | JSON | The message as it was produced. Valid JSON comes back as JSON, other UTF-8 text as a JSON string, and anything else as a base64 string with `payload_encoding`. |
-| `payload_encoding` | string: `base64` | `base64` when `payload` holds binary data in base64. |
-| `timestamp` | integer | When the message was committed to its partition, Unix seconds. |
-| `receipt_handle` | string | The lease to settle with [ack](#ack), `partition:offset:nonce`. Absent on a replay. |
+| Field | Description |
+|---|---|
+| `topic`<br>string | Topic name. |
+| `partition`<br>integer | Partition the message is stored in. |
+| `offset`<br>integer | Position in the partition. |
+| `key`<br>string | The produce key. Absent for a message produced without one. |
+| `key_encoding` (unreleased)<br>string: `base64` | `base64` when the key is not valid UTF-8 and `key` holds it in base64. |
+| `payload`<br>JSON | The message as it was produced. Valid JSON comes back as JSON, other UTF-8 text as a JSON string, and anything else as a base64 string with `payload_encoding`. |
+| `payload_encoding`<br>string: `base64` | `base64` when `payload` holds binary data in base64. |
+| `timestamp`<br>integer | When the message was committed to its partition, Unix seconds. |
+| `receipt_handle`<br>string | The lease to settle with [ack](#ack), `partition:offset:nonce`. Absent on a replay. |
 
 ### User object {#user-object}
 
-| Field | Type | Description |
-|---|---|---|
-| `username` | string | The username. |
-| `grants` | array of [Grant](#grant-object) | The user's grants. Absent when it has none. |
-| `root` | boolean | `true` for the root admin, which holds every right and cannot be deleted. Absent otherwise. |
-| `created_at_ms` | integer | Creation time, Unix milliseconds. |
-| `updated_at_ms` | integer | Time of the last change, Unix milliseconds. |
+| Field | Description |
+|---|---|
+| `username`<br>string | The username. |
+| `grants`<br>array of [Grant](#grant-object) | The user's grants. Absent when it has none. |
+| `root`<br>boolean | `true` for the root admin, which holds every right and cannot be deleted. Absent otherwise. |
+| `created_at_ms`<br>integer | Creation time, Unix milliseconds. |
+| `updated_at_ms`<br>integer | Time of the last change, Unix milliseconds. |
 
 ### Grant object {#grant-object}
 
-| Field | Type | Description |
-|---|---|---|
-| `action` | string: `produce`, `consume`, `create`, `admin` | What the grant allows; see [Access model and grants](access-model.md#actions). |
-| `patterns` | array of string | Topic names or prefix wildcards such as `invoices.*`. Required for every action but `admin`, which takes none. |
+| Field | Description |
+|---|---|
+| `action`<br>string: `produce`, `consume`, `create`, `admin` | What the grant allows; see [Access model and grants](access-model.md#actions). |
+| `patterns`<br>array of string | Topic names or prefix wildcards such as `invoices.*`. Required for every action but `admin`, which takes none. |

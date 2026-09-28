@@ -2,9 +2,13 @@
 #
 # Written by hand from internal/transport/httpserver/router.go and the
 # request and response types under internal/transport/httpserver/handlers.
+# This is the only spec: the docs site publishes it as-is.
 # scripts/gen_http_api.py renders docs/reference/http-api.md from this file
 # and, with --check, fails when the routes in router.go and the operations
-# here disagree. Examples are pasted from real runs, never typed.
+# here disagree. The Go contract test
+# (internal/transport/httpserver/openapi_contract_test.go) fails when a
+# status code here is one the handler cannot answer. Examples are pasted
+# from real runs, never typed.
 #
 # Extensions:
 #   x-narad-lead      first paragraph of the generated page
@@ -33,7 +37,32 @@ info:
       Content-Type: application/json
       Date: Mon, 28 Sep 2026 19:31:43 GMT
 
-      {"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":172800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"parent","children":["orders-audit"],"schema_version":0,"partition_stats":[{"index":1,"segments":1,"oldest_offset":0,"next_offset":2,"high_watermark":2,"size_bytes":166,"oldest_segment_at":1790623903,"owner_node":"narad-0"}]}
+      {
+        "name": "orders",
+        "id": "681a429c0b683b2d",
+        "partitions": 3,
+        "retention_ms": 172800000,
+        "visibility_timeout_ms": 30000,
+        "max_in_flight_per_partition": 1024,
+        "max_acked_ahead_per_partition": 1024,
+        "created_at": 1790623903,
+        "owner": "admin",
+        "role": "parent",
+        "children": ["orders-audit"],
+        "schema_version": 0,
+        "partition_stats": [
+          {
+            "index": 1,
+            "segments": 1,
+            "oldest_offset": 0,
+            "next_offset": 2,
+            "high_watermark": 2,
+            "size_bytes": 166,
+            "oldest_segment_at": 1790623903,
+            "owner_node": "narad-0"
+          }
+        ]
+      }
   x-narad-placeholders: |
     - `$NARAD` is the base URL of any node or of the load balancer in front
       of the cluster, for example `http://127.0.0.1:7942`.
@@ -90,14 +119,16 @@ info:
     |---|---|---|
     | Request body | 1 MiB (1,048,576 bytes) | [`413`](status-codes.md#status-413); `400` on the user and attach-child routes |
     | Batch ack body (unreleased) | 64 KiB | [`413`](status-codes.md#status-413) |
-    | Request headers | 64 KiB (`http.max_header_bytes`) | [`431`](status-codes.md#status-431) |
+    | Request headers | 64 KiB by default | [`431`](status-codes.md#status-431) |
     | Messages per batch produce, records per batch consume, handles per batch ack (unreleased) | 100 | [`400`](status-codes.md#status-400) |
-    | Consume `wait` | `http.max_consume_wait`, 10 s by default | clamped, with an `X-Narad-Wait-Clamped` response header |
-    | Concurrent consumes per user (or per client IP with security off), per node | 1024 (`http.max_consume_in_flight_per_identity`) | [`429`](status-codes.md#status-429) |
-    | Concurrent produces per user, per node (unreleased) | off (`http.max_produce_in_flight_per_identity`) | [`429`](status-codes.md#status-429) |
+    | Consume `wait` | 10 s by default | clamped, with an `X-Narad-Wait-Clamped` response header |
+    | Concurrent consumes per user (or per client IP with security off), per node | 1024 by default | [`429`](status-codes.md#status-429) |
+    | Concurrent produces per user, per node (unreleased) | off by default | [`429`](status-codes.md#status-429) |
 
-    The settings in the table are in the
-    [Configuration reference](configuration.md#http).
+    The limits marked "by default" are settings: `http.max_header_bytes`,
+    `http.max_consume_wait`, `http.max_consume_in_flight_per_identity` and
+    `http.max_produce_in_flight_per_identity` (unreleased), in that order,
+    all in the [Configuration reference](configuration.md#http).
 
     ### Errors
 
@@ -109,8 +140,9 @@ info:
 
     A few answers are plain text instead: a route or method the server does
     not know (`404`, `405`), a header block that is too large (`431`), and
-    some failures of a request forwarded to another node (`502`, and `503`
-    when a partition owner is down or the cluster leader cannot be reached).
+    some answers to a request forwarded to another node. Those are `502`,
+    `503` when a partition owner is down or the cluster leader cannot be
+    reached, and some `500` and `400` answers to a consume.
     Read the status code first and treat the body as a message for people.
 
     Each endpoint below lists the codes it answers. On top of those, any
@@ -646,7 +678,7 @@ paths:
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '429':
-          description: Too many produces in flight for this user on this node (only when `http.max_produce_in_flight_per_identity` is set).
+          description: Too many produces in flight for this user on this node, only when the operator set a produce cap ([Configuration reference](configuration.md#http)).
         '500':
           description: The node could not write to its ingress WAL. It answers every produce this way until it restarts.
       x-narad-examples:
@@ -755,9 +787,10 @@ paths:
           description: |
             How long to wait for a message before answering `204`, as a Go
             duration such as `500ms` or `10s`. Without it the answer is
-            immediate. Values above the server's `http.max_consume_wait`
-            are cut to it, and the response then carries
-            `X-Narad-Wait-Clamped` with the value used.
+            immediate. Values above the server's maximum (10 s by default,
+            [Configuration reference](configuration.md#http)) are cut to it,
+            and the response then carries `X-Narad-Wait-Clamped` with the
+            value used.
           schema:
             type: string
             default: 0s
@@ -903,7 +936,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/AckBatchResults'
         '400':
-          description: No handle, a malformed handle, a handle for another topic, a bad `extend`, or more than 100 handles.
+          description: No `receipt_handle`, a handle that cannot be decoded, a bad `extend`, or more than 100 handles.
         '401':
           description: Missing or wrong credentials.
         '403':
@@ -911,7 +944,7 @@ paths:
         '404':
           description: The topic does not exist.
         '410':
-          description: The lease ran out, or the message was already settled or delivered again under a new handle.
+          description: The lease ran out, or the message was already settled or delivered again under a new handle. A handle from another topic, or for a partition this topic does not have, also answers `410`.
         '413':
           description: A batch body over 64 KiB.
         '415':
@@ -1449,32 +1482,34 @@ components:
           type: integer
           minimum: 3
           description: |
-            At least 3 and at most `topic.max_partitions` (108 by default).
-            Defaults to `topic.default_partitions` (3), or to the parent's
-            count when `parent` is set. It can grow later, never shrink.
+            At least 3 and at most the server's maximum (108 by default).
+            Defaults to the server default (3), or to the parent's count
+            when `parent` is set. It can grow later, never shrink. Both
+            server settings are in the
+            [Configuration reference](configuration.md#topic-defaults).
         retention_ms:
           type: integer
           description: |
             How long a message is kept after it is written, whether or not
-            it was consumed. At least 3,600,000 (1 hour). Defaults to
-            `topic.default_retention_age_ms`: 7 days in the binary, 12 hours
-            in the Helm chart.
+            it was consumed. At least 3,600,000 (1 hour). Defaults to the
+            server default ([Configuration reference](configuration.md#topic-defaults)):
+            7 days in the binary, 12 hours in the Helm chart.
         visibility_timeout_ms:
           type: integer
           default: 30000
-          description: How long a consumer's lease lasts before the message is delivered again. Defaults to `topic.default_visibility_timeout_ms`. Fixed after creation.
+          description: How long a consumer's lease lasts before the message is delivered again. Defaults to the server default ([Configuration reference](configuration.md#topic-defaults)). Fixed after creation.
         max_in_flight_per_partition:
           type: integer
           default: 1024
-          description: Most messages of one partition leased at once. At the cap, consumes find nothing new in that partition until a lease ends. Defaults to `topic.default_max_in_flight_per_partition`.
+          description: Most messages of one partition leased at once. At the cap, consumes find nothing new in that partition until a lease ends. Defaults to the server default ([Configuration reference](configuration.md#topic-defaults)).
         max_acked_ahead_per_partition:
           type: integer
           default: 1024
           description: |
             Most acks one partition holds above its oldest unacked message.
             At the cap the partition delivers no new messages until that
-            message is acked. Defaults to
-            `topic.default_max_acked_ahead_per_partition`.
+            message is acked. Defaults to the server default
+            ([Configuration reference](configuration.md#topic-defaults)).
         schema:
           description: A JSON Schema every message must match; registered as version 1. A JSON object or `true`.
         parent:
@@ -1509,7 +1544,7 @@ components:
           description: New acked-ahead cap; `0` sets the server default. A cap left out keeps its value.
         partitions:
           type: integer
-          description: New partition count, larger than the current one and at most `topic.max_partitions`. New keys may then map to other partitions.
+          description: New partition count, larger than the current one and at most the server's maximum (108 by default). New keys may then map to other partitions.
         schema:
           description: |
             A new schema version, checked for compatibility with the current

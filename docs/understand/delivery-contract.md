@@ -15,7 +15,7 @@ Learn what Narad promises about delivery, durability, ordering and availability,
 
 ## At least once {#at-least-once}
 
---8<-- "contract/at-least-once.md"
+--8<-- "contract/body/at-least-once.md"
 
 A consumer takes a [lease](../reference/glossary.md#lease) on each message it receives. The lease lasts the topic's [visibility timeout](../reference/glossary.md#visibility-timeout) (`visibility_timeout_ms`, 30 seconds by default), and the response carries a [receipt handle](../reference/glossary.md#receipt-handle) that names the lease. An ack with that handle settles the message for good. Anything that ends a lease without an ack puts the message back in the queue.
 
@@ -24,8 +24,8 @@ flowchart LR
     accTitle: The life of one message under at-least-once delivery
     accDescr: A message accepted with 202 is delivered. If it is acked it is settled and never delivered again. If its lease ends without an ack it is delivered again, possibly as a duplicate. If it is never acked before its retention runs out, retention deletes it.
     A["202 Accepted"] --> B{delivered and acked?}
-    B -->|yes| C[settled, never delivered again]
-    B -->|"lease ended without an ack"| D[delivered again, possibly a duplicate]
+    B -->|yes| C[settled for good]
+    B -->|"lease ended, no ack"| D["delivered again<br/>(maybe a duplicate)"]
     D --> B
     B -->|"never acked within retention"| E[deleted by retention]
 ```
@@ -46,7 +46,7 @@ None of these loses a message. The one way an unacked message leaves without bei
 
 ## What a 202 means {#what-202-means}
 
---8<-- "contract/produce-202.md"
+--8<-- "contract/body/produce-202.md"
 
 A produce is written to the [ingress WAL](../reference/glossary.md#ingress-wal) of the node that received it, and the `202` goes out once the group-commit fsync that covers it returns. That node's dispatcher then commits the message to the owner of its partition. The owner fsyncs it and reads it back with its checksum verified, and only then moves the [high watermark](../reference/glossary.md#high-watermark) over it so consumers can see it. The ingress WAL keeps its copy until the owner confirms that commit, so a message that got a `202` is always in at least one verified place.
 
@@ -56,7 +56,7 @@ The whole path, stage by stage, is in [Produce path](produce-path.md).
 
 ## One copy per partition {#one-copy}
 
---8<-- "contract/one-copy.md"
+--8<-- "contract/body/one-copy.md"
 
 Narad has no replication subsystem for message data. Each [partition](../reference/glossary.md#partition) is a directory on its owner's volume, and every commit is fsynced and verified there before it becomes visible. So process crashes, restarts and power loss lose nothing that got a `202`. A destroyed volume loses the messages, consumer positions and fan-out cursors stored on it.
 
@@ -71,7 +71,7 @@ Run Narad on storage you trust, such as cloud persistent volumes or RAID.
 
 ## Ordering {#ordering}
 
---8<-- "contract/no-ordering.md"
+--8<-- "contract/body/no-ordering.md"
 
 Messages with the same [key](../reference/glossary.md#key) go to one partition by the hash of the key, and in steady state they tend to arrive in the order they were produced. Five mechanisms reorder them on purpose, and a design must assume all five:
 
@@ -106,7 +106,7 @@ flowchart LR
 
 ## Retention {#retention}
 
-Retention is the one way an unacked message leaves without being delivered. A topic's `retention_ms` (7 days by default, at least 1 hour) is a floor: a message lives at least that long after it was written. It usually lives somewhat longer, because deletion works on whole segments of up to 64 MiB, and it is gone within about twice the retention age of its write.
+Retention is the one way an unacked message leaves without being delivered. A topic's `retention_ms` (at least 1 hour; when unset, the operator's default: 7 days for the binary, 12 hours for a cluster installed with the Helm chart) is a floor: a message lives at least that long after it was written. It usually lives somewhat longer, because deletion works on whole segments of up to 64 MiB, and it is gone within about twice the retention age of its write.
 
 When a consumer falls so far behind that its next message has been deleted, the partition's [committed frontier](../reference/glossary.md#committed-frontier) jumps to the oldest message still retained, and the owner logs `consumer frontier fell behind retention; skipped to oldest retained offset`. A [fan-out child](../reference/glossary.md#fan-out-child) that falls behind its parent's retention skips the lost records too, and counts them in `narad_fanout_child_dropped_messages`. The parent of a [delay child](../reference/glossary.md#delay-child) must keep messages for at least the delay plus one hour, which keeps a healthy delay child clear of this.
 
@@ -136,7 +136,7 @@ Each row is one event: what clients see while it lasts, what it can lose, and wh
 | The ingress WAL's disk fails | `500` from that node until it restarts, even after space is freed | No change | Nothing that got a `202`; a produce answered `500` may still arrive | Alert on `narad_ingress_wal_failed` (unreleased), then [fix and restart](../operate/troubleshooting.md#produce-500) |
 | Raft quorum is lost | Survivors report not ready, so the load balancer stops routing to them; topic and user changes get `503` | The load balancer stops routing to the survivors | Nothing | Bring nodes back; [do not restart the survivor](../operate/troubleshooting.md#not-ready-all-pods) |
 | A partition moves (rebalance or decommission) | `202` as usual; commits to it pause for the freeze, usually milliseconds | No new messages from it during the freeze; leases unacked at the handover come back from the new owner | Nothing | Nothing; follow it with [`narad cluster moves`](../operate/scaling.md) |
-| A move's source dies mid-move | As for a node that is down | After 2 minutes the copy is promoted; messages acked in the source's last moments may come back | What the source committed after the destination's last read, if it never returns | Keep any copy the returning source quarantines; see [Scale out and in](../operate/scaling.md) |
+| A move's source dies mid-move | As for a node that is down | After 2 minutes the copy is promoted; messages acked in the source's last moments may come back | What the source committed after the destination's last read, if it never returns. On v3.0.1, records committed after the promote could also stay undelivered (unreleased fix) | Keep any copy the returning source quarantines; see [Scale out and in](../operate/scaling.md) |
 | A rolling restart | Requests move to the other pods; Raft leadership moves in about 150 ms | Messages leased on the restarting node come back; acked ones do not | Nothing | [Roll one pod at a time](../operate/upgrade.md#upgrade) |
 | An unacked message outlives retention | Nothing | It is never delivered; the frontier skips it, and the owner logs it | That message, by policy | [Alert on lag](../operate/monitoring.md#alerts), and keep retention above your longest consumer outage |
 

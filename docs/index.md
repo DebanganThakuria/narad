@@ -545,9 +545,10 @@ The `narad` binary is both the broker and the CLI. `narad server start --dev` ru
 === "Docker"
 
     ```sh
-    docker run -p 7942:7942 \
+    docker run --rm -p 127.0.0.1:7942:7942 \
       -v narad-data:/var/lib/narad \
       -e NARAD_SECURITY_ENABLED=false \
+      -e NARAD_CLUSTER_ADDR=127.0.0.1:7943 \
       ghcr.io/debanganthakuria/narad:v3.0.1
     ```
 

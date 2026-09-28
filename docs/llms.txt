@@ -41,7 +41,7 @@ These docs track the master branch; the latest release is v3.0.1, and anything n
 - [Production checklist](https://debanganthakuria.github.io/narad/operate/production-checklist/): Check a Narad deployment against this list before it takes production traffic.
 - [Raft TLS certificates: enable and rotate](https://debanganthakuria.github.io/narad/operate/raft-tls/): Turn on mutual TLS for the Raft port, then renew and rotate its certificates without losing messages.
 - [Manage users and grants](https://debanganthakuria.github.io/narad/operate/users/): Create a user for each service and give it only the grants it needs.
-- [Monitor and alert](https://debanganthakuria.github.io/narad/operate/monitoring/): Scrape Narad's Prometheus metrics, import the ready-made Grafana dashboard, and set up the five alerts that catch real trouble.
+- [Monitor and alert](https://debanganthakuria.github.io/narad/operate/monitoring/): Scrape Narad's Prometheus metrics, import the ready-made Grafana dashboard, and set up the six alerts that catch real trouble.
 - [Scale out and in](https://debanganthakuria.github.io/narad/operate/scaling/): Add nodes to a running Narad cluster, or drain nodes and remove them, without stranding any partition.
 - [Back up and replicate topics](https://debanganthakuria.github.io/narad/operate/backups/): Keep a second copy of a topic on other nodes, and restore a node from a volume snapshot when its disk is lost.
 - [Upgrade Narad](https://debanganthakuria.github.io/narad/operate/upgrade/): Move a cluster to a new Narad release with a rolling restart, and roll it back safely if you need to.

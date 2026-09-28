@@ -12,7 +12,7 @@ A [topic](../reference/glossary.md#topic) is a named stream of messages: produce
 
 You never need to know which node owns what. Any node accepts any request, and forwards it to the owner when the work belongs elsewhere. You can add partitions to a topic later, but never remove them.
 
-A topic keeps each message for its [retention](../reference/glossary.md#retention) period (7 days by default), whether or not anyone acked it. Retention removes messages in whole chunks of the log, so a message can outlive its retention period but is never removed before it.
+A topic keeps each message for its [retention](../reference/glossary.md#retention) period (the operator's default: 7 days for the binary, 12 hours for a cluster installed with the Helm chart), whether or not anyone acked it. Retention removes messages in whole chunks of the log, so a message can outlive its retention period but is never removed before it.
 
 --8<-- "contract/one-copy.md"
 

@@ -10,7 +10,7 @@ Learn how Narad hands each message to one consumer at a time: in-memory leases, 
 
 !!! abstract "In short"
     - The owner of a partition leases each visible message to one consumer at a time, and remembers the lease only in memory. A crash forgets leases, and the messages are delivered again.
-    - What is settled is a durable frontier per partition, plus the offsets acked out of order above it. Acks reach the page cache within about 100 ms and the disk within about the durability interval (1 s by default).
+    - What is settled is a durable frontier per partition, plus the offsets acked out of order above it. Acks reach the page cache within about 100 ms and the disk within about the durability interval (1 s by default) (unreleased; v3.0.1 syncs every changed partition every 100 ms).
     - A consumer that finds nothing waits in a queue. One pump per node hands each new record to exactly one waiter, so cost scales with messages delivered, not with consumers waiting.
     - A node that holds a consumer but not the data leaves a delivery token with each remote owner, and claims the record when an owner tells it one arrived.
     - After an outage, a lease stranded at the bottom of a partition can hold that partition quiet for up to one visibility timeout.
@@ -31,8 +31,9 @@ flowchart TB
         ahead["ackedAhead: {44}"]
         corrupt["corrupt-skipped: {}"]
         heap["expiry min-heap"]
+        committed ~~~ entries ~~~ ahead ~~~ corrupt ~~~ heap
     end
-    committed -.->|"written every 100ms, synced every 1s"| file[("consumer.ahead<br/>consumer.offset")]
+    committed -.->|"written every 100ms, synced every 1s (unreleased)"| file[("consumer.ahead<br/>consumer.offset")]
 ```
 
 - **`committed`** is the [committed frontier](../reference/glossary.md#committed-frontier): the offset below which *everything* is acked. It advances contiguously. It is persisted in the frontier field of every `consumer.ahead` record, and in `consumer.offset`, which is brought level with it at most every 30 s and at a graceful stop (see [Ack persistence](#how-acks-reach-the-disk)). Recovery takes the larger of the two.
@@ -190,7 +191,7 @@ This replaced a committer that made every changed partition durable on every 100
 ## Crash recovery {#crash-recovery}
 
 ```mermaid
-flowchart LR
+flowchart TB
     accTitle: Consumer state after an owner crash
     accDescr: The owner crashes and restarts. The first consume that touches a partition reads consumer.offset and consumer.ahead from disk. The shard is seeded with the committed frontier from the files and the restored acked-ahead set, with no leases. Everything above the frontier that was not acked ahead is delivered again.
     CRASH[owner crashes] --> BOOT[restart]

@@ -1,10 +1,10 @@
 ---
-description: "Scrape Narad's Prometheus metrics, import the ready-made Grafana dashboard, and set up the five alerts that catch real trouble."
+description: "Scrape Narad's Prometheus metrics, import the ready-made Grafana dashboard, and set up the six alerts that catch real trouble."
 ---
 
 # Monitor and alert
 
-Scrape Narad's Prometheus metrics, import the ready-made Grafana dashboard, and set up the five alerts that catch real trouble.
+Scrape Narad's Prometheus metrics, import the ready-made Grafana dashboard, and set up the six alerts that catch real trouble.
 
 Before you start: a cluster installed with the Helm chart, and a Prometheus that can reach its pods.
 
@@ -48,7 +48,7 @@ Two panels read differently from their titles on builds after v3.0.1 (unreleased
 
 ## Set up the alerts {#alerts}
 
-If you configure nothing else, configure these five. Each one fires on a condition that needs a person:
+If you configure nothing else, configure these six. Each one fires on a condition that needs a person. The first five read Narad's metrics; the sixth reads a Kubernetes metric from kube-state-metrics, because Narad has no metric for a node that is down:
 
 | Alert | Expression | What it means |
 |---|---|---|
@@ -57,10 +57,11 @@ If you configure nothing else, configure these five. Each one fires on a conditi
 | Consumer-side loss | `rate(narad_consumer_corrupt_skipped_total[5m]) > 0` or `narad_consumer_dropped_messages > 0` | A consumer skipped a permanently unreadable record, or [retention](../reference/glossary.md#retention) deleted messages nobody had acked. |
 | Disk runway | `predict_linear(narad_data_dir_available_bytes[6h], 24 * 3600) < 0` | At the rate of the last six hours, the data volume fills within a day. |
 | Produce latched off (unreleased) | `narad_ingress_wal_failed == 1` | A write or sync of the node's [ingress WAL](../reference/glossary.md#ingress-wal) failed. The node answers every produce with `500` until it restarts, while consume and `/readyz` keep working. |
+| Pod not ready (Kubernetes metric) | `kube_pod_status_ready{namespace="narad", condition="true"} == 0`, held for 2 minutes (`for: 2m`) | A Narad pod has not been ready for 2 minutes. The messages stored on it wait until it is back. |
 
 On v3.0.1, which has no `narad_ingress_wal_failed`, watch for the same failure with `rate(narad_errors_total{component="http", kind="5xx"}[5m]) > 0`, which also catches other server errors.
 
-What to do when one fires is on the [Troubleshooting](troubleshooting.md) page: [produce latched off](troubleshooting.md#produce-500), [delay child behind](troubleshooting.md#due-lag-stuck), [messages lost to retention](troubleshooting.md#log-frontier-behind-retention). For disk runway, check the retention of the largest topics against [Capacity and disk sizing](../reference/capacity.md#disk-sizing).
+What to do when one fires is on the [Troubleshooting](troubleshooting.md) page: [produce latched off](troubleshooting.md#produce-500), [delay child behind](troubleshooting.md#due-lag-stuck), [messages lost to retention](troubleshooting.md#log-frontier-behind-retention), [pod not ready](troubleshooting.md#node-down). For disk runway, check the retention of the largest topics against [Capacity and disk sizing](../reference/capacity.md#disk-sizing).
 
 `rate(narad_errors_total[5m])`, split by its `component` and `kind` labels, makes a useful catch-all panel beside these alerts.
 

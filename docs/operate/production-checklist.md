@@ -17,8 +17,9 @@ Before you start: a cluster installed as in [Deploy on Kubernetes](deploy-kubern
 | Clients connect over TLS | [Terminate client TLS](#client-tls) |
 | A rate limiter sits in front of the API | [Limit request rates](#rate-limiting) |
 | Disk is sized for your retention | [Capacity and disk sizing](../reference/capacity.md#disk-sizing) |
-| Compression is chosen on purpose | [Choose values](deploy-kubernetes.md#values) |
-| The five alerts are configured | [Monitor and alert](monitoring.md#alerts) |
+| Default retention is chosen on purpose (the chart's is 12 hours) | [Decide before you install](deploy-kubernetes.md#values) |
+| Compression is chosen on purpose | [Decide before you install](deploy-kubernetes.md#values) |
+| The six alerts are configured | [Monitor and alert](monitoring.md#alerts) |
 | Topics you cannot lose have a second copy | [Keep a second copy](#second-copy) |
 | `initialClusterSize` is set and stays fixed | [Fix the bootstrap size](#initial-cluster-size) |
 | Each service has its own user and grants | [Manage users and grants](users.md) |
@@ -141,5 +142,5 @@ Decide which topics need a second copy before the first disk fails: [Back up and
 ## Next steps
 
 - [Raft TLS certificates](raft-tls.md): turn on mutual TLS for the Raft port.
-- [Monitor and alert](monitoring.md): set up the five alerts from the checklist.
+- [Monitor and alert](monitoring.md): set up the six alerts from the checklist.
 - [Back up and replicate topics](backups.md): add a second copy for the topics that need one.

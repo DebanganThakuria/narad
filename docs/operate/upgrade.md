@@ -39,11 +39,16 @@ What is stable across releases, and what the docs describe, is in [API stability
 A rollback is the same upgrade with the older tag, using the chart of the release you go back to:
 
 ```bash
+git fetch --depth 1 origin tag vX.Y.Z
+git checkout vX.Y.Z
 helm upgrade narad ./charts/narad -n narad \
   --reset-then-reuse-values \
-  --set image.tag=v3.0.0
+  --set image.tag=vX.Y.Z
 kubectl rollout status statefulset/narad -n narad
 ```
+
+- `vX.Y.Z` is the release you go back to, in all three places.
+- Do not pick v3.0.0: a v3.0.0 node that has been up for more than 24 hours cannot be reached by its peers ([version notes](#version-notes)).
 
 Prefer this to `helm rollback`. A `helm rollback` to a revision with a smaller `replicaCount` is a scale-in that skips the decommission ([Scale out and in](scaling.md#scale-in)). The chart refuses it unless that revision set `allowScaleIn`.
 

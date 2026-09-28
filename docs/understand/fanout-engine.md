@@ -85,7 +85,7 @@ The same rule decides a *lost* cursor file. With the attach point recorded, a cu
 A [delay child](../reference/glossary.md#delay-child)'s cursor adds one filter: **it reads only records whose parent commit time is at or before now minus the delay.**
 
 ```mermaid
-flowchart LR
+flowchart TB
     accTitle: The delay gate
     accDescr: Three parent records were committed at 12:00:00, 12:00:01 and 12:00:02. The gate compares now minus the delay with each record's commit time. A record that is due is fanned out; at the first record that is not due yet, the cursor sleeps until that record is due.
     subgraph parent log

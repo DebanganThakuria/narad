@@ -64,7 +64,7 @@ The dispatcher commits a partition's records in WAL order, so records of one bat
 A per-node dispatcher drains the WAL from a durable checkpoint and commits records to their partition owners:
 
 ```mermaid
-flowchart LR
+flowchart TB
     accTitle: The produce dispatcher
     accDescr: Records at or above the checkpoint are read from the ingress WAL once, as they become durable, and placed by topic and partition. A record is either held on its partition's destination queue or left in the WAL to be read again later. Each queue has at most one commit in flight, committed locally or sent to the owner over QUIC in batches of at most 8 MiB. Committed sequence numbers are marked done, the checkpoint moves to the first sequence not done and is synced within 250 ms, and the WAL is compacted below it.
     WAL[("ingress WAL<br/>records ≥ checkpoint")] -->|"read once, as it becomes durable"| PLACE{"place by<br/>(topic, partition)"}

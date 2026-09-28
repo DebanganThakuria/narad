@@ -67,7 +67,7 @@ A topic is split into [partitions](../reference/glossary.md#partition), which sp
 
 ### Retention
 
-Narad deletes a message `retention_ms` after it was written, whether or not anyone consumed it. The minimum is one hour, and `0` or no value gives the operator's default, which is 7 days unless they changed it. A message that is still unacked when retention removes it is never delivered, so size retention for your slowest consumer plus a margin for replay. The [delivery contract](../understand/delivery-contract.md#retention) has the details.
+Narad deletes a message `retention_ms` after it was written, whether or not anyone consumed it. The minimum is one hour, and `0` or no value gives the operator's default: 7 days for the binary, 12 hours for a cluster installed with the Helm chart. A message that is still unacked when retention removes it is never delivered, so size retention for your slowest consumer plus a margin for replay. The [delivery contract](../understand/delivery-contract.md#retention) has the details.
 
 ### Visibility timeout
 

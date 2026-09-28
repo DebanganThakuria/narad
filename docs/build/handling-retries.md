@@ -198,7 +198,7 @@ The delay survives restarts of every node, and no timer in your process holds th
 
 - Do not attach several delay children to one parent to get tiers. Every child copies every message of its parent, so each failed message would come back once per tier.
 - Tiers are fixed delays, not a delay per message. Two or three tiers cover most policies.
-- The parent's retention must be at least the delay plus one hour. The default of 7 days covers delays of up to 6 days and 23 hours.
+- The parent's retention must be at least the delay plus one hour; check your cluster's default retention. A cluster installed with the Helm chart defaults to 12 hours, which covers delays of up to 11 hours; a longer delay child gets [`409`](../reference/status-codes.md#status-409) until the parent's retention is raised.
 
 ## Park failures in a dead-letter topic {#dead-letter}
 

@@ -8,12 +8,14 @@ its own, so it would either run the pinned column off the screen or split
 at an arbitrary letter. This adds <wbr> after each underscore, dot, slash
 and hyphen in code at the start of a table cell, so it wraps at a word
 boundary. <wbr> draws nothing, is not copied with the text, and does
-nothing where the code is set nowrap.
+nothing where the code is set nowrap. Code that starts a new line of a
+cell (after a <br>, as in a Setting cell holding a key and then its
+environment variable) gets the same break points.
 """
 
 import re
 
-_CELL_CODE = re.compile(r"(<t[dh][^>]*>\s*<code>)([^<]+)(</code>)")
+_CELL_CODE = re.compile(r"((?:<t[dh][^>]*>|<br\s*/?>)\s*<code>)([^<]+)(</code>)")
 _BREAK_AFTER = re.compile(r"([_./-])(?=[^_./-])")
 
 

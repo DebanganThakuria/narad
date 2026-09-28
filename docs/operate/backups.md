@@ -12,7 +12,7 @@ Before you start: for a replica, a user who may manage the topic and holds a `cr
 
 ## Add a replica child {#replica-children}
 
-A [replica child](../reference/glossary.md#replica-child) is a fan-out child created in the same call as its link to the parent. It receives a full copy of every record the parent commits from then on, When it is created on a cluster of two or more nodes, each of its partitions is placed on a different node from the parent's partition with the same index.
+A [replica child](../reference/glossary.md#replica-child) is a fan-out child created in the same call as its link to the parent. It receives a full copy of every record the parent commits from then on. When it is created on a cluster of two or more nodes, each of its partitions is placed on a different node from the parent's partition with the same index.
 
 ```bash
 curl -s -u "$AUTH" -X POST "$NARAD/v1/topics" \

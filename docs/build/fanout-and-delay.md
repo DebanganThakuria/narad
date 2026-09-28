@@ -181,7 +181,7 @@ sequenceDiagram
     accDescr: A producer writes to orders at 12:00. The copy for orders-retry exists but is held back. At 13:00 it is committed to orders-retry, and the retry worker can consume it from then on.
     participant P as Producer
     participant O as orders
-    participant R as orders-retry (1 hour delay)
+    participant R as orders-retry<br/>(1 hour delay)
     participant W as Retry worker
     P->>O: produce at 12:00
     Note over R: copy held back

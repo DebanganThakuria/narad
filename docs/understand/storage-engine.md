@@ -37,6 +37,8 @@ topics/orders.stale-3f9a1c0e7b2d4a61/   <- quarantined: a deleted
                                            incarnation's leftover
 ```
 
+How acks reach `consumer.offset` and `consumer.ahead`: [Ack persistence](consume-path.md#how-acks-reach-the-disk).
+
 Everything the engine creates under the data directory is private to the broker's user: directories `0700`, files `0600`. That covers segments, `hwm`, `consumer.offset`, fan-out cursors, the incarnation marker, transferred segments, and the ingress WAL's directory and segments. Segments carry every message payload, so they get the same protection `fsm.db` (password hashes) already had. Modes are applied at creation only, so a file or directory that an older binary created keeps the mode it was created with.
 
 ### The incarnation marker {#incarnation-marker}
@@ -226,7 +228,7 @@ The commit timestamp is written when the envelope is built, and raised under the
 ## Flusher pipeline {#flusher}
 
 ```mermaid
-flowchart LR
+flowchart TB
     accTitle: The flusher pipeline
     accDescr: Appends go into an in-memory buffer. A drain runs when the buffer holds 1 MiB or 1000 records, or every 100 ms, and turns the buffer into one frame with the codec applied. The frame is written to the active segment. In batched mode the segment is fsynced every second, every 8 MiB, on a segment roll, on close, or on an explicit sync.
     A["Append/AppendBatch<br/>(in-memory buffer)"] --> D["drain: flush_bytes 1MiB<br/>flush_records 1000<br/>flush_interval 100ms"]

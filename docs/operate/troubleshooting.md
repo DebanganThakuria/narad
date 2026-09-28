@@ -8,20 +8,20 @@ search:
 
 Match what you see, a status code, a readiness answer, a metric or a log line, to its cause, a check and a fix.
 
-Before you start: `kubectl` access to the pods, and the metrics from [Monitor and alert](monitoring.md). Status codes that point at a client mistake (`400`, `404`, `409`, `410`, `413`, `415`) are explained on [Status codes and errors](../reference/status-codes.md), not here.
+Before you start: `kubectl` access to the pods, the metrics from [Monitor and alert](monitoring.md), and the `narad` CLI with admin credentials ([CLI command reference](../reference/cli.md#cluster)). Status codes that point at a client mistake (`400`, `404`, `409`, `410`, `413`, `415`) are explained on [Status codes and errors](../reference/status-codes.md), not here.
 
 ## Start with readiness {#check-readiness}
 
-Every node explains in its `/readyz` answer why it is not ready. Forward one pod's API port and ask it:
+Every node explains in its `/readyz` answer why it is not ready. Forward one pod's API port to a free local port, 7952 here, so it does not clash with a port-forward to the Service on 7942:
 
 ```bash
-kubectl port-forward -n narad pod/narad-2 7942:7942
+kubectl port-forward -n narad pod/narad-2 7952:7942
 ```
 
 In a second terminal:
 
 ```bash
-curl -s http://127.0.0.1:7942/readyz
+curl -s http://127.0.0.1:7952/readyz
 ```
 
 ```text title="Output"
@@ -39,7 +39,38 @@ curl -s http://127.0.0.1:7942/readyz
 
 The last four answers start with `metastore: node is not ready:`, as in the output above. The sections below say what to do.
 
+## Node failures
+
+### A node is down {#node-down}
+
+A pod is not running or restarts in a loop, or `narad cluster members` shows a node with `"status": "dead"`.
+
+**What clients see.** Produces still get `202`, and after about 3 seconds the messages meant for that node's partitions go to other partitions of the topic. Messages already stored on that node wait for it. Acks of those messages, and consumes pinned to one of its partitions with `partition=N`, get `502`, then `503` (`partition owner is down; retry later`) once the node is marked dead after about 30 seconds without a heartbeat. Consumes without `partition` keep being served from the other partitions.
+
+**Check.** Find the pod and why it stopped:
+
+```bash
+kubectl get pods -n narad
+kubectl describe pod narad-2 -n narad
+kubectl logs narad-2 -n narad --previous
+narad cluster members
+```
+
+`describe` lists the pod's events, such as a volume that will not attach, a failed probe or an out-of-memory kill. `logs --previous` prints the last lines of the container that stopped.
+
+**Fix.** Get the pod running again on its own volume. A partition has one owner and no replica, so the messages stored on that node come back only with it. If the volume is lost, the node rejoins empty: [restore a snapshot](backups.md#restore), or move consumers to the topic's [replica child](backups.md#replica-children). After the node returns, expect [quiet gaps](#quiet-after-outage) of about one visibility timeout.
+
 ## Status codes
+
+### `503` on produce {#produce-503}
+
+A produce answers `503`, often from every node at once.
+
+**Cause.** Narad itself never answers a produce with `503`. The `503` comes from the proxy in front of it, the load balancer or ingress, when no pod is ready.
+
+**Check.** `kubectl get pods -n narad`, then `/readyz` on each pod ([Start with readiness](#check-readiness)).
+
+**Fix.** When every pod answers `no raft leader known`, follow [Not ready on every pod](#not-ready-all-pods). When pods are down, see [A node is down](#node-down).
 
 ### `500` on every produce {#produce-500}
 
@@ -65,9 +96,9 @@ Requests to one node answer `500` with `{"error":"authentication unavailable"}`,
 
 **Fix.** Fix what `err` names, then restart the pod. Other nodes authenticate from their own copies, so clients can use them meanwhile.
 
-### `503` on consume or ack {#status-503}
+### `503` on ack, or on a consume pinned to a partition {#status-503}
 
-A consume, ack, extend or nack answers `503`.
+An ack, extend or nack, or a consume with `partition=N`, answers `503`.
 
 **Cause.** The body says which:
 
@@ -76,13 +107,13 @@ A consume, ack, extend or nack answers `503`.
 
 **Check.** `narad cluster members` shows the owner as `dead`, and `/readyz` shows the leader state ([Start with readiness](#check-readiness)).
 
-**Fix.** Bring the node back. Clients retry with backoff; the partition serves again as soon as its owner is back. What each failure means for delivery: [failure matrix](../understand/delivery-contract.md#failure-matrix).
+**Fix.** Bring the node back ([A node is down](#node-down)). Clients retry with backoff; the partition serves again as soon as its owner is back. What each failure means for delivery: [failure matrix](../understand/delivery-contract.md#failure-matrix).
 
 ### `502` on ack, extend or nack {#status-502}
 
 An ack, extend or nack answers `502`, with the error of a failed call between nodes as the body.
 
-**Cause.** The node you called forwarded the request to the partition's owner and got no usable answer, often because the owner was restarting or overloaded. The ack may or may not have been applied.
+**Cause.** The node you called forwarded the request to the partition's owner and got no usable answer, often because the owner was restarting or overloaded. The ack may or may not have been applied. When the `502`s last, the owner may be down ([A node is down](#node-down)).
 
 **Check.** `narad_cluster_rpc_requests_total` with `outcome="timeout"` or `outcome="error"` rises on the forwarding node.
 

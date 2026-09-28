@@ -31,7 +31,7 @@ The controller's only job is policy: set `Target` to balance the partition count
 Each node's move runner looks for partitions targeted at it once a second. Each pass lists every topic and reads its assignments, so it is gated the way the fan-out reconciler is (see [Fan-out engine](fanout-engine.md#where-the-work-runs)). A tick skips the read while the replica's domain versions have not moved, and runs it anyway after a failed or unfinished pass, after a move worker exits, and at least every 30 s. A new target still starts its worker on the next tick. The stale-copy sweep keeps its own count of ticks, skipped or not, and runs every 30th.
 
 ```mermaid
-flowchart LR
+flowchart TB
     accTitle: Desired ownership and the move worker
     accDescr: The controller on the leader sets the target of partition 3 of orders to node B, while its owner is node A. Node B's move worker reads its own target, copies the partition from node A, and then flips ownership with a compare-and-swap in the metastore.
     subgraph raft["metastore (Raft)"]

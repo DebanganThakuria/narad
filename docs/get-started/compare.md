@@ -16,22 +16,43 @@ The rule for this page: when in doubt, the other system gets the benefit. Each o
 
 ## Feature matrix {#feature-matrix}
 
-| | **Narad** | **Kafka** | **NATS JetStream** | **RabbitMQ** | **SQS** | **Redis Streams** | **Pulsar** |
-|---|---|---|---|---|---|---|---|
-| **Core model** | Queue-first on durable logs | Partitioned ordered log | Streams + consumers | Broker with exchanges/queues | Managed queue | In-memory log + consumer groups | Segmented log |
-| **Client protocol** | **Plain HTTP: curl is a client** | Binary protocol, SDK required | NATS protocol, SDK required | AMQP, SDK required | HTTP + SigV4 signing (SDK in practice) | RESP, client library | Binary protocol, SDK required |
-| **Per-message ack + visibility lease** | ✓ native | ✓ with share groups (Kafka 4): per-record acks and a time-limited lock; ✗ with consumer groups (offsets only) | ✓ (ack wait + redelivery) | ✓ | ✓ (the model Narad's leases resemble) | ✓ (PEL + claim) | ✓ |
-| **Delayed delivery** | ✓ native (delay child topics) | ✗ | ✓ per message since 2.12 (message schedules) | Plugin, or TTL plus a dead-letter exchange | ✓ per message, up to 15 min | ✗ | ✓ native, arbitrary |
-| **Fan-out (one message to many independent streams)** | ✓ native child topics | ✓ (consumer groups re-read the log) | ✓ (multiple consumers per stream) | ✓ (exchanges, its main strength) | Needs SNS in front | ✓ (multiple groups) | ✓ (subscriptions) |
-| **Schema validation at the broker** | ✓ built in: JSON Schema per topic, checked on produce, append-only versions with a fail-closed compatibility check | Separate Schema Registry (Confluent, Karapace); richer (Avro/Protobuf, per-subject modes) but a second service, and validation lives in the client serializer | ✗ | ✗ (payloads are opaque) | ✗ | ✗ | ✓ built in, Avro/JSON/Protobuf with compatibility modes; broader than Narad |
-| **Replay from offset** | ✓ native, non-destructive | ✓ native | ✓ native | ✓ with streams; ✗ with classic and quorum queues | ✗ | ✓ (XRANGE) | ✓ native |
-| **Ordering** | **✗, deliberately none** | ✓ per partition | ✓ per stream | ✓ per queue (mostly) | FIFO queues only, throughput-capped | ✓ per stream | ✓ per partition |
-| **Replication** | Async, opt-in per topic ([replica child](../operate/backups.md#replica-children)) | ✓ synchronous (ISR) | ✓ Raft (R3/R5) | ✓ quorum queues | Managed, invisible | Async (loss windows) | ✓ BookKeeper quorums |
-| **Binary payloads over the wire API** | ✓ raw octet-stream | ✓ (opaque bytes) | ✓ | ✓ | ✗ text-only bodies, 1 MiB cap | ✓ | ✓ |
-| **Deployment footprint** | **1 binary, Raft inside** | Brokers + KRaft (historically ZooKeeper) | 1 binary | 1 broker (Erlang runtime) | None: AWS runs it | Your existing Redis | Brokers + BookKeeper (+ZK/Oxia) |
-| **Runs on your laptop unchanged** | ✓ | Heavier | ✓ | ✓ | ✗ (emulators only) | ✓ | Standalone mode, which differs from production |
-| **Stream processing ecosystem** | ✗ | ✓✓ (Streams, Connect, ksql) | Modest | ✗ | ✗ | ✗ | ✓ (Functions) |
-| **Maturity** | **Young**: first release June 2026, a small track record | Since 2011, widely deployed | Mature, CNCF | Since 2007 | Fully managed since 2006 | Mature | Mature |
+Narad beside Kafka, NATS JetStream and RabbitMQ:
+
+|  | **Narad** | **Kafka** | **NATS JetStream** | **RabbitMQ** |
+|---|---|---|---|---|
+| **Core model** | Queue-first on durable logs | Partitioned ordered log | Streams + consumers | Broker with exchanges/queues |
+| **Client protocol** | **Plain HTTP: curl is a client** | Binary protocol, SDK required | NATS protocol, SDK required | AMQP, SDK required |
+| **Per-message ack + visibility lease** | ✓ native | ✓ with share groups (Kafka 4): per-record acks and a time-limited lock; ✗ with consumer groups (offsets only) | ✓ (ack wait + redelivery) | ✓ |
+| **Delayed delivery** | ✓ native (delay child topics) | ✗ | ✓ per message since 2.12 (message schedules) | Plugin, or TTL plus a dead-letter exchange |
+| **Fan-out (one message to many independent streams)** | ✓ native child topics | ✓ (consumer groups re-read the log) | ✓ (multiple consumers per stream) | ✓ (exchanges, its main strength) |
+| **Schema validation at the broker** | ✓ built in: JSON Schema per topic, checked on produce, append-only versions with a fail-closed compatibility check | Separate Schema Registry (Confluent, Karapace); richer (Avro/Protobuf, per-subject modes) but a second service, and validation lives in the client serializer | ✗ | ✗ (payloads are opaque) |
+| **Replay from offset** | ✓ native, non-destructive | ✓ native | ✓ native | ✓ with streams; ✗ with classic and quorum queues |
+| **Ordering** | **✗, deliberately none** | ✓ per partition | ✓ per stream | ✓ per queue (mostly) |
+| **Replication** | Async, opt-in per topic ([replica child](../operate/backups.md#replica-children)) | ✓ synchronous (ISR) | ✓ Raft (R3/R5) | ✓ quorum queues |
+| **Binary payloads over the wire API** | ✓ raw octet-stream | ✓ (opaque bytes) | ✓ | ✓ |
+| **Deployment footprint** | **1 binary, Raft inside** | Brokers + KRaft (historically ZooKeeper) | 1 binary | 1 broker (Erlang runtime) |
+| **Runs on your laptop unchanged** | ✓ | Heavier | ✓ | ✓ |
+| **Stream processing ecosystem** | ✗ | ✓✓ (Streams, Connect, ksql) | Modest | ✗ |
+| **Maturity** | **Young**: first release June 2026, a small track record | Since 2011, widely deployed | Mature, CNCF | Since 2007 |
+
+Narad beside SQS, Redis Streams and Pulsar:
+
+|  | **Narad** | **SQS** | **Redis Streams** | **Pulsar** |
+|---|---|---|---|---|
+| **Core model** | Queue-first on durable logs | Managed queue | In-memory log + consumer groups | Segmented log |
+| **Client protocol** | **Plain HTTP: curl is a client** | HTTP + SigV4 signing (SDK in practice) | RESP, client library | Binary protocol, SDK required |
+| **Per-message ack + visibility lease** | ✓ native | ✓ (the model Narad's leases resemble) | ✓ (PEL + claim) | ✓ |
+| **Delayed delivery** | ✓ native (delay child topics) | ✓ per message, up to 15 min | ✗ | ✓ native, arbitrary |
+| **Fan-out (one message to many independent streams)** | ✓ native child topics | Needs SNS in front | ✓ (multiple groups) | ✓ (subscriptions) |
+| **Schema validation at the broker** | ✓ built in: JSON Schema per topic, checked on produce, append-only versions with a fail-closed compatibility check | ✗ | ✗ | ✓ built in, Avro/JSON/Protobuf with compatibility modes; broader than Narad |
+| **Replay from offset** | ✓ native, non-destructive | ✗ | ✓ (XRANGE) | ✓ native |
+| **Ordering** | **✗, deliberately none** | FIFO queues only, throughput-capped | ✓ per stream | ✓ per partition |
+| **Replication** | Async, opt-in per topic ([replica child](../operate/backups.md#replica-children)) | Managed, invisible | Async (loss windows) | ✓ BookKeeper quorums |
+| **Binary payloads over the wire API** | ✓ raw octet-stream | ✗ text-only bodies, 1 MiB cap | ✓ | ✓ |
+| **Deployment footprint** | **1 binary, Raft inside** | None: AWS runs it | Your existing Redis | Brokers + BookKeeper (+ZK/Oxia) |
+| **Runs on your laptop unchanged** | ✓ | ✗ (emulators only) | ✓ | Standalone mode, which differs from production |
+| **Stream processing ecosystem** | ✗ | ✗ | ✗ | ✓ (Functions) |
+| **Maturity** | **Young**: first release June 2026, a small track record | Fully managed since 2006 | Mature | Mature |
 
 ## Durability: what an ack means {#durability}
 

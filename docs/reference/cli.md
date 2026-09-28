@@ -78,12 +78,12 @@ Manage topics. `narad topics` works too.
 | Command | What it does |
 |---|---|
 | `narad topic add <name>` | Create a topic, or a fan-out child with `--parent`. |
-| `narad topic ls [--json]` | List every topic, all pages. `RETENTION` shows `forever` for a topic that keeps messages forever. `--json` prints the raw list. |
+| `narad topic ls` | List every topic, all pages. `RETENTION` shows `forever` for a topic that keeps messages forever. With `--json`, print the raw list. |
 | `narad topic info <name>` | Print the topic and its partition statistics, as [get a topic](http-api.md#get-topic) returns them. |
 | `narad topic edit <name>` | Change retention or the partition count, or register a new schema version. |
-| `narad topic schema <name> [--current]` | Print the schema history, or with `--current` only the current schema. Prints `no schema` when there is none. |
-| `narad topic rm <name> [-f]` | Delete the topic and all its data. It asks `delete topic "<name>" and all its data? [y/N]` unless `-f` (`--force`) is given. |
-| `narad topic attach <parent> <child> [--delay <duration>]` | Attach an existing topic as a child; with `--delay`, as a delay child. |
+| `narad topic schema <name>` | Print the schema history (version `0` and an empty list when there is none), or with `--current` only the current schema, which prints `no schema` when there is none. |
+| `narad topic rm <name>` | Delete the topic and all its data. It asks `delete topic "<name>" and all its data? [y/N]` unless `-f` (`--force`) is given. |
+| `narad topic attach <parent> <child>` | Attach an existing topic as a child. With `--delay <duration>`, attach it as a delay child. |
 | `narad topic detach <parent> <child>` | Detach a child. The child and its messages remain. |
 | `narad topic children <parent>` | List a parent's children with how far each is behind. |
 
@@ -175,8 +175,8 @@ Manage users. Every command needs the `admin` grant ([Manage users and grants](.
 
 | Command | What it does |
 |---|---|
-| `narad user add <username> --grant <grant> --user-password-stdin` | Create a user. The password comes from `--user-password <password>` or, better, the first line of standard input with `--user-password-stdin`; one of them is required. |
-| `narad user grant <username> --grant <grant>` | Replace all of the user's grants. |
+| `narad user add <username>` | Create a user with the grants given by `--grant <grant>`. The password comes from `--user-password <password>` or, better, the first line of standard input with `--user-password-stdin`; one of them is required. |
+| `narad user grant <username>` | Replace all of the user's grants with the ones given by `--grant <grant>`. |
 | `narad user ls` | List users as JSON. |
 | `narad user rm <username>` | Delete a user. |
 
@@ -188,7 +188,7 @@ A context is a named server URL with optional credentials, so you do not have to
 
 | Command | What it does |
 |---|---|
-| `narad ctx add <name> --server <url> [--user <name>] [--password-stdin]` | Add or update a context. The first context added becomes the selected one. `--password <password>` also works but shows in `ps`. |
+| `narad ctx add <name>` | Add or update a context: its URL with `--server <url>`, and optionally `--user <name>` and `--password-stdin`. The first context added becomes the selected one. `--password <password>` also works but shows in `ps`. |
 | `narad ctx select <name>` | Make a context the default for every command. |
 | `narad ctx ls` | List contexts; the selected one is marked `*`. |
 | `narad ctx rm <name>` | Remove a context. |
@@ -232,5 +232,5 @@ When to run these, and in what order, is in [Scale out and in](../operate/scalin
 | Command | What it does |
 |---|---|
 | `narad version` | Print the build's version. A binary built with plain `go build` prints `narad dev (<commit>)`. |
-| `narad completion bash`, `zsh`, `fish` or `powershell` | Print a shell completion script. |
-| `narad help [command]`, `narad <command> --help` | Print help. |
+| `narad completion <shell>` | Print a shell completion script for `bash`, `zsh`, `fish` or `powershell`. |
+| `narad help` | Print help. `narad help <command>` and `narad <command> --help` print the help of one command. |

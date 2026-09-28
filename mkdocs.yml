@@ -73,10 +73,13 @@ markdown_extensions:
           format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
-  # The four contract sentences live once, in includes/contract/, and
-  # pages pull them in with --8<-- "contract/<name>.md". Their links are
-  # written relative to a page one folder deep, so only pages inside the
-  # five tab folders may include them (never docs/index.md).
+  # The four contract sentences live once, in includes/contract/body/,
+  # and pages pull them in as a callout with --8<-- "contract/<name>.md",
+  # which wraps the body in a note. The delivery contract page, their
+  # home, includes the bare body (contract/body/<name>.md) under its own
+  # headings instead. Their links are written relative to a page one
+  # folder deep, so only pages inside the five tab folders may include
+  # them (never docs/index.md).
   - pymdownx.snippets:
       base_path: [includes]
       check_paths: true
@@ -166,12 +169,12 @@ nav:
           - Manage topics: build/topics.md
       - Send and receive:
           - Produce messages: build/producing.md
-          - Consume and acknowledge: build/consuming.md
+          - Consume and acknowledge messages: build/consuming.md
           - Handle retries and dead letters: build/handling-retries.md
-          - Replay messages: build/replay.md
+          - Replay messages from an offset: build/replay.md
       - Topic features:
           - Fan out and delay messages: build/fanout-and-delay.md
-          - Enforce schemas: build/schemas.md
+          - Enforce schemas on a topic: build/schemas.md
           # RESERVED SLOT: remote children (inter-cluster copy).
           # The Build guide for this feature lands here as
           # build/remote-children.md when its branch merges.

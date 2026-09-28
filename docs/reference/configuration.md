@@ -10,9 +10,15 @@ Look up every setting `narad serve` reads: its environment variable, its config 
 
 ```json title="narad.json"
 {
+  "http": {
+    "addr": "127.0.0.1:7952"
+  },
+  "cluster": {
+    "addr": "127.0.0.1:7953"
+  },
   "storage": {
     "codec": "zstd",
-    "fsync": "per_write"
+    "data_dir": "./narad-data"
   }
 }
 ```
@@ -21,13 +27,11 @@ Look up every setting `narad serve` reads: its environment variable, its config 
 narad serve --config narad.json
 ```
 
-```text title="Output"
-narad: config: config: load file: storage.fsync is an internal setting and cannot be configured
-```
-
-The node refuses to start: `storage.fsync` is not a setting you can change, and every setting is checked before the node opens any data. Remove the key and it starts with zstd compression on.
+The node logs one JSON line per event and serves once a line contains `"msg":"http listening"`. It serves the API on `127.0.0.1:7952`, runs Raft on `127.0.0.1:7953`, and stores messages compressed with zstd under `./narad-data`. Every setting the file leaves out keeps its default.
 
 Under Kubernetes the Helm chart sets most of these for you; which chart value sets which variable is in [Helm values reference](helm-values.md#env-mapping).
+
+In the tables below, each Setting cell holds the config file key, then the environment variable.
 
 ## Precedence {#precedence}
 
@@ -38,7 +42,7 @@ A setting can come from four layers. Each overrides the one before it:
 3. environment variables;
 4. command-line flags of `narad serve`.
 
-After the four layers are applied, the whole configuration is checked. Any problem stops the node before it starts, with a message that names the setting, such as `http.max_consume_wait (20s) must be <= http.shutdown_grace (10s)`.
+After the four layers are applied, the whole configuration is checked. Any problem stops the node before it opens any data, with a message that names the setting, such as `http.max_consume_wait (20s) must be <= http.shutdown_grace (10s)`. A key the file may not set stops it the same way: a file with `"fsync": "per_write"` under `storage` stops the node with `narad: config: config: load file: storage.fsync is an internal setting and cannot be configured`.
 
 `narad serve` takes these flags:
 
@@ -58,48 +62,48 @@ After the four layers are applied, the whole configuration is checked. Any probl
 
 ## HTTP {#http}
 
-| Environment variable | Config file key | Default | Notes |
-|---|---|---|---|
-| `NARAD_HTTP_ADDR` | `http.addr` | `:7942` | The client API. Nodes also talk to each other on the same port number over UDP (QUIC). Must differ from `cluster.addr`. |
-| `NARAD_HTTP_READ_TIMEOUT` | `http.read_timeout` | `10s` | |
-| `NARAD_HTTP_WRITE_TIMEOUT` | `http.write_timeout` | `30s` | Must be longer than `http.max_consume_wait`, or long polls are cut off mid-wait. |
-| `NARAD_HTTP_IDLE_TIMEOUT` | `http.idle_timeout` | `60s` | |
-| `NARAD_HTTP_SHUTDOWN_GRACE` | `http.shutdown_grace` | `10s` | How long a stopping node lets requests in flight finish. Must be at least `http.max_consume_wait`. |
-| `NARAD_HTTP_MAX_CONSUME_WAIT` | `http.max_consume_wait` | `10s` | The longest `wait` a consume may ask for; longer ones are cut to it. Raising it past `10s` means raising `http.shutdown_grace` too. Set a positive value: `0` passes the checks but falls back to a 30 s ceiling. |
-| `NARAD_HTTP_MAX_HEADER_BYTES` | `http.max_header_bytes` | `65536` | Largest request header block; larger gets `431`. At least `4096`. |
-| `NARAD_HTTP_MAX_CONNECTIONS` | `http.max_connections` | `4096` | Open client connections per node; more wait in the listen backlog. `0` removes the cap. |
-| `NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY` | `http.max_consume_in_flight_per_identity` | `1024` | Concurrent consumes per user, or per client IP with security off, per node; more get `429`. A batch consume counts as its `max`. `0` removes the cap. |
-| `NARAD_HTTP_MAX_PRODUCE_IN_FLIGHT_PER_IDENTITY` (unreleased) | `http.max_produce_in_flight_per_identity` (unreleased) | `0` (off) | Concurrent produces per user, or per client IP with security off, per node; more get `429`. A batch produce counts as its message count, and as one while its body is read. v3.0.1 refuses to start with the file key. |
-| `NARAD_HTTP_METRICS_ADDR` | `http.metrics_addr` | empty | When set, `/metrics`, `/healthz` and `/readyz` are served on this address without credentials, and `/metrics` leaves the API port. Keep it inside the cluster. May equal `http.pprof_addr`. |
-| `NARAD_HTTP_METRICS_UNAUTHENTICATED` | `http.metrics_unauthenticated` | `false` | Serve `/metrics` on the API port without credentials. Its series name every topic. Ignored when `http.metrics_addr` is set. |
-| `NARAD_HTTP_PPROF_ADDR` | `http.pprof_addr` | empty | Serves Go's `net/http/pprof` on this address, without credentials. Keep it inside the cluster. |
+| Setting | Default | Notes |
+|---|---|---|
+| `http.addr`<br>`NARAD_HTTP_ADDR` | `:7942` | The client API. Nodes also talk to each other on the same port number over UDP (QUIC). Must differ from `cluster.addr`. |
+| `http.read_timeout`<br>`NARAD_HTTP_READ_TIMEOUT` | `10s` |  |
+| `http.write_timeout`<br>`NARAD_HTTP_WRITE_TIMEOUT` | `30s` | Must be longer than `http.max_consume_wait`, or long polls are cut off mid-wait. |
+| `http.idle_timeout`<br>`NARAD_HTTP_IDLE_TIMEOUT` | `60s` |  |
+| `http.shutdown_grace`<br>`NARAD_HTTP_SHUTDOWN_GRACE` | `10s` | How long a stopping node lets requests in flight finish. Must be at least `http.max_consume_wait`. |
+| `http.max_consume_wait`<br>`NARAD_HTTP_MAX_CONSUME_WAIT` | `10s` | The longest `wait` a consume may ask for; longer ones are cut to it. Raising it past `10s` means raising `http.shutdown_grace` too. Set a positive value: `0` passes the checks but falls back to a 30 s ceiling. |
+| `http.max_header_bytes`<br>`NARAD_HTTP_MAX_HEADER_BYTES` | `65536` | Largest request header block; larger gets `431`. At least `4096`. |
+| `http.max_connections`<br>`NARAD_HTTP_MAX_CONNECTIONS` | `4096` | Open client connections per node; more wait in the listen backlog. `0` removes the cap. |
+| `http.max_consume_in_flight_per_identity`<br>`NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY` | `1024` | Concurrent consumes per user, or per client IP with security off, per node; more get `429`. A batch consume counts as its `max`. `0` removes the cap. |
+| `http.max_produce_in_flight_per_identity` (unreleased)<br>`NARAD_HTTP_MAX_PRODUCE_IN_FLIGHT_PER_IDENTITY` | `0` (off) | Concurrent produces per user, or per client IP with security off, per node; more get `429`. A batch produce counts as its message count, and as one while its body is read. v3.0.1 refuses to start with the file key. |
+| `http.metrics_addr`<br>`NARAD_HTTP_METRICS_ADDR` | empty | When set, `/metrics`, `/healthz` and `/readyz` are served on this address without credentials, and `/metrics` leaves the API port. Keep it inside the cluster. May equal `http.pprof_addr`. |
+| `http.metrics_unauthenticated`<br>`NARAD_HTTP_METRICS_UNAUTHENTICATED` | `false` | Serve `/metrics` on the API port without credentials. Its series name every topic. Ignored when `http.metrics_addr` is set. |
+| `http.pprof_addr`<br>`NARAD_HTTP_PPROF_ADDR` | empty | Serves Go's `net/http/pprof` on this address, without credentials. Keep it inside the cluster. |
 
 ## Cluster {#cluster}
 
-| Environment variable | Config file key | Default | Notes |
-|---|---|---|---|
-| `NARAD_NODE_ID` | `cluster.node_id` | the host name | The node's identity in the cluster. Keep it stable across restarts. |
-| `NARAD_CLUSTER_ADDR` | `cluster.addr` | `:7943` | The Raft transport (TCP). |
-| `NARAD_CLUSTER_PEERS` | `cluster.peers` | none | The voters that bootstrap the cluster, the same list on every node. In the environment, `id@host:7943,id@host:7943,...`; in the file, a list of `{"id": ..., "addr": ...}`. When set, it lists at least 3 voters. A joining node walks it to find the leader. |
-| `NARAD_CLUSTER_ADVERTISE_ADDR` | `cluster.advertise_addr` | empty | The `host:port` other nodes dial for this node's Raft transport. Required when the node is not in the peer list; otherwise the node takes the host from its own peer entry. |
-| `NARAD_CLUSTER_INITIAL_MEMBERS` | `cluster.initial_members` | empty | Comma-separated IDs of the nodes that may bootstrap a new cluster; every other node joins the existing one. Empty lets every node bootstrap. Never change it after the cluster exists. |
-| `NARAD_CLUSTER_RAFT_SNAPSHOT_THRESHOLD` | `cluster.raft_snapshot_threshold` | `8192` | Metadata log entries applied since the last snapshot before the next one. Greater than 0. |
-| `NARAD_CLUSTER_RAFT_SNAPSHOT_INTERVAL` | `cluster.raft_snapshot_interval` | `120s` | How often the threshold is checked, with up to 2x jitter. At least `5ms`. |
-| `NARAD_CLUSTER_RAFT_TRAILING_LOGS` | `cluster.raft_trailing_logs` | `10240` | Log entries kept behind a snapshot. A restarting node further behind than this gets the whole snapshot. |
+| Setting | Default | Notes |
+|---|---|---|
+| `cluster.node_id`<br>`NARAD_NODE_ID` | the host name | The node's identity in the cluster. Keep it stable across restarts. |
+| `cluster.addr`<br>`NARAD_CLUSTER_ADDR` | `:7943` | The Raft transport (TCP). |
+| `cluster.peers`<br>`NARAD_CLUSTER_PEERS` | none | The voters that bootstrap the cluster, the same list on every node. In the environment, `id@host:7943,id@host:7943,...`; in the file, a list of `{"id": ..., "addr": ...}`. When set, it lists at least 3 voters. A joining node walks it to find the leader. |
+| `cluster.advertise_addr`<br>`NARAD_CLUSTER_ADVERTISE_ADDR` | empty | The `host:port` other nodes dial for this node's Raft transport. Required when the node is not in the peer list; otherwise the node takes the host from its own peer entry. |
+| `cluster.initial_members`<br>`NARAD_CLUSTER_INITIAL_MEMBERS` | empty | Comma-separated IDs of the nodes that may bootstrap a new cluster; every other node joins the existing one. Empty lets every node bootstrap. Never change it after the cluster exists. |
+| `cluster.raft_snapshot_threshold`<br>`NARAD_CLUSTER_RAFT_SNAPSHOT_THRESHOLD` | `8192` | Metadata log entries applied since the last snapshot before the next one. Greater than 0. |
+| `cluster.raft_snapshot_interval`<br>`NARAD_CLUSTER_RAFT_SNAPSHOT_INTERVAL` | `120s` | How often the threshold is checked, with up to 2x jitter. At least `5ms`. |
+| `cluster.raft_trailing_logs`<br>`NARAD_CLUSTER_RAFT_TRAILING_LOGS` | `10240` | Log entries kept behind a snapshot. A restarting node further behind than this gets the whole snapshot. |
 
 The three Raft settings are the defaults of the Raft library Narad uses. Leave them alone in production.
 
 ## Storage {#storage}
 
-| Environment variable | Config file key | Default | Notes |
-|---|---|---|---|
-| `NARAD_DATA_DIR` | `storage.data_dir` | `data` | Everything the node stores: `topics/`, `ingress/` and `metastore/`. |
-| none | `storage.codec` | `none` | `none` or `zstd`. Compression is off by default. zstd shrinks JSON-like payloads a lot, and more under load, when frames hold more records. |
-| none | `storage.compression_level` | `fastest` | zstd level: `fastest`, `default`, `better` or `best`. Decompression speed does not depend on it. |
-| none | `storage.idle_log_eviction_ms` | `1800000` (30 min) | Close a partition log nothing has touched for this long. `0` turns it off; otherwise at least `60000`. See [Idle partitions](#idle-partitions). |
-| none | `storage.cold_retention_walk_ms` | `300000` (5 min) | How often closed partitions are checked for expired data. `0` turns it off; otherwise at least `60000`. |
-| none | `storage.consumer_offset_commit_interval_ms` (unreleased) | `1000` | How long an acked position may wait for a sync to disk. `10` to `60000`. v3.0.1 refuses to start with this key. See [Consumer offset commit interval](#consumer-offset-commit-interval). |
-| none | `storage.ingress_wal_prealloc` (unreleased) | `false` | Prepare ingress WAL segments ahead of use. v3.0.1 refuses to start with this key, `true` or `false`. See [Ingress WAL segment preparation](#ingress-wal-segment-preparation). |
+| Setting | Default | Notes |
+|---|---|---|
+| `storage.data_dir`<br>`NARAD_DATA_DIR` | `data` | Everything the node stores: `topics/`, `ingress/` and `metastore/`. |
+| `storage.codec`<br>config file only | `none` | `none` or `zstd`. Compression is off by default. zstd shrinks JSON-like payloads a lot, and more under load, when frames hold more records. |
+| `storage.compression_level`<br>config file only | `fastest` | zstd level: `fastest`, `default`, `better` or `best`. Decompression speed does not depend on it. |
+| `storage.idle_log_eviction_ms`<br>config file only | `1800000` (30 min) | Close a partition log nothing has touched for this long. `0` turns it off; otherwise at least `60000`. See [Idle partitions](#idle-partitions). |
+| `storage.cold_retention_walk_ms`<br>config file only | `300000` (5 min) | How often closed partitions are checked for expired data. `0` turns it off; otherwise at least `60000`. |
+| `storage.consumer_offset_commit_interval_ms` (unreleased)<br>config file only | `1000` | How long an acked position may wait for a sync to disk. `10` to `60000`. v3.0.1 refuses to start with this key. See [Consumer offset commit interval](#consumer-offset-commit-interval). |
+| `storage.ingress_wal_prealloc` (unreleased)<br>config file only | `false` | Prepare ingress WAL segments ahead of use. v3.0.1 refuses to start with this key, `true` or `false`. See [Ingress WAL segment preparation](#ingress-wal-segment-preparation). |
 
 The storage keys in this table are the only ones the config file accepts. The engine's fsync mode, flush and sync cadence and segment size are internal settings with fixed production values, and a config file that sets one is refused (`storage.<key> is an internal setting and cannot be configured`). What a `202` promises about the disk does not depend on any setting; it is in the [delivery contract](../understand/delivery-contract.md#what-202-means).
 
@@ -141,40 +145,40 @@ The node logs a warning, at most once a minute, when it cannot keep to either ca
 
 These apply when a topic is created without the field, or with `0`. Existing topics keep their values.
 
-| Environment variable | Config file key | Default | Notes |
-|---|---|---|---|
-| `NARAD_TOPIC_DEFAULT_PARTITIONS` | `topic.default_partitions` | `3` | At least 3, and at most `topic.max_partitions`. |
-| `NARAD_TOPIC_MAX_PARTITIONS` | `topic.max_partitions` | `108` | The most partitions a topic may have, at create or later. |
-| `NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS` | `topic.default_retention_age_ms` | `604800000` (7 days) | `0` keeps messages forever; any other value is at least `3600000` (1 hour). The Helm chart sets 12 hours. |
-| `NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS` | `topic.default_visibility_timeout_ms` | `30000` | Greater than 0, and no longer than the default retention when that is not 0. |
-| `NARAD_TOPIC_DEFAULT_MAX_IN_FLIGHT_PER_PARTITION` | `topic.default_max_in_flight_per_partition` | `1024` | Greater than 0. |
-| `NARAD_TOPIC_DEFAULT_MAX_ACKED_AHEAD_PER_PARTITION` | `topic.default_max_acked_ahead_per_partition` | `1024` | Greater than 0. |
+| Setting | Default | Notes |
+|---|---|---|
+| `topic.default_partitions`<br>`NARAD_TOPIC_DEFAULT_PARTITIONS` | `3` | At least 3, and at most `topic.max_partitions`. |
+| `topic.max_partitions`<br>`NARAD_TOPIC_MAX_PARTITIONS` | `108` | The most partitions a topic may have, at create or later. |
+| `topic.default_retention_age_ms`<br>`NARAD_TOPIC_DEFAULT_RETENTION_AGE_MS` | `604800000` (7 days) | `0` keeps messages forever; any other value is at least `3600000` (1 hour). The Helm chart sets 12 hours. |
+| `topic.default_visibility_timeout_ms`<br>`NARAD_TOPIC_DEFAULT_VISIBILITY_TIMEOUT_MS` | `30000` | Greater than 0, and no longer than the default retention when that is not 0. |
+| `topic.default_max_in_flight_per_partition`<br>`NARAD_TOPIC_DEFAULT_MAX_IN_FLIGHT_PER_PARTITION` | `1024` | Greater than 0. |
+| `topic.default_max_acked_ahead_per_partition`<br>`NARAD_TOPIC_DEFAULT_MAX_ACKED_AHEAD_PER_PARTITION` | `1024` | Greater than 0. |
 
 What each topic field does is in [Create a topic](http-api.md#create-topic).
 
 ## Fan-out {#fan-out}
 
-| Environment variable | Config file key | Default | Notes |
-|---|---|---|---|
-| `NARAD_FANOUT_MAX_BATCH_RECORDS` | `fanout.max_batch_records` | `4096` | Most records copied to a child in one batch. |
-| `NARAD_FANOUT_MAX_BATCH_BYTES` | `fanout.max_batch_bytes` | `4194304` (4 MiB) | Most payload bytes in one batch. |
-| `NARAD_FANOUT_LINGER_MS` | `fanout.linger_ms` | `25` | How long a partly filled batch waits for more records. |
+| Setting | Default | Notes |
+|---|---|---|
+| `fanout.max_batch_records`<br>`NARAD_FANOUT_MAX_BATCH_RECORDS` | `4096` | Most records copied to a child in one batch. |
+| `fanout.max_batch_bytes`<br>`NARAD_FANOUT_MAX_BATCH_BYTES` | `4194304` (4 MiB) | Most payload bytes in one batch. |
+| `fanout.linger_ms`<br>`NARAD_FANOUT_LINGER_MS` | `25` | How long a partly filled batch waits for more records. |
 
 Larger batches mean fewer syncs on the child and more delay for each record. How the copy works is in [Fan-out engine](../understand/fanout-engine.md).
 
 ## Logging and security {#logging-and-security}
 
-| Environment variable | Config file key | Default | Notes |
-|---|---|---|---|
-| `NARAD_LOG_LEVEL` | `log.level` | `info` | `debug`, `info`, `warn` or `error`. |
-| `NARAD_LOG_FORMAT` | `log.format` | `json` | `json` or `text`. |
-| `NARAD_SECURITY_ENABLED` | `security.enabled` | `true` | HTTP Basic authentication and grants on the API, and the shared secret between nodes. |
-| `NARAD_ADMIN_PASSWORD` | none | generated | The root admin's password, used when a secured cluster first starts with no users. Unset, the node that creates the root admin generates a password and logs it once. |
-| `NARAD_CLUSTER_SECRET` | none | none | The shared secret every node proves to the others on the node-to-node port. Required when security is on and `cluster.peers` is set. |
-| `NARAD_CLUSTER_TLS_CERT_FILE`, `NARAD_CLUSTER_TLS_KEY_FILE`, `NARAD_CLUSTER_TLS_CA_FILE` | `security.cluster_tls_cert_file`, `security.cluster_tls_key_file`, `security.cluster_tls_ca_file` | empty | Mutual TLS for Raft: all three or none. Read once at startup; see [Raft TLS certificates](../operate/raft-tls.md). |
-| `NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT` | `security.allow_plaintext_raft` | `false` | With security on and `cluster.peers` set, a node refuses to start without the Raft TLS files unless this says the Raft port is fenced some other way, such as by a NetworkPolicy. |
-| `NARAD_SECURITY_ALLOW_INSECURE_CLUSTER` | `security.allow_insecure_cluster` | `false` | Required to run several nodes with security off, which leaves the API, the node-to-node port and Raft open. One node needs nothing. |
-| `NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH` | `security.allow_legacy_cluster_auth` | `false` | Also accept the older node-to-node authentication, for a rolling upgrade from a release that used it. Turn it off once every node has rolled. See [Upgrade Narad](../operate/upgrade.md#version-notes). |
+| Setting | Default | Notes |
+|---|---|---|
+| `log.level`<br>`NARAD_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
+| `log.format`<br>`NARAD_LOG_FORMAT` | `json` | `json` or `text`. |
+| `security.enabled`<br>`NARAD_SECURITY_ENABLED` | `true` | HTTP Basic authentication and grants on the API, and the shared secret between nodes. |
+| `NARAD_ADMIN_PASSWORD`<br>environment only | generated | The root admin's password, used when a secured cluster first starts with no users. Unset, the node that creates the root admin generates a password and logs it once. |
+| `NARAD_CLUSTER_SECRET`<br>environment only | none | The shared secret every node proves to the others on the node-to-node port. Required when security is on and `cluster.peers` is set. |
+| `security.cluster_tls_cert_file`<br>`NARAD_CLUSTER_TLS_CERT_FILE`<br>`security.cluster_tls_key_file`<br>`NARAD_CLUSTER_TLS_KEY_FILE`<br>`security.cluster_tls_ca_file`<br>`NARAD_CLUSTER_TLS_CA_FILE` | empty | Mutual TLS for Raft: all three or none. Read once at startup; see [Raft TLS certificates](../operate/raft-tls.md). |
+| `security.allow_plaintext_raft`<br>`NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT` | `false` | With security on and `cluster.peers` set, a node refuses to start without the Raft TLS files unless this says the Raft port is fenced some other way, such as by a NetworkPolicy. |
+| `security.allow_insecure_cluster`<br>`NARAD_SECURITY_ALLOW_INSECURE_CLUSTER` | `false` | Required to run several nodes with security off, which leaves the API, the node-to-node port and Raft open. One node needs nothing. |
+| `security.allow_legacy_cluster_auth`<br>`NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH` | `false` | Also accept the older node-to-node authentication, for a rolling upgrade from a release that used it. Turn it off once every node has rolled. See [Upgrade Narad](../operate/upgrade.md#version-notes). |
 
 The two secrets can only be set in the environment, so config files and ConfigMaps never hold them. Why each setting exists is in [Networking and security](../understand/networking-and-security.md), and what to set before going live is in the [Production checklist](../operate/production-checklist.md).
 
