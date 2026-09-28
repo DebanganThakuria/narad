@@ -28,6 +28,13 @@ Four Kubernetes objects do all the work:
 
 ## Install, step by step
 
+**0. Get the chart and a namespace.** The chart installs from a clone of the repository:
+
+```bash
+git clone https://github.com/DebanganThakuria/narad && cd narad
+kubectl create namespace narad
+```
+
 **1. Create the security secret** (the chart expects `<release>-security`):
 
 ```bash
@@ -41,10 +48,13 @@ kubectl create secret generic narad-security -n narad \
 **2. Install:**
 
 ```bash
-helm install narad ./charts/narad -n narad --create-namespace \
+helm install narad ./charts/narad -n narad \
   --set replicaCount=3 \
-  --set persistence.size=50Gi
+  --set persistence.size=50Gi \
+  --set image.tag=v3.0.1
 ```
+
+Pin `image.tag` to the release you mean to run: the chart's default is `latest`, which follows `master`.
 
 **3. Watch it come up:**
 

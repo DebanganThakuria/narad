@@ -38,7 +38,7 @@ Need a sequence? Carry it in the payload and order on your side. Need to collaps
 
 Ordering was not lost by accident; it was spent on availability. In CAP terms Narad's **data plane is AP**:
 
-- **Produce is available while any node lives.** Any live node accepts a produce with a local fsync: no leader election, no quorum, no coordination on the hot path. Delivery is worked out afterwards and routed around dead machines.
+- **Produce is available while any node lives.** Any live node accepts a produce with a local fsync: no leader election, no quorum, no coordination on the hot path. Delivery is worked out afterwards and routed around dead machines. One caveat when a majority is down: a survivor still accepts a produce sent to it directly, but it reports not ready while it has no Raft leader, so a load balancer stops routing to it until quorum returns. Losing a minority of nodes never stops produces through the load balancer.
 - **Consume is available for every partition whose owner is alive**, and since new traffic reroutes to live owners, fresh messages stay consumable even mid-outage. Messages already stored on a dead node wait for it to return (their partition answers `503` meanwhile).
 - **The control plane is the one consistent piece**: creating/altering topics and managing users go through Raft and need a quorum of nodes. Your *data* flows at one node; *administration* waits for a majority.
 
