@@ -4,7 +4,7 @@ description: "Send a message to a Narad topic with one HTTP POST. A 202 means it
 
 # Producing
 
-Send a message with one `POST`. The request body is the message, and `202 Accepted` means Narad has fsynced it to disk and will deliver it at least once.
+Send a message with one `POST`. The request body is the message, and `202 Accepted`{.nr-nowrap} means Narad has fsynced it to disk and will deliver it at least once.
 
 ## Produce one message
 
@@ -24,15 +24,15 @@ Content-Length: 0
 
 What to put in place of each part:
 
-- `$NARAD` is the base URL of any Narad node, or of the load balancer in front of them; every node accepts every produce. With `narad server start --dev` on your machine it is `http://127.0.0.1:7942`.
+- `$NARAD` is the base URL of any Narad node, or of the load balancer in front of them; every node accepts every produce. With `narad server start --dev`{.nr-nowrap} on your machine it is `http://127.0.0.1:7942`.
 - `$AUTH` is `username:password` for a user with a `produce` grant on the topic (see [Users & access](users-and-access.md)). `--dev` turns auth off, so any value works there.
-- `orders` is the topic. It must already exist, or you get `404`. Create it with `narad topic add orders` or the [topics API](topics.md).
+- `orders` is the topic. It must already exist, or you get `404`. Create it with `narad topic add orders`{.nr-nowrap} or the [topics API](topics.md).
 - `customer-42` is the optional key, described below.
 
 ## Request body and parameters
 
 - **The body is the message**: raw bytes, up to 1 MiB (1,048,576 bytes; one byte more gets `413`). JSON, protobuf, plain text and images all work. If the topic has a [schema](schemas.md), the body must be JSON that validates against it. Nothing is encoded on the client; see [how each kind comes back](consuming.md#the-payload-comes-back-the-way-you-sent-it).
-- **`Content-Type`** must be `application/json` or `application/octet-stream`, or the request must carry an `X-Narad-Client` header. This is a cross-site guard, not a format hint: a missing header gets `415`, and so does `curl -d` on its own, which sends a form type. The body is stored as the same bytes either way.
+- **`Content-Type`** must be `application/json`{.nr-nowrap} or `application/octet-stream`{.nr-nowrap}, or the request must carry an `X-Narad-Client`{.nr-nowrap} header. This is a cross-site guard, not a format hint: a missing header gets `415`, and so does `curl -d`{.nr-nowrap} on its own, which sends a form type. The body is stored as the same bytes either way.
 - **`key`** (query, optional): messages with the same key go to the same partition in normal operation. That gives locality for fan-out and consumers, not ordering. With no key, Narad generates one per message (`key-1`, `key-2`, ...) so keyless messages spread across partitions, and the generated key comes back on consume.
 - **`partition`** (query, optional): pin the message to one partition, overriding the key. A partition that does not exist gets `400`. Most apps never need it.
 
@@ -42,6 +42,8 @@ When you get a `202`, the message has been fsynced to the write-ahead log on the
 
 ```mermaid
 sequenceDiagram
+    accTitle: A produce, from the POST to the partition
+    accDescr: You POST to any Narad node. The node fsyncs the message to its write-ahead log and answers 202 Accepted. Milliseconds later, asynchronously, it hands the message to the partition owner, which fsyncs it into the partition, verifies it and makes it visible.
     participant You
     participant Node as Any Narad node
     participant Owner as Partition owner

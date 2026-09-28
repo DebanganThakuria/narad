@@ -11,7 +11,7 @@ hide:
 
 <div class="nr-hero__intro" markdown>
 
-# A small, sturdy message broker. HTTP in, <span class="nr-nowrap">at-least-once</span> out.
+# <span class="nr-line">A small, sturdy message broker.</span> <span class="nr-line">HTTP in, <span class="nr-nowrap">at-least-once out.</span></span>
 
 <p class="nr-lead">Narad is one Go binary. A producer POSTs a message and gets <code>202</code> once it is fsynced to disk. A consumer pulls it, works on it under a lease and acks it. Anything left unacked comes back.</p>
 
@@ -28,7 +28,7 @@ hide:
 </div>
 
 <figure class="nr-term" aria-labelledby="nr-term-caption">
-<div class="nr-term__bar" aria-hidden="true"><span>Terminal</span><span>produce, consume, ack</span></div>
+<div class="nr-term__bar" aria-hidden="true"><span>Terminal</span></div>
 <pre tabindex="0"><code><span class="p">$</span> NARAD=http://127.0.0.1:7942
 <span class="p">$</span> curl -i -X POST "$NARAD/v1/topics/orders/produce?key=customer-42" \
     -H 'Content-Type: application/json' \
