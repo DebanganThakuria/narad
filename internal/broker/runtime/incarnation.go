@@ -149,13 +149,19 @@ func (g *Logs) ensureIncarnationGuarded(topicName, id string) error {
 		// still holding a log of the deleted incarnation may be making
 		// a shard from files it read before the rename; the hook's drop
 		// waits for that create to store its shard and drops it (the
-		// create fence of consumer.InFlight), so the shard never serves
-		// the current incarnation or reaches the committer. A shard made
-		// after the hook recovers nothing of the deleted incarnation:
-		// none of its files are under the path any more. The hook runs
-		// only here: run again after the open, it could drop a shard of
-		// the current incarnation, whose log the Get fast path already
-		// serves.
+		// create fence of consumer.InFlight), so that shard never
+		// carries the deleted incarnation's frontier into the current
+		// one or reaches the committer. A shard made after the hook
+		// recovers nothing of the deleted incarnation (none of its files
+		// are under the path any more): it is the current incarnation's
+		// shard, even when a consume still holding the deleted
+		// incarnation's log made it. That consume's read then fails with
+		// storage.ErrLogClosed (the log was closed above, before the
+		// drop), which the scan treats as transient and never as a gap to
+		// skip, so it cannot move the current incarnation's frontier. The
+		// hook runs only here: run again after the open, it could drop a
+		// shard of the current incarnation, whose log the Get fast path
+		// already serves.
 		g.notifyRetired(topicName)
 	}
 	// Unmarked: a fresh directory, or one written before markers
