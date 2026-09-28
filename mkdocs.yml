@@ -82,6 +82,7 @@ extra_css:
 
 extra_javascript:
   - javascripts/mermaid-lines.js
+  - javascripts/scroll-hosts.js
   - javascripts/drawer.js
   - javascripts/goatcounter.js
 

@@ -12,8 +12,8 @@
    - useMaxWidth: false, so a wide diagram keeps its natural size and its
      host scrolls sideways, instead of shrinking its text to 7-10px.
 
-   A host that scrolls is made keyboard-reachable below. If anything here
-   fails, diagrams still render with Material's own styles. */
+   A host that scrolls is made keyboard-reachable by scroll-hosts.js. If
+   anything here fails, diagrams still render with Material's own styles. */
 (function () {
   var EXTRA =
     ".node rect,.node circle,.node ellipse,.node polygon,.node path{stroke-width:1.5px}" +
@@ -80,49 +80,5 @@
     }
   } catch (e) {
     /* Leave Mermaid untouched */
-  }
-
-  /* A diagram wider than the column scrolls inside its host. Make that
-     host a named, focusable group so the keyboard can scroll it too, and
-     drop it from the Tab order again when it fits. */
-  try {
-    var watching = typeof WeakSet === "function" ? new WeakSet() : null;
-    var sizes = new ResizeObserver(function (entries) {
-      entries.forEach(function (entry) {
-        var host = entry.target;
-        if (host.scrollWidth > host.clientWidth + 1) {
-          host.setAttribute("tabindex", "0");
-          host.setAttribute("role", "group");
-          host.setAttribute("aria-label", "Diagram, scrolls sideways");
-        } else if (host.hasAttribute("tabindex")) {
-          host.removeAttribute("tabindex");
-          host.removeAttribute("role");
-          host.removeAttribute("aria-label");
-        }
-      });
-    });
-
-    var watch = function (root) {
-      var hosts = root.querySelectorAll ? root.querySelectorAll("div.mermaid") : [];
-      for (var i = 0; i < hosts.length; i++) {
-        if (watching && watching.has(hosts[i])) continue;
-        if (watching) watching.add(hosts[i]);
-        sizes.observe(hosts[i]);
-      }
-    };
-
-    new MutationObserver(function (records) {
-      records.forEach(function (record) {
-        record.addedNodes.forEach(function (node) {
-          if (node.nodeType !== 1) return;
-          if (node.matches && node.matches("div.mermaid")) watch(node.parentNode);
-          else watch(node);
-        });
-      });
-    }).observe(document.documentElement, { childList: true, subtree: true });
-
-    watch(document);
-  } catch (e) {
-    /* Diagrams still scroll with a pointer */
   }
 })();
