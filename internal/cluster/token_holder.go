@@ -69,9 +69,7 @@ func (t *peerToken) Notify(topicName string, done func(claiming bool)) bool {
 	t.mu.Unlock()
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), notifyTimeout)
-		defer cancel()
-		claiming := t.holder.notify(ctx, t.addr, topicName)
+		claiming := t.holder.notify(context.Background(), t.addr, topicName)
 		// The token is gone either way; the peer re-registers if it still
 		// wants one. Retrying would risk telling it twice about the same
 		// record, which means two claims for one consumer.
@@ -209,9 +207,11 @@ func (h *tokenHolder) forget(tok *peerToken) {
 
 // notify sends one notification and reports the peer's verdict. Any
 // failure reads as a pass: the record goes to somebody else immediately
-// rather than being held for a claim that is not coming.
+// rather than being held for a claim that is not coming. The round trip
+// is bounded by notifyTimeout, handed to the transport as the call's
+// budget.
 func (h *tokenHolder) notify(ctx context.Context, addr, topicName string) bool {
-	res, err := h.peer.NotifyToken(ctx, addr, nodewire.TokenNotifyRequest{
+	res, err := h.peer.NotifyTokenWithin(ctx, addr, notifyTimeout, nodewire.TokenNotifyRequest{
 		From:  h.selfAddr,
 		Topic: topicName,
 	})

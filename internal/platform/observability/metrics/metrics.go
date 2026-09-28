@@ -43,12 +43,18 @@ type Metrics struct {
 	ConsumeEmptyTotal  *prometheus.CounterVec   // topic
 
 	// Inventory / lag (gauges; updated by poller)
-	TopicsTotal                prometheus.Gauge
-	PartitionsTotal            prometheus.Gauge
-	OpenPartitionLogs          prometheus.Gauge
-	IdleLogsEvictedTotal       prometheus.Counter
-	ColdRetentionSweptTotal    prometheus.Counter
-	ReaperRestarts             prometheus.Gauge
+	TopicsTotal             prometheus.Gauge
+	PartitionsTotal         prometheus.Gauge
+	OpenPartitionLogs       prometheus.Gauge
+	IdleLogsEvictedTotal    prometheus.Counter
+	ColdRetentionSweptTotal prometheus.Counter
+	ReaperRestarts          prometheus.Gauge
+	// IngressWALFailed is 1 once the ingress WAL has latched a write or
+	// sync failure (updated by poller). See its Help.
+	IngressWALFailed prometheus.Gauge
+	// IngressDispatchBacklog is the ingress WAL records a restart would
+	// replay (updated by poller). See its Help.
+	IngressDispatchBacklog     prometheus.Gauge
 	DataDirSizeBytes           prometheus.Gauge
 	DataDirAvailableBytes      prometheus.Gauge
 	TopicBytes                 *prometheus.GaugeVec // topic
@@ -122,6 +128,16 @@ type Metrics struct {
 	partitionCounters sync.Map
 	pruneMu           sync.Mutex
 	pruneGeneration   atomic.Uint64
+
+	// epoch orders the birth of storage recorders and cached counter
+	// sets against the poller's topic listings: the poller advances it
+	// just before it lists topics (snapshotEpoch), and anything born
+	// before the listing that did not include its topic belongs to a
+	// deleted topic. See pruneTopicSeries and pruneOrphanedTopics.
+	epoch atomic.Uint64
+	// topicLives holds the live topicLife of each topic name that has
+	// storage recorders. Guarded by pruneMu.
+	topicLives map[string]*topicLife
 }
 
 // New constructs the metrics struct and registers every collector with
@@ -129,6 +145,8 @@ type Metrics struct {
 // so duplicates are a programming error.
 func New(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
+		topicLives: make(map[string]*topicLife),
+
 		HTTPRequestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Subsystem: "http",
@@ -243,6 +261,20 @@ func New(reg prometheus.Registerer) *Metrics {
 			Namespace: Namespace,
 			Name:      "reaper_restarts",
 			Help:      "Times the shared retention loop was replaced because it stopped ticking. Any value above zero deserves a look at the log.",
+		}),
+
+		IngressWALFailed: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "ingress",
+			Name:      "wal_failed",
+			Help:      "1 once a write or sync of the ingress WAL has failed, else 0. The failure is latched on purpose (acking records stacked on bytes of unknown durability is unsafe): every produce on this node answers 500 until the process restarts, while consume keeps working and /readyz stays 200. Alert on any value of 1 and restart the node once the disk is healthy.",
+		}),
+
+		IngressDispatchBacklog: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Subsystem: "ingress",
+			Name:      "dispatch_backlog_records",
+			Help:      "Records in this node's ingress WAL that a restart would replay: the durable next sequence minus the stored dispatch checkpoint. It is 0 once everything the node accepted has been committed to its partition owner and the checkpoint stored past it. Before rolling a node back to a release that cannot read the current ingress WAL record format, stop producing to it and wait for 0. A value that stays above 0 with producers idle means records are not reaching their owners.",
 		}),
 
 		DataDirSizeBytes: prometheus.NewGauge(prometheus.GaugeOpts{
@@ -474,7 +506,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.BytesProducedTotal, m.BytesConsumedTotal,
 		m.ProduceRejectionsTotal,
 		m.ConsumeWaitSeconds, m.ConsumeEmptyTotal,
-		m.TopicsTotal, m.PartitionsTotal, m.OpenPartitionLogs, m.IdleLogsEvictedTotal, m.ColdRetentionSweptTotal, m.ReaperRestarts, m.DataDirSizeBytes, m.DataDirAvailableBytes,
+		m.TopicsTotal, m.PartitionsTotal, m.OpenPartitionLogs, m.IdleLogsEvictedTotal, m.ColdRetentionSweptTotal, m.ReaperRestarts, m.IngressWALFailed, m.IngressDispatchBacklog, m.DataDirSizeBytes, m.DataDirAvailableBytes,
 		m.TopicBytes, m.PartitionSizeBytes, m.Segments,
 		m.ConsumerLagMessages, m.ConsumerDroppedMessages, m.OldestUnconsumedAgeSeconds,
 		m.InFlightSize, m.AckedAheadSize, m.AckRejected, m.AckExtendedTotal, m.NackTotal,
@@ -492,6 +524,13 @@ func New(reg prometheus.Registerer) *Metrics {
 	return m
 }
 
+// snapshotEpoch advances the birth epoch and returns the new value.
+// The poller calls it just before it lists topics, and passes it to
+// the prunes that listing leads to.
+func (m *Metrics) snapshotEpoch() uint64 {
+	return m.epoch.Add(1)
+}
+
 // pruneTopicSeries drops every series labeled with the given topic across
 // all topic-labeled collectors. It is called when a topic disappears so
 // the exposition does not leak series for the process lifetime under topic
@@ -503,11 +542,22 @@ func New(reg prometheus.Registerer) *Metrics {
 // same critical section and the prune generation is advanced, so a
 // recreated topic re-binds live children instead of incrementing the
 // detached ones that DeletePartialMatch left behind.
-func (m *Metrics) pruneTopicSeries(topic string) {
+//
+// The topic's storage recorders born before epoch (the listing that no
+// longer had the topic) are retired for good: a deleted topic's log
+// can stay open for a while (a skipped or failed purge keeps it until
+// idle eviction), and its flushes and retention sweeps must not bring
+// the series back. Recorders born later belong to a same-named
+// successor and stay live.
+func (m *Metrics) pruneTopicSeries(topic string, epoch uint64) {
 	m.pruneMu.Lock()
 	defer m.pruneMu.Unlock()
 	defer m.pruneGeneration.Add(1)
 	m.dropPartitionCounters(topic)
+	if life := m.topicLives[topic]; life != nil {
+		life.deadBefore = max(life.deadBefore, epoch)
+		delete(m.topicLives, topic)
+	}
 
 	sel := prometheus.Labels{"topic": topic}
 	for _, c := range []interface{ DeletePartialMatch(prometheus.Labels) int }{
@@ -532,6 +582,40 @@ func (m *Metrics) pruneTopicSeries(topic string) {
 	} {
 		c.DeletePartialMatch(prometheus.Labels{"parent": topic})
 		c.DeletePartialMatch(prometheus.Labels{"child": topic})
+	}
+}
+
+// pruneOrphanedTopics re-prunes topics that are not in current (the
+// listing taken at epoch) but whose children were bound again before
+// that listing: a request that straddled the topic's delete bumped its
+// partition counters after the prune, or a log opened just as the
+// topic was deleted. Neither would otherwise be pruned again, because
+// the poller prunes a topic only on the tick it disappears. Costs one
+// pass over the counter cache and the recorder topics per tick.
+func (m *Metrics) pruneOrphanedTopics(current map[string]struct{}, epoch uint64) {
+	var orphaned map[string]struct{}
+	add := func(topic string) {
+		if orphaned == nil {
+			orphaned = make(map[string]struct{})
+		}
+		orphaned[topic] = struct{}{}
+	}
+	m.partitionCounters.Range(func(k, v any) bool {
+		topic := k.(partitionKey).topic
+		if _, live := current[topic]; !live && v.(*PartitionCounters).born < epoch {
+			add(topic)
+		}
+		return true
+	})
+	m.pruneMu.Lock()
+	for topic, life := range m.topicLives {
+		if _, live := current[topic]; !live && life.born < epoch {
+			add(topic)
+		}
+	}
+	m.pruneMu.Unlock()
+	for topic := range orphaned {
+		m.pruneTopicSeries(topic, epoch)
 	}
 }
 

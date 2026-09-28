@@ -26,14 +26,13 @@ func (f *InFlight) RunPurger(ctx context.Context, interval time.Duration) {
 // were actually released.
 func (f *InFlight) purgeAll() {
 	now := f.now()
-	f.mu.RLock()
-	keys := make([]shardKey, 0, len(f.shards))
-	shards := make([]*partitionShard, 0, len(f.shards))
-	for k, sh := range f.shards {
-		keys = append(keys, k)
-		shards = append(shards, sh)
-	}
-	f.mu.RUnlock()
+	var keys []shardKey
+	var shards []*partitionShard
+	f.shards.Range(func(k, v any) bool {
+		keys = append(keys, k.(shardKey))
+		shards = append(shards, v.(*partitionShard))
+		return true
+	})
 
 	notify := f.releaseNotifier()
 	for i, sh := range shards {

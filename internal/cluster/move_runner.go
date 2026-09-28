@@ -153,6 +153,13 @@ type moveStore interface {
 	AbortMove(ctx context.Context, topicName string, partition int, expectedTarget string) error
 }
 
+// domainVersioner is the optional store capability pass gating reads
+// (*metastore.Store implements it; see reconcileGate). A store without
+// it gets a full pass every tick.
+type domainVersioner interface {
+	LatestDomainVersion() uint64
+}
+
 // movePeer is the peer RPC surface a move needs: the source-side segment
 // copy (via the embedded segmentFetcher) and last-moment freeze, plus the
 // leader-forwarded ownership writes (the destination is usually not the
@@ -214,6 +221,7 @@ type moveHandle struct {
 // MoveRunner owns the move workers for partitions targeted at this node.
 type MoveRunner struct {
 	store     moveStore
+	versions  domainVersioner // store's, or nil: see domainVersioner
 	selfID    string
 	dataDir   string
 	peer      movePeer
@@ -228,6 +236,7 @@ type MoveRunner struct {
 	wg      sync.WaitGroup
 
 	reconcilePasses int
+	gate            reconcileGate
 }
 
 // NewMoveRunner wires a runner. selfID must be this node's ID; an empty
@@ -237,8 +246,10 @@ func NewMoveRunner(store moveStore, selfID, dataDir string, peer movePeer, recla
 		logger = slog.Default()
 	}
 	cfg = cfg.withDefaults()
+	versions, _ := store.(domainVersioner)
 	return &MoveRunner{
 		store:     store,
+		versions:  versions,
 		selfID:    selfID,
 		dataDir:   dataDir,
 		peer:      peer,
@@ -278,7 +289,9 @@ func (r *MoveRunner) Run(ctx context.Context) {
 
 // Reconcile performs one pass: spawn a worker for every partition now
 // targeted at this node, and cancel workers whose target changed or
-// cleared. Exported so tests can drive passes directly.
+// cleared. The pass reads every topic's assignments, so it is skipped
+// while its inputs cannot have changed (see reconcileGate). Exported so
+// tests can drive passes directly.
 func (r *MoveRunner) Reconcile(ctx context.Context) {
 	if ctx.Err() != nil || r.selfID == "" {
 		return
@@ -296,6 +309,15 @@ func (r *MoveRunner) Reconcile(ctx context.Context) {
 	// a superseded plan. Running workers keep going — the flip is a guarded
 	// CAS, so a stale worker can only fail, never corrupt.
 	if !r.store.AppliedCaughtUp() {
+		r.gate.invalidate()
+		return
+	}
+	var version uint64
+	if r.versions != nil {
+		version = r.versions.LatestDomainVersion()
+	}
+	now := time.Now()
+	if r.gate.skip(version, now, r.versions == nil) {
 		return
 	}
 	topics, _, err := r.store.ListTopics(ctx, metastore.ListOptions{})
@@ -304,11 +326,15 @@ func (r *MoveRunner) Reconcile(ctx context.Context) {
 		return
 	}
 
+	// pending: this pass left something for a later one, which must run
+	// even if no metadata changes.
+	pending := false
 	desired := map[moveKey]metastore.Assignment{}
 	for _, t := range topics {
 		assignments, err := r.store.ListAssignments(t.Name)
 		if err != nil {
-			continue // transient; next pass retries
+			pending = true // transient; next pass retries
+			continue
 		}
 		for _, a := range assignments {
 			if a.TargetID == r.selfID && a.OwnerID != r.selfID {
@@ -335,6 +361,7 @@ func (r *MoveRunner) Reconcile(ctx context.Context) {
 		case <-h.done:
 			delete(r.workers, key)
 		default:
+			pending = true // reaped by a later pass once it exits
 		}
 	}
 	// Spawn missing workers.
@@ -349,10 +376,12 @@ func (r *MoveRunner) Reconcile(ctx context.Context) {
 		r.wg.Add(1)
 		go func(key moveKey, source string) {
 			defer r.wg.Done()
+			defer r.gate.workerExited()
 			defer close(h.done)
 			r.runMove(workerCtx, key.topic, key.partition, source)
 		}(key, source)
 	}
+	r.gate.finish(version, now, pending)
 }
 
 // runMove drives one partition move to completion. It holds ONE copy
@@ -504,7 +533,7 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, sess *MoveSession, topicNa
 	// The source's fan-out cursors kept advancing while frozen (fan-out
 	// only reads); the fence's listing is the freshest view of them.
 	staging := r.stagingDir(topicName, partition)
-	if err := installSidecars(staging, fence.Sidecars); err != nil {
+	if err := installSidecars(staging, fence.Sidecars, res.HighWatermark); err != nil {
 		r.logger.Warn("move: install fan-out cursor sidecars; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false, CopyResult{}
 	}

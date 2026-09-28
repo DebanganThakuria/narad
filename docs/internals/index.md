@@ -47,7 +47,7 @@ A produce is fsynced into the receiving node's **ingress WAL** and acked `202` i
 Topics, users, assignments, and fan-out links live in a Raft-replicated **metastore** (every node has a full replica; one leader). Message data is deliberately *not* replicated: one owner, one copy, fsync-verified. See [Metastore & Raft](metastore-and-raft.md) and the durability discussion in the [Client Guide](../client/guarantees-and-errors.md).
 
 **4. Consume is a queue with leases.**
-Consumers reserve one message at a time; a reservation is a **visibility window** tracked in the owner's memory with a durable committed frontier behind it. Acks advance the frontier; crashes just mean redelivery. See [Consume Path](consume-path.md).
+Consumers reserve messages one at a time (a batch consume takes up to 100 in one request, each reserved on its own); a reservation is a **visibility window** tracked in the owner's memory with a durable committed frontier behind it. Acks advance the frontier; crashes just mean redelivery. See [Consume Path](consume-path.md).
 
 **5. Fan-out is log-tailing, not double-publish.**
 A child topic is fed by a **cursor** on each parent partition's owner that reads committed parent records in bulk and commits them to the child, with its own durable position, so no parent message is ever skipped or double-fanned (beyond at-least-once retries). Delay children add a due-time gate on that same cursor. See [Fan-out Engine](fanout-engine.md).
@@ -105,7 +105,7 @@ If you're about to read source, here's the map so you don't wander:
 
 ## Anatomy of one produce, with real names
 
-The same diagram as above, but with function names you can grep for; handler to disk in nine hops:
+The same diagram as above, but with function names you can grep for, from the handler to the disk:
 
 ```
 POST /v1/topics/orders/produce?key=k
@@ -115,15 +115,19 @@ POST /v1/topics/orders/produce?key=k
          └─ ingress.Manager.AcceptProduce (broker/ingress/produce.go)
              └─ wal.Log.Append: staged into the group-commit buffer,
                 blocks until the shared fsync lands             ← the 202 line
-… milliseconds later, in the background …
- └─ ProduceDispatcher.dispatch (cluster/produce_dispatch.go)
-     ├─ scanWindow: replay WAL from the checkpoint
-     ├─ bucketByTarget: group by (topic, partition), reroute dead owners
-     └─ commitBuckets → commitBatch
-         └─ Engine.CommitAcceptedProduceBatch (broker/messaging/produce_commit.go)
-             ├─ storage.Log.AppendBatch: keyed-envelope records
-             └─ commitDurable: Sync → VerifyDurable (CRC) → AdvanceHighWatermark
-                                                            ← consumers can see it
+… in the background, woken as soon as the record is durable …
+ └─ ProduceDispatcher.run (cluster/produce_dispatcher.go)
+     ├─ read → place (cluster/produce_dispatch.go): replay the newly durable
+     │   records, queue each on its (topic, partition), reroute dead owners
+     ├─ launch → startCommit → runJob (cluster/produce_commit.go): at most
+     │   one commit in flight per partition, local or to the owner over QUIC
+     │   └─ Engine.CommitAcceptedProduceBatch (broker/messaging/produce_commit.go)
+     │       ├─ storage.Log.AppendBatchOwned: keyed-envelope records
+     │       └─ commitDurable → storage.Log.CommitDurable:
+     │          fsync → CRC read-back → advance the high-watermark
+     │                                                      ← consumers can see it
+     └─ advanceCheckpoint: first seq not yet committed, stored; the WAL
+        compacts behind it
 ```
 
 Every deep-dive page below follows this pattern: the concept first, then the actual constants and function names, because "trust me" is not documentation.

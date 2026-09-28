@@ -47,6 +47,7 @@ const (
 	OpAppliedIndex
 	OpTokenRegister
 	OpTokenNotify
+	OpAckBatch
 )
 
 // CompleteMoveRequest asks the leader to perform the guarded ownership flip
@@ -92,7 +93,15 @@ type ProduceRequest struct {
 // CommitProduceRequest asks the owner of TargetPartition to durably
 // commit one already-routed record.
 type CommitProduceRequest struct {
-	Topic           string
+	Topic string
+	// TopicID is the incarnation (topic.Topic.ID) the record was
+	// accepted against, so an owner can refuse a record of a deleted
+	// topic whose name now belongs to a new one. Empty for records
+	// accepted before incarnations were stamped. It travels as an
+	// optional trailing field (see EncodeCommitProduceBatchRequest),
+	// written only when set, and an owner on an older release refuses
+	// a frame that carries it.
+	TopicID         string
 	Key             string
 	TargetPartition int
 	Payload         []byte
@@ -124,6 +133,14 @@ type ConsumeRequest struct {
 	// optional trailing field, so a request from an older peer decodes
 	// with Claim=false and keeps the deadline behaviour.
 	Claim bool
+	// Max asks for up to that many records in one reply, a batch consume
+	// answered {"messages":[...]} (see cluster.RPCServer). 0 and 1 are a
+	// single-record consume. Encoded as a second optional trailing field,
+	// after Claim, and only when above 1, so a single-record request is
+	// byte for byte what it was; an owner on an older release refuses it
+	// with 400 (trailing payload) and the requester asks it for one record
+	// instead.
+	Max int
 }
 
 // AckRequest acknowledges a reserved record identified by its receipt

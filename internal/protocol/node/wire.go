@@ -32,6 +32,10 @@ func newWriter(capacity int) *writer {
 	return &writer{buf: make([]byte, 0, capacity)}
 }
 
+func (w *writer) u8(v uint8) {
+	w.buf = append(w.buf, v)
+}
+
 func (w *writer) u16(v uint16) {
 	var b [2]byte
 	binary.BigEndian.PutUint16(b[:], v)
@@ -100,21 +104,19 @@ type reader struct {
 }
 
 // opReader starts decoding a request payload, verifying that its
-// leading operation byte matches expected.
-func opReader(payload []byte, expected Operation) (*reader, error) {
-	r := newReader(payload)
+// leading operation byte matches expected. The reader is returned by
+// value so it lives on the decoder's stack: every inbound node RPC is
+// decoded through here, and a pointer escaped to the heap on each one.
+func opReader(payload []byte, expected Operation) (reader, error) {
+	r := reader{payload: payload}
 	op, err := r.op()
 	if err != nil {
-		return nil, err
+		return reader{}, err
 	}
 	if op != expected {
-		return nil, fmt.Errorf("unexpected operation %d, want %d", op, expected)
+		return reader{}, fmt.Errorf("unexpected operation %d, want %d", op, expected)
 	}
 	return r, nil
-}
-
-func newReader(payload []byte) *reader {
-	return &reader{payload: payload}
 }
 
 func (r *reader) op() (Operation, error) {
@@ -124,6 +126,15 @@ func (r *reader) op() (Operation, error) {
 	op := Operation(r.payload[r.pos])
 	r.pos++
 	return op, nil
+}
+
+func (r *reader) u8() (uint8, error) {
+	if r.remaining() < 1 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	v := r.payload[r.pos]
+	r.pos++
+	return v, nil
 }
 
 func (r *reader) u16() (uint16, error) {

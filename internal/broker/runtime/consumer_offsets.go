@@ -41,10 +41,15 @@ type aheadWritten struct {
 // ConsumerOffsetCommitter batches best-effort consumer offset persistence.
 // Ack commits are authoritative in memory; this writer only seeds recovery.
 //
-// Each flush writes two files per dirty partition, each only when it
-// changed since the last write: consumer.offset (the frontier) and
-// consumer.ahead (the offsets acked out of order above it). A partition
-// is dirty when its frontier advanced or its acked-ahead set changed.
+// A partition is dirty when its frontier advanced or its acked-ahead
+// set changed, and a flush makes it durable with one data sync: to
+// consumer.ahead (the offsets acked out of order above the frontier)
+// when that set changed, else to consumer.offset (the frontier). The
+// consumer.ahead record carries the frontier too, and recovery takes
+// the larger of the two files' frontiers, so while acks arrive out of
+// order consumer.offset is left behind rather than synced a second
+// time; Close brings it level. Every reader of the persisted frontier
+// must therefore read both files.
 type ConsumerOffsetCommitter struct {
 	dataDir  string
 	interval time.Duration
@@ -52,9 +57,18 @@ type ConsumerOffsetCommitter struct {
 
 	mu      sync.Mutex
 	pending map[offsetCommitKey]int64
-	// lastOffset is the frontier last written per partition; a flush
-	// that finds the same value skips the write and its fdatasync.
+	// lastOffset is the highest frontier made durable per partition,
+	// by either file; a flush that finds the same value or a lower one
+	// skips the consumer.offset write and its fdatasync. A lower one is
+	// not stale data to repair: acks call Commit after dropping the
+	// shard lock, so two frontier advances can reach the committer in
+	// reverse order, and when the flush that wrote the higher one runs
+	// in between, the lower one arrives alone in the next window.
 	lastOffset map[offsetCommitKey]int64
+	// offsetFile is what this process last wrote to consumer.offset per
+	// partition. It trails lastOffset while consumer.ahead carries the
+	// frontier.
+	offsetFile map[offsetCommitKey]int64
 	lastAhead  map[offsetCommitKey]aheadWritten
 	ahead      AheadSource
 
@@ -76,6 +90,7 @@ func NewConsumerOffsetCommitter(dataDir string, interval time.Duration, log *slo
 		log:        log,
 		pending:    make(map[offsetCommitKey]int64),
 		lastOffset: make(map[offsetCommitKey]int64),
+		offsetFile: make(map[offsetCommitKey]int64),
 		lastAhead:  make(map[offsetCommitKey]aheadWritten),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
@@ -93,9 +108,10 @@ func (c *ConsumerOffsetCommitter) SetAheadSource(fn AheadSource) {
 }
 
 // Commit queues an offset for the next flush. Offsets only move
-// forward: a smaller offset never overwrites a pending larger one. A
-// call with the current frontier (no advance) still marks the partition
-// dirty, which is how an out-of-order ack reaches the next flush.
+// forward: a smaller offset never overwrites a pending larger one, nor
+// one a previous flush already made durable. A call with the current
+// frontier (no advance) still marks the partition dirty, which is how
+// an out-of-order ack reaches the next flush.
 func (c *ConsumerOffsetCommitter) Commit(topic string, partition int, offset int64) {
 	key := offsetCommitKey{topic: topic, partition: partition}
 	c.mu.Lock()
@@ -114,28 +130,60 @@ func (c *ConsumerOffsetCommitter) Forget(topic string, partition int) {
 	c.mu.Lock()
 	delete(c.pending, key)
 	delete(c.lastOffset, key)
+	delete(c.offsetFile, key)
 	delete(c.lastAhead, key)
 	c.mu.Unlock()
 }
 
-// Close stops the flush loop and performs a final flush. Idempotent.
+// Close stops the flush loop, performs a final flush and brings every
+// consumer.offset that consumer.ahead left behind up to the frontier,
+// so after a graceful stop the frontier file alone is exact. Idempotent.
 func (c *ConsumerOffsetCommitter) Close() error {
 	c.once.Do(func() { close(c.stop) })
 	<-c.done
-	return c.flush()
+	err := c.flush()
+	if lerr := c.levelOffsetFiles(); err == nil {
+		err = lerr
+	}
+	return err
 }
 
+// run flushes every interval. A flush that takes longer than the
+// interval is followed at once by the next, so the committer keeps the
+// disk busy the whole time and persisted offsets lag acks by about the
+// flush time rather than the interval. That is logged, at most once a
+// minute: a longer interval gives produce the disk back, and fewer
+// partitions per node or a faster disk shorten the lag.
+//
+// The partitions of a flush are written one at a time on purpose.
+// Overlapping their data syncs, 8 at once, makes a flush 2.4 to 3.7
+// times shorter, but on macOS the overlapped bursts held back the
+// produce syncs sharing the disk: beside 12 dirty partitions an owner's
+// 24-record commit went from 10ms to 22ms at p99. A committer that
+// overlapped and paced itself to hold the disk half the time halved
+// the lag of 64 partitions, and cost 8 concurrent commit streams 17% of
+// their throughput and 2.6 times their p99 (see
+// BenchmarkZZWP16OwnerCommitUnderOffsetFlush and
+// BenchmarkZZWP16SpreadCommitUnderOffsetFlush in the messaging package).
 func (c *ConsumerOffsetCommitter) run() {
 	defer close(c.done)
 
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 
+	var lastWarned time.Time
 	for {
 		select {
 		case <-ticker.C:
-			if err := c.flush(); err != nil && c.log != nil {
+			start := time.Now()
+			commits, ahead := c.drain()
+			if err := c.persistAll(commits, ahead); err != nil && c.log != nil {
 				c.log.Error("consumer offset batch write failed", "err", err)
+			}
+			if took := time.Since(start); took > c.interval && c.log != nil && time.Since(lastWarned) >= time.Minute {
+				lastWarned = time.Now()
+				c.log.Warn("consumer offset commits cannot keep to their interval: persisted offsets lag acks by about the flush time",
+					"partitions", len(commits), "flush_took", took, "interval", c.interval)
 			}
 		case <-c.stop:
 			return
@@ -144,19 +192,20 @@ func (c *ConsumerOffsetCommitter) run() {
 }
 
 // flush drains the pending map and writes each dirty partition's files.
-// A purged partition directory is skipped silently (the topic is gone);
-// any other failure re-queues the partition for the next flush so a
-// transient error can't lose the recovery seed.
 func (c *ConsumerOffsetCommitter) flush() error {
 	commits, ahead := c.drain()
+	return c.persistAll(commits, ahead)
+}
+
+// persistAll writes the drained partitions' files, one partition at a
+// time (see run). A purged partition directory is skipped silently (the
+// topic is gone); any other failure re-queues the partition for the next
+// flush so a transient error can't lose the recovery seed.
+func (c *ConsumerOffsetCommitter) persistAll(commits []offsetCommit, ahead AheadSource) error {
 	var firstErr error
 	for _, commit := range commits {
 		partitionDir := storage.TopicPartitionDir(c.dataDir, commit.key.topic, commit.key.partition)
-		err := c.writeOffset(partitionDir, commit)
-		if err == nil && ahead != nil {
-			err = c.writeAhead(partitionDir, commit.key, ahead)
-		}
-		if err != nil {
+		if err := c.persist(partitionDir, commit, ahead); err != nil {
 			if errors.Is(err, storage.ErrPartitionDirMissing) {
 				c.Forget(commit.key.topic, commit.key.partition)
 				continue
@@ -170,12 +219,35 @@ func (c *ConsumerOffsetCommitter) flush() error {
 	return firstErr
 }
 
-// writeOffset persists the frontier unless it is the value last written.
+// persist makes one dirty partition durable, normally with a single
+// data sync. consumer.ahead goes first when its set changed; its record
+// carries the source's frontier, which is at least the queued commit
+// unless that commit outlived its shard, so writeOffset then finds
+// nothing above what is durable and skips the second sync. A failed
+// consumer.ahead write still lets the frontier through consumer.offset.
+func (c *ConsumerOffsetCommitter) persist(partitionDir string, commit offsetCommit, source AheadSource) error {
+	var aheadErr error
+	if source != nil {
+		aheadErr = c.writeAhead(partitionDir, commit.key, source)
+		if errors.Is(aheadErr, storage.ErrPartitionDirMissing) {
+			return aheadErr
+		}
+	}
+	if err := c.writeOffset(partitionDir, commit); err != nil {
+		return err
+	}
+	return aheadErr
+}
+
+// writeOffset persists the frontier unless it is at or below the
+// highest one already durable: the frontier never moves backwards, and
+// Forget clears the memory whenever the directory is replaced or
+// removed.
 func (c *ConsumerOffsetCommitter) writeOffset(partitionDir string, commit offsetCommit) error {
 	c.mu.Lock()
 	last, seen := c.lastOffset[commit.key]
 	c.mu.Unlock()
-	if seen && last == commit.offset {
+	if seen && commit.offset <= last {
 		return nil
 	}
 	if err := storage.WriteConsumerOffsetIfPartitionDirExists(partitionDir, commit.offset); err != nil {
@@ -183,13 +255,49 @@ func (c *ConsumerOffsetCommitter) writeOffset(partitionDir string, commit offset
 	}
 	c.mu.Lock()
 	c.lastOffset[commit.key] = commit.offset
+	c.offsetFile[commit.key] = commit.offset
 	c.mu.Unlock()
 	return nil
 }
 
+// levelOffsetFiles writes consumer.offset for every partition whose
+// latest frontier only consumer.ahead holds, so a reader of the
+// frontier file alone (the dispatcher's free-record estimate for a
+// partition with no shard, an older binary) sees where consumers got
+// to after a graceful stop. Called by Close, after the loop stopped.
+func (c *ConsumerOffsetCommitter) levelOffsetFiles() error {
+	c.mu.Lock()
+	var behind []offsetCommit
+	for key, frontier := range c.lastOffset {
+		if written, ok := c.offsetFile[key]; !ok || written < frontier {
+			behind = append(behind, offsetCommit{key: key, offset: frontier})
+		}
+	}
+	c.mu.Unlock()
+	var firstErr error
+	for _, commit := range behind {
+		partitionDir := storage.TopicPartitionDir(c.dataDir, commit.key.topic, commit.key.partition)
+		if err := storage.WriteConsumerOffsetIfPartitionDirExists(partitionDir, commit.offset); err != nil {
+			if errors.Is(err, storage.ErrPartitionDirMissing) {
+				c.Forget(commit.key.topic, commit.key.partition)
+				continue
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("level consumer offset %s/%d: %w", commit.key.topic, commit.key.partition, err)
+			}
+			continue
+		}
+		c.mu.Lock()
+		c.offsetFile[commit.key] = commit.offset
+		c.mu.Unlock()
+	}
+	return firstErr
+}
+
 // writeAhead persists the acked-ahead set unless its version is the one
 // last written. Writes alternate slots and carry a rising sequence so
-// the previous record survives a torn write.
+// the previous record survives a torn write. A written record raises
+// the durable frontier to the one it carries.
 func (c *ConsumerOffsetCommitter) writeAhead(partitionDir string, key offsetCommitKey, source AheadSource) error {
 	committed, offsets, version, ok := source(key.topic, key.partition)
 	if !ok {
@@ -228,6 +336,9 @@ func (c *ConsumerOffsetCommitter) writeAhead(partitionDir string, key offsetComm
 	}
 	c.mu.Lock()
 	c.lastAhead[key] = aheadWritten{version: version, slot: slot, seq: seq}
+	if last, seen := c.lastOffset[key]; !seen || committed > last {
+		c.lastOffset[key] = committed
+	}
 	c.mu.Unlock()
 	return nil
 }

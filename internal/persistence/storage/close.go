@@ -44,10 +44,7 @@ func (l *Log) Close() error {
 	if err := l.flusher.closeErr; err != nil {
 		firstErr = err
 	}
-	if err := l.syncHighWatermark(true); err != nil && firstErr == nil {
-		firstErr = err
-	}
-	if err := l.closeHWMFile(); err != nil && firstErr == nil {
+	if err := l.persistClosedHighWatermark(); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	for i, s := range l.segments {
@@ -73,5 +70,4 @@ func (l *Log) closeSegments() {
 	for _, s := range l.segments {
 		_ = s.release()
 	}
-	_ = l.closeHWMFile()
 }

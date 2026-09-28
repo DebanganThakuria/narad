@@ -14,7 +14,7 @@ import (
 // whose CommitDurable did not return success. If the failed batch's
 // records stayed in the log (in the flushing snapshot for a write
 // failure, or already written and even fsynced for an fsync, verify,
-// roll or high-watermark persist failure), the retry would append a
+// roll or high-watermark release failure), the retry would append a
 // second copy at fresh offsets and its commit would advance the
 // high-watermark past both: every record of the batch delivered twice,
 // permanently, without any crash. So, on the flusher goroutine and

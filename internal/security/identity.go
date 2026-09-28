@@ -15,12 +15,24 @@ type identityKey struct{}
 // (handlers that need it re-read the store).
 func WithIdentity(ctx context.Context, u user.User) context.Context {
 	u.PasswordHash = nil
-	return context.WithValue(ctx, identityKey{}, u)
+	return withIdentity(ctx, &u)
+}
+
+// withIdentity stores id itself, not a copy. The context holds a
+// pointer so attaching the verification cache's identity boxes nothing;
+// id must carry no PasswordHash and must never be modified, since every
+// request of that user until the next users-domain version shares it.
+func withIdentity(ctx context.Context, id *user.User) context.Context {
+	return context.WithValue(ctx, identityKey{}, id)
 }
 
 // IdentityFrom returns the authenticated user, if any. ok is false when
 // the request was not authenticated (security disabled or exempt path).
+// The result is a copy; its Grants are shared and must not be modified.
 func IdentityFrom(ctx context.Context) (user.User, bool) {
-	u, ok := ctx.Value(identityKey{}).(user.User)
-	return u, ok
+	id, ok := ctx.Value(identityKey{}).(*user.User)
+	if !ok || id == nil {
+		return user.User{}, false
+	}
+	return *id, true
 }

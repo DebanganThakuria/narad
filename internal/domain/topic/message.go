@@ -16,6 +16,11 @@ import (
 // string cannot carry losslessly: it is returned base64-encoded with
 // "payload_encoding":"base64" alongside so consumers know to decode.
 //
+// Key gets the same treatment: produce takes it URL-decoded and
+// unvalidated, so it may be any bytes. Valid UTF-8 is returned as a JSON
+// string; anything else is base64 with "key_encoding":"base64"
+// alongside, because a JSON string cannot carry invalid UTF-8 losslessly.
+//
 // ReceiptHandle is the token the consumer must echo back on Ack. It
 // encodes partition, offset, and reservation nonce as
 // partition:offset:nonce. The ack request path supplies the topic.
@@ -38,14 +43,22 @@ type Message struct {
 // omitempty handling; an empty Payload encodes as null.
 func (m Message) AppendJSON(dst []byte) []byte {
 	dst = append(dst, `{"topic":`...)
-	dst = strconv.AppendQuote(dst, m.Topic)
+	dst = AppendJSONQuoted(dst, m.Topic)
 	dst = append(dst, `,"partition":`...)
 	dst = strconv.AppendInt(dst, int64(m.Partition), 10)
 	dst = append(dst, `,"offset":`...)
 	dst = strconv.AppendInt(dst, m.Offset, 10)
 	if m.Key != "" {
 		dst = append(dst, `,"key":`...)
-		dst = strconv.AppendQuote(dst, m.Key)
+		if utf8.ValidString(m.Key) {
+			dst = AppendJSONQuoted(dst, m.Key)
+		} else {
+			// Binary key (a hash, a packed ID): base64-wrap and flag it,
+			// as for a binary payload.
+			dst = append(dst, '"')
+			dst = base64.StdEncoding.AppendEncode(dst, []byte(m.Key))
+			dst = append(dst, `","key_encoding":"base64"`...)
+		}
 	}
 	dst = append(dst, `,"payload":`...)
 	switch {
@@ -69,10 +82,69 @@ func (m Message) AppendJSON(dst []byte) []byte {
 	dst = strconv.AppendInt(dst, m.Timestamp, 10)
 	if m.ReceiptHandle != "" {
 		dst = append(dst, `,"receipt_handle":`...)
-		dst = strconv.AppendQuote(dst, m.ReceiptHandle)
+		dst = AppendJSONQuoted(dst, m.ReceiptHandle)
 	}
 	dst = append(dst, '}')
 	return dst
+}
+
+// AppendJSONQuoted appends s as a JSON string literal without
+// allocating. strconv.AppendQuote is not a substitute: it emits Go
+// escapes (\x01, \v, \U000e0067) that JSON forbids, so one odd byte in
+// a key made the whole consume response unparseable. Exported for the
+// HTTP layer's hand-built error bodies, whose messages can carry a
+// decoded path value. Printable ASCII
+// other than '"' and '\\' is copied in runs, which is every topic name,
+// receipt handle and typical key. The rest follows encoding/json:
+// control bytes are escaped, as are U+2028 and U+2029 (valid JSON but
+// line terminators to JavaScript), and an invalid UTF-8 byte becomes
+// U+FFFD. Other runes, printable or not, are valid JSON as they are.
+func AppendJSONQuoted(dst []byte, s string) []byte {
+	const hex = "0123456789abcdef"
+	dst = append(dst, '"')
+	start := 0
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c >= 0x20 && c < utf8.RuneSelf && c != '"' && c != '\\' {
+			i++
+			continue
+		}
+		if c >= utf8.RuneSelf {
+			r, size := utf8.DecodeRuneInString(s[i:])
+			switch {
+			case r == utf8.RuneError && size == 1:
+				dst = append(dst, s[start:i]...)
+				dst = append(dst, `\ufffd`...)
+			case r == '\u2028' || r == '\u2029':
+				dst = append(dst, s[start:i]...)
+				dst = append(dst, `\u202`...)
+				dst = append(dst, hex[r&0xF])
+			default:
+				i += size
+				continue
+			}
+			i += size
+			start = i
+			continue
+		}
+		dst = append(dst, s[start:i]...)
+		switch c {
+		case '"', '\\':
+			dst = append(dst, '\\', c)
+		case '\n':
+			dst = append(dst, '\\', 'n')
+		case '\r':
+			dst = append(dst, '\\', 'r')
+		case '\t':
+			dst = append(dst, '\\', 't')
+		default:
+			dst = append(dst, '\\', 'u', '0', '0', hex[c>>4], hex[c&0xF])
+		}
+		i++
+		start = i
+	}
+	dst = append(dst, s[start:]...)
+	return append(dst, '"')
 }
 
 // appendJSONString appends s as a JSON string literal. encoding/json

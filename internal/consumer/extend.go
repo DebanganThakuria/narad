@@ -1,9 +1,6 @@
 package consumer
 
-import (
-	"container/heap"
-	"time"
-)
+import "time"
 
 // ExtendHandle renews a live reservation's visibility window to
 // now + visibilityTimeout and returns the new expiry (Unix ms). The
@@ -41,7 +38,7 @@ func (f *InFlight) ExtendHandle(topic string, partition int, offset, nonce int64
 
 	exp := now + visibilityTimeout.Milliseconds()
 	sh.entries[offset] = reservation{expiresAtUnixMs: exp, nonce: nonce}
-	heap.Push(&sh.expiry, expiryEntry{offset: offset, expiresAtUnixMs: exp, nonce: nonce})
+	sh.expiry.push(expiryEntry{offset: offset, expiresAtUnixMs: exp, nonce: nonce})
 	sh.mu.Unlock()
 	if purged {
 		f.notifyRelease(topic, partition)

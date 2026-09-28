@@ -98,6 +98,22 @@ func (c *QUICFrameClient) RequestOnLane(ctx context.Context, addr string, lane L
 	return c.pool.request(ctx, addr, lane, frameType, payload)
 }
 
+// RequestOnLaneTimeout is RequestOnLane with a budget of the caller's
+// own: the whole call, including any dial or stream open it has to wait
+// for, ends after timeout, or earlier if ctx ends first. A call that runs
+// out of budget fails with an error wrapping context.DeadlineExceeded,
+// exactly as one whose ctx deadline passed would, so a caller can pass its
+// per-call timeout here instead of deriving a context.WithTimeout for
+// every call. ctx still carries cancellation: cancelling it abandons the
+// call and tells the peer, as with RequestOnLane. A non-positive timeout
+// adds no budget, making this RequestOnLane.
+func (c *QUICFrameClient) RequestOnLaneTimeout(ctx context.Context, addr string, lane Lane, timeout time.Duration, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
+	if c == nil || c.pool == nil {
+		return clusterwire.StreamFrame{}, errors.New("quic frame client is nil")
+	}
+	return c.pool.requestWithin(ctx, addr, lane, timeout, frameType, payload)
+}
+
 // Close tears down every pooled connection and the client's UDP socket.
 // In-flight requests fail; the client must not be used afterwards.
 func (c *QUICFrameClient) Close() error {

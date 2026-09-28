@@ -90,11 +90,11 @@ func TestFailedCommitThenRetryDeliversExactlyOnce(t *testing.T) {
 	}
 }
 
-// A commit that wrote and fsynced its frames but failed to persist the
-// high-watermark must truncate those frames: they are above the
+// A commit that wrote and fsynced its frames but then failed (its
+// read-back here) must truncate those frames: they are above the
 // high-watermark, the dispatcher will re-append them, and a second copy
 // on disk would become visible as soon as the retry commits.
-func TestFailedCommitHWMPersistFailureTruncatesTail(t *testing.T) {
+func TestFailedCommitAfterFsyncTruncatesTail(t *testing.T) {
 	l, err := NewLog(testLogPath(t), slowFlushOpts(t, codec.NewNoopCodec()))
 	if err != nil {
 		t.Fatalf("NewLog: %v", err)
@@ -110,20 +110,13 @@ func TestFailedCommitHWMPersistFailureTruncatesTail(t *testing.T) {
 	}
 	sizeAfterFirst := fileSize(t, l.dir)
 
-	// Break the high-watermark persist: release the held descriptor and
-	// point the path at a directory, so the reopen fails.
-	if err := l.closeHWMFile(); err != nil {
-		t.Fatal(err)
-	}
-	goodPath := l.hwmPath
-	l.hwmPath = l.dir
-
+	wp3FailReadBackOnce(t, l)
 	off1, err := l.Append([]byte("uncommitted"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := l.CommitDurable(off1, off1); err == nil {
-		t.Fatal("CommitDurable succeeded although the high-watermark could not be persisted")
+		t.Fatal("CommitDurable succeeded although its read-back failed")
 	}
 
 	if got := l.HighWatermark(); got != off0+1 {
@@ -142,8 +135,7 @@ func TestFailedCommitHWMPersistFailureTruncatesTail(t *testing.T) {
 		t.Fatalf("Read(%d): err=%v, want ErrOffsetNotFound", off1, err)
 	}
 
-	// Retry after the disk recovers.
-	l.hwmPath = goodPath
+	// The dispatcher's retry.
 	off1b, err := l.Append([]byte("uncommitted"))
 	if err != nil {
 		t.Fatal(err)
@@ -453,18 +445,13 @@ func TestFailedCommitDiscardsLaterAppendsToo(t *testing.T) {
 	}
 	defer l.Close()
 
-	if err := l.closeHWMFile(); err != nil {
-		t.Fatal(err)
-	}
-	goodPath := l.hwmPath
-	l.hwmPath = l.dir
-
+	wp3FailReadBackOnce(t, l)
 	first, last, err := l.AppendBatch([][]byte{[]byte("a"), []byte("b"), []byte("c")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := l.CommitDurable(first, last); err == nil {
-		t.Fatal("CommitDurable succeeded with an unwritable hwm path")
+		t.Fatal("CommitDurable succeeded although its read-back failed")
 	}
 	if got := l.NextOffset(); got != 0 {
 		t.Fatalf("NextOffset = %d, want 0", got)
@@ -473,7 +460,6 @@ func TestFailedCommitDiscardsLaterAppendsToo(t *testing.T) {
 		t.Fatalf("segment size = %d, want 0 (whole batch truncated)", got)
 	}
 
-	l.hwmPath = goodPath
 	first, last, err = l.AppendBatch([][]byte{[]byte("a"), []byte("b"), []byte("c")})
 	if err != nil {
 		t.Fatal(err)
@@ -556,16 +542,13 @@ func TestDiscardKeepsActiveSegmentFile(t *testing.T) {
 		t.Fatalf("NewLog: %v", err)
 	}
 	defer l.Close()
-	if err := l.closeHWMFile(); err != nil {
-		t.Fatal(err)
-	}
-	l.hwmPath = l.dir
+	wp3FailReadBackOnce(t, l)
 	off, err := l.Append([]byte("x"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := l.CommitDurable(off, off); err == nil {
-		t.Fatal("CommitDurable succeeded with an unwritable hwm path")
+		t.Fatal("CommitDurable succeeded although its read-back failed")
 	}
 	if _, err := os.Stat(filepath.Join(l.dir, segmentFileName(0))); err != nil {
 		t.Fatal(err)

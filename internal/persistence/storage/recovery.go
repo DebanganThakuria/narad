@@ -8,24 +8,45 @@ import (
 	"path/filepath"
 )
 
-// recover walks every segment file in the partition directory in
-// base-offset order, recovering segment bounds and indexing only the
-// active segment. Old sealed-segment indexes are loaded lazily by
-// reads, which keeps retained history from becoming live heap.
+// recover rebuilds the partition's segment list from its directory. Only
+// the active (last) segment is read: it is walked frame by frame, CRC
+// included, and indexed. A sealed segment is not read at all. Its range
+// ends where its successor's begins, so its bounds come from the file
+// names, and an open costs O(active segment) rather than O(retained
+// bytes). Old sealed-segment indexes are loaded lazily by reads, which
+// keeps retained history from becoming live heap.
 //
-// Per-segment scan rules:
+// Taking a sealed segment's end from its successor is exact, not an
+// estimate: a roll fsyncs the active segment and only then creates the
+// next one, named by the offset the sealed one ended at, and nothing
+// writes to a sealed segment again. So every offset below the
+// successor's base that the segment ever held is in it, and none past.
 //
-//   - Mid-file corruption: resync to next 0xCAFE magic and continue.
-//     Bad frames' offsets become permanent gaps. The file is NOT
-//     truncated.
+// What recovery no longer does is prove each sealed frame intact at
+// open. Nothing depended on that: the scan never repaired or reported a
+// sealed segment (a bad frame was skipped in silence, and a torn tail
+// left alone), and every read CRC-checks the frame it serves, so damage
+// in a sealed segment surfaces when a record in it is read, as corrupt or
+// not found, which the consume path skips as recorded loss. Only the
+// errors that are not corruption move: an I/O error reading a sealed
+// segment used to fail the open, and now fails the reads that need it.
 //
-//   - Torn tail at EOF on the active (last) segment: truncate to the
-//     last valid frame boundary so future appends start clean.
+// Scan rules for the active segment:
 //
-//   - Torn tail on a sealed segment: leave the file alone. A torn
-//     tail there means a crash mid-roll; bytes past the tear are
-//     lost either way and truncating would destroy a clean later
-//     segment's invariants.
+//   - Mid-file corruption: resync to the next frame that passes its CRC
+//     and continue. Bad frames' offsets become permanent gaps. The file
+//     is NOT truncated.
+//
+//   - Torn tail at EOF (a short last frame, or a last frame whose bytes
+//     do not check out with nothing valid after it): truncate to the
+//     last valid frame boundary, and fsync the truncate, so future
+//     appends start clean.
+//
+// A sealed segment with a torn tail (its last sync lied and the roll
+// after it survived) is left alone: nothing appends to it again, so the
+// tear shadows nothing, and the bytes past it are lost either way. Its
+// range still ends at its successor's base, so the lost offsets read as
+// unreadable.
 //
 // An empty directory is initialised with one fresh segment at base
 // offset 0.
@@ -55,87 +76,89 @@ func (l *Log) recover() (int64, error) {
 		if err != nil {
 			return 0, fmt.Errorf("storage: open segment %s: %w", name, err)
 		}
-		isActive := i == len(names)-1
-		if err := l.walkSegment(seg, isActive, &nextOffset); err != nil {
+		if i < len(names)-1 {
+			// Sealed: bounded by its successor, and nothing reads it
+			// yet. The first read reopens it (segment.handle), so a
+			// partition with days of history does not pin a descriptor
+			// per file.
+			seg.nextOffset, _ = parseSegmentFileName(names[i+1])
+			_ = seg.release()
+			l.segments = append(l.segments, seg)
+			continue
+		}
+		if err := l.walkActiveSegment(seg, &nextOffset); err != nil {
 			_ = seg.release()
 			return 0, err
-		}
-		if !isActive {
-			// Sealed: the scan is done and nothing reads it yet. The
-			// first read reopens it (segment.handle), so a partition
-			// with days of history does not pin a descriptor per file.
-			_ = seg.release()
 		}
 		l.segments = append(l.segments, seg)
 	}
 	return nextOffset, nil
 }
 
-func (l *Log) walkSegment(seg *segment, isActive bool, nextOffset *int64) error {
+// walkActiveSegment CRC-walks the active segment to its durable tail,
+// builds its sparse index, and truncates a torn tail (see recover). The
+// log's next offset is the end of its last valid frame, or the segment's
+// base when it holds none: every sealed segment ends at or below that
+// base.
+func (l *Log) walkActiveSegment(seg *segment, nextOffset *int64) error {
 	pos := int64(0)
 	size := seg.sizeBytes
 	entries := make([]indexEntry, 0)
+	buf := verifyChunks.get()
+	defer verifyChunks.put(buf)
 
 	for pos < size {
 		// Recovery only needs frame headers + CRC to find the durable tail and
 		// build the index; decoding every frame on startup is pure waste (and a
-		// cold-start CPU spike on a large log). verifyFrameAt validates each
-		// frame's CRC over the raw bytes, so corruption is still caught — an
+		// cold-start CPU spike on a large log). verifyFrameAtBuffered validates
+		// each frame's CRC over the raw bytes, so corruption is still caught: an
 		// intact CRC means the compressed payload is byte-good and would decode.
-		h, end, err := verifyFrameAt(seg.file, pos)
+		// It streams the payload through one reused chunk, where reading each
+		// frame whole allocated the segment's size in garbage per open (and a
+		// corrupt length field could ask for a 256 MiB buffer).
+		h, end, err := verifyFrameAtBuffered(seg.file, pos, buf)
 
 		switch {
 		case err == nil:
-			entry := indexEntry{
+			entries = l.appendSparseIndexEntry(entries, indexEntry{
 				segmentBaseOffset: seg.baseOffset,
 				baseOffset:        h.baseOffset,
 				recordCount:       h.recordCount,
 				framePos:          pos,
 				frameLen:          int32(end - pos),
-			}
-			if isActive {
-				entries = l.appendSparseIndexEntry(entries, entry)
-			}
+			})
 			if frameNext := h.baseOffset + int64(h.recordCount); frameNext > *nextOffset {
 				*nextOffset = frameNext
 			}
 			seg.nextOffset = h.baseOffset + int64(h.recordCount)
 			pos = end
 
-		case errors.Is(err, io.ErrUnexpectedEOF):
+		case errors.Is(err, io.ErrUnexpectedEOF),
+			errors.Is(err, errBadMagic),
+			errors.Is(err, errCorrupt),
+			errors.Is(err, ErrCorruptRecord):
 			// A short frame read is a torn tail only when the tear runs
 			// to EOF. A corrupted length field mid-file lands here too;
 			// if a later valid frame exists this is mid-file corruption,
 			// so resync and keep scanning instead of truncating away
 			// fsynced frames.
+			//
+			// Likewise a frame whose bytes are all there but do not
+			// check out, with nothing valid after it, is a torn tail:
+			// the crash landed after the file size moved and before the
+			// data did (a zero-filled or scrambled last sector). Left in
+			// place, its intact-looking header would shadow the frames
+			// the next commits write at the same offsets (navigation is
+			// header-only), so the first commit after recovery failed
+			// its CRC read-back and, with the read-back disabled, its
+			// records would read as corrupt for good. Cut it like any
+			// other torn tail; mid-file corruption (a valid frame
+			// follows) is still kept.
 			if next := nextValidFramePos(seg.file, pos+1, size); next < size {
 				pos = next
 				continue
 			}
-			return l.finishTornTail(seg, isActive, pos, entries, nextOffset)
-
-		case errors.Is(err, errBadMagic),
-			errors.Is(err, errCorrupt),
-			errors.Is(err, ErrCorruptRecord):
-			if isActive {
-				// A frame whose bytes are all there but do not check
-				// out, with nothing valid after it, is a torn tail too:
-				// the crash landed after the file size moved and before
-				// the data did (a zero-filled or scrambled last sector).
-				// Left in place, its intact-looking header would shadow
-				// the frames the next commits write at the same offsets
-				// (navigation is header-only), so the first commit after
-				// recovery failed its CRC read-back and, with the
-				// read-back disabled, its records would read as corrupt
-				// for good. Cut it like any other torn tail; mid-file
-				// corruption (a valid frame follows) is still kept.
-				if next := nextValidFramePos(seg.file, pos+1, size); next < size {
-					pos = next
-					continue
-				}
-				return l.finishTornTail(seg, isActive, pos, entries, nextOffset)
-			}
-			pos = nextMagicInSegment(seg.file, pos+1, size)
+			return l.finishTornTail(seg, pos, entries, nextOffset)
 
 		default:
 			return err
@@ -145,28 +168,21 @@ func (l *Log) walkSegment(seg *segment, isActive bool, nextOffset *int64) error 
 	if seg.nextOffset > *nextOffset {
 		*nextOffset = seg.nextOffset
 	}
-	if isActive {
-		l.setSegmentIndexLocked(seg.baseOffset, entries)
-	}
+	l.setSegmentIndexLocked(seg.baseOffset, entries)
 	return nil
 }
 
-// finishTornTail ends a segment walk at a tear that runs to EOF: the
-// active segment is truncated at pos (and the truncate fsynced), a
-// sealed one is left alone (see recover), and the recovered bounds and
-// index are installed.
-func (l *Log) finishTornTail(seg *segment, isActive bool, pos int64, entries []indexEntry, nextOffset *int64) error {
-	if isActive {
-		if err := seg.truncate(pos); err != nil {
-			return err
-		}
+// finishTornTail ends the active segment's walk at a tear that runs to
+// EOF: the segment is truncated at pos (and the truncate fsynced), and
+// the recovered bounds and index are installed.
+func (l *Log) finishTornTail(seg *segment, pos int64, entries []indexEntry, nextOffset *int64) error {
+	if err := seg.truncate(pos); err != nil {
+		return err
 	}
 	if seg.nextOffset > *nextOffset {
 		*nextOffset = seg.nextOffset
 	}
-	if isActive {
-		l.setSegmentIndexLocked(seg.baseOffset, entries)
-	}
+	l.setSegmentIndexLocked(seg.baseOffset, entries)
 	return nil
 }
 

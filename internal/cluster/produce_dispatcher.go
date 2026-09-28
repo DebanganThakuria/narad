@@ -11,69 +11,135 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/wal"
+	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 )
 
 const (
+	// defaultProduceDispatchInterval is the idle backstop: Run wakes at
+	// least this often when nothing else wakes it (a record becoming
+	// durable, a commit completing, a retry falling due). It is also how
+	// often a destination whose owner cannot be resolved is looked up
+	// again.
 	defaultProduceDispatchInterval = 10 * time.Millisecond
 
-	// defaultProduceDispatchBatchSize is the hard ceiling on a single drain
-	// window (BatchSize in the config). The actual window grows adaptively up
-	// to this cap (see produceDispatchBaseWindow /
-	// produceDispatchTargetPerPartition); the cap only binds at very high
-	// fan-out (>~1k partitions) and bounds the transient memory a drain holds.
+	// defaultProduceDispatchBatchSize is the hard ceiling on the adaptive
+	// window (BatchSize in the config). The window grows up to this cap
+	// (see produceDispatchBaseWindow / produceDispatchTargetPerPartition);
+	// the cap only binds at very high fan-out (>~1k partitions) and
+	// bounds the records the dispatcher holds in memory.
 	defaultProduceDispatchBatchSize = 1 << 16 // 65536
 
-	// produceDispatchBaseWindow is the window used before any fan-out has been
-	// observed and the floor it never drops below (clamped to the BatchSize
-	// cap). At low fan-out this already yields large per-partition batches.
+	// produceDispatchBaseWindow is the window used before any fan-out has
+	// been observed and the floor it never drops below (clamped to the
+	// BatchSize cap). It is also the least one destination may queue for
+	// a single commit (see perDestCap): the pass-based dispatcher sent a
+	// whole window to a lone hot partition per round trip, and a
+	// latency-bound destination must not get less.
 	produceDispatchBaseWindow = 4096
 
-	// produceDispatchTargetPerPartition is the per-partition batch size the
-	// adaptive window aims for: the next window is sized to
-	// target * (distinct partitions seen this window), so per-partition commit
-	// batches — hence fsyncs — stay fat regardless of how many partitions the
-	// WAL interleaves.
+	// produceRemoteBatchBytes bounds the encoded size of one commit to a
+	// remote owner (see remoteBatchLen). The stream client refuses a
+	// frame payload over clusterwire.MaxStreamFramePayloadBytes before
+	// sending it, and a refused batch fails the same way every time it
+	// is retried; the record count alone lets a base window of records
+	// of a few KiB each exceed it. Half the frame limit keeps one commit
+	// from holding the produce lane for long and still carries a whole
+	// base window of records just under 2 KiB each. A local commit needs
+	// no bound: the partition log splits a large batch into frames
+	// itself.
+	produceRemoteBatchBytes = clusterwire.MaxStreamFramePayloadBytes / 2
+
+	// produceDispatchTargetPerPartition is the per-partition batch size
+	// the adaptive window aims for: the window is sized to target *
+	// (distinct partitions seen), so there is room for fat
+	// per-partition commit batches, hence few fsyncs, however many
+	// partitions the WAL interleaves. It is also the batch floor below
+	// which a destination lingers while other commits are in flight
+	// (see lingerUntil).
 	produceDispatchTargetPerPartition = 64
 
-	// produceDispatchLookaheadWindows caps how far past a stuck record a
-	// drain pass may scan, as a multiple of the current window: the scan
-	// horizon is checkpoint + windowLimit*produceDispatchLookaheadWindows WAL
-	// seqs. While a low seq cannot commit (its topic has no live-owner
-	// partition left to reroute to), healthy records up to that horizon keep
-	// committing; only records beyond it stay frozen until the stuck record
-	// clears. The horizon also bounds memory and per-pass scan work: the
-	// committedAhead skip-set and the seqs examined per pass never exceed it
-	// (worst case produceDispatchLookaheadWindows * BatchSize seqs).
+	// produceDispatchMaxLinger caps how long a destination below the
+	// batch floor waits for more records while other commits are in
+	// flight. The wait is twice its owner's recent commit latency, so a
+	// fast disk waits a few milliseconds and an fsync-bound or distant
+	// owner up to this.
+	produceDispatchMaxLinger = 50 * time.Millisecond
+
+	// produceDispatchLookaheadWindows caps how far past the checkpoint
+	// the dispatcher reads, as a multiple of the current window: nothing
+	// at or above checkpoint + windowLimit*produceDispatchLookaheadWindows
+	// is read. While a low seq cannot commit (its destination is failing
+	// and has nowhere to reroute to, or its commit is still in flight),
+	// records up to that horizon keep committing; only records beyond it
+	// wait for the stuck one. The horizon bounds the per-seq bookkeeping
+	// (seqMarks) and the work of a rescan.
 	produceDispatchLookaheadWindows = 16
 
-	// produceDispatchRerouteAfterPasses is how many consecutive passes a
-	// destination may keep failing commits before the dispatcher treats its
-	// owner as dead and reroutes the destination's records to a live-owner
-	// partition of the same topic (see dispatch). One failed pass is a
-	// transient blip that must not scatter records across partitions, so the
-	// records retry on their original partition until this threshold; the
-	// commit attempt that keeps failing doubles as the recovery probe, so a
-	// destination whose owner comes back stops being rerouted on the very
-	// next pass. Destinations that fail to RESOLVE (owner dead per
-	// membership) skip this grace entirely — membership death is already
-	// authoritative, matching the accept-time dead-owner skip.
-	produceDispatchRerouteAfterPasses = 3
+	// produceDispatchRerouteGrace is how long a destination may keep
+	// failing commits, counted from the start of the first failed
+	// attempt, before the dispatcher treats its owner as dead and
+	// reroutes the destination's records to a live-owner partition of
+	// the same topic (see dispatch.go). A shorter failure is a transient
+	// blip (an owner restarting, a partition handoff freeze) that must
+	// not scatter records across partitions, so the records retry on
+	// their original partition until then. Destinations that fail to
+	// RESOLVE (owner dead per membership) skip this grace entirely:
+	// membership death is already authoritative, matching the
+	// accept-time dead-owner skip. The grace is measured in time, not
+	// passes: passes run back to back under load, so a pass count would
+	// reroute a handoff freeze within milliseconds.
+	produceDispatchRerouteGrace = 3 * time.Second
 
-	defaultProduceDispatchCommitFanout   = 16
+	defaultProduceDispatchCommitFanout = 16
+
+	// defaultProduceDispatchFailureBackoff is how long a destination
+	// whose commit failed waits before its next attempt, so a failing
+	// owner is probed about once a second rather than at the pass rate.
+	// It holds back only that destination. Run also waits this long
+	// after it could not read the WAL or store the checkpoint.
 	defaultProduceDispatchFailureBackoff = time.Second
 
 	// produceCommitRPCTimeout bounds a remote commit RPC issued by the
 	// dispatcher. The dispatcher's own context carries no deadline, so
 	// without an explicit one the peer transport applies its short (~5s)
-	// default reply timeout — comfortably shorter than a worst-case remote
-	// fsync under load. A commit that succeeds remotely after the client
-	// gave up is re-committed on the next pass as duplicates (the server
-	// has no dedup) and, after produceDispatchRerouteAfterPasses, even
+	// default reply timeout — comfortably shorter than a worst-case
+	// remote fsync under load. A commit that succeeds remotely after the
+	// client gave up is re-committed as duplicates (the server has no
+	// dedup) and, once the destination is past its reroute grace, even
 	// rerouted to a sibling partition. This generous timeout makes that
-	// window rare; it cannot eliminate it (see dispatch's at-least-once
-	// note), so it just needs to sit far above worst-case commit latency
-	// while still letting a genuinely dead owner fail in bounded time.
+	// window rare; it cannot eliminate it (see the at-least-once note in
+	// dispatch.go), so it just needs to sit far above worst-case commit
+	// latency while still letting a genuinely dead owner fail in bounded
+	// time. Only the destination waits for it: other destinations keep
+	// committing while it runs.
 	produceCommitRPCTimeout = 30 * time.Second
+
+	// produceProbeRPCTimeout bounds the one-record commit that probes a
+	// failing destination. A probe that succeeds after the client gave
+	// up duplicates one record, so it can afford a short deadline, and a
+	// short one keeps a hung owner from pinning the checkpoint for the
+	// full commit timeout on every retry.
+	produceProbeRPCTimeout = 5 * time.Second
+
+	// produceDispatchSlowAfter is how long a commit may run before it
+	// stops counting against the commit fan-out. A hung owner then holds
+	// one slot per destination for this long, not for the RPC deadline,
+	// so its destinations cannot starve everyone else's commits.
+	produceDispatchSlowAfter = time.Second
+
+	// produceDispatchRescanInterval is the backstop for records the
+	// dispatcher left in the WAL (see dispatch.go): at least this often
+	// they are read again and re-placed, which picks up a reroute that
+	// became possible, an owner that came back, or a delete that became
+	// confirmable.
+	produceDispatchRescanInterval = time.Second
+
+	// produceLegacyOwnerTTL is how long commits keep going out without
+	// topic IDs to an owner that refused them (an older release). Long
+	// enough that a rolling upgrade costs one refused batch per owner per
+	// TTL, short enough that an upgraded owner is back on the checked
+	// path within minutes.
+	produceLegacyOwnerTTL = 2 * time.Minute
 )
 
 type produceCommitter interface {
@@ -87,14 +153,14 @@ type produceBatchCommitter interface {
 // ProduceDispatcherConfig holds tunables for a ProduceDispatcher. Zero values
 // use safe defaults.
 type ProduceDispatcherConfig struct {
-	// PollInterval is how long Run sleeps when a pass finds no work.
+	// PollInterval is the longest Run sleeps when nothing wakes it.
 	// <=0 uses the default.
 	PollInterval time.Duration
-	// BatchSize is the hard cap on one drain window (see
+	// BatchSize is the hard cap on the adaptive window (see
 	// defaultProduceDispatchBatchSize). <=0 uses the default.
 	BatchSize int
-	// CommitConcurrency bounds how many per-partition batches are committed
-	// in parallel within one drain window. <=0 uses the default.
+	// CommitConcurrency bounds how many per-partition batches are
+	// committed in parallel. <=0 uses the default.
 	CommitConcurrency int
 }
 
@@ -103,6 +169,9 @@ type ProduceDispatcherConfig struct {
 // the committer, remotely through the peer client. It is the async half of the
 // accept-then-commit produce pipeline: producers get a 2xx once a record is in
 // the WAL, and the dispatcher guarantees it eventually reaches a partition.
+//
+// Run and DispatchAvailable share the dispatcher's state and must not be
+// used at the same time.
 type ProduceDispatcher struct {
 	ingress           *ingress.Manager
 	store             *metastore.Store
@@ -114,45 +183,22 @@ type ProduceDispatcher struct {
 	batchSize         int
 	commitConcurrency int
 	failureBackoff    time.Duration
+	// now is the clock the reroute grace and retry backoff read; tests
+	// swap it.
+	now func() time.Time
+
+	// results carries finished commits from their goroutines back to
+	// the loop, which alone owns state.
+	results chan dispatchResult
 
 	state *produceDispatchState
 
 	targetMu    sync.RWMutex
 	targetCache map[string]cachedProduceDispatchTargets
-}
 
-type produceDispatchState struct {
-	nextSeq uint64
-	cursor  wal.Cursor
-	// windowLimit is the adaptive drain window, grown toward
-	// produceDispatchTargetPerPartition * (distinct partitions seen) and
-	// clamped to [base, BatchSize cap]. It converges in one window: the first
-	// pass sees the fan-out and the next is sized to it.
-	windowLimit int
-	// committedAhead holds WAL seqs that committed in a prior pass but sit
-	// above the checkpoint because a lower seq has not committed yet. They
-	// are skipped (not re-committed) on subsequent passes — without
-	// consuming window budget — so a stuck partition cannot cause duplicate
-	// deliveries of its neighbours nor freeze them. Its size is bounded by
-	// the lookahead horizon (see produceDispatchLookaheadWindows). The set
-	// lives only in memory: a process crash loses it, and those seqs
-	// re-commit on replay — one of the at-least-once duplicate paths (the
-	// other is a remote commit that outlives produceCommitRPCTimeout; see
-	// dispatch).
-	committedAhead map[uint64]bool
-	// stuck maps each destination partition that failed to resolve or commit
-	// on the previous pass to the number of consecutive passes it has been
-	// failing. While a destination is stuck (and cannot be rerouted) only
-	// its first (lowest WAL seq) record enters the window as a recovery
-	// probe; the rest are skipped without consuming window budget, so a dead
-	// owner's growing backlog cannot re-fill the window and freeze healthy
-	// partitions. Once the count reaches produceDispatchRerouteAfterPasses
-	// and a live-owner sibling partition exists, the destination's records
-	// are rerouted there instead (see dispatch). Rebuilt every pass from
-	// that pass's failures, so a recovered destination drains at full window
-	// size one pass after a commit to it succeeds. Bounded by the distinct
-	// destinations seen in one window.
-	stuck map[produceDispatchStuckKey]int
+	// legacyOwners maps an owner address to the time until which
+	// commits to it go out without topic IDs (see commitRemote).
+	legacyOwners sync.Map
 }
 
 // NewProduceDispatcher constructs a ProduceDispatcher. Call Run to start the
@@ -192,13 +238,18 @@ func NewProduceDispatcher(
 		batchSize:         batchSize,
 		commitConcurrency: commitConcurrency,
 		failureBackoff:    defaultProduceDispatchFailureBackoff,
+		now:               time.Now,
+		results:           make(chan dispatchResult, commitConcurrency),
 		targetCache:       make(map[string]cachedProduceDispatchTargets),
 	}
 }
 
-// Run continuously drains the ingress WAL and commits accepted produce records
-// to the owning partition logs. Per-partition batches are committed in parallel,
-// while checkpointing stays tied to the single ingress WAL cursor.
+// Run continuously drains the ingress WAL and commits accepted produce
+// records to the owning partition logs until ctx is cancelled. Each
+// destination partition has at most one commit in flight and the next
+// one leaves as soon as it lands, so one slow or unreachable owner holds
+// up only its own partitions. Run returns once every commit it started
+// has finished.
 func (d *ProduceDispatcher) Run(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -211,42 +262,135 @@ func (d *ProduceDispatcher) Run(ctx context.Context) {
 }
 
 func (d *ProduceDispatcher) run(ctx context.Context) {
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		processed, err := d.dispatch(ctx, d.state)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			d.logger.Error("produce dispatcher", "err", err)
-		}
-		if ctx.Err() != nil {
-			return
+	st := d.state
+	st.manual = false
+	timer := time.NewTimer(d.interval)
+	defer timer.Stop()
+	advanced := d.ingress.DurableProduceAdvanced()
+	var lastLogged time.Time
+	for ctx.Err() == nil {
+		st.pass++
+		st.err, st.stalled = nil, false
+		d.step(ctx, st)
+		if st.err != nil && !errors.Is(st.err, context.Canceled) {
+			// A failing destination is retried about once a second;
+			// log at that pace rather than once per wakeup.
+			if now := d.now(); now.Sub(lastLogged) >= d.failureBackoff {
+				lastLogged = now
+				d.logger.Error("produce dispatcher", "err", st.err)
+			}
 		}
 
-		// More work pending and no error: keep draining without sleeping.
-		if processed > 0 && err == nil {
-			continue
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
 		}
-		// On failure, back off so a stuck partition (e.g. a dead owner)
-		// neither spins nor re-commits the window's already-committed
-		// records at the poll rate.
-		wait := d.interval
-		if err != nil {
-			wait = d.failureBackoff
+		timer.Reset(d.nextWake(st))
+		// A record becoming durable wakes the loop at once rather than
+		// on the idle poll. Not after a round that could not read the
+		// WAL or store the checkpoint: the retry then waits out the
+		// backoff instead of running once per accept. A failing
+		// destination does not count: its retries go by its own clock.
+		wake := advanced
+		if st.stalled {
+			wake = nil
 		}
-		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
-			return
+		case res := <-d.results:
+			d.finish(ctx, st, res)
+		case <-wake:
 		case <-timer.C:
+		}
+	}
+	// Every commit still running aborts on ctx; merge their outcomes so
+	// what did commit is checkpointed.
+	for st.outstanding > 0 {
+		d.finish(ctx, st, <-d.results)
+	}
+	if err := d.advanceCheckpoint(st); err != nil {
+		d.logger.Error("produce dispatcher: final checkpoint", "err", err)
+	}
+}
+
+// step runs one round of the loop: merge finished commits, read newly
+// durable records (and any the dispatcher left in the WAL when it is
+// time to look at them again), start the commits that can go, and
+// move the checkpoint.
+func (d *ProduceDispatcher) step(ctx context.Context, st *produceDispatchState) {
+	d.drainResults(ctx, st)
+	d.markSlow(st, d.now())
+	d.read(ctx, st)
+	d.launch(ctx, st)
+	if err := d.advanceCheckpoint(st); err != nil {
+		st.noteErr(err)
+		st.stalled = true
+	}
+	if now := d.now(); now.Sub(st.lastSweep) >= produceDispatchRescanInterval {
+		st.lastSweep = now
+		d.sweepIdle(st)
+	}
+}
+
+// drainResults merges every finished commit that is already waiting.
+func (d *ProduceDispatcher) drainResults(ctx context.Context, st *produceDispatchState) {
+	for {
+		select {
+		case res := <-d.results:
+			d.finish(ctx, st, res)
+		default:
+			return
 		}
 	}
 }
 
+// nextWake is how long Run may sleep before something is due: the idle
+// backstop (the failure backoff after a stalled round), a running commit
+// turning slow, a lingering batch's deadline, a failing destination's
+// retry, or the rescan backstop.
+func (d *ProduceDispatcher) nextWake(st *produceDispatchState) time.Duration {
+	now := d.now()
+	wake := now.Add(d.interval)
+	if st.stalled {
+		wake = now.Add(d.failureBackoff)
+	}
+	for job := range st.jobs {
+		if !job.slow {
+			if at := job.start.Add(produceDispatchSlowAfter); at.Before(wake) {
+				wake = at
+			}
+		}
+	}
+	for _, dest := range st.ready {
+		// Only a deadline still ahead: one that passed while the
+		// fan-out is full waits for a commit to land, which wakes the
+		// loop anyway.
+		if until, ok := d.lingerUntil(st, dest); ok && until.After(now) && until.Before(wake) {
+			wake = until
+		}
+	}
+	for dest := range st.waiting {
+		if dest.retryAt.Before(wake) {
+			wake = dest.retryAt
+		}
+	}
+	if st.skipped > 0 {
+		if at := st.lastRescan.Add(produceDispatchRescanInterval); at.Before(wake) {
+			wake = at
+		}
+	}
+	return max(wake.Sub(now), 0)
+}
+
 // DispatchAvailable performs a single dispatch pass over the ingress WAL and
-// reports how many records it processed. It is the one-shot form of Run for
-// callers (and tests) that drive the drain loop themselves.
+// reports how far the checkpoint advanced. It is the one-shot form of Run
+// for callers (and tests) that drive the loop themselves: it reads the
+// available window, commits it, waits for every commit it started, and
+// returns the first error that left records uncommitted. A failing
+// destination gets one attempt per pass (its probe), not one per
+// failureBackoff.
 func (d *ProduceDispatcher) DispatchAvailable(ctx context.Context) (int, error) {
 	if d == nil {
 		return 0, errors.New("produce dispatcher is nil")
@@ -258,12 +402,42 @@ func (d *ProduceDispatcher) DispatchAvailable(ctx context.Context) (int, error) 
 	if err := d.loadCursor(); err != nil {
 		return 0, err
 	}
-	if d.state == nil {
+	st := d.state
+	if st == nil {
 		return 0, nil
 	}
+	st.manual = true
+	defer func() { st.manual = false }()
+	st.pass++
+	st.err = nil
+	before := st.nextSeq
 
-	return d.dispatch(ctx, d.state)
+	d.drainResults(ctx, st)
+	// A pass looks at everything left in the WAL once, like the full
+	// scan it replaces, then keeps going while that makes progress:
+	// a reroute decided when a probe fails re-places the destination's
+	// other records within the same pass.
+	st.rescanDue = true
+	for range produceDispatchManualRounds {
+		d.read(ctx, st)
+		d.launch(ctx, st)
+		for st.outstanding > 0 {
+			d.finish(ctx, st, <-d.results)
+			d.launch(ctx, st)
+		}
+		if !st.rescanDue || ctx.Err() != nil {
+			break
+		}
+	}
+	if err := d.advanceCheckpoint(st); err != nil {
+		st.noteErr(err)
+	}
+	return int(st.nextSeq - before), st.err
 }
+
+// produceDispatchManualRounds bounds the read-and-commit rounds of one
+// DispatchAvailable pass.
+const produceDispatchManualRounds = 4
 
 // clampWindow bounds an adaptive window to [base, BatchSize cap]. The cap
 // (d.batchSize) wins when it is below the base, so a tiny configured BatchSize
@@ -282,12 +456,25 @@ func (d *ProduceDispatcher) loadCursor() error {
 	if err != nil {
 		return err
 	}
-	d.state = &produceDispatchState{
-		nextSeq:        nextSeq,
-		cursor:         wal.Cursor{Seq: nextSeq},
-		committedAhead: map[uint64]bool{},
-		stuck:          map[produceDispatchStuckKey]int{},
-		windowLimit:    d.clampWindow(produceDispatchBaseWindow),
-	}
+	d.state = newProduceDispatchState(nextSeq, d.clampWindow(produceDispatchBaseWindow))
 	return nil
+}
+
+func newProduceDispatchState(nextSeq uint64, window int) *produceDispatchState {
+	return &produceDispatchState{
+		nextSeq:     nextSeq,
+		storedSeq:   nextSeq,
+		readSeq:     nextSeq,
+		readCursor:  wal.Cursor{Seq: nextSeq},
+		marks:       seqMarks{base: nextSeq},
+		windowLimit: window,
+		epochDests:  map[produceDispatchStuckKey]struct{}{},
+		dests:       map[produceDispatchStuckKey]*dispatchDest{},
+		waiting:     map[*dispatchDest]struct{}{},
+		jobs:        map[*dispatchJob]struct{}{},
+		latency:     map[string]time.Duration{},
+		goneIDs:     map[string]struct{}{},
+		unsure:      map[string]time.Time{},
+		topics:      map[string]cachedDispatchTopic{},
+	}
 }

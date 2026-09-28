@@ -46,7 +46,7 @@
 //	index.go            Sparse in-memory frame index per segment.
 //	nav_cache.go        LRU of recently-resolved frame positions.
 //	decode_cache.go     LRU of decoded frames.
-//	hwm.go              Durable high-watermark persistence.
+//	hwm.go              High-watermark file: emptied before the first advance, exact at Close.
 //	consumer_offset.go  Per-partition consumer offset file.
 //	codec.go            codecForFlag — resolve a frame's codec on read.
 //	retention.go        reaper goroutine; age-based segment deletion.

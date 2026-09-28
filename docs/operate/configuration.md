@@ -18,7 +18,8 @@ Every variable, with the compiled-in default when unset. (This table is generate
 | `NARAD_HTTP_MAX_CONSUME_WAIT` | `10s` | Server-side ceiling on `?wait=` long-polls |
 | `NARAD_HTTP_MAX_HEADER_BYTES` | `65536` | Request header cap (Go's default is 1 MiB) |
 | `NARAD_HTTP_MAX_CONNECTIONS` | `4096` | Open client connections per node; extra ones wait in the accept backlog. `0` = unlimited |
-| `NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY` | `1024` | Concurrent consumes (long-polls included) per user, or per client IP with security off; extra ones get `429`. `0` = unlimited |
+| `NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY` | `1024` | Concurrent consumes (long-polls included) per user, or per client IP with security off; extra ones get `429`. A batch consume (`?max=N`) counts as N. `0` = unlimited |
+| `NARAD_HTTP_MAX_PRODUCE_IN_FLIGHT_PER_IDENTITY` | `0` | Concurrent produces per user, or per client IP with security off; extra ones get `429`. A batch produce counts as its message count, clamped to the cap, and as one while its body is read. `0` = unlimited, the default: a produce holds its goroutine only until its write-ahead log fsync, not for a long-poll's wait. In the config file (`http.max_produce_in_flight_per_identity`) it must be removed before a rollback to v3.0.1 or earlier; see below |
 | `NARAD_HTTP_METRICS_ADDR` | off | e.g. `:9100`; serves `/metrics` on its own listener (unauthenticated, keep it cluster-internal) and removes it from the API port. Off = `/metrics` on the API port behind API credentials |
 | `NARAD_HTTP_METRICS_UNAUTHENTICATED` | `false` | Serve `/metrics` on the API port without credentials (it names every topic) |
 | `NARAD_HTTP_PPROF_ADDR` | off | e.g. `:6060`; unauthenticated; keep it cluster-internal. May equal the metrics addr |
@@ -83,9 +84,9 @@ Applied when a topic-create omits the field; existing topics keep their values.
 
 For everything not worth an env var: mostly the storage engine. The chart renders `narad.config` values into this file. Full shape with defaults:
 
-Storage accepts exactly four keys; everything else (fsync mode, flush/sync
-cadence, segment sizing) is an engine internal with production defaults, and
-the loader **rejects** any attempt to set it:
+Storage accepts exactly the seven keys below; everything else (fsync mode,
+flush/sync cadence, segment sizing) is an engine internal with production
+defaults, and the loader **rejects** any attempt to set it:
 
 ```json
 {
@@ -94,7 +95,9 @@ the loader **rejects** any attempt to set it:
     "codec": "none",                        // "none" | "zstd" (yes, OFF by default)
     "compression_level": "fastest",         // zstd: fastest | default | better | best
     "idle_log_eviction_ms": 1800000,        // close logs untouched this long; 0 disables
-    "cold_retention_walk_ms": 300000        // reap expired segments of partitions whose log is closed; 0 disables
+    "cold_retention_walk_ms": 300000,       // reap expired segments of partitions whose log is closed; 0 disables
+    "consumer_offset_commit_interval_ms": 100, // how often acked frontiers reach disk; 10 to 60000
+    "ingress_wal_prealloc": false           // prepare ingress WAL segments ahead of use (opt-in, see below)
   },
   "http": { "...": "same knobs as the env vars; durations are strings with a unit (\"10s\"), a bare number is rejected" },
   "cluster": {
@@ -114,6 +117,14 @@ the loader **rejects** any attempt to set it:
   }
 }
 ```
+
+`storage.consumer_offset_commit_interval_ms`, `storage.ingress_wal_prealloc`
+and `http.max_produce_in_flight_per_identity` are new since v3.0.1, whose
+loader rejects all three. Remove them from the file before rolling a node back
+to v3.0.1 or earlier, even where they hold their defaults, or it fails to
+start. The `NARAD_HTTP_MAX_PRODUCE_IN_FLIGHT_PER_IDENTITY` environment variable
+can stay: older binaries ignore variables they do not know. See [Rolling back
+to an earlier release](helm-chart.md#rolling-back-to-an-earlier-release).
 
 Secrets (`NARAD_CLUSTER_SECRET`, `NARAD_ADMIN_PASSWORD`) are deliberately **not** file-configurable: files end up in git, and git ends up on the internet.
 
@@ -147,6 +158,63 @@ The upshot: creating short-lived topics and forgetting to delete them
 is rude but free. Deleting them is still nicer: metastore entries and
 the last active segment on disk stay until you do.
 
+### Consumer offset commit interval
+
+`consumer_offset_commit_interval_ms` (default 100, allowed 10 to 60000) is how
+often each node makes its acked consumer frontiers and out-of-order ack sets
+durable (`consumer.offset`, `consumer.ahead`): one data sync per partition
+that was acked since the last commit. A crash redelivers roughly the acks of
+the last interval, within the [at-least-once
+contract](../client/guarantees-and-errors.md); a graceful stop redelivers none.
+A longer interval means fewer syncs and a wider crash redelivery window; the
+default keeps the window it has always had. It used to be tied to the storage
+flush interval, so tuning one no longer moves the other.
+
+A commit syncs the changed partitions one at a time. When a node has more of
+them than its disk can sync within the interval, commits run back to back,
+the files lag acks by about one commit's duration instead of the interval, and
+the node logs `consumer offset commits cannot keep to their interval` (at most
+once a minute, with the partition count, the commit's duration and the
+interval). A longer interval gives produce the disk back; fewer partitions per
+node or a faster disk shortens the lag. On macOS beside a busy partition owner,
+12 changed partitions kept to 100ms, 32 took about 250ms and 64 about 510ms.
+
+### Ingress WAL segment preparation
+
+`ingress_wal_prealloc` (default `false`) makes the ingress WAL create and
+zero-fill each next segment (64 MiB) in the background, so group commits
+overwrite blocks that are already allocated and their `fdatasync` is data-only
+instead of also committing the inode through the file system journal on every
+produce batch. The win was measured on ext4 only (APFS showed none); measure on
+your own volumes before relying on it. What it changes:
+
+- **Disk**: up to two extra segments per node (the prepared active segment and
+  a ready spare, `next-segment.prep` in `<data_dir>/ingress/produce`), and one
+  segment's worth of background zero-filling per segment. If the disk is full,
+  preparation fails and the next roll creates a plain segment instead.
+- **Crash recovery**: a torn write inside a prepared segment is truncated
+  rather than refused. The details, including the one kind of damage recovery
+  can no longer tell from a tear, are in [Produce
+  Path](../internals/produce-path.md#segment-preparation-opt-in).
+- **Rollback**: a binary from before preparation (v3.0.1 and earlier) can refuse
+  to start on a WAL whose prepared segment a crash tore; see [Rolling back
+  to an earlier release](helm-chart.md#rolling-back-to-an-earlier-release).
+  Rolling back only after a clean stop avoids that, but those binaries also
+  reject the `ingress_wal_prealloc` key itself, `true` or `false`: remove it
+  from the config file before the rollback, or the node fails to start.
+  Turning the setting off again needs nothing: the next start trims the
+  prepared segment and removes the spare.
+
+### Deprecated: `high_watermark_sync_interval_ms`
+
+The engine's internal `storage.high_watermark_sync_interval_ms` has no effect:
+an open partition log no longer persists its high-watermark while it runs (the
+`hwm` file is written at close; see [Storage
+Engine](../internals/storage-engine.md#the-high-watermark-and-the-hidden-tail)).
+The field is kept, and any value passes validation, so code and tests that set
+it keep working. It was never settable from the config file or the
+environment.
+
 ### The fsync knob, honestly explained
 
 `"fsync": "batched"` (the default) does **not** weaken the durability contract you care about: a produce is fsynced in the ingress WAL before its `202`, and a partition commit is fsynced + CRC-verified before it's acknowledged back or made visible, always, in both modes. The knob only controls how eagerly *background* flusher batches hit disk between those hard points. `per_write` syncs every flushed batch; it buys you almost nothing and costs you a lot of IOPS. Leave it.
@@ -160,3 +228,5 @@ the last active segment on disk stay until you do.
 | Fatter fan-out batches on slow disks | raise `fanout.linger_ms` |
 | Faster delay-child metadata refresh | you don't; the engine self-paces (30s max wake) |
 | More retention granularity | smaller `segment_bytes`: more files, finer reaping |
+| Fewer consumer offset syncs under heavy ack traffic | raise `storage.consumer_offset_commit_interval_ms` (a crash then redelivers more acked messages) |
+| A ceiling on one user's concurrent produces | `http.max_produce_in_flight_per_identity` (off by default; a batch counts as its message count) |

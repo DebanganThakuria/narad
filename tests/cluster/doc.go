@@ -11,6 +11,9 @@
 //     TestTLSUntrustedCertFailsLoudly: Raft mTLS certificate renewal and
 //     CA rotation by rolling restart, and the failure mode of a
 //     certificate the peers do not trust.
+//   - TestReplicaChildKeepsKeylessCopiesApart: a replica child (created
+//     with parent) keeps both copies of every record, keyless ones
+//     included, on different nodes.
 //
 // The scenarios take minutes and spawn processes, so they are behind the
 // "cluster" build tag and do not run with a plain go test ./...:

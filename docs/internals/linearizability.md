@@ -182,7 +182,8 @@ in place.
 This is the case the whole tool is built around, so it is worth stating
 exactly when it is expected.
 
-Acks are persisted in batches, every 100ms by default. A broker that
+Acks are persisted in batches, every 100ms by default
+(`storage.consumer_offset_commit_interval_ms`). A broker that
 dies with a batch still in memory comes back having forgotten those
 acks, and redelivers those messages. A partition moving to a new owner
 can do the same for acks that landed during the copy. Both are

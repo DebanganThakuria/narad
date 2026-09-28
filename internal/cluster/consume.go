@@ -60,6 +60,21 @@ func (rt *Router) remoteConsumeCandidates(topicName string) []string {
 	return rotated
 }
 
+// hasRemoteOwner reports whether the topic has a live remote owner,
+// without building the owner list or touching the probe cursor.
+func (rt *Router) hasRemoteOwner(topicName string) bool {
+	routes, ok := rt.routesForTopic(topicName)
+	if !ok {
+		return false
+	}
+	for _, entry := range routes.remoteEntries {
+		if rt.consumeOwnerAddr(entry) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // remoteOwnerAddrsForTopic returns the topic's live remote owner
 // addresses in partition order, without touching the probe cursor.
 func (rt *Router) remoteOwnerAddrsForTopic(topicName string) []string {
@@ -101,9 +116,17 @@ type remoteCandidateCache struct {
 // owner, and probes each owner once. Returns (forwarded, hadCandidates)
 // with the same meaning as RouteConsumeRemote.
 func (rt *Router) reprobeRemote(ctx context.Context, w http.ResponseWriter, topicName string, cache *remoteCandidateCache) (bool, bool) {
+	forwarded, hadCandidates, _ := rt.reprobeRemoteUpTo(ctx, w, topicName, cache, 0)
+	return forwarded, hadCandidates
+}
+
+// reprobeRemoteUpTo is reprobeRemote for a consume that takes up to max
+// records (see probeBatchCandidates); batch reports that what it wrote
+// is a batch body.
+func (rt *Router) reprobeRemoteUpTo(ctx context.Context, w http.ResponseWriter, topicName string, cache *remoteCandidateCache, max int) (forwarded, hadCandidates, batch bool) {
 	routes, ok := rt.routesForTopic(topicName)
 	if !ok {
-		return false, false
+		return false, false, false
 	}
 	if !cache.valid || cache.assignmentVersion != routes.assignmentVersion || cache.routingMembersVersion != routes.routingMembersVersion {
 		cache.addrs = rt.remoteOwnerAddrs(routes, cache.addrs)
@@ -112,17 +135,28 @@ func (rt *Router) reprobeRemote(ctx context.Context, w http.ResponseWriter, topi
 		cache.valid = true
 	}
 	if len(cache.addrs) == 0 {
-		return false, false
+		return false, false, false
 	}
 	start := rt.nextConsumeCursor(topicName+":remote", len(cache.addrs))
-	return rt.probeCandidates(ctx, w, topicName, cache.addrs, start), true
+	if max > 1 {
+		forwarded, batch = rt.probeBatchCandidates(ctx, w, topicName, cache.addrs, start, max)
+	} else {
+		forwarded = rt.probeCandidates(ctx, w, topicName, cache.addrs, start)
+	}
+	return forwarded, true, batch
 }
 
 // probeCandidates probes each candidate once, starting at index start and
 // wrapping around, and writes the first delivered message to w. It
-// reports whether a message was written.
+// reports whether a message was written. It stops early once ctx is
+// done.
 func (rt *Router) probeCandidates(ctx context.Context, w http.ResponseWriter, topicName string, candidates []string, start int) bool {
 	for i := range candidates {
+		if ctx.Err() != nil {
+			// The client is gone: probing the rest would only reserve a
+			// record for nobody and release it again.
+			return false
+		}
 		addr := candidates[(start+i)%len(candidates)]
 		result := rt.callConsumeProbe(ctx, topicName, addr)
 		if result.err != nil {
@@ -137,6 +171,33 @@ func (rt *Router) probeCandidates(ctx context.Context, w http.ResponseWriter, to
 	return false
 }
 
+// probeBatchCandidates is probeCandidates for a batch consume: each
+// owner is asked for up to max records (see consumeFrom), and batch
+// reports that what was written is the owner's {"messages":[...]} body.
+// It is false for a single message, from an owner too old to take the
+// field. It is kept apart from probeCandidates so a single-record probe,
+// the one every consume on an owning node makes when its own partitions
+// are empty, pays nothing for it.
+func (rt *Router) probeBatchCandidates(ctx context.Context, w http.ResponseWriter, topicName string, candidates []string, start, max int) (forwarded, batch bool) {
+	for i := range candidates {
+		if ctx.Err() != nil {
+			// The client is gone: probing the rest would only reserve
+			// records for nobody and release them again.
+			return false, false
+		}
+		addr := candidates[(start+i)%len(candidates)]
+		res, isBatch, err := rt.consumeFrom(ctx, addr, nodewire.ConsumeRequest{Topic: topicName, LocalOnly: true}, max, consumeProbeTimeout)
+		if err != nil || res.Status != http.StatusOK {
+			// As for a single probe: an owner that failed, timed out or
+			// just lost the partition is skipped for this round.
+			continue
+		}
+		writePeerResponse(w, res)
+		return true, isBatch
+	}
+	return false, false
+}
+
 // callConsumeProbe asks one remote owner for a single non-blocking,
 // local-only scan of its partitions. Non-OK statuses (including 421 from an
 // owner that just lost the partition) are normalized to an empty 204 so the
@@ -148,9 +209,7 @@ func (rt *Router) callConsumeProbe(ctx context.Context, topicName, addr string) 
 		Topic:     topicName,
 		LocalOnly: true,
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, consumeProbeTimeout)
-	defer cancel()
-	res, err := rt.peer.Consume(probeCtx, addr, req)
+	res, err := rt.peer.ConsumeWithin(ctx, addr, consumeProbeTimeout, req)
 	if err != nil {
 		return consumeProbeResult{err: fmt.Errorf("consume probe %s: %w", addr, err)}
 	}

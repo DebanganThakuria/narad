@@ -2,7 +2,6 @@ package storage
 
 import (
 	"log/slog"
-	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -49,12 +48,18 @@ type Log struct {
 
 	highWatermark atomic.Int64
 	durableTail   atomic.Int64
-	persistedHWM  atomic.Int64
-	hwmMu         sync.Mutex
-	lastHWMSync   time.Time
-	hwmPath       string
-	hwmDirSynced  bool     // guarded by hwmMu; set after the first hwm-file dir fsync
-	hwmFile       *os.File // guarded by hwmMu; opened lazily on first persist, closed by Close
+	// persistedHWM is the boundary the hwm file holds, or -1 when it
+	// holds none Close could keep: emptied (or half emptied, if that
+	// failed) for this Log's first advance, or found empty next to
+	// records after a crash. Close writes the exact boundary whenever it
+	// differs (see hwm.go).
+	persistedHWM atomic.Int64
+	// hwmReleased is set once the hwm file is empty for this Log's life,
+	// so later advances owe it nothing (releaseHighWatermarkFile).
+	hwmReleased  atomic.Bool
+	hwmMu        sync.Mutex
+	hwmPath      string
+	hwmDirSynced bool // guarded by hwmMu; the file's name is known durable
 
 	flusher *flusher
 	reaper  *reaper
@@ -101,6 +106,13 @@ type Log struct {
 	// re-walking header-by-header from the sparse index anchor.
 	navCache *navCache
 
+	// readSeen records that something read the log since the flusher
+	// last looked. Set by every ReadShared, cleared by the flusher when
+	// it decides whether a batch it writes also goes into frameCache
+	// (see cacheWrittenFrames), so a partition nobody reads never fills
+	// its cache with frames nobody asked for.
+	readSeen atomic.Bool
+
 	closed atomic.Bool
 }
 
@@ -144,7 +156,6 @@ func NewLog(dir string, opts Options) (*Log, error) {
 		return nil, err
 	}
 	l.durableTail.Store(nextOffset)
-	l.lastHWMSync = time.Now()
 	l.flusher = newFlusher(l, &l.rwmu, opts.FlushInterval)
 	// A recovered active segment that is already full (the previous
 	// process filled it and stopped before rolling) rolls before the

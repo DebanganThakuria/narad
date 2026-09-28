@@ -56,7 +56,6 @@ func TestValidateRejectsInvalidFields(t *testing.T) {
 		"at least one of storage.flush_bytes or storage.flush_records must be > 0",
 		"storage.sync_interval_ms must be > 0",
 		"storage.sync_bytes must be >= 0",
-		"storage.high_watermark_sync_interval_ms must be > 0",
 		"storage.ingress_wal_sync_interval_ms must be > 0",
 		"topic.default_partitions must be >= 3",
 		"log.level \"verbose\" is not one of [debug, info, warn, error]",
