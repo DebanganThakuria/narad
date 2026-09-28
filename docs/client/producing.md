@@ -82,7 +82,7 @@ What follows from that:
 | `409 Conflict` | The topic is a delay child, which only its parent can feed | Produce to the parent |
 | `413 Request Entity Too Large` | Body over 1 MiB | Shrink the payload |
 | `415 Unsupported Media Type` | No accepted `Content-Type` and no `X-Narad-Client` header | Set the header |
-| `429 Too Many Requests` | Too many concurrent produces for your identity on this node (only when the operator sets `http.max_produce_in_flight_per_identity`; it is off by default) | Back off and retry, or send fewer at once |
+| `429 Too Many Requests` | Too many concurrent produces for your identity on this node. The cap is off unless the operator [sets one](../operate/configuration.md#http) | Back off and retry, or send fewer at once |
 | `503 Service Unavailable` | Temporarily unavailable, for example quorum lost | Retry with backoff; a duplicate is possible |
 
 The full list across every endpoint is in [Guarantees & errors](guarantees-and-errors.md#status-codes).
