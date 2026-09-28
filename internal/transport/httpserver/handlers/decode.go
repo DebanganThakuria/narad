@@ -119,8 +119,11 @@ func (s *Set) decodeJSON(w http.ResponseWriter, dec *json.Decoder, dst any) bool
 		s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return false
 	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
+	// One token is enough to tell whitespace from a second value, and it
+	// costs no more than that token: decoding the rest into an any built
+	// the whole trailing value, which a body under the cap could make
+	// dozens of times its own size.
+	if _, err := dec.Token(); err != io.EOF {
 		if err == nil {
 			s.WriteError(w, http.StatusBadRequest, "invalid json: multiple JSON values")
 			return false

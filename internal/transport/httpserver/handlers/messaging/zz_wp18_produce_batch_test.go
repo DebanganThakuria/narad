@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -133,7 +134,7 @@ func TestZZWP18ProduceBatchRefusesInvalid(t *testing.T) {
 		{"not json", "", `{"messages":[`, "invalid json"},
 		{"no messages", "", `{"messages":[]}`, "messages required"},
 		{"messages absent", "", `{}`, "messages required"},
-		{"too many", "", `{"messages":[` + strings.Join(many, ",") + `]}`, fmt.Sprintf("too many messages: %d (max %d)", MaxProduceBatch+1, MaxProduceBatch)},
+		{"too many", "", `{"messages":[` + strings.Join(many, ",") + `]}`, fmt.Sprintf("too many messages: more than %d (max %d)", MaxProduceBatch, MaxProduceBatch)},
 		{"key parameter", "?key=k", `{"messages":[` + ok + `]}`, "key is set per message"},
 		{"empty key parameter", "?key=", `{"messages":[` + ok + `]}`, "key is set per message"},
 		{"partition parameter", "?partition=1", `{"messages":[` + ok + `]}`, "partition is set per message"},
@@ -232,32 +233,76 @@ func TestZZWP18ProduceBatchAuthorization(t *testing.T) {
 	}
 }
 
+// zzWP18Hold records what the handler does with a gate's hold.
+type zzWP18Hold struct {
+	raised   []int
+	released int
+	refuse   bool
+}
+
+func (h *zzWP18Hold) Raise(w http.ResponseWriter, n int) bool {
+	h.raised = append(h.raised, n)
+	if h.refuse {
+		w.WriteHeader(http.StatusTooManyRequests)
+		return false
+	}
+	return true
+}
+
+func (h *zzWP18Hold) Release() { h.released++ }
+
+// zzWP18ReadTracker is a request body that records its first read.
+type zzWP18ReadTracker struct {
+	io.Reader
+	read bool
+}
+
+func (r *zzWP18ReadTracker) Read(p []byte) (int, error) {
+	r.read = true
+	return r.Reader.Read(p)
+}
+
+func (r *zzWP18ReadTracker) Close() error { return nil }
+
 // TestZZWP18ProduceBatchGateWeighsMessages checks the in-flight gate is
-// asked for the batch's message count, after the body is decoded, and
-// that a refusal keeps the batch from the broker.
+// taken before the body is read and raised to the batch's message count
+// once it is decoded, that the hold is released whether or not the
+// raise succeeds, and that a refusal keeps the batch from the broker.
 func TestZZWP18ProduceBatchGateWeighsMessages(t *testing.T) {
-	var asked []int
-	released := 0
-	refuse := false
-	gate := func(w http.ResponseWriter, _ *http.Request, n int) (func(), bool) {
-		asked = append(asked, n)
-		if refuse {
-			w.WriteHeader(http.StatusTooManyRequests)
-			return nil, false
+	var holds []*zzWP18Hold
+	var body *zzWP18ReadTracker
+	refuseRaise := false
+	gate := func(_ http.ResponseWriter, _ *http.Request) (InFlightHold, bool) {
+		if body.read {
+			t.Error("the gate was taken after the body was read")
 		}
-		return func() { released++ }, true
+		h := &zzWP18Hold{refuse: refuseRaise}
+		holds = append(holds, h)
+		return h, true
 	}
 	br := &zzWP18BatchProducer{fakeBroker: &fakeBroker{}}
 	h := ProduceBatch(newTestSet(br, nil), gate)
-	body := `{"messages":[{"payload":1},{"payload":2},{"payload":3}]}`
-	if res := zzWP18PostBatch(t, h, "/v1/topics/orders/produce/batch", body, nil); res.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202", res.Code)
+	post := func() int {
+		body = &zzWP18ReadTracker{Reader: strings.NewReader(`{"messages":[{"payload":1},{"payload":2},{"payload":3}]}`)}
+		req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce/batch", body)
+		req.SetPathValue("topic", "orders")
+		res := httptest.NewRecorder()
+		h(res, req)
+		return res.Code
 	}
-	refuse = true
-	if res := zzWP18PostBatch(t, h, "/v1/topics/orders/produce/batch", body, nil); res.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429", res.Code)
+	if code := post(); code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", code)
 	}
-	if len(asked) != 2 || asked[0] != 3 || asked[1] != 3 || released != 1 || len(br.calls) != 1 {
-		t.Fatalf("gate asked %v, released %d, broker calls %d; want [3 3], 1, 1", asked, released, len(br.calls))
+	refuseRaise = true
+	if code := post(); code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", code)
+	}
+	if len(holds) != 2 || len(br.calls) != 1 {
+		t.Fatalf("holds %d, broker calls %d; want 2, 1", len(holds), len(br.calls))
+	}
+	for i, h := range holds {
+		if len(h.raised) != 1 || h.raised[0] != 3 || h.released != 1 {
+			t.Fatalf("hold %d: raised %v, released %d times; want [3] and once", i, h.raised, h.released)
+		}
 	}
 }

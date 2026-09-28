@@ -18,11 +18,6 @@ import (
 // same bound as a batch consume's max and a batch ack's handles.
 const MaxProduceBatch = MaxConsumeBatch
 
-// produceBatchRequest is the body of a batch produce.
-type produceBatchRequest struct {
-	Messages []produceBatchMessage `json:"messages"`
-}
-
 // produceBatchMessage is one message of a batch produce. It mirrors the
 // encoding a consume returns a record in:
 //
@@ -43,12 +38,27 @@ type produceBatchMessage struct {
 	Partition       *int            `json:"partition"`
 }
 
-// InFlightGate takes n of the caller's in-flight budget for the rest of
-// a request whose weight the handler learns only from the body (a
-// batch produce weighs its message count). It answers the request
-// itself (429) and reports false when the budget cannot take n more;
-// otherwise release gives the n back. A nil gate admits everything.
-type InFlightGate func(w http.ResponseWriter, r *http.Request, n int) (release func(), ok bool)
+// InFlightGate admits a request against the caller's in-flight budget
+// when the handler learns the request's weight only from its body (a
+// batch produce weighs its message count). The handler calls it before
+// it reads the body, so the budget also bounds the requests that are
+// still reading and decoding one: a body costs memory before its weight
+// is known. The gate answers the request itself (429) and reports false
+// when the caller has no room for another request. Otherwise the handler
+// raises the hold to the weight once it knows it, and releases the hold
+// when the request is done. A nil gate admits everything.
+type InFlightGate func(w http.ResponseWriter, r *http.Request) (InFlightHold, bool)
+
+// InFlightHold is what an InFlightGate holds for one request.
+type InFlightHold interface {
+	// Raise takes n of the caller's budget for the rest of the request.
+	// It answers the request itself (429) and reports false when the
+	// budget cannot take n; the hold is then still to be released. Call
+	// it at most once.
+	Raise(w http.ResponseWriter, n int) bool
+	// Release gives back whatever the hold took. Call it exactly once.
+	Release()
+}
 
 // ProduceBatch handles POST /v1/topics/{topic}/produce/batch: a JSON
 // body {"messages":[...]} of up to MaxProduceBatch messages (see
@@ -64,6 +74,11 @@ type InFlightGate func(w http.ResponseWriter, r *http.Request, n int) (release f
 // and a server that predates batches must refuse a batch (404) rather
 // than store it as one message. The body cap is a single produce's, and
 // the permission is produce.
+//
+// What a request costs before it is refused is bounded by the request,
+// not by what its body holds: the gate is taken before the body is read,
+// and the body is decoded one message at a time and refused at message
+// MaxProduceBatch+1 (see decodeBoundedList).
 func ProduceBatch(s *handlers.Set, gate InFlightGate) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")
@@ -84,26 +99,34 @@ func ProduceBatch(s *handlers.Set, gate InFlightGate) http.HandlerFunc {
 			return
 		}
 
+		var hold InFlightHold
+		if gate != nil {
+			if hold, ok = gate(w, r); !ok {
+				return
+			}
+			defer hold.Release()
+		}
 		body, ok := s.ReadBody(w, r, handlers.MaxMessageBodyBytes)
 		if !ok {
 			return
 		}
-		var req produceBatchRequest
-		if !s.DecodeJSONBytes(w, body, &req) {
+		batch, err := decodeBoundedList[produceBatchMessage](body, "messages", MaxProduceBatch)
+		if errors.Is(err, errListTooLong) {
+			s.WriteError(w, http.StatusBadRequest, tooManyMessages)
 			return
 		}
-		n := len(req.Messages)
+		if err != nil {
+			s.WriteError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+			return
+		}
+		n := len(batch)
 		if n == 0 {
 			s.WriteError(w, http.StatusBadRequest, "messages required")
 			return
 		}
-		if n > MaxProduceBatch {
-			s.WriteError(w, http.StatusBadRequest, "too many messages: "+strconv.Itoa(n)+" (max "+strconv.Itoa(MaxProduceBatch)+")")
-			return
-		}
 		msgs := make([]brokermsg.ProduceMessage, n)
-		for i := range req.Messages {
-			msg, err := req.Messages[i].decode()
+		for i := range batch {
+			msg, err := batch[i].decode()
 			if err != nil {
 				s.WriteError(w, http.StatusBadRequest, "message "+strconv.Itoa(i)+": "+err.Error())
 				return
@@ -111,12 +134,8 @@ func ProduceBatch(s *handlers.Set, gate InFlightGate) http.HandlerFunc {
 			msgs[i] = msg
 		}
 
-		if gate != nil {
-			release, ok := gate(w, r, n)
-			if !ok {
-				return
-			}
-			defer release()
+		if hold != nil && !hold.Raise(w, n) {
+			return
 		}
 		if _, err := bp.AcceptProduceBatch(r.Context(), topicName, msgs); err != nil {
 			s.WriteBrokerError(w, "produce", err)
@@ -125,6 +144,11 @@ func ProduceBatch(s *handlers.Set, gate InFlightGate) http.HandlerFunc {
 		writeProduceBatchAccepted(w, n)
 	}
 }
+
+// tooManyMessages answers a batch produce past MaxProduceBatch. The
+// decode stops at the first message past the bound, so the answer does
+// not count the rest.
+var tooManyMessages = "too many messages: more than " + strconv.Itoa(MaxProduceBatch) + " (max " + strconv.Itoa(MaxProduceBatch) + ")"
 
 // decode checks one message as a single produce checks its key,
 // partition and body, and returns it for the broker.

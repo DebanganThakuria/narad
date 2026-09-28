@@ -23,6 +23,10 @@ type inFlightLimiter struct {
 	what   string
 	mu     sync.Mutex
 	counts map[string]int
+	// reading counts, per identity, the requests a gate admitted that
+	// have not raised their hold yet: they are reading or decoding their
+	// bodies (see gate).
+	reading map[string]int
 }
 
 // newInFlightLimiter returns a limiter allowing max concurrent consume
@@ -38,7 +42,7 @@ func newInFlightLimiterFor(max int, what string) *inFlightLimiter {
 	if max <= 0 {
 		return nil
 	}
-	return &inFlightLimiter{max: max, what: what, counts: make(map[string]int)}
+	return &inFlightLimiter{max: max, what: what, counts: make(map[string]int), reading: make(map[string]int)}
 }
 
 // wrap gates next: a request beyond the identity's cap is answered 429
@@ -66,22 +70,94 @@ func (l *inFlightLimiter) wrap(next http.Handler, weight func(*http.Request) int
 }
 
 // gate is wrap for a handler that learns a request's weight only from
-// its body (a batch produce weighs its message count): the handler calls
-// the gate once it knows. The weight is clamped as wrap clamps it. Nil
-// when limiting is off.
+// its body (a batch produce weighs its message count). The handler takes
+// the gate before it reads the body and raises the hold to the weight
+// once it knows it (see httpmessaging.InFlightGate). Nil when limiting
+// is off.
+//
+// A request that has not raised its hold yet counts in reading, and is
+// admitted only while the identity's weight in flight plus its requests
+// still reading stay within the cap, so the cap bounds the bodies being
+// read and decoded as well as the weight admitted. A raise is held to
+// the weight in flight alone, clamped as wrap clamps it: two requests
+// that both read their bodies are not refused together for each other's
+// reading slot, and a lone request larger than the cap is still served.
 func (l *inFlightLimiter) gate() httpmessaging.InFlightGate {
 	if l == nil {
 		return nil
 	}
-	return func(w http.ResponseWriter, r *http.Request, n int) (func(), bool) {
+	return func(w http.ResponseWriter, r *http.Request) (httpmessaging.InFlightHold, bool) {
 		key := requestIdentity(r)
-		n = min(max(n, 1), l.max)
-		if !l.acquireN(key, n) {
+		if !l.beginRead(key) {
 			writeTooManyInFlightFor(w, l.what, l.max)
 			return nil, false
 		}
-		return func() { l.releaseN(key, n) }, true
+		return &inFlightHold{l: l, key: key}, true
 	}
+}
+
+// inFlightHold is one gated request: a reading slot until Raise
+// succeeds, n of the identity's budget after.
+type inFlightHold struct {
+	l   *inFlightLimiter
+	key string
+	n   int
+}
+
+func (h *inFlightHold) Raise(w http.ResponseWriter, n int) bool {
+	n = min(max(n, 1), h.l.max)
+	if !h.l.raise(h.key, n) {
+		writeTooManyInFlightFor(w, h.l.what, h.l.max)
+		return false
+	}
+	h.n = n
+	return true
+}
+
+func (h *inFlightHold) Release() {
+	if h.n == 0 {
+		h.l.endRead(h.key)
+		return
+	}
+	h.l.releaseN(h.key, h.n)
+}
+
+// beginRead admits one more request of key to read its body.
+func (l *inFlightLimiter) beginRead(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.counts[key]+l.reading[key] >= l.max {
+		return false
+	}
+	l.reading[key]++
+	return true
+}
+
+// raise turns one of key's reading slots into n of its budget.
+func (l *inFlightLimiter) raise(key string, n int) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.counts[key]+n > l.max {
+		return false
+	}
+	l.counts[key] += n
+	l.dropReadLocked(key)
+	return true
+}
+
+// endRead gives back a reading slot that was never raised.
+func (l *inFlightLimiter) endRead(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.dropReadLocked(key)
+}
+
+func (l *inFlightLimiter) dropReadLocked(key string) {
+	if l.reading[key] <= 1 {
+		delete(l.reading, key)
+		return
+	}
+	l.reading[key]--
 }
 
 func (l *inFlightLimiter) acquire(key string) bool { return l.acquireN(key, 1) }
