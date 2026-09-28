@@ -85,7 +85,7 @@ The price, stated plainly so you never discover it in production: **ordering is 
 curl -u $AUTH -X POST $NARAD/v1/topics   -H "Content-Type: application/json"   -d '{"name": "orders-replica", "parent": "orders"}'
 ```
 
-That creates a fan-out child that receives every message durably and whose partitions are **deliberately placed on different nodes** than the parent's: an async full copy that survives the parent's disk, with its own retention (make it longer: congratulations, you also have an archive tier). No quorums, no consistency protocol, no replication code to trust, just [a placement rule on machinery already soak-tested for days](client/fanout-and-delay.md#replication-when-you-ask-for-it). You pay double disk only on topics that opt in.
+That creates a fan-out child that receives every message durably and whose partitions are **deliberately placed on different nodes** than the parent's: an async full copy that survives the parent's disk for every keyed message, with its own retention (make it longer: congratulations, you also have an archive tier). No quorums, no consistency protocol, no replication code to trust, just [a placement rule on machinery already soak-tested for days](client/fanout-and-delay.md#replication-when-you-ask-for-it). You pay double disk only on topics that opt in.
 
 </div>
 
@@ -128,6 +128,7 @@ PATCH  /v1/topics/{t}                   tune retention & limits
 DELETE /v1/topics/{t}                   delete
 
 POST   /v1/topics/{t}/produce           send   (body = your message)
+POST   /v1/topics/{t}/produce/batch     send up to 100 at once (JSON)
 GET    /v1/topics/{t}/consume           receive (long-poll with ?wait=, batch with ?max=)
 POST   /v1/topics/{t}/ack               settle · extend · nack (one, or a batch)
 

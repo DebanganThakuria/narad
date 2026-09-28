@@ -19,6 +19,7 @@ Every variable, with the compiled-in default when unset. (This table is generate
 | `NARAD_HTTP_MAX_HEADER_BYTES` | `65536` | Request header cap (Go's default is 1 MiB) |
 | `NARAD_HTTP_MAX_CONNECTIONS` | `4096` | Open client connections per node; extra ones wait in the accept backlog. `0` = unlimited |
 | `NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY` | `1024` | Concurrent consumes (long-polls included) per user, or per client IP with security off; extra ones get `429`. A batch consume (`?max=N`) counts as N. `0` = unlimited |
+| `NARAD_HTTP_MAX_PRODUCE_IN_FLIGHT_PER_IDENTITY` | `0` | Concurrent produces per user, or per client IP with security off; extra ones get `429`. A batch produce counts as its message count, clamped to the cap. `0` = unlimited, the default: a produce holds its goroutine only until its write-ahead log fsync, not for a long-poll's wait. In the config file (`http.max_produce_in_flight_per_identity`) it must be removed before a rollback to v3.0.1 or earlier; see below |
 | `NARAD_HTTP_METRICS_ADDR` | off | e.g. `:9100`; serves `/metrics` on its own listener (unauthenticated, keep it cluster-internal) and removes it from the API port. Off = `/metrics` on the API port behind API credentials |
 | `NARAD_HTTP_METRICS_UNAUTHENTICATED` | `false` | Serve `/metrics` on the API port without credentials (it names every topic) |
 | `NARAD_HTTP_PPROF_ADDR` | off | e.g. `:6060`; unauthenticated; keep it cluster-internal. May equal the metrics addr |
@@ -117,11 +118,13 @@ defaults, and the loader **rejects** any attempt to set it:
 }
 ```
 
-`consumer_offset_commit_interval_ms` and `ingress_wal_prealloc` are new since
-v3.0.1, whose loader rejects both. Remove them from the file before rolling a
-node back to v3.0.1 or earlier, even where they hold the defaults shown above,
-or it fails to start; see [Rolling back to an earlier
-release](helm-chart.md#rolling-back-to-an-earlier-release).
+`storage.consumer_offset_commit_interval_ms`, `storage.ingress_wal_prealloc`
+and `http.max_produce_in_flight_per_identity` are new since v3.0.1, whose
+loader rejects all three. Remove them from the file before rolling a node back
+to v3.0.1 or earlier, even where they hold their defaults, or it fails to
+start. The `NARAD_HTTP_MAX_PRODUCE_IN_FLIGHT_PER_IDENTITY` environment variable
+can stay: older binaries ignore variables they do not know. See [Rolling back
+to an earlier release](helm-chart.md#rolling-back-to-an-earlier-release).
 
 Secrets (`NARAD_CLUSTER_SECRET`, `NARAD_ADMIN_PASSWORD`) are deliberately **not** file-configurable: files end up in git, and git ends up on the internet.
 
@@ -166,6 +169,15 @@ contract](../client/guarantees-and-errors.md); a graceful stop redelivers none.
 A longer interval means fewer syncs and a wider crash redelivery window; the
 default keeps the window it has always had. It used to be tied to the storage
 flush interval, so tuning one no longer moves the other.
+
+A commit syncs the changed partitions one at a time. When a node has more of
+them than its disk can sync within the interval, commits run back to back,
+the files lag acks by about one commit's duration instead of the interval, and
+the node logs `consumer offset commits cannot keep to their interval` (at most
+once a minute, with the partition count, the commit's duration and the
+interval). A longer interval gives produce the disk back; fewer partitions per
+node or a faster disk shortens the lag. On macOS beside a busy partition owner,
+12 changed partitions kept to 100ms, 32 took about 250ms and 64 about 510ms.
 
 ### Ingress WAL segment preparation
 
@@ -217,3 +229,4 @@ environment.
 | Faster delay-child metadata refresh | you don't; the engine self-paces (30s max wake) |
 | More retention granularity | smaller `segment_bytes`: more files, finer reaping |
 | Fewer consumer offset syncs under heavy ack traffic | raise `storage.consumer_offset_commit_interval_ms` (a crash then redelivers more acked messages) |
+| A ceiling on one user's concurrent produces | `http.max_produce_in_flight_per_identity` (off by default; a batch counts as its message count) |

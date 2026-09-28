@@ -18,7 +18,7 @@ flowchart LR
     CUR2 -->|"commit batch"| R[("retry/p* owners")]
 ```
 
-A reconciler on every node diffs *desired cursors* (from the metastore: links × owned partitions) against *running cursors* once a second: cursors spawn on attach, stop on detach/delete/ownership change.
+A reconciler on every node diffs *desired cursors* (from the metastore: links × owned partitions) against *running cursors* once a second: cursors spawn on attach, stop on detach/delete/ownership change. The diff decodes every topic record, so a tick skips it while none of the replica's topic, assignment, schema, user or routing-member versions has moved since the last full pass (`LatestDomainVersion`; member heartbeats and drain flags do not count). A full pass still runs after a pass that failed or left work behind (a cancelled cursor still draining, ownership it could not read), after any cursor exits, on the first tick after the replica caught up again, on every orphan-sweep tick, and at least every 30 s. Measured over 12-partition topics with no links or moves, one tick of this reconciler and the [move runner](rebalance.md) together takes about 91% less time than a full pass every second (at 5,000 topics, 29.5 ms to 2.8 ms, the orphan sweep's share included), and an attach or detach is still picked up on the next tick.
 
 ## The cursor loop: commit-before-advance
 
@@ -86,13 +86,13 @@ Delivery is therefore *never early on the reading clock* (the gate is checked ag
 
 | Constant | Value |
 |---|---|
-| Reconcile interval (desired vs running cursors) | 1s |
+| Reconcile interval (desired vs running cursors) | 1s, a tick skipping its pass while metadata is unchanged; a full pass at least every 30s (`reconcileForcedPassEvery`) |
 | Slab long-poll / retry backoff | 1s / 1s |
 | Child-partition commits in flight per slab | 16 |
 | Batch caps | 4,096 records / 4 MiB (`fanout.max_batch_records/bytes`) |
 | Linger to fatten a partial batch | 25ms |
 | Delay cursor max sleep (metadata freshness bound) | 30s (`defaultFanoutDueWakeCap`) |
-| Orphan cursor-file sweep | every 30th reconcile pass |
+| Orphan cursor-file sweep | every 30th caught-up reconcile tick, skipped ticks included (a sweep tick always runs a full pass) |
 | Max children per parent / max delay | 108 / 1 year |
 | Retention floor for a delay child's parent | delay + 1h (`topic.MinRetentionMs`) |
 | Attach epoch | 8 random bytes, hex (e.g. `67953471cc57a32a`) |

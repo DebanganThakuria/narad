@@ -13,6 +13,8 @@ Every partition assignment carries two fields:
 
 The controller's only job is policy: set `Target` to balance partition count across the live nodes. The nodes do the work. The ownership flip is a Raft compare-and-swap: atomic, single entry, no split-brain.
 
+Each node's move runner looks for partitions targeted at it once a second. Each pass lists every topic and reads its assignments, so it is gated the way the fan-out reconciler is (see [Fan-out Engine](fanout-engine.md)): a tick skips the read while the replica's domain versions have not moved, and runs it anyway after a failed or unfinished pass, after a move worker exits, and at least every 30 s. A new target still starts its worker on the next tick. The stale-copy sweep keeps its own count of ticks, skipped or not, and runs every 30th.
+
 ```mermaid
 flowchart LR
     subgraph raft["metastore (Raft)"]

@@ -64,9 +64,7 @@ var zzWP19RollbackTargetFileKeys = []string{
 // documentation has not caught up with yet. Delete an entry in the same
 // change that names the key, with an instruction to remove it, in every
 // rollbackDocs section: the test fails while an entry outlives its need.
-var zzWP19AwaitingRollbackNote = map[string]bool{
-	"http.max_produce_in_flight_per_identity": true,
-}
+var zzWP19AwaitingRollbackNote = map[string]bool{}
 
 // Every file key outside storage that this loader accepts and the rollback
 // target's loader rejects is named, together with an instruction to remove
