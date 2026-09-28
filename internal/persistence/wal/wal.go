@@ -87,7 +87,7 @@ type syncBatch struct {
 
 // Open opens (or creates) the log in dir, recovers the next sequence
 // number from the existing segments, truncates any torn tail from the
-// active segment, and starts the background sync loop.
+// active segment and fsyncs it, and starts the background sync loop.
 func Open(dir string, opts Options) (*Log, error) {
 	opts = normalizeOptions(opts)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -150,7 +150,14 @@ func Open(dir string, opts Options) (*Log, error) {
 }
 
 // openActiveSegment opens the last segment for appending, discarding any
-// bytes past validEnd (a torn tail detected by the open-time scan).
+// bytes past validEnd (a torn tail detected by the open-time scan), and
+// fsyncs it. The scan read the file through the page cache, so after a
+// process crash validEnd can cover frames the dead process wrote but
+// never saw synced; the sync makes them durable before the log reports
+// them as such (durableSize) and replays them to the dispatcher, whose
+// checkpoint could otherwise pass records a later power loss takes back.
+// A full fsync, not a data-only one: the truncate may have changed the
+// size. One per open, never on the append path.
 func openActiveSegment(path string, validEnd int64) (*os.File, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -163,6 +170,10 @@ func openActiveSegment(path string, validEnd int64) (*os.File, error) {
 	if _, err := file.Seek(validEnd, io.SeekStart); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("wal: seek active segment: %w", err)
+	}
+	if err := syncfile.Sync(file); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("wal: sync active segment: %w", err)
 	}
 	return file, nil
 }
