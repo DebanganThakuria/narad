@@ -109,6 +109,14 @@ Honest fine print, because a pattern is not a subsystem:
 - Children attached the two-step way (create, then attach) keep the
   placement they got at creation, which is *not* anti-affine. For the
   replica pattern, use one-call creation.
+- **Keyed records only.** Fan-out picks a record's child partition from
+  its key, the same way produce picked its parent partition, which is
+  what puts a keyed record on the same partition index in both topics.
+  A record produced without a key is spread round-robin
+  in the parent and again, independently, in the child, so its child
+  copy can land on the node that holds its parent copy. (Releases that
+  invented a key for keyless records covered them too.) Key the records
+  of a topic you replicate.
 
 ## Delay children
 

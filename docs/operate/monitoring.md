@@ -48,6 +48,8 @@ Honorable mention: `rate(narad_errors_total[5m])` by `component`/`kind` as a cat
 
 The per-partition series (lag, oldest unconsumed age, in-flight and acked-ahead sizes, `narad_partition_size_bytes`, `narad_segments`) are exported for every partition the node owns, open log or not, as long as its files hold a boundary: a closed partition whose `hwm` file is empty (as a crash leaves it, until the log is opened and closed again) has no series. Before, a partition whose log was idle-evicted, or not yet opened since a restart, dropped out of them, which hid exactly the untouched backlog they exist to show. For such a partition the file-derived values (size, segments, the high watermark) are cached for up to 30 s, so a cold-retention sweep between two polls can leave them stale for that long; the frontier and the in-flight and acked-ahead sizes are always current. A deleted topic's series stay pruned even while one of its logs is still open on a node.
 
+Three more series are built from the same set of partitions and changed with it. `narad_partitions_total` and `narad_topic_bytes` now count owned partitions whose log is closed, where they used to count only open ones, so both step up after the upgrade on a node with idle-evicted partitions or partitions not reopened since a restart; that is a change in what they count, not growth. `narad_consumer_dropped_messages` is exported for those partitions too, and a partition whose consumer state is not loaded is measured from its persisted frontier: it used to count as dropped every offset below the log start.
+
 ### Fan-out
 
 | Metric | Meaning |
@@ -79,7 +81,7 @@ The per-partition series (lag, oldest unconsumed age, in-flight and acked-ahead 
 
 ### Cluster & misc
 
-`narad_topics_total`, `narad_partitions_total`, `narad_open_partition_logs` (refreshed every poller tick, eviction on or off), `narad_errors_total{component,kind}`, `narad_boot_duration_seconds`.
+`narad_topics_total`, `narad_partitions_total` (the owned partitions that have per-partition series, open log or closed, as described under Queue health), `narad_open_partition_logs` (refreshed every poller tick, eviction on or off), `narad_errors_total{component,kind}`, `narad_boot_duration_seconds`.
 
 ## Reading the dashboards under failure
 

@@ -39,7 +39,9 @@ persistence:
 commonLabels: {}               # extra labels on EVERY resource's metadata (admission policies)
 podLabels: {}                  # extra POD labels (never touches the immutable selector)
 podAnnotations: {}
-resources: {}                  # a memory limit also sets Go's soft memory limit (90% of it)
+resources:                     # the chart's default; a memory limit also sets Go's soft memory limit (90% of it)
+  requests: { cpu: 500m, memory: 512Mi }
+  limits: {}
 affinity: {}                   # spread across zones here if you have them
 
 # Engine
