@@ -13,15 +13,18 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
-// zzWP23RemoveAllWithTick removes topics/<name> the way os.RemoveAll
-// does for a topic with one partition directory, in its syscall order:
-// the partition directory's entries and the topic directory's marker are
-// unlinked, then (the window) tick runs, then the two directories are
-// rmdir'ed. os.RemoveAll lists before it unlinks and does not list
-// again before the rmdir, so a file created in the window fails the
-// rmdir with ENOTEMPTY, which it returns (removeall_at.go).
-func zzWP23RemoveAllWithTick(t *testing.T, partDir string, tick func()) func(string) error {
+// zzWP23RemoveAllWithTick removes a topic directory the way os.RemoveAll
+// does for a topic with one partition directory (partBase, e.g.
+// "p00000"), in its syscall order: the partition directory's entries and
+// the topic directory's marker are unlinked, then (the window) tick
+// runs, then the two directories are rmdir'ed. os.RemoveAll lists before
+// it unlinks and does not list again before the rmdir, so a file
+// created in the window fails the rmdir with ENOTEMPTY, which it returns
+// (removeall_at.go). It acts on the directory it is passed: topics/<name>,
+// or wherever the purge set it aside.
+func zzWP23RemoveAllWithTick(t *testing.T, partBase string, tick func()) func(string) error {
 	return func(topicDir string) error {
+		partDir := filepath.Join(topicDir, partBase)
 		entries, err := os.ReadDir(partDir)
 		if err != nil {
 			t.Errorf("list %s: %v", partDir, err)
@@ -89,7 +92,7 @@ func TestZZWP23PurgeRetiresBeforeRemoving(t *testing.T) {
 	topicDir := storage.TopicDir(dataDir, "orders")
 	partDir := storage.TopicPartitionDir(dataDir, "orders", 0)
 	ticked := false
-	logs.removeAll = zzWP23RemoveAllWithTick(t, partDir, func() {
+	logs.removeAll = zzWP23RemoveAllWithTick(t, filepath.Base(partDir), func() {
 		ticked = true
 		if err := committer.flush(); err != nil {
 			t.Logf("tick inside the removal: %v", err)

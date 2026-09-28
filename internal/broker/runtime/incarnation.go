@@ -33,6 +33,8 @@ package runtime
 // name-based behaviour: nothing is stamped, nothing is quarantined.
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -219,6 +221,10 @@ func (g *Logs) TopicIncarnationMatches(topicName, id string) (bool, error) {
 //
 // An empty id is a purge from a sender that predates incarnation IDs
 // and removes topics/<name> whatever it holds, as it always did.
+//
+// A directory being removed is first renamed to a quarantine name
+// (setAsidePurged), so nothing written by path during the removal lands
+// where a successor of the name opens.
 func (g *Logs) PurgeTopic(topicName, id string) (purged bool, err error) {
 	unlock := g.lockTopic(topicName)
 	purged, err = g.purgeTopicGuarded(topicName, id)
@@ -260,23 +266,39 @@ func (g *Logs) purgeTopicGuarded(topicName, id string) (purged bool, err error) 
 	// partition) and the unlink of every segment file stall callers of
 	// this topic, which must wait for the purge anyway, and nobody else.
 	closeErr := g.closeTopicGuarded(topicName)
+	// Set the directory aside before retiring the incarnation, and remove
+	// it there. The offset committer persists a shard's commits by path,
+	// creating a missing consumer file in the partition directory, and
+	// the retire cannot stop a shard from being made again after it: a
+	// consume that resolved the purged incarnation's log before the purge
+	// can still reserve on it, which makes the partition's shard again
+	// from whatever consumer files the path names. Removed in place, that
+	// shard recovered the purged frontier from files os.RemoveAll had not
+	// unlinked yet, and a tick persisting it after the unlinks and before
+	// the rmdir (a late ack of the dropped shard, or the committer's
+	// requeue of a forgotten snapshot) created consumer files in the
+	// directory being removed. The rmdir failed, the unmarked leftover
+	// survived, and a same-named successor adopted it with the purged
+	// frontier and skipped its own first records. Set aside, the path
+	// names nothing: a shard made after the rename recovers nothing, a
+	// prime by path finds no directory and creates none, and a file
+	// created through a directory the committer pinned before the rename
+	// lands in the set-aside copy, which no successor opens. A rename that
+	// fails removes the directory in place, as before.
+	removeDir, asideErr := g.setAsidePurged(topicName, id)
+	if asideErr != nil {
+		g.logger.Warn("purge: set topic directory aside; removing it in place",
+			"topic", topicName, "purged_incarnation", id, "err", asideErr)
+	}
 	// Retire the incarnation before the removal as well as after it. Its
-	// consumer shards are live until the hook drops them, and the offset
-	// committer persists their commits by path, creating a missing
-	// consumer file in the partition directory. os.RemoveAll lists and
-	// unlinks a directory's entries and only then removes the directory:
-	// a file created in between fails that rmdir, the unmarked leftover
-	// survives, and a same-named successor adopts it with the purged
-	// incarnation's frontier. The retire comes after the closes: a
-	// closed log serves no reads, so no record reaches a consumer
-	// through a shard made again after the retire, and the retire after
-	// the removal drops such a shard. Each retire's drop also waits for
-	// a shard create already reading the files and drops what it stores
-	// (the create fence of consumer.InFlight), so a create that read
-	// before the removal cannot store its shard after the last retire
-	// and hand the purged frontier to a successor of the name.
+	// consumer shards are live until the hook drops them. Each retire's
+	// drop waits for a shard create already reading the files and drops
+	// what it stores (the create fence of consumer.InFlight), so a create
+	// that read before the rename cannot store its shard after the last
+	// retire and hand the purged frontier to a successor of the name. The
+	// retire after the removal drops a shard made again in between.
 	g.notifyRetired(topicName)
-	rmErr := g.removeAll(dir)
+	rmErr := g.removeAll(removeDir)
 	if closeErr != nil {
 		err = closeErr
 	}
@@ -285,6 +307,48 @@ func (g *Logs) purgeTopicGuarded(topicName, id string) (purged bool, err error) 
 	}
 	g.notifyRetired(topicName)
 	return true, err
+}
+
+// setAsidePurged renames topics/<name> to a quarantine name before a
+// purge removes it, and returns the directory to remove: the set-aside
+// path, or topics/<name> when there is nothing to rename or the rename
+// failed (err). The name is topics/<name>.stale-<id>, which a failed
+// removal leaves for the purge's retry (removeQuarantines) and the orphan
+// sweeps. A legacy purge (empty id) uses the directory's marker when it
+// has one, so the sweeps classify the leftover as a quarantine, and
+// otherwise a random suffix no live topic's directory carries; the
+// startup sweep removes such an unmarked leftover once the leader
+// confirms no topic of that name exists.
+func (g *Logs) setAsidePurged(topicName, id string) (string, error) {
+	dir := storage.TopicDir(g.dataDir, topicName)
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		return dir, nil
+	} else if err != nil {
+		return dir, err
+	}
+	asideID := id
+	if asideID == "" {
+		marker, marked, err := storage.ReadTopicIncarnation(dir)
+		switch {
+		case err != nil:
+			return dir, err
+		case marked:
+			asideID = marker
+		default:
+			var b [8]byte
+			if _, err := rand.Read(b[:]); err != nil {
+				return dir, err
+			}
+			asideID = "purge-" + hex.EncodeToString(b[:])
+		}
+	}
+	aside, err := storage.QuarantineTopicDir(g.dataDir, topicName, asideID)
+	if aside != "" {
+		// Renamed; a failed sync of the parent directory does not matter
+		// for a directory about to be removed.
+		return aside, nil
+	}
+	return dir, err
 }
 
 // removeQuarantines deletes every quarantine directory of topicName's
