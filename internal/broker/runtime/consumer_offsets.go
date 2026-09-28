@@ -628,50 +628,33 @@ func (c *ConsumerOffsetCommitter) newPart(key offsetCommitKey) *offsetPart {
 // the file out before any window write (syncPrimes). A missing
 // directory is never recreated. Caller holds ioMu.
 func (c *ConsumerOffsetCommitter) primeLocked(st *offsetPart) (offsetSync, error) {
-	dir, err := os.Open(st.dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return offsetSync{}, errOffsetDirGone
-	}
+	root, dirInfo, err := openPartitionDir(st.dir)
 	if err != nil {
 		return offsetSync{}, err
 	}
-	keepDir := false
-	defer func() {
-		if !keepDir {
-			_ = dir.Close()
-		}
-	}()
-	dirInfo, err := dir.Stat()
-	if err != nil {
-		return offsetSync{}, err
-	}
-	if !dirInfo.IsDir() {
-		return offsetSync{}, fmt.Errorf("consumer state partition path is not a directory: %s", st.dir)
-	}
+	defer root.Close()
 	// From here st's shard is being persisted into this directory: if it
 	// goes away, the partition is stranded.
 	st.dirInfo = dirInfo
-	path := filepath.Join(st.dir, storage.ConsumerAheadFileName)
-	created := false
-	f, err := syncfile.OpenFile(path, os.O_RDWR, storage.ConsumerStateFileMode)
-	if errors.Is(err, os.ErrNotExist) {
-		f, err = syncfile.OpenFile(path, os.O_RDWR|os.O_CREATE, storage.ConsumerStateFileMode)
-		created = true
-	}
-	if errors.Is(err, os.ErrNotExist) {
-		return offsetSync{}, errOffsetDirGone
-	}
+	f, created, err := openStateFile(root, st.dir, dirInfo, storage.ConsumerAheadFileName, os.O_RDWR)
 	if err != nil {
 		return offsetSync{}, err
 	}
+	// A created file's directory entry is synced with the prime's
+	// writeout, through the directory it was created in.
+	var dir *os.File
+	if created {
+		if dir, err = root.Open("."); err != nil {
+			_ = f.Close()
+			return offsetSync{}, err
+		}
+	}
 	fail := func(err error) (offsetSync, error) {
 		_ = f.Close()
+		if dir != nil {
+			_ = dir.Close()
+		}
 		return offsetSync{}, err
-	}
-	// The file must have been opened in the directory held open above,
-	// not in one renamed over its name since (a move's install).
-	if now, err := os.Stat(st.dir); err != nil || !os.SameFile(now, dirInfo) {
-		return fail(errOffsetDirGone)
 	}
 	info, err := f.Stat()
 	if err != nil {
@@ -713,18 +696,73 @@ func (c *ConsumerOffsetCommitter) primeLocked(st *offsetPart) (offsetSync, error
 	st.written = offsetWritten{}
 	st.dirtySince = time.Time{}
 	st.needsRewrite = false
-	p := offsetSync{st: st, f: f, dev: st.dev}
+	p := offsetSync{st: st, f: f, dev: st.dev, dir: dir}
 	if c.held < c.maxFDs || c.evictLocked() {
 		st.f = f
 		c.held++
 	} else {
 		p.transient = true
 	}
-	if created {
-		p.dir = dir
-		keepDir = true
-	}
 	return p, nil
+}
+
+// openPartitionDir opens a partition directory as the root every open of
+// its consumer state goes through, and reports what the directory is. A
+// missing directory is errOffsetDirGone: the committer never recreates
+// one.
+//
+// The open root pins the directory: while it is open, the directory
+// cannot be removed and replaced by one that reuses its inode, and a
+// file opened or created through it lands in it whatever the path names
+// by then.
+func openPartitionDir(dir string) (*os.Root, os.FileInfo, error) {
+	root, err := os.OpenRoot(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, errOffsetDirGone
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, nil, err
+	}
+	return root, info, nil
+}
+
+// openStateFile opens name, a consumer state file, in the partition
+// directory root pins, whose path is dir and identity dirInfo, creating
+// it when missing (created reports that).
+//
+// An existing file is opened by path, through syncfile, so the fault
+// hook sees the open. A move can rename its copy over dir between the
+// caller's checks and that open, and the open then names the copy's
+// file; so the path must still name the pinned directory after the
+// open. A pinned directory is not replaced by one reusing its inode, and
+// nothing renames a replaced partition directory back, so a path that
+// names it after the open named it at the open. A missing file is
+// created through root, never by path: a create by path after such an
+// install would add the file to the copy. Either failure is
+// errOffsetDirGone, and nothing has been written.
+func openStateFile(root *os.Root, dir string, dirInfo os.FileInfo, name string, flag int) (f *os.File, created bool, err error) {
+	f, err = syncfile.OpenFile(filepath.Join(dir, name), flag, storage.ConsumerStateFileMode)
+	if errors.Is(err, os.ErrNotExist) {
+		f, err = root.OpenFile(name, flag|os.O_CREATE, storage.ConsumerStateFileMode)
+		created = true
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		// The pinned directory was removed: nothing can be created in it.
+		return nil, false, errOffsetDirGone
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if now, err := os.Stat(dir); err != nil || !os.SameFile(now, dirInfo) {
+		_ = f.Close()
+		return nil, false, errOffsetDirGone
+	}
+	return f, created, nil
 }
 
 // syncPrimes writes out every file primed this tick and flushes their
@@ -869,7 +907,10 @@ func (c *ConsumerOffsetCommitter) writeWindows(now time.Time, wants []offsetWant
 		}
 		lv, err := c.levelLocked(st, frontier)
 		if errors.Is(err, errOffsetDirGone) {
-			// The window's writeout, if any, finds the directory gone too.
+			// The directory changed under st. A window of st queued
+			// above is not written out: writeOut finds its descriptor
+			// closed or naming another file, and flip finds st dead.
+			c.strandLocked(st)
 			continue
 		}
 		if err != nil {
@@ -886,37 +927,43 @@ func (c *ConsumerOffsetCommitter) writeWindows(now time.Time, wants []offsetWant
 
 // levelLocked writes frontier into the partition's consumer.offset in
 // place, through a transient descriptor the caller writes out with the
-// tick's batch. The directory must still be the one primed: its
-// consumer.ahead must be the file the committer holds. Caller holds
+// tick's batch. It writes only into the directory the partition was
+// primed in: that directory is pinned for the whole level, it must be
+// the one primed, its consumer.ahead must be the file the committer
+// holds, and consumer.offset is opened inside it (openStateFile). A
+// move that installs its copy over the path at any point of the level
+// gets nothing from it; the level reports errOffsetDirGone. Caller holds
 // ioMu.
 func (c *ConsumerOffsetCommitter) levelLocked(st *offsetPart, frontier int64) (offsetSync, error) {
-	if err := c.checkFileLocked(st); err != nil {
-		return offsetSync{}, err
-	}
-	path := filepath.Join(st.dir, storage.ConsumerOffsetFileName)
-	created := false
-	f, err := syncfile.OpenFile(path, os.O_WRONLY, storage.ConsumerStateFileMode)
-	if errors.Is(err, os.ErrNotExist) {
-		f, err = syncfile.OpenFile(path, os.O_WRONLY|os.O_CREATE, storage.ConsumerStateFileMode)
-		created = true
-	}
-	if errors.Is(err, os.ErrNotExist) {
-		return offsetSync{}, errOffsetDirGone
-	}
+	root, dirInfo, err := openPartitionDir(st.dir)
 	if err != nil {
 		return offsetSync{}, err
 	}
-	buf := storage.EncodeConsumerOffset(frontier)
-	if _, err := syncfile.WriteAt(f, buf[:], 0); err != nil {
-		_ = f.Close()
+	defer root.Close()
+	if !os.SameFile(dirInfo, st.dirInfo) {
+		return offsetSync{}, errOffsetDirGone
+	}
+	if err := c.checkFileLocked(st, root); err != nil {
+		return offsetSync{}, err
+	}
+	f, created, err := openStateFile(root, st.dir, dirInfo, storage.ConsumerOffsetFileName, os.O_WRONLY)
+	if err != nil {
 		return offsetSync{}, err
 	}
 	lv := offsetSync{st: st, f: f, dev: st.dev, transient: true, level: frontier}
 	if created {
-		if lv.dir, err = os.Open(st.dir); err != nil {
+		if lv.dir, err = root.Open("."); err != nil {
 			_ = f.Close()
 			return offsetSync{}, err
 		}
+	}
+	buf := storage.EncodeConsumerOffset(frontier)
+	if _, err := syncfile.WriteAt(f, buf[:], 0); err != nil {
+		_ = f.Close()
+		if lv.dir != nil {
+			_ = lv.dir.Close()
+		}
+		return offsetSync{}, err
 	}
 	return lv, nil
 }
@@ -1049,11 +1096,11 @@ func (c *ConsumerOffsetCommitter) fdLocked(st *offsetPart) (*os.File, bool, erro
 	return f, true, nil
 }
 
-// checkFileLocked reports errOffsetDirGone when st's directory no
-// longer holds the consumer.ahead the committer primed. Caller holds
-// ioMu.
-func (c *ConsumerOffsetCommitter) checkFileLocked(st *offsetPart) error {
-	info, err := os.Stat(filepath.Join(st.dir, storage.ConsumerAheadFileName))
+// checkFileLocked reports errOffsetDirGone when the partition directory
+// root pins no longer holds the consumer.ahead the committer primed.
+// Caller holds ioMu.
+func (c *ConsumerOffsetCommitter) checkFileLocked(st *offsetPart, root *os.Root) error {
+	info, err := root.Stat(storage.ConsumerAheadFileName)
 	if errors.Is(err, os.ErrNotExist) {
 		return errOffsetDirGone
 	}
