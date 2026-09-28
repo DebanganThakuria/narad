@@ -3,7 +3,16 @@ name: Docs
 on:
   push:
     branches: [master]
-    paths: ["docs/**", "overrides/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+    paths:
+      - "docs/**"
+      - "overrides/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+      # The HTTP API reference page is generated from the spec, and the
+      # check below also compares the spec with the router.
+      - "api/**"
+      - "scripts/gen-http-api-docs.py"
+      - "internal/transport/httpserver/router.go"
   workflow_dispatch:
 
 permissions:
@@ -24,6 +33,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install mkdocs-material
+      # Fails when docs/reference/http-api.md is not what
+      # api/openapi.yaml renders to, or when the spec and router.go list
+      # different routes. PyYAML comes with MkDocs.
+      - name: Check the generated HTTP API page
+        run: python scripts/gen-http-api-docs.py --check
       - run: mkdocs build --strict
       - uses: actions/upload-pages-artifact@v5
         with:
