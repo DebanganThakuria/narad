@@ -128,6 +128,7 @@ PATCH  /v1/topics/{t}                   tune retention & limits
 DELETE /v1/topics/{t}                   delete
 
 POST   /v1/topics/{t}/produce           send   (body = your message)
+POST   /v1/topics/{t}/produce/batch     send up to 100 at once (JSON)
 GET    /v1/topics/{t}/consume           receive (long-poll with ?wait=, batch with ?max=)
 POST   /v1/topics/{t}/ack               settle · extend · nack (one, or a batch)
 

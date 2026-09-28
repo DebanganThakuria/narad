@@ -115,7 +115,7 @@ narad:
       codec: zstd                   # compression is OFF by default; we turn it on
       compression_level: fastest
 
-extraEnv:                    # Go runtime tuning we actually run with
+extraEnv:                    # optional Go runtime settings (see below)
   GOMAXPROCS: "5"
   GOMEMLIMIT: 1GiB
   GOGC: "400"
@@ -124,10 +124,11 @@ metrics:
   enabled: true              # ServiceMonitor for Prometheus operators
 ```
 
-Two of those deserve a second look:
+Three of those deserve a second look:
 
 - **`initialClusterSize`** is the set of pods allowed to *bootstrap* a brand-new Raft cluster (`narad-0/1/2` at 3). Every pod beyond it joins the existing cluster instead. It is consulted only on an empty disk; set it once and forget it exists. Changing it later does nothing good and possibly something educational.
 - **`narad.config.storage.codec: zstd`**: on-disk compression is **off by default**. We run zstd/fastest: ~40% smaller at low rate, up to ~95% smaller under real load for JSON-ish payloads, for near-zero CPU. Turn it on unless your payloads are already compressed.
+- **`GOMEMLIMIT`** is not needed once the pod has a memory limit. On Linux, when `GOMEMLIMIT` is unset, `narad serve` sets the Go soft memory limit to 90% of the process's cgroup memory limit (cgroup v2 `memory.max` or v1 `memory.limit_in_bytes`, the tightest one from the process's cgroup up to the root, unlimited ones ignored), so the garbage collector works harder near the limit instead of letting a burst get the pod OOM-killed. It logs this once at startup as `go memory limit set from the cgroup memory limit (set GOMEMLIMIT to override)`, with `gomemlimit_bytes`, `cgroup_limit_bytes` and `cgroup_file`. With the chart's default `resources.limits: {}` there is no cgroup limit and nothing is set; to get a soft limit there, set `resources.limits.memory` or `GOMEMLIMIT`. An explicit `GOMEMLIMIT`, whatever its value (`off` included), always wins. The binary never changes `GOGC`: a local A/B found no throughput, latency or CPU gain from `GOGC=400`, so treat it as optional.
 
 ## Recovering after a node outage
 
@@ -167,7 +168,7 @@ an outage that has not finished.
 
 ## Rate limiting: bring your own
 
-Narad has request-size caps (1 MiB bodies, 64 KiB headers), a per-node connection cap (`NARAD_HTTP_MAX_CONNECTIONS`, 4096), and a per-user cap on concurrent consumes (`NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY`, 1024, answered `429` beyond it), but **no built-in request rate limiting**: a hostile or buggy client can send requests as fast as you'll accept them. Put a rate limiter at your ingress (every ingress controller has one), same place your TLS terminates. Narad's job is not losing messages; your ingress's job is deciding who gets to send them.
+Narad has request-size caps (1 MiB bodies, 64 KiB headers), a per-node connection cap (`NARAD_HTTP_MAX_CONNECTIONS`, 4096), a per-user cap on concurrent consumes (`NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY`, 1024, answered `429` beyond it), and an optional per-user cap on concurrent produces (`NARAD_HTTP_MAX_PRODUCE_IN_FLIGHT_PER_IDENTITY`, off by default; a batch produce counts as its message count), but **no built-in request rate limiting**: a hostile or buggy client can send requests as fast as you'll accept them. Put a rate limiter at your ingress (every ingress controller has one), same place your TLS terminates. Narad's job is not losing messages; your ingress's job is deciding who gets to send them.
 
 One thing the API does refuse on its own: a `POST`, `PUT` or `PATCH` without `Content-Type: application/json` (or `application/octet-stream` for produce) and without an `X-Narad-Client` header gets `415`. That is the cross-site request forgery guard for Basic-auth sessions: a browser attaches cached Basic credentials to cross-origin requests, and only those "simple" requests skip the CORS preflight. Set the header in `curl` (`-H 'Content-Type: application/json'`, also on body-less acks) and you never see it; the CLI sends `X-Narad-Client` on every request.
 

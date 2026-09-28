@@ -38,6 +38,27 @@ Consequences worth knowing:
 - **A timeout or 5xx is ambiguous**: the message may or may not have been accepted. If you retry (you should), you may create a duplicate. Consumers must tolerate duplicates anyway (see [Guarantees](guarantees-and-errors.md)), so retry freely.
 - There's a tiny gap between `202` and the message being consumable, usually single-digit milliseconds.
 
+## Producing in batches
+
+```bash
+curl -u $AUTH -X POST -H "Content-Type: application/json" \
+  "$NARAD/v1/topics/orders/produce/batch" \
+  -d '{"messages":[{"key":"customer-42","payload":{"order":1}},{"payload":"aGVsbG8=","payload_encoding":"base64"}]}'
+```
+
+- `POST /v1/topics/{topic}/produce/batch` takes a JSON body `{"messages":[...]}` with 1 to 100 messages. The whole body counts against the same **1 MiB** cap as a single produce, and the request needs the same produce permission. Each message has:
+    - `payload`: a JSON value, stored byte for byte as written, exactly as a single produce of that body would store it. A JSON string keeps its quotes: `"hi"` is stored as those four bytes. Anything that is not JSON (plain text, protobuf, an image) goes as a base64 string with **`"payload_encoding": "base64"`**, and is stored as the decoded bytes.
+    - `key` (optional): a string. Absent or empty means no key, as for a single produce without `?key=`. A key that is not valid UTF-8 goes as base64 with **`"key_encoding": "base64"`**.
+    - `partition` (optional): pins the message, as `?partition=` does.
+- The `key` and `partition` query parameters are refused (`400`) on this path: in a batch they belong to each message. An unknown field in the body is refused too.
+- The answer is **`202`** with `{"accepted":N}`, sent once every message is fsynced to the accepting node's write-ahead log. It is the same delivery promise as a single `202`, for every message in the batch.
+- **All or nothing.** Every message is checked the way a single produce checks one (its key, payload and partition, the partition range, the topic's [schema](schemas.md)) before any is accepted. The first that fails answers the whole request with the status a single produce of it would get, its error prefixed with its index (`message 3: ...`), and nothing is stored.
+- **A timeout or 5xx is ambiguous for the whole batch**: some or all of it may have been accepted, so a retry may duplicate part of it. That is the single-produce rule, applied to every message at once.
+- Messages go into the write-ahead log in batch order, so messages that share a key reach their partition in batch order in normal operation. That is still steady-state behaviour, not a contract: the [ordering section](#ordering-there-is-no-ordering-guarantee) applies to batches too.
+- A batch waits for one write-ahead log fsync however many messages it carries (two when the log rolls to a new segment in the middle of it), so it costs far less per message than single produces. Measured at the write-ahead log on macOS, where an fsync flushes the whole device, with one caller at a time: about 51 µs per message in batches of 100 and 0.5 ms in batches of 10, against about 4.7 ms for a single produce. For one message, use a single produce: the batch envelope costs a little more CPU and buys nothing.
+- A batch counts as its message count (clamped to the cap) against your per-identity cap on concurrent produces, `http.max_produce_in_flight_per_identity`, which answers `429` beyond it. The cap is off by default.
+- Batches need a server that knows them. A node on a release before batch produce answers `404`, so fall back to single produces for as long as a client can reach such a node.
+
 ## Ordering: there is no ordering guarantee
 
 Read that heading twice, because most brokers whisper this in a footnote: **Narad does not guarantee delivery order.** Keys give steady-state partition affinity, and a single quiet partition with one consumer will usually see arrival order, but it is emergent behavior, not a contract. Three mechanisms (all deliberate) reorder:
@@ -51,5 +72,6 @@ The last two are the availability trade: Narad would rather deliver your message
 ## Practical tips
 
 - Send messages concurrently: Narad handles parallel produces per connection and across connections.
+- Have many small messages ready at once? [Send them as a batch](#producing-in-batches): one request and one fsync for up to 100 of them.
 - Keep payloads lean. The 1 MiB cap is a ceiling, not a target; big payloads slow every hop.
 - If your payload is already compressed or encrypted, that's fine; Narad's on-disk compression just won't shrink it further.
