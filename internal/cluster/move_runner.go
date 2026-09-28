@@ -596,8 +596,8 @@ func (r *MoveRunner) finishMove(ctx context.Context, topicName string, partition
 	}
 	// A node that owned this partition before it moved away may still
 	// hold the old in-memory reservation shard, and the installed copy
-	// carries the source's consumer.offset, which must win. The shard is
-	// dropped before the install as well as after it. Its acks persist
+	// carries the source's consumer state files, which must win. The
+	// shard is dropped before the install as well as after it. Its acks persist
 	// through the offset committer by path, into whatever directory the
 	// partition's path names: a shard still alive when the copy lands
 	// would write its frontier into the copy, and the new owner would

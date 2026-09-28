@@ -96,7 +96,7 @@ defaults, and the loader **rejects** any attempt to set it:
     "compression_level": "fastest",         // zstd: fastest | default | better | best
     "idle_log_eviction_ms": 1800000,        // close logs untouched this long; 0 disables
     "cold_retention_walk_ms": 300000,       // reap expired segments of partitions whose log is closed; 0 disables
-    "consumer_offset_commit_interval_ms": 100, // how often acked frontiers reach disk; 10 to 60000
+    "consumer_offset_commit_interval_ms": 1000, // how long an acked frontier may wait for a disk sync; 10 to 60000
     "ingress_wal_prealloc": false           // prepare ingress WAL segments ahead of use (opt-in, see below)
   },
   "http": { "...": "same knobs as the env vars; durations are strings with a unit (\"10s\"), a bare number is rejected" },
@@ -160,24 +160,49 @@ the last active segment on disk stay until you do.
 
 ### Consumer offset commit interval
 
-`consumer_offset_commit_interval_ms` (default 100, allowed 10 to 60000) is how
-often each node makes its acked consumer frontiers and out-of-order ack sets
-durable (`consumer.offset`, `consumer.ahead`): one data sync per partition
-that was acked since the last commit. A crash redelivers roughly the acks of
-the last interval, within the [at-least-once
-contract](../client/guarantees-and-errors.md); a graceful stop redelivers none.
-A longer interval means fewer syncs and a wider crash redelivery window; the
-default keeps the window it has always had. It used to be tied to the storage
-flush interval, so tuning one no longer moves the other.
+`consumer_offset_commit_interval_ms` (default 1000, allowed 10 to 60000) is the
+durability interval of each node's acked consumer frontiers and out-of-order
+ack sets (`consumer.ahead`, `consumer.offset`). The node persists them at two
+cadences (the details are in [Consume
+Path](../internals/consume-path.md#how-acks-reach-the-disk)):
 
-A commit syncs the changed partitions one at a time. When a node has more of
-them than its disk can sync within the interval, commits run back to back,
-the files lag acks by about one commit's duration instead of the interval, and
-the node logs `consumer offset commits cannot keep to their interval` (at most
-once a minute, with the partition count, the commit's duration and the
-interval). A longer interval gives produce the disk back; fewer partitions per
-node or a faster disk shortens the lag. On macOS beside a busy partition owner,
-12 changed partitions kept to 100ms, 32 took about 250ms and 64 about 510ms.
+- Every 100ms, or every interval when that is shorter, each partition acked
+  since the last tick has its state written into the page cache, with no sync.
+  A crash of the broker process loses nothing from the page cache, so it
+  redelivers about the last 100ms of acks (less with an interval under 100),
+  however long the interval is.
+- Once per interval, each partition written since is synced to disk, once:
+  `fdatasync` on Linux; on macOS `fsync(2)` and then one `F_FULLFSYNC` per
+  device for all of a tick's partitions. So a power loss, a kernel crash or the
+  loss of the machine redelivers up to about the interval plus 100ms and the
+  sync time of acks: about 1.1s at the default.
+
+Every redelivery is a duplicate, within the [at-least-once
+contract](../client/guarantees-and-errors.md), never a loss, and a graceful
+stop redelivers none. Releases before this one synced every changed partition
+every 100ms (on the storage flush interval, which this setting no longer
+borrows), and after a power loss redelivered about 0.1s plus the time that
+sync took. Set the key to `100` to keep that window: every changed partition is
+then synced on every tick again, still with one `F_FULLFSYNC` per device per
+tick on macOS rather than one per partition. A longer interval means fewer
+syncs and a wider power-loss window, and nothing more redelivered after a
+process crash.
+
+The node logs, at most once a minute each, when it cannot keep to either
+cadence: `consumer offset commits cannot keep to their interval` (with the
+partition count, `flush_took`, and the tick as `interval`) when one tick takes
+longer than the tick interval, and `consumer offsets wait longer than their
+durability interval for a device flush` (with the partition count, the
+`oldest` wait and the `durability_interval`) when a partition's writes have
+waited more than twice the interval to be synced. Fewer partitions per node or
+a faster disk helps with either.
+
+Each node keeps up to min(4096, a quarter of the soft open-file limit)
+`consumer.ahead` files open between writes, and every partition acked since
+the upgrade has one (8 KiB). `consumer.offset` is brought level with it at most
+every 30s while the node runs and at a graceful stop, so a tool that reads
+`consumer.offset` alone sees a frontier up to about 30s plus the interval old:
+read `consumer.ahead` too and take the larger, as the broker does.
 
 ### Ingress WAL segment preparation
 
@@ -228,5 +253,6 @@ environment.
 | Fatter fan-out batches on slow disks | raise `fanout.linger_ms` |
 | Faster delay-child metadata refresh | you don't; the engine self-paces (30s max wake) |
 | More retention granularity | smaller `segment_bytes`: more files, finer reaping |
-| Fewer consumer offset syncs under heavy ack traffic | raise `storage.consumer_offset_commit_interval_ms` (a crash then redelivers more acked messages) |
+| Fewer consumer offset syncs under heavy ack traffic | raise `storage.consumer_offset_commit_interval_ms` (a power loss then redelivers more acked messages; a process crash still redelivers about 100ms of them) |
+| Fewer acked messages redelivered after a power loss | lower `storage.consumer_offset_commit_interval_ms` (`100` restores the window of earlier releases, at more syncs) |
 | A ceiling on one user's concurrent produces | `http.max_produce_in_flight_per_identity` (off by default; a batch counts as its message count) |

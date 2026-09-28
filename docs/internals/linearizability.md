@@ -182,10 +182,13 @@ in place.
 This is the case the whole tool is built around, so it is worth stating
 exactly when it is expected.
 
-Acks are persisted in batches, every 100ms by default
-(`storage.consumer_offset_commit_interval_ms`). A broker that
-dies with a batch still in memory comes back having forgotten those
-acks, and redelivers those messages. A partition moving to a new owner
+Acks are persisted in batches: written to the page cache every 100ms,
+and synced to disk once per durability interval
+(`storage.consumer_offset_commit_interval_ms`, 1s by default). A broker
+process that dies with a batch still in memory comes back having
+forgotten those acks, and redelivers those messages; a machine that
+loses power can also lose what was in the page cache, up to about the
+durability interval of acks. A partition moving to a new owner
 can do the same for acks that landed during the copy. Both are
 documented in [Guarantees](../client/guarantees-and-errors.md) and both
 are the direct cost of not paying for a synchronous ack write per
