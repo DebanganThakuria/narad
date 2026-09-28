@@ -1,0 +1,19 @@
+{% extends "main.html" %}
+
+{#-
+  Home page: an introduction, not a docs page. It keeps the header,
+  tabs and footer, drops the breadcrumbs, the edit button and the
+  generated title, and gives the content the full grid width so the
+  first screen can sit on a two-column grid.
+-#}
+{% block htmltitle %}
+  <title>Narad: a small, sturdy message broker over HTTP</title>
+{% endblock %}
+
+{% block container %}
+  <div class="md-content nr-home" data-md-component="content">
+    <article class="md-content__inner md-typeset">
+      {{ page.content }}
+    </article>
+  </div>
+{% endblock %}
