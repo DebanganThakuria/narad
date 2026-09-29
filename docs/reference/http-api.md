@@ -55,7 +55,9 @@ Date: Mon, 28 Sep 2026 19:31:43 GMT
 
 The same API as an OpenAPI 3.1 file:
 [openapi.yaml](openapi.yaml). Every example on this page was run
-against a single node built from `master`.
+against a single node built from `master`. Long JSON bodies are shown
+indented; the node sends each one on a single line, which is what
+`Content-Length` counts.
 
 ## Basics {#basics}
 
