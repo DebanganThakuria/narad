@@ -40,7 +40,9 @@ func loadCheckpoint(path string) (uint64, error) {
 // but not yet fdatasynced. The value only bounds crash-replay
 // duplicates (every seq below it is committed to its partition), so
 // deferring the flush costs at most this much re-dispatch after an OS
-// crash or power loss, never a record.
+// crash or power loss, never a record. The WAL is compacted only behind
+// the synced value (see durable), so compaction trails a store by at
+// most one flush.
 const checkpointSyncDelay = 250 * time.Millisecond
 
 // checkpointWriter persists the dispatch checkpoint by overwriting a
@@ -80,6 +82,13 @@ type checkpointWriter struct {
 	syncing bool
 	// syncErr is a failed background flush, reported by the next store.
 	syncErr error
+	// written is the last value written to the file; synced is the
+	// highest value a successful fdatasync covered. Compaction must not
+	// pass synced: after a power loss the file can come back holding
+	// synced (or anything later), while unlinked WAL segments stay
+	// unlinked.
+	written uint64
+	synced  uint64
 }
 
 func newCheckpointWriter(dir, name string) *checkpointWriter {
@@ -123,6 +132,7 @@ func (w *checkpointWriter) store(nextSeq uint64) error {
 		w.resetLocked()
 		return fmt.Errorf("ingress: write checkpoint: %w", err)
 	}
+	w.written = nextSeq
 	if !w.dirSynced {
 		// A new name must be durable before anything relies on it:
 		// flush the data and the directory now, once.
@@ -140,6 +150,7 @@ func (w *checkpointWriter) store(nextSeq uint64) error {
 			return fmt.Errorf("ingress: sync checkpoint dir: %w", syncErr)
 		}
 		w.dirSynced = true
+		w.markSyncedLocked(nextSeq)
 		return nil
 	}
 	w.dirty = true
@@ -148,6 +159,48 @@ func (w *checkpointWriter) store(nextSeq uint64) error {
 		time.AfterFunc(w.delay, w.flush)
 	}
 	return nil
+}
+
+// storeDurable writes nextSeq and fdatasyncs it before returning, so
+// the WAL may be compacted behind it at once. OpenManager uses it to
+// make the recovered value durable (a process crash can leave it
+// written but not flushed) before anything compacts behind it.
+func (w *checkpointWriter) storeDurable(nextSeq uint64) error {
+	if err := w.store(nextSeq); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.waitIdleLocked()
+	if w.file == nil {
+		return errors.New("ingress: checkpoint file closed")
+	}
+	if w.dirty {
+		if err := syncfile.SyncData(w.file); err != nil {
+			w.resetLocked()
+			return fmt.Errorf("ingress: sync checkpoint: %w", err)
+		}
+		w.dirty = false
+	}
+	w.markSyncedLocked(w.written)
+	return nil
+}
+
+// durable returns the highest checkpoint known to be on disk: the WAL
+// may be compacted up to it and no further. 0 for a nil writer.
+func (w *checkpointWriter) durable() uint64 {
+	if w == nil {
+		return 0
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.synced
+}
+
+// markSyncedLocked records that an fdatasync covered v. Checkpoints
+// only move forward, so synced never goes back.
+func (w *checkpointWriter) markSyncedLocked(v uint64) {
+	w.synced = max(w.synced, v)
 }
 
 // flush is the background fdatasync a store schedules.
@@ -159,6 +212,7 @@ func (w *checkpointWriter) flush() {
 		return
 	}
 	f := w.file
+	value := w.written
 	w.dirty = false
 	w.syncing = true
 	w.mu.Unlock()
@@ -167,9 +221,19 @@ func (w *checkpointWriter) flush() {
 
 	w.mu.Lock()
 	w.syncing = false
-	if err != nil {
+	switch {
+	case err != nil:
 		w.dirty = true
 		w.syncErr = err
+	default:
+		w.markSyncedLocked(value)
+		// A store that landed during the sync found this flush running
+		// and did not arm another; arm it here so the newer value (and
+		// compaction behind it) does not wait for the next store.
+		if w.dirty && !w.flushArmed && w.file != nil {
+			w.flushArmed = true
+			time.AfterFunc(w.delay, w.flush)
+		}
 	}
 	w.idle.Broadcast()
 	w.mu.Unlock()
@@ -209,6 +273,8 @@ func (w *checkpointWriter) close() error {
 	if w.dirty {
 		if serr := syncfile.SyncData(w.file); serr != nil {
 			err = fmt.Errorf("ingress: sync checkpoint: %w", serr)
+		} else {
+			w.markSyncedLocked(w.written)
 		}
 		w.dirty = false
 	}
