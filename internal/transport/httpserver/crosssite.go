@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	httpmessaging "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/messaging"
 )
 
 // ClientHeader is a request header whose mere presence marks a request
@@ -42,13 +43,14 @@ var apiContentTypes = map[string]bool{
 // A single consume stays open to plain clients (curl without the
 // header), as it always was; a batch consume (?max=N), which reserves up
 // to 100 records a request, must carry ClientHeader and is answered 400
-// without it.
+// without it. HEAD is checked too: the mux serves it on GET routes, and a
+// page can send it without a preflight as well.
 func RequireAPIContentType() Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case http.MethodPost, http.MethodPut, http.MethodPatch:
-			case http.MethodGet:
+			case http.MethodGet, http.MethodHead:
 				if r.Header.Get(ClientHeader) == "" && batchConsume(r) {
 					writeBatchConsumeNeedsClientHeader(w)
 					return
@@ -69,18 +71,12 @@ func RequireAPIContentType() Middleware {
 }
 
 // batchConsume reports whether r is a consume with a non-empty max
-// parameter (an empty max= is a single consume). A plain consume costs
-// a suffix check and two substring checks; the query is parsed only when
-// it mentions max or is percent-encoded (%6Dax is max too).
+// parameter (an empty max= is a single consume), read with the consume
+// handler's own query walker. A plain consume costs a suffix check and
+// two substring checks; the query is walked only when it mentions max or
+// is percent-encoded (%6Dax is max too).
 func batchConsume(r *http.Request) bool {
-	if !strings.HasSuffix(r.URL.Path, "/consume") {
-		return false
-	}
-	raw := r.URL.RawQuery
-	if !strings.Contains(raw, "max") && !strings.Contains(raw, "%") {
-		return false
-	}
-	return r.URL.Query().Get("max") != ""
+	return strings.HasSuffix(r.URL.Path, "/consume") && httpmessaging.BatchConsumeRequested(r.URL.RawQuery)
 }
 
 // apiContentType reports whether the Content-Type header names one of

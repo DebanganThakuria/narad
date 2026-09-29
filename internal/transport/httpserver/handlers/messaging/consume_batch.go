@@ -41,6 +41,19 @@ const consumeBatchReplyBytes = 8 << 20
 // give most of it back.
 const consumeBatchReserveBytes = 4 << 20
 
+// BatchConsumeRequested reports whether a consume's raw query asks for
+// a batch: a non-empty max, found the way the handler finds it (so no
+// parser difference, such as url.ParseQuery giving up on a query of more
+// than 10000 parameters, can hide it from a check the handler then
+// ignores). A query without "max" or an escape that could spell it is
+// not parsed.
+func BatchConsumeRequested(rawQuery string) bool {
+	if !strings.Contains(rawQuery, "max") && !strings.Contains(rawQuery, "%") {
+		return false
+	}
+	return consumeQueryFromRawQuery(rawQuery).max != ""
+}
+
 // ConsumeWeight is how many records a consume request may hold reserved
 // when it returns: its max for a batch consume (GET /consume?max=N),
 // else 1. The per-identity in-flight limiter counts a request by it, so
