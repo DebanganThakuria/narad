@@ -676,10 +676,12 @@ func (c *PeerClient) NotifyTokenWithin(ctx context.Context, addr string, timeout
 	return c.sendWithin(ctx, addr, "token_notify", laneControl, timeout, payload, err)
 }
 
-// RegisterTokens sends one peer its batched token delta: the topics this
-// node now wants to hear about, and the ones it no longer does. Both
-// travel together so retiring stale interest costs bytes in a frame that
-// was already going out rather than an RPC of its own.
+// RegisterTokens sends one peer this node's batched token
+// registrations: the topics it wants to hear about. This node never
+// retires a token (they lapse at their TTL, see tokenRequester.register);
+// the delta's Drop list stays in the wire format only so the owner side
+// (tokenHolder.ApplyDelta) still honours drops from older peers during a
+// rolling upgrade.
 func (c *PeerClient) RegisterTokens(ctx context.Context, addr string, delta nodewire.TokenDelta) (nodewire.Response, error) {
 	return c.RegisterTokensWithin(ctx, addr, 0, delta)
 }

@@ -167,10 +167,10 @@ type produceDispatchState struct {
 	// soon as that fan-out is seen and shrinks back only after a whole
 	// window of records has shown less, clamped to [base, BatchSize].
 	windowLimit  int
-	epochDests   map[produceDispatchStuckKey]struct{}
+	epochDests   map[dispatchDestKey]struct{}
 	epochRecords int
 
-	dests map[produceDispatchStuckKey]*dispatchDest
+	dests map[dispatchDestKey]*dispatchDest
 	// ready lists, in order, the destinations with queued records and
 	// no commit in flight; waiting holds the failing or unresolved ones
 	// until their retry is due.
@@ -223,11 +223,11 @@ type produceDispatchState struct {
 	topics       map[string]cachedDispatchTopic
 	// rerouteMemo is rerouteFor's answer per destination for the read
 	// numbered rerouteEpoch (-1: nowhere to reroute).
-	rerouteMemo  map[produceDispatchStuckKey]int
+	rerouteMemo  map[dispatchDestKey]int
 	rerouteEpoch uint64
 	// rerouted counts, per original destination, the records rerouted
 	// in the current read, for one log line each.
-	rerouted map[produceDispatchStuckKey]rerouteNote
+	rerouted map[dispatchDestKey]rerouteNote
 }
 
 func (st *produceDispatchState) noteErr(err error) {
@@ -240,7 +240,7 @@ func (st *produceDispatchState) noteErr(err error) {
 // for commit, and, as the partition records were accepted for, how many
 // of them sit skipped in the WAL.
 type dispatchDest struct {
-	key produceDispatchStuckKey
+	key dispatchDestKey
 	// queue holds this destination's records waiting for the next
 	// commit, in WAL-seq order, and origs the partition each was
 	// accepted for (it differs for a rerouted record).
@@ -293,7 +293,7 @@ type rerouteNote struct {
 }
 
 // dest returns the destination for key, creating it on first use.
-func (st *produceDispatchState) dest(key produceDispatchStuckKey) *dispatchDest {
+func (st *produceDispatchState) dest(key dispatchDestKey) *dispatchDest {
 	dest, ok := st.dests[key]
 	if !ok {
 		dest = &dispatchDest{key: key}
@@ -403,7 +403,7 @@ func (d *ProduceDispatcher) read(ctx context.Context, st *produceDispatchState) 
 			return err
 		}
 		seq := rec.WAL.Seq
-		orig := st.dest(produceDispatchStuckKey{topic: rec.Topic, partition: rec.TargetPartition})
+		orig := st.dest(dispatchDestKey{topic: rec.Topic, partition: rec.TargetPartition})
 		if seq >= st.readSeq {
 			st.marks.extendTo(seq)
 			st.readSeq = seq + 1
@@ -564,7 +564,7 @@ func (d *ProduceDispatcher) reroute(st *produceDispatchState, rec ingress.Produc
 	rec.TargetPartition = alt.key.partition
 	d.hold(st, alt, rec, orig.key.partition)
 	if st.rerouted == nil {
-		st.rerouted = map[produceDispatchStuckKey]rerouteNote{}
+		st.rerouted = map[dispatchDestKey]rerouteNote{}
 	}
 	note := st.rerouted[orig.key]
 	note.to = alt.key.partition

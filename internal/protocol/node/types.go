@@ -262,10 +262,8 @@ func OperationOf(payload []byte) (Operation, error) {
 }
 
 // TokenDelta is one batched update to the standing interest this node
-// has registered with a peer. Adds and drops travel together so a
-// consumer that was served elsewhere can retire its unused interest in
-// a frame that was already going out, rather than paying an RPC per
-// stale token.
+// has registered with a peer. Current releases send only adds and let
+// a token lapse at its TTL; Drop is legacy (see its field).
 //
 // A token reserves nothing. It says only "I am here, tell me if records
 // show up", which is why losing one costs a round trip and never
@@ -277,8 +275,11 @@ type TokenDelta struct {
 	From string
 	// Add carries the topics this node now wants to hear about.
 	Add []TokenRegistration
-	// Drop carries topics it no longer wants. Best effort: a lost drop
-	// costs one wasted notification that the peer declines.
+	// Drop carries topics it no longer wants. Legacy: no longer sent,
+	// kept in the wire format so drops from peers on an older release
+	// are still decoded and honoured during a rolling upgrade. Best
+	// effort: a lost drop costs one wasted notification that the peer
+	// declines.
 	Drop []string
 }
 

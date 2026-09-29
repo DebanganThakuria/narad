@@ -264,7 +264,7 @@ func (d *ProduceDispatcher) dropReplaced(st *produceDispatchState, dest *dispatc
 			kept++
 			continue
 		}
-		orig := st.dest(produceDispatchStuckKey{topic: rec.Topic, partition: dest.origs[i]})
+		orig := st.dest(dispatchDestKey{topic: rec.Topic, partition: dest.origs[i]})
 		st.release(rec, orig)
 		st.requestRescan(orig)
 	}
@@ -422,17 +422,17 @@ func (d *ProduceDispatcher) keepProbe(st *produceDispatchState, dest *dispatchDe
 	}
 	d.holdAll(st, dest, all[:1], origs[:1])
 	for i, rec := range all[1:] {
-		st.release(rec, st.dest(produceDispatchStuckKey{topic: rec.Topic, partition: origs[i+1]}))
+		st.release(rec, st.dest(dispatchDestKey{topic: rec.Topic, partition: origs[i+1]}))
 	}
 }
 
 // releaseAll returns failed and dest's queue to the WAL.
 func (d *ProduceDispatcher) releaseAll(st *produceDispatchState, dest *dispatchDest, failed []ingress.ProduceRecord, failedOrigs []int) {
 	for i, rec := range failed {
-		st.release(rec, st.dest(produceDispatchStuckKey{topic: rec.Topic, partition: failedOrigs[i]}))
+		st.release(rec, st.dest(dispatchDestKey{topic: rec.Topic, partition: failedOrigs[i]}))
 	}
 	for i, rec := range dest.queue {
-		st.release(rec, st.dest(produceDispatchStuckKey{topic: rec.Topic, partition: dest.origs[i]}))
+		st.release(rec, st.dest(dispatchDestKey{topic: rec.Topic, partition: dest.origs[i]}))
 	}
 	d.unhold(st, dest, len(dest.queue))
 	dest.queue, dest.origs = nil, nil
@@ -584,7 +584,7 @@ func (d *ProduceDispatcher) topicDeleted(ctx context.Context, st *produceDispatc
 	return deleted
 }
 
-// incarnationState classifies a record by the topic incarnation it was
+// incarnationCheck classifies a record by the topic incarnation it was
 // accepted under.
 type incarnationCheck uint8
 
