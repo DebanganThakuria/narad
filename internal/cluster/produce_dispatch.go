@@ -679,6 +679,11 @@ func (d *ProduceDispatcher) advanceCheckpoint(st *produceDispatchState) error {
 		st.storedSeq = st.nextSeq
 	}
 	to, err := d.ingress.CompactProduceBefore(st.storedSeq)
+	if err != nil {
+		// Not reached: the next pass (stalled, so at the failure backoff)
+		// tries again.
+		return err
+	}
 	st.compactedSeq = max(st.compactedSeq, to)
-	return err
+	return nil
 }

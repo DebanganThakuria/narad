@@ -47,8 +47,8 @@ func TestProduceDispatcherResumesFromCheckpointBelowOldestSegment(t *testing.T) 
 	}
 	// Compaction waits for the checkpoint's sync: let it land and let
 	// idle passes compact behind it, as a node that stops producing does.
-	shipDrainCompaction(t, dispatcher)
 	walDir := filepath.Join(dir, "ingress", "produce")
+	shipDrainCompaction(t, dispatcher, walDir)
 	oldest := shipOldestWALSeq(t, walDir)
 	// BatchSize 8 reads 128 ahead of the checkpoint: the stale value must
 	// sit further below the oldest segment than that, or the test would
@@ -92,15 +92,25 @@ func TestProduceDispatcherResumesFromCheckpointBelowOldestSegment(t *testing.T) 
 	}
 }
 
-// shipDrainCompaction waits past the checkpoint's deferred sync and runs
-// idle passes, which compact the WAL behind the synced checkpoint.
-func shipDrainCompaction(t *testing.T, dispatcher *ProduceDispatcher) {
+// shipDrainCompaction runs idle passes until they have compacted the WAL
+// at walDir down to its active segment, which they can do only once the
+// checkpoint's deferred sync has landed (250 ms after the last store,
+// plus the sync, which a busy disk can stretch). Every record is
+// dispatched by then, so nothing else may stay.
+func shipDrainCompaction(t *testing.T, dispatcher *ProduceDispatcher, walDir string) {
 	t.Helper()
-	time.Sleep(400 * time.Millisecond)
-	for range 5 {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
 		if _, err := dispatcher.DispatchAvailable(context.Background()); err != nil {
 			t.Fatalf("idle DispatchAvailable: %v", err)
 		}
+		if len(shipWALSegments(t, walDir)) == 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("idle passes never compacted the WAL down to its active segment: segments %v", shipWALSegments(t, walDir))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -173,10 +183,7 @@ func TestProduceDispatcherIdlePassesCompactBehindTheLastCheckpoint(t *testing.T)
 	accept(3) // the first store creates the checkpoint file, synced inline
 	accept(120)
 	walDir := filepath.Join(dir, "ingress", "produce")
-	shipDrainCompaction(t, dispatcher)
 	// Every sealed segment is wholly below the stored, synced checkpoint:
-	// only the active one may stay.
-	if segs := shipWALSegments(t, walDir); len(segs) != 1 {
-		t.Fatalf("WAL segments after an idle drain = %v, want only the active one (durable next %d)", segs, manager.DurableProduceNext())
-	}
+	// idle passes must compact down to the active one.
+	shipDrainCompaction(t, dispatcher, walDir)
 }

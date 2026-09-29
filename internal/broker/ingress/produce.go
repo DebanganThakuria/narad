@@ -313,7 +313,8 @@ func (m *Manager) ReplayProduceFromCursorPeek(cursor wal.Cursor, peek wal.Peek, 
 // while unlinked segments stay gone, and a checkpoint far below the
 // oldest segment is a gap the dispatcher cannot read across. It returns
 // the bound it compacted to, min(seq, the synced checkpoint), so a
-// caller knows when it has caught up with seq.
+// caller knows when it has caught up with seq; the bound means nothing
+// when err is set.
 func (m *Manager) CompactProduceBefore(seq uint64) (uint64, error) {
 	if m == nil || m.log == nil {
 		return 0, errors.New("ingress: manager is nil")
