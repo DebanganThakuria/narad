@@ -16,7 +16,15 @@ Content-Length: 196
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:44 GMT
 
-{"username":"billing-service","grants":[{"action":"produce","patterns":["invoices.*"]},{"action":"consume","patterns":["payments.*"]}],"created_at_ms":1790623904012,"updated_at_ms":1790623904012}
+{
+  "username": "billing-service",
+  "grants": [
+    {"action": "produce", "patterns": ["invoices.*"]},
+    {"action": "consume", "patterns": ["payments.*"]}
+  ],
+  "created_at_ms": 1790623904012,
+  "updated_at_ms": 1790623904012
+}
 ```
 
 - `$NARAD` is the base URL of any node or of the load balancer, for example `http://127.0.0.1:7942`.

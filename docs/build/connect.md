@@ -8,7 +8,7 @@ search:
 
 Point any HTTP client at a Narad node and authenticate each request with a username and password.
 
-Before you start: the address of a Narad node or of the load balancer in front of the nodes, and a username and password from your operator. No cluster yet? [Quickstart](../get-started/quickstart.md) runs one on your machine in a minute; leave `$AUTH` empty for it.
+Before you start: the address of a Narad node or of the load balancer in front of the nodes, and a username and password from your operator. No cluster yet? [Quickstart](../get-started/quickstart.md) runs one on your machine in a minute; set `AUTH` to `:` for it.
 
 Set the base URL and your credentials once per shell:
 
@@ -18,7 +18,7 @@ export AUTH="billing-service:your-password"
 ```
 
 - `$NARAD` is the base URL of any Narad node, or of the load balancer in front of them, for example `http://127.0.0.1:7942`.
-- `$AUTH` is `username:password` for a user your operator created, here `billing-service`. Quote it, so a password with shell characters survives. A local node with authentication off, such as `narad server start --dev`{.nr-nowrap}, needs none: `export AUTH=""`.
+- `$AUTH` is `username:password` for a user your operator created, here `billing-service`. Quote it, so a password with shell characters survives. A local node with authentication off, such as `narad server start --dev`{.nr-nowrap}, ignores credentials: `export AUTH=":"` (an empty user and password).
 
 Then call the node:
 

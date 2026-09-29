@@ -48,17 +48,17 @@ Chaos testing proved this is not theoretical: four separate data-loss bugs came 
 flowchart TD
     accTitle: Deciding whether a node may destroy data
     accDescr: A node that wants to destroy something based on metastore state first asks whether its local replica is provably current. If no leader is known or there was no recent leader contact, it keeps the data and retries later. If it looks current and the node is not the leader, it asks the leader over RPC, and destroys only if the leader confirms the thing is gone. If the node is the leader, it runs a Raft barrier until its state machine has applied every committed entry, then reads its local state again, and destroys only if the thing is still gone. Any other outcome keeps the data.
-    Q{Node wants to destroy something<br/>based on metastore state} --> A{Is the local replica<br/>provably current?}
-    A -->|"no leader known /<br/>no fresh leader contact"| KEEP[Keep the data. Retry later]
+    Q([Node wants to destroy something based on metastore state]) --> A{Is the local replica<br/>provably current?}
+    A -->|"no leader known /<br/>no fresh leader contact"| KEEP0[Keep the data. Retry later]
     A -->|looks current| B{Am I the leader?}
     B -->|no| RPC[Ask the LEADER over RPC]
-    RPC -->|leader confirms gone| DEL[OK to destroy]
-    RPC -->|anything else| KEEP
-    B -->|yes| BAR["Raft Barrier: wait until my FSM<br/>has applied every committed entry"]
+    RPC -->|leader confirms gone| DEL1[OK to destroy]
+    RPC -->|anything else| KEEP1[Keep the data. Retry later]
+    B -->|yes| BAR["Raft Barrier: wait until my FSM has applied every committed entry"]
     BAR -->|barrier ok| REREAD[Re-read local state]
-    REREAD -->|still gone| DEL
-    REREAD -->|reappeared| KEEP
-    BAR -->|failed| KEEP
+    REREAD -->|still gone| DEL2[OK to destroy]
+    REREAD -->|reappeared| KEEP2[Keep the data. Retry later]
+    BAR -->|failed| KEEP2
 ```
 
 Three primitives implement this:

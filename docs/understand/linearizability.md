@@ -58,9 +58,9 @@ stateDiagram-v2
     [*] --> absent
     absent --> pending: produce (202)
     pending --> leased: deliver
-    leased --> leased: deliver (lease lapsed)
     leased --> acked: ack (204)
     acked --> leased: deliver<br/>(contract mode only)
+    note right of leased: A delivery after the lease lapsed keeps it leased
 ```
 
 Operations the client cannot interpret are **dropped before they reach the model** rather than guessed at. This is what keeps the checker free of false positives:

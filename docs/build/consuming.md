@@ -264,8 +264,26 @@ The `payload` field comes back in the form that carries the produced bytes exact
 Two consumes of the text and binary messages from [Produce messages](producing.md#binary-payloads):
 
 ```json title="Response bodies"
-{"topic":"orders","partition":4,"offset":2,"key":"customer-42","payload":"hello world","timestamp":1790623346,"receipt_handle":"4:2:3685415247247279671"}
-{"topic":"orders","partition":4,"offset":3,"key":"customer-42","payload":"iVBORw0KGgo=","payload_encoding":"base64","timestamp":1790623346,"receipt_handle":"4:3:5733584771904418009"}
+{
+  "topic": "orders",
+  "partition": 4,
+  "offset": 2,
+  "key": "customer-42",
+  "payload": "hello world",
+  "timestamp": 1790623346,
+  "receipt_handle": "4:2:3685415247247279671"
+}
+
+{
+  "topic": "orders",
+  "partition": 4,
+  "offset": 3,
+  "key": "customer-42",
+  "payload": "iVBORw0KGgo=",
+  "payload_encoding": "base64",
+  "timestamp": 1790623346,
+  "receipt_handle": "4:3:5733584771904418009"
+}
 ```
 
 The rule for consumers: if `payload_encoding` is `"base64"`, decode the payload; otherwise use it as it is.

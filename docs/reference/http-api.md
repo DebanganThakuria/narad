@@ -223,7 +223,17 @@ Content-Length: 224
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 
-{"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":604800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin"}
+{
+  "name": "orders",
+  "id": "681a429c0b683b2d",
+  "partitions": 3,
+  "retention_ms": 604800000,
+  "visibility_timeout_ms": 30000,
+  "max_in_flight_per_partition": 1024,
+  "max_acked_ahead_per_partition": 1024,
+  "created_at": 1790623903,
+  "owner": "admin"
+}
 ```
 
 ### List topics {#list-topics}
@@ -268,7 +278,35 @@ Content-Length: 540
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 
-{"next_page_token":"orders-audit","topics":[{"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":604800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"standalone"},{"name":"orders-audit","id":"91ad229a6dd04bcf","partitions":3,"retention_ms":604800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"standalone"}]}
+{
+  "next_page_token": "orders-audit",
+  "topics": [
+    {
+      "name": "orders",
+      "id": "681a429c0b683b2d",
+      "partitions": 3,
+      "retention_ms": 604800000,
+      "visibility_timeout_ms": 30000,
+      "max_in_flight_per_partition": 1024,
+      "max_acked_ahead_per_partition": 1024,
+      "created_at": 1790623903,
+      "owner": "admin",
+      "role": "standalone"
+    },
+    {
+      "name": "orders-audit",
+      "id": "91ad229a6dd04bcf",
+      "partitions": 3,
+      "retention_ms": 604800000,
+      "visibility_timeout_ms": 30000,
+      "max_in_flight_per_partition": 1024,
+      "max_acked_ahead_per_partition": 1024,
+      "created_at": 1790623903,
+      "owner": "admin",
+      "role": "standalone"
+    }
+  ]
+}
 ```
 
 ### Get a topic {#get-topic}
@@ -317,7 +355,32 @@ Content-Length: 456
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 
-{"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":172800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"parent","children":["orders-audit"],"schema_version":0,"partition_stats":[{"index":1,"segments":1,"oldest_offset":0,"next_offset":2,"high_watermark":2,"size_bytes":166,"oldest_segment_at":1790623903,"owner_node":"narad-0"}]}
+{
+  "name": "orders",
+  "id": "681a429c0b683b2d",
+  "partitions": 3,
+  "retention_ms": 172800000,
+  "visibility_timeout_ms": 30000,
+  "max_in_flight_per_partition": 1024,
+  "max_acked_ahead_per_partition": 1024,
+  "created_at": 1790623903,
+  "owner": "admin",
+  "role": "parent",
+  "children": ["orders-audit"],
+  "schema_version": 0,
+  "partition_stats": [
+    {
+      "index": 1,
+      "segments": 1,
+      "oldest_offset": 0,
+      "next_offset": 2,
+      "high_watermark": 2,
+      "size_bytes": 166,
+      "oldest_segment_at": 1790623903,
+      "owner_node": "narad-0"
+    }
+  ]
+}
 ```
 
 ### Change a topic {#alter-topic}
@@ -381,7 +444,18 @@ Content-Length: 244
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 
-{"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":172800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"standalone"}
+{
+  "name": "orders",
+  "id": "681a429c0b683b2d",
+  "partitions": 3,
+  "retention_ms": 172800000,
+  "visibility_timeout_ms": 30000,
+  "max_in_flight_per_partition": 1024,
+  "max_acked_ahead_per_partition": 1024,
+  "created_at": 1790623903,
+  "owner": "admin",
+  "role": "standalone"
+}
 ```
 
 ### Delete a topic {#delete-topic}
@@ -467,7 +541,13 @@ Content-Length: 105
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 
-{"topic":"payments","version":1,"versions":[{"version":1,"schema":{"type":"object","required":["id"]}}]}
+{
+  "topic": "payments",
+  "version": 1,
+  "versions": [
+    {"version": 1, "schema": {"type": "object", "required": ["id"]}}
+  ]
+}
 ```
 
 ## Fan-out children {#fan-out-children}
@@ -532,7 +612,19 @@ Content-Length: 268
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 
-{"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":172800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"parent","children":["orders-audit"]}
+{
+  "name": "orders",
+  "id": "681a429c0b683b2d",
+  "partitions": 3,
+  "retention_ms": 172800000,
+  "visibility_timeout_ms": 30000,
+  "max_in_flight_per_partition": 1024,
+  "max_acked_ahead_per_partition": 1024,
+  "created_at": 1790623903,
+  "owner": "admin",
+  "role": "parent",
+  "children": ["orders-audit"]
+}
 ```
 
 ### List a parent's children {#list-children}
@@ -580,7 +672,17 @@ Content-Length: 108
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 
-{"parent":"orders","children":[{"name":"orders-audit","delay_ms":0,"lag_messages":0,"lag_complete":false}]}
+{
+  "parent": "orders",
+  "children": [
+    {
+      "name": "orders-audit",
+      "delay_ms": 0,
+      "lag_messages": 0,
+      "lag_complete": false
+    }
+  ]
+}
 ```
 
 ### Detach a child {#detach-child}
@@ -820,7 +922,15 @@ Content-Length: 179
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 
-{"topic":"orders","partition":1,"offset":0,"key":"customer-42","payload":{"order_id": "ord_123", "amount": 1250},"timestamp":1790623903,"receipt_handle":"1:0:181499699661178901"}
+{
+  "topic": "orders",
+  "partition": 1,
+  "offset": 0,
+  "key": "customer-42",
+  "payload": {"order_id": "ord_123", "amount": 1250},
+  "timestamp": 1790623903,
+  "receipt_handle": "1:0:181499699661178901"
+}
 ```
 
 ```sh title="Request: a batch, unreleased"
@@ -833,7 +943,28 @@ Content-Length: 326
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 
-{"messages":[{"topic":"orders","partition":1,"offset":1,"key":"customer-42","payload":{"order_id": "ord_124"},"timestamp":1790623903,"receipt_handle":"1:1:6130356697557286029"},{"topic":"orders","partition":0,"offset":0,"key":"customer-7","payload":"hello","timestamp":1790623903,"receipt_handle":"0:0:2681459915124828679"}]}
+{
+  "messages": [
+    {
+      "topic": "orders",
+      "partition": 1,
+      "offset": 1,
+      "key": "customer-42",
+      "payload": {"order_id": "ord_124"},
+      "timestamp": 1790623903,
+      "receipt_handle": "1:1:6130356697557286029"
+    },
+    {
+      "topic": "orders",
+      "partition": 0,
+      "offset": 0,
+      "key": "customer-7",
+      "payload": "hello",
+      "timestamp": 1790623903,
+      "receipt_handle": "0:0:2681459915124828679"
+    }
+  ]
+}
 ```
 
 ### Ack, extend or nack a message {#ack}
@@ -927,7 +1058,16 @@ Content-Length: 124
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 
-{"results":[{"status":204},{"status":204},{"status":410,"error":"receipt handle no longer matches an active reservation"}]}
+{
+  "results": [
+    {"status": 204},
+    {"status": 204},
+    {
+      "status": 410,
+      "error": "receipt handle no longer matches an active reservation"
+    }
+  ]
+}
 ```
 
 ## Users {#users}
@@ -986,7 +1126,15 @@ Content-Length: 196
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:44 GMT
 
-{"username":"billing-service","grants":[{"action":"produce","patterns":["invoices.*"]},{"action":"consume","patterns":["payments.*"]}],"created_at_ms":1790623904012,"updated_at_ms":1790623904012}
+{
+  "username": "billing-service",
+  "grants": [
+    {"action": "produce", "patterns": ["invoices.*"]},
+    {"action": "consume", "patterns": ["payments.*"]}
+  ],
+  "created_at_ms": 1790623904012,
+  "updated_at_ms": 1790623904012
+}
 ```
 
 ### List users {#list-users}
@@ -1017,7 +1165,23 @@ Content-Length: 291
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:44 GMT
 
-[{"username":"admin","root":true,"created_at_ms":1790623900693,"updated_at_ms":1790623900693},{"username":"billing-service","grants":[{"action":"produce","patterns":["invoices.*"]},{"action":"consume","patterns":["payments.*"]}],"created_at_ms":1790623904012,"updated_at_ms":1790623904012}]
+[
+  {
+    "username": "admin",
+    "root": true,
+    "created_at_ms": 1790623900693,
+    "updated_at_ms": 1790623900693
+  },
+  {
+    "username": "billing-service",
+    "grants": [
+      {"action": "produce", "patterns": ["invoices.*"]},
+      {"action": "consume", "patterns": ["payments.*"]}
+    ],
+    "created_at_ms": 1790623904012,
+    "updated_at_ms": 1790623904012
+  }
+]
 ```
 
 ### Get a user {#get-user}
@@ -1055,7 +1219,15 @@ Content-Length: 196
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:44 GMT
 
-{"username":"billing-service","grants":[{"action":"produce","patterns":["invoices.*"]},{"action":"consume","patterns":["payments.*"]}],"created_at_ms":1790623904012,"updated_at_ms":1790623904012}
+{
+  "username": "billing-service",
+  "grants": [
+    {"action": "produce", "patterns": ["invoices.*"]},
+    {"action": "consume", "patterns": ["payments.*"]}
+  ],
+  "created_at_ms": 1790623904012,
+  "updated_at_ms": 1790623904012
+}
 ```
 
 ### Delete a user {#delete-user}
@@ -1139,7 +1311,12 @@ Content-Length: 149
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:44 GMT
 
-{"username":"billing-service","grants":[{"action":"produce","patterns":["invoices.*"]}],"created_at_ms":1790623904012,"updated_at_ms":1790623904073}
+{
+  "username": "billing-service",
+  "grants": [{"action": "produce", "patterns": ["invoices.*"]}],
+  "created_at_ms": 1790623904012,
+  "updated_at_ms": 1790623904073
+}
 ```
 
 ### Change a password {#update-password}
@@ -1235,7 +1412,18 @@ Content-Length: 130
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:44 GMT
 
-{"members":[{"id":"narad-0","addr":"127.0.0.1:17970","status":"alive","draining":false,"owned_partitions":6,"outbound_moves":0}]}
+{
+  "members": [
+    {
+      "id": "narad-0",
+      "addr": "127.0.0.1:17970",
+      "status": "alive",
+      "draining": false,
+      "owned_partitions": 6,
+      "outbound_moves": 0
+    }
+  ]
+}
 ```
 
 ### List partition moves {#list-moves}
