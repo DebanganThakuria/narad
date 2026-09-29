@@ -18,7 +18,7 @@ Every variable, with the compiled-in default when unset. (This table is generate
 | `NARAD_HTTP_MAX_CONSUME_WAIT` | `10s` | Server-side ceiling on `?wait=` long-polls |
 | `NARAD_HTTP_MAX_HEADER_BYTES` | `65536` | Request header cap (Go's default is 1 MiB) |
 | `NARAD_HTTP_MAX_CONNECTIONS` | `4096` | Open client connections per node; extra ones wait in the accept backlog. `0` = unlimited |
-| `NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY` | `1024` | Concurrent consumes (long-polls included) per user, or per client IP with security off; extra ones get `429`. A batch consume (`?max=N`) counts as N. `0` = unlimited |
+| `NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY` | `1024` | Concurrent consumes (long-polls included) per user, or per client IP with security off; extra ones get `429`. A batch consume (`?max=N`) counts as N, clamped to the cap. `0` = unlimited |
 | `NARAD_HTTP_MAX_PRODUCE_IN_FLIGHT_PER_IDENTITY` | `0` | Concurrent produces per user, or per client IP with security off; extra ones get `429`. A batch produce counts as its message count, clamped to the cap, and as one while its body is read. `0` = unlimited, the default: a produce holds its goroutine only until its write-ahead log fsync, not for a long-poll's wait. In the config file (`http.max_produce_in_flight_per_identity`) it must be removed before a rollback to v3.0.1 or earlier; see below |
 | `NARAD_HTTP_METRICS_ADDR` | off | e.g. `:9100`; serves `/metrics` on its own listener (unauthenticated, keep it cluster-internal) and removes it from the API port. Off = `/metrics` on the API port behind API credentials |
 | `NARAD_HTTP_METRICS_UNAUTHENTICATED` | `false` | Serve `/metrics` on the API port without credentials (it names every topic) |
@@ -260,4 +260,4 @@ environment.
 | More retention granularity | smaller `segment_bytes`: more files, finer reaping |
 | Fewer consumer offset syncs under heavy ack traffic | raise `storage.consumer_offset_commit_interval_ms` (a power loss then redelivers more acked messages; a process crash still redelivers about 100ms of them) |
 | Fewer acked messages redelivered after a power loss | lower `storage.consumer_offset_commit_interval_ms` (`100` restores the window of earlier releases, at more syncs) |
-| A ceiling on one user's concurrent produces | `http.max_produce_in_flight_per_identity` (off by default; a batch counts as its message count) |
+| A ceiling on one user's concurrent produces | `http.max_produce_in_flight_per_identity` (off by default; a batch counts as its message count, clamped to the cap) |
