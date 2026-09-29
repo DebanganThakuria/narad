@@ -43,6 +43,26 @@ func zzWP7aWaitStack(t *testing.T, what string, ok func(count func(string) int) 
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+// zzWP7aWaitQueued waits until n commits are queued on the partition's
+// combiner (the leader's own included). A request is in the next drain
+// exactly when it is in the queue, and a test holding the produce lock
+// keeps that drain from running early.
+func zzWP7aWaitQueued(t *testing.T, e *Engine, topicName string, partition, n int) {
+	t.Helper()
+	c := e.combinerFor(topicName, partition)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		queued := len(c.queue)
+		c.mu.Unlock()
+		if queued >= n {
+			return
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+	t.Fatalf("%d commits never queued on %s/%d", n, topicName, partition)
+}
+
 // zzWP7aHoldProduceLock holds the partition's produce lock, as a commit
 // inside its append and fsync does, until the returned release is
 // called.
