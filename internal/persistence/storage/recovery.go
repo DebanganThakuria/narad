@@ -247,10 +247,14 @@ func (l *Log) scanSegmentIndex(seg *segment) ([]indexEntry, error) {
 // nextValidFramePos scans forward from start for the next position
 // holding a frame that passes CRC verification, so callers can tell a
 // mid-file tear (resyncable) from one that runs to EOF. Returns size
-// when no later valid frame exists.
+// when no later valid frame exists. Each candidate streams through one
+// borrowed chunk, so a stray magic with a corrupt length field never
+// allocates the frame size it claims.
 func nextValidFramePos(f *os.File, start, size int64) int64 {
+	buf := verifyChunks.get()
+	defer verifyChunks.put(buf)
 	for pos := nextMagicInSegment(f, start, size); pos < size; pos = nextMagicInSegment(f, pos+1, size) {
-		if _, _, err := verifyFrameAt(f, pos); err == nil {
+		if _, _, err := verifyFrameAtBuffered(f, pos, buf); err == nil {
 			return pos
 		}
 	}

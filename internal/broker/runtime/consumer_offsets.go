@@ -752,7 +752,9 @@ func openPartitionDir(dir string) (*os.Root, os.FileInfo, error) {
 // names it after the open named it at the open. A missing file is
 // created through root, never by path: a create by path after such an
 // install would add the file to the copy. Either failure is
-// errOffsetDirGone, and nothing has been written.
+// errOffsetDirGone, and nothing has been written. A stat of dir that
+// fails for any reason but the path being gone tells nothing about the
+// directory, and is returned as an ordinary error.
 func openStateFile(root *os.Root, dir string, dirInfo os.FileInfo, name string, flag int) (f *os.File, created bool, err error) {
 	f, err = syncfile.OpenFile(filepath.Join(dir, name), flag, storage.ConsumerStateFileMode)
 	if errors.Is(err, os.ErrNotExist) {
@@ -766,7 +768,12 @@ func openStateFile(root *os.Root, dir string, dirInfo os.FileInfo, name string, 
 	if err != nil {
 		return nil, false, err
 	}
-	if now, err := os.Stat(dir); err != nil || !os.SameFile(now, dirInfo) {
+	now, err := os.Stat(dir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = f.Close()
+		return nil, false, err
+	}
+	if err != nil || !os.SameFile(now, dirInfo) {
 		_ = f.Close()
 		return nil, false, errOffsetDirGone
 	}
@@ -983,9 +990,16 @@ func (c *ConsumerOffsetCommitter) levelLocked(st *offsetPart, frontier int64) (o
 func (c *ConsumerOffsetCommitter) writeOut(syncs []offsetSync) error {
 	for i := range syncs {
 		s := &syncs[i]
-		if s.window && !sameFileAt(s.f, filepath.Join(s.st.dir, storage.ConsumerAheadFileName)) {
-			s.gone = true
-			continue
+		if s.window {
+			same, err := sameFileAt(s.f, filepath.Join(s.st.dir, storage.ConsumerAheadFileName))
+			if err != nil {
+				s.err = err
+				continue
+			}
+			if !same {
+				s.gone = true
+				continue
+			}
 		}
 		s.err = c.io.writeOut(s.f)
 		if s.err == nil && s.dir != nil {
@@ -1092,6 +1106,10 @@ func (c *ConsumerOffsetCommitter) fdLocked(st *offsetPart) (*os.File, bool, erro
 		return nil, false, err
 	}
 	dirInfo, err := os.Stat(st.dir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = f.Close()
+		return nil, false, err
+	}
 	if err != nil || !os.SameFile(info, st.file) || !os.SameFile(dirInfo, st.dirInfo) {
 		_ = f.Close()
 		return nil, false, errOffsetDirGone
@@ -1127,14 +1145,22 @@ func (c *ConsumerOffsetCommitter) checkFileLocked(st *offsetPart, root *os.Root)
 	return nil
 }
 
-// sameFileAt reports whether path still names the file f has open.
-func sameFileAt(f *os.File, path string) bool {
+// sameFileAt reports whether path still names the file f has open. A
+// missing path is not the same file; err is set only when a stat fails
+// for another reason, which tells nothing about the path.
+func sameFileAt(f *os.File, path string) (bool, error) {
 	held, err := f.Stat()
 	if err != nil {
-		return false
+		return false, err
 	}
 	now, err := os.Stat(path)
-	return err == nil && os.SameFile(held, now)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(held, now), nil
 }
 
 // strandLocked drops st, whose directory was removed or replaced under
@@ -1156,6 +1182,10 @@ func (c *ConsumerOffsetCommitter) strandLocked(st *offsetPart) {
 		c.mu.Unlock()
 		if hasSource {
 			c.stranded[st.key] = struct{}{}
+			if c.log != nil {
+				c.log.Warn("consumer offsets: partition directory removed or replaced under its persisted state; its acks are not persisted until the partition is dropped",
+					"topic", st.key.topic, "partition", st.key.partition)
+			}
 		}
 	}
 	c.dropLocked(st)

@@ -633,8 +633,9 @@ func TestRecoveryResyncsAcrossLargeCorruptGap(t *testing.T) {
 }
 
 // TestRecoveryResyncsAfterCorruptLengthField corrupts a mid-file frame's
-// compressed-length field so its claimed end runs past EOF. verifyFrameAt
-// then sees a short payload read (io.ErrUnexpectedEOF) exactly like a torn
+// compressed-length field so its claimed end runs past EOF. The walk's
+// verifyFrameAtBuffered then sees a short payload read
+// (io.ErrUnexpectedEOF) exactly like a torn
 // tail — but a later valid, fsynced frame exists, so recovery must resync
 // to it rather than truncate it away.
 func TestRecoveryResyncsAfterCorruptLengthField(t *testing.T) {

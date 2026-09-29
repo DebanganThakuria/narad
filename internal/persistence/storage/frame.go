@@ -178,9 +178,9 @@ func readAt(r io.ReaderAt, b []byte, off int64) (int, error) {
 }
 
 // readFrameRaw reads the header and raw (still-encoded) payload of the
-// frame at pos and validates the CRC — no decode. Shared by readFrameAt
-// (which goes on to decode) and verifyFrameAt (which deliberately does
-// not).
+// frame at pos and validates the CRC, without decoding. readFrameAt
+// goes on to decode; a caller that only needs the CRC check uses
+// verifyFrameAtBuffered, which does not hold the whole frame.
 //
 // Errors:
 //   - errBadMagic: header magic mismatch (caller resyncs)
@@ -298,28 +298,6 @@ func frameHeaderAt(r io.ReaderAt, pos int64) (frameHeader, int64, error) {
 	return h, pos + int64(headerSize) + int64(h.compressed), nil
 }
 
-// verifyFrameAt re-reads the frame at pos and validates its CRC over the raw
-// (possibly compressed) on-disk bytes, WITHOUT decoding. It returns the frame
-// header (record count, base offset) and the position just after the frame.
-//
-// Two hot, decode-free paths use it:
-//   - the durability read-back (VerifyDurable) — one CRC check per frame
-//     instead of a full decode per record;
-//   - index navigation (scanSegmentFromIndexAnchorLocked / the index build) —
-//     locating an offset only needs frame headers to step frame-to-frame, so
-//     decoding the payload there is pure waste. With small frames and a sparse
-//     index, that waste dominated consume CPU (hundreds of decodes per lookup).
-//
-// CRC is still checked so navigation detects corruption exactly as the old
-// decode-based walk did; only the (expensive) zstd decode is skipped.
-func verifyFrameAt(r io.ReaderAt, pos int64) (frameHeader, int64, error) {
-	h, _, err := readFrameRaw(r, pos)
-	if err != nil {
-		return h, pos, err
-	}
-	return h, pos + int64(headerSize) + int64(h.compressed), nil
-}
-
 // verifyChunkBytes is the read granularity of verifyFrameAtBuffered: big
 // enough to make a page-cache read cheap, small enough that the commit
 // path never allocates a whole frame just to hash it.
@@ -354,10 +332,14 @@ func (c chunkList) put(b *[]byte) {
 	}
 }
 
-// verifyFrameAtBuffered is verifyFrameAt without the frame-sized payload
-// allocation: it streams the payload through *buf (grown to
-// verifyChunkBytes if smaller) while computing the CRC. Same errors as
-// readFrameRaw.
+// verifyFrameAtBuffered re-reads the frame at pos and validates its CRC
+// over the raw (possibly compressed) on-disk bytes, without decoding. It
+// returns the frame header (record count, base offset) and the position
+// just after the frame. It streams the payload through *buf (grown to
+// verifyChunkBytes if smaller) instead of allocating the frame, so the
+// durability read-back (VerifyDurable), the recovery walk and the
+// resync past a corrupt frame (nextValidFramePos) never allocate per
+// frame. Same errors as readFrameRaw.
 func verifyFrameAtBuffered(r io.ReaderAt, pos int64, buf *[]byte) (frameHeader, int64, error) {
 	var hdrBuf [headerSize]byte
 	n, err := readAt(r, hdrBuf[:], pos)

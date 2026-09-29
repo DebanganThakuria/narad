@@ -87,29 +87,11 @@ func TestWriteConsumerOffsetCreatesPartitionDir(t *testing.T) {
 	}
 }
 
-func TestWriteConsumerOffsetIfPartitionDirExistsWritesExistingDir(t *testing.T) {
-	partitionDir := t.TempDir()
-	if err := WriteConsumerOffsetIfPartitionDirExists(partitionDir, 11); err != nil {
-		t.Fatalf("WriteConsumerOffsetIfPartitionDirExists() error = %v", err)
-	}
-
-	offset, ok, err := ReadConsumerOffset(partitionDir)
-	if err != nil {
-		t.Fatalf("ReadConsumerOffset() error = %v", err)
-	}
-	if !ok {
-		t.Fatal("ReadConsumerOffset() ok = false, want true")
-	}
-	if offset != 11 {
-		t.Fatalf("ReadConsumerOffset() offset = %d, want 11", offset)
-	}
-}
-
-func TestWriteConsumerOffsetIfPartitionDirExistsDoesNotCreateDir(t *testing.T) {
+func TestWriteOffsetFileInPlaceDoesNotCreateDir(t *testing.T) {
 	partitionDir := TopicPartitionDir(t.TempDir(), "orders", 0)
-	err := WriteConsumerOffsetIfPartitionDirExists(partitionDir, 11)
+	err := writeOffsetFileInPlace(partitionDir, consumerOffsetFileName, 11)
 	if !errors.Is(err, ErrPartitionDirMissing) {
-		t.Fatalf("WriteConsumerOffsetIfPartitionDirExists() error = %v, want %v", err, ErrPartitionDirMissing)
+		t.Fatalf("writeOffsetFileInPlace() error = %v, want %v", err, ErrPartitionDirMissing)
 	}
 	if _, statErr := os.Stat(partitionDir); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("partition dir stat error = %v, want not exist", statErr)
