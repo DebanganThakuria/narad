@@ -229,7 +229,13 @@ func (s *RPCServer) consumeOneAsBatch(ctx context.Context, key requestKey, req *
 	if res.Status != http.StatusOK {
 		return res
 	}
-	body := make([]byte, 0, len(res.Body)+16)
+	// A single consume's reply is bounded by the forwarded reply bound;
+	// cap the size hint at it too, so the capacity can never overflow.
+	n := len(res.Body)
+	if n > forwardedConsumeReplyBytes {
+		n = forwardedConsumeReplyBytes
+	}
+	body := make([]byte, 0, n+16)
 	body = append(body, `{"messages":[`...)
 	body = append(body, bytes.TrimRight(res.Body, "\n")...)
 	body = append(body, "]}\n"...)

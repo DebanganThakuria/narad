@@ -310,7 +310,9 @@ func (a *Authenticator) verifySlow(ctx context.Context, username, password strin
 	ok, err := a.runBcrypt(ctx, username, cred, storedHash, password)
 	if errors.Is(err, ErrThrottled) {
 		if a.shouldLogThrottle(username) {
-			a.logger.Warn("authentication throttled", "component", "audit", "username", username)
+			// The audit line names the stored account, never text taken
+			// from the request's Authorization header.
+			a.logger.Warn("authentication throttled", "component", "audit", "username", rec.Username)
 		}
 		return nil, ErrThrottled
 	}
@@ -330,7 +332,7 @@ func (a *Authenticator) verifySlow(ctx context.Context, username, password strin
 			evictOldest(e.failed)
 		}
 		e.failed[cred] = a.now()
-		a.logger.Warn("authentication failed", "component", "audit", "username", username)
+		a.logger.Warn("authentication failed", "component", "audit", "username", rec.Username)
 		return nil, ErrUnauthorized
 	}
 	// Success: remember the credential — but only if the stored hash is
