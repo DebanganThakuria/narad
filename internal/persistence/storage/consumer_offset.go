@@ -44,7 +44,8 @@ func DecodeConsumerAheadSlot(slot []byte) (ConsumerAhead, bool) {
 	return decodeConsumerAheadSlot(slot)
 }
 
-// ErrPartitionDirMissing reports that a consumer offset write was
+// ErrPartitionDirMissing reports that a write of a partition's consumer
+// state (consumer.offset, consumer.ahead) or of a fan-out cursor was
 // refused because the partition directory no longer exists (e.g. the
 // topic was deleted concurrently).
 var ErrPartitionDirMissing = errors.New("storage: partition directory missing")
@@ -80,35 +81,16 @@ func WriteConsumerOffset(partitionDir string, offset int64) error {
 	return writeOffsetFileInPlace(partitionDir, consumerOffsetFileName, offset)
 }
 
-// WriteConsumerOffsetIfPartitionDirExists is WriteConsumerOffset except
-// it fails with ErrPartitionDirMissing instead of recreating a deleted
-// partition directory: the guard against resurrecting a topic that was
-// removed while a commit was in flight.
-func WriteConsumerOffsetIfPartitionDirExists(partitionDir string, offset int64) error {
-	info, err := os.Stat(partitionDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return ErrPartitionDirMissing
-	}
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("consumer offset partition path is not a directory: %s", partitionDir)
-	}
-	return writeOffsetFileInPlace(partitionDir, consumerOffsetFileName, offset)
-}
-
 // writeOffsetFileInPlace durably persists an 8-byte big-endian offset
-// file under dir by overwriting it in place.
+// file under dir by overwriting it in place. WriteConsumerOffset (move
+// staging) is its caller; the committer writes the same format itself.
 //
-// The previous temp-file + fsync + rename cost seven syscalls, a new
-// inode, and a directory mutation per active partition every commit
-// interval; under acks on a hundred partitions that was a thousand
-// metadata-heavy fsyncs a second competing with produce. An 8-byte
-// value fits in one sector and a single-sector overwrite is atomic
-// across a crash (the reader sees the old or the new 8 bytes), which is
-// exactly the argument the high-watermark file already relies on. The
-// first creation additionally fsyncs the directory so the new name is
+// It replaced a temp-file + fsync + rename, which cost seven syscalls,
+// a new inode and a directory mutation per write. An 8-byte value fits
+// in one sector and a single-sector overwrite is atomic across a crash
+// (the reader sees the old or the new 8 bytes), which is exactly the
+// argument the high-watermark file already relies on. The first
+// creation additionally fsyncs the directory so the new name is
 // durable; a crash between create and write leaves an empty file, which
 // ReadConsumerOffset reads as "no offset".
 func writeOffsetFileInPlace(dir, name string, offset int64) error {

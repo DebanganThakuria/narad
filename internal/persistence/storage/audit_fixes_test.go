@@ -193,7 +193,7 @@ func TestVerifyFrameAtBufferedMatchesUnbuffered(t *testing.T) {
 func TestConsumerOffsetInPlaceWrite(t *testing.T) {
 	dir := t.TempDir()
 	for _, off := range []int64{0, 7, 1 << 40, 3} {
-		if err := WriteConsumerOffsetIfPartitionDirExists(dir, off); err != nil {
+		if err := writeOffsetFileInPlace(dir, consumerOffsetFileName, off); err != nil {
 			t.Fatalf("Write(%d): %v", off, err)
 		}
 		got, ok, err := ReadConsumerOffset(dir)
@@ -223,7 +223,7 @@ func TestConsumerOffsetInPlaceWrite(t *testing.T) {
 	if _, ok, err := ReadConsumerOffset(dir); err != nil || ok {
 		t.Fatalf("empty file read = (ok=%v, err=%v), want (false, nil)", ok, err)
 	}
-	if err := WriteConsumerOffsetIfPartitionDirExists(dir, 9); err != nil {
+	if err := writeOffsetFileInPlace(dir, consumerOffsetFileName, 9); err != nil {
 		t.Fatalf("Write over empty file: %v", err)
 	}
 	if got, ok, _ := ReadConsumerOffset(dir); !ok || got != 9 {
@@ -231,7 +231,7 @@ func TestConsumerOffsetInPlaceWrite(t *testing.T) {
 	}
 
 	missing := filepath.Join(dir, "gone")
-	if err := WriteConsumerOffsetIfPartitionDirExists(missing, 1); !errors.Is(err, ErrPartitionDirMissing) {
+	if err := writeOffsetFileInPlace(missing, consumerOffsetFileName, 1); !errors.Is(err, ErrPartitionDirMissing) {
 		t.Fatalf("missing dir error = %v, want ErrPartitionDirMissing", err)
 	}
 }

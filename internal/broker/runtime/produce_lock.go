@@ -41,19 +41,6 @@ func (g *Logs) WithProduceLockIncarnation(topicName string, idx int, fn func(log
 	return fn(log, incarnation)
 }
 
-// WithProduceLockResult is WithProduceLock for callbacks that return
-// an offset.
-func (g *Logs) WithProduceLockResult(topicName string, idx int, fn func(*storage.Log) (int64, error)) (int64, error) {
-	mu := g.lockProduce(topicName, idx)
-	defer mu.Unlock()
-
-	log, err := g.Get(topicName, idx)
-	if err != nil {
-		return 0, err
-	}
-	return fn(log)
-}
-
 // ProduceSyncCount reports the number of live produce-serialization
 // mutexes. Used by tests to assert topic churn doesn't leak entries.
 func (g *Logs) ProduceSyncCount() int {
