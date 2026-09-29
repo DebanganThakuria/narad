@@ -126,8 +126,8 @@ func TestZZWP6SmallBatchLingersWhileOtherCommitsRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := d.state
-	p0 := produceDispatchStuckKey{topic: "orders", partition: 0}
-	inflight := func(key produceDispatchStuckKey) bool {
+	p0 := dispatchDestKey{topic: "orders", partition: 0}
+	inflight := func(key dispatchDestKey) bool {
 		dest, ok := st.dests[key]
 		return ok && dest.inflight
 	}

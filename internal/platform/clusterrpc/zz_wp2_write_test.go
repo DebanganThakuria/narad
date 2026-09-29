@@ -168,7 +168,13 @@ func TestZZWP2CancelDoesNotWaitBehindAStalledWrite(t *testing.T) {
 		_, err := client.requestFrame(ctx, clusterwire.StreamFrameNodeRequest, make([]byte, 64<<10))
 		return err
 	})
-	time.Sleep(50 * time.Millisecond)
+	// A holds the write slot once its frame starts arriving: frameB was
+	// the only frame before it, and bufio buffers at most 4 KiB of A's
+	// 64 KiB, so A stays mid-write, holding the slot, until frameA is
+	// read below. Peek consumes nothing.
+	if _, err := reader.Peek(1); err != nil {
+		t.Fatal(err)
+	}
 
 	start := time.Now()
 	cancelB()

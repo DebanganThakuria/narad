@@ -204,11 +204,19 @@ func (r *reader) bytes() ([]byte, error) {
 	return out, nil
 }
 
+// TrailingPayloadError is the error text of a payload with bytes left
+// over after its last known field. Besides a framing bug or a tampered
+// payload, it is how an owner on an older release refuses a request
+// carrying a field added since: requesters match its "trailing" to fall
+// back during a rolling upgrade (see the cluster package's
+// isTrailingFieldRefusal), so the wording must stay.
+const TrailingPayloadError = "trailing node rpc payload data"
+
 // done verifies the payload was consumed exactly; trailing bytes mean
-// a framing bug or a tampered payload.
+// a framing bug, a tampered payload, or a field this release predates.
 func (r *reader) done() error {
 	if r.pos != len(r.payload) {
-		return errors.New("trailing node rpc payload data")
+		return errors.New(TrailingPayloadError)
 	}
 	return nil
 }

@@ -150,7 +150,12 @@ func (s *RPCServer) abandonConsume(req *nodewire.ConsumeRequest) nodewire.Respon
 // consume runs a decoded consume against the broker, wait already
 // clamped.
 func (s *RPCServer) consume(ctx context.Context, key requestKey, req *nodewire.ConsumeRequest, wait time.Duration) nodewire.Response {
-	if req.Max > 1 && !req.HasOffset {
+	if req.Max > 1 {
+		if req.HasOffset {
+			// A replay reads one record, still in the batch shape the
+			// requester asked for.
+			return s.consumeOneAsBatch(ctx, key, req, wait)
+		}
 		return s.consumeBatch(ctx, key, req, wait)
 	}
 	opts := brokermsg.ConsumeOpts{Wait: wait}
@@ -211,6 +216,25 @@ func (s *RPCServer) consume(ctx context.Context, key requestKey, req *nodewire.C
 	return nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: body}
 }
 
+// consumeOneAsBatch serves a consume that asked for up to req.Max
+// records with one record, answered in the batch shape it asked for:
+// 200 {"messages":[<record>]}, or whatever else a single consume
+// answers. The requester reads the reply's shape from what it asked
+// for, so the shape must follow the request, not the path taken.
+func (s *RPCServer) consumeOneAsBatch(ctx context.Context, key requestKey, req *nodewire.ConsumeRequest, wait time.Duration) nodewire.Response {
+	single := *req
+	single.Max = 0
+	res := s.consume(ctx, key, &single, wait)
+	if res.Status != http.StatusOK {
+		return res
+	}
+	body := make([]byte, 0, len(res.Body)+16)
+	body = append(body, `{"messages":[`...)
+	body = append(body, bytes.TrimRight(res.Body, "\n")...)
+	body = append(body, "]}\n"...)
+	return nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: body}
+}
+
 // maxForwardedConsumeBatch caps the records one forwarded batch consume
 // takes, whatever the requester asked for. It is the HTTP layer's own
 // cap on ?max= (messaging.MaxConsumeBatch there), restated because this
@@ -258,19 +282,8 @@ const forwardedConsumeReplyBytes = clusterwire.MaxStreamFramePayloadBytes / 2
 func (s *RPCServer) consumeBatch(ctx context.Context, key requestKey, req *nodewire.ConsumeRequest, wait time.Duration) nodewire.Response {
 	bc, ok := s.broker.(broker.BatchConsumer)
 	if !ok {
-		// A broker without the batch surface serves one record, answered
-		// in the batch shape the requester asked for.
-		single := *req
-		single.Max = 0
-		res := s.consume(ctx, key, &single, wait)
-		if res.Status != http.StatusOK {
-			return res
-		}
-		body := make([]byte, 0, len(res.Body)+16)
-		body = append(body, `{"messages":[`...)
-		body = append(body, bytes.TrimRight(res.Body, "\n")...)
-		body = append(body, "]}\n"...)
-		return nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: body}
+		// A broker without the batch surface serves one record.
+		return s.consumeOneAsBatch(ctx, key, req, wait)
 	}
 
 	opts := brokermsg.ConsumeOpts{MaxBytes: forwardedConsumeBatchBytes}

@@ -79,10 +79,11 @@ const (
 	// failing commits, counted from the start of the first failed
 	// attempt, before the dispatcher treats its owner as dead and
 	// reroutes the destination's records to a live-owner partition of
-	// the same topic (see dispatch.go). A shorter failure is a transient
-	// blip (an owner restarting, a partition handoff freeze) that must
-	// not scatter records across partitions, so the records retry on
-	// their original partition until then. Destinations that fail to
+	// the same topic (see the header comment of produce_dispatch.go). A
+	// shorter failure is a transient blip (an owner restarting, a
+	// partition handoff freeze) that must not scatter records across
+	// partitions, so the records retry on their original partition
+	// until then. Destinations that fail to
 	// RESOLVE (owner dead per membership) skip this grace entirely:
 	// membership death is already authoritative, matching the
 	// accept-time dead-owner skip. The grace is measured in time, not
@@ -108,10 +109,10 @@ const (
 	// dedup) and, once the destination is past its reroute grace, even
 	// rerouted to a sibling partition. This generous timeout makes that
 	// window rare; it cannot eliminate it (see the at-least-once note in
-	// dispatch.go), so it just needs to sit far above worst-case commit
-	// latency while still letting a genuinely dead owner fail in bounded
-	// time. Only the destination waits for it: other destinations keep
-	// committing while it runs.
+	// produce_dispatch.go's header comment), so it just needs to sit far
+	// above worst-case commit latency while still letting a genuinely
+	// dead owner fail in bounded time. Only the destination waits for
+	// it: other destinations keep committing while it runs.
 	produceCommitRPCTimeout = 30 * time.Second
 
 	// produceProbeRPCTimeout bounds the one-record commit that probes a
@@ -128,10 +129,10 @@ const (
 	produceDispatchSlowAfter = time.Second
 
 	// produceDispatchRescanInterval is the backstop for records the
-	// dispatcher left in the WAL (see dispatch.go): at least this often
-	// they are read again and re-placed, which picks up a reroute that
-	// became possible, an owner that came back, or a delete that became
-	// confirmable.
+	// dispatcher left in the WAL (see produce_dispatch.go): at least
+	// this often they are read again and re-placed, which picks up a
+	// reroute that became possible, an owner that came back, or a
+	// delete that became confirmable.
 	produceDispatchRescanInterval = time.Second
 
 	// produceLegacyOwnerTTL is how long commits keep going out without
@@ -468,8 +469,8 @@ func newProduceDispatchState(nextSeq uint64, window int) *produceDispatchState {
 		readCursor:  wal.Cursor{Seq: nextSeq},
 		marks:       seqMarks{base: nextSeq},
 		windowLimit: window,
-		epochDests:  map[produceDispatchStuckKey]struct{}{},
-		dests:       map[produceDispatchStuckKey]*dispatchDest{},
+		epochDests:  map[dispatchDestKey]struct{}{},
+		dests:       map[dispatchDestKey]*dispatchDest{},
 		waiting:     map[*dispatchDest]struct{}{},
 		jobs:        map[*dispatchJob]struct{}{},
 		latency:     map[string]time.Duration{},

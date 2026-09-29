@@ -59,9 +59,9 @@ var errRequestTimeout = fmt.Errorf("cluster rpc request timed out: %w", context.
 
 // timerPool recycles the timers that bound reply and queue waits, so a
 // request carrying a timeout does not allocate one. Reuse is safe: since
-// Go 1.23 (this module's language version), Stop and Reset guarantee
-// that no value from before the call is received from the channel
-// afterwards.
+// Go 1.23, Stop and Reset guarantee that no value from before the call
+// is received from the channel afterwards (go.mod declares a newer
+// version and sets no asynctimerchan godebug, so these semantics apply).
 var timerPool sync.Pool
 
 func getTimer(d time.Duration) *time.Timer {
