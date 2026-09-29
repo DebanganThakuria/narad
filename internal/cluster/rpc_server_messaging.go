@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"strconv"
@@ -327,9 +328,14 @@ func (s *RPCServer) consumeBatch(ctx context.Context, key requestKey, req *nodew
 	if len(msgs) == 0 {
 		return nodewire.Response{Status: http.StatusNoContent}
 	}
+	// Size the reply for the worst encoding each record can take (a
+	// binary key or payload goes out as base64), as the local batch
+	// writer does, so a batch of binary records does not regrow the
+	// buffer on its way to the frame bound.
 	size := 16
 	for i := range msgs {
-		size += len(msgs[i].Key) + len(msgs[i].Payload) + 160
+		size += base64.StdEncoding.EncodedLen(len(msgs[i].Key)) + base64.StdEncoding.EncodedLen(len(msgs[i].Payload)) +
+			len(msgs[i].Topic) + len(msgs[i].ReceiptHandle) + 192
 	}
 	body := make([]byte, 0, min(size, forwardedConsumeReplyBytes))
 	body = append(body, `{"messages":[`...)

@@ -152,7 +152,7 @@ func (m *shipFailFirstOpen) GetTopic(ctx context.Context, name string) (topic.To
 	return m.Metastore.GetTopic(ctx, name)
 }
 
-// A partition that fails to open is logged at debug and skipped: the
+// A partition that fails to open is logged as a warning and skipped: the
 // warmup goes on with the topic's next partition and with the other
 // topics, and returns once every owned partition is open or has failed.
 func TestShipWarmupOpenFailureContinues(t *testing.T) {
@@ -170,8 +170,8 @@ func TestShipWarmupOpenFailureContinues(t *testing.T) {
 		t.Fatalf("open failure records = %+v, want exactly one", failures)
 	}
 	f := failures[0]
-	if f.level != slog.LevelDebug || f.attrs["topic"] != "bad" || f.attrs["err"] == nil {
-		t.Fatalf("open failure record = %+v, want a debug record for topic bad with its error", f)
+	if f.level != slog.LevelWarn || f.attrs["topic"] != "bad" || f.attrs["err"] == nil {
+		t.Fatalf("open failure record = %+v, want a warning for topic bad with its error", f)
 	}
 	failedPartition, ok := f.attrs["partition"].(int64)
 	if !ok {
