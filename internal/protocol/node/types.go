@@ -139,7 +139,8 @@ type ConsumeRequest struct {
 	// after Claim, and only when above 1, so a single-record request is
 	// byte for byte what it was; an owner on an older release refuses it
 	// with 400 (trailing payload) and the requester asks it for one record
-	// instead.
+	// instead. A replay (HasOffset) reads at most one record, still
+	// answered in the batch shape.
 	Max int
 }
 
