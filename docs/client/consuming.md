@@ -33,9 +33,10 @@ You may also pass `partition=N` to consume from one partition only, or `offset=N
 ## Consuming in batches
 
 ```bash
-curl -u $AUTH "$NARAD/v1/topics/orders/consume?wait=10s&max=50"
+curl -u $AUTH -H 'X-Narad-Client: curl' "$NARAD/v1/topics/orders/consume?wait=10s&max=50"
 ```
 
+- A batch consume must send an `X-Narad-Client` header (any value; the CLI and the Go SDK send it), else `400`. A consume reserves messages, and a page on another origin could send a `GET` with an operator's cached Basic credentials; the header forces a CORS preflight, which Narad never approves. A single consume does not need it.
 - `max=N`, from 1 to 100, asks for up to N messages in one response: `200` with `{"messages":[...]}`, or `204` if nothing turned up within `wait`. Each element is exactly what a single consume returns, with its own `receipt_handle` and its own visibility window, and you ack each one on its own (or [in a batch](#acking-in-batches)). Any `max`, `max=1` included, gets the `{"messages":[...]}` shape; without `max` the body is one message, as always. An empty `max=` counts as no `max` (one message in the single-message shape, not a `400`), so a client that builds `max=` from a variable should check it is set.
 - A batch is what is ready now, not N on demand. The request is never held to fill N, and it does not go round the other nodes to fill it either.
 - On a node that owns some of the topic's partitions, the batch comes from one scan of those partitions. Only when that finds nothing does the request fall back on the single-message path: it asks the other owners for one message, then waits (the ordinary long-poll, other nodes' partitions included), and adds to the message the wait delivers whatever a second scan of its own partitions finds. There, other nodes' partitions contribute at most one message to a batch.
