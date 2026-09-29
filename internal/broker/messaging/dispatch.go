@@ -1094,12 +1094,16 @@ func (d *dispatcher) forget(topicName string) {
 	}
 	// Only forget removes an entry, and it marks it retired under st.mu,
 	// so a state that is not retired is still the map's.
+	// Retire before the map lock is released: a wake notifier still
+	// holding this state must follow the map to any successor an
+	// enqueue creates (stateFor takes the map lock), not read this
+	// one's hasWaiters and drop the wake.
 	d.mu.Lock()
 	if d.topics[topicName] == st {
 		delete(d.topics, topicName)
 	}
-	d.mu.Unlock()
 	st.retired.Store(true)
+	d.mu.Unlock()
 	st.hasWaiters.Store(false)
 	st.gen++
 }

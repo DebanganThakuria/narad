@@ -50,12 +50,7 @@ func TestZZWP7aQueuedCommitsShareOneDurableCycle(t *testing.T) {
 			offsets[c], errs[c] = e.CommitAcceptedProduceBatch(ctx, zzWP7aRecords("orders", "", 0, each, fmt.Sprint("c", c)))
 		})
 	}
-	zzWP7aWaitStack(t, "every caller to queue", func(count func(string) int) bool {
-		// One waiting for the lock and the rest queued behind it, or
-		// every one of them on the lock.
-		return count("(*Logs).lockProduce(") == callers ||
-			count("(*Logs).lockProduce(") == 1 && count("(*Engine).commitCombined(") == callers
-	})
+	zzWP7aWaitQueued(t, e, "orders", 0, callers)
 	release()
 	wg.Wait()
 
@@ -139,10 +134,7 @@ func TestZZWP7aCombinedCommitFailureFailsEveryCaller(t *testing.T) {
 		for c := range callers {
 			wg.Go(func() { _, errs[c] = e.CommitAcceptedProduceBatch(ctx, batches[c]) })
 		}
-		zzWP7aWaitStack(t, "every caller to queue", func(count func(string) int) bool {
-			return count("(*Logs).lockProduce(") == callers ||
-				count("(*Logs).lockProduce(") == 1 && count("(*Engine).commitCombined(") == callers
-		})
+		zzWP7aWaitQueued(t, e, "orders", 0, callers)
 		release()
 		wg.Wait()
 		return errs
@@ -258,9 +250,7 @@ func TestZZWP7aCombinedCycleOrdersAndClampsCommitTimes(t *testing.T) {
 			}
 		})
 		// Queue them in this order.
-		zzWP7aWaitStack(t, "the request to queue", func(count func(string) int) bool {
-			return count("(*Engine).commitCombined(") == i+1
-		})
+		zzWP7aWaitQueued(t, e, "orders", 0, i+1)
 	}
 	release()
 	wg.Wait()

@@ -139,8 +139,17 @@ func (e *Engine) FanoutCursorStats(ctx context.Context, parent string) ([]topic.
 		var hwm int64
 		if log, open := e.logs.Peek(parent, p); open {
 			hwm = log.HighWatermark()
-		} else if hwm, _, err = storage.ReadPersistedHighWatermark(dir); err != nil {
-			return nil, err
+		} else {
+			var known bool
+			if hwm, known, err = closedHighWatermark(dir); err != nil {
+				return nil, err
+			}
+			if !known {
+				// Only an open knows this boundary and a listing never
+				// opens a log: report nothing for the partition rather
+				// than a boundary of 0 below its cursors.
+				continue
+			}
 		}
 		for _, child := range t.Children {
 			cur, ok, err := storage.ReadFanoutCursor(dir, child)
@@ -250,7 +259,8 @@ func (e *Engine) readFanoutSlabOnce(log fanoutLog, opts topic.FanoutReadOpts) (t
 // must open the log for real: the cursor is behind the durable HWM
 // (backlog to drain — correctness over eviction, always), the read is
 // a tail-anchor (needs the live tail), or the HWM file is unreadable
-// (open for ground truth).
+// or holds no boundary over record bytes (open for ground truth; see
+// closedHighWatermark).
 //
 // The caught-up case sleeps out the long-poll in short slices,
 // re-checking Peek each slice: a produce reopens the log through Get,
@@ -262,8 +272,8 @@ func (e *Engine) fanoutSlabWhileClosed(ctx context.Context, topicName string, pa
 		return topic.FanoutSlab{}, false, nil
 	}
 	partitionDir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
-	hwm, _, err := storage.ReadPersistedHighWatermark(partitionDir)
-	if err != nil {
+	hwm, known, err := closedHighWatermark(partitionDir)
+	if err != nil || !known {
 		return topic.FanoutSlab{}, false, nil
 	}
 	if opts.FromOffset < hwm {
@@ -289,4 +299,28 @@ func (e *Engine) fanoutSlabWhileClosed(ctx context.Context, topicName string, pa
 		}
 	}
 	return topic.FanoutSlab{NextOffset: opts.FromOffset, HighWatermark: hwm}, true, nil
+}
+
+// closedHighWatermark reads a closed partition's high watermark from its
+// directory without opening the log. known=false means only an open can
+// tell: the hwm file holds no boundary (a crash image nothing has opened
+// yet, or a Close whose hwm write failed) while the segments hold record
+// bytes. With no record bytes the answer is exact without an open: the
+// offset the newest segment is named for, as in transferHighWatermark.
+func closedHighWatermark(dir string) (hwm int64, known bool, err error) {
+	hwm, known, err = storage.ReadPersistedHighWatermark(dir)
+	if err != nil || known {
+		return hwm, known, err
+	}
+	segs, err := storage.ListPartitionSegments(dir)
+	if err != nil {
+		return 0, false, err
+	}
+	for _, seg := range segs {
+		if seg.SizeBytes > 0 {
+			return 0, false, nil
+		}
+		hwm = max(hwm, seg.BaseOffset)
+	}
+	return hwm, true, nil
 }

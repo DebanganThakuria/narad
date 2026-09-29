@@ -108,8 +108,11 @@ func (w *checkpointWriter) store(nextSeq uint64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.syncErr != nil {
-		// A background flush failed: report it once, reopen, and
-		// write the value again so it is flushed afresh.
+		// A background flush failed: report it once and drop the
+		// descriptor. This call writes nothing; the caller retries
+		// (the dispatcher's storedSeq did not advance), and that next
+		// store reopens the file and writes its value, which a new
+		// flush then syncs.
 		err := w.syncErr
 		w.syncErr = nil
 		w.resetLocked()
