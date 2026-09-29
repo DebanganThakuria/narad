@@ -263,12 +263,47 @@ func TestZZWP16CommitterWarnsWhenItCannotKeepToItsInterval(t *testing.T) {
 	}
 }
 
-// A committer that keeps up says nothing. (The first tick, which
-// creates every partition's consumer.ahead, is not held to the
-// interval.)
+// A committer that keeps up says nothing. The background loop times its
+// ticks by the wall clock, which a loaded machine (make check runs
+// packages in parallel under -race) stretches past the tick on its own,
+// so this drives the ticks by hand at synthetic times and hands warn
+// the flush time: one well under the tick must not warn, and the same
+// committer must warn for one over it, so the test can fail. (The first
+// tick, which creates every partition's consumer.ahead, is not held to
+// the interval.)
 func TestZZWP16CommitterThatKeepsUpDoesNotWarn(t *testing.T) {
-	sink := zzWP16LoggedLoop(t, 8, 250*time.Millisecond, time.Millisecond, time.Second)
+	const parts = 8
+	dataDir := t.TempDir()
+	for p := range parts {
+		mustCreatePartitionDir(t, dataDir, "t", p)
+	}
+	io, _ := zzWP16SlowSyncs(time.Millisecond)
+	sink := &zzWP16LogSink{}
+	c := newConsumerOffsetCommitter(dataDir, 250*time.Millisecond, slog.New(slog.NewJSONHandler(sink, nil)), committerOptions{io: io, manual: true})
+	defer c.Close()
+	var version uint64
+	c.SetAheadSource(func(string, int) (int64, []int64, uint64, bool) {
+		return int64(version) * 10, []int64{int64(version)*10 + 2}, version, true
+	})
+
+	start := time.Now()
+	for i := range 20 {
+		version++
+		for p := range parts {
+			c.Commit("t", p, int64(version)*10)
+		}
+		at := start.Add(time.Duration(i) * c.tick)
+		if err := c.tickAt(at, offsetTickNormal); err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+		c.warn(at, c.tick/10)
+	}
 	if warned := sink.records(t, "WARN", "consumer offset"); len(warned) != 0 {
 		t.Fatalf("a committer that keeps up warned: %v", warned)
+	}
+
+	c.warn(start.Add(time.Hour), 2*c.tick)
+	if warned := sink.records(t, "WARN", "consumer offset commits cannot keep to their interval"); len(warned) != 1 {
+		t.Fatalf("a flush over the tick gave %d warnings, want 1: %v", len(warned), warned)
 	}
 }
