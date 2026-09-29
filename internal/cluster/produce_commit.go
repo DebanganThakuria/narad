@@ -578,7 +578,9 @@ func (d *ProduceDispatcher) topicDeleted(ctx context.Context, st *produceDispatc
 	deleted := d.topicConfirmedDeleted(ctx, topicName)
 	st.deleted[topicName] = deleted
 	if !deleted {
-		d.noteUnsure(st, key, now)
+		// Stamped after the check: one slower than failureBackoff would
+		// otherwise leave a memo that has already run out.
+		d.noteUnsure(st, key, d.now())
 	}
 	return deleted
 }
@@ -630,7 +632,7 @@ func (d *ProduceDispatcher) incarnationState(ctx context.Context, st *produceDis
 		st.goneIDs[rec.TopicID] = struct{}{}
 		return incarnationGone
 	}
-	d.noteUnsure(st, key, now)
+	d.noteUnsure(st, key, d.now()) // after the check, as in topicDeleted
 	return incarnationUnconfirmed
 }
 
