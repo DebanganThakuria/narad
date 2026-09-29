@@ -39,6 +39,15 @@ func isUnsupportedOp(res nodewire.Response) bool {
 	return res.Status == http.StatusBadRequest && bytes.Contains(res.Body, []byte("unsupported rpc operation"))
 }
 
+// isTrailingFieldRefusal reports whether res is an owner refusing a
+// request for a field it does not know: a node on a release before the
+// field existed rejects the whole payload with 400 and
+// nodewire.TrailingPayloadError. It matches only "trailing", the part
+// every release sends.
+func isTrailingFieldRefusal(res nodewire.Response) bool {
+	return res.Status == http.StatusBadRequest && bytes.Contains(res.Body, []byte("trailing"))
+}
+
 // legacyAckBatchTTL is how long an owner that refused OpAckBatch gets
 // every ack on its own. As with legacyClaimTTL: long enough that a
 // rolling upgrade costs one refused batch per owner per TTL, short

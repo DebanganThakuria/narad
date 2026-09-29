@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -214,7 +213,7 @@ func (rt *Router) claimUpTo(ctx context.Context, addr, topicName string, max int
 		req.Max = max
 	}
 	res, err := rt.peer.ConsumeWithin(ctx, addr, consumeProbeTimeout, req)
-	for err == nil && res.Status == http.StatusBadRequest && (req.Claim || req.Max > 1) && bytes.Contains(res.Body, []byte("trailing")) {
+	for err == nil && (req.Claim || req.Max > 1) && isTrailingFieldRefusal(res) {
 		// An owner on an earlier release rejects a trailing field it does
 		// not know outright, and the reply does not say which. Drop the
 		// newest first: Max, then the Claim byte, which leaves the plain
