@@ -19,7 +19,9 @@ BUILD_PLATFORM ?= linux/amd64
 endif
 
 PKGS       := ./...
-TEST_FLAGS := -race -count=1
+# The same per-package limit CI uses: internal/cluster runs close to go
+# test's default 10 minutes on a laptop under load.
+TEST_FLAGS := -race -count=1 -timeout 20m
 
 # Stamp the binary with the current commit so `narad version` is honest.
 # Falls through to the runtime debug.BuildInfo path inside `narad version`
