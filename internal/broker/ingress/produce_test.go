@@ -441,7 +441,7 @@ func TestManagerCompactReclaimsFullyDispatchedWALAcrossRestart(t *testing.T) {
 	if err := manager.StoreProduceCheckpoint(next); err != nil {
 		t.Fatalf("StoreProduceCheckpoint() error = %v", err)
 	}
-	if err := manager.CompactProduceBefore(next); err != nil {
+	if _, err := manager.CompactProduceBefore(next); err != nil {
 		t.Fatalf("CompactProduceBefore() error = %v", err)
 	}
 	// The WAL dir now holds only the checkpoint and one empty segment.

@@ -49,7 +49,7 @@ func TestCompactProduceBeforeStopsAtSyncedCheckpoint(t *testing.T) {
 	if err := m.StoreProduceCheckpoint(60); err != nil {
 		t.Fatalf("StoreProduceCheckpoint(60) error = %v", err)
 	}
-	if err := m.CompactProduceBefore(60); err != nil {
+	if _, err := m.CompactProduceBefore(60); err != nil {
 		t.Fatalf("CompactProduceBefore() error = %v", err)
 	}
 	if first := walFirstSeq(t, m); first > 10 {
@@ -58,7 +58,7 @@ func TestCompactProduceBeforeStopsAtSyncedCheckpoint(t *testing.T) {
 
 	// Once the flush lands, compaction catches up.
 	m.checkpoint.flush()
-	if err := m.CompactProduceBefore(60); err != nil {
+	if _, err := m.CompactProduceBefore(60); err != nil {
 		t.Fatalf("CompactProduceBefore() after flush error = %v", err)
 	}
 	if first := walFirstSeq(t, m); first <= 10 {
@@ -80,7 +80,7 @@ func TestOpenManagerRaisesCheckpointBelowOldestSegment(t *testing.T) {
 	if err := m.StoreProduceCheckpoint(60); err != nil {
 		t.Fatalf("StoreProduceCheckpoint() error = %v", err)
 	}
-	if err := m.CompactProduceBefore(60); err != nil {
+	if _, err := m.CompactProduceBefore(60); err != nil {
 		t.Fatalf("CompactProduceBefore() error = %v", err)
 	}
 	oldest := walFirstSeq(t, m)

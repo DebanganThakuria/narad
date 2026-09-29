@@ -311,15 +311,18 @@ func (m *Manager) ReplayProduceFromCursorPeek(cursor wal.Cursor, peek wal.Peek, 
 // compaction stops at the synced value and catches up on a later call:
 // after a power loss the checkpoint can come back as the synced value
 // while unlinked segments stay gone, and a checkpoint far below the
-// oldest segment is a gap the dispatcher cannot read across.
-func (m *Manager) CompactProduceBefore(seq uint64) error {
+// oldest segment is a gap the dispatcher cannot read across. It returns
+// the bound it compacted to, min(seq, the synced checkpoint), so a
+// caller knows when it has caught up with seq.
+func (m *Manager) CompactProduceBefore(seq uint64) (uint64, error) {
 	if m == nil || m.log == nil {
-		return errors.New("ingress: manager is nil")
+		return 0, errors.New("ingress: manager is nil")
 	}
 	m.checkpointMu.Lock()
 	durable := m.checkpoint.durable()
 	m.checkpointMu.Unlock()
-	return m.log.CompactBefore(min(seq, durable))
+	to := min(seq, durable)
+	return to, m.log.CompactBefore(to)
 }
 
 // LoadProduceCheckpoint reads the persisted dispatch checkpoint (the

@@ -152,6 +152,12 @@ type produceDispatchState struct {
 	// storedSeq is the last checkpoint written to disk; compaction never
 	// goes past it.
 	storedSeq uint64
+	// compactedSeq is the bound the WAL was last compacted to. It trails
+	// storedSeq until the checkpoint's sync lands (see
+	// ingress.Manager.CompactProduceBefore); while it does, idle passes
+	// keep compacting so a node that stops producing still reclaims the
+	// WAL behind its last checkpoint.
+	compactedSeq uint64
 	// readSeq is the first seq the reader has not seen, and readCursor
 	// the WAL position to resume reading from.
 	readSeq    uint64
@@ -657,15 +663,22 @@ func (d *ProduceDispatcher) logReroutes(st *produceDispatchState) {
 // front, stores it, and compacts the WAL behind the stored value. A
 // failed store is retried by the next call; the in-memory checkpoint
 // does not wait for it (nothing is read below it again) and compaction
-// stays behind the last value that was written.
+// stays behind the last value that was written. Compaction stops at the
+// last synced checkpoint, so a pass whose checkpoint did not move still
+// compacts until it has caught up with the stored value; once it has,
+// such a pass does nothing.
 func (d *ProduceDispatcher) advanceCheckpoint(st *produceDispatchState) error {
 	st.nextSeq += st.marks.popDone()
-	if st.nextSeq == st.storedSeq {
+	if st.nextSeq == st.storedSeq && st.compactedSeq >= st.storedSeq {
 		return nil
 	}
-	if err := d.ingress.StoreProduceCheckpoint(st.nextSeq); err != nil {
-		return err
+	if st.nextSeq != st.storedSeq {
+		if err := d.ingress.StoreProduceCheckpoint(st.nextSeq); err != nil {
+			return err
+		}
+		st.storedSeq = st.nextSeq
 	}
-	st.storedSeq = st.nextSeq
-	return d.ingress.CompactProduceBefore(st.storedSeq)
+	to, err := d.ingress.CompactProduceBefore(st.storedSeq)
+	st.compactedSeq = max(st.compactedSeq, to)
+	return err
 }
