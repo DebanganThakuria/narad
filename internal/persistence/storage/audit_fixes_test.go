@@ -170,13 +170,14 @@ func TestVerifyFrameAtBufferedMatchesUnbuffered(t *testing.T) {
 		t.Fatalf("encodeFrame: %v", err)
 	}
 	var buf []byte
-	h1, end1, err1 := verifyFrameAt(bytes.NewReader(frame), 0)
+	h1, _, err1 := readFrameRaw(bytes.NewReader(frame), 0)
+	end1 := int64(headerSize) + int64(h1.compressed)
 	h2, end2, err2 := verifyFrameAtBuffered(bytes.NewReader(frame), 0, &buf)
 	if err1 != nil || err2 != nil || h1 != h2 || end1 != end2 {
 		t.Fatalf("healthy: unbuffered=(%+v,%d,%v) buffered=(%+v,%d,%v)", h1, end1, err1, h2, end2, err2)
 	}
 	frame[len(frame)-1] ^= 0x01
-	_, _, err1 = verifyFrameAt(bytes.NewReader(frame), 0)
+	_, _, err1 = readFrameRaw(bytes.NewReader(frame), 0)
 	_, _, err2 = verifyFrameAtBuffered(bytes.NewReader(frame), 0, &buf)
 	if !IsCorrupt(err1) || !IsCorrupt(err2) {
 		t.Fatalf("corrupt: unbuffered=%v buffered=%v, want corruption from both", err1, err2)

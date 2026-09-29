@@ -493,8 +493,9 @@ func wp15WalkedEnd(t *testing.T, path string, base int64) int64 {
 		t.Fatal(err)
 	}
 	end := base
+	var buf []byte
 	for pos := int64(0); pos < st.Size(); {
-		h, next, err := verifyFrameAt(f, pos)
+		h, next, err := verifyFrameAtBuffered(f, pos, &buf)
 		if err != nil {
 			t.Fatalf("%s@%d: %v", filepath.Base(path), pos, err)
 		}
