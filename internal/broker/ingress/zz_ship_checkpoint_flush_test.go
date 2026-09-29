@@ -69,11 +69,18 @@ func TestCheckpointFlushRearmsForStoreDuringSlowSync(t *testing.T) {
 	w := newSyncedCheckpointWriter(t, 5*time.Millisecond)
 	defer w.close()
 	entered, release, syncs := blockFirstCheckpointSync(t)
+	// Deferred after close, so it runs first: a failed assertion must
+	// open the gate before close waits for the parked flush.
+	defer release()
 
 	if err := w.store(2); err != nil {
 		t.Fatalf("store(2): %v", err)
 	}
-	<-entered
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the background flush of store(2) never reached the sync")
+	}
 	if err := w.store(3); err != nil {
 		t.Fatalf("store(3): %v", err)
 	}

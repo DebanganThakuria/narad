@@ -186,8 +186,10 @@ func TestZZShipEvictionSkipsAClosingEntry(t *testing.T) {
 	claimed := zzShipClaim(t, g, 0)
 	evicted := make(chan int, 1)
 	go func() { evicted <- g.EvictIdleOnce(time.Minute) }()
+	returned := false
 	select {
 	case n := <-evicted:
+		returned = true
 		if n != 1 {
 			t.Errorf("EvictIdleOnce closed %d logs, want 1 (other/0 only)", n)
 		}
@@ -199,7 +201,10 @@ func TestZZShipEvictionSkipsAClosingEntry(t *testing.T) {
 	}
 	unlock()
 	if t.Failed() {
-		<-evicted
+		if !returned {
+			// The guard is released now, so the eviction can finish.
+			<-evicted
+		}
 		return
 	}
 	if _, ok := g.Peek("other", 0); ok {
