@@ -139,10 +139,18 @@ func (p *Poller) Run(ctx context.Context) {
 }
 
 func (p *Poller) tick(ctx context.Context) {
-	// First, so a failing snapshot does not leave it stale: an operator
-	// waits for it to read 0 before a rollback.
+	// First, so a failing snapshot does not leave them stale: an operator
+	// waits for the backlog to read 0 before a rollback, and alerts on
+	// the WAL failure.
 	if p.ingressBacklog != nil {
 		p.metrics.IngressDispatchBacklog.Set(float64(p.ingressBacklog()))
+	}
+	if p.ingressHealthy != nil {
+		failed := 0.0
+		if !p.ingressHealthy() {
+			failed = 1
+		}
+		p.metrics.IngressWALFailed.Set(failed)
 	}
 	// Taken before the topic listing inside Snapshot: anything bound for
 	// a topic before this point, and absent from the listing, belongs to
@@ -173,13 +181,6 @@ func (p *Poller) tick(ctx context.Context) {
 	}
 	if p.reaperRestarts != nil {
 		p.metrics.ReaperRestarts.Set(float64(p.reaperRestarts()))
-	}
-	if p.ingressHealthy != nil {
-		failed := 0.0
-		if !p.ingressHealthy() {
-			failed = 1
-		}
-		p.metrics.IngressWALFailed.Set(failed)
 	}
 	p.updateDataDirGauges()
 	p.clearDepartedPartitions(currentPartitions)
