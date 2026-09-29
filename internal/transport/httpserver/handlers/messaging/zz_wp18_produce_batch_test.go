@@ -64,7 +64,8 @@ func zzWP18ErrorBody(t *testing.T, res *httptest.ResponseRecorder) string {
 // TestZZWP18ProduceBatchAccepts checks a valid batch reaches the broker
 // as one call, each message decoded exactly: a JSON payload verbatim
 // (whitespace and all), a base64 payload and key as their bytes, a
-// pinned partition, and a keyless message.
+// pinned partition, a keyless message, and a null payload stored as the
+// four bytes null, as a single produce of the body null stores it.
 func TestZZWP18ProduceBatchAccepts(t *testing.T) {
 	br := &zzWP18BatchProducer{fakeBroker: &fakeBroker{}}
 	h := ProduceBatch(newTestSet(br, nil), nil)
@@ -75,14 +76,15 @@ func TestZZWP18ProduceBatchAccepts(t *testing.T) {
 		{"key":"` + base64.StdEncoding.EncodeToString([]byte(binKey)) + `","key_encoding":"base64","payload":"` +
 		base64.StdEncoding.EncodeToString(binPayload) + `","payload_encoding":"base64","partition":2},
 		{"payload":"text"},
-		{"key":"","payload":42}
+		{"key":"","payload":42},
+		{"payload":null}
 	]}`
 	res := zzWP18PostBatch(t, h, "/v1/topics/orders/produce/batch", body, nil)
 	if res.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202 (body %s)", res.Code, res.Body)
 	}
-	if got := res.Body.String(); got != "{\"accepted\":4}\n" {
-		t.Fatalf("body = %q, want {\"accepted\":4}", got)
+	if got := res.Body.String(); got != "{\"accepted\":5}\n" {
+		t.Fatalf("body = %q, want {\"accepted\":5}", got)
 	}
 	if ct := res.Header().Get("Content-Type"); ct != "application/json" {
 		t.Fatalf("Content-Type = %q", ct)
@@ -95,6 +97,7 @@ func TestZZWP18ProduceBatchAccepts(t *testing.T) {
 		{Key: binKey, Payload: binPayload, Partition: 2, HasPartition: true},
 		{Payload: []byte(`"text"`)},
 		{Payload: []byte(`42`)},
+		{Payload: []byte(`null`)},
 	}
 	got := br.calls[0]
 	if len(got) != len(want) {
@@ -138,6 +141,8 @@ func TestZZWP18ProduceBatchRefusesInvalid(t *testing.T) {
 		{"key parameter", "?key=k", `{"messages":[` + ok + `]}`, "key is set per message"},
 		{"empty key parameter", "?key=", `{"messages":[` + ok + `]}`, "key is set per message"},
 		{"partition parameter", "?partition=1", `{"messages":[` + ok + `]}`, "partition is set per message"},
+		{"escaped key parameter", "?%6Bey=k", `{"messages":[` + ok + `]}`, "key is set per message"},
+		{"escaped partition parameter", "?p%61rtition=1", `{"messages":[` + ok + `]}`, "partition is set per message"},
 	} {
 		br := &zzWP18BatchProducer{fakeBroker: &fakeBroker{}}
 		h := ProduceBatch(newTestSet(br, nil), nil)

@@ -6,10 +6,12 @@ package main
 // alone it lets the heap grow to twice the live heap between GCs and
 // never looks at the container it runs in, so a burst (a schema hydrate
 // herd, a fan-out catch-up) can take a pod past its cgroup limit and get
-// it OOM-killed while the collector still thinks there is room. The chart
-// and the ops doc set GOMEMLIMIT, but a brew install, a docker run or
-// another chart does not. So at startup, when GOMEMLIMIT is unset and the
-// process runs under a cgroup memory limit, serve sets the soft limit to
+// it OOM-killed while the collector still thinks there is room. Only the
+// ops doc's example values set GOMEMLIMIT (through the chart's extraEnv);
+// the chart itself, a brew install and a docker run do not, so a pod
+// given just resources.limits.memory would otherwise run with no soft
+// limit. So at startup, when GOMEMLIMIT is unset and the process runs
+// under a cgroup memory limit, serve sets the soft limit to
 // containerMemoryLimitPercent of it. GOGC is left alone: raising it
 // showed no throughput, latency or CPU gain.
 

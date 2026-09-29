@@ -2,6 +2,7 @@ package messaging
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"strconv"
@@ -311,11 +312,16 @@ func (b *batchConsume) release(msgs []topic.Message) {
 // message, may be nil) and then msgs, each as a single consume encodes
 // it, in order until the next record would take the body past
 // consumeBatchReplyBytes. The first record always goes. sent is how many
-// of msgs the body carries.
+// of msgs the body carries. The buffer is sized for each key and payload
+// base64-encoded, plus the topic, the receipt handle and 192 bytes for
+// the field names, both encoding flags and the widest numbers, so a
+// batch of binary records is built without growing it; JSON records
+// over-reserve by a third, within the reply bound.
 func appendMessages(first []byte, msgs []topic.Message) (body []byte, sent int) {
 	size := len(first) + 16
 	for i := range msgs {
-		size += len(msgs[i].Key) + len(msgs[i].Payload) + 160
+		size += base64.StdEncoding.EncodedLen(len(msgs[i].Key)) + base64.StdEncoding.EncodedLen(len(msgs[i].Payload)) +
+			len(msgs[i].Topic) + len(msgs[i].ReceiptHandle) + 192
 	}
 	body = make([]byte, 0, min(size, consumeBatchReplyBytes))
 	body = append(body, `{"messages":[`...)
