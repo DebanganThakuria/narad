@@ -70,6 +70,9 @@ func applyEnv(cfg *Config) error {
 	if err := envInt("NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY", &cfg.HTTP.MaxConsumeInFlightPerIdentity); err != nil {
 		return err
 	}
+	if err := envInt("NARAD_HTTP_MAX_PRODUCE_IN_FLIGHT_PER_IDENTITY", &cfg.HTTP.MaxProduceInFlightPerIdentity); err != nil {
+		return err
+	}
 	if v, ok := os.LookupEnv("NARAD_HTTP_METRICS_ADDR"); ok {
 		cfg.HTTP.MetricsAddr = strings.TrimSpace(v)
 	}

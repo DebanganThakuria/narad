@@ -75,10 +75,12 @@ nodes* than the parent's, that copy survives the parent's disk.
 That placement is exactly what create-with-`parent` guarantees:
 
 > A child created with `parent`, keeping the inherited partition count,
-> on a cluster with at least 2 live nodes: **every keyed record's parent
-> copy and child copy live on different nodes.** Partition p of the
-> child is deliberately assigned away from the owner of the parent's
-> partition p.
+> on a cluster with at least 2 live nodes: **every record's parent copy
+> and child copy live on different nodes.** Partition p of the child is
+> deliberately assigned away from the owner of the parent's partition p,
+> and fan-out puts each record on the same partition index in both
+> topics: a keyed record because its key hashes to the same index, a
+> keyless one because fan-out keeps its parent partition's index.
 
 ```bash
 # One line of replication:
@@ -109,6 +111,12 @@ Honest fine print, because a pattern is not a subsystem:
 - Children attached the two-step way (create, then attach) keep the
   placement they got at creation, which is *not* anti-affine. For the
   replica pattern, use one-call creation.
+- A keyed record that does not sit on the partition its key hashes to
+  (sent with an explicit `partition`, or moved to a live sibling
+  partition while its owner was unreachable) still gets its child copy
+  by key, on another index, so those two copies can share a node.
+  Keyless records do not have this gap: their child copy follows the
+  parent partition they actually landed on.
 
 ## Delay children
 

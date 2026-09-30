@@ -22,12 +22,20 @@ package runtime
 //  3. Eviction holds the partition's produce-serialization mutex, so
 //     it can never interleave with a produce commit's append+fsync
 //     critical section.
-//  4. The close-and-delete happens under the map's WRITE lock — the
-//     same discipline as CloseTopic — so a concurrent Get cannot open
-//     a second log over the same directory while the first is still
-//     flushing its final state.
-//  5. Candidacy is re-checked under those locks before closing: a Get
-//     that stamped the entry after the scan aborts the eviction.
+//  4. The close happens under the topic's guard, like every other
+//     close: the entry is claimed (marked closing) under the map's
+//     WRITE lock and closed after that lock is released, so a
+//     concurrent Get takes the slow path and waits on the guard. It
+//     cannot open a second log over the same directory while the first
+//     is still flushing its final state, and Gets of other topics never
+//     wait for the flush.
+//  5. Candidacy is re-checked under the write lock, in the critical
+//     section that claims the entry: a Get that stamped the entry after
+//     the scan aborts the eviction, and one that comes after the claim
+//     waits for the close and reopens. A Get skips the store while
+//     lastAccess is under a second old (stampEvery), and such a stamp
+//     is far inside any idle window (a minute at least), so the
+//     re-check still sees the log in use.
 //
 // Close itself force-syncs the high-watermark file and wakes any
 // long-poll waiters, so an evicted log leaves exact durable state and
@@ -35,7 +43,6 @@ package runtime
 
 import (
 	"context"
-	"strings"
 	"time"
 )
 
@@ -71,13 +78,13 @@ func (g *Logs) EvictIdleOnce(idleAfter time.Duration) int {
 	// Snapshot candidates under the read lock; all closing happens
 	// per-candidate under the full lock discipline below.
 	type candidate struct {
-		key   string
+		key   logKey
 		entry *logEntry
 	}
 	g.mu.RLock()
 	candidates := make([]candidate, 0)
 	for k, e := range g.logs {
-		if !evictable(e, cutoff) {
+		if e.closing || !evictable(e, cutoff) {
 			continue
 		}
 		candidates = append(candidates, candidate{key: k, entry: e})
@@ -106,27 +113,29 @@ func (g *Logs) EvictIdleOnce(idleAfter time.Duration) int {
 
 // closeIfStill closes and forgets one open log under the full lock
 // discipline (invariants 3-5): the partition's produce mutex, then the
-// registry write lock, then a re-check that the same entry is still
-// installed and still satisfies `still`. A Get that raced in (stamping
-// the entry, or reopening it) makes the check fail and the log stays
-// open for its caller. Close runs under g.mu, like CloseTopic: a Get
-// blocks until the old log has fully flushed and released its files,
-// then reopens fresh. A close error is counted under errKind.
-func (g *Logs) closeIfStill(key string, entry *logEntry, still func(*logEntry) bool, errKind string) (closed bool, err error) {
-	topicName, idx, ok := splitKey(key)
-	if !ok {
-		return false, nil
-	}
-	unlock := g.lockProduce(topicName, idx)
+// topic's guard, then the registry write lock and a re-check that the
+// same entry is still installed and still satisfies `still`. A Get that
+// raced in (stamping the entry, or reopening it) makes the check fail
+// and the log stays open for its caller. Otherwise the entry is claimed
+// in that critical section and the log closed after the write lock is
+// released, still under the guard: a Get of the partition waits until
+// the old log has fully flushed and released its files, then reopens
+// fresh, and no other topic waits at all. A close error is counted
+// under errKind.
+func (g *Logs) closeIfStill(key logKey, entry *logEntry, still func(*logEntry) bool, errKind string) (closed bool, err error) {
+	produceMu := g.lockProduce(key.topic, key.idx)
+	defer produceMu.Unlock()
+	unlock := g.lockTopic(key.topic)
 	defer unlock()
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	cur, present := g.logs[key]
 	if !present || cur != entry || !still(cur) {
+		g.mu.Unlock()
 		return false, nil
 	}
-	delete(g.logs, key)
-	if err := cur.log.Close(); err != nil {
+	claimLocked(cur)
+	g.mu.Unlock()
+	if err := g.closeClaimed([]claimedEntry{{key: key, entry: cur}}); err != nil {
 		if g.metrics != nil {
 			g.metrics.IncError("storage", errKind)
 		}
@@ -153,21 +162,4 @@ func evictable(e *logEntry, cutoffUnixNano int64) bool {
 		return false
 	}
 	return e.log.RetentionMaxAge() == 0 || e.log.SegmentCount() <= 1
-}
-
-// splitKey reverses keyOf. Topic names cannot contain '/', so the last
-// separator is unambiguous.
-func splitKey(key string) (topicName string, idx int, ok bool) {
-	i := strings.LastIndexByte(key, '/')
-	if i <= 0 || i == len(key)-1 {
-		return "", 0, false
-	}
-	n := 0
-	for _, ch := range key[i+1:] {
-		if ch < '0' || ch > '9' {
-			return "", 0, false
-		}
-		n = n*10 + int(ch-'0')
-	}
-	return key[:i], n, true
 }

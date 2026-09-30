@@ -8,6 +8,7 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -83,15 +84,21 @@ type ReleaseFunc func(topic string, partition int)
 // most one redelivery per leased message. The committed frontier and the
 // acked-ahead set are persisted through CommitFunc and recovered lazily.
 type InFlight struct {
-	mu           sync.RWMutex
-	shards       map[shardKey]*partitionShard
+	// shards maps shardKey to *partitionShard. Every reserve, ack,
+	// extend and nack looks its shard up, from every core, while the set
+	// only changes when a partition is first touched, moves or is
+	// deleted; a sync.Map serves those lookups without writing a shared
+	// lock word.
+	shards       sync.Map
 	onCommit     CommitFunc
 	resolve      CapsResolver
 	recover      CommittedRecoverFunc
 	recoverAhead AheadRecoverFunc
 
-	clockMu sync.RWMutex
-	timeNow func() int64 // replaced in tests
+	// clock, when set, replaces the wall clock (Unix ms); only tests set
+	// it. Every reserve and ack reads it, so it is an atomic pointer
+	// rather than a field behind a process-wide lock.
+	clock atomic.Pointer[func() int64]
 
 	notifyMu  sync.RWMutex
 	onRelease ReleaseFunc
@@ -99,28 +106,42 @@ type InFlight struct {
 	// onDrop is set once at wiring, like recover and recoverAhead, and
 	// read without a lock.
 	onDrop func(topic string, partition int)
+
+	// createMu orders shard creates against drops. A create holds it for
+	// reading from before its recovery reads through its store; a drop
+	// holds it for writing across its deletes only. A drop therefore
+	// waits for every create that is already reading and deletes the
+	// shard that create stores, while a create that starts after a drop
+	// reads the partition's files as they are after it. The retire of a
+	// topic incarnation and a move's install drop after the directory
+	// was renamed, removed or replaced, so no shard recovered from the
+	// files of a copy that is gone outlives the drop to serve the
+	// directory now at the path, or to be persisted into it. Reserves,
+	// acks and lookups of an existing shard never take it.
+	createMu sync.RWMutex
 }
 
 // NewInFlight creates an InFlight tracker. onCommit may be nil (no
 // persistence, useful for tests or early development).
 func NewInFlight(resolve CapsResolver, onCommit CommitFunc) *InFlight {
 	return &InFlight{
-		shards:   make(map[shardKey]*partitionShard),
 		onCommit: onCommit,
 		resolve:  resolve,
-		timeNow:  nowUnixMs,
 	}
 }
 
 // SetCommittedRecovery registers fn as the durable-offset source consulted
 // when a shard is created lazily. Call once during wiring, before serving.
+// fn runs while drops wait (see createMu), so it must not call DropTopic
+// or DropPartition.
 func (f *InFlight) SetCommittedRecovery(fn CommittedRecoverFunc) {
 	f.recover = fn
 }
 
 // SetAheadRecovery registers fn as the source of the persisted
 // acked-ahead set consulted when a shard is created lazily, alongside
-// the committed frontier. Call once during wiring, before serving.
+// the committed frontier. Call once during wiring, before serving. Like
+// the committed recovery, fn must not call DropTopic or DropPartition.
 func (f *InFlight) SetAheadRecovery(fn AheadRecoverFunc) {
 	f.recoverAhead = fn
 }
@@ -159,9 +180,7 @@ func (f *InFlight) Init(ctx context.Context, topic string, partition int, commit
 		return err
 	}
 
-	f.mu.Lock()
-	f.shards[shardKey{topic, partition}] = newPartitionShard(committed, caps)
-	f.mu.Unlock()
+	f.shards.Store(shardKey{topic, partition}, newPartitionShard(committed, caps))
 	return nil
 }
 
@@ -238,31 +257,36 @@ func (f *InFlight) RefreshCaps(ctx context.Context, topic string) error {
 		return err
 	}
 
-	f.mu.RLock()
-	for k, sh := range f.shards {
-		if k.topic != topic {
-			continue
+	f.shards.Range(func(k, v any) bool {
+		if k.(shardKey).topic != topic {
+			return true
 		}
+		sh := v.(*partitionShard)
 		sh.mu.Lock()
 		sh.maxInFlight = caps.MaxInFlight
 		sh.maxAckedAhead = caps.MaxAckedAhead
 		sh.mu.Unlock()
-	}
-	f.mu.RUnlock()
+		return true
+	})
 	return nil
 }
 
-// DropTopic removes all shards for a topic. Called on topic deletion.
+// DropTopic removes all shards for a topic. Called on topic deletion
+// and when a topic incarnation is retired. It waits for the shard
+// creates already in progress and drops what they store (see
+// createMu).
 func (f *InFlight) DropTopic(topic string) {
 	var dropped []int
-	f.mu.Lock()
-	for k := range f.shards {
-		if k.topic == topic {
-			delete(f.shards, k)
-			dropped = append(dropped, k.partition)
+	f.createMu.Lock()
+	f.shards.Range(func(k, v any) bool {
+		// Only the shard seen here: one recreated for the name since is
+		// a shard of the successor.
+		if key := k.(shardKey); key.topic == topic && f.shards.CompareAndDelete(k, v) {
+			dropped = append(dropped, key.partition)
 		}
-	}
-	f.mu.Unlock()
+		return true
+	})
+	f.createMu.Unlock()
 	if f.onDrop != nil {
 		for _, p := range dropped {
 			f.onDrop(topic, p)
@@ -274,11 +298,13 @@ func (f *InFlight) DropTopic(topic string) {
 // partition's local data is reclaimed after a rebalance moved it away,
 // and on the destination before it takes ownership, so a partition that
 // moves away and back never resumes from a stale in-memory frontier
-// instead of the persisted consumer.offset the move carried over.
+// instead of the persisted consumer.offset the move carried over. Like
+// DropTopic, it waits for a shard create in progress and drops what it
+// stores.
 func (f *InFlight) DropPartition(topic string, partition int) {
-	f.mu.Lock()
-	delete(f.shards, shardKey{topic, partition})
-	f.mu.Unlock()
+	f.createMu.Lock()
+	f.shards.Delete(shardKey{topic, partition})
+	f.createMu.Unlock()
 	if f.onDrop != nil {
 		f.onDrop(topic, partition)
 	}
@@ -327,17 +353,16 @@ func (f *InFlight) notifyRelease(topic string, partition int) {
 
 // shard returns the live shard for (topic, partition), or nil.
 func (f *InFlight) shard(topic string, partition int) *partitionShard {
-	f.mu.RLock()
-	sh := f.shards[shardKey{topic, partition}]
-	f.mu.RUnlock()
-	return sh
+	if v, ok := f.shards.Load(shardKey{topic, partition}); ok {
+		return v.(*partitionShard)
+	}
+	return nil
 }
 
 // shardOrCreate returns the live shard for (topic, partition), creating
 // one with freshly resolved caps if none exists. On a create race the
 // first shard stored wins and the loser is discarded.
 func (f *InFlight) shardOrCreate(ctx context.Context, topic string, partition int) (*partitionShard, error) {
-	key := shardKey{topic, partition}
 	if sh := f.shard(topic, partition); sh != nil {
 		return sh, nil
 	}
@@ -346,6 +371,29 @@ func (f *InFlight) shardOrCreate(ctx context.Context, topic string, partition in
 	if err != nil {
 		return nil, err
 	}
+
+	sh, stored, recovered, advanced := f.recoverShard(topic, partition, caps)
+	// Outside the create fence: onCommit is the committer's, and a drop
+	// must not wait on it.
+	if stored && advanced > recovered && f.onCommit != nil {
+		f.onCommit(topic, partition, advanced)
+	}
+	return sh, nil
+}
+
+// recoverShard builds a shard from the partition's persisted consumer
+// state and stores it unless another create stored one first (stored
+// is then false and sh is that shard). recovered is the frontier read
+// and advanced the frontier after seeding the acked-ahead set.
+//
+// It holds the create fence for reading from the first recovery read
+// through the store (see createMu). Without it a create that read a
+// retired copy's files could store its shard after the retire's drop,
+// and that shard, keyed by the topic name, would serve the successor
+// from the retired copy's frontier.
+func (f *InFlight) recoverShard(topic string, partition int, caps Caps) (sh *partitionShard, stored bool, recovered, advanced int64) {
+	f.createMu.RLock()
+	defer f.createMu.RUnlock()
 
 	committed := int64(-1)
 	if f.recover != nil {
@@ -356,9 +404,12 @@ func (f *InFlight) shardOrCreate(ctx context.Context, topic string, partition in
 	var ahead []int64
 	if f.recoverAhead != nil {
 		if aheadCommitted, offsets, ok := f.recoverAhead(topic, partition); ok {
-			// Both files hold frontier values the shard reached; the
-			// ahead record may be the fresher of the two when the crash
-			// landed between the two writes of one flush.
+			// Both files hold frontier values the shard reached. While
+			// the broker runs the newest frontier is in consumer.ahead:
+			// consumer.offset is levelled with it at most every 30s
+			// (consumerOffsetLevelEvery) and at Close, so after a crash
+			// it can trail by that much (see runtime's
+			// ConsumerOffsetCommitter). Take the larger.
 			committed = max(committed, aheadCommitted)
 			ahead = offsets
 		}
@@ -367,19 +418,12 @@ func (f *InFlight) shardOrCreate(ctx context.Context, topic string, partition in
 	// Seeding can collapse the frontier over a run of recovered
 	// acked-ahead offsets that starts right above it (the frontier file
 	// lagged the set); persist that advance like any other.
-	advanced := fresh.seedAheadLocked(ahead)
+	advanced = fresh.seedAheadLocked(ahead)
 
-	f.mu.Lock()
-	if existing := f.shards[key]; existing != nil {
-		f.mu.Unlock()
-		return existing, nil
+	if existing, loaded := f.shards.LoadOrStore(shardKey{topic, partition}, fresh); loaded {
+		return existing.(*partitionShard), false, committed, advanced
 	}
-	f.shards[key] = fresh
-	f.mu.Unlock()
-	if advanced > committed && f.onCommit != nil {
-		f.onCommit(topic, partition, advanced)
-	}
-	return fresh, nil
+	return fresh, true, committed, advanced
 }
 
 // resolvedCaps fetches and validates the topic's caps.
@@ -395,18 +439,12 @@ func (f *InFlight) resolvedCaps(ctx context.Context, topic string) (Caps, error)
 }
 
 func (f *InFlight) now() int64 {
-	f.clockMu.RLock()
-	now := f.timeNow
-	f.clockMu.RUnlock()
-	return now()
+	if c := f.clock.Load(); c != nil {
+		return (*c)()
+	}
+	return time.Now().UnixMilli()
 }
 
 func (f *InFlight) setTimeNow(now func() int64) {
-	f.clockMu.Lock()
-	f.timeNow = now
-	f.clockMu.Unlock()
-}
-
-func nowUnixMs() int64 {
-	return time.Now().UnixMilli()
+	f.clock.Store(&now)
 }

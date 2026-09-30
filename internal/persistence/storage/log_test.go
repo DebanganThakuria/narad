@@ -159,6 +159,8 @@ func TestRoundTripAfterFlushAndReopen(t *testing.T) {
 	}
 }
 
+// Close writes the exact high-watermark for readers of the closed log,
+// and a reopen restores it: the record at offset 2 stays hidden.
 func TestHighWatermarkPersistsAcrossRestart(t *testing.T) {
 	path := testLogPath(t)
 	mustWriteAndClose(t, path, slowFlushOpts(t, nil), func(l *Log) {
@@ -171,6 +173,9 @@ func TestHighWatermarkPersistsAcrossRestart(t *testing.T) {
 			t.Fatalf("AdvanceHighWatermark: %v", err)
 		}
 	})
+	if got, ok, err := ReadPersistedHighWatermark(path); err != nil || !ok || got != 2 {
+		t.Fatalf("persisted after Close = (%d, %v, %v), want exactly 2", got, ok, err)
+	}
 
 	l, err := NewLog(path, slowFlushOpts(t, nil))
 	if err != nil {
@@ -325,8 +330,10 @@ func TestBatchedSyncDoesNotFsyncEveryFlush(t *testing.T) {
 	if got := metrics.fsyncs.Load(); got != 0 {
 		t.Fatalf("fsyncs before close = %d, want 0", got)
 	}
-	if got := metrics.hwms.Load(); got != 0 {
-		t.Fatalf("hwm persists before close = %d, want 0", got)
+	// One: the release that emptied the hwm file before the first
+	// advance. The advances after it write nothing.
+	if got := metrics.hwms.Load(); got != 1 {
+		t.Fatalf("hwm persists before close = %d, want 1", got)
 	}
 
 	if err := l.Close(); err != nil {
@@ -335,8 +342,8 @@ func TestBatchedSyncDoesNotFsyncEveryFlush(t *testing.T) {
 	if got := metrics.fsyncs.Load(); got != 1 {
 		t.Fatalf("fsyncs after close = %d, want 1", got)
 	}
-	if got := metrics.hwms.Load(); got != 1 {
-		t.Fatalf("hwm persists after close = %d, want 1", got)
+	if got := metrics.hwms.Load(); got != 2 {
+		t.Fatalf("hwm persists after close = %d, want 2", got)
 	}
 }
 
@@ -626,8 +633,9 @@ func TestRecoveryResyncsAcrossLargeCorruptGap(t *testing.T) {
 }
 
 // TestRecoveryResyncsAfterCorruptLengthField corrupts a mid-file frame's
-// compressed-length field so its claimed end runs past EOF. verifyFrameAt
-// then sees a short payload read (io.ErrUnexpectedEOF) exactly like a torn
+// compressed-length field so its claimed end runs past EOF. The walk's
+// verifyFrameAtBuffered then sees a short payload read
+// (io.ErrUnexpectedEOF) exactly like a torn
 // tail — but a later valid, fsynced frame exists, so recovery must resync
 // to it rather than truncate it away.
 func TestRecoveryResyncsAfterCorruptLengthField(t *testing.T) {
@@ -1050,7 +1058,7 @@ func TestMidSegmentCorruptionInSealedSegmentSkipped(t *testing.T) {
 		}
 	}
 
-	// Record 1 (in segment[1]) is now a gap; the rest readable.
+	// Record 1 (in segment[1]) is now unreadable; the rest readable.
 	for _, off := range []int64{0, 2, 3, 4, 5} {
 		want := fmt.Appendf(nil, "frame-%d", off)
 		got, err := l.Read(off)
@@ -1061,8 +1069,11 @@ func TestMidSegmentCorruptionInSealedSegmentSkipped(t *testing.T) {
 			t.Fatalf("Read %d got %q want %q", off, got, want)
 		}
 	}
-	if _, err := l.Read(1); !errors.Is(err, ErrOffsetNotFound) {
-		t.Fatalf("Read(1) want ErrOffsetNotFound got %v", err)
+	// Recovery does not read sealed segments, so the read is what finds
+	// the bad frame: it fails its CRC, and the consume path skips it as
+	// corrupt, exactly as it skips a gap.
+	if _, err := l.Read(1); !IsCorrupt(err) {
+		t.Fatalf("Read(1) want a corrupt-record error got %v", err)
 	}
 }
 

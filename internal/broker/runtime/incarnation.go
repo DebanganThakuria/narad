@@ -25,12 +25,16 @@ package runtime
 //     incarnation alone;
 //   - a purge holds the topic's guard from closing the open logs
 //     through unlinking the directory, so an open of the same topic
-//     waits and then sees the directory gone.
+//     waits and then sees the directory gone. It holds the log map lock
+//     only to claim and drop the topic's entries, never across the
+//     closes or the unlink.
 //
 // A record without an ID (created before IDs existed) keeps the old
 // name-based behaviour: nothing is stamped, nothing is quarantined.
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -83,27 +87,39 @@ func (g *Logs) lockTopic(topicName string) (unlock func()) {
 // retired incarnation carries over into a same-named successor. fn runs
 // outside the log map lock but under the topic's guard, so it may Peek
 // but must not Get.
+//
+// Until fn has run, the retired incarnation's consumer shards are live,
+// and the offset committer persists their commits by path, into
+// whatever directory the path names by then. So fn runs while no other
+// incarnation's directory is under the name: a quarantine runs it after
+// the rename, before the successor's marker and partition directories
+// are made, and a purge runs it before removing the directory as well
+// as after. The drop fn makes must wait for a shard create that read
+// the partition's files before the rename or the removal, and drop the
+// shard it stores (consumer.InFlight.DropTopic does), or that shard
+// outlives the retire with the retired incarnation's frontier.
 func (g *Logs) SetTopicRetiredHook(fn func(topicName string)) {
 	g.retired = fn
 }
 
-// ensureIncarnationLocked makes topics/<name> the directory of the
-// incarnation id before a partition log is opened in it, and reports
-// whether a directory of another incarnation was quarantined doing so
-// (the caller runs the retired hook once it has released mu). Caller
-// holds the topic's guard and mu (write). An empty id is a record
-// without an incarnation: the directory is used as-is.
-func (g *Logs) ensureIncarnationLocked(topicName, id string) (quarantined bool, err error) {
+// ensureIncarnationGuarded makes topics/<name> the directory of the
+// incarnation id before a partition log is opened in it. A directory of
+// another incarnation is quarantined, and the retired hook runs then.
+// Caller holds the topic's guard and not mu: the marker read, the
+// quarantine rename and the marker write are file I/O that must not
+// stall other topics. An empty id is a record without an incarnation:
+// the directory is used as-is.
+func (g *Logs) ensureIncarnationGuarded(topicName, id string) error {
 	if id == "" {
-		return false, nil
+		return nil
 	}
 	topicDir := storage.TopicDir(g.dataDir, topicName)
 	marker, marked, err := storage.ReadTopicIncarnation(topicDir)
 	if err != nil {
-		return false, err
+		return err
 	}
 	if marked && marker == id {
-		return false, nil
+		return nil
 	}
 	if marked {
 		// The directory belongs to another incarnation of the name: a
@@ -112,27 +128,52 @@ func (g *Logs) ensureIncarnationLocked(topicName, id string) (quarantined bool, 
 		// topic under the current incarnation), set the directory
 		// aside for the sweep, and start the current incarnation from
 		// an empty directory.
-		if err := g.closeTopicLocked(topicName); err != nil {
-			return false, fmt.Errorf("broker/runtime: close stale incarnation of %s: %w", topicName, err)
+		if err := g.closeTopicGuarded(topicName); err != nil {
+			return fmt.Errorf("broker/runtime: close stale incarnation of %s: %w", topicName, err)
 		}
 		setAside, err := storage.QuarantineTopicDir(g.dataDir, topicName, marker)
 		if err != nil {
-			return false, fmt.Errorf("broker/runtime: quarantine stale incarnation of %s: %w", topicName, err)
+			return fmt.Errorf("broker/runtime: quarantine stale incarnation of %s: %w", topicName, err)
 		}
 		g.logger.Error("topic directory belongs to a deleted incarnation of the topic; quarantined instead of served",
 			"topic", topicName, "directory_incarnation", marker, "current_incarnation", id, "quarantine_dir", setAside)
-		quarantined = true
+		// Retire the deleted incarnation now, while nothing is under
+		// the name: its directory was just renamed away, and the current
+		// incarnation's partition directories are made only after this
+		// returns (the caller's storage.NewLog, a move's install). Until
+		// the hook drops them, its consumer shards are live, and the
+		// offset committer persists their commits by path. Retired after
+		// the NewLog, as it was before, a commit in between wrote the
+		// deleted incarnation's frontier into the new directory, and the
+		// recreated topic skipped its own first records. A consumer
+		// still holding a log of the deleted incarnation may be making
+		// a shard from files it read before the rename; the hook's drop
+		// waits for that create to store its shard and drops it (the
+		// create fence of consumer.InFlight), so that shard never
+		// carries the deleted incarnation's frontier into the current
+		// one or reaches the committer. A shard made after the hook
+		// recovers nothing of the deleted incarnation (none of its files
+		// are under the path any more): it is the current incarnation's
+		// shard, even when a consume still holding the deleted
+		// incarnation's log made it. That consume's read then fails with
+		// storage.ErrLogClosed (the log was closed above, before the
+		// drop), which the scan treats as transient and never as a gap to
+		// skip, so it cannot move the current incarnation's frontier. The
+		// hook runs only here: run again after the open, it could drop a
+		// shard of the current incarnation, whose log the Get fast path
+		// already serves.
+		g.notifyRetired(topicName)
 	}
 	// Unmarked: a fresh directory, or one written before markers
 	// existed (adopted by the current incarnation, the upgrade path).
 	if err := storage.WriteTopicIncarnation(topicDir, id); err != nil {
-		return quarantined, fmt.Errorf("broker/runtime: stamp incarnation of %s: %w", topicName, err)
+		return fmt.Errorf("broker/runtime: stamp incarnation of %s: %w", topicName, err)
 	}
-	return quarantined, nil
+	return nil
 }
 
 // notifyRetired runs the retired hook. Callers hold the topic's guard
-// and have released mu.
+// and not mu.
 func (g *Logs) notifyRetired(topicName string) {
 	if g.retired != nil {
 		g.retired(topicName)
@@ -147,13 +188,7 @@ func (g *Logs) notifyRetired(topicName string) {
 func (g *Logs) EnsureTopicIncarnation(topicName, id string) error {
 	unlock := g.lockTopic(topicName)
 	defer unlock()
-	g.mu.Lock()
-	quarantined, err := g.ensureIncarnationLocked(topicName, id)
-	g.mu.Unlock()
-	if quarantined {
-		g.notifyRetired(topicName)
-	}
-	return err
+	return g.ensureIncarnationGuarded(topicName, id)
 }
 
 // TopicIncarnationMatches reports whether topics/<name> may be served
@@ -192,6 +227,10 @@ func (g *Logs) TopicIncarnationMatches(topicName, id string) (bool, error) {
 //
 // An empty id is a purge from a sender that predates incarnation IDs
 // and removes topics/<name> whatever it holds, as it always did.
+//
+// A directory being removed is first renamed to a quarantine name
+// (setAsidePurged), so nothing written by path during the removal lands
+// where a successor of the name opens.
 func (g *Logs) PurgeTopic(topicName, id string) (purged bool, err error) {
 	unlock := g.lockTopic(topicName)
 	purged, err = g.purgeTopicGuarded(topicName, id)
@@ -204,7 +243,7 @@ func (g *Logs) PurgeTopic(topicName, id string) (purged bool, err error) {
 		// finishes first. That commit may be inside Get waiting for the
 		// guard, which is why this runs only after the guard is
 		// released.
-		g.retireProduceEntries(func(k string) bool { return strings.HasPrefix(k, topicName+"/") })
+		g.retireProduceEntries(func(k logKey) bool { return k.topic == topicName })
 	}
 	return purged, err
 }
@@ -229,10 +268,43 @@ func (g *Logs) purgeTopicGuarded(topicName, id string) (purged bool, err error) 
 		}
 	}
 
-	g.mu.Lock()
-	closeErr := g.closeTopicLocked(topicName)
-	rmErr := os.RemoveAll(dir)
-	g.mu.Unlock()
+	// Under the guard only: the closes (a flush and fsyncs per open
+	// partition) and the unlink of every segment file stall callers of
+	// this topic, which must wait for the purge anyway, and nobody else.
+	closeErr := g.closeTopicGuarded(topicName)
+	// Set the directory aside before retiring the incarnation, and remove
+	// it there. The offset committer persists a shard's commits by path,
+	// creating a missing consumer file in the partition directory, and
+	// the retire cannot stop a shard from being made again after it: a
+	// consume that resolved the purged incarnation's log before the purge
+	// can still reserve on it, which makes the partition's shard again
+	// from whatever consumer files the path names. Removed in place, that
+	// shard recovered the purged frontier from files os.RemoveAll had not
+	// unlinked yet, and a tick persisting it after the unlinks and before
+	// the rmdir (a late ack of the dropped shard, or the committer's
+	// requeue of a forgotten snapshot) created consumer files in the
+	// directory being removed. The rmdir failed, the unmarked leftover
+	// survived, and a same-named successor adopted it with the purged
+	// frontier and skipped its own first records. Set aside, the path
+	// names nothing: a shard made after the rename recovers nothing, a
+	// prime by path finds no directory and creates none, and a file
+	// created through a directory the committer pinned before the rename
+	// lands in the set-aside copy, which no successor opens. A rename that
+	// fails removes the directory in place, as before.
+	removeDir, asideErr := g.setAsidePurged(topicName, id)
+	if asideErr != nil {
+		g.logger.Warn("purge: set topic directory aside; removing it in place",
+			"topic", topicName, "purged_incarnation", id, "err", asideErr)
+	}
+	// Retire the incarnation before the removal as well as after it. Its
+	// consumer shards are live until the hook drops them. Each retire's
+	// drop waits for a shard create already reading the files and drops
+	// what it stores (the create fence of consumer.InFlight), so a create
+	// that read before the rename cannot store its shard after the last
+	// retire and hand the purged frontier to a successor of the name. The
+	// retire after the removal drops a shard made again in between.
+	g.notifyRetired(topicName)
+	rmErr := g.removeAll(removeDir)
 	if closeErr != nil {
 		err = closeErr
 	}
@@ -241,6 +313,48 @@ func (g *Logs) purgeTopicGuarded(topicName, id string) (purged bool, err error) 
 	}
 	g.notifyRetired(topicName)
 	return true, err
+}
+
+// setAsidePurged renames topics/<name> to a quarantine name before a
+// purge removes it, and returns the directory to remove: the set-aside
+// path, or topics/<name> when there is nothing to rename or the rename
+// failed (err). The name is topics/<name>.stale-<id>, which a failed
+// removal leaves for the purge's retry (removeQuarantines) and the orphan
+// sweeps. A legacy purge (empty id) uses the directory's marker when it
+// has one, so the sweeps classify the leftover as a quarantine, and
+// otherwise a random suffix no live topic's directory carries; the
+// startup sweep removes such an unmarked leftover once the leader
+// confirms no topic of that name exists.
+func (g *Logs) setAsidePurged(topicName, id string) (string, error) {
+	dir := storage.TopicDir(g.dataDir, topicName)
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		return dir, nil
+	} else if err != nil {
+		return dir, err
+	}
+	asideID := id
+	if asideID == "" {
+		marker, marked, err := storage.ReadTopicIncarnation(dir)
+		switch {
+		case err != nil:
+			return dir, err
+		case marked:
+			asideID = marker
+		default:
+			var b [8]byte
+			if _, err := rand.Read(b[:]); err != nil {
+				return dir, err
+			}
+			asideID = "purge-" + hex.EncodeToString(b[:])
+		}
+	}
+	aside, err := storage.QuarantineTopicDir(g.dataDir, topicName, asideID)
+	if aside != "" {
+		// Renamed; a failed sync of the parent directory does not matter
+		// for a directory about to be removed.
+		return aside, nil
+	}
+	return dir, err
 }
 
 // removeQuarantines deletes every quarantine directory of topicName's

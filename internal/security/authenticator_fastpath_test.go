@@ -26,7 +26,7 @@ func TestCredTokenMatchesFreshHMAC(t *testing.T) {
 		copy(want[:], mac.Sum(nil))
 
 		for i := range 3 {
-			if got := a.credToken(pw); got != want {
+			if got := credToken(a, pw); got != want {
 				t.Fatalf("credToken(%q) call %d = %x, want %x", pw, i, got, want)
 			}
 		}
@@ -143,7 +143,7 @@ func BenchmarkCredToken(b *testing.B) {
 	a := New(newFakeStore(), slog.New(slog.DiscardHandler))
 	b.ReportAllocs()
 	for b.Loop() {
-		a.credToken("correct horse battery staple")
+		credToken(a, "correct horse battery staple")
 	}
 }
 

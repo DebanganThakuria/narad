@@ -162,3 +162,33 @@ type CreateGater interface {
 	ArmCreateGate()
 	ReleaseCreateGate()
 }
+
+// BatchProducer is the optional batch-produce surface of a Broker.
+// Brokers built by New implement it (via the embedded messaging.Engine).
+// The HTTP batch produce handler asserts for it and refuses the request
+// without it: accepting a batch one AcceptProduce at a time would give
+// up all or nothing. Like CreateGater it stays out of Broker so test
+// fakes of Broker need not implement it.
+type BatchProducer interface {
+	// AcceptProduceBatch validates every message and then durably
+	// accepts them all into the ingress WAL, in order, or accepts none.
+	// See messaging.Engine.AcceptProduceBatch.
+	AcceptProduceBatch(ctx context.Context, topicName string, msgs []messaging.ProduceMessage) ([]ingress.AcceptedProduce, error)
+}
+
+// Compile-time check: batch produce stays reachable through the facade
+// via the embedded messaging.Engine.
+var _ BatchProducer = (*impl)(nil)
+
+// BatchConsumer is the optional batch-consume surface of a Broker.
+// Brokers built by New implement it (via the embedded messaging.Engine).
+// The HTTP consume handler asserts for it when a request asks for more
+// than one record (?max=N) and serves one record at a time without it.
+// Like CreateGater it stays out of Broker so test fakes of Broker need
+// not implement it.
+type BatchConsumer interface {
+	// ConsumeBatch reserves up to max records in one non-blocking scan
+	// and appends them to dst; with none reservable it returns a waiter
+	// for ConsumeWait. See messaging.Engine.ConsumeBatch.
+	ConsumeBatch(ctx context.Context, topicName string, opts messaging.ConsumeOpts, max int, dst []topic.Message) ([]topic.Message, *messaging.ConsumeWaiter, error)
+}

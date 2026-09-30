@@ -76,6 +76,20 @@ func (l *Log) CompactBefore(seq uint64) error {
 	return nil
 }
 
+// FirstSeq returns the base of the oldest segment on disk. Every
+// sequence number below it was compacted away; with no segment on disk
+// it is NextSeq.
+func (l *Log) FirstSeq() (uint64, error) {
+	segments, err := listSegments(l.dir)
+	if err != nil {
+		return 0, err
+	}
+	if len(segments) == 0 {
+		return l.NextSeq(), nil
+	}
+	return segments[0].base, nil
+}
+
 // rotateFullyCompacted rolls the active segment when every record in the
 // log — the active segment's included — is below seq and the segment has
 // grown past the rotation floor. The fresh (empty) segment's base is the
@@ -99,5 +113,5 @@ func (l *Log) rotateFullyCompacted(seq uint64) error {
 	if err != nil {
 		return err
 	}
-	return l.rollLocked()
+	return l.rollLocked(false)
 }

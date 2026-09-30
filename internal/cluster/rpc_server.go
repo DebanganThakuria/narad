@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker"
+	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -45,20 +46,28 @@ type RPCServer struct {
 	// agrees with the router's and the HTTP handlers'.
 	maxConsumeWait time.Duration
 
-	// messagingSem bounds how many messaging handlers (produce commits,
-	// acks, non-blocking consumes) execute at once. The read loop still
-	// spawns a goroutine per frame so it never blocks; the goroutine
-	// waits here before touching the broker. nil disables gating
-	// (zero-value servers in tests); NewRPCServer sizes it to
-	// 4*GOMAXPROCS. Ops that call peers (delete_topic's purge broadcast)
-	// are never gated: they could hold a slot while waiting on a node
-	// that is itself waiting on us.
+	// messagingSem bounds how many messaging handlers (acks, extends,
+	// nacks, non-blocking consumes) execute at once, and commitSem how
+	// many produce commits do. The read loop still spawns a goroutine
+	// per frame so it never blocks; the goroutine waits here before
+	// touching the broker. The two are separate because a commit holds
+	// its slot across a segment fsync and an HWM fdatasync, while an ack
+	// or a probe is in-memory bookkeeping and at most one read: sharing
+	// one gate queued them behind the disk whenever commit fan-in
+	// approached its size. nil disables gating (zero-value servers in
+	// tests); NewRPCServer sizes both to max(64, 4*GOMAXPROCS). Ops that
+	// call peers (delete_topic's purge broadcast) are never gated: they
+	// could hold a slot while waiting on a node that is itself waiting
+	// on us.
 	messagingSem chan struct{}
+	commitSem    chan struct{}
 
 	// transferSem bounds the partition-transfer ops (segment listing and
 	// chunk reads): each chunk read pins up to storage.MaxSegmentReadBytes,
 	// so an unbounded number of them from one peer is an unbounded amount
-	// of memory and disk reads. controlSem bounds the remaining control
+	// of memory and disk reads. A transfer op keeps its slot until its
+	// reply has been written, since encoding and writing the reply is
+	// where the chunk's memory lives. controlSem bounds the remaining control
 	// ops (topic lookups, stats, membership, moves, users, fan-out
 	// cursors) so a peer cannot run thousands of them at once either. Ops
 	// that call OTHER peers or may park for a long time (delete_topic's
@@ -71,8 +80,9 @@ type RPCServer struct {
 	// deliveries remembers messages handed to forwarded consumes whose
 	// client may cancel after the reply was already sent; see
 	// HandleStreamCancel. deliveryExpiry is the same records in insertion
-	// order with their deadlines, so expiring old ones is a pop from the
-	// front, never a scan of the map. now is the clock (tests inject one).
+	// order with their deadlines, from deliveryHead on, so expiring old
+	// ones is a pop from the front, never a scan of the map. now is the
+	// clock (tests inject one).
 	// tokens holds the standing interest peers have registered with this
 	// node (the owner half of the token protocol); demand is how an
 	// inbound notification reaches a consumer parked here (the requester
@@ -84,6 +94,7 @@ type RPCServer struct {
 	deliveriesMu   sync.Mutex
 	deliveries     map[requestKey]delivery
 	deliveryExpiry []deliveryDeadline
+	deliveryHead   int
 	now            func() time.Time
 }
 
@@ -104,8 +115,9 @@ func NewRPCServer(br broker.Broker, store *metastore.Store, logger *slog.Logger)
 
 // defaultTransferConcurrency is the transfer-op ceiling: at
 // storage.MaxSegmentReadBytes per read that is at most 32 MiB of chunk
-// buffers in flight per node, while the mover (one sequential chunk
-// stream per move) never queues behind it in practice.
+// replies in flight per node (twice that for an instant while a reply
+// is encoded from its read buffer), while the mover (one sequential
+// chunk stream per move) never queues behind it in practice.
 const defaultTransferConcurrency = 8
 
 // defaultControlConcurrency is the control-op ceiling. Control ops are
@@ -127,13 +139,11 @@ func defaultMessagingConcurrency() int {
 const minMessagingConcurrency = 64
 
 // SetMessagingConcurrency bounds concurrently executing messaging
-// handlers to n; n <= 0 disables the bound. Call before serving.
+// handlers to n, and concurrently executing produce commits to another
+// n; n <= 0 disables both bounds. Call before serving.
 func (s *RPCServer) SetMessagingConcurrency(n int) {
-	if n <= 0 {
-		s.messagingSem = nil
-		return
-	}
-	s.messagingSem = make(chan struct{}, n)
+	s.messagingSem = newSemaphore(n)
+	s.commitSem = newSemaphore(n)
 }
 
 // SetTransferConcurrency bounds concurrently executing partition-transfer
@@ -197,19 +207,53 @@ func (s *RPCServer) HandleStreamRequest(ctx context.Context, frame clusterwire.S
 		return false
 	}
 	go func() {
-		res := s.dispatch(ctx, requestKey{stream: clusterrpc.StreamIDFromContext(ctx), request: frame.RequestID}, frame.Payload)
-		payload, err := nodewire.EncodeResponse(res)
-		if err != nil {
-			payload, _ = nodewire.EncodeResponse(errorResponse(http.StatusInternalServerError, "encode rpc response failed"))
-		}
-		respond(clusterwire.StreamFrame{
-			Type:      clusterwire.StreamFrameNodeReply,
-			RequestID: frame.RequestID,
-			Payload:   payload,
-		})
+		res, held := s.serve(ctx, requestKey{stream: clusterrpc.StreamIDFromContext(ctx), request: frame.RequestID}, frame.Payload)
+		writeReply(frame.RequestID, res, held, respond)
 	}()
 	return true
 }
+
+// writeReply encodes res into a recycled buffer and hands it to respond.
+// respond writes the reply and keeps no reference to it (see
+// clusterrpc.StreamFrameHandler), so once it returns the buffer, and any
+// slot the reply held, is free again.
+//
+// It is kept out of line so its frame is not part of the request
+// goroutine's while the handler runs: every request starts on a fresh
+// minimum-size stack, and a handler path that outgrows it pays a stack
+// copy per request.
+//
+//go:noinline
+func writeReply(requestID uint64, res nodewire.Response, held chan struct{}, respond func(clusterwire.StreamFrame)) {
+	buf := replyBuffers.Get().(*[]byte)
+	payload, err := nodewire.AppendResponse((*buf)[:0], res)
+	if err != nil {
+		payload, _ = nodewire.AppendResponse((*buf)[:0], errorResponse(http.StatusInternalServerError, "encode rpc response failed"))
+	}
+	respond(clusterwire.StreamFrame{
+		Type:      clusterwire.StreamFrameNodeReply,
+		RequestID: requestID,
+		Payload:   payload,
+	})
+	if held != nil {
+		<-held
+	}
+	if cap(payload) <= maxPooledReplyBytes {
+		*buf = payload[:0]
+		replyBuffers.Put(buf)
+	}
+}
+
+// replyBuffers recycles the buffers node RPC replies are encoded into,
+// so a reply costs no allocation of its own. A buffer grown past
+// maxPooledReplyBytes (a segment chunk, a large consume reply) is left
+// to the collector rather than pinned in the pool.
+var replyBuffers = sync.Pool{New: func() any {
+	buf := make([]byte, 0, 512)
+	return &buf
+}}
+
+const maxPooledReplyBytes = 64 << 10
 
 // HandleStreamCancel gives back a message that a consume delivered for a
 // request whose client stopped waiting (see clusterwire.StreamFrameCancel).
@@ -229,11 +273,14 @@ type requestKey struct {
 }
 
 // delivery is a message a consume handler handed to a client that may
-// have stopped listening.
+// have stopped listening. rest holds the receipt handles of the other
+// records of a batch reply, as they went out; a single record has none.
+// They stay encoded because a cancel is rare: decoding one per record
+// on every batch would cost more than the record keeping.
 type delivery struct {
 	topic    string
 	handle   consumer.Handle
-	at       time.Time
+	rest     []string
 	expireAt time.Time
 }
 
@@ -263,6 +310,14 @@ func (s *RPCServer) clock() time.Time {
 // rememberDelivery records a handle a forwarded consume is about to
 // answer with, so a cancel that races the reply can give it back.
 func (s *RPCServer) rememberDelivery(key requestKey, topicName string, h consumer.Handle) {
+	s.rememberDeliveries(key, topicName, h, nil)
+}
+
+// rememberDeliveries is rememberDelivery for a reply that carries
+// several records: h is the first one's handle, and rest the receipt
+// handles of the others. A cancel that races the reply gives them all
+// back.
+func (s *RPCServer) rememberDeliveries(key requestKey, topicName string, h consumer.Handle, rest []string) {
 	now := s.clock()
 	s.deliveriesMu.Lock()
 	if s.deliveries == nil {
@@ -270,7 +325,7 @@ func (s *RPCServer) rememberDelivery(key requestKey, topicName string, h consume
 	}
 	s.expireDeliveriesLocked(now)
 	expireAt := now.Add(deliveryCancelGrace)
-	s.deliveries[key] = delivery{topic: topicName, handle: h, at: now, expireAt: expireAt}
+	s.deliveries[key] = delivery{topic: topicName, handle: h, rest: rest, expireAt: expireAt}
 	s.deliveryExpiry = append(s.deliveryExpiry, deliveryDeadline{key: key, expireAt: expireAt})
 	s.deliveriesMu.Unlock()
 }
@@ -279,20 +334,32 @@ func (s *RPCServer) rememberDelivery(key requestKey, topicName string, h consume
 // A queue entry whose record was already taken (cancelled) or replaced
 // by a later delivery under the same key is skipped. Must hold
 // deliveriesMu.
+//
+// The queue's head moves forward over the spent entries rather than
+// shifting the rest down on every pop: once the queue is full, nearly
+// every delivery expires one, and the shift cost a copy of the whole
+// queue each time (57 us per delivery at 50k a second). The live
+// entries move to the front only once the spent ones are more than
+// half the array, which the pops since the last move have paid for, so
+// a delivery costs O(1) amortized and the array stays within about
+// twice the live entries.
 func (s *RPCServer) expireDeliveriesLocked(now time.Time) {
-	n := 0
-	for n < len(s.deliveryExpiry) && n < deliveryExpiryBudget && !s.deliveryExpiry[n].expireAt.After(now) {
-		e := s.deliveryExpiry[n]
+	q, head := s.deliveryExpiry, s.deliveryHead
+	for n := 0; head < len(q) && n < deliveryExpiryBudget && !q[head].expireAt.After(now); n++ {
+		e := q[head]
 		if d, ok := s.deliveries[e.key]; ok && d.expireAt.Equal(e.expireAt) {
 			delete(s.deliveries, e.key)
 		}
-		n++
+		head++
 	}
-	if n > 0 {
-		// Shift in place; the queue is a FIFO whose head moves forward,
-		// and copying the remainder keeps the backing array from growing
-		// without bound.
-		s.deliveryExpiry = append(s.deliveryExpiry[:0], s.deliveryExpiry[n:]...)
+	switch {
+	case head == s.deliveryHead:
+	case head == len(q):
+		s.deliveryExpiry, s.deliveryHead = q[:0], 0
+	case head > len(q)/2:
+		s.deliveryExpiry, s.deliveryHead = append(q[:0], q[head:]...), 0
+	default:
+		s.deliveryHead = head
 	}
 }
 
@@ -314,65 +381,188 @@ func (s *RPCServer) takeDelivery(key requestKey) (delivery, bool) {
 	return d, ok
 }
 
-// releaseDelivery nacks a delivered message so it is redeliverable now.
-// A stale handle (already acked or released) is not an error.
+// releaseDelivery nacks a delivered message, and every other record of
+// its batch, so they are redeliverable now. A stale handle (already
+// acked or released) is not an error.
 func (s *RPCServer) releaseDelivery(d delivery) {
-	if err := s.broker.Nack(rpcRequestContext(), d.topic, d.handle); err != nil && !errors.Is(err, consumer.ErrHandleStale) && s.logger != nil {
-		s.logger.Warn("release consume delivery after client cancel", "topic", d.topic, "err", err)
+	s.releaseHandle(d.topic, d.handle)
+	for _, rh := range d.rest {
+		if h, err := consumer.DecodeHandle(rh); err == nil {
+			s.releaseHandle(d.topic, h)
+		}
 	}
 }
 
-// withMessagingSlot runs handle under the messaging concurrency bound.
-func (s *RPCServer) withMessagingSlot(handle func() nodewire.Response) nodewire.Response {
+// releaseHandle nacks one delivered record; see releaseDelivery.
+func (s *RPCServer) releaseHandle(topicName string, h consumer.Handle) {
+	if err := s.broker.Nack(rpcRequestContext(), topicName, h); err != nil && !errors.Is(err, consumer.ErrHandleStale) && s.logger != nil {
+		s.logger.Warn("release consume delivery after client cancel", "topic", topicName, "err", err)
+	}
+}
+
+// acquireMessagingSlot takes a slot under the messaging concurrency
+// bound, or reports false if ctx ends first: the requester gave up (its
+// budget ran out, or its client left), and the caller answers without
+// touching the broker. The uncontended case is one non-blocking send,
+// and never asks the request context for its Done channel, which the
+// transport makes only on demand. A true result must be paired with
+// releaseMessagingSlot.
+func (s *RPCServer) acquireMessagingSlot(ctx context.Context) bool {
+	sem := s.messagingSem
+	if sem == nil {
+		return true
+	}
+	select {
+	case sem <- struct{}{}:
+		return true
+	default:
+	}
+	select {
+	case sem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (s *RPCServer) releaseMessagingSlot() {
 	if sem := s.messagingSem; sem != nil {
+		<-sem
+	}
+}
+
+// withCommitSlot runs handle under the produce-commit concurrency bound.
+// A commit is not abandoned while it waits: whether a batch the
+// requester stopped waiting for may be skipped is the produce path's
+// decision, not the gate's.
+func (s *RPCServer) withCommitSlot(handle func() nodewire.Response) nodewire.Response {
+	if sem := s.commitSem; sem != nil {
 		sem <- struct{}{}
 		defer func() { <-sem }()
 	}
 	return handle()
 }
 
+// handleAckFamily runs an ack, extend or nack under the messaging
+// bound. One whose requester gave up while it waited for a slot is
+// answered 503 unapplied. Skipping it is safe: acks are idempotent by
+// nonce, the requester already answered its client with an error, and a
+// retry is applied on its own; applying the stale one as well would
+// only make the retry look stale.
+func (s *RPCServer) handleAckFamily(ctx context.Context, op nodewire.Operation, payload []byte) nodewire.Response {
+	if !s.acquireMessagingSlot(ctx) {
+		return errorResponse(http.StatusServiceUnavailable, "request cancelled while waiting for a handler slot")
+	}
+	defer s.releaseMessagingSlot()
+	switch op {
+	case nodewire.OpAck:
+		return s.handleAck(ctx, payload)
+	case nodewire.OpExtendAck:
+		return s.handleExtendAck(ctx, payload)
+	default:
+		return s.handleNack(ctx, payload)
+	}
+}
+
 // withSlot runs handle under sem, or answers 503 if the request is
 // cancelled (client gone, stream closed) before a slot frees up. A nil
 // sem runs handle directly.
 func (s *RPCServer) withSlot(ctx context.Context, sem chan struct{}, handle func() nodewire.Response) nodewire.Response {
+	res, held := s.withHeldSlot(ctx, sem, handle)
+	if held != nil {
+		<-held
+	}
+	return res
+}
+
+// withHeldSlot is withSlot for a handler whose reply must keep the slot
+// until it has been written: the slot is returned still held, and the
+// caller frees it (a receive from held) once the reply is out. held is
+// nil when no slot was taken.
+func (s *RPCServer) withHeldSlot(ctx context.Context, sem chan struct{}, handle func() nodewire.Response) (res nodewire.Response, held chan struct{}) {
 	if sem == nil {
-		return handle()
+		return handle(), nil
 	}
 	select {
 	case sem <- struct{}{}:
 	case <-ctx.Done():
-		return errorResponse(http.StatusServiceUnavailable, "request cancelled while waiting for a handler slot")
+		return errorResponse(http.StatusServiceUnavailable, "request cancelled while waiting for a handler slot"), nil
 	}
-	defer func() { <-sem }()
-	return handle()
+	return handle(), sem
 }
 
 func (s *RPCServer) dispatch(ctx context.Context, key requestKey, payload []byte) nodewire.Response {
+	res, held := s.serve(ctx, key, payload)
+	if held != nil {
+		<-held
+	}
+	return res
+}
+
+// serve runs one request. held, when not nil, is a semaphore slot the
+// reply still holds; the caller frees it once the reply is written.
+func (s *RPCServer) serve(ctx context.Context, key requestKey, payload []byte) (res nodewire.Response, held chan struct{}) {
 	op, err := nodewire.OperationOf(payload)
 	if err != nil {
-		return errorResponse(http.StatusBadRequest, "invalid rpc request")
+		return errorResponse(http.StatusBadRequest, "invalid rpc request"), nil
 	}
-	var res nodewire.Response
+	switch op {
+	case nodewire.OpConsume:
+		// Gated inside the handler: only non-blocking scans take a slot.
+		reserveConsumeStack()
+		return s.handleConsume(ctx, key, payload), nil
+	case nodewire.OpAck, nodewire.OpExtendAck, nodewire.OpNack:
+		return s.handleAckFamily(ctx, op, payload), nil
+	case nodewire.OpAckBatch:
+		// Here rather than in serveOther for the same reason as the ack
+		// family: a batch of two is common under load, and serveOther's
+		// frame would cost it a stack growth.
+		return s.handleAckBatch(ctx, payload), nil
+	default:
+		return s.serveOther(ctx, op, payload)
+	}
+}
+
+// consumeStackReserve is the frame reserveConsumeStack takes: enough
+// that the one growth it causes on a minimum-size stack goes straight
+// to the 8 KiB a broker consume ends up using.
+const consumeStackReserve = 3 << 10
+
+// reserveConsumeStack grows the request goroutine's stack before a
+// consume runs, while the only frames on it are serve's and its
+// caller's. Every request runs on a new goroutine with a small stack,
+// and a broker consume outgrows it twice on the way down
+// (Engine.Consume's own frame is nearly 1 KiB). Each growth copies
+// every frame above it, and left to itself the second one struck ten
+// frames deep inside the scan. Growing once here, with two frames to
+// copy, took an empty probe against a real engine from 1.8 to 1.1 us.
+//
+//go:noinline
+func reserveConsumeStack() {
+	var reserve [consumeStackReserve]byte
+	touchStack(&reserve)
+}
+
+// touchStack keeps reserveConsumeStack's array, and so its frame, from
+// being optimized away.
+//
+//go:noinline
+func touchStack(*[consumeStackReserve]byte) {}
+
+// serveOther runs every op but the per-message consume and ack family,
+// which serve keeps to a small frame of their own (see writeReply).
+func (s *RPCServer) serveOther(ctx context.Context, op nodewire.Operation, payload []byte) (res nodewire.Response, held chan struct{}) {
 	switch op {
 	case nodewire.OpProduce:
 		res = s.handleProduce(ctx, payload)
 	case nodewire.OpCommitProduce:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleCommitProduce(ctx, payload) })
+		res = s.withCommitSlot(func() nodewire.Response { return s.handleCommitProduce(ctx, payload) })
 	case nodewire.OpCommitProduceBatch:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleCommitProduceBatch(ctx, payload) })
-	case nodewire.OpConsume:
-		// Gated inside the handler: only non-blocking scans take a slot.
-		res = s.handleConsume(ctx, key, payload)
-	case nodewire.OpAck:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleAck(ctx, payload) })
-	case nodewire.OpExtendAck:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleExtendAck(ctx, payload) })
-	case nodewire.OpNack:
-		res = s.withMessagingSlot(func() nodewire.Response { return s.handleNack(ctx, payload) })
+		res = s.withCommitSlot(func() nodewire.Response { return s.handleCommitProduceBatch(ctx, payload) })
 	case nodewire.OpListPartitionSegments:
-		res = s.withSlot(ctx, s.transferSem, func() nodewire.Response { return s.handleListPartitionSegments(payload) })
+		return s.withHeldSlot(ctx, s.transferSem, func() nodewire.Response { return s.handleListPartitionSegments(payload) })
 	case nodewire.OpFetchSegmentChunk:
-		res = s.withSlot(ctx, s.transferSem, func() nodewire.Response { return s.handleFetchSegmentChunk(payload) })
+		return s.withHeldSlot(ctx, s.transferSem, func() nodewire.Response { return s.handleFetchSegmentChunk(payload) })
 	case nodewire.OpCreateTopic:
 		// Ungated: may park behind the startup create gate for up to the
 		// forwarded-create timeout.
@@ -388,7 +578,7 @@ func (s *RPCServer) dispatch(ctx context.Context, key requestKey, payload []byte
 		}
 		res = s.withSlot(ctx, s.controlSem, func() nodewire.Response { return handle(payload) })
 	}
-	return res
+	return res, nil
 }
 
 // controlHandler maps a control op to its handler; ok is false for an
@@ -444,22 +634,28 @@ func (s *RPCServer) controlHandler(op nodewire.Operation) (handle func([]byte) n
 // with the HTTP layer. Unrecognized errors are logged and reported as opaque
 // 500s so internal details never cross the wire.
 func (s *RPCServer) brokerError(op string, err error) nodewire.Response {
+	return errorResponse(s.brokerErrorStatus(op, err))
+}
+
+// brokerErrorStatus is brokerError's mapping as a status and message, for
+// a reply that carries several outcomes in one body (see handleAckBatch).
+func (s *RPCServer) brokerErrorStatus(op string, err error) (int, string) {
 	switch {
 	case errors.Is(err, errs.ErrTopicNotFound):
-		return errorResponse(http.StatusNotFound, "topic not found")
+		return http.StatusNotFound, "topic not found"
 	case errors.Is(err, errs.ErrTopicAlreadyExists):
-		return errorResponse(http.StatusConflict, "topic already exists")
+		return http.StatusConflict, "topic already exists"
 	case errors.Is(err, errs.ErrHandleMalformed):
-		return errorResponse(http.StatusBadRequest, err.Error())
+		return http.StatusBadRequest, err.Error()
 	case errors.Is(err, errs.ErrHandleStale):
-		return errorResponse(http.StatusGone, err.Error())
+		return http.StatusGone, err.Error()
 	case errors.Is(err, errs.ErrAckedAheadFull):
-		return errorResponse(http.StatusServiceUnavailable, err.Error())
+		return http.StatusServiceUnavailable, err.Error()
 	case errors.Is(err, errs.ErrInvalidArgument),
 		errors.Is(err, errs.ErrPartitionRequired):
-		return errorResponse(http.StatusBadRequest, err.Error())
+		return http.StatusBadRequest, err.Error()
 	case errors.Is(err, errs.ErrNotPartitionOwner):
-		return errorResponse(http.StatusMisdirectedRequest, err.Error())
+		return http.StatusMisdirectedRequest, err.Error()
 	case errors.Is(err, errs.ErrFanoutRoleConflict),
 		errors.Is(err, errs.ErrFanoutChildLimit),
 		errors.Is(err, errs.ErrFanoutSchemaMismatch),
@@ -469,14 +665,24 @@ func (s *RPCServer) brokerError(op string, err error) nodewire.Response {
 		errors.Is(err, errs.ErrSchemaVersionConflict),
 		errors.Is(err, errs.ErrSchemaHistoryFull),
 		errors.Is(err, errs.ErrAlreadyExists):
-		return errorResponse(http.StatusConflict, err.Error())
+		return http.StatusConflict, err.Error()
 	case errors.Is(err, errs.ErrNotFound):
-		return errorResponse(http.StatusNotFound, err.Error())
+		return http.StatusNotFound, err.Error()
+	case errors.Is(err, brokermsg.ErrTopicIncarnationMismatch):
+		// Records accepted for another incarnation of the topic than the
+		// one this node holds under the name: a delete and recreate raced
+		// them, or this replica or the sender's lags. Expected and
+		// retriable, so it gets its own status, which the produce
+		// dispatcher recognizes (see commitRemote), and no error line.
+		if s.logger != nil {
+			s.logger.Info(op+" refused: records accepted for another topic incarnation", "err", err)
+		}
+		return http.StatusPreconditionFailed, err.Error()
 	default:
 		if s.logger != nil {
 			s.logger.Error(op, "err", err)
 		}
-		return errorResponse(http.StatusInternalServerError, op+" failed")
+		return http.StatusInternalServerError, op + " failed"
 	}
 }
 

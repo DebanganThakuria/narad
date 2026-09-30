@@ -46,12 +46,10 @@ func AuthExempting(auth *security.Authenticator, log *slog.Logger, exempt map[st
 				next.ServeHTTP(w, r)
 				return
 			}
-			username, password, ok := r.BasicAuth()
-			if !ok {
-				unauthorized(w)
-				return
-			}
-			rec, err := auth.Verify(r.Context(), username, password)
+			// AuthenticateBasic parses the header exactly as r.BasicAuth
+			// does (a missing or malformed one is ErrUnauthorized) but
+			// without allocating, and attaches the cached identity.
+			ctx, err := auth.AuthenticateBasic(r.Context(), r.Header.Get("Authorization"))
 			switch {
 			case err == nil:
 				// The ServeMux records the matched route pattern on the
@@ -61,7 +59,7 @@ func AuthExempting(auth *security.Authenticator, log *slog.Logger, exempt map[st
 				// middleware (metrics route labelling) reads an empty
 				// pattern and buckets every authenticated request under
 				// "unmatched".
-				authed := r.WithContext(security.WithIdentity(r.Context(), rec))
+				authed := r.WithContext(ctx)
 				next.ServeHTTP(w, authed)
 				r.Pattern = authed.Pattern
 			case errors.Is(err, security.ErrThrottled):

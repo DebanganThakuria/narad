@@ -62,7 +62,7 @@ Narad is a queue, so "subscribe" means a choice:
 - **`narad sub jobs`**: a *real consumer*, long-polls, prints, acks. Messages it takes are settled; it competes with your production workers. (Ack retries are built in, per [the discipline](handling-retries.md).) `--no-ack` to let leases lapse instead.
 - **`narad sub jobs --peek`**: a *bystander*, tails every partition with [replay reads](consuming.md) starting at the current tail. Nothing is reserved, nothing is acked, production consumers never notice. This is the "what is flowing through this topic right now?" debugging tool. `--from N --partition P` to start in history.
 
-Payloads print as themselves: JSON verbatim, text as text, binary hex-dumped with a byte count. `--raw` emits payloads only, for pipes.
+Payloads print as themselves: JSON verbatim, text as text, binary hex-dumped with a byte count. Keys work the same way: a text key prints as text, a binary one (sent back base64-flagged, see [Consuming](consuming.md#the-payload-comes-back-the-way-you-sent-it)) prints decoded, in hex, marked `(binary)`. `--raw` emits payloads only, for pipes.
 
 ## Command reference
 

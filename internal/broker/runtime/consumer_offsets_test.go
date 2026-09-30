@@ -12,7 +12,7 @@ import (
 func TestConsumerOffsetCommitterFlushesLatestOffsetOnClose(t *testing.T) {
 	dataDir := t.TempDir()
 	mustCreatePartitionDir(t, dataDir, "orders", 0)
-	committer := NewConsumerOffsetCommitter(dataDir, time.Hour, nil)
+	committer := zzWP23ManualCommitter(dataDir)
 
 	committer.Commit("orders", 0, 1)
 	committer.Commit("orders", 0, 3)
@@ -37,7 +37,7 @@ func TestConsumerOffsetCommitterFlushesLatestOffsetOnClose(t *testing.T) {
 func TestConsumerOffsetCommitterCanPersistOffsetZero(t *testing.T) {
 	dataDir := t.TempDir()
 	mustCreatePartitionDir(t, dataDir, "orders", 0)
-	committer := NewConsumerOffsetCommitter(dataDir, time.Hour, nil)
+	committer := zzWP23ManualCommitter(dataDir)
 
 	committer.Commit("orders", 0, 0)
 
@@ -60,7 +60,7 @@ func TestConsumerOffsetCommitterCanPersistOffsetZero(t *testing.T) {
 func TestConsumerOffsetCommitterDoesNotRecreatePurgedPartitionDir(t *testing.T) {
 	dataDir := t.TempDir()
 	partitionDir := mustCreatePartitionDir(t, dataDir, "orders", 0)
-	committer := NewConsumerOffsetCommitter(dataDir, time.Hour, nil)
+	committer := zzWP23ManualCommitter(dataDir)
 
 	committer.Commit("orders", 0, 7)
 	if err := os.RemoveAll(partitionDir); err != nil {
@@ -100,7 +100,7 @@ func TestConsumerOffsetCommitterPersistsAckedAheadWithTheFrontier(t *testing.T) 
 	dataDir := t.TempDir()
 	mustCreatePartitionDir(t, dataDir, "orders", 0)
 	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
-	committer := NewConsumerOffsetCommitter(dataDir, time.Hour, nil)
+	committer := zzWP23ManualCommitter(dataDir)
 	src := &fakeAheadSource{committed: 4, offsets: []int64{6, 9}, version: 1}
 	committer.SetAheadSource(src.source)
 
@@ -144,21 +144,27 @@ func TestConsumerOffsetCommitterPersistsAckedAheadWithTheFrontier(t *testing.T) 
 	}
 }
 
-// TestConsumerOffsetCommitterSkipsEmptyAheadOnFreshPartition pins that
-// a partition whose acks are all in order never gets a consumer.ahead
-// file at all: the missing file already means "nothing acked ahead".
-func TestConsumerOffsetCommitterSkipsEmptyAheadOnFreshPartition(t *testing.T) {
+// TestConsumerOffsetCommitterInOrderFrontierRidesConsumerAhead pins
+// that a partition whose acks are all in order still carries its
+// frontier in consumer.ahead, as an empty record: that file's two slots
+// are what lets a tick write without a sync. Close levels
+// consumer.offset with it.
+func TestConsumerOffsetCommitterInOrderFrontierRidesConsumerAhead(t *testing.T) {
 	dataDir := t.TempDir()
-	mustCreatePartitionDir(t, dataDir, "orders", 0)
-	committer := NewConsumerOffsetCommitter(dataDir, time.Hour, nil)
+	dir := mustCreatePartitionDir(t, dataDir, "orders", 0)
+	committer := zzWP23ManualCommitter(dataDir)
 	src := &fakeAheadSource{committed: 2, version: 7}
 	committer.SetAheadSource(src.source)
 	committer.Commit("orders", 0, 2)
 	if err := committer.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	if _, err := os.Stat(storage.TopicPartitionDir(dataDir, "orders", 0) + "/consumer.ahead"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("consumer.ahead exists (stat err %v) although nothing was ever acked ahead", err)
+	rec, ok, err := storage.ReadConsumerAhead(dir)
+	if err != nil || !ok || rec.Committed != 2 || len(rec.Offsets) != 0 {
+		t.Fatalf("consumer.ahead = %+v ok %v err %v, want an empty record at 2", rec, ok, err)
+	}
+	if got, ok, err := storage.ReadConsumerOffset(dir); err != nil || !ok || got != 2 {
+		t.Fatalf("consumer.offset after Close = %d (ok %v err %v), want 2", got, ok, err)
 	}
 }
 
@@ -170,7 +176,7 @@ func TestConsumerOffsetCommitterForgetRewritesAfterReplacement(t *testing.T) {
 	dataDir := t.TempDir()
 	mustCreatePartitionDir(t, dataDir, "orders", 0)
 	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
-	committer := NewConsumerOffsetCommitter(dataDir, time.Hour, nil)
+	committer := zzWP23ManualCommitter(dataDir)
 	src := &fakeAheadSource{committed: 3, offsets: []int64{5}, version: 1}
 	committer.SetAheadSource(src.source)
 	committer.Commit("orders", 0, 3)
@@ -197,9 +203,15 @@ func TestConsumerOffsetCommitterForgetRewritesAfterReplacement(t *testing.T) {
 	}
 }
 
+// mustModTime returns the file's mtime, or the zero time when the file
+// does not exist (a flush whose consumer.ahead carried the frontier
+// never creates consumer.offset).
 func mustModTime(t *testing.T, dir, name string) time.Time {
 	t.Helper()
 	info, err := os.Stat(dir + "/" + name)
+	if errors.Is(err, os.ErrNotExist) {
+		return time.Time{}
+	}
 	if err != nil {
 		t.Fatalf("stat %s: %v", name, err)
 	}
@@ -219,7 +231,7 @@ func TestConsumerOffsetCommitterResumesFromTheFileAfterRestart(t *testing.T) {
 	if err := storage.WriteConsumerAhead(dir, 1, future, 2, []int64{5}); err != nil {
 		t.Fatal(err)
 	}
-	committer := NewConsumerOffsetCommitter(dataDir, time.Hour, nil)
+	committer := zzWP23ManualCommitter(dataDir)
 	src := &fakeAheadSource{committed: 2, offsets: []int64{5, 6}, version: 1}
 	committer.SetAheadSource(src.source)
 	committer.Commit("orders", 0, 2)

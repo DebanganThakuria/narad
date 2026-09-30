@@ -25,6 +25,8 @@ type fakeControllerStore struct {
 	forgotten          []string // RemoveMember calls in order
 	transferred        int      // TransferLeadership call count
 	leaderID           string
+	membersVersion     uint64 // RoutingMembersVersion; bump when members change
+	listMembersErr     error
 }
 
 func newFakeControllerStore(memberIDs ...string) *fakeControllerStore {
@@ -43,8 +45,13 @@ func (f *fakeControllerStore) IsLeader() bool        { return true }
 func (f *fakeControllerStore) LeaderCh() <-chan bool { return nil }
 func (f *fakeControllerStore) Barrier() error        { return f.barrierErr }
 func (f *fakeControllerStore) ListMembers() ([]metastore.Member, error) {
+	if f.listMembersErr != nil {
+		return nil, f.listMembersErr
+	}
 	return f.members, nil
 }
+
+func (f *fakeControllerStore) RoutingMembersVersion() uint64 { return f.membersVersion }
 
 func (f *fakeControllerStore) ListTopics(context.Context, metastore.ListOptions) ([]topic.Topic, string, error) {
 	return f.topics, "", nil
@@ -62,6 +69,8 @@ func (f *fakeControllerStore) ListAssignments(topicName string) ([]metastore.Ass
 	}
 	return out, nil
 }
+
+func (f *fakeControllerStore) LockAssignments() func() { return func() {} }
 
 func (f *fakeControllerStore) SetAssignmentTarget(_ context.Context, topicName string, partition int, targetID string) error {
 	if f.targets[topicName] == nil {

@@ -47,6 +47,7 @@ const (
 	OpAppliedIndex
 	OpTokenRegister
 	OpTokenNotify
+	OpAckBatch
 )
 
 // CompleteMoveRequest asks the leader to perform the guarded ownership flip
@@ -92,7 +93,15 @@ type ProduceRequest struct {
 // CommitProduceRequest asks the owner of TargetPartition to durably
 // commit one already-routed record.
 type CommitProduceRequest struct {
-	Topic           string
+	Topic string
+	// TopicID is the incarnation (topic.Topic.ID) the record was
+	// accepted against, so an owner can refuse a record of a deleted
+	// topic whose name now belongs to a new one. Empty for records
+	// accepted before incarnations were stamped. It travels as an
+	// optional trailing field (see EncodeCommitProduceBatchRequest),
+	// written only when set, and an owner on an older release refuses
+	// a frame that carries it.
+	TopicID         string
 	Key             string
 	TargetPartition int
 	Payload         []byte
@@ -124,6 +133,15 @@ type ConsumeRequest struct {
 	// optional trailing field, so a request from an older peer decodes
 	// with Claim=false and keeps the deadline behaviour.
 	Claim bool
+	// Max asks for up to that many records in one reply, a batch consume
+	// answered {"messages":[...]} (see cluster.RPCServer). 0 and 1 are a
+	// single-record consume. Encoded as a second optional trailing field,
+	// after Claim, and only when above 1, so a single-record request is
+	// byte for byte what it was; an owner on an older release refuses it
+	// with 400 (trailing payload) and the requester asks it for one record
+	// instead. A replay (HasOffset) reads at most one record, still
+	// answered in the batch shape.
+	Max int
 }
 
 // AckRequest acknowledges a reserved record identified by its receipt
@@ -244,10 +262,8 @@ func OperationOf(payload []byte) (Operation, error) {
 }
 
 // TokenDelta is one batched update to the standing interest this node
-// has registered with a peer. Adds and drops travel together so a
-// consumer that was served elsewhere can retire its unused interest in
-// a frame that was already going out, rather than paying an RPC per
-// stale token.
+// has registered with a peer. Current releases send only adds and let
+// a token lapse at its TTL; Drop is legacy (see its field).
 //
 // A token reserves nothing. It says only "I am here, tell me if records
 // show up", which is why losing one costs a round trip and never
@@ -259,8 +275,11 @@ type TokenDelta struct {
 	From string
 	// Add carries the topics this node now wants to hear about.
 	Add []TokenRegistration
-	// Drop carries topics it no longer wants. Best effort: a lost drop
-	// costs one wasted notification that the peer declines.
+	// Drop carries topics it no longer wants. Legacy: no longer sent,
+	// kept in the wire format so drops from peers on an older release
+	// are still decoded and honoured during a rolling upgrade. Best
+	// effort: a lost drop costs one wasted notification that the peer
+	// declines.
 	Drop []string
 }
 

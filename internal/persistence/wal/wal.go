@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
@@ -30,9 +31,15 @@ type Log struct {
 	segmentSize int64
 	nextSeq     uint64
 	writeBuffer []byte
-	pending     *syncBatch
-	closed      bool
-	syncErr     error
+	// spare (guarded by mu) is the last written-out buffer, kept empty
+	// for the next batch. flushSync swaps it in as writeBuffer when it
+	// detaches a batch, so records staged while that batch's write and
+	// sync are in flight land in a buffer already sized to the previous
+	// batch instead of regrowing from a single frame. See recycleBufferLocked.
+	spare   []byte
+	pending *syncBatch
+	closed  bool
+	syncErr error
 	// writeFailed is guarded by fileOps, not mu. It latches the first
 	// write or fsync failure on the active file so that no later batch
 	// is written on top of a possibly torn region and acked.
@@ -43,6 +50,27 @@ type Log struct {
 	// last directory listing; 0 means unknown (list on the next call).
 	// See CompactBefore.
 	compactFloor uint64
+
+	// durableSize (guarded by mu) is how many bytes of the active
+	// segment are known written and synced. Log.ReplayFromCursor reads
+	// the active segment only that far, so it never parses a frame that
+	// is still being written, nor the zero-filled space after the data
+	// of a prepared segment.
+	durableSize int64
+
+	// Segment preparation (see SegmentPrealloc), all guarded by mu.
+	// activePrepared marks an active segment that was prepared (it has a
+	// zero tail up to SegmentBytes, trimmed by the roll that seals it);
+	// prepRequested is set once the active segment passes half its size
+	// and cleared by the next roll; spareReady marks a fully prepared
+	// file waiting under prepFileName. prepWake and prepDone are nil when
+	// preparation is off.
+	prealloc       bool
+	activePrepared bool
+	prepRequested  bool
+	spareReady     bool
+	prepWake       chan struct{}
+	prepDone       chan struct{}
 
 	wakeup chan struct{}
 	stop   chan struct{}
@@ -59,7 +87,7 @@ type syncBatch struct {
 
 // Open opens (or creates) the log in dir, recovers the next sequence
 // number from the existing segments, truncates any torn tail from the
-// active segment, and starts the background sync loop.
+// active segment and fsyncs it, and starts the background sync loop.
 func Open(dir string, opts Options) (*Log, error) {
 	opts = normalizeOptions(opts)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -85,7 +113,15 @@ func Open(dir string, opts Options) (*Log, error) {
 	if nextSeq < last.base {
 		nextSeq = last.base
 	}
+	// A preparation interrupted by a stop or a crash is never resumed:
+	// its file may be partly written. Nothing reads it, and the preparer
+	// removes it before preparing again, so a failed remove is harmless.
+	_ = os.Remove(filepath.Join(dir, prepFileName))
 
+	// The active segment is truncated to its data, prepared or not (the
+	// scan reads a prepared segment's zeros as a torn tail), so nothing
+	// can sit behind the next append; it grows by appending until the
+	// next roll brings in a prepared successor.
 	file, err := openActiveSegment(last.path, lastValidEnd)
 	if err != nil {
 		return nil, err
@@ -97,17 +133,31 @@ func Open(dir string, opts Options) (*Log, error) {
 		file:        file,
 		segmentBase: last.base,
 		segmentSize: lastValidEnd,
+		durableSize: lastValidEnd,
 		nextSeq:     nextSeq,
+		prealloc:    opts.Prealloc.enabled(),
 		wakeup:      make(chan struct{}, 1),
 		stop:        make(chan struct{}),
 		done:        make(chan struct{}),
+	}
+	if l.prealloc {
+		l.prepWake = make(chan struct{}, 1)
+		l.prepDone = make(chan struct{})
+		go l.prepLoop()
 	}
 	go l.syncLoop()
 	return l, nil
 }
 
 // openActiveSegment opens the last segment for appending, discarding any
-// bytes past validEnd (a torn tail detected by the open-time scan).
+// bytes past validEnd (a torn tail detected by the open-time scan), and
+// fsyncs it. The scan read the file through the page cache, so after a
+// process crash validEnd can cover frames the dead process wrote but
+// never saw synced; the sync makes them durable before the log reports
+// them as such (durableSize) and replays them to the dispatcher, whose
+// checkpoint could otherwise pass records a later power loss takes back.
+// A full fsync, not a data-only one: the truncate may have changed the
+// size. One per open, never on the append path.
 func openActiveSegment(path string, validEnd int64) (*os.File, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -120,6 +170,10 @@ func openActiveSegment(path string, validEnd int64) (*os.File, error) {
 	if _, err := file.Seek(validEnd, io.SeekStart); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("wal: seek active segment: %w", err)
+	}
+	if err := syncfile.Sync(file); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("wal: sync active segment: %w", err)
 	}
 	return file, nil
 }
@@ -192,6 +246,71 @@ func (l *Log) AppendWith(ctx context.Context, size int, fill func(dst []byte) []
 	return id, batch.err
 }
 
+// AppendManyWith is AppendWith for several records that are acked
+// together: record i is sizes[i] bytes, appended by fill(i, dst) under
+// the rules AppendWith sets for its fill. The records are staged in
+// slice order under one hold of the append lock, so they take
+// consecutive seqs, nothing is staged between them, and they share one
+// group commit: the call wakes the sync loop once, waits once, and
+// returns the records' IDs in slice order once all of them are durable.
+// A batch that outgrows the room left in the active segment rolls it
+// between two records exactly as single appends would (the records
+// before the roll are synced first, inline), so no frame spans two
+// segments.
+//
+// On disk a batch is the frames len(sizes) single appends would have
+// written, and replay cannot tell the two apart. A crash can keep a
+// prefix of a batch but never a gap: frames are written in order and
+// recovery truncates at the first torn one.
+//
+// An error means the batch is not durable as a whole and none of it
+// may be acked. Records a roll had already synced before it failed
+// stay in the log and are replayed, as with any failed sync, so a
+// caller that retries may duplicate them. A fill that fails or panics
+// withdraws the records staged since the last such roll.
+func (l *Log) AppendManyWith(ctx context.Context, sizes []int, fill func(i int, dst []byte) []byte) ([]RecordID, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(sizes) == 0 {
+		return nil, errors.New("wal: no records")
+	}
+	for i, size := range sizes {
+		if size <= 0 {
+			return nil, fmt.Errorf("wal: record %d: empty payload", i)
+		}
+		if size > l.opts.MaxRecord {
+			return nil, fmt.Errorf("wal: record %d: payload size %d exceeds max %d", i, size, l.opts.MaxRecord)
+		}
+	}
+	if fill == nil {
+		return nil, errors.New("wal: nil fill")
+	}
+
+	ids, batch, err := l.stageMany(sizes, fill)
+	if err != nil {
+		return nil, err
+	}
+
+	l.signalSync()
+	<-batch.done // see Append for why ctx is not honoured past this point
+	if batch.err != nil {
+		return nil, batch.err
+	}
+	return ids, nil
+}
+
+// stageMany runs appendManyLocked under mu, unlocking on a panic in fill
+// as stage does.
+func (l *Log) stageMany(sizes []int, fill func(i int, dst []byte) []byte) ([]RecordID, *syncBatch, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.appendManyLocked(sizes, fill)
+}
+
 // stage runs appendLocked under mu. The unlock is deferred so a panic
 // inside a caller-supplied fill cannot leave the log locked forever (an
 // HTTP handler's recover middleware would otherwise hide the panic and
@@ -213,11 +332,28 @@ func (l *Log) NextSeq() uint64 {
 	return l.nextSeq
 }
 
-// Close stops the sync loop, flushes any buffered records, and closes
-// the active segment. It returns the latched sync error, if any.
+// Err returns the latched write or sync failure, or nil while the log is
+// healthy. Once set it never clears: the log refuses every append (and
+// fails every waiting one) until it is reopened, because the bytes after
+// the failure point are of unknown durability.
+func (l *Log) Err() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.syncErr
+}
+
+// Close stops the sync loop and the segment preparer, flushes any
+// buffered records, and closes the active segment. It returns the
+// latched sync error, if any.
 func (l *Log) Close() error {
 	l.once.Do(func() { close(l.stop) })
 	<-l.done
+	if l.prepDone != nil {
+		<-l.prepDone
+		// A prepared spare is not kept across restarts (Open discards
+		// it), so do not leave it holding disk.
+		_ = os.Remove(filepath.Join(l.dir, prepFileName))
+	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()

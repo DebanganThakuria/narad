@@ -60,6 +60,15 @@ Three primitives implement this:
 The Raft leader doubles as the **cluster controller**: it assigns partitions of new topics (round-robin over live members, except fan-out children, whose partition p deliberately walks past the owner of the parent's partition p via `metastore.ChildAwareOwner`, so a replica child's copy never shares a disk with the original), marks members dead when heartbeats lapse (30s), and seeds the root admin. Leadership transfer on graceful shutdown makes planned restarts nearly seamless (~150ms failover); crash failover takes an election timeout (~1s).
 
 Assignments are **sticky**: a dead node's partitions are *not* reassigned, because the data lives only on that node's disk. The cluster waits for the node (and its volume) to come back. The produce path works around dead owners in the meantime; see [Produce Path](produce-path.md).
+
+The first seconds of a cluster need care, because a partition placed on the only member registered so far is soon moved by rebalance, and a topic created before any member registered used to wait for the controller's 10 s tick with produces parked and consumers answered `204`. So:
+
+- A node retries its member registration every 250 ms until it first succeeds, then heartbeats at the normal 5 s.
+- The leader watches membership every 250 ms and runs its assignment and rebalance passes outside the 10 s tick when a member turns alive (new, or back after a restart). The pass waits until every Raft voter is alive, or until 1 s after the latest arrival if a voter is still missing.
+- A topic create or partition increase made while the cluster is still forming (some Raft voters have a member record, others have none) waits up to 2 s for the rest to register before it places partitions, so they are spread rather than moved later. The 2 s are counted from when a forming cluster was first seen, so a voter that never registers costs one wait, not one per create.
+- A create with no alive member at all still succeeds, and logs the warning "topic created without immediate partition assignment" (the error it carries reads "no alive member to own new partitions"); the controller assigns its partitions within about a second of the first member turning alive.
+- Creates and the controller's sweep take one assignment lock, so one can no longer overwrite the other's owners.
+
 ## The concrete bits
 
 | Thing | Value |
@@ -71,9 +80,9 @@ Assignments are **sticky**: a dead node's partitions are *not* reassigned, becau
 | `Barrier` timeout | 5s |
 | Startup reconcile wait for caught-up | up to 60s, then the destructive sweep is skipped (never rushed) |
 
-Schema history is **append-only** and capped at 1000 versions per topic: `opPutSchema` is applied only when the version is exactly the topic's persisted latest plus one and within the cap (and the same for every fan-out child's copy). The proposer (the topics manager on the leader) reads the persisted history, checks compatibility against the persisted latest and proposes latest+1; a proposer working from a stale view can therefore never overwrite an earlier version on any replica, and gets `ErrAlreadyExists` to re-read and retry. The produce path keys its loaded copy of the history by the topic's schema version counter and reloads the whole history when that moves, so a version registered on another node, a delete-and-recreate under the same name, or an attach-time adoption is picked up on the next produce.
+Schema history is **append-only** and capped at 1000 versions per topic: `opPutSchema` is applied only when the version is exactly the topic's persisted latest plus one and within the cap (and the same for every fan-out child's copy). The proposer (the topics manager on the leader) reads the persisted history, checks compatibility against the persisted latest and proposes latest+1; a proposer working from a stale view can therefore never overwrite an earlier version on any replica, and gets `ErrAlreadyExists` to re-read and retry. The produce path keys its loaded schema by the topic's schema version counter and reloads when that moves, so a version registered on another node, a delete-and-recreate under the same name, or an attach-time adoption is picked up on the next produce. A reload reads only the latest version and runs as one flight per topic: every produce waiting on it shares one metastore read and one compile, and a flight that raced a newer schema change loads again, so the last schema compiled on a node is always the newest.
 
-Every write is one `command` envelope (an op byte plus a JSON payload) applied identically on every node's FSM. Op families bump per-domain **version counters** (topics version, members version, …) that the hot paths use as cache keys: a produce checks its cached topic record against the topic version in one atomic load instead of a bbolt read per message.
+Every write is one `command` envelope (an op byte plus a JSON payload) applied identically on every node's FSM. Op families bump per-domain **version counters** (topics version, members version, …) that the hot paths use as cache keys: a produce checks its cached topic record against the topic version in one atomic load instead of a bbolt read per message. The per-name counters (topic, assignments, schema) of a deleted topic are retired rather than kept for every name ever created.
 
 ## Boot order is load-bearing
 

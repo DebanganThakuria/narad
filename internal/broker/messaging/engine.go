@@ -27,6 +27,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/consumer"
@@ -67,6 +69,13 @@ type ConsumeOpts struct {
 	// separate pinned probe the handler used to make first, so one scan
 	// covers both. Ignored when Partition or Offset is set.
 	ScanStart *int
+	// MaxBytes, when positive, ends a ConsumeBatch once the key and
+	// payload bytes it has reserved reach it; the first record is always
+	// taken. A forwarded batch sets it so it reserves about what its reply
+	// can carry. These are raw bytes: a record's JSON encoding can be up
+	// to six times as large (escaped text), so a caller bounding an
+	// encoded reply checks that as it encodes. Zero is no bound.
+	MaxBytes int
 }
 
 // Engine handles produce, consume, and ack. Constructed once at
@@ -93,6 +102,14 @@ type Engine struct {
 	assignmentCache map[string]cached[assignmentSet]
 	memberCache     map[string]cached[routingMember]
 	schemaLoadCache map[string]cached[bool]
+	// cacheForgets records the topics ForgetTopic dropped; written under
+	// cacheMu. A cache load that overlapped a forget of its own topic
+	// does not store its result (see lookupCached), so a request racing
+	// a topic delete cannot put back what the delete dropped.
+	cacheForgets forgetFence
+	// schemaFlights runs one schema reload per topic at a time; see
+	// syncTopicSchemas.
+	schemaFlights singleflight.Group
 
 	consumeCursors sync.Map // topic name -> *atomic.Uint64
 
@@ -108,6 +125,18 @@ type Engine struct {
 	// frontier it reports is final once the in-flight leases have been
 	// acked or released; see PrepareHandoff.
 	consumePauses map[string]int64
+	// producePausesActive and consumePausesActive count the entries of
+	// the two maps above. Each is raised before its map insert and
+	// lowered after its delete, both under pauseMu, so reading zero
+	// proves nothing is paused and the per-partition checks on the
+	// produce and consume paths skip pauseMu and the key build.
+	producePausesActive atomic.Int32
+	consumePausesActive atomic.Int32
+
+	// combiners holds each partition's group-commit queue; see
+	// commitCombined.
+	combineMu sync.RWMutex
+	combiners map[partitionKey]*produceCombiner
 
 	// dispatch owns the per-topic waiter queues and the single pump
 	// goroutine that hands records to them; see dispatch.go. Queue-style

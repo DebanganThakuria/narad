@@ -327,11 +327,11 @@ func TestJSONSchemaExternalMetaschemaIsRefused(t *testing.T) {
 }
 
 // BenchmarkValidatePayloadDecode documents what the exact-number decode
-// costs: Validate uses jsonschema.UnmarshalJSON (json.Number, so
-// integers beyond 2^53 keep their value), which runs about a fifth
-// slower than a float64 json.Unmarshal because it goes through a
-// json.Decoder. The difference is well under a microsecond per produce
-// and buys the documented number contract.
+// costs. jsonschema.UnmarshalJSON (json.Number, so integers beyond 2^53
+// keep their value) runs about a fifth slower than a float64
+// json.Unmarshal because it goes through a json.Decoder; Validate now
+// decodes with decodePayload's pooled token walk, which builds the same
+// value for a fraction of either.
 func BenchmarkValidatePayloadDecode(b *testing.B) {
 	payload := []byte(`{"id":"o_12345","qty":3,"price":19.99,"tags":["a","b","c"],"customer":{"name":"Ada","email":"ada@example.com","tier":2},"lines":[{"sku":"x1","n":1},{"sku":"x2","n":4}]}`)
 	registry := NewJSONSchema()
@@ -360,6 +360,14 @@ func BenchmarkValidatePayloadDecode(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			if _, err := jsonschema.UnmarshalJSON(bytes.NewReader(payload)); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("decode-only/decodePayload", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := decodePayload(payload); err != nil {
 				b.Fatal(err)
 			}
 		}

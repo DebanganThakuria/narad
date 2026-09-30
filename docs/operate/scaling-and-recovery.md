@@ -62,7 +62,7 @@ Draining marks the node so the rebalance planner stops sending it partitions and
 
 Two safety rails hold: the controller **never removes a node if it would drop the cluster below three Raft voters** (a quorum-safe floor), and it transfers leadership away first if the departing node is the leader. So `initialClusterSize` down to 3 is safe; below 3 the Raft removal is refused by design.
 
-If a source node dies *while its partitions are still draining*, the destinations that already caught up **force-promote** their copies after a couple of minutes rather than waiting forever; see [Rebalance & Decommission](../internals/rebalance.md#what-if-the-source-dies-mid-move).
+If a source node dies *while its partitions are still draining*, the destinations that already caught up **force-promote** their copies after a couple of minutes rather than waiting forever. A promoted copy's consumer position is clamped to what the copy holds, so messages the source's consumers acked in its last moments can be delivered again, and none is skipped; see [Rebalance & Decommission](../internals/rebalance.md#what-if-the-source-dies-mid-move).
 
 ## What failure actually does
 
@@ -70,6 +70,7 @@ If a source node dies *while its partitions are still draining*, the destination
 |---|---|---|
 | **One pod dies** | Leader failover ≤ ~1s if it led Raft. Its partitions 503 for consume; **produce reroutes to live partitions automatically**. Everything drains on return | Nothing. Maybe watch |
 | **Pod dies and comes back** | Replica catches up (it must hear what the leader has committed and apply it; a heartbeat alone is not enough); readiness gates traffic until then; cursors resume from durable positions; leases redeliver. A pod that was away long enough for the leader to compact its Raft log past what the pod had (`NARAD_CLUSTER_RAFT_TRAILING_LOGS`, 10240 entries) is sent the leader's whole metadata snapshot instead of the log tail; the node logs `Installed remote snapshot` and is ready a few hundred milliseconds later, with the same topics, users, grants, schemas and assignments as the leader. Tested under load, including a kill mid-snapshot and a second kill right after the install (`tests/cluster`) | Nothing |
+| **Node loses power** (or its kernel crashes, or the instance is lost with its volume intact) | As for a pod that dies and comes back. Every `202`-acked message survives, since it was fsynced before the `202`; consumers can see the messages acked in about the last second again (the durability interval, `storage.consumer_offset_commit_interval_ms`, plus about 100ms), where a process crash redelivers about the last 100ms of acks and a graceful stop none. Produced messages can come twice too: the dispatch checkpoint is synced within 250ms rather than on every store, so the messages the node dispatched to their partitions in about the last 250ms (plus the sync time) can be committed again at new offsets, and consumers get both copies | Nothing, if consumers are idempotent (they must be anyway). Set the interval to `100` ([Configuration](configuration.md#consumer-offset-commit-interval)) if a second of redelivered acks after a power loss is too many; the 250ms of produce duplicates has no setting |
 | **Quorum lost** (2 of 3 down) | Data plane: produce **still accepted** on live nodes, new traffic flows. Control plane: topic/user changes wait for quorum. The survivor reports **not ready** while it has no leader, so a load balancer stops sending it reads of a frozen replica | Bring pods back; don't panic-restart the survivor |
 | **PV destroyed** | That node's partition data is gone (single copy by design). The pod comes back empty, asks its peers, and **joins** the running cluster instead of bootstrapping a rival one; it is not ready until admitted and caught up | Restore from your volume snapshots. This is the one you plan for |
 | **Pod cut off from the leader** (partition, or removed from the voter set) | It flips to not ready within seconds and stays there; a node that sees no leader for 15 s runs the join loop, and the leader decides (a decommissioned ID is refused) | Fix the network, or scale the removed pod away |
@@ -94,7 +95,7 @@ bytes ≈ (cluster msg/s ÷ nodes) × avg_stored_record × retention_seconds × 
 - `avg_stored_record` ≈ payload + ~20B envelope, then × your compression ratio (zstd: measure; we see 0.05–0.6 depending on batch fatness; compression improves under load because frames get fatter).
 - `× 1.3` covers the retention sawtooth: deletion is per 64 MiB segment, so a partition holds up to `retention + one segment's fill time` of data.
 - Fan-out children each store their **own full copy**; count them as separate topics in the math.
-- Add the metastore (~tens of MB) and ingress WAL (self-reclaiming, sub-MB steady state) as rounding errors.
+- Add the metastore (~tens of MB) and ingress WAL (self-reclaiming, sub-MB steady state; up to two 64 MiB prepared segments more with `storage.ingress_wal_prealloc` on) as rounding errors.
 
 Worked example from our soak: 100 msg/s × ~250B JSON × 12h retention × 3 topic copies ≈ 1.4GB cluster-wide with zstd. Disk is cheap; run the math anyway.
 

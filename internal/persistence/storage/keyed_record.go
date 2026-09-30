@@ -11,6 +11,9 @@ package storage
 //	offset N  [key: keyLen bytes]
 //	offset M  [committedAtUnixMs: 8 bytes big-endian]
 //	offset P  [payload]
+//
+// messaging.restampKeyedRecords rewrites the timestamp in place at the
+// offset this layout puts it; it must change with the layout.
 
 import (
 	"encoding/binary"

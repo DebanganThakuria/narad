@@ -26,10 +26,11 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
-// moveSweepEvery is how many reconcile passes elapse between stale-copy
-// sweeps. The sweep stats partition dirs and may RPC the leader, so it
-// runs at a fraction of the reconcile cadence; a stale copy sitting on
-// disk a few extra minutes costs nothing.
+// moveSweepEvery is how many reconcile ticks (Reconcile calls) elapse
+// between stale-copy sweeps, counted whether or not the tick then skips
+// its pass (see reconcileGate). The sweep stats partition dirs and may
+// RPC the leader, so it runs at a fraction of the reconcile cadence; a
+// stale copy sitting on disk a few extra minutes costs nothing.
 const moveSweepEvery = 30
 
 // sweepStaleCopies reclaims local partition directories whose partitions

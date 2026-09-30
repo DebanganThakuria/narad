@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -270,12 +271,13 @@ func TestProduceDispatcherReroutesDeadOwnerRecordsAtDispatch(t *testing.T) {
 
 // A commit failure while membership still says the owner is alive is treated
 // as transient at first: the records retry on their ORIGINAL partition and
-// must not scatter. Only after the destination has stayed stuck for
-// produceDispatchRerouteAfterPasses consecutive passes are its records
-// rerouted to a live-owner partition — and once the owner recovers, new
-// records flow to the original partition again (rerouting is per-pass, not
-// sticky).
-func TestProduceDispatcherReroutesAfterConsecutiveCommitFailurePasses(t *testing.T) {
+// must not scatter, however many passes run. Only once the destination has
+// kept failing for produceDispatchRerouteGrace are its records rerouted to a
+// live-owner partition, and once the owner recovers, new records flow to the
+// original partition again (rerouting is not sticky). The grace is counted
+// in time, not passes: passes run back to back under load, so a pass count
+// would reroute a partition handoff freeze within milliseconds.
+func TestProduceDispatcherReroutesAfterCommitFailureGrace(t *testing.T) {
 	store := newTestStore(t)
 	seedProduceDispatchTopicPartitions(t, store, "node-self", 2)
 	manager := newDispatchIngressManager(t)
@@ -292,11 +294,14 @@ func TestProduceDispatcherReroutesAfterConsecutiveCommitFailurePasses(t *testing
 	}
 	committer := &perPartitionCommitter{failPartitions: map[int]error{0: errors.New("p0 owner unreachable")}}
 	dispatcher := NewProduceDispatcher(manager, store, "node-self", committer, nil, nil, ProduceDispatcherConfig{})
+	now := time.Unix(1_000_000, 0)
+	dispatcher.now = func() time.Time { return now }
 
-	// For the first produceDispatchRerouteAfterPasses passes the destination
-	// gets its grace: commits are attempted against p0 itself, nothing is
-	// rerouted, and the checkpoint stays pinned.
-	for pass := 1; pass <= produceDispatchRerouteAfterPasses; pass++ {
+	// Within the grace, however many passes run, commits are attempted
+	// against p0 itself (one probe per pass), nothing is rerouted, and the
+	// checkpoint stays pinned.
+	const passes = 6
+	for pass := 1; pass <= passes; pass++ {
 		if _, err := dispatcher.DispatchAvailable(ctx); err == nil {
 			t.Fatalf("pass %d: error = nil, want commit failure", pass)
 		}
@@ -310,12 +315,16 @@ func TestProduceDispatcherReroutesAfterConsecutiveCommitFailurePasses(t *testing
 		if n, _ := manager.LoadProduceCheckpoint(); n != 0 {
 			t.Fatalf("pass %d: checkpoint = %d, want pinned at 0", pass, n)
 		}
+		now = now.Add(produceDispatchRerouteGrace / (2 * passes))
 	}
 
-	// Next pass: the destination exceeded its grace, so its records are
-	// rerouted to p1 and the checkpoint advances past them.
-	if _, err := dispatcher.DispatchAvailable(ctx); err == nil {
-		t.Fatal("reroute pass: error = nil, want the still-failing p0 probe error")
+	// The grace runs out: the next pass's probe fails again, the
+	// destination's records are rerouted to p1 in order, and the checkpoint
+	// advances past them. Nothing is left behind, so the pass reports no
+	// error.
+	now = now.Add(produceDispatchRerouteGrace)
+	if _, err := dispatcher.DispatchAvailable(ctx); err != nil {
+		t.Fatalf("reroute pass: error = %v, want nil (every record rerouted)", err)
 	}
 	if n, _ := manager.LoadProduceCheckpoint(); n != 3 {
 		t.Fatalf("checkpoint after reroute = %d, want 3", n)
@@ -351,6 +360,7 @@ func TestProduceDispatcherReroutesAfterConsecutiveCommitFailurePasses(t *testing
 	if _, err := manager.AcceptProduce(ctx, "orders", "k", 0, []byte(`{"recovered":true}`)); err != nil {
 		t.Fatalf("AcceptProduce(recovered) error = %v", err)
 	}
+	now = now.Add(time.Second)
 	if _, err := dispatcher.DispatchAvailable(ctx); err != nil {
 		t.Fatalf("recovery pass error = %v", err)
 	}

@@ -123,6 +123,7 @@ type consumedMessage struct {
 	Partition       int             `json:"partition"`
 	Offset          int64           `json:"offset"`
 	Key             string          `json:"key"`
+	KeyEncoding     string          `json:"key_encoding"`
 	Payload         json.RawMessage `json:"payload"`
 	PayloadEncoding string          `json:"payload_encoding"`
 	Timestamp       int64           `json:"timestamp"`
@@ -410,7 +411,7 @@ func printMessage(msg consumedMessage, raw bool) {
 
 	meta := fmt.Sprintf("[p%d @%d]", msg.Partition, msg.Offset)
 	if msg.Key != "" {
-		meta += " key=" + msg.Key
+		meta += " key=" + displayKey(msg)
 	}
 	if msg.Timestamp > 0 {
 		meta += " " + time.UnixMilli(msg.Timestamp).Format("15:04:05.000")
@@ -422,6 +423,19 @@ func printMessage(msg consumedMessage, raw bool) {
 		return
 	}
 	fmt.Println(dim(meta) + " " + string(payload))
+}
+
+// displayKey renders the message key for the metadata header. A key
+// that is not valid UTF-8 arrives base64-wrapped with key_encoding
+// "base64", as a binary payload does; it is decoded and shown in hex,
+// like a binary payload, since the raw bytes would garble the terminal.
+func displayKey(msg consumedMessage) string {
+	if msg.KeyEncoding == "base64" {
+		if decoded, err := base64.StdEncoding.DecodeString(msg.Key); err == nil {
+			return fmt.Sprintf("%x (binary)", decoded)
+		}
+	}
+	return msg.Key
 }
 
 func sleepCtxCLI(ctx context.Context, d time.Duration) bool {

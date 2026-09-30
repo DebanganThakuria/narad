@@ -28,7 +28,7 @@ Narad is explicit about this where other brokers are shy: **there is no delivery
 
 - **Redelivery**: a crashed or slow consumer's message reappears after newer ones were consumed.
 - **A dead consumer holds its partition's frontier**: a message leased by a consumer that never comes back is redelivered when its visibility timeout expires, and until then that partition can run out of anything else to serve (everything above it is acked). Expect quiet windows up to `visibility_timeout_ms` after an outage.
-- **Broker restart**: acks are persisted in batches (every 100ms by default), including acks that landed out of order, so a crash can redeliver the messages acked in the last batch. A graceful restart redelivers nothing that was acked.
+- **Broker restart**: acks are persisted in batches, including acks that landed out of order, at two cadences. Every 100ms (or every interval below, when that is shorter) the acked state of each partition that changed is handed to the operating system, and once per `storage.consumer_offset_commit_interval_ms` (1s by default) each of those partitions is synced to disk. So a crash of the broker process can redeliver the messages acked in about the last 100ms, and a power loss, kernel crash or loss of the machine those acked in about the last interval plus 100ms and the sync time: about 1.1s by default. Setting the interval to 100 restores the power-loss window of earlier releases. The broker logs a warning when a node cannot keep to either cadence. A graceful restart redelivers nothing that was acked.
 - **Dead-owner skip**: while a node is marked dead, keyed produces walk forward to a live partition: the key-to-partition mapping itself moves.
 - **Dispatch reroute**: accepted messages destined for an unreachable owner are committed to a live sibling partition rather than delayed indefinitely.
 
@@ -63,23 +63,25 @@ flowchart LR
 
 | Code | Where | Meaning | What you should do |
 |---|---|---|---|
-| `200` | consume, reads | Here's your data | Process it |
+| `200` | consume, reads, batch ack | Here's your data; for a [batch ack](consuming.md#acking-in-batches), one result per handle, each with the status a single ack would have got | Process it; retry the batch-ack handles answered `502` or `503` |
 | `201` | topic/user create | Created | Nothing |
-| `202` | produce | Durably accepted: the delivery promise | Nothing. Never retry a 202 |
+| `202` | produce, batch produce | Durably accepted: the delivery promise (for a [batch](producing.md#producing-in-batches), every message in it) | Nothing. Never retry a 202 |
 | `204` | ack/extend/nack, delete, empty consume | Done / nothing available | Loop or move on |
 | `400` | anywhere | Malformed request, bad param, schema violation, incompatible or unregistrable schema | Fix the request; don't retry as-is |
 | `401` | anywhere | Missing/wrong credentials | Fix auth |
 | `403` | anywhere | Authenticated but not allowed | You need a grant |
-| `404` | anywhere | Topic/user doesn't exist | Check the name |
+| `404` | anywhere | Topic/user doesn't exist; for a batch produce, also a node on a release before batch produce | Check the name; fall back to single produces |
 | `409` | create/attach/alter | Conflict: already exists, role conflict, retention-vs-delay violation, schema `schema_base_version` no longer current, schema history full, schema of an attached child | Read the error body; for a schema conflict, re-read `schema_version` and retry with the new base |
 | `410` | ack/extend | Your lease lapsed; message was handed elsewhere | Stop working on it; expect a duplicate |
-| `413` | produce, topic create/alter | Body over 1 MiB (a schema document itself is capped at 256 KiB, answered as `400`) | Shrink the payload |
+| `413` | produce, batch produce, topic create/alter, batch ack | Body over 1 MiB (a schema document itself is capped at 256 KiB, answered as `400`); a batch ack body over 64 KiB | Shrink the payload |
+| `429` | consume, produce | Too many concurrent consumes for your identity on this node (`http.max_consume_in_flight_per_identity`, 1024 by default; a [batch consume](consuming.md#consuming-in-batches) counts as its `max`, clamped to the cap), or too many concurrent produces (`http.max_produce_in_flight_per_identity`, off by default; a [batch produce](producing.md#producing-in-batches) counts as its message count, clamped to the cap) | Back off and retry, or run fewer concurrent requests |
+| `502` | ack/extend/nack, partition-pinned consume | The node you reached forwarded the request to the partition's owner and got no answer (the owner stopped responding, or the connection to it failed) | Back off and retry, as for `503`; an ack can never settle twice, so retrying one that had already landed changes nothing (the retry answers `410`) |
 | `503` | produce/consume/ack | Temporarily unavailable: partition owner down, quorum lost | Back off and retry |
 
 ## Retry cheat sheet
 
-- `202` → never retry. `4xx` → never retry unchanged. `503` and timeouts → retry with backoff.
-- A **timed-out produce is ambiguous**: the message may have been accepted. Retrying may duplicate it; that's fine, because your consumer is idempotent. Right?
+- `202` → never retry. `4xx` → never retry unchanged, except `429`, which is a retry-later. `502`, `503` and timeouts → retry with backoff; for a batch ack, retry just the handles whose result says so.
+- A **timed-out produce is ambiguous**: the message may have been accepted. Retrying may duplicate it; that's fine, because your consumer is idempotent. Right? A timed-out batch produce is ambiguous as a whole: any of its messages may have been accepted.
 
 ## API stability
 

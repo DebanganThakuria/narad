@@ -43,6 +43,12 @@ func TestCommitProduceRequestRejectsMalformedPayloads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeCommitProduceRequest() error = %v", err)
 	}
+	withID := valid
+	withID.TopicID = "incarnation-1"
+	encodedWithID, err := EncodeCommitProduceRequest(withID)
+	if err != nil {
+		t.Fatalf("EncodeCommitProduceRequest(with topic id) error = %v", err)
+	}
 
 	for _, tc := range []struct {
 		name string
@@ -70,8 +76,14 @@ func TestCommitProduceRequestRejectsMalformedPayloads(t *testing.T) {
 			want: "EOF",
 		},
 		{
-			name: "trailing bytes",
+			// A lone byte where the optional topic ID would start.
+			name: "truncated topic id",
 			data: append(append([]byte(nil), encoded...), 0),
+			want: "EOF",
+		},
+		{
+			name: "trailing bytes",
+			data: append(append([]byte(nil), encodedWithID...), 0),
 			want: "trailing node rpc payload data",
 		},
 	} {
@@ -141,6 +153,12 @@ func TestCommitProduceBatchRequestRejectsMalformedPayloads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeCommitProduceBatchRequest() error = %v", err)
 	}
+	withIDs := CommitProduceBatchRequest{Records: append([]CommitProduceRequest(nil), valid.Records...)}
+	withIDs.Records[0].TopicID = "incarnation-1"
+	encodedWithIDs, err := EncodeCommitProduceBatchRequest(withIDs)
+	if err != nil {
+		t.Fatalf("EncodeCommitProduceBatchRequest(with topic ids) error = %v", err)
+	}
 
 	negativeCount := opWriter(OpCommitProduceBatch, 4)
 	negativeCount.i32(-1)
@@ -183,8 +201,14 @@ func TestCommitProduceBatchRequestRejectsMalformedPayloads(t *testing.T) {
 			want: "EOF",
 		},
 		{
-			name: "trailing bytes",
+			// A lone byte where the optional topic-ID section would start.
+			name: "truncated topic id section",
 			data: append(append([]byte(nil), encoded...), 0),
+			want: "EOF",
+		},
+		{
+			name: "trailing bytes",
+			data: append(append([]byte(nil), encodedWithIDs...), 0),
 			want: "trailing node rpc payload data",
 		},
 	} {

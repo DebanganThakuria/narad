@@ -42,6 +42,8 @@ func runServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("logger: %w", err)
 	}
+	// Before anything allocates in earnest; see memlimit.go.
+	applyContainerMemoryLimit(log)
 	reg, m := buildMetrics()
 
 	if err = os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil {
@@ -208,6 +210,8 @@ func runServe(args []string) error {
 	poller := metrics.NewPoller(m, bc.broker, log, cfg.Storage.DataDir)
 	poller.SetOpenLogCounter(bc.logs.OpenCount)
 	poller.SetReaperRestartCounter(bc.logs.ReaperRestarts)
+	poller.SetIngressWALHealth(bc.ingress.Healthy)
+	poller.SetIngressDispatchBacklog(bc.ingress.DispatchBacklog)
 	wg.Go(func() { poller.Run(ctx) })
 	wg.Go(func() { bc.logs.RunIdleEviction(ctx, time.Duration(cfg.Storage.IdleLogEvictionMs)*time.Millisecond) })
 	wg.Go(func() { bc.logs.RunColdRetention(ctx, time.Duration(cfg.Storage.ColdRetentionWalkMs)*time.Millisecond) })

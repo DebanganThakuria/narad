@@ -1,7 +1,6 @@
 package consumer
 
 import (
-	"container/heap"
 	crand "crypto/rand"
 	"encoding/binary"
 	"math/rand/v2"
@@ -121,7 +120,7 @@ func (sh *partitionShard) nextNonceLocked() int64 {
 func (sh *partitionShard) purgeExpiredLocked(now int64) int {
 	released := 0
 	for sh.expiry.Len() > 0 && sh.expiry[0].expiresAtUnixMs <= now {
-		e := heap.Pop(&sh.expiry).(expiryEntry)
+		e := sh.expiry.pop()
 		if rsv, ok := sh.entries[e.offset]; ok && rsv.nonce == e.nonce && rsv.expiresAtUnixMs == e.expiresAtUnixMs {
 			delete(sh.entries, e.offset)
 			sh.freedLocked(e.offset)
@@ -161,7 +160,7 @@ func (sh *partitionShard) compactExpiryLocked() {
 		})
 	}
 	sh.expiry = rebuilt
-	heap.Init(&sh.expiry)
+	sh.expiry.init()
 }
 
 // advanceCommittedLocked moves the committed frontier forward across the
@@ -223,17 +222,67 @@ type expiryEntry struct {
 	nonce           int64
 }
 
-// expiryHeap is a min-heap ordered by expiresAtUnixMs.
+// expiryHeap is a min-heap ordered by expiresAtUnixMs. Its operations
+// are container/heap's, typed: going through heap.Interface boxed every
+// pushed and popped entry into an interface, one allocation per reserve,
+// extend and expiry.
 type expiryHeap []expiryEntry
 
-func (h expiryHeap) Len() int           { return len(h) }
-func (h expiryHeap) Less(i, j int) bool { return h[i].expiresAtUnixMs < h[j].expiresAtUnixMs }
-func (h expiryHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *expiryHeap) Push(x any)        { *h = append(*h, x.(expiryEntry)) }
-func (h *expiryHeap) Pop() any {
+func (h expiryHeap) Len() int { return len(h) }
+
+func (h expiryHeap) less(i, j int) bool { return h[i].expiresAtUnixMs < h[j].expiresAtUnixMs }
+
+// push adds e.
+func (h *expiryHeap) push(e expiryEntry) {
+	*h = append(*h, e)
+	h.up(len(*h) - 1)
+}
+
+// pop removes and returns the entry that expires first. The heap must
+// not be empty.
+func (h *expiryHeap) pop() expiryEntry {
 	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[:n-1]
-	return x
+	n := len(old) - 1
+	old[0], old[n] = old[n], old[0]
+	old.down(0, n)
+	e := old[n]
+	*h = old[:n]
+	return e
+}
+
+// init establishes the heap order over the whole slice.
+func (h expiryHeap) init() {
+	n := len(h)
+	for i := n/2 - 1; i >= 0; i-- {
+		h.down(i, n)
+	}
+}
+
+func (h expiryHeap) up(j int) {
+	for {
+		i := (j - 1) / 2 // parent
+		if i == j || !h.less(j, i) {
+			break
+		}
+		h[i], h[j] = h[j], h[i]
+		j = i
+	}
+}
+
+func (h expiryHeap) down(i, n int) {
+	for {
+		j1 := 2*i + 1
+		if j1 >= n || j1 < 0 { // j1 < 0 after int overflow
+			break
+		}
+		j := j1 // left child
+		if j2 := j1 + 1; j2 < n && h.less(j2, j1) {
+			j = j2 // right child
+		}
+		if !h.less(j, i) {
+			break
+		}
+		h[i], h[j] = h[j], h[i]
+		i = j
+	}
 }

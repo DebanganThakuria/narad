@@ -703,6 +703,6 @@ func equalProduce(a, b ProduceRequest) bool {
 }
 
 func equalCommit(a, b CommitProduceRequest) bool {
-	return a.Topic == b.Topic && a.Key == b.Key && a.TargetPartition == b.TargetPartition &&
+	return a.Topic == b.Topic && a.TopicID == b.TopicID && a.Key == b.Key && a.TargetPartition == b.TargetPartition &&
 		bytes.Equal(a.Payload, b.Payload) && a.CreatedAtUnixMs == b.CreatedAtUnixMs
 }

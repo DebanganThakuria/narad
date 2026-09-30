@@ -69,9 +69,7 @@ func (t *peerToken) Notify(topicName string, done func(claiming bool)) bool {
 	t.mu.Unlock()
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), notifyTimeout)
-		defer cancel()
-		claiming := t.holder.notify(ctx, t.addr, topicName)
+		claiming := t.holder.notify(context.Background(), t.addr, topicName)
 		// The token is gone either way; the peer re-registers if it still
 		// wants one. Retrying would risk telling it twice about the same
 		// record, which means two claims for one consumer.
@@ -134,8 +132,8 @@ func newTokenHolder(broker demandRegistrar, peer peerClient, selfAddr string) *t
 }
 
 // ApplyDelta registers and retires tokens for one peer in a single
-// pass. Adds and drops arrive together so a consumer served elsewhere
-// can retire its unused interest in a frame that was already going out.
+// pass. Drops come only from peers on an older release: this one never
+// sends them, its tokens lapse at their TTL instead.
 func (h *tokenHolder) ApplyDelta(ctx context.Context, delta nodewire.TokenDelta) {
 	for _, topicName := range delta.Drop {
 		h.drop(delta.From, topicName)
@@ -209,9 +207,11 @@ func (h *tokenHolder) forget(tok *peerToken) {
 
 // notify sends one notification and reports the peer's verdict. Any
 // failure reads as a pass: the record goes to somebody else immediately
-// rather than being held for a claim that is not coming.
+// rather than being held for a claim that is not coming. The round trip
+// is bounded by notifyTimeout, handed to the transport as the call's
+// budget.
 func (h *tokenHolder) notify(ctx context.Context, addr, topicName string) bool {
-	res, err := h.peer.NotifyToken(ctx, addr, nodewire.TokenNotifyRequest{
+	res, err := h.peer.NotifyTokenWithin(ctx, addr, notifyTimeout, nodewire.TokenNotifyRequest{
 		From:  h.selfAddr,
 		Topic: topicName,
 	})

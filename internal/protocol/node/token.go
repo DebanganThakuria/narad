@@ -12,7 +12,7 @@ const maxTokenBatch = 4096
 // drops for one peer, batched into a single frame. Everything is a
 // fixed field order written straight into one right-sized buffer — no
 // reflection and no intermediate objects, because this runs whenever a
-// consumer arrives or is served.
+// consumer parks and registers.
 func EncodeTokenDelta(delta TokenDelta) ([]byte, error) {
 	if len(delta.Add) > maxTokenBatch || len(delta.Drop) > maxTokenBatch {
 		return nil, fmt.Errorf("token delta too large: %d adds, %d drops (max %d each)",

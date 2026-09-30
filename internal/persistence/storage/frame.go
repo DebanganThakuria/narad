@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"os"
+	"runtime"
+	"sync"
 
 	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
 )
@@ -30,9 +33,8 @@ func encodeRecordsPayload(dst []byte, records [][]byte) []byte {
 	return dst
 }
 
-// decodeRecordsPayload returns slices that reference the input. Caller
-// must copy if it needs to retain them past the codec buffer's
-// lifetime.
+// decodeRecordsPayload splits a record stream into slices of payload,
+// not copies: they share its lifetime and its memory.
 func decodeRecordsPayload(payload []byte, recordCount int32) ([][]byte, error) {
 	out := make([][]byte, 0, recordCount)
 	pos := 0
@@ -54,9 +56,9 @@ func decodeRecordsPayload(payload []byte, recordCount int32) ([][]byte, error) {
 	return out, nil
 }
 
-// encodeFrame builds one frame with fresh buffers. The flusher uses a
-// frameEncoder to reuse its buffers across flushes; this form serves
-// tests and one-off callers.
+// encodeFrame builds one frame with fresh buffers. The flusher borrows
+// a frameEncoder (frameEncoders) to reuse buffers across flushes; this
+// form serves tests and one-off callers.
 func encodeFrame(records [][]byte, baseOffset int64, c codec.Codec) ([]byte, error) {
 	var enc frameEncoder
 	frame, err := enc.encodeFrame(records, baseOffset, c)
@@ -80,10 +82,20 @@ type frameEncoder struct {
 	frame []byte
 }
 
+// frameEncoders lends encoders to the flushers for one frame at a time.
+// Each Log used to own one, so the encode buffers of the largest batch a
+// partition ever wrote (up to 2 x maxRetainedFrameBuffer) stayed pinned
+// for the life of the Log on every partition that ever committed; the
+// pool bounds them by the frames being encoded at once, and the GC
+// drops idle ones.
+var frameEncoders = sync.Pool{New: func() any { return new(frameEncoder) }}
+
 // encodeFrame encodes records into a frame: header, then the codec's
 // output. The codec appends straight into the frame buffer after the
 // header slot (both codecs append to dst), so there is no intermediate
-// "encoded" buffer and no copy.
+// "encoded" buffer and no copy. An uncompressed frame's payload is the
+// record stream itself, so it is built in place after the header with
+// no staging buffer at all.
 func (enc *frameEncoder) encodeFrame(records [][]byte, baseOffset int64, c codec.Codec) ([]byte, error) {
 	if len(records) == 0 {
 		return nil, errors.New("storage: encodeFrame: empty batch")
@@ -93,42 +105,50 @@ func (enc *frameEncoder) encodeFrame(records [][]byte, baseOffset int64, c codec
 	for _, r := range records {
 		innerSize += 4 + len(r)
 	}
-	if cap(enc.inner) < innerSize {
-		enc.inner = make([]byte, 0, innerSize)
+	var frame []byte
+	if c.Flag() == codec.FlagNone {
+		if cap(enc.frame) < headerSize+innerSize {
+			enc.frame = make([]byte, 0, headerSize+innerSize)
+		}
+		frame = encodeRecordsPayload(enc.frame[:headerSize], records)
+	} else {
+		if cap(enc.inner) < innerSize {
+			enc.inner = make([]byte, 0, innerSize)
+		}
+		inner := encodeRecordsPayload(enc.inner[:0], records)
+		if cap(enc.frame) < headerSize {
+			enc.frame = make([]byte, 0, headerSize+innerSize)
+		}
+		frame = c.Encode(enc.frame[:headerSize], inner)
+		if cap(inner) <= maxRetainedFrameBuffer {
+			enc.inner = inner[:0]
+		} else {
+			enc.inner = nil
+		}
 	}
-	inner := encodeRecordsPayload(enc.inner[:0], records)
-
-	if cap(enc.frame) < headerSize {
-		enc.frame = make([]byte, 0, headerSize+innerSize)
-	}
-	frame := c.Encode(enc.frame[:headerSize], inner)
 	encodedLen := len(frame) - headerSize
 
 	// Mirror decodeHeader's read-time bound: a frame past maxFrameBytes
 	// would be written but rejected as corrupt on every read (a poison
 	// frame), so refuse it at write time instead.
-	if len(inner) > maxFrameBytes || encodedLen > maxFrameBytes {
+	if innerSize > maxFrameBytes || encodedLen > maxFrameBytes {
 		enc.release()
-		return nil, fmt.Errorf("storage: frame too large: uncompressed=%d compressed=%d", len(inner), encodedLen)
+		return nil, fmt.Errorf("storage: frame too large: uncompressed=%d compressed=%d", innerSize, encodedLen)
 	}
 
 	encodeHeader(frame[:headerSize], frameHeader{
 		flags:        c.Flag() & codecMask,
 		recordCount:  int32(len(records)),
 		baseOffset:   baseOffset,
-		uncompressed: int32(len(inner)),
+		uncompressed: int32(innerSize),
 		compressed:   int32(encodedLen),
 	})
 
 	crc := crc32cOf(frame[2:23], frame[headerSize:])
 	binary.BigEndian.PutUint32(frame[23:27], crc)
 
-	// Keep the (possibly grown) buffers for the next flush, within bounds.
-	if cap(inner) <= maxRetainedFrameBuffer {
-		enc.inner = inner[:0]
-	} else {
-		enc.inner = nil
-	}
+	// Keep the (possibly grown) frame buffer for the next flush, within
+	// bounds.
 	if cap(frame) <= maxRetainedFrameBuffer {
 		enc.frame = frame[:0]
 	} else {
@@ -142,10 +162,25 @@ func (enc *frameEncoder) release() {
 	enc.frame = nil
 }
 
+// readAt is r.ReadAt that lets b stay on the caller's stack. A slice
+// passed through the io.ReaderAt interface escapes, which cost every
+// frame header read on the commit and read paths a heap allocation; a
+// segment is always an *os.File, whose ReadAt does not retain b. Other
+// readers (tests) read into a copy.
+func readAt(r io.ReaderAt, b []byte, off int64) (int, error) {
+	if f, ok := r.(*os.File); ok {
+		return f.ReadAt(b, off)
+	}
+	tmp := make([]byte, len(b))
+	n, err := r.ReadAt(tmp, off)
+	copy(b, tmp[:n])
+	return n, err
+}
+
 // readFrameRaw reads the header and raw (still-encoded) payload of the
-// frame at pos and validates the CRC — no decode. Shared by readFrameAt
-// (which goes on to decode) and verifyFrameAt (which deliberately does
-// not).
+// frame at pos and validates the CRC, without decoding. readFrameAt
+// goes on to decode; a caller that only needs the CRC check uses
+// verifyFrameAtBuffered, which does not hold the whole frame.
 //
 // Errors:
 //   - errBadMagic: header magic mismatch (caller resyncs)
@@ -153,7 +188,7 @@ func (enc *frameEncoder) release() {
 //   - io.ErrUnexpectedEOF: torn tail
 func readFrameRaw(r io.ReaderAt, pos int64) (frameHeader, []byte, error) {
 	var hdrBuf [headerSize]byte
-	n, err := r.ReadAt(hdrBuf[:], pos)
+	n, err := readAt(r, hdrBuf[:], pos)
 	if err != nil && err != io.EOF {
 		return frameHeader{}, nil, err
 	}
@@ -165,7 +200,12 @@ func readFrameRaw(r io.ReaderAt, pos int64) (frameHeader, []byte, error) {
 		return h, nil, err
 	}
 
-	payload := make([]byte, h.compressed)
+	// The header rides in front of the payload in one allocation: the CRC
+	// covers both, and hashing hdrBuf itself would move it to the heap
+	// (crc32 leaks its input), a second allocation per frame read.
+	buf := make([]byte, headerSize+int(h.compressed))
+	copy(buf, hdrBuf[:])
+	payload := buf[headerSize:]
 	n, err = r.ReadAt(payload, pos+headerSize)
 	if err != nil && err != io.EOF {
 		return h, nil, err
@@ -174,7 +214,7 @@ func readFrameRaw(r io.ReaderAt, pos int64) (frameHeader, []byte, error) {
 		return h, nil, io.ErrUnexpectedEOF
 	}
 
-	if want, got := h.crc, crc32cOf(hdrBuf[2:23], payload); want != got {
+	if want, got := h.crc, crc32cOf(buf[2:23], payload); want != got {
 		return h, nil, fmt.Errorf("%w: crc want=0x%x got=0x%x at pos=%d", errCorrupt, want, got, pos)
 	}
 	return h, payload, nil
@@ -183,19 +223,29 @@ func readFrameRaw(r io.ReaderAt, pos int64) (frameHeader, []byte, error) {
 // readFrameAt reads, CRC-checks, and decodes the frame at pos, returning
 // its records and the position just after the frame. Errors are those of
 // readFrameRaw, plus errCorrupt when the decoded record stream is invalid.
+//
+// The records are slices of one buffer this call allocated (the payload
+// read from the file for an uncompressed frame, the codec's output
+// otherwise) that nothing else references, so a caller may keep them
+// without copying; they pin that buffer while it does.
 func readFrameAt(r io.ReaderAt, pos int64, log *Log) (frameHeader, [][]byte, int64, error) {
 	h, payload, err := readFrameRaw(r, pos)
 	if err != nil {
 		return h, nil, pos, err
 	}
 
-	c, err := codecForFlag(h.codec(), log.codec)
-	if err != nil {
-		return h, nil, pos, err
-	}
-	decoded, err := c.Decode(nil, payload, int(h.uncompressed))
-	if err != nil {
-		return h, nil, pos, fmt.Errorf("%w: decode: %v", errCorrupt, err)
+	// An uncompressed frame's payload IS the record stream: split it in
+	// place instead of copying it through the noop codec.
+	decoded := payload
+	if h.codec() != codec.FlagNone {
+		c, err := codecForFlag(h.codec(), log.codec)
+		if err != nil {
+			return h, nil, pos, err
+		}
+		decoded, err = c.Decode(nil, payload, int(h.uncompressed))
+		if err != nil {
+			return h, nil, pos, fmt.Errorf("%w: decode: %v", errCorrupt, err)
+		}
 	}
 	if len(decoded) != int(h.uncompressed) {
 		return h, nil, pos, fmt.Errorf("%w: decoded size %d != header.uncompressed %d", errCorrupt, len(decoded), h.uncompressed)
@@ -234,7 +284,7 @@ func frameHeaderAt(r io.ReaderAt, pos int64) (frameHeader, int64, error) {
 		frameHeaderReadHook()
 	}
 	var hdrBuf [headerSize]byte
-	n, err := r.ReadAt(hdrBuf[:], pos)
+	n, err := readAt(r, hdrBuf[:], pos)
 	if err != nil && err != io.EOF {
 		return frameHeader{}, pos, err
 	}
@@ -248,39 +298,51 @@ func frameHeaderAt(r io.ReaderAt, pos int64) (frameHeader, int64, error) {
 	return h, pos + int64(headerSize) + int64(h.compressed), nil
 }
 
-// verifyFrameAt re-reads the frame at pos and validates its CRC over the raw
-// (possibly compressed) on-disk bytes, WITHOUT decoding. It returns the frame
-// header (record count, base offset) and the position just after the frame.
-//
-// Two hot, decode-free paths use it:
-//   - the durability read-back (VerifyDurable) — one CRC check per frame
-//     instead of a full decode per record;
-//   - index navigation (scanSegmentFromIndexAnchorLocked / the index build) —
-//     locating an offset only needs frame headers to step frame-to-frame, so
-//     decoding the payload there is pure waste. With small frames and a sparse
-//     index, that waste dominated consume CPU (hundreds of decodes per lookup).
-//
-// CRC is still checked so navigation detects corruption exactly as the old
-// decode-based walk did; only the (expensive) zstd decode is skipped.
-func verifyFrameAt(r io.ReaderAt, pos int64) (frameHeader, int64, error) {
-	h, _, err := readFrameRaw(r, pos)
-	if err != nil {
-		return h, pos, err
-	}
-	return h, pos + int64(headerSize) + int64(h.compressed), nil
-}
-
 // verifyChunkBytes is the read granularity of verifyFrameAtBuffered: big
 // enough to make a page-cache read cheap, small enough that the commit
 // path never allocates a whole frame just to hash it.
 const verifyChunkBytes = 64 << 10
 
-// verifyFrameAtBuffered is verifyFrameAt without the frame-sized payload
-// allocation: it streams the payload through *buf (grown once, reused
-// across calls) while computing the CRC. Same errors as readFrameRaw.
+// verifyChunks lends verifyFrameAtBuffered its read buffer for one
+// verify. Each Log's flusher used to keep its own: 64 KiB of heap on
+// every partition that ever committed, however small its frames. The
+// list holds at most one chunk per P, whoever returned it. (A sync.Pool
+// keeps a lone chunk in the private slot of the P that put it back, out
+// of reach of a flusher that next runs on another P, so a migrating
+// flusher kept allocating fresh ones.)
+var verifyChunks = make(chunkList, runtime.GOMAXPROCS(0))
+
+// chunkList is a bounded free list of verifyChunkBytes buffers.
+type chunkList chan *[]byte
+
+func (c chunkList) get() *[]byte {
+	select {
+	case b := <-c:
+		return b
+	default:
+		b := make([]byte, verifyChunkBytes)
+		return &b
+	}
+}
+
+func (c chunkList) put(b *[]byte) {
+	select {
+	case c <- b:
+	default:
+	}
+}
+
+// verifyFrameAtBuffered re-reads the frame at pos and validates its CRC
+// over the raw (possibly compressed) on-disk bytes, without decoding. It
+// returns the frame header (record count, base offset) and the position
+// just after the frame. It streams the payload through *buf (grown to
+// verifyChunkBytes if smaller) instead of allocating the frame, so the
+// durability read-back (VerifyDurable), the recovery walk and the
+// resync past a corrupt frame (nextValidFramePos) never allocate per
+// frame. Same errors as readFrameRaw.
 func verifyFrameAtBuffered(r io.ReaderAt, pos int64, buf *[]byte) (frameHeader, int64, error) {
 	var hdrBuf [headerSize]byte
-	n, err := r.ReadAt(hdrBuf[:], pos)
+	n, err := readAt(r, hdrBuf[:], pos)
 	if err != nil && err != io.EOF {
 		return frameHeader{}, pos, err
 	}
@@ -297,24 +359,25 @@ func verifyFrameAtBuffered(r io.ReaderAt, pos int64, buf *[]byte) (frameHeader, 
 	}
 	chunk := (*buf)[:verifyChunkBytes]
 
-	c := crc32.New(crc32cTable)
-	c.Write(hdrBuf[2:23])
+	// Hash the header from the chunk, not from hdrBuf: crc32 leaks its
+	// input, which would move hdrBuf to the heap on every commit.
+	crc := crc32.Update(0, crc32cTable, chunk[:copy(chunk, hdrBuf[2:23])])
 	remaining := int64(h.compressed)
 	at := pos + headerSize
 	for remaining > 0 {
 		want := min(remaining, int64(len(chunk)))
-		got, rerr := r.ReadAt(chunk[:want], at)
+		got, rerr := readAt(r, chunk[:want], at)
 		if rerr != nil && rerr != io.EOF {
 			return h, pos, rerr
 		}
 		if int64(got) < want {
 			return h, pos, io.ErrUnexpectedEOF
 		}
-		c.Write(chunk[:got])
+		crc = crc32.Update(crc, crc32cTable, chunk[:got])
 		remaining -= want
 		at += want
 	}
-	if want, got := h.crc, c.Sum32(); want != got {
+	if want, got := h.crc, crc; want != got {
 		return h, pos, fmt.Errorf("%w: crc want=0x%x got=0x%x at pos=%d", errCorrupt, want, got, pos)
 	}
 	return h, pos + int64(headerSize) + int64(h.compressed), nil

@@ -60,6 +60,17 @@ type Source interface {
 	GetSchema(ctx context.Context, topic string, version int) ([]byte, error)
 }
 
+// LatestSource is a Source that can also read a topic's latest
+// persisted version directly: the version PersistedHistory would end
+// with, and its bytes, or version 0 when the topic has none. Hydrate
+// uses it when the source has it (the metastore does), since the
+// registry only ever validates against the latest version and walking
+// the history to find it cost one read and one copy per version.
+type LatestSource interface {
+	Source
+	LatestSchema(ctx context.Context, topic string) (version int, raw []byte, err error)
+}
+
 // PersistedHistory returns every persisted schema version of topic in
 // ascending order, or an empty slice when the topic has none. Versions
 // are contiguous from 1 (the metastore's state machine enforces it), so
@@ -78,14 +89,18 @@ func PersistedHistory(ctx context.Context, src Source, topic string) ([]Version,
 	}
 }
 
-// Hydrate makes reg's copy of topic's schema history identical to what
-// src holds, replacing whatever was loaded before, and reports whether
-// the topic has any schema at all. It is the only correct way to bring
-// a registry up to date: a version registered by another node, a
+// Hydrate brings reg's copy of topic's schemas in line with what src
+// holds, replacing whatever was loaded before, and reports whether the
+// topic has any schema at all. It is the only correct way to bring a
+// registry up to date: a version registered by another node, a
 // delete-and-recreate under the same name, or an attach-time adoption
 // can all change the history in ways an incremental Load would miss.
+//
+// A LatestSource hands over only the latest version, which is all the
+// registry keeps (JSONSchema.ReplaceTopic compiles the latest and
+// drops the rest); any other Source has its whole history read.
 func Hydrate(ctx context.Context, src Source, reg Registry, topic string) (bool, error) {
-	history, err := PersistedHistory(ctx, src, topic)
+	history, err := hydrateHistory(ctx, src, topic)
 	if err != nil {
 		return false, err
 	}
@@ -93,4 +108,20 @@ func Hydrate(ctx context.Context, src Source, reg Registry, topic string) (bool,
 		return false, fmt.Errorf("schema: load %s: %w", topic, err)
 	}
 	return len(history) > 0, nil
+}
+
+// hydrateHistory reads what Hydrate hands to ReplaceTopic.
+func hydrateHistory(ctx context.Context, src Source, topic string) ([]Version, error) {
+	latest, ok := src.(LatestSource)
+	if !ok {
+		return PersistedHistory(ctx, src, topic)
+	}
+	number, raw, err := latest.LatestSchema(ctx, topic)
+	if err != nil {
+		return nil, fmt.Errorf("schema: read %s latest: %w", topic, err)
+	}
+	if number <= 0 {
+		return nil, nil
+	}
+	return []Version{{Number: number, Raw: raw}}, nil
 }

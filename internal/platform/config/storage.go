@@ -31,14 +31,43 @@ type StorageConfig struct {
 	// this many unsynced bytes in batched mode. Zero disables the byte bound.
 	SyncBytes int64 `json:"sync_bytes"`
 
-	// HighWatermarkSyncIntervalMs batches durable high-watermark metadata
-	// rewrites. Close always forces one final persist.
+	// HighWatermarkSyncIntervalMs is deprecated and has no effect: an
+	// open log no longer persists its high-watermark while it runs (the
+	// hwm file is emptied before the first advance and written exactly
+	// at Close), so there is no deferred persist to batch. It is kept,
+	// and any value accepted, so existing configs still load.
 	HighWatermarkSyncIntervalMs int `json:"high_watermark_sync_interval_ms"`
+
+	// ConsumerOffsetCommitIntervalMs is the durability interval of
+	// acked consumer frontiers and acked-ahead sets (consumer.ahead,
+	// consumer.offset). Every 100ms, or every interval when it is
+	// shorter, the changed ones are written to the page cache, so a
+	// process crash redelivers about 100ms of acks; every interval each
+	// partition acked since is synced once (fdatasync on Linux, fsync
+	// plus one F_FULLFSYNC per tick on macOS), so a power loss or kernel
+	// crash redelivers at most about the interval plus 100ms. Both are
+	// within the at-least-once contract; a graceful stop redelivers
+	// none. 100 keeps the power-loss window of releases before the
+	// two-cadence committer. It is its own setting rather than
+	// FlushIntervalMs so tuning the storage flush does not change how
+	// often offsets are synced.
+	ConsumerOffsetCommitIntervalMs int `json:"consumer_offset_commit_interval_ms"`
 
 	// IngressWALSyncIntervalMs is the backstop cadence for the ingress WAL
 	// sync loop. Appends wake the loop immediately (group commit), so this
 	// only bounds how long buffered records can wait if a wakeup is missed.
 	IngressWALSyncIntervalMs int `json:"ingress_wal_sync_interval_ms"`
+
+	// IngressWALPrealloc prepares ingress WAL segments ahead of use:
+	// the next segment is created and zero-filled to full size off the
+	// append path, so a group commit overwrites allocated blocks and its
+	// sync is data-only instead of also committing the inode through the
+	// file system journal (ext4, XFS). Off by default: it changes crash
+	// recovery (a torn write inside a prepared segment is truncated
+	// rather than refused, and a binary from before preparation refuses
+	// such a segment), costs up to two segments of preallocated disk,
+	// and its win is measured on ext4 only. See wal.SegmentPrealloc.
+	IngressWALPrealloc bool `json:"ingress_wal_prealloc"`
 
 	// SegmentBytes triggers a segment roll once the active segment's
 	// on-disk size meets or exceeds this value.

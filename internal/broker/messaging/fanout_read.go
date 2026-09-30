@@ -33,6 +33,12 @@ import (
 // advances past everything returned, dropped, or skipped — but never
 // past a record blocked by the due gate. The caller persists it only
 // after the records are durably committed downstream.
+//
+// Record payloads alias the log's buffer, flushing snapshot, or
+// decoded-frame cache and are READ-ONLY (see storage.Log.ReadShared).
+// The child commit copies each payload into its own envelope or RPC
+// frame anyway, so a private copy here would be garbage the moment it
+// was made.
 func (e *Engine) ReadFanoutSlab(ctx context.Context, topicName string, partition int, opts topic.FanoutReadOpts) (topic.FanoutSlab, error) {
 	if e.logs == nil {
 		return topic.FanoutSlab{}, unavailableError("partition logs")
@@ -79,7 +85,7 @@ func (e *Engine) ReadFanoutSlab(ctx context.Context, topicName string, partition
 			notify = log.NotifyC()
 		}
 
-		slab, err := e.readFanoutSlabOnce(log, opts)
+		slab, err := e.readFanoutSlabOnce(sharedFanoutLog{log}, opts)
 		if err != nil {
 			return topic.FanoutSlab{}, err
 		}
@@ -133,8 +139,17 @@ func (e *Engine) FanoutCursorStats(ctx context.Context, parent string) ([]topic.
 		var hwm int64
 		if log, open := e.logs.Peek(parent, p); open {
 			hwm = log.HighWatermark()
-		} else if hwm, _, err = storage.ReadPersistedHighWatermark(dir); err != nil {
-			return nil, err
+		} else {
+			var known bool
+			if hwm, known, err = closedHighWatermark(dir); err != nil {
+				return nil, err
+			}
+			if !known {
+				// Only an open knows this boundary and a listing never
+				// opens a log: report nothing for the partition rather
+				// than a boundary of 0 below its cursors.
+				continue
+			}
 		}
 		for _, child := range t.Children {
 			cur, ok, err := storage.ReadFanoutCursor(dir, child)
@@ -154,11 +169,22 @@ func (e *Engine) FanoutCursorStats(ctx context.Context, parent string) ([]topic.
 
 // fanoutLog is the slice of *storage.Log the slab read uses; narrowed
 // so drop-behind arithmetic is unit-testable without forcing real
-// segment retention.
+// segment retention. ReadKeyed may return a payload that aliases the
+// log (sharedFanoutLog does); the slab read never writes to it.
 type fanoutLog interface {
 	HighWatermark() int64
 	OldestOffset() int64
 	ReadKeyed(offset int64) (string, int64, []byte, error)
+}
+
+// sharedFanoutLog serves the slab read's ReadKeyed from the log's
+// zero-copy ReadKeyedShared. The payloads only feed the child commit,
+// which copies them again, so the private copy ReadKeyed makes cost one
+// allocation of the full record per record per child for nothing.
+type sharedFanoutLog struct{ *storage.Log }
+
+func (l sharedFanoutLog) ReadKeyed(offset int64) (string, int64, []byte, error) {
+	return l.ReadKeyedShared(offset)
 }
 
 // readFanoutSlabOnce performs one non-blocking slab read.
@@ -233,7 +259,8 @@ func (e *Engine) readFanoutSlabOnce(log fanoutLog, opts topic.FanoutReadOpts) (t
 // must open the log for real: the cursor is behind the durable HWM
 // (backlog to drain — correctness over eviction, always), the read is
 // a tail-anchor (needs the live tail), or the HWM file is unreadable
-// (open for ground truth).
+// or holds no boundary over record bytes (open for ground truth; see
+// closedHighWatermark).
 //
 // The caught-up case sleeps out the long-poll in short slices,
 // re-checking Peek each slice: a produce reopens the log through Get,
@@ -245,8 +272,8 @@ func (e *Engine) fanoutSlabWhileClosed(ctx context.Context, topicName string, pa
 		return topic.FanoutSlab{}, false, nil
 	}
 	partitionDir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
-	hwm, _, err := storage.ReadPersistedHighWatermark(partitionDir)
-	if err != nil {
+	hwm, known, err := closedHighWatermark(partitionDir)
+	if err != nil || !known {
 		return topic.FanoutSlab{}, false, nil
 	}
 	if opts.FromOffset < hwm {
@@ -272,4 +299,28 @@ func (e *Engine) fanoutSlabWhileClosed(ctx context.Context, topicName string, pa
 		}
 	}
 	return topic.FanoutSlab{NextOffset: opts.FromOffset, HighWatermark: hwm}, true, nil
+}
+
+// closedHighWatermark reads a closed partition's high watermark from its
+// directory without opening the log. known=false means only an open can
+// tell: the hwm file holds no boundary (a crash image nothing has opened
+// yet, or a Close whose hwm write failed) while the segments hold record
+// bytes. With no record bytes the answer is exact without an open: the
+// offset the newest segment is named for, as in transferHighWatermark.
+func closedHighWatermark(dir string) (hwm int64, known bool, err error) {
+	hwm, known, err = storage.ReadPersistedHighWatermark(dir)
+	if err != nil || known {
+		return hwm, known, err
+	}
+	segs, err := storage.ListPartitionSegments(dir)
+	if err != nil {
+		return 0, false, err
+	}
+	for _, seg := range segs {
+		if seg.SizeBytes > 0 {
+			return 0, false, nil
+		}
+		hwm = max(hwm, seg.BaseOffset)
+	}
+	return hwm, true, nil
 }

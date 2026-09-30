@@ -14,8 +14,8 @@ import (
 // WithProduceLock runs fn on the (topic, partition) log while holding
 // its produce-serialization mutex.
 func (g *Logs) WithProduceLock(topicName string, idx int, fn func(*storage.Log) error) error {
-	unlock := g.lockProduce(topicName, idx)
-	defer unlock()
+	mu := g.lockProduce(topicName, idx)
+	defer mu.Unlock()
 
 	log, err := g.Get(topicName, idx)
 	if err != nil {
@@ -24,17 +24,21 @@ func (g *Logs) WithProduceLock(topicName string, idx int, fn func(*storage.Log) 
 	return fn(log)
 }
 
-// WithProduceLockResult is WithProduceLock for callbacks that return
-// an offset.
-func (g *Logs) WithProduceLockResult(topicName string, idx int, fn func(*storage.Log) (int64, error)) (int64, error) {
-	unlock := g.lockProduce(topicName, idx)
-	defer unlock()
+// WithProduceLockIncarnation is WithProduceLock for a caller that must
+// know which incarnation of the topic the log belongs to: fn also gets
+// the topic ID the log was opened under ("" for a topic record without
+// one, or when the Logs has no metastore). The log map re-checks an
+// open log against the topic record only on a Get, so a caller that
+// commits records which arrived after this Get pairs it with Current.
+func (g *Logs) WithProduceLockIncarnation(topicName string, idx int, fn func(log *storage.Log, incarnation string) error) error {
+	mu := g.lockProduce(topicName, idx)
+	defer mu.Unlock()
 
-	log, err := g.Get(topicName, idx)
+	log, incarnation, err := g.get(topicName, idx)
 	if err != nil {
-		return 0, err
+		return err
 	}
-	return fn(log)
+	return fn(log, incarnation)
 }
 
 // ProduceSyncCount reports the number of live produce-serialization
@@ -46,7 +50,9 @@ func (g *Logs) ProduceSyncCount() int {
 }
 
 // lockProduce acquires the produce-serialization mutex for (topic,
-// partition), minting one on first use.
+// partition), minting one on first use, and returns it locked; the
+// caller unlocks it. Returning the mutex rather than an unlock func
+// keeps the per-commit-batch call free of allocations.
 //
 // Keyed-mutex revalidation: CloseTopic/CloseAll retire map entries,
 // and a goroutine may have fetched a mutex from the map
@@ -58,7 +64,7 @@ func (g *Logs) ProduceSyncCount() int {
 // itself only deletes an entry while holding that entry's mutex (see
 // retireProduceMutex), so a holder inside its critical section is never
 // invalidated mid-flight.
-func (g *Logs) lockProduce(topicName string, idx int) func() {
+func (g *Logs) lockProduce(topicName string, idx int) *sync.Mutex {
 	key := keyOf(topicName, idx)
 	for {
 		g.produceMu.Lock()
@@ -75,7 +81,7 @@ func (g *Logs) lockProduce(topicName string, idx int) func() {
 		current := g.produceSync[key] == mu
 		g.produceMu.Unlock()
 		if current {
-			return mu.Unlock
+			return mu
 		}
 		// The entry was retired (and possibly replaced) between our map
 		// fetch and the acquisition — this mutex no longer serializes
@@ -92,7 +98,7 @@ func (g *Logs) lockProduce(topicName string, idx int) func() {
 // retired mutex fail lockProduce's revalidation and retry. The map
 // re-check under produceMu makes retirement idempotent against a
 // concurrent retire of the same key.
-func (g *Logs) retireProduceMutex(key string, mu *sync.Mutex) {
+func (g *Logs) retireProduceMutex(key logKey, mu *sync.Mutex) {
 	mu.Lock()
 	g.produceMu.Lock()
 	if g.produceSync[key] == mu {
@@ -105,9 +111,9 @@ func (g *Logs) retireProduceMutex(key string, mu *sync.Mutex) {
 // retireProduceEntries retires every produceSync entry whose key
 // matches. The map is snapshotted under produceMu, then each entry is
 // retired individually under its own mutex.
-func (g *Logs) retireProduceEntries(match func(key string) bool) {
+func (g *Logs) retireProduceEntries(match func(key logKey) bool) {
 	g.produceMu.Lock()
-	retire := make(map[string]*sync.Mutex)
+	retire := make(map[logKey]*sync.Mutex)
 	for k, mu := range g.produceSync {
 		if match(k) {
 			retire[k] = mu

@@ -54,6 +54,12 @@ type Poller struct {
 	// reaperRestarts, when set (SetReaperRestartCounter), reports how
 	// many times the shared retention loop had to be replaced.
 	reaperRestarts func() int64
+	// ingressHealthy, when set (SetIngressWALHealth), reports whether
+	// the ingress WAL still accepts produce.
+	ingressHealthy func() bool
+	// ingressBacklog, when set (SetIngressDispatchBacklog), reports the
+	// ingress WAL records a restart would replay.
+	ingressBacklog func() uint64
 }
 
 // gaugeSeriesKey identifies one per-partition gauge series.
@@ -93,6 +99,22 @@ func (p *Poller) SetReaperRestartCounter(count func() int64) {
 	p.reaperRestarts = count
 }
 
+// SetIngressWALHealth wires the source of narad_ingress_wal_failed:
+// healthy reports whether the ingress WAL still accepts produce
+// (ingress.Manager.Healthy).
+func (p *Poller) SetIngressWALHealth(healthy func() bool) {
+	p.ingressHealthy = healthy
+}
+
+// SetIngressDispatchBacklog wires the source of
+// narad_ingress_dispatch_backlog_records: backlog reports the durable
+// next seq minus the stored dispatch checkpoint
+// (ingress.Manager.DispatchBacklog). It must be cheap: it is read on
+// every tick.
+func (p *Poller) SetIngressDispatchBacklog(backlog func() uint64) {
+	p.ingressBacklog = backlog
+}
+
 // Run blocks until ctx is cancelled. It does an immediate first tick
 // so /metrics returns useful values before the first 5-second
 // interval elapses.
@@ -117,6 +139,23 @@ func (p *Poller) Run(ctx context.Context) {
 }
 
 func (p *Poller) tick(ctx context.Context) {
+	// First, so a failing snapshot does not leave them stale: an operator
+	// waits for the backlog to read 0 before a rollback, and alerts on
+	// the WAL failure.
+	if p.ingressBacklog != nil {
+		p.metrics.IngressDispatchBacklog.Set(float64(p.ingressBacklog()))
+	}
+	if p.ingressHealthy != nil {
+		failed := 0.0
+		if !p.ingressHealthy() {
+			failed = 1
+		}
+		p.metrics.IngressWALFailed.Set(failed)
+	}
+	// Taken before the topic listing inside Snapshot: anything bound for
+	// a topic before this point, and absent from the listing, belongs to
+	// a deleted topic. See pruneDeletedTopics.
+	epoch := p.metrics.snapshotEpoch()
 	snaps, err := p.broker.Snapshot(ctx)
 	if err != nil {
 		p.logger.Warn("metrics: snapshot failed", "err", err)
@@ -145,7 +184,7 @@ func (p *Poller) tick(ctx context.Context) {
 	}
 	p.updateDataDirGauges()
 	p.clearDepartedPartitions(currentPartitions)
-	p.pruneDeletedTopics(currentTopics)
+	p.pruneDeletedTopics(currentTopics, epoch)
 }
 
 func (p *Poller) setTopicGauges(ts TopicSnapshot, nowUnix int64, current map[gaugeSeriesKey]struct{}) {
@@ -205,14 +244,18 @@ func (p *Poller) clearDepartedPartitions(current map[gaugeSeriesKey]struct{}) {
 // pruneDeletedTopics drops gauge series for topics that disappeared
 // since the previous tick. Without this, deleted topics would leak
 // series in /metrics for the lifetime of the process — unbounded under
-// topic churn.
-func (p *Poller) pruneDeletedTopics(current map[string]struct{}) {
+// topic churn. The prune also retires the topic's storage recorders,
+// and a topic that got counters or a recorder bound again after its
+// prune (a request that straddled the delete, a log opened just as it
+// happened) is pruned again, since it is never "disappearing" twice.
+func (p *Poller) pruneDeletedTopics(current map[string]struct{}, epoch uint64) {
 	for topic := range p.previousTopics {
 		if _, still := current[topic]; still {
 			continue
 		}
-		p.metrics.pruneTopicSeries(topic)
+		p.metrics.pruneTopicSeries(topic, epoch)
 	}
+	p.metrics.pruneOrphanedTopics(current, epoch)
 	p.previousTopics = current
 }
 

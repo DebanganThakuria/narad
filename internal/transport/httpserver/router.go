@@ -26,8 +26,17 @@ type RouterOptions struct {
 	// Basic credentials as the API. Ignored when auth is nil.
 	MetricsRequireAuth bool
 	// ConsumeInFlightPerIdentity caps concurrent consume requests per
-	// authenticated user (or per client IP without auth); 0 disables.
+	// authenticated user (or per client IP without auth); 0 disables. A
+	// batch consume (?max=N) counts N.
 	ConsumeInFlightPerIdentity int
+	// ProduceInFlightPerIdentity caps concurrent produce requests per
+	// identity, as ConsumeInFlightPerIdentity does for consume; 0
+	// disables. A batch produce counts its message count, so batching
+	// does not multiply what one identity may have in flight, and counts
+	// one while it reads and decodes its body, before that count is
+	// known: an identity's batch bodies in flight are bounded by the cap
+	// too.
+	ProduceInFlightPerIdentity int
 }
 
 // DefaultRouterOptions is the secure default: metrics on the API port
@@ -56,6 +65,7 @@ func NewRouter(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prome
 func NewRouterWithOptions(h *handlers.Set, log *slog.Logger, m *metrics.Metrics, reg *prometheus.Registry, auth *security.Authenticator, opts RouterOptions) http.Handler {
 	mux := http.NewServeMux()
 	consumeLimit := newInFlightLimiter(opts.ConsumeInFlightPerIdentity)
+	produceLimit := newInFlightLimiterFor(opts.ProduceInFlightPerIdentity, "produce")
 
 	// Topic CRUD
 	mux.HandleFunc("POST /v1/topics", httptopics.Create(h))
@@ -71,8 +81,9 @@ func NewRouterWithOptions(h *handlers.Set, log *slog.Logger, m *metrics.Metrics,
 	mux.HandleFunc("DELETE /v1/topics/{parent}/children/{child}", httptopics.DetachChild(h))
 
 	// Data plane
-	mux.HandleFunc("POST /v1/topics/{topic}/produce", httpmessaging.Produce(h))
-	mux.Handle("GET /v1/topics/{topic}/consume", consumeLimit.wrap(httpmessaging.Consume(h)))
+	mux.Handle("POST /v1/topics/{topic}/produce", produceLimit.wrap(httpmessaging.Produce(h), nil))
+	mux.HandleFunc("POST /v1/topics/{topic}/produce/batch", httpmessaging.ProduceBatch(h, produceLimit.gate()))
+	mux.Handle("GET /v1/topics/{topic}/consume", consumeLimit.wrap(httpmessaging.Consume(h), httpmessaging.ConsumeWeight))
 	mux.HandleFunc("POST /v1/topics/{topic}/ack", httpmessaging.Ack(h))
 
 	// User administration. Registered only when a metastore is wired in

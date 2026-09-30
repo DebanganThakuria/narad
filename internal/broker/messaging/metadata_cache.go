@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -45,9 +46,15 @@ type cached[V any] struct {
 // dropOnError, when non-nil and true for the load error, evicts the
 // stale entry so the next lookup doesn't keep serving a value for a
 // key that now fails to load.
+//
+// fence, when non-nil, records the forgets of the cache's keys (it is
+// written under mu). A load that overlapped a forget of its own key
+// still returns its value but does not cache it, so a request racing a
+// topic delete cannot put back an entry the delete just dropped.
 func lookupCached[V any](
 	mu *sync.RWMutex,
 	cache map[string]cached[V],
+	fence *forgetFence,
 	key string,
 	version uint64,
 	currentVersion func() uint64,
@@ -67,6 +74,7 @@ func lookupCached[V any](
 			continue
 		}
 
+		token := fence.begin()
 		value, err := load()
 		if current := currentVersion(); current != version {
 			version = current
@@ -83,10 +91,116 @@ func lookupCached[V any](
 		}
 
 		mu.Lock()
-		cache[key] = cached[V]{value: value, version: version}
+		if fence.clean(key, token) {
+			cache[key] = cached[V]{value: value, version: version}
+		}
 		mu.Unlock()
 		return value, nil
 	}
+}
+
+// fenceWindow is how many of the latest forgets a forgetFence remembers.
+const fenceWindow = 256
+
+// forgetFence tells a cache load whether a forget of its own key landed
+// while it ran. It numbers the forgets and remembers the keys of the
+// latest fenceWindow of them; a load notes the count when it begins
+// and, before storing, looks for its key among the forgets numbered
+// since. So a forget of one topic never fences a load of another: the
+// engine-wide counter this replaces fenced every load in flight on any
+// forget, which let a churn of deletes of other topics keep a topic's
+// schema flight redoing its load, and every produce waiting on it
+// blocked, for as long as the churn lasted. Its size is fixed, however
+// many names are forgotten.
+//
+// A load that more than fenceWindow forgets overlapped sees only the
+// latest of them and is clean if its key is not among those. Both
+// users stay correct when that happens, at the cost of the fence's
+// tidiness only: lookupCached stores only a value whose version did not
+// move during the load, so the worst it can put back is an entry a
+// delete dropped, which the delete's version bump keeps from ever being
+// served; and a schema marker stored over a registry that lost the
+// topic's schemas meanwhile is reloaded by validateProducePayload.
+//
+// forget and clean run under the fenced cache's write lock, which
+// orders them, so a forget cannot land between a load's check and its
+// store; begin is one atomic load.
+type forgetFence struct {
+	count atomic.Uint64
+	// keys[n%fenceWindow] is forget n's key; allocated by the first
+	// forget, so an engine that never forgets does not carry it.
+	keys *[fenceWindow]string
+}
+
+// begin returns the token a load hands to clean. A nil fence fences
+// nothing.
+func (f *forgetFence) begin() uint64 {
+	if f == nil {
+		return 0
+	}
+	return f.count.Load()
+}
+
+// clean reports whether no forget of key is known to have landed since
+// the load that got token began. The caller holds the cache's write
+// lock and stores the load's value under it.
+func (f *forgetFence) clean(key string, token uint64) bool {
+	if f == nil {
+		return true
+	}
+	n := f.count.Load()
+	if n-token > fenceWindow {
+		token = n - fenceWindow
+	}
+	for ; n > token; n-- {
+		if f.keys[n%fenceWindow] == key {
+			return false
+		}
+	}
+	return true
+}
+
+// forget records a forget of key. The caller holds the cache's write
+// lock and drops key's entry under it.
+func (f *forgetFence) forget(key string) {
+	if f.keys == nil {
+		f.keys = new([fenceWindow]string)
+	}
+	n := f.count.Load() + 1
+	f.keys[n%fenceWindow] = key
+	f.count.Store(n)
+}
+
+// ForgetTopic drops every cached view this engine holds of topicName:
+// its record, its assignments, its schema load marker, its consume
+// cursor, its partitions' commit combiners and, when nothing is parked
+// on it any more, its dispatch state. The topic manager calls it when a
+// topic incarnation's local state is retired, after dropping the topic's
+// compiled schemas and releasing its waiters, so a deleted topic stops
+// costing memory on every node it was used on. Any of it reloads from
+// the metastore or is rebuilt on the next use, so forgetting a live
+// same-named successor only costs a reload.
+func (e *Engine) ForgetTopic(topicName string) {
+	e.cacheMu.Lock()
+	e.cacheForgets.forget(topicName)
+	delete(e.topicCache, topicName)
+	delete(e.assignmentCache, topicName)
+	delete(e.schemaLoadCache, topicName)
+	e.cacheMu.Unlock()
+	e.consumeCursors.Delete(topicName)
+	e.forgetCombiners(topicName)
+	if e.dispatch != nil {
+		e.dispatch.forget(topicName)
+	}
+}
+
+// forgetSchemaLoad drops the topic's schema load marker so the next
+// sync reloads the registry.
+func (e *Engine) forgetSchemaLoad(topicName string) {
+	e.cacheMu.Lock()
+	e.cacheForgets.forget(topicName)
+	delete(e.schemaLoadCache, topicName)
+	e.cacheMu.Unlock()
 }
 
 // assignmentSet holds a topic's partition assignments in both list and
@@ -147,7 +261,7 @@ func (e *Engine) getTopic(ctx context.Context, name string) (topic.Topic, error)
 	if !ok {
 		return e.loadTopic(ctx, name)
 	}
-	return lookupCached(&e.cacheMu, e.topicCache, name, version,
+	return lookupCached(&e.cacheMu, e.topicCache, &e.cacheForgets, name, version,
 		func() uint64 { v, _ := e.topicVersion(name); return v },
 		func() (topic.Topic, error) { return e.loadTopic(ctx, name) },
 		func(err error) bool { return errors.Is(err, ErrTopicNotFound) },
@@ -188,8 +302,19 @@ func (e *Engine) getAssignment(topicName string, partition int) (metastore.Assig
 	return assignment, nil
 }
 
+// errNoAssignments is the assignment loader's way of keeping an empty
+// row set out of the cache (see assignmentsForTopic); it never reaches
+// a caller.
+var errNoAssignments = errors.New("messaging: topic has no partition assignments")
+
 // assignmentsForTopic returns the topic's assignments. ok is false
 // when the metastore has no assignment support at all.
+//
+// An empty row set is returned but not cached: it is what a deleted
+// topic reads as (ListAssignments of an unknown topic is nil, nil), and
+// caching it let every straggling request for a deleted name put back
+// the entry its delete had dropped. A live topic has rows from the
+// moment its partitions are placed.
 func (e *Engine) assignmentsForTopic(topicName string) (assignmentSet, bool, error) {
 	assignments, ok := e.metastore.(assignmentReader)
 	if !ok {
@@ -200,19 +325,29 @@ func (e *Engine) assignmentsForTopic(topicName string) (assignmentSet, bool, err
 		if err != nil {
 			return assignmentSet{}, err
 		}
+		if len(rows) == 0 {
+			return assignmentSet{}, errNoAssignments
+		}
 		return newAssignmentSet(rows, e.selfID), nil
 	}
 
 	version, versioned := e.assignmentVersion(topicName)
-	if !versioned {
-		set, err := load()
-		return set, true, err
-	}
-	set, err := lookupCached(&e.cacheMu, e.assignmentCache, topicName, version,
-		func() uint64 { v, _ := e.assignmentVersion(topicName); return v },
-		load,
-		nil,
+	var (
+		set assignmentSet
+		err error
 	)
+	if versioned {
+		set, err = lookupCached(&e.cacheMu, e.assignmentCache, &e.cacheForgets, topicName, version,
+			func() uint64 { v, _ := e.assignmentVersion(topicName); return v },
+			load,
+			func(err error) bool { return errors.Is(err, errNoAssignments) },
+		)
+	} else {
+		set, err = load()
+	}
+	if errors.Is(err, errNoAssignments) {
+		return assignmentSet{}, true, nil
+	}
 	return set, true, err
 }
 
@@ -226,7 +361,7 @@ func (e *Engine) getRoutingMember(id string) (routingMember, error) {
 	if !versioned {
 		return loadRoutingMember(assignments, id)
 	}
-	return lookupCached(&e.cacheMu, e.memberCache, id, version,
+	return lookupCached(&e.cacheMu, e.memberCache, nil, id, version,
 		func() uint64 { v, _ := e.routingMembersVersion(); return v },
 		func() (routingMember, error) { return loadRoutingMember(assignments, id) },
 		func(error) bool { return true },

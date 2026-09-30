@@ -54,7 +54,12 @@ jobs:
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Leaves room above the race step's 20m per-package -timeout for
+    # setup, race builds and queueing (go test's clock starts when each
+    # package's test binary does), so a package that hangs usually fails
+    # with go test's goroutine dump rather than the runner killing the
+    # job.
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -66,9 +71,11 @@ jobs:
 
       # Excludes the e2e package; that has its own job below so HTTP
       # surface failures don't get buried in unit-test output and
-      # vice versa.
+      # vice versa. internal/cluster alone takes 450-580 s under -race
+      # on a laptop, close to go test's default 10-minute per-package
+      # timeout, hence the explicit one.
       - name: go test (excluding e2e)
-        run: go test -race -count=1 $(go list ./... | grep -v '/tests/e2e$')
+        run: go test -race -count=1 -timeout 20m $(go list ./... | grep -v '/tests/e2e$')
 
   e2e-tests:
     name: E2E tests

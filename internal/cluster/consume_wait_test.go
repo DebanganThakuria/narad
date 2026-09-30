@@ -220,11 +220,13 @@ func TestRouteConsumeWaitStaysParkedWhenTheClaimLoses(t *testing.T) {
 	}
 }
 
-// TestRouteConsumeWaitLocalWinsAndRetiresTokens pins the drop: when the
-// local partitions serve the consumer, the tokens left with remote
-// owners are retired so they do not waste a notification on somebody who
-// has already been served.
-func TestRouteConsumeWaitLocalWinsAndRetiresTokens(t *testing.T) {
+// TestRouteConsumeWaitLocalWinLeavesTokensToLapse pins the lazy
+// retirement: when the local partitions serve the last consumer parked
+// here, the tokens left with remote owners are not retired with a frame
+// of their own. One costs at most a notification answered "pass" before
+// it lapses, where a drop cost a frame per owner every time the parked
+// count touched zero.
+func TestRouteConsumeWaitLocalWinLeavesTokensToLapse(t *testing.T) {
 	dropped := make(chan string, 4)
 	peer := fakePeerClient{
 		registerTokensFn: func(_ context.Context, addr string, delta nodewire.TokenDelta) (nodewire.Response, error) {
@@ -257,11 +259,13 @@ func TestRouteConsumeWaitLocalWinsAndRetiresTokens(t *testing.T) {
 	}
 	select {
 	case got := <-dropped:
-		if got != "remote.example:7942/orders" {
-			t.Fatalf("dropped %q, want the token at the remote owner", got)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("the token at the remote owner was never retired")
+		t.Fatalf("dropped %q, want the token left to lapse", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+	// The token is still there for the next consumer: nobody asked
+	// for it back, and a notification now is answered "pass".
+	if router.LocalDemand().WakeOneWaiter("orders", "remote.example:7942") {
+		t.Fatal("a notification after the last consumer left was answered claiming")
 	}
 }
 
@@ -480,20 +484,30 @@ func (l *registrationLog) counts(key string) (adds, drops int) {
 
 // TestRouteConsumeWaitKeepsTokensWhileOthersAreParked pins the shared
 // token: an owner holds ONE token per (this node, topic), so a consumer
-// served locally must not retire it while another consumer is still
-// parked here for the topic. Retiring it stranded the other consumer for
-// the rest of its wait.
+// served locally must not retire it, or take the other consumer off the
+// queue, while that one is still parked here for the topic. Either
+// stranded the other consumer for the rest of its wait.
 func TestRouteConsumeWaitKeepsTokensWhileOthersAreParked(t *testing.T) {
 	reg := newRegistrationLog()
-	router := tokenRouter(t, fakePeerClient{registerTokensFn: reg.registerTokens})
+	handle := consumer.EncodeHandle(consumer.Handle{Partition: 0, Offset: 7, Nonce: 99})
+	router := tokenRouter(t, fakePeerClient{
+		registerTokensFn: reg.registerTokens,
+		consumeFn: func(context.Context, string, nodewire.ConsumeRequest) (nodewire.Response, error) {
+			return remoteMessageResponse(0, 7, handle), nil
+		},
+	})
 
-	// The second consumer parks for its whole budget.
-	stayed := make(chan struct{})
+	// The second consumer parks until the owner's notification.
+	type parkedResult struct {
+		code int
+		body []byte
+	}
+	parked := make(chan parkedResult, 1)
 	go func() {
-		defer close(stayed)
 		res := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=600ms", nil)
-		router.RouteConsumeWait(context.Background(), res, req, "orders", 600*time.Millisecond, &fakeLocalWaiter{delay: time.Hour})
+		req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders/consume?wait=5s", nil)
+		router.RouteConsumeWait(context.Background(), res, req, "orders", 5*time.Second, &fakeLocalWaiter{delay: time.Hour})
+		parked <- parkedResult{code: res.Code, body: res.Body.Bytes()}
 	}()
 	time.Sleep(50 * time.Millisecond)
 
@@ -510,11 +524,21 @@ func TestRouteConsumeWaitKeepsTokensWhileOthersAreParked(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", res.Code)
 	}
-	time.Sleep(100 * time.Millisecond)
+
+	// The owner spends the token: it must reach the consumer still parked.
+	notifyWhenParked(router, "orders", "remote.example:7942")
+	got := <-parked
+	if got.code != http.StatusOK {
+		t.Fatalf("parked consumer answered %d after a local win, want the owner's record", got.code)
+	}
+	if msg := decodeMessageBody(t, got.body); msg.Offset != 7 {
+		t.Fatalf("parked consumer got offset %d, want the owner's record at 7", msg.Offset)
+	}
+	// Nothing sends a drop any more (tokens lapse at their TTL); this
+	// only guards against a drop sender coming back on this path.
 	if _, drops := reg.counts("remote.example:7942/orders"); drops != 0 {
 		t.Fatalf("token dropped %d times while another consumer was still parked on the topic", drops)
 	}
-	<-stayed
 }
 
 // TestRouteConsumeWaitReRegistersAfterAClaimWhenOthersAreParked pins the
@@ -522,6 +546,7 @@ func TestRouteConsumeWaitKeepsTokensWhileOthersAreParked(t *testing.T) {
 // when other consumers are still parked here a fresh token goes back to
 // that owner, and nothing is dropped anywhere. Without it the owner's
 // next record reached nobody on this node until a new consumer arrived.
+// The two consumers park together and share one registration.
 func TestRouteConsumeWaitReRegistersAfterAClaimWhenOthersAreParked(t *testing.T) {
 	reg := newRegistrationLog()
 	handle := consumer.EncodeHandle(consumer.Handle{Partition: 0, Offset: 7, Nonce: 99})
@@ -544,8 +569,8 @@ func TestRouteConsumeWaitReRegistersAfterAClaimWhenOthersAreParked(t *testing.T)
 		}()
 	}
 	time.Sleep(50 * time.Millisecond)
-	if adds, _ := reg.counts("remote.example:7942/orders"); adds != 2 {
-		t.Fatalf("registered %d tokens before the offer, want one per parked consumer", adds)
+	if adds, _ := reg.counts("remote.example:7942/orders"); adds != 1 {
+		t.Fatalf("registered %d tokens before the offer, want one shared by both parked consumers", adds)
 	}
 	notifyWhenParked(router, "orders", "remote.example:7942")
 
@@ -560,9 +585,10 @@ func TestRouteConsumeWaitReRegistersAfterAClaimWhenOthersAreParked(t *testing.T)
 		t.Fatalf("statuses %v, want exactly one 200 (the claim) and one 204 (the budget)", codes)
 	}
 	adds, drops := reg.counts("remote.example:7942/orders")
-	if adds < 3 {
-		t.Fatalf("owner received %d registrations, want a third one after the claim spent its token while a consumer was still parked", adds)
+	if adds < 2 {
+		t.Fatalf("owner received %d registrations, want a second one after the claim spent its token while a consumer was still parked", adds)
 	}
+	// No drop sender exists any more; this guards against one coming back.
 	if drops != 0 {
 		t.Fatalf("token dropped %d times with a consumer still parked", drops)
 	}

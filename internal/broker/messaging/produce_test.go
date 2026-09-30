@@ -351,15 +351,19 @@ func TestProduceFailsWhenNoPartitionHasAliveOwner(t *testing.T) {
 	}
 }
 
-// The commit boundary persists the high-watermark in the same flusher
-// pass that fsyncs the records, BEFORE the records become visible: a
-// produce whose visibility boundary cannot reach disk must fail (so the
-// ingress dispatcher retries instead of checkpointing past it), and the
-// record must not be exposed. The failed commit discards the record
-// from the log altogether (the dispatcher's retry re-appends it at the
-// same offset), so nothing of it remains. Previously the HWM persist
-// lagged the commit by one batch and a broken hwm path only surfaced at
-// Close.
+// Storage no longer persists the high-watermark on every commit: the hwm
+// file holds the boundary only while the log is closed. Instead, before
+// an open log's first advance, the commit empties the file once and
+// syncs it (the one-time release), so a crash recovers the boundary from
+// the fsynced record tail rather than from a stale file. That release
+// runs in the commit's flusher pass BEFORE the records become visible: a
+// produce whose release cannot reach disk must fail (so the ingress
+// dispatcher retries instead of checkpointing past it), and the record
+// must not be exposed. The failed commit discards the record from the
+// log altogether (the dispatcher's retry re-appends it at the same
+// offset), so nothing of it remains. Without the release a broken hwm
+// path only surfaced at Close, where the closed log's boundary would go
+// missing.
 func TestProduceFailsWhenHighWatermarkCannotPersist(t *testing.T) {
 	dataDir := t.TempDir()
 	ms := newMessagingFakeMetastore()

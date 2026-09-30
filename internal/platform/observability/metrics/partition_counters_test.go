@@ -62,7 +62,7 @@ func TestPartitionCountersCachedAndLiveAfterPrune(t *testing.T) {
 		t.Fatalf("messages_produced_total = %v, %v; want 1, true", got, ok)
 	}
 
-	m.pruneTopicSeries("orders")
+	m.pruneTopicSeries("orders", m.snapshotEpoch())
 	if _, ok := readCounter(t, reg, "narad_messages_produced_total", labels); ok {
 		t.Fatal("series survived pruneTopicSeries")
 	}
@@ -88,7 +88,7 @@ func TestPartitionCountersCachedAndLiveAfterPrune(t *testing.T) {
 
 	// Pruning one topic must not evict another's cache entry.
 	keep := m.PartitionCounters("payments", 0)
-	m.pruneTopicSeries("orders")
+	m.pruneTopicSeries("orders", m.snapshotEpoch())
 	if m.PartitionCounters("payments", 0) != keep {
 		t.Fatal("pruning orders evicted the payments cache entry")
 	}
@@ -101,8 +101,9 @@ func TestPartitionCountersCachedAndLiveAfterPrune(t *testing.T) {
 
 // TestStorageRecorderPreResolvedChildrenSurvivePrune verifies the
 // recorder's pre-bound children observe into live series, and that
-// after the topic's series are pruned the next observation re-binds
-// rather than landing on the detached children.
+// after the topic's series are pruned a live recorder's next
+// observation re-binds rather than landing on the detached children,
+// while one born before the prune (the deleted topic's) stays silent.
 func TestStorageRecorderPreResolvedChildrenSurvivePrune(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New(reg)
@@ -136,12 +137,20 @@ func TestStorageRecorderPreResolvedChildrenSurvivePrune(t *testing.T) {
 		}
 	}
 
-	m.pruneTopicSeries("orders")
+	// A successor's log opened after the poller listed topics but
+	// before it pruned: its recorder is born at the prune's epoch.
+	epoch := m.snapshotEpoch()
+	successor := m.StorageRecorder("orders", 0)
+	m.pruneTopicSeries("orders", epoch)
 	if _, ok := readCounter(t, reg, "narad_storage_flush_bytes_total", labels); ok {
 		t.Fatal("flush_bytes_total survived pruneTopicSeries")
 	}
 
 	rec.ObserveFlush(time.Millisecond, 25)
+	if _, ok := readCounter(t, reg, "narad_storage_flush_bytes_total", labels); ok {
+		t.Fatal("a recorder born before the prune re-created the pruned series")
+	}
+	successor.ObserveFlush(time.Millisecond, 25)
 	if got, ok := readCounter(t, reg, "narad_storage_flush_bytes_total", labels); !ok || got != 25 {
 		t.Fatalf("flush_bytes_total after prune = %v, %v; want 25, true (re-bound child)", got, ok)
 	}

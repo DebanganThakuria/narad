@@ -38,6 +38,10 @@ const (
 // window (heartbeat for slow consumers), extend=0 releases it for
 // immediate redelivery (negative ack). Both share ack's validation: a
 // lapsed or superseded handle gets 410 Gone.
+//
+// Without a receipt_handle parameter, a JSON body
+// {"receipt_handles":[...]} settles several handles at once (see
+// ackBatch).
 func Ack(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")
@@ -54,6 +58,15 @@ func Ack(s *handlers.Set) http.HandlerFunc {
 		receiptHandle, found, mode, err := ackParamsFromRawQuery(r.URL.RawQuery)
 		if err != nil {
 			s.WriteError(w, http.StatusBadRequest, "invalid receipt_handle: "+err.Error())
+			return
+		}
+		if !found && r.ContentLength != 0 {
+			// No receipt_handle parameter but a body: a batch ack.
+			if mode == ackModeInvalid {
+				s.WriteError(w, http.StatusBadRequest, `invalid extend: want "true" (renew lease) or "0" (release for redelivery)`)
+				return
+			}
+			ackBatch(s, w, r, topicName, mode)
 			return
 		}
 		if !found || receiptHandle == "" {
