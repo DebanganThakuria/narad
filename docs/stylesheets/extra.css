@@ -2476,3 +2476,71 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
     fill: HighlightText;
   }
 }
+
+/* ---- Diagrams on docs pages: docs pages are white, so a drawing sits
+   on a light plate of the multi palette (.nr-plate plus an .nr-tint--*
+   chosen by topic), the width of the content column. These rules come
+   last on purpose: they must win over the home page's phone rules for
+   .nr-dia__frame and the band's .nr-tint padding, which share their
+   specificity. ---- */
+.md-typeset .nr-dia--doc {
+  max-width: none;
+  margin: 1.6em 0;
+}
+
+.nr-dia--doc .nr-dia__frame {
+  overflow-x: auto;
+}
+
+.nr-plate {
+  border-radius: 6px;
+  padding: 1.2rem;
+}
+
+.md-typeset .nr-dia--doc .nr-dia__wide {
+  min-width: 622px;
+  max-width: 860px;
+}
+
+.md-typeset .nr-dia .nr-dia__solo {
+  display: block;
+  max-width: 440px;
+}
+
+.md-typeset .nr-dia--doc figcaption {
+  border-top: 0;
+  padding: 0;
+  margin-top: 0.8rem;
+  max-width: var(--nr-measure);
+}
+
+.nr-dia .win {
+  fill: var(--nr-band-deep);
+}
+
+@media screen and (max-width: 59.984375em) {
+  .nr-plate {
+    padding: 0.8rem;
+  }
+}
+
+@media screen and (max-width: 47.984375em) {
+  .nr-plate {
+    margin-inline: -0.8rem;
+    border-radius: 0;
+    padding: 0.8rem 0.6rem;
+  }
+
+  .md-typeset .nr-dia--doc .nr-dia__narrow {
+    min-width: 336px;
+    max-width: 440px;
+  }
+}
+
+@media (forced-colors: active) {
+  .nr-dia .win {
+    fill: Canvas;
+    stroke: CanvasText;
+    stroke-width: 1;
+  }
+}
