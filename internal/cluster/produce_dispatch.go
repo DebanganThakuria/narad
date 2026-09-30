@@ -9,7 +9,12 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/wal"
 )
 
-var errProduceReplayBoundary = errors.New("produce replay reached durable boundary")
+var (
+	errProduceReplayBoundary = errors.New("produce replay reached durable boundary")
+	// errRescanDone ends a rescan's pass over records already read once
+	// nothing left in it can be placed (see read).
+	errRescanDone = errors.New("produce rescan has nothing left to place")
+)
 
 // How the dispatcher moves records, in brief.
 //
@@ -281,6 +286,10 @@ type dispatchDest struct {
 	skipped      int
 	firstSkipped wal.Cursor
 	blockedRead  uint64
+	// pendingRead is the read (state.readEpoch) of the rescan that
+	// counts this destination among those it may still place a skipped
+	// record for (see read).
+	pendingRead uint64
 
 	// failingSince is the start of the first commit attempt in the
 	// current run of failures, zero while commits succeed; retryAt is
@@ -366,6 +375,19 @@ func (d *ProduceDispatcher) holdLimit(st *produceDispatchState) int {
 // read reads newly durable records, or, when a rescan is due, the
 // skipped ones first, and places each. It stops at the durable frontier,
 // the lookahead horizon, or once holdLimit records are held.
+//
+// A rescan counts the destinations it may place a skipped record for:
+// those whose skipped records all lie in its range. One drops out once
+// it has none left or once the rescan skips one of its records again,
+// which blocks the rest of them for this read. When none is left, every
+// record still ahead in the range is either not skipped or would only be
+// skipped again, a no-op, so the rescan stops there and goes on with new
+// records as a plain read would. A destination whose firstSkipped lies
+// below the rescan's start is not counted: its records in the range wait
+// for a rescan that starts at or below that cursor (the backstop's, at
+// the latest). Without the stop, a lone hot destination whose queue
+// fills at once had its whole skipped backlog, up to the horizon,
+// decoded again after each of its commits.
 func (d *ProduceDispatcher) read(ctx context.Context, st *produceDispatchState) {
 	now := d.now()
 	durableNext := d.ingress.DurableProduceNext()
@@ -389,11 +411,26 @@ func (d *ProduceDispatcher) read(ctx context.Context, st *produceDispatchState) 
 	oldReadSeq := st.readSeq
 	complete := true
 	var stopped wal.Cursor
+	// pending counts the destinations this rescan may still place a
+	// skipped record for; each is marked with the read's epoch until it
+	// drops out.
+	pending := 0
+	if rescan {
+		for _, dest := range st.dests {
+			if dest.skipped > 0 && dest.firstSkipped.Seq >= rescanFrom {
+				dest.pendingRead = st.readEpoch
+				pending++
+			}
+		}
+	}
 
 	peek := func(id wal.RecordID, _ wal.Cursor) (bool, error) {
 		seq := id.Seq
 		if seq < st.nextSeq {
 			return true, nil
+		}
+		if rescan && pending == 0 && seq < oldReadSeq {
+			return false, errRescanDone
 		}
 		if seq >= durableNext || seq >= horizon || st.held-st.slowHeld >= limit {
 			if seq < oldReadSeq {
@@ -431,10 +468,25 @@ func (d *ProduceDispatcher) read(ctx context.Context, st *produceDispatchState) 
 		st.rereads++
 		blocked := orig.blockedRead == st.readEpoch || (orig.skipped > 0 && orig.firstSkipped.Seq < rescanFrom)
 		d.place(ctx, st, rec, orig, blocked, true, rescanFrom, now)
+		if orig.pendingRead == st.readEpoch && (orig.skipped == 0 || orig.blockedRead == st.readEpoch) {
+			// Nothing of orig is left for this rescan to place.
+			orig.pendingRead = 0
+			pending--
+		}
 		st.forget(orig)
 		return nil
 	}
 	err := d.ingress.ReplayProduceFromCursorPeek(start, peek, fn)
+	if errors.Is(err, errRescanDone) {
+		// Nothing was read past oldReadSeq, so readSeq and readCursor are
+		// where they were: go on with new records, under the same stops
+		// as a plain read. Nothing is left unfinished below oldReadSeq, so
+		// complete stays true.
+		err = nil
+		if st.readSeq < durableNext && st.readSeq < horizon && st.held-st.slowHeld < limit {
+			err = d.ingress.ReplayProduceFromCursorPeek(st.readCursor, peek, fn)
+		}
+	}
 	if err != nil && !errors.Is(err, errProduceReplayBoundary) {
 		st.noteErr(err)
 		st.stalled = ctx.Err() == nil

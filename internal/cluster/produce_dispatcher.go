@@ -72,7 +72,8 @@ const (
 	// and has nowhere to reroute to, or its commit is still in flight),
 	// records up to that horizon keep committing; only records beyond it
 	// wait for the stuck one. The horizon bounds the per-seq bookkeeping
-	// (seqMarks) and the work of a rescan.
+	// (seqMarks) and the work of a rescan (which usually stops well
+	// before it, see read).
 	produceDispatchLookaheadWindows = 16
 
 	// produceDispatchRerouteGrace is how long a destination may keep
