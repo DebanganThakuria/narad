@@ -59,7 +59,7 @@ A per-node dispatcher drains the WAL from a durable checkpoint and commits recor
 <div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
 --8<-- "diagrams/produce-dispatcher.html"
 </div>
-<figcaption>Each partition has its own queue with at most one commit in flight, and the checkpoint only passes sequence numbers whose commit landed, so a crash replays from a point that never skips a record.</figcaption>
+<figcaption>Each partition has its own queue with at most one commit in flight, and the checkpoint only passes sequence numbers whose commit landed, so a crash replays from a point that never skips a record. In the strip, a shaded cell is done, a heavy one is held (queued or in flight), and a dashed one is skipped: left in the WAL and read again at least once a second.</figcaption>
 </figure>
 
 The reader reads each record once, as soon as it is durable, and puts it on the queue of its destination partition. Each destination has **at most one commit in flight**: when it lands, whatever queued meanwhile goes out as the next batch. Different destinations commit independently, up to 16 commits at once, so a slow or unreachable owner holds up its own partitions and nothing else.

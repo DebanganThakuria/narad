@@ -1,6 +1,6 @@
-<svg class="nr-dia__wide" viewBox="0 8 800 412" role="img" aria-labelledby="storage-retention-w-t" aria-describedby="storage-retention-w-d">
+<svg class="nr-dia__wide" viewBox="0 8 800 434" role="img" aria-labelledby="storage-retention-w-t" aria-describedby="storage-retention-w-d">
 <title id="storage-retention-w-t">Retention deletes whole segments, by their last write</title>
-<desc id="storage-retention-w-d">Segments of one partition on a line of write time, the oldest on the left. The retention boundary stands at now minus retention_ms. Segment A was last written before the boundary, so the reaper deletes it whole. Segment B straddles the boundary: its last write is newer, so it is kept, and its oldest record, already past retention, is still here. Segment C is the active one; the flusher seals it once its oldest record reaches the roll age, MaxSegmentAge, which defaults to the retention. So a record lives at most MaxSegmentAge plus MaxAge plus the one-minute sweep: about twice the retention. The reaper sweeps about once a minute.</desc>
+<desc id="storage-retention-w-d">Segments of one partition on a line of write time, the oldest on the left. The retention boundary stands at now minus retention_ms. Segment A was last written before the boundary, so the reaper deletes it whole. Segment B straddles the boundary: its last write is newer, so it is kept, and its oldest record, already past retention, is still here. Segment C is the active one; the flusher seals it once its oldest record reaches the roll age, MaxSegmentAge, which defaults to the retention. So in a log that is open a record lives at most MaxSegmentAge plus MaxAge plus the one-minute sweep: about twice the retention. The reaper sweeps open logs about once a minute; a log closed after 30 idle minutes, or not opened since a restart, is swept by a walk that runs every 5 minutes by default.</desc>
 <text class="cd mid" x="420" y="28">now - retention_ms</text>
 <path class="ln" d="M420 40V188"/>
 <text class="an mid" x="776" y="28">now</text>
@@ -26,12 +26,13 @@
 <text class="an" x="552" y="276">age, MaxSegmentAge</text>
 <path class="ln1" d="M222 316V324H776V316"/>
 <text class="an mid" x="499" y="348">a record lives at most MaxSegmentAge + MaxAge + 1 minute:</text>
-<text class="an mid" x="499" y="370">about twice the retention</text>
-<text class="an mu" x="0" y="412">The reaper sweeps about once a minute</text>
+<text class="an mid" x="499" y="370">about twice the retention, for an open log</text>
+<text class="an mu" x="0" y="412">The reaper sweeps open logs about once a minute;</text>
+<text class="an mu" x="0" y="434">an idle, closed log is swept every 5 minutes</text>
 </svg>
-<svg class="nr-dia__narrow" viewBox="0 16 360 728" role="img" data-search-exclude aria-labelledby="storage-retention-n-t" aria-describedby="storage-retention-n-d">
+<svg class="nr-dia__narrow" viewBox="0 16 360 768" role="img" data-search-exclude aria-labelledby="storage-retention-n-t" aria-describedby="storage-retention-n-d">
 <title id="storage-retention-n-t">Retention deletes whole segments, by their last write</title>
-<desc id="storage-retention-n-d">Segments of one partition on a line of write time, the oldest on the left. The retention boundary stands at now minus retention_ms. Segment A was last written before the boundary, so the reaper deletes it whole. Segment B straddles the boundary: its last write is newer, so it is kept, and its oldest record, already past retention, is still here. Segment C is the active one; the flusher seals it once its oldest record reaches the roll age, MaxSegmentAge, which defaults to the retention. So a record lives at most MaxSegmentAge plus MaxAge plus the one-minute sweep: about twice the retention. The reaper sweeps about once a minute.</desc>
+<desc id="storage-retention-n-d">Segments of one partition on a line of write time, the oldest on the left. The retention boundary stands at now minus retention_ms. Segment A was last written before the boundary, so the reaper deletes it whole. Segment B straddles the boundary: its last write is newer, so it is kept, and its oldest record, already past retention, is still here. Segment C is the active one; the flusher seals it once its oldest record reaches the roll age, MaxSegmentAge, which defaults to the retention. So in a log that is open a record lives at most MaxSegmentAge plus MaxAge plus the one-minute sweep: about twice the retention. The reaper sweeps open logs about once a minute; a log closed after 30 idle minutes, or not opened since a restart, is swept by a walk that runs every 5 minutes by default.</desc>
 <path class="ln1" d="M16 40V632"/>
 <text class="an mu" x="28" y="32">older</text>
 <text class="an mu" x="28" y="656">newer: write time runs down</text>
@@ -55,7 +56,9 @@
 <text class="an" x="108" y="476">C: active; sealed once its</text>
 <text class="an" x="108" y="496">oldest record reaches the</text>
 <text class="an" x="108" y="516">roll age, MaxSegmentAge</text>
-<text class="an mu" x="0" y="696">A record lives at most MaxSegmentAge +</text>
-<text class="an mu" x="0" y="716">MaxAge + 1 minute: about twice the</text>
-<text class="an mu" x="0" y="736">retention; the reaper sweeps every minute</text>
+<text class="an mu" x="0" y="696">In an open log a record lives at most</text>
+<text class="an mu" x="0" y="716">MaxSegmentAge + MaxAge + 1 minute: about</text>
+<text class="an mu" x="0" y="736">twice the retention; the reaper sweeps</text>
+<text class="an mu" x="0" y="756">every minute. An idle, closed log is</text>
+<text class="an mu" x="0" y="776">swept every 5 minutes.</text>
 </svg>

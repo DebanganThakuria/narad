@@ -1,14 +1,12 @@
-<svg class="nr-dia__wide" viewBox="0 -4 800 516" role="img" aria-labelledby="produce-dispatcher-w-t" aria-describedby="produce-dispatcher-w-d">
+<svg class="nr-dia__wide" viewBox="0 -4 800 540" role="img" aria-labelledby="produce-dispatcher-w-t" aria-describedby="produce-dispatcher-w-d">
 <title id="produce-dispatcher-w-t">The produce dispatcher: one reader, a queue per partition, a checkpoint that never lies</title>
-<desc id="produce-dispatcher-w-d">Inside narad-0, the accepting node. The ingress WAL is a strip of sequence numbers from the checkpoint to the read frontier. Each is done (committed), held (queued or in flight) or skipped (left in the WAL and read again at least once a second). 1: the dispatcher reads each record once, as it becomes durable, and places it on the queue of its partition; each queue has at most one commit in flight. 2: orders/0 is owned here, so its batch is committed into the local partition log. orders/1 is owned by narad-2, so its batch, at most 8 MiB, goes over QUIC. orders/2 is owned by narad-3, which is dead: after 3 s of failures, or at once when membership marks it dead, its records go to the next live partition, orders/0. 3: a commit that lands marks its sequence numbers done. 4: the checkpoint moves to the first sequence number not done, is synced within 250 ms, and the WAL compacts behind it. Up to 16 commits run at once.</desc>
+<desc id="produce-dispatcher-w-d">Inside narad-0, the accepting node. The ingress WAL is a strip of sequence numbers from the checkpoint to the read frontier. Each is done (committed), held (queued or in flight) or skipped (left in the WAL and read again at least once a second). 1: the dispatcher reads each record once, as it becomes durable, and places it on the queue of its partition; each queue has at most one commit in flight. 2: orders/0 is owned here, so its batch is committed into the local partition log. orders/1 is owned by narad-2, so its batch, at most 8 MiB, goes over QUIC. orders/2 is owned by narad-3, which is dead: after 3 s of failures, or at once when membership marks it dead, its records go to the next live partition, orders/0. 3: a commit that lands marks its sequence numbers done. 4: the checkpoint moves to the first sequence number not done, is synced within 250 ms, and the WAL compacts behind it. Up to 16 commits run at once; a commit that runs past 1 s stops counting against that limit.</desc>
 <defs><pattern id="produce-dispatcher-w-h" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hb" width="10" height="10"/><path class="hl" d="M0 0V10"/></pattern></defs>
-<rect class="rg" x="0" y="0" width="644" height="508" rx="6"/>
-<text class="cd" x="20" y="494">narad-0</text>
-<text class="rl" x="107.8" y="494">the accepting node</text>
-<circle class="sc" cx="36" cy="28" r="13"/><text class="sn" x="36" y="33.5">4</text>
-<text class="an" x="58" y="34">checkpoint: first seq not done</text>
-<text class="an" x="58" y="56">synced within 250 ms; the WAL compacts behind it</text>
-<text class="an mid" x="472" y="34">read frontier</text>
+<rect class="rg" x="0" y="0" width="644" height="532" rx="6"/>
+<text class="cd" x="20" y="30">narad-0</text>
+<text class="rl" x="107.8" y="30">the accepting node</text>
+<text class="an" x="40" y="60">checkpoint</text>
+<text class="an mid" x="472" y="60">read frontier</text>
 <rect class="bx bx3" x="40" y="84" width="36" height="36"/>
 <rect class="bx tn" x="76" y="84" width="36" height="36"/>
 <rect class="bx tn" x="112" y="84" width="36" height="36"/>
@@ -23,12 +21,6 @@
 <rect class="bx bx3" x="436" y="84" width="36" height="36"/>
 <path class="ln" d="M40 68V136"/>
 <path class="ln" d="M472 68V136"/>
-<rect class="bx tn" x="500" y="72" width="20" height="20"/>
-<text class="an" x="530" y="88">done</text>
-<rect class="bx bx3" x="500" y="100" width="20" height="20"/>
-<text class="an" x="530" y="116">held</text>
-<rect class="bx ghost" x="500" y="128" width="20" height="20"/>
-<text class="an" x="530" y="144">skipped</text>
 <path class="ln2" d="M58 136V244Q58 260 74 260H88"/>
 <path class="ah" d="M88 266L100 260L88 254Z"/>
 <path class="ln2" d="M58 136V340Q58 356 74 356H88"/>
@@ -37,36 +29,29 @@
 <path class="ah" d="M88 450L100 444L88 438Z"/>
 <circle class="sc" cx="84" cy="164" r="13"/><text class="sn" x="84" y="169.5">1</text>
 <text class="an" x="106" y="170">read once, as it becomes durable</text>
-<text class="an mu" x="106" y="196">skipped: left in the WAL, read again</text>
-<text class="an mu" x="106" y="218">at least once a second</text>
 <rect class="bx" x="100" y="236" width="180" height="48" rx="2"/>
 <text class="cd" x="112" y="266">orders/0</text>
-<rect class="bx" x="208" y="248" width="24" height="24"/>
 <rect class="bx" x="232" y="248" width="24" height="24"/>
 <rect class="bx" x="256" y="248" width="24" height="24"/>
 <rect class="bx" x="100" y="332" width="180" height="48" rx="2"/>
 <text class="cd" x="112" y="362">orders/2</text>
-<rect class="bx" x="208" y="344" width="24" height="24"/>
 <rect class="bx" x="232" y="344" width="24" height="24"/>
 <rect class="bx" x="256" y="344" width="24" height="24"/>
 <rect class="bx" x="100" y="420" width="180" height="48" rx="2"/>
 <text class="cd" x="112" y="450">orders/1</text>
-<rect class="bx" x="208" y="432" width="24" height="24"/>
 <rect class="bx" x="232" y="432" width="24" height="24"/>
 <rect class="bx" x="256" y="432" width="24" height="24"/>
 <path class="ln2" d="M280 260H424"/>
 <path class="ah" d="M424 266L436 260L424 254Z"/>
-<circle class="sc" cx="304" cy="238" r="13"/><text class="sn" x="304" y="243.5">2</text>
-<text class="an" x="326" y="244">commit here</text>
+<circle class="sc" cx="304" cy="216" r="13"/><text class="sn" x="304" y="221.5">2</text>
+<text class="an" x="326" y="222">commit here</text>
 <rect class="bx tn" x="436" y="242" width="36" height="36"/>
 <rect class="bx tn" x="472" y="242" width="36" height="36"/>
 <rect class="bx tn" x="508" y="242" width="36" height="36"/>
-<rect class="bx tn" x="544" y="242" width="36" height="36"/>
 <path class="ln1" d="M454 242V136"/>
 <path class="ah-o" d="M461 147L454 136L447 147"/>
-<circle class="sc" cx="480" cy="170" r="13"/><text class="sn" x="480" y="175.5">3</text>
-<text class="an" x="502" y="176">committed: mark</text>
-<text class="an" x="502" y="198">the seqs done</text>
+<circle class="sc" cx="480" cy="216" r="13"/><text class="sn" x="480" y="221.5">3</text>
+<text class="an" x="502" y="222">mark seqs done</text>
 <path class="ln2 dash" d="M280 356H672"/>
 <path class="ah" d="M672 362L684 356L672 350Z"/>
 <path class="x" d="M591 347L609 365M609 347L591 365"/>
@@ -83,11 +68,15 @@
 <text class="an" x="296" y="434">QUIC, at most 8 MiB</text>
 <rect class="bx" x="684" y="416" width="116" height="56" rx="2"/>
 <text class="pod" x="742" y="450.46">narad-2</text>
-<text class="an mu end" x="632" y="494">up to 16 commits at once</text>
+<circle class="sc" cx="36" cy="494" r="13"/><text class="sn" x="36" y="499.5">4</text>
+<text class="an" x="58" y="500">checkpoint: first seq not done,</text>
+<text class="an" x="58" y="522">synced within 250 ms</text>
+<text class="an mu end" x="624" y="500">16 commit slots; one running</text>
+<text class="an mu end" x="624" y="522">past 1 s stops counting</text>
 </svg>
 <svg class="nr-dia__narrow" viewBox="0 -4 360 752" role="img" data-search-exclude aria-labelledby="produce-dispatcher-n-t" aria-describedby="produce-dispatcher-n-d">
 <title id="produce-dispatcher-n-t">The produce dispatcher: one reader, a queue per partition, a checkpoint that never lies</title>
-<desc id="produce-dispatcher-n-d">Inside narad-0, the accepting node. The ingress WAL is a strip of sequence numbers from the checkpoint to the read frontier. Each is done (committed), held (queued or in flight) or skipped (left in the WAL and read again at least once a second). 1: the dispatcher reads each record once, as it becomes durable, and places it on the queue of its partition; each queue has at most one commit in flight. 2: orders/0 is owned here, so its batch is committed into the local partition log. orders/1 is owned by narad-2, so its batch, at most 8 MiB, goes over QUIC. orders/2 is owned by narad-3, which is dead: after 3 s of failures, or at once when membership marks it dead, its records go to the next live partition, orders/0. 3: a commit that lands marks its sequence numbers done. 4: the checkpoint moves to the first sequence number not done, is synced within 250 ms, and the WAL compacts behind it. Up to 16 commits run at once.</desc>
+<desc id="produce-dispatcher-n-d">Inside narad-0, the accepting node. The ingress WAL is a strip of sequence numbers from the checkpoint to the read frontier. Each is done (committed), held (queued or in flight) or skipped (left in the WAL and read again at least once a second). 1: the dispatcher reads each record once, as it becomes durable, and places it on the queue of its partition; each queue has at most one commit in flight. 2: orders/0 is owned here, so its batch is committed into the local partition log. orders/1 is owned by narad-2, so its batch, at most 8 MiB, goes over QUIC. orders/2 is owned by narad-3, which is dead: after 3 s of failures, or at once when membership marks it dead, its records go to the next live partition, orders/0. 3: a commit that lands marks its sequence numbers done. 4: the checkpoint moves to the first sequence number not done, is synced within 250 ms, and the WAL compacts behind it. Up to 16 commits run at once; a commit that runs past 1 s stops counting against that limit.</desc>
 <defs><pattern id="produce-dispatcher-n-h" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hb" width="10" height="10"/><path class="hl" d="M0 0V10"/></pattern></defs>
 <rect class="rg" x="0" y="0" width="360" height="528" rx="6"/>
 <text class="cd" x="16" y="516">narad-0</text>
@@ -151,8 +140,9 @@
 <text class="an" x="184" y="412">8 MiB</text>
 <rect class="bx" x="56" y="440" width="132" height="44" rx="2"/>
 <text class="pod" x="122" y="467.44">narad-2</text>
-<text class="an mu" x="204" y="456">up to 16 commits</text>
-<text class="an mu" x="204" y="476">at once</text>
+<text class="an mu" x="204" y="456">16 commit slots;</text>
+<text class="an mu" x="204" y="476">past 1 s, a commit</text>
+<text class="an mu" x="204" y="496">stops counting</text>
 <path class="sep" d="M0 544H360"/>
 <rect class="bx tn" x="16" y="558" width="16" height="16"/>
 <text class="an" x="40" y="571">done</text>

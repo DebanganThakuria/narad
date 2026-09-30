@@ -1,93 +1,79 @@
 <svg class="nr-dia__wide" viewBox="0 -4 800 488" role="img" aria-labelledby="metastore-write-path-w-t" aria-describedby="metastore-write-path-w-d">
 <title id="metastore-write-path-w-t">A metadata write: through the leader, answered after the local replica</title>
-<desc id="metastore-write-path-w-d">A Narad cluster of three nodes; narad-0 is the Raft leader. Each node holds a Raft log and an FSM in bbolt. 1: a client sends POST /v1/topics to narad-2. 2: narad-2 forwards the write to the leader, narad-0. 3: the leader appends the entry, create orders, to its Raft log and replicates it to narad-1 and narad-2; a quorum commits it. 4: every node applies the committed entry to its own FSM. 5: narad-2 asks the leader for the index it applied and waits, up to 3 s, until its own FSM has reached it. 6: only then does narad-2 answer the client 201. Reads never leave the node: narad-1 answers them from its local FSM.</desc>
-<rect class="rg" x="56" y="0" width="500" height="480" rx="6"/>
-<text class="rl" x="76" y="30">Narad cluster</text>
-<rect class="bx" x="176" y="48" width="260" height="148" rx="2"/>
-<text class="pod" x="246" y="78">narad-0</text>
-<rect class="bx tn" x="300" y="58" width="112" height="28" rx="2"/>
-<text class="an mid" x="356" y="78">Raft leader</text>
-<text class="an" x="192" y="136">Raft log</text>
-<rect class="bx tn" x="192" y="144" width="36" height="36"/>
-<rect class="bx tn" x="228" y="144" width="36" height="36"/>
-<path class="bx tn" d="M336 112V176A42 8 0 0 0 420 176V112"/>
-<ellipse class="bx tn" cx="378" cy="112" rx="42" ry="8"/>
-<text class="an mid" x="378" y="146.4">FSM</text>
-<text class="an mid" x="378" y="168.4">bbolt</text>
-<path class="ln1" d="M264 162H326"/>
-<path class="ah" d="M326 167L336 162L326 157Z"/>
-<rect class="bx bx3" x="76" y="300" width="220" height="148" rx="2"/>
-<text class="pod" x="186" y="330">narad-2</text>
-<text class="an" x="92" y="388">Raft log</text>
-<rect class="bx tn" x="92" y="396" width="36" height="36"/>
-<rect class="bx tn" x="128" y="396" width="36" height="36"/>
-<path class="bx tn" d="M196 364V428A42 8 0 0 0 280 428V364"/>
-<ellipse class="bx tn" cx="238" cy="364" rx="42" ry="8"/>
-<text class="an mid" x="238" y="398.4">FSM</text>
-<text class="an mid" x="238" y="420.4">bbolt</text>
-<path class="ln1" d="M164 414H186"/>
-<path class="ah" d="M186 419L196 414L186 409Z"/>
-<rect class="bx" x="316" y="300" width="220" height="148" rx="2"/>
-<text class="pod" x="426" y="330">narad-1</text>
-<text class="an" x="332" y="388">Raft log</text>
-<rect class="bx tn" x="332" y="396" width="36" height="36"/>
-<rect class="bx tn" x="368" y="396" width="36" height="36"/>
-<path class="bx tn" d="M436 364V428A42 8 0 0 0 520 428V364"/>
-<ellipse class="bx tn" cx="478" cy="364" rx="42" ry="8"/>
-<text class="an mid" x="478" y="398.4">FSM</text>
-<text class="an mid" x="478" y="420.4">bbolt</text>
-<path class="ln1" d="M404 414H426"/>
-<path class="ah" d="M426 419L436 414L426 409Z"/>
-<circle class="sc" cx="180" cy="388" r="13"/><text class="sn" x="180" y="393.5">4</text>
-<text class="lb" x="0" y="288">client</text>
-<rect class="ink" x="0" y="300" width="14" height="148"/>
-<path class="ln" d="M14 332H64"/>
-<path class="ah" d="M64 339L76 332L64 325Z"/>
-<path class="ln1" d="M76 368H14"/>
-<path class="ah-o" d="M25 361L14 368L25 375"/>
-<circle class="sc" cx="38" cy="310" r="13"/><text class="sn" x="38" y="315.5">1</text>
-<circle class="sc" cx="38" cy="392" r="13"/><text class="sn" x="38" y="397.5">6</text>
-<path class="ln2" d="M212 300V208"/>
-<path class="ah" d="M218 208L212 196L206 208Z"/>
-<circle class="sc" cx="188" cy="248" r="13"/><text class="sn" x="188" y="253.5">2</text>
-<path class="ln1" d="M248 196V300"/>
-<path class="ah-o" d="M241 289L248 300L255 289"/>
-<circle class="sc" cx="272" cy="248" r="13"/><text class="sn" x="272" y="253.5">5</text>
-<path class="ln1" d="M176 128H136Q120 128 120 144V290"/>
-<path class="ah" d="M115 290L120 300L125 290Z"/>
-<path class="ln1" d="M436 128H444Q460 128 460 144V229M460 267V288"/>
-<path class="ah" d="M455 290L460 300L465 290Z"/>
-<polygon class="msg" points="403,233 499,233 517,263 421,263"/>
-<text class="msg-t" x="460" y="254.5">orders</text>
-<circle class="sc" cx="148" cy="104" r="13"/><text class="sn" x="148" y="109.5">3</text>
-<path class="ln1" d="M478 476V458"/>
-<path class="ah" d="M483 458L478 448L473 458Z"/>
-<text class="an end" x="466" y="470">local reads</text>
-<circle class="sc" cx="581" cy="34" r="13"/><text class="sn" x="581" y="39.5">1</text>
-<text class="cd" x="602" y="40">POST /v1/topics</text>
-<text class="an" x="602" y="62">to any node</text>
-<circle class="sc" cx="581" cy="96" r="13"/><text class="sn" x="581" y="101.5">2</text>
-<text class="an" x="602" y="102">forwarded to the leader</text>
-<circle class="sc" cx="581" cy="136" r="13"/><text class="sn" x="581" y="141.5">3</text>
-<text class="an" x="602" y="142">replicated; a quorum</text>
-<text class="an" x="602" y="164">commits it</text>
-<circle class="sc" cx="581" cy="198" r="13"/><text class="sn" x="581" y="203.5">4</text>
-<text class="an" x="602" y="204">applied to every FSM</text>
-<circle class="sc" cx="581" cy="238" r="13"/><text class="sn" x="581" y="243.5">5</text>
-<text class="an" x="602" y="244">waits until its own FSM</text>
-<text class="an" x="602" y="266">reaches the leader's</text>
-<text class="an" x="602" y="288">applied index, up to 3 s</text>
-<circle class="sc" cx="581" cy="322" r="13"/><text class="sn" x="581" y="327.5">6</text>
-<text class="cd" x="602" y="328">201</text>
-<text class="an" x="647.5" y="328">to the client</text>
+<desc id="metastore-write-path-w-d">A Narad cluster of three nodes; narad-0 is the Raft leader. Each node holds a Raft log and an FSM, both stored in bbolt. 1: a client sends POST /v1/topics to narad-2. 2: narad-2 forwards the write to the leader, narad-0. 3: the leader appends the entry, create orders, to its Raft log and replicates it to narad-1 and narad-2; a quorum commits it. 4: every node applies the committed entry to its own FSM. 5: narad-2 asks the leader for the index it applied and waits, up to 3 s, until its own FSM has reached it. 6: then narad-2 answers the client 201, after at most 3 s even if its FSM has not caught up, and at once if the leader cannot be reached. Reads never leave the node: narad-1 answers them from its local FSM.</desc>
+<rect class="rg" x="232" y="0" width="568" height="480" rx="6"/>
+<text class="rl" x="252" y="30">Narad cluster</text>
+<text class="lb" x="0" y="52">client</text>
+<rect class="ink" x="0" y="64" width="14" height="148"/>
+<path class="ln" d="M14 104H236"/>
+<path class="ah" d="M236 111L248 104L236 97Z"/>
+<circle class="sc" cx="34" cy="82" r="13"/><text class="sn" x="34" y="87.5">1</text>
+<text class="cd" x="54" y="88">POST /v1/topics</text>
+<path class="ln1" d="M248 176H15"/>
+<path class="ah-o" d="M25 169L14 176L25 183"/>
+<circle class="sc" cx="34" cy="198" r="13"/><text class="sn" x="34" y="203.5">6</text>
+<text class="an" x="54" y="204"><tspan class="cd">201</tspan> to the client</text>
+<rect class="bx bx3" x="248" y="64" width="156" height="148" rx="2"/>
+<text class="pod" x="302" y="94">narad-2</text>
+<text class="an" x="262" y="152">Raft log</text>
+<rect class="bx tn" x="262" y="160" width="24" height="36"/>
+<rect class="bx tn" x="286" y="160" width="24" height="36"/>
+<path class="ln1" d="M310 178H324"/>
+<path class="ah" d="M324 183L334 178L324 173Z"/>
+<path class="bx tn" d="M334 128V192A31 8 0 0 0 396 192V128"/>
+<ellipse class="bx tn" cx="365" cy="128" rx="31" ry="8"/>
+<text class="an mid" x="365" y="166">FSM</text>
+<rect class="bx" x="580" y="64" width="204" height="148" rx="2"/>
+<text class="pod" x="626" y="94">narad-0</text>
+<rect class="bx tn" x="672" y="74" width="108" height="28" rx="2"/>
+<text class="an mid" x="726" y="94">Raft leader</text>
+<text class="an" x="596" y="152">Raft log</text>
+<rect class="bx tn" x="596" y="160" width="36" height="36"/>
+<rect class="bx tn" x="632" y="160" width="36" height="36"/>
+<path class="ln1" d="M668 178H680"/>
+<path class="ah" d="M680 183L690 178L680 173Z"/>
+<path class="bx tn" d="M690 128V192A42 8 0 0 0 774 192V128"/>
+<ellipse class="bx tn" cx="732" cy="128" rx="42" ry="8"/>
+<text class="an mid" x="732" y="166">FSM</text>
+<path class="ln2" d="M404 96H568"/>
+<path class="ah" d="M568 102L580 96L568 90Z"/>
+<circle class="sc" cx="426" cy="74" r="13"/><text class="sn" x="426" y="79.5">2</text>
+<text class="an" x="448" y="80">forward</text>
+<path class="ln1" d="M580 136H416"/>
+<path class="ah" d="M416 130L404 136L416 142Z"/>
+<circle class="sc" cx="558" cy="116" r="13"/><text class="sn" x="558" y="121.5">3</text>
+<text class="an end" x="536" y="122">replicate</text>
+<path class="ln1" d="M580 192H405"/>
+<path class="ah-o" d="M415 185L404 192L415 199"/>
+<circle class="sc" cx="426" cy="170" r="13"/><text class="sn" x="426" y="175.5">5</text>
+<text class="an" x="448" y="176">waits up to 3 s</text>
+<path class="ln1" d="M626 212V237M626 275V288"/>
+<path class="ah" d="M621 290L626 300L631 290Z"/>
+<polygon class="msg" points="569,241 665,241 683,271 587,271"/>
+<text class="msg-t" x="626" y="262.5">orders</text>
+<rect class="bx" x="580" y="300" width="204" height="148" rx="2"/>
+<text class="pod" x="626" y="330">narad-1</text>
+<text class="an" x="596" y="388">Raft log</text>
+<rect class="bx tn" x="596" y="396" width="36" height="36"/>
+<rect class="bx tn" x="632" y="396" width="36" height="36"/>
+<path class="ln1" d="M668 414H680"/>
+<path class="ah" d="M680 419L690 414L680 409Z"/>
+<path class="bx tn" d="M690 364V428A42 8 0 0 0 774 428V364"/>
+<ellipse class="bx tn" cx="732" cy="364" rx="42" ry="8"/>
+<text class="an mid" x="732" y="402">FSM</text>
+<circle class="sc" cx="556" cy="414" r="13"/><text class="sn" x="556" y="419.5">4</text>
+<text class="an end" x="534" y="420">applied to every FSM</text>
+<path class="ln1" d="M732 480V458"/>
+<path class="ah" d="M737 458L732 448L727 458Z"/>
+<text class="an end" x="720" y="472">local reads</text>
 </svg>
 <svg class="nr-dia__narrow" viewBox="0 -4 360 748" role="img" data-search-exclude aria-labelledby="metastore-write-path-n-t" aria-describedby="metastore-write-path-n-d">
 <title id="metastore-write-path-n-t">A metadata write: through the leader, answered after the local replica</title>
-<desc id="metastore-write-path-n-d">A Narad cluster of three nodes; narad-0 is the Raft leader. Each node holds a Raft log and an FSM in bbolt. 1: a client sends POST /v1/topics to narad-2. 2: narad-2 forwards the write to the leader, narad-0. 3: the leader appends the entry, create orders, to its Raft log and replicates it to narad-1 and narad-2; a quorum commits it. 4: every node applies the committed entry to its own FSM. 5: narad-2 asks the leader for the index it applied and waits, up to 3 s, until its own FSM has reached it. 6: only then does narad-2 answer the client 201. Reads never leave the node: narad-1 answers them from its local FSM.</desc>
+<desc id="metastore-write-path-n-d">A Narad cluster of three nodes; narad-0 is the Raft leader. Each node holds a Raft log and an FSM, both stored in bbolt. 1: a client sends POST /v1/topics to narad-2. 2: narad-2 forwards the write to the leader, narad-0. 3: the leader appends the entry, create orders, to its Raft log and replicates it to narad-1 and narad-2; a quorum commits it. 4: every node applies the committed entry to its own FSM. 5: narad-2 asks the leader for the index it applied and waits, up to 3 s, until its own FSM has reached it. 6: then narad-2 answers the client 201, after at most 3 s even if its FSM has not caught up, and at once if the leader cannot be reached. Reads never leave the node: narad-1 answers them from its local FSM.</desc>
 <text class="lb" x="0" y="16">client</text>
 <rect class="ink" x="0" y="24" width="360" height="12"/>
-<rect class="rg" x="0" y="52" width="360" height="456" rx="6"/>
-<text class="rl" x="20" y="492">Narad cluster</text>
+<rect class="rg" x="0" y="52" width="360" height="444" rx="6"/>
+<text class="rl end" x="340" y="80">Narad cluster</text>
 <rect class="bx bx3" x="16" y="92" width="328" height="100" rx="2"/>
 <text class="pod" x="76" y="118">narad-2</text>
 <text class="an" x="32" y="148">Raft log</text>
@@ -95,8 +81,7 @@
 <rect class="bx tn" x="60" y="156" width="28" height="28"/>
 <path class="bx tn" d="M236 124V172A46 8 0 0 0 328 172V124"/>
 <ellipse class="bx tn" cx="282" cy="124" rx="46" ry="8"/>
-<text class="an mid" x="282" y="150.5">FSM</text>
-<text class="an mid" x="282" y="170.5">bbolt</text>
+<text class="an mid" x="282" y="160.0">FSM</text>
 <path class="ln1" d="M88 170H226"/>
 <path class="ah" d="M226 175L236 170L226 165Z"/>
 <rect class="bx" x="16" y="236" width="328" height="100" rx="2"/>
@@ -108,8 +93,7 @@
 <rect class="bx tn" x="60" y="300" width="28" height="28"/>
 <path class="bx tn" d="M236 268V316A46 8 0 0 0 328 316V268"/>
 <ellipse class="bx tn" cx="282" cy="268" rx="46" ry="8"/>
-<text class="an mid" x="282" y="294.5">FSM</text>
-<text class="an mid" x="282" y="314.5">bbolt</text>
+<text class="an mid" x="282" y="304.0">FSM</text>
 <path class="ln1" d="M88 314H226"/>
 <path class="ah" d="M226 319L236 314L226 309Z"/>
 <rect class="bx" x="16" y="380" width="328" height="100" rx="2"/>
@@ -119,8 +103,7 @@
 <rect class="bx tn" x="60" y="444" width="28" height="28"/>
 <path class="bx tn" d="M236 412V460A46 8 0 0 0 328 460V412"/>
 <ellipse class="bx tn" cx="282" cy="412" rx="46" ry="8"/>
-<text class="an mid" x="282" y="438.5">FSM</text>
-<text class="an mid" x="282" y="458.5">bbolt</text>
+<text class="an mid" x="282" y="448.0">FSM</text>
 <path class="ln1" d="M88 458H226"/>
 <path class="ah" d="M226 463L236 458L226 453Z"/>
 <circle class="sc" cx="160" cy="144" r="12"/><text class="sn" x="160" y="149">4</text>

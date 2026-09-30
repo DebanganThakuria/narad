@@ -1,6 +1,6 @@
 <svg class="nr-dia__wide" viewBox="0 0 800 492" role="img" aria-labelledby="scaling-decommission-w-t" aria-describedby="scaling-decommission-w-d">
 <title id="scaling-decommission-w-t">Scale in: drain narad-4, then delete it</title>
-<desc id="scaling-decommission-w-d">You run narad cluster decommission narad-4 on a five-node cluster. narad-4 is marked draining, so it receives no partitions, and the leader moves each partition it owns to the other four pods: orders/4 to narad-0, orders/9 to narad-1, orders/14 to narad-2 and orders/19 to narad-3, at most 8 moves at once. Once narad-4 owns 0 partitions, the leader removes it from the Raft voters, never going below 3 voters. Then you run helm upgrade with replicaCount=4 and allowScaleIn=true, and the StatefulSet deletes narad-4. Lower replicaCount before step 2 and the partitions still on narad-4 are stranded.</desc>
+<desc id="scaling-decommission-w-d">You run narad cluster decommission narad-4 on a five-node cluster. narad-4 is marked draining, so it receives no partitions, and the leader targets each partition it owns at the other four pods, and each destination copies its share: orders/4 to narad-0, orders/9 to narad-1, orders/14 to narad-2 and orders/19 to narad-3, at most 8 moves at once. Once narad-4 owns 0 partitions, the leader removes it from the Raft voters, never going below 3 voters. Then you run helm upgrade with replicaCount=4 and allowScaleIn=true, and the StatefulSet deletes narad-4. Lower replicaCount before step 2 and the partitions still on narad-4 are stranded.</desc>
 <rect class="rg" x="304" y="8" width="496" height="456" rx="6"/>
 <circle class="sc" cx="13" cy="84" r="13"/><text class="sn" x="13" y="89.5">1</text>
 <rect class="ink" x="32" y="52" width="248" height="64"/>
@@ -16,10 +16,10 @@
 <rect class="bx bxq tn" x="344" y="180" width="104" height="36" rx="2"/>
 <text class="an" x="358" y="204">Raft</text>
 <path class="x" d="M414 190L430 206M430 190L414 206"/>
-<path class="ln2" d="M464 82H484M608 82H628"/>
+<path class="ln2" d="M464 82H496M596 82H628"/>
 <path class="ah" d="M628 76L640 82L628 88Z"/>
-<polygon class="msg" points="481,67 593,67 611,97 499,97"/>
-<text class="msg-t" x="546" y="88.5">orders/4</text>
+<polygon class="msg" points="489,67 585,67 603,97 507,97"/>
+<text class="msg-t" x="546" y="88" style="font-size:17px">orders/4</text>
 <path class="ln2" d="M464 138H628M464 194H628M464 250H628"/>
 <path class="ah" d="M628 132L640 138L628 144Z"/>
 <path class="ah" d="M628 188L640 194L628 200Z"/>
@@ -57,7 +57,7 @@
 </svg>
 <svg class="nr-dia__narrow" viewBox="0 0 360 736" role="img" data-search-exclude aria-labelledby="scaling-decommission-n-t" aria-describedby="scaling-decommission-n-d">
 <title id="scaling-decommission-n-t">Scale in: drain narad-4, then delete it</title>
-<desc id="scaling-decommission-n-d">You run narad cluster decommission narad-4 on a five-node cluster. narad-4 is marked draining, so it receives no partitions, and the leader moves each partition it owns to the other four pods: orders/4 to narad-0, orders/9 to narad-1, orders/14 to narad-2 and orders/19 to narad-3, at most 8 moves at once. Once narad-4 owns 0 partitions, the leader removes it from the Raft voters, never going below 3 voters. Then you run helm upgrade with replicaCount=4 and allowScaleIn=true, and the StatefulSet deletes narad-4. Lower replicaCount before step 2 and the partitions still on narad-4 are stranded.</desc>
+<desc id="scaling-decommission-n-d">You run narad cluster decommission narad-4 on a five-node cluster. narad-4 is marked draining, so it receives no partitions, and the leader targets each partition it owns at the other four pods, and each destination copies its share: orders/4 to narad-0, orders/9 to narad-1, orders/14 to narad-2 and orders/19 to narad-3, at most 8 moves at once. Once narad-4 owns 0 partitions, the leader removes it from the Raft voters, never going below 3 voters. Then you run helm upgrade with replicaCount=4 and allowScaleIn=true, and the StatefulSet deletes narad-4. Lower replicaCount before step 2 and the partitions still on narad-4 are stranded.</desc>
 <rect class="rg" x="8" y="8" width="344" height="444" rx="6"/>
 <text class="rl" x="28" y="36">StatefulSet narad</text>
 <rect class="bx" x="24" y="52" width="136" height="36" rx="2"/>

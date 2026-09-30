@@ -1,4 +1,4 @@
-<svg class="nr-dia__wide" viewBox="0 -4 800 456" role="img" aria-labelledby="fanout-attach-point-w-t" aria-describedby="fanout-attach-point-w-d">
+<svg class="nr-dia__wide" viewBox="0 -4 800 328" role="img" aria-labelledby="fanout-attach-point-w-t" aria-describedby="fanout-attach-point-w-d">
 <title id="fanout-attach-point-w-t">Where a new child's copy begins on each parent partition</title>
 <desc id="fanout-attach-point-w-d">Topic orders has partitions p0, p1 and p2 when a child is attached. 1: while proposing the attach, the node reads each partition's committed high watermark: 19, 10 and 9. 2: they travel inside the Raft attach command, as attach_offsets [19, 10, 9]. 3: each cursor starts exactly at its recorded offset; the records before it are not copied. A partition added later, p3, lies beyond the recorded slice, so its cursor starts at 0.</desc>
 <rect class="rg" x="0" y="0" width="480" height="320" rx="6"/>
@@ -24,8 +24,10 @@
 <rect class="bx ghost" x="64" y="260" width="64" height="32"/>
 <path class="ln" d="M64 248V304"/>
 <text class="an" x="140" y="282">added later: starts at 0</text>
-<circle class="sc" cx="440" cy="40" r="13"/><text class="sn" x="440" y="45.5">1</text>
-<circle class="sc" cx="440" cy="212" r="13"/><text class="sn" x="440" y="217.5">3</text>
+<circle class="sc" cx="440" cy="30" r="13"/><text class="sn" x="440" y="35.5">1</text>
+<text class="an end" x="418" y="36">read each high watermark</text>
+<circle class="sc" cx="440" cy="244" r="13"/><text class="sn" x="440" y="249.5">3</text>
+<text class="an end" x="418" y="250">each cursor starts here</text>
 <path class="ln" d="M480 150H493M607 150H608"/>
 <path class="ah" d="M608 157L620 150L608 143Z"/>
 <polygon class="msg" points="493,135 589,135 607,165 511,165"/>
@@ -35,14 +37,6 @@
 <text class="an" x="636" y="128">Raft attach</text>
 <text class="cd" x="636" y="156">attach_offsets</text>
 <text class="cd" x="636" y="182">[19, 10, 9]</text>
-<path class="sep" d="M0 348H800"/>
-<circle class="sc" cx="13" cy="374" r="13"/><text class="sn" x="13" y="379.5">1</text>
-<text class="an" x="34" y="380">the proposing node reads each partition's committed high watermark</text>
-<circle class="sc" cx="13" cy="404" r="13"/><text class="sn" x="13" y="409.5">2</text>
-<text class="an" x="34" y="410">they travel in the Raft attach command as</text>
-<text class="cd" x="378.6" y="410">attach_offsets</text>
-<circle class="sc" cx="13" cy="434" r="13"/><text class="sn" x="13" y="439.5">3</text>
-<text class="an" x="34" y="440">each cursor starts at its offset; a partition added later starts at 0</text>
 </svg>
 <svg class="nr-dia__narrow" viewBox="0 -4 360 636" role="img" data-search-exclude aria-labelledby="fanout-attach-point-n-t" aria-describedby="fanout-attach-point-n-d">
 <title id="fanout-attach-point-n-t">Where a new child's copy begins on each parent partition</title>

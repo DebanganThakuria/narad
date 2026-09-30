@@ -1,6 +1,6 @@
 <svg class="nr-dia__wide" viewBox="0 96 800 388" role="img" aria-labelledby="consume-delivery-tokens-w-t" aria-describedby="consume-delivery-tokens-w-d">
 <title id="consume-delivery-tokens-w-t">Delivery tokens: one token spent, one record claimed</title>
-<desc id="consume-delivery-tokens-w-d">1: a consumer sends GET /consume?wait=30s to narad-1, the gateway, whose own partitions of the topic are empty. 2: narad-1 probes the remote owners, narad-0 and narad-2, and both answer empty. 3: narad-1 leaves a token with each owner, with a time to live of the remaining wait plus 250 ms. Then everything is idle: no polling and no timers. 4: a record commits on narad-0, whose pump spends the one token by notifying narad-1. 5: narad-1 claims it with a consume that does not wait and carries the Claim flag, and narad-0 returns the record, ord_123. 6: narad-1 answers the consumer 200. The token at narad-2 is never spent and lapses at its time to live.</desc>
+<desc id="consume-delivery-tokens-w-d">1: a consumer sends GET /consume?wait=10s to narad-1, the gateway, whose own partitions of the topic are empty. 2: narad-1 probes the remote owners, narad-0 and narad-2, and both answer empty. 3: narad-1 leaves a token with each owner, with a time to live of the remaining wait plus 250 ms. Then nothing polls: while the consumer waits, a keeper re-sends each registration every 5 seconds, so a token an owner lost is repaired. 4: a record commits on narad-0, whose pump spends the one token by notifying narad-1. 5: narad-1 claims it with a consume that does not wait and carries the Claim flag, and narad-0 returns the record, ord_123. 6: narad-1 answers the consumer 200. The token at narad-2 is never spent and lapses at its time to live.</desc>
 <text class="lb" x="0" y="168">Consumer</text>
 <rect class="ink" x="0" y="184" width="14" height="120"/>
 <path class="ln" d="M14 228H304"/>
@@ -8,7 +8,7 @@
 <path class="ln1" d="M316 264H14"/>
 <path class="ah-o" d="M25 257L14 264L25 271"/>
 <circle class="sc" cx="38" cy="204" r="13"/><text class="sn" x="38" y="209.5">1</text>
-<text class="cd" x="60" y="210">GET /consume?wait=30s</text>
+<text class="cd" x="60" y="210">GET /consume?wait=10s</text>
 <circle class="sc" cx="38" cy="288" r="13"/><text class="sn" x="38" y="293.5">6</text>
 <text class="cd" x="60" y="294">200</text>
 <rect class="bx bx3" x="316" y="100" width="120" height="260" rx="2"/>
@@ -33,20 +33,21 @@
 <path class="ah" d="M658 186L668 181L658 176Z"/>
 <circle class="sc" cx="458" cy="181" r="13"/><text class="sn" x="458" y="186.5">3</text>
 <text class="an" x="478" y="173">token</text>
-<rect class="win" x="436" y="200" width="220" height="32"/>
-<text class="an" x="446" y="222">idle: no polls, no timers</text>
-<path class="ln2" d="M656 256H448"/>
-<path class="ah" d="M448 250L436 256L448 262Z"/>
-<circle class="sc" cx="630" cy="256" r="13"/><text class="sn" x="630" y="261.5">4</text>
-<text class="an end" x="608" y="248">notify</text>
-<path class="ln" d="M436 290H644"/>
-<path class="ah" d="M644 297L656 290L644 283Z"/>
-<circle class="sc" cx="458" cy="290" r="13"/><text class="sn" x="458" y="295.5">5</text>
-<text class="an" x="478" y="282">claim: wait 0, Claim</text>
-<path class="ln1" d="M656 326H603M489 326H448"/>
-<path class="ah-o" d="M447 319L436 326L447 333"/>
-<polygon class="msg" points="489,311 585,311 603,341 507,341"/>
-<text class="msg-t" x="546" y="332.5">ord_123</text>
+<rect class="win" x="436" y="194" width="220" height="50"/>
+<text class="an" x="446" y="214">idle: no polling; tokens</text>
+<text class="an" x="446" y="236">re-sent every 5 s</text>
+<path class="ln2" d="M656 268H448"/>
+<path class="ah" d="M448 262L436 268L448 274Z"/>
+<circle class="sc" cx="630" cy="268" r="13"/><text class="sn" x="630" y="273.5">4</text>
+<text class="an end" x="608" y="262">notify</text>
+<path class="ln" d="M436 300H644"/>
+<path class="ah" d="M644 307L656 300L644 293Z"/>
+<circle class="sc" cx="458" cy="300" r="13"/><text class="sn" x="458" y="305.5">5</text>
+<text class="an" x="478" y="292">claim: wait 0, Claim</text>
+<path class="ln1" d="M656 334H603M489 334H448"/>
+<path class="ah-o" d="M447 327L436 334L447 341"/>
+<polygon class="msg" points="489,319 585,319 603,349 507,349"/>
+<text class="msg-t" x="546" y="340.5">ord_123</text>
 <rect class="bx" x="656" y="392" width="144" height="88" rx="2"/>
 <text class="pod" x="728" y="424">narad-2</text>
 <rect class="bx ghost" x="668" y="440" width="64" height="26"/>
@@ -60,7 +61,7 @@
 </svg>
 <svg class="nr-dia__narrow" viewBox="0 -4 360 748" role="img" data-search-exclude aria-labelledby="consume-delivery-tokens-n-t" aria-describedby="consume-delivery-tokens-n-d">
 <title id="consume-delivery-tokens-n-t">Delivery tokens: one token spent, one record claimed</title>
-<desc id="consume-delivery-tokens-n-d">1: a consumer sends GET /consume?wait=30s to narad-1, the gateway, whose own partitions of the topic are empty. 2: narad-1 probes the remote owners, narad-0 and narad-2, and both answer empty. 3: narad-1 leaves a token with each owner, with a time to live of the remaining wait plus 250 ms. Then everything is idle: no polling and no timers. 4: a record commits on narad-0, whose pump spends the one token by notifying narad-1. 5: narad-1 claims it with a consume that does not wait and carries the Claim flag, and narad-0 returns the record, ord_123. 6: narad-1 answers the consumer 200. The token at narad-2 is never spent and lapses at its time to live.</desc>
+<desc id="consume-delivery-tokens-n-d">1: a consumer sends GET /consume?wait=10s to narad-1, the gateway, whose own partitions of the topic are empty. 2: narad-1 probes the remote owners, narad-0 and narad-2, and both answer empty. 3: narad-1 leaves a token with each owner, with a time to live of the remaining wait plus 250 ms. Then nothing polls: while the consumer waits, a keeper re-sends each registration every 5 seconds, so a token an owner lost is repaired. 4: a record commits on narad-0, whose pump spends the one token by notifying narad-1. 5: narad-1 claims it with a consume that does not wait and carries the Claim flag, and narad-0 returns the record, ord_123. 6: narad-1 answers the consumer 200. The token at narad-2 is never spent and lapses at its time to live.</desc>
 <text class="lb" x="0" y="16">Consumer</text>
 <rect class="ink" x="0" y="24" width="360" height="12"/>
 <path class="ln" d="M60 36V120"/>
@@ -69,7 +70,7 @@
 <path class="ah-o" d="M103 47L96 36L89 47"/>
 <circle class="sc" cx="60" cy="84" r="12"/><text class="sn" x="60" y="89">1</text>
 <circle class="sc" cx="96" cy="108" r="12"/><text class="sn" x="96" y="113">6</text>
-<text class="cd" x="112" y="70">GET /consume?wait=30s</text>
+<text class="cd" x="112" y="70">GET /consume?wait=10s</text>
 <text class="cd" x="112" y="114">200</text>
 <rect class="bx bx3" x="16" y="132" width="328" height="72" rx="2"/>
 <text class="pod" x="100" y="162">narad-1</text>
@@ -115,9 +116,9 @@
 <circle class="sc" cx="12" cy="647" r="12"/><text class="sn" x="12" y="652">3</text>
 <text class="an" x="32" y="652">a token each; TTL = wait + 250 ms</text>
 <circle class="sc" cx="12" cy="675" r="12"/><text class="sn" x="12" y="680">4</text>
-<text class="an" x="32" y="680">a record commits on narad-0: notify</text>
+<text class="an" x="32" y="680">a record commits on <tspan class="cd">narad-0</tspan>: notify</text>
 <circle class="sc" cx="12" cy="703" r="12"/><text class="sn" x="12" y="708">5</text>
 <text class="an" x="32" y="708">claim: consume, wait 0, Claim</text>
 <rect class="win" x="0" y="720" width="24" height="20"/>
-<text class="an" x="32" y="736">idle: no polls, no timers</text>
+<text class="an" x="32" y="736">idle: no polling; tokens re-sent every 5 s</text>
 </svg>

@@ -1,8 +1,8 @@
-<svg class="nr-dia__wide" viewBox="0 -4 800 432" role="img" aria-labelledby="delivery-availability-w-t" aria-describedby="delivery-availability-w-d">
+<svg class="nr-dia__wide" viewBox="0 -4 800 454" role="img" aria-labelledby="delivery-availability-w-t" aria-describedby="delivery-availability-w-d">
 <title id="delivery-availability-w-t">What still works with one node down, and with two</title>
-<desc id="delivery-availability-w-d">Two views of a three-node cluster behind a load balancer. With one of three nodes down, narad-2, the load balancer sends traffic to narad-0 and narad-1. A produce, ord_123, is answered 202 by any live node. Consumes work, except that messages stored on narad-2 wait for it to return, and a consume pinned to one of its partitions is answered 503. Topic and user changes work, because Raft still has a quorum, 2 of 3. With two of three down, narad-1 and narad-2, narad-0 has no Raft leader and reports not ready, so the load balancer routes nothing to it. A produce sent to narad-0 directly is still answered 202, and a consume sent to it directly is served from what it stores. Topic and user changes are answered 503: there is no quorum.</desc>
+<desc id="delivery-availability-w-d">Two views of a three-node cluster behind a load balancer. With one of three nodes down, narad-2, the load balancer sends traffic to narad-0 and narad-1. A produce, ord_123, is answered 202 by any live node. Consumes work, except that messages stored on narad-2 wait for it to return, and a consume or an ack pinned to one of its partitions is answered 502 while the node does not answer, then 503 once the controller marks it dead, about 30 seconds after its last heartbeat. Topic and user changes work, because Raft still has a quorum, 2 of 3. With two of three down, narad-1 and narad-2, narad-0 has no Raft leader and reports not ready, so the load balancer routes nothing to it. A produce sent to narad-0 directly is still answered 202, and a consume sent to it directly is served from what it stores. Topic and user changes are answered 503: there is no quorum.</desc>
 <defs><pattern id="delivery-availability-w-hd" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hb deep" width="10" height="10"/><path class="hl" d="M0 0V10"/></pattern></defs>
-<rect class="rg" x="0" y="0" width="392" height="424" rx="6"/>
+<rect class="rg" x="0" y="0" width="392" height="446" rx="6"/>
 <text class="rl" x="20" y="30">One of three nodes down</text>
 <rect class="bx bxq" x="20" y="48" width="352" height="36" rx="2"/>
 <text class="an mid" x="196" y="72.12">load balancer</text>
@@ -19,17 +19,17 @@
 <text class="msg-t" x="72" y="116.5">ord_123</text>
 <path class="ln" d="M196 84V124"/>
 <path class="ah" d="M189 124L196 136L203 124Z"/>
-<text class="an mu" x="20" y="212">narad-0, narad-1: ready</text>
+<text class="an mu" x="20" y="212"><tspan class="cd">narad-0</tspan>, <tspan class="cd">narad-1</tspan>: ready</text>
 <text class="an" x="20" y="248">produce:</text>
 <text class="cd" x="100.5" y="248">202</text>
 <text class="an" x="20" y="270">on any live node</text>
 <text class="an" x="20" y="304">consume: yes, except messages</text>
-<text class="an" x="20" y="326">stored on narad-2: they wait;</text>
-<text class="an" x="20" y="348">pinned to them:</text>
-<text class="cd" x="155.9" y="348">503</text>
-<text class="an" x="20" y="382">topics and users: yes,</text>
-<text class="an" x="20" y="404">Raft quorum 2 of 3</text>
-<rect class="rg" x="408" y="0" width="392" height="424" rx="6"/>
+<text class="an" x="20" y="326">stored on <tspan class="cd">narad-2</tspan>: they wait;</text>
+<text class="an" x="20" y="348">pinned to them: <tspan class="cd">502</tspan>, then <tspan class="cd">503</tspan></text>
+<text class="an" x="20" y="370">once it is marked dead</text>
+<text class="an" x="20" y="404">topics and users: yes,</text>
+<text class="an" x="20" y="426">Raft quorum 2 of 3</text>
+<rect class="rg" x="408" y="0" width="392" height="446" rx="6"/>
 <text class="rl" x="428" y="30">Two of three nodes down</text>
 <rect class="bx bxq" x="428" y="48" width="352" height="36" rx="2"/>
 <text class="an mid" x="604" y="72.12">load balancer</text>
@@ -44,69 +44,65 @@
 <path class="ln1 dash" d="M480.0 84V136"/>
 <path class="x" d="M472 102L488 118M488 102L472 118"/>
 <text class="an" x="500" y="116">routes nothing</text>
-<text class="an mu" x="428" y="212">narad-0: not ready, no Raft leader</text>
-<text class="an" x="428" y="248">produce sent to narad-0</text>
+<text class="an mu" x="428" y="212"><tspan class="cd">narad-0</tspan>: not ready, no Raft leader</text>
+<text class="an" x="428" y="248">produce sent to <tspan class="cd">narad-0</tspan></text>
 <text class="an" x="428" y="270">directly: still</text>
 <text class="cd" x="531.2" y="270">202</text>
-<text class="an" x="428" y="304">consume sent to narad-0</text>
+<text class="an" x="428" y="304">consume sent to <tspan class="cd">narad-0</tspan></text>
 <text class="an" x="428" y="326">directly: what it stores</text>
-<text class="an" x="428" y="382">topics and users:</text>
-<text class="cd" x="572.4" y="382">503</text>
-<text class="an" x="428" y="404">no Raft quorum</text>
+<text class="an" x="428" y="404">topics and users: <tspan class="cd">503</tspan></text>
+<text class="an" x="428" y="426">no Raft quorum</text>
 </svg>
-<svg class="nr-dia__narrow" viewBox="0 0 360 756" role="img" data-search-exclude aria-labelledby="delivery-availability-n-t" aria-describedby="delivery-availability-n-d">
+<svg class="nr-dia__narrow" viewBox="0 0 360 776" role="img" data-search-exclude aria-labelledby="delivery-availability-n-t" aria-describedby="delivery-availability-n-d">
 <title id="delivery-availability-n-t">What still works with one node down, and with two</title>
-<desc id="delivery-availability-n-d">Two views of a three-node cluster behind a load balancer. With one of three nodes down, narad-2, the load balancer sends traffic to narad-0 and narad-1. A produce, ord_123, is answered 202 by any live node. Consumes work, except that messages stored on narad-2 wait for it to return, and a consume pinned to one of its partitions is answered 503. Topic and user changes work, because Raft still has a quorum, 2 of 3. With two of three down, narad-1 and narad-2, narad-0 has no Raft leader and reports not ready, so the load balancer routes nothing to it. A produce sent to narad-0 directly is still answered 202, and a consume sent to it directly is served from what it stores. Topic and user changes are answered 503: there is no quorum.</desc>
+<desc id="delivery-availability-n-d">Two views of a three-node cluster behind a load balancer. With one of three nodes down, narad-2, the load balancer sends traffic to narad-0 and narad-1. A produce, ord_123, is answered 202 by any live node. Consumes work, except that messages stored on narad-2 wait for it to return, and a consume or an ack pinned to one of its partitions is answered 502 while the node does not answer, then 503 once the controller marks it dead, about 30 seconds after its last heartbeat. Topic and user changes work, because Raft still has a quorum, 2 of 3. With two of three down, narad-1 and narad-2, narad-0 has no Raft leader and reports not ready, so the load balancer routes nothing to it. A produce sent to narad-0 directly is still answered 202, and a consume sent to it directly is served from what it stores. Topic and user changes are answered 503: there is no quorum.</desc>
 <defs><pattern id="delivery-availability-n-hd" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hb deep" width="10" height="10"/><path class="hl" d="M0 0V10"/></pattern></defs>
-<rect class="rg" x="0" y="0" width="360" height="372" rx="6"/>
-<text class="rl" x="20" y="30">One of three nodes down</text>
-<rect class="bx bxq" x="16" y="44" width="328" height="32" rx="2"/>
+<rect class="rg" x="8" y="0" width="344" height="392" rx="6"/>
+<text class="rl" x="24" y="30">One of three nodes down</text>
+<rect class="bx bxq" x="20" y="44" width="320" height="32" rx="2"/>
 <text class="an mid" x="180" y="65.1">load balancer</text>
-<rect class="bx" x="16" y="124" width="104" height="40" rx="2"/>
-<text class="pod" x="68" y="149.44">narad-0</text>
-<rect class="bx" x="128" y="124" width="104" height="40" rx="2"/>
+<rect class="bx" x="20" y="124" width="100" height="40" rx="2"/>
+<text class="pod" x="70" y="149.44">narad-0</text>
+<rect class="bx" x="130" y="124" width="100" height="40" rx="2"/>
 <text class="pod" x="180" y="149.44">narad-1</text>
-<rect class="dead" x="240" y="124" width="104" height="40" fill="url(#delivery-availability-n-hd)"/>
-<rect class="plate deep" x="249" y="131" width="86" height="26"/>
-<text class="pod" x="292" y="149.44">narad-2</text>
-<path class="ln" d="M68.0 76V85.0M68.0 115.0V112"/>
-<path class="ah" d="M61 112L68 124L75 112Z"/>
-<polygon class="msg" points="18.5,87 100.5,87 117.5,113 35.5,113"/>
-<text class="msg-t" x="68" y="105">ord_123</text>
+<rect class="dead" x="240" y="124" width="100" height="40" fill="url(#delivery-availability-n-hd)"/>
+<rect class="plate deep" x="249" y="131" width="82" height="26"/>
+<text class="pod" x="290" y="149.44">narad-2</text>
+<path class="ln" d="M70 76V85M70 115V112"/>
+<path class="ah" d="M63 112L70 124L77 112Z"/>
+<polygon class="msg" points="20.5,87 102.5,87 119.5,113 37.5,113"/>
+<text class="msg-t" x="70" y="105">ord_123</text>
 <path class="ln" d="M180 76V112"/>
 <path class="ah" d="M173 112L180 124L187 112Z"/>
-<text class="an mu" x="16" y="192">narad-0, narad-1: ready</text>
-<text class="an" x="16" y="222">produce:</text>
-<text class="cd" x="83.4" y="222">202</text>
-<text class="an" x="16" y="242">on any live node</text>
-<text class="an" x="16" y="270">consume: yes, except messages</text>
-<text class="an" x="16" y="290">stored on narad-2: they wait;</text>
-<text class="an" x="16" y="310">pinned to them:</text>
-<text class="cd" x="129.5" y="310">503</text>
-<text class="an" x="16" y="338">topics and users: yes,</text>
-<text class="an" x="16" y="358">Raft quorum 2 of 3</text>
-<rect class="rg" x="0" y="384" width="360" height="372" rx="6"/>
-<text class="rl" x="20" y="414">Two of three nodes down</text>
-<rect class="bx bxq" x="16" y="428" width="328" height="32" rx="2"/>
-<text class="an mid" x="180" y="449.1">load balancer</text>
-<rect class="bx ghost" x="16" y="508" width="104" height="40" rx="2"/>
-<text class="pod" x="68" y="533.44">narad-0</text>
-<rect class="dead" x="128" y="508" width="104" height="40" fill="url(#delivery-availability-n-hd)"/>
-<rect class="plate deep" x="137" y="515" width="86" height="26"/>
-<text class="pod" x="180" y="533.44">narad-1</text>
-<rect class="dead" x="240" y="508" width="104" height="40" fill="url(#delivery-availability-n-hd)"/>
-<rect class="plate deep" x="249" y="515" width="86" height="26"/>
-<text class="pod" x="292" y="533.44">narad-2</text>
-<path class="ln1 dash" d="M68.0 460V508"/>
-<path class="x" d="M61 477L75 491M75 477L61 491"/>
-<text class="an" x="88" y="490">routes nothing</text>
-<text class="an mu" x="16" y="576">narad-0: not ready, no Raft leader</text>
-<text class="an" x="16" y="606">produce sent to narad-0</text>
-<text class="an" x="16" y="626">directly: still</text>
-<text class="cd" x="102.6" y="626">202</text>
-<text class="an" x="16" y="654">consume sent to narad-0</text>
-<text class="an" x="16" y="674">directly: what it stores</text>
-<text class="an" x="16" y="722">topics and users:</text>
-<text class="cd" x="136.6" y="722">503</text>
-<text class="an" x="16" y="742">no Raft quorum</text>
+<text class="an mu" x="24" y="192"><tspan class="cd">narad-0</tspan>, <tspan class="cd">narad-1</tspan>: ready</text>
+<text class="an" x="24" y="222">produce: <tspan class="cd">202</tspan></text>
+<text class="an" x="24" y="242">on any live node</text>
+<text class="an" x="24" y="270">consume: yes, except messages</text>
+<text class="an" x="24" y="290">stored on <tspan class="cd">narad-2</tspan>: they wait;</text>
+<text class="an" x="24" y="310">pinned to them: <tspan class="cd">502</tspan>, then <tspan class="cd">503</tspan></text>
+<text class="an" x="24" y="330">once it is marked dead</text>
+<text class="an" x="24" y="358">topics and users: yes,</text>
+<text class="an" x="24" y="378">Raft quorum 2 of 3</text>
+<rect class="rg" x="8" y="404" width="344" height="372" rx="6"/>
+<text class="rl" x="24" y="434">Two of three nodes down</text>
+<rect class="bx bxq" x="20" y="448" width="320" height="32" rx="2"/>
+<text class="an mid" x="180" y="469.1">load balancer</text>
+<rect class="bx ghost" x="20" y="528" width="100" height="40" rx="2"/>
+<text class="pod" x="70" y="553.44">narad-0</text>
+<rect class="dead" x="130" y="528" width="100" height="40" fill="url(#delivery-availability-n-hd)"/>
+<rect class="plate deep" x="139" y="535" width="82" height="26"/>
+<text class="pod" x="180" y="553.44">narad-1</text>
+<rect class="dead" x="240" y="528" width="100" height="40" fill="url(#delivery-availability-n-hd)"/>
+<rect class="plate deep" x="249" y="535" width="82" height="26"/>
+<text class="pod" x="290" y="553.44">narad-2</text>
+<path class="ln1 dash" d="M70 480V528"/>
+<path class="x" d="M63 497L77 511M77 497L63 511"/>
+<text class="an" x="90" y="510">routes nothing</text>
+<text class="an mu" x="24" y="596"><tspan class="cd">narad-0</tspan>: not ready, no Raft leader</text>
+<text class="an" x="24" y="626">produce sent to <tspan class="cd">narad-0</tspan></text>
+<text class="an" x="24" y="646">directly: still <tspan class="cd">202</tspan></text>
+<text class="an" x="24" y="674">consume sent to <tspan class="cd">narad-0</tspan></text>
+<text class="an" x="24" y="694">directly: what it stores</text>
+<text class="an" x="24" y="742">topics and users: <tspan class="cd">503</tspan></text>
+<text class="an" x="24" y="762">no Raft quorum</text>
 </svg>

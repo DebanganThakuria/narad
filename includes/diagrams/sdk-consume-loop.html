@@ -37,8 +37,8 @@
 <svg class="nr-dia__narrow" viewBox="0 0 360 488" role="img" data-search-exclude aria-labelledby="sdk-consume-loop-n-t" aria-describedby="sdk-consume-loop-n-d">
 <title id="sdk-consume-loop-n-t">One worker's loop inside client.Consume</title>
 <desc id="sdk-consume-loop-n-d">Each worker in client.Consume runs this loop. Step 1: it long-polls GET .../consume?wait=10s, which waits up to 10 seconds for a message. Step 2: the message, ord_123, goes to your handler. While the handler runs, a lease keeper extends the lease every 10 seconds, a third of the topic's 30 second visibility timeout; if an extend gets 410, the lease is lost, the handler's context is cancelled and the message is left alone. Step 3: if the handler returns nil, the worker acks the message and gets 204; if it returns an error, the worker nacks it and the message is back in the queue at once. A panic is recovered and nacked like an error. Then the worker polls again.</desc>
-<rect class="rg" x="0" y="0" width="360" height="488" rx="6"/>
-<text class="rl" x="16" y="26">One worker's loop in <tspan class="cd mu">client.Consume</tspan></text>
+<rect class="rg" x="8" y="0" width="344" height="488" rx="6"/>
+<text class="rl" x="24" y="26">One worker's loop in <tspan class="cd mu">client.Consume</tspan></text>
 <rect class="bx" x="44" y="44" width="272" height="64" rx="2"/>
 <circle class="sc" cx="68" cy="76" r="12"/><text class="sn" x="68" y="81">1</text>
 <text class="lb" x="88" y="70">Long-poll</text>
@@ -61,11 +61,11 @@
 <rect class="bx" x="24" y="368" width="144" height="56" rx="2"/>
 <text class="an" x="40" y="392">return nil:</text>
 <text class="an" x="40" y="414">ack, <tspan class="cd">204</tspan></text>
-<rect class="bx" x="184" y="368" width="168" height="56" rx="2"/>
+<rect class="bx" x="184" y="368" width="160" height="56" rx="2"/>
 <text class="an" x="200" y="392">return error:</text>
 <text class="an" x="200" y="414">nack, back at once</text>
-<path class="ln2" d="M268 424V436Q268 452 252 452H28Q12 452 12 436V92Q12 76 28 76H32M96 424V452"/>
+<path class="ln2" d="M268 424V436Q268 452 252 452H36Q20 452 20 436V92Q20 76 32 76M96 424V452"/>
 <path class="ah" d="M32 70L44 76L32 82Z"/>
-<text class="an mu" x="28" y="476">poll again</text>
-<text class="an mu" x="184" y="476">panic: recovered, nacked</text>
+<text class="an mu" x="36" y="476">poll again</text>
+<text class="an mu end" x="336" y="476">panic: recovered, nacked</text>
 </svg>

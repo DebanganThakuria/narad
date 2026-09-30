@@ -1,4 +1,4 @@
-<svg class="nr-dia__wide" viewBox="0 -4 800 508" role="img" aria-labelledby="network-routing-w-t" aria-describedby="network-routing-w-d">
+<svg class="nr-dia__wide" viewBox="0 -4 800 352" role="img" aria-labelledby="network-routing-w-t" aria-describedby="network-routing-w-d">
 <title id="network-routing-w-t">How narad-1 routes four requests</title>
 <desc id="network-routing-w-d">narad-1 decides every route from its local metastore replica. 1: a produce, ord_123, is always accepted into narad-1's own ingress WAL; the dispatcher moves it to the owner later. 2: a consume of orders/1, which narad-1 owns, is served from its local log. 3: a consume of orders/2, which narad-2 owns, is forwarded to narad-2 over node RPC. 4: a metadata write, such as creating a topic, is forwarded to the Raft leader, narad-0.</desc>
 <rect class="rg" x="216" y="0" width="380" height="332" rx="6"/>
@@ -43,25 +43,14 @@
 <rect class="bx" x="652" y="204" width="148" height="48" rx="2"/>
 <text class="pod" x="726" y="234.46">narad-2</text>
 <path class="ln2" d="M344 228H640"/>
+<text class="an" x="360" y="218">node RPC to its owner</text>
 <path class="ah" d="M640 234L652 228L640 222Z"/>
 <rect class="bx" x="652" y="268" width="148" height="48" rx="2"/>
 <text class="pod" x="726" y="298.46">narad-0</text>
 <path class="ln2" d="M344 292H640"/>
+<text class="an" x="360" y="282">forwarded to the leader</text>
 <path class="ah" d="M640 298L652 292L640 286Z"/>
 <text class="an mid" x="726" y="340">Raft leader</text>
-<path class="sep" d="M0 368H800"/>
-<circle class="sc" cx="13" cy="394" r="13"/><text class="sn" x="13" y="399.5">1</text>
-<text class="an" x="34" y="400">produce: always into the local ingress WAL; the dispatcher moves it later</text>
-<circle class="sc" cx="13" cy="424" r="13"/><text class="sn" x="13" y="429.5">2</text>
-<text class="an" x="34" y="430">consume of</text>
-<text class="cd" x="136.1" y="430">orders/1</text>
-<text class="an" x="230.3" y="430">, owned here: served from the local log</text>
-<circle class="sc" cx="13" cy="454" r="13"/><text class="sn" x="13" y="459.5">3</text>
-<text class="an" x="34" y="460">consume of</text>
-<text class="cd" x="136.1" y="460">orders/2</text>
-<text class="an" x="230.3" y="460">: forwarded over node RPC to its owner</text>
-<circle class="sc" cx="13" cy="484" r="13"/><text class="sn" x="13" y="489.5">4</text>
-<text class="an" x="34" y="490">metadata write: forwarded to the Raft leader</text>
 </svg>
 <svg class="nr-dia__narrow" viewBox="0 -4 360 620" role="img" data-search-exclude aria-labelledby="network-routing-n-t" aria-describedby="network-routing-n-d">
 <title id="network-routing-n-t">How narad-1 routes four requests</title>
