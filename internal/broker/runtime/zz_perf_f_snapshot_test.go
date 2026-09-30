@@ -146,3 +146,74 @@ func TestPerfFSnapshotReadsTopicMarkerOncePerTopic(t *testing.T) {
 		t.Fatalf("with topic a's marker unreadable the poll read markers %d times, want 2", *reads)
 	}
 }
+
+// TestPerfFSnapshotColdRefreshSpread: closed partitions loaded in the
+// same poll must not all expire in the same later poll. Over a minute
+// of 5 s polls, no poll after the first reloads more than about a sixth
+// of them, and no reading is used once it is coldRefresh old, so every
+// partition is still reloaded within coldRefresh of its previous load.
+func TestPerfFSnapshotColdRefreshSpread(t *testing.T) {
+	const (
+		parts = 120
+		tick  = 5 * time.Second
+		limit = parts/6 + 6
+	)
+	s, clk := zzPerfFClosedNode(t, []string{"orders"}, parts)
+
+	type stamps struct{ log, next time.Time }
+	prev := make(map[int]stamps, parts)
+	lastLog := make(map[int]time.Time, parts) // when each part was last read
+	lastNext := make(map[int]time.Time, parts)
+	worst, worstAt := 0, time.Duration(0)
+	for step := range 13 {
+		if step > 0 {
+			clk.at = clk.at.Add(tick)
+		}
+		now, elapsed := clk.at, time.Duration(step)*tick
+		if got := zzPerfFSnapshot(t, s); got["orders"] != parts {
+			t.Fatalf("poll at +%v reported %d partitions, want %d", elapsed, got["orders"], parts)
+		}
+		logLoads, nextLoads := 0, 0
+		s.coldMu.Lock()
+		if len(s.cold) != parts {
+			t.Fatalf("poll at +%v holds %d cold entries, want %d", elapsed, len(s.cold), parts)
+		}
+		for k, e := range s.cold {
+			p, seen := prev[k.partition]
+			if !seen || !e.logAt.Equal(p.log) {
+				if seen && now.Sub(lastLog[k.partition]) > coldRefresh {
+					t.Errorf("partition %d: log files reread %v after the previous read, want at most %v", k.partition, now.Sub(lastLog[k.partition]), coldRefresh)
+				}
+				lastLog[k.partition] = now
+				logLoads++
+			}
+			if !seen || !e.nextAt.Equal(p.next) {
+				if seen && now.Sub(lastNext[k.partition]) > coldRefresh {
+					t.Errorf("partition %d: frontier files reread %v after the previous read, want at most %v", k.partition, now.Sub(lastNext[k.partition]), coldRefresh)
+				}
+				lastNext[k.partition] = now
+				nextLoads++
+			}
+			if age := now.Sub(lastLog[k.partition]); age >= coldRefresh {
+				t.Errorf("poll at +%v used a %v old reading of partition %d's log files", elapsed, age, k.partition)
+			}
+			if age := now.Sub(lastNext[k.partition]); age >= coldRefresh {
+				t.Errorf("poll at +%v used a %v old reading of partition %d's frontier files", elapsed, age, k.partition)
+			}
+			prev[k.partition] = stamps{log: e.logAt, next: e.nextAt}
+		}
+		s.coldMu.Unlock()
+		if step == 0 {
+			if logLoads != parts || nextLoads != parts {
+				t.Fatalf("first poll loaded %d log and %d frontier readings, want %d of each", logLoads, nextLoads, parts)
+			}
+			continue
+		}
+		if n := max(logLoads, nextLoads); n > worst {
+			worst, worstAt = n, elapsed
+		}
+	}
+	if worst > limit {
+		t.Fatalf("the poll at +%v reloaded %d of %d closed partitions, want at most %d: readings loaded together must not expire together", worstAt, worst, parts, limit)
+	}
+}

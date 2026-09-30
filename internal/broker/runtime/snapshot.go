@@ -62,7 +62,37 @@ var readTopicIncarnation = storage.ReadTopicIncarnation
 // log between two polls, so this is how stale that can leave a closed
 // partition's gauges. It keeps an idle partition to a map lookup per
 // poll rather than a directory listing and four file reads.
+//
+// Readings taken in the same poll (all of them after a restart, or a
+// batch whose logs were open together) would all expire in the same
+// later poll, rereading every closed partition at once. A reading taken
+// while its read time is zero is therefore dated back by the partition's
+// coldPhase, which is less than coldRefresh: its first refresh comes
+// sooner, never later, and from then on the refreshes stay spread over
+// the interval, about a sixth of the entries per 5 s poll.
 const coldRefresh = 30 * time.Second
+
+// coldPhase is how far a partition's first reading is dated back: an
+// FNV-1a hash of the topic name and the partition number, modulo
+// coldRefresh. Fixed per partition, so the spread holds across polls.
+func coldPhase(topicName string, idx int) time.Duration {
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	h := uint64(offset64)
+	for i := range len(topicName) {
+		h ^= uint64(topicName[i])
+		h *= prime64
+	}
+	v := uint64(idx)
+	for range 8 {
+		h ^= v & 0xff
+		h *= prime64
+		v >>= 8
+	}
+	return time.Duration(h % uint64(coldRefresh))
+}
 
 type coldKey struct {
 	topic     string
@@ -72,10 +102,12 @@ type coldKey struct {
 // coldPartition is what one partition's files said when last read. The
 // log part (hwm, segments) is read for a closed log, the frontier part
 // for a partition with no consumer shard; each has its own read time,
-// zero when not loaded.
+// zero when not loaded, and dated back by phase when loaded from zero
+// (see coldRefresh).
 type coldPartition struct {
-	seen uint64 // the poll that last visited it
-	dir  string // the partition directory
+	seen  uint64        // the poll that last visited it
+	dir   string        // the partition directory
+	phase time.Duration // coldPhase of the partition
 
 	logAt     time.Time
 	logOK     bool // the files describe this incarnation's log
@@ -295,7 +327,10 @@ func (s *Snapshotter) coldEntry(topicName string, idx int) *coldPartition {
 		if s.cold == nil {
 			s.cold = make(map[coldKey]*coldPartition)
 		}
-		e = &coldPartition{dir: storage.TopicPartitionDir(s.logs.DataDir(), topicName, idx)}
+		e = &coldPartition{
+			dir:   storage.TopicPartitionDir(s.logs.DataDir(), topicName, idx),
+			phase: coldPhase(topicName, idx),
+		}
 		s.cold[key] = e
 	}
 	e.seen = s.polls
@@ -324,8 +359,19 @@ func (e *coldPartition) persistedNext(now time.Time) int64 {
 			}
 		}
 	}
-	e.next, e.nextAt = next, now
+	e.next, e.nextAt = next, e.readAt(e.nextAt, now)
 	return next
+}
+
+// readAt is the read time to record for a reading taken now whose
+// previous read time was prev: now, or now dated back by the phase when
+// prev is zero (a first reading, or one dropped while the files could
+// change), so readings taken together do not expire together.
+func (e *coldPartition) readAt(prev, now time.Time) time.Time {
+	if prev.IsZero() {
+		return now.Add(-e.phase)
+	}
+	return now
 }
 
 // snapshot builds a closed partition's snapshot from its files, read
@@ -334,7 +380,7 @@ func (e *coldPartition) persistedNext(now time.Time) int64 {
 func (e *coldPartition) snapshot(marker *topicMarker, idx int, next int64, inFlight, ackedAhead int, now time.Time) (metrics.PartitionSnapshot, bool) {
 	if e.logAt.IsZero() || now.Sub(e.logAt) >= coldRefresh {
 		e.load(marker)
-		e.logAt = now
+		e.logAt = e.readAt(e.logAt, now)
 	}
 	if !e.logOK {
 		return metrics.PartitionSnapshot{}, false
