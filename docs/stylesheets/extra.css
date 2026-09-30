@@ -760,8 +760,10 @@ body {
   font-size: 0.72rem;
   color: var(--nr-muted);
   font-weight: 500;
-  box-shadow: none;
-  background: transparent;
+  /* The title is sticky: an opaque ground keeps long tables of contents
+     from printing through it as they scroll underneath. */
+  box-shadow: 0 0 .4rem .4rem var(--nr-paper);
+  background: var(--nr-paper);
 }
 
 .md-nav--secondary .md-nav__link {

@@ -560,7 +560,7 @@ The `narad` binary is both the broker and the CLI. `narad server start --dev` ru
     narad server start --dev
     ```
 
-Then, in a second terminal, create the topic and paste the session from the top of this page:
+Then, in a second terminal, create the topic, and produce, consume and ack it with [steps 3 to 5 of the Quickstart](get-started/quickstart.md#produce), acking with the `receipt_handle` your own consume returns:
 
 ```sh
 curl http://127.0.0.1:7942/v1/topics \
