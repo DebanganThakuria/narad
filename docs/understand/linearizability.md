@@ -105,6 +105,13 @@ Acks are persisted in batches: written to the page cache every 100 ms, and synce
 
 So the checker does not ask whether a redelivery happened. It asks whether each one sat inside a **fault window**: from the moment a fault began until it ended, plus a grace period. The grace defaults to the run's visibility timeout plus twenty seconds, because a broker that restarts releases the leases it held only when they expire, up to one visibility timeout later.
 
+<figure class="nr-dia nr-dia--doc" id="fig-linearizability-fault-windows">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--lilac">
+--8<-- "diagrams/linearizability-fault-windows.html"
+</div>
+<figcaption>A redelivery after an ack passes only inside a fault window, from the fault's start to its end plus the grace. Faults closer together than the grace merge into one window.</figcaption>
+</figure>
+
 Choosing that grace is a real trade-off, and worth understanding before you trust a green run. Too short, and honest redeliveries look like anomalies. Too long, and a genuine bug hides inside a fault's shadow. Override it with `--grace` when a run's timing calls for it.
 
 There is a sharper version of the same problem. If faults arrive closer together than the grace period, each window's grace swallows the next window's start. The windows merge into one unbroken interval, and "explained by a fault" quietly becomes "happened at all during the fault phase". So the injector spaces faults further apart than the grace, and **the report prints what fraction of the run sat inside a fault window**. Read that number before trusting a green result: the check can tell a bug from a fault only in the time the windows do not cover.

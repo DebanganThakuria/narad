@@ -25,22 +25,12 @@ The first nodes (the `initial_members`, typically 3) each start with an empty di
 
 A node *not* listed in `initial_members` must never bootstrap: it would create a phantom cluster that the real one never contacts. Instead it starts **join-only**:
 
-```mermaid
-sequenceDiagram
-    accTitle: A new node joining the cluster
-    accDescr: The new node narad-3 starts with an empty Raft configuration and is not ready. It sends a JoinCluster RPC to a follower, which answers 421, not the leader. It sends JoinCluster to the leader, which adds narad-3 as a voter and answers 200, then starts replicating to it. Once narad-3 sees a leader it is admitted, catches up its state machine and becomes ready.
-    participant N as new node (narad-3)
-    participant P as peer (follower)
-    participant L as leader
-    Note over N: empty raft config, /readyz = false
-    N->>P: JoinCluster RPC
-    P-->>N: 421 not the leader
-    N->>L: JoinCluster RPC
-    L->>L: raft AddVoter(narad-3)
-    L-->>N: 200
-    L->>N: AppendEntries (replication begins)
-    Note over N: sees leader → admitted,<br/>catches up FSM → /readyz = true
-```
+<figure class="nr-dia nr-dia--doc" id="fig-lifecycle-join">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/lifecycle-join.html"
+</div>
+<figcaption>A <code>421</code> sends the joiner on to the next peer. Only its own Raft seeing a leader ends the loop and lets it report ready.</figcaption>
+</figure>
 
 The join loop walks the configured peers every 2 s until its own Raft sees a leader, which proves admission. Readiness is held until then, so an unadmitted node never receives traffic: a fresh node cannot serve an empty metastore behind the load balancer. `AddVoter` is idempotent, so joiner restarts and lost replies are safe. Scaling out is `replicaCount: 5` in Helm. The peer list the pods carry is pinned to the initial members, and each pod advertises its own address, so the existing members are not rolled by the scale.
 
@@ -129,6 +119,13 @@ Every scenario ended with bounded duplicates (the at-least-once seams) and `OVER
 A topic delete is two things: the Raft-committed removal of the record, and a best-effort purge of every member's directory on disk. The Raft commit is the commit point: from there the topic is gone for every client. The purge is broadcast to the live members after the commit, and purges are missed: a member can be down, unreachable, or slower to apply the delete than the leader is to broadcast.
 
 Historically the two backstops were the startup orphan sweep (remove directories whose topic the leader confirms absent) and the purge handler's rule "wait until the local replica no longer shows the topic, else skip". Both keyed on the **name**, and a name is reused. Recreate `orders` quickly enough and the purge handler saw the name present again and skipped for good; a member that was down through the delete and the recreate kept the old directory because the name existed. Either way the recreated topic reopened the deleted one's segments, high watermark and consumer offset, and its consumers received the deleted topic's messages (observed in an audit, and reproduced in `TestRecreatedTopicDoesNotResurrectOldData`).
+
+<figure class="nr-dia nr-dia--doc" id="fig-lifecycle-incarnation">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--lilac">
+--8<-- "diagrams/lifecycle-incarnation.html"
+</div>
+<figcaption>A node that missed the purge finds the old marker on its next open: the directory is set aside as <code>topics/orders.stale-3f9a…</code>, never served, and reclaimed once the leader confirms. Not to scale.</figcaption>
+</figure>
 
 So every topic record now carries an [incarnation](../reference/glossary.md#incarnation) id (since v2.2.0), created by the proposer at create time and carried inside the Raft entry, so all replicas store the same value; the state machine derives nothing random itself. Every topic directory carries the marker of the incarnation it belongs to (see [Storage engine](storage-engine.md#incarnation-marker)). The delete path is keyed on it end to end:
 

@@ -59,17 +59,12 @@ A [quarantined](../reference/glossary.md#quarantine) directory is reclaimed only
 
 ### Segments, frames and records {#segments-frames-records}
 
-```mermaid
-flowchart LR
-    accTitle: Frames inside a segment file
-    accDescr: A segment file is a sequence of frames. Each frame has a header and a CRC, followed by a group of records encoded with the configured codec.
-    subgraph segment file
-        F1["frame: header + CRC<br/>codec(records 0..k)"]
-        F2["frame: header + CRC<br/>codec(records k+1..m)"]
-        F3[...]
-    end
-    F1 --- F2 --- F3
-```
+<figure class="nr-dia nr-dia--doc" id="fig-storage-segments">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
+--8<-- "diagrams/storage-segments.html"
+</div>
+<figcaption>A segment is the unit of retention, a frame the unit of writing, and a record the unit of reading.</figcaption>
+</figure>
 
 - **Segments** are capped at 64 MiB. A frame that pushes the active segment past the cap marks it full and fsyncs it. The roll itself (a new segment named by its first offset) happens at the end of the commit that filled the segment, at close, or right before the next frame write, whichever comes first. A segment also rolls before the first write that finds its oldest record older than the retention roll age (see [Retention](#retention)). Sealed segments are immutable, and they are the unit of retention deletion.
 - **Frames** are the write unit: all records drained in one flush become one frame of length-prefixed records, compressed together with the configured codec and covered by a CRC over the stored bytes. The codec is `storage.codec`: `none` by default, or `zstd`. With zstd, frame size tracks batch size: trickle traffic gives one record per frame (about 40% compression on JSON-like payloads), while busy traffic gives frames of hundreds of records (95% or more, since similar records compress against each other).
@@ -172,6 +167,13 @@ One process-wide reaper loop (a single goroutine, not one per partition) sweeps 
 - **Time-based roll.** The flusher rolls the active segment before the first write that finds the segment's oldest record older than the roll age (`RetentionConfig.MaxSegmentAge`, which defaults to `MaxAge`). A partition writing 1 MiB a day with a 7-day retention used to keep its oldest records for months (until the 64 MiB segment filled, then one more retention period). Now the segment is sealed after at most one retention period of writes.
 - **Rotation of an idle active segment.** A partition that stops writing never triggers the roll, so the reaper asks the flusher to seal an active segment whose last write is older than `MaxAge` (every record in it has expired), and deletes it in the same sweep. Only a fully committed segment is rotated. One that still holds records above the high watermark waits for the ingress WAL to commit them again first, so the failed-commit discard above always finds them in the active segment.
 
+<figure class="nr-dia nr-dia--doc" id="fig-storage-retention">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
+--8<-- "diagrams/storage-retention.html"
+</div>
+<figcaption>Retention deletes whole segments by their last write, so a record can outlive <code>retention_ms</code>: the oldest record in segment B is already past it and stays until B goes.</figcaption>
+</figure>
+
 Together these bound a record's lifetime by `MaxSegmentAge + MaxAge + CheckInterval`, so with the defaults a record is gone within about twice the retention age of its write. For a segment recovered from disk, the roll age counts from the file's mtime (its last write), the only write time the inode keeps, so such a segment can live up to one write-span longer.
 
 The reaper's bookkeeping is cheap:
@@ -226,15 +228,12 @@ The commit timestamp is written when the envelope is built, and raised under the
 
 ## Flusher pipeline {#flusher}
 
-```mermaid
-flowchart TB
-    accTitle: The flusher pipeline
-    accDescr: Appends go into an in-memory buffer. A drain runs when the buffer holds 1 MiB or 1000 records, or every 100 ms, and turns the buffer into one frame with the codec applied. The frame is written to the active segment. In batched mode the segment is fsynced every second, every 8 MiB, on a segment roll, on close, or on an explicit sync.
-    A["Append/AppendBatch<br/>(in-memory buffer)"] --> D["drain: flush_bytes 1MiB<br/>flush_records 1000<br/>flush_interval 100ms"]
-    D --> F["one frame per drain<br/>(codec applied here)"]
-    F --> W[write to active segment]
-    W --> S["fsync: batched mode syncs on<br/>sync_interval 1s / sync_bytes 8MiB /<br/>segment roll / Close / explicit Sync()"]
-```
+<figure class="nr-dia nr-dia--doc" id="fig-storage-flusher">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
+--8<-- "diagrams/storage-flusher.html"
+</div>
+<figcaption>Timers bound how long unpromised data sits in memory. A commit never waits for them: it forces its own drain and fsync before the high watermark moves.</figcaption>
+</figure>
 
 These are internal defaults, not settings a config file can change. Three properties keep the pipeline safe:
 

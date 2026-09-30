@@ -99,6 +99,13 @@ The partition's produce lock spans the append and the durable commit. A failed c
 
 Now a batch queues on the partition's combiner. With no cycle running, its caller becomes the leader: it takes the produce lock, drains every batch queued by then, appends them as one run, and commits them with one `CommitDurable`, without releasing the lock between the append and the commit. Everyone in the cycle shares the outcome: contiguous offsets on success, or the same error on failure, which the ingress dispatcher and the fan-out runner already handle by appending again. Batches that arrive during a cycle wait for the next one, which the leader hands to the oldest of them on its way out.
 
+<figure class="nr-dia nr-dia--doc" id="fig-commit-combining">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
+--8<-- "diagrams/commit-combining.html"
+</div>
+<figcaption>Batches that queue together share one append, one <code>CommitDurable</code> and one outcome, so they pay for one fsync together instead of one after another.</figcaption>
+</figure>
+
 Under the lock, before anything is appended, the cycle checks again what the caller checked on its way in:
 
 - **Ownership and the handoff freeze.** A commit that passed the check before a [rebalance handoff](rebalance.md) armed its freeze, but reached the lock after the handoff read the final high watermark, is refused with nothing appended, and retries at the new owner.

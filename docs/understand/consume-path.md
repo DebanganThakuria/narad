@@ -62,31 +62,25 @@ The details that carry the correctness:
 - **Nothing is reserved speculatively.** The pump reserves only once it has taken a waiter off the queue, so there is no local give-back path at all. The one exception is explicit: a record handed over at the instant its request is cancelled has nobody to receive it, so it is released at once rather than left invisible until its visibility timeout.
 - **An idle topic costs nothing.** There is no polling and no timer. The wake notifier returns at once on an atomic flag when a topic has no waiter, keeping the produce path allocation-free. Measured: 600 consumers parked across a four-node cluster moved idle CPU by less than the noise floor. A deleted topic's queue state is dropped along with its other per-topic caches, so churning through uniquely named topics leaves nothing behind.
 
+<figure class="nr-dia nr-dia--doc" id="fig-consume-pump">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--sky">
+--8<-- "diagrams/consume-pump.html"
+</div>
+<figcaption>Each record is reserved once, for the waiter at the head of the queue; the others keep waiting, and nobody scans.</figcaption>
+</figure>
+
 ## Cross-node consume: delivery tokens {#delivery-tokens}
 
 A consumer's request lands on whichever node the load balancer picked, which usually does not own the partition its record arrives on. Narad takes partitions from Kafka and a client that knows nothing about routing from SQS, and gathering records across nodes is the result of combining those two choices. Neither parent has it: Kafka's client goes straight to the partition leader, and SQS exposes no partitions at all.
 
 The node holding the consumer leaves a [delivery token](../reference/glossary.md#delivery-token) with every remote owner of the topic:
 
-```mermaid
-sequenceDiagram
-    accTitle: A consumer served by a remote owner through a delivery token
-    accDescr: The consumer asks broker B, the gateway, with a 30 second wait. B finds its own partitions empty and sends a token to every owner at once, including broker A. Nothing runs while both are idle. When a record commits on A, A's pump wakes and spends one token by notifying B. B answers and claims the record with a non-blocking consume. A returns the record, and B answers the consumer with 200. Tokens left at other owners lapse at their time to live.
-    participant c as consumer
-    participant B as Broker B (gateway)
-    participant A as Broker A (owner)
-    c->>B: GET /consume?wait=30s
-    B->>B: probe own partitions, empty
-    B->>A: token (batched, to every owner at once)
-    Note over B,A: idle. no polling, no timers, nothing running.
-    A->>A: record commits, pump wakes
-    A->>B: spends ONE token: notification
-    B-->>A: reply: will claim
-    B->>A: claim: consume{wait:0}
-    A-->>B: the record
-    B-->>c: 200
-    Note over B: tokens left at other owners lapse at their TTL
-```
+<figure class="nr-dia nr-dia--doc" id="fig-consume-delivery-tokens">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--sky">
+--8<-- "diagrams/consume-delivery-tokens.html"
+</div>
+<figcaption>A token reserves nothing; the owner where a record commits spends one, and only the claim takes the record. The token left on <code>narad-2</code> lapses at its time to live.</figcaption>
+</figure>
 
 The properties that make it work:
 
@@ -206,6 +200,13 @@ Recovery reads both files and takes the larger frontier, as does a partition tra
 ## Quiet partitions after an outage {#after-an-outage}
 
 The frontier is one watermark per partition, so the lowest unacked offset decides when anything above it can be reclaimed. An outage strands leases, and a stranded lease can sit exactly there. The consumer that took it is gone, and the offsets above it were acked out of order into the acked-ahead set. `ReserveNext` then correctly reports `all_reserved`, because every offset in the window is either in flight or resolved. The partition serves nothing until the lease lapses, then serves the whole run at once.
+
+<figure class="nr-dia nr-dia--doc" id="fig-consume-after-outage">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--lilac">
+--8<-- "diagrams/consume-after-outage.html"
+</div>
+<figcaption>One lease stranded at the frontier holds back a whole acked run: consumers get <code>204</code> until it lapses one visibility timeout later, and then the run clears at once.</figcaption>
+</figure>
 
 The quiet window is one visibility timeout, and consumers see `204` through it. It is arithmetic, not a stall: shrinking the visibility timeout shrinks it one for one. `tests/cluster/crash_drain_test.go` pins the property that matters underneath it, which is that nothing is lost while this happens.
 

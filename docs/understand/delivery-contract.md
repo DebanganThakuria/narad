@@ -81,6 +81,13 @@ Messages with the same [key](../reference/glossary.md#key) go to one partition b
 4. **Each node dispatches on its own.** A message is committed to its partition by the dispatcher of the node that accepted it. Two messages with the same key that reach two different nodes can land on their partition in either order.
 5. **Reroute around an unavailable owner.** When a partition's owner is marked dead, or its commits keep failing for 3 seconds, the accepting node commits those messages to a live sibling partition instead ([the reroute](produce-path.md#dispatch)). The key-to-partition mapping moves for them.
 
+<figure class="nr-dia nr-dia--doc" id="fig-delivery-ordering">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--lilac">
+--8<-- "diagrams/delivery-ordering.html"
+</div>
+<figcaption>Two nodes, two dispatchers, two clocks: <code>m1</code> was sent first and lands second, at offset 8.</figcaption>
+</figure>
+
 If you need a sequence, carry one in the payload and order on your side. Handlers that are idempotent on an ID in the payload absorb duplicates and reordering together.
 
 ## Availability {#availability}
@@ -91,18 +98,12 @@ Ordering was traded for availability. In CAP terms, Narad's data plane is AP and
 - **Consume works for every partition whose owner is alive.** New messages reroute to live owners, so fresh messages stay consumable during an outage. Messages already stored on a dead node wait for it to return. Meanwhile a consume pinned to one of its partitions is answered [`503`](../reference/status-codes.md#status-503), or [`502`](../reference/status-codes.md#status-502) until the node is marked dead.
 - **Topic, user and grant changes go through Raft** and need a quorum of nodes. Without one they are answered `503`. Data flows through one node; administration waits for a majority.
 
-```mermaid
-flowchart LR
-    accTitle: Data plane and control plane
-    accDescr: The data plane, produce on any live node and consume from live owners, stays available. The control plane, topics, users and membership, needs a Raft quorum and stays consistent.
-    subgraph ap["Data plane: available (AP)"]
-        PRO[produce: any live node]
-        CON[consume: live owners]
-    end
-    subgraph cp["Control plane: consistent (CP)"]
-        META["topics / users / membership<br/>need a Raft quorum"]
-    end
-```
+<figure class="nr-dia nr-dia--doc" id="fig-delivery-availability">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--lilac">
+--8<-- "diagrams/delivery-availability.html"
+</div>
+<figcaption>Losing a minority stops nothing that goes through the load balancer. Losing a majority stops the control plane and the load balancer, but a produce sent straight to a survivor still gets <code>202</code>.</figcaption>
+</figure>
 
 ## Retention {#retention}
 

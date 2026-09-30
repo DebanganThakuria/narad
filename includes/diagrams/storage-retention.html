@@ -1,0 +1,61 @@
+<svg class="nr-dia__wide" viewBox="0 8 800 412" role="img" aria-labelledby="storage-retention-w-t" aria-describedby="storage-retention-w-d">
+<title id="storage-retention-w-t">Retention deletes whole segments, by their last write</title>
+<desc id="storage-retention-w-d">Segments of one partition on a line of write time, the oldest on the left. The retention boundary stands at now minus retention_ms. Segment A was last written before the boundary, so the reaper deletes it whole. Segment B straddles the boundary: its last write is newer, so it is kept, and its oldest record, already past retention, is still here. Segment C is the active one; the flusher seals it once its oldest record reaches the roll age, MaxSegmentAge, which defaults to the retention. So a record lives at most MaxSegmentAge plus MaxAge plus the one-minute sweep: about twice the retention. The reaper sweeps about once a minute.</desc>
+<text class="cd mid" x="420" y="28">now - retention_ms</text>
+<path class="ln" d="M420 40V188"/>
+<text class="an mid" x="776" y="28">now</text>
+<rect class="bx ghost" x="0" y="100" width="196" height="44"/>
+<text class="lb mid" x="98" y="128">A</text>
+<rect class="bx tn" x="204" y="100" width="340" height="44"/>
+<rect class="msg" x="204" y="100" width="36" height="44"/>
+<text class="lb mid" x="392" y="128">B</text>
+<rect class="bx bx3" x="552" y="100" width="196" height="44"/>
+<text class="lb mid" x="650" y="128">C: active</text>
+<path class="ln1" d="M0 172H800"/>
+<path class="ln" d="M776 40V172"/>
+<text class="an mu" x="0" y="196">older</text>
+<text class="an mu end" x="796" y="196">write time</text>
+<text class="an" x="0" y="232">A: last write older</text>
+<text class="an" x="0" y="254">than retention:</text>
+<text class="an" x="0" y="276">deleted whole</text>
+<text class="an" x="204" y="232">B: its last write is newer:</text>
+<text class="an" x="204" y="254">kept, and its oldest record</text>
+<text class="an" x="204" y="276">is past retention, still here</text>
+<text class="an" x="552" y="232">C: sealed once its oldest</text>
+<text class="an" x="552" y="254">record reaches the roll</text>
+<text class="an" x="552" y="276">age, MaxSegmentAge</text>
+<path class="ln1" d="M222 316V324H776V316"/>
+<text class="an mid" x="499" y="348">a record lives at most MaxSegmentAge + MaxAge + 1 minute:</text>
+<text class="an mid" x="499" y="370">about twice the retention</text>
+<text class="an mu" x="0" y="412">The reaper sweeps about once a minute</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 16 360 728" role="img" data-search-exclude aria-labelledby="storage-retention-n-t" aria-describedby="storage-retention-n-d">
+<title id="storage-retention-n-t">Retention deletes whole segments, by their last write</title>
+<desc id="storage-retention-n-d">Segments of one partition on a line of write time, the oldest on the left. The retention boundary stands at now minus retention_ms. Segment A was last written before the boundary, so the reaper deletes it whole. Segment B straddles the boundary: its last write is newer, so it is kept, and its oldest record, already past retention, is still here. Segment C is the active one; the flusher seals it once its oldest record reaches the roll age, MaxSegmentAge, which defaults to the retention. So a record lives at most MaxSegmentAge plus MaxAge plus the one-minute sweep: about twice the retention. The reaper sweeps about once a minute.</desc>
+<path class="ln1" d="M16 40V632"/>
+<text class="an mu" x="28" y="32">older</text>
+<text class="an mu" x="28" y="656">newer: write time runs down</text>
+<path class="ln" d="M8 616H24"/>
+<text class="an" x="36" y="621">now</text>
+<path class="ln" d="M8 290H152"/>
+<text class="cd" x="160" y="295">now - retention_ms</text>
+<rect class="bx ghost" x="48" y="56" width="44" height="160"/>
+<text class="lb mid" x="70" y="142">A</text>
+<rect class="bx tn" x="48" y="224" width="44" height="200"/>
+<rect class="msg" x="48" y="224" width="44" height="28"/>
+<text class="lb mid" x="70" y="350">B</text>
+<rect class="bx bx3" x="48" y="432" width="44" height="168"/>
+<text class="lb mid" x="70" y="522">C</text>
+<text class="an" x="108" y="112">A: last write older than</text>
+<text class="an" x="108" y="132">retention: deleted whole</text>
+<text class="an" x="108" y="236">B: its oldest record is past</text>
+<text class="an" x="108" y="256">retention, still here</text>
+<text class="an" x="160" y="332">B: its last write is</text>
+<text class="an" x="160" y="352">newer: kept</text>
+<text class="an" x="108" y="476">C: active; sealed once its</text>
+<text class="an" x="108" y="496">oldest record reaches the</text>
+<text class="an" x="108" y="516">roll age, MaxSegmentAge</text>
+<text class="an mu" x="0" y="696">A record lives at most MaxSegmentAge +</text>
+<text class="an mu" x="0" y="716">MaxAge + 1 minute: about twice the</text>
+<text class="an mu" x="0" y="736">retention; the reaper sweeps every minute</text>
+</svg>

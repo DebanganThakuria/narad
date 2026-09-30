@@ -12,17 +12,12 @@ The [metastore](../reference/glossary.md#metastore) holds everything that is not
 
 ## Metastore shape {#shape}
 
-```mermaid
-flowchart LR
-    accTitle: The metastore on each node
-    accDescr: On each node, local reads go to a bbolt state machine. Raft applies committed entries to that state machine and keeps its own log and snapshots on disk. Raft talks to the other nodes' Raft with AppendEntries and elections over mutual TLS.
-    subgraph each node
-        API[local reads] --> FSM[("FSM<br/>bbolt database")]
-        RAFT[Raft] -->|apply committed entries| FSM
-        RAFT --> LOG[("raft log + snapshots<br/>on disk")]
-    end
-    RAFT <-->|"AppendEntries / elections<br/>(mutual TLS)"| PEERS[other nodes' Raft]
-```
+<figure class="nr-dia nr-dia--doc" id="fig-metastore-write-path">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/metastore-write-path.html"
+</div>
+<figcaption>Reads never leave the node. A write goes through the leader, and the node that forwarded it answers <code>201</code> only once its own FSM has applied it, so the next read there sees the write.</figcaption>
+</figure>
 
 - **Writes** (create a topic, register a member, attach a child) are Raft commands: forwarded to the leader, committed by a quorum, then applied to every node's state machine (FSM). A node that forwarded a write does not answer the client until its own FSM has applied it: it asks the leader for the index it applied and waits, for a bounded time, for its replica to reach it. So a read on the same node right after the response is never behind the write. Each command family bumps a per-domain **version counter**, so caches (such as topic lookups on the produce path) are invalidated precisely.
 - **Reads** are local: every node answers topic lookups from its own bbolt replica, with no network hop. This is what makes request routing fast, and it is also the reason for the rules in [Stale replicas](#stale-replicas).
@@ -41,6 +36,13 @@ flowchart LR
 ## Stale replicas {#stale-replicas}
 
 Local reads are fast because they trust the local replica. But **a freshly restarted node's replica is restored from a snapshot that can be hours old**, and until it catches up, that node sees the past: topics that were deleted still exist, and topics created since do not. The node has no local way to know it is stale, since its own bookkeeping says "everything I know is applied."
+
+<figure class="nr-dia nr-dia--doc" id="fig-metastore-log-vs-state">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--lilac">
+--8<-- "diagrams/metastore-log-vs-state.html"
+</div>
+<figcaption>Winning an election proves the Raft log is complete, not that the FSM has applied it. Before acting on its own state, a leader runs a barrier and reads again.</figcaption>
+</figure>
 
 Chaos testing proved this is not theoretical: four separate data-loss bugs came from code trusting a stale local view (see [Cluster lifecycle](cluster-lifecycle.md#crash-recovery-bugs)). The defenses are now systematic:
 

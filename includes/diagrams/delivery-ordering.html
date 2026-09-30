@@ -1,0 +1,115 @@
+<svg class="nr-dia__wide" viewBox="0 4 800 388" role="img" aria-labelledby="delivery-ordering-w-t" aria-describedby="delivery-ordering-w-d">
+<title id="delivery-ordering-w-t">Same key, two nodes: the order is not kept</title>
+<desc id="delivery-ordering-w-d">Your service sends m1 with key customer-42 to narad-0, which answers 202. After that 202 it sends m2 with the same key to narad-1, which also answers 202. The key maps both to partition orders/1, owned by narad-2. Each node commits what it accepted with its own dispatcher, on its own clock. 3: narad-1's dispatcher commits m2 first, at offset 7. 4: narad-0's dispatcher commits m1 after it, at offset 8. So m1, sent first, lands second.</desc>
+<text class="lb" x="0" y="24">Your service</text>
+<rect class="ink" x="0" y="40" width="14" height="300"/>
+<rect class="bx" x="292" y="40" width="176" height="112" rx="2"/>
+<text class="pod" x="380" y="70">narad-0</text>
+<rect class="bx bxq" x="308" y="88" width="144" height="44" rx="2"/>
+<text class="an mid" x="380" y="116.12">dispatcher</text>
+<rect class="bx" x="292" y="228" width="176" height="112" rx="2"/>
+<text class="pod" x="380" y="258">narad-1</text>
+<rect class="bx bxq" x="308" y="276" width="144" height="44" rx="2"/>
+<text class="an mid" x="380" y="304.12">dispatcher</text>
+<rect class="bx bx3" x="628" y="104" width="172" height="180" rx="2"/>
+<text class="pod" x="684" y="134">narad-2</text>
+<text class="cd" x="644" y="168">orders/1</text>
+<rect class="bx tn" x="644" y="208" width="44" height="44"/>
+<text class="cd mu mid" x="666" y="200">6</text>
+<rect class="bx tn" x="688" y="208" width="44" height="44"/>
+<text class="cd mid" x="710" y="236.12">m2</text>
+<text class="cd mu mid" x="710" y="200">7</text>
+<rect class="bx tn" x="732" y="208" width="44" height="44"/>
+<text class="cd mid" x="754" y="236.12">m1</text>
+<text class="cd mu mid" x="754" y="200">8</text>
+<path class="ln" d="M14 76H280"/>
+<path class="ah" d="M280 83L292 76L280 69Z"/>
+<path class="ln1" d="M292 112H14"/>
+<path class="ah-o" d="M25 105L14 112L25 119"/>
+<circle class="sc" cx="40" cy="52" r="13"/><text class="sn" x="40" y="57.5">1</text>
+<text class="cd" x="62" y="58">m1,</text>
+<text class="cd" x="103.1" y="58">key=customer-42</text>
+<text class="cd" x="40" y="138">202</text>
+<path class="ln" d="M14 264H280"/>
+<path class="ah" d="M280 271L292 264L280 257Z"/>
+<path class="ln1" d="M292 300H14"/>
+<path class="ah-o" d="M25 293L14 300L25 307"/>
+<circle class="sc" cx="40" cy="240" r="13"/><text class="sn" x="40" y="245.5">2</text>
+<text class="an" x="62" y="246">then</text>
+<text class="cd" x="105.2" y="246">m2,</text>
+<text class="an" x="146.3" y="246">same key</text>
+<text class="cd" x="40" y="326">202</text>
+<path class="ln2" d="M583 96H584Q600 96 600 112V152Q600 168 616 168"/>
+<path class="ah" d="M616 174L628 168L616 162Z"/>
+<polygon class="msg" points="469,81 565,81 583,111 487,111"/>
+<text class="msg-t" x="526" y="102.5">m1</text>
+<path class="ln2" d="M468 284H544Q560 284 560 268V252Q560 236 576 236H616"/>
+<path class="ah" d="M616 242L628 236L616 230Z"/>
+<circle class="sc" cx="492" cy="62" r="13"/><text class="sn" x="492" y="67.5">4</text>
+<text class="an" x="514" y="68">second: offset 8</text>
+<circle class="sc" cx="492" cy="316" r="13"/><text class="sn" x="492" y="321.5">3</text>
+<text class="an" x="514" y="322">first: offset 7</text>
+<text class="an mu" x="0" y="384">each node lingers and batches on its own clock, up to 50 ms</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 688" role="img" data-search-exclude aria-labelledby="delivery-ordering-n-t" aria-describedby="delivery-ordering-n-d">
+<title id="delivery-ordering-n-t">Same key, two nodes: the order is not kept</title>
+<desc id="delivery-ordering-n-d">Your service sends m1 with key customer-42 to narad-0, which answers 202. After that 202 it sends m2 with the same key to narad-1, which also answers 202. The key maps both to partition orders/1, owned by narad-2. Each node commits what it accepted with its own dispatcher, on its own clock. 3: narad-1's dispatcher commits m2 first, at offset 7. 4: narad-0's dispatcher commits m1 after it, at offset 8. So m1, sent first, lands second.</desc>
+<text class="lb" x="0" y="16">Your service</text>
+<rect class="ink" x="0" y="24" width="360" height="12"/>
+<rect class="bx" x="0" y="120" width="168" height="92" rx="2"/>
+<text class="pod" x="84" y="146">narad-0</text>
+<rect class="bx bxq" x="16" y="160" width="136" height="36" rx="2"/>
+<text class="an mid" x="84" y="183.1">dispatcher</text>
+<rect class="bx" x="192" y="120" width="168" height="92" rx="2"/>
+<text class="pod" x="276" y="146">narad-1</text>
+<rect class="bx bxq" x="208" y="160" width="136" height="36" rx="2"/>
+<text class="an mid" x="276" y="183.1">dispatcher</text>
+<path class="ln" d="M40 36V108"/>
+<path class="ah" d="M33 108L40 120L47 108Z"/>
+<path class="ln1" d="M76 120V36"/>
+<path class="ah-o" d="M83 47L76 36L69 47"/>
+<circle class="sc" cx="104" cy="70" r="12"/><text class="sn" x="104" y="75">1</text>
+<path class="ln" d="M232 36V108"/>
+<path class="ah" d="M225 108L232 120L239 108Z"/>
+<path class="ln1" d="M268 120V36"/>
+<path class="ah-o" d="M275 47L268 36L261 47"/>
+<circle class="sc" cx="296" cy="70" r="12"/><text class="sn" x="296" y="75">2</text>
+<path class="ln2" d="M84 212V230M84 256V272"/>
+<path class="ah" d="M78 272L84 284L90 272Z"/>
+<polygon class="msg" points="34.5,230 116.5,230 133.5,256 51.5,256"/>
+<text class="msg-t" x="84" y="248">m1</text>
+<path class="ln2" d="M276 212V272"/>
+<path class="ah" d="M270 272L276 284L282 272Z"/>
+<circle class="sc" cx="300" cy="248" r="12"/><text class="sn" x="300" y="253">3</text>
+<circle class="sc" cx="160" cy="248" r="12"/><text class="sn" x="160" y="253">4</text>
+<rect class="bx bx3" x="40" y="284" width="280" height="148" rx="2"/>
+<text class="pod" x="88" y="310">narad-2</text>
+<text class="cd" x="56" y="336">orders/1</text>
+<rect class="bx tn" x="56" y="372" width="36" height="36"/>
+<text class="cd mu mid" x="74" y="364">6</text>
+<rect class="bx tn" x="92" y="372" width="36" height="36"/>
+<text class="cd mid" x="110" y="395.1">m2</text>
+<text class="cd mu mid" x="110" y="364">7</text>
+<rect class="bx tn" x="128" y="372" width="36" height="36"/>
+<text class="cd mid" x="146" y="395.1">m1</text>
+<text class="cd mu mid" x="146" y="364">8</text>
+<path class="sep" d="M0 464H360"/>
+<circle class="sc" cx="12" cy="490" r="12"/><text class="sn" x="12" y="495">1</text>
+<text class="cd" x="32" y="496">m1,</text>
+<text class="cd" x="66.6" y="496">key=customer-42</text>
+<text class="an" x="215.2" y="496">to narad-0:</text>
+<text class="cd" x="299.4" y="496">202</text>
+<circle class="sc" cx="12" cy="518" r="12"/><text class="sn" x="12" y="523">2</text>
+<text class="an" x="32" y="524">then</text>
+<text class="cd" x="68.2" y="524">m2,</text>
+<text class="an" x="102.8" y="524">same key, to narad-1:</text>
+<text class="cd" x="253.3" y="524">202</text>
+<circle class="sc" cx="12" cy="546" r="12"/><text class="sn" x="12" y="551">3</text>
+<text class="an" x="32" y="552">narad-1's dispatcher commits m2 first,</text>
+<text class="an" x="32" y="572">at offset 7</text>
+<circle class="sc" cx="12" cy="594" r="12"/><text class="sn" x="12" y="599">4</text>
+<text class="an" x="32" y="600">narad-0's dispatcher commits m1 second,</text>
+<text class="an" x="32" y="620">at offset 8</text>
+<text class="an mu" x="0" y="656">each node lingers and batches on its own</text>
+<text class="an mu" x="0" y="676">clock, up to 50 ms</text>
+</svg>

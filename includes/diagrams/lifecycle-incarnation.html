@@ -1,0 +1,125 @@
+<svg class="nr-dia__wide" viewBox="0 24 800 484" role="img" aria-labelledby="lifecycle-incarnation-w-t" aria-describedby="lifecycle-incarnation-w-d">
+<title id="lifecycle-incarnation-w-t">A recreated topic never serves the deleted one</title>
+<desc id="lifecycle-incarnation-w-d">Two lanes in time order, not to scale: the metastore, replicated by Raft, and the disk of narad-2. 1: orders is created with incarnation id 3f9a..., and narad-2 holds a directory for it marked 3f9a.... narad-2 then goes down. 2: orders is deleted; the purge reaches the live nodes but not narad-2, so its old directory stays. 3: orders is created again with a new id, 7c21.... 4: narad-2 returns and opens topics/orders/. Its marker says 3f9a..., not 7c21..., so the directory is renamed to topics/orders.stale-3f9a..., quarantined and never served, and a fresh directory opens for 7c21.... 5: once the leader confirms that 3f9a... is gone, the sweep reclaims the quarantined directory.</desc>
+<defs><pattern id="lifecycle-incarnation-w-h" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hb" width="10" height="10"/><path class="hl" d="M0 0V10"/></pattern></defs>
+<text class="an" x="0" y="44">Metastore</text>
+<text class="an" x="0" y="66">(Raft)</text>
+<path class="ln1" d="M120 48H800"/>
+<circle class="sc" cx="180" cy="48" r="13"/><text class="sn" x="180" y="53.5">1</text>
+<circle class="sc" cx="300" cy="48" r="13"/><text class="sn" x="300" y="53.5">2</text>
+<circle class="sc" cx="420" cy="48" r="13"/><text class="sn" x="420" y="53.5">3</text>
+<circle class="sc" cx="752" cy="48" r="13"/><text class="sn" x="752" y="53.5">5</text>
+<text class="cd mid" x="180" y="88">3f9a…</text>
+<text class="cd mid" x="420" y="88">7c21…</text>
+<text class="pod" x="44" y="194">narad-2</text>
+<text class="an" x="0" y="218">disk</text>
+<rect class="bx tn" x="120" y="168" width="112" height="48"/>
+<text class="cd mid" x="176" y="198">orders/</text>
+<rect class="dead" x="248" y="168" width="244" height="48" fill="url(#lifecycle-incarnation-w-h)"/>
+<rect class="plate" x="336.4" y="176" width="67.2" height="32"/>
+<text class="pod" x="370" y="198.46">down</text>
+<path class="ln1 dash" d="M300 61V168"/>
+<path class="x" d="M292 118.5L308 134.5M308 118.5L292 134.5"/>
+<path class="ln1" d="M232 192H248"/>
+<path class="ln1" d="M492 192H503M529 192H555M669 192H704"/>
+<circle class="sc" cx="516" cy="192" r="13"/><text class="sn" x="516" y="197.5">4</text>
+<polygon class="msg" points="555,177 651,177 669,207 573,207"/>
+<text class="msg-t" x="612" y="198.5">3f9a…</text>
+<rect class="bx ghost" x="704" y="168" width="96" height="48"/>
+<text class="an mid" x="752" y="198">reclaimed</text>
+<path class="ln1" d="M752 61V158"/>
+<path class="ah" d="M747 158L752 168L757 158Z"/>
+<path class="ln2" d="M516 205V240Q516 256 532 256H536"/>
+<path class="ah" d="M536 262L548 256L536 250Z"/>
+<rect class="bx" x="548" y="232" width="168" height="48"/>
+<text class="cd mid" x="632" y="262">orders/  7c21…</text>
+<path class="sep" d="M0 308H800"/>
+<circle class="sc" cx="13" cy="338" r="13"/><text class="sn" x="13" y="343.5">1</text>
+<text class="an" x="34" y="344">create</text>
+<text class="cd" x="92" y="344">orders</text>
+<text class="an" x="167.3" y="344">with id</text>
+<text class="cd" x="228" y="344">3f9a…</text>
+<circle class="sc" cx="13" cy="370" r="13"/><text class="sn" x="13" y="375.5">2</text>
+<text class="an" x="34" y="376">delete</text>
+<text class="cd" x="91" y="376">orders</text>
+<text class="an" x="162.4" y="376">: the purge reaches the live nodes, not narad-2</text>
+<circle class="sc" cx="13" cy="402" r="13"/><text class="sn" x="13" y="407.5">3</text>
+<text class="an" x="34" y="408">create</text>
+<text class="cd" x="92" y="408">orders</text>
+<text class="an" x="167.3" y="408">again, id</text>
+<text class="cd" x="243.5" y="408">7c21…</text>
+<circle class="sc" cx="13" cy="434" r="13"/><text class="sn" x="13" y="439.5">4</text>
+<text class="an" x="34" y="440">narad-2 returns; the marker says</text>
+<text class="cd" x="306.4" y="440">3f9a…</text>
+<text class="an" x="366.4" y="440">, so it renames the directory</text>
+<text class="cd" x="34" y="462">topics/orders.stale-3f9a…</text>
+<text class="an" x="325.9" y="462">(never served) and opens a fresh one</text>
+<circle class="sc" cx="13" cy="488" r="13"/><text class="sn" x="13" y="493.5">5</text>
+<text class="an" x="34" y="494">the leader confirms</text>
+<text class="cd" x="197.9" y="494">3f9a…</text>
+<text class="an" x="261.8" y="494">is gone: the sweep reclaims it</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 692" role="img" data-search-exclude aria-labelledby="lifecycle-incarnation-n-t" aria-describedby="lifecycle-incarnation-n-d">
+<title id="lifecycle-incarnation-n-t">A recreated topic never serves the deleted one</title>
+<desc id="lifecycle-incarnation-n-d">Two lanes in time order, not to scale: the metastore, replicated by Raft, and the disk of narad-2. 1: orders is created with incarnation id 3f9a..., and narad-2 holds a directory for it marked 3f9a.... narad-2 then goes down. 2: orders is deleted; the purge reaches the live nodes but not narad-2, so its old directory stays. 3: orders is created again with a new id, 7c21.... 4: narad-2 returns and opens topics/orders/. Its marker says 3f9a..., not 7c21..., so the directory is renamed to topics/orders.stale-3f9a..., quarantined and never served, and a fresh directory opens for 7c21.... 5: once the leader confirms that 3f9a... is gone, the sweep reclaims the quarantined directory.</desc>
+<defs><pattern id="lifecycle-incarnation-n-h" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hb" width="10" height="10"/><path class="hl" d="M0 0V10"/></pattern></defs>
+<text class="an" x="0" y="16">Metastore (Raft)</text>
+<text class="pod" x="220" y="16">narad-2</text>
+<text class="an" x="260" y="16">disk</text>
+<path class="ln1" d="M40 32V420"/>
+<circle class="sc" cx="40" cy="64" r="12"/><text class="sn" x="40" y="69">1</text>
+<circle class="sc" cx="40" cy="144" r="12"/><text class="sn" x="40" y="149">2</text>
+<circle class="sc" cx="40" cy="224" r="12"/><text class="sn" x="40" y="229">3</text>
+<circle class="sc" cx="40" cy="384" r="12"/><text class="sn" x="40" y="389">5</text>
+<text class="cd" x="60" y="69">3f9a…</text>
+<text class="cd" x="60" y="229">7c21…</text>
+<rect class="bx tn" x="176" y="40" width="88" height="44"/>
+<text class="cd mid" x="220" y="67">orders/</text>
+<rect class="dead" x="176" y="100" width="88" height="136" fill="url(#lifecycle-incarnation-n-h)"/>
+<rect class="plate" x="192" y="155" width="56" height="26"/>
+<text class="pod" x="220" y="173.44">down</text>
+<path class="ln1 dash" d="M52 144H176"/>
+<path class="x" d="M117 137L131 151M131 137L117 151"/>
+<path class="ln1" d="M220 84V100"/>
+<path class="ln1" d="M220 236V244M220 268V282M220 318V360"/>
+<circle class="sc" cx="220" cy="256" r="12"/><text class="sn" x="220" y="261">4</text>
+<polygon class="msg" points="170.5,287 252.5,287 269.5,313 187.5,313"/>
+<text class="msg-t" x="220" y="305">3f9a…</text>
+<rect class="bx ghost" x="176" y="360" width="88" height="48"/>
+<text class="an mid" x="220" y="389">reclaimed</text>
+<path class="ln1" d="M52 384H166"/>
+<path class="ah" d="M166 389L176 384L166 379Z"/>
+<path class="ln2" d="M232 256H264"/>
+<path class="ah" d="M264 262L276 256L264 250Z"/>
+<rect class="bx" x="276" y="232" width="80" height="48"/>
+<text class="cd mid" x="316" y="252">orders/</text>
+<text class="cd mid" x="316" y="272">7c21…</text>
+<path class="sep" d="M0 440H360"/>
+<circle class="sc" cx="12" cy="466" r="12"/><text class="sn" x="12" y="471">1</text>
+<text class="an" x="32" y="472">create</text>
+<text class="cd" x="80.6" y="472">orders</text>
+<text class="an" x="143.7" y="472">with id</text>
+<text class="cd" x="194.8" y="472">3f9a…</text>
+<circle class="sc" cx="12" cy="494" r="12"/><text class="sn" x="12" y="499">2</text>
+<text class="an" x="32" y="500">delete</text>
+<text class="cd" x="79.7" y="500">orders</text>
+<text class="an" x="139.7" y="500">: the purge reaches</text>
+<text class="an" x="32" y="520">the live nodes, not narad-2</text>
+<circle class="sc" cx="12" cy="542" r="12"/><text class="sn" x="12" y="547">3</text>
+<text class="an" x="32" y="548">create</text>
+<text class="cd" x="80.6" y="548">orders</text>
+<text class="an" x="143.7" y="548">again, id</text>
+<text class="cd" x="207.6" y="548">7c21…</text>
+<circle class="sc" cx="12" cy="570" r="12"/><text class="sn" x="12" y="575">4</text>
+<text class="an" x="32" y="576">narad-2 returns; the marker says</text>
+<text class="cd" x="258.9" y="576">3f9a…</text>
+<text class="an" x="309.4" y="576">,</text>
+<text class="an" x="32" y="596">so it renames the directory</text>
+<text class="cd" x="32" y="616">topics/orders.stale-3f9a…</text>
+<text class="an" x="32" y="636">(never served) and opens a fresh one</text>
+<circle class="sc" cx="12" cy="658" r="12"/><text class="sn" x="12" y="663">5</text>
+<text class="an" x="32" y="664">the leader confirms</text>
+<text class="cd" x="168.7" y="664">3f9a…</text>
+<text class="an" x="222.3" y="664">is gone:</text>
+<text class="an" x="32" y="684">the sweep reclaims it</text>
+</svg>

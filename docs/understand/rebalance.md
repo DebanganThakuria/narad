@@ -30,18 +30,12 @@ The controller's only job is policy: set `Target` to balance the partition count
 
 Each node's move runner looks for partitions targeted at it once a second. Each pass lists every topic and reads its assignments, so it is gated the way the fan-out reconciler is (see [Fan-out engine](fanout-engine.md#where-the-work-runs)). A tick skips the read while the replica's domain versions have not moved, and runs it anyway after a failed or unfinished pass, after a move worker exits, and at least every 30 s. A new target still starts its worker on the next tick. The stale-copy sweep keeps its own count of ticks, skipped or not, and runs every 30th.
 
-```mermaid
-flowchart TB
-    accTitle: Desired ownership and the move worker
-    accDescr: The controller on the leader sets the target of partition 3 of orders to node B, while its owner is node A. Node B's move worker reads its own target, copies the partition from node A, and then flips ownership with a compare-and-swap in the metastore.
-    subgraph raft["metastore (Raft)"]
-        A["orders/3<br/>Owner=A Target=B"]
-    end
-    CTRL["controller (leader)<br/>writes Target"] -->|SetAssignmentTarget| A
-    A -->|reads own Target| B["node B<br/>move worker"]
-    B -->|copy from A| A2[("A: orders/3")]
-    B -->|CAS flip| A
-```
+<figure class="nr-dia nr-dia--doc" id="fig-rebalance-owner-target">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/rebalance-owner-target.html"
+</div>
+<figcaption>The controller only sets <code>Target</code>. The destination copies the partition and proposes the flip, which applies only if nothing changed in the meantime.</figcaption>
+</figure>
 
 ## Partition move: copy, then freeze {#move}
 
@@ -127,6 +121,13 @@ If the source stays dead past `ForcePromoteAfter` (2 minutes by default, long en
 - the session must have reached the source at least once; otherwise the destination has no idea what the source exposed, so it refuses;
 - the staged copy must recover to an offset **at or above the source's last-known high watermark**: the destination copied everything the source had made *visible*. If the source died before the copy caught up, promoting would drop visible records, so it refuses and keeps waiting.
 
+<figure class="nr-dia nr-dia--doc" id="fig-rebalance-force-promote">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--lilac">
+--8<-- "diagrams/rebalance-force-promote.html"
+</div>
+<figcaption>After 2 minutes the destination promotes its copy only if the copy reaches the high watermark the source last reported; otherwise it keeps waiting.</figcaption>
+</figure>
+
 Force-promote works from the last pre-copy listing, taken while produce and consume were live, and installs its positions clamped to the promoted high watermark, so the new owner never starts with a frontier past its own log end. Releases through v3.0.1 read the high watermark before the frontier and did not clamp. A record committed, delivered and acked between the two reads put the frontier at or above the high watermark, and after a force-promote every record the new owner committed below that frontier was readable but never delivered. A source asked to list a partition it has not opened since a crash opens it first, so the high watermark it reports is the recovered boundary, never 0, which would let the gate accept a partial copy.
 
 Records the source committed between the destination's last successful read and the source's death live only on the source's disk. If the source really crashed for good, they are lost regardless; force-promote recovers everything that can be recovered, and turns a stalled move into a completed one.
@@ -146,6 +147,13 @@ The controller's rebalance pass therefore clears the target of any in-flight mov
 ## Move planner {#planner}
 
 On each tick the leader computes the fewest moves that balance the count of owned partitions. With T movable partitions over R receiving nodes, balance gives each receiver `floor(T/R)` or `ceil(T/R)`. The plan moves exactly the surplus above that capacity, and the nodes already holding the most keep the `ceil` slots, so a partition on a node within its share is never touched.
+
+<figure class="nr-dia nr-dia--doc" id="fig-rebalance-planner">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/rebalance-planner.html"
+</div>
+<figcaption>With 18 partitions over 4 nodes each share is 4 or 5, and only the four partitions above those shares move, all to the new node.</figcaption>
+</figure>
 
 Two properties make it safe to recompute every tick:
 

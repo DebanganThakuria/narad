@@ -1,0 +1,61 @@
+<svg class="nr-dia__wide" viewBox="0 -4 800 356" role="img" aria-labelledby="metastore-log-vs-state-w-t" aria-describedby="metastore-log-vs-state-w-d">
+<title id="metastore-log-vs-state-w-t">An election proves the log; only a barrier proves the state</title>
+<desc id="metastore-log-vs-state-w-d">narad-1 has just been elected Raft leader after restoring its FSM from an old snapshot. Its Raft log is complete up to the commit index, which is what let it win the election. Its FSM is still replaying that log, so the applied point trails the commit index. A local read in that gap sees the past: a topic deleted since the snapshot still exists. So before acting on its own state the leader runs a Raft barrier, which waits at most 5 s until everything committed is applied, and then reads again. A follower trusts its replica only with contact from the leader in the last 5 s and an FSM that has applied everything Raft handed it.</desc>
+<rect class="bx bx3" x="0" y="0" width="800" height="348" rx="2"/>
+<text class="pod" x="62" y="36">narad-1</text>
+<text class="an" x="120" y="36">elected leader; FSM restored from an old snapshot</text>
+<text class="an" x="20" y="84">Raft log: complete</text>
+<rect class="bx tn" x="20" y="96" width="520" height="36"/>
+<text class="an" x="556" y="112">enough to win</text>
+<text class="an" x="556" y="134">an election</text>
+<text class="an" x="20" y="176">FSM applied: replaying</text>
+<rect class="bx tn" x="20" y="188" width="280" height="36"/>
+<rect class="bx ghost" x="300" y="188" width="240" height="36"/>
+<polygon class="msg" points="243,139 339,139 357,169 261,169"/>
+<text class="msg-t" x="300" y="160.5">applied</text>
+<path class="ln1" d="M300 169V188"/>
+<path class="ln" d="M540 60V240"/>
+<text class="an end" x="532" y="64">commit index</text>
+<path class="ln1" d="M140 280V234"/>
+<path class="ah" d="M145 234L140 224L135 234Z"/>
+<text class="an" x="156" y="272">local read: sees the past,</text>
+<text class="an" x="156" y="294">a deleted topic still exists</text>
+<rect class="bx" x="588" y="176" width="196" height="108" rx="2"/>
+<text class="an mid" x="686" y="203.12">Barrier: wait until</text>
+<text class="an mid" x="686" y="225.12">applied reaches the</text>
+<text class="an mid" x="686" y="247.12">commit, at most 5 s,</text>
+<text class="an mid" x="686" y="269.12">then read again</text>
+<path class="ln1" d="M588 206H550"/>
+<path class="ah" d="M550 201L540 206L550 211Z"/>
+<text class="an mu" x="20" y="330">a follower instead needs leader contact within 5 s and its FSM caught up</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 748" role="img" data-search-exclude aria-labelledby="metastore-log-vs-state-n-t" aria-describedby="metastore-log-vs-state-n-d">
+<title id="metastore-log-vs-state-n-t">An election proves the log; only a barrier proves the state</title>
+<desc id="metastore-log-vs-state-n-d">narad-1 has just been elected Raft leader after restoring its FSM from an old snapshot. Its Raft log is complete up to the commit index, which is what let it win the election. Its FSM is still replaying that log, so the applied point trails the commit index. A local read in that gap sees the past: a topic deleted since the snapshot still exists. So before acting on its own state the leader runs a Raft barrier, which waits at most 5 s until everything committed is applied, and then reads again. A follower trusts its replica only with contact from the leader in the last 5 s and an FSM that has applied everything Raft handed it.</desc>
+<rect class="bx bx3" x="0" y="0" width="360" height="740" rx="2"/>
+<text class="pod" x="52" y="30">narad-1</text>
+<text class="an" x="16" y="56">elected leader; FSM restored from</text>
+<text class="an" x="16" y="76">an old snapshot</text>
+<text class="an" x="24" y="124">Raft log:</text>
+<text class="an" x="24" y="144">complete,</text>
+<text class="an" x="24" y="164">enough to win</text>
+<text class="an" x="24" y="184">an election</text>
+<rect class="bx tn" x="40" y="196" width="56" height="360"/>
+<text class="an" x="176" y="124">FSM applied:</text>
+<text class="an" x="176" y="144">replaying</text>
+<rect class="bx tn" x="192" y="196" width="56" height="180"/>
+<rect class="bx ghost" x="192" y="376" width="56" height="180"/>
+<polygon class="msg" points="254.5,363 336.5,363 353.5,389 271.5,389"/>
+<text class="msg-t" x="304" y="381">applied</text>
+<path class="ln" d="M24 556H300"/>
+<text class="an" x="24" y="580">commit index</text>
+<path class="ln1" d="M344 256H258"/>
+<path class="ah" d="M258 251L248 256L258 261Z"/>
+<text class="an" x="262" y="224">local read:</text>
+<text class="an" x="262" y="244">the past</text>
+<rect class="bx" x="16" y="604" width="328" height="64" rx="2"/>
+<text class="an mid" x="180" y="631.1">Barrier: wait until applied reaches the</text>
+<text class="an mid" x="180" y="651.1">commit, at most 5 s, then read again</text>
+<text class="an mu" x="16" y="694">a follower instead needs leader contact</text>
+<text class="an mu" x="16" y="714">within 5 s and its FSM caught up</text>
+</svg>

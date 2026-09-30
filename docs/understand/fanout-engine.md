@@ -21,24 +21,12 @@ A [fan-out child](../reference/glossary.md#fan-out-child) gets its copies from *
 
 For each (parent partition, child) pair, one **cursor goroutine** runs on the node that *owns that parent partition*. So slab reads always hit local disk, and the cursor's durable state lives in the same directory, with the same durability, as the log it tails:
 
-```mermaid
-flowchart LR
-    accTitle: Fan-out cursors on the owner of a parent partition
-    accDescr: On the owner of partition 3 of orders, two cursors read the orders partition 3 log: one for the analytics child and one for a retry child with a one hour delay. Their offset files sit beside the log. Each cursor commits batches to the owners of its child's partitions.
-    subgraph owner["owner of orders/p3"]
-        OFF1[("fanout-analytics.offset")]
-        LOG[("orders/p3 log")]
-        OFF2[("fanout-retry.offset")]
-        CUR1["cursor → analytics"]
-        CUR2["cursor → retry (1h delay)"]
-        OFF1 -.- CUR1
-        LOG --> CUR1
-        LOG --> CUR2
-        OFF2 -.- CUR2
-    end
-    CUR1 -->|"commit batch"| A[("analytics/p* owners")]
-    CUR2 -->|"commit batch"| R[("retry/p* owners")]
-```
+<figure class="nr-dia nr-dia--doc" id="fig-fanout-cursor-placement">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
+--8<-- "diagrams/fanout-cursor-placement.html"
+</div>
+<figcaption>Cursors run on the owner of the parent partition and read local disk; only the commit batches cross the network, to the owners of the child partitions.</figcaption>
+</figure>
 
 A reconciler on every node compares the *desired cursors* (from the metastore: links times owned partitions) with the *running cursors* once a second. Cursors start on attach and stop on detach, delete or a change of ownership.
 
@@ -46,16 +34,12 @@ The comparison decodes every topic record, so a tick skips it while none of the 
 
 ## Cursor loop: commit before advance {#cursor-loop}
 
-```mermaid
-flowchart TD
-    accTitle: The fan-out cursor loop
-    accDescr: The cursor reads a slab of committed parent records, re-keys each record with the child's partitioner, and commits per-child-partition batches concurrently, up to 16 at once. When all batches are acknowledged it persists its offset and reads the next slab. When some batches fail it backs off and retries only the failed partitions' records, from memory.
-    READ["read slab of committed parent records<br/>(fill-or-linger batching)"] --> REKEY["re-key each record with the<br/>child's partitioner (key preserved;<br/>keyless: parent partition's index)"]
-    REKEY --> COMMIT["commit per-child-partition batches<br/>concurrently, up to 16 at once<br/>(local or one RPC to the owner)"]
-    COMMIT -->|all batches acked| PERSIST["persist cursor offset"]
-    PERSIST --> READ
-    COMMIT -->|some batches failed| RETRY["back off, retry only the failed<br/>partitions' records, from memory"] --> COMMIT
-```
+<figure class="nr-dia nr-dia--doc" id="fig-fanout-cursor-loop">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
+--8<-- "diagrams/fanout-cursor-loop.html"
+</div>
+<figcaption>The cursor offset is written only after every bucket of the slab has committed, so a crash sends the last slab again: duplicates in the child, never a gap.</figcaption>
+</figure>
 
 The invariant is the whole guarantee: **the cursor's durable offset only moves past records whose child commits were acknowledged**, and a child commit is the same fsync and verify as any produce. A crash in the middle commits the last slab again: duplicates in the child, never a gap.
 
@@ -80,6 +64,13 @@ So the attach records its own [attach point](../reference/glossary.md#attach-poi
 | has `attach_offsets` | index within the slice | the recorded offset, exactly |
 | has `attach_offsets` | index beyond the slice (added after the attach) | 0 |
 | no `attach_offsets` (attached before this existed) | any | the live tail at first read (the older behaviour; detach and re-attach to upgrade) |
+
+<figure class="nr-dia nr-dia--doc" id="fig-fanout-attach-point">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
+--8<-- "diagrams/fanout-attach-point.html"
+</div>
+<figcaption>The attach records the tail it observed on every parent partition. A partition created after the attach has no history to skip, so it starts at 0.</figcaption>
+</figure>
 
 If any owner cannot be asked, the attach fails with `503` and leaves no link: a guessed offset would either skip records or backfill history, and an attach is cheap to retry. Records committed while the attach is in flight (between the tail reads and the Raft commit) sit at or past the recorded offsets and are delivered: the attach point is "the tail observed while processing the attach", never later.
 
