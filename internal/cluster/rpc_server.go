@@ -436,13 +436,24 @@ func (s *RPCServer) releaseMessagingSlot() {
 	}
 }
 
-// withCommitSlot runs handle under the produce-commit concurrency bound.
-// A commit is not abandoned while it waits: whether a batch the
-// requester stopped waiting for may be skipped is the produce path's
-// decision, not the gate's.
-func (s *RPCServer) withCommitSlot(handle func() nodewire.Response) nodewire.Response {
-	if sem := s.commitSem; sem != nil {
-		sem <- struct{}{}
+// withCommitSlot runs handle under the produce-commit concurrency bound,
+// or answers 503 unapplied if the request is cancelled while it waits
+// for a slot: the requester gave up (its budget ran out, or its client
+// left) and will never read the reply. The broker would refuse it
+// anyway, since a commit refuses a cancelled context at entry; refusing
+// it here lets go of the frame's records when the cancel arrives rather
+// than when a slot frees, which on an owner whose disk has stalled can
+// be many seconds later. A commit that got its slot is never abandoned
+// by the gate: from then on, what happens to a batch the requester
+// stopped waiting for is the produce path's decision. The uncontended
+// case is one non-blocking send and never asks ctx for its Done channel
+// (see acquireSlot), so withSlot is not used here.
+func (s *RPCServer) withCommitSlot(ctx context.Context, handle func() nodewire.Response) nodewire.Response {
+	sem := s.commitSem
+	if !acquireSlot(ctx, sem) {
+		return errorResponse(http.StatusServiceUnavailable, "request cancelled while waiting for a commit slot")
+	}
+	if sem != nil {
 		defer func() { <-sem }()
 	}
 	return handle()
@@ -561,9 +572,9 @@ func (s *RPCServer) serveOther(ctx context.Context, op nodewire.Operation, paylo
 	case nodewire.OpProduce:
 		res = s.handleProduce(ctx, payload)
 	case nodewire.OpCommitProduce:
-		res = s.withCommitSlot(func() nodewire.Response { return s.handleCommitProduce(ctx, payload) })
+		res = s.withCommitSlot(ctx, func() nodewire.Response { return s.handleCommitProduce(ctx, payload) })
 	case nodewire.OpCommitProduceBatch:
-		res = s.withCommitSlot(func() nodewire.Response { return s.handleCommitProduceBatch(ctx, payload) })
+		res = s.withCommitSlot(ctx, func() nodewire.Response { return s.handleCommitProduceBatch(ctx, payload) })
 	case nodewire.OpListPartitionSegments:
 		return s.withHeldSlot(ctx, s.transferSem, func() nodewire.Response { return s.handleListPartitionSegments(payload) })
 	case nodewire.OpFetchSegmentChunk:
