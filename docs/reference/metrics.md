@@ -55,6 +55,13 @@ The HTTP series count requests, not messages. A batch produce (**Unreleased**) h
 
 ## Queue health {#queue-health}
 
+<figure class="nr-dia nr-dia--doc" id="fig-metrics-queue-gauges">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--sky">
+--8<-- "diagrams/metrics-queue-gauges.html"
+</div>
+<figcaption>One partition's log, not to scale. <code>narad_consumer_lag_messages</code> counts from the oldest unacked message (lime) up to the high watermark, so leased and acked-ahead messages count toward lag and the written but hidden tail never does.</figcaption>
+</figure>
+
 | Series | Meaning |
 |---|---|
 | `narad_consumer_lag_messages`<br>gauge; labels `topic`, `partition` | Messages consumers can still take: the partition's high watermark minus its [committed frontier](glossary.md#committed-frontier). |
