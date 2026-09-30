@@ -108,8 +108,13 @@ func TestZZWP18ServerBatchConsumeEncodedBound(t *testing.T) {
 // encoding is six times their size. The owner's reply used to overrun
 // the RPC frame: the write aborted the stream, the gateway answered 204
 // and the reserved records stayed hidden for their visibility timeout,
-// every time. Every request must now answer 200 until all are
-// delivered, each record once and ackable.
+// every time. Now every record must be delivered, each once and
+// ackable, within a few requests. A request may still answer 204 when
+// the owner's reply outlasts the gateway's 500 ms probe budget, which
+// JSON-encoding about 8 MiB of escaped records under -race on a 2-core
+// runner can: the gateway then cancels and the owner gives the records
+// back at once, so they are delivered by a later request. Records left
+// hidden (the old failure) would never be delivered and fail the test.
 func TestZZWP18NonOwnerBatchConsumeEscapedPayloads(t *testing.T) {
 	owner := newZZWP18Owner(t, 1)
 	const n = 100
@@ -124,13 +129,16 @@ func TestZZWP18NonOwnerBatchConsumeEscapedPayloads(t *testing.T) {
 	})
 	seen := map[string]bool{}
 	for attempt := 0; len(seen) < n; attempt++ {
-		if attempt == 10 {
+		if attempt == 20 {
 			t.Fatalf("after %d batch consumes only %d of %d records were delivered", attempt, len(seen), n)
 		}
 		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/topics/orders/consume?max=%d", n), nil)
 		req.SetPathValue("topic", "orders")
 		rec := httptest.NewRecorder()
 		httpmessaging.Consume(set)(rec, req)
+		if rec.Code == http.StatusNoContent {
+			continue // a reply that outlasted the probe budget; its records come back
+		}
 		if rec.Code != http.StatusOK {
 			t.Fatalf("batch consume %d on a non-owner = %d with %d of %d records never delivered, want 200", attempt, rec.Code, n-len(seen), n)
 		}

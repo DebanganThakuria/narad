@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -229,16 +230,9 @@ func (s *RPCServer) consumeOneAsBatch(ctx context.Context, key requestKey, req *
 	if res.Status != http.StatusOK {
 		return res
 	}
-	// A single consume's reply is bounded by the forwarded reply bound;
-	// cap the size hint at it too, so the capacity can never overflow.
-	n := len(res.Body)
-	if n > forwardedConsumeReplyBytes {
-		n = forwardedConsumeReplyBytes
-	}
-	body := make([]byte, 0, n+16)
-	body = append(body, `{"messages":[`...)
-	body = append(body, bytes.TrimRight(res.Body, "\n")...)
-	body = append(body, "]}\n"...)
+	// One exact-size allocation; slices.Concat sizes it and checks the
+	// sum, so no length arithmetic here can overflow.
+	body := slices.Concat([]byte(`{"messages":[`), bytes.TrimRight(res.Body, "\n"), []byte("]}\n"))
 	return nodewire.Response{Status: http.StatusOK, ContentType: nodewire.ContentTypeJSON, Body: body}
 }
 
