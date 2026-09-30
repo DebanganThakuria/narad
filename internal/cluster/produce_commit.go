@@ -186,6 +186,12 @@ func (d *ProduceDispatcher) startCommit(ctx context.Context, st *produceDispatch
 	if len(dest.queue) == 0 {
 		dest.queue, dest.origs = nil, nil
 	}
+	if !st.manual && !probe && dest.skipped > 0 && len(dest.queue) < d.perDestCap(st)/2 {
+		// Refill the queue from the WAL while this commit runs, so the
+		// next batch is ready when it lands rather than read after it
+		// (Run wakes at once for the rescan, see nextWake).
+		st.requestRescan(dest)
+	}
 	dest.inflight = true
 	st.jobs[job] = struct{}{}
 	st.active++

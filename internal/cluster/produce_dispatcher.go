@@ -348,11 +348,17 @@ func (d *ProduceDispatcher) drainResults(ctx context.Context, st *produceDispatc
 	}
 }
 
-// nextWake is how long Run may sleep before something is due: the idle
-// backstop (the failure backoff after a stalled round), a running commit
-// turning slow, a lingering batch's deadline, a failing destination's
-// retry, or the rescan backstop.
+// nextWake is how long Run may sleep before something is due: nothing
+// while a rescan is due (a commit that just started asks for one to
+// refill its destination's queue), else the idle backstop (the failure
+// backoff after a stalled round), a running commit turning slow, a
+// lingering batch's deadline, a failing destination's retry, or the
+// rescan backstop. Every round's read clears rescanDue, and under Run
+// only a commit that starts or finishes sets it, so this cannot spin.
 func (d *ProduceDispatcher) nextWake(st *produceDispatchState) time.Duration {
+	if st.rescanDue {
+		return 0
+	}
 	now := d.now()
 	wake := now.Add(d.interval)
 	if st.stalled {
