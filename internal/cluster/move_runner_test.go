@@ -49,7 +49,7 @@ type movePeerFake struct {
 	marker      *messaging.MoveMarker // reported by ListPartitionSegments (the sweep's owner lookup)
 	leaderTopic *topic.Topic          // answered by GetTopic (the sweep's leader confirmation); nil errors
 	incarnation string                // reported by ListPartitionSegments as the copy's incarnation
-	listDelay   time.Duration         // slows every listing (a drain that outlives the freeze TTL)
+	onList      func()                // when set, runs inside every listing (a drain that outlives the freeze TTL)
 	lists       *atomic.Int32         // when set, counts listings
 }
 
@@ -57,8 +57,8 @@ func (f movePeerFake) ListPartitionSegments(ctx context.Context, addr, topicName
 	if f.lists != nil {
 		f.lists.Add(1)
 	}
-	if f.listDelay > 0 {
-		time.Sleep(f.listDelay)
+	if f.onList != nil {
+		f.onList()
 	}
 	info, err := f.dirFetcher.ListPartitionSegments(ctx, addr, topicName, partition)
 	if err != nil {
@@ -100,12 +100,60 @@ type fakeFreeze struct {
 	rearms   int
 	lapsed   int // fenced re-arms refused
 	lapseOn  int // when >0, the Nth fenced re-arm finds the freeze lapsed
+	// virtual judges the TTL on the freeze's own clock (vnow), which
+	// only elapse moves, instead of the wall clock. The outcome then
+	// depends on the order of re-arms and listings alone, not on how
+	// quickly a loaded machine gets round to them.
+	virtual bool
+	vnow    time.Time
+}
+
+// nowLocked is the freeze's clock. Called with f.mu held.
+func (f *fakeFreeze) nowLocked() time.Time {
+	if f.virtual {
+		return f.vnow
+	}
+	return time.Now()
+}
+
+// elapse moves a virtual freeze's clock on by d, as if the source spent
+// d serving a request, and reports how many fenced re-arms had landed
+// by then. It holds f.mu, so a concurrent re-arm lands wholly before
+// the move (and is counted) or wholly after it (and sees the new time).
+// Nothing moves before the first freeze is armed: the pre-copy listings
+// run unfrozen, and frozen=false says so.
+func (f *fakeFreeze) elapse(d time.Duration) (rearms int, frozen bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.minted == 0 {
+		return f.rearms, false
+	}
+	f.vnow = f.vnow.Add(d)
+	return f.rearms, true
+}
+
+// awaitRearm waits, up to timeout of wall time, for a fenced re-arm
+// after the first `after` ones. It reports whether one landed.
+func (f *fakeFreeze) awaitRearm(after int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		f.mu.Lock()
+		n := f.rearms
+		f.mu.Unlock()
+		if n > after {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func (f *fakeFreeze) arm(ttl time.Duration, token string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	now := time.Now()
+	now := f.nowLocked()
 	active := f.token != "" && now.Before(f.deadline)
 	if token != "" {
 		f.rearms++
@@ -130,7 +178,7 @@ func (f *fakeFreeze) arm(ttl time.Duration, token string) (string, error) {
 func (f *fakeFreeze) activeToken() (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.token == "" || !time.Now().Before(f.deadline) {
+	if f.token == "" || !f.nowLocked().Before(f.deadline) {
 		return "", false
 	}
 	return f.token, true
@@ -477,15 +525,29 @@ func TestMoveRunnerForwardsFlipToLeaderWhenFollower(t *testing.T) {
 
 // A drain that outlives the freeze TTL must keep the source frozen: the
 // worker re-arms the freeze with its token while Finalize runs and fences
-// the flip with it. Here every listing takes longer than the TTL, so the
-// freeze would lapse (and the source would resume commits behind the
-// copy) without the re-arm; the move must still flip, and only while the
-// freeze is active.
+// the flip with it. Here every listing under the freeze takes longer than
+// the TTL, so the freeze would lapse (and the source would resume commits
+// behind the copy) without the re-arm; the move must still flip, and only
+// while the freeze is active.
+//
+// The TTL is judged on the freeze's own clock, not the wall's. With a
+// wall-clock TTL the test raced the runner's re-arm ticker, and then the
+// install, against the TTL: one stalled tick, or an install slower than
+// the TTL on a loaded two-core -race runner, lapsed the freeze and failed
+// it at random. Here a listing under the freeze spends 1.5 TTLs of that
+// clock, in two halves of 3/4, and before each half it waits for one of
+// the runner's periodic re-arms to land while it is still running. Each
+// half fits inside the TTL a re-arm just renewed, so the freeze holds;
+// re-arms that only land between listings leave it at most one TTL from
+// the listing's start, and it lapses before the listing ends. Nothing
+// else moves the clock, so the install and the flip run under the
+// fence's renewal whatever the machine's speed.
 func TestMoveRunnerRearmsFreezeAcrossTTLAndFencesFlip(t *testing.T) {
 	src := t.TempDir()
 	wantHWM, _ := buildSourcePartition(t, src, 10)
-	freeze := &fakeFreeze{}
+	freeze := &fakeFreeze{virtual: true}
 	var activeAtFlip atomic.Bool
+	var missedRearms atomic.Int32
 	store := &fakeMoveStore{
 		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
 		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
@@ -494,28 +556,38 @@ func TestMoveRunnerRearmsFreezeAcrossTTLAndFencesFlip(t *testing.T) {
 		_, active := freeze.activeToken()
 		activeAtFlip.Store(active)
 	}
-	// The freeze here is judged on the wall clock (fakeFreeze and the
-	// runner's re-arm ticker both are), so the intervals have to dwarf
-	// scheduler jitter or the test measures the machine's load instead of
-	// the runner. At 120ms with a 30ms re-arm, one delayed tick under the
-	// full suite lapsed the freeze and failed the assertion below at
-	// random. The production ratio (re-arm every TTL/4) is kept; only the
-	// absolute scale is raised so a 30-50ms stall is noise, not a lapse.
 	const ttl = time.Second
 	peer := movePeerFake{
 		dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true},
 		freeze:     freeze,
-		listDelay:  ttl, // one listing alone outlives the TTL
+		onList: func() {
+			for range 2 {
+				before, frozen := freeze.elapse(0)
+				if !frozen {
+					return
+				}
+				if !freeze.awaitRearm(before, 30*time.Second) {
+					missedRearms.Add(1)
+				}
+				freeze.elapse(ttl * 3 / 4)
+			}
+		},
 	}
+	// The re-arm ticker runs on the wall clock; it only has to tick
+	// while a listing waits for it, so its period sets the test's speed,
+	// not its outcome.
 	r := NewMoveRunner(store, "narad-dst", t.TempDir(), peer, nil, nil, nil, MoveConfig{
-		FreezeTTL: ttl, FreezeRearmEvery: ttl / 4, RetryBackoff: 5 * time.Millisecond,
+		FreezeTTL: ttl, FreezeRearmEvery: 10 * time.Millisecond, RetryBackoff: 5 * time.Millisecond,
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	r.Reconcile(ctx)
 	r.wg.Wait()
 
+	if n := missedRearms.Load(); n != 0 {
+		t.Fatalf("%d listing(s) under the freeze saw no re-arm while they ran", n)
+	}
 	if got := store.completeArgs; len(got) != 3 || got[2] != "narad-dst" {
 		t.Fatalf("move did not flip: %v", got)
 	}
