@@ -234,6 +234,10 @@ type produceDispatchState struct {
 	// rerouted counts, per original destination, the records rerouted
 	// in the current read, for one log line each.
 	rerouted map[dispatchDestKey]rerouteNote
+
+	// rereads counts the skipped records the reader has read again (a
+	// decode each), for tests.
+	rereads uint64
 }
 
 func (st *produceDispatchState) noteErr(err error) {
@@ -424,6 +428,7 @@ func (d *ProduceDispatcher) read(ctx context.Context, st *produceDispatchState) 
 		// or does not reach (below its start).
 		orig.skipped--
 		st.skipped--
+		st.rereads++
 		blocked := orig.blockedRead == st.readEpoch || (orig.skipped > 0 && orig.firstSkipped.Seq < rescanFrom)
 		d.place(ctx, st, rec, orig, blocked, true, rescanFrom, now)
 		st.forget(orig)
