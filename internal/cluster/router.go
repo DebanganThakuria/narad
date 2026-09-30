@@ -475,6 +475,20 @@ func (rt *Router) routeConsumeRemote(ctx context.Context, w http.ResponseWriter,
 	return forwarded, true, batch
 }
 
+// RouteConsumeRemoteBatch is RouteConsumeRemote for a batch consume
+// (?max=N) on a node that owns some of the topic's partitions, all of
+// them empty: each remote owner is asked for up to max records instead
+// of one, and the first that has any answers the whole request. batch
+// reports that a 200 it wrote is already {"messages":[...]}. It is
+// false for a single message the caller wraps: from an owner that does
+// not take Max yet (asked again for one record, see consumeFrom), or
+// for a max of 1. RouteConsumeRemote stays as it is, so a plain consume
+// on an owning node pays nothing for this.
+func (rt *Router) RouteConsumeRemoteBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, max int) (forwarded, batch bool) {
+	forwarded, _, batch = rt.routeConsumeRemote(ctx, w, r, topicName, max)
+	return forwarded, batch
+}
+
 // Re-probe pacing for longPollConsumeRemote. Each round costs one RPC per
 // remote owner, so the interval trades delivery latency against probe
 // QPS. The loop starts at remoteConsumeReprobeInterval, so a message
