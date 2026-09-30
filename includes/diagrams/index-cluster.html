@@ -1,0 +1,125 @@
+<svg class="nr-dia__wide" viewBox="0 -4 800 468" role="img" aria-labelledby="index-cluster-w-t" aria-describedby="index-cluster-w-d">
+<title id="index-cluster-w-t">Metadata on every node, each partition on one</title>
+<desc id="index-cluster-w-d">A Narad cluster of three nodes, narad-0, narad-1 and narad-2. Each holds a full replica of the metastore, the same topics, users and assignments on all three, kept in step by Raft from the leader, narad-0, which also runs the controller. Message data is different: each partition lives on one node only, orders/0 on narad-0, orders/1 on narad-1 and orders/2 on narad-2, so orders/1 is one copy, on one node. The nodes send each other commits and forwarded requests over QUIC.</desc>
+<rect class="rg" x="0" y="0" width="800" height="460" rx="6"/>
+<text class="rl" x="20" y="30">Narad cluster</text>
+<text class="an end" x="780" y="50">Raft: every node holds all metadata</text>
+<rect class="bx" x="24" y="76" width="224" height="304" rx="2"/>
+<text class="pod" x="88" y="108">narad-0</text>
+<path class="bx tn" d="M40 132V172A96 8 0 0 0 232 172V132"/>
+<ellipse class="bx tn" cx="136" cy="132" rx="96" ry="8"/>
+<text class="an mid" x="136" y="165.4">metastore</text>
+<text class="an" x="40" y="208">all topics, users,</text>
+<text class="an" x="40" y="230">assignments</text>
+<text class="cd" x="40" y="276">orders/0</text>
+<rect class="bx tn" x="40" y="292" width="36" height="36"/>
+<rect class="bx tn" x="76" y="292" width="36" height="36"/>
+<rect class="bx tn" x="112" y="292" width="36" height="36"/>
+<rect class="bx tn" x="148" y="292" width="36" height="36"/>
+<rect class="bx tn" x="184" y="292" width="36" height="36"/>
+<rect class="bx tn" x="40" y="336" width="192" height="32" rx="2"/>
+<text class="an mid" x="136" y="358">controller: leader only</text>
+<rect class="bx" x="288" y="76" width="224" height="304" rx="2"/>
+<text class="pod" x="352" y="108">narad-1</text>
+<path class="bx tn" d="M304 132V172A96 8 0 0 0 496 172V132"/>
+<ellipse class="bx tn" cx="400" cy="132" rx="96" ry="8"/>
+<text class="an mid" x="400" y="165.4">metastore</text>
+<text class="an" x="304" y="208">all topics, users,</text>
+<text class="an" x="304" y="230">assignments</text>
+<polygon class="msg" points="304,257 400,257 418,287 322,287"/>
+<text class="msg-t" x="361" y="278.5">orders/1</text>
+<rect class="bx tn" x="304" y="292" width="36" height="36"/>
+<rect class="bx tn" x="340" y="292" width="36" height="36"/>
+<rect class="bx tn" x="376" y="292" width="36" height="36"/>
+<rect class="bx tn" x="412" y="292" width="36" height="36"/>
+<rect class="bx tn" x="448" y="292" width="36" height="36"/>
+<text class="an" x="304" y="356">one copy, on one node</text>
+<rect class="bx" x="552" y="76" width="224" height="304" rx="2"/>
+<text class="pod" x="616" y="108">narad-2</text>
+<path class="bx tn" d="M568 132V172A96 8 0 0 0 760 172V132"/>
+<ellipse class="bx tn" cx="664" cy="132" rx="96" ry="8"/>
+<text class="an mid" x="664" y="165.4">metastore</text>
+<text class="an" x="568" y="208">all topics, users,</text>
+<text class="an" x="568" y="230">assignments</text>
+<text class="cd" x="568" y="276">orders/2</text>
+<rect class="bx tn" x="568" y="292" width="36" height="36"/>
+<rect class="bx tn" x="604" y="292" width="36" height="36"/>
+<rect class="bx tn" x="640" y="292" width="36" height="36"/>
+<rect class="bx tn" x="676" y="292" width="36" height="36"/>
+<rect class="bx tn" x="712" y="292" width="36" height="36"/>
+<path class="ln1" d="M200 126V76Q200 64 212 64H716Q728 64 728 76V116"/>
+<path class="ah" d="M723 116L728 126L733 116Z"/>
+<path class="ln1" d="M464 64V116"/>
+<path class="ah" d="M459 116L464 126L469 116Z"/>
+<path class="ln2" d="M136.0 412H664.0"/>
+<path class="ln2" d="M136 412V392"/>
+<path class="ah" d="M142 392L136 380L130 392Z"/>
+<path class="ln2" d="M400 412V392"/>
+<path class="ah" d="M406 392L400 380L394 392Z"/>
+<path class="ln2" d="M664 412V392"/>
+<path class="ah" d="M670 392L664 380L658 392Z"/>
+<text class="an mid" x="400" y="440">QUIC: commits and forwards between any two nodes</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 720" role="img" data-search-exclude aria-labelledby="index-cluster-n-t" aria-describedby="index-cluster-n-d">
+<title id="index-cluster-n-t">Metadata on every node, each partition on one</title>
+<desc id="index-cluster-n-d">A Narad cluster of three nodes, narad-0, narad-1 and narad-2. Each holds a full replica of the metastore, the same topics, users and assignments on all three, kept in step by Raft from the leader, narad-0, which also runs the controller. Message data is different: each partition lives on one node only, orders/0 on narad-0, orders/1 on narad-1 and orders/2 on narad-2, so orders/1 is one copy, on one node. The nodes send each other commits and forwarded requests over QUIC.</desc>
+<rect class="rg" x="0" y="0" width="360" height="712" rx="6"/>
+<text class="rl" x="20" y="30">Narad cluster</text>
+<text class="an" x="16" y="54">Raft: every node holds</text>
+<text class="an" x="16" y="74">all metadata</text>
+<rect class="bx" x="40" y="100" width="280" height="172" rx="2"/>
+<text class="pod" x="100" y="126">narad-0</text>
+<path class="bx tn" d="M56 148V180A60 8 0 0 0 176 180V148"/>
+<ellipse class="bx tn" cx="116" cy="148" rx="60" ry="8"/>
+<text class="an mid" x="116" y="176.5">metastore</text>
+<text class="an" x="188" y="156">all topics, users,</text>
+<text class="an" x="188" y="176">assignments</text>
+<text class="cd" x="56" y="220">orders/0</text>
+<rect class="bx tn" x="56" y="228" width="28" height="28"/>
+<rect class="bx tn" x="84" y="228" width="28" height="28"/>
+<rect class="bx tn" x="112" y="228" width="28" height="28"/>
+<rect class="bx tn" x="140" y="228" width="28" height="28"/>
+<rect class="bx tn" x="184" y="204" width="120" height="48" rx="2"/>
+<text class="an mid" x="244" y="224">controller:</text>
+<text class="an mid" x="244" y="244">leader only</text>
+<rect class="bx" x="40" y="284" width="280" height="172" rx="2"/>
+<text class="pod" x="100" y="310">narad-1</text>
+<path class="bx tn" d="M56 332V364A60 8 0 0 0 176 364V332"/>
+<ellipse class="bx tn" cx="116" cy="332" rx="60" ry="8"/>
+<text class="an mid" x="116" y="360.5">metastore</text>
+<text class="an" x="188" y="340">all topics, users,</text>
+<text class="an" x="188" y="360">assignments</text>
+<polygon class="msg" points="56,387 138,387 155,413 73,413"/>
+<text class="msg-t" x="105.5" y="405">orders/1</text>
+<rect class="bx tn" x="56" y="412" width="28" height="28"/>
+<rect class="bx tn" x="84" y="412" width="28" height="28"/>
+<rect class="bx tn" x="112" y="412" width="28" height="28"/>
+<rect class="bx tn" x="140" y="412" width="28" height="28"/>
+<text class="an" x="184" y="424">one copy,</text>
+<text class="an" x="184" y="444">on one node</text>
+<rect class="bx" x="40" y="468" width="280" height="172" rx="2"/>
+<text class="pod" x="100" y="494">narad-2</text>
+<path class="bx tn" d="M56 516V548A60 8 0 0 0 176 548V516"/>
+<ellipse class="bx tn" cx="116" cy="516" rx="60" ry="8"/>
+<text class="an mid" x="116" y="544.5">metastore</text>
+<text class="an" x="188" y="524">all topics, users,</text>
+<text class="an" x="188" y="544">assignments</text>
+<text class="cd" x="56" y="588">orders/2</text>
+<rect class="bx tn" x="56" y="596" width="28" height="28"/>
+<rect class="bx tn" x="84" y="596" width="28" height="28"/>
+<rect class="bx tn" x="112" y="596" width="28" height="28"/>
+<rect class="bx tn" x="140" y="596" width="28" height="28"/>
+<path class="ln1" d="M56 168H32Q20 168 20 180V524Q20 536 32 536H46"/>
+<path class="ah" d="M46 541L56 536L46 531Z"/>
+<path class="ln1" d="M20 352H46"/>
+<path class="ah" d="M46 357L56 352L46 347Z"/>
+<path class="ln2" d="M340 186.0V554.0"/>
+<path class="ln2" d="M340 186H332"/>
+<path class="ah" d="M332 180L320 186L332 192Z"/>
+<path class="ln2" d="M340 370H332"/>
+<path class="ah" d="M332 364L320 370L332 376Z"/>
+<path class="ln2" d="M340 554H332"/>
+<path class="ah" d="M332 548L320 554L332 560Z"/>
+<text class="an" x="16" y="672">QUIC: commits and forwards between</text>
+<text class="an" x="16" y="692">any two nodes</text>
+</svg>

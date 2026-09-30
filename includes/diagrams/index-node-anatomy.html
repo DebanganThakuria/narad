@@ -1,0 +1,153 @@
+<svg class="nr-dia__wide" viewBox="0 -4 800 500" role="img" aria-labelledby="index-node-anatomy-w-t" aria-describedby="index-node-anatomy-w-d">
+<title id="index-node-anatomy-w-t">Inside one node: three paths through the same components</title>
+<desc id="index-node-anatomy-w-d">A load balancer sends each request to any node, here narad-1. Inside the node, the HTTP API takes it. A produce goes straight into the node's ingress WAL, and the message, ord_123, is answered once it is fsynced there; the produce dispatcher then reads it back and commits it, to the broker engine's partition logs when this node owns the partition, or over QUIC to the owner on another node. A consume or an ack goes to the router, which looks the partition up in the node's own metastore replica and hands it to the broker engine when the partition is owned here, or forwards it to the owner. The fan-out runner reads the owned partition logs and commits child copies, here or on the child partition's owner.</desc>
+<rect class="rg" x="0" y="72" width="604" height="420" rx="6"/>
+<text class="rl" x="20" y="476">One node:</text>
+<text class="cd" x="112.9" y="476">narad-1</text>
+<rect class="bx" x="0" y="0" width="160" height="44" rx="2"/>
+<text class="lb mid" x="80" y="28.8">Load balancer</text>
+<path class="ln" d="M80 44V84"/>
+<path class="ah" d="M73 84L80 96L87 84Z"/>
+<rect class="bx" x="20" y="96" width="120" height="60" rx="2"/>
+<text class="lb mid" x="80" y="132.8">HTTP API</text>
+<text class="an" x="156" y="102">produce</text>
+<path class="ln" d="M140 126H158M282 126H288"/>
+<path class="ah" d="M288 133L300 126L288 119Z"/>
+<polygon class="msg" points="163,111 259,111 277,141 181,141"/>
+<text class="msg-t" x="220" y="132.5">ord_123</text>
+<path class="bx tn" d="M300 100V156A44 8 0 0 0 388 156V100"/>
+<ellipse class="bx tn" cx="344" cy="100" rx="44" ry="8"/>
+<text class="an mid" x="344" y="130.4">Ingress</text>
+<text class="an mid" x="344" y="152.4">WAL</text>
+<path class="ln2" d="M388 126H408"/>
+<path class="ah" d="M408 132L420 126L408 120Z"/>
+<rect class="bx" x="420" y="96" width="164" height="60" rx="2"/>
+<text class="lb mid" x="502" y="121.8">Produce</text>
+<text class="lb mid" x="502" y="143.8">dispatcher</text>
+<path class="ln dash" d="M584 126H648"/>
+<path class="ah" d="M648 133L660 126L648 119Z"/>
+<path class="ln2" d="M440 156V216"/>
+<path class="ah" d="M434 216L440 228L446 216Z"/>
+<text class="an end" x="432" y="198">commit here</text>
+<path class="ln" d="M80 156V232"/>
+<path class="ah" d="M73 232L80 244L87 232Z"/>
+<text class="an" x="92" y="206">consume, ack</text>
+<rect class="bx" x="20" y="244" width="120" height="76" rx="2"/>
+<text class="lb mid" x="80" y="288.8">Router</text>
+<path class="ln" d="M140 264H252"/>
+<path class="ah" d="M252 271L264 264L252 257Z"/>
+<text class="an" x="152" y="254">owned here</text>
+<path class="ln2" d="M140 300H164Q180 300 180 316V436Q180 452 196 452H648"/>
+<path class="ah" d="M648 458L660 452L648 446Z"/>
+<text class="an" x="196" y="442">or forward to the owner</text>
+<path class="bx tn" d="M20 364V424A60 8 0 0 0 140 424V364"/>
+<ellipse class="bx tn" cx="80" cy="364" rx="60" ry="8"/>
+<text class="an mid" x="80" y="396.4">Metastore</text>
+<text class="an mid" x="80" y="418.4">Raft replica</text>
+<path class="ln1" d="M60 356V330"/>
+<path class="ah" d="M65 330L60 320L55 330Z"/>
+<text class="an" x="72" y="344">routes</text>
+<rect class="bx" x="264" y="228" width="196" height="176" rx="2"/>
+<text class="lb mid" x="362" y="260">Broker engine</text>
+<rect class="bx tn" x="282" y="284" width="36" height="36"/>
+<rect class="bx tn" x="318" y="284" width="36" height="36"/>
+<rect class="bx tn" x="354" y="284" width="36" height="36"/>
+<rect class="bx tn" x="390" y="284" width="36" height="36"/>
+<rect class="bx tn" x="282" y="320" width="36" height="36"/>
+<rect class="bx tn" x="318" y="320" width="36" height="36"/>
+<rect class="bx tn" x="354" y="320" width="36" height="36"/>
+<text class="an" x="282" y="384">owned partition logs</text>
+<path class="ln1" d="M460 280H486"/>
+<path class="ah" d="M486 285L496 280L486 275Z"/>
+<path class="ln2" d="M496 316H472"/>
+<path class="ah" d="M472 310L460 316L472 322Z"/>
+<rect class="bx" x="496" y="264" width="92" height="68" rx="2"/>
+<text class="lb mid" x="542" y="293.8">Fan-out</text>
+<text class="lb mid" x="542" y="315.8">runner</text>
+<text class="an" x="496" y="356">reads logs,</text>
+<text class="an" x="496" y="378">commits</text>
+<text class="an" x="496" y="400">child copies</text>
+<path class="ln2 dash" d="M588 298H648"/>
+<path class="ah" d="M648 304L660 298L648 292Z"/>
+<rect class="bx bxq" x="660" y="96" width="140" height="372" rx="2"/>
+<text class="lb mid" x="730" y="270">Owners on</text>
+<text class="lb mid" x="730" y="292">other nodes</text>
+<text class="an mid" x="730" y="318">over QUIC</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 720" role="img" data-search-exclude aria-labelledby="index-node-anatomy-n-t" aria-describedby="index-node-anatomy-n-d">
+<title id="index-node-anatomy-n-t">Inside one node: three paths through the same components</title>
+<desc id="index-node-anatomy-n-d">A load balancer sends each request to any node, here narad-1. Inside the node, the HTTP API takes it. A produce goes straight into the node's ingress WAL, and the message, ord_123, is answered once it is fsynced there; the produce dispatcher then reads it back and commits it, to the broker engine's partition logs when this node owns the partition, or over QUIC to the owner on another node. A consume or an ack goes to the router, which looks the partition up in the node's own metastore replica and hands it to the broker engine when the partition is owned here, or forwards it to the owner. The fan-out runner reads the owned partition logs and commits child copies, here or on the child partition's owner.</desc>
+<rect class="rg" x="0" y="60" width="360" height="572" rx="6"/>
+<text class="rl" x="16" y="616">One node:</text>
+<text class="cd" x="93.5" y="616">narad-1</text>
+<rect class="bx" x="16" y="0" width="160" height="40" rx="2"/>
+<text class="lb mid" x="96" y="25.78">Load balancer</text>
+<path class="ln" d="M96 40V64"/>
+<path class="ah" d="M89 64L96 76L103 64Z"/>
+<rect class="bx" x="16" y="76" width="180" height="44" rx="2"/>
+<text class="lb mid" x="106" y="103.78">HTTP API</text>
+<path class="bx tn" d="M228 80V124A58 8 0 0 0 344 124V80"/>
+<ellipse class="bx tn" cx="286" cy="80" rx="58" ry="8"/>
+<text class="an mid" x="286" y="104.5">Metastore</text>
+<text class="an mid" x="286" y="124.5">Raft replica</text>
+<path class="ln1" d="M320 132V186"/>
+<path class="ah" d="M315 186L320 196L325 186Z"/>
+<text class="an end" x="312" y="170">routes</text>
+<rect class="bx" x="228" y="196" width="116" height="44" rx="2"/>
+<text class="lb mid" x="286" y="223.78">Router</text>
+<path class="ln" d="M180 120V202Q180 218 196 218H216"/>
+<path class="ah" d="M216 225L228 218L216 211Z"/>
+<text class="an" x="188" y="156">consume,</text>
+<text class="an" x="188" y="176">ack</text>
+<text class="an" x="76" y="142">produce</text>
+<path class="ln" d="M64 120V160M64 196V200"/>
+<path class="ah" d="M57 200L64 212L71 200Z"/>
+<polygon class="msg" points="14.5,165 96.5,165 113.5,191 31.5,191"/>
+<text class="msg-t" x="64" y="183">ord_123</text>
+<path class="bx tn" d="M16 220V264A48 8 0 0 0 112 264V220"/>
+<ellipse class="bx tn" cx="64" cy="220" rx="48" ry="8"/>
+<text class="an mid" x="64" y="244.5">Ingress</text>
+<text class="an mid" x="64" y="264.5">WAL</text>
+<path class="ln2" d="M64 272V288"/>
+<path class="ah" d="M58 288L64 300L70 288Z"/>
+<rect class="bx" x="16" y="300" width="128" height="56" rx="2"/>
+<text class="lb mid" x="80" y="323.78">Produce</text>
+<text class="lb mid" x="80" y="343.78">dispatcher</text>
+<path class="ln2" d="M120 356V380"/>
+<path class="ah" d="M114 380L120 392L126 380Z"/>
+<text class="an" x="130" y="380">commit here</text>
+<path class="ln" d="M256 240V380"/>
+<path class="ah" d="M249 380L256 392L263 380Z"/>
+<text class="an end" x="248" y="280">owned</text>
+<text class="an end" x="248" y="300">here</text>
+<text class="an" x="266" y="280">or forward</text>
+<text class="an" x="266" y="300">to the</text>
+<text class="an" x="266" y="320">owner</text>
+<rect class="bx" x="100" y="392" width="244" height="124" rx="2"/>
+<text class="lb mid" x="222" y="418">Broker engine</text>
+<rect class="bx tn" x="152" y="432" width="28" height="28"/>
+<rect class="bx tn" x="180" y="432" width="28" height="28"/>
+<rect class="bx tn" x="208" y="432" width="28" height="28"/>
+<rect class="bx tn" x="236" y="432" width="28" height="28"/>
+<rect class="bx tn" x="264" y="432" width="28" height="28"/>
+<text class="an mid" x="222" y="500">owned partition logs</text>
+<path class="ln1" d="M196 516V538"/>
+<path class="ah" d="M191 538L196 548L201 538Z"/>
+<path class="ln2" d="M232 548V528"/>
+<path class="ah" d="M238 528L232 516L226 528Z"/>
+<rect class="bx" x="172" y="548" width="120" height="48" rx="2"/>
+<text class="lb mid" x="232" y="567.78">Fan-out</text>
+<text class="lb mid" x="232" y="587.78">runner</text>
+<text class="an" x="16" y="548">reads logs,</text>
+<text class="an" x="16" y="568">commits</text>
+<text class="an" x="16" y="588">child copies</text>
+<path class="ln dash" d="M16 344Q8 344 8 352V640"/>
+<path class="ah" d="M1 640L8 652L15 640Z"/>
+<path class="ln2 dash" d="M262 596V640"/>
+<path class="ah" d="M256 640L262 652L268 640Z"/>
+<path class="ln2" d="M344 226Q352 226 352 234V640"/>
+<path class="ah" d="M346 640L352 652L358 640Z"/>
+<rect class="bx bxq" x="0" y="652" width="360" height="60" rx="2"/>
+<text class="lb mid" x="180" y="678">Owners on other nodes</text>
+<text class="an mid" x="180" y="700">over QUIC</text>
+</svg>

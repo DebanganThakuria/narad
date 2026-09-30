@@ -14,47 +14,21 @@ Every Narad node runs the same binary with the same components. Nodes differ onl
 
 Inside one node, a request takes this path:
 
-```mermaid
-flowchart TB
-    accTitle: The request path inside one node
-    accDescr: A load balancer sends each request to any node. Inside the node, the HTTP API hands it to the router. The router writes a produce to the ingress WAL, and the produce dispatcher commits it to the partition's owner, this node or another one over QUIC. The router sends a consume or an ack to the broker engine, which works on the partition logs this node owns. The fan-out runner copies committed records into child partitions.
-    LB[Load balancer] --> H
-    subgraph node["one node"]
-        direction TB
-        H[HTTP API] --> R[Router]
-        R -->|produce| ING[Ingress WAL]
-        ING --> D[Produce dispatcher]
-        R -->|"consume, ack"| B[Broker engine]
-        D -->|"commit, here or<br/>on the owner (QUIC)"| S[("partition logs<br/>(owned partitions)")]
-        B --> S
-        F[Fan-out runner] -->|child commits| S
-    end
-```
+<figure class="nr-dia nr-dia--doc" id="fig-index-node-anatomy">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/index-node-anatomy.html"
+</div>
+<figcaption>A produce is answered once the node's own ingress WAL has fsynced it; the dispatcher then commits it here or over QUIC to the owner. Consumes and acks go through the router, which decides from the local metastore replica whether the partition is served here or forwarded.</figcaption>
+</figure>
 
 Across the cluster, every node holds a full copy of the metadata and the partitions it owns:
 
-```mermaid
-flowchart LR
-    accTitle: Three nodes of a Narad cluster
-    accDescr: Each of three nodes holds a Raft replica of the metastore and the partition logs it owns. The metastore replicas stay in step over Raft. The nodes commit messages to each other's partition logs over QUIC. The controller runs only on the node that leads Raft, here narad-0.
-    subgraph n0["narad-0"]
-        MS0[("metastore<br/>Raft replica")]
-        S0[("partition logs")]
-        C0["controller<br/>(Raft leader only)"]
-    end
-    subgraph n1["narad-1"]
-        MS1[("metastore<br/>Raft replica")]
-        S1[("partition logs")]
-    end
-    subgraph n2["narad-2"]
-        MS2[("metastore<br/>Raft replica")]
-        S2[("partition logs")]
-    end
-    MS0 <-->|Raft| MS1
-    MS1 <-->|Raft| MS2
-    S0 <-.->|QUIC| S1
-    S1 <-.->|QUIC| S2
-```
+<figure class="nr-dia nr-dia--doc" id="fig-index-cluster">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/index-cluster.html"
+</div>
+<figcaption>Every node holds the same metadata, kept in step by Raft, but each partition lives on exactly one node: <code>orders/1</code> is one copy, on <code>narad-1</code>.</figcaption>
+</figure>
 
 ## Five design ideas {#design-ideas}
 
@@ -75,40 +49,14 @@ A child topic is fed by a cursor on the owner of each parent partition. The curs
 
 ## One message, end to end {#message-end-to-end}
 
-A produce is accepted by any node and committed on the partition's owner:
+A produce is accepted by any node and committed on the partition's owner; once it is visible, a fan-out cursor copies it to child topics and a consumer takes it from the owner:
 
-```mermaid
-sequenceDiagram
-    accTitle: One message from producer to owner
-    accDescr: The producer posts to any node, which fsyncs the message into its ingress WAL and answers 202. That node's dispatcher commits it to the partition owner, which appends, fsyncs, verifies the checksum and advances the high watermark, so the message becomes visible, then confirms so the WAL entry can be reclaimed.
-    participant P as Producer
-    participant A as Accepting node
-    participant O as Partition owner
-    P->>A: POST /produce
-    A->>A: fsync into ingress WAL
-    A-->>P: 202
-    A->>O: dispatcher: commit batch (QUIC)
-    O->>O: append + fsync + CRC verify
-    O->>O: advance high watermark (visible)
-    O-->>A: committed (WAL entry now reclaimable)
-```
-
-Once it is visible, a fan-out cursor copies it to child topics and a consumer takes it from the owner:
-
-```mermaid
-sequenceDiagram
-    accTitle: One message from owner to consumer
-    accDescr: A fan-out cursor on the owner reads the committed records and commits copies to the owners of the child partitions. A consumer gets the message with a receipt handle from the owner and acks it.
-    participant F as Fan-out cursor
-    participant O as Partition owner
-    participant CH as Child owner
-    participant C as Consumer
-    F->>O: read committed slab
-    F->>CH: commit copies to child partitions
-    C->>O: GET /consume
-    O-->>C: message + receipt handle
-    C->>O: POST /ack
-```
+<figure class="nr-dia nr-dia--doc" id="fig-index-journey">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
+--8<-- "diagrams/index-journey.html"
+</div>
+<figcaption>The producer waits for one fsync on the node it reached; everything after the <code>202 Accepted</code> happens in the background, and <code>ord_123</code> becomes visible only when the owner advances its high watermark. The steps are in order, not to scale.</figcaption>
+</figure>
 
 ## Design principles {#design-principles}
 

@@ -89,16 +89,12 @@ The same rule decides a *lost* cursor file. With the attach point recorded, a cu
 
 A [delay child](../reference/glossary.md#delay-child)'s cursor adds one filter: **it reads only records whose parent commit time is at or before now minus the delay.**
 
-```mermaid
-flowchart TB
-    accTitle: The delay gate
-    accDescr: Three parent records were committed at 12:00:00, 12:00:01 and 12:00:02. The gate compares now minus the delay with each record's commit time. A record that is due is fanned out; at the first record that is not due yet, the cursor sleeps until that record is due.
-    subgraph parent log
-        r1["r₁ committed 12:00:00"] --> r2["r₂ committed 12:00:01"] --> r3["r₃ committed 12:00:02"]
-    end
-    GATE{"now − delay ≥ commit time?"} -->|"yes: fan out"| r1
-    GATE -->|"not yet: sleep until r₂ is due"| r2
-```
+<figure class="nr-dia nr-dia--doc" id="fig-fanout-delay-gate">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
+--8<-- "diagrams/fanout-delay-gate.html"
+</div>
+<figcaption>The gate is <code>now - delay</code> on the owner's clock. The cursor copies what is left of it and sleeps at the first record right of it, because commit times never decrease along a partition.</figcaption>
+</figure>
 
 Commit times **never decrease along a partition**: they are stamped just before the commit takes the partition's produce lock, and raised under it to the newest time the partition has committed (see [Storage engine](storage-engine.md#segments-frames-records)). So the first record that is not due yet proves that everything behind it is not due either. The floor lives in the committing process, so it starts over after a restart: a wall-clock step back across a restart can still leave a small inversion, which holds due records back by at most the size of the step.
 

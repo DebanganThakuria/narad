@@ -121,13 +121,12 @@ After a crash the file stays empty until the log is opened and closed again, and
 
 Records can sit above the high watermark, deliberately:
 
-```mermaid
-flowchart LR
-    accTitle: Visible records and the hidden tail
-    accDescr: Offsets 0 to H minus 1 are visible to consumers. Offsets H to T minus 1 are the hidden tail, written but not exposed. Offset T is where the next append goes.
-    A["offsets 0 .. H-1<br/>visible"] --> B["offsets H .. T-1<br/>hidden tail"]
-    B --> C["offset T = next append"]
-```
+<figure class="nr-dia nr-dia--doc" id="fig-storage-hwm-tail">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
+--8<-- "diagrams/storage-hwm-tail.html"
+</div>
+<figcaption>A batch is written and checked above the high watermark and becomes visible only in step 4; a crash before then leaves a hidden copy that the ingress WAL makes a duplicate, never a loss.</figcaption>
+</figure>
 
 These records in the [hidden tail](../reference/glossary.md#hidden-tail) were written but never exposed. A crash landed after a commit wrote them and before it advanced the boundary (before or after its fsync), or a failed commit could not truncate them (the log is then poisoned, see above). For produce-path records the ingress WAL still owns them and **commits them again at fresh offsets**, since its checkpoint never passes a batch whose commit did not return. So the hidden copy is a duplicate in waiting.
 

@@ -1,0 +1,172 @@
+<svg class="nr-dia__wide" viewBox="0 -4 800 516" role="img" aria-labelledby="produce-dispatcher-w-t" aria-describedby="produce-dispatcher-w-d">
+<title id="produce-dispatcher-w-t">The produce dispatcher: one reader, a queue per partition, a checkpoint that never lies</title>
+<desc id="produce-dispatcher-w-d">Inside narad-0, the accepting node. The ingress WAL is a strip of sequence numbers from the checkpoint to the read frontier. Each is done (committed), held (queued or in flight) or skipped (left in the WAL and read again at least once a second). 1: the dispatcher reads each record once, as it becomes durable, and places it on the queue of its partition; each queue has at most one commit in flight. 2: orders/0 is owned here, so its batch is committed into the local partition log. orders/1 is owned by narad-2, so its batch, at most 8 MiB, goes over QUIC. orders/2 is owned by narad-3, which is dead: after 3 s of failures, or at once when membership marks it dead, its records go to the next live partition, orders/0. 3: a commit that lands marks its sequence numbers done. 4: the checkpoint moves to the first sequence number not done, is synced within 250 ms, and the WAL compacts behind it. Up to 16 commits run at once.</desc>
+<defs><pattern id="produce-dispatcher-w-h" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hb" width="10" height="10"/><path class="hl" d="M0 0V10"/></pattern></defs>
+<rect class="rg" x="0" y="0" width="644" height="508" rx="6"/>
+<text class="cd" x="20" y="494">narad-0</text>
+<text class="rl" x="107.8" y="494">the accepting node</text>
+<circle class="sc" cx="36" cy="28" r="13"/><text class="sn" x="36" y="33.5">4</text>
+<text class="an" x="58" y="34">checkpoint: first seq not done</text>
+<text class="an" x="58" y="56">synced within 250 ms; the WAL compacts behind it</text>
+<text class="an mid" x="472" y="34">read frontier</text>
+<rect class="bx bx3" x="40" y="84" width="36" height="36"/>
+<rect class="bx tn" x="76" y="84" width="36" height="36"/>
+<rect class="bx tn" x="112" y="84" width="36" height="36"/>
+<rect class="bx bx3" x="148" y="84" width="36" height="36"/>
+<rect class="bx ghost" x="184" y="84" width="36" height="36"/>
+<rect class="bx tn" x="220" y="84" width="36" height="36"/>
+<rect class="bx bx3" x="256" y="84" width="36" height="36"/>
+<rect class="bx bx3" x="292" y="84" width="36" height="36"/>
+<rect class="bx ghost" x="328" y="84" width="36" height="36"/>
+<rect class="bx tn" x="364" y="84" width="36" height="36"/>
+<rect class="bx bx3" x="400" y="84" width="36" height="36"/>
+<rect class="bx bx3" x="436" y="84" width="36" height="36"/>
+<path class="ln" d="M40 68V136"/>
+<path class="ln" d="M472 68V136"/>
+<rect class="bx tn" x="500" y="72" width="20" height="20"/>
+<text class="an" x="530" y="88">done</text>
+<rect class="bx bx3" x="500" y="100" width="20" height="20"/>
+<text class="an" x="530" y="116">held</text>
+<rect class="bx ghost" x="500" y="128" width="20" height="20"/>
+<text class="an" x="530" y="144">skipped</text>
+<path class="ln2" d="M58 136V244Q58 260 74 260H88"/>
+<path class="ah" d="M88 266L100 260L88 254Z"/>
+<path class="ln2" d="M58 136V340Q58 356 74 356H88"/>
+<path class="ah" d="M88 362L100 356L88 350Z"/>
+<path class="ln2" d="M58 136V428Q58 444 74 444H88"/>
+<path class="ah" d="M88 450L100 444L88 438Z"/>
+<circle class="sc" cx="84" cy="164" r="13"/><text class="sn" x="84" y="169.5">1</text>
+<text class="an" x="106" y="170">read once, as it becomes durable</text>
+<text class="an mu" x="106" y="196">skipped: left in the WAL, read again</text>
+<text class="an mu" x="106" y="218">at least once a second</text>
+<rect class="bx" x="100" y="236" width="180" height="48" rx="2"/>
+<text class="cd" x="112" y="266">orders/0</text>
+<rect class="bx" x="208" y="248" width="24" height="24"/>
+<rect class="bx" x="232" y="248" width="24" height="24"/>
+<rect class="bx" x="256" y="248" width="24" height="24"/>
+<rect class="bx" x="100" y="332" width="180" height="48" rx="2"/>
+<text class="cd" x="112" y="362">orders/2</text>
+<rect class="bx" x="208" y="344" width="24" height="24"/>
+<rect class="bx" x="232" y="344" width="24" height="24"/>
+<rect class="bx" x="256" y="344" width="24" height="24"/>
+<rect class="bx" x="100" y="420" width="180" height="48" rx="2"/>
+<text class="cd" x="112" y="450">orders/1</text>
+<rect class="bx" x="208" y="432" width="24" height="24"/>
+<rect class="bx" x="232" y="432" width="24" height="24"/>
+<rect class="bx" x="256" y="432" width="24" height="24"/>
+<path class="ln2" d="M280 260H424"/>
+<path class="ah" d="M424 266L436 260L424 254Z"/>
+<circle class="sc" cx="304" cy="238" r="13"/><text class="sn" x="304" y="243.5">2</text>
+<text class="an" x="326" y="244">commit here</text>
+<rect class="bx tn" x="436" y="242" width="36" height="36"/>
+<rect class="bx tn" x="472" y="242" width="36" height="36"/>
+<rect class="bx tn" x="508" y="242" width="36" height="36"/>
+<rect class="bx tn" x="544" y="242" width="36" height="36"/>
+<path class="ln1" d="M454 242V136"/>
+<path class="ah-o" d="M461 147L454 136L447 147"/>
+<circle class="sc" cx="480" cy="170" r="13"/><text class="sn" x="480" y="175.5">3</text>
+<text class="an" x="502" y="176">committed: mark</text>
+<text class="an" x="502" y="198">the seqs done</text>
+<path class="ln2 dash" d="M280 356H672"/>
+<path class="ah" d="M672 362L684 356L672 350Z"/>
+<path class="x" d="M591 347L609 365M609 347L591 365"/>
+<rect class="dead" x="684" y="328" width="116" height="56" fill="url(#produce-dispatcher-w-h)"/>
+<rect class="plate" x="690.7" y="340" width="102.6" height="32"/>
+<text class="pod" x="742" y="362.46">narad-3</text>
+<path class="ln1 dash" d="M190 332V294"/>
+<path class="ah" d="M195 294L190 284L185 294Z"/>
+<text class="an" x="202" y="314">3 s of failures (at once if dead): next live partition</text>
+<path class="ln" d="M280 444H512M632 444H672"/>
+<path class="ah" d="M672 451L684 444L672 437Z"/>
+<polygon class="msg" points="515,429 611,429 629,459 533,459"/>
+<text class="msg-t" x="572" y="450.5">orders/1</text>
+<text class="an" x="296" y="434">QUIC, at most 8 MiB</text>
+<rect class="bx" x="684" y="416" width="116" height="56" rx="2"/>
+<text class="pod" x="742" y="450.46">narad-2</text>
+<text class="an mu end" x="632" y="494">up to 16 commits at once</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 752" role="img" data-search-exclude aria-labelledby="produce-dispatcher-n-t" aria-describedby="produce-dispatcher-n-d">
+<title id="produce-dispatcher-n-t">The produce dispatcher: one reader, a queue per partition, a checkpoint that never lies</title>
+<desc id="produce-dispatcher-n-d">Inside narad-0, the accepting node. The ingress WAL is a strip of sequence numbers from the checkpoint to the read frontier. Each is done (committed), held (queued or in flight) or skipped (left in the WAL and read again at least once a second). 1: the dispatcher reads each record once, as it becomes durable, and places it on the queue of its partition; each queue has at most one commit in flight. 2: orders/0 is owned here, so its batch is committed into the local partition log. orders/1 is owned by narad-2, so its batch, at most 8 MiB, goes over QUIC. orders/2 is owned by narad-3, which is dead: after 3 s of failures, or at once when membership marks it dead, its records go to the next live partition, orders/0. 3: a commit that lands marks its sequence numbers done. 4: the checkpoint moves to the first sequence number not done, is synced within 250 ms, and the WAL compacts behind it. Up to 16 commits run at once.</desc>
+<defs><pattern id="produce-dispatcher-n-h" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hb" width="10" height="10"/><path class="hl" d="M0 0V10"/></pattern></defs>
+<rect class="rg" x="0" y="0" width="360" height="528" rx="6"/>
+<text class="cd" x="16" y="516">narad-0</text>
+<text class="rl" x="88.5" y="516">the accepting node</text>
+<text class="an" x="16" y="26">checkpoint</text>
+<text class="an mid" x="248" y="26">read frontier</text>
+<rect class="bx bx3" x="24" y="52" width="28" height="28"/>
+<rect class="bx tn" x="52" y="52" width="28" height="28"/>
+<rect class="bx tn" x="80" y="52" width="28" height="28"/>
+<rect class="bx bx3" x="108" y="52" width="28" height="28"/>
+<rect class="bx ghost" x="136" y="52" width="28" height="28"/>
+<rect class="bx tn" x="164" y="52" width="28" height="28"/>
+<rect class="bx bx3" x="192" y="52" width="28" height="28"/>
+<rect class="bx bx3" x="220" y="52" width="28" height="28"/>
+<path class="ln" d="M24 36V96"/>
+<path class="ln" d="M248 36V96"/>
+<path class="ln2" d="M38 80V154Q38 160 44 160"/>
+<path class="ah" d="M44 166L56 160L44 154Z"/>
+<path class="ln2" d="M38 80V250Q38 256 44 256"/>
+<path class="ah" d="M44 262L56 256L44 250Z"/>
+<path class="ln2" d="M38 80V326Q38 332 44 332"/>
+<path class="ah" d="M44 338L56 332L44 326Z"/>
+<circle class="sc" cx="64" cy="116" r="12"/><text class="sn" x="64" y="121">1</text>
+<rect class="bx" x="56" y="140" width="132" height="40" rx="2"/>
+<text class="cd" x="66" y="165">orders/0</text>
+<rect class="bx" x="146" y="151" width="18" height="18"/>
+<rect class="bx" x="164" y="151" width="18" height="18"/>
+<rect class="bx" x="56" y="236" width="132" height="40" rx="2"/>
+<text class="cd" x="66" y="261">orders/2</text>
+<rect class="bx" x="146" y="247" width="18" height="18"/>
+<rect class="bx" x="164" y="247" width="18" height="18"/>
+<rect class="bx" x="56" y="312" width="132" height="40" rx="2"/>
+<text class="cd" x="66" y="337">orders/1</text>
+<rect class="bx" x="146" y="323" width="18" height="18"/>
+<rect class="bx" x="164" y="323" width="18" height="18"/>
+<path class="ln2" d="M188 160H224"/>
+<path class="ah" d="M224 166L236 160L224 154Z"/>
+<circle class="sc" cx="212" cy="132" r="12"/><text class="sn" x="212" y="137">2</text>
+<rect class="bx tn" x="236" y="146" width="28" height="28"/>
+<rect class="bx tn" x="264" y="146" width="28" height="28"/>
+<rect class="bx tn" x="292" y="146" width="28" height="28"/>
+<rect class="bx tn" x="320" y="146" width="28" height="28"/>
+<path class="ln1" d="M240 146V80"/>
+<path class="ah-o" d="M247 91L240 80L233 91"/>
+<circle class="sc" cx="268" cy="112" r="12"/><text class="sn" x="268" y="117">3</text>
+<path class="ln2 dash" d="M188 256H224"/>
+<path class="ah" d="M224 262L236 256L224 250Z"/>
+<path class="x" d="M205 249L219 263M219 249L205 263"/>
+<rect class="dead" x="236" y="232" width="116" height="48" fill="url(#produce-dispatcher-n-h)"/>
+<rect class="plate" x="251" y="243" width="86" height="26"/>
+<text class="pod" x="294" y="261.44">narad-3</text>
+<path class="ln1 dash" d="M120 236V190"/>
+<path class="ah" d="M125 190L120 180L115 190Z"/>
+<text class="an" x="132" y="204">3 s of failures:</text>
+<text class="an" x="132" y="224">next live partition</text>
+<path class="ln" d="M122 352V378M122 414V428"/>
+<path class="ah" d="M115 428L122 440L129 428Z"/>
+<polygon class="msg" points="72.5,383 154.5,383 171.5,409 89.5,409"/>
+<text class="msg-t" x="122" y="401">orders/1</text>
+<text class="an" x="184" y="392">QUIC, at most</text>
+<text class="an" x="184" y="412">8 MiB</text>
+<rect class="bx" x="56" y="440" width="132" height="44" rx="2"/>
+<text class="pod" x="122" y="467.44">narad-2</text>
+<text class="an mu" x="204" y="456">up to 16 commits</text>
+<text class="an mu" x="204" y="476">at once</text>
+<path class="sep" d="M0 544H360"/>
+<rect class="bx tn" x="16" y="558" width="16" height="16"/>
+<text class="an" x="40" y="571">done</text>
+<rect class="bx bx3" x="112" y="558" width="16" height="16"/>
+<text class="an" x="136" y="571">held: queued or in flight</text>
+<rect class="bx ghost" x="16" y="584" width="16" height="16"/>
+<text class="an" x="40" y="597">skipped: read again at least once a second</text>
+<circle class="sc" cx="28" cy="628" r="12"/><text class="sn" x="28" y="633">1</text>
+<text class="an" x="50" y="633">read once, as it becomes durable</text>
+<circle class="sc" cx="28" cy="656" r="12"/><text class="sn" x="28" y="661">2</text>
+<text class="an" x="50" y="661">commit: here, or over QUIC to the owner</text>
+<circle class="sc" cx="28" cy="684" r="12"/><text class="sn" x="28" y="689">3</text>
+<text class="an" x="50" y="689">committed: mark the seqs done</text>
+<circle class="sc" cx="28" cy="712" r="12"/><text class="sn" x="28" y="717">4</text>
+<text class="an" x="50" y="717">checkpoint: first seq not done, synced</text>
+<text class="an" x="50" y="737">within 250 ms; the WAL compacts behind it</text>
+</svg>

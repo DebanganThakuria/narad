@@ -21,22 +21,14 @@ Queue consumption is a leasing protocol. The [owner](../reference/glossary.md#ow
 
 Each owned partition has a shard of the **InFlight** tracker:
 
-```mermaid
-flowchart TB
-    accTitle: One partition's shard of the in-flight table
-    accDescr: In memory, a partition shard holds the committed frontier, the reservations with their nonces and expiry times, the set of offsets acked ahead of a gap, the corrupt-skipped set and an expiry min-heap. The committed frontier and the acked-ahead set are written to the consumer.ahead and consumer.offset files every 100 ms and synced every second.
-    subgraph shard["partition shard (in memory)"]
-        committed["committed = 41<br/>durable frontier"]
-        entries["reservations:<br/>43 → nonce 881, expires 12:00:31<br/>45 → nonce 882, expires 12:00:35"]
-        ahead["ackedAhead: {44}"]
-        corrupt["corrupt-skipped: {}"]
-        heap["expiry min-heap"]
-        committed ~~~ entries ~~~ ahead ~~~ corrupt ~~~ heap
-    end
-    committed -.->|"written every 100ms, synced every 1s (unreleased)"| file[("consumer.ahead<br/>consumer.offset")]
-```
+<figure class="nr-dia nr-dia--doc" id="fig-consume-offset-strip">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--sky">
+--8<-- "diagrams/consume-offset-strip.html"
+</div>
+<figcaption>The committed frontier is the last offset up to which everything is acked; leases and the acked-ahead set sit above it. Only the frontier and the acked-ahead set reach the disk, in <code>consumer.ahead</code> and <code>consumer.offset</code>.</figcaption>
+</figure>
 
-- **`committed`** is the [committed frontier](../reference/glossary.md#committed-frontier): the offset below which *everything* is acked. It advances contiguously. It is persisted in the frontier field of every `consumer.ahead` record, and in `consumer.offset`, which is brought level with it at most every 30 s and at a graceful stop (see [Ack persistence](#how-acks-reach-the-disk)). Recovery takes the larger of the two.
+- **`committed`** is the [committed frontier](../reference/glossary.md#committed-frontier): the last offset up to which *everything* is acked. It advances contiguously. It is persisted in the frontier field of every `consumer.ahead` record, and in `consumer.offset`, which is brought level with it at most every 30 s and at a graceful stop (see [Ack persistence](#how-acks-reach-the-disk)). Recovery takes the larger of the two.
 - **Reservations** are leased offsets, each with a **nonce** and an expiry. The [receipt handle](../reference/glossary.md#receipt-handle) a consumer holds is `partition:offset:nonce`; the nonce is what makes a stale handle detectable.
 - **`ackedAhead`** is the [acked-ahead set](../reference/glossary.md#acked-ahead-set): acks that arrived out of order, parked until the gap beneath them closes. It is bounded by `max_acked_ahead_per_partition` and persisted in `consumer.ahead`.
 - The whole shard is memory-only except `committed` and the acked-ahead set. A crash forgets the leases, and the messages are simply delivered again. That is the entire crash story for consumption.
@@ -163,6 +155,13 @@ An ack settles in the shard's memory at once and marks its partition for the nod
 
 - **Every tick** (T: 100 ms, or `storage.consumer_offset_commit_interval_ms` when that is shorter), each partition whose acked state changed gets a fresh `consumer.ahead` record, the frontier plus the offsets acked above it, written through a descriptor the committer keeps open. Nothing is synced: the record is in the page cache, which a crash of the broker process does not lose.
 - **Every durability interval** (D: `storage.consumer_offset_commit_interval_ms`, 1 s by default), each partition written since is written out once. On Linux that is `fdatasync`. On macOS it is a plain `fsync(2)`, which gets the data to the drive but not past its cache, and then one `F_FULLFSYNC` per device for all of that tick's partitions instead of one per partition. The writeouts are spread over the ticks of an interval by a hash of the partition, so they do not reach the disk as one burst, and a partition whose writes have waited a whole interval is written out on the next tick whatever its turn.
+
+<figure class="nr-dia nr-dia--doc" id="fig-consume-ack-cadences">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--sky">
+--8<-- "diagrams/consume-ack-cadences.html"
+</div>
+<figcaption>Each tick rewrites the window slot in the page cache, and one writeout per interval makes it the anchor. Follow the lime record: after the tick at 0.3 s a process crash keeps it, and after the writeout at 0.7 s a power loss does too.</figcaption>
+</figure>
 
 `consumer.ahead` has two 4 KiB slots, and the committer gives them roles. The **anchor** holds the newest record known to be durable and is never written while it is the anchor; ticks write the other slot, the **window**. A writeout that succeeds (with its device flush, on macOS) flips the two. One that fails leaves the anchor alone, and the next tick rewrites the window in full, since after a failed sync the page cache is not to be trusted.
 

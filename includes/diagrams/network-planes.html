@@ -1,0 +1,98 @@
+<svg class="nr-dia__wide" viewBox="0 16 800 492" role="img" aria-labelledby="network-planes-w-t" aria-describedby="network-planes-w-d">
+<title id="network-planes-w-t">Which traffic rides which port</title>
+<desc id="network-planes-w-d">Clients reach a node through your ingress, where TLS ends, and speak HTTP with Basic auth to port 7942/tcp. Inside the cluster network, which must stay private, every node talks to every other on two ports. Node RPC runs over QUIC on 7942/udp: produce, consume and ack lanes of 16 streams each and a control lane of 4, authenticated by the cluster secret, proved per TLS session; a forwarded commit batch travels here. Raft runs on 7943/tcp with mutual TLS. Prometheus scrapes metrics and the probes on 9100/tcp, with no auth, so keep it internal. pprof on 6060 is off by default.</desc>
+<rect class="rg" x="300" y="20" width="500" height="380" rx="6"/>
+<text class="rl" x="320" y="50">Cluster network: private, fence it</text>
+<text class="lb" x="0" y="104">Clients</text>
+<rect class="ink" x="0" y="120" width="14" height="100"/>
+<path class="ln" d="M14 170H36"/>
+<path class="ah" d="M36 177L48 170L36 163Z"/>
+<rect class="bx" x="48" y="138" width="140" height="64" rx="2"/>
+<text class="lb mid" x="118" y="166">Ingress</text>
+<text class="an mid" x="118" y="190">TLS ends here</text>
+<path class="ln" d="M188 170H318"/>
+<path class="ah" d="M318 177L330 170L318 163Z"/>
+<text class="cd" x="198" y="158">7942/tcp</text>
+<text class="an" x="198" y="196">HTTP,</text>
+<text class="an" x="198" y="218">Basic auth</text>
+<rect class="bx bx3" x="330" y="80" width="120" height="220" rx="2"/>
+<text class="pod" x="390" y="196.46">narad-0</text>
+<rect class="bx" x="620" y="80" width="140" height="70" rx="2"/>
+<text class="pod" x="690" y="121.46">narad-1</text>
+<rect class="bx" x="620" y="230" width="140" height="70" rx="2"/>
+<text class="pod" x="690" y="271.46">narad-2</text>
+<path class="ln2" d="M450 100H478M592 100H620"/>
+<polygon class="msg" points="478,85 574,85 592,115 496,115"/>
+<text class="msg-t" x="535" y="106.5">commit</text>
+<path class="ln1" d="M450 136H620"/>
+<path class="ln2" d="M450 250H620"/>
+<path class="ln1" d="M450 286H620"/>
+<text class="cd" x="470" y="238">7942/udp</text>
+<text class="cd" x="470" y="274">7943/tcp</text>
+<path class="ln2" d="M656 150V230"/>
+<path class="ln1" d="M724 150V230"/>
+<text class="an" x="470" y="324">7942/udp: node RPC over QUIC;</text>
+<text class="an" x="470" y="346">produce, consume, ack: 16 streams</text>
+<text class="an" x="470" y="368">each, control: 4; the cluster</text>
+<text class="an" x="470" y="390">secret, proved per TLS session</text>
+<path class="ln2" d="M390 440V312"/>
+<path class="ah" d="M396 312L390 300L384 312Z"/>
+<rect class="bx bxq" x="330" y="440" width="120" height="48" rx="2"/>
+<text class="lb mid" x="390" y="470.8">Prometheus</text>
+<text class="cd" x="466" y="456">9100/tcp</text>
+<text class="an" x="466" y="478">metrics and probes,</text>
+<text class="an" x="466" y="500">no auth: keep internal</text>
+<rect class="bx ghost" x="704" y="440" width="96" height="44" rx="2"/>
+<text class="cd mid" x="752" y="468">6060</text>
+<text class="an mu end" x="796" y="428">pprof, off by default</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 732" role="img" data-search-exclude aria-labelledby="network-planes-n-t" aria-describedby="network-planes-n-d">
+<title id="network-planes-n-t">Which traffic rides which port</title>
+<desc id="network-planes-n-d">Clients reach a node through your ingress, where TLS ends, and speak HTTP with Basic auth to port 7942/tcp. Inside the cluster network, which must stay private, every node talks to every other on two ports. Node RPC runs over QUIC on 7942/udp: produce, consume and ack lanes of 16 streams each and a control lane of 4, authenticated by the cluster secret, proved per TLS session; a forwarded commit batch travels here. Raft runs on 7943/tcp with mutual TLS. Prometheus scrapes metrics and the probes on 9100/tcp, with no auth, so keep it internal. pprof on 6060 is off by default.</desc>
+<rect class="rg" x="0" y="196" width="360" height="332" rx="6"/>
+<text class="rl" x="20" y="512">Cluster network: private</text>
+<text class="lb" x="16" y="16">Clients</text>
+<rect class="ink" x="16" y="24" width="160" height="12"/>
+<path class="ln" d="M96 36V48"/>
+<path class="ah" d="M89 48L96 60L103 48Z"/>
+<rect class="bx" x="16" y="60" width="160" height="56" rx="2"/>
+<text class="lb mid" x="96" y="84">Ingress</text>
+<text class="an mid" x="96" y="106">TLS ends here</text>
+<rect class="bx bxq" x="216" y="60" width="128" height="56" rx="2"/>
+<text class="lb mid" x="280" y="93.78">Prometheus</text>
+<path class="ln" d="M48 116V216"/>
+<path class="ah" d="M41 216L48 228L55 216Z"/>
+<text class="cd" x="60" y="144">7942/tcp</text>
+<text class="an" x="60" y="164">HTTP, Basic auth</text>
+<path class="ln2" d="M232 116V216"/>
+<path class="ah" d="M226 216L232 228L238 216Z"/>
+<text class="cd" x="244" y="144">9100/tcp</text>
+<text class="an" x="244" y="164">no auth: keep</text>
+<text class="an" x="244" y="184">internal</text>
+<rect class="bx bx3" x="16" y="228" width="328" height="48" rx="2"/>
+<text class="pod" x="180" y="257.44">narad-0</text>
+<rect class="bx" x="16" y="420" width="144" height="48" rx="2"/>
+<text class="pod" x="88" y="449.44">narad-1</text>
+<rect class="bx" x="200" y="420" width="144" height="48" rx="2"/>
+<text class="pod" x="272" y="449.44">narad-2</text>
+<path class="ln1" d="M36 276V420"/>
+<path class="ln2" d="M100 276V321M100 355V420"/>
+<polygon class="msg" points="50.5,325 132.5,325 149.5,351 67.5,351"/>
+<text class="msg-t" x="100" y="343">commit</text>
+<path class="ln2" d="M264 276V420"/>
+<path class="ln1" d="M300 276V420"/>
+<path class="ln2" d="M160 436H200"/>
+<path class="ln1" d="M160 456H200"/>
+<path class="sep" d="M0 552H360"/>
+<path class="ln2" d="M0 576H40"/>
+<text class="cd" x="52" y="581">7942/udp</text>
+<text class="an" x="52" y="603">node RPC over QUIC; produce, consume,</text>
+<text class="an" x="52" y="623">ack: 16 streams each, control: 4;</text>
+<text class="an" x="52" y="643">cluster secret, per TLS session</text>
+<path class="ln1" d="M0 676H40"/>
+<text class="cd" x="52" y="681">7943/tcp</text>
+<text class="an" x="137.5" y="681">Raft, mutual TLS</text>
+<rect class="bx ghost" x="0" y="700" width="40" height="24" rx="2"/>
+<text class="cd" x="52" y="718">6060</text>
+<text class="an" x="99.5" y="718">pprof, off by default</text>
+</svg>

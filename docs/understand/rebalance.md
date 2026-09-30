@@ -47,18 +47,12 @@ flowchart TB
 
 A partition can be gigabytes. Freezing produce for the whole copy would be an outage, so the copy runs in **two phases**, and the freeze covers only the small tail:
 
-```mermaid
-flowchart TD
-    accTitle: The stages of one partition move
-    accDescr: Begin opens a copy session against the source. CatchUp copies in bulk without a freeze while produce continues, until the copy is within lagBytes of the tail. PrepareHandoff freezes the source and returns a freeze token. Finalize drains the now-static tail, re-arming the freeze with the token, reproduces the exact high watermark, committed offset and cursor files, and checks that the copy recovers. The fence presents the token once more, and a lapsed freeze refuses with no flip. The install renames the copy into place with a move marker. CompleteMove sets the owner to the target only if the owner is still the source and the target is still this node.
-    BEGIN["Begin: open copy session against the source"] --> CATCHUP
-    CATCHUP["CatchUp: freeze-free bulk copy<br/>(GBs, produce still flowing)"] -->|within lagBytes of the tail| FREEZE
-    FREEZE["PrepareHandoff: freeze the source<br/>(commits and new reservations), get a freeze token"] --> FINAL
-    FINAL["Finalize: drain the now-static tail,<br/>re-arming the freeze with the token,<br/>reproduce exact HWM + committed offset + cursor files,<br/>verify the copy recovers"] --> FENCE
-    FENCE["fence: present the token once more;<br/>a lapsed freeze refuses, no flip"] --> INSTALL
-    INSTALL["install: atomic rename into the real dir<br/>(with a move marker)"] --> FLIP
-    FLIP["CompleteMove, guarded CAS:<br/>Owner := Target, iff Owner still A and Target still B"]
-```
+<figure class="nr-dia nr-dia--doc" id="fig-rebalance-move-timeline">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/rebalance-move-timeline.html"
+</div>
+<figcaption>The bulk copy runs while the partition keeps serving; only the last tail is copied under the freeze. No client request is refused: produces still get <code>202</code>, and consumes of this partition pause for the freeze. Not to scale.</figcaption>
+</figure>
 
 **CatchUp** streams the source's segments (the sealed files plus the growing active tail) while produce keeps flowing, repeating to shrink the tail that is not yet copied. Once it is within `lagBytes` of the live tail it stops, and **PrepareHandoff** freezes the source. The freeze lasts milliseconds, because Finalize has only the last few MiB to drain.
 

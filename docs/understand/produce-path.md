@@ -21,20 +21,12 @@ The produce path runs on two clocks: how fast the client can be made safe (one l
 
 --8<-- "contract/produce-202.md"
 
-```mermaid
-sequenceDiagram
-    accTitle: Accepting a produce
-    accDescr: The client posts a produce to any node. The HTTP handler authorizes and validates it, resolves the target partition, and appends the record to the ingress WAL. The WAL group-commits and fsyncs, reports the record durable, and the handler answers 202 Accepted.
-    participant C as Client
-    participant H as HTTP handler (any node)
-    participant W as Ingress WAL
-    C->>H: POST /produce?key=k
-    H->>H: authorize, validate, resolve target partition
-    H->>W: append record
-    W->>W: group-commit fsync
-    W-->>H: durable at seq N
-    H-->>C: 202 Accepted
-```
+<figure class="nr-dia nr-dia--doc" id="fig-produce-group-commit">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
+--8<-- "diagrams/produce-group-commit.html"
+</div>
+<figcaption>Every caller whose record is staged before a flush shares its one write and one fsync, and each gets <code>202 Accepted</code> only when its own bytes are durable.</figcaption>
+</figure>
 
 Every node has one [ingress WAL](../reference/glossary.md#ingress-wal): a segmented, append-only log with group commit. Concurrent produces are staged into a shared buffer and fsynced together, so under load the fsync cost per message falls toward zero.
 
@@ -63,20 +55,12 @@ The dispatcher commits a partition's records in WAL order, so records of one bat
 
 A per-node dispatcher drains the WAL from a durable checkpoint and commits records to their partition owners:
 
-```mermaid
-flowchart TB
-    accTitle: The produce dispatcher
-    accDescr: Records at or above the checkpoint are read from the ingress WAL once, as they become durable, and placed by topic and partition. A record is either held on its partition's destination queue or left in the WAL to be read again later. Each queue has at most one commit in flight, committed locally or sent to the owner over QUIC in batches of at most 8 MiB. Committed sequence numbers are marked done, the checkpoint moves to the first sequence not done and is synced within 250 ms, and the WAL is compacted below it.
-    WAL[("ingress WAL<br/>records ≥ checkpoint")] -->|"read once, as it becomes durable"| PLACE{"place by<br/>(topic, partition)"}
-    PLACE -->|hold| Q["destination queue<br/>(one per partition)"]
-    PLACE -->|"cannot hold it now"| SKIP["left in the WAL,<br/>read again later"]
-    Q -->|"at most one commit in flight"| OWNER{owner}
-    OWNER -->|me| LOCAL[commit locally]
-    OWNER -->|peer| RPC["commit batch over QUIC<br/>(at most 8 MiB)"]
-    LOCAL & RPC --> DONE[mark the seqs done]
-    DONE --> CKPT["checkpoint = first seq not done;<br/>write it, fdatasync within 250 ms"]
-    CKPT --> COMPACT[compact the WAL below it]
-```
+<figure class="nr-dia nr-dia--doc" id="fig-produce-dispatcher">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
+--8<-- "diagrams/produce-dispatcher.html"
+</div>
+<figcaption>Each partition has its own queue with at most one commit in flight, and the checkpoint only passes sequence numbers whose commit landed, so a crash replays from a point that never skips a record.</figcaption>
+</figure>
 
 The reader reads each record once, as soon as it is durable, and puts it on the queue of its destination partition. Each destination has **at most one commit in flight**: when it lands, whatever queued meanwhile goes out as the next batch. Different destinations commit independently, up to 16 commits at once, so a slow or unreachable owner holds up its own partitions and nothing else.
 

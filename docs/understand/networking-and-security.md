@@ -17,14 +17,12 @@ Learn how Narad nodes talk to clients and to each other over HTTP, QUIC and Raft
 
 Narad has two planes, each on its own port: clients speak **HTTP** to any node, and nodes speak a compact **RPC protocol over QUIC** to each other. Raft has its own TCP transport with mutual TLS.
 
-```mermaid
-flowchart TB
-    accTitle: The three network paths of a Narad node
-    accDescr: Clients reach any node on port 7942 over HTTP with Basic auth, with TLS terminated at the ingress. Nodes reach each other with node RPC over QUIC on port 7942, authenticated by the cluster shared secret, and with Raft on port 7943 over mutual TLS.
-    C[Clients] -->|"HTTP + Basic auth<br/>(TLS at the ingress)"| ANY[any node :7942]
-    ANY <-->|"node RPC over QUIC :7942<br/>(cluster shared secret)"| PEERS[peer nodes]
-    ANY <-->|"Raft :7943<br/>(mutual TLS)"| PEERS
-```
+<figure class="nr-dia nr-dia--doc" id="fig-network-planes">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/network-planes.html"
+</div>
+<figcaption>Clients use <code>7942/tcp</code>; node RPC uses the same number over UDP, <code>7942/udp</code>, and Raft uses <code>7943/tcp</code>. Fence both cluster ports, and keep <code>9100/tcp</code> internal.</figcaption>
+</figure>
 
 ## HTTP plane {#http-plane}
 
