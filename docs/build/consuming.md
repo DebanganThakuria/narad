@@ -81,6 +81,13 @@ The [message lifecycle](../get-started/concepts.md#message-lifecycle) shows ever
 
 --8<-- "contract/at-least-once.md"
 
+<figure class="nr-dia nr-dia--doc" id="fig-consuming-lease-timeline">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--sky">
+--8<-- "diagrams/consuming-lease-timeline.html"
+</div>
+<figcaption>Each consume starts a 30 s lease. An ack inside it settles the message, an extend restarts a full 30 s from now, and a nack gives the message back at once; once the lease runs out, the message belongs to the next consumer and a late ack gets <code>410 Gone</code>.</figcaption>
+</figure>
+
 ## Acknowledge a message {#ack}
 
 === "curl"

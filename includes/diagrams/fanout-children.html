@@ -1,0 +1,99 @@
+<svg class="nr-dia__wide" viewBox="0 16 800 456" role="img" aria-labelledby="fanout-children-w-t" aria-describedby="fanout-children-w-d">
+<title id="fanout-children-w-t">One produce, a copy in every child</title>
+<desc id="fanout-children-w-d">Your service produces ord_123 to the topic orders, a parent, and orders keeps its own consumers. Every message committed to orders is copied to each of its children: orders-analytics and orders-billing get their copy at once, and orders-retry, a delay child, gets its copy 1 hour after the parent's commit. Each child is an ordinary topic with its own consumers: analytics, billing and a retry worker. Producers change nothing.</desc>
+<text class="lb" x="0" y="40">Your service</text>
+<rect class="ink" x="0" y="56" width="14" height="96"/>
+<path class="ln" d="M14 104H89M193 104H248"/>
+<path class="ah" d="M248 97L260 104L248 111Z"/>
+<polygon class="msg" points="84,89 180,89 198,119 102,119"/>
+<text class="msg-t" x="141" y="110.5">ord_123</text>
+<text class="an mu" x="0" y="180">producers change nothing</text>
+<rect class="rg" x="260" y="40" width="280" height="128" rx="6"/>
+<text class="rl" x="280" y="70">Parent</text>
+<text class="cd cdb" x="280" y="102">orders</text>
+<rect class="bx bxq tn" x="280" y="116" width="216" height="36" rx="2"/>
+<path class="ln1" d="M316 116V152M352 116V152M388 116V152M424 116V152M460 116V152"/>
+<path class="ln2" d="M540 104H596"/>
+<path class="ah" d="M596 98L608 104L596 110Z"/>
+<rect class="you" x="608" y="80" width="192" height="48" rx="2"/>
+<text class="lb mid on" x="704" y="111">orders consumers</text>
+<path class="ln2" d="M400 168V216M120 216H400M120 216V276M400 216V276"/>
+<path class="ln2 dash" d="M400 216H680V276"/>
+<path class="ah" d="M114 276L120 288L126 276Z"/>
+<path class="ah" d="M394 276L400 288L406 276Z"/>
+<path class="ah" d="M674 276L680 288L686 276Z"/>
+<text class="an" x="136" y="258">copy</text>
+<text class="an" x="416" y="258">copy</text>
+<text class="an end" x="664" y="248">copy, 1 hour after</text>
+<text class="an end" x="664" y="270">the parent commit</text>
+<rect class="rg" x="0" y="288" width="240" height="88" rx="6"/>
+<text class="rl" x="20" y="318">Child</text>
+<text class="cd" x="20" y="352">orders-analytics</text>
+<rect class="rg" x="280" y="288" width="240" height="88" rx="6"/>
+<text class="rl" x="300" y="318">Child</text>
+<text class="cd" x="300" y="352">orders-billing</text>
+<rect class="rg" x="560" y="288" width="240" height="88" rx="6"/>
+<text class="rl" x="580" y="318">Delay child, 1 hour</text>
+<text class="cd" x="580" y="352">orders-retry</text>
+<path class="ln2" d="M120 376V408M400 376V408M680 376V408"/>
+<path class="ah" d="M114 408L120 420L126 408Z"/>
+<path class="ah" d="M394 408L400 420L406 408Z"/>
+<path class="ah" d="M674 408L680 420L686 408Z"/>
+<rect class="you" x="50" y="420" width="140" height="44" rx="2"/>
+<text class="lb mid on" x="120" y="449">analytics</text>
+<rect class="you" x="330" y="420" width="140" height="44" rx="2"/>
+<text class="lb mid on" x="400" y="449">billing</text>
+<rect class="you" x="600" y="420" width="160" height="44" rx="2"/>
+<text class="lb mid on" x="680" y="449">retry worker</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 548" role="img" data-search-exclude aria-labelledby="fanout-children-n-t" aria-describedby="fanout-children-n-d">
+<title id="fanout-children-n-t">One produce, a copy in every child</title>
+<desc id="fanout-children-n-d">Your service produces ord_123 to the topic orders, a parent, and orders keeps its own consumers. Every message committed to orders is copied to each of its children: orders-analytics and orders-billing get their copy at once, and orders-retry, a delay child, gets its copy 1 hour after the parent's commit. Each child is an ordinary topic with its own consumers: analytics, billing and a retry worker. Producers change nothing.</desc>
+<text class="lb" x="16" y="24">Your service</text>
+<rect class="ink" x="16" y="34" width="328" height="12"/>
+<path class="ln" d="M180 46V68M180 102V124"/>
+<path class="ah" d="M174 124L180 136L186 124Z"/>
+<polygon class="msg" points="130.5,72 212.5,72 229.5,98 147.5,98"/>
+<text class="msg-t" x="180" y="90">ord_123</text>
+<text class="an mu" x="16" y="78">producers</text>
+<text class="an mu" x="16" y="98">change nothing</text>
+<rect class="rg" x="8" y="136" width="224" height="76" rx="6"/>
+<text class="rl" x="24" y="162">Parent</text>
+<text class="cd cdb" x="24" y="198">orders</text>
+<rect class="bx bxq tn" x="120" y="172" width="84" height="28" rx="2"/>
+<path class="ln1" d="M148 172V200M176 172V200"/>
+<path class="ln2" d="M232 174H244"/>
+<path class="ah" d="M244 168L256 174L244 180Z"/>
+<rect class="you" x="256" y="148" width="96" height="52" rx="2"/>
+<text class="lb mid on" x="304" y="170">orders</text>
+<text class="lb mid on" x="304" y="190">consumers</text>
+<path class="ln2" d="M40 212V388M40 284H52M40 388H52"/>
+<path class="ln2 dash" d="M40 388V508H52"/>
+<path class="ah" d="M52 278L64 284L52 290Z"/>
+<path class="ah" d="M52 382L64 388L52 394Z"/>
+<path class="ah" d="M52 502L64 508L52 514Z"/>
+<text class="an" x="56" y="240">copy</text>
+<text class="an" x="56" y="344">copy</text>
+<text class="an" x="56" y="444">copy, 1 hour after</text>
+<text class="an" x="56" y="464">the parent commit</text>
+<rect class="rg" x="64" y="252" width="180" height="64" rx="6"/>
+<text class="rl" x="80" y="276">Child</text>
+<text class="cd" x="80" y="302">orders-analytics</text>
+<rect class="rg" x="64" y="356" width="180" height="64" rx="6"/>
+<text class="rl" x="80" y="380">Child</text>
+<text class="cd" x="80" y="406">orders-billing</text>
+<rect class="rg" x="64" y="476" width="180" height="64" rx="6"/>
+<text class="rl" x="80" y="500">Delay child, 1 hour</text>
+<text class="cd" x="80" y="526">orders-retry</text>
+<path class="ln2" d="M244 284H252M244 388H252M244 508H252"/>
+<path class="ah" d="M252 278L264 284L252 290Z"/>
+<path class="ah" d="M252 382L264 388L252 394Z"/>
+<path class="ah" d="M252 502L264 508L252 514Z"/>
+<rect class="you" x="264" y="264" width="88" height="40" rx="2"/>
+<text class="lb mid on" x="308" y="290">analytics</text>
+<rect class="you" x="264" y="368" width="88" height="40" rx="2"/>
+<text class="lb mid on" x="308" y="394">billing</text>
+<rect class="you" x="264" y="480" width="88" height="56" rx="2"/>
+<text class="lb mid on" x="308" y="503">retry</text>
+<text class="lb mid on" x="308" y="524">worker</text>
+</svg>

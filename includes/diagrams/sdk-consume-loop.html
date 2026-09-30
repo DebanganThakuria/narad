@@ -1,0 +1,71 @@
+<svg class="nr-dia__wide" viewBox="0 0 800 404" role="img" aria-labelledby="sdk-consume-loop-w-t" aria-describedby="sdk-consume-loop-w-d">
+<title id="sdk-consume-loop-w-t">One worker's loop inside client.Consume</title>
+<desc id="sdk-consume-loop-w-d">Each worker in client.Consume runs this loop. Step 1: it long-polls GET .../consume?wait=10s, which waits up to 10 seconds for a message. Step 2: the message, ord_123, goes to your handler. While the handler runs, a lease keeper extends the lease every 10 seconds, a third of the topic's 30 second visibility timeout; if an extend gets 410, the lease is lost, the handler's context is cancelled and the message is left alone. Step 3: if the handler returns nil, the worker acks the message and gets 204; if it returns an error, the worker nacks it and the message is back in the queue at once. A panic is recovered and nacked like an error. Then the worker polls again.</desc>
+<rect class="rg" x="0" y="0" width="800" height="404" rx="6"/>
+<text class="rl" x="20" y="30">One worker's loop in <tspan class="cd mu">client.Consume</tspan></text>
+<rect class="bx" x="24" y="64" width="256" height="80" rx="2"/>
+<circle class="sc" cx="52" cy="104" r="13"/><text class="sn" x="52" y="109.5">1</text>
+<text class="lb" x="76" y="98">Long-poll</text>
+<text class="cd" x="76" y="126">consume?wait=10s</text>
+<path class="ln" d="M280 104H305M409 104H488"/>
+<path class="ah" d="M488 97L500 104L488 111Z"/>
+<polygon class="msg" points="300,89 396,89 414,119 318,119"/>
+<text class="msg-t" x="357" y="110.5">ord_123</text>
+<circle class="sc" cx="452" cy="104" r="13"/><text class="sn" x="452" y="109.5">2</text>
+<rect class="you" x="500" y="64" width="200" height="80" rx="2"/>
+<text class="lb mid on" x="600" y="111">your handler</text>
+<path class="ln1" d="M572 160H700M614 152V160M657 152V160M700 152V160"/>
+<text class="an" x="572" y="192">lease keeper: extend</text>
+<text class="an" x="572" y="214">every 10 s</text>
+<text class="an mu" x="572" y="250">lease lost (extend 410):</text>
+<text class="an mu" x="572" y="272">handler context cancelled</text>
+<path class="ln" d="M540 144V308Q540 324 524 324H372M540 228H372"/>
+<path class="ah" d="M372 221L360 228L372 235Z"/>
+<path class="ah" d="M372 317L360 324L372 331Z"/>
+<circle class="sc" cx="516" cy="192" r="13"/><text class="sn" x="516" y="197.5">3</text>
+<rect class="bx" x="160" y="196" width="200" height="64" rx="2"/>
+<text class="an" x="176" y="222">return nil:</text>
+<text class="an" x="176" y="246">ack, <tspan class="cd">204</tspan></text>
+<rect class="bx" x="160" y="292" width="200" height="64" rx="2"/>
+<text class="an" x="176" y="318">return error:</text>
+<text class="an" x="176" y="342">nack, back at once</text>
+<path class="ln2" d="M160 324H120Q104 324 104 308V156M160 228H104"/>
+<path class="ah" d="M98 156L104 144L110 156Z"/>
+<text class="an mu end" x="92" y="236">poll again</text>
+<text class="an mu" x="160" y="388">panic: recovered, nacked</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 488" role="img" data-search-exclude aria-labelledby="sdk-consume-loop-n-t" aria-describedby="sdk-consume-loop-n-d">
+<title id="sdk-consume-loop-n-t">One worker's loop inside client.Consume</title>
+<desc id="sdk-consume-loop-n-d">Each worker in client.Consume runs this loop. Step 1: it long-polls GET .../consume?wait=10s, which waits up to 10 seconds for a message. Step 2: the message, ord_123, goes to your handler. While the handler runs, a lease keeper extends the lease every 10 seconds, a third of the topic's 30 second visibility timeout; if an extend gets 410, the lease is lost, the handler's context is cancelled and the message is left alone. Step 3: if the handler returns nil, the worker acks the message and gets 204; if it returns an error, the worker nacks it and the message is back in the queue at once. A panic is recovered and nacked like an error. Then the worker polls again.</desc>
+<rect class="rg" x="0" y="0" width="360" height="488" rx="6"/>
+<text class="rl" x="16" y="26">One worker's loop in <tspan class="cd mu">client.Consume</tspan></text>
+<rect class="bx" x="44" y="44" width="272" height="64" rx="2"/>
+<circle class="sc" cx="68" cy="76" r="12"/><text class="sn" x="68" y="81">1</text>
+<text class="lb" x="88" y="70">Long-poll</text>
+<text class="cd" x="88" y="96">consume?wait=10s</text>
+<path class="ln" d="M128 108V116M128 150V164"/>
+<path class="ah" d="M122 164L128 176L134 164Z"/>
+<polygon class="msg" points="78.5,120 160.5,120 177.5,146 95.5,146"/>
+<text class="msg-t" x="128" y="138">ord_123</text>
+<circle class="sc" cx="196" cy="133" r="12"/><text class="sn" x="196" y="138">2</text>
+<rect class="you" x="44" y="176" width="168" height="48" rx="2"/>
+<text class="lb mid on" x="128" y="205">your handler</text>
+<path class="ln1" d="M100 244H212M137 236V244M174 236V244M211 236V244"/>
+<text class="an" x="100" y="272">lease keeper: extend every 10 s</text>
+<text class="an mu" x="100" y="300">lease lost (extend 410):</text>
+<text class="an mu" x="100" y="320">handler context cancelled</text>
+<path class="ln" d="M72 224V356M72 340H256Q272 340 272 356"/>
+<path class="ah" d="M66 356L72 368L78 356Z"/>
+<path class="ah" d="M266 356L272 368L278 356Z"/>
+<circle class="sc" cx="48" cy="318" r="12"/><text class="sn" x="48" y="323">3</text>
+<rect class="bx" x="24" y="368" width="144" height="56" rx="2"/>
+<text class="an" x="40" y="392">return nil:</text>
+<text class="an" x="40" y="414">ack, <tspan class="cd">204</tspan></text>
+<rect class="bx" x="184" y="368" width="168" height="56" rx="2"/>
+<text class="an" x="200" y="392">return error:</text>
+<text class="an" x="200" y="414">nack, back at once</text>
+<path class="ln2" d="M268 424V436Q268 452 252 452H28Q12 452 12 436V92Q12 76 28 76H32M96 424V452"/>
+<path class="ah" d="M32 70L44 76L32 82Z"/>
+<text class="an mu" x="28" y="476">poll again</text>
+<text class="an mu" x="184" y="476">panic: recovered, nacked</text>
+</svg>

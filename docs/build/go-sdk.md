@@ -117,6 +117,13 @@ Returning `nil` acks the message. Returning an error hands it straight back for 
 | Recovers from a panicking handler | One bad message does not take the consumer down |
 | Gives in-flight handlers 30 seconds on shutdown | They can finish and ack; anything still running after that is redelivered |
 
+<figure class="nr-dia nr-dia--doc" id="fig-sdk-consume-loop">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--sky">
+--8<-- "diagrams/sdk-consume-loop.html"
+</div>
+<figcaption>Return <code>nil</code> to ack and an error to hand the message back; a panic counts as an error. While your handler runs, the lease keeper extends the lease every third of the visibility timeout, and cancels the handler's context if the lease is lost.</figcaption>
+</figure>
+
 --8<-- "contract/at-least-once.md"
 
 Check the context in slow handlers. Once it is cancelled, the lease may be gone and another consumer may already be doing the work:

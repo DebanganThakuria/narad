@@ -10,19 +10,12 @@ Before you start: you must own, or be an admin for, every topic you link. Creati
 
 You attach [child topics](../reference/glossary.md#fan-out-child) to a parent topic. From then on, every message committed to the parent is copied to every child. Each child is an ordinary topic with its own consumers, retention and pace, so analytics, billing and a retry worker can each read the same stream on their own schedule.
 
-```mermaid
-flowchart LR
-    accTitle: One parent topic feeding three children
-    accDescr: A producer writes to the orders topic. Narad copies each message to orders-analytics and orders-billing at once, and to orders-retry one hour later. Each child has its own consumer, and orders keeps its own consumers too.
-    P[producer] --> parent[(orders)]
-    parent -->|copy| c1[(orders-analytics)]
-    parent -->|copy| c2[(orders-billing)]
-    parent -->|"copy, 1 hour later"| c3[(orders-retry)]
-    parent --> pc[orders consumers]
-    c1 --> a[analytics]
-    c2 --> b[billing]
-    c3 --> r[retry worker]
-```
+<figure class="nr-dia nr-dia--doc" id="fig-fanout-children">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
+--8<-- "diagrams/fanout-children.html"
+</div>
+<figcaption>Each child stores its own copy and is read at its own pace; a delay child gets the same copy, only later. Copying starts at the attach, so messages already in <code>orders</code> are not copied.</figcaption>
+</figure>
 
 ## Attach a child {#attach}
 

@@ -123,6 +123,13 @@ A copy produced back to `orders` is consumable again within milliseconds. When a
 
 You cannot produce to a delay child: it gets `409`, because a direct write would skip the delay. A delay child's only source is its parent, and it receives everything the parent receives. So each backoff tier is a pair: a parent that carries nothing but retries, and its delay child.
 
+<figure class="nr-dia nr-dia--doc" id="fig-retries-tiers">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--sky">
+--8<-- "diagrams/retries-tiers.html"
+</div>
+<figcaption>Produce the copy before you ack the original, so a crash in between leaves a duplicate, never a loss. The delay child is fed only by its parent (a direct produce gets <code>409</code>), and <code>delivery_count</code> lives in your JSON, not in the broker.</figcaption>
+</figure>
+
 ```sh title="Create a 30-second retry tier"
 curl -i -u "$AUTH" -X POST "$NARAD/v1/topics" \
   -H "Content-Type: application/json" \
