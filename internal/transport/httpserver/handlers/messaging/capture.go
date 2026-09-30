@@ -32,12 +32,33 @@ func (c *captureWriter) WriteHeader(status int) {
 	}
 }
 
+// Write copies p, as io.Writer requires: callers such as http.Error
+// write from a buffer they reuse once Write returns.
 func (c *captureWriter) Write(p []byte) (int, error) {
 	if c.status == 0 {
 		c.status = http.StatusOK
 	}
 	c.body = append(c.body, p...)
 	return len(p), nil
+}
+
+// KeepBody is Write for a body the caller hands over and never touches
+// again: the cluster router's forwarded replies, whose body is the
+// owner's reply frame, allocated for that one response. The first body
+// is kept as it is rather than copied, which spares a batch consume
+// forwarded to another node a copy of up to the owner's 8 MiB reply. It
+// is clipped to its length, so a later Write appends into a new array
+// and never into the caller's spare capacity. A body after another is
+// appended, as Write would.
+func (c *captureWriter) KeepBody(p []byte) {
+	if c.status == 0 {
+		c.status = http.StatusOK
+	}
+	if len(c.body) == 0 {
+		c.body = p[:len(p):len(p)]
+		return
+	}
+	c.body = append(c.body, p...)
 }
 
 // code is the status the capture would have sent: net/http answers 200
