@@ -60,6 +60,13 @@ Every value, with its default, is in the [Helm values reference](../reference/he
 
 The chart lives in the repository, so the install starts from a clone of the release you mean to run.
 
+<figure class="nr-dia nr-dia--doc" id="fig-deploy-topology">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/deploy-topology.html"
+</div>
+<figcaption>For a release called <code>narad</code>: TLS ends at your ingress, clients reach the pods through the Service <code>narad</code> on <code>7942/tcp</code>, and the pods reach each other directly on <code>7942/udp</code> and <code>7943/tcp</code>. Each pod keeps its own volume, <code>data-narad-0</code> for <code>narad-0</code> and so on.</figcaption>
+</figure>
+
 1. Get the chart and create a namespace:
 
     ```bash

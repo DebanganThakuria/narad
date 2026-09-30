@@ -1,0 +1,115 @@
+<svg class="nr-dia__wide" viewBox="0 0 800 492" role="img" aria-labelledby="scaling-decommission-w-t" aria-describedby="scaling-decommission-w-d">
+<title id="scaling-decommission-w-t">Scale in: drain narad-4, then delete it</title>
+<desc id="scaling-decommission-w-d">You run narad cluster decommission narad-4 on a five-node cluster. narad-4 is marked draining, so it receives no partitions, and the leader moves each partition it owns to the other four pods: orders/4 to narad-0, orders/9 to narad-1, orders/14 to narad-2 and orders/19 to narad-3, at most 8 moves at once. Once narad-4 owns 0 partitions, the leader removes it from the Raft voters, never going below 3 voters. Then you run helm upgrade with replicaCount=4 and allowScaleIn=true, and the StatefulSet deletes narad-4. Lower replicaCount before step 2 and the partitions still on narad-4 are stranded.</desc>
+<rect class="rg" x="304" y="8" width="496" height="456" rx="6"/>
+<circle class="sc" cx="13" cy="84" r="13"/><text class="sn" x="13" y="89.5">1</text>
+<rect class="ink" x="32" y="52" width="248" height="64"/>
+<text class="cd on" x="44" y="80">narad cluster</text>
+<text class="cd on" x="44" y="102">decommission narad-4</text>
+<path class="ln" d="M280 84H316"/>
+<path class="ah" d="M316 77L328 84L316 91Z"/>
+<text class="an mu" x="480" y="42">at most 8 moves at once</text>
+<rect class="bx bx3" x="328" y="60" width="136" height="212" rx="2"/>
+<text class="pod" x="396" y="94">narad-4</text>
+<rect class="bx bxq tn" x="344" y="120" width="104" height="36" rx="2"/>
+<text class="an mid" x="396" y="144">draining</text>
+<rect class="bx bxq tn" x="344" y="180" width="104" height="36" rx="2"/>
+<text class="an" x="358" y="204">Raft</text>
+<path class="x" d="M414 190L430 206M430 190L414 206"/>
+<path class="ln2" d="M464 82H484M608 82H628"/>
+<path class="ah" d="M628 76L640 82L628 88Z"/>
+<polygon class="msg" points="481,67 593,67 611,97 499,97"/>
+<text class="msg-t" x="546" y="88.5">orders/4</text>
+<path class="ln2" d="M464 138H628M464 194H628M464 250H628"/>
+<path class="ah" d="M628 132L640 138L628 144Z"/>
+<path class="ah" d="M628 188L640 194L628 200Z"/>
+<path class="ah" d="M628 244L640 250L628 256Z"/>
+<text class="cd" x="480" y="128">orders/9</text>
+<text class="cd" x="480" y="184">orders/14</text>
+<text class="cd" x="480" y="240">orders/19</text>
+<rect class="bx" x="640" y="60" width="136" height="44" rx="2"/>
+<text class="pod" x="708" y="89">narad-0</text>
+<rect class="bx" x="640" y="116" width="136" height="44" rx="2"/>
+<text class="pod" x="708" y="145">narad-1</text>
+<rect class="bx" x="640" y="172" width="136" height="44" rx="2"/>
+<text class="pod" x="708" y="201">narad-2</text>
+<rect class="bx" x="640" y="228" width="136" height="44" rx="2"/>
+<text class="pod" x="708" y="257">narad-3</text>
+<path class="ln1 dash" d="M396 272V358"/>
+<path class="ah" d="M391 358L396 368L401 358Z"/>
+<circle class="sc" cx="424" cy="300" r="13"/><text class="sn" x="424" y="305.5">2</text>
+<text class="cd" x="446" y="306">owned_partitions: 0</text>
+<text class="an" x="446" y="328">leader removes it from Raft</text>
+<text class="an mu" x="446" y="350">never below 3 voters</text>
+<rect class="bx ghost" x="328" y="368" width="136" height="44" rx="2"/>
+<text class="pod mu" x="396" y="397">narad-4</text>
+<text class="an mu" x="480" y="396">deleted by the StatefulSet</text>
+<circle class="sc" cx="13" cy="390" r="13"/><text class="sn" x="13" y="395.5">3</text>
+<rect class="ink" x="32" y="350" width="248" height="80"/>
+<text class="cd on" x="44" y="376">helm upgrade ...</text>
+<text class="cd on" x="44" y="398">replicaCount=4</text>
+<text class="cd on" x="44" y="420">allowScaleIn=true</text>
+<path class="ln" d="M280 390H316"/>
+<path class="ah" d="M316 383L328 390L316 397Z"/>
+<text class="an mu" x="32" y="458">Lower it before step 2 and</text>
+<text class="an mu" x="32" y="480">its partitions are stranded</text>
+<text class="rl" x="324" y="446">StatefulSet narad</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 736" role="img" data-search-exclude aria-labelledby="scaling-decommission-n-t" aria-describedby="scaling-decommission-n-d">
+<title id="scaling-decommission-n-t">Scale in: drain narad-4, then delete it</title>
+<desc id="scaling-decommission-n-d">You run narad cluster decommission narad-4 on a five-node cluster. narad-4 is marked draining, so it receives no partitions, and the leader moves each partition it owns to the other four pods: orders/4 to narad-0, orders/9 to narad-1, orders/14 to narad-2 and orders/19 to narad-3, at most 8 moves at once. Once narad-4 owns 0 partitions, the leader removes it from the Raft voters, never going below 3 voters. Then you run helm upgrade with replicaCount=4 and allowScaleIn=true, and the StatefulSet deletes narad-4. Lower replicaCount before step 2 and the partitions still on narad-4 are stranded.</desc>
+<rect class="rg" x="8" y="8" width="344" height="444" rx="6"/>
+<text class="rl" x="28" y="36">StatefulSet narad</text>
+<rect class="bx" x="24" y="52" width="136" height="36" rx="2"/>
+<text class="pod" x="92" y="76">narad-0</text>
+<rect class="bx" x="24" y="98" width="136" height="36" rx="2"/>
+<text class="pod" x="92" y="122">narad-1</text>
+<rect class="bx" x="24" y="144" width="136" height="36" rx="2"/>
+<text class="pod" x="92" y="168">narad-2</text>
+<rect class="bx" x="24" y="190" width="136" height="36" rx="2"/>
+<text class="pod" x="92" y="214">narad-3</text>
+<path class="ln2" d="M160 256H316Q332 256 332 240V86Q332 70 316 70H302M198 70H172"/>
+<path class="ah" d="M172 64L160 70L172 76Z"/>
+<polygon class="msg" points="196,57 288,57 305,83 213,83"/>
+<text class="msg-t" x="250.5" y="75">orders/4</text>
+<path class="ln2" d="M332 116H172M332 162H172M332 208H172"/>
+<path class="ah" d="M172 110L160 116L172 122Z"/>
+<path class="ah" d="M172 156L160 162L172 168Z"/>
+<path class="ah" d="M172 202L160 208L172 214Z"/>
+<text class="cd" x="180" y="106">orders/9</text>
+<text class="cd" x="180" y="152">orders/14</text>
+<text class="cd" x="180" y="198">orders/19</text>
+<rect class="bx bx3" x="24" y="236" width="136" height="116" rx="2"/>
+<text class="pod" x="92" y="262">narad-4</text>
+<rect class="bx bxq tn" x="38" y="274" width="108" height="30" rx="2"/>
+<text class="an mid" x="92" y="294">draining</text>
+<rect class="bx bxq tn" x="38" y="312" width="108" height="30" rx="2"/>
+<text class="an" x="50" y="332">Raft</text>
+<path class="x" d="M112 320L126 334M126 320L112 334"/>
+<circle class="sc" cx="212" cy="256" r="12"/><text class="sn" x="212" y="261">1</text>
+<text class="an mu" x="176" y="292">at most 8 moves at once</text>
+<path class="ln1 dash" d="M92 352V380"/>
+<path class="ah" d="M87 380L92 390L97 380Z"/>
+<circle class="sc" cx="120" cy="371" r="12"/><text class="sn" x="120" y="376">2</text>
+<rect class="bx ghost" x="24" y="390" width="136" height="36" rx="2"/>
+<text class="pod mu" x="92" y="414">narad-4</text>
+<circle class="sc" cx="184" cy="408" r="12"/><text class="sn" x="184" y="413">3</text>
+<text class="an mu" x="204" y="402">deleted by the</text>
+<text class="an mu" x="204" y="422">StatefulSet</text>
+<path class="sep" d="M16 468H344"/>
+<circle class="sc" cx="20" cy="504" r="12"/><text class="sn" x="20" y="509">1</text>
+<rect class="ink" x="40" y="480" width="212" height="48"/>
+<text class="cd on" x="50" y="499">narad cluster</text>
+<text class="cd on" x="50" y="519">decommission narad-4</text>
+<circle class="sc" cx="20" cy="552" r="12"/><text class="sn" x="20" y="557">2</text>
+<text class="cd" x="40" y="557">owned_partitions: 0</text>
+<text class="an" x="40" y="577">leader removes it from Raft</text>
+<text class="an mu" x="40" y="597">never below 3 voters</text>
+<circle class="sc" cx="20" cy="644" r="12"/><text class="sn" x="20" y="649">3</text>
+<rect class="ink" x="40" y="612" width="212" height="64"/>
+<text class="cd on" x="50" y="629">helm upgrade ...</text>
+<text class="cd on" x="50" y="649">replicaCount=4</text>
+<text class="cd on" x="50" y="669">allowScaleIn=true</text>
+<text class="an mu" x="40" y="702">Lower it before step 2 and</text>
+<text class="an mu" x="40" y="722">its partitions are stranded</text>
+</svg>

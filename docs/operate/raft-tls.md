@@ -90,6 +90,13 @@ A node on TLS and a node on plaintext cannot talk Raft to each other, so the swi
 !!! warning "Topic, user and schema changes pause"
     While neither side holds a majority of the nodes, the cluster has no Raft leader and refuses topic, user, grant and schema changes. In a local three-node run this lasted a few seconds. Produce and consume carry on, because the node-to-node data plane does not use Raft. Plan a quiet moment for the switch.
 
+<figure class="nr-dia nr-dia--doc" id="fig-raft-tls-enable">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/raft-tls-enable.html"
+</div>
+<figcaption>Raft follows the majority. The rolling update stops at the first pod on TLS; deleting <code>narad-1</code> by hand gives TLS the majority, and the rollout then finishes by itself. Only the moment in between, with a majority on neither side, has no Raft leader.</figcaption>
+</figure>
+
 1. Create the certificates and the TLS secret as in [Create the certificates](#create-certificates).
 2. Turn TLS on:
 
@@ -133,6 +140,13 @@ The rolling restart waits for each pod to be ready before it restarts the next, 
 ## Rotate the CA {#rotate-ca}
 
 Rotating the CA takes three rolling restarts. Between them, every node trusts the certificate every other node presents, so Raft never loses a connection.
+
+<figure class="nr-dia nr-dia--doc" id="fig-raft-tls-ca-rotation">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/raft-tls-ca-rotation.html"
+</div>
+<figcaption>Trust the new CA first, move the certificates second, drop the old CA last. At every roll boundary each pod trusts the certificate every other pod presents; skip roll 1 and the first pod on a new certificate cannot join.</figcaption>
+</figure>
 
 1. **Trust both CAs.** Make `ca.crt` the old CA followed by the new one (`cat old-ca.crt new-ca.crt > ca.crt`), replace the secret, and roll.
 2. **Move to certificates from the new CA.** Issue a node certificate from the new CA, replace `tls.crt` and `tls.key` in the secret, and roll. Nodes still trust the old CA, so pods on the old and new certificates keep talking during this roll.

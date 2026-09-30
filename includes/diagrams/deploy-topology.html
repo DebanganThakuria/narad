@@ -1,0 +1,122 @@
+<svg class="nr-dia__wide" viewBox="0 12 800 488" role="img" aria-labelledby="deploy-topology-w-t" aria-describedby="deploy-topology-w-d">
+<title id="deploy-topology-w-t">What the Helm chart installs</title>
+<desc id="deploy-topology-w-d">Clients reach an ingress or load balancer, where TLS ends. A message, ord_123, goes on as plain HTTP to the Service narad on 7942/tcp, which spreads requests over the three pods of the StatefulSet narad, narad-0 to narad-2. Each pod has its own volume, from the claims data-narad-0 to data-narad-2. The pods talk to each other directly, node RPC on 7942/udp and Raft on 7943/tcp, and find each other by DNS through the headless Service narad-headless. The pods read the secret narad-security as environment variables. The secret narad-cluster-tls is mounted only with clusterTLS.enabled. Prometheus scrapes :9100/metrics on every pod.</desc>
+<rect class="rg" x="0" y="172" width="552" height="320" rx="6"/>
+<text class="lb" x="0" y="28">Clients</text>
+<rect class="ink" x="0" y="44" width="14" height="64"/>
+<path class="ln" d="M14 76H38"/>
+<path class="ah" d="M38 69L50 76L38 83Z"/>
+<rect class="bx" x="50" y="36" width="164" height="88" rx="2"/>
+<text class="lb mid" x="132" y="60">Ingress or</text>
+<text class="lb mid" x="132" y="82">load balancer</text>
+<text class="an mid" x="132" y="108">TLS ends here</text>
+<path class="ln" d="M214 76H241M345 76H370"/>
+<path class="ah" d="M370 69L382 76L370 83Z"/>
+<polygon class="msg" points="236,61 332,61 350,91 254,91"/>
+<text class="msg-t" x="293" y="82.5">ord_123</text>
+<rect class="bx" x="382" y="40" width="140" height="72" rx="2"/>
+<text class="lb mid" x="452" y="70">Service</text>
+<text class="cd mid" x="452" y="96">narad</text>
+<path class="ln2" d="M452 112V204M100 160H452M100 160V204M276 160V204"/>
+<path class="ah" d="M94 204L100 216L106 204Z"/>
+<path class="ah" d="M270 204L276 216L282 204Z"/>
+<path class="ah" d="M446 204L452 216L458 204Z"/>
+<text class="cd" x="464" y="142">7942/tcp</text>
+<rect class="bx" x="20" y="216" width="160" height="136" rx="2"/>
+<text class="pod" x="100" y="246">narad-0</text>
+<path class="bx tn" d="M26 268V324A74 8 0 0 0 174 324V268"/><ellipse class="bx tn" cx="100" cy="268" rx="74" ry="8"/>
+<text class="cd mid" x="100" y="308">data-narad-0</text>
+<rect class="bx" x="196" y="216" width="160" height="136" rx="2"/>
+<text class="pod" x="276" y="246">narad-1</text>
+<path class="bx tn" d="M202 268V324A74 8 0 0 0 350 324V268"/><ellipse class="bx tn" cx="276" cy="268" rx="74" ry="8"/>
+<text class="cd mid" x="276" y="308">data-narad-1</text>
+<rect class="bx" x="372" y="216" width="160" height="136" rx="2"/>
+<text class="pod" x="452" y="246">narad-2</text>
+<path class="bx tn" d="M378 268V324A74 8 0 0 0 526 324V268"/><ellipse class="bx tn" cx="452" cy="268" rx="74" ry="8"/>
+<text class="cd mid" x="452" y="308">data-narad-2</text>
+<path class="ln1" d="M100 352V380M276 352V380M452 352V380M100 380H452"/>
+<text class="an" x="20" y="412">node RPC</text>
+<text class="cd" x="111" y="412">7942/udp</text>
+<text class="an" x="20" y="434">Raft</text>
+<text class="cd" x="60" y="434">7943/tcp</text>
+<text class="an" x="236" y="412">headless Service</text>
+<text class="cd" x="236" y="434">narad-headless</text>
+<text class="rl" x="20" y="472">StatefulSet narad</text>
+<rect class="bx bxq" x="592" y="172" width="208" height="48" rx="2"/>
+<text class="cd mid" x="696" y="202">narad-security</text>
+<path class="ln1" d="M592 196H562"/>
+<path class="ah" d="M562 191L552 196L562 201Z"/>
+<text class="an mu" x="592" y="244">read as env vars</text>
+<rect class="bx bxq ghost" x="592" y="276" width="208" height="48" rx="2"/>
+<text class="cd mid mu" x="696" y="306">narad-cluster-tls</text>
+<path class="ln1 dash" d="M592 300H562"/>
+<path class="ah" d="M562 295L552 300L562 305Z"/>
+<text class="an mu" x="592" y="348">mounted, only with</text>
+<text class="cd mu" x="592" y="370">clusterTLS.enabled</text>
+<rect class="bx bxq" x="592" y="412" width="208" height="72" rx="2"/>
+<text class="lb mid" x="696" y="442">Prometheus</text>
+<text class="cd mid" x="696" y="468">:9100/metrics</text>
+<path class="ln2" d="M592 448H564"/>
+<path class="ah" d="M564 442L552 448L564 454Z"/>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 756" role="img" data-search-exclude aria-labelledby="deploy-topology-n-t" aria-describedby="deploy-topology-n-d">
+<title id="deploy-topology-n-t">What the Helm chart installs</title>
+<desc id="deploy-topology-n-d">Clients reach an ingress or load balancer, where TLS ends. A message, ord_123, goes on as plain HTTP to the Service narad on 7942/tcp, which spreads requests over the three pods of the StatefulSet narad, narad-0 to narad-2. Each pod has its own volume, from the claims data-narad-0 to data-narad-2. The pods talk to each other directly, node RPC on 7942/udp and Raft on 7943/tcp, and find each other by DNS through the headless Service narad-headless. The pods read the secret narad-security as environment variables. The secret narad-cluster-tls is mounted only with clusterTLS.enabled. Prometheus scrapes :9100/metrics on every pod.</desc>
+<rect class="rg" x="44" y="344" width="308" height="288" rx="6"/>
+<text class="lb" x="20" y="26">Clients</text>
+<rect class="ink" x="20" y="36" width="320" height="12"/>
+<path class="ln" d="M96 48V72"/>
+<path class="ah" d="M90 72L96 84L102 72Z"/>
+<rect class="bx" x="20" y="84" width="152" height="84" rx="2"/>
+<text class="lb mid" x="96" y="110">Ingress or</text>
+<text class="lb mid" x="96" y="130">load balancer</text>
+<text class="an mid" x="96" y="156">TLS ends here</text>
+<path class="ln" d="M96 168V182M96 216V228"/>
+<path class="ah" d="M90 228L96 240L102 228Z"/>
+<polygon class="msg" points="46.5,186 128.5,186 145.5,212 63.5,212"/>
+<text class="msg-t" x="96" y="204">ord_123</text>
+<rect class="bx" x="20" y="240" width="152" height="80" rx="2"/>
+<text class="lb mid" x="96" y="264">Service</text>
+<text class="cd mid" x="96" y="286">narad</text>
+<text class="cd mid" x="96" y="308">7942/tcp</text>
+<rect class="bx bxq" x="184" y="240" width="168" height="64" rx="2"/>
+<text class="lb mid" x="268" y="266">Prometheus</text>
+<text class="cd mid" x="268" y="290">:9100/metrics</text>
+<path class="ln2" d="M268 304V332"/>
+<path class="ah" d="M262 332L268 344L274 332Z"/>
+<path class="ln2" d="M32 320V514M32 386H48M32 450H48M32 514H48"/>
+<path class="ah" d="M48 380L60 386L48 392Z"/>
+<path class="ah" d="M48 444L60 450L48 456Z"/>
+<path class="ah" d="M48 508L60 514L48 520Z"/>
+<rect class="bx" x="60" y="360" width="280" height="52" rx="2"/>
+<text class="pod" x="112" y="392">narad-0</text>
+<path class="bx tn" d="M196 371V397A66 6 0 0 0 328 397V371"/><ellipse class="bx tn" cx="262" cy="371" rx="66" ry="6"/>
+<text class="cd mid" x="262" y="393">data-narad-0</text>
+<rect class="bx" x="60" y="424" width="280" height="52" rx="2"/>
+<text class="pod" x="112" y="456">narad-1</text>
+<path class="bx tn" d="M196 435V461A66 6 0 0 0 328 461V435"/><ellipse class="bx tn" cx="262" cy="435" rx="66" ry="6"/>
+<text class="cd mid" x="262" y="457">data-narad-1</text>
+<rect class="bx" x="60" y="488" width="280" height="52" rx="2"/>
+<text class="pod" x="112" y="520">narad-2</text>
+<path class="bx tn" d="M196 499V525A66 6 0 0 0 328 525V499"/><ellipse class="bx tn" cx="262" cy="499" rx="66" ry="6"/>
+<text class="cd mid" x="262" y="521">data-narad-2</text>
+<path class="ln1" d="M112 412V424M112 476V488"/>
+<text class="an" x="60" y="568">node RPC</text>
+<text class="cd" x="136" y="568">7942/udp</text>
+<text class="an" x="224" y="568">Raft</text>
+<text class="cd" x="258" y="568">7943/tcp</text>
+<text class="an" x="60" y="590">headless Service</text>
+<text class="cd" x="186" y="590">narad-headless</text>
+<text class="rl" x="60" y="616">StatefulSet narad</text>
+<rect class="bx bxq" x="8" y="656" width="144" height="48" rx="2"/>
+<text class="cd mid" x="80" y="685">narad-security</text>
+<path class="ln1" d="M80 656V642"/>
+<path class="ah" d="M75 642L80 632L85 642Z"/>
+<text class="an mu" x="8" y="728">read as env vars</text>
+<rect class="bx bxq ghost" x="168" y="656" width="184" height="48" rx="2"/>
+<text class="cd mid mu" x="260" y="685">narad-cluster-tls</text>
+<path class="ln1 dash" d="M260 656V642"/>
+<path class="ah" d="M255 642L260 632L265 642Z"/>
+<text class="an mu" x="168" y="728">mounted, only with</text>
+<text class="cd mu" x="168" y="748">clusterTLS.enabled</text>
+</svg>

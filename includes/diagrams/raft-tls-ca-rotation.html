@@ -1,0 +1,84 @@
+<svg class="nr-dia__wide" viewBox="0 8 800 332" role="img" aria-labelledby="raft-tls-ca-rotation-w-t" aria-describedby="raft-tls-ca-rotation-w-d">
+<title id="raft-tls-ca-rotation-w-t">Rotating the CA in three rolls</title>
+<desc id="raft-tls-ca-rotation-w-d">Rotating the CA of the Raft certificates takes three rolling restarts. At the start, every pod's ca.crt trusts the old CA and its tls.crt is issued by the old CA. Roll 1, trust both: ca.crt trusts the old and the new CA, while the certificates stay on the old CA. Roll 2, new certificates: tls.crt is issued by the new CA, and pods still trust both. Roll 3, drop the old CA: ca.crt trusts the new CA alone. At every step, every pod trusts the certificate every other pod presents. Skip roll 1 and a certificate from the new CA meets peers that trust only the old CA, and it is refused.</desc>
+<path class="ln1 dash" d="M250 84V56Q250 40 266 40H546Q562 40 562 56V74"/>
+<path class="ah" d="M557 74L562 84L567 74Z"/>
+<path class="x" d="M397 31L415 49M415 31L397 49"/>
+<text class="an" x="580" y="36">skip roll 1 and a new</text>
+<text class="an" x="580" y="58">certificate is refused</text>
+<text class="lb mid" x="250" y="104">Start</text>
+<text class="lb mid" x="406" y="104">Roll 1</text>
+<text class="an mu mid" x="406" y="126">trust both</text>
+<text class="lb mid" x="562" y="104">Roll 2</text>
+<text class="an mu mid" x="562" y="126">new certificates</text>
+<text class="lb mid" x="718" y="104">Roll 3</text>
+<text class="an mu mid" x="718" y="126">drop the old CA</text>
+<text class="cd" x="0" y="176">ca.crt</text>
+<text class="an" x="0" y="198">trusts</text>
+<rect class="bx tn" x="180" y="144" width="140" height="72" rx="2"/>
+<text class="an mid" x="250" y="186">old CA</text>
+<rect class="bx tn" x="336" y="144" width="140" height="72" rx="2"/>
+<text class="an mid" x="406" y="170">old CA</text>
+<polygon class="msg" points="349,180 445,180 463,210 367,210"/>
+<text class="msg-t" x="406" y="201.5">new CA</text>
+<rect class="bx tn" x="492" y="144" width="140" height="72" rx="2"/>
+<text class="an mid" x="562" y="170">old CA</text>
+<text class="an mid" x="562" y="198">new CA</text>
+<rect class="bx tn" x="648" y="144" width="140" height="72" rx="2"/>
+<text class="an mid" x="718" y="186">new CA</text>
+<text class="cd" x="0" y="252">tls.crt</text>
+<text class="an" x="0" y="274">issued by</text>
+<rect class="bx tn" x="180" y="232" width="140" height="48" rx="2"/>
+<text class="an mid" x="250" y="262">old CA</text>
+<rect class="bx tn" x="336" y="232" width="140" height="48" rx="2"/>
+<text class="an mid" x="406" y="262">old CA</text>
+<rect class="bx tn" x="492" y="232" width="140" height="48" rx="2"/>
+<text class="an mid" x="562" y="262">new CA</text>
+<rect class="bx tn" x="648" y="232" width="140" height="48" rx="2"/>
+<text class="an mid" x="718" y="262">new CA</text>
+<path class="ln1" d="M180 296V304H788V296"/>
+<text class="an mid" x="484" y="328">at every step, every pod trusts every certificate</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 588" role="img" data-search-exclude aria-labelledby="raft-tls-ca-rotation-n-t" aria-describedby="raft-tls-ca-rotation-n-d">
+<title id="raft-tls-ca-rotation-n-t">Rotating the CA in three rolls</title>
+<desc id="raft-tls-ca-rotation-n-d">Rotating the CA of the Raft certificates takes three rolling restarts. At the start, every pod's ca.crt trusts the old CA and its tls.crt is issued by the old CA. Roll 1, trust both: ca.crt trusts the old and the new CA, while the certificates stay on the old CA. Roll 2, new certificates: tls.crt is issued by the new CA, and pods still trust both. Roll 3, drop the old CA: ca.crt trusts the new CA alone. At every step, every pod trusts the certificate every other pod presents. Skip roll 1 and a certificate from the new CA meets peers that trust only the old CA, and it is refused.</desc>
+<text class="cd" x="32" y="24">ca.crt</text>
+<text class="an" x="32" y="44">trusts</text>
+<text class="cd" x="196" y="24">tls.crt</text>
+<text class="an" x="196" y="44">issued by</text>
+<text class="lb" x="32" y="80">Start</text>
+<rect class="bx tn" x="32" y="92" width="152" height="48" rx="2"/>
+<text class="an mid" x="108" y="121">old CA</text>
+<rect class="bx tn" x="196" y="92" width="152" height="48" rx="2"/>
+<text class="an mid" x="272" y="121">old CA</text>
+<text class="lb" x="32" y="172">Roll 1</text>
+<text class="an mu" x="96" y="172">trust both</text>
+<rect class="bx tn" x="32" y="184" width="152" height="72" rx="2"/>
+<text class="an mid" x="108" y="208">old CA</text>
+<polygon class="msg" points="58.5,220 140.5,220 157.5,246 75.5,246"/>
+<text class="msg-t" x="108" y="238">new CA</text>
+<rect class="bx tn" x="196" y="184" width="152" height="72" rx="2"/>
+<text class="an mid" x="272" y="225">old CA</text>
+<text class="lb" x="32" y="288">Roll 2</text>
+<text class="an mu" x="96" y="288">new certificates</text>
+<rect class="bx tn" x="32" y="300" width="152" height="72" rx="2"/>
+<text class="an mid" x="108" y="328">old CA</text>
+<text class="an mid" x="108" y="352">new CA</text>
+<rect class="bx tn" x="196" y="300" width="152" height="72" rx="2"/>
+<text class="an mid" x="272" y="341">new CA</text>
+<text class="lb" x="32" y="404">Roll 3</text>
+<text class="an mu" x="96" y="404">drop the old CA</text>
+<rect class="bx tn" x="32" y="416" width="152" height="48" rx="2"/>
+<text class="an mid" x="108" y="445">new CA</text>
+<rect class="bx tn" x="196" y="416" width="152" height="48" rx="2"/>
+<text class="an mid" x="272" y="445">new CA</text>
+<path class="ln1 dash" d="M32 116H24Q8 116 8 132V320Q8 336 24 336"/>
+<path class="ah" d="M22 331L32 336L22 341Z"/>
+<path class="x" d="M0 212L16 228M16 212L0 228"/>
+<path class="sep" d="M16 484H344"/>
+<text class="an" x="32" y="512">At every step, every pod</text>
+<text class="an" x="32" y="532">trusts every certificate</text>
+<path class="x" d="M32 548L46 562M46 548L32 562"/>
+<text class="an" x="60" y="560">Skip roll 1 and a new</text>
+<text class="an" x="60" y="580">certificate is refused</text>
+</svg>

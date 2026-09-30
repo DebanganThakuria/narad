@@ -78,6 +78,13 @@ A pod removed while it still owns partitions strands them: they stay assigned to
 
 ### Decommission a node {#decommission}
 
+<figure class="nr-dia nr-dia--doc" id="fig-scaling-decommission">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/scaling-decommission.html"
+</div>
+<figcaption>Drain first, delete second: <code>narad-4</code> hands every partition it owns to the other pods and leaves the Raft voters at <code>owned_partitions: 0</code>, and only then does a lower <code>replicaCount</code> remove the pod. The four moves are the ones from the example below.</figcaption>
+</figure>
+
 This example takes a five-node cluster down to four.
 
 1. Mark the highest-numbered node for decommission:

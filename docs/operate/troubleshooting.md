@@ -37,6 +37,13 @@ curl -s http://127.0.0.1:7952/readyz
 | `last raft leader contact <duration> ago` | The node has not heard from the leader for more than 5 seconds. |
 | `replica has not caught up with the leader since start` | The node's copy of the metadata is still behind the leader's. |
 
+<figure class="nr-dia nr-dia--doc" id="fig-readiness-gates">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/readiness-gates.html"
+</div>
+<figcaption>A pod answers with the first gate it fails, so <code>narad-2</code> above, answering <code>no raft leader known</code>, has started but sees no Raft leader. The gates are checked on every probe: a ready pod that loses the leader turns not ready again.</figcaption>
+</figure>
+
 The last four answers start with `metastore: node is not ready:`, as in the output above. The sections below say what to do.
 
 ## Node failures
@@ -46,6 +53,13 @@ The last four answers start with `metastore: node is not ready:`, as in the outp
 A pod is not running or restarts in a loop, or `narad cluster members` shows a node with `"status": "dead"`.
 
 **What clients see.** Produces still get `202`, and after about 3 seconds the messages meant for that node's partitions go to other partitions of the topic. Messages already stored on that node wait for it. Acks of those messages, and consumes pinned to one of its partitions with `partition=N`, get `502`, then `503` (`partition owner is down; retry later`) once the node is marked dead after about 30 seconds without a heartbeat. Consumes without `partition` keep being served from the other partitions.
+
+<figure class="nr-dia nr-dia--doc" id="fig-node-down-timeline">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--lilac">
+--8<-- "diagrams/node-down-timeline.html"
+</div>
+<figcaption>Match what your clients see to the clock, which is not to scale here: produces keep getting <code>202</code>, acks and pinned consumes get <code>502</code> and then <code>503</code> once <code>narad-2</code> is marked dead, and messages stored on it, like <code>ord_123</code>, wait until it returns.</figcaption>
+</figure>
 
 **Check.** Find the pod and why it stopped:
 
