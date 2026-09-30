@@ -6,7 +6,7 @@ description: "Turn on mutual TLS for the Raft port, then renew and rotate its ce
 
 Turn on mutual TLS for the Raft port, then renew and rotate its certificates without losing messages.
 
-Before you start: a cluster installed with the Helm chart, OpenSSL 3, and permission to create secrets in its namespace.
+Before you start: the Narad namespace ([Deploy on Kubernetes](deploy-kubernetes.md#install) step 1), OpenSSL 3, and permission to create secrets in it. Enabling TLS on a running cluster also needs that cluster.
 
 Every node presents a certificate that carries the DNS name `narad-cluster.local`, and checks its peers' certificates against a CA bundle. The name is the same for every node: membership of the cluster is the identity, not the pod's hostname, so all nodes can share one certificate. A node reads the files once, at startup. Replacing them changes nothing until the node restarts, so every change below is a rolling restart. Why Raft needs this is in [Networking and security](../understand/networking-and-security.md#raft-tls).
 
@@ -56,6 +56,8 @@ kubectl create secret generic narad-cluster-tls -n narad \
 ```
 
 Keep `ca.key` somewhere safe and outside the cluster. You need it to issue the next certificate.
+
+Installing from a values file? Go back to [Deploy on Kubernetes](deploy-kubernetes.md#install) step 3. Otherwise continue below.
 
 ## Enable on a new cluster {#enable-new-cluster}
 

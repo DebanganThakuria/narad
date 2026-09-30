@@ -26,10 +26,15 @@ flowchart LR
     accTitle: Fan-out cursors on the owner of a parent partition
     accDescr: On the owner of partition 3 of orders, two cursors read the orders partition 3 log: one for the analytics child and one for a retry child with a one hour delay. Their offset files sit beside the log. Each cursor commits batches to the owners of its child's partitions.
     subgraph owner["owner of orders/p3"]
+        OFF1[("fanout-analytics.offset")]
         LOG[("orders/p3 log")]
-        CUR1["cursor → analytics"] --> LOG
-        CUR2["cursor → retry (1h delay)"] --> LOG
-        OFF[("fanout-analytics.offset<br/>fanout-retry.offset")]
+        OFF2[("fanout-retry.offset")]
+        CUR1["cursor → analytics"]
+        CUR2["cursor → retry (1h delay)"]
+        OFF1 -.- CUR1
+        LOG --> CUR1
+        LOG --> CUR2
+        OFF2 -.- CUR2
     end
     CUR1 -->|"commit batch"| A[("analytics/p* owners")]
     CUR2 -->|"commit batch"| R[("retry/p* owners")]

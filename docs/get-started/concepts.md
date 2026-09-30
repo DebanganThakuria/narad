@@ -65,8 +65,7 @@ stateDiagram-v2
     [*] --> Available: produce committed
     Available --> Leased: consume
     Leased --> Settled: ack
-    Leased --> Available: nack
-    Leased --> Available: visibility timeout expires
+    Leased --> Available: nack or lease runs out
     Leased --> Leased: extend
     Settled --> Removed: retention
     Available --> Removed: retention
