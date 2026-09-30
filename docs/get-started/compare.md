@@ -68,6 +68,13 @@ Narad beside SQS, Redis Streams and Pulsar:
 | **Redis Streams** | ✗: default is RDB snapshots; AOF `everysec` still loses about 1 s; `appendfsync always` drops to the disk's fsync rate | None by default; replication is **always async** (`WAIT` is best-effort) | Failover discards replication lag; [the Redis docs say so](https://redis.io/docs/latest/operate/oss_and_stack/management/replication/) |
 | **Pulsar** | **✓: BookKeeper fsyncs the journal on the ack quorum by default** (standalone mode: no) | E=2/W=2/A=2 defaults, synchronous | Narrow: needs `journalSyncData=false` (a common performance tuning) or simultaneous loss of the ack quorum |
 
+<figure class="nr-dia nr-dia--doc" id="fig-compare-durability">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--lilac">
+--8<-- "diagrams/compare-durability.html"
+</div>
+<figcaption>Narad alone fsyncs before the ack without replicating first: a <code>202</code> survives a crash or a power cut, but not the loss of the disk that holds the message.</figcaption>
+</figure>
+
 Narad, Pulsar and RabbitMQ quorum queues are the only systems here that fsync before acking by default. Narad gives up the other axis: it has **no synchronous replication**, so a destroyed disk loses data where Kafka, JetStream at R3 and quorum queues survive it. Each system guards against a different failure.
 
 Kafka, RabbitMQ, NATS and Redis have all been through [Jepsen](https://jepsen.io/analyses) analyses. Narad's evidence is its own. Before v1.0.0 it was a chaos matrix. Since September 2026 a [nightly linearizability check](../understand/linearizability.md) tests the delivery contract while nodes are killed and cut off from each other.

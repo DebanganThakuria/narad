@@ -10,6 +10,13 @@ Learn the handful of ideas every Narad client uses: topics, partitions, keys, le
 
 A [topic](../reference/glossary.md#topic) is a named stream of messages: producers write to it, consumers read from it. Each topic is split into [partitions](../reference/glossary.md#partition): 3 by default, or the number you ask for when you create it. A partition is an append-only log on the disk of one node, its [owner](../reference/glossary.md#owner).
 
+<figure class="nr-dia nr-dia--doc" id="fig-concepts-partitions">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--mint">
+--8<-- "diagrams/concepts-partitions.html"
+</div>
+<figcaption>Whichever node accepts the produce picks the partition: <code>customer-42</code> hashes to <code>orders/1</code>, so in normal operation every message with that key joins the same log.</figcaption>
+</figure>
+
 You never need to know which node owns what. Any node accepts any request, and forwards it to the owner when the work belongs elsewhere. You can add partitions to a topic later, but never remove them.
 
 A topic keeps each message for its [retention](../reference/glossary.md#retention) period (the operator's default: 7 days for the binary, 12 hours for a cluster installed with the Helm chart), whether or not anyone acked it. Retention removes messages in whole chunks of the log, so a message can outlive its retention period but is never removed before it.
@@ -58,19 +65,12 @@ Each answers `204 No Content`. Acks can arrive in any order. If the lease ran ou
 
 ## Message lifecycle {#message-lifecycle}
 
-```mermaid
-stateDiagram-v2
-    accTitle: The lifecycle of one message
-    accDescr: A committed message is available. A consume leases it. From the lease, an ack settles it, a nack or an expired visibility timeout makes it available again, and an extend keeps the lease. Retention later removes the message whether it was settled or not.
-    [*] --> Available: produce committed
-    Available --> Leased: consume
-    Leased --> Settled: ack
-    Leased --> Available: nack or lease runs out
-    Leased --> Leased: extend
-    Settled --> Removed: retention
-    Available --> Removed: retention
-    Removed --> [*]
-```
+<figure class="nr-dia nr-dia--doc" id="fig-concepts-lifecycle">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--sky">
+--8<-- "diagrams/concepts-lifecycle.html"
+</div>
+<figcaption>A lease ends one of three ways: an ack settles the message, while a nack or the clock puts it back for the next consume. Retention removes messages later, whether they were acked or not.</figcaption>
+</figure>
 
 A settled message stays in its partition's log until retention removes it. A replay can still read it by partition and offset, without taking a lease: see [Replay messages](../build/replay.md).
 

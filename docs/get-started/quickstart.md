@@ -170,6 +170,13 @@ If this answers `204 No Content` at once, run it again after a few seconds: a no
 
 ## Step 5: ack it {#ack}
 
+<figure class="nr-dia nr-dia--doc" id="fig-quickstart-handle">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--sky">
+--8<-- "diagrams/quickstart-handle.html"
+</div>
+<figcaption>Copy the <code>receipt_handle</code> from the consume answer into the ack. It names this one delivery, so it settles the message only while your lease lasts.</figcaption>
+</figure>
+
 Put the `receipt_handle` from your step 4 response in a variable. Yours differs from the one shown here, so replace the value:
 
 ```bash
