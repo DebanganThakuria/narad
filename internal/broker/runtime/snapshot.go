@@ -48,7 +48,13 @@ type Snapshotter struct {
 	coldMu sync.Mutex
 	cold   map[coldKey]*coldPartition
 	polls  uint64
+
+	now func() time.Time // the clock a poll reads; time.Now outside tests
 }
+
+// readTopicIncarnation reads a topic directory's incarnation marker. A
+// variable so tests can count the reads a poll makes.
+var readTopicIncarnation = storage.ReadTopicIncarnation
 
 // coldRefresh bounds how long a reading of a partition's files is
 // reused. A closed log's files change only while it is open, which the
@@ -96,6 +102,7 @@ func NewSnapshotter(ms metastore.Metastore, offsets *consumer.InFlight, logs *Lo
 		logs:      logs,
 		logger:    logger,
 		selfID:    selfID,
+		now:       time.Now,
 	}
 }
 
@@ -119,7 +126,7 @@ func (s *Snapshotter) Snapshot(ctx context.Context) ([]metrics.TopicSnapshot, er
 	s.coldMu.Lock()
 	defer s.coldMu.Unlock()
 	s.polls++
-	now := time.Now()
+	now := s.now()
 	out := make([]metrics.TopicSnapshot, 0, len(topics))
 	for _, t := range topics {
 		ts := metrics.TopicSnapshot{
@@ -331,7 +338,7 @@ func (e *coldPartition) snapshot(topicID string, idx int, next int64, inFlight, 
 func (e *coldPartition) load(topicID string) {
 	e.logOK, e.hwm, e.segs, e.sizeBytes = false, 0, e.segs[:0], 0
 	if topicID != "" {
-		if marker, marked, err := storage.ReadTopicIncarnation(filepath.Dir(e.dir)); err != nil || (marked && marker != topicID) {
+		if marker, marked, err := readTopicIncarnation(filepath.Dir(e.dir)); err != nil || (marked && marker != topicID) {
 			return
 		}
 	}
