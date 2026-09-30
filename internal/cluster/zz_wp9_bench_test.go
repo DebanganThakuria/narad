@@ -37,12 +37,36 @@ func zzWP9Store(tb testing.TB) *metastore.Store {
 	for time.Now().Before(deadline) {
 		if err := store.CreateTopic(context.Background(), topic.Topic{Name: "__probe__", Partitions: 1}); err == nil {
 			_ = store.DeleteTopic(context.Background(), "__probe__")
+			zzWP9AwaitOwnershipView(tb, store)
 			return store
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	tb.Fatal("timed out waiting for leader")
 	return nil
+}
+
+// zzWP9AwaitOwnershipView sets the store's ownership latch and waits
+// until it holds, as a node's readiness check does before the node
+// takes traffic. The first ownership read sets the latch through a Raft
+// barrier. A read that lands while that barrier is committed but not
+// yet applied is refused (ErrUnavailable) rather than made to wait, and
+// the router then leaves the request to the local broker instead of
+// forwarding it. The coalescer tests open with a window's worth of
+// concurrent first acks to one remote owner, so now and then one of
+// them was not forwarded: the fake owner held one ack fewer than the
+// test waited for, and the wait timed out (two tests in one CI run on a
+// 2-core runner). Every store here is past the latch before a test
+// uses it.
+func zzWP9AwaitOwnershipView(tb testing.TB, store *metastore.Store) {
+	tb.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !store.OwnershipViewReady() {
+		if time.Now().After(deadline) {
+			tb.Fatal("timed out waiting for the metastore's ownership view")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // zzWP9Router builds a router on node-self for "orders": partition 1 is

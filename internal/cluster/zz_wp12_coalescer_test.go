@@ -58,6 +58,27 @@ func zzWP12Eventually(t *testing.T, what string, ok func() bool) {
 	}
 }
 
+// zzWP12AwaitHeld waits for n acks to be held by the gate. None of them
+// may answer first: each should be on its way to the owner, so an early
+// answer (an ack the router did not forward, say) fails at once, naming
+// what it answered, instead of leaving the wait to time out.
+func zzWP12AwaitHeld(t *testing.T, gate *zzWP12Gate, n int, results <-chan zzWP12Result) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for int(gate.held.Load()) != n {
+		select {
+		case r := <-results:
+			t.Fatalf("ack nonce %d answered %d %q (forwarded %v) with %d of %d acks held by the owner",
+				r.nonce, r.code, r.body, r.forwarded, gate.held.Load(), n)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the owner to hold %d acks: it holds %d", n, gate.held.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func zzWP12Queued(router *Router, addr string) int {
 	o := router.acks.owner(addr)
 	o.mu.Lock()
@@ -75,12 +96,13 @@ type zzWP12Result struct {
 	code        int
 	contentType string
 	body        string
+	forwarded   bool
 }
 
 func zzWP12Ack(router *Router, ctx context.Context, h consumer.Handle, out chan<- zzWP12Result) {
 	w := httptest.NewRecorder()
-	router.RouteAck(ctx, w, nil, "orders", h)
-	out <- zzWP12Result{nonce: h.Nonce, code: w.Code, contentType: w.Header().Get("Content-Type"), body: w.Body.String()}
+	forwarded := router.RouteAck(ctx, w, nil, "orders", h)
+	out <- zzWP12Result{nonce: h.Nonce, code: w.Code, contentType: w.Header().Get("Content-Type"), body: w.Body.String(), forwarded: forwarded}
 }
 
 // With every slot to an owner busy, further acks wait and leave as one
@@ -96,7 +118,7 @@ func TestZZWP12CoalescerBatchesWhenSlotsBusy(t *testing.T) {
 	for i := range slots {
 		go zzWP12Ack(router, context.Background(), consumer.Handle{Partition: 0, Offset: int64(i), Nonce: 1}, results)
 	}
-	zzWP12Eventually(t, "every slot to be busy", func() bool { return int(gate.held.Load()) == slots })
+	zzWP12AwaitHeld(t, gate, slots, results)
 	const queued = 10
 	for i := range queued {
 		nonce := int64(100 + i)
@@ -162,7 +184,7 @@ func TestZZWP12CoalescerLegacyOwner(t *testing.T) {
 	for i := range slots {
 		go zzWP12Ack(router, context.Background(), consumer.Handle{Partition: 0, Offset: int64(i), Nonce: 1}, results)
 	}
-	zzWP12Eventually(t, "every slot to be busy", func() bool { return int(gate.held.Load()) == slots })
+	zzWP12AwaitHeld(t, gate, slots, results)
 	for i := range 5 {
 		go zzWP12Ack(router, context.Background(), consumer.Handle{Partition: 0, Offset: int64(50 + i), Nonce: 2}, results)
 	}
@@ -196,7 +218,7 @@ func TestZZWP12CoalescerQueuedCallerLeaves(t *testing.T) {
 	for i := range slots {
 		go zzWP12Ack(router, context.Background(), consumer.Handle{Partition: 0, Offset: int64(i), Nonce: 1}, results)
 	}
-	zzWP12Eventually(t, "every slot to be busy", func() bool { return int(gate.held.Load()) == slots })
+	zzWP12AwaitHeld(t, gate, slots, results)
 	ctx, cancel := context.WithCancel(context.Background())
 	go zzWP12Ack(router, ctx, consumer.Handle{Partition: 0, Offset: 70, Nonce: 70}, results)
 	go zzWP12Ack(router, context.Background(), consumer.Handle{Partition: 0, Offset: 71, Nonce: 71}, results)
@@ -335,7 +357,7 @@ func TestZZWP14CoalescerWindowIsWide(t *testing.T) {
 	for i := range concurrent {
 		go zzWP12Ack(router, context.Background(), consumer.Handle{Partition: 0, Offset: int64(i), Nonce: 1}, results)
 	}
-	zzWP12Eventually(t, "every ack to reach the owner", func() bool { return gate.held.Load() == concurrent })
+	zzWP12AwaitHeld(t, gate, concurrent, results)
 	if n := zzWP12Queued(router, zzWP12AddrA); n != 0 {
 		t.Fatalf("%d acks queued with %d in flight", n, concurrent)
 	}
