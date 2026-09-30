@@ -493,6 +493,19 @@ func TestProduceDispatcherDiscardsRecordsForDeletedTopic(t *testing.T) {
 	if err := store.DeleteTopic(context.Background(), "orders"); err != nil {
 		t.Fatalf("DeleteTopic() error = %v", err)
 	}
+	// The discard is gated on AppliedCaughtUp, and a fresh store is not
+	// settled yet. Its ownership latch is unset, so the dispatcher's
+	// first ListAssignments sets it with a Raft barrier; and
+	// hashicorp/raft answers an apply or a barrier from the FSM goroutine
+	// before its main loop publishes the new applied index (processLogs
+	// calls setLastApplied last). So the latch's barrier could return
+	// just before the dispatcher's caught-up check, which then saw
+	// applied_index one behind commit_index and rightly declined to
+	// discard. A node that has been serving set its latch long ago:
+	// settle it here, and wait for the gate itself rather than race it.
+	waitFor(t, 10*time.Second, "the replica to settle after the delete", func() bool {
+		return store.OwnershipViewReady() && store.AppliedCaughtUp()
+	})
 	committer := &fakeProduceCommitter{}
 	dispatcher := NewProduceDispatcher(manager, store, "node-self", committer, nil, nil, ProduceDispatcherConfig{})
 
