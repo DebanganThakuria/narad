@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/debanganthakuria/narad/internal/persistence/storage/codec"
@@ -110,7 +111,7 @@ func TestFailedCommitAfterFsyncTruncatesTail(t *testing.T) {
 	}
 	sizeAfterFirst := fileSize(t, l.dir)
 
-	wp3FailReadBackOnce(t, l)
+	failReadBackOnce(t, l)
 	off1, err := l.Append([]byte("uncommitted"))
 	if err != nil {
 		t.Fatal(err)
@@ -445,7 +446,7 @@ func TestFailedCommitDiscardsLaterAppendsToo(t *testing.T) {
 	}
 	defer l.Close()
 
-	wp3FailReadBackOnce(t, l)
+	failReadBackOnce(t, l)
 	first, last, err := l.AppendBatch([][]byte{[]byte("a"), []byte("b"), []byte("c")})
 	if err != nil {
 		t.Fatal(err)
@@ -542,7 +543,7 @@ func TestDiscardKeepsActiveSegmentFile(t *testing.T) {
 		t.Fatalf("NewLog: %v", err)
 	}
 	defer l.Close()
-	wp3FailReadBackOnce(t, l)
+	failReadBackOnce(t, l)
 	off, err := l.Append([]byte("x"))
 	if err != nil {
 		t.Fatal(err)
@@ -556,4 +557,30 @@ func TestDiscardKeepsActiveSegmentFile(t *testing.T) {
 	if got := fmt.Sprint(segmentPaths(t, l.dir)); got != fmt.Sprint([]string{filepath.Join(l.dir, segmentFileName(0))}) {
 		t.Fatalf("segments = %s", got)
 	}
+}
+
+// failReadBackOnce makes the next commit on l fail after its frames
+// are written and fsynced: that fsync scribbles over the last bytes of
+// the frame just written, so the commit's CRC read-back rejects it. The
+// commit fails after its frames are durable and before they are exposed,
+// which is also where a failed high-watermark release fails one.
+func failReadBackOnce(t *testing.T, l *Log) {
+	t.Helper()
+	var armed atomic.Bool
+	armed.Store(true)
+	fsyncHook = func(s *segment) error {
+		if filepath.Dir(s.path) != l.dir || !armed.CompareAndSwap(true, false) {
+			return nil
+		}
+		f, err := os.OpenFile(s.path, os.O_WRONLY, 0)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		// Inside the last frame's payload: every record carries a
+		// 4-byte length prefix, so a payload is never shorter.
+		_, err = f.WriteAt([]byte{0xde, 0xad, 0xbe, 0xef}, s.sizeBytes-4)
+		return err
+	}
+	t.Cleanup(func() { fsyncHook = nil })
 }

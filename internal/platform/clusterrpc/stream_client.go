@@ -30,9 +30,9 @@ const defaultStreamTimeout = 5 * time.Second
 // alternative, header and payload as two Writes, was measured over QUIC
 // loopback (Apple M4 Pro, count=6, benchstat, September 2026) and was
 // never measurably faster:
-//   - pooled ack round trips from parallel callers (BenchmarkZZWP2QUICAck):
+//   - pooled ack round trips from parallel callers:
 //     3.09 us staged, 3.63 us split (+17%); over net.Pipe +27% to +50%;
-//   - one frame at a time on one stream (BenchmarkZZWP17QUICFrameWrite):
+//   - one frame at a time on one stream:
 //     no difference at 64 B and 1 KiB (round trip about 35 us, one way
 //     1.05 us and 7.7 us per frame), and at 16 KiB split is 7% slower
 //     round trip, 4% slower one way, with 8% more CPU.

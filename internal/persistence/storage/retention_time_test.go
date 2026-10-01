@@ -336,7 +336,7 @@ func TestStorageErrorCounters(t *testing.T) {
 	}
 	defer l.Close()
 
-	wp3FailReadBackOnce(t, l)
+	failReadBackOnce(t, l)
 	off, err := l.Append([]byte("x"))
 	if err != nil {
 		t.Fatal(err)

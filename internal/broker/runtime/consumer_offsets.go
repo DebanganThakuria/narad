@@ -389,9 +389,8 @@ func (c *ConsumerOffsetCommitter) Close() error {
 // Overlapping their data syncs, 8 at once, made a flush 2.4 to 3.7
 // times shorter, but on macOS the overlapped bursts held back the
 // produce syncs sharing the disk: beside 12 dirty partitions an owner's
-// 24-record commit went from 10ms to 22ms at p99 (see
-// BenchmarkZZWP16OwnerCommitUnderOffsetFlush and
-// BenchmarkZZWP16SpreadCommitUnderOffsetFlush in the messaging package).
+// 24-record commit went from 10ms to 22ms at p99 (measured on macOS,
+// September 2026).
 func (c *ConsumerOffsetCommitter) run() {
 	defer close(c.done)
 
