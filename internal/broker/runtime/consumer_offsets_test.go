@@ -12,7 +12,7 @@ import (
 func TestConsumerOffsetCommitterFlushesLatestOffsetOnClose(t *testing.T) {
 	dataDir := t.TempDir()
 	mustCreatePartitionDir(t, dataDir, "orders", 0)
-	committer := zzWP23ManualCommitter(dataDir)
+	committer := manualOffsetCommitter(dataDir)
 
 	committer.Commit("orders", 0, 1)
 	committer.Commit("orders", 0, 3)
@@ -37,7 +37,7 @@ func TestConsumerOffsetCommitterFlushesLatestOffsetOnClose(t *testing.T) {
 func TestConsumerOffsetCommitterCanPersistOffsetZero(t *testing.T) {
 	dataDir := t.TempDir()
 	mustCreatePartitionDir(t, dataDir, "orders", 0)
-	committer := zzWP23ManualCommitter(dataDir)
+	committer := manualOffsetCommitter(dataDir)
 
 	committer.Commit("orders", 0, 0)
 
@@ -60,7 +60,7 @@ func TestConsumerOffsetCommitterCanPersistOffsetZero(t *testing.T) {
 func TestConsumerOffsetCommitterDoesNotRecreatePurgedPartitionDir(t *testing.T) {
 	dataDir := t.TempDir()
 	partitionDir := mustCreatePartitionDir(t, dataDir, "orders", 0)
-	committer := zzWP23ManualCommitter(dataDir)
+	committer := manualOffsetCommitter(dataDir)
 
 	committer.Commit("orders", 0, 7)
 	if err := os.RemoveAll(partitionDir); err != nil {
@@ -100,7 +100,7 @@ func TestConsumerOffsetCommitterPersistsAckedAheadWithTheFrontier(t *testing.T) 
 	dataDir := t.TempDir()
 	mustCreatePartitionDir(t, dataDir, "orders", 0)
 	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
-	committer := zzWP23ManualCommitter(dataDir)
+	committer := manualOffsetCommitter(dataDir)
 	src := &fakeAheadSource{committed: 4, offsets: []int64{6, 9}, version: 1}
 	committer.SetAheadSource(src.source)
 
@@ -152,7 +152,7 @@ func TestConsumerOffsetCommitterPersistsAckedAheadWithTheFrontier(t *testing.T) 
 func TestConsumerOffsetCommitterInOrderFrontierRidesConsumerAhead(t *testing.T) {
 	dataDir := t.TempDir()
 	dir := mustCreatePartitionDir(t, dataDir, "orders", 0)
-	committer := zzWP23ManualCommitter(dataDir)
+	committer := manualOffsetCommitter(dataDir)
 	src := &fakeAheadSource{committed: 2, version: 7}
 	committer.SetAheadSource(src.source)
 	committer.Commit("orders", 0, 2)
@@ -176,7 +176,7 @@ func TestConsumerOffsetCommitterForgetRewritesAfterReplacement(t *testing.T) {
 	dataDir := t.TempDir()
 	mustCreatePartitionDir(t, dataDir, "orders", 0)
 	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
-	committer := zzWP23ManualCommitter(dataDir)
+	committer := manualOffsetCommitter(dataDir)
 	src := &fakeAheadSource{committed: 3, offsets: []int64{5}, version: 1}
 	committer.SetAheadSource(src.source)
 	committer.Commit("orders", 0, 3)
@@ -231,7 +231,7 @@ func TestConsumerOffsetCommitterResumesFromTheFileAfterRestart(t *testing.T) {
 	if err := storage.WriteConsumerAhead(dir, 1, future, 2, []int64{5}); err != nil {
 		t.Fatal(err)
 	}
-	committer := zzWP23ManualCommitter(dataDir)
+	committer := manualOffsetCommitter(dataDir)
 	src := &fakeAheadSource{committed: 2, offsets: []int64{5, 6}, version: 1}
 	committer.SetAheadSource(src.source)
 	committer.Commit("orders", 0, 2)
@@ -245,4 +245,11 @@ func TestConsumerOffsetCommitterResumesFromTheFileAfterRestart(t *testing.T) {
 	if rec.Slot != 0 || rec.Seq <= future || len(rec.Offsets) != 2 {
 		t.Fatalf("record after restart = slot %d seq %d offsets %v, want slot 0, seq > %d, [5 6]", rec.Slot, rec.Seq, rec.Offsets, future)
 	}
+}
+
+// manualOffsetCommitter is a committer with no loop, on the default
+// durability interval: ticks happen only through flush, tickAt and
+// Close.
+func manualOffsetCommitter(dataDir string) *ConsumerOffsetCommitter {
+	return newConsumerOffsetCommitter(dataDir, 0, nil, committerOptions{manual: true})
 }

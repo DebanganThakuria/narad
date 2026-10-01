@@ -15,7 +15,7 @@ import (
 // with context.DeadlineExceeded), so its scripted functions keep seeing
 // a bounded context exactly as before.
 
-func zzWP9Within(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+func fakeWithin(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if timeout <= 0 {
 		return ctx, func() {}
 	}
@@ -23,43 +23,43 @@ func zzWP9Within(ctx context.Context, timeout time.Duration) (context.Context, c
 }
 
 func (f fakePeerClient) CommitProduceBatchWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.CommitProduceBatchRequest) (nodewire.Response, error) {
-	ctx, cancel := zzWP9Within(ctx, timeout)
+	ctx, cancel := fakeWithin(ctx, timeout)
 	defer cancel()
 	return f.CommitProduceBatch(ctx, addr, req)
 }
 
 func (f fakePeerClient) ConsumeWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.ConsumeRequest) (nodewire.Response, error) {
-	ctx, cancel := zzWP9Within(ctx, timeout)
+	ctx, cancel := fakeWithin(ctx, timeout)
 	defer cancel()
 	return f.Consume(ctx, addr, req)
 }
 
 func (f fakePeerClient) AckWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.AckRequest) (nodewire.Response, error) {
-	ctx, cancel := zzWP9Within(ctx, timeout)
+	ctx, cancel := fakeWithin(ctx, timeout)
 	defer cancel()
 	return f.Ack(ctx, addr, req)
 }
 
 func (f fakePeerClient) ExtendAckWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.AckRequest) (nodewire.Response, error) {
-	ctx, cancel := zzWP9Within(ctx, timeout)
+	ctx, cancel := fakeWithin(ctx, timeout)
 	defer cancel()
 	return f.ExtendAck(ctx, addr, req)
 }
 
 func (f fakePeerClient) NackWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.AckRequest) (nodewire.Response, error) {
-	ctx, cancel := zzWP9Within(ctx, timeout)
+	ctx, cancel := fakeWithin(ctx, timeout)
 	defer cancel()
 	return f.Nack(ctx, addr, req)
 }
 
 func (f fakePeerClient) NotifyTokenWithin(ctx context.Context, addr string, timeout time.Duration, req nodewire.TokenNotifyRequest) (nodewire.Response, error) {
-	ctx, cancel := zzWP9Within(ctx, timeout)
+	ctx, cancel := fakeWithin(ctx, timeout)
 	defer cancel()
 	return f.NotifyToken(ctx, addr, req)
 }
 
 func (f fakePeerClient) RegisterTokensWithin(ctx context.Context, addr string, timeout time.Duration, delta nodewire.TokenDelta) (nodewire.Response, error) {
-	ctx, cancel := zzWP9Within(ctx, timeout)
+	ctx, cancel := fakeWithin(ctx, timeout)
 	defer cancel()
 	return f.RegisterTokens(ctx, addr, delta)
 }
