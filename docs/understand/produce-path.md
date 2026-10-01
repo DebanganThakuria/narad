@@ -192,7 +192,7 @@ The latch is exported as the gauge `narad_ingress_wal_failed` (unreleased; 1 onc
 | Linger cap | 50ms | `produceDispatchMaxLinger`: a small batch waits up to twice its owner's recent commit latency, never longer than this |
 | Per-destination queue cap | a quarter of the window, at least 4,096 | `perDestCap`: one destination holds at most a batch in flight and a full queue |
 | Remote commit byte budget | 8 MiB | `produceRemoteBatchBytes`: half the 16 MiB stream frame limit; at least one record per commit |
-| Lookahead past a stuck record | 16 windows | `produceDispatchLookaheadWindows`: bounds the per-seq marks and the work of a rescan |
+| Lookahead past a stuck record | 16 windows | `produceDispatchLookaheadWindows`: bounds the per-seq marks and the work of a rescan. A rescan also stops as soon as every partition it could place records for is blocked again or has none left, so a hot partition's skipped backlog is read again about once, not after each of its commits |
 | Commit fan-out | 16 commits in flight | `defaultProduceDispatchCommitFanout`: hung commits (past 1s) do not count |
 | Hung-commit threshold | 1s | `produceDispatchSlowAfter` |
 | Commit budget / probe budget / failure backoff | 30s / 5s / 1s | `produceCommitRPCTimeout`, `produceProbeRPCTimeout`, `defaultProduceDispatchFailureBackoff`: generous on purpose, since a commit that succeeds after the client gave up duplicates; the backoff is per destination |

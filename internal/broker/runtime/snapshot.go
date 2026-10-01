@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -48,7 +47,13 @@ type Snapshotter struct {
 	coldMu sync.Mutex
 	cold   map[coldKey]*coldPartition
 	polls  uint64
+
+	now func() time.Time // the clock a poll reads; time.Now outside tests
 }
+
+// readTopicIncarnation reads a topic directory's incarnation marker. A
+// variable so tests can count the reads a poll makes.
+var readTopicIncarnation = storage.ReadTopicIncarnation
 
 // coldRefresh bounds how long a reading of a partition's files is
 // reused. A closed log's files change only while it is open, which the
@@ -57,7 +62,37 @@ type Snapshotter struct {
 // log between two polls, so this is how stale that can leave a closed
 // partition's gauges. It keeps an idle partition to a map lookup per
 // poll rather than a directory listing and four file reads.
+//
+// Readings taken in the same poll (all of them after a restart, or a
+// batch whose logs were open together) would all expire in the same
+// later poll, rereading every closed partition at once. A reading taken
+// while its read time is zero is therefore dated back by the partition's
+// coldPhase, which is less than coldRefresh: its first refresh comes
+// sooner, never later, and from then on the refreshes stay spread over
+// the interval, about a sixth of the entries per 5 s poll.
 const coldRefresh = 30 * time.Second
+
+// coldPhase is how far a partition's first reading is dated back: an
+// FNV-1a hash of the topic name and the partition number, modulo
+// coldRefresh. Fixed per partition, so the spread holds across polls.
+func coldPhase(topicName string, idx int) time.Duration {
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	h := uint64(offset64)
+	for i := range len(topicName) {
+		h ^= uint64(topicName[i])
+		h *= prime64
+	}
+	v := uint64(idx)
+	for range 8 {
+		h ^= v & 0xff
+		h *= prime64
+		v >>= 8
+	}
+	return time.Duration(h % uint64(coldRefresh))
+}
 
 type coldKey struct {
 	topic     string
@@ -67,10 +102,12 @@ type coldKey struct {
 // coldPartition is what one partition's files said when last read. The
 // log part (hwm, segments) is read for a closed log, the frontier part
 // for a partition with no consumer shard; each has its own read time,
-// zero when not loaded.
+// zero when not loaded, and dated back by phase when loaded from zero
+// (see coldRefresh).
 type coldPartition struct {
-	seen uint64 // the poll that last visited it
-	dir  string // the partition directory
+	seen  uint64        // the poll that last visited it
+	dir   string        // the partition directory
+	phase time.Duration // coldPhase of the partition
 
 	logAt     time.Time
 	logOK     bool // the files describe this incarnation's log
@@ -96,6 +133,7 @@ func NewSnapshotter(ms metastore.Metastore, offsets *consumer.InFlight, logs *Lo
 		logs:      logs,
 		logger:    logger,
 		selfID:    selfID,
+		now:       time.Now,
 	}
 }
 
@@ -119,7 +157,7 @@ func (s *Snapshotter) Snapshot(ctx context.Context) ([]metrics.TopicSnapshot, er
 	s.coldMu.Lock()
 	defer s.coldMu.Unlock()
 	s.polls++
-	now := time.Now()
+	now := s.now()
 	out := make([]metrics.TopicSnapshot, 0, len(topics))
 	for _, t := range topics {
 		ts := metrics.TopicSnapshot{
@@ -127,11 +165,12 @@ func (s *Snapshotter) Snapshot(ctx context.Context) ([]metrics.TopicSnapshot, er
 			Partitions: make([]metrics.PartitionSnapshot, 0, t.Partitions),
 		}
 		owned := s.ownedPartitions(t.Name, t.Partitions)
+		marker := topicMarker{dataDir: s.logs.DataDir(), topic: t.Name, id: t.ID}
 		for i := 0; i < t.Partitions; i++ {
 			if !owned(i) {
 				continue
 			}
-			ps, ok := s.partitionSnapshot(t.Name, t.ID, i, now)
+			ps, ok := s.topicPartitionSnapshot(t.Name, &marker, i, now)
 			if !ok {
 				continue
 			}
@@ -185,6 +224,38 @@ func (s *Snapshotter) ownedPartitions(topicName string, partitions int) func(int
 	return func(int) bool { return true }
 }
 
+// topicMarker is one poll's reading of a topic directory's incarnation
+// marker. The first cold load of the topic's partitions that needs it
+// reads the file and the topic's other partitions reuse that reading for
+// the rest of the poll: at most one read per topic per poll rather than
+// one per reloaded partition, and none when no partition reloads.
+type topicMarker struct {
+	dataDir string
+	topic   string
+	id      string // the topic's incarnation ID; "" when it has none
+
+	read   bool
+	marker string
+	marked bool
+	err    error
+}
+
+// matches reports whether the topic directory may hold this
+// incarnation's partitions: always for a topic without an ID, otherwise
+// when its marker reads and names no other incarnation. A marker that
+// cannot be read counts as a mismatch, so the partitions that needed it
+// this poll are omitted.
+func (m *topicMarker) matches() bool {
+	if m.id == "" {
+		return true
+	}
+	if !m.read {
+		m.marker, m.marked, m.err = readTopicIncarnation(storage.TopicDir(m.dataDir, m.topic))
+		m.read = true
+	}
+	return m.err == nil && (!m.marked || m.marker == m.id)
+}
+
 // partitionSnapshot builds the snapshot for one owned partition. An
 // open log reports live; a closed one (idle-evicted, or not opened since
 // a restart) reports what its files say, because a backlog nobody reads
@@ -199,7 +270,17 @@ func (s *Snapshotter) ownedPartitions(topicName string, partitions int) func(int
 // acked-ahead sizes are always the shard's (0 without one): idle
 // eviction closes the log but keeps the shard, and its leases and
 // out-of-order acks are what shows a stalled consumer.
+//
+// This form reads the topic marker on its own; a poll uses
+// topicPartitionSnapshot so the topic's partitions share one reading.
 func (s *Snapshotter) partitionSnapshot(topicName, topicID string, idx int, now time.Time) (metrics.PartitionSnapshot, bool) {
+	marker := topicMarker{dataDir: s.logs.DataDir(), topic: topicName, id: topicID}
+	return s.topicPartitionSnapshot(topicName, &marker, idx, now)
+}
+
+// topicPartitionSnapshot is partitionSnapshot with the poll's reading of
+// the topic marker, shared by the topic's partitions.
+func (s *Snapshotter) topicPartitionSnapshot(topicName string, marker *topicMarker, idx int, now time.Time) (metrics.PartitionSnapshot, bool) {
 	next, inFlight, ackedAhead, hasShard := s.offsets.Reservable(topicName, idx)
 	// Peek, never Get: a metrics poll must not lazily open (and mkdir) a
 	// partition log. Opening here would resurrect directories for a topic
@@ -225,7 +306,7 @@ func (s *Snapshotter) partitionSnapshot(topicName, topicID string, idx int, now 
 	if open {
 		return liveSnapshot(log, idx, next, inFlight, ackedAhead), true
 	}
-	if ps, ok := e.snapshot(topicID, idx, next, inFlight, ackedAhead, now); ok {
+	if ps, ok := e.snapshot(marker, idx, next, inFlight, ackedAhead, now); ok {
 		return ps, true
 	}
 	// The log may have opened since the Peek (its first advance empties
@@ -246,7 +327,10 @@ func (s *Snapshotter) coldEntry(topicName string, idx int) *coldPartition {
 		if s.cold == nil {
 			s.cold = make(map[coldKey]*coldPartition)
 		}
-		e = &coldPartition{dir: storage.TopicPartitionDir(s.logs.DataDir(), topicName, idx)}
+		e = &coldPartition{
+			dir:   storage.TopicPartitionDir(s.logs.DataDir(), topicName, idx),
+			phase: coldPhase(topicName, idx),
+		}
 		s.cold[key] = e
 	}
 	e.seen = s.polls
@@ -275,17 +359,28 @@ func (e *coldPartition) persistedNext(now time.Time) int64 {
 			}
 		}
 	}
-	e.next, e.nextAt = next, now
+	e.next, e.nextAt = next, e.readAt(e.nextAt, now)
 	return next
+}
+
+// readAt is the read time to record for a reading taken now whose
+// previous read time was prev: now, or now dated back by the phase when
+// prev is zero (a first reading, or one dropped while the files could
+// change), so readings taken together do not expire together.
+func (e *coldPartition) readAt(prev, now time.Time) time.Time {
+	if prev.IsZero() {
+		return now.Add(-e.phase)
+	}
+	return now
 }
 
 // snapshot builds a closed partition's snapshot from its files, read
 // at most once per coldRefresh, with the given frontier and shard
 // sizes. ok=false when there is no persisted log to report.
-func (e *coldPartition) snapshot(topicID string, idx int, next int64, inFlight, ackedAhead int, now time.Time) (metrics.PartitionSnapshot, bool) {
+func (e *coldPartition) snapshot(marker *topicMarker, idx int, next int64, inFlight, ackedAhead int, now time.Time) (metrics.PartitionSnapshot, bool) {
 	if e.logAt.IsZero() || now.Sub(e.logAt) >= coldRefresh {
-		e.load(topicID)
-		e.logAt = now
+		e.load(marker)
+		e.logAt = e.readAt(e.logAt, now)
 	}
 	if !e.logOK {
 		return metrics.PartitionSnapshot{}, false
@@ -327,13 +422,12 @@ func (e *coldPartition) snapshot(topicID string, idx int, next int64, inFlight, 
 // load reads the closed log's persisted high-watermark (exact for a
 // cleanly closed log) and one listing of its segment files. A directory
 // whose topic marker names another incarnation is a deleted namesake's
-// leftover, not this topic's backlog.
-func (e *coldPartition) load(topicID string) {
+// leftover, not this topic's backlog; the marker is the topic's, read
+// once per poll by the first partition that needs it.
+func (e *coldPartition) load(marker *topicMarker) {
 	e.logOK, e.hwm, e.segs, e.sizeBytes = false, 0, e.segs[:0], 0
-	if topicID != "" {
-		if marker, marked, err := storage.ReadTopicIncarnation(filepath.Dir(e.dir)); err != nil || (marked && marker != topicID) {
-			return
-		}
+	if !marker.matches() {
+		return
 	}
 	hwm, ok, err := storage.ReadPersistedHighWatermark(e.dir)
 	if err != nil || !ok {

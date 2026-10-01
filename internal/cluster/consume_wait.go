@@ -57,6 +57,25 @@ func (rt *Router) RouteConsumeWait(ctx context.Context, w http.ResponseWriter, _
 	return true
 }
 
+// RouteConsumeWaitBatch is RouteConsumeWait for a batch consume
+// (?max=N): the claim an owner's notification triggers asks for up to
+// max records, so a consumer parked on a node that owns some of the
+// topic's partitions is served the owner's batch rather than one
+// record. handled means what RouteConsumeWait's return does. batch
+// reports that a 200 it wrote is already {"messages":[...]}; it is false
+// for a single message the caller wraps or tops up: one the local
+// waiter delivered, or one from an owner that does not take Max yet
+// (asked again for one record, see claimUpTo).
+func (rt *Router) RouteConsumeWaitBatch(ctx context.Context, w http.ResponseWriter, _ *http.Request, topicName string, wait time.Duration, local LocalConsumeWaiter, max int) (handled, batch bool) {
+	if wait <= 0 || local == nil {
+		return false, false
+	}
+	if !rt.tokens.enabled() || !rt.hasRemoteOwner(topicName) {
+		return false, false
+	}
+	return true, rt.waitOnTokens(ctx, w, topicName, wait, local, max)
+}
+
 // waitOnTokens parks the consumer on this node's tokens, races that
 // against local's wait, and writes the response. A max above 1 is a
 // batch consume: the claim and the re-probe ask the owner for up to max

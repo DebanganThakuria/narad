@@ -529,6 +529,19 @@ func rpcOutcome(res nodewire.Response, err error) string {
 	}
 }
 
+// bodyKeeper is a response writer that can take a body over instead of
+// copying it: the batch handlers' capture of a forwarded reply.
+type bodyKeeper interface {
+	KeepBody(body []byte)
+}
+
+// writePeerResponse writes a peer's reply to w: its status, and its body
+// typed as setContentHeaders does. A writer that implements bodyKeeper
+// is handed res.Body itself rather than a Write of it, so it may keep
+// the slice: the caller must not use res, or anything sharing its body,
+// afterwards. Every caller writes the reply as its last act, and a
+// decoded reply's body is its own frame's (see nodewire.DecodeResponse
+// and clusterwire.ReadStreamFrame), so nothing else holds it.
 func writePeerResponse(w http.ResponseWriter, res nodewire.Response) {
 	if res.Status == 0 {
 		res.Status = http.StatusOK
@@ -542,6 +555,10 @@ func writePeerResponse(w http.ResponseWriter, res nodewire.Response) {
 	}
 	setContentHeaders(w.Header(), res.ContentType)
 	w.WriteHeader(res.Status)
+	if k, ok := w.(bodyKeeper); ok {
+		k.KeepBody(res.Body)
+		return
+	}
 	_, _ = w.Write(res.Body)
 }
 
