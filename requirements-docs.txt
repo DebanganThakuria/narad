@@ -1,9 +1,12 @@
 # Docs toolchain for mkdocs.yml, pinned so CI builds what reviewers saw.
+# Needs Python 3.10 or newer (pymdown-extensions 11 dropped 3.9).
 # Install: python3 -m pip install -r requirements-docs.txt
 mkdocs==1.6.1
 mkdocs-material==9.7.7
-pymdown-extensions==10.21.3
-# 1.2.3 needs Python 3.10 and pulls in properdocs; 1.2.2 runs on 3.8+.
+# 11.0.2: fixes GHSA-gm37-52c6-37mw (ReDoS) and GHSA-9xwg-3r6f-jcx2 (b64,
+# which this site does not use).
+pymdown-extensions==11.0.2
+# 1.2.3 pulls in properdocs; stay on 1.2.2.
 mkdocs-redirects==1.2.2
 # scripts/gen_http_api.py reads docs/reference/openapi.yaml.
 PyYAML>=6
