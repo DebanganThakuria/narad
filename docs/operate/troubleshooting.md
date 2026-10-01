@@ -313,6 +313,16 @@ The full line is `reclaim: the new owner cannot vouch for the local partition co
 
 **Fix.** Copy the quarantined directory off before anything else: its records may be the only ones left. Narad never serves or deletes it; it goes only when the topic is deleted. Narad has no tool to merge it back; decide whether its records matter, re-produce them from the copy if they do, and delete it when you are done. The sweep's rules: [Rebalance and decommission](../understand/rebalance.md#what-if-the-source-dies-mid-move).
 
+### `move: the partition's path holds records the incoming copy lacks` {#log-move-install-set-aside}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `move: the partition's path holds records the incoming copy lacks; quarantined instead of replaced, they may exist only there. Operator action required`, at error level, with `topic`, `partition`, `reason` and `quarantine_dir`.
+
+**Cause.** A partition moved onto this node while its path (`topics/<topic>/p<NNNNN>`, the partition number zero-padded to 5 digits) still held an older copy, usually this node's own copy from when it owned the partition, which its stale-copy sweep had not judged yet. The incoming copy does not cover it. `reason` says how: the old copy recovers past the incoming copy's high watermark (this node kept committing past a force-promote while it was cut off), it holds a segment the incoming copy lacks or holds shorter (the new owner lost it), or the incoming copy holds no records at all (the new owner came back on an empty volume). The node renamed the old copy to `quarantine_dir` and installed the incoming one.
+
+**Fix.** As for [the sweep's set-aside](#log-partition-set-aside): copy the quarantined directory off first, since its records may be the only ones left. Narad never serves or deletes it; it goes only when the topic is deleted. Decide whether its records matter, re-produce them from the copy if they do, and delete it when you are done.
+
 ### `move: keeping the staging copy of a partition this node owns` {#log-move-keeping-staging}
 
 **Unreleased:** in master, not in v3.0.1.

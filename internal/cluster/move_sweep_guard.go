@@ -43,10 +43,12 @@ package cluster
 // ID and took new records at the same offsets cannot pass for the one
 // the copy was taken from.
 //
-// A copy the owner cannot vouch for is not kept at the partition's path:
-// a later move of the partition back onto this node would clear that path
-// before installing its copy. Set aside, it survives that, and every set
-// aside is logged at error level.
+// A copy the owner cannot vouch for is not kept at the partition's path,
+// where a later move of the partition back onto this node meets it; it
+// is set aside, and every set aside is logged at error level. A move back
+// that comes before the sweep runs is judged the same way by the install
+// itself (setAsideUncoveredCopy), with the staged copy in the owner's
+// place.
 
 import (
 	"bytes"

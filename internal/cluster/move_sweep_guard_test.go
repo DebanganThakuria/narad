@@ -665,3 +665,83 @@ func TestStaleCopySweepReclaimsAnInstallThatNeverFlipped(t *testing.T) {
 		requireSetAside(t, dst, 10)
 	})
 }
+
+// A partition can be planned back onto its old owner before that node's
+// stale-copy sweep has judged its old copy (the sweep runs every
+// moveSweepEvery reconcile ticks; the rebalance pass, every 10 s). From
+// then on the sweep skips the partition, and the move's install is what
+// meets the old copy at the partition's path. When the incoming copy
+// does not cover it, the install must set it aside, never delete it.
+func TestAMoveBackBeforeTheSweepNeverDeletesTheOldCopysRecords(t *testing.T) {
+	ctx := context.Background()
+	moveBack := func(t *testing.T, src *engineNode, from *messaging.Engine) {
+		t.Helper()
+		if err := src.store.SetAssignmentTarget(ctx, "orders", 0, "narad-src"); err != nil {
+			t.Fatal(err)
+		}
+		moveInto(t, src, from, "narad-dst", "narad-src")
+	}
+	requireMovedBackAndKept := func(t *testing.T, src *engineNode, incoming, kept int64) {
+		t.Helper()
+		if n := nextOffsetAt(t, src.dir()); n != incoming {
+			t.Fatalf("setup: the moved-back partition recovers next offset %d, want the incoming copy's %d", n, incoming)
+		}
+		for _, q := range quarantinesOf(t, src.dir()) {
+			if nextOffsetAt(t, q) == kept {
+				return
+			}
+		}
+		t.Fatalf("LOSS: the install deleted the old copy's records (quarantines %v, want one recovering to %d)", quarantinesOf(t, src.dir()), kept)
+	}
+
+	t.Run("the old owner kept committing past a force-promote", func(t *testing.T) {
+		// The destination promoted at 10 while the old owner, cut off,
+		// committed 10..14.
+		src := newEngineNode(t, "narad-src", "narad-src", "")
+		dst := newEngineNode(t, "narad-dst", "narad-src", "narad-dst")
+		for i := range 10 {
+			src.produce(t, fmt.Sprintf("pre-move-%d", i))
+		}
+		moveInto(t, dst, src.engine, "narad-src", "narad-dst")
+		dst.flip(t, "narad-src", "narad-dst")
+		src.engine.ResumeProduce("orders", 0)
+		for i := range 5 {
+			src.produce(t, fmt.Sprintf("cut-off-%d", i))
+		}
+		src.flip(t, "narad-src", "narad-dst")
+		moveBack(t, src, dst.engine)
+		requireMovedBackAndKept(t, src, 10, 15)
+	})
+
+	t.Run("the new owner came back empty", func(t *testing.T) {
+		src, _ := moveThenFlip(t, 10)
+		reborn := newEngineNode(t, "narad-dst", "narad-dst", "")
+		moveBack(t, src, reborn.engine)
+		requireMovedBackAndKept(t, src, 0, 10)
+	})
+
+	t.Run("the new owner lost a sealed segment", func(t *testing.T) {
+		src, dst := moveThenFlip(t, 10)
+		sealed := sealedSegmentFiles(t, dst.dir())
+		if len(sealed) < 3 {
+			t.Fatalf("setup: %d sealed segments on the new owner, want several", len(sealed))
+		}
+		if err := dst.engine.InstallPartitionDir("orders", 0, func() error { return os.Remove(sealed[1]) }); err != nil {
+			t.Fatalf("drop a sealed segment: %v", err)
+		}
+		moveBack(t, src, dst.engine)
+		requireMovedBackAndKept(t, src, 10, 10)
+	})
+
+	t.Run("control: a covered old copy is replaced", func(t *testing.T) {
+		src, dst := moveThenFlip(t, 10)
+		dst.produce(t, "after-the-move")
+		moveBack(t, src, dst.engine)
+		if n := nextOffsetAt(t, src.dir()); n != 11 {
+			t.Fatalf("the moved-back partition recovers next offset %d, want 11", n)
+		}
+		if q := quarantinesOf(t, src.dir()); len(q) != 0 {
+			t.Fatalf("a copy the incoming one covers was quarantined: %v", q)
+		}
+	})
+}

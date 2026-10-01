@@ -144,7 +144,7 @@ func (e *Engine) reclaimPartitionDirGuarded(topicName string, partition int, own
 	if guard.SetAside != "" {
 		// Not recovered first: a copy the owner cannot vouch for is set
 		// aside whatever it holds, a damaged one included.
-		quarantined, err := quarantinePartitionDir(dir)
+		quarantined, err := QuarantinePartitionDir(dir)
 		if err != nil {
 			return fmt.Errorf("reclaim refused: the new owner cannot vouch for the local copy (%s) and quarantine failed: %w", guard.SetAside, err)
 		}
@@ -153,12 +153,12 @@ func (e *Engine) reclaimPartitionDirGuarded(topicName string, partition int, own
 		return fmt.Errorf("%w: %s/%d set aside at %s: %s", ErrPartitionQuarantined, topicName, partition, quarantined, guard.SetAside)
 	}
 	if guard.Known {
-		next, err := recoveredNextOffset(dir)
+		next, err := RecoveredNextOffset(dir)
 		if err != nil {
 			return fmt.Errorf("reclaim refused: recover local copy: %w", err)
 		}
 		if next > guard.PromotedHWM {
-			quarantined, qerr := quarantinePartitionDir(dir)
+			quarantined, qerr := QuarantinePartitionDir(dir)
 			if qerr != nil {
 				return fmt.Errorf("reclaim refused: local copy is ahead of the promoted hwm (%d > %d) and quarantine failed: %w", next, guard.PromotedHWM, qerr)
 			}
@@ -175,10 +175,12 @@ func (e *Engine) reclaimPartitionDirGuarded(topicName string, partition int, own
 	return nil
 }
 
-// recoveredNextOffset reopens a closed partition directory and reports
+// RecoveredNextOffset reopens a closed partition directory and reports
 // the offset its log recovers to: an upper bound on what the copy holds.
-// A directory with no log is empty (next offset 0).
-func recoveredNextOffset(dir string) (int64, error) {
+// A directory with no log is empty (next offset 0). The caller must hold
+// the partition's log closed (the reclaim and the move's install run it
+// under ReplacePartitionDir).
+func RecoveredNextOffset(dir string) (int64, error) {
 	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
@@ -190,9 +192,11 @@ func recoveredNextOffset(dir string) (int64, error) {
 	return next, log.Close()
 }
 
-// quarantinePartitionDir renames dir to dir + QuarantineSuffix, picking a
-// timestamped name if that already exists, and returns the new path.
-func quarantinePartitionDir(dir string) (string, error) {
+// QuarantinePartitionDir renames dir to dir + QuarantineSuffix, picking a
+// timestamped name if that already exists, and returns the new path. The
+// stale-copy reclaim uses it, and so does a move's install when the
+// partition's path holds records the incoming copy lacks.
+func QuarantinePartitionDir(dir string) (string, error) {
 	target := dir + QuarantineSuffix
 	if _, err := os.Stat(target); err == nil {
 		target = dir + QuarantineSuffix + "." + strconv.FormatInt(time.Now().UnixNano(), 10)

@@ -651,7 +651,7 @@ func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResu
 		}
 	}
 	resetConsumerState()
-	installed, err := r.install(topicName, partition, stagingDir, expectID)
+	installed, err := r.install(topicName, partition, stagingDir, expectID, res.HighWatermark, time.Duration(rec.RetentionMs)*time.Millisecond)
 	if err != nil {
 		r.logger.Warn("move: install failed; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
@@ -746,6 +746,17 @@ func (r *MoveRunner) leaderAddr() (string, error) {
 // Called before the flip: after CompleteMove the partition is servable
 // here immediately, with no window where we own it but have no data.
 //
+// The partition's path may already hold a copy: this node's own copy
+// from when it owned the partition, which its stale-copy sweep has not
+// judged yet (the sweep runs every moveSweepEvery reconcile ticks, and a
+// rebalance can plan the partition back onto this node first), or an
+// earlier attempt's install. That copy can hold records nobody else has:
+// records committed here past a force-promote while this node was cut
+// off, or records the new owner lost. So the swap removes it only when
+// the staged copy covers it (stagedHWM and retention judge that; see
+// setAsideUncoveredCopy) and quarantines it otherwise, never deleting
+// it.
+//
 // expectID, when set, is the incarnation finishMove prepared the topic
 // directory for. The swap runs under the topic's guard (see below) and
 // refuses unless the topic marker still names it: a delete and recreate
@@ -754,7 +765,7 @@ func (r *MoveRunner) leaderAddr() (string, error) {
 // path, and clearing the destination would remove the successor's
 // records and consumer state. A marker gone altogether is a purge: the
 // copy would land in an unmarked directory the successor adopts.
-func (r *MoveRunner) install(topicName string, partition int, staging, expectID string) (os.FileInfo, error) {
+func (r *MoveRunner) install(topicName string, partition int, staging, expectID string, stagedHWM int64, retention time.Duration) (os.FileInfo, error) {
 	dir := r.partitionDir(topicName, partition)
 	var installed os.FileInfo
 	swap := func() error {
@@ -763,6 +774,9 @@ func (r *MoveRunner) install(topicName string, partition int, staging, expectID 
 		}
 		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 			return fmt.Errorf("make partition parent: %w", err)
+		}
+		if err := r.setAsideUncoveredCopy(topicName, partition, dir, staging, stagedHWM, retention); err != nil {
+			return err
 		}
 		if err := os.RemoveAll(dir); err != nil {
 			return fmt.Errorf("clear destination dir: %w", err)
@@ -786,6 +800,57 @@ func (r *MoveRunner) install(topicName string, partition int, staging, expectID 
 		return nil, err
 	}
 	return installed, nil
+}
+
+// setAsideUncoveredCopy quarantines the copy at the partition's path
+// (dir) when it holds records the staged copy does not cover, so the
+// install's swap never deletes them. It is the stale-copy sweep's
+// comparison (ownerReclaimGuard) with the staged copy in the owner's
+// place: the local copy is covered when it holds no live records, or
+// when every live segment below the staged high-watermark is in the
+// staged copy, a sealed one at least as long, and it recovers to no
+// further than that high-watermark. Runs under the topic's guard with
+// the partition's log closed. An error refuses the install (the move
+// retries); the copy is never removed here.
+func (r *MoveRunner) setAsideUncoveredCopy(topicName string, partition int, dir, staging string, stagedHWM int64, retention time.Duration) error {
+	local, err := listLocalSegments(dir)
+	if err != nil {
+		return fmt.Errorf("list the copy at the partition's path: %w", err)
+	}
+	now := time.Now()
+	if !liveRecords(local, retention, now) {
+		return nil
+	}
+	staged, err := storage.ListPartitionSegments(staging)
+	if err != nil {
+		return fmt.Errorf("list the staged copy: %w", err)
+	}
+	guard := ownerReclaimGuard(messaging.PartitionTransferInfo{
+		Segments:      staged,
+		HighWatermark: stagedHWM,
+		MoveMarker:    &messaging.MoveMarker{HighWatermark: stagedHWM},
+	}, local, false, retention, now)
+	why := guard.SetAside
+	if why == "" {
+		next, err := messaging.RecoveredNextOffset(dir)
+		switch {
+		case err != nil:
+			why = fmt.Sprintf("it could not be recovered to compare (%v)", err)
+		case next > stagedHWM:
+			why = fmt.Sprintf("it recovers to offset %d, past the incoming copy's high watermark %d", next, stagedHWM)
+		}
+	}
+	if why == "" {
+		return nil
+	}
+	why = "compared with the incoming copy: " + why
+	quarantined, err := messaging.QuarantinePartitionDir(dir)
+	if err != nil {
+		return fmt.Errorf("quarantine the copy at the partition's path (%s): %w", why, err)
+	}
+	r.logger.Error("move: the partition's path holds records the incoming copy lacks; quarantined instead of replaced, they may exist only there. Operator action required",
+		"topic", topicName, "partition", partition, "reason", why, "quarantine_dir", quarantined)
+	return nil
 }
 
 // rollbackInstall moves the copy install put in place back to staging,
