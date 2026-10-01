@@ -2531,6 +2531,12 @@ html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
     padding: 0.8rem 0.6rem;
   }
 
+  /* The plate bleeds to the screen edges here, so draw the focus ring
+     inside it or its sides fall off screen. */
+  .nr-plate:focus-visible {
+    outline-offset: -3px !important;
+  }
+
   .md-typeset .nr-dia--doc .nr-dia__narrow {
     min-width: 336px;
     max-width: 440px;
