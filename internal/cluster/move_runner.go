@@ -657,6 +657,7 @@ func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResu
 		return false
 	}
 	resetConsumerState()
+	w.movedBack = false
 	w.pending = &pendingFlip{
 		res: res, expectID: expectID, installed: installed, forcePromoted: forcePromoted,
 		token: token, sourceAddr: sourceAddr, since: r.now(),

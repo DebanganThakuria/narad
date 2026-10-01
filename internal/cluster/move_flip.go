@@ -79,6 +79,10 @@ type moveWorker struct {
 	// exit: the move as this worker knows it is over (the leader
 	// confirmed its flip cannot happen); a re-plan spawns a fresh worker.
 	exit bool
+	// movedBack: staging holds a copy this worker installed and then
+	// moved back off the partition's path (rollbackInstall restored it),
+	// and the worker has not installed again since.
+	movedBack bool
 }
 
 // flipDone records that the move flipped.
@@ -99,14 +103,14 @@ func (w *moveWorker) observeDone() {
 // finish runs as the worker exits. A worker that did not flip removes
 // its staging copy: a worker spawned again for the same move copies
 // afresh, and one that is not wanted any more must not leave a partition
-// copy on disk. Staging is kept only when this node owns the partition
-// by now (a flip that committed after the copy was moved back to staging
-// left the only local copy there), or when the owner cannot be read; a
-// partition with no assignment (its topic is gone) has no owner. A worker
-// cancelled with a flip pending leaves the install at the partition's
-// path: if the flip committed it is the partition, and if not, the next
-// worker's install replaces it or the stale-copy sweep judges it against
-// the real owner.
+// copy on disk. Staging is kept when the owner cannot be read, and when
+// this node owns the partition by now and staging may hold records the
+// partition's path lacks (see ownedStagingIsRedundant); a partition with
+// no assignment (its topic is gone) has no owner. A worker cancelled
+// with a flip pending leaves the install at the partition's path: if the
+// flip committed it is the partition, and if not, the next worker's
+// install replaces it or the stale-copy sweep judges it against the real
+// owner.
 func (w *moveWorker) finish() {
 	if w.flipped {
 		return
@@ -123,15 +127,52 @@ func (w *moveWorker) finish() {
 		return
 	}
 	if err == nil && a.OwnerID == r.selfID {
-		if _, err := os.Stat(w.staging); err == nil {
-			r.logger.Error("move: keeping the staging copy of a partition this node owns; the flip committed after the copy was moved back. Operator action required",
-				"topic", w.topic, "partition", w.partition, "staging", w.staging)
+		if _, err := os.Stat(w.staging); err != nil {
+			return
 		}
-		return
+		dir := r.partitionDir(w.topic, w.partition)
+		if w.ownedStagingIsRedundant(dir) {
+			r.logger.Info("move: the partition flipped to this node under an earlier attempt's install; removing this attempt's staging copy",
+				"topic", w.topic, "partition", w.partition, "staging", w.staging, "partition_dir", dir)
+		} else {
+			segs, _ := listLocalSegments(dir)
+			r.logger.Error("move: keeping the staging copy of a partition this node owns; the partition's records may not all be under its path. Operator action required",
+				"topic", w.topic, "partition", w.partition, "staging", w.staging, "partition_dir", dir,
+				"moved_back", w.movedBack, "partition_dir_has_records", holdsRecords(segs))
+			return
+		}
 	}
 	if err := os.RemoveAll(w.staging); err != nil {
 		r.logger.Warn("move: remove the staging copy of a move that ended without a flip", "dir", w.staging, "err", err)
 	}
+}
+
+// ownedStagingIsRedundant reports whether the staging copy of a worker
+// that ended without a flip, on a node that owns the partition by now,
+// holds nothing the partition's path (dir) lacks. That is so when the
+// path holds a copy installed from this move's source and this worker
+// never moved an install of its own back to staging: the flip that
+// committed was an earlier worker's, made while its install was in
+// place (a node restart cancels a worker with its flip pending, and the
+// next worker's fresh copy is all staging holds). Anything else keeps
+// staging: a copy this worker moved back is the partition's as of the
+// flip, and a path without an install may hold none of it.
+func (w *moveWorker) ownedStagingIsRedundant(dir string) bool {
+	if w.movedBack {
+		return false
+	}
+	m, ok, err := messaging.ReadMoveMarker(dir)
+	return err == nil && ok && m.Source == w.source
+}
+
+// holdsRecords reports whether any segment holds bytes.
+func holdsRecords(segs []localSegment) bool {
+	for _, s := range segs {
+		if s.size > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // resetSession throws the staged copy away and starts the next attempt
@@ -326,9 +367,11 @@ func (w *moveWorker) resolvePending(ctx context.Context) bool {
 		}
 		r.logger.Warn("move: the leader confirms the flip did not and cannot happen; moving the installed copy back to staging",
 			"topic", w.topic, "partition", w.partition, "source", w.source, "reason", v.why)
-		if _, err := r.rollbackInstall(w.topic, w.partition, p.expectID, p.installed, w.staging); err != nil {
+		restored, err := r.rollbackInstall(w.topic, w.partition, p.expectID, p.installed, w.staging)
+		if err != nil {
 			r.logger.Warn("move: roll back install", "topic", w.topic, "partition", w.partition, "err", err)
 		}
+		w.movedBack = restored
 		w.pending = nil
 		w.exit = true
 		return false
@@ -417,6 +460,7 @@ func (w *moveWorker) rollbackPending(reason string) {
 	if err != nil {
 		r.logger.Warn("move: roll back install", "topic", w.topic, "partition", w.partition, "err", err)
 	}
+	w.movedBack = restored
 	if !restored {
 		w.resetSession("the installed copy could not be moved back to staging")
 	}

@@ -571,6 +571,121 @@ func TestMoveRunnerRemovesItsStagingWhenTheTopicIsGone(t *testing.T) {
 	}
 }
 
+// chunkHookPeer runs onChunk before every segment chunk fetch.
+type chunkHookPeer struct {
+	movePeerFake
+	onChunk func()
+}
+
+func (p chunkHookPeer) FetchSegmentChunk(ctx context.Context, addr, topicName string, partition int, base, at, length int64) ([]byte, error) {
+	p.onChunk()
+	return p.movePeerFake.FetchSegmentChunk(ctx, addr, topicName, partition, base, at, length)
+}
+
+// Worker A installs and proposes the flip, the reply is unknown, and the
+// node restarts with the flip pending, which cancels A. The target is
+// still this node, so worker B starts a fresh copy into staging; A's
+// flip then commits, A's install becomes the partition, and the
+// reconcile cancels B. B's staging holds only its re-copy: it must go,
+// without the "operator action required" alarm, and the partition's
+// path keeps A's install.
+func TestMoveRunnerDropsARecopyWhenAnEarlierWorkersInstallFlipped(t *testing.T) {
+	src := t.TempDir()
+	wantHWM, payloads := buildSourcePartition(t, src, 10)
+	store := &unknownFlipStore{fakeMoveStore: &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+	}, err: fmt.Errorf("%w: peer rpc: reply timeout", errs.ErrUnavailable)}
+	fetcher := dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}
+	dataDir := t.TempDir()
+	cfg := MoveConfig{RetryBackoff: 5 * time.Millisecond, FreezeTTL: time.Minute}
+
+	a := NewMoveRunner(store, "narad-dst", dataDir, movePeerFake{dirFetcher: fetcher, freeze: &fakeFreeze{}}, nil, nil, nil, cfg)
+	ctxA, cancelA := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelA()
+	doneA := make(chan struct{})
+	go func() {
+		defer close(doneA)
+		a.runMove(ctxA, "orders", 0, "narad-src")
+	}()
+	for store.flips.Load() < 1 && ctxA.Err() == nil {
+		time.Sleep(time.Millisecond)
+	}
+	cancelA()
+	<-doneA
+	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	if m, ok, err := messaging.ReadMoveMarker(dir); err != nil || !ok || m.Source != "narad-src" {
+		t.Fatalf("setup: worker A's install is not at the partition's path (marker %+v, found %v, err %v)", m, ok, err)
+	}
+
+	ctxB, cancelB := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelB()
+	var commitA sync.Once
+	peerB := chunkHookPeer{movePeerFake: movePeerFake{dirFetcher: fetcher, freeze: &fakeFreeze{}}, onChunk: func() {
+		commitA.Do(func() {
+			store.mu.Lock()
+			store.assignment.OwnerID, store.assignment.TargetID = "narad-dst", ""
+			store.mu.Unlock()
+			cancelB()
+		})
+	}}
+	b := NewMoveRunner(store, "narad-dst", dataDir, peerB, nil, nil, nil, cfg)
+	b.runMove(ctxB, "orders", 0, "narad-src")
+	if errors.Is(ctxB.Err(), context.DeadlineExceeded) {
+		t.Fatal("setup: worker B never fetched a chunk")
+	}
+
+	if _, err := os.Stat(b.stagingDir("orders", 0)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("worker B kept its re-copy in staging although the partition's path holds the install that flipped (stat err %v)", err)
+	}
+	requireInstalledCopy(t, dataDir, wantHWM, payloads)
+}
+
+// What finish does with the staging copy of a worker that ended without
+// a flip on a node that owns the partition by then: only a path holding
+// an install from the move's source, with no install of this worker
+// moved back, makes staging redundant.
+func TestMoveWorkerKeepsAnOwnedStagingCopyOnlyWhenItMayHoldTheRecords(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		movedBack  bool
+		pathSource string // "" for no move marker at the path
+		pathLog    bool   // the path holds a log with a record
+		wantKept   bool
+	}{
+		{name: "an earlier install from the source is the partition", pathSource: "narad-src"},
+		{name: "this worker moved its install back", movedBack: true, pathLog: true, wantKept: true},
+		{name: "nothing under the partition's path", wantKept: true},
+		{name: "the path holds records that came from no move", pathLog: true, wantKept: true},
+		{name: "the path holds an install from another source", pathSource: "narad-other", wantKept: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeMoveStore{assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-dst"}}
+			dataDir := t.TempDir()
+			r := NewMoveRunner(store, "narad-dst", dataDir, movePeerFake{}, nil, nil, nil, MoveConfig{})
+			w := &moveWorker{r: r, topic: "orders", partition: 0, source: "narad-src", staging: r.stagingDir("orders", 0), movedBack: tc.movedBack}
+			buildSourcePartition(t, w.staging, 3)
+			dir := r.partitionDir("orders", 0)
+			if tc.pathLog {
+				buildSourcePartition(t, dir, 1)
+			}
+			if tc.pathSource != "" {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := messaging.WriteMoveMarker(dir, messaging.MoveMarker{Source: tc.pathSource, HighWatermark: 3}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w.finish()
+			_, err := os.Stat(w.staging)
+			if kept := err == nil; kept != tc.wantKept {
+				t.Fatalf("staging kept = %v (stat err %v), want %v", kept, err, tc.wantKept)
+			}
+		})
+	}
+}
+
 // readerPeer answers the leader read with a fixed assignment, as the
 // given kind of node.
 type readerPeer struct {

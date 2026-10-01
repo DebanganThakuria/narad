@@ -317,11 +317,18 @@ The full line is `reclaim: the new owner cannot vouch for the local partition co
 
 **Unreleased:** in master, not in v3.0.1.
 
-The full line is `move: keeping the staging copy of a partition this node owns; the flip committed after the copy was moved back. Operator action required`, at error level, with `topic`, `partition` and `staging`.
+The full line is `move: keeping the staging copy of a partition this node owns; the partition's records may not all be under its path. Operator action required`, at error level, with `topic`, `partition`, `staging`, `partition_dir`, `moved_back` and `partition_dir_has_records`.
 
-**Cause.** A move's flip had an unknown outcome, the leader confirmed it had not committed, and the destination moved its copy back to staging; the flip then committed after all. This node owns the partition, and its records are in `staging` (`dataDir/.moves/<topic>-<partition>`, with the partition number not padded, such as `.moves/orders-3`), not under the partition's path.
+**Cause.** A move to this node ended without seeing its own flip commit, yet this node owns the partition: a flip committed after all. `staging` is the move's copy (`dataDir/.moves/<topic>-<partition>`, with the partition number not padded, such as `.moves/orders-3`), and `partition_dir` is the partition's path (`topics/<topic>/p<NNNNN>`, the partition number zero-padded to 5 digits, such as `topics/orders/p00003`).
 
-**Fix.** Stop the node, move the staging directory into place as `topics/<topic>/p<NNNNN>` under the data directory (the partition number zero-padded to 5 digits: `.moves/orders-3` goes to `topics/orders/p00003`) (replacing what is there, after copying that off if it holds anything), and start the node. Narad does not move it on its own.
+- `moved_back=true`: the leader read the flip as not committed, the move took its installed copy off the partition's path, and the flip committed anyway. `staging` holds the partition's records as of the flip; `partition_dir` holds only what this node wrote since.
+- `moved_back=false`: no copy installed from the move's source is under the partition's path, so `staging` may hold records the path lacks.
+
+When the path does hold a copy installed from the move's source and the move moved nothing back, the flip was an earlier attempt's (a restart cancelled that worker with its flip pending) and `staging` only holds a later attempt's re-copy: the node removes it and logs `move: the partition flipped to this node under an earlier attempt's install; removing this attempt's staging copy` at info instead.
+
+**Check.** `partition_dir_has_records`, and the segment files in both directories (each file is named for the offset it starts at).
+
+**Fix.** Stop the node and copy both directories off first. If `partition_dir_has_records=false`, move the staging directory into place as `partition_dir` (`.moves/orders-3` goes to `topics/orders/p00003`) and start the node. If it is `true`, both copies can hold records the other lacks, at overlapping offsets: do not replace the live partition with the staging copy; compare the two, start the node, and re-produce from the staging copy the records you decide matter. Narad does not move either directory on its own.
 
 ### `x509: certificate signed by unknown authority` {#raft-cert-untrusted}
 
