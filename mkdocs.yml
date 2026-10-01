@@ -107,7 +107,7 @@ plugins:
   # Old URLs from before the five-tab layout. A target never carries a
   # #fragment: the plugin appends the visitor's own hash, and
   # javascripts/legacy-anchors.js forwards hashes whose section moved.
-  # Pinned to 1.2.2 in requirements-docs.txt (1.2.3 needs Python 3.10).
+  # Pinned to 1.2.2 in requirements-docs.txt (1.2.3 pulls in properdocs).
   - redirects:
       redirect_maps:
         # Client guide (client/) to Get started and Build
