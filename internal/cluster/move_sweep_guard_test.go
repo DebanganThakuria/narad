@@ -21,6 +21,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
@@ -51,6 +52,7 @@ func TestStaleCopyOwnerGuardDecisions(t *testing.T) {
 		name      string
 		info      messaging.PartitionTransferInfo
 		local     []localSegment
+		fromOwner bool // the local copy's marker names the owner as its source
 		retention time.Duration
 		setAside  bool
 		wantHWM   int64
@@ -141,9 +143,37 @@ func TestStaleCopyOwnerGuardDecisions(t *testing.T) {
 			local:   []localSegment{{base: 0, size: 0, modTime: fresh}},
 			wantHWM: 7,
 		},
+		{
+			name:      "install copied from an owner with no marker: guard at the owner's hwm",
+			info:      messaging.PartitionTransferInfo{Segments: healthy, HighWatermark: 25},
+			local:     local,
+			fromOwner: true,
+			wantHWM:   25,
+		},
+		{
+			name:      "install copied from an owner whose own marker is older: not capped by it",
+			info:      messaging.PartitionTransferInfo{Segments: healthy, HighWatermark: 25, MoveMarker: marker(3)},
+			local:     local,
+			fromOwner: true,
+			wantHWM:   25,
+		},
+		{
+			name:      "install copied from an owner that now lists nothing: set aside",
+			info:      messaging.PartitionTransferInfo{},
+			local:     local,
+			fromOwner: true,
+			setAside:  true,
+		},
+		{
+			name:      "install copied from an owner that lost a segment: set aside",
+			info:      messaging.PartitionTransferInfo{Segments: []storage.SegmentInfo{seg(0, 500, true), seg(10, 500, true), seg(15, 900, false)}, HighWatermark: 25},
+			local:     local,
+			fromOwner: true,
+			setAside:  true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			guard := ownerReclaimGuard(tc.info, tc.local, tc.retention, now)
+			guard := ownerReclaimGuard(tc.info, tc.local, tc.fromOwner, tc.retention, now)
 			if !guard.Known {
 				t.Fatalf("guard %+v is not KNOWN: the sweep must never reclaim unguarded", guard)
 			}
@@ -314,17 +344,59 @@ func moveInto(t *testing.T, node *engineNode, from *messaging.Engine, owner, tar
 // own leader, against whatever engine answers for the new owner.
 func sweepOnSource(t *testing.T, src *engineNode, owner *messaging.Engine) []messaging.PartitionTransferInfo {
 	t.Helper()
+	return sweepAs(t, src, "narad-src", metastore.Assignment{OwnerID: "narad-dst"}, owner)
+}
+
+// sweepAs runs the real stale-copy sweep on node as self, its own
+// leader, with orders/0 at a (owner and target) in its view, against
+// whatever engine answers for a.OwnerID.
+func sweepAs(t *testing.T, node *engineNode, self string, a metastore.Assignment, owner *messaging.Engine) []messaging.PartitionTransferInfo {
+	t.Helper()
 	var seen []messaging.PartitionTransferInfo
+	a.Topic, a.Partition = "orders", 0
 	store := &fakeMoveStore{
-		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-dst"},
-		member:     metastore.Member{ID: "narad-dst", Addr: "narad-dst:7942", Status: metastore.MemberAlive},
-		leaderID:   "narad-src",
+		assignment: a,
+		member:     metastore.Member{ID: a.OwnerID, Addr: a.OwnerID + ":7942", Status: metastore.MemberAlive},
+		leaderID:   self,
 		topics:     []topic.Topic{{Name: "orders", Partitions: 1, RetentionMs: 7_200_000}},
 	}
-	r := NewMoveRunner(store, "narad-src", src.dataDir, ownerEnginePeer{owner: owner, seen: &seen}, src.engine, nil,
+	r := NewMoveRunner(store, self, node.dataDir, ownerEnginePeer{owner: owner, seen: &seen}, node.engine, nil,
 		discardLogger(), MoveConfig{})
 	r.sweepStaleCopies(context.Background())
 	return seen
+}
+
+// installWithoutFlip runs a move worker on node that copies orders/0
+// from the engine answering for owner and installs it, while every flip
+// it proposes returns an unknown outcome and never commits. The worker
+// is cancelled once it has proposed `flips` flips, which leaves the
+// install, with a move marker naming owner, at the partition's path.
+func installWithoutFlip(t *testing.T, node *engineNode, from *messaging.Engine, owner, target string, flips int32) {
+	t.Helper()
+	store := &unknownFlipStore{fakeMoveStore: &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: owner, TargetID: target},
+		member:     metastore.Member{ID: owner, Addr: owner + ":7942", Status: metastore.MemberAlive},
+	}, err: fmt.Errorf("%w: peer rpc: reply timeout", errs.ErrUnavailable)}
+	r := NewMoveRunner(store, target, node.dataDir, ownerEnginePeer{owner: from}, node.engine, nil,
+		discardLogger(), MoveConfig{RetryBackoff: 5 * time.Millisecond})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.runMove(ctx, "orders", 0, owner)
+	}()
+	for store.flips.Load() < flips && ctx.Err() == nil {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+	if got := store.flips.Load(); got < flips {
+		t.Fatalf("setup: the worker proposed %d flips, want %d", got, flips)
+	}
+	if m, ok, err := messaging.ReadMoveMarker(node.dir()); err != nil || !ok || m.Source != owner {
+		t.Fatalf("setup: no install from %s at the partition's path (marker %+v, found %v, err %v)", owner, m, ok, err)
+	}
 }
 
 func nextOffsetAt(t *testing.T, dir string) int64 {
@@ -495,4 +567,101 @@ func TestStaleCopyTheOwnerCannotVouchForSurvivesAMoveBack(t *testing.T) {
 		}
 	}
 	t.Fatalf("LOSS: after the move back the old owner's 10 records exist nowhere (quarantines %v)", quarantinesOf(t, src.dir()))
+}
+
+// An install that never flipped is a copy of the owner's records, made
+// from the owner. When its move is abandoned (the destination died with
+// its flip pending and the controller cleared the target, or the worker
+// was cancelled with its flip pending and the move re-planned), the
+// install stays at the destination's partition path, and the
+// destination's sweep judges it against the owner it came from:
+// reclaimed while the owner still holds those records, set aside when it
+// does not.
+func TestStaleCopySweepReclaimsAnInstallThatNeverFlipped(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T) (src, dst *engineNode) {
+		t.Helper()
+		src = newEngineNode(t, "narad-src", "narad-src", "")
+		dst = newEngineNode(t, "narad-dst", "narad-src", "narad-dst")
+		for i := range 10 {
+			src.produce(t, fmt.Sprintf("pre-move-%d", i))
+		}
+		return src, dst
+	}
+	abortOn := func(t *testing.T, n *engineNode) {
+		t.Helper()
+		if err := n.store.AbortMove(ctx, "orders", 0, "narad-dst"); err != nil {
+			t.Fatalf("AbortMove: %v", err)
+		}
+	}
+	requireReclaimed := func(t *testing.T, src, dst *engineNode) {
+		t.Helper()
+		if q := quarantinesOf(t, dst.dir()); len(q) != 0 {
+			t.Fatalf("the abandoned install was quarantined although its owner holds every record of it: %v", q)
+		}
+		if _, err := os.Stat(dst.dir()); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the abandoned install was not reclaimed (stat err %v)", err)
+		}
+		if n := nextOffsetAt(t, src.dir()); n != 10 {
+			t.Fatalf("the owner holds next offset %d, want 10", n)
+		}
+	}
+	cleared := metastore.Assignment{OwnerID: "narad-src"}
+
+	t.Run("the destination died and the controller cleared the target", func(t *testing.T) {
+		src, dst := setup(t)
+		installWithoutFlip(t, dst, src.engine, "narad-src", "narad-dst", 1)
+		abortOn(t, dst)
+		sweepAs(t, dst, "narad-dst", cleared, src.engine)
+		requireReclaimed(t, src, dst)
+	})
+
+	t.Run("the owner holds an older move marker of its own", func(t *testing.T) {
+		src, dst := setup(t)
+		// The owner got the partition by an earlier move, promoted at 3.
+		if err := messaging.WriteMoveMarker(src.dir(), messaging.MoveMarker{Source: "narad-old", HighWatermark: 3}); err != nil {
+			t.Fatal(err)
+		}
+		installWithoutFlip(t, dst, src.engine, "narad-src", "narad-dst", 1)
+		abortOn(t, dst)
+		seen := sweepAs(t, dst, "narad-dst", cleared, src.engine)
+		if len(seen) != 1 || seen[0].MoveMarker == nil || seen[0].MoveMarker.HighWatermark != 3 {
+			t.Fatalf("setup: the owner's listing is %+v, want its marker at 3", seen)
+		}
+		requireReclaimed(t, src, dst)
+	})
+
+	t.Run("the worker was cancelled with its flip pending and the move re-planned", func(t *testing.T) {
+		src, dst := setup(t)
+		installWithoutFlip(t, dst, src.engine, "narad-src", "narad-dst", 3)
+		if err := dst.store.SetAssignmentTarget(ctx, "orders", 0, "narad-other"); err != nil {
+			t.Fatalf("SetAssignmentTarget: %v", err)
+		}
+		sweepAs(t, dst, "narad-dst", metastore.Assignment{OwnerID: "narad-src", TargetID: "narad-other"}, src.engine)
+		requireReclaimed(t, src, dst)
+	})
+
+	t.Run("control: the owner came back empty", func(t *testing.T) {
+		src, dst := setup(t)
+		installWithoutFlip(t, dst, src.engine, "narad-src", "narad-dst", 1)
+		abortOn(t, dst)
+		reborn := newEngineNode(t, "narad-src", "narad-src", "")
+		sweepAs(t, dst, "narad-dst", cleared, reborn.engine)
+		requireSetAside(t, dst, 10)
+	})
+
+	t.Run("control: the owner came back empty and took other records at the same offsets", func(t *testing.T) {
+		src, dst := setup(t)
+		installWithoutFlip(t, dst, src.engine, "narad-src", "narad-dst", 1)
+		abortOn(t, dst)
+		reborn := newEngineNode(t, "narad-src", "narad-src", "")
+		for i := range 12 {
+			reborn.produce(t, fmt.Sprintf("new-recs-%d", i))
+		}
+		seen := sweepAs(t, dst, "narad-dst", cleared, reborn.engine)
+		if len(seen) != 1 || seen[0].MoveMarker != nil || seen[0].HighWatermark < 10 {
+			t.Fatalf("setup: the reborn owner's listing is %+v, want records past 10 and no marker", seen)
+		}
+		requireSetAside(t, dst, 10)
+	})
 }
