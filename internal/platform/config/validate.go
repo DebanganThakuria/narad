@@ -354,9 +354,13 @@ func logValidationErrors(cfg LogConfig) []string {
 
 func securityValidationErrors(cfg SecurityConfig, cluster ClusterConfig) []string {
 	var errs []string
-	// A multi-node cluster with security on must set a cluster secret,
-	// otherwise the node-to-node port would be the unauthenticated way
-	// around RBAC. Single-node clusters (no peers) don't expose it.
+	// The node-to-node RPC plane (QUIC on the API port over UDP) always
+	// listens, single node or not, and runs the control plane with
+	// authorization bypassed, so with security on every stream must
+	// prove a secret. A secured node with no peers is given a random
+	// per-process one at startup (cmd/narad secureNodeRPC); a secured
+	// multi-node cluster needs one secret its nodes share, hence the
+	// refusal.
 	if cfg.Enabled && len(cluster.Peers) > 0 && strings.TrimSpace(cfg.ClusterSecret) == "" {
 		errs = append(errs, "security.cluster_secret (NARAD_CLUSTER_SECRET) is required when security is enabled with cluster peers")
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -41,6 +42,12 @@ func runServe(args []string) error {
 	log, err := logger.New(cfg.Log.Format, cfg.Log.Level)
 	if err != nil {
 		return fmt.Errorf("logger: %w", err)
+	}
+	// Before the first peer client or cluster RPC listener reads the
+	// cluster secret: a secured node with no peers and no secret gets
+	// one of its own, so its node RPC answers no other process.
+	if err = secureNodeRPC(cfg, log); err != nil {
+		return err
 	}
 	// Before anything allocates in earnest; see memlimit.go.
 	applyContainerMemoryLimit(log)
@@ -372,7 +379,19 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 // In a multi-node cluster a dead listener makes this node unreachable for
 // all peer RPC, so it fails the serve loop via failServe rather than
 // keeping degraded client HTTP alive.
+//
+// With security on it never serves without a cluster secret, whatever
+// the peer count: an empty secret turns off per-stream auth, and the
+// plane runs the control plane with authorization bypassed. runServe
+// resolves the secret first (secureNodeRPC), so this only fires if that
+// step is skipped.
 func serveClusterRPC(ctx context.Context, cfg *config.Config, rpc *cluster.RPCServer, failServe func(error), log *slog.Logger) {
+	if cfg.Security.Enabled && strings.TrimSpace(cfg.Security.ClusterSecret) == "" {
+		log.Error("cluster rpc server: security is enabled but no cluster secret was resolved; not serving node RPC",
+			"component", "audit", "addr", cfg.HTTP.Addr)
+		failServe(errors.New("cluster rpc server: refusing to serve node RPC without a cluster secret while security is enabled"))
+		return
+	}
 	err := clusterrpc.ServeQUIC(ctx, cfg.HTTP.Addr, cfg.Security.ClusterSecret, log, rpc)
 	if err == nil || errors.Is(err, context.Canceled) {
 		return
