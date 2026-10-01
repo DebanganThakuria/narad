@@ -245,6 +245,24 @@ Logged at warning level with `peer` and `status`.
 
 **Fix.** For `503`, the node retries every 2 seconds; check the leader's log for `join cluster: add voter` or `join cluster: readmit member`. For `400`, compare the node's `NARAD_NODE_ID` and `NARAD_CLUSTER_ADVERTISE_ADDR` with a working node's.
 
+### `cluster stream rejected: invalid auth` {#log-stream-invalid-auth}
+
+Logged at warning level (`component=audit`) by a node that refused a node RPC stream whose peer could not prove the node's cluster secret.
+
+**Cause.** A peer with another secret, or none, reached this node's node-to-node port (7942/udp). One common case (unreleased): a node with security on was started alone, without `NARAD_CLUSTER_SECRET`, and nodes are now joining it. Such a node generates a secret of its own for the life of the process, so a joiner carrying the shared secret cannot authenticate to it: the joiner's attempts fail (`cluster join attempt failed` at debug level, with `cluster rpc: read server auth proof: ...`) and it never joins.
+
+**Fix.** Set the same `NARAD_CLUSTER_SECRET` on every node, the first one included, and restart the first node before the others join. Any other source of these lines is a process that should not be talking to the port: fence 7942/udp ([Networking and security](../understand/networking-and-security.md#ports)).
+
+### `node RPC plane is unauthenticated` {#log-node-rpc-unauthenticated}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `node RPC plane is unauthenticated: security is disabled and no cluster secret is set, so anything that can send UDP to the API port can create users and topics and produce, consume and ack without credentials`, logged once at startup at warning level with `component=audit` and `addr`.
+
+**Cause.** The node runs with `security.enabled=false` and no `NARAD_CLUSTER_SECRET`. That mode leaves the API open too; this line names the node-to-node port, which listens even on a single node.
+
+**Fix.** Fence 7942/udp so only the cluster's own nodes reach it, or set `NARAD_CLUSTER_SECRET` on every node, which authenticates the port even with security off. With security on, a node never serves the port without a secret ([Networking and security](../understand/networking-and-security.md#cluster-secret)).
+
 ### `consumer frontier fell behind retention` {#log-frontier-behind-retention}
 
 The full line is `consumer frontier fell behind retention; skipped to oldest retained offset`, at warning level, with `topic`, `partition`, `from`, `to` and `skipped`.
@@ -282,6 +300,28 @@ The full line is `reclaim: local partition copy is AHEAD of the position it was 
 **Cause.** A partition moved away from this node while the node was cut off, and the destination [force-promoted](../reference/glossary.md#force-promote) its copy. This node kept taking records meanwhile, so its copy holds records the new owner never received. Instead of deleting it, the node renamed it to `quarantine_dir`.
 
 **Fix.** Narad never serves or deletes that directory; it goes only when the topic is deleted. The records from `promoted_hwm` onwards exist only there, and Narad has no tool to merge them back. Decide whether they matter, copy the directory off if they do, and delete it when you are done. The move protocol: [Rebalance and decommission](../understand/rebalance.md).
+
+### `reclaim: the new owner cannot vouch for the local partition copy` {#log-partition-set-aside}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `reclaim: the new owner cannot vouch for the local partition copy; quarantined instead of deleted, its records may exist only here`, at error level, with `topic`, `partition`, `owner`, `reason` and `quarantine_dir`. The sweep that triggered it logs `move: stale partition copy QUARANTINED, not deleted: the new owner cannot vouch for it; operator action required` next to it.
+
+**Cause.** A partition moved away from this node, and when this node went to delete its old copy, the new owner held less than the move gave it. `reason` says which: the new owner lists no records (it came back on an empty volume, or rolled its install back), it holds records without a move marker (so they did not come from this copy), or it lacks a segment, or holds one shorter, below the position it vouches for (a segment lost before it reached its disk). The records of this copy may exist nowhere else, so the node renamed it to `quarantine_dir` instead of deleting it.
+
+**Check.** The new owner's partition directory (`topics/<topic>/p<partition>` under its data directory) and whether it has a `move.marker`; `narad server report` for its high watermark.
+
+**Fix.** Copy the quarantined directory off before anything else: its records may be the only ones left. Narad never serves or deletes it; it goes only when the topic is deleted. Narad has no tool to merge it back; decide whether its records matter, re-produce them from the copy if they do, and delete it when you are done. The sweep's rules: [Rebalance and decommission](../understand/rebalance.md#what-if-the-source-dies-mid-move).
+
+### `move: keeping the staging copy of a partition this node owns` {#log-move-keeping-staging}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `move: keeping the staging copy of a partition this node owns; the flip committed after the copy was moved back. Operator action required`, at error level, with `topic`, `partition` and `staging`.
+
+**Cause.** A move's flip had an unknown outcome, the leader confirmed it had not committed, and the destination moved its copy back to staging; the flip then committed after all. This node owns the partition, and its records are in `staging` (`dataDir/.moves/<topic>-<partition>`), not under the partition's path.
+
+**Fix.** Stop the node, move the staging directory into place as `topics/<topic>/p<partition>` under the data directory (replacing what is there, after copying that off if it holds anything), and start the node. Narad does not move it on its own.
 
 ### `x509: certificate signed by unknown authority` {#raft-cert-untrusted}
 
