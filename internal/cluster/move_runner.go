@@ -195,10 +195,11 @@ type moveReclaimer interface {
 	ReclaimMovedPartition(ctx context.Context, topicName string, partition int) error
 }
 
-// guardedReclaimer is the reclaim the sweep prefers: it is told the HWM
-// the partition was promoted at on its new owner and quarantines instead
-// of deleting a local copy that is ahead of it (*messaging.Engine
-// implements it; the broker wiring embeds the engine).
+// guardedReclaimer is the reclaim the sweep requires: it is told the
+// position the new owner vouches for and quarantines instead of deleting
+// a local copy that is ahead of it or that the owner cannot vouch for
+// (*messaging.Engine implements it; the broker wiring embeds the
+// engine). A reclaimer without it is never asked to reclaim.
 type guardedReclaimer interface {
 	ReclaimMovedPartitionGuarded(ctx context.Context, topicName string, partition int, guard messaging.ReclaimGuard) error
 }

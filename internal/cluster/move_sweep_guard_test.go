@@ -1,0 +1,498 @@
+package cluster
+
+// The old owner's stale-copy sweep must never delete the only copy of a
+// moved partition's records. The new owner can hold less than the move
+// gave it: an install rolled back after a flip that committed anyway, a
+// volume lost under the same node ID, a sealed segment lost or cut short
+// before writeback. The sweep compares the owner's listing with the local
+// copy and sets the copy aside when the owner cannot vouch for it.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/debanganthakuria/narad/internal/broker/messaging"
+	"github.com/debanganthakuria/narad/internal/broker/runtime"
+	"github.com/debanganthakuria/narad/internal/consumer"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/platform/schema"
+	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
+)
+
+// ownerReclaimGuard's decisions, on synthetic listings.
+func TestStaleCopyOwnerGuardDecisions(t *testing.T) {
+	now := time.Now()
+	fresh := now.Add(-time.Minute)
+	old := now.Add(-48 * time.Hour)
+	seg := func(base, size int64, sealed bool) storage.SegmentInfo {
+		return storage.SegmentInfo{BaseOffset: base, SizeBytes: size, Sealed: sealed}
+	}
+	// The local copy: three sealed segments of 5 records and a tail of 2.
+	local := []localSegment{
+		{base: 0, size: 500, modTime: fresh},
+		{base: 5, size: 500, modTime: fresh},
+		{base: 10, size: 500, modTime: fresh},
+		{base: 15, size: 200, modTime: fresh},
+	}
+	marker := func(hwm int64) *messaging.MoveMarker {
+		return &messaging.MoveMarker{Source: "narad-src", HighWatermark: hwm}
+	}
+	healthy := []storage.SegmentInfo{seg(0, 500, true), seg(5, 500, true), seg(10, 500, true), seg(15, 900, false)}
+
+	for _, tc := range []struct {
+		name      string
+		info      messaging.PartitionTransferInfo
+		local     []localSegment
+		retention time.Duration
+		setAside  bool
+		wantHWM   int64
+	}{
+		{
+			name:    "healthy owner past the promoted position: guard at the promoted hwm",
+			info:    messaging.PartitionTransferInfo{Segments: healthy, HighWatermark: 25, MoveMarker: marker(17)},
+			local:   local,
+			wantHWM: 17,
+		},
+		{
+			name:    "owner hwm below the marker's caps the guard",
+			info:    messaging.PartitionTransferInfo{Segments: []storage.SegmentInfo{seg(0, 500, true), seg(5, 500, true), seg(10, 300, false)}, HighWatermark: 13, MoveMarker: marker(17)},
+			local:   local,
+			wantHWM: 13,
+		},
+		{
+			name:     "owner lists nothing (lost its volume): set aside",
+			info:     messaging.PartitionTransferInfo{},
+			local:    local,
+			setAside: true,
+		},
+		{
+			name:     "owner lists only an empty active segment (rolled back its install): set aside",
+			info:     messaging.PartitionTransferInfo{Segments: []storage.SegmentInfo{seg(0, 0, false)}},
+			local:    local,
+			setAside: true,
+		},
+		{
+			name:     "owner holds records but no move marker: set aside",
+			info:     messaging.PartitionTransferInfo{Segments: healthy, HighWatermark: 40},
+			local:    local,
+			setAside: true,
+		},
+		{
+			name:     "owner lost a sealed segment below the vouched position: set aside",
+			info:     messaging.PartitionTransferInfo{Segments: []storage.SegmentInfo{seg(0, 500, true), seg(10, 500, true), seg(15, 900, false)}, HighWatermark: 25, MoveMarker: marker(17)},
+			local:    local,
+			setAside: true,
+		},
+		{
+			name:     "owner's sealed segment is shorter than the local one: set aside",
+			info:     messaging.PartitionTransferInfo{Segments: []storage.SegmentInfo{seg(0, 500, true), seg(5, 120, true), seg(10, 500, true), seg(15, 900, false)}, HighWatermark: 25, MoveMarker: marker(17)},
+			local:    local,
+			setAside: true,
+		},
+		{
+			name: "force-promoted below the local copy: the tail and the segments past it are the guard's",
+			info: messaging.PartitionTransferInfo{Segments: []storage.SegmentInfo{seg(0, 500, true), seg(5, 260, false)}, HighWatermark: 8, MoveMarker: marker(8)},
+			// The local copy kept committing past 8, into the same
+			// segment and new ones; the reclaim quarantines it (17 > 8).
+			local:   local,
+			wantHWM: 8,
+		},
+		{
+			name: "owner's retention reaped segments the local copy holds expired",
+			info: messaging.PartitionTransferInfo{Segments: []storage.SegmentInfo{seg(10, 500, true), seg(15, 900, false)}, HighWatermark: 25, MoveMarker: marker(17)},
+			local: []localSegment{
+				{base: 0, size: 500, modTime: old},
+				{base: 5, size: 500, modTime: old},
+				{base: 10, size: 500, modTime: fresh},
+				{base: 15, size: 200, modTime: fresh},
+			},
+			retention: 24 * time.Hour,
+			wantHWM:   17,
+		},
+		{
+			name: "keep-forever topic: an owner missing an old segment is a gap",
+			info: messaging.PartitionTransferInfo{Segments: []storage.SegmentInfo{seg(10, 500, true), seg(15, 900, false)}, HighWatermark: 25, MoveMarker: marker(17)},
+			local: []localSegment{
+				{base: 0, size: 500, modTime: old},
+				{base: 5, size: 500, modTime: old},
+				{base: 10, size: 500, modTime: fresh},
+				{base: 15, size: 200, modTime: fresh},
+			},
+			setAside: true,
+		},
+		{
+			name:      "local copy wholly expired: the plain guard at the owner's position",
+			info:      messaging.PartitionTransferInfo{HighWatermark: 0},
+			local:     []localSegment{{base: 0, size: 500, modTime: old}},
+			retention: time.Hour,
+			wantHWM:   0,
+		},
+		{
+			name:    "empty local copy: the plain guard at the owner's hwm",
+			info:    messaging.PartitionTransferInfo{HighWatermark: 7},
+			local:   []localSegment{{base: 0, size: 0, modTime: fresh}},
+			wantHWM: 7,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			guard := ownerReclaimGuard(tc.info, tc.local, tc.retention, now)
+			if !guard.Known {
+				t.Fatalf("guard %+v is not KNOWN: the sweep must never reclaim unguarded", guard)
+			}
+			if got := guard.SetAside != ""; got != tc.setAside {
+				t.Fatalf("set aside = %v (%q), want %v", got, guard.SetAside, tc.setAside)
+			}
+			if !tc.setAside && guard.PromotedHWM != tc.wantHWM {
+				t.Fatalf("guard hwm = %d, want %d", guard.PromotedHWM, tc.wantHWM)
+			}
+		})
+	}
+}
+
+// ---- end to end: a real move between real engines, then the sweep ----
+
+// engineNode is one broker: a real engine over its own single-node
+// metastore replica and data directory, with small segments so a
+// partition spans several sealed ones.
+type engineNode struct {
+	engine  *messaging.Engine
+	store   *metastore.Store
+	dataDir string
+}
+
+// newEngineNode starts a node selfID whose replica has orders/0 owned by
+// owner and moving to target ("" for none).
+func newEngineNode(t *testing.T, selfID, owner, target string) *engineNode {
+	t.Helper()
+	ctx := context.Background()
+	store := newTestStore(t)
+	if err := store.CreateTopic(ctx, topic.Topic{
+		Name: "orders", Partitions: 1, RetentionMs: 7_200_000,
+		VisibilityTimeoutMs: 30_000, MaxInFlightPerPartition: 64, MaxAckedAheadPerPartition: 64,
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	for _, id := range []string{"narad-src", "narad-dst"} {
+		if err := store.RegisterMember(ctx, metastore.Member{ID: id, Addr: id + ":7942", Status: metastore.MemberAlive}); err != nil {
+			t.Fatalf("RegisterMember %s: %v", id, err)
+		}
+	}
+	if err := store.AssignPartition(ctx, "orders", 0, owner); err != nil {
+		t.Fatalf("AssignPartition: %v", err)
+	}
+	if target != "" {
+		if err := store.SetAssignmentTarget(ctx, "orders", 0, target); err != nil {
+			t.Fatalf("SetAssignmentTarget: %v", err)
+		}
+	}
+	dataDir := t.TempDir()
+	logs := runtime.NewLogs(dataDir, storage.Options{FlushInterval: time.Millisecond, SegmentBytes: 64}, store, nil)
+	t.Cleanup(func() { _ = logs.CloseAll() })
+	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+		return consumer.Caps{MaxInFlight: 64, MaxAckedAhead: 64}, nil
+	}, nil)
+	engine := messaging.NewEngine(store, schema.NewAlwaysValid(), fixedPartitionManager{picked: 0},
+		offsets, logs, nil, nil, discardLogger(), selfID)
+	return &engineNode{engine: engine, store: store, dataDir: dataDir}
+}
+
+func (n *engineNode) dir() string { return storage.TopicPartitionDir(n.dataDir, "orders", 0) }
+
+// flip records, in this node's replica, the move of orders/0 to target.
+func (n *engineNode) flip(t *testing.T, owner, target string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := n.store.SetAssignmentTarget(ctx, "orders", 0, target); err != nil {
+		t.Fatalf("SetAssignmentTarget: %v", err)
+	}
+	if err := n.store.CompleteMove(ctx, "orders", 0, owner, target); err != nil {
+		t.Fatalf("CompleteMove: %v", err)
+	}
+}
+
+func (n *engineNode) produce(t *testing.T, label string) {
+	t.Helper()
+	if _, _, err := n.engine.Produce(context.Background(), "orders", "", fmt.Appendf(nil, `{"label":%q}`, label)); err != nil {
+		t.Fatalf("produce %s: %v", label, err)
+	}
+}
+
+// ownerEnginePeer answers the move and sweep RPCs from one real engine
+// (whoever answers at the owner's address), JSON round-tripping each
+// listing as PeerClient decodes it.
+type ownerEnginePeer struct {
+	owner *messaging.Engine
+	seen  *[]messaging.PartitionTransferInfo
+}
+
+func onTheWire(info messaging.PartitionTransferInfo, err error) (messaging.PartitionTransferInfo, error) {
+	if err != nil {
+		return messaging.PartitionTransferInfo{}, err
+	}
+	buf, err := json.Marshal(info)
+	if err != nil {
+		return messaging.PartitionTransferInfo{}, err
+	}
+	var out messaging.PartitionTransferInfo
+	err = json.Unmarshal(buf, &out)
+	return out, err
+}
+
+func (p ownerEnginePeer) ListPartitionSegments(ctx context.Context, _, topicName string, partition int) (messaging.PartitionTransferInfo, error) {
+	info, err := onTheWire(p.owner.PartitionTransferInfo(ctx, topicName, partition))
+	if err == nil && p.seen != nil {
+		*p.seen = append(*p.seen, info)
+	}
+	return info, err
+}
+
+func (p ownerEnginePeer) FetchSegmentChunk(ctx context.Context, _, topicName string, partition int, base, at, length int64) ([]byte, error) {
+	return p.owner.ReadPartitionSegment(ctx, topicName, partition, base, at, min(length, storage.MaxSegmentReadBytes))
+}
+
+func (p ownerEnginePeer) PrepareHandoff(ctx context.Context, _, topicName string, partition int, ttl time.Duration, token string) (messaging.PartitionTransferInfo, error) {
+	if token != "" {
+		return onTheWire(p.owner.ConfirmHandoff(ctx, topicName, partition, ttl, token))
+	}
+	return onTheWire(p.owner.PrepareHandoff(ctx, topicName, partition, ttl))
+}
+
+func (ownerEnginePeer) CompleteMove(context.Context, string, string, int, string, string) error {
+	return nil
+}
+func (ownerEnginePeer) AbortMove(context.Context, string, string, int, string) error { return nil }
+func (ownerEnginePeer) GetAssignment(context.Context, string, string, int) (metastore.Assignment, error) {
+	return metastore.Assignment{}, errors.New("unused: the sweep runs as its own leader")
+}
+
+func (ownerEnginePeer) GetTopic(context.Context, string, string) (nodewire.Response, error) {
+	return nodewire.Response{}, errors.New("unused")
+}
+
+// moveThenFlip runs a real move of orders/0 (records records) from a
+// fresh source into a fresh destination and flips both replicas.
+func moveThenFlip(t *testing.T, records int) (src, dst *engineNode) {
+	t.Helper()
+	src = newEngineNode(t, "narad-src", "narad-src", "")
+	dst = newEngineNode(t, "narad-dst", "narad-src", "narad-dst")
+	for i := range records {
+		src.produce(t, fmt.Sprintf("pre-move-%d", i))
+	}
+	moveInto(t, dst, src.engine, "narad-src", "narad-dst")
+	dst.flip(t, "narad-src", "narad-dst")
+	src.flip(t, "narad-src", "narad-dst")
+	return src, dst
+}
+
+// moveInto runs a real move worker on node, copying orders/0 from the
+// engine that answers for owner.
+func moveInto(t *testing.T, node *engineNode, from *messaging.Engine, owner, target string) {
+	t.Helper()
+	store := &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: owner, TargetID: target},
+		member:     metastore.Member{ID: owner, Addr: owner + ":7942", Status: metastore.MemberAlive},
+	}
+	r := NewMoveRunner(store, target, node.dataDir, ownerEnginePeer{owner: from}, node.engine, nil,
+		discardLogger(), MoveConfig{RetryBackoff: 5 * time.Millisecond})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	r.runMove(ctx, "orders", 0, owner)
+	if got := store.completeArgs; len(got) != 3 || got[2] != target {
+		t.Fatalf("the move to %s did not complete: %v", target, got)
+	}
+}
+
+// sweepOnSource runs the real stale-copy sweep on the old owner, as its
+// own leader, against whatever engine answers for the new owner.
+func sweepOnSource(t *testing.T, src *engineNode, owner *messaging.Engine) []messaging.PartitionTransferInfo {
+	t.Helper()
+	var seen []messaging.PartitionTransferInfo
+	store := &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-dst"},
+		member:     metastore.Member{ID: "narad-dst", Addr: "narad-dst:7942", Status: metastore.MemberAlive},
+		leaderID:   "narad-src",
+		topics:     []topic.Topic{{Name: "orders", Partitions: 1, RetentionMs: 7_200_000}},
+	}
+	r := NewMoveRunner(store, "narad-src", src.dataDir, ownerEnginePeer{owner: owner, seen: &seen}, src.engine, nil,
+		discardLogger(), MoveConfig{})
+	r.sweepStaleCopies(context.Background())
+	return seen
+}
+
+func nextOffsetAt(t *testing.T, dir string) int64 {
+	t.Helper()
+	if _, err := os.Stat(dir); err != nil {
+		return -1
+	}
+	l, err := storage.NewLog(dir, storage.Options{})
+	if err != nil {
+		t.Fatalf("open %s: %v", dir, err)
+	}
+	defer l.Close()
+	return l.NextOffset()
+}
+
+func quarantinesOf(t *testing.T, dir string) []string {
+	t.Helper()
+	m, err := filepath.Glob(dir + messaging.QuarantineSuffix + "*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// sealedSegmentFiles lists a partition's non-empty sealed segment files
+// in base-offset order (every segment file but the newest).
+func sealedSegmentFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	segs, err := listLocalSegments(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for i, s := range segs {
+		if i < len(segs)-1 && s.size > 0 {
+			out = append(out, filepath.Join(dir, fmt.Sprintf("%020d.log", s.base)))
+		}
+	}
+	return out
+}
+
+// requireSetAside fails unless the old owner's want records are in a
+// quarantine next to the partition's path and not at the path.
+func requireSetAside(t *testing.T, src *engineNode, want int64) {
+	t.Helper()
+	if _, err := os.Stat(src.dir()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the stale copy is still at the partition's path (stat err %v): a later install there would delete it", err)
+	}
+	for _, q := range quarantinesOf(t, src.dir()) {
+		if got := nextOffsetAt(t, q); got == want {
+			return
+		}
+	}
+	t.Fatalf("LOSS: the old owner's %d records are not in a quarantine (path next offset %d, quarantines %v)",
+		want, nextOffsetAt(t, src.dir()), quarantinesOf(t, src.dir()))
+}
+
+func TestStaleCopySweepNeverDeletesRecordsTheNewOwnerLacks(t *testing.T) {
+	t.Run("healthy owner (control)", func(t *testing.T) {
+		src, dst := moveThenFlip(t, 10)
+		if n := len(sealedSegmentFiles(t, dst.dir())); n < 3 {
+			t.Fatalf("setup: the new owner holds %d sealed segments, want several", n)
+		}
+		seen := sweepOnSource(t, src, dst.engine)
+		if len(seen) != 1 || seen[0].MoveMarker == nil {
+			t.Fatalf("owner listing: %+v", seen)
+		}
+		if _, err := os.Stat(src.dir()); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the healthy owner's stale copy was not reclaimed (stat %v, quarantines %v)", err, quarantinesOf(t, src.dir()))
+		}
+		if q := quarantinesOf(t, src.dir()); len(q) != 0 {
+			t.Fatalf("a copy the owner vouches for was quarantined: %v", q)
+		}
+		if n := nextOffsetAt(t, dst.dir()); n != 10 {
+			t.Fatalf("the new owner holds next offset %d, want 10", n)
+		}
+	})
+
+	t.Run("owner lost its volume", func(t *testing.T) {
+		src, _ := moveThenFlip(t, 10)
+		reborn := newEngineNode(t, "narad-dst", "narad-dst", "")
+		seen := sweepOnSource(t, src, reborn.engine)
+		if len(seen) != 1 || seen[0].MoveMarker != nil || seen[0].HighWatermark != 0 {
+			t.Fatalf("setup: the reborn owner's listing is %+v, want no marker and hwm 0", seen)
+		}
+		requireSetAside(t, src, 10)
+	})
+
+	t.Run("owner rolled its install back", func(t *testing.T) {
+		src, dst := moveThenFlip(t, 10)
+		if err := dst.engine.InstallPartitionDir("orders", 0, func() error { return os.RemoveAll(dst.dir()) }); err != nil {
+			t.Fatalf("roll back the install: %v", err)
+		}
+		seen := sweepOnSource(t, src, dst.engine)
+		if len(seen) != 1 || seen[0].MoveMarker != nil || seen[0].HighWatermark != 0 {
+			t.Fatalf("setup: listing %+v, want the rolled-back owner without a marker at hwm 0", seen)
+		}
+		requireSetAside(t, src, 10)
+	})
+
+	t.Run("owner rolled back and took new records", func(t *testing.T) {
+		src, dst := moveThenFlip(t, 10)
+		if err := dst.engine.InstallPartitionDir("orders", 0, func() error { return os.RemoveAll(dst.dir()) }); err != nil {
+			t.Fatalf("roll back the install: %v", err)
+		}
+		// New produce lands at offsets 0..11 of a log the old copy never
+		// fed: different records at the same offsets.
+		for i := range 12 {
+			dst.produce(t, fmt.Sprintf("after-rollback-%d", i))
+		}
+		seen := sweepOnSource(t, src, dst.engine)
+		if len(seen) != 1 || seen[0].MoveMarker != nil || seen[0].HighWatermark < 10 {
+			t.Fatalf("setup: listing %+v, want the owner without a marker past the old copy's length", seen)
+		}
+		requireSetAside(t, src, 10)
+	})
+
+	t.Run("owner lost a sealed segment", func(t *testing.T) {
+		src, dst := moveThenFlip(t, 10)
+		sealed := sealedSegmentFiles(t, dst.dir())
+		if len(sealed) < 3 {
+			t.Fatalf("setup: %d sealed segments on the new owner, want several", len(sealed))
+		}
+		if err := dst.engine.InstallPartitionDir("orders", 0, func() error { return os.Remove(sealed[1]) }); err != nil {
+			t.Fatalf("drop a sealed segment: %v", err)
+		}
+		sweepOnSource(t, src, dst.engine)
+		requireSetAside(t, src, 10)
+	})
+
+	t.Run("owner holds a sealed segment short", func(t *testing.T) {
+		src, dst := moveThenFlip(t, 10)
+		sealed := sealedSegmentFiles(t, dst.dir())
+		if len(sealed) < 3 {
+			t.Fatalf("setup: %d sealed segments on the new owner, want several", len(sealed))
+		}
+		if err := dst.engine.InstallPartitionDir("orders", 0, func() error { return os.Truncate(sealed[1], 3) }); err != nil {
+			t.Fatalf("truncate a sealed segment: %v", err)
+		}
+		sweepOnSource(t, src, dst.engine)
+		requireSetAside(t, src, 10)
+	})
+}
+
+// A copy the new owner cannot vouch for used to be kept in place, where
+// the next move of the partition back onto this node (the natural next
+// step after the owner lost its volume) deleted it: the install clears
+// the partition's path before renaming the copy in. Set aside, it
+// survives the move back.
+func TestStaleCopyTheOwnerCannotVouchForSurvivesAMoveBack(t *testing.T) {
+	src, _ := moveThenFlip(t, 10)
+	reborn := newEngineNode(t, "narad-dst", "narad-dst", "")
+	sweepOnSource(t, src, reborn.engine)
+
+	// The partition is planned back onto the old owner, which copies the
+	// reborn owner's (empty) partition and installs it.
+	ctx := context.Background()
+	if err := src.store.SetAssignmentTarget(ctx, "orders", 0, "narad-src"); err != nil {
+		t.Fatal(err)
+	}
+	moveInto(t, src, reborn.engine, "narad-dst", "narad-src")
+	if n := nextOffsetAt(t, src.dir()); n != 0 {
+		t.Fatalf("setup: the moved-back partition recovers next offset %d, want the reborn owner's 0", n)
+	}
+	for _, q := range quarantinesOf(t, src.dir()) {
+		if nextOffsetAt(t, q) == 10 {
+			return
+		}
+	}
+	t.Fatalf("LOSS: after the move back the old owner's 10 records exist nowhere (quarantines %v)", quarantinesOf(t, src.dir()))
+}
