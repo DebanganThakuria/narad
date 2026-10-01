@@ -178,7 +178,7 @@ Narad keeps one copy of each partition, on the volume of the node that owns it. 
 | Value | What it does |
 |---|---|
 | `resources`<br>default requests `cpu: 500m`, `memory: 512Mi`; no limits | Container resources. A memory limit also sets Go's soft memory limit to 90% of it (unreleased; see [Go runtime](configuration.md#go-runtime)). |
-| `terminationGracePeriodSeconds`<br>default `30` | Time a stopping pod gets before it is killed. Give it enough to shut down cleanly: the HTTP drain (up to `http.shutdown_grace`, 10 s by default), then about 1 ms per partition written to since it was opened (local disk under Linux; more on a network volume). |
+| `terminationGracePeriodSeconds`<br>default `30` | Time a stopping pod gets before it is killed. Give it enough to shut down cleanly: the HTTP drain (up to `http.shutdown_grace`, 10 s by default), then up to about 2 ms per partition written to since it was opened (measured on local disk under Linux; more on a network volume), so the default covers roughly 10,000 such partitions. |
 | `podManagementPolicy`<br>default `Parallel` | Pods start and stop together rather than one by one. |
 | `updateStrategy`<br>default `type: RollingUpdate` |  |
 | `podDisruptionBudget.enabled`<br>default `true` | Creates the PodDisruptionBudget. |

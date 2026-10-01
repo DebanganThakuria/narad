@@ -106,7 +106,9 @@ func ConsumeWeight(r *http.Request) int {
 //     parked or not, holds up to N records and up to the owner's reply
 //     bound (8 MiB, as consumeBatchReplyBytes here), not one record.
 //
-// The request is never held to fill N, nor filled from several owners: a
+// The request is never held to fill N, nor filled from several owners
+// (except when a single record from the wait, possibly an older owner's
+// claimed one, is topped up with a local scan): a
 // caller that wants N records soon asks with a wait and gets what is
 // there when the first one lands. A scan reserves at most
 // consumeBatchReserveBytes, and the response carries at most
