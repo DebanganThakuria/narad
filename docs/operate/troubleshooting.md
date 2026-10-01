@@ -309,7 +309,7 @@ The full line is `reclaim: the new owner cannot vouch for the local partition co
 
 **Cause.** A partition moved away from this node, and when this node went to delete its old copy, the new owner held less than the move gave it. `reason` says which: the new owner lists no records (it came back on an empty volume, or rolled its install back), it holds records without a move marker (so they did not come from this copy), or it lacks a segment, or holds one shorter, below the position it vouches for (a segment lost before it reached its disk). The records of this copy may exist nowhere else, so the node renamed it to `quarantine_dir` instead of deleting it.
 
-**Check.** The new owner's partition directory (`topics/<topic>/p<partition>` under its data directory) and whether it has a `move.marker`; `narad server report` for its high watermark.
+**Check.** The new owner's partition directory (`topics/<topic>/p<NNNNN>` under its data directory: the partition number zero-padded to 5 digits, such as `p00003` for partition 3) and whether it has a `move.marker`; `narad server report` for its high watermark.
 
 **Fix.** Copy the quarantined directory off before anything else: its records may be the only ones left. Narad never serves or deletes it; it goes only when the topic is deleted. Narad has no tool to merge it back; decide whether its records matter, re-produce them from the copy if they do, and delete it when you are done. The sweep's rules: [Rebalance and decommission](../understand/rebalance.md#what-if-the-source-dies-mid-move).
 
@@ -319,9 +319,9 @@ The full line is `reclaim: the new owner cannot vouch for the local partition co
 
 The full line is `move: keeping the staging copy of a partition this node owns; the flip committed after the copy was moved back. Operator action required`, at error level, with `topic`, `partition` and `staging`.
 
-**Cause.** A move's flip had an unknown outcome, the leader confirmed it had not committed, and the destination moved its copy back to staging; the flip then committed after all. This node owns the partition, and its records are in `staging` (`dataDir/.moves/<topic>-<partition>`), not under the partition's path.
+**Cause.** A move's flip had an unknown outcome, the leader confirmed it had not committed, and the destination moved its copy back to staging; the flip then committed after all. This node owns the partition, and its records are in `staging` (`dataDir/.moves/<topic>-<partition>`, with the partition number not padded, such as `.moves/orders-3`), not under the partition's path.
 
-**Fix.** Stop the node, move the staging directory into place as `topics/<topic>/p<partition>` under the data directory (replacing what is there, after copying that off if it holds anything), and start the node. Narad does not move it on its own.
+**Fix.** Stop the node, move the staging directory into place as `topics/<topic>/p<NNNNN>` under the data directory (the partition number zero-padded to 5 digits: `.moves/orders-3` goes to `topics/orders/p00003`) (replacing what is there, after copying that off if it holds anything), and start the node. Narad does not move it on its own.
 
 ### `x509: certificate signed by unknown authority` {#raft-cert-untrusted}
 
