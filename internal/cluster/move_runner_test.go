@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -27,6 +29,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
@@ -689,5 +692,77 @@ func TestMoveRunnerWritesMoveMarker(t *testing.T) {
 	}
 	if len(marker.Children) != 2 || marker.Children["audit"] != "e1" || marker.Children["other"] != "e2" {
 		t.Fatalf("marker children = %v, want {audit:e1 other:e2}", marker.Children)
+	}
+}
+
+// The old owner deletes its copy once the flip is visible and the new
+// owner's listing covers it, and that listing reads sizes from the page
+// cache. So before the flip the destination must have synced every file
+// of the copy, the staging directory, and the topic directory it renamed
+// the copy into, and the marker must say so.
+func TestMoveRunnerMakesTheCopyDurableBeforeTheFlip(t *testing.T) {
+	src := t.TempDir()
+	wantHWM, _ := buildSourcePartition(t, src, 10)
+	dataDir := t.TempDir()
+	var (
+		mu     sync.Mutex
+		synced = map[string]bool{}
+		atFlip map[string]bool
+	)
+	restore := syncfile.SetFaultHook(func(op syncfile.Op, path string) error {
+		if op == syncfile.OpSync || op == syncfile.OpSyncData {
+			mu.Lock()
+			synced[filepath.Clean(path)] = true
+			mu.Unlock()
+		}
+		return nil
+	})
+	defer restore()
+	store := &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+	}
+	store.completeHook = func() {
+		mu.Lock()
+		atFlip = maps.Clone(synced)
+		mu.Unlock()
+	}
+	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}}
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, nil, MoveConfig{RetryBackoff: 5 * time.Millisecond})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	r.Reconcile(ctx)
+	r.wg.Wait()
+	if atFlip == nil {
+		t.Fatal("setup: the flip was never proposed")
+	}
+
+	staging := filepath.Clean(r.stagingDir("orders", 0))
+	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := 0
+	for _, e := range entries {
+		if !e.Type().IsRegular() || e.Name() == messaging.MoveMarkerFileName {
+			continue // the marker is synced under its temporary name
+		}
+		files++
+		if !atFlip[filepath.Join(staging, e.Name())] {
+			t.Errorf("staged %s was not synced before the flip", e.Name())
+		}
+	}
+	if files < 10 {
+		t.Fatalf("setup: the installed copy holds %d files, want every segment and the position files", files)
+	}
+	for what, d := range map[string]string{"the staging directory": staging, "the topic directory": filepath.Dir(dir)} {
+		if !atFlip[filepath.Clean(d)] {
+			t.Errorf("%s was not synced before the flip", what)
+		}
+	}
+	marker, ok, err := messaging.ReadMoveMarker(dir)
+	if err != nil || !ok || marker.DurableAtUnixMs == 0 {
+		t.Fatalf("the move marker does not record the copy as durable: %+v (found %v, err %v)", marker, ok, err)
 	}
 }

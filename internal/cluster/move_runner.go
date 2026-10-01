@@ -620,6 +620,18 @@ func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResu
 		}
 		expectID = rec.ID
 	}
+	// The old owner deletes its copy once the flip is visible and this
+	// node's listing covers it, and that listing reads sizes from the
+	// page cache. So the copy must survive a power loss before the flip:
+	// every staged file is synced before the marker vouches for it
+	// (sealed segments were synced as they landed), the marker and the
+	// staging directory after it, and install syncs the directories it
+	// renames the copy into.
+	if err := w.sess.makeDurable(stagingDir); err != nil {
+		r.logger.Warn("move: make the staged copy durable; will retry", "topic", topicName, "partition", partition, "err", err)
+		return false
+	}
+	durableAt := time.Now()
 	// The marker records how this copy got here. The old owner's sweep
 	// reads it (through the transfer info) to refuse deleting a local copy
 	// that is ahead of the promoted HWM, and the fan-out reconciler reads
@@ -629,9 +641,14 @@ func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResu
 		HighWatermark:     res.HighWatermark,
 		ForcePromoted:     forcePromoted,
 		InstalledAtUnixMs: time.Now().UnixMilli(),
+		DurableAtUnixMs:   durableAt.UnixMilli(),
 		Children:          r.linkedChildren(ctx, topicName),
 	}); err != nil {
 		r.logger.Warn("move: write move marker; will retry", "topic", topicName, "partition", partition, "err", err)
+		return false
+	}
+	if err := storage.SyncDir(stagingDir); err != nil {
+		r.logger.Warn("move: sync the staging directory; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
 	// A node that owned this partition before it moved away may still
@@ -784,6 +801,15 @@ func (r *MoveRunner) install(topicName string, partition int, staging, expectID 
 		if err := os.Rename(staging, dir); err != nil {
 			return fmt.Errorf("install staged copy: %w", err)
 		}
+		// The rename (and a topic directory MkdirAll made, and a
+		// quarantine rename) survive a power loss only once the parent
+		// directories are synced, and the flip must not come before.
+		if err := syncPartitionParents(dir); err != nil {
+			if rerr := os.Rename(dir, staging); rerr != nil {
+				return fmt.Errorf("sync the installed copy's directories: %w (and moving it back to staging: %v)", err, rerr)
+			}
+			return fmt.Errorf("sync the installed copy's directories: %w", err)
+		}
 		info, err := os.Stat(dir)
 		if err != nil {
 			return fmt.Errorf("stat installed copy: %w", err)
@@ -800,6 +826,17 @@ func (r *MoveRunner) install(topicName string, partition int, staging, expectID 
 		return nil, err
 	}
 	return installed, nil
+}
+
+// syncPartitionParents fsyncs the topic directory holding a partition
+// directory and the directory above it, so a rename into the topic
+// directory, and a topic directory just created, survive a power loss.
+func syncPartitionParents(partitionDir string) error {
+	topicDir := filepath.Dir(partitionDir)
+	if err := storage.SyncDir(topicDir); err != nil {
+		return err
+	}
+	return storage.SyncDir(filepath.Dir(topicDir))
 }
 
 // setAsideUncoveredCopy quarantines the copy at the partition's path

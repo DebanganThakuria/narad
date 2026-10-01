@@ -91,6 +91,11 @@ type MoveSession struct {
 	stagingDir string
 	copied     map[int64]int64 // base offset -> bytes copied so far
 	total      int64
+	// synced records the staged segments already fdatasynced, at the
+	// size they had then: a sealed segment is synced once its last chunk
+	// is staged, outside the freeze, so makeDurable has little left to do
+	// before the flip.
+	synced map[int64]int64
 
 	// Last state the source reported on a successful list. Retained so that
 	// if the source later DIES, a force-promote can reproduce exactly the
@@ -139,7 +144,7 @@ func (s *MoveSession) KeepFrozen(fn func(context.Context) error, every time.Dura
 func (m *PartitionMover) Begin(sourceAddr, topicName string, partition int, stagingDir string) *MoveSession {
 	return &MoveSession{
 		m: m, sourceAddr: sourceAddr, topic: topicName, partition: partition,
-		stagingDir: stagingDir, copied: map[int64]int64{},
+		stagingDir: stagingDir, copied: map[int64]int64{}, synced: map[int64]int64{},
 	}
 }
 
@@ -197,6 +202,12 @@ func (s *MoveSession) pass(ctx context.Context) (int64, messaging.PartitionTrans
 			newBytes += int64(len(chunk))
 		}
 		s.copied[seg.BaseOffset] = at
+		if seg.Sealed && at > 0 && at == seg.SizeBytes && s.synced[seg.BaseOffset] != at {
+			if err := storage.SyncSegmentFile(s.stagingDir, seg.BaseOffset); err != nil {
+				return 0, messaging.PartitionTransferInfo{}, fmt.Errorf("sync staged segment %d: %w", seg.BaseOffset, err)
+			}
+			s.synced[seg.BaseOffset] = at
+		}
 	}
 	s.total += newBytes
 	return newBytes, info, nil
@@ -509,6 +520,20 @@ func installSidecars(dir string, sidecars []storage.SidecarFile, hwm int64) erro
 		}
 	}
 	return nil
+}
+
+// makeDurable fdatasyncs every staged file not already synced at its
+// current size (sealed segments are synced as their last chunk lands),
+// so the copy survives a power loss once ownership flips to it. A nil
+// session syncs every file.
+func (s *MoveSession) makeDurable(stagingDir string) error {
+	return storage.SyncStagedFiles(stagingDir, func(name string, size int64) bool {
+		if s == nil || size == 0 {
+			return false
+		}
+		base, ok := storage.ParseSegmentFileName(name)
+		return ok && s.synced[base] == size
+	})
 }
 
 // Copy is Begin+Finalize for a static source (or tests) — it drains

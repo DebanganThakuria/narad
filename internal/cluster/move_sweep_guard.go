@@ -233,3 +233,20 @@ func (r *MoveRunner) ownerHoldsTheseRecords(ctx context.Context, ownerAddr, topi
 	}
 	return "", nil
 }
+
+// moveUnsyncedCopyWriteback is how long after an install the old owner's
+// sweep waits before it trusts a new owner whose move marker carries no
+// durable stamp: a release that did not sync the copy before the flip,
+// whose listing can report segments that are still only in its page
+// cache. Linux writes dirty pages back within about 35 s by default
+// (vm.dirty_expire_centisecs plus the flusher interval); the rest is
+// margin for a loaded disk and for clock skew between the two nodes.
+const moveUnsyncedCopyWriteback = 5 * time.Minute
+
+// unsyncedInstallTooRecent reports whether the owner's move marker m
+// says its copy was installed without being synced, too recently for the
+// kernel to have written it back.
+func unsyncedInstallTooRecent(m *messaging.MoveMarker, now time.Time) bool {
+	return m != nil && m.DurableAtUnixMs == 0 && m.InstalledAtUnixMs > 0 &&
+		now.Sub(time.UnixMilli(m.InstalledAtUnixMs)) < moveUnsyncedCopyWriteback
+}

@@ -83,6 +83,13 @@ type MoveMarker struct {
 	HighWatermark     int64  `json:"high_watermark"`
 	ForcePromoted     bool   `json:"force_promoted,omitempty"`
 	InstalledAtUnixMs int64  `json:"installed_at_unix_ms"`
+	// DurableAtUnixMs is when the destination finished syncing the copy
+	// (every staged file and the staging directory) before it installed
+	// it and proposed the flip. Zero from a release that did not sync
+	// the copy: its segments may still sit in the new owner's page cache
+	// shortly after the install, so the old owner's sweep waits before
+	// trusting that owner's listing.
+	DurableAtUnixMs int64 `json:"durable_at_unix_ms,omitempty"`
 	// Children maps each child topic attached to this parent at install
 	// time to that link's attach epoch.
 	Children map[string]string `json:"children,omitempty"`

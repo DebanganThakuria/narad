@@ -152,6 +152,8 @@ Records the source committed between the destination's last successful read and 
 
 A local copy whose recovered next offset is **ahead** of the promoted high watermark is [quarantined](../reference/glossary.md#quarantine) (renamed to `<partition>.quarantine`) and logged at error level for an operator to reconcile; a copy at or behind it is reclaimed as before. The acks such a source took from its own consumers past the promoted high watermark stay in its copy, which the sweep quarantines. They never reach the new owner, whose records at those offsets are different ones.
 
+The destination makes the copy durable before it proposes the flip (unreleased): it syncs each sealed segment as its last chunk lands, every other file of the copy before it writes the marker, the marker and the staging directory after, and the directories the install renames the copy into, and the marker records when the copy became durable. A marker without that stamp comes from an older destination, whose copy may still be in its page cache shortly after the install, so the old owner's sweep leaves such a copy alone until the install is 5 minutes old.
+
 The new owner can also hold **less** than the move gave it: it came back on an empty volume under the same node ID, or lost or shortened a segment that never reached its disk. So the sweep compares the new owner's segment listing with its own copy before reclaiming (unreleased). The position the owner vouches for is its high watermark, never more than the marker's promoted one. The sweep quarantines its copy, without recovering it first, when the copy holds records retention has not expired and:
 
 - the owner lists no records;

@@ -10,6 +10,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -220,5 +221,44 @@ func TestMoveSweepNeverCallsAnUnguardedReclaim(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("the local copy is gone: %v", err)
+	}
+}
+
+// A new owner on a release that did not sync its copy before the flip
+// leaves a move marker with no durable stamp, and its listing can report
+// segments that are still only in its page cache. The old owner's sweep
+// waits until the install is old enough for the kernel to have written
+// it back before it trusts that listing; a stamped marker is trusted at
+// once.
+func TestMoveSweepWaitsOutTheWritebackOfAnUnsyncedInstall(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name        string
+		installedAt time.Time
+		durable     bool
+		wantReclaim bool
+	}{
+		{name: "unsynced, installed just now", installedAt: now},
+		{name: "unsynced, installed past the writeback window", installedAt: now.Add(-moveUnsyncedCopyWriteback - time.Minute), wantReclaim: true},
+		{name: "synced before the flip", installedAt: now, durable: true, wantReclaim: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeMoveStore{
+				assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-new"},
+				member:     metastore.Member{ID: "narad-new", Addr: "newaddr", Status: metastore.MemberAlive},
+			}
+			marker := &messaging.MoveMarker{Source: "narad-dst", HighWatermark: 42, InstalledAtUnixMs: tc.installedAt.UnixMilli()}
+			if tc.durable {
+				marker.DurableAtUnixMs = tc.installedAt.UnixMilli()
+			}
+			rec := &fakeReclaimer{}
+			dataDir := t.TempDir()
+			r := NewMoveRunner(store, "narad-dst", dataDir, movePeerFake{marker: marker, dirFetcher: dirFetcher{hwm: 42}}, rec, nil, nil, MoveConfig{})
+			mkLocalPartitionDir(t, dataDir)
+			r.sweepStaleCopies(context.Background())
+			if got := rec.count() == 1; got != tc.wantReclaim {
+				t.Fatalf("reclaimed = %v (%d calls), want %v", got, rec.count(), tc.wantReclaim)
+			}
+		})
 	}
 }

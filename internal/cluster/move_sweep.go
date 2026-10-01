@@ -182,6 +182,12 @@ func (r *MoveRunner) promotedPosition(ctx context.Context, ownerID, topicName st
 	now := time.Now()
 	marker, marked, merr := messaging.ReadMoveMarker(dir)
 	abandoned = merr == nil && marked && marker.Source == ownerID
+	if !abandoned && unsyncedInstallTooRecent(info.MoveMarker, now) {
+		r.logger.Info("move: the new owner's copy was installed by a release that does not sync it before the flip; deferring the reclaim until its writeback window has passed",
+			"topic", topicName, "partition", partition, "owner", ownerID,
+			"installed_at", time.UnixMilli(info.MoveMarker.InstalledAtUnixMs), "window", moveUnsyncedCopyWriteback)
+		return messaging.ReclaimGuard{}, false, false
+	}
 	guard = ownerReclaimGuard(info, local, abandoned, retention, now)
 	if abandoned && guard.SetAside == "" {
 		why, err := r.ownerHoldsTheseRecords(ctx, m.Addr, topicName, partition, dir, info, local, guard.PromotedHWM, retention, now)
