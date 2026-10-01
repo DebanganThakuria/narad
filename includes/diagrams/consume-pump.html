@@ -1,0 +1,87 @@
+<svg class="nr-dia__wide" viewBox="0 -4 800 376" role="img" aria-labelledby="consume-pump-w-t" aria-describedby="consume-pump-w-d">
+<title id="consume-pump-w-t">One pump per broker hands each record to one waiter</title>
+<desc id="consume-pump-w-d">On narad-1, consumers of topic orders that found nothing wait in one first-in, first-out queue; pinned consumers wait in their own FIFO per partition, which the pump serves first. The pump wakes on two things: a waiter joined, or records may be ready, which the partition log signals on a high watermark advance, a nack, a lease expiry or a close. It reserves a record once, ord_123, and hands it to the waiter at the head; the others keep waiting. With no waiter, the log's notifier returns on one atomic flag.</desc>
+<rect class="rg" x="0" y="0" width="800" height="332" rx="6"/>
+<text class="rl" x="20" y="30">topic</text>
+<text class="cd" x="68.8" y="30">orders</text>
+<text class="rl" x="144.1" y="30">on</text>
+<text class="cd" x="172.1" y="30">narad-1</text>
+<text class="cd" x="20" y="140">orders/0</text>
+<text class="an" x="118.1" y="140">log</text>
+<rect class="bx tn" x="20" y="150" width="36" height="36"/>
+<rect class="bx tn" x="56" y="150" width="36" height="36"/>
+<rect class="bx tn" x="92" y="150" width="36" height="36"/>
+<rect class="bx tn" x="128" y="150" width="36" height="36"/>
+<rect class="bx tn" x="164" y="150" width="36" height="36"/>
+<path class="ln1" d="M200 168H290"/>
+<path class="ah" d="M290 173L300 168L290 163Z"/>
+<text class="an" x="20" y="222">records may be ready: high</text>
+<text class="an" x="20" y="244">watermark advance, nack,</text>
+<text class="an" x="20" y="266">lease expiry, close</text>
+<rect class="bx bx3" x="300" y="136" width="100" height="64" rx="2"/>
+<text class="lb mid" x="350" y="174.8">pump</text>
+<text class="an" x="540" y="104">parked, first in, first out</text>
+<rect class="you" x="540" y="136" width="76" height="64" rx="2"/>
+<text class="an mid on" x="578" y="174">head</text>
+<rect class="you" x="628" y="136" width="76" height="64" rx="2"/>
+<text class="an mid on" x="666" y="174">waiter</text>
+<rect class="you" x="716" y="136" width="76" height="64" rx="2"/>
+<text class="an mid on" x="754" y="174">waiter</text>
+<path class="ln" d="M400 168H413M527 168H528"/>
+<path class="ah" d="M528 175L540 168L528 161Z"/>
+<polygon class="msg" points="413,153 509,153 527,183 431,183"/>
+<text class="msg-t" x="470" y="174.5">ord_123</text>
+<text class="an mid" x="470" y="224">reserve once, hand</text>
+<text class="an mid" x="470" y="246">to the head waiter</text>
+<path class="ln1" d="M742 136V92Q742 76 726 76H366Q350 76 350 92V126"/>
+<path class="ah" d="M345 126L350 136L355 126Z"/>
+<text class="an mid" x="546" y="68">a waiter joined</text>
+<rect class="bx bxq" x="588" y="240" width="192" height="72" rx="2"/>
+<text class="an mid" x="684" y="271.12">pinned FIFOs, one per</text>
+<text class="an mid" x="684" y="293.12">partition, pumped first</text>
+<text class="an mu" x="0" y="364">no waiter: the notifier returns on one atomic flag</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 500" role="img" data-search-exclude aria-labelledby="consume-pump-n-t" aria-describedby="consume-pump-n-d">
+<title id="consume-pump-n-t">One pump per broker hands each record to one waiter</title>
+<desc id="consume-pump-n-d">On narad-1, consumers of topic orders that found nothing wait in one first-in, first-out queue; pinned consumers wait in their own FIFO per partition, which the pump serves first. The pump wakes on two things: a waiter joined, or records may be ready, which the partition log signals on a high watermark advance, a nack, a lease expiry or a close. It reserves a record once, ord_123, and hands it to the waiter at the head; the others keep waiting. With no waiter, the log's notifier returns on one atomic flag.</desc>
+<rect class="rg" x="0" y="0" width="360" height="492" rx="6"/>
+<text class="rl" x="16" y="26">topic</text>
+<text class="cd" x="57.1" y="26">orders</text>
+<text class="rl" x="120.2" y="26">on</text>
+<text class="cd" x="144" y="26">narad-1</text>
+<text class="cd" x="16" y="60">orders/0</text>
+<text class="an" x="98.1" y="60">log</text>
+<rect class="bx tn" x="16" y="68" width="28" height="28"/>
+<rect class="bx tn" x="44" y="68" width="28" height="28"/>
+<rect class="bx tn" x="72" y="68" width="28" height="28"/>
+<rect class="bx tn" x="100" y="68" width="28" height="28"/>
+<rect class="bx tn" x="128" y="68" width="28" height="28"/>
+<path class="ln1" d="M72 96V138"/>
+<path class="ah" d="M67 138L72 148L77 138Z"/>
+<text class="an" x="164" y="76">records may be ready:</text>
+<text class="an" x="164" y="96">high watermark advance,</text>
+<text class="an" x="164" y="116">nack, lease expiry, close</text>
+<rect class="bx bx3" x="16" y="148" width="112" height="52" rx="2"/>
+<text class="lb mid" x="72" y="179.78">pump</text>
+<path class="ln" d="M72 200V219M72 245V264"/>
+<path class="ah" d="M65 264L72 276L79 264Z"/>
+<polygon class="msg" points="22.5,219 104.5,219 121.5,245 39.5,245"/>
+<text class="msg-t" x="72" y="237">ord_123</text>
+<text class="an" x="140" y="228">reserve once, hand</text>
+<text class="an" x="140" y="248">to the head waiter</text>
+<rect class="you" x="16" y="276" width="96" height="48" rx="2"/>
+<text class="an mid on" x="64" y="305">head</text>
+<rect class="you" x="124" y="276" width="96" height="48" rx="2"/>
+<text class="an mid on" x="172" y="305">waiter</text>
+<rect class="you" x="232" y="276" width="96" height="48" rx="2"/>
+<text class="an mid on" x="280" y="305">waiter</text>
+<text class="an" x="16" y="348">parked, first in, first out</text>
+<path class="ln1" d="M304 276V190Q304 174 288 174H138"/>
+<path class="ah" d="M138 169L128 174L138 179Z"/>
+<text class="an" x="172" y="166">a waiter joined</text>
+<rect class="bx bxq" x="16" y="368" width="328" height="52" rx="2"/>
+<text class="an mid" x="180" y="389.1">pinned FIFOs, one per partition,</text>
+<text class="an mid" x="180" y="409.1">pumped first</text>
+<text class="an mu" x="16" y="448">no waiter: the notifier returns on</text>
+<text class="an mu" x="16" y="468">one atomic flag</text>
+</svg>

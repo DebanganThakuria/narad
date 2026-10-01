@@ -1,0 +1,141 @@
+<svg class="nr-dia__wide" viewBox="0 -4 800 516" role="img" aria-labelledby="consume-offset-strip-w-t" aria-describedby="consume-offset-strip-w-d">
+<title id="consume-offset-strip-w-t">One partition's shard of the in-flight table</title>
+<desc id="consume-offset-strip-w-d">In memory on the owner, the shard for orders/3 covers offsets 38 to 49. 38 to 41 are acked, so the committed frontier stands at 41: everything up to and including 41 is acked. 42 is available. 43 and 45 are leased, each with a nonce and an expiry. 44 was acked ahead of the gap at 42 and 43. 46 and 47 are available, the high watermark stands after 47, and 48 and 49 are written but not yet visible. The lease on 43 is held through its receipt handle, 3:43:58..., which is partition:offset:nonce. Two leases are in flight against max_in_flight_per_partition, 1024 by default, and one offset is acked ahead against max_acked_ahead_per_partition, 1024 by default. On disk beside the log, consumer.ahead holds the frontier and the acked-ahead set, written every 100 ms and synced every 1 s, and consumer.offset holds the frontier alone, levelled at most every 30 s. Leases live only in memory: a crash forgets them and the messages come back.</desc>
+<rect class="rg" x="0" y="0" width="504" height="508" rx="6"/>
+<text class="cd" x="20" y="30">orders/3</text>
+<text class="rl" x="119.2" y="30">shard, in memory</text>
+<rect class="bx tn" x="24" y="112" width="36" height="36"/>
+<text class="cd mu mid" x="42" y="104">38</text>
+<rect class="bx tn" x="60" y="112" width="36" height="36"/>
+<text class="cd mu mid" x="78" y="104">39</text>
+<rect class="bx tn" x="96" y="112" width="36" height="36"/>
+<text class="cd mu mid" x="114" y="104">40</text>
+<rect class="bx tn" x="132" y="112" width="36" height="36"/>
+<text class="cd mu mid" x="150" y="104">41</text>
+<rect class="bx" x="168" y="112" width="36" height="36"/>
+<text class="cd mu mid" x="186" y="104">42</text>
+<rect class="bx bx3" x="204" y="112" width="36" height="36"/>
+<text class="cd mu mid" x="222" y="104">43</text>
+<rect class="bx tn" x="240" y="112" width="36" height="36"/>
+<text class="cd mu mid" x="258" y="104">44</text>
+<rect class="bx bx3" x="276" y="112" width="36" height="36"/>
+<text class="cd mu mid" x="294" y="104">45</text>
+<rect class="bx" x="312" y="112" width="36" height="36"/>
+<text class="cd mu mid" x="330" y="104">46</text>
+<rect class="bx" x="348" y="112" width="36" height="36"/>
+<text class="cd mu mid" x="366" y="104">47</text>
+<rect class="bx ghost" x="384" y="112" width="36" height="36"/>
+<text class="cd mu mid" x="402" y="104">48</text>
+<rect class="bx ghost" x="420" y="112" width="36" height="36"/>
+<text class="cd mu mid" x="438" y="104">49</text>
+<text class="an end" x="162" y="58">committed frontier:</text>
+<text class="an end" x="162" y="80">all up to 41 acked</text>
+<text class="an end" x="378" y="80">high watermark</text>
+<path class="ln" d="M168 96V164"/>
+<path class="ln" d="M384 96V164"/>
+<path class="ln1" d="M240 164V172H276V164"/>
+<text class="an" x="244" y="196">acked ahead</text>
+<path class="ln1" d="M222 148V218"/>
+<polygon class="msg" points="165,218 261,218 279,248 183,248"/>
+<text class="msg-t" x="222" y="239.5">3:43:58…</text>
+<text class="an" x="24" y="280">receipt handle:</text>
+<text class="cd" x="150.7" y="280">partition:offset:nonce</text>
+<rect class="bx tn" x="24" y="313" width="20" height="20"/>
+<text class="an" x="54" y="330">acked</text>
+<rect class="bx bx3" x="24" y="343" width="20" height="20"/>
+<text class="an" x="54" y="360">leased: a nonce, an expiry</text>
+<rect class="bx" x="280" y="313" width="20" height="20"/>
+<text class="an" x="310" y="330">available</text>
+<rect class="bx ghost" x="280" y="343" width="20" height="20"/>
+<text class="an" x="310" y="360">not yet visible</text>
+<text class="an" x="24" y="414">in flight: 2 of 1024</text>
+<text class="cd mu" x="24" y="436">max_in_flight_per_partition</text>
+<text class="an" x="24" y="468">acked ahead: 1 of 1024</text>
+<text class="cd mu" x="24" y="490">max_acked_ahead_per_partition</text>
+<rect class="rg" x="524" y="0" width="276" height="292" rx="6"/>
+<text class="rl" x="544" y="276">On disk, beside the log</text>
+<rect class="bx tn" x="544" y="24" width="236" height="116" rx="2"/>
+<text class="cd" x="560" y="52">consumer.ahead</text>
+<text class="an" x="560" y="80">frontier + {44}</text>
+<text class="an" x="560" y="102">written every 100 ms,</text>
+<text class="an" x="560" y="124">synced every 1 s</text>
+<rect class="bx tn" x="544" y="160" width="236" height="88" rx="2"/>
+<text class="cd" x="560" y="188">consumer.offset</text>
+<text class="an" x="560" y="214">frontier; levelled at</text>
+<text class="an" x="560" y="236">most every 30 s</text>
+<path class="ln1" d="M168 96V60Q168 44 184 44H534"/>
+<path class="ah" d="M534 49L544 44L534 39Z"/>
+<path class="ln1" d="M514 44V188Q514 204 530 204H534"/>
+<path class="ah" d="M534 209L544 204L534 199Z"/>
+<text class="an mu" x="524" y="330">Leases live only in memory:</text>
+<text class="an mu" x="524" y="352">a crash forgets them and</text>
+<text class="an mu" x="524" y="374">the messages come back</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 716" role="img" data-search-exclude aria-labelledby="consume-offset-strip-n-t" aria-describedby="consume-offset-strip-n-d">
+<title id="consume-offset-strip-n-t">One partition's shard of the in-flight table</title>
+<desc id="consume-offset-strip-n-d">In memory on the owner, the shard for orders/3 covers offsets 38 to 49. 38 to 41 are acked, so the committed frontier stands at 41: everything up to and including 41 is acked. 42 is available. 43 and 45 are leased, each with a nonce and an expiry. 44 was acked ahead of the gap at 42 and 43. 46 and 47 are available, the high watermark stands after 47, and 48 and 49 are written but not yet visible. The lease on 43 is held through its receipt handle, 3:43:58..., which is partition:offset:nonce. Two leases are in flight against max_in_flight_per_partition, 1024 by default, and one offset is acked ahead against max_acked_ahead_per_partition, 1024 by default. On disk beside the log, consumer.ahead holds the frontier and the acked-ahead set, written every 100 ms and synced every 1 s, and consumer.offset holds the frontier alone, levelled at most every 30 s. Leases live only in memory: a crash forgets them and the messages come back.</desc>
+<rect class="rg" x="0" y="0" width="360" height="428" rx="6"/>
+<text class="cd" x="12" y="26">orders/3</text>
+<text class="rl" x="94" y="26">shard, in memory</text>
+<rect class="bx tn" x="12" y="104" width="28" height="28"/>
+<text class="cd mu mid" x="26" y="96">38</text>
+<rect class="bx tn" x="40" y="104" width="28" height="28"/>
+<text class="cd mu mid" x="54" y="96">39</text>
+<rect class="bx tn" x="68" y="104" width="28" height="28"/>
+<text class="cd mu mid" x="82" y="96">40</text>
+<rect class="bx tn" x="96" y="104" width="28" height="28"/>
+<text class="cd mu mid" x="110" y="96">41</text>
+<rect class="bx" x="124" y="104" width="28" height="28"/>
+<text class="cd mu mid" x="138" y="96">42</text>
+<rect class="bx bx3" x="152" y="104" width="28" height="28"/>
+<text class="cd mu mid" x="166" y="96">43</text>
+<rect class="bx tn" x="180" y="104" width="28" height="28"/>
+<text class="cd mu mid" x="194" y="96">44</text>
+<rect class="bx bx3" x="208" y="104" width="28" height="28"/>
+<text class="cd mu mid" x="222" y="96">45</text>
+<rect class="bx" x="236" y="104" width="28" height="28"/>
+<text class="cd mu mid" x="250" y="96">46</text>
+<rect class="bx" x="264" y="104" width="28" height="28"/>
+<text class="cd mu mid" x="278" y="96">47</text>
+<rect class="bx ghost" x="292" y="104" width="28" height="28"/>
+<text class="cd mu mid" x="306" y="96">48</text>
+<rect class="bx ghost" x="320" y="104" width="28" height="28"/>
+<text class="cd mu mid" x="334" y="96">49</text>
+<text class="an end" x="119" y="56">committed</text>
+<text class="an end" x="119" y="76">frontier</text>
+<text class="an end" x="287" y="76">high watermark</text>
+<path class="ln" d="M124 88V148"/>
+<path class="ln" d="M292 88V148"/>
+<path class="ln1" d="M180 152V160H208V152"/>
+<text class="an" x="183" y="182">acked ahead</text>
+<path class="ln1" d="M166 132V196"/>
+<polygon class="msg" points="116.5,196 198.5,196 215.5,222 133.5,222"/>
+<text class="msg-t" x="166" y="214">3:43:58…</text>
+<text class="an" x="12" y="250">receipt handle:</text>
+<text class="cd" x="117.5" y="250">partition:offset:nonce</text>
+<rect class="bx tn" x="12" y="275" width="16" height="16"/>
+<text class="an" x="38" y="288">acked</text>
+<rect class="bx bx3" x="12" y="299" width="16" height="16"/>
+<text class="an" x="38" y="312">leased: nonce, expiry</text>
+<rect class="bx" x="200" y="275" width="16" height="16"/>
+<text class="an" x="226" y="288">available</text>
+<rect class="bx ghost" x="200" y="299" width="16" height="16"/>
+<text class="an" x="226" y="312">not yet visible</text>
+<text class="an" x="12" y="350">in flight: 2 of 1024</text>
+<text class="cd mu" x="12" y="370">max_in_flight_per_partition</text>
+<text class="an" x="12" y="396">acked ahead: 1 of 1024</text>
+<text class="cd mu" x="12" y="416">max_acked_ahead_per_partition</text>
+<rect class="rg" x="0" y="444" width="360" height="212" rx="6"/>
+<text class="rl" x="20" y="640">On disk, beside the log</text>
+<path class="ln1" d="M330 428V446"/>
+<path class="ah" d="M325 446L330 456L335 446Z"/>
+<rect class="bx tn" x="16" y="456" width="328" height="84" rx="2"/>
+<text class="cd" x="28" y="480">consumer.ahead</text>
+<text class="an" x="28" y="504">frontier + {44}; written every</text>
+<text class="an" x="28" y="524">100 ms, synced every 1 s</text>
+<rect class="bx tn" x="16" y="552" width="328" height="64" rx="2"/>
+<text class="cd" x="28" y="576">consumer.offset</text>
+<text class="an" x="28" y="600">frontier; levelled at most every 30 s</text>
+<text class="an mu" x="0" y="684">Leases live only in memory: a crash</text>
+<text class="an mu" x="0" y="704">forgets them and the messages come back</text>
+</svg>

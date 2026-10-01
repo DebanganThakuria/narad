@@ -1,0 +1,164 @@
+<svg class="nr-dia__wide" viewBox="0 8 800 492" role="img" aria-labelledby="consume-ack-cadences-w-t" aria-describedby="consume-ack-cadences-w-d">
+<title id="consume-ack-cadences-w-t">Two clocks and two slots: how acks reach the disk</title>
+<desc id="consume-ack-cadences-w-d">Acks settle in memory at once. Every tick, T, 100 ms, the committer writes a fresh consumer.ahead record for each changed partition into the window slot, which is only the page cache: it survives a crash of the process, not of the machine. Once every durability interval, D, 1 s, at a phase set by a hash of the partition, here 0.7 s into each second, the partition is written out: fdatasync on Linux; on macOS fsync, then one F_FULLFSYNC per device. consumer.ahead has two 4 KiB slots. The anchor holds the newest durable record and is never written while it is the anchor; ticks write the other slot, the window. A writeout that succeeds swaps the two roles. The ack followed here settles at 0.23 s, reaches the page cache at the tick at 0.3 s, and is durable at the writeout at 0.7 s. So a process crash hands back about one tick of acks, 100 ms, and a power loss up to D plus T plus the sync, about 1.1 s. consumer.offset is levelled with the frontier at most every 30 s and at Close.</desc>
+<path class="ln" d="M374 40V204"/>
+<path class="ln" d="M674 40V204"/>
+<text class="an mid" x="374" y="28">writeout: the roles swap</text>
+<text class="an mid" x="674" y="28">writeout: the roles swap</text>
+<text class="an" x="0" y="62">acks, in memory</text>
+<circle class="ink" cx="182" cy="56" r="4"/>
+<circle class="ink" cx="206" cy="56" r="4"/>
+<circle class="ink" cx="233" cy="56" r="4"/>
+<circle class="ink" cx="275" cy="56" r="4"/>
+<circle class="ink" cx="308" cy="56" r="4"/>
+<circle class="ink" cx="347" cy="56" r="4"/>
+<circle class="ink" cx="401" cy="56" r="4"/>
+<circle class="ink" cx="440" cy="56" r="4"/>
+<circle class="ink" cx="488" cy="56" r="4"/>
+<circle class="ink" cx="527" cy="56" r="4"/>
+<circle class="ink" cx="566" cy="56" r="4"/>
+<circle class="ink" cx="605" cy="56" r="4"/>
+<circle class="ink" cx="653" cy="56" r="4"/>
+<circle class="ink" cx="692" cy="56" r="4"/>
+<circle class="ink" cx="728" cy="56" r="4"/>
+<rect class="rg" x="0" y="80" width="800" height="132" rx="6"/>
+<text class="cd" x="16" y="196">consumer.ahead</text>
+<text class="rl" x="183.6" y="196">two 4 KiB slots</text>
+<text class="an" x="16" y="114">slot 0</text>
+<rect class="bx" x="164" y="92" width="30" height="32"/>
+<rect class="bx" x="194" y="92" width="30" height="32"/>
+<rect class="msg" x="224" y="92" width="30" height="32"/>
+<rect class="bx" x="254" y="92" width="30" height="32"/>
+<rect class="bx" x="284" y="92" width="30" height="32"/>
+<rect class="bx" x="314" y="92" width="30" height="32"/>
+<rect class="bx" x="344" y="92" width="30" height="32"/>
+<rect class="bx tn" x="374" y="92" width="300" height="32"/>
+<text class="an mid" x="524" y="114">anchor: never written</text>
+<rect class="bx" x="674" y="92" width="30" height="32"/>
+<rect class="bx" x="704" y="92" width="30" height="32"/>
+<rect class="bx" x="734" y="92" width="30" height="32"/>
+<text class="an" x="16" y="158">slot 1</text>
+<rect class="bx tn" x="164" y="136" width="210" height="32"/>
+<text class="an mid" x="269" y="158">anchor: never written</text>
+<rect class="bx" x="374" y="136" width="30" height="32"/>
+<rect class="bx" x="404" y="136" width="30" height="32"/>
+<rect class="bx" x="434" y="136" width="30" height="32"/>
+<rect class="bx" x="464" y="136" width="30" height="32"/>
+<rect class="bx" x="494" y="136" width="30" height="32"/>
+<rect class="bx" x="524" y="136" width="30" height="32"/>
+<rect class="bx" x="554" y="136" width="30" height="32"/>
+<rect class="bx" x="584" y="136" width="30" height="32"/>
+<rect class="bx" x="614" y="136" width="30" height="32"/>
+<rect class="bx" x="644" y="136" width="30" height="32"/>
+<rect class="bx tn" x="674" y="136" width="90" height="32"/>
+<text class="an mid" x="719" y="158">anchor</text>
+<path class="ln1" d="M233 61V82"/>
+<path class="ah" d="M228 82L233 92L238 82Z"/>
+<path class="ln1" d="M164 236H764"/>
+<path class="ln1" d="M164 236V252M194 236V244M224 236V244M254 236V244M284 236V244M314 236V244M344 236V244M374 236V244M404 236V244M434 236V244M464 236V252M494 236V244M524 236V244M554 236V244M584 236V244M614 236V244M644 236V244M674 236V244M704 236V244M734 236V244M764 236V252"/>
+<text class="an mu mid" x="164" y="274">0</text>
+<text class="an mu mid" x="314" y="274">0.5 s</text>
+<text class="an mu mid" x="464" y="274">1 s</text>
+<text class="an mu mid" x="614" y="274">1.5 s</text>
+<text class="an mu mid" x="764" y="274">2 s</text>
+<path class="ln1" d="M224 296V304H254V296"/>
+<text class="an mid" x="239" y="328">process crash: one</text>
+<text class="an mid" x="239" y="350">tick, about 100 ms</text>
+<path class="ln1" d="M374 296V304H704V296"/>
+<text class="an mid" x="539" y="328">power loss: up to D + T + the sync,</text>
+<text class="an mid" x="539" y="350">about 1.1 s</text>
+<rect class="bx" x="0" y="392" width="30" height="24"/>
+<text class="an" x="42" y="410">window: rewritten each tick (T, 100 ms),</text>
+<text class="an" x="42" y="432">page cache only</text>
+<rect class="bx tn" x="0" y="452" width="30" height="24"/>
+<text class="an" x="42" y="470">anchor: the newest durable record</text>
+<text class="an" x="42" y="492">writeout once per D (1 s), at the phase of a hash</text>
+<rect class="bx tn" x="468" y="392" width="332" height="100" rx="2"/>
+<text class="cd" x="484" y="418">consumer.offset</text>
+<text class="an" x="484" y="444">frontier only; levelled at most</text>
+<text class="an" x="484" y="466">every 30 s, and at Close</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 32 360 720" role="img" data-search-exclude aria-labelledby="consume-ack-cadences-n-t" aria-describedby="consume-ack-cadences-n-d">
+<title id="consume-ack-cadences-n-t">Two clocks and two slots: how acks reach the disk</title>
+<desc id="consume-ack-cadences-n-d">Acks settle in memory at once. Every tick, T, 100 ms, the committer writes a fresh consumer.ahead record for each changed partition into the window slot, which is only the page cache: it survives a crash of the process, not of the machine. Once every durability interval, D, 1 s, at a phase set by a hash of the partition, here 0.7 s into each second, the partition is written out: fdatasync on Linux; on macOS fsync, then one F_FULLFSYNC per device. consumer.ahead has two 4 KiB slots. The anchor holds the newest durable record and is never written while it is the anchor; ticks write the other slot, the window. A writeout that succeeds swaps the two roles. The ack followed here settles at 0.23 s, reaches the page cache at the tick at 0.3 s, and is durable at the writeout at 0.7 s. So a process crash hands back about one tick of acks, 100 ms, and a power loss up to D plus T plus the sync, about 1.1 s. consumer.offset is levelled with the frontier at most every 30 s and at Close.</desc>
+<rect class="rg" x="86" y="36" width="148" height="480" rx="6"/>
+<text class="cd" x="94" y="500">consumer.ahead</text>
+<text class="an mid" x="122" y="64">slot 0</text>
+<text class="an mid" x="186" y="64">slot 1</text>
+<rect class="bx" x="94" y="76" width="56" height="20"/>
+<rect class="bx" x="94" y="96" width="56" height="20"/>
+<rect class="msg" x="94" y="116" width="56" height="20"/>
+<rect class="bx" x="94" y="136" width="56" height="20"/>
+<rect class="bx" x="94" y="156" width="56" height="20"/>
+<rect class="bx" x="94" y="176" width="56" height="20"/>
+<rect class="bx" x="94" y="196" width="56" height="20"/>
+<rect class="bx tn" x="94" y="216" width="56" height="200"/>
+<text class="an mid" x="122" y="321">anchor</text>
+<rect class="bx" x="94" y="416" width="56" height="20"/>
+<rect class="bx" x="94" y="436" width="56" height="20"/>
+<rect class="bx" x="94" y="456" width="56" height="20"/>
+<rect class="bx tn" x="158" y="76" width="56" height="140"/>
+<text class="an mid" x="186" y="151">anchor</text>
+<rect class="bx" x="158" y="216" width="56" height="20"/>
+<rect class="bx" x="158" y="236" width="56" height="20"/>
+<rect class="bx" x="158" y="256" width="56" height="20"/>
+<rect class="bx" x="158" y="276" width="56" height="20"/>
+<rect class="bx" x="158" y="296" width="56" height="20"/>
+<rect class="bx" x="158" y="316" width="56" height="20"/>
+<rect class="bx" x="158" y="336" width="56" height="20"/>
+<rect class="bx" x="158" y="356" width="56" height="20"/>
+<rect class="bx" x="158" y="376" width="56" height="20"/>
+<rect class="bx" x="158" y="396" width="56" height="20"/>
+<rect class="bx tn" x="158" y="416" width="56" height="60"/>
+<path class="ln" d="M58 216H242"/>
+<path class="ln" d="M58 416H242"/>
+<text class="an" x="252" y="210">writeout:</text>
+<text class="an" x="252" y="230">roles swap</text>
+<text class="an" x="252" y="410">writeout:</text>
+<text class="an" x="252" y="430">roles swap</text>
+<text class="an mid" x="70" y="64">acks</text>
+<circle class="ink" cx="70" cy="88" r="4"/>
+<circle class="ink" cx="70" cy="104" r="4"/>
+<circle class="ink" cx="70" cy="122" r="4"/>
+<circle class="ink" cx="70" cy="150" r="4"/>
+<circle class="ink" cx="70" cy="172" r="4"/>
+<circle class="ink" cx="70" cy="198" r="4"/>
+<circle class="ink" cx="70" cy="234" r="4"/>
+<circle class="ink" cx="70" cy="260" r="4"/>
+<circle class="ink" cx="70" cy="292" r="4"/>
+<circle class="ink" cx="70" cy="318" r="4"/>
+<circle class="ink" cx="70" cy="344" r="4"/>
+<circle class="ink" cx="70" cy="370" r="4"/>
+<circle class="ink" cx="70" cy="402" r="4"/>
+<circle class="ink" cx="70" cy="428" r="4"/>
+<circle class="ink" cx="70" cy="452" r="4"/>
+<path class="ln1" d="M74 122H84"/>
+<path class="ah" d="M84 127L94 122L84 117Z"/>
+<path class="ln1" d="M46 76V476"/>
+<path class="ln1" d="M46 76H62M46 96H54M46 116H54M46 136H54M46 156H54M46 176H54M46 196H54M46 216H54M46 236H54M46 256H54M46 276H62M46 296H54M46 316H54M46 336H54M46 356H54M46 376H54M46 396H54M46 416H54M46 436H54M46 456H54M46 476H62"/>
+<text class="an mu end" x="41" y="81">0</text>
+<text class="an mu end" x="41" y="181">0.5 s</text>
+<text class="an mu end" x="41" y="281">1 s</text>
+<text class="an mu end" x="41" y="381">1.5 s</text>
+<text class="an mu end" x="41" y="481">2 s</text>
+<path class="ln1" d="M238 116H246V136H238"/>
+<text class="an" x="253" y="112">process crash:</text>
+<text class="an" x="253" y="132">one tick,</text>
+<text class="an" x="253" y="152">100 ms</text>
+<path class="ln1" d="M238 236H246V396H238"/>
+<text class="an" x="253" y="286">power loss:</text>
+<text class="an" x="253" y="306">up to D + T</text>
+<text class="an" x="253" y="326">+ the sync,</text>
+<text class="an" x="253" y="346">about 1.1 s</text>
+<rect class="bx" x="8" y="538" width="24" height="18"/>
+<text class="an" x="42" y="552">window: rewritten each tick</text>
+<text class="an" x="42" y="572">(T, 100 ms), page cache only</text>
+<rect class="bx tn" x="8" y="590" width="24" height="18"/>
+<text class="an" x="42" y="604">anchor: the newest durable record;</text>
+<text class="an" x="42" y="624">writeout once per D (1 s), at the</text>
+<text class="an" x="42" y="644">phase of a hash of the partition</text>
+<rect class="bx tn" x="8" y="672" width="344" height="76" rx="2"/>
+<text class="cd" x="20" y="696">consumer.offset</text>
+<text class="an" x="20" y="720">frontier only; levelled at most every</text>
+<text class="an" x="20" y="740">30 s, and at Close</text>
+</svg>

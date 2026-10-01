@@ -1,0 +1,1946 @@
+# Narad HTTP API, OpenAPI 3.1.
+#
+# Written by hand from internal/transport/httpserver/router.go and the
+# request and response types under internal/transport/httpserver/handlers.
+# This is the only spec: the docs site publishes it as-is.
+# scripts/gen_http_api.py renders docs/reference/http-api.md from this file
+# and, with --check, fails when the routes in router.go and the operations
+# here disagree. The Go contract test
+# (internal/transport/httpserver/openapi_contract_test.go) fails when a
+# status code here is one the handler cannot answer. Examples are pasted
+# from real runs, never typed.
+#
+# Extensions:
+#   x-narad-lead      first paragraph of the generated page
+#   x-narad-grant     the grant or role an operation needs
+#   x-narad-since     "unreleased" for anything not in v3.0.1
+#   x-narad-examples  curl requests and their real responses
+#   x-narad-origin    "forwarding" on a status the cluster router writes
+#                     for a request it forwarded to another node
+openapi: 3.1.0
+info:
+  title: Narad HTTP API
+  version: v1
+  summary: Produce, consume and manage topics on a Narad cluster over HTTP.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  x-narad-lead: |
+    Look up every Narad HTTP endpoint: its parameters, request body, the
+    grant it needs, the status codes it returns and a real example.
+  x-narad-lead-example:
+    request: |
+      curl -i -u "$AUTH" "$NARAD/v1/topics/orders?partition=1"
+    response: |
+      HTTP/1.1 200 OK
+      Content-Length: 456
+      Content-Type: application/json
+      Date: Mon, 28 Sep 2026 19:31:43 GMT
+
+      {
+        "name": "orders",
+        "id": "681a429c0b683b2d",
+        "partitions": 3,
+        "retention_ms": 172800000,
+        "visibility_timeout_ms": 30000,
+        "max_in_flight_per_partition": 1024,
+        "max_acked_ahead_per_partition": 1024,
+        "created_at": 1790623903,
+        "owner": "admin",
+        "role": "parent",
+        "children": ["orders-audit"],
+        "schema_version": 0,
+        "partition_stats": [
+          {
+            "index": 1,
+            "segments": 1,
+            "oldest_offset": 0,
+            "next_offset": 2,
+            "high_watermark": 2,
+            "size_bytes": 166,
+            "oldest_segment_at": 1790623903,
+            "owner_node": "narad-0"
+          }
+        ]
+      }
+  x-narad-placeholders: |
+    - `$NARAD` is the base URL of any node or of the load balancer in front
+      of the cluster, for example `http://127.0.0.1:7942`.
+    - `$AUTH` is `username:password` of a user with the grant the endpoint
+      needs. On a node started with `narad server start --dev`, security is
+      off and `-u "$AUTH"` can be left out.
+
+    The same API as an OpenAPI 3.1 file:
+    [openapi.yaml](openapi.yaml). Every example on this page was run
+    against a single node built from `master`. Long JSON bodies are shown
+    indented; the node sends each one on a single line, which is what
+    `Content-Length` counts.
+  description: |
+    ### Base URL
+
+    Send requests to any node's API port (`7942` by default) or to the load
+    balancer in front of the cluster. Every node serves every route and
+    forwards work to the node that owns the partition, so a client never
+    needs to know where a partition lives. API routes live under `/v1`;
+    `/healthz`, `/readyz` and `/metrics` do not. What a `202` promises, and
+    when a message can arrive twice, is in the
+    [delivery contract](../understand/delivery-contract.md).
+
+    ### Authentication
+
+    With security on (the default), every `/v1` route needs HTTP Basic
+    credentials, and what the user may do is set by its
+    [grants](access-model.md). Missing or wrong credentials get
+    [`401`](status-codes.md#status-401) with
+    `WWW-Authenticate: Basic realm="narad"`. After 5 wrong passwords for an
+    existing user, a node answers [`429`](status-codes.md#status-429) for
+    that user and allows one more attempt every 12 seconds. `/healthz` and `/readyz` never need
+    credentials. Narad expects TLS to end in front of it, at an ingress or a
+    load balancer. With security off (`narad server start --dev`), no
+    request needs credentials and every grant check passes. How a client
+    gets its credentials is in
+    [Connect and authenticate](../build/connect.md#credentials).
+
+    ### Required headers
+
+    `POST`, `PUT` and `PATCH` requests must send one of these headers, or
+    they get [`415`](status-codes.md#status-415):
+
+    - `Content-Type: application/json`
+    - `Content-Type: application/octet-stream`
+    - `X-Narad-Client`, with any value
+
+    A `charset` or other parameter on the content type is fine. The rule
+    holds for a request with no body too, such as an ack. `GET` and
+    `DELETE` are not checked, except a [batch consume](#consume)
+    (`max`), which must send `X-Narad-Client` or gets
+    [`400`](status-codes.md#status-400), as a `GET` or a `HEAD`. The rule
+    stops a web page in a browser from sending state-changing requests
+    with an operator's cached credentials.
+
+    ### Limits
+
+    | Limit | Value | Over it |
+    |---|---|---|
+    | Request body | 1 MiB (1,048,576 bytes) | [`413`](status-codes.md#status-413); `400` on the user and attach-child routes |
+    | Batch ack body (unreleased) | 64 KiB | [`413`](status-codes.md#status-413) |
+    | Request headers | 64 KiB by default | [`431`](status-codes.md#status-431) |
+    | Messages per batch produce, records per batch consume, handles per batch ack (unreleased) | 100 | [`400`](status-codes.md#status-400) |
+    | Consume `wait` | 10 s by default | clamped, with an `X-Narad-Wait-Clamped` response header |
+    | Concurrent consumes per user (or per client IP with security off), per node | 1024 by default | [`429`](status-codes.md#status-429) |
+    | Concurrent produces per user, per node (unreleased) | off by default | [`429`](status-codes.md#status-429) |
+
+    The limits marked "by default" are settings: `http.max_header_bytes`,
+    `http.max_consume_wait`, `http.max_consume_in_flight_per_identity` and
+    `http.max_produce_in_flight_per_identity` (unreleased), in that order,
+    all in the [Configuration reference](configuration.md#http).
+
+    ### Errors
+
+    An error answer carries a JSON body with one field:
+
+    ```json
+    {"error": "topic not found"}
+    ```
+
+    A few answers are plain text instead: a route or method the server does
+    not know (`404`, `405`), a header block that is too large (`431`), and
+    some answers to a request forwarded to another node. Those are `502`,
+    `503` when a partition owner is down or the cluster leader cannot be
+    reached, and some `500` and `400` answers to a consume.
+    Read the status code first and treat the body as a message for people.
+
+    Each endpoint below lists the codes it answers. On top of those, any
+    request with credentials can get [`429`](status-codes.md#status-429)
+    after too many wrong passwords, and any request can get
+    [`500`](status-codes.md#status-500) when the node fails, for example
+    `authentication unavailable` when it cannot read its user store.
+    [Status codes and errors](status-codes.md) lists every code and
+    whether to retry.
+
+    ### Request and response bodies
+
+    Request bodies are strict: a field the endpoint does not know gets
+    [`400`](status-codes.md#status-400). Responses can gain fields within
+    `/v1`, so ignore fields you do not know
+    ([API stability](api-stability.md)). Topic `created_at` and message
+    `timestamp` are Unix seconds; user `created_at_ms` and `updated_at_ms`
+    are Unix milliseconds.
+
+    ### Pagination
+
+    Only [list topics](#list-topics) pages. Pass `limit` (default 100, at
+    most 1000) and the `page_token` from the previous answer, and stop when
+    `next_page_token` is empty. A page can hold fewer topics than `limit`,
+    or none, while `next_page_token` is still set, because topics you
+    cannot read are removed after the page is cut.
+
+    ### Unreleased features
+
+    This page describes `master`. Anything not in the latest release,
+    v3.0.1, is marked **Unreleased**, and its entry says how a v3.0.1 node
+    answers a request that uses it. See
+    [Which release these docs describe](api-stability.md#docs-version).
+servers:
+  - url: http://127.0.0.1:7942
+    description: A local node started with narad server start --dev
+security:
+  - basicAuth: []
+tags:
+  - name: Topics
+    description: |
+      Create, read, change and delete topics. Changes to topics are
+      written through the cluster's Raft log, so they need a quorum of
+      nodes and answer [`503`](status-codes.md#status-503) while there is
+      no leader. Task guide: [Manage topics](../build/topics.md).
+  - name: Fan-out children
+    description: |
+      Link a topic to a parent so that it receives a copy of every message
+      produced to the parent from the moment of the link. Task guide:
+      [Fan out and delay messages](../build/fanout-and-delay.md).
+  - name: Messages
+    description: |
+      Produce, consume and settle messages. Task guides:
+      [Produce messages](../build/producing.md),
+      [Consume and acknowledge](../build/consuming.md) and
+      [Replay messages](../build/replay.md).
+  - name: Users
+    description: |
+      Manage users and their grants. Every route needs the `admin` grant,
+      except a user changing their own password. Task guide:
+      [Manage users and grants](../operate/users.md).
+  - name: Cluster
+    description: |
+      See cluster members and partition moves, and drain a node before
+      removing it. Every route needs the `admin` grant, reads included.
+      Task guide: [Scale out and in](../operate/scaling.md).
+  - name: Health and metrics
+    description: |
+      Probes and the Prometheus exposition. Where each is served, and which
+      port the Helm chart probes, is in
+      [Helm values reference](helm-values.md#ports-and-probes).
+paths:
+  /v1/topics:
+    post:
+      operationId: createTopic
+      tags: [Topics]
+      summary: Create a topic
+      description: |
+        Creates a topic and, with `parent`, links it as a fan-out child of
+        an existing topic in the same call. The caller becomes the topic's
+        [owner](glossary.md#owner). A field left out, or sent as `0`, takes
+        the server default.
+      x-narad-grant: |
+        `create` on the topic name. With `parent`, also ownership of the
+        parent or `admin`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTopicRequest'
+      responses:
+        '201':
+          description: Created. The body is the new topic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Topic'
+        '400':
+          description: A field is invalid, the name is not allowed, or the schema cannot be registered.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: No `create` grant on the name, or no right to manage `parent`.
+        '404':
+          description: '`parent` does not exist.'
+        '409':
+          description: The topic exists, or `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold).
+        '413':
+          description: The body is over 1 MiB.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '503':
+          description: The cluster has no leader to write the topic.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X POST "$NARAD/v1/topics" \
+              -H "Content-Type: application/json" \
+              -d '{"name": "orders", "partitions": 3}'
+          response: |
+            HTTP/1.1 201 Created
+            Content-Length: 224
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+
+            {"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":604800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin"}
+    get:
+      operationId: listTopics
+      tags: [Topics]
+      summary: List topics
+      description: |
+        Lists topics in name order, one page at a time. See
+        [Pagination](#pagination).
+      x-narad-grant: |
+        Any user. The list holds only topics the caller could read with
+        [get a topic](#get-topic).
+      parameters:
+        - name: limit
+          in: query
+          description: Page size. Values above 1000 are treated as 1000.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: page_token
+          in: query
+          description: The `next_page_token` of the previous page. Leave it out for the first page.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A page of topics.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TopicPage'
+        '400':
+          description: '`limit` is not a positive integer.'
+        '401':
+          description: Missing or wrong credentials.
+        '500':
+          description: The node could not read its topic list.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" "$NARAD/v1/topics?limit=2"
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 540
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+
+            {"next_page_token":"orders-audit","topics":[{"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":604800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"standalone"},{"name":"orders-audit","id":"91ad229a6dd04bcf","partitions":3,"retention_ms":604800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"standalone"}]}
+  /v1/topics/{topic}:
+    parameters:
+      - $ref: '#/components/parameters/TopicPath'
+    get:
+      operationId: getTopic
+      tags: [Topics]
+      summary: Get a topic
+      description: |
+        Returns the topic, its current schema and statistics for each
+        partition. The node that answers asks every partition's owner for
+        its statistics.
+      x-narad-grant: |
+        Any grant that matches the topic name, ownership, or `admin`.
+      parameters:
+        - name: partition
+          in: query
+          description: Return statistics for this partition only.
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: The topic with partition statistics.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TopicDetails'
+        '400':
+          description: '`partition` is not a partition of the topic.'
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: No grant on the topic.
+        '404':
+          description: The topic does not exist.
+        '421':
+          description: The owner of one of the topic's partitions could not be found or refused to answer.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" "$NARAD/v1/topics/orders?partition=1"
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 456
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+
+            {"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":172800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"parent","children":["orders-audit"],"schema_version":0,"partition_stats":[{"index":1,"segments":1,"oldest_offset":0,"next_offset":2,"high_watermark":2,"size_bytes":166,"oldest_segment_at":1790623903,"owner_node":"narad-0"}]}
+    patch:
+      operationId: alterTopic
+      tags: [Topics]
+      summary: Change a topic
+      description: |
+        Changes retention, the per-partition caps or the partition count, or
+        registers a new schema version. Send at least one field.
+        `visibility_timeout_ms` is fixed when the topic is created.
+
+        Fields are applied one group at a time in this order: retention,
+        then the caps, then partitions, then schema. There is no
+        transaction across them: the first failure answers its error and
+        the groups before it stay applied. Send one field per request when
+        you need all or nothing.
+      x-narad-grant: |
+        Ownership of the topic, or `admin`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlterTopicRequest'
+      responses:
+        '200':
+          description: Changed. The body is the topic after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Topic'
+        '400':
+          description: No field given, a value is invalid, `partitions` is not larger than the current count, or the new schema is not compatible.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not the owner and not `admin`.
+        '404':
+          description: The topic does not exist.
+        '409':
+          description: '`schema_base_version` is not the current version, the history holds 1000 versions, the topic is a child whose schema its parent manages, or the new retention is too short for a delay child.'
+        '413':
+          description: The body is over 1 MiB.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '503':
+          description: The cluster has no leader to write the change.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X PATCH "$NARAD/v1/topics/orders" \
+              -H "Content-Type: application/json" \
+              -d '{"retention_ms": 172800000}'
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 244
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+
+            {"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":172800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"standalone"}
+    delete:
+      operationId: deleteTopic
+      tags: [Topics]
+      summary: Delete a topic
+      description: |
+        Deletes the topic's metadata and its data on every node, and
+        removes its fan-out links. There is no undo. Once the metadata
+        delete is committed the answer is `204`, even if a node that is
+        down could not remove its files yet; that node removes them when
+        it next starts.
+      x-narad-grant: |
+        Ownership of the topic, or `admin`.
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not the owner and not `admin`.
+        '404':
+          description: The topic does not exist.
+        '503':
+          description: The cluster has no leader to write the delete.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X DELETE "$NARAD/v1/topics/orders-audit"
+          response: |
+            HTTP/1.1 204 No Content
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+  /v1/topics/{topic}/schema:
+    parameters:
+      - $ref: '#/components/parameters/TopicPath'
+    get:
+      operationId: getSchemaHistory
+      tags: [Topics]
+      summary: Get a topic's schema history
+      description: |
+        Returns every schema version of the topic, oldest first, and the
+        number of the current one. A topic without a schema has version `0`
+        and an empty list. The rules for schemas are in
+        [Schema validation rules](schema-rules.md).
+      x-narad-grant: |
+        Any grant that matches the topic name, ownership, or `admin`.
+      responses:
+        '200':
+          description: The schema history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchemaHistory'
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: No grant on the topic.
+        '404':
+          description: The topic does not exist.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" "$NARAD/v1/topics/payments/schema"
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 105
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+
+            {"topic":"payments","version":1,"versions":[{"version":1,"schema":{"type":"object","required":["id"]}}]}
+  /v1/topics/{parent}/children:
+    parameters:
+      - $ref: '#/components/parameters/ParentPath'
+    post:
+      operationId: attachChild
+      tags: [Fan-out children]
+      summary: Attach a child
+      description: |
+        Links an existing topic as a [fan-out child](glossary.md#fan-out-child)
+        of `parent`. The child receives every message produced to the parent
+        from the [attach point](glossary.md#attach-point) on; nothing older
+        is copied. A child without a schema adopts the parent's schema
+        history.
+
+        The delay field here is `delay_ms`. Creating a child in one call
+        with [create a topic](#create-topic) takes `fanout_delay_ms`
+        instead.
+      x-narad-grant: |
+        Ownership of both topics, or `admin`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttachChildRequest'
+      responses:
+        '200':
+          description: Attached. The body is the parent topic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Topic'
+        '400':
+          description: '`child` is missing, the two names are the same, or `delay_ms` is out of range.'
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: The caller does not manage both topics.
+        '404':
+          description: The parent or the child does not exist.
+        '409':
+          description: The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, or the delay is longer than the parent's retention can hold.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '503':
+          description: No leader, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/children" \
+              -H "Content-Type: application/json" \
+              -d '{"child": "orders-audit"}'
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 268
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+
+            {"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":172800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"parent","children":["orders-audit"]}
+    get:
+      operationId: listChildren
+      tags: [Fan-out children]
+      summary: List a parent's children
+      description: |
+        Lists the parent's children with their delay and how many messages
+        each is behind.
+      x-narad-grant: |
+        Any grant that matches the parent's name, ownership, or `admin`.
+      responses:
+        '200':
+          description: The children.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChildList'
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: No grant on the parent.
+        '404':
+          description: The parent does not exist.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" "$NARAD/v1/topics/orders/children"
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 108
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+
+            {"parent":"orders","children":[{"name":"orders-audit","delay_ms":0,"lag_messages":0,"lag_complete":false}]}
+  /v1/topics/{parent}/children/{child}:
+    parameters:
+      - $ref: '#/components/parameters/ParentPath'
+      - name: child
+        in: path
+        required: true
+        description: Name of the child topic.
+        schema:
+          type: string
+    delete:
+      operationId: detachChild
+      tags: [Fan-out children]
+      summary: Detach a child
+      description: |
+        Removes the link. The child keeps the messages and the schema
+        history it already has and becomes a standalone topic again.
+      x-narad-grant: |
+        Ownership of either topic, or `admin`.
+      responses:
+        '204':
+          description: Detached.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: The caller manages neither topic.
+        '404':
+          description: A topic does not exist, or the two are not linked.
+        '503':
+          description: The cluster has no leader to write the change.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X DELETE \
+              "$NARAD/v1/topics/orders/children/orders-audit"
+          response: |
+            HTTP/1.1 204 No Content
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+  /v1/topics/{topic}/produce:
+    parameters:
+      - $ref: '#/components/parameters/TopicPath'
+    post:
+      operationId: produce
+      tags: [Messages]
+      summary: Produce a message
+      description: |
+        Stores the request body as one message. A
+        [`202`](status-codes.md#status-202) means the node that answered has
+        written the message to its [ingress WAL](glossary.md#ingress-wal)
+        and synced it to disk; it then moves the message to the partition's
+        owner in the background. What a `202` promises is in the
+        [delivery contract](../understand/delivery-contract.md#what-202-means).
+
+        The body is stored byte for byte. Send JSON with
+        `Content-Type: application/json` and anything else with
+        `Content-Type: application/octet-stream`. On a topic with a schema,
+        the body must be one JSON text that the current schema accepts
+        ([Schema validation rules](schema-rules.md#validation)).
+      x-narad-grant: |
+        `produce` on the topic.
+      parameters:
+        - name: key
+          in: query
+          description: |
+            Routes the message: messages with the same key go to the same
+            partition while the partition count is unchanged and its owner
+            is up. This is not an ordering guarantee. Without a key, messages
+            are spread round-robin.
+          schema:
+            type: string
+        - name: partition
+          in: query
+          description: Pins the message to this partition. Wins over `key`.
+          schema:
+            type: integer
+            minimum: 0
+      requestBody:
+        required: true
+        description: The message, 1 byte to 1 MiB.
+        content:
+          application/json:
+            schema: {}
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '202':
+          description: Accepted and synced to disk. The body is empty.
+        '400':
+          description: Empty body, `partition` out of range, `key` or `partition` given twice, or the body fails the topic's schema.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: No `produce` grant on the topic.
+        '404':
+          description: The topic does not exist.
+        '409':
+          description: The topic is a delay child, which only its parent can feed.
+        '413':
+          description: The body is over 1 MiB.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '429':
+          description: Too many produces in flight for this user on this node, only when the operator set a produce cap ([Configuration reference](configuration.md#http)).
+        '500':
+          description: The node could not write to its ingress WAL. It answers every produce this way until it restarts.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X POST \
+              "$NARAD/v1/topics/orders/produce?key=customer-42" \
+              -H "Content-Type: application/json" \
+              -d '{"order_id": "ord_123", "amount": 1250}'
+          response: |
+            HTTP/1.1 202 Accepted
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+            Content-Length: 0
+  /v1/topics/{topic}/produce/batch:
+    parameters:
+      - $ref: '#/components/parameters/TopicPath'
+    post:
+      operationId: produceBatch
+      tags: [Messages]
+      summary: Produce a batch
+      x-narad-since: unreleased
+      description: |
+        Stores 1 to 100 messages in one request, all or none. Every message
+        is checked as a single produce would check it before any is stored.
+        If one fails, the request gets the status a single produce of that
+        message would get, its error starts with `message <index>: `, and
+        nothing is stored. The `202` comes once every message is synced to
+        the ingress WAL, and carries the same promise as a single `202` for
+        each of them.
+
+        `key` and `partition` belong to each message; as query parameters
+        they get `400`. A node on v3.0.1 or earlier answers `404`: fall back
+        to single produces.
+      x-narad-grant: |
+        `produce` on the topic.
+      requestBody:
+        required: true
+        description: At most 1 MiB in total.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProduceBatchRequest'
+      responses:
+        '202':
+          description: Every message accepted and synced to disk.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProduceBatchAccepted'
+        '400':
+          description: No messages, more than 100, a bad encoding, an empty payload, a message the schema refuses, or `key` or `partition` in the query.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: No `produce` grant on the topic.
+        '404':
+          description: The topic does not exist, or the node runs v3.0.1 or earlier.
+        '409':
+          description: The topic is a delay child.
+        '413':
+          description: The body is over 1 MiB.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '429':
+          description: The batch does not fit this user's produce cap on this node (only when the cap is set). A batch counts as its message count, clamped to the cap.
+        '500':
+          description: The node could not write to its ingress WAL.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/produce/batch" \
+              -H "Content-Type: application/json" \
+              -d '{"messages": [
+                    {"key": "customer-42", "payload": {"order_id": "ord_124"}},
+                    {"key": "customer-7", "payload": "aGVsbG8=",
+                     "payload_encoding": "base64"}
+                  ]}'
+          response: |
+            HTTP/1.1 202 Accepted
+            Content-Length: 15
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+
+            {"accepted":2}
+  /v1/topics/{topic}/consume:
+    parameters:
+      - $ref: '#/components/parameters/TopicPath'
+    get:
+      operationId: consume
+      tags: [Messages]
+      summary: Consume messages
+      description: |
+        Without `offset`, takes the next available message and gives the
+        caller a [lease](glossary.md#lease) on it for the topic's
+        `visibility_timeout_ms`. Settle it with [ack](#ack) before the lease
+        runs out, or the message is delivered again. The request can reach
+        any node; the node gathers a message from whichever partition owner
+        has one.
+
+        With `partition` and `offset`, reads the record at that offset
+        without taking a lease: a [replay](../build/replay.md). The answer
+        has no `receipt_handle` and nothing needs acking.
+      x-narad-grant: |
+        `consume` on the topic.
+      parameters:
+        - name: wait
+          in: query
+          description: |
+            How long to wait for a message before answering `204`, as a Go
+            duration such as `500ms` or `10s`. Without it the answer is
+            immediate. Values above the server's maximum (10 s by default,
+            [Configuration reference](configuration.md#http)) are cut to it,
+            and the response then carries `X-Narad-Wait-Clamped` with the
+            value used.
+          schema:
+            type: string
+            default: 0s
+        - name: partition
+          in: query
+          description: Take messages from this partition only. Required with `offset`.
+          schema:
+            type: integer
+            minimum: 0
+        - name: offset
+          in: query
+          description: |
+            Replay the record at this offset of `partition`. An offset past
+            the end of the partition answers `204`; one that aged out of
+            retention answers `410`.
+          schema:
+            type: integer
+            minimum: 0
+        - name: max
+          in: query
+          x-narad-since: unreleased
+          description: |
+            Take up to this many messages in one answer,
+            `{"messages": [...]}`, each with its own lease. The request does
+            not wait to fill `max`. Requires an `X-Narad-Client` header
+            ([Required headers](#required-headers)). It counts as `max`,
+            clamped to the cap, against the per-user consume cap. Cannot be combined with `offset`. A v3.0.1
+            node ignores it and answers with one message in the
+            single-message shape.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: 'One message, or `{"messages": [...]}` with `max`.'
+          headers:
+            X-Narad-Wait-Clamped:
+              description: Present when `wait` was cut to the server's maximum; the value used.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '204':
+          description: No message arrived within `wait`, or `offset` is past the end of the partition.
+        '400':
+          description: A parameter is invalid, `partition` is out of range, `offset` came without `partition`, `max` came with `offset`, or `max` came without an `X-Narad-Client` header.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: No `consume` grant on the topic.
+        '404':
+          description: The topic does not exist.
+        '410':
+          description: Replay only. The record at `offset` aged out of retention or cannot be read.
+        '421':
+          description: The partition moved to another node while the request was served. Retry.
+        '429':
+          description: Too many consumes in flight for this user on this node.
+        '500':
+          description: The node could not read the partition, for example after a disk error.
+        '502':
+          description: With `partition`, the node forwarded the request to the partition's owner and got no answer.
+          x-narad-origin: forwarding
+        '503':
+          description: With `partition`, the partition's owner is down.
+      x-narad-examples:
+        - title: one message
+          request: |
+            curl -i -u "$AUTH" "$NARAD/v1/topics/orders/consume?wait=5s"
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 179
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+
+            {"topic":"orders","partition":1,"offset":0,"key":"customer-42","payload":{"order_id": "ord_123", "amount": 1250},"timestamp":1790623903,"receipt_handle":"1:0:181499699661178901"}
+        - title: a batch, unreleased
+          request: |
+            curl -i -u "$AUTH" -H 'X-Narad-Client: curl' \
+              "$NARAD/v1/topics/orders/consume?max=10&wait=5s"
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 326
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+
+            {"messages":[{"topic":"orders","partition":1,"offset":1,"key":"customer-42","payload":{"order_id": "ord_124"},"timestamp":1790623903,"receipt_handle":"1:1:6130356697557286029"},{"topic":"orders","partition":0,"offset":0,"key":"customer-7","payload":"hello","timestamp":1790623903,"receipt_handle":"0:0:2681459915124828679"}]}
+  /v1/topics/{topic}/ack:
+    parameters:
+      - $ref: '#/components/parameters/TopicPath'
+    post:
+      operationId: ack
+      tags: [Messages]
+      summary: Ack, extend or nack a message
+      description: |
+        Settles the lease a [receipt handle](glossary.md#receipt-handle)
+        names. By default it acks: the message is done and is not delivered
+        again. `extend=true` renews the lease for a full
+        `visibility_timeout_ms` from now, for a handler that needs longer.
+        `extend=0` is a [nack](glossary.md#nack): the lease ends now and the
+        message can be delivered again at once. A handle whose lease ran out,
+        or that was already settled, gets `410`.
+
+        Without a `receipt_handle` parameter, a JSON body
+        `{"receipt_handles": [...]}` settles 1 to 100 handles in one
+        request (**Unreleased**). Each handle is settled on its own with the
+        mode `extend` selects, and the answer is `200` with one result per
+        handle, in request order. A v3.0.1 node answers such a request `400`.
+
+        The request is a `POST`, so it needs the `Content-Type` or
+        `X-Narad-Client` header even without a body.
+      x-narad-grant: |
+        `consume` on the topic.
+      parameters:
+        - name: receipt_handle
+          in: query
+          description: The `receipt_handle` from the consume answer. Required unless the body lists handles.
+          schema:
+            type: string
+        - name: extend
+          in: query
+          description: |
+            Leave it out (or `false`) to ack, `true` or `1` to extend the
+            lease, `0` to nack. Any other value gets `400`.
+          schema:
+            type: string
+            enum: ['false', 'true', '1', '0']
+      requestBody:
+        required: false
+        description: Only for a batch ack, at most 64 KiB.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AckBatchRequest'
+      responses:
+        '204':
+          description: Settled.
+        '200':
+          description: A batch ack. One result per handle, each the status a single ack of that handle would have answered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AckBatchResults'
+        '400':
+          description: No `receipt_handle`, a handle that cannot be decoded, a bad `extend`, or more than 100 handles.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: No `consume` grant on the topic.
+        '404':
+          description: The topic does not exist.
+        '410':
+          description: The lease ran out, or the message was already settled or delivered again under a new handle. A handle from another topic, or for a partition this topic does not have, also answers `410`.
+        '413':
+          description: A batch body over 64 KiB.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '421':
+          description: The partition moved to another node while the request was served. Retry.
+        '502':
+          description: The node forwarded the request to the partition's owner and got no answer. Retry; an ack that already landed answers `410` the second time.
+          x-narad-origin: forwarding
+        '503':
+          description: The partition's owner is down. Retry.
+      x-narad-examples:
+        - title: one handle
+          request: |
+            curl -i -u "$AUTH" -X POST \
+              "$NARAD/v1/topics/orders/ack?receipt_handle=1:0:181499699661178901" \
+              -H "Content-Type: application/json"
+          response: |
+            HTTP/1.1 204 No Content
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+        - title: a batch, unreleased
+          request: |
+            curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/ack" \
+              -H "Content-Type: application/json" \
+              -d '{"receipt_handles": [
+                    "1:1:6130356697557286029",
+                    "0:0:2681459915124828679",
+                    "0:0:1"
+                  ]}'
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 124
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:43 GMT
+
+            {"results":[{"status":204},{"status":204},{"status":410,"error":"receipt handle no longer matches an active reservation"}]}
+  /v1/users:
+    post:
+      operationId: createUser
+      tags: [Users]
+      summary: Create a user
+      description: |
+        Creates a user with a password and a list of
+        [grants](access-model.md#actions).
+      x-narad-grant: |
+        `admin`. Only the root admin can give the `admin` grant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: Invalid username, password or grant, or a body over 1 MiB.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not `admin`, or giving `admin` without being the root admin.
+        '409':
+          description: The user exists.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '503':
+          description: The cluster has no leader to write the user.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X POST "$NARAD/v1/users" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "username": "billing-service",
+                "password": "example-only-7Kq2",
+                "grants": [
+                  {"action": "produce", "patterns": ["invoices.*"]},
+                  {"action": "consume", "patterns": ["payments.*"]}
+                ]
+              }'
+          response: |
+            HTTP/1.1 201 Created
+            Content-Length: 196
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:44 GMT
+
+            {"username":"billing-service","grants":[{"action":"produce","patterns":["invoices.*"]},{"action":"consume","patterns":["payments.*"]}],"created_at_ms":1790623904012,"updated_at_ms":1790623904012}
+    get:
+      operationId: listUsers
+      tags: [Users]
+      summary: List users
+      description: Lists every user in name order. Password hashes are never returned.
+      x-narad-grant: |
+        `admin`.
+      responses:
+        '200':
+          description: The users.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not `admin`.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" "$NARAD/v1/users"
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 291
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:44 GMT
+
+            [{"username":"admin","root":true,"created_at_ms":1790623900693,"updated_at_ms":1790623900693},{"username":"billing-service","grants":[{"action":"produce","patterns":["invoices.*"]},{"action":"consume","patterns":["payments.*"]}],"created_at_ms":1790623904012,"updated_at_ms":1790623904012}]
+  /v1/users/{username}:
+    parameters:
+      - $ref: '#/components/parameters/UsernamePath'
+    get:
+      operationId: getUser
+      tags: [Users]
+      summary: Get a user
+      description: Returns one user and its grants.
+      x-narad-grant: |
+        `admin`.
+      responses:
+        '200':
+          description: The user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not `admin`.
+        '404':
+          description: The user does not exist.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" "$NARAD/v1/users/billing-service"
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 196
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:44 GMT
+
+            {"username":"billing-service","grants":[{"action":"produce","patterns":["invoices.*"]},{"action":"consume","patterns":["payments.*"]}],"created_at_ms":1790623904012,"updated_at_ms":1790623904012}
+    delete:
+      operationId: deleteUser
+      tags: [Users]
+      summary: Delete a user
+      description: Deletes a user. The root admin and the caller's own account cannot be deleted.
+      x-narad-grant: |
+        `admin`.
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not `admin`, or the user is the root admin or the caller.
+        '404':
+          description: The user does not exist.
+        '503':
+          description: The cluster has no leader to write the delete.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X DELETE "$NARAD/v1/users/billing-service"
+          response: |
+            HTTP/1.1 204 No Content
+            Date: Mon, 28 Sep 2026 19:31:44 GMT
+  /v1/users/{username}/grants:
+    parameters:
+      - $ref: '#/components/parameters/UsernamePath'
+    put:
+      operationId: updateGrants
+      tags: [Users]
+      summary: Replace a user's grants
+      description: |
+        Replaces all of the user's grants with the list sent. The password
+        is not touched. The root admin's grants cannot change, and no one
+        can change their own grants.
+      x-narad-grant: |
+        `admin`. Only the root admin can give the `admin` grant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateGrantsRequest'
+      responses:
+        '200':
+          description: Changed. The body is the user after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: A grant is invalid, or the body is over 1 MiB.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not `admin`, the caller's own grants, the root admin's grants, or `admin` given by someone other than the root admin.
+        '404':
+          description: The user does not exist.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '503':
+          description: The cluster has no leader to write the change.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X PUT "$NARAD/v1/users/billing-service/grants" \
+              -H "Content-Type: application/json" \
+              -d '{"grants": [{"action": "produce", "patterns": ["invoices.*"]}]}'
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 149
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:44 GMT
+
+            {"username":"billing-service","grants":[{"action":"produce","patterns":["invoices.*"]}],"created_at_ms":1790623904012,"updated_at_ms":1790623904073}
+  /v1/users/{username}/password:
+    parameters:
+      - $ref: '#/components/parameters/UsernamePath'
+    put:
+      operationId: updatePassword
+      tags: [Users]
+      summary: Change a password
+      description: |
+        Sets a new password. A user who is not `admin` can change their
+        own password by sending `current_password`. An `admin` can reset
+        any password without it, except the root admin's, which only the
+        root admin can change. Grants are not touched.
+      x-narad-grant: |
+        `admin`, or the user themself.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePasswordRequest'
+      responses:
+        '204':
+          description: Changed.
+        '400':
+          description: '`new_password` is empty or over 72 bytes, or the body is over 1 MiB.'
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not `admin` and not the user, `current_password` is wrong, or someone other than the root admin changing the root admin's password.
+        '404':
+          description: The user does not exist.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '503':
+          description: The cluster has no leader to write the change.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X PUT \
+              "$NARAD/v1/users/billing-service/password" \
+              -H "Content-Type: application/json" \
+              -d '{"new_password": "example-only-9Wd4"}'
+          response: |
+            HTTP/1.1 204 No Content
+            Date: Mon, 28 Sep 2026 19:31:44 GMT
+  /v1/cluster/members:
+    get:
+      operationId: listMembers
+      tags: [Cluster]
+      summary: List cluster members
+      description: |
+        Lists every node the cluster knows, alive or dead, with how many
+        partitions it owns and how many are moving off it.
+      x-narad-grant: |
+        `admin`.
+      responses:
+        '200':
+          description: The members, in ID order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemberList'
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not `admin`.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" "$NARAD/v1/cluster/members"
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 130
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:44 GMT
+
+            {"members":[{"id":"narad-0","addr":"127.0.0.1:17970","status":"alive","draining":false,"owned_partitions":6,"outbound_moves":0}]}
+  /v1/cluster/moves:
+    get:
+      operationId: listMoves
+      tags: [Cluster]
+      summary: List partition moves
+      description: Lists every partition that is moving between nodes right now.
+      x-narad-grant: |
+        `admin`.
+      responses:
+        '200':
+          description: The moves, by topic and partition.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MoveList'
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not `admin`.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" "$NARAD/v1/cluster/moves"
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 13
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:44 GMT
+
+            {"moves":[]}
+  /v1/cluster/members/{id}/decommission:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The node ID, as `GET /v1/cluster/members` lists it (the pod name under the Helm chart).
+        schema:
+          type: string
+    post:
+      operationId: decommissionMember
+      tags: [Cluster]
+      summary: Decommission a node
+      description: |
+        Marks the node as draining. The cluster moves every partition it
+        owns onto the other nodes and, once it owns none, removes it from
+        the Raft voters. Remove the node only after that; the steps are in
+        [Scale out and in](../operate/scaling.md#decommission).
+      x-narad-grant: |
+        `admin`.
+      responses:
+        '204':
+          description: Marked as draining.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not `admin`.
+        '404':
+          description: No member has this ID.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '503':
+          description: The cluster has no leader to write the change.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X POST \
+              "$NARAD/v1/cluster/members/narad-0/decommission" \
+              -H "Content-Type: application/json"
+          response: |
+            HTTP/1.1 204 No Content
+            Date: Mon, 28 Sep 2026 19:31:44 GMT
+    delete:
+      operationId: cancelDecommission
+      tags: [Cluster]
+      summary: Cancel a decommission
+      description: |
+        Clears the draining mark. Partitions that already moved stay where
+        they are; the node keeps the rest.
+      x-narad-grant: |
+        `admin`.
+      responses:
+        '204':
+          description: No longer draining.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not `admin`.
+        '404':
+          description: No member has this ID.
+        '503':
+          description: The cluster has no leader to write the change.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X DELETE \
+              "$NARAD/v1/cluster/members/narad-0/decommission"
+          response: |
+            HTTP/1.1 204 No Content
+            Date: Mon, 28 Sep 2026 19:31:44 GMT
+  /healthz:
+    get:
+      operationId: healthz
+      tags: [Health and metrics]
+      summary: Check liveness
+      security: []
+      description: |
+        Answers `200` while the process runs, from the moment it starts,
+        and `503` once a graceful shutdown has begun. It never needs
+        credentials. It is also served on the metrics listener when
+        `http.metrics_addr` is set.
+      x-narad-grant: |
+        None.
+      responses:
+        '200':
+          description: The process is up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '503':
+          description: The node is shutting down.
+      x-narad-examples:
+        - request: |
+            curl -i "$NARAD/healthz"
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 16
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:44 GMT
+
+            {"status":"ok"}
+  /readyz:
+    get:
+      operationId: readyz
+      tags: [Health and metrics]
+      summary: Check readiness
+      security: []
+      description: |
+        Answers `200` only while the node should receive traffic: its
+        startup work is done, it has a Raft leader in view that it heard
+        from within the last 5 seconds (or it is the leader), and its copy
+        of the cluster metadata has caught up with the leader since it
+        started. Otherwise it answers `503` with the reason in `error`.
+        The check runs on every request. It never needs credentials.
+      x-narad-grant: |
+        None.
+      responses:
+        '200':
+          description: Ready for traffic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '503':
+          description: Not ready. The `error` field says why.
+      x-narad-examples:
+        - request: |
+            curl -i "$NARAD/readyz"
+          response: |
+            HTTP/1.1 200 OK
+            Content-Length: 19
+            Content-Type: application/json
+            Date: Mon, 28 Sep 2026 19:31:44 GMT
+
+            {"status":"ready"}
+  /metrics:
+    get:
+      operationId: metrics
+      tags: [Health and metrics]
+      summary: Scrape metrics
+      description: |
+        The Prometheus text exposition; every series is in the
+        [Metrics reference](metrics.md). Where it is served depends on
+        `http.metrics_addr`:
+
+        - Not set (the binary's default): on the API port, and it needs
+          the same credentials as the API unless
+          `http.metrics_unauthenticated` is `true`.
+        - Set (the Helm chart sets `:9100`): on that listener without
+          credentials, and not on the API port, where a request gets
+          `404` (or `401` without credentials).
+      x-narad-grant: |
+        Any valid credentials on the API port; none on the metrics
+        listener.
+      responses:
+        '200':
+          description: The exposition.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          description: Missing or wrong credentials on the API port.
+      x-narad-examples:
+        - request: |
+            curl -sS -u "$AUTH" "$NARAD/metrics" | grep '^narad_topics_total'
+          response: |
+            narad_topics_total 2
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+  parameters:
+    TopicPath:
+      name: topic
+      in: path
+      required: true
+      description: Name of the topic.
+      schema:
+        type: string
+    ParentPath:
+      name: parent
+      in: path
+      required: true
+      description: Name of the parent topic.
+      schema:
+        type: string
+    UsernamePath:
+      name: username
+      in: path
+      required: true
+      description: The username.
+      schema:
+        type: string
+  schemas:
+    CreateTopicRequest:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          description: 1 to 255 characters from `A-Z a-z 0-9 . _ -`, not `.` or `..`.
+        partitions:
+          type: integer
+          minimum: 3
+          description: |
+            At least 3 and at most the server's maximum (108 by default).
+            Defaults to the server default (3), or to the parent's count
+            when `parent` is set. It can grow later, never shrink. Both
+            server settings are in the
+            [Configuration reference](configuration.md#topic-defaults).
+        retention_ms:
+          type: integer
+          description: |
+            How long a message is kept after it is written, whether or not
+            it was consumed. At least 3,600,000 (1 hour). Defaults to the
+            server default ([Configuration reference](configuration.md#topic-defaults)):
+            7 days in the binary, 12 hours in the Helm chart.
+        visibility_timeout_ms:
+          type: integer
+          default: 30000
+          description: How long a consumer's lease lasts before the message is delivered again. Defaults to the server default ([Configuration reference](configuration.md#topic-defaults)). Fixed after creation.
+        max_in_flight_per_partition:
+          type: integer
+          default: 1024
+          description: Most messages of one partition leased at once. At the cap, consumes find nothing new in that partition until a lease ends. Defaults to the server default ([Configuration reference](configuration.md#topic-defaults)).
+        max_acked_ahead_per_partition:
+          type: integer
+          default: 1024
+          description: |
+            Most acks one partition holds above its oldest unacked message.
+            At the cap the partition delivers no new messages until that
+            message is acked. Defaults to the server default
+            ([Configuration reference](configuration.md#topic-defaults)).
+        schema:
+          description: A JSON Schema every message must match; registered as version 1. A JSON object or `true`.
+        parent:
+          type: string
+          description: |
+            Create the topic as a fan-out child of this existing topic. Its
+            partitions are placed on other nodes than the parent's where the
+            cluster allows, which is what makes a
+            [replica child](../operate/backups.md#replica-children).
+        fanout_delay_ms:
+          type: integer
+          description: |
+            With `parent`, make the topic a delay child that receives each
+            message this long after the parent committed it. At most
+            31,536,000,000 (one year). Attaching an existing topic takes
+            `delay_ms` instead.
+        owner:
+          type: string
+          description: Ignored. The server sets the owner to the caller.
+    AlterTopicRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        retention_ms:
+          type: integer
+          description: New retention. At least 3,600,000 (1 hour); `0` sets the server default.
+        max_in_flight_per_partition:
+          type: integer
+          description: New in-flight cap; `0` sets the server default. A cap left out keeps its value.
+        max_acked_ahead_per_partition:
+          type: integer
+          description: New acked-ahead cap; `0` sets the server default. A cap left out keeps its value.
+        partitions:
+          type: integer
+          description: New partition count, larger than the current one and at most the server's maximum (108 by default). New keys may then map to other partitions.
+        schema:
+          description: |
+            A new schema version, checked for compatibility with the current
+            one. Sending the current schema again changes nothing and
+            answers `200`. A schema cannot be removed (`null` gets `400`).
+        schema_base_version:
+          type: integer
+          description: With `schema`, apply it only if the current version is exactly this number; `409` otherwise.
+    Topic:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Topic name.
+        id:
+          type: string
+          description: The [incarnation](glossary.md#incarnation) ID, 16 hex characters. A topic deleted and created again under the same name gets a new one. Absent on a topic created before v2.2.0.
+        partitions:
+          type: integer
+          description: Partition count.
+        retention_ms:
+          type: integer
+          description: Retention in milliseconds; `0` keeps messages forever.
+        visibility_timeout_ms:
+          type: integer
+          description: Lease length in milliseconds.
+        max_in_flight_per_partition:
+          type: integer
+          description: In-flight cap per partition.
+        max_acked_ahead_per_partition:
+          type: integer
+          description: Acked-ahead cap per partition.
+        created_at:
+          type: integer
+          description: Creation time, Unix seconds.
+        owner:
+          type: string
+          description: The user that created the topic. Absent when security was off.
+        role:
+          type: string
+          enum: [standalone, parent, child]
+          description: Fan-out role. Absent in the answer to a create without `parent`, which means `standalone`.
+        children:
+          type: array
+          items:
+            type: string
+          description: A parent's children, in attach order.
+        parent:
+          type: string
+          description: A child's parent.
+        attach_epoch:
+          type: string
+          description: A child's current attachment; it changes on every attach.
+        fanout_delay_ms:
+          type: integer
+          description: A delay child's delay in milliseconds.
+        attach_offsets:
+          type: array
+          items:
+            type: integer
+          description: A child's attach point, one offset per parent partition.
+    TopicDetails:
+      allOf:
+        - $ref: '#/components/schemas/Topic'
+        - type: object
+          properties:
+            schema_version:
+              type: integer
+              description: Current schema version, `0` without a schema.
+            schema:
+              description: The current schema document. Absent without a schema.
+            partition_stats:
+              type: array
+              description: One entry per partition, or only the one `partition` asked for.
+              items:
+                $ref: '#/components/schemas/PartitionStats'
+    PartitionStats:
+      type: object
+      properties:
+        index:
+          type: integer
+          description: Partition number.
+        segments:
+          type: integer
+          description: Segment files on disk.
+        oldest_offset:
+          type: integer
+          description: Lowest offset still kept.
+        next_offset:
+          type: integer
+          description: Offset the next record will get. It can lead `high_watermark` while a commit runs.
+        high_watermark:
+          type: integer
+          description: One past the last offset consumers can see.
+        size_bytes:
+          type: integer
+          description: Bytes on disk.
+        oldest_segment_at:
+          type: integer
+          description: Time of the oldest segment, Unix seconds. Absent when unknown.
+        owner_node:
+          type: string
+          description: ID of the node that owns the partition.
+    TopicPage:
+      type: object
+      properties:
+        topics:
+          type: array
+          description: Topics the caller can read.
+          items:
+            $ref: '#/components/schemas/Topic'
+        next_page_token:
+          type: string
+          description: Pass as `page_token` for the next page; empty when there are no more.
+    SchemaHistory:
+      type: object
+      properties:
+        topic:
+          type: string
+          description: Topic name.
+        version:
+          type: integer
+          description: Current version, `0` without a schema.
+        versions:
+          type: array
+          description: Every version, oldest first.
+          items:
+            type: object
+            properties:
+              version:
+                type: integer
+                description: Version number, from 1.
+              schema:
+                description: The schema document.
+    AttachChildRequest:
+      type: object
+      required: [child]
+      additionalProperties: false
+      properties:
+        child:
+          type: string
+          description: Name of the existing topic to attach.
+        delay_ms:
+          type: integer
+          description: Make the child a delay child that receives each message this long after the parent committed it. At most one year. Fixed while attached.
+    ChildList:
+      type: object
+      properties:
+        parent:
+          type: string
+          description: Parent topic name.
+        children:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                description: Child topic name.
+              delay_ms:
+                type: integer
+                description: The child's delay, `0` for an immediate child.
+              lag_messages:
+                type: integer
+                description: Parent messages not yet copied into the child, summed over partitions.
+              lag_complete:
+                type: boolean
+                description: '`false` while some partitions have not reported, so `lag_messages` is a lower bound.'
+    Message:
+      type: object
+      description: 'One message. A batch consume answers `{"messages": [...]}` with one of these per message.'
+      properties:
+        topic:
+          type: string
+          description: Topic name.
+        partition:
+          type: integer
+          description: Partition the message is stored in.
+        offset:
+          type: integer
+          description: Position in the partition.
+        key:
+          type: string
+          description: The produce key. Absent for a message produced without one.
+        key_encoding:
+          type: string
+          enum: [base64]
+          x-narad-since: unreleased
+          description: '`base64` when the key is not valid UTF-8 and `key` holds it in base64.'
+        payload:
+          description: |
+            The message as it was produced. Valid JSON comes back as JSON,
+            other UTF-8 text as a JSON string, and anything else as a base64
+            string with `payload_encoding`.
+        payload_encoding:
+          type: string
+          enum: [base64]
+          description: '`base64` when `payload` holds binary data in base64.'
+        timestamp:
+          type: integer
+          description: When the message was committed to its partition, Unix seconds.
+        receipt_handle:
+          type: string
+          description: The lease to settle with [ack](#ack), `partition:offset:nonce`. Absent on a replay.
+    ProduceBatchRequest:
+      type: object
+      required: [messages]
+      additionalProperties: false
+      properties:
+        messages:
+          type: array
+          description: 1 to 100 messages, stored in this order.
+          items:
+            type: object
+            required: [payload]
+            additionalProperties: false
+            properties:
+              payload:
+                description: |
+                  A JSON value, stored exactly as written (a JSON string
+                  keeps its quotes). With `payload_encoding`, a base64
+                  string of any bytes.
+              payload_encoding:
+                type: string
+                enum: [base64]
+                description: Set to `base64` for a payload that is not JSON.
+              key:
+                type: string
+                description: The message's key. Absent or empty means no key.
+              key_encoding:
+                type: string
+                enum: [base64]
+                description: Set to `base64` for a key that is not valid UTF-8.
+              partition:
+                type: integer
+                minimum: 0
+                description: Pin the message to this partition.
+    ProduceBatchAccepted:
+      type: object
+      properties:
+        accepted:
+          type: integer
+          description: How many messages were stored.
+    AckBatchRequest:
+      type: object
+      required: [receipt_handles]
+      additionalProperties: false
+      properties:
+        receipt_handles:
+          type: array
+          x-narad-since: unreleased
+          description: 1 to 100 receipt handles of this topic.
+          items:
+            type: string
+    AckBatchResults:
+      type: object
+      properties:
+        results:
+          type: array
+          description: One result per handle, in request order.
+          items:
+            type: object
+            properties:
+              status:
+                type: integer
+                description: The status a single ack of this handle would have answered.
+              error:
+                type: string
+                description: The error message, for a failed handle.
+    Grant:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [produce, consume, create, admin]
+          description: What the grant allows; see [Access model and grants](access-model.md#actions).
+        patterns:
+          type: array
+          items:
+            type: string
+          description: Topic names or prefix wildcards such as `invoices.*`. Required for every action but `admin`, which takes none.
+    CreateUserRequest:
+      type: object
+      required: [username, password]
+      additionalProperties: false
+      properties:
+        username:
+          type: string
+          description: 1 to 64 characters from `A-Z a-z 0-9 . _ -`, not `.` or `..`.
+        password:
+          type: string
+          description: 1 to 72 bytes. A character outside ASCII counts as more than one byte.
+        grants:
+          type: array
+          description: What the user may do. Leave it out for a user with no grants.
+          items:
+            $ref: '#/components/schemas/Grant'
+    UpdateGrantsRequest:
+      type: object
+      required: [grants]
+      additionalProperties: false
+      properties:
+        grants:
+          type: array
+          description: The complete new list; it replaces the old one. An empty list removes every grant.
+          items:
+            $ref: '#/components/schemas/Grant'
+    UpdatePasswordRequest:
+      type: object
+      required: [new_password]
+      additionalProperties: false
+      properties:
+        new_password:
+          type: string
+          description: 1 to 72 bytes.
+        current_password:
+          type: string
+          description: The user's current password. Required when a user who is not `admin` changes their own.
+    User:
+      type: object
+      properties:
+        username:
+          type: string
+          description: The username.
+        grants:
+          type: array
+          description: The user's grants. Absent when it has none.
+          items:
+            $ref: '#/components/schemas/Grant'
+        root:
+          type: boolean
+          description: '`true` for the root admin, which holds every right and cannot be deleted. Absent otherwise.'
+        created_at_ms:
+          type: integer
+          description: Creation time, Unix milliseconds.
+        updated_at_ms:
+          type: integer
+          description: Time of the last change, Unix milliseconds.
+    MemberList:
+      type: object
+      properties:
+        members:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                description: Node ID.
+              addr:
+                type: string
+                description: The node's API address.
+              status:
+                type: string
+                enum: [alive, dead]
+                description: '`dead` once the node stopped sending heartbeats.'
+              draining:
+                type: boolean
+                description: '`true` while the node is being decommissioned.'
+              owned_partitions:
+                type: integer
+                description: Partitions the node owns.
+              outbound_moves:
+                type: integer
+                description: Partitions moving off the node.
+    MoveList:
+      type: object
+      properties:
+        moves:
+          type: array
+          items:
+            type: object
+            properties:
+              topic:
+                type: string
+                description: Topic name.
+              partition:
+                type: integer
+                description: Partition number.
+              from:
+                type: string
+                description: Node that owns the partition now.
+              to:
+                type: string
+                description: Node the partition is moving to.
+    Status:
+      type: object
+      properties:
+        status:
+          type: string
+          description: '`ok` for `/healthz`, `ready` for `/readyz`.'

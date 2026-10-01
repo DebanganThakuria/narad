@@ -1,0 +1,136 @@
+<svg class="nr-dia__wide" viewBox="0 36 800 360" role="img" aria-labelledby="produce-group-commit-w-t" aria-describedby="produce-group-commit-w-d">
+<title id="produce-group-commit-w-t">Group commit: many callers, one fsync</title>
+<desc id="produce-group-commit-w-d">Three producers send to narad-0 at the same time: two single produces and a batch of up to 100. The HTTP handlers authorize and validate each one and pick its partition. 1: each record is staged into the ingress WAL's shared buffer, and its caller waits. The batch's records take consecutive sequence numbers, N+1 to N+4, with nothing staged between them; ord_123 takes N+5. 2: one write and one fsync make every staged record durable at once. The sync loop wakes on every append, with a 10 ms backstop. 3: every caller in that flush gets 202 Accepted. A staged record waits for the true outcome of its flush.</desc>
+<rect class="you" x="0" y="40" width="120" height="56" rx="2"/>
+<text class="lb mid on" x="60" y="74">produce</text>
+<path class="ln" d="M120 50H188"/>
+<path class="ah" d="M188 57L200 50L188 43Z"/>
+<path class="ln1" d="M200 86H120"/>
+<path class="ah-o" d="M131 79L120 86L131 93"/>
+<rect class="you" x="0" y="120" width="120" height="56" rx="2"/>
+<text class="lb mid on" x="60" y="154">produce</text>
+<path class="ln" d="M120 130H188"/>
+<path class="ah" d="M188 137L200 130L188 123Z"/>
+<path class="ln1" d="M200 166H120"/>
+<path class="ah-o" d="M131 159L120 166L131 173"/>
+<rect class="you" x="0" y="200" width="120" height="56" rx="2"/>
+<text class="lb mid on" x="60" y="223">batch of</text>
+<text class="lb mid on" x="60" y="245">up to 100</text>
+<path class="ln" d="M120 210H188"/>
+<path class="ah" d="M188 217L200 210L188 203Z"/>
+<path class="ln1" d="M200 246H120"/>
+<path class="ah-o" d="M131 239L120 246L131 253"/>
+<rect class="bx bx3" x="200" y="40" width="172" height="216" rx="2"/>
+<text class="pod" x="286" y="76">narad-0</text>
+<text class="lb mid" x="286" y="104">HTTP handlers</text>
+<text class="an mid" x="286" y="140">authorize,</text>
+<text class="an mid" x="286" y="162">validate, pick</text>
+<text class="an mid" x="286" y="184">the partition</text>
+<rect class="rg" x="412" y="40" width="388" height="176" rx="6"/>
+<text class="rl" x="432" y="70">staging buffer</text>
+<path class="ln" d="M372 150H448"/>
+<path class="ah" d="M448 157L460 150L448 143Z"/>
+<circle class="sc" cx="440" cy="94" r="13"/><text class="sn" x="440" y="99.5">1</text>
+<text class="an" x="462" y="100">staged, caller waits</text>
+<rect class="bx" x="460" y="132" width="36" height="36"/>
+<text class="cd mu mid" x="478" y="124">N</text>
+<rect class="bx" x="496" y="132" width="36" height="36"/>
+<text class="cd mu mid" x="514" y="124">+1</text>
+<rect class="bx" x="532" y="132" width="36" height="36"/>
+<text class="cd mu mid" x="550" y="124">+2</text>
+<rect class="bx" x="568" y="132" width="36" height="36"/>
+<text class="cd mu mid" x="586" y="124">+3</text>
+<rect class="bx" x="604" y="132" width="36" height="36"/>
+<text class="cd mu mid" x="622" y="124">+4</text>
+<rect class="msg" x="640" y="132" width="36" height="36"/>
+<text class="cd mu mid" x="658" y="124">+5</text>
+<text class="cd" x="686" y="156">ord_123</text>
+<path class="ln1" d="M496 168V176H640V168"/>
+<text class="an mid" x="568" y="198">one batch: consecutive seqs</text>
+<path class="ln2" d="M720 216V252"/>
+<path class="ah" d="M714 252L720 264L726 252Z"/>
+<circle class="sc" cx="496" cy="242" r="13"/><text class="sn" x="496" y="247.5">2</text>
+<text class="an" x="518" y="248">one write + one fsync</text>
+<path class="bx tn" d="M660 272V328A60 8 0 0 0 780 328V272"/>
+<ellipse class="bx tn" cx="720" cy="272" rx="60" ry="8"/>
+<text class="an mid" x="720" y="302.4">Ingress</text>
+<text class="an mid" x="720" y="324.4">WAL</text>
+<text class="an mu end" x="796" y="364">a wake per append,</text>
+<text class="an mu end" x="796" y="386">10 ms backstop</text>
+<path class="ln1" d="M660 300H302Q286 300 286 284V256"/>
+<path class="ah-o" d="M293 267L286 256L279 267"/>
+<text class="an" x="300" y="290">durable</text>
+<circle class="sc" cx="13" cy="300" r="13"/><text class="sn" x="13" y="305.5">3</text>
+<text class="cd" x="36" y="306">202 Accepted</text>
+<text class="an" x="36" y="330">to every caller in the flush</text>
+<text class="an mu" x="36" y="352">a staged record waits for</text>
+<text class="an mu" x="36" y="374">the true outcome</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 608" role="img" data-search-exclude aria-labelledby="produce-group-commit-n-t" aria-describedby="produce-group-commit-n-d">
+<title id="produce-group-commit-n-t">Group commit: many callers, one fsync</title>
+<desc id="produce-group-commit-n-d">Three producers send to narad-0 at the same time: two single produces and a batch of up to 100. The HTTP handlers authorize and validate each one and pick its partition. 1: each record is staged into the ingress WAL's shared buffer, and its caller waits. The batch's records take consecutive sequence numbers, N+1 to N+4, with nothing staged between them; ord_123 takes N+5. 2: one write and one fsync make every staged record durable at once. The sync loop wakes on every append, with a 10 ms backstop. 3: every caller in that flush gets 202 Accepted. A staged record waits for the true outcome of its flush.</desc>
+<rect class="you" x="0" y="0" width="104" height="48" rx="2"/>
+<text class="lb mid on" x="52" y="29">produce</text>
+<path class="ln" d="M34 48V88"/>
+<path class="ah" d="M27 88L34 100L41 88Z"/>
+<path class="ln1" d="M70 100V48"/>
+<path class="ah-o" d="M77 59L70 48L63 59"/>
+<rect class="you" x="128" y="0" width="104" height="48" rx="2"/>
+<text class="lb mid on" x="180" y="29">produce</text>
+<path class="ln" d="M162 48V88"/>
+<path class="ah" d="M155 88L162 100L169 88Z"/>
+<path class="ln1" d="M198 100V48"/>
+<path class="ah-o" d="M205 59L198 48L191 59"/>
+<rect class="you" x="256" y="0" width="104" height="48" rx="2"/>
+<text class="lb mid on" x="308" y="19">batch of</text>
+<text class="lb mid on" x="308" y="39">up to 100</text>
+<path class="ln" d="M290 48V88"/>
+<path class="ah" d="M283 88L290 100L297 88Z"/>
+<path class="ln1" d="M326 100V48"/>
+<path class="ah-o" d="M333 59L326 48L319 59"/>
+<rect class="bx bx3" x="20" y="100" width="340" height="76" rx="2"/>
+<text class="pod" x="80" y="128">narad-0</text>
+<text class="lb" x="140" y="128">HTTP handlers</text>
+<text class="an" x="36" y="158">authorize, validate, pick the partition</text>
+<path class="ln" d="M190 176V236"/>
+<path class="ah" d="M183 236L190 248L197 236Z"/>
+<circle class="sc" cx="212" cy="204" r="12"/><text class="sn" x="212" y="209">1</text>
+<text class="an" x="230" y="209">staged, caller waits</text>
+<rect class="rg" x="20" y="216" width="340" height="148" rx="6"/>
+<text class="rl" x="36" y="240">staging buffer</text>
+<rect class="bx" x="106" y="272" width="28" height="28"/>
+<text class="cd mu mid" x="120" y="264">N</text>
+<rect class="bx" x="134" y="272" width="28" height="28"/>
+<text class="cd mu mid" x="148" y="264">+1</text>
+<rect class="bx" x="162" y="272" width="28" height="28"/>
+<text class="cd mu mid" x="176" y="264">+2</text>
+<rect class="bx" x="190" y="272" width="28" height="28"/>
+<text class="cd mu mid" x="204" y="264">+3</text>
+<rect class="bx" x="218" y="272" width="28" height="28"/>
+<text class="cd mu mid" x="232" y="264">+4</text>
+<rect class="msg" x="246" y="272" width="28" height="28"/>
+<text class="cd mu mid" x="260" y="264">+5</text>
+<text class="cd" x="282" y="291">ord_123</text>
+<path class="ln1" d="M134 304V312H246V304"/>
+<text class="an mid" x="190" y="332">one batch:</text>
+<text class="an mid" x="190" y="352">consecutive seqs</text>
+<path class="ln2" d="M170 364V400"/>
+<path class="ah" d="M164 400L170 412L176 400Z"/>
+<circle class="sc" cx="196" cy="380" r="12"/><text class="sn" x="196" y="385">2</text>
+<text class="an" x="216" y="385">one write,</text>
+<text class="an" x="216" y="405">one fsync</text>
+<path class="bx tn" d="M110 420V468A60 8 0 0 0 230 468V420"/>
+<ellipse class="bx tn" cx="170" cy="420" rx="60" ry="8"/>
+<text class="an mid" x="170" y="446.5">Ingress</text>
+<text class="an mid" x="170" y="466.5">WAL</text>
+<text class="an mu" x="244" y="440">a wake per</text>
+<text class="an mu" x="244" y="460">append, 10 ms</text>
+<text class="an mu" x="244" y="480">backstop</text>
+<path class="ln1" d="M110 448H12Q6 448 6 442V144Q6 138 12 138H20"/>
+<path class="ah-o" d="M9 145L20 138L9 131"/>
+<circle class="sc" cx="20" cy="520" r="12"/><text class="sn" x="20" y="525">3</text>
+<text class="cd" x="40" y="525">202 Accepted</text>
+<text class="an" x="40" y="547">to every caller in the flush</text>
+<text class="an mu" x="40" y="575">a staged record waits for</text>
+<text class="an mu" x="40" y="595">the true outcome</text>
+</svg>

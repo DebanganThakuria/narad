@@ -1,0 +1,105 @@
+<svg class="nr-dia__wide" viewBox="0 16 800 544" role="img" aria-labelledby="rebalance-move-timeline-w-t" aria-describedby="rebalance-move-timeline-w-d">
+<title id="rebalance-move-timeline-w-t">One partition move: copy while traffic flows, then a short freeze</title>
+<desc id="rebalance-move-timeline-w-d">Time runs left to right, not to scale. narad-0, the source, keeps taking produce and consume while narad-3, the target, copies the partition in passes that shrink: the first copies the bulk, gigabytes perhaps, and the copy stops pre-copying once a pass copies 4 MiB or less. 1: PrepareHandoff freezes the source and returns a freeze token. 2: Finalize drains the last tail under the freeze, re-arming the token every 7.5 s, a quarter of the 30 s freeze. 3: the fence presents the token once more; the source must still hold that freeze and report the same high watermark, or it answers 409 and the target freezes and drains again. 4: the target installs the copy, a rename with a move marker, and CompleteMove proposes the guarded flip, after which narad-3 owns the partition. Producers get 202 throughout: commits to this partition wait in the WAL and land on narad-3 after the flip, unless the freeze outlasts 3 s; then the dispatcher sends them, and what queued behind them, to a sibling partition, which gives up their per-key order. Consumers get nothing new from this partition during the freeze, and leases still out come back from narad-3. If the copy does not converge after 20 passes, or 3 without progress, the target freezes anyway, and the freeze is longer.</desc>
+<rect class="win" x="360" y="20" width="280" height="160" rx="2"/>
+<rect class="win" x="360" y="348" width="280" height="172" rx="2"/>
+<path class="ln1 dash" d="M360 20V180M360 348V520"/>
+<path class="ln1" d="M640 348V520"/>
+<text class="an" x="372" y="44">the freeze</text>
+<text class="pod" x="44" y="92">narad-0</text>
+<text class="an" x="0" y="114">source</text>
+<text class="pod" x="44" y="146">narad-3</text>
+<text class="an" x="0" y="168">target</text>
+<text class="an" x="160" y="76">produce and consume</text>
+<path class="ln" d="M160 88H360"/>
+<path class="ln1 dash" d="M360 88H640"/>
+<rect class="bx tn" x="160" y="132" width="112" height="20"/>
+<rect class="bx tn" x="280" y="132" width="40" height="20"/>
+<rect class="bx tn" x="328" y="132" width="20" height="20"/>
+<text class="an mid" x="216" y="176">pass 1: GBs</text>
+<text class="an mid" x="300" y="176">pass 2</text>
+<text class="an end" x="352" y="198">pass 3: 4 MiB or less</text>
+<path class="ln2" d="M360 142H372M478 142H640"/>
+<polygon class="msg" points="372,127 468,127 486,157 390,157"/>
+<text class="msg-t" x="429" y="148.5">tail</text>
+<path class="ln1" d="M580 96V134"/>
+<path class="ln" d="M640 20V180"/>
+<path class="ln" d="M640 142H800"/>
+<text class="an" x="652" y="128"><tspan class="cd">narad-3</tspan> owns it</text>
+<circle class="sc" cx="372" cy="230" r="13"/><text class="sn" x="372" y="235.5">1</text>
+<text class="an" x="394" y="236">PrepareHandoff: freeze</text>
+<circle class="sc" cx="440" cy="258" r="13"/><text class="sn" x="440" y="263.5">2</text>
+<text class="an" x="462" y="264">Finalize: drain, re-arm</text>
+<circle class="sc" cx="580" cy="286" r="13"/><text class="sn" x="580" y="291.5">3</text>
+<text class="an" x="602" y="292">fence: token still live</text>
+<circle class="sc" cx="640" cy="314" r="13"/><text class="sn" x="640" y="319.5">4</text>
+<text class="an" x="662" y="320">install and flip</text>
+<text class="lb" x="0" y="376">Producers</text>
+<text class="cd" x="160" y="376">202</text>
+<text class="an" x="205.5" y="376">throughout</text>
+<text class="an" x="372" y="376">commits wait in the WAL;</text>
+<text class="an" x="372" y="398">a freeze past 3 s sends</text>
+<text class="an" x="372" y="420">them to a sibling partition</text>
+<text class="an" x="652" y="376">they land on</text>
+<text class="cd" x="652" y="398">narad-3</text>
+<text class="lb" x="0" y="464">Consumers</text>
+<text class="an" x="160" y="464">served by <tspan class="cd">narad-0</tspan></text>
+<text class="an" x="372" y="464">nothing new from this</text>
+<text class="an" x="372" y="486">partition</text>
+<text class="an" x="652" y="464">leases still out</text>
+<text class="an" x="652" y="486">come back from</text>
+<text class="cd" x="652" y="508">narad-3</text>
+<text class="an mu" x="0" y="552">no convergence after 20 passes, or 3 without progress: freeze anyway, for longer</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 12 360 740" role="img" data-search-exclude aria-labelledby="rebalance-move-timeline-n-t" aria-describedby="rebalance-move-timeline-n-d">
+<title id="rebalance-move-timeline-n-t">One partition move: copy while traffic flows, then a short freeze</title>
+<desc id="rebalance-move-timeline-n-d">Time runs left to right, not to scale. narad-0, the source, keeps taking produce and consume while narad-3, the target, copies the partition in passes that shrink: the first copies the bulk, gigabytes perhaps, and the copy stops pre-copying once a pass copies 4 MiB or less. 1: PrepareHandoff freezes the source and returns a freeze token. 2: Finalize drains the last tail under the freeze, re-arming the token every 7.5 s, a quarter of the 30 s freeze. 3: the fence presents the token once more; the source must still hold that freeze and report the same high watermark, or it answers 409 and the target freezes and drains again. 4: the target installs the copy, a rename with a move marker, and CompleteMove proposes the guarded flip, after which narad-3 owns the partition. Producers get 202 throughout: commits to this partition wait in the WAL and land on narad-3 after the flip, unless the freeze outlasts 3 s; then the dispatcher sends them, and what queued behind them, to a sibling partition, which gives up their per-key order. Consumers get nothing new from this partition during the freeze, and leases still out come back from narad-3. If the copy does not converge after 20 passes, or 3 without progress, the target freezes anyway, and the freeze is longer.</desc>
+<rect class="win" x="8" y="292" width="344" height="164" rx="2"/>
+<path class="ln1 dash" d="M8 292H352"/>
+<text class="pod" x="44" y="28">narad-0</text>
+<text class="pod" x="126" y="28">narad-3</text>
+<path class="ln" d="M40 48V292"/>
+<path class="ln1 dash" d="M40 292V456"/>
+<rect class="bx tn" x="110" y="48" width="20" height="116"/>
+<rect class="bx tn" x="110" y="172" width="20" height="40"/>
+<rect class="bx tn" x="110" y="220" width="20" height="16"/>
+<path class="ln2" d="M120 292V324M120 358V456"/>
+<polygon class="msg" points="70.5,328 152.5,328 169.5,354 87.5,354"/>
+<text class="msg-t" x="120" y="346">tail</text>
+<path class="ln" d="M8 456H176"/>
+<path class="ln" d="M120 456V540"/>
+<circle class="sc" cx="80" cy="306" r="12"/><text class="sn" x="80" y="311">1</text>
+<circle class="sc" cx="80" cy="378" r="12"/><text class="sn" x="80" y="383">2</text>
+<circle class="sc" cx="80" cy="420" r="12"/><text class="sn" x="80" y="425">3</text>
+<circle class="sc" cx="80" cy="480" r="12"/><text class="sn" x="80" y="485">4</text>
+<text class="an" x="184" y="64"><tspan class="cd">narad-3</tspan> copies in</text>
+<text class="an" x="184" y="84">passes that shrink, from</text>
+<text class="an" x="184" y="104">GBs to 4 MiB or less;</text>
+<text class="an" x="184" y="124">producers get 202,</text>
+<text class="an" x="184" y="144">consumers are served</text>
+<text class="an" x="184" y="164">by <tspan class="cd">narad-0</tspan></text>
+<text class="an" x="184" y="316">the freeze</text>
+<text class="an" x="184" y="340">producers get 202;</text>
+<text class="an" x="184" y="360">commits wait in the</text>
+<text class="an" x="184" y="380">WAL, or past 3 s go</text>
+<text class="an" x="184" y="400">to a sibling partition;</text>
+<text class="an" x="184" y="420">consumers get nothing</text>
+<text class="an" x="184" y="440">new from this partition</text>
+<text class="an" x="184" y="484"><tspan class="cd">narad-3</tspan> owns it: held</text>
+<text class="an" x="184" y="504">commits land there, and</text>
+<text class="an" x="184" y="524">leases still out come</text>
+<text class="an" x="184" y="544">back from <tspan class="cd">narad-3</tspan></text>
+<path class="sep" d="M8 564H352"/>
+<circle class="sc" cx="20" cy="587" r="12"/><text class="sn" x="20" y="592">1</text>
+<text class="an" x="40" y="592">PrepareHandoff: freeze the source,</text>
+<text class="an" x="40" y="612">get a token</text>
+<circle class="sc" cx="20" cy="631" r="12"/><text class="sn" x="20" y="636">2</text>
+<text class="an" x="40" y="636">Finalize: drain the tail; re-arm</text>
+<text class="an" x="40" y="656">the token every 7.5 s</text>
+<circle class="sc" cx="20" cy="675" r="12"/><text class="sn" x="20" y="680">3</text>
+<text class="an" x="40" y="680">fence: token still live, same high</text>
+<text class="an" x="40" y="700">watermark; or 409, freeze again</text>
+<circle class="sc" cx="20" cy="719" r="12"/><text class="sn" x="20" y="724">4</text>
+<text class="an" x="40" y="724">install (rename, move marker), then</text>
+<text class="an" x="40" y="744">CompleteMove: the guarded flip</text>
+</svg>

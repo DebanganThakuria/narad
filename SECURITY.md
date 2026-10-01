@@ -30,7 +30,7 @@ path.
 
 The `/v1` HTTP surface is stable across major versions, so upgrading is a
 binary swap and a rolling restart rather than a client migration. See
-[API stability](https://debanganthakuria.github.io/narad/client/guarantees-and-errors/#api-stability).
+[API stability](https://debanganthakuria.github.io/narad/reference/api-stability/).
 
 ## Response targets
 
@@ -56,7 +56,7 @@ The following are documented, deliberate configurations rather than
 vulnerabilities, so please do not report them as such:
 
 - **Running with security disabled.** `--dev` and `NARAD_SECURITY_ENABLED=false` turn authentication off by design, for local use.
-- **The Raft port without TLS.** The cluster secret does not cover the Raft plane. Running it in plaintext requires `NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true`, and the risk is documented in [Deployment](https://debanganthakuria.github.io/narad/operate/#tls-story). A deployment that leaves 7943/tcp reachable is a misconfiguration we have warned about, not a product flaw.
+- **The Raft port without TLS.** The cluster secret does not cover the Raft plane. Running it in plaintext requires `NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true`, and the risk is documented in [the production checklist](https://debanganthakuria.github.io/narad/operate/production-checklist/#raft-tls). A deployment that leaves 7943/tcp reachable is a misconfiguration we have warned about, not a product flaw.
 - **The metrics listener served without credentials**, when `NARAD_HTTP_METRICS_UNAUTHENTICATED=true` is set explicitly.
 - **No built-in request rate limiting.** Narad expects a rate limiter at the ingress, as documented.
 

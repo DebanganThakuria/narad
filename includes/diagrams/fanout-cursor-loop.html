@@ -1,0 +1,74 @@
+<svg class="nr-dia__wide" viewBox="0 -4 800 394" role="img" aria-labelledby="fanout-cursor-loop-w-t" aria-describedby="fanout-cursor-loop-w-d">
+<title id="fanout-cursor-loop-w-t">The cursor loop: commit before advance</title>
+<desc id="fanout-cursor-loop-w-d">One fan-out cursor runs a loop of four steps. 1: read a slab from the parent partition, up to 4,096 records or 4 MiB, lingering up to 25 ms. 2: bucket the records by child partition, by key hash, keeping their order. 3: commit the buckets to the child partitions' owners, up to 16 at once. A bucket whose commit fails gets up to 3 quick tries, 100 ms and then 200 ms apart; if some still fail, the cursor backs off 1 s and retries only those buckets, from memory. 4: once every bucket has committed, write the cursor offset: 256 bytes and one fdatasync. Then read the next slab. The offset never passes a record the child has not committed.</desc>
+<rect class="bx" x="0" y="0" width="320" height="76" rx="2"/>
+<circle class="sc" cx="25" cy="38" r="13"/><text class="sn" x="25" y="43.5">1</text>
+<text class="an" x="46" y="33.12">read a slab: up to 4,096</text>
+<text class="an" x="46" y="55.12">records or 4 MiB; 25 ms linger</text>
+<rect class="bx" x="460" y="0" width="320" height="76" rx="2"/>
+<circle class="sc" cx="485" cy="38" r="13"/><text class="sn" x="485" y="43.5">2</text>
+<text class="an" x="506" y="33.12">bucket by child partition:</text>
+<text class="an" x="506" y="55.12">key hash, order kept</text>
+<rect class="bx" x="460" y="200" width="320" height="76" rx="2"/>
+<circle class="sc" cx="485" cy="238" r="13"/><text class="sn" x="485" y="243.5">3</text>
+<text class="an" x="506" y="233.12">commit the buckets,</text>
+<text class="an" x="506" y="255.12">up to 16 at once</text>
+<rect class="bx tn" x="0" y="200" width="320" height="76" rx="2"/>
+<circle class="sc" cx="25" cy="238" r="13"/><text class="sn" x="25" y="243.5">4</text>
+<text class="an" x="46" y="233.12">write the cursor offset:</text>
+<text class="an" x="46" y="255.12">256 bytes, one fdatasync</text>
+<path class="ln" d="M320 38H323M437 38H448"/>
+<path class="ah" d="M448 45L460 38L448 31Z"/>
+<polygon class="msg" points="323,23 419,23 437,53 341,53"/>
+<text class="msg-t" x="380" y="44.5">slab</text>
+<path class="ln" d="M620 76V188"/>
+<path class="ah" d="M613 188L620 200L627 188Z"/>
+<path class="ln" d="M460 238H332"/>
+<path class="ah" d="M332 231L320 238L332 245Z"/>
+<path class="ln" d="M160 200V88"/>
+<path class="ah" d="M167 88L160 76L153 88Z"/>
+<text class="an mid" x="390" y="132">the offset never passes a record</text>
+<text class="an mid" x="390" y="154">the child has not committed</text>
+<path class="ln1 dash" d="M720 276V296Q720 308 708 308H552Q540 308 540 296V286"/>
+<path class="ah" d="M545 286L540 276L535 286Z"/>
+<text class="an mid" x="630" y="338">a bucket still failing after 3 quick</text>
+<text class="an mid" x="630" y="360">tries: back off 1 s, retry only</text>
+<text class="an mid" x="630" y="382">those buckets, from memory</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 536" role="img" data-search-exclude aria-labelledby="fanout-cursor-loop-n-t" aria-describedby="fanout-cursor-loop-n-d">
+<title id="fanout-cursor-loop-n-t">The cursor loop: commit before advance</title>
+<desc id="fanout-cursor-loop-n-d">One fan-out cursor runs a loop of four steps. 1: read a slab from the parent partition, up to 4,096 records or 4 MiB, lingering up to 25 ms. 2: bucket the records by child partition, by key hash, keeping their order. 3: commit the buckets to the child partitions' owners, up to 16 at once. A bucket whose commit fails gets up to 3 quick tries, 100 ms and then 200 ms apart; if some still fail, the cursor backs off 1 s and retries only those buckets, from memory. 4: once every bucket has committed, write the cursor offset: 256 bytes and one fdatasync. Then read the next slab. The offset never passes a record the child has not committed.</desc>
+<rect class="bx" x="40" y="0" width="320" height="64" rx="2"/>
+<circle class="sc" cx="64" cy="32" r="12"/><text class="sn" x="64" y="37">1</text>
+<text class="an" x="84" y="27.1">read a slab: up to 4,096</text>
+<text class="an" x="84" y="47.1">records or 4 MiB; 25 ms linger</text>
+<rect class="bx" x="40" y="124" width="320" height="64" rx="2"/>
+<circle class="sc" cx="64" cy="156" r="12"/><text class="sn" x="64" y="161">2</text>
+<text class="an" x="84" y="151.1">bucket by child partition:</text>
+<text class="an" x="84" y="171.1">key hash, order kept</text>
+<rect class="bx" x="40" y="236" width="320" height="64" rx="2"/>
+<circle class="sc" cx="64" cy="268" r="12"/><text class="sn" x="64" y="273">3</text>
+<text class="an" x="84" y="263.1">commit the buckets,</text>
+<text class="an" x="84" y="283.1">up to 16 at once</text>
+<rect class="bx tn" x="40" y="400" width="320" height="64" rx="2"/>
+<circle class="sc" cx="64" cy="432" r="12"/><text class="sn" x="64" y="437">4</text>
+<text class="an" x="84" y="427.1">write the cursor offset:</text>
+<text class="an" x="84" y="447.1">256 bytes, one fdatasync</text>
+<path class="ln" d="M200 64V73"/>
+<path class="ah" d="M193 112L200 124L207 112Z"/>
+<polygon class="msg" points="150.5,75 232.5,75 249.5,101 167.5,101"/>
+<text class="msg-t" x="200" y="93">slab</text>
+<path class="ln" d="M200 188V224"/>
+<path class="ah" d="M193 224L200 236L207 224Z"/>
+<path class="ln" d="M120 300V388"/>
+<path class="ah" d="M113 388L120 400L127 388Z"/>
+<path class="ln1 dash" d="M300 300V320Q300 328 308 328H332Q340 328 340 320V310"/>
+<path class="ah" d="M345 310L340 300L335 310Z"/>
+<text class="an" x="140" y="346">still failing after 3 quick</text>
+<text class="an" x="140" y="366">tries: back off 1 s, retry</text>
+<text class="an" x="140" y="386">only those buckets</text>
+<path class="ln" d="M40 432H32Q16 432 16 416V48Q16 32 28 32"/>
+<path class="ah" d="M28 39L40 32L28 25Z"/>
+<text class="an" x="0" y="504">the offset never passes a record the</text>
+<text class="an" x="0" y="524">child has not committed</text>
+</svg>

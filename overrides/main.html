@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{#-
+  Signal Line theme. theme.font is false in mkdocs.yml, so the fonts are
+  loaded here instead of from Material's Google Fonts block:
+  Satoshi (display) from Fontshare, Atkinson Hyperlegible Next (body) and
+  Atkinson Hyperlegible Mono (code) from Google Fonts. All use
+  font-display: swap, and the fallback stacks live in extra.css.
+-#}
+{% block extrahead %}
+  {#- First visit with the OS in dark mode: the HTML is light first, and
+      Material only switches to slate once its bundle runs, so the page
+      flashed paper before going dark. Store the dark choice before the
+      header's palette script reads it; this is the same object Material
+      stores itself after the first load. __md_get and __md_set are
+      defined earlier in <head>. -#}
+  <script>try{if(!__md_get("__palette")&&matchMedia("(prefers-color-scheme: dark)").matches){__md_set("__palette",{index:1,color:{media:"(prefers-color-scheme: dark)",scheme:"slate",primary:"custom",accent:"custom"}})}}catch(e){}</script>
+  <link rel="preconnect" href="https://api.fontshare.com">
+  <link rel="preconnect" href="https://cdn.fontshare.com" crossorigin>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://api.fontshare.com/v2/css?f[]=satoshi@500,700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;600&family=Atkinson+Hyperlegible+Next:ital,wght@0,400;0,600;1,400&display=swap">
+  {#- PNG fallback first, then the SVG again so browsers that read
+      both still prefer the scheme-aware vector. -#}
+  <link rel="icon" type="image/png" sizes="32x32" href="{{ 'assets/narad-favicon-32.png' | url }}">
+  <link rel="icon" type="image/svg+xml" href="{{ config.theme.favicon | url }}">
+  <link rel="apple-touch-icon" href="{{ 'assets/narad-apple-touch-icon.png' | url }}">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#FFFFFF">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101214">
+  {#- Link previews: each page shares with its own title and its
+      front-matter description, and the square Relay mark as the image.
+      The home page title matches the one home.html sets. -#}
+  {%- if page %}
+    {%- if page.is_homepage %}
+      {%- set nr_og_title = "Narad: a small, sturdy message broker over HTTP" %}
+    {%- elif page.meta and page.meta.title %}
+      {%- set nr_og_title = page.meta.title ~ " - " ~ config.site_name %}
+    {%- else %}
+      {%- set nr_og_title = (page.title | striptags) ~ " - " ~ config.site_name %}
+    {%- endif %}
+    {%- set nr_og_desc = (page.meta.description if page.meta and page.meta.description else config.site_description) %}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ config.site_name | e }}">
+  <meta property="og:title" content="{{ nr_og_title | e }}">
+  <meta property="og:description" content="{{ nr_og_desc | e }}">
+  {%- if page.canonical_url %}
+  <meta property="og:url" content="{{ page.canonical_url }}">
+  {%- endif %}
+  {%- if config.site_url %}
+  <meta property="og:image" content="{{ config.site_url }}assets/narad-avatar.png">
+  <meta property="og:image:width" content="440">
+  <meta property="og:image:height" content="440">
+  <meta property="og:image:alt" content="The Narad mark">
+  {%- endif %}
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="{{ nr_og_title | e }}">
+  <meta name="twitter:description" content="{{ nr_og_desc | e }}">
+  {%- endif %}
+{% endblock %}

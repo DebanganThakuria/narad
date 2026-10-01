@@ -7,39 +7,49 @@ edit_uri: edit/master/docs/
 
 theme:
   name: material
-  logo: assets/narad-icon.png
-  favicon: assets/narad-icon.png
-  font:
-    text: Inter
-    code: JetBrains Mono
+  custom_dir: overrides
+  logo: assets/narad-mark.svg
+  favicon: assets/narad-favicon.svg
+  # Fonts are loaded in overrides/main.html (Satoshi from Fontshare,
+  # Atkinson Hyperlegible Next and Mono from Google Fonts).
+  font: false
   features:
     - navigation.tabs
     - navigation.instant
+    - navigation.instant.progress
+    - navigation.instant.prefetch
     - navigation.tracking
     - navigation.sections
+    - navigation.path
     - navigation.top
     - navigation.footer
     - toc.follow
     - search.suggest
     - search.highlight
     - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.action.edit
+  # Light first: the built HTML carries the first palette's scheme, so a
+  # visitor without JavaScript (and the first paint) gets paper, not ink.
   palette:
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: custom
-      accent: custom
-      toggle:
-        icon: material/weather-sunny
-        name: Light mode
     - media: "(prefers-color-scheme: light)"
       scheme: default
       primary: custom
       accent: custom
       toggle:
         icon: material/weather-night
-        name: Dark mode
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
   icon:
     repo: fontawesome/brands/github
+    edit: material/pencil-outline
 
 markdown_extensions:
   - admonition
@@ -52,48 +62,167 @@ markdown_extensions:
   - toc:
       permalink: true
   - pymdownx.details
+  - pymdownx.highlight:
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
           class: mermaid
           format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  # The four contract sentences live once, in includes/contract/body/,
+  # and pages pull them in as a callout with --8<-- "contract/<name>.md",
+  # which wraps the body in a note. The delivery contract page, their
+  # home, includes the bare body (contract/body/<name>.md) under its own
+  # headings instead. Their links are written relative to a page one
+  # folder deep, so only pages inside the five tab folders may include
+  # them (never docs/index.md).
+  - pymdownx.snippets:
+      base_path: [includes]
+      check_paths: true
+
+hooks:
+  - overrides/hooks/table_breaks.py
 
 extra_css:
   - stylesheets/extra.css
 
 extra_javascript:
+  - javascripts/mermaid-lines.js
+  - javascripts/scroll-hosts.js
+  - javascripts/drawer.js
   - javascripts/goatcounter.js
+  - javascripts/legacy-anchors.js
+
+plugins:
+  # Listing plugins replaces MkDocs' implicit default, so search is
+  # named here. The separator also splits snake_case, dotted keys and
+  # camelCase, so "consume in flight" finds
+  # NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY.
+  - search:
+      separator: '[\s\-_,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+  # Old URLs from before the five-tab layout. A target never carries a
+  # #fragment: the plugin appends the visitor's own hash, and
+  # javascripts/legacy-anchors.js forwards hashes whose section moved.
+  # Pinned to 1.2.2 in requirements-docs.txt (1.2.3 needs Python 3.10).
+  - redirects:
+      redirect_maps:
+        # Client guide (client/) to Get started and Build
+        client/index.md: get-started/quickstart.md
+        client/go-sdk.md: build/go-sdk.md
+        client/cli.md: build/cli.md
+        client/topics.md: build/topics.md
+        client/schemas.md: build/schemas.md
+        client/producing.md: build/producing.md
+        client/consuming.md: build/consuming.md
+        client/handling-retries.md: build/handling-retries.md
+        client/fanout-and-delay.md: build/fanout-and-delay.md
+        client/users-and-access.md: reference/access-model.md
+        client/guarantees-and-errors.md: understand/delivery-contract.md
+        # Top level
+        compare.md: get-started/compare.md
+        # Operate
+        operate/index.md: operate/deploy-kubernetes.md
+        operate/helm-chart.md: reference/helm-values.md
+        operate/configuration.md: reference/configuration.md
+        operate/scaling-and-recovery.md: operate/scaling.md
+        operate/raft-tls-rotation.md: operate/raft-tls.md
+        # Internals (internals/) to Understand
+        internals/index.md: understand/index.md
+        internals/metastore-and-raft.md: understand/metastore-and-raft.md
+        internals/produce-path.md: understand/produce-path.md
+        internals/storage-engine.md: understand/storage-engine.md
+        internals/consume-path.md: understand/consume-path.md
+        internals/fanout-engine.md: understand/fanout-engine.md
+        internals/cluster-lifecycle.md: understand/cluster-lifecycle.md
+        internals/rebalance.md: understand/rebalance.md
+        internals/networking-and-security.md: understand/networking-and-security.md
+        internals/linearizability.md: understand/linearizability.md
+        # Bare tab folders, which would otherwise 404
+        get-started/index.md: get-started/quickstart.md
+        build/index.md: build/connect.md
+        reference/index.md: reference/http-api.md
+
+# Strict builds fail on any of these, including a link to a missing
+# #anchor.
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn
 
 nav:
   - Home: index.md
-  - Compare: compare.md
-  - Client Guide:
-      - Getting Started: client/index.md
-      - Go SDK: client/go-sdk.md
-      - The CLI: client/cli.md
-      - Topics: client/topics.md
-      - Schemas: client/schemas.md
-      - Producing: client/producing.md
-      - Consuming: client/consuming.md
-      - Handling Retries: client/handling-retries.md
-      - Fan-out & Delay: client/fanout-and-delay.md
-      - Users & Access: client/users-and-access.md
-      - Guarantees & Errors: client/guarantees-and-errors.md
+  - Get started:
+      - Quickstart: get-started/quickstart.md
+      - Core concepts: get-started/concepts.md
+      - Compare Narad with other brokers: get-started/compare.md
+  - Build:
+      - Setup:
+          - Connect and authenticate: build/connect.md
+          - Manage topics: build/topics.md
+      - Send and receive:
+          - Produce messages: build/producing.md
+          - Consume and acknowledge messages: build/consuming.md
+          - Handle retries and dead letters: build/handling-retries.md
+          - Replay messages from an offset: build/replay.md
+      - Topic features:
+          - Fan out and delay messages: build/fanout-and-delay.md
+          - Enforce schemas on a topic: build/schemas.md
+          # RESERVED SLOT: remote children (inter-cluster copy).
+          # The Build guide for this feature lands here as
+          # build/remote-children.md when its branch merges.
+          # Do not create the page, a stub or a link before then.
+      - Clients:
+          - Go SDK: build/go-sdk.md
+          - Narad CLI: build/cli.md
   - Operate:
-      - Deployment: operate/index.md
-      - Helm Chart Reference: operate/helm-chart.md
-      - Configuration Reference: operate/configuration.md
-      - Monitoring: operate/monitoring.md
-      - Scaling & Recovery: operate/scaling-and-recovery.md
-      - Rotating the Raft TLS certificates: operate/raft-tls-rotation.md
-  - Internals:
-      - Architecture: internals/index.md
-      - Metastore & Raft: internals/metastore-and-raft.md
-      - Produce Path: internals/produce-path.md
-      - Storage Engine: internals/storage-engine.md
-      - Consume Path: internals/consume-path.md
-      - Fan-out Engine: internals/fanout-engine.md
-      - Cluster Lifecycle: internals/cluster-lifecycle.md
-      - Rebalance & Decommission: internals/rebalance.md
-      - Networking & Security: internals/networking-and-security.md
-      - Checking the Delivery Contract: internals/linearizability.md
+      - Install:
+          - Deploy on Kubernetes: operate/deploy-kubernetes.md
+          - Production checklist: operate/production-checklist.md
+          - Raft TLS certificates: operate/raft-tls.md
+          - Manage users and grants: operate/users.md
+      - Run:
+          - Monitor and alert: operate/monitoring.md
+          - Scale out and in: operate/scaling.md
+          - Back up and replicate topics: operate/backups.md
+          - Upgrade Narad: operate/upgrade.md
+      # RESERVED SLOT: a "Playbooks" group for remote children
+      # (inter-cluster copy) lands here, pages under operate/playbooks/,
+      # when that branch merges. Do not create it before then.
+      - Troubleshooting: operate/troubleshooting.md
+  - Understand:
+      - Overview:
+          - Architecture overview: understand/index.md
+          - Delivery contract: understand/delivery-contract.md
+          - Linearizability check: understand/linearizability.md
+      - Data path:
+          - Produce path: understand/produce-path.md
+          - Storage engine: understand/storage-engine.md
+          - Consume path: understand/consume-path.md
+          - Fan-out engine: understand/fanout-engine.md
+      - Cluster:
+          - Metastore and Raft: understand/metastore-and-raft.md
+          - Networking and security: understand/networking-and-security.md
+          - Cluster lifecycle: understand/cluster-lifecycle.md
+          - Rebalance and decommission: understand/rebalance.md
+  - Reference:
+      - API:
+          - HTTP API reference: reference/http-api.md
+          - Status codes and errors: reference/status-codes.md
+          - Access model and grants: reference/access-model.md
+          - Schema validation rules: reference/schema-rules.md
+          - API stability and versions: reference/api-stability.md
+      - Server and CLI:
+          - Configuration reference: reference/configuration.md
+          - Helm values reference: reference/helm-values.md
+          - Metrics reference: reference/metrics.md
+          - Capacity and disk sizing: reference/capacity.md
+          - CLI command reference: reference/cli.md
+      - Glossary: reference/glossary.md

@@ -1,0 +1,130 @@
+<svg class="nr-dia__wide" viewBox="0 8 800 512" role="img" aria-labelledby="raft-tls-enable-w-t" aria-describedby="raft-tls-enable-w-d">
+<title id="raft-tls-enable-w-t">Turning on Raft TLS in a running cluster</title>
+<desc id="raft-tls-enable-w-d">Three stages of turning on Raft TLS in a running three-node cluster. After helm upgrade, the StatefulSet restarts narad-2 on TLS. It cannot talk Raft to its plaintext peers and stays not ready, so the rolling update waits, while narad-0, the leader, and narad-1 keep serving on plaintext. You then delete narad-1 by hand, the one manual step. While it restarts on TLS, neither side holds a majority: there is no Raft leader, and topic, user and schema changes are refused, while produce and consume go on. Once narad-1 and narad-2 both run TLS they are a majority and elect a leader, one of the two. narad-0, still on plaintext, is not ready, and the rolling update restarts it on its own.</desc>
+<rect class="rg" x="0" y="12" width="800" height="132" rx="6"/>
+<rect class="rg" x="0" y="200" width="800" height="132" rx="6"/>
+<rect class="rg" x="0" y="348" width="800" height="168" rx="6"/>
+<text class="rl" x="20" y="42">After helm upgrade</text>
+<text class="rl" x="20" y="230">No majority</text>
+<text class="rl" x="20" y="378">TLS majority</text>
+<rect class="bx" x="20" y="56" width="176" height="76" rx="2"/>
+<text class="pod" x="108" y="84">narad-0</text>
+<text class="an mu" x="30" y="116">plaintext</text>
+<rect class="bx bxq tn" x="110" y="96" width="72" height="28" rx="2"/>
+<text class="an mid" x="146" y="116">leader</text>
+<rect class="bx" x="208" y="56" width="176" height="76" rx="2"/>
+<text class="pod" x="296" y="84">narad-1</text>
+<text class="an mu" x="218" y="116">plaintext</text>
+<rect class="bx ghost" x="396" y="56" width="176" height="76" rx="2"/>
+<text class="pod mu" x="484" y="84">narad-2</text>
+<rect class="bx bxq tn" x="406" y="96" width="52" height="28" rx="2"/>
+<text class="an mid" x="432" y="116">TLS</text>
+<text class="an mu" x="468" y="116">not ready</text>
+<rect class="bx" x="20" y="244" width="176" height="76" rx="2"/>
+<text class="pod" x="108" y="272">narad-0</text>
+<text class="an mu" x="30" y="304">plaintext</text>
+<rect class="bx ghost" x="208" y="244" width="176" height="76" rx="2"/>
+<text class="pod mu" x="296" y="272">narad-1</text>
+<rect class="bx bxq tn" x="218" y="284" width="52" height="28" rx="2"/>
+<text class="an mid" x="244" y="304">TLS</text>
+<text class="an mu" x="280" y="304">restarting</text>
+<rect class="bx ghost" x="396" y="244" width="176" height="76" rx="2"/>
+<text class="pod mu" x="484" y="272">narad-2</text>
+<rect class="bx bxq tn" x="406" y="284" width="52" height="28" rx="2"/>
+<text class="an mid" x="432" y="304">TLS</text>
+<text class="an mu" x="468" y="304">not ready</text>
+<rect class="bx ghost" x="20" y="392" width="176" height="76" rx="2"/>
+<text class="pod mu" x="108" y="420">narad-0</text>
+<text class="an mu" x="30" y="452">plaintext</text>
+<text class="an mu" x="110" y="452">not ready</text>
+<rect class="bx" x="208" y="392" width="176" height="76" rx="2"/>
+<text class="pod" x="296" y="420">narad-1</text>
+<rect class="bx bxq tn" x="218" y="432" width="52" height="28" rx="2"/>
+<text class="an mid" x="244" y="452">TLS</text>
+<rect class="bx" x="396" y="392" width="176" height="76" rx="2"/>
+<text class="pod" x="484" y="420">narad-2</text>
+<rect class="bx bxq tn" x="406" y="432" width="52" height="28" rx="2"/>
+<text class="an mid" x="432" y="452">TLS</text>
+<path class="ln" d="M296 132V148M296 186V232"/>
+<path class="ah" d="M289 232L296 244L303 232Z"/>
+<polygon class="msg" points="239,152 335,152 353,182 257,182"/>
+<text class="msg-t" x="296" y="173.5">delete</text>
+<text class="an" x="368" y="173">by hand, once</text>
+<path class="ln1" d="M208 472V480H572V472"/>
+<text class="an mid" x="390" y="504">leader: one of the two</text>
+<text class="an" x="588" y="64">TLS and plaintext pods</text>
+<text class="an" x="588" y="86">cannot talk Raft; the</text>
+<text class="an" x="588" y="108">rollout waits here</text>
+<text class="an" x="588" y="252">no majority, no leader:</text>
+<text class="an" x="588" y="274">topic, user and schema</text>
+<text class="an" x="588" y="296">changes are refused</text>
+<text class="an" x="588" y="400">a TLS majority elects a</text>
+<text class="an" x="588" y="422">leader; the rollout then</text>
+<text class="an" x="588" y="444">restarts the last pod</text>
+<text class="an mu" x="588" y="318">produce, consume go on</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 756" role="img" data-search-exclude aria-labelledby="raft-tls-enable-n-t" aria-describedby="raft-tls-enable-n-d">
+<title id="raft-tls-enable-n-t">Turning on Raft TLS in a running cluster</title>
+<desc id="raft-tls-enable-n-d">Three stages of turning on Raft TLS in a running three-node cluster. After helm upgrade, the StatefulSet restarts narad-2 on TLS. It cannot talk Raft to its plaintext peers and stays not ready, so the rolling update waits, while narad-0, the leader, and narad-1 keep serving on plaintext. You then delete narad-1 by hand, the one manual step. While it restarts on TLS, neither side holds a majority: there is no Raft leader, and topic, user and schema changes are refused, while produce and consume go on. Once narad-1 and narad-2 both run TLS they are a majority and elect a leader, one of the two. narad-0, still on plaintext, is not ready, and the rolling update restarts it on its own.</desc>
+<rect class="rg" x="8" y="8" width="344" height="208" rx="6"/>
+<rect class="rg" x="8" y="264" width="344" height="228" rx="6"/>
+<rect class="rg" x="8" y="504" width="344" height="244" rx="6"/>
+<text class="rl" x="20" y="34">After helm upgrade</text>
+<rect class="bx" x="20" y="48" width="96" height="88" rx="2"/>
+<text class="pod" x="68" y="68">narad-0</text>
+<text class="an mu" x="28" y="95">plaintext</text>
+<rect class="bx bxq tn" x="28" y="106" width="56" height="24" rx="2"/>
+<text class="an mid" x="56" y="123">leader</text>
+<rect class="bx" x="132" y="48" width="96" height="88" rx="2"/>
+<text class="pod" x="180" y="68">narad-1</text>
+<text class="an mu" x="140" y="95">plaintext</text>
+<rect class="bx ghost" x="244" y="48" width="96" height="88" rx="2"/>
+<text class="pod mu" x="292" y="68">narad-2</text>
+<rect class="bx bxq tn" x="252" y="78" width="40" height="24" rx="2"/>
+<text class="an mid" x="272" y="95">TLS</text>
+<text class="an mu" x="252" y="123">not ready</text>
+<text class="an" x="20" y="160">TLS and plaintext pods</text>
+<text class="an" x="20" y="180">cannot talk Raft; the</text>
+<text class="an" x="20" y="200">rollout waits here</text>
+<text class="rl" x="20" y="290">No majority</text>
+<rect class="bx" x="20" y="304" width="96" height="88" rx="2"/>
+<text class="pod" x="68" y="324">narad-0</text>
+<text class="an mu" x="28" y="351">plaintext</text>
+<rect class="bx ghost" x="132" y="304" width="96" height="88" rx="2"/>
+<text class="pod mu" x="180" y="324">narad-1</text>
+<rect class="bx bxq tn" x="140" y="334" width="40" height="24" rx="2"/>
+<text class="an mid" x="160" y="351">TLS</text>
+<text class="an mu" x="140" y="379">restarting</text>
+<rect class="bx ghost" x="244" y="304" width="96" height="88" rx="2"/>
+<text class="pod mu" x="292" y="324">narad-2</text>
+<rect class="bx bxq tn" x="252" y="334" width="40" height="24" rx="2"/>
+<text class="an mid" x="272" y="351">TLS</text>
+<text class="an mu" x="252" y="379">not ready</text>
+<text class="an" x="20" y="416">no majority, no leader:</text>
+<text class="an" x="20" y="436">topic, user and schema</text>
+<text class="an" x="20" y="456">changes are refused</text>
+<text class="an mu" x="20" y="476">produce, consume go on</text>
+<text class="rl" x="20" y="530">TLS majority</text>
+<rect class="bx ghost" x="20" y="544" width="96" height="88" rx="2"/>
+<text class="pod mu" x="68" y="564">narad-0</text>
+<text class="an mu" x="28" y="591">plaintext</text>
+<text class="an mu" x="28" y="619">not ready</text>
+<rect class="bx" x="132" y="544" width="96" height="88" rx="2"/>
+<text class="pod" x="180" y="564">narad-1</text>
+<rect class="bx bxq tn" x="140" y="574" width="40" height="24" rx="2"/>
+<text class="an mid" x="160" y="591">TLS</text>
+<rect class="bx" x="244" y="544" width="96" height="88" rx="2"/>
+<text class="pod" x="292" y="564">narad-2</text>
+<rect class="bx bxq tn" x="252" y="574" width="40" height="24" rx="2"/>
+<text class="an mid" x="272" y="591">TLS</text>
+<text class="an" x="20" y="692">a TLS majority elects a</text>
+<text class="an" x="20" y="712">leader; the rollout then</text>
+<text class="an" x="20" y="732">restarts the last pod</text>
+<path class="ln" d="M180 216V222M180 256V292"/>
+<path class="ah" d="M174 292L180 304L186 292Z"/>
+<polygon class="msg" points="130.5,226 212.5,226 229.5,252 147.5,252"/>
+<text class="msg-t" x="180" y="244">delete</text>
+<text class="an" x="240" y="244">by hand, once</text>
+<path class="ln1" d="M132 640V648H340V640"/>
+<text class="an mid" x="236" y="668">leader: one of the two</text>
+</svg>

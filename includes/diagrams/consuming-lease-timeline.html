@@ -1,0 +1,101 @@
+<svg class="nr-dia__wide" viewBox="0 20 800 464" role="img" aria-labelledby="consuming-lease-timeline-w-t" aria-describedby="consuming-lease-timeline-w-d">
+<title id="consuming-lease-timeline-w-t">The lease is a clock</title>
+<desc id="consuming-lease-timeline-w-d">Four of your workers each consume a message at 0 seconds, which leases it for the topic's visibility timeout, 30 seconds by default. Ack in time: the first acks at 12 seconds and gets 204, and the message is settled. Extend: the second extends at 10 seconds and gets 204, which restarts a full 30 seconds from then, so the lease that would have ended at 30 seconds runs to 40; it acks at 35 seconds and gets 204. Nack: the third nacks at 5 seconds and gets 204, and the message is back in the queue at once. Too slow: 30 seconds pass with no ack from the fourth, so its lease runs out and ord_123 goes back to the queue, where the next consumer takes it. The fourth worker's ack at 38 seconds then gets 410 Gone.</desc>
+<text class="an" x="0" y="78">ack in time</text>
+<rect class="ink" x="116" y="56" width="12" height="32"/>
+<rect class="win" x="132" y="56" width="156" height="32" rx="2"/>
+<text class="an" x="144" y="78">lease</text>
+<text class="an" x="132" y="46">consume</text>
+<rect class="bx tn" x="288" y="56" width="32" height="32"/>
+<text class="cd" x="288" y="46">ack: 204</text>
+<text class="an" x="0" y="158">extend</text>
+<rect class="ink" x="116" y="136" width="12" height="32"/>
+<rect class="win" x="132" y="136" width="455" height="32" rx="2"/>
+<rect class="ln1 dash" x="262" y="136" width="390" height="32"/>
+<text class="an" x="144" y="158">lease</text>
+<path class="ln2" d="M262 114V168"/>
+<text class="cd" x="270" y="126">extend: 204</text>
+<text class="an" x="278" y="158">a full 30 s again</text>
+<path class="ln1 dash" d="M522 136V168"/>
+<text class="an mu mid" x="522" y="190">old end</text>
+<rect class="bx tn" x="587" y="136" width="32" height="32"/>
+<text class="cd" x="587" y="126">ack: 204</text>
+<text class="an" x="0" y="238">nack</text>
+<rect class="ink" x="116" y="216" width="12" height="32"/>
+<rect class="win" x="132" y="216" width="65" height="32" rx="2"/>
+<text class="an" x="140" y="238">lease</text>
+<text class="cd" x="197" y="206">nack: 204</text>
+<path class="ln1" d="M197 232H241"/>
+<path class="ah" d="M241 227L251 232L241 237Z"/>
+<text class="an" x="259" y="238">back in the queue at once</text>
+<text class="an" x="0" y="318">too slow</text>
+<rect class="ink" x="116" y="296" width="12" height="32"/>
+<rect class="win" x="132" y="296" width="390" height="32" rx="2"/>
+<path class="ln1 dash" d="M522 296V328"/>
+<text class="an" x="144" y="318">30 s pass with no ack</text>
+<path class="ln2" d="M626 274V328"/>
+<path class="x" d="M617 303L635 321M635 303L617 321"/>
+<text class="cd" x="634" y="286">ack: 410 Gone</text>
+<path class="ln" d="M522 328V338M522 376V384Q522 400 538 400H560"/>
+<path class="ah" d="M560 393L572 400L560 407Z"/>
+<polygon class="msg" points="465,342 561,342 579,372 483,372"/>
+<text class="msg-t" x="522" y="363.5">ord_123</text>
+<rect class="you" x="572" y="380" width="180" height="40" rx="2"/>
+<text class="lb mid on" x="662" y="407">next consumer</text>
+<path class="ln1" d="M132 444H717M132 444V452M262 444V452M392 444V452M522 444V452M652 444V452"/>
+<text class="an mu mid" x="132" y="474">0 s</text>
+<text class="an mu mid" x="262" y="474">10 s</text>
+<text class="an mu mid" x="392" y="474">20 s</text>
+<text class="an mu mid" x="522" y="474">30 s</text>
+<text class="an mu mid" x="652" y="474">40 s</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 504" role="img" data-search-exclude aria-labelledby="consuming-lease-timeline-n-t" aria-describedby="consuming-lease-timeline-n-d">
+<title id="consuming-lease-timeline-n-t">The lease is a clock</title>
+<desc id="consuming-lease-timeline-n-d">Four of your workers each consume a message at 0 seconds, which leases it for the topic's visibility timeout, 30 seconds by default. Ack in time: the first acks at 12 seconds and gets 204, and the message is settled. Extend: the second extends at 10 seconds and gets 204, which restarts a full 30 seconds from then, so the lease that would have ended at 30 seconds runs to 40; it acks at 35 seconds and gets 204. Nack: the third nacks at 5 seconds and gets 204, and the message is back in the queue at once. Too slow: 30 seconds pass with no ack from the fourth, so its lease runs out and ord_123 goes back to the queue, where the next consumer takes it. The fourth worker's ack at 38 seconds then gets 410 Gone.</desc>
+<text class="an" x="0" y="20">ack in time</text>
+<rect class="ink" x="14" y="52" width="10" height="28"/>
+<rect class="win" x="28" y="52" width="84" height="28" rx="2"/>
+<text class="an" x="36" y="71">lease</text>
+<text class="an" x="28" y="42">consume</text>
+<rect class="bx tn" x="112" y="52" width="28" height="28"/>
+<text class="cd" x="112" y="42">ack: 204</text>
+<text class="an" x="0" y="108">extend</text>
+<rect class="ink" x="14" y="140" width="10" height="28"/>
+<rect class="win" x="28" y="140" width="245" height="28" rx="2"/>
+<rect class="ln1 dash" x="98" y="140" width="210" height="28"/>
+<text class="an" x="36" y="159">lease</text>
+<path class="ln2" d="M98 118V168"/>
+<text class="cd" x="104" y="130">extend: 204</text>
+<text class="an" x="106" y="159">a full 30 s again</text>
+<path class="ln1 dash" d="M238 140V168"/>
+<text class="an mu mid" x="238" y="185">old end</text>
+<rect class="bx tn" x="273" y="140" width="28" height="28"/>
+<text class="cd" x="273" y="130">ack: 204</text>
+<text class="an" x="0" y="196">nack</text>
+<rect class="ink" x="14" y="228" width="10" height="28"/>
+<rect class="win" x="28" y="228" width="35" height="28" rx="2"/>
+<text class="cd" x="63" y="218">nack: 204</text>
+<path class="ln1" d="M63 242H91"/>
+<path class="ah" d="M91 237L101 242L91 247Z"/>
+<text class="an" x="109" y="247">back in the queue at once</text>
+<text class="an" x="0" y="284">too slow</text>
+<rect class="ink" x="14" y="316" width="10" height="28"/>
+<rect class="win" x="28" y="316" width="210" height="28" rx="2"/>
+<path class="ln1 dash" d="M238 316V344"/>
+<text class="an" x="36" y="335">30 s pass with no ack</text>
+<path class="ln2" d="M294 294V344"/>
+<path class="x" d="M286 322L302 338M302 322L286 338"/>
+<text class="cd end" x="286" y="306">ack: 410 Gone</text>
+<path class="ln" d="M238 344V352M238 386V392"/>
+<path class="ah" d="M232 392L238 404L244 392Z"/>
+<polygon class="msg" points="188.5,356 270.5,356 287.5,382 205.5,382"/>
+<text class="msg-t" x="238" y="374">ord_123</text>
+<rect class="you" x="168" y="404" width="140" height="40" rx="2"/>
+<text class="lb mid on" x="238" y="429">next consumer</text>
+<path class="ln1" d="M28 468H343M28 468V476M98 468V476M168 468V476M238 468V476M308 468V476"/>
+<text class="an mu mid" x="28" y="494">0 s</text>
+<text class="an mu mid" x="98" y="494">10 s</text>
+<text class="an mu mid" x="168" y="494">20 s</text>
+<text class="an mu mid" x="238" y="494">30 s</text>
+<text class="an mu mid" x="308" y="494">40 s</text>
+</svg>

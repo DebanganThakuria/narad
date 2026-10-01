@@ -1,0 +1,105 @@
+<svg class="nr-dia__wide" viewBox="0 12 800 508" role="img" aria-labelledby="index-journey-w-t" aria-describedby="index-journey-w-d">
+<title id="index-journey-w-t">One message, end to end</title>
+<desc id="index-journey-w-d">The life of one message, ord_123, across five actors, in order but not to scale. 1: the producer sends POST /produce to narad-0, which fsyncs it into its ingress WAL and answers 202 Accepted. 2: narad-0's dispatcher commits it over QUIC to narad-2, the partition's owner, which appends it, fsyncs, reads it back and checks the CRC, then advances the high watermark, and ord_123 becomes visible. narad-2 confirms, and narad-0's WAL entry becomes reclaimable. 3: the fan-out cursor on narad-2 commits a copy to narad-1, the child partition's owner. 4: a consumer's GET /consume gets ord_123 from narad-2 with a receipt handle. 5: the consumer acks it with POST /ack and gets 204.</desc>
+<text class="lb" x="0" y="34">Producer</text>
+<rect class="ink" x="108" y="24" width="64" height="12"/>
+<rect class="bx bxq" x="108" y="116" width="692" height="40" rx="2"/>
+<text class="pod" x="42" y="136">narad-0</text>
+<text class="an" x="0" y="158">accepting</text>
+<rect class="bx bx3" x="108" y="236" width="692" height="64" rx="2"/>
+<text class="pod" x="42" y="262">narad-2</text>
+<text class="an" x="0" y="284">owner</text>
+<rect class="bx bxq" x="108" y="380" width="432" height="40" rx="2"/>
+<text class="pod" x="42" y="398">narad-1</text>
+<text class="an" x="0" y="420">child owner</text>
+<text class="lb" x="0" y="510">Consumer</text>
+<rect class="ink" x="540" y="500" width="260" height="12"/>
+<path class="ln" d="M124 36V104"/>
+<path class="ah" d="M117 104L124 116L131 104Z"/>
+<path class="ln1" d="M160 116V36"/>
+<path class="ah-o" d="M167 47L160 36L153 47"/>
+<circle class="sc" cx="188" cy="64" r="13"/><text class="sn" x="188" y="69.5">1</text>
+<text class="cd" x="210" y="70">POST /produce</text>
+<text class="cd" x="210" y="92">202 Accepted</text>
+<text class="an" x="172" y="142">fsync into the WAL</text>
+<path class="ln" d="M220 156V224"/>
+<path class="ah" d="M213 224L220 236L227 224Z"/>
+<circle class="sc" cx="244" cy="184" r="13"/><text class="sn" x="244" y="189.5">2</text>
+<text class="an" x="266" y="190">commit over QUIC</text>
+<text class="an" x="232" y="262">append, fsync,</text>
+<text class="an" x="232" y="284">read back, CRC</text>
+<path class="ln1 dash" d="M420 220V253M420 283V316"/>
+<polygon class="msg" points="363,253 459,253 477,283 381,283"/>
+<text class="msg-t" x="420" y="274.5">ord_123</text>
+<text class="an end" x="412" y="212">high watermark: visible</text>
+<path class="ln1 dash" d="M500 236V156"/>
+<path class="ah-o" d="M507 167L500 156L493 167"/>
+<text class="an" x="512" y="142">WAL entry reclaimable</text>
+<path class="ln2" d="M500 300V368"/>
+<path class="ah" d="M494 368L500 380L506 368Z"/>
+<circle class="sc" cx="360" cy="338" r="13"/><text class="sn" x="360" y="343.5">3</text>
+<text class="an" x="382" y="344">fan-out copy</text>
+<text class="an end" x="488" y="406">child copy committed</text>
+<path class="ln" d="M560 500V312"/>
+<path class="ah" d="M567 312L560 300L553 312Z"/>
+<path class="ln1" d="M596 300V500"/>
+<path class="ah-o" d="M589 489L596 500L603 489"/>
+<circle class="sc" cx="578" cy="452" r="13"/><text class="sn" x="578" y="457.5">4</text>
+<text class="cd end" x="548" y="446">GET /consume</text>
+<text class="an end" x="548" y="468">200, receipt handle</text>
+<path class="ln" d="M640 500V312"/>
+<path class="ah" d="M647 312L640 300L633 312Z"/>
+<path class="ln1" d="M676 300V500"/>
+<path class="ah-o" d="M669 489L676 500L683 489"/>
+<circle class="sc" cx="658" cy="452" r="13"/><text class="sn" x="658" y="457.5">5</text>
+<text class="cd" x="688" y="446">POST /ack</text>
+<text class="cd" x="688" y="468">204</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 656" role="img" data-search-exclude aria-labelledby="index-journey-n-t" aria-describedby="index-journey-n-d">
+<title id="index-journey-n-t">One message, end to end</title>
+<desc id="index-journey-n-d">The life of one message, ord_123, across five actors, in order but not to scale. 1: the producer sends POST /produce to narad-0, which fsyncs it into its ingress WAL and answers 202 Accepted. 2: narad-0's dispatcher commits it over QUIC to narad-2, the partition's owner, which appends it, fsyncs, reads it back and checks the CRC, then advances the high watermark, and ord_123 becomes visible. narad-2 confirms, and narad-0's WAL entry becomes reclaimable. 3: the fan-out cursor on narad-2 commits a copy to narad-1, the child partition's owner. 4: a consumer's GET /consume gets ord_123 from narad-2 with a receipt handle. 5: the consumer acks it with POST /ack and gets 204.</desc>
+<text class="lb" x="40" y="18">Producer</text>
+<rect class="ink" x="40" y="28" width="304" height="12"/>
+<path class="ln" d="M184 40V56"/>
+<path class="ah" d="M177 56L184 68L191 56Z"/>
+<rect class="bx bxq" x="40" y="68" width="304" height="76" rx="2"/>
+<text class="cd" x="56" y="90">narad-0</text>
+<text class="an" x="56" y="112">producer's POST /produce:</text>
+<text class="an" x="56" y="132">fsync into the WAL, 202</text>
+<circle class="sc" cx="16" cy="86" r="12"/><text class="sn" x="16" y="91">1</text>
+<path class="ln2" d="M184 144V160"/>
+<path class="ah" d="M178 160L184 172L190 160Z"/>
+<rect class="bx bx3" x="40" y="172" width="304" height="76" rx="2"/>
+<text class="cd" x="56" y="194">narad-2</text>
+<text class="an" x="56" y="216">commit over QUIC: append,</text>
+<text class="an" x="56" y="236">fsync, read back, CRC</text>
+<circle class="sc" cx="16" cy="190" r="12"/><text class="sn" x="16" y="195">2</text>
+<path class="ln1 dash" d="M184 248V260M184 292V312"/>
+<path class="ah-o" d="M177 313L184 324L191 313"/>
+<polygon class="msg" points="134.5,263 216.5,263 233.5,289 151.5,289"/>
+<text class="msg-t" x="184" y="281">ord_123</text>
+<text class="an" x="240" y="272">high watermark:</text>
+<text class="an" x="240" y="292">visible</text>
+<rect class="bx bxq" x="40" y="324" width="304" height="56" rx="2"/>
+<text class="cd" x="56" y="346">narad-0</text>
+<text class="an" x="56" y="368">WAL entry reclaimable</text>
+<path class="ln2" d="M184 380V396"/>
+<path class="ah" d="M178 396L184 408L190 396Z"/>
+<rect class="bx bxq" x="40" y="408" width="304" height="56" rx="2"/>
+<text class="cd" x="56" y="430">narad-1</text>
+<text class="an" x="56" y="452">fan-out copy committed</text>
+<circle class="sc" cx="16" cy="426" r="12"/><text class="sn" x="16" y="431">3</text>
+<path class="ln2" d="M184 464V480"/>
+<path class="ah" d="M178 480L184 492L190 480Z"/>
+<rect class="bx bx3" x="40" y="492" width="304" height="76" rx="2"/>
+<text class="cd" x="56" y="514">narad-2</text>
+<text class="an" x="56" y="536">consumer's GET /consume:</text>
+<text class="an" x="56" y="556">200, receipt handle</text>
+<circle class="sc" cx="16" cy="510" r="12"/><text class="sn" x="16" y="515">4</text>
+<path class="ln2" d="M184 568V584"/>
+<path class="ah" d="M178 584L184 596L190 584Z"/>
+<rect class="bx bx3" x="40" y="596" width="304" height="56" rx="2"/>
+<text class="cd" x="56" y="618">narad-2</text>
+<text class="an" x="56" y="640">consumer's POST /ack: 204</text>
+<circle class="sc" cx="16" cy="614" r="12"/><text class="sn" x="16" y="619">5</text>
+</svg>

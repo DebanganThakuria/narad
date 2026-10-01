@@ -1,0 +1,65 @@
+<svg class="nr-dia__wide" viewBox="0 0 800 440" role="img" aria-labelledby="compare-durability-w-t" aria-describedby="compare-durability-w-d">
+<title id="compare-durability-w-t">What an ack means: on disk, and on more than one machine</title>
+<desc id="compare-durability-w-d">Each system's default sits in a grid of two questions: is the message fsynced to disk before the ack, and is it on more than one machine before the ack. Narad fsyncs before the ack and keeps one copy. RabbitMQ quorum queues and Pulsar with BookKeeper fsync and replicate before the ack. Kafka with RF=3 and acks=all, NATS JetStream at R3, whose quorum ack is in memory, and RabbitMQ streams replicate before the ack but do not fsync. NATS JetStream at R1, its default, and Redis Streams do neither. SQS is managed: it stores a message across availability zones before it responds, and its internals are not published.</desc>
+<text class="rl" x="200" y="24">One copy when the ack goes out</text>
+<text class="rl" x="518" y="24">Replicated before the ack</text>
+<text class="rl" x="0" y="100">Fsynced before</text>
+<text class="rl" x="0" y="122">the ack</text>
+<text class="rl" x="0" y="284">Not fsynced before</text>
+<text class="rl" x="0" y="306">the ack (default)</text>
+<rect class="rg" x="180" y="40" width="302" height="132" rx="6"/>
+<rect class="rg" x="498" y="40" width="302" height="132" rx="6"/>
+<rect class="rg" x="180" y="188" width="302" height="204" rx="6"/>
+<rect class="rg" x="498" y="188" width="302" height="204" rx="6"/>
+<polygon class="msg" points="274,91 370,91 388,121 292,121"/>
+<text class="msg-t" x="331" y="112.5">Narad</text>
+<rect class="bx bxq" x="514" y="56" width="270" height="44" rx="2"/>
+<text class="an mid" x="649" y="84">RabbitMQ quorum queues</text>
+<rect class="bx bxq" x="514" y="112" width="270" height="44" rx="2"/>
+<text class="an mid" x="649" y="140">Pulsar (BookKeeper)</text>
+<rect class="bx bxq" x="196" y="204" width="270" height="44" rx="2"/>
+<text class="an mid" x="331" y="232">NATS JetStream R1 (default)</text>
+<rect class="bx bxq" x="196" y="260" width="270" height="44" rx="2"/>
+<text class="an mid" x="331" y="288">Redis Streams</text>
+<rect class="bx bxq" x="514" y="204" width="270" height="44" rx="2"/>
+<text class="an mid" x="649" y="232">Kafka, RF=3, <tspan class="cd">acks=all</tspan></text>
+<rect class="bx bxq" x="514" y="260" width="270" height="60" rx="2"/>
+<text class="an mid" x="649" y="284">NATS JetStream R3</text>
+<text class="an mid mu" x="649" y="306">quorum ack in memory</text>
+<rect class="bx bxq" x="514" y="332" width="270" height="44" rx="2"/>
+<text class="an mid" x="649" y="360">RabbitMQ streams</text>
+<text class="an mu" x="180" y="428">SQS: managed; stored across AZs, internals not published</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 700" role="img" data-search-exclude aria-labelledby="compare-durability-n-t" aria-describedby="compare-durability-n-d">
+<title id="compare-durability-n-t">What an ack means: on disk, and on more than one machine</title>
+<desc id="compare-durability-n-d">Each system's default sits in a grid of two questions: is the message fsynced to disk before the ack, and is it on more than one machine before the ack. Narad fsyncs before the ack and keeps one copy. RabbitMQ quorum queues and Pulsar with BookKeeper fsync and replicate before the ack. Kafka with RF=3 and acks=all, NATS JetStream at R3, whose quorum ack is in memory, and RabbitMQ streams replicate before the ack but do not fsync. NATS JetStream at R1, its default, and Redis Streams do neither. SQS is managed: it stores a message across availability zones before it responds, and its internals are not published.</desc>
+<text class="lb" x="8" y="22">Fsynced before the ack</text>
+<rect class="rg" x="8" y="36" width="344" height="92" rx="6"/>
+<text class="rl" x="24" y="60">One copy when the ack goes out</text>
+<polygon class="msg" points="130.5,84 212.5,84 229.5,110 147.5,110"/>
+<text class="msg-t" x="180" y="102">Narad</text>
+<rect class="rg" x="8" y="140" width="344" height="128" rx="6"/>
+<text class="rl" x="24" y="164">Replicated before the ack</text>
+<rect class="bx bxq" x="24" y="176" width="312" height="36" rx="2"/>
+<text class="an mid" x="180" y="199">RabbitMQ quorum queues</text>
+<rect class="bx bxq" x="24" y="220" width="312" height="36" rx="2"/>
+<text class="an mid" x="180" y="243">Pulsar (BookKeeper)</text>
+<text class="lb" x="8" y="300">Not fsynced before the ack (default)</text>
+<rect class="rg" x="8" y="314" width="344" height="128" rx="6"/>
+<text class="rl" x="24" y="338">One copy when the ack goes out</text>
+<rect class="bx bxq" x="24" y="350" width="312" height="36" rx="2"/>
+<text class="an mid" x="180" y="373">NATS JetStream R1 (default)</text>
+<rect class="bx bxq" x="24" y="394" width="312" height="36" rx="2"/>
+<text class="an mid" x="180" y="417">Redis Streams</text>
+<rect class="rg" x="8" y="454" width="344" height="188" rx="6"/>
+<text class="rl" x="24" y="478">Replicated before the ack</text>
+<rect class="bx bxq" x="24" y="490" width="312" height="36" rx="2"/>
+<text class="an mid" x="180" y="513">Kafka, RF=3, <tspan class="cd">acks=all</tspan></text>
+<rect class="bx bxq" x="24" y="534" width="312" height="52" rx="2"/>
+<text class="an mid" x="180" y="556">NATS JetStream R3</text>
+<text class="an mid mu" x="180" y="576">quorum ack in memory</text>
+<rect class="bx bxq" x="24" y="594" width="312" height="36" rx="2"/>
+<text class="an mid" x="180" y="617">RabbitMQ streams</text>
+<text class="an mu" x="8" y="670">SQS: managed; stored across AZs,</text>
+<text class="an mu" x="8" y="690">internals not published</text>
+</svg>

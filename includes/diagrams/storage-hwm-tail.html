@@ -1,0 +1,91 @@
+<svg class="nr-dia__wide" viewBox="0 12 800 376" role="img" aria-labelledby="storage-hwm-tail-w-t" aria-describedby="storage-hwm-tail-w-d">
+<title id="storage-hwm-tail-w-t">A commit against the high watermark</title>
+<desc id="storage-hwm-tail-w-d">The active segment as a strip of offsets. Offsets below the high watermark, H, are visible: consumers and fan-out read them. A commit batch goes in at T, the next append, and sits above H while four steps run: 1, append; 2, fsync; 3, read back and check the CRC; 4, advance H over the batch, which makes it visible. Until step 4 the batch is a hidden tail: written, never exposed. The hwm file is written at Close, emptied once before the first advance after an open, and an empty file means recovery takes the boundary from the CRC-checked tail. A crash before step 4 leaves the hidden copy behind, and the ingress WAL commits the batch again at fresh offsets, so the hidden copy is a duplicate in waiting. A failed commit truncates everything above H before the error returns.</desc>
+<circle class="sc" cx="13" cy="30" r="13"/><text class="sn" x="13" y="35.5">1</text>
+<text class="an" x="34" y="36">append at T</text>
+<circle class="sc" cx="168.4" cy="30" r="13"/><text class="sn" x="168.4" y="35.5">2</text>
+<text class="an" x="189.4" y="36">fsync</text>
+<circle class="sc" cx="269.2" cy="30" r="13"/><text class="sn" x="269.2" y="35.5">3</text>
+<text class="an" x="290.2" y="36">read back, check CRC</text>
+<circle class="sc" cx="229" cy="78" r="13"/><text class="sn" x="229" y="83.5">4</text>
+<text class="an" x="250" y="84">advance H over the batch</text>
+<path class="ln2" d="M216 104H348"/>
+<path class="ah" d="M348 110L360 104L348 98Z"/>
+<text class="an mid" x="216" y="128">high watermark H</text>
+<rect class="bx tn" x="0" y="160" width="36" height="36"/>
+<text class="cd mu mid" x="18" y="150">0</text>
+<rect class="bx tn" x="36" y="160" width="36" height="36"/>
+<rect class="bx tn" x="72" y="160" width="36" height="36"/>
+<rect class="bx tn" x="108" y="160" width="36" height="36"/>
+<rect class="bx tn" x="144" y="160" width="36" height="36"/>
+<rect class="bx tn" x="180" y="160" width="36" height="36"/>
+<rect class="msg" x="216" y="160" width="144" height="36"/>
+<text class="msg-t" x="288" y="184">batch</text>
+<text class="cd mu mid" x="234" y="150">H</text>
+<text class="cd mu mid" x="342" y="150">T-1</text>
+<rect class="bx ghost" x="360" y="160" width="36" height="36"/>
+<text class="cd mu mid" x="378" y="150">T</text>
+<text class="an" x="408" y="184">next append</text>
+<path class="ln" d="M216 144V212"/>
+<text class="an" x="0" y="236">visible: consumers and</text>
+<text class="an" x="0" y="258">fan-out read these</text>
+<text class="an" x="228" y="236">hidden tail: written,</text>
+<text class="an" x="228" y="258">never exposed</text>
+<rect class="bx tn" x="560" y="120" width="240" height="160" rx="2"/>
+<text class="cd" x="576" y="148">hwm</text>
+<text class="an" x="576" y="176">written at Close; emptied</text>
+<text class="an" x="576" y="198">once before the first</text>
+<text class="an" x="576" y="220">advance after an open;</text>
+<text class="an" x="576" y="242">empty: recover from the</text>
+<text class="an" x="576" y="264">CRC-checked tail</text>
+<text class="an mu" x="0" y="312">crash before step 4: the ingress WAL</text>
+<text class="an mu" x="0" y="334">commits the batch again at fresh</text>
+<text class="an mu" x="0" y="356">offsets, so the hidden copy is a</text>
+<text class="an mu" x="0" y="378">duplicate in waiting</text>
+<text class="an mu" x="420" y="312">failed commit: everything above H</text>
+<text class="an mu" x="420" y="334">is truncated before the error</text>
+<text class="an mu" x="420" y="356">returns</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 548" role="img" data-search-exclude aria-labelledby="storage-hwm-tail-n-t" aria-describedby="storage-hwm-tail-n-d">
+<title id="storage-hwm-tail-n-t">A commit against the high watermark</title>
+<desc id="storage-hwm-tail-n-d">The active segment as a strip of offsets. Offsets below the high watermark, H, are visible: consumers and fan-out read them. A commit batch goes in at T, the next append, and sits above H while four steps run: 1, append; 2, fsync; 3, read back and check the CRC; 4, advance H over the batch, which makes it visible. Until step 4 the batch is a hidden tail: written, never exposed. The hwm file is written at Close, emptied once before the first advance after an open, and an empty file means recovery takes the boundary from the CRC-checked tail. A crash before step 4 leaves the hidden copy behind, and the ingress WAL commits the batch again at fresh offsets, so the hidden copy is a duplicate in waiting. A failed commit truncates everything above H before the error returns.</desc>
+<circle class="sc" cx="20" cy="16" r="12"/><text class="sn" x="20" y="21">1</text>
+<text class="an" x="40" y="21">append at T</text>
+<circle class="sc" cx="20" cy="44" r="12"/><text class="sn" x="20" y="49">2</text>
+<text class="an" x="40" y="49">fsync</text>
+<circle class="sc" cx="20" cy="72" r="12"/><text class="sn" x="20" y="77">3</text>
+<text class="an" x="40" y="77">read back, check CRC</text>
+<circle class="sc" cx="20" cy="100" r="12"/><text class="sn" x="20" y="105">4</text>
+<text class="an" x="40" y="105">advance H over the batch</text>
+<path class="ln2" d="M148 132H248"/>
+<path class="ah" d="M248 138L260 132L248 126Z"/>
+<text class="an mid" x="148" y="156">high watermark H</text>
+<rect class="bx tn" x="8" y="188" width="28" height="28"/>
+<text class="cd mu mid" x="22" y="180">0</text>
+<rect class="bx tn" x="36" y="188" width="28" height="28"/>
+<rect class="bx tn" x="64" y="188" width="28" height="28"/>
+<rect class="bx tn" x="92" y="188" width="28" height="28"/>
+<rect class="bx tn" x="120" y="188" width="28" height="28"/>
+<rect class="msg" x="148" y="188" width="112" height="28"/>
+<text class="msg-t" x="204" y="207">batch</text>
+<text class="cd mu mid" x="162" y="180">H</text>
+<rect class="bx ghost" x="260" y="188" width="28" height="28"/>
+<text class="cd mu mid" x="274" y="180">T</text>
+<path class="ln" d="M148 172V232"/>
+<text class="an" x="8" y="252">visible: consumers</text>
+<text class="an" x="8" y="272">and fan-out read</text>
+<text class="an" x="160" y="252">hidden tail: written,</text>
+<text class="an" x="160" y="272">never exposed</text>
+<text class="an" x="296" y="207">next</text>
+<text class="an" x="296" y="227">append</text>
+<rect class="bx tn" x="8" y="300" width="344" height="108" rx="2"/>
+<text class="cd" x="24" y="326">hwm</text>
+<text class="an" x="24" y="350">written at Close; emptied once before</text>
+<text class="an" x="24" y="370">the first advance after an open; empty:</text>
+<text class="an" x="24" y="390">recover from the CRC-checked tail</text>
+<text class="an mu" x="8" y="440">crash before step 4: the ingress WAL</text>
+<text class="an mu" x="8" y="460">commits the batch again at fresh offsets,</text>
+<text class="an mu" x="8" y="480">so the hidden copy is a duplicate in waiting</text>
+<text class="an mu" x="8" y="518">failed commit: everything above H is</text>
+<text class="an mu" x="8" y="538">truncated before the error returns</text>
+</svg>

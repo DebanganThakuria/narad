@@ -38,6 +38,6 @@ which versions receive fixes and which configurations are out of scope.
 [Project status](./README.md#project-status) states what is well covered
 by tests and the three structural limits worth weighing: no ordering
 guarantee, no synchronous replication, and months of track record rather
-than years. [Compare](https://debanganthakuria.github.io/narad/compare/)
+than years. [Compare](https://debanganthakuria.github.io/narad/get-started/compare/)
 puts those against Kafka, NATS, RabbitMQ, SQS, Redis, and Pulsar, and
 says which to pick instead when one of them is a hard requirement.
