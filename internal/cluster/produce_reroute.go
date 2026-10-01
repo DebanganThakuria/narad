@@ -1,9 +1,9 @@
 package cluster
 
-// produceDispatchStuckKey identifies a destination partition independently of
-// where its owner currently lives, so a partition stays recognisably "stuck"
-// across owner-address changes.
-type produceDispatchStuckKey struct {
+// dispatchDestKey identifies one destination partition by (topic,
+// partition), independent of its owner's address, so a destination's
+// queue and failure state carry across owner-address changes.
+type dispatchDestKey struct {
 	topic     string
 	partition int
 }
@@ -15,9 +15,9 @@ type produceDispatchStuckKey struct {
 // dies can read a full window of them. A memoized answer can name a
 // partition that started failing later in the same read; its commit
 // then fails and its records move on from there.
-func (d *ProduceDispatcher) rerouteFor(st *produceDispatchState, key produceDispatchStuckKey) (*dispatchDest, bool) {
+func (d *ProduceDispatcher) rerouteFor(st *produceDispatchState, key dispatchDestKey) (*dispatchDest, bool) {
 	if st.rerouteEpoch != st.readEpoch || st.rerouteMemo == nil {
-		st.rerouteMemo = map[produceDispatchStuckKey]int{}
+		st.rerouteMemo = map[dispatchDestKey]int{}
 		st.rerouteEpoch = st.readEpoch
 	}
 	partition, ok := st.rerouteMemo[key]
@@ -31,7 +31,7 @@ func (d *ProduceDispatcher) rerouteFor(st *produceDispatchState, key produceDisp
 	if partition < 0 {
 		return nil, false
 	}
-	return st.dest(produceDispatchStuckKey{topic: key.topic, partition: partition}), true
+	return st.dest(dispatchDestKey{topic: key.topic, partition: partition}), true
 }
 
 // rerouteTarget picks a live-owner partition of the same topic to stand in
@@ -63,7 +63,7 @@ func (d *ProduceDispatcher) rerouteTarget(st *produceDispatchState, topicName st
 		if !ok || cached.err != nil {
 			continue
 		}
-		if dest, tracked := st.dests[produceDispatchStuckKey{topic: topicName, partition: candidate}]; tracked && (dest.failing() || dest.unresolved || dest.slow) {
+		if dest, tracked := st.dests[dispatchDestKey{topic: topicName, partition: candidate}]; tracked && (dest.failing() || dest.unresolved || dest.slow) {
 			continue
 		}
 		return cached.target, true

@@ -92,6 +92,7 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 - A produce whose body the topic's schema refuses, or a schema that cannot be registered or is not compatible with the current version ([Schema validation rules](schema-rules.md)).
 - An ack, extend or nack without `receipt_handle`, or with a handle that cannot be decoded (a handle is `partition:offset:nonce`).
 - A consume with a bad `wait`, `partition`, `offset` or `max`, a replay (`offset`) without `partition`, or `max` together with `offset`.
+- A batch consume (`max`) without an `X-Narad-Client` header ([Required headers](../build/connect.md#required-headers)).
 - More than 100 messages in a batch produce or 100 handles in a batch ack.
 - An invalid username, a password of 0 or more than 72 bytes, or an invalid grant.
 
@@ -211,8 +212,8 @@ A handle carries no topic, so a handle from another topic, or one naming a parti
 
 | Limit | Setting |
 |---|---|
-| Concurrent consumes per user, or per client IP with security off; a batch consume counts as its `max` | `http.max_consume_in_flight_per_identity`, 1024 by default |
-| Concurrent produces per user (unreleased); a batch produce counts as its message count | `http.max_produce_in_flight_per_identity`, off by default |
+| Concurrent consumes per user, or per client IP with security off; a batch consume counts as its `max`, clamped to the cap | `http.max_consume_in_flight_per_identity`, 1024 by default |
+| Concurrent produces per user (unreleased); a batch produce counts as its message count, clamped to the cap | `http.max_produce_in_flight_per_identity`, off by default |
 | Wrong passwords for one existing user: 5, then one attempt every 12 seconds | none |
 
 The error message says which limit was hit, in the same order:

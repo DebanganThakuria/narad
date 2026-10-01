@@ -9,7 +9,7 @@
 //     has been fsynced into the WAL;
 //   - the dispatch checkpoint (Load/StoreProduceCheckpoint): everything
 //     below it has been committed to its partition log, so the WAL may
-//     compact past it (CompactProduceBefore).
+//     compact past it (CompactProduceBefore) once it is on disk.
 //
 // A Manager is safe for concurrent use.
 package ingress
@@ -74,6 +74,11 @@ type Manager struct {
 	// or written by StoreProduceCheckpoint, so DispatchBacklog costs two
 	// atomic loads rather than a file read.
 	storedCheckpoint atomic.Uint64
+	// raisedFrom is the checkpoint OpenManager read when it was below the
+	// oldest WAL segment and had to be raised to it (see
+	// CheckpointRaised); 0 with raised false otherwise.
+	raisedFrom uint64
+	raised     bool
 }
 
 // DefaultWALOptions returns the WAL options used for the ingress
@@ -110,15 +115,49 @@ func OpenManager(dataDir string, opts wal.Options) (*Manager, error) {
 		_ = log.Close()
 		return nil, fmt.Errorf("ingress: produce checkpoint %d is ahead of recovered WAL next seq %d (missing WAL segments?)", checkpoint, nextSeq)
 	}
+	// Segments are only removed behind a durable checkpoint, so every seq
+	// below the oldest one left was committed. A checkpoint below it (a
+	// disk that lost the checkpoint's last write, or a WAL compacted by a
+	// build that did not wait for the checkpoint's sync) would leave the
+	// dispatcher facing a gap wider than it reads ahead, and it would
+	// never dispatch again: start at the oldest segment instead.
+	first, err := log.FirstSeq()
+	if err != nil {
+		_ = log.Close()
+		return nil, err
+	}
 	manager := &Manager{
 		produceDir:      produceDir,
 		log:             log,
 		durableAdvanced: make(chan struct{}, 1),
 		checkpoint:      newCheckpointWriter(produceDir, produceCheckpointFile),
 	}
+	if checkpoint < first {
+		manager.raisedFrom, manager.raised = checkpoint, true
+		checkpoint = first
+	}
+	// Make the value durable before the dispatcher compacts behind it: a
+	// process crash can leave the last store written but not flushed.
+	if checkpoint > 0 {
+		if err := manager.checkpoint.storeDurable(checkpoint); err != nil {
+			_ = manager.checkpoint.close()
+			_ = log.Close()
+			return nil, err
+		}
+	}
 	manager.durableNext.Store(nextSeq)
 	manager.storedCheckpoint.Store(checkpoint)
 	return manager, nil
+}
+
+// CheckpointRaised reports whether OpenManager found the dispatch
+// checkpoint below the oldest WAL segment and started dispatch at that
+// segment instead, with the value it read and the one it used.
+func (m *Manager) CheckpointRaised() (from, to uint64, raised bool) {
+	if m == nil || !m.raised {
+		return 0, 0, false
+	}
+	return m.raisedFrom, m.storedCheckpoint.Load(), true
 }
 
 // AcceptProduce validates and durably appends one produce request to
@@ -265,20 +304,32 @@ func (m *Manager) ReplayProduceFromCursorPeek(cursor wal.Cursor, peek wal.Peek, 
 	}, cursor, fn)
 }
 
-// CompactProduceBefore drops WAL segments wholly below seq. Callers
-// must only pass a stored dispatch checkpoint — compacting past
-// undispatched records loses them. The store need not be synced yet:
-// every seq below a stored checkpoint is committed, and a replay from
-// an older, synced value starts at the first segment that is left.
-func (m *Manager) CompactProduceBefore(seq uint64) error {
+// CompactProduceBefore drops WAL segments wholly below seq, and never
+// past the last checkpoint that is durable on disk. Callers must only
+// pass a stored dispatch checkpoint: compacting past undispatched
+// records loses them. The store may still be waiting for its sync, so
+// compaction stops at the synced value and catches up on a later call:
+// after a power loss the checkpoint can come back as the synced value
+// while unlinked segments stay gone, and a checkpoint far below the
+// oldest segment is a gap the dispatcher cannot read across. It returns
+// the bound it compacted to, min(seq, the synced checkpoint), so a
+// caller knows when it has caught up with seq; the bound means nothing
+// when err is set.
+func (m *Manager) CompactProduceBefore(seq uint64) (uint64, error) {
 	if m == nil || m.log == nil {
-		return errors.New("ingress: manager is nil")
+		return 0, errors.New("ingress: manager is nil")
 	}
-	return m.log.CompactBefore(seq)
+	m.checkpointMu.Lock()
+	durable := m.checkpoint.durable()
+	m.checkpointMu.Unlock()
+	to := min(seq, durable)
+	return to, m.log.CompactBefore(to)
 }
 
 // LoadProduceCheckpoint reads the persisted dispatch checkpoint (the
-// next sequence to dispatch). A missing checkpoint reads as 0.
+// next sequence to dispatch). A missing checkpoint reads as 0. After
+// OpenManager raised a stale checkpoint (see CheckpointRaised) the file
+// holds the raised value.
 func (m *Manager) LoadProduceCheckpoint() (uint64, error) {
 	if m == nil {
 		return 0, errors.New("ingress: manager is nil")

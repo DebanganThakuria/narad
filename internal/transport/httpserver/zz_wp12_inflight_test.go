@@ -21,7 +21,13 @@ func TestZZWP12ConsumeInFlightCapCountsBatch(t *testing.T) {
 	t.Cleanup(srv.Close)
 	get := func(query string) int {
 		t.Helper()
-		resp, err := http.Get(srv.URL + "/v1/topics/orders/consume" + query)
+		req, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/topics/orders/consume"+query, nil)
+		if err != nil {
+			t.Error(err)
+			return 0
+		}
+		req.Header.Set(ClientHeader, "test")
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Error(err)
 			return 0
@@ -54,7 +60,12 @@ func TestZZWP12ConsumeInFlightCapCountsBatch(t *testing.T) {
 	close(br2.release)
 	srv2 := httptest.NewServer(NewRouterWithOptions(newTestSet(br2), newTestLogger(), nil, nil, nil, RouterOptions{ConsumeInFlightPerIdentity: 10}))
 	t.Cleanup(srv2.Close)
-	resp, err := http.Get(srv2.URL + "/v1/topics/orders/consume?max=50")
+	req, err := http.NewRequest(http.MethodGet, srv2.URL+"/v1/topics/orders/consume?max=50", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(ClientHeader, "test")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -169,7 +169,7 @@ A nack does not count anything. A message that always fails is nacked and delive
 **Unreleased:** in master, not in v3.0.1.
 
 ```sh title="Take up to 10 messages in one request"
-curl -i -u "$AUTH" "$NARAD/v1/topics/orders/consume?wait=10s&max=10"
+curl -i -u "$AUTH" -H 'X-Narad-Client: curl' "$NARAD/v1/topics/orders/consume?wait=10s&max=10"
 ```
 
 ```http title="Response"
@@ -208,11 +208,12 @@ Date: Mon, 28 Sep 2026 19:22:32 GMT
 }
 ```
 
+- A batch consume must send an `X-Narad-Client` header, with any value, or it gets [`400`](../reference/status-codes.md#status-400). The Go SDK and the CLI send it. A consume reserves messages, and a page on another site could send a `GET` with an operator's cached Basic credentials; the header forces a CORS preflight, which Narad never approves. A single consume does not need it.
 - `max` is 1 to 100. Each message in `messages` is exactly what a single consume returns, with its own receipt handle and its own lease, and you settle each one on its own or [in a batch](#ack-batch). Any `max`, `max=1` included, gets this shape; without `max` you get one message, as before.
 - A batch is what is ready now. The request is never held to fill it, so expect fewer than `max` messages. When nothing is ready it long-polls like a single consume and answers `204` if `wait` runs out.
 - A batch stops early when its messages add up to about 4 MiB, and a response carries at most 8 MiB. The first message always goes, whatever its size.
 - `max` works with `partition=N` but not with `offset`, which [replays](replay.md) one message; that combination gets [`400`](../reference/status-codes.md#status-400).
-- A batch request counts as `max` requests against your per-node limit on concurrent consumes, and each message counts against its partition's `max_in_flight_per_partition`.
+- A batch request counts as `max` requests (or as the whole limit, when `max` is larger) against your per-node limit on concurrent consumes, and each message counts against its partition's `max_in_flight_per_partition`.
 - A node on v3.0.1 or earlier ignores `max` and answers one message in the single-message shape. Switch a client over once every node it can reach is upgraded.
 
 ## Acknowledge a batch {#ack-batch}

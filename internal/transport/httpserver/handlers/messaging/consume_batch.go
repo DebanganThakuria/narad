@@ -2,6 +2,7 @@ package messaging
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"strconv"
@@ -39,6 +40,19 @@ const consumeBatchReplyBytes = 8 << 20
 // batch of large records would reserve and read up to 100 MiB only to
 // give most of it back.
 const consumeBatchReserveBytes = 4 << 20
+
+// BatchConsumeRequested reports whether a consume's raw query asks for
+// a batch: a non-empty max, found the way the handler finds it (so no
+// parser difference, such as url.ParseQuery giving up on a query of more
+// than 10000 parameters, can hide it from a check the handler then
+// ignores). A query without "max" or an escape that could spell it is
+// not parsed.
+func BatchConsumeRequested(rawQuery string) bool {
+	if !strings.Contains(rawQuery, "max") && !strings.Contains(rawQuery, "%") {
+		return false
+	}
+	return consumeQueryFromRawQuery(rawQuery).max != ""
+}
 
 // ConsumeWeight is how many records a consume request may hold reserved
 // when it returns: its max for a batch consume (GET /consume?max=N),
@@ -311,11 +325,16 @@ func (b *batchConsume) release(msgs []topic.Message) {
 // message, may be nil) and then msgs, each as a single consume encodes
 // it, in order until the next record would take the body past
 // consumeBatchReplyBytes. The first record always goes. sent is how many
-// of msgs the body carries.
+// of msgs the body carries. The buffer is sized for each key and payload
+// base64-encoded, plus the topic, the receipt handle and 192 bytes for
+// the field names, both encoding flags and the widest numbers, so a
+// batch of binary records is built without growing it; JSON records
+// over-reserve by a third, within the reply bound.
 func appendMessages(first []byte, msgs []topic.Message) (body []byte, sent int) {
 	size := len(first) + 16
 	for i := range msgs {
-		size += len(msgs[i].Key) + len(msgs[i].Payload) + 160
+		size += base64.StdEncoding.EncodedLen(len(msgs[i].Key)) + base64.StdEncoding.EncodedLen(len(msgs[i].Payload)) +
+			len(msgs[i].Topic) + len(msgs[i].ReceiptHandle) + 192
 	}
 	body = make([]byte, 0, min(size, consumeBatchReplyBytes))
 	body = append(body, `{"messages":[`...)

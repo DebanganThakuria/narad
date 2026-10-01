@@ -35,7 +35,7 @@ type Log struct {
 	// for the next batch. flushSync swaps it in as writeBuffer when it
 	// detaches a batch, so records staged while that batch's write and
 	// sync are in flight land in a buffer already sized to the previous
-	// batch instead of regrowing from a single frame. See recycleBuffer.
+	// batch instead of regrowing from a single frame. See recycleBufferLocked.
 	spare   []byte
 	pending *syncBatch
 	closed  bool

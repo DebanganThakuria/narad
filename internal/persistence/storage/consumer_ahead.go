@@ -19,15 +19,20 @@ import (
 // were already acked. It sits next to consumer.offset, which stays the
 // 8-byte frontier file: an older binary ignores this one.
 //
-// The file holds two fixed-size slots written alternately in place:
-// one WriteAt and one data sync per write, no rename and no directory
-// mutation, the same cost the frontier write was cut down to. A torn
-// write can only damage the slot being written; the reader validates
-// both and takes the one with the highest sequence. A record that does
-// not fit keeps the lowest offsets and drops the rest: a dropped entry
-// costs one duplicate on recovery, never a wrong frontier, because
-// every offset in the file was acked and the reader ignores anything at
-// or below the recovered frontier.
+// The file holds two fixed-size slots overwritten in place, with no
+// rename and no directory mutation. A writer never overwrites the slot
+// holding the newest durable record, so a torn write can only damage
+// the other one; the reader validates both and takes the one with the
+// highest sequence (a tie keeps slot 0). The production write cadence
+// and its sync batching (an anchor slot and a window slot, flipped
+// after a writeout and a device flush) belong to
+// runtime.ConsumerOffsetCommitter; WriteConsumerAhead is the simple
+// synced writer used for staging.
+//
+// A record that does not fit keeps the lowest offsets and drops the
+// rest: a dropped entry costs one duplicate on recovery, never a wrong
+// frontier, because every offset in the file was acked and the reader
+// ignores anything at or below the recovered frontier.
 //
 // Slot layout (little endian):
 //
@@ -60,8 +65,8 @@ type ConsumerAhead struct {
 	Committed int64
 	// Offsets are the acked-ahead offsets, ascending, all > Committed.
 	Offsets []int64
-	// Slot is the slot the record was read from (0 or 1), so a writer
-	// resuming after a restart alternates away from the newest record.
+	// Slot is the slot the record was read from (0 or 1): the one a
+	// writer resuming after a restart must not overwrite first.
 	Slot int
 }
 

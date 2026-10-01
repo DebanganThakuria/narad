@@ -1,10 +1,8 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"log/slog"
-	"net/http"
 	"slices"
 	"sync"
 	"time"
@@ -213,8 +211,7 @@ func (q *tokenRequester) noteRegisterResult(addr string, res nodewire.Response, 
 		// A transport failure says nothing about what the peer speaks.
 		return
 	}
-	legacy := res.Status == http.StatusBadRequest &&
-		bytes.Contains(res.Body, []byte("unsupported rpc operation"))
+	legacy := isUnsupportedOp(res)
 
 	q.legacyMu.Lock()
 	_, was := q.legacyPeers[addr]

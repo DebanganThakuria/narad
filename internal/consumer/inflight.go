@@ -404,9 +404,12 @@ func (f *InFlight) recoverShard(topic string, partition int, caps Caps) (sh *par
 	var ahead []int64
 	if f.recoverAhead != nil {
 		if aheadCommitted, offsets, ok := f.recoverAhead(topic, partition); ok {
-			// Both files hold frontier values the shard reached; the
-			// ahead record may be the fresher of the two when the crash
-			// landed between the two writes of one flush.
+			// Both files hold frontier values the shard reached. While
+			// the broker runs the newest frontier is in consumer.ahead:
+			// consumer.offset is levelled with it at most every 30s
+			// (consumerOffsetLevelEvery) and at Close, so after a crash
+			// it can trail by that much (see runtime's
+			// ConsumerOffsetCommitter). Take the larger.
 			committed = max(committed, aheadCommitted)
 			ahead = offsets
 		}

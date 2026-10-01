@@ -101,6 +101,10 @@ func buildBroker(
 	if err != nil {
 		return nil, fmt.Errorf("ingress: %w", err)
 	}
+	if from, to, raised := ingressManager.CheckpointRaised(); raised {
+		log.Warn("ingress dispatch checkpoint was below the oldest WAL segment; dispatch starts at that segment",
+			"checkpoint", from, "oldest_segment", to)
+	}
 
 	br, err := broker.New(broker.Deps{
 		DataDir:        cfg.Storage.DataDir,

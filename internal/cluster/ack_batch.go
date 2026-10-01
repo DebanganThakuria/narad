@@ -39,6 +39,15 @@ func isUnsupportedOp(res nodewire.Response) bool {
 	return res.Status == http.StatusBadRequest && bytes.Contains(res.Body, []byte("unsupported rpc operation"))
 }
 
+// isTrailingFieldRefusal reports whether res is an owner refusing a
+// request for a field it does not know: a node on a release before the
+// field existed rejects the whole payload with 400 and
+// nodewire.TrailingPayloadError. It matches only "trailing", the part
+// every release sends.
+func isTrailingFieldRefusal(res nodewire.Response) bool {
+	return res.Status == http.StatusBadRequest && bytes.Contains(res.Body, []byte("trailing"))
+}
+
 // legacyAckBatchTTL is how long an owner that refused OpAckBatch gets
 // every ack on its own. As with legacyClaimTTL: long enough that a
 // rolling upgrade costs one refused batch per owner per TTL, short
@@ -88,14 +97,20 @@ const (
 	ackOpNack   = "nack"
 )
 
-func ackModeOf(op string) nodewire.AckMode {
+// ackModeOf maps a batch-route op to its wire mode. An op it does not
+// know is refused, not taken as an ack: the strings cross a package
+// boundary, and a nack or extend misread as a commit would delete a
+// record its consumer wanted back.
+func ackModeOf(op string) (nodewire.AckMode, bool) {
 	switch op {
+	case ackOpAck:
+		return nodewire.AckModeAck, true
 	case ackOpExtend:
-		return nodewire.AckModeExtend
+		return nodewire.AckModeExtend, true
 	case ackOpNack:
-		return nodewire.AckModeNack
+		return nodewire.AckModeNack, true
 	default:
-		return nodewire.AckModeAck
+		return 0, false
 	}
 }
 
@@ -105,7 +120,8 @@ const ownerDownMessage = "partition owner is down; retry later"
 // RouteAckBatch settles the handles of one HTTP batch ack whose
 // partitions other nodes own: one OpAckBatch per owner, the owners
 // asked concurrently, so one slow or failed owner costs only its own
-// records. op is "ack", "extend" or "nack".
+// records. op is "ack", "extend" or "nack"; any other op settles
+// nothing and fails every handle not already rejected with a 500.
 //
 // statuses and msgs are parallel to handles. An entry whose status is
 // already set (the caller rejected that handle) is skipped. For every
@@ -115,6 +131,15 @@ const ownerDownMessage = "partition owner is down; retry later"
 // for a transport failure. A handle this node owns is left at status 0
 // for the caller to apply locally.
 func (rt *Router) RouteAckBatch(ctx context.Context, topicName, op string, handles []consumer.Handle, statuses []int, msgs []string) {
+	mode, ok := ackModeOf(op)
+	if !ok {
+		for i := range handles {
+			if statuses[i] == 0 {
+				statuses[i], msgs[i] = http.StatusInternalServerError, "unknown ack op "+op
+			}
+		}
+		return
+	}
 	var groups []ackGroup
 	for i, h := range handles {
 		if statuses[i] != 0 {
@@ -130,7 +155,6 @@ func (rt *Router) RouteAckBatch(ctx context.Context, topicName, op string, handl
 			groups = addToAckGroup(groups, addr, i)
 		}
 	}
-	mode := ackModeOf(op)
 	switch len(groups) {
 	case 0:
 	case 1:

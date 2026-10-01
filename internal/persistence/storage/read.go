@@ -145,17 +145,12 @@ func (l *Log) readSegmentShared(offset int64) ([]byte, error) {
 // high-watermark advances and the WAL source is dropped. The CRC was computed
 // over the stored (possibly compressed) payload at write time, so this is a
 // full torn/corrupt-write check with zero decode: one CRC per frame instead
-// of one decode per record.
+// of one decode per record. The CRC read buffer is borrowed from
+// verifyChunks, so the commit path (which verifies every batch) does not
+// allocate per frame.
 func (l *Log) VerifyDurable(first, last int64) error {
 	buf := verifyChunks.get()
 	defer verifyChunks.put(buf)
-	return l.verifyDurable(first, last, buf)
-}
-
-// verifyDurable is VerifyDurable with a caller-provided CRC buffer, so
-// the commit path (which verifies on every batch) never allocates per
-// frame.
-func (l *Log) verifyDurable(first, last int64, buf *[]byte) error {
 	for off := first; off <= last; {
 		entry, _, writeLocked, ok, err := l.lockIndexEntry(off)
 		if err != nil {

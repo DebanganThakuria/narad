@@ -310,7 +310,9 @@ func (a *Authenticator) verifySlow(ctx context.Context, username, password strin
 	ok, err := a.runBcrypt(ctx, username, cred, storedHash, password)
 	if errors.Is(err, ErrThrottled) {
 		if a.shouldLogThrottle(username) {
-			a.logger.Warn("authentication throttled", "component", "audit", "username", username)
+			// The audit line names the stored account, never text taken
+			// from the request's Authorization header.
+			a.logger.Warn("authentication throttled", "component", "audit", "username", rec.Username)
 		}
 		return nil, ErrThrottled
 	}
@@ -330,7 +332,7 @@ func (a *Authenticator) verifySlow(ctx context.Context, username, password strin
 			evictOldest(e.failed)
 		}
 		e.failed[cred] = a.now()
-		a.logger.Warn("authentication failed", "component", "audit", "username", username)
+		a.logger.Warn("authentication failed", "component", "audit", "username", rec.Username)
 		return nil, ErrUnauthorized
 	}
 	// Success: remember the credential — but only if the stored hash is
@@ -367,7 +369,11 @@ func identityOf(rec user.User) *user.User {
 // and the call finishes for the rest, so its throttle accounting is
 // never cut short either.
 func (a *Authenticator) runBcrypt(ctx context.Context, username string, cred [32]byte, storedHash []byte, password string) (bool, error) {
-	key := username + "\x00" + string(cred[:])
+	// The key names the hash the call compares against: a caller that
+	// read a changed password record must not join a call still checking
+	// the old hash, or it would accept (and cache) the old password as
+	// verified for the new one.
+	key := username + "\x00" + string(cred[:]) + "\x00" + string(storedHash)
 	shared := context.WithoutCancel(ctx)
 	ch := a.group.DoChan(key, func() (any, error) {
 		if !a.takeTokenFor(username) {

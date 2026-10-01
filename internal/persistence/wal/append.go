@@ -175,6 +175,14 @@ func (l *Log) rollLocked(usePrepared bool) error {
 	l.fileOps.Lock()
 	defer l.fileOps.Unlock()
 
+	// A flush that held fileOps until now may have failed: never trim,
+	// seal or replace a segment over a write of unknown outcome. Latched
+	// here as syncLocked does; flushSync latches it too once it gets mu.
+	if l.writeFailed != nil {
+		l.syncErr = fmt.Errorf("wal: write and sync: %w", l.writeFailed)
+		return l.syncErr
+	}
+
 	// A prepared segment is cut back to its data, and the new size
 	// synced, before its successor exists, so a sealed segment never
 	// keeps a zero tail: binaries that predate preparation read a bad

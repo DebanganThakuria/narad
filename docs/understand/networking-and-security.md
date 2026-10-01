@@ -12,7 +12,7 @@ Learn how Narad nodes talk to clients and to each other over HTTP, QUIC and Raft
     - Clients speak HTTP with Basic auth to any node on port 7942. TLS for clients terminates at your ingress.
     - Nodes speak a compact RPC protocol over QUIC on the same port number, over UDP (7942/udp), and prove a shared cluster secret bound to each TLS session.
     - Raft runs on its own TCP port (7943) and needs its own mutual TLS, because Raft has no authentication of its own.
-    - State-changing requests must carry an API content type or an `X-Narad-Client` header, or they get `415`: this blocks cross-site requests from a browser.
+    - State-changing requests must carry an API content type or an `X-Narad-Client` header, or they get `415`, and so must a batch consume, or it gets `400`: this blocks cross-site requests from a browser.
     - The cluster network is assumed private. Fence 7942/udp and 7943/tcp with a network policy.
 
 Narad has two planes, each on its own port: clients speak **HTTP** to any node, and nodes speak a compact **RPC protocol over QUIC** to each other. Raft has its own TCP transport with mutual TLS.
@@ -44,6 +44,8 @@ The limits a client sees are listed in [Connect and authenticate](../build/conne
 State-changing requests (`POST`, `PUT`, `PATCH`) must carry `Content-Type: application/json` or `application/octet-stream`, or an `X-Narad-Client` header, or they are answered `415`. This guards Basic-auth sessions against cross-site request forgery. Browsers attach cached Basic credentials to cross-origin requests, and a `POST` with `text/plain` or a form encoding needs no CORS preflight.
 
 Without the guard, a hostile page could create topics, produce, ack, or decommission a member on behalf of an operator who had used the API from that browser. The API content types and any custom header force a preflight, which Narad never approves. `DELETE` is preflighted anyway.
+
+A consume is a `GET`, but it is not read-only: it reserves messages and hides them for their visibility window, and a cross-origin page can send one (an image tag will do) with the cached credentials. The page cannot read the response, so it can delay delivery but can neither see nor lose a message. A batch consume (`max=N`) reserves up to 100 messages a request, so it must carry `X-Narad-Client` or it is answered `400`. That holds for a `GET` and for a `HEAD`, which the router serves on the same route and which a page can also send without a preflight. A single consume stays open to plain clients such as `curl`.
 
 The guard sits inside the auth middleware, so an anonymous request is still answered `401` first.
 
@@ -164,7 +166,7 @@ The full opcode registry (`internal/protocol/node/types.go`; values are stable o
 | 15 | AttachChild | 31 | TokenNotify |
 | 16 | DetachChild | 32 | AckBatch |
 
-An unknown opcode gets a clean `400` (`unsupported rpc operation`), and so does a trailing field the decoder does not know. That is how mixed versions work during a rolling upgrade: an old node declines what it has not heard of, and the caller sends the request again in a shape the old node understands, and keeps doing so for that node for 2 minutes. An `AckBatch` becomes single acks, a commit batch goes out without its topic ids, and a claim becomes a plain probe.
+An unknown opcode gets a clean `400` (`unsupported rpc operation`), and so does a trailing field the decoder does not know. That is how mixed versions work during a rolling upgrade: an old node declines what it has not heard of, and the caller sends the request again in a shape the old node understands, and keeps doing so for that node for 2 minutes. An `AckBatch` becomes single acks, a commit batch goes out without its topic ids, a forwarded batch consume asks for one record, and a claim becomes a plain probe.
 
 ## Timeouts {#timeouts}
 

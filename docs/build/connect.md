@@ -124,7 +124,7 @@ Date: Mon, 28 Sep 2026 19:18:45 GMT
 ```
 
 - The rule is a guard against cross-site requests from a browser, not a format check: a message body is stored as the same bytes whichever of the two types you send. [Networking and security](../understand/networking-and-security.md#cross-site-guard) explains the attack it stops.
-- `GET` and `DELETE` requests are not checked.
+- `GET` and `DELETE` requests are not checked, with one exception: a [batch consume](consuming.md#consume-batch) (`GET .../consume?max=N`) without `X-Narad-Client` gets [`400`](../reference/status-codes.md#status-400). A consume reserves messages, so a batch consume needs the header that forces a preflight. With `curl`, add `-H 'X-Narad-Client: curl'`.
 - The Go SDK and the CLI set `X-Narad-Client` on every request, so they never see this `415`.
 
 ## Limits {#limits}

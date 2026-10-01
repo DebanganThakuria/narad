@@ -62,11 +62,15 @@ type Logs struct {
 	guardMu sync.Mutex
 	guards  map[string]*topicGuard
 
-	// retired, when set, is called after a topic incarnation's local
-	// state has been retired (its directory purged or quarantined) so
-	// the owner of the per-topic in-memory state (consumer reservations,
-	// loaded schemas) drops it too: that state belongs to the retired
-	// incarnation and must not leak into a same-named successor.
+	// retired, when set, is called when a topic incarnation's local
+	// state is retired (its directory quarantined or purged), at a point
+	// where no other incarnation's directory is under the name: after a
+	// quarantine's rename and before the successor's directories are
+	// made, and both before and after a purge's removal (see
+	// SetTopicRetiredHook). The owner of the per-topic in-memory state
+	// (consumer reservations, loaded schemas) drops it then too: that
+	// state belongs to the retired incarnation and must not leak into a
+	// same-named successor.
 	retired func(topicName string)
 
 	// removeAll removes a purged topic's directory: os.RemoveAll, which

@@ -164,10 +164,13 @@ func (l *inFlightLimiter) acquire(key string) bool { return l.acquireN(key, 1) }
 
 func (l *inFlightLimiter) release(key string) { l.releaseN(key, 1) }
 
+// acquireN admits a request of weight n. A gated request still reading
+// its body counts one here, so single produces and the batch bodies
+// being read share the cap (reading is always empty for consume).
 func (l *inFlightLimiter) acquireN(key string, n int) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.counts[key]+n > l.max {
+	if l.counts[key]+l.reading[key]+n > l.max {
 		return false
 	}
 	l.counts[key] += n

@@ -30,6 +30,11 @@ var querySeeds = []string{
 	strings.Repeat("wait=1s&", 50),
 	"wait=%",
 	"partition=-1&offset=-1",
+	"max=5",
+	"m%61x=7&max=9",
+	"max=&max=3",
+	"max=%ZZ&max=4",
+	"max=5;x",
 }
 
 // FuzzConsumeQuery checks that the consume walker returns exactly what
@@ -46,6 +51,7 @@ func FuzzConsumeQuery(f *testing.F) {
 			offset:    values.Get("offset"),
 			wait:      values.Get("wait"),
 			localOnly: values.Get("local_only"),
+			max:       values.Get("max"),
 		}
 		if got != want {
 			t.Fatalf("consumeQueryFromRawQuery(%q)\n got %+v\nwant %+v", raw, got, want)

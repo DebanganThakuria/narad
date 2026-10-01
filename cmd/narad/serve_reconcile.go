@@ -237,6 +237,7 @@ func openOwnedPartitionLogs(ctx context.Context, store *metastore.Store, logs *r
 	for _, t := range topics {
 		assignments, err := store.ListAssignments(t.Name)
 		if err != nil {
+			log.Warn("retention warmup: list assignments failed", "topic", t.Name, "err", err)
 			continue
 		}
 		var owned []int
@@ -253,7 +254,7 @@ func openOwnedPartitionLogs(ctx context.Context, store *metastore.Store, logs *r
 			defer func() { <-slots }()
 			for _, p := range owned {
 				if _, err := logs.Get(t.Name, p); err != nil {
-					log.Debug("retention warmup: open owned partition failed", "topic", t.Name, "partition", p, "err", err)
+					log.Warn("retention warmup: open owned partition failed", "topic", t.Name, "partition", p, "err", err)
 					continue
 				}
 				opened.Add(1)

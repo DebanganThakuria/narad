@@ -137,7 +137,7 @@ An ack, extend or nack answers `502`, with the error of a failed call between no
 
 Consumes answer `429` with `too many in-flight consume requests for this identity (limit 1024 per node)`.
 
-**Cause.** One user holds more concurrent consumes on this node than the cap allows. Every waiting long poll counts, and a batch consume counts as its `max`. With security off, the cap counts per client IP. Produces have the same kind of cap, off by default (unreleased).
+**Cause.** One user holds more concurrent consumes on this node than the cap allows. Every waiting long poll counts, and a batch consume counts as its `max`, clamped to the cap. With security off, the cap counts per client IP. Produces have the same kind of cap, off by default (unreleased).
 
 **Check.** Count the long polls your consumers keep open against one node, per user.
 

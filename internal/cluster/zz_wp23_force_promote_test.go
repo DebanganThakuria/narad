@@ -217,6 +217,25 @@ func (p *zzWP23CutOffSource) GetTopic(context.Context, string, string) (nodewire
 	return nodewire.Response{}, errZZWP23SourceCutOff
 }
 
+// zzWP23AwaitPersistedFrontier waits until the consumer.ahead in dir
+// recovers at least want: the node's offset committer has written its
+// acks up to want there, as each of its ticks does.
+func zzWP23AwaitPersistedFrontier(t *testing.T, dir string, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rec, ok, err := storage.ReadConsumerAhead(dir)
+		if err == nil && ok && rec.Committed >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s holds frontier %d (ok %v, err %v) after 10s, want at least %d: the offset committer never persisted the acks",
+				dir, rec.Committed, ok, err, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestZZWP23ForcePromoteWhileSourceAcksPastHWM(t *testing.T) {
 	ctx := context.Background()
 	src := newZZWP23Node(t, "narad-src", "narad-src", "")
@@ -284,6 +303,18 @@ func TestZZWP23ForcePromoteWhileSourceAcksPastHWM(t *testing.T) {
 	}
 	dst.flip(t, "narad-src", "narad-dst")
 
+	// The source's offset committer ran all the time it was cut off: a
+	// force-promote waits ForcePromoteAfter past the source's last
+	// contact (minutes in production, a millisecond here), and every
+	// 100ms tick writes the acked frontier into the page cache. So by
+	// its return the source's partition directory holds the acks it
+	// took. Wait for that here. The reclaim's reset forgets what no tick
+	// has written yet, as every drop does (those acks are redelivered,
+	// never lost), and on a fast disk this test gets from its first acks
+	// to the reclaim in under a tick (about 80ms on a 2-CPU Linux
+	// runner), where the quarantined copy then held no consumer state.
+	zzWP23AwaitPersistedFrontier(t, src.dir(), srcAcked)
+
 	// The source returns. Its replica learns of the flip; a consumer acks
 	// the record it held; the sweep reclaims the copy, which is ahead of
 	// the promoted boundary, so it is quarantined.
@@ -308,8 +339,11 @@ func TestZZWP23ForcePromoteWhileSourceAcksPastHWM(t *testing.T) {
 	if _, err := os.Stat(src.dir()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the source's partition directory exists after its reclaim (stat err %v)", err)
 	}
-	if got := zzWP23RecoveredFrontier(t, src.dir()+messaging.QuarantineSuffix); got < 4 || got > 14 {
-		t.Fatalf("the quarantined source copy recovers %d, want its own acks (4 to 14)", got)
+	// The quarantined copy keeps what the committer wrote before the
+	// source returned (13), and 14 only when a tick also wrote the held
+	// record's ack before the reclaim's reset.
+	if got := zzWP23RecoveredFrontier(t, src.dir()+messaging.QuarantineSuffix); got < srcAcked || got > 14 {
+		t.Fatalf("the quarantined source copy recovers %d, want its own acks (%d, or 14 with the held record's)", got, srcAcked)
 	}
 	if got := zzWP23ConsumerFiles(t, dst.dir()); !maps.EqualFunc(got, installed, slices.Equal) {
 		t.Fatalf("the destination's consumer state changed without a destination ack: %v, installed %v", got, installed)

@@ -118,31 +118,23 @@ func TestSharedReaperActuallySweeps(t *testing.T) {
 	defer l.Close()
 
 	appendCommit(t, l, "first")
-	// Past the age bound: the next write rolls the aged active segment,
-	// leaving a sealed one for the reaper to take.
+	// Past the age bound: the aged segment holding offset 0 is now the
+	// reaper's to take, whether its one due sweep lands before the next
+	// write (rotate, then delete) or after it (delete the sealed segment
+	// that write rolled). Both leave offset 1 as the oldest, so the check
+	// is on that outcome, not on a segment count the sweep can race.
 	clock.Set(t0.Add(2 * maxAge))
 	appendCommit(t, l, "second")
-
-	l.rwmu.RLock()
-	before := len(l.segments)
-	l.rwmu.RUnlock()
-	if before < 2 {
-		t.Fatalf("expected a sealed segment after the time-based roll, got %d segment(s)", before)
-	}
 
 	// Nothing here calls sweep(): the shared loop has to do it.
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		l.rwmu.RLock()
-		n := len(l.segments)
-		l.rwmu.RUnlock()
-		if n < before {
-			t.Logf("shared reaper reduced %d segments to %d", before, n)
+		if l.OldestOffset() > 0 {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Fatalf("segments still %d after 20s: the shared reaper never swept this log", before)
+	t.Fatal("offset 0 still retained after 20s: the shared reaper never swept this log")
 }
 
 // A log registered LATER with a short check interval must not inherit
@@ -178,19 +170,11 @@ func TestSharedReaperHonoursPerLogIntervals(t *testing.T) {
 	fastClock.Set(t0.Add(2 * maxAge))
 	appendCommit(t, fast, "second")
 
-	fast.rwmu.RLock()
-	before := len(fast.segments)
-	fast.rwmu.RUnlock()
-	if before < 2 {
-		t.Fatalf("expected a sealed segment on the fast log, got %d", before)
-	}
-
+	// As in TestSharedReaperActuallySweeps: offset 0 leaving the log is
+	// the sweep's outcome on either side of the second write.
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		fast.rwmu.RLock()
-		n := len(fast.segments)
-		fast.rwmu.RUnlock()
-		if n < before {
+		if fast.OldestOffset() > 0 {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)

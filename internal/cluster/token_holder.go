@@ -132,8 +132,8 @@ func newTokenHolder(broker demandRegistrar, peer peerClient, selfAddr string) *t
 }
 
 // ApplyDelta registers and retires tokens for one peer in a single
-// pass. Adds and drops arrive together so a consumer served elsewhere
-// can retire its unused interest in a frame that was already going out.
+// pass. Drops come only from peers on an older release: this one never
+// sends them, its tokens lapse at their TTL instead.
 func (h *tokenHolder) ApplyDelta(ctx context.Context, delta nodewire.TokenDelta) {
 	for _, topicName := range delta.Drop {
 		h.drop(delta.From, topicName)

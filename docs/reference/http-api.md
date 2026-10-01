@@ -97,8 +97,11 @@ they get [`415`](status-codes.md#status-415):
 
 A `charset` or other parameter on the content type is fine. The rule
 holds for a request with no body too, such as an ack. `GET` and
-`DELETE` are not checked. The rule stops a web page in a browser from
-sending state-changing requests with an operator's cached credentials.
+`DELETE` are not checked, except a [batch consume](#consume)
+(`max`), which must send `X-Narad-Client` or gets
+[`400`](status-codes.md#status-400), as a `GET` or a `HEAD`. The rule
+stops a web page in a browser from sending state-changing requests
+with an operator's cached credentials.
 
 ### Limits
 
@@ -840,7 +843,7 @@ At most 1 MiB in total.
 | [`409`](status-codes.md#status-409) | The topic is a delay child. |
 | [`413`](status-codes.md#status-413) | The body is over 1 MiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
-| [`429`](status-codes.md#status-429) | The batch does not fit this user's produce cap on this node (only when the cap is set). A batch counts as its message count. |
+| [`429`](status-codes.md#status-429) | The batch does not fit this user's produce cap on this node (only when the cap is set). A batch counts as its message count, clamped to the cap. |
 | [`500`](status-codes.md#status-500) | The node could not write to its ingress WAL. |
 
 **Response body (`202`)**
@@ -893,7 +896,7 @@ has no `receipt_handle` and nothing needs acking.
 | `wait`<br>query, string, optional, default `0s` | How long to wait for a message before answering `204`, as a Go duration such as `500ms` or `10s`. Without it the answer is immediate. Values above the server's maximum (10 s by default, [Configuration reference](configuration.md#http)) are cut to it, and the response then carries `X-Narad-Wait-Clamped` with the value used. |
 | `partition`<br>query, integer, optional | Take messages from this partition only. Required with `offset`. |
 | `offset`<br>query, integer, optional | Replay the record at this offset of `partition`. An offset past the end of the partition answers `204`; one that aged out of retention answers `410`. |
-| `max` (unreleased)<br>query, integer, optional | Take up to this many messages in one answer, `{"messages": [...]}`, each with its own lease. The request does not wait to fill `max`. It counts as `max` against the per-user consume cap. Cannot be combined with `offset`. A v3.0.1 node ignores it and answers with one message in the single-message shape. |
+| `max` (unreleased)<br>query, integer, optional | Take up to this many messages in one answer, `{"messages": [...]}`, each with its own lease. The request does not wait to fill `max`. Requires an `X-Narad-Client` header ([Required headers](#required-headers)). It counts as `max`, clamped to the cap, against the per-user consume cap. Cannot be combined with `offset`. A v3.0.1 node ignores it and answers with one message in the single-message shape. |
 
 **Responses**
 
@@ -901,7 +904,7 @@ has no `receipt_handle` and nothing needs acking.
 |---|---|
 | [`200`](status-codes.md#status-200) | One message, or `{"messages": [...]}` with `max`. |
 | [`204`](status-codes.md#status-204) | No message arrived within `wait`, or `offset` is past the end of the partition. |
-| [`400`](status-codes.md#status-400) | A parameter is invalid, `partition` is out of range, `offset` came without `partition`, or `max` came with `offset`. |
+| [`400`](status-codes.md#status-400) | A parameter is invalid, `partition` is out of range, `offset` came without `partition`, `max` came with `offset`, or `max` came without an `X-Narad-Client` header. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No `consume` grant on the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist. |
@@ -936,7 +939,8 @@ Date: Mon, 28 Sep 2026 19:31:43 GMT
 ```
 
 ```sh title="Request: a batch, unreleased"
-curl -i -u "$AUTH" "$NARAD/v1/topics/orders/consume?max=10&wait=5s"
+curl -i -u "$AUTH" -H 'X-Narad-Client: curl' \
+  "$NARAD/v1/topics/orders/consume?max=10&wait=5s"
 ```
 
 ```http title="Response: a batch, unreleased"

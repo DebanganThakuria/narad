@@ -220,7 +220,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "sum(rate(narad_http_requests_total{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=\"204\"}[$window]))",
+          "expr": "sum(rate(narad_http_requests_total{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=~\"200|204\"}[$window]))",
           "instant": false,
           "legendFormat": "",
           "range": true,
@@ -290,7 +290,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/produce\",status=\"202\"}[$window])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/produce(/batch)?\",status=\"202\"}[$window])))",
           "instant": false,
           "legendFormat": "",
           "range": true,
@@ -360,7 +360,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=\"204\"}[$window])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=~\"200|204\"}[$window])))",
           "instant": false,
           "legendFormat": "",
           "range": true,
@@ -939,7 +939,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "sum(increase(narad_http_requests_total{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/produce\",status=\"202\"}[$__range]))",
+          "expr": "sum(increase(narad_http_requests_total{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/produce(/batch)?\",status=\"202\"}[$__range]))",
           "refId": "A",
           "instant": false,
           "range": true
@@ -984,7 +984,7 @@
       "id": 80,
       "type": "stat",
       "title": "Acked in range (logical PCA)",
-      "description": "Messages that completed the whole produce, consume, ack flow (ack 204) in the selected range.",
+      "description": "Ack requests that settled (204 for a single ack, 200 for a batch ack, which carries up to 100 messages) in the selected range.",
       "datasource": {
         "type": "prometheus",
         "uid": "$datasource"
@@ -1001,7 +1001,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "sum(increase(narad_http_requests_total{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=\"204\"}[$__range]))",
+          "expr": "sum(increase(narad_http_requests_total{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=~\"200|204\"}[$__range]))",
           "refId": "A",
           "instant": false,
           "range": true
@@ -1063,7 +1063,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "max_over_time(sum(rate(narad_http_requests_total{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/produce\",status=\"202\"}[$window]))[$__range:1m])",
+          "expr": "max_over_time(sum(rate(narad_http_requests_total{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/produce(/batch)?\",status=\"202\"}[$window]))[$__range:1m])",
           "refId": "A",
           "instant": false,
           "range": true
@@ -1125,7 +1125,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "max_over_time(sum(rate(narad_http_requests_total{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=\"204\"}[$window]))[$__range:1m])",
+          "expr": "max_over_time(sum(rate(narad_http_requests_total{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=~\"200|204\"}[$window]))[$__range:1m])",
           "refId": "A",
           "instant": false,
           "range": true
@@ -1298,7 +1298,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "sum(rate(narad_http_requests_total{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=\"204\"}[$window]))",
+          "expr": "sum(rate(narad_http_requests_total{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=~\"200|204\"}[$window]))",
           "instant": false,
           "legendFormat": "acked",
           "range": true,
@@ -2349,7 +2349,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/produce\",status=\"202\"}[$window])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/produce(/batch)?\",status=\"202\"}[$window])))",
           "instant": false,
           "legendFormat": "p50",
           "range": true,
@@ -2360,7 +2360,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/produce\",status=\"202\"}[$window])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/produce(/batch)?\",status=\"202\"}[$window])))",
           "instant": false,
           "legendFormat": "p95",
           "range": true,
@@ -2371,7 +2371,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/produce\",status=\"202\"}[$window])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/produce(/batch)?\",status=\"202\"}[$window])))",
           "instant": false,
           "legendFormat": "p99",
           "range": true,
@@ -2609,7 +2609,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=\"204\"}[$window])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=~\"200|204\"}[$window])))",
           "instant": false,
           "legendFormat": "p50",
           "range": true,
@@ -2620,7 +2620,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=\"204\"}[$window])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=~\"200|204\"}[$window])))",
           "instant": false,
           "legendFormat": "p95",
           "range": true,
@@ -2631,7 +2631,7 @@
             "type": "prometheus",
             "uid": "$datasource"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=\"204\"}[$window])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(narad_http_request_duration_seconds_bucket{cluster=~\"$cluster\",job=~\"$job\",k8s_pod=~\"$pod\",k8s_pod=~\"narad-.*\",route=~\".*/ack\",status=~\"200|204\"}[$window])))",
           "instant": false,
           "legendFormat": "p99",
           "range": true,

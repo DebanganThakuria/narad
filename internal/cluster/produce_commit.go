@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -265,7 +264,7 @@ func (d *ProduceDispatcher) dropReplaced(st *produceDispatchState, dest *dispatc
 			kept++
 			continue
 		}
-		orig := st.dest(produceDispatchStuckKey{topic: rec.Topic, partition: dest.origs[i]})
+		orig := st.dest(dispatchDestKey{topic: rec.Topic, partition: dest.origs[i]})
 		st.release(rec, orig)
 		st.requestRescan(orig)
 	}
@@ -423,17 +422,17 @@ func (d *ProduceDispatcher) keepProbe(st *produceDispatchState, dest *dispatchDe
 	}
 	d.holdAll(st, dest, all[:1], origs[:1])
 	for i, rec := range all[1:] {
-		st.release(rec, st.dest(produceDispatchStuckKey{topic: rec.Topic, partition: origs[i+1]}))
+		st.release(rec, st.dest(dispatchDestKey{topic: rec.Topic, partition: origs[i+1]}))
 	}
 }
 
 // releaseAll returns failed and dest's queue to the WAL.
 func (d *ProduceDispatcher) releaseAll(st *produceDispatchState, dest *dispatchDest, failed []ingress.ProduceRecord, failedOrigs []int) {
 	for i, rec := range failed {
-		st.release(rec, st.dest(produceDispatchStuckKey{topic: rec.Topic, partition: failedOrigs[i]}))
+		st.release(rec, st.dest(dispatchDestKey{topic: rec.Topic, partition: failedOrigs[i]}))
 	}
 	for i, rec := range dest.queue {
-		st.release(rec, st.dest(produceDispatchStuckKey{topic: rec.Topic, partition: dest.origs[i]}))
+		st.release(rec, st.dest(dispatchDestKey{topic: rec.Topic, partition: dest.origs[i]}))
 	}
 	d.unhold(st, dest, len(dest.queue))
 	dest.queue, dest.origs = nil, nil
@@ -578,12 +577,14 @@ func (d *ProduceDispatcher) topicDeleted(ctx context.Context, st *produceDispatc
 	deleted := d.topicConfirmedDeleted(ctx, topicName)
 	st.deleted[topicName] = deleted
 	if !deleted {
-		d.noteUnsure(st, key, now)
+		// Stamped after the check: one slower than failureBackoff would
+		// otherwise leave a memo that has already run out.
+		d.noteUnsure(st, key, d.now())
 	}
 	return deleted
 }
 
-// incarnationState classifies a record by the topic incarnation it was
+// incarnationCheck classifies a record by the topic incarnation it was
 // accepted under.
 type incarnationCheck uint8
 
@@ -630,7 +631,7 @@ func (d *ProduceDispatcher) incarnationState(ctx context.Context, st *produceDis
 		st.goneIDs[rec.TopicID] = struct{}{}
 		return incarnationGone
 	}
-	d.noteUnsure(st, key, now)
+	d.noteUnsure(st, key, d.now()) // after the check, as in topicDeleted
 	return incarnationUnconfirmed
 }
 
@@ -711,7 +712,7 @@ func (d *ProduceDispatcher) commitRemote(ctx context.Context, addr string, recor
 	// ctx deadline would; ctx still carries cancellation.
 	start := time.Now()
 	res, err := d.peer.CommitProduceBatchWithin(ctx, addr, timeout, req)
-	if err == nil && withIDs && res.Status == http.StatusBadRequest && bytes.Contains(res.Body, []byte("trailing")) {
+	if err == nil && withIDs && isTrailingFieldRefusal(res) {
 		d.legacyOwners.Store(addr, d.now().Add(produceLegacyOwnerTTL))
 		for i := range req.Records {
 			req.Records[i].TopicID = ""

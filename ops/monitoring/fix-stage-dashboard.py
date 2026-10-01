@@ -59,21 +59,23 @@ def stat(pid, x, w, title, expr, unit, desc, decimals=0):
                     "textMode": "auto", "wideLayout": True},
     }
 
-ack = SEL + ',route=~".*/ack",status="204"'
-prod = SEL + ',route=~".*/produce",status="202"'
+# A batch produce has its own route and a batch ack answers 200 on the
+# ack route; both count here, as one request each.
+ack = SEL + ',route=~".*/ack",status=~"200|204"'
+prod = SEL + ',route=~".*/produce(/batch)?",status="202"'
 # The per-partition message counters are keyed by topic and partition. A topic
 # deleted and recreated under the same name drops and climbs again inside one
 # 60s scrape, which Prometheus reads as a small increase rather than a reset,
 # so those counters undercount across test runs. The HTTP counters are
-# long-lived series; totals and peaks come from them (one request is one
-# message; there is no batching).
+# long-lived series; totals and peaks come from them. They count
+# requests: one message each, or up to 100 for a batch request.
 new = [
     stat(79, 0, 6, "Produced in range",
          f'sum(increase(narad_http_requests_total{{{prod}}}[$__range]))', "short",
          "Produce requests accepted (202) across the selected time range, from the long-lived HTTP counter. The per-topic message counters are keyed by topic and partition; a topic deleted and recreated under the same name drops and climbs again inside one 60s scrape, which Prometheus reads as a small increase, so those counters undercount across test runs."),
     stat(80, 6, 6, "Acked in range (logical PCA)",
          f'sum(increase(narad_http_requests_total{{{ack}}}[$__range]))', "short",
-         "Messages that completed the whole produce, consume, ack flow (ack 204) in the selected range."),
+         "Ack requests that settled (204 for a single ack, 200 for a batch ack, which carries up to 100 messages) in the selected range."),
     stat(81, 12, 6, "Peak produce/s",
          f'max_over_time(sum(rate(narad_http_requests_total{{{prod}}}[$window]))[$__range:1m])', "reqps",
          "Highest produce rate seen at any minute of the range, averaged over the rate window. This is the number a load test is looking for."),
