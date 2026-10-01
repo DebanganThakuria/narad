@@ -99,26 +99,28 @@ func (w *moveWorker) observeDone() {
 // afresh, and one that is not wanted any more must not leave a partition
 // copy on disk. Staging is kept only when this node owns the partition
 // by now (a flip that committed after the copy was moved back to staging
-// left the only local copy there), or when the owner cannot be read. A
-// worker cancelled with a flip pending
-// leaves the install at the partition's path: if the flip committed it
-// is the partition, and if not, the next worker's install replaces it or
-// the stale-copy sweep judges it against the real owner.
+// left the only local copy there), or when the owner cannot be read; a
+// partition with no assignment (its topic is gone) has no owner. A worker
+// cancelled with a flip pending leaves the install at the partition's
+// path: if the flip committed it is the partition, and if not, the next
+// worker's install replaces it or the stale-copy sweep judges it against
+// the real owner.
 func (w *moveWorker) finish() {
 	if w.flipped {
 		return
 	}
 	r := w.r
 	a, err := r.store.GetAssignment(w.topic, w.partition)
-	if err != nil {
+	if err != nil && !errors.Is(err, errs.ErrNotFound) {
 		// Unknown owner: keep it. A worker spawned again for this move
-		// clears staging when it starts.
+		// clears staging when it starts. (No assignment at all is a
+		// deleted topic: nobody owns it, so staging goes.)
 		if _, serr := os.Stat(w.staging); serr == nil {
 			r.logger.Warn("move: could not read the partition's owner; keeping the staging copy", "topic", w.topic, "partition", w.partition, "staging", w.staging, "err", err)
 		}
 		return
 	}
-	if a.OwnerID == r.selfID {
+	if err == nil && a.OwnerID == r.selfID {
 		if _, err := os.Stat(w.staging); err == nil {
 			r.logger.Error("move: keeping the staging copy of a partition this node owns; the flip committed after the copy was moved back. Operator action required",
 				"topic", w.topic, "partition", w.partition, "staging", w.staging)

@@ -525,6 +525,52 @@ func TestMoveRunnerWaitsOutTheSettleWindowBeforeUndoingAnInstall(t *testing.T) {
 	}
 }
 
+// goneTopicStore reports no assignment once gone is set: the topic was
+// deleted.
+type goneTopicStore struct {
+	*fakeMoveStore
+	gone atomic.Bool
+}
+
+func (s *goneTopicStore) GetAssignment(topicName string, partition int) (metastore.Assignment, error) {
+	if s.gone.Load() {
+		return metastore.Assignment{}, errs.ErrNotFound
+	}
+	return s.fakeMoveStore.GetAssignment(topicName, partition)
+}
+
+// The topic is deleted as the flip is proposed: the leader confirms the
+// flip cannot happen, the install goes back to staging, and the worker
+// ends. A partition with no assignment has no owner, so the worker
+// removes its staging copy rather than keeping it for an owner that
+// will never come.
+func TestMoveRunnerRemovesItsStagingWhenTheTopicIsGone(t *testing.T) {
+	src := t.TempDir()
+	wantHWM, _ := buildSourcePartition(t, src, 10)
+	store := &goneTopicStore{fakeMoveStore: &fakeMoveStore{
+		assignment:  metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:      metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+		completeErr: fmt.Errorf("%w: assignment orders/0", errs.ErrNotFound),
+	}}
+	store.completeHook = func() { store.gone.Store(true) }
+	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}}
+	dataDir := t.TempDir()
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, nil, MoveConfig{RetryBackoff: 5 * time.Millisecond})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r.Reconcile(ctx)
+	r.wg.Wait()
+	if ctx.Err() != nil {
+		t.Fatal("the worker kept running after the leader confirmed the topic is gone")
+	}
+	if segs, _ := storage.ListPartitionSegments(storage.TopicPartitionDir(dataDir, "orders", 0)); len(segs) != 0 {
+		t.Fatalf("install left at the partition's path: %d segments", len(segs))
+	}
+	if _, err := os.Stat(r.stagingDir("orders", 0)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the worker kept its staging copy of a deleted topic's partition (stat err %v)", err)
+	}
+}
+
 // readerPeer answers the leader read with a fixed assignment, as the
 // given kind of node.
 type readerPeer struct {
