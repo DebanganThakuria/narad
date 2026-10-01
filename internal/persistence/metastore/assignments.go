@@ -380,8 +380,14 @@ func (s *Store) SetAssignmentTarget(ctx context.Context, topicName string, parti
 
 // CompleteMove atomically flips ownership to the target, guarded as a
 // compare-and-swap: it succeeds only if the current owner still equals
-// expectedOwner and the target still equals targetID. A caught-up
-// destination proposes this; an error means the flip did not happen.
+// expectedOwner and the target still equals targetID, or if that flip
+// already committed (the retry is answered as done). A caught-up
+// destination proposes this. An error does not mean the flip did not
+// happen: a refusal the state machine applied (errs.ErrInvalidArgument,
+// errs.ErrNotFound) is final, but errs.ErrUnavailable (leadership lost
+// mid-commit) or a context error may still commit under the next
+// leader, so the caller resolves the outcome with the leader before it
+// undoes anything.
 func (s *Store) CompleteMove(ctx context.Context, topicName string, partition int, expectedOwner, targetID string) error {
 	return s.apply(ctx, opCompleteMove, completeMovePayload{Topic: topicName, Partition: partition, ExpectedOwner: expectedOwner, TargetID: targetID})
 }

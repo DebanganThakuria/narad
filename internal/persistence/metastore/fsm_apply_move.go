@@ -48,15 +48,27 @@ func (f *fsmState) applySetAssignmentTarget(data []byte) error {
 // equals TargetID. A precondition miss returns an error so the proposing
 // destination knows the flip did not happen (owner changed, or the move
 // was retargeted/aborted) and can discard its copy.
+//
+// A flip can commit while its proposer sees an error (leadership lost
+// mid-apply, a lost forwarded reply), and the destination then retries
+// the same flip. When the owner already equals TargetID and no move is
+// in flight, that retry is answered with success and writes nothing, so
+// the destination reads its flip as done instead of rolling back a copy
+// it owns. Only the answer differs from before (the state is untouched
+// either way), so replicas that answer the old way never diverge.
 func (f *fsmState) applyCompleteMove(data []byte) error {
 	var p completeMovePayload
 	if err := json.Unmarshal(data, &p); err != nil {
 		return err
 	}
+	var changed bool
 	err := f.update(func(tx *bolt.Tx) error {
 		a, err := readAssignment(tx, p.Topic, p.Partition)
 		if err != nil {
 			return err
+		}
+		if a.OwnerID == p.TargetID && a.TargetID == "" && p.TargetID != "" {
+			return nil // already flipped: a retry of a committed flip
 		}
 		if a.OwnerID != p.ExpectedOwner {
 			return fmt.Errorf("%w: complete-move owner is %q, expected %q", errs.ErrInvalidArgument, a.OwnerID, p.ExpectedOwner)
@@ -66,9 +78,10 @@ func (f *fsmState) applyCompleteMove(data []byte) error {
 		}
 		a.OwnerID = p.TargetID
 		a.TargetID = ""
+		changed = true
 		return putAssignment(tx, a)
 	})
-	if err == nil {
+	if err == nil && changed {
 		f.versions.bumpAssignment(p.Topic)
 	}
 	return err
