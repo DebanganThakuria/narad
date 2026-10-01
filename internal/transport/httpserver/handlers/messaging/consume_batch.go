@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker"
 	brokermsg "github.com/debanganthakuria/narad/internal/broker/messaging"
@@ -88,10 +89,14 @@ func ConsumeWeight(r *http.Request) int {
 //     is topped up with another scan.
 //   - A node that owns some of the topic's partitions (withLocalOwner):
 //     one scan of them first. Only when that finds nothing does the
-//     request fall back on the single-record machinery: a probe of the
-//     remote owners, whose one record goes out alone, then the long-poll
-//     raced against the token protocol, whose one record is topped up
-//     with another local scan.
+//     request go to the other owners: a probe asking each for up to N,
+//     then the long-poll raced against the token protocol, whose claim
+//     asks the owner for up to N too. An owner's batch goes out as it
+//     is. A single record (from an owner on a release before Max, or
+//     the local wait's) goes out alone when the probe found it, and is
+//     topped up with another local scan when the wait delivered it. A
+//     router without the batch forms (localOwnerBatchRouter) keeps the
+//     single-record probe and wait.
 //   - A node that owns none of the topic's partitions, or not the pinned
 //     one: the router forwards the request (RouteConsumeBatch) and asks
 //     the owner for up to N, in the opening probes and in the wait phase
@@ -101,7 +106,9 @@ func ConsumeWeight(r *http.Request) int {
 //     parked or not, holds up to N records and up to the owner's reply
 //     bound (8 MiB, as consumeBatchReplyBytes here), not one record.
 //
-// The request is never held to fill N, nor filled from several owners: a
+// The request is never held to fill N, nor filled from several owners
+// (except when a single record from the wait, possibly an older owner's
+// claimed one, is topped up with a local scan): a
 // caller that wants N records soon asks with a wait and gets what is
 // there when the first one lands. A scan reserves at most
 // consumeBatchReserveBytes, and the response carries at most
@@ -136,14 +143,8 @@ func consumeBatch(s *handlers.Set, w http.ResponseWriter, r *http.Request, topic
 		}
 		if forwarded {
 			// Served by another node (a pinned partition it owns, or the
-			// remote owners of a topic this node holds none of): a batch
-			// the owner built goes out as it is, and anything else as a
-			// single-record flow's outcome.
-			if batch && c.code() == http.StatusOK {
-				writeBatchBody(w, c.body)
-				return
-			}
-			writeCapturedBatch(w, c)
+			// remote owners of a topic this node holds none of).
+			writeForwardedBatch(w, c, batch)
 			return
 		}
 		if localPartition != nil && isQueueConsume(opts) {
@@ -162,6 +163,20 @@ func consumeBatch(s *handlers.Set, w http.ResponseWriter, r *http.Request, topic
 // for RouteConsume.
 type batchConsumeRouter interface {
 	RouteConsumeBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, pinnedPartition *int, max int) (forwarded, batch bool, localPartition *int)
+}
+
+// localOwnerBatchRouter is the batch form of the router's
+// RouteConsumeRemote and RouteConsumeWait, the fallback of a node that
+// owns some of the topic's partitions when they are empty; the cluster
+// router implements it. Each asks the owner it reaches for up to max
+// records instead of one, and batch reports that a 200 it wrote is
+// already a {"messages":[...]} body rather than a single message for the
+// caller to wrap or top up. forwarded and handled mean what the single
+// forms return. It is apart from batchConsumeRouter so a router that has
+// only RouteConsumeBatch keeps satisfying that one.
+type localOwnerBatchRouter interface {
+	RouteConsumeRemoteBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, max int) (forwarded, batch bool)
+	RouteConsumeWaitBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, topicName string, wait time.Duration, local handlers.LocalConsumeWaiter, max int) (handled, batch bool)
 }
 
 // batchConsume is one batch consume request in flight.
@@ -215,7 +230,10 @@ func (b *batchConsume) local(opts brokermsg.ConsumeOpts) {
 
 // withLocalOwner is queueConsumeWithLocalOwner for a batch: one scan of
 // the local partitions starting at the router's pick, then the remote
-// owners, then the wait raced against the token protocol.
+// owners, then the wait raced against the token protocol. With a router
+// that has the batch forms (localOwnerBatchRouter), the remote probe
+// and the wait's claim ask the owner for up to max records, and an
+// owner's batch goes out as it is.
 func (b *batchConsume) withLocalOwner(opts brokermsg.ConsumeOpts, localPartition int) {
 	ctx := b.r.Context()
 	router := b.s.Deps.Router
@@ -233,8 +251,14 @@ func (b *batchConsume) withLocalOwner(opts brokermsg.ConsumeOpts, localPartition
 		return
 	}
 
+	br, batchRouter := router.(localOwnerBatchRouter)
 	c := &captureWriter{}
-	if forwarded, _ := router.RouteConsumeRemote(ctx, c, b.r, b.topic); forwarded {
+	if batchRouter {
+		if forwarded, batch := br.RouteConsumeRemoteBatch(ctx, c, b.r, b.topic, b.max); forwarded {
+			writeForwardedBatch(b.w, c, batch)
+			return
+		}
+	} else if forwarded, _ := router.RouteConsumeRemote(ctx, c, b.r, b.topic); forwarded {
 		writeCapturedBatch(b.w, c)
 		return
 	}
@@ -245,7 +269,18 @@ func (b *batchConsume) withLocalOwner(opts brokermsg.ConsumeOpts, localPartition
 
 	local := &localConsumeWaiter{s: b.s, topic: b.topic, waiter: waiter}
 	c = &captureWriter{}
-	if router.RouteConsumeWait(ctx, c, b.r, b.topic, opts.Wait, local) {
+	var handled, batch bool
+	if batchRouter {
+		handled, batch = br.RouteConsumeWaitBatch(ctx, c, b.r, b.topic, opts.Wait, local, b.max)
+	} else {
+		handled = router.RouteConsumeWait(ctx, c, b.r, b.topic, opts.Wait, local)
+	}
+	if handled {
+		if batch && c.code() == http.StatusOK {
+			// A batch the owner built on the claim: it goes out as it is.
+			writeBatchBody(b.w, c.body)
+			return
+		}
 		if first, ok := c.message(); ok {
 			b.write(first, b.topUp(probe, nil, 1, len(first)))
 			return
@@ -366,6 +401,18 @@ func writeBatchBody(w http.ResponseWriter, body []byte) {
 	h.Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
+}
+
+// writeForwardedBatch answers a batch consume from what a router's
+// forward wrote: a batch the owner built (batch, and 200) goes out as it
+// is, and anything else as a single-record flow's outcome (see
+// writeCapturedBatch).
+func writeForwardedBatch(w http.ResponseWriter, c *captureWriter, batch bool) {
+	if batch && c.code() == http.StatusOK {
+		writeBatchBody(w, c.body)
+		return
+	}
+	writeCapturedBatch(w, c)
 }
 
 // writeCapturedBatch answers a batch consume from what the single-record
