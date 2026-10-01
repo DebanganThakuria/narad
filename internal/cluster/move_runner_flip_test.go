@@ -733,6 +733,72 @@ func (c *testClock) Advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
+// slowLeaderPeer answers the leader read like readerPeer, and the read
+// takes `took` on the worker's clock.
+type slowLeaderPeer struct {
+	readerPeer
+	clock *testClock
+	took  time.Duration
+}
+
+func (p slowLeaderPeer) leaderAssignment(ctx context.Context, addr, topicName string, partition int) (metastore.Assignment, bool, bool, error) {
+	p.clock.Advance(p.took)
+	return p.readerPeer.leaderAssignment(ctx, addr, topicName, partition)
+}
+
+// The settle window is judged by when the leader read starts. A read
+// that starts inside the window and returns after it may carry a
+// barrier taken inside it, which a proposal still on its way to the
+// leader can follow, so it must not undo the install. The next read,
+// started after the window, may.
+func TestMoveRunnerUndoesAnInstallOnlyOnAReadStartedAfterTheSettleWindow(t *testing.T) {
+	ctx := context.Background()
+	clock := newTestClock()
+	store := &fakeMoveStore{
+		notLeader: true, leaderID: "narad-leader",
+		member: metastore.Member{ID: "narad-leader", Addr: "leaderaddr", Status: metastore.MemberAlive},
+	}
+	replanned := metastore.Assignment{Topic: "orders", OwnerID: "narad-src", TargetID: "narad-other"}
+	const readTakes = 2 * time.Second
+	peer := slowLeaderPeer{readerPeer: readerPeer{a: replanned, found: true, leaderRead: true}, clock: clock, took: readTakes}
+	installer := &dirInstaller{}
+	dataDir := t.TempDir()
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, installer, nil, nil, MoveConfig{})
+	r.now = clock.Now
+	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &moveWorker{r: r, topic: "orders", partition: 0, source: "narad-src", staging: r.stagingDir("orders", 0), started: time.Now()}
+	w.pending = &pendingFlip{installed: installed, since: clock.Now(), unknownAt: clock.Now()}
+
+	// The read starts a second before the window closes and returns a
+	// second after it.
+	clock.Advance(r.flipSettle - readTakes/2)
+	w.resolvePending(ctx)
+	if n := len(installer.replacements()); n != 0 || w.exit || w.pending == nil {
+		t.Fatalf("a read started %v after the unknown reply (window %v) undid the install: replacements %d, exit %v",
+			r.flipSettle-readTakes/2, r.flipSettle, n, w.exit)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("the install left the partition's path: %v", err)
+	}
+
+	// The next read starts after the window: the refusal it reads may
+	// undo the install, which goes back to staging.
+	w.resolvePending(ctx)
+	if n := len(installer.replacements()); n != 1 || !w.exit {
+		t.Fatalf("a read started after the window did not undo the install: replacements %d, exit %v", n, w.exit)
+	}
+	if _, err := os.Stat(w.staging); err != nil {
+		t.Fatalf("the install was not moved back to staging: %v", err)
+	}
+}
+
 // freezeLogPeer counts fresh (token-less) freezes and records, for every
 // fenced re-arm, how many fresh freezes had been asked for by then and
 // the worker's clock.

@@ -32,9 +32,11 @@ const movePendingFreezeLimit = 2 * time.Minute
 // moveFlipSettle is how long after a flip proposal returned an unknown
 // outcome it may still reach the leader's log: network transit, the RPC
 // server's control-slot wait, and raft.Apply's enqueue timeout (5s). A
-// barriered leader read once it has passed sees every such proposal that
-// can still commit, so only then may an install be undone on the
-// leader's word.
+// barriered leader read that starts once it has passed sees every such
+// proposal that can still commit, so only such a read may undo an
+// install on the leader's word. A read that started earlier does not
+// count even if it returns after the window: its barrier may predate
+// it.
 const moveFlipSettle = 15 * time.Second
 
 // pendingFlip is an installed copy whose flip was proposed and not
@@ -302,6 +304,11 @@ func (w *moveWorker) proposeFlip(ctx context.Context) error {
 func (w *moveWorker) resolvePending(ctx context.Context) bool {
 	r, p := w.r, w.pending
 	m, merr := r.store.GetMember(w.source)
+	// The settle check is taken when the leader read starts, not when it
+	// returns: the barrier may be taken anywhere in between, and only a
+	// read whose barrier comes after the window can have seen every
+	// proposal still on its way into the leader's log.
+	readStart := r.now()
 	v := r.resolveFlip(ctx, w.topic, w.partition, w.source, p.expectID)
 	if v.outcome == flipDone {
 		w.pending = nil
@@ -310,7 +317,7 @@ func (w *moveWorker) resolvePending(ctx context.Context) bool {
 			"topic", w.topic, "partition", w.partition, "source", w.source, "hwm", p.res.HighWatermark)
 		return true
 	}
-	settled := p.unknownAt.IsZero() || r.now().Sub(p.unknownAt) >= r.flipSettle
+	settled := p.unknownAt.IsZero() || readStart.Sub(p.unknownAt) >= r.flipSettle
 	if v.outcome == flipRejected {
 		if !settled {
 			r.logger.Debug("move: the flip cannot commit; waiting for any proposal still in flight before moving the install back",
