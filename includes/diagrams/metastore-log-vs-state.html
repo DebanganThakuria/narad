@@ -1,9 +1,9 @@
 <svg class="nr-dia__wide" viewBox="0 -4 800 356" role="img" aria-labelledby="metastore-log-vs-state-w-t" aria-describedby="metastore-log-vs-state-w-d">
 <title id="metastore-log-vs-state-w-t">An election proves the log; only a barrier proves the state</title>
 <desc id="metastore-log-vs-state-w-d">narad-1 has just been elected Raft leader after restoring its FSM from an old snapshot. Its Raft log is complete up to the commit index, which is what let it win the election. Its FSM is still replaying that log, so the applied point trails the commit index. A local read in that gap sees the past: a topic deleted since the snapshot still exists. So before acting on its own state the leader runs a Raft barrier, which waits at most 5 s until everything committed is applied, and then reads again. A follower trusts its replica only with contact from the leader in the last 5 s and an FSM that has applied everything Raft handed it.</desc>
-<rect class="bx bx3" x="0" y="0" width="800" height="348" rx="2"/>
-<text class="pod" x="62" y="36">narad-1</text>
-<text class="an" x="120" y="36">elected leader; FSM restored from an old snapshot</text>
+<rect class="rg" x="0" y="0" width="800" height="348" rx="6"/>
+<text class="rl" x="20" y="30">narad-1</text>
+<text class="an" x="108" y="30">elected leader; FSM restored from an old snapshot</text>
 <text class="an" x="20" y="84">Raft log: complete</text>
 <rect class="bx tn" x="20" y="96" width="520" height="36"/>
 <text class="an" x="556" y="112">enough to win</text>
@@ -20,7 +20,7 @@
 <path class="ah" d="M145 234L140 224L135 234Z"/>
 <text class="an" x="156" y="272">local read: sees the past,</text>
 <text class="an" x="156" y="294">a deleted topic still exists</text>
-<rect class="bx" x="588" y="176" width="196" height="108" rx="2"/>
+<rect class="bx bx3" x="588" y="176" width="196" height="108" rx="2"/>
 <text class="an mid" x="686" y="203.12">Barrier: wait until</text>
 <text class="an mid" x="686" y="225.12">applied reaches the</text>
 <text class="an mid" x="686" y="247.12">commit, at most 5 s,</text>
@@ -32,10 +32,10 @@
 <svg class="nr-dia__narrow" viewBox="0 -4 360 748" role="img" data-search-exclude aria-labelledby="metastore-log-vs-state-n-t" aria-describedby="metastore-log-vs-state-n-d">
 <title id="metastore-log-vs-state-n-t">An election proves the log; only a barrier proves the state</title>
 <desc id="metastore-log-vs-state-n-d">narad-1 has just been elected Raft leader after restoring its FSM from an old snapshot. Its Raft log is complete up to the commit index, which is what let it win the election. Its FSM is still replaying that log, so the applied point trails the commit index. A local read in that gap sees the past: a topic deleted since the snapshot still exists. So before acting on its own state the leader runs a Raft barrier, which waits at most 5 s until everything committed is applied, and then reads again. A follower trusts its replica only with contact from the leader in the last 5 s and an FSM that has applied everything Raft handed it.</desc>
-<rect class="bx bx3" x="0" y="0" width="360" height="740" rx="2"/>
-<text class="pod" x="52" y="30">narad-1</text>
-<text class="an" x="16" y="56">elected leader; FSM restored from</text>
-<text class="an" x="16" y="76">an old snapshot</text>
+<rect class="rg" x="0" y="0" width="360" height="740" rx="6"/>
+<text class="rl" x="20" y="30">narad-1</text>
+<text class="an" x="20" y="56">elected leader; FSM restored from</text>
+<text class="an" x="20" y="76">an old snapshot</text>
 <text class="an" x="24" y="124">Raft log:</text>
 <text class="an" x="24" y="144">complete,</text>
 <text class="an" x="24" y="164">enough to win</text>
@@ -53,7 +53,7 @@
 <path class="ah" d="M258 251L248 256L258 261Z"/>
 <text class="an" x="262" y="224">local read:</text>
 <text class="an" x="262" y="244">the past</text>
-<rect class="bx" x="16" y="604" width="328" height="64" rx="2"/>
+<rect class="bx bx3" x="16" y="604" width="328" height="64" rx="2"/>
 <text class="an mid" x="180" y="631.1">Barrier: wait until applied reaches the</text>
 <text class="an mid" x="180" y="651.1">commit, at most 5 s, then read again</text>
 <text class="an mu" x="16" y="694">a follower instead needs leader contact</text>
