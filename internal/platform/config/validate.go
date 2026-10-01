@@ -368,17 +368,68 @@ func securityValidationErrors(cfg SecurityConfig, cluster ClusterConfig) []strin
 		errs = append(errs, "security.cluster_tls_cert_file, security.cluster_tls_key_file and security.cluster_tls_ca_file must be set together")
 	}
 	// The cluster secret authenticates the QUIC RPC plane only. Raft has
-	// no authentication of its own, so a secured multi-node cluster with
-	// a plaintext Raft transport is only secure if the operator fences
-	// the port by other means; make them say so.
+	// no authentication of its own, so a secured cluster with a plaintext
+	// Raft transport is only secure if the operator fences the port by
+	// other means; make them say so (the check below).
 	// With security off, the QUIC RPC plane (UDP on the API port) and
 	// Raft are both open to anyone who can reach them; that used to be
 	// a runtime warning only. A multi-node cluster must opt into it.
 	if !cfg.Enabled && len(cluster.Peers) > 0 && !cfg.AllowInsecureCluster {
 		errs = append(errs, "security.enabled=false with cluster peers leaves node-to-node RPC (QUIC on the API port over UDP) and raft unauthenticated: set security.allow_insecure_cluster: true (NARAD_SECURITY_ALLOW_INSECURE_CLUSTER=true) to run a multi-node cluster this way deliberately")
 	}
-	if cfg.Enabled && len(cluster.Peers) > 0 && !cfg.ClusterTLSConfigured() && !cfg.AllowPlaintextRaft {
-		errs = append(errs, "security is enabled with cluster peers but the raft transport has no TLS: set security.cluster_tls_cert_file/_key_file/_ca_file (NARAD_CLUSTER_TLS_*_FILE), or set security.allow_plaintext_raft: true (NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true) if the raft port is restricted by network policy")
+	// A single node is held to the same rule once its Raft port can be
+	// reached from other hosts: Raft listens whatever the peer count, and
+	// a node bound to a routable address is the one an operator means to
+	// grow. Only a loopback cluster.addr is exempt (the quickstart's
+	// docker run, a local build), where just processes on the host reach
+	// the port, and so is a cluster.addr Raft refuses to serve on anyway
+	// (see raftServesBeyondLoopback).
+	if cfg.Enabled && !cfg.ClusterTLSConfigured() && !cfg.AllowPlaintextRaft {
+		switch {
+		case len(cluster.Peers) > 0:
+			errs = append(errs, "security is enabled with cluster peers but the raft transport has no TLS: set security.cluster_tls_cert_file/_key_file/_ca_file (NARAD_CLUSTER_TLS_*_FILE), or set security.allow_plaintext_raft: true (NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true) if the raft port is restricted by network policy")
+		case raftServesBeyondLoopback(cluster):
+			errs = append(errs, fmt.Sprintf("security is enabled and the raft transport has no TLS, but cluster.addr %q is not a loopback address: set security.cluster_tls_cert_file/_key_file/_ca_file (NARAD_CLUSTER_TLS_*_FILE), bind cluster.addr (NARAD_CLUSTER_ADDR) to a loopback address such as 127.0.0.1:7943, or set security.allow_plaintext_raft: true (NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true) if the raft port is restricted by network policy", cluster.Addr))
+		}
 	}
 	return errs
+}
+
+// raftServesBeyondLoopback reports whether a node would serve Raft on an
+// address processes on other hosts can reach: its bind address
+// (cluster.addr) is not loopback, and Raft can start at all. Raft
+// refuses to advertise an unspecified address, which is what a port-only
+// cluster.addr (the default ":7943") gives it when cluster.advertise_addr
+// is unset; such a node never serves Raft, and its startup error says
+// so.
+func raftServesBeyondLoopback(cluster ClusterConfig) bool {
+	if IsLoopbackHostPort(cluster.Addr) {
+		return false
+	}
+	advertise := strings.TrimSpace(cluster.AdvertiseAddr)
+	if advertise == "" {
+		advertise = strings.TrimSpace(cluster.Addr)
+	}
+	host, _, err := net.SplitHostPort(advertise)
+	if err != nil || strings.TrimSpace(host) == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		return false
+	}
+	return true
+}
+
+// IsLoopbackHostPort reports whether addr is host:port with a loopback
+// host: localhost or a loopback IP.
+func IsLoopbackHostPort(addr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

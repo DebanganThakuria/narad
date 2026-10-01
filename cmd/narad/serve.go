@@ -71,10 +71,21 @@ func runServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("cluster tls: %w", err)
 	}
-	if clusterTLS != nil {
+	// The plaintext warning names why validation let the node run it.
+	switch {
+	case clusterTLS != nil:
 		log.Info("raft metadata transport secured with mutual TLS")
-	} else {
+	case !cfg.Security.Enabled:
+		log.Warn("raft metadata transport is plaintext (security is disabled); raft has no authentication of its own, so restrict the cluster port by network policy",
+			"component", "audit", "cluster_addr", cfg.Cluster.Addr)
+	case cfg.Security.AllowPlaintextRaft:
 		log.Warn("raft metadata transport is plaintext (security.allow_plaintext_raft); raft has no authentication of its own, so restrict the cluster port by network policy",
+			"component", "audit", "cluster_addr", cfg.Cluster.Addr)
+	case config.IsLoopbackHostPort(cfg.Cluster.Addr):
+		log.Warn("raft metadata transport is plaintext on a loopback address (a node with no peers and no raft TLS files); raft has no authentication of its own, so any process on this host can reach it: set the raft TLS files before binding cluster.addr to another address",
+			"component", "audit", "cluster_addr", cfg.Cluster.Addr)
+	default:
+		log.Warn("raft metadata transport is plaintext; raft has no authentication of its own, so restrict the cluster port by network policy",
 			"component", "audit", "cluster_addr", cfg.Cluster.Addr)
 	}
 	joinOnly := joinOnlyNode(nodeID, cfg.Cluster.InitialMembers)

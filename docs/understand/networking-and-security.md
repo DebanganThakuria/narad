@@ -95,7 +95,7 @@ The listener also refuses to serve a secured node that has no secret, whatever i
 
 ### Raft mutual TLS {#raft-tls}
 
-Metadata replication runs over mutual TLS when certificates are configured. With security on and peers configured, the Raft TLS files are required unless `security.allow_plaintext_raft` is set explicitly, because Raft itself has no authentication and the cluster secret does not cover it. Setting it up and rotating the certificates is in [Raft TLS certificates](../operate/raft-tls.md).
+Metadata replication runs over mutual TLS when certificates are configured. With security on, the Raft TLS files are required unless `security.allow_plaintext_raft` is set explicitly, because Raft itself has no authentication and the cluster secret does not cover it. Raft listens whatever the peer count, so this holds for a node with no peers too, unless its `cluster.addr` is a loopback address, which only processes on the same host can reach (unreleased; it used to apply only with peers configured). Setting it up and rotating the certificates is in [Raft TLS certificates](../operate/raft-tls.md).
 
 ### QUIC certificate {#quic-certificate}
 
