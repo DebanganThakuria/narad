@@ -112,8 +112,11 @@ info:
 
     A `charset` or other parameter on the content type is fine. The rule
     holds for a request with no body too, such as an ack. `GET` and
-    `DELETE` are not checked. The rule stops a web page in a browser from
-    sending state-changing requests with an operator's cached credentials.
+    `DELETE` are not checked, except a [batch consume](#consume)
+    (`max`), which must send `X-Narad-Client` or gets
+    [`400`](status-codes.md#status-400), as a `GET` or a `HEAD`. The rule
+    stops a web page in a browser from sending state-changing requests
+    with an operator's cached credentials.
 
     ### Limits
 
@@ -744,7 +747,7 @@ paths:
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '429':
-          description: The batch does not fit this user's produce cap on this node (only when the cap is set). A batch counts as its message count.
+          description: The batch does not fit this user's produce cap on this node (only when the cap is set). A batch counts as its message count, clamped to the cap.
         '500':
           description: The node could not write to its ingress WAL.
       x-narad-examples:
@@ -817,8 +820,9 @@ paths:
           description: |
             Take up to this many messages in one answer,
             `{"messages": [...]}`, each with its own lease. The request does
-            not wait to fill `max`. It counts as `max` against the
-            per-user consume cap. Cannot be combined with `offset`. A v3.0.1
+            not wait to fill `max`. Requires an `X-Narad-Client` header
+            ([Required headers](#required-headers)). It counts as `max`,
+            clamped to the cap, against the per-user consume cap. Cannot be combined with `offset`. A v3.0.1
             node ignores it and answers with one message in the
             single-message shape.
           schema:
@@ -840,7 +844,7 @@ paths:
         '204':
           description: No message arrived within `wait`, or `offset` is past the end of the partition.
         '400':
-          description: A parameter is invalid, `partition` is out of range, `offset` came without `partition`, or `max` came with `offset`.
+          description: A parameter is invalid, `partition` is out of range, `offset` came without `partition`, `max` came with `offset`, or `max` came without an `X-Narad-Client` header.
         '401':
           description: Missing or wrong credentials.
         '403':
@@ -873,7 +877,8 @@ paths:
             {"topic":"orders","partition":1,"offset":0,"key":"customer-42","payload":{"order_id": "ord_123", "amount": 1250},"timestamp":1790623903,"receipt_handle":"1:0:181499699661178901"}
         - title: a batch, unreleased
           request: |
-            curl -i -u "$AUTH" "$NARAD/v1/topics/orders/consume?max=10&wait=5s"
+            curl -i -u "$AUTH" -H 'X-Narad-Client: curl' \
+              "$NARAD/v1/topics/orders/consume?max=10&wait=5s"
           response: |
             HTTP/1.1 200 OK
             Content-Length: 326
