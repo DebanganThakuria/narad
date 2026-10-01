@@ -409,13 +409,7 @@ func printMessage(msg consumedMessage, raw bool) {
 		return
 	}
 
-	meta := fmt.Sprintf("[p%d @%d]", msg.Partition, msg.Offset)
-	if msg.Key != "" {
-		meta += " key=" + displayKey(msg)
-	}
-	if msg.Timestamp > 0 {
-		meta += " " + time.UnixMilli(msg.Timestamp).Format("15:04:05.000")
-	}
+	meta := messageMeta(msg)
 	if msg.PayloadEncoding == "base64" {
 		meta += fmt.Sprintf(" (binary, %d bytes)", len(payload))
 		fmt.Println(dim(meta))
@@ -423,6 +417,20 @@ func printMessage(msg consumedMessage, raw bool) {
 		return
 	}
 	fmt.Println(dim(meta) + " " + string(payload))
+}
+
+// messageMeta renders the metadata header of one message: partition,
+// offset, key and the local time the message was committed. The server
+// sends timestamp in Unix seconds, so the time has no fraction.
+func messageMeta(msg consumedMessage) string {
+	meta := fmt.Sprintf("[p%d @%d]", msg.Partition, msg.Offset)
+	if msg.Key != "" {
+		meta += " key=" + displayKey(msg)
+	}
+	if msg.Timestamp > 0 {
+		meta += " " + time.Unix(msg.Timestamp, 0).Format("15:04:05")
+	}
+	return meta
 }
 
 // displayKey renders the message key for the metadata header. A key

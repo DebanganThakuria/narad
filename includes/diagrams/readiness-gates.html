@@ -1,0 +1,92 @@
+<svg class="nr-dia__wide" viewBox="0 8 800 484" role="img" aria-labelledby="readiness-gates-w-t" aria-describedby="readiness-gates-w-d">
+<title id="readiness-gates-w-t">Where a pod stops on its way to ready</title>
+<desc id="readiness-gates-w-d">/readyz passes four gates in order, and a pod that is not ready answers with the first gate it fails. Gate 1: the pod has finished starting and, if it is a new node, has been admitted; otherwise it answers not ready. Gate 2: a Raft leader is known; otherwise no raft leader known. Gate 3: the pod has heard from the leader within 5 seconds, or is the leader; otherwise no contact with the raft leader yet, or last raft leader contact &lt;duration&gt; ago. Gate 4: its metadata has caught up with the leader once since it started; otherwise replica has not caught up with the leader since start. Past all four it answers {"status":"ready"}. narad-2, the pod in the example above, stops at gate 2. Readiness is not a latch: a ready pod that loses the leader turns not ready again. Answers 2 to 4 start with metastore: node is not ready:.</desc>
+<rect class="bx" x="28" y="16" width="272" height="56" rx="2"/>
+<circle class="sc" cx="52" cy="44" r="13"/><text class="sn" x="52" y="49.5">1</text>
+<text class="an" x="74" y="38">Started, and admitted</text>
+<text class="an" x="74" y="60">if it is a new node</text>
+<path class="ln2" d="M164 72V84M164 122V128"/>
+<path class="ah" d="M158 128L164 140L170 128Z"/>
+<polygon class="msg" points="107,88 203,88 221,118 125,118"/>
+<text class="msg-t" x="164" y="109.5">narad-2</text>
+<rect class="bx" x="28" y="140" width="272" height="48" rx="2"/>
+<circle class="sc" cx="52" cy="164" r="13"/><text class="sn" x="52" y="169.5">2</text>
+<text class="an" x="74" y="170">A Raft leader is known</text>
+<path class="ln2" d="M164 188V204"/>
+<path class="ah" d="M158 204L164 216L170 204Z"/>
+<rect class="bx" x="28" y="216" width="272" height="56" rx="2"/>
+<circle class="sc" cx="52" cy="244" r="13"/><text class="sn" x="52" y="249.5">3</text>
+<text class="an" x="74" y="238">Heard from the leader</text>
+<text class="an" x="74" y="260">within 5 s, or is it</text>
+<path class="ln2" d="M164 272V288"/>
+<path class="ah" d="M158 288L164 300L170 288Z"/>
+<rect class="bx" x="28" y="300" width="272" height="56" rx="2"/>
+<circle class="sc" cx="52" cy="328" r="13"/><text class="sn" x="52" y="333.5">4</text>
+<text class="an" x="74" y="322">Metadata caught up with</text>
+<text class="an" x="74" y="344">the leader since start</text>
+<path class="ln2" d="M164 356V372"/>
+<path class="ah" d="M158 372L164 384L170 372Z"/>
+<rect class="bx tn" x="28" y="384" width="272" height="48" rx="2"/>
+<text class="lb mid" x="164" y="415">Ready</text>
+<path class="ln1" d="M300 44H334M300 164H334M300 244H334M300 328H334M300 408H334"/>
+<path class="ah-o" d="M334 37L345 44L334 51M334 157L345 164L334 171M334 237L345 244L334 251M334 321L345 328L334 335M334 401L345 408L334 415"/>
+<text class="cd" x="356" y="50">not ready</text>
+<text class="cd" x="356" y="170">no raft leader known</text>
+<text class="cd" x="356" y="236">no contact with the raft leader yet</text>
+<text class="cd" x="356" y="262">last raft leader contact &lt;duration&gt; ago</text>
+<text class="cd" x="356" y="322">replica has not caught up with</text>
+<text class="cd" x="368" y="346">the leader since start</text>
+<text class="cd" x="356" y="414">{"status":"ready"}</text>
+<path class="ln1 dash" d="M28 408H16Q0 408 0 392V180Q0 164 16 164H18"/>
+<path class="ah" d="M18 159L28 164L18 169Z"/>
+<text class="an mu" x="28" y="460">losing the leader turns it</text>
+<text class="an mu" x="28" y="482">not ready again</text>
+<text class="an mu" x="356" y="460">answers 2 to 4 start with</text>
+<text class="cd mu" x="356" y="482">metastore: node is not ready:</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 708" role="img" data-search-exclude aria-labelledby="readiness-gates-n-t" aria-describedby="readiness-gates-n-d">
+<title id="readiness-gates-n-t">Where a pod stops on its way to ready</title>
+<desc id="readiness-gates-n-d">/readyz passes four gates in order, and a pod that is not ready answers with the first gate it fails. Gate 1: the pod has finished starting and, if it is a new node, has been admitted; otherwise it answers not ready. Gate 2: a Raft leader is known; otherwise no raft leader known. Gate 3: the pod has heard from the leader within 5 seconds, or is the leader; otherwise no contact with the raft leader yet, or last raft leader contact &lt;duration&gt; ago. Gate 4: its metadata has caught up with the leader once since it started; otherwise replica has not caught up with the leader since start. Past all four it answers {"status":"ready"}. narad-2, the pod in the example above, stops at gate 2. Readiness is not a latch: a ready pod that loses the leader turns not ready again. Answers 2 to 4 start with metastore: node is not ready:.</desc>
+<rect class="bx" x="24" y="12" width="324" height="80" rx="2"/>
+<circle class="sc" cx="44" cy="30" r="12"/><text class="sn" x="44" y="35">1</text>
+<text class="an" x="64" y="34">Started, and admitted</text>
+<text class="an" x="64" y="54">if it is a new node</text>
+<text class="cd mu" x="64" y="80">not ready</text>
+<path class="ln2" d="M186 92V102M186 136V142"/>
+<path class="ah" d="M180 142L186 154L192 142Z"/>
+<polygon class="msg" points="136.5,106 218.5,106 235.5,132 153.5,132"/>
+<text class="msg-t" x="186" y="124">narad-2</text>
+<rect class="bx" x="24" y="154" width="324" height="58" rx="2"/>
+<circle class="sc" cx="44" cy="176" r="12"/><text class="sn" x="44" y="181">2</text>
+<text class="an" x="64" y="180">A Raft leader is known</text>
+<text class="cd mu" x="64" y="202">no raft leader known</text>
+<path class="ln2" d="M186 212V228"/>
+<path class="ah" d="M180 228L186 240L192 228Z"/>
+<rect class="bx" x="24" y="240" width="324" height="144" rx="2"/>
+<circle class="sc" cx="44" cy="260" r="12"/><text class="sn" x="44" y="265">3</text>
+<text class="an" x="64" y="264">Heard from the leader</text>
+<text class="an" x="64" y="284">within 5 s, or is it</text>
+<text class="cd mu" x="64" y="310">no contact with the raft</text>
+<text class="cd mu" x="76" y="330">leader yet</text>
+<text class="cd mu" x="64" y="350">last raft leader contact</text>
+<text class="cd mu" x="76" y="370">&lt;duration&gt; ago</text>
+<path class="ln2" d="M186 384V400"/>
+<path class="ah" d="M180 400L186 412L192 400Z"/>
+<rect class="bx" x="24" y="412" width="324" height="100" rx="2"/>
+<circle class="sc" cx="44" cy="432" r="12"/><text class="sn" x="44" y="437">4</text>
+<text class="an" x="64" y="436">Metadata caught up with</text>
+<text class="an" x="64" y="456">the leader since start</text>
+<text class="cd mu" x="64" y="480">replica has not caught up</text>
+<text class="cd mu" x="76" y="500">with the leader since start</text>
+<path class="ln2" d="M186 512V528"/>
+<path class="ah" d="M180 528L186 540L192 528Z"/>
+<rect class="bx tn" x="24" y="540" width="324" height="58" rx="2"/>
+<text class="lb" x="64" y="564">Ready</text>
+<text class="cd" x="64" y="586">{"status":"ready"}</text>
+<path class="ln1 dash" d="M24 569H16Q0 569 0 553V198Q0 182 16 182"/>
+<path class="ah" d="M14 177L24 182L14 187Z"/>
+<text class="an mu" x="24" y="624">Losing the leader turns it</text>
+<text class="an mu" x="24" y="644">not ready again</text>
+<text class="an mu" x="24" y="676">Answers 2 to 4 start with</text>
+<text class="cd mu" x="24" y="696">metastore: node is not ready:</text>
+</svg>

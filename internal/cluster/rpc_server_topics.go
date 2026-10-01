@@ -145,7 +145,7 @@ func (s *RPCServer) handleAlterTopic(payload []byte) nodewire.Response {
 // as of the last successful update. An error aborts the sequence, so a
 // multi-field alter can be partially applied: each group is an independent
 // broker update with no cross-group transaction. This matches the HTTP
-// handler and the documented contract in docs/client/topics.md.
+// handler and the documented contract in docs/build/topics.md.
 func (s *RPCServer) applyTopicAlterations(topicName string, body rpcAlterTopicBody) (topic.Topic, error) {
 	var t topic.Topic
 	var err error

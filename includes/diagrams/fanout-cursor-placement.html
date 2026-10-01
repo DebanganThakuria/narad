@@ -1,0 +1,109 @@
+<svg class="nr-dia__wide" viewBox="0 -4 800 432" role="img" aria-labelledby="fanout-cursor-placement-w-t" aria-describedby="fanout-cursor-placement-w-d">
+<title id="fanout-cursor-placement-w-t">Fan-out cursors run where the parent partition lives</title>
+<desc id="fanout-cursor-placement-w-d">narad-1 owns partition 3 of orders, so both cursors for it run on narad-1 and read its log from local disk: one for the analytics child and one for the retry child, which delays by 1 hour. Each keeps its position in a file beside the log, fanout-analytics.offset and fanout-retry.offset. Each cursor splits a batch by key hash over all its child's partitions and commits each share to that partition's owner. Child partitions are spread across the nodes, so each cursor commits to more than one: here analytics/0 and retry/1 live on narad-0, analytics/1 and retry/0 on narad-2. A reconciler on every node starts and stops cursors every second, one for each link and each parent partition the node owns.</desc>
+<rect class="rg" x="0" y="0" width="520" height="424" rx="6"/>
+<text class="cd" x="20" y="30">narad-1</text>
+<text class="rl" x="111.1" y="30">owner of</text>
+<text class="cd" x="189.6" y="30">orders/3</text>
+<rect class="bx tn" x="20" y="56" width="290" height="36"/>
+<text class="cd" x="32" y="80">fanout-analytics.offset</text>
+<text class="cd" x="20" y="180">orders/3</text>
+<text class="an" x="122.5" y="180">log</text>
+<rect class="bx tn" x="20" y="192" width="36" height="36"/>
+<rect class="bx tn" x="56" y="192" width="36" height="36"/>
+<rect class="bx tn" x="92" y="192" width="36" height="36"/>
+<rect class="bx tn" x="128" y="192" width="36" height="36"/>
+<rect class="bx tn" x="164" y="192" width="36" height="36"/>
+<rect class="bx tn" x="200" y="192" width="36" height="36"/>
+<rect class="bx tn" x="20" y="316" width="290" height="36"/>
+<text class="cd" x="32" y="340">fanout-retry.offset</text>
+<rect class="bx" x="360" y="56" width="140" height="64" rx="2"/>
+<text class="lb mid" x="430" y="83.8">cursor:</text>
+<text class="lb mid" x="430" y="105.8">analytics</text>
+<rect class="bx" x="360" y="264" width="140" height="64" rx="2"/>
+<text class="lb mid" x="430" y="291.8">cursor: retry,</text>
+<text class="lb mid" x="430" y="313.8">1 hour delay</text>
+<path class="ln2" d="M236 204H314Q330 204 330 188V120Q330 104 346 104H348"/>
+<path class="ah" d="M348 110L360 104L348 98Z"/>
+<path class="ln2" d="M236 216H314Q330 216 330 232V280Q330 296 346 296H348"/>
+<path class="ah" d="M348 302L360 296L348 290Z"/>
+<path class="ln1" d="M360 74H320"/>
+<path class="ah" d="M320 69L310 74L320 79Z"/>
+<path class="ln1" d="M360 316H320"/>
+<path class="ah" d="M320 311L310 316L320 321Z"/>
+<text class="an mu" x="20" y="384">a reconciler starts and stops cursors every second:</text>
+<text class="an mu" x="20" y="406">one per link and per partition this node owns</text>
+<text class="rl end" x="800" y="44">child partition owners</text>
+<rect class="bx" x="660" y="64" width="140" height="48" rx="2"/>
+<text class="pod" x="730" y="94.46">narad-0</text>
+<text class="cd" x="660" y="136">analytics/0</text>
+<text class="cd" x="660" y="158">retry/1</text>
+<rect class="bx" x="660" y="272" width="140" height="48" rx="2"/>
+<text class="pod" x="730" y="302.46">narad-2</text>
+<text class="cd" x="660" y="344">analytics/1</text>
+<text class="cd" x="660" y="366">retry/0</text>
+<path class="ln" d="M500 80H523M637 80H648"/>
+<path class="ah" d="M648 87L660 80L648 73Z"/>
+<polygon class="msg" points="523,65 619,65 637,95 541,95"/>
+<text class="msg-t" x="580" y="86.5">batch</text>
+<path class="ln2" d="M500 108H584Q600 108 600 124V280Q600 296 616 296H648"/>
+<path class="ah" d="M648 302L660 296L648 290Z"/>
+<path class="ln" d="M500 312H648"/>
+<path class="ah" d="M648 319L660 312L648 305Z"/>
+<path class="ln2" d="M500 272H612Q628 272 628 256V116Q628 100 644 100H648"/>
+<path class="ah" d="M648 106L660 100L648 94Z"/>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 580" role="img" data-search-exclude aria-labelledby="fanout-cursor-placement-n-t" aria-describedby="fanout-cursor-placement-n-d">
+<title id="fanout-cursor-placement-n-t">Fan-out cursors run where the parent partition lives</title>
+<desc id="fanout-cursor-placement-n-d">narad-1 owns partition 3 of orders, so both cursors for it run on narad-1 and read its log from local disk: one for the analytics child and one for the retry child, which delays by 1 hour. Each keeps its position in a file beside the log, fanout-analytics.offset and fanout-retry.offset. Each cursor splits a batch by key hash over all its child's partitions and commits each share to that partition's owner. Child partitions are spread across the nodes, so each cursor commits to more than one: here analytics/0 and retry/1 live on narad-0, analytics/1 and retry/0 on narad-2. A reconciler on every node starts and stops cursors every second, one for each link and each parent partition the node owns.</desc>
+<rect class="rg" x="0" y="0" width="360" height="324" rx="6"/>
+<text class="cd" x="16" y="26">narad-1</text>
+<text class="rl" x="92" y="26">owner of</text>
+<text class="cd" x="157.4" y="26">orders/3</text>
+<text class="an mu" x="16" y="50">a reconciler starts and stops cursors every</text>
+<text class="an mu" x="16" y="70">second: one per link and owned partition</text>
+<rect class="bx tn" x="16" y="84" width="328" height="30"/>
+<text class="cd" x="28" y="104">fanout-retry.offset</text>
+<rect class="bx tn" x="16" y="122" width="240" height="30"/>
+<text class="cd" x="28" y="142">fanout-analytics.offset</text>
+<text class="cd" x="110" y="180">orders/3</text>
+<text class="an" x="195.5" y="180">log</text>
+<rect class="bx tn" x="110" y="188" width="28" height="28"/>
+<rect class="bx tn" x="138" y="188" width="28" height="28"/>
+<rect class="bx tn" x="166" y="188" width="28" height="28"/>
+<rect class="bx tn" x="194" y="188" width="28" height="28"/>
+<rect class="bx tn" x="222" y="188" width="28" height="28"/>
+<rect class="bx" x="16" y="248" width="160" height="56" rx="2"/>
+<text class="lb mid" x="96" y="271.78">cursor:</text>
+<text class="lb mid" x="96" y="291.78">analytics</text>
+<rect class="bx" x="184" y="248" width="160" height="56" rx="2"/>
+<text class="lb mid" x="264" y="271.78">cursor: retry,</text>
+<text class="lb mid" x="264" y="291.78">1 hour delay</text>
+<path class="ln2" d="M124 216V236"/>
+<path class="ah" d="M118 236L124 248L130 236Z"/>
+<path class="ln2" d="M236 216V236"/>
+<path class="ah" d="M230 236L236 248L242 236Z"/>
+<path class="ln1" d="M32 248V162"/>
+<path class="ah" d="M37 162L32 152L27 162Z"/>
+<path class="ln1" d="M328 248V124"/>
+<path class="ah" d="M333 124L328 114L323 124Z"/>
+<text class="rl" x="16" y="566">child partition owners</text>
+<path class="ln" d="M64 304V352M64 386V432"/>
+<path class="ah" d="M57 432L64 444L71 432Z"/>
+<polygon class="msg" points="14.5,356 96.5,356 113.5,382 31.5,382"/>
+<text class="msg-t" x="64" y="374">batch</text>
+<path class="ln2" d="M140 304V332Q140 344 152 344H228Q240 344 240 356V432"/>
+<path class="ah" d="M234 432L240 444L246 432Z"/>
+<path class="ln2" d="M212 304V380Q212 392 200 392H132Q120 392 120 404V432"/>
+<path class="ah" d="M114 432L120 444L126 432Z"/>
+<path class="ln" d="M296 304V432"/>
+<path class="ah" d="M289 432L296 444L303 432Z"/>
+<rect class="bx" x="16" y="444" width="160" height="48" rx="2"/>
+<text class="pod" x="96" y="473.44">narad-0</text>
+<text class="cd" x="16" y="516">analytics/0</text>
+<text class="cd" x="16" y="536">retry/1</text>
+<rect class="bx" x="184" y="444" width="160" height="48" rx="2"/>
+<text class="pod" x="264" y="473.44">narad-2</text>
+<text class="cd" x="184" y="516">analytics/1</text>
+<text class="cd" x="184" y="536">retry/0</text>
+</svg>

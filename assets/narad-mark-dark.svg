@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 16 16">
+  <title>narad</title>
+  <!-- the same mark for dark grounds: paper bars, lime message -->
+  <path fill="#F5F6F3" d="M1 1H4L8 7H5L3 4V15H1Z"/>
+  <path fill="#B8F53A" d="M7 10H10L12 13H9Z"/>
+  <path fill="#F5F6F3" d="M13 1H15V15H13Z"/>
+</svg>

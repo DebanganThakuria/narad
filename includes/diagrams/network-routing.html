@@ -1,0 +1,115 @@
+<svg class="nr-dia__wide" viewBox="0 -4 800 352" role="img" aria-labelledby="network-routing-w-t" aria-describedby="network-routing-w-d">
+<title id="network-routing-w-t">How narad-1 routes four requests</title>
+<desc id="network-routing-w-d">narad-1 decides every route from its local metastore replica. 1: a produce, ord_123, is always accepted into narad-1's own ingress WAL; the dispatcher moves it to the owner later. 2: a consume of orders/1, which narad-1 owns, is served from its local log. 3: a consume of orders/2, which narad-2 owns, is forwarded to narad-2 over node RPC. 4: a metadata write, such as creating a topic, is forwarded to the Raft leader, narad-0.</desc>
+<rect class="rg" x="216" y="0" width="380" height="332" rx="6"/>
+<text class="cd" x="236" y="30">narad-1</text>
+<rect class="bx bx3" x="236" y="44" width="108" height="268" rx="2"/>
+<text class="an mid" x="290" y="162.12">router</text>
+<text class="an mid" x="290" y="184.12">local</text>
+<text class="an mid" x="290" y="206.12">replica</text>
+<circle class="sc" cx="13" cy="58" r="13"/><text class="sn" x="13" y="63.5">1</text>
+<text class="an" x="34" y="64">produce</text>
+<path class="ln" d="M0 84H87M201 84H224"/>
+<polygon class="msg" points="87,69 183,69 201,99 105,99"/>
+<text class="msg-t" x="144" y="90.5">ord_123</text>
+<path class="ah" d="M224 91L236 84L224 77Z"/>
+<circle class="sc" cx="13" cy="130" r="13"/><text class="sn" x="13" y="135.5">2</text>
+<text class="an" x="34" y="136">consume</text>
+<text class="cd" x="115" y="136">orders/1</text>
+<path class="ln" d="M0 156H224"/>
+<path class="ah" d="M224 163L236 156L224 149Z"/>
+<circle class="sc" cx="13" cy="202" r="13"/><text class="sn" x="13" y="207.5">3</text>
+<text class="an" x="34" y="208">consume</text>
+<text class="cd" x="115" y="208">orders/2</text>
+<path class="ln" d="M0 228H224"/>
+<path class="ah" d="M224 235L236 228L224 221Z"/>
+<circle class="sc" cx="13" cy="266" r="13"/><text class="sn" x="13" y="271.5">4</text>
+<text class="an" x="34" y="272">create a topic</text>
+<path class="ln" d="M0 292H224"/>
+<path class="ah" d="M224 299L236 292L224 285Z"/>
+<path class="bx tn" d="M400 60V108A88 8 0 0 0 576 108V60"/>
+<ellipse class="bx tn" cx="488" cy="60" rx="88" ry="8"/>
+<text class="an mid" x="488" y="97.4">ingress WAL</text>
+<path class="ln2" d="M344 84H388"/>
+<path class="ah" d="M388 90L400 84L388 78Z"/>
+<text class="cd" x="400" y="146">orders/1</text>
+<text class="an" x="498.1" y="146">log</text>
+<rect class="bx tn" x="400" y="156" width="36" height="36"/>
+<rect class="bx tn" x="436" y="156" width="36" height="36"/>
+<rect class="bx tn" x="472" y="156" width="36" height="36"/>
+<rect class="bx tn" x="508" y="156" width="36" height="36"/>
+<path class="ln2" d="M344 174H388"/>
+<path class="ah" d="M388 180L400 174L388 168Z"/>
+<rect class="bx" x="652" y="204" width="148" height="48" rx="2"/>
+<text class="pod" x="726" y="234.46">narad-2</text>
+<path class="ln2" d="M344 228H640"/>
+<text class="an" x="360" y="218">node RPC to its owner</text>
+<path class="ah" d="M640 234L652 228L640 222Z"/>
+<rect class="bx" x="652" y="268" width="148" height="48" rx="2"/>
+<text class="pod" x="726" y="298.46">narad-0</text>
+<path class="ln2" d="M344 292H640"/>
+<text class="an" x="360" y="282">forwarded to the leader</text>
+<path class="ah" d="M640 298L652 292L640 286Z"/>
+<text class="an mid" x="726" y="340">Raft leader</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 620" role="img" data-search-exclude aria-labelledby="network-routing-n-t" aria-describedby="network-routing-n-d">
+<title id="network-routing-n-t">How narad-1 routes four requests</title>
+<desc id="network-routing-n-d">narad-1 decides every route from its local metastore replica. 1: a produce, ord_123, is always accepted into narad-1's own ingress WAL; the dispatcher moves it to the owner later. 2: a consume of orders/1, which narad-1 owns, is served from its local log. 3: a consume of orders/2, which narad-2 owns, is forwarded to narad-2 over node RPC. 4: a metadata write, such as creating a topic, is forwarded to the Raft leader, narad-0.</desc>
+<rect class="rg" x="0" y="104" width="360" height="196" rx="6"/>
+<text class="cd" x="16" y="290">narad-1</text>
+<rect class="bx bx3" x="16" y="116" width="328" height="40" rx="2"/>
+<text class="an mid" x="180" y="141.1">router: local replica</text>
+<path class="ln" d="M72 0V37M72 63V104"/>
+<polygon class="msg" points="22.5,37 104.5,37 121.5,63 39.5,63"/>
+<text class="msg-t" x="72" y="55">ord_123</text>
+<path class="ah" d="M65 104L72 116L79 104Z"/>
+<circle class="sc" cx="48" cy="86" r="12"/><text class="sn" x="48" y="91">1</text>
+<path class="ln" d="M240 0V104"/>
+<path class="ah" d="M233 104L240 116L247 104Z"/>
+<circle class="sc" cx="216" cy="86" r="12"/><text class="sn" x="216" y="91">2</text>
+<path class="ln" d="M180 0V104"/>
+<path class="ah" d="M173 104L180 116L187 104Z"/>
+<circle class="sc" cx="156" cy="86" r="12"/><text class="sn" x="156" y="91">3</text>
+<path class="ln" d="M332 0V104"/>
+<path class="ah" d="M325 104L332 116L339 104Z"/>
+<circle class="sc" cx="308" cy="86" r="12"/><text class="sn" x="308" y="91">4</text>
+<path class="bx tn" d="M16 204V248A68 8 0 0 0 152 248V204"/>
+<ellipse class="bx tn" cx="84" cy="204" rx="68" ry="8"/>
+<text class="an mid" x="84" y="238.5">ingress WAL</text>
+<path class="ln2" d="M72 156V184"/>
+<path class="ah" d="M66 184L72 196L78 184Z"/>
+<text class="cd" x="196" y="246">orders/1</text>
+<text class="an" x="278.1" y="246">log</text>
+<rect class="bx tn" x="196" y="196" width="28" height="28"/>
+<rect class="bx tn" x="224" y="196" width="28" height="28"/>
+<rect class="bx tn" x="252" y="196" width="28" height="28"/>
+<rect class="bx tn" x="280" y="196" width="28" height="28"/>
+<path class="ln2" d="M240 156V184"/>
+<path class="ah" d="M234 184L240 196L246 184Z"/>
+<path class="ln2" d="M180 156V320"/>
+<path class="ah" d="M174 320L180 332L186 320Z"/>
+<path class="ln2" d="M332 156V320"/>
+<path class="ah" d="M326 320L332 332L338 320Z"/>
+<rect class="bx" x="100" y="332" width="132" height="40" rx="2"/>
+<text class="pod" x="166" y="357.44">narad-2</text>
+<rect class="bx" x="252" y="332" width="108" height="40" rx="2"/>
+<text class="pod" x="306" y="357.44">narad-0</text>
+<text class="an mid" x="306" y="392">Raft leader</text>
+<path class="sep" d="M0 416H360"/>
+<circle class="sc" cx="12" cy="442" r="12"/><text class="sn" x="12" y="447">1</text>
+<text class="an" x="32" y="448">produce: always into the local ingress</text>
+<text class="an" x="32" y="468">WAL; the dispatcher moves it later</text>
+<circle class="sc" cx="12" cy="488" r="12"/><text class="sn" x="12" y="493">2</text>
+<text class="an" x="32" y="494">consume of</text>
+<text class="cd" x="117.2" y="494">orders/1</text>
+<text class="an" x="196.2" y="494">, owned here:</text>
+<text class="an" x="32" y="514">served from the local log</text>
+<circle class="sc" cx="12" cy="534" r="12"/><text class="sn" x="12" y="539">3</text>
+<text class="an" x="32" y="540">consume of</text>
+<text class="cd" x="117.2" y="540">orders/2</text>
+<text class="an" x="196.2" y="540">: forwarded over</text>
+<text class="an" x="32" y="560">node RPC to its owner</text>
+<circle class="sc" cx="12" cy="580" r="12"/><text class="sn" x="12" y="585">4</text>
+<text class="an" x="32" y="586">metadata write: forwarded to the</text>
+<text class="an" x="32" y="606">Raft leader</text>
+</svg>

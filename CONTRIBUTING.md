@@ -39,7 +39,7 @@ specification of at-least-once delivery.
 Partition faults need `iptables` and passwordless `sudo`; without them it
 injects kills only, which is the normal case on a laptop. The verdicts, the
 flags, and what the check does not catch are in
-[Checking the Delivery Contract](https://debanganthakuria.github.io/narad/internals/linearizability/).
+[Checking the Delivery Contract](https://debanganthakuria.github.io/narad/understand/linearizability/).
 
 ## Coding guidelines
 

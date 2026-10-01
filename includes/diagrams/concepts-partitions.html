@@ -1,0 +1,84 @@
+<svg class="nr-dia__wide" viewBox="0 0 800 488" role="img" aria-labelledby="concepts-partitions-w-t" aria-describedby="concepts-partitions-w-d">
+<title id="concepts-partitions-w-t">A topic split into partitions, and the one a key picks</title>
+<desc id="concepts-partitions-w-d">Your service produces the message ord_123 to the topic orders with the key customer-42. The node that accepts the produce hashes the key: hash(key) mod 3 = 1, so the message goes to the partition orders/1, whose log lives on narad-1, the partition's owner. The topic orders has 3 partitions, orders/0, orders/1 and orders/2, and each one is an append-only log on one node: narad-0, narad-1 and narad-2. A message with no key goes to the topic's next partition in turn instead, such as orders/2.</desc>
+<rect class="rg" x="40" y="96" width="752" height="388" rx="6"/>
+<text class="rl" x="60" y="126">Narad cluster</text>
+<text class="lb" x="0" y="24">Your service</text>
+<rect class="ink" x="0" y="40" width="14" height="80"/>
+<text class="cd" x="30" y="62">produce key=customer-42</text>
+<path class="ln" d="M14 80H400Q416 80 416 96V120M416 156V176M416 214V236"/>
+<path class="ah" d="M409 236L416 248L423 236Z"/>
+<rect class="bx bxq" x="322" y="120" width="188" height="36" rx="2"/>
+<text class="an mid" x="416" y="144">hash(key) mod 3 = 1</text>
+<polygon class="msg" points="359,180 455,180 473,210 377,210"/>
+<text class="msg-t" x="416" y="201.5">ord_123</text>
+<path class="ln1 dash" d="M510 138H644Q660 138 660 154V238"/>
+<path class="ah" d="M655 238L660 248L665 238Z"/>
+<text class="an mu" x="526" y="126">no key: the next partition in turn</text>
+<rect class="bx" x="72" y="248" width="200" height="128" rx="2"/>
+<text class="pod" x="172" y="282">narad-0</text>
+<text class="cd mid" x="172" y="314">orders/0</text>
+<rect class="bx tn" x="100" y="328" width="36" height="36"/>
+<rect class="bx tn" x="136" y="328" width="36" height="36"/>
+<rect class="bx tn" x="172" y="328" width="36" height="36"/>
+<rect class="bx tn" x="208" y="328" width="36" height="36"/>
+<rect class="bx bx3" x="316" y="248" width="200" height="128" rx="2"/>
+<text class="pod" x="416" y="282">narad-1</text>
+<text class="cd mid" x="416" y="314">orders/1</text>
+<rect class="bx tn" x="344" y="328" width="36" height="36"/>
+<rect class="bx tn" x="380" y="328" width="36" height="36"/>
+<rect class="bx tn" x="416" y="328" width="36" height="36"/>
+<rect class="bx tn" x="452" y="328" width="36" height="36"/>
+<rect class="bx" x="560" y="248" width="200" height="128" rx="2"/>
+<text class="pod" x="660" y="282">narad-2</text>
+<text class="cd mid" x="660" y="314">orders/2</text>
+<rect class="bx tn" x="588" y="328" width="36" height="36"/>
+<rect class="bx tn" x="624" y="328" width="36" height="36"/>
+<rect class="bx tn" x="660" y="328" width="36" height="36"/>
+<rect class="bx tn" x="696" y="328" width="36" height="36"/>
+<text class="an mid" x="416" y="404">owner of <tspan class="cd">orders/1</tspan></text>
+<path class="ln1" d="M100 424V432H732V424"/>
+<text class="an mid" x="416" y="460">Topic <tspan class="cd cdb">orders</tspan>, 3 partitions</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 460" role="img" data-search-exclude aria-labelledby="concepts-partitions-n-t" aria-describedby="concepts-partitions-n-d">
+<title id="concepts-partitions-n-t">A topic split into partitions, and the one a key picks</title>
+<desc id="concepts-partitions-n-d">Your service produces the message ord_123 to the topic orders with the key customer-42. The node that accepts the produce hashes the key: hash(key) mod 3 = 1, so the message goes to the partition orders/1, whose log lives on narad-1, the partition's owner. The topic orders has 3 partitions, orders/0, orders/1 and orders/2, and each one is an append-only log on one node: narad-0, narad-1 and narad-2. A message with no key goes to the topic's next partition in turn instead, such as orders/2.</desc>
+<rect class="rg" x="8" y="96" width="344" height="356" rx="6"/>
+<text class="rl" x="28" y="126">Narad cluster</text>
+<text class="lb" x="20" y="26">Your service</text>
+<rect class="ink" x="20" y="36" width="320" height="12"/>
+<text class="cd end" x="164" y="68">produce</text>
+<text class="cd end" x="164" y="88">key=customer-42</text>
+<path class="ln" d="M180 48V122M180 174V190M180 224V244"/>
+<path class="ah" d="M174 244L180 256L186 244Z"/>
+<rect class="bx bxq" x="132" y="122" width="96" height="52" rx="2"/>
+<text class="an mid" x="180" y="144">hash(key)</text>
+<text class="an mid" x="180" y="164">mod 3 = 1</text>
+<polygon class="msg" points="130.5,194 212.5,194 229.5,220 147.5,220"/>
+<text class="msg-t" x="180" y="212">ord_123</text>
+<path class="ln1 dash" d="M228 148H276Q292 148 292 164V246"/>
+<path class="ah" d="M287 246L292 256L297 246Z"/>
+<text class="an mu" x="236" y="120">no key: the next</text>
+<text class="an mu" x="236" y="140">partition in turn</text>
+<rect class="bx" x="16" y="256" width="104" height="104" rx="2"/>
+<text class="pod" x="68" y="282">narad-0</text>
+<text class="cd mid" x="68" y="308">orders/0</text>
+<rect class="bx tn" x="26" y="320" width="28" height="28"/>
+<rect class="bx tn" x="54" y="320" width="28" height="28"/>
+<rect class="bx tn" x="82" y="320" width="28" height="28"/>
+<rect class="bx bx3" x="128" y="256" width="104" height="104" rx="2"/>
+<text class="pod" x="180" y="282">narad-1</text>
+<text class="cd mid" x="180" y="308">orders/1</text>
+<rect class="bx tn" x="138" y="320" width="28" height="28"/>
+<rect class="bx tn" x="166" y="320" width="28" height="28"/>
+<rect class="bx tn" x="194" y="320" width="28" height="28"/>
+<rect class="bx" x="240" y="256" width="104" height="104" rx="2"/>
+<text class="pod" x="292" y="282">narad-2</text>
+<text class="cd mid" x="292" y="308">orders/2</text>
+<rect class="bx tn" x="250" y="320" width="28" height="28"/>
+<rect class="bx tn" x="278" y="320" width="28" height="28"/>
+<rect class="bx tn" x="306" y="320" width="28" height="28"/>
+<text class="an mid" x="180" y="384">owner of <tspan class="cd">orders/1</tspan></text>
+<path class="ln1" d="M26 400V408H334V400"/>
+<text class="an mid" x="180" y="436">Topic <tspan class="cd cdb">orders</tspan>, 3 partitions</text>
+</svg>

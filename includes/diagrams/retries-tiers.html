@@ -1,0 +1,123 @@
+<svg class="nr-dia__wide" viewBox="0 8 800 484" role="img" aria-labelledby="retries-tiers-w-t" aria-describedby="retries-tiers-w-d">
+<title id="retries-tiers-w-t">The retry loop through a delay child</title>
+<desc id="retries-tiers-w-d">Your worker consumes a message from the topic orders, and its handler fails. Step 1: the worker produces a copy, ord_123 with delivery_count 1, to orders-retry-30s, a parent topic that carries nothing but retries. Step 2: only then does it ack the original in orders. 30 seconds after the copy's commit, the delay child orders-retry-30s-run receives it. Step 3: the worker consumes the copy from the delay child. Step 4: once delivery_count reaches your limit, the worker produces the message to orders-dlq instead, where it is parked. Your service cannot produce to the delay child directly: that gets 409. The counter and the envelope are your JSON, not broker state.</desc>
+<rect class="rg" x="0" y="80" width="176" height="124" rx="6"/>
+<text class="rl" x="20" y="110">Topic</text>
+<text class="cd cdb" x="20" y="138">orders</text>
+<rect class="bx bxq tn" x="20" y="152" width="144" height="36" rx="2"/>
+<path class="ln1" d="M56 152V188M92 152V188M128 152V188"/>
+<rect class="rg" x="656" y="80" width="144" height="124" rx="6"/>
+<text class="rl" x="676" y="110">Parked</text>
+<text class="cd" x="676" y="140">orders-dlq</text>
+<rect class="bx bxq tn" x="676" y="152" width="108" height="36" rx="2"/>
+<path class="ln1" d="M712 152V188M748 152V188"/>
+<rect class="you" x="268" y="104" width="120" height="80" rx="2"/>
+<text class="lb mid on" x="328" y="150">worker</text>
+<path class="ln" d="M176 160H256"/>
+<path class="ah" d="M256 153L268 160L256 167Z"/>
+<text class="an" x="186" y="148">consume</text>
+<path class="ln1" d="M296 104V64Q296 48 280 48H104Q88 48 88 64V79"/>
+<path class="ah-o" d="M81 69L88 80L95 69"/>
+<circle class="sc" cx="132" cy="28" r="13"/><text class="sn" x="132" y="33.5">2</text>
+<text class="an" x="154" y="34">then ack the original</text>
+<path class="ln" d="M388 128H644"/>
+<path class="ah" d="M644 121L656 128L644 135Z"/>
+<circle class="sc" cx="404" cy="84" r="13"/><text class="sn" x="404" y="89.5">4</text>
+<text class="an" x="424" y="90"><tspan class="cd">delivery_count</tspan> reaches</text>
+<text class="an" x="424" y="112">the limit: park it</text>
+<text class="an mu" x="404" y="168">handler fails</text>
+<path class="ln" d="M368 184V252Q368 268 384 268H441M545 268H656Q672 268 672 284V288"/>
+<path class="ah" d="M665 288L672 300L679 288Z"/>
+<polygon class="msg" points="436,253 532,253 550,283 454,283"/>
+<text class="msg-t" x="493" y="274.5">ord_123</text>
+<circle class="sc" cx="452" cy="216" r="13"/><text class="sn" x="452" y="221.5">1</text>
+<text class="an" x="474" y="222">produce the copy,</text>
+<text class="cd" x="474" y="244">delivery_count 1</text>
+<rect class="rg" x="544" y="300" width="256" height="124" rx="6"/>
+<text class="rl" x="564" y="330">Parent: retries only</text>
+<text class="cd" x="564" y="360">orders-retry-30s</text>
+<rect class="bx bxq tn" x="564" y="372" width="216" height="36" rx="2"/>
+<path class="ln1" d="M600 372V408M636 372V408M672 372V408M708 372V408M744 372V408"/>
+<rect class="rg" x="104" y="300" width="260" height="124" rx="6"/>
+<text class="rl" x="124" y="330">Delay child, 30 s</text>
+<text class="cd" x="124" y="360">orders-retry-30s-run</text>
+<rect class="bx bxq tn" x="124" y="372" width="216" height="36" rx="2"/>
+<path class="ln1" d="M160 372V408M196 372V408M232 372V408M268 372V408M304 372V408"/>
+<path class="ln dash" d="M544 348H376"/>
+<path class="ah" d="M376 341L364 348L376 355Z"/>
+<text class="an" x="392" y="376">30 s after</text>
+<text class="an" x="392" y="398">its commit</text>
+<path class="ln" d="M296 300V196"/>
+<path class="ah" d="M289 196L296 184L303 196Z"/>
+<circle class="sc" cx="113" cy="246" r="13"/><text class="sn" x="113" y="251.5">3</text>
+<text class="an end" x="284" y="252">consume the copy</text>
+<rect class="ink" x="176" y="472" width="188" height="12"/>
+<text class="lb end" x="164" y="484">Your service</text>
+<path class="ln2 dash" d="M236 472V424"/>
+<path class="x" d="M227 439L245 457M245 439L227 457"/>
+<text class="cd mu" x="260" y="454">direct produce: 409</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 736" role="img" data-search-exclude aria-labelledby="retries-tiers-n-t" aria-describedby="retries-tiers-n-d">
+<title id="retries-tiers-n-t">The retry loop through a delay child</title>
+<desc id="retries-tiers-n-d">Your worker consumes a message from the topic orders, and its handler fails. Step 1: the worker produces a copy, ord_123 with delivery_count 1, to orders-retry-30s, a parent topic that carries nothing but retries. Step 2: only then does it ack the original in orders. 30 seconds after the copy's commit, the delay child orders-retry-30s-run receives it. Step 3: the worker consumes the copy from the delay child. Step 4: once delivery_count reaches your limit, the worker produces the message to orders-dlq instead, where it is parked. Your service cannot produce to the delay child directly: that gets 409. The counter and the envelope are your JSON, not broker state.</desc>
+<rect class="rg" x="44" y="0" width="260" height="72" rx="6"/>
+<text class="rl" x="60" y="26">Topic</text>
+<rect class="bx bxq tn" x="208" y="10" width="84" height="28" rx="2"/>
+<path class="ln1" d="M236 10V38M264 10V38"/>
+<text class="cd cdb" x="60" y="58">orders</text>
+<path class="ln" d="M132 72V100"/>
+<path class="ah" d="M126 100L132 112L138 100Z"/>
+<text class="an end" x="120" y="97">consume</text>
+<path class="ln1" d="M168 112V73"/>
+<path class="ah-o" d="M162 83L168 72L174 83"/>
+<circle class="sc" cx="194" cy="92" r="12"/><text class="sn" x="194" y="97">2</text>
+<rect class="you" x="104" y="112" width="128" height="44" rx="2"/>
+<text class="lb mid on" x="168" y="140">worker</text>
+<text class="an mu" x="244" y="150">handler fails</text>
+<path class="ln" d="M232 128H320Q336 128 336 144V520Q336 536 320 536H316"/>
+<path class="ah" d="M316 530L304 536L316 542Z"/>
+<circle class="sc" cx="336" cy="290" r="12"/><text class="sn" x="336" y="295">4</text>
+<path class="ln" d="M168 156V162M168 196V220"/>
+<path class="ah" d="M162 220L168 232L174 220Z"/>
+<polygon class="msg" points="118.5,166 200.5,166 217.5,192 135.5,192"/>
+<text class="msg-t" x="168" y="184">ord_123</text>
+<circle class="sc" cx="234" cy="179" r="12"/><text class="sn" x="234" y="184">1</text>
+<rect class="rg" x="44" y="232" width="260" height="72" rx="6"/>
+<text class="rl" x="60" y="258">Parent: retries only</text>
+<rect class="bx bxq tn" x="208" y="242" width="84" height="28" rx="2"/>
+<path class="ln1" d="M236 242V270M264 242V270"/>
+<text class="cd" x="60" y="290">orders-retry-30s</text>
+<path class="ln dash" d="M168 304V340"/>
+<path class="ah" d="M162 340L168 352L174 340Z"/>
+<text class="an" x="184" y="325">30 s after</text>
+<text class="an" x="184" y="343">its commit</text>
+<rect class="rg" x="44" y="352" width="260" height="72" rx="6"/>
+<text class="rl" x="60" y="378">Delay child, 30 s</text>
+<rect class="bx bxq tn" x="208" y="362" width="84" height="28" rx="2"/>
+<path class="ln1" d="M236 362V390M264 362V390"/>
+<text class="cd" x="60" y="410">orders-retry-30s-run</text>
+<path class="ln" d="M44 388H40Q24 388 24 372V150Q24 134 40 134H92"/>
+<path class="ah" d="M92 128L104 134L92 140Z"/>
+<circle class="sc" cx="24" cy="290" r="12"/><text class="sn" x="24" y="295">3</text>
+<path class="ln2 dash" d="M168 464V424"/>
+<path class="x" d="M160 436L176 452M176 436L160 452"/>
+<text class="cd mu" x="184" y="441">direct produce:</text>
+<text class="cd mu" x="184" y="459">409</text>
+<rect class="ink" x="120" y="464" width="112" height="12"/>
+<text class="lb end" x="112" y="476">Your service</text>
+<rect class="rg" x="44" y="500" width="260" height="72" rx="6"/>
+<text class="rl" x="60" y="526">Parked</text>
+<rect class="bx bxq tn" x="208" y="510" width="84" height="28" rx="2"/>
+<path class="ln1" d="M236 510V538M264 510V538"/>
+<text class="cd" x="60" y="558">orders-dlq</text>
+<path class="sep" d="M16 592H344"/>
+<circle class="sc" cx="28" cy="615" r="12"/><text class="sn" x="28" y="620">1</text>
+<text class="an" x="50" y="620">produce the copy, <tspan class="cd">delivery_count 1</tspan></text>
+<circle class="sc" cx="28" cy="643" r="12"/><text class="sn" x="28" y="648">2</text>
+<text class="an" x="50" y="648">then ack the original</text>
+<circle class="sc" cx="28" cy="671" r="12"/><text class="sn" x="28" y="676">3</text>
+<text class="an" x="50" y="676">consume the copy</text>
+<circle class="sc" cx="28" cy="699" r="12"/><text class="sn" x="28" y="704">4</text>
+<text class="an" x="50" y="704"><tspan class="cd">delivery_count</tspan> reaches</text>
+<text class="an" x="50" y="724">the limit: park it</text>
+</svg>

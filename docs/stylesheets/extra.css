@@ -1,211 +1,2552 @@
-/* ── Narad brand: deep navy + veena gold ─────────────────────────── */
-:root {
-  --narad-navy: #010816;      /* sampled from the logo lockup */
-  --narad-navy-2: #0c142c;
-  --narad-navy-3: #131c3a;
-  --narad-gold: #c9963f;
-  --narad-gold-bright: #e2b163;
-  --narad-ink: #e9ecf5;
+/* ==========================================================================
+   Signal Line: the Narad docs theme
+   Ink on white, pastel grounds, one lime signal. Type, hairlines and
+   space do the work; mint, sky, lilac and butter carry the home page's
+   bands and the callouts, and a pale slate carries code.
+   Lime only ever means "here": the current tab, page and TOC heading,
+   the one next action, and the message in flight.
+
+   Sizes: Material sets the root to 125%, so 1rem is 20px at the default
+   browser size. Body text is .85rem (17px).
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. Tokens
+   -------------------------------------------------------------------------- */
+
+/* Raw values, light. Material puts the scheme attribute on <body>, so the
+   raw values are set per scheme and the Material mapping below is declared
+   on every scheme element, where it resolves against the right values. */
+:root,
+[data-md-color-scheme="default"] {
+  --nr-paper: #FFFFFF;        /* page, header and footer: one clean white */
+  --nr-surface: #F3F5F8;      /* pale slate: code blocks, table header, search field */
+  --nr-rule: #DFE3E9;         /* cool neutral hairlines */
+  --nr-text: #272929;         /* body text, 14.6:1 on paper */
+  --nr-ink: #0B0D0E;          /* headings and link text */
+  --nr-muted: #5A616B;        /* secondary text, 6.3:1 on paper, 5.5:1 on lilac */
+  --nr-signal: #528A00;       /* never text: markers, underlines, focus, load bar */
+  --nr-underline: #528A00;    /* a link's resting underline: the signal in light */
+  --nr-lime: #B8F53A;         /* hover fill and primary button, ink text on it */
+  --nr-lime-wash: rgba(184, 245, 58, 0.28);
+  --nr-on-lime: #0B0D0E;
+  --nr-danger: #B42318;       /* data-loss warnings only */
+  --nr-line-tint: #E7F5CC;    /* highlighted code lines: lime means "here" */
+  --nr-string: #3D5A73;       /* the one quiet tone in code: a slate blue,
+                                 6.6:1 on surface, 6.3:1 on the line tint */
+  --nr-you: #0B0D0E;          /* your own code in a diagram: solid ink */
+
+  /* Pastels: the home page's bands, callout fills and diagram tints.
+     Each has an edge (hairlines and tinted shapes on it) and a mark
+     (the 3px callout rule). */
+  --nr-mint: #E9F8F0;
+  --nr-mint-edge: #C9E9D7;
+  --nr-mint-mark: #2E8A5E;    /* 3.9:1 on mint (UI) */
+  --nr-sky: #E9F3FD;
+  --nr-sky-edge: #C9DEF3;
+  --nr-sky-mark: #2F6FAE;     /* 4.7:1 on sky (UI) */
+  --nr-lilac: #F1EEFC;
+  --nr-lilac-edge: #DCD5F3;
+  --nr-lilac-mark: #6A56C0;   /* 5.0:1 on lilac (UI) */
+  --nr-butter: #FFF9DF;
+  --nr-butter-edge: #F0E3AE;
+  --nr-butter-mark: #977100;  /* 4.3:1 on butter (UI) */
+  --nr-rose: #FDEEEC;
+  --nr-rose-edge: #F4D0CC;
+  --nr-inset: #FFFFFF;        /* code, inline code and boxes sitting on a pastel */
 }
 
-/* Typography: a little more air, a little less default */
+/* Raw values, dark: a neutral near-black; the pastels become quiet
+   tints with light accent tones */
+[data-md-color-scheme="slate"] {
+  --nr-paper: #101214;        /* ground */
+  --nr-surface: #191C20;
+  --nr-rule: #2B2F35;
+  --nr-text: #D9DCE1;         /* 13.6:1 on ground */
+  --nr-ink: #F5F7FA;          /* headings and link text */
+  --nr-muted: #9CA2AB;        /* 7.3:1 on ground */
+  --nr-signal: #B8F53A;
+  /* Resting link underlines are a mid green, not the lime: lime means
+     "here" (the current tab, focus, the one button, the message in
+     flight), and a page of links would otherwise be a page of lime.
+     5.1:1 to 5.7:1 on the ground and every band; hover still fills lime. */
+  --nr-underline: #6E9A2C;
+  --nr-lime: #B8F53A;
+  --nr-lime-wash: rgba(184, 245, 58, 0.16);
+  --nr-on-lime: #0B0D0E;
+  --nr-danger: #FF8A7A;
+  --nr-line-tint: #2A3521;
+  --nr-string: #9DC4EA;       /* pastel sky, 9.4:1 on surface, 7.1:1 on the line tint */
+  /* Your code in a diagram: a mid grey, 7.6:1 to 8.5:1 on the bands,
+     so it reads as solid without outshining the lime message */
+  --nr-you: #A9AFB8;
+
+  --nr-mint: #10201D;
+  --nr-mint-edge: #1F3833;
+  --nr-mint-mark: #8EDDB5;
+  --nr-sky: #131C26;
+  --nr-sky-edge: #23344A;
+  --nr-sky-mark: #9CC9F2;
+  --nr-lilac: #1A1827;
+  --nr-lilac-edge: #302B48;
+  --nr-lilac-mark: #BFB2F5;
+  --nr-butter: #18191B;       /* neutral graphite: a warm dark reads brown */
+  --nr-butter-edge: #303236;
+  --nr-butter-mark: #F0D78A;
+  --nr-rose: #24161A;
+  --nr-rose-edge: #43272C;
+  --nr-inset: #101214;        /* code and boxes on a band sit on the ground */
+  color-scheme: dark;
+}
+
+/* Constants and the Material mapping, for every scheme, and again on
+   the home page's tinted bands, which re-point the surface and the
+   hairlines, so code and links there resolve against the band */
+:root,
+[data-md-color-scheme],
+.nr-tint {
+  /* The terminal panel is ink in both schemes */
+  --nr-term-bg: #0B0D0E;
+  --nr-term-text: #D4D5D3;
+  --nr-term-strong: #F5F6F3;
+  --nr-term-muted: #939493;
+  --nr-term-rule: #2C2E2E;
+
+  /* Type and measures */
+  --nr-font-display: "Satoshi", "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+  --nr-measure: 32rem;        /* 640px: the prose column (40rem at a 16px root) */
+  --nr-strip: 1.9rem;         /* code block title strip */
+
+  --md-text-font: "Atkinson Hyperlegible Next";
+  --md-code-font: "Atkinson Hyperlegible Mono";
+
+  --md-default-bg-color: var(--nr-paper);
+  --md-default-bg-color--light: color-mix(in srgb, var(--nr-paper) 70%, transparent);
+  --md-default-bg-color--lighter: color-mix(in srgb, var(--nr-paper) 30%, transparent);
+  --md-default-bg-color--lightest: color-mix(in srgb, var(--nr-paper) 12%, transparent);
+  --md-default-fg-color: var(--nr-text);
+  --md-default-fg-color--light: var(--nr-muted);
+  /* Material also sets text in this one (search ghost text, annotation
+     numbers), so it gets the muted value that passes 4.5:1 */
+  --md-default-fg-color--lighter: var(--nr-muted);
+  --md-default-fg-color--lightest: var(--nr-rule);
+
+  --md-primary-fg-color: var(--nr-paper);
+  --md-primary-fg-color--light: var(--nr-paper);
+  --md-primary-fg-color--dark: var(--nr-surface);
+  --md-primary-bg-color: var(--nr-ink);
+  --md-primary-bg-color--light: var(--nr-muted);
+
+  --md-accent-fg-color: var(--nr-ink);
+  --md-accent-fg-color--transparent: var(--nr-lime-wash);
+  --md-accent-bg-color: var(--nr-paper);
+  --md-accent-bg-color--light: var(--nr-paper);
+
+  --md-typeset-color: var(--nr-text);
+  --md-typeset-a-color: var(--nr-ink);
+  --md-typeset-mark-color: var(--nr-lime);
+  --md-typeset-table-color: var(--nr-rule);
+  --md-typeset-table-color--light: var(--nr-surface);
+  --md-typeset-kbd-color: var(--nr-paper);
+  --md-typeset-kbd-accent-color: var(--nr-paper);
+  --md-typeset-kbd-border-color: var(--nr-rule);
+
+  --md-code-fg-color: var(--nr-text);
+  --md-code-bg-color: var(--nr-surface);
+  --md-code-bg-color--light: color-mix(in srgb, var(--nr-surface) 90%, transparent);
+  --md-code-bg-color--lighter: color-mix(in srgb, var(--nr-surface) 60%, transparent);
+  --md-code-hl-color: var(--nr-signal);
+  --md-code-hl-color--light: var(--nr-line-tint);
+  --md-code-hl-keyword-color: var(--nr-ink);
+  --md-code-hl-name-color: var(--nr-text);
+  --md-code-hl-function-color: var(--nr-ink);
+  --md-code-hl-constant-color: var(--nr-ink);
+  --md-code-hl-number-color: var(--nr-text);
+  --md-code-hl-special-color: var(--nr-text);
+  --md-code-hl-string-color: var(--nr-string);
+  --md-code-hl-variable-color: var(--nr-text);
+  --md-code-hl-operator-color: var(--nr-muted);
+  --md-code-hl-punctuation-color: var(--nr-muted);
+  --md-code-hl-comment-color: var(--nr-muted);
+  --md-code-hl-generic-color: var(--nr-muted);
+
+  --md-admonition-fg-color: var(--nr-text);
+  --md-admonition-bg-color: transparent;
+
+  --md-footer-fg-color: var(--nr-ink);
+  --md-footer-fg-color--light: var(--nr-muted);
+  --md-footer-fg-color--lighter: var(--nr-muted);
+  --md-footer-bg-color: var(--nr-paper);
+  --md-footer-bg-color--dark: var(--nr-paper);
+
+  /* Hairlines where Material draws shadows */
+  --md-shadow-z1: 0 0 0 1px var(--nr-rule);
+  --md-shadow-z2: 0 0 0 1px var(--nr-rule);
+  --md-shadow-z3: 0 0 0 1px var(--nr-rule);
+
+  /* Mermaid: sky boxes with ink outlines, ink lines and arrowheads,
+     butter notes. In the dark scheme the same mapping gives deep sky
+     boxes with light outlines, and light sequence numbers with ink digits. */
+  --md-mermaid-font-family: var(--md-text-font-family);
+  --md-mermaid-node-bg-color: var(--nr-sky);
+  --md-mermaid-node-fg-color: var(--nr-ink);
+  --md-mermaid-edge-color: var(--nr-ink);
+  --md-mermaid-label-bg-color: var(--nr-paper);
+  --md-mermaid-label-fg-color: var(--nr-ink);
+  --md-mermaid-sequence-actor-bg-color: var(--nr-sky);
+  --md-mermaid-sequence-actor-border-color: var(--nr-ink);
+  --md-mermaid-sequence-actor-fg-color: var(--nr-ink);
+  --md-mermaid-sequence-actor-line-color: var(--nr-muted);
+  --md-mermaid-sequence-actorman-bg-color: var(--nr-sky);
+  --md-mermaid-sequence-actorman-line-color: var(--nr-ink);
+  --md-mermaid-sequence-message-fg-color: var(--nr-text);
+  --md-mermaid-sequence-message-line-color: var(--nr-ink);
+  --md-mermaid-sequence-note-bg-color: var(--nr-butter);
+  --md-mermaid-sequence-note-border-color: var(--nr-butter-mark);
+  --md-mermaid-sequence-note-fg-color: var(--nr-text);
+  --md-mermaid-sequence-loop-bg-color: var(--nr-paper);
+  --md-mermaid-sequence-loop-border-color: var(--nr-muted);
+  --md-mermaid-sequence-loop-fg-color: var(--nr-text);
+  --md-mermaid-sequence-label-bg-color: var(--nr-surface);
+  --md-mermaid-sequence-label-fg-color: var(--nr-ink);
+  --md-mermaid-sequence-box-bg-color: var(--nr-surface);
+  --md-mermaid-sequence-box-fg-color: var(--nr-text);
+  --md-mermaid-sequence-number-bg-color: var(--nr-ink);
+  --md-mermaid-sequence-number-fg-color: var(--nr-paper);
+}
+
+/* --------------------------------------------------------------------------
+   2. Base: type, focus, selection, motion
+   -------------------------------------------------------------------------- */
+
+html {
+  /* Keep focused elements, and their focus ring, clear of the sticky
+     header when the browser scrolls them into view */
+  scroll-padding-top: 3.4rem;
+}
+
+/* An anchor jump lands the heading just under the 48px header. Material
+   adds its own :target margin on top of the padding above, which parked
+   headings at 136px, below the line where toc.follow moves the marker,
+   so the TOC pointed at the previous section. -1.05rem cancels the
+   padding down to 47px, where the marker moves to the heading. */
+.md-typeset :target {
+  scroll-margin-top: -1.05rem;
+}
+
 body {
   -webkit-font-smoothing: antialiased;
-}
-.md-typeset h1, .md-typeset h2 {
-  font-weight: 700;
-  letter-spacing: -0.015em;
-}
-.md-typeset h1 {
-  color: var(--md-default-fg-color);
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--nr-paper);
 }
 
-/* Header: brand navy with a whisper of gold underline */
-.md-header, .md-tabs {
-  background: linear-gradient(180deg, #010816 0%, #0a1128 100%);
-}
-.md-header {
-  border-bottom: 1px solid rgba(201, 150, 63, 0.28);
-}
-.md-header__button.md-logo img {
-  border-radius: 50%;
+::selection {
+  background-color: var(--nr-lime);
+  color: var(--nr-on-lime);
 }
 
-/* ── Dark scheme tuned to the brand ──────────────────────────────── */
-[data-md-color-scheme="slate"] {
-  --md-default-bg-color: #060c1e;
-  --md-default-fg-color: rgba(233, 236, 245, 0.88);
-  --md-default-fg-color--light: rgba(233, 236, 245, 0.62);
-  --md-default-fg-color--lighter: rgba(233, 236, 245, 0.36);
-  --md-typeset-a-color: var(--narad-gold-bright);
-  --md-accent-fg-color: #f0c67e;
-  --md-primary-fg-color: #010816;
-  --md-code-bg-color: #0e1631;
-  --md-code-fg-color: #dfe5f3;
-  --md-typeset-table-color: rgba(233, 236, 245, 0.10);
-  --md-footer-bg-color: #010816;
-  --md-footer-bg-color--dark: #01060f;
-}
-[data-md-color-scheme="slate"] .md-typeset code {
-  border: 1px solid rgba(201, 150, 63, 0.12);
+/* One visible focus style everywhere: 2px signal, 2px off the element */
+:focus-visible,
+.md-typeset :focus-visible,
+.md-typeset .focus-visible,
+.md-nav__link.focus-visible,
+.md-tabs__link.focus-visible,
+.md-clipboard.focus-visible,
+.md-code__button.focus-visible {
+  outline: 2px solid var(--nr-signal) !important;
+  outline-offset: 2px !important;
 }
 
-/* ── Light scheme: ivory paper, navy text, gold accents ──────────── */
-[data-md-color-scheme="default"] {
-  --md-default-bg-color: #fcfbf8;
-  --md-typeset-a-color: #a1721f;
-  --md-accent-fg-color: #c9963f;
-  --md-primary-fg-color: #010816;
-  --md-primary-fg-color--light: #2a3452;
-  --md-code-bg-color: #f4f1ea;
+/* Hidden radios hand their focus ring to the label people see: the
+   scheme toggle in the header, and content tab labels (section 6). */
+.md-option:focus-visible,
+.md-typeset .tabbed-set > input:focus-visible {
+  outline: none !important;
 }
 
-/* ── Landing hero ─────────────────────────────────────────────────── */
-.narad-hero {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  padding: 1.2rem 0 2.2rem;
+/* Either palette radio can hold focus, and in the dark scheme neither is
+   checked after a reload, so the ring goes on whichever label is shown */
+.md-header__option:has(.md-option:focus-visible) > label:not([hidden]) {
+  outline: 2px solid var(--nr-signal);
+  outline-offset: 2px;
 }
-.narad-hero img.narad-hero-logo {
-  width: min(380px, 78vw);
-  border-radius: 28px;
-  box-shadow: 0 24px 80px rgba(1, 8, 22, 0.45), 0 0 0 1px rgba(201, 150, 63, 0.25);
-}
-[data-md-color-scheme="slate"] .narad-hero img.narad-hero-logo {
-  box-shadow: 0 0 90px rgba(201, 150, 63, 0.16), 0 0 0 1px rgba(201, 150, 63, 0.22);
-}
-.narad-hero .narad-tagline {
-  margin: 1.4rem 0 0.2rem;
-  font-size: 1.35rem;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-  background: linear-gradient(90deg, var(--narad-gold) 0%, var(--narad-gold-bright) 50%, var(--narad-gold) 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-.narad-hero .narad-sub {
-  max-width: 34rem;
+
+.md-typeset {
   font-size: 0.85rem;
-  color: var(--md-default-fg-color--light);
+  line-height: 1.65;
+  font-variant-numeric: normal;
 }
-.narad-hero .md-button {
-  margin: 0.25rem 0.35rem;
-  border-radius: 999px;
-  padding: 0.55em 1.6em;
+
+/* The prose column: text runs 40rem (at a 16px root); code, tables and
+   diagrams may use the full content width */
+.md-typeset > :is(p, ul, ol, dl, blockquote, h1, h2, h3, h4, h5, h6, hr, .admonition, details, .footnote) {
+  max-width: var(--nr-measure);
 }
-.narad-hero .md-button--primary {
-  background: linear-gradient(135deg, #c9963f, #e2b163);
-  border-color: transparent;
-  color: #0b1023;
+
+.md-typeset :is(h1, h2) {
+  font-family: var(--nr-font-display);
+  color: var(--nr-ink);
+  letter-spacing: -0.02em;
+  text-transform: none;
+}
+
+.md-typeset h1 {
+  font-size: 2.35em;
   font-weight: 700;
-}
-.narad-hero .md-button--primary:hover {
-  background: linear-gradient(135deg, #d8a54c, #efc27a);
-  color: #01060f;
+  line-height: 1.12;
+  margin: 0 0 0.8em;
 }
 
-/* ── Cards: lift on hover, gold hairline ─────────────────────────── */
-.md-typeset .grid.cards > ul > li,
-.md-typeset .grid > .card {
-  border-radius: 16px;
-  border: 1px solid rgba(201, 150, 63, 0.22);
-  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
-}
-.md-typeset .grid.cards > ul > li:hover {
-  transform: translateY(-3px);
-  border-color: rgba(201, 150, 63, 0.55);
-  box-shadow: 0 12px 32px rgba(1, 8, 22, 0.25);
+.md-typeset h2 {
+  font-size: 1.55em;
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 2.2em 0 0.7em;
 }
 
-/* ── Tables and admonitions: soften the chrome ───────────────────── */
-.md-typeset table:not([class]) {
-  border-radius: 12px;
-  overflow: hidden;
-  border: 1px solid var(--md-typeset-table-color);
-}
-.md-typeset table:not([class]) th {
-  background: rgba(201, 150, 63, 0.10);
-}
-.md-typeset .admonition, .md-typeset details {
-  border-radius: 12px;
+.md-typeset h3 {
+  font-size: 1.18em;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: -0.005em;
+  color: var(--nr-ink);
+  margin: 1.8em 0 0.6em;
 }
 
-/* Mermaid diagrams breathe a little */
-.md-typeset .mermaid {
-  text-align: center;
+.md-typeset h4,
+.md-typeset h5,
+.md-typeset h6 {
+  font-weight: 600;
+  color: var(--nr-ink);
+  letter-spacing: 0;
+  text-transform: none;
 }
 
-/* Hide the auto-generated page title on the hero landing page */
-.md-content article:has(.narad-hero) > h1:first-child {
+.md-typeset strong {
+  font-weight: 600;
+  color: var(--nr-ink);
+}
+
+.md-typeset hr {
+  border-bottom: 1px solid var(--nr-rule);
+}
+
+/* Links: heading-colour text on a 1.5px green underline (the signal in
+   light, a quieter green in dark); hover puts a lime fill behind ink text */
+.md-typeset a {
+  color: var(--nr-ink);
+  text-decoration: underline;
+  text-decoration-color: var(--nr-underline);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+  transition: none;
+}
+
+.md-typeset a:is(:hover, :focus-visible) {
+  color: var(--nr-on-lime);
+  background-color: var(--nr-lime);
+  text-decoration-color: currentColor;
+}
+
+.md-typeset a code {
+  color: inherit;
+}
+
+.md-typeset a:is(:hover, :focus-visible) code {
+  background-color: transparent;
+}
+
+/* Things that are links but not prose links */
+.md-typeset :is(a.headerlink, a.md-button, a.md-content__button, a.footnote-backref) {
+  text-decoration: none;
+}
+
+.md-typeset :is(a.headerlink, a.md-content__button, a.footnote-backref):is(:hover, :focus-visible) {
+  background-color: transparent;
+}
+
+/* Content tab labels are links too; they get the tab treatment instead */
+.md-typeset .tabbed-labels > label > a,
+.md-typeset .tabbed-labels > label > a:is(:hover, :focus-visible) {
+  color: inherit;
+  background-color: transparent;
+  text-decoration: none;
+}
+
+.md-typeset .headerlink {
+  color: var(--nr-muted);
+}
+
+.md-typeset .headerlink:is(:hover, :focus-visible),
+.md-typeset :target > .headerlink {
+  color: var(--nr-ink);
+}
+
+/* The edit action sits quietly beside the title */
+.md-typeset .md-content__button {
+  color: var(--nr-muted);
+}
+
+.md-typeset .md-content__button:is(:hover, :focus-visible) {
+  color: var(--nr-ink);
+}
+
+/* Inline code */
+.md-typeset code {
+  font-size: 0.88em;
+  background-color: var(--nr-surface);
+  color: var(--nr-text);
+  border-radius: 2px;
+  padding: 0.08em 0.3em;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+}
+
+.md-typeset kbd {
+  font-family: var(--md-code-font-family);
+  box-shadow: 0 0 0 1px var(--nr-rule);
+  border-radius: 2px;
+}
+
+.md-typeset mark {
+  background-color: var(--nr-lime);
+  color: var(--nr-on-lime);
+}
+
+/* Minimal-functional motion: only the page-load bar moves. Material
+   animates a few more things; they change state instantly here. */
+.md-progress {
+  background-color: var(--nr-signal);
+  height: 2px;
+}
+
+.md-header__topic,
+.md-header__title--active .md-header__topic,
+.md-header__topic + .md-header__topic,
+.md-header__title--active .md-header__topic + .md-header__topic,
+.md-header__button,
+.md-header__option,
+.md-search__form,
+.md-search__suggest,
+.md-typeset .headerlink,
+.md-typeset code,
+.md-typeset pre,
+.md-typeset .md-code__nav,
+.md-code__button,
+.md-clipboard,
+.md-nav__link,
+.md-nav__icon,
+.md-tabs,
+.md-tabs__link,
+.md-top,
+.md-footer__link,
+.md-source,
+.md-source__fact,
+.md-typeset .tabbed-labels > label,
+.js .md-typeset .tabbed-labels::before,
+.md-header,
+.md-dialog,
+.md-nav,
+.md-nav__icon::after,
+.md-search__overlay,
+.md-search__inner,
+.md-search__icon,
+.md-search__output,
+.md-typeset a::before,
+.md-typeset .headerlink::before,
+.md-typeset .admonition,
+.md-typeset details,
+.md-typeset table:not([class]) tbody tr,
+.md-nav__toggle ~ .md-nav,
+.md-nav__toggle:checked ~ .md-nav,
+[data-md-toggle="search"]:checked ~ .md-header .md-search__inner,
+[data-md-toggle="search"]:checked ~ .md-header .md-search__overlay,
+.md-search__options > .md-icon,
+.md-tabs[hidden] .md-tabs__link,
+.md-typeset .tabbed-control,
+.md-typeset .tabbed-button,
+.md-typeset .tabbed-button::after {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   3. Header, tabs, breadcrumbs
+   -------------------------------------------------------------------------- */
+
+.md-header {
+  background-color: var(--nr-paper);
+  color: var(--nr-ink);
+  box-shadow: none;
+}
+
+.md-header--shadow {
+  box-shadow: 0 1px 0 var(--nr-rule);
+}
+
+@media screen and (max-width: 76.234375em) {
+  .md-header {
+    box-shadow: 0 1px 0 var(--nr-rule);
+  }
+}
+
+.md-header__title {
+  font-family: var(--nr-font-display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.md-header__button.md-logo {
+  padding: 0.4rem;
+}
+
+.md-header__button.md-logo img {
+  height: 1.2rem;
+  width: 1.2rem;
+}
+
+/* One logo image per scheme (beats Material's .md-logo img display) */
+.md-logo .nr-logo.nr-logo--dark,
+[data-md-color-scheme="slate"] .md-logo .nr-logo.nr-logo--light {
   display: none;
 }
 
-/* Secondary hero button must read on navy */
-.narad-hero .md-button:not(.md-button--primary) {
-  border-color: rgba(201, 150, 63, 0.55);
-  color: var(--narad-gold-bright);
-}
-.narad-hero .md-button:not(.md-button--primary):hover {
-  background: rgba(201, 150, 63, 0.12);
-  border-color: var(--narad-gold-bright);
-  color: #f0c67e;
-}
-[data-md-color-scheme="default"] .narad-hero .md-button:not(.md-button--primary) {
-  color: #8a6420;
-  border-color: rgba(138, 100, 32, 0.6);
+[data-md-color-scheme="slate"] .md-logo .nr-logo.nr-logo--dark {
+  display: block;
 }
 
-/* ── Landing sections ─────────────────────────────────────────────── */
-.narad-section {
-  max-width: 46rem;
-  margin: 0 auto;
-  padding: 1.6rem 0 0.8rem;
-}
-.narad-section > h2 {
-  text-align: center;
-  font-size: 1.6rem;
-  margin-bottom: 0.8rem;
-}
-.narad-section > p {
-  font-size: 0.78rem;
-}
-.narad-final > h2 {
-  margin-top: 1rem;
+.md-header__button:not([hidden]):hover,
+.md-header__source:hover {
+  opacity: 1;
 }
 
-/* Stat chips */
-.narad-stats {
-  display: flex;
-  gap: 0.8rem;
-  justify-content: center;
-  flex-wrap: wrap;
-  margin: 1.4rem 0;
+.md-header__button:hover {
+  color: var(--nr-ink);
 }
-.narad-stat {
-  flex: 1 1 10rem;
-  max-width: 13rem;
-  text-align: center;
-  padding: 1rem 0.8rem;
-  border-radius: 16px;
-  border: 1px solid rgba(201, 150, 63, 0.30);
-  background: linear-gradient(180deg, rgba(201, 150, 63, 0.07), transparent);
+
+/* Search: a quiet surface field */
+@media screen and (min-width: 60em) {
+  .md-search__form {
+    background-color: var(--nr-surface);
+    border-radius: 2px;
+  }
+
+  .md-search__form:hover {
+    background-color: var(--nr-surface);
+    box-shadow: 0 0 0 1px var(--nr-rule);
+  }
+
+  .md-search__input::placeholder,
+  .md-search__icon[for="__search"] {
+    color: var(--nr-muted);
+  }
+
+  .md-search__input {
+    color: var(--nr-ink);
+  }
 }
-.narad-stat-num {
+
+[data-md-toggle="search"]:checked ~ .md-header .md-search__form {
+  background-color: var(--nr-paper);
+  box-shadow: 0 0 0 1px var(--nr-rule);
+}
+
+.md-search__output {
+  box-shadow: 0 0 0 1px var(--nr-rule);
+}
+
+/* Closed search: the empty results scroller is 0px tall but Chrome still
+   stops Tab on it, so focus vanished for a step after the search field */
+[data-md-toggle="search"]:not(:checked) ~ .md-header .md-search__scrollwrap {
+  visibility: hidden;
+}
+
+.md-search-result__meta {
+  background-color: var(--nr-surface);
+  color: var(--nr-muted);
+}
+
+.md-search-result__link:is(:hover, :focus),
+.md-search-result__more > summary:is(:hover, :focus) > div {
+  background-color: var(--md-accent-fg-color--transparent);
+}
+
+/* Tabs: sentence case, the current one carries the signal bar */
+.md-tabs {
+  background-color: var(--nr-paper);
+  color: var(--nr-text);
+  border-bottom: 1px solid var(--nr-rule);
+}
+
+.md-tabs__item {
+  height: 2.5rem;
+  padding: 0 0.6rem;
+}
+
+.md-tabs__link {
+  font-family: var(--nr-font-display);
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  margin-top: 0.75rem;
+  opacity: 1;
+  color: var(--nr-text);
+  text-underline-offset: 4px;
+  transition: none;
+}
+
+.md-tabs__link:is(:hover, :focus-visible) {
+  color: var(--nr-ink);
+  text-decoration: underline;
+  text-decoration-color: var(--nr-signal);
+  text-decoration-thickness: 1.5px;
+}
+
+/* The bar runs under the label only, so it starts on the same 16px line
+   as the logo and the page content, not out in the item's padding */
+.md-tabs__item--active {
+  position: relative;
+}
+
+.md-tabs__item--active::after {
+  content: "";
+  position: absolute;
+  left: 0.6rem;
+  right: 0.6rem;
+  bottom: 0;
+  height: 3px;
+  background-color: var(--nr-signal);
+}
+
+.md-tabs__item--active .md-tabs__link {
+  color: var(--nr-ink);
+  font-weight: 700;
+}
+
+.md-tabs__item--active .md-tabs__link:hover {
+  text-decoration: none;
+}
+
+/* Breadcrumbs above the H1. The trail scrolls sideways when long, which
+   clips anything outside its box, so 4px of padding (taken back from the
+   margins) leaves room for the whole focus ring. */
+.md-path {
+  font-family: var(--nr-font-display);
+  font-size: 0.7rem;
+  font-weight: 500;
+  padding: 1.4rem 4px 4px;
+  margin: 0 calc(0.8rem - 4px) -4px;
+}
+
+@media screen and (min-width: 76.25em) {
+  .md-path {
+    margin: 0 calc(1.2rem - 4px) -4px;
+  }
+}
+
+.md-path__link {
+  color: var(--nr-muted);
+}
+
+.md-path__link:is(:hover, :focus-visible) {
+  color: var(--nr-ink);
+  text-decoration: underline;
+  text-decoration-color: var(--nr-signal);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+}
+
+.md-path__item:not(:first-child)::before {
+  background-color: var(--nr-muted);
+}
+
+/* --------------------------------------------------------------------------
+   4. Layout: a wider grid so code can run past the prose column
+   -------------------------------------------------------------------------- */
+
+.md-grid {
+  max-width: 72rem;
+}
+
+.md-main__inner {
+  margin-top: 0;
+}
+
+.md-content__inner {
+  padding-top: 0.8rem;
+  margin-bottom: 2.4rem;
+}
+
+.md-content__inner > h1:first-child,
+.md-content__inner > .md-content__button + h1 {
+  margin-top: 0.4em;
+}
+
+/* --------------------------------------------------------------------------
+   5. Sidebars: navigation and table of contents
+   -------------------------------------------------------------------------- */
+
+.md-nav {
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.md-nav--primary .md-nav__link {
+  font-family: var(--nr-font-display);
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+
+.md-nav__link {
+  color: var(--nr-text);
+}
+
+.md-nav__link:is(:hover, :focus-visible),
+.md-nav__link[for]:is(:hover, :focus-visible) {
+  color: var(--nr-ink);
+}
+
+.md-nav__link:hover .md-ellipsis {
+  text-decoration: underline;
+  text-decoration-color: var(--nr-signal);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+}
+
+/* Section labels in the sidebar */
+.md-nav--primary .md-nav__item--section > .md-nav__link,
+.md-nav--lifted > .md-nav__list > .md-nav__item > [for],
+.md-nav__title {
+  color: var(--nr-ink);
+  font-family: var(--nr-font-display);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* The marker rail: every link reserves 3px, the current one fills it */
+@media screen and (min-width: 76.25em) {
+  .md-nav--primary .md-nav__item:not(.md-nav__item--section) > .md-nav__link,
+  .md-nav--secondary .md-nav__link {
+    border-left: 3px solid transparent;
+    padding-left: 0.55rem;
+    margin-top: 0.3em;
+    padding-top: 0.15em;
+    padding-bottom: 0.15em;
+  }
+}
+
+.md-nav__item .md-nav__link--active,
+.md-nav__item .md-nav__link--active code {
+  color: var(--nr-ink);
+  font-weight: 700;
+}
+
+.md-nav--primary .md-nav__link--active,
+.md-nav--secondary .md-nav__link--active {
+  border-left-color: var(--nr-signal) !important;
+}
+
+.md-nav--secondary .md-nav__title {
+  font-size: 0.72rem;
+  color: var(--nr-muted);
+  font-weight: 500;
+  /* The title is sticky: an opaque ground keeps long tables of contents
+     from printing through it as they scroll underneath. */
+  box-shadow: 0 0 .4rem .4rem var(--nr-paper);
+  background: var(--nr-paper);
+}
+
+.md-nav--secondary .md-nav__link {
+  font-family: var(--md-text-font-family);
+}
+
+.md-nav--secondary .md-nav__link--passed {
+  color: var(--nr-muted);
+}
+
+.md-nav--secondary .md-nav__link--active {
+  color: var(--nr-ink);
+  font-weight: 600;
+}
+
+.md-sidebar__scrollwrap {
+  scrollbar-color: var(--nr-rule) transparent;
+}
+
+/* Mobile drawer: the same paper surface, hairlines instead of fills */
+@media screen and (max-width: 76.234375em) {
+  .md-nav--primary .md-nav__title[for="__drawer"] {
+    background-color: var(--nr-paper);
+    color: var(--nr-ink);
+    border-bottom: 1px solid var(--nr-rule);
+  }
+
+  .md-nav--primary .md-nav__title {
+    background-color: var(--nr-paper);
+    box-shadow: none;
+  }
+
+  .md-nav__source {
+    background-color: var(--nr-surface);
+    color: var(--nr-ink);
+  }
+
+  .md-nav--primary .md-nav__item {
+    border-top: 1px solid var(--nr-rule);
+  }
+
+  .md-nav--primary .md-nav__link--active {
+    box-shadow: inset 3px 0 0 var(--nr-signal);
+  }
+
+  /* A closed drawer is off-canvas, so take it out of the Tab order too;
+     otherwise focus walks through dozens of links nobody can see. It
+     opens and closes in place: only the page-load bar moves. */
+  [data-md-toggle="drawer"]:not(:checked) ~ .md-container .md-sidebar--primary {
+    visibility: hidden;
+  }
+
+  .md-sidebar--primary,
+  .md-overlay,
+  [data-md-toggle="drawer"]:checked ~ .md-overlay {
+    transition: none;
+  }
+}
+
+/* The drawer control is a real button (overrides/partials/header.html);
+   Material's label stays as the no-JavaScript fallback */
+.md-header__button.nr-drawer-button {
+  background: transparent;
+  border: 0;
+  border-radius: 2px;
+  font: inherit;
+  color: inherit;
+}
+
+.no-js .md-header__button.nr-drawer-button,
+.js .md-header__button.nr-drawer-label {
+  display: none;
+}
+
+@media screen and (min-width: 76.25em) {
+  .md-header__button.nr-drawer-button {
+    display: none;
+  }
+}
+
+.md-sidebar--primary {
+  background-color: var(--nr-paper);
+}
+
+/* --------------------------------------------------------------------------
+   6. Code blocks: a title strip that holds the copy button
+   -------------------------------------------------------------------------- */
+
+.md-typeset .highlight,
+.md-typeset .highlighttable {
+  position: relative;
+  margin: 1.2em 0;
+  background-color: var(--nr-surface);
+  border: 1px solid var(--nr-rule);
+  border-radius: 2px;
+}
+
+.md-typeset .highlight pre,
+.md-typeset .highlight pre > code {
+  margin: 0;
+  border-radius: 0;
+  background-color: transparent;
+}
+
+.md-typeset pre > code {
+  font-size: 0.75rem;
+  line-height: 1.6;
+  padding: 0.85em 1em;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  scrollbar-color: var(--nr-rule) transparent;
+}
+
+/* The strip: the language, or the title given with title="...". One line
+   is exactly --nr-strip tall; a long title wraps onto more lines instead
+   of being cut off, and the right padding keeps it clear of the button. */
+.md-typeset .highlight > span.filename,
+.md-typeset .highlight:not(:has(> span.filename))::before {
   display: block;
-  font-size: 2.4rem;
-  font-weight: 800;
-  line-height: 1.1;
-  background: linear-gradient(90deg, var(--narad-gold), var(--narad-gold-bright));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-.narad-stat-label {
-  display: block;
-  margin-top: 0.3rem;
+  box-sizing: border-box;
+  min-height: var(--nr-strip);
+  height: auto;
+  margin: 0;
+  padding: calc((var(--nr-strip) - 1px - 1.1rem) / 2) 3.2rem calc((var(--nr-strip) - 1px - 1.1rem) / 2) 1rem;
+  border-bottom: 1px solid var(--nr-rule);
+  border-radius: 0;
+  background-color: transparent;
+  color: var(--nr-muted);
+  font-family: var(--md-code-font-family);
   font-size: 0.66rem;
-  color: var(--md-default-fg-color--light);
+  font-weight: 600;
+  line-height: 1.1rem;
+  letter-spacing: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.md-typeset .highlight:not(:has(> span.filename))::before {
+  content: "Code";
+}
+
+.md-typeset .highlight:is(.language-bash, .language-sh, .language-shell, .language-zsh, .language-console):not(:has(> span.filename))::before { content: "Shell"; }
+.md-typeset .highlight.language-json:not(:has(> span.filename))::before { content: "JSON"; }
+.md-typeset .highlight:is(.language-yaml, .language-yml):not(:has(> span.filename))::before { content: "YAML"; }
+.md-typeset .highlight.language-go:not(:has(> span.filename))::before { content: "Go"; }
+.md-typeset .highlight.language-text:not(:has(> span.filename))::before { content: "Text"; }
+.md-typeset .highlight.language-http:not(:has(> span.filename))::before { content: "HTTP"; }
+.md-typeset .highlight.language-python:not(:has(> span.filename))::before { content: "Python"; }
+.md-typeset .highlight:is(.language-promql, .language-prometheus):not(:has(> span.filename))::before { content: "PromQL"; }
+.md-typeset .highlight.language-toml:not(:has(> span.filename))::before { content: "TOML"; }
+.md-typeset .highlight.language-ini:not(:has(> span.filename))::before { content: "INI"; }
+.md-typeset .highlight.language-dockerfile:not(:has(> span.filename))::before { content: "Dockerfile"; }
+.md-typeset .highlight.language-sql:not(:has(> span.filename))::before { content: "SQL"; }
+.md-typeset .highlight.language-js:not(:has(> span.filename))::before { content: "JavaScript"; }
+
+/* The copy button lives in the strip's first line, so it never covers
+   code. It is placed against the whole block rather than the <pre>, so
+   it stays in the strip however many lines the title takes. */
+.md-typeset .highlight > pre {
+  position: static;
+}
+
+.md-typeset .highlight .md-code__nav {
+  top: 0.2rem;
+  right: 0.35rem;
+  padding: 0.1rem;
+  background-color: transparent;
+}
+
+.md-typeset .highlight:hover .md-code__nav,
+.md-typeset .highlight .md-code__nav:hover {
+  background-color: transparent;
+}
+
+.md-code__button,
+.md-clipboard {
+  color: var(--nr-muted);
+  border-radius: 2px;
+}
+
+.md-code__button:is(:hover, .focus-visible),
+.md-clipboard:is(:hover, .focus-visible),
+:hover > * > .md-code__button {
+  color: var(--nr-ink);
+}
+
+/* Near-monochrome highlighting: keywords carry weight, not colour */
+.md-typeset .highlight :is(.k, .kc, .kd, .kn, .kp, .kr, .kt, .ow, .nt, .nb) {
+  font-weight: 600;
+}
+
+.md-typeset .highlight :is(.c, .c1, .cm, .ch, .cs, .cp, .cpf, .sd) {
+  font-style: normal;
+}
+
+/* Highlighted lines: the line tint with a 3px signal bar */
+.md-typeset .highlight .hll {
+  background-color: var(--nr-line-tint);
+  box-shadow: inset 3px 0 0 var(--nr-signal);
+  margin: 0 -1em;
+  padding: 0 1em;
+}
+
+/* On the dark line tint, muted tokens fall to 4.1:1; lift them to text */
+[data-md-color-scheme="slate"] .md-typeset .highlight .hll :is(.c, .c1, .cm, .ch, .cs, .cp, .cpf, .o, .ow, .p, .gp, .go, .gh, .gu) {
+  color: var(--nr-text);
+}
+
+/* Code annotations: ink markers, lime only when open */
+.md-annotation__index::after {
+  background-color: var(--nr-muted);
+}
+
+.md-annotation__index:is(:hover, :focus-visible)::after,
+:focus-within > .md-annotation__index::after {
+  background-color: var(--nr-ink);
+}
+
+.md-tooltip {
+  background-color: var(--nr-paper);
+  box-shadow: 0 0 0 1px var(--nr-rule);
+  border-radius: 2px;
+}
+
+/* Content tabs */
+.md-typeset .tabbed-set {
+  margin: 1.2em 0;
+}
+
+.md-typeset .tabbed-labels {
+  box-shadow: inset 0 -1px 0 var(--nr-rule);
+}
+
+.md-typeset .tabbed-labels > label {
+  font-family: var(--nr-font-display);
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--nr-text);
+  padding: 0.7em 0.9em 0.6em;
+}
+
+.md-typeset .tabbed-labels > label:hover {
+  color: var(--nr-ink);
+}
+
+/* The current tab: ink at 700 over the signal bar. Material marks it
+   per position (input N checked, label N), so the rules follow suit. */
+.md-typeset .tabbed-set > input:nth-child(1):checked ~ .tabbed-labels > :nth-child(1),
+.md-typeset .tabbed-set > input:nth-child(2):checked ~ .tabbed-labels > :nth-child(2),
+.md-typeset .tabbed-set > input:nth-child(3):checked ~ .tabbed-labels > :nth-child(3),
+.md-typeset .tabbed-set > input:nth-child(4):checked ~ .tabbed-labels > :nth-child(4),
+.md-typeset .tabbed-set > input:nth-child(5):checked ~ .tabbed-labels > :nth-child(5),
+.md-typeset .tabbed-set > input:nth-child(6):checked ~ .tabbed-labels > :nth-child(6) {
+  color: var(--nr-ink);
+  font-weight: 700;
+}
+
+/* Keyboard focus sits on the hidden radio; the ring goes on its label.
+   The label row scrolls sideways when it overflows, which would clip a
+   ring drawn outside the label, so this one is drawn just inside it. */
+.md-typeset .tabbed-set > input:nth-child(1):focus-visible ~ .tabbed-labels > :nth-child(1),
+.md-typeset .tabbed-set > input:nth-child(2):focus-visible ~ .tabbed-labels > :nth-child(2),
+.md-typeset .tabbed-set > input:nth-child(3):focus-visible ~ .tabbed-labels > :nth-child(3),
+.md-typeset .tabbed-set > input:nth-child(4):focus-visible ~ .tabbed-labels > :nth-child(4),
+.md-typeset .tabbed-set > input:nth-child(5):focus-visible ~ .tabbed-labels > :nth-child(5),
+.md-typeset .tabbed-set > input:nth-child(6):focus-visible ~ .tabbed-labels > :nth-child(6) {
+  outline: 2px solid var(--nr-signal);
+  outline-offset: -4px;
+}
+
+/* The sliding indicator becomes the signal bar, and it does not slide
+   (Material's own rule is more specific than a plain override) */
+.js .md-typeset .tabbed-labels::before,
+.js .md-typeset .tabbed-set > input ~ .tabbed-labels::before {
+  background-color: var(--nr-signal);
+  height: 3px;
+  transition: none;
+}
+
+/* The code sits straight under the labels: their rule is its top edge */
+.md-typeset .tabbed-content > .highlight:first-child,
+.md-typeset .tabbed-block > .highlight:first-child {
+  margin-top: 0;
+  border-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+/* --------------------------------------------------------------------------
+   7. Tables: body size, hairline rows, tabular figures
+   -------------------------------------------------------------------------- */
+
+.md-typeset table:not([class]) {
+  font-size: 1em;
+  line-height: 1.5;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background-color: transparent;
+  font-variant-numeric: tabular-nums;
+  border-collapse: separate;
+  border-spacing: 0;
+  /* Material makes the table its own scroller; let the wrapper around it
+     scroll instead, so the pinned first column (phones) has something to
+     stick against */
+  overflow: visible;
+}
+
+/* People copy from reference tables: a port, a variable name or a status
+   stays on one line and the table scrolls instead of splitting it. The
+   build adds <wbr> after underscores in cell code for the pinned column
+   on phones (overrides/hooks/table_breaks.py); Chrome honours <wbr> even
+   under nowrap, so they are switched off here and back on there. */
+.md-typeset table:not([class]) :is(th, td) code {
+  white-space: nowrap;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.md-typeset table:not([class]) :is(th, td) code wbr {
+  display: none;
+}
+
+.md-typeset table:not([class]) th {
+  background-color: var(--nr-surface);
+  color: var(--nr-ink);
+  font-weight: 600;
+  min-width: 4rem;              /* a floor, so no column shrinks to a letter */
+  padding: 0.6em 1em;
+  border-top: 1px solid var(--nr-rule);
+  border-bottom: 1px solid var(--nr-rule);
+  vertical-align: bottom;
+}
+
+.md-typeset table:not([class]) td {
+  padding: 0.65em 1em;
+  border-top: 0;
+  border-bottom: 1px solid var(--nr-rule);
+  vertical-align: top;
+}
+
+.md-typeset table:not([class]) tbody tr:hover {
+  background-color: transparent;
+  box-shadow: none;
+}
+
+.md-typeset table:not([class]) :is(th, td):first-child {
+  padding-left: 0.5em;
+}
+
+.md-typeset__table {
+  padding: 0;
+}
+
+.md-typeset__scrollwrap {
+  margin: 1.2em 0;
+}
+
+/* Phones: scroll sideways, with the first column pinned. Every column
+   keeps a readable floor, so a table scrolls rather than crushing its
+   cells into fragments. The pinned column may wrap its code at spaces
+   and at the word breaks the build marks (never mid-word), so a long
+   variable name cannot push it off the screen. */
+@media screen and (max-width: 44.984375em) {
+  .md-typeset__scrollwrap {
+    margin-left: -0.8rem;
+    margin-right: -0.8rem;
+  }
+
+  /* Full bleed: the pinned column's text sits on the 16px gutter both
+     before and after the table scrolls */
+  .md-typeset__table {
+    padding: 0;
+  }
+
+  .md-typeset table:not([class]) :is(th, td) {
+    min-width: 9rem;
+  }
+
+  .md-typeset table:not([class]) :is(th, td):last-child {
+    padding-right: 0.8rem;
+  }
+
+  /* Chrome paints the borders of the scrolled cells over a pinned cell,
+     and can clip a line on a pinned cell's bottom edge, so on phones each
+     row line is an inset shadow on the top edge of the cell below it, and
+     the table's own border closes the last row */
+  .md-typeset table:not([class]) {
+    border-bottom: 1px solid var(--nr-rule);
+  }
+
+  .md-typeset table:not([class]) :is(th, td) {
+    border-top: 0;
+    border-bottom: 0;
+    box-shadow: inset 0 1px 0 var(--nr-rule);
+  }
+
+  .md-typeset table:not([class]) :is(th, td):first-child {
+    min-width: 6.5rem;
+    padding-left: 0.8rem;
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background-color: var(--nr-paper);
+    box-shadow: inset 0 1px 0 var(--nr-rule), 1px 0 0 var(--nr-rule);
+  }
+
+  .md-typeset table:not([class]) th:first-child {
+    background-color: var(--nr-surface);
+  }
+
+  .md-typeset table:not([class]) :is(th, td):first-child code {
+    white-space: normal;
+  }
+
+  .md-typeset table:not([class]) :is(th, td):first-child code wbr {
+    display: inline;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   8. Callouts: a pastel fill by type, a 3px rule in the same family and a
+   text label; no icons
+   -------------------------------------------------------------------------- */
+
+.md-typeset .admonition,
+.md-typeset details {
+  background-color: transparent;
+  border: 0;
+  border-left: 3px solid var(--nr-ink);
+  border-radius: 0;
+  box-shadow: none;
+  font-size: 1em;
+  margin: 1.6em 0;
+  padding: 0.1em 0 0.1em 1.1em;
+}
+
+.md-typeset :is(.admonition, details) > :is(.admonition-title, summary) {
+  background-color: transparent;
+  border: 0;
+  margin: 0 0 0.3em;
+  padding: 0;
+  font-family: var(--nr-font-display);
+  font-weight: 700;
+  font-size: 1em;
+  letter-spacing: -0.01em;
+  color: var(--nr-ink);
+}
+
+.md-typeset :is(.admonition, details) > :is(.admonition-title, summary)::before {
+  display: none;
+}
+
+.md-typeset details > summary {
+  cursor: pointer;
+  padding-right: 1.6em;
+}
+
+.md-typeset details > summary::after {
+  background-color: var(--nr-muted);
+  top: 0.35em;
+  right: 0;
+}
+
+.md-typeset :is(.admonition, details) > :is(p, ul, ol):last-child {
+  margin-bottom: 0.2em;
+}
+
+/* Every type gets a pastel fill and a rule in the same family (beats
+   Material's per-type colours). A fill needs inner room, so a filled
+   callout gets padding on every side. Notes and anything untyped are
+   sky, tips mint, examples and questions lilac. */
+.md-typeset .admonition[class],
+.md-typeset details[class] {
+  --nr-callout: var(--nr-sky);
+  --nr-callout-mark: var(--nr-sky-mark);
+  background-color: var(--nr-callout);
+  border-left-color: var(--nr-callout-mark);
+  border-radius: 0 2px 2px 0;
+  padding: 0.75em 1em 0.75em 1.1em;
+}
+
+.md-typeset :is(.admonition, details):is(.tip, .hint, .important, .success, .check, .done) {
+  --nr-callout: var(--nr-mint);
+  --nr-callout-mark: var(--nr-mint-mark);
+}
+
+.md-typeset :is(.admonition, details):is(.example, .question, .help, .faq, .quote, .cite, .abstract, .summary, .tldr) {
+  --nr-callout: var(--nr-lilac);
+  --nr-callout-mark: var(--nr-lilac-mark);
+}
+
+/* Code inside a filled callout sits on white (the ground, in dark), not
+   on the slate it would share a tone with */
+.md-typeset :is(.admonition, details) {
+  --nr-surface: var(--nr-inset);
+}
+
+/* Data-loss warnings: a rose fill, a danger rule and a danger label */
+.md-typeset :is(.admonition, details):is(.warning, .danger, .caution, .attention, .error, .failure, .bug) {
+  --nr-callout: var(--nr-rose);
+  --nr-callout-mark: var(--nr-danger);
+}
+
+.md-typeset :is(.admonition, details):is(.warning, .danger, .caution, .attention, .error, .failure, .bug) > :is(.admonition-title, summary) {
+  color: var(--nr-danger);
+}
+
+/* --------------------------------------------------------------------------
+   9. Buttons: square, flat, one primary
+   -------------------------------------------------------------------------- */
+
+.md-typeset .md-button {
+  font-family: var(--nr-font-display);
+  font-weight: 700;
+  font-size: 0.85rem;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  padding: 0.7em 1.3em;
+  border: 2px solid var(--nr-ink);
+  border-radius: 2px;
+  color: var(--nr-ink);
+  background-color: transparent;
+  transition: none;
+}
+
+.md-typeset .md-button:is(:hover, :focus, :focus-visible, :active) {
+  background-color: var(--nr-lime);
+  border-color: var(--nr-ink);
+  color: var(--nr-on-lime);
+}
+
+.md-typeset .md-button--primary {
+  background-color: var(--nr-lime);
+  border-color: var(--nr-lime);
+  color: var(--nr-on-lime);
+}
+
+.md-typeset .md-button--primary:is(:hover, :focus, :focus-visible, :active) {
+  background-color: var(--nr-lime);
+  border-color: var(--nr-ink);
+  color: var(--nr-on-lime);
+}
+
+/* Back to top: a flat square with a hairline. It shows while the reader
+   moves up the page, so it sits at the bottom edge, where focus moving
+   upward never lands, instead of over the top of the content. Material
+   sets top inline from the header height, hence !important. */
+.md-top {
+  font-family: var(--nr-font-display);
+  font-weight: 500;
+  border-radius: 2px;
+  background-color: var(--nr-paper);
+  color: var(--nr-ink);
+  box-shadow: 0 0 0 1px var(--nr-rule);
+  top: auto !important;
+  bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+}
+
+.md-top:is(:hover, :focus-visible) {
+  background-color: var(--nr-lime);
+  color: var(--nr-on-lime);
+}
+
+/* --------------------------------------------------------------------------
+   10. Mermaid: left-aligned on the grid, full content width
+   -------------------------------------------------------------------------- */
+
+.md-typeset .mermaid {
+  margin: 1.4em 0;
+  text-align: left;
+  overflow-x: auto;
+}
+
+/* --------------------------------------------------------------------------
+   11. Footer: the same white, a hairline above
+   -------------------------------------------------------------------------- */
+
+.md-footer {
+  background-color: var(--nr-paper);
+  color: var(--nr-ink);
+  border-top: 1px solid var(--nr-rule);
+}
+
+.md-footer__link,
+.md-footer__link:is(:hover, :focus, :focus-visible) {
+  opacity: 1;
+}
+
+.md-footer__link:is(:hover, :focus-visible) .md-footer__title {
+  text-decoration: underline;
+  text-decoration-color: var(--nr-signal);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+}
+
+.md-footer__title {
+  font-family: var(--nr-font-display);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.md-footer__direction {
+  color: var(--nr-muted);
+  opacity: 1;
+}
+
+.md-footer-meta {
+  background-color: var(--nr-paper);
+  border-top: 1px solid var(--nr-rule);
+}
+
+.md-footer-meta__inner,
+.md-copyright {
+  color: var(--nr-muted);
+}
+
+html .md-footer-meta.md-typeset a {
+  color: var(--nr-muted);
+}
+
+html .md-footer-meta.md-typeset a:is(:hover, :focus-visible) {
+  color: var(--nr-ink);
+  background-color: transparent;
+}
+
+.md-social__link svg {
+  fill: var(--nr-muted);
+}
+
+/* --------------------------------------------------------------------------
+   12. Utilities
+   -------------------------------------------------------------------------- */
+
+.nr-sr {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --------------------------------------------------------------------------
+   13. Home page: the one page that argues. A white first screen with the
+   contract working, then four pitches on edge-to-edge pastel bands (mint,
+   sky, lilac, butter), one hand-drawn diagram each, then the fine print
+   and the rest on white. Everything else on the site stays calm.
+   -------------------------------------------------------------------------- */
+
+/* Bands run edge to edge; nothing may scroll the page sideways */
+.md-main:has(.nr-home) {
+  overflow-x: clip;
+}
+
+/* 0.8rem sides at every width: the headline starts on the same 16px line
+   as the logo and the tab labels */
+.nr-home .md-content__inner {
+  margin: 0 0.8rem;
+  padding-top: 0;
+}
+
+.nr-home .md-typeset > * {
+  max-width: none;
+}
+
+/* An introduction, not a reference page: no permalinks on its headings */
+.nr-home .md-typeset .headerlink {
+  display: none;
+}
+
+/* Short commands and codes stay whole instead of splitting into two chips */
+.nr-home .md-typeset :is(.nr-lead, .nr-band__copy p, .nr-rows li, .nr-try__copy p, .nr-print__head p) code {
+  white-space: nowrap;
+}
+
+.md-typeset .nr-more {
+  font-family: var(--nr-font-display);
+  font-weight: 500;
+}
+
+/* Full bleed: the ground reaches both edges, the content keeps the
+   grid's column */
+.nr-band,
+.nr-print,
+.nr-also,
+.nr-try {
+  margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
+  padding-left: calc(50vw - 50%);
+  padding-right: calc(50vw - 50%);
+}
+
+/* Without :has() nothing clips the bleed, so the sections stay in the
+   column instead of scrolling the page sideways, and a tinted one keeps
+   some room inside its colour */
+@supports not selector(:has(*)) {
+  .nr-band,
+  .nr-print,
+  .nr-also,
+  .nr-try {
+    margin-left: 0;
+    margin-right: 0;
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  .nr-tint {
+    padding-left: 1.2rem;
+    padding-right: 1.2rem;
+  }
+}
+
+/* The bands. A tint paints the section and re-points what sits on it:
+   hairlines take the band's edge, and code panels, inline code and the
+   diagram's boxes sit on the inset tone (white; the ground in dark). The
+   change of colour is the divider, so tinted sections draw no rule. */
+.nr-home {
+  --nr-band: var(--nr-paper);
+  --nr-band-edge: var(--nr-surface);
+  --nr-band-deep: var(--nr-surface);
+  /* the scheme's slate, kept here because a tint re-points --nr-surface */
+  --nr-slate: var(--nr-surface);
+  --nr-slate-edge: var(--nr-rule);
+}
+
+.nr-tint {
+  background-color: var(--nr-band);
+  --nr-rule: var(--nr-band-edge);
+  --nr-surface: var(--nr-inset);
+  /* halfway to the edge tone: groups in a drawing. A group always
+     carries a name ("Topic", "Narad cluster", "StatefulSet"), because
+     the tint alone is only 1.09 to 1.16:1 against its band. Text on the
+     tint (ratios measured):
+       light  mint   muted 5.22  text 12.22  ink 16.26
+              sky    muted 5.02  text 11.74  ink 15.63
+              lilac  muted 4.94  text 11.56  ink 15.40
+              butter muted 5.37  text 12.56  ink 16.73
+       dark   mint   muted 5.71  text 10.68  ink 13.69
+              sky    muted 5.81  text 10.85  ink 13.90
+              lilac  muted 5.99  text 11.19  ink 14.34
+              butter muted 5.91  text 11.05  ink 14.15
+     Recheck these if a band or edge colour changes: muted on the lilac
+     tint is the thinnest margin on the page. */
+  --nr-band-deep: color-mix(in srgb, var(--nr-band-edge) 50%, var(--nr-band));
+}
+
+.nr-tint--mint {
+  --nr-band: var(--nr-mint);
+  --nr-band-edge: var(--nr-mint-edge);
+}
+
+.nr-tint--sky {
+  --nr-band: var(--nr-sky);
+  --nr-band-edge: var(--nr-sky-edge);
+}
+
+.nr-tint--lilac {
+  --nr-band: var(--nr-lilac);
+  --nr-band-edge: var(--nr-lilac-edge);
+}
+
+.nr-tint--butter {
+  --nr-band: var(--nr-butter);
+  --nr-band-edge: var(--nr-butter-edge);
+}
+
+/* The fine print sits on the pale slate of the code surface: the one
+   neutral band, for the part that reads like a contract */
+.nr-tint--slate {
+  --nr-band: var(--nr-slate);
+  --nr-band-edge: var(--nr-slate-edge);
+}
+
+/* In the dark scheme butter is a neutral graphite, one step from the
+   slate, so the fine print marks its edge with a hairline */
+[data-md-color-scheme="slate"] .nr-tint--slate {
+  border-top: 1px solid var(--nr-rule);
+}
+
+/* The palette keeps dark butter neutral (a warm dark reads brown), so
+   the drawing on it carries the hue instead: its group and its storage
+   (Raft and the volumes) take a little of the butter accent */
+[data-md-color-scheme="slate"] .nr-tint--butter {
+  --nr-band-edge: color-mix(in srgb, var(--nr-butter-mark) 16%, var(--nr-butter));
+  --nr-band-deep: color-mix(in srgb, var(--nr-butter-mark) 7%, var(--nr-butter));
+}
+
+/* A white section that follows a white section takes a hairline */
+.nr-also:not(.nr-tint + .nr-also),
+.nr-try:not(.nr-tint) {
+  border-top: 1px solid var(--nr-rule);
+}
+
+/* ---- First screen: the headline across the page, then the pitch and
+   the doors on the left and the recorded session on the right. Stacked,
+   the session comes straight after the button and the doors follow it. */
+
+.nr-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 4fr) minmax(0, 7fr);
+  grid-template-rows: auto auto 1fr;
+  grid-template-areas:
+    "head  head"
+    "pitch term"
+    "doors term";
+  column-gap: 3rem;
+  align-items: start;
+  padding: 2.8rem 0 3.6rem;
+}
+
+.nr-hero > h1 { grid-area: head; }
+.nr-hero > .nr-hero__pitch { grid-area: pitch; }
+.nr-hero > .nr-term { grid-area: term; }
+.nr-hero > .nr-doors { grid-area: doors; }
+
+.md-typeset .nr-hero h1 {
+  /* 78px at 1440px; the 48px floor keeps a 720px window (1440 at 200%
+     zoom) to three lines, so the lead still starts on the first screen */
+  font-size: clamp(2.4rem, 5.4vw, 3.9rem);
+  line-height: 1;
+  letter-spacing: -0.035em;
+  margin: 0 0 0.5em;
+}
+
+/* One sentence per block, each wrapped at a phrase */
+.nr-hero h1 .nr-line {
+  display: block;
+  text-wrap: balance;
+}
+
+.nr-hero__pitch > :first-child {
+  margin-top: 0;
+}
+
+.md-typeset .nr-lead {
+  font-size: 1.1rem;             /* 22px */
+  line-height: 1.5;
+  color: var(--nr-text);
+  max-width: 30rem;
+  margin: 0 0 1.4rem;
+}
+
+.md-typeset .nr-lead code {
+  font-size: 0.85em;
+}
+
+.nr-hero .md-button {
+  margin: 0 0 2rem;
+}
+
+.md-typeset .nr-hero__pitch p:last-child {
+  margin-bottom: 0;
+}
+
+/* The four doors: hairline rows that open each tab */
+.md-typeset .nr-doors > ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--nr-rule);
+  max-width: 34rem;
+}
+
+.md-typeset .nr-doors > ul > li {
+  margin: 0;
+  padding: 0;
+  border-bottom: 1px solid var(--nr-rule);
+}
+
+.md-typeset .nr-doors > ul > li > a {
+  display: grid;
+  grid-template-columns: 6.2rem minmax(0, 1fr);
+  column-gap: 0.8rem;
+  align-items: baseline;
+  padding: 0.85rem 0;
+  color: var(--nr-text);
+  text-decoration: none;
+}
+
+.md-typeset .nr-doors__tab {
+  font-family: var(--nr-font-display);
+  font-weight: 700;
+  font-size: 1.05em;
+  letter-spacing: -0.02em;
+  color: var(--nr-ink);
+  justify-self: start;
+  text-decoration: underline;
+  text-decoration-color: var(--nr-underline);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 4px;
+}
+
+.md-typeset .nr-doors > ul > li > a:is(:hover, :focus-visible) {
+  background-color: transparent;
+  color: var(--nr-ink);
+}
+
+.md-typeset .nr-doors > ul > li > a:is(:hover, :focus-visible) .nr-doors__tab {
+  background-color: var(--nr-lime);
+  color: var(--nr-on-lime);
+  text-decoration-color: currentColor;
+}
+
+/* The terminal: ink in both schemes, and no colour at all. The payload
+   and the two status lines are set strong; lime stays on the button. */
+.md-typeset .nr-term {
+  text-align: left;
+}
+
+.nr-term {
+  margin: 0;
+  background-color: var(--nr-term-bg);
+  color: var(--nr-term-text);
+  border: 1px solid var(--nr-term-bg);
+  border-radius: 2px;
+}
+
+[data-md-color-scheme="slate"] .nr-term {
+  border-color: var(--nr-term-rule);
+}
+
+.nr-term__bar {
+  display: flex;
+  gap: 1rem;
+  padding: 0 1rem;
+  height: var(--nr-strip);
+  line-height: calc(var(--nr-strip) - 1px);
+  border-bottom: 1px solid var(--nr-term-rule);
+  font-family: var(--md-code-font-family);
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--nr-term-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.md-typeset .nr-term pre {
+  margin: 0;
+  padding: 0.9rem 1rem 1rem;
+  background: transparent;
+  color: var(--nr-term-text);
+  font-family: var(--md-code-font-family);
+  font-size: 0.7rem;             /* 14px */
+  line-height: 1.6;
+  overflow-x: auto;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  scrollbar-color: var(--nr-term-rule) transparent;
+}
+
+.md-typeset .nr-term pre code {
+  display: block;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+  white-space: pre;
+}
+
+.nr-term .p,
+.nr-term .h {
+  color: var(--nr-term-muted);
+}
+
+.nr-term .s,
+.nr-term .payload {
+  color: var(--nr-term-strong);
+  font-weight: 600;
+}
+
+.nr-term ::selection {
+  background-color: var(--nr-term-strong);
+  color: var(--nr-term-bg);
+}
+
+.nr-term .md-code__nav {
+  display: none;
+}
+
+.md-typeset .nr-term figcaption {
+  font-style: normal;
+  margin: 0;
+  padding: 0.6rem 1rem 0.7rem;
+  max-width: none;
+  border-top: 1px solid var(--nr-term-rule);
+  font-size: 0.7rem;
+  line-height: 1.5;
+  color: var(--nr-term-muted);
+  text-align: left;
+}
+
+.md-typeset .nr-term figcaption code {
+  white-space: nowrap;
+  background: transparent;
+  color: var(--nr-term-text);
+  padding: 0;
+  font-size: 1em;
+}
+
+/* ---- The four bands ---- */
+
+.nr-band {
+  display: grid;
+  grid-template-columns: minmax(0, 4fr) minmax(0, 7fr);
+  column-gap: 3rem;
+  align-items: center;
+  padding-top: 3.8rem;
+  padding-bottom: 4.2rem;
+}
+
+.nr-band--flip {
+  grid-template-columns: minmax(0, 7fr) minmax(0, 4fr);
+}
+
+.nr-band--flip > .nr-band__copy {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.nr-band--flip > .nr-dia {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+/* The last pitch breaks the zigzag once: its heading runs across the
+   band, the copy sits in two columns under it, and the drawing gets the
+   band's full width, a third wider than the others at the same scale */
+.nr-band--wide {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+}
+
+.nr-band--wide > h2,
+.nr-band--wide > .nr-dia {
+  grid-column: 1 / -1;
+}
+
+.md-typeset .nr-band--wide > h2 {
+  margin-bottom: 0.7em;
+}
+
+.md-typeset .nr-band--wide > .nr-dia {
+  max-width: 1160px;
+  margin-top: 3rem;
+}
+
+.md-typeset .nr-band--wide .nr-band__copy p:only-child {
+  margin-top: 0;
+}
+
+.nr-band__copy > :first-child {
+  margin-top: 0;
+}
+
+.nr-band__copy > :last-child {
+  margin-bottom: 0;
+}
+
+.md-typeset :is(.nr-band, .nr-print, .nr-also, .nr-try) h2 {
+  font-size: 2.25em;             /* 38px */
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+  margin: 0 0 0.6em;
+  text-wrap: balance;
+}
+
+.md-typeset .nr-band__copy p {
+  font-size: 1.06em;             /* 18px */
+  line-height: 1.62;
+  max-width: 31rem;
+  margin: 0 0 0.9em;
+}
+
+.md-typeset .nr-band__copy p:last-child {
+  margin-top: 1.4em;
+}
+
+.md-typeset .nr-band__copy .highlight {
+  margin: 1.2em 0 0;
+}
+
+/* ---- Diagrams: drawn straight on the band, in four flat tones. The
+   band is the ground; a deeper tint gathers what belongs together (the
+   cluster, the topic, the StatefulSet) and carries the group's name;
+   Narad's pods sit on it as white boxes with ink strokes, and storage
+   inside them takes the band's edge tone. Your own code is solid (ink
+   in light, a mid grey in dark, so it never outshines the message).
+   A request is a heavy line with a filled head, its answer a thin line
+   with an open head. Dashes mean later or never: a road not taken, a
+   blocked hand-off, a lease that ran out, a pod still to come. A dead
+   node is hatched, and the message is the one lime shape. Every colour
+   is a token, so the dark scheme redraws it. Each wide drawing's
+   viewBox starts at its leftmost shape, so the drawing, its caption and
+   the caption's rule share one left edge. ---- */
+
+.md-typeset .nr-dia {
+  display: block;
+  width: auto;
+  max-width: 860px;
+  margin: 0;
+  text-align: left;
+}
+
+.nr-dia__frame {
+  overflow-x: auto;
+  scrollbar-color: var(--nr-rule) transparent;
+}
+
+.md-typeset .nr-dia svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: none;
+  overflow: visible;
+}
+
+/* Every label is 18 units or more, so it renders at 14px or more down
+   to this width; the band grid keeps the drawing wider than this from
+   768px up, so it never scrolls there */
+.md-typeset .nr-dia .nr-dia__wide {
+  min-width: 670px;
+  max-width: 860px;
+}
+
+.md-typeset .nr-dia .nr-dia__narrow {
+  display: none;
+}
+
+/* The full-width drawing is 1160 units wide: 14px labels need 902px or
+   more, so below 960px it hands over to its tall copy instead */
+.md-typeset .nr-dia--pano .nr-dia__wide {
+  min-width: 0;
+  max-width: 1160px;
+}
+
+@media screen and (max-width: 59.984375em) {
+  .md-typeset .nr-dia--pano .nr-dia__wide {
+    display: none;
+  }
+
+  .md-typeset .nr-dia--pano .nr-dia__narrow {
+    display: block;
+    min-width: 336px;
+    max-width: 440px;
+  }
+}
+
+/* The figure is as wide as its drawing, so the caption's rule runs the
+   drawing's width while the text keeps a 34rem measure */
+.md-typeset .nr-dia figcaption {
+  max-width: none;
+  margin: 1.4rem 0 0;
+  padding-top: 0.9rem;
+  padding-right: max(0px, 100% - 34rem);
+  border-top: 1px solid var(--nr-rule);
+  font-size: 0.8rem;             /* 16px */
+  font-style: normal;
+  line-height: 1.5;
+  color: var(--nr-text);
+  text-align: left;
+}
+
+.md-typeset .nr-dia figcaption code {
+  font-size: 0.9em;
+}
+
+/* Type: Satoshi for every label; mono only for literals a reader could
+   type: the HTTP lines, the topic name, the message id and the pod
+   names (Satoshi's zero reads as a capital O, so "narad-0" is mono,
+   with the same slashed zero as the prose and the code around it) */
+.nr-dia text {
+  font-family: var(--nr-font-display);
+  fill: var(--nr-ink);
+}
+
+.nr-dia .lb {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.nr-dia .an {
+  font-size: 18px;
+  font-weight: 500;
+  fill: var(--nr-text);
+}
+
+/* A group's name, set small and quiet at the group's corner */
+.nr-dia .rl {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.005em;
+  fill: var(--nr-muted);
+}
+
+.nr-dia .cd {
+  font-family: var(--md-code-font-family);
+  font-size: 18px;
+  font-weight: 400;
+  fill: var(--nr-ink);
+}
+
+.nr-dia .cdb {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.nr-dia .pod {
+  font-family: var(--md-code-font-family);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  fill: var(--nr-ink);
+  text-anchor: middle;
+}
+
+.nr-dia .mu {
+  fill: var(--nr-muted);
+}
+
+.nr-dia .mid {
+  text-anchor: middle;
+}
+
+.nr-dia .end {
+  text-anchor: end;
+}
+
+/* Shapes */
+.nr-dia .rg {
+  fill: var(--nr-band-deep);
+}
+
+.nr-dia .ah {
+  fill: var(--nr-ink);
+}
+
+.nr-dia .sc,
+.nr-dia .ink,
+.nr-dia .you {
+  fill: var(--nr-you);
+}
+
+/* An answer's open arrowhead */
+.nr-dia .ah-o {
+  fill: none;
+  stroke: var(--nr-ink);
+  stroke-width: 1.5;
+  stroke-linejoin: miter;
+  stroke-linecap: butt;
+}
+
+/* The hairline above a tall drawing's legend */
+.nr-dia .sep {
+  fill: none;
+  stroke: var(--nr-rule);
+  stroke-width: 1;
+}
+
+/* Text on your code and in the step circles */
+.nr-dia .sn,
+.nr-dia .on {
+  fill: var(--nr-paper);
+}
+
+.nr-dia .sn {
+  font-size: 18px;
+  font-weight: 700;
+  text-anchor: middle;
+}
+
+.nr-dia :is(.ln, .ln2, .ln1, .x) {
+  fill: none;
+  stroke: var(--nr-ink);
+  stroke-linejoin: round;
+}
+
+.nr-dia .ln { stroke-width: 2.5; }
+.nr-dia .ln2 { stroke-width: 1.75; }
+.nr-dia .ln1 { stroke-width: 1.5; }
+
+.nr-dia .x {
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.nr-dia .dash {
+  stroke-dasharray: 8 6;
+}
+
+.nr-dia .bx {
+  fill: var(--nr-inset);
+  stroke: var(--nr-ink);
+  stroke-width: 1.75;
+}
+
+.nr-dia .bx.tn {
+  fill: var(--nr-band-edge);
+}
+
+.nr-dia .bx3 { stroke-width: 2.5; }
+.nr-dia .bxq { stroke-width: 1.25; }
+
+.nr-dia .bx.ghost {
+  fill: none;
+  stroke-width: 1.5;
+  stroke-dasharray: 7 6;
+}
+
+.nr-dia .dead {
+  stroke: var(--nr-ink);
+  stroke-width: 1.75;
+  stroke-dasharray: 8 6;
+}
+
+/* The hatch's ground and a label's backing take whatever the dead node
+   sits on: the band, or the group's deeper tint */
+.nr-dia .hb,
+.nr-dia .plate {
+  fill: var(--nr-band);
+}
+
+.nr-dia :is(.hb, .plate).deep {
+  fill: var(--nr-band-deep);
+}
+
+.nr-dia .hl {
+  stroke: var(--nr-ink);
+  stroke-width: 1.25;
+}
+
+.nr-dia .msg {
+  fill: var(--nr-lime);
+  stroke: var(--nr-on-lime);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+
+.nr-dia .msg-t {
+  font-family: var(--md-code-font-family);
+  font-size: 18px;
+  font-weight: 600;
+  fill: var(--nr-on-lime);
+  text-anchor: middle;
+}
+
+/* The tall drawing for phones: same story, 15 units and up, so 14px at
+   its 336px floor */
+.nr-dia__narrow .lb { font-size: 17px; }
+.nr-dia__narrow .pod { font-size: 16px; }
+.nr-dia__narrow :is(.an, .cd, .rl) { font-size: 15px; }
+.nr-dia__narrow .cdb { font-size: 18px; }
+.nr-dia__narrow .sn { font-size: 15px; }
+.nr-dia__narrow .msg-t { font-size: 15px; }
+
+/* ---- Hairline rows: the fine print and the one-binary list ---- */
+
+.md-typeset .nr-rows > ul {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 3rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--nr-rule);
+}
+
+.md-typeset .nr-rows--one > ul {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+[dir] .md-typeset .nr-rows > ul > li {
+  margin: 0;
+  padding: 1.1rem 0 1.2rem;
+  border-bottom: 1px solid var(--nr-rule);
+  font-size: 1em;
+  line-height: 1.55;
+  color: var(--nr-text);
+}
+
+.md-typeset .nr-rows > ul > li > strong:first-child {
+  display: block;
+  margin-bottom: 0.25rem;
+  font-family: var(--nr-font-display);
+  font-size: 1.12em;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--nr-ink);
+}
+
+/* A row's receipt link sits on its own line under the sentence */
+.md-typeset .nr-rows > ul > li > .nr-more {
+  display: table;
+  margin-top: 0.4rem;
+}
+
+/* The fine print: the heading beside four rows */
+.nr-print {
+  display: grid;
+  grid-template-columns: minmax(0, 4fr) minmax(0, 7fr);
+  column-gap: 3rem;
+  align-items: start;
+  padding-top: 3.6rem;
+  padding-bottom: 4rem;
+}
+
+.nr-print__head > :first-child {
+  margin-top: 0;
+}
+
+/* Four rows run long, so the heading stays in view beside them, and the
+   rows keep a reading measure */
+@media screen and (min-width: 76.25em) {
+  .nr-print__head {
+    position: sticky;
+    top: 4.4rem;
+  }
+}
+
+.md-typeset .nr-print .nr-rows > ul {
+  max-width: 40rem;
+}
+
+.md-typeset .nr-print__head p {
+  font-size: 1.06em;
+  line-height: 1.55;
+  max-width: 24rem;
+  margin: 0;
+}
+
+.nr-also {
+  padding-top: 3.6rem;
+  padding-bottom: 4rem;
+}
+
+/* ---- Sixty seconds on your laptop ---- */
+
+.nr-try {
+  display: grid;
+  grid-template-columns: minmax(0, 4fr) minmax(0, 7fr);
+  column-gap: 3rem;
+  align-items: start;
+  padding-top: 4rem;
+  padding-bottom: 4.4rem;
+}
+
+.nr-try__copy > :first-child {
+  margin-top: 0;
+}
+
+.md-typeset .nr-try__copy > p {
+  font-size: 1.06em;
+  line-height: 1.62;
+  max-width: 31rem;
+}
+
+.md-typeset .nr-try__code > .tabbed-set:first-child {
+  margin-top: 0.15rem;
+}
+
+.md-typeset .nr-try__code > p {
+  margin: 1.2rem 0 0.6rem;
+  max-width: 34rem;
+}
+
+.md-typeset .nr-try__code > .highlight:last-child {
+  margin-bottom: 0;
+}
+
+/* A link's words stay on one line */
+.md-typeset .nr-try__copy .nr-more {
+  white-space: nowrap;
+}
+
+/* Which half of the terminal's caption shows: the whole session is
+   wrapped by character on a phone, only the consume response elsewhere */
+.nr-term .nr-when-narrow {
+  display: none;
+}
+
+/* ---- Tablet: everything stacks, copy first, drawing below ---- */
+@media screen and (max-width: 76.234375em) {
+  .nr-hero,
+  .nr-band,
+  .nr-band--flip,
+  .nr-print,
+  .nr-try {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 2.4rem;
+  }
+
+  .nr-band,
+  .nr-band--flip {
+    padding-top: 3.6rem;
+    padding-bottom: 3.8rem;
+  }
+
+  .nr-band--flip > .nr-band__copy,
+  .nr-band--flip > .nr-dia {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .md-typeset .nr-band__copy p {
+    max-width: 34rem;
+  }
+
+  /* Stacked, the wide band reads as one column of prose */
+  .nr-band.nr-band--wide {
+    row-gap: 0;
+  }
+
+  .nr-band--wide > .nr-band__copy + .nr-band__copy {
+    margin-top: 0.95rem;
+  }
+
+  .md-typeset .nr-band--wide > .nr-dia {
+    margin-top: 2.4rem;
+  }
+
+  .nr-hero {
+    grid-template-rows: none;
+    grid-template-areas:
+      "head"
+      "pitch"
+      "term"
+      "doors";
+  }
+
+  .md-typeset .nr-hero h1 {
+    margin-bottom: 0.1em;
+  }
+
+  .nr-hero .md-button {
+    margin-bottom: 0;
+  }
+}
+
+/* ---- Below 768px: the tall drawings, which may use the full width
+   of the screen ---- */
+@media screen and (max-width: 47.984375em) {
+  .md-typeset .nr-dia .nr-dia__wide {
+    display: none;
+  }
+
+  .md-typeset .nr-dia .nr-dia__narrow {
+    display: block;
+    min-width: 336px;
+    max-width: 440px;
+  }
+
+  .md-typeset .nr-hero h1 {
+    font-size: min(2.1rem, 10.5vw);   /* 42px, smaller below 400px */
+    line-height: 1.04;
+  }
+
+  .nr-dia__frame {
+    margin-left: -0.8rem;
+    margin-right: -0.8rem;
+    padding: 0 0.8rem;
+  }
+}
+
+/* ---- Phone ---- */
+@media screen and (max-width: 44.984375em) {
+  .nr-hero {
+    padding: 2.2rem 0 2.8rem;
+    row-gap: 2rem;
+  }
+
+  .md-typeset .nr-lead {
+    font-size: 0.9rem;           /* 18px */
+  }
+
+  .md-typeset .nr-doors > ul > li > a {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 0.15rem;
+    padding: 0.75rem 0;
+  }
+
+  /* On a phone the transcript wraps instead of scrolling, so the payload
+     is in view going in and coming out. It wraps by character, as a
+     terminal does, and wrapped lines hang 4ch in so they read as
+     continuations. */
+  .md-typeset .nr-term pre {
+    padding: 0.8rem 0.7rem 0.9rem;
+  }
+
+  .md-typeset .nr-term pre code {
+    white-space: pre-wrap;
+    word-break: break-all;
+    text-indent: 4ch hanging each-line;
+  }
+
+  .nr-term__bar {
+    padding: 0 0.7rem;
+  }
+
+  .nr-term .nr-when-narrow {
+    display: inline;
+  }
+
+  .nr-term .nr-when-wide {
+    display: none;
+  }
+
+  /* Commands to copy wrap instead of hiding their end past a scrollbar
+     a phone does not show; a wrapped line hangs 2ch in, so it reads as
+     the same line. Copying still takes the command as written. */
+  .md-typeset :is(.nr-try, .nr-band) pre > code {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    text-indent: 2ch hanging each-line;
+    /* 39 characters to a line from 360px up: every line but the
+       Homebrew tap's fits whole, and that one breaks at its space */
+    font-size: min(0.725rem, 3.7vw);
+  }
+
+  /* and run to the screen's edges, as Material does for code on a
+     phone, so most lines fit whole */
+  .md-typeset :is(.nr-try__code, .nr-band__copy) > :is(.highlight, .tabbed-set) {
+    margin-left: -0.8rem;
+    margin-right: -0.8rem;
+  }
+
+  .md-typeset :is(.nr-try__code, .nr-band__copy) > .highlight,
+  .md-typeset .nr-try__code > .tabbed-set .highlight {
+    border-left: 0;
+    border-right: 0;
+    border-radius: 0;
+  }
+
+  .md-typeset .nr-try__code > .tabbed-set > .tabbed-labels {
+    padding-left: 0.8rem;
+  }
+
+  .md-typeset .nr-term figcaption {
+    padding: 0.6rem 0.7rem 0.7rem;
+  }
+
+  .nr-band,
+  .nr-band--flip,
+  .nr-try {
+    padding-top: 2.8rem;
+    padding-bottom: 3rem;
+    row-gap: 2rem;
+  }
+
+  .nr-print,
+  .nr-also {
+    padding-top: 2.8rem;
+    padding-bottom: 3.2rem;
+  }
+
+  .md-typeset :is(.nr-band, .nr-print, .nr-also, .nr-try) h2 {
+    font-size: 1.75em;           /* 30px */
+  }
+
+  .md-typeset :is(.nr-band__copy, .nr-print__head) p,
+  .md-typeset .nr-try__copy > p {
+    font-size: 1em;
+  }
+
+  .md-typeset .nr-rows > ul {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.nr-nowrap {
+  white-space: nowrap;
+}
+
+/* ---- Forced colours (Windows High Contrast): the bands become the
+   system Canvas, but SVG fills and strokes are not forced, so ink on a
+   black Canvas would vanish. Map every shape to system colours. ---- */
+@media (forced-colors: active) {
+  .nr-dia text:not(.sn, .on, .msg-t),
+  .nr-dia :is(.ink, .ah, .sc, .you) {
+    fill: CanvasText;
+  }
+
+  .nr-dia :is(.sn, .on) {
+    fill: Canvas;
+  }
+
+  .nr-dia :is(.ln, .ln1, .ln2, .x, .bx, .dead, .hl, .ah-o, .sep) {
+    stroke: CanvasText;
+  }
+
+  .nr-dia :is(.bx, .bx.tn, .rg, .hb, .plate, .hb.deep, .plate.deep) {
+    fill: Canvas;
+  }
+
+  .nr-dia .rg {
+    stroke: CanvasText;
+    stroke-width: 1;
+  }
+
+  .nr-dia .msg {
+    fill: Highlight;
+    stroke: CanvasText;
+  }
+
+  .nr-dia .msg-t {
+    fill: HighlightText;
+  }
+}
+
+/* ---- Diagrams on docs pages: docs pages are white, so a drawing sits
+   on a light plate of the multi palette (.nr-plate plus an .nr-tint--*
+   chosen by topic), the width of the content column. These rules come
+   last on purpose: they must win over the home page's phone rules for
+   .nr-dia__frame and the band's .nr-tint padding, which share their
+   specificity. ---- */
+.md-typeset .nr-dia--doc {
+  max-width: none;
+  margin: 1.6em 0;
+}
+
+.nr-dia--doc .nr-dia__frame {
+  overflow-x: auto;
+}
+
+.nr-plate {
+  border-radius: 6px;
+  padding: 1.2rem;
+}
+
+.md-typeset .nr-dia--doc .nr-dia__wide {
+  min-width: 622px;
+  max-width: 860px;
+}
+
+.md-typeset .nr-dia .nr-dia__solo {
+  display: block;
+  max-width: 440px;
+}
+
+.md-typeset .nr-dia--doc figcaption {
+  border-top: 0;
+  padding: 0;
+  margin-top: 0.8rem;
+  max-width: var(--nr-measure);
+}
+
+.nr-dia .win {
+  fill: var(--nr-band-deep);
+}
+
+@media screen and (max-width: 59.984375em) {
+  .nr-plate {
+    padding: 0.8rem;
+  }
+}
+
+@media screen and (max-width: 47.984375em) {
+  .nr-plate {
+    margin-inline: -0.8rem;
+    border-radius: 0;
+    padding: 0.8rem 0.6rem;
+  }
+
+  /* The plate bleeds to the screen edges here, so draw the focus ring
+     inside it or its sides fall off screen. */
+  .nr-plate:focus-visible {
+    outline-offset: -3px !important;
+  }
+
+  .md-typeset .nr-dia--doc .nr-dia__narrow {
+    min-width: 336px;
+    max-width: 440px;
+  }
+}
+
+@media (forced-colors: active) {
+  .nr-dia .win {
+    fill: Canvas;
+    stroke: CanvasText;
+    stroke-width: 1;
+  }
 }

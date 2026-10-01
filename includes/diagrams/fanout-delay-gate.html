@@ -1,0 +1,89 @@
+<svg class="nr-dia__wide" viewBox="0 24 800 376" role="img" aria-labelledby="fanout-delay-gate-w-t" aria-describedby="fanout-delay-gate-w-d">
+<title id="fanout-delay-gate-w-t">The delay gate is a line on the clock</title>
+<desc id="fanout-delay-gate-w-d">On the clock of the node that owns orders/3, it is now 13:00:00.5, and the retry child delays by 1 hour, so the gate stands at now minus the delay, 12:00:00.5. The parent log holds r1, committed at 12:00:00, r2 at 12:00:01 and r3 at 12:00:02. r1 is left of the gate, so it is due and the cursor commits it to the retry child. r2 is the first record not due: the cursor stops there and sleeps until 13:00:01, when r2 becomes due, and never longer than 30 s. Commit times never decrease along a partition, so nothing after r2 is due either.</desc>
+<rect class="bx tn" x="0" y="28" width="36" height="36"/>
+<rect class="bx tn" x="36" y="28" width="36" height="36"/>
+<rect class="bx tn" x="72" y="28" width="36" height="36"/>
+<rect class="bx ghost" x="108" y="28" width="36" height="36"/>
+<text class="cd" x="184" y="52">retry</text>
+<text class="an" x="252.3" y="52">the delay child</text>
+<path class="ln2" d="M126 204V152M126 116V76"/>
+<path class="ah" d="M132 76L126 64L120 76Z"/>
+<polygon class="msg" points="69,119 165,119 183,149 87,149"/>
+<text class="msg-t" x="126" y="140.5">r1</text>
+<text class="an" x="196" y="140">due</text>
+<rect class="bx bx3" x="242" y="112" width="88" height="40" rx="2"/>
+<text class="lb mid" x="286" y="138.8">cursor</text>
+<path class="ln1" d="M286 152V194"/>
+<path class="ah" d="M281 194L286 204L291 194Z"/>
+<text class="an" x="346" y="128">first record not due: sleep</text>
+<text class="an" x="346" y="150">until 13:00:01, at most 30 s</text>
+<rect class="bx tn" x="108" y="204" width="36" height="36" rx="2"/>
+<text class="an mid" x="126" y="228.12">r1</text>
+<rect class="bx" x="268" y="204" width="36" height="36" rx="2"/>
+<text class="an mid" x="286" y="228.12">r2</text>
+<rect class="bx" x="428" y="204" width="36" height="36" rx="2"/>
+<text class="an mid" x="446" y="228.12">r3</text>
+<path class="ln1" d="M0 256H546M666 256H800"/>
+<path class="ln1 dash" d="M546 256H666"/>
+<text class="an mu mid" x="606" y="244">an hour</text>
+<path class="ln1" d="M126 256V264M286 256V264M446 256V264"/>
+<text class="cd mu mid" x="126" y="288">12:00:00</text>
+<text class="cd mu mid" x="286" y="288">12:00:01</text>
+<text class="cd mu mid" x="446" y="288">12:00:02</text>
+<path class="ln" d="M736 248V264"/>
+<text class="an mid" x="736" y="236">now</text>
+<text class="cd mu mid" x="736" y="288">13:00:00.5</text>
+<path class="ln" d="M206 188V300"/>
+<text class="an mid" x="206" y="324">now - delay (1 hour)</text>
+<text class="cd mid" x="206" y="346">12:00:00.5</text>
+<text class="an mu" x="402" y="324">commit times never decrease along</text>
+<text class="an mu" x="402" y="346">a partition: nothing after r2 is due</text>
+<text class="an mu" x="0" y="392">The clock of the node that owns</text>
+<text class="cd mu" x="265.5" y="392">orders/3</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 12 360 712" role="img" data-search-exclude aria-labelledby="fanout-delay-gate-n-t" aria-describedby="fanout-delay-gate-n-d">
+<title id="fanout-delay-gate-n-t">The delay gate is a line on the clock</title>
+<desc id="fanout-delay-gate-n-d">On the clock of the node that owns orders/3, it is now 13:00:00.5, and the retry child delays by 1 hour, so the gate stands at now minus the delay, 12:00:00.5. The parent log holds r1, committed at 12:00:00, r2 at 12:00:01 and r3 at 12:00:02. r1 is left of the gate, so it is due and the cursor commits it to the retry child. r2 is the first record not due: the cursor stops there and sleeps until 13:00:01, when r2 becomes due, and never longer than 30 s. Commit times never decrease along a partition, so nothing after r2 is due either.</desc>
+<rect class="bx tn" x="200" y="40" width="28" height="28"/>
+<rect class="bx tn" x="228" y="40" width="28" height="28"/>
+<rect class="bx tn" x="256" y="40" width="28" height="28"/>
+<rect class="bx ghost" x="284" y="40" width="28" height="28"/>
+<text class="cd" x="200" y="28">retry</text>
+<text class="an" x="257" y="28">the delay child</text>
+<rect class="bx tn" x="124" y="122" width="28" height="28" rx="2"/>
+<text class="an mid" x="138" y="141.1">r1</text>
+<text class="cd mu" x="28" y="141">12:00:00</text>
+<rect class="bx" x="124" y="250" width="28" height="28" rx="2"/>
+<text class="an mid" x="138" y="269.1">r2</text>
+<text class="cd mu" x="28" y="269">12:00:01</text>
+<rect class="bx" x="124" y="378" width="28" height="28" rx="2"/>
+<text class="an mid" x="138" y="397.1">r3</text>
+<text class="cd mu" x="28" y="397">12:00:02</text>
+<path class="ln2" d="M152 136H195M229 136H282Q298 136 298 120V80"/>
+<path class="ah" d="M304 80L298 68L292 80Z"/>
+<polygon class="msg" points="162.5,123 244.5,123 261.5,149 179.5,149"/>
+<text class="msg-t" x="212" y="141">r1</text>
+<text class="an mid" x="212" y="170">due</text>
+<path class="ln" d="M8 200H168"/>
+<text class="an" x="176" y="205">now - delay (1 hour)</text>
+<text class="cd" x="176" y="225">12:00:00.5</text>
+<rect class="bx bx3" x="192" y="244" width="84" height="40" rx="2"/>
+<text class="lb mid" x="234" y="269.78">cursor</text>
+<path class="ln1" d="M192 264H162"/>
+<path class="ah" d="M162 259L152 264L162 269Z"/>
+<text class="an" x="192" y="308">first record not due:</text>
+<text class="an" x="192" y="328">sleep until 13:00:01,</text>
+<text class="an" x="192" y="348">at most 30 s</text>
+<path class="ln1" d="M16 96V452M16 532V602"/>
+<path class="ln1 dash" d="M16 452V532"/>
+<text class="an mu" x="28" y="497">an hour</text>
+<path class="ln1" d="M16 136H24M16 264H24M16 392H24"/>
+<path class="ln" d="M8 568H24"/>
+<text class="an" x="32" y="573">now</text>
+<text class="cd mu" x="64.9" y="573">13:00:00.5</text>
+<text class="an mu" x="0" y="642">Commit times never decrease along a</text>
+<text class="an mu" x="0" y="662">partition: nothing after r2 is due</text>
+<text class="an mu" x="0" y="694">The clock of the node that owns</text>
+<text class="cd mu" x="0" y="714">orders/3</text>
+</svg>

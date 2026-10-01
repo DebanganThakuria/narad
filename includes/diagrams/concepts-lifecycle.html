@@ -1,0 +1,84 @@
+<svg class="nr-dia__wide" viewBox="0 24 800 336" role="img" aria-labelledby="concepts-lifecycle-w-t" aria-describedby="concepts-lifecycle-w-d">
+<title id="concepts-lifecycle-w-t">The lifecycle of one message</title>
+<desc id="concepts-lifecycle-w-d">Once its produce is committed, a message is available. Step 1: a consume leases it, here ord_123, for the topic's visibility timeout, 30 seconds by default. Step 2: an ack settles it and answers 204. An extend keeps the message leased and restarts a full timeout. A nack puts it back at once. If the lease runs out first, it goes back too, and a late ack gets 410. Retention later removes messages, whether they were acked or not.</desc>
+<path class="ln" d="M68 24V100"/>
+<path class="ah" d="M61 100L68 112L75 100Z"/>
+<text class="an" x="84" y="60">produce committed</text>
+<rect class="bx" x="0" y="112" width="136" height="64" rx="2"/>
+<text class="lb mid" x="68" y="151">Available</text>
+<path class="ln" d="M136 144H180M284 144H316"/>
+<path class="ah" d="M316 137L328 144L316 151Z"/>
+<polygon class="msg" points="175,129 271,129 289,159 193,159"/>
+<text class="msg-t" x="232" y="150.5">ord_123</text>
+<circle class="sc" cx="164" cy="110" r="13"/><text class="sn" x="164" y="115.5">1</text>
+<text class="an" x="186" y="116">consume</text>
+<rect class="bx bx3" x="328" y="112" width="144" height="64" rx="2"/>
+<text class="lb mid" x="400" y="151">Leased</text>
+<path class="ln2" d="M376 112V88Q376 72 392 72H408Q424 72 424 88V100"/>
+<path class="ah" d="M418 100L424 112L430 100Z"/>
+<text class="an mid" x="400" y="56">extend: a full timeout again</text>
+<text class="an" x="376" y="204">for the visibility timeout,</text>
+<text class="an" x="376" y="226">30 s by default</text>
+<path class="ln" d="M472 144H652"/>
+<path class="ah" d="M652 137L664 144L652 151Z"/>
+<circle class="sc" cx="492" cy="110" r="13"/><text class="sn" x="492" y="115.5">2</text>
+<text class="cd" x="514" y="116">ack: 204</text>
+<rect class="bx tn" x="664" y="112" width="136" height="64" rx="2"/>
+<text class="lb mid" x="732" y="151">Settled</text>
+<path class="ln1" d="M344 176V200Q344 216 328 216H120Q104 216 104 200V186"/>
+<path class="ah" d="M99 186L104 176L109 186Z"/>
+<text class="an" x="128" y="206">nack: back at once</text>
+<path class="ln1 dash" d="M360 176V260Q360 276 344 276H96Q80 276 80 260V186"/>
+<path class="ah" d="M75 186L80 176L85 186Z"/>
+<text class="an" x="96" y="244">lease runs out: back,</text>
+<text class="an" x="96" y="266">and a late ack gets <tspan class="cd">410</tspan></text>
+<path class="ln1 dash" d="M24 176V294M732 176V294"/>
+<path class="ah" d="M19 294L24 304L29 294Z"/>
+<path class="ah" d="M727 294L732 304L737 294Z"/>
+<text class="an mu end" x="716" y="282">retention, acked or not</text>
+<rect class="bx ghost" x="0" y="304" width="800" height="48" rx="2"/>
+<text class="lb mid mu" x="400" y="335">Removed by retention</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 544" role="img" data-search-exclude aria-labelledby="concepts-lifecycle-n-t" aria-describedby="concepts-lifecycle-n-d">
+<title id="concepts-lifecycle-n-t">The lifecycle of one message</title>
+<desc id="concepts-lifecycle-n-d">Once its produce is committed, a message is available. Step 1: a consume leases it, here ord_123, for the topic's visibility timeout, 30 seconds by default. Step 2: an ack settles it and answers 204. An extend keeps the message leased and restarts a full timeout. A nack puts it back at once. If the lease runs out first, it goes back too, and a late ack gets 410. Retention later removes messages, whether they were acked or not.</desc>
+<path class="ln" d="M148 8V36"/>
+<path class="ah" d="M142 36L148 48L154 36Z"/>
+<text class="an" x="164" y="32">produce committed</text>
+<rect class="bx" x="56" y="48" width="184" height="48" rx="2"/>
+<text class="lb mid" x="148" y="78">Available</text>
+<path class="ln" d="M148 96V132M148 166V212"/>
+<path class="ah" d="M142 212L148 224L154 212Z"/>
+<polygon class="msg" points="98.5,136 180.5,136 197.5,162 115.5,162"/>
+<text class="msg-t" x="148" y="154">ord_123</text>
+<circle class="sc" cx="168" cy="116" r="12"/><text class="sn" x="168" y="121">1</text>
+<text class="an" x="188" y="121">consume</text>
+<path class="ln1" d="M56 266H44Q28 266 28 250V100Q28 84 44 84H46"/>
+<path class="ah" d="M46 79L56 84L46 89Z"/>
+<text class="an" x="44" y="186">nack: back</text>
+<text class="an" x="44" y="206">at once</text>
+<path class="ln1 dash" d="M240 266H316Q332 266 332 250V88Q332 72 316 72H250"/>
+<path class="ah" d="M250 67L240 72L250 77Z"/>
+<text class="an end" x="320" y="186">lease runs out: back,</text>
+<text class="an end" x="320" y="206">a late ack gets <tspan class="cd">410</tspan></text>
+<rect class="bx bx3" x="56" y="224" width="184" height="84" rx="2"/>
+<text class="lb mid" x="148" y="252">Leased</text>
+<text class="an mid" x="148" y="276">for the visibility timeout,</text>
+<text class="an mid" x="148" y="296">30 s by default</text>
+<path class="ln2" d="M80 308V320Q80 336 96 336H104Q120 336 120 320"/>
+<path class="ah" d="M114 320L120 308L126 320Z"/>
+<text class="an" x="20" y="360">extend: a full</text>
+<text class="an" x="20" y="380">timeout again</text>
+<path class="ln" d="M148 308V380"/>
+<path class="ah" d="M142 380L148 392L154 380Z"/>
+<circle class="sc" cx="168" cy="344" r="12"/><text class="sn" x="168" y="349">2</text>
+<text class="cd" x="188" y="349">ack: 204</text>
+<rect class="bx tn" x="56" y="392" width="184" height="48" rx="2"/>
+<text class="lb mid" x="148" y="422">Settled</text>
+<path class="ln1 dash" d="M56 60H24Q8 60 8 76V478M148 440V478"/>
+<path class="ah" d="M3 478L8 488L13 478Z"/>
+<path class="ah" d="M143 478L148 488L153 478Z"/>
+<text class="an mu" x="164" y="468">retention, acked or not</text>
+<rect class="bx ghost" x="0" y="488" width="352" height="48" rx="2"/>
+<text class="lb mid mu" x="176" y="518">Removed by retention</text>
+</svg>

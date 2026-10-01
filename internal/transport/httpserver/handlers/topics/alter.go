@@ -28,7 +28,7 @@ import (
 // partitions, schema) with no cross-group transaction: the first
 // failure aborts the sequence and the groups before it stay applied.
 // Clients that need atomicity send one field per request. This is the
-// documented contract (docs/client/topics.md).
+// documented contract (docs/build/topics.md).
 //
 // retention_ms / max_*_per_partition are *int64 (rather than int64)
 // so the caller can distinguish "unset" from "set to zero"; zero

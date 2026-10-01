@@ -1,0 +1,29 @@
+{% extends "main.html" %}
+
+{#-
+  Not found. MkDocs renders this template to /404.html with absolute
+  links from site_url, so the links below work at any depth. It reuses
+  the home page's doors (one per tab) and the square button; no new CSS.
+  The button opens Material's search: it checks the search toggle, then
+  moves focus into the query field. "/" opens search from anywhere.
+-#}
+{% block htmltitle %}
+  <title>Page not found - {{ config.site_name }}</title>
+{% endblock %}
+
+{% block content %}
+  <h1>Page not found</h1>
+  <p>This page moved or never existed. Try search (press <kbd>/</kbd>) or start from one of these.</p>
+  <p>
+    <button type="button" class="md-button md-button--primary" onclick="var t=document.getElementById('__search');if(t){t.checked=true;t.dispatchEvent(new Event('change'))}setTimeout(function(){var q=document.querySelector('.md-search__input');if(q)q.focus()},50)">Search the docs</button>
+  </p>
+  <nav class="nr-doors" aria-label="Documentation sections">
+    <ul>
+      <li><a href="{{ 'get-started/quickstart/' | url }}"><span class="nr-doors__tab">Get started<span class="nr-sr">:</span></span> <span class="nr-doors__what">Run Narad and send your first message.</span></a></li>
+      <li><a href="{{ 'build/connect/' | url }}"><span class="nr-doors__tab">Build<span class="nr-sr">:</span></span> <span class="nr-doors__what">Produce, consume and ack from your service.</span></a></li>
+      <li><a href="{{ 'operate/deploy-kubernetes/' | url }}"><span class="nr-doors__tab">Operate<span class="nr-sr">:</span></span> <span class="nr-doors__what">Deploy with Helm, monitor, scale, upgrade.</span></a></li>
+      <li><a href="{{ 'understand/' | url }}"><span class="nr-doors__tab">Understand<span class="nr-sr">:</span></span> <span class="nr-doors__what">Storage, Raft, rebalance, the delivery contract.</span></a></li>
+      <li><a href="{{ 'reference/http-api/' | url }}"><span class="nr-doors__tab">Reference<span class="nr-sr">:</span></span> <span class="nr-doors__what">Every endpoint, status code, setting and metric.</span></a></li>
+    </ul>
+  </nav>
+{% endblock %}

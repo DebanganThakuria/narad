@@ -1,0 +1,133 @@
+<svg class="nr-dia__wide" viewBox="0 -4 800 384" role="img" aria-labelledby="commit-combining-w-t" aria-describedby="commit-combining-w-d">
+<title id="commit-combining-w-t">Commit combining: one append and one fsync for every queued batch</title>
+<desc id="commit-combining-w-d">narad-2 owns orders/1. Commit batches for it arrive together from the narad-0 dispatcher, the narad-1 dispatcher and a fan-out cursor, and queue on the partition's combiner. 1: the first to arrive with no cycle running leads: it takes the produce lock, and under the lock checks again ownership and the handoff freeze, the live incarnation and that each caller is still waiting. 2: it drains every queued batch and appends them as one run of contiguous offsets. 3: it commits the run with one CommitDurable: fsync, read back, advance the high watermark. 4: every caller in the cycle gets the same outcome.</desc>
+<rect class="rg" x="220" y="0" width="580" height="376" rx="6"/>
+<text class="cd" x="240" y="30">narad-2</text>
+<text class="rl" x="326.7" y="30">owner of</text>
+<text class="cd" x="407.3" y="30">orders/1</text>
+<rect class="bx bxq" x="0" y="52" width="176" height="64" rx="2"/>
+<text class="an mid" x="88" y="90.12"><tspan class="cd">narad-0</tspan> dispatcher</text>
+<path class="ln2" d="M176 70H248"/>
+<path class="ah" d="M248 76L260 70L248 64Z"/>
+<path class="ln1" d="M260 98H176"/>
+<path class="ah-o" d="M187 91L176 98L187 105"/>
+<rect class="bx" x="260" y="52" width="84" height="64" rx="2"/>
+<text class="an mid" x="302" y="90.12">batch</text>
+<rect class="bx bxq" x="0" y="136" width="176" height="64" rx="2"/>
+<text class="an mid" x="88" y="174.12"><tspan class="cd">narad-1</tspan> dispatcher</text>
+<path class="ln2" d="M176 154H248"/>
+<path class="ah" d="M248 160L260 154L248 148Z"/>
+<path class="ln1" d="M260 182H176"/>
+<path class="ah-o" d="M187 175L176 182L187 189"/>
+<rect class="bx" x="260" y="136" width="84" height="64" rx="2"/>
+<text class="an mid" x="302" y="174.12">batch</text>
+<rect class="bx bxq" x="0" y="220" width="176" height="64" rx="2"/>
+<text class="an mid" x="88" y="258.12">fan-out cursor</text>
+<path class="ln2" d="M176 238H248"/>
+<path class="ah" d="M248 244L260 238L248 232Z"/>
+<path class="ln1" d="M260 266H176"/>
+<path class="ah-o" d="M187 259L176 266L187 273"/>
+<rect class="bx" x="260" y="220" width="84" height="64" rx="2"/>
+<text class="an mid" x="302" y="258.12">batch</text>
+<path class="ln2" d="M344 84H364Q380 84 380 100V168"/>
+<path class="ln2" d="M344 252H364Q380 252 380 236V168"/>
+<path class="ln2" d="M344 168H389M503 168H508"/>
+<path class="ah" d="M508 174L520 168L508 162Z"/>
+<polygon class="msg" points="389,153 485,153 503,183 407,183"/>
+<text class="msg-t" x="446" y="174.5">one run</text>
+<text class="an end" x="772" y="132"><tspan class="cd">orders/1</tspan> log</text>
+<rect class="bx bx3" x="520" y="150" width="36" height="36"/>
+<rect class="bx bx3" x="556" y="150" width="36" height="36"/>
+<rect class="bx bx3" x="592" y="150" width="36" height="36"/>
+<rect class="bx bx3" x="628" y="150" width="36" height="36"/>
+<rect class="bx bx3" x="664" y="150" width="36" height="36"/>
+<rect class="bx bx3" x="700" y="150" width="36" height="36"/>
+<rect class="bx bx3" x="736" y="150" width="36" height="36"/>
+<rect class="bx" x="520" y="212" width="252" height="80" rx="2"/>
+<text class="cd mid" x="646" y="236.12">CommitDurable</text>
+<text class="an mid" x="646" y="258.12">fsync, read back, advance</text>
+<text class="an mid" x="646" y="280.12">the high watermark</text>
+<circle class="sc" cx="402" cy="66" r="13"/><text class="sn" x="402" y="71.5">1</text>
+<text class="an" x="424" y="72">the lead takes the produce lock</text>
+<circle class="sc" cx="446" cy="128" r="13"/><text class="sn" x="446" y="133.5">2</text>
+<text class="an" x="468" y="134">drain into one run</text>
+<circle class="sc" cx="496" cy="252" r="13"/><text class="sn" x="496" y="257.5">3</text>
+<circle class="sc" cx="250" cy="312" r="13"/><text class="sn" x="250" y="317.5">4</text>
+<text class="an" x="272" y="318">one outcome for every caller</text>
+<text class="an mu" x="528" y="318">under the lock it checks again:</text>
+<text class="an mu" x="528" y="340">ownership, freeze, incarnation,</text>
+<text class="an mu" x="528" y="362">caller still waiting</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 660" role="img" data-search-exclude aria-labelledby="commit-combining-n-t" aria-describedby="commit-combining-n-d">
+<title id="commit-combining-n-t">Commit combining: one append and one fsync for every queued batch</title>
+<desc id="commit-combining-n-d">narad-2 owns orders/1. Commit batches for it arrive together from the narad-0 dispatcher, the narad-1 dispatcher and a fan-out cursor, and queue on the partition's combiner. 1: the first to arrive with no cycle running leads: it takes the produce lock, and under the lock checks again ownership and the handoff freeze, the live incarnation and that each caller is still waiting. 2: it drains every queued batch and appends them as one run of contiguous offsets. 3: it commits the run with one CommitDurable: fsync, read back, advance the high watermark. 4: every caller in the cycle gets the same outcome.</desc>
+<rect class="rg" x="0" y="88" width="360" height="404" rx="6"/>
+<text class="cd" x="16" y="476">narad-2</text>
+<text class="rl" x="88.6" y="476">owner of</text>
+<text class="cd" x="156.2" y="476">orders/1</text>
+<rect class="bx bxq" x="0" y="0" width="112" height="48" rx="2"/>
+<text class="cd mid" x="56" y="19.1">narad-0</text>
+<text class="an mid" x="56" y="39.1">dispatcher</text>
+<path class="ln2" d="M32 48V92"/>
+<path class="ah" d="M26 92L32 104L38 92Z"/>
+<path class="ln1" d="M80 104V48"/>
+<path class="ah-o" d="M87 59L80 48L73 59"/>
+<rect class="bx" x="0" y="104" width="112" height="40" rx="2"/>
+<text class="an mid" x="56" y="129.1">batch</text>
+<rect class="bx bxq" x="124" y="0" width="112" height="48" rx="2"/>
+<text class="cd mid" x="180" y="19.1">narad-1</text>
+<text class="an mid" x="180" y="39.1">dispatcher</text>
+<path class="ln2" d="M156 48V92"/>
+<path class="ah" d="M150 92L156 104L162 92Z"/>
+<path class="ln1" d="M204 104V48"/>
+<path class="ah-o" d="M211 59L204 48L197 59"/>
+<rect class="bx" x="124" y="104" width="112" height="40" rx="2"/>
+<text class="an mid" x="180" y="129.1">batch</text>
+<rect class="bx bxq" x="248" y="0" width="112" height="48" rx="2"/>
+<text class="an mid" x="304" y="19.1">fan-out</text>
+<text class="an mid" x="304" y="39.1">cursor</text>
+<path class="ln2" d="M280 48V92"/>
+<path class="ah" d="M274 92L280 104L286 92Z"/>
+<path class="ln1" d="M328 104V48"/>
+<path class="ah-o" d="M335 59L328 48L321 59"/>
+<rect class="bx" x="248" y="104" width="112" height="40" rx="2"/>
+<text class="an mid" x="304" y="129.1">batch</text>
+<path class="ln2" d="M56 144V156Q56 172 72 172H180"/>
+<path class="ln2" d="M304 144V156Q304 172 288 172H180"/>
+<path class="ln2" d="M180 144V199M180 225V240"/>
+<path class="ah" d="M174 240L180 252L186 240Z"/>
+<polygon class="msg" points="130.5,199 212.5,199 229.5,225 147.5,225"/>
+<text class="msg-t" x="180" y="217">one run</text>
+<text class="cd" x="16" y="272">orders/1</text>
+<text class="an" x="98.1" y="272">log</text>
+<rect class="bx bx3" x="128" y="252" width="28" height="28"/>
+<rect class="bx bx3" x="156" y="252" width="28" height="28"/>
+<rect class="bx bx3" x="184" y="252" width="28" height="28"/>
+<rect class="bx bx3" x="212" y="252" width="28" height="28"/>
+<rect class="bx bx3" x="240" y="252" width="28" height="28"/>
+<rect class="bx bx3" x="268" y="252" width="28" height="28"/>
+<rect class="bx bx3" x="296" y="252" width="28" height="28"/>
+<rect class="bx" x="16" y="296" width="328" height="76" rx="2"/>
+<text class="cd mid" x="180" y="319.1">CommitDurable</text>
+<text class="an mid" x="180" y="339.1">fsync, read back, advance the</text>
+<text class="an mid" x="180" y="359.1">high watermark</text>
+<circle class="sc" cx="104" cy="68" r="12"/><text class="sn" x="104" y="73">4</text>
+<circle class="sc" cx="262" cy="212" r="12"/><text class="sn" x="262" y="217">2</text>
+<circle class="sc" cx="340" cy="236" r="12"/><text class="sn" x="340" y="241">3</text>
+<circle class="sc" cx="28" cy="400" r="12"/><text class="sn" x="28" y="405">1</text>
+<text class="an mu" x="48" y="406">under the lock it checks again:</text>
+<text class="an mu" x="48" y="426">ownership, freeze, incarnation,</text>
+<text class="an mu" x="48" y="446">caller still waiting</text>
+<path class="sep" d="M0 516H360"/>
+<circle class="sc" cx="12" cy="542" r="12"/><text class="sn" x="12" y="547">1</text>
+<text class="an" x="32" y="548">the first with no cycle running leads</text>
+<text class="an" x="32" y="568">and takes the produce lock</text>
+<circle class="sc" cx="12" cy="588" r="12"/><text class="sn" x="12" y="593">2</text>
+<text class="an" x="32" y="594">drains every queued batch: one run</text>
+<circle class="sc" cx="12" cy="614" r="12"/><text class="sn" x="12" y="619">3</text>
+<text class="an" x="32" y="620">one</text>
+<text class="cd" x="63.5" y="620">CommitDurable</text>
+<text class="an" x="193.1" y="620">commits the run</text>
+<circle class="sc" cx="12" cy="640" r="12"/><text class="sn" x="12" y="645">4</text>
+<text class="an" x="32" y="646">every caller gets the same outcome</text>
+</svg>

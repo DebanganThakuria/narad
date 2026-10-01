@@ -1,0 +1,109 @@
+<svg class="nr-dia__wide" viewBox="0 -4 800 344" role="img" aria-labelledby="storage-flusher-w-t" aria-describedby="storage-flusher-w-d">
+<title id="storage-flusher-w-t">Two ways to disk: timers for the unpromised, one fsync for a commit</title>
+<desc id="storage-flusher-w-d">A partition log reaches the disk two ways. Data nobody was promised yet goes into an in-memory buffer; a drain runs at 1 MiB, 1,000 records or every 100 ms and writes one frame with the codec applied; in batched mode the segment is fsynced every 1 s or 8 MiB, on a segment roll and on Close. A commit, CommitDurable, does not wait for those timers: it forces a drain and a write, fsyncs, reads the batch back and checks its CRC, and only then advances the high watermark. It is synchronous, with one fsync.</desc>
+<rect class="rg" x="0" y="0" width="800" height="336" rx="6"/>
+<text class="rl" x="20" y="30">partition log</text>
+<text class="an mu" x="20" y="64">data not yet promised</text>
+<rect class="bx" x="20" y="76" width="170" height="84" rx="2"/>
+<text class="an mid" x="105" y="113.12">buffer:</text>
+<text class="an mid" x="105" y="135.12">Append</text>
+<rect class="bx" x="214" y="76" width="170" height="84" rx="2"/>
+<text class="an mid" x="299" y="102.12">drain at 1 MiB,</text>
+<text class="an mid" x="299" y="124.12">1,000 records</text>
+<text class="an mid" x="299" y="146.12">or 100 ms</text>
+<path class="ln2" d="M190 118H202"/>
+<path class="ah" d="M202 124L214 118L202 112Z"/>
+<rect class="bx" x="408" y="76" width="170" height="84" rx="2"/>
+<text class="an mid" x="493" y="102.12">one frame,</text>
+<text class="an mid" x="493" y="124.12">codec applied,</text>
+<text class="an mid" x="493" y="146.12">written</text>
+<path class="ln2" d="M384 118H396"/>
+<path class="ah" d="M396 124L408 118L396 112Z"/>
+<rect class="bx" x="602" y="76" width="170" height="84" rx="2"/>
+<text class="an mid" x="687" y="102.12">fsync every 1 s</text>
+<text class="an mid" x="687" y="124.12">or 8 MiB, on roll,</text>
+<text class="an mid" x="687" y="146.12">on Close</text>
+<path class="ln2" d="M578 118H590"/>
+<path class="ah" d="M590 124L602 118L590 112Z"/>
+<text class="an mu" x="20" y="200">a commit:</text>
+<text class="cd" x="107.6" y="200">CommitDurable</text>
+<rect class="bx" x="150" y="214" width="140" height="64" rx="2"/>
+<text class="an mid" x="220" y="241.12">forced drain,</text>
+<text class="an mid" x="220" y="263.12">write</text>
+<rect class="bx" x="316" y="214" width="140" height="64" rx="2"/>
+<text class="an mid" x="386" y="252.12">fsync</text>
+<path class="ln" d="M290 246H304"/>
+<path class="ah" d="M304 253L316 246L304 239Z"/>
+<rect class="bx" x="482" y="214" width="140" height="64" rx="2"/>
+<text class="an mid" x="552" y="241.12">read back,</text>
+<text class="an mid" x="552" y="263.12">check CRC</text>
+<path class="ln" d="M456 246H470"/>
+<path class="ah" d="M470 253L482 246L470 239Z"/>
+<rect class="bx bx3" x="648" y="214" width="140" height="64" rx="2"/>
+<text class="an mid" x="718" y="241.12">advance the</text>
+<text class="an mid" x="718" y="263.12">high watermark</text>
+<path class="ln" d="M622 246H636"/>
+<path class="ah" d="M636 253L648 246L636 239Z"/>
+<path class="ln" d="M20 246H28M142 246H138"/>
+<path class="ah" d="M138 253L150 246L138 239Z"/>
+<polygon class="msg" points="28,231 124,231 142,261 46,261"/>
+<text class="msg-t" x="85" y="252.5">commit</text>
+<text class="an mu" x="150" y="312">synchronous, one fsync: it never waits for the timers</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 540" role="img" data-search-exclude aria-labelledby="storage-flusher-n-t" aria-describedby="storage-flusher-n-d">
+<title id="storage-flusher-n-t">Two ways to disk: timers for the unpromised, one fsync for a commit</title>
+<desc id="storage-flusher-n-d">A partition log reaches the disk two ways. Data nobody was promised yet goes into an in-memory buffer; a drain runs at 1 MiB, 1,000 records or every 100 ms and writes one frame with the codec applied; in batched mode the segment is fsynced every 1 s or 8 MiB, on a segment roll and on Close. A commit, CommitDurable, does not wait for those timers: it forces a drain and a write, fsyncs, reads the batch back and checks its CRC, and only then advances the high watermark. It is synchronous, with one fsync.</desc>
+<rect class="rg" x="0" y="0" width="360" height="532" rx="6"/>
+<text class="rl" x="20" y="516">partition log</text>
+<text class="an mu" x="16" y="26">data not yet</text>
+<text class="an mu" x="16" y="46">promised</text>
+<text class="an mu" x="188" y="26">a commit:</text>
+<text class="cd" x="188" y="46">CommitDurable</text>
+<rect class="bx" x="16" y="112" width="156" height="68" rx="2"/>
+<text class="an mid" x="94" y="141.1">buffer:</text>
+<text class="an mid" x="94" y="161.1">Append</text>
+<rect class="bx" x="16" y="200" width="156" height="68" rx="2"/>
+<text class="an mid" x="94" y="219.1">drain at 1 MiB,</text>
+<text class="an mid" x="94" y="239.1">1,000 records</text>
+<text class="an mid" x="94" y="259.1">or 100 ms</text>
+<path class="ln2" d="M94 180V188"/>
+<path class="ah" d="M88 188L94 200L100 188Z"/>
+<rect class="bx" x="16" y="288" width="156" height="68" rx="2"/>
+<text class="an mid" x="94" y="307.1">one frame,</text>
+<text class="an mid" x="94" y="327.1">codec applied,</text>
+<text class="an mid" x="94" y="347.1">written</text>
+<path class="ln2" d="M94 268V276"/>
+<path class="ah" d="M88 276L94 288L100 276Z"/>
+<rect class="bx" x="16" y="376" width="156" height="68" rx="2"/>
+<text class="an mid" x="94" y="395.1">fsync every 1 s</text>
+<text class="an mid" x="94" y="415.1">or 8 MiB, on roll,</text>
+<text class="an mid" x="94" y="435.1">on Close</text>
+<path class="ln2" d="M94 356V364"/>
+<path class="ah" d="M88 364L94 376L100 364Z"/>
+<path class="ln2" d="M94 56V100"/>
+<path class="ah" d="M88 100L94 112L100 100Z"/>
+<rect class="bx" x="188" y="112" width="156" height="68" rx="2"/>
+<text class="an mid" x="266" y="141.1">forced drain,</text>
+<text class="an mid" x="266" y="161.1">write</text>
+<rect class="bx" x="188" y="200" width="156" height="68" rx="2"/>
+<text class="an mid" x="266" y="239.1">fsync</text>
+<path class="ln" d="M266 180V188"/>
+<path class="ah" d="M259 188L266 200L273 188Z"/>
+<rect class="bx" x="188" y="288" width="156" height="68" rx="2"/>
+<text class="an mid" x="266" y="317.1">read back,</text>
+<text class="an mid" x="266" y="337.1">check CRC</text>
+<path class="ln" d="M266 268V276"/>
+<path class="ah" d="M259 276L266 288L273 276Z"/>
+<rect class="bx bx3" x="188" y="376" width="156" height="68" rx="2"/>
+<text class="an mid" x="266" y="405.1">advance the</text>
+<text class="an mid" x="266" y="425.1">high watermark</text>
+<path class="ln" d="M266 356V364"/>
+<path class="ah" d="M259 364L266 376L273 364Z"/>
+<path class="ln" d="M266 56V71"/>
+<path class="ah" d="M259 100L266 112L273 100Z"/>
+<polygon class="msg" points="216.5,71 298.5,71 315.5,97 233.5,97"/>
+<text class="msg-t" x="266" y="89">commit</text>
+<text class="an mu" x="188" y="468">synchronous, one</text>
+<text class="an mu" x="188" y="488">fsync: never waits</text>
+<text class="an mu" x="188" y="508">for the timers</text>
+</svg>

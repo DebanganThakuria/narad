@@ -1,0 +1,95 @@
+<svg class="nr-dia__wide" viewBox="0 -4 800 384" role="img" aria-labelledby="storage-segments-w-t" aria-describedby="storage-segments-w-d">
+<title id="storage-segments-w-t">Segments, frames and records</title>
+<desc id="storage-segments-w-d">A partition directory, topics/orders/p00003/, holds segment files named by the 20-digit offset of their first record, up to 64 MiB each. 00000000000000000000.log is sealed: immutable, and deleted whole by retention. 00000000000000450832.log is the active segment, a run of frames with the last one being written. A frame is the unit of writing, one per flush: a header with the magic 0xCAFE, the codec, the record count, the base offset, the sizes and a crc32c, then its records. Each record is the keyed envelope, [version][key][commit-time][payload], the unit a consumer reads.</desc>
+<rect class="rg" x="0" y="0" width="800" height="160" rx="6"/>
+<text class="cd" x="20" y="30">topics/orders/p00003/</text>
+<rect class="bx tn" x="20" y="48" width="360" height="92"/>
+<text class="cd" x="36" y="74">00000000000000000000.log</text>
+<text class="an" x="36" y="102">sealed: immutable, deleted</text>
+<text class="an" x="36" y="124">whole by retention</text>
+<rect class="bx bx3" x="400" y="48" width="380" height="92"/>
+<text class="cd" x="416" y="74">00000000000000450832.log</text>
+<rect class="bx tn" x="416" y="88" width="36" height="36"/>
+<rect class="bx tn" x="452" y="88" width="36" height="36"/>
+<rect class="bx tn" x="488" y="88" width="36" height="36"/>
+<rect class="bx tn" x="524" y="88" width="36" height="36"/>
+<rect class="bx tn" x="560" y="88" width="36" height="36"/>
+<rect class="bx tn" x="596" y="88" width="36" height="36"/>
+<rect class="bx tn" x="632" y="88" width="36" height="36"/>
+<rect class="bx" x="668" y="88" width="36" height="36"/>
+<text class="an" x="708" y="112">active</text>
+<path class="ln1" d="M542 124V198"/>
+<path class="ah" d="M537 198L542 208L547 198Z"/>
+<text class="an" x="20" y="196">a frame: the unit of writing, one per flush</text>
+<rect class="bx tn" x="20" y="208" width="500" height="64"/>
+<text class="an" x="36" y="234">header: magic</text>
+<text class="cd" x="159.7" y="234">0xCAFE</text>
+<text class="an" x="231.1" y="234">, codec, count,</text>
+<text class="an" x="36" y="256">base offset, sizes, crc32c</text>
+<rect class="bx" x="520" y="208" width="52" height="52"/>
+<rect class="bx" x="572" y="208" width="52" height="52"/>
+<rect class="msg" x="624" y="208" width="52" height="52"/>
+<rect class="bx" x="676" y="208" width="52" height="52"/>
+<rect class="bx" x="728" y="208" width="52" height="52"/>
+<text class="an" x="530" y="300">records</text>
+<path class="ln1" d="M650 272V326"/>
+<path class="ah" d="M645 326L650 336L655 326Z"/>
+<text class="an" x="20" y="350">a record, the keyed envelope:</text>
+<text class="an" x="20" y="372">the unit of reading</text>
+<rect class="bx" x="400" y="336" width="96" height="40"/>
+<text class="cd mid" x="448" y="362.12">version</text>
+<rect class="bx" x="496" y="336" width="60" height="40"/>
+<text class="cd mid" x="526" y="362.12">key</text>
+<rect class="bx" x="556" y="336" width="144" height="40"/>
+<text class="cd mid" x="628" y="362.12">commit-time</text>
+<rect class="bx" x="700" y="336" width="100" height="40"/>
+<text class="cd mid" x="750" y="362.12">payload</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 -4 360 520" role="img" data-search-exclude aria-labelledby="storage-segments-n-t" aria-describedby="storage-segments-n-d">
+<title id="storage-segments-n-t">Segments, frames and records</title>
+<desc id="storage-segments-n-d">A partition directory, topics/orders/p00003/, holds segment files named by the 20-digit offset of their first record, up to 64 MiB each. 00000000000000000000.log is sealed: immutable, and deleted whole by retention. 00000000000000450832.log is the active segment, a run of frames with the last one being written. A frame is the unit of writing, one per flush: a header with the magic 0xCAFE, the codec, the record count, the base offset, the sizes and a crc32c, then its records. Each record is the keyed envelope, [version][key][commit-time][payload], the unit a consumer reads.</desc>
+<rect class="rg" x="0" y="0" width="360" height="256" rx="6"/>
+<text class="cd" x="16" y="26">topics/orders/p00003/</text>
+<rect class="bx tn" x="16" y="40" width="328" height="84"/>
+<text class="cd" x="28" y="62">00000000000000000000.log</text>
+<text class="an" x="28" y="86">sealed: immutable, deleted whole</text>
+<text class="an" x="28" y="106">by retention</text>
+<rect class="bx bx3" x="16" y="136" width="328" height="104"/>
+<text class="cd" x="28" y="158">00000000000000450832.log</text>
+<rect class="bx tn" x="28" y="172" width="28" height="28"/>
+<rect class="bx tn" x="56" y="172" width="28" height="28"/>
+<rect class="bx tn" x="84" y="172" width="28" height="28"/>
+<rect class="bx tn" x="112" y="172" width="28" height="28"/>
+<rect class="bx tn" x="140" y="172" width="28" height="28"/>
+<rect class="bx tn" x="168" y="172" width="28" height="28"/>
+<rect class="bx tn" x="196" y="172" width="28" height="28"/>
+<rect class="bx" x="224" y="172" width="28" height="28"/>
+<text class="an" x="264" y="192">active</text>
+<path class="ln1" d="M126 186V294"/>
+<path class="ah" d="M121 294L126 304L131 294Z"/>
+<text class="an" x="140" y="280">a frame: the unit of</text>
+<text class="an" x="140" y="300">writing, one per flush</text>
+<rect class="bx tn" x="16" y="304" width="328" height="64"/>
+<text class="an" x="28" y="328">header: magic</text>
+<text class="cd" x="131.4" y="328">0xCAFE</text>
+<text class="an" x="191.4" y="328">, codec, count,</text>
+<text class="an" x="28" y="348">base offset, sizes, crc32c</text>
+<rect class="bx" x="16" y="368" width="44" height="44"/>
+<rect class="bx" x="60" y="368" width="44" height="44"/>
+<rect class="msg" x="104" y="368" width="44" height="44"/>
+<rect class="bx" x="148" y="368" width="44" height="44"/>
+<rect class="bx" x="192" y="368" width="44" height="44"/>
+<text class="an" x="248" y="394">records</text>
+<path class="ln1" d="M126 412V466"/>
+<path class="ah" d="M121 466L126 476L131 466Z"/>
+<text class="an" x="140" y="440">a record: the unit of</text>
+<text class="an" x="140" y="460">reading</text>
+<rect class="bx" x="16" y="476" width="76" height="36"/>
+<text class="cd mid" x="54" y="499.1">version</text>
+<rect class="bx" x="92" y="476" width="44" height="36"/>
+<text class="cd mid" x="114" y="499.1">key</text>
+<rect class="bx" x="136" y="476" width="112" height="36"/>
+<text class="cd mid" x="192" y="499.1">commit-time</text>
+<rect class="bx" x="248" y="476" width="80" height="36"/>
+<text class="cd mid" x="288" y="499.1">payload</text>
+</svg>

@@ -3,7 +3,17 @@ name: Docs
 on:
   push:
     branches: [master]
-    paths: ["docs/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+    paths:
+      - "docs/**"
+      - "includes/**"
+      - "overrides/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
+      - ".github/workflows/docs.yml"
+      # The HTTP API reference page is generated from the spec, and the
+      # check below also compares the spec with the router.
+      - "scripts/gen_http_api.py"
+      - "internal/transport/httpserver/**"
   workflow_dispatch:
 
 permissions:
@@ -23,8 +33,26 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: pip install mkdocs-material
+      - run: pip install -r requirements-docs.txt
+      # Fails when docs/reference/http-api.md is not what
+      # docs/reference/openapi.yaml renders to, when the spec and
+      # router.go list different routes, or when a status code in the
+      # spec has no heading on the status codes page.
+      - name: Check the generated HTTP API page
+        run: python scripts/gen_http_api.py --check
+      # The published spec is the file the Go contract test checks
+      # against the handlers, so a deploy never ships a spec that
+      # documents a status code the server cannot answer.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Check the published OpenAPI spec against the handlers
+        run: go test -count=1 -run '^TestOpenAPIContract' ./internal/transport/httpserver/
+      # No -q: with -q, MkDocs 1.6 drops warnings before --strict counts
+      # them, so a broken link or #anchor would pass.
       - run: mkdocs build --strict
+        env:
+          NO_MKDOCS_2_WARNING: "1"
       - uses: actions/upload-pages-artifact@v5
         with:
           path: site

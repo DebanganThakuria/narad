@@ -1,0 +1,76 @@
+<svg class="nr-dia__wide" viewBox="0 0 800 376" role="img" aria-labelledby="quickstart-handle-w-t" aria-describedby="quickstart-handle-w-d">
+<title id="quickstart-handle-w-t">The receipt handle travels from the consume answer to the ack</title>
+<desc id="quickstart-handle-w-d">Your terminal talks to the one local Narad node from step 1, listening on 127.0.0.1:7942. Step 3: POST /v1/topics/orders/produce answers 202 Accepted, and the message is stored at offset 0 of orders/1. Step 4: GET .../consume?wait=10s answers 200 with a receipt_handle, 1:0:3742135424316369939, which names this one delivery. Step 5: you send that handle back in POST .../ack?receipt_handle=..., which answers 204 No Content. An ack after the lease ran out gets 410.</desc>
+<text class="lb" x="0" y="24">Your terminal</text>
+<rect class="ink" x="0" y="40" width="14" height="312"/>
+<rect class="bx bx3" x="600" y="64" width="200" height="304" rx="2"/>
+<text class="lb" x="616" y="104">Narad</text>
+<text class="cd" x="616" y="132">127.0.0.1:7942</text>
+<text class="cd mu mid" x="634" y="200">0</text>
+<rect class="bx tn" x="616" y="208" width="36" height="36"/>
+<text class="cd" x="664" y="232">orders/1</text>
+<path class="ln" d="M14 96H588"/>
+<path class="ah" d="M588 89L600 96L588 103Z"/>
+<circle class="sc" cx="196" cy="78" r="13"/><text class="sn" x="196" y="83.5">3</text>
+<text class="cd" x="218" y="84">POST /v1/topics/orders/produce</text>
+<path class="ln1" d="M600 132H17"/>
+<path class="ah-o" d="M27 125L16 132L27 139"/>
+<text class="cd end" x="584" y="122">202 Accepted</text>
+<path class="ln" d="M14 196H588"/>
+<path class="ah" d="M588 189L600 196L588 203Z"/>
+<circle class="sc" cx="196" cy="178" r="13"/><text class="sn" x="196" y="183.5">4</text>
+<text class="cd" x="218" y="184">GET .../consume?wait=10s</text>
+<path class="ln1" d="M600 232H17"/>
+<path class="ah-o" d="M27 225L16 232L27 239"/>
+<text class="cd end" x="584" y="222">200 + receipt_handle</text>
+<path class="ln1" d="M96 232V246M96 284V290"/>
+<path class="ah" d="M91 290L96 300L101 290Z"/>
+<polygon class="msg" points="39,250 135,250 153,280 57,280"/>
+<text class="msg-t" x="96" y="271.5">1:0:37…</text>
+<path class="ln" d="M14 300H588"/>
+<path class="ah" d="M588 293L600 300L588 307Z"/>
+<circle class="sc" cx="196" cy="282" r="13"/><text class="sn" x="196" y="287.5">5</text>
+<text class="cd" x="218" y="288">POST .../ack?receipt_handle=...</text>
+<path class="ln1" d="M600 336H17"/>
+<path class="ah-o" d="M27 329L16 336L27 343"/>
+<text class="cd end" x="584" y="326">204 No Content</text>
+<text class="an mu" x="218" y="364">an ack after the lease ran out gets <tspan class="cd mu">410</tspan></text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 512" role="img" data-search-exclude aria-labelledby="quickstart-handle-n-t" aria-describedby="quickstart-handle-n-d">
+<title id="quickstart-handle-n-t">The receipt handle travels from the consume answer to the ack</title>
+<desc id="quickstart-handle-n-d">Your terminal talks to the one local Narad node from step 1, listening on 127.0.0.1:7942. Step 3: POST /v1/topics/orders/produce answers 202 Accepted, and the message is stored at offset 0 of orders/1. Step 4: GET .../consume?wait=10s answers 200 with a receipt_handle, 1:0:3742135424316369939, which names this one delivery. Step 5: you send that handle back in POST .../ack?receipt_handle=..., which answers 204 No Content. An ack after the lease ran out gets 410.</desc>
+<text class="lb" x="20" y="26">Your terminal</text>
+<rect class="ink" x="16" y="36" width="328" height="12"/>
+<path class="ln" d="M36 48V188M112 48V188M300 48V188"/>
+<path class="ah" d="M30 188L36 200L42 188Z"/>
+<path class="ah" d="M106 188L112 200L118 188Z"/>
+<path class="ah" d="M294 188L300 200L306 188Z"/>
+<path class="ln1" d="M72 200V51M148 200V51M336 200V51"/>
+<path class="ah-o" d="M66 61L72 50L78 61"/>
+<path class="ah-o" d="M142 61L148 50L154 61"/>
+<path class="ah-o" d="M330 61L336 50L342 61"/>
+<path class="ln1" d="M148 96H174M264 96H290"/>
+<path class="ah" d="M290 91L300 96L290 101Z"/>
+<polygon class="msg" points="169.5,83 251.5,83 268.5,109 186.5,109"/>
+<text class="msg-t" x="219" y="101">1:0:37…</text>
+<circle class="sc" cx="36" cy="150" r="12"/><text class="sn" x="36" y="155">3</text>
+<circle class="sc" cx="112" cy="150" r="12"/><text class="sn" x="112" y="155">4</text>
+<circle class="sc" cx="300" cy="150" r="12"/><text class="sn" x="300" y="155">5</text>
+<rect class="bx bx3" x="16" y="200" width="328" height="88" rx="2"/>
+<text class="lb" x="32" y="232">Narad</text>
+<text class="cd" x="32" y="258">127.0.0.1:7942</text>
+<text class="cd mu mid" x="314" y="232">0</text>
+<rect class="bx tn" x="300" y="240" width="28" height="28"/>
+<text class="cd end" x="288" y="262">orders/1</text>
+<path class="sep" d="M16 312H344"/>
+<circle class="sc" cx="28" cy="340" r="12"/><text class="sn" x="28" y="345">3</text>
+<text class="cd" x="50" y="345">POST /v1/topics/orders/produce</text>
+<text class="cd" x="50" y="365">202 Accepted</text>
+<circle class="sc" cx="28" cy="396" r="12"/><text class="sn" x="28" y="401">4</text>
+<text class="cd" x="50" y="401">GET .../consume?wait=10s</text>
+<text class="cd" x="50" y="421">200 + receipt_handle</text>
+<circle class="sc" cx="28" cy="452" r="12"/><text class="sn" x="28" y="457">5</text>
+<text class="cd" x="50" y="457">POST .../ack?receipt_handle=...</text>
+<text class="cd" x="50" y="477">204 No Content</text>
+<text class="an mu" x="50" y="501">an ack after the lease ran out gets <tspan class="cd mu">410</tspan></text>
+</svg>

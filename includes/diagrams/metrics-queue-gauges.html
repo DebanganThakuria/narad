@@ -1,0 +1,105 @@
+<svg class="nr-dia__wide" viewBox="0 0 800 508" role="img" aria-labelledby="metrics-queue-gauges-w-t" aria-describedby="metrics-queue-gauges-w-d">
+<title id="metrics-queue-gauges-w-t">What each queue gauge measures</title>
+<desc id="metrics-queue-gauges-w-d">One partition's log drawn as a strip of offsets, oldest on the left, not to scale. Messages below the committed frontier are acked. The message just above the frontier, highlighted, is the oldest one not yet acked: its lease ran out and it waits to be delivered again. After it come five leased messages, two acked ahead of it and three that no one has taken yet, up to the high watermark. Past the high watermark two more are written but not yet visible to consumers. narad_consumer_lag_messages is the high watermark minus the committed frontier, 11 here: it counts the highlighted, leased, acked-ahead and not yet taken messages, and never the hidden tail. narad_inflight_size counts the five leased messages and narad_acked_ahead_size the two acked ahead. narad_oldest_unconsumed_message_age_seconds is the age of the highlighted message, read from the last write to the segment file that holds it. In a second partition the committed frontier sits below the log start: retention deleted four messages before anyone acked them, and narad_consumer_dropped_messages is the log start minus the frontier, 4 here.</desc>
+<rect class="rg" x="0" y="0" width="800" height="296" rx="6"/>
+<text class="rl" x="20" y="30">A partition with a backlog</text>
+<text class="an" x="20" y="60">log start (oldest retained)</text>
+<text class="cd" x="206" y="90">narad_oldest_unconsumed_message_age_seconds</text>
+<text class="an end" x="192" y="122">committed frontier</text>
+<text class="an end" x="588" y="122">high watermark</text>
+<text class="an" x="604" y="122">written, not yet visible</text>
+<rect class="bx tn" x="20" y="130" width="36" height="36"/>
+<rect class="bx tn" x="56" y="130" width="36" height="36"/>
+<rect class="bx tn" x="92" y="130" width="36" height="36"/>
+<rect class="bx tn" x="128" y="130" width="36" height="36"/>
+<rect class="bx tn" x="164" y="130" width="36" height="36"/>
+<rect class="msg" x="200" y="130" width="36" height="36"/>
+<rect class="bx bx3" x="236" y="130" width="36" height="36"/>
+<rect class="bx bx3" x="272" y="130" width="36" height="36"/>
+<rect class="bx bx3" x="308" y="130" width="36" height="36"/>
+<rect class="bx bx3" x="344" y="130" width="36" height="36"/>
+<rect class="bx bx3" x="380" y="130" width="36" height="36"/>
+<rect class="bx tn" x="416" y="130" width="36" height="36"/>
+<rect class="bx tn" x="452" y="130" width="36" height="36"/>
+<rect class="bx" x="488" y="130" width="36" height="36"/>
+<rect class="bx" x="524" y="130" width="36" height="36"/>
+<rect class="bx" x="560" y="130" width="36" height="36"/>
+<rect class="bx ghost" x="596" y="130" width="36" height="36"/>
+<rect class="bx ghost" x="632" y="130" width="36" height="36"/>
+<path class="ln" d="M20 68V182M200 114V182M596 114V182"/>
+<path class="ln1" d="M218 100V120"/>
+<path class="ah" d="M213 120L218 130L223 120Z"/>
+<path class="ln1" d="M238 170V178H414V170"/>
+<text class="cd mid" x="326" y="202">narad_inflight_size</text>
+<path class="ln1" d="M418 170V178H486V170M452 178V214"/>
+<text class="cd mid" x="452" y="232">narad_acked_ahead_size</text>
+<path class="ln1" d="M200 182V252H596V182"/>
+<text class="cd mid" x="398" y="276">narad_consumer_lag_messages</text>
+<rect class="rg" x="0" y="312" width="800" height="196" rx="6"/>
+<text class="rl" x="20" y="342">A partition behind retention</text>
+<text class="an end" x="192" y="368">committed frontier</text>
+<text class="an" x="352" y="368">log start (oldest retained)</text>
+<rect class="bx ghost" x="200" y="376" width="36" height="36"/>
+<rect class="bx ghost" x="236" y="376" width="36" height="36"/>
+<rect class="bx ghost" x="272" y="376" width="36" height="36"/>
+<rect class="bx ghost" x="308" y="376" width="36" height="36"/>
+<rect class="bx" x="344" y="376" width="36" height="36"/>
+<rect class="bx" x="380" y="376" width="36" height="36"/>
+<rect class="bx" x="416" y="376" width="36" height="36"/>
+<rect class="bx" x="452" y="376" width="36" height="36"/>
+<path class="ln" d="M200 360V428M344 360V428"/>
+<path class="ln1" d="M200 428V440H344V428"/>
+<text class="cd mid" x="272" y="464">narad_consumer_dropped_messages</text>
+<text class="an mid" x="272" y="488">deleted before anyone acked</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 740" role="img" data-search-exclude aria-labelledby="metrics-queue-gauges-n-t" aria-describedby="metrics-queue-gauges-n-d">
+<title id="metrics-queue-gauges-n-t">What each queue gauge measures</title>
+<desc id="metrics-queue-gauges-n-d">One partition's log drawn as a strip of offsets, oldest on the left, not to scale. Messages below the committed frontier are acked. The message just above the frontier, highlighted, is the oldest one not yet acked: its lease ran out and it waits to be delivered again. After it come five leased messages, two acked ahead of it and three that no one has taken yet, up to the high watermark. Past the high watermark two more are written but not yet visible to consumers. narad_consumer_lag_messages is the high watermark minus the committed frontier, 11 here: it counts the highlighted, leased, acked-ahead and not yet taken messages, and never the hidden tail. narad_inflight_size counts the five leased messages and narad_acked_ahead_size the two acked ahead. narad_oldest_unconsumed_message_age_seconds is the age of the highlighted message, read from the last write to the segment file that holds it. In a second partition the committed frontier sits below the log start: retention deleted four messages before anyone acked them, and narad_consumer_dropped_messages is the log start minus the frontier, 4 here.</desc>
+<rect class="rg" x="8" y="0" width="344" height="460" rx="6"/>
+<text class="rl" x="24" y="26">A partition with a backlog</text>
+<rect class="bx tn" x="24" y="52" width="28" height="28"/>
+<rect class="msg" x="24" y="80" width="28" height="28"/>
+<rect class="bx bx3" x="24" y="108" width="28" height="28"/>
+<rect class="bx bx3" x="24" y="136" width="28" height="28"/>
+<rect class="bx bx3" x="24" y="164" width="28" height="28"/>
+<rect class="bx bx3" x="24" y="192" width="28" height="28"/>
+<rect class="bx bx3" x="24" y="220" width="28" height="28"/>
+<rect class="bx tn" x="24" y="248" width="28" height="28"/>
+<rect class="bx tn" x="24" y="276" width="28" height="28"/>
+<rect class="bx" x="24" y="304" width="28" height="28"/>
+<rect class="bx" x="24" y="332" width="28" height="28"/>
+<rect class="bx" x="24" y="360" width="28" height="28"/>
+<rect class="bx ghost" x="24" y="388" width="28" height="28"/>
+<rect class="bx ghost" x="24" y="416" width="28" height="28"/>
+<path class="ln" d="M8 52H68M8 80H68M8 388H68"/>
+<text class="an" x="92" y="46">log start (oldest retained)</text>
+<text class="an" x="92" y="74">committed frontier</text>
+<path class="ln1" d="M56 82H64V106H56"/>
+<text class="cd" x="92" y="93">narad_oldest_unconsumed_</text>
+<text class="cd" x="92" y="113">message_age_seconds</text>
+<path class="ln1" d="M56 110H64V246H56"/>
+<text class="cd" x="92" y="183">narad_inflight_size</text>
+<path class="ln1" d="M72 80H80V388H72"/>
+<path class="ln1" d="M80 346H88"/>
+<text class="cd" x="92" y="351">narad_consumer_lag_messages</text>
+<path class="ln1" d="M56 250H64V302H56"/>
+<text class="cd" x="92" y="281">narad_acked_ahead_size</text>
+<text class="an" x="92" y="382">high watermark</text>
+<text class="an" x="92" y="421">written, not yet visible</text>
+<rect class="rg" x="8" y="476" width="344" height="264" rx="6"/>
+<text class="rl" x="24" y="502">A partition behind retention</text>
+<rect class="bx ghost" x="24" y="528" width="28" height="28"/>
+<rect class="bx ghost" x="24" y="556" width="28" height="28"/>
+<rect class="bx ghost" x="24" y="584" width="28" height="28"/>
+<rect class="bx ghost" x="24" y="612" width="28" height="28"/>
+<rect class="bx" x="24" y="640" width="28" height="28"/>
+<rect class="bx" x="24" y="668" width="28" height="28"/>
+<rect class="bx" x="24" y="696" width="28" height="28"/>
+<path class="ln" d="M8 528H68M8 640H68"/>
+<text class="an" x="92" y="522">committed frontier</text>
+<text class="an" x="92" y="634">log start (oldest retained)</text>
+<path class="ln1" d="M72 528H80V640H72"/>
+<text class="cd" x="92" y="561">narad_consumer_</text>
+<text class="cd" x="92" y="581">dropped_messages</text>
+<text class="an" x="92" y="603">deleted before anyone acked</text>
+</svg>

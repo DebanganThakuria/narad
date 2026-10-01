@@ -1,0 +1,192 @@
+---
+description: "Learn how rebalance and decommission move a partition between nodes: a verbatim copy, then an ownership switch that loses no record."
+search:
+  boost: 0.5
+---
+
+# Rebalance and decommission
+
+Learn how rebalance and decommission move a partition between nodes: a verbatim copy, then an ownership switch that loses no record.
+
+!!! abstract "In short"
+    - A partition's data lives only on its owner's disk, so moving it means copying it. Rebalance and decommission run the same move.
+    - The leader only writes where each partition should go. Each destination node copies its partitions itself, then switches ownership with a Raft compare-and-swap.
+    - The copy runs while produce and consume continue. Only the last few MiB are copied under a freeze, which usually lasts milliseconds.
+    - During the freeze the source takes no new commits and hands out no new messages for that partition. Leases still out at the handover are delivered again by the new owner.
+    - If the source dies for good mid-move, the destination promotes its copy after 2 minutes, but only if the copy holds everything the source had made visible.
+
+Narad has no follower replication: a partition's data lives only on its owner's disk. So moving a partition means *physically copying it* to another node and switching over without losing a record. Rebalance (spreading partitions onto a new node) and [decommission](../reference/glossary.md#decommission) (draining a node) use the same machine: **relocate a partition, verbatim, from one owner to another.**
+
+The design principle is the one that runs fan-out and assignment: **each node looks after its own partitions.** The controller (the Raft leader) writes the *desired* ownership into Raft, and each node runs a local reconcile loop that moves its own partitions toward it. No component directs the others step by step.
+
+## Owner and target {#owner-target}
+
+Every partition assignment carries two fields:
+
+- **Owner**: the node that serves the partition *now*; produce and consume land here. See [owner](../reference/glossary.md#owner).
+- **Target**: the node where it *should* end up; empty when the partition is where it belongs. See [target](../reference/glossary.md#target).
+
+The controller's only job is policy: set `Target` to balance the partition count across the live nodes. The nodes do the work. The ownership change is a Raft compare-and-swap: one atomic entry, with no split-brain.
+
+Each node's move runner looks for partitions targeted at it once a second. Each pass lists every topic and reads its assignments, so it is gated the way the fan-out reconciler is (see [Fan-out engine](fanout-engine.md#where-the-work-runs)). A tick skips the read while the replica's domain versions have not moved, and runs it anyway after a failed or unfinished pass, after a move worker exits, and at least every 30 s. A new target still starts its worker on the next tick. The stale-copy sweep keeps its own count of ticks, skipped or not, and runs every 30th.
+
+<figure class="nr-dia nr-dia--doc" id="fig-rebalance-owner-target">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/rebalance-owner-target.html"
+</div>
+<figcaption>The controller only sets <code>Target</code>. The destination copies the partition and proposes the flip, which applies only if nothing changed in the meantime.</figcaption>
+</figure>
+
+## Partition move: copy, then freeze {#move}
+
+A partition can be gigabytes. Freezing produce for the whole copy would be an outage, so the copy runs in **two phases**, and the freeze covers only the small tail:
+
+<figure class="nr-dia nr-dia--doc" id="fig-rebalance-move-timeline">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/rebalance-move-timeline.html"
+</div>
+<figcaption>The bulk copy runs while the partition keeps serving; only the last tail is copied under the freeze. No client request is refused: produces still get <code>202</code>, and consumes of this partition pause for the freeze. Not to scale.</figcaption>
+</figure>
+
+**CatchUp** streams the source's segments (the sealed files plus the growing active tail) while produce keeps flowing, repeating to shrink the tail that is not yet copied. Once it is within `lagBytes` of the live tail it stops, and **PrepareHandoff** freezes the source. The freeze lasts milliseconds, because Finalize has only the last few MiB to drain.
+
+### Hot partitions: pre-copy, then stop-and-copy {#hot-partitions}
+
+CatchUp is a **pre-copy, then stop-and-copy** cutover, the same shape as live migration of a virtual machine. Let `W` be the partition's write rate and `B` the copy bandwidth. Each pass copies what was written since the last one, so consecutive deltas scale by `W/B`:
+
+- **`W < B`** (the normal case: one partition's writes are far below network and disk copy speed): deltas shrink geometrically, CatchUp converges, and the freeze is tiny.
+- **`W ≥ B`** (a very hot partition, or a slow copy link): deltas stay flat or grow, so the tail would never shrink below `lagBytes`.
+
+CatchUp is therefore **bounded**: after a capped number of passes, or once the tail stops shrinking, it stops pre-copying and freezes anyway. The freeze then does a **stop-and-copy** of whatever tail remains. That is always safe and always ends, because the freeze *stops the writes*: `Finalize` drains a now-fixed tail at full bandwidth with nothing competing.
+
+The move never hangs. A partition the copy cannot keep up with just gets a **longer freeze** (bounded by the remaining tail divided by the bandwidth), logged as a non-converged cutover. Because the tail only grows while the copy chases a moving target, stopping sooner is what keeps that freeze *smallest*.
+
+The freeze stops *both* produce commits and new consume reservations on the source:
+
+- **Commits are refused**, so the ingress dispatcher keeps the records and retries them, and they land at the new owner after the flip.
+- **New reservations stop** for that partition (see [Handoff freeze on the source](#handoff-freeze)).
+
+That is the no-loss guarantee: once the destination captures the final tail, no record can land behind it on the source. Anything in flight is delivered again by the new owner, and at-least-once absorbs the small burst of duplicates. If the destination dies mid-handoff, the freeze **lifts on its own when its TTL runs out**; no coordinator is needed to clean up.
+
+### Freeze fencing and re-arming {#freeze-fence}
+
+The TTL that makes a dead destination harmless would also make a *slow* destination dangerous. The freeze lasts 30 s, and a non-converged stop-and-copy can drain for longer. If the freeze silently lapsed mid-drain, the source would take commits again, `Finalize` would still stop on a quiet pass, and everything committed on the source between that pass and the flip would be stranded on a copy the sweep later deletes. Two things close that hole:
+
+- **Re-arm.** `PrepareHandoff` returns a **freeze token**. While `Finalize` drains, the destination presents the token every `FreezeTTL/4`, on its own timer, so a single long pass cannot outlive the TTL either. Presenting a token *extends* the freeze that token names; it never arms a new one.
+- **Fence.** Right before the install and the flip, the destination presents the token once more. The source refuses (`409`) if that freeze is no longer active, which is exactly the case where commits may have landed behind the copy. The refused destination does not flip: it freezes again under a fresh token, drains again, and only then proposes the flip. The fence also checks that the high watermark the source reports now equals the one the copy reproduced, and renews the TTL, so the install and the Raft round trip run under a fresh freeze.
+
+A source running an older release returns no token. The destination then behaves as before (re-arms without a fence, and logs a warning), so a rolling upgrade never stalls a move.
+
+Two details make the reported high watermark *final* rather than merely current. `PrepareHandoff` reads the transfer info while holding the partition's **produce lock**, so a commit that passed the freeze gate a moment earlier and is in the middle of its fsync finishes first and is included. A commit that passed the gate but had not reached the lock yet checks the gate again once it holds the lock, finds the freeze, and is refused with nothing appended; it retries at the new owner, so it cannot land after the reported high watermark either. And `Finalize` stops only after **two consecutive passes that copy nothing and report the same high watermark**: a single quiet pass could see the segment before an append and the high watermark after it.
+
+The copy reproduces the source's *exact* high watermark, which may be below the physical record count (a [hidden tail](../reference/glossary.md#hidden-tail)): a reopened copy must never expose records the source had not made visible. The verify step reopens the staged copy and confirms it recovers into a log that reaches that high watermark before the flip.
+
+### Handoff freeze on the source {#handoff-freeze}
+
+`PrepareHandoff` freezes produce commits for the partition (commits are refused and retry at the new owner) and consume: the source hands out no new reservations for the partition until the flip, or until the freeze lapses. Acks, extends and nacks of leases already handed out keep working.
+
+Before it reports the transfer info, the source waits up to 500 ms (or a quarter of the freeze TTL, if that is shorter) for the leases already out to be acked or released. It then reads the transfer info under the partition's produce lock, so an in-flight commit is either fully in it or refused. The committed offset it reports is the in-memory frontier, which is ahead of the one in the consumer files by about a tick of the offset committer (100 ms, see [Ack persistence](consume-path.md#how-acks-reach-the-disk)), and of `consumer.offset` alone by up to about 30 s plus the durability interval.
+
+Before this, the copied frontier was the file's value, and the acks that landed in the last flush interval, or during the copy, were delivered again by the new owner: every move of a freshly created child topic onto its parent's node produced a few redeliveries of acked messages. A lease still out when the 500 ms bound is reached is delivered again by the new owner, as before (at-least-once). The freeze it arms is fenced by the token it returns (see [Freeze fencing](#freeze-fence)). Presenting the token again (`PrepareHandoff` with a token on the wire) extends that freeze, or fails with `409` if it lapsed.
+
+### Client view during a move {#client-view}
+
+**No client request is refused, at any point.** The freeze is internal to one partition. From the outside:
+
+- **Produce keeps succeeding.** Every produce is accepted into the receiving node's ingress WAL and answered `202`, as always. The dispatcher's commits to the moving partition are refused for the length of the freeze, so it keeps those records and retries them about once a second; they land at the new owner after the flip, on the same partition. Only a freeze that outlasts the 3 s reroute grace sends them to a live sibling partition instead, with the usual seam in per-key order (see [Produce path](produce-path.md#dispatch)).
+- **Consume pauses on this partition for the freeze.** The source hands out no new messages from the moving partition while the freeze holds, usually milliseconds; other partitions keep serving. Acks, extends and nacks of messages already handed out keep working. After the flip, consumes of that partition route to the new owner.
+- **The consumer position moves with the partition.** The committed consumer offset is copied along with the data, so the new owner resumes where the old one left off. In-flight reservations are *not* transferred: anything unacked at the flip, plus an ack that lands on the source in the milliseconds after the final capture, is **delivered again** by the new owner. Duplicates, never gaps: the standard at-least-once contract.
+- **The listing never runs ahead of the copy.** The source reads the consumer frontier and the fan-out cursors before the high watermark, and the high watermark before the segments, so a listing never carries a position past what it copies. The destination clamps anyway (unreleased): it installs a committed offset of at most HWM-1 and keeps only acked-ahead offsets below the high watermark, logging a warning when it had to clamp the frontier, and lowers a fan-out cursor past the high watermark to it without a log line. A source on an older release costs redeliveries, never a skipped record.
+- **Old consumer state is dropped.** A destination that owned the partition before may still hold that ownership's in-memory consumer state. It drops that state before it installs the copy and again after, so no ack of the old state can reach the copy. A move target never creates consumer state for the partition before the flip, because only a node that owns a partition reserves from it.
+- **Fan-out cursors move with the partition.** A parent partition's `fanout-<child>.offset` files travel as **sidecars** of the transfer info, and are installed into the copy last, after the final segment pass (the source's cursors keep advancing until the flip, since fan-out only reads). The new owner's cursor resumes from the copied position, and whatever the source fanned out between the copy and the flip is fanned out again. A cursor file is overwritten in place as its cursor advances, so the source checks each file's checksum before shipping it (reading one caught in the middle of a write again, never shipping an unverified one), and the destination checks it again before installing it. Without this, the new owner anchored at the tail and skipped the child's backlog, which for a delay child is its entire pending window.
+
+Should a cursor file still be missing after a move, for a link that already existed when the partition was installed (a source on an older release that did not ship sidecars, or a lost file), the new owner refuses to anchor at the tail over data. Every installed copy carries a `move.marker` naming the child links that existed at install time, with their attach epochs. A cursor for such a link that finds no file resumes from the partition's **oldest retained offset** instead of the tail. A link attached after the install is a fresh attach and keeps the no-backfill contract.
+
+So the freeze protects **durability** (no write may land behind the final copy), and **redelivery** protects consume correctness. A move never costs availability.
+
+## Ownership flip: compare-and-swap {#flip}
+
+`CompleteMove` sets `Owner := Target` **only if** the owner is still the source and the target is still this node. A re-plan that retargeted the move, or a competing worker, makes the compare-and-swap fail. A failed flip rolls the install back but keeps the target, so the source stays authoritative and a retry is legitimate. This single guarded entry is what keeps the whole scheme free of split-brain.
+
+The install and its rollback act on the partition's path, and a flip is also rejected when the topic was deleted under the move. If the name was recreated meanwhile, and this node already opened the successor's partition there, removing whatever the path names would take the successor's records and consumer state with it. So the install's swap and the rollback both run under the topic's open guard with the partition's log closed.
+
+For a topic with an incarnation id, they run only while the topic directory's marker still names the incarnation the move prepared it for, and the rollback also checks that the path still names the directory the install put there (unreleased). A refused install fails that attempt, and the move retries. A refused rollback removes nothing: the copy went with its incarnation's directory when that was quarantined, and the sweep reclaims it.
+
+## Source failure mid-move {#what-if-the-source-dies-mid-move}
+
+The destination worker holds one copy session and **retries**; it does not give up when a copy attempt fails. If the source is briefly unreachable (a pod restart), the next attempt resumes the copy, and the move completes normally once the source is back. With no replication, waiting for the source is the safe default: the source's disk holds the authoritative partition.
+
+If the source stays dead past `ForcePromoteAfter` (2 minutes by default, long enough to rule out a restart), the destination [force-promotes](../reference/glossary.md#force-promote) the copy it already holds: it skips the freeze (a dead source is not writing) and flips ownership to itself. Force-promote is strictly gated, so it can never expose a truncated partition:
+
+- the session must have reached the source at least once; otherwise the destination has no idea what the source exposed, so it refuses;
+- the staged copy must recover to an offset **at or above the source's last-known high watermark**: the destination copied everything the source had made *visible*. If the source died before the copy caught up, promoting would drop visible records, so it refuses and keeps waiting.
+
+<figure class="nr-dia nr-dia--doc" id="fig-rebalance-force-promote">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--lilac">
+--8<-- "diagrams/rebalance-force-promote.html"
+</div>
+<figcaption>After 2 minutes the destination promotes its copy only if the copy reaches the high watermark the source last reported; otherwise it keeps waiting.</figcaption>
+</figure>
+
+Force-promote works from the last pre-copy listing, taken while produce and consume were live, and installs its positions clamped to the promoted high watermark, so the new owner never starts with a frontier past its own log end. Releases through v3.0.1 read the high watermark before the frontier and did not clamp. A record committed, delivered and acked between the two reads put the frontier at or above the high watermark, and after a force-promote every record the new owner committed below that frontier was readable but never delivered. A source asked to list a partition it has not opened since a crash opens it first, so the high watermark it reports is the recovered boundary, never 0, which would let the gate accept a partial copy.
+
+Records the source committed between the destination's last successful read and the source's death live only on the source's disk. If the source really crashed for good, they are lost regardless; force-promote recovers everything that can be recovered, and turns a stalled move into a completed one.
+
+"Dead" is a heartbeat verdict, though, not a post-mortem. A source cut off by a long network partition keeps serving its local consumers, and whatever dispatchers can still reach it, and its copy ends up **ahead** of the position the destination promoted at. When that source returns, its stale-copy sweep must not delete the only copy of those records. So the install writes a **move marker** (`move.marker`) into the partition directory, recording the promoted high watermark and whether it was a force-promote. The owner reports it in its transfer info, and the old owner's sweep asks the new owner for it before reclaiming.
+
+A local copy whose recovered next offset is **ahead** of the promoted high watermark is [quarantined](../reference/glossary.md#quarantine) (renamed to `<partition>.quarantine`) and logged at error level for an operator to reconcile; a copy at or behind it is reclaimed as before. An owner that cannot be asked defers the sweep, and an owner that reports no marker (an older release) is reclaimed without the guard. The acks such a source took from its own consumers past the promoted high watermark stay in its copy, which the sweep quarantines. They never reach the new owner, whose records at those offsets are different ones.
+
+The reclaim closes the partition's log and drops its consumer state, then does its recovery, quarantine or removal under the topic's open guard, and only while the topic directory's marker is absent or names the incarnation the reclaim read from the metastore. A delete and recreate landing in between, with this node opening the successor's partition under the path, refuses the reclaim instead of removing the successor's directory; an old incarnation's copy left that way is quarantined and reclaimed by the stale-incarnation sweep.
+
+## Target failure mid-move {#target-failure}
+
+Only the destination aborts a move, and a dead destination cannot. Left alone, moves aimed at a node that died would sit in flight forever, holding the `MaxInFlightMoves` budget and stopping every later rebalance and decommission (`narad cluster moves` would list them indefinitely).
+
+The controller's rebalance pass therefore clears the target of any in-flight move whose target member is gone from the membership, has been dead longer than `DeadTargetAbortAfter` (2 minutes by default, so a restarting pod still finishes its copy), or is out of the Raft voter set while dead or draining. The partition never left its owner, so clearing the target is safe at any point, and a destination that comes back finds its guarded compare-and-swap refused and discards its staged copy. The freed budget is used in the same pass.
+
+## Move planner {#planner}
+
+On each tick the leader computes the fewest moves that balance the count of owned partitions. With T movable partitions over R receiving nodes, balance gives each receiver `floor(T/R)` or `ceil(T/R)`. The plan moves exactly the surplus above that capacity, and the nodes already holding the most keep the `ceil` slots, so a partition on a node within its share is never touched.
+
+<figure class="nr-dia nr-dia--doc" id="fig-rebalance-planner">
+<div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
+--8<-- "diagrams/rebalance-planner.html"
+</div>
+<figcaption>With 18 partitions over 4 nodes each share is 4 or 5, and only the four partitions above those shares move, all to the new node.</figcaption>
+</figure>
+
+Two properties make it safe to recompute every tick:
+
+- **Idempotent under moves in flight.** A partition in the middle of a move is counted at its *destination* and excluded from the movable pool, so a plan computed while moves run already accounts for them and reaches a fixed point. The planner recomputes and converges; it never oscillates.
+- **Bounded concurrency.** The plan tops the count of moves in flight up to `MaxInFlightMoves` (8 by default) each tick, so a large rebalance drains gradually instead of copying every partition at once.
+
+Planning runs under a **mutex** and after a **Raft barrier**: a membership change landing in the middle of a computation cannot race two passes, and a freshly elected leader never plans against a stale state machine. Partitions of a dead owner stay where they are: their data lives only on the dead node's disk, so they wait for it to return. Anti-affinity is a *preference*: a fan-out child is steered off its parent's node when a balanced alternative exists, but balance always wins. So a replica child's copies can end up on one node after a rebalance.
+
+## Decommission as rebalance {#decommission}
+
+Marking a node **draining** (`POST /v1/cluster/members/{id}/decommission`) removes it from the planner's set of receiving nodes while it stays a live owner. The same minimal-movement algorithm then sheds every partition it owns onto the others. The drain flag survives a new registration, so a node that restarts in the middle of a decommission stays draining.
+
+Once a draining node owns nothing, the controller removes it from the Raft voter set, behind two guards:
+
+- **MinVoters** (3 by default): a node is never removed if that would drop the cluster below a quorum-safe size.
+- **Leader moves off first**: a node cannot be cleanly removed from its own Raft configuration while it leads, so if the drained node is the current leader, the controller transfers leadership away, and the new leader finishes the removal.
+
+Rebalance starts on its own when a node joins; decommission is started by an operator. The commands and the safe order of steps are in [Scale out and in](../operate/scaling.md#decommission).
+
+## Move constants {#constants}
+
+| Constant | Value |
+|---|---|
+| Move runner tick | 1s; a full pass at least every 30s |
+| Freeze TTL | 30s, re-armed every quarter of it while `Finalize` drains |
+| Lease drain before the frontier is read | up to 500ms, or a quarter of the freeze TTL if shorter |
+| Force-promote after (`ForcePromoteAfter`) | 2 minutes |
+| Clear the target of a dead destination (`DeadTargetAbortAfter`) | 2 minutes |
+| Moves in flight (`MaxInFlightMoves`) | 8 |
+| Minimum voters before a removal (`MinVoters`) | 3 |
+| Stale-copy sweep | every 30th move-runner tick |
+
+## Next steps
+
+- [Scale out and in](../operate/scaling.md): add and remove nodes, and watch moves as they run.
+- [Delivery contract](delivery-contract.md#failure-matrix): what a move, or a source that dies mid-move, does to your messages.

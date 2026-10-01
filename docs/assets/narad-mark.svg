@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 16 16">
+  <title>narad</title>
+  <!-- 16-unit grid, for light grounds. Producer bar and wire, a 3-unit gap, the message in flight, the consumer bar.
+       The wire and the message sit on one 2:3 line that lands on the consumer's foot at y = 14.5. -->
+  <path fill="#0B0D0E" d="M1 1H4L8 7H5L3 4V15H1Z"/>
+  <path fill="#528A00" d="M7 10H10L12 13H9Z"/>
+  <path fill="#0B0D0E" d="M13 1H15V15H13Z"/>
+</svg>

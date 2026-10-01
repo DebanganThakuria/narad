@@ -1,0 +1,109 @@
+<svg class="nr-dia__wide" viewBox="0 12 800 412" role="img" aria-labelledby="node-down-timeline-w-t" aria-describedby="node-down-timeline-w-d">
+<title id="node-down-timeline-w-t">What clients see while a node is down</title>
+<desc id="node-down-timeline-w-d">narad-2 stops at 0 seconds and comes back later; the time axis is not to scale. Producers get 202 throughout. For the first 3 seconds, messages for narad-2's partitions are held; after 3 seconds they go to other partitions of the topic; once narad-2 is marked dead, after about 30 seconds without a heartbeat, they are rerouted at once. Consumers without partition= are served from the other partitions all along. Acks of messages on narad-2, and consumes pinned to its partitions, get 502 while the owner does not answer, then 503, partition owner is down, once it is marked dead. Messages stored on narad-2, such as ord_123, wait for the node. After it returns, its partitions can deliver with quiet gaps of up to one visibility timeout.</desc>
+<defs><pattern id="node-down-timeline-w-h" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hb" width="10" height="10"/><path class="hl" d="M0 0V10"/></pattern></defs>
+<text class="cd" x="0" y="46">narad-2</text>
+<rect class="dead" x="216" y="24" width="456" height="32" fill="url(#node-down-timeline-w-h)"/>
+<rect class="plate" x="412" y="26" width="64" height="28"/>
+<text class="an mid" x="444" y="45">down</text>
+<rect class="bx" x="680" y="24" width="116" height="32" rx="2"/>
+<text class="an mid" x="738" y="46">back</text>
+<text class="lb" x="0" y="100">Producers</text>
+<text class="cd" x="0" y="122">202</text>
+<text class="an" x="42" y="122">throughout</text>
+<rect class="win" x="216" y="88" width="76" height="32" rx="2"/>
+<text class="an" x="224" y="110">held</text>
+<rect class="win" x="300" y="88" width="192" height="32" rx="2"/>
+<text class="an" x="308" y="110">to other partitions</text>
+<rect class="win" x="500" y="88" width="172" height="32" rx="2"/>
+<text class="an" x="508" y="110">rerouted at once</text>
+<text class="lb" x="0" y="172">Consumers</text>
+<text class="an" x="0" y="194">without</text>
+<text class="cd" x="66" y="194">partition=</text>
+<rect class="win" x="216" y="160" width="580" height="32" rx="2"/>
+<text class="an" x="224" y="182">served from the other partitions</text>
+<text class="an" x="0" y="244">Acks and pinned</text>
+<text class="an" x="0" y="266">consumes</text>
+<rect class="win" x="216" y="232" width="276" height="32" rx="2"/>
+<text class="cd" x="224" y="254">502</text>
+<text class="an" x="266" y="254">no answer from the owner</text>
+<rect class="win" x="500" y="232" width="172" height="32" rx="2"/>
+<text class="cd" x="508" y="254">503</text>
+<text class="an" x="550" y="254">owner is down</text>
+<text class="an" x="0" y="316">Messages stored</text>
+<text class="an" x="0" y="338">on</text>
+<text class="cd" x="26" y="338">narad-2</text>
+<rect class="win" x="216" y="304" width="456" height="32" rx="2"/>
+<text class="an" x="224" y="326">wait for the node</text>
+<polygon class="msg" points="548,305 644,305 662,335 566,335"/>
+<text class="msg-t" x="605" y="326.5">ord_123</text>
+<rect class="win" x="680" y="304" width="116" height="32" rx="2"/>
+<rect class="ln1 dash" x="680" y="304" width="116" height="32"/>
+<text class="an" x="688" y="326">quiet gaps</text>
+<text class="an mu end" x="796" y="360">up to one visibility timeout</text>
+<path class="ln1" d="M216 384H796M216 384V392M296 384V392M496 384V392M676 384V392"/>
+<text class="an mu mid" x="216" y="414">0 s</text>
+<text class="an mu mid" x="296" y="414">3 s</text>
+<text class="an mu mid" x="496" y="414">about 30 s</text>
+<text class="an mu mid" x="676" y="414">returns</text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 628" role="img" data-search-exclude aria-labelledby="node-down-timeline-n-t" aria-describedby="node-down-timeline-n-d">
+<title id="node-down-timeline-n-t">What clients see while a node is down</title>
+<desc id="node-down-timeline-n-d">narad-2 stops at 0 seconds and comes back later; the time axis is not to scale. Producers get 202 throughout. For the first 3 seconds, messages for narad-2's partitions are held; after 3 seconds they go to other partitions of the topic; once narad-2 is marked dead, after about 30 seconds without a heartbeat, they are rerouted at once. Consumers without partition= are served from the other partitions all along. Acks of messages on narad-2, and consumes pinned to its partitions, get 502 while the owner does not answer, then 503, partition owner is down, once it is marked dead. Messages stored on narad-2, such as ord_123, wait for the node. After it returns, its partitions can deliver with quiet gaps of up to one visibility timeout.</desc>
+<defs><pattern id="node-down-timeline-n-h" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hb" width="10" height="10"/><path class="hl" d="M0 0V10"/></pattern></defs>
+<rect class="dead" x="20" y="12" width="128" height="40" fill="url(#node-down-timeline-n-h)"/>
+<rect class="plate" x="36" y="18" width="96" height="28"/>
+<text class="cd mid" x="84" y="37">narad-2</text>
+<text class="an" x="164" y="28">stops at 0 s,</text>
+<text class="an" x="164" y="48">back when it returns</text>
+<path class="ln1" d="M12 72V620M12 72H20M12 208H20M12 344H20M12 480H20"/>
+<rect class="rg" x="24" y="72" width="328" height="124" rx="6"/>
+<text class="rl" x="40" y="98">0 to 3 s</text>
+<text class="an" x="40" y="122">Producers</text>
+<text class="cd" x="148" y="122">202</text>
+<text class="an" x="184" y="122">held</text>
+<text class="an" x="40" y="142">Consumers</text>
+<text class="an" x="148" y="142">other partitions</text>
+<text class="an" x="40" y="162">Acks, pinned</text>
+<text class="cd" x="148" y="162">502</text>
+<text class="an" x="40" y="182">On</text>
+<text class="cd" x="68" y="182">narad-2</text>
+<text class="an" x="148" y="182">wait for the node</text>
+<rect class="rg" x="24" y="208" width="328" height="124" rx="6"/>
+<text class="rl" x="40" y="234">3 to 30 s</text>
+<text class="an" x="40" y="258">Producers</text>
+<text class="cd" x="148" y="258">202</text>
+<text class="an" x="184" y="258">to other partitions</text>
+<text class="an" x="40" y="278">Consumers</text>
+<text class="an" x="148" y="278">other partitions</text>
+<text class="an" x="40" y="298">Acks, pinned</text>
+<text class="cd" x="148" y="298">502</text>
+<text class="an" x="40" y="318">On</text>
+<text class="cd" x="68" y="318">narad-2</text>
+<text class="an" x="148" y="318">wait for the node</text>
+<rect class="rg" x="24" y="344" width="328" height="124" rx="6"/>
+<text class="rl" x="40" y="370">About 30 s on</text>
+<text class="an" x="40" y="394">Producers</text>
+<text class="cd" x="148" y="394">202</text>
+<text class="an" x="184" y="394">rerouted at once</text>
+<text class="an" x="40" y="414">Consumers</text>
+<text class="an" x="148" y="414">other partitions</text>
+<text class="an" x="40" y="434">Acks, pinned</text>
+<text class="cd" x="148" y="434">503</text>
+<text class="an" x="184" y="434">owner is down</text>
+<text class="an" x="40" y="454">On</text>
+<text class="cd" x="68" y="454">narad-2</text>
+<polygon class="msg" points="148.5,441 230.5,441 247.5,467 165.5,467"/>
+<text class="msg-t" x="198" y="459">ord_123</text>
+<text class="an" x="258" y="459">waits</text>
+<rect class="rg" x="24" y="480" width="328" height="140" rx="6"/>
+<text class="rl" x="40" y="506">After it returns</text>
+<text class="an" x="40" y="530">On</text>
+<text class="cd" x="68" y="530">narad-2</text>
+<rect class="win" x="148" y="514" width="188" height="28" rx="2"/>
+<rect class="ln1 dash" x="148" y="514" width="188" height="28"/>
+<text class="an" x="156" y="533">quiet gaps</text>
+<text class="an" x="148" y="564">up to one visibility</text>
+<text class="an" x="148" y="584">timeout</text>
+<text class="an" x="40" y="608">The rest as before the stop</text>
+</svg>

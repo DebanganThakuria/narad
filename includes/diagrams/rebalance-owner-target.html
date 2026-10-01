@@ -1,0 +1,94 @@
+<svg class="nr-dia__wide" viewBox="0 -4 800 360" role="img" aria-labelledby="rebalance-owner-target-w-t" aria-describedby="rebalance-owner-target-w-d">
+<title id="rebalance-owner-target-w-t">The leader writes the target; the destination does the move</title>
+<desc id="rebalance-owner-target-w-d">The metastore, replicated by Raft, holds the assignment of orders/3: Owner narad-0, Target narad-3. 1: the controller on the Raft leader writes only the Target. 2: the move runner on narad-3 looks for partitions targeted at it every second and finds this one. 3: it copies orders/3 from narad-0. 4: it proposes the flip, a compare-and-swap: Owner becomes narad-3 only if Owner is still narad-0 and Target is still narad-3.</desc>
+<rect class="rg" x="240" y="0" width="320" height="148" rx="6"/>
+<text class="rl" x="260" y="30">metastore (Raft)</text>
+<rect class="bx" x="260" y="44" width="280" height="84" rx="2"/>
+<text class="cd" x="276" y="66">orders/3</text>
+<text class="cd" x="276" y="88">Owner=narad-0</text>
+<text class="cd" x="276" y="110">Target=narad-3</text>
+<rect class="bx" x="0" y="48" width="180" height="76" rx="2"/>
+<text class="lb mid" x="90" y="81.8">controller</text>
+<text class="lb mid" x="90" y="103.8">on the leader</text>
+<path class="ln2" d="M180 86H248"/>
+<path class="ah" d="M248 92L260 86L248 80Z"/>
+<circle class="sc" cx="220" cy="62" r="13"/><text class="sn" x="220" y="67.5">1</text>
+<rect class="bx" x="0" y="232" width="240" height="120" rx="2"/>
+<text class="pod" x="120" y="262">narad-0</text>
+<text class="cd" x="16" y="294">orders/3</text>
+<rect class="bx tn" x="16" y="304" width="36" height="36"/>
+<rect class="bx tn" x="52" y="304" width="36" height="36"/>
+<rect class="bx tn" x="88" y="304" width="36" height="36"/>
+<rect class="bx tn" x="124" y="304" width="36" height="36"/>
+<rect class="bx tn" x="160" y="304" width="36" height="36"/>
+<rect class="bx bx3" x="480" y="232" width="320" height="120" rx="2"/>
+<text class="pod" x="700" y="262">narad-3</text>
+<rect class="bx bxq" x="500" y="280" width="176" height="56" rx="2"/>
+<text class="an mid" x="588" y="303.12">move runner,</text>
+<text class="an mid" x="588" y="325.12">every 1 s</text>
+<path class="ln1" d="M520 128V270"/>
+<path class="ah" d="M515 270L520 280L525 270Z"/>
+<circle class="sc" cx="316" cy="186" r="13"/><text class="sn" x="316" y="191.5">2</text>
+<text class="an" x="338" y="192">reads its target</text>
+<path class="ln" d="M240 308H303M417 308H468"/>
+<path class="ah" d="M468 315L480 308L468 301Z"/>
+<polygon class="msg" points="303,293 399,293 417,323 321,323"/>
+<text class="msg-t" x="360" y="314.5">orders/3</text>
+<circle class="sc" cx="264" cy="280" r="13"/><text class="sn" x="264" y="285.5">3</text>
+<path class="ln2" d="M784 232V120Q784 104 768 104H552"/>
+<path class="ah" d="M552 98L540 104L552 110Z"/>
+<circle class="sc" cx="576" cy="142" r="13"/><text class="sn" x="576" y="147.5">4</text>
+<text class="an" x="596" y="148">flip: Owner := <tspan class="cd">narad-3</tspan></text>
+<text class="an" x="596" y="170">only if Owner is</text>
+<text class="an" x="596" y="192">still <tspan class="cd">narad-0</tspan> and</text>
+<text class="an" x="596" y="214">Target is still <tspan class="cd">narad-3</tspan></text>
+</svg>
+<svg class="nr-dia__narrow" viewBox="0 0 360 756" role="img" data-search-exclude aria-labelledby="rebalance-owner-target-n-t" aria-describedby="rebalance-owner-target-n-d">
+<title id="rebalance-owner-target-n-t">The leader writes the target; the destination does the move</title>
+<desc id="rebalance-owner-target-n-d">The metastore, replicated by Raft, holds the assignment of orders/3: Owner narad-0, Target narad-3. 1: the controller on the Raft leader writes only the Target. 2: the move runner on narad-3 looks for partitions targeted at it every second and finds this one. 3: it copies orders/3 from narad-0. 4: it proposes the flip, a compare-and-swap: Owner becomes narad-3 only if Owner is still narad-0 and Target is still narad-3.</desc>
+<rect class="bx" x="8" y="0" width="344" height="44" rx="2"/>
+<text class="lb mid" x="180" y="27.78">controller on the leader</text>
+<path class="ln2" d="M68 44V88"/>
+<path class="ah" d="M62 88L68 100L74 88Z"/>
+<circle class="sc" cx="92" cy="72" r="12"/><text class="sn" x="92" y="77">1</text>
+<rect class="rg" x="8" y="100" width="344" height="128" rx="6"/>
+<text class="rl" x="28" y="130">metastore (Raft)</text>
+<rect class="bx" x="48" y="136" width="280" height="76" rx="2"/>
+<text class="cd" x="64" y="156">orders/3</text>
+<text class="cd" x="64" y="176">Owner=narad-0</text>
+<text class="cd" x="64" y="196">Target=narad-3</text>
+<path class="ln1" d="M108 212V290"/>
+<path class="ah" d="M103 290L108 300L113 290Z"/>
+<circle class="sc" cx="132" cy="256" r="12"/><text class="sn" x="132" y="261">2</text>
+<path class="ln2" d="M308 300V224"/>
+<path class="ah" d="M314 224L308 212L302 224Z"/>
+<circle class="sc" cx="284" cy="256" r="12"/><text class="sn" x="284" y="261">4</text>
+<rect class="bx bx3" x="8" y="300" width="344" height="104" rx="2"/>
+<text class="pod" x="60" y="326">narad-3</text>
+<rect class="bx bxq" x="24" y="340" width="168" height="48" rx="2"/>
+<text class="an mid" x="108" y="359.1">move runner,</text>
+<text class="an mid" x="108" y="379.1">every 1 s</text>
+<path class="ln" d="M208 500V464M208 438V416"/>
+<path class="ah" d="M215 416L208 404L201 416Z"/>
+<polygon class="msg" points="158.5,438 240.5,438 257.5,464 175.5,464"/>
+<text class="msg-t" x="208" y="456">orders/3</text>
+<circle class="sc" cx="284" cy="451" r="12"/><text class="sn" x="284" y="456">3</text>
+<rect class="bx" x="8" y="500" width="344" height="100" rx="2"/>
+<text class="pod" x="60" y="526">narad-0</text>
+<text class="cd" x="24" y="556">orders/3</text>
+<rect class="bx tn" x="128" y="548" width="28" height="28"/>
+<rect class="bx tn" x="156" y="548" width="28" height="28"/>
+<rect class="bx tn" x="184" y="548" width="28" height="28"/>
+<rect class="bx tn" x="212" y="548" width="28" height="28"/>
+<rect class="bx tn" x="240" y="548" width="28" height="28"/>
+<path class="sep" d="M8 624H352"/>
+<circle class="sc" cx="20" cy="646" r="12"/><text class="sn" x="20" y="651">1</text>
+<text class="an" x="40" y="652">writes only the Target</text>
+<circle class="sc" cx="20" cy="672" r="12"/><text class="sn" x="20" y="677">2</text>
+<text class="an" x="40" y="678">finds its target, checking every 1 s</text>
+<circle class="sc" cx="20" cy="698" r="12"/><text class="sn" x="20" y="703">3</text>
+<text class="an" x="40" y="704">copies <tspan class="cd">orders/3</tspan> from <tspan class="cd">narad-0</tspan></text>
+<circle class="sc" cx="20" cy="724" r="12"/><text class="sn" x="20" y="729">4</text>
+<text class="an" x="40" y="730">flip: Owner := <tspan class="cd">narad-3</tspan> only if Owner is</text>
+<text class="an" x="40" y="750">still <tspan class="cd">narad-0</tspan> and Target is still <tspan class="cd">narad-3</tspan></text>
+</svg>
