@@ -28,10 +28,14 @@ package cluster
 //	CompleteMove  guarded CAS flip: owner := target, only if owner is still
 //	              the source and target is still us — the split-brain guard
 //
-// On any failure before the flip the worker aborts: it discards the staged
-// copy and clears the target (AbortMove, itself guarded so a re-plan is
-// never clobbered). The source's freeze auto-resumes on its TTL, so a
-// worker that dies mid-handoff needs no coordinator to clean up.
+// A failure before the flip is retried: the staged copy is kept and the
+// next attempt resumes it. The source's freeze auto-resumes on its TTL,
+// so a worker that dies mid-handoff needs no coordinator to clean up.
+// A flip whose outcome the worker did not see (the reply was lost, the
+// leader changed mid-commit) is resolved with the leader before anything
+// is undone (move_flip.go): the installed copy stays in place unless a
+// leader read confirms the flip did not and cannot happen, and even then
+// it is renamed back to staging, never deleted.
 //
 // The source side is passive: it keeps serving, answers the copy RPCs, and
 // freezes on PrepareHandoff. Its now-stale on-disk copy after the flip is
@@ -239,6 +243,13 @@ type MoveRunner struct {
 
 	reconcilePasses int
 	gate            reconcileGate
+
+	// flipSettle is the flip settle window (moveFlipSettle; tests
+	// shorten it).
+	flipSettle time.Duration
+	// now is the clock the worker measures its own durations on
+	// (time.Now outside tests).
+	now func() time.Time
 }
 
 // NewMoveRunner wires a runner. selfID must be this node's ID; an empty
@@ -250,17 +261,19 @@ func NewMoveRunner(store moveStore, selfID, dataDir string, peer movePeer, recla
 	cfg = cfg.withDefaults()
 	versions, _ := store.(domainVersioner)
 	return &MoveRunner{
-		store:     store,
-		versions:  versions,
-		selfID:    selfID,
-		dataDir:   dataDir,
-		peer:      peer,
-		mover:     NewPartitionMover(peer, cfg.ChunkBytes, logger),
-		reclaimer: reclaimer,
-		metrics:   m,
-		logger:    logger,
-		cfg:       cfg,
-		workers:   map[moveKey]*moveHandle{},
+		store:      store,
+		versions:   versions,
+		selfID:     selfID,
+		dataDir:    dataDir,
+		peer:       peer,
+		mover:      NewPartitionMover(peer, cfg.ChunkBytes, logger),
+		reclaimer:  reclaimer,
+		metrics:    m,
+		logger:     logger,
+		cfg:        cfg,
+		workers:    map[moveKey]*moveHandle{},
+		flipSettle: moveFlipSettle,
+		now:        time.Now,
 	}
 }
 
@@ -386,29 +399,42 @@ func (r *MoveRunner) Reconcile(ctx context.Context) {
 	r.gate.finish(version, now, pending)
 }
 
-// runMove drives one partition move to completion. It holds ONE copy
-// session for the worker's lifetime and RETRIES until the move flips, the
-// worker is cancelled (retarget/shutdown), or — if the source dies and stays
-// dead — force-promotes the copy it already has. Retrying in place (rather
-// than aborting and being re-spawned) keeps the session's memory of the
-// source's last-known HWM, which is what force-promote needs after the source
-// is gone.
+// runMove drives one partition move to completion. It holds one copy
+// session and RETRIES until the move flips, the worker is cancelled
+// (retarget/shutdown), the leader confirms its flip cannot happen, or (if
+// the source dies and stays dead) it force-promotes the copy it already
+// has. Retrying in place (rather than aborting and being re-spawned)
+// keeps the session's memory of the source's last-known HWM, which is
+// what force-promote needs after the source is gone. An installed copy
+// whose flip was not confirmed is resolved first (resolvePending), on
+// every pass, before anything else is tried. Every exit without a flip
+// removes the staging copy (see moveWorker.finish).
 func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition int, source string) {
 	staging := r.stagingDir(topicName, partition)
 	if err := os.RemoveAll(staging); err != nil {
 		r.logger.Warn("move: clear staging", "dir", staging, "err", err)
 		return
 	}
-	started := time.Now()
+	w := &moveWorker{r: r, topic: topicName, partition: partition, source: source, staging: staging, started: time.Now()}
+	defer w.finish()
 	if r.metrics != nil {
 		r.metrics.MovesInFlight.Inc()
 		defer r.metrics.MovesInFlight.Dec()
 	}
-	var sess *MoveSession
 
 	for {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || w.exit {
 			return
+		}
+		if w.pending != nil {
+			if w.resolvePending(ctx) {
+				w.observeDone()
+				return
+			}
+			if w.exit || !sleepCtx(ctx, r.cfg.RetryBackoff) {
+				return
+			}
+			continue
 		}
 		m, err := r.store.GetMember(source)
 		if err != nil || m.Addr == "" {
@@ -417,26 +443,27 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 			}
 			continue
 		}
-		if sess == nil {
-			sess = r.mover.Begin(m.Addr, topicName, partition, staging)
+		if w.sess == nil {
+			w.sess = r.mover.Begin(m.Addr, topicName, partition, staging)
+			w.sess.carryFrom(w.prevSess)
 		}
 
 		// If the source has been dead long enough, stop waiting for it and try
 		// to promote the copy we already have (guarded: ForcePromote refuses
 		// unless we copied up to the source's last-known HWM).
 		if r.sourceDeadEnough(m) {
-			if res, err := sess.ForcePromote(); err == nil {
+			if res, err := w.sess.ForcePromote(); err == nil {
 				r.logger.Warn("move: force-promoting copy of a dead source",
 					"topic", topicName, "partition", partition, "source", source, "hwm", res.HighWatermark)
-				if r.finishMove(ctx, topicName, partition, source, staging, res, true) {
-					r.observeMoveDone("force_promoted", started, res)
+				if r.finishMove(ctx, w, res, true, "", m.Addr) {
+					w.observeDone()
 					return
 				}
 			} else {
 				r.logger.Warn("move: source dead but copy is behind its last hwm — cannot force-promote; waiting",
 					"topic", topicName, "partition", partition, "source", source, "err", err)
 			}
-			if !sleepCtx(ctx, r.cfg.RetryBackoff) {
+			if w.exit || !sleepCtx(ctx, r.cfg.RetryBackoff) {
 				return
 			}
 			continue
@@ -449,11 +476,11 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 			continue
 		}
 
-		if done, res := r.attemptCopy(ctx, sess, topicName, partition, source, m.Addr); done {
-			r.observeMoveDone("completed", started, res)
+		if r.attemptCopy(ctx, w, m.Addr) {
+			w.observeDone()
 			return
 		}
-		if !sleepCtx(ctx, r.cfg.RetryBackoff) {
+		if w.exit || !sleepCtx(ctx, r.cfg.RetryBackoff) {
 			return
 		}
 	}
@@ -474,11 +501,13 @@ func (r *MoveRunner) observeMoveDone(outcome string, started time.Time, res Copy
 // finalize → flip). Returns true only when the move flipped. Any failure
 // returns false WITHOUT clearing staging, so the next attempt resumes the
 // copy and keeps the session's last-known HWM for a possible force-promote.
-func (r *MoveRunner) attemptCopy(ctx context.Context, sess *MoveSession, topicName string, partition int, source, sourceAddr string) (bool, CopyResult) {
+func (r *MoveRunner) attemptCopy(ctx context.Context, w *moveWorker, sourceAddr string) bool {
+	sess := w.sess
+	topicName, partition, source := w.topic, w.partition, w.source
 	converged, err := sess.CatchUp(ctx, r.cfg.CatchUpLagBytes, r.cfg.CatchUpMaxRounds, r.cfg.CatchUpStallRounds)
 	if err != nil {
 		r.logger.Warn("move: catch-up failed; will retry", "topic", topicName, "partition", partition, "err", err)
-		return false, CopyResult{}
+		return false
 	}
 	if !converged {
 		r.logger.Warn("move: pre-copy did not converge (writers keep pace with the copy); freezing with a larger tail — the cutover freeze will be longer",
@@ -487,7 +516,7 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, sess *MoveSession, topicNa
 	frozen, err := r.peer.PrepareHandoff(ctx, sourceAddr, topicName, partition, r.cfg.FreezeTTL, "")
 	if err != nil {
 		r.logger.Warn("move: prepare-handoff failed; will retry", "topic", topicName, "partition", partition, "err", err)
-		return false, CopyResult{}
+		return false
 	}
 	token := frozen.FreezeToken
 	if token == "" {
@@ -497,58 +526,68 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, sess *MoveSession, topicNa
 		r.logger.Warn("move: source does not fence its handoff freeze (older release); cutover relies on the freeze TTL alone",
 			"topic", topicName, "partition", partition, "source", source)
 	}
-	rearm := func(ctx context.Context) (messaging.PartitionTransferInfo, error) {
-		info, err := r.peer.PrepareHandoff(ctx, sourceAddr, topicName, partition, r.cfg.FreezeTTL, token)
-		if err != nil {
-			return messaging.PartitionTransferInfo{}, err
-		}
-		if token != "" && info.FreezeToken != token {
-			return messaging.PartitionTransferInfo{}, fmt.Errorf("%w: source armed a different freeze", messaging.ErrHandoffFreezeLapsed)
-		}
-		return info, nil
-	}
 	sess.KeepFrozen(func(ctx context.Context) error {
-		_, err := rearm(ctx)
+		_, err := r.rearm(ctx, sourceAddr, topicName, partition, token)
 		return err
 	}, r.cfg.FreezeRearmEvery)
 	res, err := sess.Finalize(ctx)
 	if err != nil {
 		r.logger.Warn("move: finalize failed; will retry", "topic", topicName, "partition", partition, "err", err)
-		return false, CopyResult{}
+		return false
 	}
 	// The fence. The freeze must have held continuously from the final
 	// tail capture to here, or a commit could have landed on the source
 	// behind the copy; the source refuses a lapsed token, and the HWM it
 	// reports now must match what the copy reproduced. This also renews
 	// the TTL so the install + CAS below run under a fresh freeze.
-	fence, err := rearm(ctx)
+	fence, err := r.rearm(ctx, sourceAddr, topicName, partition, token)
 	if err != nil {
 		r.logger.Warn("move: handoff freeze lapsed before the flip; not flipping, will re-freeze and drain again",
 			"topic", topicName, "partition", partition, "err", err)
-		return false, CopyResult{}
+		return false
 	}
 	if fence.HighWatermark != res.HighWatermark {
 		r.logger.Warn("move: source hwm moved under the freeze; not flipping, will re-freeze and drain again",
 			"topic", topicName, "partition", partition, "copied_hwm", res.HighWatermark, "source_hwm", fence.HighWatermark)
-		return false, CopyResult{}
+		return false
 	}
 	// The source's fan-out cursors kept advancing while frozen (fan-out
 	// only reads); the fence's listing is the freshest view of them.
 	staging := r.stagingDir(topicName, partition)
 	if err := installSidecars(staging, fence.Sidecars, res.HighWatermark); err != nil {
 		r.logger.Warn("move: install fan-out cursor sidecars; will retry", "topic", topicName, "partition", partition, "err", err)
-		return false, CopyResult{}
+		return false
 	}
-	return r.finishMove(ctx, topicName, partition, source, staging, res, false), res
+	return r.finishMove(ctx, w, res, false, token, sourceAddr)
 }
 
-// finishMove installs the staged copy and proposes the guarded flip (owner
-// := us, only if owner is still the source and target is still us — forwarded
-// to the leader when this node is a follower). Returns true when the flip
-// commits; on a rejected flip it rolls the install back and returns false so
-// the source stays authoritative and the worker retries (a re-plan will
-// cancel the worker).
-func (r *MoveRunner) finishMove(ctx context.Context, topicName string, partition int, source, stagingDir string, res CopyResult, forcePromoted bool) bool {
+// rearm re-arms (with a token: extends and fences) the source's handoff
+// freeze and returns the source's current transfer info.
+func (r *MoveRunner) rearm(ctx context.Context, sourceAddr, topicName string, partition int, token string) (messaging.PartitionTransferInfo, error) {
+	info, err := r.peer.PrepareHandoff(ctx, sourceAddr, topicName, partition, r.cfg.FreezeTTL, token)
+	if err != nil {
+		return messaging.PartitionTransferInfo{}, err
+	}
+	if token != "" && info.FreezeToken != token {
+		return messaging.PartitionTransferInfo{}, fmt.Errorf("%w: source armed a different freeze", messaging.ErrHandoffFreezeLapsed)
+	}
+	return info, nil
+}
+
+// finishMove installs the staged copy and proposes the guarded flip
+// (owner := us, only if owner is still the source and target is still
+// us; forwarded to the leader when this node is a follower). Returns true
+// when the flip commits.
+//
+// A flip that returns an error did not necessarily fail: a deposed
+// leader answers ErrLeadershipLost for an entry the next leader commits,
+// and a forwarded flip's reply can be lost after the leader applied it.
+// So the install is never undone on the error alone: the outcome is
+// resolved with the leader (resolvePending), and until it is, the
+// installed copy stays where it is. token and sourceAddr are the freeze
+// the flip runs under (empty for a force-promote).
+func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResult, forcePromoted bool, token, sourceAddr string) bool {
+	topicName, partition, source, stagingDir := w.topic, w.partition, w.source, w.staging
 	// The copy must belong to the incarnation of the topic THIS node
 	// records, or it is a deleted incarnation's data being moved into
 	// the recreated topic (the source never purged it, or this replica
@@ -617,13 +656,17 @@ func (r *MoveRunner) finishMove(ctx context.Context, topicName string, partition
 		return false
 	}
 	resetConsumerState()
-	if err := r.completeMove(ctx, topicName, partition, source); err != nil {
-		r.logger.Warn("move: flip rejected (CAS guard or not applied)", "topic", topicName, "partition", partition, "err", err)
-		if rmErr := r.rollbackInstall(topicName, partition, expectID, installed); rmErr != nil {
-			r.logger.Warn("move: roll back install", "topic", topicName, "partition", partition, "err", rmErr)
-		}
-		return false
+	w.pending = &pendingFlip{
+		res: res, expectID: expectID, installed: installed, forcePromoted: forcePromoted,
+		token: token, sourceAddr: sourceAddr, since: r.now(),
 	}
+	if err := w.proposeFlip(ctx); err != nil {
+		r.logger.Warn("move: flip not confirmed; resolving its outcome with the leader before undoing anything",
+			"topic", topicName, "partition", partition, "err", err)
+		return w.resolvePending(ctx)
+	}
+	w.pending = nil
+	w.flipDone(res, forcePromoted)
 	r.logger.Info("move: partition moved",
 		"topic", topicName, "partition", partition, "source", source, "hwm", res.HighWatermark, "bytes", res.BytesCopied)
 	return true
@@ -664,15 +707,17 @@ func (r *MoveRunner) sourceDeadEnough(m metastore.Member) bool {
 
 // completeMove proposes the guarded ownership flip: directly when this node
 // is the leader, otherwise forwarded to the leader over peer RPC (the
-// destination is usually a follower). A CAS failure or a not-leader forward
-// both surface as an error — the worker rolls the install back and retries.
+// destination is usually a follower). Every error is resolved with the
+// leader before anything is undone (resolvePending); flipSettled tells
+// the errors that prove the proposal cannot commit later (a CAS refusal,
+// no leader to send it to) from the ones that do not.
 func (r *MoveRunner) completeMove(ctx context.Context, topicName string, partition int, source string) error {
 	if r.store.IsLeader() {
 		return r.store.CompleteMove(ctx, topicName, partition, source, r.selfID)
 	}
 	addr, err := r.leaderAddr()
 	if err != nil {
-		return err
+		return &flipNotProposedError{cause: err}
 	}
 	return r.peer.CompleteMove(ctx, addr, topicName, partition, source, r.selfID)
 }
@@ -741,18 +786,24 @@ func (r *MoveRunner) install(topicName string, partition int, staging, expectID 
 	return installed, nil
 }
 
-// rollbackInstall removes the copy install put in place, after the flip
-// was rejected. The flip is rejected exactly when the topic was deleted
-// under the move, and the name may have been recreated, with this node
-// serving the successor's partition under the path, while the flip was
-// in flight. So the removal runs like the install, under the topic's
-// guard with the partition's log closed, and only while the topic
-// marker still names expectID and the path still names the directory
-// install put there (installed). Otherwise the copy was quarantined with
-// the rest of its incarnation's directory, and the sweep reclaims it.
-func (r *MoveRunner) rollbackInstall(topicName string, partition int, expectID string, installed os.FileInfo) error {
+// rollbackInstall moves the copy install put in place back to staging,
+// once a leader read confirmed the flip did not and will not happen. The
+// flip is rejected exactly when the topic was deleted under the move, and
+// the name may have been recreated, with this node serving the
+// successor's partition under the path, while the flip was in flight. So
+// the rollback runs like the install, under the topic's guard with the
+// partition's log closed, and only while the topic marker still names
+// expectID and the path still names the directory install put there
+// (installed; nil refuses). Otherwise the copy was quarantined with the
+// rest of its incarnation's directory, and the sweep reclaims it.
+//
+// It renames rather than deletes: the rollback runs on the leader's word,
+// and a copy that is moved back can be installed again, while a deleted
+// one is gone. restored reports that staging holds the copy again, byte
+// for byte what the session staged, so the session can resume from it.
+func (r *MoveRunner) rollbackInstall(topicName string, partition int, expectID string, installed os.FileInfo, staging string) (restored bool, err error) {
 	dir := r.partitionDir(topicName, partition)
-	return r.replacePartitionDir(topicName, partition, func() error {
+	err = r.replacePartitionDir(topicName, partition, func() error {
 		if err := r.checkTopicIncarnation(topicName, expectID); err != nil {
 			r.logger.Info("move: installed copy no longer under the partition's path; left for the sweep",
 				"topic", topicName, "partition", partition, "reason", err)
@@ -765,13 +816,24 @@ func (r *MoveRunner) rollbackInstall(topicName string, partition int, expectID s
 		if err != nil {
 			return err
 		}
-		if !os.SameFile(now, installed) {
+		if installed == nil || !os.SameFile(now, installed) {
 			r.logger.Info("move: the partition's path names another directory than the installed copy; left in place",
 				"topic", topicName, "partition", partition)
 			return nil
 		}
-		return os.RemoveAll(dir)
+		if err := os.RemoveAll(staging); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(staging), 0o755); err != nil {
+			return err
+		}
+		if err := os.Rename(dir, staging); err != nil {
+			return err
+		}
+		restored = true
+		return nil
 	})
+	return restored, err
 }
 
 // replacePartitionDir runs fn, which replaces or removes the partition's

@@ -10,7 +10,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -360,36 +362,42 @@ func TestMoveRunnerCompletesMove(t *testing.T) {
 	}
 }
 
-func TestMoveRunnerRollsBackOnFlipReject(t *testing.T) {
+// A flip the leader confirms cannot happen (the CAS refused it because
+// the move was re-planned to another node) is rolled back: the install
+// is taken off the partition's path, so a non-owner keeps no phantom
+// copy, the worker ends (the re-plan's own worker takes over), and it
+// leaves no staging copy behind.
+func TestMoveRunnerRollsBackOnConfirmedFlipReject(t *testing.T) {
 	src := t.TempDir()
 	wantHWM, _ := buildSourcePartition(t, src, 10)
 	store := &fakeMoveStore{
 		assignment:  metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
 		member:      metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
-		completeErr: context.DeadlineExceeded, // CAS guard rejects the flip
+		completeErr: fmt.Errorf("%w: complete-move target is %q, expected %q", errs.ErrInvalidArgument, "narad-other", "narad-dst"),
 	}
+	// The re-plan landed just before the flip: the CAS refuses it.
+	store.completeHook = func() { store.assignment.TargetID = "narad-other" }
 	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}}
 	dataDir := t.TempDir()
 	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, nil, MoveConfig{RetryBackoff: 5 * time.Millisecond})
 
-	// The worker retries a rejected flip forever; cancel it deterministically
-	// the moment the first flip attempt lands (the rollback runs before the
-	// worker checks the context again).
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	store.completeHook = cancel
 	r.Reconcile(ctx)
 	r.wg.Wait()
 
-	// The flip was attempted and rejected; the install must be rolled back so a
-	// non-owner keeps no phantom copy. The target is NOT cleared — the source
-	// stays authoritative and the worker retries until a re-plan cancels it.
 	if len(store.completeArgs) == 0 {
 		t.Fatal("flip was never attempted")
+	}
+	if ctx.Err() != nil {
+		t.Fatal("the worker kept running after the leader confirmed the flip was rejected")
 	}
 	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
 	if segs, _ := storage.ListPartitionSegments(dir); len(segs) != 0 {
 		t.Fatalf("install not rolled back: %d segments remain at %s", len(segs), dir)
+	}
+	if _, err := os.Stat(r.stagingDir("orders", 0)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the worker left its staging copy behind (stat err %v)", err)
 	}
 }
 
