@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,7 +53,6 @@ func TestStaleCopyOwnerGuardDecisions(t *testing.T) {
 		name      string
 		info      messaging.PartitionTransferInfo
 		local     []localSegment
-		fromOwner bool // the local copy's marker names the owner as its source
 		retention time.Duration
 		setAside  bool
 		wantHWM   int64
@@ -143,37 +143,9 @@ func TestStaleCopyOwnerGuardDecisions(t *testing.T) {
 			local:   []localSegment{{base: 0, size: 0, modTime: fresh}},
 			wantHWM: 7,
 		},
-		{
-			name:      "install copied from an owner with no marker: guard at the owner's hwm",
-			info:      messaging.PartitionTransferInfo{Segments: healthy, HighWatermark: 25},
-			local:     local,
-			fromOwner: true,
-			wantHWM:   25,
-		},
-		{
-			name:      "install copied from an owner whose own marker is older: not capped by it",
-			info:      messaging.PartitionTransferInfo{Segments: healthy, HighWatermark: 25, MoveMarker: marker(3)},
-			local:     local,
-			fromOwner: true,
-			wantHWM:   25,
-		},
-		{
-			name:      "install copied from an owner that now lists nothing: set aside",
-			info:      messaging.PartitionTransferInfo{},
-			local:     local,
-			fromOwner: true,
-			setAside:  true,
-		},
-		{
-			name:      "install copied from an owner that lost a segment: set aside",
-			info:      messaging.PartitionTransferInfo{Segments: []storage.SegmentInfo{seg(0, 500, true), seg(10, 500, true), seg(15, 900, false)}, HighWatermark: 25},
-			local:     local,
-			fromOwner: true,
-			setAside:  true,
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			guard := ownerReclaimGuard(tc.info, tc.local, tc.fromOwner, tc.retention, now)
+			guard := ownerReclaimGuard(tc.info, tc.local, tc.retention, now)
 			if !guard.Known {
 				t.Fatalf("guard %+v is not KNOWN: the sweep must never reclaim unguarded", guard)
 			}
@@ -202,6 +174,15 @@ type engineNode struct {
 // owner and moving to target ("" for none).
 func newEngineNode(t *testing.T, selfID, owner, target string) *engineNode {
 	t.Helper()
+	return newEngineNodeWithSegments(t, selfID, owner, target, 64)
+}
+
+// newEngineNodeWithSegments is newEngineNode with a chosen segment size:
+// 64 bytes puts about one record in each segment, which exercises the
+// sweep's per-segment checks; the default (zero) keeps every record of
+// a small partition in one tail segment, as in production.
+func newEngineNodeWithSegments(t *testing.T, selfID, owner, target string, segmentBytes int64) *engineNode {
+	t.Helper()
 	ctx := context.Background()
 	store := newTestStore(t)
 	if err := store.CreateTopic(ctx, topic.Topic{
@@ -224,7 +205,7 @@ func newEngineNode(t *testing.T, selfID, owner, target string) *engineNode {
 		}
 	}
 	dataDir := t.TempDir()
-	logs := runtime.NewLogs(dataDir, storage.Options{FlushInterval: time.Millisecond, SegmentBytes: 64}, store, nil)
+	logs := runtime.NewLogs(dataDir, storage.Options{FlushInterval: time.Millisecond, SegmentBytes: segmentBytes}, store, nil)
 	t.Cleanup(func() { _ = logs.CloseAll() })
 	offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
 		return consumer.Caps{MaxInFlight: 64, MaxAckedAhead: 64}, nil
@@ -527,6 +508,44 @@ func TestStaleCopySweepNeverDeletesRecordsTheNewOwnerLacks(t *testing.T) {
 		requireSetAside(t, src, 10)
 	})
 
+	t.Run("the old copy's own marker names the new owner, past a force-promote", func(t *testing.T) {
+		// The partition reached the old owner by an earlier move from
+		// the node that owns it now, so the old copy carries a marker
+		// naming that node. It then moved back, the new owner promoted
+		// at 10, and the old owner, cut off, committed 10..14 while the
+		// new owner took 8 records of its own. Production-sized
+		// segments keep every record in one tail segment on both
+		// nodes, and records of about 1 KiB put the first 4 KiB of that
+		// segment inside the 10 records the two copies share.
+		big := func(label string) string { return label + "-" + strings.Repeat("x", 1000) }
+		src := newEngineNodeWithSegments(t, "narad-src", "narad-src", "", 0)
+		dst := newEngineNodeWithSegments(t, "narad-dst", "narad-src", "narad-dst", 0)
+		for i := range 10 {
+			src.produce(t, big(fmt.Sprintf("pre-move-%d", i)))
+		}
+		if err := messaging.WriteMoveMarker(src.dir(), messaging.MoveMarker{Source: "narad-dst", HighWatermark: 0}); err != nil {
+			t.Fatal(err)
+		}
+		moveInto(t, dst, src.engine, "narad-src", "narad-dst")
+		dst.flip(t, "narad-src", "narad-dst")
+		src.engine.ResumeProduce("orders", 0)
+		for i := range 5 {
+			src.produce(t, big(fmt.Sprintf("cut-off-%d", i)))
+		}
+		src.flip(t, "narad-src", "narad-dst")
+		for i := range 8 {
+			dst.produce(t, big(fmt.Sprintf("new-owner-%d", i)))
+		}
+		if n := len(sealedSegmentFiles(t, src.dir())); n != 0 {
+			t.Fatalf("setup: the old copy holds %d sealed segments, want every record in its tail", n)
+		}
+		seen := sweepOnSource(t, src, dst.engine)
+		if len(seen) != 1 || seen[0].MoveMarker == nil || seen[0].MoveMarker.HighWatermark != 10 || seen[0].HighWatermark != 18 {
+			t.Fatalf("setup: the owner's listing is %+v, want its marker at 10 and hwm 18", seen)
+		}
+		requireSetAside(t, src, 15)
+	})
+
 	t.Run("owner holds a sealed segment short", func(t *testing.T) {
 		src, dst := moveThenFlip(t, 10)
 		sealed := sealedSegmentFiles(t, dst.dir())
@@ -573,11 +592,13 @@ func TestStaleCopyTheOwnerCannotVouchForSurvivesAMoveBack(t *testing.T) {
 // from the owner. When its move is abandoned (the destination died with
 // its flip pending and the controller cleared the target, or the worker
 // was cancelled with its flip pending and the move re-planned), the
-// install stays at the destination's partition path, and the
-// destination's sweep judges it against the owner it came from:
-// reclaimed while the owner still holds those records, set aside when it
-// does not.
-func TestStaleCopySweepReclaimsAnInstallThatNeverFlipped(t *testing.T) {
+// install stays at the destination's partition path. The sweep does not
+// trust the copy's own move marker to tell such an install from a copy
+// this node served (a marker survives every later move of the partition,
+// so it cannot), and the owner did not receive the partition from it, so
+// the owner vouches for none of it: the install is set aside, never
+// deleted, whatever the owner holds.
+func TestStaleCopySweepSetsAsideAnInstallThatNeverFlipped(t *testing.T) {
 	ctx := context.Background()
 	setup := func(t *testing.T) (src, dst *engineNode) {
 		t.Helper()
@@ -594,18 +615,6 @@ func TestStaleCopySweepReclaimsAnInstallThatNeverFlipped(t *testing.T) {
 			t.Fatalf("AbortMove: %v", err)
 		}
 	}
-	requireReclaimed := func(t *testing.T, src, dst *engineNode) {
-		t.Helper()
-		if q := quarantinesOf(t, dst.dir()); len(q) != 0 {
-			t.Fatalf("the abandoned install was quarantined although its owner holds every record of it: %v", q)
-		}
-		if _, err := os.Stat(dst.dir()); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("the abandoned install was not reclaimed (stat err %v)", err)
-		}
-		if n := nextOffsetAt(t, src.dir()); n != 10 {
-			t.Fatalf("the owner holds next offset %d, want 10", n)
-		}
-	}
 	cleared := metastore.Assignment{OwnerID: "narad-src"}
 
 	t.Run("the destination died and the controller cleared the target", func(t *testing.T) {
@@ -613,7 +622,7 @@ func TestStaleCopySweepReclaimsAnInstallThatNeverFlipped(t *testing.T) {
 		installWithoutFlip(t, dst, src.engine, "narad-src", "narad-dst", 1)
 		abortOn(t, dst)
 		sweepAs(t, dst, "narad-dst", cleared, src.engine)
-		requireReclaimed(t, src, dst)
+		requireSetAside(t, dst, 10)
 	})
 
 	t.Run("the owner holds an older move marker of its own", func(t *testing.T) {
@@ -628,7 +637,7 @@ func TestStaleCopySweepReclaimsAnInstallThatNeverFlipped(t *testing.T) {
 		if len(seen) != 1 || seen[0].MoveMarker == nil || seen[0].MoveMarker.HighWatermark != 3 {
 			t.Fatalf("setup: the owner's listing is %+v, want its marker at 3", seen)
 		}
-		requireReclaimed(t, src, dst)
+		requireSetAside(t, dst, 10)
 	})
 
 	t.Run("the worker was cancelled with its flip pending and the move re-planned", func(t *testing.T) {
@@ -638,7 +647,7 @@ func TestStaleCopySweepReclaimsAnInstallThatNeverFlipped(t *testing.T) {
 			t.Fatalf("SetAssignmentTarget: %v", err)
 		}
 		sweepAs(t, dst, "narad-dst", metastore.Assignment{OwnerID: "narad-src", TargetID: "narad-other"}, src.engine)
-		requireReclaimed(t, src, dst)
+		requireSetAside(t, dst, 10)
 	})
 
 	t.Run("control: the owner came back empty", func(t *testing.T) {
@@ -670,8 +679,9 @@ func TestStaleCopySweepReclaimsAnInstallThatNeverFlipped(t *testing.T) {
 // stale-copy sweep has judged its old copy (the sweep runs every
 // moveSweepEvery reconcile ticks; the rebalance pass, every 10 s). From
 // then on the sweep skips the partition, and the move's install is what
-// meets the old copy at the partition's path. When the incoming copy
-// does not cover it, the install must set it aside, never delete it.
+// meets the old copy at the partition's path. Whenever it holds
+// unexpired records, the install sets it aside, never deletes it: no
+// comparison with the incoming copy is trusted to prove it redundant.
 func TestAMoveBackBeforeTheSweepNeverDeletesTheOldCopysRecords(t *testing.T) {
 	ctx := context.Background()
 	moveBack := func(t *testing.T, src *engineNode, from *messaging.Engine) {
@@ -733,15 +743,22 @@ func TestAMoveBackBeforeTheSweepNeverDeletesTheOldCopysRecords(t *testing.T) {
 		requireMovedBackAndKept(t, src, 10, 10)
 	})
 
-	t.Run("control: a covered old copy is replaced", func(t *testing.T) {
+	t.Run("an old copy the incoming one covers is set aside too", func(t *testing.T) {
 		src, dst := moveThenFlip(t, 10)
 		dst.produce(t, "after-the-move")
 		moveBack(t, src, dst.engine)
-		if n := nextOffsetAt(t, src.dir()); n != 11 {
-			t.Fatalf("the moved-back partition recovers next offset %d, want 11", n)
+		requireMovedBackAndKept(t, src, 11, 10)
+	})
+
+	t.Run("control: an old copy with no records is replaced", func(t *testing.T) {
+		src, dst := moveThenFlip(t, 0)
+		dst.produce(t, "after-the-move")
+		moveBack(t, src, dst.engine)
+		if n := nextOffsetAt(t, src.dir()); n != 1 {
+			t.Fatalf("the moved-back partition recovers next offset %d, want 1", n)
 		}
 		if q := quarantinesOf(t, src.dir()); len(q) != 0 {
-			t.Fatalf("a copy the incoming one covers was quarantined: %v", q)
+			t.Fatalf("an old copy with no records was quarantined: %v", q)
 		}
 	})
 }

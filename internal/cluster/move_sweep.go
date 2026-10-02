@@ -86,7 +86,7 @@ func (r *MoveRunner) sweepStaleCopies(ctx context.Context) {
 			// for exist nowhere else (see ownerReclaimGuard). An owner
 			// that cannot be asked defers the sweep.
 			retention := time.Duration(t.RetentionMs) * time.Millisecond
-			guard, abandoned, ok := r.promotedPosition(ctx, a.OwnerID, t.Name, a.Partition, dir, retention)
+			guard, ok := r.promotedPosition(ctx, a.OwnerID, t.Name, a.Partition, dir, retention)
 			if !ok {
 				continue
 			}
@@ -103,11 +103,6 @@ func (r *MoveRunner) sweepStaleCopies(ctx context.Context) {
 			}
 			if err != nil {
 				r.logger.Warn("move: reclaim stale copy", "topic", t.Name, "partition", a.Partition, "err", err)
-				continue
-			}
-			if abandoned {
-				r.logger.Info("move: reclaimed an install of the partition that never flipped to this node; it was copied from the owner, which still holds its records",
-					"topic", t.Name, "partition", a.Partition, "owner", a.OwnerID)
 				continue
 			}
 			r.logger.Info("move: reclaimed stale partition copy left by a completed move",
@@ -155,50 +150,40 @@ func (r *MoveRunner) assignmentAwayConfirmedByLeader(ctx context.Context, topicN
 // info, compares it with the local copy in dir, and returns the reclaim
 // guard (ownerReclaimGuard): always KNOWN, at the position the owner
 // vouches for, or set aside when the owner cannot vouch for the copy.
-// abandoned reports that the local copy is an install copied from the
-// owner that never flipped here (its move marker names the owner as its
-// source); its first bytes were also compared with the owner's. ok=false
+// A local copy that is an install which never flipped here is judged
+// the same way: the owner's marker records how the owner got the
+// partition, not where this copy came from, so the sweep never trusts a
+// copy's own marker to relax the guard; such a copy is quarantined
+// unless the owner vouches for it like any other. ok=false
 // defers the sweep, which is free, and happens only when the owner could
 // not be asked (unknown, no address, RPC failed) or the local copy could
 // not be listed. retention is the topic's age bound (zero keeps
 // forever).
-func (r *MoveRunner) promotedPosition(ctx context.Context, ownerID, topicName string, partition int, dir string, retention time.Duration) (guard messaging.ReclaimGuard, abandoned, ok bool) {
+func (r *MoveRunner) promotedPosition(ctx context.Context, ownerID, topicName string, partition int, dir string, retention time.Duration) (guard messaging.ReclaimGuard, ok bool) {
 	m, err := r.store.GetMember(ownerID)
 	if err != nil || m.Addr == "" {
-		return messaging.ReclaimGuard{}, false, false
+		return messaging.ReclaimGuard{}, false
 	}
 	info, err := r.peer.ListPartitionSegments(ctx, m.Addr, topicName, partition)
 	if err != nil {
 		r.logger.Warn("move: sweep could not read the new owner's transfer info; deferring reclaim",
 			"topic", topicName, "partition", partition, "owner", ownerID, "err", err)
-		return messaging.ReclaimGuard{}, false, false
+		return messaging.ReclaimGuard{}, false
 	}
 	local, err := listLocalSegments(dir)
 	if err != nil {
 		r.logger.Warn("move: sweep could not list the local stale copy; deferring reclaim",
 			"topic", topicName, "partition", partition, "err", err)
-		return messaging.ReclaimGuard{}, false, false
+		return messaging.ReclaimGuard{}, false
 	}
 	now := time.Now()
-	marker, marked, merr := messaging.ReadMoveMarker(dir)
-	abandoned = merr == nil && marked && marker.Source == ownerID
-	if !abandoned && unsyncedInstallTooRecent(info.MoveMarker, now) {
+	if unsyncedInstallTooRecent(info.MoveMarker, now) {
 		r.logger.Info("move: the new owner's copy was installed by a release that does not sync it before the flip; deferring the reclaim until its writeback window has passed",
 			"topic", topicName, "partition", partition, "owner", ownerID,
 			"installed_at", time.UnixMilli(info.MoveMarker.InstalledAtUnixMs), "window", moveUnsyncedCopyWriteback)
-		return messaging.ReclaimGuard{}, false, false
+		return messaging.ReclaimGuard{}, false
 	}
-	guard = ownerReclaimGuard(info, local, abandoned, retention, now)
-	if abandoned && guard.SetAside == "" {
-		why, err := r.ownerHoldsTheseRecords(ctx, m.Addr, topicName, partition, dir, info, local, guard.PromotedHWM, retention, now)
-		if err != nil {
-			r.logger.Warn("move: sweep could not compare the local install with the owner's records; deferring reclaim",
-				"topic", topicName, "partition", partition, "owner", ownerID, "err", err)
-			return messaging.ReclaimGuard{}, false, false
-		}
-		guard.SetAside = why
-	}
-	return guard, abandoned, true
+	return ownerReclaimGuard(info, local, retention, now), true
 }
 
 // reclaim runs the guarded reclaim. A broker that cannot honor the guard
