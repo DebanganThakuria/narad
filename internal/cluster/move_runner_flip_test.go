@@ -413,38 +413,64 @@ func TestMoveRunnerKeepsInstallOnAnUnknownFlipOutcome(t *testing.T) {
 }
 
 // lateCommitStore answers the first flip with an unknown outcome without
-// committing it, and commits it `late` after: the proposal was still on
-// its way into the leader's log when the worker first asked.
+// committing it: the proposal is still on its way into the leader's log.
+// It commits during the worker's commitOnRead-th leader read after that
+// reply (or at commit, if the worker stops asking first). Every leader
+// read takes readTakes on the worker's clock, so the store, not the wall
+// clock, decides when the commit lands within the settle window.
 type lateCommitStore struct {
 	*fakeMoveStore
-	late      time.Duration
+	clock        *testClock
+	readTakes    time.Duration
+	commitOnRead int32
+
 	calls     atomic.Int32
-	unknownAt atomic.Int64 // unix nanos of the unknown reply
-	wg        sync.WaitGroup
+	reads     atomic.Int32 // leader reads since the unknown reply
+	unknownAt time.Time    // the unknown reply, on clock; set once under mu
+	flip      [2]string    // the first proposal's expected owner and target
+	landed    bool         // the first proposal committed; under mu
 }
 
 func (s *lateCommitStore) CompleteMove(_ context.Context, topicName string, partition int, expectedOwner, targetID string) error {
-	if s.calls.Add(1) == 1 {
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			time.Sleep(s.late)
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			if s.assignment.OwnerID == expectedOwner && s.assignment.TargetID == targetID {
-				s.assignment.OwnerID, s.assignment.TargetID = targetID, ""
-			}
-		}()
-		s.unknownAt.Store(time.Now().UnixNano())
-		return fmt.Errorf("%w: peer rpc: reply timeout", errs.ErrUnavailable)
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.calls.Add(1) == 1 {
+		s.flip = [2]string{expectedOwner, targetID}
+		s.unknownAt = s.clock.Now()
+		return fmt.Errorf("%w: peer rpc: reply timeout", errs.ErrUnavailable)
+	}
 	if s.assignment.OwnerID != expectedOwner || s.assignment.TargetID != targetID {
 		return fmt.Errorf("%w: complete-move owner is %q, expected %q", errs.ErrInvalidArgument, s.assignment.OwnerID, expectedOwner)
 	}
 	s.assignment.OwnerID, s.assignment.TargetID = targetID, ""
 	return nil
+}
+
+// Barrier is the start of the worker's leader read (it is its own
+// leader): the read takes readTakes, and the late proposal commits
+// during the commitOnRead-th one.
+func (s *lateCommitStore) Barrier() error {
+	if s.calls.Load() == 0 {
+		return nil
+	}
+	s.clock.Advance(s.readTakes)
+	if s.reads.Add(1) == s.commitOnRead {
+		s.commit()
+	}
+	return nil
+}
+
+// commit lands the first proposal, if it has not landed yet.
+func (s *lateCommitStore) commit() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.landed || s.calls.Load() == 0 {
+		return
+	}
+	s.landed = true
+	if s.assignment.OwnerID == s.flip[0] && s.assignment.TargetID == s.flip[1] {
+		s.assignment.OwnerID, s.assignment.TargetID = s.flip[1], ""
+	}
 }
 
 // oneFreezePeer lets the source be frozen once: every later fresh
@@ -464,20 +490,24 @@ func (p oneFreezePeer) PrepareHandoff(ctx context.Context, addr, topicName strin
 
 // The flip's reply is an unknown outcome, the leader reads "not flipped
 // yet", and the source's freeze has lapsed, so the install cannot be
-// flipped as it is. The proposal commits 300 ms later. Moving the
-// install back before that proposal could no longer commit would leave
-// the new owner with nothing under the partition's path: the worker must
-// wait out the settle window.
+// flipped as it is. The proposal commits during the fourth leader read,
+// three quarters of the way into the settle window on the worker's
+// clock. Moving the install back before that proposal could no longer
+// commit would leave the new owner with nothing under the partition's
+// path: the worker must wait out the settle window.
 func TestMoveRunnerWaitsOutTheSettleWindowBeforeUndoingAnInstall(t *testing.T) {
 	src := t.TempDir()
 	wantHWM, payloads := buildSourcePartition(t, src, 10)
+	const settle = time.Second
+	clock := newTestClock()
 	store := &lateCommitStore{fakeMoveStore: &fakeMoveStore{
 		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
 		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
-	}, late: 300 * time.Millisecond}
+	}, clock: clock, readTakes: settle / 4, commitOnRead: 4}
 	// Fenced re-arm 1 is the fence before the flip; re-arm 2, the
-	// resolution's, finds the freeze gone.
-	freeze := &fakeFreeze{lapseOn: 2}
+	// resolution's, finds the freeze gone. The freeze's own clock never
+	// moves, so nothing else lapses it.
+	freeze := &fakeFreeze{lapseOn: 2, virtual: true}
 	var fresh atomic.Int32
 	peer := oneFreezePeer{
 		movePeerFake: movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}, freeze: freeze},
@@ -486,9 +516,17 @@ func TestMoveRunnerWaitsOutTheSettleWindowBeforeUndoingAnInstall(t *testing.T) {
 	dataDir := t.TempDir()
 	logs := runtime.NewLogs(dataDir, storage.Options{FlushInterval: time.Millisecond}, nil, nil)
 	t.Cleanup(func() { _ = logs.CloseAll() })
-	installer := &dirInstaller{logs: logs}
-	const settle = time.Second
-	r := NewMoveRunner(store, "narad-dst", dataDir, peer, installer, nil, nil, MoveConfig{RetryBackoff: 20 * time.Millisecond, FreezeTTL: time.Minute})
+	var (
+		mu         sync.Mutex
+		replacedAt []time.Time // on the worker's clock
+	)
+	installer := &dirInstaller{logs: logs, before: func(int) {
+		mu.Lock()
+		replacedAt = append(replacedAt, clock.Now())
+		mu.Unlock()
+	}}
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, installer, nil, nil, MoveConfig{RetryBackoff: 5 * time.Millisecond, FreezeTTL: time.Minute})
+	r.now = clock.Now
 	r.flipSettle = settle
 	ctx, cancel := context.WithCancel(context.Background())
 	owner := func() string {
@@ -499,16 +537,25 @@ func TestMoveRunnerWaitsOutTheSettleWindowBeforeUndoingAnInstall(t *testing.T) {
 	runUntilMoved(t, ctx, r, owner, "narad-dst", 10*time.Second)
 	cancel()
 	r.wg.Wait()
-	store.wg.Wait()
+	// The proposal commits whatever the worker did meanwhile; a worker
+	// that stopped asking before it landed undid the install first.
+	store.commit()
 
+	if store.calls.Load() == 0 {
+		t.Fatal("setup: the worker never proposed the flip")
+	}
 	if got := owner(); got != "narad-dst" {
 		t.Fatalf("setup: the late flip never landed (owner %s)", got)
 	}
-	unknownAt := time.Unix(0, store.unknownAt.Load())
-	replaces := installer.replacements()
+	if got := store.reads.Load(); got < store.commitOnRead {
+		t.Errorf("the worker stopped asking the leader after %d reads, before the late flip landed on read %d", got, store.commitOnRead)
+	}
+	mu.Lock()
+	replaces := append([]time.Time(nil), replacedAt...)
+	mu.Unlock()
 	for i, at := range replaces[1:] {
-		if at.Sub(unknownAt) < settle {
-			t.Errorf("directory replacement %d ran %v after the unknown reply, inside the %v settle window", i+2, at.Sub(unknownAt), settle)
+		if at.Sub(store.unknownAt) < settle {
+			t.Errorf("directory replacement %d ran %v after the unknown reply on the worker's clock, inside the %v settle window", i+2, at.Sub(store.unknownAt), settle)
 		}
 	}
 	if len(replaces) != 1 {
