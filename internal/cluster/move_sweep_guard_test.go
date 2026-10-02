@@ -693,7 +693,7 @@ func TestStaleCopySweepSetsAsideAnInstallThatNeverFlipped(t *testing.T) {
 		requireSetAside(t, dst, 10)
 	})
 
-	t.Run("control: the owner came back empty", func(t *testing.T) {
+	t.Run("the owner came back empty", func(t *testing.T) {
 		src, dst := setup(t)
 		installWithoutFlip(t, dst, src.engine, "narad-src", "narad-dst", 1)
 		abortOn(t, dst)
@@ -702,7 +702,7 @@ func TestStaleCopySweepSetsAsideAnInstallThatNeverFlipped(t *testing.T) {
 		requireSetAside(t, dst, 10)
 	})
 
-	t.Run("control: the owner came back empty and took other records at the same offsets", func(t *testing.T) {
+	t.Run("the owner came back empty and took other records at the same offsets", func(t *testing.T) {
 		src, dst := setup(t)
 		installWithoutFlip(t, dst, src.engine, "narad-src", "narad-dst", 1)
 		abortOn(t, dst)
