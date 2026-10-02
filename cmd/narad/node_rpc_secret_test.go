@@ -173,15 +173,15 @@ func singleNodeStore(t *testing.T) *metastore.Store {
 	return store
 }
 
-// mintAdminOverNodeRPC sends one OpCreateUser for an admin "mallory"
+// createUserOverNodeRPC sends one OpCreateUser
 // as a process that knows no cluster secret.
-func mintAdminOverNodeRPC(t *testing.T, addr string) (status int, err error) {
+func createUserOverNodeRPC(t *testing.T, addr string) (status int, err error) {
 	t.Helper()
 	hash, err := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := json.Marshal(user.User{Username: "mallory", PasswordHash: hash, Grants: []user.Grant{{Action: user.ActionAdmin}}})
+	body, err := json.Marshal(user.User{Username: "rpc-probe-user", PasswordHash: hash, Grants: []user.Grant{{Action: user.ActionAdmin}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,10 +196,10 @@ func mintAdminOverNodeRPC(t *testing.T, addr string) (status int, err error) {
 	return res.Status, nil
 }
 
-func requireNoMallory(t *testing.T, store *metastore.Store) {
+func requireNoUserCreated(t *testing.T, store *metastore.Store) {
 	t.Helper()
-	if _, err := store.GetUser(context.Background(), "mallory"); !errors.Is(err, errs.ErrNotFound) {
-		t.Fatalf("GetUser(mallory) = %v, want not found: an unauthenticated node RPC peer created an admin", err)
+	if _, err := store.GetUser(context.Background(), "rpc-probe-user"); !errors.Is(err, errs.ErrNotFound) {
+		t.Fatalf("GetUser(rpc-probe-user) = %v, want not found: an unauthenticated node RPC peer created an admin", err)
 	}
 }
 
@@ -248,12 +248,12 @@ func TestSecuredSingleNodeRefusesUnauthenticatedNodeRPC(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	status, err := mintAdminOverNodeRPC(t, cfg.HTTP.Addr)
+	status, err := createUserOverNodeRPC(t, cfg.HTTP.Addr)
 	t.Logf("unauthenticated OpCreateUser: status=%d err=%v", status, err)
 	if err == nil && status == http.StatusCreated {
 		t.Errorf("an unauthenticated node RPC peer created a user (status %d)", status)
 	}
-	requireNoMallory(t, store)
+	requireNoUserCreated(t, store)
 	failMu.Lock()
 	defer failMu.Unlock()
 	if failed != nil {
@@ -290,12 +290,12 @@ func TestNodeRPCListenerRefusesToServeASecuredNodeWithoutASecret(t *testing.T) {
 		t.Error("serveClusterRPC is still serving a secured node that has no cluster secret")
 	}
 
-	status, err := mintAdminOverNodeRPC(t, cfg.HTTP.Addr)
+	status, err := createUserOverNodeRPC(t, cfg.HTTP.Addr)
 	t.Logf("unauthenticated OpCreateUser: status=%d err=%v", status, err)
 	if err == nil && status == http.StatusCreated {
 		t.Errorf("an unauthenticated node RPC peer created a user (status %d)", status)
 	}
-	requireNoMallory(t, store)
+	requireNoUserCreated(t, store)
 
 	select {
 	case err := <-failed:

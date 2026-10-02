@@ -115,19 +115,19 @@ func usersStatus(api, username, password string) int {
 	return resp.StatusCode
 }
 
-// mintAdminOverNodeRPC sends one OpCreateUser frame for an admin
-// "mallory" as a process that knows no cluster secret, and reports the
-// reply and whether mallory can then list users.
-func mintAdminOverNodeRPC(t *testing.T, api string) (rpcStatus int, rpcErr error, after int) {
+// createUserOverNodeRPC sends one OpCreateUser frame for an admin
+// "rpc-probe-user" without the cluster secret, and reports the
+// reply and whether that user can then list users.
+func createUserOverNodeRPC(t *testing.T, api string) (rpcStatus int, rpcErr error, after int) {
 	t.Helper()
-	if before := usersStatus(api, "mallory", "pw"); before != http.StatusUnauthorized {
-		t.Fatalf("precondition: mallory GET /v1/users = %d, want 401", before)
+	if before := usersStatus(api, "rpc-probe-user", "pw"); before != http.StatusUnauthorized {
+		t.Fatalf("precondition: the user's GET /v1/users = %d, want 401", before)
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := json.Marshal(user.User{Username: "mallory", PasswordHash: hash, Grants: []user.Grant{{Action: user.ActionAdmin}}})
+	body, err := json.Marshal(user.User{Username: "rpc-probe-user", PasswordHash: hash, Grants: []user.Grant{{Action: user.ActionAdmin}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,19 +140,19 @@ func mintAdminOverNodeRPC(t *testing.T, api string) (rpcStatus int, rpcErr error
 		rpcStatus = res.Status
 	}
 	time.Sleep(300 * time.Millisecond)
-	return rpcStatus, err, usersStatus(api, "mallory", "pw")
+	return rpcStatus, err, usersStatus(api, "rpc-probe-user", "pw")
 }
 
 func TestSingleNodeNodeRPCRefusesUnauthenticatedPeers(t *testing.T) {
 	t.Run("no cluster secret", func(t *testing.T) {
 		api, logPath := singleNode(t, nil)
-		status, err, after := mintAdminOverNodeRPC(t, api)
-		t.Logf("unauthenticated OpCreateUser: status=%d err=%v; mallory GET /v1/users afterwards = %d", status, err, after)
+		status, err, after := createUserOverNodeRPC(t, api)
+		t.Logf("unauthenticated OpCreateUser: status=%d err=%v; the user's GET /v1/users afterwards = %d", status, err, after)
 		if err == nil && status == http.StatusCreated {
 			t.Errorf("an unauthenticated node RPC peer created a user (status %d)", status)
 		}
 		if after != http.StatusUnauthorized {
-			t.Errorf("mallory GET /v1/users = %d after the unauthenticated node RPC call, want 401", after)
+			t.Errorf("the user's GET /v1/users = %d after the unauthenticated node RPC call, want 401", after)
 		}
 		body, _ := os.ReadFile(logPath)
 		if !strings.Contains(string(body), "node RPC is closed to other processes") {
@@ -163,9 +163,9 @@ func TestSingleNodeNodeRPCRefusesUnauthenticatedPeers(t *testing.T) {
 	// Control: an explicit secret was already enough before the change.
 	t.Run("explicit cluster secret", func(t *testing.T) {
 		api, _ := singleNode(t, map[string]string{"NARAD_CLUSTER_SECRET": "an-explicit-single-node-secret"})
-		status, err, after := mintAdminOverNodeRPC(t, api)
+		status, err, after := createUserOverNodeRPC(t, api)
 		if (err == nil && status == http.StatusCreated) || after != http.StatusUnauthorized {
-			t.Fatalf("with an explicit secret: status=%d err=%v after=%d, want the call refused and mallory 401", status, err, after)
+			t.Fatalf("with an explicit secret: status=%d err=%v after=%d, want the call refused and the user 401", status, err, after)
 		}
 	})
 
