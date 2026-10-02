@@ -406,6 +406,15 @@ func TestValidateRequiresRaftTLSOrLoopbackForSecureSingleNode(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), "loopback address such as 127.0.0.1:7943") {
 					t.Fatalf("Validate() = %v, want the raft TLS, loopback or plaintext opt-in requirement", err)
 				}
+				// Nodes may already have joined a peerless node. Raft TLS
+				// on it alone, or a loopback bind, cuts it off from their
+				// Raft for good, so each of those ways out says when it
+				// is safe.
+				for _, caveat := range []string{"on every node of the cluster", "only if no other node dials this node's raft"} {
+					if !strings.Contains(err.Error(), caveat) {
+						t.Fatalf("Validate() = %v, want the caveat %q", err, caveat)
+					}
+				}
 				return
 			}
 			if err != nil {

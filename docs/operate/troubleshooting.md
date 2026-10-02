@@ -251,7 +251,7 @@ Logged at warning level (`component=audit`) by a node that refused a node RPC st
 
 **Cause.** A peer with another secret, or none, reached this node's node-to-node port (7942/udp). One common case (unreleased): a node with security on was started alone, without `NARAD_CLUSTER_SECRET`, and nodes are now joining it. Such a node generates a secret of its own for the life of the process, so a joiner carrying the shared secret cannot authenticate to it: the joiner's attempts fail (`cluster join attempt failed` at debug level, with `cluster rpc: read server auth proof: ...`) and it never joins.
 
-**Fix.** Set the same `NARAD_CLUSTER_SECRET` on every node, the first one included, and restart the first node before the others join. Any other source of these lines is a process that should not be talking to the port: fence 7942/udp ([Networking and security](../understand/networking-and-security.md#ports)).
+**Fix.** Set the same `NARAD_CLUSTER_SECRET` on every node, the first one included, and restart the first node before the others join. The first node also needs a `cluster.addr` the others can reach, and either the Raft TLS files on every node or `security.allow_plaintext_raft` with 7943/tcp fenced: with no peers configured it never runs the join loop, so if the others cannot reach its Raft it stays cut off from their Raft. Any other source of these lines is a process that should not be talking to the port: fence 7942/udp ([Networking and security](../understand/networking-and-security.md#ports)).
 
 ### `node RPC plane is unauthenticated` {#log-node-rpc-unauthenticated}
 

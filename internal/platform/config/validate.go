@@ -383,13 +383,17 @@ func securityValidationErrors(cfg SecurityConfig, cluster ClusterConfig) []strin
 	// grow. Only a loopback cluster.addr is exempt (the quickstart's
 	// docker run, a local build), where just processes on the host reach
 	// the port, and so is a cluster.addr Raft refuses to serve on anyway
-	// (see raftServesBeyondLoopback).
+	// (see raftServesBeyondLoopback). Other nodes may already have joined
+	// a node with no peers configured, and such a node never runs the
+	// join loop, so the message says when each way out is safe: Raft TLS
+	// on it alone, or a loopback bind, cuts it off from their Raft for
+	// good.
 	if cfg.Enabled && !cfg.ClusterTLSConfigured() && !cfg.AllowPlaintextRaft {
 		switch {
 		case len(cluster.Peers) > 0:
 			errs = append(errs, "security is enabled with cluster peers but the raft transport has no TLS: set security.cluster_tls_cert_file/_key_file/_ca_file (NARAD_CLUSTER_TLS_*_FILE), or set security.allow_plaintext_raft: true (NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true) if the raft port is restricted by network policy")
 		case raftServesBeyondLoopback(cluster):
-			errs = append(errs, fmt.Sprintf("security is enabled and the raft transport has no TLS, but cluster.addr %q is not a loopback address: set security.cluster_tls_cert_file/_key_file/_ca_file (NARAD_CLUSTER_TLS_*_FILE), bind cluster.addr (NARAD_CLUSTER_ADDR) to a loopback address such as 127.0.0.1:7943, or set security.allow_plaintext_raft: true (NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true) if the raft port is restricted by network policy", cluster.Addr))
+			errs = append(errs, fmt.Sprintf("security is enabled and the raft transport has no TLS, but cluster.addr %q is not a loopback address: set security.cluster_tls_cert_file/_key_file/_ca_file (NARAD_CLUSTER_TLS_*_FILE) on every node of the cluster, bind cluster.addr (NARAD_CLUSTER_ADDR) to a loopback address such as 127.0.0.1:7943 only if no other node dials this node's raft, or set security.allow_plaintext_raft: true (NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true) if the raft port is restricted by network policy", cluster.Addr))
 		}
 	}
 	return errs
