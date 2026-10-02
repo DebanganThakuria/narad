@@ -128,6 +128,7 @@ func runServe(args []string) error {
 		SnapshotThreshold: cfg.Cluster.RaftSnapshotThreshold,
 		SnapshotInterval:  cfg.Cluster.RaftSnapshotInterval.D(),
 		TrailingLogs:      cfg.Cluster.RaftTrailingLogs,
+		Build:             versionString(),
 	})
 	if err != nil {
 		return fmt.Errorf("metastore: %w", err)
@@ -214,6 +215,7 @@ func runServe(args []string) error {
 	wg.Go(func() {
 		runClusterJoinWhenLeaderless(ctx, ms, cs.peerRPC, cfg, nodeID, joinOnly, fresh, log)
 	})
+	wg.Go(func() { watchMetastoreHalt(ctx, ms, failServe) })
 	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, cs.peerRPC, log) })
 	wg.Go(func() { cs.controller.Run(ctx) })
 	// Re-registers consume tokens with owners that come back or are
