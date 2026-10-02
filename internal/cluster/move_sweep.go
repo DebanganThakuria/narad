@@ -17,7 +17,9 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
@@ -75,17 +77,26 @@ func (r *MoveRunner) sweepStaleCopies(ctx context.Context) {
 			if !r.assignmentAwayConfirmedByLeader(ctx, t.Name, a.Partition) {
 				continue
 			}
-			// Learn the position the partition was promoted at on its new
-			// owner before deleting anything: a force-promote leaves the
-			// old owner's copy AHEAD of it when the old owner kept
-			// committing through a network partition, and those records
-			// exist nowhere else. An unreachable owner defers the sweep.
-			guard, ok := r.promotedPosition(ctx, a.OwnerID, t.Name, a.Partition)
+			// Learn what the new owner holds before deleting anything: a
+			// force-promote leaves the old owner's copy AHEAD of the
+			// promoted position when the old owner kept committing
+			// through a network partition, and a new owner that rolled
+			// back its install, lost its volume or lost unsynced segments
+			// holds less than the move gave it. Records it cannot vouch
+			// for exist nowhere else (see ownerReclaimGuard). An owner
+			// that cannot be asked defers the sweep.
+			retention := time.Duration(t.RetentionMs) * time.Millisecond
+			guard, ok := r.promotedPosition(ctx, a.OwnerID, t.Name, a.Partition, dir, retention)
 			if !ok {
 				continue
 			}
 			err := r.reclaim(ctx, t.Name, a.Partition, guard)
 			if errors.Is(err, messaging.ErrPartitionQuarantined) {
+				if guard.SetAside != "" {
+					r.logger.Error("move: stale partition copy QUARANTINED, not deleted: the new owner cannot vouch for it; operator action required",
+						"topic", t.Name, "partition", a.Partition, "owner", a.OwnerID, "reason", guard.SetAside, "err", err)
+					continue
+				}
 				r.logger.Error("move: stale partition copy QUARANTINED, not deleted: it holds records past the hwm the partition was promoted at on its new owner; operator action required",
 					"topic", t.Name, "partition", a.Partition, "owner", a.OwnerID, "promoted_hwm", guard.PromotedHWM, "err", err)
 				continue
@@ -136,12 +147,19 @@ func (r *MoveRunner) assignmentAwayConfirmedByLeader(ctx context.Context, topicN
 }
 
 // promotedPosition asks the partition's current owner for its transfer
-// info and returns the move marker's promoted HWM as a reclaim guard.
-// ok=false when the owner could not be asked (unknown, no address, RPC
-// failed): the sweep then defers, which is free. An owner that reports
-// no marker (older release, or a copy not installed by a move) yields a
-// guard with Known=false, so the reclaim deletes as it always did.
-func (r *MoveRunner) promotedPosition(ctx context.Context, ownerID, topicName string, partition int) (messaging.ReclaimGuard, bool) {
+// info, compares it with the local copy in dir, and returns the reclaim
+// guard (ownerReclaimGuard): always KNOWN, at the position the owner
+// vouches for, or set aside when the owner cannot vouch for the copy.
+// A local copy that is an install which never flipped here is judged
+// the same way: the owner's marker records how the owner got the
+// partition, not where this copy came from, so the sweep never trusts a
+// copy's own marker to relax the guard; such a copy is quarantined
+// unless the owner vouches for it like any other. ok=false
+// defers the sweep, which is free, and happens only when the owner could
+// not be asked (unknown, no address, RPC failed) or the local copy could
+// not be listed. retention is the topic's age bound (zero keeps
+// forever).
+func (r *MoveRunner) promotedPosition(ctx context.Context, ownerID, topicName string, partition int, dir string, retention time.Duration) (guard messaging.ReclaimGuard, ok bool) {
 	m, err := r.store.GetMember(ownerID)
 	if err != nil || m.Addr == "" {
 		return messaging.ReclaimGuard{}, false
@@ -152,24 +170,30 @@ func (r *MoveRunner) promotedPosition(ctx context.Context, ownerID, topicName st
 			"topic", topicName, "partition", partition, "owner", ownerID, "err", err)
 		return messaging.ReclaimGuard{}, false
 	}
-	if info.MoveMarker == nil {
-		return messaging.ReclaimGuard{}, true
+	local, err := listLocalSegments(dir)
+	if err != nil {
+		r.logger.Warn("move: sweep could not list the local stale copy; deferring reclaim",
+			"topic", topicName, "partition", partition, "err", err)
+		return messaging.ReclaimGuard{}, false
 	}
-	return messaging.ReclaimGuard{PromotedHWM: info.MoveMarker.HighWatermark, Known: true}, true
+	now := time.Now()
+	if unsyncedInstallTooRecent(info.MoveMarker, now) {
+		r.logger.Info("move: the new owner's copy was installed by a release that does not sync it before the flip; deferring the reclaim until its writeback window has passed",
+			"topic", topicName, "partition", partition, "owner", ownerID,
+			"installed_at", time.UnixMilli(info.MoveMarker.InstalledAtUnixMs), "window", moveUnsyncedCopyWriteback)
+		return messaging.ReclaimGuard{}, false
+	}
+	return ownerReclaimGuard(info, local, r.selfID, retention, now), true
 }
 
-// reclaim runs the guarded reclaim when the broker offers it, else the
-// plain one (a guard the broker cannot honor is logged, never silently
-// dropped).
+// reclaim runs the guarded reclaim. A broker that cannot honor the guard
+// is refused, never called: the sweep does not delete a copy it could not
+// compare with what the new owner holds.
 func (r *MoveRunner) reclaim(ctx context.Context, topicName string, partition int, guard messaging.ReclaimGuard) error {
 	if g, ok := r.reclaimer.(guardedReclaimer); ok {
 		return g.ReclaimMovedPartitionGuarded(ctx, topicName, partition, guard)
 	}
-	if guard.Known {
-		r.logger.Warn("move: reclaimer cannot compare the local copy against the promoted hwm; reclaiming unguarded",
-			"topic", topicName, "partition", partition, "promoted_hwm", guard.PromotedHWM)
-	}
-	return r.reclaimer.ReclaimMovedPartition(ctx, topicName, partition)
+	return fmt.Errorf("reclaimer %T cannot compare the local copy with the new owner's position (it lacks ReclaimMovedPartitionGuarded); keeping the copy", r.reclaimer)
 }
 
 // localDirIsOtherIncarnation reports whether topics/<t.Name> on this

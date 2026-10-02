@@ -124,3 +124,42 @@ func mustCreateAndAssign(t *testing.T, s interface {
 		t.Fatalf("AssignPartition: %v", err)
 	}
 }
+
+// The flip can commit while its proposer sees an error (leadership
+// lost mid-apply, a lost forwarded reply), and the destination then
+// retries the same compare-and-swap. The retry must read as done: the
+// owner already equals the target and no move is in flight. Answering it
+// with a CAS error is what made the destination roll back its installed
+// copy of a partition it now owned.
+func TestCompleteMoveRetryAfterCommittedFlipSucceeds(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	mustCreateAndAssign(t, s, "orders", 0, "narad-0")
+	if err := s.SetAssignmentTarget(ctx, "orders", 0, "narad-1"); err != nil {
+		t.Fatalf("set target: %v", err)
+	}
+	if err := s.CompleteMove(ctx, "orders", 0, "narad-0", "narad-1"); err != nil {
+		t.Fatalf("CompleteMove: %v", err)
+	}
+	version := s.AssignmentVersion("orders")
+
+	if err := s.CompleteMove(ctx, "orders", 0, "narad-0", "narad-1"); err != nil {
+		t.Fatalf("retried CompleteMove after the flip committed = %v, want success", err)
+	}
+	a, _ := s.GetAssignment("orders", 0)
+	if a.OwnerID != "narad-1" || a.TargetID != "" {
+		t.Fatalf("after retry = owner %q target %q, want narad-1 / empty", a.OwnerID, a.TargetID)
+	}
+	if got := s.AssignmentVersion("orders"); got != version {
+		t.Fatalf("assignment version moved %d -> %d on a no-op retry", version, got)
+	}
+
+	// A retry whose partition has since moved on (a new move away from
+	// the new owner is in flight) is not "done": it stays a CAS miss.
+	if err := s.SetAssignmentTarget(ctx, "orders", 0, "narad-2"); err != nil {
+		t.Fatalf("set target: %v", err)
+	}
+	if err := s.CompleteMove(ctx, "orders", 0, "narad-0", "narad-1"); err == nil {
+		t.Fatal("stale retry accepted while a newer move is in flight")
+	}
+}

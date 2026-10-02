@@ -10,7 +10,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"maps"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -25,6 +29,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
@@ -229,6 +234,7 @@ type fakeMoveStore struct {
 	deadAfter    int    // >0: GetMember(source) reports MemberDead from this call on
 	memberCalls  int
 	topics       []topic.Topic // nil: a single "orders" topic
+	assignErr    error         // returned by GetAssignment when set
 }
 
 func (s *fakeMoveStore) AppliedCaughtUp() bool { return true }
@@ -236,6 +242,9 @@ func (s *fakeMoveStore) Barrier() error        { return nil }
 func (s *fakeMoveStore) GetAssignment(string, int) (metastore.Assignment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.assignErr != nil {
+		return metastore.Assignment{}, s.assignErr
+	}
 	return s.assignment, nil
 }
 func (s *fakeMoveStore) IsLeader() bool { return !s.notLeader }
@@ -360,36 +369,42 @@ func TestMoveRunnerCompletesMove(t *testing.T) {
 	}
 }
 
-func TestMoveRunnerRollsBackOnFlipReject(t *testing.T) {
+// A flip the leader confirms cannot happen (the CAS refused it because
+// the move was re-planned to another node) is rolled back: the install
+// is taken off the partition's path, so a non-owner keeps no phantom
+// copy, the worker ends (the re-plan's own worker takes over), and it
+// leaves no staging copy behind.
+func TestMoveRunnerRollsBackOnConfirmedFlipReject(t *testing.T) {
 	src := t.TempDir()
 	wantHWM, _ := buildSourcePartition(t, src, 10)
 	store := &fakeMoveStore{
 		assignment:  metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
 		member:      metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
-		completeErr: context.DeadlineExceeded, // CAS guard rejects the flip
+		completeErr: fmt.Errorf("%w: complete-move target is %q, expected %q", errs.ErrInvalidArgument, "narad-other", "narad-dst"),
 	}
+	// The re-plan landed just before the flip: the CAS refuses it.
+	store.completeHook = func() { store.assignment.TargetID = "narad-other" }
 	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}}
 	dataDir := t.TempDir()
 	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, nil, MoveConfig{RetryBackoff: 5 * time.Millisecond})
 
-	// The worker retries a rejected flip forever; cancel it deterministically
-	// the moment the first flip attempt lands (the rollback runs before the
-	// worker checks the context again).
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	store.completeHook = cancel
 	r.Reconcile(ctx)
 	r.wg.Wait()
 
-	// The flip was attempted and rejected; the install must be rolled back so a
-	// non-owner keeps no phantom copy. The target is NOT cleared — the source
-	// stays authoritative and the worker retries until a re-plan cancels it.
 	if len(store.completeArgs) == 0 {
 		t.Fatal("flip was never attempted")
+	}
+	if ctx.Err() != nil {
+		t.Fatal("the worker kept running after the leader confirmed the flip was rejected")
 	}
 	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
 	if segs, _ := storage.ListPartitionSegments(dir); len(segs) != 0 {
 		t.Fatalf("install not rolled back: %d segments remain at %s", len(segs), dir)
+	}
+	if _, err := os.Stat(r.stagingDir("orders", 0)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the worker left its staging copy behind (stat err %v)", err)
 	}
 }
 
@@ -681,5 +696,77 @@ func TestMoveRunnerWritesMoveMarker(t *testing.T) {
 	}
 	if len(marker.Children) != 2 || marker.Children["audit"] != "e1" || marker.Children["other"] != "e2" {
 		t.Fatalf("marker children = %v, want {audit:e1 other:e2}", marker.Children)
+	}
+}
+
+// The old owner deletes its copy once the flip is visible and the new
+// owner's listing covers it, and that listing reads sizes from the page
+// cache. So before the flip the destination must have synced every file
+// of the copy, the staging directory, and the topic directory it renamed
+// the copy into, and the marker must say so.
+func TestMoveRunnerMakesTheCopyDurableBeforeTheFlip(t *testing.T) {
+	src := t.TempDir()
+	wantHWM, _ := buildSourcePartition(t, src, 10)
+	dataDir := t.TempDir()
+	var (
+		mu     sync.Mutex
+		synced = map[string]bool{}
+		atFlip map[string]bool
+	)
+	restore := syncfile.SetFaultHook(func(op syncfile.Op, path string) error {
+		if op == syncfile.OpSync || op == syncfile.OpSyncData {
+			mu.Lock()
+			synced[filepath.Clean(path)] = true
+			mu.Unlock()
+		}
+		return nil
+	})
+	defer restore()
+	store := &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+	}
+	store.completeHook = func() {
+		mu.Lock()
+		atFlip = maps.Clone(synced)
+		mu.Unlock()
+	}
+	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}}
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, nil, MoveConfig{RetryBackoff: 5 * time.Millisecond})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	r.Reconcile(ctx)
+	r.wg.Wait()
+	if atFlip == nil {
+		t.Fatal("setup: the flip was never proposed")
+	}
+
+	staging := filepath.Clean(r.stagingDir("orders", 0))
+	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := 0
+	for _, e := range entries {
+		if !e.Type().IsRegular() || e.Name() == messaging.MoveMarkerFileName {
+			continue // the marker is synced under its temporary name
+		}
+		files++
+		if !atFlip[filepath.Join(staging, e.Name())] {
+			t.Errorf("staged %s was not synced before the flip", e.Name())
+		}
+	}
+	if files < 10 {
+		t.Fatalf("setup: the installed copy holds %d files, want every segment and the position files", files)
+	}
+	for what, d := range map[string]string{"the staging directory": staging, "the topic directory": filepath.Dir(dir)} {
+		if !atFlip[filepath.Clean(d)] {
+			t.Errorf("%s was not synced before the flip", what)
+		}
+	}
+	marker, ok, err := messaging.ReadMoveMarker(dir)
+	if err != nil || !ok || marker.DurableAtUnixMs == 0 {
+		t.Fatalf("the move marker does not record the copy as durable: %+v (found %v, err %v)", marker, ok, err)
 	}
 }

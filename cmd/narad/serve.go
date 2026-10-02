@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
 	"github.com/debanganthakuria/narad/internal/platform/config"
+	"github.com/debanganthakuria/narad/internal/platform/netaddr"
 	"github.com/debanganthakuria/narad/internal/platform/observability/logger"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
@@ -41,6 +43,12 @@ func runServe(args []string) error {
 	log, err := logger.New(cfg.Log.Format, cfg.Log.Level)
 	if err != nil {
 		return fmt.Errorf("logger: %w", err)
+	}
+	// Before the first peer client or cluster RPC listener reads the
+	// cluster secret: a secured node with no peers and no secret gets
+	// one of its own, so its node RPC answers no other process.
+	if err = secureNodeRPC(cfg, log); err != nil {
+		return err
 	}
 	// Before anything allocates in earnest; see memlimit.go.
 	applyContainerMemoryLimit(log)
@@ -64,10 +72,21 @@ func runServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("cluster tls: %w", err)
 	}
-	if clusterTLS != nil {
+	// The plaintext warning names why validation let the node run it.
+	switch {
+	case clusterTLS != nil:
 		log.Info("raft metadata transport secured with mutual TLS")
-	} else {
+	case !cfg.Security.Enabled:
+		log.Warn("raft metadata transport is plaintext (security is disabled); raft has no authentication of its own, so restrict the cluster port by network policy",
+			"component", "audit", "cluster_addr", cfg.Cluster.Addr)
+	case cfg.Security.AllowPlaintextRaft:
 		log.Warn("raft metadata transport is plaintext (security.allow_plaintext_raft); raft has no authentication of its own, so restrict the cluster port by network policy",
+			"component", "audit", "cluster_addr", cfg.Cluster.Addr)
+	case netaddr.IsLoopbackHostPort(cfg.Cluster.Addr):
+		log.Warn("raft metadata transport is plaintext on a loopback address (a node with no peers and no raft TLS files); raft has no authentication of its own, so any process on this host can reach it, and the raft configuration keeps the address raft first started on, so a node whose raft first started on loopback can never take peers, whatever cluster.addr it is bound to later",
+			"component", "audit", "cluster_addr", cfg.Cluster.Addr)
+	default:
+		log.Warn("raft metadata transport is plaintext; raft has no authentication of its own, so restrict the cluster port by network policy",
 			"component", "audit", "cluster_addr", cfg.Cluster.Addr)
 	}
 	joinOnly := joinOnlyNode(nodeID, cfg.Cluster.InitialMembers)
@@ -372,7 +391,19 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 // In a multi-node cluster a dead listener makes this node unreachable for
 // all peer RPC, so it fails the serve loop via failServe rather than
 // keeping degraded client HTTP alive.
+//
+// With security on it never serves without a cluster secret, whatever
+// the peer count: an empty secret turns off per-stream auth, and the
+// plane runs the control plane with authorization bypassed. runServe
+// resolves the secret first (secureNodeRPC), so this only fires if that
+// step is skipped.
 func serveClusterRPC(ctx context.Context, cfg *config.Config, rpc *cluster.RPCServer, failServe func(error), log *slog.Logger) {
+	if cfg.Security.Enabled && strings.TrimSpace(cfg.Security.ClusterSecret) == "" {
+		log.Error("cluster rpc server: security is enabled but no cluster secret was resolved; not serving node RPC",
+			"component", "audit", "addr", cfg.HTTP.Addr)
+		failServe(errors.New("cluster rpc server: refusing to serve node RPC without a cluster secret while security is enabled"))
+		return
+	}
 	err := clusterrpc.ServeQUIC(ctx, cfg.HTTP.Addr, cfg.Security.ClusterSecret, log, rpc)
 	if err == nil || errors.Is(err, context.Canceled) {
 		return

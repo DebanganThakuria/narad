@@ -28,25 +28,34 @@ import (
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
-// ErrPartitionQuarantined reports that a reclaim found the local copy
-// ahead of the position the partition was promoted at elsewhere and set
-// it aside instead of deleting it. An operator must reconcile the
-// quarantined directory by hand.
-var ErrPartitionQuarantined = errors.New("stale partition copy quarantined: local copy is ahead of the promoted high-watermark")
+// ErrPartitionQuarantined reports that a reclaim set the local copy aside
+// instead of deleting it: the copy is ahead of the position the partition
+// was promoted at elsewhere, or the new owner cannot vouch for it. An
+// operator must reconcile the quarantined directory by hand.
+var ErrPartitionQuarantined = errors.New("stale partition copy quarantined instead of deleted")
 
 // QuarantineSuffix is appended to a partition directory's name when a
 // reclaim sets it aside instead of deleting it.
 const QuarantineSuffix = ".quarantine"
 
 // ReclaimGuard carries what the caller learned about where the partition
-// went. Known=false means the current owner reported no move marker (an
-// older node, or a copy not installed by a move); the reclaim then
-// deletes as it always did.
+// went. Known=false is the plain ReclaimMovedPartition, which deletes
+// without comparing; the move runner's stale-copy sweep never sends it:
+// it compares the new owner's listing with the local copy first and
+// always sends a KNOWN guard, at the position the owner vouches for, or
+// with SetAside when the owner cannot vouch for the copy.
 type ReclaimGuard struct {
-	// PromotedHWM is the high-watermark at which the current owner's copy
-	// was installed by the move that relocated the partition there.
+	// PromotedHWM is the position the current owner vouches for: the
+	// high-watermark its copy was installed at by the move that relocated
+	// the partition there, or its own lower one.
 	PromotedHWM int64
 	Known       bool
+	// SetAside, when set, says why the new owner cannot vouch for the
+	// local copy (it lists no records, holds records that did not come
+	// from this copy, or lacks part of what it was given). The copy may
+	// hold the only instance of its records, so it is renamed to
+	// <dir>.quarantine without being recovered, never deleted.
+	SetAside string
 }
 
 // ReclaimMovedPartition deletes this node's local copy of a partition that
@@ -70,7 +79,10 @@ func (e *Engine) ReclaimMovedPartition(ctx context.Context, topicName string, pa
 // When guard.Known, the local copy is recovered and its next offset
 // compared with guard.PromotedHWM: a copy that is AHEAD holds records the
 // new owner never received, so it is renamed to <dir>.quarantine (never
-// deleted) and ErrPartitionQuarantined is returned.
+// deleted) and ErrPartitionQuarantined is returned. When guard.SetAside
+// is set, the new owner cannot vouch for the copy at all: it is renamed
+// to <dir>.quarantine without being recovered, and
+// ErrPartitionQuarantined is returned.
 //
 // The caller (the move runner's sweep) additionally confirms the same view
 // with the Raft LEADER before calling; this method's own check is defense
@@ -124,24 +136,36 @@ func (e *Engine) ReclaimMovedPartitionGuarded(ctx context.Context, topicName str
 }
 
 // reclaimPartitionDirGuarded is the reclaim's action on the partition
-// directory: quarantine a copy ahead of guard.PromotedHWM, remove it
-// otherwise. Caller holds the topic's guard with the log closed.
+// directory: set it aside when the owner cannot vouch for it, quarantine a
+// copy ahead of guard.PromotedHWM, remove it otherwise. Caller holds the
+// topic's guard with the log closed.
 func (e *Engine) reclaimPartitionDirGuarded(topicName string, partition int, owner string, guard ReclaimGuard) error {
 	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
+	if guard.SetAside != "" {
+		// Not recovered first: a copy the owner cannot vouch for is set
+		// aside whatever it holds, a damaged one included.
+		quarantined, err := QuarantinePartitionDir(dir)
+		if err != nil {
+			return fmt.Errorf("reclaim refused: the new owner cannot vouch for the local copy (%s) and quarantine failed: %w", guard.SetAside, err)
+		}
+		e.logger.Error("reclaim: the new owner cannot vouch for the local partition copy; quarantined instead of deleted, its records may exist only here",
+			"topic", topicName, "partition", partition, "owner", owner, "reason", guard.SetAside, "quarantine_dir", quarantined)
+		return fmt.Errorf("%w: %s/%d set aside at %s: %s", ErrPartitionQuarantined, topicName, partition, quarantined, guard.SetAside)
+	}
 	if guard.Known {
-		next, err := recoveredNextOffset(dir)
+		next, err := RecoveredNextOffset(dir)
 		if err != nil {
 			return fmt.Errorf("reclaim refused: recover local copy: %w", err)
 		}
 		if next > guard.PromotedHWM {
-			quarantined, qerr := quarantinePartitionDir(dir)
+			quarantined, qerr := QuarantinePartitionDir(dir)
 			if qerr != nil {
 				return fmt.Errorf("reclaim refused: local copy is ahead of the promoted hwm (%d > %d) and quarantine failed: %w", next, guard.PromotedHWM, qerr)
 			}
 			e.logger.Error("reclaim: local partition copy is AHEAD of the position it was promoted at elsewhere; quarantined instead of deleted, records after the promoted hwm exist only here",
 				"topic", topicName, "partition", partition, "owner", owner,
 				"local_next_offset", next, "promoted_hwm", guard.PromotedHWM, "quarantine_dir", quarantined)
-			return fmt.Errorf("%w: %s/%d local next offset %d > promoted hwm %d, kept at %s",
+			return fmt.Errorf("%w: %s/%d local next offset %d is ahead of the promoted hwm %d, kept at %s",
 				ErrPartitionQuarantined, topicName, partition, next, guard.PromotedHWM, quarantined)
 		}
 	}
@@ -151,10 +175,12 @@ func (e *Engine) reclaimPartitionDirGuarded(topicName string, partition int, own
 	return nil
 }
 
-// recoveredNextOffset reopens a closed partition directory and reports
+// RecoveredNextOffset reopens a closed partition directory and reports
 // the offset its log recovers to: an upper bound on what the copy holds.
-// A directory with no log is empty (next offset 0).
-func recoveredNextOffset(dir string) (int64, error) {
+// A directory with no log is empty (next offset 0). The caller must hold
+// the partition's log closed (the reclaim and the move's install run it
+// under ReplacePartitionDir).
+func RecoveredNextOffset(dir string) (int64, error) {
 	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
@@ -166,9 +192,11 @@ func recoveredNextOffset(dir string) (int64, error) {
 	return next, log.Close()
 }
 
-// quarantinePartitionDir renames dir to dir + QuarantineSuffix, picking a
-// timestamped name if that already exists, and returns the new path.
-func quarantinePartitionDir(dir string) (string, error) {
+// QuarantinePartitionDir renames dir to dir + QuarantineSuffix, picking a
+// timestamped name if that already exists, and returns the new path. The
+// stale-copy reclaim uses it, and so does a move's install when the
+// partition's path holds records the incoming copy lacks.
+func QuarantinePartitionDir(dir string) (string, error) {
 	target := dir + QuarantineSuffix
 	if _, err := os.Stat(target); err == nil {
 		target = dir + QuarantineSuffix + "." + strconv.FormatInt(time.Now().UnixNano(), 10)

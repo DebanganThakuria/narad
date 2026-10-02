@@ -354,11 +354,79 @@ func TestValidateRequiresRaftTLSOrExplicitPlaintextForSecureMultiNode(t *testing
 		t.Fatalf("Validate() with partial raft TLS files = %v, want 'set together'", err)
 	}
 
-	// Single-node and security-off deployments are not held to it.
+	// A single node on the default port-only address (which Raft refuses
+	// to serve on by itself) is not held to it.
 	cfg = Default()
 	cfg.Security.ClusterSecret = "shared"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() single node = %v, want nil", err)
+	}
+}
+
+// A secured single node runs plaintext Raft only where other hosts cannot
+// reach it: Raft listens whatever the peer count and has no
+// authentication of its own. A loopback cluster.addr (the quickstart's
+// docker run, a local build) needs nothing; an address other hosts can
+// reach needs the Raft TLS files or the explicit plaintext opt-in, and
+// so does binding every interface while advertising an address Raft
+// serves on. Security off is not held to it.
+func TestValidateRequiresRaftTLSOrLoopbackForSecureSingleNode(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		addr      string
+		advertise string
+		insecure  bool
+		plaintext bool
+		tls       bool
+		wantErr   bool
+	}{
+		{name: "loopback IPv4", addr: "127.0.0.1:7943"},
+		{name: "loopback IPv6", addr: "[::1]:7943"},
+		{name: "localhost", addr: "localhost:7943"},
+		{name: "routable address", addr: "10.0.0.5:7943", wantErr: true},
+		{name: "host name", addr: "narad-0.internal:7943", wantErr: true},
+		{name: "every interface, advertising a routable address", addr: ":7943", advertise: "10.0.0.5:7943", wantErr: true},
+		{name: "every interface, advertising loopback", addr: "0.0.0.0:7943", advertise: "127.0.0.1:7943", wantErr: true},
+		{name: "every interface, nothing Raft can advertise", addr: ":7943"},
+		{name: "routable address with the plaintext opt-in", addr: "10.0.0.5:7943", plaintext: true},
+		{name: "routable address with raft TLS", addr: "10.0.0.5:7943", tls: true},
+		{name: "routable address with security off", addr: "10.0.0.5:7943", insecure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Cluster.Addr = tc.addr
+			cfg.Cluster.AdvertiseAddr = tc.advertise
+			cfg.Security.Enabled = !tc.insecure
+			cfg.Security.AllowPlaintextRaft = tc.plaintext
+			if tc.tls {
+				cfg.Security.ClusterTLSCertFile, cfg.Security.ClusterTLSKeyFile, cfg.Security.ClusterTLSCAFile = "c.pem", "k.pem", "ca.pem"
+			}
+			err := cfg.Validate()
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "loopback address such as 127.0.0.1:7943") {
+					t.Fatalf("Validate() = %v, want the raft TLS, loopback or plaintext opt-in requirement", err)
+				}
+				// Nodes may already have joined a peerless node. Raft TLS
+				// on it alone, or a loopback bind, cuts it off from their
+				// Raft for good, so each of those ways out says when it
+				// is safe. A node whose Raft first starts on loopback
+				// keeps that address in the Raft configuration, so the
+				// loopback way out also says it is for good, and why.
+				for _, caveat := range []string{
+					"on every node of the cluster",
+					"only on a node that will never take peers",
+					"the raft configuration keeps the address raft first starts on, and a later cluster.addr does not change it",
+				} {
+					if !strings.Contains(err.Error(), caveat) {
+						t.Fatalf("Validate() = %v, want the caveat %q", err, caveat)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate() = %v, want nil", err)
+			}
+		})
 	}
 }
 

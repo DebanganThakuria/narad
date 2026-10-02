@@ -91,6 +91,11 @@ type MoveSession struct {
 	stagingDir string
 	copied     map[int64]int64 // base offset -> bytes copied so far
 	total      int64
+	// synced records the staged segments already fdatasynced, at the
+	// size they had then: a sealed segment is synced once its last chunk
+	// is staged, outside the freeze, so makeDurable has little left to do
+	// before the flip.
+	synced map[int64]int64
 
 	// Last state the source reported on a successful list. Retained so that
 	// if the source later DIES, a force-promote can reproduce exactly the
@@ -111,6 +116,10 @@ type MoveSession struct {
 	// lastAhead is the acked-ahead set the source reported with its
 	// last listing; written into the staged copy next to the frontier.
 	lastAhead []int64
+	// floorHWM is the highest source HWM an earlier session of the same
+	// worker saw (see carryFrom): a force-promote never promotes a copy
+	// that is behind it, even before this session reaches the source.
+	floorHWM int64
 
 	// keepFrozen, when set, is called every keepFrozenEvery during
 	// Finalize to re-arm the source's handoff freeze (whose TTL is
@@ -135,7 +144,7 @@ func (s *MoveSession) KeepFrozen(fn func(context.Context) error, every time.Dura
 func (m *PartitionMover) Begin(sourceAddr, topicName string, partition int, stagingDir string) *MoveSession {
 	return &MoveSession{
 		m: m, sourceAddr: sourceAddr, topic: topicName, partition: partition,
-		stagingDir: stagingDir, copied: map[int64]int64{},
+		stagingDir: stagingDir, copied: map[int64]int64{}, synced: map[int64]int64{},
 	}
 }
 
@@ -193,6 +202,12 @@ func (s *MoveSession) pass(ctx context.Context) (int64, messaging.PartitionTrans
 			newBytes += int64(len(chunk))
 		}
 		s.copied[seg.BaseOffset] = at
+		if seg.Sealed && at > 0 && at == seg.SizeBytes && s.synced[seg.BaseOffset] != at {
+			if err := storage.SyncSegmentFile(s.stagingDir, seg.BaseOffset); err != nil {
+				return 0, messaging.PartitionTransferInfo{}, fmt.Errorf("sync staged segment %d: %w", seg.BaseOffset, err)
+			}
+			s.synced[seg.BaseOffset] = at
+		}
 	}
 	s.total += newBytes
 	return newBytes, info, nil
@@ -380,11 +395,36 @@ func (s *MoveSession) Finalize(ctx context.Context) (CopyResult, error) {
 // successful list and the source's death are unrecoverable — but they live
 // only on the (now-dead) source's disk, so with single-owner partitions they
 // are lost regardless. Force-promote recovers the maximum that is recoverable.
+//
+// The HWM it promotes at is never below the floor an earlier session of
+// the same worker carried (carryFrom), so starting the copy over after a
+// flip that did not happen cannot weaken the gate.
 func (s *MoveSession) ForcePromote() (CopyResult, error) {
 	if !s.sawInfo {
 		return CopyResult{}, fmt.Errorf("force-promote refused: source was never reached")
 	}
-	return s.finalizeStaged(s.lastHWM, s.lastCommitted, s.hasCommitted, s.lastAhead, s.lastSidecars)
+	return s.finalizeStaged(s.promoteHWM(), s.lastCommitted, s.hasCommitted, s.lastAhead, s.lastSidecars)
+}
+
+// promoteHWM is the HWM a force-promote of this session promotes at: the
+// source's last-known one, never below the carried floor.
+func (s *MoveSession) promoteHWM() int64 {
+	return max(s.lastHWM, s.floorHWM)
+}
+
+// carryFrom starts s with what an earlier session of the same worker
+// knew about the source, when the staged copy had to be thrown away: the
+// last listing's positions, and the highest HWM seen as the
+// force-promote floor. The staged bytes are not carried (the staging
+// directory starts empty), so the floor only ever makes a promote wait
+// longer.
+func (s *MoveSession) carryFrom(old *MoveSession) {
+	if old == nil || !old.sawInfo {
+		return
+	}
+	s.floorHWM = old.promoteHWM()
+	s.lastHWM, s.lastCommitted, s.hasCommitted, s.sawInfo = old.lastHWM, old.lastCommitted, old.hasCommitted, true
+	s.lastIncarnation, s.lastSidecars, s.lastAhead = old.lastIncarnation, old.lastSidecars, old.lastAhead
 }
 
 // finalizeStaged writes the target HWM, the consumer frontier and the
@@ -480,6 +520,20 @@ func installSidecars(dir string, sidecars []storage.SidecarFile, hwm int64) erro
 		}
 	}
 	return nil
+}
+
+// makeDurable fdatasyncs every staged file not already synced at its
+// current size (sealed segments are synced as their last chunk lands),
+// so the copy survives a power loss once ownership flips to it. A nil
+// session syncs every file.
+func (s *MoveSession) makeDurable(stagingDir string) error {
+	return storage.SyncStagedFiles(stagingDir, func(name string, size int64) bool {
+		if s == nil || size == 0 {
+			return false
+		}
+		base, ok := storage.ParseSegmentFileName(name)
+		return ok && s.synced[base] == size
+	})
 }
 
 // Copy is Begin+Finalize for a static source (or tests) — it drains

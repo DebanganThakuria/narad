@@ -416,8 +416,10 @@ func (c *PeerClient) DecommissionMember(ctx context.Context, addr, id string, ca
 }
 
 // CompleteMove forwards the guarded ownership flip to the leader at addr.
-// Returns an error unless the leader applied it (the CAS may legitimately
-// fail, which the caller treats as "flip not done").
+// Returns an error unless the leader applied it. A refusal the leader's
+// state machine applied (409 for the compare-and-set, 404 for a partition
+// with no assignment) is a *flipRefusedError: that proposal can never
+// commit. Any other error leaves the outcome unknown (see flipSettled).
 func (c *PeerClient) CompleteMove(ctx context.Context, addr, topicName string, partition int, expectedOwner, targetID string) error {
 	payload, err := nodewire.EncodeCompleteMoveRequest(nodewire.CompleteMoveRequest{
 		Topic: topicName, Partition: partition, ExpectedOwner: expectedOwner, TargetID: targetID,
@@ -426,10 +428,17 @@ func (c *PeerClient) CompleteMove(ctx context.Context, addr, topicName string, p
 	if err != nil {
 		return err
 	}
-	if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
-		return fmt.Errorf("complete move returned status %d", res.Status)
+	switch {
+	case res.Status >= http.StatusOK && res.Status < http.StatusMultipleChoices:
+		return nil
+	case res.Status == http.StatusConflict || res.Status == http.StatusNotFound:
+		var body struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(res.Body, &body)
+		return &flipRefusedError{status: res.Status, msg: body.Error}
 	}
-	return nil
+	return fmt.Errorf("complete move returned status %d", res.Status)
 }
 
 // AbortMove forwards a move-target clear to the leader at addr.

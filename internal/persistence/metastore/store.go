@@ -191,6 +191,11 @@ func newRaft(cfg Config, fsm *fsmState) (r *raft.Raft, transport *commitObservin
 			return nil, nil, nil, err
 		}
 	}
+	if hasState {
+		// NewRaft has loaded the latest configuration from the snapshot
+		// and the log, and GetConfiguration reads it without waiting.
+		reportRecordedAddress(cfg.startupLog(), r.GetConfiguration().Configuration(), cfg.NodeID, advertiseAddr)
+	}
 	return r, transport, boltStore, nil
 }
 

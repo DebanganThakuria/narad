@@ -28,7 +28,7 @@ Before you start: a cluster installed as in [Deploy on Kubernetes](deploy-kubern
 
 Narad keeps its [metadata](../reference/glossary.md#metastore) (topics, users with their password hashes, grants, partition owners) in a Raft group on port 7943/tcp. Raft has no authentication of its own, and the cluster secret does not cover it: anything that reaches that port can force elections or rewrite the metadata as a fake leader.
 
-A multi-node cluster with security on refuses to start unless one of two things is true:
+A node with security on refuses to start unless one of two things is true (a node with no peers is exempt only while its `cluster.addr` is a loopback address, unreleased):
 
 - **Raft runs over mutual TLS.** Set `security.clusterTLS.enabled: true` in the chart. Steps: [Raft TLS certificates](raft-tls.md).
 - **You state that the port is fenced another way.** Set `security.allowPlaintextRaft: true` and apply a NetworkPolicy ([next section](#network-policy)).

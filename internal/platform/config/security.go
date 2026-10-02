@@ -22,9 +22,11 @@ type SecurityConfig struct {
 	AdminPassword string `json:"-"`
 
 	// ClusterSecret authenticates node-to-node cluster RPC. Required
-	// when security is enabled and cluster peers are configured. Every
-	// stream proves it with a MAC bound to the QUIC connection's TLS
-	// session, in both directions. Env: NARAD_CLUSTER_SECRET.
+	// when security is enabled and cluster peers are configured. A
+	// secured node with no peers and none set generates a random one
+	// for the life of the process, so its node RPC answers only itself.
+	// Every stream proves it with a MAC bound to the QUIC connection's
+	// TLS session, in both directions. Env: NARAD_CLUSTER_SECRET.
 	ClusterSecret string `json:"-"`
 
 	// AllowLegacyClusterAuth is the one-release compatibility path for
@@ -50,7 +52,9 @@ type SecurityConfig struct {
 	// cluster with security disabled: no API auth, no cluster secret
 	// (the QUIC RPC plane, which listens on the API port over UDP,
 	// accepts any peer) and plaintext Raft. Fine on a laptop, a
-	// mistake anywhere else, so it has to be said.
+	// mistake anywhere else, so it has to be said. A single node with
+	// security off and no cluster secret also serves an open node RPC
+	// plane; it needs no flag, and startup logs a warning naming it.
 	// Env: NARAD_SECURITY_ALLOW_INSECURE_CLUSTER.
 	AllowInsecureCluster bool `json:"allow_insecure_cluster"`
 

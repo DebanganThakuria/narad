@@ -10,7 +10,7 @@ Learn how Narad nodes talk to clients and to each other over HTTP, QUIC and Raft
 
 !!! abstract "In short"
     - Clients speak HTTP with Basic auth to any node on port 7942. TLS for clients terminates at your ingress.
-    - Nodes speak a compact RPC protocol over QUIC on the same port number, over UDP (7942/udp), and prove a shared cluster secret bound to each TLS session.
+    - Nodes speak a compact RPC protocol over QUIC on the same port number, over UDP (7942/udp), and prove a cluster secret bound to each TLS session. The QUIC listener always runs, even on a single node: with security on every stream proves a secret (the shared `NARAD_CLUSTER_SECRET`, or on a node with no peers a random per-process one, unreleased), and with security off and no secret the plane is open and startup warns.
     - Raft runs on its own TCP port (7943) and needs its own mutual TLS, because Raft has no authentication of its own.
     - State-changing requests must carry an API content type or an `X-Narad-Client` header, or they get `415`, and so must a batch consume, or it gets `400`: this blocks cross-site requests from a browser.
     - The cluster network is assumed private. Fence 7942/udp and 7943/tcp with a network policy.
@@ -70,7 +70,7 @@ Streams are pooled per **lane**, so bulk traffic cannot starve control calls: pr
 
 Partition-transfer traffic (fan-out cursor listings, segment chunks, handoff freezes) rides a second peer client (unreleased), with its own UDP socket and its own connection to each peer, made on first use. A multi-megabyte chunk therefore shares neither a stream nor a connection flow-control window with commit replies, and a node holds two connections to a peer it has moved partitions with.
 
-Peer restarts are detected at once rather than at the 30 s idle timeout. Both ends run a QUIC transport whose stateless reset key is derived from the cluster secret (HMAC-SHA256 with a fixed context). So a restarted node answers packets for connection IDs it no longer knows with a reset the peer can verify, and the peer's pool drops the dead connection on the spot.
+Peer restarts are detected at once rather than at the 30 s idle timeout. Both ends run a QUIC transport whose stateless reset key is derived from the cluster secret (HMAC-SHA256 with a fixed context). So a restarted node answers packets for connection IDs it no longer knows with a reset the peer can verify, and the peer's pool drops the dead connection on the spot. A lone secured node's generated secret (see [below](#cluster-secret)) changes on every restart, and so does its reset key; that matters to nobody, because no other process holds a connection to it.
 
 As a backstop for resets that never arrive (a peer that came back at a new address, a path that drops packets), any request that ends on a deadline triggers a liveness ping on its stream, off the caller's path (unreleased). The deadline can be its context's, the per-call budget its caller passed, or the 5 s fallback. At most one ping runs per connection at a time, and one per second. The connection is closed, so the next request dials again, only if the pong does not arrive within 1 s **and** no stream on that connection received anything meanwhile; a busy, healthy connection whose pong is queued behind other replies is never dropped. Before, only the fallback timeout pinged, and every hot-path caller carries a deadline of its own, so a dead connection stayed pooled, failing every request, until QUIC's 30 s idle timeout.
 
@@ -78,18 +78,24 @@ A stream is multiplexed, so one request's trouble must not end it. A request tha
 
 ### Cluster shared secret {#cluster-secret}
 
-Every node RPC stream starts with a mutual proof of a symmetric secret, taken from the deployment's Kubernetes Secret and bound to the TLS session:
+The QUIC listener runs on every node, a single node included, and the node RPC plane runs the whole control plane with authorization bypassed (forwarded requests carry no identity: the ingress node already decided). So with security on, every stream must prove a secret before any request reaches a handler:
+
+- With peers configured, the secret is `NARAD_CLUSTER_SECRET`, shared by every node (taken from the deployment's Kubernetes Secret in the chart); startup refuses a secured node with peers and no secret.
+- On a node with no peers and no `NARAD_CLUSTER_SECRET` (unreleased), startup generates a random 32-byte secret (crypto/rand) for the life of the process, kept in memory only and never logged or written, and logs `single node with no cluster secret: generated a per-process secret, so node RPC is closed to other processes`. Only the node itself can use its node RPC. To add peers to such a node, set the same `NARAD_CLUSTER_SECRET` on it and restart it before the first node joins. Before the first node joins, it also needs a `cluster.addr` the other nodes can reach, and either the Raft TLS files on every node or `security.allow_plaintext_raft` with 7943/tcp fenced: Raft has no authentication of its own, and a node with no peers configured never runs the join loop, so one the others cannot reach over Raft stays cut off from their Raft. This works only for a node whose Raft first started on the address the others will reach it at, because the Raft configuration keeps the address a node's Raft first started on: a node first started on a loopback `cluster.addr` cannot be grown by rebinding it ([Raft mutual TLS](#raft-tls) has why, and the way out).
+- With security off and no secret, the plane is open, as that mode opts into, and startup logs `node RPC plane is unauthenticated` at warning level. A multi-node cluster must also set `security.allow_insecure_cluster`.
+
+The proof is bound to the TLS session:
 
 - Both ends export 32 bytes of keying material from the QUIC connection's TLS 1.3 session (the RFC 8446 exporter, label `narad-cluster-auth-v1`), and send `HMAC-SHA256(secret, role || ekm)`.
 - The client's proof is the stream's first frame. The server answers with its own, server-role proof, and the client sends no request on a stream whose server cannot prove the secret.
 - Because the keying material is unique to that TLS session, a proof captured by a rogue endpoint (a spoofed peer address, a decommissioned pod's IP) cannot be replayed to a real node, and an impostor server cannot pass for a peer.
 - The proof frame is read under a 64-byte cap before authentication, so an unauthenticated peer cannot make a node allocate the 16 MiB general frame buffer per stream.
 
-No secret, no cluster plane: a stray client cannot speak the node protocol.
+The listener also refuses to serve a secured node that has no secret, whatever its peer count, and stops the node instead (unreleased).
 
 ### Raft mutual TLS {#raft-tls}
 
-Metadata replication runs over mutual TLS when certificates are configured. With security on and peers configured, the Raft TLS files are required unless `security.allow_plaintext_raft` is set explicitly, because Raft itself has no authentication and the cluster secret does not cover it. Setting it up and rotating the certificates is in [Raft TLS certificates](../operate/raft-tls.md).
+Metadata replication runs over mutual TLS when certificates are configured. With security on, the Raft TLS files are required unless `security.allow_plaintext_raft` is set explicitly, because Raft itself has no authentication and the cluster secret does not cover it. Raft listens whatever the peer count, so this holds for a node with no peers too, unless its `cluster.addr` is a loopback address, which only processes on the same host can reach (unreleased; it used to apply only with peers configured). Bind it to loopback only on a node that will never take peers. The address a node's Raft first starts on is recorded in the Raft configuration (at bootstrap, or by the leader when the node joins), the nodes that join later dial that recorded address, and a later `cluster.addr` does not change it. So a node first started on a loopback `cluster.addr` cannot be grown into a cluster by rebinding it: once it is not the leader the others cannot reach its Raft, so it stays leaderless and stale, and a node whose `cluster.addr` is port-only (`:7943`) that dials the loopback address reaches its own Raft and steps down, so metadata writes can stall across the cluster. Such a node logs `raft configuration records this node at an address other than the one it advertises` at error level when it starts on the new address (unreleased; see [Troubleshooting](../operate/troubleshooting.md#log-raft-address-recorded)). To grow it, start a new cluster whose first node starts on an address the others can reach, and move the workload to it. Raft TLS works only when every node of the cluster has the files: a node with no peers configured that other nodes have joined keeps its reachable address and needs the TLS files on every node or `security.allow_plaintext_raft`. Setting it up and rotating the certificates is in [Raft TLS certificates](../operate/raft-tls.md).
 
 ### QUIC certificate {#quic-certificate}
 
@@ -99,7 +105,7 @@ Releases before v3.0.1 created it for 24 hours and refused an expired one, which
 
 ### Ports to fence {#ports}
 
-The QUIC listener shares the **API port number over UDP** (7942/udp by default), not the Raft port. Network policies that fence the cluster plane must cover 7942/udp and 7943/tcp, not just 7943. The recommended policy is in the [Production checklist](../operate/production-checklist.md#network-policy).
+The QUIC listener shares the **API port number over UDP** (7942/udp by default), not the Raft port. Network policies that fence the cluster plane must cover 7942/udp and 7943/tcp, not just 7943. The recommended policy is in the [Production checklist](../operate/production-checklist.md#network-policy). A node with security off serves 7942/udp unauthenticated, so fence it even on a single node. A fence is not authentication: with security on, every stream proves a secret whether or not the port is fenced.
 
 ### Legacy cluster authentication {#legacy-cluster-auth}
 

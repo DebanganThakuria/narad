@@ -14,6 +14,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
 // SegmentInfo describes one on-disk segment for the transfer protocol.
@@ -131,4 +133,63 @@ func AppendToSegmentFile(partitionDir string, baseOffset int64, data []byte) err
 	defer f.Close()
 	_, err = f.Write(data)
 	return err
+}
+
+// The destination's durability of a staged copy. The old owner deletes
+// its copy once ownership has flipped and the new owner's listing covers
+// it, and that listing reads sizes from the page cache, so the copy must
+// survive a power loss before the flip: every staged file, the staging
+// directory, and the directories the install renames it into.
+
+// SyncSegmentFile fdatasyncs the segment file with the given base offset
+// in partitionDir.
+func SyncSegmentFile(partitionDir string, baseOffset int64) error {
+	return syncFileData(filepath.Join(partitionDir, segmentFileName(baseOffset)))
+}
+
+// SyncStagedFiles fdatasyncs every regular file in partitionDir that
+// skip (which may be nil) does not exclude. The caller syncs the
+// directory itself (SyncDir) once its last entry is in place.
+func SyncStagedFiles(partitionDir string, skip func(name string, size int64) bool) error {
+	entries, err := os.ReadDir(partitionDir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		info, err := e.Info()
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if skip != nil && skip(e.Name(), info.Size()) {
+			continue
+		}
+		if err := syncFileData(filepath.Join(partitionDir, e.Name())); err != nil {
+			return fmt.Errorf("storage: sync staged %s: %w", e.Name(), err)
+		}
+	}
+	return nil
+}
+
+// SyncDir fsyncs a directory, so the names created, renamed or removed
+// in it survive a power loss.
+func SyncDir(dir string) error { return syncDir(dir) }
+
+// syncFileData fdatasyncs the file at path.
+func syncFileData(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	serr := syncfile.SyncData(f)
+	cerr := f.Close()
+	if serr != nil {
+		return serr
+	}
+	return cerr
 }

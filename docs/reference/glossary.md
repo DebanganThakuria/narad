@@ -164,9 +164,12 @@ See: [Core concepts](../get-started/concepts.md#topics-and-partitions).
 
 ## Quarantine {#quarantine}
 
-Setting aside a partition directory that belongs to a deleted incarnation of a topic, by renaming it `<name>.stale-<id>`, instead of serving it. It is removed later.
+Setting a directory aside by renaming it instead of serving or deleting it. Two kinds:
 
-See: [Cluster lifecycle](../understand/cluster-lifecycle.md).
+- A topic directory that belongs to a deleted incarnation of a topic is renamed `<name>.stale-<id>`. It is removed later, once the leader confirms that incarnation is gone.
+- A moved partition's old copy that the stale-copy sweep cannot prove is covered by the new owner (it is ahead of the position the partition was promoted at, or, unreleased, the new owner cannot vouch for it), or, unreleased, that a move back onto the node finds at the partition's path holding unexpired records, is renamed `<partition>.quarantine`. Narad never serves it and removes it only when the topic is deleted; its records may exist only there, so an operator decides what to do with it.
+
+See: [Cluster lifecycle](../understand/cluster-lifecycle.md), [Rebalance and decommission](../understand/rebalance.md#what-if-the-source-dies-mid-move) and [Troubleshooting](../operate/troubleshooting.md#log-partition-set-aside).
 
 ## Receipt handle {#receipt-handle}
 

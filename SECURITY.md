@@ -56,7 +56,7 @@ The following are documented, deliberate configurations rather than
 vulnerabilities, so please do not report them as such:
 
 - **Running with security disabled.** `--dev` and `NARAD_SECURITY_ENABLED=false` turn authentication off by design, for local use.
-- **The Raft port without TLS.** The cluster secret does not cover the Raft plane. Running it in plaintext requires `NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true`, and the risk is documented in [the production checklist](https://debanganthakuria.github.io/narad/operate/production-checklist/#raft-tls). A deployment that leaves 7943/tcp reachable is a misconfiguration we have warned about, not a product flaw.
+- **The Raft port without TLS.** The cluster secret does not cover the Raft plane. With security on, running it in plaintext requires `NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT=true`, except on a node with no peers whose `NARAD_CLUSTER_ADDR` is a loopback address, which only processes on the same host can reach. The risk is documented in [the production checklist](https://debanganthakuria.github.io/narad/operate/production-checklist/#raft-tls). A deployment that leaves 7943/tcp reachable is a misconfiguration we have warned about, not a product flaw.
 - **The metrics listener served without credentials**, when `NARAD_HTTP_METRICS_UNAUTHENTICATED=true` is set explicitly.
 - **No built-in request rate limiting.** Narad expects a rate limiter at the ingress, as documented.
 

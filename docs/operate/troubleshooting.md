@@ -245,6 +245,34 @@ Logged at warning level with `peer` and `status`.
 
 **Fix.** For `503`, the node retries every 2 seconds; check the leader's log for `join cluster: add voter` or `join cluster: readmit member`. For `400`, compare the node's `NARAD_NODE_ID` and `NARAD_CLUSTER_ADVERTISE_ADDR` with a working node's.
 
+### `cluster stream rejected: invalid auth` {#log-stream-invalid-auth}
+
+Logged at warning level (`component=audit`) by a node that refused a node RPC stream whose peer could not prove the node's cluster secret.
+
+**Cause.** A peer with another secret, or none, reached this node's node-to-node port (7942/udp). One common case (unreleased): a node with security on was started alone, without `NARAD_CLUSTER_SECRET`, and nodes are now joining it. Such a node generates a secret of its own for the life of the process, so a joiner carrying the shared secret cannot authenticate to it: the joiner's attempts fail (`cluster join attempt failed` at debug level, with `cluster rpc: read server auth proof: ...`) and it never joins.
+
+**Fix.** Set the same `NARAD_CLUSTER_SECRET` on every node, the first one included, and restart the first node before the others join. The first node also needs a `cluster.addr` the others can reach, and either the Raft TLS files on every node or `security.allow_plaintext_raft` with 7943/tcp fenced: with no peers configured it never runs the join loop, so if the others cannot reach its Raft it stays cut off from their Raft. A first node whose Raft first started on a loopback `cluster.addr` cannot be grown by rebinding it: start a new cluster whose first node starts on an address the others can reach, and move the workload to it ([below](#log-raft-address-recorded)). Any other source of these lines is a process that should not be talking to the port: fence 7942/udp ([Networking and security](../understand/networking-and-security.md#ports)).
+
+### `raft configuration records this node at an address other than the one it advertises` {#log-raft-address-recorded}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `raft configuration records this node at an address other than the one it advertises: other nodes dial the recorded address, and a later cluster.addr does not change it (a node with cluster.peers set re-registers its advertised address through its join loop after about 15 s without a leader), so if the recorded address does not reach this node they cannot reach its raft once it is not the leader; operator action required`, logged once at startup at error level with `node`, `recorded_addr`, `advertise_addr` and `other_servers` (how many other nodes the Raft configuration lists). A node alone in the Raft configuration that now advertises a loopback address logs `raft configuration records this node at an address other than the one it advertises; harmless while no other node is in the configuration` at info instead: it takes no peers, so no node dials either address.
+
+**Cause.** The address a node's Raft first starts on is recorded in the Raft configuration: at bootstrap on the node that seeds the cluster, by the leader when a node joins. The other nodes dial that recorded address. Restarting the node on a new `cluster.addr` or `cluster.advertise_addr` changes where it listens and what it advertises, not the recorded address. The usual case is a node first started alone on a loopback `cluster.addr` such as `127.0.0.1:7943`, then rebound to an address the others can reach so it could take peers. If nodes join it, then once it is not the leader they cannot reach its Raft: it stays leaderless and not ready, and a node whose `cluster.addr` is port-only (`:7943`) that dials the loopback address reaches its own Raft and steps down, so metadata writes can stall across the cluster. With `other_servers=0`, no other node is in the configuration yet, so nothing has gone wrong yet.
+
+**Fix.** If `recorded_addr` is another way of writing an address that reaches this node, nothing. If it is an address the other nodes can reach, restart the node on it. A node first started on a loopback address cannot be fixed by rebinding, because no other node can reach a loopback address: do not let any node join it, and to grow it, start a new cluster whose first node starts on an address the others can reach and move the workload to it (recreate topics, users and grants there, point producers at it, and retire this node once its consumers have drained it). If nodes have already joined it, move the workload the same way while it is still the Raft leader. A node with `cluster.peers` set re-registers the address it advertises: about 15 s after it finds no leader it runs the [join loop](../understand/cluster-lifecycle.md), and the leader's `AddVoter` updates its recorded address, so for such a node (one re-addressed host of a cluster, say) the line clears once the leader can reach the new address. Only a node with no peers configured keeps its recorded address for good.
+
+### `node RPC plane is unauthenticated` {#log-node-rpc-unauthenticated}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `node RPC plane is unauthenticated: security is disabled and no cluster secret is set, so anything that can send UDP to the API port can create users and topics and produce, consume and ack without credentials`, logged once at startup at warning level with `component=audit` and `addr`.
+
+**Cause.** The node runs with `security.enabled=false` and no `NARAD_CLUSTER_SECRET`. That mode leaves the API open too; this line names the node-to-node port, which listens even on a single node.
+
+**Fix.** Fence 7942/udp so only the cluster's own nodes reach it, or set `NARAD_CLUSTER_SECRET` on every node, which authenticates the port even with security off. With security on, a node never serves the port without a secret ([Networking and security](../understand/networking-and-security.md#cluster-secret)).
+
 ### `consumer frontier fell behind retention` {#log-frontier-behind-retention}
 
 The full line is `consumer frontier fell behind retention; skipped to oldest retained offset`, at warning level, with `topic`, `partition`, `from`, `to` and `skipped`.
@@ -282,6 +310,45 @@ The full line is `reclaim: local partition copy is AHEAD of the position it was 
 **Cause.** A partition moved away from this node while the node was cut off, and the destination [force-promoted](../reference/glossary.md#force-promote) its copy. This node kept taking records meanwhile, so its copy holds records the new owner never received. Instead of deleting it, the node renamed it to `quarantine_dir`.
 
 **Fix.** Narad never serves or deletes that directory; it goes only when the topic is deleted. The records from `promoted_hwm` onwards exist only there, and Narad has no tool to merge them back. Decide whether they matter, copy the directory off if they do, and delete it when you are done. The move protocol: [Rebalance and decommission](../understand/rebalance.md).
+
+### `reclaim: the new owner cannot vouch for the local partition copy` {#log-partition-set-aside}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `reclaim: the new owner cannot vouch for the local partition copy; quarantined instead of deleted, its records may exist only here`, at error level, with `topic`, `partition`, `owner`, `reason` and `quarantine_dir`. The sweep that triggered it logs `move: stale partition copy QUARANTINED, not deleted: the new owner cannot vouch for it; operator action required` next to it.
+
+**Cause.** A partition moved away from this node, and when this node went to delete its old copy, the new owner held less than the move gave it. `reason` says which: the new owner lists no records (it came back on an empty volume, or rolled its install back), it holds records without a move marker (so they did not come from this copy), its move marker records a move from another node (the partition moved on again before this node's sweep ran, so the marker vouches for that node's records, not this copy's), or it lacks a segment, or holds one shorter, below the position it vouches for (a segment lost before it reached its disk). A node holding an install that never flipped (copied from the owner, see [Rebalance](../understand/rebalance.md#target-failure)) sets it aside the same way: the owner's move marker names how the owner got the partition, not this copy, so the owner cannot vouch for it. Its records are usually also on the owner; check before deleting it. The records of this copy may exist nowhere else, so the node renamed it to `quarantine_dir` instead of deleting it.
+
+**Check.** The new owner's partition directory (`topics/<topic>/p<NNNNN>` under its data directory: the partition number zero-padded to 5 digits, such as `p00003` for partition 3) and whether it has a `move.marker`; `narad server report` for its high watermark.
+
+**Fix.** Copy the quarantined directory off before anything else: its records may be the only ones left. Narad never serves or deletes it; it goes only when the topic is deleted. Narad has no tool to merge it back; decide whether its records matter, re-produce them from the copy if they do, and delete it when you are done. The sweep's rules: [Rebalance and decommission](../understand/rebalance.md#what-if-the-source-dies-mid-move).
+
+### `move: the partition's path held an earlier copy with unexpired records` {#log-move-install-set-aside}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `move: the partition's path held an earlier copy with unexpired records; quarantined instead of replaced, since it may hold records the incoming copy lacks. Operator action required`, at error level, with `topic`, `partition` and `quarantine_dir`.
+
+**Cause.** A partition moved onto this node while its path (`topics/<topic>/p<NNNNN>`, the partition number zero-padded to 5 digits) still held an older copy, usually this node's own copy from when it owned the partition, which its stale-copy sweep had not judged yet, and that copy held unexpired records. The install never deletes such a copy, because it cannot prove the incoming copy holds the same records: this node may have kept committing past a force-promote while it was cut off, or the new owner may have lost records since. Often the incoming copy does hold them all; the node set the old copy aside anyway, renamed to `quarantine_dir`, and installed the incoming one. The earlier copy can also be an earlier attempt's install of the same move, left when the node restarted or its worker was cancelled with the flip pending; it holds the source's records, so check the owner before treating them as the only copy.
+
+**Fix.** As for [the sweep's set-aside](#log-partition-set-aside): copy the quarantined directory off first, since its records may be the only ones left. Narad never serves or deletes it; it goes only when the topic is deleted. Decide whether its records matter, re-produce them from the copy if they do, and delete it when you are done.
+
+### `move: set aside the staging copy of a partition this node owns` {#log-move-keeping-staging}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `move: set aside the staging copy of a partition this node owns; the partition's records may not all be under its path. Operator action required`, at error level, with `topic`, `partition`, `quarantine_dir`, `partition_dir`, `moved_back` and `partition_dir_has_records`. A move that took its installed copy back off the partition's path and then cannot read the partition's owner logs `move: set aside the staging copy this move moved back, since the partition's owner cannot be read; it may hold the partition's records. Operator action required` the same way, with `quarantine_dir`, `partition_dir` and `err`.
+
+**Cause.** A move to this node ended without seeing its own flip commit, yet this node owns the partition: a flip committed after all. The move's copy was in `dataDir/.moves/<topic>-<partition>` (the partition number not padded, such as `.moves/orders-3`); the node renamed it aside to `quarantine_dir` (such as `.moves/orders-3.quarantine`), where no later move of the partition onto this node clears it, and `partition_dir` is the partition's path (`topics/<topic>/p<NNNNN>`, the partition number zero-padded to 5 digits, such as `topics/orders/p00003`).
+
+- `moved_back=true`: the leader read the flip as not committed, the move took its installed copy off the partition's path, and the flip committed anyway. `quarantine_dir` holds the partition's records as of the flip; `partition_dir` holds only what this node wrote since.
+- `moved_back=false`: no copy installed from the move's source is under the partition's path, so `quarantine_dir` may hold records the path lacks.
+
+When the path does hold a copy installed from the move's source and the move moved nothing back, the flip was an earlier attempt's (a restart cancelled that worker with its flip pending) and `staging` only holds a later attempt's re-copy: the node removes it and logs `move: the partition flipped to this node under an earlier attempt's install; removing this attempt's staging copy` at info instead.
+
+**Check.** `partition_dir_has_records`, and the segment files in both directories (each file is named for the offset it starts at).
+
+**Fix.** Stop the node and copy both directories off first. If `partition_dir_has_records=false`, move the set-aside directory into place as `partition_dir` (`.moves/orders-3.quarantine` goes to `topics/orders/p00003`) and start the node. If it is `true`, both copies can hold records the other lacks, at overlapping offsets: do not replace the live partition with the set-aside copy; compare the two, start the node, and re-produce from the set-aside copy the records you decide matter. Narad does not move or delete either directory on its own.
 
 ### `x509: certificate signed by unknown authority` {#raft-cert-untrusted}
 
