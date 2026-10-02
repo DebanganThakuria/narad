@@ -33,18 +33,14 @@ package cluster
 //   - otherwise reclaim with a guard at the vouched position: the owner's
 //     high-watermark, and never more than the move marker's promoted one.
 //
-// One local copy came from the owner rather than going to it: an install
-// whose flip never committed (the destination died with its flip
-// pending and the controller cleared the target, or its worker was
-// cancelled and the move re-planned elsewhere), left at the partition's
-// path with a move marker that names the current owner as its source.
-// The owner held every record in it when it was copied, and needs no
-// marker of its own to vouch for them: the owner's listing and its live
-// high-watermark judge it, and the owner's own marker (from an earlier
-// move onto it) does not cap the position. Its first bytes are compared
-// with the owner's too, so an owner that came back empty under the same
-// ID and took new records at the same offsets cannot pass for the one
-// the copy was taken from.
+// An install whose flip never committed (the destination died with its
+// flip pending and the controller cleared the target, or its worker was
+// cancelled and the move re-planned elsewhere) is left at the
+// partition's path and judged like any other copy. The sweep never
+// trusts the local copy's own move marker (a marker survives every later
+// move of the partition, so it cannot tell such an install from a copy
+// this node served), so the install is set aside unless the owner
+// vouches for it at its own marker's position.
 //
 // A copy the owner cannot vouch for is not kept at the partition's path,
 // where a later move of the partition back onto this node meets it; it

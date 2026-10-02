@@ -109,8 +109,8 @@ func (w *moveWorker) observeDone() {
 // no assignment (its topic is gone) has no owner. A worker cancelled
 // with a flip pending leaves the install at the partition's path: if the
 // flip committed it is the partition, and if not, the next worker's
-// install replaces it or the stale-copy sweep judges it against the real
-// owner.
+// install quarantines it (setAsideLiveCopy; error-level log) or the
+// stale-copy sweep judges it against the real owner.
 func (w *moveWorker) finish() {
 	if w.flipped {
 		return
