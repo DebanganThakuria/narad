@@ -151,7 +151,12 @@ func (s *Store) AppliedCaughtUp() bool {
 	if pending, err := strconv.ParseUint(stats["fsm_pending"], 10, 64); err != nil || pending > 0 {
 		return false
 	}
-	if !s.fsmCoversApplied(applied) {
+	// A restored snapshot covers every entry up to its index without the
+	// FSM's own index moving past them (a snapshot written by 3.0.x
+	// carries no index), so the coverage walk stops at whichever is
+	// higher.
+	snapshot, _ := strconv.ParseUint(stats["last_snapshot_index"], 10, 64)
+	if !s.fsmCoversApplied(applied, snapshot) {
 		return false
 	}
 	if s.r.State() == raft.Leader {
@@ -225,8 +230,16 @@ func (s *Store) ClusterReady() error {
 // entries when caught up and returns at the first entry when the FSM
 // is far behind. An index the log no longer holds was covered by the
 // snapshot the FSM was restored from.
-func (s *Store) fsmCoversApplied(raftApplied uint64) bool {
-	fsmApplied := s.fsm.applied.Load()
+//
+// The walk stops at max(FSM index, snapshotIndex). After a restore from
+// a snapshot that carries no index the FSM's own index is 0 while Raft
+// keeps TrailingLogs entries behind the snapshot, so walking down to 0
+// found a command the snapshot already covered and read the replica as
+// behind until some new command committed: /readyz and the ownership
+// latch waited on a quiet cluster. A snapshot this node took itself is
+// as good a bound, since the FSM had applied that far when it was taken.
+func (s *Store) fsmCoversApplied(raftApplied, snapshotIndex uint64) bool {
+	fsmApplied := max(s.fsm.applied.Load(), snapshotIndex)
 	if s.logs == nil {
 		return true
 	}
