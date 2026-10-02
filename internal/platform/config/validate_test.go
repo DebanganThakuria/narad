@@ -409,8 +409,14 @@ func TestValidateRequiresRaftTLSOrLoopbackForSecureSingleNode(t *testing.T) {
 				// Nodes may already have joined a peerless node. Raft TLS
 				// on it alone, or a loopback bind, cuts it off from their
 				// Raft for good, so each of those ways out says when it
-				// is safe.
-				for _, caveat := range []string{"on every node of the cluster", "only if no other node dials this node's raft"} {
+				// is safe. A node whose Raft first starts on loopback
+				// keeps that address in the Raft configuration, so the
+				// loopback way out also says it is for good, and why.
+				for _, caveat := range []string{
+					"on every node of the cluster",
+					"only on a node that will never take peers",
+					"the raft configuration keeps the address raft first starts on, and a later cluster.addr does not change it",
+				} {
 					if !strings.Contains(err.Error(), caveat) {
 						t.Fatalf("Validate() = %v, want the caveat %q", err, caveat)
 					}
