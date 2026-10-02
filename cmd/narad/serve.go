@@ -83,7 +83,7 @@ func runServe(args []string) error {
 		log.Warn("raft metadata transport is plaintext (security.allow_plaintext_raft); raft has no authentication of its own, so restrict the cluster port by network policy",
 			"component", "audit", "cluster_addr", cfg.Cluster.Addr)
 	case netaddr.IsLoopbackHostPort(cfg.Cluster.Addr):
-		log.Warn("raft metadata transport is plaintext on a loopback address (a node with no peers and no raft TLS files); raft has no authentication of its own, so any process on this host can reach it, and the raft configuration keeps the address raft first started on, so a node whose raft first started on loopback cannot take peers by binding cluster.addr to another address later",
+		log.Warn("raft metadata transport is plaintext on a loopback address (a node with no peers and no raft TLS files); raft has no authentication of its own, so any process on this host can reach it, and the raft configuration keeps the address raft first started on, so a node whose raft first started on loopback can never take peers, whatever cluster.addr it is bound to later",
 			"component", "audit", "cluster_addr", cfg.Cluster.Addr)
 	default:
 		log.Warn("raft metadata transport is plaintext; raft has no authentication of its own, so restrict the cluster port by network policy",

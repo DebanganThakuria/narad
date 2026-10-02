@@ -44,6 +44,6 @@ func reportRecordedAddress(log *slog.Logger, conf raft.Configuration, nodeID, ad
 			"node", nodeID, "recorded_addr", recorded, "advertise_addr", advertise)
 		return
 	}
-	log.Error("raft configuration records this node at an address other than the one it advertises: other nodes dial the recorded address, and a later cluster.addr does not change it, so if the recorded address does not reach this node they cannot reach its raft once it is not the leader; operator action required",
+	log.Error("raft configuration records this node at an address other than the one it advertises: other nodes dial the recorded address, and a later cluster.addr does not change it (a node with cluster.peers set re-registers its advertised address through its join loop after about 15 s without a leader), so if the recorded address does not reach this node they cannot reach its raft once it is not the leader; operator action required",
 		"node", nodeID, "recorded_addr", recorded, "advertise_addr", advertise, "other_servers", others)
 }
