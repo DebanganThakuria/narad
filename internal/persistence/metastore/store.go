@@ -51,6 +51,10 @@ type Config struct {
 	SnapshotThreshold uint64
 	SnapshotInterval  time.Duration
 	TrailingLogs      uint64
+	// Build names this binary (serve passes its version string) in the
+	// error a node logs when it stops applying Raft entries, so the
+	// operator can tell which release stopped and why.
+	Build string
 }
 
 // startupLog returns cfg.Log or a discarding logger.
@@ -111,7 +115,7 @@ func New(cfg Config) (*Store, error) {
 	// line says what the process was doing if it does wait.
 	fsmPath := filepath.Join(cfg.DataDir, "fsm.db")
 	cfg.startupLog().Info("opening metastore database (waits up to the lock timeout if another process holds it)", "path", fsmPath, "lock_timeout", boltOpenTimeout)
-	fsm, err := newFSM(fsmPath)
+	fsm, err := newFSMWith(fsmPath, fsmOptions{log: cfg.startupLog(), build: cfg.Build})
 	if err != nil {
 		return nil, fmt.Errorf("metastore: fsm: %w", err)
 	}
@@ -119,9 +123,32 @@ func New(cfg Config) (*Store, error) {
 	r, transport, logStore, err := newRaft(cfg, fsm)
 	if err != nil {
 		_ = fsm.db.Close()
+		if stopped := fsm.stopErr(); stopped != nil {
+			// Raft could restore no snapshot because the FSM refused
+			// them; the refusal is the reason worth reporting.
+			return nil, fmt.Errorf("%w (%v)", stopped, err)
+		}
 		return nil, err
 	}
-	return &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore, logs: logStore, log: cfg.startupLog()}, nil
+	s := &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore, logs: logStore, log: cfg.startupLog()}
+	// A stopped FSM takes Raft down with it, so the node stops voting,
+	// leading and acknowledging writes its replica lacks. Never from
+	// inside Apply: Shutdown waits for the FSM goroutine.
+	fsm.setOnHalt(func() { _ = r.Shutdown().Error() })
+	return s, nil
+}
+
+// Halted is closed once the FSM has stopped applying Raft entries (an
+// entry type this build does not know, or a write its database refused
+// for good). Raft is shut down by then; serve exits with HaltErr.
+func (s *Store) Halted() <-chan struct{} {
+	return s.fsm.halt.channel()
+}
+
+// HaltErr is why the FSM stopped applying, or nil while it applies. It
+// wraps ErrStoppedApplying and errs.ErrUnavailable.
+func (s *Store) HaltErr() error {
+	return s.fsm.stopErr()
 }
 
 // newRaft wires up the Raft node: log/stable store, snapshot store, TCP
@@ -154,6 +181,16 @@ func newRaft(cfg Config, fsm *fsmState) (r *raft.Raft, transport *commitObservin
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("metastore: snapshots: %w", err)
 	}
+	// Read before NewRaft, which restores the latest snapshot into the
+	// FSM and needs to know whether to.
+	hasState, err := raft.HasExistingState(boltStore, boltStore, snapStore)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("metastore: check state: %w", err)
+	}
+	restore, err := prepareFSMForStart(cfg.startupLog(), fsm, hasState, boltStore, snapStore)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
 	rawTransport, advertiseAddr, err := newTransport(cfg, logOutput)
 	if err != nil {
@@ -175,6 +212,7 @@ func newRaft(cfg Config, fsm *fsmState) (r *raft.Raft, transport *commitObservin
 	if cfg.TrailingLogs > 0 {
 		rc.TrailingLogs = cfg.TrailingLogs
 	}
+	rc.NoSnapshotRestoreOnStart = !restore
 
 	r, err = raft.NewRaft(rc, fsm, boltStore, boltStore, snapStore, transport)
 	if err != nil {
@@ -182,10 +220,6 @@ func newRaft(cfg Config, fsm *fsmState) (r *raft.Raft, transport *commitObservin
 		return nil, nil, nil, fmt.Errorf("metastore: raft: %w", err)
 	}
 
-	hasState, err := raft.HasExistingState(boltStore, boltStore, snapStore)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("metastore: check state: %w", err)
-	}
 	if !hasState && !cfg.JoinOnly {
 		if err := bootstrapCluster(r, cfg, advertiseAddr); err != nil {
 			return nil, nil, nil, err

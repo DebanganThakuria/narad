@@ -95,8 +95,16 @@ const barrierTimeout = 5 * time.Second
 // from an old snapshot legally serves reads from a stale FSM until the
 // replay finishes. Any "I am the leader, my local state is authoritative"
 // decision must barrier first, then re-read.
+//
+// A barrier on a node whose FSM has stopped applying fails with the
+// stop error: the FSM returned without applying the entry it stopped
+// on, so its database is not the leader's view even though every entry
+// before the barrier was handed to it.
 func (s *Store) Barrier() error {
-	return s.r.Barrier(barrierTimeout).Error()
+	if err := s.r.Barrier(barrierTimeout).Error(); err != nil {
+		return err
+	}
+	return s.fsm.stopErr()
 }
 
 // AppliedCaughtUp reports whether the cluster has a leader, this node has
@@ -123,7 +131,7 @@ func (s *Store) Barrier() error {
 // then commit_index is 0 in a fresh process and the leader is NOT
 // caught up, however complete its log.
 func (s *Store) AppliedCaughtUp() bool {
-	if s.r == nil || s.r.Leader() == "" {
+	if s.r == nil || s.r.Leader() == "" || s.fsm.stopErr() != nil {
 		return false
 	}
 	stats := s.r.Stats()
@@ -200,6 +208,9 @@ var ErrNotReady = errors.New("metastore: node is not ready")
 func (s *Store) ClusterReady() error {
 	if s.r == nil {
 		return nil
+	}
+	if err := s.fsm.stopErr(); err != nil {
+		return fmt.Errorf("%w: %v", ErrNotReady, err)
 	}
 	if s.r.Leader() == "" {
 		return fmt.Errorf("%w: no raft leader known", ErrNotReady)

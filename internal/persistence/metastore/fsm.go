@@ -2,7 +2,9 @@ package metastore
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,106 +65,191 @@ type fsmState struct {
 	// handed to the FSM goroutine, and fsm_pending only counts batches
 	// still queued, so neither says the entry's bbolt transaction has
 	// finished; this does. Store.WaitApplied builds read-your-writes on it.
+	// It starts at the index db records about itself (fsm_applied.go)
+	// when that can be trusted, and Apply skips entries at or below it.
 	applied atomic.Uint64
+	// lastSeen is the highest index Raft has handed Apply, or that a
+	// restored snapshot covers. It trails applied only after a start
+	// that kept a database ahead of the snapshot Raft resumed from, until
+	// the replay reaches applied; Snapshot waits for that.
+	lastSeen atomic.Uint64
+	// meta is what db recorded about itself when it was opened; the
+	// start-up rules in store.go read it before Raft starts.
+	meta fsmMeta
+
+	// cur is the entry Apply is applying (zero outside Apply). Only the
+	// FSM goroutine touches it.
+	cur appliedEntry
+
+	log   *slog.Logger
+	build string
+	halt  haltState
+
+	// For the metastore metrics: apply errors by kind, and whether a
+	// storage failure is being retried right now.
+	applyErrors [applyErrKinds]atomic.Uint64
+	stalled     atomic.Bool
+}
+
+// appliedEntry is the entry being applied.
+type appliedEntry struct {
+	index     uint64
+	entryType uint32
+	// persisted: the entry's index was committed with its effects.
+	persisted bool
+}
+
+// fsmOptions configures an FSM before it opens its database.
+type fsmOptions struct {
+	// log receives the FSM's error and warning lines; nil discards them.
+	log *slog.Logger
+	// build names this binary in those lines and in the stop error.
+	build string
 }
 
 func newFSM(path string) (*fsmState, error) {
-	db, err := openBolt(path)
+	return newFSMWith(path, fsmOptions{})
+}
+
+// newFSMWith opens the database at path. It refuses one that has
+// applied an entry type newer than this build knows (openBolt): this
+// binary would read it with older semantics, and its log tail holds
+// entries it cannot apply.
+func newFSMWith(path string, opts fsmOptions) (*fsmState, error) {
+	log := opts.log
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	db, meta, err := openBolt(path, opts.build)
 	if err != nil {
 		return nil, err
 	}
-	return &fsmState{db: db, dbPath: path, versions: newMetadataDomainVersions()}, nil
-}
-
-func openBolt(path string) (*bolt.DB, error) {
-	db, err := bolt.Open(path, 0o600, boltOptions())
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
-	}
-	return db, db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketTopics, bucketSchemas, bucketAssignments, bucketMembers, bucketUsers, bucketRemovedMembers} {
-			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	f := &fsmState{db: db, dbPath: path, versions: newMetadataDomainVersions(), meta: meta, log: log, build: opts.build}
+	f.applied.Store(meta.trustedApplied())
+	return f, nil
 }
 
 func (f *fsmState) view(fn func(*bolt.Tx) error) error {
 	return f.db.View(fn)
 }
 
-func (f *fsmState) update(fn func(*bolt.Tx) error) error {
-	return f.db.Update(fn)
+// entryEnvelope decodes a log entry's envelope (cmd). The type is read
+// wider than opCode so an entry type past 255 still reads as unknown
+// rather than undecodable.
+type entryEnvelope struct {
+	Op   uint64 `json:"o"`
+	Data []byte `json:"d"`
 }
 
 // Apply is called by Raft when a log entry is committed. A business
 // error (e.g. ErrAlreadyExists) is returned as the FSM response so the
 // caller sees it, and the metadata version only advances on success.
+//
+// An entry the database already holds (a replay after a restart) is
+// skipped. An entry type this build does not know, or a write the
+// local database refuses, stops the FSM instead of being consumed
+// (fsm_failstop.go).
 func (f *fsmState) Apply(l *raft.Log) any {
-	var c cmd
-	if err := json.Unmarshal(l.Data, &c); err != nil {
+	if err := f.stopErr(); err != nil {
 		return err
 	}
+	f.lastSeen.Store(l.Index)
+	if l.Index <= f.applied.Load() {
+		return nil
+	}
+	var env entryEnvelope
+	if err := json.Unmarshal(l.Data, &env); err != nil {
+		// The same bytes are in every replica's log, so every replica
+		// refuses them alike: consume the entry.
+		f.applyErrors[applyErrUndecodable].Add(1)
+		f.log.Error("metastore: consumed a raft entry it cannot decode", "index", l.Index, "error", err)
+		f.recordConsumed(l.Index, 0)
+		f.applied.Store(l.Index)
+		return err
+	}
+	if env.Op == 0 || env.Op > uint64(MaxEntryType) {
+		return f.stopOnUnknownEntryType(l.Index, env.Op)
+	}
 
-	var err error
-	switch c.Op {
-	case opCreateTopic:
-		err = f.applyCreateTopic(c.Data)
-	case opUpdateTopic:
-		err = f.applyUpdateTopic(c.Data)
-	case opDeleteTopic:
-		err = f.applyDeleteTopic(c.Data)
-	case opPutSchema:
-		err = f.applyPutSchema(c.Data)
-	case opAssignPartition:
-		err = f.applyAssignPartition(c.Data)
-	case opMemberJoin:
-		err = f.applyMemberJoin(c.Data)
-	case opMemberHeartbeat:
-		err = f.applyMemberHeartbeat(c.Data)
-	case opMemberDead:
-		err = f.applyMemberDead(c.Data)
-	case opCreateUser:
-		err = f.applyCreateUser(c.Data)
-	case opUpdateUser:
-		err = f.applyUpdateUser(c.Data)
-	case opDeleteUser:
-		err = f.applyDeleteUser(c.Data)
-	case opSeedRootUser:
-		err = f.applySeedRootUser(c.Data)
-	case opAttachChild:
-		err = f.applyAttachChild(c.Data)
-	case opDetachChild:
-		err = f.applyDetachChild(c.Data)
-	case opSetAssignmentTarget:
-		err = f.applySetAssignmentTarget(c.Data)
-	case opCompleteMove:
-		err = f.applyCompleteMove(c.Data)
-	case opAbortMove:
-		err = f.applyAbortMove(c.Data)
-	case opSetMemberDraining:
-		err = f.applySetMemberDraining(c.Data)
-	case opRemoveMember:
-		err = f.applyRemoveMember(c.Data)
-	case opReadmitMember:
-		err = f.applyReadmitMember(c.Data)
-	case opSetUserPassword:
-		err = f.applySetUserPassword(c.Data)
-	case opSetUserGrants:
-		err = f.applySetUserGrants(c.Data)
-	default:
-		err = fmt.Errorf("metastore: unknown op %d", c.Op)
+	f.cur = appliedEntry{index: l.Index, entryType: uint32(env.Op)}
+	defer func() { f.cur = appliedEntry{} }()
+	err := f.dispatch(opCode(env.Op), env.Data)
+	if errors.Is(err, errNoHandler) {
+		return f.stopOnUnknownEntryType(l.Index, env.Op)
+	}
+	if stopped := f.stopErr(); stopped != nil {
+		// The entry's write failed for good: not applied, not consumed.
+		return stopped
 	}
 	if err == nil {
 		f.version.Add(1)
+	}
+	if !f.cur.persisted {
+		// Refused before or inside its transaction: record the index
+		// on its own.
+		f.recordConsumed(l.Index, f.cur.entryType)
 	}
 	// Every path above has finished its bbolt transaction (or refused
 	// to start one), so the entry's effects are in db before the index
 	// moves. Set on error too: a rejected command is consumed all the same.
 	f.applied.Store(l.Index)
 	return err
+}
+
+// errNoHandler is dispatch's answer for a type with no handler, which
+// Apply treats like any type it does not know.
+var errNoHandler = errors.New("metastore: no handler for this entry type")
+
+// dispatch runs the handler for op.
+func (f *fsmState) dispatch(op opCode, data []byte) error {
+	switch op {
+	case opCreateTopic:
+		return f.applyCreateTopic(data)
+	case opUpdateTopic:
+		return f.applyUpdateTopic(data)
+	case opDeleteTopic:
+		return f.applyDeleteTopic(data)
+	case opPutSchema:
+		return f.applyPutSchema(data)
+	case opAssignPartition:
+		return f.applyAssignPartition(data)
+	case opMemberJoin:
+		return f.applyMemberJoin(data)
+	case opMemberHeartbeat:
+		return f.applyMemberHeartbeat(data)
+	case opMemberDead:
+		return f.applyMemberDead(data)
+	case opCreateUser:
+		return f.applyCreateUser(data)
+	case opUpdateUser:
+		return f.applyUpdateUser(data)
+	case opDeleteUser:
+		return f.applyDeleteUser(data)
+	case opSeedRootUser:
+		return f.applySeedRootUser(data)
+	case opAttachChild:
+		return f.applyAttachChild(data)
+	case opDetachChild:
+		return f.applyDetachChild(data)
+	case opSetAssignmentTarget:
+		return f.applySetAssignmentTarget(data)
+	case opCompleteMove:
+		return f.applyCompleteMove(data)
+	case opAbortMove:
+		return f.applyAbortMove(data)
+	case opSetMemberDraining:
+		return f.applySetMemberDraining(data)
+	case opRemoveMember:
+		return f.applyRemoveMember(data)
+	case opReadmitMember:
+		return f.applyReadmitMember(data)
+	case opSetUserPassword:
+		return f.applySetUserPassword(data)
+	case opSetUserGrants:
+		return f.applySetUserGrants(data)
+	default:
+		return errNoHandler
+	}
 }
 
 func (f *fsmState) metadataVersion() uint64 {
