@@ -219,6 +219,42 @@ Logged at error level with `dir`, `durable_tail` and `err`.
 
 **Fix.** Fix the disk, then restart the pod: the partition is reopened and checked, and the records waiting for it are committed. Why a failed sync is final: [Storage engine](../understand/storage-engine.md#fsync-failure).
 
+### `metastore: stopped applying raft entries` {#log-metastore-stopped}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Logged at error level with `index`, `entry_type`, `build` and `error`, just before the node exits non-zero. The pod restarts and, until the cause is fixed, stops again on the same entry.
+
+**Cause.** The node could not apply a committed metadata change, and stopped rather than skip it ([When a node stops applying](../understand/metastore-and-raft.md#fail-stop)). `error` says which:
+
+- `raft entry at index <n> has entry type <t>, which this build (...) does not know`: a newer release proposed the entry, and this pod runs an older image than the rest of the cluster (a stale tag, or a pod rolled back on its own).
+- `could not write raft entry at index <n> (entry type <t>) to .../fsm.db after retrying for 30s: ...`: the data volume refused the write, usually `no space left on device`, sometimes an I/O error. The node logged `metastore: could not write raft entry; retrying` at warning level 30 s before.
+- `the raft snapshot holds raft entry type <t>, written by a newer Narad release`: the leader sent this node a snapshot from a newer release.
+
+**Check.** The image of every pod (`kubectl get pods -n narad -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[0].image`), and the free space and kernel log of the pod's data volume.
+
+**Fix.** Run the cluster's release on the pod, or free space on the volume (or replace it). Nothing needs repair: the entry was never counted as applied, so the restart applies it and the node rejoins. The rest of the cluster keeps working as long as a majority of voters can write; pods that share a full volume all stop.
+
+### `metastore: set aside fsm.db as fsm.db.stale` {#log-metastore-set-aside}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Logged at warning level at start, with `reason` and `stale`.
+
+**Cause.** The node found an `fsm.db` it could not use as the base for its Raft log: one with no applied index this release can trust (written last by v3.0.x: the first restart after an upgrade, or after a rollback and a new upgrade), or one left beside a missing Raft state. It moved the file aside and rebuilds the database from the Raft log ([Restarts](../understand/metastore-and-raft.md#restarts)).
+
+**Fix.** None. Delete `fsm.db.stale` (next to `fsm.db` under the data directory's `metastore` directory) once the node is ready. It is kept only for inspection, and the next set-aside overwrites it.
+
+### `written by a newer Narad release` at start {#log-metastore-newer-database}
+
+**Unreleased:** in master, not in v3.0.1.
+
+`narad serve` exits at start with `metastore: fsm: .../fsm.db holds raft entry type <t>, written by a newer Narad release than this build (...); run that release or newer`.
+
+**Cause.** The node's metadata database has applied an entry only a newer release proposes: the pod was rolled back, or started on an older image, after the cluster used a newer release's feature. This build would read that metadata by older rules, so it does not open it, and leaves the file untouched.
+
+**Fix.** Run the release the rest of the cluster runs, or a newer one.
+
 ### `no raft leader for a while; running the cluster join loop` {#log-no-raft-leader}
 
 Logged at warning level after a node has had no Raft leader for 15 seconds.

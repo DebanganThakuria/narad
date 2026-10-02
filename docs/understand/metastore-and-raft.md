@@ -21,7 +21,7 @@ The [metastore](../reference/glossary.md#metastore) holds everything that is not
 
 - **Writes** (create a topic, register a member, attach a child) are Raft commands: forwarded to the leader, committed by a quorum, then applied to every node's state machine (FSM). A node that forwarded a write does not answer the client until its own FSM has applied it: it asks the leader for the index it applied and waits, for a bounded time, for its replica to reach it. So a read on the same node right after the response is never behind the write. Each command family bumps a per-domain **version counter**, so caches (such as topic lookups on the produce path) are invalidated precisely.
 - **Reads** are local: every node answers topic lookups from its own bbolt replica, with no network hop. This is what makes request routing fast, and it is also the reason for the rules in [Stale replicas](#stale-replicas).
-- The FSM persists in **bbolt**; Raft keeps its log in boltdb, plus periodic **snapshots** on disk. A restarting node restores FSM state from the latest snapshot, then replays the log tail.
+- The FSM persists in **bbolt** (`fsm.db`); Raft keeps its log in boltdb, plus periodic **snapshots** on disk. A restarting node keeps its `fsm.db` and applies only the entries it does not hold yet ([Restarts](#restarts)).
 
 ## Metastore contents {#contents}
 
@@ -69,6 +69,40 @@ Three primitives implement this:
 - **Leader confirmation RPC.** Before deleting a topic directory, discarding a WAL record, or resetting a fan-out cursor, the node asks the leader "does this still exist?" Only a definite "no" allows destruction.
 - **`Barrier`** is the subtle one. *Winning an election proves a node's Raft log is complete, not that its FSM has applied it.* A just-elected leader restored from an old snapshot legally serves stale reads while replay finishes. So "I am the leader, my state is the authority" is valid only after `raft.Barrier()` has blocked until the FSM is fully applied, and the state must be read again *after* the barrier.
 
+## Restarts {#restarts}
+
+**Unreleased:** in master, not in v3.0.1.
+
+`fsm.db` outlives the process, and Raft hands the FSM its log again on every start: from index 1 when there is no snapshot yet, or the tail after the latest snapshot. Each entry's index is written into `fsm.db` (the `fsm_meta` bucket) in the same transaction as its effects, and a refused entry's index in a small transaction of its own, so the FSM skips every entry the database already holds. No entry is applied twice, and an entry that was refused when it first applied (an attach whose schemas did not match, say) cannot succeed on one node's replay.
+
+The index describes the file only while nothing else writes it. Beside it is the bbolt transaction id of the commit that wrote it; any other write (an older release after a rollback, which ignores `fsm_meta`, or a tool) moves the file's id past it, and the index is no longer trusted. Before Raft starts, the node decides:
+
+| `fsm.db` | Raft state | What happens |
+|---|---|---|
+| holds anything | none (`raft.db` and the snapshots are gone) | Set aside as `fsm.db.stale`; the new log starts on an empty database. |
+| trusted index at or past the latest snapshot | any | The snapshot is not restored (Raft still takes its index and configuration), and the replay skips what `fsm.db` holds: the restart re-applies nothing. |
+| trusted index behind the latest snapshot | a snapshot | The snapshot is restored over `fsm.db`, then the tail after it is applied. |
+| index missing or untrusted | a snapshot | The snapshot is restored over `fsm.db`, as in v3.0.1. |
+| index missing or untrusted | no snapshot, the log starts at index 1 | Set aside as `fsm.db.stale` and rebuilt from the log, one synced transaction per entry. This is the first restart after upgrading from v3.0.x on a cluster with no snapshot yet. |
+| index missing or untrusted | no snapshot, the log is compacted | Kept and replayed onto as it is, logged at error: there is nothing to rebuild from. |
+
+A snapshot is not taken while `fsm.db` is ahead of what the replay has handed it since the start. Raft labels the image with its own applied index, and a node that restores an image whose content ran past its label would replay entries on top of it. The replay closes the gap in milliseconds, since it only skips.
+
+## When a node stops applying {#fail-stop}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Every node must apply every committed entry, in order, or its replica parts from the others for good. Two failures are local to one node, and that node stops instead of skipping the entry:
+
+- **An entry type it does not know.** A newer release proposed it. A leader proposes a new entry type only once every member reports a release that knows it, so this means a node runs an older image than the rest of the cluster.
+- **A write its disk refuses.** bbolt allocates pages when it commits, so a full volume or an I/O error shows up as a failed commit. The node retries for up to 30 s (100 ms doubling to 5 s), logging `metastore: could not write raft entry; retrying` once, then stops.
+
+A refused entry is neither: a topic that already exists, a compare-and-set that missed, a schema out of order are refused the same way on every node, so they are answered and counted as applied. So is an entry whose bytes do not decode, which every node's log holds alike (it is logged at error).
+
+A node that stops logs `metastore: stopped applying raft entries` at error level with the entry's index and type and its own build, shuts Raft down (it no longer votes, leads or acknowledges writes its replica lacks), answers metadata writes and barriers with a `503`-class error, reports not ready, and exits non-zero. The entry is not counted as applied, so a restart replays it: once the disk has room, or on the cluster's release, it applies; until then the node stops again on the same entry, a crash loop with the reason in its log ([Troubleshooting](../operate/troubleshooting.md#log-metastore-stopped)). Why not keep running: a node whose replica is stuck would route requests and decide partition ownership from a view the rest of the cluster has moved past, while a stopped node is a dead member the others route around.
+
+A database or snapshot that has applied an entry type newer than the build knows is refused too: the node does not open such an `fsm.db` (and leaves it untouched), and stops rather than install such a snapshot.
+
 ## Leader and controller {#controller}
 
 The Raft leader is also the **cluster controller**. It:
@@ -93,11 +127,12 @@ The first seconds of a cluster need care. A partition placed on the only member 
 
 | Thing | Value |
 |---|---|
-| FSM store | bbolt, buckets: `topics`, `schemas`, `assignments`, `members`, `users` |
+| FSM store | bbolt (`fsm.db`), buckets: `topics`, `schemas`, `assignments`, `members`, `users`, `removed_members`, and `fsm_meta` (applied index, the transaction that wrote it, newest entry type applied) |
 | Raft log store | boltdb (`raft.db`); snapshots: file store, **2 retained** |
 | Heartbeat / dead marking | every 5s / after 30s silence |
 | `AppliedCaughtUp` contact freshness | leader contact within 5s (followers) |
 | `Barrier` timeout | 5s |
+| Failed metastore write | retried 100 ms doubling to 5 s, for up to 30 s, then the node stops ([When a node stops applying](#fail-stop)) |
 | Startup reconcile wait for caught-up | up to 60s, then the destructive sweep is skipped rather than rushed |
 
 Schema history is **append-only** and capped at 1000 versions per topic. `opPutSchema` is applied only when the version is exactly the topic's persisted latest plus one and within the cap (and the same for every fan-out child's copy). The proposer (the topics manager on the leader) reads the persisted history, checks compatibility against the persisted latest, and proposes latest plus one. A proposer working from a stale view can therefore never overwrite an earlier version on any replica; it gets `ErrAlreadyExists`, reads again and retries.
