@@ -45,6 +45,7 @@ type pendingFlip struct {
 	res           CopyResult
 	expectID      string
 	installed     os.FileInfo
+	marker        messaging.MoveMarker // the marker the install wrote into its copy
 	forcePromoted bool
 	token         string
 	sourceAddr    string
@@ -395,7 +396,7 @@ func (w *moveWorker) resolvePending(ctx context.Context) bool {
 		}
 		r.logger.Warn("move: the leader confirms the flip did not and cannot happen; moving the installed copy back to staging",
 			"topic", w.topic, "partition", w.partition, "source", w.source, "reason", v.why)
-		restored, err := r.rollbackInstall(w.topic, w.partition, p.expectID, p.installed, w.staging)
+		restored, err := r.rollbackInstall(w.topic, w.partition, p.expectID, p.installed, p.marker, w.staging)
 		if err != nil {
 			r.logger.Warn("move: roll back install", "topic", w.topic, "partition", w.partition, "err", err)
 		}
@@ -484,7 +485,7 @@ func (w *moveWorker) rollbackPending(reason string) {
 	w.pending = nil
 	r.logger.Warn("move: moving the installed copy back to staging; the flip did not commit and the copy must be drained again",
 		"topic", w.topic, "partition", w.partition, "reason", reason)
-	restored, err := r.rollbackInstall(w.topic, w.partition, p.expectID, p.installed, w.staging)
+	restored, err := r.rollbackInstall(w.topic, w.partition, p.expectID, p.installed, p.marker, w.staging)
 	if err != nil {
 		r.logger.Warn("move: roll back install", "topic", w.topic, "partition", w.partition, "err", err)
 	}

@@ -950,12 +950,16 @@ func TestMoveRunnerUndoesAnInstallOnlyOnAReadStartedAfterTheSettleWindow(t *test
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	marker := messaging.MoveMarker{Source: "narad-src", HighWatermark: 3, InstalledAtUnixMs: 1, DurableAtUnixMs: 1}
+	if err := messaging.WriteMoveMarker(dir, marker); err != nil {
+		t.Fatal(err)
+	}
 	installed, err := os.Stat(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	w := &moveWorker{r: r, topic: "orders", partition: 0, source: "narad-src", staging: r.stagingDir("orders", 0), started: time.Now()}
-	w.pending = &pendingFlip{installed: installed, since: clock.Now(), unknownAt: clock.Now()}
+	w.pending = &pendingFlip{installed: installed, marker: marker, since: clock.Now(), unknownAt: clock.Now()}
 
 	// The read starts a second before the window closes and returns a
 	// second after it.
@@ -1226,6 +1230,65 @@ func TestMoveRunnerFlipsAPendingInstallAsForcePromoteWhenTheSourceDies(t *testin
 		t.Fatalf("owner %s, want narad-dst", owner)
 	}
 	requireInstalledCopy(t, dataDir, wantHWM, payloads)
+}
+
+// On Linux a directory removed and created again can get the freed
+// inode number back at once, so the partition's path can name a
+// successor directory that os.SameFile takes for the install. The
+// rollback must still leave it alone: it moves a directory only when it
+// also holds the move marker the install wrote. The successor's own
+// file identity is passed as the install's, which is what inode reuse
+// produces.
+func TestRollbackLeavesASuccessorThatReusedTheInstallsInode(t *testing.T) {
+	dataDir := t.TempDir()
+	r := NewMoveRunner(&fakeMoveStore{}, "narad-dst", dataDir, movePeerFake{}, nil, nil, nil, MoveConfig{})
+	dir := r.partitionDir("orders", 0)
+	marker := messaging.MoveMarker{Source: "narad-src", HighWatermark: 10, InstalledAtUnixMs: 1, DurableAtUnixMs: 1}
+
+	for _, tc := range []struct {
+		name      string
+		successor func(t *testing.T)
+		wantMoved bool
+	}{
+		{"a successor with no marker (fresh produce)", func(t *testing.T) { buildSourcePartition(t, dir, 7) }, false},
+		{"a successor installed by another move", func(t *testing.T) {
+			buildSourcePartition(t, dir, 7)
+			other := marker
+			other.InstalledAtUnixMs = 2
+			if err := messaging.WriteMoveMarker(dir, other); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"control: the install itself", func(t *testing.T) {
+			buildSourcePartition(t, dir, 7)
+			if err := messaging.WriteMoveMarker(dir, marker); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = os.RemoveAll(dir)
+			_ = os.RemoveAll(r.stagingDir("orders", 0))
+			tc.successor(t)
+			now, err := os.Stat(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restored, err := r.rollbackInstall("orders", 0, "", now, marker, r.stagingDir("orders", 0))
+			if err != nil {
+				t.Fatalf("rollbackInstall: %v", err)
+			}
+			if restored != tc.wantMoved {
+				t.Fatalf("rollback moved the directory = %v, want %v", restored, tc.wantMoved)
+			}
+			if tc.wantMoved {
+				return
+			}
+			if n := nextOffsetAt(t, dir); n != 7 {
+				t.Fatalf("LOSS: the successor at the partition's path recovers next offset %d, want 7", n)
+			}
+		})
+	}
 }
 
 const (

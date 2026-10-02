@@ -636,14 +636,15 @@ func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResu
 	// reads it (through the transfer info) to refuse deleting a local copy
 	// that is ahead of the promoted HWM, and the fan-out reconciler reads
 	// it to tell a lost cursor from a fresh attach.
-	if err := messaging.WriteMoveMarker(stagingDir, messaging.MoveMarker{
+	marker := messaging.MoveMarker{
 		Source:            source,
 		HighWatermark:     res.HighWatermark,
 		ForcePromoted:     forcePromoted,
 		InstalledAtUnixMs: time.Now().UnixMilli(),
 		DurableAtUnixMs:   durableAt.UnixMilli(),
 		Children:          r.linkedChildren(ctx, topicName),
-	}); err != nil {
+	}
+	if err := messaging.WriteMoveMarker(stagingDir, marker); err != nil {
 		r.logger.Warn("move: write move marker; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
@@ -676,7 +677,7 @@ func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResu
 	resetConsumerState()
 	w.movedBack = false
 	w.pending = &pendingFlip{
-		res: res, expectID: expectID, installed: installed, forcePromoted: forcePromoted,
+		res: res, expectID: expectID, installed: installed, marker: marker, forcePromoted: forcePromoted,
 		token: token, sourceAddr: sourceAddr, since: r.now(),
 	}
 	if err := w.proposeFlip(ctx); err != nil {
@@ -874,15 +875,20 @@ func (r *MoveRunner) setAsideLiveCopy(topicName string, partition int, dir strin
 // successor's partition under the path, while the flip was in flight. So
 // the rollback runs like the install, under the topic's guard with the
 // partition's log closed, and only while the topic marker still names
-// expectID and the path still names the directory install put there
-// (installed; nil refuses). Otherwise the copy was quarantined with the
-// rest of its incarnation's directory, and the sweep reclaims it.
+// expectID and the path still names the directory install put there:
+// the same directory (installed; nil refuses) holding the move marker
+// install wrote (marker). The marker check is what tells the install
+// from a successor: on Linux a directory removed and created again can
+// get the freed inode number back at once, so the same file identity
+// alone does not prove it is the install. Otherwise the copy was
+// quarantined with the rest of its incarnation's directory, and the
+// sweep reclaims it.
 //
 // It renames rather than deletes: the rollback runs on the leader's word,
 // and a copy that is moved back can be installed again, while a deleted
 // one is gone. restored reports that staging holds the copy again, byte
 // for byte what the session staged, so the session can resume from it.
-func (r *MoveRunner) rollbackInstall(topicName string, partition int, expectID string, installed os.FileInfo, staging string) (restored bool, err error) {
+func (r *MoveRunner) rollbackInstall(topicName string, partition int, expectID string, installed os.FileInfo, marker messaging.MoveMarker, staging string) (restored bool, err error) {
 	dir := r.partitionDir(topicName, partition)
 	err = r.replacePartitionDir(topicName, partition, func() error {
 		if err := r.checkTopicIncarnation(topicName, expectID); err != nil {
@@ -897,7 +903,7 @@ func (r *MoveRunner) rollbackInstall(topicName string, partition int, expectID s
 		if err != nil {
 			return err
 		}
-		if installed == nil || !os.SameFile(now, installed) {
+		if installed == nil || !os.SameFile(now, installed) || !holdsMoveMarker(dir, marker) {
 			r.logger.Info("move: the partition's path names another directory than the installed copy; left in place",
 				"topic", topicName, "partition", partition)
 			return nil
@@ -915,6 +921,20 @@ func (r *MoveRunner) rollbackInstall(topicName string, partition int, expectID s
 		return nil
 	})
 	return restored, err
+}
+
+// holdsMoveMarker reports whether dir holds the move marker want, the
+// one an install wrote into its copy. A directory created since (fresh
+// produce, another move's install) holds none or another one. Only the
+// identifying fields are compared; the children map is informational.
+func holdsMoveMarker(dir string, want messaging.MoveMarker) bool {
+	got, ok, err := messaging.ReadMoveMarker(dir)
+	return err == nil && ok &&
+		got.Source == want.Source &&
+		got.HighWatermark == want.HighWatermark &&
+		got.ForcePromoted == want.ForcePromoted &&
+		got.InstalledAtUnixMs == want.InstalledAtUnixMs &&
+		got.DurableAtUnixMs == want.DurableAtUnixMs
 }
 
 // replacePartitionDir runs fn, which replaces or removes the partition's
