@@ -234,6 +234,7 @@ type fakeMoveStore struct {
 	deadAfter    int    // >0: GetMember(source) reports MemberDead from this call on
 	memberCalls  int
 	topics       []topic.Topic // nil: a single "orders" topic
+	assignErr    error         // returned by GetAssignment when set
 }
 
 func (s *fakeMoveStore) AppliedCaughtUp() bool { return true }
@@ -241,6 +242,9 @@ func (s *fakeMoveStore) Barrier() error        { return nil }
 func (s *fakeMoveStore) GetAssignment(string, int) (metastore.Assignment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.assignErr != nil {
+		return metastore.Assignment{}, s.assignErr
+	}
 	return s.assignment, nil
 }
 func (s *fakeMoveStore) IsLeader() bool { return !s.notLeader }

@@ -692,22 +692,27 @@ func TestMoveRunnerDropsARecopyWhenAnEarlierWorkersInstallFlipped(t *testing.T) 
 // a flip on a node that owns the partition by then: only a path holding
 // an install from the move's source, with no install of this worker
 // moved back, makes staging redundant.
-func TestMoveWorkerKeepsAnOwnedStagingCopyOnlyWhenItMayHoldTheRecords(t *testing.T) {
+func TestMoveWorkerSetsAsideAnOwnedStagingCopyOnlyWhenItMayHoldTheRecords(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		movedBack  bool
-		pathSource string // "" for no move marker at the path
-		pathLog    bool   // the path holds a log with a record
-		wantKept   bool
+		name         string
+		movedBack    bool
+		pathSource   string // "" for no move marker at the path
+		pathLog      bool   // the path holds a log with a record
+		ownerUnknown bool   // the assignment read fails
+		wantSetAside bool
 	}{
 		{name: "an earlier install from the source is the partition", pathSource: "narad-src"},
-		{name: "this worker moved its install back", movedBack: true, pathLog: true, wantKept: true},
-		{name: "nothing under the partition's path", wantKept: true},
-		{name: "the path holds records that came from no move", pathLog: true, wantKept: true},
-		{name: "the path holds an install from another source", pathSource: "narad-other", wantKept: true},
+		{name: "this worker moved its install back", movedBack: true, pathLog: true, wantSetAside: true},
+		{name: "nothing under the partition's path", wantSetAside: true},
+		{name: "the path holds records that came from no move", pathLog: true, wantSetAside: true},
+		{name: "the path holds an install from another source", pathSource: "narad-other", wantSetAside: true},
+		{name: "the owner cannot be read after this worker moved its install back", movedBack: true, ownerUnknown: true, wantSetAside: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &fakeMoveStore{assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-dst"}}
+			if tc.ownerUnknown {
+				store.assignErr = errors.New("metastore unavailable")
+			}
 			dataDir := t.TempDir()
 			r := NewMoveRunner(store, "narad-dst", dataDir, movePeerFake{}, nil, nil, nil, MoveConfig{})
 			w := &moveWorker{r: r, topic: "orders", partition: 0, source: "narad-src", staging: r.stagingDir("orders", 0), movedBack: tc.movedBack}
@@ -725,9 +730,23 @@ func TestMoveWorkerKeepsAnOwnedStagingCopyOnlyWhenItMayHoldTheRecords(t *testing
 				}
 			}
 			w.finish()
-			_, err := os.Stat(w.staging)
-			if kept := err == nil; kept != tc.wantKept {
-				t.Fatalf("staging kept = %v (stat err %v), want %v", kept, err, tc.wantKept)
+			if _, err := os.Stat(w.staging); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the staging copy is still at the staging path (stat err %v): the next worker's start clears that path", err)
+			}
+			q := quarantinesOf(t, w.staging)
+			if got := len(q) == 1; got != tc.wantSetAside {
+				t.Fatalf("staging set aside = %v (quarantines %v), want %v", got, q, tc.wantSetAside)
+			}
+			if !tc.wantSetAside {
+				return
+			}
+			// The next move of the partition onto this node starts by
+			// clearing the staging path; the copy set aside survives it.
+			if err := os.RemoveAll(r.stagingDir("orders", 0)); err != nil {
+				t.Fatal(err)
+			}
+			if n := nextOffsetAt(t, q[0]); n != 3 {
+				t.Fatalf("the copy set aside recovers next offset %d, want 3", n)
 			}
 		})
 	}

@@ -90,8 +90,10 @@ func TestStaleCopyOwnerGuardDecisions(t *testing.T) {
 		},
 		{
 			name: "owner's marker records a move from another node: set aside",
-			info: messaging.PartitionTransferInfo{Segments: healthy, HighWatermark: 25,
-				MoveMarker: &messaging.MoveMarker{Source: "narad-other", HighWatermark: 25}},
+			info: messaging.PartitionTransferInfo{
+				Segments: healthy, HighWatermark: 25,
+				MoveMarker: &messaging.MoveMarker{Source: "narad-other", HighWatermark: 25},
+			},
 			local:    local,
 			setAside: true,
 		},

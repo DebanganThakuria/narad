@@ -103,10 +103,14 @@ func (w *moveWorker) observeDone() {
 // finish runs as the worker exits. A worker that did not flip removes
 // its staging copy: a worker spawned again for the same move copies
 // afresh, and one that is not wanted any more must not leave a partition
-// copy on disk. Staging is kept when the owner cannot be read, and when
-// this node owns the partition by now and staging may hold records the
-// partition's path lacks (see ownedStagingIsRedundant); a partition with
-// no assignment (its topic is gone) has no owner. A worker cancelled
+// copy on disk. Staging is kept when the owner cannot be read (a fresh
+// copy from the source, which the next worker clears), and set aside
+// (quarantined, where no worker clears it) when it may hold records
+// that exist nowhere else: this node owns the partition by now and
+// staging may hold records the partition's path lacks (see
+// ownedStagingIsRedundant), or this worker moved its install back to
+// staging and the owner cannot be read. A partition with no assignment
+// (its topic is gone) has no owner. A worker cancelled
 // with a flip pending leaves the install at the partition's path: if the
 // flip committed it is the partition, and if not, the next worker's
 // install quarantines it (setAsideLiveCopy; error-level log) or the
@@ -122,6 +126,13 @@ func (w *moveWorker) finish() {
 		// clears staging when it starts. (No assignment at all is a
 		// deleted topic: nobody owns it, so staging goes.)
 		if _, serr := os.Stat(w.staging); serr == nil {
+			if w.movedBack {
+				// Staging holds the install this worker moved back; if
+				// its flip committed after all, it is the partition.
+				w.setAsideStaging("move: set aside the staging copy this move moved back, since the partition's owner cannot be read; it may hold the partition's records. Operator action required",
+					"partition_dir", r.partitionDir(w.topic, w.partition), "err", err)
+				return
+			}
 			r.logger.Warn("move: could not read the partition's owner; keeping the staging copy", "topic", w.topic, "partition", w.partition, "staging", w.staging, "err", err)
 		}
 		return
@@ -136,15 +147,32 @@ func (w *moveWorker) finish() {
 				"topic", w.topic, "partition", w.partition, "staging", w.staging, "partition_dir", dir)
 		} else {
 			segs, _ := listLocalSegments(dir)
-			r.logger.Error("move: keeping the staging copy of a partition this node owns; the partition's records may not all be under its path. Operator action required",
-				"topic", w.topic, "partition", w.partition, "staging", w.staging, "partition_dir", dir,
-				"moved_back", w.movedBack, "partition_dir_has_records", holdsRecords(segs))
+			w.setAsideStaging("move: set aside the staging copy of a partition this node owns; the partition's records may not all be under its path. Operator action required",
+				"partition_dir", dir, "moved_back", w.movedBack, "partition_dir_has_records", holdsRecords(segs))
 			return
 		}
 	}
 	if err := os.RemoveAll(w.staging); err != nil {
 		r.logger.Warn("move: remove the staging copy of a move that ended without a flip", "dir", w.staging, "err", err)
 	}
+}
+
+// setAsideStaging renames this worker's staging copy aside
+// (QuarantinePartitionDir), where no later worker's start clears it, and
+// logs msg at error level with where it went. The copy is never judged
+// or deleted here. If the rename fails, the copy stays at the staging
+// path, and the error line says the next move of the partition onto
+// this node would clear it.
+func (w *moveWorker) setAsideStaging(msg string, args ...any) {
+	r := w.r
+	base := []any{"topic", w.topic, "partition", w.partition}
+	quarantined, err := messaging.QuarantinePartitionDir(w.staging)
+	if err != nil {
+		r.logger.Error(msg+"; setting it aside failed, so it is still at the staging path, which the next move of this partition onto this node clears: copy it off now",
+			append(append(base, "staging", w.staging, "set_aside_err", err), args...)...)
+		return
+	}
+	r.logger.Error(msg, append(append(base, "quarantine_dir", quarantined), args...)...)
 }
 
 // ownedStagingIsRedundant reports whether the staging copy of a worker
