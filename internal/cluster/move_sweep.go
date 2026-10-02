@@ -183,7 +183,7 @@ func (r *MoveRunner) promotedPosition(ctx context.Context, ownerID, topicName st
 			"installed_at", time.UnixMilli(info.MoveMarker.InstalledAtUnixMs), "window", moveUnsyncedCopyWriteback)
 		return messaging.ReclaimGuard{}, false
 	}
-	return ownerReclaimGuard(info, local, retention, now), true
+	return ownerReclaimGuard(info, local, r.selfID, retention, now), true
 }
 
 // reclaim runs the guarded reclaim. A broker that cannot honor the guard

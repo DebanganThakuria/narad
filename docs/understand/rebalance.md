@@ -158,6 +158,7 @@ The new owner can also hold **less** than the move gave it: it came back on an e
 
 - the owner lists no records;
 - the owner holds records but no move marker, so they did not come from this copy (every release since v2.2.0 writes a marker on install);
+- the owner's move marker records a move from another node: the partition moved on again before this sweep ran, so the marker vouches for the records that node gave the owner, not for this copy's (past a force-promote away from this node, the records it committed while cut off never left it);
 - a segment below the vouched position is missing from the owner's listing, or a sealed one is shorter there.
 
 Otherwise it reclaims with a guard at the vouched position. It defers only while the owner cannot be asked or its own copy cannot be listed. Releases through v3.0.1 reclaimed without any check when the owner reported no marker.

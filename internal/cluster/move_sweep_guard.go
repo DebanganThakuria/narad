@@ -24,6 +24,9 @@ package cluster
 //     ones: set aside;
 //   - the owner holds records but no move marker, so they did not come
 //     from this copy: set aside;
+//   - the owner's move marker records a move from another node (the
+//     partition moved on again before this sweep ran), so it vouches
+//     for the records that node gave it, not for this copy's: set aside;
 //   - a local segment below the vouched position is missing from the
 //     owner's listing (and not expired), or a sealed one wholly below it
 //     is longer than the owner's: set aside;
@@ -100,13 +103,13 @@ func listLocalSegments(dir string) ([]localSegment, error) {
 }
 
 // ownerReclaimGuard decides from the new owner's listing (info) and the
-// local copy's segments how the local copy may be reclaimed. The guard is
-// always KNOWN; SetAside is set (with the reason) when the owner cannot
-// vouch for the copy. retention is the topic's age bound (zero keeps
-// forever): a local segment older than it holds nothing retention would
-// not have removed anyway, so the owner no longer listing it is not a
-// gap.
-func ownerReclaimGuard(info messaging.PartitionTransferInfo, local []localSegment, retention time.Duration, now time.Time) messaging.ReclaimGuard {
+// local copy's segments how this node's (selfID's) local copy may be
+// reclaimed. The guard is always KNOWN; SetAside is set (with the
+// reason) when the owner cannot vouch for the copy. retention is the
+// topic's age bound (zero keeps forever): a local segment older than it
+// holds nothing retention would not have removed anyway, so the owner no
+// longer listing it is not a gap.
+func ownerReclaimGuard(info messaging.PartitionTransferInfo, local []localSegment, selfID string, retention time.Duration, now time.Time) messaging.ReclaimGuard {
 	// The position the owner vouches for: its live high-watermark, capped
 	// at the promoted one when the move left a marker. An owner whose hwm
 	// is below the promoted position lost records it was given; the local
@@ -145,6 +148,15 @@ func ownerReclaimGuard(info messaging.PartitionTransferInfo, local []localSegmen
 		// Its records are not these even at the same offsets, and its
 		// high-watermark vouches for none of them.
 		return setAside("the owner holds records (hwm %d) but no move marker, so they did not come from this copy", info.HighWatermark)
+	}
+	if info.MoveMarker.Source != selfID {
+		// The owner got the partition from another node, not from this
+		// copy: the partition moved on again before this sweep ran, or
+		// this copy is an install that never flipped. That node's
+		// records need not be this copy's at the same offsets: past a
+		// force-promote away from this node, the records it committed
+		// while cut off never left it.
+		return setAside("the owner's move marker records a move from %s, not from this node, so it vouches for none of this copy's records", info.MoveMarker.Source)
 	}
 	for i, s := range local {
 		if s.size == 0 || s.base >= vouched {

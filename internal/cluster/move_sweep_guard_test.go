@@ -37,7 +37,8 @@ func TestStaleCopyOwnerGuardDecisions(t *testing.T) {
 	seg := func(base, size int64, sealed bool) storage.SegmentInfo {
 		return storage.SegmentInfo{BaseOffset: base, SizeBytes: size, Sealed: sealed}
 	}
-	// The local copy: three sealed segments of 5 records and a tail of 2.
+	// This node is narad-src. The local copy: three sealed segments of 5
+	// records and a tail of 2.
 	local := []localSegment{
 		{base: 0, size: 500, modTime: fresh},
 		{base: 5, size: 500, modTime: fresh},
@@ -84,6 +85,13 @@ func TestStaleCopyOwnerGuardDecisions(t *testing.T) {
 		{
 			name:     "owner holds records but no move marker: set aside",
 			info:     messaging.PartitionTransferInfo{Segments: healthy, HighWatermark: 40},
+			local:    local,
+			setAside: true,
+		},
+		{
+			name: "owner's marker records a move from another node: set aside",
+			info: messaging.PartitionTransferInfo{Segments: healthy, HighWatermark: 25,
+				MoveMarker: &messaging.MoveMarker{Source: "narad-other", HighWatermark: 25}},
 			local:    local,
 			setAside: true,
 		},
@@ -145,7 +153,7 @@ func TestStaleCopyOwnerGuardDecisions(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			guard := ownerReclaimGuard(tc.info, tc.local, tc.retention, now)
+			guard := ownerReclaimGuard(tc.info, tc.local, "narad-src", tc.retention, now)
 			if !guard.Known {
 				t.Fatalf("guard %+v is not KNOWN: the sweep must never reclaim unguarded", guard)
 			}
@@ -542,6 +550,41 @@ func TestStaleCopySweepNeverDeletesRecordsTheNewOwnerLacks(t *testing.T) {
 		seen := sweepOnSource(t, src, dst.engine)
 		if len(seen) != 1 || seen[0].MoveMarker == nil || seen[0].MoveMarker.HighWatermark != 10 || seen[0].HighWatermark != 18 {
 			t.Fatalf("setup: the owner's listing is %+v, want its marker at 10 and hwm 18", seen)
+		}
+		requireSetAside(t, src, 15)
+	})
+
+	t.Run("the partition moved on again after a force-promote", func(t *testing.T) {
+		// The new owner promoted at 10 while the old owner, cut off,
+		// committed 10..14. Before the old owner's sweep ran, the
+		// partition moved on to a third node, whose marker names the
+		// node it got the partition from at a position (18) past the
+		// old copy's 15 records. That marker vouches for the records
+		// the third node was given, not for this copy's: records
+		// 10..14 exist only here. Production-sized segments keep every
+		// record in one tail segment, which no size check sees.
+		src := newEngineNodeWithSegments(t, "narad-src", "narad-src", "", 0)
+		dst := newEngineNodeWithSegments(t, "narad-dst", "narad-src", "narad-dst", 0)
+		third := newEngineNodeWithSegments(t, "narad-third", "narad-dst", "narad-third", 0)
+		for i := range 10 {
+			src.produce(t, fmt.Sprintf("pre-move-%d", i))
+		}
+		moveInto(t, dst, src.engine, "narad-src", "narad-dst")
+		dst.flip(t, "narad-src", "narad-dst")
+		src.engine.ResumeProduce("orders", 0)
+		for i := range 5 {
+			src.produce(t, fmt.Sprintf("cut-off-%d", i))
+		}
+		src.flip(t, "narad-src", "narad-dst")
+		for i := range 8 {
+			dst.produce(t, fmt.Sprintf("new-owner-%d", i))
+		}
+		moveInto(t, third, dst.engine, "narad-dst", "narad-third")
+		third.flip(t, "narad-dst", "narad-third")
+		seen := sweepAs(t, src, "narad-src", metastore.Assignment{OwnerID: "narad-third"}, third.engine)
+		if len(seen) != 1 || seen[0].MoveMarker == nil || seen[0].MoveMarker.Source != "narad-dst" ||
+			seen[0].MoveMarker.HighWatermark != 18 || seen[0].HighWatermark != 18 {
+			t.Fatalf("setup: the owner's listing is %+v, want a marker from narad-dst at 18 and hwm 18", seen)
 		}
 		requireSetAside(t, src, 15)
 	})
