@@ -58,8 +58,11 @@ const coldWalkPause = 10 * time.Millisecond
 func (g *Logs) ReaperRestarts() int64 { return storage.ReaperRestarts() }
 
 // RunColdRetention runs the cold-partition retention walk every interval
-// until ctx is cancelled. interval <= 0 disables it and returns at once.
+// until ctx is cancelled. interval <= 0 disables the walk and returns at
+// once. Either way it starts the background pass that applies retention
+// alters to open logs (startRetentionFollow), once, bound to ctx.
 func (g *Logs) RunColdRetention(ctx context.Context, interval time.Duration) {
+	g.startRetentionFollow(ctx)
 	if interval <= 0 {
 		return
 	}
@@ -85,7 +88,16 @@ func (g *Logs) RunColdRetention(ctx context.Context, interval time.Duration) {
 // ColdRetentionOnce runs one walk and reports how many closed partitions
 // it opened, swept and closed. The first error stops the walk of that
 // topic only; the returned error is the first one seen.
+//
+// No walk runs while the local metastore replica is behind the leader:
+// the walk opens closed logs under the replica's retention, which on a
+// lagging replica (a restart, a partition) can predate an alter that
+// raised it. The next interval tries again.
 func (g *Logs) ColdRetentionOnce(ctx context.Context, now time.Time) (int, error) {
+	if !g.replicaCaughtUp() {
+		g.logger.Debug("cold retention walk skipped: the local metastore replica is not caught up")
+		return 0, nil
+	}
 	topicsRoot := filepath.Join(g.dataDir, "topics")
 	entries, err := os.ReadDir(topicsRoot)
 	if errors.Is(err, os.ErrNotExist) {

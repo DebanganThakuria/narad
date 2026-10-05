@@ -4,8 +4,10 @@
 // Logs is the single owner of the map from (topic, partition) to
 // *storage.Log. Every other broker subpackage that needs to read or
 // write a partition's log goes through Logs — there is no sharing of
-// the underlying map. UpdateTopicRetention calls CloseTopic so the next
-// access reopens with fresh options; DeleteTopic purges (PurgeTopic).
+// the underlying map. The node that runs a retention alter calls
+// CloseTopic so the next access reopens with fresh options; every other
+// owner applies the alter to its open logs in place once its replica has
+// it (retention_follow.go). DeleteTopic purges (PurgeTopic).
 package runtime
 
 import (
@@ -95,6 +97,10 @@ type Logs struct {
 	// quarantine is the inventory QuarantinedCopies last took (nil
 	// before the first): the quarantine gauges read it on scrape.
 	quarantine atomic.Pointer[QuarantineSummary]
+
+	// followOnce starts the background pass that applies retention
+	// alters to open logs (see startRetentionFollow) once.
+	followOnce sync.Once
 }
 
 // logKey names one partition log: the key of logs, produceSync and
@@ -357,7 +363,13 @@ func (g *Logs) openGuarded(topicName string, idx int, walk bool) (l *storage.Log
 	if open {
 		if e.incarnation == incarnation {
 			// The record changed (an alter, or a version bump) but the
-			// incarnation did not: the open log is still the right one.
+			// incarnation did not: the open log is still the right one,
+			// under the record's retention. An alter reaches this node
+			// only through its replica (the node that ran it closed its
+			// own logs), so the bound is applied here, in place.
+			if g.metastore != nil {
+				g.applyRetention(topicName, idx, e.log, opts.Retention.MaxAge)
+			}
 			e.version.Store(version)
 			e.stamp()
 			return e.log, e, nil

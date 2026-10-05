@@ -52,8 +52,11 @@ const evictionTick = time.Minute
 
 // RunIdleEviction closes partition logs untouched for idleAfter,
 // blocking until ctx is cancelled. idleAfter <= 0 disables eviction
-// and returns immediately.
+// and returns immediately. Either way it starts the background pass
+// that applies retention alters to open logs (startRetentionFollow),
+// once, bound to ctx.
 func (g *Logs) RunIdleEviction(ctx context.Context, idleAfter time.Duration) {
+	g.startRetentionFollow(ctx)
 	if idleAfter <= 0 {
 		return
 	}
