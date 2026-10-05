@@ -31,7 +31,25 @@ const (
 	opReadmitMember
 	opSetUserPassword
 	opSetUserGrants
+
+	// opEnd is not an entry type: it marks the end of the list. New
+	// entry types go above this line, and a leader proposes one only
+	// once every member reports a release that knows it, so an older
+	// node never meets an entry it cannot apply. One that does stops
+	// applying (see Apply).
+	opEnd
 )
+
+// MaxEntryType is the newest Raft entry type this release applies. An
+// entry above it was proposed by a newer release; Apply stops on it
+// instead of skipping it, and a database or snapshot that records one
+// is refused.
+const MaxEntryType = uint32(opEnd - 1)
+
+// legacyMaxEntryType is the newest entry type every v3.0.x release
+// applies, and so the set a member that reports nothing is assumed to
+// know. Frozen: it never moves when a type is added.
+const legacyMaxEntryType = uint32(opSetUserGrants)
 
 // memberRemovalPayload is the body of opRemoveMember and opReadmitMember.
 // At is a Unix timestamp (seconds) supplied by the proposer so Apply

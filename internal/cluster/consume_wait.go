@@ -232,7 +232,7 @@ func (rt *Router) claimUpTo(ctx context.Context, addr, topicName string, max int
 		req.Max = max
 	}
 	res, err := rt.peer.ConsumeWithin(ctx, addr, consumeProbeTimeout, req)
-	for err == nil && (req.Claim || req.Max > 1) && isTrailingFieldRefusal(res) {
+	for err == nil && (req.Claim || req.Max > 1) && IsTrailingFieldRefusal(res) {
 		// An owner on an earlier release rejects a trailing field it does
 		// not know outright, and the reply does not say which. Drop the
 		// newest first: Max, then the Claim byte, which leaves the plain

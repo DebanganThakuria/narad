@@ -18,6 +18,7 @@ import (
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const applyTimeout = 5 * time.Second
@@ -31,8 +32,8 @@ type Config struct {
 	Peers         []Peer
 	// JoinOnly prevents this node from bootstrapping a cluster when it
 	// has no prior Raft state: it starts with an EMPTY configuration and
-	// waits for the existing leader to admit it via AddVoter (the
-	// OpJoinCluster RPC). Without it, a scale-out node would bootstrap a
+	// waits for the existing leader to admit it (the OpJoinCluster RPC,
+	// AdmitJoiner). Without it, a scale-out node would bootstrap a
 	// phantom cluster from its peer list and never join the real one.
 	JoinOnly bool
 	// Logger receives hashicorp/raft's own log output; nil discards it.
@@ -51,6 +52,13 @@ type Config struct {
 	SnapshotThreshold uint64
 	SnapshotInterval  time.Duration
 	TrailingLogs      uint64
+	// Build names this binary (serve passes its version string) in the
+	// error a node logs when it stops applying Raft entries, so the
+	// operator can tell which release stopped and why.
+	Build string
+	// Registerer, when non-nil, receives the metastore and Raft series
+	// (metrics.go) while the store is open. Nil exports none.
+	Registerer prometheus.Registerer
 }
 
 // startupLog returns cfg.Log or a discarding logger.
@@ -104,10 +112,27 @@ type Store struct {
 	barrierMu      sync.Mutex
 	barrierTerm    atomic.Uint64
 	leaderBarriers atomic.Uint64
+
+	// opened is when New began; a node that has never heard from a
+	// leader reports its last contact as this old.
+	opened time.Time
+	// registerer and collectors are the metrics registered in New and
+	// unregistered by Close.
+	registerer prometheus.Registerer
+	collectors []prometheus.Collector
+
+	// id is this node's Raft server ID.
+	id raft.ServerID
+	// health is the leader's heartbeat view of its peers
+	// (raft_health.go); admitMu serialises join admission
+	// (join_admission.go).
+	health  *raftHealth
+	admitMu sync.Mutex
 }
 
 // New opens or creates the Raft metastore at cfg.DataDir.
 func New(cfg Config) (*Store, error) {
+	opened := time.Now()
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("metastore: mkdir: %w", err)
 	}
@@ -118,7 +143,7 @@ func New(cfg Config) (*Store, error) {
 	// line says what the process was doing if it does wait.
 	fsmPath := filepath.Join(cfg.DataDir, "fsm.db")
 	cfg.startupLog().Info("opening metastore database (waits up to the lock timeout if another process holds it)", "path", fsmPath, "lock_timeout", boltOpenTimeout)
-	fsm, err := newFSM(fsmPath)
+	fsm, err := newFSMWith(fsmPath, fsmOptions{log: cfg.startupLog(), build: cfg.Build})
 	if err != nil {
 		return nil, fmt.Errorf("metastore: fsm: %w", err)
 	}
@@ -126,12 +151,37 @@ func New(cfg Config) (*Store, error) {
 	r, transport, logStore, err := newRaft(cfg, fsm)
 	if err != nil {
 		_ = fsm.db.Close()
+		if stopped := fsm.stopErr(); stopped != nil {
+			// Raft could restore no snapshot because the FSM refused
+			// them; the refusal is the reason worth reporting.
+			return nil, fmt.Errorf("%w (%v)", stopped, err)
+		}
 		return nil, err
 	}
 	if cfg.Log != nil {
 		placementLogger.Store(cfg.Log)
 	}
-	return &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore, logs: logStore, log: cfg.startupLog()}, nil
+	s := &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore, logs: logStore, log: cfg.startupLog(), opened: opened, id: raft.ServerID(cfg.NodeID)}
+	s.health = newRaftHealth(r, cfg.NodeID)
+	// A stopped FSM takes Raft down with it, so the node stops voting,
+	// leading and acknowledging writes its replica lacks. Never from
+	// inside Apply: Shutdown waits for the FSM goroutine.
+	fsm.setOnHalt(func() { _ = r.Shutdown().Error() })
+	s.registerMetrics(cfg.Registerer)
+	return s, nil
+}
+
+// Halted is closed once the FSM has stopped applying Raft entries (an
+// entry type this build does not know, or a write its database refused
+// for good). Raft is shut down by then; serve exits with HaltErr.
+func (s *Store) Halted() <-chan struct{} {
+	return s.fsm.halt.channel()
+}
+
+// HaltErr is why the FSM stopped applying, or nil while it applies. It
+// wraps ErrStoppedApplying and errs.ErrUnavailable.
+func (s *Store) HaltErr() error {
+	return s.fsm.stopErr()
 }
 
 // newRaft wires up the Raft node: log/stable store, snapshot store, TCP
@@ -164,6 +214,16 @@ func newRaft(cfg Config, fsm *fsmState) (r *raft.Raft, transport *commitObservin
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("metastore: snapshots: %w", err)
 	}
+	// Read before NewRaft, which restores the latest snapshot into the
+	// FSM and needs to know whether to.
+	hasState, err := raft.HasExistingState(boltStore, boltStore, snapStore)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("metastore: check state: %w", err)
+	}
+	restore, err := prepareFSMForStart(cfg.startupLog(), fsm, hasState, cfg.JoinOnly, boltStore, snapStore)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
 	rawTransport, advertiseAddr, err := newTransport(cfg, logOutput)
 	if err != nil {
@@ -185,6 +245,7 @@ func newRaft(cfg Config, fsm *fsmState) (r *raft.Raft, transport *commitObservin
 	if cfg.TrailingLogs > 0 {
 		rc.TrailingLogs = cfg.TrailingLogs
 	}
+	rc.NoSnapshotRestoreOnStart = !restore
 
 	r, err = raft.NewRaft(rc, fsm, boltStore, boltStore, snapStore, transport)
 	if err != nil {
@@ -192,10 +253,6 @@ func newRaft(cfg Config, fsm *fsmState) (r *raft.Raft, transport *commitObservin
 		return nil, nil, nil, fmt.Errorf("metastore: raft: %w", err)
 	}
 
-	hasState, err := raft.HasExistingState(boltStore, boltStore, snapStore)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("metastore: check state: %w", err)
-	}
 	if !hasState && !cfg.JoinOnly {
 		if err := bootstrapCluster(r, cfg, advertiseAddr); err != nil {
 			return nil, nil, nil, err

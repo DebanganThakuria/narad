@@ -64,7 +64,9 @@ helm upgrade narad ./charts/narad -n narad --reuse-values \
   --set replicaCount=5
 ```
 
-Each new pod starts empty and finds it is not one of the initial members, so it asks the leader to admit it instead of creating a cluster of its own. The existing pods are not restarted: the peer list in their pod template stays pinned to the initial members.
+Each new pod starts empty and finds it is not one of the initial members, so it asks the leader to admit it instead of creating a cluster of its own. It does not need the leader in its peer list: a follower's answer names the leader, and the new pod asks it next, so this works after leadership has moved to a pod outside the pinned list. The existing pods are not restarted: the peer list in their pod template stays pinned to the initial members.
+
+The leader admits a new pod as a Raft non-voter: it replicates the cluster's metadata and serves traffic, but does not count toward quorum, so a pod that cannot be reached costs the cluster nothing. Once its copy has caught up it asks again, and the leader promotes it to voter, normally within seconds (and never before the leader has led for 12 s). Until then `narad_raft_nonvoters` is above 0. If it stays above 0, the new pod logs why the leader defers its promotion ([Troubleshooting](troubleshooting.md#nonvoters-stay)).
 
 Once a new node is admitted, the leader rebalances. It computes the fewest partition moves that even out the number of partitions per node, copies each partition to its new owner, and switches ownership over at the end. At most 8 moves run at once, so a large rebalance drains gradually. Watch it with `narad cluster moves` until the list is empty. How a move copies and hands over a partition is in [Rebalance and decommission](../understand/rebalance.md).
 
@@ -128,7 +130,7 @@ This example takes a five-node cluster down to four.
 
     This output comes from a five-node test cluster on one machine, with one topic of 20 partitions.
 
-2. Wait until `narad cluster members` shows `owned_partitions: 0` for `narad-4`. The leader then removes it from the Raft voters, and it drops out of the list. The pod keeps running, reports not ready, and its heartbeats are refused.
+2. Wait until `narad cluster members` shows `owned_partitions: 0` for `narad-4`. The leader then removes it from Raft (as a voter, or as a non-voter if it was never promoted), and it drops out of the list. The pod keeps running, reports not ready, and its heartbeats are refused.
 
 3. Lower `replicaCount`. `allowScaleIn=true` tells the chart the pods it removes were decommissioned; without it, the chart refuses to lower the replica count of a running StatefulSet.
 
@@ -146,7 +148,8 @@ Keep these rules while you scale in:
 - **Do not overlap a decommission with a rolling restart.** A `helm upgrade` that changes the pod template restarts the pods, and a draining node that restarts has no stable source to copy from until it settles. Changing only `replicaCount` does not restart the pods.
 - **A rollback of `replicaCount` is a scale-in.** `helm rollback` to a revision with fewer replicas deletes pods exactly like step 3, without steps 1 and 2. The chart refuses it unless `allowScaleIn` is set; decommission first rather than setting it to get past the refusal.
 - **Keep a node that is not draining alive.** New partitions never go to a draining node. While every live node is draining, for example two draining nodes while the others restart, topic creates and partition increases answer `503` and the leader logs `every live member is being decommissioned` at error level; they succeed again once a node that is not draining is back.
-- **Three voters is the floor.** The leader never removes a node from Raft if that would leave fewer than three voters. A decommission on a three-node cluster moves the partitions away, but the node stays a member. If the leader itself is decommissioned, it hands leadership to another node first.
+- **Three voters is the floor.** The leader never removes a voter from Raft if that would leave fewer than three voters. A decommission on a three-node cluster moves the partitions away, but the node stays a member. If the leader itself is decommissioned, it hands leadership to another node first. A node that is still a non-voter has no vote, so the floor does not hold it back.
+- **Finish a rolling upgrade from 3.0.x before you decommission a non-voter.** A 3.0.x leader removes only voters, so a non-voter it decommissions loses its member record but stays in the Raft configuration, and `narad_raft_nonvoters` stays above 0 ([Troubleshooting](troubleshooting.md#nonvoters-stay)).
 
 ### Reuse a decommissioned name {#reuse-name}
 

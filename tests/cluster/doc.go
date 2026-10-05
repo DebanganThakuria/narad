@@ -14,6 +14,10 @@
 //   - TestReplicaChildKeepsKeylessCopiesApart: a replica child (created
 //     with parent) keeps both copies of every record, keyless ones
 //     included, on different nodes.
+//   - TestFollowerRestartDoesNotReEvaluateAppliedEntries: a follower
+//     restarted before any Raft snapshot skips the entries its metadata
+//     database already holds instead of applying them again, so an
+//     attach the cluster refused stays refused on it.
 //
 // The scenarios take minutes and spawn processes, so they are behind the
 // "cluster" build tag and do not run with a plain go test ./...:

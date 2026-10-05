@@ -42,6 +42,12 @@ func (w *writer) u16(v uint16) {
 	w.buf = append(w.buf, b[:]...)
 }
 
+func (w *writer) u32(v uint32) {
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], v)
+	w.buf = append(w.buf, b[:]...)
+}
+
 func (w *writer) i32(v int32) {
 	var b [4]byte
 	binary.BigEndian.PutUint32(b[:], uint32(v))
@@ -146,6 +152,15 @@ func (r *reader) u16() (uint16, error) {
 	return v, nil
 }
 
+func (r *reader) u32() (uint32, error) {
+	if r.remaining() < 4 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	v := binary.BigEndian.Uint32(r.payload[r.pos : r.pos+4])
+	r.pos += 4
+	return v, nil
+}
+
 func (r *reader) i32() (int32, error) {
 	if r.remaining() < 4 {
 		return 0, io.ErrUnexpectedEOF
@@ -209,7 +224,7 @@ func (r *reader) bytes() ([]byte, error) {
 // payload, it is how an owner on an older release refuses a request
 // carrying a field added since: requesters match its "trailing" to fall
 // back during a rolling upgrade (see the cluster package's
-// isTrailingFieldRefusal), so the wording must stay.
+// IsTrailingFieldRefusal), so the wording must stay.
 const TrailingPayloadError = "trailing node rpc payload data"
 
 // done verifies the payload was consumed exactly; trailing bytes mean

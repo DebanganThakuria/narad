@@ -212,9 +212,10 @@ func FuzzRPCDispatch(f *testing.F) {
 	server.SetMaxConsumeWait(50 * time.Millisecond)
 
 	f.Fuzz(func(t *testing.T, payload []byte) {
-		// A join would add the payload's node to the Raft voter set and
-		// take the single-node store's quorum with it; every other op is
-		// safe against a stub broker and a scratch store.
+		// A join would stage the payload's node in the scratch store's
+		// Raft configuration, which then heartbeats an address nobody
+		// answers for the rest of the run; every other op is safe against
+		// a stub broker and a scratch store.
 		if op, err := nodewire.OperationOf(payload); err == nil && op == nodewire.OpJoinCluster {
 			return
 		}

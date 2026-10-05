@@ -209,6 +209,23 @@ The due lag of a delay child climbs or stays flat above 0 instead of returning t
 
 **Fix.** Bring the child partition's owner back, or fix what the log's `err` names. The cursor resumes where it stopped. How cursors behave: [Fan-out engine](../understand/fanout-engine.md).
 
+### `narad_raft_nonvoters` stays above 0 {#nonvoters-stay}
+
+`narad_raft_nonvoters` stays above 0 for more than a minute after a scale-out or a readmission.
+
+**Cause.** A node joined as a Raft non-voter and has not been promoted to voter ([how promotion works](../understand/cluster-lifecycle.md#join-promotion)). It still replicates and serves traffic; it only does not vote. Either it never asked again (it runs 3.0.x, or its replica has not caught up with the leader), or the leader defers it. A node decommissioned while a 3.0.x node led can also be left behind as a non-voter: that release removes only voters.
+
+**Check.** The log of each pod that joined after the initial members. A deferred node logs `cluster join: caught up as a raft non-voter; the leader defers promotion` at info, with the leader's `reason`, whenever the reason changes. A node that logs nothing of the kind is on an older release or still catching up (its `/readyz` says which).
+
+**Fix.** By `reason`:
+
+- `the leader has led for less than 12s`: nothing; the leader promotes it once it has led that long.
+- `the leader's raft heartbeats to it are failing`: the leader cannot reach the node's Raft address. Check its `NARAD_CLUSTER_ADVERTISE_ADDR`, the network between them (7943/tcp), and the [Raft certificate](#raft-cert-untrusted).
+- `it has no member record yet`, or `its member record is marked dead`: the node is not heartbeating its membership to the leader. Check its log for `member heartbeat failed` (debug level) and the node-RPC port (7942/udp).
+- `it is draining`: the node is being decommissioned, and decommission removes it from Raft once it owns nothing. Cancel the decommission to keep it.
+
+A node on 3.0.x asks for promotion once it runs this release and restarts. A non-voter left behind by a decommission under a 3.0.x leader carries no quorum weight, but the leader keeps sending it heartbeats, and it has no member record, so the decommission cannot simply be run again. To remove it, start its pod with an empty volume (delete its PersistentVolumeClaim first): it is readmitted under its ID, and a decommission run while every node is on this release then takes it out of Raft.
+
 ## Log lines
 
 ### `storage: fsync failed; log poisoned until reopened` {#log-fsync-poisoned}
@@ -221,11 +238,71 @@ Logged at error level with `dir`, `durable_tail` and `err`.
 
 **Fix.** Fix the disk, then restart the pod: the partition is reopened and checked, and the records waiting for it are committed. Why a failed sync is final: [Storage engine](../understand/storage-engine.md#fsync-failure).
 
+### `metastore: stopped applying raft entries` {#log-metastore-stopped}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Logged at error level with `index`, `entry_type`, `build` and `error`, just before the node exits non-zero. The pod restarts and, until the cause is fixed, stops again on the same entry.
+
+**Cause.** The node could not apply a committed metadata change, and stopped rather than skip it ([When a node stops applying](../understand/metastore-and-raft.md#fail-stop)). `error` says which:
+
+- `raft entry at index <n> has entry type <t>, which this build (...) does not know`: a newer release proposed the entry, and this pod runs an older image than the rest of the cluster (a stale tag, or a pod rolled back on its own).
+- `could not write raft entry at index <n> (entry type <t>) to .../fsm.db after retrying for <about 26s>: ...`: the data volume refused the write, usually `no space left on device`, sometimes an I/O error. The time is how long the node actually retried: the retries wait 100 ms doubling to 5 s, and the last one that fits in the 30 s budget ends after about 26 s. The node logged `metastore: could not write raft entry; retrying` at warning level about 26 s before.
+- `the raft snapshot holds raft entry type <t>, written by a newer Narad release`: the leader sent this node a snapshot from a newer release.
+
+**Check.** The image of every pod (`kubectl get pods -n narad -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[0].image`), and the free space and kernel log of the pod's data volume.
+
+**Fix.** Run the cluster's release on the pod, or free space on the volume (or replace it). Nothing needs repair: the entry was never counted as applied, so the restart applies it and the node rejoins. The rest of the cluster keeps working as long as a majority of voters can write; pods that share a full volume all stop.
+
+### `metastore: set aside fsm.db as fsm.db.stale` {#log-metastore-set-aside}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Logged at warning level at start, with `reason` and `stale`.
+
+**Cause.** The node found an `fsm.db` it could not use as the base for its Raft log: one with no applied index this release can trust (written last by v3.0.x: the first restart after an upgrade, or after a rollback and a new upgrade), or, on a node joining a running cluster, one left beside a missing Raft state or one newer than its Raft state (a node that does not join refuses to start in both cases instead: [no Raft state](#log-metastore-no-raft-state), [older Raft state](#log-metastore-raft-state-older)). It moved the file aside and rebuilds the database from the Raft log ([Restarts](../understand/metastore-and-raft.md#restarts)).
+
+**Fix.** None. Delete `fsm.db.stale` (next to `fsm.db` under the data directory's `metastore` directory) once the node is ready. It is kept only for inspection, and the next set-aside overwrites it.
+
+### `holds metadata, but there is no raft state beside it` at start {#log-metastore-no-raft-state}
+
+**Unreleased:** in master, not in v3.0.1.
+
+`narad serve` exits at start with `metastore: .../fsm.db holds metadata, but there is no raft state beside it (raft.db is missing or empty and there is no raft snapshot), so this node would bootstrap a new cluster with an empty log and none of its topics; refusing to start`, followed by the two ways out below. The pod restarts and exits the same way until one is taken.
+
+**Cause.** The node's Raft log (`raft.db`) and snapshots are gone while its metadata database survived: the file was deleted, or the volume was restored without it. A node with fewer than `cluster.raft_snapshot_threshold` metadata changes (8192 by default) has no snapshot, so `raft.db` held all of its Raft state. A node that would bootstrap (a single node, or an initial member none of whose peers answers) would start a new cluster on an empty database that holds none of its topics, and then remove their partition directories as orphans. It refuses instead and leaves `fsm.db` untouched. v3.0.1 replayed the new log onto the old file. A node that joins a running cluster sets the file aside instead ([previous section](#log-metastore-set-aside)).
+
+**Check.** The pod's `metastore` directory under the data directory: `fsm.db` is there, `raft.db` is missing or was just created, and `snapshots` is empty.
+
+**Fix.** To keep the node's topics, restore `raft.db`, the `snapshots` directory and `fsm.db` from the same backup of the volume and restart, and first copy the `topics` directory beside `metastore` somewhere safe: the node removes every topic directory that no topic names, so the topics created after the backup lose their partition data. Restoring `raft.db` alone beside the current `fsm.db` does not work: every member heartbeat is a Raft entry, so a backup of `raft.db` is always older than a running node's `fsm.db`, and the node refuses again with `raft state is older than fsm.db` ([next section](#log-metastore-raft-state-older)). A member of a multi-node cluster rejoins on its own once a peer answers at its start: it joins the running cluster instead of bootstrapping, and rebuilds the database from the leader. To start the node empty, move `fsm.db` out of the `metastore` directory, and move the `topics` directory beside it aside too if its partition data must be kept: a node started empty removes every topic directory that no topic names.
+
+### `raft state is older than fsm.db` at start {#log-metastore-raft-state-older}
+
+**Unreleased:** in master, not in v3.0.1.
+
+`narad serve` exits at start with `metastore: raft state is older than fsm.db: .../fsm.db has applied raft index <a>, past the end of the raft log (index <l>) and the latest raft snapshot (index <s>) in ...; starting would drop every metadata change after index <n>, so refusing to start`, followed by the ways out below. The pod restarts and exits the same way until one is taken.
+
+**Cause.** The node's metadata database holds Raft entries its Raft log and snapshots do not: `raft.db` and the `snapshots` directory were restored from a backup and `fsm.db` was not. Every member heartbeat is a Raft entry, so a backup of `raft.db` is always older than a running node's `fsm.db`. Rebuilding the database from the older Raft state, or restoring its snapshot over it, would drop every topic created since the backup, and a node that leads would then remove their partition directories as orphans. It refuses instead and leaves `fsm.db` untouched. v3.0.1 replayed the older log onto the file, or restored the older snapshot over it. A node that joins a running cluster sets the file aside instead, and the cluster's log brings the rest ([Set aside](#log-metastore-set-aside)).
+
+**Check.** The pod's `metastore` directory under the data directory, and where its `raft.db` came from.
+
+**Fix.** If the `raft.db` and `snapshots` that went with this `fsm.db` still exist, put them back and restart. Otherwise restore `fsm.db` from the same backup as `raft.db` (or move it out of the `metastore` directory, and the node rebuilds it from the restored Raft state), and first copy the `topics` directory beside `metastore` somewhere safe: the node removes every topic directory that no topic names, so the topics created after the backup lose their partition data. On a member of a multi-node cluster whose other members are running, moving `fsm.db` out is enough: the node rebuilds it from its log and the leader's, and loses nothing.
+
+### `written by a newer Narad release` at start {#log-metastore-newer-database}
+
+**Unreleased:** in master, not in v3.0.1.
+
+`narad serve` exits at start with `metastore: fsm: .../fsm.db holds raft entry type <t>, written by a newer Narad release than this build (...); run that release or newer`.
+
+**Cause.** The node's metadata database has applied an entry only a newer release proposes: the pod was rolled back, or started on an older image, after the cluster used a newer release's feature. This build would read that metadata by older rules, so it does not open it, and leaves the file untouched.
+
+**Fix.** Run the release the rest of the cluster runs, or a newer one.
+
 ### `no raft leader for a while; running the cluster join loop` {#log-no-raft-leader}
 
 Logged at warning level after a node has had no Raft leader for 15 seconds.
 
-**Cause.** The node lost its leader: its peers are down, the network between them is cut, or the node was removed from the voters. It now asks its peers to admit it again every 2 seconds.
+**Cause.** The node lost its leader: its peers are down, the network between them is cut, or the node was removed from Raft. It now asks its peers to admit it again every 2 seconds. The line reads `raft non-voter has had no leader for a while; running the cluster join loop` on a node that had joined and was not yet promoted.
 
 **Check.** `/readyz` on every pod, and whether the node was decommissioned (`narad cluster members`).
 
@@ -235,17 +312,27 @@ Logged at warning level after a node has had no Raft leader for 15 seconds.
 
 The full line is `cluster join refused: this node was decommissioned and removed; it will not rejoin with its old data directory. Scale it away, or delete its volume to rejoin as a new node`.
 
-**Cause.** A node that was decommissioned restarted with its old volume. The leader refuses it, so it cannot undo its own decommission.
+**Cause.** A node that was decommissioned restarted with its old volume. The leader refuses it, so it cannot undo its own decommission. If the line's `body` carries `older_release`, the cause is different: the node runs 3.0.x and the cluster's members all run a newer release ([next section](#log-join-older-release)).
 
 **Fix.** Scale it away. To use the name again, delete its PersistentVolumeClaim so it starts empty ([Reuse a decommissioned name](scaling.md#reuse-name)).
 
+### `cluster join refused: this node runs an older release than every member` {#log-join-older-release}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Logged at error level on the joining node, once, with `via`, the node's `entry_types` and the leader's answer in `body`. The leader logs `cluster join refused: the joiner runs an older release than the cluster` at error, at most once a minute per joiner, with the joiner's `id`, `joiner_entry_types`, `member_entry_types_min` (the fewest any recorded member applies) and `cluster_entry_type_used` (the newest type the cluster has applied). A joiner on 3.0.x logs the same refusal as `cluster join refused: this node was decommissioned`, with `older_release` in its `body`.
+
+**Cause.** The node is not in the Raft configuration and applies fewer Raft entry types than every member of the cluster, so the cluster may already use entries it would skip or stop on, or fewer than the newest type the cluster has already applied, so its log holds such entries. A joiner that has been admitted but has not registered yet counts for neither ([Raft entry types and upgrades](../understand/metastore-and-raft.md#entry-types)). Typically a pod started on an older image than the rest of the cluster: a scale-out or a re-added node while `image.tag` pointed at an older release, or a rollback of one node that also lost its volume.
+
+**Fix.** Run the cluster's release on the node (`image.tag`). It keeps asking every 2 seconds and is admitted on its next attempt. Nothing about the cluster needs to change.
+
 ### `cluster join rejected` {#log-join-rejected-status}
 
-Logged at warning level with `peer` and `status`.
+Logged at warning level with `via` (the address that answered) and `status`.
 
-**Cause.** The leader could not admit the node. A `503` status means the leader failed to read the membership or to add the node to Raft. A `400` status means the leader could not read the request, or it lacked the node's ID or Raft address.
+**Cause.** The leader could not admit the node. A `503` status means the leader failed to read the membership or to change the Raft configuration (it may have lost leadership meanwhile). A `400` status means the leader could not read the request, or it lacked the node's ID or Raft address.
 
-**Fix.** For `503`, the node retries every 2 seconds; check the leader's log for `join cluster: add voter` or `join cluster: readmit member`. For `400`, compare the node's `NARAD_NODE_ID` and `NARAD_CLUSTER_ADVERTISE_ADDR` with a working node's.
+**Fix.** For `503`, the node retries every 2 seconds; check the leader's log for `join cluster: admission failed` or `join cluster: readmit member`. For `400`, compare the node's `NARAD_NODE_ID` and `NARAD_CLUSTER_ADVERTISE_ADDR` with a working node's.
 
 ### `cluster stream rejected: invalid auth` {#log-stream-invalid-auth}
 
@@ -263,7 +350,7 @@ The full line is `raft configuration records this node at an address other than 
 
 **Cause.** The address a node's Raft first starts on is recorded in the Raft configuration: at bootstrap on the node that seeds the cluster, by the leader when a node joins. The other nodes dial that recorded address. Restarting the node on a new `cluster.addr` or `cluster.advertise_addr` changes where it listens and what it advertises, not the recorded address. The usual case is a node first started alone on a loopback `cluster.addr` such as `127.0.0.1:7943`, then rebound to an address the others can reach so it could take peers. If nodes join it, then once it is not the leader they cannot reach its Raft: it stays leaderless and not ready, and a node whose `cluster.addr` is port-only (`:7943`) that dials the loopback address reaches its own Raft and steps down, so metadata writes can stall across the cluster. With `other_servers=0`, no other node is in the configuration yet, so nothing has gone wrong yet.
 
-**Fix.** If `recorded_addr` is another way of writing an address that reaches this node, nothing. If it is an address the other nodes can reach, restart the node on it. A node first started on a loopback address cannot be fixed by rebinding, because no other node can reach a loopback address: do not let any node join it, and to grow it, start a new cluster whose first node starts on an address the others can reach and move the workload to it (recreate topics, users and grants there, point producers at it, and retire this node once its consumers have drained it). If nodes have already joined it, move the workload the same way while it is still the Raft leader. A node with `cluster.peers` set re-registers the address it advertises: about 15 s after it finds no leader it runs the [join loop](../understand/cluster-lifecycle.md), and the leader's `AddVoter` updates its recorded address, so for such a node (one re-addressed host of a cluster, say) the line clears once the leader can reach the new address. Only a node with no peers configured keeps its recorded address for good.
+**Fix.** If `recorded_addr` is another way of writing an address that reaches this node, nothing. If it is an address the other nodes can reach, restart the node on it. A node first started on a loopback address cannot be fixed by rebinding, because no other node can reach a loopback address: do not let any node join it, and to grow it, start a new cluster whose first node starts on an address the others can reach and move the workload to it (recreate topics, users and grants there, point producers at it, and retire this node once its consumers have drained it). If nodes have already joined it, move the workload the same way while it is still the Raft leader. A node with `cluster.peers` set re-registers the address it advertises: about 15 s after it finds no leader it runs the [join loop](../understand/cluster-lifecycle.md), and the leader updates its recorded address, so for such a node (one re-addressed host of a cluster, say) the line clears once the leader can reach the new address. Only a node with no peers configured keeps its recorded address for good.
 
 ### `node RPC plane is unauthenticated` {#log-node-rpc-unauthenticated}
 

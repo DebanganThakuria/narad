@@ -275,3 +275,26 @@ func TestRebalanceDeadTargetAbortFreesBudgetSamePass(t *testing.T) {
 		t.Fatalf("fresh moves to b = %d, want 2 (the budget freed by the aborts, used in the same pass)", live)
 	}
 }
+
+// A move to a staged Raft non-voter (a node that joined and is not yet
+// promoted) is a move to a node still in the Raft configuration: a brief
+// dead mark (a pod restart) leaves it alone, as for a voter, instead of
+// treating the node as decommissioned.
+func TestRebalanceKeepsAMoveToARecentlyDeadNonvoter(t *testing.T) {
+	store := newFakeControllerStore("a", "b")
+	staged := deadMember("staged")
+	staged.LastHeartbeat = time.Now().Add(-10 * time.Second).Unix()
+	store.members = append(store.members, staged)
+	store.voters = []string{"a", "b"}
+	store.nonvoters = []string{"staged"}
+	store.topics = []topic.Topic{{Name: "orders", Partitions: 1}}
+	store.assignments["orders"] = map[int]string{0: "a"}
+	store.targets["orders"] = map[int]string{0: "staged"}
+	c := &Controller{store: store, cfg: Config{MaxInFlightMoves: 8, DeadTargetAbortAfter: time.Minute}.withDefaults()}
+
+	c.reconcileRebalance(context.Background())
+
+	if tgt := store.targets["orders"][0]; tgt != "staged" {
+		t.Fatalf("partition 0 target = %q, want the move to the briefly dead non-voter kept", tgt)
+	}
+}
