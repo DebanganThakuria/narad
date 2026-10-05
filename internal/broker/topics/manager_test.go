@@ -472,7 +472,7 @@ func TestCreateTopic_RejectsInvalidInputs(t *testing.T) {
 		{name: "space", opts: CreateOpts{Name: "or ders"}, want: "topic name must match"},
 		{name: "negative partitions", opts: CreateOpts{Name: testTopicName, Partitions: -1}, want: "partitions must be >= 3"},
 		{name: "partitions over max", opts: CreateOpts{Name: testTopicName, Partitions: 33}, want: "exceeds topic.max_partitions"},
-		{name: "negative retention", opts: CreateOpts{Name: testTopicName, RetentionMs: -1}, want: "retention_ms must be >= 0"},
+		{name: "negative retention", opts: CreateOpts{Name: testTopicName, RetentionMs: -2}, want: "retention_ms must be >= 0"},
 		{name: "negative visibility timeout", opts: CreateOpts{Name: testTopicName, VisibilityTimeoutMs: -1}, want: "visibility_timeout_ms must be >= 0"},
 		{name: "negative in flight cap", opts: CreateOpts{Name: testTopicName, MaxInFlightPerPartition: -1}, want: "max_in_flight_per_partition must be >= 0"},
 		{name: "negative acked ahead cap", opts: CreateOpts{Name: testTopicName, MaxAckedAheadPerPartition: -1}, want: "max_acked_ahead_per_partition must be >= 0"},
@@ -1025,5 +1025,49 @@ func TestTopicMutationsBarrierBeforeReading(t *testing.T) {
 	}
 	if !slices.Contains(ms.callOrder, "barrier") {
 		t.Fatalf("calls = %v, want a leader barrier on create", ms.callOrder)
+	}
+}
+
+// The broker's keep-forever sentinel (audit M5): retention_ms -1 on
+// create or alter keeps records forever and is stored as 0, which
+// storage and the cold walk read as no age limit; 0 still means the
+// operator default; any other negative value is refused. Master refused
+// -1, so nothing could ask for keep forever when the operator default
+// was an age.
+func TestKeepForeverRetentionSentinel(t *testing.T) {
+	ms := newFakeMetastore()
+	m := newTestManager(t, ms, nil)
+	ctx := context.Background()
+
+	forever, err := m.CreateTopic(ctx, CreateOpts{Name: "archive", RetentionMs: topic.RetentionKeepForever})
+	if err != nil {
+		t.Fatalf("create with keep forever: %v", err)
+	}
+	if forever.RetentionMs != 0 || ms.topics["archive"].RetentionMs != 0 {
+		t.Fatalf("keep-forever create returned %d, stored %d; want 0", forever.RetentionMs, ms.topics["archive"].RetentionMs)
+	}
+	def, err := m.CreateTopic(ctx, CreateOpts{Name: "orders"})
+	if err != nil {
+		t.Fatalf("create with the default: %v", err)
+	}
+	if def.RetentionMs != m.cfg.DefaultRetentionMs {
+		t.Fatalf("retention 0 stored %d, want the operator default %d", def.RetentionMs, m.cfg.DefaultRetentionMs)
+	}
+	if _, err := m.CreateTopic(ctx, CreateOpts{Name: "bad", RetentionMs: -2}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("create with retention -2 = %v, want ErrInvalid", err)
+	}
+
+	updated, err := m.UpdateTopicRetention(ctx, "orders", topic.RetentionKeepForever)
+	if err != nil {
+		t.Fatalf("alter to keep forever: %v", err)
+	}
+	if updated.RetentionMs != 0 || ms.topics["orders"].RetentionMs != 0 {
+		t.Fatalf("keep-forever alter returned %d, stored %d; want 0", updated.RetentionMs, ms.topics["orders"].RetentionMs)
+	}
+	if updated, err = m.UpdateTopicRetention(ctx, "orders", 0); err != nil || updated.RetentionMs != m.cfg.DefaultRetentionMs {
+		t.Fatalf("alter to 0 = %d, %v; want the operator default %d", updated.RetentionMs, err, m.cfg.DefaultRetentionMs)
+	}
+	if _, err := m.UpdateTopicRetention(ctx, "orders", -2); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("alter to -2 = %v, want ErrInvalid", err)
 	}
 }

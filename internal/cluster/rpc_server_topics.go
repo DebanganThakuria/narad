@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -15,8 +16,12 @@ import (
 )
 
 type rpcCreateTopicBody struct {
-	Name                      string          `json:"name"`
-	Partitions                int             `json:"partitions"`
+	Name       string `json:"name"`
+	Partitions int    `json:"partitions"`
+	// RetentionMs is passed to the broker as sent: 0 (absent, or any
+	// value from a 3.0.x forwarder) is the operator default and
+	// topic.RetentionKeepForever (-1, a 3.1.0 forwarder's explicit 0) is
+	// keep forever.
 	RetentionMs               int64           `json:"retention_ms"`
 	VisibilityTimeoutMs       int64           `json:"visibility_timeout_ms"`
 	MaxInFlightPerPartition   int64           `json:"max_in_flight_per_partition"`
@@ -53,8 +58,11 @@ func (b rpcAlterTopicBody) validate() error {
 	if !hasPartitions && !hasRetention && !hasCaps && !hasSchema {
 		return errors.New("at least one of partitions, retention_ms, max_*_per_partition, or schema is required")
 	}
-	if hasRetention && *b.RetentionMs < 0 {
-		return errors.New("retention_ms must be >= 0 (0 = use default)")
+	// The ingress refuses negative values and turns a client's explicit
+	// 0 (keep forever) into topic.RetentionKeepForever; a 0 here comes
+	// from a 3.0.x forwarder, where it meant the default, and still does.
+	if hasRetention && *b.RetentionMs < 0 && *b.RetentionMs != topic.RetentionKeepForever {
+		return fmt.Errorf("retention_ms must be >= 0 (0 = the default), or %d (keep forever)", topic.RetentionKeepForever)
 	}
 	if b.MaxInFlightPerPartition != nil && *b.MaxInFlightPerPartition < 0 {
 		return errors.New("max_in_flight_per_partition must be >= 0 (0 = use default)")

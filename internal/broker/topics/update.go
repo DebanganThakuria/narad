@@ -94,19 +94,17 @@ func (m *Manager) IncreaseTopicPartitions(ctx context.Context, name string, newP
 // topic. Cached partition logs are closed so the next access reopens
 // them with the new bounds.
 //
-// retentionMs == 0 inherits Config.DefaultRetentionMs; negative values
-// are rejected.
+// retentionMs == 0 inherits Config.DefaultRetentionMs,
+// topic.RetentionKeepForever (-1) keeps records forever (stored as 0),
+// and other negative values are rejected. The returned topic carries
+// the effective retention.
 func (m *Manager) UpdateTopicRetention(ctx context.Context, name string, retentionMs int64) (topic.Topic, error) {
 	if name == "" {
 		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalid)
 	}
-	if retentionMs < 0 {
-		return topic.Topic{}, fmt.Errorf("%w: retention_ms must be >= 0 (0 = use default)", ErrInvalid)
-	}
-	if retentionMs == 0 {
-		retentionMs = m.cfg.DefaultRetentionMs
-	}
-	if err := checkRetentionFloor(retentionMs); err != nil {
+	requested := retentionMs
+	retentionMs, err := m.resolveRetention(retentionMs)
+	if err != nil {
 		return topic.Topic{}, err
 	}
 	unlock := m.lockTopicName(name)
@@ -138,7 +136,9 @@ func (m *Manager) UpdateTopicRetention(ctx context.Context, name string, retenti
 	m.logger.Info("topic retention updated",
 		"topic", name,
 		"old_retention_ms", current.RetentionMs,
-		"new_retention_ms", retentionMs)
+		"requested_retention_ms", requested,
+		"new_retention_ms", retentionMs,
+		"keep_forever", retentionMs == 0)
 
 	return updated, nil
 }

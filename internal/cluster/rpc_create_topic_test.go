@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"testing"
 
 	"github.com/debanganthakuria/narad/internal/broker"
@@ -67,5 +68,65 @@ func TestRPCCreateTopicDecodesEveryHandlerField(t *testing.T) {
 		got.MaxAckedAheadPerPartition != 256 || string(got.Schema) != `{"type": "object"}` ||
 		got.Parent != "orders" || got.FanoutDelayMs != 60_000 || got.Owner != "svc-user" {
 		t.Fatalf("CreateOpts = %+v; a field was dropped between the wire body and the broker", got)
+	}
+}
+
+// retentionBroker records the retention a forwarded create or alter
+// hands the broker.
+type retentionBroker struct {
+	broker.Broker
+	created  []int64
+	altered  []int64
+	topicFor string
+}
+
+func (b *retentionBroker) CreateTopic(_ context.Context, opts brokertopics.CreateOpts) (topic.Topic, error) {
+	b.created = append(b.created, opts.RetentionMs)
+	return topic.Topic{Name: opts.Name}, nil
+}
+
+func (b *retentionBroker) UpdateTopicRetention(_ context.Context, name string, retentionMs int64) (topic.Topic, error) {
+	b.altered = append(b.altered, retentionMs)
+	return topic.Topic{Name: name}, nil
+}
+
+// A 3.0.x follower forwards retention_ms 0 both for an absent field and
+// for an explicit 0, which meant the default in that release, so the
+// leader keeps reading 0 as the default; only the -1 marker a 3.1.0
+// ingress sends for an explicit 0 means keep forever. Master refused -1
+// on a forwarded alter (400).
+func TestLeaderReadsZeroFromAnOlderForwarderAsDefault(t *testing.T) {
+	br := &retentionBroker{}
+	s := NewRPCServer(br, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	for _, body := range []string{`{"name":"orders","retention_ms":0}`, `{"name":"orders","retention_ms":-1}`} {
+		payload, err := nodewire.EncodeTopicBodyRequest(nodewire.OpCreateTopic, nodewire.TopicBodyRequest{Body: []byte(body)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res := s.handleCreateTopic(payload); res.Status != http.StatusCreated {
+			t.Fatalf("forwarded create %s: status %d body %s", body, res.Status, res.Body)
+		}
+	}
+	for _, body := range []string{`{"retention_ms":0}`, `{"retention_ms":-1}`} {
+		payload, err := nodewire.EncodeTopicBodyRequest(nodewire.OpAlterTopic, nodewire.TopicBodyRequest{Topic: "orders", Body: []byte(body)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res := s.handleAlterTopic(payload); res.Status != http.StatusOK {
+			t.Fatalf("forwarded alter %s: status %d body %s", body, res.Status, res.Body)
+		}
+	}
+	want := []int64{0, topic.RetentionKeepForever}
+	if !slices.Equal(br.created, want) || !slices.Equal(br.altered, want) {
+		t.Fatalf("broker retentions: create %v, alter %v; want %v for each (0 = default, -1 = keep forever)", br.created, br.altered, want)
+	}
+
+	// Anything below the marker is still refused.
+	payload, err := nodewire.EncodeTopicBodyRequest(nodewire.OpAlterTopic, nodewire.TopicBodyRequest{Topic: "orders", Body: []byte(`{"retention_ms":-2}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := s.handleAlterTopic(payload); res.Status != http.StatusBadRequest {
+		t.Fatalf("forwarded alter with retention_ms -2: status %d, want 400", res.Status)
 	}
 }

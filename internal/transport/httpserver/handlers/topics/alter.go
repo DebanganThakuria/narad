@@ -31,8 +31,9 @@ import (
 // documented contract (docs/build/topics.md).
 //
 // retention_ms / max_*_per_partition are *int64 (rather than int64)
-// so the caller can distinguish "unset" from "set to zero"; zero
-// means "inherit broker default". partitions uses 0 as unset.
+// so the caller can distinguish "unset" from "set to zero". An explicit
+// retention_ms of 0 keeps records forever (audit M5); a zero cap
+// inherits the broker default. partitions uses 0 as unset.
 type alterRequest struct {
 	Partitions                int             `json:"partitions"`
 	RetentionMs               *int64          `json:"retention_ms,omitempty"`
@@ -55,7 +56,7 @@ func (req alterRequest) Validate() error {
 		return errors.New("at least one of partitions, retention_ms, max_*_per_partition, or schema is required")
 	}
 	if hasRetention && *req.RetentionMs < 0 {
-		return errors.New("retention_ms must be >= 0 (0 = use default)")
+		return errors.New(retentionRangeError)
 	}
 	if req.MaxInFlightPerPartition != nil && *req.MaxInFlightPerPartition < 0 {
 		return errors.New("max_in_flight_per_partition must be >= 0 (0 = use default)")
@@ -107,6 +108,20 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 		}
 		if !s.AuthorizeTopicManage(w, r, topicName) {
 			return
+		}
+
+		// An explicit retention_ms of 0 is keep forever, which the leader
+		// reads as topic.RetentionKeepForever (a 3.0.x leader reads 0 as
+		// its default). Only then is the forwarded body re-encoded;
+		// otherwise the client's bytes go to the leader as they came.
+		if req.RetentionMs != nil && *req.RetentionMs == 0 {
+			req.RetentionMs = brokerRetention(req.RetentionMs)
+			reencoded, err := json.Marshal(req)
+			if err != nil {
+				s.WriteError(w, http.StatusInternalServerError, "encode alter request")
+				return
+			}
+			body = reencoded
 		}
 
 		if s.Deps.Router != nil {

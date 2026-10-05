@@ -110,6 +110,15 @@ const MaxChildrenPerParent = 108
 // due-time arithmetic comfortably inside int64.
 const MaxFanoutDelayMs int64 = 365 * 24 * 60 * 60 * 1000
 
+// RetentionKeepForever is the retention_ms value that asks the broker
+// to keep records forever on create or alter; it is stored as 0, which
+// is what a topic's RetentionMs of 0 means everywhere else (no age
+// limit). A requested retention of 0 means the operator's default
+// instead. The HTTP API spells keep forever as an explicit
+// "retention_ms": 0 and turns it into this value, which is also what
+// travels to the leader on a forwarded create or alter.
+const RetentionKeepForever int64 = -1
+
 // MinRetentionMs is the minimum effective retention for every topic
 // (one hour). The parent's retained log is the fan-out buffer for
 // lagging children, so the floor guarantees every child at least an

@@ -1122,3 +1122,137 @@ func (f *fakeBroker) RegisterRemoteDemand(context.Context, string, brokermsg.Rem
 func (f *fakeBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}
 
 func (*fakeBroker) NoteRemoteClaim(string) {}
+
+// An explicit retention_ms of 0 is documented as keep forever; master
+// handed it to the broker as 0, which means the operator default (12h
+// in the Helm chart), so an archive topic aged out (audit M5,
+// verify-topics-5). The broker now receives its keep-forever sentinel,
+// on the leader directly and in the body forwarded to the leader.
+func TestExplicitZeroRetentionMeansKeepForever(t *testing.T) {
+	t.Run("create on the leader", func(t *testing.T) {
+		var got brokertopics.CreateOpts
+		s := newTestSet(&fakeBroker{createTopicFn: func(_ context.Context, opts brokertopics.CreateOpts) (topic.Topic, error) {
+			got = opts
+			return topic.Topic{Name: opts.Name}, nil
+		}})
+		res := httptest.NewRecorder()
+		Create(s).ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":"archive","retention_ms":0}`)))
+		if res.Code != http.StatusCreated || got.RetentionMs != topic.RetentionKeepForever {
+			t.Fatalf("status %d, broker retention %d; want 201 and %d (keep forever)", res.Code, got.RetentionMs, topic.RetentionKeepForever)
+		}
+	})
+	t.Run("create forwarded", func(t *testing.T) {
+		var forwarded map[string]any
+		s := newTestSetWithRouter(&fakeBroker{}, &fakeRouter{routeCreateTopicFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, body []byte) bool {
+			if err := json.Unmarshal(body, &forwarded); err != nil {
+				t.Fatalf("decode forwarded body: %v", err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			return true
+		}})
+		res := httptest.NewRecorder()
+		Create(s).ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":"archive","retention_ms":0}`)))
+		if res.Code != http.StatusCreated || forwarded["retention_ms"] != float64(topic.RetentionKeepForever) {
+			t.Fatalf("status %d, forwarded retention_ms %v; want 201 and %d", res.Code, forwarded["retention_ms"], topic.RetentionKeepForever)
+		}
+	})
+	t.Run("alter on the leader", func(t *testing.T) {
+		var got int64 = 99
+		s := newTestSet(&fakeBroker{updateTopicRetentionFn: func(_ context.Context, name string, retentionMs int64) (topic.Topic, error) {
+			got = retentionMs
+			return topic.Topic{Name: name}, nil
+		}})
+		req := httptest.NewRequest(http.MethodPatch, "/v1/topics/archive", bytes.NewBufferString(`{"retention_ms":0}`))
+		req.SetPathValue("topic", "archive")
+		res := httptest.NewRecorder()
+		Alter(s).ServeHTTP(res, req)
+		if res.Code != http.StatusOK || got != topic.RetentionKeepForever {
+			t.Fatalf("status %d, broker retention %d; want 200 and %d", res.Code, got, topic.RetentionKeepForever)
+		}
+	})
+	t.Run("alter forwarded", func(t *testing.T) {
+		var forwarded map[string]any
+		s := newTestSetWithRouter(&fakeBroker{}, &fakeRouter{routeAlterTopicFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, _ string, body []byte) bool {
+			if err := json.Unmarshal(body, &forwarded); err != nil {
+				t.Fatalf("decode forwarded body: %v", err)
+			}
+			w.WriteHeader(http.StatusOK)
+			return true
+		}})
+		req := httptest.NewRequest(http.MethodPatch, "/v1/topics/archive", bytes.NewBufferString(`{"retention_ms":0,"partitions":6}`))
+		req.SetPathValue("topic", "archive")
+		res := httptest.NewRecorder()
+		Alter(s).ServeHTTP(res, req)
+		if res.Code != http.StatusOK || forwarded["retention_ms"] != float64(topic.RetentionKeepForever) || forwarded["partitions"] != float64(6) {
+			t.Fatalf("status %d, forwarded %v; want 200, retention_ms %d and the other fields kept", res.Code, forwarded, topic.RetentionKeepForever)
+		}
+	})
+}
+
+// Leaving retention_ms out still gives the operator default: the broker
+// receives 0, and the forwarded body carries no keep-forever marker.
+func TestAbsentRetentionUsesTheDefault(t *testing.T) {
+	var got brokertopics.CreateOpts
+	s := newTestSet(&fakeBroker{createTopicFn: func(_ context.Context, opts brokertopics.CreateOpts) (topic.Topic, error) {
+		got = opts
+		return topic.Topic{Name: opts.Name}, nil
+	}})
+	res := httptest.NewRecorder()
+	Create(s).ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":"orders"}`)))
+	if res.Code != http.StatusCreated || got.RetentionMs != 0 {
+		t.Fatalf("status %d, broker retention %d; want 201 and 0 (the default)", res.Code, got.RetentionMs)
+	}
+
+	var forwarded map[string]any
+	s = newTestSetWithRouter(&fakeBroker{}, &fakeRouter{routeCreateTopicFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, body []byte) bool {
+		if err := json.Unmarshal(body, &forwarded); err != nil {
+			t.Fatalf("decode forwarded body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		return true
+	}})
+	res = httptest.NewRecorder()
+	Create(s).ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":"orders"}`)))
+	if v, ok := forwarded["retention_ms"]; ok && v != float64(0) {
+		t.Fatalf("forwarded retention_ms = %v, want it absent or 0 (the default)", v)
+	}
+}
+
+// A negative retention_ms is a 400 at the ingress, before the broker or
+// the router sees it: -1 is the broker's internal keep-forever marker,
+// not something a client sends.
+func TestNegativeRetentionIsRefused(t *testing.T) {
+	b := &fakeBroker{
+		createTopicFn: func(context.Context, brokertopics.CreateOpts) (topic.Topic, error) {
+			return topic.Topic{}, errors.New("broker reached")
+		},
+		updateTopicRetentionFn: func(context.Context, string, int64) (topic.Topic, error) {
+			return topic.Topic{}, errors.New("broker reached")
+		},
+	}
+	router := &fakeRouter{
+		routeCreateTopicFn: func(context.Context, http.ResponseWriter, *http.Request, []byte) bool {
+			t.Fatal("a negative retention was forwarded")
+			return true
+		},
+		routeAlterTopicFn: func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool {
+			t.Fatal("a negative retention was forwarded")
+			return true
+		},
+	}
+	s := newTestSetWithRouter(b, router)
+	for _, v := range []string{"-1", "-100"} {
+		res := httptest.NewRecorder()
+		Create(s).ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":"orders","retention_ms":`+v+`}`)))
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("create with retention_ms %s: status %d, want 400", v, res.Code)
+		}
+		req := httptest.NewRequest(http.MethodPatch, "/v1/topics/orders", bytes.NewBufferString(`{"retention_ms":`+v+`}`))
+		req.SetPathValue("topic", "orders")
+		res = httptest.NewRecorder()
+		Alter(s).ServeHTTP(res, req)
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("alter with retention_ms %s: status %d, want 400", v, res.Code)
+		}
+	}
+}

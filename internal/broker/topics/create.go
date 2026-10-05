@@ -184,6 +184,7 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 		"topic", opts.Name,
 		"partitions", t.Partitions,
 		"retention_ms", t.RetentionMs,
+		"keep_forever", t.RetentionMs == 0,
 		"visibility_timeout_ms", t.VisibilityTimeoutMs,
 		"max_in_flight_per_partition", t.MaxInFlightPerPartition,
 		"max_acked_ahead_per_partition", t.MaxAckedAheadPerPartition)
@@ -256,11 +257,8 @@ func (m *Manager) topicFromOpts(opts CreateOpts) (topic.Topic, error) {
 			ErrInvalid, partitions, maximum)
 	}
 
-	retentionMs, err := defaultedNonNegative(opts.RetentionMs, m.cfg.DefaultRetentionMs, "retention_ms")
+	retentionMs, err := m.resolveRetention(opts.RetentionMs)
 	if err != nil {
-		return topic.Topic{}, err
-	}
-	if err := checkRetentionFloor(retentionMs); err != nil {
 		return topic.Topic{}, err
 	}
 	visibilityMs, err := defaultedNonNegative(opts.VisibilityTimeoutMs, m.cfg.DefaultVisibilityTimeoutMs, "visibility_timeout_ms")
@@ -318,12 +316,36 @@ func defaultedNonNegative(v, def int64, field string) (int64, error) {
 	return v, nil
 }
 
+// resolveRetention turns a requested retention_ms into the value to
+// store (audit M5): topic.RetentionKeepForever (-1) keeps records
+// forever and stores 0; 0 inherits Config.DefaultRetentionMs (keep
+// forever only when the operator default is 0); any other negative
+// value is invalid; the result must clear the one-hour floor.
+func (m *Manager) resolveRetention(requested int64) (int64, error) {
+	var retentionMs int64
+	switch {
+	case requested == topic.RetentionKeepForever:
+		retentionMs = 0
+	case requested < 0:
+		return 0, fmt.Errorf("%w: retention_ms must be >= 0 (0 = use the server default) or %d (keep forever)",
+			ErrInvalid, topic.RetentionKeepForever)
+	case requested == 0:
+		retentionMs = m.cfg.DefaultRetentionMs
+	default:
+		retentionMs = requested
+	}
+	if err := checkRetentionFloor(retentionMs); err != nil {
+		return 0, err
+	}
+	return retentionMs, nil
+}
+
 // checkRetentionFloor rejects a resolved retention below the uniform
 // one-hour minimum. The retained log is the fan-out buffer for lagging
 // children, so the floor guarantees at least an hour of child outage
 // tolerance before drop-behind can lose messages. Zero (keep forever)
-// passes: it can only arrive here via a keep-forever configured
-// default, which is above any floor.
+// passes: it arrives here from an explicit keep-forever request or a
+// keep-forever configured default, and is above any floor.
 func checkRetentionFloor(retentionMs int64) error {
 	if retentionMs != 0 && retentionMs < topic.MinRetentionMs {
 		return fmt.Errorf("%w: retention_ms (%d) is below the minimum of %d (1 hour)",

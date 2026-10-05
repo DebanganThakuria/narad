@@ -99,20 +99,28 @@ func TestAlterTopic_RetentionUpdateReopensPartitionLogs(t *testing.T) {
 	mustProduce(t, env, "reopen", "k", map[string]int{"v": 2})
 }
 
-func TestAlterTopic_RetentionDefaultsWhenZero(t *testing.T) {
+// An explicit retention_ms of 0 keeps records forever (stored as 0),
+// even though this server's default is an age (7 days); leaving the
+// field out is what gives the default.
+func TestAlterTopic_ZeroRetentionKeepsForever(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
-	mustCreateTopic(t, env, createTopicReq{Name: "default-ret", RetentionMs: 3_600_000})
+	mustCreateTopic(t, env, createTopicReq{Name: "forever-ret", RetentionMs: 3_600_000})
 
-	// Sending retention_ms=0 should fall back to the broker default.
-	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/default-ret",
+	resp := jsonReq(t, http.MethodPatch, env.Server.URL+"/v1/topics/forever-ret",
 		map[string]any{"retention_ms": int64(0)})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: got %d body=%s", resp.StatusCode, readBody(resp))
 	}
 	got := readJSON[topic.Topic](t, resp)
-	if got.RetentionMs != int64(7*24*60*60*1000) {
-		t.Errorf("retention_ms: got %d want %d (7-day env default)", got.RetentionMs, int64(7*24*60*60*1000))
+	if got.RetentionMs != 0 {
+		t.Errorf("retention_ms: got %d want 0 (keep forever)", got.RetentionMs)
+	}
+
+	resp = jsonReq(t, http.MethodGet, env.Server.URL+"/v1/topics/forever-ret", nil)
+	stored := readJSON[topic.Topic](t, resp)
+	if stored.RetentionMs != 0 {
+		t.Errorf("stored retention_ms: got %d want 0 (keep forever)", stored.RetentionMs)
 	}
 }
 
