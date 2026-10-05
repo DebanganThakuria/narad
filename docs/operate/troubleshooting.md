@@ -245,7 +245,7 @@ Logged at error level with `index`, `entry_type`, `build` and `error`, just befo
 **Cause.** The node could not apply a committed metadata change, and stopped rather than skip it ([When a node stops applying](../understand/metastore-and-raft.md#fail-stop)). `error` says which:
 
 - `raft entry at index <n> has entry type <t>, which this build (...) does not know`: a newer release proposed the entry, and this pod runs an older image than the rest of the cluster (a stale tag, or a pod rolled back on its own).
-- `could not write raft entry at index <n> (entry type <t>) to .../fsm.db after retrying for 30s: ...`: the data volume refused the write, usually `no space left on device`, sometimes an I/O error. The node logged `metastore: could not write raft entry; retrying` at warning level 30 s before.
+- `could not write raft entry at index <n> (entry type <t>) to .../fsm.db after retrying for <about 26s>: ...`: the data volume refused the write, usually `no space left on device`, sometimes an I/O error. The time is how long the node actually retried: the retries wait 100 ms doubling to 5 s, and the last one that fits in the 30 s budget ends after about 26 s. The node logged `metastore: could not write raft entry; retrying` at warning level about 26 s before.
 - `the raft snapshot holds raft entry type <t>, written by a newer Narad release`: the leader sent this node a snapshot from a newer release.
 
 **Check.** The image of every pod (`kubectl get pods -n narad -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[0].image`), and the free space and kernel log of the pod's data volume.
