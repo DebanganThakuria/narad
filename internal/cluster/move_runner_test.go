@@ -770,3 +770,149 @@ func TestMoveRunnerMakesTheCopyDurableBeforeTheFlip(t *testing.T) {
 		t.Fatalf("the move marker does not record the copy as durable: %+v (found %v, err %v)", marker, ok, err)
 	}
 }
+
+// switchableSourceStore reports the source member alive or dead as the
+// test switches it; dead, its last heartbeat stamp is ten minutes old,
+// past any ForcePromoteAfter. reads counts the source lookups.
+type switchableSourceStore struct {
+	*fakeMoveStore
+	dead  atomic.Bool
+	reads atomic.Int64
+}
+
+func (s *switchableSourceStore) GetMember(id string) (metastore.Member, error) {
+	m, err := s.fakeMoveStore.GetMember(id)
+	if id != "narad-src" {
+		return m, err
+	}
+	s.reads.Add(1)
+	if s.dead.Load() {
+		m.Status = metastore.MemberDead
+		m.LastHeartbeat = time.Now().Add(-10 * time.Minute).Unix()
+	}
+	return m, err
+}
+
+// awaitReads waits until the worker has read the source member n more
+// times, or has flipped the move.
+func (s *switchableSourceStore) awaitReads(t *testing.T, n int64) {
+	t.Helper()
+	target := s.reads.Load() + n
+	for deadline := time.Now().Add(5 * time.Second); s.reads.Load() < target && !s.flipped(); {
+		if time.Now().After(deadline) {
+			t.Fatalf("the worker stopped reading the source member (%d reads, want %d)", s.reads.Load(), target)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func (s *switchableSourceStore) flipped() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.completeArgs) > 0
+}
+
+// prepareCountingPeer counts handoff freezes; with prepareErr set they
+// all fail, so a live source never cuts over.
+type prepareCountingPeer struct {
+	movePeerFake
+	prepares *atomic.Int64
+}
+
+func (p prepareCountingPeer) PrepareHandoff(ctx context.Context, addr, topicName string, partition int, ttl time.Duration, token string) (messaging.PartitionTransferInfo, error) {
+	p.prepares.Add(1)
+	return p.movePeerFake.PrepareHandoff(ctx, addr, topicName, partition, ttl, token)
+}
+
+// newDeadSourceScenario starts a worker on a fake clock whose copy is
+// complete and whose source refuses the handoff freeze, so the move can
+// only finish by a force-promote.
+func newDeadSourceScenario(t *testing.T) (*switchableSourceStore, *testClock, *MoveRunner, string, int64, map[int64][]byte, context.CancelFunc) {
+	t.Helper()
+	src := t.TempDir()
+	wantHWM, payloads := buildSourcePartition(t, src, 8)
+	store := &switchableSourceStore{fakeMoveStore: &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+	}}
+	var prepares atomic.Int64
+	peer := prepareCountingPeer{
+		movePeerFake: movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}, prepareErr: context.DeadlineExceeded},
+		prepares:     &prepares,
+	}
+	dataDir := t.TempDir()
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, discardLogger(), MoveConfig{
+		RetryBackoff: 5 * time.Millisecond, ForcePromoteAfter: 2 * time.Minute,
+	})
+	clock := newTestClock()
+	r.now = clock.Now
+	ctx, cancel := context.WithCancel(context.Background())
+	r.Reconcile(ctx)
+	for deadline := time.Now().Add(5 * time.Second); prepares.Load() == 0; {
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("the worker never finished its copy")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return store, clock, r, dataDir, wantHWM, payloads, func() { cancel(); r.wg.Wait() }
+}
+
+// Force-promote needs the destination itself to have watched the source
+// stay dead for ForcePromoteAfter, on its own monotonic clock. The
+// leader's heartbeat stamp alone compares this node's wall clock with a
+// stamp another node wrote, possibly across a leaderless period: a
+// worker that had only just seen the source dead read a ten-minute-old
+// stamp and promoted its copy at once, giving up whatever the source
+// still held.
+func TestForcePromoteWaitsForTheDestinationToSeeTheSourceDead(t *testing.T) {
+	store, clock, _, dataDir, wantHWM, payloads, stop := newDeadSourceScenario(t)
+	defer stop()
+	store.dead.Store(true)
+	store.awaitReads(t, 3)
+	if store.flipped() {
+		t.Fatal("force-promoted the moment the destination saw the source dead (the leader's stamp was ten minutes old)")
+	}
+	clock.Advance(119 * time.Second)
+	store.awaitReads(t, 3)
+	if store.flipped() {
+		t.Fatal("force-promoted before the destination watched the source dead for ForcePromoteAfter")
+	}
+	clock.Advance(2 * time.Second)
+	for deadline := time.Now().Add(5 * time.Second); !store.flipped(); {
+		if time.Now().After(deadline) {
+			t.Fatal("no force-promote after the destination watched the source dead for ForcePromoteAfter")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stop()
+	requireInstalledCopy(t, dataDir, wantHWM, payloads)
+}
+
+// A source seen alive again restarts the destination's own clock: a
+// source that died, came back and died again has been dead only since
+// the second death.
+func TestForcePromoteClockRestartsWhenTheSourceComesBack(t *testing.T) {
+	store, clock, _, _, _, _, stop := newDeadSourceScenario(t)
+	defer stop()
+	store.dead.Store(true)
+	store.awaitReads(t, 3)
+	clock.Advance(90 * time.Second)
+	store.awaitReads(t, 3)
+	store.dead.Store(false)
+	store.awaitReads(t, 3)
+	store.dead.Store(true)
+	store.awaitReads(t, 3)
+	clock.Advance(90 * time.Second)
+	store.awaitReads(t, 3)
+	if store.flipped() {
+		t.Fatal("force-promoted 90s after the source died again: the clock counted the first death too")
+	}
+	clock.Advance(31 * time.Second)
+	for deadline := time.Now().Add(5 * time.Second); !store.flipped(); {
+		if time.Now().After(deadline) {
+			t.Fatal("no force-promote once the source stayed dead for ForcePromoteAfter after it came back")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

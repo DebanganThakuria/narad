@@ -87,6 +87,10 @@ type moveWorker struct {
 	// warned holds the retry reasons this worker has already logged at
 	// warn level (see warnOnce).
 	warned map[string]bool
+	// deadSince is when this worker first read the source as dead, on
+	// its own clock; zero while the source reads alive
+	// (move_source_clock.go).
+	deadSince time.Time
 }
 
 // warnOnce logs a retry at warn level the first time this worker meets
@@ -381,7 +385,8 @@ func (w *moveWorker) proposeFlip(ctx context.Context) error {
 //     re-armed freeze whose HWM still matches the copy, for at most
 //     movePendingFreezeLimit; or, for a force-promote, while the source
 //     stays dead. A source that dies under a pending install turns it
-//     into a force-promote once it has been dead long enough. Once the
+//     into a force-promote once it has been dead long enough, by the
+//     leader's stamp and by this worker's own clock. Once the
 //     install cannot be flipped as it is, the worker stops proposing
 //     and, when a leader read confirms the flip has not committed and no
 //     proposal is in flight, moves the install back to staging to drain
@@ -393,6 +398,9 @@ func (w *moveWorker) proposeFlip(ctx context.Context) error {
 func (w *moveWorker) resolvePending(ctx context.Context) bool {
 	r, p := w.r, w.pending
 	m, merr := r.store.GetMember(w.source)
+	if merr == nil {
+		w.observeSource(m)
+	}
 	// The settle check is taken when the leader read starts, not when it
 	// returns: the barrier may be taken anywhere in between, and only a
 	// read whose barrier comes after the window can have seen every
@@ -464,7 +472,7 @@ func (w *moveWorker) pendingFlippable(ctx context.Context, m metastore.Member, m
 	if err := r.checkTopicIncarnation(w.topic, p.expectID); err != nil {
 		return false, err.Error(), false
 	}
-	if !p.forcePromoted && merr == nil && r.sourceDeadEnough(m) {
+	if !p.forcePromoted && merr == nil && w.sourceDeadLongEnough(m) {
 		// The install is the whole copy as of the fence; the source died
 		// with the flip unconfirmed. Flip it as a force-promote would.
 		p.forcePromoted = true

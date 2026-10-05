@@ -107,7 +107,11 @@ type MoveConfig struct {
 	FreezeRearmEvery   time.Duration // default FreezeTTL / 4
 	ChunkBytes         int64
 	RetryBackoff       time.Duration
-	ForcePromoteAfter  time.Duration
+	// ForcePromoteAfter is how long the source must have been dead
+	// before the destination promotes the copy it holds: dead by the
+	// leader's last heartbeat stamp, and watched dead by the worker on
+	// its own monotonic clock, for that long.
+	ForcePromoteAfter time.Duration
 }
 
 func (c MoveConfig) withDefaults() MoveConfig {
@@ -454,6 +458,7 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 			}
 			continue
 		}
+		w.observeSource(m)
 		if w.sess == nil {
 			w.sess = r.mover.Begin(m.Addr, topicName, partition, staging)
 			w.sess.carryFrom(w.prevSess)
@@ -462,7 +467,7 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 		// If the source has been dead long enough, stop waiting for it and try
 		// to promote the copy we already have (guarded: ForcePromote refuses
 		// unless we copied up to the source's last-known HWM).
-		if r.sourceDeadEnough(m) {
+		if w.sourceDeadLongEnough(m) {
 			if res, err := w.sess.ForcePromote(); err == nil {
 				r.logger.Warn("move: force-promoting copy of a dead source",
 					"topic", topicName, "partition", partition, "source", source, "hwm", res.HighWatermark)
@@ -731,9 +736,13 @@ func (r *MoveRunner) linkedChildren(ctx context.Context, parent string) map[stri
 }
 
 // sourceDeadEnough reports whether the source has been confirmed dead by the
-// controller AND has stayed dead past ForcePromoteAfter — long enough that a
-// transient pod restart (which would let the copy finish normally) has been
-// ruled out, so promoting the copy we have is the right recovery.
+// controller AND has stayed dead past ForcePromoteAfter by the leader's last
+// heartbeat stamp — long enough that a transient pod restart (which would let
+// the copy finish normally) has been ruled out, so promoting the copy we have
+// is the right recovery. It compares this node's wall clock with a stamp
+// another node wrote, so a worker also requires its own observation
+// (moveWorker.sourceDeadLongEnough): a skewed clock or a stamp that aged
+// during a leaderless period can then only make it wait longer.
 func (r *MoveRunner) sourceDeadEnough(m metastore.Member) bool {
 	if m.Status != metastore.MemberDead {
 		return false
