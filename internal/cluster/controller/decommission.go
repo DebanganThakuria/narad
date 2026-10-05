@@ -14,6 +14,11 @@ package controller
 // on this leader cannot place a partition on the node in between. Without
 // both, a flip or a create landing in that window left a partition owned
 // by a removed node that nothing could route to, move off or reassign.
+// A move whose source is dead or no longer a member is the exception: the
+// draining node may hold the only live copy, which it force-promotes once
+// the source has been dead long enough, and the partition then drains off
+// it as usual. The pass leaves such a move alone and the decommission
+// waits (move_target, at error, saying how to abort it by hand).
 //
 // Guards that apply to a voter (a non-voter, a joiner staged and never
 // promoted, has no vote and cannot lead, so none applies to it):
@@ -106,7 +111,8 @@ func (c *Controller) reconcileDecommission(ctx context.Context) {
 	for _, m := range draining {
 		drainingSet[m.ID] = true
 	}
-	if c.abortMovesTo(ctx, usage.inFlight, drainingSet) > 0 {
+	status := memberStatuses(members)
+	if c.abortMovesTo(ctx, usage.inFlight, drainingSet, status) > 0 {
 		// A flip may have landed before its abort: read placement again.
 		if usage, ok = c.placementUsage(ctx); !ok {
 			return
@@ -120,17 +126,18 @@ func (c *Controller) reconcileDecommission(ctx context.Context) {
 			return
 		}
 		leaderID := c.store.LeaderID()
-		status := statuses[m.ID]
-		if status == nil && c.cfg.NodeStatus != nil && m.ID != leaderID {
+		nodeStatus := statuses[m.ID]
+		if nodeStatus == nil && c.cfg.NodeStatus != nil && m.ID != leaderID {
 			// Not asked this pass (it led when the statuses were read):
 			// never remove a node whose backlog was not read.
-			status = &NodeStatusResult{Err: errors.New("its status was not read this pass")}
+			nodeStatus = &NodeStatusResult{Err: errors.New("its status was not read this pass")}
 		}
 		if bs := DecommissionBlockers(DecommissionView{
 			Node: m, Members: members, Voters: voters, LeaderID: leaderID,
 			MinVoters: c.cfg.MinVoters, MaxInFlightMoves: c.cfg.MaxInFlightMoves,
 			Owned: usage.owned[m.ID], Outbound: usage.outbound[m.ID], Inbound: usage.inbound[m.ID],
-			InFlight: len(usage.inFlight), Status: status,
+			InFlight: len(usage.inFlight), Status: nodeStatus,
+			InboundFromDeadSource: inboundFromDeadSource(usage.inFlight, m.ID, status),
 		}); len(bs) > 0 {
 			blocked[m.ID] = bs
 			if bs[0].Code == BlockedLeaderTransfer {
@@ -143,7 +150,7 @@ func (c *Controller) reconcileDecommission(ctx context.Context) {
 		if usage.owned[m.ID] > 0 {
 			continue // moves off it still to run or in flight; wait
 		}
-		c.removeDrainedNode(ctx, m.ID, members, status)
+		c.removeDrainedNode(ctx, m.ID, members, nodeStatus)
 	}
 	c.syncDecomBlocked(t, blocked)
 }
@@ -211,10 +218,13 @@ func (c *Controller) placementUsage(ctx context.Context) (placement, bool) {
 // in-flight move whose target is in targets, and returns how many it
 // cleared. The owner never changed, so the partition stays where its data
 // is; a destination that still finishes its copy finds its flip refused.
-func (c *Controller) abortMovesTo(ctx context.Context, inFlight []metastore.Assignment, targets map[string]bool) int {
+// A move whose source is dead or no longer a member is left alone: its
+// target may hold the only live copy (the decommission reports it as a
+// move_target that needs an operator).
+func (c *Controller) abortMovesTo(ctx context.Context, inFlight []metastore.Assignment, targets map[string]bool, status map[string]metastore.MemberStatus) int {
 	cleared := 0
 	for _, a := range inFlight {
-		if !targets[a.TargetID] {
+		if !targets[a.TargetID] || sourceGone(a.OwnerID, status) {
 			continue
 		}
 		if err := c.store.AbortMove(ctx, a.Topic, a.Partition, a.TargetID); err != nil {
@@ -227,6 +237,18 @@ func (c *Controller) abortMovesTo(ctx context.Context, inFlight []metastore.Assi
 		cleared++
 	}
 	return cleared
+}
+
+// inboundFromDeadSource counts the in-flight moves into node whose source
+// is dead or no longer a member.
+func inboundFromDeadSource(inFlight []metastore.Assignment, node string, status map[string]metastore.MemberStatus) int {
+	n := 0
+	for _, a := range inFlight {
+		if a.TargetID == node && sourceGone(a.OwnerID, status) {
+			n++
+		}
+	}
+	return n
 }
 
 // nodeStatusTimeout bounds one NodeStatus call, and nodeStatusConcurrency
@@ -325,6 +347,10 @@ func (c *Controller) removeDrainedNode(ctx context.Context, id string, members [
 		return
 	}
 	c.logger().Info("controller: decommissioned member removed", "node", id)
+	if status != nil && status.Err == nil && status.Status.QuarantinedCopies > 0 {
+		c.logger().Error("controller: the decommissioned node holds quarantined partition copies that may be the only instance of some records; keep its volume until they are checked (troubleshooting: quarantined copies)",
+			"node", id, "copies", status.Status.QuarantinedCopies)
+	}
 }
 
 // warnBacklogUnchecked says that a node is leaving Raft without its
@@ -347,7 +373,7 @@ func (c *Controller) syncDecomBlocked(t *leaderTerm, blocked map[string][]Blocke
 	for node, bs := range blocked {
 		next[node] = make(map[string]bool, len(bs))
 		for _, b := range bs {
-			next[node][b.Code] = true
+			next[node][b.Code] = b.needsOperator()
 		}
 	}
 	t.blocked = next
@@ -356,7 +382,7 @@ func (c *Controller) syncDecomBlocked(t *leaderTerm, blocked map[string][]Blocke
 	c.publish(t, func() {
 		for node, reasons := range prev {
 			for reason := range reasons {
-				if !next[node][reason] {
+				if _, still := next[node][reason]; !still {
 					c.m.clearDecomBlocked(node, reason)
 				}
 			}
@@ -374,10 +400,13 @@ func (c *Controller) syncDecomBlocked(t *leaderTerm, blocked map[string][]Blocke
 	}
 	for node, bs := range blocked {
 		for _, b := range bs {
-			if prev[node][b.Code] {
+			// Log a reason when it is new for the node, or when it
+			// turned from one that clears on its own into one that
+			// needs an operator (or back).
+			if was, seen := prev[node][b.Code]; seen && was == b.needsOperator() {
 				continue
 			}
-			if stallReasons[b.Code] {
+			if b.needsOperator() {
 				c.logger().Error("controller: decommission blocked", "node", node, "reason", b.Code, "detail", b.Message)
 			} else {
 				c.logger().Warn("controller: decommission waiting", "node", node, "reason", b.Code, "detail", b.Message)

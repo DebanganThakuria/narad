@@ -42,9 +42,10 @@ func controllerConfig(log *slog.Logger, reg prometheus.Registerer, peer nodeStat
 				return controller.NodeStatus{}, err
 			}
 			return controller.NodeStatus{
-				Draining:        st.Draining,
-				ProduceInFlight: st.ProduceInFlight,
-				DispatchBacklog: st.DispatchBacklog,
+				Draining:          st.Draining,
+				ProduceInFlight:   st.ProduceInFlight,
+				DispatchBacklog:   st.DispatchBacklog,
+				QuarantinedCopies: st.Quarantine.Copies,
 			}, nil
 		},
 	}

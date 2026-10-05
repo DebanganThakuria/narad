@@ -29,7 +29,8 @@ type leaderTerm struct {
 	// to log the refusal once per streak.
 	refusing bool
 	// blocked maps a draining node to the reasons its decommission is
-	// blocked, as last logged and exported.
+	// blocked, as last logged and exported, each to whether it needed an
+	// operator (logged at error) then.
 	blocked map[string]map[string]bool
 	// movesLogged holds the blocked moves already logged in this term.
 	movesLogged map[string]bool

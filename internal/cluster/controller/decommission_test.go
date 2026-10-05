@@ -328,6 +328,108 @@ func TestDecommissionAbortsMovesAimedAtADrainingNode(t *testing.T) {
 	}
 }
 
+// A move into the draining node whose source is dead (or no longer a
+// member) is not cleared: the draining node may hold the only live copy,
+// which it force-promotes once the source has been dead long enough, and
+// the partition then drains off it as usual. Clearing it and removing
+// the node in the same pass left that copy set aside on a node outside
+// the cluster and the partition on its dead owner. The decommission
+// waits instead and says, at error, how to abort by hand.
+func TestDecommissionKeepsAMoveFromADeadSourceIntoTheDrainingNode(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(f *fakeControllerStore)
+	}{
+		{"source dead", func(f *fakeControllerStore) {
+			f.members[2].Status = metastore.MemberDead // c
+		}},
+		{"source not a member", func(f *fakeControllerStore) {
+			f.assignments["orders"][2] = "gone"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := decomStore(t)
+			store.assignments["orders"] = map[int]string{0: "a", 1: "b", 2: "c"}
+			store.targets["orders"] = map[int]string{2: "d"}
+			tc.setup(store)
+			log, logs := newLogBuffer()
+			reg := prometheus.NewRegistry()
+			c := &Controller{store: store, cfg: Config{Logger: log}.withDefaults(), m: newMetrics(reg)}
+
+			for range 3 {
+				c.reconcileDecommission(context.Background())
+			}
+
+			if len(store.abortLog) != 0 || store.targets["orders"][2] != "d" {
+				t.Fatalf("cleared the move into d from a dead source: aborts %v, target %q", store.abortLog, store.targets["orders"][2])
+			}
+			if len(store.removed) != 0 || len(store.forgotten) != 0 {
+				t.Fatalf("removed %v (forgotten %v), the node that may hold the only live copy", store.removed, store.forgotten)
+			}
+			if got := testutil.ToFloat64(c.m.decomBlocked.WithLabelValues("d", BlockedMoveTarget)); got != 1 {
+				t.Fatalf("narad_decommission_blocked{d,move_target} = %v, want 1", got)
+			}
+			lines := logs.lines("level=ERROR", "decommission blocked", "node=d", "reason=move_target")
+			if len(lines) != 1 || !strings.Contains(lines[0], "narad cluster moves abort") {
+				t.Fatalf("want one error line for d's move_target that says how to abort by hand:\n%s", logs)
+			}
+
+			// The members view, on any node, reads the same reason.
+			views, err := DecommissionViews(context.Background(), store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bs := DecommissionBlockers(views["d"])
+			if len(bs) != 1 || bs[0].Code != BlockedMoveTarget || !strings.Contains(bs[0].Message, "narad cluster moves abort") {
+				t.Fatalf("members view blockers for d = %+v, want the move_target that says how to abort by hand", bs)
+			}
+		})
+	}
+}
+
+// A move_target wait that turns into one an operator must look at (the
+// move's source died) is logged again, at error.
+func TestDecommissionLogsAMoveTargetAgainWhenItsSourceDies(t *testing.T) {
+	store := decomStore(t)
+	store.assignments["orders"] = map[int]string{0: "a", 1: "b", 2: "c"}
+	store.targets["orders"] = map[int]string{2: "d"}
+	store.abortRefused = true // the live source's move cannot be cleared this pass
+	log, logs := newLogBuffer()
+	c := &Controller{store: store, cfg: Config{Logger: log}.withDefaults()}
+
+	c.reconcileDecommission(context.Background())
+	if len(logs.lines("level=WARN", "decommission waiting", "node=d", "reason=move_target")) != 1 {
+		t.Fatalf("no warn line for a move into d from a live source:\n%s", logs)
+	}
+	store.members[2].Status = metastore.MemberDead // c dies
+	c.reconcileDecommission(context.Background())
+	c.reconcileDecommission(context.Background())
+	if len(logs.lines("level=ERROR", "decommission blocked", "node=d", "reason=move_target")) != 1 {
+		t.Fatalf("no error line once the move's source died:\n%s", logs)
+	}
+}
+
+// A node that holds quarantined copies is still removed once drained
+// (it cannot be told to discard them), but the removal says so at error:
+// its volume holds copies that may be the only instance of some records.
+func TestDecommissionSaysWhenItRemovesANodeHoldingQuarantinedCopies(t *testing.T) {
+	store := decomStore(t)
+	withAddrs(store)
+	store.assignments["orders"] = map[int]string{0: "a", 1: "b", 2: "c"}
+	ns := &fakeNodeStatus{answers: map[string][]NodeStatusResult{"d:7942": {{Status: NodeStatus{Draining: true, QuarantinedCopies: 2}}}}}
+	log, logs := newLogBuffer()
+	c := &Controller{store: store, cfg: Config{NodeStatus: ns.status, Logger: log}.withDefaults()}
+
+	c.reconcileDecommission(context.Background())
+
+	if !slices.Equal(store.removed, []string{"d"}) {
+		t.Fatalf("removed = %v, want [d]", store.removed)
+	}
+	if len(logs.lines("level=ERROR", "quarantined partition copies", "node=d", "copies=2", "troubleshooting: quarantined copies")) != 1 {
+		t.Fatalf("no error line naming d's 2 quarantined copies:\n%s", logs)
+	}
+}
+
 // A drained node leaves Raft only once its ingress WAL has handed every
 // accepted record to its owner: a removed node's replica freezes and it
 // can never dispatch them after.

@@ -81,7 +81,7 @@ The leader exports why a decommission or a move cannot progress ([Cluster contro
 
 | Alert | Expression | What it means |
 |---|---|---|
-| Decommission blocked | `max by (node, reason) (narad_decommission_blocked) == 1`, held for 10 minutes (`for: 10m`) | A draining node's decommission has not progressed for 10 minutes, for the reason in the label. Some reasons clear on their own within minutes (`dispatch_backlog`, `move_target`, `move_budget_full`, `leader_transfer`); the others need a person ([Troubleshooting](troubleshooting.md#decommission-blocked)). |
+| Decommission blocked | `max by (node, reason) (narad_decommission_blocked) == 1`, held for 10 minutes (`for: 10m`) | A draining node's decommission has not progressed for 10 minutes, for the reason in the label. Some reasons clear on their own within minutes (`dispatch_backlog`, `move_target` unless the move's source is dead, `move_budget_full`, `leader_transfer`); the others need a person ([Troubleshooting](troubleshooting.md#decommission-blocked)). |
 | Moves blocked | `sum by (reason) (narad_moves_blocked) > 0`, held for 10 minutes (`for: 10m`) | A partition move cannot finish on its own, and holds one of the 8 move slots until it does or is aborted ([Troubleshooting](troubleshooting.md#moves-blocked)). |
 | Dead marking refused | `max(narad_dead_marking_refused) == 1`, held for 5 minutes (`for: 5m`) | The leader is not hearing heartbeats from most voters although Raft still reaches them: its node RPC plane is likely broken ([Troubleshooting](troubleshooting.md#log-dead-marking-refused)). |
 

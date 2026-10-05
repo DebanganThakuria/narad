@@ -24,7 +24,8 @@ const (
 	// would not be a majority of the new configuration.
 	BlockedNoHealthyMajority = "no_healthy_majority"
 	// BlockedMoveTarget: a move still aims at the node; the leader
-	// clears such moves and waits for them to go.
+	// clears such moves and waits for them to go, except a move whose
+	// source is dead or gone, which needs an operator.
 	BlockedMoveTarget = "move_target"
 	// BlockedDispatchBacklog: the node's ingress WAL still holds records
 	// it accepted and has not handed to their owners, or may still take
@@ -69,9 +70,16 @@ var stallReasons = map[string]bool{
 type Blocker struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// stall marks a reason that needs an operator although its code
+	// usually clears on its own (a move_target held by a dead source).
+	stall bool
 }
 
 func (b Blocker) Error() string { return b.Code + ": " + b.Message }
+
+// needsOperator reports whether the reason needs an operator (logged at
+// error) rather than clearing on its own (logged at warn).
+func (b Blocker) needsOperator() bool { return b.stall || stallReasons[b.Code] }
 
 // NodeStatus is the part of a node's own status the decommission pass
 // reads before it takes the node out of Raft. The node reads Draining,
@@ -88,6 +96,11 @@ type NodeStatus struct {
 	// DispatchBacklog is how many records the node's ingress WAL
 	// accepted and has not yet handed to their owners.
 	DispatchBacklog uint64
+	// QuarantinedCopies is how many partition copies the node set aside
+	// instead of deleting. They do not hold the removal up (nothing can
+	// discard them), but the removal says so at error: the node's volume
+	// may hold the only instance of some records.
+	QuarantinedCopies int
 }
 
 // ErrNodeStatusUnsupported is the error Config.NodeStatus returns for a
@@ -120,6 +133,11 @@ type DecommissionView struct {
 	// Owned is how many partitions the node owns, Outbound how many of
 	// them are moving off it, and Inbound how many moves aim at it.
 	Owned, Outbound, Inbound int
+	// InboundFromDeadSource is how many of the Inbound moves come from
+	// a source that is dead or no longer a member. The node may hold the
+	// only live copy of those partitions, so nothing clears them on its
+	// own.
+	InboundFromDeadSource int
 	// InFlight is how many moves are in flight cluster-wide.
 	InFlight int
 	// Status is the node's own status; nil when it was not read (the
@@ -174,7 +192,11 @@ func DecommissionBlockers(v DecommissionView) []Blocker {
 	if v.Owned > 0 {
 		out = append(out, ownershipBlockers(v)...)
 	}
-	if v.Inbound > 0 {
+	switch {
+	case v.InboundFromDeadSource > 0:
+		out = append(out, Blocker{Code: BlockedMoveTarget, stall: true, Message: fmt.Sprintf(
+			"%d moves aim at it, %d of them from a source that is dead or no longer a member; it may hold the only live copy of those partitions, so the leader does not clear them, and it waits for each copy to be force-promoted and moved off, or for the source to come back. If dropping that copy is really intended, abort the move by hand (narad cluster moves abort <topic> <partition>)", v.Inbound, v.InboundFromDeadSource)})
+	case v.Inbound > 0:
 		out = append(out, Blocker{Code: BlockedMoveTarget, Message: fmt.Sprintf(
 			"%d moves still aim at it; the leader clears them and removes it once they are gone", v.Inbound)})
 	}
@@ -296,7 +318,8 @@ func DecommissionViews(ctx context.Context, r ClusterReader) (map[string]Decommi
 	if err != nil {
 		return nil, err
 	}
-	owned, outbound, inbound := map[string]int{}, map[string]int{}, map[string]int{}
+	status := memberStatuses(members)
+	owned, outbound, inbound, fromDead := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
 	inFlight := 0
 	for _, t := range topics {
 		assignments, err := r.ListAssignments(t.Name)
@@ -308,6 +331,9 @@ func DecommissionViews(ctx context.Context, r ClusterReader) (map[string]Decommi
 			if a.TargetID != "" {
 				outbound[a.OwnerID]++
 				inbound[a.TargetID]++
+				if sourceGone(a.OwnerID, status) {
+					fromDead[a.TargetID]++
+				}
 				inFlight++
 			}
 		}
@@ -318,7 +344,8 @@ func DecommissionViews(ctx context.Context, r ClusterReader) (map[string]Decommi
 		views[m.ID] = DecommissionView{
 			Node: m, Members: members, Voters: voters, LeaderID: leaderID,
 			MinVoters: DefaultMinVoters, MaxInFlightMoves: DefaultMaxInFlightMoves,
-			Owned: owned[m.ID], Outbound: outbound[m.ID], Inbound: inbound[m.ID], InFlight: inFlight,
+			Owned: owned[m.ID], Outbound: outbound[m.ID], Inbound: inbound[m.ID],
+			InboundFromDeadSource: fromDead[m.ID], InFlight: inFlight,
 		}
 	}
 	return views, nil
@@ -339,4 +366,21 @@ func NewDecommissionRefusal(id string, reasons []Blocker) DecommissionRefusal {
 		Error:   "decommission of " + id + " refused: " + reasons[0].Message,
 		Reasons: reasons,
 	}
+}
+
+// memberStatuses maps each member's ID to its status.
+func memberStatuses(members []metastore.Member) map[string]metastore.MemberStatus {
+	out := make(map[string]metastore.MemberStatus, len(members))
+	for _, m := range members {
+		out[m.ID] = m.Status
+	}
+	return out
+}
+
+// sourceGone reports whether a move's source, the partition's owner, is
+// dead or no longer a member: the move's target may then hold the only
+// live copy of the partition.
+func sourceGone(owner string, status map[string]metastore.MemberStatus) bool {
+	st, ok := status[owner]
+	return !ok || st == metastore.MemberDead
 }

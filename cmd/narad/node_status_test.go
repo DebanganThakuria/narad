@@ -38,15 +38,15 @@ func (p *scriptedStatusPeer) NodeStatus(_ context.Context, addr string) (nodewir
 // controller's own sentinel.
 func TestServeGivesTheControllerALoggerRegistryAndNodeStatus(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	peer := &scriptedStatusPeer{st: nodewire.NodeStatus{Node: "narad-2", Draining: true, ProduceInFlight: 2, DispatchBacklog: 7}}
+	peer := &scriptedStatusPeer{st: nodewire.NodeStatus{Node: "narad-2", Draining: true, ProduceInFlight: 2, DispatchBacklog: 7, Quarantine: nodewire.QuarantineStatus{Copies: 3}}}
 	cfg := controllerConfig(slog.New(slog.NewTextHandler(io.Discard, nil)), reg, peer)
 
 	if cfg.Logger == nil || cfg.Registerer != reg || cfg.NodeStatus == nil {
 		t.Fatalf("controller config = %+v; want a logger, the process registry and a node status call", cfg)
 	}
 	st, err := cfg.NodeStatus(context.Background(), "narad-2:7942")
-	if err != nil || st != (controller.NodeStatus{Draining: true, ProduceInFlight: 2, DispatchBacklog: 7}) || !slices.Equal(peer.asked, []string{"narad-2:7942"}) {
-		t.Fatalf("NodeStatus = %+v, %v (asked %v); want draining, 2 in flight and a backlog of 7 from narad-2:7942", st, err, peer.asked)
+	if err != nil || st != (controller.NodeStatus{Draining: true, ProduceInFlight: 2, DispatchBacklog: 7, QuarantinedCopies: 3}) || !slices.Equal(peer.asked, []string{"narad-2:7942"}) {
+		t.Fatalf("NodeStatus = %+v, %v (asked %v); want draining, 2 in flight, a backlog of 7 and 3 quarantined copies from narad-2:7942", st, err, peer.asked)
 	}
 	peer.err = cluster.ErrNodeStatusUnsupported
 	if _, err := cfg.NodeStatus(context.Background(), "old:7942"); !errors.Is(err, controller.ErrNodeStatusUnsupported) {
