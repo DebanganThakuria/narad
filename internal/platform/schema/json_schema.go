@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -53,25 +54,34 @@ const (
 // calls pay no compilation cost. Safe for concurrent use.
 type JSONSchema struct {
 	mu       sync.RWMutex
-	versions map[string]int                        // topic → latest loaded version number
-	schemas  map[string]map[int]*jsonschema.Schema // topic → version → compiled schema
+	versions map[string]int                     // topic → latest loaded version number
+	schemas  map[string]map[int]*compiledSchema // topic → version → compiled schema
+
+	// limiter bounds the validations of large payloads (and of any
+	// payload on a costly schema) running at once on this node.
+	limiter *validationLimiter
 }
 
 // NewJSONSchema returns an empty JSONSchema registry.
 func NewJSONSchema() *JSONSchema {
 	return &JSONSchema{
 		versions: map[string]int{},
-		schemas:  map[string]map[int]*jsonschema.Schema{},
+		schemas:  map[string]map[int]*compiledSchema{},
+		limiter:  defaultValidationLimiter(),
 	}
 }
 
 // ValidateDefinition checks that schemaBytes is a schema this registry
 // will accept at registration: within MaxSchemaBytes and
 // MaxSchemaDepth, an object or true at the root (false would reject
-// every message, and anything else is not a schema), and compilable.
-// Nothing is registered. Persisted schemas are never re-checked
-// against the limits, so tightening a limit cannot make an existing
-// topic's history fail to load.
+// every message, and anything else is not a schema), compilable, and
+// bounded in validation cost: no recursion that revalidates a value
+// through several paths per level, no subschema applied to one value
+// through more than 64 validation paths, and no pattern that keeps more
+// than 32 partial matches alive. Nothing is registered. Persisted
+// schemas are never re-checked against the limits, so tightening a
+// limit cannot make an existing topic's history fail to load; one that
+// fails a cost check is validated under the node's validation limit.
 func (r *JSONSchema) ValidateDefinition(_ context.Context, topic string, schemaBytes []byte) error {
 	if err := checkDefinitionLimits(schemaBytes); err != nil {
 		return err
@@ -87,12 +97,22 @@ func (r *JSONSchema) ValidateDefinition(_ context.Context, topic string, schemaB
 	if err := checkInDocumentRefs(schemaDoc); err != nil {
 		return fmt.Errorf("schema: %w", err)
 	}
-	if _, err := compileDecoded(topic, 0, schemaDoc); err != nil {
+	cs, err := compileTopic(topic, 0, schemaDoc, nil)
+	if err != nil {
 		return err
 	}
 	// After compiling, so the analysis sees a well-formed document.
 	if err := checkRevalidation(schemaDoc); err != nil {
+		countRejection(rejectDefinitionPaths)
 		return fmt.Errorf("schema: %w", err)
+	}
+	if cs.cost.paths != nil {
+		countRejection(rejectDefinitionPaths)
+		return fmt.Errorf("schema: %w", cs.cost.paths)
+	}
+	if cs.cost.pattern != nil {
+		countRejection(rejectDefinitionPattern)
+		return fmt.Errorf("schema: %w", cs.cost.pattern)
 	}
 	return nil
 }
@@ -290,14 +310,14 @@ func (r *JSONSchema) Load(_ context.Context, topic string, version int, schemaBy
 	if version <= 0 {
 		return fmt.Errorf("schema: %s: invalid version %d", topic, version)
 	}
-	compiled, err := compileSchema(topic, version, schemaBytes)
+	compiled, err := compileTopicBytes(topic, version, schemaBytes)
 	if err != nil {
 		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.schemas[topic] == nil {
-		r.schemas[topic] = map[int]*jsonschema.Schema{}
+		r.schemas[topic] = map[int]*compiledSchema{}
 	}
 	r.schemas[topic][version] = compiled
 	if version > r.versions[topic] {
@@ -324,9 +344,9 @@ func (r *JSONSchema) ReplaceTopic(_ context.Context, topic string, history []Ver
 			latest = v
 		}
 	}
-	var compiled *jsonschema.Schema
+	var compiled *compiledSchema
 	if latest.Number > 0 {
-		s, err := compileSchema(topic, latest.Number, latest.Raw)
+		s, err := compileTopicBytes(topic, latest.Number, latest.Raw)
 		if err != nil {
 			return fmt.Errorf("v%d: %w", latest.Number, err)
 		}
@@ -340,7 +360,7 @@ func (r *JSONSchema) ReplaceTopic(_ context.Context, topic string, history []Ver
 		delete(r.versions, topic)
 		return nil
 	}
-	r.schemas[topic] = map[int]*jsonschema.Schema{latest.Number: compiled}
+	r.schemas[topic] = map[int]*compiledSchema{latest.Number: compiled}
 	r.versions[topic] = latest.Number
 	return nil
 }
@@ -380,34 +400,23 @@ func schemaResourceURL(topic string, version int) string {
 	return fmt.Sprintf("narad://schema/%s/%d", topic, version)
 }
 
+// compileSchema compiles a schema document and returns the form that
+// reports every violation.
 func compileSchema(topic string, version int, schemaBytes []byte) (*jsonschema.Schema, error) {
+	cs, err := compileTopicBytes(topic, version, schemaBytes)
+	if err != nil {
+		return nil, err
+	}
+	return cs.full, nil
+}
+
+// compileTopicBytes is compileTopic on the document's bytes.
+func compileTopicBytes(topic string, version int, schemaBytes []byte) (*compiledSchema, error) {
 	schemaDoc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaBytes))
 	if err != nil {
 		return nil, fmt.Errorf("schema: invalid JSON: %w", err)
 	}
-	return compileDecoded(topic, version, schemaDoc)
-}
-
-// compileDecoded compiles an already decoded schema document. It
-// applies no registration limit: persisted schemas go through here on
-// every hydrate and must keep loading.
-func compileDecoded(topic string, version int, schemaDoc any) (*jsonschema.Schema, error) {
-	c := jsonschema.NewCompiler()
-	c.UseLoader(noExternalRefs{})
-	// The library asserts "format" only for draft-07 and earlier and
-	// treats it as an annotation from 2019-09 on (the default draft).
-	// One contract for every draft: format is always asserted. The
-	// compatibility check already treats it as a constraint.
-	c.AssertFormat()
-	resource := schemaResourceURL(topic, version)
-	if err := c.AddResource(resource, schemaDoc); err != nil {
-		return nil, clientSafeCompileError(err)
-	}
-	compiled, err := c.Compile(resource)
-	if err != nil {
-		return nil, clientSafeCompileError(err)
-	}
-	return compiled, nil
+	return compileTopic(topic, version, schemaDoc, schemaBytes)
 }
 
 // clientSafeCompileError strips the target URL from a refused load so
@@ -430,8 +439,19 @@ func clientSafeCompileError(err error) error {
 // exact value for type, multipleOf and bound checks; the library does
 // the arithmetic in big.Rat. The decode itself is decodePayload's
 // token walk, which accepts and rejects exactly what encoding/json
-// does (BenchmarkValidatePayloadDecode compares the two).
-func (r *JSONSchema) Validate(_ context.Context, topic string, payload []byte) error {
+// does (BenchmarkValidatePayloadDecode compares the two). A payload
+// nested deeper than MaxPayloadDepth is refused before validation.
+//
+// A payload above 16 KiB, or any payload on a schema the cost analysis
+// flagged, validates under the node's validation limit: it waits for a
+// slot (at most the limit's wait, never past ctx) and is refused with
+// an error IsCapacityError recognises when none frees up.
+//
+// A rejected payload gets a report of every violation, with its
+// location, when that report is bounded (detailCost); a payload whose
+// report could be larger (a megabyte of deeply nested failing values,
+// say) is checked without building one and gets a summary instead.
+func (r *JSONSchema) Validate(ctx context.Context, topic string, payload []byte) error {
 	r.mu.RLock()
 	version, ok := r.versions[topic]
 	if !ok {
@@ -441,16 +461,72 @@ func (r *JSONSchema) Validate(_ context.Context, topic string, payload []byte) e
 	compiled := r.schemas[topic][version]
 	r.mu.RUnlock()
 
+	if len(payload) <= limitedPayloadBytes && !compiled.expensive() {
+		return validatePayload(compiled, payload)
+	}
+	if err := r.limiter.acquire(ctx); err != nil {
+		if errors.Is(err, errValidationBusy) {
+			countRejection(rejectBusy)
+		} else {
+			countRejection(rejectCanceled)
+		}
+		return err
+	}
+	return r.validateLimited(compiled, payload)
+}
+
+// validateLimited runs validatePayload in a slot already acquired and
+// gives the slot back however validation ends: a slot lost to a panic
+// would shrink the node's validation capacity for good.
+func (r *JSONSchema) validateLimited(compiled *compiledSchema, payload []byte) error {
+	validationsInFlight.Add(1)
+	start := time.Now()
+	defer func() {
+		observeValidation(time.Since(start))
+		validationsInFlight.Add(-1)
+		r.limiter.release()
+	}()
+	return validatePayload(compiled, payload)
+}
+
+// validatePayload decodes payload and validates it against compiled.
+func validatePayload(compiled *compiledSchema, payload []byte) error {
 	if !utf8.Valid(payload) {
+		countRejection(rejectMalformed)
 		return errors.New("schema: invalid JSON payload: not valid UTF-8")
 	}
-	instance, err := decodePayload(payload)
+	instance, maxDepth, err := decodePayloadDepth(payload)
 	if err != nil {
+		if errors.Is(err, errPayloadTooDeep) {
+			countRejection(rejectDepth)
+			return fmt.Errorf("schema: %w", err)
+		}
+		countRejection(rejectMalformed)
 		return fmt.Errorf("schema: invalid JSON payload: %w", err)
 	}
 
-	if err := compiled.Validate(instance); err != nil {
-		return fmt.Errorf("schema: %w", boundedError(err, maxValidationErrorBytes))
+	// Walk the payload for its exact shape only when the bound from its
+	// size and depth does not already settle it.
+	stats := boundStats(len(payload), maxDepth)
+	if compiled.detailCost(stats) > detailBudgetBytes {
+		stats = statsOf(instance, 0, &payloadStats{})
+	}
+	if compiled.detailCost(stats) <= detailBudgetBytes {
+		if err := compiled.full.Validate(instance); err != nil {
+			countRejection(rejectInvalid)
+			return fmt.Errorf("schema: %w", boundedError(err, maxValidationErrorBytes))
+		}
+		return nil
+	}
+	check, err := compiled.checkForm()
+	if err != nil {
+		// Unreachable for a document that compiled once; the full form
+		// is still correct, only unbounded.
+		check = compiled.full
+	}
+	if check.Validate(instance) != nil {
+		countRejection(rejectInvalid)
+		return fmt.Errorf("schema: payload does not match the schema (%d values nested up to %d levels: too large for a report of each violation, so validate a smaller part of it to find one)", stats.values, stats.maxDepth)
 	}
 	return nil
 }
