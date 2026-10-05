@@ -127,6 +127,24 @@ Each metadata change is a Raft entry of one type (create topic, register member,
 
 Once every member runs a release that adds an entry type and the leader has used it, rolling a node back to a release without that type is unsupported: 3.0.x would skip those entries and a later release stops on them. Roll back before that point ([Upgrade](../operate/upgrade.md#roll-back-newer)), and never add a node on an older release to a fully upgraded cluster; the leader refuses it.
 
+### The entry types this release adds {#new-entry-types}
+
+This release adds nine entry types, 23 to 31. Each one carries what its write was checked against, so the state machine refuses the write (identically on every node) when the metadata changed in between. The entry types every release applies keep their exact meaning, so a 3.0.x node and an upgraded one never apply the same entry differently.
+
+| Type | Name in the logs | What it does |
+|---|---|---|
+| 23 | create topic with schema and link | Creates a topic, its first schema version and its fan-out parent link in one transaction. A leader change can no longer leave half a create behind (a topic without its schema, or a "child" that copies nothing), and a placement pass can no longer run between the record and the link. The parent must still be the incarnation the create was checked against. A name that differs from an existing one only in letter case is refused, and assignment rows or schema versions left under the name by an earlier topic are dropped. |
+| 24 | compare-and-set topic update | Applies an alter only to the incarnation it was read from, never shrinks the partition count, and keeps the owner, creation time, visibility timeout and fan-out link as stored. |
+| 25 | compare-and-set topic delete | Deletes the topic only if it is the incarnation the delete was checked against. |
+| 26 | compare-and-set schema version | Appends a schema version only to the incarnation it was checked against, within the schema byte budgets (each fan-out child's copy counts against the child). |
+| 27 | compare-and-set fan-out attach | Links a child only if parent and child are the incarnations checked; compares their schema histories as JSON values (key order, whitespace and number spelling do not matter), and counts a history the child adopts against the budgets. |
+| 28 | compare-and-set fan-out detach | Unlinks a child only if parent and child are the incarnations checked. |
+| 29 | insert-only partition placement | Places a partition that has no owner on record, of the topic incarnation it was computed for, inside its range, on a member that was not removed. It never replaces an owner; moves still change owners through their own flip. |
+| 30 | orphan assignment prune | Deletes an assignment row that belongs to no partition (its topic is gone, or the index is past the partition count), and refuses a live one. |
+| 31 | dead mark from an observed heartbeat | Marks a member dead unless a heartbeat newer than the one the decision was made from is on record. |
+
+The topic manager on the leader asks before each write whether every member applies the type. While one does not, it proposes the entry every release applies and the leader-side checks are all the protection (the name lock, the leader barrier and the owner re-check); it logs `metastore: not using a new raft entry type yet; proposing the entries every member applies` at info, at most once a minute per type, with the member holding it back. The first time the leader uses each type it logs `metastore: every member applies raft entry type <n>; using <name>` at info: the rollback boundary for this release. When the state machine refuses a write because the topic changed, the manager reads the topic again, checks the request again and retries once; a second refusal answers `409` (`topic changed since it was read`).
+
 ## Leader and controller {#controller}
 
 The Raft leader is also the **cluster controller**. It:
@@ -145,7 +163,9 @@ The first seconds of a cluster need care. A partition placed on the only member 
 - The leader watches membership every 250 ms, and runs its assignment and rebalance passes outside the 10 s tick when a member turns alive (new, or back after a restart). The pass waits until every Raft voter is alive, or until 1 s after the latest arrival if a voter is still missing.
 - A topic create or partition increase made while the cluster is still forming (some Raft voters have a member record, others have none) waits up to 2 s for the rest to register before it places partitions, so they are spread rather than moved later. The 2 s are counted from when a forming cluster was first seen, so a voter that never registers costs one wait, not one per create.
 - A create with no alive member at all still succeeds, and logs the warning "topic created without immediate partition assignment" (the error it carries reads "no alive member to own new partitions"). The controller assigns its partitions within about a second of the first member turning alive.
-- Creates and the controller's sweep take one assignment lock, so one can no longer overwrite the other's owners.
+- Creates and the controller's sweep take one assignment lock, so one can no longer overwrite the other's owners. Once every member applies [insert-only placement](#new-entry-types), the state machine refuses a placement for a partition that already has an owner, so a pass computed from a lagging replica cannot replace one either.
+- Assignment rows that belong to no partition (an earlier release could leave them behind a topic delete) are pruned by the leader when it takes over and about every minute after. Until every member applies the prune, each such row is logged once at error: `orphan assignment row for <topic>/<partition>; it is pruned once every member runs 3.1.0`. No data moves: the row names no partition.
+- A dead mark carries the heartbeat the controller judged, and is refused when a newer one committed in between.
 
 ## Metastore constants {#constants}
 
@@ -159,10 +179,12 @@ The first seconds of a cluster need care. A partition placed on the only member 
 | `Barrier` timeout | 5s |
 | Failed metastore write | retried 100 ms doubling to 5 s, for up to 30 s, then the node stops ([When a node stops applying](#fail-stop)) |
 | New Raft entry type | proposed only once every Raft server and member record reports a release that applies it ([Raft entry types](#entry-types)) |
+| Entry types added by this release | 23 to 31 ([the list](#new-entry-types)); the leader logs the first use of each at info |
+| Orphan assignment row prune | on the leader, when it takes over and every 6th reconcile tick (about a minute) |
 | Joiner older than every member | refused with `409`, code `older_release`; the leader logs it at error at most once a minute per joiner |
 | Startup reconcile wait for caught-up | up to 60s, then the destructive sweep is skipped rather than rushed |
 
-Schema history is **append-only** and capped at 1000 versions per topic, and (unreleased) at 4 MiB of stored versions per topic and 256 MiB for every schema in the cluster, counting each fan-out child's copy; the leader checks the byte budgets before it proposes, and the state machine does not re-check them. `opPutSchema` is applied only when the version is exactly the topic's persisted latest plus one and within the cap (and the same for every fan-out child's copy). The proposer (the topics manager on the leader) reads the persisted history, checks compatibility against the persisted latest, and proposes latest plus one. A proposer working from a stale view can therefore never overwrite an earlier version on any replica; it gets `ErrAlreadyExists`, reads again and retries.
+Schema history is **append-only** and capped at 1000 versions per topic, and (unreleased) at 4 MiB of stored versions per topic and 256 MiB for every schema in the cluster, counting each fan-out child's copy; the leader checks the byte budgets before it proposes, and once every member applies the [compare-and-set schema entry types](#new-entry-types) the state machine checks them again. `opPutSchema` is applied only when the version is exactly the topic's persisted latest plus one and within the cap (and the same for every fan-out child's copy). The proposer (the topics manager on the leader) reads the persisted history, checks compatibility against the persisted latest, and proposes latest plus one. A proposer working from a stale view can therefore never overwrite an earlier version on any replica; it gets `ErrAlreadyExists`, reads again and retries.
 
 The produce path keys its loaded schema by the topic's schema version counter and reloads when that moves. So a version registered on another node, a delete and recreate under the same name, or a schema adopted at attach time is picked up on the next produce. A reload reads only the latest version and runs as one flight per topic: every produce waiting on it shares one metastore read and one compile, and a flight that raced a newer schema change loads again, so the last schema compiled on a node is always the newest.
 

@@ -210,7 +210,7 @@ forever and only leaving it out takes the default.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No `create` grant on the name, or no right to manage `parent`, as the node that answers or the cluster leader sees it. |
 | [`404`](status-codes.md#status-404) | `parent` does not exist, also after the answering node caught up with the leader. |
-| [`409`](status-codes.md#status-409) | The topic exists, a topic exists whose name differs only in letter case (the error names it), `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold), or (unreleased) the schema, or the parent's schema history a child adopts, would pass a schema byte budget. |
+| [`409`](status-codes.md#status-409) | The topic exists, a topic exists whose name differs only in letter case (the error names it), `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold), or (unreleased) the schema, or the parent's schema history a child adopts, would pass a schema byte budget, or `parent` was recreated under the request twice in a row (`topic changed since it was read`). |
 | [`413`](status-codes.md#status-413) | The body is over 1 MiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`503`](status-codes.md#status-503) | The cluster has no leader to write the topic, the answering node could not reach the leader to confirm `parent`, or (unreleased) every live node is being decommissioned, so no node can take the new partitions; nothing was written. |
@@ -443,7 +443,7 @@ you need all or nothing.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist, also after the answering node caught up with the leader. |
-| [`409`](status-codes.md#status-409) | `schema_base_version` is not the current version, the history holds 1000 versions or (unreleased) the new version would take it past 4 MiB or the cluster's schemas past 256 MiB, the topic is a child whose schema its parent manages, or the new retention is too short for a delay child. |
+| [`409`](status-codes.md#status-409) | `schema_base_version` is not the current version, the history holds 1000 versions or (unreleased) the new version would take it past 4 MiB or the cluster's schemas past 256 MiB, the topic is a child whose schema its parent manages, the new retention is too short for a delay child, or (unreleased) the topic was deleted and recreated, or grew, under the request twice in a row (`topic changed since it was read`). |
 | [`413`](status-codes.md#status-413) | The body is over 1 MiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, the answering node could not reach the leader to confirm a topic it does not have, or (unreleased) a partition increase found every live node being decommissioned, so no node can take the new partitions; nothing was changed. |
@@ -502,6 +502,7 @@ it next starts.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist, also after the answering node caught up with the leader. |
+| [`409`](status-codes.md#status-409) | (Unreleased) The topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was deleted. Read the topic again before deleting it. |
 | [`503`](status-codes.md#status-503) | The cluster has no leader to write the delete, or the answering node could not reach the leader to confirm a topic it does not have. |
 
 ```sh title="Request"
@@ -612,7 +613,7 @@ instead.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | The caller does not manage both topics, as the node that answers or the cluster leader sees them. |
 | [`404`](status-codes.md#status-404) | The parent or the child does not exist, also after the answering node caught up with the leader. |
-| [`409`](status-codes.md#status-409) | The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, the delay is longer than the parent's retention can hold, or (unreleased) the copy of the parent's schema history the child adopts would pass the cluster's schema byte budget. |
+| [`409`](status-codes.md#status-409) | The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, the delay is longer than the parent's retention can hold, or (unreleased) the copy of the parent's schema history the child adopts would pass the cluster's schema byte budget, or either topic was recreated under the request twice in a row (`topic changed since it was read`). |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`503`](status-codes.md#status-503) | No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry. |
 
@@ -727,6 +728,7 @@ history it already has and becomes a standalone topic again.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | The caller manages neither topic, as the node that answers or the cluster leader sees them. |
 | [`404`](status-codes.md#status-404) | Neither topic exists after the answering node caught up with the leader, or the two are not linked. |
+| [`409`](status-codes.md#status-409) | (Unreleased) Either topic was deleted and recreated under the request twice in a row (`topic changed since it was read`); nothing was changed. |
 | [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, or the answering node could not reach the leader to confirm the topics. |
 
 ```sh title="Request"

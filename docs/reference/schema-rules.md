@@ -120,7 +120,7 @@ Two limits of the check:
 
 A child created under, or attached to, a parent with a schema adopts the parent's whole history: the same version numbers and the same documents. While it is attached, its parent manages it: changing the child's schema gets `409`, and every change to the parent's schema reaches the child in the same metadata write. After a detach, the child keeps the history it has and manages it again.
 
-- A child can be attached, or attached again, only to a parent whose history is identical to its own, version for version.
+- A child can be attached, or attached again, only to a parent whose history is identical to its own, version for version. (**Unreleased**) Once every member runs this release, identical means the same JSON value: key order, whitespace and the spelling of a number (`10`, `1e1`) do not matter, so a history copied from what the API serves matches one stored with the client's formatting. Before that, the stored bytes must match.
 - A child with a schema cannot go under a parent without one. A child without a schema adopts the parent's on attach.
 - To link a child whose history has drifted, first make the parent's history, or the detached child's, the same as the other.
 
