@@ -31,6 +31,10 @@ const (
 	opReadmitMember
 	opSetUserPassword
 	opSetUserGrants
+	// opDeleteUserReleaseTopics deletes a user and clears the owner of
+	// every topic it owned, in one transaction (fsm_apply_users.go).
+	// Proposed only once every member applies it (Store.DeleteUser).
+	opDeleteUserReleaseTopics
 
 	// opEnd is not an entry type: it marks the end of the list. New
 	// entry types go above this line, and a leader proposes one only
@@ -67,6 +71,11 @@ type userPasswordPayload struct {
 	Username     string `json:"u"`
 	PasswordHash []byte `json:"h"`
 	UpdatedAtMs  int64  `json:"t"`
+}
+
+// userDeletePayload is the body of opDeleteUserReleaseTopics.
+type userDeletePayload struct {
+	Username string `json:"u"`
 }
 
 // userGrantsPayload is the body of opSetUserGrants: replace only the

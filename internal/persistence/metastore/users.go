@@ -86,10 +86,53 @@ func (s *Store) ApplyUserUpdate(ctx context.Context, upd UserUpdate) error {
 	}
 }
 
-// DeleteUser removes the user through Raft. It returns ErrNotFound if
-// the user does not exist.
+// DeleteUser removes the user through Raft and clears the owner of every
+// topic it owned, so a user created later under the same name inherits
+// none of them. It returns ErrNotFound if the user does not exist and
+// ErrRootProtected for the root admin.
+//
+// Releasing the topics needs opDeleteUserReleaseTopics, which a 3.0.x
+// member would skip. Until every member applies it (EveryMemberKnows)
+// the delete uses the old entry, which removes only the user: revoking
+// access never waits on an upgrade. The topics it leaves owned by the
+// name are logged, since recreating the user would hand them back.
 func (s *Store) DeleteUser(ctx context.Context, username string) error {
-	return s.apply(ctx, opDeleteUser, username)
+	if ok, reason := s.EveryMemberKnows(uint32(opDeleteUserReleaseTopics)); !ok {
+		if err := s.apply(ctx, opDeleteUser, username); err != nil {
+			return err
+		}
+		s.warnTopicsStillOwned(username, reason)
+		return nil
+	}
+	return s.apply(ctx, opDeleteUserReleaseTopics, userDeletePayload{Username: username})
+}
+
+// maxLoggedTopics caps the topic names one log line lists.
+const maxLoggedTopics = 20
+
+// warnTopicsStillOwned logs the topics a delete that used the old entry
+// left owned by username, if any.
+func (s *Store) warnTopicsStillOwned(username, reason string) {
+	var names []string
+	s.fsm.mu.RLock()
+	err := s.fsm.view(func(tx *bolt.Tx) error {
+		owned, err := topicsOwnedBy(tx, username)
+		for _, t := range owned {
+			names = append(names, t.Name)
+		}
+		return err
+	})
+	s.fsm.mu.RUnlock()
+	if err != nil {
+		s.log.Error("user deleted, but the topics it owned could not be read; any it owned still name it as owner, so do not create a user with this name again until an admin has checked them",
+			"component", "audit", "username", username, "error", err)
+		return
+	}
+	if len(names) == 0 {
+		return
+	}
+	s.log.Warn("user deleted, but its topics still name it as owner because a member cannot apply the entry that releases them; do not create a user with this name again until an admin has deleted those topics",
+		"component", "audit", "username", username, "topics", names[:min(len(names), maxLoggedTopics)], "topic_count", len(names), "reason", reason)
 }
 
 // GetUser reads the user from the local replica. It returns ErrNotFound

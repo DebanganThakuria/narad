@@ -253,6 +253,8 @@ func (f *fsmState) dispatch(op opCode, data []byte) error {
 		return f.applySetUserPassword(data)
 	case opSetUserGrants:
 		return f.applySetUserGrants(data)
+	case opDeleteUserReleaseTopics:
+		return f.applyDeleteUserReleaseTopics(data)
 	default:
 		return errNoHandler
 	}
