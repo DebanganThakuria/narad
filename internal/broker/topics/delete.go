@@ -32,31 +32,48 @@ func (e PurgeError) Unwrap() error {
 // name lock (audit H1): a delete authorized at the ingress against one
 // topic is refused if the name now holds someone else's.
 func (m *Manager) DeleteTopic(ctx context.Context, name string) error {
+	_, err := m.DeleteTopicID(ctx, name)
+	return err
+}
+
+// DeleteTopicID is DeleteTopic that also returns the incarnation ID it
+// deleted (audit M8): the record read under the name lock, which is the
+// one the delete removes. A caller that fans the purge out to the other
+// nodes names this ID, not one it read before the lock: a delete and
+// recreate interleaved between that read and the delete made the
+// fan-out name the wrong incarnation, and every other node kept the
+// deleted one's files until it restarted.
+//
+// The ID is returned whenever the metadata delete committed, including
+// with a PurgeError (the local purge failed, but the topic is gone and
+// the other nodes still have to purge it). It is empty for a record that
+// predates incarnation IDs.
+func (m *Manager) DeleteTopicID(ctx context.Context, name string) (string, error) {
 	if name == "" {
-		return fmt.Errorf("%w: name required", ErrInvalid)
+		return "", fmt.Errorf("%w: name required", ErrInvalid)
 	}
 	unlock := m.lockTopicName(name)
 	defer unlock()
 	if err := m.leaderBarrier(ctx); err != nil {
-		return err
+		return "", err
 	}
 
 	t, err := m.GetTopic(ctx, name)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := authorizeManage(ctx, t); err != nil {
-		return err
+		return "", err
 	}
 
 	if err := m.deleteTopicMetadata(ctx, name); err != nil {
-		return err
+		return "", err
 	}
 	if err := m.purgeTopicLocked(ctx, name, t.ID); err != nil {
-		return PurgeError{Topic: name, Err: err}
+		return t.ID, PurgeError{Topic: name, Err: err}
 	}
 	m.logger.Info("topic deleted", "topic", name, "incarnation", t.ID)
-	return nil
+	return t.ID, nil
 }
 
 // assignmentLocker is the metastore capability behind the assignment

@@ -163,6 +163,25 @@ type CreateGater interface {
 	ReleaseCreateGate()
 }
 
+// TopicIDDeleter is the optional delete surface of a Broker that
+// reports the topic incarnation it removed. Brokers built by New
+// implement it (via the embedded topics.Manager). The HTTP delete and
+// the forwarded-delete RPC assert for it so the purge fan-out names the
+// incarnation the delete actually removed, read under the topic's lock
+// (audit M8); without it they read the incarnation before the delete,
+// as before. Like CreateGater it stays out of Broker so test fakes of
+// Broker need not implement it.
+type TopicIDDeleter interface {
+	// DeleteTopicID deletes the topic and returns the ID of the
+	// incarnation it removed, also alongside a topics.PurgeError. See
+	// topics.Manager.DeleteTopicID.
+	DeleteTopicID(ctx context.Context, name string) (string, error)
+}
+
+// Compile-time check: the incarnation-reporting delete stays reachable
+// through the facade via the embedded topics.Manager.
+var _ TopicIDDeleter = (*impl)(nil)
+
 // BatchProducer is the optional batch-produce surface of a Broker.
 // Brokers built by New implement it (via the embedded messaging.Engine).
 // The HTTP batch produce handler asserts for it and refuses the request
