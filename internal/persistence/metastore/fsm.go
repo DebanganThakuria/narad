@@ -85,10 +85,15 @@ type fsmState struct {
 	build string
 	halt  haltState
 
-	// For the metastore metrics: apply errors by kind, and whether a
-	// storage failure is being retried right now.
-	applyErrors [applyErrKinds]atomic.Uint64
-	stalled     atomic.Bool
+	// For the metastore metrics: apply errors by kind, whether a
+	// storage failure is being retried right now, and the last snapshot
+	// this node persisted (its size and how long it took) and how many
+	// failed.
+	applyErrors      [applyErrKinds]atomic.Uint64
+	stalled          atomic.Bool
+	snapshotBytes    atomic.Int64
+	snapshotNanos    atomic.Int64
+	snapshotFailures atomic.Uint64
 }
 
 // appliedEntry is the entry being applied.
@@ -124,6 +129,7 @@ func newFSMWith(path string, opts fsmOptions) (*fsmState, error) {
 	if err != nil {
 		return nil, err
 	}
+	removeLeftovers(log, path)
 	f := &fsmState{db: db, dbPath: path, versions: newMetadataDomainVersions(), meta: meta, log: log, build: opts.build}
 	f.applied.Store(meta.trustedApplied())
 	return f, nil

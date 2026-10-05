@@ -1,19 +1,34 @@
 package metastore
 
 import (
-	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
 
-// Snapshot captures the whole bbolt database as one in-memory blob.
-// Raft serialises Snapshot with Apply, so the copy is consistent.
+// Snapshot copies the database to a temporary file beside it for Raft
+// to persist. Raft calls it on the FSM goroutine, serialised with Apply
+// and Restore, so the copy holds exactly the entries applied so far.
+// The copy is made under a read transaction that ends before Snapshot
+// returns, and Persist then streams the file into Raft's snapshot sink
+// on Raft's own goroutine while Apply carries on; Release removes it.
+//
+// Nothing large is held in memory. This used to copy the whole database
+// into a buffer that grew by doubling (a 26 MiB database allocated
+// 64 MiB per snapshot), so a metastore grown large enough could crash
+// every node at its next snapshot. No read transaction outlives Snapshot either: an open one
+// makes any commit that grows bbolt's memory map wait for it, and Raft
+// persists while the FSM applies. The price is free disk equal to the
+// database's size for the copy; without it the snapshot fails, which is
+// logged and counted, and Raft tries again at its next interval.
 //
 // It refuses while the FSM has stopped applying, and while the database
 // is ahead of what Raft has handed the FSM since this start (a restart
@@ -30,20 +45,69 @@ func (f *fsmState) Snapshot() (raft.FSMSnapshot, error) {
 	if applied, seen := f.applied.Load(), f.lastSeen.Load(); applied > seen {
 		return nil, fmt.Errorf("metastore: snapshot deferred: the database holds raft index %d but the replay since the start has reached only %d", applied, seen)
 	}
+	started := time.Now()
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	var buf bytes.Buffer
-	err := f.view(func(tx *bolt.Tx) error {
-		_, err := tx.WriteTo(&buf)
-		return err
-	})
-	return &fsmSnapshot{data: buf.Bytes()}, err
+	path, size, err := f.copyDatabase()
+	if err != nil {
+		f.snapshotFailures.Add(1)
+		f.log.Error("metastore: could not copy the database for a raft snapshot; raft tries again at its next snapshot interval, and its log grows until a snapshot succeeds",
+			"path", f.dbPath, "error", err, "hint", "a snapshot needs free disk beside fsm.db equal to its size")
+		return nil, fmt.Errorf("metastore: snapshot: copy %s: %w", f.dbPath, err)
+	}
+	return &fsmSnapshot{f: f, path: path, size: size, started: started}, nil
 }
 
-// Restore replaces the local database with a leader snapshot: the blob
-// is written and fsynced to a sidecar file, checked, atomically renamed
-// over the live database, and reopened. On any failure f.db is left
-// holding an open database: either the new one or the untouched old one.
+// snapshotCopySuffix starts the name of the temporary copy Snapshot
+// makes beside the database (fsm.db.snapshot-<random>).
+const snapshotCopySuffix = ".snapshot-"
+
+// copyDatabase writes a consistent copy of the database to a new file
+// beside it and returns its path and size. The read transaction ends
+// before it returns. On failure nothing is left behind.
+func (f *fsmState) copyDatabase() (path string, size int64, err error) {
+	file, err := os.CreateTemp(filepath.Dir(f.dbPath), filepath.Base(f.dbPath)+snapshotCopySuffix+"*")
+	if err != nil {
+		return "", 0, err
+	}
+	err = f.view(func(tx *bolt.Tx) error {
+		size, err = tx.WriteTo(file)
+		return err
+	})
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(file.Name())
+		return "", 0, err
+	}
+	return file.Name(), size, nil
+}
+
+// removeLeftovers removes the temporary files a crash can leave beside
+// the database: snapshot copies Release never removed, and a restore
+// image never installed. It runs once the database is open, so no
+// other process is using them (bbolt holds an exclusive lock on it).
+func removeLeftovers(log *slog.Logger, dbPath string) {
+	copies, _ := filepath.Glob(dbPath + snapshotCopySuffix + "*")
+	for _, p := range append(copies, dbPath+restoreSuffix) {
+		if err := os.Remove(p); err == nil {
+			log.Info("metastore: removed a temporary file a crash left beside the database", "path", p)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			log.Warn("metastore: could not remove a temporary file a crash left beside the database", "path", p, "error", err)
+		}
+	}
+}
+
+// restoreSuffix names the file Restore streams an image into before it
+// replaces the database (fsm.db.restore).
+const restoreSuffix = ".restore"
+
+// Restore replaces the local database with a leader snapshot: the image
+// is streamed to a sidecar file and fsynced (never read into memory),
+// checked, atomically renamed over the live database, and reopened. On
+// any failure f.db is left holding an open database: either the new one
+// or the untouched old one, and the sidecar is removed.
 //
 // The image is read before it replaces anything. One that is not a
 // database is refused with an error and the live database stays. One
@@ -57,13 +121,10 @@ func (f *fsmState) Restore(rc io.ReadCloser) error {
 	if err := f.stopErr(); err != nil {
 		return err
 	}
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		return err
-	}
-	tmp := f.dbPath + ".restore"
-	if err := writeFileSync(tmp, data); err != nil {
-		return err
+	tmp := f.dbPath + restoreSuffix
+	if err := writeFileSync(tmp, rc); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("metastore: restore: write the snapshot to %s: %w", tmp, err)
 	}
 	image, err := readImageMeta(tmp)
 	if err != nil {
@@ -81,6 +142,7 @@ func (f *fsmState) Restore(rc io.ReadCloser) error {
 	defer f.mu.Unlock()
 	f.db.Close()
 	if err := os.Rename(tmp, f.dbPath); err != nil {
+		_ = os.Remove(tmp)
 		// The old file is still in place; reopen it so f.db is never
 		// left holding a closed database.
 		db, _, reopenErr := openBolt(f.dbPath, f.build)
@@ -120,14 +182,14 @@ func syncDir(path string) {
 	}
 }
 
-// writeFileSync writes data to path and fsyncs it before closing so the
+// writeFileSync streams r to path and fsyncs it before closing, so the
 // restored snapshot is durable before it replaces the live database.
-func writeFileSync(path string, data []byte) error {
+func writeFileSync(path string, r io.Reader) error {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	if _, err := file.Write(data); err != nil {
+	if _, err := io.Copy(file, r); err != nil {
 		_ = file.Close()
 		return err
 	}
@@ -138,16 +200,51 @@ func writeFileSync(path string, data []byte) error {
 	return file.Close()
 }
 
-// fsmSnapshot is a fully materialised database image; Persist just
-// streams it into the sink.
-type fsmSnapshot struct{ data []byte }
+// fsmSnapshot is a copy of the database in a temporary file. Persist
+// streams it into Raft's sink and Release removes it.
+type fsmSnapshot struct {
+	f    *fsmState
+	path string
+	size int64
+	// started is when Snapshot began the copy; the snapshot's duration
+	// runs from there to the sink's close.
+	started time.Time
+}
 
 func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
-	if _, err := sink.Write(s.data); err != nil {
-		sink.Cancel()
+	if err := s.persist(sink); err != nil {
+		_ = sink.Cancel()
+		s.f.snapshotFailures.Add(1)
+		s.f.log.Error("metastore: could not persist a raft snapshot; raft tries again at its next snapshot interval, and its log grows until a snapshot succeeds",
+			"copy", s.path, "bytes", s.size, "error", err)
 		return err
+	}
+	s.f.snapshotBytes.Store(s.size)
+	s.f.snapshotNanos.Store(int64(time.Since(s.started)))
+	return nil
+}
+
+func (s *fsmSnapshot) persist(sink raft.SnapshotSink) error {
+	file, err := os.Open(s.path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	n, err := io.Copy(sink, file)
+	if err != nil {
+		return err
+	}
+	if n != s.size {
+		return fmt.Errorf("metastore: snapshot copy %s holds %d bytes, want %d", s.path, n, s.size)
 	}
 	return sink.Close()
 }
 
-func (s *fsmSnapshot) Release() {}
+// Release removes the copy. Raft calls it once, after Persist or
+// instead of it; a crash before it leaves the copy for the next open to
+// remove.
+func (s *fsmSnapshot) Release() {
+	if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.f.log.Warn("metastore: could not remove a raft snapshot copy; the next start removes it", "path", s.path, "error", err)
+	}
+}
