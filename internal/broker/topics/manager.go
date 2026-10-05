@@ -153,6 +153,25 @@ func (m *Manager) lockTopicName(name string) (unlock func()) {
 	}
 }
 
+// leaderBarrierer is the metastore capability behind the once-per-term
+// leader barrier (implemented by *metastore.Store).
+type leaderBarrierer interface {
+	LeaderBarrier(ctx context.Context) error
+}
+
+// leaderBarrier makes sure, on a just-elected leader, that the local
+// replica has applied everything earlier leaders committed before a
+// mutation reads the record it rewrites (audit M3). It costs one Raft
+// round trip per leadership term and nothing after. Callers hold the
+// topic's name lock and call it before their first read. A metastore
+// without the capability (tests, embedded use) skips it.
+func (m *Manager) leaderBarrier(ctx context.Context) error {
+	if b, ok := m.metastore.(leaderBarrierer); ok {
+		return b.LeaderBarrier(ctx)
+	}
+	return nil
+}
+
 // NewManager wires a Manager. dataDir is the topic directory root
 // (used by CreateTopic/DeleteTopic to mkdir/rmdir on disk). selfID is
 // this node's cluster ID (may be empty when there is no cluster

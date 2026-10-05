@@ -97,6 +97,13 @@ type Store struct {
 	// no-ops the FSM never sees".
 	logs raft.LogStore
 	log  *slog.Logger
+
+	// barrierTerm is the Raft term in which LeaderBarrier last
+	// succeeded (0: never); barrierMu makes concurrent first callers of
+	// a term share one barrier. leaderBarriers counts the barriers run.
+	barrierMu      sync.Mutex
+	barrierTerm    atomic.Uint64
+	leaderBarriers atomic.Uint64
 }
 
 // New opens or creates the Raft metastore at cfg.DataDir.

@@ -54,6 +54,9 @@ func (m *Manager) IncreaseTopicPartitions(ctx context.Context, name string, newP
 	}
 	unlock := m.lockTopicName(name)
 	defer unlock()
+	if err := m.leaderBarrier(ctx); err != nil {
+		return topic.Topic{}, err
+	}
 
 	current, err := m.GetTopic(ctx, name)
 	if err != nil {
@@ -108,6 +111,9 @@ func (m *Manager) UpdateTopicRetention(ctx context.Context, name string, retenti
 	}
 	unlock := m.lockTopicName(name)
 	defer unlock()
+	if err := m.leaderBarrier(ctx); err != nil {
+		return topic.Topic{}, err
+	}
 
 	current, err := m.GetTopic(ctx, name)
 	if err != nil {
@@ -156,6 +162,9 @@ func (m *Manager) UpdateTopicCaps(ctx context.Context, name string, maxInFlight,
 	}
 	unlock := m.lockTopicName(name)
 	defer unlock()
+	if err := m.leaderBarrier(ctx); err != nil {
+		return topic.Topic{}, err
+	}
 
 	current, err := m.GetTopic(ctx, name)
 	if err != nil {
@@ -226,6 +235,9 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 	}
 	unlock := m.lockTopicName(name)
 	defer unlock()
+	if err := m.leaderBarrier(ctx); err != nil {
+		return topic.Topic{}, err
+	}
 
 	t, err := m.GetTopic(ctx, name)
 	if err != nil {

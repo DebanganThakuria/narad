@@ -37,6 +37,9 @@ func (m *Manager) AttachChild(ctx context.Context, parent, child string, delayMs
 		return fmt.Errorf("%w: delay_ms (%d) exceeds the maximum of %d (1 year)",
 			ErrInvalid, delayMs, topic.MaxFanoutDelayMs)
 	}
+	if err := m.leaderBarrier(ctx); err != nil {
+		return err
+	}
 	if err := m.checkTopicExists(ctx, parent); err != nil {
 		return err
 	}
@@ -60,6 +63,9 @@ func (m *Manager) DetachChild(ctx context.Context, parent, child string) error {
 		return err
 	}
 	if err := validateTopicName(child); err != nil {
+		return err
+	}
+	if err := m.leaderBarrier(ctx); err != nil {
 		return err
 	}
 	if err := m.metastore.DetachChild(ctx, parent, child); err != nil {

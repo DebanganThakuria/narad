@@ -16,6 +16,13 @@ func (c *Controller) reconcileAssignments(ctx context.Context) {
 	if !c.store.IsLeader() {
 		return
 	}
+	// A just-elected leader's FSM may not have applied the placements
+	// the previous leader committed; a partition that looks unassigned
+	// here could already have an owner holding records. Barrier first
+	// (once per term); on failure skip the pass, the next tick retries.
+	if err := c.store.LeaderBarrier(ctx); err != nil {
+		return
+	}
 
 	members, err := c.store.ListMembers()
 	if err != nil {

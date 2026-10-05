@@ -909,3 +909,103 @@ func TestDeleteTopicReleasesParkedConsumers(t *testing.T) {
 		t.Fatalf("retired hook did not run: dropped schema topic = %q", reg.lastDroppedTopic)
 	}
 }
+
+// laggingLeaderMetastore is a just-elected leader whose FSM has not yet
+// applied what the previous leader committed: it serves the stale
+// records until LeaderBarrier runs, and logs barriers and reads in
+// order.
+type laggingLeaderMetastore struct {
+	*fakeMetastore
+	stale     map[string]topic.Topic
+	caughtUp  bool
+	callOrder []string
+}
+
+func (f *laggingLeaderMetastore) LeaderBarrier(context.Context) error {
+	f.callOrder = append(f.callOrder, "barrier")
+	f.caughtUp = true
+	return nil
+}
+
+func (f *laggingLeaderMetastore) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
+	f.callOrder = append(f.callOrder, "read "+name)
+	if t, ok := f.stale[name]; ok && !f.caughtUp {
+		return t, nil
+	}
+	return f.fakeMetastore.GetTopic(ctx, name)
+}
+
+// Every topic mutation reads the record it rewrites from the local
+// replica, so on a just-elected leader it must barrier before that read
+// (audit M3, verify-topics-4): the old leader raised orders to 6
+// partitions, the new leader's FSM still shows 3, and a retention alter
+// built from the stale read would write 3 back.
+func TestTopicMutationsBarrierBeforeReading(t *testing.T) {
+	mutations := map[string]func(*Manager) error{
+		"retention": func(m *Manager) error {
+			_, err := m.UpdateTopicRetention(context.Background(), "orders", 7_200_000)
+			return err
+		},
+		"caps": func(m *Manager) error {
+			_, err := m.UpdateTopicCaps(context.Background(), "orders", 5, 5)
+			return err
+		},
+		"partitions": func(m *Manager) error {
+			_, err := m.IncreaseTopicPartitions(context.Background(), "orders", 9)
+			return err
+		},
+		"schema": func(m *Manager) error {
+			_, err := m.UpdateTopicSchema(context.Background(), "orders", []byte(`{"type":"object"}`), 0)
+			return err
+		},
+		"delete": func(m *Manager) error {
+			return m.DeleteTopic(context.Background(), "orders")
+		},
+		"attach": func(m *Manager) error {
+			return m.AttachChild(context.Background(), "orders", "audit", 0)
+		},
+		"detach": func(m *Manager) error {
+			if err := m.metastore.AttachChild(context.Background(), "orders", "audit", 0); err != nil {
+				return err
+			}
+			return m.DetachChild(context.Background(), "orders", "audit")
+		},
+		"create as child": func(m *Manager) error {
+			_, err := m.CreateTopic(context.Background(), CreateOpts{Name: "orders-copy", Parent: "orders"})
+			return err
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			ms := &laggingLeaderMetastore{
+				fakeMetastore: newFakeMetastore(),
+				stale:         map[string]topic.Topic{"orders": {Name: "orders", ID: "0000000000000001", Partitions: 3, RetentionMs: 3_600_000}},
+			}
+			ms.topics["orders"] = topic.Topic{Name: "orders", ID: "0000000000000001", Partitions: 6, RetentionMs: 3_600_000}
+			ms.topics["audit"] = topic.Topic{Name: "audit", ID: "0000000000000002", Partitions: 6, RetentionMs: 3_600_000}
+			m := newTestManagerForMetastore(t, ms, nil, &fakeSchemaRegistry{}, "")
+			if err := mutate(m); err != nil {
+				t.Fatalf("mutation: %v", err)
+			}
+			barrier := slices.Index(ms.callOrder, "barrier")
+			firstRead := slices.IndexFunc(ms.callOrder, func(c string) bool { return strings.HasPrefix(c, "read ") })
+			if barrier < 0 || (firstRead >= 0 && firstRead < barrier) {
+				t.Errorf("calls = %v, want a leader barrier before the first read", ms.callOrder)
+			}
+			if got, ok := ms.topics["orders"]; ok && got.Partitions < 6 {
+				t.Errorf("orders now has %d partitions, want at least 6: the mutation wrote back a stale read", got.Partitions)
+			}
+		})
+	}
+
+	// A plain create reads no record but still barriers, so the name
+	// checks it makes run against an up-to-date replica.
+	ms := &laggingLeaderMetastore{fakeMetastore: newFakeMetastore()}
+	m := newTestManagerForMetastore(t, ms, nil, &fakeSchemaRegistry{}, "")
+	if _, err := m.CreateTopic(context.Background(), CreateOpts{Name: "fresh"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !slices.Contains(ms.callOrder, "barrier") {
+		t.Fatalf("calls = %v, want a leader barrier on create", ms.callOrder)
+	}
+}

@@ -33,6 +33,9 @@ func (m *Manager) DeleteTopic(ctx context.Context, name string) error {
 	}
 	unlock := m.lockTopicName(name)
 	defer unlock()
+	if err := m.leaderBarrier(ctx); err != nil {
+		return err
+	}
 
 	t, err := m.GetTopic(ctx, name)
 	if err != nil {

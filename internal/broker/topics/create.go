@@ -102,7 +102,7 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	if err := validateTopicName(opts.Name); err != nil {
 		return topic.Topic{}, err
 	}
-	if err := m.resolveCreateAsChild(ctx, &opts); err != nil {
+	if err := validateCreateAsChild(opts); err != nil {
 		return topic.Topic{}, err
 	}
 	// Wait before lockTopicName so a gated create doesn't stall
@@ -112,6 +112,12 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	}
 	unlock := m.lockTopicName(opts.Name)
 	defer unlock()
+	if err := m.leaderBarrier(ctx); err != nil {
+		return topic.Topic{}, err
+	}
+	if err := m.resolveCreateAsChild(ctx, &opts); err != nil {
+		return topic.Topic{}, err
+	}
 
 	t, err := m.topicFromOpts(opts)
 	if err != nil {
@@ -182,11 +188,10 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	return t, nil
 }
 
-// resolveCreateAsChild validates the Parent/FanoutDelayMs pair and,
-// for a create-as-child, defaults Partitions to the parent's count —
-// matching counts make the anti-affine per-key guarantee exact. It
-// runs before anything is written, so every failure is a clean 4xx.
-func (m *Manager) resolveCreateAsChild(ctx context.Context, opts *CreateOpts) error {
+// validateCreateAsChild checks the Parent/FanoutDelayMs pair without
+// reading anything, so a malformed request is refused before it waits
+// for any lock.
+func validateCreateAsChild(opts CreateOpts) error {
 	if opts.Parent == "" {
 		if opts.FanoutDelayMs != 0 {
 			return fmt.Errorf("%w: fanout_delay_ms requires parent", ErrInvalid)
@@ -205,6 +210,18 @@ func (m *Manager) resolveCreateAsChild(ctx context.Context, opts *CreateOpts) er
 	if opts.FanoutDelayMs > topic.MaxFanoutDelayMs {
 		return fmt.Errorf("%w: fanout_delay_ms (%d) exceeds the maximum of %d (1 year)",
 			ErrInvalid, opts.FanoutDelayMs, topic.MaxFanoutDelayMs)
+	}
+	return nil
+}
+
+// resolveCreateAsChild reads the parent of a create-as-child and
+// defaults Partitions to its count: matching counts make the
+// anti-affine per-key guarantee exact. It runs under the lock, after the
+// leader barrier, and before anything is written, so every failure is a
+// clean 4xx.
+func (m *Manager) resolveCreateAsChild(ctx context.Context, opts *CreateOpts) error {
+	if opts.Parent == "" {
+		return nil
 	}
 	parent, err := m.GetTopic(ctx, opts.Parent)
 	if err != nil {

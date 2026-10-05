@@ -27,6 +27,10 @@ type fakeControllerStore struct {
 	leaderID           string
 	membersVersion     uint64 // RoutingMembersVersion; bump when members change
 	listMembersErr     error
+	leaderBarrierErr   error
+	leaderBarriers     int    // LeaderBarrier call count
+	onLeaderBarrier    func() // what the FSM applies once a leader barriers
+	onLockAssignments  func() // what lands between a sweep's list and its lock
 }
 
 func newFakeControllerStore(memberIDs ...string) *fakeControllerStore {
@@ -70,7 +74,33 @@ func (f *fakeControllerStore) ListAssignments(topicName string) ([]metastore.Ass
 	return out, nil
 }
 
-func (f *fakeControllerStore) LockAssignments() func() { return func() {} }
+func (f *fakeControllerStore) LockAssignments() func() {
+	if f.onLockAssignments != nil {
+		f.onLockAssignments()
+	}
+	return func() {}
+}
+
+func (f *fakeControllerStore) LeaderBarrier(context.Context) error {
+	f.leaderBarriers++
+	if f.leaderBarrierErr != nil {
+		return f.leaderBarrierErr
+	}
+	if f.onLeaderBarrier != nil {
+		f.onLeaderBarrier()
+		f.onLeaderBarrier = nil
+	}
+	return nil
+}
+
+func (f *fakeControllerStore) GetTopic(_ context.Context, name string) (topic.Topic, error) {
+	for _, t := range f.topics {
+		if t.Name == name {
+			return t, nil
+		}
+	}
+	return topic.Topic{}, metastore.ErrNotFound
+}
 
 func (f *fakeControllerStore) SetAssignmentTarget(_ context.Context, topicName string, partition int, targetID string) error {
 	if f.targets[topicName] == nil {
@@ -257,5 +287,36 @@ func TestReconcileChildWiderThanParent(t *testing.T) {
 		if parent[p] == child[p] {
 			t.Fatalf("overlapping partition %d colocated on %q", p, parent[p])
 		}
+	}
+}
+
+// A just-elected leader's FSM may not have applied the placements the
+// previous leader committed, so the sweep must barrier before it reads
+// assignments (verify-concurrency-7): on master the sweep saw orders/0
+// unassigned and replaced the owner the old leader had placed, whose
+// disk may already hold records. A failed barrier skips the pass.
+func TestAssignSweepBarriersBeforeReading(t *testing.T) {
+	store := newFakeControllerStore("narad-0", "narad-1", "narad-2")
+	store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 3}}
+	store.onLeaderBarrier = func() {
+		store.assignments["orders"] = map[int]string{0: "narad-2", 1: "narad-0", 2: "narad-1"}
+	}
+	c := &Controller{store: store, cfg: Config{}.withDefaults()}
+
+	c.reconcileAssignments(context.Background())
+	if len(store.assignedLog) != 0 {
+		t.Fatalf("assigned %v, want none: the previous leader already placed every partition", store.assignedLog)
+	}
+	if got := store.assignments["orders"][0]; got != "narad-2" {
+		t.Fatalf("orders/0 owner = %q, want narad-2 (the previous leader's placement)", got)
+	}
+
+	failing := newFakeControllerStore("narad-0", "narad-1", "narad-2")
+	failing.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 3}}
+	failing.leaderBarrierErr = errors.New("barrier timed out")
+	c = &Controller{store: failing, cfg: Config{}.withDefaults()}
+	c.reconcileAssignments(context.Background())
+	if failing.leaderBarriers == 0 || len(failing.assignedLog) != 0 {
+		t.Fatalf("barriers = %d, assigned %v after a failed barrier, want the pass skipped", failing.leaderBarriers, failing.assignedLog)
 	}
 }
