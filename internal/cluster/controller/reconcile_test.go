@@ -32,6 +32,13 @@ type fakeControllerStore struct {
 	leaderBarriers     int    // LeaderBarrier call count
 	onLeaderBarrier    func() // what the FSM applies once a leader barriers
 	onLockAssignments  func() // what lands between a sweep's list and its lock
+	// entryTypesUsable makes the store answer the writes newer than
+	// 3.0.x (insert-only placement, prune) as a cluster whose members
+	// all apply them; false answers metastore.ErrEntryTypeNotYetUsable.
+	entryTypesUsable bool
+	orphans          []metastore.Assignment // OrphanAssignments
+	prunes           int                    // PruneAssignment calls
+	deadMarks        []string               // "id@observed" in call order
 }
 
 func newFakeControllerStore(memberIDs ...string) *fakeControllerStore {
@@ -121,7 +128,39 @@ func (f *fakeControllerStore) AssignPartition(_ context.Context, topicName strin
 	return nil
 }
 
-func (f *fakeControllerStore) MarkMemberDead(context.Context, string) error { return nil }
+func (f *fakeControllerStore) AssignPartitionIfAbsent(ctx context.Context, topicName string, partition int, owner, _ string) error {
+	if !f.entryTypesUsable {
+		return metastore.ErrEntryTypeNotYetUsable
+	}
+	if _, ok := f.assignments[topicName][partition]; ok {
+		return metastore.ErrPartitionAssigned
+	}
+	return f.AssignPartition(ctx, topicName, partition, owner)
+}
+
+func (f *fakeControllerStore) OrphanAssignments() ([]metastore.Assignment, error) {
+	return slices.Clone(f.orphans), nil
+}
+
+func (f *fakeControllerStore) PruneAssignment(_ context.Context, topicName string, partition int) error {
+	f.prunes++
+	if !f.entryTypesUsable {
+		return metastore.ErrEntryTypeNotYetUsable
+	}
+	before := len(f.orphans)
+	f.orphans = slices.DeleteFunc(f.orphans, func(a metastore.Assignment) bool {
+		return a.Topic == topicName && a.Partition == partition
+	})
+	if len(f.orphans) == before {
+		return metastore.ErrNotFound
+	}
+	return nil
+}
+
+func (f *fakeControllerStore) MarkMemberDeadObserved(_ context.Context, id string, observed int64) error {
+	f.deadMarks = append(f.deadMarks, fmt.Sprintf("%s@%d", id, observed))
+	return nil
+}
 
 func (f *fakeControllerStore) Voters() ([]string, error) {
 	if f.voters == nil {
