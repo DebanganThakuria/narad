@@ -129,6 +129,7 @@ func runServe(args []string) error {
 		SnapshotInterval:  cfg.Cluster.RaftSnapshotInterval.D(),
 		TrailingLogs:      cfg.Cluster.RaftTrailingLogs,
 		Build:             versionString(),
+		Registerer:        reg,
 	})
 	if err != nil {
 		return fmt.Errorf("metastore: %w", err)
