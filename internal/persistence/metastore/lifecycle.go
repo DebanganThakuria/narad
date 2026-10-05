@@ -272,14 +272,6 @@ func (s *Store) fsmCoversApplied(raftApplied, snapshotIndex uint64) bool {
 
 var _ Metastore = (*Store)(nil)
 
-// AddVoter admits (or re-addresses) a node in the Raft voter set.
-// Leader-only — followers fail with raft.ErrNotLeader — and idempotent:
-// re-adding an existing voter with the same address is a no-op config
-// entry. This is the scale-out admission path (OpJoinCluster).
-func (s *Store) AddVoter(id, clusterAddr string) error {
-	return s.r.AddVoter(raft.ServerID(id), raft.ServerAddress(clusterAddr), 0, barrierTimeout).Error()
-}
-
 // RemoveServer removes a node, voter or non-voter, from the Raft
 // configuration. Leader-only (followers fail with raft.ErrNotLeader).
 // This is the decommission path: the controller calls it once a draining
