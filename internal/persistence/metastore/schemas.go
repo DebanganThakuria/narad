@@ -3,6 +3,7 @@ package metastore
 import (
 	"bytes"
 	"context"
+	"strconv"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -46,11 +47,20 @@ func (s *Store) LatestSchema(_ context.Context, topicName string) (int, []byte, 
 		out    []byte
 	)
 	err := s.fsm.view(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bucketSchemas)
+		// schemaKey's "<topic>:<version>", built once and rewritten in
+		// place, and looked up through one cursor: a key and a lookup
+		// allocated per version were most of a long history's cost, and
+		// a topic describe reads the schema through here on every GET.
+		key := make([]byte, 0, len(topicName)+1+20)
+		key = append(key, topicName...)
+		key = append(key, ':')
+		prefix := len(key)
+		c := tx.Bucket(bucketSchemas).Cursor()
 		var raw []byte
 		for version := 1; ; version++ {
-			v := b.Get(schemaKey(topicName, version))
-			if v == nil {
+			key = strconv.AppendInt(key[:prefix], int64(version), 10)
+			k, v := c.Seek(key)
+			if v == nil || !bytes.Equal(k, key) {
 				break
 			}
 			latest, raw = version, v

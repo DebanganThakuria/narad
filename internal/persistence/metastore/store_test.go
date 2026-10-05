@@ -511,3 +511,43 @@ func TestTopicNameFoldConflictFindsCaseVariant(t *testing.T) {
 		}
 	}
 }
+
+// LatestSchema returns the last of the contiguous versions from 1, and
+// costs the same however long the history is: a topic describe reads
+// the schema through it on every GET (audit schemas:5). Master built a
+// fresh key and ran a fresh lookup per version, so a 60-version history
+// cost about 120 more allocations per describe than a 1-version one.
+func TestLatestSchemaCostsTheSameForAnyHistoryLength(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	const long = 60
+	for name, versions := range map[string]int{"short": 1, "long": long} {
+		if err := s.CreateTopic(ctx, topic.Topic{Name: name, Partitions: 1}); err != nil {
+			t.Fatalf("CreateTopic(%s): %v", name, err)
+		}
+		for v := 1; v <= versions; v++ {
+			if err := s.PutSchema(ctx, name, v, fmt.Appendf(nil, `{"title":"%s v%d"}`, name, v)); err != nil {
+				t.Fatalf("PutSchema(%s v%d): %v", name, v, err)
+			}
+		}
+	}
+	if err := s.CreateTopic(ctx, topic.Topic{Name: "none", Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic(none): %v", err)
+	}
+
+	for name, want := range map[string]int{"short": 1, "long": long} {
+		version, raw, err := s.LatestSchema(ctx, name)
+		if err != nil || version != want || string(raw) != fmt.Sprintf(`{"title":"%s v%d"}`, name, want) {
+			t.Fatalf("LatestSchema(%s) = v%d %s (err %v), want v%d", name, version, raw, err, want)
+		}
+	}
+	if version, raw, err := s.LatestSchema(ctx, "none"); err != nil || version != 0 || raw != nil {
+		t.Fatalf("LatestSchema(none) = v%d %s (err %v), want version 0 and no bytes", version, raw, err)
+	}
+
+	short := testing.AllocsPerRun(20, func() { _, _, _ = s.LatestSchema(ctx, "short") })
+	longer := testing.AllocsPerRun(20, func() { _, _, _ = s.LatestSchema(ctx, "long") })
+	if longer > short {
+		t.Fatalf("LatestSchema allocates %.0f times for a %d-version history and %.0f for one version, want no more", longer, long, short)
+	}
+}

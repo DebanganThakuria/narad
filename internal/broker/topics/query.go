@@ -47,9 +47,9 @@ func (m *Manager) GetTopic(ctx context.Context, name string) (topic.Topic, error
 // eviction could never fire (runtime/evict.go, invariant 1).
 //
 // The result slice always has exactly Topic.Partitions entries in
-// index order: callers (the HTTP ?partition= path and the cluster
-// stats RPC handler) index it positionally, and the cluster router
-// merges each owner's populated entries into a complete view in
+// index order: the HTTP ?partition= path indexes it positionally, and
+// the cluster router merges each owner's populated entries (which the
+// owner serves through LocalPartitionStats) into a complete view in
 // multi-node mode. A single node owns everything, so it still reports
 // full stats.
 func (m *Manager) GetTopicDetails(ctx context.Context, name string) (topic.Details, error) {
@@ -59,15 +59,17 @@ func (m *Manager) GetTopicDetails(ctx context.Context, name string) (topic.Detai
 	}
 	// The current schema comes from the persisted history, the same
 	// source the produce path validates against, so a describe on any
-	// node reports what that node's replica enforces.
-	history, err := schema.PersistedHistory(ctx, m.metastore, name)
+	// node reports what that node's replica enforces. Only the latest
+	// version is read (audit schemas:5): walking and copying the whole
+	// history cost one read and one copy per version on every GET.
+	version, raw, err := m.latestSchema(ctx, name)
 	if err != nil {
-		return topic.Details{}, fmt.Errorf("topics: read schema history: %w", err)
+		return topic.Details{}, fmt.Errorf("topics: read latest schema: %w", err)
 	}
 	details := topic.Details{Topic: t}
-	if n := len(history); n > 0 {
-		details.SchemaVersion = history[n-1].Number
-		details.Schema = history[n-1].Raw
+	if version > 0 {
+		details.SchemaVersion = version
+		details.Schema = raw
 	}
 	// Directory stats are only this topic's if the directory is: a
 	// node that missed the purge of a deleted same-named topic still
@@ -79,41 +81,94 @@ func (m *Manager) GetTopicDetails(ctx context.Context, name string) (topic.Detai
 		return topic.Details{}, err
 	}
 	stats := make([]topic.PartitionStats, t.Partitions)
-	for i := 0; i < t.Partitions; i++ {
-		stats[i] = topic.PartitionStats{Index: i}
-		owned, err := m.ownsPartition(name, i)
-		if err != nil {
+	for i := range t.Partitions {
+		if stats[i], err = m.partitionStats(name, i, dirIsOurs); err != nil {
 			return topic.Details{}, err
 		}
-		if l, ok := m.logs.Peek(name, i); ok {
-			stats[i].Segments = l.SegmentCount()
-			stats[i].OldestOffset = l.OldestOffset()
-			stats[i].NextOffset = l.NextOffset()
-			stats[i].HighWatermark = l.HighWatermark()
-			stats[i].SizeBytes = l.SizeBytes()
-			if mt, ok := l.OldestSegmentAt(); ok {
-				stats[i].OldestSegmentAt = mt
-			}
-			continue
-		}
-		if !owned || !dirIsOurs {
-			continue
-		}
-		dirStats, err := storage.StatPartitionDir(storage.TopicPartitionDir(m.logs.DataDir(), name, i))
-		if err != nil {
-			return topic.Details{}, err
-		}
-		stats[i].Segments = dirStats.Segments
-		stats[i].OldestOffset = dirStats.OldestOffset
-		// A closed log's record tail is not recorded separately from
-		// its committed frontier; report the frontier for both.
-		stats[i].NextOffset = dirStats.HighWatermark
-		stats[i].HighWatermark = dirStats.HighWatermark
-		stats[i].SizeBytes = dirStats.SizeBytes
-		stats[i].OldestSegmentAt = dirStats.OldestSegmentAt
 	}
 	details.Partitions = stats
 	return details, nil
+}
+
+// LocalPartitionStats returns one partition's runtime stats as this
+// node sees them, exactly as GetTopicDetails reports that partition,
+// without reading the topic's schema or describing its other
+// partitions. The cluster's per-partition stats RPC serves it: the
+// router asks each owner for one partition, and a whole describe there
+// cost a schema read and a stat of every partition per call (audit
+// schemas:5). A partition outside the topic's range is ErrInvalid.
+func (m *Manager) LocalPartitionStats(ctx context.Context, name string, partition int) (topic.PartitionStats, error) {
+	t, err := m.GetTopic(ctx, name)
+	if err != nil {
+		return topic.PartitionStats{}, err
+	}
+	if partition < 0 || partition >= t.Partitions {
+		return topic.PartitionStats{}, fmt.Errorf("%w: partition %d of %q (the topic has %d)", ErrInvalid, partition, name, t.Partitions)
+	}
+	dirIsOurs, err := m.logs.TopicIncarnationMatches(name, t.ID)
+	if err != nil {
+		return topic.PartitionStats{}, err
+	}
+	return m.partitionStats(name, partition, dirIsOurs)
+}
+
+// partitionStats describes one partition without opening its log: an
+// open log is read through the non-opening Peek accessor (its live
+// counters); a closed one this node owns is described from its
+// directory, and only when the directory is this incarnation's
+// (dirIsOurs); any other partition reports zero stats with just Index
+// set.
+func (m *Manager) partitionStats(name string, i int, dirIsOurs bool) (topic.PartitionStats, error) {
+	stats := topic.PartitionStats{Index: i}
+	owned, err := m.ownsPartition(name, i)
+	if err != nil {
+		return topic.PartitionStats{}, err
+	}
+	if l, ok := m.logs.Peek(name, i); ok {
+		stats.Segments = l.SegmentCount()
+		stats.OldestOffset = l.OldestOffset()
+		stats.NextOffset = l.NextOffset()
+		stats.HighWatermark = l.HighWatermark()
+		stats.SizeBytes = l.SizeBytes()
+		if mt, ok := l.OldestSegmentAt(); ok {
+			stats.OldestSegmentAt = mt
+		}
+		return stats, nil
+	}
+	if !owned || !dirIsOurs {
+		return stats, nil
+	}
+	dirStats, err := storage.StatPartitionDir(storage.TopicPartitionDir(m.logs.DataDir(), name, i))
+	if err != nil {
+		return topic.PartitionStats{}, err
+	}
+	stats.Segments = dirStats.Segments
+	stats.OldestOffset = dirStats.OldestOffset
+	// A closed log's record tail is not recorded separately from its
+	// committed frontier; report the frontier for both.
+	stats.NextOffset = dirStats.HighWatermark
+	stats.HighWatermark = dirStats.HighWatermark
+	stats.SizeBytes = dirStats.SizeBytes
+	stats.OldestSegmentAt = dirStats.OldestSegmentAt
+	return stats, nil
+}
+
+// latestSchema reads the topic's latest persisted schema version and
+// its bytes (version 0 when it has none): directly through the
+// metastore's LatestSchema when it has one (the Store does), otherwise
+// as the last entry of the whole history.
+func (m *Manager) latestSchema(ctx context.Context, name string) (int, []byte, error) {
+	if latest, ok := m.metastore.(schema.LatestSource); ok {
+		return latest.LatestSchema(ctx, name)
+	}
+	history, err := schema.PersistedHistory(ctx, m.metastore, name)
+	if err != nil {
+		return 0, nil, err
+	}
+	if n := len(history); n > 0 {
+		return history[n-1].Number, history[n-1].Raw, nil
+	}
+	return 0, nil, nil
 }
 
 // ownsPartition reports whether this node owns (topic, idx). A manager

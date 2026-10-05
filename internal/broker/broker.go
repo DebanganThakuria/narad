@@ -182,6 +182,23 @@ type TopicIDDeleter interface {
 // through the facade via the embedded topics.Manager.
 var _ TopicIDDeleter = (*impl)(nil)
 
+// PartitionStatsReader is the optional one-partition describe of a
+// Broker. Brokers built by New implement it (via the embedded
+// topics.Manager). The cluster's per-partition stats RPC asserts for it
+// and falls back to a whole GetTopicDetails without it. Like CreateGater
+// it stays out of Broker so test fakes of Broker need not implement it.
+type PartitionStatsReader interface {
+	// LocalPartitionStats describes one partition as this node sees it
+	// without reading the topic's schema; a partition outside the
+	// topic's range is an invalid-argument error. See
+	// topics.Manager.LocalPartitionStats.
+	LocalPartitionStats(ctx context.Context, name string, partition int) (topic.PartitionStats, error)
+}
+
+// Compile-time check: the one-partition describe stays reachable through
+// the facade via the embedded topics.Manager.
+var _ PartitionStatsReader = (*impl)(nil)
+
 // BatchProducer is the optional batch-produce surface of a Broker.
 // Brokers built by New implement it (via the embedded messaging.Engine).
 // The HTTP batch produce handler asserts for it and refuses the request
