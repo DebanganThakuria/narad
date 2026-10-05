@@ -41,7 +41,9 @@ Four answers mean something to a joiner:
 - `200`: admitted. The body's `status` says how: `staged` (added as a non-voter), `deferred` (a non-voter not promoted yet; `reason` says why), `promoted` (made a voter by this request) or `voter` (already one). A leader on 3.0.x answers `joined` and adds the joiner as a voter at once.
 - `421`: a configured node that is not the leader; ask the leader it names, then the next peer.
 - `412`: a node with no Raft configuration at all (not bootstrapped, or itself waiting for admission); no evidence of a cluster.
-- `409`: the ID was decommissioned ([below](#decommission-removal)).
+- `409`: the ID was decommissioned ([below](#decommission-removal)), or, with code `older_release` (unreleased), the joiner runs an older release than every member: it applies fewer Raft entry types than all of them, so the cluster may already use entries it would skip ([Raft entry types and upgrades](metastore-and-raft.md#entry-types)). The joiner logs that at error once and keeps asking every 2 s until it is upgraded; the leader logs it at error at most once a minute per joiner. A node already in the Raft configuration is never refused this way.
+
+A join request carries the newest Raft entry type the joiner applies (unreleased). A 3.0.x node refuses that longer request with a `400` naming trailing data, and the joiner sends it again at once without the field, on every path: the join loop, the promotion requests below, and the existing-cluster probe.
 
 ### Staged as a non-voter, then promoted {#join-promotion}
 
@@ -132,6 +134,7 @@ Every scenario ended with bounded duplicates (the at-least-once seams) and `OVER
 | Readiness | live: leader in view, contact within 5s (or the node is the leader), ownership latch set |
 | Leaderless join | a node with no leader for 15s runs the join loop |
 | Existing-cluster probe (empty volume) | 3 rounds, 1s apart, 2s per peer, before an initial member bootstraps |
+| Joiner older than every member | `409` with code `older_release`; logged at error once by the joiner, at most once a minute per joiner by the leader |
 | Trust in itself as leader | only after a Raft `Barrier` bounded at 5s and a new read; the ownership latch on a node that is the leader also needs the barrier |
 
 ## Topic incarnations {#incarnations}

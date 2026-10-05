@@ -104,7 +104,7 @@ A snapshot is not taken while `fsm.db` is ahead of what the replay has handed it
 
 Every node must apply every committed entry, in order, or its replica parts from the others for good. Two failures are local to one node, and that node stops instead of skipping the entry:
 
-- **An entry type it does not know.** A newer release proposed it. A leader proposes a new entry type only once every member reports a release that knows it, so this means a node runs an older image than the rest of the cluster.
+- **An entry type it does not know.** A newer release proposed it. A leader proposes a new entry type only once every member reports a release that knows it ([Raft entry types and upgrades](#entry-types)), so this means a node runs an older image than the rest of the cluster.
 - **A write its disk refuses.** bbolt allocates pages when it commits, so a full volume or an I/O error shows up as a failed commit. The node retries for up to 30 s (100 ms doubling to 5 s), logging `metastore: could not write raft entry; retrying` once, then stops.
 
 A refused entry is neither: a topic that already exists, a compare-and-set that missed, a schema out of order are refused the same way on every node, so they are answered and counted as applied. So is an entry whose bytes do not decode, which every node's log holds alike (it is logged at error).
@@ -112,6 +112,19 @@ A refused entry is neither: a topic that already exists, a compare-and-set that 
 A node that stops logs `metastore: stopped applying raft entries` at error level with the entry's index and type and its own build, shuts Raft down (it no longer votes, leads or acknowledges writes its replica lacks), answers metadata writes and barriers with a `503`-class error, reports not ready, and exits non-zero. The entry is not counted as applied, so a restart replays it: once the disk has room, or on the cluster's release, it applies; until then the node stops again on the same entry, a crash loop with the reason in its log ([Troubleshooting](../operate/troubleshooting.md#log-metastore-stopped)). Why not keep running: a node whose replica is stuck would route requests and decide partition ownership from a view the rest of the cluster has moved past, while a stopped node is a dead member the others route around.
 
 A database or snapshot that has applied an entry type newer than the build knows is refused too: the node does not open such an `fsm.db` (and leaves it untouched), and stops rather than install such a snapshot.
+
+## Raft entry types and upgrades {#entry-types}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Each metadata change is a Raft entry of one type (create topic, register member, and so on), and a release that adds a type must not propose it while a node that does not know it is in the cluster. A 3.0.x node skips such an entry silently, and a later release stops applying ([above](#fail-stop)). So during a rolling upgrade the cluster keeps writing the entry types every member knows:
+
+- **Every member reports what it applies.** The heartbeat a node sends every 5 s carries its build and the newest Raft entry type it applies, and the leader records both on the node's member record. A heartbeat from 3.0.x carries neither, which reads as the set every 3.0.x release applies. Each heartbeat replaces the record, so a node rolled back stops reporting the newer set within one heartbeat.
+- **The leader checks every member before it proposes a new type.** A type 3.0.x does not know is proposed only when every server in the Raft configuration (voters and non-voters) and every member record (alive, dead or draining) reports a release that applies it. A server with no member record yet (a joiner that has not registered) holds the type back, and so does a dead member until it is removed. The leader counts itself as its own release. Until every member qualifies, the leader keeps using the entries it used before, and the reason names the first member holding the type back and the build it reported. The check reads the leader's own replica, so a member that rolls back counts with its old report for up to about 5 s.
+- **A joiner older than every member is refused.** A join request carries the newest entry type the joiner applies (none from 3.0.x, which reads as the 3.0.x set). A node not yet in the Raft configuration that applies fewer types than every current member is answered `409` with code `older_release`: the cluster may already use entries it would skip. A server already in the configuration is never refused; its own heartbeat holds new types back instead. The answer is a `409` so that a 3.0.x node with an empty volume, which reads only `200`, `421` and `409` as "a cluster exists", joins (and is refused) instead of bootstrapping a rival cluster ([Cluster lifecycle](cluster-lifecycle.md#join)).
+- **Older peers get the frame they know.** A 3.0.x node refuses a heartbeat or join request carrying these fields with a `400` naming trailing data, before it looks at anything else. The sender resends the same request without them at once, so a rolling upgrade needs no step and no heartbeat window is missed.
+
+Once every member runs a release that adds an entry type and the leader has used it, rolling a node back to a release without that type is unsupported: 3.0.x would skip those entries and a later release stops on them. Roll back before that point ([Upgrade](../operate/upgrade.md#roll-back-newer)), and never add a node on an older release to a fully upgraded cluster; the leader refuses it.
 
 ## Leader and controller {#controller}
 
@@ -144,6 +157,8 @@ The first seconds of a cluster need care. A partition placed on the only member 
 | `AppliedCaughtUp` contact freshness | leader contact within 5s (followers) |
 | `Barrier` timeout | 5s |
 | Failed metastore write | retried 100 ms doubling to 5 s, for up to 30 s, then the node stops ([When a node stops applying](#fail-stop)) |
+| New Raft entry type | proposed only once every Raft server and member record reports a release that applies it ([Raft entry types](#entry-types)) |
+| Joiner older than every member | refused with `409`, code `older_release`; the leader logs it at error at most once a minute per joiner |
 | Startup reconcile wait for caught-up | up to 60s, then the destructive sweep is skipped rather than rushed |
 
 Schema history is **append-only** and capped at 1000 versions per topic. `opPutSchema` is applied only when the version is exactly the topic's persisted latest plus one and within the cap (and the same for every fan-out child's copy). The proposer (the topics manager on the leader) reads the persisted history, checks compatibility against the persisted latest, and proposes latest plus one. A proposer working from a stale view can therefore never overwrite an earlier version on any replica; it gets `ErrAlreadyExists`, reads again and retries.

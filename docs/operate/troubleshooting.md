@@ -286,9 +286,19 @@ Logged at warning level after a node has had no Raft leader for 15 seconds.
 
 The full line is `cluster join refused: this node was decommissioned and removed; it will not rejoin with its old data directory. Scale it away, or delete its volume to rejoin as a new node`.
 
-**Cause.** A node that was decommissioned restarted with its old volume. The leader refuses it, so it cannot undo its own decommission.
+**Cause.** A node that was decommissioned restarted with its old volume. The leader refuses it, so it cannot undo its own decommission. If the line's `body` carries `older_release`, the cause is different: the node runs 3.0.x and the cluster's members all run a newer release ([next section](#log-join-older-release)).
 
 **Fix.** Scale it away. To use the name again, delete its PersistentVolumeClaim so it starts empty ([Reuse a decommissioned name](scaling.md#reuse-name)).
+
+### `cluster join refused: this node runs an older release than every member` {#log-join-older-release}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Logged at error level on the joining node, once, with `via`, the node's `entry_types` and the leader's answer in `body`. The leader logs `cluster join refused: the joiner runs an older release than every member` at error, at most once a minute per joiner, with the joiner's `id`, `joiner_entry_types` and `member_entry_types_min`. A joiner on 3.0.x logs the same refusal as `cluster join refused: this node was decommissioned`, with `older_release` in its `body`.
+
+**Cause.** The node is not in the Raft configuration and applies fewer Raft entry types than every member of the cluster, so the cluster may already use entries it would skip or stop on ([Raft entry types and upgrades](../understand/metastore-and-raft.md#entry-types)). Typically a pod started on an older image than the rest of the cluster: a scale-out or a re-added node while `image.tag` pointed at an older release, or a rollback of one node that also lost its volume.
+
+**Fix.** Run the cluster's release on the node (`image.tag`). It keeps asking every 2 seconds and is admitted on its next attempt. Nothing about the cluster needs to change.
 
 ### `cluster join rejected` {#log-join-rejected-status}
 
