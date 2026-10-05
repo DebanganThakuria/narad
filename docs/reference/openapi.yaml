@@ -1448,9 +1448,13 @@ paths:
         Clears the move's target, so the partition stays with its owner
         and keeps serving there. The destination discards its copy. The
         abort is a compare-and-set on the leader: a move re-planned to
-        another node in the meantime is left alone. The cluster may plan
-        a move for the partition again later. The action is audited as
-        `cluster.move.abort`.
+        another node in the meantime is left alone. The answer is read
+        back from the leader's assignment after the abort, so a move whose
+        flip committed before the abort reached the leader is refused
+        with `409`, never reported as aborted. The cluster may plan a move
+        for the partition again later. An abort that took effect is
+        audited as `cluster.move.abort`; one whose outcome could not be
+        read back is audited with `outcome unknown`.
       x-narad-grant: |
         `admin`.
       parameters:
@@ -1464,7 +1468,7 @@ paths:
             type: string
       responses:
         '202':
-          description: The target was cleared (unless the move was re-planned in the meantime).
+          description: The leader cleared the target; the partition stays with its owner.
           content:
             application/json:
               schema:
@@ -1478,11 +1482,11 @@ paths:
         '404':
           description: The partition has no assignment.
         '409':
-          description: No move is in flight for the partition, or it targets another node than `target`.
+          description: No move is in flight for the partition, or it targets another node than `target`, or the leader's assignment after the abort shows the move finished first (another node owns the partition now) or still in flight; the message names the owner and target. Nothing was aborted.
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '503':
-          description: The cluster has no leader to write the change.
+          description: The cluster has no leader to write the change, or the abort reached the leader but whether it cleared the target could not be read back; list the moves to see.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST \
@@ -1490,11 +1494,11 @@ paths:
               -H "Content-Type: application/json"
           response: |
             HTTP/1.1 202 Accepted
-            Content-Length: 283
+            Content-Length: 240
             Content-Type: application/json
             Date: Mon, 05 Oct 2026 19:15:09 GMT
 
-            {"move":{"topic":"orders","partition":3,"from":"narad-0","to":"narad-2","from_status":"alive","to_status":"alive"},"note":"the move's target was cleared (unless the move was re-planned meanwhile); the partition stays with its owner, and the controller may plan a move for it again"}
+            {"move":{"topic":"orders","partition":3,"from":"narad-0","to":"narad-2","from_status":"alive","to_status":"alive"},"note":"the move's target was cleared; the partition stays with its owner, and the controller may plan a move for it again"}
   /healthz:
     get:
       operationId: healthz

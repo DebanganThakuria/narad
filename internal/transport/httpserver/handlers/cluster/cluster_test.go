@@ -19,6 +19,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/domain/user"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 	"github.com/debanganthakuria/narad/internal/security"
@@ -406,16 +407,40 @@ func TestMovesViewShowsLivenessAndBlockedReason(t *testing.T) {
 	}
 }
 
-// fakeAbortRouter is a router that forwards a move abort to a leader.
+// fakeAbortRouter is a router that forwards a move abort to a leader,
+// played by ms: flipFirst commits the move's flip there before the abort
+// arrives, and readErr fails the read-back of the leader's assignment.
 type fakeAbortRouter struct {
 	handlers.Router
+	ms        *metastore.Store
 	forwarded []string
 	err       error
+	flipFirst bool
+	readErr   error
 }
 
-func (f *fakeAbortRouter) ForwardAbortMove(_ context.Context, topicName string, partition int, expectedTarget string) (bool, error) {
+func (f *fakeAbortRouter) ForwardAbortMove(ctx context.Context, topicName string, partition int, expectedTarget string) (bool, error) {
 	f.forwarded = append(f.forwarded, fmt.Sprintf("%s/%d->%s", topicName, partition, expectedTarget))
-	return true, f.err
+	if f.err != nil {
+		return true, f.err
+	}
+	if f.flipFirst {
+		if err := f.ms.CompleteMove(ctx, topicName, partition, "cluster-0", expectedTarget); err != nil {
+			return true, err
+		}
+	}
+	return true, f.ms.AbortMove(ctx, topicName, partition, expectedTarget)
+}
+
+func (f *fakeAbortRouter) LeaderAssignment(_ context.Context, topicName string, partition int) (metastore.Assignment, bool, error) {
+	if f.readErr != nil {
+		return metastore.Assignment{}, false, f.readErr
+	}
+	a, err := f.ms.GetAssignment(topicName, partition)
+	if errors.Is(err, errs.ErrNotFound) {
+		return metastore.Assignment{}, false, nil
+	}
+	return a, err == nil, err
 }
 
 func abortRequest(target string) *http.Request {
@@ -452,18 +477,66 @@ func TestMoveAbortClearsTheTargetOnTheLeader(t *testing.T) {
 	if err := ms.SetAssignmentTarget(context.Background(), "secret-topic", 0, "cluster-1"); err != nil {
 		t.Fatal(err)
 	}
-	router := &fakeAbortRouter{}
+	router := &fakeAbortRouter{ms: ms}
 	set.Deps.Router = router
 	res = httptest.NewRecorder()
 	httpcluster.AbortMove(set).ServeHTTP(res, abortRequest("/v1/cluster/moves/secret-topic/0/abort"))
 	if res.Code != http.StatusAccepted || !slices.Equal(router.forwarded, []string{"secret-topic/0->cluster-1"}) {
-		t.Fatalf("forwarded abort: status %d, forwarded %v", res.Code, router.forwarded)
+		t.Fatalf("forwarded abort: status %d (%s), forwarded %v", res.Code, res.Body, router.forwarded)
+	}
+	if err := ms.SetAssignmentTarget(context.Background(), "secret-topic", 0, "cluster-1"); err != nil {
+		t.Fatal(err)
 	}
 	router.err = errors.New("abort move returned status 503")
 	res = httptest.NewRecorder()
 	httpcluster.AbortMove(set).ServeHTTP(res, abortRequest("/v1/cluster/moves/secret-topic/0/abort"))
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("forwarded abort the leader failed: status %d, want 503", res.Code)
+	}
+}
+
+// An abort answers what the leader did, not what this node read before
+// it asked: a move whose flip committed before the abort reached the
+// leader has moved, and the abort is refused with 409 naming the owner
+// now, not answered 202 "stays with its owner", and not audited.
+func TestMoveAbortThatLostTheRaceToTheFlipIsRefused(t *testing.T) {
+	set := seededSet(t)
+	ms := set.Deps.Metastore
+	var logs bytes.Buffer
+	set.Deps.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	set.Deps.Router = &fakeAbortRouter{ms: ms, flipFirst: true}
+
+	res := httptest.NewRecorder()
+	httpcluster.AbortMove(set).ServeHTTP(res, abortRequest("/v1/cluster/moves/secret-topic/0/abort?target=cluster-1"))
+
+	a, _ := ms.GetAssignment("secret-topic", 0)
+	if a.OwnerID != "cluster-1" {
+		t.Fatalf("assignment after = %+v; the flip was meant to commit first", a)
+	}
+	if res.Code != http.StatusConflict || !strings.Contains(res.Body.String(), "cluster-1 owns it now") {
+		t.Fatalf("abort that lost to the flip: status %d (%s), want 409 naming cluster-1 as the owner now", res.Code, res.Body)
+	}
+	if strings.Contains(logs.String(), "cluster.move.abort") {
+		t.Fatalf("audited an abort the leader never applied:\n%s", logs.String())
+	}
+}
+
+// An abort whose outcome cannot be read back from the leader is not
+// reported as done: 503, and the audit line says the outcome is unknown.
+func TestMoveAbortWhoseOutcomeCannotBeReadBackSaysSo(t *testing.T) {
+	set := seededSet(t)
+	var logs bytes.Buffer
+	set.Deps.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	set.Deps.Router = &fakeAbortRouter{ms: set.Deps.Metastore, readErr: errors.New("get assignment returned status 503")}
+
+	res := httptest.NewRecorder()
+	httpcluster.AbortMove(set).ServeHTTP(res, abortRequest("/v1/cluster/moves/secret-topic/0/abort"))
+
+	if res.Code != http.StatusServiceUnavailable || !strings.Contains(res.Body.String(), "could not be read back") {
+		t.Fatalf("status %d (%s), want 503 saying the outcome could not be read back", res.Code, res.Body)
+	}
+	if !strings.Contains(logs.String(), "cluster.move.abort") || !strings.Contains(logs.String(), "outcome unknown") {
+		t.Fatalf("audit line does not record the unknown outcome:\n%s", logs.String())
 	}
 }
 

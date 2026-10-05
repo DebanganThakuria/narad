@@ -1666,9 +1666,13 @@ Date: Mon, 28 Sep 2026 19:31:44 GMT
 Clears the move's target, so the partition stays with its owner
 and keeps serving there. The destination discards its copy. The
 abort is a compare-and-set on the leader: a move re-planned to
-another node in the meantime is left alone. The cluster may plan
-a move for the partition again later. The action is audited as
-`cluster.move.abort`.
+another node in the meantime is left alone. The answer is read
+back from the leader's assignment after the abort, so a move whose
+flip committed before the abort reached the leader is refused
+with `409`, never reported as aborted. The cluster may plan a move
+for the partition again later. An abort that took effect is
+audited as `cluster.move.abort`; one whose outcome could not be
+read back is audited with `outcome unknown`.
 
 **Grant needed:** `admin`.
 
@@ -1684,14 +1688,14 @@ a move for the partition again later. The action is audited as
 
 | Status | Meaning |
 |---|---|
-| [`202`](status-codes.md#status-202) | The target was cleared (unless the move was re-planned in the meantime). |
+| [`202`](status-codes.md#status-202) | The leader cleared the target; the partition stays with its owner. |
 | [`400`](status-codes.md#status-400) | The partition is not a number. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | Not `admin`. |
 | [`404`](status-codes.md#status-404) | The partition has no assignment. |
-| [`409`](status-codes.md#status-409) | No move is in flight for the partition, or it targets another node than `target`. |
+| [`409`](status-codes.md#status-409) | No move is in flight for the partition, or it targets another node than `target`, or the leader's assignment after the abort shows the move finished first (another node owns the partition now) or still in flight; the message names the owner and target. Nothing was aborted. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
-| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, or the abort reached the leader but whether it cleared the target could not be read back; list the moves to see. |
 
 **Response body (`202`)**
 
@@ -1727,7 +1731,7 @@ curl -i -u "$AUTH" -X POST \
 
 ```http title="Response"
 HTTP/1.1 202 Accepted
-Content-Length: 283
+Content-Length: 240
 Content-Type: application/json
 Date: Mon, 05 Oct 2026 19:15:09 GMT
 
@@ -1740,7 +1744,7 @@ Date: Mon, 05 Oct 2026 19:15:09 GMT
     "from_status": "alive",
     "to_status": "alive"
   },
-  "note": "the move's target was cleared (unless the move was re-planned meanwhile); the partition stays with its owner, and the controller may plan a move for it again"
+  "note": "the move's target was cleared; the partition stays with its owner, and the controller may plan a move for it again"
 }
 ```
 

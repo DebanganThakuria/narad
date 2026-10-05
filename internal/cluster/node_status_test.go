@@ -8,13 +8,16 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/cluster/controller"
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
+	"github.com/debanganthakuria/narad/internal/platform/partition"
 	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
@@ -192,7 +195,67 @@ func TestForwardedDecommissionIsPreflightedOnTheLeader(t *testing.T) {
 	}
 }
 
-// The HTTP abort handler finds the leader forwarder through this method.
+// The HTTP abort handler finds the leader forwarder and the leader read
+// it answers from through these methods.
 var _ interface {
 	ForwardAbortMove(ctx context.Context, topicName string, partition int, expectedTarget string) (bool, error)
+	LeaderAssignment(ctx context.Context, topicName string, partition int) (metastore.Assignment, bool, error)
 } = (*Router)(nil)
+
+// leaderReadPeer answers the leader assignment read, recording the
+// addresses asked.
+type leaderReadPeer struct {
+	fakePeerClient
+	a     metastore.Assignment
+	asked []string
+}
+
+func (p *leaderReadPeer) leaderAssignment(_ context.Context, addr, _ string, _ int) (metastore.Assignment, bool, bool, error) {
+	p.asked = append(p.asked, addr)
+	return p.a, true, true, nil
+}
+
+// A move abort answers from the leader's assignment: the leader reads
+// its own FSM behind a Barrier, and a follower asks the leader, never its
+// own replica.
+func TestRouterReadsTheAssignmentAsTheLeaderHasIt(t *testing.T) {
+	stores := newTestStoreCluster(t, "node-a", "node-b")
+	leaderID, leader := waitForClusterLeader(t, stores)
+	followerID := "node-a"
+	if leaderID == followerID {
+		followerID = "node-b"
+	}
+	ctx := context.Background()
+	for _, id := range []string{"node-a", "node-b"} {
+		if err := leader.RegisterMember(ctx, metastore.Member{ID: id, Addr: id + ":7942", Status: metastore.MemberAlive}); err != nil {
+			t.Fatalf("RegisterMember(%s): %v", id, err)
+		}
+	}
+	if err := leader.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	if err := leader.AssignPartition(ctx, "orders", 0, leaderID); err != nil {
+		t.Fatalf("AssignPartition: %v", err)
+	}
+	if err := leader.SetAssignmentTarget(ctx, "orders", 0, followerID); err != nil {
+		t.Fatalf("SetAssignmentTarget: %v", err)
+	}
+
+	onLeader := NewRouter(leader, leaderID, partition.NewHashRoundRobin(), "")
+	a, found, err := onLeader.LeaderAssignment(ctx, "orders", 0)
+	if err != nil || !found || a.OwnerID != leaderID || a.TargetID != followerID {
+		t.Fatalf("leader read = %+v, %v, %v; want owner %s, target %s", a, found, err, leaderID, followerID)
+	}
+	if _, found, err := onLeader.LeaderAssignment(ctx, "orders", 7); err != nil || found {
+		t.Fatalf("leader read of a partition with no assignment = found %v, %v; want not found", found, err)
+	}
+
+	waitForMember(t, stores[followerID], leaderID)
+	onFollower := NewRouter(stores[followerID], followerID, partition.NewHashRoundRobin(), "")
+	peer := &leaderReadPeer{a: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: followerID}}
+	onFollower.peer = peer
+	a, found, err = onFollower.LeaderAssignment(ctx, "orders", 0)
+	if err != nil || !found || a.OwnerID != followerID || !slices.Equal(peer.asked, []string{leaderID + ":7942"}) {
+		t.Fatalf("follower read = %+v, %v, %v (asked %v); want the leader's answer from %s:7942", a, found, err, peer.asked, leaderID)
+	}
+}
