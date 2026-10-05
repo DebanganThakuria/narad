@@ -21,6 +21,7 @@ type fakeControllerStore struct {
 	targetLog          []string                  // "topic/partition→target" in call order
 	barrierErr         error
 	voters             []string // nil ⇒ derive from members
+	nonvoters          []string // Raft non-voters (staged joiners)
 	removed            []string // RemoveServer calls in order
 	forgotten          []string // RemoveMember calls in order
 	transferred        int      // TransferLeadership call count
@@ -103,6 +104,10 @@ func (f *fakeControllerStore) Voters() ([]string, error) {
 	return f.voters, nil
 }
 
+func (f *fakeControllerStore) Nonvoters() ([]string, error) {
+	return f.nonvoters, nil
+}
+
 func (f *fakeControllerStore) RemoveMember(_ context.Context, id string, _ int64) error {
 	f.forgotten = append(f.forgotten, id)
 	f.members = slices.DeleteFunc(f.members, func(m metastore.Member) bool { return m.ID == id })
@@ -111,6 +116,7 @@ func (f *fakeControllerStore) RemoveMember(_ context.Context, id string, _ int64
 
 func (f *fakeControllerStore) RemoveServer(id string) error {
 	f.removed = append(f.removed, id)
+	f.nonvoters = slices.DeleteFunc(f.nonvoters, func(n string) bool { return n == id })
 	// Reflect the removal so a follow-up Voters() no longer lists it.
 	if f.voters == nil {
 		for _, m := range f.members {

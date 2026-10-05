@@ -3,10 +3,12 @@ package controller
 // reconcileDecommission completes a decommission once its placement half is
 // done. The draining machinery (Member.Draining → planner excludes it as a
 // receiver) sheds every partition off a draining node; this pass watches for
-// a draining node that owns nothing left and removes it from the Raft voter
-// set, so the pod can be torn down safely.
+// a draining node that owns nothing left and removes it from the Raft
+// configuration, so the pod can be torn down safely.
 //
-// Two guards, per the design:
+// Two guards apply to a voter, per the design (a non-voter, a joiner
+// staged and never promoted, has no vote and cannot lead, so neither
+// applies to it):
 //   - MinVoters: never remove a node if doing so would drop the voter count
 //     below MinVoters (default 3), so a decommission can't take the cluster
 //     below a quorum-safe size.
@@ -26,8 +28,8 @@ package controller
 // Everything is level-triggered: the pass reads state fresh each tick and is
 // a no-op once the node is out of the configuration AND forgotten, so a
 // removal that races a leadership change simply completes on a later tick
-// (a draining member found already outside the voter set just gets the
-// second half).
+// (a draining member found already outside the configuration just gets
+// the second half).
 
 import (
 	"context"
@@ -97,11 +99,14 @@ func (c *Controller) ownersInUse(ctx context.Context) (map[string]bool, bool) {
 	return owners, true
 }
 
-// removeDrainedNode removes a fully-drained node from the Raft voter set,
-// honoring the MinVoters and leader-off-departing guards, then forgets its
-// member record. The record is deleted only once the node is out of the
-// configuration: it is the tombstone that stops the departed pod's
-// heartbeats from resurrecting it.
+// removeDrainedNode removes a fully-drained node from the Raft
+// configuration, then forgets its member record. A voter is removed only
+// when the MinVoters and leader-off-departing guards allow. A non-voter
+// (a joiner that was staged and never promoted) is removed without
+// them: it carries no quorum weight and cannot be the leader. The record
+// is deleted only once the node is out of the configuration: it is the
+// tombstone that stops the departed pod's heartbeats from resurrecting
+// it.
 func (c *Controller) removeDrainedNode(ctx context.Context, id string) {
 	voters, err := c.store.Voters()
 	if err != nil {
@@ -119,6 +124,16 @@ func (c *Controller) removeDrainedNode(ctx context.Context, id string) {
 		}
 		if err := c.store.RemoveServer(id); err != nil {
 			return // still a voter; retry next tick
+		}
+	} else {
+		nonvoters, err := c.store.Nonvoters()
+		if err != nil {
+			return
+		}
+		if containsStr(nonvoters, id) {
+			if err := c.store.RemoveServer(id); err != nil {
+				return // still a non-voter; retry next tick
+			}
 		}
 	}
 	_ = c.store.RemoveMember(ctx, id, time.Now().Unix())

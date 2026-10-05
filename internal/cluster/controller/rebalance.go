@@ -144,8 +144,9 @@ func (c *Controller) buildPlanInput(
 // abortDeadTargetMoves clears the target of every in-flight move whose
 // destination cannot complete it: the target member is gone from the
 // member list, has been dead longer than DeadTargetAbortAfter, or is out
-// of the Raft voter set while dead or draining (a decommissioned node that
-// has not aged out yet). Returns how many targets were cleared. A briefly
+// of the Raft configuration (neither a voter nor a staged non-voter)
+// while dead or draining (a decommissioned node that has not aged out
+// yet). Returns how many targets were cleared. A briefly
 // dead target (a pod restart) is left alone: its worker resumes the copy
 // when it returns. Clearing the target is safe at any point of the move:
 // the owner never changed, and a destination that comes back finds its
@@ -158,9 +159,17 @@ func (c *Controller) abortDeadTargetMoves(ctx context.Context, inFlight []metast
 	for _, m := range members {
 		byID[m.ID] = m
 	}
-	voters, err := c.store.Voters()
+	inRaft, err := c.store.Voters()
+	if err == nil {
+		nonvoters, nerr := c.store.Nonvoters()
+		if nerr == nil {
+			inRaft = append(inRaft, nonvoters...)
+		} else {
+			err = nerr
+		}
+	}
 	if err != nil {
-		voters = nil // unknown: only the membership rules below apply
+		inRaft = nil // unknown: only the membership rules below apply
 	}
 	deadBefore := time.Now().Unix() - int64(c.cfg.DeadTargetAbortAfter.Seconds())
 	aborted := 0
@@ -168,7 +177,7 @@ func (c *Controller) abortDeadTargetMoves(ctx context.Context, inFlight []metast
 		m, known := byID[a.TargetID]
 		gone := !known || // not a cluster member at all
 			(m.Status == metastore.MemberDead && m.LastHeartbeat < deadBefore) || // dead past the bound
-			(voters != nil && !slices.Contains(voters, a.TargetID) && (m.Status == metastore.MemberDead || m.Draining)) // removed from Raft
+			(inRaft != nil && !slices.Contains(inRaft, a.TargetID) && (m.Status == metastore.MemberDead || m.Draining)) // removed from Raft
 		if !gone {
 			continue
 		}
