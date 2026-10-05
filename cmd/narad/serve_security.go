@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -65,62 +66,111 @@ func buildAuthenticator(cfg *config.Config, ms *metastore.Store, log *slog.Logge
 // seedRootAdmin ensures the root admin user exists once security is
 // enabled. It retries in the background until some node (whichever
 // holds Raft leadership) seeds it or a user already exists. When no
-// password was configured, a random one is generated and logged exactly
-// once by the node that wins the seed race.
+// password was configured, a random one is generated; it is never
+// logged, the node that wins the seed race leaves it in
+// <data_dir>/admin-password (see admin_password.go).
 func seedRootAdmin(ctx context.Context, cfg *config.Config, ms *metastore.Store, log *slog.Logger) {
 	if !cfg.Security.Enabled {
 		return
 	}
-	go func() {
-		password := cfg.Security.AdminPassword
-		generated := false
-		if password == "" {
-			password = randomPassword()
-			generated = true
-		}
-		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-		if err != nil {
-			log.Error("seed admin: hash password", "err", err)
+	node, err := resolveNodeID(cfg)
+	if err != nil {
+		node = "unknown"
+	}
+	go runRootAdminSeed(ctx, cfg, node, ms, log)
+}
+
+// seedRetryInterval is how long the seed loop waits before trying again
+// (not the leader yet, a transient Raft error, an unwritable data
+// directory).
+const seedRetryInterval = 2 * time.Second
+
+// runRootAdminSeed is seedRootAdmin's loop. It returns once root exists
+// (seeded here or elsewhere) or ctx ends.
+func runRootAdminSeed(ctx context.Context, cfg *config.Config, node string, ms *metastore.Store, log *slog.Logger) {
+	dataDir := cfg.Storage.DataDir
+	configured := cfg.Security.AdminPassword
+	password := configured
+	var hash []byte
+	for ctx.Err() == nil {
+		if has, err := ms.HasUsers(ctx); err == nil && has {
+			// Someone (possibly us, on an earlier boot) already seeded.
+			settleRootAdminSeed(ctx, dataDir, configured, node, ms, log)
 			return
 		}
-		root := user.User{
+		if configured == "" && hash == nil {
+			// Durable before the seed is proposed, so root is never
+			// created with a password that exists nowhere.
+			generated, err := preparePendingAdminPassword(dataDir)
+			if err != nil {
+				log.Error("not seeding the root admin yet: its generated password could not be written to the data directory, and it is never logged; make the data directory writable or set NARAD_ADMIN_PASSWORD",
+					"component", "audit", "node", node, "path", filepath.Join(dataDir, adminPasswordPendingFile), "err", err)
+				if !sleepCtx(ctx, seedRetryInterval) {
+					return
+				}
+				continue
+			}
+			password = generated
+		}
+		if hash == nil {
+			h, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+			if err != nil {
+				log.Error("seed admin: hash password", "err", err)
+				return
+			}
+			hash = h
+		}
+		now := time.Now().UnixMilli()
+		err := ms.SeedRootUser(ctx, user.User{
 			Username:     rootAdminUsername,
 			PasswordHash: hash,
 			Root:         true,
-			CreatedAtMs:  time.Now().UnixMilli(),
-			UpdatedAtMs:  time.Now().UnixMilli(),
+			CreatedAtMs:  now,
+			UpdatedAtMs:  now,
+		})
+		switch {
+		case err == nil:
+			if configured == "" {
+				reportGeneratedAdminPassword(dataDir, node, log)
+				return
+			}
+			log.Info("seeded root admin", "component", "audit", "username", rootAdminUsername, "node", node)
+			// A pending file from an earlier boot without the
+			// variable is not root's password now.
+			settlePendingAdminPassword(ctx, dataDir, node, ms, log)
+			return
+		case errors.Is(err, metastore.ErrAlreadyExists):
+			settleRootAdminSeed(ctx, dataDir, configured, node, ms, log)
+			return
+		default:
+			// Not the leader yet (or transient Raft error): retry
+			// until leadership settles somewhere.
+			if !sleepCtx(ctx, seedRetryInterval) {
+				return
+			}
 		}
+	}
+}
 
-		for ctx.Err() == nil {
-			if has, err := ms.HasUsers(ctx); err == nil && has {
-				return // someone (possibly us, earlier) already seeded
-			}
-			err := ms.SeedRootUser(ctx, root)
-			switch {
-			case err == nil:
-				if generated {
-					// Logged once, on purpose: the operator set no
-					// NARAD_ADMIN_PASSWORD, and a printed one-time
-					// password beats a well-known default.
-					log.Warn("seeded root admin with a GENERATED password — change it or set NARAD_ADMIN_PASSWORD before the next boot",
-						"component", "audit", "username", rootAdminUsername, "password", password)
-				} else {
-					log.Info("seeded root admin", "component", "audit", "username", rootAdminUsername)
-				}
-				return
-			case errors.Is(err, metastore.ErrAlreadyExists):
-				return
-			default:
-				// Not the leader yet (or transient Raft error): retry
-				// until leadership settles somewhere.
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(2 * time.Second):
-				}
-			}
-		}
-	}()
+// settleRootAdminSeed runs once root is known to exist without this
+// call having seeded it: a pending generated password is kept or
+// removed, and a configured password that is not root's is warned
+// about.
+func settleRootAdminSeed(ctx context.Context, dataDir, configured, node string, ms *metastore.Store, log *slog.Logger) {
+	settlePendingAdminPassword(ctx, dataDir, node, ms, log)
+	if configured != "" {
+		warnIfAdminPasswordIgnored(ctx, configured, node, ms, log)
+	}
+}
+
+// sleepCtx waits d, reporting false if ctx ended first.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
 }
 
 // randomPassword returns a 192-bit random secret, URL-safe base64.
