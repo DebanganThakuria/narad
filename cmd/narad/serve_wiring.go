@@ -208,7 +208,10 @@ func healthHandler(ctx context.Context, br broker.Broker, logs *runtime.Logs, ms
 	return mux
 }
 
-func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, logs *runtime.Logs, ms *metastore.Store, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, auth *security.Authenticator, log *slog.Logger) *httpserver.Server {
+// buildAPIServer builds the client API server. Each of extra adjusts
+// the handlers' dependencies before the handlers are built (serve wires
+// the cluster stack's drain flag and member status this way).
+func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, logs *runtime.Logs, ms *metastore.Store, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, auth *security.Authenticator, log *slog.Logger, extra ...func(*handlers.Deps)) *httpserver.Server {
 	deps := handlers.Deps{
 		Broker:         br,
 		Logs:           logs,
@@ -223,6 +226,9 @@ func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, l
 		// bcrypt concurrency bound (a nil *Authenticator must not become
 		// a non-nil interface).
 		deps.Passwords = auth
+	}
+	for _, fn := range extra {
+		fn(&deps)
 	}
 	handlerSet := handlers.New(deps)
 	opts := apiRouterOptions(cfg.HTTP)

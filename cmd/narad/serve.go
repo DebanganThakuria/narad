@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,6 +28,8 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
+	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
 // runServe boots a Narad node: config, observability, metastore, broker,
@@ -221,6 +224,9 @@ func runServe(args []string) error {
 	wg.Go(func() { watchMetastoreHalt(ctx, ms, failServe) })
 	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, cs.peerRPC, log) })
 	wg.Go(func() { cs.controller.Run(ctx) })
+	wg.Go(func() {
+		watchDraining(ctx, ms, nodeID, cs.draining, drainingCheckInterval, drainingRefreshInterval)
+	})
 	// Re-registers consume tokens with owners that come back or are
 	// newly assigned while consumers are parked here.
 	wg.Go(func() { cs.router.RunTokenKeeper(ctx) })
@@ -302,7 +308,10 @@ func runServe(args []string) error {
 	// /readyz turns true only when the reconcile goroutine above calls
 	// MarkReady AND the metastore's live check (leader in view, recent
 	// contact, ownership latch set) passes on that probe.
-	srv := buildAPIServer(ctx, cfg, bc.broker, bc.logs, ms, cs.router, m, reg, auth, log)
+	srv := buildAPIServer(ctx, cfg, bc.broker, bc.logs, ms, cs.router, m, reg, auth, log, func(d *handlers.Deps) {
+		d.Draining = cs.draining.Load
+		d.NodeStatus = cs.memberStatus
+	})
 	defer bc.lifecycle.MarkNotReady()
 
 	m.BootDurationSeconds.Set(time.Since(bootStart).Seconds())
@@ -341,17 +350,22 @@ type clusterStack struct {
 	dispatcher *cluster.ProduceDispatcher
 	fanout     *cluster.FanoutRunner
 	mover      *cluster.MoveRunner
+
+	// draining mirrors this node's own drain flag (watchDraining), and
+	// memberStatus answers the cluster views' per-member status.
+	draining     *atomic.Bool
+	memberStatus func(context.Context, metastore.Member) (nodewire.NodeStatus, error)
 }
 
 func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, bc *brokerComponents, reg prometheus.Registerer, log *slog.Logger) *clusterStack {
-	ctrl := controller.New(ms, controller.Config{})
-
 	// One peer client for the whole process: the router, dispatcher,
-	// fan-out runner, mover, heartbeater, and join loop all forward
-	// through it, so each peer gets one QUIC connection and one set of
-	// pooled streams from this node.
+	// fan-out runner, mover, heartbeater, join loop and controller all
+	// forward through it, so each peer gets one QUIC connection and one
+	// set of pooled streams from this node.
 	peerRPC := cluster.NewPeerClient(5*time.Second, cfg.Security.ClusterSecret)
 	peerRPC.SetMetrics(cluster.NewPrometheusRPCMetrics(reg))
+
+	ctrl := controller.New(ms, controllerConfig(log, reg, peerRPC))
 
 	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), cfg.Security.ClusterSecret)
 	router.SetPeerClient(peerRPC)
@@ -383,6 +397,14 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 
 	mover := cluster.NewMoveRunner(ms, nodeID, cfg.Storage.DataDir, peerRPC, bc.broker, bc.metrics, log, cluster.MoveConfig{})
 	mover.RegisterMetrics(reg)
+	mover.SetLeaderBlockedMoves(controller.LeaderMoveBlockedReasons, ctrl.BlockedMoves)
+
+	// Node status: what this node answers about itself (a draining
+	// node's dispatch backlog is what decommission waits on), and how
+	// the cluster views ask any member.
+	draining := &atomic.Bool{}
+	local := localNodeStatus(nodeID, draining, bc.ingress.DispatchBacklog, bc.logs.LastQuarantinedCopies, mover.MoveStates)
+	rpcServer.SetNodeStatus(local)
 
 	return &clusterStack{
 		controller: ctrl,
@@ -396,7 +418,9 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 				MaxBatchBytes:   cfg.Fanout.MaxBatchBytes,
 				Linger:          time.Duration(cfg.Fanout.LingerMs) * time.Millisecond,
 			}),
-		mover: mover,
+		mover:        mover,
+		draining:     draining,
+		memberStatus: memberNodeStatus(nodeID, local, peerRPC),
 	}
 }
 

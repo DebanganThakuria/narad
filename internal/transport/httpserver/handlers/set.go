@@ -26,6 +26,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
 const (
@@ -115,6 +116,11 @@ type Deps struct {
 	// Draining reports whether this node is being decommissioned; client
 	// produce is then refused with 503. Nil never refuses.
 	Draining func() bool
+
+	// NodeStatus asks a member for its own status over node RPC (this
+	// node answers locally). The cluster views' ?detail=true uses it.
+	// Nil leaves the detail empty, with a status error per member.
+	NodeStatus func(ctx context.Context, m metastore.Member) (nodewire.NodeStatus, error)
 }
 
 // Set is shared by every handler subpackage. The Deps field is
