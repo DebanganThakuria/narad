@@ -92,7 +92,10 @@ func TestRouteGetTopicMergesRemotePartitionStats(t *testing.T) {
 	}
 }
 
-func TestRouteGetTopicReturnsErrorWhenRemoteOwnerMissing(t *testing.T) {
+// A partition whose owner this node has no member record for is
+// reported unavailable with liveness unknown; the rest of the topic is
+// still answered (audit M15).
+func TestRouteGetTopicMarksAPartitionWhoseOwnerIsUnknown(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1}); err != nil {
@@ -104,16 +107,32 @@ func TestRouteGetTopicReturnsErrorWhenRemoteOwnerMissing(t *testing.T) {
 
 	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
 	router.peer = fakePeerClient{topicPartitionStatsFn: func(context.Context, string, string, int) (topic.PartitionStats, error) {
+		t.Error("asked an owner with no member record for stats")
 		return topic.PartitionStats{}, context.DeadlineExceeded
 	}}
 	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders", nil)
 	req.SetPathValue("topic", "orders")
-	_, err := router.RouteGetTopic(context.Background(), req, "orders", topic.Details{
+	details, err := router.RouteGetTopic(context.Background(), req, "orders", topic.Details{
 		Topic:      topic.Topic{Name: "orders", Partitions: 1},
 		Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 1}},
 	})
-	if err == nil {
-		t.Fatal("RouteGetTopic() error = nil, want error")
+	assertPartitionUnavailable(t, details, err, 0, "node-remote", topic.OwnerUnknown)
+}
+
+// assertPartitionUnavailable checks that a topic GET answered partially
+// with partition p marked unavailable for the given owner and liveness.
+func assertPartitionUnavailable(t *testing.T, details topic.Details, err error, p int, owner, liveness string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("RouteGetTopic() error = %v, want a partial answer", err)
+	}
+	if !details.Partial || p >= len(details.Partitions) {
+		t.Fatalf("RouteGetTopic() = %+v, want partial with partition %d", details, p)
+	}
+	got := details.Partitions[p]
+	want := topic.PartitionStats{Index: p, OwnerNode: owner, Status: topic.PartitionOwnerUnavailable, OwnerLiveness: liveness}
+	if got != want {
+		t.Fatalf("partition %d = %+v, want %+v", p, got, want)
 	}
 }
 
@@ -148,102 +167,48 @@ func TestRouteGetTopicKeepsLocalPartitionsLocal(t *testing.T) {
 	}
 }
 
-func TestRouteGetTopicReturnsErrorWhenRemoteStatusIsNon2xx(t *testing.T) {
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer remote.Close()
-
-	store := newTestStore(t)
-	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1}); err != nil {
-		t.Fatalf("CreateTopic() error = %v", err)
-	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember() error = %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
-		t.Fatalf("AssignPartition() error = %v", err)
-	}
-
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
-	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders", nil)
-	req.SetPathValue("topic", "orders")
-	_, err := router.RouteGetTopic(context.Background(), req, "orders", topic.Details{
-		Topic:      topic.Topic{Name: "orders", Partitions: 1},
-		Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 0}},
-	})
-	if err == nil {
-		t.Fatal("RouteGetTopic() error = nil, want error")
-	}
-}
-
-func TestRouteGetTopicReturnsErrorWhenRemotePayloadHasWrongPartition(t *testing.T) {
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(topic.Details{
-			Topic:      topic.Topic{Name: "orders", Partitions: 1},
-			Partitions: []topic.PartitionStats{{Index: 9, NextOffset: 20}},
+// A remote owner that answers with an error, a stats entry for another
+// partition, or not at all is reported unreachable for that partition
+// rather than failing the whole GET (audit M15).
+func TestRouteGetTopicMarksAPartitionUnreachableWhenItsOwnerFails(t *testing.T) {
+	for name, answer := range map[string]func(context.Context, string, string, int) (topic.PartitionStats, error){
+		"error status": func(context.Context, string, string, int) (topic.PartitionStats, error) {
+			return topic.PartitionStats{}, errors.New("topic partition stats returned status 503")
+		},
+		"wrong partition": func(context.Context, string, string, int) (topic.PartitionStats, error) {
+			return topic.PartitionStats{Index: 9, NextOffset: 20}, nil
+		},
+		"timeout": func(ctx context.Context, _, _ string, _ int) (topic.PartitionStats, error) {
+			<-ctx.Done()
+			return topic.PartitionStats{}, ctx.Err()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := newTestStore(t)
+			ctx := context.Background()
+			if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1}); err != nil {
+				t.Fatalf("CreateTopic() error = %v", err)
+			}
+			if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: "127.0.0.1:2", Status: metastore.MemberAlive}); err != nil {
+				t.Fatalf("RegisterMember() error = %v", err)
+			}
+			if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
+				t.Fatalf("AssignPartition() error = %v", err)
+			}
+			router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
+			router.peer = fakePeerClient{topicPartitionStatsFn: answer}
+			req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders", nil)
+			req.SetPathValue("topic", "orders")
+			start := time.Now()
+			details, err := router.RouteGetTopic(context.Background(), req, "orders", topic.Details{
+				Topic:      topic.Topic{Name: "orders", Partitions: 1},
+				Partitions: []topic.PartitionStats{{Index: 0}},
+			})
+			assertPartitionUnavailable(t, details, err, 0, "node-remote", topic.OwnerUnreachable)
+			if elapsed := time.Since(start); elapsed > topicStatsTimeout+time.Second {
+				t.Fatalf("GET took %s, want the stats RPC bounded by %s", elapsed, topicStatsTimeout)
+			}
 		})
-	}))
-	defer remote.Close()
-
-	store := newTestStore(t)
-	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1}); err != nil {
-		t.Fatalf("CreateTopic() error = %v", err)
-	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember() error = %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
-		t.Fatalf("AssignPartition() error = %v", err)
-	}
-
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
-	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders", nil)
-	req.SetPathValue("topic", "orders")
-	_, err := router.RouteGetTopic(context.Background(), req, "orders", topic.Details{
-		Topic:      topic.Topic{Name: "orders", Partitions: 1},
-		Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 0}},
-	})
-	if err == nil {
-		t.Fatal("RouteGetTopic() error = nil, want error")
-	}
-}
-
-func TestRouteGetTopicReturnsErrorWhenRemotePayloadHasMultiplePartitions(t *testing.T) {
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(topic.Details{
-			Topic:      topic.Topic{Name: "orders", Partitions: 2},
-			Partitions: []topic.PartitionStats{{Index: 0}, {Index: 1}},
-		})
-	}))
-	defer remote.Close()
-
-	store := newTestStore(t)
-	ctx := context.Background()
-	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1}); err != nil {
-		t.Fatalf("CreateTopic() error = %v", err)
-	}
-	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-remote", Addr: remote.Listener.Addr().String(), Status: metastore.MemberAlive}); err != nil {
-		t.Fatalf("RegisterMember() error = %v", err)
-	}
-	if err := store.AssignPartition(ctx, "orders", 0, "node-remote"); err != nil {
-		t.Fatalf("AssignPartition() error = %v", err)
-	}
-
-	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
-	router.peer = fakePeerClient{topicPartitionStatsFn: func(context.Context, string, string, int) (topic.PartitionStats, error) {
-		return topic.PartitionStats{}, context.DeadlineExceeded
-	}}
-	req := httptest.NewRequest(http.MethodGet, "/v1/topics/orders", nil)
-	req.SetPathValue("topic", "orders")
-	_, err := router.RouteGetTopic(context.Background(), req, "orders", topic.Details{
-		Topic:      topic.Topic{Name: "orders", Partitions: 1},
-		Partitions: []topic.PartitionStats{{Index: 0, NextOffset: 0}},
-	})
-	if err == nil {
-		t.Fatal("RouteGetTopic() error = nil, want error")
 	}
 }
 

@@ -11,6 +11,14 @@ import (
 // Get handles GET /v1/topics/{topic}. The caller needs any grant on the
 // topic (or ownership, or admin): the response carries per-partition
 // sizes, high watermarks and owner nodes.
+//
+// Every partition carries a status. In a cluster the stats of remote
+// partitions come from their owners, and when some owners are down the
+// answer is still a 200 (audit M15): the partitions that could be read
+// carry their stats and status "ok", every other one a zero placeholder
+// with status "owner_unavailable" and its owner's liveness, and the
+// body carries "partial": true. Only a failure to read the cluster's
+// own metadata is an error (a 503).
 func Get(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")
@@ -51,24 +59,30 @@ func Get(s *handlers.Set) http.HandlerFunc {
 				return
 			}
 		}
+		// A node's own describe is complete: every partition it reports
+		// is real.
+		for i := range d.Partitions {
+			if d.Partitions[i].Status == "" {
+				d.Partitions[i].Status = topic.PartitionStatusOK
+			}
+		}
 		if partition >= 0 {
-			// Select by Index, not position: the merged slice carries one
-			// entry per assignment and may not be positional mid-rebalance.
+			// Select by Index, not position, which every source shares.
 			stats, ok := partitionStatsByIndex(d.Partitions, partition)
 			if !ok {
 				s.WriteError(w, http.StatusInternalServerError, "partition stats unavailable")
 				return
 			}
 			d.Partitions = []topic.PartitionStats{stats}
+			d.Partial = stats.Status != topic.PartitionStatusOK
 		}
 		s.WriteJSON(w, http.StatusOK, d)
 	}
 }
 
 // partitionStatsByIndex returns the stats entry whose Index matches
-// partition. The local GetTopicDetails slice is positional, but the
-// router-merged slice carries one entry per assignment, so a linear
-// scan by Index is the only ordering both share.
+// partition. Both the local GetTopicDetails slice and the router-merged
+// one are positional, but a linear scan by Index does not depend on it.
 func partitionStatsByIndex(stats []topic.PartitionStats, partition int) (topic.PartitionStats, bool) {
 	for _, ps := range stats {
 		if ps.Index == partition {
