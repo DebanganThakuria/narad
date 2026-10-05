@@ -28,6 +28,12 @@ type fakeControllerStore struct {
 	leaderID           string
 	membersVersion     uint64 // RoutingMembersVersion; bump when members change
 	listMembersErr     error
+
+	barriers     int                        // Barrier calls
+	onBarrier    func(*fakeControllerStore) // runs inside a successful Barrier
+	abortLog     []string                   // AbortMove calls, "topic/partition→expected target"
+	abortRefused bool                       // AbortMove fails
+	markedDead   []string                   // MarkMemberDead calls in order
 }
 
 func newFakeControllerStore(memberIDs ...string) *fakeControllerStore {
@@ -44,7 +50,14 @@ func newFakeControllerStore(memberIDs ...string) *fakeControllerStore {
 
 func (f *fakeControllerStore) IsLeader() bool        { return true }
 func (f *fakeControllerStore) LeaderCh() <-chan bool { return nil }
-func (f *fakeControllerStore) Barrier() error        { return f.barrierErr }
+func (f *fakeControllerStore) Barrier() error {
+	f.barriers++
+	if f.barrierErr == nil && f.onBarrier != nil {
+		f.onBarrier(f)
+	}
+	return f.barrierErr
+}
+
 func (f *fakeControllerStore) ListMembers() ([]metastore.Member, error) {
 	if f.listMembersErr != nil {
 		return nil, f.listMembersErr
@@ -91,7 +104,26 @@ func (f *fakeControllerStore) AssignPartition(_ context.Context, topicName strin
 	return nil
 }
 
-func (f *fakeControllerStore) MarkMemberDead(context.Context, string) error { return nil }
+func (f *fakeControllerStore) AbortMove(_ context.Context, topicName string, partition int, expectedTarget string) error {
+	f.abortLog = append(f.abortLog, fmt.Sprintf("%s/%d→%s", topicName, partition, expectedTarget))
+	if f.abortRefused {
+		return errors.New("abort move: not applied")
+	}
+	if f.targets[topicName][partition] == expectedTarget {
+		f.targets[topicName][partition] = ""
+	}
+	return nil
+}
+
+func (f *fakeControllerStore) MarkMemberDead(_ context.Context, id string) error {
+	f.markedDead = append(f.markedDead, id)
+	for i := range f.members {
+		if f.members[i].ID == id {
+			f.members[i].Status = metastore.MemberDead
+		}
+	}
+	return nil
+}
 
 func (f *fakeControllerStore) Voters() ([]string, error) {
 	if f.voters == nil {

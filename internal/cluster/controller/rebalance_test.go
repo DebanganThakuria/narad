@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
@@ -296,5 +299,76 @@ func TestRebalanceKeepsAMoveToARecentlyDeadNonvoter(t *testing.T) {
 
 	if tgt := store.targets["orders"][0]; tgt != "staged" {
 		t.Fatalf("partition 0 target = %q, want the move to the briefly dead non-voter kept", tgt)
+	}
+}
+
+// A move aimed at a member whose (inherited) stamp is old is not aborted
+// right after an election: the dead-target bound runs on the new
+// leader's own clock.
+func TestDeadTargetAbortWaitsOutTheElectionGrace(t *testing.T) {
+	clk := newTestClock()
+	store := newFakeControllerStore("a", "b")
+	dst := deadMember("dst")
+	dst.LastHeartbeat = clk.now().Add(-10 * time.Minute).Unix()
+	store.members = append(store.members, dst)
+	store.topics = []topic.Topic{{Name: "orders", Partitions: 2}}
+	store.assignments["orders"] = map[int]string{0: "a", 1: "b"}
+	store.targets["orders"] = map[int]string{0: "dst"}
+	c := &Controller{store: store, now: clk.now, cfg: Config{MaxInFlightMoves: 8, DeadTargetAbortAfter: 2 * time.Minute}.withDefaults()}
+	ctx := withTerm(context.Background(), newLeaderTerm(clk.now()))
+
+	c.reconcileRebalance(ctx)
+	if got := store.targets["orders"][0]; got != "dst" {
+		t.Fatalf("target = %q right after the election, want the move to dst kept until the bound passes on this leader's clock", got)
+	}
+	clk.advance(2*time.Minute + time.Second)
+	c.reconcileRebalance(ctx)
+	if got := store.targets["orders"][0]; got == "dst" {
+		t.Fatal("the move to dst survived the dead-target bound on the leader's clock")
+	}
+}
+
+// The leader counts in-flight moves stuck on a dead source and says so
+// once per term at error.
+func TestControllerReportsMovesBlockedOnADeadSource(t *testing.T) {
+	store := newFakeControllerStore("a", "b", "c")
+	store.members[0].Status = metastore.MemberDead // a: the source of two moves
+	store.topics = []topic.Topic{{Name: "orders", Partitions: 3}}
+	store.assignments["orders"] = map[int]string{0: "a", 1: "a", 2: "b"}
+	store.targets["orders"] = map[int]string{0: "b", 1: "c"}
+	log, logs := newLogBuffer()
+	c := &Controller{store: store, cfg: Config{MaxInFlightMoves: 8, Logger: log}.withDefaults()}
+
+	for range 3 {
+		c.reconcileRebalance(context.Background())
+	}
+
+	if got := c.BlockedMoves()[MoveBlockedSourceDead]; got != 2 {
+		t.Fatalf("BlockedMoves()[source_dead] = %d, want 2 (%v)", got, c.BlockedMoves())
+	}
+	if n := len(logs.lines("level=ERROR", "move blocked", "reason=source_dead")); n != 2 {
+		t.Fatalf("logged %d blocked moves at error over 3 passes, want 2 (once each):\n%s", n, logs)
+	}
+	store.members[0].Status = metastore.MemberAlive
+	c.reconcileRebalance(context.Background())
+	if got := c.BlockedMoves()[MoveBlockedSourceDead]; got != 0 {
+		t.Fatalf("BlockedMoves()[source_dead] = %d once the source is back, want 0", got)
+	}
+}
+
+// narad_colocated_child_partitions counts the child partitions sharing a
+// node with the parent's same-index partition. It only reports.
+func TestColocatedChildPartitionsGauge(t *testing.T) {
+	store := newFakeControllerStore("a", "b")
+	store.topics = []topic.Topic{{Name: "orders", Partitions: 2}, {Name: "orders-copy", Partitions: 3, Parent: "orders"}}
+	store.assignments["orders"] = map[int]string{0: "a", 1: "b"}
+	store.assignments["orders-copy"] = map[int]string{0: "a", 1: "a", 2: "b"} // p0 shares a; p2 has no parent twin
+	reg := prometheus.NewRegistry()
+	c := &Controller{store: store, cfg: Config{MaxInFlightMoves: 8}.withDefaults(), m: newMetrics(reg)}
+
+	c.reconcileRebalance(context.Background())
+
+	if got := testutil.ToFloat64(c.m.colocated); got != 1 {
+		t.Fatalf("narad_colocated_child_partitions = %v, want 1", got)
 	}
 }
