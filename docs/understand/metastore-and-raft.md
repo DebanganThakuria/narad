@@ -69,6 +69,16 @@ Three primitives implement this:
 - **Leader confirmation RPC.** Before deleting a topic directory, discarding a WAL record, or resetting a fan-out cursor, the node asks the leader "does this still exist?" Only a definite "no" allows destruction.
 - **`Barrier`** is the subtle one. *Winning an election proves a node's Raft log is complete, not that its FSM has applied it.* A just-elected leader restored from an old snapshot legally serves stale reads while replay finishes. So "I am the leader, my state is the authority" is valid only after `raft.Barrier()` has blocked until the FSM is fully applied, and the state must be read again *after* the barrier.
 
+## Snapshots {#snapshots}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Raft compacts its log into a snapshot of the metadata database once 8192 entries have piled up since the last one (checked about every 120 s; both are [configurable](../reference/configuration.md#cluster)), and keeps the newest two. A node that falls too far behind gets the leader's latest snapshot instead of the entries it missed, and a restarting node may restore its own.
+
+Neither direction holds the database in memory. To take a snapshot, the node copies `fsm.db` to a temporary file beside it (`fsm.db.snapshot-<random>`) under a read transaction that ends with the copy. Raft writes that copy into its snapshot file while the node goes on applying entries, then deletes it. A node that installs a snapshot streams it into `fsm.db.restore` and syncs it, checks it, and renames it over `fsm.db`. A crash can leave either file behind, and the next start deletes them.
+
+The copy needs free disk equal to `fsm.db`'s size (`narad_metastore_fsm_bytes`), on top of Raft's two snapshot files. Without it the snapshot fails: the node logs `metastore: could not copy the database for a raft snapshot` at error, counts it in `narad_metastore_snapshot_failures_total`, and Raft tries again at its next interval, while its log keeps growing until a snapshot succeeds. Metadata reads and writes carry on meanwhile. v3.0.1 held the whole database in memory instead: a 26 MiB `fsm.db` allocated 64 MiB per snapshot and 54 MiB per restore, where this release allocates under 100 KiB for either. The snapshot file is the same bbolt image as before, so v3.0.1 and this release install each other's snapshots.
+
 ## Restarts {#restarts}
 
 **Unreleased:** in master, not in v3.0.1.
@@ -129,6 +139,7 @@ The first seconds of a cluster need care. A partition placed on the only member 
 |---|---|
 | FSM store | bbolt (`fsm.db`), buckets: `topics`, `schemas`, `assignments`, `members`, `users`, `removed_members`, and `fsm_meta` (applied index, the transaction that wrote it, newest entry type applied) |
 | Raft log store | boltdb (`raft.db`); snapshots: file store, **2 retained** |
+| Snapshot copy | `fsm.db.snapshot-<random>` beside `fsm.db`, deleted once Raft has written its snapshot; a restore streams into `fsm.db.restore` ([Snapshots](#snapshots)) |
 | Heartbeat / dead marking | every 5s / after 30s silence |
 | `AppliedCaughtUp` contact freshness | leader contact within 5s (followers) |
 | `Barrier` timeout | 5s |

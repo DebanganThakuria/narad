@@ -121,6 +121,31 @@ narad_http_requests_total{route="POST /v1/topics/{topic}/ack",status="410"}
 | `narad_ingress_wal_failed` (unreleased)<br>gauge; no labels | `1` once a write or sync of the node's [ingress WAL](glossary.md#ingress-wal) failed, else `0`. While it is `1`, every produce to the node gets `500` until the node restarts; consume and `/readyz` are not affected, so alert on this gauge. |
 | `narad_ingress_dispatch_backlog_records` (unreleased)<br>gauge; no labels | Records in the ingress WAL that a restart would replay: accepted, but not yet confirmed at their partition owner. Small on a healthy node; a value that stays above 0 while producers are idle means records are not reaching their owners. Wait for 0 on every node before a rollback ([Upgrade Narad](../operate/upgrade.md#roll-back)). |
 
+## Metastore and Raft {#metastore-raft}
+
+Every node holds a full replica of the [metastore](glossary.md#metastore), kept in step by Raft ([Metastore and Raft](../understand/metastore-and-raft.md)). These series are read when Prometheus scrapes, without waiting on Raft, so they still answer while the node's Raft is stuck. All of them are unreleased: in master, not in v3.0.1.
+
+| Series | Meaning |
+|---|---|
+| `narad_raft_state`<br>gauge; labels `state` | `1` for this node's Raft state (`follower`, `candidate`, `leader` or `shutdown`), `0` for the other three. Exactly one node of a healthy cluster reports `leader`; `shutdown` means the node left Raft, for example because its metastore stopped applying. |
+| `narad_raft_term`<br>gauge; no labels | Current Raft term. It moves on every election, so a term that keeps climbing means leaders keep changing. |
+| `narad_raft_last_log_index`<br>gauge; no labels | Index of the last entry in this node's Raft log. |
+| `narad_raft_commit_index`<br>gauge; no labels | Raft commit index as this node knows it. |
+| `narad_raft_applied_index`<br>gauge; no labels | Last Raft index handed to this node's state machine. |
+| `narad_raft_fsm_pending`<br>gauge; no labels | Batches of committed entries waiting for this node's state machine. Above 0 for long means it applies slower than entries commit. |
+| `narad_raft_has_leader`<br>gauge; no labels | `1` while this node knows a Raft leader (itself included), else `0`. Without a leader no metadata write (create a topic, register a member) succeeds. |
+| `narad_raft_last_contact_seconds`<br>gauge; no labels | Seconds since this node last heard from the leader: `0` on the leader, and the time since the node started on one that has never heard from a leader. |
+| `narad_raft_voters`<br>gauge; no labels | Voters in the latest Raft configuration this node knows. |
+| `narad_raft_nonvoters`<br>gauge; no labels | Non-voting servers in that configuration. |
+| `narad_metastore_fsm_bytes`<br>gauge; no labels | Size of the metadata database file (`fsm.db`). The file never shrinks, and every Raft snapshot first copies it beside itself, so the volume needs this much free space on top. |
+| `narad_metastore_applied_index`<br>gauge; no labels | Highest Raft index whose effects are in this node's metadata database. It trails `narad_raft_applied_index` only while an entry is being written. |
+| `narad_metastore_apply_errors_total`<br>counter; labels `kind` | Raft entries the node could not apply as proposed, by `kind`: `storage` (its disk refused the write; retried for up to 30 s, then the node stops), `unknown_entry_type` (a newer release proposed it; the node stops), `undecodable` (skipped on every node alike) and `newer_database` (a snapshot from a newer release; the node stops). |
+| `narad_metastore_apply_stalled`<br>gauge; no labels | `1` while the node retries a metadata write its disk refused, else `0`. |
+| `narad_metastore_apply_stopped`<br>gauge; no labels | `1` once the node has stopped applying Raft entries, else `0`. It then leaves Raft and exits; see [When a node stops applying](../understand/metastore-and-raft.md#fail-stop). |
+| `narad_metastore_snapshot_bytes`<br>gauge; no labels | Size of the last Raft snapshot this node wrote (`0` before the first). |
+| `narad_metastore_snapshot_duration_seconds`<br>gauge; no labels | How long that snapshot took, from the copy of `fsm.db` to the snapshot file's close. |
+| `narad_metastore_snapshot_failures_total`<br>counter; no labels | Raft snapshots that failed on this node, for example for lack of disk space for the copy. Raft tries again at its next interval, and its log grows until one succeeds. |
+
 ## Cluster and other series {#cluster-misc}
 
 | Series | Meaning |
