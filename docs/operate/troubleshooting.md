@@ -258,7 +258,7 @@ Logged at error level with `index`, `entry_type`, `build` and `error`, just befo
 
 Logged at warning level at start, with `reason` and `stale`.
 
-**Cause.** The node found an `fsm.db` it could not use as the base for its Raft log: one with no applied index this release can trust (written last by v3.0.x: the first restart after an upgrade, or after a rollback and a new upgrade), or, on a node joining a running cluster, one left beside a missing Raft state ([next section](#log-metastore-no-raft-state) covers a node that would bootstrap). It moved the file aside and rebuilds the database from the Raft log ([Restarts](../understand/metastore-and-raft.md#restarts)).
+**Cause.** The node found an `fsm.db` it could not use as the base for its Raft log: one with no applied index this release can trust (written last by v3.0.x: the first restart after an upgrade, or after a rollback and a new upgrade), or, on a node joining a running cluster, one left beside a missing Raft state or one newer than its Raft state (a node that does not join refuses to start in both cases instead: [no Raft state](#log-metastore-no-raft-state), [older Raft state](#log-metastore-raft-state-older)). It moved the file aside and rebuilds the database from the Raft log ([Restarts](../understand/metastore-and-raft.md#restarts)).
 
 **Fix.** None. Delete `fsm.db.stale` (next to `fsm.db` under the data directory's `metastore` directory) once the node is ready. It is kept only for inspection, and the next set-aside overwrites it.
 
@@ -272,7 +272,19 @@ Logged at warning level at start, with `reason` and `stale`.
 
 **Check.** The pod's `metastore` directory under the data directory: `fsm.db` is there, `raft.db` is missing or was just created, and `snapshots` is empty.
 
-**Fix.** To keep the node's topics, restore `raft.db` and the `snapshots` directory from a backup of the same volume and restart. A member of a multi-node cluster rejoins on its own once a peer answers at its start: it joins the running cluster instead of bootstrapping, and rebuilds the database from the leader. To start the node empty, move `fsm.db` out of the `metastore` directory, and move the `topics` directory beside it aside too if its partition data must be kept: a node started empty removes every topic directory that no topic names.
+**Fix.** To keep the node's topics, restore `raft.db`, the `snapshots` directory and `fsm.db` from the same backup of the volume and restart, and first copy the `topics` directory beside `metastore` somewhere safe: the node removes every topic directory that no topic names, so the topics created after the backup lose their partition data. Restoring `raft.db` alone beside the current `fsm.db` does not work: every member heartbeat is a Raft entry, so a backup of `raft.db` is always older than a running node's `fsm.db`, and the node refuses again with `raft state is older than fsm.db` ([next section](#log-metastore-raft-state-older)). A member of a multi-node cluster rejoins on its own once a peer answers at its start: it joins the running cluster instead of bootstrapping, and rebuilds the database from the leader. To start the node empty, move `fsm.db` out of the `metastore` directory, and move the `topics` directory beside it aside too if its partition data must be kept: a node started empty removes every topic directory that no topic names.
+
+### `raft state is older than fsm.db` at start {#log-metastore-raft-state-older}
+
+**Unreleased:** in master, not in v3.0.1.
+
+`narad serve` exits at start with `metastore: raft state is older than fsm.db: .../fsm.db has applied raft index <a>, past the end of the raft log (index <l>) and the latest raft snapshot (index <s>) in ...; starting would drop every metadata change after index <n>, so refusing to start`, followed by the ways out below. The pod restarts and exits the same way until one is taken.
+
+**Cause.** The node's metadata database holds Raft entries its Raft log and snapshots do not: `raft.db` and the `snapshots` directory were restored from a backup and `fsm.db` was not. Every member heartbeat is a Raft entry, so a backup of `raft.db` is always older than a running node's `fsm.db`. Rebuilding the database from the older Raft state, or restoring its snapshot over it, would drop every topic created since the backup, and a node that leads would then remove their partition directories as orphans. It refuses instead and leaves `fsm.db` untouched. v3.0.1 replayed the older log onto the file, or restored the older snapshot over it. A node that joins a running cluster sets the file aside instead, and the cluster's log brings the rest ([Set aside](#log-metastore-set-aside)).
+
+**Check.** The pod's `metastore` directory under the data directory, and where its `raft.db` came from.
+
+**Fix.** If the `raft.db` and `snapshots` that went with this `fsm.db` still exist, put them back and restart. Otherwise restore `fsm.db` from the same backup as `raft.db` (or move it out of the `metastore` directory, and the node rebuilds it from the restored Raft state), and first copy the `topics` directory beside `metastore` somewhere safe: the node removes every topic directory that no topic names, so the topics created after the backup lose their partition data. On a member of a multi-node cluster whose other members are running, moving `fsm.db` out is enough: the node rebuilds it from its log and the leader's, and loses nothing.
 
 ### `written by a newer Narad release` at start {#log-metastore-newer-database}
 

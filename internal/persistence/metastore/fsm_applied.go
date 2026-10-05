@@ -203,9 +203,26 @@ func readImageMeta(path string) (fsmMeta, error) {
 func noRaftStateError(path string) error {
 	dir := filepath.Dir(path)
 	return fmt.Errorf("metastore: %s holds metadata, but there is no raft state beside it (raft.db is missing or empty and there is no raft snapshot), so this node would bootstrap a new cluster with an empty log and none of its topics; refusing to start. "+
-		"To keep its topics, restore raft.db and the snapshots directory in %s from a backup. "+
+		"To keep its topics, restore raft.db, the snapshots directory and fsm.db in %s from the same backup, and first copy the topics directory beside %s somewhere safe: a node removes every topic directory that no topic names, so the topics created after the backup lose theirs. "+
 		"To start this node empty instead, move fsm.db out of %s, and move the topics directory beside %s aside too if its partition data must be kept: a node started empty removes every topic directory that no topic names",
-		path, dir, dir, dir)
+		path, dir, dir, dir, dir)
+}
+
+// raftStateOlderError refuses to start a node whose database holds
+// entries past the end of its Raft log and latest snapshot: raft.db and
+// the snapshots came from a backup that fsm.db did not (every member
+// heartbeat is a Raft entry, so any backup of raft.db is older than a
+// running node's fsm.db). Rebuilding the database from that Raft state,
+// or restoring its snapshot over it, would drop every change after the
+// backup, and on a node that leads for good: the startup sweep then
+// removes the partition directories of the topics it dropped. So the
+// operator decides.
+func raftStateOlderError(path string, applied, lastLog, snapIndex uint64) error {
+	dir := filepath.Dir(path)
+	return fmt.Errorf("metastore: raft state is older than fsm.db: %s has applied raft index %d, past the end of the raft log (index %d) and the latest raft snapshot (index %d) in %s, as when raft.db and the snapshots are restored from a backup and fsm.db is not; starting would drop every metadata change after index %d, so refusing to start. "+
+		"If the raft.db and snapshots that went with this fsm.db still exist, put them back. "+
+		"Otherwise restore fsm.db from the same backup as raft.db (or move it out of %s to rebuild it from the raft state), and first copy the topics directory beside %s somewhere safe: a node removes every topic directory that no topic names, so the topics created after the backup lose theirs",
+		path, applied, lastLog, snapIndex, dir, max(lastLog, snapIndex), dir, dir)
 }
 
 // newerDatabaseError reports a database or snapshot that has applied an
@@ -291,7 +308,13 @@ func (f *fsmState) setAsideDatabase(reason string) error {
 //     logged at error.
 //
 // A trusted index past everything Raft holds (its log and its latest
-// snapshot) belongs to another log and is treated as untrusted.
+// snapshot) means the Raft state is older than the database: raft.db
+// was restored from a backup that fsm.db was not. A node that joins a
+// running cluster treats the index as untrusted, so the rules above set
+// the file aside or restore the snapshot over it, and the cluster's log
+// brings the rest. Any other node refuses to start instead
+// (raftStateOlderError): rebuilding the database from the older Raft
+// state would drop every change after the backup.
 func prepareFSMForStart(log *slog.Logger, f *fsmState, hasState, joinOnly bool, logs raft.LogStore, snaps raft.SnapshotStore) (restore bool, err error) {
 	var snapIndex uint64
 	list, err := snaps.List()
@@ -321,9 +344,14 @@ func prepareFSMForStart(log *slog.Logger, f *fsmState, hasState, joinOnly bool, 
 			return false, noRaftStateError(f.dbPath)
 		}
 	}
+	setAsideReason := "fsm.db has no applied index this release can trust (an older release or another program wrote it last), and replaying the raft log onto it would apply entries twice"
 	if applied > max(last, snapIndex) {
-		log.Warn("metastore: fsm.db records an applied index past the raft log and its latest snapshot; it belongs to another log and is not used",
+		if !joinOnly {
+			return false, raftStateOlderError(f.dbPath, applied, last, snapIndex)
+		}
+		log.Warn("metastore: fsm.db records an applied index past the raft log and its latest snapshot (the raft state is older than fsm.db); this node joins a running cluster, whose log rebuilds it, so the index is not used",
 			"applied_index", applied, "last_log_index", last, "snapshot_index", snapIndex)
+		setAsideReason = "it records an applied index past the raft log and its latest snapshot (the raft state is older than fsm.db), and the cluster this node joins rebuilds it"
 		applied = 0
 		f.applied.Store(0)
 	}
@@ -341,7 +369,7 @@ func prepareFSMForStart(log *slog.Logger, f *fsmState, hasState, joinOnly bool, 
 		return true, nil
 	case first <= 1 || !f.meta.hasData:
 		if f.meta.hasData {
-			return true, f.setAsideDatabase("fsm.db has no applied index this release can trust (an older release or another program wrote it last), and replaying the raft log onto it would apply entries twice")
+			return true, f.setAsideDatabase(setAsideReason)
 		}
 		return true, nil
 	default:

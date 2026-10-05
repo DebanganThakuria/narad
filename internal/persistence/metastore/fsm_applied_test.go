@@ -324,6 +324,145 @@ func TestJoinOnlyNodeWithoutRaftStateSetsAStaleDatabaseAside(t *testing.T) {
 	}
 }
 
+// backupMetastore copies a closed store's raft.db, snapshots and fsm.db
+// to a new directory, as a backup of the volume would.
+func backupMetastore(t *testing.T, dataDir string) (backup string) {
+	t.Helper()
+	backup = t.TempDir()
+	copyMetastoreFiles(t, dataDir, backup, "raft.db", "snapshots", "fsm.db")
+	return backup
+}
+
+// copyMetastoreFiles replaces each named file or directory in to with
+// the one in from.
+func copyMetastoreFiles(t *testing.T, from, to string, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		src, dst := filepath.Join(from, name), filepath.Join(to, name)
+		if err := os.RemoveAll(dst); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.IsDir() {
+			err = os.CopyFS(dst, os.DirFS(src))
+		} else {
+			var raw []byte
+			if raw, err = os.ReadFile(src); err == nil {
+				err = os.WriteFile(dst, raw, 0o600)
+			}
+		}
+		if err != nil {
+			t.Fatalf("copy %s: %v", name, err)
+		}
+	}
+}
+
+// restoreOlderRaftState leaves a closed single-node store whose raft.db
+// and snapshots come from a backup taken after topic "early" was created
+// (and, with snapshot, after a Raft snapshot), beside the fsm.db that
+// also holds "late", created after the backup. It returns the backup.
+func restoreOlderRaftState(t *testing.T, cfg Config, snapshot bool) (backup string) {
+	t.Helper()
+	ctx := context.Background()
+	h := openStore(t, cfg)
+	if err := h.s.CreateTopic(ctx, topic.Topic{Name: "early", Partitions: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot {
+		if err := h.s.r.Snapshot().Error(); err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
+	}
+	h.close(t)
+	backup = backupMetastore(t, cfg.DataDir)
+
+	h.reopen(t, cfg)
+	if err := h.s.CreateTopic(ctx, topic.Topic{Name: "late", Partitions: 1}); err != nil {
+		t.Fatal(err)
+	}
+	h.close(t)
+	copyMetastoreFiles(t, backup, cfg.DataDir, "raft.db", "snapshots")
+	return backup
+}
+
+// A node whose raft.db and snapshots were restored from a backup beside
+// a newer fsm.db refuses to start. The database holds entries past the
+// end of the restored log and snapshot; rebuilding it from them would
+// drop every topic created since the backup, and the startup sweep would
+// then remove their partition directories. The refusal names the indexes
+// and leaves fsm.db untouched, and restoring fsm.db from the same backup
+// starts the node as the backup left it.
+func TestRaftStateRestoredFromAnOlderBackupIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		snapshot bool
+	}{
+		{"no snapshot", false},
+		{"the backup holds a snapshot", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := singleNodeConfig(t)
+			backup := restoreOlderRaftState(t, cfg, tc.snapshot)
+			fsmPath := filepath.Join(cfg.DataDir, "fsm.db")
+			meta, err := readImageMeta(fsmPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(fsmPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for attempt := 1; attempt <= 2; attempt++ {
+				s, err := New(cfg)
+				if err == nil {
+					_, lateErr := s.GetTopic(ctx, "late")
+					_ = s.Close()
+					t.Fatalf("start %d: a node whose raft state is older than fsm.db started (late: %v)", attempt, lateErr)
+				}
+				for _, want := range []string{fsmPath, "raft state is older than fsm.db", fmt.Sprintf("applied raft index %d", meta.applied), "same backup", "topics directory"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("start %d: New = %v; want it to say %q", attempt, err, want)
+					}
+				}
+				if fileExists(t, fsmPath+".stale") {
+					t.Fatalf("start %d: fsm.db was set aside", attempt)
+				}
+				if after, _ := os.ReadFile(fsmPath); !bytes.Equal(before, after) {
+					t.Fatalf("start %d: the refused start wrote to fsm.db", attempt)
+				}
+			}
+
+			copyMetastoreFiles(t, backup, cfg.DataDir, "fsm.db")
+			h := openStore(t, cfg)
+			if _, err := h.s.GetTopic(ctx, "early"); err != nil {
+				t.Fatalf("early after fsm.db was restored from the same backup: %v", err)
+			}
+		})
+	}
+}
+
+// A node that joins a running cluster sets aside a database newer than
+// its Raft state, and the cluster's log rebuilds it.
+func TestJoinOnlyNodeSetsADatabaseNewerThanItsRaftStateAside(t *testing.T) {
+	ctx := context.Background()
+	cfg := singleNodeConfig(t)
+	restoreOlderRaftState(t, cfg, false)
+
+	cfg.JoinOnly = true
+	h := openStore(t, cfg)
+	if !fileExists(t, filepath.Join(cfg.DataDir, "fsm.db.stale")) {
+		t.Fatal("fsm.db newer than the raft state was not set aside")
+	}
+	if _, err := h.s.GetTopic(ctx, "early"); err != nil {
+		t.Fatalf("early after the rebuild: %v", err)
+	}
+}
+
 func TestDatabaseFromANewerReleaseIsRefusedAtOpen(t *testing.T) {
 	cfg := singleNodeConfig(t)
 	cfg.Build = "narad test"
