@@ -45,7 +45,7 @@ func TestProduceMapsSchemaLimitErrors(t *testing.T) {
 		return consumer.Caps{MaxInFlight: 10, MaxAckedAhead: 10}, nil
 	}, nil)
 	reg := schema.NewJSONSchema()
-	reg.SetValidationLimit(1, 30*time.Millisecond)
+	reg.SetValidationLimit(1, 100*time.Millisecond)
 	e := NewEngine(store, reg, fixedPartitionManager{}, offsets, logs, nil, nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)), "node-self")
 
@@ -78,12 +78,31 @@ func TestProduceMapsSchemaLimitErrors(t *testing.T) {
 		t.Fatalf("large payload with a free slot: %v", err)
 	}
 
-	// Occupy the only slot with a slow validation on the legacy schema,
-	// then produce a large payload until it finds the slot taken.
-	slow := make(chan error, 1)
-	go func() { slow <- e.validateProducePayload(ctx, "legacy", []byte(`"x"`)) }()
+	// Occupy the only slot with a slow validation on the legacy schema
+	// (about half a second, seconds under -race), then produce a large
+	// payload until it finds the slot taken. The 100 ms wait for a slot
+	// is far longer than one large validation (milliseconds), so the
+	// legacy validation gets the slot as soon as one ends, and far shorter
+	// than the legacy validation, so the next large one waits it out and
+	// is refused. A legacy validation that found the slot taken all the
+	// same (a runner so loaded that one large validation outlasted the
+	// wait) or ended before the loop saw the slot taken is started again.
+	startSlow := func() chan error {
+		done := make(chan error, 1)
+		go func() { done <- e.validateProducePayload(ctx, "legacy", []byte(`"x"`)) }()
+		return done
+	}
+	slow := startSlow()
 	var busy error
-	for deadline := time.Now().Add(20 * time.Second); busy == nil && time.Now().Before(deadline); {
+	for deadline := time.Now().Add(30 * time.Second); busy == nil && time.Now().Before(deadline); {
+		select {
+		case err := <-slow:
+			if err != nil && !schema.IsCapacityError(err) {
+				t.Fatalf("legacy schema validation: %v", err)
+			}
+			slow = startSlow()
+		default:
+		}
 		err := e.validateProducePayload(ctx, "arrays", large)
 		switch {
 		case err == nil:
