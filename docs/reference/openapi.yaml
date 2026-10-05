@@ -229,7 +229,8 @@ paths:
         Creates a topic and, with `parent`, links it as a fan-out child of
         an existing topic in the same call. The caller becomes the topic's
         [owner](glossary.md#owner). A field left out, or sent as `0`, takes
-        the server default.
+        the server default, except `retention_ms`, where `0` keeps messages
+        forever and only leaving it out takes the default.
       x-narad-grant: |
         `create` on the topic name. With `parent`, also ownership of the
         parent or `admin`.
@@ -247,21 +248,21 @@ paths:
               schema:
                 $ref: '#/components/schemas/Topic'
         '400':
-          description: A field is invalid, the name is not allowed, or the schema cannot be registered.
+          description: A field is invalid, the name is not allowed, or the schema cannot be registered (unreleased, that includes a schema whose validation would cost too much).
         '401':
           description: Missing or wrong credentials.
         '403':
-          description: No `create` grant on the name, or no right to manage `parent`.
+          description: No `create` grant on the name, or no right to manage `parent`, as the node that answers or the cluster leader sees it.
         '404':
-          description: '`parent` does not exist.'
+          description: '`parent` does not exist, also after the answering node caught up with the leader.'
         '409':
-          description: The topic exists, or `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold).
+          description: The topic exists, a topic exists whose name differs only in letter case (the error names it), `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold), or (unreleased) the schema, or the parent's schema history a child adopts, would pass a schema byte budget.
         '413':
           description: The body is over 1 MiB.
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '503':
-          description: The cluster has no leader to write the topic.
+          description: The cluster has no leader to write the topic, the answering node could not reach the leader to confirm `parent`, or (unreleased) every live node is being decommissioned, so no node can take the new partitions; nothing was written.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST "$NARAD/v1/topics" \
@@ -332,6 +333,15 @@ paths:
         Returns the topic, its current schema and statistics for each
         partition. The node that answers asks every partition's owner for
         its statistics.
+
+        **Unreleased:** when some partitions' owners are down, the answer
+        is still `200`. The partitions that could be read carry their
+        statistics and `status` `ok`; each other one is a placeholder with
+        zero statistics, `status` `owner_unavailable` and the owner's
+        `owner_liveness`, and the body carries `partial: true`. Leave the
+        placeholders out of any total. An owner that does not answer within
+        2 seconds counts as `unreachable`. A v3.0.1 node answers `421`
+        instead.
       x-narad-grant: |
         Any grant that matches the topic name, ownership, or `admin`.
       parameters:
@@ -357,17 +367,19 @@ paths:
         '404':
           description: The topic does not exist.
         '421':
-          description: The owner of one of the topic's partitions could not be found or refused to answer.
+          description: From a v3.0.1 node, the owner of one of the topic's partitions could not be found or refused to answer. An upgraded node answers `200` with `partial` instead.
+        '503':
+          description: The answering node could not read its own copy of the cluster metadata (for example while it catches up after a restart). Retry.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" "$NARAD/v1/topics/orders?partition=1"
           response: |
             HTTP/1.1 200 OK
-            Content-Length: 456
+            Content-Length: 470
             Content-Type: application/json
             Date: Mon, 28 Sep 2026 19:31:43 GMT
 
-            {"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":172800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"parent","children":["orders-audit"],"schema_version":0,"partition_stats":[{"index":1,"segments":1,"oldest_offset":0,"next_offset":2,"high_watermark":2,"size_bytes":166,"oldest_segment_at":1790623903,"owner_node":"narad-0"}]}
+            {"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":172800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"parent","children":["orders-audit"],"schema_version":0,"partition_stats":[{"index":1,"segments":1,"oldest_offset":0,"next_offset":2,"high_watermark":2,"size_bytes":166,"oldest_segment_at":1790623903,"owner_node":"narad-0","status":"ok"}]}
     patch:
       operationId: alterTopic
       tags: [Topics]
@@ -402,17 +414,17 @@ paths:
         '401':
           description: Missing or wrong credentials.
         '403':
-          description: Not the owner and not `admin`.
+          description: Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic.
         '404':
-          description: The topic does not exist.
+          description: The topic does not exist, also after the answering node caught up with the leader.
         '409':
-          description: '`schema_base_version` is not the current version, the history holds 1000 versions, the topic is a child whose schema its parent manages, or the new retention is too short for a delay child.'
+          description: '`schema_base_version` is not the current version, the history holds 1000 versions or (unreleased) the new version would take it past 4 MiB or the cluster''s schemas past 256 MiB, the topic is a child whose schema its parent manages, or the new retention is too short for a delay child.'
         '413':
           description: The body is over 1 MiB.
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '503':
-          description: The cluster has no leader to write the change.
+          description: The cluster has no leader to write the change, the answering node could not reach the leader to confirm a topic it does not have, or (unreleased) a partition increase found every live node being decommissioned, so no node can take the new partitions; nothing was changed.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X PATCH "$NARAD/v1/topics/orders" \
@@ -443,11 +455,11 @@ paths:
         '401':
           description: Missing or wrong credentials.
         '403':
-          description: Not the owner and not `admin`.
+          description: Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic.
         '404':
-          description: The topic does not exist.
+          description: The topic does not exist, also after the answering node caught up with the leader.
         '503':
-          description: The cluster has no leader to write the delete.
+          description: The cluster has no leader to write the delete, or the answering node could not reach the leader to confirm a topic it does not have.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X DELETE "$NARAD/v1/topics/orders-audit"
@@ -528,15 +540,15 @@ paths:
         '401':
           description: Missing or wrong credentials.
         '403':
-          description: The caller does not manage both topics.
+          description: The caller does not manage both topics, as the node that answers or the cluster leader sees them.
         '404':
-          description: The parent or the child does not exist.
+          description: The parent or the child does not exist, also after the answering node caught up with the leader.
         '409':
-          description: The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, or the delay is longer than the parent's retention can hold.
+          description: The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, the delay is longer than the parent's retention can hold, or (unreleased) the copy of the parent's schema history the child adopts would pass the cluster's schema byte budget.
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '503':
-          description: No leader, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry.
+          description: No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/children" \
@@ -605,11 +617,11 @@ paths:
         '401':
           description: Missing or wrong credentials.
         '403':
-          description: The caller manages neither topic.
+          description: The caller manages neither topic, as the node that answers or the cluster leader sees them.
         '404':
-          description: A topic does not exist, or the two are not linked.
+          description: Neither topic exists after the answering node caught up with the leader, or the two are not linked.
         '503':
-          description: The cluster has no leader to write the change.
+          description: The cluster has no leader to write the change, or the answering node could not reach the leader to confirm the topics.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X DELETE \
@@ -669,7 +681,7 @@ paths:
         '202':
           description: Accepted and synced to disk. The body is empty.
         '400':
-          description: Empty body, `partition` out of range, `key` or `partition` given twice, or the body fails the topic's schema.
+          description: Empty body, `partition` out of range, `key` or `partition` given twice, or the body fails the topic's schema (unreleased, that includes a body nested deeper than 256 levels).
         '401':
           description: Missing or wrong credentials.
         '403':
@@ -686,6 +698,8 @@ paths:
           description: Too many produces in flight for this user on this node, only when the operator set a produce cap ([Configuration reference](configuration.md#http)).
         '500':
           description: The node could not write to its ingress WAL. It answers every produce this way until it restarts.
+        '503':
+          description: Unreleased. The topic has a schema and every schema validation slot on the node stayed busy for 5 seconds; nothing was checked or stored. Retry, preferably through another node.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST \
@@ -733,7 +747,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProduceBatchAccepted'
         '400':
-          description: No messages, more than 100, a bad encoding, an empty payload, a message the schema refuses, or `key` or `partition` in the query.
+          description: No messages, more than 100, a bad encoding, an empty payload, a message the schema refuses (one nested deeper than 256 levels included), or `key` or `partition` in the query.
         '401':
           description: Missing or wrong credentials.
         '403':
@@ -750,6 +764,8 @@ paths:
           description: The batch does not fit this user's produce cap on this node (only when the cap is set). A batch counts as its message count, clamped to the cap.
         '500':
           description: The node could not write to its ingress WAL.
+        '503':
+          description: The topic has a schema and every schema validation slot on the node stayed busy for 5 seconds; nothing was checked or stored. Retry, preferably through another node.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/produce/batch" \
@@ -1484,7 +1500,12 @@ components:
       properties:
         name:
           type: string
-          description: 1 to 255 characters from `A-Z a-z 0-9 . _ -`, not `.` or `..`.
+          maxLength: 200
+          description: |
+            1 to 200 characters from `A-Z a-z 0-9 . _ -`, not `.` or `..`,
+            and not differing from an existing topic's name only in letter
+            case (`409`). Topics an earlier release created with names up to
+            255 characters keep working.
         partitions:
           type: integer
           minimum: 3
@@ -1498,8 +1519,10 @@ components:
           type: integer
           description: |
             How long a message is kept after it is written, whether or not
-            it was consumed. At least 3,600,000 (1 hour). Defaults to the
-            server default ([Configuration reference](configuration.md#topic-defaults)):
+            it was consumed. At least 3,600,000 (1 hour), or `0` to keep
+            messages forever; a negative value gets `400`. Left out, it
+            takes the server default
+            ([Configuration reference](configuration.md#topic-defaults)):
             7 days in the binary, 12 hours in the Helm chart.
         visibility_timeout_ms:
           type: integer
@@ -1542,7 +1565,7 @@ components:
       properties:
         retention_ms:
           type: integer
-          description: New retention. At least 3,600,000 (1 hour); `0` sets the server default.
+          description: New retention. At least 3,600,000 (1 hour), or `0` to keep messages forever; a negative value gets `400`. To return to the server default, send its value.
         max_in_flight_per_partition:
           type: integer
           description: New in-flight cap; `0` sets the server default. A cap left out keeps its value.
@@ -1628,6 +1651,9 @@ components:
               description: One entry per partition, or only the one `partition` asked for.
               items:
                 $ref: '#/components/schemas/PartitionStats'
+            partial:
+              type: boolean
+              description: '**Unreleased.** `true` when some entries are placeholders whose owner could not report (`status` `owner_unavailable`). Absent otherwise.'
     PartitionStats:
       type: object
       properties:
@@ -1655,6 +1681,14 @@ components:
         owner_node:
           type: string
           description: ID of the node that owns the partition.
+        status:
+          type: string
+          enum: [ok, owner_unavailable]
+          description: '**Unreleased.** `ok` when the statistics are the owner''s; `owner_unavailable` for a placeholder with zero statistics, because the owner could not report them. Never add a placeholder''s numbers to a total.'
+        owner_liveness:
+          type: string
+          enum: [dead, unreachable, unknown, unassigned]
+          description: '**Unreleased.** Why an `owner_unavailable` partition''s owner could not report: `dead` (marked dead), `unreachable` (alive, but its statistics did not come back within 2 seconds), `unknown` (no member with an address), `unassigned` (no owner yet). Absent for `ok`.'
     TopicPage:
       type: object
       properties:

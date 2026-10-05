@@ -47,6 +47,17 @@ var (
 	// transient during elections, partitions, and rolling restarts.
 	// It maps to 503 so clients retry instead of treating it as a bug.
 	ErrUnavailable = errors.New("control plane temporarily unavailable")
+
+	// ErrOutcomeUnknown marks an ErrUnavailable write whose change may
+	// still take effect: the leader appended the entry and then lost its
+	// leadership (or shut down) before it learned whether the entry
+	// committed, so a later leader may commit it. A client should read
+	// the record back before it retries, and an audit line records the
+	// outcome as unknown. Its text travels in a forwarded write's 503
+	// reply, which is how the forwarding node learns it (see
+	// cluster.writeForwardedWrite), so keep it free of characters JSON
+	// escapes.
+	ErrOutcomeUnknown = errors.New("the change may still be applied, read it back before retrying")
 )
 
 // Partition log (storage).
@@ -128,4 +139,12 @@ var (
 	// ErrNotPartitionOwner reports a request routed to a node that does
 	// not own the requested partition.
 	ErrNotPartitionOwner = errors.New("this node does not own the requested partition")
+)
+
+// Authorization.
+var (
+	// ErrForbidden reports a request the caller's identity may not make:
+	// the Raft leader's re-check of topic ownership refused it. It maps
+	// to 403 and is never worth retrying unchanged.
+	ErrForbidden = errors.New("forbidden")
 )

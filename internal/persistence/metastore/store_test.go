@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,11 +15,18 @@ import (
 
 func newTestStore(t *testing.T) *metastore.Store {
 	t.Helper()
+	return newTestStoreLogging(t, nil)
+}
+
+// newTestStoreLogging is newTestStore with the store logging on log.
+func newTestStoreLogging(t *testing.T, log *slog.Logger) *metastore.Store {
+	t.Helper()
 	s, err := metastore.New(metastore.Config{
 		NodeID:        "test-0",
 		DataDir:       t.TempDir(),
 		BindAddr:      "127.0.0.1:0",
 		AdvertiseAddr: "127.0.0.1:0",
+		Log:           log,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -488,5 +496,66 @@ func TestStoreAppliedCaughtUp(t *testing.T) {
 	}
 	if !s.AppliedCaughtUp() {
 		t.Fatal("AppliedCaughtUp() = false after an applied write, want true")
+	}
+}
+
+// The case-fold lookup behind the create-time name check finds an
+// existing topic whose name differs only in letter case, and nothing
+// else: not the name itself, not a different name of the same length.
+func TestTopicNameFoldConflictFindsCaseVariant(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for _, name := range []string{"Orders", "orderz", "payments"} {
+		if err := s.CreateTopic(ctx, topic.Topic{Name: name, Partitions: 3}); err != nil {
+			t.Fatalf("CreateTopic(%s): %v", name, err)
+		}
+	}
+	if existing, found, err := s.TopicNameFoldConflict("orders"); err != nil || !found || existing != "Orders" {
+		t.Fatalf("TopicNameFoldConflict(orders) = %q, %v, %v; want Orders", existing, found, err)
+	}
+	for _, name := range []string{"Orders", "orders-eu", "ordery"} {
+		if existing, found, err := s.TopicNameFoldConflict(name); err != nil || found {
+			t.Fatalf("TopicNameFoldConflict(%s) = %q, %v, %v; want no conflict", name, existing, found, err)
+		}
+	}
+}
+
+// LatestSchema returns the last of the contiguous versions from 1, and
+// costs the same however long the history is: a topic describe reads
+// the schema through it on every GET. Master built a fresh key and ran
+// a fresh lookup per version, so a 60-version history cost about 120
+// more allocations per describe than a 1-version one.
+func TestLatestSchemaCostsTheSameForAnyHistoryLength(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	const long = 60
+	for name, versions := range map[string]int{"short": 1, "long": long} {
+		if err := s.CreateTopic(ctx, topic.Topic{Name: name, Partitions: 1}); err != nil {
+			t.Fatalf("CreateTopic(%s): %v", name, err)
+		}
+		for v := 1; v <= versions; v++ {
+			if err := s.PutSchema(ctx, name, v, fmt.Appendf(nil, `{"title":"%s v%d"}`, name, v)); err != nil {
+				t.Fatalf("PutSchema(%s v%d): %v", name, v, err)
+			}
+		}
+	}
+	if err := s.CreateTopic(ctx, topic.Topic{Name: "none", Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic(none): %v", err)
+	}
+
+	for name, want := range map[string]int{"short": 1, "long": long} {
+		version, raw, err := s.LatestSchema(ctx, name)
+		if err != nil || version != want || string(raw) != fmt.Sprintf(`{"title":"%s v%d"}`, name, want) {
+			t.Fatalf("LatestSchema(%s) = v%d %s (err %v), want v%d", name, version, raw, err, want)
+		}
+	}
+	if version, raw, err := s.LatestSchema(ctx, "none"); err != nil || version != 0 || raw != nil {
+		t.Fatalf("LatestSchema(none) = v%d %s (err %v), want version 0 and no bytes", version, raw, err)
+	}
+
+	short := testing.AllocsPerRun(20, func() { _, _, _ = s.LatestSchema(ctx, "short") })
+	longer := testing.AllocsPerRun(20, func() { _, _, _ = s.LatestSchema(ctx, "long") })
+	if longer > short {
+		t.Fatalf("LatestSchema allocates %.0f times for a %d-version history and %.0f for one version, want no more", longer, long, short)
 	}
 }

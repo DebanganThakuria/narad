@@ -26,12 +26,17 @@ import (
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/health"
 )
 
+// buildMetrics builds the process registry: the Go and process
+// collectors, the broker's metrics and the schema validation metrics.
+// The schema metrics are process-wide, so a later call (tests build
+// several registries in one process) moves them to its registry.
 func buildMetrics() (*prometheus.Registry, *metrics.Metrics) {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
+	schema.RegisterMetrics(reg)
 	return reg, metrics.New(reg)
 }
 

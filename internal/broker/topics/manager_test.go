@@ -95,8 +95,26 @@ func (f *fakeMetastore) GetTopic(_ context.Context, name string) (topic.Topic, e
 	return t, nil
 }
 
-func (f *fakeMetastore) ListTopics(_ context.Context, _ metastore.ListOptions) ([]topic.Topic, string, error) {
-	return nil, "", nil
+// ListTopics pages through the topics in name order, as the real
+// metastore does.
+func (f *fakeMetastore) ListTopics(_ context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error) {
+	names := make([]string, 0, len(f.topics))
+	for name := range f.topics {
+		if opts.PageToken == "" || name > opts.PageToken {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	var next string
+	if opts.Limit > 0 && len(names) > opts.Limit {
+		names = names[:opts.Limit]
+		next = names[len(names)-1]
+	}
+	out := make([]topic.Topic, 0, len(names))
+	for _, name := range names {
+		out = append(out, f.topics[name])
+	}
+	return out, next, nil
 }
 
 // AttachChild/DetachChild mimic the FSM's link mutations closely enough
@@ -454,7 +472,7 @@ func TestCreateTopic_RejectsInvalidInputs(t *testing.T) {
 		{name: "space", opts: CreateOpts{Name: "or ders"}, want: "topic name must match"},
 		{name: "negative partitions", opts: CreateOpts{Name: testTopicName, Partitions: -1}, want: "partitions must be >= 3"},
 		{name: "partitions over max", opts: CreateOpts{Name: testTopicName, Partitions: 33}, want: "exceeds topic.max_partitions"},
-		{name: "negative retention", opts: CreateOpts{Name: testTopicName, RetentionMs: -1}, want: "retention_ms must be >= 0"},
+		{name: "negative retention", opts: CreateOpts{Name: testTopicName, RetentionMs: -2}, want: "retention_ms must be >= 0"},
 		{name: "negative visibility timeout", opts: CreateOpts{Name: testTopicName, VisibilityTimeoutMs: -1}, want: "visibility_timeout_ms must be >= 0"},
 		{name: "negative in flight cap", opts: CreateOpts{Name: testTopicName, MaxInFlightPerPartition: -1}, want: "max_in_flight_per_partition must be >= 0"},
 		{name: "negative acked ahead cap", opts: CreateOpts{Name: testTopicName, MaxAckedAheadPerPartition: -1}, want: "max_acked_ahead_per_partition must be >= 0"},
@@ -593,12 +611,81 @@ func TestUpdateTopicCaps_UsesDefaultsAndPersists(t *testing.T) {
 	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, MaxInFlightPerPartition: 1, MaxAckedAheadPerPartition: 1}
 	manager := newTestManager(t, ms, nil)
 
-	updated, err := manager.UpdateTopicCaps(context.Background(), testTopicName, 0, 0)
+	updated, err := manager.UpdateTopicCaps(context.Background(), testTopicName, new(int64(0)), new(int64(0)))
 	if err != nil {
 		t.Fatalf("UpdateTopicCaps() error = %v", err)
 	}
 	if updated.MaxInFlightPerPartition != 10 || updated.MaxAckedAheadPerPartition != 11 {
 		t.Fatalf("UpdateTopicCaps() caps = %+v, want defaults", updated)
+	}
+}
+
+// A caps update changes only the caps it names. The other keeps the
+// value the record holds when read under the topic lock after the
+// leader barrier, not one a caller read earlier: on this just-elected
+// leader the replica still says acked-ahead 1000, while the previous
+// leader had committed 10 before it failed.
+func TestUpdateTopicCapsKeepsTheCapItDoesNotName(t *testing.T) {
+	ms := &laggingLeaderMetastore{
+		fakeMetastore: newFakeMetastore(),
+		stale:         map[string]topic.Topic{"orders": {Name: "orders", ID: "0000000000000001", Partitions: 3, MaxInFlightPerPartition: 1000, MaxAckedAheadPerPartition: 1000}},
+	}
+	ms.topics["orders"] = topic.Topic{Name: "orders", ID: "0000000000000001", Partitions: 3, MaxInFlightPerPartition: 1000, MaxAckedAheadPerPartition: 10}
+	m := newTestManagerForMetastore(t, ms, nil, &fakeSchemaRegistry{}, "")
+
+	updated, err := m.UpdateTopicCaps(context.Background(), "orders", new(int64(50)), nil)
+	if err != nil {
+		t.Fatalf("UpdateTopicCaps: %v", err)
+	}
+	stored := ms.topics["orders"]
+	if updated.MaxInFlightPerPartition != 50 || updated.MaxAckedAheadPerPartition != 10 ||
+		stored.MaxInFlightPerPartition != 50 || stored.MaxAckedAheadPerPartition != 10 {
+		t.Fatalf("caps returned %d/%d, stored %d/%d; want 50/10 (acked-ahead kept at the committed 10)",
+			updated.MaxInFlightPerPartition, updated.MaxAckedAheadPerPartition, stored.MaxInFlightPerPartition, stored.MaxAckedAheadPerPartition)
+	}
+
+	// Zero still inherits the default, and a call naming no cap is refused.
+	if updated, err = m.UpdateTopicCaps(context.Background(), "orders", nil, new(int64(0))); err != nil {
+		t.Fatalf("UpdateTopicCaps(acked-ahead 0): %v", err)
+	}
+	if updated.MaxInFlightPerPartition != 50 || updated.MaxAckedAheadPerPartition != 11 {
+		t.Fatalf("caps = %d/%d, want 50 and the default 11", updated.MaxInFlightPerPartition, updated.MaxAckedAheadPerPartition)
+	}
+	if _, err := m.UpdateTopicCaps(context.Background(), "orders", nil, nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("UpdateTopicCaps(no cap) = %v, want ErrInvalid", err)
+	}
+}
+
+// Two callers that each change a different cap of one topic at the same
+// time both land: neither writes back the other's cap as it read it
+// before its own write.
+func TestConcurrentUpdatesOfDifferentCapsBothLand(t *testing.T) {
+	ms := newFakeMetastore()
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, MaxInFlightPerPartition: 1, MaxAckedAheadPerPartition: 1}
+	m := newTestManager(t, ms, nil)
+	const rounds = 50
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := int64(1); i <= rounds; i++ {
+			if _, err := m.UpdateTopicCaps(context.Background(), testTopicName, new(100+i), nil); err != nil {
+				t.Errorf("in-flight update %d: %v", i, err)
+				return
+			}
+		}
+	})
+	wg.Go(func() {
+		for i := int64(1); i <= rounds; i++ {
+			if _, err := m.UpdateTopicCaps(context.Background(), testTopicName, nil, new(200+i)); err != nil {
+				t.Errorf("acked-ahead update %d: %v", i, err)
+				return
+			}
+		}
+	})
+	wg.Wait()
+	got := ms.topics[testTopicName]
+	if got.MaxInFlightPerPartition != 100+rounds || got.MaxAckedAheadPerPartition != 200+rounds {
+		t.Fatalf("caps = %d/%d, want %d/%d: one caller's change was written over",
+			got.MaxInFlightPerPartition, got.MaxAckedAheadPerPartition, 100+rounds, 200+rounds)
 	}
 }
 
@@ -609,13 +696,13 @@ func TestUpdateTopicSchema_VersionsFromPersistedHistory(t *testing.T) {
 	ms := newFakeMetastore()
 	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
 	for v := 1; v <= 6; v++ {
-		if err := ms.PutSchema(context.Background(), testTopicName, v, []byte(fmt.Sprintf(`{"title":"v%d","type":"object"}`, v))); err != nil {
+		if err := ms.PutSchema(context.Background(), testTopicName, v, []byte(fmt.Sprintf(`{"x-rev":"v%d","type":"object"}`, v))); err != nil {
 			t.Fatal(err)
 		}
 	}
 	reg := &fakeSchemaRegistry{}
 	manager := newTestManager(t, ms, reg)
-	rawSchema := []byte(`{"title":"v7","type":"object"}`)
+	rawSchema := []byte(`{"x-rev":"v7","type":"object"}`)
 
 	updated, err := manager.UpdateTopicSchema(context.Background(), testTopicName, rawSchema, 0)
 	if err != nil {
@@ -624,7 +711,7 @@ func TestUpdateTopicSchema_VersionsFromPersistedHistory(t *testing.T) {
 	if updated.Name != testTopicName {
 		t.Fatalf("UpdateTopicSchema() topic = %q, want %q", updated.Name, testTopicName)
 	}
-	if reg.compatCalls != 1 || string(reg.lastCompatPrevious) != `{"title":"v6","type":"object"}` || string(reg.lastCompatNext) != string(rawSchema) {
+	if reg.compatCalls != 1 || string(reg.lastCompatPrevious) != `{"x-rev":"v6","type":"object"}` || string(reg.lastCompatNext) != string(rawSchema) {
 		t.Fatalf("CheckCompatible() calls = %d previous %q next %q, want 1 call against the persisted v6",
 			reg.compatCalls, reg.lastCompatPrevious, reg.lastCompatNext)
 	}
@@ -692,14 +779,14 @@ func TestUpdateTopicSchema_IncompatibleIsRefusedBeforePersist(t *testing.T) {
 func TestUpdateTopicSchema_RetriesOnVersionConflict(t *testing.T) {
 	ms := newFakeMetastore()
 	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
-	if err := ms.PutSchema(context.Background(), testTopicName, 1, []byte(`{"title":"v1"}`)); err != nil {
+	if err := ms.PutSchema(context.Background(), testTopicName, 1, []byte(`{"x-rev":"v1"}`)); err != nil {
 		t.Fatal(err)
 	}
 	ms.putSchemaConflicts = 1
 	reg := &fakeSchemaRegistry{}
 	manager := newTestManager(t, ms, reg)
 
-	if _, err := manager.UpdateTopicSchema(context.Background(), testTopicName, []byte(`{"title":"v2"}`), 0); err != nil {
+	if _, err := manager.UpdateTopicSchema(context.Background(), testTopicName, []byte(`{"x-rev":"v2"}`), 0); err != nil {
 		t.Fatalf("UpdateTopicSchema() error = %v", err)
 	}
 	if reg.compatCalls != 2 {
@@ -711,7 +798,7 @@ func TestUpdateTopicSchema_RetriesOnVersionConflict(t *testing.T) {
 
 	// A conflict that never resolves surfaces as ErrAlreadyExists.
 	ms.putSchemaConflicts = schemaPutAttempts
-	_, err := manager.UpdateTopicSchema(context.Background(), testTopicName, []byte(`{"title":"v3"}`), 0)
+	_, err := manager.UpdateTopicSchema(context.Background(), testTopicName, []byte(`{"x-rev":"v3"}`), 0)
 	if !errors.Is(err, errs.ErrAlreadyExists) {
 		t.Fatalf("UpdateTopicSchema() under persistent conflict error = %v, want %v", err, errs.ErrAlreadyExists)
 	}
@@ -907,5 +994,149 @@ func TestDeleteTopicReleasesParkedConsumers(t *testing.T) {
 	}
 	if reg.lastDroppedTopic != testTopicName {
 		t.Fatalf("retired hook did not run: dropped schema topic = %q", reg.lastDroppedTopic)
+	}
+}
+
+// laggingLeaderMetastore is a just-elected leader whose FSM has not yet
+// applied what the previous leader committed: it serves the stale
+// records until LeaderBarrier runs, and logs barriers and reads in
+// order.
+type laggingLeaderMetastore struct {
+	*fakeMetastore
+	stale     map[string]topic.Topic
+	caughtUp  bool
+	callOrder []string
+}
+
+func (f *laggingLeaderMetastore) LeaderBarrier(context.Context) error {
+	f.callOrder = append(f.callOrder, "barrier")
+	f.caughtUp = true
+	return nil
+}
+
+func (f *laggingLeaderMetastore) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
+	f.callOrder = append(f.callOrder, "read "+name)
+	if t, ok := f.stale[name]; ok && !f.caughtUp {
+		return t, nil
+	}
+	return f.fakeMetastore.GetTopic(ctx, name)
+}
+
+// Every topic mutation reads the record it rewrites from the local
+// replica, so on a just-elected leader it must barrier before that
+// read: the old leader raised orders to 6 partitions, the new leader's
+// FSM still shows 3, and a retention alter built from the stale read
+// would write 3 back.
+func TestTopicMutationsBarrierBeforeReading(t *testing.T) {
+	mutations := map[string]func(*Manager) error{
+		"retention": func(m *Manager) error {
+			_, err := m.UpdateTopicRetention(context.Background(), "orders", 7_200_000)
+			return err
+		},
+		"caps": func(m *Manager) error {
+			_, err := m.UpdateTopicCaps(context.Background(), "orders", new(int64(5)), new(int64(5)))
+			return err
+		},
+		"partitions": func(m *Manager) error {
+			_, err := m.IncreaseTopicPartitions(context.Background(), "orders", 9)
+			return err
+		},
+		"schema": func(m *Manager) error {
+			_, err := m.UpdateTopicSchema(context.Background(), "orders", []byte(`{"type":"object"}`), 0)
+			return err
+		},
+		"delete": func(m *Manager) error {
+			return m.DeleteTopic(context.Background(), "orders")
+		},
+		"attach": func(m *Manager) error {
+			return m.AttachChild(context.Background(), "orders", "audit", 0)
+		},
+		"detach": func(m *Manager) error {
+			if err := m.metastore.AttachChild(context.Background(), "orders", "audit", 0); err != nil {
+				return err
+			}
+			return m.DetachChild(context.Background(), "orders", "audit")
+		},
+		"create as child": func(m *Manager) error {
+			_, err := m.CreateTopic(context.Background(), CreateOpts{Name: "orders-copy", Parent: "orders"})
+			return err
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			ms := &laggingLeaderMetastore{
+				fakeMetastore: newFakeMetastore(),
+				stale:         map[string]topic.Topic{"orders": {Name: "orders", ID: "0000000000000001", Partitions: 3, RetentionMs: 3_600_000}},
+			}
+			ms.topics["orders"] = topic.Topic{Name: "orders", ID: "0000000000000001", Partitions: 6, RetentionMs: 3_600_000}
+			ms.topics["audit"] = topic.Topic{Name: "audit", ID: "0000000000000002", Partitions: 6, RetentionMs: 3_600_000}
+			m := newTestManagerForMetastore(t, ms, nil, &fakeSchemaRegistry{}, "")
+			if err := mutate(m); err != nil {
+				t.Fatalf("mutation: %v", err)
+			}
+			barrier := slices.Index(ms.callOrder, "barrier")
+			firstRead := slices.IndexFunc(ms.callOrder, func(c string) bool { return strings.HasPrefix(c, "read ") })
+			if barrier < 0 || (firstRead >= 0 && firstRead < barrier) {
+				t.Errorf("calls = %v, want a leader barrier before the first read", ms.callOrder)
+			}
+			if got, ok := ms.topics["orders"]; ok && got.Partitions < 6 {
+				t.Errorf("orders now has %d partitions, want at least 6: the mutation wrote back a stale read", got.Partitions)
+			}
+		})
+	}
+
+	// A plain create reads no record but still barriers, so the name
+	// checks it makes run against an up-to-date replica.
+	ms := &laggingLeaderMetastore{fakeMetastore: newFakeMetastore()}
+	m := newTestManagerForMetastore(t, ms, nil, &fakeSchemaRegistry{}, "")
+	if _, err := m.CreateTopic(context.Background(), CreateOpts{Name: "fresh"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !slices.Contains(ms.callOrder, "barrier") {
+		t.Fatalf("calls = %v, want a leader barrier on create", ms.callOrder)
+	}
+}
+
+// The broker's keep-forever sentinel: retention_ms -1 on create or
+// alter keeps records forever and is stored as 0, which storage and the
+// cold walk read as no age limit; 0 still means the operator default;
+// any other negative value is refused. Master refused
+// -1, so nothing could ask for keep forever when the operator default
+// was an age.
+func TestKeepForeverRetentionSentinel(t *testing.T) {
+	ms := newFakeMetastore()
+	m := newTestManager(t, ms, nil)
+	ctx := context.Background()
+
+	forever, err := m.CreateTopic(ctx, CreateOpts{Name: "archive", RetentionMs: topic.RetentionKeepForever})
+	if err != nil {
+		t.Fatalf("create with keep forever: %v", err)
+	}
+	if forever.RetentionMs != 0 || ms.topics["archive"].RetentionMs != 0 {
+		t.Fatalf("keep-forever create returned %d, stored %d; want 0", forever.RetentionMs, ms.topics["archive"].RetentionMs)
+	}
+	def, err := m.CreateTopic(ctx, CreateOpts{Name: "orders"})
+	if err != nil {
+		t.Fatalf("create with the default: %v", err)
+	}
+	if def.RetentionMs != m.cfg.DefaultRetentionMs {
+		t.Fatalf("retention 0 stored %d, want the operator default %d", def.RetentionMs, m.cfg.DefaultRetentionMs)
+	}
+	if _, err := m.CreateTopic(ctx, CreateOpts{Name: "bad", RetentionMs: -2}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("create with retention -2 = %v, want ErrInvalid", err)
+	}
+
+	updated, err := m.UpdateTopicRetention(ctx, "orders", topic.RetentionKeepForever)
+	if err != nil {
+		t.Fatalf("alter to keep forever: %v", err)
+	}
+	if updated.RetentionMs != 0 || ms.topics["orders"].RetentionMs != 0 {
+		t.Fatalf("keep-forever alter returned %d, stored %d; want 0", updated.RetentionMs, ms.topics["orders"].RetentionMs)
+	}
+	if updated, err = m.UpdateTopicRetention(ctx, "orders", 0); err != nil || updated.RetentionMs != m.cfg.DefaultRetentionMs {
+		t.Fatalf("alter to 0 = %d, %v; want the operator default %d", updated.RetentionMs, err, m.cfg.DefaultRetentionMs)
+	}
+	if _, err := m.UpdateTopicRetention(ctx, "orders", -2); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("alter to -2 = %v, want ErrInvalid", err)
 	}
 }

@@ -30,9 +30,10 @@ import (
 // Clients that need atomicity send one field per request. This is the
 // documented contract (docs/build/topics.md).
 //
-// retention_ms / max_*_per_partition are *int64 (rather than int64)
-// so the caller can distinguish "unset" from "set to zero"; zero
-// means "inherit broker default". partitions uses 0 as unset.
+// retention_ms / max_*_per_partition are *int64 (rather than int64) so
+// the caller can distinguish "unset" from "set to zero". An explicit
+// retention_ms of 0 keeps records forever; a zero cap inherits the
+// broker default. partitions uses 0 as unset.
 type alterRequest struct {
 	Partitions                int             `json:"partitions"`
 	RetentionMs               *int64          `json:"retention_ms,omitempty"`
@@ -55,7 +56,7 @@ func (req alterRequest) Validate() error {
 		return errors.New("at least one of partitions, retention_ms, max_*_per_partition, or schema is required")
 	}
 	if hasRetention && *req.RetentionMs < 0 {
-		return errors.New("retention_ms must be >= 0 (0 = use default)")
+		return errors.New(retentionRangeError)
 	}
 	if req.MaxInFlightPerPartition != nil && *req.MaxInFlightPerPartition < 0 {
 		return errors.New("max_in_flight_per_partition must be >= 0 (0 = use default)")
@@ -105,17 +106,36 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		aw := newAuditWriter(w)
+		w = aw
+		var progress alterProgress
+		defer func() { auditAlter(s, r, aw, topicName, req, progress) }()
 		if !s.AuthorizeTopicManage(w, r, topicName) {
 			return
 		}
 
+		// An explicit retention_ms of 0 is keep forever, which the leader
+		// reads as topic.RetentionKeepForever (a 3.0.x leader reads 0 as
+		// its default). Only then is the forwarded body re-encoded;
+		// otherwise the client's bytes go to the leader as they came.
+		if req.RetentionMs != nil && *req.RetentionMs == 0 {
+			req.RetentionMs = brokerRetention(req.RetentionMs)
+			reencoded, err := json.Marshal(req)
+			if err != nil {
+				s.WriteError(w, http.StatusInternalServerError, "encode alter request")
+				return
+			}
+			body = reencoded
+		}
+
 		if s.Deps.Router != nil {
 			if s.Deps.Router.RouteAlterTopic(r.Context(), w, r, topicName, body) {
+				progress.forwarded = true
 				return
 			}
 		}
 
-		t, err := applyAlter(r.Context(), s, topicName, req)
+		t, err := applyAlter(r.Context(), s, topicName, req, &progress)
 		if err != nil {
 			s.WriteBrokerError(w, "alter topic", err)
 			return
@@ -124,12 +144,53 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 	}
 }
 
+// alterGroup is one field group of a PATCH. The groups apply in this
+// order, each as its own metastore update.
+type alterGroup int
+
+const (
+	alterRetention alterGroup = iota
+	alterCaps
+	alterPartitions
+	alterSchema
+)
+
+// groups returns the field groups the request sets, in the order they
+// apply.
+func (req alterRequest) groups() []alterGroup {
+	var groups []alterGroup
+	if req.RetentionMs != nil {
+		groups = append(groups, alterRetention)
+	}
+	if req.MaxInFlightPerPartition != nil || req.MaxAckedAheadPerPartition != nil {
+		groups = append(groups, alterCaps)
+	}
+	if req.Partitions > 0 {
+		groups = append(groups, alterPartitions)
+	}
+	if len(req.Schema) > 0 {
+		groups = append(groups, alterSchema)
+	}
+	return groups
+}
+
+// alterProgress records how far a PATCH got, for its audit lines.
+type alterProgress struct {
+	// forwarded is set when the leader answered the PATCH: it applied
+	// the groups, and this node cannot know how many landed before one
+	// failed.
+	forwarded bool
+	// applied counts the groups this node's own apply committed, in
+	// order; the first failure stops the sequence.
+	applied int
+}
+
 // applyAlter applies each supplied field group in order: retention,
 // caps, partitions, schema. Each group is an independent metastore
 // update; a failure aborts the sequence and leaves the earlier groups
-// applied (see alterRequest). The returned topic reflects the last
-// applied change.
-func applyAlter(ctx context.Context, s *handlers.Set, topicName string, req alterRequest) (topic.Topic, error) {
+// applied (see alterRequest), which progress counts. The returned
+// topic reflects the last applied change.
+func applyAlter(ctx context.Context, s *handlers.Set, topicName string, req alterRequest, progress *alterProgress) (topic.Topic, error) {
 	var t topic.Topic
 	var err error
 
@@ -138,48 +199,32 @@ func applyAlter(ctx context.Context, s *handlers.Set, topicName string, req alte
 		if err != nil {
 			return topic.Topic{}, err
 		}
+		progress.applied++
 	}
 	if req.MaxInFlightPerPartition != nil || req.MaxAckedAheadPerPartition != nil {
-		t, err = applyCaps(ctx, s, topicName, t, req)
+		// A cap the request leaves unset is nil: the broker keeps its
+		// stored value, read under the topic lock on the leader, never one
+		// read here (a stale replica or a concurrent PATCH of the other cap
+		// would make this node write an old value back).
+		t, err = s.Deps.Broker.UpdateTopicCaps(ctx, topicName, req.MaxInFlightPerPartition, req.MaxAckedAheadPerPartition)
 		if err != nil {
 			return topic.Topic{}, err
 		}
+		progress.applied++
 	}
 	if req.Partitions > 0 {
 		t, err = s.Deps.Broker.IncreaseTopicPartitions(ctx, topicName, req.Partitions)
 		if err != nil {
 			return topic.Topic{}, err
 		}
+		progress.applied++
 	}
 	if len(req.Schema) > 0 {
 		t, err = s.Deps.Broker.UpdateTopicSchema(ctx, topicName, req.Schema, req.SchemaBaseVersion)
 		if err != nil {
 			return topic.Topic{}, err
 		}
+		progress.applied++
 	}
 	return t, nil
-}
-
-// applyCaps updates the in-flight / acked-ahead caps. A cap the
-// request leaves unset must keep its current value, so the topic is
-// fetched first unless an earlier alteration already returned it
-// (current is the zero Topic otherwise).
-func applyCaps(ctx context.Context, s *handlers.Set, topicName string, current topic.Topic, req alterRequest) (topic.Topic, error) {
-	if current.Name == "" {
-		var err error
-		current, err = s.Deps.Broker.GetTopic(ctx, topicName)
-		if err != nil {
-			return topic.Topic{}, err
-		}
-	}
-
-	inFlight := current.MaxInFlightPerPartition
-	if req.MaxInFlightPerPartition != nil {
-		inFlight = *req.MaxInFlightPerPartition
-	}
-	ackedAhead := current.MaxAckedAheadPerPartition
-	if req.MaxAckedAheadPerPartition != nil {
-		ackedAhead = *req.MaxAckedAheadPerPartition
-	}
-	return s.Deps.Broker.UpdateTopicCaps(ctx, topicName, inFlight, ackedAhead)
 }

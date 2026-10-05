@@ -376,13 +376,16 @@ func rawAuthReq(t *testing.T, e *env, path string, body []byte, user, pass strin
 }
 
 // The version cap is reachable and answers 409 without touching the
-// history; re-registering the latest still succeeds.
+// history; re-registering the latest still succeeds. Each version
+// raises maxProperties, a widening the compatibility check accepts (a
+// change to "title" alone registers nothing), and 1000 such versions
+// stay far under the 4 MiB history budget.
 func TestSchemaHistoryCapOverHTTP(t *testing.T) {
 	t.Parallel()
 	e := newTestEnv(t)
 	e.createTopic("cap", 3, 0)
 	sch := func(v int) string {
-		return `{"type":"object","title":"v` + intString(v) + `"}`
+		return `{"type":"object","maxProperties":` + intString(1000+v) + `}`
 	}
 	for v := 1; v <= metastore.MaxSchemaVersions; v++ {
 		if resp := e.setSchema("cap", sch(v), 0); resp.StatusCode != http.StatusOK {
@@ -395,4 +398,44 @@ func TestSchemaHistoryCapOverHTTP(t *testing.T) {
 	expectConflict(t, e.setSchema("cap", sch(metastore.MaxSchemaVersions+1), 0))
 	expectOK(t, e.setSchema("cap", sch(metastore.MaxSchemaVersions), 0))
 	expectSchemaVersion(t, e, "cap", metastore.MaxSchemaVersions, sch(metastore.MaxSchemaVersions))
+}
+
+// A schema whose validation cost explodes is refused at registration,
+// on create and on PATCH, and a payload nested past 256 levels is
+// refused at produce: all 400s that leave nothing behind.
+func TestSchemaValidationCostOverHTTP(t *testing.T) {
+	t.Parallel()
+	e := newTestEnv(t)
+
+	// An acyclic chain applying each level twice: 2^22 paths to the
+	// leaf, two seconds per produce of "x".
+	var dag strings.Builder
+	dag.WriteString(`{"$ref":"#/$defs/d0","$defs":{`)
+	for i := range 22 {
+		dag.WriteString(`"d` + intString(i) + `":{"allOf":[{"$ref":"#/$defs/d` + intString(i+1) + `"},{"$ref":"#/$defs/d` + intString(i+1) + `"}]},`)
+	}
+	dag.WriteString(`"d22":{"type":"string"}}}`)
+	resp := e.post("/v1/topics", map[string]any{"name": "cost-create", "partitions": 3, "schema": json.RawMessage(dag.String())})
+	expectBadRequest(t, resp)
+	if msg := readError(t, resp); !strings.Contains(msg, "more than 64 validation paths") {
+		t.Fatalf("DAG schema create error = %q", msg)
+	}
+	expectNotFound(t, e.get("/v1/topics/cost-create"))
+
+	e.createTopic("cost", 3, 0)
+	for _, bad := range []string{dag.String(), `{"type":"string","pattern":"a.{1000}b"}`} {
+		resp := e.setSchema("cost", bad, 0)
+		expectBadRequest(t, resp)
+		resp.Body.Close()
+	}
+	expectSchemaVersion(t, e, "cost", 0, "")
+
+	tree := `{"type":"array","items":{"$ref":"#"}}`
+	expectOK(t, e.setSchema("cost", tree, 0))
+	resp = rawReq(t, http.MethodPost, e.url("/v1/topics/cost/produce"), []byte(strings.Repeat("[", 257)+strings.Repeat("]", 257)))
+	expectBadRequest(t, resp)
+	if msg := readError(t, resp); !strings.Contains(msg, "deeper than 256") {
+		t.Fatalf("deep payload error = %q", msg)
+	}
+	produceAndAwaitVisibility(t, e, "cost", "", []byte(strings.Repeat("[", 256)+strings.Repeat("]", 256)))
 }

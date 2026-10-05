@@ -54,14 +54,24 @@ func (m *Manager) IncreaseTopicPartitions(ctx context.Context, name string, newP
 	}
 	unlock := m.lockTopicName(name)
 	defer unlock()
+	if err := m.leaderBarrier(ctx); err != nil {
+		return topic.Topic{}, err
+	}
 
 	current, err := m.GetTopic(ctx, name)
 	if err != nil {
 		return topic.Topic{}, err
 	}
+	if err := authorizeManage(ctx, current); err != nil {
+		return topic.Topic{}, err
+	}
 	if newPartitions <= current.Partitions {
 		return topic.Topic{}, fmt.Errorf("%w: new partition count (%d) must be greater than current (%d); decrease is not supported",
 			ErrInvalid, newPartitions, current.Partitions)
+	}
+
+	if err := m.checkPlacement(); err != nil {
+		return topic.Topic{}, err
 	}
 
 	updated := current
@@ -91,26 +101,30 @@ func (m *Manager) IncreaseTopicPartitions(ctx context.Context, name string, newP
 // topic. Cached partition logs are closed so the next access reopens
 // them with the new bounds.
 //
-// retentionMs == 0 inherits Config.DefaultRetentionMs; negative values
-// are rejected.
+// retentionMs == 0 inherits Config.DefaultRetentionMs,
+// topic.RetentionKeepForever (-1) keeps records forever (stored as 0),
+// and other negative values are rejected. The returned topic carries
+// the effective retention.
 func (m *Manager) UpdateTopicRetention(ctx context.Context, name string, retentionMs int64) (topic.Topic, error) {
 	if name == "" {
 		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalid)
 	}
-	if retentionMs < 0 {
-		return topic.Topic{}, fmt.Errorf("%w: retention_ms must be >= 0 (0 = use default)", ErrInvalid)
-	}
-	if retentionMs == 0 {
-		retentionMs = m.cfg.DefaultRetentionMs
-	}
-	if err := checkRetentionFloor(retentionMs); err != nil {
+	requested := retentionMs
+	retentionMs, err := m.resolveRetention(retentionMs)
+	if err != nil {
 		return topic.Topic{}, err
 	}
 	unlock := m.lockTopicName(name)
 	defer unlock()
+	if err := m.leaderBarrier(ctx); err != nil {
+		return topic.Topic{}, err
+	}
 
 	current, err := m.GetTopic(ctx, name)
 	if err != nil {
+		return topic.Topic{}, err
+	}
+	if err := authorizeManage(ctx, current); err != nil {
 		return topic.Topic{}, err
 	}
 
@@ -132,39 +146,49 @@ func (m *Manager) UpdateTopicRetention(ctx context.Context, name string, retenti
 	m.logger.Info("topic retention updated",
 		"topic", name,
 		"old_retention_ms", current.RetentionMs,
-		"new_retention_ms", retentionMs)
+		"requested_retention_ms", requested,
+		"new_retention_ms", retentionMs,
+		"keep_forever", retentionMs == 0)
 
 	return updated, nil
 }
 
 // UpdateTopicCaps changes the per-partition in-flight and acked-ahead
-// caps for an existing topic. Zero in either field inherits the
-// matching Config default. Effective immediately for all existing
-// in-flight shards via consumer.InFlight.RefreshCaps.
-func (m *Manager) UpdateTopicCaps(ctx context.Context, name string, maxInFlight, maxAckedAhead int64) (topic.Topic, error) {
+// caps of an existing topic. A nil cap keeps its stored value; zero
+// inherits the matching Config default. The unset cap is filled from
+// the record read under the topic lock after the leader barrier, never
+// from a caller's earlier read: on a just-elected leader whose replica
+// has not applied the previous leader's last change, or beside a
+// concurrent change of the other cap, that read is stale, and writing
+// it back would undo a committed change. Effective immediately for all
+// existing in-flight shards via consumer.InFlight.RefreshCaps.
+func (m *Manager) UpdateTopicCaps(ctx context.Context, name string, maxInFlight, maxAckedAhead *int64) (topic.Topic, error) {
 	if name == "" {
 		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalid)
 	}
-	if maxInFlight < 0 || maxAckedAhead < 0 {
+	if maxInFlight == nil && maxAckedAhead == nil {
+		return topic.Topic{}, fmt.Errorf("%w: at least one cap is required", ErrInvalid)
+	}
+	if (maxInFlight != nil && *maxInFlight < 0) || (maxAckedAhead != nil && *maxAckedAhead < 0) {
 		return topic.Topic{}, fmt.Errorf("%w: caps must be >= 0", ErrInvalid)
-	}
-	if maxInFlight == 0 {
-		maxInFlight = m.cfg.DefaultMaxInFlightPerPartition
-	}
-	if maxAckedAhead == 0 {
-		maxAckedAhead = m.cfg.DefaultMaxAckedAheadPerPartition
 	}
 	unlock := m.lockTopicName(name)
 	defer unlock()
+	if err := m.leaderBarrier(ctx); err != nil {
+		return topic.Topic{}, err
+	}
 
 	current, err := m.GetTopic(ctx, name)
 	if err != nil {
 		return topic.Topic{}, err
 	}
+	if err := authorizeManage(ctx, current); err != nil {
+		return topic.Topic{}, err
+	}
 
 	updated := current
-	updated.MaxInFlightPerPartition = maxInFlight
-	updated.MaxAckedAheadPerPartition = maxAckedAhead
+	updated.MaxInFlightPerPartition = resolveCap(maxInFlight, current.MaxInFlightPerPartition, m.cfg.DefaultMaxInFlightPerPartition)
+	updated.MaxAckedAheadPerPartition = resolveCap(maxAckedAhead, current.MaxAckedAheadPerPartition, m.cfg.DefaultMaxAckedAheadPerPartition)
 
 	if err := m.metastore.UpdateTopic(ctx, updated); err != nil {
 		if errors.Is(err, errs.ErrNotFound) {
@@ -182,9 +206,23 @@ func (m *Manager) UpdateTopicCaps(ctx context.Context, name string, maxInFlight,
 
 	m.logger.Info("topic caps updated",
 		"topic", name,
-		"max_in_flight_per_partition", maxInFlight,
-		"max_acked_ahead_per_partition", maxAckedAhead)
+		"max_in_flight_per_partition", updated.MaxInFlightPerPartition,
+		"max_acked_ahead_per_partition", updated.MaxAckedAheadPerPartition)
 	return updated, nil
+}
+
+// resolveCap is the value UpdateTopicCaps stores for one cap: the
+// requested one, or the stored one when the caller left it unset (nil),
+// with zero inheriting def.
+func resolveCap(requested *int64, stored, def int64) int64 {
+	v := stored
+	if requested != nil {
+		v = *requested
+	}
+	if v == 0 {
+		v = def
+	}
+	return v
 }
 
 // schemaPutAttempts bounds the re-read-and-retry loop in
@@ -208,6 +246,12 @@ const schemaPutAttempts = 3
 // The update is idempotent: a schema that is the same JSON value as
 // the current latest registers nothing and returns success, so a
 // client that retries after a lost response does not grow the history.
+// Neither does one that differs from the latest only in annotations
+// (title, description, examples, $comment, default, deprecated,
+// readOnly, writeOnly): it accepts exactly what the latest accepts. The
+// schema is stored compacted. A version that would take the topic's
+// history (or the cluster's schemas, counting every child's copy) past
+// its byte budget is refused with errs.ErrSchemaHistoryFull.
 //
 // baseVersion, when positive, is a precondition: the update is applied
 // only if the topic's current version is exactly baseVersion, and
@@ -224,11 +268,18 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 	if baseVersion < 0 {
 		return topic.Topic{}, fmt.Errorf("%w: schema_base_version must be >= 0", ErrInvalid)
 	}
+	rawSchema = canonicalSchema(rawSchema)
 	unlock := m.lockTopicName(name)
 	defer unlock()
+	if err := m.leaderBarrier(ctx); err != nil {
+		return topic.Topic{}, err
+	}
 
 	t, err := m.GetTopic(ctx, name)
 	if err != nil {
+		return topic.Topic{}, err
+	}
+	if err := authorizeManage(ctx, t); err != nil {
 		return topic.Topic{}, err
 	}
 	if t.IsChild() {
@@ -259,6 +310,10 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 				m.logger.Info("topic schema unchanged", "topic", name, "version", latest.Number)
 				return t, nil
 			}
+			if annotationOnlyChange(latest.Raw, rawSchema) {
+				m.logger.Info("annotation-only schema change ignored", "topic", name, "version", latest.Number)
+				return t, nil
+			}
 			if latest.Number >= metastore.MaxSchemaVersions {
 				return topic.Topic{}, fmt.Errorf("%w: %q already has %d schema versions, the maximum",
 					errs.ErrSchemaHistoryFull, name, latest.Number)
@@ -270,6 +325,10 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 		} else if baseVersion > 0 {
 			return topic.Topic{}, fmt.Errorf("%w: schema_base_version %d given but %q has no schema yet",
 				errs.ErrSchemaVersionConflict, baseVersion, name)
+		}
+		// The new version is appended to every child's copy as well.
+		if err := m.checkSchemaBudget(ctx, name, historyBytes(history), int64(len(rawSchema)), 1+len(t.Children)); err != nil {
+			return topic.Topic{}, err
 		}
 
 		err = m.metastore.PutSchema(ctx, name, version, rawSchema)

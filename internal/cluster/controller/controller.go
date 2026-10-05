@@ -18,9 +18,13 @@ type controllerStore interface {
 	IsLeader() bool
 	LeaderCh() <-chan bool
 	Barrier() error
+	// LeaderBarrier barriers once per leadership term (see
+	// metastore.Store.LeaderBarrier); nil on a follower.
+	LeaderBarrier(ctx context.Context) error
 	ListMembers() ([]metastore.Member, error)
 	RoutingMembersVersion() uint64
 	ListTopics(ctx context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error)
+	GetTopic(ctx context.Context, name string) (topic.Topic, error)
 	ListAssignments(topicName string) ([]metastore.Assignment, error)
 	LockAssignments() (unlock func())
 	AssignPartition(ctx context.Context, topicName string, partition int, ownerID string) error

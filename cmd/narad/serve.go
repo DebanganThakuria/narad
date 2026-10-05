@@ -26,6 +26,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
 	"github.com/debanganthakuria/narad/internal/platform/schema"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
 // runServe boots a Narad node: config, observability, metastore, broker,
@@ -331,6 +332,10 @@ type clusterStack struct {
 	mover      *cluster.MoveRunner
 }
 
+// The router answers the HTTP ingress's catch-up before a 404 for a
+// topic this node's replica does not have.
+var _ handlers.LeaderSyncer = (*cluster.Router)(nil)
+
 func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, bc *brokerComponents, reg prometheus.Registerer, log *slog.Logger) *clusterStack {
 	ctrl := controller.New(ms, controller.Config{})
 
@@ -340,9 +345,11 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 	// pooled streams from this node.
 	peerRPC := cluster.NewPeerClient(5*time.Second, cfg.Security.ClusterSecret)
 	peerRPC.SetMetrics(cluster.NewPrometheusRPCMetrics(reg))
+	peerRPC.SetLogger(log)
 
 	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), cfg.Security.ClusterSecret)
 	router.SetPeerClient(peerRPC)
+	router.SetLogger(log)
 	// The router clamps client-supplied long-poll waits (?wait=) on its
 	// forward and re-probe paths to the same ceiling the HTTP handlers use.
 	router.SetMaxConsumeWait(cfg.HTTP.MaxConsumeWait.D())

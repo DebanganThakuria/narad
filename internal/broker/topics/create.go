@@ -99,10 +99,10 @@ func (m *Manager) waitCreateGate(ctx context.Context) error {
 // If the startup create gate is armed (see ArmCreateGate), CreateTopic
 // waits for it to open before taking the per-name lock or touching disk.
 func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic, error) {
-	if err := validateTopicName(opts.Name); err != nil {
+	if err := validateNewTopicName(opts.Name); err != nil {
 		return topic.Topic{}, err
 	}
-	if err := m.resolveCreateAsChild(ctx, &opts); err != nil {
+	if err := validateCreateAsChild(opts); err != nil {
 		return topic.Topic{}, err
 	}
 	// Wait before lockTopicName so a gated create doesn't stall
@@ -110,17 +110,35 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	if err := m.waitCreateGate(ctx); err != nil {
 		return topic.Topic{}, err
 	}
-	unlock := m.lockTopicName(opts.Name)
+	// A create-as-child also locks the parent, so the parent read and
+	// checked below is the one the child is linked to.
+	unlock := m.lockTopicNames(opts.Name, opts.Parent)
 	defer unlock()
+	if err := m.leaderBarrier(ctx); err != nil {
+		return topic.Topic{}, err
+	}
+	if err := authorizeCreate(ctx, opts.Name); err != nil {
+		return topic.Topic{}, err
+	}
+	if err := m.checkNameFold(ctx, opts.Name); err != nil {
+		return topic.Topic{}, err
+	}
+	if err := m.resolveCreateAsChild(ctx, &opts); err != nil {
+		return topic.Topic{}, err
+	}
 
 	t, err := m.topicFromOpts(opts)
 	if err != nil {
 		return topic.Topic{}, err
 	}
 	if len(opts.Schema) > 0 {
+		opts.Schema = canonicalSchema(opts.Schema)
 		if err := m.schemas.ValidateDefinition(ctx, opts.Name, opts.Schema); err != nil {
 			return topic.Topic{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 		}
+	}
+	if err := m.checkCreateSchemaBudget(ctx, opts); err != nil {
+		return topic.Topic{}, err
 	}
 
 	// Defense in depth behind validateTopicName: refuse a name that would
@@ -132,6 +150,9 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	// leader-confirm it after a delete that happened while this node was
 	// down, and the disk-size metrics counted it.
 	if _, err := m.topicDir(opts.Name); err != nil {
+		return topic.Topic{}, err
+	}
+	if err := m.checkPlacement(); err != nil {
 		return topic.Topic{}, err
 	}
 
@@ -175,6 +196,7 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 		"topic", opts.Name,
 		"partitions", t.Partitions,
 		"retention_ms", t.RetentionMs,
+		"keep_forever", t.RetentionMs == 0,
 		"visibility_timeout_ms", t.VisibilityTimeoutMs,
 		"max_in_flight_per_partition", t.MaxInFlightPerPartition,
 		"max_acked_ahead_per_partition", t.MaxAckedAheadPerPartition)
@@ -182,11 +204,23 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	return t, nil
 }
 
-// resolveCreateAsChild validates the Parent/FanoutDelayMs pair and,
-// for a create-as-child, defaults Partitions to the parent's count —
-// matching counts make the anti-affine per-key guarantee exact. It
-// runs before anything is written, so every failure is a clean 4xx.
-func (m *Manager) resolveCreateAsChild(ctx context.Context, opts *CreateOpts) error {
+// checkCreateSchemaBudget applies the schema byte budgets to what a
+// create stores: its own first version, or, for a schema-less
+// create-as-child, the copy of the parent's history it adopts.
+func (m *Manager) checkCreateSchemaBudget(ctx context.Context, opts CreateOpts) error {
+	switch {
+	case len(opts.Schema) > 0:
+		return m.checkSchemaBudget(ctx, opts.Name, 0, int64(len(opts.Schema)), 1)
+	case opts.Parent != "":
+		return m.checkAdoptSchemaBudget(ctx, opts.Parent, opts.Name)
+	}
+	return nil
+}
+
+// validateCreateAsChild checks the Parent/FanoutDelayMs pair without
+// reading anything, so a malformed request is refused before it waits
+// for any lock.
+func validateCreateAsChild(opts CreateOpts) error {
 	if opts.Parent == "" {
 		if opts.FanoutDelayMs != 0 {
 			return fmt.Errorf("%w: fanout_delay_ms requires parent", ErrInvalid)
@@ -206,11 +240,27 @@ func (m *Manager) resolveCreateAsChild(ctx context.Context, opts *CreateOpts) er
 		return fmt.Errorf("%w: fanout_delay_ms (%d) exceeds the maximum of %d (1 year)",
 			ErrInvalid, opts.FanoutDelayMs, topic.MaxFanoutDelayMs)
 	}
+	return nil
+}
+
+// resolveCreateAsChild reads the parent of a create-as-child, checks
+// that the request identity manages it (a child receives every record
+// of its parent), and defaults Partitions to its count: matching counts
+// make the anti-affine per-key guarantee exact. It runs under both
+// names' locks, after the leader barrier, and before anything is
+// written, so every failure is a clean 4xx.
+func (m *Manager) resolveCreateAsChild(ctx context.Context, opts *CreateOpts) error {
+	if opts.Parent == "" {
+		return nil
+	}
 	parent, err := m.GetTopic(ctx, opts.Parent)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) || errors.Is(err, errs.ErrNotFound) {
 			return fmt.Errorf("%w: parent topic %q", ErrNotFound, opts.Parent)
 		}
+		return err
+	}
+	if err := authorizeManage(ctx, parent); err != nil {
 		return err
 	}
 	if opts.Partitions == 0 {
@@ -236,11 +286,8 @@ func (m *Manager) topicFromOpts(opts CreateOpts) (topic.Topic, error) {
 			ErrInvalid, partitions, maximum)
 	}
 
-	retentionMs, err := defaultedNonNegative(opts.RetentionMs, m.cfg.DefaultRetentionMs, "retention_ms")
+	retentionMs, err := m.resolveRetention(opts.RetentionMs)
 	if err != nil {
-		return topic.Topic{}, err
-	}
-	if err := checkRetentionFloor(retentionMs); err != nil {
 		return topic.Topic{}, err
 	}
 	visibilityMs, err := defaultedNonNegative(opts.VisibilityTimeoutMs, m.cfg.DefaultVisibilityTimeoutMs, "visibility_timeout_ms")
@@ -298,12 +345,36 @@ func defaultedNonNegative(v, def int64, field string) (int64, error) {
 	return v, nil
 }
 
+// resolveRetention turns a requested retention_ms into the value to
+// store: topic.RetentionKeepForever (-1) keeps records forever and
+// stores 0; 0 inherits Config.DefaultRetentionMs (keep forever only
+// when the operator default is 0); any other negative value is invalid;
+// the result must clear the one-hour floor.
+func (m *Manager) resolveRetention(requested int64) (int64, error) {
+	var retentionMs int64
+	switch {
+	case requested == topic.RetentionKeepForever:
+		retentionMs = 0
+	case requested < 0:
+		return 0, fmt.Errorf("%w: retention_ms must be >= 0 (0 = use the server default) or %d (keep forever)",
+			ErrInvalid, topic.RetentionKeepForever)
+	case requested == 0:
+		retentionMs = m.cfg.DefaultRetentionMs
+	default:
+		retentionMs = requested
+	}
+	if err := checkRetentionFloor(retentionMs); err != nil {
+		return 0, err
+	}
+	return retentionMs, nil
+}
+
 // checkRetentionFloor rejects a resolved retention below the uniform
 // one-hour minimum. The retained log is the fan-out buffer for lagging
 // children, so the floor guarantees at least an hour of child outage
 // tolerance before drop-behind can lose messages. Zero (keep forever)
-// passes: it can only arrive here via a keep-forever configured
-// default, which is above any floor.
+// passes: it arrives here from an explicit keep-forever request or a
+// keep-forever configured default, and is above any floor.
 func checkRetentionFloor(retentionMs int64) error {
 	if retentionMs != 0 && retentionMs < topic.MinRetentionMs {
 		return fmt.Errorf("%w: retention_ms (%d) is below the minimum of %d (1 hour)",
@@ -314,7 +385,7 @@ func checkRetentionFloor(retentionMs int64) error {
 
 func (m *Manager) rollbackCreatedTopic(ctx context.Context, topicName, id string, cause error) error {
 	var rollbackErrs []error
-	if err := m.metastore.DeleteTopic(ctx, topicName); err != nil && !errors.Is(err, errs.ErrNotFound) {
+	if err := m.deleteTopicMetadata(ctx, topicName); err != nil && !errors.Is(err, errs.ErrNotFound) {
 		rollbackErrs = append(rollbackErrs, fmt.Errorf("delete topic metadata: %w", err))
 	}
 	if err := m.purgeTopicLocked(ctx, topicName, id); err != nil {

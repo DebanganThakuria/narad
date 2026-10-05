@@ -110,6 +110,15 @@ const MaxChildrenPerParent = 108
 // due-time arithmetic comfortably inside int64.
 const MaxFanoutDelayMs int64 = 365 * 24 * 60 * 60 * 1000
 
+// RetentionKeepForever is the retention_ms value that asks the broker
+// to keep records forever on create or alter; it is stored as 0, which
+// is what a topic's RetentionMs of 0 means everywhere else (no age
+// limit). A requested retention of 0 means the operator's default
+// instead. The HTTP API spells keep forever as an explicit
+// "retention_ms": 0 and turns it into this value, which is also what
+// travels to the leader on a forwarded create or alter.
+const RetentionKeepForever int64 = -1
+
 // MinRetentionMs is the minimum effective retention for every topic
 // (one hour). The parent's retained log is the fan-out buffer for
 // lagging children, so the floor guarantees every child at least an
@@ -144,6 +153,11 @@ type Details struct {
 	// none. Every produce is validated against exactly this document.
 	Schema     json.RawMessage  `json:"schema,omitempty"`
 	Partitions []PartitionStats `json:"partition_stats"`
+	// Partial is true when some partitions' stats could not be read
+	// because their owner is down, unreachable or not assigned yet;
+	// those entries carry Status PartitionOwnerUnavailable and zero
+	// stats, so totals over the topic leave them out.
+	Partial bool `json:"partial,omitempty"`
 }
 
 // SchemaVersion is one entry of a topic's append-only schema history.
@@ -185,4 +199,38 @@ type PartitionStats struct {
 	// `parent`, comparing OwnerNode per index against the parent shows
 	// the anti-affine replica placement.
 	OwnerNode string `json:"owner_node,omitempty"`
+	// Status says whether the stats are real: PartitionStatusOK, or
+	// PartitionOwnerUnavailable for a placeholder whose stats are zero
+	// because its owner could not report them (see OwnerLiveness).
+	// Empty in a single node's own describe and in an owner's answer to
+	// the cluster stats RPC, which are always real; a topic GET stamps
+	// it on every partition.
+	Status string `json:"status,omitempty"`
+	// OwnerLiveness says why an unavailable partition's owner could not
+	// report: OwnerDead, OwnerUnreachable, OwnerUnknown or
+	// OwnerUnassigned. Empty for a partition whose stats are real.
+	OwnerLiveness string `json:"owner_liveness,omitempty"`
 }
+
+// Partition statuses of a topic GET (PartitionStats.Status).
+const (
+	// PartitionStatusOK: the stats are the owner's.
+	PartitionStatusOK = "ok"
+	// PartitionOwnerUnavailable: the stats are a zero placeholder; the
+	// owner could not report them (see PartitionStats.OwnerLiveness).
+	PartitionOwnerUnavailable = "owner_unavailable"
+)
+
+// Owner liveness of an unavailable partition (PartitionStats.OwnerLiveness).
+const (
+	// OwnerDead: the owner is a member currently marked dead.
+	OwnerDead = "dead"
+	// OwnerUnreachable: the owner is a live member, but its stats did
+	// not come back in time.
+	OwnerUnreachable = "unreachable"
+	// OwnerUnknown: the owner is not a member this node knows an
+	// address for.
+	OwnerUnknown = "unknown"
+	// OwnerUnassigned: the partition has no owner yet.
+	OwnerUnassigned = "unassigned"
+)

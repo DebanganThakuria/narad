@@ -181,7 +181,8 @@ no leader. Task guide: [Manage topics](../build/topics.md).
 Creates a topic and, with `parent`, links it as a fan-out child of
 an existing topic in the same call. The caller becomes the topic's
 [owner](glossary.md#owner). A field left out, or sent as `0`, takes
-the server default.
+the server default, except `retention_ms`, where `0` keeps messages
+forever and only leaving it out takes the default.
 
 **Grant needed:** `create` on the topic name. With `parent`, also ownership of the parent or `admin`.
 
@@ -189,9 +190,9 @@ the server default.
 
 | Field | Description |
 |---|---|
-| `name`<br>string, required | 1 to 255 characters from `A-Z a-z 0-9 . _ -`, not `.` or `..`. |
+| `name`<br>string, required | 1 to 200 characters from `A-Z a-z 0-9 . _ -`, not `.` or `..`, and not differing from an existing topic's name only in letter case (`409`). Topics an earlier release created with names up to 255 characters keep working. |
 | `partitions`<br>integer, optional | At least 3 and at most the server's maximum (108 by default). Defaults to the server default (3), or to the parent's count when `parent` is set. It can grow later, never shrink. Both server settings are in the [Configuration reference](configuration.md#topic-defaults). |
-| `retention_ms`<br>integer, optional | How long a message is kept after it is written, whether or not it was consumed. At least 3,600,000 (1 hour). Defaults to the server default ([Configuration reference](configuration.md#topic-defaults)): 7 days in the binary, 12 hours in the Helm chart. |
+| `retention_ms`<br>integer, optional | How long a message is kept after it is written, whether or not it was consumed. At least 3,600,000 (1 hour), or `0` to keep messages forever; a negative value gets `400`. Left out, it takes the server default ([Configuration reference](configuration.md#topic-defaults)): 7 days in the binary, 12 hours in the Helm chart. |
 | `visibility_timeout_ms`<br>integer, optional, default `30000` | How long a consumer's lease lasts before the message is delivered again. Defaults to the server default ([Configuration reference](configuration.md#topic-defaults)). Fixed after creation. |
 | `max_in_flight_per_partition`<br>integer, optional, default `1024` | Most messages of one partition leased at once. At the cap, consumes find nothing new in that partition until a lease ends. Defaults to the server default ([Configuration reference](configuration.md#topic-defaults)). |
 | `max_acked_ahead_per_partition`<br>integer, optional, default `1024` | Most acks one partition holds above its oldest unacked message. At the cap the partition delivers no new messages until that message is acked. Defaults to the server default ([Configuration reference](configuration.md#topic-defaults)). |
@@ -205,14 +206,14 @@ the server default.
 | Status | Meaning |
 |---|---|
 | [`201`](status-codes.md#status-201) | Created. The body is the new topic. |
-| [`400`](status-codes.md#status-400) | A field is invalid, the name is not allowed, or the schema cannot be registered. |
+| [`400`](status-codes.md#status-400) | A field is invalid, the name is not allowed, or the schema cannot be registered (unreleased, that includes a schema whose validation would cost too much). |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
-| [`403`](status-codes.md#status-403) | No `create` grant on the name, or no right to manage `parent`. |
-| [`404`](status-codes.md#status-404) | `parent` does not exist. |
-| [`409`](status-codes.md#status-409) | The topic exists, or `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold). |
+| [`403`](status-codes.md#status-403) | No `create` grant on the name, or no right to manage `parent`, as the node that answers or the cluster leader sees it. |
+| [`404`](status-codes.md#status-404) | `parent` does not exist, also after the answering node caught up with the leader. |
+| [`409`](status-codes.md#status-409) | The topic exists, a topic exists whose name differs only in letter case (the error names it), `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold), or (unreleased) the schema, or the parent's schema history a child adopts, would pass a schema byte budget. |
 | [`413`](status-codes.md#status-413) | The body is over 1 MiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
-| [`503`](status-codes.md#status-503) | The cluster has no leader to write the topic. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the topic, the answering node could not reach the leader to confirm `parent`, or (unreleased) every live node is being decommissioned, so no node can take the new partitions; nothing was written. |
 
 **Response body (`201`)**: a [Topic](#topic-object).
 
@@ -322,6 +323,15 @@ Returns the topic, its current schema and statistics for each
 partition. The node that answers asks every partition's owner for
 its statistics.
 
+**Unreleased:** when some partitions' owners are down, the answer
+is still `200`. The partitions that could be read carry their
+statistics and `status` `ok`; each other one is a placeholder with
+zero statistics, `status` `owner_unavailable` and the owner's
+`owner_liveness`, and the body carries `partial: true`. Leave the
+placeholders out of any total. An owner that does not answer within
+2 seconds counts as `unreachable`. A v3.0.1 node answers `421`
+instead.
+
 **Grant needed:** Any grant that matches the topic name, ownership, or `admin`.
 
 **Parameters**
@@ -340,7 +350,8 @@ its statistics.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No grant on the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist. |
-| [`421`](status-codes.md#status-421) | The owner of one of the topic's partitions could not be found or refused to answer. |
+| [`421`](status-codes.md#status-421) | From a v3.0.1 node, the owner of one of the topic's partitions could not be found or refused to answer. An upgraded node answers `200` with `partial` instead. |
+| [`503`](status-codes.md#status-503) | The answering node could not read its own copy of the cluster metadata (for example while it catches up after a restart). Retry. |
 
 **Response body (`200`)**: every field of a [Topic](#topic-object), plus:
 
@@ -349,6 +360,7 @@ its statistics.
 | `schema_version`<br>integer | Current schema version, `0` without a schema. |
 | `schema`<br>JSON | The current schema document. Absent without a schema. |
 | `partition_stats`<br>array of [Partition statistics](#partition-stats-object) | One entry per partition, or only the one `partition` asked for. |
+| `partial`<br>boolean | **Unreleased.** `true` when some entries are placeholders whose owner could not report (`status` `owner_unavailable`). Absent otherwise. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" "$NARAD/v1/topics/orders?partition=1"
@@ -356,7 +368,7 @@ curl -i -u "$AUTH" "$NARAD/v1/topics/orders?partition=1"
 
 ```http title="Response"
 HTTP/1.1 200 OK
-Content-Length: 456
+Content-Length: 470
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 
@@ -382,7 +394,8 @@ Date: Mon, 28 Sep 2026 19:31:43 GMT
       "high_watermark": 2,
       "size_bytes": 166,
       "oldest_segment_at": 1790623903,
-      "owner_node": "narad-0"
+      "owner_node": "narad-0",
+      "status": "ok"
     }
   ]
 }
@@ -414,7 +427,7 @@ you need all or nothing.
 
 | Field | Description |
 |---|---|
-| `retention_ms`<br>integer, optional | New retention. At least 3,600,000 (1 hour); `0` sets the server default. |
+| `retention_ms`<br>integer, optional | New retention. At least 3,600,000 (1 hour), or `0` to keep messages forever; a negative value gets `400`. To return to the server default, send its value. |
 | `max_in_flight_per_partition`<br>integer, optional | New in-flight cap; `0` sets the server default. A cap left out keeps its value. |
 | `max_acked_ahead_per_partition`<br>integer, optional | New acked-ahead cap; `0` sets the server default. A cap left out keeps its value. |
 | `partitions`<br>integer, optional | New partition count, larger than the current one and at most the server's maximum (108 by default). New keys may then map to other partitions. |
@@ -428,12 +441,12 @@ you need all or nothing.
 | [`200`](status-codes.md#status-200) | Changed. The body is the topic after the change. |
 | [`400`](status-codes.md#status-400) | No field given, a value is invalid, `partitions` is not larger than the current count, or the new schema is not compatible. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
-| [`403`](status-codes.md#status-403) | Not the owner and not `admin`. |
-| [`404`](status-codes.md#status-404) | The topic does not exist. |
-| [`409`](status-codes.md#status-409) | `schema_base_version` is not the current version, the history holds 1000 versions, the topic is a child whose schema its parent manages, or the new retention is too short for a delay child. |
+| [`403`](status-codes.md#status-403) | Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. |
+| [`404`](status-codes.md#status-404) | The topic does not exist, also after the answering node caught up with the leader. |
+| [`409`](status-codes.md#status-409) | `schema_base_version` is not the current version, the history holds 1000 versions or (unreleased) the new version would take it past 4 MiB or the cluster's schemas past 256 MiB, the topic is a child whose schema its parent manages, or the new retention is too short for a delay child. |
 | [`413`](status-codes.md#status-413) | The body is over 1 MiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
-| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, the answering node could not reach the leader to confirm a topic it does not have, or (unreleased) a partition increase found every live node being decommissioned, so no node can take the new partitions; nothing was changed. |
 
 **Response body (`200`)**: a [Topic](#topic-object).
 
@@ -487,9 +500,9 @@ it next starts.
 |---|---|
 | [`204`](status-codes.md#status-204) | Deleted. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
-| [`403`](status-codes.md#status-403) | Not the owner and not `admin`. |
-| [`404`](status-codes.md#status-404) | The topic does not exist. |
-| [`503`](status-codes.md#status-503) | The cluster has no leader to write the delete. |
+| [`403`](status-codes.md#status-403) | Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. |
+| [`404`](status-codes.md#status-404) | The topic does not exist, also after the answering node caught up with the leader. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the delete, or the answering node could not reach the leader to confirm a topic it does not have. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" -X DELETE "$NARAD/v1/topics/orders-audit"
@@ -597,11 +610,11 @@ instead.
 | [`200`](status-codes.md#status-200) | Attached. The body is the parent topic. |
 | [`400`](status-codes.md#status-400) | `child` is missing, the two names are the same, or `delay_ms` is out of range. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
-| [`403`](status-codes.md#status-403) | The caller does not manage both topics. |
-| [`404`](status-codes.md#status-404) | The parent or the child does not exist. |
-| [`409`](status-codes.md#status-409) | The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, or the delay is longer than the parent's retention can hold. |
+| [`403`](status-codes.md#status-403) | The caller does not manage both topics, as the node that answers or the cluster leader sees them. |
+| [`404`](status-codes.md#status-404) | The parent or the child does not exist, also after the answering node caught up with the leader. |
+| [`409`](status-codes.md#status-409) | The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, the delay is longer than the parent's retention can hold, or (unreleased) the copy of the parent's schema history the child adopts would pass the cluster's schema byte budget. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
-| [`503`](status-codes.md#status-503) | No leader, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry. |
+| [`503`](status-codes.md#status-503) | No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry. |
 
 **Response body (`200`)**: a [Topic](#topic-object).
 
@@ -712,9 +725,9 @@ history it already has and becomes a standalone topic again.
 |---|---|
 | [`204`](status-codes.md#status-204) | Detached. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
-| [`403`](status-codes.md#status-403) | The caller manages neither topic. |
-| [`404`](status-codes.md#status-404) | A topic does not exist, or the two are not linked. |
-| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change. |
+| [`403`](status-codes.md#status-403) | The caller manages neither topic, as the node that answers or the cluster leader sees them. |
+| [`404`](status-codes.md#status-404) | Neither topic exists after the answering node caught up with the leader, or the two are not linked. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, or the answering node could not reach the leader to confirm the topics. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" -X DELETE \
@@ -769,7 +782,7 @@ The message, 1 byte to 1 MiB. Content types: `application/json`, `application/oc
 | Status | Meaning |
 |---|---|
 | [`202`](status-codes.md#status-202) | Accepted and synced to disk. The body is empty. |
-| [`400`](status-codes.md#status-400) | Empty body, `partition` out of range, `key` or `partition` given twice, or the body fails the topic's schema. |
+| [`400`](status-codes.md#status-400) | Empty body, `partition` out of range, `key` or `partition` given twice, or the body fails the topic's schema (unreleased, that includes a body nested deeper than 256 levels). |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No `produce` grant on the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist. |
@@ -778,6 +791,7 @@ The message, 1 byte to 1 MiB. Content types: `application/json`, `application/oc
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`429`](status-codes.md#status-429) | Too many produces in flight for this user on this node, only when the operator set a produce cap ([Configuration reference](configuration.md#http)). |
 | [`500`](status-codes.md#status-500) | The node could not write to its ingress WAL. It answers every produce this way until it restarts. |
+| [`503`](status-codes.md#status-503) | Unreleased. The topic has a schema and every schema validation slot on the node stayed busy for 5 seconds; nothing was checked or stored. Retry, preferably through another node. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" -X POST \
@@ -836,7 +850,7 @@ At most 1 MiB in total.
 | Status | Meaning |
 |---|---|
 | [`202`](status-codes.md#status-202) | Every message accepted and synced to disk. |
-| [`400`](status-codes.md#status-400) | No messages, more than 100, a bad encoding, an empty payload, a message the schema refuses, or `key` or `partition` in the query. |
+| [`400`](status-codes.md#status-400) | No messages, more than 100, a bad encoding, an empty payload, a message the schema refuses (one nested deeper than 256 levels included), or `key` or `partition` in the query. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No `produce` grant on the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist, or the node runs v3.0.1 or earlier. |
@@ -845,6 +859,7 @@ At most 1 MiB in total.
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`429`](status-codes.md#status-429) | The batch does not fit this user's produce cap on this node (only when the cap is set). A batch counts as its message count, clamped to the cap. |
 | [`500`](status-codes.md#status-500) | The node could not write to its ingress WAL. |
+| [`503`](status-codes.md#status-503) | The topic has a schema and every schema validation slot on the node stayed busy for 5 seconds; nothing was checked or stored. Retry, preferably through another node. |
 
 **Response body (`202`)**
 
@@ -1695,6 +1710,8 @@ Bodies that several endpoints share.
 | `size_bytes`<br>integer | Bytes on disk. |
 | `oldest_segment_at`<br>integer | Time of the oldest segment, Unix seconds. Absent when unknown. |
 | `owner_node`<br>string | ID of the node that owns the partition. |
+| `status`<br>string: `ok`, `owner_unavailable` | **Unreleased.** `ok` when the statistics are the owner's; `owner_unavailable` for a placeholder with zero statistics, because the owner could not report them. Never add a placeholder's numbers to a total. |
+| `owner_liveness`<br>string: `dead`, `unreachable`, `unknown`, `unassigned` | **Unreleased.** Why an `owner_unavailable` partition's owner could not report: `dead` (marked dead), `unreachable` (alive, but its statistics did not come back within 2 seconds), `unknown` (no member with an address), `unassigned` (no owner yet). Absent for `ok`. |
 
 ### Message object {#message-object}
 

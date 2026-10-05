@@ -106,6 +106,13 @@ type Store struct {
 	logs raft.LogStore
 	log  *slog.Logger
 
+	// barrierTerm is the Raft term in which LeaderBarrier last
+	// succeeded (0: never); barrierMu makes concurrent first callers of
+	// a term share one barrier. leaderBarriers counts the barriers run.
+	barrierMu      sync.Mutex
+	barrierTerm    atomic.Uint64
+	leaderBarriers atomic.Uint64
+
 	// opened is when New began; a node that has never heard from a
 	// leader reports its last contact as this old.
 	opened time.Time
@@ -150,6 +157,9 @@ func New(cfg Config) (*Store, error) {
 			return nil, fmt.Errorf("%w (%v)", stopped, err)
 		}
 		return nil, err
+	}
+	if cfg.Log != nil {
+		placementLogger.Store(cfg.Log)
 	}
 	s := &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore, logs: logStore, log: cfg.startupLog(), opened: opened, id: raft.ServerID(cfg.NodeID)}
 	s.health = newRaftHealth(r, cfg.NodeID)
@@ -362,12 +372,20 @@ func (s *Store) apply(ctx context.Context, op opCode, payload any) error {
 // of 500. These all mean "no committed decision right now" — expected
 // during elections, partitions, and rolling restarts — not a bug. The
 // original error is wrapped so logs keep the specific cause.
+//
+// Two of them also leave the entry's fate open, and carry
+// errs.ErrOutcomeUnknown: ErrLeadershipLost is answered for an entry the
+// leader appended and could not see commit (the next leader may commit
+// it), and ErrRaftShutdown can be answered for an entry that was
+// already appended when Raft stopped. The others are answered before
+// the entry is appended, so nothing of it can apply.
 func classifyRaftError(err error) error {
 	switch {
+	case errors.Is(err, raft.ErrLeadershipLost),
+		errors.Is(err, raft.ErrRaftShutdown):
+		return fmt.Errorf("%w: %w: %v", errs.ErrUnavailable, errs.ErrOutcomeUnknown, err)
 	case errors.Is(err, raft.ErrNotLeader),
-		errors.Is(err, raft.ErrLeadershipLost),
 		errors.Is(err, raft.ErrLeadershipTransferInProgress),
-		errors.Is(err, raft.ErrRaftShutdown),
 		errors.Is(err, raft.ErrEnqueueTimeout):
 		return fmt.Errorf("%w: %v", errs.ErrUnavailable, err)
 	default:

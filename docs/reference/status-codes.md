@@ -89,7 +89,7 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 
 - JSON that does not parse, a field the endpoint does not know, or a value out of range (a partition count under 3, a retention under one hour, a negative number).
 - A produce with an empty body, a `partition` the topic does not have, or a `key` or `partition` given twice.
-- A produce whose body the topic's schema refuses, or a schema that cannot be registered or is not compatible with the current version ([Schema validation rules](schema-rules.md)).
+- A produce whose body the topic's schema refuses, or a schema that cannot be registered or is not compatible with the current version ([Schema validation rules](schema-rules.md)). Since **Unreleased** that includes a produce body nested deeper than 256 levels (`payload nests deeper than 256 levels`), and a schema whose validation would cost too much: a subschema reached through more than 64 validation paths, or a pattern that costs more than 32 steps per byte ([Schema documents](schema-rules.md#registration)).
 - An ack, extend or nack without `receipt_handle`, or with a handle that cannot be decoded (a handle is `partition:offset:nonce`).
 - A consume with a bad `wait`, `partition`, `offset` or `max`, a replay (`offset`) without `partition`, or `max` together with `offset`.
 - A batch consume (`max`) without an `X-Narad-Client` header ([Required headers](../build/connect.md#required-headers)).
@@ -116,6 +116,8 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 
 **Meaning:** the credentials are right, but the user may not do this. The message says what is missing, for example `produce not allowed on this topic`, `no grant on this topic`, `only the topic owner or an admin may modify this topic`, or `admin privileges required`. The user routes also answer `403` for the rules that protect accounts: you cannot change your own grants, delete your own account, give a grant you do not hold, or touch the root admin's grants.
 
+A topic change is checked twice: by the node that receives it, and again by the cluster leader under the topic's lock, against the topic as it stands there. The leader's refusal reads `only the owner of topic "<name>" or an admin may modify it` (or names the fan-out link, or the missing create grant), and it is what you get when the topic was deleted and created again by someone else after your request was let in. `caller unknown to the leader` means the leader has no record of the user.
+
 **What to do:** ask an admin for the grant, or send the request as the topic's owner. Which grant each route needs is in [Access model and grants](access-model.md).
 
 **Go SDK:** `ErrForbidden`.
@@ -126,7 +128,7 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 
 **Meaning:** one of these:
 
-- The topic, user, parent, child or cluster member does not exist, or the two topics named in a detach are not linked.
+- The topic, user, parent, child or cluster member does not exist, or the two topics named in a detach are not linked. For a change to a topic by a user without `admin`, a topic the receiving node does not have is looked up again once that node has caught up with the cluster leader, so the `404` holds for the whole cluster.
 - The path is not a Narad route. This answer is plain text, `404 page not found`.
 - A batch produce (**Unreleased**) reached a node running v3.0.1 or earlier, which does not have the route.
 - `/metrics` on the API port of a node that serves metrics on their own listener (`http.metrics_addr`).
@@ -151,11 +153,12 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 
 **Meaning:** the request conflicts with the current state:
 
-- The topic or user already exists.
+- The topic or user already exists, or a topic exists whose name differs from the requested one only in letter case (`Orders` next to `orders`): on a case-insensitive filesystem both would share one directory. The message names the existing topic.
 - The attach breaks a [fan-out](glossary.md#fan-out-child) rule: a child has exactly one parent and no children of its own, and a parent has at most 108 children.
 - The child's schema history is not identical to the parent's.
 - A delay child's delay is longer than the parent's retention can hold, on attach, on create with `parent`, or when the parent's retention shrinks.
 - `schema_base_version` is not the current schema version, the topic already holds 1000 schema versions, or the topic is an attached child whose schema its parent manages.
+- A schema change, a create with a schema, or a create-as-child or attach that adopts a parent's schema history would take the topic's stored history past 4 MiB, or every schema in the cluster past 256 MiB (**Unreleased**). The message names the budget and what is stored, and says when the history (or the cluster) is already over the budget, stored before it applied, so that no new version fits ([Compatibility](schema-rules.md#compatibility)).
 - A produce to a delay child, which only its parent can feed.
 
 **What to do:** read the error message and the current state. For a schema conflict, read the current `schema_version` and retry with it as the base. For a create that must succeed once, treat "already exists" as success when the existing topic has the settings you wanted.
@@ -196,9 +199,9 @@ A handle carries no topic, so a handle from another topic, or one naming a parti
 
 ## 421 Misdirected Request {#status-421}
 
-**Where:** get a topic; ack, extend and nack; a replay, or a consume pinned with `partition`.
+**Where:** ack, extend and nack; a replay, or a consume pinned with `partition`; get a topic, from a v3.0.1 node only.
 
-**Meaning:** `this node does not own the requested partition`. For get a topic, the owner of one of the topic's partitions could not be found or refused to answer. For the others, the partition moved to another node while the request was served.
+**Meaning:** `this node does not own the requested partition`. The partition moved to another node while the request was served. From a v3.0.1 node, get a topic also answers `421` when the owner of one of the topic's partitions could not be found or refused to answer; an upgraded node (**Unreleased**) answers `200` instead, with `partial: true` and the unavailable partitions marked `owner_unavailable` ([Get a topic](http-api.md#get-topic)).
 
 **What to do:** retry with backoff. If get a topic keeps answering `421` from every node, see [Troubleshooting](../operate/troubleshooting.md#status-421).
 
@@ -273,9 +276,12 @@ The error message says which limit was hit, in the same order:
 **Where:**
 
 - Ack, extend and nack, a replay, or a consume pinned with `partition`, when the partition's owner is down: `partition owner is down; retry later` (plain text).
-- Any change to cluster metadata (topics, fan-out links, users, decommission) while the cluster has no Raft leader or the leader cannot be reached.
+- Any change to cluster metadata (topics, fan-out links, users, decommission) while the cluster has no Raft leader or the leader cannot be reached, including a change by a user without `admin` naming a topic the receiving node does not have, when that node cannot catch up with the leader to confirm it. A leader elected moments ago may also answer `503` once while it finishes applying the log.
+- A change to cluster metadata whose Raft leader lost its leadership, or stopped, while committing it (**Unreleased**): `control plane temporarily unavailable: the change may still be applied, read it back before retrying: ...`. A later leader may still commit the change, so read the record back before you retry; a retried create of a topic that did land answers `409`, a retried delete `404`.
 - `/readyz` while the node should not take traffic, and `/healthz` once the node is shutting down.
-- Never on a produce: a `503` there comes from a proxy in front of Narad ([Troubleshooting](../operate/troubleshooting.md#produce-503)).
+- A topic create or partition increase while every live node is being decommissioned (**Unreleased**): `every live member is being decommissioned, so no member can take new partitions; ...`. New partitions are never placed on a draining node. The request succeeds once a node that is not draining is alive: wait for restarting nodes, cancel a decommission, or add a node ([Decommission a node](../operate/scaling.md#decommission)).
+- Get a topic (**Unreleased**), when the answering node cannot read its own copy of the cluster metadata, for example while it catches up after a restart. A partition owner being down is not a `503`: the answer is a `200` with `partial: true`.
+- A produce to a topic with a schema whose validation found no free slot on the node within 5 seconds (**Unreleased**): `schema: validation capacity busy, retry`. The payload was not checked or stored; retry it, preferably through another node ([Validation capacity](schema-rules.md#validation-capacity)). Any other `503` on a produce comes from a proxy in front of Narad ([Troubleshooting](../operate/troubleshooting.md#produce-503)).
 
 **Meaning:** the cluster cannot do this right now. Messages stored on a node that is down wait for it to come back; see the [failure matrix](../understand/delivery-contract.md#failure-matrix).
 

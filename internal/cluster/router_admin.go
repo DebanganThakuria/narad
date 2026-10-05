@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,14 +11,42 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
+	"github.com/debanganthakuria/narad/internal/security"
 )
 
 // writeLeaderForwardError answers a failed control-plane forward to the
 // leader with 503, not 502: the leader was momentarily unreachable
 // (election, partition, rolling restart), which is retryable — not a
 // bad gateway the client should treat as broken.
+//
+// The answer carries no decision of the leader's: the forward may have
+// been applied there before its reply was lost, or the client went away
+// while the leader ran it. A writer that records outcomes (the topic
+// handlers' audit writer) is told so first, so the change is audited as
+// unknown rather than failed.
 func writeLeaderForwardError(w http.ResponseWriter, err error) {
+	if m, ok := w.(undecidedMarker); ok {
+		m.MarkUndecided()
+	}
 	http.Error(w, err.Error(), http.StatusServiceUnavailable)
+}
+
+// undecidedMarker is a response writer that records an answer written
+// without the leader's decision.
+type undecidedMarker interface {
+	MarkUndecided()
+}
+
+// forwardActor is the caller a forwarded topic write is made for: the
+// authenticated user of the request, or "" when security is off. The
+// leader looks it up in its own replica and re-checks that user's
+// rights.
+func forwardActor(ctx context.Context) string {
+	if id, ok := security.IdentityFrom(ctx); ok {
+		return id.Username
+	}
+	return ""
 }
 
 // createForwardTimeout bounds a follower's create forward to the cluster
@@ -38,7 +67,7 @@ func (rt *Router) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, _
 	}
 	createCtx, cancel := longWaitRPCContext(ctx, createForwardTimeout)
 	defer cancel()
-	res, err := rt.peer.CreateTopic(createCtx, memberAddr, body)
+	res, err := rt.peer.CreateTopic(createCtx, memberAddr, body, forwardActor(ctx))
 	return rt.writeForwardedWrite(ctx, w, memberAddr, res, err)
 }
 
@@ -48,7 +77,7 @@ func (rt *Router) RouteAlterTopic(ctx context.Context, w http.ResponseWriter, _ 
 	if memberAddr == "" {
 		return false
 	}
-	res, err := rt.peer.AlterTopic(ctx, memberAddr, topicName, body)
+	res, err := rt.peer.AlterTopic(ctx, memberAddr, topicName, body, forwardActor(ctx))
 	return rt.writeForwardedWrite(ctx, w, memberAddr, res, err)
 }
 
@@ -66,7 +95,7 @@ func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, _
 	}
 	deleteCtx, cancel := longWaitRPCContext(ctx, deleteTopicForwardTimeout)
 	defer cancel()
-	res, err := rt.peer.DeleteTopic(deleteCtx, memberAddr, topicName)
+	res, err := rt.peer.DeleteTopic(deleteCtx, memberAddr, topicName, forwardActor(ctx))
 	return rt.writeForwardedWrite(ctx, w, memberAddr, res, err)
 }
 
@@ -81,18 +110,32 @@ func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, _
 // client's own patience), turning an already-committed delete into a 503
 // whose retry then 404s. The returned error joins every member that
 // failed; a nil error means all live members purged.
+//
+// The fan-out is detached from ctx's cancellation and deadline: the
+// delete it follows has already committed, so a client that
+// disconnects or times out must not cancel the purge on every other
+// member, which then kept the deleted topic's files until it restarted.
+// It runs under its own bounded budget instead (purgeBroadcastBudget).
+// A member whose replica has not applied the delete yet answers
+// purge_deferred, and one that cannot be reached fails in transport;
+// each is asked again with a backoff, at most purgeMaxAttempts times in
+// all, inside the same budget. Members that still owe the purge at the
+// end are logged once, at error, with the topic, the incarnation and
+// their IDs: their copies stay until their startup orphan sweep.
 func (rt *Router) BroadcastDeleteTopic(ctx context.Context, topicName, id string) error {
 	members, err := rt.store.ListMembers()
 	if err != nil {
+		rt.logger.Error("topic purge fan-out could not list the members; their copies stay until their startup orphan sweep reclaims them",
+			"topic", topicName, "incarnation", id, "err", err)
 		return err
 	}
 	// One budget for the lot: a purge legitimately waits up to
 	// purgeApplyWaitTimeout on the remote for its replica to reflect the
 	// deletion, and only THEN starts the purge work itself, which can take
 	// multiple seconds for a topic with many partition directories. Budget
-	// both phases (plus longWaitRPCContext's transfer grace) so the
-	// deadline doesn't expire on a purge that is about to succeed.
-	purgeCtx, cancel := longWaitRPCContext(ctx, purgeApplyWaitTimeout+purgeExecutionAllowance)
+	// both phases (plus the transfer grace) so the deadline doesn't expire
+	// on a purge that is about to succeed.
+	purgeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), purgeBroadcastBudget)
 	defer cancel()
 
 	// Attempt every live member even if one fails: a single unreachable
@@ -109,18 +152,85 @@ func (rt *Router) BroadcastDeleteTopic(ctx context.Context, topicName, id string
 	var wg sync.WaitGroup
 	for i, member := range targets {
 		wg.Go(func() {
-			res, err := rt.peer.PurgeTopic(purgeCtx, member.Addr, topicName, id)
-			if err != nil {
-				results[i] = fmt.Errorf("purge %s on %s: %w", topicName, member.ID, err)
-				return
-			}
-			if res.Status < http.StatusOK || res.Status >= http.StatusMultipleChoices {
-				results[i] = fmt.Errorf("purge %s returned status %d for %s", topicName, res.Status, member.ID)
-			}
+			results[i] = rt.purgeMember(purgeCtx, member, topicName, id)
 		})
 	}
 	wg.Wait()
+
+	var owing []string
+	for i, err := range results {
+		if err != nil {
+			owing = append(owing, targets[i].ID)
+		}
+	}
 	// Joined in member order so the message is stable regardless of
 	// which purge finished first.
-	return errors.Join(results...)
+	joined := errors.Join(results...)
+	if joined != nil {
+		rt.logger.Error("topic purge unfinished on some members; their copies stay until their startup orphan sweep reclaims them",
+			"topic", topicName, "incarnation", id, "members", owing, "err", joined)
+	}
+	return joined
+}
+
+// purgeBroadcastBudget bounds the whole purge fan-out of one delete: the
+// remote's replica apply wait, the purge work itself and the transfer
+// grace. Retries of a deferred or unreachable member happen inside it.
+const purgeBroadcastBudget = purgeApplyWaitTimeout + purgeExecutionAllowance + longWaitRPCGrace
+
+// purgeMaxAttempts caps how many times the fan-out asks one member to
+// purge, and purgeRetryBackoff is the pause before the second attempt
+// (doubled before each later one).
+const (
+	purgeMaxAttempts  = 3
+	purgeRetryBackoff = 250 * time.Millisecond
+)
+
+// purgeMember asks one member to purge the deleted incarnation and
+// returns why it did not, if it did not. A member that answered
+// purge_deferred (its replica had not applied the delete) or could not be
+// reached is asked again after a backoff while attempts and the budget
+// last. Any other answer is final: a 2xx is a purge that ran (a 3.0.x
+// member answers 204 also when it skipped, as it always has), and any
+// other status is a refusal another attempt would not change.
+func (rt *Router) purgeMember(ctx context.Context, member metastore.Member, topicName, id string) error {
+	backoff := purgeRetryBackoff
+	for attempt := 1; ; attempt++ {
+		res, err := rt.peer.PurgeTopic(ctx, member.Addr, topicName, id)
+		var failure error
+		switch {
+		case err != nil:
+			failure = fmt.Errorf("purge %s on %s: %w", topicName, member.ID, err)
+		case res.Status >= http.StatusOK && res.Status < http.StatusMultipleChoices:
+			return nil
+		case purgeDeferred(res):
+			failure = fmt.Errorf("purge %s deferred by %s: its replica had not applied the delete", topicName, member.ID)
+		default:
+			return fmt.Errorf("purge %s returned status %d for %s", topicName, res.Status, member.ID)
+		}
+		if attempt >= purgeMaxAttempts {
+			return failure
+		}
+		select {
+		case <-ctx.Done():
+			return failure
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+}
+
+// purgeDeferredCode is the code of a purge a member deferred because its
+// replica still showed the incarnation (see handlePurgeTopic).
+const purgeDeferredCode = "purge_deferred"
+
+// purgeDeferred reports whether res is a member's purge_deferred answer.
+func purgeDeferred(res nodewire.Response) bool {
+	if res.Status != http.StatusServiceUnavailable {
+		return false
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	return json.Unmarshal(res.Body, &body) == nil && body.Code == purgeDeferredCode
 }
