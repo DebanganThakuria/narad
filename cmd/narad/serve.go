@@ -212,7 +212,7 @@ func runServe(args []string) error {
 		runClusterJoinWhenLeaderless(ctx, ms, cs.peerRPC, cfg, nodeID, joinOnly, fresh, log)
 	})
 	wg.Go(func() { watchMetastoreHalt(ctx, ms, failServe) })
-	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, cs.peerRPC, log) })
+	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, cs.peerRPC, m, log) })
 	wg.Go(func() { cs.controller.Run(ctx) })
 	// Re-registers consume tokens with owners that come back or are
 	// newly assigned while consumers are parked here.

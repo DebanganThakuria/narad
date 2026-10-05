@@ -69,6 +69,7 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 	m.IncError("test", "kind")
 	m.BootDurationSeconds.Set(0.1)
 	m.PollerLastSuccess.WithLabelValues("vitals").Set(1)
+	m.RecordMemberHeartbeat(0, time.Now())
 
 	want := []string{
 		"narad_http_requests_total",
@@ -109,6 +110,8 @@ func TestNewRegistersAllCollectors(t *testing.T) {
 		"narad_errors_total",
 		"narad_boot_duration_seconds",
 		"narad_poller_last_success_timestamp_seconds",
+		"narad_member_heartbeat_failures",
+		"narad_member_heartbeat_last_success_timestamp_seconds",
 	}
 
 	mfs, err := reg.Gather()
