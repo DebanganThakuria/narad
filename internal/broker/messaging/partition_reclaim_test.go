@@ -448,3 +448,73 @@ func TestReclaimLeavesASuccessorOpenedDuringTheReclaim(t *testing.T) {
 		})
 	}
 }
+
+// recordHookStore runs hook once, inside the first GetTopic, before the
+// read.
+type recordHookStore struct {
+	*metastore.Store
+	mu   sync.Mutex
+	hook func()
+}
+
+func (s *recordHookStore) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
+	s.mu.Lock()
+	hook := s.hook
+	s.hook = nil
+	s.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return s.Store.GetTopic(ctx, name)
+}
+
+// A reclaim compares the topic marker, under the topic's guard, with the
+// incarnation it read, so it must read that incarnation before it checks
+// the assignment. Read the other way round, a delete and recreate
+// applied between the two reads, with the successor's partition placed
+// on this node and opened here, made the record the successor's while
+// the approved assignment was the deleted incarnation's: the marker
+// check passed on the successor's own directory, and the reclaim removed
+// it (or set it aside, when the guard found it ahead).
+//
+// The only seam: the engine's metastore runs the delete, the recreate,
+// the successor's open and 7 commits inside the reclaim's first topic
+// read, standing for the reclaim being descheduled at that read.
+func TestReclaimReadsTheIncarnationBeforeTheAssignment(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		guard ReclaimGuard
+	}{
+		{"unguarded", ReclaimGuard{}},
+		{"guarded behind", ReclaimGuard{Known: true, PromotedHWM: 10}},
+		{"guarded ahead", ReclaimGuard{Known: true, PromotedHWM: 5}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			real := newTestStore(t)
+			dataDir := t.TempDir()
+			logs := runtime.NewLogs(dataDir, storage.Options{FlushInterval: time.Millisecond}, real, nil)
+			t.Cleanup(func() { _ = logs.CloseAll() })
+			seedMovedAwayCopy(t, real, logs)
+
+			var successorHWM int64
+			var hookErr error
+			store := &recordHookStore{Store: real}
+			store.hook = func() { successorHWM, hookErr = successorOpen(ctx, real, logs, "node-self") }
+			offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+				return consumer.Caps{MaxInFlight: 10, MaxAckedAhead: 10}, nil
+			}, nil)
+			e := NewEngine(store, schema.NewAlwaysValid(), fixedPartitionManager{picked: 0}, offsets, logs, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "node-self")
+			t.Cleanup(func() { e.dispatch.close() })
+
+			rerr := e.ReclaimMovedPartitionGuarded(ctx, "orders", 0, tc.guard)
+			if hookErr != nil || successorHWM != 7 {
+				t.Fatalf("setup: the successor's produce: hwm %d, err %v", successorHWM, hookErr)
+			}
+			if rerr == nil {
+				t.Errorf("the reclaim of a partition now placed on this node succeeded, want a refusal")
+			}
+			requireSuccessorKeepsItsRecords(t, logs, dataDir, rerr)
+		})
+	}
+}
