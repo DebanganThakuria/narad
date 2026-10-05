@@ -275,32 +275,32 @@ func runPeek(ctx context.Context, topic string, partition int, from int64, raw b
 // peekStartCursors resolves each partition's starting offset from the
 // topic's partition stats: the current tail, so peek shows "what flows
 // from now on" rather than replaying history (use --from for history).
+//
+// A partition whose owner is down is refused (its stats are a zero
+// placeholder, and starting it at 0 would replay its whole history once
+// the owner returns), unless --from gives the start and the stats are
+// not needed.
 func peekStartCursors(c *httpClient, topic string, partition int, from int64) (map[int]int64, error) {
-	resp, err := c.do(http.MethodGet, "/v1/topics/"+url.PathEscape(topic), nil)
+	info, err := fetchTopicStats(c, topic)
 	if err != nil {
 		return nil, err
-	}
-	defer resp.Body.Close()
-	var info struct {
-		PartitionStats []struct {
-			Index         int   `json:"index"`
-			NextOffset    int64 `json:"next_offset"`
-			HighWatermark int64 `json:"high_watermark"`
-		} `json:"partition_stats"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return nil, fmt.Errorf("parse topic info: %w", err)
 	}
 	cursors := map[int]int64{}
 	for _, ps := range info.PartitionStats {
 		if partition >= 0 && ps.Index != partition {
 			continue
 		}
-		start := ps.HighWatermark
 		if from >= 0 {
-			start = from
+			cursors[ps.Index] = from
+			continue
 		}
-		cursors[ps.Index] = start
+		if ps.unavailable() {
+			if partition < 0 {
+				return nil, fmt.Errorf("%w (peek one live partition with --partition, or give --from)", ps.unavailableError(topic))
+			}
+			return nil, ps.unavailableError(topic)
+		}
+		cursors[ps.Index] = ps.HighWatermark
 	}
 	if len(cursors) == 0 {
 		if partition >= 0 {
@@ -312,26 +312,15 @@ func peekStartCursors(c *httpClient, topic string, partition int, from int64) (m
 }
 
 func oldestOffset(c *httpClient, topic string, partition int) (int64, error) {
-	resp, err := c.do(http.MethodGet, "/v1/topics/"+url.PathEscape(topic), nil)
+	info, err := fetchTopicStats(c, topic)
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
-	var info struct {
-		PartitionStats []struct {
-			Index        int   `json:"index"`
-			OldestOffset int64 `json:"oldest_offset"`
-		} `json:"partition_stats"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+	ps, err := info.partition(topic, partition)
+	if err != nil {
 		return 0, err
 	}
-	for _, ps := range info.PartitionStats {
-		if ps.Index == partition {
-			return ps.OldestOffset, nil
-		}
-	}
-	return 0, fmt.Errorf("partition %d not in stats", partition)
+	return ps.OldestOffset, nil
 }
 
 // fetchOne performs one consume request. ok=false means an empty poll
