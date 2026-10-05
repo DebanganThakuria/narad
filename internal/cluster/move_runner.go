@@ -263,6 +263,9 @@ type MoveRunner struct {
 	// narad_moves_blocked (move_states.go).
 	statusMu sync.Mutex
 	statuses map[moveKey]*moveStatus
+	// leaderBlocked is the leader's blocked-move count exported with
+	// narad_moves_blocked (SetLeaderBlockedMoves); nil when not wired.
+	leaderBlocked atomic.Pointer[leaderBlockedMoves]
 
 	// flipSettle is the flip settle window (moveFlipSettle; tests
 	// shorten it).

@@ -1238,3 +1238,20 @@ func TestMoveStatesAreOrderedByTopicAndPartition(t *testing.T) {
 		t.Fatalf("MoveStates order %v, want %v", got, want)
 	}
 }
+
+// On the leader narad_moves_blocked also carries the leader's own
+// reasons (an in-flight move whose source or destination is dead), each
+// exported at 0 too, beside this node's worker reasons.
+func TestMovesBlockedCarriesTheLeadersReasons(t *testing.T) {
+	r := NewMoveRunner(&fakeMoveStore{}, "narad-dst", t.TempDir(), movePeerFake{}, nil, nil, discardLogger(), MoveConfig{})
+	reg := prometheus.NewRegistry()
+	r.RegisterMetrics(reg)
+	leader := map[string]int{"source_dead": 2}
+	r.SetLeaderBlockedMoves([]string{"source_dead", "target_dead", MoveBlockedCopyUnverifiable}, func() map[string]int { return leader })
+
+	got := movesBlocked(t, reg)
+	want := map[string]float64{MoveBlockedCopyUnverifiable: 0, MoveBlockedSourceDeadCopyBehind: 0, "source_dead": 2, "target_dead": 0}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("narad_moves_blocked = %v, want %v", got, want)
+	}
+}

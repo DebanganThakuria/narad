@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
 // Move phases (MoveState.Phase).
@@ -52,26 +54,9 @@ const (
 // narad_moves_blocked even at 0.
 var moveBlockedReasons = []string{MoveBlockedCopyUnverifiable, MoveBlockedSourceDeadCopyBehind}
 
-// MoveState is one move this node runs as the destination.
-type MoveState struct {
-	Topic     string    `json:"topic"`
-	Partition int       `json:"partition"`
-	Source    string    `json:"source"`
-	Target    string    `json:"target"`
-	StartedAt time.Time `json:"started_at"`
-	// Phase is what the worker is doing (the MovePhase constants).
-	Phase string `json:"phase"`
-	// Attempts counts copy attempts against a live source.
-	Attempts int `json:"attempts"`
-	// LastError is the last thing that failed, kept until the next one.
-	LastError string `json:"last_error,omitempty"`
-	// CopiedBytes is how many bytes the current copy fetched from the
-	// source; a copy started again from scratch counts from 0.
-	CopiedBytes int64 `json:"copied_bytes"`
-	// Blocked says why the move cannot finish on its own (the
-	// MoveBlocked constants), empty while it can.
-	Blocked string `json:"blocked,omitempty"`
-}
+// MoveState is one move this node runs as the destination. It is the
+// nodewire type, so OpNodeStatus carries it as is.
+type MoveState = nodewire.MoveState
 
 // moveStatus is one worker's MoveState: written by the worker goroutine,
 // read by MoveStates. A nil *moveStatus (a worker built without
@@ -175,8 +160,25 @@ func (r *MoveRunner) MoveStates() []MoveState {
 	return out
 }
 
-// movesBlockedCollector exports narad_moves_blocked{reason} from
-// MoveStates at scrape time.
+// leaderBlockedMoves is the leader's own count of in-flight moves
+// blocked on a dead node (controller.BlockedMoves), exported beside this
+// node's worker reasons under narad_moves_blocked: one metric name can
+// have one collector only.
+type leaderBlockedMoves struct {
+	reasons []string
+	counts  func() map[string]int
+}
+
+// SetLeaderBlockedMoves adds the leader's blocked-move counts, by the
+// given reasons (each exported even at 0), to narad_moves_blocked. Call
+// before serving metrics.
+func (r *MoveRunner) SetLeaderBlockedMoves(reasons []string, counts func() map[string]int) {
+	r.leaderBlocked.Store(&leaderBlockedMoves{reasons: slices.Clone(reasons), counts: counts})
+}
+
+// movesBlockedCollector exports narad_moves_blocked{reason} at scrape
+// time: this node's workers' blocked reasons from MoveStates, and the
+// leader's reasons when SetLeaderBlockedMoves wired them.
 type movesBlockedCollector struct {
 	r    *MoveRunner
 	desc *prometheus.Desc
@@ -185,7 +187,7 @@ type movesBlockedCollector struct {
 func newMovesBlockedCollector(r *MoveRunner) *movesBlockedCollector {
 	return &movesBlockedCollector{r: r, desc: prometheus.NewDesc(
 		"narad_moves_blocked",
-		"Moves this node is the destination of that cannot finish on their own, by reason: copy_unverifiable (the staged copy failed verification again after a fresh copy, so the source is not frozen again) or source_dead_copy_behind (the source is dead and the copy is behind its last high watermark).",
+		"Partition moves that cannot finish on their own, by reason. On the move's destination: copy_unverifiable (the staged copy failed verification again after a fresh copy, so the source is not frozen again) or source_dead_copy_behind (the source is dead and the copy is behind its last high watermark). On the leader only: source_dead and target_dead (an in-flight move whose source or destination member is dead).",
 		[]string{"reason"}, nil,
 	)}
 }
@@ -201,5 +203,16 @@ func (c *movesBlockedCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for _, reason := range moveBlockedReasons {
 		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(counts[reason]), reason)
+	}
+	lb := c.r.leaderBlocked.Load()
+	if lb == nil {
+		return
+	}
+	leader := lb.counts()
+	for _, reason := range lb.reasons {
+		if slices.Contains(moveBlockedReasons, reason) {
+			continue // never two series for one reason
+		}
+		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(leader[reason]), reason)
 	}
 }

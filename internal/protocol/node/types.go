@@ -48,6 +48,7 @@ const (
 	OpTokenRegister
 	OpTokenNotify
 	OpAckBatch
+	OpNodeStatus
 )
 
 // CompleteMoveRequest asks the leader to perform the guarded ownership flip
