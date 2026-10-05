@@ -209,7 +209,7 @@ The due lag of a delay child climbs or stays flat above 0 instead of returning t
 
 ### `narad_quarantined_copies` above 0 {#quarantined-copies}
 
-The node holds partition copies it set aside instead of deleting. At startup it lists each one at error level, `quarantined partition copy on this node: it was set aside instead of deleted and may hold the only instance of some of its records; inspect it before removing it`, with `kind`, `topic`, `partition`, `dir`, `bytes` and `mod_time` (twenty lines at most), then `this node holds quarantined partition copies; none is removed automatically` with the totals in `copies` and `bytes`. The gauge and `narad_quarantined_bytes` are refreshed at startup and on every stale-copy sweep (about every 30 s).
+The node holds partition copies it set aside instead of deleting. At startup it lists each one at error level, `quarantined partition copy on this node: it was set aside instead of deleted and may hold the only instance of some of its records; inspect it before removing it (troubleshooting: quarantined copies)`, with `kind`, `topic`, `partition`, `dir`, `bytes` and `mod_time` (twenty lines at most), then `this node holds quarantined partition copies; none is removed automatically (troubleshooting: quarantined copies)` with the totals in `copies` and `bytes`. The gauge and `narad_quarantined_bytes` are refreshed at startup and on every stale-copy sweep (about every 30 s).
 
 **Cause.** `kind` says where the copy came from:
 

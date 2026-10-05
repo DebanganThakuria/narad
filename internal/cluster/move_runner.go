@@ -812,7 +812,7 @@ func (r *MoveRunner) linkedChildren(ctx context.Context, parent string) map[stri
 
 // sourceDeadEnough reports whether the source has been confirmed dead by the
 // controller AND has stayed dead past ForcePromoteAfter by the leader's last
-// heartbeat stamp — long enough that a transient pod restart (which would let
+// heartbeat stamp: long enough that a transient pod restart (which would let
 // the copy finish normally) has been ruled out, so promoting the copy we have
 // is the right recovery. It compares this node's wall clock with a stamp
 // another node wrote, so a worker also requires its own observation
