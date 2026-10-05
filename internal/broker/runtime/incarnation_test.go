@@ -13,9 +13,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -442,5 +445,333 @@ func TestEnsureTopicIncarnationQuarantinesStaleDir(t *testing.T) {
 	ok, err = logs.TopicIncarnationMatches("orders", "eeeeeeeeeeeeeeee")
 	if err != nil || ok {
 		t.Fatalf("TopicIncarnationMatches(old) = (%v, %v), want (false, nil)", ok, err)
+	}
+}
+
+// Incarnation ids the purge tests below use: the purged topic and the
+// same-named topic created after it.
+const (
+	purgedIncarnation    = "1111111111111111"
+	successorIncarnation = "2222222222222222"
+)
+
+// wireConsumerState wires an InFlight to committer as
+// cmd/narad/serve_wiring.go does, with caps resolved through the
+// metastore record (a shard is made only for a topic the replica
+// holds). onCommit, when set, runs in place of committer.Commit.
+func wireConsumerState(dataDir string, store *metastore.Store, committer *ConsumerOffsetCommitter, onCommit func(name string, p int, off int64)) *consumer.InFlight {
+	if onCommit == nil {
+		onCommit = committer.Commit
+	}
+	offsets := consumer.NewInFlight(func(ctx context.Context, name string) (consumer.Caps, error) {
+		if _, err := store.GetTopic(ctx, name); err != nil {
+			return consumer.Caps{}, err
+		}
+		return consumer.Caps{MaxInFlight: 1 << 10, MaxAckedAhead: 1 << 10}, nil
+	}, onCommit)
+	offsets.SetCommittedRecovery(func(name string, p int) (int64, bool) {
+		committed, ok, err := storage.ReadConsumerOffset(storage.TopicPartitionDir(dataDir, name, p))
+		return committed, ok && err == nil
+	})
+	offsets.SetAheadRecovery(func(name string, p int) (int64, []int64, bool) {
+		rec, ok, err := storage.ReadConsumerAhead(storage.TopicPartitionDir(dataDir, name, p))
+		return rec.Committed, rec.Offsets, ok && err == nil
+	})
+	committer.SetAheadSource(offsets.AheadSnapshot)
+	offsets.SetDropNotifier(committer.Forget)
+	return offsets
+}
+
+// persistedFrontier is the frontier a recovery of dir starts from: the
+// larger of the two consumer files' frontiers, -1 for none.
+func persistedFrontier(dir string) int64 {
+	frontier := int64(-1)
+	if off, ok, err := storage.ReadConsumerOffset(dir); err == nil && ok {
+		frontier = off
+	}
+	if rec, ok, err := storage.ReadConsumerAhead(dir); err == nil && ok {
+		frontier = max(frontier, rec.Committed)
+	}
+	return frontier
+}
+
+// seedAckedIncarnation runs an earlier process of the purged
+// incarnation: 30 records, 0..19 acked and persisted, a clean stop.
+func seedAckedIncarnation(t *testing.T, store *metastore.Store, dataDir string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", ID: purgedIncarnation, Partitions: 1}); err != nil {
+		t.Fatal(err)
+	}
+	logs := NewLogs(dataDir, storage.Options{FlushInterval: time.Millisecond}, store, nil)
+	committer := manualOffsetCommitter(dataDir)
+	offsets := wireConsumerState(dataDir, store, committer, nil)
+	l, err := logs.Get("orders", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendOld(t, l, 30, "purged-incarnation")
+	for range 20 {
+		res, err := offsets.ReserveNext(ctx, "orders", 0, time.Minute, l.HighWatermark())
+		if err != nil || !res.Reserved {
+			t.Fatalf("reserve: %+v %v", res, err)
+		}
+		if err := offsets.CommitHandle("orders", 0, res.Offset, res.Nonce); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := committer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_ = logs.CloseAll()
+	if got := persistedFrontier(storage.TopicPartitionDir(dataDir, "orders", 0)); got != 19 {
+		t.Fatalf("setup: persisted frontier %d, want 19", got)
+	}
+}
+
+// recreateTopic deletes the purged incarnation's record and creates the
+// successor under the same name.
+func recreateTopic(t *testing.T, store *metastore.Store) {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.DeleteTopic(ctx, "orders"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", ID: successorIncarnation, Partitions: 1}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// removeAllWithTick removes a topic directory holding one partition
+// directory (partBase) in os.RemoveAll's syscall order: the partition
+// directory's entries and the topic marker are unlinked, then tick runs
+// (the window), then the two directories are rmdir'ed. os.RemoveAll does
+// not list again before the rmdir, so a file created in the window fails
+// it with ENOTEMPTY, which it returns.
+func removeAllWithTick(t *testing.T, partBase string, tick func()) func(string) error {
+	return func(topicDir string) error {
+		partDir := filepath.Join(topicDir, partBase)
+		entries, err := os.ReadDir(partDir)
+		if err != nil {
+			t.Errorf("list %s: %v", partDir, err)
+		}
+		for _, e := range entries {
+			if err := os.Remove(filepath.Join(partDir, e.Name())); err != nil {
+				t.Errorf("unlink %s: %v", e.Name(), err)
+			}
+		}
+		if err := os.Remove(filepath.Join(topicDir, storage.IncarnationMarkerFileName)); err != nil {
+			t.Errorf("unlink marker: %v", err)
+		}
+		tick()
+		if err := syscall.Rmdir(partDir); err != nil {
+			return &os.PathError{Op: "unlinkat", Path: partDir, Err: err}
+		}
+		if err := syscall.Rmdir(topicDir); err != nil {
+			return &os.PathError{Op: "unlinkat", Path: topicDir, Err: err}
+		}
+		return nil
+	}
+}
+
+// requireSuccessorDeliversFromZero opens the successor's partition,
+// appends 30 records and consumes them: every one must be delivered,
+// from offset 0, as it is on a node that never held the purged topic.
+func requireSuccessorDeliversFromZero(t *testing.T, logs *Logs, offsets *consumer.InFlight, committer *ConsumerOffsetCommitter, partDir string) {
+	t.Helper()
+	ctx := context.Background()
+	l, err := logs.Get("orders", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hwm := l.HighWatermark(); hwm != 0 {
+		t.Fatalf("the successor's log opens at hwm %d, want 0", hwm)
+	}
+	appendOld(t, l, 30, "successor")
+	var got []int64
+	for {
+		r, err := offsets.ReserveNext(ctx, "orders", 0, time.Minute, l.HighWatermark())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !r.Reserved {
+			break
+		}
+		if err := offsets.CommitHandle("orders", 0, r.Offset, r.Nonce); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, r.Offset)
+	}
+	if err := committer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 30 || got[0] != 0 {
+		first := int64(-1)
+		if len(got) > 0 {
+			first = got[0]
+		}
+		t.Fatalf("the successor delivered %d of its 30 records, from offset %d; its directory holds frontier %d",
+			len(got), first, persistedFrontier(partDir))
+	}
+}
+
+// A purge sets the topic directory aside before it removes it, so
+// nothing written by path during the removal lands where a same-named
+// successor opens. The purge's first retire drops the purged
+// incarnation's shards, but a consume still holding the purged
+// incarnation's log can make the partition's shard again from the
+// consumer files at the path, and a commit that reaches the committer
+// after the retire (a late ack, or the committer's own requeue of a
+// snapshot it was told to forget) makes a tick prime that shard by path.
+// A tick inside the removal, after the unlinks and before the rmdir,
+// recreated the consumer files in the directory being removed: the
+// rmdir failed, and the successor adopted the unmarked leftover with the
+// purged frontier and skipped its own first records.
+//
+// The seams stand for schedules only: the late ack's onCommit is parked,
+// or the committer's first tick is parked after its snapshot, and the
+// removal runs in os.RemoveAll's syscall order with a tick in its
+// window. Everything else is production code.
+func TestPurgeLeavesNoLeftoverASuccessorCouldAdopt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// lagging: the purge reaches this node before its replica
+		// applied the delete, so caps still resolve for the old record.
+		lagging  bool
+		requeued bool
+	}{
+		{name: "a late ack after the successor was created"},
+		{name: "a late ack while the replica lags the delete", lagging: true},
+		{name: "a commit the committer requeued", requeued: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newIncarnationStore(t)
+			dataDir := t.TempDir()
+			partDir := storage.TopicPartitionDir(dataDir, "orders", 0)
+			seedAckedIncarnation(t, store, dataDir)
+
+			logs := NewLogs(dataDir, storage.Options{FlushInterval: time.Millisecond}, store, nil)
+			defer logs.CloseAll()
+			committer := manualOffsetCommitter(dataDir)
+			defer func() { _ = committer.Close() }()
+			var parkCommit atomic.Bool
+			parked := make(chan struct{})
+			release := make(chan struct{})
+			offsets := wireConsumerState(dataDir, store, committer, func(name string, p int, off int64) {
+				if parkCommit.CompareAndSwap(true, false) {
+					close(parked)
+					<-release
+				}
+				committer.Commit(name, p, off)
+			})
+			var parkSnap atomic.Bool
+			snapped := make(chan struct{})
+			resume := make(chan struct{})
+			committer.SetAheadSource(func(name string, p int) (int64, []int64, uint64, bool) {
+				committed, offs, version, ok := offsets.AheadSnapshot(name, p)
+				if parkSnap.CompareAndSwap(true, false) {
+					close(snapped)
+					<-resume
+				}
+				return committed, offs, version, ok
+			})
+			var retires atomic.Int32
+			logs.SetTopicRetiredHook(func(name string) {
+				retires.Add(1)
+				offsets.DropTopic(name)
+			})
+
+			// Consumer A resolved the purged incarnation's log; consumer
+			// C holds offset 20.
+			oldLog, err := logs.Get("orders", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := offsets.ReserveNext(ctx, "orders", 0, time.Minute, oldLog.HighWatermark())
+			if err != nil || !c.Reserved || c.Offset != 20 {
+				t.Fatalf("setup: C's reserve %+v %v", c, err)
+			}
+
+			var beforeRemoval func()
+			if tc.requeued {
+				// C acks before the delete; the committer's first tick
+				// snapshots the purged shard and is descheduled. Resumed
+				// after the first retire's Forget, it requeues the commit.
+				if err := offsets.CommitHandle("orders", 0, c.Offset, c.Nonce); err != nil {
+					t.Fatal(err)
+				}
+				recreateTopic(t, store)
+				parkSnap.Store(true)
+				tick1 := make(chan error, 1)
+				go func() { tick1 <- committer.flush() }()
+				select {
+				case <-snapped:
+				case <-time.After(10 * time.Second):
+					t.Fatal("setup: the first tick never took a snapshot")
+				}
+				beforeRemoval = func() {
+					close(resume)
+					if err := <-tick1; err != nil {
+						t.Logf("first tick: %v", err)
+					}
+				}
+			} else {
+				if !tc.lagging {
+					recreateTopic(t, store)
+				}
+				// C's ack moves the frontier to 20; its onCommit parks
+				// and lands only after the first retire.
+				parkCommit.Store(true)
+				acked := make(chan error, 1)
+				go func() { acked <- offsets.CommitHandle("orders", 0, c.Offset, c.Nonce) }()
+				select {
+				case <-parked:
+				case <-time.After(10 * time.Second):
+					t.Fatal("setup: C's onCommit never ran")
+				}
+				beforeRemoval = func() {
+					close(release)
+					if err := <-acked; err != nil {
+						t.Errorf("setup: C's ack: %v", err)
+					}
+				}
+			}
+
+			removal := removeAllWithTick(t, filepath.Base(partDir), func() {
+				if err := committer.flush(); err != nil {
+					t.Logf("tick inside the removal: %v", err)
+				}
+			})
+			logs.removeAll = func(dir string) error {
+				if n := retires.Load(); n != 1 {
+					t.Errorf("setup: the removal started after %d retires, want 1", n)
+				}
+				beforeRemoval()
+				// A reserves on the log it resolved before the purge,
+				// making the partition's shard again.
+				if r, err := offsets.ReserveNext(ctx, "orders", 0, time.Minute, oldLog.HighWatermark()); err == nil && r.Reserved {
+					if _, _, _, rerr := oldLog.ReadKeyedShared(r.Offset); rerr != nil {
+						_ = offsets.ReleaseHandle("orders", 0, r.Offset, r.Nonce)
+					}
+				}
+				return removal(dir)
+			}
+
+			if _, err := logs.PurgeTopic("orders", purgedIncarnation); err != nil {
+				t.Errorf("purge: %v", err)
+			}
+			entries, err := os.ReadDir(storage.TopicDir(dataDir, ""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				t.Errorf("left under topics/ after the purge: %s (frontier %d at the partition path)", e.Name(), persistedFrontier(partDir))
+			}
+			if tc.lagging {
+				recreateTopic(t, store)
+			}
+			requireSuccessorDeliversFromZero(t, logs, offsets, committer, partDir)
+		})
 	}
 }

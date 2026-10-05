@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -320,4 +321,130 @@ func TestReclaimSetsAsideACopyTheOwnerCannotVouchFor(t *testing.T) {
 		t.Fatalf("unrecoverable copy not set aside: %v", err)
 	}
 	_ = os.Chmod(filepath.Join(dir1+QuarantineSuffix, filepath.Base(unreadable)), 0o644)
+}
+
+// successorOpen deletes and recreates orders on store with partition 0
+// assigned to successorOwner (none when empty), opens the successor's
+// partition on logs and commits 7 records to it, reporting the hwm.
+func successorOpen(ctx context.Context, store *metastore.Store, logs *runtime.Logs, successorOwner string) (int64, error) {
+	if err := store.DeleteTopic(ctx, "orders"); err != nil {
+		return 0, err
+	}
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", ID: successorIncarnation, Partitions: 1}); err != nil {
+		return 0, err
+	}
+	if successorOwner != "" {
+		if err := store.AssignPartition(ctx, "orders", 0, successorOwner); err != nil {
+			return 0, err
+		}
+	}
+	l, err := logs.Get("orders", 0)
+	if err != nil {
+		return 0, err
+	}
+	for range 7 {
+		if _, err := l.Append(storage.EncodeKeyedRecord("k", 1, []byte("successor"))); err != nil {
+			return 0, err
+		}
+	}
+	if err := l.CommitDurable(0, 6); err != nil {
+		return 0, err
+	}
+	return l.HighWatermark(), nil
+}
+
+// seedMovedAwayCopy gives this node a 5-record copy of orders/0 of the
+// retired incarnation, whose partition has since moved to node-other.
+func seedMovedAwayCopy(t *testing.T, store *metastore.Store, logs *runtime.Logs) {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", ID: retiredIncarnation, Partitions: 1}); err != nil {
+		t.Fatal(err)
+	}
+	old, err := logs.Get("orders", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		if _, err := old.Append(storage.EncodeKeyedRecord("k", 1, []byte("old"))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := old.CommitDurable(0, 4); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AssignPartition(ctx, "orders", 0, "node-other"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// requireSuccessorKeepsItsRecords fails unless orders/0 on dataDir still
+// recovers the successor's 7 committed records.
+func requireSuccessorKeepsItsRecords(t *testing.T, logs *runtime.Logs, dataDir string, reclaimErr error) {
+	t.Helper()
+	if err := logs.CloseAll(); err != nil {
+		t.Logf("close: %v", err)
+	}
+	id, marked, _ := storage.ReadTopicIncarnation(storage.TopicDir(dataDir, "orders"))
+	l, err := storage.NewLog(storage.TopicPartitionDir(dataDir, "orders", 0), storage.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if got := l.NextOffset(); got != 7 {
+		t.Fatalf("the successor's partition directory recovers next offset %d after the reclaim (%v), want 7 (its 7 committed records); topic marker %q (marked %v)",
+			got, reclaimErr, id, marked)
+	}
+}
+
+// A reclaim closes the partition's log and resets its consumer state,
+// then acts on the partition's PATH. A delete and recreate of the name
+// in between, with this node serving the successor's partition (its open
+// quarantines the old topic directory and makes a new partition
+// directory), must not lose the successor's directory: the reclaim acts
+// under the topic's guard with the log closed, and only while the topic
+// marker is absent or names the incarnation it read.
+//
+// The only seam is the drop notifier (production wires the committer's
+// Forget there), which runs the recreate and the successor's first
+// produce at the reclaim's reset.
+func TestReclaimLeavesASuccessorOpenedDuringTheReclaim(t *testing.T) {
+	for _, guard := range []struct {
+		name  string
+		guard ReclaimGuard
+	}{
+		{"unguarded", ReclaimGuard{}},
+		{"guarded", ReclaimGuard{Known: true, PromotedHWM: 5}},
+	} {
+		t.Run(guard.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newTestStore(t)
+			dataDir := t.TempDir()
+			logs := runtime.NewLogs(dataDir, storage.Options{FlushInterval: time.Millisecond}, store, nil)
+			t.Cleanup(func() { _ = logs.CloseAll() })
+			seedMovedAwayCopy(t, store, logs)
+
+			offsets := consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+				return consumer.Caps{MaxInFlight: 10, MaxAckedAhead: 10}, nil
+			}, nil)
+			var successorHWM int64
+			var hookErr error
+			fired := false
+			offsets.SetDropNotifier(func(string, int) {
+				if fired {
+					return
+				}
+				fired = true
+				successorHWM, hookErr = successorOpen(ctx, store, logs, "")
+			})
+			e := NewEngine(store, schema.NewAlwaysValid(), fixedPartitionManager{picked: 0}, offsets, logs, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "node-self")
+			t.Cleanup(func() { e.dispatch.close() })
+
+			rerr := e.ReclaimMovedPartitionGuarded(ctx, "orders", 0, guard.guard)
+			if hookErr != nil || successorHWM != 7 {
+				t.Fatalf("setup: the successor's produce: hwm %d, err %v", successorHWM, hookErr)
+			}
+			requireSuccessorKeepsItsRecords(t, logs, dataDir, rerr)
+		})
+	}
 }
