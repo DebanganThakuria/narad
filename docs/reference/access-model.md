@@ -83,6 +83,8 @@ The user that creates a topic becomes its owner; the topic's `owner` field names
 
 Ownership is stored as a username, and it never moves. A topic created while security was off has no owner, so once security is on only an admin can change or delete it. If a user is deleted and a new one is created under the same username, the new user owns the old user's topics.
 
+Every topic change is checked twice. The node that receives the request checks it against its own copy of the cluster's metadata, and a change by a user without `admin` that names a topic this copy does not have is looked up again once the node has caught up with the cluster leader: `404` if it is still missing, `503` if the node cannot reach the leader. The node then forwards the change to the leader together with the caller's username, and the leader checks again, under the topic's lock, against the topic as it stands and the user as the leader knows it: ownership for a change or delete, both topics for an attach, either for a detach, the parent for a create with `parent`, and the `create` grant for any create. A user the leader does not know gets `403`. During a rolling upgrade from 3.0.x a leader that does not yet understand the forwarded username gets the change without it, and only the receiving node's check applies.
+
 ## Reads {#reads}
 
 - **Get a topic, its schema history, or a parent's children:** any grant whose pattern matches the topic name, whatever its action, or ownership, or `admin`. Anything else gets `403` (`no grant on this topic`). A topic that does not exist gets `404` either way.

@@ -229,7 +229,8 @@ paths:
         Creates a topic and, with `parent`, links it as a fan-out child of
         an existing topic in the same call. The caller becomes the topic's
         [owner](glossary.md#owner). A field left out, or sent as `0`, takes
-        the server default.
+        the server default, except `retention_ms`, where `0` keeps messages
+        forever and only leaving it out takes the default.
       x-narad-grant: |
         `create` on the topic name. With `parent`, also ownership of the
         parent or `admin`.
@@ -251,17 +252,17 @@ paths:
         '401':
           description: Missing or wrong credentials.
         '403':
-          description: No `create` grant on the name, or no right to manage `parent`.
+          description: No `create` grant on the name, or no right to manage `parent`, as the node that answers or the cluster leader sees it.
         '404':
-          description: '`parent` does not exist.'
+          description: '`parent` does not exist, also after the answering node caught up with the leader.'
         '409':
-          description: The topic exists, or `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold).
+          description: The topic exists, a topic exists whose name differs only in letter case (the error names it), or `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold).
         '413':
           description: The body is over 1 MiB.
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '503':
-          description: The cluster has no leader to write the topic.
+          description: The cluster has no leader to write the topic, or the answering node could not reach the leader to confirm `parent`.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST "$NARAD/v1/topics" \
@@ -402,9 +403,9 @@ paths:
         '401':
           description: Missing or wrong credentials.
         '403':
-          description: Not the owner and not `admin`.
+          description: Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic.
         '404':
-          description: The topic does not exist.
+          description: The topic does not exist, also after the answering node caught up with the leader.
         '409':
           description: '`schema_base_version` is not the current version, the history holds 1000 versions, the topic is a child whose schema its parent manages, or the new retention is too short for a delay child.'
         '413':
@@ -412,7 +413,7 @@ paths:
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '503':
-          description: The cluster has no leader to write the change.
+          description: The cluster has no leader to write the change, or the answering node could not reach the leader to confirm a topic it does not have.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X PATCH "$NARAD/v1/topics/orders" \
@@ -443,11 +444,11 @@ paths:
         '401':
           description: Missing or wrong credentials.
         '403':
-          description: Not the owner and not `admin`.
+          description: Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic.
         '404':
-          description: The topic does not exist.
+          description: The topic does not exist, also after the answering node caught up with the leader.
         '503':
-          description: The cluster has no leader to write the delete.
+          description: The cluster has no leader to write the delete, or the answering node could not reach the leader to confirm a topic it does not have.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X DELETE "$NARAD/v1/topics/orders-audit"
@@ -528,15 +529,15 @@ paths:
         '401':
           description: Missing or wrong credentials.
         '403':
-          description: The caller does not manage both topics.
+          description: The caller does not manage both topics, as the node that answers or the cluster leader sees them.
         '404':
-          description: The parent or the child does not exist.
+          description: The parent or the child does not exist, also after the answering node caught up with the leader.
         '409':
           description: The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, or the delay is longer than the parent's retention can hold.
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '503':
-          description: No leader, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry.
+          description: No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/children" \
@@ -605,11 +606,11 @@ paths:
         '401':
           description: Missing or wrong credentials.
         '403':
-          description: The caller manages neither topic.
+          description: The caller manages neither topic, as the node that answers or the cluster leader sees them.
         '404':
-          description: A topic does not exist, or the two are not linked.
+          description: Neither topic exists after the answering node caught up with the leader, or the two are not linked.
         '503':
-          description: The cluster has no leader to write the change.
+          description: The cluster has no leader to write the change, or the answering node could not reach the leader to confirm the topics.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X DELETE \
@@ -1484,7 +1485,12 @@ components:
       properties:
         name:
           type: string
-          description: 1 to 255 characters from `A-Z a-z 0-9 . _ -`, not `.` or `..`.
+          maxLength: 200
+          description: |
+            1 to 200 characters from `A-Z a-z 0-9 . _ -`, not `.` or `..`,
+            and not differing from an existing topic's name only in letter
+            case (`409`). Topics an earlier release created with names up to
+            255 characters keep working.
         partitions:
           type: integer
           minimum: 3
@@ -1498,8 +1504,10 @@ components:
           type: integer
           description: |
             How long a message is kept after it is written, whether or not
-            it was consumed. At least 3,600,000 (1 hour). Defaults to the
-            server default ([Configuration reference](configuration.md#topic-defaults)):
+            it was consumed. At least 3,600,000 (1 hour), or `0` to keep
+            messages forever; a negative value gets `400`. Left out, it
+            takes the server default
+            ([Configuration reference](configuration.md#topic-defaults)):
             7 days in the binary, 12 hours in the Helm chart.
         visibility_timeout_ms:
           type: integer
@@ -1542,7 +1550,7 @@ components:
       properties:
         retention_ms:
           type: integer
-          description: New retention. At least 3,600,000 (1 hour); `0` sets the server default.
+          description: New retention. At least 3,600,000 (1 hour), or `0` to keep messages forever; a negative value gets `400`. To return to the server default, send its value.
         max_in_flight_per_partition:
           type: integer
           description: New in-flight cap; `0` sets the server default. A cap left out keeps its value.

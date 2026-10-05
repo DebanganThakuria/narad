@@ -116,6 +116,8 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 
 **Meaning:** the credentials are right, but the user may not do this. The message says what is missing, for example `produce not allowed on this topic`, `no grant on this topic`, `only the topic owner or an admin may modify this topic`, or `admin privileges required`. The user routes also answer `403` for the rules that protect accounts: you cannot change your own grants, delete your own account, give a grant you do not hold, or touch the root admin's grants.
 
+A topic change is checked twice: by the node that receives it, and again by the cluster leader under the topic's lock, against the topic as it stands there. The leader's refusal reads `only the owner of topic "<name>" or an admin may modify it` (or names the fan-out link, or the missing create grant), and it is what you get when the topic was deleted and created again by someone else after your request was let in. `caller unknown to the leader` means the leader has no record of the user.
+
 **What to do:** ask an admin for the grant, or send the request as the topic's owner. Which grant each route needs is in [Access model and grants](access-model.md).
 
 **Go SDK:** `ErrForbidden`.
@@ -126,7 +128,7 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 
 **Meaning:** one of these:
 
-- The topic, user, parent, child or cluster member does not exist, or the two topics named in a detach are not linked.
+- The topic, user, parent, child or cluster member does not exist, or the two topics named in a detach are not linked. For a change to a topic by a user without `admin`, a topic the receiving node does not have is looked up again once that node has caught up with the cluster leader, so the `404` holds for the whole cluster.
 - The path is not a Narad route. This answer is plain text, `404 page not found`.
 - A batch produce (**Unreleased**) reached a node running v3.0.1 or earlier, which does not have the route.
 - `/metrics` on the API port of a node that serves metrics on their own listener (`http.metrics_addr`).
@@ -151,7 +153,7 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 
 **Meaning:** the request conflicts with the current state:
 
-- The topic or user already exists.
+- The topic or user already exists, or a topic exists whose name differs from the requested one only in letter case (`Orders` next to `orders`): on a case-insensitive filesystem both would share one directory. The message names the existing topic.
 - The attach breaks a [fan-out](glossary.md#fan-out-child) rule: a child has exactly one parent and no children of its own, and a parent has at most 108 children.
 - The child's schema history is not identical to the parent's.
 - A delay child's delay is longer than the parent's retention can hold, on attach, on create with `parent`, or when the parent's retention shrinks.
@@ -273,7 +275,7 @@ The error message says which limit was hit, in the same order:
 **Where:**
 
 - Ack, extend and nack, a replay, or a consume pinned with `partition`, when the partition's owner is down: `partition owner is down; retry later` (plain text).
-- Any change to cluster metadata (topics, fan-out links, users, decommission) while the cluster has no Raft leader or the leader cannot be reached.
+- Any change to cluster metadata (topics, fan-out links, users, decommission) while the cluster has no Raft leader or the leader cannot be reached, including a change by a user without `admin` naming a topic the receiving node does not have, when that node cannot catch up with the leader to confirm it. A leader elected moments ago may also answer `503` once while it finishes applying the log.
 - `/readyz` while the node should not take traffic, and `/healthz` once the node is shutting down.
 - Never on a produce: a `503` there comes from a proxy in front of Narad ([Troubleshooting](../operate/troubleshooting.md#produce-503)).
 
