@@ -705,6 +705,7 @@ func (s *RPCServer) brokerErrorStatus(op string, err error) (int, string) {
 		errors.Is(err, errs.ErrFanoutDelayTooLong), // 409, as the HTTP layer maps it
 		errors.Is(err, errs.ErrSchemaVersionConflict),
 		errors.Is(err, errs.ErrSchemaHistoryFull),
+		errors.Is(err, errs.ErrTopicChanged),
 		errors.Is(err, errs.ErrAlreadyExists):
 		return http.StatusConflict, err.Error()
 	case errors.Is(err, errs.ErrNotFound):

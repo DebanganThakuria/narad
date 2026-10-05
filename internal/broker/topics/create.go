@@ -11,6 +11,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
 
 // topicNamePattern is the set of allowed topic names. Restricting to a
@@ -92,6 +93,13 @@ func (m *Manager) waitCreateGate(ctx context.Context) error {
 // partition log directories and files are created lazily on first use
 // by whichever node owns the partition.
 //
+// Once every member applies single-entry creates, the record, its first
+// schema version and its fan-out parent link are one Raft entry: a
+// leader change cannot leave half of a create behind, and a retry's 409
+// means the topic exists as requested. A create-as-child is checked
+// against the parent incarnation it read; if the parent was recreated
+// since, the parent is read and checked again, once.
+//
 // Zero values for any policy field inherit the matching default from
 // Config. Negative values and partitions exceeding Config.MaxPartitions
 // are rejected.
@@ -123,60 +131,47 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	if err := m.checkNameFold(ctx, opts.Name); err != nil {
 		return topic.Topic{}, err
 	}
-	if err := m.resolveCreateAsChild(ctx, &opts); err != nil {
-		return topic.Topic{}, err
-	}
-
-	t, err := m.topicFromOpts(opts)
-	if err != nil {
-		return topic.Topic{}, err
-	}
-	if len(opts.Schema) > 0 {
-		opts.Schema = canonicalSchema(opts.Schema)
-		if err := m.schemas.ValidateDefinition(ctx, opts.Name, opts.Schema); err != nil {
-			return topic.Topic{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+	var (
+		t      topic.Topic
+		single bool
+	)
+	for attempt := 1; ; attempt++ {
+		prepared := opts
+		parentID, err := m.resolveCreateAsChild(ctx, &prepared)
+		if err != nil {
+			return topic.Topic{}, err
 		}
-	}
-	if err := m.checkCreateSchemaBudget(ctx, opts); err != nil {
-		return topic.Topic{}, err
-	}
-
-	// Defense in depth behind validateTopicName: refuse a name that would
-	// escape the topics root before it reaches the metastore. No
-	// directory is created here: the node running a create is the Raft
-	// leader, which may own none of the topic's partitions, and partition
-	// logs create their own directories lazily on first open. An empty
-	// directory on the leader was pure liability: the orphan sweep had to
-	// leader-confirm it after a delete that happened while this node was
-	// down, and the disk-size metrics counted it.
-	if _, err := m.topicDir(opts.Name); err != nil {
-		return topic.Topic{}, err
-	}
-	if err := m.checkPlacement(); err != nil {
-		return topic.Topic{}, err
-	}
-
-	if err := m.metastore.CreateTopic(ctx, t); err != nil {
-		if errors.Is(err, errs.ErrAlreadyExists) {
-			return topic.Topic{}, ErrAlreadyExists
+		if t, err = m.prepareCreate(ctx, &prepared); err != nil {
+			return topic.Topic{}, err
 		}
-		return topic.Topic{}, err
-	}
-	if len(opts.Schema) > 0 {
-		if err := m.createInitialSchema(ctx, opts.Name, opts.Schema); err != nil {
-			return topic.Topic{}, m.rollbackCreatedTopic(ctx, opts.Name, t.ID, err)
+		single, err = m.createTopicWith(ctx, t, metastore.CreateTopicSpec{
+			Schema:   prepared.Schema,
+			Parent:   prepared.Parent,
+			ParentID: parentID,
+			DelayMs:  prepared.FanoutDelayMs,
+		})
+		if single && m.retryTopicChanged(err, attempt, "create", opts.Name) {
+			continue
 		}
+		if single {
+			err = createWithError(err)
+		} else {
+			err = m.createTopicSteps(ctx, t, prepared)
+		}
+		if err != nil {
+			return topic.Topic{}, err
+		}
+		opts = prepared
+		break
 	}
-	// Attach BEFORE partition assignment: placement reads the parent
-	// link to keep the child's partitions off the parent's nodes. A
-	// failed attach rolls the create back so no half-linked topic
-	// survives.
-	if opts.Parent != "" {
-		if err := m.metastore.AttachChild(ctx, opts.Parent, opts.Name, opts.FanoutDelayMs); err != nil {
-			if errors.Is(err, errs.ErrNotFound) {
-				err = fmt.Errorf("%w: %v", ErrNotFound, err)
-			}
-			return topic.Topic{}, m.rollbackCreatedTopic(ctx, opts.Name, t.ID, err)
+	if single && len(opts.Schema) > 0 {
+		// The schema is committed with the topic; produce reloads it
+		// from the metastore whenever the topic's schema version moves,
+		// so a failed local load is not a failed create (the client's
+		// retry would only answer 409).
+		if err := m.schemas.Load(ctx, opts.Name, 1, opts.Schema); err != nil {
+			m.logger.Error("topic created with its schema, but the schema was not loaded locally; produce will reload it from the metastore",
+				"topic", opts.Name, "err", err)
 		}
 	}
 	if m.assigner != nil {
@@ -202,6 +197,89 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 		"max_acked_ahead_per_partition", t.MaxAckedAheadPerPartition)
 
 	return t, nil
+}
+
+// prepareCreate resolves opts into the record to create and checks,
+// before anything is written, its schema, the schema byte budgets, its
+// directory and that its partitions can be placed. It compacts
+// opts.Schema.
+func (m *Manager) prepareCreate(ctx context.Context, opts *CreateOpts) (topic.Topic, error) {
+	t, err := m.topicFromOpts(*opts)
+	if err != nil {
+		return topic.Topic{}, err
+	}
+	if len(opts.Schema) > 0 {
+		opts.Schema = canonicalSchema(opts.Schema)
+		if err := m.schemas.ValidateDefinition(ctx, opts.Name, opts.Schema); err != nil {
+			return topic.Topic{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+		}
+	}
+	if err := m.checkCreateSchemaBudget(ctx, *opts); err != nil {
+		return topic.Topic{}, err
+	}
+	// Defense in depth behind validateTopicName: refuse a name that would
+	// escape the topics root before it reaches the metastore. No
+	// directory is created here: the node running a create is the Raft
+	// leader, which may own none of the topic's partitions, and partition
+	// logs create their own directories lazily on first open. An empty
+	// directory on the leader was pure liability: the orphan sweep had to
+	// leader-confirm it after a delete that happened while this node was
+	// down, and the disk-size metrics counted it.
+	if _, err := m.topicDir(opts.Name); err != nil {
+		return topic.Topic{}, err
+	}
+	if err := m.checkPlacement(); err != nil {
+		return topic.Topic{}, err
+	}
+	return t, nil
+}
+
+// createWithError maps the answer of a single-entry create onto the
+// Manager's errors.
+func createWithError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, errs.ErrTopicAlreadyExists):
+		// A name that differs from an existing one only in letter case;
+		// the message names the existing topic.
+		return err
+	case errors.Is(err, errs.ErrAlreadyExists):
+		return ErrAlreadyExists
+	case errors.Is(err, errs.ErrNotFound):
+		// The parent of a create-as-child is gone.
+		return fmt.Errorf("%w: %v", ErrNotFound, err)
+	}
+	return err
+}
+
+// createTopicSteps creates t the way every release since 3.0.0
+// applies, while some member does not apply single-entry creates: the
+// record, then the first schema version, then the fan-out link (before
+// placement, which reads it to keep the child's partitions off the
+// parent's nodes). A failed later step rolls the create back so no
+// half-made topic survives, as far as this leader still can.
+func (m *Manager) createTopicSteps(ctx context.Context, t topic.Topic, opts CreateOpts) error {
+	if err := m.metastore.CreateTopic(ctx, t); err != nil {
+		if errors.Is(err, errs.ErrAlreadyExists) {
+			return ErrAlreadyExists
+		}
+		return err
+	}
+	if len(opts.Schema) > 0 {
+		if err := m.createInitialSchema(ctx, opts.Name, opts.Schema); err != nil {
+			return m.rollbackCreatedTopic(ctx, opts.Name, t.ID, err)
+		}
+	}
+	if opts.Parent != "" {
+		if err := m.metastore.AttachChild(ctx, opts.Parent, opts.Name, opts.FanoutDelayMs); err != nil {
+			if errors.Is(err, errs.ErrNotFound) {
+				err = fmt.Errorf("%w: %v", ErrNotFound, err)
+			}
+			return m.rollbackCreatedTopic(ctx, opts.Name, t.ID, err)
+		}
+	}
+	return nil
 }
 
 // checkCreateSchemaBudget applies the schema byte budgets to what a
@@ -248,25 +326,26 @@ func validateCreateAsChild(opts CreateOpts) error {
 // of its parent), and defaults Partitions to its count: matching counts
 // make the anti-affine per-key guarantee exact. It runs under both
 // names' locks, after the leader barrier, and before anything is
-// written, so every failure is a clean 4xx.
-func (m *Manager) resolveCreateAsChild(ctx context.Context, opts *CreateOpts) error {
+// written, so every failure is a clean 4xx. It returns the parent
+// incarnation it read, which a single-entry create is checked against.
+func (m *Manager) resolveCreateAsChild(ctx context.Context, opts *CreateOpts) (parentID string, err error) {
 	if opts.Parent == "" {
-		return nil
+		return "", nil
 	}
 	parent, err := m.GetTopic(ctx, opts.Parent)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) || errors.Is(err, errs.ErrNotFound) {
-			return fmt.Errorf("%w: parent topic %q", ErrNotFound, opts.Parent)
+			return "", fmt.Errorf("%w: parent topic %q", ErrNotFound, opts.Parent)
 		}
-		return err
+		return "", err
 	}
 	if err := authorizeManage(ctx, parent); err != nil {
-		return err
+		return "", err
 	}
 	if opts.Partitions == 0 {
 		opts.Partitions = parent.Partitions
 	}
-	return nil
+	return parent.ID, nil
 }
 
 // topicFromOpts resolves CreateOpts against the configured defaults
@@ -385,7 +464,7 @@ func checkRetentionFloor(retentionMs int64) error {
 
 func (m *Manager) rollbackCreatedTopic(ctx context.Context, topicName, id string, cause error) error {
 	var rollbackErrs []error
-	if err := m.deleteTopicMetadata(ctx, topicName); err != nil && !errors.Is(err, errs.ErrNotFound) {
+	if err := m.deleteTopicMetadata(ctx, topicName, id); err != nil && !errors.Is(err, errs.ErrNotFound) {
 		rollbackErrs = append(rollbackErrs, fmt.Errorf("delete topic metadata: %w", err))
 	}
 	if err := m.purgeTopicLocked(ctx, topicName, id); err != nil {
