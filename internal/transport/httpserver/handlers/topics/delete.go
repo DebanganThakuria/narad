@@ -34,6 +34,16 @@ func Delete(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, "topic required")
 			return
 		}
+		aw := newAuditWriter(w)
+		w = aw
+		var incarnation string
+		defer func() {
+			if incarnation != "" {
+				aw.audit(s, r, auditEventDelete, topicName, "incarnation", incarnation)
+				return
+			}
+			aw.audit(s, r, auditEventDelete, topicName)
+		}()
 		if !s.AuthorizeTopicManage(w, r, topicName) {
 			return
 		}
@@ -45,7 +55,8 @@ func Delete(s *handlers.Set) http.HandlerFunc {
 		// The purge fan-out names the incarnation the delete removed so a
 		// member that already applied a recreate of the same name purges
 		// the old directory, not the new one.
-		incarnation, err := deleteTopicReportingID(r.Context(), s, topicName)
+		id, err := deleteTopicReportingID(r.Context(), s, topicName)
+		incarnation = id
 		if err != nil {
 			purgeErr, ok := errors.AsType[brokertopics.PurgeError](err)
 			if !ok {

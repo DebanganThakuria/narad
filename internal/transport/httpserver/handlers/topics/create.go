@@ -57,6 +57,18 @@ func Create(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 		req.RetentionMs = brokerRetention(req.RetentionMs)
+		aw := newAuditWriter(w)
+		w = aw
+		defer func() {
+			var extra []any
+			if req.Parent != "" {
+				extra = append(extra, "parent", req.Parent)
+			}
+			if len(req.Schema) > 0 {
+				extra = append(extra, "schema", true)
+			}
+			aw.audit(s, r, auditEventCreate, req.Name, extra...)
+		}()
 		if !s.Authorize(w, r, user.ActionCreate, req.Name) {
 			return
 		}

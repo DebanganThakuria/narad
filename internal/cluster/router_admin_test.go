@@ -28,6 +28,8 @@ import (
 	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 	"github.com/debanganthakuria/narad/internal/security"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
+	httptopics "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/topics"
 )
 
 func TestRouteGetTopicMergesRemotePartitionStats(t *testing.T) {
@@ -1223,5 +1225,69 @@ func TestUnfinishedPurgeIsLoggedAtError(t *testing.T) {
 	members, _ := line["members"].([]any)
 	if line["topic"] != "orders" || line["incarnation"] != "000000000000000e" || len(members) != 1 || members[0] != "node-a" {
 		t.Fatalf("error line = %v, want topic orders, incarnation 000000000000000e and members [node-a]", line)
+	}
+}
+
+// cancellingFrames lets the leader run a forwarded write to completion
+// and then has the client give up before the reply reaches the ingress.
+type cancellingFrames struct {
+	leader *loopbackFrames
+	cancel context.CancelFunc
+}
+
+func (f *cancellingFrames) RequestOnLane(ctx context.Context, addr string, lane clusterrpc.Lane, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
+	if _, err := f.leader.RequestOnLane(context.Background(), addr, lane, frameType, payload); err != nil {
+		return clusterwire.StreamFrame{}, err
+	}
+	f.cancel()
+	<-ctx.Done()
+	return clusterwire.StreamFrame{}, ctx.Err()
+}
+
+func (f *cancellingFrames) RequestOnLaneTimeout(ctx context.Context, addr string, lane clusterrpc.Lane, _ time.Duration, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
+	return f.RequestOnLane(ctx, addr, lane, frameType, payload)
+}
+
+// A forwarded delete that the leader applied, but whose reply never
+// reached the ingress because the client went away, is audited as
+// outcome=unknown, never as rejected or failed: an audit query for
+// changes that happened must not miss it (audit M13, the wave-1
+// reviewer's repro). Master wrote no audit line at all.
+func TestForwardWithoutTheLeadersAnswerIsAuditedAsUnknown(t *testing.T) {
+	router, br, frames, store := forwardingPair(t, false)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", ID: "00000000000000f1", Partitions: 3, Owner: "alice"}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	reqCtx, cancel := context.WithCancel(asUser("alice"))
+	defer cancel()
+	router.peer = &PeerClient{frames: &cancellingFrames{leader: frames, cancel: cancel}}
+
+	var logs bytes.Buffer
+	set := handlers.New(handlers.Deps{
+		Broker: br,
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+		Router: router,
+	})
+	req := httptest.NewRequestWithContext(reqCtx, http.MethodDelete, "/v1/topics/orders", nil)
+	req.SetPathValue("topic", "orders")
+	rec := httptest.NewRecorder()
+	httptopics.Delete(set).ServeHTTP(rec, req)
+
+	if br.deletes != 1 {
+		t.Fatalf("the leader deleted %d times, want 1 (the delete committed)", br.deletes)
+	}
+	var audit map[string]any
+	for _, raw := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		var line map[string]any
+		if json.Unmarshal(raw, &line) == nil && line["component"] == "audit" && line["event"] == "topic.delete" {
+			audit = line
+		}
+	}
+	if audit == nil {
+		t.Fatalf("no topic.delete audit line (client got %d):\n%s", rec.Code, logs.String())
+	}
+	if audit["outcome"] != "unknown" || audit["actor"] != "alice" || audit["target"] != "orders" {
+		t.Fatalf("audit line = %v, want actor alice, target orders, outcome unknown", audit)
 	}
 }

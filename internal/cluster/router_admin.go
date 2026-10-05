@@ -19,8 +19,23 @@ import (
 // leader with 503, not 502: the leader was momentarily unreachable
 // (election, partition, rolling restart), which is retryable — not a
 // bad gateway the client should treat as broken.
+//
+// The answer carries no decision of the leader's: the forward may have
+// been applied there before its reply was lost, or the client went
+// away while the leader ran it. A writer that records outcomes (the
+// topic handlers' audit writer) is told so first, so the change is
+// audited as unknown rather than failed (audit M13).
 func writeLeaderForwardError(w http.ResponseWriter, err error) {
+	if m, ok := w.(undecidedMarker); ok {
+		m.MarkUndecided()
+	}
 	http.Error(w, err.Error(), http.StatusServiceUnavailable)
+}
+
+// undecidedMarker is a response writer that records an answer written
+// without the leader's decision.
+type undecidedMarker interface {
+	MarkUndecided()
 }
 
 // forwardActor is the caller a forwarded topic write is made for: the

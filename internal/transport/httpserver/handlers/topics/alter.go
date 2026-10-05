@@ -106,6 +106,9 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		aw := newAuditWriter(w)
+		w = aw
+		defer func() { auditAlter(s, r, aw, topicName, req) }()
 		if !s.AuthorizeTopicManage(w, r, topicName) {
 			return
 		}
