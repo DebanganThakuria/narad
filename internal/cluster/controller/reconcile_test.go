@@ -320,3 +320,95 @@ func TestAssignSweepBarriersBeforeReading(t *testing.T) {
 		t.Fatalf("barriers = %d, assigned %v after a failed barrier, want the pass skipped", failing.leaderBarriers, failing.assignedLog)
 	}
 }
+
+// The sweep places new partitions only on members that are not being
+// decommissioned (verify-operability-7: master placed them round-robin
+// over every live member, draining ones included).
+func TestAssignSweepSkipsDrainingMembers(t *testing.T) {
+	store := newFakeControllerStore("narad-0", "narad-1", "narad-2")
+	store.members[1].Draining = true
+	store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 6}}
+	c := &Controller{store: store, cfg: Config{}.withDefaults()}
+
+	c.reconcileAssignments(context.Background())
+	if len(store.assignments["orders"]) != 6 {
+		t.Fatalf("assigned %v, want all 6 partitions placed", store.assignedLog)
+	}
+	for p, owner := range store.assignments["orders"] {
+		if owner == "narad-1" {
+			t.Fatalf("orders/%d placed on the draining member (all: %v)", p, store.assignedLog)
+		}
+	}
+}
+
+// With every live member draining the sweep still places the partition
+// (on a draining member): an unowned partition takes no produces at all.
+func TestAssignSweepFallsBackWhenAllDraining(t *testing.T) {
+	store := newFakeControllerStore("narad-0", "narad-1")
+	store.members[0].Draining = true
+	store.members[1].Draining = true
+	store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 3}}
+	c := &Controller{store: store, cfg: Config{}.withDefaults()}
+
+	c.reconcileAssignments(context.Background())
+	if len(store.assignments["orders"]) != 3 {
+		t.Fatalf("assigned %v with every member draining, want all 3 partitions placed", store.assignedLog)
+	}
+}
+
+// A topic deleted between the sweep's topic list and its assignment
+// lock must be skipped (verify-topics-3: master wrote assignment rows
+// for the deleted topic, which a later same-named topic inherited).
+func TestAssignSweepSkipsTopicDeletedAfterList(t *testing.T) {
+	store := newFakeControllerStore("narad-0", "narad-1", "narad-2")
+	store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 3}}
+	store.onLockAssignments = func() { store.topics = nil }
+	c := &Controller{store: store, cfg: Config{}.withDefaults()}
+
+	c.reconcileAssignments(context.Background())
+	if len(store.assignedLog) != 0 {
+		t.Fatalf("assigned %v for a topic deleted after the list, want none", store.assignedLog)
+	}
+
+	// Recreated under the same name in between: the listed incarnation
+	// is gone, so the sweep leaves the new one to the next pass.
+	store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 3}}
+	store.onLockAssignments = func() {
+		store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000002", Partitions: 3}}
+	}
+	c.reconcileAssignments(context.Background())
+	if len(store.assignedLog) != 0 {
+		t.Fatalf("assigned %v for the listed incarnation after a recreate, want none", store.assignedLog)
+	}
+}
+
+// The sweep places partitions by the counts it reads under the
+// assignment lock, not the ones it listed: here the parent was
+// recreated with 6 partitions after the list showed 3, and the child's
+// partitions 3 to 5 must still avoid the parent's same-index owners
+// instead of being placed as if the parent had no partition there.
+func TestAssignSweepUsesRecreatedPartitionCount(t *testing.T) {
+	store := newFakeControllerStore("narad-0", "narad-1", "narad-2")
+	store.topics = []topic.Topic{
+		{Name: "orders", ID: "0000000000000001", Partitions: 3, Role: topic.RoleParent, Children: []string{"replica"}},
+		{Name: "replica", ID: "0000000000000002", Partitions: 6, Parent: "orders", Role: topic.RoleChild},
+	}
+	// The parent's six owners are already on record; the round-robin
+	// owner of each child partition is the parent's same-index owner.
+	store.assignments["orders"] = map[int]string{0: "narad-0", 1: "narad-1", 2: "narad-2", 3: "narad-0", 4: "narad-1", 5: "narad-2"}
+	store.onLockAssignments = func() {
+		store.topics[0] = topic.Topic{Name: "orders", ID: "0000000000000003", Partitions: 6, Role: topic.RoleParent, Children: []string{"replica"}}
+	}
+	c := &Controller{store: store, cfg: Config{}.withDefaults()}
+
+	c.reconcileAssignments(context.Background())
+	child := store.assignments["replica"]
+	if len(child) != 6 {
+		t.Fatalf("child assignments = %v, want all 6 placed", child)
+	}
+	for p := range 6 {
+		if child[p] == store.assignments["orders"][p] {
+			t.Fatalf("replica/%d colocated with orders/%d on %q: the sweep used the listed parent count", p, p, child[p])
+		}
+	}
+}

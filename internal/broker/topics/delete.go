@@ -42,7 +42,7 @@ func (m *Manager) DeleteTopic(ctx context.Context, name string) error {
 		return err
 	}
 
-	if err := m.metastore.DeleteTopic(ctx, name); err != nil {
+	if err := m.deleteTopicMetadata(ctx, name); err != nil {
 		return err
 	}
 	if err := m.purgeTopicLocked(ctx, name, t.ID); err != nil {
@@ -50,6 +50,29 @@ func (m *Manager) DeleteTopic(ctx context.Context, name string) error {
 	}
 	m.logger.Info("topic deleted", "topic", name, "incarnation", t.ID)
 	return nil
+}
+
+// assignmentLocker is the metastore capability behind the assignment
+// lock (implemented by *metastore.Store).
+type assignmentLocker interface {
+	LockAssignments() (unlock func())
+}
+
+// deleteTopicMetadata deletes the topic's record (and with it its
+// schemas and assignment rows) under the metastore's assignment lock.
+// The controller's placement pass re-reads each topic under that lock
+// before writing owners, so holding it here means the pass either
+// finishes first (and the delete removes its rows) or sees the topic
+// gone; without it a pass could write rows for the deleted topic that a
+// later same-named topic inherited (audit M2, L6). The caller holds the
+// topic's name lock: the lock order is name lock, then assignment lock,
+// everywhere.
+func (m *Manager) deleteTopicMetadata(ctx context.Context, name string) error {
+	if l, ok := m.metastore.(assignmentLocker); ok {
+		unlock := l.LockAssignments()
+		defer unlock()
+	}
+	return m.metastore.DeleteTopic(ctx, name)
 }
 
 // PurgeTopic drops all local state of one incarnation of a topic

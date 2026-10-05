@@ -331,7 +331,7 @@ func checkRetentionFloor(retentionMs int64) error {
 
 func (m *Manager) rollbackCreatedTopic(ctx context.Context, topicName, id string, cause error) error {
 	var rollbackErrs []error
-	if err := m.metastore.DeleteTopic(ctx, topicName); err != nil && !errors.Is(err, errs.ErrNotFound) {
+	if err := m.deleteTopicMetadata(ctx, topicName); err != nil && !errors.Is(err, errs.ErrNotFound) {
 		rollbackErrs = append(rollbackErrs, fmt.Errorf("delete topic metadata: %w", err))
 	}
 	if err := m.purgeTopicLocked(ctx, topicName, id); err != nil {

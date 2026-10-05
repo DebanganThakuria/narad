@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"sort"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -28,7 +29,9 @@ func (c *Controller) reconcileAssignments(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	active := metastore.AliveMembers(members)
+	// New partitions go to live members that are not being
+	// decommissioned (all live members only if every one is draining).
+	active := metastore.PlacementMembers(members)
 	if len(active) == 0 {
 		return
 	}
@@ -48,13 +51,8 @@ func (c *Controller) reconcileAssignments(ctx context.Context) {
 		return topics[i].Parent == "" && topics[j].Parent != ""
 	})
 
-	partitionCounts := make(map[string]int, len(topics))
 	for _, t := range topics {
-		partitionCounts[t.Name] = t.Partitions
-	}
-
-	for _, t := range topics {
-		c.assignTopic(ctx, t, active, partitionCounts)
+		c.assignTopic(ctx, t, active)
 	}
 }
 
@@ -70,13 +68,26 @@ func (c *Controller) reconcileAssignments(ctx context.Context) {
 // The store's assignment lock is held from reading the assignments to
 // the last write, so a topic create placing the same partitions through
 // AssignNewPartitions cannot interleave with this pass and have one
-// placement overwrite the other.
-func (c *Controller) assignTopic(ctx context.Context, t topic.Topic, active []metastore.Member, partitionCounts map[string]int) {
+// placement overwrite the other, and a topic delete (which takes the
+// same lock) cannot land in between.
+//
+// listed is the topic as this tick's list showed it. It is read again
+// under the lock: a topic deleted or recreated since the list is skipped
+// (rows written for a deleted topic would be inherited by a later
+// same-named one), and the partition counts placed by are the ones on
+// record now, the topic's own and, for a child, its parent's.
+func (c *Controller) assignTopic(ctx context.Context, listed topic.Topic, active []metastore.Member) {
 	if len(active) == 0 {
 		return
 	}
 	unlock := c.store.LockAssignments()
 	defer unlock()
+
+	t, err := c.store.GetTopic(ctx, listed.Name)
+	if err != nil || t.ID != listed.ID {
+		// Gone, recreated, or unreadable: the next tick lists it afresh.
+		return
+	}
 
 	var parentOwners map[int]string
 	var parentPartitions int
@@ -91,10 +102,17 @@ func (c *Controller) assignTopic(ctx context.Context, t topic.Topic, active []me
 		for _, a := range parentAssignments {
 			parentOwners[a.Partition] = a.OwnerID
 		}
-		// The true partition count comes from this tick's topic list. A
-		// parent absent from it (detach/delete race) yields 0 — no
-		// constraint — matching the create-path behavior.
-		parentPartitions = partitionCounts[t.Parent]
+		// The parent's partition count as it stands under the lock. A
+		// parent that is gone (detach/delete race) yields 0, no
+		// constraint, matching the create-path behavior.
+		parent, err := c.store.GetTopic(ctx, t.Parent)
+		switch {
+		case err == nil:
+			parentPartitions = parent.Partitions
+		case !errors.Is(err, metastore.ErrNotFound):
+			// Unreadable: placing blind could colocate the copies.
+			return
+		}
 	}
 
 	existing, err := c.store.ListAssignments(t.Name)

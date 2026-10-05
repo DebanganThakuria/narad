@@ -128,6 +128,9 @@ func New(cfg Config) (*Store, error) {
 		_ = fsm.db.Close()
 		return nil, err
 	}
+	if cfg.Log != nil {
+		placementLogger.Store(cfg.Log)
+	}
 	return &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore, logs: logStore, log: cfg.startupLog()}, nil
 }
 

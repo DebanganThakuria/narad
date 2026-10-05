@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -170,7 +172,7 @@ func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromP
 	if err != nil {
 		return err
 	}
-	active := AliveMembers(members)
+	active := PlacementMembers(members)
 	if len(active) == 0 {
 		return ErrNoAliveMembers
 	}
@@ -358,6 +360,55 @@ func ChildAwareOwner(active []Member, partition int, parentOwners map[int]string
 	}
 	owner, ok = AntiAffineOwner(active, partition, avoid)
 	return owner, ok, false
+}
+
+// PlacementMembers returns the members that may receive NEW partitions
+// (a create, a partition increase, the controller's sweep): the live
+// members that are not being decommissioned. A draining member keeps
+// serving what it owns, but a partition placed on it would only have to
+// be moved off again, and a drain that keeps receiving new partitions
+// may never finish (audit M7).
+//
+// When every live member is draining it returns those members instead,
+// with a warning: an unowned partition takes no produces at all, which
+// is worse than one more partition for the decommission to move. With
+// no live member it returns none.
+func PlacementMembers(members []Member) []Member {
+	alive := AliveMembers(members)
+	out := make([]Member, 0, len(alive))
+	for _, m := range alive {
+		if !m.Draining {
+			out = append(out, m)
+		}
+	}
+	if len(out) > 0 || len(alive) == 0 {
+		placementFallback.Store(false)
+		return out
+	}
+	if !placementFallback.Swap(true) {
+		ids := make([]string, 0, len(alive))
+		for _, m := range alive {
+			ids = append(ids, m.ID)
+		}
+		placementLog().Warn("every live member is being decommissioned; placing new partitions on draining members so they have an owner, and the decommission will move them again",
+			"members", ids)
+	}
+	return alive
+}
+
+// placementFallback is set while PlacementMembers is falling back to
+// draining members, so the warning is logged once per episode.
+var placementFallback atomic.Bool
+
+// placementLogger is the logger PlacementMembers warns on: the logger
+// of the process's metastore (set by New), or a discarding one.
+var placementLogger atomic.Pointer[slog.Logger]
+
+func placementLog() *slog.Logger {
+	if l := placementLogger.Load(); l != nil {
+		return l
+	}
+	return slog.New(slog.DiscardHandler)
 }
 
 // AliveMembers filters members down to those with MemberAlive status.
