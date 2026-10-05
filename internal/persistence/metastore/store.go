@@ -32,8 +32,8 @@ type Config struct {
 	Peers         []Peer
 	// JoinOnly prevents this node from bootstrapping a cluster when it
 	// has no prior Raft state: it starts with an EMPTY configuration and
-	// waits for the existing leader to admit it via AddVoter (the
-	// OpJoinCluster RPC). Without it, a scale-out node would bootstrap a
+	// waits for the existing leader to admit it (the OpJoinCluster RPC,
+	// AdmitJoiner). Without it, a scale-out node would bootstrap a
 	// phantom cluster from its peer list and never join the real one.
 	JoinOnly bool
 	// Logger receives hashicorp/raft's own log output; nil discards it.
@@ -113,6 +113,14 @@ type Store struct {
 	// unregistered by Close.
 	registerer prometheus.Registerer
 	collectors []prometheus.Collector
+
+	// id is this node's Raft server ID.
+	id raft.ServerID
+	// health is the leader's heartbeat view of its peers
+	// (raft_health.go); admitMu serialises join admission
+	// (join_admission.go).
+	health  *raftHealth
+	admitMu sync.Mutex
 }
 
 // New opens or creates the Raft metastore at cfg.DataDir.
@@ -143,7 +151,8 @@ func New(cfg Config) (*Store, error) {
 		}
 		return nil, err
 	}
-	s := &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore, logs: logStore, log: cfg.startupLog(), opened: opened}
+	s := &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore, logs: logStore, log: cfg.startupLog(), opened: opened, id: raft.ServerID(cfg.NodeID)}
+	s.health = newRaftHealth(r, cfg.NodeID)
 	// A stopped FSM takes Raft down with it, so the node stops voting,
 	// leading and acknowledging writes its replica lacks. Never from
 	// inside Apply: Shutdown waits for the FSM goroutine.

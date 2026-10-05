@@ -20,7 +20,8 @@ var errPreVoteUnsupported = errors.New("metastore: transport does not support pr
 // current leader, not carried over from before the restart.
 const appliedCaughtUpContactWindow = 5 * time.Second
 
-// Close takes the store's metrics off their registry, hands leadership
+// Close takes the store's metrics off their registry, deregisters its
+// Raft observer (raft_health.go), hands leadership
 // to another voter if this node leads, shuts Raft down, and closes the
 // Raft log store and the FSM database. The
 // databases are closed even when the shutdown reports an error: a
@@ -37,6 +38,7 @@ const appliedCaughtUpContactWindow = 5 * time.Second
 // keeps stalling is diagnosable from the leader's last lines.
 func (s *Store) Close() error {
 	s.unregisterMetrics()
+	s.health.close()
 	if s.r.State() == raft.Leader {
 		log := s.log
 		if log == nil {
@@ -278,11 +280,12 @@ func (s *Store) AddVoter(id, clusterAddr string) error {
 	return s.r.AddVoter(raft.ServerID(id), raft.ServerAddress(clusterAddr), 0, barrierTimeout).Error()
 }
 
-// RemoveServer removes a node from the Raft configuration. Leader-only
-// (followers fail with raft.ErrNotLeader). This is the decommission path:
-// the controller calls it once a draining node owns no partitions, so the
-// removed node's data is already safely relocated. Idempotent — removing a
-// node already absent is a no-op config entry.
+// RemoveServer removes a node, voter or non-voter, from the Raft
+// configuration. Leader-only (followers fail with raft.ErrNotLeader).
+// This is the decommission path: the controller calls it once a draining
+// node owns no partitions, so the removed node's data is already safely
+// relocated. Idempotent: removing a node already absent is a no-op
+// config entry.
 func (s *Store) RemoveServer(id string) error {
 	return s.r.RemoveServer(raft.ServerID(id), 0, barrierTimeout).Error()
 }
