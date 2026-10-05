@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -191,5 +192,56 @@ func TestPurgeAnswersRetriableWhileTheReplicaLags(t *testing.T) {
 	}
 	if got := br.calls(); len(got) != 0 {
 		t.Fatalf("PurgeTopic calls = %v, want none while the replica lags", got)
+	}
+}
+
+// statsOnlyBroker serves the per-partition stats RPC and counts whole
+// describes, each of which reads the topic's schema.
+type statsOnlyBroker struct {
+	broker.Broker
+	describes int
+}
+
+func (b *statsOnlyBroker) GetTopicDetails(_ context.Context, name string) (topic.Details, error) {
+	b.describes++
+	return topic.Details{
+		Topic:         topic.Topic{Name: name, Partitions: 2},
+		SchemaVersion: 7,
+		Partitions:    []topic.PartitionStats{{Index: 0, HighWatermark: 3}, {Index: 1, HighWatermark: 4}},
+	}, nil
+}
+
+func (b *statsOnlyBroker) LocalPartitionStats(_ context.Context, _ string, partition int) (topic.PartitionStats, error) {
+	if partition < 0 || partition >= 2 {
+		return topic.PartitionStats{}, fmt.Errorf("%w: partition %d", errs.ErrInvalidArgument, partition)
+	}
+	return topic.PartitionStats{Index: partition, HighWatermark: int64(3 + partition)}, nil
+}
+
+// An owner answers the per-partition stats RPC from the one partition,
+// without a whole describe and so without reading the topic's schema
+// (audit schemas:5). Master ran GetTopicDetails per call: one schema
+// read and one stat of every partition for each partition asked for.
+func TestPartitionStatsRPCReadsNoSchema(t *testing.T) {
+	br := &statsOnlyBroker{}
+	s := &RPCServer{broker: br, logger: discardLogger()}
+	encode := func(partition int) []byte {
+		payload, err := nodewire.EncodeTopicPartitionStatsRequest(nodewire.TopicPartitionStatsRequest{Topic: "orders", Partition: partition})
+		if err != nil {
+			t.Fatalf("EncodeTopicPartitionStatsRequest: %v", err)
+		}
+		return payload
+	}
+
+	res := s.handleTopicPartitionStats(encode(1))
+	var stats topic.PartitionStats
+	if res.Status != http.StatusOK || json.Unmarshal(res.Body, &stats) != nil || stats.Index != 1 || stats.HighWatermark != 4 {
+		t.Fatalf("stats RPC = %d %s, want 200 with partition 1 at high watermark 4", res.Status, res.Body)
+	}
+	if res := s.handleTopicPartitionStats(encode(2)); res.Status != http.StatusBadRequest {
+		t.Fatalf("stats RPC for an out-of-range partition = %d %s, want 400", res.Status, res.Body)
+	}
+	if br.describes != 0 {
+		t.Fatalf("the stats RPC described the whole topic %d times, want 0", br.describes)
 	}
 }

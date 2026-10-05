@@ -409,6 +409,16 @@ func (s *RPCServer) handleTopicPartitionStats(payload []byte) nodewire.Response 
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid topic stats request: "+err.Error())
 	}
+	// One partition is asked for, so one is described: a broker that can
+	// describe a single partition does so without reading the topic's
+	// schema or stat'ing its other partitions (audit schemas:5).
+	if reader, ok := s.broker.(broker.PartitionStatsReader); ok {
+		stats, err := reader.LocalPartitionStats(rpcRequestContext(), req.Topic, req.Partition)
+		if err != nil {
+			return s.brokerError("get topic", err)
+		}
+		return jsonResponse(http.StatusOK, stats)
+	}
 	details, err := s.broker.GetTopicDetails(rpcRequestContext(), req.Topic)
 	if err != nil {
 		return s.brokerError("get topic", err)
