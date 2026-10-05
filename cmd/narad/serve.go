@@ -271,11 +271,12 @@ func runServe(args []string) error {
 			// the voter set, rival cluster) would otherwise become Ready
 			// and serve a frozen replica: stale users and grants, stale
 			// topics, 503 for everything ownership-related. Keep waiting
-			// with no timeout; /readyz stays false meanwhile.
-			if !waitMetastoreCaughtUp(ctx, ms, 0) {
+			// with no timeout; /readyz stays false meanwhile. The orphan
+			// sweep the timeout skipped runs, leader-confirmed, once the
+			// replica is current.
+			if !finishLateStartup(ctx, ms, bc.logs, cs.mover, wg.Go, nodeID, log) {
 				return
 			}
-			openOwnedPartitionLogs(ctx, ms, bc.logs, nodeID, log)
 		}
 		if ctx.Err() == nil {
 			bc.lifecycle.MarkReady()

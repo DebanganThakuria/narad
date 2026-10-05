@@ -48,14 +48,15 @@ const startupReconcileCaughtUpTimeout = 60 * time.Second
 // cancellation so shutdown during startup isn't blocked.
 //
 // The returned caughtUp reports whether the replica caught up within
-// the timeout. When it did not, the sweep is forfeited for this boot
-// (the gate cannot stay armed forever) and the owned logs are NOT
-// opened (ownership is unknown); the caller keeps waiting and must not
-// mark the node ready until the replica is provably current.
+// the timeout. When it did not, the create-gated sweep is forfeited for
+// this boot (the gate cannot stay armed forever) and the owned logs are
+// NOT opened (ownership is unknown); the caller finishes startup with
+// finishLateStartup, which keeps waiting, and must not mark the node
+// ready until the replica is provably current.
 func runStartupReconcile(ctx context.Context, store *metastore.Store, logs *runtime.Logs, peer *cluster.PeerClient, dataDir, nodeID string, log *slog.Logger) (caughtUp bool) {
-	if !waitMetastoreCaughtUp(ctx, store, startupReconcileCaughtUpTimeout) {
+	if !startupCatchUpWait(ctx, store, startupReconcileCaughtUpTimeout) {
 		if ctx.Err() == nil {
-			log.Warn("skipping startup orphan sweep: metastore not caught up within timeout; node stays not ready until it is")
+			log.Warn("deferring the startup orphan sweep: metastore not caught up within timeout; node stays not ready until it is, and the leader-confirmed reclaim of deleted topics' directories runs once it is")
 		}
 		return false
 	}
@@ -72,6 +73,51 @@ func runStartupReconcile(ctx context.Context, store *metastore.Store, logs *runt
 		// Shutting down during startup: don't open logs we're about to close.
 		return true
 	}
+	openOwnedPartitionLogs(ctx, store, logs, nodeID, log)
+	return true
+}
+
+// startupCatchUpWait is how runStartupReconcile waits for the replica
+// to catch up (waitMetastoreCaughtUp); a test replaces it to make the
+// bounded wait time out without a partitioned cluster.
+var startupCatchUpWait = waitMetastoreCaughtUp
+
+// orphanReclaimPass is the leader-confirmed reclaim of deleted topics'
+// directories (*cluster.MoveRunner implements it).
+type orphanReclaimPass interface {
+	ReclaimOrphanTopicDirs(ctx context.Context) int
+}
+
+// finishLateStartup completes startup for a boot whose replica caught up
+// only after runStartupReconcile's bounded wait gave up. It waits with
+// no deadline, then starts the orphan reclaim on spawn (bound to ctx)
+// and opens the owned partition logs. It returns false when ctx ended
+// first.
+//
+// The create-gated startup sweep was forfeited, and skipping it left a
+// deleted topic's directory whose purge never reached this node on disk
+// until the move runner's sweep came round. The gate is released by
+// now, so the deferred pass is the move runner's: quarantined copies of
+// deleted incarnations are removed by path, a marked directory of a
+// topic the replica no longer knows is purged under the topic's guard,
+// each only once the leader confirms the incarnation gone, and an
+// unmarked directory is kept (narad_orphan_topic_dirs counts it) for
+// the next boot's gated sweep. It runs beside the readiness path, so a
+// slow leader confirmation never holds readiness back.
+func finishLateStartup(ctx context.Context, store *metastore.Store, logs *runtime.Logs, orphans orphanReclaimPass, spawn func(func()), nodeID string, log *slog.Logger) bool {
+	if !waitMetastoreCaughtUp(ctx, store, 0) {
+		return false
+	}
+	spawn(func() {
+		switch left := orphans.ReclaimOrphanTopicDirs(ctx); {
+		case left < 0:
+			if ctx.Err() == nil {
+				log.Warn("deferred startup orphan sweep did not run: the replica fell behind again; the move runner's periodic sweep retries")
+			}
+		case left > 0:
+			log.Info("deferred startup orphan sweep kept topic directories it could not reclaim; narad_orphan_topic_dirs counts them", "kept", left)
+		}
+	})
 	openOwnedPartitionLogs(ctx, store, logs, nodeID, log)
 	return true
 }
