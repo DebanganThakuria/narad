@@ -206,11 +206,11 @@ forever and only leaving it out takes the default.
 | Status | Meaning |
 |---|---|
 | [`201`](status-codes.md#status-201) | Created. The body is the new topic. |
-| [`400`](status-codes.md#status-400) | A field is invalid, the name is not allowed, or the schema cannot be registered. |
+| [`400`](status-codes.md#status-400) | A field is invalid, the name is not allowed, or the schema cannot be registered (unreleased, that includes a schema whose validation would cost too much). |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No `create` grant on the name, or no right to manage `parent`, as the node that answers or the cluster leader sees it. |
 | [`404`](status-codes.md#status-404) | `parent` does not exist, also after the answering node caught up with the leader. |
-| [`409`](status-codes.md#status-409) | The topic exists, a topic exists whose name differs only in letter case (the error names it), or `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold). |
+| [`409`](status-codes.md#status-409) | The topic exists, a topic exists whose name differs only in letter case (the error names it), `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold), or (unreleased) the schema, or the parent's schema history a child adopts, would pass a schema byte budget. |
 | [`413`](status-codes.md#status-413) | The body is over 1 MiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`503`](status-codes.md#status-503) | The cluster has no leader to write the topic, or the answering node could not reach the leader to confirm `parent`. |
@@ -443,7 +443,7 @@ you need all or nothing.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | Not the owner and not `admin`, as the node that answers or the cluster leader sees the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist, also after the answering node caught up with the leader. |
-| [`409`](status-codes.md#status-409) | `schema_base_version` is not the current version, the history holds 1000 versions, the topic is a child whose schema its parent manages, or the new retention is too short for a delay child. |
+| [`409`](status-codes.md#status-409) | `schema_base_version` is not the current version, the history holds 1000 versions or (unreleased) the new version would take it past 4 MiB or the cluster's schemas past 256 MiB, the topic is a child whose schema its parent manages, or the new retention is too short for a delay child. |
 | [`413`](status-codes.md#status-413) | The body is over 1 MiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, or the answering node could not reach the leader to confirm a topic it does not have. |
@@ -612,7 +612,7 @@ instead.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | The caller does not manage both topics, as the node that answers or the cluster leader sees them. |
 | [`404`](status-codes.md#status-404) | The parent or the child does not exist, also after the answering node caught up with the leader. |
-| [`409`](status-codes.md#status-409) | The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, or the delay is longer than the parent's retention can hold. |
+| [`409`](status-codes.md#status-409) | The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, the delay is longer than the parent's retention can hold, or (unreleased) the copy of the parent's schema history the child adopts would pass the cluster's schema byte budget. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`503`](status-codes.md#status-503) | No leader, the answering node could not reach the leader to confirm a topic it does not have, or the parent's partition owners could not be asked for the attach point. Nothing was linked; retry. |
 
@@ -782,7 +782,7 @@ The message, 1 byte to 1 MiB. Content types: `application/json`, `application/oc
 | Status | Meaning |
 |---|---|
 | [`202`](status-codes.md#status-202) | Accepted and synced to disk. The body is empty. |
-| [`400`](status-codes.md#status-400) | Empty body, `partition` out of range, `key` or `partition` given twice, or the body fails the topic's schema. |
+| [`400`](status-codes.md#status-400) | Empty body, `partition` out of range, `key` or `partition` given twice, or the body fails the topic's schema (unreleased, that includes a body nested deeper than 256 levels). |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No `produce` grant on the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist. |
@@ -791,6 +791,7 @@ The message, 1 byte to 1 MiB. Content types: `application/json`, `application/oc
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`429`](status-codes.md#status-429) | Too many produces in flight for this user on this node, only when the operator set a produce cap ([Configuration reference](configuration.md#http)). |
 | [`500`](status-codes.md#status-500) | The node could not write to its ingress WAL. It answers every produce this way until it restarts. |
+| [`503`](status-codes.md#status-503) | Unreleased. The topic has a schema and every schema validation slot on the node stayed busy for 5 seconds; nothing was checked or stored. Retry, preferably through another node. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" -X POST \
@@ -849,7 +850,7 @@ At most 1 MiB in total.
 | Status | Meaning |
 |---|---|
 | [`202`](status-codes.md#status-202) | Every message accepted and synced to disk. |
-| [`400`](status-codes.md#status-400) | No messages, more than 100, a bad encoding, an empty payload, a message the schema refuses, or `key` or `partition` in the query. |
+| [`400`](status-codes.md#status-400) | No messages, more than 100, a bad encoding, an empty payload, a message the schema refuses (one nested deeper than 256 levels included), or `key` or `partition` in the query. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No `produce` grant on the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist, or the node runs v3.0.1 or earlier. |
@@ -858,6 +859,7 @@ At most 1 MiB in total.
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`429`](status-codes.md#status-429) | The batch does not fit this user's produce cap on this node (only when the cap is set). A batch counts as its message count, clamped to the cap. |
 | [`500`](status-codes.md#status-500) | The node could not write to its ingress WAL. |
+| [`503`](status-codes.md#status-503) | The topic has a schema and every schema validation slot on the node stayed busy for 5 seconds; nothing was checked or stored. Retry, preferably through another node. |
 
 **Response body (`202`)**
 

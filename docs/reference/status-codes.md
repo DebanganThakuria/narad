@@ -89,7 +89,7 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 
 - JSON that does not parse, a field the endpoint does not know, or a value out of range (a partition count under 3, a retention under one hour, a negative number).
 - A produce with an empty body, a `partition` the topic does not have, or a `key` or `partition` given twice.
-- A produce whose body the topic's schema refuses, or a schema that cannot be registered or is not compatible with the current version ([Schema validation rules](schema-rules.md)).
+- A produce whose body the topic's schema refuses, or a schema that cannot be registered or is not compatible with the current version ([Schema validation rules](schema-rules.md)). Since **Unreleased** that includes a produce body nested deeper than 256 levels (`payload nests deeper than 256 levels`), and a schema whose validation would cost too much: a subschema reached through more than 64 validation paths, or a pattern that costs more than 32 steps per byte ([Schema documents](schema-rules.md#registration)).
 - An ack, extend or nack without `receipt_handle`, or with a handle that cannot be decoded (a handle is `partition:offset:nonce`).
 - A consume with a bad `wait`, `partition`, `offset` or `max`, a replay (`offset`) without `partition`, or `max` together with `offset`.
 - A batch consume (`max`) without an `X-Narad-Client` header ([Required headers](../build/connect.md#required-headers)).
@@ -158,6 +158,7 @@ A topic change is checked twice: by the node that receives it, and again by the 
 - The child's schema history is not identical to the parent's.
 - A delay child's delay is longer than the parent's retention can hold, on attach, on create with `parent`, or when the parent's retention shrinks.
 - `schema_base_version` is not the current schema version, the topic already holds 1000 schema versions, or the topic is an attached child whose schema its parent manages.
+- A schema change, a create with a schema, or a create-as-child or attach that adopts a parent's schema history would take the topic's stored history past 4 MiB, or every schema in the cluster past 256 MiB (**Unreleased**). The message names the budget and what is stored ([Compatibility](schema-rules.md#compatibility)).
 - A produce to a delay child, which only its parent can feed.
 
 **What to do:** read the error message and the current state. For a schema conflict, read the current `schema_version` and retry with it as the base. For a create that must succeed once, treat "already exists" as success when the existing topic has the settings you wanted.
@@ -278,7 +279,7 @@ The error message says which limit was hit, in the same order:
 - Any change to cluster metadata (topics, fan-out links, users, decommission) while the cluster has no Raft leader or the leader cannot be reached, including a change by a user without `admin` naming a topic the receiving node does not have, when that node cannot catch up with the leader to confirm it. A leader elected moments ago may also answer `503` once while it finishes applying the log.
 - `/readyz` while the node should not take traffic, and `/healthz` once the node is shutting down.
 - Get a topic (**Unreleased**), when the answering node cannot read its own copy of the cluster metadata, for example while it catches up after a restart. A partition owner being down is not a `503`: the answer is a `200` with `partial: true`.
-- Never on a produce: a `503` there comes from a proxy in front of Narad ([Troubleshooting](../operate/troubleshooting.md#produce-503)).
+- A produce to a topic with a schema whose validation found no free slot on the node within 5 seconds (**Unreleased**): `schema: validation capacity busy, retry`. The payload was not checked or stored; retry it, preferably through another node ([Validation capacity](schema-rules.md#validation-capacity)). Any other `503` on a produce comes from a proxy in front of Narad ([Troubleshooting](../operate/troubleshooting.md#produce-503)).
 
 **Meaning:** the cluster cannot do this right now. Messages stored on a node that is down wait for it to come back; see the [failure matrix](../understand/delivery-contract.md#failure-matrix).
 

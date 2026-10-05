@@ -248,7 +248,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Topic'
         '400':
-          description: A field is invalid, the name is not allowed, or the schema cannot be registered.
+          description: A field is invalid, the name is not allowed, or the schema cannot be registered (unreleased, that includes a schema whose validation would cost too much).
         '401':
           description: Missing or wrong credentials.
         '403':
@@ -256,7 +256,7 @@ paths:
         '404':
           description: '`parent` does not exist, also after the answering node caught up with the leader.'
         '409':
-          description: The topic exists, a topic exists whose name differs only in letter case (the error names it), or `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold).
+          description: The topic exists, a topic exists whose name differs only in letter case (the error names it), `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold), or (unreleased) the schema, or the parent's schema history a child adopts, would pass a schema byte budget.
         '413':
           description: The body is over 1 MiB.
         '415':
@@ -418,7 +418,7 @@ paths:
         '404':
           description: The topic does not exist, also after the answering node caught up with the leader.
         '409':
-          description: '`schema_base_version` is not the current version, the history holds 1000 versions, the topic is a child whose schema its parent manages, or the new retention is too short for a delay child.'
+          description: '`schema_base_version` is not the current version, the history holds 1000 versions or (unreleased) the new version would take it past 4 MiB or the cluster''s schemas past 256 MiB, the topic is a child whose schema its parent manages, or the new retention is too short for a delay child.'
         '413':
           description: The body is over 1 MiB.
         '415':
@@ -544,7 +544,7 @@ paths:
         '404':
           description: The parent or the child does not exist, also after the answering node caught up with the leader.
         '409':
-          description: The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, or the delay is longer than the parent's retention can hold.
+          description: The link breaks a fan-out rule (a child has one parent and no children), the parent has 108 children, the schemas differ, the delay is longer than the parent's retention can hold, or (unreleased) the copy of the parent's schema history the child adopts would pass the cluster's schema byte budget.
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '503':
@@ -681,7 +681,7 @@ paths:
         '202':
           description: Accepted and synced to disk. The body is empty.
         '400':
-          description: Empty body, `partition` out of range, `key` or `partition` given twice, or the body fails the topic's schema.
+          description: Empty body, `partition` out of range, `key` or `partition` given twice, or the body fails the topic's schema (unreleased, that includes a body nested deeper than 256 levels).
         '401':
           description: Missing or wrong credentials.
         '403':
@@ -698,6 +698,8 @@ paths:
           description: Too many produces in flight for this user on this node, only when the operator set a produce cap ([Configuration reference](configuration.md#http)).
         '500':
           description: The node could not write to its ingress WAL. It answers every produce this way until it restarts.
+        '503':
+          description: Unreleased. The topic has a schema and every schema validation slot on the node stayed busy for 5 seconds; nothing was checked or stored. Retry, preferably through another node.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST \
@@ -745,7 +747,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProduceBatchAccepted'
         '400':
-          description: No messages, more than 100, a bad encoding, an empty payload, a message the schema refuses, or `key` or `partition` in the query.
+          description: No messages, more than 100, a bad encoding, an empty payload, a message the schema refuses (one nested deeper than 256 levels included), or `key` or `partition` in the query.
         '401':
           description: Missing or wrong credentials.
         '403':
@@ -762,6 +764,8 @@ paths:
           description: The batch does not fit this user's produce cap on this node (only when the cap is set). A batch counts as its message count, clamped to the cap.
         '500':
           description: The node could not write to its ingress WAL.
+        '503':
+          description: The topic has a schema and every schema validation slot on the node stayed busy for 5 seconds; nothing was checked or stored. Retry, preferably through another node.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/produce/batch" \

@@ -80,11 +80,11 @@ narad cluster members
 
 A produce answers `503`, often from every node at once.
 
-**Cause.** Narad itself never answers a produce with `503`. The `503` comes from the proxy in front of it, the load balancer or ingress, when no pod is ready.
+**Cause.** Narad itself answers a produce with `503` in one case only (**Unreleased**): a topic with a schema, and every schema validation slot on the node stayed busy for 5 seconds; the body then reads `schema: validation capacity busy, retry` ([Validation capacity](../reference/schema-rules.md#validation-capacity)). Any other `503` comes from the proxy in front of it, the load balancer or ingress, when no pod is ready.
 
-**Check.** `kubectl get pods -n narad`, then `/readyz` on each pod ([Start with readiness](#check-readiness)).
+**Check.** For the validation case, `narad_schema_validations_in_flight` on the node sits at its CPU count and `narad_schema_rejections_total{reason="busy"}` rises; look for producers sending large payloads, or a schema that `narad_schema_validation_seconds` shows to be slow. Otherwise, `kubectl get pods -n narad`, then `/readyz` on each pod ([Start with readiness](#check-readiness)).
 
-**Fix.** When every pod answers `no raft leader known`, follow [Not ready on every pod](#not-ready-all-pods). When pods are down, see [A node is down](#node-down).
+**Fix.** For the validation case, retry with backoff, through another node if you can, and spread large payloads out or simplify the slow schema. When every pod answers `no raft leader known`, follow [Not ready on every pod](#not-ready-all-pods). When pods are down, see [A node is down](#node-down).
 
 ### `500` on every produce {#produce-500}
 
