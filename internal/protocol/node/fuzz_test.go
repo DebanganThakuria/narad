@@ -253,6 +253,14 @@ var decoders = []decoder{
 		encode: func(v any) ([]byte, error) { return EncodeDecommissionRequest(v.(DecommissionRequest)) },
 	},
 	{
+		name: "ForgetServer",
+		decode: func(b []byte) (any, int, error) {
+			v, err := DecodeForgetServerRequest(b)
+			return v, len(v.ID), err
+		},
+		encode: func(v any) ([]byte, error) { return EncodeForgetServerRequest(v.(ForgetServerRequest)) },
+	},
+	{
 		name: "CompleteMove",
 		decode: func(b []byte) (any, int, error) {
 			v, err := DecodeCompleteMoveRequest(b)
@@ -340,6 +348,7 @@ func seedPayloads(t testing.TB) [][]byte {
 		must(EncodePrepareHandoffRequest(PrepareHandoffRequest{Topic: "orders", Partition: 1, FreezeTTLNanos: 3e10})),
 		must(EncodePrepareHandoffRequest(PrepareHandoffRequest{Topic: "orders", Partition: 1, FreezeTTLNanos: 3e10, FreezeToken: "tok-1"})),
 		must(EncodeDecommissionRequest(DecommissionRequest{ID: "n3", Cancel: true})),
+		must(EncodeForgetServerRequest(ForgetServerRequest{ID: "n4"})),
 		must(EncodeCompleteMoveRequest(CompleteMoveRequest{Topic: "orders", Partition: 2, ExpectedOwner: "n1", TargetID: "n2"})),
 		must(EncodeAbortMoveRequest(AbortMoveRequest{Topic: "orders", Partition: 2, ExpectedTarget: "n2"})),
 		must(EncodeGetAssignmentRequest(GetAssignmentRequest{Topic: "orders", Partition: 2})),
@@ -609,6 +618,16 @@ func FuzzRoundTripControl(f *testing.F) {
 			mustDecode("Decommission", err)
 			if got != want {
 				t.Fatalf("Decommission: round trip\n got %#v\nwant %#v", got, want)
+			}
+		}
+		{
+			want := ForgetServerRequest{ID: a}
+			enc, err := EncodeForgetServerRequest(want)
+			mustDecode("ForgetServer encode", err)
+			got, err := DecodeForgetServerRequest(enc)
+			mustDecode("ForgetServer", err)
+			if got != want {
+				t.Fatalf("ForgetServer: round trip\n got %#v\nwant %#v", got, want)
 			}
 		}
 		{

@@ -1545,6 +1545,66 @@ HTTP/1.1 204 No Content
 Date: Mon, 28 Sep 2026 19:31:44 GMT
 ```
 
+### Forget a Raft server with no member record {#forget-server}
+
+**Unreleased:** in master, not in v3.0.1.
+
+`POST /v1/cluster/members/{id}/forget`
+
+Removes a Raft voter or non-voter that has no member record, such as
+a joiner a 3.0.x leader admitted that never registered. Such a
+server counts against quorum as a voter, and holds back new Raft
+entry types whatever its suffrage, and decommission cannot reach
+it. Forget moves and deletes no data: it refuses a server with a
+member record, alive, dead or draining (decommission it instead),
+and one a partition assignment names. It runs on the leader;
+followers forward it. The steps are in
+[Troubleshooting](../operate/troubleshooting.md#raft-server-no-member-record).
+
+**Grant needed:** `admin`.
+
+**Parameters**
+
+| Name | Description |
+|---|---|
+| `id`<br>path, string, required | The Raft server ID, as the leader's log or `narad_raft_nonvoters` names it. |
+
+**Responses**
+
+| Status | Meaning |
+|---|---|
+| [`200`](status-codes.md#status-200) | Removed from the Raft configuration. |
+| [`400`](status-codes.md#status-400) | The ID names the leader itself. |
+| [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
+| [`403`](status-codes.md#status-403) | Not `admin`. |
+| [`404`](status-codes.md#status-404) | No Raft server has this ID. |
+| [`409`](status-codes.md#status-409) | The server has a member record (decommission it instead), or a partition assignment names it as owner or move target. |
+| [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
+| [`501`](status-codes.md#status-501) | The leader runs a release before forget. Upgrade it first. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, or the leader could not be reached. The server may have been removed; read the leader's log or retry. |
+
+**Response body (`200`)**
+
+| Field | Description |
+|---|---|
+| `id`<br>string | The Raft server ID that was removed. |
+| `voter`<br>boolean | `true` when it was a voter, `false` for a non-voter. |
+
+```sh title="Request"
+curl -i -u "$AUTH" -X POST \
+  "$NARAD/v1/cluster/members/narad-3/forget" \
+  -H "Content-Type: application/json"
+```
+
+```http title="Response"
+HTTP/1.1 200 OK
+Content-Length: 31
+Content-Type: application/json
+Date: Mon, 05 Oct 2026 14:20:04 GMT
+
+{"id":"narad-3","voter":false}
+```
+
 ## Health and metrics {#health-and-metrics}
 
 Probes and the Prometheus exposition. Where each is served, and which

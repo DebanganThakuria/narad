@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -189,5 +192,139 @@ func TestForwardedDecommissionIsAudited(t *testing.T) {
 			lines[0]["outcome"] != tc.outcome || lines[0]["status"] != float64(tc.status) {
 			t.Fatalf("%s answered %d: audit lines %v, want one with actor root, target cluster-1, outcome %s", tc.event, tc.status, lines, tc.outcome)
 		}
+	}
+}
+
+// freeAddr returns a local address nothing listens on.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	_ = l.Close()
+	return addr
+}
+
+// stageGhost leaves id in s's Raft configuration as a non-voter with no
+// member record, as a joiner that never registered is left behind.
+func stageGhost(t *testing.T, s *metastore.Store, id string) {
+	t.Helper()
+	if adm, err := s.AdmitJoiner(id, freeAddr(t)); err != nil || adm.Status != metastore.JoinStaged {
+		t.Fatalf("AdmitJoiner(%s) = %+v, %v; want staged", id, adm, err)
+	}
+}
+
+func forgetRequest(id string, u *user.User) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/v1/cluster/members/"+id+"/forget", nil)
+	req.SetPathValue("id", id)
+	if u != nil {
+		req = asUser(req, *u)
+	}
+	return req
+}
+
+// Forget is admin only; an admin's forget is audited with its outcome,
+// a refused one as rejected.
+func TestForgetIsAdminOnlyAndAudited(t *testing.T) {
+	s := newStore(t)
+	stageGhost(t, s, "ghost")
+	stageGhost(t, s, "registered")
+	if err := s.RegisterMember(context.Background(), metastore.Member{ID: "registered", Addr: "10.0.0.7:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember: %v", err)
+	}
+	var logs bytes.Buffer
+	set := handlers.New(handlers.Deps{
+		Broker: stubBroker{}, Metastore: s,
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+	})
+	lowPriv := user.User{Username: "lowpriv", Grants: []user.Grant{{Action: user.ActionProduce, Patterns: []string{"*"}}}}
+	admin := user.User{Username: "root", Root: true}
+
+	res := httptest.NewRecorder()
+	httpcluster.Forget(set).ServeHTTP(res, forgetRequest("ghost", &lowPriv))
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("non-admin forget: status = %d, want 403", res.Code)
+	}
+	if in, err := s.RaftServer("ghost"); err != nil || !in {
+		t.Fatalf("a refused forget removed the server (%v, %v)", in, err)
+	}
+
+	res = httptest.NewRecorder()
+	httpcluster.Forget(set).ServeHTTP(res, forgetRequest("registered", &admin))
+	if res.Code != http.StatusConflict || !strings.Contains(res.Body.String(), "decommission it instead") {
+		t.Fatalf("forget of a server with a member record: %d %s, want 409 saying to decommission", res.Code, res.Body)
+	}
+
+	res = httptest.NewRecorder()
+	httpcluster.Forget(set).ServeHTTP(res, forgetRequest("ghost", &admin))
+	if res.Code != http.StatusOK || strings.TrimSpace(res.Body.String()) != `{"id":"ghost","voter":false}` {
+		t.Fatalf("admin forget: %d %s, want 200 {id: ghost, voter: false}", res.Code, res.Body)
+	}
+	if in, err := s.RaftServer("ghost"); err != nil || in {
+		t.Fatalf("ghost still in the raft configuration (%v, %v)", in, err)
+	}
+
+	res = httptest.NewRecorder()
+	httpcluster.Forget(set).ServeHTTP(res, forgetRequest("ghost", &admin))
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("forget of a server already gone: %d %s, want 404", res.Code, res.Body)
+	}
+
+	var got []string
+	for _, line := range auditLines(t, &logs) {
+		if line["event"] != "cluster.forget" {
+			continue
+		}
+		if line["actor"] != "root" {
+			t.Fatalf("forget audit line %v, want actor root", line)
+		}
+		got = append(got, fmt.Sprintf("%s %s %v", line["target"], line["outcome"], line["status"]))
+	}
+	want := []string{"registered rejected 409", "ghost ok 200", "ghost rejected 404"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("forget audit lines = %q, want %q", got, want)
+	}
+}
+
+// forgetForwarder stands in for the cluster router on a follower: a
+// forget is forwarded and answered by "the leader".
+type forgetForwarder struct {
+	handlers.Router
+	calls *int
+}
+
+func (f forgetForwarder) RouteForgetServer(_ context.Context, w http.ResponseWriter, _ *http.Request, id string) bool {
+	*f.calls++
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprintf(w, `{"id":%q,"voter":true}`, id)
+	return true
+}
+
+// On a follower the forget goes to the leader through the router, and is
+// audited on the node the client called.
+func TestForgetForwardsToTheLeader(t *testing.T) {
+	s := newStore(t)
+	stageGhost(t, s, "ghost")
+	var logs bytes.Buffer
+	calls := 0
+	set := handlers.New(handlers.Deps{
+		Broker: stubBroker{}, Metastore: s,
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+		Router: forgetForwarder{calls: &calls},
+	})
+	res := httptest.NewRecorder()
+	httpcluster.Forget(set).ServeHTTP(res, forgetRequest("ghost", &user.User{Username: "root", Root: true}))
+	if res.Code != http.StatusOK || calls != 1 || !strings.Contains(res.Body.String(), `"voter":true`) {
+		t.Fatalf("forward: %d %s after %d router calls, want the leader's 200 after one", res.Code, res.Body, calls)
+	}
+	if in, err := s.RaftServer("ghost"); err != nil || !in {
+		t.Fatalf("the follower forgot the server itself (%v, %v); only the leader may", in, err)
+	}
+	lines := auditLines(t, &logs)
+	if len(lines) != 1 || lines[0]["event"] != "cluster.forget" || lines[0]["outcome"] != handlers.AuditOK || lines[0]["target"] != "ghost" {
+		t.Fatalf("audit lines %v, want one cluster.forget of ghost, outcome ok", lines)
 	}
 }

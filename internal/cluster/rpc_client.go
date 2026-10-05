@@ -60,6 +60,7 @@ type peerClient interface {
 	UpdateUser(ctx context.Context, addr, username string, body []byte) (nodewire.Response, error)
 	DeleteUser(ctx context.Context, addr, username string) (nodewire.Response, error)
 	DecommissionMember(ctx context.Context, addr, id string, cancel bool) (nodewire.Response, error)
+	ForgetServer(ctx context.Context, addr, id string) (nodewire.Response, error)
 	AppliedIndex(ctx context.Context, addr string) (uint64, error)
 }
 
@@ -413,6 +414,14 @@ func (c *PeerClient) DeleteUser(ctx context.Context, addr, username string) (nod
 func (c *PeerClient) DecommissionMember(ctx context.Context, addr, id string, cancel bool) (nodewire.Response, error) {
 	payload, err := nodewire.EncodeDecommissionRequest(nodewire.DecommissionRequest{ID: id, Cancel: cancel})
 	return c.send(ctx, addr, "decommission_member", laneControl, payload, err)
+}
+
+// ForgetServer forwards a forget (remove a Raft server with no member
+// record) to the leader at addr. A leader on a release before the
+// operation answers 400 "unsupported rpc operation"; see isUnsupportedOp.
+func (c *PeerClient) ForgetServer(ctx context.Context, addr, id string) (nodewire.Response, error) {
+	payload, err := nodewire.EncodeForgetServerRequest(nodewire.ForgetServerRequest{ID: id})
+	return c.send(ctx, addr, "forget_server", laneControl, payload, err)
 }
 
 // CompleteMove forwards the guarded ownership flip to the leader at addr.

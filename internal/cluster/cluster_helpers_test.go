@@ -37,6 +37,7 @@ type fakePeerClient struct {
 	fanoutCursorsFn       func(context.Context, string, string) ([]topic.FanoutCursorStat, error)
 	notifyTokenFn         func(context.Context, string, nodewire.TokenNotifyRequest) (nodewire.Response, error)
 	registerTokensFn      func(context.Context, string, nodewire.TokenDelta) (nodewire.Response, error)
+	forgetServerFn        func(context.Context, string, string) (nodewire.Response, error)
 }
 
 func (f fakePeerClient) GetTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error) {
@@ -100,6 +101,13 @@ func (f fakePeerClient) DeleteUser(ctx context.Context, addr, username string) (
 }
 
 func (f fakePeerClient) DecommissionMember(context.Context, string, string, bool) (nodewire.Response, error) {
+	return nodewire.Response{}, context.DeadlineExceeded
+}
+
+func (f fakePeerClient) ForgetServer(ctx context.Context, addr, id string) (nodewire.Response, error) {
+	if f.forgetServerFn != nil {
+		return f.forgetServerFn(ctx, addr, id)
+	}
 	return nodewire.Response{}, context.DeadlineExceeded
 }
 
