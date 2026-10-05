@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -434,5 +435,143 @@ func TestNotLeaderJoinAnswerNamesTheLeader(t *testing.T) {
 	waitForMember(t, follower, leaderID)
 	if body := hint(); body["leader_id"] != leaderID || body["leader_addr"] != memberAddr {
 		t.Fatalf("421 body = %v, want leader_id %s and leader_addr %s", body, leaderID, memberAddr)
+	}
+}
+
+// recordedLog keeps the level and message of every record logged
+// through it.
+type recordedLog struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (l *recordedLog) Enabled(context.Context, slog.Level) bool { return true }
+func (l *recordedLog) WithAttrs([]slog.Attr) slog.Handler       { return l }
+func (l *recordedLog) WithGroup(string) slog.Handler            { return l }
+
+func (l *recordedLog) Handle(_ context.Context, r slog.Record) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.records = append(l.records, r.Clone())
+	return nil
+}
+
+// count returns how many records at level contain msg.
+func (l *recordedLog) count(level slog.Level, msg string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, r := range l.records {
+		if r.Level == level && strings.Contains(r.Message, msg) {
+			n++
+		}
+	}
+	return n
+}
+
+// A joiner that applies fewer Raft entry types than every current
+// member is refused with 409 and code older_release: the cluster may
+// already use entries it would skip. Nothing is staged and a tombstone
+// stays. A joiner as new as the oldest member is admitted, and a join
+// from a server already in the configuration is never refused.
+func TestJoinRefusesAJoinerOlderThanEveryMember(t *testing.T) {
+	ctx := context.Background()
+	stores := newTestStoreCluster(t, "node-a")
+	leader := stores["node-a"]
+	waitStoreLeader(t, leader)
+	logs := &recordedLog{}
+	server := NewRPCServer(nil, leader, slog.New(logs))
+	now := time.Unix(1_800_000_000, 0)
+	server.now = func() time.Time { return now }
+
+	register := func(id string, entryTypes uint32) {
+		t.Helper()
+		if err := leader.RegisterMember(ctx, metastore.Member{ID: id, Addr: id + ":7942", Status: metastore.MemberAlive, Build: "narad next", EntryTypes: entryTypes}); err != nil {
+			t.Fatalf("RegisterMember(%s): %v", id, err)
+		}
+	}
+	join := func(req nodewire.JoinClusterRequest) nodewire.Response {
+		t.Helper()
+		payload, err := nodewire.EncodeJoinClusterRequest(req)
+		if err != nil {
+			t.Fatalf("encode join request: %v", err)
+		}
+		return server.handleJoinCluster(payload)
+	}
+	requireRefused := func(res nodewire.Response) {
+		t.Helper()
+		var body map[string]string
+		if res.Status != http.StatusConflict || json.Unmarshal(res.Body, &body) != nil || body["code"] != JoinCodeOlderRelease {
+			t.Fatalf("join answer = %d %s, want 409 with code %s", res.Status, res.Body, JoinCodeOlderRelease)
+		}
+		if !strings.Contains(body["error"], "upgrade") {
+			t.Fatalf("refusal %q does not say to upgrade the node", body["error"])
+		}
+	}
+	older := metastore.MaxEntryType - 1
+	// Joiners that get staged listen nowhere on loopback, so the leader's
+	// replication to them fails fast and Close does not wait on a dial.
+	oldAddr, newAddr := freeTCPAddr(t), freeTCPAddr(t)
+
+	// Every other member applies more than this release: the oldest is
+	// the leader itself, at MaxEntryType.
+	register("node-a", metastore.MaxEntryType)
+	register("node-b", metastore.MaxEntryType+1)
+	register("node-c", metastore.MaxEntryType+1)
+	if err := leader.MarkMemberDead(ctx, "node-c"); err != nil {
+		t.Fatalf("MarkMemberDead: %v", err)
+	}
+
+	res := join(nodewire.JoinClusterRequest{ID: "node-old", ClusterAddr: oldAddr, EntryTypes: older})
+	requireRefused(res)
+	if in, err := leader.RaftServer("node-old"); err != nil || in {
+		t.Fatalf("refused joiner in the raft configuration: %v, %v", in, err)
+	}
+	if n := logs.count(slog.LevelError, "older release"); n != 1 {
+		t.Fatalf("error lines for the refusal = %d, want 1", n)
+	}
+	// The joiner retries every 2 s: one error line a minute per joiner.
+	requireRefused(join(nodewire.JoinClusterRequest{ID: "node-old", ClusterAddr: oldAddr, EntryTypes: older}))
+	if n := logs.count(slog.LevelError, "older release"); n != 1 {
+		t.Fatalf("error lines after a retry within a minute = %d, want 1", n)
+	}
+	now = now.Add(time.Minute)
+	requireRefused(join(nodewire.JoinClusterRequest{ID: "node-old", ClusterAddr: oldAddr, EntryTypes: older}))
+	if n := logs.count(slog.LevelError, "older release"); n != 2 {
+		t.Fatalf("error lines a minute later = %d, want 2", n)
+	}
+
+	// A removed ID declaring an empty data directory is refused before
+	// its tombstone is cleared.
+	register("node-z", metastore.MaxEntryType+1)
+	if err := leader.RemoveMember(ctx, "node-z", 1); err != nil {
+		t.Fatalf("RemoveMember: %v", err)
+	}
+	requireRefused(join(nodewire.JoinClusterRequest{ID: "node-z", ClusterAddr: "10.0.0.9:7943", Fresh: true, EntryTypes: older}))
+	if removed, err := leader.MemberRemoved("node-z"); err != nil || !removed {
+		t.Fatalf("tombstone after a refused join: removed = %v, %v; want it kept", removed, err)
+	}
+
+	// A joiner as new as every member is staged.
+	res = join(nodewire.JoinClusterRequest{ID: "node-new", ClusterAddr: newAddr, EntryTypes: metastore.MaxEntryType + 1})
+	if res.Status != http.StatusOK {
+		t.Fatalf("join of a current joiner = %d %s, want 200", res.Status, res.Body)
+	}
+	if status, _ := joinOutcome(t, res); status != metastore.JoinStaged {
+		t.Fatalf("current joiner outcome = %q, want %q", status, metastore.JoinStaged)
+	}
+	register("node-new", metastore.MaxEntryType+1)
+
+	// A server already in the configuration is never refused: it is a
+	// member already, and its own heartbeat holds new entry types back.
+	if res := join(nodewire.JoinClusterRequest{ID: "node-new", ClusterAddr: newAddr, EntryTypes: older}); res.Status != http.StatusOK {
+		t.Fatalf("join from a configured server = %d %s, want 200", res.Status, res.Body)
+	}
+
+	// With one member no newer than the joiner, nothing is refused.
+	register("node-d", older)
+	res = join(nodewire.JoinClusterRequest{ID: "node-old", ClusterAddr: oldAddr, EntryTypes: older})
+	if res.Status != http.StatusOK {
+		t.Fatalf("join with a member at the joiner's release = %d %s, want 200", res.Status, res.Body)
 	}
 }

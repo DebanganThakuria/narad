@@ -44,15 +44,15 @@ type entryTypeReport struct {
 	self bool
 }
 
-// reportedEntryTypes is the newest entry type m applies. A record
-// without the field comes from a release that predates it (a 3.0.x
-// heartbeat, or a node rolled back to one) and reads as the set every
-// 3.0.x release applies.
-func reportedEntryTypes(m Member) uint32 {
-	if m.EntryTypes == 0 {
+// ReportedEntryTypes is the newest Raft entry type a node applies,
+// given what its heartbeat or join request reported. Nothing reported
+// (0) means a release that predates the field (3.0.x, or a node rolled
+// back to one), which applies the set every 3.0.x release applies.
+func ReportedEntryTypes(reported uint32) uint32 {
+	if reported == 0 {
 		return legacyMaxEntryType
 	}
-	return m.EntryTypes
+	return reported
 }
 
 // entryTypeReports returns a report for every server in the latest Raft
@@ -73,7 +73,7 @@ func (s *Store) entryTypeReports() ([]entryTypeReport, error) {
 		byID[string(srv.ID)] = entryTypeReport{id: string(srv.ID)}
 	}
 	for _, m := range members {
-		byID[m.ID] = entryTypeReport{id: m.ID, build: m.Build, entryTypes: reportedEntryTypes(m), recorded: true}
+		byID[m.ID] = entryTypeReport{id: m.ID, build: m.Build, entryTypes: ReportedEntryTypes(m.EntryTypes), recorded: true}
 	}
 	self := string(s.id)
 	byID[self] = entryTypeReport{id: self, build: s.fsm.build, entryTypes: MaxEntryType, recorded: true, self: true}

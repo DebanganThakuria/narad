@@ -96,6 +96,12 @@ type RPCServer struct {
 	deliveryExpiry []deliveryDeadline
 	deliveryHead   int
 	now            func() time.Time
+
+	// olderReleaseLogged is when the leader last logged refusing each
+	// joiner ID as older than every member (logOlderReleaseJoin); entries
+	// older than olderReleaseLogEvery are dropped on the next insert.
+	olderReleaseMu     sync.Mutex
+	olderReleaseLogged map[string]time.Time
 }
 
 // deliveryDeadline is one entry of the delivery expiry queue.
