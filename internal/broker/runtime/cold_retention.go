@@ -38,6 +38,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/errs"
@@ -80,11 +81,25 @@ func (g *Logs) RunColdRetention(ctx context.Context, interval time.Duration) {
 			// open never registers a new one, so this is the only other
 			// place a stalled loop would be noticed.
 			storage.EnsureReaperRunning()
-			swept, err := g.ColdRetentionOnce(ctx, time.Now())
-			if err != nil && g.logger != nil {
-				g.logger.Warn("cold retention walk", "err", err, "swept", swept)
-			}
+			g.coldRetentionTick(ctx)
 		}
+	}
+}
+
+// coldRetentionTick runs one walk for RunColdRetention. Each partition's
+// panic is contained inside the walk (sweepColdSafe); one anywhere else
+// in it is logged here and the next tick walks again, so the walk never
+// takes the node down.
+func (g *Logs) coldRetentionTick(ctx context.Context) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			g.logger.Error("cold retention walk panicked; the next interval walks again",
+				"panic", rec, "stack", string(debug.Stack()))
+		}
+	}()
+	swept, err := g.ColdRetentionOnce(ctx, time.Now())
+	if err != nil {
+		g.logger.Warn("cold retention walk", "err", err, "swept", swept)
 	}
 }
 
@@ -205,10 +220,15 @@ func (g *Logs) coldRetentionTopic(ctx context.Context, topicDir, topicName strin
 			continue
 		}
 		opened := time.Now()
-		changed, err := g.sweepColdPartition(topicName, idx)
+		changed, err := g.sweepColdSafe(topicName, idx)
 		if err != nil {
 			if errors.Is(err, errs.ErrTopicNotFound) {
 				return swept, firstErr
+			}
+			if errors.Is(err, errColdSweepPanicked) {
+				// Likely to panic again: leave it alone for a while
+				// rather than on every walk.
+				g.deferCold(key, now.Add(coldWalkRetryAfter))
 			}
 			if firstErr == nil {
 				firstErr = err
@@ -349,9 +369,14 @@ func (g *Logs) sweepColdPartition(topicName string, idx int) (changed bool, err 
 		return false, err
 	}
 
-	changed = l.SweepRetentionNow()
+	// A sweep that panics must still leave the log closed: a walk-owned
+	// entry nobody closes stays open, unseen by the walk, for good.
+	changed, err = sweepContained(l)
 
-	_, err = g.closeIfStill(keyOf(topicName, idx), entry, func(cur *logEntry) bool { return cur.walkOwned.Load() }, "cold_retention_close")
+	_, cerr := g.closeIfStill(keyOf(topicName, idx), entry, func(cur *logEntry) bool { return cur.walkOwned.Load() }, "cold_retention_close")
+	if err == nil {
+		err = cerr
+	}
 	return changed, err
 }
 

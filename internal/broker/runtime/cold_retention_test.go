@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -399,5 +400,83 @@ func TestRunColdRetentionTicksAndStops(t *testing.T) {
 	}
 	if _, open := g.Peek("orders", 0); open {
 		t.Fatal("the loop left the partition open")
+	}
+}
+
+// panicOnceRecorder is a storage.MetricsRecorder whose first
+// ObserveRetentionRun, the deferred call that ends every retention
+// sweep, panics: one partition's sweep panicking.
+type panicOnceRecorder struct {
+	armed atomic.Bool
+	runs  atomic.Int64
+}
+
+func (*panicOnceRecorder) ObserveFlush(time.Duration, int64)                 {}
+func (*panicOnceRecorder) ObserveFsync(time.Duration)                        {}
+func (*panicOnceRecorder) ObserveHighWatermarkPersist(time.Duration, string) {}
+func (*panicOnceRecorder) IncRetentionDeletion(string, int64, int64)         {}
+
+func (r *panicOnceRecorder) ObserveRetentionRun(time.Duration) {
+	r.runs.Add(1)
+	if r.armed.CompareAndSwap(true, false) {
+		panic("injected sweep panic")
+	}
+}
+
+// A panic in one partition's sweep is contained: the walk logs and
+// counts it, closes the log it opened, leaves that partition alone for a
+// while, and still sweeps the next partition. The walk runs on its own
+// goroutine with nothing above it to recover, so an escaped panic took
+// the whole node down, and a deterministic one did it on every restart.
+func TestColdWalkSurvivesAPanicInOnePartition(t *testing.T) {
+	ms := newRuntimeFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, RetentionMs: int64(time.Hour / time.Millisecond)}
+	rec := &panicOnceRecorder{}
+	g := NewLogs(t.TempDir(), storage.Options{
+		FlushInterval: 5 * time.Millisecond,
+		Retention:     storage.RetentionConfig{CheckInterval: time.Minute},
+		Metrics:       rec,
+	}, ms, nil)
+	t.Cleanup(func() { _ = g.CloseAll() })
+	for p := range 2 {
+		appendAndCommit(t, g, "orders", p, "x")
+		if err := g.ClosePartition("orders", p); err != nil {
+			t.Fatalf("ClosePartition(%d): %v", p, err)
+		}
+		ageSegments(t, g, "orders", p, 2*time.Hour)
+	}
+	rec.armed.Store(true)
+
+	var escaped any
+	var swept int
+	var err error
+	func() {
+		defer func() { escaped = recover() }()
+		swept, err = g.ColdRetentionOnce(context.Background(), time.Now())
+	}()
+	if escaped != nil {
+		t.Fatalf("a sweep panic escaped the cold walk, which would crash the node: %v", escaped)
+	}
+	if err == nil {
+		t.Fatal("the walk reported no error for a partition whose sweep panicked")
+	}
+	if swept != 1 {
+		t.Fatalf("swept = %d, want 1: the partition after the panicking one must still be swept", swept)
+	}
+	if got := testutil.ToFloat64(g.ColdRetentionPanics()); got != 1 {
+		t.Fatalf("narad_cold_retention_panics_total = %v, want 1", got)
+	}
+	if n := g.OpenCount(); n != 0 {
+		t.Fatalf("OpenCount = %d after a contained panic: the walk-owned log was left open", n)
+	}
+	if !g.coldDeferred(keyOf("orders", 0), time.Now()) {
+		t.Fatal("the partition whose sweep panicked is not left alone for a while")
+	}
+	runs := rec.runs.Load()
+	if _, err := g.ColdRetentionOnce(context.Background(), time.Now()); err != nil {
+		t.Fatalf("second walk: %v", err)
+	}
+	if got := rec.runs.Load(); got != runs {
+		t.Fatalf("the next walk swept the panicking partition again at once (%d sweeps, want %d)", got, runs)
 	}
 }

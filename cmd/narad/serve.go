@@ -150,6 +150,9 @@ func runServe(args []string) error {
 	// narad_quarantined_copies and _bytes read the inventory the startup
 	// listing and the move runner's sweep take; a scrape never walks.
 	reg.MustRegister(runtime.NewQuarantineCollector(bc.logs))
+	// narad_cold_retention_panics_total: cold walk partitions whose
+	// sweep panicked and was contained.
+	reg.MustRegister(bc.logs.ColdRetentionPanics())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

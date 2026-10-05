@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
@@ -106,6 +108,10 @@ type Logs struct {
 	// Idle eviction then closes retention logs with sealed segments too:
 	// the walk reaps them closed (see evictable).
 	coldWalkOn atomic.Bool
+
+	// coldPanics counts cold walk partitions whose open, sweep or close
+	// panicked and were contained (narad_cold_retention_panics_total).
+	coldPanics prometheus.Counter
 }
 
 // logKey names one partition log: the key of logs, produceSync and
@@ -192,6 +198,7 @@ func NewLogs(dataDir string, storageOpts storage.Options, ms metastore.Metastore
 		guards:      make(map[string]*topicGuard),
 		produceSync: make(map[logKey]*sync.Mutex),
 		removeAll:   os.RemoveAll,
+		coldPanics:  newColdPanicsCounter(),
 	}
 	if v, ok := ms.(topicVersioner); ok {
 		g.versions = v
