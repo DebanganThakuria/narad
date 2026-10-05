@@ -212,6 +212,22 @@ A password change touches only the password, and a grants change only the grants
 
 The API answers `204` and the CLI prints nothing. You cannot delete your own account or the root user.
 
+**Unreleased:** deleting a user also releases the topics it owned: their owner is cleared, so only admins manage them, and a user created later under the same name does not inherit them. Earlier releases left the name on the topics, and whoever was created under it next owned them. While any node runs an older release, the delete removes only the user and the leader logs `user deleted, but its topics still name it as owner` at warning level (`component=audit`), with the `topics` (up to 20), `topic_count` and the `reason`, which names the node holding the change back. Until that node is upgraded, do not create a user with the deleted name; delete those topics, or recreate them as an admin, instead.
+
+## Audit trail {#audit}
+
+**Unreleased:** every user create, delete, password change and grants change, and every decommission, decommission cancel and [forget](troubleshooting.md#raft-server-no-member-record), writes one log line on the node the client called, also when that node forwarded the change to the Raft leader: message `audit`, attribute `component=audit`, with `event` (`user.create`, `user.delete`, `user.password`, `user.grants`, `cluster.decommission`, `cluster.decommission.cancel` or `cluster.forget`), `actor` (the caller, empty with security off), `target`, `status` (the HTTP status the client got) and `outcome`:
+
+| `outcome` | Meaning |
+|---|---|
+| `ok` | Applied. |
+| `denied` | Refused with `403`, for example a grant the caller does not hold or a wrong current password; logged at warning level. |
+| `rejected` | Refused with another `4xx` by the node or the leader. Nothing changed. |
+| `failed` | A `5xx` decided by the node or the leader. |
+| `unknown` | The request ended without a decision the node knows: a forward to the leader whose answer never came back (`503`), or a client that went away mid-change (`499`). The change may have been applied; read the user or the members to find out. |
+
+A request refused before these checks (a caller who is not an admin, a malformed body) writes no audit line. Route `component=audit` to its own sink if you keep an audit trail.
+
 ## Manage the root user {#root-admin}
 
 The root user is called `admin`. The cluster creates it once, at its first start, when it has no users yet. It holds every permission, its grants cannot change, it cannot be deleted, and only the root user can change its password.

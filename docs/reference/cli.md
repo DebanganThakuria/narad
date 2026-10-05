@@ -205,6 +205,7 @@ Inspect partition placement and drain nodes. Every command needs the `admin` gra
 | `narad cluster moves` | List partitions moving between nodes, as JSON. |
 | `narad cluster decommission <node-id>` | Mark a node for decommission: its partitions move to the other nodes, then it leaves the Raft voters. |
 | `narad cluster decommission <node-id> --cancel` | Stop a decommission. The node keeps the partitions it still has and takes new ones again. |
+| `narad cluster members forget <node-id>` | **Unreleased.** Remove a Raft voter or non-voter that has no member record, such as a joiner that never registered. Refused for a server with a member record (decommission it instead) or one a partition assignment names. Prints `{"id":...,"voter":...}`. See [Troubleshooting](../operate/troubleshooting.md#raft-server-no-member-record). |
 
 ```sh title="Command"
 narad cluster members

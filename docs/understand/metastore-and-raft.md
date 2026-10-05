@@ -125,6 +125,14 @@ Each metadata change is a Raft entry of one type (create topic, register member,
 - **A joiner older than every member is refused.** A join request carries the newest entry type the joiner applies (none from 3.0.x, which reads as the 3.0.x set). A node not yet in the Raft configuration that applies fewer types than every member with a record (this node included) is answered `409` with code `older_release`: the cluster may already use entries it would skip. So is one that applies fewer types than the newest the leader's `fsm.db` has applied (`fsm_meta`, carried in every snapshot), whatever the records say: the log it would receive holds such entries. A server with no member record yet, such as a staged joiner, is left out of the first check, since its release is unknown and counting it as nothing would let any joiner in. A server already in the configuration is never refused; its own heartbeat holds new types back instead. The answer is a `409` so that a 3.0.x node with an empty volume, which reads only `200`, `421` and `409` as "a cluster exists", joins (and is refused) instead of bootstrapping a rival cluster ([Cluster lifecycle](cluster-lifecycle.md#join)).
 - **Older peers get the frame they know.** A 3.0.x node refuses a heartbeat or join request carrying these fields with a `400` naming trailing data, before it looks at anything else. The sender resends the same request without them at once, so a rolling upgrade needs no step and no heartbeat window is missed.
 
+The entry types added since 3.0.x, and what the leader writes until every member applies them:
+
+| Entry type | Until every member applies it |
+|---|---|
+| Delete a user and release its topics: the delete clears the owner of every topic the user owned, in the same entry, so the topics fall to admins instead of passing to the next user created under the name | The 3.0.x delete, which removes only the user. The leader logs `user deleted, but its topics still name it as owner` (warning, `component=audit`) with the topics, their count, and the member holding the type back. Do not create a user under that name again until an admin has dealt with those topics. |
+
+A Raft server with no member record holds every new type back until it registers. If it never will (a joiner that crashed or was replaced), remove it with `narad cluster members forget <id>` ([Troubleshooting](../operate/troubleshooting.md#raft-server-no-member-record)).
+
 Once every member runs a release that adds an entry type and the leader has used it, rolling a node back to a release without that type is unsupported: 3.0.x would skip those entries and a later release stops on them. Roll back before that point ([Upgrade](../operate/upgrade.md#roll-back-newer)), and never add a node on an older release to a fully upgraded cluster; the leader refuses it.
 
 ## Leader and controller {#controller}

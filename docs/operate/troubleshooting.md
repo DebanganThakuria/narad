@@ -224,7 +224,23 @@ The due lag of a delay child climbs or stays flat above 0 instead of returning t
 - `it has no member record yet`, or `its member record is marked dead`: the node is not heartbeating its membership to the leader. Check its log for `member heartbeat failed` (debug level) and the node-RPC port (7942/udp).
 - `it is draining`: the node is being decommissioned, and decommission removes it from Raft once it owns nothing. Cancel the decommission to keep it.
 
-A node on 3.0.x asks for promotion once it runs this release and restarts. A non-voter left behind by a decommission under a 3.0.x leader carries no quorum weight, but the leader keeps sending it heartbeats, and it has no member record, so the decommission cannot simply be run again. To remove it, start its pod with an empty volume (delete its PersistentVolumeClaim first): it is readmitted under its ID, and a decommission run while every node is on this release then takes it out of Raft.
+A node on 3.0.x asks for promotion once it runs this release and restarts. A non-voter left behind by a decommission under a 3.0.x leader carries no quorum weight, but the leader keeps sending it heartbeats, and it has no member record, so the decommission cannot simply be run again. **Unreleased:** remove it with `narad cluster members forget <id>`; see [A Raft server has no member record](#raft-server-no-member-record).
+
+### A Raft server has no member record {#raft-server-no-member-record}
+
+The Raft configuration holds a server that `narad cluster members` does not list. **Unreleased:** a warning names it as `raft server "<id>" has no member record, so its release is unknown`, because it holds back new Raft entry types, for example in `user deleted, but its topics still name it as owner` (`component=audit`).
+
+**Cause.** A node joined and never registered: it crashed right after its join request, could not reach the cluster, or was replaced under another ID. A 3.0.x leader admitted joiners straight into the voter set, so such a server can be a voter, and an unreachable voter counts against quorum: with one more voter down the cluster may lose its leader. A decommission under a 3.0.x leader can also leave a non-voter behind.
+
+**Check.** `narad_raft_voters` and `narad_raft_nonvoters` on the leader against the members `narad cluster members` lists, and the leader's log for `raft: failed to heartbeat to: peer=<addr>` naming an address no member has.
+
+**Fix.** **Unreleased:** remove it, from any node, while the cluster has a leader:
+
+```bash
+narad cluster members forget narad-3
+```
+
+It answers `{"id":"narad-3","voter":true}` (or `false` for a non-voter), and the leader logs `forgot a raft server with no member record` (`component=audit`). Forget moves and deletes no data. It refuses a server with a member record, alive, dead or draining (`409`; [decommission](scaling.md#decommission) it instead), one a partition assignment names (`409`), and the leader itself (`400`). A leader on an older release answers `501`: finish the upgrade first. If the node comes back later, it asks to join again and is staged as a new non-voter.
 
 ## Log lines
 
