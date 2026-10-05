@@ -181,6 +181,34 @@ func TestLongNamedTopicCannotBecomeAFanoutChild(t *testing.T) {
 	}
 }
 
+// The documented threshold: a name of up to 230 bytes can be a fan-out
+// child (its cursor file, temp suffix included, then fits the 255-byte
+// file name limit, as a real write shows), and a 231-byte one cannot.
+// Names of 201 to 230 bytes, which only an earlier release could
+// create, still attach.
+func TestFanoutChildNamesUpTo230BytesAttach(t *testing.T) {
+	longest := strings.Repeat("c", 230)
+	if err := validateFanoutChildName(longest); err != nil {
+		t.Fatalf("a 230-byte child name is refused: %v", err)
+	}
+	if err := validateFanoutChildName(longest + "c"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a 231-byte child name: err = %v, want ErrInvalid", err)
+	}
+	partitionDir := storage.TopicPartitionDir(t.TempDir(), "parent", 0)
+	if err := storage.WriteFanoutCursorCreating(partitionDir, longest, storage.FanoutCursor{Epoch: "e1", NextOffset: 0}); err != nil {
+		t.Fatalf("fan-out cursor write for a 230-byte child name: %v", err)
+	}
+
+	ms := newFakeMetastore()
+	legacy := strings.Repeat("l", 210)
+	ms.topics[legacy] = topic.Topic{Name: legacy, ID: "0000000000000001", Partitions: 3, RetentionMs: 3_600_000}
+	ms.topics["orders"] = topic.Topic{Name: "orders", ID: "0000000000000002", Partitions: 3, RetentionMs: 3_600_000}
+	m := newTestManager(t, ms, nil)
+	if err := m.AttachChild(context.Background(), "orders", legacy, 0); err != nil {
+		t.Fatalf("attach of a 210-byte child named by an earlier release: %v", err)
+	}
+}
+
 // A create or a partition increase while every live member is being
 // decommissioned is refused with a 503 that says why and what to do,
 // before anything is committed: the new partitions could have no owner,

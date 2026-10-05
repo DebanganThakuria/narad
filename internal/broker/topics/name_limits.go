@@ -15,7 +15,8 @@ package topics
 // are capped at MaxNewTopicNameBytes, which leaves room for every
 // derived name (create_test.go runs the real storage helpers at the
 // cap). Existing longer names keep working for every operation, except
-// that such a topic cannot become a fan-out child.
+// that one over maxFanoutChildNameBytes (230) cannot become a fan-out
+// child.
 //
 // Letter case. On a case-insensitive filesystem (APFS, the macOS
 // default; NTFS; Docker Desktop bind mounts) "Orders" and "orders" are
@@ -55,6 +56,10 @@ const (
 	fanoutCursorExtraBytes = len("fanout-") + len(".offset") + 1 + 10
 )
 
+// maxFanoutChildNameBytes is the longest name a fan-out child may have:
+// its cursor file name, temp suffix included, then just fits NAME_MAX.
+const maxFanoutChildNameBytes = nameMaxBytes - fanoutCursorExtraBytes
+
 // validateNewTopicName is validateTopicName plus the length cap that
 // applies to a name being created.
 func validateNewTopicName(name string) error {
@@ -77,7 +82,8 @@ func validateNewTopicName(name string) error {
 // fan-out to it could never start. Only topics named before the length
 // cap can fail it.
 func validateFanoutChildName(child string) error {
-	if n := len(child) + fanoutCursorExtraBytes; n > nameMaxBytes {
+	if len(child) > maxFanoutChildNameBytes {
+		n := len(child) + fanoutCursorExtraBytes
 		return fmt.Errorf("%w: child topic name is %d bytes; its fan-out cursor file name (%d bytes) would exceed the %d-byte file name limit, so fan-out to it could never start; use a child named in at most %d bytes",
 			ErrInvalid, len(child), n, nameMaxBytes, MaxNewTopicNameBytes)
 	}
