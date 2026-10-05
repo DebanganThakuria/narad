@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -1092,5 +1093,135 @@ func TestCallerIsDroppedOnlyForAnOlderLeadersDecodeRefusal(t *testing.T) {
 	second, _ := nodewire.DecodeTopicBodyRequest(f.payloads[1], nodewire.OpAlterTopic)
 	if first.Actor != "alice" || second.Actor != "" {
 		t.Fatalf("actors sent = %q then %q, want alice then none", first.Actor, second.Actor)
+	}
+}
+
+// purgeDeferredReply is a member's answer while its replica has not
+// applied the delete yet.
+func purgeDeferredReply() nodewire.Response {
+	return nodewire.Response{
+		Status:      http.StatusServiceUnavailable,
+		ContentType: nodewire.ContentTypeJSON,
+		Body:        []byte(`{"error":"this node's replica has not applied the topic delete yet","code":"purge_deferred"}` + "\n"),
+	}
+}
+
+// The purge fan-out follows a delete that has already committed, so a
+// client that disconnects or times out while it runs must not cancel
+// the purge on the other members (audit M8, verify-concurrency-4).
+// Master derived the fan-out from the request's context: cancelling the
+// request cancelled every member's purge, and their copies stayed until
+// they restarted.
+func TestPurgeBroadcastSurvivesACancelledRequest(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	for _, m := range []metastore.Member{
+		{ID: "node-a", Addr: "127.0.0.1:2", Status: metastore.MemberAlive},
+		{ID: "node-b", Addr: "127.0.0.1:3", Status: metastore.MemberAlive},
+	} {
+		if err := store.RegisterMember(ctx, m); err != nil {
+			t.Fatalf("RegisterMember(%s): %v", m.ID, err)
+		}
+	}
+	reqCtx, cancelReq := context.WithCancel(ctx)
+	var started sync.WaitGroup
+	started.Add(2)
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
+	router.peer = fakePeerClient{purgeTopicFn: func(ctx context.Context, _, _, _ string) (nodewire.Response, error) {
+		started.Done()
+		select {
+		case <-ctx.Done():
+			return nodewire.Response{}, ctx.Err()
+		case <-time.After(300 * time.Millisecond): // the member's purge work
+		}
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	}}
+	go func() {
+		started.Wait()
+		cancelReq() // the client goes away mid-fan-out
+	}()
+	if err := router.BroadcastDeleteTopic(reqCtx, "orders", "000000000000000c"); err != nil {
+		t.Fatalf("BroadcastDeleteTopic after the request was cancelled: %v, want every member purged", err)
+	}
+}
+
+// A member whose replica had not applied the delete answers
+// purge_deferred; the leader asks it again within the same budget, and
+// a purge that then runs is a success (audit M8). Master counted the
+// first answer as the member's final word.
+func TestPurgeBroadcastRetriesADeferredMember(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-a", Addr: "127.0.0.1:2", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember: %v", err)
+	}
+	var mu sync.Mutex
+	var calls int
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
+	router.peer = fakePeerClient{purgeTopicFn: func(context.Context, string, string, string) (nodewire.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			return purgeDeferredReply(), nil
+		}
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	}}
+	if err := router.BroadcastDeleteTopic(ctx, "orders", "000000000000000d"); err != nil {
+		t.Fatalf("BroadcastDeleteTopic: %v, want the deferred member purged on its retry", err)
+	}
+	if calls != 2 {
+		t.Fatalf("purge requests = %d, want 2 (deferred, then purged)", calls)
+	}
+}
+
+// A member that still owes the purge when the fan-out gives up is
+// logged once, at error, naming the topic, the incarnation and the
+// member, after at most three attempts (audit M8).
+func TestUnfinishedPurgeIsLoggedAtError(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	for _, m := range []metastore.Member{
+		{ID: "node-a", Addr: "127.0.0.1:2", Status: metastore.MemberAlive},
+		{ID: "node-b", Addr: "127.0.0.1:3", Status: metastore.MemberAlive},
+	} {
+		if err := store.RegisterMember(ctx, m); err != nil {
+			t.Fatalf("RegisterMember(%s): %v", m.ID, err)
+		}
+	}
+	var mu sync.Mutex
+	calls := map[string]int{}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
+	var logs bytes.Buffer
+	router.SetLogger(slog.New(slog.NewJSONHandler(&logs, nil)))
+	router.peer = fakePeerClient{purgeTopicFn: func(_ context.Context, addr, _, _ string) (nodewire.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls[addr]++
+		if addr == "127.0.0.1:2" {
+			return purgeDeferredReply(), nil
+		}
+		return nodewire.Response{Status: http.StatusNoContent}, nil
+	}}
+	if err := router.BroadcastDeleteTopic(ctx, "orders", "000000000000000e"); err == nil {
+		t.Fatal("BroadcastDeleteTopic = nil, want the member that never purged reported")
+	}
+	if calls["127.0.0.1:2"] != 3 || calls["127.0.0.1:3"] != 1 {
+		t.Fatalf("purge requests per member = %v, want 3 to the deferring member and 1 to the other", calls)
+	}
+	var lines []map[string]any
+	for _, raw := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		var line map[string]any
+		if json.Unmarshal(raw, &line) == nil && line["level"] == "ERROR" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 1 {
+		t.Fatalf("error lines = %d, want 1:\n%s", len(lines), logs.String())
+	}
+	line := lines[0]
+	members, _ := line["members"].([]any)
+	if line["topic"] != "orders" || line["incarnation"] != "000000000000000e" || len(members) != 1 || members[0] != "node-a" {
+		t.Fatalf("error line = %v, want topic orders, incarnation 000000000000000e and members [node-a]", line)
 	}
 }

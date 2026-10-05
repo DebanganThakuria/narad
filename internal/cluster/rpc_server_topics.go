@@ -213,16 +213,16 @@ func (s *RPCServer) handleDeleteTopic(payload []byte) nodewire.Response {
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid delete topic request: "+err.Error())
 	}
-	// The purge fan-out below names the incarnation being deleted, so a
-	// member that has already applied a recreate of the same name purges
-	// the old directory and not the new one. Read it before the delete
-	// removes the record; a lookup failure falls back to a purge by name.
+	// The purge fan-out below names the incarnation the delete removed,
+	// so a member that has already applied a recreate of the same name
+	// purges the old directory and not the new one (see
+	// deleteTopicReportingID).
 	ctx, refusal := s.actorContext(req.Actor)
 	if refusal != nil {
 		return *refusal
 	}
-	id := deletedIncarnation(s.broker, req.Topic)
-	if err := s.broker.DeleteTopic(ctx, req.Topic); err != nil {
+	id, err := deleteTopicReportingID(ctx, s.broker, req.Topic)
+	if err != nil {
 		purgeErr, ok := errors.AsType[brokertopics.PurgeError](err)
 		if !ok {
 			return s.brokerError("delete topic", err)
@@ -242,11 +242,10 @@ func (s *RPCServer) handleDeleteTopic(payload []byte) nodewire.Response {
 	// leader here over RPC. Best-effort: the metastore delete already
 	// succeeded, and the startup sweep reclaims any member we miss (e.g.
 	// one that is briefly unreachable), so a fan-out failure must not fail
-	// the delete.
+	// the delete. The broadcaster logs the members that still owe the
+	// purge.
 	if s.broadcaster != nil {
-		if err := s.broadcaster.BroadcastDeleteTopic(rpcRequestContext(), req.Topic, id); err != nil {
-			s.logger.Warn("broadcast topic purge after forwarded delete failed; orphans will be reclaimed by startup sweep", "topic", req.Topic, "err", err)
-		}
+		_ = s.broadcaster.BroadcastDeleteTopic(rpcRequestContext(), req.Topic, id)
 	}
 	return nodewire.Response{Status: http.StatusNoContent}
 }
@@ -286,15 +285,23 @@ func (s *RPCServer) actorContext(actor string) (context.Context, *nodewire.Respo
 	return security.WithIdentity(ctx, u), nil
 }
 
-// deletedIncarnation returns the ID of the topic incarnation a delete
-// is about to remove, or "" when it cannot be read (the purge then runs
-// by name, as before incarnation IDs).
-func deletedIncarnation(b broker.Broker, topicName string) string {
-	t, err := b.GetTopic(rpcRequestContext(), topicName)
-	if err != nil {
-		return ""
+// deleteTopicReportingID deletes the topic and returns the incarnation
+// ID the purge fan-out should name (audit M8). A broker that reports the
+// incarnation it deleted from under its name lock is asked for it, so an
+// interleaved delete and recreate cannot make the fan-out name the
+// wrong one; otherwise the ID is read before the delete, as before, and
+// a failed read purges by name. The ID accompanies a PurgeError too:
+// the metadata delete committed and the other members still have to
+// purge.
+func deleteTopicReportingID(ctx context.Context, b broker.Broker, topicName string) (string, error) {
+	if deleter, ok := b.(broker.TopicIDDeleter); ok {
+		return deleter.DeleteTopicID(ctx, topicName)
 	}
-	return t.ID
+	var id string
+	if t, err := b.GetTopic(ctx, topicName); err == nil {
+		id = t.ID
+	}
+	return id, b.DeleteTopic(ctx, topicName)
 }
 
 // purgeApplyWaitTimeout bounds how long a purge waits for the local Raft
@@ -321,8 +328,11 @@ func (s *RPCServer) handlePurgeTopic(payload []byte) nodewire.Response {
 	// catches up would let a concurrent produce-dispatch/consume re-open
 	// (and thus resurrect) the partition logs via Logs.Get, which keys
 	// off the local replica. If the replica never reflects the deletion
-	// (timeout), we skip the purge rather than risk deleting live data;
-	// the startup orphan sweep is the backstop.
+	// (timeout), we skip the purge rather than risk deleting live data
+	// and answer a retriable 503 with code purge_deferred (audit M8),
+	// not the 204 of a purge that ran: the leader then knows this member
+	// still holds the files and asks again; the startup orphan sweep is
+	// the backstop.
 	//
 	// "Reflects the deletion" is judged per INCARNATION when the purge
 	// names one: the record is gone, or the name now belongs to a
@@ -331,15 +341,37 @@ func (s *RPCServer) handlePurgeTopic(payload []byte) nodewire.Response {
 	// incarnation's directory. Judging by name alone skipped the purge
 	// whenever the name had been recreated, which left the old data in
 	// place for the new topic to reopen.
-	if s.store != nil && !s.waitIncarnationGoneLocally(req.Topic, req.ID, purgeApplyWaitTimeout) {
-		s.logger.Warn("skipping purge: local metastore still shows the topic incarnation; deferring to orphan sweep",
+	if s.store != nil && !s.waitIncarnationGoneLocally(req.Topic, req.ID, s.purgeApplyWaitTimeout()) {
+		s.logger.Warn("purge deferred: the local metastore still shows the topic incarnation; the leader may ask again, and the startup orphan sweep is the backstop",
 			"topic", req.Topic, "incarnation", req.ID)
-		return nodewire.Response{Status: http.StatusNoContent}
+		return purgeDeferredResponse()
 	}
 	if err := s.broker.PurgeTopic(rpcRequestContext(), req.Topic, req.ID); err != nil {
 		return s.brokerError("purge topic", err)
 	}
 	return nodewire.Response{Status: http.StatusNoContent}
+}
+
+// purgeApplyWaitTimeout is how long this server's purges wait for the
+// local replica to reflect a deletion: purgeApplyWait when a test set
+// it, else the package default.
+func (s *RPCServer) purgeApplyWaitTimeout() time.Duration {
+	if s.purgeApplyWait > 0 {
+		return s.purgeApplyWait
+	}
+	return purgeApplyWaitTimeout
+}
+
+// purgeDeferredResponse is the 503 of a purge skipped because the local
+// replica still shows the incarnation. The code lets the leader tell it
+// from any other 503 and ask again.
+func purgeDeferredResponse() nodewire.Response {
+	body, _ := json.Marshal(map[string]string{
+		"error": "this node's metadata replica has not applied the topic delete yet; purge deferred",
+		"code":  purgeDeferredCode,
+	})
+	body = append(body, '\n')
+	return nodewire.Response{Status: http.StatusServiceUnavailable, ContentType: nodewire.ContentTypeJSON, Body: body}
 }
 
 // waitTopicDeletedLocally returns true once the local metastore no longer

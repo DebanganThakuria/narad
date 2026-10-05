@@ -231,3 +231,59 @@ func (b *recordingIDBroadcaster) BroadcastDeleteTopic(_ context.Context, _, id s
 	b.id = id
 	return nil
 }
+
+// racingDeleteBroker models a name deleted and recreated by another
+// client between a delete handler's read of the incarnation and its
+// delete: the first GetTopic returns the incarnation it saw and then
+// the name is recreated. deleted records the incarnation each delete
+// actually removed.
+type racingDeleteBroker struct {
+	broker.Broker
+	current  topic.Topic
+	recreate topic.Topic
+	deleted  []string
+}
+
+func (b *racingDeleteBroker) GetTopic(context.Context, string) (topic.Topic, error) {
+	seen := b.current
+	if b.recreate.ID != "" {
+		b.current, b.recreate = b.recreate, topic.Topic{}
+	}
+	return seen, nil
+}
+
+func (b *racingDeleteBroker) DeleteTopic(context.Context, string) error {
+	b.deleted = append(b.deleted, b.current.ID)
+	b.current = topic.Topic{}
+	return nil
+}
+
+func (b *racingDeleteBroker) DeleteTopicID(context.Context, string) (string, error) {
+	id := b.current.ID
+	b.deleted = append(b.deleted, id)
+	b.current = topic.Topic{}
+	return id, nil
+}
+
+// The forwarded delete's purge fan-out names the incarnation the delete
+// removed, as the broker reports it from under its name lock (audit M8).
+// Master read the incarnation before the delete, so a recreate in
+// between made the fan-out name the old one while the delete removed the
+// new one, and the other members kept the deleted incarnation's files.
+func TestForwardedDeleteBroadcastsTheDeletedIncarnation(t *testing.T) {
+	br := &racingDeleteBroker{
+		current:  topic.Topic{Name: "orders", ID: "000000000000000a"},
+		recreate: topic.Topic{Name: "orders", ID: "000000000000000b"},
+	}
+	bc := &recordingIDBroadcaster{}
+	s := &RPCServer{broker: br, logger: discardLogger(), broadcaster: bc}
+	if res := s.handleDeleteTopic(encodeDeleteReq(t, "orders")); res.Status != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", res.Status)
+	}
+	if len(br.deleted) != 1 {
+		t.Fatalf("deletes = %v, want one", br.deleted)
+	}
+	if bc.id != br.deleted[0] {
+		t.Fatalf("the purge fan-out named incarnation %q, but the delete removed %q", bc.id, br.deleted[0])
+	}
+}

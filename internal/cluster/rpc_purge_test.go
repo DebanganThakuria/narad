@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -159,5 +160,36 @@ func TestRPCServerForwardedDeleteAnswers204OnLocalPurgeFailure(t *testing.T) {
 	}
 	if got := bc.seen(); len(got) != 1 || got[0] != "orders" {
 		t.Fatalf("broadcast = %v, want [orders] despite the local purge failure", got)
+	}
+}
+
+// A purge whose local replica still shows the incarnation after the
+// apply wait answers a retriable 503 with code purge_deferred instead
+// of the 204 of a purge that ran, and purges nothing (audit M8,
+// verify-concurrency-4): the leader then knows this member still holds
+// the files and asks again. Master answered 204, so the leader counted
+// the member as purged.
+func TestPurgeAnswersRetriableWhileTheReplicaLags(t *testing.T) {
+	store := newTestStore(t)
+	br := &purgeOnlyBroker{}
+	s := &RPCServer{store: store, broker: br, logger: discardLogger()}
+	s.purgeApplyWait = 100 * time.Millisecond
+	if err := store.CreateTopic(context.Background(), topic.Topic{Name: "orders", ID: "0000000000000009", Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	res := s.handlePurgeTopic(encodePurgeReq(t, "orders", "0000000000000009"))
+	if res.Status != http.StatusServiceUnavailable {
+		t.Fatalf("purge while the replica still shows the incarnation: status %d body %s, want 503", res.Status, res.Body)
+	}
+	var body struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if err := json.Unmarshal(res.Body, &body); err != nil || body.Code != "purge_deferred" || body.Error == "" {
+		t.Fatalf("body = %s (decode err %v), want an error with code purge_deferred", res.Body, err)
+	}
+	if got := br.calls(); len(got) != 0 {
+		t.Fatalf("PurgeTopic calls = %v, want none while the replica lags", got)
 	}
 }

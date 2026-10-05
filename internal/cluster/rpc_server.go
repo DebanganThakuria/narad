@@ -46,6 +46,11 @@ type RPCServer struct {
 	// agrees with the router's and the HTTP handlers'.
 	maxConsumeWait time.Duration
 
+	// purgeApplyWait overrides purgeApplyWaitTimeout, how long a purge
+	// waits for the local replica to reflect the deletion. Zero (every
+	// production server) means the default; tests shorten it.
+	purgeApplyWait time.Duration
+
 	// messagingSem bounds how many messaging handlers (acks, extends,
 	// nacks, non-blocking consumes) execute at once, and commitSem how
 	// many produce commits do. The read loop still spawns a goroutine
