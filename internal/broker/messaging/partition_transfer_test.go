@@ -468,3 +468,116 @@ func TestResetPartitionConsumerStateLiftsStaleHandoffFreeze(t *testing.T) {
 		t.Fatalf("consume after the reinstall: found=%v err=%v", found, err)
 	}
 }
+
+// committedWithHiddenFrame commits five records to orders/0 and then
+// writes and fsyncs one more frame without making it visible, which is
+// what a commit leaves between its fsync and its high-watermark advance
+// (and what a failed commit leaves when its truncate fails). It returns
+// the active segment as a listing of the committed records reports it
+// and the segment file's size with the hidden frame.
+func committedWithHiddenFrame(t *testing.T, e *Engine) (storage.SegmentInfo, int64) {
+	t.Helper()
+	ctx := context.Background()
+	var recs []ingress.ProduceRecord
+	for i := range 5 {
+		recs = append(recs, ingress.ProduceRecord{Topic: "orders", Key: "k", TargetPartition: 0, Payload: []byte{byte('a' + i)}})
+	}
+	if _, err := e.CommitAcceptedProduceBatch(ctx, recs); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	committed, err := e.PartitionTransferInfo(ctx, "orders", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := committed.Segments[len(committed.Segments)-1]
+	log, err := e.logs.Get("orders", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(storage.EncodeKeyedRecord("k", 1, []byte("UNCOMMITTED"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	dir := storage.TopicPartitionDir(e.logs.DataDir(), "orders", 0)
+	segs, err := storage.ListPartitionSegments(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	size := segs[len(segs)-1].SizeBytes
+	if size <= active.SizeBytes || log.HighWatermark() != 5 {
+		t.Fatalf("setup: file %d bytes, committed %d, hwm %d: the hidden frame did not reach the file", size, active.SizeBytes, log.HighWatermark())
+	}
+	return active, size
+}
+
+// A partition's transfer listing covers only the records below its high
+// watermark. The active segment's file also holds frames a commit wrote
+// and has not made visible; a failed commit truncates those and hands
+// their offsets to other records, so a copy that took them kept records
+// the source never committed at offsets it later committed others at.
+func TestTransferInfoListsOnlyCommittedBytes(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
+	e := newTestEngine(t, ms, nil, nil)
+	ctx := context.Background()
+	active, fileSize := committedWithHiddenFrame(t, e)
+
+	check := func(what string, info PartitionTransferInfo) {
+		t.Helper()
+		got := info.Segments[len(info.Segments)-1]
+		if info.HighWatermark != 5 || got.BaseOffset != active.BaseOffset || got.SizeBytes != active.SizeBytes {
+			t.Fatalf("%s: listed hwm %d and active segment %d with %d bytes; want hwm 5 and %d bytes (the file holds %d)",
+				what, info.HighWatermark, got.BaseOffset, got.SizeBytes, active.SizeBytes, fileSize)
+		}
+	}
+	info, err := e.PartitionTransferInfo(ctx, "orders", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("open log", info)
+
+	frozen, err := e.PrepareHandoff(ctx, "orders", 0, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("handoff freeze", frozen)
+	e.ResetPartitionConsumerState("orders", 0)
+
+	// Closed, the file keeps the frame as a hidden tail behind the
+	// boundary Close persisted; the listing still stops before it.
+	if err := e.logs.CloseAll(); err != nil {
+		t.Fatal(err)
+	}
+	info, err = e.PartitionTransferInfo(ctx, "orders", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("closed log", info)
+}
+
+// A chunk read of the active segment never serves bytes past the
+// committed boundary, whatever position and length the caller asks for.
+func TestSegmentReadNeverServesPastTheCommittedBoundary(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
+	e := newTestEngine(t, ms, nil, nil)
+	ctx := context.Background()
+	active, fileSize := committedWithHiddenFrame(t, e)
+
+	whole, err := e.ReadPartitionSegment(ctx, "orders", 0, active.BaseOffset, 0, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(whole)) != active.SizeBytes {
+		t.Fatalf("a read from 0 served %d bytes; want the %d committed bytes (the file holds %d)", len(whole), active.SizeBytes, fileSize)
+	}
+	past, err := e.ReadPartitionSegment(ctx, "orders", 0, active.BaseOffset, active.SizeBytes, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(past) != 0 {
+		t.Fatalf("a read at the committed boundary served %d bytes of an uncommitted frame", len(past))
+	}
+}

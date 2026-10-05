@@ -159,6 +159,11 @@ func (e *Engine) PartitionTransferInfo(ctx context.Context, topicName string, pa
 	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
 	info, err := e.transferInfoAt(dir, topicName, partition, func() (int64, error) {
 		return e.transferHighWatermark(dir, topicName, partition)
+	}, func(base, hwm int64) (int64, bool) {
+		if log, open := e.logs.Peek(topicName, partition); open {
+			return log.CommittedBoundary(base, hwm)
+		}
+		return 0, false
 	})
 	if err != nil {
 		return PartitionTransferInfo{}, err
@@ -254,6 +259,15 @@ func (e *Engine) EnsureTopicIncarnation(topicName, id string) error {
 // the consumer frontier, the fan-out cursor sidecars, the high watermark
 // hwmAt reports, the segment listing, and the move marker.
 //
+// The listing covers only the records below that high watermark
+// (storage.ListCommittedSegments): the active segment's file also holds
+// frames a commit wrote and has not made visible, and the hidden tail a
+// failed commit leaves, and a failed commit hands their offsets to other
+// records. A copy that took them kept records the source never
+// committed. boundary reports a segment's committed boundary from the
+// open log (Log.CommittedBoundary); when it does not know the segment
+// (the log is closed), the segment file's frames are walked.
+//
 // The order makes one listing consistent. The frontier and the fan-out
 // cursors only ever cover visible records, so read before the boundary
 // they sit below it (the frontier) or at most at it (a cursor's next
@@ -265,7 +279,7 @@ func (e *Engine) EnsureTopicIncarnation(topicName, id string) error {
 // past its log end: the records it later wrote below that frontier were
 // never delivered. The clamp below keeps the invariant even for a
 // frontier this node recovered from a file that was already past it.
-func (e *Engine) transferInfoAt(dir, topicName string, partition int, hwmAt func() (int64, error)) (PartitionTransferInfo, error) {
+func (e *Engine) transferInfoAt(dir, topicName string, partition int, hwmAt func() (int64, error), boundary func(base, hwm int64) (int64, bool)) (PartitionTransferInfo, error) {
 	committed, hasCommitted, ackedAhead, err := e.consumerFrontier(dir, topicName, partition)
 	if err != nil {
 		return PartitionTransferInfo{}, err
@@ -278,7 +292,9 @@ func (e *Engine) transferInfoAt(dir, topicName string, partition int, hwmAt func
 	if err != nil {
 		return PartitionTransferInfo{}, err
 	}
-	segs, err := storage.ListPartitionSegments(dir)
+	segs, err := storage.ListCommittedSegments(dir, hwm, func(base int64) (int64, bool) {
+		return boundary(base, hwm)
+	})
 	if err != nil {
 		return PartitionTransferInfo{}, err
 	}
@@ -362,12 +378,26 @@ func FrontierBelowBoundary(hwm, committed int64, ackedAhead []int64) (int64, []i
 // segment with the given base offset in a locally-owned partition. A
 // read past EOF returns the available bytes (the active segment grows
 // under the writer); callers re-list to learn the final size.
+//
+// While the log is open, a read never goes past the segment's committed
+// boundary, as the listing reports it: the bytes past it can be
+// truncated and rewritten with other records. A closed log's file is
+// read as it is: nothing rewrites it until the log opens, and a copy
+// asks only for the bytes a listing reported.
 func (e *Engine) ReadPartitionSegment(ctx context.Context, topicName string, partition int, baseOffset, at, length int64) ([]byte, error) {
 	if e.logs == nil {
 		return nil, unavailableError("partition logs")
 	}
 	if !e.isLocalOwner(topicName, partition) {
 		return nil, ErrNotPartitionOwner
+	}
+	if log, open := e.logs.Peek(topicName, partition); open {
+		if pos, ok := log.CommittedBoundary(baseOffset, log.HighWatermark()); ok {
+			if at >= pos {
+				return []byte{}, nil
+			}
+			length = min(length, pos-at)
+		}
 	}
 	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
 	return storage.ReadSegmentRange(dir, baseOffset, at, length)
