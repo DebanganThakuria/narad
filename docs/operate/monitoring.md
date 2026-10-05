@@ -65,6 +65,22 @@ What to do when one fires is on the [Troubleshooting](troubleshooting.md) page: 
 
 `rate(narad_errors_total[5m])`, split by its `component` and `kind` labels, makes a useful catch-all panel beside these alerts.
 
+## Read the audit log {#audit-log}
+
+Changes to users, topics and cluster membership are logged as audit lines: message `audit`, attribute `component=audit`, with `event`, `actor` (the authenticated user, empty with security off) and `target`. Route `component=audit` to its own sink if you keep an audit trail. A line is written on the node the client called, also when that node forwarded the change to the Raft leader.
+
+**Unreleased:** topic changes are audited too, one line per change once its body passed validation: `topic.create`, `topic.alter` (with `fields`, the retention, cap and partition fields it set), `topic.schema`, `topic.delete` (with `incarnation` when the node that answered ran the delete), `topic.attach` and `topic.detach` (with `child`). These lines also carry `status`, the HTTP status the client got, and `outcome`:
+
+| `outcome` | Meaning |
+|---|---|
+| `ok` | Applied. |
+| `denied` | Refused with `403`; logged at warning level. |
+| `rejected` | Refused with another `4xx` by the answering node or the leader. Nothing changed. |
+| `failed` | A `5xx` decided by the answering node or the leader. |
+| `unknown` | The request ended without a decision the answering node knows: a forward to the leader whose answer never came back (`503`), or a client that went away mid-change (`499`). The change may have been applied; read the topic to find out. |
+
+`unknown` is never logged as `rejected` or `failed`: a search for the changes that may have happened must include it along with `ok`.
+
 ## Profile with pprof {#pprof}
 
 `narad.pprof.enabled: true` serves Go's `net/http/pprof` endpoints on port 6060. They are off by default and have no authentication, so keep the port inside the cluster; the chart never routes it through the Service or an ingress. With pprof on, take a 30-second CPU profile of one pod:

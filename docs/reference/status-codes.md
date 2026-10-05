@@ -198,9 +198,9 @@ A handle carries no topic, so a handle from another topic, or one naming a parti
 
 ## 421 Misdirected Request {#status-421}
 
-**Where:** get a topic; ack, extend and nack; a replay, or a consume pinned with `partition`.
+**Where:** ack, extend and nack; a replay, or a consume pinned with `partition`; get a topic, from a v3.0.1 node only.
 
-**Meaning:** `this node does not own the requested partition`. For get a topic, the owner of one of the topic's partitions could not be found or refused to answer. For the others, the partition moved to another node while the request was served.
+**Meaning:** `this node does not own the requested partition`. The partition moved to another node while the request was served. From a v3.0.1 node, get a topic also answers `421` when the owner of one of the topic's partitions could not be found or refused to answer; an upgraded node (**Unreleased**) answers `200` instead, with `partial: true` and the unavailable partitions marked `owner_unavailable` ([Get a topic](http-api.md#get-topic)).
 
 **What to do:** retry with backoff. If get a topic keeps answering `421` from every node, see [Troubleshooting](../operate/troubleshooting.md#status-421).
 
@@ -277,6 +277,7 @@ The error message says which limit was hit, in the same order:
 - Ack, extend and nack, a replay, or a consume pinned with `partition`, when the partition's owner is down: `partition owner is down; retry later` (plain text).
 - Any change to cluster metadata (topics, fan-out links, users, decommission) while the cluster has no Raft leader or the leader cannot be reached, including a change by a user without `admin` naming a topic the receiving node does not have, when that node cannot catch up with the leader to confirm it. A leader elected moments ago may also answer `503` once while it finishes applying the log.
 - `/readyz` while the node should not take traffic, and `/healthz` once the node is shutting down.
+- Get a topic (**Unreleased**), when the answering node cannot read its own copy of the cluster metadata, for example while it catches up after a restart. A partition owner being down is not a `503`: the answer is a `200` with `partial: true`.
 - Never on a produce: a `503` there comes from a proxy in front of Narad ([Troubleshooting](../operate/troubleshooting.md#produce-503)).
 
 **Meaning:** the cluster cannot do this right now. Messages stored on a node that is down wait for it to come back; see the [failure matrix](../understand/delivery-contract.md#failure-matrix).

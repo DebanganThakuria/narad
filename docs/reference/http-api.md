@@ -323,6 +323,15 @@ Returns the topic, its current schema and statistics for each
 partition. The node that answers asks every partition's owner for
 its statistics.
 
+**Unreleased:** when some partitions' owners are down, the answer
+is still `200`. The partitions that could be read carry their
+statistics and `status` `ok`; each other one is a placeholder with
+zero statistics, `status` `owner_unavailable` and the owner's
+`owner_liveness`, and the body carries `partial: true`. Leave the
+placeholders out of any total. An owner that does not answer within
+2 seconds counts as `unreachable`. A v3.0.1 node answers `421`
+instead.
+
 **Grant needed:** Any grant that matches the topic name, ownership, or `admin`.
 
 **Parameters**
@@ -341,7 +350,8 @@ its statistics.
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | No grant on the topic. |
 | [`404`](status-codes.md#status-404) | The topic does not exist. |
-| [`421`](status-codes.md#status-421) | The owner of one of the topic's partitions could not be found or refused to answer. |
+| [`421`](status-codes.md#status-421) | From a v3.0.1 node, the owner of one of the topic's partitions could not be found or refused to answer. An upgraded node answers `200` with `partial` instead. |
+| [`503`](status-codes.md#status-503) | The answering node could not read its own copy of the cluster metadata (for example while it catches up after a restart). Retry. |
 
 **Response body (`200`)**: every field of a [Topic](#topic-object), plus:
 
@@ -350,6 +360,7 @@ its statistics.
 | `schema_version`<br>integer | Current schema version, `0` without a schema. |
 | `schema`<br>JSON | The current schema document. Absent without a schema. |
 | `partition_stats`<br>array of [Partition statistics](#partition-stats-object) | One entry per partition, or only the one `partition` asked for. |
+| `partial`<br>boolean | **Unreleased.** `true` when some entries are placeholders whose owner could not report (`status` `owner_unavailable`). Absent otherwise. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" "$NARAD/v1/topics/orders?partition=1"
@@ -357,7 +368,7 @@ curl -i -u "$AUTH" "$NARAD/v1/topics/orders?partition=1"
 
 ```http title="Response"
 HTTP/1.1 200 OK
-Content-Length: 456
+Content-Length: 470
 Content-Type: application/json
 Date: Mon, 28 Sep 2026 19:31:43 GMT
 
@@ -383,7 +394,8 @@ Date: Mon, 28 Sep 2026 19:31:43 GMT
       "high_watermark": 2,
       "size_bytes": 166,
       "oldest_segment_at": 1790623903,
-      "owner_node": "narad-0"
+      "owner_node": "narad-0",
+      "status": "ok"
     }
   ]
 }
@@ -1696,6 +1708,8 @@ Bodies that several endpoints share.
 | `size_bytes`<br>integer | Bytes on disk. |
 | `oldest_segment_at`<br>integer | Time of the oldest segment, Unix seconds. Absent when unknown. |
 | `owner_node`<br>string | ID of the node that owns the partition. |
+| `status`<br>string: `ok`, `owner_unavailable` | **Unreleased.** `ok` when the statistics are the owner's; `owner_unavailable` for a placeholder with zero statistics, because the owner could not report them. Never add a placeholder's numbers to a total. |
+| `owner_liveness`<br>string: `dead`, `unreachable`, `unknown`, `unassigned` | **Unreleased.** Why an `owner_unavailable` partition's owner could not report: `dead` (marked dead), `unreachable` (alive, but its statistics did not come back within 2 seconds), `unknown` (no member with an address), `unassigned` (no owner yet). Absent for `ok`. |
 
 ### Message object {#message-object}
 

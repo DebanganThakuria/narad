@@ -333,6 +333,15 @@ paths:
         Returns the topic, its current schema and statistics for each
         partition. The node that answers asks every partition's owner for
         its statistics.
+
+        **Unreleased:** when some partitions' owners are down, the answer
+        is still `200`. The partitions that could be read carry their
+        statistics and `status` `ok`; each other one is a placeholder with
+        zero statistics, `status` `owner_unavailable` and the owner's
+        `owner_liveness`, and the body carries `partial: true`. Leave the
+        placeholders out of any total. An owner that does not answer within
+        2 seconds counts as `unreachable`. A v3.0.1 node answers `421`
+        instead.
       x-narad-grant: |
         Any grant that matches the topic name, ownership, or `admin`.
       parameters:
@@ -358,17 +367,19 @@ paths:
         '404':
           description: The topic does not exist.
         '421':
-          description: The owner of one of the topic's partitions could not be found or refused to answer.
+          description: From a v3.0.1 node, the owner of one of the topic's partitions could not be found or refused to answer. An upgraded node answers `200` with `partial` instead.
+        '503':
+          description: The answering node could not read its own copy of the cluster metadata (for example while it catches up after a restart). Retry.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" "$NARAD/v1/topics/orders?partition=1"
           response: |
             HTTP/1.1 200 OK
-            Content-Length: 456
+            Content-Length: 470
             Content-Type: application/json
             Date: Mon, 28 Sep 2026 19:31:43 GMT
 
-            {"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":172800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"parent","children":["orders-audit"],"schema_version":0,"partition_stats":[{"index":1,"segments":1,"oldest_offset":0,"next_offset":2,"high_watermark":2,"size_bytes":166,"oldest_segment_at":1790623903,"owner_node":"narad-0"}]}
+            {"name":"orders","id":"681a429c0b683b2d","partitions":3,"retention_ms":172800000,"visibility_timeout_ms":30000,"max_in_flight_per_partition":1024,"max_acked_ahead_per_partition":1024,"created_at":1790623903,"owner":"admin","role":"parent","children":["orders-audit"],"schema_version":0,"partition_stats":[{"index":1,"segments":1,"oldest_offset":0,"next_offset":2,"high_watermark":2,"size_bytes":166,"oldest_segment_at":1790623903,"owner_node":"narad-0","status":"ok"}]}
     patch:
       operationId: alterTopic
       tags: [Topics]
@@ -1636,6 +1647,9 @@ components:
               description: One entry per partition, or only the one `partition` asked for.
               items:
                 $ref: '#/components/schemas/PartitionStats'
+            partial:
+              type: boolean
+              description: '**Unreleased.** `true` when some entries are placeholders whose owner could not report (`status` `owner_unavailable`). Absent otherwise.'
     PartitionStats:
       type: object
       properties:
@@ -1663,6 +1677,14 @@ components:
         owner_node:
           type: string
           description: ID of the node that owns the partition.
+        status:
+          type: string
+          enum: [ok, owner_unavailable]
+          description: '**Unreleased.** `ok` when the statistics are the owner''s; `owner_unavailable` for a placeholder with zero statistics, because the owner could not report them. Never add a placeholder''s numbers to a total.'
+        owner_liveness:
+          type: string
+          enum: [dead, unreachable, unknown, unassigned]
+          description: '**Unreleased.** Why an `owner_unavailable` partition''s owner could not report: `dead` (marked dead), `unreachable` (alive, but its statistics did not come back within 2 seconds), `unknown` (no member with an address), `unassigned` (no owner yet). Absent for `ok`.'
     TopicPage:
       type: object
       properties:
