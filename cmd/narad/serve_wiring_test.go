@@ -343,3 +343,44 @@ func (stubBroker) RegisterRemoteDemand(context.Context, string, brokermsg.Remote
 func (stubBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}
 
 func (stubBroker) NoteRemoteClaim(string) {}
+
+// An alter reaches a non-leader owner only through its replica, where
+// nothing calls RefreshCaps: the InFlight serve builds must read the
+// replica's topic versions, so a live shard follows the applied caps.
+func TestServeGivesInFlightTheTopicVersions(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.Storage.DataDir = t.TempDir()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := singleNodeStore(t)
+	bc, err := buildBroker(cfg, "node-1", store, schema.NewAlwaysValid(), metrics.New(prometheus.NewRegistry()), log)
+	if err != nil {
+		t.Fatalf("buildBroker() error = %v", err)
+	}
+	t.Cleanup(func() { _ = bc.broker.Close() })
+
+	if err := store.CreateTopic(ctx, topic.Topic{
+		Name: "orders", Partitions: 1, RetentionMs: topic.MinRetentionMs,
+		MaxInFlightPerPartition: 1, MaxAckedAheadPerPartition: 100,
+	}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if r, err := bc.offsets.ReserveNext(ctx, "orders", 0, time.Minute, 100); err != nil || !r.Reserved {
+		t.Fatalf("first reserve = %+v, %v", r, err)
+	}
+	if r, err := bc.offsets.ReserveNext(ctx, "orders", 0, time.Minute, 100); err != nil || r.SkipReason != "cap" {
+		t.Fatalf("second reserve under cap 1 = %+v, %v", r, err)
+	}
+
+	rec, err := store.GetTopic(ctx, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.MaxInFlightPerPartition = 10
+	if err := store.UpdateTopic(ctx, rec); err != nil {
+		t.Fatalf("UpdateTopic() error = %v", err)
+	}
+	if r, err := bc.offsets.ReserveNext(ctx, "orders", 0, time.Minute, 100); err != nil || !r.Reserved {
+		t.Fatalf("the live shard is still capped at 1 after the replica applied cap 10: %+v, %v", r, err)
+	}
+}

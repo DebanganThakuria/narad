@@ -93,9 +93,13 @@ func buildBroker(
 	logs := runtime.NewLogs(cfg.Storage.DataDir, storageOpts, ms, m)
 	lifecycle := runtime.NewLifecycle(logs, offsetCommitter.Close)
 
-	if _, ok := ms.(*metastore.Store); !ok {
+	store, ok := ms.(*metastore.Store)
+	if !ok {
 		return nil, errors.New("broker: cluster coordination requires metastore.Store")
 	}
+	// A caps alter reaches this node through its replica unless it ran
+	// here; the replica's topic versions let live shards follow it.
+	offsets.SetCapsVersions(store)
 
 	ingressManager, err := ingress.OpenManager(cfg.Storage.DataDir, ingressWALOptions(cfg.Storage))
 	if err != nil {
