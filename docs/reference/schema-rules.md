@@ -52,7 +52,7 @@ A batch produce (**Unreleased**) checks each message this way before it stores a
 
 ### Validation capacity {#validation-capacity}
 
-**Unreleased.** Small payloads validate in well under a millisecond and run as they come. A payload above 16 KiB, and any payload on a schema whose validation cost is high (one registered before the rules below existed, or one listing more than 1,024 `required`, `dependentRequired` or `dependencies` names, or more than 64 `patternProperties` keys in all), is validated under a per-node bound of one validation per CPU core. A produce that finds no free slot within 5 seconds gets [`503`](status-codes.md#status-503) (`schema validation capacity busy, retry`) and nothing is written: the payload was never checked, so retry it, preferably through another node. `narad_schema_validations_in_flight` shows how full the bound is.
+**Unreleased.** Small payloads validate in well under a millisecond and run as they come. A payload above 16 KiB, and any payload on a schema whose validation cost is high (one registered before the rules below existed, or one listing more than 1,024 `required`, `dependentRequired` or `dependencies` names, or more than 64 `patternProperties` keys in all), is validated under a per-node bound of one validation per CPU core. A produce that finds no free slot within 5 seconds gets [`503`](status-codes.md#status-503) (`schema: validation capacity busy, retry`) and nothing is written: the payload was never checked, so retry it, preferably through another node. `narad_schema_validations_in_flight` shows how full the bound is.
 
 ## Schema documents {#registration}
 
