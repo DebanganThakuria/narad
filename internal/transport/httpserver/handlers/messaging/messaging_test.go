@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1330,3 +1331,55 @@ func TestConsumeDoesNotAnnounceAnUnclampedWait(t *testing.T) {
 }
 
 func (*fakeBroker) NoteRemoteClaim(string) {}
+
+// A node being decommissioned refuses client produce, single and batch,
+// with 503 and Retry-After before it reads the body: every record it
+// accepted would be one more its ingress WAL must hand off before the
+// node can leave Raft.
+func TestDrainingNodeRefusesProduceAndBatchProduce(t *testing.T) {
+	accepted := 0
+	b := &fakeBroker{acceptProduceFn: func(_ context.Context, topicName, _ string, _ []byte, _ ...int) (ingress.AcceptedProduce, error) {
+		accepted++
+		return ingress.AcceptedProduce{Topic: topicName}, nil
+	}}
+	draining := true
+	s := handlers.New(handlers.Deps{
+		Broker: b, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Draining: func() bool { return draining },
+	})
+	for _, tc := range []struct {
+		name    string
+		path    string
+		body    string
+		handler http.HandlerFunc
+	}{
+		{"produce", "/v1/topics/orders/produce", `{"id":1}`, Produce(s)},
+		{"batch", "/v1/topics/orders/produce/batch", `{"messages":[{"value":{"id":1}}]}`, ProduceBatch(s, nil)},
+	} {
+		req := httptest.NewRequest(http.MethodPost, tc.path, bytes.NewBufferString(tc.body))
+		req.SetPathValue("topic", "orders")
+		res := httptest.NewRecorder()
+		tc.handler.ServeHTTP(res, req)
+		if res.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s while draining: status %d, want 503 (body %s)", tc.name, res.Code, res.Body)
+		}
+		if res.Header().Get("Retry-After") != "1" {
+			t.Fatalf("%s while draining: Retry-After %q, want 1", tc.name, res.Header().Get("Retry-After"))
+		}
+		if !strings.Contains(res.Body.String(), "being decommissioned") || !strings.Contains(res.Body.String(), "another node") {
+			t.Fatalf("%s while draining: body %s does not say why or what to do", tc.name, res.Body)
+		}
+	}
+	if accepted != 0 {
+		t.Fatalf("a draining node accepted %d records", accepted)
+	}
+
+	draining = false
+	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"id":1}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Produce(s).ServeHTTP(res, req)
+	if res.Code != http.StatusAccepted || accepted != 1 {
+		t.Fatalf("after the drain was cancelled: status %d, accepted %d; want 202 and 1", res.Code, accepted)
+	}
+}

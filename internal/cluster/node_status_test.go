@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/broker/ingress"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
 	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
@@ -91,5 +93,62 @@ func TestPeerClientReportsNodeStatusUnsupportedByAnOlderNode(t *testing.T) {
 	unwired := &PeerClient{frames: serverTransport{s: NewRPCServer(stubBroker{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))}}
 	if _, err := unwired.NodeStatus(context.Background(), "peer:7942"); !errors.Is(err, ErrNodeStatusUnsupported) {
 		t.Fatalf("NodeStatus from a server without status = %v, want ErrNodeStatusUnsupported", err)
+	}
+}
+
+// committingBroker commits every record it is handed.
+type committingBroker struct {
+	stubBroker
+	committed int
+}
+
+func (b *committingBroker) CommitAcceptedProduce(context.Context, ingress.ProduceRecord) (int64, error) {
+	b.committed++
+	return int64(b.committed), nil
+}
+
+func (b *committingBroker) CommitAcceptedProduceBatch(_ context.Context, records []ingress.ProduceRecord) ([]int64, error) {
+	offsets := make([]int64, len(records))
+	for i := range records {
+		b.committed++
+		offsets[i] = int64(b.committed)
+	}
+	return offsets, nil
+}
+
+// Only client produce is refused on a draining node: an owner being
+// decommissioned still commits what other nodes' dispatchers send it, or
+// records accepted elsewhere for its partitions would stall until its
+// partitions moved.
+func TestDrainingOwnerStillCommitsForwardedRecords(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "127.0.0.1:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember: %v", err)
+	}
+	if err := store.SetMemberDraining(ctx, "node-self", true); err != nil {
+		t.Fatalf("SetMemberDraining: %v", err)
+	}
+	br := &committingBroker{}
+	server := NewRPCServer(br, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	single, err := nodewire.EncodeCommitProduceRequest(nodewire.CommitProduceRequest{Topic: "orders", Key: "k", Payload: []byte("p"), CreatedAtUnixMs: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := nodewire.EncodeCommitProduceBatchRequest(nodewire.CommitProduceBatchRequest{Records: []nodewire.CommitProduceRequest{
+		{Topic: "orders", Key: "a", Payload: []byte("1"), CreatedAtUnixMs: 1},
+		{Topic: "orders", Key: "b", Payload: []byte("2"), CreatedAtUnixMs: 1},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, payload := range map[string][]byte{"commit": single, "batch commit": batch} {
+		if res := server.dispatch(ctx, requestKey{stream: 1, request: 1}, payload); res.Status != http.StatusOK {
+			t.Fatalf("%s on a draining owner: status %d (%s), want 200", name, res.Status, res.Body)
+		}
+	}
+	if br.committed != 3 {
+		t.Fatalf("committed %d records, want 3", br.committed)
 	}
 }

@@ -81,6 +81,9 @@ type InFlightHold interface {
 // MaxProduceBatch+1 (see decodeBoundedList).
 func ProduceBatch(s *handlers.Set, gate InFlightGate) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if refuseWhileDraining(s, w) {
+			return
+		}
 		topicName := r.PathValue("topic")
 		if topicName == "" {
 			s.WriteError(w, http.StatusBadRequest, "topic required")

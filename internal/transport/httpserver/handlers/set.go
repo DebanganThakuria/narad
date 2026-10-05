@@ -111,6 +111,10 @@ type Deps struct {
 
 	// Passwords is optional; see PasswordHasher.
 	Passwords PasswordHasher
+
+	// Draining reports whether this node is being decommissioned; client
+	// produce is then refused with 503. Nil never refuses.
+	Draining func() bool
 }
 
 // Set is shared by every handler subpackage. The Deps field is
