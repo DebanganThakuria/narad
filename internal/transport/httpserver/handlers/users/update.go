@@ -40,6 +40,9 @@ func UpdateGrants(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		aw := handlers.NewAuditWriter(w)
+		w = aw
+		defer aw.Audit(s, r, "user.grants", username)
 		if username == caller.Username {
 			s.WriteError(w, http.StatusForbidden, "cannot modify your own grants")
 			return
@@ -63,7 +66,7 @@ func UpdateGrants(s *handlers.Set) http.HandlerFunc {
 			Field: metastore.UserUpdateGrants,
 			User:  user.User{Username: username, Grants: req.Grants, UpdatedAtMs: time.Now().UnixMilli()},
 		}
-		committed, ok := applyUserUpdate(s, w, r, upd, "user.grants")
+		committed, ok := applyUserUpdate(s, w, r, upd)
 		if !ok {
 			return
 		}
@@ -99,6 +102,9 @@ func UpdatePassword(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, "new_password: "+err.Error())
 			return
 		}
+		aw := handlers.NewAuditWriter(w)
+		w = aw
+		defer aw.Audit(s, r, "user.password", username)
 
 		target, err := s.Deps.Metastore.GetUser(r.Context(), username)
 		if err != nil {
@@ -134,7 +140,7 @@ func UpdatePassword(s *handlers.Set) http.HandlerFunc {
 			Field: metastore.UserUpdatePassword,
 			User:  user.User{Username: username, PasswordHash: hash, UpdatedAtMs: time.Now().UnixMilli()},
 		}
-		if _, ok := applyUserUpdate(s, w, r, upd, "user.password"); !ok {
+		if _, ok := applyUserUpdate(s, w, r, upd); !ok {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -142,11 +148,11 @@ func UpdatePassword(s *handlers.Set) http.HandlerFunc {
 }
 
 // applyUserUpdate forwards the update to the leader (or applies it
-// locally on the leader), audits it, and returns the record as
-// committed. It returns ok=false when the response has already been
-// written: either by the forward (success or failure) or by the error
-// path here.
-func applyUserUpdate(s *handlers.Set, w http.ResponseWriter, r *http.Request, upd metastore.UserUpdate, event string) (user.User, bool) {
+// locally on the leader) and returns the record as committed. It returns
+// ok=false when the response has already been written: either by the
+// forward (success or failure) or by the error path here. The caller
+// audits the request.
+func applyUserUpdate(s *handlers.Set, w http.ResponseWriter, r *http.Request, upd metastore.UserUpdate) (user.User, bool) {
 	body, err := json.Marshal(upd)
 	if err != nil {
 		s.WriteError(w, http.StatusInternalServerError, "encode user update")
@@ -159,7 +165,6 @@ func applyUserUpdate(s *handlers.Set, w http.ResponseWriter, r *http.Request, up
 		s.WriteBrokerError(w, "update user", err)
 		return user.User{}, false
 	}
-	s.Audit(r, event, upd.Username)
 	// The leader's replica reflects its own apply by the time Raft
 	// returns, so this read is the committed record.
 	committed, err := s.Deps.Metastore.GetUser(r.Context(), upd.Username)

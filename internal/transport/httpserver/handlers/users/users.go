@@ -79,6 +79,9 @@ func Create(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		aw := handlers.NewAuditWriter(w)
+		w = aw
+		defer aw.Audit(s, r, "user.create", req.Username)
 		if !caller.CanDelegate(req.Grants) {
 			s.WriteError(w, http.StatusForbidden, "cannot grant permissions you do not hold")
 			return
@@ -110,7 +113,6 @@ func Create(s *handlers.Set) http.HandlerFunc {
 			s.WriteBrokerError(w, "create user", err)
 			return
 		}
-		s.Audit(r, "user.create", req.Username)
 		s.WriteJSON(w, http.StatusCreated, toResponse(u))
 	}
 }
@@ -158,6 +160,9 @@ func Delete(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 		username := r.PathValue("username")
+		aw := handlers.NewAuditWriter(w)
+		w = aw
+		defer aw.Audit(s, r, "user.delete", username)
 		target, err := s.Deps.Metastore.GetUser(r.Context(), username)
 		if err != nil {
 			s.WriteBrokerError(w, "delete user", err)
@@ -179,7 +184,6 @@ func Delete(s *handlers.Set) http.HandlerFunc {
 			s.WriteBrokerError(w, "delete user", err)
 			return
 		}
-		s.Audit(r, "user.delete", username)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

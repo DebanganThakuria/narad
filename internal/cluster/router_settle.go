@@ -47,6 +47,7 @@ func (rt *Router) settleForwardedWrite(ctx context.Context, memberAddr string, r
 // successful forward on the local replica before answering.
 func (rt *Router) writeForwardedWrite(ctx context.Context, w http.ResponseWriter, memberAddr string, res nodewire.Response, err error) bool {
 	if err != nil {
+		markForwardUndecided(w)
 		writeLeaderForwardError(w, err)
 		return true
 	}

@@ -31,6 +31,13 @@ func Decommission(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 		cancel := r.Method == http.MethodDelete
+		event := "cluster.decommission"
+		if cancel {
+			event = "cluster.decommission.cancel"
+		}
+		aw := handlers.NewAuditWriter(w)
+		w = aw
+		defer aw.Audit(s, r, event, id)
 
 		if s.Deps.Router != nil && s.Deps.Router.RouteDecommissionMember(r.Context(), w, r, id, cancel) {
 			return // forwarded to the leader; response already written
@@ -39,11 +46,6 @@ func Decommission(s *handlers.Set) http.HandlerFunc {
 			s.WriteBrokerError(w, "decommission", err)
 			return
 		}
-		event := "cluster.decommission"
-		if cancel {
-			event = "cluster.decommission.cancel"
-		}
-		s.Audit(r, event, id)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

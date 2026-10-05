@@ -51,6 +51,7 @@ func (rt *Router) RouteDeleteUser(ctx context.Context, w http.ResponseWriter, _ 
 // topic write forwards.
 func writeForwardResult(w http.ResponseWriter, res nodewire.Response, err error) bool {
 	if err != nil {
+		markForwardUndecided(w)
 		writeLeaderForwardError(w, err)
 		return true
 	}

@@ -1,7 +1,9 @@
 package cluster_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -122,5 +124,70 @@ func TestDecommissionIsAdminOnly(t *testing.T) {
 	httpcluster.Decommission(set).ServeHTTP(res, req)
 	if res.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", res.Code)
+	}
+}
+
+// decommissionRouter stands in for the cluster router on a follower: a
+// decommission is forwarded and answered with status.
+type decommissionRouter struct {
+	handlers.Router
+	status int
+}
+
+func (f decommissionRouter) RouteDecommissionMember(_ context.Context, w http.ResponseWriter, _ *http.Request, _ string, _ bool) bool {
+	w.WriteHeader(f.status)
+	return true
+}
+
+// auditLines returns the component=audit lines of a JSON log.
+func auditLines(t *testing.T, logs *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, raw := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		if len(raw) == 0 {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("log line %q: %v", raw, err)
+		}
+		if m["component"] == "audit" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// A decommission (or its cancel) a follower forwards to the leader is
+// audited on the node the client called, with the leader's answer.
+func TestForwardedDecommissionIsAudited(t *testing.T) {
+	admin := user.User{Username: "root", Root: true}
+	for _, tc := range []struct {
+		method, event string
+		status        int
+		outcome       string
+	}{
+		{http.MethodPost, "cluster.decommission", http.StatusNoContent, handlers.AuditOK},
+		{http.MethodDelete, "cluster.decommission.cancel", http.StatusNoContent, handlers.AuditOK},
+		{http.MethodPost, "cluster.decommission", http.StatusNotFound, handlers.AuditRejected},
+	} {
+		var logs bytes.Buffer
+		set := handlers.New(handlers.Deps{
+			Broker: stubBroker{}, Metastore: newStore(t),
+			Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+			Router: decommissionRouter{status: tc.status},
+		})
+		req := asUser(httptest.NewRequest(tc.method, "/v1/cluster/members/cluster-1/decommission", nil), admin)
+		req.SetPathValue("id", "cluster-1")
+		res := httptest.NewRecorder()
+		httpcluster.Decommission(set).ServeHTTP(res, req)
+		if res.Code != tc.status {
+			t.Fatalf("%s: status = %d, want the leader's %d", tc.event, res.Code, tc.status)
+		}
+		lines := auditLines(t, &logs)
+		if len(lines) != 1 || lines[0]["event"] != tc.event || lines[0]["actor"] != "root" || lines[0]["target"] != "cluster-1" ||
+			lines[0]["outcome"] != tc.outcome || lines[0]["status"] != float64(tc.status) {
+			t.Fatalf("%s answered %d: audit lines %v, want one with actor root, target cluster-1, outcome %s", tc.event, tc.status, lines, tc.outcome)
+		}
 	}
 }
