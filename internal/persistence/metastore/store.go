@@ -18,6 +18,7 @@ import (
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const applyTimeout = 5 * time.Second
@@ -55,6 +56,9 @@ type Config struct {
 	// error a node logs when it stops applying Raft entries, so the
 	// operator can tell which release stopped and why.
 	Build string
+	// Registerer, when non-nil, receives the metastore and Raft series
+	// (metrics.go) while the store is open. Nil exports none.
+	Registerer prometheus.Registerer
 }
 
 // startupLog returns cfg.Log or a discarding logger.
@@ -101,10 +105,19 @@ type Store struct {
 	// no-ops the FSM never sees".
 	logs raft.LogStore
 	log  *slog.Logger
+
+	// opened is when New began; a node that has never heard from a
+	// leader reports its last contact as this old.
+	opened time.Time
+	// registerer and collectors are the metrics registered in New and
+	// unregistered by Close.
+	registerer prometheus.Registerer
+	collectors []prometheus.Collector
 }
 
 // New opens or creates the Raft metastore at cfg.DataDir.
 func New(cfg Config) (*Store, error) {
+	opened := time.Now()
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("metastore: mkdir: %w", err)
 	}
@@ -130,11 +143,12 @@ func New(cfg Config) (*Store, error) {
 		}
 		return nil, err
 	}
-	s := &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore, logs: logStore, log: cfg.startupLog()}
+	s := &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore, logs: logStore, log: cfg.startupLog(), opened: opened}
 	// A stopped FSM takes Raft down with it, so the node stops voting,
 	// leading and acknowledging writes its replica lacks. Never from
 	// inside Apply: Shutdown waits for the FSM goroutine.
 	fsm.setOnHalt(func() { _ = r.Shutdown().Error() })
+	s.registerMetrics(cfg.Registerer)
 	return s, nil
 }
 

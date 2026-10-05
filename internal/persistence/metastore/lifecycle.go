@@ -20,8 +20,9 @@ var errPreVoteUnsupported = errors.New("metastore: transport does not support pr
 // current leader, not carried over from before the restart.
 const appliedCaughtUpContactWindow = 5 * time.Second
 
-// Close hands leadership to another voter if this node leads, shuts
-// Raft down, and closes the Raft log store and the FSM database. The
+// Close takes the store's metrics off their registry, hands leadership
+// to another voter if this node leads, shuts Raft down, and closes the
+// Raft log store and the FSM database. The
 // databases are closed even when the shutdown reports an error: a
 // Store that is gone must not keep the bbolt locks on raft.db and
 // fsm.db, or a reopen of the directory in the same process (an
@@ -35,6 +36,7 @@ const appliedCaughtUpContactWindow = 5 * time.Second
 // debug level, so the outcome is logged here; a rolling restart that
 // keeps stalling is diagnosable from the leader's last lines.
 func (s *Store) Close() error {
+	s.unregisterMetrics()
 	if s.r.State() == raft.Leader {
 		log := s.log
 		if log == nil {
