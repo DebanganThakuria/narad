@@ -8,8 +8,12 @@ PVC-backed storage.
 ```sh
 helm upgrade --install narad ./charts/narad \
   --namespace narad \
-  --create-namespace
+  --create-namespace \
+  --set networkPolicy.enabled=true
 ```
+
+With security on (the default), Raft needs mutual TLS or a fence; see
+[Network policy and Raft TLS](#network-policy-and-raft-tls).
 
 Enable an EKS LoadBalancer when you want to hit Narad from outside the cluster:
 
@@ -17,6 +21,7 @@ Enable an EKS LoadBalancer when you want to hit Narad from outside the cluster:
 helm upgrade --install narad ./charts/narad \
   --namespace narad \
   --create-namespace \
+  --set networkPolicy.enabled=true \
   --set service.loadBalancer.enabled=true
 ```
 
@@ -52,6 +57,29 @@ The chart exposes:
 * TCP `7942` for the public HTTP API.
 * UDP `7942` for Narad peer RPC.
 * TCP `7943` for Raft/bootstrap cluster traffic.
+
+## Network policy and Raft TLS
+
+Raft (`7943/tcp`) carries the cluster metadata, password hashes and grants
+included, and has no authentication of its own. With `security.enabled`,
+the broker refuses to start on plaintext Raft unless it is told the port
+is fenced, and the chart tells it so (`NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT`)
+only when that is true. Pick one:
+
+* `security.clusterTLS.enabled=true`: Raft mutual TLS, with the
+  certificates in the `narad-cluster-tls` Secret. The production choice.
+* `networkPolicy.enabled=true`: the chart renders a NetworkPolicy that
+  admits Raft (`7943/tcp`) and the node RPC plane (`7942/udp`) from this
+  release's pods only, and leaves the API (`7942/tcp`) and metrics ports
+  open, or limited to `networkPolicy.apiFrom` and
+  `networkPolicy.metricsFrom`. It needs a CNI that enforces
+  NetworkPolicy; on one that does not, nothing is fenced.
+* `security.allowPlaintextRaft=true`: you fence `7943/tcp` and `7942/udp`
+  to the narad pods some other way.
+
+With none of the three, the install fails and names them. The policy is
+useful with Raft TLS too: it keeps the node RPC plane to the release's
+pods.
 
 ## Metrics
 

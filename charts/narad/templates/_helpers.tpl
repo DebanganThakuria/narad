@@ -135,3 +135,13 @@ Container image reference.
 {{- define "narad.image" -}}
 {{- printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) -}}
 {{- end -}}
+
+{{/*
+Readers for values this chart version added. `helm upgrade --reuse-values`
+renders with the previous chart's default values, where these keys do not
+exist, so a plain .Values.networkPolicy.enabled would fail on a nil map.
+Each reader falls back to this chart's default.
+*/}}
+{{- define "narad.networkPolicyEnabled" -}}
+{{- dig "enabled" false (.Values.networkPolicy | default dict) -}}
+{{- end -}}
