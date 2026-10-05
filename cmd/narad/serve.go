@@ -167,12 +167,7 @@ func runServe(args []string) error {
 		log.Warn("advertised member address is not routable by peers; set http.addr to a host:port or give this node a hostful cluster peer entry — member registration will not converge",
 			"member_addr", memberAddr, "node", nodeID)
 	}
-	member := metastore.Member{
-		ID:          nodeID,
-		Addr:        memberAddr,
-		ClusterAddr: clusterAdvertiseAddr(cfg, nodeID),
-		Status:      metastore.MemberAlive,
-	}
+	member := localMember(nodeID, memberAddr, clusterAdvertiseAddr(cfg, nodeID))
 	cs := buildClusterStack(cfg, nodeID, ms, bc, reg, log)
 	// Registered before the goroutine drain below, so it runs after every
 	// peer-RPC user has stopped (defers are LIFO).
