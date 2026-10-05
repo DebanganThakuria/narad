@@ -153,7 +153,7 @@ func TestAppliedIndexIsCommittedWithTheEntry(t *testing.T) {
 	}
 }
 
-// L11: after a snapshot a restart neither restores the snapshot over a
+// After a snapshot a restart neither restores the snapshot over a
 // database that already covers it nor applies the tail again.
 func TestRestartAfterASnapshotReappliesNothing(t *testing.T) {
 	ctx := context.Background()
