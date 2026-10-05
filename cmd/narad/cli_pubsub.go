@@ -296,7 +296,7 @@ func peekStartCursors(c *httpClient, topic string, partition int, from int64) (m
 		}
 		if ps.unavailable() {
 			if partition < 0 {
-				return nil, fmt.Errorf("%w (peek one live partition with --partition, or give --from)", ps.unavailableError(topic))
+				return nil, fmt.Errorf("%w (peek a live partition with --partition)", ps.unavailableError(topic))
 			}
 			return nil, ps.unavailableError(topic)
 		}
