@@ -19,6 +19,16 @@ func settlePromotionsAfter(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { promotionSettle = old })
 }
 
+// waitLeaderSettled waits until leader has led for promotionSettle, so
+// a promotion the test expects does not depend on how long the setup
+// took (an fsync is far cheaper on some runners than on others).
+func waitLeaderSettled(t *testing.T, leader *Store) {
+	t.Helper()
+	waitUntil(t, promotionSettle+5*time.Second, "the leader to have led for the settle time", func() bool {
+		return leader.health.leaderFor() >= promotionSettle
+	})
+}
+
 // singleVoter opens a bootstrapped one-node store and waits until it
 // leads with its ownership view ready.
 func singleVoter(t *testing.T, id string) (*Store, string) {
@@ -101,6 +111,7 @@ func TestCaughtUpJoinerIsPromotedOnRequest(t *testing.T) {
 	}
 	registerAlive(t, leader, "ad-0", leaderAddr)
 	registerAlive(t, leader, "ad-1", joinerAddr)
+	waitLeaderSettled(t, leader)
 
 	adm, err := leader.AdmitJoiner("ad-1", joinerAddr)
 	if err != nil || adm.Status != JoinPromoted {
@@ -178,9 +189,7 @@ func TestPromotionIsDeferredForADrainingOrUnregisteredJoiner(t *testing.T) {
 	joiner, joinerAddr := joinOnlyStore(t, "ad-1")
 	stageCaughtUp(t, leader, joiner, "ad-1", joinerAddr)
 	registerAlive(t, leader, "ad-0", leaderAddr)
-	waitUntil(t, 5*time.Second, "the leader to have led for the settle time", func() bool {
-		return leader.health.leaderFor() >= promotionSettle
-	})
+	waitLeaderSettled(t, leader)
 
 	adm, err := leader.AdmitJoiner("ad-1", joinerAddr)
 	requireDeferred(t, adm, err, "no member record")
