@@ -152,6 +152,9 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	if _, err := m.topicDir(opts.Name); err != nil {
 		return topic.Topic{}, err
 	}
+	if err := m.checkPlacement(); err != nil {
+		return topic.Topic{}, err
+	}
 
 	if err := m.metastore.CreateTopic(ctx, t); err != nil {
 		if errors.Is(err, errs.ErrAlreadyExists) {

@@ -85,6 +85,24 @@ type PartitionAssigner interface {
 	AssignNewPartitions(ctx context.Context, topicName string, fromPartition, toPartition int) error
 }
 
+// placementChecker is the assigner capability behind checkPlacement
+// (implemented by *metastore.Store).
+type placementChecker interface {
+	CheckPlacement() error
+}
+
+// checkPlacement refuses, before anything is committed, a create or a
+// partition increase whose new partitions could have no owner because
+// every live member is being decommissioned
+// (metastore.ErrAllMembersDraining, which maps to 503). The partitions
+// are never placed on a draining member instead.
+func (m *Manager) checkPlacement() error {
+	if c, ok := m.assigner.(placementChecker); ok {
+		return c.CheckPlacement()
+	}
+	return nil
+}
+
 // Manager handles every topic-CRUD operation. Constructed once at
 // broker startup; safe for concurrent use.
 type Manager struct {

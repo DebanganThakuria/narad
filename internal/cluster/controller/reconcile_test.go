@@ -341,9 +341,11 @@ func TestAssignSweepSkipsDrainingMembers(t *testing.T) {
 	}
 }
 
-// With every live member draining the sweep still places the partition
-// (on a draining member): an unowned partition takes no produces at all.
-func TestAssignSweepFallsBackWhenAllDraining(t *testing.T) {
+// With every live member draining the sweep places nothing: a draining
+// member is never given new partitions, and the decommission would have
+// nowhere to move them. The partitions wait, and go to the first member
+// that is not draining once one is alive.
+func TestAssignSweepLeavesPartitionsUnassignedWhenAllDraining(t *testing.T) {
 	store := newFakeControllerStore("narad-0", "narad-1")
 	store.members[0].Draining = true
 	store.members[1].Draining = true
@@ -351,8 +353,19 @@ func TestAssignSweepFallsBackWhenAllDraining(t *testing.T) {
 	c := &Controller{store: store, cfg: Config{}.withDefaults()}
 
 	c.reconcileAssignments(context.Background())
+	if len(store.assignedLog) != 0 {
+		t.Fatalf("assigned %v with every live member draining, want none", store.assignedLog)
+	}
+
+	store.members[1].Draining = false
+	c.reconcileAssignments(context.Background())
 	if len(store.assignments["orders"]) != 3 {
-		t.Fatalf("assigned %v with every member draining, want all 3 partitions placed", store.assignedLog)
+		t.Fatalf("assigned %v once narad-1 stopped draining, want all 3 partitions placed", store.assignedLog)
+	}
+	for p, owner := range store.assignments["orders"] {
+		if owner != "narad-1" {
+			t.Fatalf("orders/%d placed on %q, want narad-1, the only member not draining", p, owner)
+		}
 	}
 }
 

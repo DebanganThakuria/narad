@@ -262,7 +262,7 @@ paths:
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '503':
-          description: The cluster has no leader to write the topic, or the answering node could not reach the leader to confirm `parent`.
+          description: The cluster has no leader to write the topic, the answering node could not reach the leader to confirm `parent`, or (unreleased) every live node is being decommissioned, so no node can take the new partitions; nothing was written.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST "$NARAD/v1/topics" \
@@ -424,7 +424,7 @@ paths:
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '503':
-          description: The cluster has no leader to write the change, or the answering node could not reach the leader to confirm a topic it does not have.
+          description: The cluster has no leader to write the change, the answering node could not reach the leader to confirm a topic it does not have, or (unreleased) a partition increase found every live node being decommissioned, so no node can take the new partitions; nothing was changed.
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X PATCH "$NARAD/v1/topics/orders" \

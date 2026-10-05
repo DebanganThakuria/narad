@@ -30,7 +30,9 @@ func (c *Controller) reconcileAssignments(ctx context.Context) {
 		return
 	}
 	// New partitions go to live members that are not being
-	// decommissioned (all live members only if every one is draining).
+	// decommissioned, never to a draining one: with every live member
+	// draining nothing is placed, PlacementMembers logs that at error
+	// level, and the partitions wait for a member that is not draining.
 	active := metastore.PlacementMembers(members)
 	if len(active) == 0 {
 		return

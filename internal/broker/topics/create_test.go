@@ -180,3 +180,56 @@ func TestLongNamedTopicCannotBecomeAFanoutChild(t *testing.T) {
 		t.Fatalf("a long-named topic as a parent: %v", err)
 	}
 }
+
+// A create or a partition increase while every live member is being
+// decommissioned is refused with a 503 that says why and what to do,
+// before anything is committed: the new partitions could have no owner,
+// and they are never placed on a draining member instead. Once a member
+// that is not draining is alive, both go through.
+func TestCreateAndPartitionIncreaseRefusedWhileEveryMemberDrains(t *testing.T) {
+	m, store := newStoreManager(t)
+	m.assigner = store
+	ctx := context.Background()
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "narad-0", Addr: "narad-0:7943", Status: metastore.MemberAlive, LastHeartbeat: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CreateTopic(ctx, CreateOpts{Name: "orders", Partitions: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMemberDraining(ctx, "narad-0", true); err != nil {
+		t.Fatal(err)
+	}
+
+	refused := func(what string, err error) {
+		t.Helper()
+		if !errors.Is(err, errs.ErrUnavailable) || !strings.Contains(err.Error(), "abort a decommission or add a node") {
+			t.Fatalf("%s with every live member draining: err = %v, want a 503 that says to abort a decommission or add a node", what, err)
+		}
+	}
+	_, err := m.CreateTopic(ctx, CreateOpts{Name: "late", Partitions: 3})
+	refused("create", err)
+	if _, err := store.GetTopic(ctx, "late"); !errors.Is(err, errs.ErrNotFound) {
+		t.Fatalf("refused create left the topic behind: %v", err)
+	}
+	_, err = m.IncreaseTopicPartitions(ctx, "orders", 6)
+	refused("partition increase", err)
+	if got, err := store.GetTopic(ctx, "orders"); err != nil || got.Partitions != 3 {
+		t.Fatalf("refused increase: orders has %d partitions (err %v), want 3", got.Partitions, err)
+	}
+	if got, _ := store.ListAssignments("orders"); len(got) != 3 {
+		t.Fatalf("orders has %d assignments, want its 3", len(got))
+	}
+
+	if err := store.SetMemberDraining(ctx, "narad-0", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CreateTopic(ctx, CreateOpts{Name: "late", Partitions: 3}); err != nil {
+		t.Fatalf("create once a member is placeable: %v", err)
+	}
+	if _, err := m.IncreaseTopicPartitions(ctx, "orders", 6); err != nil {
+		t.Fatalf("partition increase once a member is placeable: %v", err)
+	}
+	if got, _ := store.ListAssignments("orders"); len(got) != 6 {
+		t.Fatalf("orders has %d assignments after the increase, want 6", len(got))
+	}
+}

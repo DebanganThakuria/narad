@@ -213,7 +213,7 @@ forever and only leaving it out takes the default.
 | [`409`](status-codes.md#status-409) | The topic exists, a topic exists whose name differs only in letter case (the error names it), `parent` cannot take this child (role, child limit, schema, or a delay the parent's retention cannot hold), or (unreleased) the schema, or the parent's schema history a child adopts, would pass a schema byte budget. |
 | [`413`](status-codes.md#status-413) | The body is over 1 MiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
-| [`503`](status-codes.md#status-503) | The cluster has no leader to write the topic, or the answering node could not reach the leader to confirm `parent`. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the topic, the answering node could not reach the leader to confirm `parent`, or (unreleased) every live node is being decommissioned, so no node can take the new partitions; nothing was written. |
 
 **Response body (`201`)**: a [Topic](#topic-object).
 
@@ -446,7 +446,7 @@ you need all or nothing.
 | [`409`](status-codes.md#status-409) | `schema_base_version` is not the current version, the history holds 1000 versions or (unreleased) the new version would take it past 4 MiB or the cluster's schemas past 256 MiB, the topic is a child whose schema its parent manages, or the new retention is too short for a delay child. |
 | [`413`](status-codes.md#status-413) | The body is over 1 MiB. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
-| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, or the answering node could not reach the leader to confirm a topic it does not have. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, the answering node could not reach the leader to confirm a topic it does not have, or (unreleased) a partition increase found every live node being decommissioned, so no node can take the new partitions; nothing was changed. |
 
 **Response body (`200`)**: a [Topic](#topic-object).
 

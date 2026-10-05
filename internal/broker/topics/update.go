@@ -70,6 +70,10 @@ func (m *Manager) IncreaseTopicPartitions(ctx context.Context, name string, newP
 			ErrInvalid, newPartitions, current.Partitions)
 	}
 
+	if err := m.checkPlacement(); err != nil {
+		return topic.Topic{}, err
+	}
+
 	updated := current
 	updated.Partitions = newPartitions
 

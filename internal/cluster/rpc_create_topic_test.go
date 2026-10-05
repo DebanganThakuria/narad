@@ -16,11 +16,13 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/debanganthakuria/narad/internal/broker"
 	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
@@ -68,6 +70,31 @@ func TestRPCCreateTopicDecodesEveryHandlerField(t *testing.T) {
 		got.MaxAckedAheadPerPartition != 256 || string(got.Schema) != `{"type": "object"}` ||
 		got.Parent != "orders" || got.FanoutDelayMs != 60_000 || got.Owner != "svc-user" {
 		t.Fatalf("CreateOpts = %+v; a field was dropped between the wire body and the broker", got)
+	}
+}
+
+// refusingCreateBroker refuses every create with err.
+type refusingCreateBroker struct {
+	broker.Broker
+	err error
+}
+
+func (b *refusingCreateBroker) CreateTopic(context.Context, brokertopics.CreateOpts) (topic.Topic, error) {
+	return topic.Topic{}, b.err
+}
+
+// A create the leader refuses because every live member is being
+// decommissioned reaches the forwarding follower, and its client, as a
+// 503 that says why and what to do, not a 500 "create topic failed".
+func TestRPCCreateTopicRefusedWhileEveryMemberDrainsIs503(t *testing.T) {
+	payload, err := nodewire.EncodeTopicBodyRequest(nodewire.OpCreateTopic, nodewire.TopicBodyRequest{Topic: "orders", Body: []byte(`{"name":"orders","partitions":3}`)})
+	if err != nil {
+		t.Fatalf("encode request: %v", err)
+	}
+	s := NewRPCServer(&refusingCreateBroker{err: metastore.ErrAllMembersDraining}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	res := s.handleCreateTopic(payload)
+	if res.Status != http.StatusServiceUnavailable || !strings.Contains(string(res.Body), "abort a decommission or add a node") {
+		t.Fatalf("status = %d, body = %s; want 503 saying to abort a decommission or add a node", res.Status, res.Body)
 	}
 }
 

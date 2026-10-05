@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,11 +15,18 @@ import (
 
 func newTestStore(t *testing.T) *metastore.Store {
 	t.Helper()
+	return newTestStoreLogging(t, nil)
+}
+
+// newTestStoreLogging is newTestStore with the store logging on log.
+func newTestStoreLogging(t *testing.T, log *slog.Logger) *metastore.Store {
+	t.Helper()
 	s, err := metastore.New(metastore.Config{
 		NodeID:        "test-0",
 		DataDir:       t.TempDir(),
 		BindAddr:      "127.0.0.1:0",
 		AdvertiseAddr: "127.0.0.1:0",
+		Log:           log,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

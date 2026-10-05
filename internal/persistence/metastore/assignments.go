@@ -24,6 +24,15 @@ import (
 // to the create and alter paths, which log it.
 var ErrNoAliveMembers = errors.New("metastore: no alive member to own new partitions")
 
+// ErrAllMembersDraining is returned when members are alive but every one
+// of them is being decommissioned, so no member may take new partitions:
+// placing them on a draining member would override the operator's drain,
+// and the decommission would have nowhere to move them. It wraps
+// errs.ErrUnavailable (503): a create or partition increase is refused,
+// and succeeds once a member that is not draining is alive again.
+var ErrAllMembersDraining = fmt.Errorf("%w: every live member is being decommissioned, so no member can take new partitions; wait for restarting members to come back, abort a decommission or add a node",
+	errs.ErrUnavailable)
+
 // assignMu orders the read-then-assign sequences that place unassigned
 // partitions: AssignNewPartitions (topic create and alter) and the
 // controller's reconcile sweep, which takes it through LockAssignments.
@@ -149,6 +158,8 @@ func (s *Store) ListAssignments(topicName string) ([]Assignment, error) {
 // rather than nil: a create that returned success with every partition
 // unowned used to leave produces waiting in the ingress WAL and
 // consumers getting empty answers, with nothing in the log to say why.
+// With every live member draining it assigns nothing and returns
+// ErrAllMembersDraining.
 //
 // While the cluster is still forming it first waits, briefly, for the
 // voters that have not registered yet (awaitVotersRegistered), so a
@@ -174,7 +185,7 @@ func (s *Store) AssignNewPartitions(ctx context.Context, topicName string, fromP
 	}
 	active := PlacementMembers(members)
 	if len(active) == 0 {
-		return ErrNoAliveMembers
+		return PlacementRefusal(members)
 	}
 	active = RoundRobinMembers(active)
 
@@ -367,12 +378,16 @@ func ChildAwareOwner(active []Member, partition int, parentOwners map[int]string
 // members that are not being decommissioned. A draining member keeps
 // serving what it owns, but a partition placed on it would only have to
 // be moved off again, and a drain that keeps receiving new partitions
-// may never finish (audit M7).
+// may never finish.
 //
-// When every live member is draining it returns those members instead,
-// with a warning: an unowned partition takes no produces at all, which
-// is worse than one more partition for the decommission to move. With
-// no live member it returns none.
+// It never falls back to draining members. When every live member is
+// draining it returns none and logs, once per episode and at error
+// level, that new partitions have no owner: placing them on a draining
+// member would override the operator's drain, and while every live
+// member drains the decommission has nowhere to move them either. The
+// create and partition-increase paths refuse with ErrAllMembersDraining
+// (see PlacementRefusal), and the controller's sweep leaves unassigned
+// partitions unassigned until a member that is not draining is alive.
 func PlacementMembers(members []Member) []Member {
 	alive := AliveMembers(members)
 	out := make([]Member, 0, len(alive))
@@ -382,26 +397,62 @@ func PlacementMembers(members []Member) []Member {
 		}
 	}
 	if len(out) > 0 || len(alive) == 0 {
-		placementFallback.Store(false)
+		allDraining.Store(false)
 		return out
 	}
-	if !placementFallback.Swap(true) {
+	if !allDraining.Swap(true) {
 		ids := make([]string, 0, len(alive))
 		for _, m := range alive {
 			ids = append(ids, m.ID)
 		}
-		placementLog().Warn("every live member is being decommissioned; placing new partitions on draining members so they have an owner, and the decommission will move them again",
+		placementLog().Error("every live member is being decommissioned, so new partitions have no owner: topic creates and partition increases are refused and unassigned partitions stay unassigned until a member that is not draining is alive; wait for restarting members to come back, abort a decommission or add a node",
 			"members", ids)
 	}
-	return alive
+	return nil
 }
 
-// placementFallback is set while PlacementMembers is falling back to
-// draining members, so the warning is logged once per episode.
-var placementFallback atomic.Bool
+// PlacementRefusal says why PlacementMembers(members) is empty:
+// ErrNoAliveMembers when no member is alive (a cluster still forming,
+// whose controller places the partitions once members register), and
+// ErrAllMembersDraining when every live member is being decommissioned.
+// It returns nil when some member may take new partitions.
+func PlacementRefusal(members []Member) error {
+	alive := AliveMembers(members)
+	if len(alive) == 0 {
+		return ErrNoAliveMembers
+	}
+	for _, m := range alive {
+		if !m.Draining {
+			return nil
+		}
+	}
+	return ErrAllMembersDraining
+}
 
-// placementLogger is the logger PlacementMembers warns on: the logger
-// of the process's metastore (set by New), or a discarding one.
+// CheckPlacement refuses, with ErrAllMembersDraining, new partitions
+// that could have no owner because every live member is being
+// decommissioned. Leader-only, read from the local replica. The create
+// and partition-increase paths call it before they commit anything, so
+// the request is refused instead of leaving partitions unowned. No
+// alive member at all is not refused here: on a cluster still forming,
+// the controller places the partitions once members register.
+func (s *Store) CheckPlacement() error {
+	members, err := s.ListMembers()
+	if err != nil {
+		return fmt.Errorf("metastore: list members: %w", err)
+	}
+	if err := PlacementRefusal(members); errors.Is(err, ErrAllMembersDraining) {
+		return err
+	}
+	return nil
+}
+
+// allDraining is set while every live member is draining, so
+// PlacementMembers logs that once per episode.
+var allDraining atomic.Bool
+
+// placementLogger is the logger PlacementMembers logs on: the logger of
+// the process's metastore (set by New), or a discarding one.
 var placementLogger atomic.Pointer[slog.Logger]
 
 func placementLog() *slog.Logger {

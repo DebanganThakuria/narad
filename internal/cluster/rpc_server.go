@@ -677,6 +677,15 @@ func (s *RPCServer) brokerErrorStatus(op string, err error) (int, string) {
 		return http.StatusGone, err.Error()
 	case errors.Is(err, errs.ErrAckedAheadFull):
 		return http.StatusServiceUnavailable, err.Error()
+	case errors.Is(err, errs.ErrUnavailable):
+		// Retryable, as the HTTP layer maps it: no leader, a replica
+		// still catching up, or a create the leader refused because
+		// every live member is being decommissioned. The message says
+		// which, so a forwarded request's caller sees it.
+		if s.logger != nil {
+			s.logger.Warn(op+" unavailable", "err", err)
+		}
+		return http.StatusServiceUnavailable, err.Error()
 	case errors.Is(err, errs.ErrInvalidArgument),
 		errors.Is(err, errs.ErrPartitionRequired):
 		return http.StatusBadRequest, err.Error()
