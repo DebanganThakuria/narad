@@ -30,7 +30,7 @@ type fakeBroker struct {
 	createTopicFn             func(context.Context, brokertopics.CreateOpts) (topic.Topic, error)
 	increaseTopicPartitionsFn func(context.Context, string, int) (topic.Topic, error)
 	updateTopicRetentionFn    func(context.Context, string, int64) (topic.Topic, error)
-	updateTopicCapsFn         func(context.Context, string, int64, int64) (topic.Topic, error)
+	updateTopicCapsFn         func(context.Context, string, *int64, *int64) (topic.Topic, error)
 	updateTopicSchemaFn       func(context.Context, string, []byte) (topic.Topic, error)
 	deleteTopicFn             func(context.Context, string) error
 	getTopicFn                func(context.Context, string) (topic.Topic, error)
@@ -54,7 +54,7 @@ func (f *fakeBroker) UpdateTopicRetention(ctx context.Context, name string, rete
 	return f.updateTopicRetentionFn(ctx, name, retentionMs)
 }
 
-func (f *fakeBroker) UpdateTopicCaps(ctx context.Context, name string, maxInFlightPerPartition, maxAckedAheadPerPartition int64) (topic.Topic, error) {
+func (f *fakeBroker) UpdateTopicCaps(ctx context.Context, name string, maxInFlightPerPartition, maxAckedAheadPerPartition *int64) (topic.Topic, error) {
 	return f.updateTopicCapsFn(ctx, name, maxInFlightPerPartition, maxAckedAheadPerPartition)
 }
 

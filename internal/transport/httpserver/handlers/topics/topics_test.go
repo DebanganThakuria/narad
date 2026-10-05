@@ -30,7 +30,7 @@ type fakeBroker struct {
 	createTopicFn             func(context.Context, brokertopics.CreateOpts) (topic.Topic, error)
 	increaseTopicPartitionsFn func(context.Context, string, int) (topic.Topic, error)
 	updateTopicRetentionFn    func(context.Context, string, int64) (topic.Topic, error)
-	updateTopicCapsFn         func(context.Context, string, int64, int64) (topic.Topic, error)
+	updateTopicCapsFn         func(context.Context, string, *int64, *int64) (topic.Topic, error)
 	updateTopicSchemaFn       func(context.Context, string, []byte, int) (topic.Topic, error)
 	topicSchemaHistoryFn      func(context.Context, string) (topic.SchemaHistory, error)
 	deleteTopicFn             func(context.Context, string) error
@@ -161,7 +161,7 @@ func (f *fakeBroker) UpdateTopicRetention(ctx context.Context, name string, rete
 	return f.updateTopicRetentionFn(ctx, name, retentionMs)
 }
 
-func (f *fakeBroker) UpdateTopicCaps(ctx context.Context, name string, maxInFlightPerPartition, maxAckedAheadPerPartition int64) (topic.Topic, error) {
+func (f *fakeBroker) UpdateTopicCaps(ctx context.Context, name string, maxInFlightPerPartition, maxAckedAheadPerPartition *int64) (topic.Topic, error) {
 	return f.updateTopicCapsFn(ctx, name, maxInFlightPerPartition, maxAckedAheadPerPartition)
 }
 
@@ -1006,7 +1006,7 @@ func TestAlterHandlerAppliesOperationsInOrder(t *testing.T) {
 			calls = append(calls, "retention")
 			return topic.Topic{Name: "orders", MaxInFlightPerPartition: 5, MaxAckedAheadPerPartition: 6}, nil
 		},
-		updateTopicCapsFn: func(context.Context, string, int64, int64) (topic.Topic, error) {
+		updateTopicCapsFn: func(context.Context, string, *int64, *int64) (topic.Topic, error) {
 			calls = append(calls, "caps")
 			return topic.Topic{Name: "orders", MaxInFlightPerPartition: 1, MaxAckedAheadPerPartition: 2}, nil
 		},
@@ -1266,5 +1266,42 @@ func TestNegativeRetentionIsRefused(t *testing.T) {
 		if res.Code != http.StatusBadRequest {
 			t.Fatalf("alter with retention_ms %s: status %d, want 400", v, res.Code)
 		}
+	}
+}
+
+// A PATCH that sets one cap must not carry the other cap forward from
+// a read of its own. On a just-elected leader whose replica has not yet
+// applied the previous leader's last cap change, or beside a concurrent
+// PATCH of the other cap, that read is stale, and writing it back undid
+// a committed change while both clients got 200. The broker fills the
+// unset cap from the record it reads under the topic lock.
+func TestAlterOneCapKeepsTheOtherCapCommittedBefore(t *testing.T) {
+	stored := topic.Topic{Name: "orders", MaxInFlightPerPartition: 1000, MaxAckedAheadPerPartition: 10}
+	stale := topic.Topic{Name: "orders", MaxInFlightPerPartition: 1000, MaxAckedAheadPerPartition: 1000}
+	s := newTestSet(&fakeBroker{
+		getTopicFn: func(context.Context, string) (topic.Topic, error) { return stale, nil },
+		updateTopicCapsFn: func(_ context.Context, _ string, inFlight, ackedAhead *int64) (topic.Topic, error) {
+			// The broker's side: an unset cap keeps the record's value.
+			if inFlight != nil {
+				stored.MaxInFlightPerPartition = *inFlight
+			}
+			if ackedAhead != nil {
+				stored.MaxAckedAheadPerPartition = *ackedAhead
+			}
+			return stored, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/topics/orders", bytes.NewBufferString(`{"max_in_flight_per_partition":50}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Alter(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("Alter() status = %d, want 200 (body %s)", res.Code, res.Body)
+	}
+	if stored.MaxInFlightPerPartition != 50 || stored.MaxAckedAheadPerPartition != 10 {
+		t.Fatalf("caps after the PATCH = in-flight %d, acked-ahead %d; want 50 and the committed 10",
+			stored.MaxInFlightPerPartition, stored.MaxAckedAheadPerPartition)
 	}
 }

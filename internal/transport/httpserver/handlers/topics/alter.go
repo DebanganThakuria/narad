@@ -158,7 +158,11 @@ func applyAlter(ctx context.Context, s *handlers.Set, topicName string, req alte
 		}
 	}
 	if req.MaxInFlightPerPartition != nil || req.MaxAckedAheadPerPartition != nil {
-		t, err = applyCaps(ctx, s, topicName, t, req)
+		// A cap the request leaves unset is nil: the broker keeps its
+		// stored value, read under the topic lock on the leader, never one
+		// read here (a stale replica or a concurrent PATCH of the other cap
+		// would make this node write an old value back).
+		t, err = s.Deps.Broker.UpdateTopicCaps(ctx, topicName, req.MaxInFlightPerPartition, req.MaxAckedAheadPerPartition)
 		if err != nil {
 			return topic.Topic{}, err
 		}
@@ -176,28 +180,4 @@ func applyAlter(ctx context.Context, s *handlers.Set, topicName string, req alte
 		}
 	}
 	return t, nil
-}
-
-// applyCaps updates the in-flight / acked-ahead caps. A cap the
-// request leaves unset must keep its current value, so the topic is
-// fetched first unless an earlier alteration already returned it
-// (current is the zero Topic otherwise).
-func applyCaps(ctx context.Context, s *handlers.Set, topicName string, current topic.Topic, req alterRequest) (topic.Topic, error) {
-	if current.Name == "" {
-		var err error
-		current, err = s.Deps.Broker.GetTopic(ctx, topicName)
-		if err != nil {
-			return topic.Topic{}, err
-		}
-	}
-
-	inFlight := current.MaxInFlightPerPartition
-	if req.MaxInFlightPerPartition != nil {
-		inFlight = *req.MaxInFlightPerPartition
-	}
-	ackedAhead := current.MaxAckedAheadPerPartition
-	if req.MaxAckedAheadPerPartition != nil {
-		ackedAhead = *req.MaxAckedAheadPerPartition
-	}
-	return s.Deps.Broker.UpdateTopicCaps(ctx, topicName, inFlight, ackedAhead)
 }

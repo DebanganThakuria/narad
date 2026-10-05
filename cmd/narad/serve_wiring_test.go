@@ -275,7 +275,7 @@ func (stubBroker) UpdateTopicRetention(context.Context, string, int64) (topic.To
 	return topic.Topic{}, nil
 }
 
-func (stubBroker) UpdateTopicCaps(context.Context, string, int64, int64) (topic.Topic, error) {
+func (stubBroker) UpdateTopicCaps(context.Context, string, *int64, *int64) (topic.Topic, error) {
 	return topic.Topic{}, nil
 }
 

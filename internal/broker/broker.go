@@ -45,7 +45,10 @@ type Broker interface {
 	CreateTopic(ctx context.Context, opts topics.CreateOpts) (topic.Topic, error)
 	IncreaseTopicPartitions(ctx context.Context, name string, newPartitions int) (topic.Topic, error)
 	UpdateTopicRetention(ctx context.Context, name string, retentionMs int64) (topic.Topic, error)
-	UpdateTopicCaps(ctx context.Context, name string, maxInFlightPerPartition, maxAckedAheadPerPartition int64) (topic.Topic, error)
+	// UpdateTopicCaps sets the per-partition caps the call names. A nil
+	// cap keeps the stored value, read under the topic lock on the
+	// leader, so a caller never writes back a value it read earlier.
+	UpdateTopicCaps(ctx context.Context, name string, maxInFlightPerPartition, maxAckedAheadPerPartition *int64) (topic.Topic, error)
 	// UpdateTopicSchema registers a new JSON Schema version for the
 	// topic, enforcing backwards compatibility. Re-registering the
 	// current schema is a no-op. A positive baseVersion makes the

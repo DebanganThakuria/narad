@@ -611,12 +611,81 @@ func TestUpdateTopicCaps_UsesDefaultsAndPersists(t *testing.T) {
 	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, MaxInFlightPerPartition: 1, MaxAckedAheadPerPartition: 1}
 	manager := newTestManager(t, ms, nil)
 
-	updated, err := manager.UpdateTopicCaps(context.Background(), testTopicName, 0, 0)
+	updated, err := manager.UpdateTopicCaps(context.Background(), testTopicName, new(int64(0)), new(int64(0)))
 	if err != nil {
 		t.Fatalf("UpdateTopicCaps() error = %v", err)
 	}
 	if updated.MaxInFlightPerPartition != 10 || updated.MaxAckedAheadPerPartition != 11 {
 		t.Fatalf("UpdateTopicCaps() caps = %+v, want defaults", updated)
+	}
+}
+
+// A caps update changes only the caps it names. The other keeps the
+// value the record holds when read under the topic lock after the
+// leader barrier, not one a caller read earlier: on this just-elected
+// leader the replica still says acked-ahead 1000, while the previous
+// leader had committed 10 before it failed.
+func TestUpdateTopicCapsKeepsTheCapItDoesNotName(t *testing.T) {
+	ms := &laggingLeaderMetastore{
+		fakeMetastore: newFakeMetastore(),
+		stale:         map[string]topic.Topic{"orders": {Name: "orders", ID: "0000000000000001", Partitions: 3, MaxInFlightPerPartition: 1000, MaxAckedAheadPerPartition: 1000}},
+	}
+	ms.topics["orders"] = topic.Topic{Name: "orders", ID: "0000000000000001", Partitions: 3, MaxInFlightPerPartition: 1000, MaxAckedAheadPerPartition: 10}
+	m := newTestManagerForMetastore(t, ms, nil, &fakeSchemaRegistry{}, "")
+
+	updated, err := m.UpdateTopicCaps(context.Background(), "orders", new(int64(50)), nil)
+	if err != nil {
+		t.Fatalf("UpdateTopicCaps: %v", err)
+	}
+	stored := ms.topics["orders"]
+	if updated.MaxInFlightPerPartition != 50 || updated.MaxAckedAheadPerPartition != 10 ||
+		stored.MaxInFlightPerPartition != 50 || stored.MaxAckedAheadPerPartition != 10 {
+		t.Fatalf("caps returned %d/%d, stored %d/%d; want 50/10 (acked-ahead kept at the committed 10)",
+			updated.MaxInFlightPerPartition, updated.MaxAckedAheadPerPartition, stored.MaxInFlightPerPartition, stored.MaxAckedAheadPerPartition)
+	}
+
+	// Zero still inherits the default, and a call naming no cap is refused.
+	if updated, err = m.UpdateTopicCaps(context.Background(), "orders", nil, new(int64(0))); err != nil {
+		t.Fatalf("UpdateTopicCaps(acked-ahead 0): %v", err)
+	}
+	if updated.MaxInFlightPerPartition != 50 || updated.MaxAckedAheadPerPartition != 11 {
+		t.Fatalf("caps = %d/%d, want 50 and the default 11", updated.MaxInFlightPerPartition, updated.MaxAckedAheadPerPartition)
+	}
+	if _, err := m.UpdateTopicCaps(context.Background(), "orders", nil, nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("UpdateTopicCaps(no cap) = %v, want ErrInvalid", err)
+	}
+}
+
+// Two callers that each change a different cap of one topic at the same
+// time both land: neither writes back the other's cap as it read it
+// before its own write.
+func TestConcurrentUpdatesOfDifferentCapsBothLand(t *testing.T) {
+	ms := newFakeMetastore()
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, MaxInFlightPerPartition: 1, MaxAckedAheadPerPartition: 1}
+	m := newTestManager(t, ms, nil)
+	const rounds = 50
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := int64(1); i <= rounds; i++ {
+			if _, err := m.UpdateTopicCaps(context.Background(), testTopicName, new(100+i), nil); err != nil {
+				t.Errorf("in-flight update %d: %v", i, err)
+				return
+			}
+		}
+	})
+	wg.Go(func() {
+		for i := int64(1); i <= rounds; i++ {
+			if _, err := m.UpdateTopicCaps(context.Background(), testTopicName, nil, new(200+i)); err != nil {
+				t.Errorf("acked-ahead update %d: %v", i, err)
+				return
+			}
+		}
+	})
+	wg.Wait()
+	got := ms.topics[testTopicName]
+	if got.MaxInFlightPerPartition != 100+rounds || got.MaxAckedAheadPerPartition != 200+rounds {
+		t.Fatalf("caps = %d/%d, want %d/%d: one caller's change was written over",
+			got.MaxInFlightPerPartition, got.MaxAckedAheadPerPartition, 100+rounds, 200+rounds)
 	}
 }
 
@@ -965,7 +1034,7 @@ func TestTopicMutationsBarrierBeforeReading(t *testing.T) {
 			return err
 		},
 		"caps": func(m *Manager) error {
-			_, err := m.UpdateTopicCaps(context.Background(), "orders", 5, 5)
+			_, err := m.UpdateTopicCaps(context.Background(), "orders", new(int64(5)), new(int64(5)))
 			return err
 		},
 		"partitions": func(m *Manager) error {

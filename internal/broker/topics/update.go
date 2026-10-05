@@ -154,21 +154,23 @@ func (m *Manager) UpdateTopicRetention(ctx context.Context, name string, retenti
 }
 
 // UpdateTopicCaps changes the per-partition in-flight and acked-ahead
-// caps for an existing topic. Zero in either field inherits the
-// matching Config default. Effective immediately for all existing
-// in-flight shards via consumer.InFlight.RefreshCaps.
-func (m *Manager) UpdateTopicCaps(ctx context.Context, name string, maxInFlight, maxAckedAhead int64) (topic.Topic, error) {
+// caps of an existing topic. A nil cap keeps its stored value; zero
+// inherits the matching Config default. The unset cap is filled from
+// the record read under the topic lock after the leader barrier, never
+// from a caller's earlier read: on a just-elected leader whose replica
+// has not applied the previous leader's last change, or beside a
+// concurrent change of the other cap, that read is stale, and writing
+// it back would undo a committed change. Effective immediately for all
+// existing in-flight shards via consumer.InFlight.RefreshCaps.
+func (m *Manager) UpdateTopicCaps(ctx context.Context, name string, maxInFlight, maxAckedAhead *int64) (topic.Topic, error) {
 	if name == "" {
 		return topic.Topic{}, fmt.Errorf("%w: name required", ErrInvalid)
 	}
-	if maxInFlight < 0 || maxAckedAhead < 0 {
+	if maxInFlight == nil && maxAckedAhead == nil {
+		return topic.Topic{}, fmt.Errorf("%w: at least one cap is required", ErrInvalid)
+	}
+	if (maxInFlight != nil && *maxInFlight < 0) || (maxAckedAhead != nil && *maxAckedAhead < 0) {
 		return topic.Topic{}, fmt.Errorf("%w: caps must be >= 0", ErrInvalid)
-	}
-	if maxInFlight == 0 {
-		maxInFlight = m.cfg.DefaultMaxInFlightPerPartition
-	}
-	if maxAckedAhead == 0 {
-		maxAckedAhead = m.cfg.DefaultMaxAckedAheadPerPartition
 	}
 	unlock := m.lockTopicName(name)
 	defer unlock()
@@ -185,8 +187,8 @@ func (m *Manager) UpdateTopicCaps(ctx context.Context, name string, maxInFlight,
 	}
 
 	updated := current
-	updated.MaxInFlightPerPartition = maxInFlight
-	updated.MaxAckedAheadPerPartition = maxAckedAhead
+	updated.MaxInFlightPerPartition = resolveCap(maxInFlight, current.MaxInFlightPerPartition, m.cfg.DefaultMaxInFlightPerPartition)
+	updated.MaxAckedAheadPerPartition = resolveCap(maxAckedAhead, current.MaxAckedAheadPerPartition, m.cfg.DefaultMaxAckedAheadPerPartition)
 
 	if err := m.metastore.UpdateTopic(ctx, updated); err != nil {
 		if errors.Is(err, errs.ErrNotFound) {
@@ -204,9 +206,23 @@ func (m *Manager) UpdateTopicCaps(ctx context.Context, name string, maxInFlight,
 
 	m.logger.Info("topic caps updated",
 		"topic", name,
-		"max_in_flight_per_partition", maxInFlight,
-		"max_acked_ahead_per_partition", maxAckedAhead)
+		"max_in_flight_per_partition", updated.MaxInFlightPerPartition,
+		"max_acked_ahead_per_partition", updated.MaxAckedAheadPerPartition)
 	return updated, nil
+}
+
+// resolveCap is the value UpdateTopicCaps stores for one cap: the
+// requested one, or the stored one when the caller left it unset (nil),
+// with zero inheriting def.
+func resolveCap(requested *int64, stored, def int64) int64 {
+	v := stored
+	if requested != nil {
+		v = *requested
+	}
+	if v == 0 {
+		v = def
+	}
+	return v
 }
 
 // schemaPutAttempts bounds the re-read-and-retry loop in

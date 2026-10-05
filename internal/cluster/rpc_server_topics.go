@@ -175,23 +175,9 @@ func (s *RPCServer) applyTopicAlterations(ctx context.Context, topicName string,
 		}
 	}
 	if body.MaxInFlightPerPartition != nil || body.MaxAckedAheadPerPartition != nil {
-		// UpdateTopicCaps replaces both caps, so an alter that sets only one
-		// must carry the other's current value forward.
-		current := t
-		if current.Name == "" {
-			if current, err = s.broker.GetTopic(ctx, topicName); err != nil {
-				return topic.Topic{}, err
-			}
-		}
-		inFlight := current.MaxInFlightPerPartition
-		if body.MaxInFlightPerPartition != nil {
-			inFlight = *body.MaxInFlightPerPartition
-		}
-		ackedAhead := current.MaxAckedAheadPerPartition
-		if body.MaxAckedAheadPerPartition != nil {
-			ackedAhead = *body.MaxAckedAheadPerPartition
-		}
-		if t, err = s.broker.UpdateTopicCaps(ctx, topicName, inFlight, ackedAhead); err != nil {
+		// A cap the body leaves unset is nil: the Manager keeps its stored
+		// value, read under the topic lock after the leader barrier.
+		if t, err = s.broker.UpdateTopicCaps(ctx, topicName, body.MaxInFlightPerPartition, body.MaxAckedAheadPerPartition); err != nil {
 			return topic.Topic{}, err
 		}
 	}

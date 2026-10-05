@@ -42,7 +42,7 @@ func TestNonOwnerCannotAlterOrDeleteThroughTheManager(t *testing.T) {
 			return err
 		},
 		"caps": func(ctx context.Context) error {
-			_, err := m.UpdateTopicCaps(ctx, "orders", 99, 99)
+			_, err := m.UpdateTopicCaps(ctx, "orders", new(int64(99)), new(int64(99)))
 			return err
 		},
 		"partitions": func(ctx context.Context) error {
