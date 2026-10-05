@@ -149,7 +149,9 @@ Requests with one username answer `429` with `{"error":"too many failed authenti
 
 **Cause.** Each node allows each username 5 failed password checks, then one more every 12 seconds. A client with a wrong password, or someone guessing, has used them up. While they are used up, even a correct password that the node has not yet accepted is refused.
 
-**Check.** The `username` in the log line, and which clients use it.
+Or the node's failure budget is empty (unreleased): repeated wrong passwords across many usernames have used up the 32 checks the node allows for usernames with recent failures, refilled at 4 a second. Until it refills, any username whose own bucket is not full again (about 12 seconds per recent failure) is refused at once, and the node logs `authentication failure budget exhausted` at most once every 10 seconds. Usernames with no recent failures are not affected.
+
+**Check.** The `username` in the log line, and which clients use it. For the budget, look for `authentication failure budget exhausted` and a rising `narad_auth_verify_queued`.
 
 **Fix.** Correct the client's password. The node accepts the correct one again after at most 12 seconds without failures. How the throttle works: [Networking and security](../understand/networking-and-security.md#auth-throttle).
 

@@ -216,15 +216,18 @@ The API answers `204` and the CLI prints nothing. You cannot delete your own acc
 
 The root user is called `admin`. The cluster creates it once, at its first start, when it has no users yet. It holds every permission, its grants cannot change, it cannot be deleted, and only the root user can change its password.
 
-Its first password comes from the `admin-password` key of the chart's security secret (`NARAD_ADMIN_PASSWORD` outside the chart). If that key is missing, the node that creates the user generates a password and logs it once, at warning level. Find it in the logs of the first pods:
+Its first password comes from the `admin-password` key of the chart's security secret (`NARAD_ADMIN_PASSWORD` outside the chart). If that key is missing, the node that creates the user generates a password. The password is never logged (unreleased; earlier releases logged it once, at warning level). That node writes it to the file `admin-password` in its data directory (`storage.data_dir`, `/var/lib/narad` under the chart), readable only by the Narad process user, and logs `seeded root admin with a generated password` at warning level with the file's `path` and its `node`. Find that node in the logs of the first pods, then read the file on it:
 
 ```bash
 for pod in narad-0 narad-1 narad-2; do
-  kubectl logs -n narad "$pod" | grep 'GENERATED password'
+  kubectl logs -n narad "$pod" | grep 'seeded root admin with a generated password'
 done
+kubectl exec -n narad narad-0 -- cat /var/lib/narad/admin-password  # the pod that logged the line
 ```
 
-Change a generated password straight away. The secret is read only when the root user is created, so editing `admin-password` later changes nothing. Change the password through the API instead, signed in as `admin`:
+An existing file is never overwritten: if `admin-password` was already there, the log line names `admin-password.<digits>` instead. If the node cannot write the file, it does not create the root user yet: it logs `not seeding the root admin yet` at error level and tries again every 2 seconds.
+
+Change a generated password straight away, then delete the file. The secret is read only when the root user is created, so editing the secret's `admin-password` key later changes nothing; a node that starts with `NARAD_ADMIN_PASSWORD` set on a cluster that already has users, and finds it is not root's password, logs `NARAD_ADMIN_PASSWORD is set but ignored` at warning level (unreleased). Change the password through the API instead, signed in as `admin`:
 
 ```bash
 ROOT_PASSWORD="$(openssl rand -base64 24)"
@@ -236,7 +239,11 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 EOF
 ```
 
-Store the new password where your team keeps root credentials, and update the secret to match so it does not mislead the next reader.
+Store the new password where your team keeps root credentials, and update the secret to match so it does not mislead the next reader. If the password was generated, delete the file it was read from:
+
+```bash
+kubectl exec -n narad narad-0 -- rm /var/lib/narad/admin-password
+```
 
 ## Next steps
 

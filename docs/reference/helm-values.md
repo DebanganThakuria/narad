@@ -244,7 +244,7 @@ The chart reads credentials from a Secret named `<name>-security` (`narad-securi
 | Key | Required | Meaning |
 |---|---|---|
 | `cluster-secret` | yes, with `security.enabled` | The secret nodes prove to each other on the node-to-node port ([`NARAD_CLUSTER_SECRET`](configuration.md#logging-and-security)). A pod does not start without it. |
-| `admin-password` | no | The root admin's password ([`NARAD_ADMIN_PASSWORD`](configuration.md#logging-and-security)). Left out, the node that creates the root admin generates one and logs it once. |
+| `admin-password` | no | The root admin's password ([`NARAD_ADMIN_PASSWORD`](configuration.md#logging-and-security)). Left out, the node that creates the root admin generates one and writes it to `/var/lib/narad/admin-password` on its own volume (unreleased; it used to be logged once). See [Manage the root user](../operate/users.md#root-admin). |
 
 ```sh title="Command"
 kubectl create secret generic narad-security \

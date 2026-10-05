@@ -146,6 +146,12 @@ Every node holds a full replica of the [metastore](glossary.md#metastore), kept 
 | `narad_metastore_snapshot_duration_seconds`<br>gauge; no labels | How long that snapshot took, from the copy of `fsm.db` to the snapshot file's close. |
 | `narad_metastore_snapshot_failures_total`<br>counter; no labels | Raft snapshots that failed on this node, for example for lack of disk space for the copy. Raft tries again at its next interval, and its log grows until one succeeds. |
 
+## Authentication {#authentication}
+
+| Series | Meaning |
+|---|---|
+| `narad_auth_verify_queued`<br>gauge; no labels | Password checks (bcrypt) admitted and not yet finished, waiting for one of the node's 4 verification slots or running (unreleased). It includes checks whose clients have already gone: they still run. A sustained value above 0 with a rising rate of `401` and `429` answers is a failed-login flood ([Failed-login throttle](../understand/networking-and-security.md#auth-throttle)). |
+
 ## Cluster and other series {#cluster-misc}
 
 | Series | Meaning |

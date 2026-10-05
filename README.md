@@ -70,7 +70,8 @@ It lives at [DebanganThakuria/narad-go](https://github.com/DebanganThakuria/nara
 with the guide in [the docs](https://debanganthakuria.github.io/narad/build/go-sdk/).
 
 Security is on outside `--dev`: a root `admin` user is seeded at first start (set
-`NARAD_ADMIN_PASSWORD` or read the one-time log line) and every call needs HTTP Basic auth.
+`NARAD_ADMIN_PASSWORD`, or read the generated one from `admin-password` in the seeding node's
+data directory) and every call needs HTTP Basic auth.
 Terminate TLS at an ingress in front of Narad. Details in
 [Connect and authenticate](https://debanganthakuria.github.io/narad/build/connect/).
 

@@ -144,7 +144,8 @@ security:
   #     --from-literal=cluster-secret="$(openssl rand -base64 32)" \
   #     --from-literal=admin-password="$(openssl rand -base64 24)"
   # admin-password is optional: if the key is absent, the seeding node
-  # generates a random password and logs it once at first boot.
+  # generates a random password and writes it to /var/lib/narad/admin-password
+  # on its own volume (never logged); see docs/operate/users.md.
   existingSecret: ""
   adminPasswordKey: admin-password
   clusterSecretKey: cluster-secret

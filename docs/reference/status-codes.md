@@ -214,7 +214,7 @@ A handle carries no topic, so a handle from another topic, or one naming a parti
 |---|---|
 | Concurrent consumes per user, or per client IP with security off; a batch consume counts as its `max`, clamped to the cap | `http.max_consume_in_flight_per_identity`, 1024 by default |
 | Concurrent produces per user (unreleased); a batch produce counts as its message count, clamped to the cap | `http.max_produce_in_flight_per_identity`, off by default |
-| Wrong passwords for one existing user: 5, then one attempt every 12 seconds | none |
+| Wrong passwords for one existing user: 5, then one attempt every 12 seconds; and, for a user with recent failures, the node's failure budget of 32 checks, refilled at 4 a second (unreleased) | none |
 
 The error message says which limit was hit, in the same order:
 

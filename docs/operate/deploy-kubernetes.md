@@ -84,7 +84,7 @@ The chart lives in the repository, so the install starts from a clone of the rel
       --from-literal=admin-password="$(openssl rand -base64 24)"
     ```
 
-    `cluster-secret` authenticates the nodes to each other and is required. `admin-password` becomes the password of the root user, `admin`. It is optional: without it, one node generates a password and logs it once (see [Manage users and grants](users.md#root-admin)). With Raft TLS on, also create the `narad-cluster-tls` secret now ([Create the certificates](raft-tls.md#create-certificates)).
+    `cluster-secret` authenticates the nodes to each other and is required. `admin-password` becomes the password of the root user, `admin`. It is optional: without it, one node generates a password and writes it to a file on its own volume (see [Manage users and grants](users.md#root-admin)). With Raft TLS on, also create the `narad-cluster-tls` secret now ([Create the certificates](raft-tls.md#create-certificates)).
 
 3. Install the chart with your values file:
 

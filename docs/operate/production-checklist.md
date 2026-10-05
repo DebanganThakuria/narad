@@ -97,7 +97,7 @@ Change `monitoring` to the namespace your Prometheus runs in. Kubernetes does no
 
 ## Set the admin password {#admin-password}
 
-Put `admin-password` in the security secret before the first start. The root user, `admin`, is created once, from that value, when the cluster has no users. Without it, one node generates a password and logs it once. Changing the secret later changes nothing; change the password through the API instead. Both cases: [Manage users and grants](users.md#root-admin).
+Put `admin-password` in the security secret before the first start. The root user, `admin`, is created once, from that value, when the cluster has no users. Without it, one node generates a password and writes it to a file on its own volume. Changing the secret later changes nothing; change the password through the API instead. Both cases: [Manage users and grants](users.md#root-admin).
 
 ## Keep metrics internal {#metrics-exposure}
 
