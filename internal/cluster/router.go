@@ -309,7 +309,7 @@ func (rt *Router) consumeFrom(ctx context.Context, addr string, req nodewire.Con
 	}
 	deadline := time.Now().Add(timeout)
 	res, err := rt.peer.ConsumeWithin(ctx, addr, timeout, req)
-	if err == nil && req.Max > 1 && isTrailingFieldRefusal(res) {
+	if err == nil && req.Max > 1 && IsTrailingFieldRefusal(res) {
 		rt.legacyBatchConsume.Store(addr, time.Now().Add(legacyClaimTTL))
 		req.Max = 0
 		left := time.Duration(0)

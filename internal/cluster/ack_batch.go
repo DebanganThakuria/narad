@@ -39,12 +39,13 @@ func isUnsupportedOp(res nodewire.Response) bool {
 	return res.Status == http.StatusBadRequest && bytes.Contains(res.Body, []byte("unsupported rpc operation"))
 }
 
-// isTrailingFieldRefusal reports whether res is an owner refusing a
+// IsTrailingFieldRefusal reports whether res is a peer refusing a
 // request for a field it does not know: a node on a release before the
 // field existed rejects the whole payload with 400 and
 // nodewire.TrailingPayloadError. It matches only "trailing", the part
-// every release sends.
-func isTrailingFieldRefusal(res nodewire.Response) bool {
+// every release sends. The heartbeat and join senders (cmd/narad) use it
+// to resend the frame without the new fields.
+func IsTrailingFieldRefusal(res nodewire.Response) bool {
 	return res.Status == http.StatusBadRequest && bytes.Contains(res.Body, []byte("trailing"))
 }
 

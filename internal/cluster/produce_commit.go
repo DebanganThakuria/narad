@@ -718,7 +718,7 @@ func (d *ProduceDispatcher) commitRemote(ctx context.Context, addr string, recor
 	// ctx deadline would; ctx still carries cancellation.
 	start := time.Now()
 	res, err := d.peer.CommitProduceBatchWithin(ctx, addr, timeout, req)
-	if err == nil && withIDs && isTrailingFieldRefusal(res) {
+	if err == nil && withIDs && IsTrailingFieldRefusal(res) {
 		d.legacyOwners.Store(addr, d.now().Add(produceLegacyOwnerTTL))
 		for i := range req.Records {
 			req.Records[i].TopicID = ""

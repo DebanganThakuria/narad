@@ -224,7 +224,7 @@ func (r *reader) bytes() ([]byte, error) {
 // payload, it is how an owner on an older release refuses a request
 // carrying a field added since: requesters match its "trailing" to fall
 // back during a rolling upgrade (see the cluster package's
-// isTrailingFieldRefusal), so the wording must stay.
+// IsTrailingFieldRefusal), so the wording must stay.
 const TrailingPayloadError = "trailing node rpc payload data"
 
 // done verifies the payload was consumed exactly; trailing bytes mean
