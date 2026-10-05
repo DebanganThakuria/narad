@@ -121,6 +121,11 @@ type Store struct {
 	// (join_admission.go).
 	health  *raftHealth
 	admitMu sync.Mutex
+
+	// tls is the Raft transport's TLS material (nil: plain TCP), and
+	// tlsWatch announces its expiry (tls_expiry.go).
+	tls      *TLSConfig
+	tlsWatch *tlsExpiryWatch
 }
 
 // New opens or creates the Raft metastore at cfg.DataDir.
@@ -151,13 +156,14 @@ func New(cfg Config) (*Store, error) {
 		}
 		return nil, err
 	}
-	s := &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore, logs: logStore, log: cfg.startupLog(), opened: opened, id: raft.ServerID(cfg.NodeID)}
+	s := &Store{r: r, leaderCommit: transport, fsm: fsm, logStore: logStore, logs: logStore, log: cfg.startupLog(), opened: opened, id: raft.ServerID(cfg.NodeID), tls: cfg.TLS}
 	s.health = newRaftHealth(r, cfg.NodeID)
 	// A stopped FSM takes Raft down with it, so the node stops voting,
 	// leading and acknowledging writes its replica lacks. Never from
 	// inside Apply: Shutdown waits for the FSM goroutine.
 	fsm.setOnHalt(func() { _ = r.Shutdown().Error() })
 	s.registerMetrics(cfg.Registerer)
+	s.startTLSExpiryWatch()
 	return s, nil
 }
 

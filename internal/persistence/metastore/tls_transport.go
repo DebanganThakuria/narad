@@ -35,6 +35,64 @@ type TLSConfig struct {
 	Certificate tls.Certificate
 	// CAs is the pool of trusted cluster CAs peer certs must chain to.
 	CAs *x509.CertPool
+	// CACertificates is the parsed CA bundle behind CAs, when the caller
+	// has it. Trust is decided by CAs alone; this only feeds the expiry
+	// gauge, the expiry log lines and the /readyz "degraded" list
+	// (tls_expiry.go).
+	CACertificates []*x509.Certificate
+}
+
+// leaf returns the parsed node certificate, or nil when there is none
+// or it does not parse.
+func (t *TLSConfig) leaf() *x509.Certificate {
+	if t == nil {
+		return nil
+	}
+	if t.Certificate.Leaf != nil {
+		return t.Certificate.Leaf
+	}
+	if len(t.Certificate.Certificate) == 0 {
+		return nil
+	}
+	leaf, err := x509.ParseCertificate(t.Certificate.Certificate[0])
+	if err != nil {
+		return nil
+	}
+	return leaf
+}
+
+// LeafNotAfter is when the node certificate expires; zero when unknown.
+func (t *TLSConfig) LeafNotAfter() time.Time {
+	if leaf := t.leaf(); leaf != nil {
+		return leaf.NotAfter
+	}
+	return time.Time{}
+}
+
+// LeafNotBefore is when the node certificate becomes valid; zero when
+// unknown.
+func (t *TLSConfig) LeafNotBefore() time.Time {
+	if leaf := t.leaf(); leaf != nil {
+		return leaf.NotBefore
+	}
+	return time.Time{}
+}
+
+// CANotAfter is when the earliest-expiring CA in CACertificates runs
+// out: during a CA rotation the bundle holds the old CA and the new
+// one, and the old one runs out first. Zero when CACertificates is
+// empty.
+func (t *TLSConfig) CANotAfter() time.Time {
+	var earliest time.Time
+	if t == nil {
+		return earliest
+	}
+	for _, ca := range t.CACertificates {
+		if earliest.IsZero() || ca.NotAfter.Before(earliest) {
+			earliest = ca.NotAfter
+		}
+	}
+	return earliest
 }
 
 func (t *TLSConfig) serverConfig() *tls.Config {

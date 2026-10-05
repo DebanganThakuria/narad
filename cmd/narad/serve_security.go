@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -47,7 +48,31 @@ func clusterTLSConfig(sec config.SecurityConfig) (*metastore.TLSConfig, error) {
 	if !pool.AppendCertsFromPEM(caPEM) {
 		return nil, fmt.Errorf("CA file %q contained no valid certificates", ca)
 	}
-	return &metastore.TLSConfig{Certificate: keyPair, CAs: pool}, nil
+	// Dates are not checked here: an expired or not yet valid file is
+	// logged at error by the metastore, which also exports the dates
+	// and warns ahead of expiry (tls_expiry.go).
+	return &metastore.TLSConfig{Certificate: keyPair, CAs: pool, CACertificates: parseCertificates(caPEM)}, nil
+}
+
+// parseCertificates returns every CERTIFICATE block of pemData that
+// parses, in file order. It skips the rest, as x509.CertPool's
+// AppendCertsFromPEM does, so the list matches the trusted pool.
+func parseCertificates(pemData []byte) []*x509.Certificate {
+	var certs []*x509.Certificate
+	for len(pemData) > 0 {
+		var block *pem.Block
+		block, pemData = pem.Decode(pemData)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			continue
+		}
+		if cert, err := x509.ParseCertificate(block.Bytes); err == nil {
+			certs = append(certs, cert)
+		}
+	}
+	return certs
 }
 
 // rootAdminUsername is the seeded root account. It is undeletable and
