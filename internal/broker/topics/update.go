@@ -228,10 +228,10 @@ const schemaPutAttempts = 3
 // client that retries after a lost response does not grow the history.
 // Neither does one that differs from the latest only in annotations
 // (title, description, examples, $comment, default, deprecated,
-// readOnly, writeOnly): it accepts exactly what the latest accepts. A
-// version that would take the topic's history (or the cluster's
-// schemas, counting every child's copy) past its byte budget is refused
-// with errs.ErrSchemaHistoryFull.
+// readOnly, writeOnly): it accepts exactly what the latest accepts. The
+// schema is stored compacted. A version that would take the topic's
+// history (or the cluster's schemas, counting every child's copy) past
+// its byte budget is refused with errs.ErrSchemaHistoryFull.
 //
 // baseVersion, when positive, is a precondition: the update is applied
 // only if the topic's current version is exactly baseVersion, and
@@ -248,6 +248,7 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 	if baseVersion < 0 {
 		return topic.Topic{}, fmt.Errorf("%w: schema_base_version must be >= 0", ErrInvalid)
 	}
+	rawSchema = canonicalSchema(rawSchema)
 	unlock := m.lockTopicName(name)
 	defer unlock()
 	if err := m.leaderBarrier(ctx); err != nil {

@@ -7,6 +7,21 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/schema"
 )
 
+// canonicalSchema returns the schema with insignificant whitespace
+// removed (audit schemas:6). Registration used to store a request's raw
+// bytes, so a client's indentation became part of the replicated
+// history, and of every fan-out child's copy, while every read path
+// hands schemas back compacted. New versions are stored compacted;
+// histories written before stay as they are. A body that is not JSON is
+// returned unchanged for the definition check to report.
+func canonicalSchema(raw []byte) []byte {
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return raw
+	}
+	return buf.Bytes()
+}
+
 // annotationKeywords document a schema and never change what it
 // accepts.
 var annotationKeywords = map[string]bool{

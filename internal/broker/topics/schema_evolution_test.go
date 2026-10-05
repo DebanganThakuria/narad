@@ -317,3 +317,27 @@ func TestSchemaHistoryStopsAtTheTopicBudget(t *testing.T) {
 		t.Fatalf("re-registering the latest on a full history: %v", err)
 	}
 }
+
+// TestSchemaIsStoredCompacted (audit schemas:6): a pretty-printed body
+// was stored byte for byte, indentation included, while every read path
+// hands schemas back compacted. Schemas are now stored compacted, on
+// create and on update.
+func TestSchemaIsStoredCompacted(t *testing.T) {
+	ms := newFakeMetastore()
+	manager := newTestManager(t, ms, &fakeSchemaRegistry{})
+	ctx := context.Background()
+	pretty := "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"id\": { \"type\": \"integer\" }\n  }\n}\n"
+	if _, err := manager.CreateTopic(ctx, CreateOpts{Name: testTopicName, Partitions: 3, Schema: []byte(pretty)}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(ms.schemas[testTopicName][1]), `{"type":"object","properties":{"id":{"type":"integer"}}}`; got != want {
+		t.Fatalf("stored v1 = %q, want %q", got, want)
+	}
+	next := "{ \"type\": \"object\",\t\"properties\": { \"id\": {\"type\": \"integer\"}, \"n\": {\"type\": \"string\"} } }"
+	if _, err := manager.UpdateTopicSchema(ctx, testTopicName, []byte(next), 0); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(ms.schemas[testTopicName][2]), `{"type":"object","properties":{"id":{"type":"integer"},"n":{"type":"string"}}}`; got != want {
+		t.Fatalf("stored v2 = %q, want %q", got, want)
+	}
+}

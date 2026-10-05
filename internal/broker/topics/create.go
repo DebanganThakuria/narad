@@ -132,6 +132,7 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 		return topic.Topic{}, err
 	}
 	if len(opts.Schema) > 0 {
+		opts.Schema = canonicalSchema(opts.Schema)
 		if err := m.schemas.ValidateDefinition(ctx, opts.Name, opts.Schema); err != nil {
 			return topic.Topic{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 		}
