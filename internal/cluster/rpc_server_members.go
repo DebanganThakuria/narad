@@ -25,12 +25,19 @@ func (s *RPCServer) handleRegisterMember(payload []byte) nodewire.Response {
 	// away) and one whose clock ran fast was never marked dead after it
 	// really died. The value still lives in the Raft proposal, so the
 	// FSM stays deterministic.
+	//
+	// Build and EntryTypes are what the member's release reports (empty
+	// from a 3.0.x sender), recorded as sent: the leader proposes a newer
+	// Raft entry type only once every member reports one that knows it
+	// (metastore.Store.EveryMemberKnows).
 	member := metastore.Member{
 		ID:            strings.TrimSpace(req.ID),
 		Addr:          strings.TrimSpace(req.Addr),
 		ClusterAddr:   strings.TrimSpace(req.ClusterAddr),
 		Status:        metastore.MemberStatus(strings.TrimSpace(req.Status)),
 		LastHeartbeat: s.clock().Unix(),
+		Build:         strings.TrimSpace(req.Build),
+		EntryTypes:    req.EntryTypes,
 	}
 	if member.ID == "" {
 		return errorResponse(http.StatusBadRequest, "member id is required")

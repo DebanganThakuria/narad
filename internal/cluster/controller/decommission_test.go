@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -119,5 +120,35 @@ func TestDecommissionNoopWithoutDrainingNodes(t *testing.T) {
 	c.reconcileDecommission(context.Background())
 	if len(store.removed) != 0 || store.transferred != 0 {
 		t.Fatalf("acted with no draining nodes: removed %v, transfers %d", store.removed, store.transferred)
+	}
+}
+
+// A node staged as a Raft non-voter (it joined but was never promoted)
+// and then decommissioned leaves the Raft configuration too, not just
+// the member list. A non-voter carries no quorum weight and cannot lead,
+// so the MinVoters floor and the leader hand-off do not apply to it.
+func TestDecommissionRemovesADrainedNonvoterFromRaft(t *testing.T) {
+	store := newFakeControllerStore("a", "b", "c", "e")
+	store.members[3].Draining = true // e is draining and owns nothing
+	store.leaderID = "a"
+	store.voters = []string{"a", "b", "c"} // at the MinVoters floor
+	store.nonvoters = []string{"e"}
+	store.topics = []topic.Topic{{Name: "orders", Partitions: 3}}
+	store.assignments["orders"] = map[int]string{0: "a", 1: "b", 2: "c"}
+	c := &Controller{store: store, cfg: Config{}.withDefaults()} // MinVoters 3
+
+	c.reconcileDecommission(context.Background())
+
+	if !slices.Equal(store.removed, []string{"e"}) {
+		t.Fatalf("RemoveServer calls = %v, want [e] (the drained non-voter)", store.removed)
+	}
+	if !slices.Equal(store.forgotten, []string{"e"}) {
+		t.Fatalf("RemoveMember calls = %v, want [e]", store.forgotten)
+	}
+	if store.transferred != 0 {
+		t.Fatalf("TransferLeadership called %d times for a non-voter", store.transferred)
+	}
+	if !slices.Equal(store.voters, []string{"a", "b", "c"}) {
+		t.Fatalf("voters = %v, want a, b and c untouched", store.voters)
 	}
 }

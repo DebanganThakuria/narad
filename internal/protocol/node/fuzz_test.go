@@ -181,7 +181,7 @@ var decoders = []decoder{
 		name: "RegisterMember",
 		decode: func(b []byte) (any, int, error) {
 			v, err := DecodeMemberRequest(b)
-			return v, len(v.ID) + len(v.Addr) + len(v.ClusterAddr) + len(v.Status), err
+			return v, len(v.ID) + len(v.Addr) + len(v.ClusterAddr) + len(v.Status) + len(v.Build), err
 		},
 		encode: func(v any) ([]byte, error) { return EncodeMemberRequest(v.(MemberRequest)) },
 	},
@@ -330,7 +330,9 @@ func seedPayloads(t testing.TB) [][]byte {
 		must(EncodeUserRequest(OpUpdateUser, UserRequest{Username: "alice", Body: []byte(`{}`)})),
 		must(EncodeUserRequest(OpDeleteUser, UserRequest{Username: "alice"})),
 		must(EncodeMemberRequest(MemberRequest{ID: "n1", Addr: "10.0.0.1:7942", ClusterAddr: "10.0.0.1:7943", Status: "alive", LastHeartbeat: 1700000000})),
+		must(EncodeMemberRequest(MemberRequest{ID: "n1", Addr: "10.0.0.1:7942", ClusterAddr: "10.0.0.1:7943", Status: "alive", LastHeartbeat: 1700000000, Build: "narad v3.1.0", EntryTypes: 23})),
 		must(EncodeJoinClusterRequest(JoinClusterRequest{ID: "n2", ClusterAddr: "10.0.0.2:7943", Fresh: true})),
+		must(EncodeJoinClusterRequest(JoinClusterRequest{ID: "n2", ClusterAddr: "10.0.0.2:7943", Fresh: true, EntryTypes: 23})),
 		must(EncodeChildLinkRequest(OpAttachChild, ChildLinkRequest{Parent: "orders", Child: "orders-audit", DelayMs: 60000})),
 		must(EncodeChildLinkRequest(OpDetachChild, ChildLinkRequest{Parent: "orders", Child: "orders-audit"})),
 		must(EncodePartitionSegmentsRequest(PartitionSegmentsRequest{Topic: "orders", Partition: 1})),
@@ -580,7 +582,7 @@ func FuzzRoundTripControl(f *testing.F) {
 			}
 		}
 		{
-			want := MemberRequest{ID: a, Addr: b, ClusterAddr: id, Status: topic, LastHeartbeat: n}
+			want := MemberRequest{ID: a, Addr: b, ClusterAddr: id, Status: topic, LastHeartbeat: n, Build: a, EntryTypes: uint32(n)}
 			enc, err := EncodeMemberRequest(want)
 			mustDecode("Member encode", err)
 			got, err := DecodeMemberRequest(enc)
@@ -590,7 +592,7 @@ func FuzzRoundTripControl(f *testing.F) {
 			}
 		}
 		{
-			want := JoinClusterRequest{ID: a, ClusterAddr: b, Fresh: flag}
+			want := JoinClusterRequest{ID: a, ClusterAddr: b, Fresh: flag, EntryTypes: uint32(n)}
 			enc, err := EncodeJoinClusterRequest(want)
 			mustDecode("Join encode", err)
 			got, err := DecodeJoinClusterRequest(enc)

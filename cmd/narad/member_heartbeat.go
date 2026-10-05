@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/cluster"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/netaddr"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
@@ -27,6 +28,21 @@ const memberRegisterRetryInterval = 250 * time.Millisecond
 // errMemberRemoved reports that the leader refused the registration
 // because decommission removed this member. Retrying cannot succeed.
 var errMemberRemoved = errors.New("register member: member was removed from the cluster")
+
+// localMember is the member record this node registers and refreshes
+// with every heartbeat. It reports this binary's build and the newest
+// Raft entry type it applies: the leader proposes a newer entry type
+// only once every member reports one that knows it.
+func localMember(id, addr, clusterAddr string) metastore.Member {
+	return metastore.Member{
+		ID:          id,
+		Addr:        addr,
+		ClusterAddr: clusterAddr,
+		Status:      metastore.MemberAlive,
+		Build:       versionString(),
+		EntryTypes:  metastore.MaxEntryType,
+	}
+}
 
 // runMemberHeartbeater re-registers this node's membership every interval
 // (and once immediately) so the controller keeps seeing it alive. It runs
@@ -99,13 +115,31 @@ func registerMember(ctx context.Context, store *metastore.Store, member metastor
 	if registrar == nil {
 		return fmt.Errorf("register member: peer registrar unavailable")
 	}
-	res, err := registrar.RegisterMember(ctx, leaderAddr, nodewire.MemberRequest{
+	return forwardMember(ctx, registrar, leaderAddr, member)
+}
+
+// forwardMember sends the registration to the leader at leaderAddr. A
+// leader on 3.0.x refuses the frame carrying the build and entry types
+// (a trailing-field refusal); the registration is sent again at once
+// without them, so a rolling upgrade never costs a heartbeat window and
+// the member is never marked dead for it. Nothing is remembered: every
+// heartbeat to an older leader costs one refused frame, which never
+// reaches Raft.
+func forwardMember(ctx context.Context, registrar memberRegistrar, leaderAddr string, member metastore.Member) error {
+	req := nodewire.MemberRequest{
 		ID:            member.ID,
 		Addr:          member.Addr,
 		ClusterAddr:   member.ClusterAddr,
 		Status:        string(member.Status),
 		LastHeartbeat: member.LastHeartbeat,
-	})
+		Build:         member.Build,
+		EntryTypes:    member.EntryTypes,
+	}
+	res, err := registrar.RegisterMember(ctx, leaderAddr, req)
+	if err == nil && (req.Build != "" || req.EntryTypes != 0) && cluster.IsTrailingFieldRefusal(res) {
+		req.Build, req.EntryTypes = "", 0
+		res, err = registrar.RegisterMember(ctx, leaderAddr, req)
+	}
 	if err != nil {
 		return err
 	}

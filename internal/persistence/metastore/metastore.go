@@ -69,6 +69,18 @@ type Member struct {
 	// receiving partitions and sheds everything it owns onto the other live
 	// nodes. Once drained it can be removed from the Raft voter set.
 	Draining bool `json:"draining,omitempty"`
+	// Build is the release the member reported in its last heartbeat,
+	// and EntryTypes the newest Raft entry type it applies; both empty
+	// when the heartbeat came from a release that reports neither
+	// (3.0.x), which reads as the set every 3.0.x release applies. Every
+	// heartbeat replaces them, so a node rolled back stops reporting
+	// within one heartbeat. The leader proposes a Raft entry type newer
+	// than 3.0.x only once every member reports one that knows it
+	// (Store.EveryMemberKnows). A 3.0.x replica drops both fields from
+	// its copy of the record, which only makes that check stricter while
+	// it leads.
+	Build      string `json:"build,omitempty"`
+	EntryTypes uint32 `json:"entry_types,omitempty"`
 }
 
 // Assignment maps a single partition of a topic to its owner pod.

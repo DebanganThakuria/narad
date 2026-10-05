@@ -177,7 +177,7 @@ Every copy a sweep, a reclaim or an install sets aside instead of deleting is co
 
 Only the destination aborts a move, and a dead destination cannot. Left alone, moves aimed at a node that died would sit in flight forever, holding the `MaxInFlightMoves` budget and stopping every later rebalance and decommission (`narad cluster moves` would list them indefinitely).
 
-The controller's rebalance pass therefore clears the target of any in-flight move whose target member is gone from the membership, has been dead longer than `DeadTargetAbortAfter` (2 minutes by default, so a restarting pod still finishes its copy), or is out of the Raft voter set while dead or draining. The partition never left its owner, so clearing the target is safe at any point. A destination that comes back runs no worker for the move, because the target no longer names it. An install it left at the partition's path, with its flip unconfirmed, is a copy of the owner's records; its stale-copy sweep quarantines it and logs it at error level unless the owner vouches for it at its own marker's position, and an operator decides what to do with it ([above](#what-if-the-source-dies-mid-move)). A staging copy it left under `.moves` stays until a later move of the same partition onto it clears it. The freed budget is used in the same pass.
+The controller's rebalance pass therefore clears the target of any in-flight move whose target member is gone from the membership, has been dead longer than `DeadTargetAbortAfter` (2 minutes by default, so a restarting pod still finishes its copy), or is out of the Raft configuration (neither a voter nor a [non-voter still waiting for promotion](cluster-lifecycle.md#join-promotion)) while dead or draining. The partition never left its owner, so clearing the target is safe at any point. A destination that comes back runs no worker for the move, because the target no longer names it. An install it left at the partition's path, with its flip unconfirmed, is a copy of the owner's records; its stale-copy sweep quarantines it and logs it at error level unless the owner vouches for it at its own marker's position, and an operator decides what to do with it ([above](#what-if-the-source-dies-mid-move)). A staging copy it left under `.moves` stays until a later move of the same partition onto it clears it. The freed budget is used in the same pass.
 
 ## Move planner {#planner}
 
@@ -201,10 +201,12 @@ Planning runs under a **mutex** and after a **Raft barrier**: a membership chang
 
 Marking a node **draining** (`POST /v1/cluster/members/{id}/decommission`) removes it from the planner's set of receiving nodes while it stays a live owner. The same minimal-movement algorithm then sheds every partition it owns onto the others. The drain flag survives a new registration, so a node that restarts in the middle of a decommission stays draining.
 
-Once a draining node owns nothing, the controller removes it from the Raft voter set, behind two guards:
+Once a draining node owns nothing, the controller removes it from the Raft configuration. A voter's removal sits behind two guards:
 
 - **MinVoters** (3 by default): a node is never removed if that would drop the cluster below a quorum-safe size.
 - **Leader moves off first**: a node cannot be cleanly removed from its own Raft configuration while it leads, so if the drained node is the current leader, the controller transfers leadership away, and the new leader finishes the removal.
+
+A node that joined and was never promoted is a [non-voter](cluster-lifecycle.md#join-promotion): it has no vote and cannot lead, so it is removed without either guard.
 
 Rebalance starts on its own when a node joins; decommission is started by an operator. The commands and the safe order of steps are in [Scale out and in](../operate/scaling.md#decommission).
 

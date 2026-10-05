@@ -129,6 +129,8 @@ func runServe(args []string) error {
 		SnapshotThreshold: cfg.Cluster.RaftSnapshotThreshold,
 		SnapshotInterval:  cfg.Cluster.RaftSnapshotInterval.D(),
 		TrailingLogs:      cfg.Cluster.RaftTrailingLogs,
+		Build:             versionString(),
+		Registerer:        reg,
 	})
 	if err != nil {
 		return fmt.Errorf("metastore: %w", err)
@@ -169,12 +171,7 @@ func runServe(args []string) error {
 		log.Warn("advertised member address is not routable by peers; set http.addr to a host:port or give this node a hostful cluster peer entry — member registration will not converge",
 			"member_addr", memberAddr, "node", nodeID)
 	}
-	member := metastore.Member{
-		ID:          nodeID,
-		Addr:        memberAddr,
-		ClusterAddr: clusterAdvertiseAddr(cfg, nodeID),
-		Status:      metastore.MemberAlive,
-	}
+	member := localMember(nodeID, memberAddr, clusterAdvertiseAddr(cfg, nodeID))
 	cs := buildClusterStack(cfg, nodeID, ms, bc, reg, log)
 	// Registered before the goroutine drain below, so it runs after every
 	// peer-RPC user has stopped (defers are LIFO).
@@ -218,6 +215,7 @@ func runServe(args []string) error {
 	wg.Go(func() {
 		runClusterJoinWhenLeaderless(ctx, ms, cs.peerRPC, cfg, nodeID, joinOnly, fresh, log)
 	})
+	wg.Go(func() { watchMetastoreHalt(ctx, ms, failServe) })
 	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, cs.peerRPC, log) })
 	wg.Go(func() { cs.controller.Run(ctx) })
 	// Re-registers consume tokens with owners that come back or are

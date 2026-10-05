@@ -49,6 +49,9 @@ func (s *Store) WaitApplied(ctx context.Context, index uint64) error {
 		if s.AppliedIndex() >= index {
 			return nil
 		}
+		if err := s.fsm.stopErr(); err != nil {
+			return err
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

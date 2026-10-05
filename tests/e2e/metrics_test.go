@@ -52,6 +52,32 @@ func TestMetrics_EndpointReachable(t *testing.T) {
 	}
 }
 
+// TestMetrics_MetastoreAndRaftSeries confirms the node's /metrics
+// carries the metadata plane's series: the Raft state and the size of
+// the metadata database.
+func TestMetrics_MetastoreAndRaftSeries(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t, withMetrics())
+
+	resp := getJSON(t, env.Server.URL+"/metrics")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	for _, want := range []string{
+		`narad_raft_state{state="leader"} 1`,
+		"narad_raft_has_leader 1",
+		"narad_metastore_fsm_bytes ",
+		"narad_metastore_apply_stopped 0",
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("/metrics lacks %q", want)
+		}
+	}
+}
+
 // TestMetrics_ProduceCountersIncrement verifies that a successful
 // produce bumps both the message and byte counters labeled by topic
 // and partition.

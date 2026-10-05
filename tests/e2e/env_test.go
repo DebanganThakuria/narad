@@ -181,18 +181,21 @@ func newEnv(t testing.TB, opts envOpts) *env {
 	if metastoreDir == "" {
 		metastoreDir = filepath.Join(dataDir, "metastore")
 	}
-	ms := startMetastore(t, metastoreDir)
-	controllerCancel, controllerDone := startController(t, ms)
-	log := newTestLogger()
-
 	var (
 		reg *prometheus.Registry
 		m   *obsmetrics.Metrics
+		// msReg stays a nil interface without metrics: a nil *Registry
+		// in it would not read as "no registerer".
+		msReg prometheus.Registerer
 	)
 	if opts.metrics {
 		reg = prometheus.NewRegistry()
 		m = obsmetrics.New(reg)
+		msReg = reg
 	}
+	ms := startMetastore(t, metastoreDir, msReg)
+	controllerCancel, controllerDone := startController(t, ms)
+	log := newTestLogger()
 
 	logs := runtime.NewLogs(dataDir, opts.logOptions, ms, m)
 	lifecycle := runtime.NewLifecycle(logs)
@@ -327,13 +330,16 @@ func seedTestAdmin(t testing.TB, ms *metastore.Store, username, password string)
 // startMetastore boots a single-node Raft metastore, waits for it to
 // elect itself leader (topic operations fail on a leaderless store), and
 // registers three alive members so replica placement has somewhere to go.
-func startMetastore(t testing.TB, dataDir string) *metastore.Store {
+// reg, when not nil, receives the metastore and Raft series, as serve
+// passes its registry.
+func startMetastore(t testing.TB, dataDir string, reg prometheus.Registerer) *metastore.Store {
 	t.Helper()
 
 	ms, err := metastore.New(metastore.Config{
-		NodeID:   "test-0",
-		DataDir:  dataDir,
-		BindAddr: "127.0.0.1:0",
+		NodeID:     "test-0",
+		DataDir:    dataDir,
+		BindAddr:   "127.0.0.1:0",
+		Registerer: reg,
 	})
 	if err != nil {
 		t.Fatalf("metastore: %v", err)

@@ -1,6 +1,6 @@
 <svg class="nr-dia__wide" viewBox="0 -4 800 360" role="img" aria-labelledby="lifecycle-join-w-t" aria-describedby="lifecycle-join-w-d">
 <title id="lifecycle-join-w-t">A new node joins: the loop ends when its own Raft sees a leader</title>
-<desc id="lifecycle-join-w-d">narad-3 starts with an empty Raft configuration and reports not ready. 1: it sends JoinCluster to narad-1, a follower, which answers 421, not the leader, so it tries the next peer. 2: it sends JoinCluster to the leader, narad-0, which adds narad-3 as a voter and answers 200. 3: the leader starts replicating to it with AppendEntries. 4: once narad-3's own Raft sees a leader it is admitted; it catches up its state machine and /readyz answers 200. A node with no Raft configuration answers 412, and a decommissioned node gets 409. The loop tries every 2 s until its own Raft sees a leader.</desc>
+<desc id="lifecycle-join-w-d">narad-3 starts with an empty Raft configuration and reports not ready. 1: it sends JoinCluster to narad-1, a follower, which answers 421, not the leader, naming the leader, so it asks the leader next. 2: it sends JoinCluster to the leader, narad-0, which adds narad-3 as a non-voter and answers 200. 3: the leader starts replicating to it with AppendEntries. 4: once narad-3's own Raft sees a leader it is admitted; it catches up its state machine, /readyz answers 200, and it sends JoinCluster again until the leader promotes it to voter. A node with no Raft configuration answers 412, and a decommissioned node gets 409. The loop tries every 2 s until its own Raft sees a leader.</desc>
 <rect class="bx ghost" x="0" y="48" width="140" height="240" rx="2"/>
 <text class="pod" x="70" y="78">narad-3</text>
 <text class="an mu" x="16" y="108">not ready</text>
@@ -24,7 +24,7 @@
 <path class="ah-o" d="M151 97L140 104L151 111"/>
 <circle class="sc" cx="164" cy="52" r="13"/><text class="sn" x="164" y="57.5">1</text>
 <text class="cd" x="184" y="58">JoinCluster</text>
-<text class="an" x="184" y="128"><tspan class="cd">421</tspan>: try the next peer</text>
+<text class="an" x="184" y="128"><tspan class="cd">421</tspan>: names the leader</text>
 <path class="ln" d="M140 200H205M319 200H388"/>
 <path class="ah" d="M388 207L400 200L388 193Z"/>
 <polygon class="msg" points="205,185 301,185 319,215 223,215"/>
@@ -33,7 +33,7 @@
 <path class="ah-o" d="M151 229L140 236L151 243"/>
 <circle class="sc" cx="164" cy="172" r="13"/><text class="sn" x="164" y="177.5">2</text>
 <text class="cd" x="184" y="178">JoinCluster</text>
-<text class="an" x="184" y="260"><tspan class="cd">200</tspan>: added as a voter</text>
+<text class="an" x="184" y="260"><tspan class="cd">200</tspan>: as a non-voter</text>
 <path class="ln1" d="M400 272H150"/>
 <path class="ah" d="M150 267L140 272L150 277Z"/>
 <circle class="sc" cx="164" cy="296" r="13"/><text class="sn" x="164" y="301.5">3</text>
@@ -45,7 +45,7 @@
 </svg>
 <svg class="nr-dia__narrow" viewBox="0 -4 360 580" role="img" data-search-exclude aria-labelledby="lifecycle-join-n-t" aria-describedby="lifecycle-join-n-d">
 <title id="lifecycle-join-n-t">A new node joins: the loop ends when its own Raft sees a leader</title>
-<desc id="lifecycle-join-n-d">narad-3 starts with an empty Raft configuration and reports not ready. 1: it sends JoinCluster to narad-1, a follower, which answers 421, not the leader, so it tries the next peer. 2: it sends JoinCluster to the leader, narad-0, which adds narad-3 as a voter and answers 200. 3: the leader starts replicating to it with AppendEntries. 4: once narad-3's own Raft sees a leader it is admitted; it catches up its state machine and /readyz answers 200. A node with no Raft configuration answers 412, and a decommissioned node gets 409. The loop tries every 2 s until its own Raft sees a leader.</desc>
+<desc id="lifecycle-join-n-d">narad-3 starts with an empty Raft configuration and reports not ready. 1: it sends JoinCluster to narad-1, a follower, which answers 421, not the leader, naming the leader, so it asks the leader next. 2: it sends JoinCluster to the leader, narad-0, which adds narad-3 as a non-voter and answers 200. 3: the leader starts replicating to it with AppendEntries. 4: once narad-3's own Raft sees a leader it is admitted; it catches up its state machine, /readyz answers 200, and it sends JoinCluster again until the leader promotes it to voter. A node with no Raft configuration answers 412, and a decommissioned node gets 409. The loop tries every 2 s until its own Raft sees a leader.</desc>
 <rect class="bx ghost" x="0" y="0" width="360" height="48" rx="2"/>
 <text class="pod" x="52" y="30">narad-3</text>
 <text class="an mu" x="112" y="30">not ready yet</text>
@@ -80,12 +80,12 @@
 <text class="cd" x="32" y="376">JoinCluster</text>
 <text class="an" x="142.6" y="376">to a follower:</text>
 <text class="cd" x="237.2" y="376">421</text>
-<text class="an" x="32" y="396">not the leader; try the next peer</text>
+<text class="an" x="32" y="396">not the leader; it names the leader</text>
 <circle class="sc" cx="12" cy="416" r="12"/><text class="sn" x="12" y="421">2</text>
 <text class="cd" x="32" y="422">JoinCluster</text>
 <text class="an" x="142.6" y="422">to the leader:</text>
 <text class="cd" x="238.6" y="422">200</text>
-<text class="an" x="32" y="442">it adds <tspan class="cd">narad-3</tspan> as a voter</text>
+<text class="an" x="32" y="442">it adds <tspan class="cd">narad-3</tspan> as a non-voter</text>
 <circle class="sc" cx="12" cy="462" r="12"/><text class="sn" x="12" y="467">3</text>
 <text class="an" x="32" y="468">replication begins</text>
 <circle class="sc" cx="12" cy="488" r="12"/><text class="sn" x="12" y="493">4</text>

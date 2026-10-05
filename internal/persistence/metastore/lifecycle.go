@@ -20,8 +20,10 @@ var errPreVoteUnsupported = errors.New("metastore: transport does not support pr
 // current leader, not carried over from before the restart.
 const appliedCaughtUpContactWindow = 5 * time.Second
 
-// Close hands leadership to another voter if this node leads, shuts
-// Raft down, and closes the Raft log store and the FSM database. The
+// Close takes the store's metrics off their registry, deregisters its
+// Raft observer (raft_health.go), hands leadership
+// to another voter if this node leads, shuts Raft down, and closes the
+// Raft log store and the FSM database. The
 // databases are closed even when the shutdown reports an error: a
 // Store that is gone must not keep the bbolt locks on raft.db and
 // fsm.db, or a reopen of the directory in the same process (an
@@ -35,6 +37,8 @@ const appliedCaughtUpContactWindow = 5 * time.Second
 // debug level, so the outcome is logged here; a rolling restart that
 // keeps stalling is diagnosable from the leader's last lines.
 func (s *Store) Close() error {
+	s.unregisterMetrics()
+	s.health.close()
 	if s.r.State() == raft.Leader {
 		log := s.log
 		if log == nil {
@@ -95,8 +99,16 @@ const barrierTimeout = 5 * time.Second
 // from an old snapshot legally serves reads from a stale FSM until the
 // replay finishes. Any "I am the leader, my local state is authoritative"
 // decision must barrier first, then re-read.
+//
+// A barrier on a node whose FSM has stopped applying fails with the
+// stop error: the FSM returned without applying the entry it stopped
+// on, so its database is not the leader's view even though every entry
+// before the barrier was handed to it.
 func (s *Store) Barrier() error {
-	return s.r.Barrier(barrierTimeout).Error()
+	if err := s.r.Barrier(barrierTimeout).Error(); err != nil {
+		return err
+	}
+	return s.fsm.stopErr()
 }
 
 // AppliedCaughtUp reports whether the cluster has a leader, this node has
@@ -123,7 +135,7 @@ func (s *Store) Barrier() error {
 // then commit_index is 0 in a fresh process and the leader is NOT
 // caught up, however complete its log.
 func (s *Store) AppliedCaughtUp() bool {
-	if s.r == nil || s.r.Leader() == "" {
+	if s.r == nil || s.r.Leader() == "" || s.fsm.stopErr() != nil {
 		return false
 	}
 	stats := s.r.Stats()
@@ -151,7 +163,12 @@ func (s *Store) AppliedCaughtUp() bool {
 	if pending, err := strconv.ParseUint(stats["fsm_pending"], 10, 64); err != nil || pending > 0 {
 		return false
 	}
-	if !s.fsmCoversApplied(applied) {
+	// A restored snapshot covers every entry up to its index without the
+	// FSM's own index moving past them (a snapshot written by 3.0.x
+	// carries no index), so the coverage walk stops at whichever is
+	// higher.
+	snapshot, _ := strconv.ParseUint(stats["last_snapshot_index"], 10, 64)
+	if !s.fsmCoversApplied(applied, snapshot) {
 		return false
 	}
 	if s.r.State() == raft.Leader {
@@ -196,6 +213,9 @@ func (s *Store) ClusterReady() error {
 	if s.r == nil {
 		return nil
 	}
+	if err := s.fsm.stopErr(); err != nil {
+		return fmt.Errorf("%w: %v", ErrNotReady, err)
+	}
 	if s.r.Leader() == "" {
 		return fmt.Errorf("%w: no raft leader known", ErrNotReady)
 	}
@@ -225,8 +245,16 @@ func (s *Store) ClusterReady() error {
 // entries when caught up and returns at the first entry when the FSM
 // is far behind. An index the log no longer holds was covered by the
 // snapshot the FSM was restored from.
-func (s *Store) fsmCoversApplied(raftApplied uint64) bool {
-	fsmApplied := s.fsm.applied.Load()
+//
+// The walk stops at max(FSM index, snapshotIndex). After a restore from
+// a snapshot that carries no index the FSM's own index is 0 while Raft
+// keeps TrailingLogs entries behind the snapshot, so walking down to 0
+// found a command the snapshot already covered and read the replica as
+// behind until some new command committed: /readyz and the ownership
+// latch waited on a quiet cluster. A snapshot this node took itself is
+// as good a bound, since the FSM had applied that far when it was taken.
+func (s *Store) fsmCoversApplied(raftApplied, snapshotIndex uint64) bool {
+	fsmApplied := max(s.fsm.applied.Load(), snapshotIndex)
 	if s.logs == nil {
 		return true
 	}
@@ -244,19 +272,12 @@ func (s *Store) fsmCoversApplied(raftApplied uint64) bool {
 
 var _ Metastore = (*Store)(nil)
 
-// AddVoter admits (or re-addresses) a node in the Raft voter set.
-// Leader-only — followers fail with raft.ErrNotLeader — and idempotent:
-// re-adding an existing voter with the same address is a no-op config
-// entry. This is the scale-out admission path (OpJoinCluster).
-func (s *Store) AddVoter(id, clusterAddr string) error {
-	return s.r.AddVoter(raft.ServerID(id), raft.ServerAddress(clusterAddr), 0, barrierTimeout).Error()
-}
-
-// RemoveServer removes a node from the Raft configuration. Leader-only
-// (followers fail with raft.ErrNotLeader). This is the decommission path:
-// the controller calls it once a draining node owns no partitions, so the
-// removed node's data is already safely relocated. Idempotent — removing a
-// node already absent is a no-op config entry.
+// RemoveServer removes a node, voter or non-voter, from the Raft
+// configuration. Leader-only (followers fail with raft.ErrNotLeader).
+// This is the decommission path: the controller calls it once a draining
+// node owns no partitions, so the removed node's data is already safely
+// relocated. Idempotent: removing a node already absent is a no-op
+// config entry.
 func (s *Store) RemoveServer(id string) error {
 	return s.r.RemoveServer(raft.ServerID(id), 0, barrierTimeout).Error()
 }
