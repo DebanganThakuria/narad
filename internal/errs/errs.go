@@ -14,6 +14,13 @@ var (
 	// ErrTopicAlreadyExists reports that the requested topic name is
 	// already taken.
 	ErrTopicAlreadyExists = errors.New("topic already exists")
+
+	// ErrTopicChanged reports a topic write refused because the topic
+	// changed after the write was checked against it: it was deleted and
+	// recreated under the name, its partition count grew, or the parent
+	// of a create-as-child was recreated. Nothing was written. It maps to
+	// 409; the client re-reads the topic before deciding what to retry.
+	ErrTopicChanged = errors.New("topic changed since it was read")
 )
 
 // Message delivery.

@@ -86,11 +86,7 @@ func (s *Store) SchemaBytes(_ context.Context, topicName string) (int64, error) 
 	defer s.fsm.mu.RUnlock()
 	var total int64
 	err := s.fsm.view(func(tx *bolt.Tx) error {
-		prefix := []byte(topicName + ":")
-		c := tx.Bucket(bucketSchemas).Cursor()
-		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
-			total += int64(len(v))
-		}
+		total = topicSchemaBytes(tx, topicName)
 		return nil
 	})
 	return total, err
@@ -106,10 +102,7 @@ func (s *Store) ClusterSchemaBytes(_ context.Context) (int64, error) {
 	defer s.fsm.mu.RUnlock()
 	var total int64
 	err := s.fsm.view(func(tx *bolt.Tx) error {
-		c := tx.Bucket(bucketSchemas).Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			total += int64(len(v))
-		}
+		total = clusterSchemaBytes(tx)
 		return nil
 	})
 	return total, err

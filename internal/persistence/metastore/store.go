@@ -128,6 +128,10 @@ type Store struct {
 	// (join_admission.go).
 	health  *raftHealth
 	admitMu sync.Mutex
+
+	// entryUse records which entry types newer than 3.0.x this node has
+	// proposed (entry_type_use.go).
+	entryUse entryTypeUse
 }
 
 // New opens or creates the Raft metastore at cfg.DataDir.

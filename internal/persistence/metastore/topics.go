@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	bolt "go.etcd.io/bbolt"
 
@@ -139,16 +138,7 @@ func (s *Store) TopicNameFoldConflict(name string) (existing string, found bool,
 	s.fsm.mu.RLock()
 	defer s.fsm.mu.RUnlock()
 	err = s.fsm.view(func(tx *bolt.Tx) error {
-		c := tx.Bucket(bucketTopics).Cursor()
-		for k, _ := c.First(); k != nil; k, _ = c.Next() {
-			if len(k) != len(name) || string(k) == name {
-				continue
-			}
-			if strings.EqualFold(string(k), name) {
-				existing, found = string(k), true
-				return nil
-			}
-		}
+		existing, found = foldedTopicName(tx, name)
 		return nil
 	})
 	return existing, found, err
