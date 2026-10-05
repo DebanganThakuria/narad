@@ -2,15 +2,18 @@ package cluster_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker"
+	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -122,5 +125,121 @@ func TestDecommissionIsAdminOnly(t *testing.T) {
 	httpcluster.Decommission(set).ServeHTTP(res, req)
 	if res.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", res.Code)
+	}
+}
+
+func adminRequest(method, target string, pathValues ...string) *http.Request {
+	req := asUser(httptest.NewRequest(method, target, nil), user.User{Username: "root", Root: true})
+	for i := 0; i+1 < len(pathValues); i += 2 {
+		req.SetPathValue(pathValues[i], pathValues[i+1])
+	}
+	return req
+}
+
+func isDraining(t *testing.T, s *metastore.Store, id string) bool {
+	t.Helper()
+	m, err := s.GetMember(id)
+	if err != nil {
+		t.Fatalf("GetMember(%s): %v", id, err)
+	}
+	return m.Draining
+}
+
+func decodeBody[T any](t *testing.T, res *httptest.ResponseRecorder) T {
+	t.Helper()
+	var v T
+	if err := json.Unmarshal(res.Body.Bytes(), &v); err != nil {
+		t.Fatalf("decode %s: %v", res.Body, err)
+	}
+	return v
+}
+
+// A decommission that could never complete safely is refused up front
+// with 409 and every reason, and nothing is written: here the only voter
+// (too few voters would be left, and nobody could take its partition),
+// and a dead member that owns a partition.
+func TestDecommissionPreflightRefusesWithReasons(t *testing.T) {
+	set := seededSet(t)
+	ms := set.Deps.Metastore
+	ctx := context.Background()
+	if err := ms.RegisterMember(ctx, metastore.Member{ID: "cluster-2", Addr: "10.0.0.9:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.CreateTopic(ctx, topic.Topic{Name: "dead-owned", Partitions: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.AssignPartition(ctx, "dead-owned", 0, "cluster-2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.MarkMemberDead(ctx, "cluster-2"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		id    string
+		codes []string
+	}{
+		{"cluster-0", []string{controller.BlockedBelowMinVoters, controller.BlockedNoReceivers}},
+		{"cluster-2", []string{controller.BlockedOwnerDead}},
+	} {
+		res := httptest.NewRecorder()
+		httpcluster.Decommission(set).ServeHTTP(res, adminRequest(http.MethodPost, "/v1/cluster/members/"+tc.id+"/decommission", "id", tc.id))
+		if res.Code != http.StatusConflict {
+			t.Fatalf("decommission %s: status %d (%s), want 409", tc.id, res.Code, res.Body)
+		}
+		body := decodeBody[controller.DecommissionRefusal](t, res)
+		var codes []string
+		for _, r := range body.Reasons {
+			codes = append(codes, r.Code)
+			if r.Message == "" {
+				t.Fatalf("reason %s has no message", r.Code)
+			}
+		}
+		if !slices.Equal(codes, tc.codes) || body.Error == "" {
+			t.Fatalf("decommission %s refused with %v (error %q), want %v", tc.id, codes, body.Error, tc.codes)
+		}
+		if isDraining(t, ms, tc.id) {
+			t.Fatalf("a refused decommission still marked %s draining", tc.id)
+		}
+	}
+}
+
+// ?dry_run=true says what a decommission would do and writes nothing,
+// and a cancel cannot be dry-run.
+func TestDecommissionDryRunWritesNothing(t *testing.T) {
+	set := seededSet(t)
+	ms := set.Deps.Metastore
+	if err := ms.RegisterMember(context.Background(), metastore.Member{ID: "cluster-1", Addr: "10.0.0.8:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatal(err)
+	}
+
+	res := httptest.NewRecorder()
+	httpcluster.Decommission(set).ServeHTTP(res, adminRequest(http.MethodPost, "/v1/cluster/members/cluster-1/decommission?dry_run=true", "id", "cluster-1"))
+	if res.Code != http.StatusOK {
+		t.Fatalf("dry run: status %d (%s), want 200", res.Code, res.Body)
+	}
+	got := decodeBody[httpcluster.DryRunView](t, res)
+	if got.Member != "cluster-1" || !got.WouldDecommission || got.Voter || got.InboundMoves != 1 || got.Reasons == nil || len(got.Reasons) != 0 {
+		t.Fatalf("dry run = %+v, want cluster-1 decommissionable, not a voter, one inbound move, no reasons", got)
+	}
+	if isDraining(t, ms, "cluster-1") {
+		t.Fatal("a dry run marked cluster-1 draining")
+	}
+
+	res = httptest.NewRecorder()
+	httpcluster.Decommission(set).ServeHTTP(res, adminRequest(http.MethodPost, "/v1/cluster/members/cluster-0/decommission?dry_run=1", "id", "cluster-0"))
+	if got := decodeBody[httpcluster.DryRunView](t, res); res.Code != http.StatusOK || got.WouldDecommission || !got.Voter || got.OwnedPartitions != 1 || len(got.Reasons) != 1 || got.Reasons[0].Code != controller.BlockedBelowMinVoters {
+		t.Fatalf("dry run of the only voter: status %d, %+v; want would_decommission false, below_min_voters", res.Code, got)
+	}
+
+	res = httptest.NewRecorder()
+	httpcluster.Decommission(set).ServeHTTP(res, adminRequest(http.MethodDelete, "/v1/cluster/members/cluster-1/decommission?dry_run=true", "id", "cluster-1"))
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("dry-run cancel: status %d, want 400", res.Code)
+	}
+	res = httptest.NewRecorder()
+	httpcluster.Decommission(set).ServeHTTP(res, adminRequest(http.MethodPost, "/v1/cluster/members/cluster-1/decommission?dry_run=maybe", "id", "cluster-1"))
+	if res.Code != http.StatusBadRequest || isDraining(t, ms, "cluster-1") {
+		t.Fatalf("dry_run=maybe: status %d, want 400 and nothing written", res.Code)
 	}
 }

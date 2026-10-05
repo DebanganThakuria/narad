@@ -5,10 +5,12 @@ package controller
 // share, so an operator reads the same reason everywhere.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
 
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
 
@@ -247,4 +249,76 @@ func statusBlocker(v DecommissionView) (Blocker, bool) {
 			"its ingress WAL still holds %d accepted records not yet handed to their owners; it is removed once they are", r.Status.DispatchBacklog)}, true
 	}
 	return Blocker{}, false
+}
+
+// ClusterReader is the replica view DecommissionViews reads.
+// *metastore.Store implements it, on any node.
+type ClusterReader interface {
+	ListMembers() ([]metastore.Member, error)
+	Voters() ([]string, error)
+	LeaderID() string
+	ListTopics(ctx context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error)
+	ListAssignments(topicName string) ([]metastore.Assignment, error)
+}
+
+// DecommissionViews reads one DecommissionView per member from r, judged
+// with the default MinVoters and MaxInFlightMoves (the ones serve runs
+// the controller with) and without node status. The decommission
+// preflight and the members view use it on whichever node they run.
+func DecommissionViews(ctx context.Context, r ClusterReader) (map[string]DecommissionView, error) {
+	members, err := r.ListMembers()
+	if err != nil {
+		return nil, err
+	}
+	voters, err := r.Voters()
+	if err != nil {
+		return nil, err
+	}
+	topics, _, err := r.ListTopics(ctx, metastore.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	owned, outbound, inbound := map[string]int{}, map[string]int{}, map[string]int{}
+	inFlight := 0
+	for _, t := range topics {
+		assignments, err := r.ListAssignments(t.Name)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range assignments {
+			owned[a.OwnerID]++
+			if a.TargetID != "" {
+				outbound[a.OwnerID]++
+				inbound[a.TargetID]++
+				inFlight++
+			}
+		}
+	}
+	leaderID := r.LeaderID()
+	views := make(map[string]DecommissionView, len(members))
+	for _, m := range members {
+		views[m.ID] = DecommissionView{
+			Node: m, Members: members, Voters: voters, LeaderID: leaderID,
+			MinVoters: DefaultMinVoters, MaxInFlightMoves: DefaultMaxInFlightMoves,
+			Owned: owned[m.ID], Outbound: outbound[m.ID], Inbound: inbound[m.ID], InFlight: inFlight,
+		}
+	}
+	return views, nil
+}
+
+// DecommissionRefusal is the 409 body of a decommission the preflight
+// refused, on the receiving node and on the leader alike: the first
+// reason's message as the error, and every reason.
+type DecommissionRefusal struct {
+	Error   string    `json:"error"`
+	Reasons []Blocker `json:"reasons"`
+}
+
+// NewDecommissionRefusal builds the refusal body for reasons (at least
+// one).
+func NewDecommissionRefusal(id string, reasons []Blocker) DecommissionRefusal {
+	return DecommissionRefusal{
+		Error:   "decommission of " + id + " refused: " + reasons[0].Message,
+		Reasons: reasons,
+	}
 }

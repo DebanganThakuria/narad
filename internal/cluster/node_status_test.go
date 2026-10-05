@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/ingress"
+	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
 	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
@@ -150,5 +152,42 @@ func TestDrainingOwnerStillCommitsForwardedRecords(t *testing.T) {
 	}
 	if br.committed != 3 {
 		t.Fatalf("committed %d records, want 3", br.committed)
+	}
+}
+
+// A decommission forwarded to the leader is preflighted there too: a
+// 3.0.x follower forwards without checking. Removing the only voter
+// could never complete, so it is refused with 409 and nothing is
+// written; a cancel always goes through.
+func TestForwardedDecommissionIsPreflightedOnTheLeader(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-self", Addr: "127.0.0.1:7942", Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember: %v", err)
+	}
+	server := NewRPCServer(stubBroker{}, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	payload, err := nodewire.EncodeDecommissionRequest(nodewire.DecommissionRequest{ID: "node-self"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := server.dispatch(ctx, requestKey{stream: 1, request: 1}, payload)
+	if res.Status != http.StatusConflict {
+		t.Fatalf("forwarded decommission of the only voter: status %d (%s), want 409", res.Status, res.Body)
+	}
+	var body controller.DecommissionRefusal
+	if err := json.Unmarshal(res.Body, &body); err != nil || len(body.Reasons) == 0 || body.Reasons[0].Code != controller.BlockedBelowMinVoters {
+		t.Fatalf("refusal body = %s (%v), want the below_min_voters reason", res.Body, err)
+	}
+	if m, _ := store.GetMember("node-self"); m.Draining {
+		t.Fatal("a refused forwarded decommission marked the node draining")
+	}
+
+	cancelPayload, err := nodewire.EncodeDecommissionRequest(nodewire.DecommissionRequest{ID: "node-self", Cancel: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := server.dispatch(ctx, requestKey{stream: 1, request: 2}, cancelPayload); res.Status != http.StatusNoContent {
+		t.Fatalf("forwarded cancel: status %d (%s), want 204", res.Status, res.Body)
 	}
 }

@@ -10,8 +10,11 @@ package cluster
 
 import (
 	"net/http"
+	"slices"
 	"sort"
+	"strconv"
 
+	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
@@ -20,6 +23,14 @@ import (
 // node draining) and DELETE (cancel a drain). Admin only. Draining a node
 // makes the controller shed its partitions onto the others and, once
 // drained, remove it from the Raft voter set.
+//
+// A POST is preflighted from this node's replica first: a decommission
+// that could never complete safely (too few voters left, no alive
+// majority left, no node to receive its partitions, a dead node that
+// owns partitions) is refused with 409 and the reasons, and nothing is
+// written. The leader checks again when the request is forwarded.
+// ?dry_run=true answers 200 with the verdict and writes nothing; it is
+// never forwarded.
 func Decommission(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.RequireAdmin(w, r); !ok {
@@ -31,6 +42,18 @@ func Decommission(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 		cancel := r.Method == http.MethodDelete
+		dryRun, err := boolQuery(r, "dry_run")
+		if err != nil {
+			s.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if cancel && dryRun {
+			s.WriteError(w, http.StatusBadRequest, "dry_run applies to a decommission, not to its cancel")
+			return
+		}
+		if !cancel && !preflightDecommission(s, w, r, id, dryRun) {
+			return
+		}
 
 		if s.Deps.Router != nil && s.Deps.Router.RouteDecommissionMember(r.Context(), w, r, id, cancel) {
 			return // forwarded to the leader; response already written
@@ -147,4 +170,70 @@ func Members(s *handlers.Set) http.HandlerFunc {
 		sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
 		s.WriteJSON(w, http.StatusOK, map[string]any{"members": views})
 	}
+}
+
+// DryRunView is the 200 body of POST .../decommission?dry_run=true.
+type DryRunView struct {
+	Member            string               `json:"member"`
+	WouldDecommission bool                 `json:"would_decommission"`
+	Reasons           []controller.Blocker `json:"reasons"`
+	Voter             bool                 `json:"voter"`
+	OwnedPartitions   int                  `json:"owned_partitions"`
+	InboundMoves      int                  `json:"inbound_moves"`
+}
+
+// preflightDecommission judges the decommission of id from this node's
+// replica. It answers a dry run itself, refuses an unsafe decommission
+// with 409, and reports whether the request may go on to the write.
+func preflightDecommission(s *handlers.Set, w http.ResponseWriter, r *http.Request, id string, dryRun bool) bool {
+	views, err := controller.DecommissionViews(r.Context(), s.Deps.Metastore)
+	if err != nil {
+		s.WriteError(w, http.StatusServiceUnavailable, "decommission preflight: "+err.Error())
+		return false
+	}
+	v, ok := views[id]
+	if !ok {
+		s.WriteError(w, http.StatusNotFound, "member not found")
+		return false
+	}
+	reasons := controller.DecommissionPreflight(v)
+	if dryRun {
+		s.WriteJSON(w, http.StatusOK, DryRunView{
+			Member: id, WouldDecommission: len(reasons) == 0, Reasons: nonNil(reasons),
+			Voter: slices.Contains(v.Voters, id), OwnedPartitions: v.Owned, InboundMoves: v.Inbound,
+		})
+		return false
+	}
+	if len(reasons) > 0 {
+		s.WriteJSON(w, http.StatusConflict, controller.NewDecommissionRefusal(id, reasons))
+		return false
+	}
+	return true
+}
+
+// boolQuery parses the boolean query parameter name; absent is false.
+func boolQuery(r *http.Request, name string) (bool, error) {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, &queryError{name: name, value: raw}
+	}
+	return v, nil
+}
+
+type queryError struct{ name, value string }
+
+func (e *queryError) Error() string {
+	return e.name + " must be true or false, got " + strconv.Quote(e.value)
+}
+
+// nonNil returns s, or an empty slice for nil, so JSON says [].
+func nonNil[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
 }
