@@ -163,7 +163,7 @@ Requests with one username answer `429` with `{"error":"too many failed authenti
 
 **Check.** `narad cluster members` shows the owner named in `owner_node` as `dead`, or `/readyz` on it is not ready.
 
-**Fix.** Bring the owner back. The topic list, produce, and consume of the other partitions keep working meanwhile. Until then, leave the unavailable partitions out of any total: their zeros are placeholders, not an empty partition. `narad replay` and `narad peek` refuse such a partition rather than start it at offset 0.
+**Fix.** Bring the owner back. The topic list, produce, and consume of the other partitions keep working meanwhile. Until then, leave the unavailable partitions out of any total: their zeros are placeholders, not an empty partition. `narad replay` and `narad sub --peek` refuse such a partition rather than start it at offset 0.
 
 ### `204` gaps after a node returns {#quiet-after-outage}
 

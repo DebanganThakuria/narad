@@ -84,9 +84,9 @@ func TestReplayRangeRefusesAnUnavailablePartition(t *testing.T) {
 	}
 }
 
-// peekStartCursors (narad peek) refuses an unavailable partition rather
-// than starting it at offset 0, which would replay its whole history
-// once the owner returns; with --from the stats are not needed.
+// peekStartCursors (narad sub --peek) refuses an unavailable partition
+// rather than starting it at offset 0, which would replay its whole
+// history once the owner returns; with --from the stats are not needed.
 func TestPeekStartRefusesAnUnavailablePartition(t *testing.T) {
 	c := newHTTPClient(partialTopicServer(t).URL)
 	if cursors, err := peekStartCursors(c, "orders", 1, -1); err == nil || !strings.Contains(err.Error(), "partition 1") {
