@@ -214,7 +214,7 @@ The node holds partition copies it set aside instead of deleting. At startup it 
 **Cause.** `kind` says where the copy came from:
 
 - `partition` (`topics/<topic>/p<NNNNN>.quarantine`, or with a timestamp suffix when that name was taken): a stale copy the new owner could not vouch for, or one ahead of the position it was promoted at, set aside by the [stale-copy sweep](#log-partition-set-aside), or an earlier copy a move's [install](#log-move-install-set-aside) found at the partition's path.
-- `staging` (`.moves/<topic>-<N>.quarantine`): a move's staging copy set aside because this node owns the partition by now and the copy may hold records its path lacks ([set-aside staging](#log-move-keeping-staging)).
+- `staging` (`.moves/<topic>-<N>.quarantine`): a move's staging copy set aside because this node owns the partition by now and the copy may hold records its path lacks ([set-aside staging](#log-move-keeping-staging)), or because the move ended while the partition's owner was dead ([dead source](#log-move-dead-source-staging)).
 - `topic_incarnation` (`topics/<topic>.stale-<id>`): the directory of a deleted incarnation of a topic recreated under the same name. Narad removes it on its own once the leader confirms that incarnation is gone; one that stays means the leader cannot be asked or still lists the incarnation.
 
 **Check.** The error line logged when the copy was set aside names why; search the node's logs for its `dir`.
@@ -233,6 +233,21 @@ The node holds directories of topics its replica no longer knows: a deleted topi
 **Check.** `ls dataDir/topics` for names `narad topic list` does not show, and the node's logs for `leader confirm:` warnings.
 
 **Fix.** For a leader that cannot be asked, restore the cluster's leader; the next sweep removes the directory. For an unmarked directory, restart the node, or remove the directory by hand once you are sure no topic of that name exists.
+### `narad_moves_blocked` above 0 {#moves-blocked}
+
+**Unreleased:** in master, not in v3.0.1.
+
+A node is the destination of a partition move it cannot finish on its own. The gauge is per node and per `reason`.
+
+**Cause.** By `reason`:
+
+- `copy_unverifiable`: the move's staged copy failed verification, and failed again after one fresh copy, so the node stopped freezing the source ([staged copy cannot be verified](#log-move-unverifiable)). Also a dead source's copy that reaches its high watermark but fails verification.
+- `source_dead_copy_behind`: the move's source is dead and the copy is behind the source's last high watermark, so promoting it would lose records ([source is dead](#log-move-dead-source-behind)).
+
+**Check.** The node's log for the error line of each reason; `narad cluster moves` for the move and `narad cluster members` for the source.
+
+**Fix.** By reason, in the log lines below. Each blocked move holds one of the `MaxInFlightMoves` slots, so later rebalances and decommissions wait behind it.
+
 ### `narad_raft_nonvoters` stays above 0 {#nonvoters-stay}
 
 `narad_raft_nonvoters` stays above 0 for more than a minute after a scale-out or a readmission.
@@ -462,6 +477,38 @@ When the path does hold a copy installed from the move's source and the move mov
 **Check.** `partition_dir_has_records`, and the segment files in both directories (each file is named for the offset it starts at).
 
 **Fix.** Stop the node and copy both directories off first. If `partition_dir_has_records=false`, move the set-aside directory into place as `partition_dir` (`.moves/orders-3.quarantine` goes to `topics/orders/p00003`) and start the node. If it is `true`, both copies can hold records the other lacks, at overlapping offsets: do not replace the live partition with the set-aside copy; compare the two, start the node, and re-produce from the set-aside copy the records you decide matter. Narad does not move or delete either directory on its own.
+
+### `move: staged copy cannot be verified; not freezing the source again` {#log-move-unverifiable}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Logged at error level on a move's destination, with `topic`, `partition`, `source`, `attempts`, `action` and `err`. The move counts in `narad_moves_blocked{reason="copy_unverifiable"}`.
+
+**Cause.** The destination drained the partition under the source's freeze, and the staged copy did not verify as the partition at the source's high watermark: it recovered short of it, past it (`a frame straddles the high watermark`), or not at all. The destination threw the copy away and copied the partition once more from scratch (logged at warning as `move: copying the partition again from scratch`), and that copy failed too. Draining again would fail the same way, so the destination stopped. It no longer freezes the source; the source's last freeze lapses within 30 s, and the partition keeps serving from the source, which still owns it.
+
+**Check.** `err`, and the source's log and partition directory: the source serves the partition, so a copy that recovers differently from it points at a storage problem on either node.
+
+**Fix.** The move stays in flight until it is aborted or re-planned, or this node restarts, which tries once more. Nothing was deleted: the source keeps its copy.
+
+### `move: the source is dead and this node's copy` {#log-move-dead-source-behind}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `move: the source is dead and this node's copy is behind its last high watermark, so it cannot force-promote: promoting would lose records the source made visible. Waiting for the source to return; abort the move to give up on it`, at error level, with `topic`, `partition`, `source`, `copy_next_offset`, `source_last_hwm` and `err`. A copy that reaches the high watermark but fails verification logs `move: the source is dead and this node's copy fails verification, so it cannot force-promote` instead. Either is logged once each time the source dies, then at debug level; v3.0.1 logged `move: source dead but copy is behind its last hwm` at warning every 2 s. The move counts in `narad_moves_blocked` until the source reads alive again.
+
+**Cause.** The move's source died before the destination's copy caught up with it. Records from `copy_next_offset` to `source_last_hwm` exist only on the source's disk. The destination keeps waiting, because a force-promote would drop them.
+
+**Fix.** Bring the source back: the move resumes and completes. If the source is gone for good, the records past `copy_next_offset` are gone with it; aborting the move leaves the partition with its dead owner, and the destination sets its partial copy aside ([below](#log-move-dead-source-staging)).
+
+### `move: set aside the staging copy of a move that ended while its source is dead` {#log-move-dead-source-staging}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `move: set aside the staging copy of a move that ended while its source is dead; it may be the only copy of the partition's records. Operator action required`, at error level, with `topic`, `partition`, `quarantine_dir`, `owner`, `owner_state` and `target`.
+
+**Cause.** A move to this node ended without a flip (it was aborted or re-planned, or the node shut down) while the partition's owner read dead (`owner_state` is `dead`, `no member record`, or why the record could not be read), and the move's staging copy held records. Those may be the only copy of the partition's records left, so the node renamed the copy to `quarantine_dir` (`.moves/<topic>-<N>.quarantine`) instead of deleting it. It is counted in `narad_quarantined_copies`.
+
+**Fix.** If the owner comes back with its disk, its copy is the partition and the set-aside one can be deleted once you have checked. If it is gone for good, copy `quarantine_dir` off before anything else: Narad never serves it and never deletes it. Its records stop at the copy's last segment; re-produce the ones you need.
 
 ### `x509: certificate signed by unknown authority` {#raft-cert-untrusted}
 

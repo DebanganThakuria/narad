@@ -160,6 +160,7 @@ Every node holds a full replica of the [metastore](glossary.md#metastore), kept 
 | `narad_moves_total`<br>counter; labels `outcome` | Finished moves: `completed`, or `force_promoted` when the source died and the copy took over. |
 | `narad_moves_duration_seconds`<br>histogram; no labels | Time from a move starting to the ownership change. |
 | `narad_moves_bytes_total`<br>counter; no labels | Bytes copied by finished moves. |
+| `narad_moves_blocked` (unreleased)<br>gauge; labels `reason` | Moves this node is the destination of that cannot finish on their own: `copy_unverifiable` (the staged copy failed verification twice, the second time after a fresh copy, so the node stopped freezing the source; or a dead source's copy fails it) and `source_dead_copy_behind` (the source is dead and the copy is behind its last high watermark, so it cannot be force-promoted). Both are exported at 0. Alert on a value above 0 ([Troubleshooting](../operate/troubleshooting.md#moves-blocked)). |
 | `narad_topics_total`<br>gauge; no labels | Topics in the cluster. |
 | `narad_partitions_total`<br>gauge; no labels | Partitions this node owns. |
 | `narad_errors_total`<br>counter; labels `component`, `kind` | Errors by where they happened, for example `http`/`5xx`, `storage`/`fsync_poisoned` or `storage`/`retention_unlink`. |
