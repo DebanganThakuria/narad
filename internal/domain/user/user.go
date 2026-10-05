@@ -5,9 +5,12 @@
 package user
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Action is a permission verb. Consume includes ack — a consumer that
@@ -248,4 +251,34 @@ func ValidateGrants(grants []Grant) error {
 		}
 	}
 	return nil
+}
+
+// ValidatePasswordHash rejects a stored password that is not a bcrypt
+// hash. A writer that reaches the metastore without the HTTP handler
+// (the leader-forwarded user RPC) carries the hash, not the password, so
+// this is the check it can make: an empty or foreign value would create
+// a principal no password can ever sign in as.
+func ValidatePasswordHash(hash []byte) error {
+	if len(hash) == 0 {
+		return errors.New("password hash required")
+	}
+	if _, err := bcrypt.Cost(hash); err != nil {
+		return fmt.Errorf("password hash is not a bcrypt hash: %w", err)
+	}
+	return nil
+}
+
+// ValidateNewUser checks a user record about to be created: a username
+// the API can address, grants ValidateGrants accepts, and a bcrypt
+// password hash. The HTTP handler checks the plaintext password before
+// hashing it; the leader-forwarded RPC, which only sees the record,
+// checks it with this.
+func ValidateNewUser(u User) error {
+	if err := ValidateUsername(u.Username); err != nil {
+		return err
+	}
+	if err := ValidateGrants(u.Grants); err != nil {
+		return err
+	}
+	return ValidatePasswordHash(u.PasswordHash)
 }
