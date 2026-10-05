@@ -104,13 +104,15 @@ const JoinCodeOlderRelease = "older_release"
 const olderReleaseLogEvery = time.Minute
 
 // refuseOlderJoiner refuses a node not yet in the Raft configuration
-// that applies fewer Raft entry types than every current member
-// (metastore.Store.MinMemberEntryTypes): the leader proposes an entry
-// type once every member knows it, so such a cluster may already use
-// entries the joiner would skip (3.0.x) or stop on (3.1.0 and later). A
-// joiner that reports nothing (3.0.x) applies the 3.0.x set. A server
-// already in the configuration is never refused: it is a member, and its
-// own heartbeat holds newer types back.
+// that applies fewer Raft entry types than every recorded member
+// (metastore.Store.MinMemberEntryTypes), or than the newest type the
+// cluster has applied (metastore.Store.NewestAppliedEntryType). The
+// leader proposes an entry type once every member knows it, so a cluster
+// whose members all apply more may already use entries the joiner would
+// skip (3.0.x) or stop on (3.1.0 and later), and one that has applied a
+// type certainly does. A joiner that reports nothing (3.0.x) applies the
+// 3.0.x set. A server already in the configuration is never refused: it
+// is a member, and its own heartbeat holds newer types back.
 //
 // 409 is deliberate: a 3.0.x node with an empty data directory reads
 // only 200, 421 and 409 as "a cluster exists" before deciding whether to
@@ -128,20 +130,28 @@ func (s *RPCServer) refuseOlderJoiner(req nodewire.JoinClusterRequest) (nodewire
 	if err != nil {
 		return errorResponse(http.StatusServiceUnavailable, "membership lookup failed"), true
 	}
+	used, err := s.store.NewestAppliedEntryType()
+	if err != nil {
+		return errorResponse(http.StatusServiceUnavailable, "metadata lookup failed"), true
+	}
 	joiner := metastore.ReportedEntryTypes(req.EntryTypes)
-	if joiner >= lowest {
+	if joiner >= lowest && joiner >= used {
 		return nodewire.Response{}, false
 	}
-	s.logOlderReleaseJoin(req.ID, joiner, lowest)
+	s.logOlderReleaseJoin(req.ID, joiner, lowest, used)
+	reason := fmt.Sprintf("this node runs an older release than every member of the cluster: it applies Raft entry types up to %d, every member applies up to %d or more, so the cluster may already use entries it would skip; upgrade it to the cluster's release before it joins", joiner, lowest)
+	if joiner < used {
+		reason = fmt.Sprintf("this node runs an older release than the cluster: it applies Raft entry types up to %d, and the cluster has already used Raft entry type %d, so its log holds entries the node would skip; upgrade it to the cluster's release before it joins", joiner, used)
+	}
 	return jsonResponse(http.StatusConflict, map[string]string{
-		"error": fmt.Sprintf("this node runs an older release than every member of the cluster: it applies Raft entry types up to %d, every member applies up to %d or more, so the cluster may already use entries it would skip; upgrade it to the cluster's release before it joins", joiner, lowest),
+		"error": reason,
 		"code":  JoinCodeOlderRelease,
 	}), true
 }
 
 // logOlderReleaseJoin logs a refused older joiner at error, at most once
 // per olderReleaseLogEvery for each joiner ID.
-func (s *RPCServer) logOlderReleaseJoin(id string, joiner, lowest uint32) {
+func (s *RPCServer) logOlderReleaseJoin(id string, joiner, lowest, used uint32) {
 	if s.logger == nil {
 		return
 	}
@@ -158,7 +168,7 @@ func (s *RPCServer) logOlderReleaseJoin(id string, joiner, lowest uint32) {
 	}
 	s.olderReleaseMu.Unlock()
 	if due {
-		s.logger.Error("cluster join refused: the joiner runs an older release than every member; upgrade it to the cluster's release",
-			"id", id, "joiner_entry_types", joiner, "member_entry_types_min", lowest)
+		s.logger.Error("cluster join refused: the joiner runs an older release than the cluster; upgrade it to the cluster's release",
+			"id", id, "joiner_entry_types", joiner, "member_entry_types_min", lowest, "cluster_entry_type_used", used)
 	}
 }

@@ -79,9 +79,9 @@ type AbortMoveRequest struct {
 //
 // EntryTypes is the newest Raft entry type the joiner's release applies
 // (0: not reported, a joiner on an older release). The leader refuses a
-// joiner that applies fewer entry types than every current member, so
-// a node never joins a cluster that may already use entries it cannot
-// apply. It is a trailing optional field, written only when non-zero; a
+// joiner that applies fewer entry types than every recorded member, or
+// than the newest type the cluster has applied, so a node never joins a
+// cluster that may already use entries it cannot apply. It is a trailing optional field, written only when non-zero; a
 // leader on an older release refuses the longer frame
 // (TrailingPayloadError) and the joiner sends it again without the
 // field.

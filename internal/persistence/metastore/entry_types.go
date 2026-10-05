@@ -8,9 +8,10 @@ package metastore
 // already sends (Member.Build, Member.EntryTypes), and the leader asks
 // EveryMemberKnows before it proposes a new type, proposing today's
 // entries until every member knows it. A joiner that applies fewer types
-// than every current member is refused at the door (the join handler,
-// MinMemberEntryTypes), so a cluster that may already use a type never
-// admits a node that would skip it.
+// than every recorded member, or than the newest type the cluster has
+// applied, is refused at the door (the join handler, MinMemberEntryTypes
+// and NewestAppliedEntryType), so a cluster that may already use a type
+// never admits a node that would skip it.
 //
 // The check reads the local replica, so it is the leader's view: a
 // member that rolls back counts with its old report until its next
@@ -21,9 +22,11 @@ import (
 	"cmp"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 
 	"github.com/hashicorp/raft"
+	bolt "go.etcd.io/bbolt"
 )
 
 // entryTypeReport is one member's account of the Raft entry types it
@@ -127,12 +130,18 @@ func (r entryTypeReport) holdsBack(entryType uint32) string {
 	}
 }
 
-// MinMemberEntryTypes returns the fewest Raft entry types any member
-// applies, over the same servers and records as EveryMemberKnows except
-// excludeID (a joiner's own record must not judge it). A Raft server
-// with no member record counts as 0. The join handler refuses a joiner
-// that applies fewer types than this: every member applies more, so the
-// cluster may already use an entry the joiner would skip.
+// MinMemberEntryTypes returns the fewest Raft entry types any recorded
+// member applies (alive, dead or draining), this node included, except
+// excludeID (a joiner's own record must not judge it). The join handler
+// refuses a joiner that applies fewer types than this: every member
+// applies more, so the cluster may already use an entry the joiner would
+// skip.
+//
+// A Raft server with no member record (a staged joiner that has not
+// registered yet) is left out. Its release is unknown, so it says
+// nothing about which types the cluster may use: EveryMemberKnows holds
+// new types back for it, but here, counted as 0, it would let any joiner
+// in for as long as it stays unregistered.
 func (s *Store) MinMemberEntryTypes(excludeID string) (uint32, error) {
 	reports, err := s.entryTypeReports()
 	if err != nil {
@@ -140,11 +149,31 @@ func (s *Store) MinMemberEntryTypes(excludeID string) (uint32, error) {
 	}
 	lowest := MaxEntryType
 	for _, r := range reports {
-		if r.id != excludeID {
+		if r.recorded && r.id != excludeID {
 			lowest = min(lowest, r.entryTypes)
 		}
 	}
 	return lowest, nil
+}
+
+// NewestAppliedEntryType returns the newest Raft entry type this node's
+// database has applied (fsm_meta's max_entry_type, which every snapshot
+// carries): on the leader, the newest type the cluster has used. A
+// joiner that does not apply it would meet entries of that type in the
+// log or snapshot it is sent, so the join handler refuses it whatever
+// the member records say.
+func (s *Store) NewestAppliedEntryType() (uint32, error) {
+	s.fsm.mu.RLock()
+	defer s.fsm.mu.RUnlock()
+	var newest uint64
+	err := s.fsm.view(func(tx *bolt.Tx) error {
+		newest = getMetaUint(tx.Bucket(bucketFSMMeta), metaKeyMaxEntryType)
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return uint32(min(newest, math.MaxUint32)), nil
 }
 
 // RaftServer reports whether id is a server, voter or non-voter, in the

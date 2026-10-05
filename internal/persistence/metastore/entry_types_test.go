@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/domain/user"
 )
 
 // A Raft entry type newer than the 3.0.x set may be proposed only once
@@ -180,9 +183,12 @@ func TestEveryServerAndMemberRecordReportsItsEntryTypes(t *testing.T) {
 		exclude string
 		want    uint32
 	}{
-		{"", 0},                       // ghost reports nothing
-		{"ghost", legacyMaxEntryType}, // et-old and et-dead read as the 3.0.x set
-		{"et-old", 0},
+		// ghost has no record and is left out; et-old and et-dead read as
+		// the 3.0.x set.
+		{"", legacyMaxEntryType},
+		{"ghost", legacyMaxEntryType},
+		{"et-old", legacyMaxEntryType},
+		{"et-dead", legacyMaxEntryType},
 	} {
 		got, err := s.MinMemberEntryTypes(tc.exclude)
 		if err != nil || got != tc.want {
@@ -231,5 +237,29 @@ func TestLegacyHeartbeatClearsTheReportedVersion(t *testing.T) {
 	lowest, err := s.MinMemberEntryTypes("")
 	if err != nil || lowest != legacyMaxEntryType {
 		t.Fatalf("MinMemberEntryTypes = %d, %v; want the 3.0.x set %d", lowest, err, legacyMaxEntryType)
+	}
+}
+
+// The newest entry type the database has applied is the newest the
+// cluster has used: an entry of a newer type moves it, and an older one
+// never moves it back.
+func TestNewestAppliedEntryTypeFollowsTheEntriesApplied(t *testing.T) {
+	ctx := context.Background()
+	s, _ := singleVoter(t, "na-0")
+	grants := uint32(opSetUserGrants)
+	if got, err := s.NewestAppliedEntryType(); err != nil || got >= grants {
+		t.Fatalf("NewestAppliedEntryType before any grants = %d, %v; want below %d", got, err, grants)
+	}
+	if err := s.CreateUser(ctx, user.User{Username: "bob"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := s.SetUserGrants(ctx, "bob", []user.Grant{{Action: user.ActionConsume, Patterns: []string{"orders"}}}, 1); err != nil {
+		t.Fatalf("SetUserGrants: %v", err)
+	}
+	if err := s.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	if got, err := s.NewestAppliedEntryType(); err != nil || got != grants {
+		t.Fatalf("NewestAppliedEntryType after grants and a topic = %d, %v; want %d", got, err, grants)
 	}
 }

@@ -10,6 +10,7 @@ package cluster
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
@@ -492,21 +494,11 @@ func TestJoinRefusesAJoinerOlderThanEveryMember(t *testing.T) {
 	}
 	join := func(req nodewire.JoinClusterRequest) nodewire.Response {
 		t.Helper()
-		payload, err := nodewire.EncodeJoinClusterRequest(req)
-		if err != nil {
-			t.Fatalf("encode join request: %v", err)
-		}
-		return server.handleJoinCluster(payload)
+		return joinVia(t, server, req)
 	}
 	requireRefused := func(res nodewire.Response) {
 		t.Helper()
-		var body map[string]string
-		if res.Status != http.StatusConflict || json.Unmarshal(res.Body, &body) != nil || body["code"] != JoinCodeOlderRelease {
-			t.Fatalf("join answer = %d %s, want 409 with code %s", res.Status, res.Body, JoinCodeOlderRelease)
-		}
-		if !strings.Contains(body["error"], "upgrade") {
-			t.Fatalf("refusal %q does not say to upgrade the node", body["error"])
-		}
+		requireOlderReleaseRefusal(t, res)
 	}
 	older := metastore.MaxEntryType - 1
 	// Joiners that get staged listen nowhere on loopback, so the leader's
@@ -573,5 +565,96 @@ func TestJoinRefusesAJoinerOlderThanEveryMember(t *testing.T) {
 	res = join(nodewire.JoinClusterRequest{ID: "node-old", ClusterAddr: oldAddr, EntryTypes: older})
 	if res.Status != http.StatusOK {
 		t.Fatalf("join with a member at the joiner's release = %d %s, want 200", res.Status, res.Body)
+	}
+}
+
+// joinVia hands req to server's join handler, as a joiner's request
+// arrives.
+func joinVia(t *testing.T, server *RPCServer, req nodewire.JoinClusterRequest) nodewire.Response {
+	t.Helper()
+	payload, err := nodewire.EncodeJoinClusterRequest(req)
+	if err != nil {
+		t.Fatalf("encode join request: %v", err)
+	}
+	return server.handleJoinCluster(payload)
+}
+
+// requireOlderReleaseRefusal fails unless res refuses the joiner as
+// older than the cluster, saying to upgrade it.
+func requireOlderReleaseRefusal(t *testing.T, res nodewire.Response) {
+	t.Helper()
+	var body map[string]string
+	if res.Status != http.StatusConflict || json.Unmarshal(res.Body, &body) != nil || body["code"] != JoinCodeOlderRelease {
+		t.Fatalf("join answer = %d %s, want 409 with code %s", res.Status, res.Body, JoinCodeOlderRelease)
+	}
+	if !strings.Contains(body["error"], "upgrade") {
+		t.Fatalf("refusal %q does not say to upgrade the node", body["error"])
+	}
+}
+
+// A staged server that has not registered yet does not lower the bar a
+// joiner must clear: its release is unknown, and every recorded member
+// may already have let the leader use a type the joiner would skip.
+// Every scale-out opens this window, and a joiner whose registration
+// never converges keeps it open.
+func TestJoinRefusesAnOlderJoinerWhileAStagedServerHasNoRecord(t *testing.T) {
+	ctx := context.Background()
+	stores := newTestStoreCluster(t, "node-a")
+	leader := stores["node-a"]
+	waitStoreLeader(t, leader)
+	server := NewRPCServer(nil, leader, slog.New(slog.DiscardHandler))
+	for id, entryTypes := range map[string]uint32{"node-a": metastore.MaxEntryType, "node-b": metastore.MaxEntryType + 1} {
+		if err := leader.RegisterMember(ctx, metastore.Member{ID: id, Addr: id + ":7942", Status: metastore.MemberAlive, Build: "narad next", EntryTypes: entryTypes}); err != nil {
+			t.Fatalf("RegisterMember(%s): %v", id, err)
+		}
+	}
+
+	res := joinVia(t, server, nodewire.JoinClusterRequest{ID: "node-new", ClusterAddr: freeTCPAddr(t), EntryTypes: metastore.MaxEntryType + 1})
+	if status, _ := joinOutcome(t, res); status != metastore.JoinStaged {
+		t.Fatalf("current joiner outcome = %q, want %q", status, metastore.JoinStaged)
+	}
+	if _, err := leader.GetMember("node-new"); !errors.Is(err, metastore.ErrNotFound) {
+		t.Fatalf("staged joiner's member record: %v; the scenario needs none yet", err)
+	}
+
+	requireOlderReleaseRefusal(t, joinVia(t, server, nodewire.JoinClusterRequest{ID: "node-old", ClusterAddr: freeTCPAddr(t), EntryTypes: metastore.MaxEntryType - 1}))
+	if in, err := leader.RaftServer("node-old"); err != nil || in {
+		t.Fatalf("refused joiner in the raft configuration: %v, %v", in, err)
+	}
+}
+
+// Once the cluster has applied an entry type, a joiner that lacks it is
+// refused even while a member record reports the joiner's own release
+// (a record from a node that heartbeated without being admitted, say):
+// the log and snapshot it would receive hold entries of that type.
+func TestJoinRefusesAJoinerLackingAnEntryTypeTheClusterHasUsed(t *testing.T) {
+	ctx := context.Background()
+	stores := newTestStoreCluster(t, "node-a")
+	leader := stores["node-a"]
+	waitStoreLeader(t, leader)
+	server := NewRPCServer(nil, leader, slog.New(slog.DiscardHandler))
+	// The 3.0.x set ends with the user-grants entry, so a joiner one type
+	// short of it lacks only that entry.
+	grants := metastore.ReportedEntryTypes(0)
+	short := grants - 1
+	if err := leader.RegisterMember(ctx, metastore.Member{ID: "node-d", Addr: "node-d:7942", Status: metastore.MemberAlive, Build: "narad old", EntryTypes: short}); err != nil {
+		t.Fatalf("RegisterMember(node-d): %v", err)
+	}
+
+	// Nothing the joiner lacks has been used yet: it is staged.
+	res := joinVia(t, server, nodewire.JoinClusterRequest{ID: "node-early", ClusterAddr: freeTCPAddr(t), EntryTypes: short})
+	if status, _ := joinOutcome(t, res); status != metastore.JoinStaged {
+		t.Fatalf("joiner before the cluster used entry type %d: outcome %q, want %q", grants, status, metastore.JoinStaged)
+	}
+
+	if err := leader.CreateUser(ctx, user.User{Username: "bob"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := leader.SetUserGrants(ctx, "bob", []user.Grant{{Action: user.ActionProduce, Patterns: []string{"orders"}}}, 1); err != nil {
+		t.Fatalf("SetUserGrants: %v", err)
+	}
+	requireOlderReleaseRefusal(t, joinVia(t, server, nodewire.JoinClusterRequest{ID: "node-late", ClusterAddr: freeTCPAddr(t), EntryTypes: short}))
+	if in, err := leader.RaftServer("node-late"); err != nil || in {
+		t.Fatalf("refused joiner in the raft configuration: %v, %v", in, err)
 	}
 }
