@@ -31,9 +31,9 @@ Narad keeps its [metadata](../reference/glossary.md#metastore) (topics, users wi
 A node with security on refuses to start unless one of two things is true (a node with no peers is exempt only while its `cluster.addr` is a loopback address, unreleased):
 
 - **Raft runs over mutual TLS.** Set `security.clusterTLS.enabled: true` in the chart. Steps: [Raft TLS certificates](raft-tls.md).
-- **You state that the port is fenced another way.** Set `security.allowPlaintextRaft: true` and apply a NetworkPolicy ([next section](#network-policy)).
+- **The port is fenced.** The chart's `networkPolicy.enabled: true` fences it ([next section](#network-policy)); `security.allowPlaintextRaft: true` says you fence it some other way.
 
-The chart sets `allowPlaintextRaft: true` by default, because `clusterTLS` is off by default. So a default install runs Raft in plaintext. Each node says at startup which transport it runs:
+The chart tells the node that the port is fenced (`NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT`) only when one of those two is set and `clusterTLS` is off (unreleased). With security on and none of the three, the install fails and names them. The v3.0.1 chart set `allowPlaintextRaft: true` by default instead, while shipping nothing that fenced the port, so a default v3.0.1 install runs Raft in plaintext with nothing in front of it. Each node says at startup which transport it runs:
 
 ```bash
 kubectl logs -n narad narad-0 \
@@ -48,56 +48,70 @@ How the two planes are secured is in [Networking and security](../understand/net
 
 ## Fence the cluster ports {#network-policy}
 
-Two ports carry node-to-node traffic: Raft on 7943/tcp, and the node RPC plane, which uses QUIC on the API port number over UDP (7942/udp). Restrict both to the Narad pods, whether or not Raft uses TLS. This NetworkPolicy does that for a release called `narad` in the namespace `narad`:
+Two ports carry node-to-node traffic: Raft on 7943/tcp, and the node RPC plane, which uses QUIC on the API port number over UDP (7942/udp). Restrict both to the Narad pods, whether or not Raft uses TLS. The chart does it with `networkPolicy.enabled` (unreleased); this keeps the metrics port to your Prometheus namespace too:
 
-```yaml title="narad-networkpolicy.yaml"
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: narad
-  namespace: narad
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: narad
-      app.kubernetes.io/instance: narad
-  policyTypes:
-    - Ingress
-  ingress:
-    # Raft and node RPC: other Narad pods only.
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: narad
-              app.kubernetes.io/instance: narad
-      ports:
-        - protocol: TCP
-          port: 7943
-        - protocol: UDP
-          port: 7942
-    # Client API: any source that can reach the Service.
-    - ports:
-        - protocol: TCP
-          port: 7942
-    # Metrics and probe port: your Prometheus namespace only.
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: monitoring
-      ports:
-        - protocol: TCP
-          port: 9100
+```yaml title="narad-values.yaml"
+networkPolicy:
+  enabled: true
+  metricsFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
 ```
 
-```bash
-kubectl apply -f narad-networkpolicy.yaml
-```
+The policy admits 7943/tcp and 7942/udp from the release's own pods only, and leaves the API (7942/tcp) open to any source that can reach the Service; `networkPolicy.apiFrom` narrows it. Change `monitoring` to the namespace your Prometheus runs in. Kubernetes does not let a NetworkPolicy block traffic from the pod's own node, so kubelet probes still reach their ports. The pprof port (6060) is closed unless `networkPolicy.pprofFrom` names a source. Every value is in the [Helm values reference](../reference/helm-values.md#network-policy).
 
-Change `monitoring` to the namespace your Prometheus runs in. Kubernetes does not let a NetworkPolicy block traffic from the pod's own node, so kubelet probes still reach port 9100. The pprof port (6060) has no rule, so the policy closes it.
+A NetworkPolicy is only enforced by a CNI that supports it (Calico, Cilium and most managed offerings do). On one that does not, the policy is accepted and changes nothing, and the ports stay open. Check yours before you rely on it for Raft; Raft TLS does not depend on the CNI.
+
+??? note "The v3.0.1 chart: apply the policy by hand"
+    The v3.0.1 chart has no `networkPolicy` values. This NetworkPolicy does the same for a release called `narad` in the namespace `narad`:
+
+    ```yaml title="narad-networkpolicy.yaml"
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: narad
+      namespace: narad
+    spec:
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: narad
+          app.kubernetes.io/instance: narad
+      policyTypes:
+        - Ingress
+      ingress:
+        # Raft and node RPC: other Narad pods only.
+        - from:
+            - podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: narad
+                  app.kubernetes.io/instance: narad
+          ports:
+            - protocol: TCP
+              port: 7943
+            - protocol: UDP
+              port: 7942
+        # Client API: any source that can reach the Service.
+        - ports:
+            - protocol: TCP
+              port: 7942
+        # Metrics and probe port: your Prometheus namespace only.
+        - from:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: monitoring
+          ports:
+            - protocol: TCP
+              port: 9100
+    ```
+
+    ```bash
+    kubectl apply -f narad-networkpolicy.yaml
+    ```
 
 ## Set the admin password {#admin-password}
 
-Put `admin-password` in the security secret before the first start. The root user, `admin`, is created once, from that value, when the cluster has no users. Without it, one node generates a password and writes it to a file on its own volume. Changing the secret later changes nothing; change the password through the API instead. Both cases: [Manage users and grants](users.md#root-admin).
+Put `admin-password` in the security secret before the first start. The root user, `admin`, is created once, from that value, when the cluster has no users. Without it, one node generates a password and writes it to a file on its own volume. Changing the secret later changes nothing; change the password through the API instead. Both cases: [Manage users and grants](users.md#root-admin). The chart's scale-in guard signs in with that key (unreleased), so after changing the password, put the new one in the secret too ([Scale in](scaling.md#scale-in)).
 
 ## Keep metrics internal {#metrics-exposure}
 

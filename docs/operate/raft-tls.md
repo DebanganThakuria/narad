@@ -69,8 +69,10 @@ helm install narad ./charts/narad -n narad \
   --set persistence.size=50Gi \
   --set image.tag=v3.0.1 \
   --set security.clusterTLS.enabled=true \
-  --set security.allowPlaintextRaft=false
+  --set networkPolicy.enabled=true
 ```
+
+With TLS on, the chart never tells the node that plaintext Raft is fenced, so `security.allowPlaintextRaft` does not matter. `networkPolicy.enabled` still keeps the node RPC plane (7942/udp) and Raft to the Narad pods ([Fence the cluster ports](production-checklist.md#network-policy); unreleased, the v3.0.1 chart ignores it).
 
 Each node logs which transport it runs. Check one:
 
@@ -105,6 +107,8 @@ A node on TLS and a node on plaintext cannot talk Raft to each other, so the swi
       --set security.clusterTLS.enabled=true \
       --set security.allowPlaintextRaft=false
     ```
+
+    `allowPlaintextRaft=false` clears a `true` that `--reuse-values` carries over from an older chart's default, so that a later change that turns TLS off is refused unless it names a fence.
 
     The StatefulSet restarts the highest-numbered pod first. That pod runs TLS, cannot reach its plaintext peers and stays not ready. The rolling update waits for it to become ready, so it stops here. The other pods keep their leader and keep serving.
 

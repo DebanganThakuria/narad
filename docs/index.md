@@ -376,8 +376,11 @@ To scale out, raise `replicaCount`. The new pod joins the cluster and the leader
 ```sh
 helm install narad ./charts/narad \
   -n narad --set replicaCount=3 \
-  --set image.tag=v3.0.1
+  --set image.tag=v3.0.1 \
+  --set networkPolicy.enabled=true
 ```
+
+The last line fences the Raft port to the Narad pods; [Raft TLS](operate/raft-tls.md) is the production choice.
 
 [Deployment, step by step](operate/deploy-kubernetes.md){ .nr-more }
 

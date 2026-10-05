@@ -132,13 +132,23 @@ This example takes a five-node cluster down to four.
 
 2. Wait until `narad cluster members` shows `owned_partitions: 0` for `narad-4`. The leader then removes it from Raft (as a voter, or as a non-voter if it was never promoted), and it drops out of the list. The pod keeps running, reports not ready, and its heartbeats are refused.
 
-3. Lower `replicaCount`. `allowScaleIn=true` tells the chart the pods it removes were decommissioned; without it, the chart refuses to lower the replica count of a running StatefulSet.
+3. Lower `replicaCount`. `allowScaleInTo=4` tells the chart the pods above size 4 were decommissioned; without it, the chart refuses to lower the replica count of a running StatefulSet. It approves that one size only, so keeping it with `--reuse-values` does not approve a later scale-in to another size.
 
     ```bash
     helm upgrade narad ./charts/narad -n narad --reuse-values \
       --set replicaCount=4 \
-      --set allowScaleIn=true
+      --set allowScaleInTo=4
     ```
+
+    `allowScaleInTo` is unreleased: the v3.0.1 chart takes `--set allowScaleIn=true` instead, and newer charts no longer read `allowScaleIn`.
+
+    Before the change, the chart's scale-in guard (unreleased) checks the cluster itself. This hook Job runs before every `helm upgrade` and `helm rollback`. If the change deletes a pod that `narad cluster members` still lists, it refuses, and the command fails with the reason in the Job's log:
+
+    ```bash
+    kubectl logs -n narad job/narad-scale-in-guard
+    ```
+
+    A change that deletes no pod passes without calling the API. On a scale-in the guard signs in as `admin` with the `admin-password` key of the security secret, so that key must hold root's current password; without it, the guard refuses and says so. To go ahead after checking `narad cluster members` by hand, add `--no-hooks` to that one command.
 
 To stop a decommission before it finishes, run `narad cluster decommission narad-4 --cancel`. The node starts receiving partitions again, and the next rebalance evens the load out.
 
@@ -146,7 +156,7 @@ Keep these rules while you scale in:
 
 - **Wait for zero partitions.** Lowering `replicaCount` before the node owns nothing deletes a pod whose data has not moved.
 - **Do not overlap a decommission with a rolling restart.** A `helm upgrade` that changes the pod template restarts the pods, and a draining node that restarts has no stable source to copy from until it settles. Changing only `replicaCount` does not restart the pods.
-- **A rollback of `replicaCount` is a scale-in.** `helm rollback` to a revision with fewer replicas deletes pods exactly like step 3, without steps 1 and 2. The chart refuses it unless `allowScaleIn` is set; decommission first rather than setting it to get past the refusal.
+- **A rollback of `replicaCount` is a scale-in.** `helm rollback` to a revision with fewer replicas deletes pods exactly like step 3, without steps 1 and 2. `helm rollback` renders no templates, so the `allowScaleInTo` check never runs; the scale-in guard, a pre-rollback hook, refuses it while a pod being deleted is still a member. A rollback to a revision rendered by an older chart runs no guard (the v3.0.1 chart refuses nothing on rollback). Decommission first.
 - **Three voters is the floor.** The leader never removes a voter from Raft if that would leave fewer than three voters. A decommission on a three-node cluster moves the partitions away, but the node stays a member. If the leader itself is decommissioned, it hands leadership to another node first. A node that is still a non-voter has no vote, so the floor does not hold it back.
 - **Finish a rolling upgrade from 3.0.x before you decommission a non-voter.** A 3.0.x leader removes only voters, so a non-voter it decommissions loses its member record but stays in the Raft configuration, and `narad_raft_nonvoters` stays above 0 ([Troubleshooting](troubleshooting.md#nonvoters-stay)).
 
