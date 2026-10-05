@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -39,6 +40,10 @@ type fakeControllerStore struct {
 	orphans          []metastore.Assignment // OrphanAssignments
 	prunes           int                    // PruneAssignment calls
 	deadMarks        []string               // "id@observed" in call order
+	// staleAssignments is what ListAssignments answers for a topic, once,
+	// instead of the rows on record: a view that missed placements the
+	// state machine has already applied.
+	staleAssignments map[string][]metastore.Assignment
 }
 
 func newFakeControllerStore(memberIDs ...string) *fakeControllerStore {
@@ -72,6 +77,10 @@ func (f *fakeControllerStore) ListTopics(context.Context, metastore.ListOptions)
 func (f *fakeControllerStore) ListAssignments(topicName string) ([]metastore.Assignment, error) {
 	if err := f.listAssignmentsErr[topicName]; err != nil {
 		return nil, err
+	}
+	if stale, ok := f.staleAssignments[topicName]; ok {
+		delete(f.staleAssignments, topicName)
+		return slices.Clone(stale), nil
 	}
 	var out []metastore.Assignment
 	for p, owner := range f.assignments[topicName] {
@@ -363,6 +372,31 @@ func TestAssignSweepBarriersBeforeReading(t *testing.T) {
 	c.reconcileAssignments(context.Background())
 	if failing.leaderBarriers == 0 || len(failing.assignedLog) != 0 {
 		t.Fatalf("barriers = %d, assigned %v after a failed barrier, want the pass skipped", failing.leaderBarriers, failing.assignedLog)
+	}
+}
+
+// Once every member applies insert-only placement, a sweep whose view
+// shows a partition without an owner, while the state machine already
+// holds one, leaves that owner in place (its disk may hold records) and
+// still places the partitions that really have none. A plain assignment
+// here replaced orders/0's owner with the round-robin pick.
+func TestAssignSweepNeverReplacesAnOwnerItDidNotSee(t *testing.T) {
+	store := newFakeControllerStore("narad-0", "narad-1", "narad-2")
+	store.entryTypesUsable = true
+	store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 3}}
+	store.assignments["orders"] = map[int]string{0: "narad-2"}
+	store.staleAssignments = map[string][]metastore.Assignment{"orders": nil}
+	c := &Controller{store: store, cfg: Config{}.withDefaults()}
+
+	c.reconcileAssignments(context.Background())
+	if got := store.assignments["orders"][0]; got != "narad-2" {
+		t.Fatalf("orders/0 owner = %q, want narad-2, the owner on record (assigned %v)", got, store.assignedLog)
+	}
+	if got := store.assignments["orders"]; len(got) != 3 || got[1] == "" || got[2] == "" {
+		t.Fatalf("orders assignments = %v, want partitions 1 and 2 placed too", got)
+	}
+	if slices.ContainsFunc(store.assignedLog, func(s string) bool { return strings.HasPrefix(s, "orders/0") }) {
+		t.Fatalf("assigned %v, want no write for orders/0", store.assignedLog)
 	}
 }
 
