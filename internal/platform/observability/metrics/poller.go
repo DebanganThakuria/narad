@@ -7,26 +7,52 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
-// pollInterval is the cadence at which the poller refreshes
-// inventory and lag gauges. Hardcoded — Prometheus scrapes are
-// usually 15-30s, so a 5s tick keeps gauges fresh without doing
-// significantly more work than the scraper consumes.
+// pollInterval is the cadence of both poller loops. Hardcoded:
+// Prometheus scrapes are usually 15-30s, so a 5s tick keeps gauges
+// fresh without doing significantly more work than the scraper
+// consumes.
 const pollInterval = 5 * time.Second
+
+// vitalsReadDeadline bounds how long one vitals pass waits for its
+// reads. A read still running at the deadline (a statfs on a hung
+// volume, a source blocked behind a lock held across a stuck fsync)
+// keeps running on its own goroutine and is not started again until it
+// returns; the pass keeps that gauge's last value and records no
+// success, so narad_poller_last_success_timestamp_seconds{loop="vitals"}
+// stops advancing and the frozen-poller alert fires.
+const vitalsReadDeadline = 2 * time.Second
 
 // defaultDataDirScanInterval bounds how often the data directory is
 // walked for the size gauge; the walk stats every segment file, so it
 // runs far less often than the 5s tick.
 const defaultDataDirScanInterval = 30 * time.Second
 
-// Poller is the goroutine that updates Narad's gauge-style metrics
-// (lag, inventory, on-disk sizes). Counters and histograms are
-// updated inline at the relevant call sites; only gauges need
-// periodic refresh because their value is "current state", not a
+// Loop label values of narad_poller_last_success_timestamp_seconds.
+const (
+	pollerLoopVitals    = "vitals"
+	pollerLoopInventory = "inventory"
+)
+
+// Poller is the pair of goroutines that updates Narad's gauge-style
+// metrics (lag, inventory, on-disk sizes, vital signs). Counters and
+// histograms are updated inline at the relevant call sites; only gauges
+// need periodic refresh because their value is "current state", not a
 // running tally.
+//
+// The two loops run independently, so the inventory walk cannot freeze
+// the gauges alerts read. The vitals loop reads the ingress WAL health
+// and dispatch backlog, the open-log count, the reaper restarts and the
+// free space on the data volume, each through its own bounded probe
+// (vitals.go). The inventory loop takes the broker Snapshot, sets the
+// per-partition gauges, walks the data directory and prunes departed
+// series. A Snapshot that failed used to skip the open-log count, the
+// reaper restarts and the free space, and one that blocked froze every
+// gauge, during exactly the failure they exist to show.
 type Poller struct {
 	metrics *Metrics
 	broker  SnapshotProvider
@@ -38,14 +64,27 @@ type Poller struct {
 	// defaultDataDirScanInterval. Zero means walk on every tick.
 	DataDirScanInterval time.Duration
 
+	// interval is both loops' cadence and vitalsDeadline the vitals
+	// read deadline; NewPoller sets pollInterval and vitalsReadDeadline,
+	// tests shorten them. statfs reads the bytes available on the data
+	// volume: filesystemAvailableBytes unless a test replaces it.
+	interval       time.Duration
+	vitalsDeadline time.Duration
+	statfs         func(path string) (uint64, error)
+
 	// previousTopics records which topics existed at the last tick;
 	// see pruneDeletedTopics. previousPartitions records which
 	// {topic, partition} pairs this node reported at the last tick; see
-	// clearDepartedPartitions.
+	// clearDepartedPartitions. Inventory loop only.
 	previousTopics     map[string]struct{}
 	previousPartitions map[gaugeSeriesKey]struct{}
 	lastDataDirScan    time.Time
 	dirScanner         *dirSizeScanner
+
+	// vitalsMu serialises vitals passes over probes, which remembers
+	// each source's in-flight read (vitals.go).
+	vitalsMu sync.Mutex
+	probes   map[string]*vitalProbe
 
 	// openLogs, when set (SetOpenLogCounter), reports how many
 	// partition logs are open so narad_open_partition_logs is refreshed
@@ -83,8 +122,12 @@ func NewPoller(m *Metrics, broker SnapshotProvider, logger *slog.Logger, dataDir
 		logger:              logger,
 		dataDir:             dir,
 		DataDirScanInterval: defaultDataDirScanInterval,
+		interval:            pollInterval,
+		vitalsDeadline:      vitalsReadDeadline,
+		statfs:              filesystemAvailableBytes,
 		previousTopics:      make(map[string]struct{}),
 		previousPartitions:  make(map[gaugeSeriesKey]struct{}),
+		probes:              make(map[string]*vitalProbe),
 	}
 }
 
@@ -115,51 +158,70 @@ func (p *Poller) SetIngressDispatchBacklog(backlog func() uint64) {
 	p.ingressBacklog = backlog
 }
 
-// Run blocks until ctx is cancelled. It does an immediate first tick
-// so /metrics returns useful values before the first 5-second
+// Run blocks until ctx is cancelled. Each loop does an immediate first
+// pass so /metrics returns useful values before the first 5-second
 // interval elapses.
+//
+// Both loops' narad_poller_last_success_timestamp_seconds start at the
+// time Run starts, so a loop that never completes a pass (a Snapshot
+// that fails or blocks from boot) ages and trips the frozen-poller
+// alert like one that stopped later.
 func (p *Poller) Run(ctx context.Context) {
 	if p.metrics == nil || p.broker == nil {
 		return
 	}
+	p.markSuccess(pollerLoopVitals)
+	p.markSuccess(pollerLoopInventory)
+	var wg sync.WaitGroup
+	wg.Go(func() { runPollerLoop(ctx, p.interval, p.vitalsTick) })
+	wg.Go(func() { runPollerLoop(ctx, p.interval, p.inventoryTick) })
+	wg.Wait()
+}
 
-	p.tick(ctx)
-
-	ticker := time.NewTicker(pollInterval)
+// runPollerLoop runs pass at once and then every interval until ctx
+// is cancelled.
+func runPollerLoop(ctx context.Context, interval time.Duration, pass func(context.Context)) {
+	pass(ctx)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.tick(ctx)
+			pass(ctx)
 		}
 	}
 }
 
+// tick runs one vitals pass and then one inventory pass: the
+// synchronous form of Run, for tests.
 func (p *Poller) tick(ctx context.Context) {
-	// First, so a failing snapshot does not leave them stale: an operator
-	// waits for the backlog to read 0 before a rollback, and alerts on
-	// the WAL failure.
-	if p.ingressBacklog != nil {
-		p.metrics.IngressDispatchBacklog.Set(float64(p.ingressBacklog()))
-	}
-	if p.ingressHealthy != nil {
-		failed := 0.0
-		if !p.ingressHealthy() {
-			failed = 1
-		}
-		p.metrics.IngressWALFailed.Set(failed)
-	}
+	p.vitalsTick(ctx)
+	p.inventoryTick(ctx)
+}
+
+// markSuccess records a complete pass of loop.
+func (p *Poller) markSuccess(loop string) {
+	p.metrics.PollerLastSuccess.WithLabelValues(loop).Set(float64(time.Now().UnixMilli()) / 1000)
+}
+
+// inventoryTick takes the broker Snapshot and refreshes everything
+// derived from it. A pass is a success only when Snapshot answered; a
+// failed data-dir walk is logged and counted in narad_errors_total but
+// does not fail the pass (the walk runs only every
+// DataDirScanInterval).
+func (p *Poller) inventoryTick(ctx context.Context) {
 	// Taken before the topic listing inside Snapshot: anything bound for
 	// a topic before this point, and absent from the listing, belongs to
 	// a deleted topic. See pruneDeletedTopics.
 	epoch := p.metrics.snapshotEpoch()
 	snaps, err := p.broker.Snapshot(ctx)
 	if err != nil {
-		p.logger.Warn("metrics: snapshot failed", "err", err)
-		p.metrics.IncError("metrics", "snapshot")
+		if ctx.Err() == nil {
+			p.logger.Warn("metrics: snapshot failed", "err", err)
+			p.metrics.IncError("metrics", "snapshot")
+		}
 		return
 	}
 
@@ -176,15 +238,10 @@ func (p *Poller) tick(ctx context.Context) {
 
 	p.metrics.TopicsTotal.Set(float64(len(snaps)))
 	p.metrics.PartitionsTotal.Set(float64(partitionsTotal))
-	if p.openLogs != nil {
-		p.metrics.OpenPartitionLogs.Set(float64(p.openLogs()))
-	}
-	if p.reaperRestarts != nil {
-		p.metrics.ReaperRestarts.Set(float64(p.reaperRestarts()))
-	}
-	p.updateDataDirGauges()
+	p.updateDataDirSize()
 	p.clearDepartedPartitions(currentPartitions)
 	p.pruneDeletedTopics(currentTopics, epoch)
+	p.markSuccess(pollerLoopInventory)
 }
 
 func (p *Poller) setTopicGauges(ts TopicSnapshot, nowUnix int64, current map[gaugeSeriesKey]struct{}) {
@@ -259,7 +316,11 @@ func (p *Poller) pruneDeletedTopics(current map[string]struct{}, epoch uint64) {
 	p.previousTopics = current
 }
 
-func (p *Poller) updateDataDirGauges() {
+// updateDataDirSize walks the data directory for
+// narad_data_dir_size_bytes, at most once per DataDirScanInterval. Free
+// space (narad_data_dir_available_bytes) is a vital sign, read by the
+// vitals loop instead.
+func (p *Poller) updateDataDirSize() {
 	if p.dataDir == "" {
 		return
 	}
@@ -276,17 +337,9 @@ func (p *Poller) updateDataDirGauges() {
 	if err != nil {
 		p.logger.Warn("metrics: data dir size scan failed", "data_dir", p.dataDir, "err", err)
 		p.metrics.IncError("metrics", "data_dir_size")
-	} else {
-		p.metrics.DataDirSizeBytes.Set(float64(sizeBytes))
+		return
 	}
-
-	availableBytes, err := filesystemAvailableBytes(p.dataDir)
-	if err != nil {
-		p.logger.Warn("metrics: data dir statfs failed", "data_dir", p.dataDir, "err", err)
-		p.metrics.IncError("metrics", "data_dir_available")
-	} else {
-		p.metrics.DataDirAvailableBytes.Set(float64(availableBytes))
-	}
+	p.metrics.DataDirSizeBytes.Set(float64(sizeBytes))
 }
 
 // dirSizeBytes is the reference full walk; the poller uses
