@@ -77,8 +77,9 @@ func NewJSONSchema() *JSONSchema {
 // every message, and anything else is not a schema), compilable, and
 // bounded in validation cost: no recursion that revalidates a value
 // through several paths per level, no subschema applied to one value
-// through more than 64 validation paths, and no pattern that keeps more
-// than 32 partial matches alive. Nothing is registered. Persisted
+// through more than 64 validation paths (counted on the compiled
+// graph), and no pattern that costs the matcher more than 32
+// instruction visits per byte. Nothing is registered. Persisted
 // schemas are never re-checked against the limits, so tightening a
 // limit cannot make an existing topic's history fail to load; one that
 // fails a cost check is validated under the node's validation limit.
