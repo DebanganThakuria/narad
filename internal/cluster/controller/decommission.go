@@ -115,11 +115,17 @@ func (c *Controller) reconcileDecommission(ctx context.Context) {
 			return
 		}
 		leaderID := c.store.LeaderID()
+		status := statuses[m.ID]
+		if status == nil && c.cfg.NodeStatus != nil && m.ID != leaderID {
+			// Not asked this pass (it led when the statuses were read):
+			// never remove a node whose backlog was not read.
+			status = &NodeStatusResult{Err: errors.New("its status was not read this pass")}
+		}
 		if bs := DecommissionBlockers(DecommissionView{
 			Node: m, Members: members, Voters: voters, LeaderID: leaderID,
 			MinVoters: c.cfg.MinVoters, MaxInFlightMoves: c.cfg.MaxInFlightMoves,
 			Owned: usage.owned[m.ID], Outbound: usage.outbound[m.ID], Inbound: usage.inbound[m.ID],
-			InFlight: len(usage.inFlight), Status: statuses[m.ID],
+			InFlight: len(usage.inFlight), Status: status,
 		}); len(bs) > 0 {
 			blocked[m.ID] = bs
 			if bs[0].Code == BlockedLeaderTransfer {
@@ -132,7 +138,7 @@ func (c *Controller) reconcileDecommission(ctx context.Context) {
 		if usage.owned[m.ID] > 0 {
 			continue // moves off it still to run or in flight; wait
 		}
-		c.removeDrainedNode(ctx, m.ID, members, statuses[m.ID])
+		c.removeDrainedNode(ctx, m.ID, members, status)
 	}
 	c.syncDecomBlocked(t, blocked)
 }
