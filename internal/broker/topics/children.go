@@ -65,6 +65,16 @@ func (m *Manager) AttachChild(ctx context.Context, parent, child string, delayMs
 	if err := authorizeManage(ctx, c); err != nil {
 		return err
 	}
+	// A child with no schema adopts a copy of the parent's history.
+	childBytes, err := m.topicSchemaBytes(ctx, child)
+	if err != nil {
+		return err
+	}
+	if childBytes == 0 {
+		if err := m.checkAdoptSchemaBudget(ctx, parent, child); err != nil {
+			return err
+		}
+	}
 	if err := m.metastore.AttachChild(ctx, parent, child, delayMs); err != nil {
 		if errors.Is(err, errs.ErrNotFound) {
 			return fmt.Errorf("%w: %v", ErrNotFound, err)

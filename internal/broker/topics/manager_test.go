@@ -627,13 +627,13 @@ func TestUpdateTopicSchema_VersionsFromPersistedHistory(t *testing.T) {
 	ms := newFakeMetastore()
 	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
 	for v := 1; v <= 6; v++ {
-		if err := ms.PutSchema(context.Background(), testTopicName, v, []byte(fmt.Sprintf(`{"title":"v%d","type":"object"}`, v))); err != nil {
+		if err := ms.PutSchema(context.Background(), testTopicName, v, []byte(fmt.Sprintf(`{"x-rev":"v%d","type":"object"}`, v))); err != nil {
 			t.Fatal(err)
 		}
 	}
 	reg := &fakeSchemaRegistry{}
 	manager := newTestManager(t, ms, reg)
-	rawSchema := []byte(`{"title":"v7","type":"object"}`)
+	rawSchema := []byte(`{"x-rev":"v7","type":"object"}`)
 
 	updated, err := manager.UpdateTopicSchema(context.Background(), testTopicName, rawSchema, 0)
 	if err != nil {
@@ -642,7 +642,7 @@ func TestUpdateTopicSchema_VersionsFromPersistedHistory(t *testing.T) {
 	if updated.Name != testTopicName {
 		t.Fatalf("UpdateTopicSchema() topic = %q, want %q", updated.Name, testTopicName)
 	}
-	if reg.compatCalls != 1 || string(reg.lastCompatPrevious) != `{"title":"v6","type":"object"}` || string(reg.lastCompatNext) != string(rawSchema) {
+	if reg.compatCalls != 1 || string(reg.lastCompatPrevious) != `{"x-rev":"v6","type":"object"}` || string(reg.lastCompatNext) != string(rawSchema) {
 		t.Fatalf("CheckCompatible() calls = %d previous %q next %q, want 1 call against the persisted v6",
 			reg.compatCalls, reg.lastCompatPrevious, reg.lastCompatNext)
 	}
@@ -710,14 +710,14 @@ func TestUpdateTopicSchema_IncompatibleIsRefusedBeforePersist(t *testing.T) {
 func TestUpdateTopicSchema_RetriesOnVersionConflict(t *testing.T) {
 	ms := newFakeMetastore()
 	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
-	if err := ms.PutSchema(context.Background(), testTopicName, 1, []byte(`{"title":"v1"}`)); err != nil {
+	if err := ms.PutSchema(context.Background(), testTopicName, 1, []byte(`{"x-rev":"v1"}`)); err != nil {
 		t.Fatal(err)
 	}
 	ms.putSchemaConflicts = 1
 	reg := &fakeSchemaRegistry{}
 	manager := newTestManager(t, ms, reg)
 
-	if _, err := manager.UpdateTopicSchema(context.Background(), testTopicName, []byte(`{"title":"v2"}`), 0); err != nil {
+	if _, err := manager.UpdateTopicSchema(context.Background(), testTopicName, []byte(`{"x-rev":"v2"}`), 0); err != nil {
 		t.Fatalf("UpdateTopicSchema() error = %v", err)
 	}
 	if reg.compatCalls != 2 {
@@ -729,7 +729,7 @@ func TestUpdateTopicSchema_RetriesOnVersionConflict(t *testing.T) {
 
 	// A conflict that never resolves surfaces as ErrAlreadyExists.
 	ms.putSchemaConflicts = schemaPutAttempts
-	_, err := manager.UpdateTopicSchema(context.Background(), testTopicName, []byte(`{"title":"v3"}`), 0)
+	_, err := manager.UpdateTopicSchema(context.Background(), testTopicName, []byte(`{"x-rev":"v3"}`), 0)
 	if !errors.Is(err, errs.ErrAlreadyExists) {
 		t.Fatalf("UpdateTopicSchema() under persistent conflict error = %v, want %v", err, errs.ErrAlreadyExists)
 	}

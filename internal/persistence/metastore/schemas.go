@@ -75,3 +75,42 @@ func (s *Store) LatestSchema(_ context.Context, topicName string) (int, []byte, 
 	}
 	return latest, out, nil
 }
+
+// SchemaBytes reports, from the local replica, how many bytes the
+// topic's stored schema versions hold together. Topic names cannot
+// contain ':', so the "<topic>:" prefix scan is exact. The topic
+// manager reads it to refuse a schema write that would take a history
+// past its byte budget before proposing it.
+func (s *Store) SchemaBytes(_ context.Context, topicName string) (int64, error) {
+	s.fsm.mu.RLock()
+	defer s.fsm.mu.RUnlock()
+	var total int64
+	err := s.fsm.view(func(tx *bolt.Tx) error {
+		prefix := []byte(topicName + ":")
+		c := tx.Bucket(bucketSchemas).Cursor()
+		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+			total += int64(len(v))
+		}
+		return nil
+	})
+	return total, err
+}
+
+// ClusterSchemaBytes reports, from the local replica, how many bytes
+// every stored schema version of every topic holds together, fan-out
+// children's copies included. It walks keys only: a value's length is
+// read from its leaf element, so large values' overflow pages are not
+// touched.
+func (s *Store) ClusterSchemaBytes(_ context.Context) (int64, error) {
+	s.fsm.mu.RLock()
+	defer s.fsm.mu.RUnlock()
+	var total int64
+	err := s.fsm.view(func(tx *bolt.Tx) error {
+		c := tx.Bucket(bucketSchemas).Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			total += int64(len(v))
+		}
+		return nil
+	})
+	return total, err
+}

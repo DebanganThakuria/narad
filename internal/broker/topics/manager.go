@@ -116,6 +116,10 @@ type Manager struct {
 	// orphan sweep has finished. See create.go.
 	createGateMu sync.Mutex
 	createGate   chan struct{}
+
+	// schemaBudget bounds the stored schema bytes per topic history and
+	// for the whole cluster (see schema_budget.go).
+	schemaBudget schemaBudgets
 }
 
 // topicLock is a refcounted per-topic-name mutex. Refcounting lets
@@ -244,6 +248,10 @@ func NewManager(
 		logger:     logger,
 		selfID:     selfID,
 		topicLocks: map[string]*topicLock{},
+		schemaBudget: schemaBudgets{
+			topic:   topicSchemaBudgetBytes,
+			cluster: clusterSchemaBudgetBytes,
+		},
 	}
 	if logs != nil {
 		logs.SetTopicRetiredHook(m.dropTopicState)

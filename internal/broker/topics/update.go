@@ -226,6 +226,12 @@ const schemaPutAttempts = 3
 // The update is idempotent: a schema that is the same JSON value as
 // the current latest registers nothing and returns success, so a
 // client that retries after a lost response does not grow the history.
+// Neither does one that differs from the latest only in annotations
+// (title, description, examples, $comment, default, deprecated,
+// readOnly, writeOnly): it accepts exactly what the latest accepts. A
+// version that would take the topic's history (or the cluster's
+// schemas, counting every child's copy) past its byte budget is refused
+// with errs.ErrSchemaHistoryFull.
 //
 // baseVersion, when positive, is a precondition: the update is applied
 // only if the topic's current version is exactly baseVersion, and
@@ -283,6 +289,10 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 				m.logger.Info("topic schema unchanged", "topic", name, "version", latest.Number)
 				return t, nil
 			}
+			if annotationOnlyChange(latest.Raw, rawSchema) {
+				m.logger.Info("annotation-only schema change ignored", "topic", name, "version", latest.Number)
+				return t, nil
+			}
 			if latest.Number >= metastore.MaxSchemaVersions {
 				return topic.Topic{}, fmt.Errorf("%w: %q already has %d schema versions, the maximum",
 					errs.ErrSchemaHistoryFull, name, latest.Number)
@@ -294,6 +304,10 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 		} else if baseVersion > 0 {
 			return topic.Topic{}, fmt.Errorf("%w: schema_base_version %d given but %q has no schema yet",
 				errs.ErrSchemaVersionConflict, baseVersion, name)
+		}
+		// The new version is appended to every child's copy as well.
+		if err := m.checkSchemaBudget(ctx, name, historyBytes(history), int64(len(rawSchema)), 1+len(t.Children)); err != nil {
+			return topic.Topic{}, err
 		}
 
 		err = m.metastore.PutSchema(ctx, name, version, rawSchema)

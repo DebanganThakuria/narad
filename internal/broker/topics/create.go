@@ -136,6 +136,9 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 			return topic.Topic{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 		}
 	}
+	if err := m.checkCreateSchemaBudget(ctx, opts); err != nil {
+		return topic.Topic{}, err
+	}
 
 	// Defense in depth behind validateTopicName: refuse a name that would
 	// escape the topics root before it reaches the metastore. No
@@ -195,6 +198,19 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 		"max_acked_ahead_per_partition", t.MaxAckedAheadPerPartition)
 
 	return t, nil
+}
+
+// checkCreateSchemaBudget applies the schema byte budgets to what a
+// create stores: its own first version, or, for a schema-less
+// create-as-child, the copy of the parent's history it adopts.
+func (m *Manager) checkCreateSchemaBudget(ctx context.Context, opts CreateOpts) error {
+	switch {
+	case len(opts.Schema) > 0:
+		return m.checkSchemaBudget(ctx, opts.Name, 0, int64(len(opts.Schema)), 1)
+	case opts.Parent != "":
+		return m.checkAdoptSchemaBudget(ctx, opts.Parent, opts.Name)
+	}
+	return nil
 }
 
 // validateCreateAsChild checks the Parent/FanoutDelayMs pair without
