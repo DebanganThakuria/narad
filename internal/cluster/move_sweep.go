@@ -53,7 +53,12 @@ func (r *MoveRunner) sweepStaleCopies(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	r.sweepMu.Lock()
 	r.sweepStaleIncarnations(ctx, topics)
+	// Plain directories of topics this replica no longer knows: a purge
+	// that never reached this node.
+	r.reclaimOrphanTopicDirs(ctx)
+	r.sweepMu.Unlock()
 	for _, t := range topics {
 		if r.localDirIsOtherIncarnation(t) {
 			// The local directory is a deleted incarnation's, not this
@@ -220,11 +225,13 @@ func (r *MoveRunner) localDirIsOtherIncarnation(t topic.Topic) bool {
 //   - topics/<name>.stale-<id>: a quarantined directory. Reclaimed once
 //     the leader confirms that incarnation is gone (the record is absent
 //     or carries a different ID). Only quarantined directories are
-//     removed here: a plain directory can be created by a concurrent
-//     lazy open, which the startup sweep excludes with the create gate
-//     and this sweep cannot.
+//     removed by path here: a plain directory can be created by a
+//     concurrent lazy open, which the startup sweep excludes with the
+//     create gate and this sweep cannot.
 //
-// Every failure to confirm defers to the next pass.
+// Plain directories of topics this replica no longer knows are the
+// caller's third half (reclaimOrphanTopicDirs): purged under the topic's
+// guard, never by path. Every failure to confirm defers to the next pass.
 func (r *MoveRunner) sweepStaleIncarnations(ctx context.Context, topics []topic.Topic) {
 	keeper, hasKeeper := r.reclaimer.(incarnationKeeper)
 	for _, t := range topics {
@@ -242,6 +249,15 @@ func (r *MoveRunner) sweepStaleIncarnations(ctx context.Context, topics []topic.
 			r.logger.Warn("move: set aside stale incarnation directory; will retry on the next sweep", "topic", t.Name, "err", err)
 		}
 	}
+	r.reclaimQuarantinedTopicDirs(ctx)
+}
+
+// reclaimQuarantinedTopicDirs removes topics/<name>.stale-<id>
+// directories (and their numbered variants) once the leader confirms the
+// incarnation id is gone: the name is absent, or live as another
+// incarnation. Nothing opens a quarantined directory, so it is removed by
+// path; every other directory is kept.
+func (r *MoveRunner) reclaimQuarantinedTopicDirs(ctx context.Context) {
 	removed, err := runtime.SweepOrphanTopicDirs(r.dataDir, func(c runtime.OrphanCandidate) bool {
 		if !c.Quarantined {
 			return true

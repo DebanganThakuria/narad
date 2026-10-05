@@ -371,6 +371,9 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 	// to the partition owners, matching the HTTP leader-direct path.
 	rpcServer.SetBroadcaster(router)
 
+	mover := cluster.NewMoveRunner(ms, nodeID, cfg.Storage.DataDir, peerRPC, bc.broker, bc.metrics, log, cluster.MoveConfig{})
+	mover.RegisterMetrics(reg)
+
 	return &clusterStack{
 		controller: ctrl,
 		router:     router,
@@ -383,7 +386,7 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 				MaxBatchBytes:   cfg.Fanout.MaxBatchBytes,
 				Linger:          time.Duration(cfg.Fanout.LingerMs) * time.Millisecond,
 			}),
-		mover: cluster.NewMoveRunner(ms, nodeID, cfg.Storage.DataDir, peerRPC, bc.broker, bc.metrics, log, cluster.MoveConfig{}),
+		mover: mover,
 	}
 }
 

@@ -49,6 +49,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
@@ -244,6 +245,15 @@ type MoveRunner struct {
 
 	reconcilePasses int
 	gate            reconcileGate
+
+	// sweepMu serializes the reclaim of deleted topics' directories: the
+	// periodic sweep and a boot's deferred startup pass
+	// (ReclaimOrphanTopicDirs) never walk topics/ at the same time.
+	sweepMu sync.Mutex
+	// orphanTopicDirs is the narad_orphan_topic_dirs value: plain topic
+	// directories of topics this replica no longer knows that the last
+	// reclaim pass left in place.
+	orphanTopicDirs atomic.Int64
 
 	// flipSettle is the flip settle window (moveFlipSettle; tests
 	// shorten it).

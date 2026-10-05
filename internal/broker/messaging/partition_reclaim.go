@@ -254,3 +254,17 @@ func (e *Engine) InstallPartitionDir(topicName string, partition int, swap func(
 	}
 	return e.logs.ReplacePartitionDir(topicName, partition, swap)
 }
+
+// ReclaimOrphanTopicDir purges this node's directory of the deleted
+// topic incarnation id, whose purge never reached this node, under the
+// topic's guard and only while the local record shows the topic absent
+// and the directory still carries id's marker (see
+// runtime.Logs.ReclaimOrphanTopicDir). The move runner's periodic sweep
+// calls it once the LEADER confirmed the incarnation gone; the broker
+// facade reaches it through the embedded engine.
+func (e *Engine) ReclaimOrphanTopicDir(topicName, id string) (bool, error) {
+	if e.logs == nil {
+		return false, unavailableError("partition logs")
+	}
+	return e.logs.ReclaimOrphanTopicDir(topicName, id)
+}
