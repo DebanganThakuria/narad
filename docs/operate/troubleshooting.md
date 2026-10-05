@@ -207,6 +207,33 @@ The due lag of a delay child climbs or stays flat above 0 instead of returning t
 
 **Fix.** Bring the child partition's owner back, or fix what the log's `err` names. The cursor resumes where it stopped. How cursors behave: [Fan-out engine](../understand/fanout-engine.md).
 
+### `narad_quarantined_copies` above 0 {#quarantined-copies}
+
+The node holds partition copies it set aside instead of deleting. At startup it lists each one at error level, `quarantined partition copy on this node: it was set aside instead of deleted and may hold the only instance of some of its records; inspect it before removing it`, with `kind`, `topic`, `partition`, `dir`, `bytes` and `mod_time` (twenty lines at most), then `this node holds quarantined partition copies; none is removed automatically` with the totals in `copies` and `bytes`. The gauge and `narad_quarantined_bytes` are refreshed at startup and on every stale-copy sweep (about every 30 s).
+
+**Cause.** `kind` says where the copy came from:
+
+- `partition` (`topics/<topic>/p<NNNNN>.quarantine`, or with a timestamp suffix when that name was taken): a stale copy the new owner could not vouch for, or one ahead of the position it was promoted at, set aside by the [stale-copy sweep](#log-partition-set-aside), or an earlier copy a move's [install](#log-move-install-set-aside) found at the partition's path.
+- `staging` (`.moves/<topic>-<N>.quarantine`): a move's staging copy set aside because this node owns the partition by now and the copy may hold records its path lacks ([set-aside staging](#log-move-keeping-staging)).
+- `topic_incarnation` (`topics/<topic>.stale-<id>`): the directory of a deleted incarnation of a topic recreated under the same name. Narad removes it on its own once the leader confirms that incarnation is gone; one that stays means the leader cannot be asked or still lists the incarnation.
+
+**Check.** The error line logged when the copy was set aside names why; search the node's logs for its `dir`.
+
+**Fix.** Copy a `partition` or `staging` copy off before anything else: its records may be the only ones left. Narad never serves one and never deletes one on its own; a `partition` copy goes only when its topic is deleted. Decide whether its records matter, re-produce them from the copy if they do, and delete the directory when you are done. The gauge drops on the next sweep.
+
+### `narad_orphan_topic_dirs` stays above 0 {#orphan-topic-directories}
+
+The node holds directories of topics its replica no longer knows: a deleted topic whose purge never reached this node (it was down, marked dead or lagging when the delete committed).
+
+**Cause.** The stale-copy sweep removes such a directory once the leader confirms its [incarnation](../reference/glossary.md#incarnation) is gone (the name is absent, or live as another incarnation), at most 16 a pass. Two kinds stay:
+
+- A directory without an incarnation marker (`topics/<name>/incarnation`), such as one of a topic whose record has no incarnation id. While the node runs, Narad cannot tell it from a directory a concurrent open is making, so only the startup sweep removes it, which runs before the node accepts topic creates.
+- A directory the leader has not confirmed gone: the leader cannot be reached, or it still lists the incarnation because this node's replica is behind a create.
+
+**Check.** `ls dataDir/topics` for names `narad topic list` does not show, and the node's logs for `leader confirm:` warnings.
+
+**Fix.** For a leader that cannot be asked, restore the cluster's leader; the next sweep removes the directory. For an unmarked directory, restart the node, or remove the directory by hand once you are sure no topic of that name exists.
+
 ## Log lines
 
 ### `storage: fsync failed; log poisoned until reopened` {#log-fsync-poisoned}
@@ -299,9 +326,9 @@ Logged at warning level with `topic` and `err`.
 
 **Cause.** The node holds a directory left by a deleted and recreated topic of the same name (an older [incarnation](../reference/glossary.md#incarnation)), and it failed to rename it aside. Narad never serves such a directory; it renames it to `topics/<name>.stale-<id>` and removes it once the leader confirms that incarnation is gone.
 
-**Check.** The `err` field, usually a permission or disk problem in the data directory.
+**Check.** The `err` field, usually a permission or disk problem in the data directory. An `err` with `asked to prepare incarnation <id>, the local record now names <other>` (or a missing record) means this node's replica has not applied the latest delete or recreate of the name yet: the node prepares a topic directory only for the incarnation its own record still names, so it never sets a live successor's directory aside. A move onto the node logs `move: prepare topic directory for the incarnation; will retry` with the same `err` once per move, then at debug level.
 
-**Fix.** Fix what `err` names. The node retries on its next pass.
+**Fix.** Fix what `err` names. The node retries on its next pass; a refusal for a record that changed clears once the replica catches up, or once a re-plan cancels the move.
 
 ### `reclaim: local partition copy is AHEAD` {#log-partition-quarantined}
 
