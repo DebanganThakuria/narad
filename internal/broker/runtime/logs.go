@@ -101,6 +101,11 @@ type Logs struct {
 	// followOnce starts the background pass that applies retention
 	// alters to open logs (see startRetentionFollow) once.
 	followOnce sync.Once
+
+	// coldWalkOn is set while RunColdRetention runs an enabled walk.
+	// Idle eviction then closes retention logs with sealed segments too:
+	// the walk reaps them closed (see evictable).
+	coldWalkOn atomic.Bool
 }
 
 // logKey names one partition log: the key of logs, produceSync and

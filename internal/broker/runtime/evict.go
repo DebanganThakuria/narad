@@ -14,11 +14,14 @@ package runtime
 //     observation cannot keep a log warm — and, symmetrically, the
 //     fan-out read path uses Peek + the durable HWM file to check
 //     "am I caught up?" so an attached-but-silent child cannot either.
-//  2. A log is a candidate only when its retention owes nothing:
-//     age-based retention with sealed segments still on disk defers
-//     eviction (closing would stop the reaper and strand those
-//     segments forever). Keep-forever logs evict regardless — their
-//     segments are meant to stay.
+//  2. A log is a candidate only when its retention owes nothing, or
+//     when something else will pay it: with the cold-retention walk
+//     running, a closed log's expired segments are reaped by the walk,
+//     so every idle log is a candidate. Without the walk, age-based
+//     retention with sealed segments still on disk defers eviction
+//     (closing would stop the reaper and strand those segments until
+//     the partition is next opened). Keep-forever logs evict
+//     regardless: their segments are meant to stay.
 //  3. Eviction holds the partition's produce-serialization mutex, so
 //     it can never interleave with a produce commit's append+fsync
 //     critical section.
@@ -84,10 +87,11 @@ func (g *Logs) EvictIdleOnce(idleAfter time.Duration) int {
 		key   logKey
 		entry *logEntry
 	}
+	coldWalk := g.coldWalkOn.Load()
 	g.mu.RLock()
 	candidates := make([]candidate, 0)
 	for k, e := range g.logs {
-		if e.closing || !evictable(e, cutoff) {
+		if e.closing || !evictable(e, cutoff, coldWalk) {
 			continue
 		}
 		candidates = append(candidates, candidate{key: k, entry: e})
@@ -100,7 +104,7 @@ func (g *Logs) EvictIdleOnce(idleAfter time.Duration) int {
 		// Re-verify under the locks: same entry still installed, still
 		// idle, retention still owes nothing. A Get since the scan
 		// (which stamped it) or a CloseTopic (which removed it) aborts.
-		if closed, _ := g.closeIfStill(c.key, c.entry, func(cur *logEntry) bool { return evictable(cur, cutoff) }, "idle_evict_close"); closed {
+		if closed, _ := g.closeIfStill(c.key, c.entry, func(cur *logEntry) bool { return evictable(cur, cutoff, coldWalk) }, "idle_evict_close"); closed {
 			evicted++
 		}
 	}
@@ -160,9 +164,11 @@ func (g *Logs) OpenCount() int {
 
 // evictable reports whether an entry may be closed: idle past the
 // cutoff, and not deferred by pending retention work (invariant 2).
-func evictable(e *logEntry, cutoffUnixNano int64) bool {
+// coldWalk says the cold-retention walk is running, which reaps a
+// closed log's sealed segments, so nothing is deferred.
+func evictable(e *logEntry, cutoffUnixNano int64, coldWalk bool) bool {
 	if e.lastAccess.Load() > cutoffUnixNano {
 		return false
 	}
-	return e.log.RetentionMaxAge() == 0 || e.log.SegmentCount() <= 1
+	return coldWalk || e.log.RetentionMaxAge() == 0 || e.log.SegmentCount() <= 1
 }

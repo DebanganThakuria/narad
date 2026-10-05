@@ -4,11 +4,12 @@ package runtime
 //
 // The shared reaper (storage.sharedReaper) walks the logs registered
 // with it, and a log is registered only while it is open. The idle
-// evictor closes a log untouched for the configured window once its
-// retention "owes nothing", which in practice means a single active
-// segment; that segment then ages past MaxAge with nothing left to roll
-// and delete it, and nothing reopens the log until a producer or a local
-// consumer touches the partition. A node that restarts registers nothing
+// evictor closes a log untouched for the configured window (while this
+// walk runs, whatever its segments; otherwise once its retention "owes
+// nothing", in practice a single active segment); its segments then age
+// past MaxAge with nothing left to roll and delete them, and nothing
+// reopens the log until a producer or a local consumer touches the
+// partition. A node that restarts registers nothing
 // until first use either. Measured on devstack: a node held 24 expired
 // partitions for minutes past eligibility until they were reopened by
 // hand, and reaped them within two minutes of that.
@@ -66,6 +67,8 @@ func (g *Logs) RunColdRetention(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		return
 	}
+	g.coldWalkOn.Store(true)
+	defer g.coldWalkOn.Store(false)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
