@@ -349,3 +349,68 @@ func TestMoveInstallLeavesASuccessorOpenedBeforeTheInstall(t *testing.T) {
 			got, id, marked, store.completeArgs)
 	}
 }
+
+// finishMove reads the topic record outside the topic's guard and then
+// prepares the directory for that record's incarnation. A delete and
+// recreate in between, with this node opening the successor's partition
+// (which stamps the successor's marker), must not make the prepare treat
+// the live successor's directory as a deleted incarnation's leftover:
+// the prepare re-reads the local record under the guard and refuses an
+// id the record no longer carries, and the move retries.
+//
+// The only seam: the destination's prepare runs the delete, the
+// recreate and the successor's first produce before it takes the guard,
+// standing for the worker being descheduled between finishMove's read
+// and its prepare. Everything else is production code: a real
+// runtime.Logs over a real Raft metastore.
+func TestMoveNeverQuarantinesASuccessorRecreatedBeforeItsInstall(t *testing.T) {
+	ctx := context.Background()
+	real := newTestStore(t)
+	if err := real.CreateTopic(ctx, topic.Topic{Name: "orders", ID: movedIncarnation, Partitions: 1}); err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	hwm, _ := buildSourcePartition(t, src, 10)
+	dataDir := t.TempDir()
+	logs := runtime.NewLogs(dataDir, storage.Options{FlushInterval: time.Millisecond}, real, nil)
+	t.Cleanup(func() { _ = logs.CloseAll() })
+
+	store := &fakeMoveStore{
+		assignment:  metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:      metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+		topics:      []topic.Topic{{Name: "orders", ID: movedIncarnation, Partitions: 1}},
+		completeErr: errors.New("flip rejected: the topic was deleted"),
+	}
+	moveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	store.completeHook = cancel // one attempt
+
+	var successorHWM int64
+	var hookErr error
+	dest := &logsDest{logs: logs, onEnsure: func() {
+		successorHWM, hookErr = recreateAndServe(ctx, real, logs)
+		// A refused prepare retries until the worker is cancelled.
+		time.AfterFunc(time.Second, cancel)
+	}}
+	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: hwm, committed: 5, hasCommitted: true}, incarnation: movedIncarnation}
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, dest, nil, nil, MoveConfig{RetryBackoff: 50 * time.Millisecond})
+	r.Reconcile(moveCtx)
+	r.wg.Wait()
+	if hookErr != nil || successorHWM != 7 {
+		t.Fatalf("setup: the successor's produce: hwm %d, err %v", successorHWM, hookErr)
+	}
+
+	// The successor serves its partition again: its 7 committed records
+	// must still be there.
+	l, err := logs.Get("orders", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := l.NextOffset(); got != 7 {
+		t.Fatalf("the successor's partition reopens at next offset %d after the move, want 7 (its records were set aside under %s); flip args %v",
+			got, storage.StaleTopicDir(dataDir, "orders", recreatedIncarnation), store.completeArgs)
+	}
+	if len(store.completeArgs) != 0 {
+		t.Fatalf("the move flipped a copy of the deleted incarnation into the successor's name: %v", store.completeArgs)
+	}
+}

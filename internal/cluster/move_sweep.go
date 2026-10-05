@@ -235,8 +235,11 @@ func (r *MoveRunner) sweepStaleIncarnations(ctx context.Context, topics []topic.
 		if !ok || absent || leaderRec.ID == "" {
 			continue
 		}
+		// EnsureTopicIncarnation refuses unless the local record carries
+		// the leader's ID too (this replica can lag a recreate the leader
+		// already applied): the next pass tries again.
 		if err := keeper.EnsureTopicIncarnation(t.Name, leaderRec.ID); err != nil {
-			r.logger.Warn("move: set aside stale incarnation directory", "topic", t.Name, "err", err)
+			r.logger.Warn("move: set aside stale incarnation directory; will retry on the next sweep", "topic", t.Name, "err", err)
 		}
 	}
 	removed, err := runtime.SweepOrphanTopicDirs(r.dataDir, func(c runtime.OrphanCandidate) bool {

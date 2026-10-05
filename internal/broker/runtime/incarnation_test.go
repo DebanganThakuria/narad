@@ -424,7 +424,11 @@ func TestGetRefusesDeletedTopicWithOpenEntry(t *testing.T) {
 // the current incarnation.
 func TestEnsureTopicIncarnationQuarantinesStaleDir(t *testing.T) {
 	dataDir := t.TempDir()
-	logs := NewLogs(dataDir, storage.Options{}, newRuntimeFakeMetastore(), nil)
+	ms := newRuntimeFakeMetastore()
+	// EnsureTopicIncarnation acts only for the incarnation the local
+	// record still carries.
+	ms.topics["orders"] = topic.Topic{Name: "orders", ID: "ffffffffffffffff", Partitions: 1}
+	logs := NewLogs(dataDir, storage.Options{}, ms, nil)
 	defer logs.CloseAll()
 	if err := storage.WriteTopicIncarnation(storage.TopicDir(dataDir, "orders"), "eeeeeeeeeeeeeeee"); err != nil {
 		t.Fatalf("WriteTopicIncarnation: %v", err)
@@ -445,6 +449,59 @@ func TestEnsureTopicIncarnationQuarantinesStaleDir(t *testing.T) {
 	ok, err = logs.TopicIncarnationMatches("orders", "eeeeeeeeeeeeeeee")
 	if err != nil || ok {
 		t.Fatalf("TopicIncarnationMatches(old) = (%v, %v), want (false, nil)", ok, err)
+	}
+}
+
+// EnsureTopicIncarnation acts only for the incarnation the local record
+// still carries. Its callers (a move's install, the stale-incarnation
+// sweep) read the id before it takes the topic's guard, so the id can
+// name an incarnation deleted since, with the name recreated and this
+// node serving the successor under the path: preparing the directory
+// for the deleted id would set the live successor's directory aside as a
+// leftover and stamp the deleted id on a fresh one.
+func TestEnsureTopicIncarnationRefusesAnIDTheRecordNoLongerHas(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		record *topic.Topic
+	}{
+		{"the record names the successor", &topic.Topic{Name: "orders", ID: "bbbbbbbbbbbbbbbb", Partitions: 1}},
+		{"the record is gone", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			ms := newRuntimeFakeMetastore()
+			ms.topics["orders"] = topic.Topic{Name: "orders", ID: "bbbbbbbbbbbbbbbb", Partitions: 1}
+			logs := NewLogs(dataDir, storage.Options{FlushInterval: time.Millisecond}, ms, nil)
+			defer logs.CloseAll()
+			l, err := logs.Get("orders", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			appendOld(t, l, 7, "successor")
+			if tc.record == nil {
+				delete(ms.topics, "orders")
+			}
+
+			err = logs.EnsureTopicIncarnation("orders", "aaaaaaaaaaaaaaaa")
+			if !errors.Is(err, ErrStaleTopicIncarnation) {
+				t.Errorf("EnsureTopicIncarnation(deleted id) = %v, want ErrStaleTopicIncarnation", err)
+			}
+			if got := readMarker(t, dataDir, "orders"); got != "bbbbbbbbbbbbbbbb" {
+				t.Errorf("marker = %q after the prepare, want the successor's bbbbbbbbbbbbbbbb", got)
+			}
+			if stale := staleDirs(t, dataDir, "orders"); len(stale) != 0 {
+				t.Errorf("the successor's directory was set aside: %v", stale)
+			}
+			if tc.record != nil {
+				l, err := logs.Get("orders", 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := l.NextOffset(); got != 7 {
+					t.Errorf("the successor reopens at next offset %d, want 7", got)
+				}
+			}
+		})
 	}
 }
 

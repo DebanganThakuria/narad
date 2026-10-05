@@ -613,9 +613,16 @@ func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResu
 	// under the path. So the install's swap and the rollback act only
 	// while the topic marker still names expectID (see install).
 	var expectID string
+	//
+	// EnsureTopicIncarnation re-reads the local record under the topic's
+	// guard and refuses when it no longer carries rec.ID (the name was
+	// deleted and recreated since the read above): preparing for the
+	// deleted id would set the successor's live directory aside. The
+	// move retries, and a re-plan cancels the worker once the move is no
+	// longer wanted.
 	if keeper, ok := r.reclaimer.(incarnationKeeper); ok && rec.ID != "" {
 		if err := keeper.EnsureTopicIncarnation(topicName, rec.ID); err != nil {
-			r.logger.Warn("move: prepare topic directory for the incarnation; will retry", "topic", topicName, "partition", partition, "err", err)
+			w.warnOnce("prepare", "move: prepare topic directory for the incarnation; will retry", "topic", topicName, "partition", partition, "err", err)
 			return false
 		}
 		expectID = rec.ID

@@ -84,6 +84,25 @@ type moveWorker struct {
 	// moved back off the partition's path (rollbackInstall restored it),
 	// and the worker has not installed again since.
 	movedBack bool
+	// warned holds the retry reasons this worker has already logged at
+	// warn level (see warnOnce).
+	warned map[string]bool
+}
+
+// warnOnce logs a retry at warn level the first time this worker meets
+// reason and at debug level after that, so a move that keeps retrying
+// for the same reason (the topic record changed under it, until the
+// next reconcile pass cancels the worker) does not flood the log.
+func (w *moveWorker) warnOnce(reason, msg string, args ...any) {
+	if w.warned[reason] {
+		w.r.logger.Debug(msg, args...)
+		return
+	}
+	if w.warned == nil {
+		w.warned = map[string]bool{}
+	}
+	w.warned[reason] = true
+	w.r.logger.Warn(msg, args...)
 }
 
 // flipDone records that the move flipped.
