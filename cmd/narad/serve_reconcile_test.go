@@ -11,10 +11,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -226,5 +228,51 @@ func TestStartupOrphanSweepRunsOnceTheReplicaCatchesUp(t *testing.T) {
 	l, err := logs.Get("keep", 0)
 	if err != nil || l.NextOffset() != 20 {
 		t.Fatalf("the live topic after the deferred sweep: err %v", err)
+	}
+}
+
+// A restart leaves the error line each set-aside logged behind, so
+// startup lists every quarantined copy at error level (a bounded number
+// of lines, then the totals) and takes the inventory the quarantine
+// gauges report. A node with none logs nothing.
+func TestStartupLogsQuarantinedCopies(t *testing.T) {
+	dataDir := t.TempDir()
+	logs := runtime.NewLogs(dataDir, storage.Options{}, nil, nil)
+	var out strings.Builder
+	log := slog.New(slog.NewJSONHandler(&out, nil))
+
+	logQuarantinedCopies(logs, log)
+	if out.Len() != 0 {
+		t.Fatalf("a node with no quarantined copies logged:\n%s", out.String())
+	}
+
+	n := startupQuarantineLines + 5
+	for i := range n {
+		dir := filepath.Join(storage.TopicDir(dataDir, "orders"), fmt.Sprintf("p%05d.quarantine", i))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "00000000000000000000.log"), make([]byte, 3), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logQuarantinedCopies(logs, log)
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != startupQuarantineLines+1 {
+		t.Fatalf("logged %d lines for %d copies, want %d listed and a summary:\n%s", len(lines), n, startupQuarantineLines, out.String())
+	}
+	for _, line := range lines {
+		if !strings.Contains(line, `"level":"ERROR"`) {
+			t.Fatalf("a quarantine line below error level: %s", line)
+		}
+	}
+	if !strings.Contains(lines[0], `"dir":"`+filepath.Join(storage.TopicDir(dataDir, "orders"), "p00000.quarantine")+`"`) || !strings.Contains(lines[0], "only instance") {
+		t.Fatalf("the first copy's line lacks its path or the warning: %s", lines[0])
+	}
+	if summary := lines[len(lines)-1]; !strings.Contains(summary, fmt.Sprintf(`"copies":%d`, n)) || !strings.Contains(summary, fmt.Sprintf(`"bytes":%d`, 3*n)) {
+		t.Fatalf("the summary line lacks the totals: %s", summary)
+	}
+	if sum, ok := logs.LastQuarantinedCopies(); !ok || sum.Count != n {
+		t.Fatalf("the inventory the gauges read = %+v (%v), want %d copies", sum, ok, n)
 	}
 }

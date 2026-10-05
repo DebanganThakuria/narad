@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
 
@@ -267,4 +268,15 @@ func (e *Engine) ReclaimOrphanTopicDir(topicName, id string) (bool, error) {
 		return false, unavailableError("partition logs")
 	}
 	return e.logs.ReclaimOrphanTopicDir(topicName, id)
+}
+
+// QuarantinedCopies takes the inventory of this node's quarantined
+// copies and keeps it for the quarantine gauges (see
+// runtime.Logs.QuarantinedCopies). The move runner's sweep calls it on
+// its cadence; the broker facade reaches it through the embedded engine.
+func (e *Engine) QuarantinedCopies() (runtime.QuarantineSummary, error) {
+	if e.logs == nil {
+		return runtime.QuarantineSummary{}, unavailableError("partition logs")
+	}
+	return e.logs.QuarantinedCopies()
 }

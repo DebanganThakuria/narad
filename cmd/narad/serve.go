@@ -16,6 +16,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/cluster"
 	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -144,6 +145,9 @@ func runServe(args []string) error {
 		return err
 	}
 	defer closeWithLog(log, "broker", bc.broker.Close)
+	// narad_quarantined_copies and _bytes read the inventory the startup
+	// listing and the move runner's sweep take; a scrape never walks.
+	reg.MustRegister(runtime.NewQuarantineCollector(bc.logs))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -265,6 +269,10 @@ func runServe(args []string) error {
 		// creates must be unblocked here regardless of how it went; the
 		// idempotent deferred release above stays the shutdown safety net.
 		bc.createGate.ReleaseCreateGate()
+		// Copies set aside instead of deleted, by this boot's sweep or
+		// earlier: each logged one error line when it happened, which
+		// a restart leaves behind.
+		logQuarantinedCopies(bc.logs, log)
 		if !caughtUp {
 			// The catch-up timeout is NOT a readiness path. A node whose
 			// replica never caught up (no leader reachable, removed from

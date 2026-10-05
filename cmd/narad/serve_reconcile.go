@@ -122,6 +122,35 @@ func finishLateStartup(ctx context.Context, store *metastore.Store, logs *runtim
 	return true
 }
 
+// startupQuarantineLines bounds how many quarantined copies startup
+// lists one line each; a summary line carries the totals.
+const startupQuarantineLines = 20
+
+// logQuarantinedCopies takes this boot's first inventory of quarantined
+// copies (which the quarantine gauges then report) and lists them at
+// error level: each copy was set aside instead of deleted because it may
+// hold the only instance of some records, and the error line logged when
+// it happened does not survive a restart. Nothing is listed when there
+// are none.
+func logQuarantinedCopies(logs *runtime.Logs, log *slog.Logger) {
+	sum, err := logs.QuarantinedCopies()
+	if err != nil {
+		log.Warn("quarantine inventory incomplete: some set-aside copies may be missing from the list and from narad_quarantined_copies", "err", err)
+	}
+	if sum.Count == 0 {
+		return
+	}
+	for i, q := range sum.Copies {
+		if i == startupQuarantineLines {
+			break
+		}
+		log.Error("quarantined partition copy on this node: it was set aside instead of deleted and may hold the only instance of some of its records; inspect it before removing it (troubleshooting: quarantined copies)",
+			"kind", q.Kind, "topic", q.Topic, "partition", q.Partition, "dir", q.Dir, "bytes", q.Bytes, "mod_time", q.ModTime)
+	}
+	log.Error("this node holds quarantined partition copies; none is removed automatically (troubleshooting: quarantined copies)",
+		"copies", sum.Count, "bytes", sum.Bytes, "listed", min(sum.Count, startupQuarantineLines))
+}
+
 // leaderView is the slice of the metastore the absence check needs;
 // *metastore.Store implements it, tests fake it.
 type leaderView interface {

@@ -91,6 +91,10 @@ type Logs struct {
 	// alone.
 	coldMu    sync.Mutex
 	coldDefer map[logKey]time.Time
+
+	// quarantine is the inventory QuarantinedCopies last took (nil
+	// before the first): the quarantine gauges read it on scrape.
+	quarantine atomic.Pointer[QuarantineSummary]
 }
 
 // logKey names one partition log: the key of logs, produceSync and

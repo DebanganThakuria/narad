@@ -41,6 +41,10 @@ func (r *MoveRunner) sweepStaleCopies(ctx context.Context) {
 	if r.selfID == "" || r.reclaimer == nil {
 		return
 	}
+	// Whatever the pass does (or skips), take the quarantine inventory
+	// after it: the copies it set aside or reclaimed show in
+	// narad_quarantined_copies within one sweep.
+	defer r.refreshQuarantineInventory()
 	// A replica that has not proven itself current must not act: a stale
 	// view could show a partition "owned elsewhere" that this node in fact
 	// owns. AppliedCaughtUp requires fresh leader contact, so the view
@@ -273,5 +277,25 @@ func (r *MoveRunner) reclaimQuarantinedTopicDirs(ctx context.Context) {
 	}
 	if len(removed) > 0 {
 		r.logger.Info("move: reclaimed quarantined topic directories of deleted incarnations", "count", len(removed), "dirs", removed)
+	}
+}
+
+// quarantineInventory is the optional broker capability that takes the
+// inventory of this node's quarantined copies and keeps it for the
+// quarantine gauges (*messaging.Engine implements it; the broker facade
+// embeds the engine).
+type quarantineInventory interface {
+	QuarantinedCopies() (runtime.QuarantineSummary, error)
+}
+
+// refreshQuarantineInventory retakes the quarantine inventory on the
+// sweep cadence, so a scrape never walks the disk.
+func (r *MoveRunner) refreshQuarantineInventory() {
+	inv, ok := r.reclaimer.(quarantineInventory)
+	if !ok {
+		return
+	}
+	if _, err := inv.QuarantinedCopies(); err != nil {
+		r.logger.Warn("move: quarantine inventory incomplete; narad_quarantined_copies may undercount", "err", err)
 	}
 }

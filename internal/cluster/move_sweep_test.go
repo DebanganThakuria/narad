@@ -300,6 +300,10 @@ func (o *orphanReclaimer) ReclaimOrphanTopicDir(topicName, id string) (bool, err
 	return o.logs.ReclaimOrphanTopicDir(topicName, id)
 }
 
+func (o *orphanReclaimer) QuarantinedCopies() (runtime.QuarantineSummary, error) {
+	return o.logs.QuarantinedCopies()
+}
+
 // orphanTestRunner wires a runner whose reclaimer purges through a real
 // runtime.Logs over store's records. The store's topic list holds only
 // "live" unless the test says otherwise.
@@ -489,5 +493,22 @@ narad_orphan_topic_dirs 1
 `
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(want), "narad_orphan_topic_dirs"); err != nil {
 		t.Fatalf("after the sweep (want 1, the unmarked directory it kept): %v", err)
+	}
+}
+
+// Every sweep retakes the quarantine inventory, so a copy set aside on
+// this node shows in narad_quarantined_copies within one sweep, and a
+// scrape never walks the disk itself.
+func TestStaleCopySweepRefreshesTheQuarantineInventory(t *testing.T) {
+	r, dataDir, rec := orphanTestRunner(t, &fakeMoveStore{}, movePeerFake{})
+	mkTopicDirWithData(t, dataDir, "live", "9999999999999999")
+	set := storage.TopicPartitionDir(dataDir, "live", 0) + messaging.QuarantineSuffix
+	if err := os.Rename(storage.TopicPartitionDir(dataDir, "live", 0), set); err != nil {
+		t.Fatal(err)
+	}
+	r.sweepStaleCopies(context.Background())
+	sum, ok := rec.logs.LastQuarantinedCopies()
+	if !ok || sum.Count != 1 || len(sum.Copies) != 1 || sum.Copies[0].Dir != set {
+		t.Fatalf("inventory after the sweep = %+v (taken %v), want the one set-aside copy %s", sum, ok, set)
 	}
 }
