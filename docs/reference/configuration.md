@@ -113,8 +113,8 @@ An open partition log holds goroutines, file descriptors and buffers. A node clo
 
 - Creating a topic opens nothing; it is only a metadata entry until a partition is used.
 - Metrics reads never keep a log open, and neither does an attached fan-out child that receives nothing.
-- A log is closed only after retention has finished deleting its expired segments.
-- Retention deletes data only in open logs. Every `storage.cold_retention_walk_ms`, the node opens each closed partition that holds an expired segment, deletes it, and closes the partition again; `narad_cold_retention_swept_total` counts these.
+- With the cold retention walk off (`storage.cold_retention_walk_ms` set to `0`), a log is closed only after retention has finished deleting its expired segments. With the walk on, an idle log is closed whatever its segments, and the walk deletes them once they expire.
+- Retention deletes data only in open logs. Every `storage.cold_retention_walk_ms`, the node opens each closed partition it owns that holds an expired segment, deletes it, and closes the partition again; `narad_cold_retention_swept_total` counts these.
 
 Watch `narad_open_partition_logs` and `narad_idle_logs_evicted_total` ([Metrics reference](metrics.md#storage-housekeeping)). An abandoned topic still keeps its metadata and its last segment on disk until it is deleted.
 

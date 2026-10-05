@@ -204,6 +204,7 @@ What can change after creation:
 
 - A request with several fields applies them one at a time, in a fixed order: retention, the per-partition limits, partitions, then schema. There is no transaction across them. The first failure stops the sequence and answers its error, and the fields before it stay applied, so send one field per request when you need all or nothing.
 - A topic with [delay children](fanout-and-delay.md#delay-children) keeps at least each child's delay plus one hour of retention. A change below that gets [`409`](../reference/status-codes.md#status-409).
+- A retention or per-partition limit change applies on every node that owns a partition of the topic, not only on the node that ran it. Each owner applies it to the partitions it has open within about a second of its copy of the metadata receiving the change, idle ones included, and partitions it opens later start under the new values. A raised retention therefore protects the backlog on every partition, and a lowered one frees space on every partition at the next retention pass.
 
 ## Delete a topic {#delete}
 
