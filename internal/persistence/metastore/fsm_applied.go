@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
@@ -193,6 +194,20 @@ func readImageMeta(path string) (fsmMeta, error) {
 	return meta, err
 }
 
+// noRaftStateError refuses to bootstrap a new cluster beside a database
+// that holds metadata: the Raft state that went with it (raft.db, the
+// snapshots) is gone, and a cluster started on an empty database would
+// hold none of this node's topics. Setting the file aside on its own
+// would turn a lost raft.db into the loss of every partition copy, so
+// the operator decides.
+func noRaftStateError(path string) error {
+	dir := filepath.Dir(path)
+	return fmt.Errorf("metastore: %s holds metadata, but there is no raft state beside it (raft.db is missing or empty and there is no raft snapshot), so this node would bootstrap a new cluster with an empty log and none of its topics; refusing to start. "+
+		"To keep its topics, restore raft.db and the snapshots directory in %s from a backup. "+
+		"To start this node empty instead, move fsm.db out of %s, and move the topics directory beside %s aside too if its partition data must be kept: a node started empty removes every topic directory that no topic names",
+		path, dir, dir, dir)
+}
+
 // newerDatabaseError reports a database or snapshot that has applied an
 // entry type this release does not know.
 func newerDatabaseError(what string, entryType uint64, build string) error {
@@ -251,8 +266,14 @@ func (f *fsmState) setAsideDatabase(reason string) error {
 // database meets the Raft state beside it, and reports whether Raft
 // should restore its latest snapshot into the FSM at start:
 //
-//   - No Raft state: a new log starts at index 1, so a database holding
-//     anything describes another log. It is set aside.
+//   - No Raft state beside a database holding anything: the database
+//     describes a log that is gone. A node that joins an existing
+//     cluster sets it aside, and the leader's log or snapshot rebuilds
+//     it. A node that would bootstrap refuses to start instead: a new
+//     cluster on an empty database would hold none of its topics, and
+//     the startup sweep would then remove their partition directories.
+//     The operator restores the Raft state, or moves fsm.db away to
+//     start empty (noRaftStateError says how).
 //   - A trusted index at or past the latest snapshot: the database
 //     already holds everything the snapshot does. Raft is told not to
 //     restore it (it still takes the snapshot's index and configuration)
@@ -271,7 +292,7 @@ func (f *fsmState) setAsideDatabase(reason string) error {
 //
 // A trusted index past everything Raft holds (its log and its latest
 // snapshot) belongs to another log and is treated as untrusted.
-func prepareFSMForStart(log *slog.Logger, f *fsmState, hasState bool, logs raft.LogStore, snaps raft.SnapshotStore) (restore bool, err error) {
+func prepareFSMForStart(log *slog.Logger, f *fsmState, hasState, joinOnly bool, logs raft.LogStore, snaps raft.SnapshotStore) (restore bool, err error) {
 	var snapIndex uint64
 	list, err := snaps.List()
 	if err != nil {
@@ -291,10 +312,14 @@ func prepareFSMForStart(log *slog.Logger, f *fsmState, hasState bool, logs raft.
 	applied := f.meta.trustedApplied()
 
 	if !hasState {
-		if f.meta.hasData {
-			return true, f.setAsideDatabase("there is no raft state beside it, so a new raft log starts at index 1")
+		switch {
+		case !f.meta.hasData:
+			return true, nil
+		case joinOnly:
+			return true, f.setAsideDatabase("there is no raft state beside it, and the cluster this node joins replaces it with its own log or snapshot")
+		default:
+			return false, noRaftStateError(f.dbPath)
 		}
-		return true, nil
 	}
 	if applied > max(last, snapIndex) {
 		log.Warn("metastore: fsm.db records an applied index past the raft log and its latest snapshot; it belongs to another log and is not used",

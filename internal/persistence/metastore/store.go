@@ -210,7 +210,7 @@ func newRaft(cfg Config, fsm *fsmState) (r *raft.Raft, transport *commitObservin
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("metastore: check state: %w", err)
 	}
-	restore, err := prepareFSMForStart(cfg.startupLog(), fsm, hasState, boltStore, snapStore)
+	restore, err := prepareFSMForStart(cfg.startupLog(), fsm, hasState, cfg.JoinOnly, boltStore, snapStore)
 	if err != nil {
 		return nil, nil, nil, err
 	}

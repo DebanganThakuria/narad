@@ -227,9 +227,25 @@ func TestForeignWriteUntrustsThePersistedIndex(t *testing.T) {
 	requireStandaloneKid(t, h.s)
 }
 
-// A node whose Raft state is gone starts a new log at index 1; an old
-// fsm.db beside it describes another log and must not be replayed onto.
-func TestNoRaftStateSetsAStaleDatabaseAside(t *testing.T) {
+// removeRaftState deletes a closed store's Raft log and snapshots, as a
+// lost or wiped raft.db would, and returns a copy of them in backup.
+func removeRaftState(t *testing.T, dataDir string) (backup string) {
+	t.Helper()
+	backup = t.TempDir()
+	for _, name := range []string{"raft.db", "snapshots"} {
+		if err := os.Rename(filepath.Join(dataDir, name), filepath.Join(backup, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	return backup
+}
+
+// A node that would bootstrap with no Raft state beside an fsm.db that
+// holds metadata refuses to start: a new cluster on an empty database
+// would hold none of its topics, and the startup sweep would then remove
+// their partition directories. The refusal leaves fsm.db untouched and
+// says what to do; restoring the Raft state brings the topics back.
+func TestBootstrapWithoutRaftStateRefusesADatabaseThatHoldsMetadata(t *testing.T) {
 	ctx := context.Background()
 	cfg := singleNodeConfig(t)
 	h := openStore(t, cfg)
@@ -237,18 +253,74 @@ func TestNoRaftStateSetsAStaleDatabaseAside(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.close(t)
+	backup := removeRaftState(t, cfg.DataDir)
+	fsmPath := filepath.Join(cfg.DataDir, "fsm.db")
+	before, err := os.ReadFile(fsmPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Twice: the first refusal must leave nothing that lets the next
+	// start go ahead on an empty database.
+	for attempt := 1; attempt <= 2; attempt++ {
+		s, err := New(cfg)
+		if err == nil {
+			_ = s.Close()
+			t.Fatalf("start %d: a node with no raft state started beside an fsm.db holding topics", attempt)
+		}
+		for _, want := range []string{fsmPath, "no raft state", "restore raft.db", "move fsm.db"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("start %d: New = %v; want it to say %q", attempt, err, want)
+			}
+		}
+		if fileExists(t, fsmPath+".stale") {
+			t.Fatalf("start %d: fsm.db was set aside", attempt)
+		}
+		if after, _ := os.ReadFile(fsmPath); !bytes.Equal(before, after) {
+			t.Fatalf("start %d: the refused start wrote to fsm.db", attempt)
+		}
+	}
+
+	// The refused starts left an empty raft.db and snapshots directory;
+	// the backup replaces them.
 	for _, name := range []string{"raft.db", "snapshots"} {
 		if err := os.RemoveAll(filepath.Join(cfg.DataDir, name)); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.Rename(filepath.Join(backup, name), filepath.Join(cfg.DataDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
 	}
-
 	h.reopen(t, cfg)
+	if _, err := h.s.GetTopic(ctx, "orders"); err != nil {
+		t.Fatalf("orders after the raft state was restored: %v", err)
+	}
+}
+
+// A node that joins an existing cluster with no Raft state sets an old
+// fsm.db aside: it describes another log, and the leader's log or
+// snapshot rebuilds the database.
+func TestJoinOnlyNodeWithoutRaftStateSetsAStaleDatabaseAside(t *testing.T) {
+	ctx := context.Background()
+	cfg := singleNodeConfig(t)
+	h := openStore(t, cfg)
+	if err := h.s.CreateTopic(ctx, topic.Topic{Name: "orders", Partitions: 1}); err != nil {
+		t.Fatal(err)
+	}
+	h.close(t)
+	removeRaftState(t, cfg.DataDir)
+
+	cfg.JoinOnly = true
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New(join-only): %v", err)
+	}
+	h.s = s
 	if !fileExists(t, filepath.Join(cfg.DataDir, "fsm.db.stale")) {
 		t.Fatal("fsm.db from before the Raft state was lost was not set aside")
 	}
-	if _, err := h.s.GetTopic(ctx, "orders"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("the new log's replica holds a topic only the old one had (get = %v)", err)
+	if _, err := s.GetTopic(ctx, "orders"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the joiner's replica holds a topic only the old log had (get = %v)", err)
 	}
 }
 

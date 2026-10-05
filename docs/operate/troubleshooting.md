@@ -258,9 +258,21 @@ Logged at error level with `index`, `entry_type`, `build` and `error`, just befo
 
 Logged at warning level at start, with `reason` and `stale`.
 
-**Cause.** The node found an `fsm.db` it could not use as the base for its Raft log: one with no applied index this release can trust (written last by v3.0.x: the first restart after an upgrade, or after a rollback and a new upgrade), or one left beside a missing Raft state. It moved the file aside and rebuilds the database from the Raft log ([Restarts](../understand/metastore-and-raft.md#restarts)).
+**Cause.** The node found an `fsm.db` it could not use as the base for its Raft log: one with no applied index this release can trust (written last by v3.0.x: the first restart after an upgrade, or after a rollback and a new upgrade), or, on a node joining a running cluster, one left beside a missing Raft state ([next section](#log-metastore-no-raft-state) covers a node that would bootstrap). It moved the file aside and rebuilds the database from the Raft log ([Restarts](../understand/metastore-and-raft.md#restarts)).
 
 **Fix.** None. Delete `fsm.db.stale` (next to `fsm.db` under the data directory's `metastore` directory) once the node is ready. It is kept only for inspection, and the next set-aside overwrites it.
+
+### `holds metadata, but there is no raft state beside it` at start {#log-metastore-no-raft-state}
+
+**Unreleased:** in master, not in v3.0.1.
+
+`narad serve` exits at start with `metastore: .../fsm.db holds metadata, but there is no raft state beside it (raft.db is missing or empty and there is no raft snapshot), so this node would bootstrap a new cluster with an empty log and none of its topics; refusing to start`, followed by the two ways out below. The pod restarts and exits the same way until one is taken.
+
+**Cause.** The node's Raft log (`raft.db`) and snapshots are gone while its metadata database survived: the file was deleted, or the volume was restored without it. A node with fewer than `cluster.raft_snapshot_threshold` metadata changes (8192 by default) has no snapshot, so `raft.db` held all of its Raft state. A node that would bootstrap (a single node, or an initial member none of whose peers answers) would start a new cluster on an empty database that holds none of its topics, and then remove their partition directories as orphans. It refuses instead and leaves `fsm.db` untouched. v3.0.1 replayed the new log onto the old file. A node that joins a running cluster sets the file aside instead ([previous section](#log-metastore-set-aside)).
+
+**Check.** The pod's `metastore` directory under the data directory: `fsm.db` is there, `raft.db` is missing or was just created, and `snapshots` is empty.
+
+**Fix.** To keep the node's topics, restore `raft.db` and the `snapshots` directory from a backup of the same volume and restart. A member of a multi-node cluster rejoins on its own once a peer answers at its start: it joins the running cluster instead of bootstrapping, and rebuilds the database from the leader. To start the node empty, move `fsm.db` out of the `metastore` directory, and move the `topics` directory beside it aside too if its partition data must be kept: a node started empty removes every topic directory that no topic names.
 
 ### `written by a newer Narad release` at start {#log-metastore-newer-database}
 

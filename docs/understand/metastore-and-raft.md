@@ -89,7 +89,7 @@ The index describes the file only while nothing else writes it. Beside it is the
 
 | `fsm.db` | Raft state | What happens |
 |---|---|---|
-| holds anything | none (`raft.db` and the snapshots are gone) | Set aside as `fsm.db.stale`; the new log starts on an empty database. |
+| holds anything | none (`raft.db` and the snapshots are gone) | A node joining a running cluster sets it aside as `fsm.db.stale`, and the leader's log or snapshot rebuilds it. A node that would bootstrap a new cluster refuses to start and leaves the file untouched: a new cluster on an empty database would hold none of its topics ([Troubleshooting](../operate/troubleshooting.md#log-metastore-no-raft-state)). |
 | trusted index at or past the latest snapshot | any | The snapshot is not restored (Raft still takes its index and configuration), and the replay skips what `fsm.db` holds: the restart re-applies nothing. |
 | trusted index behind the latest snapshot | a snapshot | The snapshot is restored over `fsm.db`, then the tail after it is applied. |
 | index missing or untrusted | a snapshot | The snapshot is restored over `fsm.db`, as in v3.0.1. |
