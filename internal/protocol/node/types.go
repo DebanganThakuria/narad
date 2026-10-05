@@ -158,6 +158,13 @@ type AckRequest struct {
 type TopicBodyRequest struct {
 	Topic string
 	Body  []byte
+	// Actor names the authenticated user a forwarded create or alter is
+	// made for, so the leader re-checks that user's rights (audit H1).
+	// It is an optional trailing field, encoded only when set: a
+	// receiver that predates it refuses the payload with
+	// TrailingPayloadError before acting on it, and the sender resends
+	// without it.
+	Actor string
 }
 
 // TopicNameRequest is the shared shape for topic operations that need
@@ -166,18 +173,27 @@ type TopicBodyRequest struct {
 // the deleted record's ID so the receiver purges that incarnation's
 // directory and no other. It is encoded only when set, as a trailing
 // field, so a sender without one produces the pre-ID payload.
+//
+// Actor optionally names the authenticated user a forwarded delete is
+// made for (see TopicBodyRequest.Actor). It follows ID on the wire, so
+// when Actor is set ID is always written, empty or not.
 type TopicNameRequest struct {
 	Topic string
 	ID    string
+	Actor string
 }
 
 // ChildLinkRequest is the shared shape for fan-out attach and detach,
 // forwarded to the cluster leader. DelayMs is meaningful on attach
 // only.
+//
+// Actor optionally names the authenticated user the attach or detach is
+// made for (see TopicBodyRequest.Actor).
 type ChildLinkRequest struct {
 	Parent  string
 	Child   string
 	DelayMs int64
+	Actor   string
 }
 
 // TopicPartitionStatsRequest asks the owner of one partition for its

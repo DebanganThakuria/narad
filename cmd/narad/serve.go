@@ -342,6 +342,7 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 	// pooled streams from this node.
 	peerRPC := cluster.NewPeerClient(5*time.Second, cfg.Security.ClusterSecret)
 	peerRPC.SetMetrics(cluster.NewPrometheusRPCMetrics(reg))
+	peerRPC.SetLogger(log)
 
 	router := cluster.NewRouter(ms, nodeID, partition.NewHashRoundRobin(), cfg.Security.ClusterSecret)
 	router.SetPeerClient(peerRPC)

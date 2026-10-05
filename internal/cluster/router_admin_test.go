@@ -7,15 +7,26 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/broker"
+	"github.com/debanganthakuria/narad/internal/broker/runtime"
+	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
+	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/domain/user"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
 	"github.com/debanganthakuria/narad/internal/platform/partition"
+	"github.com/debanganthakuria/narad/internal/platform/schema"
+	"github.com/debanganthakuria/narad/internal/protocol/clusterwire"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
+	"github.com/debanganthakuria/narad/internal/security"
 )
 
 func TestRouteGetTopicMergesRemotePartitionStats(t *testing.T) {
@@ -771,5 +782,315 @@ func TestBroadcastDeleteTopicJoinsFailuresInMemberOrder(t *testing.T) {
 	a, b := strings.Index(msg, "node-a"), strings.Index(msg, "node-b")
 	if a < 0 || b < 0 || a > b {
 		t.Fatalf("joined error = %q, want node-a before node-b", msg)
+	}
+}
+
+// managerBroker is a leader's broker with a real topics Manager behind
+// the topic writes, recording the request identity each one ran under.
+type managerBroker struct {
+	broker.Broker
+	m *brokertopics.Manager
+
+	mu         sync.Mutex
+	identities []string
+	deletes    int
+}
+
+func (b *managerBroker) record(ctx context.Context) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	id, ok := security.IdentityFrom(ctx)
+	if !ok {
+		b.identities = append(b.identities, "<none>")
+		return
+	}
+	b.identities = append(b.identities, id.Username)
+}
+
+func (b *managerBroker) seen() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.identities...)
+}
+
+func (b *managerBroker) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
+	return b.m.GetTopic(ctx, name)
+}
+
+func (b *managerBroker) CreateTopic(ctx context.Context, opts brokertopics.CreateOpts) (topic.Topic, error) {
+	b.record(ctx)
+	return b.m.CreateTopic(ctx, opts)
+}
+
+func (b *managerBroker) UpdateTopicRetention(ctx context.Context, name string, retentionMs int64) (topic.Topic, error) {
+	b.record(ctx)
+	return b.m.UpdateTopicRetention(ctx, name, retentionMs)
+}
+
+func (b *managerBroker) DeleteTopic(ctx context.Context, name string) error {
+	b.record(ctx)
+	err := b.m.DeleteTopic(ctx, name)
+	if err == nil {
+		b.mu.Lock()
+		b.deletes++
+		b.mu.Unlock()
+	}
+	return err
+}
+
+func (b *managerBroker) AttachChild(ctx context.Context, parent, child string, delayMs int64) error {
+	b.record(ctx)
+	return b.m.AttachChild(ctx, parent, child, delayMs)
+}
+
+func (b *managerBroker) DetachChild(ctx context.Context, parent, child string) error {
+	b.record(ctx)
+	return b.m.DetachChild(ctx, parent, child)
+}
+
+// loopbackFrames hands PeerClient requests straight to a leader's
+// RPCServer, as the cluster transport would. With preActor set it
+// answers like a 3.0.x leader: any payload carrying the trailing actor
+// field is refused at decode, before anything runs.
+type loopbackFrames struct {
+	server   *RPCServer
+	preActor bool
+
+	mu       sync.Mutex
+	payloads [][]byte
+}
+
+func (l *loopbackFrames) RequestOnLane(ctx context.Context, _ string, _ clusterrpc.Lane, _ clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
+	l.mu.Lock()
+	l.payloads = append(l.payloads, append([]byte(nil), payload...))
+	l.mu.Unlock()
+	var res nodewire.Response
+	if prefix, refused := preActorRefusal(payload); l.preActor && refused {
+		res = errorResponse(http.StatusBadRequest, prefix+nodewire.TrailingPayloadError)
+	} else {
+		res = l.server.dispatch(ctx, requestKey{}, payload)
+	}
+	encoded, err := nodewire.EncodeResponse(res)
+	if err != nil {
+		return clusterwire.StreamFrame{}, err
+	}
+	return clusterwire.StreamFrame{Type: clusterwire.StreamFrameNodeReply, RequestID: 1, Payload: encoded}, nil
+}
+
+func (l *loopbackFrames) RequestOnLaneTimeout(ctx context.Context, addr string, lane clusterrpc.Lane, _ time.Duration, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
+	return l.RequestOnLane(ctx, addr, lane, frameType, payload)
+}
+
+func (l *loopbackFrames) sent() [][]byte {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([][]byte(nil), l.payloads...)
+}
+
+// preActorRefusal reports whether a 3.0.x leader would refuse payload
+// for its trailing actor, and the prefix of its error text.
+func preActorRefusal(payload []byte) (string, bool) {
+	op, err := nodewire.OperationOf(payload)
+	if err != nil {
+		return "", false
+	}
+	switch op {
+	case nodewire.OpDeleteTopic:
+		req, err := nodewire.DecodeTopicNameRequest(payload, op)
+		return "invalid delete topic request: ", err == nil && req.Actor != ""
+	case nodewire.OpCreateTopic, nodewire.OpAlterTopic:
+		req, err := nodewire.DecodeTopicBodyRequest(payload, op)
+		prefix := "invalid create topic request: "
+		if op == nodewire.OpAlterTopic {
+			prefix = "invalid alter topic request: "
+		}
+		return prefix, err == nil && req.Actor != ""
+	case nodewire.OpAttachChild, nodewire.OpDetachChild:
+		req, err := nodewire.DecodeChildLinkRequest(payload, op)
+		prefix := "invalid attach child request: "
+		if op == nodewire.OpDetachChild {
+			prefix = "invalid detach child request: "
+		}
+		return prefix, err == nil && req.Actor != ""
+	}
+	return "", false
+}
+
+// forwardingPair is a follower's router whose leader forwards land on a
+// leader RPCServer backed by a real topics Manager over store.
+func forwardingPair(t *testing.T, preActor bool) (*Router, *managerBroker, *loopbackFrames, *metastore.Store) {
+	t.Helper()
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.RegisterMember(ctx, metastore.Member{ID: "node-leader", Addr: store.LeaderAddr(), Status: metastore.MemberAlive}); err != nil {
+		t.Fatalf("RegisterMember: %v", err)
+	}
+	for _, name := range []string{"alice", "bob"} {
+		u := user.User{Username: name, PasswordHash: []byte("x"), Grants: []user.Grant{{Action: user.ActionCreate, Patterns: []string{"*"}}}}
+		if err := store.CreateUser(ctx, u); err != nil {
+			t.Fatalf("CreateUser(%s): %v", name, err)
+		}
+	}
+	dataDir := t.TempDir()
+	m := brokertopics.NewManager(dataDir, store, nil, schema.NewJSONSchema(),
+		consumer.NewInFlight(func(context.Context, string) (consumer.Caps, error) {
+			return consumer.Caps{MaxInFlight: 8, MaxAckedAhead: 8}, nil
+		}, nil),
+		runtime.NewLogs(dataDir, storage.Options{}, store, nil),
+		brokertopics.Config{DefaultPartitions: 3, MaxPartitions: 12, DefaultRetentionMs: 3_600_000, DefaultVisibilityTimeoutMs: 30_000, DefaultMaxInFlightPerPartition: 8, DefaultMaxAckedAheadPerPartition: 8},
+		discardLogger(), "node-leader")
+	br := &managerBroker{m: m}
+	frames := &loopbackFrames{server: &RPCServer{broker: br, store: store, logger: discardLogger()}, preActor: preActor}
+	router := NewRouter(store, "node-self", partition.NewHashRoundRobin(), "")
+	router.peer = &PeerClient{frames: frames}
+	return router, br, frames, store
+}
+
+func asUser(name string) context.Context {
+	return security.WithIdentity(context.Background(), user.User{Username: name, Grants: []user.Grant{{Action: user.ActionCreate, Patterns: []string{"*"}}}})
+}
+
+// A write a follower forwards runs on the leader as the caller (audit
+// H1): the leader looks the caller up in its own replica and the
+// Manager re-checks ownership against the topic as it stands there.
+// Master forwarded no caller, so the leader ran every forwarded write
+// unchecked and bob's forwarded delete removed alice's topic.
+func TestForwardedTopicWriteRunsAsTheCaller(t *testing.T) {
+	router, br, frames, store := forwardingPair(t, false)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", ID: "0000000000000001", Partitions: 3, RetentionMs: 3_600_000, Owner: "alice"}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	router.RouteDeleteTopic(asUser("bob"), rec, httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil), "orders")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("bob's forwarded delete of alice's topic: status %d body %s, want 403", rec.Code, rec.Body)
+	}
+	if _, err := store.GetTopic(ctx, "orders"); err != nil {
+		t.Fatalf("alice's topic after bob's delete: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	router.RouteAlterTopic(asUser("bob"), rec, nil, "orders", []byte(`{"retention_ms":7200000}`))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("bob's forwarded alter of alice's topic: status %d body %s, want 403", rec.Code, rec.Body)
+	}
+
+	rec = httptest.NewRecorder()
+	router.RouteAlterTopic(asUser("alice"), rec, nil, "orders", []byte(`{"retention_ms":7200000}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("alice's forwarded alter: status %d body %s, want 200", rec.Code, rec.Body)
+	}
+	rec = httptest.NewRecorder()
+	router.RouteCreateTopic(asUser("alice"), rec, nil, []byte(`{"name":"audit","owner":"alice"}`))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("alice's forwarded create: status %d body %s, want 201", rec.Code, rec.Body)
+	}
+	rec = httptest.NewRecorder()
+	router.RouteAttachChild(asUser("alice"), rec, nil, "orders", "audit", 0)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("alice's forwarded attach: status %d body %s, want 200", rec.Code, rec.Body)
+	}
+	rec = httptest.NewRecorder()
+	router.RouteDetachChild(asUser("bob"), rec, nil, "orders", "audit")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("bob's forwarded detach of alice's link: status %d body %s, want 403", rec.Code, rec.Body)
+	}
+
+	// A caller the leader does not know is refused outright.
+	rec = httptest.NewRecorder()
+	router.RouteAlterTopic(asUser("mallory"), rec, nil, "orders", []byte(`{"retention_ms":7200000}`))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("an unknown caller's forwarded alter: status %d body %s, want 403", rec.Code, rec.Body)
+	}
+
+	want := []string{"bob", "bob", "alice", "alice", "alice", "bob"}
+	if got := br.seen(); !slices.Equal(got, want) {
+		t.Fatalf("identities the leader's broker ran under = %v, want %v", got, want)
+	}
+	if len(frames.sent()) == 0 {
+		t.Fatal("nothing was forwarded")
+	}
+}
+
+// Mid-roll the leader may still run 3.0.x, which refuses the trailing
+// actor field at decode, before applying anything. The forwarder then
+// resends the write once without it, so the write still lands, exactly
+// once, checked only at the ingress as before the upgrade.
+func TestForwardToAnOlderLeaderDropsTheCaller(t *testing.T) {
+	router, br, frames, store := forwardingPair(t, true)
+	ctx := context.Background()
+	if err := store.CreateTopic(ctx, topic.Topic{Name: "orders", ID: "0000000000000001", Partitions: 3, Owner: "alice"}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	router.RouteDeleteTopic(asUser("alice"), rec, httptest.NewRequest(http.MethodDelete, "/v1/topics/orders", nil), "orders")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("forwarded delete to an older leader: status %d body %s, want 204", rec.Code, rec.Body)
+	}
+	if br.deletes != 1 {
+		t.Fatalf("the delete ran %d times, want exactly once", br.deletes)
+	}
+	var deletes []nodewire.TopicNameRequest
+	for _, p := range frames.sent() {
+		if op, _ := nodewire.OperationOf(p); op == nodewire.OpDeleteTopic {
+			req, err := nodewire.DecodeTopicNameRequest(p, op)
+			if err != nil {
+				t.Fatalf("decode forwarded delete: %v", err)
+			}
+			deletes = append(deletes, req)
+		}
+	}
+	if len(deletes) != 2 || deletes[0].Actor != "alice" || deletes[1].Actor != "" {
+		t.Fatalf("forwarded deletes = %+v, want one with the caller, then one resent without it", deletes)
+	}
+}
+
+// scriptedFrames answers each request with the next scripted response
+// and records the payloads.
+type scriptedFrames struct {
+	replies  []nodewire.Response
+	payloads [][]byte
+}
+
+func (f *scriptedFrames) RequestOnLane(_ context.Context, _ string, _ clusterrpc.Lane, _ clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
+	f.payloads = append(f.payloads, append([]byte(nil), payload...))
+	encoded, err := nodewire.EncodeResponse(f.replies[len(f.payloads)-1])
+	if err != nil {
+		return clusterwire.StreamFrame{}, err
+	}
+	return clusterwire.StreamFrame{Type: clusterwire.StreamFrameNodeReply, RequestID: 1, Payload: encoded}, nil
+}
+
+func (f *scriptedFrames) RequestOnLaneTimeout(ctx context.Context, addr string, lane clusterrpc.Lane, _ time.Duration, frameType clusterwire.StreamFrameType, payload []byte) (clusterwire.StreamFrame, error) {
+	return f.RequestOnLane(ctx, addr, lane, frameType, payload)
+}
+
+// Only an older leader's decode refusal of the actor field is resent
+// without the caller: any other 400, even one whose text mentions
+// "trailing", comes back as it is, so a write is never quietly re-run
+// unchecked.
+func TestCallerIsDroppedOnlyForAnOlderLeadersDecodeRefusal(t *testing.T) {
+	ctx := context.Background()
+	other := errorResponse(http.StatusBadRequest, `invalid json: schema property "trailing node rpc payload data"`)
+	f := &scriptedFrames{replies: []nodewire.Response{other}}
+	c := &PeerClient{frames: f}
+	res, err := c.AlterTopic(ctx, "leader", "orders", []byte(`{}`), "alice")
+	if err != nil || res.Status != http.StatusBadRequest || len(f.payloads) != 1 {
+		t.Fatalf("alter answered %d (err %v) after %d sends; want the 400 returned after one send", res.Status, err, len(f.payloads))
+	}
+
+	refusal := errorResponse(http.StatusBadRequest, "invalid alter topic request: "+nodewire.TrailingPayloadError)
+	f = &scriptedFrames{replies: []nodewire.Response{refusal, {Status: http.StatusOK}}}
+	c = &PeerClient{frames: f}
+	res, err = c.AlterTopic(ctx, "leader", "orders", []byte(`{}`), "alice")
+	if err != nil || res.Status != http.StatusOK || len(f.payloads) != 2 {
+		t.Fatalf("alter answered %d (err %v) after %d sends; want 200 after a resend", res.Status, err, len(f.payloads))
+	}
+	first, _ := nodewire.DecodeTopicBodyRequest(f.payloads[0], nodewire.OpAlterTopic)
+	second, _ := nodewire.DecodeTopicBodyRequest(f.payloads[1], nodewire.OpAlterTopic)
+	if first.Actor != "alice" || second.Actor != "" {
+		t.Fatalf("actors sent = %q then %q, want alice then none", first.Actor, second.Actor)
 	}
 }

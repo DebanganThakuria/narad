@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/security"
 )
 
 // writeLeaderForwardError answers a failed control-plane forward to the
@@ -18,6 +19,17 @@ import (
 // bad gateway the client should treat as broken.
 func writeLeaderForwardError(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), http.StatusServiceUnavailable)
+}
+
+// forwardActor is the caller a forwarded topic write is made for: the
+// authenticated user of the request, or "" when security is off. The
+// leader looks it up in its own replica and re-checks that user's
+// rights (audit H1).
+func forwardActor(ctx context.Context) string {
+	if id, ok := security.IdentityFrom(ctx); ok {
+		return id.Username
+	}
+	return ""
 }
 
 // createForwardTimeout bounds a follower's create forward to the cluster
@@ -38,7 +50,7 @@ func (rt *Router) RouteCreateTopic(ctx context.Context, w http.ResponseWriter, _
 	}
 	createCtx, cancel := longWaitRPCContext(ctx, createForwardTimeout)
 	defer cancel()
-	res, err := rt.peer.CreateTopic(createCtx, memberAddr, body)
+	res, err := rt.peer.CreateTopic(createCtx, memberAddr, body, forwardActor(ctx))
 	return rt.writeForwardedWrite(ctx, w, memberAddr, res, err)
 }
 
@@ -48,7 +60,7 @@ func (rt *Router) RouteAlterTopic(ctx context.Context, w http.ResponseWriter, _ 
 	if memberAddr == "" {
 		return false
 	}
-	res, err := rt.peer.AlterTopic(ctx, memberAddr, topicName, body)
+	res, err := rt.peer.AlterTopic(ctx, memberAddr, topicName, body, forwardActor(ctx))
 	return rt.writeForwardedWrite(ctx, w, memberAddr, res, err)
 }
 
@@ -66,7 +78,7 @@ func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, _
 	}
 	deleteCtx, cancel := longWaitRPCContext(ctx, deleteTopicForwardTimeout)
 	defer cancel()
-	res, err := rt.peer.DeleteTopic(deleteCtx, memberAddr, topicName)
+	res, err := rt.peer.DeleteTopic(deleteCtx, memberAddr, topicName, forwardActor(ctx))
 	return rt.writeForwardedWrite(ctx, w, memberAddr, res, err)
 }
 

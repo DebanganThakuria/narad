@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
+	"github.com/debanganthakuria/narad/internal/security"
 )
 
 type rpcCreateTopicBody struct {
@@ -96,7 +98,11 @@ func (s *RPCServer) handleCreateTopic(payload []byte) nodewire.Response {
 	if err := decodeStrictJSON(req.Body, &body); err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid json: "+err.Error())
 	}
-	t, err := s.broker.CreateTopic(rpcRequestContext(), brokertopics.CreateOpts{
+	ctx, refusal := s.actorContext(req.Actor)
+	if refusal != nil {
+		return *refusal
+	}
+	t, err := s.broker.CreateTopic(ctx, brokertopics.CreateOpts{
 		Name:                      body.Name,
 		Partitions:                body.Partitions,
 		RetentionMs:               body.RetentionMs,
@@ -141,7 +147,11 @@ func (s *RPCServer) handleAlterTopic(payload []byte) nodewire.Response {
 	if err := body.validate(); err != nil {
 		return errorResponse(http.StatusBadRequest, err.Error())
 	}
-	t, err := s.applyTopicAlterations(req.Topic, body)
+	ctx, refusal := s.actorContext(req.Actor)
+	if refusal != nil {
+		return *refusal
+	}
+	t, err := s.applyTopicAlterations(ctx, req.Topic, body)
 	if err != nil {
 		return s.brokerError("alter topic", err)
 	}
@@ -153,12 +163,14 @@ func (s *RPCServer) handleAlterTopic(payload []byte) nodewire.Response {
 // as of the last successful update. An error aborts the sequence, so a
 // multi-field alter can be partially applied: each group is an independent
 // broker update with no cross-group transaction. This matches the HTTP
-// handler and the documented contract in docs/build/topics.md.
-func (s *RPCServer) applyTopicAlterations(topicName string, body rpcAlterTopicBody) (topic.Topic, error) {
+// handler and the documented contract in docs/build/topics.md. ctx
+// carries the forwarded caller (see actorContext), so the Manager's
+// owner-or-admin re-check applies to every group.
+func (s *RPCServer) applyTopicAlterations(ctx context.Context, topicName string, body rpcAlterTopicBody) (topic.Topic, error) {
 	var t topic.Topic
 	var err error
 	if body.RetentionMs != nil {
-		if t, err = s.broker.UpdateTopicRetention(rpcRequestContext(), topicName, *body.RetentionMs); err != nil {
+		if t, err = s.broker.UpdateTopicRetention(ctx, topicName, *body.RetentionMs); err != nil {
 			return topic.Topic{}, err
 		}
 	}
@@ -167,7 +179,7 @@ func (s *RPCServer) applyTopicAlterations(topicName string, body rpcAlterTopicBo
 		// must carry the other's current value forward.
 		current := t
 		if current.Name == "" {
-			if current, err = s.broker.GetTopic(rpcRequestContext(), topicName); err != nil {
+			if current, err = s.broker.GetTopic(ctx, topicName); err != nil {
 				return topic.Topic{}, err
 			}
 		}
@@ -179,17 +191,17 @@ func (s *RPCServer) applyTopicAlterations(topicName string, body rpcAlterTopicBo
 		if body.MaxAckedAheadPerPartition != nil {
 			ackedAhead = *body.MaxAckedAheadPerPartition
 		}
-		if t, err = s.broker.UpdateTopicCaps(rpcRequestContext(), topicName, inFlight, ackedAhead); err != nil {
+		if t, err = s.broker.UpdateTopicCaps(ctx, topicName, inFlight, ackedAhead); err != nil {
 			return topic.Topic{}, err
 		}
 	}
 	if body.Partitions > 0 {
-		if t, err = s.broker.IncreaseTopicPartitions(rpcRequestContext(), topicName, body.Partitions); err != nil {
+		if t, err = s.broker.IncreaseTopicPartitions(ctx, topicName, body.Partitions); err != nil {
 			return topic.Topic{}, err
 		}
 	}
 	if len(body.Schema) > 0 {
-		if t, err = s.broker.UpdateTopicSchema(rpcRequestContext(), topicName, body.Schema, body.SchemaBaseVersion); err != nil {
+		if t, err = s.broker.UpdateTopicSchema(ctx, topicName, body.Schema, body.SchemaBaseVersion); err != nil {
 			return topic.Topic{}, err
 		}
 	}
@@ -205,8 +217,12 @@ func (s *RPCServer) handleDeleteTopic(payload []byte) nodewire.Response {
 	// member that has already applied a recreate of the same name purges
 	// the old directory and not the new one. Read it before the delete
 	// removes the record; a lookup failure falls back to a purge by name.
+	ctx, refusal := s.actorContext(req.Actor)
+	if refusal != nil {
+		return *refusal
+	}
 	id := deletedIncarnation(s.broker, req.Topic)
-	if err := s.broker.DeleteTopic(rpcRequestContext(), req.Topic); err != nil {
+	if err := s.broker.DeleteTopic(ctx, req.Topic); err != nil {
 		purgeErr, ok := errors.AsType[brokertopics.PurgeError](err)
 		if !ok {
 			return s.brokerError("delete topic", err)
@@ -233,6 +249,41 @@ func (s *RPCServer) handleDeleteTopic(payload []byte) nodewire.Response {
 		}
 	}
 	return nodewire.Response{Status: http.StatusNoContent}
+}
+
+// actorContext returns the context a forwarded topic write runs under.
+// With an actor (the user the forwarding node authenticated), it is that
+// user as THIS node, the leader, knows it: looked up in the leader's own
+// replica after the once-per-term leader barrier, so the Manager's
+// owner-or-admin and create-grant re-checks judge the caller by the
+// leader's records (audit H1). A user the leader does not know is
+// refused with 403 before anything runs. The actor is trusted because
+// node RPC is authenticated with the cluster secret. Without an actor
+// (security off on the forwarder, or a 3.0.x forwarder) the write runs
+// with no identity, as before: its owner check happened at the ingress.
+func (s *RPCServer) actorContext(actor string) (context.Context, *nodewire.Response) {
+	ctx := rpcRequestContext()
+	if actor == "" {
+		return ctx, nil
+	}
+	if s.store == nil {
+		res := errorResponse(http.StatusServiceUnavailable, "metastore unavailable; cannot look up the caller")
+		return nil, &res
+	}
+	if err := s.store.LeaderBarrier(ctx); err != nil {
+		res := s.brokerError("look up caller", err)
+		return nil, &res
+	}
+	u, err := s.store.GetUser(ctx, actor)
+	if errors.Is(err, errs.ErrNotFound) {
+		res := errorResponse(http.StatusForbidden, "caller unknown to the leader")
+		return nil, &res
+	}
+	if err != nil {
+		res := s.brokerError("look up caller", err)
+		return nil, &res
+	}
+	return security.WithIdentity(ctx, u), nil
 }
 
 // deletedIncarnation returns the ID of the topic incarnation a delete
