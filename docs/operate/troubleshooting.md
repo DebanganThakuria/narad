@@ -406,6 +406,18 @@ The full line is `topic purge unfinished on some members; their copies stay unti
 
 **Fix.** The copies take disk space but are never served: a recreated topic of the same name is a different incarnation. Each listed member removes them at its next start (the startup orphan sweep). To reclaim the space sooner, restart the listed members one at a time.
 
+### `orphan assignment row for <topic>/<partition>` {#log-orphan-assignment-row}
+
+**Unreleased:** in master, not in v3.0.1.
+
+The full line is `orphan assignment row for <topic>/<partition>; it is pruned once every member runs 3.1.0`, at error level on the Raft leader, with `topic`, `partition` and `owner`, once per row.
+
+**Cause.** The metadata holds an owner for a partition that does not exist: its topic was deleted, or the index is past the topic's partition count. A placement pass of a release before 3.1.0 could write such rows after a topic delete, and a topic created again under the name used to inherit them, owners and all. The leader prunes these rows with a Raft entry type that only this release applies, so it waits until every member, dead members and Raft servers without a member record included, runs it ([Raft entry types](../understand/metastore-and-raft.md#new-entry-types)).
+
+**Check.** `narad cluster members` for a member still on an older release, or a dead member that holds the entry type back; the leader also logs `metastore: not using a new raft entry type yet` at info with the member's ID.
+
+**Fix.** Finish the upgrade, or remove the member that will not come back. The leader then prunes the rows within about a minute and logs `controller: pruned assignment rows that belonged to no partition`. No data moves: a row like this names no partition. Until then, a topic created again under that name takes over the rows' owners for the partitions they cover, so avoid recreating it before the upgrade completes.
+
 ### `move: set aside stale incarnation directory` {#log-stale-incarnation}
 
 Logged at warning level with `topic` and `err`.
