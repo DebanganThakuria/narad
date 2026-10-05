@@ -18,13 +18,42 @@ initialClusterSize: 3
 # decommissioning an initial member for good).
 clusterPeerCount: 0
 
-# Lowering replicaCount is a SCALE-IN, including a rollback to an older
-# values file: the pods the StatefulSet deletes must have been
-# decommissioned first (narad cluster decommission <pod>, wait for zero
-# owned partitions and Raft removal), or their partition data strands and
-# the remaining voters may lose quorum. The chart refuses to reduce a
-# running StatefulSet's replicas unless you acknowledge it here.
-allowScaleIn: false
+# Lowering replicaCount is a SCALE-IN, and so is a helm rollback to a
+# revision with fewer replicas: the pods the StatefulSet deletes must
+# have been decommissioned first (narad cluster decommission <pod>, then
+# wait until narad cluster members no longer lists it), or their
+# partition data strands and the remaining voters may lose quorum.
+#
+# Two checks hold you to it:
+#   - On helm upgrade, the chart refuses to lower a running StatefulSet's
+#     replicas unless allowScaleInTo equals the new replicaCount: "I
+#     decommissioned the pods above this size". It approves that one size
+#     only, so a value kept by --reuse-values cannot approve a later
+#     scale-in to another size. It replaces the allowScaleIn boolean,
+#     which is no longer read. This check needs a live cluster (Helm's
+#     lookup), so helm template and GitOps renderers skip it.
+#   - scaleInGuard (below) checks the cluster itself, on helm rollback
+#     too.
+# 0 approves no scale-in.
+allowScaleInTo: 0
+
+# The scale-in guard: a pre-upgrade and pre-rollback hook Job on the
+# narad image. Hooks run on helm rollback, which renders no templates and
+# so never reaches the allowScaleInTo check; Argo CD runs it as a PreSync
+# hook. It finds the pods at or above the new replicaCount through the
+# headless Service's DNS names. If none exists, the change deletes no pod
+# and is allowed without calling the API. Otherwise it reads
+# narad cluster members, signed in as admin with the admin-password key
+# of the security Secret, and refuses while any pod being deleted is
+# still a member. It needs no Kubernetes API access.
+#
+# On a scale-in it needs that key to hold the root admin's current
+# password; without it the guard refuses and says so. To go ahead after
+# checking by hand, pass --no-hooks to that one helm command. A rollback
+# to a revision rendered by an older chart runs that revision's hooks,
+# which have no guard.
+scaleInGuard:
+  enabled: true
 
 image:
   repository: ghcr.io/debanganthakuria/narad

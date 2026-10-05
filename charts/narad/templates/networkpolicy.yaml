@@ -1,5 +1,6 @@
 {{- if eq (include "narad.networkPolicyEnabled" .) "true" -}}
 {{- $np := .Values.networkPolicy | default dict -}}
+{{- $guard := eq (include "narad.scaleInGuardEnabled" .) "true" -}}
 {{- /*
 Fences the narad pods' ingress. Raft (the cluster port, TCP) has no
 authentication of its own, and the node RPC plane (QUIC on the API port
@@ -34,13 +35,19 @@ spec:
           protocol: TCP
         - port: {{ .Values.service.ports.api }}
           protocol: UDP
-    # The client API (and the readiness probe).
+    # The client API (and the readiness probe). A narrowed API still
+    # admits the scale-in guard's hook pod, which reads the member list.
     - ports:
         - port: {{ .Values.service.ports.api }}
           protocol: TCP
       {{- with dig "apiFrom" list $np }}
       from:
         {{- toYaml . | nindent 8 }}
+        {{- if $guard }}
+        - podSelector:
+            matchLabels:
+              {{- include "narad.scaleInGuardSelectorLabels" $ | nindent 14 }}
+        {{- end }}
       {{- end }}
     {{- if .Values.metrics.enabled }}
     # Prometheus exposition, and the startup and liveness probes.

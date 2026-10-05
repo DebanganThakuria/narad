@@ -51,3 +51,10 @@ Root admin password:
 
 Security is off: the API, the node RPC plane and Raft accept anything that reaches the pods.
 {{- end }}
+{{- if .Values.allowScaleIn }}
+
+WARNING: allowScaleIn is no longer read. A scale-in is approved with
+--set allowScaleInTo=<new replicaCount>, which matches that one size only,
+and the scale-in guard hook checks that the pods being removed left the
+cluster. Remove allowScaleIn from your values.
+{{- end }}

@@ -1,0 +1,119 @@
+{{- if eq (include "narad.scaleInGuardEnabled" .) "true" -}}
+{{- /*
+The scale-in guard (script and reasoning in _scalein_guard.tpl). A hook,
+not a template-time check: helm rollback re-applies the target
+revision's stored manifest without rendering templates, so validate.yaml's
+lookup never runs there, but the target revision's pre-rollback hooks do.
+The Job carries the replicaCount of the revision that rendered it, which
+is the size the upgrade or rollback moves to. It needs no Kubernetes API
+access: it finds pods through DNS and asks Narad's own API.
+*/ -}}
+{{- $secretName := .Values.security.existingSecret | default (printf "%s-security" (include "narad.fullname" .)) -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-scale-in-guard" (include "narad.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "narad.scaleInGuardSelectorLabels" . | nindent 4 }}
+    helm.sh/chart: {{ include "narad.chart" . }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    {{- with .Values.commonLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    helm.sh/hook: pre-upgrade,pre-rollback
+    helm.sh/hook-weight: "0"
+    # A failed Job is kept for its log until the next upgrade or rollback.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels:
+        {{- include "narad.scaleInGuardSelectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "narad.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: guard
+          image: {{ include "narad.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              {{- include "narad.scaleInGuardScript" . | nindent 14 }}
+          env:
+            - name: TARGET_REPLICAS
+              value: {{ .Values.replicaCount | int | quote }}
+            - name: STS_NAME
+              value: {{ include "narad.fullname" . | quote }}
+            - name: HEADLESS_SERVICE
+              value: {{ include "narad.headlessServiceName" . | quote }}
+            - name: POD_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: CLUSTER_DOMAIN
+              value: {{ .Values.clusterDomain | quote }}
+            - name: API_PORT
+              value: {{ .Values.service.ports.api | quote }}
+            - name: SERVICE_HOST
+              value: {{ ternary (printf "%s.%s.svc.%s" (include "narad.fullname" .) .Release.Namespace .Values.clusterDomain) "" .Values.service.internal.enabled | quote }}
+            - name: SECURITY_ENABLED
+              value: {{ .Values.security.enabled | quote }}
+            - name: ADMIN_PASSWORD_KEY
+              value: {{ .Values.security.adminPasswordKey | quote }}
+            - name: HOME
+              value: /tmp
+            {{- if .Values.security.enabled }}
+            - name: NARAD_USER
+              value: admin
+            - name: NARAD_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ .Values.security.adminPasswordKey }}
+                  optional: true
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Mi
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

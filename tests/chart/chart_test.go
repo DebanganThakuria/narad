@@ -321,6 +321,29 @@ func TestPlaintextRaftIsAcknowledgedOnlyWhenFenced(t *testing.T) {
 	}
 }
 
+// helm upgrade --reuse-values renders with the previous chart's values,
+// where every key this chart added is missing and the old defaults are
+// set. Setting a key to null drops it the same way. The render must
+// still work and fall back to this chart's defaults.
+func TestChartRendersWithValuesFromAnOlderRelease(t *testing.T) {
+	docs := render(t,
+		"--set", "networkPolicy=null",
+		"--set", "scaleInGuard=null",
+		"--set", "allowScaleInTo=null",
+		// The older chart's defaults, carried by --reuse-values.
+		"--set", "security.allowPlaintextRaft=true",
+		"--set", "allowScaleIn=false")
+	if n := len(ofKind(docs, "NetworkPolicy")); n != 0 {
+		t.Errorf("rendered %d NetworkPolicies without the networkPolicy key, want none", n)
+	}
+	if n := len(ofKind(docs, "Job")); n != 1 {
+		t.Errorf("rendered %d scale-in guard Jobs without the scaleInGuard key, want 1 (on by default)", n)
+	}
+	if env := statefulSetEnv(t, docs); env["NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT"] != "true" {
+		t.Error("the stored allowPlaintextRaft: true no longer renders the acknowledgement")
+	}
+}
+
 func TestChartPassesHelmLint(t *testing.T) {
 	helm := helmBinary(t)
 	for _, args := range [][]string{

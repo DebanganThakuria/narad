@@ -81,6 +81,25 @@ With none of the three, the install fails and names them. The policy is
 useful with Raft TLS too: it keeps the node RPC plane to the release's
 pods.
 
+## Scaling in
+
+Lowering `replicaCount`, or rolling back to a revision with fewer
+replicas, deletes the highest-numbered pods. Decommission each first
+(`narad cluster decommission <pod>`, then wait until `narad cluster
+members` no longer lists it), then upgrade with
+`--set replicaCount=<N> --set allowScaleInTo=<N>`. `allowScaleInTo`
+approves that one size only; the old `allowScaleIn` is no longer read.
+
+A pre-upgrade and pre-rollback hook Job (`scaleInGuard.enabled`, on by
+default) also checks the cluster: it refuses an upgrade or a
+`helm rollback` that would delete a pod still listed as a member. An
+upgrade that deletes no pod passes without calling the API. On a
+scale-in it signs in as `admin` with the `admin-password` key of the
+security Secret, which must hold the root password; without it, it
+refuses and says so. After checking by hand, `--no-hooks` skips it for
+one command. A rollback to a revision rendered by an older chart runs no
+guard.
+
 ## Metrics
 
 The chart annotates pods with the standard prometheus.io convention:
