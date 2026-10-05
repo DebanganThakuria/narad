@@ -180,8 +180,8 @@ func TestDeadMarkingRefusesAVerdictThatLeavesNoVoterMajority(t *testing.T) {
 	if len(refusals) != 1 {
 		t.Fatalf("refusal logged %d times at error over 3 passes, want once:\n%s", len(refusals), logs)
 	}
-	if !strings.Contains(refusals[0], "b") || !strings.Contains(refusals[0], "c") {
-		t.Fatalf("refusal line does not name the refused voters: %s", refusals[0])
+	if !strings.Contains(refusals[0], `refused="[b c]"`) {
+		t.Fatalf("refusal line does not name the refused voters b and c: %s", refusals[0])
 	}
 
 	// The voters heartbeat again: the next pass is normal and clears it.
@@ -236,6 +236,12 @@ func TestControllerLogsLeadershipAndMemberTransitions(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	stop := c.startLeaderLoop(ctx)
 	waitFor(t, func() bool { return len(logs.lines("leadership gained")) == 1 })
+	// The loop's own first pass runs on its goroutine. Stop the loop and
+	// wait for it to end before driving passes directly, so no pass of
+	// the loop can judge e alongside them.
+	stop()
+	cancel()
+	waitFor(t, func() bool { return len(logs.lines("leader loop stopped")) == 1 })
 
 	// Past the grace, a pass marks e dead; e then comes back.
 	clk.advance(31 * time.Second)
@@ -257,10 +263,6 @@ func TestControllerLogsLeadershipAndMemberTransitions(t *testing.T) {
 	if len(logs.lines("member alive again", "member=e")) != 1 {
 		t.Fatalf("no line for e alive again:\n%s", logs)
 	}
-
-	stop()
-	cancel()
-	waitFor(t, func() bool { return len(logs.lines("leader loop stopped")) == 1 })
 }
 
 // waitFor polls cond for up to 5 s.
