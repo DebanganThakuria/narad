@@ -27,6 +27,10 @@ func (e PurgeError) Unwrap() error {
 // partition logs (each does a final flush), drops in-flight
 // reservations, removes the on-disk directory, and wipes the
 // metastore record + offsets + schemas. Irreversible.
+//
+// The request identity must manage the topic as it stands under the
+// name lock (audit H1): a delete authorized at the ingress against one
+// topic is refused if the name now holds someone else's.
 func (m *Manager) DeleteTopic(ctx context.Context, name string) error {
 	if name == "" {
 		return fmt.Errorf("%w: name required", ErrInvalid)
@@ -39,6 +43,9 @@ func (m *Manager) DeleteTopic(ctx context.Context, name string) error {
 
 	t, err := m.GetTopic(ctx, name)
 	if err != nil {
+		return err
+	}
+	if err := authorizeManage(ctx, t); err != nil {
 		return err
 	}
 

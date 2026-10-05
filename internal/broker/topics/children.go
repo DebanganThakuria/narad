@@ -2,7 +2,8 @@ package topics
 
 // Fan-out attach/detach. The invariants live in the metastore FSM,
 // where both topic records are mutated in one transaction; this layer
-// adds name validation and friendly not-found errors.
+// adds name validation, friendly not-found errors, and the leader's
+// ownership re-check (audit H1) under both names' locks.
 
 import (
 	"context"
@@ -20,6 +21,11 @@ import (
 // parent's is rejected (errs.ErrFanoutSchemaMismatch). A positive
 // delayMs makes the child a delay child; the delay is immutable while
 // attached (detach and re-attach to change it).
+//
+// The request identity must manage BOTH topics as they stand under
+// their name locks: an attach rewrites the child's schema history and
+// pumps every parent record into it, so neither owner alone may link
+// the other's topic.
 func (m *Manager) AttachChild(ctx context.Context, parent, child string, delayMs int64) error {
 	if err := validateTopicName(parent); err != nil {
 		return err
@@ -40,13 +46,23 @@ func (m *Manager) AttachChild(ctx context.Context, parent, child string, delayMs
 		return fmt.Errorf("%w: delay_ms (%d) exceeds the maximum of %d (1 year)",
 			ErrInvalid, delayMs, topic.MaxFanoutDelayMs)
 	}
+	unlock := m.lockTopicNames(parent, child)
+	defer unlock()
 	if err := m.leaderBarrier(ctx); err != nil {
 		return err
 	}
-	if err := m.checkTopicExists(ctx, parent); err != nil {
+	p, err := m.getExistingTopic(ctx, parent)
+	if err != nil {
 		return err
 	}
-	if err := m.checkTopicExists(ctx, child); err != nil {
+	c, err := m.getExistingTopic(ctx, child)
+	if err != nil {
+		return err
+	}
+	if err := authorizeManage(ctx, p); err != nil {
+		return err
+	}
+	if err := authorizeManage(ctx, c); err != nil {
 		return err
 	}
 	if err := m.metastore.AttachChild(ctx, parent, child, delayMs); err != nil {
@@ -61,6 +77,8 @@ func (m *Manager) AttachChild(ctx context.Context, parent, child string, delayMs
 
 // DetachChild unlinks child from parent. The child keeps everything it
 // already received (data and schema) and becomes standalone again.
+// Either side's owner (or an admin) may detach, checked under both
+// names' locks against the topics as they stand.
 func (m *Manager) DetachChild(ctx context.Context, parent, child string) error {
 	if err := validateTopicName(parent); err != nil {
 		return err
@@ -68,7 +86,25 @@ func (m *Manager) DetachChild(ctx context.Context, parent, child string) error {
 	if err := validateTopicName(child); err != nil {
 		return err
 	}
+	unlock := m.lockTopicNames(parent, child)
+	defer unlock()
 	if err := m.leaderBarrier(ctx); err != nil {
+		return err
+	}
+	var sides []topic.Topic
+	for _, name := range []string{parent, child} {
+		t, err := m.getExistingTopic(ctx, name)
+		switch {
+		case err == nil:
+			sides = append(sides, t)
+		case !errors.Is(err, ErrNotFound):
+			return err
+		}
+	}
+	if len(sides) == 0 {
+		return fmt.Errorf("%w: neither %q nor %q exists", ErrNotFound, parent, child)
+	}
+	if err := authorizeManageAny(ctx, sides...); err != nil {
 		return err
 	}
 	if err := m.metastore.DetachChild(ctx, parent, child); err != nil {
@@ -81,14 +117,15 @@ func (m *Manager) DetachChild(ctx context.Context, parent, child string) error {
 	return nil
 }
 
-// checkTopicExists produces a not-found error that names the topic,
-// which the raced-through FSM check cannot.
-func (m *Manager) checkTopicExists(ctx context.Context, name string) error {
-	if _, err := m.GetTopic(ctx, name); err != nil {
+// getExistingTopic reads the topic, with a not-found error that names
+// it, which the raced-through FSM check cannot.
+func (m *Manager) getExistingTopic(ctx context.Context, name string) (topic.Topic, error) {
+	t, err := m.GetTopic(ctx, name)
+	if err != nil {
 		if errors.Is(err, ErrNotFound) || errors.Is(err, errs.ErrNotFound) {
-			return fmt.Errorf("%w: %q", ErrNotFound, name)
+			return topic.Topic{}, fmt.Errorf("%w: %q", ErrNotFound, name)
 		}
-		return err
+		return topic.Topic{}, err
 	}
-	return nil
+	return t, nil
 }

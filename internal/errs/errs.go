@@ -129,3 +129,11 @@ var (
 	// not own the requested partition.
 	ErrNotPartitionOwner = errors.New("this node does not own the requested partition")
 )
+
+// Authorization.
+var (
+	// ErrForbidden reports a request the caller's identity may not make:
+	// the Raft leader's re-check of topic ownership refused it. It maps
+	// to 403 and is never worth retrying unchanged.
+	ErrForbidden = errors.New("forbidden")
+)

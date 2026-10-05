@@ -20,6 +20,7 @@ package topics
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 
@@ -165,6 +166,37 @@ func (m *Manager) lockTopicName(name string) (unlock func()) {
 // folded.
 func topicLockKey(name string) string {
 	return strings.ToLower(name)
+}
+
+// lockTopicNames takes the name locks of every distinct non-empty name,
+// in the order of their lock keys, so two mutations that lock the same
+// pair (an attach and a create-as-child under the same parent, say)
+// cannot deadlock, and names that share a lock key are locked once. It
+// returns one unlock for all of them.
+func (m *Manager) lockTopicNames(names ...string) (unlock func()) {
+	byKey := make(map[string]string, len(names))
+	keys := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		key := topicLockKey(name)
+		if _, ok := byKey[key]; ok {
+			continue
+		}
+		byKey[key] = name
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	unlocks := make([]func(), 0, len(keys))
+	for _, key := range keys {
+		unlocks = append(unlocks, m.lockTopicName(byKey[key]))
+	}
+	return func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
+	}
 }
 
 // leaderBarrierer is the metastore capability behind the once-per-term

@@ -657,6 +657,8 @@ func (s *RPCServer) brokerError(op string, err error) nodewire.Response {
 // a reply that carries several outcomes in one body (see handleAckBatch).
 func (s *RPCServer) brokerErrorStatus(op string, err error) (int, string) {
 	switch {
+	case errors.Is(err, errs.ErrForbidden):
+		return http.StatusForbidden, err.Error()
 	case errors.Is(err, errs.ErrTopicNotFound):
 		return http.StatusNotFound, "topic not found"
 	case errors.Is(err, errs.ErrTopicAlreadyExists):

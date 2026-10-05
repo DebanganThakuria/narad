@@ -62,6 +62,9 @@ func (m *Manager) IncreaseTopicPartitions(ctx context.Context, name string, newP
 	if err != nil {
 		return topic.Topic{}, err
 	}
+	if err := authorizeManage(ctx, current); err != nil {
+		return topic.Topic{}, err
+	}
 	if newPartitions <= current.Partitions {
 		return topic.Topic{}, fmt.Errorf("%w: new partition count (%d) must be greater than current (%d); decrease is not supported",
 			ErrInvalid, newPartitions, current.Partitions)
@@ -117,6 +120,9 @@ func (m *Manager) UpdateTopicRetention(ctx context.Context, name string, retenti
 	if err != nil {
 		return topic.Topic{}, err
 	}
+	if err := authorizeManage(ctx, current); err != nil {
+		return topic.Topic{}, err
+	}
 
 	updated := current
 	updated.RetentionMs = retentionMs
@@ -168,6 +174,9 @@ func (m *Manager) UpdateTopicCaps(ctx context.Context, name string, maxInFlight,
 
 	current, err := m.GetTopic(ctx, name)
 	if err != nil {
+		return topic.Topic{}, err
+	}
+	if err := authorizeManage(ctx, current); err != nil {
 		return topic.Topic{}, err
 	}
 
@@ -241,6 +250,9 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 
 	t, err := m.GetTopic(ctx, name)
 	if err != nil {
+		return topic.Topic{}, err
+	}
+	if err := authorizeManage(ctx, t); err != nil {
 		return topic.Topic{}, err
 	}
 	if t.IsChild() {

@@ -110,9 +110,14 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	if err := m.waitCreateGate(ctx); err != nil {
 		return topic.Topic{}, err
 	}
-	unlock := m.lockTopicName(opts.Name)
+	// A create-as-child also locks the parent, so the parent read and
+	// checked below is the one the child is linked to.
+	unlock := m.lockTopicNames(opts.Name, opts.Parent)
 	defer unlock()
 	if err := m.leaderBarrier(ctx); err != nil {
+		return topic.Topic{}, err
+	}
+	if err := authorizeCreate(ctx, opts.Name); err != nil {
 		return topic.Topic{}, err
 	}
 	if err := m.checkNameFold(ctx, opts.Name); err != nil {
@@ -218,11 +223,12 @@ func validateCreateAsChild(opts CreateOpts) error {
 	return nil
 }
 
-// resolveCreateAsChild reads the parent of a create-as-child and
-// defaults Partitions to its count: matching counts make the
-// anti-affine per-key guarantee exact. It runs under the lock, after the
-// leader barrier, and before anything is written, so every failure is a
-// clean 4xx.
+// resolveCreateAsChild reads the parent of a create-as-child, checks
+// that the request identity manages it (a child receives every record
+// of its parent, audit H1), and defaults Partitions to its count:
+// matching counts make the anti-affine per-key guarantee exact. It runs
+// under both names' locks, after the leader barrier, and before
+// anything is written, so every failure is a clean 4xx.
 func (m *Manager) resolveCreateAsChild(ctx context.Context, opts *CreateOpts) error {
 	if opts.Parent == "" {
 		return nil
@@ -232,6 +238,9 @@ func (m *Manager) resolveCreateAsChild(ctx context.Context, opts *CreateOpts) er
 		if errors.Is(err, ErrNotFound) || errors.Is(err, errs.ErrNotFound) {
 			return fmt.Errorf("%w: parent topic %q", ErrNotFound, opts.Parent)
 		}
+		return err
+	}
+	if err := authorizeManage(ctx, parent); err != nil {
 		return err
 	}
 	if opts.Partitions == 0 {

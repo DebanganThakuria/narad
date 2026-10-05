@@ -148,6 +148,9 @@ func (s *Set) logServerError(status int, msg string, attrs ...slog.Attr) {
 // genuinely stuck and the client should back off.
 func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 	switch {
+	case errors.Is(err, errs.ErrForbidden):
+		// The leader's ownership re-check refused the caller.
+		s.WriteError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, errs.ErrTopicNotFound):
 		s.WriteError(w, http.StatusNotFound, "topic not found")
 	case errors.Is(err, errs.ErrTopicAlreadyExists):
