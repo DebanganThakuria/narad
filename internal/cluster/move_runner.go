@@ -623,7 +623,6 @@ func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResu
 	// under the path. So the install's swap and the rollback act only
 	// while the topic marker still names expectID (see install).
 	var expectID string
-	//
 	// EnsureTopicIncarnation re-reads the local record under the topic's
 	// guard and refuses when it no longer carries rec.ID (the name was
 	// deleted and recreated since the read above): preparing for the
