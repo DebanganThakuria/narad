@@ -207,6 +207,23 @@ The due lag of a delay child climbs or stays flat above 0 instead of returning t
 
 **Fix.** Bring the child partition's owner back, or fix what the log's `err` names. The cursor resumes where it stopped. How cursors behave: [Fan-out engine](../understand/fanout-engine.md).
 
+### `narad_raft_nonvoters` stays above 0 {#nonvoters-stay}
+
+`narad_raft_nonvoters` stays above 0 for more than a minute after a scale-out or a readmission.
+
+**Cause.** A node joined as a Raft non-voter and has not been promoted to voter ([how promotion works](../understand/cluster-lifecycle.md#join-promotion)). It still replicates and serves traffic; it only does not vote. Either it never asked again (it runs 3.0.x, or its replica has not caught up with the leader), or the leader defers it. A node decommissioned while a 3.0.x node led can also be left behind as a non-voter: that release removes only voters.
+
+**Check.** The log of each pod that joined after the initial members. A deferred node logs `cluster join: caught up as a raft non-voter; the leader defers promotion` at info, with the leader's `reason`, whenever the reason changes. A node that logs nothing of the kind is on an older release or still catching up (its `/readyz` says which).
+
+**Fix.** By `reason`:
+
+- `the leader has led for less than 12s`: nothing; the leader promotes it once it has led that long.
+- `the leader's raft heartbeats to it are failing`: the leader cannot reach the node's Raft address. Check its `NARAD_CLUSTER_ADVERTISE_ADDR`, the network between them (7943/tcp), and the [Raft certificate](#raft-cert-untrusted).
+- `it has no member record yet`, or `its member record is marked dead`: the node is not heartbeating its membership to the leader. Check its log for `member heartbeat failed` (debug level) and the node-RPC port (7942/udp).
+- `it is draining`: the node is being decommissioned, and decommission removes it from Raft once it owns nothing. Cancel the decommission to keep it.
+
+A node on 3.0.x asks for promotion once it runs this release and restarts. A non-voter left behind by a decommission under a 3.0.x leader carries no quorum weight, but the leader keeps sending it heartbeats, and it has no member record, so the decommission cannot simply be run again. To remove it, start its pod with an empty volume (delete its PersistentVolumeClaim first): it is readmitted under its ID, and a decommission run while every node is on this release then takes it out of Raft.
+
 ## Log lines
 
 ### `storage: fsync failed; log poisoned until reopened` {#log-fsync-poisoned}
@@ -259,7 +276,7 @@ Logged at warning level at start, with `reason` and `stale`.
 
 Logged at warning level after a node has had no Raft leader for 15 seconds.
 
-**Cause.** The node lost its leader: its peers are down, the network between them is cut, or the node was removed from the voters. It now asks its peers to admit it again every 2 seconds.
+**Cause.** The node lost its leader: its peers are down, the network between them is cut, or the node was removed from Raft. It now asks its peers to admit it again every 2 seconds. The line reads `raft non-voter has had no leader for a while; running the cluster join loop` on a node that had joined and was not yet promoted.
 
 **Check.** `/readyz` on every pod, and whether the node was decommissioned (`narad cluster members`).
 
@@ -275,11 +292,11 @@ The full line is `cluster join refused: this node was decommissioned and removed
 
 ### `cluster join rejected` {#log-join-rejected-status}
 
-Logged at warning level with `peer` and `status`.
+Logged at warning level with `via` (the address that answered) and `status`.
 
-**Cause.** The leader could not admit the node. A `503` status means the leader failed to read the membership or to add the node to Raft. A `400` status means the leader could not read the request, or it lacked the node's ID or Raft address.
+**Cause.** The leader could not admit the node. A `503` status means the leader failed to read the membership or to change the Raft configuration (it may have lost leadership meanwhile). A `400` status means the leader could not read the request, or it lacked the node's ID or Raft address.
 
-**Fix.** For `503`, the node retries every 2 seconds; check the leader's log for `join cluster: add voter` or `join cluster: readmit member`. For `400`, compare the node's `NARAD_NODE_ID` and `NARAD_CLUSTER_ADVERTISE_ADDR` with a working node's.
+**Fix.** For `503`, the node retries every 2 seconds; check the leader's log for `join cluster: admission failed` or `join cluster: readmit member`. For `400`, compare the node's `NARAD_NODE_ID` and `NARAD_CLUSTER_ADVERTISE_ADDR` with a working node's.
 
 ### `cluster stream rejected: invalid auth` {#log-stream-invalid-auth}
 
@@ -297,7 +314,7 @@ The full line is `raft configuration records this node at an address other than 
 
 **Cause.** The address a node's Raft first starts on is recorded in the Raft configuration: at bootstrap on the node that seeds the cluster, by the leader when a node joins. The other nodes dial that recorded address. Restarting the node on a new `cluster.addr` or `cluster.advertise_addr` changes where it listens and what it advertises, not the recorded address. The usual case is a node first started alone on a loopback `cluster.addr` such as `127.0.0.1:7943`, then rebound to an address the others can reach so it could take peers. If nodes join it, then once it is not the leader they cannot reach its Raft: it stays leaderless and not ready, and a node whose `cluster.addr` is port-only (`:7943`) that dials the loopback address reaches its own Raft and steps down, so metadata writes can stall across the cluster. With `other_servers=0`, no other node is in the configuration yet, so nothing has gone wrong yet.
 
-**Fix.** If `recorded_addr` is another way of writing an address that reaches this node, nothing. If it is an address the other nodes can reach, restart the node on it. A node first started on a loopback address cannot be fixed by rebinding, because no other node can reach a loopback address: do not let any node join it, and to grow it, start a new cluster whose first node starts on an address the others can reach and move the workload to it (recreate topics, users and grants there, point producers at it, and retire this node once its consumers have drained it). If nodes have already joined it, move the workload the same way while it is still the Raft leader. A node with `cluster.peers` set re-registers the address it advertises: about 15 s after it finds no leader it runs the [join loop](../understand/cluster-lifecycle.md), and the leader's `AddVoter` updates its recorded address, so for such a node (one re-addressed host of a cluster, say) the line clears once the leader can reach the new address. Only a node with no peers configured keeps its recorded address for good.
+**Fix.** If `recorded_addr` is another way of writing an address that reaches this node, nothing. If it is an address the other nodes can reach, restart the node on it. A node first started on a loopback address cannot be fixed by rebinding, because no other node can reach a loopback address: do not let any node join it, and to grow it, start a new cluster whose first node starts on an address the others can reach and move the workload to it (recreate topics, users and grants there, point producers at it, and retire this node once its consumers have drained it). If nodes have already joined it, move the workload the same way while it is still the Raft leader. A node with `cluster.peers` set re-registers the address it advertises: about 15 s after it finds no leader it runs the [join loop](../understand/cluster-lifecycle.md), and the leader updates its recorded address, so for such a node (one re-addressed host of a cluster, say) the line clears once the leader can reach the new address. Only a node with no peers configured keeps its recorded address for good.
 
 ### `node RPC plane is unauthenticated` {#log-node-rpc-unauthenticated}
 
