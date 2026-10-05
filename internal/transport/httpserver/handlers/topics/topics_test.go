@@ -51,6 +51,18 @@ type fakeRouter struct {
 	routeGetTopicFn        func(context.Context, *http.Request, string, topic.Details) (topic.Details, error)
 	routeAttachChildFn     func(context.Context, http.ResponseWriter, *http.Request, string, string, int64) bool
 	routeDetachChildFn     func(context.Context, http.ResponseWriter, *http.Request, string, string) bool
+	syncWithLeaderFn       func(context.Context) error
+	syncs                  int
+}
+
+// SyncWithLeader stands in for the router's catch-up with the leader;
+// nil syncWithLeaderFn succeeds.
+func (f *fakeRouter) SyncWithLeader(ctx context.Context) error {
+	f.syncs++
+	if f.syncWithLeaderFn == nil {
+		return nil
+	}
+	return f.syncWithLeaderFn(ctx)
 }
 
 func (f *fakeRouter) RouteProduce(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool {

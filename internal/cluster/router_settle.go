@@ -2,9 +2,11 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/errs"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
@@ -53,4 +55,45 @@ func (rt *Router) writeForwardedWrite(ctx context.Context, w http.ResponseWriter
 	rt.settleForwardedWrite(ctx, memberAddr, res)
 	writePeerResponse(w, res)
 	return true
+}
+
+// SyncWithLeader returns once this node's replica has applied everything
+// the leader had applied when asked, so a read that follows reflects
+// every write the leader had finished. The HTTP ingress calls it before
+// answering 404 for a topic its replica does not have (the topic may
+// have just been created through another node): a topic still missing
+// after it is missing on the leader too.
+//
+// On the leader it is the once-per-term leader barrier. Elsewhere it is
+// the applied-index probe forwarded writes already use (every release
+// since 2.2.0 answers it), bounded by forwardSettleTimeout. A leader that
+// is unknown, unreachable, or not caught up within the bound is an error
+// wrapping errs.ErrUnavailable (503: retry), never a silent pass.
+func (rt *Router) SyncWithLeader(ctx context.Context) error {
+	if rt.store == nil {
+		return nil
+	}
+	if rt.store.IsLeader() {
+		return rt.store.LeaderBarrier(ctx)
+	}
+	memberAddr := rt.leaderMemberAddr()
+	if memberAddr == "" {
+		return fmt.Errorf("%w: no reachable leader to confirm the topic with", errs.ErrUnavailable)
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, forwardSettleTimeout)
+	defer cancel()
+	index, err := rt.peer.AppliedIndex(syncCtx, memberAddr)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("%w: ask the leader for its applied index: %v", errs.ErrUnavailable, err)
+	}
+	if err := rt.store.WaitApplied(syncCtx, index); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("%w: catch up with the leader: %v", errs.ErrUnavailable, err)
+	}
+	return nil
 }
