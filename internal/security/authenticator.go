@@ -9,7 +9,10 @@
 //	positive cache hit         -> allow (ns; version-validated)
 //	negative cache hit         -> instant 401 (same wrong password again)
 //	token bucket empty         -> instant 429 (brute-force throttle)
-//	singleflight -> bcrypt     -> the only slow box (~100ms)
+//	node failure budget empty  -> instant 429 (only for a username with
+//	                              recent failures; see admit)
+//	singleflight -> bcrypt     -> the only slow box (~100ms), behind a
+//	                              gate that runs clean usernames first
 //
 // Cache entries are keyed by the metastore's users domain version. On a
 // version bump the user record is re-read (local bbolt, microseconds)
@@ -29,6 +32,7 @@ import (
 	"hash"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -70,9 +74,30 @@ const (
 	// negativeCapPerUser bounds remembered wrong credentials per user.
 	negativeCapPerUser = 16
 
-	// maxConcurrentVerify caps in-flight bcrypt runs process-wide; a
-	// backstop so no request mix can pin every core on hashing.
+	// maxConcurrentVerify caps in-flight bcrypt verifications (logins)
+	// process-wide; a backstop so no request mix can pin every core on
+	// hashing.
 	maxConcurrentVerify = 4
+	// maxConcurrentHash caps HashPassword and ComparePassword (user
+	// create, password change) on their own, so a failed-login flood
+	// filling the verification slots cannot delay them, and a loop of
+	// password changes cannot delay logins.
+	maxConcurrentHash = 2
+
+	// failBudgetBurst and failBudgetRefillEvery shape the node-wide
+	// failed-verification budget. An attempt for a username that already
+	// has failures outstanding (its bucket is below capacity) must also
+	// take a token here, given back if the password turns out right, and
+	// a failed clean attempt spends one when one is left. Without it the
+	// per-username bucket let an attacker who knew N usernames queue 5N
+	// bcrypt runs; with it a flood gets one attempt per username it has
+	// not tried yet plus this shared budget, and every further guess is
+	// an instant 429.
+	failBudgetBurst       = 32
+	failBudgetRefillEvery = 250 * time.Millisecond
+	// failBudgetLogEvery rate-limits the node-wide "budget exhausted"
+	// audit line.
+	failBudgetLogEvery = 10 * time.Second
 
 	// maxCachedUsers bounds the per-node verification cache so a large or
 	// churning real-account population cannot grow it without limit.
@@ -95,11 +120,24 @@ type Authenticator struct {
 	// allocation on an authenticated request.
 	macPool sync.Pool
 
-	group     singleflight.Group
-	verifySem chan struct{}
+	group singleflight.Group
+	// verifyGate bounds bcrypt verification and runs attempts for
+	// usernames with no failures outstanding ahead of the rest; hashSem
+	// bounds HashPassword and ComparePassword on their own.
+	verifyGate *verifyGate
+	hashSem    chan struct{}
+	// queued counts admitted verifications whose bcrypt has not
+	// finished, waiting or running (narad_auth_verify_queued).
+	queued atomic.Int64
 
 	mu    sync.RWMutex
 	users map[string]*userEntry
+	// failTokens and failRefill are the node-wide failed-verification
+	// budget (see failBudgetBurst); failLogAt rate-limits its audit
+	// line. Guarded by mu.
+	failTokens float64
+	failRefill time.Time
+	failLogAt  time.Time
 }
 
 // userEntry is the per-username cache: one verified credential, the
@@ -151,12 +189,14 @@ func New(store UserStore, logger *slog.Logger) *Authenticator {
 		panic("security: crypto/rand unavailable: " + err.Error())
 	}
 	a := &Authenticator{
-		store:     store,
-		logger:    logger,
-		now:       time.Now,
-		credKey:   key,
-		verifySem: make(chan struct{}, maxConcurrentVerify),
-		users:     make(map[string]*userEntry),
+		store:      store,
+		logger:     logger,
+		now:        time.Now,
+		credKey:    key,
+		verifyGate: newVerifyGate(maxConcurrentVerify),
+		hashSem:    make(chan struct{}, maxConcurrentHash),
+		users:      make(map[string]*userEntry),
+		failTokens: failBudgetBurst,
 	}
 	a.macPool.New = func() any {
 		return &credMAC{mac: hmac.New(sha256.New, a.credKey)}
@@ -354,11 +394,11 @@ func identityOf(rec user.User) *user.User {
 
 // runBcrypt performs the slow comparison, deduplicating concurrent
 // identical attempts (singleflight) and bounding process-wide
-// concurrency (semaphore). The throttle token is consumed by the
+// concurrency (verifyGate). The throttle tokens are consumed by the
 // singleflight LEADER only, so a reconnect herd presenting one shared
-// credential costs one token, not one per connection — and it is
+// credential costs one token, not one per connection, and they are
 // refunded when the credential turns out to be correct, so only failed
-// verifications drain the budget.
+// verifications drain the budgets (see admit).
 //
 // The shared call belongs to no single caller: it waits for its bcrypt
 // slot under a context detached from the leader's cancellation, and
@@ -367,7 +407,9 @@ func identityOf(rec user.User) *user.User {
 // failed every follower with context.Canceled (a 499) although their
 // clients were still connected. A caller that gives up returns at once
 // and the call finishes for the rest, so its throttle accounting is
-// never cut short either.
+// never cut short either. What bounds that detached work is admission:
+// the per-username bucket and the node-wide failure budget decide how
+// much of it is queued in the first place.
 func (a *Authenticator) runBcrypt(ctx context.Context, username string, cred [32]byte, storedHash []byte, password string) (bool, error) {
 	// The key names the hash the call compares against: a caller that
 	// read a changed password record must not join a call still checking
@@ -376,18 +418,23 @@ func (a *Authenticator) runBcrypt(ctx context.Context, username string, cred [32
 	key := username + "\x00" + string(cred[:]) + "\x00" + string(storedHash)
 	shared := context.WithoutCancel(ctx)
 	ch := a.group.DoChan(key, func() (any, error) {
-		if !a.takeTokenFor(username) {
+		suspect, admitted := a.admit(username)
+		if !admitted {
 			return false, ErrThrottled
 		}
-		release, err := a.acquireBcrypt(shared)
-		if err != nil {
-			a.adjustTokens(username, +1) // not verified; give it back
+		a.queued.Add(1)
+		defer a.queued.Add(-1)
+		if err := a.verifyGate.acquire(shared, suspect); err != nil {
+			a.refund(username, suspect) // not verified; give it back
 			return false, err
 		}
-		defer release()
+		defer a.verifyGate.release()
 		ok := bcrypt.CompareHashAndPassword(storedHash, []byte(password)) == nil
-		if ok {
-			a.adjustTokens(username, +1)
+		switch {
+		case ok:
+			a.refund(username, suspect)
+		case !suspect:
+			a.chargeCleanFailure()
 		}
 		return ok, nil
 	})
@@ -402,24 +449,26 @@ func (a *Authenticator) runBcrypt(ctx context.Context, username string, cred [32
 	}
 }
 
-// acquireBcrypt takes one of the maxConcurrentVerify bcrypt slots,
-// returning the release func, or ctx's error if it is done first.
-func (a *Authenticator) acquireBcrypt(ctx context.Context) (func(), error) {
+// acquireHash takes one of the maxConcurrentHash slots for
+// HashPassword and ComparePassword, returning the release func, or
+// ctx's error if it is done first.
+func (a *Authenticator) acquireHash(ctx context.Context) (func(), error) {
 	select {
-	case a.verifySem <- struct{}{}:
-		return func() { <-a.verifySem }, nil
+	case a.hashSem <- struct{}{}:
+		return func() { <-a.hashSem }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
-// HashPassword bcrypt-hashes a new password for storage under the same
-// process-wide concurrency bound as Verify. User create and password
-// reset run bcrypt at full cost per request; without the bound an
-// authenticated caller looping on password changes could pin every
-// core, starving the verification path (and everything else).
+// HashPassword bcrypt-hashes a new password for storage under its own
+// process-wide concurrency bound, separate from login verification.
+// User create and password reset run bcrypt at full cost per request;
+// without the bound an authenticated caller looping on password changes
+// could pin every core, and sharing the verification slots let a
+// failed-login flood delay every user create and password change.
 func (a *Authenticator) HashPassword(ctx context.Context, password string) ([]byte, error) {
-	release, err := a.acquireBcrypt(ctx)
+	release, err := a.acquireHash(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -428,13 +477,13 @@ func (a *Authenticator) HashPassword(ctx context.Context, password string) ([]by
 }
 
 // ComparePassword checks a presented password against a stored hash
-// under the bcrypt concurrency bound. It bypasses the credential cache
+// under the same bound as HashPassword. It bypasses the credential cache
 // and the throttle on purpose: it serves the self-service "prove your
 // current password" step, which is already authenticated and must not
 // spend the caller's login budget or poison the negative cache. A nil
 // error means the password matches.
 func (a *Authenticator) ComparePassword(ctx context.Context, hash []byte, password string) error {
-	release, err := a.acquireBcrypt(ctx)
+	release, err := a.acquireHash(ctx)
 	if err != nil {
 		return err
 	}
@@ -442,23 +491,83 @@ func (a *Authenticator) ComparePassword(ctx context.Context, hash []byte, passwo
 	return bcrypt.CompareHashAndPassword(hash, []byte(password))
 }
 
-// takeTokenFor consumes one throttle token for username if available.
-func (a *Authenticator) takeTokenFor(username string) bool {
+// admit consumes the throttle tokens one bcrypt attempt for username
+// costs, or reports that it is throttled. Every attempt takes a token
+// from the username's bucket. An attempt for a username whose bucket is
+// already below capacity (failures, or attempts still running, in the
+// last minute) is "suspect": it must also take a token from the
+// node-wide failure budget, and it waits in the lower-priority lane of
+// the verification gate. A username with a full bucket is "clean": an
+// honest cold login always is, and it goes ahead of every suspect
+// attempt queued.
+func (a *Authenticator) admit(username string) (suspect, ok bool) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	e := a.users[username]
 	if e == nil {
-		return false
+		a.mu.Unlock()
+		return false, false
 	}
-	return e.takeToken(a.now())
+	now := a.now()
+	e.refill(now)
+	if e.tokens < 1 {
+		a.mu.Unlock()
+		return false, false
+	}
+	suspect = e.tokens < bucketCapacity
+	if suspect {
+		a.refillFailBudgetLocked(now)
+		if a.failTokens < 1 {
+			logIt := a.failLogAt.IsZero() || now.Sub(a.failLogAt) >= failBudgetLogEvery
+			if logIt {
+				a.failLogAt = now
+			}
+			a.mu.Unlock()
+			if logIt {
+				a.logger.Warn("authentication failure budget exhausted: repeated attempts for usernames with recent failures are refused node-wide until it refills",
+					"component", "audit", "burst", failBudgetBurst, "refill_every", failBudgetRefillEvery.String())
+			}
+			return true, false
+		}
+		a.failTokens--
+	}
+	e.tokens--
+	a.mu.Unlock()
+	return suspect, true
 }
 
-// adjustTokens credits tokens back (successful or aborted attempts).
-func (a *Authenticator) adjustTokens(username string, delta float64) {
+// refund gives back what admit took for an attempt that verified (or
+// never ran).
+func (a *Authenticator) refund(username string, suspect bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if e := a.users[username]; e != nil {
-		e.tokens = min(bucketCapacity, e.tokens+delta)
+		e.tokens = min(bucketCapacity, e.tokens+1)
+	}
+	if suspect {
+		a.failTokens = min(failBudgetBurst, a.failTokens+1)
+	}
+}
+
+// chargeCleanFailure spends a failure-budget token, when one is left,
+// for a clean attempt that failed: a spray of first guesses across many
+// usernames is failed verification work too.
+func (a *Authenticator) chargeCleanFailure() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.refillFailBudgetLocked(a.now())
+	a.failTokens = max(0, a.failTokens-1)
+}
+
+// refillFailBudgetLocked credits the failure budget for the time since
+// its last refill. Caller holds a.mu.
+func (a *Authenticator) refillFailBudgetLocked(now time.Time) {
+	if a.failRefill.IsZero() {
+		a.failRefill = now
+		return
+	}
+	if elapsed := now.Sub(a.failRefill); elapsed > 0 {
+		a.failTokens = min(failBudgetBurst, a.failTokens+elapsed.Seconds()/failBudgetRefillEvery.Seconds())
+		a.failRefill = now
 	}
 }
 
@@ -507,19 +616,13 @@ func (a *Authenticator) evictOneUserLocked() {
 	}
 }
 
-// takeToken refills by elapsed time and consumes one token if
-// available. Caller must hold a.mu.
-func (e *userEntry) takeToken(now time.Time) bool {
-	elapsed := now.Sub(e.lastRefill)
-	if elapsed > 0 {
+// refill credits the tokens earned since the last refill. Caller must
+// hold a.mu.
+func (e *userEntry) refill(now time.Time) {
+	if elapsed := now.Sub(e.lastRefill); elapsed > 0 {
 		e.tokens = min(bucketCapacity, e.tokens+elapsed.Seconds()/bucketRefillEvery.Seconds())
 		e.lastRefill = now
 	}
-	if e.tokens < 1 {
-		return false
-	}
-	e.tokens--
-	return true
 }
 
 // evictOldest removes the entry with the earliest timestamp.

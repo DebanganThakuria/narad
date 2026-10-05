@@ -283,7 +283,7 @@ func runServe(args []string) error {
 	// Authentication: seed the root admin (background, leader-gated so
 	// exactly one node wins) and gate the API with Basic auth when
 	// security is enabled.
-	auth := buildAuthenticator(cfg, ms, log)
+	auth := buildAuthenticator(cfg, ms, reg, log)
 	seedRootAdmin(ctx, cfg, ms, log)
 
 	// Finally build the API server. It serves /healthz immediately;

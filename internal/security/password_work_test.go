@@ -11,13 +11,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// HashPassword and ComparePassword must wait for a bcrypt slot like
-// Verify does: with every slot taken they block until one frees or the
-// context ends, so a loop of password changes cannot pin every core.
+// HashPassword and ComparePassword must wait for a bcrypt slot of their
+// own: with every one taken they block until one frees or the context
+// ends, so a loop of password changes cannot pin every core.
 func TestHashAndCompareRunUnderBcryptBound(t *testing.T) {
 	a := New(newFakeStore(), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	for range maxConcurrentVerify {
-		a.verifySem <- struct{}{}
+	for range maxConcurrentHash {
+		a.hashSem <- struct{}{}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -29,7 +29,7 @@ func TestHashAndCompareRunUnderBcryptBound(t *testing.T) {
 		t.Fatalf("ComparePassword with all slots taken: err = %v, want deadline exceeded", err)
 	}
 
-	<-a.verifySem // free one slot
+	<-a.hashSem // free one slot
 	hash, err := a.HashPassword(context.Background(), "pw")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
@@ -45,7 +45,7 @@ func TestHashAndCompareRunUnderBcryptBound(t *testing.T) {
 	}
 	// The slot was released after each call.
 	select {
-	case a.verifySem <- struct{}{}:
+	case a.hashSem <- struct{}{}:
 	default:
 		t.Fatal("bcrypt slot leaked by HashPassword/ComparePassword")
 	}

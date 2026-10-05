@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/debanganthakuria/narad/internal/domain/user"
@@ -54,13 +55,16 @@ func clusterTLSConfig(sec config.SecurityConfig) (*metastore.TLSConfig, error) {
 const rootAdminUsername = "admin"
 
 // buildAuthenticator returns the HTTP authenticator, or nil when
-// security is disabled.
-func buildAuthenticator(cfg *config.Config, ms *metastore.Store, log *slog.Logger) *security.Authenticator {
+// security is disabled. Its metrics (narad_auth_verify_queued) are
+// registered on reg.
+func buildAuthenticator(cfg *config.Config, ms *metastore.Store, reg prometheus.Registerer, log *slog.Logger) *security.Authenticator {
 	if !cfg.Security.Enabled {
 		log.Warn("security disabled: the HTTP API accepts unauthenticated requests")
 		return nil
 	}
-	return security.New(ms, log)
+	auth := security.New(ms, log)
+	reg.MustRegister(auth.Collector())
+	return auth
 }
 
 // seedRootAdmin ensures the root admin user exists once security is
