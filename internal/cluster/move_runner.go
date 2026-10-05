@@ -422,7 +422,10 @@ func (r *MoveRunner) Reconcile(ctx context.Context) {
 // keeps the session's memory of the source's last-known HWM, which is
 // what force-promote needs after the source is gone. An installed copy
 // whose flip was not confirmed is resolved first (resolvePending), on
-// every pass, before anything else is tried. Every exit without a flip
+// every pass, before anything else is tried. A staged copy that fails
+// verification twice in a row, the second time after a fresh copy, ends
+// the attempts: the worker stops freezing the source and waits to be
+// cancelled (copyFailedVerification). Every exit without a flip
 // removes the staging copy (see moveWorker.finish).
 func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition int, source string) {
 	staging := r.stagingDir(topicName, partition)
@@ -439,6 +442,12 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 
 	for {
 		if ctx.Err() != nil || w.exit {
+			return
+		}
+		if w.gaveUp {
+			// Blocked: the source is not frozen again. An abort or a
+			// re-plan cancels the worker; a restart tries afresh.
+			<-ctx.Done()
 			return
 		}
 		if w.pending != nil {
@@ -548,9 +557,15 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, w *moveWorker, sourceAddr 
 	}, r.cfg.FreezeRearmEvery)
 	res, err := sess.Finalize(ctx)
 	if err != nil {
+		var unverified *copyUnverifiedError
+		if errors.As(err, &unverified) {
+			w.copyFailedVerification(err)
+			return false
+		}
 		r.logger.Warn("move: finalize failed; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
+	w.unverified = 0
 	// The fence. The freeze must have held continuously from the final
 	// tail capture to here, or a commit could have landed on the source
 	// behind the copy; the source refuses a lapsed token, and the HWM it
@@ -575,6 +590,28 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, w *moveWorker, sourceAddr 
 		return false
 	}
 	return r.finishMove(ctx, w, res, false, token, sourceAddr)
+}
+
+// copyFailedVerification handles a frozen drain whose staged copy failed
+// verification (err). Against a static source the same copy fails the
+// same way, so freezing the source again to drain it would freeze its
+// partition for produce and consume every RetryBackoff, forever. The
+// first failure throws the staged copy away and copies afresh. A second
+// in a row ends the attempts: the worker logs it once at error and
+// waits to be cancelled without freezing the source again, whose freeze
+// lapses on its TTL. An abort or a re-plan
+// cancels the worker; a restart of this node tries once more.
+func (w *moveWorker) copyFailedVerification(err error) {
+	r := w.r
+	w.unverified++
+	if w.unverified < 2 {
+		w.resetSession("the staged copy failed verification: " + err.Error())
+		return
+	}
+	w.gaveUp = true
+	r.logger.Error("move: staged copy cannot be verified; not freezing the source again",
+		"topic", w.topic, "partition", w.partition, "source", w.source, "attempts", w.unverified,
+		"action", "abort the move, or restart this node to try once more", "err", err)
 }
 
 // rearm re-arms (with a token: extends and fences) the source's handoff

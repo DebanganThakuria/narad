@@ -91,6 +91,13 @@ type moveWorker struct {
 	// its own clock; zero while the source reads alive
 	// (move_source_clock.go).
 	deadSince time.Time
+
+	// unverified counts the frozen drains in a row whose staged copy
+	// failed verification; gaveUp is set once the copy failed it again
+	// after a fresh start, and the worker then waits to be cancelled
+	// without freezing the source again (move_runner.go).
+	unverified int
+	gaveUp     bool
 }
 
 // warnOnce logs a retry at warn level the first time this worker meets
@@ -229,8 +236,8 @@ func holdsRecords(segs []localSegment) bool {
 
 // resetSession throws the staged copy away and starts the next attempt
 // from scratch, carrying what the session knew about the source (see
-// carryFrom). The rollback is the only caller: it could not move the
-// installed copy back to staging.
+// carryFrom): after a rollback that could not move the installed copy
+// back to staging, and after a staged copy failed verification.
 func (w *moveWorker) resetSession(reason string) {
 	r := w.r
 	r.logger.Warn("move: copying the partition again from scratch", "topic", w.topic, "partition", w.partition, "reason", reason)

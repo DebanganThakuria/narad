@@ -402,8 +402,23 @@ func (s *MoveSession) Finalize(ctx context.Context) (CopyResult, error) {
 	if lerr := lapsed(); lerr != nil {
 		return CopyResult{}, lerr
 	}
-	return s.finalizeStaged(last.HighWatermark, last.CommittedOffset, last.HasCommitted, last.AckedAhead, last.Sidecars)
+	res, err := s.finalizeStaged(last.HighWatermark, last.CommittedOffset, last.HasCommitted, last.AckedAhead, last.Sidecars)
+	if err != nil {
+		return CopyResult{}, &copyUnverifiedError{err: err}
+	}
+	return res, nil
 }
+
+// copyUnverifiedError is a Finalize whose drain completed under a freeze
+// that held, and whose staged copy then could not be made into, or did
+// not verify as, the partition at the source's high watermark
+// (finalizeStaged). Against a static source that is deterministic:
+// draining again under a new freeze reproduces it, so the worker copies
+// afresh once and then stops freezing the source (moveWorker.unverified).
+type copyUnverifiedError struct{ err error }
+
+func (e *copyUnverifiedError) Error() string { return e.err.Error() }
+func (e *copyUnverifiedError) Unwrap() error { return e.err }
 
 // ForcePromote completes a move WITHOUT the source: it promotes whatever the
 // destination already copied, reproducing the source's LAST-KNOWN high
