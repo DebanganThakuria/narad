@@ -124,6 +124,34 @@ func TestScaleInGuardRunsBeforeUpgradeAndRollback(t *testing.T) {
 	})
 }
 
+// The guard is a pre-upgrade hook, which Argo CD runs as PreSync on the
+// first sync as well, before its Sync phase creates the ServiceAccount
+// this chart renders. A guard pod naming that account is rejected at
+// admission ("serviceaccount not found"), so the Job never starts and the
+// first sync fails on every retry; plain helm hits the same when an
+// upgrade turns serviceAccount.create on or renames the account. The
+// guard needs no Kubernetes API access, so it runs as the namespace's
+// default account. An account the chart does not create already exists
+// and is still used.
+func TestScaleInGuardDoesNotWaitForTheReleaseServiceAccount(t *testing.T) {
+	for _, args := range [][]string{
+		nil,
+		{"--set", "serviceAccount.name=narad-runner"},
+	} {
+		spec := guardPodSpec(guardJob(t, args...))
+		if got := at(spec, "serviceAccountName"); got != nil {
+			t.Fatalf("with %q the guard pod names ServiceAccount %v, which this release creates only after its pre-upgrade hooks", args, got)
+		}
+		if got := at(spec, "automountServiceAccountToken"); got != "false" {
+			t.Fatalf("with %q automountServiceAccountToken = %v, want false", args, got)
+		}
+	}
+	spec := guardPodSpec(guardJob(t, "--set", "serviceAccount.create=false", "--set", "serviceAccount.name=team-runner"))
+	if got := at(spec, "serviceAccountName"); got != "team-runner" {
+		t.Fatalf("with an account the chart does not create, serviceAccountName = %v, want team-runner", got)
+	}
+}
+
 type guardMember struct {
 	ID              string `json:"id"`
 	Addr            string `json:"addr"`

@@ -42,10 +42,14 @@ allowScaleInTo: 0
 # so never reaches the allowScaleInTo check; Argo CD runs it as a PreSync
 # hook. It finds the pods at or above the new replicaCount through the
 # headless Service's DNS names. If none exists, the change deletes no pod
-# and is allowed without calling the API. Otherwise it reads
+# and is allowed without calling the API; if no pod that stays resolves
+# either, DNS is failing and it refuses. Otherwise it reads
 # narad cluster members, signed in as admin with the admin-password key
 # of the security Secret, and refuses while any pod being deleted is
-# still a member. It needs no Kubernetes API access.
+# still a member, or when no member list can be read. It needs no
+# Kubernetes API access, so it runs as the namespace's default
+# ServiceAccount with no token mounted, not as the account this chart
+# creates (which a first Argo CD sync creates only after PreSync).
 #
 # On a scale-in it needs that key to hold the root admin's current
 # password; without it the guard refuses and says so. To go ahead after

@@ -7,6 +7,17 @@ lookup never runs there, but the target revision's pre-rollback hooks do.
 The Job carries the replicaCount of the revision that rendered it, which
 is the size the upgrade or rollback moves to. It needs no Kubernetes API
 access: it finds pods through DNS and asks Narad's own API.
+
+It does not run as the ServiceAccount this chart creates: that account
+is a plain resource, created after the pre-upgrade hooks, and Argo CD
+runs this hook as PreSync on the first sync too, before its Sync phase
+creates the account. A pod naming an account that does not exist yet is
+rejected at admission, so the Job never starts, and the first sync (or
+an upgrade that turns serviceAccount.create on or renames the account)
+fails on every retry. It runs as the namespace's default account, with
+no token mounted. An account the chart does not create
+(serviceAccount.create=false with a name) exists before any hook runs,
+so the guard keeps using it, with any image pull secrets attached to it.
 */ -}}
 {{- $secretName := .Values.security.existingSecret | default (printf "%s-security" (include "narad.fullname" .)) -}}
 apiVersion: batch/v1
@@ -37,7 +48,9 @@ spec:
         {{- end }}
     spec:
       restartPolicy: Never
+      {{- if not .Values.serviceAccount.create }}
       serviceAccountName: {{ include "narad.serviceAccountName" . }}
+      {{- end }}
       automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
