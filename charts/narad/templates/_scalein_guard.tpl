@@ -32,9 +32,13 @@ still in the cluster:
    calling the API, so an emergency rollback never waits on the API.
    getent fails the same way for a name that does not exist and for a
    DNS error (SERVFAIL, a timeout), so a lookup that fails counts as a
-   missing pod only when a pod that stays (ordinal TARGET_REPLICAS-1, or
-   0) resolves right after it. If neither does, refuse: the guard cannot
-   tell which pods exist.
+   missing pod only when cluster DNS answers right after it: for the API
+   server's Service (kubernetes.default.svc, present in every cluster
+   whatever state this release is in), or else for a pod that stays
+   (ordinal TARGET_REPLICAS-1, or 0). If none of them resolves, refuse:
+   the guard cannot tell which pods exist. Before the first Argo CD
+   sync's Sync phase, or while every pod is Pending, no pod resolves but
+   the API server's Service does, so the change deletes none.
 2. Otherwise read the member list (narad cluster members, a command
    every release has) from the internal Service, which routes to ready
    pods only. If that fails, ask each pod that stays and count a member
@@ -58,21 +62,25 @@ set -u
 say() { printf 'scale-in guard: %s\n' "$*"; }
 host_of() { printf '%s-%s.%s.%s.svc.%s' "$STS_NAME" "$1" "$HEADLESS_SERVICE" "$POD_NAMESPACE" "$CLUSTER_DOMAIN"; }
 pod_exists() { getent hosts "$(host_of "$1")." >/dev/null 2>&1; }
+api_host="kubernetes.default.svc.$CLUSTER_DOMAIN"
 
 target=$TARGET_REPLICAS
 
 # Called after every failed lookup before it counts as a missing pod:
-# returns when a pod that stays resolves, refuses otherwise.
+# returns when cluster DNS answers for a name that exists, refuses
+# otherwise. The API server's Service exists in every cluster, before
+# this release has any pod; a pod that stays is the fallback.
 require_dns() {
-  tried=""
+  getent hosts "$api_host." >/dev/null 2>&1 && return 0
+  tried=" $api_host"
   keep=$((target - 1))
   if [ "$keep" -gt 0 ]; then
     pod_exists "$keep" && return 0
-    tried=" $STS_NAME-$keep"
+    tried="$tried $STS_NAME-$keep"
   fi
   pod_exists 0 && return 0
   tried="$tried $STS_NAME-0"
-  say "REFUSED: DNS lookups fail; cannot tell which pods exist. No pod this change keeps resolves (tried:$tried), so a pod that does not resolve may still be running: cluster DNS is failing, or those pods have no address."
+  say "REFUSED: DNS lookups fail; cannot tell which pods exist. Neither the API server's Service nor a pod this change keeps resolves (tried:$tried), so a pod that does not resolve may still be running: cluster DNS is failing, or clusterDomain ($CLUSTER_DOMAIN) is not this cluster's domain."
   say "to go ahead once you have checked by hand that narad cluster members lists none of the pods at or above ordinal $target, re-run the same command with --no-hooks."
   exit 1
 }

@@ -177,6 +177,9 @@ type guardWorld struct {
 	// dnsDown makes every lookup fail, as getent does on SERVFAIL or a
 	// timeout; dnsDownAfterAPI does so from the first API call on.
 	dnsDown, dnsDownAfterAPI bool
+	// apiNameMissing leaves the API server's Service name unresolved
+	// while the pods still resolve.
+	apiNameMissing bool
 }
 
 type guardRun struct {
@@ -215,6 +218,7 @@ func runGuard(t *testing.T, job map[string]any, w guardWorld) guardRun {
 	}
 	stub("getent", `[ -z "$FAKE_DNS_DOWN" ] || exit 2
 [ ! -e "$FAKE_DNS_FLAG" ] || exit 2
+if [ "$2" = kubernetes.default.svc.cluster.local. ] && [ -z "$FAKE_API_NAME_MISSING" ]; then exit 0; fi
 for p in $FAKE_PODS; do case "$2" in "$p".*) exit 0 ;; esac; done
 exit 2
 `)
@@ -272,6 +276,9 @@ if [ -f "$FAKE_ANSWERS/$key" ]; then cat "$FAKE_ANSWERS/$key"; else cat "$FAKE_A
 	}
 	if w.dnsDownAfterAPI {
 		cmd.Env = append(cmd.Env, "FAKE_DNS_DOWN_AFTER_API=1")
+	}
+	if w.apiNameMissing {
+		cmd.Env = append(cmd.Env, "FAKE_API_NAME_MISSING=1")
 	}
 	for k, v := range env {
 		if k == "HOME" {
@@ -385,6 +392,27 @@ func TestScaleInGuardAllowsWhenNoPodIsDeleted(t *testing.T) {
 	}
 }
 
+// Argo CD runs the pre-upgrade hook as PreSync on the first sync too,
+// before its Sync phase creates the StatefulSet and the headless
+// Service, so no pod resolves; the same holds for a helm upgrade while
+// every pod is Pending without an address, or after a scale to 0. Cluster
+// DNS still answers for the API server's Service, so the failed pod
+// lookups mean the pods do not exist: the change deletes none. The guard
+// used to prove DNS only with a pod that stays, refused here, and failed
+// every retry of the first sync.
+func TestScaleInGuardAllowsWhenNoPodExistsYet(t *testing.T) {
+	for _, replicas := range []string{"3", "1"} {
+		t.Run("replicaCount="+replicas, func(t *testing.T) {
+			job := guardJob(t, "--set", "replicaCount="+replicas, "--set", "initialClusterSize="+replicas)
+			run := runGuard(t, job, guardWorld{failAll: "dial tcp: lookup narad.narad.svc.cluster.local: no such host"})
+			wantExit(t, run, 0, "no pod at or above ordinal "+replicas+" exists", "deletes none")
+			if len(run.calls) != 0 {
+				t.Fatalf("called the API %v although no pod exists", run.calls)
+			}
+		})
+	}
+}
+
 // Without the member list the guard cannot tell a decommissioned pod
 // from a voter, so it refuses and says why and how to go ahead.
 func TestScaleInGuardRefusesWhenMembersCannotBeRead(t *testing.T) {
@@ -424,7 +452,8 @@ func TestScaleInGuardRefusesWhenDNSFails(t *testing.T) {
 
 	t.Run("DNS fails from the start", func(t *testing.T) {
 		run := runGuard(t, job, guardWorld{pods: []int{0, 1, 2, 3, 4}, members: all, password: "pw", dnsDown: true})
-		wantExit(t, run, 1, "REFUSED: DNS lookups fail; cannot tell which pods exist", "narad-2 narad-0", "--no-hooks")
+		wantExit(t, run, 1, "REFUSED: DNS lookups fail; cannot tell which pods exist",
+			"kubernetes.default.svc.cluster.local narad-2 narad-0", "--no-hooks")
 		if len(run.calls) != 0 {
 			t.Fatalf("called the API %v although it could not tell which pods exist", run.calls)
 		}
@@ -436,8 +465,14 @@ func TestScaleInGuardRefusesWhenDNSFails(t *testing.T) {
 			t.Fatalf("the guard allowed the change:\n%s", run.output)
 		}
 	})
+	t.Run("DNS fails before any pod exists", func(t *testing.T) {
+		run := runGuard(t, job, guardWorld{dnsDown: true})
+		wantExit(t, run, 1, "REFUSED: DNS lookups fail", "--no-hooks")
+	})
 	t.Run("a scale-out finds a pod that stays at ordinal 0", func(t *testing.T) {
-		run := runGuard(t, guardJob(t, "--set", "replicaCount=5"), guardWorld{pods: []int{0, 1, 2}, failAll: "http 503: no leader"})
+		run := runGuard(t, guardJob(t, "--set", "replicaCount=5"), guardWorld{
+			pods: []int{0, 1, 2}, failAll: "http 503: no leader", apiNameMissing: true,
+		})
 		wantExit(t, run, 0, "deletes none")
 	})
 }
