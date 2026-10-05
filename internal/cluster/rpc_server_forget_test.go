@@ -68,3 +68,34 @@ func TestRPCServerForgetServerMapsRefusals(t *testing.T) {
 		t.Fatal("the forget op is not served")
 	}
 }
+
+// A voter whose removal could leave the cluster without a quorum (here
+// one of the two other voters is down, so forgetting the reachable one
+// would leave the leader and a down voter) is refused with 409 and the
+// reason, and stays in the Raft configuration.
+func TestRPCServerForgetServerRefusesAVoterTheQuorumNeeds(t *testing.T) {
+	stores := newTestStoreCluster(t, "node-a", "node-b", "node-c")
+	leaderID, leader := waitForClusterLeader(t, stores)
+	var others []string
+	for id := range stores {
+		if id != leaderID {
+			others = append(others, id)
+		}
+	}
+	down, stray := others[0], others[1]
+	if err := stores[down].Close(); err != nil {
+		t.Fatalf("Close(%s): %v", down, err)
+	}
+	server := NewRPCServer(nil, leader, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	payload, err := nodewire.EncodeForgetServerRequest(nodewire.ForgetServerRequest{ID: stray})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	res := server.handleForgetServer(payload)
+	if res.Status != http.StatusConflict || !strings.Contains(string(res.Body), "without a quorum") {
+		t.Fatalf("forget %s with %s down = %d %s, want 409 saying it could leave the cluster without a quorum", stray, down, res.Status, res.Body)
+	}
+	if in, err := leader.RaftServer(stray); err != nil || !in {
+		t.Fatalf("a refused forget removed %s (%v, %v)", stray, in, err)
+	}
+}

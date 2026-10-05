@@ -28,7 +28,8 @@ type forgetResponse struct {
 // server, voter or non-voter, that has no member record, such as a
 // joiner admitted by a 3.0.x leader that never registered. Admin only.
 // It refuses a server with a member record (decommission it instead)
-// and one a partition assignment names, so it never touches data. The
+// and one a partition assignment names, so it never touches data, and a
+// voter whose removal could leave the cluster without a quorum. The
 // write runs on the leader; followers forward it.
 func Forget(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +51,8 @@ func Forget(s *handlers.Set) http.HandlerFunc {
 		voter, err := s.Deps.Metastore.ForgetServer(r.Context(), id)
 		switch {
 		case errors.Is(err, metastore.ErrMemberRecordExists),
-			errors.Is(err, metastore.ErrServerNamedByAssignment):
+			errors.Is(err, metastore.ErrServerNamedByAssignment),
+			errors.Is(err, metastore.ErrQuorumAtRisk):
 			s.WriteError(w, http.StatusConflict, err.Error())
 		case err != nil:
 			s.WriteBrokerError(w, "forget", err)

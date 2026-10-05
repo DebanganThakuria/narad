@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -285,6 +286,68 @@ func TestForgetIsAdminOnlyAndAudited(t *testing.T) {
 	want := []string{"registered rejected 409", "ghost ok 200", "ghost rejected 404"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("forget audit lines = %q, want %q", got, want)
+	}
+}
+
+// A voter whose removal could leave the cluster without a quorum is
+// refused with 409 and the reason: with one of the two other voters
+// down, forgetting the reachable one would leave the leader and the down
+// voter, a configuration that cannot commit.
+func TestForgetOfAVoterTheQuorumNeedsIsAConflict(t *testing.T) {
+	ids := []string{"fq-0", "fq-1", "fq-2"}
+	addrs := map[string]string{}
+	for _, id := range ids {
+		addrs[id] = freeAddr(t)
+	}
+	stores := map[string]*metastore.Store{}
+	dir := t.TempDir()
+	for _, id := range ids {
+		var peers []metastore.Peer
+		for _, p := range ids {
+			if p != id {
+				peers = append(peers, metastore.Peer{ID: p, Addr: addrs[p]})
+			}
+		}
+		s, err := metastore.New(metastore.Config{
+			NodeID: id, DataDir: filepath.Join(dir, id),
+			BindAddr: addrs[id], AdvertiseAddr: addrs[id], Peers: peers,
+		})
+		if err != nil {
+			t.Fatalf("metastore.New(%s): %v", id, err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		stores[id] = s
+	}
+	var leader *metastore.Store
+	var others []string
+	deadline := time.Now().Add(15 * time.Second)
+	for leader == nil && time.Now().Before(deadline) {
+		for id, s := range stores {
+			if s.IsLeader() {
+				leader = s
+				others = slices.DeleteFunc(slices.Clone(ids), func(o string) bool { return o == id })
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if leader == nil {
+		t.Fatal("no leader")
+	}
+	down, stray := others[0], others[1]
+	if err := stores[down].Close(); err != nil {
+		t.Fatalf("Close(%s): %v", down, err)
+	}
+	set := handlers.New(handlers.Deps{
+		Broker: stubBroker{}, Metastore: leader,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	res := httptest.NewRecorder()
+	httpcluster.Forget(set).ServeHTTP(res, forgetRequest(stray, &user.User{Username: "root", Root: true}))
+	if res.Code != http.StatusConflict || !strings.Contains(res.Body.String(), "without a quorum") {
+		t.Fatalf("forget %s with %s down: %d %s, want 409 saying it could leave the cluster without a quorum", stray, down, res.Code, res.Body)
+	}
+	if in, err := leader.RaftServer(stray); err != nil || !in {
+		t.Fatalf("a refused forget removed %s (%v, %v)", stray, in, err)
 	}
 }
 

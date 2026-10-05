@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,29 @@ func requireRaftServer(t *testing.T, s *Store, id string, want bool) {
 	}
 }
 
+// leaderOf waits for one of stores to lead and returns it with the
+// others.
+func leaderOf(t *testing.T, stores []*Store) (*Store, []*Store) {
+	t.Helper()
+	var leader *Store
+	waitUntil(t, 15*time.Second, "a leader", func() bool {
+		for _, s := range stores {
+			if s.IsLeader() {
+				leader = s
+				return true
+			}
+		}
+		return false
+	})
+	var followers []*Store
+	for _, s := range stores {
+		if s != leader {
+			followers = append(followers, s)
+		}
+	}
+	return leader, followers
+}
+
 // A staged joiner that never registered is removed from the Raft
 // configuration, which also stops it holding back new entry types.
 func TestForgetServerRemovesANonvoterWithNoMemberRecord(t *testing.T) {
@@ -54,17 +78,8 @@ func TestForgetServerRemovesANonvoterWithNoMemberRecord(t *testing.T) {
 // decommission cannot reach it. Forget removes it on the leader; a
 // follower refuses as not the leader.
 func TestForgetServerRemovesAVoterWithNoMemberRecord(t *testing.T) {
-	stores := threeNodeCluster(t)
-	var leader *Store
-	waitUntil(t, 15*time.Second, "a leader", func() bool {
-		for _, s := range stores {
-			if s.IsLeader() {
-				leader = s
-				return true
-			}
-		}
-		return false
-	})
+	settlePromotionsAfter(t, 100*time.Millisecond)
+	leader, followers := leaderOf(t, threeNodeCluster(t))
 	// The ghost: a voter at an address nothing listens on. Three live
 	// voters of four still commit.
 	if err := leader.r.AddVoter("ghost", raft.ServerAddress(freeAddr(t)), 0, barrierTimeout).Error(); err != nil {
@@ -73,15 +88,10 @@ func TestForgetServerRemovesAVoterWithNoMemberRecord(t *testing.T) {
 	if voters, err := leader.Voters(); err != nil || len(voters) != 4 {
 		t.Fatalf("voters = %v, %v; want the ghost added", voters, err)
 	}
-	for _, s := range stores {
-		if s == leader {
-			continue
-		}
-		if _, err := s.ForgetServer(context.Background(), "ghost"); !errors.Is(err, errs.ErrUnavailable) {
-			t.Fatalf("ForgetServer on a follower = %v; want ErrUnavailable (not the leader)", err)
-		}
-		break
+	if _, err := followers[0].ForgetServer(context.Background(), "ghost"); !errors.Is(err, errs.ErrUnavailable) {
+		t.Fatalf("ForgetServer on a follower = %v; want ErrUnavailable (not the leader)", err)
 	}
+	waitLeaderSettled(t, leader)
 
 	voter, err := leader.ForgetServer(context.Background(), "ghost")
 	if err != nil || !voter {
@@ -90,6 +100,67 @@ func TestForgetServerRemovesAVoterWithNoMemberRecord(t *testing.T) {
 	voters, err := leader.Voters()
 	if err != nil || len(voters) != 3 || slices.Contains(voters, "ghost") {
 		t.Fatalf("voters after forget = %v, %v; want the three real ones", voters, err)
+	}
+}
+
+// Voters A (the leader), B and D, where D is reachable but has no member
+// record (a stray a 3.0.x leader admitted whose node-RPC heartbeats
+// never land) and B is down. A and D commit, but forgetting D would
+// leave {A, B}: Raft commits that change under the new configuration,
+// which needs B, so the leader would lose its lease and nothing could
+// undo it. The forget is refused and names B; a non-voter is still
+// forgotten without the check.
+func TestForgetServerRefusesAVoterWhenTheVotersLeftCannotCommit(t *testing.T) {
+	ctx := context.Background()
+	settlePromotionsAfter(t, 100*time.Millisecond)
+	leader, followers := leaderOf(t, threeNodeCluster(t))
+	down, stray := followers[0], followers[1]
+	waitLeaderSettled(t, leader)
+	if err := down.Close(); err != nil {
+		t.Fatalf("Close(%s): %v", down.id, err)
+	}
+	waitUntil(t, 10*time.Second, "the leader to see the down voter's heartbeats fail", func() bool {
+		_, failing := leader.health.failingSince(down.id)
+		return failing
+	})
+
+	_, err := leader.ForgetServer(ctx, string(stray.id))
+	if err == nil {
+		t.Fatalf("ForgetServer(%s) removed a voter while %s is down: the voters left cannot commit", stray.id, down.id)
+	}
+	if !errors.Is(err, ErrQuorumAtRisk) || !strings.Contains(err.Error(), string(down.id)) {
+		t.Fatalf("ForgetServer(%s) = %v; want ErrQuorumAtRisk naming %s", stray.id, err, down.id)
+	}
+	requireRaftServer(t, leader, string(stray.id), true)
+	if err := leader.Barrier(); err != nil {
+		t.Fatalf("Barrier after the refused forget: %v; the leader should still commit", err)
+	}
+
+	stageGhost(t, leader, "ghost")
+	if voter, err := leader.ForgetServer(ctx, "ghost"); err != nil || voter {
+		t.Fatalf("ForgetServer(ghost non-voter) with a voter down = %v, %v; want it forgotten", voter, err)
+	}
+	requireRaftServer(t, leader, "ghost", false)
+}
+
+// A leader that has led for less than the settle time cannot have seen
+// a failed heartbeat to a peer that drops packets yet, so it forgets no
+// voter until it has; a non-voter costs no quorum and is forgotten.
+func TestForgetServerRefusesAVoterUntilTheLeaderHasSettled(t *testing.T) {
+	ctx := context.Background()
+	settlePromotionsAfter(t, time.Hour)
+	leader, _ := leaderOf(t, threeNodeCluster(t))
+	if err := leader.r.AddVoter("ghost", raft.ServerAddress(freeAddr(t)), 0, barrierTimeout).Error(); err != nil {
+		t.Fatalf("AddVoter(ghost): %v", err)
+	}
+	if _, err := leader.ForgetServer(ctx, "ghost"); !errors.Is(err, ErrQuorumAtRisk) || !strings.Contains(err.Error(), "has led for less than") {
+		t.Fatalf("ForgetServer(ghost) on a new leader = %v; want ErrQuorumAtRisk saying it has led for less than the settle time", err)
+	}
+	requireRaftServer(t, leader, "ghost", true)
+
+	stageGhost(t, leader, "staged")
+	if voter, err := leader.ForgetServer(ctx, "staged"); err != nil || voter {
+		t.Fatalf("ForgetServer(staged non-voter) on a new leader = %v, %v; want it forgotten", voter, err)
 	}
 }
 

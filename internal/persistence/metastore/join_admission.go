@@ -56,11 +56,11 @@ type JoinAdmission struct {
 }
 
 // promotionSettle is how long a node must have led before it promotes
-// anyone. A leader learns that a peer is unreachable from a failed
-// heartbeat, and the first one to a peer that drops packets fails only
-// after the transport's 10 s dial timeout; a leader younger than that
-// cannot tell an unreachable joiner from a healthy one. A variable so
-// tests can shorten it.
+// anyone, or forgets a voter (forget.go). A leader learns that a peer is
+// unreachable from a failed heartbeat, and the first one to a peer that
+// drops packets fails only after the transport's 10 s dial timeout; a
+// leader younger than that cannot tell an unreachable peer from a
+// healthy one. A variable so tests can shorten it.
 var promotionSettle = 12 * time.Second
 
 // AdmitJoiner is the leader's side of a join request. A node not in

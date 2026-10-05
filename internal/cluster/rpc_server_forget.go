@@ -38,7 +38,8 @@ func forgetErrorStatus(err error) int {
 	case errors.Is(err, errs.ErrNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, metastore.ErrMemberRecordExists),
-		errors.Is(err, metastore.ErrServerNamedByAssignment):
+		errors.Is(err, metastore.ErrServerNamedByAssignment),
+		errors.Is(err, metastore.ErrQuorumAtRisk):
 		return http.StatusConflict
 	case errors.Is(err, errs.ErrInvalidArgument):
 		return http.StatusBadRequest

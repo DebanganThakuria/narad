@@ -1370,8 +1370,12 @@ paths:
         entry types whatever its suffrage, and decommission cannot reach
         it. Forget moves and deletes no data: it refuses a server with a
         member record, alive, dead or draining (decommission it instead),
-        and one a partition assignment names. It runs on the leader;
-        followers forward it. The steps are in
+        and one a partition assignment names. It also refuses a voter
+        unless the leader and the other voters it reaches make a majority
+        of the voters left after the removal: Raft commits the removal
+        under the new configuration, so a cluster left without that
+        majority loses its leader and cannot undo the change. It runs on
+        the leader; followers forward it. The steps are in
         [Troubleshooting](../operate/troubleshooting.md#raft-server-no-member-record).
       x-narad-grant: |
         `admin`.
@@ -1391,7 +1395,7 @@ paths:
         '404':
           description: No Raft server has this ID.
         '409':
-          description: The server has a member record (decommission it instead), or a partition assignment names it as owner or move target.
+          description: The server has a member record (decommission it instead), a partition assignment names it as owner or move target, or it is a voter and the voters left could lack a quorum (the leader's Raft heartbeats to too many of them are failing, or it has led for less than 12 s). The message says which.
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '501':

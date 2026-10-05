@@ -1557,8 +1557,12 @@ server counts against quorum as a voter, and holds back new Raft
 entry types whatever its suffrage, and decommission cannot reach
 it. Forget moves and deletes no data: it refuses a server with a
 member record, alive, dead or draining (decommission it instead),
-and one a partition assignment names. It runs on the leader;
-followers forward it. The steps are in
+and one a partition assignment names. It also refuses a voter
+unless the leader and the other voters it reaches make a majority
+of the voters left after the removal: Raft commits the removal
+under the new configuration, so a cluster left without that
+majority loses its leader and cannot undo the change. It runs on
+the leader; followers forward it. The steps are in
 [Troubleshooting](../operate/troubleshooting.md#raft-server-no-member-record).
 
 **Grant needed:** `admin`.
@@ -1578,7 +1582,7 @@ followers forward it. The steps are in
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | Not `admin`. |
 | [`404`](status-codes.md#status-404) | No Raft server has this ID. |
-| [`409`](status-codes.md#status-409) | The server has a member record (decommission it instead), or a partition assignment names it as owner or move target. |
+| [`409`](status-codes.md#status-409) | The server has a member record (decommission it instead), a partition assignment names it as owner or move target, or it is a voter and the voters left could lack a quorum (the leader's Raft heartbeats to too many of them are failing, or it has led for less than 12 s). The message says which. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`501`](status-codes.md#status-501) | The leader runs a release before forget. Upgrade it first. |
 | [`503`](status-codes.md#status-503) | The cluster has no leader to write the change, or the leader could not be reached. The server may have been removed; read the leader's log or retry. |

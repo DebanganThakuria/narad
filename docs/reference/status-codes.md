@@ -158,7 +158,7 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 - A delay child's delay is longer than the parent's retention can hold, on attach, on create with `parent`, or when the parent's retention shrinks.
 - `schema_base_version` is not the current schema version, the topic already holds 1000 schema versions, or the topic is an attached child whose schema its parent manages.
 - A produce to a delay child, which only its parent can feed.
-- **Unreleased:** a forget names a Raft server that has a member record (decommission it instead), or one a partition assignment names as owner or move target.
+- **Unreleased:** a forget names a Raft server that has a member record (decommission it instead), one a partition assignment names as owner or move target, or a voter whose removal could leave the cluster without a quorum (the message names the voters the leader cannot reach).
 
 **What to do:** read the error message and the current state. For a schema conflict, read the current `schema_version` and retry with it as the base. For a create that must succeed once, treat "already exists" as success when the existing topic has the settings you wanted.
 
