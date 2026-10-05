@@ -91,6 +91,10 @@ type moveWorker struct {
 	// its own clock; zero while the source reads alive
 	// (move_source_clock.go).
 	deadSince time.Time
+	// deadReported: this worker logged, at error, that the source died
+	// with a copy it cannot force-promote, since the source last read
+	// alive.
+	deadReported bool
 
 	// unverified counts the frozen drains in a row whose staged copy
 	// failed verification; gaveUp is set once the copy failed it again
@@ -139,9 +143,11 @@ func (w *moveWorker) observeDone() {
 // (quarantined, where no worker clears it) when it may hold records
 // that exist nowhere else: this node owns the partition by now and
 // staging may hold records the partition's path lacks (see
-// ownedStagingIsRedundant), or this worker moved its install back to
-// staging and the owner cannot be read. A partition with no assignment
-// (its topic is gone) has no owner. A worker cancelled
+// ownedStagingIsRedundant), this worker moved its install back to
+// staging and the owner cannot be read, or the partition's owner reads
+// dead (or has no member record) and staging holds records, which may be
+// the only copy of them left (ownerMayBeGone). A partition with no
+// assignment (its topic is gone) has no owner. A worker cancelled
 // with a flip pending leaves the install at the partition's path: if the
 // flip committed it is the partition, and if not, the next worker's
 // install quarantines it (setAsideLiveCopy; error-level log) or the
@@ -183,6 +189,15 @@ func (w *moveWorker) finish() {
 			return
 		}
 	}
+	if err == nil && a.OwnerID != r.selfID {
+		if gone, why := w.ownerMayBeGone(a.OwnerID); gone {
+			if segs, lerr := listLocalSegments(w.staging); lerr == nil && holdsRecords(segs) {
+				w.setAsideStaging("move: set aside the staging copy of a move that ended while its source is dead; it may be the only copy of the partition's records. Operator action required",
+					"owner", a.OwnerID, "owner_state", why, "target", a.TargetID)
+				return
+			}
+		}
+	}
 	if err := os.RemoveAll(w.staging); err != nil {
 		r.logger.Warn("move: remove the staging copy of a move that ended without a flip", "dir", w.staging, "err", err)
 	}
@@ -222,6 +237,26 @@ func (w *moveWorker) ownedStagingIsRedundant(dir string) bool {
 	}
 	m, ok, err := messaging.ReadMoveMarker(dir)
 	return err == nil && ok && m.Source == w.source
+}
+
+// ownerMayBeGone reports whether the partition's owner (the move's
+// source, unless the partition was planned elsewhere since) may no
+// longer hold its copy: it reads dead, it has no member record, or its
+// record cannot be read. why describes what was read.
+func (w *moveWorker) ownerMayBeGone(owner string) (gone bool, why string) {
+	if owner == "" {
+		return true, "no owner"
+	}
+	m, err := w.r.store.GetMember(owner)
+	switch {
+	case errors.Is(err, errs.ErrNotFound):
+		return true, "no member record"
+	case err != nil:
+		return true, "member record unreadable: " + err.Error()
+	case m.Status == metastore.MemberDead:
+		return true, string(metastore.MemberDead)
+	}
+	return false, string(m.Status)
 }
 
 // holdsRecords reports whether any segment holds bytes.

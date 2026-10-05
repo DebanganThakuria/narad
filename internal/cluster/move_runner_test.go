@@ -831,6 +831,14 @@ func (p prepareCountingPeer) PrepareHandoff(ctx context.Context, addr, topicName
 // only finish by a force-promote.
 func newDeadSourceScenario(t *testing.T) (*switchableSourceStore, *testClock, *MoveRunner, string, int64, map[int64][]byte, context.CancelFunc) {
 	t.Helper()
+	return startDeadSourceScenario(t, 0, discardLogger())
+}
+
+// startDeadSourceScenario is newDeadSourceScenario with the source
+// reporting a high watermark behind records past what it serves, so the
+// copy is that many records behind it, and the runner logging to logger.
+func startDeadSourceScenario(t *testing.T, behind int64, logger *slog.Logger) (*switchableSourceStore, *testClock, *MoveRunner, string, int64, map[int64][]byte, context.CancelFunc) {
+	t.Helper()
 	src := t.TempDir()
 	wantHWM, payloads := buildSourcePartition(t, src, 8)
 	store := &switchableSourceStore{fakeMoveStore: &fakeMoveStore{
@@ -839,11 +847,11 @@ func newDeadSourceScenario(t *testing.T) (*switchableSourceStore, *testClock, *M
 	}}
 	var prepares atomic.Int64
 	peer := prepareCountingPeer{
-		movePeerFake: movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM, committed: 5, hasCommitted: true}, prepareErr: context.DeadlineExceeded},
+		movePeerFake: movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM + behind, committed: 5, hasCommitted: true}, prepareErr: context.DeadlineExceeded},
 		prepares:     &prepares,
 	}
 	dataDir := t.TempDir()
-	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, discardLogger(), MoveConfig{
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, logger, MoveConfig{
 		RetryBackoff: 5 * time.Millisecond, ForcePromoteAfter: 2 * time.Minute,
 	})
 	clock := newTestClock()

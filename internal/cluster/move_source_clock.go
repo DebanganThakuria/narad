@@ -10,6 +10,7 @@ package cluster
 // which only delays a force-promote.
 
 import (
+	"errors"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -17,7 +18,9 @@ import (
 
 // observeSource runs the worker's dead-since clock from the source's
 // member record as just read: started the first time the source reads
-// dead, cleared when it reads alive.
+// dead, cleared when it reads alive. A source that reads alive also
+// clears a refused force-promote's report (cannotForcePromote): the
+// copy can catch up again, and a later death is reported anew.
 func (w *moveWorker) observeSource(m metastore.Member) {
 	if m.Status == metastore.MemberDead {
 		if w.deadSince.IsZero() {
@@ -26,6 +29,35 @@ func (w *moveWorker) observeSource(m metastore.Member) {
 		return
 	}
 	w.deadSince = time.Time{}
+	w.deadReported = false
+}
+
+// cannotForcePromote reports a force-promote the session refused (err)
+// although the source has been dead long enough: the copy is behind the
+// source's last high watermark (a promote would lose records the source
+// made visible), or it fails verification. The worker keeps waiting for
+// the source. It is logged once at error each time the source dies, and
+// at debug on every retry after that.
+func (w *moveWorker) cannotForcePromote(err error) {
+	r := w.r
+	msg := "move: the source is dead and this node's copy is behind its last high watermark, so it cannot force-promote: promoting would lose records the source made visible. Waiting for the source to return; abort the move to give up on it"
+	args := []any{"topic", w.topic, "partition", w.partition, "source", w.source}
+	var behind *copyBehindError
+	switch {
+	case errors.As(err, &behind):
+		args = append(args, "copy_next_offset", behind.next, "source_last_hwm", behind.hwm)
+	case w.sess == nil || !w.sess.sawInfo:
+		args = append(args, "copy_next_offset", 0)
+	default:
+		msg = "move: the source is dead and this node's copy fails verification, so it cannot force-promote. Waiting for the source to return; abort the move to give up on it"
+	}
+	args = append(args, "err", err)
+	if w.deadReported {
+		r.logger.Debug(msg, args...)
+		return
+	}
+	w.deadReported = true
+	r.logger.Error(msg, args...)
 }
 
 // sourceDeadLongEnough reports whether a force-promote may replace the

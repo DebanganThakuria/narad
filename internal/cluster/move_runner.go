@@ -425,8 +425,9 @@ func (r *MoveRunner) Reconcile(ctx context.Context) {
 // every pass, before anything else is tried. A staged copy that fails
 // verification twice in a row, the second time after a fresh copy, ends
 // the attempts: the worker stops freezing the source and waits to be
-// cancelled (copyFailedVerification). Every exit without a flip
-// removes the staging copy (see moveWorker.finish).
+// cancelled (copyFailedVerification). Every exit without a flip removes
+// the staging copy, or sets it aside when it may be the only copy (see
+// moveWorker.finish).
 func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition int, source string) {
 	staging := r.stagingDir(topicName, partition)
 	if err := os.RemoveAll(staging); err != nil {
@@ -485,8 +486,7 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 					return
 				}
 			} else {
-				r.logger.Warn("move: source dead but copy is behind its last hwm — cannot force-promote; waiting",
-					"topic", topicName, "partition", partition, "source", source, "err", err)
+				w.cannotForcePromote(err)
 			}
 			if w.exit || !sleepCtx(ctx, r.cfg.RetryBackoff) {
 				return
