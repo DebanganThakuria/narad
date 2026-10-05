@@ -832,3 +832,75 @@ func TestPurgeLeavesNoLeftoverASuccessorCouldAdopt(t *testing.T) {
 		})
 	}
 }
+
+// A purge whose removal cannot finish leaves only the copy it set aside,
+// never topics/<name>, named so the purge's retry and the orphan sweeps
+// can reclaim it: topics/<name>.stale-<id> for a purge that names the
+// incarnation, the marker's id for a legacy purge of a marked directory
+// (a quarantine of that incarnation), and a random purge- suffix for a
+// legacy purge of an unmarked one (a plain directory of no topic). A
+// same-named topic created afterwards opens empty.
+func TestPurgeThatCannotFinishLeavesOnlyASetAsideCopy(t *testing.T) {
+	for _, tc := range []struct {
+		name, recordID, purgeID, wantPrefix string
+		quarantined                         bool
+	}{
+		{"a purge naming the incarnation", "0000000000000009", "0000000000000009", "orders.stale-0000000000000009", true},
+		{"a legacy purge of a marked directory", "0000000000000009", "", "orders.stale-0000000000000009", true},
+		{"a legacy purge of an unmarked directory", "", "", "orders.stale-purge-", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := newRuntimeFakeMetastore()
+			dataDir := t.TempDir()
+			logs := NewLogs(dataDir, storage.Options{FlushInterval: time.Millisecond}, ms, nil)
+			defer logs.CloseAll()
+			ms.topics["orders"] = topic.Topic{Name: "orders", ID: tc.recordID, Partitions: 1}
+			l, err := logs.Get("orders", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			appendOld(t, l, 3, "purged")
+
+			var removing string
+			logs.removeAll = func(dir string) error {
+				removing = dir
+				return errors.New("removal interrupted")
+			}
+			if purged, err := logs.PurgeTopic("orders", tc.purgeID); !purged || err == nil {
+				t.Fatalf("purge = (%v, %v), want (true, the removal's error)", purged, err)
+			}
+			if _, err := os.Stat(storage.TopicDir(dataDir, "orders")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("topics/orders after the purge: %v, want it gone", err)
+			}
+			base := filepath.Base(removing)
+			if !strings.HasPrefix(base, tc.wantPrefix) {
+				t.Fatalf("the purge removed %s, want a set-aside copy named %s*", base, tc.wantPrefix)
+			}
+			c, err := classifyTopicDir(storage.TopicDir(dataDir, ""), base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Quarantined != tc.quarantined {
+				t.Fatalf("the leftover classifies as %+v, want quarantined %v", c, tc.quarantined)
+			}
+
+			logs.removeAll = os.RemoveAll
+			ms.topics["orders"] = topic.Topic{Name: "orders", ID: "000000000000000a", Partitions: 1}
+			l2, err := logs.Get("orders", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hwm := l2.HighWatermark(); hwm != 0 {
+				t.Fatalf("the recreated topic opens at hwm %d, want 0", hwm)
+			}
+			if tc.purgeID != "" {
+				if _, err := logs.PurgeTopic("orders", tc.purgeID); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Stat(removing); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("the retried purge left %s (%v)", base, err)
+				}
+			}
+		})
+	}
+}
