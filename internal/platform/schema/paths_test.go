@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-// dagSchema is the audit's acyclic chain (verify-schemas-1): d_i
-// applies d_{i+1} twice through kw, so the leaf is reached by 2^levels
-// validation paths while no reference is recursive.
+// dagSchema is an acyclic chain: d_i applies d_{i+1} twice through kw,
+// so the leaf is reached by 2^levels validation paths while no
+// reference is recursive.
 func dagSchema(levels int, kw string) string {
 	var b strings.Builder
 	b.WriteString(`{"$ref":"#/$defs/d0","$defs":{`)
@@ -27,12 +27,11 @@ func rerooted(dag, root string) string {
 	return strings.Replace(dag, `{"$ref":"#/$defs/d0",`, root, 1)
 }
 
-// TestAcyclicRefChainIsRefused is the audit's repro as a regression
-// test: a 22-level chain (1.4 KB) registered in under a millisecond and
-// then took 2 s to validate "x", doubling per level, because nothing
-// counted validation paths outside recursive components. Registration
-// now counts them over the whole graph and refuses any subschema one
-// value reaches through more than 64.
+// TestAcyclicRefChainIsRefused: a 22-level chain (1.4 KB) registered in
+// under a millisecond and then took 2 s to validate "x", doubling per
+// level, because nothing counted validation paths outside recursive
+// components. Registration now counts them over the whole graph and
+// refuses any subschema one value reaches through more than 64.
 func TestAcyclicRefChainIsRefused(t *testing.T) {
 	r := NewJSONSchema()
 	for _, kw := range []string{"allOf", "anyOf", "oneOf"} {

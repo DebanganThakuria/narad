@@ -522,9 +522,9 @@ func TestTopicNameFoldConflictFindsCaseVariant(t *testing.T) {
 
 // LatestSchema returns the last of the contiguous versions from 1, and
 // costs the same however long the history is: a topic describe reads
-// the schema through it on every GET (audit schemas:5). Master built a
-// fresh key and ran a fresh lookup per version, so a 60-version history
-// cost about 120 more allocations per describe than a 1-version one.
+// the schema through it on every GET. Master built a fresh key and ran
+// a fresh lookup per version, so a 60-version history cost about 120
+// more allocations per describe than a 1-version one.
 func TestLatestSchemaCostsTheSameForAnyHistoryLength(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

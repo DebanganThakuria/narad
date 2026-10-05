@@ -37,9 +37,9 @@ func partialTopicServer(t *testing.T) *httptest.Server {
 }
 
 // The server report leaves a partial topic's unavailable partitions out
-// of its totals and its owner count, and says how many there are
-// (audit M15). Master counted the dead owner and printed the partial
-// totals as if they were the topic's.
+// of its totals and its owner count, and says how many there are.
+// Master counted the dead owner and printed the partial totals as if
+// they were the topic's.
 func TestServerReportMarksPartialTopics(t *testing.T) {
 	srv := partialTopicServer(t)
 	withTempConfigDir(t)

@@ -18,9 +18,9 @@ import (
 // A topic's directory is named after it, and on a case-insensitive
 // filesystem (APFS, the macOS default; NTFS; Docker Desktop bind
 // mounts) "Orders" and "orders" are one directory: opening the second
-// quarantined the first's data (audit M6). A create whose name differs
-// from an existing topic's only in letter case is refused with 409,
-// whatever filesystem the test runs on. Existing names are untouched.
+// quarantined the first's data. A create whose name differs from an
+// existing topic's only in letter case is refused with 409, whatever
+// filesystem the test runs on. Existing names are untouched.
 func TestCreateRefusesNameThatDiffersOnlyInCase(t *testing.T) {
 	ms := newFakeMetastore()
 	ms.topics["orders"] = topic.Topic{Name: "orders", ID: "0000000000000001", Partitions: 3}
@@ -98,9 +98,9 @@ func TestCreatesDifferingOnlyInCaseSerialize(t *testing.T) {
 }
 
 // New names are capped at 200 bytes so every name derived from them
-// fits the filesystem's 255-byte limit (audit L9: master accepted 255,
-// and the quarantine directory and fan-out cursor of such a topic could
-// never be created). Topics created before the cap keep working.
+// fits the filesystem's 255-byte limit (master accepted 255, and the
+// quarantine directory and fan-out cursor of such a topic could never
+// be created). Topics created before the cap keep working.
 func TestNewTopicNamesAreCappedAt200Bytes(t *testing.T) {
 	ms := newFakeMetastore()
 	m := newTestManager(t, ms, nil)

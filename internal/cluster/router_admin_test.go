@@ -94,7 +94,7 @@ func TestRouteGetTopicMergesRemotePartitionStats(t *testing.T) {
 
 // A partition whose owner this node has no member record for is
 // reported unavailable with liveness unknown; the rest of the topic is
-// still answered (audit M15).
+// still answered.
 func TestRouteGetTopicMarksAPartitionWhoseOwnerIsUnknown(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -169,7 +169,7 @@ func TestRouteGetTopicKeepsLocalPartitionsLocal(t *testing.T) {
 
 // A remote owner that answers with an error, a stats entry for another
 // partition, or not at all is reported unreachable for that partition
-// rather than failing the whole GET (audit M15).
+// rather than failing the whole GET.
 func TestRouteGetTopicMarksAPartitionUnreachableWhenItsOwnerFails(t *testing.T) {
 	for name, answer := range map[string]func(context.Context, string, string, int) (topic.PartitionStats, error){
 		"error status": func(context.Context, string, string, int) (topic.PartitionStats, error) {
@@ -1075,10 +1075,9 @@ func purgeDeferredReply() nodewire.Response {
 
 // The purge fan-out follows a delete that has already committed, so a
 // client that disconnects or times out while it runs must not cancel
-// the purge on the other members (audit M8, verify-concurrency-4).
-// Master derived the fan-out from the request's context: cancelling the
-// request cancelled every member's purge, and their copies stayed until
-// they restarted.
+// the purge on the other members. Master derived the fan-out from the
+// request's context: cancelling the request cancelled every member's
+// purge, and their copies stayed until they restarted.
 func TestPurgeBroadcastSurvivesACancelledRequest(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -1114,8 +1113,8 @@ func TestPurgeBroadcastSurvivesACancelledRequest(t *testing.T) {
 
 // A member whose replica had not applied the delete answers
 // purge_deferred; the leader asks it again within the same budget, and
-// a purge that then runs is a success (audit M8). Master counted the
-// first answer as the member's final word.
+// a purge that then runs is a success. Master counted the first answer
+// as the member's final word.
 func TestPurgeBroadcastRetriesADeferredMember(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -1144,7 +1143,7 @@ func TestPurgeBroadcastRetriesADeferredMember(t *testing.T) {
 
 // A member that still owes the purge when the fan-out gives up is
 // logged once, at error, naming the topic, the incarnation and the
-// member, after at most three attempts (audit M8).
+// member, after at most three attempts.
 func TestUnfinishedPurgeIsLoggedAtError(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -1216,8 +1215,8 @@ func (f *cancellingFrames) RequestOnLaneTimeout(ctx context.Context, addr string
 // A forwarded delete that the leader applied, but whose reply never
 // reached the ingress because the client went away, is audited as
 // outcome=unknown, never as rejected or failed: an audit query for
-// changes that happened must not miss it (audit M13, the wave-1
-// reviewer's repro). Master wrote no audit line at all.
+// changes that happened must not miss it. Master wrote no audit line at
+// all.
 func TestForwardWithoutTheLeadersAnswerIsAuditedAsUnknown(t *testing.T) {
 	router, br, frames, store := forwardingPair(t, false)
 	ctx := context.Background()

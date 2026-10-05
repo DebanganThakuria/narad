@@ -15,10 +15,10 @@ import (
 // Authorization happens at the HTTP ingress node, before any routing,
 // against this node's replica. A topic write forwarded to the leader
 // also carries the caller, and the leader re-checks ownership under the
-// topic's lock against its own records (audit H1); the ingress check
-// answers early and keeps a request naming a topic this node has never
-// seen from reaching the leader at all. When security is disabled there
-// is no identity on the context and every check passes.
+// topic's lock against its own records; the ingress check answers early
+// and keeps a request naming a topic this node has never seen from
+// reaching the leader at all. When security is disabled there is no
+// identity on the context and every check passes.
 
 // Authorize reports whether the request may perform action on the named
 // topic, writing a 403 when it may not.
@@ -56,13 +56,13 @@ type LeaderSyncer interface {
 	SyncWithLeader(ctx context.Context) error
 }
 
-// canManageTopic reports whether the caller may alter, delete, or attach
-// the named topic: security disabled, admin, or topic owner. A topic
-// this node's replica does not have is looked for again once the node
-// has caught up with the leader (the topic may have just been created
-// elsewhere); still missing, it is an errs.ErrTopicNotFound error (404),
-// never a pass, so a request racing a create, or read from a lagging
-// replica, is not forwarded as allowed (audit H1). A failed catch-up is
+// canManageTopic reports whether the caller may alter, delete, or
+// attach the named topic: security disabled, admin, or topic owner. A
+// topic this node's replica does not have is looked for again once the
+// node has caught up with the leader (the topic may have just been
+// created elsewhere); still missing, it is an errs.ErrTopicNotFound
+// error (404), never a pass, so a request racing a create, or read from
+// a lagging replica, is not forwarded as allowed. A failed catch-up is
 // an errs.ErrUnavailable error (503). Admins are not looked up.
 func (s *Set) canManageTopic(r *http.Request, topicName string) (bool, error) {
 	id, ok := security.IdentityFrom(r.Context())

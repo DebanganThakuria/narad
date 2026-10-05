@@ -28,20 +28,19 @@ const topicStatsTimeout = 2 * time.Second
 // details: locally-owned partitions come from the details the caller already
 // computed, remote ones are fetched from their owners, concurrently.
 //
-// It reports what it can when some owners are down (audit M15): when a
-// node dies nearly every multi-partition topic has a partition on it,
-// and the operator needs the other partitions' stats exactly then. The
-// result has exactly one entry per partition index in [0,
-// Topic.Partitions), in index order, each stamped with its owner and a
-// status. A partition whose stats could not be had keeps a placeholder
-// with zero stats, status topic.PartitionOwnerUnavailable and the
-// owner's liveness: dead (a member marked dead, not asked), unreachable
-// (its stats RPC failed or took longer than topicStatsTimeout), unknown
-// (no member with an address) or unassigned (no assignment row), and
-// details.Partial is set. Assignment rows at or beyond the partition
-// count (left by an earlier incarnation) are ignored. Only a failure to
-// read this node's own metadata is an error, wrapping
-// errs.ErrUnavailable (a 503).
+// It reports what it can when some owners are down: when a node dies
+// nearly every multi-partition topic has a partition on it, and the
+// operator needs the other partitions' stats exactly then. The result
+// has exactly one entry per partition index in [0, Topic.Partitions),
+// in index order, each stamped with its owner and a status. A partition
+// whose stats could not be had keeps a placeholder with zero stats,
+// status topic.PartitionOwnerUnavailable and the owner's liveness: dead
+// (a member marked dead, not asked), unreachable (its stats RPC failed
+// or took longer than topicStatsTimeout), unknown (no member with an
+// address) or unassigned (no assignment row), and details.Partial is
+// set. Assignment rows at or beyond the partition count (left by an
+// earlier incarnation) are ignored. Only a failure to read this node's
+// own metadata is an error, wrapping errs.ErrUnavailable (a 503).
 func (rt *Router) RouteGetTopic(ctx context.Context, _ *http.Request, topicName string, details topic.Details) (topic.Details, error) {
 	assignments, err := rt.store.ListAssignments(topicName)
 	if err != nil {

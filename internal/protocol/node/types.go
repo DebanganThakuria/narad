@@ -159,11 +159,10 @@ type TopicBodyRequest struct {
 	Topic string
 	Body  []byte
 	// Actor names the authenticated user a forwarded create or alter is
-	// made for, so the leader re-checks that user's rights (audit H1).
-	// It is an optional trailing field, encoded only when set: a
-	// receiver that predates it refuses the payload with
-	// TrailingPayloadError before acting on it, and the sender resends
-	// without it.
+	// made for, so the leader re-checks that user's rights. It is an
+	// optional trailing field, encoded only when set: a receiver that
+	// predates it refuses the payload with TrailingPayloadError before
+	// acting on it, and the sender resends without it.
 	Actor string
 }
 

@@ -24,9 +24,9 @@ import (
 // leader-direct path consistent.
 //
 // The purge fan-out names the incarnation the delete removed and runs
-// detached from the client's request (audit M8): a client that
-// disconnects while the leader purges must not cancel the purge on the
-// other members. The router logs any member that still owes it.
+// detached from the client's request: a client that disconnects while
+// the leader purges must not cancel the purge on the other members. The
+// router logs any member that still owes it.
 func Delete(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")

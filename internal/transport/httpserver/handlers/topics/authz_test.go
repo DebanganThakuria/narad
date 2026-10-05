@@ -231,9 +231,9 @@ var bob = user.User{Username: "bob", Grants: []user.Grant{{Action: user.ActionCr
 
 // A non-admin's manage request naming a topic this node's replica does
 // not have is answered 404 once the node has caught up with the leader,
-// never forwarded as allowed (audit H1: master's canManageTopic counted
-// a missing topic as manageable, so a request racing a create, or read
-// from a lagging follower, reached the leader unchecked).
+// never forwarded as allowed (master's canManageTopic counted a missing
+// topic as manageable, so a request racing a create, or read from a
+// lagging follower, reached the leader unchecked).
 func TestManageOfTopicMissingLocallyIsNotForwarded(t *testing.T) {
 	for name, build := range manageRequests("ghost", "bob-topic") {
 		t.Run(name, func(t *testing.T) {

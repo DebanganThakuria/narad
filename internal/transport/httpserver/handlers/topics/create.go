@@ -122,7 +122,7 @@ func Create(s *handlers.Set) http.HandlerFunc {
 const retentionRangeError = "retention_ms must be >= 0 (0 = keep forever; leave it out for the server default)"
 
 // brokerRetention maps a client's retention_ms onto what the broker and
-// the leader read (audit M5): an explicit 0 is keep forever, sent on as
+// the leader read: an explicit 0 is keep forever, sent on as
 // topic.RetentionKeepForever; an absent field (nil) stays absent, which
 // the broker reads as the operator default; a positive value passes.
 // Callers have refused negative values already.

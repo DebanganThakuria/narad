@@ -63,10 +63,10 @@ func (b *racingDeleteBroker) DeleteTopicID(context.Context, string) (string, err
 }
 
 // The leader-direct delete's purge fan-out names the incarnation the
-// delete removed, as the broker reports it from under its name lock
-// (audit M8). Master read the record before the delete, so a recreate
-// in between made it name the old incarnation while the delete removed
-// the new one.
+// delete removed, as the broker reports it from under its name lock.
+// Master read the record before the delete, so a recreate in between
+// made it name the old incarnation while the delete removed the new
+// one.
 func TestLeaderDirectDeleteBroadcastsTheDeletedIncarnation(t *testing.T) {
 	br := &racingDeleteBroker{current: "000000000000000a", recreate: "000000000000000b"}
 	br.fakeBroker = &fakeBroker{

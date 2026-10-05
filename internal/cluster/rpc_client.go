@@ -298,9 +298,9 @@ func (c *PeerClient) AlterTopic(ctx context.Context, addr, topicName string, bod
 const actorDropWarnInterval = time.Minute
 
 // sendWithActor sends a forwarded topic write that names its caller in
-// the optional trailing actor field (audit H1), so the leader re-checks
-// the caller's rights. A leader that predates the field (3.0.x, during
-// a rolling upgrade) refuses the whole payload at decode, before acting
+// the optional trailing actor field, so the leader re-checks the
+// caller's rights. A leader that predates the field (3.0.x, during a
+// rolling upgrade) refuses the whole payload at decode, before acting
 // on any of it, with a 400 whose error is refusalPrefix followed by
 // nodewire.TrailingPayloadError; only that exact refusal is resent,
 // once, without the actor, which is the request that leader has always

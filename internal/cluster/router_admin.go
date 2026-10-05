@@ -21,10 +21,10 @@ import (
 // bad gateway the client should treat as broken.
 //
 // The answer carries no decision of the leader's: the forward may have
-// been applied there before its reply was lost, or the client went
-// away while the leader ran it. A writer that records outcomes (the
-// topic handlers' audit writer) is told so first, so the change is
-// audited as unknown rather than failed (audit M13).
+// been applied there before its reply was lost, or the client went away
+// while the leader ran it. A writer that records outcomes (the topic
+// handlers' audit writer) is told so first, so the change is audited as
+// unknown rather than failed.
 func writeLeaderForwardError(w http.ResponseWriter, err error) {
 	if m, ok := w.(undecidedMarker); ok {
 		m.MarkUndecided()
@@ -41,7 +41,7 @@ type undecidedMarker interface {
 // forwardActor is the caller a forwarded topic write is made for: the
 // authenticated user of the request, or "" when security is off. The
 // leader looks it up in its own replica and re-checks that user's
-// rights (audit H1).
+// rights.
 func forwardActor(ctx context.Context) string {
 	if id, ok := security.IdentityFrom(ctx); ok {
 		return id.Username

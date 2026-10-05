@@ -954,10 +954,10 @@ func (f *laggingLeaderMetastore) GetTopic(ctx context.Context, name string) (top
 }
 
 // Every topic mutation reads the record it rewrites from the local
-// replica, so on a just-elected leader it must barrier before that read
-// (audit M3, verify-topics-4): the old leader raised orders to 6
-// partitions, the new leader's FSM still shows 3, and a retention alter
-// built from the stale read would write 3 back.
+// replica, so on a just-elected leader it must barrier before that
+// read: the old leader raised orders to 6 partitions, the new leader's
+// FSM still shows 3, and a retention alter built from the stale read
+// would write 3 back.
 func TestTopicMutationsBarrierBeforeReading(t *testing.T) {
 	mutations := map[string]func(*Manager) error{
 		"retention": func(m *Manager) error {
@@ -1028,10 +1028,10 @@ func TestTopicMutationsBarrierBeforeReading(t *testing.T) {
 	}
 }
 
-// The broker's keep-forever sentinel (audit M5): retention_ms -1 on
-// create or alter keeps records forever and is stored as 0, which
-// storage and the cold walk read as no age limit; 0 still means the
-// operator default; any other negative value is refused. Master refused
+// The broker's keep-forever sentinel: retention_ms -1 on create or
+// alter keeps records forever and is stored as 0, which storage and the
+// cold walk read as no age limit; 0 still means the operator default;
+// any other negative value is refused. Master refused
 // -1, so nothing could ask for keep forever when the operator default
 // was an age.
 func TestKeepForeverRetentionSentinel(t *testing.T) {

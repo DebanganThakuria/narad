@@ -63,10 +63,9 @@ func checkAudit(t *testing.T, name string, got []map[string]any, want ...auditWa
 }
 
 // Every topic create, alter, schema change, delete, attach and detach
-// writes one audit line on the node the client called, with the
-// caller, the target, the outcome and the status, whether this node
-// applied it or the leader did (audit M13, topic half). Master logged
-// no audit line for any of them.
+// writes one audit line on the node the client called, with the caller,
+// the target, the outcome and the status, whether this node applied it
+// or the leader did. Master logged no audit line for any of them.
 func TestTopicMutationsAreAudited(t *testing.T) {
 	alice := user.User{Username: "alice", Grants: []user.Grant{{Action: user.ActionCreate, Patterns: []string{"*"}}}}
 	bob := user.User{Username: "bob"}

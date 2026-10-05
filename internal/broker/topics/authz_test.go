@@ -1,13 +1,13 @@
 package topics
 
-// The leader re-checks topic ownership (audit H1, verify-topics-1). The
-// HTTP ingress authorizes against its own replica before the Manager
-// takes the name lock, so a request authorized against one topic could
-// act on whatever topic held the name once the lock was granted (a
-// delete racing a recreate, a lagging follower). These tests call the
-// Manager as the ingress does once its own check has passed, with the
-// request identity on the context, and expect the Manager to refuse
-// under its lock, against the record as it stands.
+// The leader re-checks topic ownership. The HTTP ingress authorizes
+// against its own replica before the Manager takes the name lock, so a
+// request authorized against one topic could act on whatever topic held
+// the name once the lock was granted (a delete racing a recreate, a
+// lagging follower). These tests call the Manager as the ingress does
+// once its own check has passed, with the request identity on the
+// context, and expect the Manager to refuse under its lock, against the
+// record as it stands.
 
 import (
 	"context"

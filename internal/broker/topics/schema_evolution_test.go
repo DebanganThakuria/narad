@@ -217,13 +217,13 @@ func TestUpdateTopicSchema_ChildIsParentManagedRegardlessOfBaseVersion(t *testin
 	}
 }
 
-// TestAnnotationOnlySchemaChangeRegistersNothing is the audit's repro
-// (verify-schemas-2): twenty PATCHes that only reword a description
-// each appended a full version, copied into every child, and the
-// history grew without anything it accepts changing. A change only to
-// annotations (title, description, examples, $comment, default,
-// deprecated, readOnly, writeOnly, at schema positions) now registers
-// nothing; a property named "description" is not an annotation.
+// TestAnnotationOnlySchemaChangeRegistersNothing: twenty PATCHes that
+// only reword a description each appended a full version, copied into
+// every child, and the history grew without anything it accepts
+// changing. A change only to annotations (title, description, examples,
+// $comment, default, deprecated, readOnly, writeOnly, at schema
+// positions) now registers nothing; a property named "description" is
+// not an annotation.
 func TestAnnotationOnlySchemaChangeRegistersNothing(t *testing.T) {
 	ms := newFakeMetastore()
 	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 3}
@@ -318,7 +318,7 @@ func TestSchemaHistoryStopsAtTheTopicBudget(t *testing.T) {
 	}
 }
 
-// TestSchemaIsStoredCompacted (audit schemas:6): a pretty-printed body
+// TestSchemaIsStoredCompacted: a pretty-printed body
 // was stored byte for byte, indentation included, while every read path
 // hands schemas back compacted. Schemas are now stored compacted, on
 // create and on update.

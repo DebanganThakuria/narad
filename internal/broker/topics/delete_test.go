@@ -32,9 +32,9 @@ func (f *assignmentLockMetastore) DeleteTopic(ctx context.Context, name string) 
 
 // A topic delete takes the assignment lock around its metastore write,
 // so a controller placement pass that re-read the topic under that lock
-// cannot write owner rows for it after the delete (audit M2, L6: master
-// deleted while the pass held the lock, leaving rows a later same-named
-// topic inherited).
+// cannot write owner rows for it after the delete (master deleted while
+// the pass held the lock, leaving rows a later same-named topic
+// inherited).
 func TestDeleteHoldsTheAssignmentLock(t *testing.T) {
 	ms := &assignmentLockMetastore{fakeMetastore: newFakeMetastore(), deleteReached: make(chan string, 1)}
 	ms.topics["orders"] = topic.Topic{Name: "orders", ID: "0000000000000001", Partitions: 3}
@@ -60,11 +60,11 @@ func TestDeleteHoldsTheAssignmentLock(t *testing.T) {
 	}
 }
 
-// DeleteTopicID names the incarnation it actually deleted (audit M8).
-// The HTTP delete read the incarnation for the purge broadcast before
-// the delete took the name lock, so a delete and recreate interleaved
-// between the two made the broadcast name the wrong incarnation, and
-// every other node kept the deleted one's files until it restarted.
+// DeleteTopicID names the incarnation it actually deleted. The HTTP
+// delete read the incarnation for the purge broadcast before the delete
+// took the name lock, so a delete and recreate interleaved between the
+// two made the broadcast name the wrong incarnation, and every other
+// node kept the deleted one's files until it restarted.
 func TestDeleteTopicIDNamesTheDeletedIncarnation(t *testing.T) {
 	ms := newFakeMetastore()
 	m := newTestManager(t, ms, nil)

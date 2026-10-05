@@ -229,10 +229,10 @@ type leaderBarrierer interface {
 
 // leaderBarrier makes sure, on a just-elected leader, that the local
 // replica has applied everything earlier leaders committed before a
-// mutation reads the record it rewrites (audit M3). It costs one Raft
-// round trip per leadership term and nothing after. Callers hold the
-// topic's name lock and call it before their first read. A metastore
-// without the capability (tests, embedded use) skips it.
+// mutation reads the record it rewrites. It costs one Raft round trip
+// per leadership term and nothing after. Callers hold the topic's name
+// lock and call it before their first read. A metastore without the
+// capability (tests, embedded use) skips it.
 func (m *Manager) leaderBarrier(ctx context.Context) error {
 	if b, ok := m.metastore.(leaderBarrierer); ok {
 		return b.LeaderBarrier(ctx)

@@ -251,15 +251,15 @@ func (s *RPCServer) handleDeleteTopic(payload []byte) nodewire.Response {
 }
 
 // actorContext returns the context a forwarded topic write runs under.
-// With an actor (the user the forwarding node authenticated), it is that
-// user as THIS node, the leader, knows it: looked up in the leader's own
-// replica after the once-per-term leader barrier, so the Manager's
-// owner-or-admin and create-grant re-checks judge the caller by the
-// leader's records (audit H1). A user the leader does not know is
-// refused with 403 before anything runs. The actor is trusted because
-// node RPC is authenticated with the cluster secret. Without an actor
-// (security off on the forwarder, or a 3.0.x forwarder) the write runs
-// with no identity, as before: its owner check happened at the ingress.
+// With an actor (the user the forwarding node authenticated), it is
+// that user as THIS node, the leader, knows it: looked up in the
+// leader's own replica after the once-per-term leader barrier, so the
+// Manager's owner-or-admin and create-grant re-checks judge the caller
+// by the leader's records. A user the leader does not know is refused
+// with 403 before anything runs. The actor is trusted because node RPC
+// is authenticated with the cluster secret. Without an actor (security
+// off on the forwarder, or a 3.0.x forwarder) the write runs with no
+// identity, as before: its owner check happened at the ingress.
 func (s *RPCServer) actorContext(actor string) (context.Context, *nodewire.Response) {
 	ctx := rpcRequestContext()
 	if actor == "" {
@@ -286,9 +286,9 @@ func (s *RPCServer) actorContext(actor string) (context.Context, *nodewire.Respo
 }
 
 // deleteTopicReportingID deletes the topic and returns the incarnation
-// ID the purge fan-out should name (audit M8). A broker that reports the
-// incarnation it deleted from under its name lock is asked for it, so an
-// interleaved delete and recreate cannot make the fan-out name the
+// ID the purge fan-out should name. A broker that reports the
+// incarnation it deleted from under its name lock is asked for it, so
+// an interleaved delete and recreate cannot make the fan-out name the
 // wrong one; otherwise the ID is read before the delete, as before, and
 // a failed read purges by name. The ID accompanies a PurgeError too:
 // the metadata delete committed and the other members still have to
@@ -323,16 +323,16 @@ func (s *RPCServer) handlePurgeTopic(payload []byte) nodewire.Response {
 	}
 	// Wait until this node's local metastore replica reflects the
 	// deletion before removing files. The leader broadcasts this purge
-	// after the delete is quorum-committed, but a follower applies it to
-	// its local replica asynchronously. Purging before the local replica
-	// catches up would let a concurrent produce-dispatch/consume re-open
-	// (and thus resurrect) the partition logs via Logs.Get, which keys
-	// off the local replica. If the replica never reflects the deletion
-	// (timeout), we skip the purge rather than risk deleting live data
-	// and answer a retriable 503 with code purge_deferred (audit M8),
-	// not the 204 of a purge that ran: the leader then knows this member
-	// still holds the files and asks again; the startup orphan sweep is
-	// the backstop.
+	// after the delete is quorum-committed, but a follower applies it
+	// to its local replica asynchronously. Purging before the local
+	// replica catches up would let a concurrent
+	// produce-dispatch/consume re-open (and thus resurrect) the
+	// partition logs via Logs.Get, which keys off the local replica. If
+	// the replica never reflects the deletion (timeout), we skip the
+	// purge rather than risk deleting live data and answer a retriable
+	// 503 with code purge_deferred, not the 204 of a purge that ran:
+	// the leader then knows this member still holds the files and asks
+	// again; the startup orphan sweep is the backstop.
 	//
 	// "Reflects the deletion" is judged per INCARNATION when the purge
 	// names one: the record is gone, or the name now belongs to a
@@ -409,9 +409,9 @@ func (s *RPCServer) handleTopicPartitionStats(payload []byte) nodewire.Response 
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, "invalid topic stats request: "+err.Error())
 	}
-	// One partition is asked for, so one is described: a broker that can
-	// describe a single partition does so without reading the topic's
-	// schema or stat'ing its other partitions (audit schemas:5).
+	// One partition is asked for, so one is described: a broker that
+	// can describe a single partition does so without reading the
+	// topic's schema or stat'ing its other partitions.
 	if reader, ok := s.broker.(broker.PartitionStatsReader); ok {
 		stats, err := reader.LocalPartitionStats(rpcRequestContext(), req.Topic, req.Partition)
 		if err != nil {

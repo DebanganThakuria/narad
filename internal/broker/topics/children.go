@@ -3,7 +3,7 @@ package topics
 // Fan-out attach/detach. The invariants live in the metastore FSM,
 // where both topic records are mutated in one transaction; this layer
 // adds name validation, friendly not-found errors, and the leader's
-// ownership re-check (audit H1) under both names' locks.
+// ownership re-check under both names' locks.
 
 import (
 	"context"

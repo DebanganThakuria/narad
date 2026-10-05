@@ -292,9 +292,9 @@ func TestReconcileChildWiderThanParent(t *testing.T) {
 
 // A just-elected leader's FSM may not have applied the placements the
 // previous leader committed, so the sweep must barrier before it reads
-// assignments (verify-concurrency-7): on master the sweep saw orders/0
-// unassigned and replaced the owner the old leader had placed, whose
-// disk may already hold records. A failed barrier skips the pass.
+// assignments: on master the sweep saw orders/0 unassigned and replaced
+// the owner the old leader had placed, whose disk may already hold
+// records. A failed barrier skips the pass.
 func TestAssignSweepBarriersBeforeReading(t *testing.T) {
 	store := newFakeControllerStore("narad-0", "narad-1", "narad-2")
 	store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 3}}
@@ -322,8 +322,8 @@ func TestAssignSweepBarriersBeforeReading(t *testing.T) {
 }
 
 // The sweep places new partitions only on members that are not being
-// decommissioned (verify-operability-7: master placed them round-robin
-// over every live member, draining ones included).
+// decommissioned (master placed them round-robin over every live
+// member, draining ones included).
 func TestAssignSweepSkipsDrainingMembers(t *testing.T) {
 	store := newFakeControllerStore("narad-0", "narad-1", "narad-2")
 	store.members[1].Draining = true
@@ -370,8 +370,8 @@ func TestAssignSweepLeavesPartitionsUnassignedWhenAllDraining(t *testing.T) {
 }
 
 // A topic deleted between the sweep's topic list and its assignment
-// lock must be skipped (verify-topics-3: master wrote assignment rows
-// for the deleted topic, which a later same-named topic inherited).
+// lock must be skipped (master wrote assignment rows for the deleted
+// topic, which a later same-named topic inherited).
 func TestAssignSweepSkipsTopicDeletedAfterList(t *testing.T) {
 	store := newFakeControllerStore("narad-0", "narad-1", "narad-2")
 	store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 3}}

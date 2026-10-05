@@ -30,10 +30,10 @@ import (
 // Clients that need atomicity send one field per request. This is the
 // documented contract (docs/build/topics.md).
 //
-// retention_ms / max_*_per_partition are *int64 (rather than int64)
-// so the caller can distinguish "unset" from "set to zero". An explicit
-// retention_ms of 0 keeps records forever (audit M5); a zero cap
-// inherits the broker default. partitions uses 0 as unset.
+// retention_ms / max_*_per_partition are *int64 (rather than int64) so
+// the caller can distinguish "unset" from "set to zero". An explicit
+// retention_ms of 0 keeps records forever; a zero cap inherits the
+// broker default. partitions uses 0 as unset.
 type alterRequest struct {
 	Partitions                int             `json:"partitions"`
 	RetentionMs               *int64          `json:"retention_ms,omitempty"`

@@ -8,12 +8,12 @@ import (
 )
 
 // canonicalSchema returns the schema with insignificant whitespace
-// removed (audit schemas:6). Registration used to store a request's raw
-// bytes, so a client's indentation became part of the replicated
-// history, and of every fan-out child's copy, while every read path
-// hands schemas back compacted. New versions are stored compacted;
-// histories written before stay as they are. A body that is not JSON is
-// returned unchanged for the definition check to report.
+// removed. Registration used to store a request's raw bytes, so a
+// client's indentation became part of the replicated history, and of
+// every fan-out child's copy, while every read path hands schemas back
+// compacted. New versions are stored compacted; histories written
+// before stay as they are. A body that is not JSON is returned
+// unchanged for the definition check to report.
 func canonicalSchema(raw []byte) []byte {
 	var buf bytes.Buffer
 	if err := json.Compact(&buf, raw); err != nil {
@@ -50,10 +50,10 @@ var (
 )
 
 // annotationOnlyChange reports whether next differs from prev only in
-// annotation keywords at schema positions (audit H14). Such a change
-// accepts exactly what prev accepts, and an automated PATCH loop that
-// only reworded a description appended a full version, copied into
-// every child, each time; it now registers nothing.
+// annotation keywords at schema positions. Such a change accepts
+// exactly what prev accepts, and an automated PATCH loop that only
+// reworded a description appended a full version, copied into every
+// child, each time; it now registers nothing.
 func annotationOnlyChange(prev, next []byte) bool {
 	a, ok := decodeSchemaValue(prev)
 	if !ok {

@@ -96,10 +96,10 @@ func partitionRange(c *httpClient, topic string, partition int) (oldest, hwm int
 }
 
 // partitionStat is one partition_stats entry of a topic GET as the CLI
-// reads it. Since the partial topic GET (audit M15), a partition whose
-// owner is down is a zero placeholder with Status "owner_unavailable";
-// its numbers must never be read as the partition's. A server that
-// predates the field sends no status, and never a placeholder.
+// reads it. Since the partial topic GET, a partition whose owner is
+// down is a zero placeholder with Status "owner_unavailable"; its
+// numbers must never be read as the partition's. A server that predates
+// the field sends no status, and never a placeholder.
 type partitionStat struct {
 	Index         int    `json:"index"`
 	OldestOffset  int64  `json:"oldest_offset"`

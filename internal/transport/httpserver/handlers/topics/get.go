@@ -14,11 +14,11 @@ import (
 //
 // Every partition carries a status. In a cluster the stats of remote
 // partitions come from their owners, and when some owners are down the
-// answer is still a 200 (audit M15): the partitions that could be read
-// carry their stats and status "ok", every other one a zero placeholder
-// with status "owner_unavailable" and its owner's liveness, and the
-// body carries "partial": true. Only a failure to read the cluster's
-// own metadata is an error (a 503).
+// answer is still a 200: the partitions that could be read carry their
+// stats and status "ok", every other one a zero placeholder with status
+// "owner_unavailable" and its owner's liveness, and the body carries
+// "partial": true. Only a failure to read the cluster's own metadata is
+// an error (a 503).
 func Get(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")

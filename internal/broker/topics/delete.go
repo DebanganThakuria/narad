@@ -29,20 +29,20 @@ func (e PurgeError) Unwrap() error {
 // metastore record + offsets + schemas. Irreversible.
 //
 // The request identity must manage the topic as it stands under the
-// name lock (audit H1): a delete authorized at the ingress against one
-// topic is refused if the name now holds someone else's.
+// name lock: a delete authorized at the ingress against one topic is
+// refused if the name now holds someone else's.
 func (m *Manager) DeleteTopic(ctx context.Context, name string) error {
 	_, err := m.DeleteTopicID(ctx, name)
 	return err
 }
 
 // DeleteTopicID is DeleteTopic that also returns the incarnation ID it
-// deleted (audit M8): the record read under the name lock, which is the
-// one the delete removes. A caller that fans the purge out to the other
-// nodes names this ID, not one it read before the lock: a delete and
-// recreate interleaved between that read and the delete made the
-// fan-out name the wrong incarnation, and every other node kept the
-// deleted one's files until it restarted.
+// deleted: the record read under the name lock, which is the one the
+// delete removes. A caller that fans the purge out to the other nodes
+// names this ID, not one it read before the lock: a delete and recreate
+// interleaved between that read and the delete made the fan-out name
+// the wrong incarnation, and every other node kept the deleted one's
+// files until it restarted.
 //
 // The ID is returned whenever the metadata delete committed, including
 // with a PurgeError (the local purge failed, but the topic is gone and
@@ -88,9 +88,8 @@ type assignmentLocker interface {
 // before writing owners, so holding it here means the pass either
 // finishes first (and the delete removes its rows) or sees the topic
 // gone; without it a pass could write rows for the deleted topic that a
-// later same-named topic inherited (audit M2, L6). The caller holds the
-// topic's name lock: the lock order is name lock, then assignment lock,
-// everywhere.
+// later same-named topic inherited. The caller holds the topic's name
+// lock: the lock order is name lock, then assignment lock, everywhere.
 func (m *Manager) deleteTopicMetadata(ctx context.Context, name string) error {
 	if l, ok := m.metastore.(assignmentLocker); ok {
 		unlock := l.LockAssignments()

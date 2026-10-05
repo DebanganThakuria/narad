@@ -275,9 +275,9 @@ func (f *schemaCountingMetastore) LatestSchema(_ context.Context, topicName stri
 }
 
 // A describe reports only the latest schema version, so it reads only
-// that one (audit schemas:5). Master walked the whole history, one read
-// and one copy per version, on every GET and again on every owner the
-// cluster router asked for stats.
+// that one. Master walked the whole history, one read and one copy per
+// version, on every GET and again on every owner the cluster router
+// asked for stats.
 func TestTopicDetailsReadOnlyTheLatestSchema(t *testing.T) {
 	ms := &schemaCountingMetastore{fakeMetastore: newFakeMetastore()}
 	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 2}

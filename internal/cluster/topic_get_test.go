@@ -127,13 +127,13 @@ func localDetails(n int) topic.Details {
 }
 
 // A topic GET with a partition owner down answers with the stats it
-// could read, one entry per partition, and marks the rest (audit M15,
-// verify-operability-10): a dead owner, an owner whose stats RPC fails,
-// an owner the node has no address for, and a partition with no owner
-// yet each get a zero placeholder with status owner_unavailable and the
-// owner's liveness, and the topic is partial. Master failed the whole
-// GET with ErrNotPartitionOwner (421) as soon as one owner was down, so
-// the operator lost every partition's stats exactly when a node died.
+// could read, one entry per partition, and marks the rest: a dead
+// owner, an owner whose stats RPC fails, an owner the node has no
+// address for, and a partition with no owner yet each get a zero
+// placeholder with status owner_unavailable and the owner's liveness,
+// and the topic is partial. Master failed the whole GET with
+// ErrNotPartitionOwner (421) as soon as one owner was down, so the
+// operator lost every partition's stats exactly when a node died.
 func TestGetTopicWithAnOwnerDownIsPartial(t *testing.T) {
 	store := getTopicFixture(t, 6,
 		map[int]string{0: "node-self", 1: "node-live", 2: "node-dead", 3: "node-silent", 5: "node-gone"},

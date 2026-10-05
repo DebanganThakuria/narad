@@ -60,8 +60,8 @@ func (m *Manager) GetTopicDetails(ctx context.Context, name string) (topic.Detai
 	// The current schema comes from the persisted history, the same
 	// source the produce path validates against, so a describe on any
 	// node reports what that node's replica enforces. Only the latest
-	// version is read (audit schemas:5): walking and copying the whole
-	// history cost one read and one copy per version on every GET.
+	// version is read: walking and copying the whole history cost one
+	// read and one copy per version on every GET.
 	version, raw, err := m.latestSchema(ctx, name)
 	if err != nil {
 		return topic.Details{}, fmt.Errorf("topics: read latest schema: %w", err)
@@ -95,8 +95,8 @@ func (m *Manager) GetTopicDetails(ctx context.Context, name string) (topic.Detai
 // without reading the topic's schema or describing its other
 // partitions. The cluster's per-partition stats RPC serves it: the
 // router asks each owner for one partition, and a whole describe there
-// cost a schema read and a stat of every partition per call (audit
-// schemas:5). A partition outside the topic's range is ErrInvalid.
+// cost a schema read and a stat of every partition per call. A
+// partition outside the topic's range is ErrInvalid.
 func (m *Manager) LocalPartitionStats(ctx context.Context, name string, partition int) (topic.PartitionStats, error) {
 	t, err := m.GetTopic(ctx, name)
 	if err != nil {

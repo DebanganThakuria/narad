@@ -166,10 +166,9 @@ func TestRPCServerForwardedDeleteAnswers204OnLocalPurgeFailure(t *testing.T) {
 
 // A purge whose local replica still shows the incarnation after the
 // apply wait answers a retriable 503 with code purge_deferred instead
-// of the 204 of a purge that ran, and purges nothing (audit M8,
-// verify-concurrency-4): the leader then knows this member still holds
-// the files and asks again. Master answered 204, so the leader counted
-// the member as purged.
+// of the 204 of a purge that ran, and purges nothing: the leader then
+// knows this member still holds the files and asks again. Master
+// answered 204, so the leader counted the member as purged.
 func TestPurgeAnswersRetriableWhileTheReplicaLags(t *testing.T) {
 	store := newTestStore(t)
 	br := &purgeOnlyBroker{}
@@ -219,9 +218,9 @@ func (b *statsOnlyBroker) LocalPartitionStats(_ context.Context, _ string, parti
 }
 
 // An owner answers the per-partition stats RPC from the one partition,
-// without a whole describe and so without reading the topic's schema
-// (audit schemas:5). Master ran GetTopicDetails per call: one schema
-// read and one stat of every partition for each partition asked for.
+// without a whole describe and so without reading the topic's schema.
+// Master ran GetTopicDetails per call: one schema read and one stat of
+// every partition for each partition asked for.
 func TestPartitionStatsRPCReadsNoSchema(t *testing.T) {
 	br := &statsOnlyBroker{}
 	s := &RPCServer{broker: br, logger: discardLogger()}

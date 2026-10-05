@@ -1,15 +1,15 @@
 package topics
 
-// Leader-side authorization of topic mutations (audit H1). The HTTP
-// ingress authorizes a mutation against its own replica before routing
-// it, and that check alone left two holes: it ran before the per-name
-// lock, so a request authorized while the name held one topic acted on
-// whatever topic held the name once the lock was granted (a delete
-// racing a delete-and-recreate), and it read a replica that may lag the
-// leader. The Manager therefore re-checks owner-or-admin from the
-// request's identity after taking the name lock and the leader barrier,
-// against the record as it stands; a missing record under the lock is a
-// 404, never a pass.
+// Leader-side authorization of topic mutations. The HTTP ingress
+// authorizes a mutation against its own replica before routing it, and
+// that check alone left two holes: it ran before the per-name lock, so
+// a request authorized while the name held one topic acted on whatever
+// topic held the name once the lock was granted (a delete racing a
+// delete-and-recreate), and it read a replica that may lag the leader.
+// The Manager therefore re-checks owner-or-admin from the request's
+// identity after taking the name lock and the leader barrier, against
+// the record as it stands; a missing record under the lock is a 404,
+// never a pass.
 //
 // No identity on the context means no check: security is disabled, or
 // the caller is internal (the purge broadcast, startup reconciliation).

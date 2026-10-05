@@ -245,10 +245,10 @@ func validateCreateAsChild(opts CreateOpts) error {
 
 // resolveCreateAsChild reads the parent of a create-as-child, checks
 // that the request identity manages it (a child receives every record
-// of its parent, audit H1), and defaults Partitions to its count:
-// matching counts make the anti-affine per-key guarantee exact. It runs
-// under both names' locks, after the leader barrier, and before
-// anything is written, so every failure is a clean 4xx.
+// of its parent), and defaults Partitions to its count: matching counts
+// make the anti-affine per-key guarantee exact. It runs under both
+// names' locks, after the leader barrier, and before anything is
+// written, so every failure is a clean 4xx.
 func (m *Manager) resolveCreateAsChild(ctx context.Context, opts *CreateOpts) error {
 	if opts.Parent == "" {
 		return nil
@@ -346,10 +346,10 @@ func defaultedNonNegative(v, def int64, field string) (int64, error) {
 }
 
 // resolveRetention turns a requested retention_ms into the value to
-// store (audit M5): topic.RetentionKeepForever (-1) keeps records
-// forever and stores 0; 0 inherits Config.DefaultRetentionMs (keep
-// forever only when the operator default is 0); any other negative
-// value is invalid; the result must clear the one-hour floor.
+// store: topic.RetentionKeepForever (-1) keeps records forever and
+// stores 0; 0 inherits Config.DefaultRetentionMs (keep forever only
+// when the operator default is 0); any other negative value is invalid;
+// the result must clear the one-hour floor.
 func (m *Manager) resolveRetention(requested int64) (int64, error) {
 	var retentionMs int64
 	switch {

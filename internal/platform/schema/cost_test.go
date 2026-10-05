@@ -10,14 +10,14 @@ import (
 	"time"
 )
 
-// TestCostlyPatternsAreRefused covers the pattern half of schemas:3.
+// TestCostlyPatternsAreRefused: registration refuses costly patterns.
 // Go's regexp is linear in the input, but each byte costs every
 // instruction the matcher visits for it: one per partial match still
 // alive (an unanchored counted repetition keeps one per starting
 // position) plus every alternation, capture and empty-width assertion
 // on the way to them. The 39-byte {"type":"string","pattern":
-// "a.{1000}b"} took 5 s per 1 MiB string, and "(?:\B){1000}x" keeps
-// one partial match yet walks a thousand assertions per byte (3.4 s).
+// "a.{1000}b"} took 5 s per 1 MiB string, and "(?:\B){1000}x" keeps one
+// partial match yet walks a thousand assertions per byte (3.4 s).
 // Registration refuses a pattern that visits more than 32 instructions
 // per byte, wherever the validator can apply it.
 func TestCostlyPatternsAreRefused(t *testing.T) {

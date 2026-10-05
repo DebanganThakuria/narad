@@ -66,15 +66,14 @@ func nested(open, leaf, closing string, depth int) string {
 	return strings.Repeat(open, depth) + leaf + strings.Repeat(closing, depth)
 }
 
-// TestDeepPayloadIsRefusedBeforeValidation is the audit's repro
-// (verify-schemas-0). Each schema is recursive, registrable and
-// ordinary (arrays of arrays, object trees, a JSON-value union). A
-// 20 KB payload nested 9990 deep made the validator build an error at
-// every level, each cloning the whole instance path: about 800 MiB
-// retained for the array shape and 2.4 GiB for the anyOf shape, and
-// close to 800 MiB of garbage even for a valid payload of the anyOf
-// shape. A payload deeper than MaxPayloadDepth is refused before
-// validation, so it costs almost nothing.
+// TestDeepPayloadIsRefusedBeforeValidation: each schema is recursive,
+// registrable and ordinary (arrays of arrays, object trees, a
+// JSON-value union). A 20 KB payload nested 9990 deep made the
+// validator build an error at every level, each cloning the whole
+// instance path: about 800 MiB retained for the array shape and 2.4 GiB
+// for the anyOf shape, and close to 800 MiB of garbage even for a valid
+// payload of the anyOf shape. A payload deeper than MaxPayloadDepth is
+// refused before validation, so it costs almost nothing.
 func TestDeepPayloadIsRefusedBeforeValidation(t *testing.T) {
 	const depth = 9990
 	cases := []struct {

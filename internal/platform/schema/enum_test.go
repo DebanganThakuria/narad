@@ -41,12 +41,11 @@ func repeatedItems(item string, n int) []byte {
 	return []byte("[" + strings.TrimSuffix(strings.Repeat(item+",", n), ",") + "]")
 }
 
-// TestLargeEnumIsNotLinear is the audit's repro (schemas:3): the
-// validator checked enum membership by a linear scan that parses both
-// sides of every numeric comparison into a big.Rat, so a registrable
-// 256 KiB allowlist of 45k integer IDs took 14 ms per payload item
-// (about 14 s for 1000 items) and a 26k-value string enum 11.5 s on a
-// 1 MiB body. Membership is now a hash lookup.
+// TestLargeEnumIsNotLinear: the validator checked enum membership by a
+// linear scan that parses both sides of every numeric comparison into a
+// big.Rat, so a registrable 256 KiB allowlist of 45k integer IDs took
+// 14 ms per payload item (about 14 s for 1000 items) and a 26k-value
+// string enum 11.5 s on a 1 MiB body. Membership is now a hash lookup.
 func TestLargeEnumIsNotLinear(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

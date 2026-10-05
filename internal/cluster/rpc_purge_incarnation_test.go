@@ -266,10 +266,10 @@ func (b *racingDeleteBroker) DeleteTopicID(context.Context, string) (string, err
 }
 
 // The forwarded delete's purge fan-out names the incarnation the delete
-// removed, as the broker reports it from under its name lock (audit M8).
-// Master read the incarnation before the delete, so a recreate in
-// between made the fan-out name the old one while the delete removed the
-// new one, and the other members kept the deleted incarnation's files.
+// removed, as the broker reports it from under its name lock. Master
+// read the incarnation before the delete, so a recreate in between made
+// the fan-out name the old one while the delete removed the new one,
+// and the other members kept the deleted incarnation's files.
 func TestForwardedDeleteBroadcastsTheDeletedIncarnation(t *testing.T) {
 	br := &racingDeleteBroker{
 		current:  topic.Topic{Name: "orders", ID: "000000000000000a"},

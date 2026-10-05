@@ -1,6 +1,6 @@
 package topics
 
-// Topic name limits (audit L9 and M6).
+// Topic name limits.
 //
 // Length. A topic name is a directory name, and storage derives other
 // file names from it by adding a prefix or suffix: the quarantine

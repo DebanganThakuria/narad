@@ -1137,9 +1137,9 @@ func (*fakeBroker) NoteRemoteClaim(string) {}
 
 // An explicit retention_ms of 0 is documented as keep forever; master
 // handed it to the broker as 0, which means the operator default (12h
-// in the Helm chart), so an archive topic aged out (audit M5,
-// verify-topics-5). The broker now receives its keep-forever sentinel,
-// on the leader directly and in the body forwarded to the leader.
+// in the Helm chart), so an archive topic aged out. The broker now
+// receives its keep-forever sentinel, on the leader directly and in the
+// body forwarded to the leader.
 func TestExplicitZeroRetentionMeansKeepForever(t *testing.T) {
 	t.Run("create on the leader", func(t *testing.T) {
 		var got brokertopics.CreateOpts

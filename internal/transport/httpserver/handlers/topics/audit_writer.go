@@ -1,17 +1,16 @@
 package topics
 
-// Audit trail for topic mutations (audit M13, topic half). Every topic
-// create, alter, schema change, delete, attach and detach that passed
-// body validation writes one audit line, when the request finishes, on
-// the node the client called, whether this node applied it or forwarded
-// it to the leader. The outcome is read from the status the client got
-// (for a forward, the leader's), except that a request that ended
-// without a decision this node knows is "unknown": a forward whose
-// reply never came back (the router marks the writer undecided before
-// answering 503), and a 499 for a client that went away mid-change.
-// Either may have been applied, so neither is logged as rejected or
-// failed: an audit query for the changes that happened must not miss
-// one.
+// Audit trail for topic mutations. Every topic create, alter, schema
+// change, delete, attach and detach that passed body validation writes
+// one audit line, when the request finishes, on the node the client
+// called, whether this node applied it or forwarded it to the leader.
+// The outcome is read from the status the client got (for a forward,
+// the leader's), except that a request that ended without a decision
+// this node knows is "unknown": a forward whose reply never came back
+// (the router marks the writer undecided before answering 503), and a
+// 499 for a client that went away mid-change. Either may have been
+// applied, so neither is logged as rejected or failed: an audit query
+// for the changes that happened must not miss one.
 
 import (
 	"net/http"

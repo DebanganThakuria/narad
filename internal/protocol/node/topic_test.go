@@ -45,10 +45,10 @@ func preActorDecode(t *testing.T, payload []byte, op Operation, fields func(*rea
 }
 
 // A forwarded create, alter or delete names the caller in an optional
-// trailing Actor field (audit H1): absent, the payload is byte-for-byte
-// the pre-actor one; present, it round-trips, and a decoder that
-// predates the field refuses it with TrailingPayloadError, which is
-// what the sender's fallback recognizes.
+// trailing Actor field: absent, the payload is byte-for-byte the
+// pre-actor one; present, it round-trips, and a decoder that predates
+// the field refuses it with TrailingPayloadError, which is what the
+// sender's fallback recognizes.
 func TestTopicRequestsCarryAnOptionalActor(t *testing.T) {
 	for _, op := range []Operation{OpCreateTopic, OpAlterTopic} {
 		for _, req := range []TopicBodyRequest{
