@@ -191,3 +191,8 @@ func TestForwardedDecommissionIsPreflightedOnTheLeader(t *testing.T) {
 		t.Fatalf("forwarded cancel: status %d (%s), want 204", res.Status, res.Body)
 	}
 }
+
+// The HTTP abort handler finds the leader forwarder through this method.
+var _ interface {
+	ForwardAbortMove(ctx context.Context, topicName string, partition int, expectedTarget string) (bool, error)
+} = (*Router)(nil)
