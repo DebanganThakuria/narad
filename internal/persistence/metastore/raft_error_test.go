@@ -3,6 +3,7 @@ package metastore
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/raft"
@@ -26,6 +27,23 @@ func TestClassifyRaftError(t *testing.T) {
 	for _, in := range unavailable {
 		if got := classifyRaftError(in); !errors.Is(got, errs.ErrUnavailable) {
 			t.Fatalf("classifyRaftError(%v) not ErrUnavailable: %v", in, got)
+		}
+	}
+
+	// Leadership lost after the append, and a shutdown that can end a
+	// pending apply, leave the entry's fate open: a later leader may still
+	// commit it. Every other refusal comes before the append.
+	undecided := map[error]bool{
+		raft.ErrLeadershipLost: true,
+		raft.ErrRaftShutdown:   true,
+	}
+	for _, in := range unavailable {
+		got := classifyRaftError(in)
+		if errors.Is(got, errs.ErrOutcomeUnknown) != undecided[in] {
+			t.Fatalf("classifyRaftError(%v) = %v; outcome unknown = %v, want %v", in, got, errors.Is(got, errs.ErrOutcomeUnknown), undecided[in])
+		}
+		if !strings.Contains(got.Error(), in.Error()) {
+			t.Fatalf("classifyRaftError(%v) = %q dropped the cause", in, got)
 		}
 	}
 

@@ -108,7 +108,8 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 		}
 		aw := newAuditWriter(w)
 		w = aw
-		defer func() { auditAlter(s, r, aw, topicName, req) }()
+		var progress alterProgress
+		defer func() { auditAlter(s, r, aw, topicName, req, progress) }()
 		if !s.AuthorizeTopicManage(w, r, topicName) {
 			return
 		}
@@ -129,11 +130,12 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 
 		if s.Deps.Router != nil {
 			if s.Deps.Router.RouteAlterTopic(r.Context(), w, r, topicName, body) {
+				progress.forwarded = true
 				return
 			}
 		}
 
-		t, err := applyAlter(r.Context(), s, topicName, req)
+		t, err := applyAlter(r.Context(), s, topicName, req, &progress)
 		if err != nil {
 			s.WriteBrokerError(w, "alter topic", err)
 			return
@@ -142,12 +144,53 @@ func Alter(s *handlers.Set) http.HandlerFunc {
 	}
 }
 
+// alterGroup is one field group of a PATCH. The groups apply in this
+// order, each as its own metastore update.
+type alterGroup int
+
+const (
+	alterRetention alterGroup = iota
+	alterCaps
+	alterPartitions
+	alterSchema
+)
+
+// groups returns the field groups the request sets, in the order they
+// apply.
+func (req alterRequest) groups() []alterGroup {
+	var groups []alterGroup
+	if req.RetentionMs != nil {
+		groups = append(groups, alterRetention)
+	}
+	if req.MaxInFlightPerPartition != nil || req.MaxAckedAheadPerPartition != nil {
+		groups = append(groups, alterCaps)
+	}
+	if req.Partitions > 0 {
+		groups = append(groups, alterPartitions)
+	}
+	if len(req.Schema) > 0 {
+		groups = append(groups, alterSchema)
+	}
+	return groups
+}
+
+// alterProgress records how far a PATCH got, for its audit lines.
+type alterProgress struct {
+	// forwarded is set when the leader answered the PATCH: it applied
+	// the groups, and this node cannot know how many landed before one
+	// failed.
+	forwarded bool
+	// applied counts the groups this node's own apply committed, in
+	// order; the first failure stops the sequence.
+	applied int
+}
+
 // applyAlter applies each supplied field group in order: retention,
 // caps, partitions, schema. Each group is an independent metastore
 // update; a failure aborts the sequence and leaves the earlier groups
-// applied (see alterRequest). The returned topic reflects the last
-// applied change.
-func applyAlter(ctx context.Context, s *handlers.Set, topicName string, req alterRequest) (topic.Topic, error) {
+// applied (see alterRequest), which progress counts. The returned
+// topic reflects the last applied change.
+func applyAlter(ctx context.Context, s *handlers.Set, topicName string, req alterRequest, progress *alterProgress) (topic.Topic, error) {
 	var t topic.Topic
 	var err error
 
@@ -156,6 +199,7 @@ func applyAlter(ctx context.Context, s *handlers.Set, topicName string, req alte
 		if err != nil {
 			return topic.Topic{}, err
 		}
+		progress.applied++
 	}
 	if req.MaxInFlightPerPartition != nil || req.MaxAckedAheadPerPartition != nil {
 		// A cap the request leaves unset is nil: the broker keeps its
@@ -166,18 +210,21 @@ func applyAlter(ctx context.Context, s *handlers.Set, topicName string, req alte
 		if err != nil {
 			return topic.Topic{}, err
 		}
+		progress.applied++
 	}
 	if req.Partitions > 0 {
 		t, err = s.Deps.Broker.IncreaseTopicPartitions(ctx, topicName, req.Partitions)
 		if err != nil {
 			return topic.Topic{}, err
 		}
+		progress.applied++
 	}
 	if len(req.Schema) > 0 {
 		t, err = s.Deps.Broker.UpdateTopicSchema(ctx, topicName, req.Schema, req.SchemaBaseVersion)
 		if err != nil {
 			return topic.Topic{}, err
 		}
+		progress.applied++
 	}
 	return t, nil
 }

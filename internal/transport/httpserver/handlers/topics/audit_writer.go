@@ -7,10 +7,13 @@ package topics
 // The outcome is read from the status the client got (for a forward,
 // the leader's), except that a request that ended without a decision
 // this node knows is "unknown": a forward whose reply never came back
-// (the router marks the writer undecided before answering 503), and a
-// 499 for a client that went away mid-change. Either may have been
-// applied, so neither is logged as rejected or failed: an audit query
-// for the changes that happened must not miss one.
+// (the router marks the writer undecided before answering 503), a 503
+// for a change the leader appended and then lost its leadership over
+// (errs.ErrOutcomeUnknown, here or in the leader's reply), and a 499 for
+// a client that went away mid-change. Each may have been applied, so
+// none is logged as rejected or failed: an audit query for the changes
+// that happened must not miss one. A PATCH that failed part way is
+// audited per field group (see auditAlter).
 
 import (
 	"net/http"
@@ -83,27 +86,70 @@ func (w *auditWriter) audit(s *handlers.Set, r *http.Request, event, target stri
 	s.AuditOutcome(r, event, target, w.outcome(), w.status, extra...)
 }
 
-// auditAlter writes a PATCH's audit lines: one topic.alter naming the
-// retention, cap and partition fields it set, and one topic.schema for a
-// schema change, each with the request's outcome.
-func auditAlter(s *handlers.Set, r *http.Request, w *auditWriter, topicName string, req alterRequest) {
+// auditAlter writes a PATCH's audit lines: topic.alter naming the
+// retention, cap and partition fields it set, and topic.schema for a
+// schema change. Each field group gets the request's outcome, except a
+// group that may have changed although a later one failed: one this
+// node applied is ok, and on a node that forwarded the PATCH every group
+// but the last is unknown, since the leader applies them in order and
+// this node cannot tell how far it got (the last one either failed or
+// never ran). Fields whose outcomes differ go on separate topic.alter
+// lines, each with the status the client got.
+func auditAlter(s *handlers.Set, r *http.Request, w *auditWriter, topicName string, req alterRequest, progress alterProgress) {
+	requestOutcome := w.outcome()
+	groups := req.groups()
+	outcomeOf := func(i int) string {
+		switch {
+		case !progress.forwarded && i < progress.applied:
+			return handlers.AuditOK
+		case requestOutcome == handlers.AuditOK, requestOutcome == handlers.AuditUnknown:
+			return requestOutcome
+		case progress.forwarded && i < len(groups)-1:
+			return handlers.AuditUnknown
+		}
+		return requestOutcome
+	}
+
 	var fields []string
-	if req.RetentionMs != nil {
-		fields = append(fields, "retention_ms")
+	lineOutcome := ""
+	flush := func() {
+		if len(fields) > 0 {
+			s.AuditOutcome(r, auditEventAlter, topicName, lineOutcome, w.status, "fields", strings.Join(fields, ","))
+		}
+		fields = nil
 	}
-	if req.MaxInFlightPerPartition != nil {
-		fields = append(fields, "max_in_flight_per_partition")
+	for i, group := range groups {
+		outcome := outcomeOf(i)
+		if group == alterSchema {
+			flush()
+			s.AuditOutcome(r, auditEventSchema, topicName, outcome, w.status, "schema_base_version", req.SchemaBaseVersion)
+			continue
+		}
+		if outcome != lineOutcome {
+			flush()
+			lineOutcome = outcome
+		}
+		fields = append(fields, alterGroupFields(req, group)...)
 	}
-	if req.MaxAckedAheadPerPartition != nil {
-		fields = append(fields, "max_acked_ahead_per_partition")
+	flush()
+}
+
+// alterGroupFields names the request fields of one non-schema group.
+func alterGroupFields(req alterRequest, group alterGroup) []string {
+	switch group {
+	case alterRetention:
+		return []string{"retention_ms"}
+	case alterCaps:
+		var fields []string
+		if req.MaxInFlightPerPartition != nil {
+			fields = append(fields, "max_in_flight_per_partition")
+		}
+		if req.MaxAckedAheadPerPartition != nil {
+			fields = append(fields, "max_acked_ahead_per_partition")
+		}
+		return fields
+	case alterPartitions:
+		return []string{"partitions"}
 	}
-	if req.Partitions > 0 {
-		fields = append(fields, "partitions")
-	}
-	if len(fields) > 0 {
-		w.audit(s, r, auditEventAlter, topicName, "fields", strings.Join(fields, ","))
-	}
-	if len(req.Schema) > 0 {
-		w.audit(s, r, auditEventSchema, topicName, "schema_base_version", req.SchemaBaseVersion)
-	}
+	return nil
 }

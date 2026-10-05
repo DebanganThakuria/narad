@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -47,15 +48,30 @@ func (rt *Router) settleForwardedWrite(ctx context.Context, memberAddr string, r
 
 // writeForwardedWrite is writeForwardResult for a write: it settles a
 // successful forward on the local replica before answering.
+//
+// A 503 from the leader whose message carries errs.ErrOutcomeUnknown
+// (the leader lost its leadership after appending the change, which a
+// later leader may still commit) is no decision either, so a writer
+// that records outcomes is told so, as for a forward with no reply. A
+// leader before this release never sends it; its 503s stay decided.
 func (rt *Router) writeForwardedWrite(ctx context.Context, w http.ResponseWriter, memberAddr string, res nodewire.Response, err error) bool {
 	if err != nil {
 		writeLeaderForwardError(w, err)
 		return true
 	}
+	if res.Status == http.StatusServiceUnavailable && bytes.Contains(res.Body, outcomeUnknownText) {
+		if m, ok := w.(undecidedMarker); ok {
+			m.MarkUndecided()
+		}
+	}
 	rt.settleForwardedWrite(ctx, memberAddr, res)
 	writePeerResponse(w, res)
 	return true
 }
+
+// outcomeUnknownText is errs.ErrOutcomeUnknown's message as a leader's
+// error reply carries it.
+var outcomeUnknownText = []byte(errs.ErrOutcomeUnknown.Error())
 
 // SyncWithLeader returns once this node's replica has applied everything
 // the leader had applied when asked, so a read that follows reflects

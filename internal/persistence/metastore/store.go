@@ -315,12 +315,20 @@ func (s *Store) apply(ctx context.Context, op opCode, payload any) error {
 // of 500. These all mean "no committed decision right now" — expected
 // during elections, partitions, and rolling restarts — not a bug. The
 // original error is wrapped so logs keep the specific cause.
+//
+// Two of them also leave the entry's fate open, and carry
+// errs.ErrOutcomeUnknown: ErrLeadershipLost is answered for an entry the
+// leader appended and could not see commit (the next leader may commit
+// it), and ErrRaftShutdown can be answered for an entry that was
+// already appended when Raft stopped. The others are answered before
+// the entry is appended, so nothing of it can apply.
 func classifyRaftError(err error) error {
 	switch {
+	case errors.Is(err, raft.ErrLeadershipLost),
+		errors.Is(err, raft.ErrRaftShutdown):
+		return fmt.Errorf("%w: %w: %v", errs.ErrUnavailable, errs.ErrOutcomeUnknown, err)
 	case errors.Is(err, raft.ErrNotLeader),
-		errors.Is(err, raft.ErrLeadershipLost),
 		errors.Is(err, raft.ErrLeadershipTransferInProgress),
-		errors.Is(err, raft.ErrRaftShutdown),
 		errors.Is(err, raft.ErrEnqueueTimeout):
 		return fmt.Errorf("%w: %v", errs.ErrUnavailable, err)
 	default:

@@ -69,17 +69,19 @@ What to do when one fires is on the [Troubleshooting](troubleshooting.md) page: 
 
 Changes to users, topics and cluster membership are logged as audit lines: message `audit`, attribute `component=audit`, with `event`, `actor` (the authenticated user, empty with security off) and `target`. Route `component=audit` to its own sink if you keep an audit trail. A line is written on the node the client called, also when that node forwarded the change to the Raft leader.
 
-**Unreleased:** topic changes are audited too, one line per change once its body passed validation: `topic.create`, `topic.alter` (with `fields`, the retention, cap and partition fields it set), `topic.schema`, `topic.delete` (with `incarnation` when the node that answered ran the delete), `topic.attach` and `topic.detach` (with `child`). These lines also carry `status`, the HTTP status the client got, and `outcome`:
+**Unreleased:** topic changes are audited too, once their body passed validation: `topic.create`, `topic.alter` (with `fields`, the retention, cap and partition fields it set), `topic.schema`, `topic.delete` (with `incarnation` when the node that answered ran the delete), `topic.attach` and `topic.detach` (with `child`). These lines also carry `status`, the HTTP status the client got, and `outcome`, which says what happened to the change the line names:
 
 | `outcome` | Meaning |
 |---|---|
 | `ok` | Applied. |
 | `denied` | Refused with `403`; logged at warning level. |
-| `rejected` | Refused with another `4xx` by the answering node or the leader. Nothing changed. |
+| `rejected` | Refused with another `4xx` by the answering node or the leader. Nothing the line names changed. |
 | `failed` | A `5xx` decided by the answering node or the leader. |
-| `unknown` | The request ended without a decision the answering node knows: a forward to the leader whose answer never came back (`503`), or a client that went away mid-change (`499`). The change may have been applied; read the topic to find out. |
+| `unknown` | The request ended without a decision the answering node knows: a forward to the leader whose answer never came back (`503`), a `503` from a leader that lost its leadership while committing the change (a later leader may still commit it), or a client that went away mid-change (`499`). The change may have been applied; read the topic to find out. |
 
 `unknown` is never logged as `rejected` or `failed`: a search for the changes that may have happened must include it along with `ok`.
+
+A `PATCH` that sets several kinds of field applies them one at a time (retention, caps, partitions, then schema) and stops at the first failure, so one that fails part way has already changed the fields before it. Its lines say so: on the node that applied the `PATCH`, the fields applied before the failure are `ok`, and on a node that forwarded it to the leader, which cannot tell how far the leader got, every kind of field before the last is `unknown`. Those lines still carry the failure's `status`, and fields whose outcomes differ go on separate `topic.alter` lines. For example, `{"retention_ms":7200000,"schema":{...}}` with a schema the leader refuses logs `topic.alter fields=retention_ms outcome=ok status=400` and `topic.schema outcome=rejected status=400` when the client called the leader, and the same lines with `outcome=unknown` for `retention_ms` when it called another node.
 
 ## Profile with pprof {#pprof}
 

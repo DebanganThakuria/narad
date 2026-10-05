@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/consumer"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/domain/user"
+	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	"github.com/debanganthakuria/narad/internal/platform/clusterrpc"
@@ -1253,5 +1255,60 @@ func TestForwardWithoutTheLeadersAnswerIsAuditedAsUnknown(t *testing.T) {
 	}
 	if audit["outcome"] != "unknown" || audit["actor"] != "alice" || audit["target"] != "orders" {
 		t.Fatalf("audit line = %v, want actor alice, target orders, outcome unknown", audit)
+	}
+}
+
+// retentionRefusedBroker is a leader's broker whose retention changes
+// all end in err.
+type retentionRefusedBroker struct {
+	*managerBroker
+	err error
+}
+
+func (b *retentionRefusedBroker) UpdateTopicRetention(context.Context, string, int64) (topic.Topic, error) {
+	return topic.Topic{}, b.err
+}
+
+// A leader that lost its leadership after appending a forwarded change
+// answers 503, but a later leader may still commit the entry, so the
+// node that forwarded it audits the change as unknown, as it does a
+// forward that got no reply. A 503 the leader decided before anything
+// was appended (its barrier failed) stays failed.
+func TestForwardedLeadershipLossIsAuditedAsUnknown(t *testing.T) {
+	router, br, frames, store := forwardingPair(t, false)
+	if err := store.CreateTopic(context.Background(), topic.Topic{Name: "orders", ID: "00000000000000f2", Partitions: 3, Owner: "alice"}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	leader := &retentionRefusedBroker{managerBroker: br}
+	frames.server.broker = leader
+	var logs bytes.Buffer
+	set := handlers.New(handlers.Deps{
+		Broker: br,
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+		Router: router,
+	})
+	alterOutcome := func() (int, string, any) {
+		logs.Reset()
+		req := httptest.NewRequestWithContext(asUser("alice"), http.MethodPatch, "/v1/topics/orders", strings.NewReader(`{"retention_ms":7200000}`))
+		req.SetPathValue("topic", "orders")
+		rec := httptest.NewRecorder()
+		httptopics.Alter(set).ServeHTTP(rec, req)
+		for _, raw := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+			var line map[string]any
+			if json.Unmarshal(raw, &line) == nil && line["component"] == "audit" && line["event"] == "topic.alter" {
+				return rec.Code, rec.Body.String(), line["outcome"]
+			}
+		}
+		t.Fatalf("no topic.alter audit line (client got %d):\n%s", rec.Code, logs.String())
+		return 0, "", nil
+	}
+
+	leader.err = fmt.Errorf("%w: %w: leadership lost while committing log", errs.ErrUnavailable, errs.ErrOutcomeUnknown)
+	if code, body, outcome := alterOutcome(); code != http.StatusServiceUnavailable || outcome != "unknown" || !strings.Contains(body, errs.ErrOutcomeUnknown.Error()) {
+		t.Fatalf("leadership lost on the leader: client got %d %q, audit outcome %v; want 503 saying the change may still apply, outcome unknown", code, body, outcome)
+	}
+	leader.err = fmt.Errorf("%w: leader barrier: node is not the leader", errs.ErrUnavailable)
+	if code, _, outcome := alterOutcome(); code != http.StatusServiceUnavailable || outcome != "failed" {
+		t.Fatalf("barrier failed on the leader: client got %d, audit outcome %v; want 503, outcome failed", code, outcome)
 	}
 }
