@@ -1429,6 +1429,7 @@ unless `detail` is set.
 | `members[].node_status` (unreleased)<br>object | With `detail=true`, the node's own report about itself. |
 | `members[].node_status.node`<br>string | Node ID. |
 | `members[].node_status.draining`<br>boolean | The node's own view of its draining mark. |
+| `members[].node_status.produce_in_flight`<br>integer | Client produce requests the node admitted and has not answered yet. Once it is draining it admits none, and a decommission waits for 0. |
 | `members[].node_status.dispatch_backlog`<br>integer | Messages its ingress WAL accepted and has not yet handed to their partition owners. A decommission waits for 0. |
 | `members[].node_status.quarantine`<br>object | Partition copies the node set aside instead of deleting ([Troubleshooting](../operate/troubleshooting.md#quarantined-copies)). |
 | `members[].node_status.quarantine.copies`<br>integer | Every set-aside copy. |

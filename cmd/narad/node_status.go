@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -15,6 +14,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
 // nodeStatusPeer is the peer client call the controller and the cluster
@@ -41,7 +41,11 @@ func controllerConfig(log *slog.Logger, reg prometheus.Registerer, peer nodeStat
 			if err != nil {
 				return controller.NodeStatus{}, err
 			}
-			return controller.NodeStatus{DispatchBacklog: st.DispatchBacklog}, nil
+			return controller.NodeStatus{
+				Draining:        st.Draining,
+				ProduceInFlight: st.ProduceInFlight,
+				DispatchBacklog: st.DispatchBacklog,
+			}, nil
 		},
 	}
 }
@@ -49,16 +53,21 @@ func controllerConfig(log *slog.Logger, reg prometheus.Registerer, peer nodeStat
 // localNodeStatus builds this node's answer to OpNodeStatus from the
 // components that own each field. Every source is a cheap read: the
 // quarantine list is the inventory the reclaim sweep last took, never a
-// fresh walk.
+// fresh walk. The drain flag, the produce requests in flight and the
+// dispatch backlog are read in that order (see handlers.DrainGate.Admit),
+// so a draining node that reports none in flight and no backlog has
+// handed off everything it accepted.
 func localNodeStatus(
 	nodeID string,
-	draining *atomic.Bool,
+	drain *handlers.DrainGate,
 	backlog func() uint64,
 	quarantine func() (runtime.QuarantineSummary, bool),
 	moves func() []cluster.MoveState,
 ) func(context.Context) nodewire.NodeStatus {
 	return func(context.Context) nodewire.NodeStatus {
-		st := nodewire.NodeStatus{Node: nodeID, Draining: draining.Load(), Moves: []nodewire.MoveState{}}
+		st := nodewire.NodeStatus{Node: nodeID, Moves: []nodewire.MoveState{}}
+		st.Draining = drain.Draining()
+		st.ProduceInFlight = drain.InFlight()
 		if backlog != nil {
 			st.DispatchBacklog = backlog()
 		}
@@ -112,14 +121,14 @@ const (
 	drainingRefreshInterval = time.Second
 )
 
-// watchDraining keeps flag equal to this node's own member record's
-// Draining in the local replica until ctx ends, so the produce handlers
-// can refuse client produce while the node is being decommissioned. A
-// failed read keeps the last value.
-func watchDraining(ctx context.Context, src drainingSource, nodeID string, flag *atomic.Bool, check, refresh time.Duration) {
+// watchDraining keeps the drain gate's flag equal to this node's own
+// member record's Draining in the local replica until ctx ends, so the
+// produce handlers refuse client produce while the node is being
+// decommissioned. A failed read keeps the last value.
+func watchDraining(ctx context.Context, src drainingSource, nodeID string, drain *handlers.DrainGate, check, refresh time.Duration) {
 	read := func() {
 		if m, err := src.GetMember(nodeID); err == nil {
-			flag.Store(m.Draining)
+			drain.SetDraining(m.Draining)
 		}
 	}
 	read()

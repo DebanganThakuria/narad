@@ -29,8 +29,13 @@ package controller
 // And for every node: its ingress WAL must have handed every record it
 // accepted to its owner (a zero dispatch backlog, read with NodeStatus)
 // before it leaves Raft, since a removed node's replica freezes and it can
-// never dispatch them after. A node whose release cannot report its status
-// (3.0.x) is removed without the check, with a warning, as 3.0.x did.
+// never dispatch them after. The backlog counts only once the node itself
+// reports that it refuses client produce and is answering none it
+// admitted before: a drain flip reaches the node's replica some time
+// after it commits, and a produce accepted in between would land in the
+// WAL after a zero backlog was read. A node whose release cannot report
+// its status (3.0.x) is removed without the check, with a warning, as
+// 3.0.x did.
 //
 // A decommission that cannot progress says why: DecommissionBlockers names
 // the reasons, each change is logged once (error when it needs an

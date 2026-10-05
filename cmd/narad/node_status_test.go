@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"slices"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +16,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/cluster/controller"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
+	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
 // scriptedStatusPeer answers NodeStatus with one fixed status or error,
@@ -38,15 +38,15 @@ func (p *scriptedStatusPeer) NodeStatus(_ context.Context, addr string) (nodewir
 // controller's own sentinel.
 func TestServeGivesTheControllerALoggerRegistryAndNodeStatus(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	peer := &scriptedStatusPeer{st: nodewire.NodeStatus{Node: "narad-2", DispatchBacklog: 7}}
+	peer := &scriptedStatusPeer{st: nodewire.NodeStatus{Node: "narad-2", Draining: true, ProduceInFlight: 2, DispatchBacklog: 7}}
 	cfg := controllerConfig(slog.New(slog.NewTextHandler(io.Discard, nil)), reg, peer)
 
 	if cfg.Logger == nil || cfg.Registerer != reg || cfg.NodeStatus == nil {
 		t.Fatalf("controller config = %+v; want a logger, the process registry and a node status call", cfg)
 	}
 	st, err := cfg.NodeStatus(context.Background(), "narad-2:7942")
-	if err != nil || st.DispatchBacklog != 7 || !slices.Equal(peer.asked, []string{"narad-2:7942"}) {
-		t.Fatalf("NodeStatus = %+v, %v (asked %v); want a backlog of 7 from narad-2:7942", st, err, peer.asked)
+	if err != nil || st != (controller.NodeStatus{Draining: true, ProduceInFlight: 2, DispatchBacklog: 7}) || !slices.Equal(peer.asked, []string{"narad-2:7942"}) {
+		t.Fatalf("NodeStatus = %+v, %v (asked %v); want draining, 2 in flight and a backlog of 7 from narad-2:7942", st, err, peer.asked)
 	}
 	peer.err = cluster.ErrNodeStatusUnsupported
 	if _, err := cfg.NodeStatus(context.Background(), "old:7942"); !errors.Is(err, controller.ErrNodeStatusUnsupported) {
@@ -72,21 +72,24 @@ func TestServeGivesTheControllerALoggerRegistryAndNodeStatus(t *testing.T) {
 // This node answers OpNodeStatus from its own components, and the
 // cluster views ask it locally and every other member over node RPC.
 func TestLocalNodeStatusReportsEachComponent(t *testing.T) {
-	var draining atomic.Bool
-	draining.Store(true)
+	drain := &handlers.DrainGate{}
+	if !drain.Admit() {
+		t.Fatal("the gate refused a produce before the drain")
+	}
+	drain.SetDraining(true)
 	sum := runtime.QuarantineSummary{Count: 150, Bytes: 9000}
 	for i := range 120 {
 		sum.Copies = append(sum.Copies, runtime.QuarantinedCopy{Kind: "partition", Topic: "orders", Partition: i})
 	}
-	local := localNodeStatus("narad-1", &draining, func() uint64 { return 3 },
+	local := localNodeStatus("narad-1", drain, func() uint64 { return 3 },
 		func() (runtime.QuarantineSummary, bool) { return sum, true },
 		func() []cluster.MoveState {
 			return []cluster.MoveState{{Topic: "orders", Partition: 4, Phase: cluster.MovePhaseCopying}}
 		})
 
 	st := local(context.Background())
-	if st.Node != "narad-1" || !st.Draining || st.DispatchBacklog != 3 {
-		t.Fatalf("status = %+v", st)
+	if st.Node != "narad-1" || !st.Draining || st.ProduceInFlight != 1 || st.DispatchBacklog != 3 {
+		t.Fatalf("status = %+v; want narad-1 draining, 1 produce in flight and a backlog of 3", st)
 	}
 	if st.Quarantine.Copies != 150 || st.Quarantine.Bytes != 9000 || len(st.Quarantine.List) != nodewire.MaxStatusQuarantineList {
 		t.Fatalf("quarantine = %d copies, %d bytes, %d listed; want 150, 9000, %d", st.Quarantine.Copies, st.Quarantine.Bytes, len(st.Quarantine.List), nodewire.MaxStatusQuarantineList)
@@ -119,11 +122,11 @@ func TestDrainingFlagFollowsTheMemberRecord(t *testing.T) {
 	if err := store.RegisterMember(ctx, metastore.Member{ID: "narad-0", Addr: "127.0.0.1:7942", Status: metastore.MemberAlive}); err != nil {
 		t.Fatalf("RegisterMember: %v", err)
 	}
-	var flag atomic.Bool
+	flag := &handlers.DrainGate{}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		watchDraining(ctx, store, "narad-0", &flag, 10*time.Millisecond, 50*time.Millisecond)
+		watchDraining(ctx, store, "narad-0", flag, 10*time.Millisecond, 50*time.Millisecond)
 	}()
 
 	for _, want := range []bool{true, false} {
@@ -131,7 +134,7 @@ func TestDrainingFlagFollowsTheMemberRecord(t *testing.T) {
 			t.Fatalf("SetMemberDraining(%v): %v", want, err)
 		}
 		deadline := time.Now().Add(5 * time.Second)
-		for flag.Load() != want {
+		for flag.Draining() != want {
 			if time.Now().After(deadline) {
 				t.Fatalf("drain flag stayed %v after the record changed to %v", !want, want)
 			}

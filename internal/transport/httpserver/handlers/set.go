@@ -113,9 +113,10 @@ type Deps struct {
 	// Passwords is optional; see PasswordHasher.
 	Passwords PasswordHasher
 
-	// Draining reports whether this node is being decommissioned; client
-	// produce is then refused with 503. Nil never refuses.
-	Draining func() bool
+	// Drain admits client produce: while this node is being
+	// decommissioned it refuses it with 503, and it counts the produce
+	// requests in flight for the node status. Nil never refuses.
+	Drain *DrainGate
 
 	// NodeStatus asks a member for its own status over node RPC (this
 	// node answers locally). The cluster views' ?detail=true uses it.

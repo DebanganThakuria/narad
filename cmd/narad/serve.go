@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -225,7 +224,7 @@ func runServe(args []string) error {
 	wg.Go(func() { runMemberHeartbeater(ctx, ms, member, 5*time.Second, cs.peerRPC, log) })
 	wg.Go(func() { cs.controller.Run(ctx) })
 	wg.Go(func() {
-		watchDraining(ctx, ms, nodeID, cs.draining, drainingCheckInterval, drainingRefreshInterval)
+		watchDraining(ctx, ms, nodeID, cs.drain, drainingCheckInterval, drainingRefreshInterval)
 	})
 	// Re-registers consume tokens with owners that come back or are
 	// newly assigned while consumers are parked here.
@@ -309,7 +308,7 @@ func runServe(args []string) error {
 	// MarkReady AND the metastore's live check (leader in view, recent
 	// contact, ownership latch set) passes on that probe.
 	srv := buildAPIServer(ctx, cfg, bc.broker, bc.logs, ms, cs.router, m, reg, auth, log, func(d *handlers.Deps) {
-		d.Draining = cs.draining.Load
+		d.Drain = cs.drain
 		d.NodeStatus = cs.memberStatus
 	})
 	defer bc.lifecycle.MarkNotReady()
@@ -351,9 +350,10 @@ type clusterStack struct {
 	fanout     *cluster.FanoutRunner
 	mover      *cluster.MoveRunner
 
-	// draining mirrors this node's own drain flag (watchDraining), and
-	// memberStatus answers the cluster views' per-member status.
-	draining     *atomic.Bool
+	// drain admits client produce and holds this node's own drain flag
+	// (watchDraining), and memberStatus answers the cluster views'
+	// per-member status.
+	drain        *handlers.DrainGate
 	memberStatus func(context.Context, metastore.Member) (nodewire.NodeStatus, error)
 }
 
@@ -402,8 +402,8 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 	// Node status: what this node answers about itself (a draining
 	// node's dispatch backlog is what decommission waits on), and how
 	// the cluster views ask any member.
-	draining := &atomic.Bool{}
-	local := localNodeStatus(nodeID, draining, bc.ingress.DispatchBacklog, bc.logs.LastQuarantinedCopies, mover.MoveStates)
+	drain := &handlers.DrainGate{}
+	local := localNodeStatus(nodeID, drain, bc.ingress.DispatchBacklog, bc.logs.LastQuarantinedCopies, mover.MoveStates)
 	rpcServer.SetNodeStatus(local)
 
 	return &clusterStack{
@@ -419,7 +419,7 @@ func buildClusterStack(cfg *config.Config, nodeID string, ms *metastore.Store, b
 				Linger:          time.Duration(cfg.Fanout.LingerMs) * time.Millisecond,
 			}),
 		mover:        mover,
-		draining:     draining,
+		drain:        drain,
 		memberStatus: memberNodeStatus(nodeID, local, peerRPC),
 	}
 }

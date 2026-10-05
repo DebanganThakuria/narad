@@ -6,8 +6,9 @@ import "time"
 // whole request. An operator surface (the leader's decommission pass,
 // GET /v1/cluster/members?detail=true) sends it to one member and gets
 // back what that member observes about itself as a JSON NodeStatus:
-// whether it believes it is draining, how many records its ingress WAL
-// still has to hand to their owners, the partition copies it has set
+// whether it believes it is draining, how many client produce requests
+// it is still answering, how many records its ingress WAL still has to
+// hand to their owners, the partition copies it has set
 // aside, and the moves it runs as the destination. Pulling this keeps it
 // out of the Raft log.
 //
@@ -22,6 +23,11 @@ type NodeStatus struct {
 	Node string `json:"node"`
 	// Draining is the node's own replica's view of its drain flag.
 	Draining bool `json:"draining"`
+	// ProduceInFlight is how many client produce requests the node
+	// admitted and has not answered yet. Read after Draining and before
+	// DispatchBacklog: a draining node reporting 0 here has nothing left
+	// on its way into its ingress WAL.
+	ProduceInFlight int64 `json:"produce_in_flight"`
 	// DispatchBacklog is how many records the node's ingress WAL
 	// accepted and has not yet handed to their owners. A node must
 	// reach zero before it leaves Raft.

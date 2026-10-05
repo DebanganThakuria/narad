@@ -2098,6 +2098,9 @@ components:
         draining:
           type: boolean
           description: The node's own view of its draining mark.
+        produce_in_flight:
+          type: integer
+          description: Client produce requests the node admitted and has not answered yet. Once it is draining it admits none, and a decommission waits for 0.
         dispatch_backlog:
           type: integer
           description: Messages its ingress WAL accepted and has not yet handed to their partition owners. A decommission waits for 0.

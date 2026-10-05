@@ -336,7 +336,7 @@ func TestDecommissionWaitsForTheDispatchBacklogToDrain(t *testing.T) {
 	withAddrs(store)
 	store.assignments["orders"] = map[int]string{0: "a", 1: "b", 2: "c"}
 	ns := &fakeNodeStatus{answers: map[string][]NodeStatusResult{
-		"d:7942": {{Status: NodeStatus{DispatchBacklog: 5}}, {Status: NodeStatus{}}},
+		"d:7942": {{Status: NodeStatus{Draining: true, DispatchBacklog: 5}}, {Status: NodeStatus{Draining: true}}},
 	}}
 	reg := prometheus.NewRegistry()
 	c := &Controller{store: store, cfg: Config{NodeStatus: ns.status}.withDefaults(), m: newMetrics(reg)}
@@ -355,6 +355,47 @@ func TestDecommissionWaitsForTheDispatchBacklogToDrain(t *testing.T) {
 	}
 	if n := testutil.CollectAndCount(c.m.decomBlocked); n != 0 {
 		t.Fatalf("%d narad_decommission_blocked series left after the removal, want 0", n)
+	}
+}
+
+// A zero backlog read from a node that does not refuse client produce
+// yet is not final: the drain reaches its replica some time after it
+// commits, and a produce it accepts meanwhile lands in its WAL after the
+// read. Nor is one read while it still answers produce it admitted
+// before the drain. Only a node that reports the drain, nothing in
+// flight and no backlog is removed.
+func TestDecommissionWaitsUntilTheNodeRefusesProduceAndAnswersWhatItAdmitted(t *testing.T) {
+	store := decomStore(t)
+	withAddrs(store)
+	store.assignments["orders"] = map[int]string{0: "a", 1: "b", 2: "c"}
+	ns := &fakeNodeStatus{answers: map[string][]NodeStatusResult{"d:7942": {
+		{Status: NodeStatus{Draining: false}},
+		{Status: NodeStatus{Draining: true, ProduceInFlight: 2}},
+		{Status: NodeStatus{Draining: true}},
+	}}}
+	log, logs := newLogBuffer()
+	reg := prometheus.NewRegistry()
+	c := &Controller{store: store, cfg: Config{NodeStatus: ns.status, Logger: log}.withDefaults(), m: newMetrics(reg)}
+
+	c.reconcileDecommission(context.Background())
+	if len(store.removed) != 0 || len(store.forgotten) != 0 {
+		t.Fatalf("removed %v (forgotten %v) on a zero backlog read before the node refused produce", store.removed, store.forgotten)
+	}
+	if got := testutil.ToFloat64(c.m.decomBlocked.WithLabelValues("d", BlockedDispatchBacklog)); got != 1 {
+		t.Fatalf("narad_decommission_blocked{d,dispatch_backlog} = %v, want 1", got)
+	}
+	if len(logs.lines("level=WARN", "decommission waiting", "node=d", "does not refuse client produce yet")) != 1 {
+		t.Fatalf("no warn line saying d does not refuse produce yet:\n%s", logs)
+	}
+
+	c.reconcileDecommission(context.Background())
+	if len(store.removed) != 0 {
+		t.Fatalf("removed %v while it still answered 2 produce requests admitted before the drain", store.removed)
+	}
+
+	c.reconcileDecommission(context.Background())
+	if !slices.Equal(store.removed, []string{"d"}) || !slices.Equal(store.forgotten, []string{"d"}) {
+		t.Fatalf("removed %v, forgotten %v; want d once it refuses produce with nothing in flight and no backlog", store.removed, store.forgotten)
 	}
 }
 

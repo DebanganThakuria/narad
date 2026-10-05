@@ -27,7 +27,9 @@ const (
 	// clears such moves and waits for them to go.
 	BlockedMoveTarget = "move_target"
 	// BlockedDispatchBacklog: the node's ingress WAL still holds records
-	// it accepted and has not handed to their owners.
+	// it accepted and has not handed to their owners, or may still take
+	// some: the node does not refuse client produce yet, or is still
+	// answering produce it admitted before it started to.
 	BlockedDispatchBacklog = "dispatch_backlog"
 	// BlockedNodeStatusUnavailable: the node's dispatch backlog cannot
 	// be read (it is dead or unreachable).
@@ -72,8 +74,17 @@ type Blocker struct {
 func (b Blocker) Error() string { return b.Code + ": " + b.Message }
 
 // NodeStatus is the part of a node's own status the decommission pass
-// reads before it takes the node out of Raft.
+// reads before it takes the node out of Raft. The node reads Draining,
+// then ProduceInFlight, then DispatchBacklog, so a zero backlog is only
+// final once it reports Draining with nothing in flight: no client
+// produce can reach its ingress WAL after that.
 type NodeStatus struct {
+	// Draining is the node's own replica's view of its drain flag; it
+	// refuses client produce once it is set.
+	Draining bool
+	// ProduceInFlight is how many client produce requests the node
+	// admitted and has not answered yet.
+	ProduceInFlight int64
 	// DispatchBacklog is how many records the node's ingress WAL
 	// accepted and has not yet handed to their owners.
 	DispatchBacklog uint64
@@ -244,6 +255,13 @@ func statusBlocker(v DecommissionView) (Blocker, bool) {
 	case r.Err != nil:
 		return Blocker{Code: BlockedNodeStatusUnavailable, Message: fmt.Sprintf(
 			"its dispatch backlog cannot be read (%v); records only its ingress WAL holds would be lost with it; bring it back or cancel the decommission", r.Err)}, true
+	case !r.Status.Draining:
+		// Its replica has not applied the drain yet, so it still takes
+		// client produce: a zero backlog read now is not final.
+		return Blocker{Code: BlockedDispatchBacklog, Message: "it does not refuse client produce yet (its replica has not applied the drain), so its ingress WAL may still take records; it is removed once it does and its WAL is empty"}, true
+	case r.Status.ProduceInFlight > 0:
+		return Blocker{Code: BlockedDispatchBacklog, Message: fmt.Sprintf(
+			"it is still answering %d client produce requests it admitted before it started refusing them; it is removed once they are answered and its ingress WAL is empty", r.Status.ProduceInFlight)}, true
 	case r.Status.DispatchBacklog > 0:
 		return Blocker{Code: BlockedDispatchBacklog, Message: fmt.Sprintf(
 			"its ingress WAL still holds %d accepted records not yet handed to their owners; it is removed once they are", r.Status.DispatchBacklog)}, true

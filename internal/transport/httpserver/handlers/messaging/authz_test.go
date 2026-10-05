@@ -71,9 +71,11 @@ func TestProduceIsAuthorizedBeforeTheDrainRefusal(t *testing.T) {
 	id := user.User{Username: "svc", Grants: []user.Grant{
 		{Action: user.ActionConsume, Patterns: []string{"orders"}},
 	}}
+	drain := &handlers.DrainGate{}
+	drain.SetDraining(true)
 	s := handlers.New(handlers.Deps{
 		Broker: &fakeBroker{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Draining: func() bool { return true },
+		Drain: drain,
 	})
 	for _, tc := range []struct {
 		name    string

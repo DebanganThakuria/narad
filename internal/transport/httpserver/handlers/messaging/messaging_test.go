@@ -1342,10 +1342,11 @@ func TestDrainingNodeRefusesProduceAndBatchProduce(t *testing.T) {
 		accepted++
 		return ingress.AcceptedProduce{Topic: topicName}, nil
 	}}
-	draining := true
+	drain := &handlers.DrainGate{}
+	drain.SetDraining(true)
 	s := handlers.New(handlers.Deps{
 		Broker: b, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Draining: func() bool { return draining },
+		Drain: drain,
 	})
 	for _, tc := range []struct {
 		name    string
@@ -1374,12 +1375,58 @@ func TestDrainingNodeRefusesProduceAndBatchProduce(t *testing.T) {
 		t.Fatalf("a draining node accepted %d records", accepted)
 	}
 
-	draining = false
+	drain.SetDraining(false)
 	req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"id":1}`))
 	req.SetPathValue("topic", "orders")
 	res := httptest.NewRecorder()
 	Produce(s).ServeHTTP(res, req)
 	if res.Code != http.StatusAccepted || accepted != 1 {
 		t.Fatalf("after the drain was cancelled: status %d, accepted %d; want 202 and 1", res.Code, accepted)
+	}
+}
+
+// The drain gate counts every client produce it admitted until it is
+// answered, refused ones included in none: a node that reports the
+// drain and nothing in flight has no produce left on its way into its
+// ingress WAL. A produce admitted before the drain still finishes.
+func TestDrainGateCountsAdmittedProduceUntilAnswered(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	b := &fakeBroker{acceptProduceFn: func(_ context.Context, topicName, _ string, _ []byte, _ ...int) (ingress.AcceptedProduce, error) {
+		entered <- struct{}{}
+		<-release
+		return ingress.AcceptedProduce{Topic: topicName}, nil
+	}}
+	drain := &handlers.DrainGate{}
+	s := handlers.New(handlers.Deps{
+		Broker: b, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Drain: drain,
+	})
+	produce := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/produce", bytes.NewBufferString(`{"id":1}`))
+		req.SetPathValue("topic", "orders")
+		res := httptest.NewRecorder()
+		Produce(s).ServeHTTP(res, req)
+		return res
+	}
+
+	done := make(chan *httptest.ResponseRecorder)
+	go func() { done <- produce() }()
+	<-entered
+	drain.SetDraining(true)
+	if got := drain.InFlight(); got != 1 {
+		t.Fatalf("in flight = %d while an admitted produce is being written, want 1", got)
+	}
+	if res := produce(); res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("produce after the drain: status %d, want 503", res.Code)
+	}
+	if got := drain.InFlight(); got != 1 {
+		t.Fatalf("in flight = %d after a refused produce, want 1 (only the admitted one)", got)
+	}
+	close(release)
+	if res := <-done; res.Code != http.StatusAccepted {
+		t.Fatalf("the produce admitted before the drain: status %d, want 202", res.Code)
+	}
+	if got := drain.InFlight(); got != 0 {
+		t.Fatalf("in flight = %d once every admitted produce was answered, want 0", got)
 	}
 }
