@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -478,5 +479,99 @@ func TestColdWalkSurvivesAPanicInOnePartition(t *testing.T) {
 	}
 	if got := rec.runs.Load(); got != runs {
 		t.Fatalf("the next walk swept the panicking partition again at once (%d sweeps, want %d)", got, runs)
+	}
+}
+
+// A due copy of a partition another node owns (a move's source awaiting
+// its reclaim, say) is not this node's to open or reap: the walk sweeps
+// only the partition the local assignment gives this node.
+func TestColdWalkSkipsPartitionsOwnedElsewhere(t *testing.T) {
+	ms := newRuntimeFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, RetentionMs: int64(time.Hour / time.Millisecond)}
+	ms.setAssignment("orders", 0, "node-self")
+	ms.setAssignment("orders", 1, "node-other")
+	g := coldTestLogs(t, ms)
+	g.SetOwnership(func(topicName string, idx int) bool {
+		a, err := ms.GetAssignment(topicName, idx)
+		return err == nil && a.OwnerID == "node-self"
+	})
+	for p := range 2 {
+		appendAndCommit(t, g, "orders", p, "x")
+		if err := g.ClosePartition("orders", p); err != nil {
+			t.Fatalf("ClosePartition(%d): %v", p, err)
+		}
+		ageSegments(t, g, "orders", p, 2*time.Hour)
+	}
+	foreign := segmentFiles(t, g, "orders", 1)
+
+	swept, err := g.ColdRetentionOnce(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("ColdRetentionOnce: %v", err)
+	}
+	if swept != 1 {
+		t.Fatalf("swept = %d, want 1 (the owned partition only)", swept)
+	}
+	if got := segmentFiles(t, g, "orders", 1); !slices.Equal(got, foreign) {
+		t.Fatalf("the walk changed a partition node-other owns: %v -> %v", foreign, got)
+	}
+}
+
+// guardWaiters reports how many callers hold or wait on the topic's
+// guard.
+func guardWaiters(g *Logs, topicName string) int {
+	g.guardMu.Lock()
+	defer g.guardMu.Unlock()
+	if tg := g.guards[topicName]; tg != nil {
+		return tg.refs
+	}
+	return 0
+}
+
+// The walk stats a partition before it takes the topic's guard. A
+// reclaim that removes the directory in between, under that guard, must
+// not see the walk's open recreate it as an empty partition at offset
+// zero next to wherever the data went.
+func TestColdWalkNeverRecreatesAReclaimedPartition(t *testing.T) {
+	ms := newRuntimeFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", ID: "inc-1", Partitions: 2, RetentionMs: int64(time.Hour / time.Millisecond)}
+	g := coldTestLogs(t, ms)
+	appendAndCommit(t, g, "orders", 1, "x")
+	if err := g.ClosePartition("orders", 1); err != nil {
+		t.Fatalf("ClosePartition: %v", err)
+	}
+	ageSegments(t, g, "orders", 1, 2*time.Hour)
+	dir := storage.TopicPartitionDir(g.DataDir(), "orders", 1)
+
+	inGuard := make(chan struct{})
+	reclaimed := make(chan error, 1)
+	go func() {
+		// A reclaim's shape: remove the directory while holding the
+		// partition's produce mutex and the topic's guard, once the walk
+		// waits on that guard.
+		reclaimed <- g.ReplacePartitionDir("orders", 1, func() error {
+			close(inGuard)
+			deadline := time.Now().Add(5 * time.Second)
+			for guardWaiters(g, "orders") < 2 {
+				if time.Now().After(deadline) {
+					return errors.New("the walk never waited on the topic guard")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			return os.RemoveAll(dir)
+		})
+	}()
+	<-inGuard
+	swept, err := g.ColdRetentionOnce(context.Background(), time.Now())
+	if rerr := <-reclaimed; rerr != nil {
+		t.Fatalf("reclaim: %v", rerr)
+	}
+	if err != nil || swept != 0 {
+		t.Fatalf("walk swept=%d err=%v, want 0, nil", swept, err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the walk recreated %s after the reclaim removed it (stat err %v)", dir, err)
+	}
+	if n := g.OpenCount(); n != 0 {
+		t.Fatalf("OpenCount = %d, want 0", n)
 	}
 }

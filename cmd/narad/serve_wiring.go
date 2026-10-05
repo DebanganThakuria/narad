@@ -91,6 +91,10 @@ func buildBroker(
 	offsetCommitter.SetAheadSource(offsets.AheadSnapshot)
 	offsets.SetDropNotifier(offsetCommitter.Forget)
 	logs := runtime.NewLogs(cfg.Storage.DataDir, storageOpts, ms, m)
+	if store, ok := ms.(*metastore.Store); ok {
+		// The cold retention walk opens only partitions this node owns.
+		logs.SetOwnership(ownedHere(store, nodeID))
+	}
 	lifecycle := runtime.NewLifecycle(logs, offsetCommitter.Close)
 
 	store, ok := ms.(*metastore.Store)
@@ -158,6 +162,17 @@ func buildBroker(
 		ingress:    ingressManager,
 		metrics:    m,
 	}, nil
+}
+
+// ownedHere reports whether the local assignment gives a partition to
+// nodeID, the way the messaging engine decides it for produce and
+// consume: an unassigned partition, or one whose assignment cannot be
+// read, is not this node's.
+func ownedHere(store *metastore.Store, nodeID string) func(topicName string, idx int) bool {
+	return func(topicName string, idx int) bool {
+		a, err := store.GetAssignment(topicName, idx)
+		return err == nil && a.OwnerID == nodeID
+	}
 }
 
 // capsResolver returns a per-topic consumer caps lookup that falls back to

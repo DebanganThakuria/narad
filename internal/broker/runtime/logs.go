@@ -112,6 +112,10 @@ type Logs struct {
 	// coldPanics counts cold walk partitions whose open, sweep or close
 	// panicked and were contained (narad_cold_retention_panics_total).
 	coldPanics prometheus.Counter
+
+	// ownedHere, when set, tells the cold walk whether the local
+	// assignment gives a partition to this node (see SetOwnership).
+	ownedHere func(topicName string, idx int) bool
 }
 
 // logKey names one partition log: the key of logs, produceSync and
