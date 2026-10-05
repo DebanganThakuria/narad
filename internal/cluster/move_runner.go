@@ -259,6 +259,11 @@ type MoveRunner struct {
 	// reclaim pass left in place.
 	orphanTopicDirs atomic.Int64
 
+	// statuses are the running workers' states, for MoveStates and
+	// narad_moves_blocked (move_states.go).
+	statusMu sync.Mutex
+	statuses map[moveKey]*moveStatus
+
 	// flipSettle is the flip settle window (moveFlipSettle; tests
 	// shorten it).
 	flipSettle time.Duration
@@ -287,6 +292,7 @@ func NewMoveRunner(store moveStore, selfID, dataDir string, peer movePeer, recla
 		logger:     logger,
 		cfg:        cfg,
 		workers:    map[moveKey]*moveHandle{},
+		statuses:   map[moveKey]*moveStatus{},
 		flipSettle: moveFlipSettle,
 		now:        time.Now,
 	}
@@ -435,6 +441,8 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 		return
 	}
 	w := &moveWorker{r: r, topic: topicName, partition: partition, source: source, staging: staging, started: time.Now()}
+	w.status = r.trackMove(topicName, partition, source, w.started)
+	defer r.untrackMove(w.status)
 	defer w.finish()
 	if r.metrics != nil {
 		r.metrics.MovesInFlight.Inc()
@@ -452,6 +460,7 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 			return
 		}
 		if w.pending != nil {
+			w.status.setPhase(MovePhaseFlipPending)
 			if w.resolvePending(ctx) {
 				w.observeDone()
 				return
@@ -463,6 +472,11 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 		}
 		m, err := r.store.GetMember(source)
 		if err != nil || m.Addr == "" {
+			if err == nil {
+				err = errors.New("the source's member record has no address")
+			}
+			w.status.setPhase(MovePhaseWaitingForSource)
+			w.status.setError(fmt.Errorf("read the source's member record: %w", err))
 			if !sleepCtx(ctx, r.cfg.RetryBackoff) {
 				return
 			}
@@ -472,6 +486,8 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 		if w.sess == nil {
 			w.sess = r.mover.Begin(m.Addr, topicName, partition, staging)
 			w.sess.carryFrom(w.prevSess)
+			w.sess.onCopied = w.status.setCopied
+			w.status.setCopied(0)
 		}
 
 		// If the source has been dead long enough, stop waiting for it and try
@@ -495,6 +511,7 @@ func (r *MoveRunner) runMove(ctx context.Context, topicName string, partition in
 		}
 		// Source down but not yet dead-enough — wait for it to return or die.
 		if m.Status == metastore.MemberDead {
+			w.status.setPhase(MovePhaseWaitingForSource)
 			if !sleepCtx(ctx, r.cfg.RetryBackoff) {
 				return
 			}
@@ -529,8 +546,10 @@ func (r *MoveRunner) observeMoveDone(outcome string, started time.Time, res Copy
 func (r *MoveRunner) attemptCopy(ctx context.Context, w *moveWorker, sourceAddr string) bool {
 	sess := w.sess
 	topicName, partition, source := w.topic, w.partition, w.source
+	w.status.startAttempt()
 	converged, err := sess.CatchUp(ctx, r.cfg.CatchUpLagBytes, r.cfg.CatchUpMaxRounds, r.cfg.CatchUpStallRounds)
 	if err != nil {
+		w.status.setError(fmt.Errorf("catch-up: %w", err))
 		r.logger.Warn("move: catch-up failed; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
@@ -540,9 +559,11 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, w *moveWorker, sourceAddr 
 	}
 	frozen, err := r.peer.PrepareHandoff(ctx, sourceAddr, topicName, partition, r.cfg.FreezeTTL, "")
 	if err != nil {
+		w.status.setError(fmt.Errorf("freeze the source: %w", err))
 		r.logger.Warn("move: prepare-handoff failed; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
+	w.status.setPhase(MovePhaseFrozen)
 	token := frozen.FreezeToken
 	if token == "" {
 		// A source running an older release arms an unfenced freeze. The
@@ -562,6 +583,7 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, w *moveWorker, sourceAddr 
 			w.copyFailedVerification(err)
 			return false
 		}
+		w.status.setError(fmt.Errorf("finalize: %w", err))
 		r.logger.Warn("move: finalize failed; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
@@ -573,11 +595,13 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, w *moveWorker, sourceAddr 
 	// the TTL so the install + CAS below run under a fresh freeze.
 	fence, err := r.rearm(ctx, sourceAddr, topicName, partition, token)
 	if err != nil {
+		w.status.setError(fmt.Errorf("fence the handoff freeze: %w", err))
 		r.logger.Warn("move: handoff freeze lapsed before the flip; not flipping, will re-freeze and drain again",
 			"topic", topicName, "partition", partition, "err", err)
 		return false
 	}
 	if fence.HighWatermark != res.HighWatermark {
+		w.status.setError(fmt.Errorf("the source's hwm moved under the freeze (%d, the copy has %d)", fence.HighWatermark, res.HighWatermark))
 		r.logger.Warn("move: source hwm moved under the freeze; not flipping, will re-freeze and drain again",
 			"topic", topicName, "partition", partition, "copied_hwm", res.HighWatermark, "source_hwm", fence.HighWatermark)
 		return false
@@ -586,6 +610,7 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, w *moveWorker, sourceAddr 
 	// only reads); the fence's listing is the freshest view of them.
 	staging := r.stagingDir(topicName, partition)
 	if err := installSidecars(staging, fence.Sidecars, res.HighWatermark); err != nil {
+		w.status.setError(fmt.Errorf("install fan-out cursors: %w", err))
 		r.logger.Warn("move: install fan-out cursor sidecars; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
@@ -604,11 +629,13 @@ func (r *MoveRunner) attemptCopy(ctx context.Context, w *moveWorker, sourceAddr 
 func (w *moveWorker) copyFailedVerification(err error) {
 	r := w.r
 	w.unverified++
+	w.status.setError(fmt.Errorf("the staged copy failed verification: %w", err))
 	if w.unverified < 2 {
 		w.resetSession("the staged copy failed verification: " + err.Error())
 		return
 	}
 	w.gaveUp = true
+	w.status.setBlocked(MoveBlockedCopyUnverifiable, nil)
 	r.logger.Error("move: staged copy cannot be verified; not freezing the source again",
 		"topic", w.topic, "partition", w.partition, "source", w.source, "attempts", w.unverified,
 		"action", "abort the move, or restart this node to try once more", "err", err)
@@ -648,10 +675,12 @@ func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResu
 	// worker if the move is no longer wanted.
 	rec, err := r.store.GetTopic(ctx, topicName)
 	if err != nil {
+		w.status.setError(fmt.Errorf("read the topic record before the install: %w", err))
 		r.logger.Warn("move: read topic record before install; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
 	if res.IncarnationID != "" && rec.ID != "" && res.IncarnationID != rec.ID {
+		w.status.setError(fmt.Errorf("the copy belongs to topic incarnation %s, this node records %s", res.IncarnationID, rec.ID))
 		r.logger.Error("move: source copy belongs to another incarnation of the topic; refusing to install it",
 			"topic", topicName, "partition", partition, "source", source,
 			"copy_incarnation", res.IncarnationID, "local_incarnation", rec.ID)
@@ -673,6 +702,7 @@ func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResu
 	// longer wanted.
 	if keeper, ok := r.reclaimer.(incarnationKeeper); ok && rec.ID != "" {
 		if err := keeper.EnsureTopicIncarnation(topicName, rec.ID); err != nil {
+			w.status.setError(fmt.Errorf("prepare the topic directory: %w", err))
 			w.warnOnce("prepare", "move: prepare topic directory for the incarnation; will retry", "topic", topicName, "partition", partition, "err", err)
 			return false
 		}
@@ -686,6 +716,7 @@ func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResu
 	// staging directory after it, and install syncs the directories it
 	// renames the copy into.
 	if err := w.sess.makeDurable(stagingDir); err != nil {
+		w.status.setError(fmt.Errorf("make the staged copy durable: %w", err))
 		r.logger.Warn("move: make the staged copy durable; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
@@ -703,10 +734,12 @@ func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResu
 		Children:          r.linkedChildren(ctx, topicName),
 	}
 	if err := messaging.WriteMoveMarker(stagingDir, marker); err != nil {
+		w.status.setError(fmt.Errorf("write the move marker: %w", err))
 		r.logger.Warn("move: write move marker; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
 	if err := storage.SyncDir(stagingDir); err != nil {
+		w.status.setError(fmt.Errorf("sync the staging directory: %w", err))
 		r.logger.Warn("move: sync the staging directory; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
@@ -729,6 +762,7 @@ func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResu
 	resetConsumerState()
 	installed, err := r.install(topicName, partition, stagingDir, expectID, time.Duration(rec.RetentionMs)*time.Millisecond)
 	if err != nil {
+		w.status.setError(fmt.Errorf("install: %w", err))
 		r.logger.Warn("move: install failed; will retry", "topic", topicName, "partition", partition, "err", err)
 		return false
 	}
@@ -738,6 +772,7 @@ func (r *MoveRunner) finishMove(ctx context.Context, w *moveWorker, res CopyResu
 		res: res, expectID: expectID, installed: installed, marker: marker, forcePromoted: forcePromoted,
 		token: token, sourceAddr: sourceAddr, since: r.now(),
 	}
+	w.status.setPhase(MovePhaseFlipPending)
 	if err := w.proposeFlip(ctx); err != nil {
 		r.logger.Warn("move: flip not confirmed; resolving its outcome with the leader before undoing anything",
 			"topic", topicName, "partition", partition, "err", err)

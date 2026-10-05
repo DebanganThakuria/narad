@@ -11,6 +11,7 @@ package cluster
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -37,11 +38,14 @@ func (w *moveWorker) observeSource(m metastore.Member) {
 // source's last high watermark (a promote would lose records the source
 // made visible), or it fails verification. The worker keeps waiting for
 // the source. It is logged once at error each time the source dies, and
-// at debug on every retry after that.
+// at debug on every retry after that. The move reports itself blocked
+// (source_dead_copy_behind, or copy_unverifiable for a copy that fails
+// verification) until the source reads alive and a copy attempt starts.
 func (w *moveWorker) cannotForcePromote(err error) {
 	r := w.r
 	msg := "move: the source is dead and this node's copy is behind its last high watermark, so it cannot force-promote: promoting would lose records the source made visible. Waiting for the source to return; abort the move to give up on it"
 	args := []any{"topic", w.topic, "partition", w.partition, "source", w.source}
+	reason := MoveBlockedSourceDeadCopyBehind
 	var behind *copyBehindError
 	switch {
 	case errors.As(err, &behind):
@@ -50,7 +54,9 @@ func (w *moveWorker) cannotForcePromote(err error) {
 		args = append(args, "copy_next_offset", 0)
 	default:
 		msg = "move: the source is dead and this node's copy fails verification, so it cannot force-promote. Waiting for the source to return; abort the move to give up on it"
+		reason = MoveBlockedCopyUnverifiable
 	}
+	w.status.setBlocked(reason, fmt.Errorf("force-promote: %w", err))
 	args = append(args, "err", err)
 	if w.deadReported {
 		r.logger.Debug(msg, args...)

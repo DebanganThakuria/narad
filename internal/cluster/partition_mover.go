@@ -125,6 +125,10 @@ type MoveSession struct {
 	// complete (move_segment_age.go).
 	modTimes map[int64]int64
 
+	// onCopied, when set, is told the bytes this session has fetched
+	// after every chunk it stages (the worker's MoveState).
+	onCopied func(int64)
+
 	// keepFrozen, when set, is called every keepFrozenEvery during
 	// Finalize to re-arm the source's handoff freeze (whose TTL is
 	// shorter than a slow drain can take). An error means the freeze
@@ -229,6 +233,9 @@ func (s *MoveSession) pass(ctx context.Context) (int64, messaging.PartitionTrans
 			}
 			at += int64(len(chunk))
 			newBytes += int64(len(chunk))
+			if s.onCopied != nil {
+				s.onCopied(s.total + newBytes)
+			}
 		}
 		s.copied[seg.BaseOffset] = at
 		if seg.Sealed && at > 0 && at == seg.SizeBytes && s.synced[seg.BaseOffset] != at {

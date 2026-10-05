@@ -102,6 +102,10 @@ type moveWorker struct {
 	// without freezing the source again (move_runner.go).
 	unverified int
 	gaveUp     bool
+
+	// status is what MoveStates reports for this worker; nil (a worker
+	// built without trackMove) records nothing (move_states.go).
+	status *moveStatus
 }
 
 // warnOnce logs a retry at warn level the first time this worker meets
@@ -410,6 +414,9 @@ func (w *moveWorker) proposeFlip(ctx context.Context) error {
 	err := w.r.completeMove(ctx, w.topic, w.partition, w.source)
 	if err != nil && !flipSettled(err) {
 		w.pending.unknownAt = w.r.now()
+	}
+	if err != nil {
+		w.status.setError(fmt.Errorf("propose the flip: %w", err))
 	}
 	return err
 }

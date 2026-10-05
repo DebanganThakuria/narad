@@ -1079,3 +1079,162 @@ func TestMoveCompletesForAPartitionWithToleratedSealedDamage(t *testing.T) {
 		}
 	}
 }
+
+// movesBlocked gathers narad_moves_blocked from reg by reason.
+func movesBlocked(t *testing.T, reg *prometheus.Registry) map[string]float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]float64{}
+	for _, mf := range mfs {
+		if mf.GetName() != "narad_moves_blocked" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "reason" {
+					got[l.GetValue()] = m.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	return got
+}
+
+// awaitMoveState waits until the runner reports exactly one move and
+// that move satisfies ok, and returns it.
+func awaitMoveState(t *testing.T, r *MoveRunner, what string, ok func(MoveState) bool) MoveState {
+	t.Helper()
+	var last []MoveState
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		last = r.MoveStates()
+		if len(last) == 1 && ok(last[0]) {
+			return last[0]
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no move %s within 5s; the runner reports %+v", what, last)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// stagedBytes sums the sizes of the segments staged under dir.
+func stagedBytes(dir string) int64 {
+	var n int64
+	for _, s := range mustSegs(dir) {
+		n += s.SizeBytes
+	}
+	return n
+}
+
+// The destination reports each move it runs: where it copies from, what
+// it is doing, how far the copy got and the last thing that went wrong,
+// and, for a move it cannot finish on its own, why. narad_moves_blocked
+// counts those by reason, both reasons exported at 0.
+func TestMoveStatesReportPhaseAndBlockedReason(t *testing.T) {
+	t.Run("a dead source with a copy behind", func(t *testing.T) {
+		store, clock, r, _, _, _, stop := startDeadSourceScenario(t, 3, discardLogger())
+		defer stop()
+		reg := prometheus.NewRegistry()
+		r.RegisterMetrics(reg)
+
+		st := awaitMoveState(t, r, "copying with a failed freeze", func(s MoveState) bool {
+			return s.Phase == MovePhaseCopying && s.LastError != ""
+		})
+		if st.Topic != "orders" || st.Partition != 0 || st.Source != "narad-src" || st.Target != "narad-dst" || st.StartedAt.IsZero() {
+			t.Fatalf("move identity %+v, want orders/0 from narad-src to narad-dst with a start time", st)
+		}
+		if st.Attempts < 1 || st.Blocked != "" {
+			t.Fatalf("live source: attempts %d, blocked %q; want at least one attempt and nothing blocked", st.Attempts, st.Blocked)
+		}
+		if staged := stagedBytes(r.stagingDir("orders", 0)); staged == 0 || st.CopiedBytes != staged {
+			t.Fatalf("copied bytes %d, want the %d bytes staged", st.CopiedBytes, staged)
+		}
+		if got := movesBlocked(t, reg); len(got) != 2 || got[MoveBlockedCopyUnverifiable] != 0 || got[MoveBlockedSourceDeadCopyBehind] != 0 {
+			t.Fatalf("narad_moves_blocked = %v, want both reasons at 0", got)
+		}
+
+		store.dead.Store(true)
+		awaitMoveState(t, r, "waiting for a dead source", func(s MoveState) bool {
+			return s.Phase == MovePhaseWaitingForSource && s.Blocked == ""
+		})
+		clock.Advance(3 * time.Minute)
+		st = awaitMoveState(t, r, "blocked behind a dead source", func(s MoveState) bool {
+			return s.Phase == MovePhaseBlocked && s.Blocked == MoveBlockedSourceDeadCopyBehind
+		})
+		if st.LastError == "" {
+			t.Fatal("a move blocked behind a dead source reports no error")
+		}
+		if got := movesBlocked(t, reg); got[MoveBlockedSourceDeadCopyBehind] != 1 || got[MoveBlockedCopyUnverifiable] != 0 {
+			t.Fatalf("narad_moves_blocked = %v, want source_dead_copy_behind 1", got)
+		}
+
+		store.dead.Store(false)
+		awaitMoveState(t, r, "copying again once the source returns", func(s MoveState) bool {
+			return s.Phase == MovePhaseCopying && s.Blocked == ""
+		})
+		if got := movesBlocked(t, reg); got[MoveBlockedSourceDeadCopyBehind] != 0 {
+			t.Fatalf("narad_moves_blocked = %v once the source returned, want 0", got)
+		}
+		stop()
+		if got := r.MoveStates(); len(got) != 0 {
+			t.Fatalf("a worker that exited is still reported: %+v", got)
+		}
+	})
+
+	t.Run("a copy that cannot be verified", func(t *testing.T) {
+		src := t.TempDir()
+		hwm, _ := buildSourcePartition(t, src, 6)
+		store := &fakeMoveStore{
+			assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+			member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+		}
+		var prepares, freshReads atomic.Int64
+		peer := unverifiablePeer{
+			movePeerFake: movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: hwm + 3}, freeze: &fakeFreeze{}},
+			prepares:     &prepares,
+			freshReads:   &freshReads,
+		}
+		r := NewMoveRunner(store, "narad-dst", t.TempDir(), peer, nil, nil, discardLogger(), MoveConfig{RetryBackoff: 5 * time.Millisecond})
+		reg := prometheus.NewRegistry()
+		r.RegisterMetrics(reg)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer func() { cancel(); r.wg.Wait() }()
+		r.Reconcile(ctx)
+
+		st := awaitMoveState(t, r, "blocked on an unverifiable copy", func(s MoveState) bool {
+			return s.Blocked == MoveBlockedCopyUnverifiable
+		})
+		if st.Phase != MovePhaseBlocked || st.Attempts != 2 || st.LastError == "" {
+			t.Fatalf("unverifiable copy: phase %q, attempts %d, last error %q; want blocked after 2 attempts with the error", st.Phase, st.Attempts, st.LastError)
+		}
+		if got := movesBlocked(t, reg); got[MoveBlockedCopyUnverifiable] != 1 || got[MoveBlockedSourceDeadCopyBehind] != 0 {
+			t.Fatalf("narad_moves_blocked = %v, want copy_unverifiable 1", got)
+		}
+		cancel()
+		r.wg.Wait()
+		if got := movesBlocked(t, reg); got[MoveBlockedCopyUnverifiable] != 0 {
+			t.Fatalf("narad_moves_blocked = %v after the worker exited, want 0", got)
+		}
+	})
+}
+
+// MoveStates lists the moves ordered by topic, then partition.
+func TestMoveStatesAreOrderedByTopicAndPartition(t *testing.T) {
+	r := NewMoveRunner(&fakeMoveStore{}, "narad-dst", t.TempDir(), movePeerFake{}, nil, nil, discardLogger(), MoveConfig{})
+	for _, k := range []struct {
+		topic     string
+		partition int
+	}{{"payments", 2}, {"orders", 10}, {"payments", 0}, {"orders", 2}} {
+		r.trackMove(k.topic, k.partition, "narad-src", time.Now())
+	}
+	var got []string
+	for _, s := range r.MoveStates() {
+		got = append(got, fmt.Sprintf("%s/%d", s.Topic, s.Partition))
+	}
+	if want := []string{"orders/2", "orders/10", "payments/0", "payments/2"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("MoveStates order %v, want %v", got, want)
+	}
+}

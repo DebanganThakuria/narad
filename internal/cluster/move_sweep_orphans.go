@@ -42,18 +42,22 @@ type orphanTopicReclaimer interface {
 // at a random directory so none is starved.
 const orphanReclaimsPerPass = 16
 
-// RegisterMetrics registers the runner's gauge on reg:
+// RegisterMetrics registers the runner's gauges on reg:
 // narad_orphan_topic_dirs, the plain topic directories whose topic this
-// node's replica no longer knows and that the last pass left in place. A
-// nil reg registers nothing.
+// node's replica no longer knows and that the last pass left in place,
+// and narad_moves_blocked, the moves this node runs that cannot finish
+// on their own (move_states.go). A nil reg registers nothing.
 func (r *MoveRunner) RegisterMetrics(reg prometheus.Registerer) {
 	if reg == nil {
 		return
 	}
-	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "narad_orphan_topic_dirs",
-		Help: "Topic directories on this node whose topic no longer exists and that the last reclaim pass left in place: unmarked directories (removed only by the startup sweep) and directories the leader has not yet confirmed gone.",
-	}, func() float64 { return float64(r.orphanTopicDirs.Load()) }))
+	reg.MustRegister(
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "narad_orphan_topic_dirs",
+			Help: "Topic directories on this node whose topic no longer exists and that the last reclaim pass left in place: unmarked directories (removed only by the startup sweep) and directories the leader has not yet confirmed gone.",
+		}, func() float64 { return float64(r.orphanTopicDirs.Load()) }),
+		newMovesBlockedCollector(r),
+	)
 }
 
 // ReclaimOrphanTopicDirs runs the leader-confirmed reclaim of deleted
