@@ -27,6 +27,7 @@ type controllerStore interface {
 	SetAssignmentTarget(ctx context.Context, topicName string, partition int, targetID string) error
 	MarkMemberDead(ctx context.Context, podID string) error
 	Voters() ([]string, error)
+	Nonvoters() ([]string, error)
 	RemoveServer(id string) error
 	RemoveMember(ctx context.Context, podID string, at int64) error
 	TransferLeadership() error

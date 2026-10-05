@@ -70,11 +70,7 @@ func TestFSMSnapshotRestoreCarriesSchemaHistory(t *testing.T) {
 	if err := fsmAttach(t, source, "parent", "child"); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	snap, err := source.Snapshot()
-	if err != nil {
-		t.Fatalf("Snapshot: %v", err)
-	}
-	data := snap.(*fsmSnapshot).data
+	data := snapshotImage(t, source)
 
 	target, err := newFSM(filepath.Join(t.TempDir(), "meta.db"))
 	if err != nil {

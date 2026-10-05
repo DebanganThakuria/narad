@@ -1,8 +1,14 @@
 package node
 
-// EncodeJoinClusterRequest encodes an OpJoinCluster payload.
+// EncodeJoinClusterRequest encodes an OpJoinCluster payload. EntryTypes
+// trails Fresh and is written only when non-zero, so a request without
+// it is exactly the frame v3.0.1 sends.
 func EncodeJoinClusterRequest(req JoinClusterRequest) ([]byte, error) {
-	w := opWriter(OpJoinCluster, fieldLen(req.ID)+fieldLen(req.ClusterAddr)+1)
+	size := fieldLen(req.ID) + fieldLen(req.ClusterAddr) + 1
+	if req.EntryTypes != 0 {
+		size += 4
+	}
+	w := opWriter(OpJoinCluster, size)
 	if err := w.string(req.ID); err != nil {
 		return nil, err
 	}
@@ -10,13 +16,17 @@ func EncodeJoinClusterRequest(req JoinClusterRequest) ([]byte, error) {
 		return nil, err
 	}
 	w.bool(req.Fresh)
+	if req.EntryTypes != 0 {
+		w.u32(req.EntryTypes)
+	}
 	return w.finish(), nil
 }
 
-// DecodeJoinClusterRequest decodes an OpJoinCluster payload. The Fresh
-// flag is a trailing optional field: a request from a node that
-// predates it decodes with Fresh=false, the conservative reading (its
-// state is unknown, so a tombstoned ID stays refused).
+// DecodeJoinClusterRequest decodes an OpJoinCluster payload. Fresh and
+// EntryTypes are trailing optional fields: a request from a node that
+// predates Fresh decodes with Fresh=false, the conservative reading (its
+// state is unknown, so a tombstoned ID stays refused), and one that
+// predates EntryTypes with 0 (it reports nothing).
 func DecodeJoinClusterRequest(payload []byte) (JoinClusterRequest, error) {
 	r, err := opReader(payload, OpJoinCluster)
 	if err != nil {
@@ -30,14 +40,19 @@ func DecodeJoinClusterRequest(payload []byte) (JoinClusterRequest, error) {
 	if err != nil {
 		return JoinClusterRequest{}, err
 	}
-	fresh := false
+	req := JoinClusterRequest{ID: id, ClusterAddr: clusterAddr}
 	if r.remaining() > 0 {
-		if fresh, err = r.bool(); err != nil {
+		if req.Fresh, err = r.bool(); err != nil {
+			return JoinClusterRequest{}, err
+		}
+	}
+	if r.remaining() > 0 {
+		if req.EntryTypes, err = r.u32(); err != nil {
 			return JoinClusterRequest{}, err
 		}
 	}
 	if err := r.done(); err != nil {
 		return JoinClusterRequest{}, err
 	}
-	return JoinClusterRequest{ID: id, ClusterAddr: clusterAddr, Fresh: fresh}, nil
+	return req, nil
 }

@@ -9,7 +9,7 @@ search:
 Learn how a Narad cluster forms, grows, recovers from crashes, and handles a topic that is deleted and recreated under the same name.
 
 !!! abstract "In short"
-    - The initial members bootstrap one Raft configuration together. Every other node starts join-only and is admitted by the leader.
+    - The initial members bootstrap one Raft configuration together. Every other node starts join-only, is admitted by the leader as a Raft non-voter, and is promoted to voter once it has caught up and asks again.
     - A node reports ready only while it has a leader in view and has caught up at least once, so a load balancer never sends traffic to an empty or stale replica.
     - Decommission removes a node from Raft and leaves a tombstone, so the old node cannot rejoin under its ID with its old data.
     - Four crash-recovery bugs shared one cause: a node restored from a snapshot trusted its stale view with something destructive. Every destructive step now needs the leader's confirmation.
@@ -29,16 +29,35 @@ A node *not* listed in `initial_members` must never bootstrap: it would create a
 <div class="nr-dia__frame nr-plate nr-tint nr-tint--butter">
 --8<-- "diagrams/lifecycle-join.html"
 </div>
-<figcaption>A <code>421</code> sends the joiner on to the next peer. Only its own Raft seeing a leader ends the loop and lets it report ready.</figcaption>
+<figcaption>A <code>421</code> names the leader, and the joiner asks it next. The leader stages the joiner as a non-voter; only the joiner's own Raft seeing a leader ends the loop and lets it report ready, and once caught up it asks again to be promoted to voter.</figcaption>
 </figure>
 
-The join loop walks the configured peers every 2 s until its own Raft sees a leader, which proves admission. Readiness is held until then, so an unadmitted node never receives traffic: a fresh node cannot serve an empty metastore behind the load balancer. `AddVoter` is idempotent, so joiner restarts and lost replies are safe. Scaling out is `replicaCount: 5` in Helm. The peer list the pods carry is pinned to the initial members, and each pod advertises its own address, so the existing members are not rolled by the scale.
+Every 2 s the join loop asks the configured peers, and the leader addresses it learned on earlier attempts, until its own Raft sees a leader, which proves admission. Readiness is held until then, so an unadmitted node never receives traffic: a fresh node cannot serve an empty metastore behind the load balancer. A join from a node already in the configuration changes nothing but its address, so joiner restarts and lost replies are safe. Scaling out is `replicaCount: 5` in Helm. The peer list the pods carry is pinned to the initial members, and each pod advertises its own address, so the existing members are not rolled by the scale.
 
-Three answers mean something to a joiner:
+Leadership moves freely, so the leader is often a node that joined later and is not in that pinned list. A follower's `421` therefore names the leader, `{"error": "not the metastore leader", "leader_id": "narad-4", "leader_addr": "narad-4.narad-headless:7942"}`, with the leader's node-RPC address from its own replica (either field is empty when it does not know), and the joiner asks that address next. One attempt follows at most 4 such hints, a hint must be a `host:port` of at most 261 bytes with a non-zero port, and the joiner remembers up to 8 leader addresses for later attempts, most recent first, so it still finds a leader every pinned pod has lost sight of. The same walk serves a readmission after a node lost its leader.
 
-- `200`: admitted.
-- `421`: a configured node that is not the leader; try the next peer.
+Four answers mean something to a joiner:
+
+- `200`: admitted. The body's `status` says how: `staged` (added as a non-voter), `deferred` (a non-voter not promoted yet; `reason` says why), `promoted` (made a voter by this request) or `voter` (already one). A leader on 3.0.x answers `joined` and adds the joiner as a voter at once.
+- `421`: a configured node that is not the leader; ask the leader it names, then the next peer.
 - `412`: a node with no Raft configuration at all (not bootstrapped, or itself waiting for admission); no evidence of a cluster.
+- `409`: the ID was decommissioned ([below](#decommission-removal)), or, with code `older_release` (unreleased), the joiner runs an older release than the cluster: it applies fewer Raft entry types than every recorded member, so the cluster may already use entries it would skip, or fewer than the newest type the cluster has applied ([Raft entry types and upgrades](metastore-and-raft.md#entry-types)). The joiner logs that at error once and keeps asking every 2 s until it is upgraded; the leader logs it at error at most once a minute per joiner. A node already in the Raft configuration is never refused this way.
+
+A join request carries the newest Raft entry type the joiner applies (unreleased). A 3.0.x node refuses that longer request with a `400` naming trailing data, and the joiner sends it again at once without the field, on every path: the join loop, the promotion requests below, and the existing-cluster probe.
+
+### Staged as a non-voter, then promoted {#join-promotion}
+
+The leader admits a new node as a Raft **non-voter**: it receives every entry and serves traffic, but it does not count toward quorum and does not vote. A joiner the voters cannot reach (a wrong advertise address, a certificate from another CA, a crash right after its join) therefore costs nothing. Until 3.1.0 a joiner was added as a voter at once, and an unreachable one admitted while one of three voters was down left two of four voters reachable: no leader, every node not ready, and no configuration change could commit to undo it.
+
+Once its replica has caught up with the leader, the node sends its join again every 2 s until it is a voter. The leader promotes it when all of these hold, and otherwise answers `deferred` with the reason:
+
+- the leader has led for at least 12 s. A heartbeat to a node that drops packets fails only after the Raft transport's 10 s dial timeout, so a younger leader cannot yet tell an unreachable joiner from a healthy one;
+- the leader's heartbeats to the joiner are not failing (a failed heartbeat counts for 12 s unless a later one succeeds);
+- the joiner's member record exists, is alive, and is not draining.
+
+The joining node logs each new deferral reason at info (`cluster join: caught up as a raft non-voter; the leader defers promotion`), and the leader logs deferrals at debug. The leader checks nothing about the other voters. If the configuration can commit at all, the voters the leader reaches are a quorum of the current voters, and they plus one more reachable voter are a quorum of the larger set too.
+
+Nothing promotes or removes a non-voter on its own. A node that never asks (one still running 3.0.x) or keeps being deferred stays a replicating non-voter until it asks again or is decommissioned; `narad_raft_nonvoters` counts them ([Troubleshooting](../operate/troubleshooting.md#nonvoters-stay)). A node that joined while running 3.0.x asks for promotion itself once it runs 3.1.0, at its first start. Decommission removes a drained non-voter from Raft like a voter, without the MinVoters floor or the leader hand-off: a node without a vote counts toward neither.
 
 "I am an initial member" does not prove membership, so two more situations end in the same loop:
 
@@ -49,7 +68,7 @@ New nodes receive partition assignments for topics created *after* they join, an
 
 ## Decommission removal {#decommission-removal}
 
-A [decommission](../reference/glossary.md#decommission) ends with `RemoveServer`, which takes the node out of the Raft configuration. That alone leaves the member record behind. The pod keeps running until the operator scales it away, its heartbeat keeps registering it again through the leader, and it stays listed as alive and draining forever, walked on every route-table rebuild and delete broadcast. After the pod is deleted, the record would linger as dead forever.
+A [decommission](../reference/glossary.md#decommission) ends with `RemoveServer`, which takes the node, voter or non-voter, out of the Raft configuration. That alone leaves the member record behind. The pod keeps running until the operator scales it away, its heartbeat keeps registering it again through the leader, and it stays listed as alive and draining forever, walked on every route-table rebuild and delete broadcast. After the pod is deleted, the record would linger as dead forever.
 
 So the controller applies a second Raft entry right after the configuration change: **remove member**, which deletes the record and leaves a tombstone for the ID. The state machine refuses to register a tombstoned ID, so no heartbeat can bring it back. The join handler answers `409` to the old incarnation of the node (still running, or restarted with its old volume), which therefore cannot undo its own decommission through the join loop.
 
@@ -106,12 +125,16 @@ Every scenario ended with bounded duplicates (the at-least-once seams) and `OVER
 | Thing | Value |
 |---|---|
 | Join attempt cadence / proof of admission | every 2s / "my own Raft sees a leader" |
+| Join hints | at most 4 followed per attempt; up to 8 leader addresses remembered |
+| Promotion request | every 2s once the non-voter's replica has caught up, until it is a voter |
+| Promotion rules | the leader has led 12s; its heartbeats to the joiner are not failing (a failure counts for 12s); the member record is alive and not draining |
 | Graceful leadership transfer | about 150ms; election after a crash about 1s |
 | Heartbeat / dead marking | 5s / 30s |
 | Startup reconcile wait for caught-up | up to 60s (the sweep is skipped on timeout, so data is never deleted in a hurry). The timeout never marks the node ready; it keeps waiting |
 | Readiness | live: leader in view, contact within 5s (or the node is the leader), ownership latch set |
 | Leaderless join | a node with no leader for 15s runs the join loop |
 | Existing-cluster probe (empty volume) | 3 rounds, 1s apart, 2s per peer, before an initial member bootstraps |
+| Joiner older than every member | `409` with code `older_release`; logged at error once by the joiner, at most once a minute per joiner by the leader |
 | Trust in itself as leader | only after a Raft `Barrier` bounded at 5s and a new read; the ownership latch on a node that is the leader also needs the barrier |
 
 ## Topic incarnations {#incarnations}

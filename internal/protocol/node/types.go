@@ -76,10 +76,20 @@ type AbortMoveRequest struct {
 // decommissioned (tombstoned) ID again only when its old state is gone,
 // so a removed pod that is merely still running, or restarted with its
 // old volume, cannot undo its own decommission.
+//
+// EntryTypes is the newest Raft entry type the joiner's release applies
+// (0: not reported, a joiner on an older release). The leader refuses a
+// joiner that applies fewer entry types than every recorded member, or
+// than the newest type the cluster has applied, so a node never joins a
+// cluster that may already use entries it cannot apply. It is a trailing optional field, written only when non-zero; a
+// leader on an older release refuses the longer frame
+// (TrailingPayloadError) and the joiner sends it again without the
+// field.
 type JoinClusterRequest struct {
 	ID          string
 	ClusterAddr string
 	Fresh       bool
+	EntryTypes  uint32
 }
 
 // ProduceRequest asks a node to route and append one record.
@@ -197,12 +207,21 @@ type UserRequest struct {
 }
 
 // MemberRequest registers or refreshes a cluster member.
+//
+// Build (the sender's release) and EntryTypes (the newest Raft entry
+// type it applies) are trailing optional fields, written only when
+// either is set. The leader records them on the member, and uses a new
+// entry type only once every member reports one that knows it. A leader
+// on an older release refuses the longer frame (TrailingPayloadError)
+// and the sender sends it again without them.
 type MemberRequest struct {
 	ID            string
 	Addr          string
 	ClusterAddr   string
 	Status        string
 	LastHeartbeat int64
+	Build         string
+	EntryTypes    uint32
 }
 
 // PartitionSegmentsRequest asks the owner of (Topic, Partition) for its
