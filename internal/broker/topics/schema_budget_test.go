@@ -3,6 +3,7 @@ package topics
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,4 +140,67 @@ func TestBudgetCountsCopiesIntoChildren(t *testing.T) {
 	if after, _ := store.ClusterSchemaBytes(ctx); after != have+4*int64(size) {
 		t.Fatalf("cluster stores %d schema bytes, want %d", after, have+4*int64(size))
 	}
+}
+
+// TestHistoryAlreadyOverTheBudgetNamesTheWayOut: 3.0.x stored up to
+// 1000 versions of 256 KiB, so a topic can come out of the upgrade
+// with a history already over the per-topic budget. It takes no new
+// version however small and no schema-less child can copy it, so the
+// 409 says the history is already over and names what works (a new
+// topic) instead of "register fewer or smaller versions". Re-sending
+// the current schema still answers. A cluster whose schemas are
+// already over the cluster budget gets the same treatment.
+func TestHistoryAlreadyOverTheBudgetNamesTheWayOut(t *testing.T) {
+	m, store := newStoreManager(t)
+	ctx := context.Background()
+	m.schemaBudget.topic = 32 << 10
+
+	const size = 10 << 10
+	if _, err := m.CreateTopic(ctx, CreateOpts{Name: "legacy", Partitions: 3, Schema: paddedSchema(1, size)}); err != nil {
+		t.Fatal(err)
+	}
+	// Versions stored before the budget applied, as a 3.0.x leader
+	// wrote them.
+	for v := 2; v <= 5; v++ {
+		if err := store.PutSchema(ctx, "legacy", v, paddedSchema(v, size)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wantWayOut := func(what string, err error, want ...string) {
+		t.Helper()
+		if !errors.Is(err, errs.ErrSchemaHistoryFull) {
+			t.Fatalf("%s: err = %v, want ErrSchemaHistoryFull", what, err)
+		}
+		for _, w := range want {
+			if !strings.Contains(err.Error(), w) {
+				t.Errorf("%s: refusal %q does not say %q", what, err, w)
+			}
+		}
+		if strings.Contains(err.Error(), "smaller") {
+			t.Errorf("%s: refusal %q suggests smaller schemas, which cannot help", what, err)
+		}
+	}
+
+	_, err := m.UpdateTopicSchema(ctx, "legacy", paddedSchema(6, 0), 0)
+	wantWayOut("a small change to an over-budget history", err, "already holds", "create a new topic")
+	if _, err := m.UpdateTopicSchema(ctx, "legacy", paddedSchema(5, size), 0); err != nil {
+		t.Fatalf("re-sending the current schema of an over-budget history: %v", err)
+	}
+
+	if _, err := m.CreateTopic(ctx, CreateOpts{Name: "plain", Partitions: 3}); err != nil {
+		t.Fatal(err)
+	}
+	wantWayOut("attaching a schema-less child", m.AttachChild(ctx, "legacy", "plain", 0), "already holds", "new topic")
+	_, err = m.CreateTopic(ctx, CreateOpts{Name: "kid", Partitions: 3, Parent: "legacy"})
+	wantWayOut("creating a schema-less child", err, "already holds", "new topic")
+	if _, err := store.GetTopic(ctx, "kid"); !errors.Is(err, errs.ErrNotFound) {
+		t.Errorf("refused create-as-child left kid behind: %v", err)
+	}
+
+	// The cluster as a whole over its budget: no topic takes a new
+	// version until topics are deleted.
+	m.schemaBudget.topic = topicSchemaBudgetBytes
+	m.schemaBudget.cluster = 40 << 10
+	_, err = m.CreateTopic(ctx, CreateOpts{Name: "fresh", Partitions: 3, Schema: paddedSchema(1, 1<<10)})
+	wantWayOut("a create with a schema on an over-budget cluster", err, "already hold", "deleted")
 }
