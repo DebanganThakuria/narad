@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/cluster"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/platform/config"
 	"github.com/debanganthakuria/narad/internal/platform/netaddr"
@@ -142,7 +143,7 @@ func awaitVoter(ctx context.Context, store leaderWatcher, peer clusterJoiner, cf
 	if !ok {
 		return false
 	}
-	req := nodewire.JoinClusterRequest{ID: nodeID, ClusterAddr: clusterAdvertiseAddr(cfg, nodeID)}
+	req := nodewire.JoinClusterRequest{ID: nodeID, ClusterAddr: clusterAdvertiseAddr(cfg, nodeID), EntryTypes: metastore.MaxEntryType}
 	walker := &joinWalker{peer: peer, cfg: cfg, nodeID: nodeID, log: log}
 	ticker := time.NewTicker(clusterJoinRetryInterval)
 	defer ticker.Stop()
@@ -213,6 +214,37 @@ func parseJoinOutcome(body []byte) joinOutcome {
 	return out
 }
 
+// joinRejection names a join answer for log-once bookkeeping: "" for a
+// 200, the body's code when it has one (cluster.JoinCodeOlderRelease),
+// else the status.
+func joinRejection(res nodewire.Response) string {
+	if res.Status == http.StatusOK {
+		return ""
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(res.Body, &body) == nil && body.Code != "" {
+		return body.Code
+	}
+	return strconv.Itoa(res.Status)
+}
+
+// sendJoin sends one join request. A 3.0.x node refuses a request
+// carrying EntryTypes with a trailing-field refusal before it looks at
+// anything else; the request is sent again at once without the field,
+// which that node cannot check anyway. Every join sender goes through
+// here: an initial member probing for an existing cluster that read a
+// 3.0.x peer's 400 as "no cluster" would bootstrap a rival one.
+func sendJoin(ctx context.Context, peer clusterJoiner, addr string, req nodewire.JoinClusterRequest) (nodewire.Response, error) {
+	res, err := peer.JoinCluster(ctx, addr, req)
+	if err == nil && req.EntryTypes != 0 && cluster.IsTrailingFieldRefusal(res) {
+		req.EntryTypes = 0
+		res, err = peer.JoinCluster(ctx, addr, req)
+	}
+	return res, err
+}
+
 // waitLeaderlessFor blocks until this node has been continuously without
 // a leader for d (returning true), or ctx is cancelled (false).
 func waitLeaderlessFor(ctx context.Context, store leaderWatcher, d time.Duration) bool {
@@ -244,38 +276,53 @@ func waitLeaderlessFor(ctx context.Context, store leaderWatcher, d time.Duration
 // in it. Safe to run on a node that is already a member: the loop exits
 // on the first leader sighting without sending anything if Raft already
 // knows one.
+//
+// The request carries the newest Raft entry type this release applies.
+// A leader whose every member applies more refuses it (409, code
+// older_release): logged at error once, then retried quietly until the
+// operator upgrades this node.
 func runClusterJoin(ctx context.Context, store leaderWatcher, peer clusterJoiner, cfg *config.Config, nodeID string, fresh bool, log *slog.Logger) {
 	req := nodewire.JoinClusterRequest{
 		ID:          nodeID,
 		ClusterAddr: clusterAdvertiseAddr(cfg, nodeID),
 		Fresh:       fresh,
+		EntryTypes:  metastore.MaxEntryType,
 	}
 	walker := &joinWalker{peer: peer, cfg: cfg, nodeID: nodeID, log: log}
 	ticker := time.NewTicker(clusterJoinRetryInterval)
 	defer ticker.Stop()
 	attempts := 0
-	lastRejection := 0
+	lastRejection := ""
 	for {
 		if store.LeaderID() != "" {
 			log.Info("cluster join: admitted", "node", nodeID, "leader", store.LeaderID(), "attempts", attempts)
 			return
 		}
 		if res, addr, ok := walker.walk(ctx, req, ""); ok {
-			switch res.Status {
-			case http.StatusOK:
+			rejection := joinRejection(res)
+			switch {
+			case res.Status == http.StatusOK:
 				log.Info("cluster join: leader accepted", "node", nodeID, "via", addr, "outcome", parseJoinOutcome(res.Body).Status)
-			case http.StatusConflict:
+			case rejection == cluster.JoinCodeOlderRelease:
+				// Every member applies Raft entry types this release does
+				// not: the cluster may already use them. Say so once, at
+				// error, then keep retrying quietly.
+				if lastRejection != rejection {
+					log.Error("cluster join refused: this node runs an older release than every member of the cluster, which may already use Raft entries it cannot apply. Upgrade it to the cluster's release",
+						"node", nodeID, "via", addr, "entry_types", req.EntryTypes, "body", strings.TrimSpace(string(res.Body)))
+				}
+			case res.Status == http.StatusConflict:
 				// The leader refuses the old incarnation of a removed ID.
 				// Say so once, loudly, then keep retrying quietly: the
 				// operator either scales this pod away or wipes its volume.
-				if lastRejection != res.Status {
+				if lastRejection != rejection {
 					log.Warn("cluster join refused: this node was decommissioned and removed; it will not rejoin with its old data directory. Scale it away, or delete its volume to rejoin as a new node",
 						"node", nodeID, "via", addr, "body", strings.TrimSpace(string(res.Body)))
 				}
 			default:
 				log.Warn("cluster join rejected", "via", addr, "status", res.Status)
 			}
-			lastRejection = res.Status
+			lastRejection = rejection
 		}
 		attempts++
 		select {
@@ -331,7 +378,7 @@ func (w *joinWalker) walk(ctx context.Context, req nodewire.JoinClusterRequest, 
 	for i := 0; i < len(queue); i++ {
 		target := queue[i]
 		rpcCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		res, err := w.peer.JoinCluster(rpcCtx, target, req)
+		res, err := sendJoin(rpcCtx, w.peer, target, req)
 		cancel()
 		switch {
 		case err != nil:
@@ -395,17 +442,20 @@ func joinHint(body []byte) string {
 
 // existingClusterAnswers reports whether any configured peer answers the
 // join request as a member of a CONFIGURED cluster: accepted (200), not
-// the leader (421), or refused as a removed ID (409). A peer with no Raft
-// configuration (412), one that is down, or one not yet listening is not
-// evidence. An initial member with no local state asks this before
-// bootstrapping: "yes" means the cluster already exists and this node
-// must join it, whatever its old role was. The request carries
-// Fresh=true, which is what makes a readmission of a removed ID legal.
+// the leader (421), or refused as a removed ID or as older than every
+// member (409). A peer with no Raft configuration (412), one that is
+// down, or one not yet listening is not evidence. An initial member with
+// no local state asks this before bootstrapping: "yes" means the cluster
+// already exists and this node must join it, whatever its old role was.
+// The request carries Fresh=true, which is what makes a readmission of a
+// removed ID legal, and is resent without its entry types to a 3.0.x
+// peer that refuses them (sendJoin).
 func existingClusterAnswers(ctx context.Context, peer clusterJoiner, cfg *config.Config, nodeID string, log *slog.Logger) bool {
 	req := nodewire.JoinClusterRequest{
 		ID:          nodeID,
 		ClusterAddr: clusterAdvertiseAddr(cfg, nodeID),
 		Fresh:       true,
+		EntryTypes:  metastore.MaxEntryType,
 	}
 	for range existingClusterProbeRounds {
 		for _, p := range cfg.Cluster.Peers {
@@ -417,7 +467,7 @@ func existingClusterAnswers(ctx context.Context, peer clusterJoiner, cfg *config
 				continue
 			}
 			rpcCtx, cancel := context.WithTimeout(ctx, existingClusterProbeTimeout)
-			res, err := peer.JoinCluster(rpcCtx, addr, req)
+			res, err := sendJoin(rpcCtx, peer, addr, req)
 			cancel()
 			if err != nil {
 				log.Debug("existing-cluster probe: peer did not answer", "peer", p.ID, "err", err)
