@@ -1355,7 +1355,10 @@ paths:
       - name: id
         in: path
         required: true
-        description: The Raft server ID, as the leader's log or `narad_raft_nonvoters` names it.
+        description: >-
+          The Raft server ID. The leader's warnings name a server with no
+          member record as `raft server "<id>" has no member record`; under
+          the Helm chart a node's Raft ID is its pod name, such as `narad-3`.
         schema:
           type: string
     post:

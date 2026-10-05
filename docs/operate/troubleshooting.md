@@ -233,7 +233,7 @@ The Raft configuration holds a server that `narad cluster members` does not list
 
 **Cause.** A node joined and never registered: it crashed right after its join request, could not reach the cluster, or was replaced under another ID. A 3.0.x leader admitted joiners straight into the voter set, so such a server can be a voter, and an unreachable voter counts against quorum: with one more voter down the cluster may lose its leader. A decommission under a 3.0.x leader can also leave a non-voter behind.
 
-**Check.** `narad_raft_voters` and `narad_raft_nonvoters` on the leader against the members `narad cluster members` lists, and the leader's log for `raft: failed to heartbeat to: peer=<addr>` naming an address no member has.
+**Check.** `narad_raft_voters` and `narad_raft_nonvoters` on the leader against the members `narad cluster members` lists, and the leader's log for `raft: failed to heartbeat to: peer=<addr>` naming an address no member has. The ID to forget is the one in the `has no member record` warning; under the Helm chart a node's Raft ID is its pod name, which also starts its Raft address (`narad-3.narad-headless...`). `narad_raft_nonvoters` is only a count and names no server.
 
 **Fix.** **Unreleased:** remove it, from any node, while the cluster has a leader:
 

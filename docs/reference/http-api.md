@@ -1571,7 +1571,7 @@ the leader; followers forward it. The steps are in
 
 | Name | Description |
 |---|---|
-| `id`<br>path, string, required | The Raft server ID, as the leader's log or `narad_raft_nonvoters` names it. |
+| `id`<br>path, string, required | The Raft server ID. The leader's warnings name a server with no member record as `raft server "<id>" has no member record`; under the Helm chart a node's Raft ID is its pod name, such as `narad-3`. |
 
 **Responses**
 
