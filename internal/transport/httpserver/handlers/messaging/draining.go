@@ -12,6 +12,9 @@ const drainingProduceMessage = "this node is being decommissioned and takes no n
 
 // refuseWhileDraining answers a client produce with 503 and Retry-After
 // while this node is being decommissioned, and reports whether it did.
+// Handlers call it after Authorize (which reads no body) and before they
+// read the body: a principal that may not produce gets its 403, not a
+// retryable 503 that tells it the node is draining.
 // A draining node's ingress WAL must empty before the node leaves Raft,
 // and every record accepted here is one more to hand off. Only client
 // produce is refused: owner-side commits and produce forwarded by a peer

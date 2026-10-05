@@ -32,15 +32,15 @@ type produceQuery struct {
 // producer never set.)
 func Produce(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if refuseWhileDraining(s, w) {
-			return
-		}
 		topicName := r.PathValue("topic")
 		if topicName == "" {
 			s.WriteError(w, http.StatusBadRequest, "topic required")
 			return
 		}
 		if !s.Authorize(w, r, user.ActionProduce, topicName) {
+			return
+		}
+		if refuseWhileDraining(s, w) {
 			return
 		}
 
