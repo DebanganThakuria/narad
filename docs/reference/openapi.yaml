@@ -1273,11 +1273,11 @@ paths:
             curl -i -u "$AUTH" "$NARAD/v1/cluster/members"
           response: |
             HTTP/1.1 200 OK
-            Content-Length: 130
+            Content-Length: 183
             Content-Type: application/json
-            Date: Mon, 28 Sep 2026 19:31:44 GMT
+            Date: Mon, 05 Oct 2026 19:14:29 GMT
 
-            {"members":[{"id":"narad-0","addr":"127.0.0.1:17970","status":"alive","draining":false,"owned_partitions":6,"outbound_moves":0}]}
+            {"members":[{"id":"narad-0","addr":"127.0.0.1:17970","status":"alive","draining":false,"owned_partitions":4,"outbound_moves":0,"voter":true,"leader":true,"heartbeat_age_seconds":2}]}
   /v1/cluster/moves:
     get:
       operationId: listMoves
@@ -1318,11 +1318,11 @@ paths:
             curl -i -u "$AUTH" "$NARAD/v1/cluster/moves"
           response: |
             HTTP/1.1 200 OK
-            Content-Length: 13
+            Content-Length: 119
             Content-Type: application/json
-            Date: Mon, 28 Sep 2026 19:31:44 GMT
+            Date: Mon, 05 Oct 2026 19:15:09 GMT
 
-            {"moves":[]}
+            {"moves":[{"topic":"orders","partition":3,"from":"narad-0","to":"narad-2","from_status":"alive","to_status":"alive"}]}
   /v1/cluster/members/{id}/decommission:
     parameters:
       - name: id
@@ -1490,8 +1490,9 @@ paths:
               -H "Content-Type: application/json"
           response: |
             HTTP/1.1 202 Accepted
+            Content-Length: 283
             Content-Type: application/json
-            Date: Mon, 05 Oct 2026 10:12:31 GMT
+            Date: Mon, 05 Oct 2026 19:15:09 GMT
 
             {"move":{"topic":"orders","partition":3,"from":"narad-0","to":"narad-2","from_status":"alive","to_status":"alive"},"note":"the move's target was cleared (unless the move was re-planned meanwhile); the partition stays with its owner, and the controller may plan a move for it again"}
   /healthz:

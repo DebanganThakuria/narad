@@ -75,6 +75,16 @@ Releases after v3.0.1 export the [metastore and Raft series](../reference/metric
 
 What to do about a stopped metastore is on the Troubleshooting page under [metastore: stopped applying raft entries](troubleshooting.md#log-metastore-stopped).
 
+### Decommission and move alerts (unreleased) {#move-alerts}
+
+The leader exports why a decommission or a move cannot progress ([Cluster controller metrics](../reference/metrics.md#cluster-controller)). Add these too:
+
+| Alert | Expression | What it means |
+|---|---|---|
+| Decommission blocked | `max by (node, reason) (narad_decommission_blocked) == 1`, held for 10 minutes (`for: 10m`) | A draining node's decommission has not progressed for 10 minutes, for the reason in the label. Some reasons clear on their own within minutes (`dispatch_backlog`, `move_target`, `move_budget_full`, `leader_transfer`); the others need a person ([Troubleshooting](troubleshooting.md#decommission-blocked)). |
+| Moves blocked | `sum by (reason) (narad_moves_blocked) > 0`, held for 10 minutes (`for: 10m`) | A partition move cannot finish on its own, and holds one of the 8 move slots until it does or is aborted ([Troubleshooting](troubleshooting.md#moves-blocked)). |
+| Dead marking refused | `max(narad_dead_marking_refused) == 1`, held for 5 minutes (`for: 5m`) | The leader is not hearing heartbeats from most voters although Raft still reaches them: its node RPC plane is likely broken ([Troubleshooting](troubleshooting.md#log-dead-marking-refused)). |
+
 What to do when one fires is on the [Troubleshooting](troubleshooting.md) page: [produce latched off](troubleshooting.md#produce-500), [delay child behind](troubleshooting.md#due-lag-stuck), [messages lost to retention](troubleshooting.md#log-frontier-behind-retention), [quarantined copies](troubleshooting.md#quarantined-copies), [pod not ready](troubleshooting.md#node-down). For disk runway, check the retention of the largest topics against [Capacity and disk sizing](../reference/capacity.md#disk-sizing).
 
 `rate(narad_errors_total[5m])`, split by its `component` and `kind` labels, makes a useful catch-all panel beside these alerts.

@@ -196,7 +196,15 @@ Every copy a sweep, a reclaim or an install sets aside instead of deleting is co
 
 Only the destination aborts a move, and a dead destination cannot. Left alone, moves aimed at a node that died would sit in flight forever, holding the `MaxInFlightMoves` budget and stopping every later rebalance and decommission (`narad cluster moves` would list them indefinitely).
 
-The controller's rebalance pass therefore clears the target of any in-flight move whose target member is gone from the membership, has been dead longer than `DeadTargetAbortAfter` (2 minutes by default, so a restarting pod still finishes its copy), or is out of the Raft configuration (neither a voter nor a [non-voter still waiting for promotion](cluster-lifecycle.md#join-promotion)) while dead or draining. The partition never left its owner, so clearing the target is safe at any point. A destination that comes back runs no worker for the move, because the target no longer names it. An install it left at the partition's path, with its flip unconfirmed, is a copy of the owner's records; its stale-copy sweep quarantines it and logs it at error level unless the owner vouches for it at its own marker's position, and an operator decides what to do with it ([above](#what-if-the-source-dies-mid-move)). A staging copy it left under `.moves` stays until a later move of the same partition onto it clears it. The freed budget is used in the same pass.
+The controller's rebalance pass therefore clears the target of any in-flight move whose target member is gone from the membership, has been dead longer than `DeadTargetAbortAfter` (2 minutes by default, so a restarting pod still finishes its copy; on master measured on the leader's own clock, so a new leader never clears a move on a stamp it inherited), or is out of the Raft configuration (neither a voter nor a [non-voter still waiting for promotion](cluster-lifecycle.md#join-promotion)) while dead or draining. The partition never left its owner, so clearing the target is safe at any point. A destination that comes back runs no worker for the move, because the target no longer names it. An install it left at the partition's path, with its flip unconfirmed, is a copy of the owner's records; its stale-copy sweep quarantines it and logs it at error level unless the owner vouches for it at its own marker's position, and an operator decides what to do with it ([above](#what-if-the-source-dies-mid-move)). A staging copy it left under `.moves` stays until a later move of the same partition onto it clears it. The freed budget is used in the same pass.
+
+## Abort a move {#abort}
+
+**Unreleased:** in master, not in v3.0.1.
+
+An operator can give up on a move: `POST /v1/cluster/moves/{topic}/{partition}/abort`, or `narad cluster moves abort <topic> <partition> [--target <node-id>]`. It is the same compare-and-set the destination and the controller use to clear a target: the leader clears it only if it still names the destination the request read, so a move re-planned in the meantime is left alone, and with `--target` the request is refused with `409` when the move now targets another node. The partition never left its owner, so an abort is safe at any point of the move; the destination stops its worker and discards its staging copy, or sets it aside when the source is dead ([above](#what-if-the-source-dies-mid-move)). The planner may move the partition again on a later pass. Every abort is audited as `cluster.move.abort`.
+
+`narad cluster moves` shows why a move might need it: each side's status (`alive`, `dead`, `draining`, `not_a_member`) and `blocked` (`source_dead`, `target_dead`, `target_not_member`); `--detail` adds the destination's own report of the move. The leader counts moves blocked on a dead source or destination in `narad_moves_blocked{reason="source_dead"|"target_dead"}` and logs each once per term at error ([Troubleshooting](../operate/troubleshooting.md#moves-blocked)).
 
 ## Move planner {#planner}
 
@@ -220,12 +228,17 @@ Planning runs under a **mutex** and after a **Raft barrier**: a membership chang
 
 Marking a node **draining** (`POST /v1/cluster/members/{id}/decommission`) removes it from the planner's set of receiving nodes while it stays a live owner. The same minimal-movement algorithm then sheds every partition it owns onto the others. The drain flag survives a new registration, so a node that restarts in the middle of a decommission stays draining.
 
-Once a draining node owns nothing, the controller removes it from the Raft configuration. A voter's removal sits behind two guards:
+Once a draining node owns nothing, the controller removes it from the Raft configuration. A voter's removal sits behind these guards:
 
 - **MinVoters** (3 by default): a node is never removed if that would drop the cluster below a quorum-safe size.
+- **A live majority** (unreleased): the voters left with an alive member record must be a strict majority of the new configuration. With 2k+1 voters of which k are dead, removing a live one would leave 2k voters with only k alive, which can never elect a leader. Dead draining voters are removed before live ones.
 - **Leader moves off first**: a node cannot be cleanly removed from its own Raft configuration while it leads, so if the drained node is the current leader, the controller transfers leadership away, and the new leader finishes the removal.
 
-A node that joined and was never promoted is a [non-voter](cluster-lifecycle.md#join-promotion): it has no vote and cannot lead, so it is removed without either guard.
+A node that joined and was never promoted is a [non-voter](cluster-lifecycle.md#join-promotion): it has no vote and cannot lead, so it is removed without these guards.
+
+Two more hold for every node (unreleased). A draining node that is still the target of a move is never removed: the controller clears moves aimed at it and holds the placement lock from reading placement until the removal is done, so neither a flip nor a topic create can land a partition on a node that is leaving. And the node leaves Raft only once its ingress WAL has handed every accepted message to its owner, read from the node itself; a draining node refuses client produce with `503` meanwhile, so that backlog only shrinks.
+
+A decommission that cannot progress says why: the leader logs each reason once and exports `narad_decommission_blocked{node,reason}`, and `narad cluster members` shows the reasons under `decommission_blocked` ([Troubleshooting](../operate/troubleshooting.md#decommission-blocked)). A decommission that could never complete (too few voters, no live majority, nobody to take the partitions, a dead owner) is refused up front with `409`, and `--dry-run` reports the verdict without changing anything.
 
 Rebalance starts on its own when a node joins; decommission is started by an operator. The commands and the safe order of steps are in [Scale out and in](../operate/scaling.md#decommission).
 
@@ -239,7 +252,7 @@ Rebalance starts on its own when a node joins; decommission is started by an ope
 | Force-promote after (`ForcePromoteAfter`) | 2 minutes, by the leader's heartbeat stamp and the destination's own clock |
 | Clear the target of a dead destination (`DeadTargetAbortAfter`) | 2 minutes |
 | Moves in flight (`MaxInFlightMoves`) | 8 |
-| Minimum voters before a removal (`MinVoters`) | 3 |
+| Minimum voters before a removal (`MinVoters`) | 3, of which a strict majority alive (unreleased) |
 | Stale-copy sweep | every 30th move-runner tick |
 
 ## Next steps

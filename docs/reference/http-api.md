@@ -778,6 +778,7 @@ The message, 1 byte to 1 MiB. Content types: `application/json`, `application/oc
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`429`](status-codes.md#status-429) | Too many produces in flight for this user on this node, only when the operator set a produce cap ([Configuration reference](configuration.md#http)). |
 | [`500`](status-codes.md#status-500) | The node could not write to its ingress WAL. It answers every produce this way until it restarts. |
+| [`503`](status-codes.md#status-503) | This node is being decommissioned and takes no new produce, with `Retry-After: 1`. Nothing was stored; send the message to another node. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" -X POST \
@@ -845,6 +846,7 @@ At most 1 MiB in total.
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`429`](status-codes.md#status-429) | The batch does not fit this user's produce cap on this node (only when the cap is set). A batch counts as its message count, clamped to the cap. |
 | [`500`](status-codes.md#status-500) | The node could not write to its ingress WAL. |
+| [`503`](status-codes.md#status-503) | This node is being decommissioned and takes no new produce, with `Retry-After: 1`. Nothing was stored; send the batch to another node. |
 
 **Response body (`202`)**
 
@@ -1384,9 +1386,19 @@ Task guide: [Scale out and in](../operate/scaling.md).
 `GET /v1/cluster/members`
 
 Lists every node the cluster knows, alive or dead, with how many
-partitions it owns and how many are moving off it.
+partitions it owns and how many are moving off it, whether it is a
+Raft voter or the leader, how long ago its last heartbeat was
+stamped, and why a decommission in progress is blocked. Answered
+from the receiving node's replica without asking any other node,
+unless `detail` is set.
 
 **Grant needed:** `admin`.
+
+**Parameters**
+
+| Name | Description |
+|---|---|
+| `detail` (unreleased)<br>query, boolean, optional, default `False` | `true` also asks every member for its own status (dispatch backlog, quarantined copies, move workers), all at once and within 2 seconds in total. A member that cannot answer gets a `status_error` instead; a v3.0.1 node is reported as an older release that cannot report its status. |
 
 **Responses**
 
@@ -1394,6 +1406,7 @@ partitions it owns and how many are moving off it.
 |---|---|
 | [`200`](status-codes.md#status-200) | The members, in ID order. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
+| [`400`](status-codes.md#status-400) | `detail` is not `true` or `false`. |
 | [`403`](status-codes.md#status-403) | Not `admin`. |
 
 **Response body (`200`)**
@@ -1407,6 +1420,38 @@ partitions it owns and how many are moving off it.
 | `members[].draining`<br>boolean | `true` while the node is being decommissioned. |
 | `members[].owned_partitions`<br>integer | Partitions the node owns. |
 | `members[].outbound_moves`<br>integer | Partitions moving off the node. |
+| `members[].voter` (unreleased)<br>boolean | `true` when the node is a Raft voter. |
+| `members[].leader` (unreleased)<br>boolean | `true` for the Raft leader. |
+| `members[].heartbeat_age_seconds` (unreleased)<br>integer | Seconds since the leader last stamped the node's heartbeat, by the answering node's clock. |
+| `members[].decommission_blocked` (unreleased)<br>array of object | For a draining node, every reason its decommission cannot progress that the cluster metadata shows. Absent when none. The leader also logs each reason and exports `narad_decommission_blocked`. |
+| `members[].decommission_blocked[].code`<br>string: `below_min_voters`, `no_healthy_majority`, `move_target`, `dispatch_backlog`, `node_status_unavailable`, `no_receivers`, `owner_dead`, `move_budget_full`, `leader_transfer` | The reason, as `narad_decommission_blocked` labels it ([Troubleshooting](../operate/troubleshooting.md#decommission-blocked)). |
+| `members[].decommission_blocked[].message`<br>string | What it means here and what to do. |
+| `members[].node_status` (unreleased)<br>object | With `detail=true`, the node's own report about itself. |
+| `members[].node_status.node`<br>string | Node ID. |
+| `members[].node_status.draining`<br>boolean | The node's own view of its draining mark. |
+| `members[].node_status.dispatch_backlog`<br>integer | Messages its ingress WAL accepted and has not yet handed to their partition owners. A decommission waits for 0. |
+| `members[].node_status.quarantine`<br>object | Partition copies the node set aside instead of deleting ([Troubleshooting](../operate/troubleshooting.md#quarantined-copies)). |
+| `members[].node_status.quarantine.copies`<br>integer | Every set-aside copy. |
+| `members[].node_status.quarantine.bytes`<br>integer | Their total size. |
+| `members[].node_status.quarantine.list`<br>array of object | The first 100 copies. |
+| `members[].node_status.quarantine.list[].kind`<br>string | `partition`, `topic_incarnation` or `staging`. |
+| `members[].node_status.quarantine.list[].topic`<br>string | Topic name. |
+| `members[].node_status.quarantine.list[].partition`<br>integer | Partition number, `-1` for a whole topic directory. |
+| `members[].node_status.quarantine.list[].dir`<br>string | The copy's directory on the node. |
+| `members[].node_status.quarantine.list[].bytes`<br>integer | Its size. |
+| `members[].node_status.quarantine.list[].mod_time`<br>string | When it was last modified, RFC 3339. |
+| `members[].node_status.moves`<br>array of object | The moves this node runs as the destination. |
+| `members[].node_status.moves[].topic`<br>string | Topic name. |
+| `members[].node_status.moves[].partition`<br>integer | Partition number. |
+| `members[].node_status.moves[].source`<br>string | The node the copy comes from. |
+| `members[].node_status.moves[].target`<br>string | This node. |
+| `members[].node_status.moves[].started_at`<br>string | When the worker started, RFC 3339. |
+| `members[].node_status.moves[].phase`<br>string: `copying`, `frozen`, `flip_pending`, `waiting_for_source`, `blocked` | What the worker is doing. |
+| `members[].node_status.moves[].attempts`<br>integer | Copy attempts against a live source. |
+| `members[].node_status.moves[].last_error`<br>string | The last thing that failed. |
+| `members[].node_status.moves[].copied_bytes`<br>integer | Bytes the current copy fetched. |
+| `members[].node_status.moves[].blocked`<br>string: `copy_unverifiable`, `source_dead_copy_behind` | Why the move cannot finish on its own. Absent while it can. |
+| `members[].status_error` (unreleased)<br>string | With `detail=true`, why the node's own status could not be read. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" "$NARAD/v1/cluster/members"
@@ -1414,9 +1459,9 @@ curl -i -u "$AUTH" "$NARAD/v1/cluster/members"
 
 ```http title="Response"
 HTTP/1.1 200 OK
-Content-Length: 130
+Content-Length: 183
 Content-Type: application/json
-Date: Mon, 28 Sep 2026 19:31:44 GMT
+Date: Mon, 05 Oct 2026 19:14:29 GMT
 
 {
   "members": [
@@ -1425,8 +1470,11 @@ Date: Mon, 28 Sep 2026 19:31:44 GMT
       "addr": "127.0.0.1:17970",
       "status": "alive",
       "draining": false,
-      "owned_partitions": 6,
-      "outbound_moves": 0
+      "owned_partitions": 4,
+      "outbound_moves": 0,
+      "voter": true,
+      "leader": true,
+      "heartbeat_age_seconds": 2
     }
   ]
 }
@@ -1436,9 +1484,17 @@ Date: Mon, 28 Sep 2026 19:31:44 GMT
 
 `GET /v1/cluster/moves`
 
-Lists every partition that is moving between nodes right now.
+Lists every partition that is moving between nodes right now, with
+each side's liveness and why a move is blocked. Abort one with
+`POST /v1/cluster/moves/{topic}/{partition}/abort`.
 
 **Grant needed:** `admin`.
+
+**Parameters**
+
+| Name | Description |
+|---|---|
+| `detail` (unreleased)<br>query, boolean, optional, default `False` | `true` also asks each move's destination for its move worker's own report: phase, copy attempts, copied bytes, last error and why it is blocked. Within 2 seconds in total. |
 
 **Responses**
 
@@ -1446,6 +1502,7 @@ Lists every partition that is moving between nodes right now.
 |---|---|
 | [`200`](status-codes.md#status-200) | The moves, by topic and partition. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
+| [`400`](status-codes.md#status-400) | `detail` is not `true` or `false`. |
 | [`403`](status-codes.md#status-403) | Not `admin`. |
 
 **Response body (`200`)**
@@ -1457,6 +1514,21 @@ Lists every partition that is moving between nodes right now.
 | `moves[].partition`<br>integer | Partition number. |
 | `moves[].from`<br>string | Node that owns the partition now. |
 | `moves[].to`<br>string | Node the partition is moving to. |
+| `moves[].from_status` (unreleased)<br>string: `alive`, `dead`, `draining`, `not_a_member` | The owner's liveness. |
+| `moves[].to_status` (unreleased)<br>string: `alive`, `dead`, `draining`, `not_a_member` | The destination's liveness. |
+| `moves[].blocked` (unreleased)<br>string: `source_dead`, `target_dead`, `target_not_member` | Why the move cannot progress as things stand. Absent while it can. A dead source finishes only if the destination can force-promote a complete copy; the leader clears a move to a dead destination after two minutes. |
+| `moves[].worker` (unreleased)<br>object | A destination's own report of one move. |
+| `moves[].worker.topic`<br>string | Topic name. |
+| `moves[].worker.partition`<br>integer | Partition number. |
+| `moves[].worker.source`<br>string | The node the copy comes from. |
+| `moves[].worker.target`<br>string | This node. |
+| `moves[].worker.started_at`<br>string | When the worker started, RFC 3339. |
+| `moves[].worker.phase`<br>string: `copying`, `frozen`, `flip_pending`, `waiting_for_source`, `blocked` | What the worker is doing. |
+| `moves[].worker.attempts`<br>integer | Copy attempts against a live source. |
+| `moves[].worker.last_error`<br>string | The last thing that failed. |
+| `moves[].worker.copied_bytes`<br>integer | Bytes the current copy fetched. |
+| `moves[].worker.blocked`<br>string: `copy_unverifiable`, `source_dead_copy_behind` | Why the move cannot finish on its own. Absent while it can. |
+| `moves[].worker_error` (unreleased)<br>string | With `detail=true`, why the destination's report could not be read. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" "$NARAD/v1/cluster/moves"
@@ -1464,11 +1536,22 @@ curl -i -u "$AUTH" "$NARAD/v1/cluster/moves"
 
 ```http title="Response"
 HTTP/1.1 200 OK
-Content-Length: 13
+Content-Length: 119
 Content-Type: application/json
-Date: Mon, 28 Sep 2026 19:31:44 GMT
+Date: Mon, 05 Oct 2026 19:15:09 GMT
 
-{"moves":[]}
+{
+  "moves": [
+    {
+      "topic": "orders",
+      "partition": 3,
+      "from": "narad-0",
+      "to": "narad-2",
+      "from_status": "alive",
+      "to_status": "alive"
+    }
+  ]
+}
 ```
 
 ### Decommission a node {#decommission-member}
@@ -1476,9 +1559,19 @@ Date: Mon, 28 Sep 2026 19:31:44 GMT
 `POST /v1/cluster/members/{id}/decommission`
 
 Marks the node as draining. The cluster moves every partition it
-owns onto the other nodes and, once it owns none, removes it from
+owns onto the other nodes and, once it owns none and its ingress WAL
+has handed every accepted message to its owner, removes it from
 the Raft voters. Remove the node only after that; the steps are in
-[Scale out and in](../operate/scaling.md#decommission).
+[Scale out and in](../operate/scaling.md#decommission). While it
+drains, the node answers produce with `503`.
+
+The request is checked first, on the node that receives it and
+again on the leader. A decommission that could never complete
+safely is refused with `409` and every reason, and nothing changes:
+`below_min_voters` (fewer than three voters would remain),
+`no_healthy_majority` (the voters left alive would not be a
+majority), `no_receivers` (no other alive node can take its
+partitions) or `owner_dead` (the node is dead and owns partitions).
 
 **Grant needed:** `admin`.
 
@@ -1487,17 +1580,34 @@ the Raft voters. Remove the node only after that; the steps are in
 | Name | Description |
 |---|---|
 | `id`<br>path, string, required | The node ID, as `GET /v1/cluster/members` lists it (the pod name under the Helm chart). |
+| `dry_run` (unreleased)<br>query, boolean, optional, default `False` | `true` answers `200` with what a decommission would do and changes nothing. Answered by the receiving node, never forwarded. |
 
 **Responses**
 
 | Status | Meaning |
 |---|---|
+| [`200`](status-codes.md#status-200) | `dry_run=true`: the verdict. Nothing changed. |
 | [`204`](status-codes.md#status-204) | Marked as draining. |
+| [`400`](status-codes.md#status-400) | `dry_run` is not `true` or `false`. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | Not `admin`. |
 | [`404`](status-codes.md#status-404) | No member has this ID. |
+| [`409`](status-codes.md#status-409) | The decommission could never complete safely. The body names every reason; nothing changed. |
 | [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
 | [`503`](status-codes.md#status-503) | The cluster has no leader to write the change. |
+
+**Response body (`200`)**
+
+| Field | Description |
+|---|---|
+| `member`<br>string | Node ID. |
+| `would_decommission`<br>boolean | `true` when a decommission would be accepted. |
+| `reasons`<br>array of object | Why it would be refused; empty when it would not. |
+| `reasons[].code`<br>string: `below_min_voters`, `no_healthy_majority`, `move_target`, `dispatch_backlog`, `node_status_unavailable`, `no_receivers`, `owner_dead`, `move_budget_full`, `leader_transfer` | The reason, as `narad_decommission_blocked` labels it ([Troubleshooting](../operate/troubleshooting.md#decommission-blocked)). |
+| `reasons[].message`<br>string | What it means here and what to do. |
+| `voter`<br>boolean | `true` when the node is a Raft voter. |
+| `owned_partitions`<br>integer | Partitions the node owns, all of which would move off it. |
+| `inbound_moves`<br>integer | Moves aimed at the node; a decommission clears them. |
 
 ```sh title="Request"
 curl -i -u "$AUTH" -X POST \
@@ -1530,6 +1640,7 @@ they are; the node keeps the rest.
 | Status | Meaning |
 |---|---|
 | [`204`](status-codes.md#status-204) | No longer draining. |
+| [`400`](status-codes.md#status-400) | `dry_run` was given: a cancel cannot be dry-run. |
 | [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
 | [`403`](status-codes.md#status-403) | Not `admin`. |
 | [`404`](status-codes.md#status-404) | No member has this ID. |
@@ -1543,6 +1654,93 @@ curl -i -u "$AUTH" -X DELETE \
 ```http title="Response"
 HTTP/1.1 204 No Content
 Date: Mon, 28 Sep 2026 19:31:44 GMT
+```
+
+### Abort a partition move {#abort-move}
+
+**Unreleased:** in master, not in v3.0.1.
+
+`POST /v1/cluster/moves/{topic}/{partition}/abort`
+
+Clears the move's target, so the partition stays with its owner
+and keeps serving there. The destination discards its copy. The
+abort is a compare-and-set on the leader: a move re-planned to
+another node in the meantime is left alone. The cluster may plan
+a move for the partition again later. The action is audited as
+`cluster.move.abort`.
+
+**Grant needed:** `admin`.
+
+**Parameters**
+
+| Name | Description |
+|---|---|
+| `topic`<br>path, string, required | Name of the topic. |
+| `partition`<br>path, integer, required | The partition number. |
+| `target`<br>query, string, optional | The destination you mean, as `GET /v1/cluster/moves` showed it. When the move now targets another node, the request is refused with `409` and nothing changes. |
+
+**Responses**
+
+| Status | Meaning |
+|---|---|
+| [`202`](status-codes.md#status-202) | The target was cleared (unless the move was re-planned in the meantime). |
+| [`400`](status-codes.md#status-400) | The partition is not a number. |
+| [`401`](status-codes.md#status-401) | Missing or wrong credentials. |
+| [`403`](status-codes.md#status-403) | Not `admin`. |
+| [`404`](status-codes.md#status-404) | The partition has no assignment. |
+| [`409`](status-codes.md#status-409) | No move is in flight for the partition, or it targets another node than `target`. |
+| [`415`](status-codes.md#status-415) | No accepted `Content-Type` and no `X-Narad-Client` header. |
+| [`503`](status-codes.md#status-503) | The cluster has no leader to write the change. |
+
+**Response body (`202`)**
+
+| Field | Description |
+|---|---|
+| `move`<br>object |  |
+| `move.topic`<br>string | Topic name. |
+| `move.partition`<br>integer | Partition number. |
+| `move.from`<br>string | Node that owns the partition now. |
+| `move.to`<br>string | Node the partition is moving to. |
+| `move.from_status` (unreleased)<br>string: `alive`, `dead`, `draining`, `not_a_member` | The owner's liveness. |
+| `move.to_status` (unreleased)<br>string: `alive`, `dead`, `draining`, `not_a_member` | The destination's liveness. |
+| `move.blocked` (unreleased)<br>string: `source_dead`, `target_dead`, `target_not_member` | Why the move cannot progress as things stand. Absent while it can. A dead source finishes only if the destination can force-promote a complete copy; the leader clears a move to a dead destination after two minutes. |
+| `move.worker` (unreleased)<br>object | A destination's own report of one move. |
+| `move.worker.topic`<br>string | Topic name. |
+| `move.worker.partition`<br>integer | Partition number. |
+| `move.worker.source`<br>string | The node the copy comes from. |
+| `move.worker.target`<br>string | This node. |
+| `move.worker.started_at`<br>string | When the worker started, RFC 3339. |
+| `move.worker.phase`<br>string: `copying`, `frozen`, `flip_pending`, `waiting_for_source`, `blocked` | What the worker is doing. |
+| `move.worker.attempts`<br>integer | Copy attempts against a live source. |
+| `move.worker.last_error`<br>string | The last thing that failed. |
+| `move.worker.copied_bytes`<br>integer | Bytes the current copy fetched. |
+| `move.worker.blocked`<br>string: `copy_unverifiable`, `source_dead_copy_behind` | Why the move cannot finish on its own. Absent while it can. |
+| `move.worker_error` (unreleased)<br>string | With `detail=true`, why the destination's report could not be read. |
+| `note`<br>string | What happens next. |
+
+```sh title="Request"
+curl -i -u "$AUTH" -X POST \
+  "$NARAD/v1/cluster/moves/orders/3/abort?target=narad-2" \
+  -H "Content-Type: application/json"
+```
+
+```http title="Response"
+HTTP/1.1 202 Accepted
+Content-Length: 283
+Content-Type: application/json
+Date: Mon, 05 Oct 2026 19:15:09 GMT
+
+{
+  "move": {
+    "topic": "orders",
+    "partition": 3,
+    "from": "narad-0",
+    "to": "narad-2",
+    "from_status": "alive",
+    "to_status": "alive"
+  },
+  "note": "the move's target was cleared (unless the move was re-planned meanwhile); the partition stays with its owner, and the controller may plan a move for it again"
+}
 ```
 
 ## Health and metrics {#health-and-metrics}

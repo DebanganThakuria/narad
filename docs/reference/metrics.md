@@ -160,10 +160,20 @@ Every node holds a full replica of the [metastore](glossary.md#metastore), kept 
 | `narad_moves_total`<br>counter; labels `outcome` | Finished moves: `completed`, or `force_promoted` when the source died and the copy took over. |
 | `narad_moves_duration_seconds`<br>histogram; no labels | Time from a move starting to the ownership change. |
 | `narad_moves_bytes_total`<br>counter; no labels | Bytes copied by finished moves. |
-| `narad_moves_blocked` (unreleased)<br>gauge; labels `reason` | Moves this node is the destination of that cannot finish on their own: `copy_unverifiable` (the staged copy failed verification twice, the second time after a fresh copy, so the node stopped freezing the source; or a dead source's copy fails it) and `source_dead_copy_behind` (the source is dead and the copy is behind its last high watermark, so it cannot be force-promoted). Both are exported at 0. Alert on a value above 0 ([Troubleshooting](../operate/troubleshooting.md#moves-blocked)). |
+| `narad_moves_blocked` (unreleased)<br>gauge; labels `reason` | Moves that cannot finish on their own. On a move's destination: `copy_unverifiable` (the staged copy failed verification twice, the second time after a fresh copy, so the node stopped freezing the source; or a dead source's copy fails it) and `source_dead_copy_behind` (the source is dead and the copy is behind its last high watermark, so it cannot be force-promoted). On the leader only: `source_dead` and `target_dead`, the in-flight moves whose source or destination member is dead. Every reason is exported at 0. Alert on a value above 0 ([Troubleshooting](../operate/troubleshooting.md#moves-blocked)). |
 | `narad_topics_total`<br>gauge; no labels | Topics in the cluster. |
 | `narad_partitions_total`<br>gauge; no labels | Partitions this node owns. |
 | `narad_errors_total`<br>counter; labels `component`, `kind` | Errors by where they happened, for example `http`/`5xx`, `storage`/`fsync_poisoned` or `storage`/`retention_unlink`. |
 | `narad_boot_duration_seconds`<br>gauge; no labels | Time from process start to the API listening, set once. |
 
 The RPC series count requests, not messages. Under heavy load, forwarded acks, extends and nacks to one owner travel together as one `op="ack_batch"` request (always, for a batch ack with two or more handles for one owner), which `op="ack"`, `op="extend_ack"` and `op="nack"` do not count. Add `ack_batch` to a panel that reads those as the forwarded-ack rate.
+
+### Cluster controller {#cluster-controller}
+
+**Unreleased:** in master, not in v3.0.1. The controller runs on the Raft leader only, so these series hold a value only there: every other node, and a node that lost leadership, reports 0 or no series.
+
+| Series | Meaning |
+|---|---|
+| `narad_decommission_blocked`<br>gauge; labels `node`, `reason` | 1 for each reason a draining node's decommission cannot progress: `below_min_voters`, `no_healthy_majority`, `owner_dead`, `no_receivers`, `node_status_unavailable` (each needs you), or `dispatch_backlog`, `move_target`, `move_budget_full`, `leader_transfer` (each clears on its own). A series goes away when its reason does. Alert on any series that stays ([Troubleshooting](../operate/troubleshooting.md#decommission-blocked)). |
+| `narad_dead_marking_refused`<br>gauge; no labels | 1 while the leader refuses a dead verdict that would leave fewer alive Raft voters than a quorum, else 0. A leader that holds its lease cannot have lost most voters, so its node RPC plane is the likelier fault ([Troubleshooting](../operate/troubleshooting.md#log-dead-marking-refused)). |
+| `narad_colocated_child_partitions`<br>gauge; no labels | Fan-out child partitions owned by the same node as their parent's same-index partition, so both copies sit on one disk. Placement avoids it when it can; nothing moves a partition to fix it ([Back up and replicate topics](../operate/backups.md)). |

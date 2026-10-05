@@ -147,7 +147,7 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 
 ## 409 Conflict {#status-409}
 
-**Where:** create a topic, change a topic, attach a child, create a user, and produce to a delay child.
+**Where:** create a topic, change a topic, attach a child, create a user, produce to a delay child, and (unreleased) decommission a node or abort a partition move.
 
 **Meaning:** the request conflicts with the current state:
 
@@ -157,6 +157,8 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 - A delay child's delay is longer than the parent's retention can hold, on attach, on create with `parent`, or when the parent's retention shrinks.
 - `schema_base_version` is not the current schema version, the topic already holds 1000 schema versions, or the topic is an attached child whose schema its parent manages.
 - A produce to a delay child, which only its parent can feed.
+- A decommission that could never complete safely (unreleased): the body's `reasons` lists each one with a `code` and a `message` ([Scale out and in](../operate/scaling.md#decommission)).
+- A move abort for a partition with no move in flight, or whose move now targets another node than `target` (unreleased).
 
 **What to do:** read the error message and the current state. For a schema conflict, read the current `schema_version` and retry with it as the base. For a create that must succeed once, treat "already exists" as success when the existing topic has the settings you wanted.
 
@@ -275,7 +277,7 @@ The error message says which limit was hit, in the same order:
 - Ack, extend and nack, a replay, or a consume pinned with `partition`, when the partition's owner is down: `partition owner is down; retry later` (plain text).
 - Any change to cluster metadata (topics, fan-out links, users, decommission) while the cluster has no Raft leader or the leader cannot be reached.
 - `/readyz` while the node should not take traffic, and `/healthz` once the node is shutting down.
-- Never on a produce: a `503` there comes from a proxy in front of Narad ([Troubleshooting](../operate/troubleshooting.md#produce-503)).
+- On a produce (single or batch) to a node being decommissioned (unreleased): `this node is being decommissioned and takes no new produce; send it to another node`, with `Retry-After: 1`. Nothing was stored, so a retry on another node cannot duplicate. v3.0.1 never answers a produce with `503`; any other `503` on a produce comes from a proxy in front of Narad ([Troubleshooting](../operate/troubleshooting.md#produce-503)).
 
 **Meaning:** the cluster cannot do this right now. Messages stored on a node that is down wait for it to come back; see the [failure matrix](../understand/delivery-contract.md#failure-matrix).
 
