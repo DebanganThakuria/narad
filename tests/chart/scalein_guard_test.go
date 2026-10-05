@@ -146,6 +146,9 @@ type guardWorld struct {
 	fail     []string // servers that answer an error
 	failAll  string   // every server answers this error
 	password string   // NARAD_PASS
+	// dnsDown makes every lookup fail, as getent does on SERVFAIL or a
+	// timeout; dnsDownAfterAPI does so from the first API call on.
+	dnsDown, dnsDownAfterAPI bool
 }
 
 type guardRun struct {
@@ -182,13 +185,16 @@ func runGuard(t *testing.T, job map[string]any, w guardWorld) guardRun {
 			t.Fatal(err)
 		}
 	}
-	stub("getent", `for p in $FAKE_PODS; do case "$2" in "$p".*) exit 0 ;; esac; done
+	stub("getent", `[ -z "$FAKE_DNS_DOWN" ] || exit 2
+[ ! -e "$FAKE_DNS_FLAG" ] || exit 2
+for p in $FAKE_PODS; do case "$2" in "$p".*) exit 0 ;; esac; done
 exit 2
 `)
 	stub("timeout", `shift
 exec "$@"
 `)
 	stub("narad", `echo "$NARAD_ADDR" >> "$FAKE_CALLS"
+[ -z "$FAKE_DNS_DOWN_AFTER_API" ] || : > "$FAKE_DNS_FLAG"
 [ "$*" = "cluster members" ] || { echo "unexpected narad $*" >&2; exit 64; }
 if [ -n "$FAKE_FAIL_ALL" ]; then echo "Error: $FAKE_FAIL_ALL" >&2; exit 1; fi
 for a in $FAKE_FAIL; do
@@ -231,6 +237,13 @@ if [ -f "$FAKE_ANSWERS/$key" ]; then cat "$FAKE_ANSWERS/$key"; else cat "$FAKE_A
 		"FAKE_FAIL_ALL=" + w.failAll,
 		"FAKE_CALLS=" + calls,
 		"NARAD_PASS=" + w.password,
+		"FAKE_DNS_FLAG=" + filepath.Join(dir, "dns-down"),
+	}
+	if w.dnsDown {
+		cmd.Env = append(cmd.Env, "FAKE_DNS_DOWN=1")
+	}
+	if w.dnsDownAfterAPI {
+		cmd.Env = append(cmd.Env, "FAKE_DNS_DOWN_AFTER_API=1")
 	}
 	for k, v := range env {
 		if k == "HOME" {
@@ -370,4 +383,59 @@ func TestScaleInGuardOnlyNotesMembersWithoutPods(t *testing.T) {
 		password: "pw",
 	})
 	wantExit(t, run, 0, "narad-7", "allowed")
+}
+
+// getent fails the same way for a pod that does not exist and for a DNS
+// error, so a failed lookup counts as a missing pod only while a pod
+// that stays resolves. A rollback from 5 to 3 replicas during a CoreDNS
+// outage used to see no pod at or above ordinal 3 and let the
+// StatefulSet delete two voters that were never decommissioned.
+func TestScaleInGuardRefusesWhenDNSFails(t *testing.T) {
+	job := guardJob(t, "--set", "replicaCount=3")
+	all := []guardMember{member(0, 3), member(1, 3), member(2, 3), member(3, 2), member(4, 0)}
+
+	t.Run("DNS fails from the start", func(t *testing.T) {
+		run := runGuard(t, job, guardWorld{pods: []int{0, 1, 2, 3, 4}, members: all, password: "pw", dnsDown: true})
+		wantExit(t, run, 1, "REFUSED: DNS lookups fail; cannot tell which pods exist", "narad-2 narad-0", "--no-hooks")
+		if len(run.calls) != 0 {
+			t.Fatalf("called the API %v although it could not tell which pods exist", run.calls)
+		}
+	})
+	t.Run("DNS fails after the member list is read", func(t *testing.T) {
+		run := runGuard(t, job, guardWorld{pods: []int{0, 1, 2, 3, 4}, members: all, password: "pw", dnsDownAfterAPI: true})
+		wantExit(t, run, 1, "REFUSED: DNS lookups fail", "--no-hooks")
+		if strings.Contains(run.output, "allowed") {
+			t.Fatalf("the guard allowed the change:\n%s", run.output)
+		}
+	})
+	t.Run("a scale-out finds a pod that stays at ordinal 0", func(t *testing.T) {
+		run := runGuard(t, guardJob(t, "--set", "replicaCount=5"), guardWorld{pods: []int{0, 1, 2}, failAll: "http 503: no leader"})
+		wantExit(t, run, 0, "deletes none")
+	})
+}
+
+// A member list with no members is not a member list: a running cluster
+// lists at least the node that answers. With security off, a pod whose
+// replica is empty answers {"members":[]}, and the guard used to read
+// that as "no pod being deleted is a member" and allow the change.
+func TestScaleInGuardRefusesAnEmptyMemberList(t *testing.T) {
+	job := guardJob(t, "--set", "replicaCount=3", "--set", "security.enabled=false", "--set", "security.allowInsecureCluster=true")
+
+	t.Run("every server answers no members", func(t *testing.T) {
+		run := runGuard(t, job, guardWorld{pods: []int{0, 1, 2, 3, 4}})
+		wantExit(t, run, 1, "REFUSED: could not read", "answered a member list with no members", "--no-hooks")
+		want := []string{serviceURL, podURL(0), podURL(1), podURL(2)}
+		if !reflect.DeepEqual(run.calls, want) {
+			t.Fatalf("asked %v, want the Service and then each remaining pod %v", run.calls, want)
+		}
+	})
+	t.Run("a pod that stays lists the members", func(t *testing.T) {
+		run := runGuard(t, job, guardWorld{
+			pods: []int{0, 1, 2, 3},
+			answers: map[string][]guardMember{
+				podURL(2): {member(0, 4), member(1, 4), member(2, 4), member(3, 1)},
+			},
+		})
+		wantExit(t, run, 1, "REFUSED: these pods are still cluster members", "narad-3 (owns 1 partitions)")
+	})
 }

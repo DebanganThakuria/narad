@@ -30,16 +30,24 @@ still in the cluster:
    ordinals are contiguous, so the scan stops after 16 missing ordinals
    in a row. None: the change deletes nothing, and it is allowed without
    calling the API, so an emergency rollback never waits on the API.
+   getent fails the same way for a name that does not exist and for a
+   DNS error (SERVFAIL, a timeout), so a lookup that fails counts as a
+   missing pod only when a pod that stays (ordinal TARGET_REPLICAS-1, or
+   0) resolves right after it. If neither does, refuse: the guard cannot
+   tell which pods exist.
 2. Otherwise read the member list (narad cluster members, a command
    every release has) from the internal Service, which routes to ready
    pods only. If that fails, ask each pod that stays and count a member
    that any of them lists: a lagging replica can only list more members,
-   never fewer. The pods being deleted are not asked.
+   never fewer. The pods being deleted are not asked. An answer that
+   lists no member at all is not a member list (a running cluster lists
+   at least the node that answers), so it counts as a failed read.
 3. A listed member whose pod is being deleted blocks the change: a
    member is a Raft voter until decommission removes it, unless the view
    says "voter": false and it owns no partitions. A listed member with no
    pod is only noted: this change does not delete it.
-4. If no member list can be read, refuse: the check could not be made.
+4. If no member list can be read, or DNS fails, refuse: the check could
+   not be made.
 
 Exit 0 allows the change; exit 1 fails the hook and with it the upgrade
 or rollback. The reason is in the Job's log. Kubernetes rewrites $(NAME)
@@ -53,6 +61,22 @@ pod_exists() { getent hosts "$(host_of "$1")." >/dev/null 2>&1; }
 
 target=$TARGET_REPLICAS
 
+# Called after every failed lookup before it counts as a missing pod:
+# returns when a pod that stays resolves, refuses otherwise.
+require_dns() {
+  tried=""
+  keep=$((target - 1))
+  if [ "$keep" -gt 0 ]; then
+    pod_exists "$keep" && return 0
+    tried=" $STS_NAME-$keep"
+  fi
+  pod_exists 0 && return 0
+  tried="$tried $STS_NAME-0"
+  say "REFUSED: DNS lookups fail; cannot tell which pods exist. No pod this change keeps resolves (tried:$tried), so a pod that does not resolve may still be running: cluster DNS is failing, or those pods have no address."
+  say "to go ahead once you have checked by hand that narad cluster members lists none of the pods at or above ordinal $target, re-run the same command with --no-hooks."
+  exit 1
+}
+
 removing=""
 i=$target
 misses=0
@@ -61,6 +85,7 @@ while [ "$misses" -lt 16 ]; do
     removing="$removing $STS_NAME-$i"
     misses=0
   else
+    require_dns
     misses=$((misses + 1))
   fi
   i=$((i + 1))
@@ -75,18 +100,23 @@ errfile="${TMPDIR:-/tmp}/scale-in-guard.err"
 started=$(date +%s)
 members=""
 lasterr=""
+count_ids() { printf '%s\n' "$1" | awk '/"id"[ \t]*:/ { n++ } END { print n + 0 }'; }
 ask() {
   if out=$(NARAD_ADDR="$1" timeout 10 narad cluster members 2>"$errfile"); then
-    members="$members
+    if [ "$(count_ids "$out")" -gt 0 ]; then
+      members="$members
 $out"
-    return 0
+      return 0
+    fi
+    lasterr="$1: answered a member list with no members"
+    return 1
   fi
   lasterr="$1: $(tail -n 3 "$errfile" 2>/dev/null | tr '\n' ' ')"
   return 1
 }
 
 if [ -n "$SERVICE_HOST" ]; then
-  ask "http://$SERVICE_HOST:$API_PORT" || say "the Service did not answer ($lasterr); asking each pod that stays instead."
+  ask "http://$SERVICE_HOST:$API_PORT" || say "the Service gave no member list ($lasterr); asking each pod that stays instead."
 fi
 if [ -z "$members" ]; then
   i=0
@@ -145,6 +175,7 @@ while read -r id owned voter; do
   if pod_exists "$ord"; then
     blocked="$blocked $id (owns $owned partitions)"
   else
+    require_dns
     stale="$stale $id"
   fi
 done <<EOF
