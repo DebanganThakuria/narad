@@ -285,7 +285,11 @@ func TestSnapshotFailureIsCountedAndLeavesNothingBehind(t *testing.T) {
 		t.Fatalf("snapshot failures = %d after a failed Persist, want 1", got)
 	}
 
-	// No room for the copy: the directory refuses new files.
+	// No room for the copy: the directory refuses new files (except to
+	// root, which permissions do not stop).
+	if os.Geteuid() == 0 {
+		return
+	}
 	dir := filepath.Dir(f.dbPath)
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
