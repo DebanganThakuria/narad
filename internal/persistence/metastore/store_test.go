@@ -490,3 +490,24 @@ func TestStoreAppliedCaughtUp(t *testing.T) {
 		t.Fatal("AppliedCaughtUp() = false after an applied write, want true")
 	}
 }
+
+// The case-fold lookup behind the create-time name check finds an
+// existing topic whose name differs only in letter case, and nothing
+// else: not the name itself, not a different name of the same length.
+func TestTopicNameFoldConflictFindsCaseVariant(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for _, name := range []string{"Orders", "orderz", "payments"} {
+		if err := s.CreateTopic(ctx, topic.Topic{Name: name, Partitions: 3}); err != nil {
+			t.Fatalf("CreateTopic(%s): %v", name, err)
+		}
+	}
+	if existing, found, err := s.TopicNameFoldConflict("orders"); err != nil || !found || existing != "Orders" {
+		t.Fatalf("TopicNameFoldConflict(orders) = %q, %v, %v; want Orders", existing, found, err)
+	}
+	for _, name := range []string{"Orders", "orders-eu", "ordery"} {
+		if existing, found, err := s.TopicNameFoldConflict(name); err != nil || found {
+			t.Fatalf("TopicNameFoldConflict(%s) = %q, %v, %v; want no conflict", name, existing, found, err)
+		}
+	}
+}

@@ -99,7 +99,7 @@ func (m *Manager) waitCreateGate(ctx context.Context) error {
 // If the startup create gate is armed (see ArmCreateGate), CreateTopic
 // waits for it to open before taking the per-name lock or touching disk.
 func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic, error) {
-	if err := validateTopicName(opts.Name); err != nil {
+	if err := validateNewTopicName(opts.Name); err != nil {
 		return topic.Topic{}, err
 	}
 	if err := validateCreateAsChild(opts); err != nil {
@@ -113,6 +113,9 @@ func (m *Manager) CreateTopic(ctx context.Context, opts CreateOpts) (topic.Topic
 	unlock := m.lockTopicName(opts.Name)
 	defer unlock()
 	if err := m.leaderBarrier(ctx); err != nil {
+		return topic.Topic{}, err
+	}
+	if err := m.checkNameFold(ctx, opts.Name); err != nil {
 		return topic.Topic{}, err
 	}
 	if err := m.resolveCreateAsChild(ctx, &opts); err != nil {

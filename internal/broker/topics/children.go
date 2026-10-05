@@ -30,6 +30,9 @@ func (m *Manager) AttachChild(ctx context.Context, parent, child string, delayMs
 	if parent == child {
 		return fmt.Errorf("%w: a topic cannot be attached to itself", ErrInvalid)
 	}
+	if err := validateFanoutChildName(child); err != nil {
+		return err
+	}
 	if delayMs < 0 {
 		return fmt.Errorf("%w: delay_ms must be >= 0", ErrInvalid)
 	}

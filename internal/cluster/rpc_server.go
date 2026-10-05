@@ -660,6 +660,9 @@ func (s *RPCServer) brokerErrorStatus(op string, err error) (int, string) {
 	case errors.Is(err, errs.ErrTopicNotFound):
 		return http.StatusNotFound, "topic not found"
 	case errors.Is(err, errs.ErrTopicAlreadyExists):
+		if err != errs.ErrTopicAlreadyExists {
+			return http.StatusConflict, err.Error()
+		}
 		return http.StatusConflict, "topic already exists"
 	case errors.Is(err, errs.ErrHandleMalformed):
 		return http.StatusBadRequest, err.Error()

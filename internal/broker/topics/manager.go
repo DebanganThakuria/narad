@@ -20,6 +20,7 @@ package topics
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
@@ -131,12 +132,19 @@ type topicLock struct {
 // retention update racing a partition increase could silently shrink
 // the partition count back). It also keeps delete→recreate ordered:
 // the purge finishes before a recreate of the same name can start.
+//
+// The lock is keyed on the lower-cased name, so names that differ only
+// in letter case share one lock: two such creates serialize and the
+// second sees the first (see checkNameFold). Topic names are ASCII
+// ([A-Za-z0-9._-]), so lower-casing is exact case folding. Callers pass
+// the real name.
 func (m *Manager) lockTopicName(name string) (unlock func()) {
+	key := topicLockKey(name)
 	m.topicLocksMu.Lock()
-	l := m.topicLocks[name]
+	l := m.topicLocks[key]
 	if l == nil {
 		l = &topicLock{}
-		m.topicLocks[name] = l
+		m.topicLocks[key] = l
 	}
 	l.refs++
 	m.topicLocksMu.Unlock()
@@ -147,10 +155,16 @@ func (m *Manager) lockTopicName(name string) (unlock func()) {
 		m.topicLocksMu.Lock()
 		l.refs--
 		if l.refs == 0 {
-			delete(m.topicLocks, name)
+			delete(m.topicLocks, key)
 		}
 		m.topicLocksMu.Unlock()
 	}
+}
+
+// topicLockKey is the key of a name's lock: the name with letter case
+// folded.
+func topicLockKey(name string) string {
+	return strings.ToLower(name)
 }
 
 // leaderBarrierer is the metastore capability behind the once-per-term

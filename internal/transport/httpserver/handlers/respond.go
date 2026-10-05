@@ -151,7 +151,13 @@ func (s *Set) WriteBrokerError(w http.ResponseWriter, op string, err error) {
 	case errors.Is(err, errs.ErrTopicNotFound):
 		s.WriteError(w, http.StatusNotFound, "topic not found")
 	case errors.Is(err, errs.ErrTopicAlreadyExists):
-		s.WriteError(w, http.StatusConflict, "topic already exists")
+		// The bare sentinel keeps its fixed text; a wrapped one says
+		// why (a name that differs from an existing one only in case).
+		msg := "topic already exists"
+		if err != errs.ErrTopicAlreadyExists {
+			msg = err.Error()
+		}
+		s.WriteError(w, http.StatusConflict, msg)
 	case errors.Is(err, errs.ErrHandleMalformed):
 		s.WriteError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, errs.ErrHandleStale):

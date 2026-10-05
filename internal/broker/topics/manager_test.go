@@ -95,8 +95,26 @@ func (f *fakeMetastore) GetTopic(_ context.Context, name string) (topic.Topic, e
 	return t, nil
 }
 
-func (f *fakeMetastore) ListTopics(_ context.Context, _ metastore.ListOptions) ([]topic.Topic, string, error) {
-	return nil, "", nil
+// ListTopics pages through the topics in name order, as the real
+// metastore does.
+func (f *fakeMetastore) ListTopics(_ context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error) {
+	names := make([]string, 0, len(f.topics))
+	for name := range f.topics {
+		if opts.PageToken == "" || name > opts.PageToken {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	var next string
+	if opts.Limit > 0 && len(names) > opts.Limit {
+		names = names[:opts.Limit]
+		next = names[len(names)-1]
+	}
+	out := make([]topic.Topic, 0, len(names))
+	for _, name := range names {
+		out = append(out, f.topics[name])
+	}
+	return out, next, nil
 }
 
 // AttachChild/DetachChild mimic the FSM's link mutations closely enough
