@@ -31,6 +31,7 @@ curl -s http://127.0.0.1:7952/readyz
 | Answer | Meaning |
 |---|---|
 | `{"status":"ready"}` | The node serves traffic. |
+| `{"status":"ready","degraded":[...]}` | **Unreleased.** The node serves traffic, but its Raft TLS certificate (`raft_tls_certificate_expired`) or every CA in its bundle (`raft_tls_ca_expired`) has expired ([below](#log-raft-tls-expired)). |
 | `not ready` | The node has not finished starting. It waits to be admitted (a new node) and to catch up with the Raft leader, so a node that cannot reach the leader stays here. |
 | `no raft leader known` | The node sees no Raft leader: quorum is lost, or the node is cut off from the others. |
 | `no contact with the raft leader yet` | The node knows a leader but has not heard from it since it started. |
@@ -221,7 +222,7 @@ The due lag of a delay child climbs or stays flat above 0 instead of returning t
 
 - `the leader has led for less than 12s`: nothing; the leader promotes it once it has led that long.
 - `the leader's raft heartbeats to it are failing`: the leader cannot reach the node's Raft address. Check its `NARAD_CLUSTER_ADVERTISE_ADDR`, the network between them (7943/tcp), and the [Raft certificate](#raft-cert-untrusted).
-- `it has no member record yet`, or `its member record is marked dead`: the node is not heartbeating its membership to the leader. Check its log for `member heartbeat failed` (debug level) and the node-RPC port (7942/udp).
+- `it has no member record yet`, or `its member record is marked dead`: the node is not heartbeating its membership to the leader. Check its log for [`member heartbeat failing`](#log-member-heartbeat-failing) (warning level; on v3.0.1, `member heartbeat failed` at debug level) and the node-RPC port (7942/udp).
 - `it is draining`: the node is being decommissioned, and decommission removes it from Raft once it owns nothing. Cancel the decommission to keep it.
 
 A node on 3.0.x asks for promotion once it runs this release and restarts. A non-voter left behind by a decommission under a 3.0.x leader carries no quorum weight, but the leader keeps sending it heartbeats, and it has no member record, so the decommission cannot simply be run again. **Unreleased:** remove it with `narad cluster members forget <id>`; see [A Raft server has no member record](#raft-server-no-member-record).
@@ -454,6 +455,37 @@ When the path does hold a copy installed from the move's source and the move mov
 **Check.** `partition_dir_has_records`, and the segment files in both directories (each file is named for the offset it starts at).
 
 **Fix.** Stop the node and copy both directories off first. If `partition_dir_has_records=false`, move the set-aside directory into place as `partition_dir` (`.moves/orders-3.quarantine` goes to `topics/orders/p00003`) and start the node. If it is `true`, both copies can hold records the other lacks, at overlapping offsets: do not replace the live partition with the set-aside copy; compare the two, start the node, and re-produce from the set-aside copy the records you decide matter. Narad does not move or delete either directory on its own.
+
+### `member heartbeat failing` {#log-member-heartbeat-failing}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Logged at warning level with `member`, `failures`, `since`, `failing_for` and `err`, once the node's member heartbeat has failed 3 times in a row over at least 10 seconds (two heartbeat intervals), then at most once a minute while it keeps failing. `member heartbeat recovered` at info level ends it. `narad_member_heartbeat_failures` counts the failures in a row, and every single failure is still logged at debug level as `member heartbeat failed`.
+
+**Cause.** The node cannot register its membership with the Raft leader, and the leader marks a member dead after 30 seconds without one ([A node is down](#node-down) says what clients see then). `err` says why: `leader member address unavailable` means the node knows no leader (quorum is lost, or the node is cut off from Raft); a timeout or a refused stream means the leader does not answer on the node-RPC port or refuses the node's cluster secret.
+
+**Check.** `err` in the line, `/readyz` on the node ([Start with readiness](#check-readiness)), `narad cluster members`, the node-RPC port (7942/udp) between the node and the leader, and that every node has the same cluster secret ([`cluster stream rejected: invalid auth`](#log-stream-invalid-auth)).
+
+**Fix.** Restore the path to the leader. The next heartbeat that reaches the leader registers the node again, and a node marked dead is alive again.
+
+A decommissioned node logs `member heartbeat refused` at error level instead, once: the leader removed it, and it can never register again. Scale it away, or delete its volume to rejoin as a new node ([`cluster join refused: this node was decommissioned`](#log-join-rejected)).
+
+### `raft TLS certificate has expired` {#log-raft-tls-expired}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Logged at error level with `kind` (`leaf` for the node's certificate, `ca` for the earliest-expiring CA in its bundle, whose lines say `raft TLS CA certificate`), `not_after` and `expired_for`, at once and then every 24 hours. It follows warnings 30 and 7 days ahead and an error 1 day ahead (`raft TLS certificate expires in less than ...`). `/readyz` keeps answering `200` and lists `raft_tls_certificate_expired` or `raft_tls_ca_expired` under `degraded`.
+
+**Cause.** The Raft certificate, or the CA it chains to, ran out. Narad reads the files only at startup, so a certificate renewed in the Secret is not used until the pod restarts. Peers refuse the new Raft connections the node opens or accepts; connections opened before the expiry carry on until they break, so the cluster can keep a leader for a while and then lose it.
+
+**Check.** `narad_raft_tls_cert_not_after_seconds` on every node, and the date in the Secret:
+
+```bash
+kubectl get secret narad-cluster-tls -n narad -o jsonpath='{.data.tls\.crt}' \
+  | base64 -d | openssl x509 -noout -enddate
+```
+
+**Fix.** Issue a new certificate (and CA, if it is the CA that expired) and replace the Secret ([Create the certificates](raft-tls.md#create-certificates)). Then restart the pods. If the certificate has expired on every node, a pod restarted with the new one and its peers on the old one refuse each other, so `kubectl rollout restart` stops at its first pod: delete the next pods down by hand until a majority runs the new certificate, as in step 3 of [Enable on a running cluster](raft-tls.md#enable-running-cluster). Renewing before the expiry avoids this: then a plain [rolling restart](raft-tls.md#renew) works.
 
 ### `x509: certificate signed by unknown authority` {#raft-cert-untrusted}
 

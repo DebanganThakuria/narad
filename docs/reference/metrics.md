@@ -34,6 +34,8 @@ A metrics listener also serves `/healthz` and `/readyz`. Keep it inside the clus
 
 Gauges that describe partitions (lag, sizes, segments) are refreshed by a poller every 5 seconds. A partition that moved to another node loses its series on this node at the next refresh, so summing across nodes by `topic` and `partition` does not count it twice.
 
+**Unreleased:** the poller runs two loops, both every 5 seconds. The vitals loop refreshes `narad_ingress_wal_failed`, `narad_ingress_dispatch_backlog_records`, `narad_open_partition_logs`, `narad_reaper_restarts` and `narad_data_dir_available_bytes`, each with a 2-second limit, so a slow broker snapshot or a hung volume does not freeze the others. The inventory loop refreshes everything that comes from the broker snapshot and the data-directory walk. Each loop's last finished pass is in `narad_poller_last_success_timestamp_seconds` ([below](#cluster-misc)).
+
 ## Traffic {#traffic}
 
 | Series | Meaning |
@@ -145,6 +147,7 @@ Every node holds a full replica of the [metastore](glossary.md#metastore), kept 
 | `narad_metastore_snapshot_bytes`<br>gauge; no labels | Size of the last Raft snapshot this node wrote (`0` before the first). |
 | `narad_metastore_snapshot_duration_seconds`<br>gauge; no labels | How long that snapshot took, from the copy of `fsm.db` to the snapshot file's close. |
 | `narad_metastore_snapshot_failures_total`<br>counter; no labels | Raft snapshots that failed on this node, for example for lack of disk space for the copy. Raft tries again at its next interval, and its log grows until one succeeds. |
+| `narad_raft_tls_cert_not_after_seconds`<br>gauge; labels `kind` | When this node's Raft TLS certificate (`kind="leaf"`) and the earliest-expiring CA in its Raft CA bundle (`kind="ca"`) expire, in Unix seconds. Absent when the Raft transport runs without TLS. The node reads the files only at startup, so a renewed certificate shows here after the restart that loads it. Alert on `narad_raft_tls_cert_not_after_seconds - time() < 7 * 86400` ([Raft TLS certificates](../operate/raft-tls.md#expiry)). |
 
 ## Authentication {#authentication}
 
@@ -166,5 +169,8 @@ Every node holds a full replica of the [metastore](glossary.md#metastore), kept 
 | `narad_partitions_total`<br>gauge; no labels | Partitions this node owns. |
 | `narad_errors_total`<br>counter; labels `component`, `kind` | Errors by where they happened, for example `http`/`5xx`, `storage`/`fsync_poisoned` or `storage`/`retention_unlink`. |
 | `narad_boot_duration_seconds`<br>gauge; no labels | Time from process start to the API listening, set once. |
+| `narad_poller_last_success_timestamp_seconds` (unreleased)<br>gauge; labels `loop` | When the metrics poller's `vitals` or `inventory` loop last finished a pass, in Unix seconds; until the first, when the poller started. Both loops run every 5 seconds, so more than 30 seconds old means the gauges that loop feeds are frozen. The vitals loop does not count a pass in which a source failed or did not answer within 2 seconds; `narad_errors_total{component="metrics"}` says which source (kind `<source>_timeout`, `<source>_panic` or `<source>`). |
+| `narad_member_heartbeat_failures` (unreleased)<br>gauge; no labels | This node's consecutive failed member heartbeats to the Raft leader, `0` after a success. Heartbeats run every 5 seconds, and the leader marks a member dead after 30 seconds without one. |
+| `narad_member_heartbeat_last_success_timestamp_seconds` (unreleased)<br>gauge; no labels | When this node's last member heartbeat succeeded, in Unix seconds; `0` until the first. |
 
 The RPC series count requests, not messages. Under heavy load, forwarded acks, extends and nacks to one owner travel together as one `op="ack_batch"` request (always, for a batch ack with two or more handles for one owner), which `op="ack"`, `op="extend_ack"` and `op="nack"` do not count. Add `ack_batch` to a panel that reads those as the forwarded-ack rate.

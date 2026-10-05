@@ -1456,6 +1456,13 @@ paths:
         of the cluster metadata has caught up with the leader since it
         started. Otherwise it answers `503` with the reason in `error`.
         The check runs on every request. It never needs credentials.
+
+        A `200` can list conditions under `degraded` (unreleased): an
+        expired Raft TLS certificate or CA bundle. They do not make the
+        node unready, because one certificate usually serves every node
+        and expires on all of them at once, and failing readiness would
+        take every pod out of its Services. See
+        [Raft TLS certificates](../operate/raft-tls.md#expiry).
       x-narad-grant: |
         None.
       responses:
@@ -1464,7 +1471,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Status'
+                $ref: '#/components/schemas/Readiness'
         '503':
           description: Not ready. The `error` field says why.
       x-narad-examples:
@@ -2014,3 +2021,21 @@ components:
         status:
           type: string
           description: '`ok` for `/healthz`, `ready` for `/readyz`.'
+    Readiness:
+      type: object
+      properties:
+        status:
+          type: string
+          description: Always `ready`.
+        degraded:
+          type: array
+          x-narad-since: unreleased
+          items:
+            type: string
+            enum: [raft_tls_certificate_expired, raft_tls_ca_expired]
+          description: |
+            Present only when something is wrong that does not make the
+            node unready: `raft_tls_certificate_expired` when the node's
+            Raft TLS certificate has expired, `raft_tls_ca_expired` when
+            every CA in its Raft CA bundle has. Peers refuse new Raft
+            connections until the node restarts with renewed files.

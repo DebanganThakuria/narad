@@ -122,6 +122,32 @@ A node on TLS and a node on plaintext cannot talk Raft to each other, so the swi
     kubectl rollout status statefulset/narad -n narad
     ```
 
+## Watch the expiry {#expiry}
+
+**Unreleased:** in master, not in v3.0.1.
+
+Each node exports when its certificate and the earliest-expiring CA in its bundle expire, as `narad_raft_tls_cert_not_after_seconds` with `kind="leaf"` and `kind="ca"` ([Metrics reference](../reference/metrics.md#metastore-raft)). Alert well ahead, for example on `narad_raft_tls_cert_not_after_seconds - time() < 7 * 86400` ([Monitor and alert](monitoring.md#node-health-alerts)). The node also checks the dates at startup and then every hour, and logs:
+
+| When | Level | Line starts with |
+|---|---|---|
+| At startup | info | `raft TLS certificate in use`, with `not_before`, `not_after` and `ca_not_after` |
+| At startup, before the certificate's `not_before` | error | `raft TLS certificate is not valid yet` |
+| 30 days, then 7 days, before it expires | warning | `raft TLS certificate expires in less than 30 days` (or `7 days`) |
+| 1 day before it expires | error | `raft TLS certificate expires in less than a day` |
+| Once it has expired, then every 24 hours | error | `raft TLS certificate has expired` |
+
+The CA's lines say `raft TLS CA certificate` instead. The expiry lines end with the same reminder: Narad reads the files only at startup, so a renewed certificate takes effect only after a [rolling restart](#renew).
+
+Once the certificate, or every CA in the bundle, has expired, peers refuse the new Raft connections the node opens or accepts, and connections opened before the expiry carry on until they break. While the node is otherwise ready, `/readyz` keeps answering `200` and lists the expiry under `degraded`:
+
+```text title="Output"
+{"status":"ready","degraded":["raft_tls_certificate_expired"]}
+```
+
+`raft_tls_ca_expired` means every CA in the bundle has expired. The expiry does not fail readiness: one certificate usually serves every node and expires on all of them at once, and failing readiness would take every pod out of its Services at the same moment.
+
+Renew before the expiry, as below. Once the certificate has expired on every node, a pod restarted with a new one and its peers on the old one refuse each other, and a rolling restart stops at its first pod; [Troubleshooting](troubleshooting.md#log-raft-tls-expired) says how to get past that.
+
 ## Renew node certificates {#renew}
 
 A new certificate from the same CA needs no ordering. Issue it, replace the secret, and restart the pods one at a time:
