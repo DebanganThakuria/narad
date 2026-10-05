@@ -414,7 +414,7 @@ The full line is `orphan assignment row for <topic>/<partition>; it is pruned on
 
 **Cause.** The metadata holds an owner for a partition that does not exist: its topic was deleted, or the index is past the topic's partition count. A placement pass of a release before 3.1.0 could write such rows after a topic delete, and a topic created again under the name used to inherit them, owners and all. The leader prunes these rows with a Raft entry type that only this release applies, so it waits until every member, dead members and Raft servers without a member record included, runs it ([Raft entry types](../understand/metastore-and-raft.md#new-entry-types)).
 
-**Check.** `narad cluster members` for a member still on an older release, or a dead member that holds the entry type back; the leader also logs `metastore: not using a new raft entry type yet` at info with the member's ID.
+**Check.** The leader's `metastore: not using a new raft entry type yet` line, at info, at most once a minute while the rows stay: its `reason` names the member holding the prune back and the build it last reported (`unknown build` for a v3.0.x member), or says the Raft server has no member record yet. `narad cluster members` does not show a member's release; use it only to see whether that member is `dead`.
 
 **Fix.** Finish the upgrade, or remove the member that will not come back. The leader then prunes the rows within about a minute and logs `controller: pruned assignment rows that belonged to no partition`. No data moves: a row like this names no partition. Until then, a topic created again under that name takes over the rows' owners for the partitions they cover, so avoid recreating it before the upgrade completes.
 
