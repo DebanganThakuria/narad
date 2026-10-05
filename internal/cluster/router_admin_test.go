@@ -920,8 +920,8 @@ func asUser(name string) context.Context {
 	return security.WithIdentity(context.Background(), user.User{Username: name, Grants: []user.Grant{{Action: user.ActionCreate, Patterns: []string{"*"}}}})
 }
 
-// A write a follower forwards runs on the leader as the caller (audit
-// H1): the leader looks the caller up in its own replica and the
+// A write a follower forwards runs on the leader as the caller: the
+// leader looks the caller up in its own replica and the
 // Manager re-checks ownership against the topic as it stands there.
 // Master forwarded no caller, so the leader ran every forwarded write
 // unchecked and bob's forwarded delete removed alice's topic.

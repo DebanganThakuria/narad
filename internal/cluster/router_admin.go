@@ -111,8 +111,8 @@ func (rt *Router) RouteDeleteTopic(ctx context.Context, w http.ResponseWriter, _
 // whose retry then 404s. The returned error joins every member that
 // failed; a nil error means all live members purged.
 //
-// The fan-out is detached from ctx's cancellation and deadline (audit
-// M8): the delete it follows has already committed, so a client that
+// The fan-out is detached from ctx's cancellation and deadline: the
+// delete it follows has already committed, so a client that
 // disconnects or times out must not cancel the purge on every other
 // member, which then kept the deleted topic's files until it restarted.
 // It runs under its own bounded budget instead (purgeBroadcastBudget).
