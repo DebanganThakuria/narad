@@ -120,6 +120,10 @@ type MoveSession struct {
 	// worker saw (see carryFrom): a force-promote never promotes a copy
 	// that is behind it, even before this session reaches the source.
 	floorHWM int64
+	// modTimes are the source's segment modification times on this
+	// node's clock, stamped on the staged files once the copy is
+	// complete (move_segment_age.go).
+	modTimes map[int64]int64
 
 	// keepFrozen, when set, is called every keepFrozenEvery during
 	// Finalize to re-arm the source's handoff freeze (whose TTL is
@@ -145,6 +149,7 @@ func (m *PartitionMover) Begin(sourceAddr, topicName string, partition int, stag
 	return &MoveSession{
 		m: m, sourceAddr: sourceAddr, topic: topicName, partition: partition,
 		stagingDir: stagingDir, copied: map[int64]int64{}, synced: map[int64]int64{},
+		modTimes: map[int64]int64{},
 	}
 }
 
@@ -156,6 +161,7 @@ func (s *MoveSession) pass(ctx context.Context) (int64, messaging.PartitionTrans
 	if err != nil {
 		return 0, messaging.PartitionTransferInfo{}, fmt.Errorf("list segments: %w", err)
 	}
+	s.noteSegmentAges(info.Segments, info.ListedAtUnixNano, time.Now())
 	// Record the source's last-known visibility boundary before copying, so a
 	// force-promote after the source dies reproduces exactly this HWM.
 	s.lastHWM, s.lastCommitted, s.hasCommitted, s.sawInfo = info.HighWatermark, info.CommittedOffset, info.HasCommitted, true
@@ -515,6 +521,10 @@ func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool, ac
 	if next > hwm {
 		return CopyResult{}, fmt.Errorf("verify: staged copy next offset %d > source hwm %d (a frame straddles the high watermark)", next, hwm)
 	}
+	// Retention and the cold walk judge a segment's age by its file's
+	// modification time: stamp the source's, or the move restarts every
+	// record's retention clock.
+	s.stampSegmentAges()
 	s.m.logger.Info("partition copy complete",
 		"topic", s.topic, "partition", s.partition, "source", s.sourceAddr,
 		"hwm", hwm, "bytes", s.total)

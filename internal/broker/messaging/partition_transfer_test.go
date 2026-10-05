@@ -581,3 +581,35 @@ func TestSegmentReadNeverServesPastTheCommittedBoundary(t *testing.T) {
 		t.Fatalf("a read at the committed boundary served %d bytes of an uncommitted frame", len(past))
 	}
 }
+
+// A listing carries each segment's modification time and the time it
+// was taken, so a destination can give its copy each segment's age.
+func TestTransferInfoReportsSegmentTimes(t *testing.T) {
+	ms := newMessagingFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 1}
+	e := newTestEngine(t, ms, nil, nil)
+	ctx := context.Background()
+	if _, err := e.CommitAcceptedProduceBatch(ctx, []ingress.ProduceRecord{{Topic: "orders", Key: "k", TargetPartition: 0, Payload: []byte("x")}}); err != nil {
+		t.Fatal(err)
+	}
+	dir := storage.TopicPartitionDir(e.logs.DataDir(), "orders", 0)
+	old := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+	segs, err := storage.ListPartitionSegments(dir)
+	if err != nil || len(segs) == 0 {
+		t.Fatalf("segments %v (err %v)", segs, err)
+	}
+	if err := storage.SetSegmentModTime(dir, segs[0].BaseOffset, old); err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now().UnixNano()
+	info, err := e.PartitionTransferInfo(ctx, "orders", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ListedAtUnixNano < before || info.ListedAtUnixNano > time.Now().UnixNano() {
+		t.Fatalf("listing time %d, want between %d and now", info.ListedAtUnixNano, before)
+	}
+	if got := info.Segments[0].ModTimeUnixNano; got != old.UnixNano() {
+		t.Fatalf("segment modification time %v, want %v", time.Unix(0, got), old)
+	}
+}

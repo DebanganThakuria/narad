@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -63,6 +64,12 @@ type PartitionTransferInfo struct {
 	// into the recreated topic. Empty from an older source, or for a
 	// record without an ID.
 	IncarnationID string `json:"incarnation_id,omitempty"`
+	// ListedAtUnixNano is the source's clock when it listed the
+	// segments. With each segment's ModTimeUnixNano it gives the
+	// segment's age, which the destination stamps on its copy on its own
+	// clock, so clock skew between the two nodes does not move the
+	// retention clock. Zero from an older source.
+	ListedAtUnixNano int64 `json:"listed_at_unix_nano,omitempty"`
 }
 
 // MoveMarkerFileName is the marker a move writes into the partition
@@ -298,16 +305,20 @@ func (e *Engine) transferInfoAt(dir, topicName string, partition int, hwmAt func
 	if err != nil {
 		return PartitionTransferInfo{}, err
 	}
+	// The segment times are file times, so the listing time is the wall
+	// clock too.
+	listedAt := time.Now().UnixNano()
 	if hasCommitted {
 		committed, ackedAhead = FrontierBelowBoundary(hwm, committed, ackedAhead)
 	}
 	info := PartitionTransferInfo{
-		Segments:        segs,
-		HighWatermark:   hwm,
-		CommittedOffset: committed,
-		HasCommitted:    hasCommitted,
-		AckedAhead:      ackedAhead,
-		Sidecars:        sidecars,
+		Segments:         segs,
+		HighWatermark:    hwm,
+		CommittedOffset:  committed,
+		HasCommitted:     hasCommitted,
+		AckedAhead:       ackedAhead,
+		Sidecars:         sidecars,
+		ListedAtUnixNano: listedAt,
 	}
 	if marker, ok, err := ReadMoveMarker(dir); err != nil {
 		return PartitionTransferInfo{}, err

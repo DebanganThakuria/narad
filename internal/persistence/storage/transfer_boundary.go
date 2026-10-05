@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // CommittedBoundary reports the byte position in this log's segment with
@@ -230,4 +231,11 @@ func SegmentFileSize(partitionDir string, base int64) (size int64, ok bool, err 
 		return 0, false, err
 	}
 	return st.Size(), true, nil
+}
+
+// SetSegmentModTime stamps the segment file with base offset base in
+// partitionDir with modification time t. Retention and the cold walk
+// judge a segment's age by it, so a moved copy carries its source's.
+func SetSegmentModTime(partitionDir string, base int64, t time.Time) error {
+	return os.Chtimes(filepath.Join(partitionDir, segmentFileName(base)), t, t)
 }

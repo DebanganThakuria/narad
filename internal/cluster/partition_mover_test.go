@@ -743,3 +743,135 @@ func TestMoveNeverPromotesARewrittenUncommittedTail(t *testing.T) {
 	}
 	requireStagedRecords(t, staging, 12, want)
 }
+
+// skewedSource lists a source whose clock is off by skew from this
+// node's, on which every segment was last modified age ago.
+type skewedSource struct {
+	dirFetcher
+	skew, age time.Duration
+}
+
+func (f skewedSource) ListPartitionSegments(ctx context.Context, addr, topicName string, partition int) (messaging.PartitionTransferInfo, error) {
+	info, err := f.dirFetcher.ListPartitionSegments(ctx, addr, topicName, partition)
+	sourceNow := time.Now().Add(f.skew)
+	info.ListedAtUnixNano = sourceNow.UnixNano()
+	for i := range info.Segments {
+		info.Segments[i].ModTimeUnixNano = sourceNow.Add(-f.age).UnixNano()
+	}
+	return info, err
+}
+
+// ageSegments sets every segment file in dir to modification time at.
+func ageSegments(t *testing.T, dir string, at time.Time) {
+	t.Helper()
+	segs, err := storage.ListPartitionSegments(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seg := range segs {
+		if err := storage.SetSegmentModTime(dir, seg.BaseOffset, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// stagedSegmentAge is how old the staged copy's first segment file is on
+// this node's clock.
+func stagedSegmentAge(t *testing.T, staging string) time.Duration {
+	t.Helper()
+	segs, err := storage.ListPartitionSegments(staging)
+	if err != nil || len(segs) == 0 {
+		t.Fatalf("staged segments %v (err %v)", segs, err)
+	}
+	return time.Since(time.Unix(0, segs[0].ModTimeUnixNano))
+}
+
+// A move keeps each segment's age. Retention and the cold walk judge a
+// segment by its file's modification time, and a copy written fresh
+// restarted the retention clock of every moved record: with 1h
+// retention, 48h-old records the source reaps survived another hour on
+// the new owner. The age is carried, not the source's wall-clock time,
+// so a skewed clock on either node does not shift it.
+func TestMoveKeepsEachSegmentsAge(t *testing.T) {
+	t.Run("same clock", func(t *testing.T) {
+		src := t.TempDir()
+		hwm, _ := buildSourcePartition(t, src, 8)
+		ageSegments(t, src, time.Now().Add(-48*time.Hour))
+		staging := filepath.Join(t.TempDir(), "staging")
+		if _, err := NewPartitionMover(dirFetcher{dir: src, hwm: hwm}, 7, nil).Copy(context.Background(), "src", "orders", 0, staging); err != nil {
+			t.Fatalf("Copy: %v", err)
+		}
+		open := func(dir string) *storage.Log {
+			l, err := storage.NewLog(dir, storage.Options{
+				FlushInterval: time.Millisecond,
+				Retention:     storage.RetentionConfig{MaxAge: time.Hour, CheckInterval: time.Hour},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return l
+		}
+		s, d := open(src), open(staging)
+		defer s.Close()
+		defer d.Close()
+		s.SweepRetentionNow()
+		d.SweepRetentionNow()
+		if s.OldestOffset() == 0 || d.OldestOffset() != s.OldestOffset() {
+			t.Fatalf("after a retention sweep the source keeps offsets from %d and the copy from %d (hwm %d): the move restarted the copy's retention clock",
+				s.OldestOffset(), d.OldestOffset(), hwm)
+		}
+	})
+	for _, skew := range []time.Duration{-24 * time.Hour, 24 * time.Hour} {
+		t.Run("source clock off by "+skew.String(), func(t *testing.T) {
+			src := t.TempDir()
+			hwm, _ := buildSourcePartition(t, src, 3)
+			const age = 48 * time.Hour
+			staging := filepath.Join(t.TempDir(), "staging")
+			mover := NewPartitionMover(skewedSource{dirFetcher: dirFetcher{dir: src, hwm: hwm}, skew: skew, age: age}, 1<<20, nil)
+			if _, err := mover.Copy(context.Background(), "src", "orders", 0, staging); err != nil {
+				t.Fatalf("Copy: %v", err)
+			}
+			if got := stagedSegmentAge(t, staging); got < age-time.Minute || got > age+time.Minute {
+				t.Fatalf("staged segment is %v old on this node's clock, want about %v", got.Round(time.Minute), age)
+			}
+		})
+	}
+}
+
+// futureSource reports every segment modified far in the future; with
+// listed set, it also reports a listing time on a sane clock.
+type futureSource struct {
+	dirFetcher
+	listed bool
+}
+
+func (f futureSource) ListPartitionSegments(ctx context.Context, addr, topicName string, partition int) (messaging.PartitionTransferInfo, error) {
+	info, err := f.dirFetcher.ListPartitionSegments(ctx, addr, topicName, partition)
+	if f.listed {
+		info.ListedAtUnixNano = time.Now().UnixNano()
+	}
+	for i := range info.Segments {
+		info.Segments[i].ModTimeUnixNano = time.Now().Add(72 * time.Hour).UnixNano()
+	}
+	return info, err
+}
+
+// A modification time in the future is a broken clock, not an age:
+// honouring it would keep the segment past its retention, so the copy
+// keeps its own time.
+func TestMoveIgnoresASourceModTimeInTheFuture(t *testing.T) {
+	for _, listed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("listing_time=%v", listed), func(t *testing.T) {
+			src := t.TempDir()
+			hwm, _ := buildSourcePartition(t, src, 3)
+			staging := filepath.Join(t.TempDir(), "staging")
+			mover := NewPartitionMover(futureSource{dirFetcher: dirFetcher{dir: src, hwm: hwm}, listed: listed}, 1<<20, nil)
+			if _, err := mover.Copy(context.Background(), "src", "orders", 0, staging); err != nil {
+				t.Fatalf("Copy: %v", err)
+			}
+			if age := stagedSegmentAge(t, staging); age < -time.Minute {
+				t.Fatalf("staged segment stamped %v in the future", (-age).Round(time.Minute))
+			}
+		})
+	}
+}
