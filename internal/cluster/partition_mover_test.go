@@ -9,15 +9,19 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/debanganthakuria/narad/internal/broker/ingress"
 	"github.com/debanganthakuria/narad/internal/broker/messaging"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	"github.com/debanganthakuria/narad/internal/persistence/syncfile"
 )
 
 // dirFetcher serves a partition directory as a segmentFetcher, exactly
@@ -124,37 +128,53 @@ func TestPartitionMoverCopiesIdentically(t *testing.T) {
 	}
 }
 
-// A source with a hidden tail (HWM < record count) must copy the
-// records but keep the hidden ones invisible — the copy's HWM matches
-// the source's, not its record tail.
-func TestPartitionMoverPreservesHiddenTail(t *testing.T) {
-	src := t.TempDir()
-	recordCount, _ := buildSourcePartition(t, src, 10)
-	hiddenHWM := recordCount - 3 // source only made the first 7 visible
-
-	fetcher := dirFetcher{dir: src, hwm: hiddenHWM}
-	mover := NewPartitionMover(fetcher, 16, nil)
-	staging := filepath.Join(t.TempDir(), "staging")
-
-	res, err := mover.Copy(context.Background(), "a", "orders", 0, staging)
-	if err != nil {
-		t.Fatalf("Copy: %v", err)
-	}
-	if res.HighWatermark != hiddenHWM {
-		t.Fatalf("copy HWM = %d, want %d", res.HighWatermark, hiddenHWM)
-	}
-	log, err := storage.NewLog(staging, storage.Options{})
-	if err != nil {
-		t.Fatalf("recover: %v", err)
-	}
-	defer log.Close()
-	if log.HighWatermark() != hiddenHWM {
-		t.Fatalf("staged HWM = %d, want %d (hidden tail must stay hidden)", log.HighWatermark(), hiddenHWM)
-	}
-	// But all records are physically present (the bytes were copied).
-	if log.NextOffset() != recordCount {
-		t.Fatalf("staged NextOffset = %d, want %d (all records copied)", log.NextOffset(), recordCount)
-	}
+// A source that lists its file sizes (a release before committed
+// listings) can list a hidden tail: records a commit wrote and never
+// made visible. The copy is promoted at the source's high watermark, so
+// those records are cut from it: left in place, the new owner's first
+// commit would expose them next to the ingress WAL's own re-commit of
+// the same records.
+func TestFinalizeCutsAStagedTailPastTheHighWatermark(t *testing.T) {
+	t.Run("hidden frames in the active segment", func(t *testing.T) {
+		src := t.TempDir()
+		l := sourceWithHiddenFrames(t, src, 10, 3)
+		want := sourceRecords(t, l)
+		if err := l.Close(); err != nil {
+			t.Fatal(err)
+		}
+		mover := NewPartitionMover(&statSizeSource{dir: src, hwm: 10}, 16, nil)
+		staging := filepath.Join(t.TempDir(), "staging")
+		res, err := mover.Copy(context.Background(), "a", "orders", 0, staging)
+		if err != nil {
+			t.Fatalf("Copy: %v", err)
+		}
+		if res.HighWatermark != 10 {
+			t.Fatalf("copy HWM = %d, want 10", res.HighWatermark)
+		}
+		requireStagedRecords(t, staging, 10, want)
+	})
+	t.Run("hidden segments", func(t *testing.T) {
+		src := t.TempDir()
+		recordCount, _ := buildSourcePartition(t, src, 10) // one record per segment
+		hiddenHWM := recordCount - 3
+		mover := NewPartitionMover(dirFetcher{dir: src, hwm: hiddenHWM}, 16, nil)
+		staging := filepath.Join(t.TempDir(), "staging")
+		res, err := mover.Copy(context.Background(), "a", "orders", 0, staging)
+		if err != nil {
+			t.Fatalf("Copy: %v", err)
+		}
+		if res.HighWatermark != hiddenHWM {
+			t.Fatalf("copy HWM = %d, want %d", res.HighWatermark, hiddenHWM)
+		}
+		log, err := storage.NewLog(staging, storage.Options{})
+		if err != nil {
+			t.Fatalf("recover: %v", err)
+		}
+		defer log.Close()
+		if log.HighWatermark() != hiddenHWM || log.NextOffset() != hiddenHWM {
+			t.Fatalf("staged HWM %d, next offset %d; want both %d (the hidden records cut)", log.HighWatermark(), log.NextOffset(), hiddenHWM)
+		}
+	})
 }
 
 // CatchUp against a static source returns once caught up without a
@@ -390,4 +410,336 @@ func TestPartitionMoverCopiesAgedOutPartition(t *testing.T) {
 	if got := staged.NextOffset(); got != base {
 		t.Fatalf("staged copy recovers next offset %d, want %d", got, base)
 	}
+}
+
+// statSizeSource is a source on a release before committed listings:
+// it lists every segment's file size, and, with overServe, a chunk read
+// returns everything to the end of the file whatever length was asked
+// for. hwm is the high watermark it reports; with log set, the log's
+// own. onFetch, when set, runs instead of the first chunk read and
+// returns its bytes.
+type statSizeSource struct {
+	dir       string
+	hwm       int64
+	log       *storage.Log
+	overServe bool
+	onFetch   func(base, at int64) []byte
+	fetched   bool
+}
+
+func (d *statSizeSource) ListPartitionSegments(context.Context, string, string, int) (messaging.PartitionTransferInfo, error) {
+	segs, err := storage.ListPartitionSegments(d.dir)
+	if err != nil {
+		return messaging.PartitionTransferInfo{}, err
+	}
+	hwm := d.hwm
+	if d.log != nil {
+		hwm = d.log.HighWatermark()
+	}
+	return messaging.PartitionTransferInfo{Segments: segs, HighWatermark: hwm}, nil
+}
+
+func (d *statSizeSource) FetchSegmentChunk(_ context.Context, _, _ string, _ int, base, at, length int64) ([]byte, error) {
+	if d.onFetch != nil && !d.fetched {
+		d.fetched = true
+		return d.onFetch(base, at), nil
+	}
+	if d.overServe {
+		length = storage.MaxSegmentReadBytes
+	}
+	return storage.ReadSegmentRange(d.dir, base, at, length)
+}
+
+func rewriteRecord(payload string, stamp int64) []byte {
+	return storage.EncodeKeyedRecord("k", stamp, []byte(payload))
+}
+
+func rewriteBatch(prefix string, n int, stamp int64) [][]byte {
+	var recs [][]byte
+	for i := range n {
+		recs = append(recs, rewriteRecord(fmt.Sprintf("%s-%d", prefix, i), stamp))
+	}
+	return recs
+}
+
+// sourceWithHiddenFrames writes n committed records to a log in dir in
+// one frame, then m records in another frame that is fsynced and never
+// made visible.
+func sourceWithHiddenFrames(t *testing.T, dir string, n, m int) *storage.Log {
+	t.Helper()
+	l, err := storage.NewLog(dir, storage.Options{SegmentBytes: 1 << 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, last, err := l.AppendBatch(rewriteBatch("P", n, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.CommitDurable(first, last); err != nil {
+		t.Fatal(err)
+	}
+	if m > 0 {
+		if _, _, err := l.AppendBatch(rewriteBatch("HIDDEN", m, 1500)); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Sync(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return l
+}
+
+// reopenedSource writes ten committed records to a log in dir, closes
+// it, and opens it again, as an owner restart or an idle-evicted log's
+// reopen leaves it: its first commit releases the hwm file Close wrote,
+// which failCommit can make fail.
+func reopenedSource(t *testing.T, dir string) *storage.Log {
+	t.Helper()
+	l := sourceWithHiddenFrames(t, dir, 10, 0)
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	l, err := storage.NewLog(dir, storage.Options{SegmentBytes: 1 << 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	return l
+}
+
+// failCommit appends recs to l and commits them through the production
+// failure path: the frame is written and fsynced, the first
+// high-watermark advance of the log's life fails (EIO on the hwm file
+// release), and the log discards the tail for the ingress WAL to commit
+// again. during runs in the window between the fsync and the failed
+// advance, where a live copy can list and read the frame.
+func failCommit(t *testing.T, l *storage.Log, dir string, recs [][]byte, during func()) {
+	t.Helper()
+	next := l.NextOffset()
+	ran := false
+	restore := syncfile.SetFaultHook(func(op syncfile.Op, path string) error {
+		if op != syncfile.OpOpen || path != filepath.Join(dir, "hwm") {
+			return nil
+		}
+		if !ran {
+			ran = true
+			during()
+		}
+		return syscall.EIO
+	})
+	first, last, err := l.AppendBatch(recs)
+	if err != nil {
+		restore()
+		t.Fatal(err)
+	}
+	cerr := l.CommitDurable(first, last)
+	restore()
+	if cerr == nil || !ran {
+		t.Fatalf("setup: the commit should have failed at the hwm release (err %v, window reached %v)", cerr, ran)
+	}
+	if l.NextOffset() != next || l.HighWatermark() != next {
+		t.Fatalf("setup: after the discard next %d, hwm %d; want both %d", l.NextOffset(), l.HighWatermark(), next)
+	}
+}
+
+func commitBatch(t *testing.T, l *storage.Log, recs [][]byte) {
+	t.Helper()
+	first, last, err := l.AppendBatch(recs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.CommitDurable(first, last); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sourceRecords reads every visible record of l as "payload@stamp".
+func sourceRecords(t *testing.T, l *storage.Log) map[int64]string {
+	t.Helper()
+	want := map[int64]string{}
+	for off := range l.HighWatermark() {
+		_, at, p, err := l.ReadKeyed(off)
+		if err != nil {
+			t.Fatalf("source read %d: %v", off, err)
+		}
+		want[off] = fmt.Sprintf("%s@%d", p, at)
+	}
+	return want
+}
+
+// requireStagedRecords opens the staged copy and requires it to end at
+// hwm and hold exactly the records want has below it.
+func requireStagedRecords(t *testing.T, staging string, hwm int64, want map[int64]string) {
+	t.Helper()
+	staged, err := storage.NewLog(staging, storage.Options{})
+	if err != nil {
+		t.Fatalf("open staged: %v", err)
+	}
+	defer staged.Close()
+	bad := 0
+	for off := range hwm {
+		_, at, p, err := staged.ReadKeyed(off)
+		got := fmt.Sprintf("%s@%d", p, at)
+		if err != nil {
+			got = "ERR " + err.Error()
+		}
+		if got != want[off] {
+			bad++
+			t.Logf("offset %d: staged %q, source %q", off, got, want[off])
+		}
+	}
+	if bad > 0 {
+		t.Fatalf("WRONG RECORDS: the verified copy differs from the source at %d of %d committed offsets", bad, hwm)
+	}
+	if staged.NextOffset() != hwm {
+		t.Fatalf("the staged copy recovers next offset %d, want %d", staged.NextOffset(), hwm)
+	}
+}
+
+// A source on an older release discards a frame the copy already took
+// (a failed commit) and a listing then reports the segment shorter than
+// the copy's cursor. The copy cuts its staged segment back to the listed
+// size; otherwise it kept the discarded records and appended the tail of
+// the records committed at those offsets after them.
+func TestMoveTruncatesAStagedSegmentTheSourceShrank(t *testing.T) {
+	ctx := context.Background()
+	src := t.TempDir()
+	l := reopenedSource(t, src)
+	source := &statSizeSource{dir: src, log: l}
+	staging := filepath.Join(t.TempDir(), "staging")
+	sess := NewPartitionMover(source, 1<<20, nil).Begin("src", "orders", 0, staging)
+
+	failCommit(t, l, src, rewriteBatch("A", 3, 2000), func() {
+		if _, err := sess.CatchUp(ctx, 1<<30, 3, 1); err != nil {
+			t.Errorf("catch-up in the commit window: %v", err)
+		}
+	})
+	// A listing after the discard reports the shorter segment.
+	if _, err := sess.CatchUp(ctx, 1<<30, 3, 1); err != nil {
+		t.Fatal(err)
+	}
+	commitBatch(t, l, append(rewriteBatch("A", 3, 3000), rewriteBatch("B", 3, 3000)...))
+	commitBatch(t, l, rewriteBatch("C", 3, 4000))
+	want := sourceRecords(t, l)
+
+	res, err := sess.Finalize(ctx)
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if res.HighWatermark != l.HighWatermark() {
+		t.Fatalf("finalized at %d, the source is at %d", res.HighWatermark, l.HighWatermark())
+	}
+	requireStagedRecords(t, staging, res.HighWatermark, want)
+}
+
+// A source on an older release can answer a chunk read with more than
+// was asked for: bytes written since the listing, which a failed commit
+// may discard and other records replace. The copy stages only what it
+// asked for; otherwise its cursor sat past the listed size and the next
+// pass appended the tail of the replacing records after the discarded
+// ones.
+func TestMoveNeverStagesMoreThanItAskedFor(t *testing.T) {
+	ctx := context.Background()
+	src := t.TempDir()
+	l := reopenedSource(t, src)
+	source := &statSizeSource{dir: src, log: l, overServe: true}
+	source.onFetch = func(base, at int64) []byte {
+		var got []byte
+		failCommit(t, l, src, rewriteBatch("A", 3, 2000), func() {
+			b, err := storage.ReadSegmentRange(src, base, at, storage.MaxSegmentReadBytes)
+			if err != nil {
+				t.Error(err)
+			}
+			got = b
+		})
+		return got
+	}
+	staging := filepath.Join(t.TempDir(), "staging")
+	sess := NewPartitionMover(source, 1<<20, nil).Begin("src", "orders", 0, staging)
+	// One pass: a second listing before the regrow would show the
+	// discard as a shorter segment, which the copy handles on its own.
+	if _, _, err := sess.pass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	commitBatch(t, l, append(rewriteBatch("A", 3, 3000), rewriteBatch("B", 3, 3000)...))
+	commitBatch(t, l, rewriteBatch("C", 3, 4000))
+	want := sourceRecords(t, l)
+
+	res, err := sess.Finalize(ctx)
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	requireStagedRecords(t, staging, res.HighWatermark, want)
+}
+
+// A move copies only committed records, through the production source
+// path. A commit on the source writes and fsyncs its frame, the copy
+// lists and reads the partition in the window before the high watermark
+// advances, and the advance fails: the source discards the frame and
+// commits other records at the same offsets, here of the same length.
+// A copy that took the discarded frame would end at the right length
+// and pass every check with records the source never committed.
+func TestMoveNeverPromotesARewrittenUncommittedTail(t *testing.T) {
+	ctx := context.Background()
+	store := seedMoveCluster(t)
+	srcEngine, srcLogs, srcData := newTestEngine(t, store, "narad-src")
+	produceRecords(t, store, srcEngine, 10)
+	// Closed and opened again (an owner restart, an idle-evicted log), so
+	// the next commit releases the hwm file Close wrote.
+	if err := srcLogs.CloseAll(); err != nil {
+		t.Fatal(err)
+	}
+	peer := enginePeer{store: store, engines: map[string]*messaging.Engine{"src-addr": srcEngine}}
+	staging := filepath.Join(t.TempDir(), "staging")
+	sess := NewPartitionMover(peer, 1<<20, discardLogger()).Begin("src-addr", "orders", 0, staging)
+
+	rec, err := store.GetTopic(ctx, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := func(payload string) []ingress.ProduceRecord {
+		return []ingress.ProduceRecord{
+			{Topic: "orders", TopicID: rec.ID, Key: "k10", TargetPartition: 0, Payload: []byte(payload)},
+			{Topic: "orders", TopicID: rec.ID, Key: "k11", TargetPartition: 0, Payload: []byte(payload)},
+		}
+	}
+	hwmFile := filepath.Join(storage.TopicPartitionDir(srcData, "orders", 0), "hwm")
+	ran := false
+	restore := syncfile.SetFaultHook(func(op syncfile.Op, path string) error {
+		if op != syncfile.OpOpen || path != hwmFile {
+			return nil
+		}
+		if !ran {
+			ran = true
+			if _, err := sess.CatchUp(ctx, 1<<30, 3, 1); err != nil {
+				t.Errorf("catch-up in the commit window: %v", err)
+			}
+		}
+		return syscall.EIO
+	})
+	_, cerr := srcEngine.CommitAcceptedProduceBatch(ctx, batch("UNCOMMITTED-TAIL"))
+	restore()
+	if cerr == nil || !ran {
+		t.Fatalf("setup: the commit should have failed at the hwm release (err %v, window reached %v)", cerr, ran)
+	}
+	if _, err := srcEngine.CommitAcceptedProduceBatch(ctx, batch("COMMITTED-RECORD")); err != nil {
+		t.Fatalf("the commit at the same offsets: %v", err)
+	}
+	log, err := srcLogs.Get("orders", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if log.HighWatermark() != 12 {
+		t.Fatalf("setup: source hwm %d, want 12", log.HighWatermark())
+	}
+	want := sourceRecords(t, log)
+
+	res, err := sess.Finalize(ctx)
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if res.HighWatermark != 12 {
+		t.Fatalf("finalized at %d, want 12", res.HighWatermark)
+	}
+	requireStagedRecords(t, staging, 12, want)
 }
