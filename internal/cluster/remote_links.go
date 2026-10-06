@@ -66,7 +66,11 @@ const (
 	// unshippedScanLimit bounds the records, of any topic, a member's
 	// WAL scan reads; a backlog past it counts as unshipped.
 	unshippedScanLimit = 1_000_000
-	// unshippedAskTimeout bounds the fan-out of the unshipped query.
+	// unshippedAskTimeout bounds the fan-out of the unshipped query. A
+	// member's own scan ends at four fifths of it (12 s; see
+	// memberScanTimeout), so a scan cut short still answers incomplete
+	// while the leader waits, and is reported as a backlog the member
+	// could not read to the end, not as a member that did not answer.
 	unshippedAskTimeout = 15 * time.Second
 	// unshippedFlightTimeout bounds a whole check: the query fan-out,
 	// then the cursor lag from every partition owner.
@@ -87,6 +91,9 @@ type RemoteLinks struct {
 	now        func() time.Time
 	checkEvery time.Duration
 	scanLimit  int
+	// askTimeout is how long the leader waits for the members' answers
+	// to the unshipped query (unshippedAskTimeout).
+	askTimeout time.Duration
 
 	// The member side of the unshipped query (memberScan).
 	scanMu    sync.Mutex
@@ -109,6 +116,7 @@ func NewRemoteLinks(d RemoteLinksDeps) *RemoteLinks {
 		now:         time.Now,
 		checkEvery:  unshippedCheckEvery,
 		scanLimit:   unshippedScanLimit,
+		askTimeout:  unshippedAskTimeout,
 		scans:       map[string]*unshippedScan{},
 		scanSlots:   make(chan struct{}, maxUnshippedScans),
 		scanBacklog: d.Ingress.PendingForTopic,
@@ -1010,7 +1018,7 @@ func (l *RemoteLinks) unshippedNow(ctx context.Context, parent topic.Topic) (uns
 		return r, err
 	}
 	query := mustJSON(unshippedQuery{Topic: parent.Name, TopicID: parent.ID})
-	askCtx, cancel := context.WithTimeout(ctx, unshippedAskTimeout)
+	askCtx, cancel := context.WithTimeout(ctx, l.askTimeout)
 	defer cancel()
 	type answer struct {
 		node string
@@ -1098,8 +1106,9 @@ func (l *RemoteLinks) collectCursorStats(ctx context.Context, parent string) ([]
 // check started can miss a record accepted in between, and the check
 // would then let a delete abandon it. The leader's per-parent single
 // flight and its 10 s pacing bound how often a leader asks; on the
-// member every scan reads at most scanLimit records, stops when the
-// leader has stopped waiting for it (unshippedAskTimeout), shares a
+// member every scan reads at most scanLimit records, stops in time for
+// its answer to reach the leader before the leader stops waiting
+// (memberScanTimeout), shares a
 // running scan of the same topic only when it started after the query
 // arrived, and takes one of a few node-wide scan slots. A scan cut
 // short answers complete=false, which counts as unshipped.
@@ -1108,20 +1117,27 @@ func (l *RemoteLinks) ServeUnshipped(ctx context.Context, req nodewire.RemoteChe
 	if err := decodeBody(req.Body, &q); err != nil || topic.ValidateName(q.Topic) != nil {
 		return errorResponse(http.StatusBadRequest, "invalid unshipped query")
 	}
-	ctx, cancel := context.WithTimeout(ctx, unshippedAskTimeout)
+	// The member's clock starts only when the query arrives (the RPC
+	// carries no deadline), after the leader's: it ends early enough for
+	// an incomplete answer to travel back while the leader still waits.
+	ctx, cancel := context.WithTimeout(ctx, l.memberScanTimeout())
 	defer cancel()
 	res := l.memberScan(ctx, q)
 	switch {
 	case res.err == nil:
 	case errors.Is(res.err, context.DeadlineExceeded), errors.Is(res.err, context.Canceled):
-		l.d.Log.Warn("unshipped query: the ingress backlog scan did not finish before the leader stopped waiting; answering incomplete",
-			"topic", q.Topic, "counted", res.count, "timeout", unshippedAskTimeout)
+		l.d.Log.Warn("unshipped query: the ingress backlog scan did not finish in time; answering incomplete",
+			"topic", q.Topic, "counted", res.count, "timeout", l.memberScanTimeout())
 	default:
 		l.d.Log.Warn("unshipped query: scan the ingress backlog", "topic", q.Topic, "err", res.err)
 		return errorResponse(http.StatusServiceUnavailable, "ingress backlog scan failed")
 	}
 	return jsonResponse(http.StatusOK, unshippedAnswer{Node: l.d.SelfID, Count: res.count, Complete: res.complete})
 }
+
+// memberScanTimeout bounds a member's part of the unshipped query, its
+// wait for a scan slot included: four fifths of the leader's wait.
+func (l *RemoteLinks) memberScanTimeout() time.Duration { return l.askTimeout * 4 / 5 }
 
 // maxUnshippedScans bounds the unshipped scans one member runs at once,
 // across every topic.

@@ -165,3 +165,25 @@ func TestMemberUnshippedScansAreSharedAndCapped(t *testing.T) {
 		t.Fatalf("%d scans at once, want at most %d", p, maxUnshippedScans)
 	}
 }
+
+// A member's scan that cannot finish (a slow disk, a long backlog, or a
+// wait for a scan slot) answers complete=false while the leader still
+// waits for it: the leader then reports it under
+// backlog_over_scan_limit, not as a node that did not answer, which the
+// docs tell the operator means the node is down.
+func TestMemberUnshippedScanAnswersBeforeTheLeaderStopsWaiting(t *testing.T) {
+	s := linksRig(t)
+	s.links.askTimeout = time.Second
+	scans := &blockingScans{started: make(chan string, 8), release: make(chan struct{})}
+	s.links.scanBacklog = scans.scan
+	q, _ := json.Marshal(map[string]string{"topic": "orders"})
+	// The leader's clock starts before the query reaches the member.
+	leaderDeadline := time.Now().Add(s.links.askTimeout)
+	res := s.links.ServeUnshipped(context.Background(), nodewire.RemoteCheckRequest{Mode: nodewire.RemoteCheckUnshipped, Body: q})
+	if res.Status != http.StatusOK || bodyOf(t, res)["complete"] != false {
+		t.Fatalf("answer: %d %s, want 200 and an incomplete scan", res.Status, res.Body)
+	}
+	if spare := time.Until(leaderDeadline); spare < s.links.askTimeout/10 {
+		t.Fatalf("the member answered %s before the leader stopped waiting; want time for the answer to travel", spare)
+	}
+}
