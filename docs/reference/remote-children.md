@@ -62,7 +62,7 @@ Attach fields, with `remote` set on `POST /v1/topics/{parent}/children`:
 | `delay_ms` | 0 | 0 to one year, as for a [delay child](../build/fanout-and-delay.md#delay-children). |
 | `dry_run` | `false` | Run the checks and resolve the start offsets; write nothing. |
 
-The stub's `remote` object holds `name`, `topic`, `target_id` (the target topic's ID at the attach, or at the last resume with `accept_target`; absent when the target serves no IDs), `from`, `lanes`, `paused` with `pause_reason` (at most 256 bytes of printable text), `paused_by` and `paused_at_ms`, `skip` (per parent partition, the last offset an admin accepted to lose) and `created_by`. `paused_by` and `created_by` are shown to admins only.
+The stub's `remote` object holds `name`, `topic`, `target_id` (the target topic's ID at the attach, or at the last resume with `accept_target`; absent when the target serves no IDs), `from`, `lanes`, `paused` with `pause_reason` (at most 256 bytes of printable text), `paused_by` and `paused_at_ms`, `skip` (per parent partition, the list of offsets an admin accepted to lose, ascending, at most 4000, always including the newest; for example `{"0":[2,7]}`) and `created_by`. `paused_by` and `created_by` are shown to admins only.
 
 | Bound | Value |
 |---|---|
