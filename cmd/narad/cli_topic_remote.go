@@ -260,6 +260,9 @@ type unshippedRefusal struct {
 	LagComplete     bool              `json:"lag_complete"`
 	DispatchBacklog map[string]uint64 `json:"dispatch_backlog"`
 	NotAnswering    []string          `json:"not_answering"`
+	// BacklogOverScanLimit names the nodes that could not read their
+	// ingress backlog to the end for the check.
+	BacklogOverScanLimit []string `json:"backlog_over_scan_limit"`
 }
 
 // explainUnshipped turns a delete's refusal into what the operator does
@@ -277,7 +280,21 @@ func explainUnshipped(body []byte, detachHint string) (string, bool) {
 	for _, node := range r.NotAnswering {
 		fmt.Fprintf(&b, "; %s did not answer", node)
 	}
-	b.WriteString(".\nWait for them to ship (narad topic wait --lag-zero)")
+	for _, node := range r.BacklogOverScanLimit {
+		fmt.Fprintf(&b, "; %s could not read its backlog to the end (let it drain, then retry)", node)
+	}
+	// Waiting for the lag helps only when there is lag or a backlog to
+	// ship; a node that did not answer or could not read its backlog is
+	// waited for by retrying.
+	shipping := *r.LagMessages > 0 || !r.LagComplete
+	for _, n := range r.DispatchBacklog {
+		shipping = shipping || n > 0
+	}
+	if shipping {
+		b.WriteString(".\nWait for them to ship (narad topic wait --lag-zero)")
+	} else {
+		b.WriteString(".\nRetry once the nodes named above answer and have drained")
+	}
 	if detachHint != "" {
 		b.WriteString(", or abandon them with: " + detachHint)
 	}

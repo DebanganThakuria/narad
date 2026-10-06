@@ -287,3 +287,20 @@ func TestCLIWaitExitsAtOnceOnEveryStateThatNeedsAFix(t *testing.T) {
 		}
 	}
 }
+
+// A node whose backlog scan was cut short refuses the detach alone. The
+// refusal must name it and say what to do, and must not send the
+// operator to wait for a lag that is already 0.
+func TestExplainUnshippedNamesANodeThatCouldNotReadItsBacklog(t *testing.T) {
+	body := []byte(`{"error":"remote child \"orders-to-b\" has unshipped records","lag_messages":0,"lag_complete":true,"dispatch_backlog":{},"not_answering":[],"backlog_over_scan_limit":["narad-2"]}`)
+	msg, ok := explainUnshipped(body, "narad topic detach orders orders-to-b --force")
+	if !ok {
+		t.Fatal("not read as an unshipped refusal")
+	}
+	if !strings.Contains(msg, "narad-2") || !strings.Contains(msg, "could not read its backlog") {
+		t.Fatalf("message %q does not name the node that could not read its backlog", msg)
+	}
+	if strings.Contains(msg, "--lag-zero") {
+		t.Fatalf("message %q sends the operator to wait for a lag that is already 0", msg)
+	}
+}
