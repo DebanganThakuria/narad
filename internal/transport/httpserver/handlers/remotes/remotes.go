@@ -479,11 +479,14 @@ type listAnswer struct {
 	Allowlist string              `json:"allowlist"`
 	Key       *keyView            `json:"key,omitempty"`
 	Remotes   []remote.RemoteView `json:"remotes"`
-	Lingering []lingeringView     `json:"lingering"`
+	// Lingering and NotAnswering are nil, and so absent, when no member
+	// was asked (nodes=false): an empty list there would read as every
+	// node having let go.
+	Lingering []lingeringView `json:"lingering,omitzero"`
 	// NotAnswering names every member that was asked and did not
 	// answer, whether or not any answering member still holds a
 	// deleted remote: a silent member may still hold one.
-	NotAnswering []string `json:"not_answering"`
+	NotAnswering []string `json:"not_answering,omitzero"`
 }
 
 // List handles GET /v1/remotes[?nodes=false].
@@ -499,16 +502,19 @@ func List(s *handlers.Set) http.HandlerFunc {
 			c.fail(http.StatusServiceUnavailable, "remotes could not be read; retry")
 			return
 		}
-		ans := listAnswer{Allowlist: "none", Remotes: []remote.RemoteView{}, Lingering: []lingeringView{}, NotAnswering: []string{}}
+		ans := listAnswer{Allowlist: "none", Remotes: []remote.RemoteView{}}
 		if s.Deps.Remote.Service.AllowlistConfigured() {
 			ans.Allowlist = "set"
 		}
 		ans.Key = keyBlock(s)
-		statuses := memberStatuses(r.Context(), s, r.URL.Query().Get("nodes") != "false")
+		askNodes := r.URL.Query().Get("nodes") != "false"
+		statuses := memberStatuses(r.Context(), s, askNodes)
 		for _, rec := range records {
 			ans.Remotes = append(ans.Remotes, viewWithNodes(s, rec, statuses))
 		}
-		ans.Lingering, ans.NotAnswering = lingering(records, statuses)
+		if askNodes {
+			ans.Lingering, ans.NotAnswering = lingering(records, statuses)
+		}
 		s.WriteJSON(c.w, http.StatusOK, ans)
 		c.audit(http.StatusOK)
 	}

@@ -793,3 +793,30 @@ func TestThrottledRemoteTestAnswersRetryAfter(t *testing.T) {
 		}
 	}
 }
+
+// A listing that asked no node (nodes=false) has no lingering and no
+// not_answering at all, as documented: empty lists there would read as
+// every node having let go of every deleted remote.
+func TestListWithoutNodesHasNoLingeringFields(t *testing.T) {
+	n := newAPINode(t, apiOpts{})
+	if res := n.do(t, admin, http.MethodPost, "/v1/remotes", n.createBody("b", canary)); res.status != http.StatusCreated {
+		t.Fatalf("create: %d %s", res.status, res.body)
+	}
+	res := n.do(t, admin, http.MethodGet, "/v1/remotes?nodes=false", "")
+	if res.status != http.StatusOK {
+		t.Fatalf("list: %d %s", res.status, res.body)
+	}
+	body := res.json(t)
+	for _, field := range []string{"lingering", "not_answering"} {
+		if v, ok := body[field]; ok {
+			t.Fatalf("nodes=false listing has %s = %v; want the field absent", field, v)
+		}
+	}
+	res = n.do(t, admin, http.MethodGet, "/v1/remotes", "")
+	body = res.json(t)
+	for _, field := range []string{"lingering", "not_answering"} {
+		if _, ok := body[field]; !ok {
+			t.Fatalf("a listing that asked the nodes has no %s: %s", field, res.body)
+		}
+	}
+}
