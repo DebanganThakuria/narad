@@ -326,6 +326,10 @@ func (l *RemoteLinks) attach(ctx context.Context, req nodewire.RemoteWriteReques
 	if err != nil {
 		return refuse(errorResponse(http.StatusServiceUnavailable, "a parent partition owner could not be asked for its start offset; retry"), topic.RemoteStateUnavailable)
 	}
+	caps, capsOK := l.probeCapabilities(ctx, b.Remote, b.RemoteTopic)
+	if capsOK && caps.MaxMessages <= sink.DefaultMaxChunkMessages {
+		warnings = append(warnings, olderTargetBodyWarning)
+	}
 	if b.DryRun {
 		out := map[string]any{
 			"dry_run":        true,
@@ -333,7 +337,7 @@ func (l *RemoteLinks) attach(ctx context.Context, req nodewire.RemoteWriteReques
 			"checks":         reports,
 			"warnings":       warnings,
 		}
-		if caps, ok := l.probeCapabilities(ctx, b.Remote, b.RemoteTopic); ok {
+		if capsOK {
 			out["capabilities"] = map[string]any{"max_messages": caps.MaxMessages, "zstd": caps.Zstd}
 		}
 		return jsonResponse(http.StatusOK, out)
@@ -408,6 +412,12 @@ func attachWarnings(parent topic.Topic, reports []remote.NodeReport) []string {
 	}
 	return warnings
 }
+
+// olderTargetBodyWarning is the attach's warning for a target whose
+// batch produce takes 100 messages: v3.1.0, which caps a batch body at
+// 1 MiB, while this cluster accepts records up to 1 MiB.
+const olderTargetBodyWarning = "the target runs an older release whose batch produce takes at most 1 MiB of body: " +
+	"a record over about 768 KiB (binary, sent as base64) or about 1 MiB (JSON) blocks the link as record_too_large until the target is upgraded"
 
 // probeCapabilities asks the target, from the leader, what its batch
 // produce takes; a dry run reports it.
