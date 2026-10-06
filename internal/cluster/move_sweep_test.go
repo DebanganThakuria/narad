@@ -331,11 +331,11 @@ func mkTopicDirWithData(t *testing.T, dataDir, name, id string) string {
 		t.Fatal(err)
 	}
 	if id != "" {
-		if err := storage.WriteTopicIncarnation(storage.TopicDir(dataDir, name), id); err != nil {
+		if err := storage.WriteTopicIncarnation(topicDirT(t, dataDir, name), id); err != nil {
 			t.Fatal(err)
 		}
 	}
-	return storage.TopicDir(dataDir, name)
+	return topicDirT(t, dataDir, name)
 }
 
 func dirExists(path string) bool {
@@ -369,7 +369,7 @@ func TestStaleCopySweepReclaimsADeletedTopicsDirectoryOnceTheLeaderConfirms(t *t
 			if dirExists(dir) {
 				t.Fatalf("the deleted topic's directory %s survived the sweep", dir)
 			}
-			if entries, _ := os.ReadDir(storage.TopicDir(dataDir, "")); len(entries) != 1 {
+			if entries, _ := os.ReadDir(storage.TopicsDir(dataDir)); len(entries) != 1 {
 				t.Fatalf("topics/ holds %d entries after the sweep, want only the live topic's", len(entries))
 			}
 			if !dirExists(live) {
@@ -479,11 +479,11 @@ func TestOrphanTopicDirsGaugeCountsWhatTheSweepKept(t *testing.T) {
 	mkTopicDirWithData(t, dataDir, "gone", "1111111111111111")
 	mkTopicDirWithData(t, dataDir, "legacy", "")
 	mkTopicDirWithData(t, dataDir, "live", "9999999999999999")
-	if err := storage.WriteTopicIncarnation(storage.StaleTopicDir(dataDir, "live", "8888888888888888"), "8888888888888888"); err != nil {
+	if err := storage.WriteTopicIncarnation(staleTopicDirT(t, dataDir, "live", "8888888888888888"), "8888888888888888"); err != nil {
 		t.Fatal(err)
 	}
 	r.sweepStaleCopies(context.Background())
-	if dirExists(storage.TopicDir(dataDir, "gone")) {
+	if dirExists(topicDirT(t, dataDir, "gone")) {
 		t.Fatal("setup: the confirmed orphan directory survived the sweep")
 	}
 	want := `

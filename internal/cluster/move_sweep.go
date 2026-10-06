@@ -212,7 +212,7 @@ func (r *MoveRunner) localDirIsOtherIncarnation(t topic.Topic) bool {
 	if t.ID == "" {
 		return false
 	}
-	marker, marked, err := storage.ReadTopicIncarnation(storage.TopicDir(r.dataDir, t.Name))
+	marker, marked, err := storage.ReadTopicIncarnationOf(r.dataDir, t.Name)
 	return err == nil && marked && marker != t.ID
 }
 

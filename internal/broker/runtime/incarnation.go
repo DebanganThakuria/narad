@@ -114,7 +114,10 @@ func (g *Logs) ensureIncarnationGuarded(topicName, id string) error {
 	if id == "" {
 		return nil
 	}
-	topicDir := storage.TopicDir(g.dataDir, topicName)
+	topicDir, err := storage.TopicDir(g.dataDir, topicName)
+	if err != nil {
+		return err
+	}
 	marker, marked, err := storage.ReadTopicIncarnation(topicDir)
 	if err != nil {
 		return err
@@ -226,7 +229,7 @@ func (g *Logs) TopicIncarnationMatches(topicName, id string) (bool, error) {
 	if id == "" {
 		return true, nil
 	}
-	marker, marked, err := storage.ReadTopicIncarnation(storage.TopicDir(g.dataDir, topicName))
+	marker, marked, err := storage.ReadTopicIncarnationOf(g.dataDir, topicName)
 	if err != nil {
 		return false, err
 	}
@@ -280,7 +283,10 @@ func (g *Logs) purgeTopicGuarded(topicName, id string) (purged bool, err error) 
 			return false, err
 		}
 	}
-	dir := storage.TopicDir(g.dataDir, topicName)
+	dir, err := storage.TopicDir(g.dataDir, topicName)
+	if err != nil {
+		return false, err
+	}
 	if id != "" {
 		marker, marked, err := storage.ReadTopicIncarnation(dir)
 		if err != nil {
@@ -351,7 +357,10 @@ func (g *Logs) purgeTopicGuarded(topicName, id string) (purged bool, err error) 
 // startup sweep removes such an unmarked leftover once the leader
 // confirms no topic of that name exists.
 func (g *Logs) setAsidePurged(topicName, id string) (string, error) {
-	dir := storage.TopicDir(g.dataDir, topicName)
+	dir, err := storage.TopicDir(g.dataDir, topicName)
+	if err != nil {
+		return "", err
+	}
 	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 		return dir, nil
 	} else if err != nil {
@@ -386,7 +395,7 @@ func (g *Logs) setAsidePurged(topicName, id string) (string, error) {
 // incarnation id: the exact name and the numbered variants a repeated
 // quarantine can produce.
 func removeQuarantines(dataDir, topicName, id string) error {
-	entries, err := os.ReadDir(storage.TopicDir(dataDir, ""))
+	entries, err := os.ReadDir(storage.TopicsDir(dataDir))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -402,7 +411,11 @@ func removeQuarantines(dataDir, topicName, id string) error {
 		if name != exact && !strings.HasPrefix(name, exact+".") {
 			continue
 		}
-		if err := os.RemoveAll(storage.TopicDir(dataDir, name)); err != nil {
+		dir, err := storage.TopicDir(dataDir, name)
+		if err != nil {
+			return fmt.Errorf("broker/runtime: remove quarantined topic dir: %w", err)
+		}
+		if err := os.RemoveAll(dir); err != nil {
 			return fmt.Errorf("broker/runtime: remove quarantined topic dir: %w", err)
 		}
 	}

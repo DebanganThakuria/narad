@@ -34,7 +34,7 @@ func TestPartitionTransferInfoRefusesStaleIncarnation(t *testing.T) {
 	if err := e.logs.CloseTopic("orders"); err != nil {
 		t.Fatalf("CloseTopic: %v", err)
 	}
-	if err := storage.WriteTopicIncarnation(storage.TopicDir(dataDir, "orders"), "1111111111111111"); err != nil {
+	if err := storage.WriteTopicIncarnation(topicDirT(t, dataDir, "orders"), "1111111111111111"); err != nil {
 		t.Fatalf("WriteTopicIncarnation: %v", err)
 	}
 	if _, err := e.PartitionTransferInfo(ctx, "orders", 0); !errors.Is(err, runtime.ErrStaleTopicIncarnation) {

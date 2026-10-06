@@ -136,7 +136,7 @@ func (e *Engine) ReclaimMovedPartitionGuarded(ctx context.Context, topicName str
 	// topic's guard across fn, with the partition's log closed, so no
 	// open of the name runs between the marker check and the removal.
 	return e.logs.ReplacePartitionDir(topicName, partition, func() error {
-		marker, marked, err := storage.ReadTopicIncarnation(storage.TopicDir(e.logs.DataDir(), topicName))
+		marker, marked, err := storage.ReadTopicIncarnationOf(e.logs.DataDir(), topicName)
 		if err != nil {
 			return fmt.Errorf("reclaim refused: read topic incarnation: %w", err)
 		}

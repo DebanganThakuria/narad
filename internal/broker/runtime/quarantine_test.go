@@ -31,12 +31,12 @@ func writeCopy(t *testing.T, dir string, n int) {
 // staging copy. Live partitions and live staging are not copies.
 func TestQuarantinedCopiesListsEveryKindOfSetAsideCopy(t *testing.T) {
 	dataDir := t.TempDir()
-	topicDir := storage.TopicDir(dataDir, "orders")
+	topicDir := topicDirT(t, dataDir, "orders")
 	writeCopy(t, filepath.Join(topicDir, "p00000.quarantine"), 10)
 	writeCopy(t, filepath.Join(topicDir, "p00001.quarantine.1759600000000000000"), 5)
 	writeCopy(t, filepath.Join(topicDir, "p00002"), 100)
 	writeCopy(t, filepath.Join(topicDir, "p00003.quarantine.x"), 100)
-	stale := storage.StaleTopicDir(dataDir, "orders", "1111111111111111")
+	stale := staleTopicDirT(t, dataDir, "orders", "1111111111111111")
 	writeCopy(t, filepath.Join(stale, "p00000"), 7)
 	if err := storage.WriteTopicIncarnation(stale, "1111111111111111"); err != nil {
 		t.Fatal(err)
@@ -93,7 +93,7 @@ func TestQuarantinedCopiesCapsTheListButCountsEveryCopy(t *testing.T) {
 	dataDir := t.TempDir()
 	n := quarantineListCap + 3
 	for i := range n {
-		writeCopy(t, filepath.Join(storage.TopicDir(dataDir, "orders"), fmt.Sprintf("p%05d.quarantine", i)), 2)
+		writeCopy(t, filepath.Join(topicDirT(t, dataDir, "orders"), fmt.Sprintf("p%05d.quarantine", i)), 2)
 	}
 	sum, err := NewLogs(dataDir, storage.Options{}, nil, nil).QuarantinedCopies()
 	if err != nil {
@@ -116,9 +116,9 @@ func TestQuarantineGaugesReportCopiesAndBytes(t *testing.T) {
 		t.Fatalf("series before the first inventory = %d (%v), want none", n, err)
 	}
 
-	first := filepath.Join(storage.TopicDir(dataDir, "orders"), "p00000.quarantine")
+	first := filepath.Join(topicDirT(t, dataDir, "orders"), "p00000.quarantine")
 	writeCopy(t, first, 30)
-	writeCopy(t, filepath.Join(storage.TopicDir(dataDir, "orders"), "p00001.quarantine"), 12)
+	writeCopy(t, filepath.Join(topicDirT(t, dataDir, "orders"), "p00001.quarantine"), 12)
 	if _, err := logs.QuarantinedCopies(); err != nil {
 		t.Fatal(err)
 	}

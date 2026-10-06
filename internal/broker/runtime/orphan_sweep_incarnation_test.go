@@ -20,15 +20,15 @@ func TestSweepOrphanTopicDirsClassifiesIncarnations(t *testing.T) {
 	dataDir := t.TempDir()
 	mkTopicDir(t, dataDir, "unmarked")
 	mkTopicDir(t, dataDir, "marked")
-	if err := storage.WriteTopicIncarnation(storage.TopicDir(dataDir, "marked"), "1111111111111111"); err != nil {
+	if err := storage.WriteTopicIncarnation(topicDirT(t, dataDir, "marked"), "1111111111111111"); err != nil {
 		t.Fatalf("WriteTopicIncarnation: %v", err)
 	}
 	mkTopicDir(t, dataDir, "marked.stale-1111111111111111")
-	if err := storage.WriteTopicIncarnation(storage.TopicDir(dataDir, "marked.stale-1111111111111111"), "1111111111111111"); err != nil {
+	if err := storage.WriteTopicIncarnation(topicDirT(t, dataDir, "marked.stale-1111111111111111"), "1111111111111111"); err != nil {
 		t.Fatalf("WriteTopicIncarnation(stale): %v", err)
 	}
 	mkTopicDir(t, dataDir, "odd.stale-name")
-	if err := storage.WriteTopicIncarnation(storage.TopicDir(dataDir, "odd.stale-name"), "3333333333333333"); err != nil {
+	if err := storage.WriteTopicIncarnation(topicDirT(t, dataDir, "odd.stale-name"), "3333333333333333"); err != nil {
 		t.Fatalf("WriteTopicIncarnation(odd): %v", err)
 	}
 
@@ -62,7 +62,7 @@ func TestSweepOrphanTopicDirsClassifiesIncarnations(t *testing.T) {
 		}
 	}
 	for _, kept := range []string{"unmarked", "marked", "odd.stale-name"} {
-		if _, err := os.Stat(storage.TopicDir(dataDir, kept)); err != nil {
+		if _, err := os.Stat(topicDirT(t, dataDir, kept)); err != nil {
 			t.Fatalf("%s was removed: %v", kept, err)
 		}
 	}
@@ -79,7 +79,7 @@ func TestSweepOrphanTopicDirsClassifiesANumberedQuarantine(t *testing.T) {
 	const id = "1111111111111111"
 	for range 2 {
 		mkTopicDir(t, dataDir, "orders")
-		if err := storage.WriteTopicIncarnation(storage.TopicDir(dataDir, "orders"), id); err != nil {
+		if err := storage.WriteTopicIncarnation(topicDirT(t, dataDir, "orders"), id); err != nil {
 			t.Fatalf("WriteTopicIncarnation: %v", err)
 		}
 		if _, err := storage.QuarantineTopicDir(dataDir, "orders", id); err != nil {
@@ -88,7 +88,7 @@ func TestSweepOrphanTopicDirsClassifiesANumberedQuarantine(t *testing.T) {
 	}
 	odd := "orders.stale-" + id + ".x"
 	mkTopicDir(t, dataDir, odd)
-	if err := storage.WriteTopicIncarnation(storage.TopicDir(dataDir, odd), id); err != nil {
+	if err := storage.WriteTopicIncarnation(topicDirT(t, dataDir, odd), id); err != nil {
 		t.Fatalf("WriteTopicIncarnation(odd): %v", err)
 	}
 
@@ -136,7 +136,7 @@ func TestReclaimOrphanTopicDirPurgesOnlyAGoneIncarnationsDirectory(t *testing.T)
 	}
 	appendOld(t, l, 3, "live")
 	mkTopicDir(t, dataDir, "gone")
-	if err := storage.WriteTopicIncarnation(storage.TopicDir(dataDir, "gone"), "1111111111111111"); err != nil {
+	if err := storage.WriteTopicIncarnation(topicDirT(t, dataDir, "gone"), "1111111111111111"); err != nil {
 		t.Fatal(err)
 	}
 	mkTopicDir(t, dataDir, "legacy")
@@ -151,7 +151,7 @@ func TestReclaimOrphanTopicDirPurgesOnlyAGoneIncarnationsDirectory(t *testing.T)
 			if purged || !errors.Is(err, ErrNotAnOrphan) {
 				t.Fatalf("ReclaimOrphanTopicDir(%s, %q) = %v, %v; want a refusal with ErrNotAnOrphan", tc.topic, tc.id, purged, err)
 			}
-			if _, err := os.Stat(storage.TopicDir(dataDir, tc.topic)); err != nil {
+			if _, err := os.Stat(topicDirT(t, dataDir, tc.topic)); err != nil {
 				t.Fatalf("the refused directory is gone: %v", err)
 			}
 		})
@@ -164,7 +164,7 @@ func TestReclaimOrphanTopicDirPurgesOnlyAGoneIncarnationsDirectory(t *testing.T)
 	if !purged || err != nil {
 		t.Fatalf("ReclaimOrphanTopicDir(gone) = %v, %v; want purged", purged, err)
 	}
-	if _, err := os.Stat(storage.TopicDir(dataDir, "gone")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(topicDirT(t, dataDir, "gone")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("topics/gone after the reclaim: %v", err)
 	}
 	if left := staleDirs(t, dataDir, "gone"); len(left) != 0 {

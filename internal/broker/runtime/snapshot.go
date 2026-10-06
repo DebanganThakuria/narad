@@ -250,7 +250,11 @@ func (m *topicMarker) matches() bool {
 		return true
 	}
 	if !m.read {
-		m.marker, m.marked, m.err = readTopicIncarnation(storage.TopicDir(m.dataDir, m.topic))
+		if dir, err := storage.TopicDir(m.dataDir, m.topic); err != nil {
+			m.err = err
+		} else {
+			m.marker, m.marked, m.err = readTopicIncarnation(dir)
+		}
 		m.read = true
 	}
 	return m.err == nil && (!m.marked || m.marker == m.id)

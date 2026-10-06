@@ -40,16 +40,59 @@ const IncarnationMarkerFileName = "incarnation"
 // from the incarnation ID it belonged to: topics/<name>.stale-<id>.
 const StaleTopicDirSuffix = ".stale-"
 
+// ErrUnsafeTopicName is returned for a topic name that cannot be one
+// directory under the topics directory: empty, ".", "..", absolute, or
+// holding a path separator. Topic names are checked when a topic is
+// created; the storage layer checks again, so a name that reached it by
+// any path never forms a path outside <dataDir>/topics.
+var ErrUnsafeTopicName = errors.New("storage: topic name is not a single path element")
+
+// TopicsDir returns the directory holding every topic's directory:
+// <dataDir>/topics.
+func TopicsDir(dataDir string) string {
+	return filepath.Join(dataDir, "topics")
+}
+
 // TopicDir returns the directory holding one topic's partitions:
-// <dataDir>/topics/<topic>.
-func TopicDir(dataDir, topicName string) string {
-	return filepath.Join(dataDir, "topics", topicName)
+// <dataDir>/topics/<topic>. A name that is not a single path element is
+// refused with ErrUnsafeTopicName.
+func TopicDir(dataDir, topicName string) (string, error) {
+	if !filepath.IsLocal(topicName) || !singlePathElem(topicName) {
+		return "", unsafeTopicName(topicName)
+	}
+	return filepath.Join(TopicsDir(dataDir), topicName), nil
 }
 
 // StaleTopicDir returns the quarantine path for topicName's directory
 // when it belonged to the incarnation id: <dataDir>/topics/<topic>.stale-<id>.
-func StaleTopicDir(dataDir, topicName, id string) string {
-	return filepath.Join(dataDir, "topics", topicName+StaleTopicDirSuffix+id)
+// The whole element must be a single path element, as for TopicDir.
+func StaleTopicDir(dataDir, topicName, id string) (string, error) {
+	elem := topicName + StaleTopicDirSuffix + id
+	if !filepath.IsLocal(topicName) || !singlePathElem(topicName) || !filepath.IsLocal(elem) || !singlePathElem(elem) {
+		return "", unsafeTopicName(elem)
+	}
+	return filepath.Join(TopicsDir(dataDir), elem), nil
+}
+
+// ReadTopicIncarnationOf reads the marker of topicName's directory
+// under dataDir (ReadTopicIncarnation of TopicDir).
+func ReadTopicIncarnationOf(dataDir, topicName string) (id string, ok bool, err error) {
+	dir, err := TopicDir(dataDir, topicName)
+	if err != nil {
+		return "", false, err
+	}
+	return ReadTopicIncarnation(dir)
+}
+
+// singlePathElem reports whether a local path (filepath.IsLocal) is one
+// element: not "." and free of either separator, so it names exactly one
+// entry of the directory it is joined to.
+func singlePathElem(name string) bool {
+	return name != "." && !strings.ContainsAny(name, `/\`)
+}
+
+func unsafeTopicName(name string) error {
+	return fmt.Errorf("%w: %q", ErrUnsafeTopicName, name)
 }
 
 // ParseStaleTopicDirName splits a quarantined directory's base name
@@ -129,15 +172,22 @@ func WriteTopicIncarnation(topicDir, id string) error {
 // if something recreated the original in between), the older one is
 // kept and the new one gets a numeric suffix so nothing is overwritten.
 func QuarantineTopicDir(dataDir, topicName, id string) (string, error) {
-	dir := TopicDir(dataDir, topicName)
-	target := StaleTopicDir(dataDir, topicName, id)
+	dir, err := TopicDir(dataDir, topicName)
+	if err != nil {
+		return "", err
+	}
+	stale, err := StaleTopicDir(dataDir, topicName, id)
+	if err != nil {
+		return "", err
+	}
+	target := stale
 	for n := 1; ; n++ {
 		if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
 			break
 		} else if err != nil {
 			return "", err
 		}
-		target = fmt.Sprintf("%s.%d", StaleTopicDir(dataDir, topicName, id), n)
+		target = fmt.Sprintf("%s.%d", stale, n)
 	}
 	if err := syncfile.Rename(dir, target); err != nil {
 		return "", err

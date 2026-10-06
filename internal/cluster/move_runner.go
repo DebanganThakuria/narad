@@ -1054,7 +1054,7 @@ func (r *MoveRunner) checkTopicIncarnation(topicName, expectID string) error {
 	if expectID == "" {
 		return nil
 	}
-	marker, marked, err := storage.ReadTopicIncarnation(storage.TopicDir(r.dataDir, topicName))
+	marker, marked, err := storage.ReadTopicIncarnationOf(r.dataDir, topicName)
 	if err != nil {
 		return err
 	}

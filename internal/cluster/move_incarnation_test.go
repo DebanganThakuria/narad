@@ -89,7 +89,7 @@ func TestMoveRunnerInstallStampsIncarnation(t *testing.T) {
 	dataDir := t.TempDir()
 	// A deleted incarnation's directory is already there: the install
 	// must set it aside, not drop the copy into it.
-	if err := storage.WriteTopicIncarnation(storage.TopicDir(dataDir, "orders"), "0000000000000000"); err != nil {
+	if err := storage.WriteTopicIncarnation(topicDirT(t, dataDir, "orders"), "0000000000000000"); err != nil {
 		t.Fatalf("WriteTopicIncarnation: %v", err)
 	}
 	r := NewMoveRunner(store, "narad-dst", dataDir, peer, newKeepingReclaimer(t, dataDir), nil, nil, MoveConfig{RetryBackoff: 5 * time.Millisecond})
@@ -100,7 +100,7 @@ func TestMoveRunnerInstallStampsIncarnation(t *testing.T) {
 	if len(store.completeArgs) != 3 {
 		t.Fatalf("flip not proposed: %v", store.completeArgs)
 	}
-	id, ok, err := storage.ReadTopicIncarnation(storage.TopicDir(dataDir, "orders"))
+	id, ok, err := storage.ReadTopicIncarnation(topicDirT(t, dataDir, "orders"))
 	if err != nil || !ok || id != "1111111111111111" {
 		t.Fatalf("marker after install = (%q, %v, %v), want 1111111111111111", id, ok, err)
 	}
@@ -133,7 +133,7 @@ func TestMoveSweepSetsAsideDirOfDeletedIncarnation(t *testing.T) {
 	prepare := func(t *testing.T) string {
 		dataDir := t.TempDir()
 		mkLocalPartitionDir(t, dataDir)
-		if err := storage.WriteTopicIncarnation(storage.TopicDir(dataDir, "orders"), "1111111111111111"); err != nil {
+		if err := storage.WriteTopicIncarnation(topicDirT(t, dataDir, "orders"), "1111111111111111"); err != nil {
 			t.Fatalf("WriteTopicIncarnation: %v", err)
 		}
 		return dataDir
@@ -167,13 +167,13 @@ func TestMoveSweepSetsAsideDirOfDeletedIncarnation(t *testing.T) {
 		// The old partition is no longer under the live topic's directory
 		// (quarantined; the same pass then reclaimed the quarantine, the
 		// leader having confirmed the incarnation is gone).
-		if _, err := os.Stat(filepath.Join(storage.TopicDir(dataDir, "orders"), "p00000")); !os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(topicDirT(t, dataDir, "orders"), "p00000")); !os.IsNotExist(err) {
 			t.Fatalf("deleted incarnation's partition still under the live topic dir (stat err %v)", err)
 		}
-		if _, err := os.Stat(storage.StaleTopicDir(dataDir, "orders", "1111111111111111")); !os.IsNotExist(err) {
+		if _, err := os.Stat(staleTopicDirT(t, dataDir, "orders", "1111111111111111")); !os.IsNotExist(err) {
 			t.Fatalf("quarantine not reclaimed after leader confirmation (stat err %v)", err)
 		}
-		id, ok, _ := storage.ReadTopicIncarnation(storage.TopicDir(dataDir, "orders"))
+		id, ok, _ := storage.ReadTopicIncarnation(topicDirT(t, dataDir, "orders"))
 		if !ok || id != live.ID {
 			t.Fatalf("marker after set-aside = (%q, %v), want the live incarnation", id, ok)
 		}
@@ -196,7 +196,7 @@ func TestMoveSweepReclaimsQuarantineAfterLeaderConfirms(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dataDir := t.TempDir()
-			stale := storage.StaleTopicDir(dataDir, "orders", "1111111111111111")
+			stale := staleTopicDirT(t, dataDir, "orders", "1111111111111111")
 			if err := storage.WriteTopicIncarnation(stale, "1111111111111111"); err != nil {
 				t.Fatalf("WriteTopicIncarnation: %v", err)
 			}
@@ -338,7 +338,7 @@ func TestMoveInstallLeavesASuccessorOpenedBeforeTheInstall(t *testing.T) {
 	if err := logs.CloseAll(); err != nil {
 		t.Logf("close: %v", err)
 	}
-	id, marked, _ := storage.ReadTopicIncarnation(storage.TopicDir(dataDir, "orders"))
+	id, marked, _ := storage.ReadTopicIncarnation(topicDirT(t, dataDir, "orders"))
 	l, err := storage.NewLog(storage.TopicPartitionDir(dataDir, "orders", 0), storage.Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -408,7 +408,7 @@ func TestMoveNeverQuarantinesASuccessorRecreatedBeforeItsInstall(t *testing.T) {
 	}
 	if got := l.NextOffset(); got != 7 {
 		t.Fatalf("the successor's partition reopens at next offset %d after the move, want 7 (its records were set aside under %s); flip args %v",
-			got, storage.StaleTopicDir(dataDir, "orders", recreatedIncarnation), store.completeArgs)
+			got, staleTopicDirT(t, dataDir, "orders", recreatedIncarnation), store.completeArgs)
 	}
 	if len(store.completeArgs) != 0 {
 		t.Fatalf("the move flipped a copy of the deleted incarnation into the successor's name: %v", store.completeArgs)

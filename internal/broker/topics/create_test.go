@@ -138,7 +138,7 @@ func TestDerivedFileNamesFitAtTheNameCap(t *testing.T) {
 	}
 	const id = "0123456789abcdef"
 	for range 2 {
-		if err := storage.WriteTopicIncarnation(storage.TopicDir(dataDir, name), id); err != nil {
+		if err := storage.WriteTopicIncarnation(topicDirT(t, dataDir, name), id); err != nil {
 			t.Fatalf("write the incarnation marker: %v", err)
 		}
 		stale, err := storage.QuarantineTopicDir(dataDir, name, id)

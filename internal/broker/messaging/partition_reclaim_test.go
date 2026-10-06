@@ -287,7 +287,7 @@ func TestReclaimSetsAsideACopyTheOwnerCannotVouchFor(t *testing.T) {
 
 	// events/0: the topic directory belongs to another incarnation.
 	dirE := mkPartition("events", 0, 3)
-	if err := storage.WriteTopicIncarnation(storage.TopicDir(dataDir, "events"), "bbbbbbbbbbbbbbbb"); err != nil {
+	if err := storage.WriteTopicIncarnation(topicDirT(t, dataDir, "events"), "bbbbbbbbbbbbbbbb"); err != nil {
 		t.Fatal(err)
 	}
 	if err := engine.ReclaimMovedPartitionGuarded(ctx, "events", 0, setAside); err == nil || errors.Is(err, ErrPartitionQuarantined) {
@@ -385,7 +385,7 @@ func requireSuccessorKeepsItsRecords(t *testing.T, logs *runtime.Logs, dataDir s
 	if err := logs.CloseAll(); err != nil {
 		t.Logf("close: %v", err)
 	}
-	id, marked, _ := storage.ReadTopicIncarnation(storage.TopicDir(dataDir, "orders"))
+	id, marked, _ := storage.ReadTopicIncarnation(topicDirT(t, dataDir, "orders"))
 	l, err := storage.NewLog(storage.TopicPartitionDir(dataDir, "orders", 0), storage.Options{})
 	if err != nil {
 		t.Fatal(err)
