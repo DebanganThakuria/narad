@@ -26,9 +26,19 @@ type remoteCursor struct {
 	// pubMu serializes publishRemoteState, so the state gauge's delete
 	// of the previous series and set of the new one never interleave
 	// with another publisher's (two series at 1 would page forever).
-	pubMu sync.Mutex
+	// It also guards loggedState and loggedAt: the stall the cursor
+	// last logged entering, and when.
+	pubMu       sync.Mutex
+	loggedState string
+	loggedAt    time.Time
 
 	mu sync.Mutex
+	// remote is the link's remote name, for the log lines; answerState
+	// and answerStatus are the state and HTTP status of the last answer
+	// that refused a chunk.
+	remote       string
+	answerState  string
+	answerStatus int
 	// stall is a cursor-wide state the last answer or check put the
 	// cursor in (forbidden, target_missing, remote_missing, ...), ""
 	// when none.
@@ -89,6 +99,32 @@ type remoteCursor struct {
 
 func newRemoteCursor(key fanoutCursorKey) *remoteCursor {
 	return &remoteCursor{key: key, lanes: map[int]string{}, blocked: map[int]topic.RemoteBlock{}}
+}
+
+// setRemote records the link's remote name.
+func (c *remoteCursor) setRemote(name string) {
+	c.mu.Lock()
+	c.remote = name
+	c.mu.Unlock()
+}
+
+// noteAnswer records the state and HTTP status of a chunk's answer
+// ("" and 0 once a chunk is accepted).
+func (c *remoteCursor) noteAnswer(state string, status int) {
+	c.mu.Lock()
+	c.answerState, c.answerStatus = state, status
+	c.mu.Unlock()
+}
+
+// logContext is the remote name and, when the last answer put the
+// cursor in state, that answer's HTTP status (0 otherwise).
+func (c *remoteCursor) logContext(state string) (remote string, status int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.answerState == state {
+		status = c.answerStatus
+	}
+	return c.remote, status
 }
 
 // clearStall clears the cursor-wide stall: the target answered.

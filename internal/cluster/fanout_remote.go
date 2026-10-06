@@ -18,6 +18,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -401,6 +402,7 @@ func (r *FanoutRunner) remoteBeforeRead(ctx context.Context, key fanoutCursorKey
 			continue
 		}
 		cur.setPaused(false)
+		cur.setRemote(stub.Remote.Name)
 		lanes := stub.Remote.EffectiveLanes()
 		if rs := s.remoteState(stub.Remote.Name); rs.gate.Closed() {
 			r.refreshRemoteLag(ctx, key, cur, next, nil)
@@ -477,13 +479,14 @@ func (r *FanoutRunner) refreshRemoteLag(ctx context.Context, key fanoutCursorKey
 // the previous series and the set of the new one) one step, so an older
 // snapshot's set never lands after a newer publish's delete.
 func (r *FanoutRunner) publishRemoteState(cur *remoteCursor) {
+	cur.pubMu.Lock()
+	defer cur.pubMu.Unlock()
+	snap := cur.snapshot()
+	r.logRemoteTransition(cur, snap.state)
 	rl := r.remoteMetrics()
 	if rl == nil {
 		return
 	}
-	cur.pubMu.Lock()
-	defer cur.pubMu.Unlock()
-	snap := cur.snapshot()
 	key := cur.key
 	part := fanoutPartitionLabel(key.partition)
 	cur.mu.Lock()
@@ -503,6 +506,48 @@ func (r *FanoutRunner) publishRemoteState(cur *remoteCursor) {
 	if snap.lastSuccessMs > 0 {
 		rl.LastSuccessTimestampSeconds.WithLabelValues(key.parent, key.child).Set(float64(snap.lastSuccessMs) / 1000)
 	}
+}
+
+// remoteStallLogGap is how often one cursor may log entering a stall
+// that clears on its own (unavailable, throttled): a lone reset or
+// timeout is routine on a WAN, and a flapping link must not flood the
+// log. A stall that needs a fix is logged on every entry.
+const remoteStallLogGap = time.Minute
+
+// logRemoteTransition writes one line when the cursor enters a stall
+// (whatever stalled it: an answer, a lookup, a target check, a refused
+// record), at error level when only a person's fix clears it, and one
+// line when it runs again. A retry that meets the same stall logs
+// nothing. Called under cur.pubMu.
+func (r *FanoutRunner) logRemoteTransition(cur *remoteCursor, state string) {
+	key := cur.key
+	switch state {
+	case topic.RemoteStateRunning:
+		if cur.loggedState != "" {
+			r.logger.Info("remote child running again",
+				"parent", key.parent, "partition", key.partition, "child", key.child, "after", cur.loggedState)
+			cur.loggedState = ""
+		}
+		return
+	case topic.RemoteStatePaused, cur.loggedState:
+		return
+	}
+	needsFix := topic.RemoteStateNeedsFix(state)
+	now := time.Now()
+	if !needsFix && now.Sub(cur.loggedAt) < remoteStallLogGap {
+		return
+	}
+	cur.loggedState, cur.loggedAt = state, now
+	level := slog.LevelWarn
+	if needsFix {
+		level = slog.LevelError
+	}
+	remoteName, status := cur.logContext(state)
+	attrs := []any{"parent", key.parent, "partition", key.partition, "child", key.child, "remote", remoteName, "state", state}
+	if status > 0 {
+		attrs = append(attrs, "status", status)
+	}
+	r.logger.Log(context.Background(), level, "remote child stalled", attrs...)
 }
 
 // unpublishRemoteState drops the per-partition series a stopped cursor
@@ -982,13 +1027,7 @@ func (s *remoteSender) checkTarget(ctx context.Context, c *remoteCursor, e *remo
 		rl.CheckFailuresTotal.WithLabelValues(key.parent, key.child).Inc()
 		rl.ErrorsTotal.WithLabelValues(rs.name, res.Class).Inc()
 	}
-	state := c.targetVerdict()
-	if state != "" {
-		s.r.logger.Warn("remote child stalled by its target check",
-			"parent", key.parent, "partition", key.partition, "child", key.child,
-			"remote", rs.name, "state", state)
-	}
-	return state == "", res, true
+	return c.targetVerdict() == "", res, true
 }
 
 // remoteIdle keeps a quiet link honest, run by a remote cursor each
@@ -1163,6 +1202,7 @@ func (sh *slabShip) sendChunk(ctx context.Context, lane *laneShip, e *remote.Ent
 	if v.Action != sink.ActCommitted && v.Action != sink.ActRecapacity && rl != nil {
 		rl.ErrorsTotal.WithLabelValues(rs.name, v.Class).Inc()
 	}
+	sh.cur.noteAnswer(v.State, v.Status)
 	sh.act(ctx, lane, rs, e, v, n, probe)
 	if rl != nil {
 		rl.ChunkBytesLimit.WithLabelValues(rs.name).Set(float64(rs.noteLaneCap(lane.cap, lane.cap.Bytes())))
@@ -1282,8 +1322,6 @@ func (sh *slabShip) act(ctx context.Context, lane *laneShip, rs *remoteState, e 
 			rs.gate.Succeeded(probe)
 		}
 		sh.cur.stallFor(v.State, s.stallRetry)
-		s.r.logger.Warn("remote child stalled", "parent", sh.key.parent, "partition", sh.key.partition,
-			"child", sh.key.child, "remote", rs.name, "state", v.State, "status", v.Status)
 		// The retry re-runs the target check before it sends: a target
 		// deleted and recreated meanwhile turns into target_replaced,
 		// never a send into the new topic without accept_target.

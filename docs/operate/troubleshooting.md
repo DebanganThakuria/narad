@@ -350,7 +350,7 @@ It answers `{"id":"narad-3","voter":true}` (or `false` for a non-voter), and the
 
 **Unreleased.**
 
-A remote child's link holds in a state other than `running` or `paused`, and its lag grows. The node that owns the parent partition logs `remote child stalled` (warning) with the `state` and the target's `status`, or `remote child stalled by its target check`, or `remote child blocked on a record the target refuses` with the `offset`.
+A remote child's link holds in a state other than `running` or `paused`, and its lag grows. The node that owns the parent partition logs `remote child stalled` once as the cursor enters the state, with the `state`, the `remote` and, when the target's answer stalled it, the `status`: an error for every state that needs a fix (the list below), a warning for `unavailable` and `throttled`. A record the target refuses also logs `remote child blocked on a record the target refuses` with the `offset`, and `remote child running again` follows once the link sends again.
 
 **Check.** `narad topic children <parent> --partitions` names the state per partition and `blocked_at`; [Link states](../reference/remote-children.md#link-states) says what each means. `narad remote ls` shows each node's credential state and `last_error`, and `narad remote test <remote> --topic <topic> --source <parent>` runs every check now.
 

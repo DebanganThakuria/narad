@@ -71,7 +71,7 @@ flowchart LR
 | A refused dial | Stall. | `destination_refused` |
 | A TLS failure | Close the gate. | `tls_failed` |
 
-Nothing from the target's answer is logged or returned except its status, its class and a message index. A cursor that stalls logs `remote child stalled` (warning) with the parent, partition, child, remote, state and status; one that blocks on a record logs `remote child blocked on a record the target refuses` with the offset.
+Nothing from the target's answer is logged or returned except its status, its class and a message index. A cursor logs `remote child stalled` with the parent, partition, child, remote, state and, when an answer stalled it, that answer's status, once each time it enters a stall, whatever stalled it (an answer, a failed lookup, a target check, a refused record), and `remote child running again` once it sends again. The line is an error for a state that needs a fix and a warning, at most once a minute per cursor, for `unavailable` and `throttled`; a retry that meets the same stall logs nothing. A cursor that blocks on a record also logs `remote child blocked on a record the target refuses` with the offset.
 
 ## Target checks {#target-checks}
 
