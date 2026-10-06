@@ -357,6 +357,27 @@ func TestChartRendersWithValuesFromAnOlderRelease(t *testing.T) {
 	}
 }
 
+// A release installed with v3.1.0's chart and upgraded with
+// --reuse-values carries none of the keys this chart added for remotes.
+// The StatefulSet must still render every secretKeyRef with a key: an
+// empty one is refused by the API server and fails the upgrade.
+func TestChartRendersSecretKeysWithValuesFromV310(t *testing.T) {
+	docs := render(t, append([]string{
+		"--set", "security.clusterSecretPreviousKey=null",
+		"--set", "remotes=null",
+	}, fenced...)...)
+	_, from := containerEnv(at(only(t, docs, "StatefulSet"), "spec", "template", "spec"))
+	for name, ref := range from {
+		key, _ := at(ref, "secretKeyRef", "key").(string)
+		if at(ref, "secretKeyRef") != nil && key == "" {
+			t.Errorf("%s renders a secretKeyRef with no key", name)
+		}
+	}
+	if key, _ := at(from["NARAD_CLUSTER_SECRET_PREVIOUS"], "secretKeyRef", "key").(string); key != "cluster-secret-previous" {
+		t.Errorf("NARAD_CLUSTER_SECRET_PREVIOUS key = %q, want the default cluster-secret-previous", key)
+	}
+}
+
 func TestChartPassesHelmLint(t *testing.T) {
 	helm := helmBinary(t)
 	for _, args := range [][]string{

@@ -140,7 +140,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.security.existingSecret | default (printf "%s-security" (include "narad.fullname" .)) }}
-                  key: {{ .Values.security.clusterSecretPreviousKey }}
+                  key: {{ .Values.security.clusterSecretPreviousKey | default "cluster-secret-previous" }}
                   optional: true
             {{- with .Values.remotes }}
             {{- if .allowedHosts }}
