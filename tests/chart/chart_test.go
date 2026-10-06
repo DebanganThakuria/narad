@@ -566,3 +566,21 @@ func scalar(v string) any {
 	}
 	return v
 }
+
+// remotes.maxHeldBytes reaches the pods whatever its value: 0 (hold
+// nothing, re-read instead) is a setting, not an absent one.
+func TestRemotesMaxHeldBytesRendersZero(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{nil, "268435456"},
+		{[]string{"--set", "remotes.maxHeldBytes=0"}, "0"},
+		{[]string{"--set", "remotes.maxHeldBytes=1048576"}, "1048576"},
+	} {
+		env := statefulSetEnv(t, render(t, c.args...))
+		if got, ok := env["NARAD_REMOTES_MAX_HELD_BYTES"]; !ok || got != c.want {
+			t.Errorf("with %v: NARAD_REMOTES_MAX_HELD_BYTES = %q (set: %v), want %q", c.args, got, ok, c.want)
+		}
+	}
+}

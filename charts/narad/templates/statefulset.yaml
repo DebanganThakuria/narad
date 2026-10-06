@@ -159,7 +159,8 @@ spec:
             - name: NARAD_REMOTES_API_HOP_ENCRYPTED
               value: "true"
             {{- end }}
-            {{- if .maxHeldBytes }}
+            {{- /* 0 is a setting (hold nothing), so test for the key. */}}
+            {{- if and (hasKey . "maxHeldBytes") (ne (toString .maxHeldBytes) "<nil>") }}
             - name: NARAD_REMOTES_MAX_HELD_BYTES
               value: {{ .maxHeldBytes | int64 | quote }}
             {{- end }}
