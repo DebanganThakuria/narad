@@ -181,6 +181,15 @@ type TopicIDDeleter interface {
 	DeleteTopicID(ctx context.Context, name string) (string, error)
 }
 
+// RemoteChildAttacher is the optional remote child attach of a Broker,
+// with the topic manager's name locks, leader barrier and admin
+// re-check. See topics.Manager.AttachRemoteChild.
+type RemoteChildAttacher interface {
+	AttachRemoteChild(ctx context.Context, op metastore.AttachRemoteChildOp) error
+}
+
+var _ RemoteChildAttacher = (*impl)(nil)
+
 // Compile-time check: the incarnation-reporting delete stays reachable
 // through the facade via the embedded topics.Manager.
 var _ TopicIDDeleter = (*impl)(nil)

@@ -130,6 +130,11 @@ func (e *Engine) FanoutCursorStats(ctx context.Context, parent string) ([]topic.
 	if !t.IsParent() {
 		return nil, nil
 	}
+	// A remote child's listing reports whether the parent's consumers
+	// have passed the link's start (source_drained), so its stats carry
+	// the partition's consumer ack frontier. Local children never need
+	// it, so a parent without remote children reads nothing more.
+	remote := e.hasRemoteChildren(ctx, t)
 	var stats []topic.FanoutCursorStat
 	for p := range t.Partitions {
 		if !e.isLocalOwner(parent, p) {
@@ -151,6 +156,12 @@ func (e *Engine) FanoutCursorStats(ctx context.Context, parent string) ([]topic.
 				continue
 			}
 		}
+		var frontier *int64
+		if remote {
+			if f, ok, err := e.ackFrontier(dir, parent, p, hwm); err == nil && ok {
+				frontier = &f
+			}
+		}
 		for _, child := range t.Children {
 			cur, ok, err := storage.ReadFanoutCursor(dir, child)
 			if err != nil || !ok {
@@ -161,10 +172,74 @@ func (e *Engine) FanoutCursorStats(ctx context.Context, parent string) ([]topic.
 				Partition:     p,
 				NextOffset:    cur.NextOffset,
 				HighWatermark: hwm,
+				AckFrontier:   frontier,
 			})
 		}
 	}
 	return stats, nil
+}
+
+// hasRemoteChildren reports whether any of t's children is a remote
+// child's stub.
+func (e *Engine) hasRemoteChildren(ctx context.Context, t topic.Topic) bool {
+	for _, child := range t.Children {
+		if c, err := e.getTopic(ctx, child); err == nil && c.IsRemoteChild() {
+			return true
+		}
+	}
+	return false
+}
+
+// ConsumerAckFrontier reports a locally owned partition's consumer ack
+// frontier: the first offset not yet acked contiguously, never below
+// the oldest retained offset nor above the high watermark. A partition
+// nobody has consumed from yet reports its oldest retained offset:
+// everything retained is unconsumed. A remote child that starts
+// "unconsumed" starts here.
+func (e *Engine) ConsumerAckFrontier(ctx context.Context, topicName string, partition int) (int64, error) {
+	if e.logs == nil {
+		return 0, unavailableError("partition logs")
+	}
+	t, err := e.getTopic(ctx, topicName)
+	if err != nil {
+		return 0, err
+	}
+	if partition < 0 || partition >= t.Partitions {
+		return 0, fmt.Errorf("%w: partition out of range", ErrInvalid)
+	}
+	if !e.isLocalOwner(topicName, partition) {
+		return 0, ErrNotPartitionOwner
+	}
+	dir := storage.TopicPartitionDir(e.logs.DataDir(), topicName, partition)
+	var hwm, oldest int64
+	if log, open := e.logs.Peek(topicName, partition); open {
+		hwm, oldest = log.HighWatermark(), log.OldestOffset()
+	} else {
+		st, err := storage.StatPartitionDir(dir)
+		if err != nil {
+			return 0, err
+		}
+		hwm, oldest = st.HighWatermark, st.OldestOffset
+	}
+	frontier, ok, err := e.ackFrontier(dir, topicName, partition, hwm)
+	if err != nil {
+		return 0, err
+	}
+	if !ok || frontier < oldest {
+		frontier = oldest
+	}
+	return min(frontier, hwm), nil
+}
+
+// ackFrontier is the consumer frontier (committed + 1) of a partition
+// as consumerFrontier reads it, clamped to hwm; ok=false when no offset
+// was ever committed.
+func (e *Engine) ackFrontier(dir, topicName string, partition int, hwm int64) (int64, bool, error) {
+	committed, ok, _, err := e.consumerFrontier(dir, topicName, partition)
+	if err != nil || !ok {
+		return 0, false, err
+	}
+	return min(committed+1, hwm), true, nil
 }
 
 // fanoutLog is the slice of *storage.Log the slab read uses; narrowed
@@ -229,6 +304,7 @@ func (e *Engine) readFanoutSlabOnce(log fanoutLog, opts topic.FanoutReadOpts) (t
 			}
 			slab.Records = append(slab.Records, topic.KeyedRecord{
 				Key:               key,
+				Offset:            offset,
 				CommittedAtUnixMs: committedAt,
 				Payload:           payload,
 			})

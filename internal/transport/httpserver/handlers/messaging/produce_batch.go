@@ -14,9 +14,12 @@ import (
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
-// MaxProduceBatch is the most messages one batch produce may carry, the
-// same bound as a batch consume's max and a batch ack's handles.
-const MaxProduceBatch = MaxConsumeBatch
+// MaxProduceBatch is the most messages one batch produce may carry
+// (Q13): 1,000, decoupled from a batch consume's max and a batch ack's
+// handles (MaxConsumeBatch, 100). A remote child's replicator sends
+// 1,000 a chunk to a target that takes them, which lifts the per-lane
+// (and per-key) ceiling tenfold over a long round trip.
+const MaxProduceBatch = 1000
 
 // produceBatchMessage is one message of a batch produce. It mirrors the
 // encoding a consume returns a record in:
@@ -72,14 +75,20 @@ type InFlightHold interface {
 // It is a path of its own, not a form of POST /produce, because a
 // produce body is opaque bytes: {"messages":[...]} is a valid payload,
 // and a server that predates batches must refuse a batch (404) rather
-// than store it as one message. The body cap is a single produce's, and
-// the permission is produce.
+// than store it as one message. The body cap is MaxBatchBodyBytes (16
+// MiB), each decoded payload is capped as a single produce's is (a
+// larger one is answered 413 "message <index>: message too large"), and
+// the permission is produce. A body may come zstd or gzip compressed
+// (Content-Encoding), decoded under the same cap; any other encoding is
+// answered 415. Bodies above 1 MiB draw from the node's batch body
+// budget (Deps.BatchBodyBudget) and are answered 503 when it is full.
 //
 // What a request costs before it is refused is bounded by the request,
 // not by what its body holds: the gate is taken before the body is read,
 // and the body is decoded one message at a time and refused at message
 // MaxProduceBatch+1 (see decodeBoundedList).
 func ProduceBatch(s *handlers.Set, gate InFlightGate) http.HandlerFunc {
+	budget := newBatchBodyBudget(s.Deps.BatchBodyBudget)
 	return func(w http.ResponseWriter, r *http.Request) {
 		topicName := r.PathValue("topic")
 		if topicName == "" {
@@ -110,7 +119,9 @@ func ProduceBatch(s *handlers.Set, gate InFlightGate) http.HandlerFunc {
 			}
 			defer hold.Release()
 		}
-		body, ok := s.ReadBody(w, r, handlers.MaxMessageBodyBytes)
+		bodyHold := &budgetHold{budget: budget}
+		defer bodyHold.release()
+		body, ok := readBatchBody(s, w, r, bodyHold)
 		if !ok {
 			return
 		}
@@ -133,6 +144,12 @@ func ProduceBatch(s *handlers.Set, gate InFlightGate) http.HandlerFunc {
 			msg, err := batch[i].decode()
 			if err != nil {
 				s.WriteError(w, http.StatusBadRequest, "message "+strconv.Itoa(i)+": "+err.Error())
+				return
+			}
+			if int64(len(msg.Payload)) > handlers.MaxMessageBodyBytes {
+				// What a single produce of this message would answer, with
+				// its index: the body cap no longer bounds one message.
+				s.WriteError(w, http.StatusRequestEntityTooLarge, "message "+strconv.Itoa(i)+": message too large")
 				return
 			}
 			msgs[i] = msg

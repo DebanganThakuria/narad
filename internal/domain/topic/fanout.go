@@ -10,6 +10,9 @@ import "time"
 // timestamp recovered from the stored envelope.
 type KeyedRecord struct {
 	Key string
+	// Offset is the record's offset in the parent partition. A remote
+	// child names a stuck record by it and lanes keyless records on it.
+	Offset int64
 	// CommittedAtUnixMs is when the record was durably committed to
 	// its partition (assigned by the partition owner). Delay children
 	// anchor due times to it.
@@ -78,4 +81,23 @@ type FanoutCursorStat struct {
 	Partition     int    `json:"partition"`
 	NextOffset    int64  `json:"next_offset"`
 	HighWatermark int64  `json:"high_watermark"`
+
+	// The fields below are optional: an owner fills them for remote
+	// children from its running cursor, and an older owner omits them.
+
+	// Node is the owner that reported the cursor.
+	Node string `json:"node,omitempty"`
+	// State is the cursor's remote link state (RemoteState*).
+	State string `json:"state,omitempty"`
+	// BlockedAt names the record the cursor is stuck on, if any.
+	BlockedAt *RemoteBlock `json:"blocked_at,omitempty"`
+	// LastSuccessMs is when the target last accepted a chunk.
+	LastSuccessMs int64 `json:"last_success_ms,omitempty"`
+	// LagSeconds is the age, on the owner's clock, of the oldest record
+	// not yet on the target: the link's live recovery point.
+	LagSeconds float64 `json:"lag_seconds,omitempty"`
+	// AckFrontier is the parent partition's consumer ack frontier.
+	AckFrontier *int64 `json:"ack_frontier,omitempty"`
+	// TargetVerifiedAtMs is when the last target check succeeded.
+	TargetVerifiedAtMs int64 `json:"target_verified_at_ms,omitempty"`
 }

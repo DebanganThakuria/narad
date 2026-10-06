@@ -8,6 +8,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,7 +27,8 @@ func newTopicCmd() *cobra.Command {
 		Short:   "create, inspect, and manage topics",
 	}
 	topic.AddCommand(topicAddCmd(), topicLsCmd(), topicInfoCmd(), topicEditCmd(),
-		topicRmCmd(), topicAttachCmd(), topicDetachCmd(), topicChildrenCmd(), topicSchemaCmd())
+		topicRmCmd(), topicAttachCmd(), topicDetachCmd(), topicChildrenCmd(), topicSchemaCmd(),
+		topicPauseCmd(), topicResumeCmd(), topicSkipCmd(), topicWaitCmd())
 	return topic
 }
 
@@ -128,6 +130,10 @@ type topicItem struct {
 	Role          string `json:"role"`
 	Parent        string `json:"parent"`
 	FanoutDelayMs int64  `json:"fanout_delay_ms"`
+	Remote        *struct {
+		Name  string `json:"name"`
+		Topic string `json:"topic"`
+	} `json:"remote"`
 }
 
 func topicLsCmd() *cobra.Command {
@@ -175,6 +181,10 @@ func topicLsCmd() *cobra.Command {
 			for _, t := range all {
 				role := t.Role
 				switch {
+				case t.Remote != nil:
+					// A stub has no partitions of its own: say where its
+					// records go so it does not look broken.
+					role = fmt.Sprintf("remote %s/%s (child of %s)", t.Remote.Name, t.Remote.Topic, t.Parent)
 				case t.Parent != "" && t.FanoutDelayMs > 0:
 					role = fmt.Sprintf("child of %s (delay %s)", t.Parent, time.Duration(t.FanoutDelayMs)*time.Millisecond)
 				case t.Parent != "":
@@ -326,53 +336,132 @@ func topicRmCmd() *cobra.Command {
 					return fmt.Errorf("aborted")
 				}
 			}
-			if err := cliClient().deleteRequest("/v1/topics/" + url.PathEscape(args[0])); err != nil {
+			// --force skips the prompt and nothing else: it never abandons
+			// a remote child's unshipped records (only topic detach
+			// --force does).
+			c := cliClient()
+			status, body, err := c.doStatus(http.MethodDelete, "/v1/topics/"+url.PathEscape(args[0]), nil)
+			if err != nil {
 				return err
+			}
+			if status == http.StatusConflict {
+				hint := "narad topic detach <parent> <child> --force"
+				if t, ok := topicInfo(c, args[0]); ok && t.Remote != nil {
+					hint = fmt.Sprintf("narad topic detach %s %s --force", t.Parent, t.Name)
+				}
+				if msg, ok := explainUnshipped(body, hint); ok {
+					return errors.New(msg)
+				}
+			}
+			if status >= 400 {
+				return fmt.Errorf("http %d: %s", status, formatErrorBody(body))
 			}
 			fmt.Printf("deleted %s\n", args[0])
 			return nil
 		},
 	}
-	cmd.Flags().BoolVarP(&force, "force", "f", false, "skip confirmation")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "skip confirmation (never abandons a remote child's unshipped records; see topic detach --force)")
 	return cmd
 }
 
+// topicInfo reads a topic record; ok is false when it cannot.
+func topicInfo(c *httpClient, name string) (topicItem, bool) {
+	status, body, err := c.doStatus(http.MethodGet, "/v1/topics/"+url.PathEscape(name), nil)
+	if err != nil || status != http.StatusOK {
+		return topicItem{}, false
+	}
+	var t topicItem
+	return t, json.Unmarshal(body, &t) == nil
+}
+
 func topicAttachCmd() *cobra.Command {
-	var delay time.Duration
+	var (
+		delay                         time.Duration
+		remoteName, remoteTopic, from string
+		lanes                         int
+		dryRun                        bool
+	)
 	cmd := &cobra.Command{
 		Use:   "attach <parent> <child>",
-		Short: "attach an existing topic as a fan-out (or delayed) child",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(_ *cobra.Command, args []string) error {
-			body := map[string]any{"child": args[1]}
-			if delay > 0 {
-				body["delay_ms"] = delay.Milliseconds()
+		Short: "attach an existing topic as a fan-out (or delayed) child, or with --remote create a remote child",
+		Long: `Attach an existing topic as a fan-out child of parent. With --remote,
+create <child> as a remote child instead: a stub whose records go to a
+topic on another Narad cluster through that remote (admin only).`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if remoteName == "" {
+				for _, f := range []string{"remote-topic", "from", "lanes", "dry-run"} {
+					if cmd.Flags().Changed(f) {
+						return fmt.Errorf("--%s needs --remote", f)
+					}
+				}
+				body := map[string]any{"child": args[1]}
+				if delay > 0 {
+					body["delay_ms"] = delay.Milliseconds()
+				}
+				return cliClient().postAndPrint(childrenPath(args[0]), body)
 			}
-			return cliClient().postAndPrint("/v1/topics/"+url.PathEscape(args[0])+"/children", body)
+			return cliClient().postAndPrint(childrenPath(args[0]),
+				remoteAttachBody(args[1], remoteName, remoteTopic, from, lanes, delay, dryRun))
 		},
 	}
 	cmd.Flags().DurationVar(&delay, "delay", 0, "delivery delay, e.g. 30s")
+	cmd.Flags().StringVar(&remoteName, "remote", "", "create a remote child sending to this remote")
+	cmd.Flags().StringVar(&remoteTopic, "remote-topic", "", "topic on the remote (default: the parent's name)")
+	cmd.Flags().StringVar(&from, "from", "", "start point: attach (default), unconsumed or earliest")
+	cmd.Flags().IntVar(&lanes, "lanes", 0, "parallel ordered streams per parent partition, 1 to 8 (default 1)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "run every check and resolve the start offsets; write nothing")
 	return cmd
 }
 
 func topicDetachCmd() *cobra.Command {
-	return &cobra.Command{
+	var force bool
+	cmd := &cobra.Command{
 		Use:   "detach <parent> <child>",
-		Short: "detach a child (the child topic and its data remain)",
-		Args:  cobra.ExactArgs(2),
+		Short: "detach a child (a local child keeps its data; a remote child's stub is deleted)",
+		Long: `Detach a child. A local child becomes a standalone topic and keeps its
+data. A remote child's stub is deleted, and only once every record of
+the parent is on the remote: the server refuses (409) while records are
+unshipped, unless --force abandons them.`,
+		Args: cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return cliClient().deleteRequest("/v1/topics/" + url.PathEscape(args[0]) + "/children/" + url.PathEscape(args[1]))
+			path := childrenPath(args[0]) + "/" + url.PathEscape(args[1])
+			if force {
+				path += "?force=true"
+			}
+			status, body, err := cliClient().doStatus(http.MethodDelete, path, nil)
+			if err != nil {
+				return err
+			}
+			if status == http.StatusConflict {
+				if msg, ok := explainUnshipped(body, fmt.Sprintf("narad topic detach %s %s --force", args[0], args[1])); ok {
+					return errors.New(msg)
+				}
+			}
+			if status >= 400 {
+				return fmt.Errorf("http %d: %s", status, formatErrorBody(body))
+			}
+			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&force, "force", false, "for a remote child: delete even with unshipped records, abandoning them")
+	return cmd
 }
 
 func topicChildrenCmd() *cobra.Command {
-	return &cobra.Command{
+	var partitions bool
+	cmd := &cobra.Command{
 		Use:   "children <parent>",
-		Short: "list a parent's children with fan-out lag",
+		Short: "list a parent's children with fan-out lag (and each remote child's state)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return cliClient().getAndPrint("/v1/topics/" + url.PathEscape(args[0]) + "/children")
+			path := childrenPath(args[0])
+			if partitions {
+				path += "?partitions=true"
+			}
+			return cliClient().getAndPrint(path)
 		},
 	}
+	cmd.Flags().BoolVar(&partitions, "partitions", false, "one row per parent partition for each remote child")
+	return cmd
 }

@@ -1,6 +1,10 @@
 {{- $replicas := int .Values.replicaCount -}}
 {{- $initial := int (default 3 .Values.initialClusterSize) -}}
 {{- $peers := int (include "narad.clusterPeerCount" .) -}}
+{{- $r := .Values.remotes | default dict -}}
+{{- if and (not .Values.security.enabled) (or $r.allowedHosts $r.allowAddresses $r.apiHopEncrypted) -}}
+{{- fail "remotes settings require security.enabled: a node without API authorization must not hold remote credentials." -}}
+{{- end -}}
 {{- if lt $initial 1 -}}
 {{- fail "initialClusterSize must be at least 1." -}}
 {{- end -}}

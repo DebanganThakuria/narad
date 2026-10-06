@@ -51,9 +51,10 @@ func List(s *handlers.Set) http.HandlerFunc {
 			return
 		}
 		visible := make([]topic.Topic, 0, len(ts))
+		admin := callerSeesAdminFields(r)
 		for _, t := range ts {
 			if handlers.CanReadTopic(r, t.Owner, t.Name) {
-				visible = append(visible, t)
+				visible = append(visible, redactStub(t, admin))
 			}
 		}
 		ts = visible

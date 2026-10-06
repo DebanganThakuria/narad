@@ -10,7 +10,12 @@ import (
 	"net/http"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 )
+
+// SetFanoutRunner gives the router the node's fan-out runner. Call
+// before serving.
+func (rt *Router) SetFanoutRunner(r *FanoutRunner) { rt.fanout = r }
 
 // RouteAttachChild forwards a fan-out attach to the cluster leader.
 func (rt *Router) RouteAttachChild(ctx context.Context, w http.ResponseWriter, _ *http.Request, parent, child string, delayMs int64) bool {
@@ -35,9 +40,11 @@ func (rt *Router) RouteDetachChild(ctx context.Context, w http.ResponseWriter, _
 // CollectFanoutCursors merges the fan-out cursor stats of every parent
 // partition owner: local stats are passed in by the caller, remote
 // owners are queried once each. Unreachable owners are skipped rather
-// than failing the listing — the caller reports the lag as incomplete
-// (ok=false) instead.
+// than failing the listing: the caller reports the lag as incomplete
+// (ok=false) instead. The local stats gain this node's remote cursor
+// state; a remote owner's come with its own.
 func (rt *Router) CollectFanoutCursors(ctx context.Context, parent string, local []topic.FanoutCursorStat) ([]topic.FanoutCursorStat, bool) {
+	local = rt.fanout.OverlayRemoteCursorStats(parent, local)
 	assignments, err := rt.store.ListAssignments(parent)
 	if err != nil {
 		return local, false
@@ -66,4 +73,43 @@ func (rt *Router) CollectFanoutCursors(ctx context.Context, parent string, local
 		merged = append(merged, stats...)
 	}
 	return merged, complete
+}
+
+// collectOwnerCursorStats is CollectFanoutCursors for a caller without
+// a route cache (the leader's unshipped check): owners resolved from the
+// local replica's assignments and members, each remote one asked once.
+func collectOwnerCursorStats(ctx context.Context, store *metastore.Store, peer peerClient, selfID, parent string, local []topic.FanoutCursorStat) ([]topic.FanoutCursorStat, bool, error) {
+	assignments, err := store.ListAssignments(parent)
+	if err != nil {
+		return nil, false, err
+	}
+	complete := true
+	addrs := map[string]struct{}{}
+	for _, a := range assignments {
+		if selfID == "" || a.OwnerID == selfID {
+			continue
+		}
+		m, err := store.GetMember(a.OwnerID)
+		if err != nil || m.Status == metastore.MemberDead || m.Addr == "" {
+			complete = false
+			continue
+		}
+		addrs[m.Addr] = struct{}{}
+	}
+	merged := local
+	for addr := range addrs {
+		if peer == nil {
+			complete = false
+			continue
+		}
+		rpcCtx, cancel := context.WithTimeout(ctx, defaultPeerRPCTimeout)
+		stats, err := peer.FanoutCursors(rpcCtx, addr, parent)
+		cancel()
+		if err != nil {
+			complete = false
+			continue
+		}
+		merged = append(merged, stats...)
+	}
+	return merged, complete, nil
 }

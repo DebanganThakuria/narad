@@ -59,6 +59,9 @@ func (m *Manager) IncreaseTopicPartitions(ctx context.Context, name string, newP
 	}
 
 	current, updated, err := m.alterTopic(ctx, name, func(current topic.Topic) (topic.Topic, error) {
+		if err := stubImmutable(current); err != nil {
+			return topic.Topic{}, err
+		}
 		if newPartitions <= current.Partitions {
 			return topic.Topic{}, fmt.Errorf("%w: new partition count (%d) must be greater than current (%d); decrease is not supported",
 				ErrInvalid, newPartitions, current.Partitions)
@@ -111,6 +114,12 @@ func (m *Manager) UpdateTopicRetention(ctx context.Context, name string, retenti
 	}
 
 	current, updated, err := m.alterTopic(ctx, name, func(current topic.Topic) (topic.Topic, error) {
+		if err := stubImmutable(current); err != nil {
+			return topic.Topic{}, err
+		}
+		if err := m.remoteSourceFloor(ctx, current, retentionMs); err != nil {
+			return topic.Topic{}, err
+		}
 		updated := current
 		updated.RetentionMs = retentionMs
 		return updated, nil
@@ -160,6 +169,9 @@ func (m *Manager) UpdateTopicCaps(ctx context.Context, name string, maxInFlight,
 	}
 
 	_, updated, err := m.alterTopic(ctx, name, func(current topic.Topic) (topic.Topic, error) {
+		if err := stubImmutable(current); err != nil {
+			return topic.Topic{}, err
+		}
 		updated := current
 		updated.MaxInFlightPerPartition = resolveCap(maxInFlight, current.MaxInFlightPerPartition, m.cfg.DefaultMaxInFlightPerPartition)
 		updated.MaxAckedAheadPerPartition = resolveCap(maxAckedAhead, current.MaxAckedAheadPerPartition, m.cfg.DefaultMaxAckedAheadPerPartition)
@@ -211,6 +223,9 @@ func (m *Manager) schemaTopic(ctx context.Context, name string) (topic.Topic, er
 		return topic.Topic{}, err
 	}
 	if err := authorizeManage(ctx, t); err != nil {
+		return topic.Topic{}, err
+	}
+	if err := stubImmutable(t); err != nil {
 		return topic.Topic{}, err
 	}
 	if t.IsChild() {
@@ -352,4 +367,39 @@ func (m *Manager) UpdateTopicSchema(ctx context.Context, name string, rawSchema 
 		"version", version)
 
 	return t, nil
+}
+
+// remoteSourceFloor refuses, before anything is proposed, a retention
+// shrink of a parent with remote children below
+// topic.MinRemoteSourceRetentionMs (a retention already below it may
+// still grow). The FSM refuses the same change (checkConfigUpdate);
+// this answers with a named error before a Raft round trip.
+func (m *Manager) remoteSourceFloor(ctx context.Context, current topic.Topic, retentionMs int64) error {
+	shrinks := retentionMs != 0 && (current.RetentionMs == 0 || retentionMs < current.RetentionMs)
+	if !current.IsParent() || !shrinks || retentionMs >= topic.MinRemoteSourceRetentionMs {
+		return nil
+	}
+	for _, name := range current.Children {
+		child, err := m.GetTopic(ctx, name)
+		if err != nil || !child.IsRemoteChild() {
+			continue
+		}
+		return errs.RemoteChildError(errs.ErrRemoteRetentionFloor, fmt.Sprintf(
+			"parent %q retention (%dms) must be at least %dms (24h) while it has remote children",
+			current.Name, retentionMs, topic.MinRemoteSourceRetentionMs))
+	}
+	return nil
+}
+
+// stubImmutable refuses every field of a topic update on a remote
+// child's stub: it has no partitions, retention or caps of its own, and
+// pause and resume have their own routes. The FSM refuses the change
+// too; this answers before a Raft round trip.
+func stubImmutable(t topic.Topic) error {
+	if !t.IsRemoteChild() {
+		return nil
+	}
+	return errs.RemoteChildError(errs.ErrRemoteStubImmutable, fmt.Sprintf(
+		"%q is a remote child of %q on remote %s; its topic record cannot be changed (use pause and resume)",
+		t.Name, t.Parent, t.Remote.Name))
 }

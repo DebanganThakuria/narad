@@ -182,6 +182,10 @@ type fanoutCursorKey struct {
 	// topic.FanoutTailOffset for records without one. Immutable per
 	// epoch like delayMs.
 	anchor int64
+	// remote marks a remote child's cursor: it ships its slabs to the
+	// remote (see fanout_remote.go) with the remote slab caps and gate.
+	// Immutable per epoch: a stub is created with its own epoch.
+	remote bool
 }
 
 type fanoutCursorHandle struct {
@@ -209,6 +213,13 @@ type FanoutRunner struct {
 	reconcilePasses int
 	caughtUpSkips   int
 	gate            reconcileGate
+
+	// remoteMu guards remote, the remote child send path (see
+	// SetRemotes), and remoteCursors, the state of the remote cursors
+	// this node runs, which the cursor-stats handlers overlay.
+	remoteMu      sync.Mutex
+	remote        *remoteSender
+	remoteCursors map[fanoutCursorKey]*remoteCursor
 }
 
 // NewFanoutRunner wires a runner and registers it on store as the
@@ -251,6 +262,17 @@ func NewFanoutRunner(
 func (r *FanoutRunner) Run(ctx context.Context) {
 	ticker := time.NewTicker(r.cfg.ReconcileInterval)
 	defer ticker.Stop()
+	r.remoteMu.Lock()
+	sender := r.remote
+	r.remoteMu.Unlock()
+	if sender != nil {
+		watchDone := make(chan struct{})
+		defer func() { <-watchDone }()
+		go func() {
+			defer close(watchDone)
+			sender.watchChanges(ctx)
+		}()
+	}
 	for {
 		r.Reconcile(ctx)
 		select {
@@ -330,6 +352,7 @@ func (r *FanoutRunner) Reconcile(ctx context.Context) {
 			desired[fanoutCursorKey{
 				parent: parent.Name, partition: p, child: t.Name,
 				epoch: t.AttachEpoch, delayMs: t.FanoutDelayMs, anchor: attachAnchor(t, p),
+				remote: t.IsRemoteChild(),
 			}] = struct{}{}
 		}
 	}
@@ -434,6 +457,9 @@ func (r *FanoutRunner) cleanUpStoppedCursor(key fanoutCursorKey, byName map[stri
 	if r.metrics != nil {
 		r.metrics.FanoutLagMessages.DeletePartialMatch(map[string]string{"parent": key.parent, "child": key.child})
 		r.metrics.FanoutDueLagSeconds.DeletePartialMatch(map[string]string{"parent": key.parent, "child": key.child})
+		if key.remote {
+			r.metrics.RemoteLink.PruneLink(key.parent, key.child)
+		}
 	}
 }
 

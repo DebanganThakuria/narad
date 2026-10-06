@@ -136,6 +136,34 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.security.existingSecret | default (printf "%s-security" (include "narad.fullname" .)) }}
                   key: {{ .Values.security.clusterSecretKey }}
+            - name: NARAD_CLUSTER_SECRET_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.security.existingSecret | default (printf "%s-security" (include "narad.fullname" .)) }}
+                  key: {{ .Values.security.clusterSecretPreviousKey }}
+                  optional: true
+            {{- with .Values.remotes }}
+            {{- if .allowedHosts }}
+            - name: NARAD_REMOTES_ALLOWED_HOSTS
+              value: {{ join "," .allowedHosts | quote }}
+            {{- end }}
+            {{- if .allowedPorts }}
+            - name: NARAD_REMOTES_ALLOWED_PORTS
+              value: {{ join "," .allowedPorts | quote }}
+            {{- end }}
+            {{- if .allowAddresses }}
+            - name: NARAD_REMOTES_ALLOW_ADDRESSES
+              value: {{ join "," .allowAddresses | quote }}
+            {{- end }}
+            {{- if .apiHopEncrypted }}
+            - name: NARAD_REMOTES_API_HOP_ENCRYPTED
+              value: "true"
+            {{- end }}
+            {{- if .maxHeldBytes }}
+            - name: NARAD_REMOTES_MAX_HELD_BYTES
+              value: {{ .maxHeldBytes | int64 | quote }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.security.allowLegacyClusterAuth }}
             - name: NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH
               value: "true"

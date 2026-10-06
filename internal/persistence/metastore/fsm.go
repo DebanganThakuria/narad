@@ -38,6 +38,9 @@ var (
 	// bucketRemovedMembers holds tombstones for members removed by
 	// decommission, keyed by member ID; see applyRemoveMember.
 	bucketRemovedMembers = []byte("removed_members")
+	// bucketRemotes holds the remotes registry, keyed by remote name,
+	// plus the reserved key domremote.KeysKey; see fsm_apply_remotes.go.
+	bucketRemotes = []byte("remotes")
 )
 
 func schemaKey(topicName string, version int) []byte {
@@ -277,6 +280,16 @@ func (f *fsmState) dispatch(op opCode, data []byte) error {
 		return f.applyMarkMemberDeadIf(data)
 	case opDeleteUserReleaseTopics:
 		return f.applyDeleteUserReleaseTopics(data)
+	case opAttachRemoteChild:
+		return f.applyAttachRemoteChild(data)
+	case opSetRemoteChildState:
+		return f.applySetRemoteChildState(data)
+	case opPutRemote:
+		return f.applyPutRemote(data)
+	case opUpdateRemote:
+		return f.applyUpdateRemote(data)
+	case opDeleteRemote:
+		return f.applyDeleteRemote(data)
 	default:
 		return errNoHandler
 	}

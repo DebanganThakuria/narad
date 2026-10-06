@@ -84,6 +84,11 @@ type Topic struct {
 	// attach and starts at offset 0. Nil on records written before the
 	// field existed; such cursors keep the older tail-anchor behaviour.
 	AttachOffsets []int64 `json:"attach_offsets,omitempty"`
+	// Remote makes this child a remote child (child role only): a stub
+	// with zero partitions whose records go to a topic on another
+	// cluster. Set at attach; managed only by the remote state op; a
+	// topic update never changes it. A stub has no Owner.
+	Remote *RemoteLink `json:"remote,omitempty"`
 }
 
 // Role classifies a topic's position in fan-out. Roles are exclusive
@@ -210,6 +215,11 @@ type PartitionStats struct {
 	// report: OwnerDead, OwnerUnreachable, OwnerUnknown or
 	// OwnerUnassigned. Empty for a partition whose stats are real.
 	OwnerLiveness string `json:"owner_liveness,omitempty"`
+	// AckFrontier is the partition's consumer ack frontier: the first
+	// offset not yet acked contiguously. Reported by the owner where it
+	// is asked for (a remote child's "unconsumed" start point); absent
+	// otherwise.
+	AckFrontier *int64 `json:"ack_frontier,omitempty"`
 }
 
 // Partition statuses of a topic GET (PartitionStats.Status).

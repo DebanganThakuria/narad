@@ -25,6 +25,7 @@ func Default() *Config {
 			MaxConnections:                4096,
 			MaxConsumeInFlightPerIdentity: 1024,
 			MaxProduceInFlightPerIdentity: 0, // off; see HTTPConfig.MaxProduceInFlightPerIdentity
+			MaxBatchBodyBytesInFlight:     DefaultMaxBatchBodyBytesInFlight,
 		},
 		Cluster: ClusterConfig{
 			Addr:                  ":7943",
@@ -77,5 +78,10 @@ func Default() *Config {
 		Security: SecurityConfig{
 			Enabled: true,
 		},
+		Remotes: defaultRemotesConfig(),
 	}
 }
+
+// DefaultMaxBatchBodyBytesInFlight is http.max_batch_body_bytes_in_flight's
+// default.
+const DefaultMaxBatchBodyBytesInFlight int64 = 256 << 20

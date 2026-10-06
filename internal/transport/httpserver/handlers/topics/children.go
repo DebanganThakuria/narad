@@ -14,10 +14,17 @@ package topics
 // stake in the link. Listing children needs any grant on the parent.
 // Like every metadata write, attach and detach are forwarded to the
 // cluster leader in multi-node mode.
+//
+// A body that names a remote attaches a remote child instead (see
+// children_remote.go): admin only, checked before anything else.
 
 import (
 	"errors"
 	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/debanganthakuria/narad/internal/domain/topic"
 
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
@@ -48,8 +55,22 @@ func AttachChild(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, "parent topic required")
 			return
 		}
-		var req attachChildRequest
-		if !s.DecodeAndValidate(w, r, &req) {
+		// One strict decode for both kinds, so a remote attach can never
+		// fall back to the owner rules of a local one.
+		var remoteReq attachRemoteChildRequest
+		if !s.DecodeJSON(w, r, &remoteReq) {
+			return
+		}
+		if remoteReq.Remote != "" {
+			attachRemote(s, w, r, parent, remoteReq)
+			return
+		}
+		req, err := remoteReq.local()
+		if err == nil {
+			err = req.Validate()
+		}
+		if err != nil {
+			s.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		aw := newAuditWriter(w)
@@ -76,7 +97,12 @@ func AttachChild(s *handlers.Set) http.HandlerFunc {
 	}
 }
 
-// DetachChild handles DELETE /v1/topics/{parent}/children/{child}.
+// DetachChild handles DELETE /v1/topics/{parent}/children/{child}. A
+// remote child's stub is deleted, and only while nothing of the parent
+// is unshipped, unless ?force=true abandons it (see
+// children_remote.go). A detach this node's replica shows as a local
+// child takes the plain path; the leader refuses it (409, retry) if the
+// child is a stub by then.
 func DetachChild(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		parent := r.PathValue("parent")
@@ -85,9 +111,30 @@ func DetachChild(s *handlers.Set) http.HandlerFunc {
 			s.WriteError(w, http.StatusBadRequest, "parent and child topics required")
 			return
 		}
+		force, ok := forceParam(s, w, r)
+		if !ok {
+			return
+		}
 		aw := newAuditWriter(w)
 		w = aw
-		defer func() { aw.audit(s, r, auditEventDetach, parent, "child", child) }()
+		defer func() {
+			if force {
+				aw.audit(s, r, auditEventDetach, parent, "child", child, "force", true)
+				return
+			}
+			aw.audit(s, r, auditEventDetach, parent, "child", child)
+		}()
+		if isRemoteChildOf(r, s, parent, child) {
+			if !authorizeStubDelete(s, w, r, parent) {
+				return
+			}
+			if s.Deps.Remote.Writer == nil {
+				s.WriteError(w, http.StatusNotImplemented, "remote children are not available on this node")
+				return
+			}
+			detachThroughLeader(s, w, r, parent, child, force)
+			return
+		}
 		if !s.AuthorizeTopicManageAny(w, r, parent, child) {
 			return
 		}
@@ -108,21 +155,26 @@ func DetachChild(s *handlers.Set) http.HandlerFunc {
 // LagMessages sums parent-partition high-watermark minus cursor over
 // every reporting cursor; LagComplete is false while some cursors have
 // not reported (owner unreachable or cursor not anchored yet), making
-// the lag a lower bound.
+// the lag a lower bound. A remote child also carries remoteChildStatus.
 type childStatus struct {
 	Name string `json:"name"`
 	// DelayMs is the child's fan-out delay (0 = immediate).
 	DelayMs     int64 `json:"delay_ms"`
 	LagMessages int64 `json:"lag_messages"`
 	LagComplete bool  `json:"lag_complete"`
+	*remoteChildStatus
 }
 
 type childrenResponse struct {
-	Parent   string        `json:"parent"`
+	Parent string `json:"parent"`
+	// ParentID is the parent's incarnation ID. Another cluster's remote
+	// child that sends to this topic reads it to notice a recreate.
+	ParentID string        `json:"parent_id,omitempty"`
 	Children []childStatus `json:"children"`
 }
 
-// ListChildren handles GET /v1/topics/{parent}/children.
+// ListChildren handles GET /v1/topics/{parent}/children. ?partitions=true
+// adds one row per parent partition to each remote child.
 func ListChildren(s *handlers.Set) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		parent := r.PathValue("parent")
@@ -132,6 +184,15 @@ func ListChildren(s *handlers.Set) http.HandlerFunc {
 		}
 		if !s.AuthorizeTopicRead(w, r, parent) {
 			return
+		}
+		withPartitions := false
+		if raw := r.URL.Query().Get("partitions"); raw != "" {
+			v, err := strconv.ParseBool(raw)
+			if err != nil {
+				s.WriteError(w, http.StatusBadRequest, "partitions must be true or false")
+				return
+			}
+			withPartitions = v
 		}
 		t, err := s.Deps.Broker.GetTopic(r.Context(), parent)
 		if err != nil {
@@ -152,6 +213,7 @@ func ListChildren(s *handlers.Set) http.HandlerFunc {
 		type lagAgg struct {
 			lag     int64
 			cursors int
+			stats   []topic.FanoutCursorStat
 		}
 		byChild := map[string]*lagAgg{}
 		for _, stat := range stats {
@@ -162,17 +224,28 @@ func ListChildren(s *handlers.Set) http.HandlerFunc {
 			}
 			agg.cursors++
 			agg.lag += max(0, stat.HighWatermark-stat.NextOffset)
+			agg.stats = append(agg.stats, stat)
 		}
 
-		resp := childrenResponse{Parent: parent, Children: []childStatus{}}
+		admin := callerSeesAdminFields(r)
+		resp := childrenResponse{Parent: parent, ParentID: t.ID, Children: []childStatus{}}
 		for _, child := range t.Children {
 			status := childStatus{Name: child}
-			if childRecord, err := s.Deps.Broker.GetTopic(r.Context(), child); err == nil {
+			childRecord, childErr := s.Deps.Broker.GetTopic(r.Context(), child)
+			if childErr == nil {
 				status.DelayMs = childRecord.FanoutDelayMs
 			}
-			if agg := byChild[child]; agg != nil {
+			agg := byChild[child]
+			if agg != nil {
 				status.LagMessages = agg.lag
 				status.LagComplete = remoteComplete && agg.cursors == t.Partitions
+			}
+			if childErr == nil && childRecord.IsRemoteChild() {
+				var childStats []topic.FanoutCursorStat
+				if agg != nil {
+					childStats = agg.stats
+				}
+				status.remoteChildStatus = remoteStatus(t, childRecord, childStats, remoteComplete, admin, withPartitions, time.Now())
 			}
 			resp.Children = append(resp.Children, status)
 		}

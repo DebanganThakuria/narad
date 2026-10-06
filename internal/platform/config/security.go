@@ -30,6 +30,11 @@ type SecurityConfig struct {
 	// TLS session, in both directions. Env: NARAD_CLUSTER_SECRET.
 	ClusterSecret string `json:"-"`
 
+	// ClusterSecretPrevious opens remote passwords sealed under the
+	// previous cluster secret during a rotation. Never used for cluster
+	// RPC. Env only: NARAD_CLUSTER_SECRET_PREVIOUS.
+	ClusterSecretPrevious string `json:"-"`
+
 	// AllowLegacyClusterAuth is the one-release compatibility path for
 	// a rolling upgrade from nodes that proved the cluster secret with
 	// a fixed (replayable, one-way) token. While true, this node also

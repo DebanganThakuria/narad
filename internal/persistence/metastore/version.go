@@ -47,6 +47,16 @@ func (s *Store) UsersVersion() uint64 {
 	return s.fsm.versions.usersVersion()
 }
 
+// RemotesVersion advances when any remote is created, updated, re-encrypted
+// or deleted, or a snapshot restore replaces local state. The credential
+// cache rebuilds only when it moves.
+func (s *Store) RemotesVersion() uint64 {
+	if s == nil || s.fsm == nil {
+		return 0
+	}
+	return s.fsm.versions.remotesVersion()
+}
+
 // RoutingMembersVersion advances when member data used by routing changes:
 // membership, API address, cluster address, or alive/dead status. Heartbeat-only
 // LastHeartbeat updates do not change this version.
@@ -59,7 +69,7 @@ func (s *Store) RoutingMembersVersion() uint64 {
 
 // LatestDomainVersion returns the newest version any of the per-domain
 // versions above has taken, for any key: it advances whenever a topic,
-// assignment, schema, users or routing-members version does, including
+// assignment, schema, users, remotes or routing-members version does, including
 // after a snapshot restore. Unlike MetadataVersion it holds still across
 // applies that change none of them (member heartbeats, which every
 // member sends every few seconds, and drain flags). Versions advance

@@ -12,6 +12,7 @@ import (
 	httpcluster "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/cluster"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/health"
 	httpmessaging "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/messaging"
+	httpremotes "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/remotes"
 	httptopics "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/topics"
 	httpusers "github.com/debanganthakuria/narad/internal/transport/httpserver/handlers/users"
 )
@@ -104,6 +105,20 @@ func NewRouterWithOptions(h *handlers.Set, log *slog.Logger, m *metrics.Metrics,
 		mux.HandleFunc("GET /v1/cluster/moves", httpcluster.Moves(h))
 		mux.HandleFunc("POST /v1/cluster/moves/{topic}/{partition}/abort", httpcluster.AbortMove(h))
 		mux.HandleFunc("GET /v1/cluster/members", httpcluster.Members(h))
+
+		// Remote replication: the remotes registry, the cluster secret
+		// re-encrypt, and the remote child operator routes. All write
+		// through Raft.
+		mux.HandleFunc("POST /v1/remotes", httpremotes.Create(h))
+		mux.HandleFunc("GET /v1/remotes", httpremotes.List(h))
+		mux.HandleFunc("GET /v1/remotes/{name}", httpremotes.Get(h))
+		mux.HandleFunc("PATCH /v1/remotes/{name}", httpremotes.Update(h))
+		mux.HandleFunc("DELETE /v1/remotes/{name}", httpremotes.Delete(h))
+		mux.HandleFunc("POST /v1/remotes/{name}/test", httpremotes.Test(h))
+		mux.HandleFunc("POST /v1/cluster/reencrypt-remotes", httpremotes.Reencrypt(h))
+		mux.HandleFunc("POST /v1/topics/{parent}/children/{child}/pause", httptopics.PauseChild(h))
+		mux.HandleFunc("POST /v1/topics/{parent}/children/{child}/resume", httptopics.ResumeChild(h))
+		mux.HandleFunc("POST /v1/topics/{parent}/children/{child}/skip", httptopics.SkipChild(h))
 	}
 
 	// Health Checks

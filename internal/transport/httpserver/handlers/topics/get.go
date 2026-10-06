@@ -76,6 +76,7 @@ func Get(s *handlers.Set) http.HandlerFunc {
 			d.Partitions = []topic.PartitionStats{stats}
 			d.Partial = stats.Status != topic.PartitionStatusOK
 		}
+		d.Topic = redactStub(d.Topic, callerSeesAdminFields(r))
 		s.WriteJSON(w, http.StatusOK, d)
 	}
 }

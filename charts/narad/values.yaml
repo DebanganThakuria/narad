@@ -185,6 +185,19 @@ security:
   existingSecret: ""
   adminPasswordKey: admin-password
   clusterSecretKey: cluster-secret
+  # Optional key in the same Secret, set only during a cluster secret
+  # rotation: the previous cluster secret, passed as
+  # NARAD_CLUSTER_SECRET_PREVIOUS. It only opens remote passwords sealed
+  # under the old secret until `narad remote reencrypt` runs; cluster RPC
+  # never accepts it. Remove the key once the re-encrypt is done. See
+  # docs/operate/remotes.md.
+  clusterSecretPreviousKey: cluster-secret-previous
+  # A cluster that holds remotes keeps its remote passwords in the
+  # metastore, encrypted under a key derived from the cluster secret, so
+  # the cluster secret and a pod's volume together open them. Keep this
+  # Secret out of namespace backups (for Velero, label it
+  # velero.io/exclude-from-backup=true) and grant pods/exec and
+  # pods/attach on this namespace only to operators who may hold both.
 
   # One-release compatibility for a rolling upgrade from a release whose
   # node-to-node auth was a fixed token (before session-bound proofs).
@@ -257,6 +270,30 @@ networkPolicy:
   pprofFrom: []
   # Extra NetworkPolicyIngressRule entries.
   extraIngress: []
+
+# Remote replication: the node-level bounds on where remotes (other Narad
+# clusters this one replicates to, managed through /v1/remotes) may
+# point. They are node config on purpose: an admin cannot widen them
+# through the API; widening one is a values change and a rollout. They
+# require security.enabled. Every pod needs egress to each remote's
+# ingress on its port, not only the pods that own parent partitions:
+# attach, resume and test run their checks from every member.
+remotes:
+  # Host allowlist of exact names and "*.suffix" patterns. Set it in
+  # production; empty admits any host the address guard allows, logs a
+  # warning, and exports narad_remotes_allowlist_configured 0.
+  allowedHosts: []
+  # Ports a remote URL may name and a dial may reach.
+  allowedPorts: [443]
+  # CIDRs the address guard lets through although they are loopback,
+  # link-local or cloud metadata addresses (a test rig). Leave empty.
+  allowAddresses: []
+  # Attest that the ingress-to-pod hop is encrypted (mesh mTLS or an
+  # ingress re-encrypting to the pod). Remote writes carry a password,
+  # so they answer 412 until this is true.
+  apiHopEncrypted: false
+  # Per-node budget for records remote children hold across a failure.
+  maxHeldBytes: 268435456
 
 metrics:
   # Serve /metrics on the dedicated metrics port (service.ports.metrics)

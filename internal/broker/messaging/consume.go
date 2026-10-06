@@ -20,6 +20,9 @@ func (e *Engine) Consume(ctx context.Context, topicName string, opts ConsumeOpts
 	if err != nil {
 		return topic.Message{}, false, err
 	}
+	if err := remoteChildGuard(t); err != nil {
+		return topic.Message{}, false, err
+	}
 
 	if opts.Offset != nil && opts.Partition == nil {
 		return topic.Message{}, false, ErrPartitionRequired
@@ -120,6 +123,9 @@ func (e *Engine) readForWaiter(w *ConsumeWaiter) (topic.Message, bool, error) {
 func (e *Engine) ConsumeProbe(ctx context.Context, topicName string, opts ConsumeOpts) (topic.Message, bool, *ConsumeWaiter, error) {
 	t, err := e.getTopic(ctx, topicName)
 	if err != nil {
+		return topic.Message{}, false, nil, err
+	}
+	if err := remoteChildGuard(t); err != nil {
 		return topic.Message{}, false, nil, err
 	}
 	if opts.Offset != nil || opts.Partition != nil {

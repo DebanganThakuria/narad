@@ -68,20 +68,9 @@ func (f *fsmState) applyUpdateTopic(data []byte) error {
 		t.AttachEpoch = current.AttachEpoch
 		t.FanoutDelayMs = current.FanoutDelayMs
 		t.AttachOffsets = current.AttachOffsets
-		// A parent's retained log is the delay buffer for its delay
-		// children: shrinking retention below what an attached child's
-		// delay requires would let scheduled records age out before
-		// they are due.
-		if t.IsParent() {
-			for _, childName := range t.Children {
-				child, err := getTopicRecord(tx, childName)
-				if err != nil {
-					continue
-				}
-				if err := checkDelayAgainstRetention(child.FanoutDelayMs, t.RetentionMs, t.Name); err != nil {
-					return err
-				}
-			}
+		t.Remote = current.Remote
+		if err := checkConfigUpdate(tx, current, t); err != nil {
+			return err
 		}
 		return putTopicRecord(tx, t)
 	})
@@ -101,14 +90,14 @@ func (f *fsmState) applyDeleteTopic(data []byte) error {
 	if err := json.Unmarshal(data, &name); err != nil {
 		return err
 	}
-	var linkedTopics []string
+	var linkedTopics, deletedStubs []string
 	err := f.update(func(tx *bolt.Tx) error {
 		var err error
-		linkedTopics, err = deleteTopicTx(tx, name)
+		linkedTopics, deletedStubs, err = deleteTopicTx(tx, name)
 		return err
 	})
 	if err == nil {
-		f.retireDeletedTopic(name, linkedTopics)
+		f.retireDeletedTopic(name, linkedTopics, deletedStubs)
 	}
 	return err
 }
@@ -118,9 +107,13 @@ func (f *fsmState) applyDeleteTopic(data []byte) error {
 // advance exactly as the bumps would, and its cells become tombstones
 // that are pruned in batches, so a churn of uniquely named topics does
 // not leave a cell per name ever deleted. The fan-out partners stay live
-// and are bumped.
-func (f *fsmState) retireDeletedTopic(name string, linkedTopics []string) {
+// and are bumped; a deleted parent's remote children went with it and
+// are retired too.
+func (f *fsmState) retireDeletedTopic(name string, linkedTopics, deletedStubs []string) {
 	f.versions.retireTopic(name)
+	for _, stub := range deletedStubs {
+		f.versions.retireTopic(stub)
+	}
 	for _, linked := range linkedTopics {
 		f.versions.bumpTopic(linked)
 	}
@@ -128,26 +121,105 @@ func (f *fsmState) retireDeletedTopic(name string, linkedTopics []string) {
 
 // deleteTopicTx removes the topic record, its schemas and its
 // assignment rows, and dissolves its fan-out links. It returns the
-// other ends of those links.
-func deleteTopicTx(tx *bolt.Tx, name string) ([]string, error) {
-	b := tx.Bucket(bucketTopics)
-	if b.Get([]byte(name)) == nil {
-		return nil, ErrNotFound
+// other ends of those links and the remote children's stubs deleted
+// with a parent.
+func deleteTopicTx(tx *bolt.Tx, name string) (linked, deletedStubs []string, err error) {
+	if tx.Bucket(bucketTopics).Get([]byte(name)) == nil {
+		return nil, nil, ErrNotFound
 	}
-	linkedTopics, err := dissolveFanoutLinks(tx, name)
+	linked, deletedStubs, err = dissolveFanoutLinks(tx, name)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := b.Delete([]byte(name)); err != nil {
-		return nil, err
+	if err := deleteTopicRecords(tx, name); err != nil {
+		return nil, nil, err
+	}
+	return linked, deletedStubs, nil
+}
+
+// deleteTopicRecords removes the topic record with its schemas and
+// partition assignments.
+func deleteTopicRecords(tx *bolt.Tx, name string) error {
+	if err := tx.Bucket(bucketTopics).Delete([]byte(name)); err != nil {
+		return err
 	}
 	if _, err := deletePrefix(tx.Bucket(bucketSchemas), name+":"); err != nil {
-		return nil, err
+		return err
 	}
-	if _, err := deletePrefix(tx.Bucket(bucketAssignments), name+":"); err != nil {
-		return nil, err
+	_, err := deletePrefix(tx.Bucket(bucketAssignments), name+":")
+	return err
+}
+
+// checkConfigUpdate is what a config update (opUpdateTopic,
+// opUpdateTopicIf) checks beyond its own rules, given the stored record
+// and the one it would store (link fields already carried over).
+//
+// A remote child's stub has no config of its own to change: its
+// partitions would turn it into a local child whose cursor advances
+// without sending anything, and pause and resume have their own op. An
+// update that changes nothing still applies.
+//
+// A parent's retained log is the delay buffer for its delay children:
+// shrinking retention below what an attached child's delay requires
+// would let scheduled records age out before they are due. It is also
+// its remote children's only buffer while a remote is down, so a shrink
+// below the remote floor is refused; a retention already below it may
+// still grow.
+func checkConfigUpdate(tx *bolt.Tx, current, next topic.Topic) error {
+	if current.IsRemoteChild() {
+		same, err := sameTopicRecord(next, current)
+		if err != nil {
+			return err
+		}
+		if !same {
+			return errs.RemoteChildError(errs.ErrRemoteStubImmutable, fmt.Sprintf(
+				"%q is a remote child of %q; its topic record cannot be changed (pause and resume have their own routes)",
+				next.Name, current.Parent))
+		}
 	}
-	return linkedTopics, nil
+	if !next.IsParent() {
+		return nil
+	}
+	hasRemote := false
+	for _, childName := range next.Children {
+		child, err := getTopicRecord(tx, childName)
+		if err != nil {
+			continue
+		}
+		if err := checkDelayAgainstRetention(child.FanoutDelayMs, next.RetentionMs, next.Name); err != nil {
+			return err
+		}
+		hasRemote = hasRemote || child.IsRemoteChild()
+	}
+	if hasRemote && retentionShrinks(current.RetentionMs, next.RetentionMs) {
+		return checkRemoteSourceRetention(next.RetentionMs, next.Name)
+	}
+	return nil
+}
+
+// sameTopicRecord reports whether a and b encode to the same record.
+func sameTopicRecord(a, b topic.Topic) (bool, error) {
+	ra, err := json.Marshal(a)
+	if err != nil {
+		return false, err
+	}
+	rb, err := json.Marshal(b)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(ra, rb), nil
+}
+
+// retentionShrinks reports whether next keeps records for less time
+// than current (0 keeps them forever).
+func retentionShrinks(current, next int64) bool {
+	switch {
+	case next == 0:
+		return false
+	case current == 0:
+		return true
+	}
+	return next < current
 }
 
 // deletePrefix deletes every key of b that starts with prefix and
@@ -167,14 +239,16 @@ func deletePrefix(b *bolt.Bucket, prefix string) (int, error) {
 
 // dissolveFanoutLinks detaches every fan-out link involving the topic
 // being deleted and returns the other endpoints so the caller can bump
-// their versions. A linked record that is unexpectedly missing is
-// skipped: the delete must not fail on an already-broken link.
-func dissolveFanoutLinks(tx *bolt.Tx, name string) ([]string, error) {
+// their versions. A deleted parent's remote children are deleted with
+// it, their stubs returned apart: a stub standalone would be a topic
+// with no partitions and no purpose. A linked record that is
+// unexpectedly missing is skipped: the delete must not fail on an
+// already-broken link.
+func dissolveFanoutLinks(tx *bolt.Tx, name string) (linked, deletedStubs []string, err error) {
 	t, err := getTopicRecord(tx, name)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var linked []string
 	if t.IsParent() {
 		for _, childName := range t.Children {
 			child, err := getTopicRecord(tx, childName)
@@ -182,7 +256,14 @@ func dissolveFanoutLinks(tx *bolt.Tx, name string) ([]string, error) {
 				continue
 			}
 			if err != nil {
-				return nil, err
+				return nil, nil, err
+			}
+			if child.IsRemoteChild() && child.Parent == name {
+				if err := deleteTopicRecords(tx, childName); err != nil {
+					return nil, nil, err
+				}
+				deletedStubs = append(deletedStubs, childName)
+				continue
 			}
 			child.Role = topic.RoleStandalone
 			child.Parent = ""
@@ -190,7 +271,7 @@ func dissolveFanoutLinks(tx *bolt.Tx, name string) ([]string, error) {
 			child.FanoutDelayMs = 0
 			child.AttachOffsets = nil
 			if err := putTopicRecord(tx, child); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			linked = append(linked, childName)
 		}
@@ -200,20 +281,26 @@ func dissolveFanoutLinks(tx *bolt.Tx, name string) ([]string, error) {
 		switch {
 		case errors.Is(err, ErrNotFound):
 		case err != nil:
-			return nil, err
+			return nil, nil, err
 		default:
-			parent.Children = slices.DeleteFunc(parent.Children, func(c string) bool { return c == name })
-			if len(parent.Children) == 0 {
-				parent.Children = nil
-				parent.Role = topic.RoleStandalone
-			}
+			unlinkChild(&parent, name)
 			if err := putTopicRecord(tx, parent); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			linked = append(linked, t.Parent)
 		}
 	}
-	return linked, nil
+	return linked, deletedStubs, nil
+}
+
+// unlinkChild removes child from parent's children; a parent whose last
+// child goes reverts to standalone.
+func unlinkChild(parent *topic.Topic, child string) {
+	parent.Children = slices.DeleteFunc(parent.Children, func(c string) bool { return c == child })
+	if len(parent.Children) == 0 {
+		parent.Children = nil
+		parent.Role = topic.RoleStandalone
+	}
 }
 
 // applyPutSchema appends a schema version. An attached child's schema
@@ -243,7 +330,13 @@ func (f *fsmState) applyPutSchema(data []byte) error {
 		if t.IsChild() {
 			return fmt.Errorf("%w: %q is attached to %q", errs.ErrFanoutSchemaManaged, p.Topic, t.Parent)
 		}
-		childTopics = t.Children
+		// A remote child's stub holds no schema: its records are
+		// validated by the parent here and by the target's own schema
+		// there.
+		childTopics, err = localChildren(tx, t.Children)
+		if err != nil {
+			return err
+		}
 		if err := checkNextSchemaVersion(tx, p.Topic, p.Version); err != nil {
 			return err
 		}
@@ -419,4 +512,21 @@ func sameRoutingMember(a, b Member) bool {
 		a.Addr == b.Addr &&
 		a.ClusterAddr == b.ClusterAddr &&
 		a.Status == b.Status
+}
+
+// localChildren filters remote children's stubs out of children. A
+// child whose record is missing is kept, as the schema put always did.
+func localChildren(tx *bolt.Tx, children []string) ([]string, error) {
+	out := make([]string, 0, len(children))
+	for _, name := range children {
+		child, err := getTopicRecord(tx, name)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+		if err == nil && child.IsRemoteChild() {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out, nil
 }

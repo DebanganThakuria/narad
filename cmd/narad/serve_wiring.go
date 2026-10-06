@@ -218,13 +218,14 @@ func healthHandler(ctx context.Context, br broker.Broker, logs *runtime.Logs, ms
 // the cluster stack's drain flag and member status this way).
 func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, logs *runtime.Logs, ms *metastore.Store, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, auth *security.Authenticator, log *slog.Logger, extra ...func(*handlers.Deps)) *httpserver.Server {
 	deps := handlers.Deps{
-		Broker:         br,
-		Logs:           logs,
-		Metastore:      ms,
-		Logger:         log,
-		MaxConsumeWait: cfg.HTTP.MaxConsumeWait.D(),
-		ShutdownCtx:    ctx,
-		Router:         router,
+		Broker:          br,
+		Logs:            logs,
+		Metastore:       ms,
+		Logger:          log,
+		MaxConsumeWait:  cfg.HTTP.MaxConsumeWait.D(),
+		ShutdownCtx:     ctx,
+		Router:          router,
+		BatchBodyBudget: cfg.HTTP.MaxBatchBodyBytesInFlight,
 	}
 	if auth != nil {
 		// Password hashing for user writes shares the authenticator's

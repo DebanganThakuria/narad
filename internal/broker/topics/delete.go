@@ -67,7 +67,7 @@ func (m *Manager) DeleteTopicID(ctx context.Context, name string) (string, error
 		if err != nil {
 			return "", err
 		}
-		if err := authorizeManage(ctx, t); err != nil {
+		if err := m.authorizeManageTopic(ctx, t); err != nil {
 			return "", err
 		}
 		err = m.deleteTopicMetadata(ctx, name, t.ID)

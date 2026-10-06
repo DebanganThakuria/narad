@@ -21,6 +21,10 @@ func (e *Engine) AcceptProduce(ctx context.Context, topicName, key string, paylo
 	if err != nil {
 		return ingress.AcceptedProduce{}, err
 	}
+	if err := remoteChildGuard(t); err != nil {
+		e.recordRemoteChildRejection(topicName)
+		return ingress.AcceptedProduce{}, err
+	}
 	// A delayed child only receives records through fan-out — a direct
 	// produce would bypass the delay the topic guarantees.
 	if t.IsChild() && t.FanoutDelayMs > 0 {

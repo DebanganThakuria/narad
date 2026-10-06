@@ -99,6 +99,11 @@ type RPCServer struct {
 	// nodeStatus builds this node's OpNodeStatus answer (SetNodeStatus);
 	// nil answers the op as unsupported.
 	nodeStatus func(context.Context) nodewire.NodeStatus
+	// remote is the remote-replication plane (see rpc_server_remote.go)
+	// and fanout the node's fan-out runner (rpc_server_fanout.go); nil
+	// until serve.go wires them.
+	remote *RemotePlane
+	fanout *FanoutRunner
 
 	deliveriesMu   sync.Mutex
 	deliveries     map[requestKey]delivery
@@ -603,6 +608,13 @@ func (s *RPCServer) serveOther(ctx context.Context, op nodewire.Operation, paylo
 		res = s.handleDeleteTopic(payload)
 	case nodewire.OpNodeStatus:
 		res = s.withSlot(ctx, s.controlSem, func() nodewire.Response { return s.handleNodeStatus(ctx, payload) })
+	case nodewire.OpRemoteWrite:
+		// Ungated: an attach on the leader calls every member and waits
+		// on the target; see handleRemoteWrite.
+		res = s.handleRemoteWrite(payload)
+	case nodewire.OpRemoteCheck:
+		// Ungated: a check waits on an HTTPS round trip to the target.
+		res = s.handleRemoteCheck(payload)
 	default:
 		handle, ok := s.controlHandler(op)
 		if !ok {
@@ -714,6 +726,7 @@ func (s *RPCServer) brokerErrorStatus(op string, err error) (int, string) {
 		errors.Is(err, errs.ErrSchemaVersionConflict),
 		errors.Is(err, errs.ErrSchemaHistoryFull),
 		errors.Is(err, errs.ErrTopicChanged),
+		errors.Is(err, errs.ErrRemoteChildConflict),
 		errors.Is(err, errs.ErrAlreadyExists):
 		return http.StatusConflict, err.Error()
 	case errors.Is(err, errs.ErrNotFound):

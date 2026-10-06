@@ -20,8 +20,8 @@ func (e *Engine) Ack(ctx context.Context, topicName string, h consumer.Handle) e
 		return err
 	}
 
-	// Confirm the topic still exists — clean 404 beats an opaque 410.
-	if _, err := e.getTopic(ctx, topicName); err != nil {
+	// Confirm the topic still exists: a clean 404 beats an opaque 410.
+	if err := e.ackableTopic(ctx, topicName); err != nil {
 		return err
 	}
 
@@ -45,6 +45,9 @@ func (e *Engine) ExtendAck(ctx context.Context, topicName string, h consumer.Han
 
 	t, err := e.getTopic(ctx, topicName)
 	if err != nil {
+		return err
+	}
+	if err := remoteChildGuard(t); err != nil {
 		return err
 	}
 
@@ -71,7 +74,7 @@ func (e *Engine) Nack(ctx context.Context, topicName string, h consumer.Handle) 
 		return err
 	}
 
-	if _, err := e.getTopic(ctx, topicName); err != nil {
+	if err := e.ackableTopic(ctx, topicName); err != nil {
 		return err
 	}
 
@@ -82,4 +85,14 @@ func (e *Engine) Nack(ctx context.Context, topicName string, h consumer.Handle) 
 		e.metrics.IncNack(topicName)
 	}
 	return nil
+}
+
+// ackableTopic confirms the topic exists and is not a remote child's
+// stub, whose records are acked on the remote.
+func (e *Engine) ackableTopic(ctx context.Context, topicName string) error {
+	t, err := e.getTopic(ctx, topicName)
+	if err != nil {
+		return err
+	}
+	return remoteChildGuard(t)
 }

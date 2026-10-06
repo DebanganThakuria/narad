@@ -73,6 +73,9 @@ type Router struct {
 	// reports, such as members still owing a topic purge. slog.Default
 	// until serve.go wires the process logger with SetLogger.
 	logger *slog.Logger
+	// fanout is the node's fan-out runner, for the local half of the
+	// children listing; see router_fanout.go.
+	fanout *FanoutRunner
 }
 
 // defaultMaxConsumeWait is the ceiling applied to a long-poll consume wait

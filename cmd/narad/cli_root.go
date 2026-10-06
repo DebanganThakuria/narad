@@ -20,6 +20,10 @@ var (
 	flagUser          string
 	flagPassword      string
 	flagPasswordStdin bool
+	// flagCtx selects a named context for one command, so a
+	// two-cluster playbook never depends on which context was selected
+	// last.
+	flagCtx string
 )
 
 func cliClient() *httpClient {
@@ -42,6 +46,18 @@ func cliConnection() (cliContext, error) {
 	if err != nil {
 		return cliContext{}, err
 	}
+	if flagCtx != "" {
+		if err := connEnvConflict(flagCtx); err != nil {
+			return cliContext{}, err
+		}
+		s, err := loadContextStore()
+		if err != nil {
+			return cliContext{}, err
+		}
+		if _, ok := s.Contexts[flagCtx]; !ok {
+			return cliContext{}, fmt.Errorf("no context %q (narad ctx ls)", flagCtx)
+		}
+	}
 	c := resolveContext(flagServer, flagUser, password)
 	warnPlaintextCredentials(os.Stderr, c)
 	return c, nil
@@ -59,6 +75,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().StringVarP(&flagUser, "user", "u", "", "basic auth user (default: active context or NARAD_USER)")
 	root.PersistentFlags().StringVarP(&flagPassword, "password", "p", "", "basic auth password (default: active context or NARAD_PASS); prefer --password-stdin or NARAD_PASS, argv is visible in ps and shell history")
 	root.PersistentFlags().BoolVar(&flagPasswordStdin, "password-stdin", false, "read the basic auth password from the first line of stdin")
+	root.PersistentFlags().StringVar(&flagCtx, "ctx", "", "use this named context for this command only (default: the selected one); refused while NARAD_ADDR, NARAD_USER or NARAD_PASS is set")
 
 	root.AddCommand(
 		newTopicCmd(),
@@ -69,6 +86,7 @@ func newRootCmd() *cobra.Command {
 		newBenchCmd(),
 		newCtxCmd(),
 		newClusterCmd(),
+		newRemoteCmd(),
 		newServerCmd(),
 		legacyStub("serve", "run the HTTP API server (default port 7942)", runServe),
 		legacyStub("version", "print build version and exit", runVersion),

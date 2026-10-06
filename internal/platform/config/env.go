@@ -79,6 +79,9 @@ func applyEnv(cfg *Config) error {
 	if err := envBool("NARAD_HTTP_METRICS_UNAUTHENTICATED", &cfg.HTTP.MetricsUnauthenticated); err != nil {
 		return err
 	}
+	if err := envInt64("NARAD_HTTP_MAX_BATCH_BODY_BYTES_IN_FLIGHT", &cfg.HTTP.MaxBatchBodyBytesInFlight); err != nil {
+		return err
+	}
 
 	if v, ok := os.LookupEnv("NARAD_DATA_DIR"); ok {
 		cfg.Storage.DataDir = v
@@ -131,6 +134,9 @@ func applyEnv(cfg *Config) error {
 	if v, ok := os.LookupEnv("NARAD_CLUSTER_SECRET"); ok {
 		cfg.Security.ClusterSecret = v
 	}
+	if v, ok := os.LookupEnv("NARAD_CLUSTER_SECRET_PREVIOUS"); ok {
+		cfg.Security.ClusterSecretPrevious = v
+	}
 	if err := envBool("NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH", &cfg.Security.AllowLegacyClusterAuth); err != nil {
 		return err
 	}
@@ -150,7 +156,32 @@ func applyEnv(cfg *Config) error {
 		cfg.Security.ClusterTLSCAFile = v
 	}
 
-	return nil
+	return applyRemotesEnv(&cfg.Remotes)
+}
+
+// applyRemotesEnv reads the NARAD_REMOTES_ overrides.
+func applyRemotesEnv(cfg *RemotesConfig) error {
+	if v, ok := os.LookupEnv("NARAD_REMOTES_ALLOWED_HOSTS"); ok {
+		cfg.AllowedHosts = splitNonEmpty(v)
+	}
+	if v, ok := os.LookupEnv("NARAD_REMOTES_ALLOWED_PORTS"); ok {
+		var ports []int
+		for _, part := range splitNonEmpty(v) {
+			n, err := strconv.Atoi(part)
+			if err != nil {
+				return fmt.Errorf("NARAD_REMOTES_ALLOWED_PORTS: %w", err)
+			}
+			ports = append(ports, n)
+		}
+		cfg.AllowedPorts = ports
+	}
+	if v, ok := os.LookupEnv("NARAD_REMOTES_ALLOW_ADDRESSES"); ok {
+		cfg.AllowAddresses = splitNonEmpty(v)
+	}
+	if err := envInt64("NARAD_REMOTES_MAX_HELD_BYTES", &cfg.MaxHeldBytes); err != nil {
+		return err
+	}
+	return envBool("NARAD_REMOTES_API_HOP_ENCRYPTED", &cfg.APIHopEncrypted)
 }
 
 func envDuration(key string, dst *Duration) error {
