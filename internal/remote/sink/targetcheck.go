@@ -16,10 +16,12 @@ import (
 const UnverifiedAfter = 10 * time.Minute
 
 // TargetView is what a target's children listing says about the topic a
-// link sends to. A target older than this release omits parent_id and
-// the remote objects: ServesIDs is false and no loop is possible through
-// it (it cannot hold a remote child). Recreate detection then reads the
-// topic's id from its describe answer, which v3.1.0 serves.
+// link sends to. A target on this release always serves parent_id ("" for
+// a topic created before topic IDs). An older one omits parent_id and the
+// remote objects: ServesIDs is false and no loop is possible through it
+// (it cannot hold a remote child). Recreate detection then reads the
+// topic's id from its describe answer, which v3.1.0 serves for a topic
+// that has one.
 type TargetView struct {
 	ParentID       string
 	ServesIDs      bool
@@ -148,14 +150,18 @@ func CheckTarget(ctx context.Context, e *remote.Entry, topicName, recordedTarget
 		return TargetResult{Class: topic.RemoteClassEdge}
 	}
 	res := TargetResult{Verified: true, View: view}
+	// An empty recorded ID is a link attached to a topic created before
+	// topic IDs (v2.1 and earlier). A topic never gains an ID except by
+	// being recreated, so any ID the target reports later is a new
+	// topic, as is a recorded ID the target no longer reports.
 	targetID, knowsID := view.ParentID, view.ServesIDs
-	if !knowsID && recordedTargetID != "" {
+	if !knowsID {
 		targetID, knowsID = describeID(ctx, e, topicName)
 	}
 	switch {
 	case view.RemoteChildren > 0 && !topic.RemoteChainsAllowed:
 		res.State = topic.RemoteStateTargetHasRemoteChildren
-	case knowsID && recordedTargetID != "" && targetID != recordedTargetID:
+	case knowsID && targetID != recordedTargetID:
 		res.State = topic.RemoteStateTargetReplaced
 	}
 	return res
@@ -163,7 +169,8 @@ func CheckTarget(ctx context.Context, e *remote.Entry, topicName, recordedTarget
 
 // describeID reads the target topic's id from GET /v1/topics/{t}, for a
 // target whose children listing carries no parent_id (v3.1.0). ok is
-// false when the answer carries no id; the check then cannot compare.
+// false when the answer carries no id (an ID-less topic, or no answer);
+// the check then cannot compare.
 func describeID(ctx context.Context, e *remote.Entry, topicName string) (id string, ok bool) {
 	path, err := remote.TopicPath(topicName)
 	if err != nil {

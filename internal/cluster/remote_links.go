@@ -553,7 +553,10 @@ func (l *RemoteLinks) setState(ctx context.Context, req nodewire.RemoteWriteRequ
 				case b.AcceptTarget:
 					op.TargetID = &targetID
 					event = "remote_child.accept_target"
-				case stub.Remote.TargetID != "" && targetID != "" && targetID != stub.Remote.TargetID:
+				case targetID != stub.Remote.TargetID:
+					// A link recorded without a target ID (a topic created
+					// before topic IDs) that finds one now is a recreated
+					// topic too: a topic gains an ID only by being recreated.
 					l.audit(event, req, target, "refused", topic.RemoteStateTargetReplaced)
 					return errorResponse(http.StatusConflict,
 						"the target topic was replaced since the link was attached; resume with accept_target to send to the new one")

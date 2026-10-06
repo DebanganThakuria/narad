@@ -177,8 +177,10 @@ type childStatus struct {
 type childrenResponse struct {
 	Parent string `json:"parent"`
 	// ParentID is the parent's incarnation ID. Another cluster's remote
-	// child that sends to this topic reads it to notice a recreate.
-	ParentID string        `json:"parent_id,omitempty"`
+	// child that sends to this topic reads it to notice a recreate. It is
+	// always present ("" for a topic created before topic IDs), so its
+	// absence tells an older release.
+	ParentID string        `json:"parent_id"`
 	Children []childStatus `json:"children"`
 }
 

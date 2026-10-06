@@ -189,6 +189,9 @@ func (c *Checker) Run(ctx context.Context, req CheckRequest) NodeReport {
 	if !rep.TargetServesIDs {
 		rep.Warnings = append(rep.Warnings, "the target does not serve remote and parent_id (an older release, which cannot hold remote children): loop and chain detection start once it is upgraded; recreate detection reads the topic id")
 	}
+	if rep.TargetID == "" {
+		rep.Warnings = append(rep.Warnings, "the target topic has no id (created before v2.2.0): the link records none, and stops in target_replaced if the target later reports one (the topic was recreated, or the remote points at another cluster)")
+	}
 
 	// Check 6: an empty batch proves the credential, the produce grant
 	// and the batch route without writing anything. There is no

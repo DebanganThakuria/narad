@@ -2773,7 +2773,7 @@ components:
           description: The topic on the remote.
         target_id:
           type: string
-          description: The target topic's ID as the attach, or the last resume with `accept_target`, saw it. A target on v3.1.0 serves it in its describe answer, so recreate detection works there too.
+          description: The target topic's ID as the attach, or the last resume with `accept_target`, saw it. A target on v3.1.0 serves it in its describe answer, so recreate detection works there too. Empty for a target topic created before topic IDs (v2.1 and earlier); such a link stops in `target_replaced` if the target later reports an ID, because a topic gains one only by being recreated.
         from:
           type: string
           enum: [attach, unconsumed, earliest]
@@ -2936,7 +2936,7 @@ components:
         parent_id:
           type: string
           x-narad-since: unreleased
-          description: The parent's incarnation ID. A remote child on another cluster that sends to this topic reads it to notice a recreate.
+          description: The parent's incarnation ID, empty for a topic created before topic IDs (v2.1 and earlier). A remote child on another cluster that sends to this topic reads it to notice a recreate.
         children:
           type: array
           items:

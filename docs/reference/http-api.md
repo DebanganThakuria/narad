@@ -831,7 +831,7 @@ target. The states are listed in
 | Field | Description |
 |---|---|
 | `parent`<br>string | Parent topic name. |
-| `parent_id` (unreleased)<br>string | The parent's incarnation ID. A remote child on another cluster that sends to this topic reads it to notice a recreate. |
+| `parent_id` (unreleased)<br>string | The parent's incarnation ID, empty for a topic created before topic IDs (v2.1 and earlier). A remote child on another cluster that sends to this topic reads it to notice a recreate. |
 | `children`<br>array of object |  |
 | `children[].name`<br>string | Child topic name. |
 | `children[].delay_ms`<br>integer | The child's delay, `0` for an immediate child. |
@@ -840,7 +840,7 @@ target. The states are listed in
 | `children[].remote` (unreleased)<br>object | A [remote child](glossary.md#remote-child)'s link. Present only on a remote child's stub, which has `partitions` `0` and no owner. |
 | `children[].remote.name`<br>string | The remote the copies go to. |
 | `children[].remote.topic`<br>string | The topic on the remote. |
-| `children[].remote.target_id`<br>string | The target topic's ID as the attach, or the last resume with `accept_target`, saw it. A target on v3.1.0 serves it in its describe answer, so recreate detection works there too. |
+| `children[].remote.target_id`<br>string | The target topic's ID as the attach, or the last resume with `accept_target`, saw it. A target on v3.1.0 serves it in its describe answer, so recreate detection works there too. Empty for a target topic created before topic IDs (v2.1 and earlier); such a link stops in `target_replaced` if the target later reports an ID, because a topic gains one only by being recreated. |
 | `children[].remote.from`<br>string: `attach`, `unconsumed`, `earliest` | Where the link started on each parent partition. |
 | `children[].remote.lanes`<br>integer | Ordered streams per parent partition, 1 to 8. |
 | `children[].remote.paused`<br>boolean | `true` while paused. Absent otherwise. |
@@ -3284,7 +3284,7 @@ Bodies that several endpoints share.
 | `remote` (unreleased)<br>object | A [remote child](glossary.md#remote-child)'s link. Present only on a remote child's stub, which has `partitions` `0` and no owner. |
 | `remote.name`<br>string | The remote the copies go to. |
 | `remote.topic`<br>string | The topic on the remote. |
-| `remote.target_id`<br>string | The target topic's ID as the attach, or the last resume with `accept_target`, saw it. A target on v3.1.0 serves it in its describe answer, so recreate detection works there too. |
+| `remote.target_id`<br>string | The target topic's ID as the attach, or the last resume with `accept_target`, saw it. A target on v3.1.0 serves it in its describe answer, so recreate detection works there too. Empty for a target topic created before topic IDs (v2.1 and earlier); such a link stops in `target_replaced` if the target later reports an ID, because a topic gains one only by being recreated. |
 | `remote.from`<br>string: `attach`, `unconsumed`, `earliest` | Where the link started on each parent partition. |
 | `remote.lanes`<br>integer | Ordered streams per parent partition, 1 to 8. |
 | `remote.paused`<br>boolean | `true` while paused. Absent otherwise. |

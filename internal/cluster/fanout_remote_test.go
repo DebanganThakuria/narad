@@ -37,9 +37,12 @@ type remoteRigOpts struct {
 	from             string
 	password         string
 	targetID         string
-	limits           domremote.Limits
-	noTargetTopic    bool
-	grant            []string
+	// legacyTarget records no target ID, as an attach to a topic created
+	// before topic IDs (v2.1 and earlier) does.
+	legacyTarget  bool
+	limits        domremote.Limits
+	noTargetTopic bool
+	grant         []string
 }
 
 func newRemoteRig(t *testing.T, o remoteRigOpts) *remoteRig {
@@ -57,7 +60,7 @@ func newRemoteRig(t *testing.T, o remoteRigOpts) *remoteRig {
 	targetID := o.targetID
 	if !o.noTargetTopic {
 		tt := target.createTopic(t, "orders", o.targetPartitions)
-		if targetID == "" {
+		if targetID == "" && !o.legacyTarget {
 			targetID = tt.ID
 		}
 	}
@@ -211,13 +214,21 @@ func TestRemoteChildForbiddenThenGranted(t *testing.T) {
 	rg.waitState(t, 0, topic.RemoteStateRunning, 10*time.Second)
 }
 
+// A missing target stalls the link in target_missing. A topic created
+// in its place is a new topic, not the one the link recorded (here none):
+// the link stops in target_replaced until an admin accepts it.
 func TestRemoteChildTargetMissingThenCreated(t *testing.T) {
 	rg := newRemoteRig(t, remoteRigOpts{noTargetTopic: true, rigSourceOpts: rigSourceOpts{stallRetry: 300 * time.Millisecond}})
 	rg.src.start()
 	defer rg.src.stop()
 	want := rg.src.produce(t, 0, 20, 3, 0)
 	rg.waitState(t, 0, topic.RemoteStateTargetMissing, 15*time.Second)
-	rg.target.createTopic(t, "orders", 3)
+	tt := rg.target.createTopic(t, "orders", 3)
+	rg.waitState(t, 0, topic.RemoteStateTargetReplaced, 15*time.Second)
+	if n := len(rg.target.records(t, "orders")); n != 0 {
+		t.Fatalf("%d records landed in a target created after the attach", n)
+	}
+	rg.setState(t, metastore.RemoteChildStateOp{TargetID: &tt.ID})
 	rg.waitDelivered(t, want, 20*time.Second)
 }
 
@@ -579,7 +590,9 @@ func TestRemoteChildRecordRefusalClearsAStaleStall(t *testing.T) {
 	rg.src.start()
 	defer rg.src.stop()
 	rg.waitState(t, 0, topic.RemoteStateTargetMissing, 15*time.Second)
-	rg.target.createTopic(t, "orders", 3)
+	tt := rg.target.createTopic(t, "orders", 3)
+	// A topic created after the attach is a new one: accept it.
+	rg.setState(t, metastore.RemoteChildStateOp{TargetID: &tt.ID})
 	schema := []byte(`{"type":"object","required":["seq"],"properties":{"seq":{"type":"integer"}}}`)
 	if _, err := rg.target.broker.UpdateTopicSchema(context.Background(), "orders", schema, 0); err != nil {
 		t.Fatal(err)
