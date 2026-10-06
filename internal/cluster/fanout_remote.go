@@ -23,6 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"weak"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
@@ -86,8 +87,14 @@ type remoteState struct {
 	gate *sink.Gate
 	sem  *sink.Semaphore
 
-	mu          sync.Mutex
-	entry       *remote.Entry
+	mu sync.Mutex
+	// seenID and seenCV identify the last entry a lookup returned
+	// (seen: one has). The identity, not the entry: an entry pins its
+	// Authorization header and its clients, which a deleted or
+	// unreadable remote must let go of.
+	seen        bool
+	seenID      string
+	seenCV      uint64
 	caps        sink.Capabilities
 	capsKnown   bool
 	capsID      string
@@ -143,8 +150,8 @@ func (s *remoteSender) remoteState(name string) *remoteState {
 }
 
 // forgetRemote drops a remote the registry no longer holds: this node's
-// pacing state for it (its gate, its in-flight slots and its last entry,
-// which pins an HTTP client) and its per-remote series. A link that
+// pacing state for it (its gate, its in-flight slots and its probed
+// capabilities) and its per-remote series. A link that
 // still names it builds fresh state on its next lookup and holds in
 // remote_missing.
 func (s *remoteSender) forgetRemote(rs *remoteState) {
@@ -227,10 +234,10 @@ func (s *remoteSender) entry(name string) (*remote.Entry, *remoteState, string) 
 
 func (rs *remoteState) observe(e *remote.Entry) {
 	rs.mu.Lock()
-	prev := rs.entry
-	rs.entry = e
+	changed := rs.seen && (rs.seenID != e.RemoteID() || rs.seenCV != e.CredentialVersion())
+	rs.seen, rs.seenID, rs.seenCV = true, e.RemoteID(), e.CredentialVersion()
 	rs.mu.Unlock()
-	if prev != nil && (prev.RemoteID() != e.RemoteID() || prev.CredentialVersion() != e.CredentialVersion()) {
+	if changed {
 		rs.gate.Reset()
 	}
 	rs.sem.Resize(e.Limits().MaxInFlight)
@@ -242,10 +249,8 @@ func (rs *remoteState) observe(e *remote.Entry) {
 // now stands.
 func (rs *remoteState) superseded(e *remote.Entry) bool {
 	rs.mu.Lock()
-	cur := rs.entry
-	rs.mu.Unlock()
-	return cur != nil && cur != e &&
-		(cur.RemoteID() != e.RemoteID() || cur.CredentialVersion() > e.CredentialVersion())
+	defer rs.mu.Unlock()
+	return rs.seen && (rs.seenID != e.RemoteID() || rs.seenCV > e.CredentialVersion())
 }
 
 // stillCurrent reports whether e is still what the lookup holds for the
@@ -1162,7 +1167,7 @@ func (s *remoteSender) checkTarget(ctx, wait context.Context, c *remoteCursor, e
 		lc.mu.Lock()
 		now := time.Now()
 		epoch := rs.gate.Epoch()
-		fresh := lc.forceCheck.Load() || lc.checkedEntry != e || lc.checkedGateEpoch != epoch ||
+		fresh := lc.forceCheck.Load() || lc.checkedEntry != weak.Make(e) || lc.checkedGateEpoch != epoch ||
 			lc.checkedTargetID != stub.Remote.TargetID
 		if !fresh && now.Before(lc.nextCheck) {
 			lc.mu.Unlock()
@@ -1198,7 +1203,7 @@ func (s *remoteSender) checkTarget(ctx, wait context.Context, c *remoteCursor, e
 			lc.mu.Unlock()
 			return false, res, false
 		}
-		lc.checkedEntry, lc.checkedGateEpoch, lc.checkedTargetID = e, epoch, stub.Remote.TargetID
+		lc.checkedEntry, lc.checkedGateEpoch, lc.checkedTargetID = weak.Make(e), epoch, stub.Remote.TargetID
 		lc.nextCheck = now.Add(sink.CheckInterval(e.Limits().CheckIntervalMs))
 		lc.record(res, now)
 		lc.mu.Unlock()

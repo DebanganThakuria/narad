@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"weak"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/remote"
@@ -114,11 +115,13 @@ type linkCheck struct {
 	forceCheck atomic.Bool
 
 	mu sync.Mutex
-	// checkedEntry, checkedGateEpoch, checkedTargetID and nextCheck
+	// checkedEntry (weak: it only tells whether the entry changed, and
+	// must not keep a dropped remote's header and clients reachable),
+	// checkedGateEpoch, checkedTargetID and nextCheck
 	// decide when the next check is due: at start, after the remote's
 	// entry changed (a new credential or URL), after its gate reopened,
 	// after the recorded target changed, and every check interval.
-	checkedEntry     *remote.Entry
+	checkedEntry     weak.Pointer[remote.Entry]
 	checkedGateEpoch uint64
 	checkedTargetID  string
 	nextCheck        time.Time
