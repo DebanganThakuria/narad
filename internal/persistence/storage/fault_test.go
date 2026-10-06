@@ -875,7 +875,10 @@ func copyLogDir(t *testing.T, src string) string {
 // retry succeeds once the disk is fine.
 func TestFaultRenameFails(t *testing.T) {
 	dataDir := t.TempDir()
-	topicDir := TopicDir(dataDir, "orders")
+	topicDir, err := TopicDir(dataDir, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := WriteTopicIncarnation(topicDir, "0123456789abcdef"); err != nil {
 		t.Fatal(err)
 	}

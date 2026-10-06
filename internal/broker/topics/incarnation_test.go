@@ -62,7 +62,7 @@ func TestDeleteTopicPurgesItsIncarnationDirectory(t *testing.T) {
 	if _, err := manager.logs.Get(testTopicName, 0); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	id, ok, err := storage.ReadTopicIncarnation(storage.TopicDir(manager.dataDir, testTopicName))
+	id, ok, err := storage.ReadTopicIncarnation(topicDirT(t, manager.dataDir, testTopicName))
 	if err != nil || !ok || id != created.ID {
 		t.Fatalf("marker after open = (%q, %v, %v), want the created ID %q", id, ok, err, created.ID)
 	}
@@ -72,7 +72,7 @@ func TestDeleteTopicPurgesItsIncarnationDirectory(t *testing.T) {
 	if err := manager.DeleteTopic(ctx, testTopicName); err != nil {
 		t.Fatalf("DeleteTopic: %v", err)
 	}
-	if _, err := os.Stat(storage.TopicDir(manager.dataDir, testTopicName)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(topicDirT(t, manager.dataDir, testTopicName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("topic directory after DeleteTopic: stat err = %v, want not-exist", err)
 	}
 }

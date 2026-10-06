@@ -217,7 +217,7 @@ func (g *Logs) reclaimOrphanGuarded(topicName, id string) (bool, error) {
 	case !errors.Is(err, errs.ErrNotFound):
 		return false, fmt.Errorf("%w: %s: read the local record: %w", ErrNotAnOrphan, topicName, err)
 	}
-	marker, marked, err := storage.ReadTopicIncarnation(storage.TopicDir(g.dataDir, topicName))
+	marker, marked, err := storage.ReadTopicIncarnationOf(g.dataDir, topicName)
 	if err != nil {
 		return false, err
 	}

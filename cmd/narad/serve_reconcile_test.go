@@ -185,7 +185,7 @@ func TestStartupOrphanSweepRunsOnceTheReplicaCatchesUp(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	stale := storage.StaleTopicDir(dataDir, "keep", "3333333333333333")
+	stale := staleTopicDirT(t, dataDir, "keep", "3333333333333333")
 	if err := storage.WriteTopicIncarnation(stale, "3333333333333333"); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestStartupOrphanSweepRunsOnceTheReplicaCatchesUp(t *testing.T) {
 	if runStartupReconcile(ctx, store, logs, nil, dataDir, "n0", log) {
 		t.Fatal("runStartupReconcile reported caught up through a wait that timed out")
 	}
-	if _, err := os.Stat(storage.TopicDir(dataDir, "orders")); err != nil {
+	if _, err := os.Stat(topicDirT(t, dataDir, "orders")); err != nil {
 		t.Fatalf("setup: the forfeited startup sweep touched the deleted topic's directory: %v", err)
 	}
 
@@ -220,7 +220,7 @@ func TestStartupOrphanSweepRunsOnceTheReplicaCatchesUp(t *testing.T) {
 		t.Fatal("finishLateStartup gave up on a caught-up replica")
 	}
 	wg.Wait()
-	for _, dir := range []string{storage.TopicDir(dataDir, "orders"), stale} {
+	for _, dir := range []string{topicDirT(t, dataDir, "orders"), stale} {
 		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("%s survived the deferred sweep (%v)", dir, err)
 		}
@@ -248,7 +248,7 @@ func TestStartupLogsQuarantinedCopies(t *testing.T) {
 
 	n := startupQuarantineLines + 5
 	for i := range n {
-		dir := filepath.Join(storage.TopicDir(dataDir, "orders"), fmt.Sprintf("p%05d.quarantine", i))
+		dir := filepath.Join(topicDirT(t, dataDir, "orders"), fmt.Sprintf("p%05d.quarantine", i))
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -266,7 +266,7 @@ func TestStartupLogsQuarantinedCopies(t *testing.T) {
 			t.Fatalf("a quarantine line below error level: %s", line)
 		}
 	}
-	if !strings.Contains(lines[0], `"dir":"`+filepath.Join(storage.TopicDir(dataDir, "orders"), "p00000.quarantine")+`"`) || !strings.Contains(lines[0], "only instance") {
+	if !strings.Contains(lines[0], `"dir":"`+filepath.Join(topicDirT(t, dataDir, "orders"), "p00000.quarantine")+`"`) || !strings.Contains(lines[0], "only instance") {
 		t.Fatalf("the first copy's line lacks its path or the warning: %s", lines[0])
 	}
 	if summary := lines[len(lines)-1]; !strings.Contains(summary, fmt.Sprintf(`"copies":%d`, n)) || !strings.Contains(summary, fmt.Sprintf(`"bytes":%d`, 3*n)) {

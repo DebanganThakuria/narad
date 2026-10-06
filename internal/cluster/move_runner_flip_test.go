@@ -1390,7 +1390,7 @@ func TestMoveRunnerRollbackLeavesARecreatedTopicsPartitionAlone(t *testing.T) {
 					}
 					produce()
 				case "adopted":
-					hookErr = storage.WriteTopicIncarnation(storage.TopicDir(dataDir, "orders"), newIncarnation)
+					hookErr = storage.WriteTopicIncarnation(topicDirT(t, dataDir, "orders"), newIncarnation)
 				}
 			}
 			peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: hwm, committed: 5, hasCommitted: true}, incarnation: oldIncarnation}
@@ -1414,7 +1414,7 @@ func TestMoveRunnerRollbackLeavesARecreatedTopicsPartitionAlone(t *testing.T) {
 			if err := logs.CloseAll(); err != nil {
 				t.Logf("close: %v", err)
 			}
-			if id, marked, _ := storage.ReadTopicIncarnation(storage.TopicDir(dataDir, "orders")); !marked || id != tc.wantMarker {
+			if id, marked, _ := storage.ReadTopicIncarnation(topicDirT(t, dataDir, "orders")); !marked || id != tc.wantMarker {
 				t.Fatalf("topic marker %q (marked %v), want %s", id, marked, tc.wantMarker)
 			}
 			l, err := storage.NewLog(storage.TopicPartitionDir(dataDir, "orders", 0), storage.Options{})

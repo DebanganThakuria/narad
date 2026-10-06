@@ -60,7 +60,7 @@ func appendOld(t *testing.T, l *storage.Log, n int, payload string) {
 
 func readMarker(t *testing.T, dataDir, name string) string {
 	t.Helper()
-	id, ok, err := storage.ReadTopicIncarnation(storage.TopicDir(dataDir, name))
+	id, ok, err := storage.ReadTopicIncarnation(topicDirT(t, dataDir, name))
 	if err != nil {
 		t.Fatalf("ReadTopicIncarnation: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestPurgeLegacyAndUnmarked(t *testing.T) {
 	if err != nil || !purged {
 		t.Fatalf("legacy purge = (%v, %v), want (true, nil)", purged, err)
 	}
-	if _, err := os.Stat(storage.TopicDir(dataDir, "orders")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(topicDirT(t, dataDir, "orders")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("topic dir after legacy purge: stat err = %v, want not-exist", err)
 	}
 
@@ -344,7 +344,7 @@ func TestPurgeLegacyAndUnmarked(t *testing.T) {
 	if err != nil || !purged {
 		t.Fatalf("purge of unmarked dir = (%v, %v), want (true, nil)", purged, err)
 	}
-	if _, err := os.Stat(storage.TopicDir(dataDir, "legacy")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(topicDirT(t, dataDir, "legacy")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unmarked dir after purge: stat err = %v, want not-exist", err)
 	}
 }
@@ -430,7 +430,7 @@ func TestEnsureTopicIncarnationQuarantinesStaleDir(t *testing.T) {
 	ms.topics["orders"] = topic.Topic{Name: "orders", ID: "ffffffffffffffff", Partitions: 1}
 	logs := NewLogs(dataDir, storage.Options{}, ms, nil)
 	defer logs.CloseAll()
-	if err := storage.WriteTopicIncarnation(storage.TopicDir(dataDir, "orders"), "eeeeeeeeeeeeeeee"); err != nil {
+	if err := storage.WriteTopicIncarnation(topicDirT(t, dataDir, "orders"), "eeeeeeeeeeeeeeee"); err != nil {
 		t.Fatalf("WriteTopicIncarnation: %v", err)
 	}
 	if err := logs.EnsureTopicIncarnation("orders", "ffffffffffffffff"); err != nil {
@@ -818,7 +818,7 @@ func TestPurgeLeavesNoLeftoverASuccessorCouldAdopt(t *testing.T) {
 			if _, err := logs.PurgeTopic("orders", purgedIncarnation); err != nil {
 				t.Errorf("purge: %v", err)
 			}
-			entries, err := os.ReadDir(storage.TopicDir(dataDir, ""))
+			entries, err := os.ReadDir(storage.TopicsDir(dataDir))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -869,14 +869,14 @@ func TestPurgeThatCannotFinishLeavesOnlyASetAsideCopy(t *testing.T) {
 			if purged, err := logs.PurgeTopic("orders", tc.purgeID); !purged || err == nil {
 				t.Fatalf("purge = (%v, %v), want (true, the removal's error)", purged, err)
 			}
-			if _, err := os.Stat(storage.TopicDir(dataDir, "orders")); !errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(topicDirT(t, dataDir, "orders")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("topics/orders after the purge: %v, want it gone", err)
 			}
 			base := filepath.Base(removing)
 			if !strings.HasPrefix(base, tc.wantPrefix) {
 				t.Fatalf("the purge removed %s, want a set-aside copy named %s*", base, tc.wantPrefix)
 			}
-			c, err := classifyTopicDir(storage.TopicDir(dataDir, ""), base)
+			c, err := classifyTopicDir(storage.TopicsDir(dataDir), base)
 			if err != nil {
 				t.Fatal(err)
 			}
