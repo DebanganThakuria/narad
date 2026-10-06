@@ -407,6 +407,10 @@ func securityValidationErrors(cfg SecurityConfig, cluster ClusterConfig) []strin
 	return errs
 }
 
+// RaftServesBeyondLoopback reports whether this node's Raft port can be
+// reached from other hosts (see raftServesBeyondLoopback).
+func (c ClusterConfig) RaftServesBeyondLoopback() bool { return raftServesBeyondLoopback(c) }
+
 // raftServesBeyondLoopback reports whether a node would serve Raft on an
 // address processes on other hosts can reach: its bind address
 // (cluster.addr) is not loopback, and Raft can start at all. Raft

@@ -23,14 +23,17 @@ type remotesStack struct {
 }
 
 // nodePosture is this node's own security posture, as it reports it to
-// the upgrade gate. Raft counts as TLS on a single node, which has no
-// Raft peers to talk plaintext to.
+// the upgrade gate. Raft counts as TLS without the TLS files only on a
+// node with no peers configured whose Raft port no other host can reach:
+// a peerless node bound to a routable address may have had nodes join
+// it, and talks plaintext Raft to them.
 func nodePosture(cfg *config.Config) remote.Posture {
 	return remote.Posture{
 		SecurityEnabled:   cfg.Security.Enabled,
 		LegacyClusterAuth: cfg.Security.AllowLegacyClusterAuth,
-		RaftTLS:           cfg.Security.ClusterTLSConfigured() || len(cfg.Cluster.Peers) == 0,
-		APIHopEncrypted:   cfg.Remotes.APIHopEncrypted,
+		RaftTLS: cfg.Security.ClusterTLSConfigured() ||
+			(len(cfg.Cluster.Peers) == 0 && !cfg.Cluster.RaftServesBeyondLoopback()),
+		APIHopEncrypted: cfg.Remotes.APIHopEncrypted,
 	}
 }
 

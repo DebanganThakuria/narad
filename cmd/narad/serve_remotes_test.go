@@ -163,3 +163,20 @@ func TestGeneratedSecretNeverSealsRemotes(t *testing.T) {
 		t.Fatalf("seal under a generated secret: err = %v, want ErrRemoteSecretMissing", err)
 	}
 }
+
+// A node with no peers configured may still run Raft in plaintext with
+// other nodes (they joined it): when its Raft port is reachable beyond
+// loopback and has no TLS, its posture says plaintext and the Q23 warning
+// and gauge fire. A loopback-bound single node counts as TLS.
+func TestPeerlessNodeOnARoutableRaftAddressReportsPlaintextRaft(t *testing.T) {
+	cfg := remotesConfig(true, strongSecret(t))
+	cfg.Security.AllowPlaintextRaft = true
+	cfg.Cluster.Addr = "10.0.0.5:7943"
+	if nodePosture(cfg).RaftTLS {
+		t.Fatal("a peerless node serving plaintext Raft on a routable address reports Raft TLS")
+	}
+	cfg.Cluster.Addr = "127.0.0.1:7943"
+	if !nodePosture(cfg).RaftTLS {
+		t.Fatal("a loopback-bound single node must count as Raft TLS")
+	}
+}
