@@ -631,7 +631,7 @@ func TestRemoteChildLaneNeverSendsWithASupersededCredential(t *testing.T) {
 	}
 	key := fanoutCursorKey{parent: "orders", partition: 0, child: "orders-to-b", epoch: rg.stub.AttachEpoch, remote: true}
 	cur := newRemoteCursor(key)
-	sh := &slabShip{s: s, cur: cur, key: key, cancel: func() {}, link: rg.stub}
+	sh := &slabShip{s: s, cur: cur, key: key, cancel: func() {}, stopWaits: func() {}, sendCtx: context.Background(), link: rg.stub}
 	recs := []topic.KeyedRecord{{Offset: 0, Payload: []byte(`{"seq":0}`), CommittedAtUnixMs: time.Now().UnixMilli()}}
 	lane := &laneShip{recs: recs, done: -1, cap: cur.chunkCap(0), backoff: sink.LaneBackoff(), b64: map[int64]bool{}}
 	sh.sendChunk(context.Background(), lane, stale, rs, rg.stub.Remote, false)

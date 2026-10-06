@@ -519,9 +519,17 @@ func (s *remoteSender) commit(ctx context.Context, key fanoutCursorKey, child to
 		cur.clearLanes()
 		return nil, false
 	}
+	// shipCtx ends the slab's requests (the link dissolved, or the slab
+	// is done); waitCtx, below it, ends only the lanes' waits, when one
+	// lane cannot hold its records and the slab must be read again. A
+	// request in flight then still gets its answer, so what the target
+	// accepted is recorded and not sent again.
 	shipCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	sh := &slabShip{s: s, cur: cur, key: key, cancel: cancel, link: child, linkVersion: childVersion, slabStart: slabStart}
+	waitCtx, stopWaits := context.WithCancel(shipCtx)
+	defer stopWaits()
+	sh := &slabShip{s: s, cur: cur, key: key, cancel: cancel, stopWaits: stopWaits, sendCtx: shipCtx,
+		link: child, linkVersion: childVersion, slabStart: slabStart}
 	if parent, err := s.r.store.GetTopic(ctx, key.parent); err == nil {
 		sh.retentionMs = parent.RetentionMs
 	}
@@ -536,7 +544,7 @@ func (s *remoteSender) commit(ctx context.Context, key fanoutCursorKey, child to
 	}
 	var wg sync.WaitGroup
 	for _, lane := range sh.lanes {
-		wg.Go(func() { sh.runLane(shipCtx, lane) })
+		wg.Go(func() { sh.runLane(waitCtx, lane) })
 	}
 	refreshDone := make(chan struct{})
 	go func() {
@@ -583,6 +591,10 @@ type slabShip struct {
 	cur         *remoteCursor
 	key         fanoutCursorKey
 	cancel      context.CancelFunc
+	// stopWaits ends every lane's waits (not its requests in flight);
+	// sendCtx is what requests run under.
+	stopWaits context.CancelFunc
+	sendCtx   context.Context
 	retentionMs int64
 	lanes       []*laneShip
 
@@ -695,8 +707,9 @@ func (sh *slabShip) oldestUnshippedMs() int64 {
 
 // hold keeps the lane's unsent records in the held budget before the
 // lane waits. When the budget is full it asks for a re-read instead and
-// stops every lane of the slab; wait is what the lane was about to wait
-// for (-1: the gate).
+// ends every lane's waits (a request in flight still gets its answer,
+// so what the target accepts is recorded); wait is what the lane was
+// about to wait for (-1: the gate).
 func (sh *slabShip) hold(lane *laneShip, wait time.Duration, gate *sink.Gate) bool {
 	if lane.held {
 		return true
@@ -708,7 +721,7 @@ func (sh *slabShip) hold(lane *laneShip, wait time.Duration, gate *sink.Gate) bo
 			sh.rereadGate.Store(gate)
 		}
 		sh.reread.Store(true)
-		sh.cancel()
+		sh.stopWaits()
 		return false
 	}
 	lane.recs = sink.Hold(lane.recs)
@@ -986,7 +999,7 @@ func (sh *slabShip) sendChunk(ctx context.Context, lane *laneShip, e *remote.Ent
 		sh.cur.setStall(topic.RemoteStateTargetMissing)
 		return
 	}
-	rctx, cancel := context.WithTimeout(ctx, requestTimeout(e))
+	rctx, cancel := context.WithTimeout(sh.sendCtx, requestTimeout(e))
 	resp, err := e.Do(rctx, remote.Outbound{Method: "POST", Path: path, Body: wire, ContentType: "application/json", ContentEncoding: encoding})
 	var answer []byte
 	if err == nil {
@@ -998,7 +1011,7 @@ func (sh *slabShip) sendChunk(ctx context.Context, lane *laneShip, e *remote.Ent
 		rl.BodyBytesTotal.WithLabelValues(rs.name).Add(float64(len(body)))
 		rl.WireBytesTotal.WithLabelValues(rs.name).Add(float64(len(wire)))
 	}
-	if err != nil && ctx.Err() != nil {
+	if err != nil && sh.sendCtx.Err() != nil {
 		// Shutting down, detaching or re-reading: not the remote's fault.
 		if probe {
 			rs.gate.Released()
@@ -1007,7 +1020,7 @@ func (sh *slabShip) sendChunk(ctx context.Context, lane *laneShip, e *remote.Ent
 	}
 	v := s.classify.Classify(sink.Answer{Resp: resp, Body: answer, Err: err, Chunk: n, Compressed: compressed})
 	if v.Action == sink.ActResolveRoute {
-		lctx, lcancel := context.WithTimeout(ctx, requestTimeout(e))
+		lctx, lcancel := context.WithTimeout(sh.sendCtx, requestTimeout(e))
 		lresp, lbody, lerr := sink.FetchListing(lctx, e, link.Topic)
 		lcancel()
 		v = sink.ResolveRoute(lresp, lbody, lerr)
