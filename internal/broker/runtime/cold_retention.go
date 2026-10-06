@@ -4,11 +4,12 @@ package runtime
 //
 // The shared reaper (storage.sharedReaper) walks the logs registered
 // with it, and a log is registered only while it is open. The idle
-// evictor closes a log untouched for the configured window once its
-// retention "owes nothing", which in practice means a single active
-// segment; that segment then ages past MaxAge with nothing left to roll
-// and delete it, and nothing reopens the log until a producer or a local
-// consumer touches the partition. A node that restarts registers nothing
+// evictor closes a log untouched for the configured window (while this
+// walk runs, whatever its segments; otherwise once its retention "owes
+// nothing", in practice a single active segment); its segments then age
+// past MaxAge with nothing left to roll and delete them, and nothing
+// reopens the log until a producer or a local consumer touches the
+// partition. A node that restarts registers nothing
 // until first use either. Measured on devstack: a node held 24 expired
 // partitions for minutes past eligibility until they were reopened by
 // hand, and reaped them within two minutes of that.
@@ -37,11 +38,22 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
 )
+
+// SetOwnership tells the cold retention walk which partitions the local
+// assignment gives this node: owned reports whether this node owns
+// (topic, idx), the way the messaging engine decides it for produce and
+// consume. The walk leaves every other partition directory alone. Nil
+// (the default) walks every partition directory on disk. Call before
+// RunColdRetention.
+func (g *Logs) SetOwnership(owned func(topicName string, idx int) bool) {
+	g.ownedHere = owned
+}
 
 // coldWalkPause is the gap between two partitions the walk opens. Opening
 // goes through the registry's slow path, which holds the topic's guard
@@ -58,11 +70,16 @@ const coldWalkPause = 10 * time.Millisecond
 func (g *Logs) ReaperRestarts() int64 { return storage.ReaperRestarts() }
 
 // RunColdRetention runs the cold-partition retention walk every interval
-// until ctx is cancelled. interval <= 0 disables it and returns at once.
+// until ctx is cancelled. interval <= 0 disables the walk and returns at
+// once. Either way it starts the background pass that applies retention
+// alters to open logs (startRetentionFollow), once, bound to ctx.
 func (g *Logs) RunColdRetention(ctx context.Context, interval time.Duration) {
+	g.startRetentionFollow(ctx)
 	if interval <= 0 {
 		return
 	}
+	g.coldWalkOn.Store(true)
+	defer g.coldWalkOn.Store(false)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -74,18 +91,41 @@ func (g *Logs) RunColdRetention(ctx context.Context, interval time.Duration) {
 			// open never registers a new one, so this is the only other
 			// place a stalled loop would be noticed.
 			storage.EnsureReaperRunning()
-			swept, err := g.ColdRetentionOnce(ctx, time.Now())
-			if err != nil && g.logger != nil {
-				g.logger.Warn("cold retention walk", "err", err, "swept", swept)
-			}
+			g.coldRetentionTick(ctx)
 		}
+	}
+}
+
+// coldRetentionTick runs one walk for RunColdRetention. Each partition's
+// panic is contained inside the walk (sweepColdSafe); one anywhere else
+// in it is logged here and the next tick walks again, so the walk never
+// takes the node down.
+func (g *Logs) coldRetentionTick(ctx context.Context) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			g.logger.Error("cold retention walk panicked; the next interval walks again",
+				"panic", rec, "stack", string(debug.Stack()))
+		}
+	}()
+	swept, err := g.ColdRetentionOnce(ctx, time.Now())
+	if err != nil {
+		g.logger.Warn("cold retention walk", "err", err, "swept", swept)
 	}
 }
 
 // ColdRetentionOnce runs one walk and reports how many closed partitions
 // it opened, swept and closed. The first error stops the walk of that
 // topic only; the returned error is the first one seen.
+//
+// No walk runs while the local metastore replica is behind the leader:
+// the walk opens closed logs under the replica's retention, which on a
+// lagging replica (a restart, a partition) can predate an alter that
+// raised it. The next interval tries again.
 func (g *Logs) ColdRetentionOnce(ctx context.Context, now time.Time) (int, error) {
+	if !g.replicaCaughtUp() {
+		g.logger.Debug("cold retention walk skipped: the local metastore replica is not caught up")
+		return 0, nil
+	}
 	topicsRoot := filepath.Join(g.dataDir, "topics")
 	entries, err := os.ReadDir(topicsRoot)
 	if errors.Is(err, os.ErrNotExist) {
@@ -189,11 +229,21 @@ func (g *Logs) coldRetentionTopic(ctx context.Context, topicDir, topicName strin
 		if !coldPartitionDue(st, cutoff) {
 			continue
 		}
+		if g.ownedHere != nil && !g.ownedHere(topicName, idx) {
+			// A copy of a partition another node owns (a move's source
+			// awaiting its reclaim, say) is not this node's to open.
+			continue
+		}
 		opened := time.Now()
-		changed, err := g.sweepColdPartition(topicName, idx)
+		changed, err := g.sweepColdSafe(topicName, idx)
 		if err != nil {
 			if errors.Is(err, errs.ErrTopicNotFound) {
 				return swept, firstErr
+			}
+			if errors.Is(err, errColdSweepPanicked) {
+				// Likely to panic again: leave it alone for a while
+				// rather than on every walk.
+				g.deferCold(key, now.Add(coldWalkRetryAfter))
 			}
 			if firstErr == nil {
 				firstErr = err
@@ -326,23 +376,29 @@ func coldPartitionDue(st coldStat, cutoff time.Time) bool {
 func (g *Logs) sweepColdPartition(topicName string, idx int) (changed bool, err error) {
 	l, entry, err := g.openForWalk(topicName, idx)
 	if errors.Is(err, errColdWalkRaced) {
-		// Someone opened it since the stat: it is registered with the
-		// shared reaper now and no longer the walk's to touch.
+		// Someone opened it since the stat (it is registered with the
+		// shared reaper now), or a reclaim removed it: either way it is
+		// no longer the walk's to touch.
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
 
-	changed = l.SweepRetentionNow()
+	// A sweep that panics must still leave the log closed: a walk-owned
+	// entry nobody closes stays open, unseen by the walk, for good.
+	changed, err = sweepContained(l)
 
-	_, err = g.closeIfStill(keyOf(topicName, idx), entry, func(cur *logEntry) bool { return cur.walkOwned.Load() }, "cold_retention_close")
+	_, cerr := g.closeIfStill(keyOf(topicName, idx), entry, func(cur *logEntry) bool { return cur.walkOwned.Load() }, "cold_retention_close")
+	if err == nil {
+		err = cerr
+	}
 	return changed, err
 }
 
 // errColdWalkRaced reports that a partition the walk meant to open was
-// already open by the time it took the locks.
-var errColdWalkRaced = errors.New("cold retention: partition opened by someone else")
+// already open, or its directory gone, by the time it took the locks.
+var errColdWalkRaced = errors.New("cold retention: partition opened or removed by someone else")
 
 // openForWalk opens a closed partition's log for the walk and claims it
 // in the same critical section that installs the entry, so no Get can
@@ -350,11 +406,23 @@ var errColdWalkRaced = errors.New("cold retention: partition opened by someone e
 // after the install and clears walkOwned (stamp), and the close at the
 // end of the sweep only happens while the flag is still set. An entry
 // that already exists is left alone with errColdWalkRaced.
+//
+// So is a partition whose directory is gone by the time the guard is
+// held: the walk stats a partition before it takes the guard, and a
+// reclaim or quarantine that removed or renamed the directory in between
+// (under the same guard) would otherwise see the open recreate it as an
+// empty partition at offset zero.
 func (g *Logs) openForWalk(topicName string, idx int) (*storage.Log, *logEntry, error) {
 	unlock := g.lockTopic(topicName)
 	defer unlock()
 	if g.isOpen(keyOf(topicName, idx)) {
 		return nil, nil, errColdWalkRaced
+	}
+	if _, err := os.Stat(storage.TopicPartitionDir(g.dataDir, topicName, idx)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil, errColdWalkRaced
+		}
+		return nil, nil, err
 	}
 	// Nothing else can open the partition while the guard is held, so
 	// the entry openGuarded returns is the one it installed for the walk.

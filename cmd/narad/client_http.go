@@ -162,10 +162,23 @@ func formatErrorBody(b []byte) string {
 		return "<empty body>"
 	}
 	var env struct {
-		Error string `json:"error"`
+		Error   string `json:"error"`
+		Reasons []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"reasons"`
 	}
 	if err := json.Unmarshal(b, &env); err == nil && env.Error != "" {
-		return env.Error
+		if len(env.Reasons) < 2 {
+			return env.Error
+		}
+		// A refusal with several reasons (a decommission preflight):
+		// name every one, not only the first.
+		msg := env.Error
+		for _, r := range env.Reasons[1:] {
+			msg += "; " + r.Code + ": " + r.Message
+		}
+		return msg
 	}
 	return trimmed
 }

@@ -129,9 +129,13 @@ narad_http_requests_total{route="POST /v1/topics/{topic}/ack",status="410"}
 | `narad_open_partition_logs`<br>gauge; no labels | Partition logs open on this node. |
 | `narad_idle_logs_evicted_total`<br>counter; no labels | Logs closed because nothing touched them for `storage.idle_log_eviction_ms`. |
 | `narad_cold_retention_swept_total`<br>counter; no labels | Closed partitions opened to delete expired data, then closed again. |
+| `narad_cold_retention_panics_total`<br>counter; no labels | Closed partitions whose open, sweep or close panicked during the cold retention walk. Each panic was contained: logged at error with the partition and the stack, the partition left alone for 30 minutes, the walk carried on. Any value above 0 is worth a look at the logs. |
 | `narad_reaper_restarts`<br>gauge; no labels | Times the retention loop was replaced because it stopped. Any value above 0 is worth a look at the logs. |
 | `narad_ingress_wal_failed` (unreleased)<br>gauge; no labels | `1` once a write or sync of the node's [ingress WAL](glossary.md#ingress-wal) failed, else `0`. While it is `1`, every produce to the node gets `500` until the node restarts; consume and `/readyz` are not affected, so alert on this gauge. |
 | `narad_ingress_dispatch_backlog_records` (unreleased)<br>gauge; no labels | Records in the ingress WAL that a restart would replay: accepted, but not yet confirmed at their partition owner. Small on a healthy node; a value that stays above 0 while producers are idle means records are not reaching their owners. Wait for 0 on every node before a rollback ([Upgrade Narad](../operate/upgrade.md#roll-back)). |
+| `narad_quarantined_copies` (unreleased)<br>gauge; no labels | Partition copies this node set aside instead of deleting: a stale copy or an earlier copy a move found that the new owner cannot vouch for (`topics/<topic>/p<N>.quarantine*`), a set-aside move staging copy (`.moves/<topic>-<N>.quarantine*`), and a deleted topic incarnation's directory (`topics/<topic>.stale-<id>*`). Any of them may hold the only instance of some records, and Narad never removes one on its own except a deleted incarnation's directory, once the leader confirms the incarnation gone. Refreshed every stale-copy sweep (about 30 s) and at startup, never on a scrape; absent until the first inventory. Alert on a value above 0 ([Troubleshooting](../operate/troubleshooting.md#quarantined-copies)). |
+| `narad_quarantined_bytes` (unreleased)<br>gauge; no labels | Bytes those copies hold. |
+| `narad_orphan_topic_dirs` (unreleased)<br>gauge; no labels | Topic directories of topics this node's replica no longer knows (a deleted topic whose purge never reached this node) that the last sweep left in place: directories without an incarnation marker, which only a restart removes, and directories the leader has not yet confirmed gone. A value that stays above 0 needs a look ([Troubleshooting](../operate/troubleshooting.md#orphan-topic-directories)). |
 
 ## Metastore and Raft {#metastore-raft}
 
@@ -168,9 +172,20 @@ Every node holds a full replica of the [metastore](glossary.md#metastore), kept 
 | `narad_moves_total`<br>counter; labels `outcome` | Finished moves: `completed`, or `force_promoted` when the source died and the copy took over. |
 | `narad_moves_duration_seconds`<br>histogram; no labels | Time from a move starting to the ownership change. |
 | `narad_moves_bytes_total`<br>counter; no labels | Bytes copied by finished moves. |
+| `narad_moves_blocked` (unreleased)<br>gauge; labels `reason` | Moves that cannot finish on their own. On a move's destination: `copy_unverifiable` (the staged copy failed verification twice, the second time after a fresh copy, so the node stopped freezing the source; or a dead source's copy fails it) and `source_dead_copy_behind` (the source is dead and the copy is behind its last high watermark, so it cannot be force-promoted). On the leader only: `source_dead` and `target_dead`, the in-flight moves whose source or destination member is dead. Every reason is exported at 0. Alert on a value above 0 ([Troubleshooting](../operate/troubleshooting.md#moves-blocked)). |
 | `narad_topics_total`<br>gauge; no labels | Topics in the cluster. |
 | `narad_partitions_total`<br>gauge; no labels | Partitions this node owns. |
 | `narad_errors_total`<br>counter; labels `component`, `kind` | Errors by where they happened, for example `http`/`5xx`, `storage`/`fsync_poisoned` or `storage`/`retention_unlink`. |
 | `narad_boot_duration_seconds`<br>gauge; no labels | Time from process start to the API listening, set once. |
 
 The RPC series count requests, not messages. Under heavy load, forwarded acks, extends and nacks to one owner travel together as one `op="ack_batch"` request (always, for a batch ack with two or more handles for one owner), which `op="ack"`, `op="extend_ack"` and `op="nack"` do not count. Add `ack_batch` to a panel that reads those as the forwarded-ack rate.
+
+### Cluster controller {#cluster-controller}
+
+**Unreleased:** in master, not in v3.0.1. The controller runs on the Raft leader only, so these series hold a value only there: every other node, and a node that lost leadership, reports 0 or no series.
+
+| Series | Meaning |
+|---|---|
+| `narad_decommission_blocked`<br>gauge; labels `node`, `reason` | 1 for each reason a draining node's decommission cannot progress: `below_min_voters`, `no_healthy_majority`, `owner_dead`, `no_receivers`, `node_status_unavailable` (each needs you), or `dispatch_backlog`, `move_target`, `move_budget_full`, `leader_transfer` (each clears on its own; `move_target` needs you when the move's source is dead, and is then logged at error). A series goes away when its reason does. Alert on any series that stays ([Troubleshooting](../operate/troubleshooting.md#decommission-blocked)). |
+| `narad_dead_marking_refused`<br>gauge; no labels | 1 while the leader refuses a dead verdict that would leave fewer alive Raft voters than a quorum, else 0. A leader that holds its lease cannot have lost most voters, so its node RPC plane is the likelier fault ([Troubleshooting](../operate/troubleshooting.md#log-dead-marking-refused)). |
+| `narad_colocated_child_partitions`<br>gauge; no labels | Fan-out child partitions owned by the same node as their parent's same-index partition, so both copies sit on one disk. Placement avoids it when it can; nothing moves a partition to fix it ([Back up and replicate topics](../operate/backups.md)). |

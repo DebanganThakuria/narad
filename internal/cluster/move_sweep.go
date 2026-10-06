@@ -41,6 +41,10 @@ func (r *MoveRunner) sweepStaleCopies(ctx context.Context) {
 	if r.selfID == "" || r.reclaimer == nil {
 		return
 	}
+	// Whatever the pass does (or skips), take the quarantine inventory
+	// after it: the copies it set aside or reclaimed show in
+	// narad_quarantined_copies within one sweep.
+	defer r.refreshQuarantineInventory()
 	// A replica that has not proven itself current must not act: a stale
 	// view could show a partition "owned elsewhere" that this node in fact
 	// owns. AppliedCaughtUp requires fresh leader contact, so the view
@@ -53,7 +57,12 @@ func (r *MoveRunner) sweepStaleCopies(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	r.sweepMu.Lock()
 	r.sweepStaleIncarnations(ctx, topics)
+	// Plain directories of topics this replica no longer knows: a purge
+	// that never reached this node.
+	r.reclaimOrphanTopicDirs(ctx)
+	r.sweepMu.Unlock()
 	for _, t := range topics {
 		if r.localDirIsOtherIncarnation(t) {
 			// The local directory is a deleted incarnation's, not this
@@ -220,11 +229,13 @@ func (r *MoveRunner) localDirIsOtherIncarnation(t topic.Topic) bool {
 //   - topics/<name>.stale-<id>: a quarantined directory. Reclaimed once
 //     the leader confirms that incarnation is gone (the record is absent
 //     or carries a different ID). Only quarantined directories are
-//     removed here: a plain directory can be created by a concurrent
-//     lazy open, which the startup sweep excludes with the create gate
-//     and this sweep cannot.
+//     removed by path here: a plain directory can be created by a
+//     concurrent lazy open, which the startup sweep excludes with the
+//     create gate and this sweep cannot.
 //
-// Every failure to confirm defers to the next pass.
+// Plain directories of topics this replica no longer knows are the
+// caller's third half (reclaimOrphanTopicDirs): purged under the topic's
+// guard, never by path. Every failure to confirm defers to the next pass.
 func (r *MoveRunner) sweepStaleIncarnations(ctx context.Context, topics []topic.Topic) {
 	keeper, hasKeeper := r.reclaimer.(incarnationKeeper)
 	for _, t := range topics {
@@ -235,10 +246,22 @@ func (r *MoveRunner) sweepStaleIncarnations(ctx context.Context, topics []topic.
 		if !ok || absent || leaderRec.ID == "" {
 			continue
 		}
+		// EnsureTopicIncarnation refuses unless the local record carries
+		// the leader's ID too (this replica can lag a recreate the leader
+		// already applied): the next pass tries again.
 		if err := keeper.EnsureTopicIncarnation(t.Name, leaderRec.ID); err != nil {
-			r.logger.Warn("move: set aside stale incarnation directory", "topic", t.Name, "err", err)
+			r.logger.Warn("move: set aside stale incarnation directory; will retry on the next sweep", "topic", t.Name, "err", err)
 		}
 	}
+	r.reclaimQuarantinedTopicDirs(ctx)
+}
+
+// reclaimQuarantinedTopicDirs removes topics/<name>.stale-<id>
+// directories (and their numbered variants) once the leader confirms the
+// incarnation id is gone: the name is absent, or live as another
+// incarnation. Nothing opens a quarantined directory, so it is removed by
+// path; every other directory is kept.
+func (r *MoveRunner) reclaimQuarantinedTopicDirs(ctx context.Context) {
 	removed, err := runtime.SweepOrphanTopicDirs(r.dataDir, func(c runtime.OrphanCandidate) bool {
 		if !c.Quarantined {
 			return true
@@ -254,5 +277,25 @@ func (r *MoveRunner) sweepStaleIncarnations(ctx context.Context, topics []topic.
 	}
 	if len(removed) > 0 {
 		r.logger.Info("move: reclaimed quarantined topic directories of deleted incarnations", "count", len(removed), "dirs", removed)
+	}
+}
+
+// quarantineInventory is the optional broker capability that takes the
+// inventory of this node's quarantined copies and keeps it for the
+// quarantine gauges (*messaging.Engine implements it; the broker facade
+// embeds the engine).
+type quarantineInventory interface {
+	QuarantinedCopies() (runtime.QuarantineSummary, error)
+}
+
+// refreshQuarantineInventory retakes the quarantine inventory on the
+// sweep cadence, so a scrape never walks the disk.
+func (r *MoveRunner) refreshQuarantineInventory() {
+	inv, ok := r.reclaimer.(quarantineInventory)
+	if !ok {
+		return
+	}
+	if _, err := inv.QuarantinedCopies(); err != nil {
+		r.logger.Warn("move: quarantine inventory incomplete; narad_quarantined_copies may undercount", "err", err)
 	}
 }

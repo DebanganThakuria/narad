@@ -7,10 +7,12 @@ package cluster
 // directory — the same bytes the RPC serve side would stream.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net/http"
 	"os"
@@ -768,5 +770,488 @@ func TestMoveRunnerMakesTheCopyDurableBeforeTheFlip(t *testing.T) {
 	marker, ok, err := messaging.ReadMoveMarker(dir)
 	if err != nil || !ok || marker.DurableAtUnixMs == 0 {
 		t.Fatalf("the move marker does not record the copy as durable: %+v (found %v, err %v)", marker, ok, err)
+	}
+}
+
+// switchableSourceStore reports the source member alive or dead as the
+// test switches it; dead, its last heartbeat stamp is ten minutes old,
+// past any ForcePromoteAfter. reads counts the source lookups.
+type switchableSourceStore struct {
+	*fakeMoveStore
+	dead  atomic.Bool
+	reads atomic.Int64
+}
+
+func (s *switchableSourceStore) GetMember(id string) (metastore.Member, error) {
+	m, err := s.fakeMoveStore.GetMember(id)
+	if id != "narad-src" {
+		return m, err
+	}
+	s.reads.Add(1)
+	if s.dead.Load() {
+		m.Status = metastore.MemberDead
+		m.LastHeartbeat = time.Now().Add(-10 * time.Minute).Unix()
+	}
+	return m, err
+}
+
+// awaitReads waits until the worker has read the source member n more
+// times, or has flipped the move.
+func (s *switchableSourceStore) awaitReads(t *testing.T, n int64) {
+	t.Helper()
+	target := s.reads.Load() + n
+	for deadline := time.Now().Add(5 * time.Second); s.reads.Load() < target && !s.flipped(); {
+		if time.Now().After(deadline) {
+			t.Fatalf("the worker stopped reading the source member (%d reads, want %d)", s.reads.Load(), target)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func (s *switchableSourceStore) flipped() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.completeArgs) > 0
+}
+
+// prepareCountingPeer counts handoff freezes; with prepareErr set they
+// all fail, so a live source never cuts over.
+type prepareCountingPeer struct {
+	movePeerFake
+	prepares *atomic.Int64
+}
+
+func (p prepareCountingPeer) PrepareHandoff(ctx context.Context, addr, topicName string, partition int, ttl time.Duration, token string) (messaging.PartitionTransferInfo, error) {
+	p.prepares.Add(1)
+	return p.movePeerFake.PrepareHandoff(ctx, addr, topicName, partition, ttl, token)
+}
+
+// newDeadSourceScenario starts a worker on a fake clock whose copy is
+// complete and whose source refuses the handoff freeze, so the move can
+// only finish by a force-promote.
+func newDeadSourceScenario(t *testing.T) (*switchableSourceStore, *testClock, *MoveRunner, string, int64, map[int64][]byte, context.CancelFunc) {
+	t.Helper()
+	return startDeadSourceScenario(t, 0, discardLogger())
+}
+
+// startDeadSourceScenario is newDeadSourceScenario with the source
+// reporting a high watermark behind records past what it serves, so the
+// copy is that many records behind it, and the runner logging to logger.
+func startDeadSourceScenario(t *testing.T, behind int64, logger *slog.Logger) (*switchableSourceStore, *testClock, *MoveRunner, string, int64, map[int64][]byte, context.CancelFunc) {
+	t.Helper()
+	src := t.TempDir()
+	wantHWM, payloads := buildSourcePartition(t, src, 8)
+	store := &switchableSourceStore{fakeMoveStore: &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+	}}
+	var prepares atomic.Int64
+	peer := prepareCountingPeer{
+		movePeerFake: movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: wantHWM + behind, committed: 5, hasCommitted: true}, prepareErr: context.DeadlineExceeded},
+		prepares:     &prepares,
+	}
+	dataDir := t.TempDir()
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, logger, MoveConfig{
+		RetryBackoff: 5 * time.Millisecond, ForcePromoteAfter: 2 * time.Minute,
+	})
+	clock := newTestClock()
+	r.now = clock.Now
+	ctx, cancel := context.WithCancel(context.Background())
+	r.Reconcile(ctx)
+	for deadline := time.Now().Add(5 * time.Second); prepares.Load() == 0; {
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("the worker never finished its copy")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return store, clock, r, dataDir, wantHWM, payloads, func() { cancel(); r.wg.Wait() }
+}
+
+// Force-promote needs the destination itself to have watched the source
+// stay dead for ForcePromoteAfter, on its own monotonic clock. The
+// leader's heartbeat stamp alone compares this node's wall clock with a
+// stamp another node wrote, possibly across a leaderless period: a
+// worker that had only just seen the source dead read a ten-minute-old
+// stamp and promoted its copy at once, giving up whatever the source
+// still held.
+func TestForcePromoteWaitsForTheDestinationToSeeTheSourceDead(t *testing.T) {
+	store, clock, _, dataDir, wantHWM, payloads, stop := newDeadSourceScenario(t)
+	defer stop()
+	store.dead.Store(true)
+	store.awaitReads(t, 3)
+	if store.flipped() {
+		t.Fatal("force-promoted the moment the destination saw the source dead (the leader's stamp was ten minutes old)")
+	}
+	clock.Advance(119 * time.Second)
+	store.awaitReads(t, 3)
+	if store.flipped() {
+		t.Fatal("force-promoted before the destination watched the source dead for ForcePromoteAfter")
+	}
+	clock.Advance(2 * time.Second)
+	for deadline := time.Now().Add(5 * time.Second); !store.flipped(); {
+		if time.Now().After(deadline) {
+			t.Fatal("no force-promote after the destination watched the source dead for ForcePromoteAfter")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stop()
+	requireInstalledCopy(t, dataDir, wantHWM, payloads)
+}
+
+// A source seen alive again restarts the destination's own clock: a
+// source that died, came back and died again has been dead only since
+// the second death.
+func TestForcePromoteClockRestartsWhenTheSourceComesBack(t *testing.T) {
+	store, clock, _, _, _, _, stop := newDeadSourceScenario(t)
+	defer stop()
+	store.dead.Store(true)
+	store.awaitReads(t, 3)
+	clock.Advance(90 * time.Second)
+	store.awaitReads(t, 3)
+	store.dead.Store(false)
+	store.awaitReads(t, 3)
+	store.dead.Store(true)
+	store.awaitReads(t, 3)
+	clock.Advance(90 * time.Second)
+	store.awaitReads(t, 3)
+	if store.flipped() {
+		t.Fatal("force-promoted 90s after the source died again: the clock counted the first death too")
+	}
+	clock.Advance(31 * time.Second)
+	for deadline := time.Now().Add(5 * time.Second); !store.flipped(); {
+		if time.Now().After(deadline) {
+			t.Fatal("no force-promote once the source stayed dead for ForcePromoteAfter after it came back")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// unverifiablePeer serves a source whose listings report a high
+// watermark past the records it serves, so every staged copy recovers
+// short of it and fails verification. It counts handoff freezes and the
+// chunk fetches that start a segment at its first byte.
+type unverifiablePeer struct {
+	movePeerFake
+	prepares   *atomic.Int64
+	freshReads *atomic.Int64
+}
+
+func (p unverifiablePeer) PrepareHandoff(ctx context.Context, addr, topicName string, partition int, ttl time.Duration, token string) (messaging.PartitionTransferInfo, error) {
+	p.prepares.Add(1)
+	return p.movePeerFake.PrepareHandoff(ctx, addr, topicName, partition, ttl, token)
+}
+
+func (p unverifiablePeer) FetchSegmentChunk(ctx context.Context, addr, topicName string, partition int, base, at, length int64) ([]byte, error) {
+	if at == 0 {
+		p.freshReads.Add(1)
+	}
+	return p.movePeerFake.FetchSegmentChunk(ctx, addr, topicName, partition, base, at, length)
+}
+
+// nonEmptySegments counts a partition directory's segments that hold
+// bytes.
+func nonEmptySegments(dir string) int64 {
+	var n int64
+	for _, s := range mustSegs(dir) {
+		if s.SizeBytes > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+const unverifiableCopyLog = "move: staged copy cannot be verified; not freezing the source again"
+
+// A staged copy that fails verification is copied once more from
+// scratch, and when that copy fails too, the worker stops: it froze the
+// source's partition for produce and consume every RetryBackoff,
+// forever, for a copy that could never pass. It logs once at error and
+// freezes the source no more.
+func TestMoveStopsFreezingTheSourceWhenTheCopyCannotBeVerified(t *testing.T) {
+	src := t.TempDir()
+	hwm, _ := buildSourcePartition(t, src, 6)
+	segments := nonEmptySegments(src)
+	store := &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+	}
+	var prepares, freshReads atomic.Int64
+	peer := unverifiablePeer{
+		movePeerFake: movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: hwm + 3}, freeze: &fakeFreeze{}},
+		prepares:     &prepares,
+		freshReads:   &freshReads,
+	}
+	logs := &recordedLog{}
+	r := NewMoveRunner(store, "narad-dst", t.TempDir(), peer, nil, nil, slog.New(logs), MoveConfig{RetryBackoff: 5 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() { cancel(); r.wg.Wait() }()
+	r.Reconcile(ctx)
+
+	for deadline := time.Now().Add(5 * time.Second); logs.count(slog.LevelError, unverifiableCopyLog) == 0 && prepares.Load() < 10; {
+		if time.Now().After(deadline) {
+			t.Fatalf("the worker neither gave up nor kept freezing within 5s (%d freezes)", prepares.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond) // forty more RetryBackoffs
+	if got := prepares.Load(); got != 2 {
+		t.Fatalf("the source was frozen %d times; want 2 (the first copy and one fresh re-copy), then never again", got)
+	}
+	if got := freshReads.Load(); got != 2*segments {
+		t.Fatalf("fetched %d segments from their first byte, want %d: the %d segments once, then once more from scratch", got, 2*segments, segments)
+	}
+	if got := logs.count(slog.LevelError, unverifiableCopyLog); got != 1 {
+		t.Fatalf("logged %q %d times at error, want once", unverifiableCopyLog, got)
+	}
+	store.mu.Lock()
+	flipped := store.completeArgs != nil
+	store.mu.Unlock()
+	if flipped {
+		t.Fatal("flipped a copy that failed verification")
+	}
+}
+
+// A sealed segment with one damaged frame is a partition the source
+// serves (recovery does not prove sealed segments at open; the damaged
+// record reads as recorded loss). Its move must finish, with the
+// damaged bytes copied as they are, and never hold the source frozen
+// while a verification of sealed segments refetches them forever.
+func TestMoveCompletesForAPartitionWithToleratedSealedDamage(t *testing.T) {
+	src := t.TempDir()
+	hwm, _ := buildSourcePartition(t, src, 6)
+	segs := mustSegs(src)
+	if len(segs) < 4 || !segs[2].Sealed || segs[2].SizeBytes == 0 {
+		t.Fatalf("setup: want a sealed non-empty third segment, got %+v", segs)
+	}
+	damaged := filepath.Join(src, fmt.Sprintf("%020d.log", segs[2].BaseOffset))
+	raw, err := os.ReadFile(damaged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[len(raw)-1] ^= 0xFF
+	if err := os.WriteFile(damaged, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n := nextOffsetAt(t, src); n != hwm {
+		t.Fatalf("setup: the damaged source recovers next offset %d, want %d", n, hwm)
+	}
+
+	freeze := &fakeFreeze{}
+	store := &fakeMoveStore{
+		assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+		member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+	}
+	peer := movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: hwm}, freeze: freeze}
+	dataDir := t.TempDir()
+	r := NewMoveRunner(store, "narad-dst", dataDir, peer, nil, nil, discardLogger(), MoveConfig{
+		RetryBackoff: 10 * time.Millisecond, FreezeTTL: 400 * time.Millisecond,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r.Reconcile(ctx)
+	r.wg.Wait()
+	if ctx.Err() != nil {
+		freeze.mu.Lock()
+		minted, rearms := freeze.minted, freeze.rearms
+		freeze.mu.Unlock()
+		t.Fatalf("the move did not finish within 5s (%d freezes, %d re-arms)", minted, rearms)
+	}
+	store.mu.Lock()
+	flipped := store.completeArgs != nil
+	store.mu.Unlock()
+	if !flipped {
+		t.Fatal("the worker ended without flipping the move")
+	}
+	dir := storage.TopicPartitionDir(dataDir, "orders", 0)
+	for _, seg := range segs {
+		name := fmt.Sprintf("%020d.log", seg.BaseOffset)
+		want, err := os.ReadFile(filepath.Join(src, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("installed copy lacks segment %s: %v", name, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("installed segment %s differs from the source's (%d bytes, want %d)", name, len(got), len(want))
+		}
+	}
+}
+
+// movesBlocked gathers narad_moves_blocked from reg by reason.
+func movesBlocked(t *testing.T, reg *prometheus.Registry) map[string]float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]float64{}
+	for _, mf := range mfs {
+		if mf.GetName() != "narad_moves_blocked" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "reason" {
+					got[l.GetValue()] = m.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	return got
+}
+
+// awaitMoveState waits until the runner reports exactly one move and
+// that move satisfies ok, and returns it.
+func awaitMoveState(t *testing.T, r *MoveRunner, what string, ok func(MoveState) bool) MoveState {
+	t.Helper()
+	var last []MoveState
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		last = r.MoveStates()
+		if len(last) == 1 && ok(last[0]) {
+			return last[0]
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no move %s within 5s; the runner reports %+v", what, last)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// stagedBytes sums the sizes of the segments staged under dir.
+func stagedBytes(dir string) int64 {
+	var n int64
+	for _, s := range mustSegs(dir) {
+		n += s.SizeBytes
+	}
+	return n
+}
+
+// The destination reports each move it runs: where it copies from, what
+// it is doing, how far the copy got and the last thing that went wrong,
+// and, for a move it cannot finish on its own, why. narad_moves_blocked
+// counts those by reason, both reasons exported at 0.
+func TestMoveStatesReportPhaseAndBlockedReason(t *testing.T) {
+	t.Run("a dead source with a copy behind", func(t *testing.T) {
+		store, clock, r, _, _, _, stop := startDeadSourceScenario(t, 3, discardLogger())
+		defer stop()
+		reg := prometheus.NewRegistry()
+		r.RegisterMetrics(reg)
+
+		st := awaitMoveState(t, r, "copying with a failed freeze", func(s MoveState) bool {
+			return s.Phase == MovePhaseCopying && s.LastError != ""
+		})
+		if st.Topic != "orders" || st.Partition != 0 || st.Source != "narad-src" || st.Target != "narad-dst" || st.StartedAt.IsZero() {
+			t.Fatalf("move identity %+v, want orders/0 from narad-src to narad-dst with a start time", st)
+		}
+		if st.Attempts < 1 || st.Blocked != "" {
+			t.Fatalf("live source: attempts %d, blocked %q; want at least one attempt and nothing blocked", st.Attempts, st.Blocked)
+		}
+		if staged := stagedBytes(r.stagingDir("orders", 0)); staged == 0 || st.CopiedBytes != staged {
+			t.Fatalf("copied bytes %d, want the %d bytes staged", st.CopiedBytes, staged)
+		}
+		if got := movesBlocked(t, reg); len(got) != 2 || got[MoveBlockedCopyUnverifiable] != 0 || got[MoveBlockedSourceDeadCopyBehind] != 0 {
+			t.Fatalf("narad_moves_blocked = %v, want both reasons at 0", got)
+		}
+
+		store.dead.Store(true)
+		awaitMoveState(t, r, "waiting for a dead source", func(s MoveState) bool {
+			return s.Phase == MovePhaseWaitingForSource && s.Blocked == ""
+		})
+		clock.Advance(3 * time.Minute)
+		st = awaitMoveState(t, r, "blocked behind a dead source", func(s MoveState) bool {
+			return s.Phase == MovePhaseBlocked && s.Blocked == MoveBlockedSourceDeadCopyBehind
+		})
+		if st.LastError == "" {
+			t.Fatal("a move blocked behind a dead source reports no error")
+		}
+		if got := movesBlocked(t, reg); got[MoveBlockedSourceDeadCopyBehind] != 1 || got[MoveBlockedCopyUnverifiable] != 0 {
+			t.Fatalf("narad_moves_blocked = %v, want source_dead_copy_behind 1", got)
+		}
+
+		store.dead.Store(false)
+		awaitMoveState(t, r, "copying again once the source returns", func(s MoveState) bool {
+			return s.Phase == MovePhaseCopying && s.Blocked == ""
+		})
+		if got := movesBlocked(t, reg); got[MoveBlockedSourceDeadCopyBehind] != 0 {
+			t.Fatalf("narad_moves_blocked = %v once the source returned, want 0", got)
+		}
+		stop()
+		if got := r.MoveStates(); len(got) != 0 {
+			t.Fatalf("a worker that exited is still reported: %+v", got)
+		}
+	})
+
+	t.Run("a copy that cannot be verified", func(t *testing.T) {
+		src := t.TempDir()
+		hwm, _ := buildSourcePartition(t, src, 6)
+		store := &fakeMoveStore{
+			assignment: metastore.Assignment{Topic: "orders", Partition: 0, OwnerID: "narad-src", TargetID: "narad-dst"},
+			member:     metastore.Member{ID: "narad-src", Addr: "srcaddr", Status: metastore.MemberAlive},
+		}
+		var prepares, freshReads atomic.Int64
+		peer := unverifiablePeer{
+			movePeerFake: movePeerFake{dirFetcher: dirFetcher{dir: src, hwm: hwm + 3}, freeze: &fakeFreeze{}},
+			prepares:     &prepares,
+			freshReads:   &freshReads,
+		}
+		r := NewMoveRunner(store, "narad-dst", t.TempDir(), peer, nil, nil, discardLogger(), MoveConfig{RetryBackoff: 5 * time.Millisecond})
+		reg := prometheus.NewRegistry()
+		r.RegisterMetrics(reg)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer func() { cancel(); r.wg.Wait() }()
+		r.Reconcile(ctx)
+
+		st := awaitMoveState(t, r, "blocked on an unverifiable copy", func(s MoveState) bool {
+			return s.Blocked == MoveBlockedCopyUnverifiable
+		})
+		if st.Phase != MovePhaseBlocked || st.Attempts != 2 || st.LastError == "" {
+			t.Fatalf("unverifiable copy: phase %q, attempts %d, last error %q; want blocked after 2 attempts with the error", st.Phase, st.Attempts, st.LastError)
+		}
+		if got := movesBlocked(t, reg); got[MoveBlockedCopyUnverifiable] != 1 || got[MoveBlockedSourceDeadCopyBehind] != 0 {
+			t.Fatalf("narad_moves_blocked = %v, want copy_unverifiable 1", got)
+		}
+		cancel()
+		r.wg.Wait()
+		if got := movesBlocked(t, reg); got[MoveBlockedCopyUnverifiable] != 0 {
+			t.Fatalf("narad_moves_blocked = %v after the worker exited, want 0", got)
+		}
+	})
+}
+
+// MoveStates lists the moves ordered by topic, then partition.
+func TestMoveStatesAreOrderedByTopicAndPartition(t *testing.T) {
+	r := NewMoveRunner(&fakeMoveStore{}, "narad-dst", t.TempDir(), movePeerFake{}, nil, nil, discardLogger(), MoveConfig{})
+	for _, k := range []struct {
+		topic     string
+		partition int
+	}{{"payments", 2}, {"orders", 10}, {"payments", 0}, {"orders", 2}} {
+		r.trackMove(k.topic, k.partition, "narad-src", time.Now())
+	}
+	var got []string
+	for _, s := range r.MoveStates() {
+		got = append(got, fmt.Sprintf("%s/%d", s.Topic, s.Partition))
+	}
+	if want := []string{"orders/2", "orders/10", "payments/0", "payments/2"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("MoveStates order %v, want %v", got, want)
+	}
+}
+
+// On the leader narad_moves_blocked also carries the leader's own
+// reasons (an in-flight move whose source or destination is dead), each
+// exported at 0 too, beside this node's worker reasons.
+func TestMovesBlockedCarriesTheLeadersReasons(t *testing.T) {
+	r := NewMoveRunner(&fakeMoveStore{}, "narad-dst", t.TempDir(), movePeerFake{}, nil, nil, discardLogger(), MoveConfig{})
+	reg := prometheus.NewRegistry()
+	r.RegisterMetrics(reg)
+	leader := map[string]int{"source_dead": 2}
+	r.SetLeaderBlockedMoves([]string{"source_dead", "target_dead", MoveBlockedCopyUnverifiable}, func() map[string]int { return leader })
+
+	got := movesBlocked(t, reg)
+	want := map[string]float64{MoveBlockedCopyUnverifiable: 0, MoveBlockedSourceDeadCopyBehind: 0, "source_dead": 2, "target_dead": 0}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("narad_moves_blocked = %v, want %v", got, want)
 	}
 }

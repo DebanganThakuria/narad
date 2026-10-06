@@ -108,7 +108,7 @@ func ReaperRestarts() int64 { return sharedReaper.restarts.Load() }
 // age bound has nothing to do and is not enrolled, which is the common
 // case for a topic configured to keep everything.
 func (p *reaperPool) register(r *reaper) {
-	if r == nil || r.cfg.MaxAge <= 0 {
+	if r == nil || r.maxAgeNow() <= 0 {
 		return
 	}
 	p.mu.Lock()

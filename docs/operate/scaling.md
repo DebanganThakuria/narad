@@ -20,40 +20,53 @@ narad cluster members
 {
   "members": [
     {
-      "id": "narad-0",
-      "addr": "127.0.0.1:7970",
-      "status": "alive",
-      "draining": false,
-      "owned_partitions": 4,
-      "outbound_moves": 0
-    },
-    {
       "id": "narad-1",
-      "addr": "127.0.0.1:7972",
+      "addr": "127.0.0.1:18181",
       "status": "alive",
       "draining": false,
       "owned_partitions": 4,
-      "outbound_moves": 0
+      "outbound_moves": 0,
+      "voter": true,
+      "leader": false,
+      "heartbeat_age_seconds": 3
     },
     {
       "id": "narad-2",
-      "addr": "127.0.0.1:7974",
+      "addr": "127.0.0.1:18182",
       "status": "alive",
       "draining": false,
       "owned_partitions": 4,
-      "outbound_moves": 0
+      "outbound_moves": 0,
+      "voter": true,
+      "leader": false,
+      "heartbeat_age_seconds": 4
+    },
+    {
+      "id": "narad-3",
+      "addr": "127.0.0.1:18183",
+      "status": "alive",
+      "draining": false,
+      "owned_partitions": 4,
+      "outbound_moves": 0,
+      "voter": true,
+      "leader": true,
+      "heartbeat_age_seconds": 4
     }
   ]
 }
 ```
 
-This output comes from a three-node test cluster on one machine; on Kubernetes, `addr` holds each pod's address.
+This output comes from a three-node test cluster on one machine, built from master; on Kubernetes, `addr` holds each pod's address. v3.0.1 prints the first six fields only.
 
 - `status` is `alive`, or `dead` once a node has sent no heartbeat for about 30 seconds.
 - `draining` is `true` while a decommission sheds the node's partitions.
 - `owned_partitions` counts the [partitions](../reference/glossary.md#partition) the node owns, and `outbound_moves` those it is copying to another node.
+- `voter` and `leader` (unreleased) are the node's place in Raft, and `heartbeat_age_seconds` how long ago its last heartbeat was recorded.
+- `decommission_blocked` (unreleased) appears on a draining node whose decommission cannot progress, with a `code` and a `message` per reason ([Troubleshooting](troubleshooting.md#decommission-blocked)).
 
-`narad cluster moves` lists the partitions being moved right now, and prints an empty `moves` list when nothing moves. Both commands need the `admin` grant.
+`narad cluster members --detail` (unreleased) also asks every node for its own status: its dispatch backlog (messages its [ingress WAL](../reference/glossary.md#ingress-wal) still has to hand to their owners), the partition copies it set aside, and the moves it runs. A node that cannot answer gets a `status_error`; a v3.0.1 node is reported as an older release.
+
+`narad cluster moves` lists the partitions being moved right now, and prints an empty `moves` list when nothing moves. Unreleased: each move also shows `from_status` and `to_status` (`alive`, `dead`, `draining` or `not_a_member`) and, when it cannot progress, `blocked`; `--detail` adds the destination's own report of the move. Both commands need the `admin` grant.
 
 ## Scale out {#scale-out}
 
@@ -89,13 +102,16 @@ A pod removed while it still owns partitions strands them: they stay assigned to
 
 This example takes a five-node cluster down to four.
 
-1. Mark the highest-numbered node for decommission:
+1. Check that the node can be removed safely, then mark it for decommission:
 
     ```bash
+    narad cluster decommission narad-4 --dry-run
     narad cluster decommission narad-4
     ```
 
-    The node stops receiving partitions and its partitions start moving to the others. While they move, `narad cluster moves` lists them:
+    The dry run (unreleased) changes nothing; it says whether the decommission would be accepted and, if not, every reason. A decommission that could never complete safely is refused with `409` and the same reasons, and nothing changes: fewer than three voters would remain (`below_min_voters`), the voters left alive would not be a majority (`no_healthy_majority`), no other alive node could take the node's partitions (`no_receivers`), or the node is dead and owns partitions (`owner_dead`).
+
+    The node stops receiving partitions and its partitions start moving to the others. It also refuses new produce with `503` and `Retry-After: 1` (unreleased), so clients send their messages to another node. While its partitions move, `narad cluster moves` lists them:
 
     ```json title="Output"
     {
@@ -130,7 +146,7 @@ This example takes a five-node cluster down to four.
 
     This output comes from a five-node test cluster on one machine, with one topic of 20 partitions.
 
-2. Wait until `narad cluster members` shows `owned_partitions: 0` for `narad-4`. The leader then removes it from Raft (as a voter, or as a non-voter if it was never promoted), and it drops out of the list. The pod keeps running, reports not ready, and its heartbeats are refused.
+2. Wait until `narad cluster members` shows `owned_partitions: 0` for `narad-4`. The leader then removes it from Raft (as a voter, or as a non-voter if it was never promoted), and it drops out of the list. The pod keeps running, reports not ready, and its heartbeats are refused. Before the removal, the leader asks the node for its dispatch backlog and waits until its ingress WAL has handed every message it accepted to the partition's owner (unreleased); a node on v3.0.1 cannot answer and is removed without that check, as v3.0.1 did. If the node stays listed, its `decommission_blocked` says why ([Troubleshooting](troubleshooting.md#decommission-blocked)).
 
 3. Lower `replicaCount`. `allowScaleIn=true` tells the chart the pods it removes were decommissioned; without it, the chart refuses to lower the replica count of a running StatefulSet.
 
@@ -148,12 +164,14 @@ Keep these rules while you scale in:
 - **Do not overlap a decommission with a rolling restart.** A `helm upgrade` that changes the pod template restarts the pods, and a draining node that restarts has no stable source to copy from until it settles. Changing only `replicaCount` does not restart the pods.
 - **A rollback of `replicaCount` is a scale-in.** `helm rollback` to a revision with fewer replicas deletes pods exactly like step 3, without steps 1 and 2. The chart refuses it unless `allowScaleIn` is set; decommission first rather than setting it to get past the refusal.
 - **Keep a node that is not draining alive.** New partitions never go to a draining node. While every live node is draining, for example two draining nodes while the others restart, topic creates and partition increases answer `503` and the leader logs `every live member is being decommissioned` at error level; they succeed again once a node that is not draining is back.
-- **Three voters is the floor.** The leader never removes a voter from Raft if that would leave fewer than three voters. A decommission on a three-node cluster moves the partitions away, but the node stays a member. If the leader itself is decommissioned, it hands leadership to another node first. A node that is still a non-voter has no vote, so the floor does not hold it back.
+- **Three voters is the floor.** The leader never removes a voter from Raft if that would leave fewer than three voters, and on master also never if the voters left alive would not be a majority of the rest: with dead voters around, removing a live one could leave a configuration that can never elect a leader. On master such a decommission is refused up front; on v3.0.1 it moves the partitions away, but the node stays a member. If the leader itself is decommissioned, it hands leadership to another node first. A node that is still a non-voter has no vote, so the floor does not hold it back.
+- **Remove dead voters first, and bring them back to do it.** On master the leader removes a dead draining voter before a live one, but only once it has read the node's dispatch backlog, which a dead node cannot report: its decommission waits with `node_status_unavailable` until the node comes back and hands off its WAL. Bring it back, or cancel its decommission. A dead node that still owns partitions cannot be drained at all (`owner_dead`): its data is only on its disk.
+- **A move aimed at the node holds it back.** On master the leader clears moves that target a draining node and removes the node only once none is left. A move you want gone sooner can be aborted with `narad cluster moves abort <topic> <partition>` ([Rebalance and decommission](../understand/rebalance.md#abort)). The leader does not clear a move whose source is dead or no longer a member: the draining node may hold the only live copy, so it waits for that copy to be force-promoted and moved off, and logs the wait at error. Abort such a move only if dropping that copy is really intended.
 - **Finish a rolling upgrade from 3.0.x before you decommission a non-voter.** A 3.0.x leader removes only voters, so a non-voter it decommissions loses its member record but stays in the Raft configuration, and `narad_raft_nonvoters` stays above 0 ([Troubleshooting](troubleshooting.md#nonvoters-stay)).
 
 ### Reuse a decommissioned name {#reuse-name}
 
-The leader remembers a decommissioned node's ID. If that pod restarts with its old volume, it is refused and logs that it was decommissioned ([Troubleshooting](troubleshooting.md#log-join-rejected)). To bring a pod back under that name later, for example when you scale out again, delete its PersistentVolumeClaim first so it starts empty:
+The leader remembers a decommissioned node's ID. If that pod restarts with its old volume, it is refused and logs that it was decommissioned ([Troubleshooting](troubleshooting.md#log-join-rejected)). To bring a pod back under that name later, for example when you scale out again, delete its PersistentVolumeClaim first so it starts empty. If the leader logged `the decommissioned node holds quarantined partition copies` for it, check those copies first ([Troubleshooting](troubleshooting.md#quarantined-copies)): deleting the claim deletes them, and they may hold the only instance of some records.
 
 ```bash
 kubectl delete pvc data-narad-4 -n narad
@@ -163,7 +181,7 @@ A node that starts with an empty data directory under a decommissioned ID is adm
 
 ### Source node failure during a move {#source-dies}
 
-If a node dies while its partitions are still being copied away, the destinations that had caught up with it promote their copies after 2 minutes instead of waiting for it. This [force-promote](../reference/glossary.md#force-promote) can deliver again messages that consumers acked on the dead node in its last moments. On master it never skips one; on v3.0.1 a force-promote could leave records committed after it undelivered (see [Rebalance and decommission](../understand/rebalance.md#what-if-the-source-dies-mid-move)). What can be lost, and why, is in the [failure matrix](../understand/delivery-contract.md#failure-matrix).
+If a node dies while its partitions are still being copied away, the destinations that had caught up with it promote their copies after 2 minutes instead of waiting for it. The 2 minutes count from the source's last heartbeat and, on master, also on each destination's own clock from when it first saw the source dead, so a destination that restarts meanwhile waits up to 2 minutes more. A destination whose copy is behind cannot promote it: it waits for the source, logs that once at error and counts the move in `narad_moves_blocked` ([Troubleshooting](troubleshooting.md#moves-blocked)). This [force-promote](../reference/glossary.md#force-promote) can deliver again messages that consumers acked on the dead node in its last moments. On master it never skips one; on v3.0.1 a force-promote could leave records committed after it undelivered (see [Rebalance and decommission](../understand/rebalance.md#what-if-the-source-dies-mid-move)). What can be lost, and why, is in the [failure matrix](../understand/delivery-contract.md#failure-matrix).
 
 ## Next steps
 

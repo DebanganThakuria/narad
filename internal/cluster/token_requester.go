@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
@@ -50,6 +51,12 @@ type localWaiter struct {
 	// from is the owner of an offer this waiter accepted and has not yet
 	// acted on: set by offer, cleared by take.
 	from string
+	// demand is the topicDemand whose queue park or repark last put this
+	// waiter in. The keeper can prune a topic's demand while its only
+	// consumer is off the queue (woken, claiming), and repark then queues
+	// it in the topic's fresh demand; the release func removes it from
+	// there (see pruneIdle).
+	demand atomic.Pointer[topicDemand]
 }
 
 // take returns the address of the owner that woke this waiter, or ""
@@ -89,6 +96,10 @@ type topicDemand struct {
 	// spends the token on a notification. The keeper (Run) registers
 	// wherever an entry is missing or due for a refresh.
 	owners map[string]ownerToken
+	// dead is set, under mu and the requester's map lock, when the
+	// keeper prunes this demand from the map. A caller that finds it set
+	// under mu looks the topic up again (see lockDemand).
+	dead bool
 }
 
 // ownerToken is this node's record of one registration at one owner.
@@ -274,11 +285,8 @@ func (q *tokenRequester) demandFor(topicName string) *topicDemand {
 // it. The caller selects on the waiter's channel. The release func is
 // for the caller's goroutine only.
 func (q *tokenRequester) park(topicName string, deadline time.Time) (*localWaiter, func()) {
-	d := q.demandFor(topicName)
 	w := &localWaiter{ch: make(chan struct{}, 1), deadline: deadline}
-	d.mu.Lock()
-	d.waiters = append(d.waiters, w)
-	d.mu.Unlock()
+	q.enqueue(topicName, w)
 	released := false
 	return w, func() {
 		// Idempotent: a consumer leaves the queue as soon as it stops
@@ -287,6 +295,9 @@ func (q *tokenRequester) park(topicName string, deadline time.Time) (*localWaite
 			return
 		}
 		released = true
+		// The demand the waiter was last queued in: a repark after the
+		// keeper pruned the one it parked in queued it in another.
+		d := w.demand.Load()
 		d.mu.Lock()
 		for i, other := range d.waiters {
 			if other == w {
@@ -306,8 +317,10 @@ func (q *tokenRequester) park(topicName string, deadline time.Time) (*localWaite
 // ran out, and spending it (a claim) without registering again did the
 // same.
 func (q *tokenRequester) othersParked(topicName string, self *localWaiter) (remaining time.Duration, ok bool) {
-	d := q.demandFor(topicName)
-	d.mu.Lock()
+	d := q.lockExistingDemand(topicName)
+	if d == nil {
+		return 0, false
+	}
 	defer d.mu.Unlock()
 	return d.longestRemainingLocked(time.Now(), self)
 }
@@ -317,10 +330,7 @@ func (q *tokenRequester) othersParked(topicName string, self *localWaiter) (rema
 // would re-register its token with nothing left listening for the next
 // offer, and would sit out the rest of its budget.
 func (q *tokenRequester) repark(topicName string, w *localWaiter) {
-	d := q.demandFor(topicName)
-	d.mu.Lock()
-	d.waiters = append(d.waiters, w)
-	d.mu.Unlock()
+	q.enqueue(topicName, w)
 }
 
 // WakeOneWaiter hands the owner's address to one parked consumer and
@@ -343,8 +353,12 @@ func (q *tokenRequester) WakeOneWaiter(topicName, from string) bool {
 	if q == nil {
 		return false
 	}
-	d := q.demandFor(topicName)
-	d.mu.Lock()
+	// No demand means nobody is parked here for the topic: pass, and
+	// leave no entry behind for a topic this node does not wait on.
+	d := q.lockExistingDemand(topicName)
+	if d == nil {
+		return false
+	}
 	defer d.mu.Unlock()
 	delete(d.owners, from)
 	for len(d.waiters) > 0 {
@@ -378,9 +392,8 @@ func (q *tokenRequester) register(ctx context.Context, topicName string, remaini
 	if len(owners) == 0 {
 		return
 	}
-	d := q.demandFor(topicName)
 	now := time.Now()
-	d.mu.Lock()
+	d := q.lockDemand(topicName)
 	// The token is shared by every consumer parked here, so it carries
 	// the longest budget among them: a short poll registering after a
 	// long one must not shorten the token the long one relies on.
@@ -402,8 +415,7 @@ func (q *tokenRequester) register(ctx context.Context, topicName string, remaini
 
 // send leaves a token with each of addrs.
 func (q *tokenRequester) send(ctx context.Context, topicName string, addrs []string, remaining time.Duration) {
-	d := q.demandFor(topicName)
-	d.mu.Lock()
+	d := q.lockDemand(topicName)
 	stamp := d.stampLocked(addrs, time.Now(), remaining)
 	d.mu.Unlock()
 	q.dispatch(ctx, topicName, d, addrs, remaining, stamp)
@@ -477,7 +489,15 @@ func (q *tokenRequester) Run(ctx context.Context) {
 	}
 }
 
+// keepAlive is one keeper pass. It first prunes the demand of every
+// topic nobody is parked on and no owner holds a live token for (see
+// pruneIdle), then registers where a parked topic's owner is missing a
+// token. A topic with nobody parked long enough to register for is
+// skipped before its owners are looked up: the lookup reads the local
+// replica, and a pass costs nothing for the topics that consumers have
+// left, deleted ones included.
 func (q *tokenRequester) keepAlive(ctx context.Context) {
+	q.pruneIdle(time.Now())
 	q.mu.RLock()
 	topics := make([]string, 0, len(q.topics))
 	for name := range q.topics {
@@ -485,17 +505,27 @@ func (q *tokenRequester) keepAlive(ctx context.Context) {
 	}
 	q.mu.RUnlock()
 	for _, topicName := range topics {
+		d := q.lockExistingDemand(topicName)
+		if d == nil {
+			continue
+		}
+		remaining, _ := d.longestRemainingLocked(time.Now(), nil)
+		d.mu.Unlock()
+		if remaining < tokenTTLFloor {
+			continue
+		}
 		// The plain owner list, not the rotated one the probe path uses:
 		// a keeper pass must not advance the probe cursor.
 		owners := q.router.remoteOwnerAddrsForTopic(topicName)
 		if len(owners) == 0 {
 			continue
 		}
-		d := q.demandFor(topicName)
+		if d = q.lockExistingDemand(topicName); d == nil {
+			continue
+		}
 		now := time.Now()
 		var missing []string
-		d.mu.Lock()
-		remaining, _ := d.longestRemainingLocked(now, nil)
+		remaining, _ = d.longestRemainingLocked(now, nil)
 		if remaining >= tokenTTLFloor {
 			for _, addr := range owners {
 				if !d.owners[addr].refreshAt.After(now) {

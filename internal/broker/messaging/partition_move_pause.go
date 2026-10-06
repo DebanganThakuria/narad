@@ -281,7 +281,7 @@ func (e *Engine) prepareHandoff(ctx context.Context, topicName string, partition
 		var ierr error
 		info, ierr = e.transferInfoAt(dir, topicName, partition, func() (int64, error) {
 			return log.HighWatermark(), nil
-		})
+		}, log.CommittedBoundary)
 		return ierr
 	})
 	if err != nil {

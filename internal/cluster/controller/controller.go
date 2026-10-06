@@ -7,7 +7,10 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -36,6 +39,7 @@ type controllerStore interface {
 	OrphanAssignments() ([]metastore.Assignment, error)
 	PruneAssignment(ctx context.Context, topicName string, partition int) error
 	SetAssignmentTarget(ctx context.Context, topicName string, partition int, targetID string) error
+	AbortMove(ctx context.Context, topicName string, partition int, expectedTarget string) error
 	MarkMemberDeadObserved(ctx context.Context, podID string, observed int64) error
 	Voters() ([]string, error)
 	Nonvoters() ([]string, error)
@@ -76,11 +80,31 @@ type Config struct {
 	// aborts a move, and a dead destination cannot, so without this bound
 	// moves aimed at a node that died pin the in-flight budget forever and
 	// stop every later rebalance and decommission. Generous, so a pod that
-	// restarts finishes its copy instead of being re-planned. Default: 2m.
+	// restarts finishes its copy instead of being re-planned. Measured on
+	// the leader's own clock like DeadTimeout. Default: 2m.
 	DeadTargetAbortAfter time.Duration
-	// Logger receives the controller's log lines. Default: slog.Default().
+	// Logger receives the controller's transitions: leadership, members
+	// marked dead or seen alive again, move targets set and cleared,
+	// voters and members removed, and why a decommission is blocked.
+	// Nil logs nothing.
 	Logger *slog.Logger
+	// Registerer receives the controller's leader-only metrics
+	// (narad_decommission_blocked, narad_dead_marking_refused,
+	// narad_colocated_child_partitions). Nil registers none.
+	Registerer prometheus.Registerer
+	// NodeStatus asks the member at addr (Member.Addr) for its status
+	// over node RPC. Decommission reads a draining node's dispatch
+	// backlog from it before taking the node out of Raft. Nil skips that
+	// check, as before node status existed.
+	NodeStatus func(ctx context.Context, addr string) (NodeStatus, error)
 }
+
+// DefaultMinVoters is the MinVoters a zero Config uses. The decommission
+// preflight on every node applies the same floor.
+const DefaultMinVoters = 3
+
+// DefaultMaxInFlightMoves is the MaxInFlightMoves a zero Config uses.
+const DefaultMaxInFlightMoves = 8
 
 func (c Config) withDefaults() Config {
 	if c.ReconcileInterval == 0 {
@@ -90,10 +114,10 @@ func (c Config) withDefaults() Config {
 		c.DeadTimeout = 30 * time.Second
 	}
 	if c.MaxInFlightMoves == 0 {
-		c.MaxInFlightMoves = 8
+		c.MaxInFlightMoves = DefaultMaxInFlightMoves
 	}
 	if c.MinVoters == 0 {
-		c.MinVoters = 3
+		c.MinVoters = DefaultMinVoters
 	}
 	if c.MemberSettleDelay == 0 {
 		c.MemberSettleDelay = time.Second
@@ -120,6 +144,26 @@ type Controller struct {
 	// interleaving their reads and target writes.
 	planMu sync.Mutex
 
+	// now is the controller's clock; nil reads time.Now. Tests set it.
+	now func() time.Time
+	// m is the controller's metrics; nil (no Registerer) records nothing.
+	m *metrics
+
+	// termMu guards defaultTerm and activeTerm, and orders the writes
+	// of leader-only metrics against a term change.
+	termMu sync.Mutex
+	// defaultTerm is the leader state of passes run outside a leader
+	// loop (tests call the passes directly).
+	defaultTerm *leaderTerm
+	// activeTerm is the running leader loop's term; nil when this node
+	// does not lead.
+	activeTerm *leaderTerm
+
+	// blockedMoves is the leader's count of in-flight moves blocked on a
+	// dead or departed node, by reason (BlockedMoves); nil when none or
+	// when this node does not lead.
+	blockedMoves atomic.Pointer[map[string]int]
+
 	// orphansLogged holds the orphan assignment rows already logged as
 	// waiting for the prune entry type (orphans.go), so each is logged
 	// once.
@@ -127,15 +171,26 @@ type Controller struct {
 	orphansLogged map[string]bool
 }
 
-// log returns the controller's logger.
-func (c *Controller) log() *slog.Logger {
+// New creates a Controller. Call Run to start it.
+func New(store *metastore.Store, cfg Config) *Controller {
+	cfg = cfg.withDefaults()
+	return &Controller{store: store, cfg: cfg, m: newMetrics(cfg.Registerer)}
+}
+
+// clock reads the controller's clock.
+func (c *Controller) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+// logger returns the configured logger, or one that discards.
+func (c *Controller) logger() *slog.Logger {
 	if c.cfg.Logger != nil {
 		return c.cfg.Logger
 	}
-	return slog.Default()
+	return discardLogger
 }
 
-// New creates a Controller. Call Run to start it.
-func New(store *metastore.Store, cfg Config) *Controller {
-	return &Controller{store: store, cfg: cfg.withDefaults()}
-}
+var discardLogger = slog.New(slog.DiscardHandler)

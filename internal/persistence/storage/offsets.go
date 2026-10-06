@@ -65,11 +65,13 @@ func (l *Log) OldestOffset() int64 {
 	return l.segments[0].baseOffset
 }
 
-// RetentionMaxAge reports the age-based retention bound this log was
-// opened with. Zero means keep forever. The idle evictor uses it to
-// defer eviction while the reaper still owes sealed-segment deletions.
+// RetentionMaxAge reports the log's age-based retention bound as it
+// stands now: the one it was opened with, or the last one
+// SetRetentionMaxAge set. Zero means keep forever. The idle evictor uses
+// it to defer eviction while the reaper still owes sealed-segment
+// deletions.
 func (l *Log) RetentionMaxAge() time.Duration {
-	return l.opts.Retention.MaxAge
+	return l.reaper.maxAgeNow()
 }
 
 // SizeBytes returns the total on-disk size of all segment files.

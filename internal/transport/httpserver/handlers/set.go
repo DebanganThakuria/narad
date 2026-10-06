@@ -26,6 +26,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
 	"github.com/debanganthakuria/narad/internal/persistence/storage"
+	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
 const (
@@ -111,6 +112,16 @@ type Deps struct {
 
 	// Passwords is optional; see PasswordHasher.
 	Passwords PasswordHasher
+
+	// Drain admits client produce: while this node is being
+	// decommissioned it refuses it with 503, and it counts the produce
+	// requests in flight for the node status. Nil never refuses.
+	Drain *DrainGate
+
+	// NodeStatus asks a member for its own status over node RPC (this
+	// node answers locally). The cluster views' ?detail=true uses it.
+	// Nil leaves the detail empty, with a status error per member.
+	NodeStatus func(ctx context.Context, m metastore.Member) (nodewire.NodeStatus, error)
 }
 
 // Set is shared by every handler subpackage. The Deps field is

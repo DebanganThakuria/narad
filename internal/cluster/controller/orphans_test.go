@@ -81,15 +81,44 @@ func TestOrphanRowsAreLoggedWhileNotUsable(t *testing.T) {
 // A dead mark carries the heartbeat the controller judged, so a newer
 // one that committed in between wins in the state machine.
 func TestDeadMarkCarriesTheHeartbeatItWasDecidedFrom(t *testing.T) {
-	store := newFakeControllerStore("a", "b")
+	store := newFakeControllerStore("a", "b", "c")
 	stale := time.Now().Add(-time.Hour).Unix()
 	store.members[1].LastHeartbeat = stale
 	store.members[0].LastHeartbeat = time.Now().Unix()
+	store.members[2].LastHeartbeat = time.Now().Unix()
 	c := &Controller{store: store, cfg: Config{DeadTimeout: time.Minute}.withDefaults()}
 
 	c.checkHeartbeats(context.Background())
 
 	if want := fmt.Sprintf("b@%d", stale); len(store.deadMarks) != 1 || store.deadMarks[0] != want {
 		t.Fatalf("dead marks = %v, want [%s]", store.deadMarks, want)
+	}
+}
+
+// A dead mark that loses to a heartbeat committed after the read leaves
+// the member alive: the controller neither logs it as marked dead nor as
+// a failure to retry, and later sees nothing come back to life.
+func TestDeadMarkThatLosesToANewerHeartbeatIsNotADeath(t *testing.T) {
+	store := newFakeControllerStore("a", "b", "c")
+	now := time.Now().Unix()
+	store.members[0].LastHeartbeat = now
+	store.members[1].LastHeartbeat = now - 3600
+	store.members[2].LastHeartbeat = now
+	store.deadMarkErr = metastore.ErrMemberHeartbeatNewer
+	log, logs := newLogBuffer()
+	c := &Controller{store: store, cfg: Config{DeadTimeout: time.Minute, Logger: log}.withDefaults()}
+
+	c.checkHeartbeats(context.Background())
+	store.deadMarkErr = nil
+	store.members[1].LastHeartbeat = time.Now().Unix()
+	c.checkHeartbeats(context.Background())
+
+	for _, msg := range []string{"member marked dead", "mark member dead failed", "member alive again"} {
+		if lines := logs.lines(msg); len(lines) != 0 {
+			t.Fatalf("logged %q for a member whose newer heartbeat won:\n%s", msg, logs)
+		}
+	}
+	if len(store.markedDead) != 0 {
+		t.Fatalf("marked %v dead", store.markedDead)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -47,11 +48,17 @@ func (c RetentionConfig) rollAge() time.Duration {
 }
 
 type reaper struct {
-	log  *Log
-	cfg  RetentionConfig
-	stop chan struct{}
-	done chan struct{}
-	once sync.Once
+	log *Log
+	// cfg is the configuration the log was opened with and never
+	// changes. Its MaxAge is only the initial bound: the topic's
+	// retention can be altered while the log is open (see
+	// Log.SetRetentionMaxAge), so every decision reads maxAge.
+	cfg RetentionConfig
+	// maxAge is the live age bound in nanoseconds (zero keeps forever).
+	maxAge atomic.Int64
+	stop   chan struct{}
+	done   chan struct{}
+	once   sync.Once
 }
 
 func newReaper(log *Log, cfg RetentionConfig) *reaper {
@@ -61,12 +68,24 @@ func newReaper(log *Log, cfg RetentionConfig) *reaper {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &reaper{
+	r := &reaper{
 		log:  log,
 		cfg:  cfg,
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
 	}
+	r.maxAge.Store(int64(max(cfg.MaxAge, 0)))
+	return r
+}
+
+// maxAgeNow is the live age bound (see reaper.maxAge).
+func (r *reaper) maxAgeNow() time.Duration { return time.Duration(r.maxAge.Load()) }
+
+// rollAgeNow is RetentionConfig.rollAge under the live age bound.
+func (r *reaper) rollAgeNow() time.Duration {
+	c := r.cfg
+	c.MaxAge = r.maxAgeNow()
+	return c.rollAge()
 }
 
 // run is retained only for tests that drive one reaper directly. The
@@ -76,7 +95,7 @@ func newReaper(log *Log, cfg RetentionConfig) *reaper {
 func (r *reaper) run() {
 	defer close(r.done)
 
-	if r.cfg.MaxAge <= 0 {
+	if r.maxAgeNow() <= 0 {
 		<-r.stop
 		return
 	}
@@ -103,7 +122,7 @@ func (r *reaper) run() {
 // active segment holds records above the persisted high-watermark) is
 // not counted as swept. A log without an age bound does nothing.
 func (l *Log) SweepRetentionNow() (changed bool) {
-	if l == nil || l.reaper == nil || l.reaper.cfg.MaxAge <= 0 {
+	if l == nil || l.reaper == nil || l.reaper.maxAgeNow() <= 0 {
 		return false
 	}
 	beforeOldest, beforeCount := l.OldestOffset(), l.SegmentCount()
@@ -212,14 +231,16 @@ func (r *reaper) activeExpired() bool {
 		return false
 	}
 	active := r.log.segments[len(r.log.segments)-1]
-	return active.sizeBytes > 0 &&
+	maxAge := r.maxAgeNow()
+	return maxAge > 0 &&
+		active.sizeBytes > 0 &&
 		!active.lastWriteAt.IsZero() &&
-		active.lastWriteAt.Before(r.cfg.Now().Add(-r.cfg.MaxAge)) &&
+		active.lastWriteAt.Before(r.cfg.Now().Add(-maxAge)) &&
 		active.nextOffset <= r.log.highWatermark.Load()
 }
 
 func (r *reaper) rotateExpiredActive() {
-	if r.cfg.MaxAge <= 0 {
+	if r.maxAgeNow() <= 0 {
 		return
 	}
 	if !r.activeExpired() {
@@ -243,8 +264,8 @@ func (r *reaper) candidatesForDeletion(sealed []*segment) map[*segment]string {
 	now := r.cfg.Now()
 	picks := make(map[*segment]string)
 
-	if r.cfg.MaxAge > 0 {
-		threshold := now.Add(-r.cfg.MaxAge)
+	if maxAge := r.maxAgeNow(); maxAge > 0 {
+		threshold := now.Add(-maxAge)
 		for _, s := range sealed {
 			if s.lastWriteAt.IsZero() {
 				continue

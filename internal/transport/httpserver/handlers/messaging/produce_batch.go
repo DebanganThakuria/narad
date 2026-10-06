@@ -89,6 +89,10 @@ func ProduceBatch(s *handlers.Set, gate InFlightGate) http.HandlerFunc {
 		if !s.Authorize(w, r, user.ActionProduce, topicName) {
 			return
 		}
+		if !admitProduce(s, w) {
+			return
+		}
+		defer s.Deps.Drain.Done()
 		if err := checkProduceBatchQuery(r.URL.RawQuery); err != nil {
 			s.WriteError(w, http.StatusBadRequest, err.Error())
 			return

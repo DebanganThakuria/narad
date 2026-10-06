@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -399,5 +401,177 @@ func TestRunColdRetentionTicksAndStops(t *testing.T) {
 	}
 	if _, open := g.Peek("orders", 0); open {
 		t.Fatal("the loop left the partition open")
+	}
+}
+
+// panicOnceRecorder is a storage.MetricsRecorder whose first
+// ObserveRetentionRun, the deferred call that ends every retention
+// sweep, panics: one partition's sweep panicking.
+type panicOnceRecorder struct {
+	armed atomic.Bool
+	runs  atomic.Int64
+}
+
+func (*panicOnceRecorder) ObserveFlush(time.Duration, int64)                 {}
+func (*panicOnceRecorder) ObserveFsync(time.Duration)                        {}
+func (*panicOnceRecorder) ObserveHighWatermarkPersist(time.Duration, string) {}
+func (*panicOnceRecorder) IncRetentionDeletion(string, int64, int64)         {}
+
+func (r *panicOnceRecorder) ObserveRetentionRun(time.Duration) {
+	r.runs.Add(1)
+	if r.armed.CompareAndSwap(true, false) {
+		panic("injected sweep panic")
+	}
+}
+
+// A panic in one partition's sweep is contained: the walk logs and
+// counts it, closes the log it opened, leaves that partition alone for a
+// while, and still sweeps the next partition. The walk runs on its own
+// goroutine with nothing above it to recover, so an escaped panic took
+// the whole node down, and a deterministic one did it on every restart.
+func TestColdWalkSurvivesAPanicInOnePartition(t *testing.T) {
+	ms := newRuntimeFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, RetentionMs: int64(time.Hour / time.Millisecond)}
+	rec := &panicOnceRecorder{}
+	g := NewLogs(t.TempDir(), storage.Options{
+		FlushInterval: 5 * time.Millisecond,
+		Retention:     storage.RetentionConfig{CheckInterval: time.Minute},
+		Metrics:       rec,
+	}, ms, nil)
+	t.Cleanup(func() { _ = g.CloseAll() })
+	for p := range 2 {
+		appendAndCommit(t, g, "orders", p, "x")
+		if err := g.ClosePartition("orders", p); err != nil {
+			t.Fatalf("ClosePartition(%d): %v", p, err)
+		}
+		ageSegments(t, g, "orders", p, 2*time.Hour)
+	}
+	rec.armed.Store(true)
+
+	var escaped any
+	var swept int
+	var err error
+	func() {
+		defer func() { escaped = recover() }()
+		swept, err = g.ColdRetentionOnce(context.Background(), time.Now())
+	}()
+	if escaped != nil {
+		t.Fatalf("a sweep panic escaped the cold walk, which would crash the node: %v", escaped)
+	}
+	if err == nil {
+		t.Fatal("the walk reported no error for a partition whose sweep panicked")
+	}
+	if swept != 1 {
+		t.Fatalf("swept = %d, want 1: the partition after the panicking one must still be swept", swept)
+	}
+	if got := testutil.ToFloat64(g.ColdRetentionPanics()); got != 1 {
+		t.Fatalf("narad_cold_retention_panics_total = %v, want 1", got)
+	}
+	if n := g.OpenCount(); n != 0 {
+		t.Fatalf("OpenCount = %d after a contained panic: the walk-owned log was left open", n)
+	}
+	if !g.coldDeferred(keyOf("orders", 0), time.Now()) {
+		t.Fatal("the partition whose sweep panicked is not left alone for a while")
+	}
+	runs := rec.runs.Load()
+	if _, err := g.ColdRetentionOnce(context.Background(), time.Now()); err != nil {
+		t.Fatalf("second walk: %v", err)
+	}
+	if got := rec.runs.Load(); got != runs {
+		t.Fatalf("the next walk swept the panicking partition again at once (%d sweeps, want %d)", got, runs)
+	}
+}
+
+// A due copy of a partition another node owns (a move's source awaiting
+// its reclaim, say) is not this node's to open or reap: the walk sweeps
+// only the partition the local assignment gives this node.
+func TestColdWalkSkipsPartitionsOwnedElsewhere(t *testing.T) {
+	ms := newRuntimeFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", Partitions: 2, RetentionMs: int64(time.Hour / time.Millisecond)}
+	ms.setAssignment("orders", 0, "node-self")
+	ms.setAssignment("orders", 1, "node-other")
+	g := coldTestLogs(t, ms)
+	g.SetOwnership(func(topicName string, idx int) bool {
+		a, err := ms.GetAssignment(topicName, idx)
+		return err == nil && a.OwnerID == "node-self"
+	})
+	for p := range 2 {
+		appendAndCommit(t, g, "orders", p, "x")
+		if err := g.ClosePartition("orders", p); err != nil {
+			t.Fatalf("ClosePartition(%d): %v", p, err)
+		}
+		ageSegments(t, g, "orders", p, 2*time.Hour)
+	}
+	foreign := segmentFiles(t, g, "orders", 1)
+
+	swept, err := g.ColdRetentionOnce(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("ColdRetentionOnce: %v", err)
+	}
+	if swept != 1 {
+		t.Fatalf("swept = %d, want 1 (the owned partition only)", swept)
+	}
+	if got := segmentFiles(t, g, "orders", 1); !slices.Equal(got, foreign) {
+		t.Fatalf("the walk changed a partition node-other owns: %v -> %v", foreign, got)
+	}
+}
+
+// guardWaiters reports how many callers hold or wait on the topic's
+// guard.
+func guardWaiters(g *Logs, topicName string) int {
+	g.guardMu.Lock()
+	defer g.guardMu.Unlock()
+	if tg := g.guards[topicName]; tg != nil {
+		return tg.refs
+	}
+	return 0
+}
+
+// The walk stats a partition before it takes the topic's guard. A
+// reclaim that removes the directory in between, under that guard, must
+// not see the walk's open recreate it as an empty partition at offset
+// zero next to wherever the data went.
+func TestColdWalkNeverRecreatesAReclaimedPartition(t *testing.T) {
+	ms := newRuntimeFakeMetastore()
+	ms.topics["orders"] = topic.Topic{Name: "orders", ID: "inc-1", Partitions: 2, RetentionMs: int64(time.Hour / time.Millisecond)}
+	g := coldTestLogs(t, ms)
+	appendAndCommit(t, g, "orders", 1, "x")
+	if err := g.ClosePartition("orders", 1); err != nil {
+		t.Fatalf("ClosePartition: %v", err)
+	}
+	ageSegments(t, g, "orders", 1, 2*time.Hour)
+	dir := storage.TopicPartitionDir(g.DataDir(), "orders", 1)
+
+	inGuard := make(chan struct{})
+	reclaimed := make(chan error, 1)
+	go func() {
+		// A reclaim's shape: remove the directory while holding the
+		// partition's produce mutex and the topic's guard, once the walk
+		// waits on that guard.
+		reclaimed <- g.ReplacePartitionDir("orders", 1, func() error {
+			close(inGuard)
+			deadline := time.Now().Add(5 * time.Second)
+			for guardWaiters(g, "orders") < 2 {
+				if time.Now().After(deadline) {
+					return errors.New("the walk never waited on the topic guard")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			return os.RemoveAll(dir)
+		})
+	}()
+	<-inGuard
+	swept, err := g.ColdRetentionOnce(context.Background(), time.Now())
+	if rerr := <-reclaimed; rerr != nil {
+		t.Fatalf("reclaim: %v", rerr)
+	}
+	if err != nil || swept != 0 {
+		t.Fatalf("walk swept=%d err=%v, want 0, nil", swept, err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the walk recreated %s after the reclaim removed it (stat err %v)", dir, err)
+	}
+	if n := g.OpenCount(); n != 0 {
+		t.Fatalf("OpenCount = %d, want 0", n)
 	}
 }

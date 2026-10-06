@@ -29,10 +29,16 @@ type fakeControllerStore struct {
 	leaderID           string
 	membersVersion     uint64 // RoutingMembersVersion; bump when members change
 	listMembersErr     error
-	leaderBarrierErr   error
-	leaderBarriers     int    // LeaderBarrier call count
-	onLeaderBarrier    func() // what the FSM applies once a leader barriers
-	onLockAssignments  func() // what lands between a sweep's list and its lock
+
+	barriers          int                        // Barrier calls
+	onBarrier         func(*fakeControllerStore) // runs inside a successful Barrier
+	abortLog          []string                   // AbortMove calls, "topic/partition→expected target"
+	abortRefused      bool                       // AbortMove fails
+	markedDead        []string                   // MarkMemberDead calls in order
+	leaderBarrierErr  error
+	leaderBarriers    int    // LeaderBarrier call count
+	onLeaderBarrier   func() // what the FSM applies once a leader barriers
+	onLockAssignments func() // what lands between a sweep's list and its lock
 	// entryTypesUsable makes the store answer the writes newer than
 	// 3.0.x (insert-only placement, prune) as a cluster whose members
 	// all apply them; false answers metastore.ErrEntryTypeNotYetUsable.
@@ -40,6 +46,7 @@ type fakeControllerStore struct {
 	orphans          []metastore.Assignment // OrphanAssignments
 	prunes           int                    // PruneAssignment calls
 	deadMarks        []string               // "id@observed" in call order
+	deadMarkErr      error                  // MarkMemberDeadObserved answers it and marks nothing
 	// staleAssignments is what ListAssignments answers for a topic, once,
 	// instead of the rows on record: a view that missed placements the
 	// state machine has already applied.
@@ -60,7 +67,14 @@ func newFakeControllerStore(memberIDs ...string) *fakeControllerStore {
 
 func (f *fakeControllerStore) IsLeader() bool        { return true }
 func (f *fakeControllerStore) LeaderCh() <-chan bool { return nil }
-func (f *fakeControllerStore) Barrier() error        { return f.barrierErr }
+func (f *fakeControllerStore) Barrier() error {
+	f.barriers++
+	if f.barrierErr == nil && f.onBarrier != nil {
+		f.onBarrier(f)
+	}
+	return f.barrierErr
+}
+
 func (f *fakeControllerStore) ListMembers() ([]metastore.Member, error) {
 	if f.listMembersErr != nil {
 		return nil, f.listMembersErr
@@ -137,6 +151,17 @@ func (f *fakeControllerStore) AssignPartition(_ context.Context, topicName strin
 	return nil
 }
 
+func (f *fakeControllerStore) AbortMove(_ context.Context, topicName string, partition int, expectedTarget string) error {
+	f.abortLog = append(f.abortLog, fmt.Sprintf("%s/%d→%s", topicName, partition, expectedTarget))
+	if f.abortRefused {
+		return errors.New("abort move: not applied")
+	}
+	if f.targets[topicName][partition] == expectedTarget {
+		f.targets[topicName][partition] = ""
+	}
+	return nil
+}
+
 func (f *fakeControllerStore) AssignPartitionIfAbsent(ctx context.Context, topicName string, partition int, owner, _ string) error {
 	if !f.entryTypesUsable {
 		return metastore.ErrEntryTypeNotYetUsable
@@ -167,7 +192,16 @@ func (f *fakeControllerStore) PruneAssignment(_ context.Context, topicName strin
 }
 
 func (f *fakeControllerStore) MarkMemberDeadObserved(_ context.Context, id string, observed int64) error {
+	if f.deadMarkErr != nil {
+		return f.deadMarkErr
+	}
+	f.markedDead = append(f.markedDead, id)
 	f.deadMarks = append(f.deadMarks, fmt.Sprintf("%s@%d", id, observed))
+	for i := range f.members {
+		if f.members[i].ID == id {
+			f.members[i].Status = metastore.MemberDead
+		}
+	}
 	return nil
 }
 

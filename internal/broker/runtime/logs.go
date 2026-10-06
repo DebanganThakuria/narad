@@ -4,8 +4,10 @@
 // Logs is the single owner of the map from (topic, partition) to
 // *storage.Log. Every other broker subpackage that needs to read or
 // write a partition's log goes through Logs — there is no sharing of
-// the underlying map. UpdateTopicRetention calls CloseTopic so the next
-// access reopens with fresh options; DeleteTopic purges (PurgeTopic).
+// the underlying map. The node that runs a retention alter calls
+// CloseTopic so the next access reopens with fresh options; every other
+// owner applies the alter to its open logs in place once its replica has
+// it (retention_follow.go). DeleteTopic purges (PurgeTopic).
 package runtime
 
 import (
@@ -19,6 +21,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -91,6 +95,27 @@ type Logs struct {
 	// alone.
 	coldMu    sync.Mutex
 	coldDefer map[logKey]time.Time
+
+	// quarantine is the inventory QuarantinedCopies last took (nil
+	// before the first): the quarantine gauges read it on scrape.
+	quarantine atomic.Pointer[QuarantineSummary]
+
+	// followOnce starts the background pass that applies retention
+	// alters to open logs (see startRetentionFollow) once.
+	followOnce sync.Once
+
+	// coldWalkOn is set while RunColdRetention runs an enabled walk.
+	// Idle eviction then closes retention logs with sealed segments too:
+	// the walk reaps them closed (see evictable).
+	coldWalkOn atomic.Bool
+
+	// coldPanics counts cold walk partitions whose open, sweep or close
+	// panicked and were contained (narad_cold_retention_panics_total).
+	coldPanics prometheus.Counter
+
+	// ownedHere, when set, tells the cold walk whether the local
+	// assignment gives a partition to this node (see SetOwnership).
+	ownedHere func(topicName string, idx int) bool
 }
 
 // logKey names one partition log: the key of logs, produceSync and
@@ -177,6 +202,7 @@ func NewLogs(dataDir string, storageOpts storage.Options, ms metastore.Metastore
 		guards:      make(map[string]*topicGuard),
 		produceSync: make(map[logKey]*sync.Mutex),
 		removeAll:   os.RemoveAll,
+		coldPanics:  newColdPanicsCounter(),
 	}
 	if v, ok := ms.(topicVersioner); ok {
 		g.versions = v
@@ -353,7 +379,13 @@ func (g *Logs) openGuarded(topicName string, idx int, walk bool) (l *storage.Log
 	if open {
 		if e.incarnation == incarnation {
 			// The record changed (an alter, or a version bump) but the
-			// incarnation did not: the open log is still the right one.
+			// incarnation did not: the open log is still the right one,
+			// under the record's retention. An alter reaches this node
+			// only through its replica (the node that ran it closed its
+			// own logs), so the bound is applied here, in place.
+			if g.metastore != nil {
+				g.applyRetention(topicName, idx, e.log, opts.Retention.MaxAge)
+			}
 			e.version.Store(version)
 			e.stamp()
 			return e.log, e, nil

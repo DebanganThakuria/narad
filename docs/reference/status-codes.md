@@ -149,7 +149,7 @@ A topic change is checked twice: by the node that receives it, and again by the 
 
 ## 409 Conflict {#status-409}
 
-**Where:** create, change or delete a topic, attach or detach a child, create a user, and produce to a delay child.
+**Where:** create, change or delete a topic, attach or detach a child, create a user, produce to a delay child, and (unreleased) decommission a node or abort a partition move.
 
 **Meaning:** the request conflicts with the current state:
 
@@ -161,6 +161,8 @@ A topic change is checked twice: by the node that receives it, and again by the 
 - `schema_base_version` is not the current schema version, the topic already holds 1000 schema versions, or the topic is an attached child whose schema its parent manages.
 - A schema change, a create with a schema, or a create-as-child or attach that adopts a parent's schema history would take the topic's stored history past 4 MiB, or every schema in the cluster past 256 MiB (**Unreleased**). The message names the budget and what is stored, and says when the history (or the cluster) is already over the budget, stored before it applied, so that no new version fits ([Compatibility](schema-rules.md#compatibility)).
 - A produce to a delay child, which only its parent can feed.
+- A decommission that could never complete safely (unreleased): the body's `reasons` lists each one with a `code` and a `message` ([Scale out and in](../operate/scaling.md#decommission)).
+- A move abort for a partition with no move in flight, or whose move now targets another node than `target`, or that the leader did not apply because the move finished first or is still in flight; the message names the owner and target (unreleased).
 
 **What to do:** read the error message and the current state. For a schema conflict, read the current `schema_version` and retry with it as the base. For a create that must succeed once, treat "already exists" as success when the existing topic has the settings you wanted.
 
@@ -282,7 +284,9 @@ The error message says which limit was hit, in the same order:
 - `/readyz` while the node should not take traffic, and `/healthz` once the node is shutting down.
 - A topic create or partition increase while every live node is being decommissioned (**Unreleased**): `every live member is being decommissioned, so no member can take new partitions; ...`. New partitions are never placed on a draining node. The request succeeds once a node that is not draining is alive: wait for restarting nodes, cancel a decommission, or add a node ([Decommission a node](../operate/scaling.md#decommission)).
 - Get a topic (**Unreleased**), when the answering node cannot read its own copy of the cluster metadata, for example while it catches up after a restart. A partition owner being down is not a `503`: the answer is a `200` with `partial: true`.
-- A produce to a topic with a schema whose validation found no free slot on the node within 5 seconds (**Unreleased**): `schema: validation capacity busy, retry`. The payload was not checked or stored; retry it, preferably through another node ([Validation capacity](schema-rules.md#validation-capacity)). Any other `503` on a produce comes from a proxy in front of Narad ([Troubleshooting](../operate/troubleshooting.md#produce-503)).
+- A produce to a topic with a schema whose validation found no free slot on the node within 5 seconds (**Unreleased**): `schema: validation capacity busy, retry`. The payload was not checked or stored; retry it, preferably through another node ([Validation capacity](schema-rules.md#validation-capacity)).
+- A move abort that reached the leader but whose outcome could not be read back from it (**Unreleased**). A retry is safe; list the moves to see where the move stands.
+- On a produce (single or batch) to a node being decommissioned (**Unreleased**): `this node is being decommissioned and takes no new produce; send it to another node`, with `Retry-After: 1`. Nothing was stored, so a retry on another node cannot duplicate. v3.0.1 never answers a produce with `503`. Any other `503` on a produce comes from a proxy in front of Narad ([Troubleshooting](../operate/troubleshooting.md#produce-503)).
 
 **Meaning:** the cluster cannot do this right now. Messages stored on a node that is down wait for it to come back; see the [failure matrix](../understand/delivery-contract.md#failure-matrix).
 

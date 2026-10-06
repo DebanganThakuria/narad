@@ -120,6 +120,14 @@ type MoveSession struct {
 	// worker saw (see carryFrom): a force-promote never promotes a copy
 	// that is behind it, even before this session reaches the source.
 	floorHWM int64
+	// modTimes are the source's segment modification times on this
+	// node's clock, stamped on the staged files once the copy is
+	// complete (move_segment_age.go).
+	modTimes map[int64]int64
+
+	// onCopied, when set, is told the bytes this session has fetched
+	// after every chunk it stages (the worker's MoveState).
+	onCopied func(int64)
 
 	// keepFrozen, when set, is called every keepFrozenEvery during
 	// Finalize to re-arm the source's handoff freeze (whose TTL is
@@ -145,6 +153,7 @@ func (m *PartitionMover) Begin(sourceAddr, topicName string, partition int, stag
 	return &MoveSession{
 		m: m, sourceAddr: sourceAddr, topic: topicName, partition: partition,
 		stagingDir: stagingDir, copied: map[int64]int64{}, synced: map[int64]int64{},
+		modTimes: map[int64]int64{},
 	}
 }
 
@@ -156,6 +165,7 @@ func (s *MoveSession) pass(ctx context.Context) (int64, messaging.PartitionTrans
 	if err != nil {
 		return 0, messaging.PartitionTransferInfo{}, fmt.Errorf("list segments: %w", err)
 	}
+	s.noteSegmentAges(info.Segments, info.ListedAtUnixNano, time.Now())
 	// Record the source's last-known visibility boundary before copying, so a
 	// force-promote after the source dies reproduces exactly this HWM.
 	s.lastHWM, s.lastCommitted, s.hasCommitted, s.sawInfo = info.HighWatermark, info.CommittedOffset, info.HasCommitted, true
@@ -165,6 +175,23 @@ func (s *MoveSession) pass(ctx context.Context) (int64, messaging.PartitionTrans
 	var newBytes int64
 	for _, seg := range info.Segments {
 		at, seen := s.copied[seg.BaseOffset]
+		if seen && seg.SizeBytes < at {
+			// Only a source on an older release lists a segment shorter
+			// than it listed before: its listing covered frames a commit
+			// had not made visible, and a failed commit discarded them.
+			// The staged bytes past the listed size are those frames, and
+			// the records committed at their offsets since go after the
+			// listed size, so they are cut before anything is appended.
+			if err := storage.TruncateSegmentFile(s.stagingDir, seg.BaseOffset, seg.SizeBytes); err != nil {
+				return 0, messaging.PartitionTransferInfo{}, fmt.Errorf("cut staged segment %d back to the source's %d bytes: %w", seg.BaseOffset, seg.SizeBytes, err)
+			}
+			s.m.logger.Warn("move: the source lists a segment shorter than the copy holds (it discarded records it never committed); cutting the staged segment back",
+				"topic", s.topic, "partition", s.partition, "source", s.sourceAddr,
+				"segment", seg.BaseOffset, "copied_bytes", at, "listed_bytes", seg.SizeBytes)
+			at = seg.SizeBytes
+			s.copied[seg.BaseOffset] = at
+			delete(s.synced, seg.BaseOffset)
+		}
 		if seg.SizeBytes == 0 && !seen {
 			// A retained log whose records have all aged out keeps one empty
 			// segment whose file name carries the partition's base offset.
@@ -191,6 +218,12 @@ func (s *MoveSession) pass(ctx context.Context) (int64, messaging.PartitionTrans
 			if len(chunk) == 0 {
 				break // source hasn't written this far yet; re-list next pass
 			}
+			// Never stage past what the listing reported: bytes written
+			// since may be frames the source has not committed, which a
+			// failed commit discards and other records replace.
+			if int64(len(chunk)) > want {
+				chunk = chunk[:want]
+			}
 			if at == 0 {
 				if err := storage.WriteSegmentFile(s.stagingDir, seg.BaseOffset, chunk); err != nil {
 					return 0, messaging.PartitionTransferInfo{}, err
@@ -200,6 +233,9 @@ func (s *MoveSession) pass(ctx context.Context) (int64, messaging.PartitionTrans
 			}
 			at += int64(len(chunk))
 			newBytes += int64(len(chunk))
+			if s.onCopied != nil {
+				s.onCopied(s.total + newBytes)
+			}
 		}
 		s.copied[seg.BaseOffset] = at
 		if seg.Sealed && at > 0 && at == seg.SizeBytes && s.synced[seg.BaseOffset] != at {
@@ -373,8 +409,23 @@ func (s *MoveSession) Finalize(ctx context.Context) (CopyResult, error) {
 	if lerr := lapsed(); lerr != nil {
 		return CopyResult{}, lerr
 	}
-	return s.finalizeStaged(last.HighWatermark, last.CommittedOffset, last.HasCommitted, last.AckedAhead, last.Sidecars)
+	res, err := s.finalizeStaged(last.HighWatermark, last.CommittedOffset, last.HasCommitted, last.AckedAhead, last.Sidecars)
+	if err != nil {
+		return CopyResult{}, &copyUnverifiedError{err: err}
+	}
+	return res, nil
 }
+
+// copyUnverifiedError is a Finalize whose drain completed under a freeze
+// that held, and whose staged copy then could not be made into, or did
+// not verify as, the partition at the source's high watermark
+// (finalizeStaged). Against a static source that is deterministic:
+// draining again under a new freeze reproduces it, so the worker copies
+// afresh once and then stops freezing the source (moveWorker.unverified).
+type copyUnverifiedError struct{ err error }
+
+func (e *copyUnverifiedError) Error() string { return e.err.Error() }
+func (e *copyUnverifiedError) Unwrap() error { return e.err }
 
 // ForcePromote completes a move WITHOUT the source: it promotes whatever the
 // destination already copied, reproducing the source's LAST-KNOWN high
@@ -429,9 +480,10 @@ func (s *MoveSession) carryFrom(old *MoveSession) {
 
 // finalizeStaged writes the target HWM, the consumer frontier and the
 // fan-out cursors onto the staged copy, verifies it recovers into a log
-// reaching that HWM, and returns the result. Shared by Finalize (frozen
-// live source) and ForcePromote (dead source). The verify is the
-// data-safety gate: it fails if the staged copy does not reach hwm.
+// ending exactly at that HWM, and returns the result. Shared by Finalize
+// (frozen live source) and ForcePromote (dead source). The verify is the
+// data-safety gate: it fails if the staged copy does not reach hwm, and
+// a copy past hwm is cut back to it first (verifyStaged).
 //
 // Every position is clamped to hwm first. A listing is consistent only
 // when the source read its frontier before its boundary; a source that
@@ -481,15 +533,20 @@ func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool, ac
 	if err := installSidecars(s.stagingDir, sidecars, hwm); err != nil {
 		return CopyResult{}, err
 	}
-	log, err := storage.NewLog(s.stagingDir, storage.Options{})
+	next, err := s.verifyStaged(hwm)
 	if err != nil {
-		return CopyResult{}, fmt.Errorf("verify: recover staged copy: %w", err)
+		return CopyResult{}, err
 	}
-	next := log.NextOffset()
-	_ = log.Close()
 	if next < hwm {
-		return CopyResult{}, fmt.Errorf("verify: staged copy next offset %d < source hwm %d", next, hwm)
+		return CopyResult{}, &copyBehindError{next: next, hwm: hwm}
 	}
+	if next > hwm {
+		return CopyResult{}, fmt.Errorf("verify: staged copy next offset %d > source hwm %d (a frame straddles the high watermark)", next, hwm)
+	}
+	// Retention and the cold walk judge a segment's age by its file's
+	// modification time: stamp the source's, or the move restarts every
+	// record's retention clock.
+	s.stampSegmentAges()
 	s.m.logger.Info("partition copy complete",
 		"topic", s.topic, "partition", s.partition, "source", s.sourceAddr,
 		"hwm", hwm, "bytes", s.total)
@@ -500,6 +557,78 @@ func (s *MoveSession) finalizeStaged(hwm, committed int64, hasCommitted bool, ac
 		BytesCopied:     s.total,
 		IncarnationID:   s.lastIncarnation,
 	}, nil
+}
+
+// copyBehindError is a staged copy that recovers short of the high
+// watermark it must reach: a force-promote whose copy is behind the
+// source's last high watermark, or a frozen drain that did not get every
+// record.
+type copyBehindError struct{ next, hwm int64 }
+
+func (e *copyBehindError) Error() string {
+	return fmt.Sprintf("verify: staged copy next offset %d < source hwm %d", e.next, e.hwm)
+}
+
+// verifyStaged recovers the staged copy and returns the offset after its
+// last record. A copy that recovers past hwm holds records the source
+// never committed (only a source on an older release lists them): it is
+// cut back to hwm (storage.CutStagedCopy) and recovered again. The
+// session's cursors are then lowered to the staged files as they are,
+// since recovery cuts a torn tail too, so the next pass appends where
+// the staged bytes end.
+func (s *MoveSession) verifyStaged(hwm int64) (int64, error) {
+	recoverNext := func() (int64, error) {
+		log, err := storage.NewLog(s.stagingDir, storage.Options{})
+		if err != nil {
+			return 0, fmt.Errorf("verify: recover staged copy: %w", err)
+		}
+		next := log.NextOffset()
+		_ = log.Close()
+		return next, nil
+	}
+	next, err := recoverNext()
+	if err != nil {
+		return 0, err
+	}
+	if next > hwm {
+		cut, err := storage.CutStagedCopy(s.stagingDir, hwm)
+		if err != nil {
+			return 0, fmt.Errorf("verify: cut the staged copy back to source hwm %d: %w", hwm, err)
+		}
+		if cut {
+			s.m.logger.Warn("move: the staged copy held records past the source's high watermark (a source on an older release listed records it never committed); cut back to it",
+				"topic", s.topic, "partition", s.partition, "source", s.sourceAddr, "hwm", hwm, "staged_next", next)
+			if next, err = recoverNext(); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if err := s.resyncCopied(); err != nil {
+		return 0, fmt.Errorf("verify: %w", err)
+	}
+	return next, nil
+}
+
+// resyncCopied lowers the session's per-segment cursors to the staged
+// files' sizes where those are smaller, and forgets the segments whose
+// files are gone, so the next pass copies from where the staged bytes
+// end.
+func (s *MoveSession) resyncCopied() error {
+	for base, at := range s.copied {
+		size, ok, err := storage.SegmentFileSize(s.stagingDir, base)
+		if err != nil {
+			return fmt.Errorf("stat staged segment %d: %w", base, err)
+		}
+		switch {
+		case !ok:
+			delete(s.copied, base)
+			delete(s.synced, base)
+		case size < at:
+			s.copied[base] = size
+			delete(s.synced, base)
+		}
+	}
+	return nil
 }
 
 // installSidecars writes the transferred fan-out cursor files into dir,

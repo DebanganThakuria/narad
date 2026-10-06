@@ -96,11 +96,19 @@ func buildBroker(
 	offsetCommitter.SetAheadSource(offsets.AheadSnapshot)
 	offsets.SetDropNotifier(offsetCommitter.Forget)
 	logs := runtime.NewLogs(cfg.Storage.DataDir, storageOpts, ms, m)
+	if store, ok := ms.(*metastore.Store); ok {
+		// The cold retention walk opens only partitions this node owns.
+		logs.SetOwnership(ownedHere(store, nodeID))
+	}
 	lifecycle := runtime.NewLifecycle(logs, offsetCommitter.Close)
 
-	if _, ok := ms.(*metastore.Store); !ok {
+	store, ok := ms.(*metastore.Store)
+	if !ok {
 		return nil, errors.New("broker: cluster coordination requires metastore.Store")
 	}
+	// A caps alter reaches this node through its replica unless it ran
+	// here; the replica's topic versions let live shards follow it.
+	offsets.SetCapsVersions(store)
 
 	ingressManager, err := ingress.OpenManager(cfg.Storage.DataDir, ingressWALOptions(cfg.Storage))
 	if err != nil {
@@ -161,6 +169,17 @@ func buildBroker(
 	}, nil
 }
 
+// ownedHere reports whether the local assignment gives a partition to
+// nodeID, the way the messaging engine decides it for produce and
+// consume: an unassigned partition, or one whose assignment cannot be
+// read, is not this node's.
+func ownedHere(store *metastore.Store, nodeID string) func(topicName string, idx int) bool {
+	return func(topicName string, idx int) bool {
+		a, err := store.GetAssignment(topicName, idx)
+		return err == nil && a.OwnerID == nodeID
+	}
+}
+
 // capsResolver returns a per-topic consumer caps lookup that falls back to
 // the configured defaults when the topic leaves a cap unset.
 func capsResolver(ms metastore.Metastore, defaults config.TopicConfig) consumer.CapsResolver {
@@ -194,7 +213,10 @@ func healthHandler(ctx context.Context, br broker.Broker, logs *runtime.Logs, ms
 	return mux
 }
 
-func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, logs *runtime.Logs, ms *metastore.Store, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, auth *security.Authenticator, log *slog.Logger) *httpserver.Server {
+// buildAPIServer builds the client API server. Each of extra adjusts
+// the handlers' dependencies before the handlers are built (serve wires
+// the cluster stack's drain flag and member status this way).
+func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, logs *runtime.Logs, ms *metastore.Store, router handlers.Router, m *metrics.Metrics, reg *prometheus.Registry, auth *security.Authenticator, log *slog.Logger, extra ...func(*handlers.Deps)) *httpserver.Server {
 	deps := handlers.Deps{
 		Broker:         br,
 		Logs:           logs,
@@ -209,6 +231,9 @@ func buildAPIServer(ctx context.Context, cfg *config.Config, br broker.Broker, l
 		// bcrypt concurrency bound (a nil *Authenticator must not become
 		// a non-nil interface).
 		deps.Passwords = auth
+	}
+	for _, fn := range extra {
+		fn(&deps)
 	}
 	handlerSet := handlers.New(deps)
 	opts := apiRouterOptions(cfg.HTTP)

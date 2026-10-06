@@ -202,7 +202,9 @@ func (l *Log) now() time.Time { return l.clock() }
 // records for longer than the retention roll age, so the next write
 // should start a fresh segment. Caller must hold rwmu (either side).
 func (l *Log) segmentAgedOutLocked(active *segment) bool {
-	rollAge := l.opts.Retention.rollAge()
+	// The live bound: the topic's retention may have been altered since
+	// the log opened (SetRetentionMaxAge).
+	rollAge := l.reaper.rollAgeNow()
 	if rollAge <= 0 || active.sizeBytes == 0 || active.firstWriteAt.IsZero() {
 		return false
 	}

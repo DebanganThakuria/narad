@@ -174,5 +174,5 @@ kubectl rollout restart statefulset/narad -n narad
 ## Next steps
 
 - [Production checklist](production-checklist.md): secure and size the cluster before it takes real traffic.
-- [Monitor and alert](monitoring.md): scrape the metrics and set up the six alerts.
+- [Monitor and alert](monitoring.md): scrape the metrics and set up the seven alerts.
 - [Helm values reference](../reference/helm-values.md): look up every chart value and the ports and probes.

@@ -703,7 +703,7 @@ paths:
         '500':
           description: The node could not write to its ingress WAL. It answers every produce this way until it restarts.
         '503':
-          description: Unreleased. The topic has a schema and every schema validation slot on the node stayed busy for 5 seconds; nothing was checked or stored. Retry, preferably through another node.
+          description: 'Unreleased. Nothing was checked or stored; retry through another node. Either this node is being decommissioned and takes no new produce (with `Retry-After: 1`), or the topic has a schema and every schema validation slot on the node stayed busy for 5 seconds.'
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST \
@@ -769,7 +769,7 @@ paths:
         '500':
           description: The node could not write to its ingress WAL.
         '503':
-          description: The topic has a schema and every schema validation slot on the node stayed busy for 5 seconds; nothing was checked or stored. Retry, preferably through another node.
+          description: 'Unreleased. Nothing was checked or stored; retry through another node. Either this node is being decommissioned and takes no new produce (with `Retry-After: 1`), or the topic has a schema and every schema validation slot on the node stayed busy for 5 seconds.'
       x-narad-examples:
         - request: |
             curl -i -u "$AUTH" -X POST "$NARAD/v1/topics/orders/produce/batch" \
@@ -1250,9 +1250,26 @@ paths:
       summary: List cluster members
       description: |
         Lists every node the cluster knows, alive or dead, with how many
-        partitions it owns and how many are moving off it.
+        partitions it owns and how many are moving off it, whether it is a
+        Raft voter or the leader, how long ago its last heartbeat was
+        stamped, and why a decommission in progress is blocked. Answered
+        from the receiving node's replica without asking any other node,
+        unless `detail` is set.
       x-narad-grant: |
         `admin`.
+      parameters:
+        - name: detail
+          in: query
+          x-narad-since: unreleased
+          description: |
+            `true` also asks every member for its own status (dispatch
+            backlog, quarantined copies, move workers), all at once and
+            within 2 seconds in total. A member that cannot answer gets a
+            `status_error` instead; a v3.0.1 node is reported as an older
+            release that cannot report its status.
+          schema:
+            type: boolean
+            default: false
       responses:
         '200':
           description: The members, in ID order.
@@ -1262,6 +1279,8 @@ paths:
                 $ref: '#/components/schemas/MemberList'
         '401':
           description: Missing or wrong credentials.
+        '400':
+          description: '`detail` is not `true` or `false`.'
         '403':
           description: Not `admin`.
       x-narad-examples:
@@ -1269,19 +1288,33 @@ paths:
             curl -i -u "$AUTH" "$NARAD/v1/cluster/members"
           response: |
             HTTP/1.1 200 OK
-            Content-Length: 130
+            Content-Length: 183
             Content-Type: application/json
-            Date: Mon, 28 Sep 2026 19:31:44 GMT
+            Date: Mon, 05 Oct 2026 19:14:29 GMT
 
-            {"members":[{"id":"narad-0","addr":"127.0.0.1:17970","status":"alive","draining":false,"owned_partitions":6,"outbound_moves":0}]}
+            {"members":[{"id":"narad-0","addr":"127.0.0.1:17970","status":"alive","draining":false,"owned_partitions":4,"outbound_moves":0,"voter":true,"leader":true,"heartbeat_age_seconds":2}]}
   /v1/cluster/moves:
     get:
       operationId: listMoves
       tags: [Cluster]
       summary: List partition moves
-      description: Lists every partition that is moving between nodes right now.
+      description: |
+        Lists every partition that is moving between nodes right now, with
+        each side's liveness and why a move is blocked. Abort one with
+        `POST /v1/cluster/moves/{topic}/{partition}/abort`.
       x-narad-grant: |
         `admin`.
+      parameters:
+        - name: detail
+          in: query
+          x-narad-since: unreleased
+          description: |
+            `true` also asks each move's destination for its move worker's
+            own report: phase, copy attempts, copied bytes, last error and
+            why it is blocked. Within 2 seconds in total.
+          schema:
+            type: boolean
+            default: false
       responses:
         '200':
           description: The moves, by topic and partition.
@@ -1291,6 +1324,8 @@ paths:
                 $ref: '#/components/schemas/MoveList'
         '401':
           description: Missing or wrong credentials.
+        '400':
+          description: '`detail` is not `true` or `false`.'
         '403':
           description: Not `admin`.
       x-narad-examples:
@@ -1298,11 +1333,11 @@ paths:
             curl -i -u "$AUTH" "$NARAD/v1/cluster/moves"
           response: |
             HTTP/1.1 200 OK
-            Content-Length: 13
+            Content-Length: 119
             Content-Type: application/json
-            Date: Mon, 28 Sep 2026 19:31:44 GMT
+            Date: Mon, 05 Oct 2026 19:15:09 GMT
 
-            {"moves":[]}
+            {"moves":[{"topic":"orders","partition":3,"from":"narad-0","to":"narad-2","from_status":"alive","to_status":"alive"}]}
   /v1/cluster/members/{id}/decommission:
     parameters:
       - name: id
@@ -1317,20 +1352,57 @@ paths:
       summary: Decommission a node
       description: |
         Marks the node as draining. The cluster moves every partition it
-        owns onto the other nodes and, once it owns none, removes it from
+        owns onto the other nodes and, once it owns none and its ingress WAL
+        has handed every accepted message to its owner, removes it from
         the Raft voters. Remove the node only after that; the steps are in
-        [Scale out and in](../operate/scaling.md#decommission).
+        [Scale out and in](../operate/scaling.md#decommission). While it
+        drains, the node answers produce with `503`.
+
+        The request is checked first, on the node that receives it and
+        again on the leader. A decommission that could never complete
+        safely is refused with `409` and every reason, and nothing changes:
+        `below_min_voters` (fewer than three voters would remain),
+        `no_healthy_majority` (the voters left alive would not be a
+        majority), `no_receivers` (no other alive node can take its
+        partitions) or `owner_dead` (the node is dead and owns partitions).
       x-narad-grant: |
         `admin`.
+      parameters:
+        - name: dry_run
+          in: query
+          x-narad-since: unreleased
+          description: |
+            `true` answers `200` with what a decommission would do and
+            changes nothing. Answered by the receiving node, never
+            forwarded.
+          schema:
+            type: boolean
+            default: false
       responses:
+        '200':
+          x-narad-since: unreleased
+          description: '`dry_run=true`: the verdict. Nothing changed.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecommissionDryRun'
         '204':
           description: Marked as draining.
+        '400':
+          description: '`dry_run` is not `true` or `false`.'
         '401':
           description: Missing or wrong credentials.
         '403':
           description: Not `admin`.
         '404':
           description: No member has this ID.
+        '409':
+          x-narad-since: unreleased
+          description: The decommission could never complete safely. The body names every reason; nothing changed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecommissionRefusal'
         '415':
           description: No accepted `Content-Type` and no `X-Narad-Client` header.
         '503':
@@ -1355,6 +1427,8 @@ paths:
       responses:
         '204':
           description: No longer draining.
+        '400':
+          description: '`dry_run` was given: a cancel cannot be dry-run.'
         '401':
           description: Missing or wrong credentials.
         '403':
@@ -1370,6 +1444,76 @@ paths:
           response: |
             HTTP/1.1 204 No Content
             Date: Mon, 28 Sep 2026 19:31:44 GMT
+  /v1/cluster/moves/{topic}/{partition}/abort:
+    parameters:
+      - $ref: '#/components/parameters/TopicPath'
+      - name: partition
+        in: path
+        required: true
+        description: The partition number.
+        schema:
+          type: integer
+          minimum: 0
+    post:
+      operationId: abortMove
+      tags: [Cluster]
+      summary: Abort a partition move
+      x-narad-since: unreleased
+      description: |
+        Clears the move's target, so the partition stays with its owner
+        and keeps serving there. The destination discards its copy. The
+        abort is a compare-and-set on the leader: a move re-planned to
+        another node in the meantime is left alone. The answer is read
+        back from the leader's assignment after the abort, so a move whose
+        flip committed before the abort reached the leader is refused
+        with `409`, never reported as aborted. The cluster may plan a move
+        for the partition again later. An abort that took effect is
+        audited as `cluster.move.abort`; one whose outcome could not be
+        read back is audited with `outcome unknown`.
+      x-narad-grant: |
+        `admin`.
+      parameters:
+        - name: target
+          in: query
+          description: |
+            The destination you mean, as `GET /v1/cluster/moves` showed
+            it. When the move now targets another node, the request is
+            refused with `409` and nothing changes.
+          schema:
+            type: string
+      responses:
+        '202':
+          description: The leader cleared the target; the partition stays with its owner.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MoveAbort'
+        '400':
+          description: The partition is not a number.
+        '401':
+          description: Missing or wrong credentials.
+        '403':
+          description: Not `admin`.
+        '404':
+          description: The partition has no assignment.
+        '409':
+          description: No move is in flight for the partition, or it targets another node than `target`, or the leader's assignment after the abort shows the move finished first (another node owns the partition now) or still in flight; the message names the owner and target. Nothing was aborted.
+        '415':
+          description: No accepted `Content-Type` and no `X-Narad-Client` header.
+        '503':
+          description: The cluster has no leader to write the change, or the abort reached the leader but whether it cleared the target could not be read back; list the moves to see.
+      x-narad-examples:
+        - request: |
+            curl -i -u "$AUTH" -X POST \
+              "$NARAD/v1/cluster/moves/orders/3/abort?target=narad-2" \
+              -H "Content-Type: application/json"
+          response: |
+            HTTP/1.1 202 Accepted
+            Content-Length: 240
+            Content-Type: application/json
+            Date: Mon, 05 Oct 2026 19:15:09 GMT
+
+            {"move":{"topic":"orders","partition":3,"from":"narad-0","to":"narad-2","from_status":"alive","to_status":"alive"},"note":"the move's target was cleared; the partition stays with its owner, and the controller may plan a move for it again"}
   /healthz:
     get:
       operationId: healthz
@@ -1956,26 +2100,221 @@ components:
               outbound_moves:
                 type: integer
                 description: Partitions moving off the node.
+              voter:
+                type: boolean
+                x-narad-since: unreleased
+                description: '`true` when the node is a Raft voter.'
+              leader:
+                type: boolean
+                x-narad-since: unreleased
+                description: '`true` for the Raft leader.'
+              heartbeat_age_seconds:
+                type: integer
+                x-narad-since: unreleased
+                description: Seconds since the leader last stamped the node's heartbeat, by the answering node's clock.
+              decommission_blocked:
+                type: array
+                x-narad-since: unreleased
+                description: For a draining node, every reason its decommission cannot progress that the cluster metadata shows. Absent when none. The leader also logs each reason and exports `narad_decommission_blocked`.
+                items:
+                  $ref: '#/components/schemas/DecommissionReason'
+              node_status:
+                $ref: '#/components/schemas/NodeStatus'
+              status_error:
+                type: string
+                x-narad-since: unreleased
+                description: With `detail=true`, why the node's own status could not be read.
+    NodeStatus:
+      type: object
+      x-narad-since: unreleased
+      description: With `detail=true`, the node's own report about itself.
+      properties:
+        node:
+          type: string
+          description: Node ID.
+        draining:
+          type: boolean
+          description: The node's own view of its draining mark.
+        produce_in_flight:
+          type: integer
+          description: Client produce requests the node admitted and has not answered yet. Once it is draining it admits none, and a decommission waits for 0.
+        dispatch_backlog:
+          type: integer
+          description: Messages its ingress WAL accepted and has not yet handed to their partition owners. A decommission waits for 0.
+        quarantine:
+          type: object
+          description: Partition copies the node set aside instead of deleting ([Troubleshooting](../operate/troubleshooting.md#quarantined-copies)).
+          properties:
+            copies:
+              type: integer
+              description: Every set-aside copy.
+            bytes:
+              type: integer
+              description: Their total size.
+            list:
+              type: array
+              description: The first 100 copies.
+              items:
+                type: object
+                properties:
+                  kind:
+                    type: string
+                    description: '`partition`, `topic_incarnation` or `staging`.'
+                  topic:
+                    type: string
+                    description: Topic name.
+                  partition:
+                    type: integer
+                    description: Partition number, `-1` for a whole topic directory.
+                  dir:
+                    type: string
+                    description: The copy's directory on the node.
+                  bytes:
+                    type: integer
+                    description: Its size.
+                  mod_time:
+                    type: string
+                    description: When it was last modified, RFC 3339.
+        moves:
+          type: array
+          description: The moves this node runs as the destination.
+          items:
+            $ref: '#/components/schemas/MoveWorker'
+    MoveWorker:
+      type: object
+      x-narad-since: unreleased
+      description: A destination's own report of one move.
+      properties:
+        topic:
+          type: string
+          description: Topic name.
+        partition:
+          type: integer
+          description: Partition number.
+        source:
+          type: string
+          description: The node the copy comes from.
+        target:
+          type: string
+          description: This node.
+        started_at:
+          type: string
+          description: When the worker started, RFC 3339.
+        phase:
+          type: string
+          enum: [copying, frozen, flip_pending, waiting_for_source, blocked]
+          description: What the worker is doing.
+        attempts:
+          type: integer
+          description: Copy attempts against a live source.
+        last_error:
+          type: string
+          description: The last thing that failed.
+        copied_bytes:
+          type: integer
+          description: Bytes the current copy fetched.
+        blocked:
+          type: string
+          enum: [copy_unverifiable, source_dead_copy_behind]
+          description: Why the move cannot finish on its own. Absent while it can.
+    DecommissionReason:
+      type: object
+      x-narad-since: unreleased
+      properties:
+        code:
+          type: string
+          enum: [below_min_voters, no_healthy_majority, move_target, dispatch_backlog, node_status_unavailable, no_receivers, owner_dead, move_budget_full, leader_transfer]
+          description: The reason, as `narad_decommission_blocked` labels it ([Troubleshooting](../operate/troubleshooting.md#decommission-blocked)).
+        message:
+          type: string
+          description: What it means here and what to do.
+    DecommissionRefusal:
+      type: object
+      x-narad-since: unreleased
+      properties:
+        error:
+          type: string
+          description: The first reason, in a sentence.
+        reasons:
+          type: array
+          items:
+            $ref: '#/components/schemas/DecommissionReason'
+    DecommissionDryRun:
+      type: object
+      x-narad-since: unreleased
+      properties:
+        member:
+          type: string
+          description: Node ID.
+        would_decommission:
+          type: boolean
+          description: '`true` when a decommission would be accepted.'
+        reasons:
+          type: array
+          description: Why it would be refused; empty when it would not.
+          items:
+            $ref: '#/components/schemas/DecommissionReason'
+        voter:
+          type: boolean
+          description: '`true` when the node is a Raft voter.'
+        owned_partitions:
+          type: integer
+          description: Partitions the node owns, all of which would move off it.
+        inbound_moves:
+          type: integer
+          description: Moves aimed at the node; a decommission clears them.
     MoveList:
       type: object
       properties:
         moves:
           type: array
           items:
-            type: object
-            properties:
-              topic:
-                type: string
-                description: Topic name.
-              partition:
-                type: integer
-                description: Partition number.
-              from:
-                type: string
-                description: Node that owns the partition now.
-              to:
-                type: string
-                description: Node the partition is moving to.
+            $ref: '#/components/schemas/Move'
+    Move:
+      type: object
+      properties:
+        topic:
+          type: string
+          description: Topic name.
+        partition:
+          type: integer
+          description: Partition number.
+        from:
+          type: string
+          description: Node that owns the partition now.
+        to:
+          type: string
+          description: Node the partition is moving to.
+        from_status:
+          type: string
+          enum: [alive, dead, draining, not_a_member]
+          x-narad-since: unreleased
+          description: The owner's liveness.
+        to_status:
+          type: string
+          enum: [alive, dead, draining, not_a_member]
+          x-narad-since: unreleased
+          description: The destination's liveness.
+        blocked:
+          type: string
+          enum: [source_dead, target_dead, target_not_member]
+          x-narad-since: unreleased
+          description: Why the move cannot progress as things stand. Absent while it can. A dead source finishes only if the destination can force-promote a complete copy; the leader clears a move to a dead destination after two minutes.
+        worker:
+          $ref: '#/components/schemas/MoveWorker'
+        worker_error:
+          type: string
+          x-narad-since: unreleased
+          description: With `detail=true`, why the destination's report could not be read.
+    MoveAbort:
+      type: object
+      x-narad-since: unreleased
+      properties:
+        move:
+          $ref: '#/components/schemas/Move'
+        note:
+          type: string
+          description: What happens next.
     Status:
       type: object
       properties:

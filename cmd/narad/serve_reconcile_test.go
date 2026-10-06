@@ -11,14 +11,23 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/debanganthakuria/narad/internal/broker/runtime"
+	"github.com/debanganthakuria/narad/internal/cluster"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/errs"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/persistence/storage"
 	nodewire "github.com/debanganthakuria/narad/internal/protocol/node"
 )
 
@@ -118,5 +127,152 @@ func TestConfirmedAbsentOnLeader(t *testing.T) {
 	}
 	if view.barriers != 1 || selfPeer.calls != 0 {
 		t.Fatalf("self-leader path: barriers=%d rpcs=%d, want 1/0", view.barriers, selfPeer.calls)
+	}
+}
+
+// newCaughtUpStore is a single-node Raft metastore that leads itself and
+// has applied everything it committed.
+func newCaughtUpStore(t *testing.T) *metastore.Store {
+	t.Helper()
+	s, err := metastore.New(metastore.Config{NodeID: "n0", DataDir: t.TempDir(), BindAddr: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatalf("metastore.New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	waitForLeadership(t, s)
+	if !waitMetastoreCaughtUp(context.Background(), s, 5*time.Second) {
+		t.Fatal("replica never caught up")
+	}
+	return s
+}
+
+// logsReclaimer reaches a runtime.Logs the way the move runner reaches
+// the broker: the orphan reclaim through the log map, nothing else.
+type logsReclaimer struct{ *runtime.Logs }
+
+func (logsReclaimer) ReclaimMovedPartition(context.Context, string, int) error {
+	return errors.New("not used by the orphan reclaim")
+}
+
+// A boot whose replica catches up only after the bounded startup wait
+// gives up forfeits the create-gated orphan sweep. The leader-confirmed
+// reclaim still runs once the replica is current: a deleted topic's
+// directory whose purge never reached this node, and a quarantined copy
+// of a deleted incarnation, go; a live topic stays.
+func TestStartupOrphanSweepRunsOnceTheReplicaCatchesUp(t *testing.T) {
+	ctx := context.Background()
+	store := newCaughtUpStore(t)
+	dataDir := t.TempDir()
+	logs := runtime.NewLogs(dataDir, storage.Options{}, store, nil)
+	t.Cleanup(func() { _ = logs.CloseAll() })
+	for _, tp := range []topic.Topic{
+		{Name: "orders", ID: "1111111111111111", Partitions: 1},
+		{Name: "keep", ID: "2222222222222222", Partitions: 1},
+	} {
+		if err := store.CreateTopic(ctx, tp); err != nil {
+			t.Fatal(err)
+		}
+		l, err := logs.Get(tp.Name, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range 20 {
+			if _, err := l.Append(storage.EncodeKeyedRecord("k", 1, []byte(strings.Repeat("x", 64)))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := l.CommitDurable(0, 19); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale := storage.StaleTopicDir(dataDir, "keep", "3333333333333333")
+	if err := storage.WriteTopicIncarnation(stale, "3333333333333333"); err != nil {
+		t.Fatal(err)
+	}
+	// The delete commits; its purge never reaches this node.
+	if err := logs.CloseTopic("orders"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteTopic(ctx, "orders"); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := startupCatchUpWait
+	startupCatchUpWait = func(ctx context.Context, s *metastore.Store, timeout time.Duration) bool {
+		if timeout > 0 {
+			return false // the replica lagged past the bounded wait
+		}
+		return orig(ctx, s, timeout)
+	}
+	t.Cleanup(func() { startupCatchUpWait = orig })
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if runStartupReconcile(ctx, store, logs, nil, dataDir, "n0", log) {
+		t.Fatal("runStartupReconcile reported caught up through a wait that timed out")
+	}
+	if _, err := os.Stat(storage.TopicDir(dataDir, "orders")); err != nil {
+		t.Fatalf("setup: the forfeited startup sweep touched the deleted topic's directory: %v", err)
+	}
+
+	runner := cluster.NewMoveRunner(store, "n0", dataDir, (*cluster.PeerClient)(nil), logsReclaimer{logs}, nil, log, cluster.MoveConfig{})
+	var wg sync.WaitGroup
+	if !finishLateStartup(ctx, store, logs, runner, wg.Go, "n0", log) {
+		t.Fatal("finishLateStartup gave up on a caught-up replica")
+	}
+	wg.Wait()
+	for _, dir := range []string{storage.TopicDir(dataDir, "orders"), stale} {
+		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s survived the deferred sweep (%v)", dir, err)
+		}
+	}
+	l, err := logs.Get("keep", 0)
+	if err != nil || l.NextOffset() != 20 {
+		t.Fatalf("the live topic after the deferred sweep: err %v", err)
+	}
+}
+
+// A restart leaves the error line each set-aside logged behind, so
+// startup lists every quarantined copy at error level (a bounded number
+// of lines, then the totals) and takes the inventory the quarantine
+// gauges report. A node with none logs nothing.
+func TestStartupLogsQuarantinedCopies(t *testing.T) {
+	dataDir := t.TempDir()
+	logs := runtime.NewLogs(dataDir, storage.Options{}, nil, nil)
+	var out strings.Builder
+	log := slog.New(slog.NewJSONHandler(&out, nil))
+
+	logQuarantinedCopies(logs, log)
+	if out.Len() != 0 {
+		t.Fatalf("a node with no quarantined copies logged:\n%s", out.String())
+	}
+
+	n := startupQuarantineLines + 5
+	for i := range n {
+		dir := filepath.Join(storage.TopicDir(dataDir, "orders"), fmt.Sprintf("p%05d.quarantine", i))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "00000000000000000000.log"), make([]byte, 3), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logQuarantinedCopies(logs, log)
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != startupQuarantineLines+1 {
+		t.Fatalf("logged %d lines for %d copies, want %d listed and a summary:\n%s", len(lines), n, startupQuarantineLines, out.String())
+	}
+	for _, line := range lines {
+		if !strings.Contains(line, `"level":"ERROR"`) {
+			t.Fatalf("a quarantine line below error level: %s", line)
+		}
+	}
+	if !strings.Contains(lines[0], `"dir":"`+filepath.Join(storage.TopicDir(dataDir, "orders"), "p00000.quarantine")+`"`) || !strings.Contains(lines[0], "only instance") {
+		t.Fatalf("the first copy's line lacks its path or the warning: %s", lines[0])
+	}
+	if summary := lines[len(lines)-1]; !strings.Contains(summary, fmt.Sprintf(`"copies":%d`, n)) || !strings.Contains(summary, fmt.Sprintf(`"bytes":%d`, 3*n)) {
+		t.Fatalf("the summary line lacks the totals: %s", summary)
+	}
+	if sum, ok := logs.LastQuarantinedCopies(); !ok || sum.Count != n {
+		t.Fatalf("the inventory the gauges read = %+v (%v), want %d copies", sum, ok, n)
 	}
 }

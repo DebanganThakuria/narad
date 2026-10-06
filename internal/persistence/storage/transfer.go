@@ -26,6 +26,12 @@ type SegmentInfo struct {
 	BaseOffset int64 `json:"base_offset"`
 	SizeBytes  int64 `json:"size_bytes"`
 	Sealed     bool  `json:"sealed"`
+	// ModTimeUnixNano is the segment file's modification time, which
+	// retention and the cold walk judge its age by. A destination stamps
+	// its copy with the same age on its own clock (see the transfer
+	// info's listing time). Zero from an older source: the copy keeps
+	// the time it was written.
+	ModTimeUnixNano int64 `json:"mod_time_unix_nano,omitempty"`
 }
 
 // ListPartitionSegments enumerates a partition directory's segments in
@@ -58,7 +64,8 @@ func ListPartitionSegments(partitionDir string) ([]SegmentInfo, error) {
 			BaseOffset: base,
 			SizeBytes:  fi.Size(),
 			// The last (highest base offset) segment is the active one.
-			Sealed: i < len(names)-1,
+			Sealed:          i < len(names)-1,
+			ModTimeUnixNano: fi.ModTime().UnixNano(),
 		})
 	}
 	return out, nil

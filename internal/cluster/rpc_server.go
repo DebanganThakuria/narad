@@ -96,6 +96,10 @@ type RPCServer struct {
 	tokens *tokenHolder
 	demand localDemand
 
+	// nodeStatus builds this node's OpNodeStatus answer (SetNodeStatus);
+	// nil answers the op as unsupported.
+	nodeStatus func(context.Context) nodewire.NodeStatus
+
 	deliveriesMu   sync.Mutex
 	deliveries     map[requestKey]delivery
 	deliveryExpiry []deliveryDeadline
@@ -597,6 +601,8 @@ func (s *RPCServer) serveOther(ctx context.Context, op nodewire.Operation, paylo
 	case nodewire.OpDeleteTopic:
 		// Ungated: broadcasts the purge to the partition owners.
 		res = s.handleDeleteTopic(payload)
+	case nodewire.OpNodeStatus:
+		res = s.withSlot(ctx, s.controlSem, func() nodewire.Response { return s.handleNodeStatus(ctx, payload) })
 	default:
 		handle, ok := s.controlHandler(op)
 		if !ok {
