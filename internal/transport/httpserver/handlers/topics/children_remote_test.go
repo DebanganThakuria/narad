@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -529,5 +530,33 @@ func TestRemoteChildWritesAreRateLimitedPerNode(t *testing.T) {
 	// Another node (another handler set) has its own budget.
 	if res := post(t, PauseChild(remoteSet(remoteBroker(), w)), "/", `{}`, &adminUser, pv...); res.Code != 200 {
 		t.Fatalf("another node's first write: %d", res.Code)
+	}
+}
+
+// The node the client called and the leader each audit a remote child's
+// detach or delete; the caller's line carries the request_id it sent to
+// the leader, so the two lines can be joined (an abandonment with
+// --force included).
+func TestRemoteDetachAndDeleteAuditLinesCarryTheRequestID(t *testing.T) {
+	w := &recordingWriter{res: nodewire.Response{Status: http.StatusNoContent}}
+	s := remoteSet(remoteBroker(), w)
+	var logs bytes.Buffer
+	s.Deps.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	s = handlers.New(s.Deps)
+	s.Deps.Remote.Writer = w
+
+	del(t, DetachChild(s), "/?force=true", &adminUser, "parent", "orders", "child", "orders-to-b")
+	req, _ := w.last(t)
+	lines := auditLines(t, &logs)
+	if len(lines) != 1 || lines[0]["event"] != "remote_child.delete" || lines[0]["request_id"] != req.RequestID || req.RequestID == "" || lines[0]["force"] != true {
+		t.Fatalf("detach audit = %v, want remote_child.delete with request_id %q and force", lines, req.RequestID)
+	}
+
+	logs.Reset()
+	del(t, Delete(s), "/", &adminUser, "topic", "orders-to-b")
+	req, _ = w.last(t)
+	lines = auditLines(t, &logs)
+	if len(lines) != 1 || lines[0]["event"] != "topic.delete" || lines[0]["request_id"] != req.RequestID || req.RequestID == "" {
+		t.Fatalf("delete audit = %v, want topic.delete with request_id %q", lines, req.RequestID)
 	}
 }

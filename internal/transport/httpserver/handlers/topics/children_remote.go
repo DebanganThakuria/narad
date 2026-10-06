@@ -148,6 +148,7 @@ const (
 	eventRemoteChildPause  = "remote_child.pause"
 	eventRemoteChildResume = "remote_child.resume"
 	eventRemoteChildSkip   = "remote_child.skip"
+	eventRemoteChildDelete = "remote_child.delete"
 )
 
 // attachTimeout bounds an attach: every member's checks (15 s) plus the
@@ -425,10 +426,10 @@ const deleteTimeout = 45 * time.Second
 // topic manager's detach. A local child never comes here: its detach
 // takes the plain path, and a leader that finds a stub where this
 // node's replica showed a local child refuses it (409) instead.
-func detachThroughLeader(s *handlers.Set, w http.ResponseWriter, r *http.Request, parent, child string, force bool) {
+func detachThroughLeader(s *handlers.Set, w http.ResponseWriter, r *http.Request, parent, child string, force bool, requestID string) {
 	handlers.SetNoStore(w)
 	body := map[string]any{"parent": parent, "child": child, "force": force, "expect_remote": true}
-	res, err := forwardRemoteWrite(r.Context(), s, nodewire.RemoteSubDetach, callerName(r), remote.NewRequestID(), body, deleteTimeout)
+	res, err := forwardRemoteWrite(r.Context(), s, nodewire.RemoteSubDetach, callerName(r), requestID, body, deleteTimeout)
 	if err != nil {
 		writeForwardError(s, w, err)
 		return
@@ -441,10 +442,10 @@ func detachThroughLeader(s *handlers.Set, w http.ResponseWriter, r *http.Request
 // unshipped check on the leader before the topic manager's delete. Any
 // other topic takes the plain path, and a leader that finds a remote
 // child this node's replica did not show refuses it (409) instead.
-func deleteThroughLeader(s *handlers.Set, w http.ResponseWriter, r *http.Request, name string, force bool) {
+func deleteThroughLeader(s *handlers.Set, w http.ResponseWriter, r *http.Request, name string, force bool, requestID string) {
 	handlers.SetNoStore(w)
 	body := map[string]any{"topic": name, "force": force, "expect_remote": true}
-	res, err := forwardRemoteWrite(r.Context(), s, nodewire.RemoteSubTopicDelete, callerName(r), remote.NewRequestID(), body, deleteTimeout)
+	res, err := forwardRemoteWrite(r.Context(), s, nodewire.RemoteSubTopicDelete, callerName(r), requestID, body, deleteTimeout)
 	if err != nil {
 		writeForwardError(s, w, err)
 		return

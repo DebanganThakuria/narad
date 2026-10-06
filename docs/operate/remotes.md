@@ -274,7 +274,7 @@ Every remotes request writes one `component=audit` line on the node that took it
 {"msg":"audit","component":"audit","event":"remote.create","actor":"admin","target":"b","outcome":"ok","status":201,"request_id":"9228e702f02e464c","host":"localhost","fingerprint":"ced1ea5d18d1"}
 ```
 
-A line carries the URL's host, never the URL, the username or the password. A forced delete of a remote child records what it abandoned (`abandoned_lag_messages`, `abandoned_dispatch_backlog`). How to read `outcome` is in [Read the audit log](monitoring.md#audit-log).
+A line carries the URL's host, never the URL, the username or the password. A forced delete of a remote child records what it abandoned (`abandoned_lag_messages`, `abandoned_dispatch_backlog`). A detach of a remote child is logged as `remote_child.delete` (target `<parent>/<child>`, with `force`) on the node the client called, and a delete of a stub or of a parent with remote children as `topic.delete`; both carry the `request_id` of the leader's line. How to read `outcome` is in [Read the audit log](monitoring.md#audit-log).
 
 ## Accepted risk: remote passwords in the metastore {#accepted-risk}
 

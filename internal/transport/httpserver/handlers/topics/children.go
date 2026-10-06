@@ -26,6 +26,7 @@ import (
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 
+	"github.com/debanganthakuria/narad/internal/remote"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
@@ -117,14 +118,22 @@ func DetachChild(s *handlers.Set) http.HandlerFunc {
 		}
 		aw := newAuditWriter(w)
 		w = aw
+		// A remote child's detach is remote_child.delete, under the
+		// request_id the leader's line for it carries.
+		var requestID string
 		defer func() {
+			var extra []any
 			if force {
-				aw.audit(s, r, auditEventDetach, parent, "child", child, "force", true)
+				extra = append(extra, "force", true)
+			}
+			if requestID != "" {
+				aw.audit(s, r, eventRemoteChildDelete, parent+"/"+child, append(extra, "request_id", requestID)...)
 				return
 			}
-			aw.audit(s, r, auditEventDetach, parent, "child", child)
+			aw.audit(s, r, auditEventDetach, parent, append([]any{"child", child}, extra...)...)
 		}()
 		if isRemoteChildOf(r, s, parent, child) {
+			requestID = remote.NewRequestID()
 			if !authorizeStubDelete(s, w, r, parent) {
 				return
 			}
@@ -132,7 +141,7 @@ func DetachChild(s *handlers.Set) http.HandlerFunc {
 				s.WriteError(w, http.StatusNotImplemented, "remote children are not available on this node")
 				return
 			}
-			detachThroughLeader(s, w, r, parent, child, force)
+			detachThroughLeader(s, w, r, parent, child, force, requestID)
 			return
 		}
 		if !s.AuthorizeTopicManageAny(w, r, parent, child) {

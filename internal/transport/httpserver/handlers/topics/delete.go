@@ -8,6 +8,7 @@ import (
 	"github.com/debanganthakuria/narad/internal/broker"
 	brokertopics "github.com/debanganthakuria/narad/internal/broker/topics"
 	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/remote"
 	"github.com/debanganthakuria/narad/internal/transport/httpserver/handlers"
 )
 
@@ -46,11 +47,15 @@ func Delete(s *handlers.Set) http.HandlerFunc {
 		}
 		aw := newAuditWriter(w)
 		w = aw
-		var incarnation string
+		var incarnation, requestID string
 		defer func() {
 			var extra []any
 			if incarnation != "" {
 				extra = append(extra, "incarnation", incarnation)
+			}
+			if requestID != "" {
+				// The leader's topic.delete line carries the same one.
+				extra = append(extra, "request_id", requestID)
 			}
 			if force {
 				extra = append(extra, "force", true)
@@ -71,7 +76,8 @@ func Delete(s *handlers.Set) http.HandlerFunc {
 				s.WriteError(w, http.StatusNotImplemented, "remote children are not available on this node")
 				return
 			}
-			deleteThroughLeader(s, w, r, topicName, force)
+			requestID = remote.NewRequestID()
+			deleteThroughLeader(s, w, r, topicName, force, requestID)
 			return
 		}
 		if s.Deps.Router != nil {
