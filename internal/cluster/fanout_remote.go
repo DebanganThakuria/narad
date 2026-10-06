@@ -248,6 +248,23 @@ func (rs *remoteState) superseded(e *remote.Entry) bool {
 		(cur.RemoteID() != e.RemoteID() || cur.CredentialVersion() > e.CredentialVersion())
 }
 
+// stillCurrent reports whether e is still what the lookup holds for the
+// remote and rs still its pacing state: one atomic load and one map
+// lookup, so a chunk that waited for a slot never goes out with the
+// credential of a remote deleted (or deleted and created again)
+// meanwhile.
+func (s *remoteSender) stillCurrent(rs *remoteState, e *remote.Entry) bool {
+	if s.lookup == nil {
+		return false
+	}
+	if cur, err := s.lookup.Get(rs.name); err != nil || cur != e {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.remotes[rs.name] == rs
+}
+
 // capabilities is what the remote's batch produce takes, probed once
 // per remote per node and credential version, and again every check
 // interval so a target upgraded (or rolled back) behind the same remote
@@ -1279,10 +1296,11 @@ func (sh *slabShip) sendChunk(ctx context.Context, lane *laneShip, e *remote.Ent
 		}
 		return
 	}
-	if rs.superseded(e) {
-		// A password rotation (or a new remote under the name) arrived
-		// while the lane waited for a slot: send nothing with the old
-		// credential; the lane looks the entry up again.
+	if rs.superseded(e) || !s.stillCurrent(rs, e) {
+		// A password rotation, a new remote under the name, or a delete
+		// arrived while the lane waited for a slot: send nothing with
+		// the old credential; the lane looks the entry up again (and
+		// holds in remote_missing when it is gone).
 		rs.sem.Release()
 		if probe {
 			rs.gate.Released()

@@ -168,3 +168,41 @@ func TestRemoteChildProbeReopensTheGateWhenNothingCanBeHeld(t *testing.T) {
 		t.Fatalf("%v re-reads while a sibling lane held the probe", v)
 	}
 }
+
+// A lane queued for an in-flight slot when the remote is deleted sends
+// nothing with the deleted remote's credential once a slot frees: it
+// looks the remote up again after the wait.
+func TestRemoteChildLaneQueuedForASlotSendsNothingAfterTheRemoteIsDeleted(t *testing.T) {
+	rg, running := laneRig(t, remoteRigOpts{rigSourceOpts: rigSourceOpts{stallRetry: 30 * time.Second}})
+	rg.src.stop()
+	cur, forget := rg.src.runner.registerRemoteCursor(running.key)
+	defer forget()
+	s := rg.src.runner.sender()
+	_, rs, state := s.entry("b")
+	if state != "" {
+		t.Fatalf("lookup state %q", state)
+	}
+	slots := rs.sem.Limit()
+	for range slots {
+		if _, err := rs.sem.Acquire(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listings := rg.target.faults.listings.Load()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	done := rg.commitAsync(ctx, cur, laneRecords(1000, 5))
+	rigWait(t, "the lane's target check", 10*time.Second, func() bool { return rg.target.faults.listings.Load() > listings })
+	time.Sleep(300 * time.Millisecond) // the lane now waits for a slot
+	batches := rg.target.faults.batches.Load()
+	rg.src.lookup.Delete("b")
+	for range slots {
+		rs.sem.Release()
+	}
+	time.Sleep(time.Second)
+	if n := rg.target.faults.batches.Load() - batches; n != 0 {
+		t.Fatalf("%d chunks went out with a deleted remote's credential", n)
+	}
+	cancel()
+	<-done
+}
