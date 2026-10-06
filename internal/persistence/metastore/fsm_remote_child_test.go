@@ -54,7 +54,7 @@ func fsmCreateTopicRetention(t *testing.T, f *fsmState, name string, retentionMs
 
 func remoteAttachOp(parent, stub, remoteName, remoteTopic string) AttachRemoteChildOp {
 	return AttachRemoteChildOp{
-		Parent: parent, Stub: stub, StubID: "sid-" + stub, Epoch: "ep-" + stub,
+		Parent: parent, ParentID: "id-" + parent, Stub: stub, StubID: "sid-" + stub, Epoch: "ep-" + stub,
 		Offsets: []int64{10, 20, 30}, CreatedAt: 1790640000,
 		Remote: topic.RemoteLink{Name: remoteName, Topic: remoteTopic, TargetID: "tid", CreatedBy: "alice"},
 	}
@@ -649,5 +649,29 @@ func TestRemoteChildSkipsOnOnePartitionAccumulate(t *testing.T) {
 	r = fsmGetTopic(t, f, "orders-to-b").Remote
 	if n := len(r.Skip[3]); n != 52 || !r.Skipped(3, 10) || !r.Skipped(3, 100) || !r.Skipped(3, 149) {
 		t.Fatalf("partition 3 keeps %d skips (%v), want all 52", n, r.Skip[3])
+	}
+}
+
+// An attach checked against a parent created before topic IDs existed
+// carries no ParentID; it applies only while the parent still has none.
+// A parent recreated in between has an ID, and the attach is refused.
+func TestRemoteAttachWithoutAParentIDNeedsAnIDlessParent(t *testing.T) {
+	f := remoteChildFSM(t)
+	op := remoteAttachOp("orders", "orders-to-b", "b", "orders")
+	op.ParentID = ""
+	if err := fsmAttachRemote(t, f, op); !errors.Is(err, errs.ErrTopicChanged) {
+		t.Fatalf("attach checked against an ID-less parent, applied to %q: %v, want topic changed", "id-orders", err)
+	}
+	data, err := json.Marshal(topic.Topic{Name: "legacy", Partitions: 3, RetentionMs: topic.MinRemoteSourceRetentionMs, Owner: "olivia"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.applyCreateTopic(data); err != nil {
+		t.Fatalf("create the ID-less parent: %v", err)
+	}
+	op = remoteAttachOp("legacy", "legacy-to-b", "b", "legacy")
+	op.ParentID = ""
+	if err := fsmAttachRemote(t, f, op); err != nil {
+		t.Fatalf("attach to an ID-less parent: %v", err)
 	}
 }

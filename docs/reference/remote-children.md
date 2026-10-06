@@ -119,7 +119,7 @@ The attach, resume and test checks run on every node and fail with one `class`, 
 | `target_disagreement` | `412` | The nodes passed but saw different target topic IDs, as when one name resolves to two clusters. |
 | `target_security_off` | `409` | The target answered without asking for credentials. |
 | `admin_credential` | `409` | The credential can list the target's users: it is an admin there. Use a produce-only user. |
-| `target_is_source` | `409` | The target topic is the parent itself. |
+| `target_is_source` | `409` | The target topic is the parent itself: the same topic ID, or, for a parent created before topic IDs existed (v2.1 and earlier), the same name and creation time. |
 | `target_is_delay_child` | `409` | The target topic is a delay child, which takes no produces. |
 | `target_is_stub` | `409` | The target topic is another cluster's remote child stub. |
 | `schema_mismatch` | `409` | Both topics have a schema and they differ. |

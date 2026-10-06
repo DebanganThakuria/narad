@@ -409,7 +409,7 @@ func Test(s *handlers.Set) http.HandlerFunc {
 				c.fail(http.StatusNotFound, "source topic not found")
 				return
 			}
-			creq.SourceID, creq.SourceSchema = d.ID, d.Schema
+			creq.SourceID, creq.SourceCreatedAt, creq.SourceSchema = d.ID, d.CreatedAt, d.Schema
 		}
 		svc := s.Deps.Remote.Service
 		var reports []remote.NodeReport

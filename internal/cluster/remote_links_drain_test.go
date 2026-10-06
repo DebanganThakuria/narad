@@ -100,7 +100,7 @@ func TestRemoteLinksDeleteNeverReusesAnEarlierBacklogAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.store.AttachRemoteChild(ctx, metastore.AttachRemoteChildOp{
-		Parent: "orders", Stub: "orders-to-c", Offsets: offsets,
+		Parent: "orders", ParentID: "src-orders-id", Stub: "orders-to-c", Offsets: offsets,
 		Remote: topic.RemoteLink{Name: "b", Topic: "orders2"},
 	}); err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func TestRemoteLinksDeleteNeverSharesACheckThatStartedBeforeIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.store.AttachRemoteChild(ctx, metastore.AttachRemoteChildOp{
-		Parent: "orders", Stub: "orders-to-c", Offsets: offsets,
+		Parent: "orders", ParentID: "src-orders-id", Stub: "orders-to-c", Offsets: offsets,
 		Remote: topic.RemoteLink{Name: "b", Topic: "orders2"},
 	}); err != nil {
 		t.Fatal(err)

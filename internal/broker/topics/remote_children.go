@@ -29,9 +29,10 @@ type remoteChildStore interface {
 
 // AttachRemoteChild creates op.Stub as a remote child of op.Parent. The
 // leader ran the remote checks against the parent as incarnation
-// op.ParentID; under both names' locks and after the leader barrier the
-// parent must still be that incarnation (errs.ErrTopicChanged
-// otherwise), and the request identity must be an admin, since the
+// op.ParentID, empty for a parent created before topic IDs existed;
+// under both names' locks and after the leader barrier the parent must
+// still be that incarnation (errs.ErrTopicChanged otherwise: a
+// recreated parent always has an ID), and the request identity must be an admin, since the
 // link lends the remote's credential. The FSM checks every fan-out and
 // remote invariant in the entry's own transaction.
 func (m *Manager) AttachRemoteChild(ctx context.Context, op metastore.AttachRemoteChildOp) error {
@@ -43,9 +44,6 @@ func (m *Manager) AttachRemoteChild(ctx context.Context, op metastore.AttachRemo
 	}
 	if op.Parent == op.Stub {
 		return fmt.Errorf("%w: a topic cannot be attached to itself", ErrInvalid)
-	}
-	if op.ParentID == "" {
-		return fmt.Errorf("%w: the parent incarnation the checks ran against is required", ErrInvalid)
 	}
 	s, ok := m.metastore.(remoteChildStore)
 	if !ok {

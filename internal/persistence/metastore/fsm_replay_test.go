@@ -76,10 +76,14 @@ func TestParentRecreateAndReattachSurvivesLogReplay(t *testing.T) {
 	if r := l.apply(opCreateTopic, topic.Topic{Name: "orders", ID: "id-orders-2", Partitions: 3, RetentionMs: topic.MinRemoteSourceRetentionMs, Owner: "olivia"}); r != nil {
 		t.Fatalf("recreate parent: %v", r)
 	}
-	if r := l.apply(opAttachRemoteChild, reattachOp()); r != nil {
+	reattach := reattachOp()
+	reattach.ParentID = "id-orders-2"
+	if r := l.apply(opAttachRemoteChild, reattach); r != nil {
 		t.Fatalf("reattach: %v", r)
 	}
-	if r := l.apply(opAttachRemoteChild, remoteAttachOp("orders", "orders-dr", "b", "orders-dr")); r != nil {
+	dr := remoteAttachOp("orders", "orders-dr", "b", "orders-dr")
+	dr.ParentID = "id-orders-2"
+	if r := l.apply(opAttachRemoteChild, dr); r != nil {
 		t.Fatalf("attach dr: %v", r)
 	}
 	requireReplayKeeps(t, l, "orders-to-b", "orders-dr")

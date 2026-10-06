@@ -402,7 +402,7 @@ func (l *RemoteLinks) attach(ctx context.Context, req nodewire.RemoteWriteReques
 func (l *RemoteLinks) checkRequest(ctx context.Context, remoteName, remoteTopic string, parent topic.Topic, credentialVersion uint64) remote.CheckRequest {
 	req := remote.CheckRequest{
 		Remote: remoteName, Topic: remoteTopic, Source: parent.Name, SourceID: parent.ID,
-		CredentialVersion: credentialVersion,
+		SourceCreatedAt: parent.CreatedAt, CredentialVersion: credentialVersion,
 	}
 	if history, err := schema.PersistedHistory(ctx, l.d.Store, parent.Name); err == nil && len(history) > 0 {
 		req.SourceSchema = history[len(history)-1].Raw

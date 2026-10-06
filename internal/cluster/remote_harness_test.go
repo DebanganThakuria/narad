@@ -574,7 +574,7 @@ func (s *rigSource) attach(tb testing.TB, remoteName, remoteTopic, targetID stri
 		tb.Fatalf("AttachOffsetsMode: %v", err)
 	}
 	if err := s.store.AttachRemoteChild(ctx, metastore.AttachRemoteChildOp{
-		Parent: "orders", Stub: "orders-to-b", DelayMs: delayMs, Offsets: offsets,
+		Parent: "orders", ParentID: "src-orders-id", Stub: "orders-to-b", DelayMs: delayMs, Offsets: offsets,
 		Remote: topic.RemoteLink{Name: remoteName, Topic: remoteTopic, TargetID: targetID, Lanes: lanes, From: from},
 	}); err != nil {
 		tb.Fatalf("AttachRemoteChild: %v", err)

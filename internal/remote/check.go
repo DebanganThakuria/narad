@@ -12,11 +12,12 @@ import (
 // CheckRequest asks a member to run the ch. 4.7 checks.
 type CheckRequest struct {
 	Remote            string          `json:"remote"`
-	Topic             string          `json:"topic"`                   // topic on the remote
-	Source            string          `json:"source,omitempty"`        // parent on this cluster
-	SourceID          string          `json:"source_id,omitempty"`     // parent's topic.Topic.ID
-	SourceSchema      json.RawMessage `json:"source_schema,omitempty"` // parent's current schema
-	CredentialVersion uint64          `json:"credential_version"`      // the record's, as the leader reads it
+	Topic             string          `json:"topic"`                       // topic on the remote
+	Source            string          `json:"source,omitempty"`            // parent on this cluster
+	SourceID          string          `json:"source_id,omitempty"`         // parent's topic.Topic.ID
+	SourceCreatedAt   int64           `json:"source_created_at,omitempty"` // parent's topic.Topic.CreatedAt
+	SourceSchema      json.RawMessage `json:"source_schema,omitempty"`     // parent's current schema
+	CredentialVersion uint64          `json:"credential_version"`          // the record's, as the leader reads it
 }
 
 // Check results.

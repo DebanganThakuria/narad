@@ -41,6 +41,7 @@ type Checker struct {
 // older source.
 type describeAnswer struct {
 	ID            string          `json:"id"`
+	CreatedAt     int64           `json:"created_at"`
 	FanoutDelayMs int64           `json:"fanout_delay_ms"`
 	Remote        json.RawMessage `json:"remote"`
 	Schema        json.RawMessage `json:"schema"`
@@ -153,7 +154,7 @@ func (c *Checker) Run(ctx context.Context, req CheckRequest) NodeReport {
 		return fail(ClassTargetIsDelayChild)
 	case len(d.Remote) > 0 && !bytes.Equal(d.Remote, []byte("null")):
 		return fail(ClassTargetIsStub)
-	case d.ID != "" && req.SourceID != "" && d.ID == req.SourceID:
+	case targetIsSource(d, req):
 		return fail(ClassTargetIsSource)
 	}
 	rep.TargetID = d.ID
@@ -340,4 +341,21 @@ func compareSchemas(source, target json.RawMessage) (class, warning string) {
 func hasSchema(s json.RawMessage) bool {
 	t := strings.TrimSpace(string(s))
 	return t != "" && t != "null"
+}
+
+// targetIsSource reports a target topic that is the source itself: the
+// remote points back at this cluster. Two topics with IDs are the same
+// only with the same ID; a topic with an ID is never one without. Two
+// topics created before topic IDs existed (both IDs empty) are judged
+// by name and creation time, which no other record of that name on
+// this cluster can share.
+func targetIsSource(d describeAnswer, req CheckRequest) bool {
+	switch {
+	case d.ID != "" || req.SourceID != "":
+		return d.ID == req.SourceID
+	case req.Source == "" || req.SourceCreatedAt == 0:
+		return false
+	default:
+		return req.Topic == req.Source && d.CreatedAt == req.SourceCreatedAt
+	}
 }

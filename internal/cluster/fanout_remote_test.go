@@ -326,8 +326,12 @@ func TestRemoteChildTargetWithRemoteChildren(t *testing.T) {
 	if err := rg.target.store.UpdateTopic(ctx, withRetention(t, rg.target.store, "orders", topic.MinRemoteSourceRetentionMs)); err != nil {
 		t.Fatal(err)
 	}
+	targetOrders, err := rg.target.store.GetTopic(ctx, "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := rg.target.store.AttachRemoteChild(ctx, metastore.AttachRemoteChildOp{
-		Parent: "orders", Stub: "orders-to-c", Remote: topic.RemoteLink{Name: "c", Topic: "orders"},
+		Parent: "orders", ParentID: targetOrders.ID, Stub: "orders-to-c", Remote: topic.RemoteLink{Name: "c", Topic: "orders"},
 	}); err != nil {
 		t.Fatal(err)
 	}

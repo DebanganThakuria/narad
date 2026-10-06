@@ -89,10 +89,10 @@ func (f *fsmState) applyAttachRemoteChild(data []byte) error {
 		if err != nil {
 			return err
 		}
-		if op.ParentID != "" {
-			if err := expectIncarnation(parent, op.ParentID); err != nil {
-				return err
-			}
+		// An empty ParentID is a parent created before topic IDs
+		// existed, and matches only a record that still has none.
+		if err := expectIncarnation(parent, op.ParentID); err != nil {
+			return err
 		}
 		if parent.IsChild() {
 			return fmt.Errorf("%w: %q is a child of %q and cannot become a parent",

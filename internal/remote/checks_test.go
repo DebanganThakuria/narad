@@ -263,3 +263,31 @@ func TestChecksRefuseAnInsecurePosture(t *testing.T) {
 		t.Fatalf("legacy cluster auth: %+v", got)
 	}
 }
+
+// A source created before topic IDs existed has no ID to compare, so a
+// remote that points back at this cluster is recognised by the topic's
+// name and creation time; a topic of another name, or one created at
+// another time, is a different topic.
+func TestTargetIsSourceWithoutIncarnationIDs(t *testing.T) {
+	tg := newRealTarget(t, true)
+	if err := tg.ms.CreateTopic(context.Background(), topic.Topic{Name: "legacy", Partitions: 1, CreatedAt: 1_600_000_000}); err != nil {
+		t.Fatal(err)
+	}
+	pass := tg.createUser("repl-from-a", produceOnly("legacy"))
+	c := checker(t, tg.url(), tg.caPEM, "repl-from-a", pass)
+	idless := func(source string, createdAt int64) func(*remote.CheckRequest) {
+		return func(r *remote.CheckRequest) { r.Source, r.SourceID, r.SourceCreatedAt = source, "", createdAt }
+	}
+	if got := run(t, c, "legacy", idless("legacy", 1_600_000_000)); got.Result != remote.ResultFail || got.Class != remote.ClassTargetIsSource {
+		t.Fatalf("the ID-less source itself: %s %s, want fail %s", got.Result, got.Class, remote.ClassTargetIsSource)
+	}
+	for name, mod := range map[string]func(*remote.CheckRequest){
+		"created at another time": idless("legacy", 1_600_000_001),
+		"another name":            idless("orders", 1_600_000_000),
+		"a source with an ID":     func(r *remote.CheckRequest) { r.Source, r.SourceID, r.SourceCreatedAt = "legacy", "source-id", 1_600_000_000 },
+	} {
+		if got := run(t, c, "legacy", mod); got.Result != remote.ResultPass {
+			t.Fatalf("%s: %s %s, want pass", name, got.Result, got.Class)
+		}
+	}
+}
