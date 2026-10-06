@@ -63,7 +63,7 @@ The plan: the source keeps taking produces while a [remote child](../../referenc
     - `narad --ctx a topic wait orders orders-to-b --lag-zero --stable 60s` exits `0`.
     - `narad_fanout_child_dropped_messages` and `narad_fanout_remote_skipped_records_total` for `orders-to-b` have not moved since step 5.
 
-9. **Detach the link, without `--force`:** `narad --ctx a topic detach orders orders-to-b`. The detach checks the lag and every node's dispatch backlog again; a refusal means something is still unshipped, so go back to step 8.
+9. **Detach the link, without `--force`:** `narad --ctx a topic detach orders orders-to-b`. The detach checks the lag and every node's dispatch backlog again; a refusal means something is still unshipped, so go back to step 8. A refusal that names a node in `not_answering` is different: that node is down and may hold records only it accepted, so step 8 cannot clear it. Bring the node back, then detach again; `--force` abandons whatever its ingress WAL still holds ([Troubleshooting](../troubleshooting.md#remote-unshipped)).
 
 10. **Clean up.** Delete the replicator user on the target, which also fences any source node that still holds the credential. Then `narad --ctx a remote rm b`, and delete the source topic after a grace period.
 

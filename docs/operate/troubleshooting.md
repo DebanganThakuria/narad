@@ -207,6 +207,8 @@ A remotes request, or a remote child's attach, pause, resume or skip, answers `4
 
 **Fix.** Stop the producers, then `narad topic wait <parent> <child> --lag-zero --stable 60s` and detach again. If the link is stalled, fix that first ([below](#remote-link-stalled)). To abandon the records on purpose, `narad topic detach <parent> <child> --force`; `narad topic rm --force` does not abandon anything. A second attempt within 10 seconds answers `429`: wait for `Retry-After`.
 
+**A node in `not_answering`.** The check asks every member, dead ones included, and a node that does not answer may hold records it answered `202` for: waiting for lag 0 does not help, and every detach without `--force` answers `409` until it answers. Bring the node back: it dispatches its ingress WAL, and the detach goes through once that backlog is shipped. A dead node cannot be decommissioned either until it comes back ([`node_status_unavailable`](#decommission-blocked)). `--force` abandons whatever that node's ingress WAL still holds; use it only for a node that is gone for good with its disk, whose records are lost with it anyway. A node in `backlog_over_scan_limit` could not read its backlog to the end for the check (over 1,000,000 records, or 15 seconds): let it drain, then detach again.
+
 ### `409` lives on remote {#remote-stub}
 
 **Unreleased.**
