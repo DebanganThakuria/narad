@@ -56,7 +56,7 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 
 ## 200 OK {#status-200}
 
-**Where:** every read (`GET` on topics, schemas, children, users and the cluster), a consume that returns messages, a topic change, an attach, a grants update, `/healthz`, `/readyz` and `/metrics`. A batch ack (**Unreleased**) answers `200` even when some of its handles failed; each handle's own status is in `results`.
+**Where:** every read (`GET` on topics, schemas, children, users and the cluster), a consume that returns messages, a topic change, an attach, a grants update, `/healthz`, `/readyz` and `/metrics`. A batch ack (**v3.1.0**) answers `200` even when some of its handles failed; each handle's own status is in `results`.
 
 **Meaning:** the body holds what you asked for.
 
@@ -68,7 +68,7 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 
 ## 202 Accepted {#status-202}
 
-**Where:** produce, and batch produce (**Unreleased**).
+**Where:** produce, and batch produce (**v3.1.0**).
 
 **Meaning:** the node that answered has written the message (for a batch, every message) to its [ingress WAL](glossary.md#ingress-wal) and synced it to disk. It will be delivered at least once. What that promises, and what it does not, is in [What a 202 means](../understand/delivery-contract.md#what-202-means).
 
@@ -90,7 +90,7 @@ The "Go SDK" lines name the error the [Go SDK](../build/go-sdk.md) returns for e
 
 - JSON that does not parse, a field the endpoint does not know, or a value out of range (a partition count under 3, a retention under one hour, a negative number).
 - A produce with an empty body, a `partition` the topic does not have, or a `key` or `partition` given twice.
-- A produce whose body the topic's schema refuses, or a schema that cannot be registered or is not compatible with the current version ([Schema validation rules](schema-rules.md)). Since **Unreleased** that includes a produce body nested deeper than 256 levels (`payload nests deeper than 256 levels`), and a schema whose validation would cost too much: a subschema reached through more than 64 validation paths, or a pattern that costs more than 32 steps per byte ([Schema documents](schema-rules.md#registration)).
+- A produce whose body the topic's schema refuses, or a schema that cannot be registered or is not compatible with the current version ([Schema validation rules](schema-rules.md)). Since **v3.1.0** that includes a produce body nested deeper than 256 levels (`payload nests deeper than 256 levels`), and a schema whose validation would cost too much: a subschema reached through more than 64 validation paths, or a pattern that costs more than 32 steps per byte ([Schema documents](schema-rules.md#registration)).
 - An ack, extend or nack without `receipt_handle`, or with a handle that cannot be decoded (a handle is `partition:offset:nonce`).
 - A consume with a bad `wait`, `partition`, `offset` or `max`, a replay (`offset`) without `partition`, or `max` together with `offset`.
 - A batch consume (`max`) without an `X-Narad-Client` header ([Required headers](../build/connect.md#required-headers)).
@@ -131,7 +131,7 @@ A topic change is checked twice: by the node that receives it, and again by the 
 
 - The topic, user, parent, child or cluster member does not exist, or the two topics named in a detach are not linked. For a change to a topic by a user without `admin`, a topic the receiving node does not have is looked up again once that node has caught up with the cluster leader, so the `404` holds for the whole cluster.
 - The path is not a Narad route. This answer is plain text, `404 page not found`.
-- A batch produce (**Unreleased**) reached a node running v3.0.1 or earlier, which does not have the route.
+- A batch produce (**v3.1.0**) reached a node running v3.0.1 or earlier, which does not have the route.
 - `/metrics` on the API port of a node that serves metrics on their own listener (`http.metrics_addr`).
 
 **What to do:** check the name. For a batch produce, fall back to single produces while any node a client can reach runs an older release.
@@ -150,21 +150,21 @@ A topic change is checked twice: by the node that receives it, and again by the 
 
 ## 409 Conflict {#status-409}
 
-**Where:** create, change or delete a topic, attach or detach a child, create a user, produce to a delay child, and (unreleased) decommission a node, abort a partition move or forget a Raft server.
+**Where:** create, change or delete a topic, attach or detach a child, create a user, produce to a delay child, and (from v3.1.0) decommission a node, abort a partition move or forget a Raft server.
 
 **Meaning:** the request conflicts with the current state:
 
 - The topic or user already exists, or a topic exists whose name differs from the requested one only in letter case (`Orders` next to `orders`): on a case-insensitive filesystem both would share one directory. The message names the existing topic.
 - The attach breaks a [fan-out](glossary.md#fan-out-child) rule: a child has exactly one parent and no children of its own, and a parent has at most 108 children.
-- The child's schema history is not identical to the parent's: version by version the same JSON values once every member runs this release (**Unreleased**), byte for byte before.
-- The topic changed under the request twice in a row (**Unreleased**): it was deleted and recreated, or grew, after the leader checked the request against it, and again after the leader read it a second time (`topic changed since it was read`). Nothing was written. Read the topic again before you decide whether the change still applies.
+- The child's schema history is not identical to the parent's: version by version the same JSON values once every member runs this release (**from v3.1.0**), byte for byte before.
+- The topic changed under the request twice in a row (**from v3.1.0**): it was deleted and recreated, or grew, after the leader checked the request against it, and again after the leader read it a second time (`topic changed since it was read`). Nothing was written. Read the topic again before you decide whether the change still applies.
 - A delay child's delay is longer than the parent's retention can hold, on attach, on create with `parent`, or when the parent's retention shrinks.
 - `schema_base_version` is not the current schema version, the topic already holds 1000 schema versions, or the topic is an attached child whose schema its parent manages.
-- A schema change, a create with a schema, or a create-as-child or attach that adopts a parent's schema history would take the topic's stored history past 4 MiB, or every schema in the cluster past 256 MiB (**Unreleased**). The message names the budget and what is stored, and says when the history (or the cluster) is already over the budget, stored before it applied, so that no new version fits ([Compatibility](schema-rules.md#compatibility)).
+- A schema change, a create with a schema, or a create-as-child or attach that adopts a parent's schema history would take the topic's stored history past 4 MiB, or every schema in the cluster past 256 MiB (**from v3.1.0**). The message names the budget and what is stored, and says when the history (or the cluster) is already over the budget, stored before it applied, so that no new version fits ([Compatibility](schema-rules.md#compatibility)).
 - A produce to a delay child, which only its parent can feed.
-- A decommission that could never complete safely (unreleased): the body's `reasons` lists each one with a `code` and a `message` ([Scale out and in](../operate/scaling.md#decommission)).
-- A move abort for a partition with no move in flight, or whose move now targets another node than `target`, or that the leader did not apply because the move finished first or is still in flight; the message names the owner and target (unreleased).
-- A forget (unreleased) that names a Raft server that has a member record (decommission it instead), one a partition assignment names as owner or move target, or a voter whose removal could leave the cluster without a quorum (the message names the voters the leader cannot reach).
+- A decommission that could never complete safely (from v3.1.0): the body's `reasons` lists each one with a `code` and a `message` ([Scale out and in](../operate/scaling.md#decommission)).
+- A move abort for a partition with no move in flight, or whose move now targets another node than `target`, or that the leader did not apply because the move finished first or is still in flight; the message names the owner and target (from v3.1.0).
+- A forget (v3.1.0) that names a Raft server that has a member record (decommission it instead), one a partition assignment names as owner or move target, or a voter whose removal could leave the cluster without a quorum (the message names the voters the leader cannot reach).
 
 **What to do:** read the error message and the current state. For a schema conflict, read the current `schema_version` and retry with it as the base. For a create that must succeed once, treat "already exists" as success when the existing topic has the settings you wanted.
 
@@ -206,7 +206,7 @@ A handle carries no topic, so a handle from another topic, or one naming a parti
 
 **Where:** ack, extend and nack; a replay, or a consume pinned with `partition`; get a topic, from a v3.0.1 node only.
 
-**Meaning:** `this node does not own the requested partition`. The partition moved to another node while the request was served. From a v3.0.1 node, get a topic also answers `421` when the owner of one of the topic's partitions could not be found or refused to answer; an upgraded node (**Unreleased**) answers `200` instead, with `partial: true` and the unavailable partitions marked `owner_unavailable` ([Get a topic](http-api.md#get-topic)).
+**Meaning:** `this node does not own the requested partition`. The partition moved to another node while the request was served. From a v3.0.1 node, get a topic also answers `421` when the owner of one of the topic's partitions could not be found or refused to answer; an upgraded node (**v3.1.0**) answers `200` instead, with `partial: true` and the unavailable partitions marked `owner_unavailable` ([Get a topic](http-api.md#get-topic)).
 
 **What to do:** retry with backoff. If get a topic keeps answering `421` from every node, see [Troubleshooting](../operate/troubleshooting.md#status-421).
 
@@ -221,13 +221,13 @@ A handle carries no topic, so a handle from another topic, or one naming a parti
 | Limit | Setting |
 |---|---|
 | Concurrent consumes per user, or per client IP with security off; a batch consume counts as its `max`, clamped to the cap | `http.max_consume_in_flight_per_identity`, 1024 by default |
-| Concurrent produces per user (unreleased); a batch produce counts as its message count, clamped to the cap | `http.max_produce_in_flight_per_identity`, off by default |
-| Wrong passwords for one existing user: 5, then one attempt every 12 seconds; and, for a user with recent failures, the node's failure budget of 32 checks, refilled at 4 a second (unreleased) | none |
+| Concurrent produces per user (v3.1.0); a batch produce counts as its message count, clamped to the cap | `http.max_produce_in_flight_per_identity`, off by default |
+| Wrong passwords for one existing user: 5, then one attempt every 12 seconds; and, for a user with recent failures, the node's failure budget of 32 checks, refilled at 4 a second (from v3.1.0) | none |
 
 The error message says which limit was hit, in the same order:
 
 - `too many in-flight consume requests for this identity (limit N per node)`
-- `too many in-flight produce requests for this identity (limit N per node)` (unreleased)
+- `too many in-flight produce requests for this identity (limit N per node)` (v3.1.0)
 - `too many failed authentication attempts`
 
 **What to do:** back off and retry, or run fewer requests at once. For the authentication limit, fix the password first. See [Troubleshooting](../operate/troubleshooting.md#status-429).
@@ -268,7 +268,7 @@ The error message says which limit was hit, in the same order:
 
 ## 501 Not Implemented {#status-501}
 
-**Where:** **Unreleased:** `POST /v1/cluster/members/{id}/forget`, on a node that forwarded it to a Raft leader running an older release.
+**Where:** `POST /v1/cluster/members/{id}/forget` (new in v3.1.0), on a node that forwarded it to a Raft leader running an older release.
 
 **Meaning:** the leader's release does not know the operation, so nothing changed: `the leader runs a release that cannot forget a Raft server; upgrade it first`.
 
@@ -292,13 +292,13 @@ The error message says which limit was hit, in the same order:
 
 - Ack, extend and nack, a replay, or a consume pinned with `partition`, when the partition's owner is down: `partition owner is down; retry later` (plain text).
 - Any change to cluster metadata (topics, fan-out links, users, decommission) while the cluster has no Raft leader or the leader cannot be reached, including a change by a user without `admin` naming a topic the receiving node does not have, when that node cannot catch up with the leader to confirm it. A leader elected moments ago may also answer `503` once while it finishes applying the log.
-- A change to cluster metadata whose Raft leader lost its leadership, or stopped, while committing it (**Unreleased**): `control plane temporarily unavailable: the change may still be applied, read it back before retrying: ...`. A later leader may still commit the change, so read the record back before you retry; a retried create of a topic that did land answers `409`, a retried delete `404`.
+- A change to cluster metadata whose Raft leader lost its leadership, or stopped, while committing it (**from v3.1.0**): `control plane temporarily unavailable: the change may still be applied, read it back before retrying: ...`. A later leader may still commit the change, so read the record back before you retry; a retried create of a topic that did land answers `409`, a retried delete `404`.
 - `/readyz` while the node should not take traffic, and `/healthz` once the node is shutting down.
-- A topic create or partition increase while every live node is being decommissioned (**Unreleased**): `every live member is being decommissioned, so no member can take new partitions; ...`. New partitions are never placed on a draining node. The request succeeds once a node that is not draining is alive: wait for restarting nodes, cancel a decommission, or add a node ([Decommission a node](../operate/scaling.md#decommission)).
-- Get a topic (**Unreleased**), when the answering node cannot read its own copy of the cluster metadata, for example while it catches up after a restart. A partition owner being down is not a `503`: the answer is a `200` with `partial: true`.
-- A produce to a topic with a schema whose validation found no free slot on the node within 5 seconds (**Unreleased**): `schema: validation capacity busy, retry`. The payload was not checked or stored; retry it, preferably through another node ([Validation capacity](schema-rules.md#validation-capacity)).
-- A move abort that reached the leader but whose outcome could not be read back from it (**Unreleased**). A retry is safe; list the moves to see where the move stands.
-- On a produce (single or batch) to a node being decommissioned (**Unreleased**): `this node is being decommissioned and takes no new produce; send it to another node`, with `Retry-After: 1`. Nothing was stored, so a retry on another node cannot duplicate. v3.0.1 never answers a produce with `503`. Any other `503` on a produce comes from a proxy in front of Narad ([Troubleshooting](../operate/troubleshooting.md#produce-503)).
+- A topic create or partition increase while every live node is being decommissioned (**from v3.1.0**): `every live member is being decommissioned, so no member can take new partitions; ...`. New partitions are never placed on a draining node. The request succeeds once a node that is not draining is alive: wait for restarting nodes, cancel a decommission, or add a node ([Decommission a node](../operate/scaling.md#decommission)).
+- Get a topic (**from v3.1.0**), when the answering node cannot read its own copy of the cluster metadata, for example while it catches up after a restart. A partition owner being down is not a `503`: the answer is a `200` with `partial: true`.
+- A produce to a topic with a schema whose validation found no free slot on the node within 5 seconds (**from v3.1.0**): `schema: validation capacity busy, retry`. The payload was not checked or stored; retry it, preferably through another node ([Validation capacity](schema-rules.md#validation-capacity)).
+- A move abort that reached the leader but whose outcome could not be read back from it (**v3.1.0**). A retry is safe; list the moves to see where the move stands.
+- On a produce (single or batch) to a node being decommissioned (**from v3.1.0**): `this node is being decommissioned and takes no new produce; send it to another node`, with `Retry-After: 1`. Nothing was stored, so a retry on another node cannot duplicate. v3.0.1 never answers a produce with `503`. Any other `503` on a produce comes from a proxy in front of Narad ([Troubleshooting](../operate/troubleshooting.md#produce-503)).
 
 **Meaning:** the cluster cannot do this right now. Messages stored on a node that is down wait for it to come back; see the [failure matrix](../understand/delivery-contract.md#failure-matrix).
 

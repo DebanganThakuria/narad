@@ -52,7 +52,7 @@ Save it as `narad-values.yaml` in the clone you make under [Install](#install), 
 - **Raft TLS.** For production, keep `security.clusterTLS.enabled: true` and `security.allowPlaintextRaft: false` in the file, and create the TLS secret in [Install](#install) step 2. Turning TLS on later needs a pause of topic and user changes ([Enable on a running cluster](raft-tls.md#enable-running-cluster)).
 - **`initialClusterSize`** is the set of pods allowed to create a new cluster. Pods beyond it join the existing one. It is read only on an empty disk, so set it at the first install and leave it.
 - **`codec: zstd`** turns on compression of stored messages. Measure the saving on your own payloads; already compressed payloads gain little.
-- **`GOMEMLIMIT`** gives the Go runtime a soft memory limit, so it collects garbage harder before the pod reaches its memory limit. Builds after v3.0.1 set it to 90% of the pod's memory limit on their own when it is unset (unreleased).
+- **`GOMEMLIMIT`** gives the Go runtime a soft memory limit, so it collects garbage harder before the pod reaches its memory limit. From v3.1.0, Narad sets it to 90% of the pod's memory limit on its own when it is unset.
 
 Every value, with its default, is in the [Helm values reference](../reference/helm-values.md#values).
 
@@ -101,7 +101,7 @@ The chart lives in the repository, so the install starts from a clone of the rel
       --set image.tag=v3.0.1
     ```
 
-    The policy holds only on a CNI that enforces NetworkPolicy ([Fence the cluster ports](production-checklist.md#network-policy)). Turn it off (`networkPolicy.enabled=false`) without TLS or `security.allowPlaintextRaft`, and a chart after v3.0.1 refuses to install and names the alternatives (unreleased); the v3.0.1 chart has no policy, ignores `networkPolicy.enabled` and runs the Raft port unfenced.
+    The policy holds only on a CNI that enforces NetworkPolicy ([Fence the cluster ports](production-checklist.md#network-policy)). Turn it off (`networkPolicy.enabled=false`) without TLS or `security.allowPlaintextRaft`, and the v3.1.0 chart refuses to install and names the alternatives; the v3.0.1 chart has no policy, ignores `networkPolicy.enabled` and runs the Raft port unfenced.
 
     Pin `image.tag` to a release either way. The chart's default is `latest`, which follows `master`.
 
@@ -145,7 +145,7 @@ curl -s -u "$AUTH" "$NARAD/v1/topics"
 
 ## Verify the image {#verify-image}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 Images are signed keyless with [cosign](https://github.com/sigstore/cosign) and carry an SBOM and build provenance. Signing starts with the first image built after the v3.0.1 release. Images up to and including v3.0.1 carry no signature, so the command below fails for them.
 

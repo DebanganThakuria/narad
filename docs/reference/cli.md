@@ -67,7 +67,7 @@ payments                          3            0         0B       1  -
 total                                       2004   540.7KiB
 ```
 
-**Unreleased:** in master, not in v3.0.1. When some of a topic's partitions have an owner that is down, the server answers with the rest ([partial topic details](http-api.md#get-topic)). The report leaves those partitions out of `MESSAGES`, `SIZE` and `OWNERS`, marks the topic `[k of n partitions unavailable]` after its role, and ends with a line counting the partial topics. Against v3.0.1 such a topic shows `(stats unavailable: ...)` instead.
+**New in v3.1.0.** When some of a topic's partitions have an owner that is down, the server answers with the rest ([partial topic details](http-api.md#get-topic)). The report leaves those partitions out of `MESSAGES`, `SIZE` and `OWNERS`, marks the topic `[k of n partitions unavailable]` after its role, and ends with a line counting the partial topics. Against v3.0.1 such a topic shows `(stats unavailable: ...)` instead.
 
 ## narad serve {#serve}
 
@@ -143,7 +143,7 @@ It prints `accepted (<n> bytes)` on standard error, or for several messages the 
 | `--no-ack` | Queue mode without acks. |
 | `--raw` | Print payloads only, for pipes. |
 
-**Unreleased:** in master, not in v3.0.1. `--peek` refuses to start while a partition it would read has an owner that is down, naming the partition, its owner and why, instead of starting that partition at offset 0. Peek a live partition with `--partition`; with `--partition` and `--from` the start is given and the peek runs.
+**New in v3.1.0.** `--peek` refuses to start while a partition it would read has an owner that is down, naming the partition, its owner and why, instead of starting that partition at offset 0. Peek a live partition with `--partition`; with `--partition` and `--from` the start is given and the peek runs.
 
 Each message prints as `[p<partition> @<offset>] key=<key> <time> <payload>`. JSON prints as it is, text as text, and binary as hex with its byte count; a key that is not valid UTF-8 prints in hex, marked `(binary)`. On exit it prints the number of messages on standard error.
 
@@ -160,7 +160,7 @@ Each message prints as `[p<partition> @<offset>] key=<key> <time> <payload>`. JS
 
 It ends with a line such as `2 message(s) replayed from p1 [0, 2)` on standard error. Replay over HTTP is in [Replay messages](../build/replay.md).
 
-**Unreleased:** in master, not in v3.0.1. While the partition's owner is down, replay fails with an error naming the partition, its owner and why, instead of printing an empty range.
+**New in v3.1.0.** While the partition's owner is down, replay fails with an error naming the partition, its owner and why, instead of printing an empty range.
 
 ## narad bench {#bench}
 
@@ -207,15 +207,15 @@ Inspect partition placement and drain nodes. Every command needs the `admin` gra
 
 | Command | What it does |
 |---|---|
-| `narad cluster members` | List members with their status, owned partitions and moves under way, as JSON. Unreleased: also each member's voter and leader flags, heartbeat age and, while it drains, why its decommission is blocked. |
-| `narad cluster members --detail` (unreleased) | Also ask every member for its own status: dispatch backlog, quarantined partition copies and move workers. |
-| `narad cluster moves` | List partitions moving between nodes, as JSON. Unreleased: also each side's status and why a move is blocked. |
-| `narad cluster moves --detail` (unreleased) | Also ask each destination for its move worker's report. |
-| `narad cluster moves abort <topic> <partition>` (unreleased) | Clear a move's target, so the partition stays with its owner. `--target <node-id>` refuses the abort when the move now targets another node. |
-| `narad cluster decommission <node-id>` | Mark a node for decommission: its partitions move to the other nodes, then it leaves the Raft voters. Unreleased: refused, with every reason, when the node could never be removed safely. |
-| `narad cluster decommission <node-id> --dry-run` (unreleased) | Report whether the node could be decommissioned, and why not, without changing anything. |
+| `narad cluster members` | List members with their status, owned partitions and moves under way, as JSON. From v3.1.0, also each member's voter and leader flags, heartbeat age and, while it drains, why its decommission is blocked. |
+| `narad cluster members --detail` (v3.1.0) | Also ask every member for its own status: dispatch backlog, quarantined partition copies and move workers. |
+| `narad cluster moves` | List partitions moving between nodes, as JSON. From v3.1.0, also each side's status and why a move is blocked. |
+| `narad cluster moves --detail` (v3.1.0) | Also ask each destination for its move worker's report. |
+| `narad cluster moves abort <topic> <partition>` (v3.1.0) | Clear a move's target, so the partition stays with its owner. `--target <node-id>` refuses the abort when the move now targets another node. |
+| `narad cluster decommission <node-id>` | Mark a node for decommission: its partitions move to the other nodes, then it leaves the Raft voters. From v3.1.0, refused, with every reason, when the node could never be removed safely. |
+| `narad cluster decommission <node-id> --dry-run` (v3.1.0) | Report whether the node could be decommissioned, and why not, without changing anything. |
 | `narad cluster decommission <node-id> --cancel` | Stop a decommission. The node keeps the partitions it still has and takes new ones again. |
-| `narad cluster members forget <node-id>` | **Unreleased.** Remove a Raft voter or non-voter that has no member record, such as a joiner that never registered. Refused for a server with a member record (decommission it instead), one a partition assignment names, or a voter whose removal could leave the cluster without a quorum. Prints `{"id":...,"voter":...}`. See [Troubleshooting](../operate/troubleshooting.md#raft-server-no-member-record). |
+| `narad cluster members forget <node-id>` | **New in v3.1.0.** Remove a Raft voter or non-voter that has no member record, such as a joiner that never registered. Refused for a server with a member record (decommission it instead), one a partition assignment names, or a voter whose removal could leave the cluster without a quorum. Prints `{"id":...,"voter":...}`. See [Troubleshooting](../operate/troubleshooting.md#raft-server-no-member-record). |
 
 ```sh title="Command"
 narad cluster members

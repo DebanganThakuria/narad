@@ -31,7 +31,7 @@ curl -s http://127.0.0.1:7952/readyz
 | Answer | Meaning |
 |---|---|
 | `{"status":"ready"}` | The node serves traffic. |
-| `{"status":"ready","degraded":[...]}` | **Unreleased.** The node serves traffic, but its Raft TLS certificate (`raft_tls_certificate_expired`) or every CA in its bundle (`raft_tls_ca_expired`) has expired ([below](#log-raft-tls-expired)). |
+| `{"status":"ready","degraded":[...]}` | **New in v3.1.0.** The node serves traffic, but its Raft TLS certificate (`raft_tls_certificate_expired`) or every CA in its bundle (`raft_tls_ca_expired`) has expired ([below](#log-raft-tls-expired)). |
 | `not ready` | The node has not finished starting. It waits to be admitted (a new node) and to catch up with the Raft leader, so a node that cannot reach the leader stays here. |
 | `no raft leader known` | The node sees no Raft leader: quorum is lost, or the node is cut off from the others. |
 | `no contact with the raft leader yet` | The node knows a leader but has not heard from it since it started. |
@@ -81,7 +81,7 @@ narad cluster members
 
 A produce answers `503`, often from every node at once.
 
-**Cause.** Narad itself answers a produce with `503` in two cases only, both unreleased: a node being decommissioned answers `this node is being decommissioned and takes no new produce; send it to another node`, with `Retry-After: 1`; and a topic with a schema whose every validation slot on the node stayed busy for 5 seconds answers `schema: validation capacity busy, retry` ([Validation capacity](../reference/schema-rules.md#validation-capacity)). Nothing was stored in either case. v3.0.1 never answers a produce with `503`. Any other `503` comes from the proxy in front of Narad, the load balancer or ingress, when no pod is ready.
+**Cause.** Narad itself answers a produce with `503` in two cases only, both new in v3.1.0: a node being decommissioned answers `this node is being decommissioned and takes no new produce; send it to another node`, with `Retry-After: 1`; and a topic with a schema whose every validation slot on the node stayed busy for 5 seconds answers `schema: validation capacity busy, retry` ([Validation capacity](../reference/schema-rules.md#validation-capacity)). Nothing was stored in either case. v3.0.1 never answers a produce with `503`. Any other `503` comes from the proxy in front of Narad, the load balancer or ingress, when no pod is ready.
 
 **Check.** For the decommission body, `narad cluster members` shows the node `draining`. For the validation case, `narad_schema_validations_in_flight` on the node sits at its CPU count and `narad_schema_rejections_total{reason="busy"}` rises; look for producers sending large payloads, or a schema that `narad_schema_validation_seconds` shows to be slow. Otherwise, `kubectl get pods -n narad`, then `/readyz` on each pod ([Start with readiness](#check-readiness)).
 
@@ -93,7 +93,7 @@ Every produce to one node answers `500` with `{"error":"produce failed"}`, and t
 
 **Cause.** A write or sync of the node's [ingress WAL](../reference/glossary.md#ingress-wal) failed, usually because the disk is full (`ENOSPC`) or failing (`EIO`). The node then refuses every later produce, because it cannot tell what the failed write left on disk. Consume and `/readyz` keep working, so the node stays in rotation.
 
-**Check.** `narad_ingress_wal_failed` is `1` on that node (unreleased; on v3.0.1, watch `narad_errors_total{component="http", kind="5xx"}`). Check the volume:
+**Check.** `narad_ingress_wal_failed` is `1` on that node (from v3.1.0; on v3.0.1, watch `narad_errors_total{component="http", kind="5xx"}`). Check the volume:
 
 ```bash
 kubectl exec -n narad narad-0 -- df -h /var/lib/narad
@@ -138,7 +138,7 @@ An ack, extend or nack answers `502`, with the error of a failed call between no
 
 Consumes answer `429` with `too many in-flight consume requests for this identity (limit 1024 per node)`.
 
-**Cause.** One user holds more concurrent consumes on this node than the cap allows. Every waiting long poll counts, and a batch consume counts as its `max`, clamped to the cap. With security off, the cap counts per client IP. Produces have the same kind of cap, off by default (unreleased).
+**Cause.** One user holds more concurrent consumes on this node than the cap allows. Every waiting long poll counts, and a batch consume counts as its `max`, clamped to the cap. With security off, the cap counts per client IP. From v3.1.0, produces have the same kind of cap, off by default.
 
 **Check.** Count the long polls your consumers keep open against one node, per user.
 
@@ -150,7 +150,7 @@ Requests with one username answer `429` with `{"error":"too many failed authenti
 
 **Cause.** Each node allows each username 5 failed password checks, then one more every 12 seconds. A client with a wrong password, or someone guessing, has used them up. While they are used up, even a correct password that the node has not yet accepted is refused.
 
-Or the node's failure budget is empty (unreleased): repeated wrong passwords across many usernames have used up the 32 checks the node allows for usernames with recent failures, refilled at 4 a second. Until it refills, any username whose own bucket is not full again (about 12 seconds per recent failure) is refused at once, and the node logs `authentication failure budget exhausted` at most once every 10 seconds. Usernames with no recent failures are not affected.
+Or the node's failure budget is empty (from v3.1.0): repeated wrong passwords across many usernames have used up the 32 checks the node allows for usernames with recent failures, refilled at 4 a second. Until it refills, any username whose own bucket is not full again (about 12 seconds per recent failure) is refused at once, and the node logs `authentication failure budget exhausted` at most once every 10 seconds. Usernames with no recent failures are not affected.
 
 **Check.** The `username` in the log line, and which clients use it. For the budget, look for `authentication failure budget exhausted` and a rising `narad_auth_verify_queued`.
 
@@ -160,7 +160,7 @@ Or the node's failure budget is empty (unreleased): repeated wrong passwords acr
 
 `GET /v1/topics/{topic}` answers `200` with `"partial": true`, and some entries of `partition_stats` have `"status": "owner_unavailable"`, zero statistics and an `owner_liveness`. `narad server report` marks the topic `[k of n partitions unavailable]`. A v3.0.1 node answers `421` with `this node does not own the requested partition` instead, from every node, or `500` with `get topic failed`.
 
-**Unreleased:** the partial answer is in master, not in v3.0.1.
+The partial answer is **new in v3.1.0**.
 
 **Cause.** Topic details gather partition statistics from every partition owner, and one owner could not report. `owner_liveness` says why: `dead` (marked dead, after about 30 seconds without a heartbeat), `unreachable` (alive, but its statistics did not come back within 2 seconds, which a node whose Raft certificate its peers do not trust also causes, [below](#raft-cert-untrusted)), `unknown` (no member record with an address) or `unassigned` (no owner yet, for example right after a partition increase). On v3.0.1 the same causes fail the whole call: `500` while the owner is unreachable, `421` once it has been marked dead.
 
@@ -241,7 +241,7 @@ The node holds directories of topics its replica no longer knows: a deleted topi
 
 ### `narad_decommission_blocked` above 0 {#decommission-blocked}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 A draining node's decommission cannot progress. The leader exports one series per node and `reason` while it holds, logs each reason once when it appears (`controller: decommission blocked` at error for a reason that needs you, `controller: decommission waiting` at warn for one that clears on its own, both with `node`, `reason` and `detail`), and `controller: decommission no longer blocked` at info when the node is free again. `narad cluster members` shows the reasons the cluster metadata holds under `decommission_blocked`.
 
@@ -259,7 +259,7 @@ A draining node's decommission cannot progress. The leader exports one series pe
 
 ### `narad_moves_blocked` above 0 {#moves-blocked}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 A partition move cannot finish on its own. The gauge is per node and per `reason`: a move's destination reports the first two reasons for the moves it runs, and the leader reports the last two for every move in flight.
 
@@ -289,17 +289,17 @@ A partition move cannot finish on its own. The gauge is per node and per `reason
 - `it has no member record yet`, or `its member record is marked dead`: the node is not heartbeating its membership to the leader. Check its log for [`member heartbeat failing`](#log-member-heartbeat-failing) (warning level; on v3.0.1, `member heartbeat failed` at debug level) and the node-RPC port (7942/udp).
 - `it is draining`: the node is being decommissioned, and decommission removes it from Raft once it owns nothing. Cancel the decommission to keep it.
 
-A node on 3.0.x asks for promotion once it runs this release and restarts. A non-voter left behind by a decommission under a 3.0.x leader carries no quorum weight, but the leader keeps sending it heartbeats, and it has no member record, so the decommission cannot simply be run again. **Unreleased:** remove it with `narad cluster members forget <id>`; see [A Raft server has no member record](#raft-server-no-member-record).
+A node on 3.0.x asks for promotion once it runs this release and restarts. A non-voter left behind by a decommission under a 3.0.x leader carries no quorum weight, but the leader keeps sending it heartbeats, and it has no member record, so the decommission cannot simply be run again. **New in v3.1.0:** remove it with `narad cluster members forget <id>`; see [A Raft server has no member record](#raft-server-no-member-record).
 
 ### A Raft server has no member record {#raft-server-no-member-record}
 
-The Raft configuration holds a server that `narad cluster members` does not list. **Unreleased:** a warning names it as `raft server "<id>" has no member record, so its release is unknown`, because it holds back new Raft entry types, for example in `user deleted, but its topics still name it as owner` (`component=audit`).
+The Raft configuration holds a server that `narad cluster members` does not list. **New in v3.1.0:** a warning names it as `raft server "<id>" has no member record, so its release is unknown`, because it holds back new Raft entry types, for example in `user deleted, but its topics still name it as owner` (`component=audit`).
 
 **Cause.** A node joined and never registered: it crashed right after its join request, could not reach the cluster, or was replaced under another ID. A 3.0.x leader admitted joiners straight into the voter set, so such a server can be a voter, and an unreachable voter counts against quorum: with one more voter down the cluster may lose its leader. A decommission under a 3.0.x leader can also leave a non-voter behind.
 
 **Check.** `narad_raft_voters` and `narad_raft_nonvoters` on the leader against the members `narad cluster members` lists, and the leader's log for `raft: failed to heartbeat to: peer=<addr>` naming an address no member has. The ID to forget is the one in the `has no member record` warning; under the Helm chart a node's Raft ID is its pod name, which also starts its Raft address (`narad-3.narad-headless...`). `narad_raft_nonvoters` is only a count and names no server.
 
-**Fix.** **Unreleased:** remove it, from any node, while the cluster has a leader:
+**Fix.** **New in v3.1.0:** remove it, from any node, while the cluster has a leader:
 
 ```bash
 narad cluster members forget narad-3
@@ -321,7 +321,7 @@ Logged at error level with `dir`, `durable_tail` and `err`.
 
 ### `metastore: stopped applying raft entries` {#log-metastore-stopped}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 Logged at error level with `index`, `entry_type`, `build` and `error`, just before the node exits non-zero. The pod restarts and, until the cause is fixed, stops again on the same entry.
 
@@ -337,7 +337,7 @@ Logged at error level with `index`, `entry_type`, `build` and `error`, just befo
 
 ### `metastore: set aside fsm.db as fsm.db.stale` {#log-metastore-set-aside}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 Logged at warning level at start, with `reason` and `stale`.
 
@@ -347,7 +347,7 @@ Logged at warning level at start, with `reason` and `stale`.
 
 ### `holds metadata, but there is no raft state beside it` at start {#log-metastore-no-raft-state}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 `narad serve` exits at start with `metastore: .../fsm.db holds metadata, but there is no raft state beside it (raft.db is missing or empty and there is no raft snapshot), so this node would bootstrap a new cluster with an empty log and none of its topics; refusing to start`, followed by the two ways out below. The pod restarts and exits the same way until one is taken.
 
@@ -359,7 +359,7 @@ Logged at warning level at start, with `reason` and `stale`.
 
 ### `raft state is older than fsm.db` at start {#log-metastore-raft-state-older}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 `narad serve` exits at start with `metastore: raft state is older than fsm.db: .../fsm.db has applied raft index <a>, past the end of the raft log (index <l>) and the latest raft snapshot (index <s>) in ...; starting would drop every metadata change after index <n>, so refusing to start`, followed by the ways out below. The pod restarts and exits the same way until one is taken.
 
@@ -371,7 +371,7 @@ Logged at warning level at start, with `reason` and `stale`.
 
 ### `written by a newer Narad release` at start {#log-metastore-newer-database}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 `narad serve` exits at start with `metastore: fsm: .../fsm.db holds raft entry type <t>, written by a newer Narad release than this build (...); run that release or newer`.
 
@@ -399,7 +399,7 @@ The full line is `cluster join refused: this node was decommissioned and removed
 
 ### `cluster join refused: this node runs an older release than every member` {#log-join-older-release}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 Logged at error level on the joining node, once, with `via`, the node's `entry_types` and the leader's answer in `body`. The leader logs `cluster join refused: the joiner runs an older release than the cluster` at error, at most once a minute per joiner, with the joiner's `id`, `joiner_entry_types`, `member_entry_types_min` (the fewest any recorded member applies) and `cluster_entry_type_used` (the newest type the cluster has applied). A joiner on 3.0.x logs the same refusal as `cluster join refused: this node was decommissioned`, with `older_release` in its `body`.
 
@@ -419,13 +419,13 @@ Logged at warning level with `via` (the address that answered) and `status`.
 
 Logged at warning level (`component=audit`) by a node that refused a node RPC stream whose peer could not prove the node's cluster secret.
 
-**Cause.** A peer with another secret, or none, reached this node's node-to-node port (7942/udp). One common case (unreleased): a node with security on was started alone, without `NARAD_CLUSTER_SECRET`, and nodes are now joining it. Such a node generates a secret of its own for the life of the process, so a joiner carrying the shared secret cannot authenticate to it: the joiner's attempts fail (`cluster join attempt failed` at debug level, with `cluster rpc: read server auth proof: ...`) and it never joins.
+**Cause.** A peer with another secret, or none, reached this node's node-to-node port (7942/udp). One common case (from v3.1.0): a node with security on was started alone, without `NARAD_CLUSTER_SECRET`, and nodes are now joining it. Such a node generates a secret of its own for the life of the process, so a joiner carrying the shared secret cannot authenticate to it: the joiner's attempts fail (`cluster join attempt failed` at debug level, with `cluster rpc: read server auth proof: ...`) and it never joins.
 
 **Fix.** Set the same `NARAD_CLUSTER_SECRET` on every node, the first one included, and restart the first node before the others join. The first node also needs a `cluster.addr` the others can reach, and either the Raft TLS files on every node or `security.allow_plaintext_raft` with 7943/tcp fenced: with no peers configured it never runs the join loop, so if the others cannot reach its Raft it stays cut off from their Raft. A first node whose Raft first started on a loopback `cluster.addr` cannot be grown by rebinding it: start a new cluster whose first node starts on an address the others can reach, and move the workload to it ([below](#log-raft-address-recorded)). Any other source of these lines is a process that should not be talking to the port: fence 7942/udp ([Networking and security](../understand/networking-and-security.md#ports)).
 
 ### `raft configuration records this node at an address other than the one it advertises` {#log-raft-address-recorded}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 The full line is `raft configuration records this node at an address other than the one it advertises: other nodes dial the recorded address, and a later cluster.addr does not change it (a node with cluster.peers set re-registers its advertised address through its join loop after about 15 s without a leader), so if the recorded address does not reach this node they cannot reach its raft once it is not the leader; operator action required`, logged once at startup at error level with `node`, `recorded_addr`, `advertise_addr` and `other_servers` (how many other nodes the Raft configuration lists). A node alone in the Raft configuration that now advertises a loopback address logs `raft configuration records this node at an address other than the one it advertises; harmless while no other node is in the configuration` at info instead: it takes no peers, so no node dials either address.
 
@@ -435,7 +435,7 @@ The full line is `raft configuration records this node at an address other than 
 
 ### `node RPC plane is unauthenticated` {#log-node-rpc-unauthenticated}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 The full line is `node RPC plane is unauthenticated: security is disabled and no cluster secret is set, so anything that can send UDP to the API port can create users and topics and produce, consume and ack without credentials`, logged once at startup at warning level with `component=audit` and `addr`.
 
@@ -455,7 +455,7 @@ The full line is `consumer frontier fell behind retention; skipped to oldest ret
 
 ### `consumer offset commits cannot keep to their interval` {#log-offset-commit-slow}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 Logged at warning level, at most once a minute, with `partitions`, `flush_took` and `interval`. A related line, `consumer offsets wait longer than their durability interval for a device flush`, carries `partitions`, `oldest` and `durability_interval`.
 
@@ -465,7 +465,7 @@ Logged at warning level, at most once a minute, with `partitions`, `flush_took` 
 
 ### `purge deferred: the local metastore still shows the topic incarnation` {#log-purge-deferred}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 The full line is `purge deferred: the local metastore still shows the topic incarnation; the leader may ask again, and the startup orphan sweep is the backstop`, at warning level, with `topic` and `incarnation`.
 
@@ -477,7 +477,7 @@ The full line is `purge deferred: the local metastore still shows the topic inca
 
 ### `topic purge unfinished on some members` {#log-purge-unfinished}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 The full line is `topic purge unfinished on some members; their copies stay until their startup orphan sweep reclaims them`, at error level on the node that ran the delete (the Raft leader), with `topic`, `incarnation`, `members` and `err`.
 
@@ -489,7 +489,7 @@ The full line is `topic purge unfinished on some members; their copies stay unti
 
 ### `orphan assignment row for <topic>/<partition>` {#log-orphan-assignment-row}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 The full line is `orphan assignment row for <topic>/<partition>; it is pruned once every member runs 3.1.0`, at error level on the Raft leader, with `topic`, `partition` and `owner`, once per row.
 
@@ -519,7 +519,7 @@ The full line is `reclaim: local partition copy is AHEAD of the position it was 
 
 ### `reclaim: the new owner cannot vouch for the local partition copy` {#log-partition-set-aside}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 The full line is `reclaim: the new owner cannot vouch for the local partition copy; quarantined instead of deleted, its records may exist only here`, at error level, with `topic`, `partition`, `owner`, `reason` and `quarantine_dir`. The sweep that triggered it logs `move: stale partition copy QUARANTINED, not deleted: the new owner cannot vouch for it; operator action required` next to it.
 
@@ -531,7 +531,7 @@ The full line is `reclaim: the new owner cannot vouch for the local partition co
 
 ### `move: the partition's path held an earlier copy with unexpired records` {#log-move-install-set-aside}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 The full line is `move: the partition's path held an earlier copy with unexpired records; quarantined instead of replaced, since it may hold records the incoming copy lacks. Operator action required`, at error level, with `topic`, `partition` and `quarantine_dir`.
 
@@ -541,7 +541,7 @@ The full line is `move: the partition's path held an earlier copy with unexpired
 
 ### `move: set aside the staging copy of a partition this node owns` {#log-move-keeping-staging}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 The full line is `move: set aside the staging copy of a partition this node owns; the partition's records may not all be under its path. Operator action required`, at error level, with `topic`, `partition`, `quarantine_dir`, `partition_dir`, `moved_back` and `partition_dir_has_records`. A move that took its installed copy back off the partition's path and then cannot read the partition's owner logs `move: set aside the staging copy this move moved back, since the partition's owner cannot be read; it may hold the partition's records. Operator action required` the same way, with `quarantine_dir`, `partition_dir` and `err`.
 
@@ -558,7 +558,7 @@ When the path does hold a copy installed from the move's source and the move mov
 
 ### `member heartbeat failing` {#log-member-heartbeat-failing}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 Logged at warning level with `member`, `failures`, `since`, `failing_for` and `err`, once the node's member heartbeat has failed 3 times in a row over at least 10 seconds (two heartbeat intervals), then at most once a minute while it keeps failing. `member heartbeat recovered` at info level ends it. `narad_member_heartbeat_failures` counts the failures in a row, and every single failure is still logged at debug level as `member heartbeat failed`.
 
@@ -572,7 +572,7 @@ A decommissioned node logs `member heartbeat refused` at error level instead, on
 
 ### `raft TLS certificate has expired` {#log-raft-tls-expired}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 Logged at error level with `kind` (`leaf` for the node's certificate, `ca` for the earliest-expiring CA in its bundle, whose lines say `raft TLS CA certificate`), `not_after` and `expired_for`, at once and then every 24 hours. It follows warnings 30 and 7 days ahead and an error 1 day ahead (`raft TLS certificate expires in less than ...`). `/readyz` keeps answering `200` and lists `raft_tls_certificate_expired` or `raft_tls_ca_expired` under `degraded`.
 
@@ -589,7 +589,7 @@ kubectl get secret narad-cluster-tls -n narad -o jsonpath='{.data.tls\.crt}' \
 
 ### `move: staged copy cannot be verified; not freezing the source again` {#log-move-unverifiable}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 Logged at error level on a move's destination, with `topic`, `partition`, `source`, `attempts`, `action` and `err`. The move counts in `narad_moves_blocked{reason="copy_unverifiable"}`.
 
@@ -601,7 +601,7 @@ Logged at error level on a move's destination, with `topic`, `partition`, `sourc
 
 ### `move: the source is dead and this node's copy` {#log-move-dead-source-behind}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 The full line is `move: the source is dead and this node's copy is behind its last high watermark, so it cannot force-promote: promoting would lose records the source made visible. Waiting for the source to return; abort the move to give up on it`, at error level, with `topic`, `partition`, `source`, `copy_next_offset`, `source_last_hwm` and `err`. A copy that reaches the high watermark but fails verification logs `move: the source is dead and this node's copy fails verification, so it cannot force-promote` instead. Either is logged once each time the source dies, then at debug level; v3.0.1 logged `move: source dead but copy is behind its last hwm` at warning every 2 s. The move counts in `narad_moves_blocked` until the source reads alive again.
 
@@ -611,7 +611,7 @@ The full line is `move: the source is dead and this node's copy is behind its la
 
 ### `move: set aside the staging copy of a move that ended while its source is dead` {#log-move-dead-source-staging}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 The full line is `move: set aside the staging copy of a move that ended while its source is dead; it may be the only copy of the partition's records. Operator action required`, at error level, with `topic`, `partition`, `quarantine_dir`, `owner`, `owner_state` and `target`.
 
@@ -621,7 +621,7 @@ The full line is `move: set aside the staging copy of a move that ended while it
 
 ### `controller: refusing to mark voters dead` {#log-dead-marking-refused}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 The full line is `controller: refusing to mark voters dead: the verdict would leave fewer alive voters than a Raft quorum, which a leader holding its lease rules out; check the cluster RPC plane (port, secret, certificates) into this leader`, at error level on the leader, with `refused`, `alive_voters_after`, `quorum` and `voters`. It is logged once per refusing streak, `narad_dead_marking_refused` is 1 while it lasts, and `controller: dead-marking breaker cleared` follows at info when the heartbeats are back.
 

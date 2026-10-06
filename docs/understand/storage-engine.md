@@ -98,7 +98,7 @@ Reads of committed records keep working. Nothing acked is lost: records above th
 
 ## High watermark and hidden tail {#the-high-watermark-and-the-hidden-tail}
 
-**Unreleased:** in master, not in v3.0.1. v3.0.1 writes the `hwm` file as commits advance the boundary.
+**New in v3.1.0.** v3.0.1 writes the `hwm` file as commits advance the boundary.
 
 The high watermark is the exclusive bound of what consumers may see. An open log keeps it in memory; the `hwm` file holds a boundary only while the log is **closed**:
 
@@ -131,7 +131,7 @@ A clean `Close` writes the boundary below them, so they stay hidden across a cle
 
 ## Recovery {#recovery}
 
-Opening a log reads only its **active** (last) segment (unreleased; v3.0.1 scans every segment at open). That segment is walked frame by frame, CRC included, and indexed:
+Opening a log reads only its **active** (last) segment (from v3.1.0; v3.0.1 scans every segment at open). That segment is walked frame by frame, CRC included, and indexed:
 
 - A **torn tail** in the active segment (a crash in the middle of a write, including a commit's frame write) is truncated and the truncate fsynced. Those bytes were never acked by this log, and the ingress WAL commits the batch again at the offset it had. A last frame whose bytes are all present but do not check out (a zero-filled or scrambled final sector: the file size reached the disk, the data did not) is a torn tail too, as long as no valid frame follows it. Left in place, its intact-looking header would shadow the frames the next commits write at the same offsets.
 - **Corruption in the middle of the file**, under valid later frames, is *not* truncated, because that would destroy acked data and move offsets backwards. The walk resyncs to the next frame that passes its CRC and carries on, and the bad frame's offsets become a permanent gap.
@@ -194,7 +194,7 @@ A retention change reaches every owner's open logs in place. The node that runs 
 
 With the walk on, idle eviction closes a retention log whatever its segments, since the walk reaps a closed log's expired segments; with the walk off (`storage.cold_retention_walk_ms` set to `0`), a log is closed only once retention has nothing left to delete in it.
 
-The consumer frontier stored next to the segments is written at two cadences (unreleased; see [Consume path](consume-path.md#how-acks-reach-the-disk)). Every 100 ms (or every durability interval, when that is shorter), each partition acked since the last tick has its `consumer.ahead` record, the frontier plus the out-of-order ack set, written into the page cache through a held descriptor. Once per `storage.consumer_offset_commit_interval_ms` (1 s by default), each partition written since is written out, one partition at a time, with one device flush per tick on macOS. `consumer.ahead`'s two slots are an anchor, the newest record known durable, which is never written while it is the anchor, and a window the ticks overwrite; a writeout flips them.
+The consumer frontier stored next to the segments is written at two cadences (from v3.1.0; see [Consume path](consume-path.md#how-acks-reach-the-disk)). Every 100 ms (or every durability interval, when that is shorter), each partition acked since the last tick has its `consumer.ahead` record, the frontier plus the out-of-order ack set, written into the page cache through a held descriptor. Once per `storage.consumer_offset_commit_interval_ms` (1 s by default), each partition written since is written out, one partition at a time, with one device flush per tick on macOS. `consumer.ahead`'s two slots are an anchor, the newest record known durable, which is never written while it is the anchor, and a window the ticks overwrite; a writeout flips them.
 
 `consumer.offset` (8 bytes overwritten in place as a single-sector atomic write; an empty file left by a crash between create and first write reads as "no offset") is brought level with that frontier at most every 30 s while the broker runs, so it can trail `consumer.ahead`. A graceful `Close` levels it and writes both files out. It is recovered lazily when a partition's queue state is first touched, from both files on disk (the larger frontier wins), deliberately *not* from a metastore scan at boot, so a stale replica at startup cannot misplace consumption progress. Both files keep the formats of v3.0.1, which recovers them the same way.
 

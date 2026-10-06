@@ -77,7 +77,7 @@ The key goes in the query string. Messages with the same key go to the same [par
 
 ### Messages without a key
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 With no key and no `partition`, Narad spreads messages over the topic's partitions in turn. Each node keeps its own rotation per topic, starting at a random partition, so a producer that writes several topics still spreads each of them evenly. The message is stored with no key, and consumers get no `key` field for it.
 
@@ -107,7 +107,7 @@ Content-Length: 0
 
 ## Produce a batch {#produce-batch}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 A batch sends up to 100 messages in one request, and they share one write to disk:
 
@@ -147,7 +147,7 @@ The `202` makes the same promise as a single produce, for every message in the b
 - Batch messages that are ready at the same time.
 - Keep payloads small. The 1 MiB cap is a ceiling, not a target, and a large payload slows every step it passes through.
 - Compressed or encrypted payloads are fine. If the operator turns on Narad's disk compression, it will not shrink them further.
-- An operator can cap concurrent produces per user and node with `http.max_produce_in_flight_per_identity` (unreleased; off by default). Past the cap a produce gets [`429`](../reference/status-codes.md#status-429).
+- An operator can cap concurrent produces per user and node with `http.max_produce_in_flight_per_identity` (from v3.1.0; off by default). Past the cap a produce gets [`429`](../reference/status-codes.md#status-429).
 
 ## Next steps
 

@@ -73,7 +73,7 @@ After the four layers are applied, the whole configuration is checked. Any probl
 | `http.max_header_bytes`<br>`NARAD_HTTP_MAX_HEADER_BYTES` | `65536` | Largest request header block; larger gets `431`. At least `4096`. |
 | `http.max_connections`<br>`NARAD_HTTP_MAX_CONNECTIONS` | `4096` | Open client connections per node; more wait in the listen backlog. `0` removes the cap. |
 | `http.max_consume_in_flight_per_identity`<br>`NARAD_HTTP_MAX_CONSUME_IN_FLIGHT_PER_IDENTITY` | `1024` | Concurrent consumes per user, or per client IP with security off, per node; more get `429`. A batch consume counts as its `max`, clamped to the cap. `0` removes the cap. |
-| `http.max_produce_in_flight_per_identity` (unreleased)<br>`NARAD_HTTP_MAX_PRODUCE_IN_FLIGHT_PER_IDENTITY` | `0` (off) | Concurrent produces per user, or per client IP with security off, per node; more get `429`. A batch produce counts as its message count, clamped to the cap, and as one while its body is read. v3.0.1 refuses to start with the file key. |
+| `http.max_produce_in_flight_per_identity` (v3.1.0)<br>`NARAD_HTTP_MAX_PRODUCE_IN_FLIGHT_PER_IDENTITY` | `0` (off) | Concurrent produces per user, or per client IP with security off, per node; more get `429`. A batch produce counts as its message count, clamped to the cap, and as one while its body is read. v3.0.1 refuses to start with the file key. |
 | `http.metrics_addr`<br>`NARAD_HTTP_METRICS_ADDR` | empty | When set, `/metrics`, `/healthz` and `/readyz` are served on this address without credentials, and `/metrics` leaves the API port. Keep it inside the cluster. May equal `http.pprof_addr`. |
 | `http.metrics_unauthenticated`<br>`NARAD_HTTP_METRICS_UNAUTHENTICATED` | `false` | Serve `/metrics` on the API port without credentials. Its series name every topic. Ignored when `http.metrics_addr` is set. |
 | `http.pprof_addr`<br>`NARAD_HTTP_PPROF_ADDR` | empty | Serves Go's `net/http/pprof` on this address, without credentials. Keep it inside the cluster. |
@@ -83,7 +83,7 @@ After the four layers are applied, the whole configuration is checked. Any probl
 | Setting | Default | Notes |
 |---|---|---|
 | `cluster.node_id`<br>`NARAD_NODE_ID` | the host name | The node's identity in the cluster. Keep it stable across restarts. |
-| `cluster.addr`<br>`NARAD_CLUSTER_ADDR` | `:7943` | The Raft transport (TCP). With security on and no Raft TLS files, a node with no peers must bind it to a loopback address such as `127.0.0.1:7943`, or set `security.allow_plaintext_raft` (unreleased). Bind it to loopback only on a node that will never take peers: the address Raft first starts on is recorded in the Raft configuration, the nodes that join later dial that recorded address, and a later `cluster.addr` does not change it, so a node first started on loopback cannot be grown by rebinding it ([Networking and security](../understand/networking-and-security.md#raft-tls)). |
+| `cluster.addr`<br>`NARAD_CLUSTER_ADDR` | `:7943` | The Raft transport (TCP). With security on and no Raft TLS files, a node with no peers must bind it to a loopback address such as `127.0.0.1:7943`, or set `security.allow_plaintext_raft` (from v3.1.0). Bind it to loopback only on a node that will never take peers: the address Raft first starts on is recorded in the Raft configuration, the nodes that join later dial that recorded address, and a later `cluster.addr` does not change it, so a node first started on loopback cannot be grown by rebinding it ([Networking and security](../understand/networking-and-security.md#raft-tls)). |
 | `cluster.peers`<br>`NARAD_CLUSTER_PEERS` | none | The voters that bootstrap the cluster, the same list on every node. In the environment, `id@host:7943,id@host:7943,...`; in the file, a list of `{"id": ..., "addr": ...}`. When set, it lists at least 3 voters. A joining node walks it to find the leader. |
 | `cluster.advertise_addr`<br>`NARAD_CLUSTER_ADVERTISE_ADDR` | empty | The `host:port` other nodes dial for this node's Raft transport. Required when the node is not in the peer list; otherwise the node takes the host from its own peer entry. |
 | `cluster.initial_members`<br>`NARAD_CLUSTER_INITIAL_MEMBERS` | empty | Comma-separated IDs of the nodes that may bootstrap a new cluster; every other node joins the existing one. Empty lets every node bootstrap. Never change it after the cluster exists. |
@@ -102,8 +102,8 @@ The three Raft settings are the defaults of the Raft library Narad uses. Leave t
 | `storage.compression_level`<br>config file only | `fastest` | zstd level: `fastest`, `default`, `better` or `best`. Decompression speed does not depend on it. |
 | `storage.idle_log_eviction_ms`<br>config file only | `1800000` (30 min) | Close a partition log nothing has touched for this long. `0` turns it off; otherwise at least `60000`. See [Idle partitions](#idle-partitions). |
 | `storage.cold_retention_walk_ms`<br>config file only | `300000` (5 min) | How often closed partitions are checked for expired data. `0` turns it off; otherwise at least `60000`. |
-| `storage.consumer_offset_commit_interval_ms` (unreleased)<br>config file only | `1000` | How long an acked position may wait for a sync to disk. `10` to `60000`. v3.0.1 refuses to start with this key. See [Consumer offset commit interval](#consumer-offset-commit-interval). |
-| `storage.ingress_wal_prealloc` (unreleased)<br>config file only | `false` | Prepare ingress WAL segments ahead of use. v3.0.1 refuses to start with this key, `true` or `false`. See [Ingress WAL segment preparation](#ingress-wal-segment-preparation). |
+| `storage.consumer_offset_commit_interval_ms` (v3.1.0)<br>config file only | `1000` | How long an acked position may wait for a sync to disk. `10` to `60000`. v3.0.1 refuses to start with this key. See [Consumer offset commit interval](#consumer-offset-commit-interval). |
+| `storage.ingress_wal_prealloc` (v3.1.0)<br>config file only | `false` | Prepare ingress WAL segments ahead of use. v3.0.1 refuses to start with this key, `true` or `false`. See [Ingress WAL segment preparation](#ingress-wal-segment-preparation). |
 
 The storage keys in this table are the only ones the config file accepts. The engine's fsync mode, flush and sync cadence and segment size are internal settings with fixed production values, and a config file that sets one is refused (`storage.<key> is an internal setting and cannot be configured`). What a `202` promises about the disk does not depend on any setting; it is in the [delivery contract](../understand/delivery-contract.md#what-202-means).
 
@@ -120,7 +120,7 @@ Watch `narad_open_partition_logs` and `narad_idle_logs_evicted_total` ([Metrics 
 
 ### Consumer offset commit interval {#consumer-offset-commit-interval}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 `storage.consumer_offset_commit_interval_ms` (default `1000`, `10` to `60000`) sets how long a partition's acked position, and the acks it holds above an unacked message, may wait before they are synced to disk. The node writes them at two cadences:
 
@@ -133,7 +133,7 @@ The node logs a warning, at most once a minute, when it cannot keep to either ca
 
 ### Ingress WAL segment preparation {#ingress-wal-segment-preparation}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 `storage.ingress_wal_prealloc` (default `false`) makes the [ingress WAL](glossary.md#ingress-wal) create and zero-fill its next 64 MiB segment in the background. Group commits then overwrite blocks that already exist, and their `fdatasync` does not also have to commit the file's metadata through the file system journal. The gain was measured on ext4 only; APFS showed none. Measure on your own volumes before you rely on it.
 
@@ -173,11 +173,11 @@ Larger batches mean fewer syncs on the child and more delay for each record. How
 | `log.level`<br>`NARAD_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `log.format`<br>`NARAD_LOG_FORMAT` | `json` | `json` or `text`. |
 | `security.enabled`<br>`NARAD_SECURITY_ENABLED` | `true` | HTTP Basic authentication and grants on the API, and the shared secret between nodes. |
-| `NARAD_ADMIN_PASSWORD`<br>environment only | generated | The root admin's password, used when a secured cluster first starts with no users. Unset, the node that creates the root admin generates a password and writes it to `admin-password` in its data directory, mode 0600, and never logs it (unreleased; it used to be logged once). Set on a cluster that already has users, it changes nothing, and a node warns at startup when it is not root's password (unreleased). See [Manage the root user](../operate/users.md#root-admin). |
-| `NARAD_CLUSTER_SECRET`<br>environment only | none | The shared secret every node proves to the others on the node-to-node port. Required when security is on and `cluster.peers` is set. A secured node with no peers and none set generates a random one for the life of the process (unreleased), so no other process can use its node-to-node port; set the same secret on every node, the first one included, before adding peers. Adding peers also needs the first node to have started on a `cluster.addr` the others can reach, with Raft TLS on every node or `security.allow_plaintext_raft`: a node whose Raft first started on a loopback address can never take peers ([Raft TLS](../understand/networking-and-security.md#raft-tls)). |
+| `NARAD_ADMIN_PASSWORD`<br>environment only | generated | The root admin's password, used when a secured cluster first starts with no users. Unset, the node that creates the root admin generates a password and writes it to `admin-password` in its data directory, mode 0600, and never logs it (from v3.1.0; it used to be logged once). Set on a cluster that already has users, it changes nothing, and a node warns at startup when it is not root's password (from v3.1.0). See [Manage the root user](../operate/users.md#root-admin). |
+| `NARAD_CLUSTER_SECRET`<br>environment only | none | The shared secret every node proves to the others on the node-to-node port. Required when security is on and `cluster.peers` is set. A secured node with no peers and none set generates a random one for the life of the process (from v3.1.0), so no other process can use its node-to-node port; set the same secret on every node, the first one included, before adding peers. Adding peers also needs the first node to have started on a `cluster.addr` the others can reach, with Raft TLS on every node or `security.allow_plaintext_raft`: a node whose Raft first started on a loopback address can never take peers ([Raft TLS](../understand/networking-and-security.md#raft-tls)). |
 | `security.cluster_tls_cert_file`<br>`NARAD_CLUSTER_TLS_CERT_FILE`<br>`security.cluster_tls_key_file`<br>`NARAD_CLUSTER_TLS_KEY_FILE`<br>`security.cluster_tls_ca_file`<br>`NARAD_CLUSTER_TLS_CA_FILE` | empty | Mutual TLS for Raft: all three or none. Read once at startup; see [Raft TLS certificates](../operate/raft-tls.md). |
-| `security.allow_plaintext_raft`<br>`NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT` | `false` | With security on, a node refuses to start without the Raft TLS files unless this says the Raft port is fenced some other way, such as by a NetworkPolicy. A node with no `cluster.peers` whose `cluster.addr` is a loopback address needs neither (unreleased; this used to apply only with `cluster.peers` set). |
-| `security.allow_insecure_cluster`<br>`NARAD_SECURITY_ALLOW_INSECURE_CLUSTER` | `false` | Required to run several nodes with security off, which leaves the API, the node-to-node port and Raft open. One node needs nothing. A node with security off and no cluster secret, alone or not, serves its node-to-node port unauthenticated and logs a warning saying so (unreleased). |
+| `security.allow_plaintext_raft`<br>`NARAD_SECURITY_ALLOW_PLAINTEXT_RAFT` | `false` | With security on, a node refuses to start without the Raft TLS files unless this says the Raft port is fenced some other way, such as by a NetworkPolicy. A node with no `cluster.peers` whose `cluster.addr` is a loopback address needs neither (from v3.1.0; this used to apply only with `cluster.peers` set). |
+| `security.allow_insecure_cluster`<br>`NARAD_SECURITY_ALLOW_INSECURE_CLUSTER` | `false` | Required to run several nodes with security off, which leaves the API, the node-to-node port and Raft open. One node needs nothing. A node with security off and no cluster secret, alone or not, serves its node-to-node port unauthenticated and logs a warning saying so (from v3.1.0). |
 | `security.allow_legacy_cluster_auth`<br>`NARAD_SECURITY_ALLOW_LEGACY_CLUSTER_AUTH` | `false` | Also accept the older node-to-node authentication, for a rolling upgrade from a release that used it. Turn it off once every node has rolled. See [Upgrade Narad](../operate/upgrade.md#version-notes). |
 
 The two secrets can only be set in the environment, so config files and ConfigMaps never hold them. Why each setting exists is in [Networking and security](../understand/networking-and-security.md), and what to set before going live is in the [Production checklist](../operate/production-checklist.md).
@@ -218,7 +218,7 @@ The Helm chart writes `narad.config` from its values into this file ([Helm value
 
 ## Go runtime {#go-runtime}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 On Linux, when `GOMEMLIMIT` is unset, `narad serve` sets Go's soft memory limit to 90% of the process's cgroup memory limit, so the garbage collector works harder near the limit instead of letting a burst get the process killed. It logs `go memory limit set from the cgroup memory limit (set GOMEMLIMIT to override)` once at startup. Any non-empty `GOMEMLIMIT`, `off` included, wins; an empty one counts as unset. Without a cgroup memory limit, nothing is set. The binary never changes `GOGC`.
 
@@ -229,6 +229,6 @@ On Linux, when `GOMEMLIMIT` is unset, `narad serve` sets Go's soft memory limit 
 | Less disk | `storage.codec: zstd` |
 | Longer long polls | `http.max_consume_wait`, with `http.shutdown_grace` at least as long and `http.write_timeout` longer |
 | Larger fan-out batches on slow disks | a higher `fanout.linger_ms` |
-| Fewer offset syncs under heavy ack traffic (unreleased) | a higher `storage.consumer_offset_commit_interval_ms`; a power loss then redelivers more acked messages |
-| Fewer redeliveries after a power loss (unreleased) | a lower `storage.consumer_offset_commit_interval_ms`; `100` matches v3.0.1 |
-| A ceiling on one user's concurrent produces (unreleased) | `http.max_produce_in_flight_per_identity` |
+| Fewer offset syncs under heavy ack traffic (v3.1.0) | a higher `storage.consumer_offset_commit_interval_ms`; a power loss then redelivers more acked messages |
+| Fewer redeliveries after a power loss (v3.1.0) | a lower `storage.consumer_offset_commit_interval_ms`; `100` matches v3.0.1 |
+| A ceiling on one user's concurrent produces (v3.1.0) | `http.max_produce_in_flight_per_identity` |

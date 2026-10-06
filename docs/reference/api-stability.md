@@ -24,15 +24,21 @@ Nodes talk to each other over a versioned protocol under the same rule. Operatio
 
 ## Which release these docs describe {#docs-version}
 
-These docs follow `master`. The latest release is **v3.0.1**, tagged on 16 September 2026.
+These docs follow `master`. The latest release is **v3.1.0**, tagged on 6 October 2026.
 
-Anything in `master` but not in v3.0.1 carries this line under its heading:
+Anything v3.1.0 added carries this line under its heading:
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
-In a table, the item's name ends in "(unreleased)". The markers go when the next release ships. The [changelog](https://github.com/DebanganThakuria/narad/blob/master/CHANGELOG.md) lists every change by release.
+In a table, the item's name ends in "(v3.1.0)", and in a sentence the change is marked "(from v3.1.0)".
 
-What a v3.0.1 node does with the unreleased HTTP features, checked against a v3.0.1 build:
+Work merged to `master` after v3.1.0 is marked unreleased until it ships: in a table, its name ends in "(unreleased)", and under its heading it carries this line:
+
+**Unreleased:** in master, not in v3.1.0.
+
+When the next release ships, those markers name that release instead. The [changelog](https://github.com/DebanganThakuria/narad/blob/master/CHANGELOG.md) lists every change by release.
+
+What a v3.0.1 node does with the HTTP features v3.1.0 added, checked against a v3.0.1 build:
 
 | Feature | A v3.0.1 node |
 |---|---|

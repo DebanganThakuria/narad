@@ -166,7 +166,7 @@ A nack does not count anything. A message that always fails is nacked and delive
 
 ## Consume a batch {#consume-batch}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 ```sh title="Take up to 10 messages in one request"
 curl -i -u "$AUTH" -H 'X-Narad-Client: curl' "$NARAD/v1/topics/orders/consume?wait=10s&max=10"
@@ -218,7 +218,7 @@ Date: Mon, 28 Sep 2026 19:22:32 GMT
 
 ## Acknowledge a batch {#ack-batch}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 Leave out the `receipt_handle` parameter and send the handles in a JSON body instead:
 
@@ -298,7 +298,7 @@ The rule for consumers: if `payload_encoding` is `"base64"`, decode the payload;
 
 Keys follow the same idea. `key` is present only when the message has one, as a JSON string.
 
-**Unreleased:** in master, not in v3.0.1. A key that is not valid UTF-8 comes back base64-encoded with `"key_encoding":"base64"` beside it. During a rolling upgrade, a message whose partition owner still runs v3.0.1 comes back the old way, without `key_encoding`.
+**New in v3.1.0.** A key that is not valid UTF-8 comes back base64-encoded with `"key_encoding":"base64"` beside it. During a rolling upgrade, a message whose partition owner still runs v3.0.1 comes back the old way, without `key_encoding`.
 
 ## Flow control {#flow-control}
 

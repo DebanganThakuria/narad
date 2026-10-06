@@ -39,11 +39,11 @@ Each WAL record stores:
 
 Once the fsync returns, the client gets its `202`: the message now survives any crash of this node.
 
-The target [partition](../reference/glossary.md#partition) is chosen at accept time from the local metastore replica. A keyed message goes to the partition its [key](../reference/glossary.md#key) hashes to, and an explicit `?partition=` pins it. A keyless message is stored with no key and placed round-robin (unreleased; v3.0.1 gives it an invented `key-<n>` and hashes that). Each topic has its own rotation on each node, starting at a random partition, and `partition.HashRoundRobin` keeps the rotations of recently used topics and forgets idle ones.
+The target [partition](../reference/glossary.md#partition) is chosen at accept time from the local metastore replica. A keyed message goes to the partition its [key](../reference/glossary.md#key) hashes to, and an explicit `?partition=` pins it. A keyless message is stored with no key and placed round-robin (from v3.1.0; v3.0.1 gives it an invented `key-<n>` and hashes that). Each topic has its own rotation on each node, starting at a random partition, and `partition.HashRoundRobin` keeps the rotations of recently used topics and forgets idle ones.
 
 ### Batch produce {#batch-produce}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 A [batch produce](../reference/http-api.md#produce-batch) (`POST /produce/batch`, up to 100 records) takes the same path for all of its records at once. Every record is checked (key, payload, partition range, schema) before any is appended, and the first failure refuses the whole batch.
 
@@ -73,7 +73,7 @@ Every sequence number between the checkpoint and the read frontier is in one of 
 - **A failing destination waits alone.** After a failed commit, the destination keeps one record as a probe, returns the rest to the WAL, and retries with that single record once a second, on a 5 s budget. Nothing else waits for it: the dispatcher as a whole backs off only when it cannot read the WAL or store its checkpoint. A destination whose owner does not resolve at all (a new topic not assigned yet) is looked up again every 10 ms.
 - **Persistent failure reroutes.** A destination whose commits keep failing for 3 s, counted from the start of the first failed attempt, has its records [rerouted](../reference/glossary.md#reroute) to a live sibling partition of the same topic: the next partition, counting up and wrapping around, whose owner membership reports alive and whose own commits are neither failing nor hung. Its probe keeps trying the original once a second, so the original gets its records back the moment it recovers. A destination whose owner membership already reports dead is rerouted at once. The grace is measured in time, not passes, so a partition handoff freeze or an owner restart does not scatter records across partitions. Records of a commit in flight are never sent again or rerouted.
 - **Records left in the WAL come back in order.** A record is skipped rather than held when holding it would cost memory for nothing or break partition order: its destination is failing and already holds its probe, is hung, or has a full queue; an earlier record of the same partition is still skipped; or a delete or incarnation change is not confirmed yet. Skipped records are read again, in WAL order, when their destination recovers or drains, and at least once a second. The WAL read passes over the records that need no work before decoding them.
-- **The checkpoint is stored lazily.** Each time the checkpoint moves, its 8 bytes are overwritten in place at once, so a process crash keeps the value. A background flush makes the value durable within 250 ms, with one `fdatasync` for however many stores landed meanwhile, and again on shutdown. The WAL compacts only behind a value that is already on disk, so compaction trails a store by at most one flush, and an idle dispatcher keeps compacting until it has caught up with the stored value. At startup the recovered value is synced before anything compacts behind it. The gauge `narad_ingress_dispatch_backlog_records` (unreleased) is the durable next sequence number minus that stored value: the records a restart would replay (see [Metrics reference](../reference/metrics.md)).
+- **The checkpoint is stored lazily.** Each time the checkpoint moves, its 8 bytes are overwritten in place at once, so a process crash keeps the value. A background flush makes the value durable within 250 ms, with one `fdatasync` for however many stores landed meanwhile, and again on shutdown. The WAL compacts only behind a value that is already on disk, so compaction trails a store by at most one flush, and an idle dispatcher keeps compacting until it has caught up with the stored value. At startup the recovered value is synced before anything compacts behind it. The gauge `narad_ingress_dispatch_backlog_records` (v3.1.0) is the durable next sequence number minus that stored value: the records a restart would replay (see [Metrics reference](../reference/metrics.md)).
 - **Duplicates come from these seams.** Which records above the checkpoint already committed lives only in memory, so a crash commits them again. An OS crash or power loss can also bring back a checkpoint up to 250 ms old, with the same result. And a commit RPC carries no idempotency token, so one that succeeds after its client gave up is retried (and, past the reroute grace, rerouted), which duplicates the batch; the 30 s budget makes that rare, and a probe's 5 s budget risks a single record. All of these are duplicates, never loss, as the [delivery contract](delivery-contract.md#at-least-once) allows.
 
 The reroute is the availability trade made explicit: messages keep flowing while a node is dead, at the cost of arriving on a different partition. It is one of the reasons Narad [does not promise ordering](delivery-contract.md#ordering).
@@ -93,7 +93,7 @@ Only after the owner confirms does the dispatcher's checkpoint move, so the WAL 
 
 ### Commit combining {#commit-combining}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 The partition's produce lock spans the append and the durable commit. A failed commit discards everything above the high watermark, other callers' records included, so the two can never be split. Commit batches for one partition often arrive together (each node's dispatcher sends its own, and fan-out cursors add theirs), and each used to pay its own write, fsync and read-back, one after another, behind that lock.
 
@@ -141,7 +141,7 @@ Segments go only behind a synced checkpoint, so every sequence number below the 
 
 ### Record formats {#record-formats}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 A WAL record starts with a format byte. Format 1 holds topic, key, partition, timestamp and payload. Format 2 adds the topic's incarnation id after the topic name, and every accept for a topic with an incarnation id now writes it; a topic created before v2.2.0 has no id, and its records stay format 1. The decoder reads both, so a WAL written by an older binary replays unchanged.
 
@@ -149,7 +149,7 @@ The reverse is not true: a binary from before format 2 (v3.0.1 and earlier) cann
 
 ### Segment preparation {#segment-preparation-opt-in}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 With `storage.ingress_wal_prealloc: true` (off by default; see [Configuration reference](../reference/configuration.md#storage)), the WAL prepares each next segment off the append path. Once the active segment is half full, a background goroutine creates `next-segment.prep`, fills it with zeros to the full segment size (64 MiB), and ends it with a 16-byte trailer (`NWPREP01` plus the write limit below); the roll renames it into place. Appends then overwrite blocks that are already allocated, so a group commit's `fdatasync` no longer changes the file's size. On journaling file systems (ext4, XFS) it therefore no longer commits the inode through the journal on the path every produce waits on. A roll that finds no spare ready (preparation failed, the disk is full) creates an empty segment as before, and the roll that seals a prepared segment trims it to its data, so sealed segments look exactly as they always did.
 
@@ -179,7 +179,7 @@ The failure is then **latched**: the WAL refuses every later append with the sam
 
 Records written before the failing point of a failed batch survive the rescan too, so a produce that got a `500` may still be delivered: the at-least-once contract, exactly as for a commit RPC that succeeds after its client timed out.
 
-The latch is exported as the gauge `narad_ingress_wal_failed` (unreleased; 1 once latched). Consume and `/readyz` are unaffected by it, so alert on the gauge rather than waiting for readiness to notice. The symptom and the fix are in [Troubleshooting](../operate/troubleshooting.md#produce-500).
+The latch is exported as the gauge `narad_ingress_wal_failed` (from v3.1.0; 1 once latched). Consume and `/readyz` are unaffected by it, so alert on the gauge rather than waiting for readiness to notice. The symptom and the fix are in [Troubleshooting](../operate/troubleshooting.md#produce-500).
 
 ## Dispatch constants {#constants}
 

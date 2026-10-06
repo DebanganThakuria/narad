@@ -132,7 +132,7 @@ A check is only worth what its limits are honest about.
 
 ## Run the check yourself {#run-it}
 
-**Unreleased:** in master, not in v3.0.1.
+**New in v3.1.0.**
 
 From a clone of the repository:
 
