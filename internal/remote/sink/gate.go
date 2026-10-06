@@ -24,8 +24,10 @@ const (
 // Gate is one remote's shared pacing on this node. While it is closed
 // nothing goes to the remote except, once each backoff has elapsed, one
 // chunk from any cursor as the probe, so a dead remote sees one request
-// per interval per node, not one per cursor. Any accepted chunk and any
-// new credential version open it at once.
+// per interval per node, not one per cursor. The backoff doubles per
+// failed probe, never per answer to a chunk already in flight when the
+// gate closed. Any accepted chunk and any new credential version open
+// it at once.
 type Gate struct {
 	mu       sync.Mutex
 	closed   bool
@@ -164,6 +166,23 @@ func (g *Gate) Failed(v Verdict, probe bool) (laneBackoff bool) {
 	defer g.mu.Unlock()
 	if probe {
 		g.probing = false
+	}
+	if g.closed && !probe {
+		// While the gate is closed only the probe is sent, so this
+		// answers a chunk already in flight when it closed: the same
+		// outage the closing answer reported, not a failed probe. It
+		// counts, but never escalates the backoff or re-draws the wait;
+		// a 429 only holds the probe until its Retry-After.
+		g.failures++
+		switch {
+		case v.Action == ActGate && v.State == topic.RemoteStateAuthFailed && g.backoff < GateMaxBackoff:
+			g.closeLocked(GateMaxBackoff, true)
+		case v.Action == ActGate && v.State == topic.RemoteStateThrottled && v.RetryAfter > 0:
+			if until := g.now().Add(v.RetryAfter); until.After(g.until) {
+				g.until = until
+			}
+		}
+		return false
 	}
 	switch {
 	case v.Action == ActGate && v.State == topic.RemoteStateAuthFailed:

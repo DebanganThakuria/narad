@@ -255,3 +255,42 @@ func TestSemaphoreResizesLive(t *testing.T) {
 		t.Fatal("a cancelled acquire past the limit must fail")
 	}
 }
+
+// Answers to chunks already in flight when the gate closed report the
+// same outage, not failed probes: sixteen of them at once leave the
+// backoff at its floor and the probe due at the first interval. Only a
+// failed probe escalates.
+func TestGateEscalatesOnFailedProbesNotOnAnswersInFlight(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1_000_000, 0)}
+	g := NewGate()
+	g.now = clock.Now
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Go(func() { g.Failed(unavailable(), false) })
+	}
+	wg.Wait()
+	if !g.Closed() || g.Backoff() != GateMinBackoff {
+		t.Fatalf("after 16 answers in flight: closed=%v backoff=%s, want closed at %s", g.Closed(), g.Backoff(), GateMinBackoff)
+	}
+	// Sixteen throttled answers in flight with Retry-After: 1 wait that
+	// long, without doubling the backoff.
+	throttled := Verdict{Action: ActGate, State: topic.RemoteStateThrottled, Class: topic.RemoteStateThrottled, RetryAfter: time.Second}
+	for range 16 {
+		g.Failed(throttled, false)
+	}
+	if g.Backoff() != GateMinBackoff {
+		t.Fatalf("after 16 throttled answers in flight: backoff=%s, want %s", g.Backoff(), GateMinBackoff)
+	}
+	clock.Advance(time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	probe, err := g.Wait(ctx)
+	if err != nil || !probe {
+		t.Fatalf("probe after Retry-After: %v %v", probe, err)
+	}
+	// A failed probe escalates.
+	g.Failed(unavailable(), true)
+	if g.Backoff() != 2*GateMinBackoff {
+		t.Fatalf("after a failed probe: backoff=%s, want %s", g.Backoff(), 2*GateMinBackoff)
+	}
+}
