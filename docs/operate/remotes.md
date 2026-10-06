@@ -260,7 +260,7 @@ Cluster RPC accepts exactly one secret, so this is a planned stop and start of t
     }
     ```
 
-    This output is from a cluster whose secret had not changed, so `b` was already current; after a rotation it is listed under `reencrypted`. A remote changed in between keeps its newer ciphertext, which is already under the new key. `failed` names any remote the leader could not open, with a reason (`key_unknown` when the leader lacks the previous secret). The command is safe to repeat.
+    This output is from a cluster whose secret had not changed, so `b` was already current; after a rotation it is listed under `reencrypted`. A remote changed in between keeps its newer ciphertext, which is already under the new key. `failed` names any remote the leader could not open, with a reason (`key_unknown` when the leader lacks the previous secret), and the command then exits non-zero: do not go on to step 5 until it exits 0. The command is safe to repeat.
 4. Run `narad --ctx a remote ls` until every remote shows the new `key_version` on every node, and `narad_remote_credential_key_current` is 1 everywhere.
 5. Remove `NARAD_CLUSTER_SECRET_PREVIOUS` (delete the key from the Secret) and restart; a rolling restart is fine now.
 

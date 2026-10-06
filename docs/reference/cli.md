@@ -231,7 +231,7 @@ Manage [remotes](glossary.md#remote), the other clusters this one may send remot
 | `narad remote rm <name>` | Delete a remote. Refused while remote children use it, unless `--force`; they then hold in `remote_missing`. |
 | `narad remote ls` | List remotes, their remote children and what each node's credential cache holds, as JSON. `--no-nodes` skips asking the nodes. |
 | `narad remote test <name> --topic <topic>` | Run the attach checks against a topic on the remote, writing nothing; `--source <parent>` adds the schema and loop checks. With `remotes.allowed_hosts` set, every node runs the checks and the command exits `0` only when every node passes; without it, only the node that took the request runs them, so a `0` says nothing about the other nodes' egress (the attach checks from every node either way). |
-| `narad remote reencrypt` | After a cluster secret rotation, re-seal every password under the new key. |
+| `narad remote reencrypt` | After a cluster secret rotation, re-seal every password under the new key. Exits non-zero when any remote failed to re-seal; keep the previous secret until it exits 0. |
 
 Limit flags of `add` and `set`: `--max-in-flight <n>` (1 to 256, default 16), `--request-timeout <duration>` (5s to 120s, default 30s), `--idle-conn-timeout <duration>` (default 30s), `--conn-max-age <duration>` (default 5m), `--check-interval <duration>` (default 60s) and `--compression none|zstd`. What each does is in [Remotes and remote children](remote-children.md#limits).
 

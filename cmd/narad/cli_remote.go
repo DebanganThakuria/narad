@@ -350,10 +350,36 @@ func newRemoteTestCmd() *cobra.Command {
 func newRemoteReencryptCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "reencrypt",
-		Short: "after a cluster secret rotation, re-seal every remote password under the new key",
+		Short: "after a cluster secret rotation, re-seal every remote password under the new key; exits non-zero if any remote failed to re-seal (keep the previous secret until it exits 0)",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return cliClient().postAndPrint("/v1/cluster/reencrypt-remotes", map[string]any{})
+			resp, err := cliClient().do(http.MethodPost, "/v1/cluster/reencrypt-remotes", map[string]any{})
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			raw, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return err
+			}
+			if err := printResponse(&http.Response{StatusCode: resp.StatusCode, Body: io.NopCloser(strings.NewReader(string(raw)))}); err != nil {
+				return err
+			}
+			var ans struct {
+				Failed []struct {
+					Name   string `json:"name"`
+					Reason string `json:"reason"`
+				} `json:"failed"`
+			}
+			_ = json.Unmarshal(raw, &ans)
+			if len(ans.Failed) == 0 {
+				return nil
+			}
+			failed := make([]string, 0, len(ans.Failed))
+			for _, f := range ans.Failed {
+				failed = append(failed, f.Name+" ("+f.Reason+")")
+			}
+			return fmt.Errorf("%d remotes failed to re-seal: %s; keep the previous cluster secret until reencrypt exits 0", len(failed), strings.Join(failed, ", "))
 		},
 	}
 }

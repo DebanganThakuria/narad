@@ -298,3 +298,21 @@ func TestRemoteLsWarnsAboutMembersThatDidNotAnswer(t *testing.T) {
 		t.Fatalf("warning with every member answering = %q", w)
 	}
 }
+
+// reencrypt exits non-zero when a remote failed to re-seal, so a
+// scripted rotation stops before it removes the previous secret and
+// strands that password.
+func TestRemoteReencryptFailsWhenARemoteFailedToReseal(t *testing.T) {
+	resetRemoteCLI(t)
+	answer := `{"key_version":"k2","reencrypted":["a"],"already_current":[],"failed":[{"name":"b","reason":"key_unknown"}]}`
+	api := &remoteAPI{answer: func(*http.Request) (int, string) { return http.StatusOK, answer }}
+	srv := api.serve(t)
+	err := route([]string{"remote", "reencrypt", "--server", srv.URL})
+	if err == nil || !strings.Contains(err.Error(), "b") || !strings.Contains(err.Error(), "key_unknown") {
+		t.Fatalf("reencrypt with a failed remote: err = %v, want one naming b and key_unknown", err)
+	}
+	answer = `{"key_version":"k2","reencrypted":["a","b"],"already_current":[],"failed":[]}`
+	if err := route([]string{"remote", "reencrypt", "--server", srv.URL}); err != nil {
+		t.Fatalf("reencrypt with every remote re-sealed: %v", err)
+	}
+}
