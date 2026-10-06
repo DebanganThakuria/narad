@@ -550,3 +550,30 @@ func TestCacheMetrics(t *testing.T) {
 		t.Fatalf("a deleted remote left %d state series", n)
 	}
 }
+
+// A node cannot tell on its own that its credential is older than the
+// leader's, so the credential state gauge never claims stale; instead
+// each node exports the credential version it holds, and a node behind
+// its peers shows as a version below theirs.
+func TestCacheExportsTheCredentialVersionItHolds(t *testing.T) {
+	salt := randomBytes(t, 32)
+	secret := base64.StdEncoding.EncodeToString(randomBytes(t, 32))
+	ring, _ := remotecred.NewKeyring(secret, "", salt)
+	target := newCountingTarget(t, nil, "")
+	reg := newFakeRegistry(salt)
+	reg.put(sealer{t: t, ring: ring}.record("b", target.srv.URL, "repl", "password-one-0123456789ab", target.ca, 3))
+	m := metrics.New(prometheus.NewRegistry()).Remote
+	c := NewCache(CacheConfig{Registry: reg, Secrets: Secrets{Current: secret}, Posture: Posture{SecurityEnabled: true}, Metrics: m, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	c.Refresh()
+	if v := testutil.ToFloat64(m.CredentialVersion.WithLabelValues("b")); v != 3 {
+		t.Fatalf("narad_remote_credential_version = %v, want 3", v)
+	}
+	if n := testutil.CollectAndCount(m.CredentialState); n != 3 {
+		t.Fatalf("%d credential state series, want ready, credential_unreadable and node_insecure (no stale)", n)
+	}
+	reg.del("b")
+	c.Refresh()
+	if n := testutil.CollectAndCount(m.CredentialVersion); n != 0 {
+		t.Fatalf("a deleted remote left %d credential version series", n)
+	}
+}

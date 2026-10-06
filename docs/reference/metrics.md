@@ -133,7 +133,8 @@ A [remote child](glossary.md#remote-child) exports its link per parent partition
 | `narad_remote_inflight_wait_seconds`<br>histogram; labels `remote` | Time a request waited for one of the remote's `max_in_flight` slots. |
 | `narad_remote_chunk_bytes_limit`<br>gauge; labels `remote` | The remote's adaptive request size cap on this node: 960 KiB when healthy, down to 64 KiB after timeouts. |
 | `narad_remote_wire_bytes_total`, `narad_remote_body_bytes_total`<br>counter; labels `remote` | Request body bytes sent to the remote, after and before compression. |
-| `narad_remote_credential_state`<br>gauge; labels `remote`, `state` | 1 for this node's [credential cache state](remote-children.md#cache-states) of the remote: `ready`, `stale`, `credential_unreadable` or `node_insecure`. |
+| `narad_remote_credential_state`<br>gauge; labels `remote`, `state` | 1 for this node's [credential cache state](remote-children.md#cache-states) of the remote: `ready`, `credential_unreadable` or `node_insecure`. A node cannot tell on its own that it is `stale`; compare `narad_remote_credential_version` across nodes, or read `narad remote ls`. |
+| `narad_remote_credential_version`<br>gauge; labels `remote` | The credential version this node's cache holds for the remote. A node whose value is below another node's still holds the older password (`stale` in `narad remote ls`). |
 | `narad_remote_credential_decrypts_total`<br>counter; labels `remote` | Password decryptions by this node's cache. It moves once per credential version; a rise without a remote change is a bug. |
 | `narad_remote_credential_age_seconds`<br>gauge; labels `remote` | Seconds since the remote's password was last set. |
 | `narad_remote_credential_key_current`<br>gauge; labels `remote` | 1 when the remote's password is sealed under the current key; 0 means a cluster secret rotation was not finished with a re-encrypt. |

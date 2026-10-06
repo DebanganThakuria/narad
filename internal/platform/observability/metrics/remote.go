@@ -17,8 +17,12 @@ type RemoteMetrics struct {
 	// RTTSeconds is the last TCP connect time a check measured. remote.
 	RTTSeconds *prometheus.GaugeVec
 	// CredentialState is 1 for the cache's current state of a remote
-	// (ready, stale, credential_unreadable, node_insecure). remote, state.
+	// (ready, credential_unreadable, node_insecure). remote, state.
 	CredentialState *prometheus.GaugeVec
+	// CredentialVersion is the credential version this node's cache
+	// holds for a remote. A node behind its peers (stale) shows a lower
+	// value than theirs. remote.
+	CredentialVersion *prometheus.GaugeVec
 	// CredentialDecryptsTotal moves once per credential version per
 	// node; anything faster breaks the decrypt-once rule. remote.
 	CredentialDecryptsTotal *prometheus.CounterVec
@@ -63,8 +67,12 @@ func newRemoteMetrics() *RemoteMetrics {
 		}, []string{"remote"}),
 		CredentialState: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: Namespace, Subsystem: "remote", Name: "credential_state",
-			Help: "1 for the credential cache's current state of a remote on this node: ready, stale, credential_unreadable or node_insecure.",
+			Help: "1 for the credential cache's current state of a remote on this node: ready, credential_unreadable or node_insecure.",
 		}, []string{"remote", "state"}),
+		CredentialVersion: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: Namespace, Subsystem: "remote", Name: "credential_version",
+			Help: "The credential version this node's cache holds for a remote. A node whose value is below another node's still holds an older password (stale).",
+		}, []string{"remote"}),
 		CredentialDecryptsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace, Subsystem: "remote", Name: "credential_decrypts_total",
 			Help: "Credential decryptions by this node's cache. Moves once per credential version; faster movement without a remote write is a bug.",
@@ -111,7 +119,7 @@ func newRemoteMetrics() *RemoteMetrics {
 func (r *RemoteMetrics) collectors() []prometheus.Collector {
 	return []prometheus.Collector{
 		r.RequestsTotal, r.RequestSeconds, r.RTTSeconds,
-		r.CredentialState, r.CredentialDecryptsTotal, r.ResealOpensTotal,
+		r.CredentialState, r.CredentialVersion, r.CredentialDecryptsTotal, r.ResealOpensTotal,
 		r.CredentialAgeSeconds, r.CredentialKeyCurrent,
 		r.KeySeals, r.SealsTotal, r.KeyAgeSeconds,
 		r.DestinationRefusedTotal, r.AllowlistConfigured, r.PlaintextRaft,
@@ -129,6 +137,7 @@ func (r *RemoteMetrics) ForgetRemote(name string) {
 	r.RequestSeconds.DeletePartialMatch(match)
 	r.RTTSeconds.DeletePartialMatch(match)
 	r.CredentialState.DeletePartialMatch(match)
+	r.CredentialVersion.DeletePartialMatch(match)
 	r.CredentialDecryptsTotal.DeletePartialMatch(match)
 	r.CredentialAgeSeconds.DeletePartialMatch(match)
 	r.CredentialKeyCurrent.DeletePartialMatch(match)

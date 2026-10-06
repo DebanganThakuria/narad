@@ -67,7 +67,11 @@ const (
 	StateMissing              = "missing"
 )
 
-var credentialStates = []string{StateReady, StateStale, StateCredentialUnreadable, StateNodeInsecure}
+// credentialStates are the states narad_remote_credential_state takes.
+// stale is not one: only a view across nodes can tell a node is behind
+// (the listing does); the metric exports each node's credential_version
+// for that comparison instead.
+var credentialStates = []string{StateReady, StateCredentialUnreadable, StateNodeInsecure}
 
 // entryKey is everything a ciphertext is sealed to, plus what
 // identifies the ciphertext. A node reuses a decrypted header only
@@ -448,6 +452,7 @@ func (c *Cache) publishMetrics() {
 			}
 			m.CredentialState.WithLabelValues(name, s).Set(v)
 		}
+		m.CredentialVersion.WithLabelValues(name).Set(float64(b.key.cv))
 		cur := 0.0
 		if b.keyClass == remotecred.KeyCurrent {
 			cur = 1
