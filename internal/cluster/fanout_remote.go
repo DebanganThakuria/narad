@@ -969,7 +969,10 @@ func (sh *slabShip) sendChunk(ctx context.Context, lane *laneShip, e *remote.Ent
 	s.r.publishRemoteState(sh.cur)
 }
 
-// act applies a classified answer to the lane.
+// act applies a classified answer to the lane. Every answer that
+// refuses or narrows down records came from the target topic through the
+// replicator's grant, so it proves a cursor stall (target_missing,
+// forbidden, ...) no longer holds and clears it, as a commit does.
 func (sh *slabShip) act(ctx context.Context, lane *laneShip, rs *remoteState, e *remote.Entry, v sink.Verdict, n int, probe bool) {
 	s := sh.s
 	switch v.Action {
@@ -994,6 +997,7 @@ func (sh *slabShip) act(ctx context.Context, lane *laneShip, rs *remoteState, e 
 
 	case sink.ActResendPrefix:
 		rs.gate.Succeeded(probe)
+		sh.cur.setStall("")
 		i := v.Index
 		switch {
 		case i >= n:
@@ -1006,6 +1010,7 @@ func (sh *slabShip) act(ctx context.Context, lane *laneShip, rs *remoteState, e 
 
 	case sink.ActBisect:
 		rs.gate.Succeeded(probe)
+		sh.cur.setStall("")
 		if n == 1 {
 			sh.refuseOne(lane, topic.RemoteStateRejectedRecord)
 		} else {
@@ -1014,11 +1019,13 @@ func (sh *slabShip) act(ctx context.Context, lane *laneShip, rs *remoteState, e 
 
 	case sink.ActBlock:
 		rs.gate.Succeeded(probe)
+		sh.cur.setStall("")
 		sh.block(lane, topic.RemoteStateRejectedRecord)
 		sh.cur.forceTargetCheck()
 
 	case sink.ActSplitTooLarge:
 		rs.gate.Succeeded(probe)
+		sh.cur.setStall("")
 		switch {
 		case n == 1:
 			sh.block(lane, topic.RemoteStateRecordTooLarge)

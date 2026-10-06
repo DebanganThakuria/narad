@@ -562,3 +562,25 @@ func TestRemoteChildRereadDoesNotResendAcceptedLanes(t *testing.T) {
 		t.Fatalf("the target holds %d records after the skip, want %d", len(got), len(good))
 	}
 }
+
+// A refusal of one record proves the target exists and takes the
+// replicator's grant, so it clears a cursor stall such as target_missing:
+// the listing then names the refused record, not a missing topic, and a
+// narrowing step does not wait out a stall that no longer holds.
+func TestRemoteChildRecordRefusalClearsAStaleStall(t *testing.T) {
+	rg := newRemoteRig(t, remoteRigOpts{noTargetTopic: true, rigSourceOpts: rigSourceOpts{stallRetry: 300 * time.Millisecond}})
+	rg.src.producePayload(t, 0, "bad", []byte(`{"not_seq":true}`))
+	rg.src.produce(t, 0, 10, 3, 0)
+	rg.src.start()
+	defer rg.src.stop()
+	rg.waitState(t, 0, topic.RemoteStateTargetMissing, 15*time.Second)
+	rg.target.createTopic(t, "orders", 3)
+	schema := []byte(`{"type":"object","required":["seq"],"properties":{"seq":{"type":"integer"}}}`)
+	if _, err := rg.target.broker.UpdateTopicSchema(context.Background(), "orders", schema, 0); err != nil {
+		t.Fatal(err)
+	}
+	snap := rg.waitState(t, 0, topic.RemoteStateRejectedRecord, 20*time.Second)
+	if snap.blocked == nil || snap.blocked.Offset != 0 {
+		t.Fatalf("blocked at %+v, want offset 0", snap.blocked)
+	}
+}
