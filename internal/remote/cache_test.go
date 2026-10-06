@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -301,7 +302,7 @@ func TestCacheDecryptsOncePerCredentialVersion(t *testing.T) {
 	if opens() != 3 {
 		t.Fatalf("a limits change decrypted: %d opens", opens())
 	}
-	if after == before || after.client == before.client || &after.authz[0] != &before.authz[0] || after.Limits().MaxInFlight != 48 {
+	if after == before || after.pools.Load().client == before.pools.Load().client || &after.authz[0] != &before.authz[0] || after.Limits().MaxInFlight != 48 {
 		t.Fatal("a limits change did not rebuild the client around the same header")
 	}
 
@@ -503,6 +504,76 @@ func TestCacheRecyclesConnectionsAfterConnMaxAge(t *testing.T) {
 	c.Refresh()
 	if _, err := send(t, c, "b"); err != nil || target.opened.Load() != 2 {
 		t.Fatalf("after conn_max_age: %d connections, want 2", target.opened.Load())
+	}
+}
+
+// conn_max_age_ms bounds every connection's age, not only the ones
+// idle when the cache recycles: on a busy link a connection is never
+// idle at that instant, and another request takes a connection before
+// the busy one returns. The connection that was in use must still close
+// once its request ends, so a DNS change reaches every connection.
+func TestCacheRecyclesConnectionsBusyAtConnMaxAge(t *testing.T) {
+	salt := randomBytes(t, 32)
+	secret := base64.StdEncoding.EncodeToString(randomBytes(t, 32))
+	ring, _ := remotecred.NewKeyring(secret, "", salt)
+	arrived := make(chan string, 1)
+	release := make(chan struct{})
+	var closed sync.Map
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/slow/") {
+			arrived <- r.RemoteAddr
+			<-release
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	srv.Config.ConnState = func(c net.Conn, s http.ConnState) {
+		if s == http.StateClosed {
+			closed.Store(c.RemoteAddr().String(), true)
+		}
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	reg := newFakeRegistry(salt)
+	rec := sealer{t: t, ring: ring}.record("b", srv.URL, "repl", "password-one-0123456789ab", string(pemCert(srv.Certificate().Raw)), 1)
+	rec.Limits.ConnMaxAgeMs = domremote.MinConnMaxAgeMs
+	reg.put(rec)
+	c := NewCache(CacheConfig{Registry: reg, Secrets: Secrets{Current: secret}, Posture: Posture{SecurityEnabled: true}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	e, err := c.Get("b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := func(topic string) error {
+		resp, err := e.Do(context.Background(), Outbound{Method: http.MethodPost, Path: "/v1/topics/" + topic + "/produce/batch", Body: []byte(`{"messages":[]}`), ContentType: "application/json", Chunk: true})
+		if err == nil {
+			_, _ = ReadBody(resp, 64)
+		}
+		return err
+	}
+	slow := make(chan error, 1)
+	go func() { slow <- chunk("slow") }()
+	busy := <-arrived
+	now = now.Add(time.Duration(domremote.MinConnMaxAgeMs) * time.Millisecond)
+	c.Refresh() // due: the slow request's connection is in use
+	for range 3 {
+		if err := chunk("orders"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(release)
+	if err := <-slow; err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, ok := closed.Load(busy); ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the connection busy at conn_max_age_ms stayed open after its request ended")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

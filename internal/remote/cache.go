@@ -403,7 +403,7 @@ func (c *Cache) maintain() {
 		age := time.Duration(e.limits.ConnMaxAgeMs) * time.Millisecond
 		if last := e.recycledAt.Load(); now.UnixNano()-last >= int64(age) {
 			e.recycledAt.Store(now.UnixNano())
-			e.CloseIdleConnections()
+			e.Recycle()
 		}
 	}
 	c.mu.Lock()

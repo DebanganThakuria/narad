@@ -51,6 +51,7 @@ type transportSpec struct {
 	limits     domremote.Limits // defaults applied
 	roots      *x509.CertPool   // nil: the system roots
 	serverName string           // the URL's host
+	tls        *tls.Config      // nil: built from roots and serverName
 	dial       dialFunc         // nil: a plain dialer
 	conns      int              // the pool's connection cap
 }
@@ -75,12 +76,16 @@ func newTransport(spec transportSpec) *http.Transport {
 		d := &net.Dialer{Timeout: dialTimeout, KeepAlive: dialKeepAlive}
 		dial = d.DialContext
 	}
+	tlsConfig := spec.tls
+	if tlsConfig == nil {
+		tlsConfig = remoteTLSConfig(spec.roots, spec.serverName)
+	}
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	return &http.Transport{
 		Proxy:                  proxyFunc,
 		DialContext:            dial,
-		TLSClientConfig:        remoteTLSConfig(spec.roots, spec.serverName),
+		TLSClientConfig:        tlsConfig,
 		TLSHandshakeTimeout:    tlsHandshakeTimeout,
 		Protocols:              protocols,
 		ForceAttemptHTTP2:      false,

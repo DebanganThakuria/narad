@@ -23,7 +23,8 @@ import (
 	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 )
 
-// Entry is one remote as this node can use it. Immutable once published.
+// Entry is one remote as this node can use it. Immutable once
+// published, except for its connection pools, which Recycle replaces.
 // Its String, Format and LogValue print the name only: the ready
 // Authorization value lives in an unexported field and nothing on the
 // outbound plane prints an *http.Request or its Header.
@@ -35,19 +36,35 @@ type Entry struct {
 	base        string // canonical scheme://host[:port][/prefix], no trailing slash
 	host        string // the URL's host:port as dialled
 	authz       []string
-	client      *http.Client
-	transport   *http.Transport
 	fingerprint string
 	metrics     *metrics.RemoteMetrics
+	// pools are the entry's current connection pools; newPools builds
+	// the next ones when Recycle retires these.
+	pools    atomic.Pointer[entryPools]
+	newPools func() *entryPools
+	// recycledAt is when the cache last recycled this entry's pools for
+	// conn_max_age_ms (Unix nanoseconds).
+	recycledAt atomic.Int64
+}
+
+// entryPools are an entry's two connection pools.
+type entryPools struct {
+	client    *http.Client
+	transport *http.Transport
 	// sideClient serves the requests that are not data chunks (target
 	// checks, listings, capability probes) from a pool of its own,
 	// SideRequestSlots connections: they never queue behind chunks for
 	// a connection, and chunks never queue behind them.
 	sideClient    *http.Client
 	sideTransport *http.Transport
-	// recycledAt is when the cache last closed this entry's idle
-	// connections for conn_max_age_ms (Unix nanoseconds).
-	recycledAt atomic.Int64
+}
+
+// closeIdle closes the pools' idle connections. A pool that serves no
+// new request afterwards also closes each in-use connection as its
+// request ends.
+func (p *entryPools) closeIdle() {
+	p.transport.CloseIdleConnections()
+	p.sideTransport.CloseIdleConnections()
 }
 
 // Name is the remote's name.
@@ -156,9 +173,10 @@ func (e *Entry) do(ctx context.Context, out Outbound, withAuth bool) (*http.Resp
 	if out.ContentEncoding == headerZstd[0] {
 		h["Content-Encoding"] = headerZstd
 	}
-	client := e.client
-	if !out.Chunk && e.sideClient != nil {
-		client = e.sideClient
+	p := e.pools.Load()
+	client := p.client
+	if !out.Chunk {
+		client = p.sideClient
 	}
 	start := time.Now()
 	resp, err := client.Do(req)
@@ -208,15 +226,26 @@ func (e *Entry) observe(resp *http.Response, err error, elapsed time.Duration) {
 }
 
 // CloseIdleConnections closes the entry's idle connections. The cache
-// calls it when it replaces or drops the entry, and every
-// conn_max_age_ms, so kept-alive connections re-resolve DNS.
+// calls it when it replaces or drops the entry.
 func (e *Entry) CloseIdleConnections() {
-	if e != nil && e.transport != nil {
-		e.transport.CloseIdleConnections()
+	if e != nil {
+		e.pools.Load().closeIdle()
 	}
-	if e != nil && e.sideTransport != nil {
-		e.sideTransport.CloseIdleConnections()
-	}
+}
+
+// Recycle bounds every connection's age, for conn_max_age_ms: it moves
+// the entry onto new pools and retires the old ones, which close their
+// idle connections now and each in-use one as its request ends, since
+// they get no new request. Closing the idle ones of a pool that stays
+// in use would not do: on a busy link a connection is idle only between
+// one answer and the next request, so most would never close, and a DNS
+// change or a load balancer scale-out would never reach them. The old
+// pools close idle again after one request timeout, for a request that
+// took a connection from them while they were being replaced.
+func (e *Entry) Recycle() {
+	old := e.pools.Swap(e.newPools())
+	old.closeIdle()
+	time.AfterFunc(time.Duration(e.limits.RequestTimeoutMs)*time.Millisecond, old.closeIdle)
 }
 
 // entrySpec is everything an entry is built from. The password is
@@ -266,22 +295,26 @@ func buildClient(spec entrySpec) (*Entry, error) {
 		return nil, err
 	}
 	limits := spec.limits.WithDefaults()
-	t := newTransport(transportSpec{limits: limits, roots: roots, serverName: serverName, dial: spec.dial, conns: limits.MaxInFlight})
-	side := newTransport(transportSpec{limits: limits, roots: roots, serverName: serverName, dial: spec.dial, conns: SideRequestSlots})
-	e := &Entry{
-		name:          spec.name,
-		id:            spec.id,
-		cv:            spec.cv,
-		limits:        limits,
-		base:          base,
-		host:          host,
-		client:        newClient(t, limits),
-		transport:     t,
-		fingerprint:   spec.fingerprint,
-		metrics:       spec.metrics,
-		sideClient:    newClient(side, limits),
-		sideTransport: side,
+	// One TLS config for every pool the entry builds, so a recycled
+	// pool's new connections resume their sessions.
+	tlsConfig := remoteTLSConfig(roots, serverName)
+	newPools := func() *entryPools {
+		t := newTransport(transportSpec{limits: limits, tls: tlsConfig, dial: spec.dial, conns: limits.MaxInFlight})
+		side := newTransport(transportSpec{limits: limits, tls: tlsConfig, dial: spec.dial, conns: SideRequestSlots})
+		return &entryPools{client: newClient(t, limits), transport: t, sideClient: newClient(side, limits), sideTransport: side}
 	}
+	e := &Entry{
+		name:        spec.name,
+		id:          spec.id,
+		cv:          spec.cv,
+		limits:      limits,
+		base:        base,
+		host:        host,
+		fingerprint: spec.fingerprint,
+		metrics:     spec.metrics,
+		newPools:    newPools,
+	}
+	e.pools.Store(newPools())
 	e.recycledAt.Store(time.Now().UnixNano())
 	return e, nil
 }

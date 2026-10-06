@@ -3151,7 +3151,7 @@ components:
           minimum: 10000
           maximum: 3600000
           default: 300000
-          description: How often idle connections are recycled, so a DNS change is picked up.
+          description: How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up.
         check_interval_ms:
           type: integer
           minimum: 10000

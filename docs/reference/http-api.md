@@ -2432,7 +2432,7 @@ remote writes a minute, and a cluster holds at most 64 remotes.
 | `limits.max_in_flight`<br>integer, optional, default `16` | Requests to the remote in flight at once on each node, shared by every cursor that sends to it. |
 | `limits.request_timeout_ms`<br>integer, optional, default `30000` | Timeout of one request to the remote. |
 | `limits.idle_conn_timeout_ms`<br>integer, optional, default `30000` | How long an idle connection to the remote is kept. |
-| `limits.conn_max_age_ms`<br>integer, optional, default `300000` | How often idle connections are recycled, so a DNS change is picked up. |
+| `limits.conn_max_age_ms`<br>integer, optional, default `300000` | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |
 | `limits.check_interval_ms`<br>integer, optional, default `60000` | How often each cursor re-checks its target, with records to send or not (with 20% jitter). |
 | `limits.compression`<br>string: `none`, `zstd`, optional, default `none` | `zstd` compresses a chunk when that saves at least 10% and the target decodes zstd; otherwise it goes uncompressed. |
 
@@ -2468,7 +2468,7 @@ remote writes a minute, and a cluster holds at most 64 remotes.
 | `limits.max_in_flight`<br>integer | Requests to the remote in flight at once on each node, shared by every cursor that sends to it. |
 | `limits.request_timeout_ms`<br>integer | Timeout of one request to the remote. |
 | `limits.idle_conn_timeout_ms`<br>integer | How long an idle connection to the remote is kept. |
-| `limits.conn_max_age_ms`<br>integer | How often idle connections are recycled, so a DNS change is picked up. |
+| `limits.conn_max_age_ms`<br>integer | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |
 | `limits.check_interval_ms`<br>integer | How often each cursor re-checks its target, with records to send or not (with 20% jitter). |
 | `limits.compression`<br>string: `none`, `zstd` | `zstd` compresses a chunk when that saves at least 10% and the target decodes zstd; otherwise it goes uncompressed. |
 | `revision`<br>integer | Moves on every change. |
@@ -2582,7 +2582,7 @@ version and age, absent before the first remote.
 | `remotes[].limits.max_in_flight`<br>integer | Requests to the remote in flight at once on each node, shared by every cursor that sends to it. |
 | `remotes[].limits.request_timeout_ms`<br>integer | Timeout of one request to the remote. |
 | `remotes[].limits.idle_conn_timeout_ms`<br>integer | How long an idle connection to the remote is kept. |
-| `remotes[].limits.conn_max_age_ms`<br>integer | How often idle connections are recycled, so a DNS change is picked up. |
+| `remotes[].limits.conn_max_age_ms`<br>integer | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |
 | `remotes[].limits.check_interval_ms`<br>integer | How often each cursor re-checks its target, with records to send or not (with 20% jitter). |
 | `remotes[].limits.compression`<br>string: `none`, `zstd` | `zstd` compresses a chunk when that saves at least 10% and the target decodes zstd; otherwise it goes uncompressed. |
 | `remotes[].revision`<br>integer | Moves on every change. |
@@ -2709,7 +2709,7 @@ for it, as [list remotes](#list-remotes) does.
 | `limits.max_in_flight`<br>integer | Requests to the remote in flight at once on each node, shared by every cursor that sends to it. |
 | `limits.request_timeout_ms`<br>integer | Timeout of one request to the remote. |
 | `limits.idle_conn_timeout_ms`<br>integer | How long an idle connection to the remote is kept. |
-| `limits.conn_max_age_ms`<br>integer | How often idle connections are recycled, so a DNS change is picked up. |
+| `limits.conn_max_age_ms`<br>integer | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |
 | `limits.check_interval_ms`<br>integer | How often each cursor re-checks its target, with records to send or not (with 20% jitter). |
 | `limits.compression`<br>string: `none`, `zstd` | `zstd` compresses a chunk when that saves at least 10% and the target decodes zstd; otherwise it goes uncompressed. |
 | `revision`<br>integer | Moves on every change. |
@@ -2799,7 +2799,7 @@ change live; a limit named with `0` or `""` is refused.
 | `limits.max_in_flight`<br>integer, optional, default `16` | Requests to the remote in flight at once on each node, shared by every cursor that sends to it. |
 | `limits.request_timeout_ms`<br>integer, optional, default `30000` | Timeout of one request to the remote. |
 | `limits.idle_conn_timeout_ms`<br>integer, optional, default `30000` | How long an idle connection to the remote is kept. |
-| `limits.conn_max_age_ms`<br>integer, optional, default `300000` | How often idle connections are recycled, so a DNS change is picked up. |
+| `limits.conn_max_age_ms`<br>integer, optional, default `300000` | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |
 | `limits.check_interval_ms`<br>integer, optional, default `60000` | How often each cursor re-checks its target, with records to send or not (with 20% jitter). |
 | `limits.compression`<br>string: `none`, `zstd`, optional, default `none` | `zstd` compresses a chunk when that saves at least 10% and the target decodes zstd; otherwise it goes uncompressed. |
 
@@ -2836,7 +2836,7 @@ change live; a limit named with `0` or `""` is refused.
 | `limits.max_in_flight`<br>integer | Requests to the remote in flight at once on each node, shared by every cursor that sends to it. |
 | `limits.request_timeout_ms`<br>integer | Timeout of one request to the remote. |
 | `limits.idle_conn_timeout_ms`<br>integer | How long an idle connection to the remote is kept. |
-| `limits.conn_max_age_ms`<br>integer | How often idle connections are recycled, so a DNS change is picked up. |
+| `limits.conn_max_age_ms`<br>integer | How often the connections are replaced, busy ones included (each closes once its request ends), so a DNS change or a load balancer scale-out is picked up. |
 | `limits.check_interval_ms`<br>integer | How often each cursor re-checks its target, with records to send or not (with 20% jitter). |
 | `limits.compression`<br>string: `none`, `zstd` | `zstd` compresses a chunk when that saves at least 10% and the target decodes zstd; otherwise it goes uncompressed. |
 | `revision`<br>integer | Moves on every change. |

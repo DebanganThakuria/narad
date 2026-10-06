@@ -242,7 +242,7 @@ func (c *Checker) clock() time.Time {
 // check's class.
 func (c *Checker) measureRTT(ctx context.Context, e *Entry) (time.Duration, string) {
 	start := time.Now()
-	conn, err := e.transport.DialContext(ctx, "tcp", e.host)
+	conn, err := e.pools.Load().transport.DialContext(ctx, "tcp", e.host)
 	if err != nil {
 		return 0, transportClass(err)
 	}

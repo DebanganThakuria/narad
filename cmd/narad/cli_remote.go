@@ -35,7 +35,7 @@ func (f *remoteLimitFlags) register(cmd *cobra.Command) {
 	cmd.Flags().IntVar(&f.maxInFlight, "max-in-flight", 0, "requests in flight to the remote per node (1-256, default 16)")
 	cmd.Flags().DurationVar(&f.requestTimeout, "request-timeout", 0, "per-request timeout (5s-120s, default 30s)")
 	cmd.Flags().DurationVar(&f.idleConnTimeout, "idle-conn-timeout", 0, "idle connection timeout (default 30s)")
-	cmd.Flags().DurationVar(&f.connMaxAge, "conn-max-age", 0, "recycle idle connections this often (default 5m)")
+	cmd.Flags().DurationVar(&f.connMaxAge, "conn-max-age", 0, "replace the connections, busy ones included, this often (default 5m)")
 	cmd.Flags().DurationVar(&f.checkInterval, "check-interval", 0, "runtime target check interval (default 60s)")
 	cmd.Flags().StringVar(&f.compression, "compression", "", "none (default) or zstd")
 }
