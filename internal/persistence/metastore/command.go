@@ -4,7 +4,10 @@ package metastore
 // frozen: changing the opCode values, JSON tags, or payload shapes would
 // break replay of existing Raft logs.
 
-import "github.com/debanganthakuria/narad/internal/domain/user"
+import (
+	"github.com/debanganthakuria/narad/internal/domain/topic"
+	"github.com/debanganthakuria/narad/internal/domain/user"
+)
 
 type opCode byte
 
@@ -31,6 +34,42 @@ const (
 	opReadmitMember
 	opSetUserPassword
 	opSetUserGrants
+
+	// The entry types below are newer than every 3.0.x release. The
+	// leader proposes one only once every member reports a release that
+	// applies it (EveryMemberKnows), and proposes the entries above
+	// until then. Their numbers are part of the log format: never reorder
+	// them. See fsm_apply_create.go, fsm_apply_cas.go and
+	// fsm_apply_assign.go.
+
+	// opCreateTopicWith creates a topic, its first schema version and its
+	// fan-out parent link in one transaction.
+	opCreateTopicWith
+	// opUpdateTopicIf is a topic config update that applies only to the
+	// incarnation it was read from and never shrinks the partitions.
+	opUpdateTopicIf
+	// opDeleteTopicIf deletes a topic only if it is the incarnation the
+	// delete was checked against.
+	opDeleteTopicIf
+	// opPutSchemaIf appends a schema version only to the incarnation it
+	// was checked against, within the schema byte budgets.
+	opPutSchemaIf
+	// opAttachChildIf links a fan-out child only if both topics are the
+	// incarnations it was checked against, comparing schema histories by
+	// JSON value.
+	opAttachChildIf
+	// opDetachChildIf unlinks a fan-out child only if both topics are
+	// the incarnations it was checked against.
+	opDetachChildIf
+	// opAssignPartitionIfAbsent places a partition that has no owner on
+	// record; it never replaces one.
+	opAssignPartitionIfAbsent
+	// opPruneAssignment deletes an assignment row that belongs to no
+	// partition: its topic is gone or the partition is out of range.
+	opPruneAssignment
+	// opMarkMemberDeadIf marks a member dead unless a heartbeat newer
+	// than the one the decision was made from is on record.
+	opMarkMemberDeadIf
 
 	// opEnd is not an entry type: it marks the end of the list. New
 	// entry types go above this line, and a leader proposes one only
@@ -150,4 +189,84 @@ type childLinkPayload struct {
 type heartbeatPayload struct {
 	ID string `json:"id"`
 	At int64  `json:"at"`
+}
+
+// createTopicWithPayload is the body of opCreateTopicWith: the topic
+// record, its first schema version (optional, already validated and
+// compacted by the proposer) and its fan-out parent link (optional).
+type createTopicWithPayload struct {
+	Topic  topic.Topic        `json:"t"`
+	Schema []byte             `json:"s,omitempty"`
+	Link   *createLinkPayload `json:"l,omitempty"`
+}
+
+// createLinkPayload is the fan-out link of a create-as-child: what an
+// attach carries, plus the parent incarnation the create was checked
+// against.
+type createLinkPayload struct {
+	Parent   string  `json:"p"`
+	ParentID string  `json:"pi"`
+	Epoch    string  `json:"e,omitempty"`
+	DelayMs  int64   `json:"d,omitempty"`
+	Offsets  []int64 `json:"o,omitempty"`
+}
+
+// updateTopicIfPayload is the body of opUpdateTopicIf: the proposed
+// record and the incarnation it was read from.
+type updateTopicIfPayload struct {
+	Topic    topic.Topic `json:"t"`
+	ExpectID string      `json:"x"`
+}
+
+// deleteTopicIfPayload is the body of opDeleteTopicIf.
+type deleteTopicIfPayload struct {
+	Name     string `json:"n"`
+	ExpectID string `json:"x"`
+}
+
+// putSchemaIfPayload is the body of opPutSchemaIf.
+type putSchemaIfPayload struct {
+	Topic    string `json:"t"`
+	Version  int    `json:"v"`
+	Schema   []byte `json:"s"`
+	ExpectID string `json:"x"`
+}
+
+// attachChildIfPayload is the body of opAttachChildIf: the link, and
+// the parent and child incarnations it was checked against.
+type attachChildIfPayload struct {
+	Link     childLinkPayload `json:"l"`
+	ParentID string           `json:"pi"`
+	ChildID  string           `json:"ci"`
+}
+
+// detachChildIfPayload is the body of opDetachChildIf.
+type detachChildIfPayload struct {
+	Parent   string `json:"p"`
+	Child    string `json:"c"`
+	ParentID string `json:"pi"`
+	ChildID  string `json:"ci"`
+}
+
+// assignIfAbsentPayload is the body of opAssignPartitionIfAbsent:
+// ExpectID is the topic incarnation the placement was computed for.
+type assignIfAbsentPayload struct {
+	Topic     string `json:"t"`
+	Partition int    `json:"p"`
+	OwnerID   string `json:"o"`
+	ExpectID  string `json:"x"`
+}
+
+// pruneAssignmentPayload is the body of opPruneAssignment.
+type pruneAssignmentPayload struct {
+	Topic     string `json:"t"`
+	Partition int    `json:"p"`
+}
+
+// markMemberDeadIfPayload is the body of opMarkMemberDeadIf: Observed
+// is the member's LastHeartbeat (Unix seconds) the decision was made
+// from.
+type markMemberDeadIfPayload struct {
+	ID       string `json:"id"`
+	Observed int64  `json:"h"`
 }

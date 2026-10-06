@@ -347,10 +347,40 @@ func (s *lockedStore) AbortMove(ctx context.Context, topicName string, partition
 	return s.f.AbortMove(ctx, topicName, partition, expectedTarget)
 }
 
-func (s *lockedStore) MarkMemberDead(ctx context.Context, id string) error {
+func (s *lockedStore) MarkMemberDeadObserved(ctx context.Context, id string, observed int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.f.MarkMemberDead(ctx, id)
+	return s.f.MarkMemberDeadObserved(ctx, id, observed)
+}
+
+func (s *lockedStore) LeaderBarrier(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.f.LeaderBarrier(ctx)
+}
+
+func (s *lockedStore) GetTopic(ctx context.Context, name string) (topic.Topic, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.f.GetTopic(ctx, name)
+}
+
+func (s *lockedStore) AssignPartitionIfAbsent(ctx context.Context, topicName string, partition int, ownerID, expectID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.f.AssignPartitionIfAbsent(ctx, topicName, partition, ownerID, expectID)
+}
+
+func (s *lockedStore) OrphanAssignments() ([]metastore.Assignment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.f.OrphanAssignments()
+}
+
+func (s *lockedStore) PruneAssignment(ctx context.Context, topicName string, partition int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.f.PruneAssignment(ctx, topicName, partition)
 }
 
 func (s *lockedStore) Voters() ([]string, error) {

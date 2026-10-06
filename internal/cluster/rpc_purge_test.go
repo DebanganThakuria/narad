@@ -2,7 +2,9 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -159,5 +161,86 @@ func TestRPCServerForwardedDeleteAnswers204OnLocalPurgeFailure(t *testing.T) {
 	}
 	if got := bc.seen(); len(got) != 1 || got[0] != "orders" {
 		t.Fatalf("broadcast = %v, want [orders] despite the local purge failure", got)
+	}
+}
+
+// A purge whose local replica still shows the incarnation after the
+// apply wait answers a retriable 503 with code purge_deferred instead
+// of the 204 of a purge that ran, and purges nothing: the leader then
+// knows this member still holds the files and asks again. Master
+// answered 204, so the leader counted the member as purged.
+func TestPurgeAnswersRetriableWhileTheReplicaLags(t *testing.T) {
+	store := newTestStore(t)
+	br := &purgeOnlyBroker{}
+	s := &RPCServer{store: store, broker: br, logger: discardLogger()}
+	s.purgeApplyWait = 100 * time.Millisecond
+	if err := store.CreateTopic(context.Background(), topic.Topic{Name: "orders", ID: "0000000000000009", Partitions: 1}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	res := s.handlePurgeTopic(encodePurgeReq(t, "orders", "0000000000000009"))
+	if res.Status != http.StatusServiceUnavailable {
+		t.Fatalf("purge while the replica still shows the incarnation: status %d body %s, want 503", res.Status, res.Body)
+	}
+	var body struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if err := json.Unmarshal(res.Body, &body); err != nil || body.Code != "purge_deferred" || body.Error == "" {
+		t.Fatalf("body = %s (decode err %v), want an error with code purge_deferred", res.Body, err)
+	}
+	if got := br.calls(); len(got) != 0 {
+		t.Fatalf("PurgeTopic calls = %v, want none while the replica lags", got)
+	}
+}
+
+// statsOnlyBroker serves the per-partition stats RPC and counts whole
+// describes, each of which reads the topic's schema.
+type statsOnlyBroker struct {
+	broker.Broker
+	describes int
+}
+
+func (b *statsOnlyBroker) GetTopicDetails(_ context.Context, name string) (topic.Details, error) {
+	b.describes++
+	return topic.Details{
+		Topic:         topic.Topic{Name: name, Partitions: 2},
+		SchemaVersion: 7,
+		Partitions:    []topic.PartitionStats{{Index: 0, HighWatermark: 3}, {Index: 1, HighWatermark: 4}},
+	}, nil
+}
+
+func (b *statsOnlyBroker) LocalPartitionStats(_ context.Context, _ string, partition int) (topic.PartitionStats, error) {
+	if partition < 0 || partition >= 2 {
+		return topic.PartitionStats{}, fmt.Errorf("%w: partition %d", errs.ErrInvalidArgument, partition)
+	}
+	return topic.PartitionStats{Index: partition, HighWatermark: int64(3 + partition)}, nil
+}
+
+// An owner answers the per-partition stats RPC from the one partition,
+// without a whole describe and so without reading the topic's schema.
+// Master ran GetTopicDetails per call: one schema read and one stat of
+// every partition for each partition asked for.
+func TestPartitionStatsRPCReadsNoSchema(t *testing.T) {
+	br := &statsOnlyBroker{}
+	s := &RPCServer{broker: br, logger: discardLogger()}
+	encode := func(partition int) []byte {
+		payload, err := nodewire.EncodeTopicPartitionStatsRequest(nodewire.TopicPartitionStatsRequest{Topic: "orders", Partition: partition})
+		if err != nil {
+			t.Fatalf("EncodeTopicPartitionStatsRequest: %v", err)
+		}
+		return payload
+	}
+
+	res := s.handleTopicPartitionStats(encode(1))
+	var stats topic.PartitionStats
+	if res.Status != http.StatusOK || json.Unmarshal(res.Body, &stats) != nil || stats.Index != 1 || stats.HighWatermark != 4 {
+		t.Fatalf("stats RPC = %d %s, want 200 with partition 1 at high watermark 4", res.Status, res.Body)
+	}
+	if res := s.handleTopicPartitionStats(encode(2)); res.Status != http.StatusBadRequest {
+		t.Fatalf("stats RPC for an out-of-range partition = %d %s, want 400", res.Status, res.Body)
+	}
+	if br.describes != 0 {
+		t.Fatalf("the stats RPC described the whole topic %d times, want 0", br.describes)
 	}
 }

@@ -46,6 +46,11 @@ type RPCServer struct {
 	// agrees with the router's and the HTTP handlers'.
 	maxConsumeWait time.Duration
 
+	// purgeApplyWait overrides purgeApplyWaitTimeout, how long a purge
+	// waits for the local replica to reflect the deletion. Zero (every
+	// production server) means the default; tests shorten it.
+	purgeApplyWait time.Duration
+
 	// messagingSem bounds how many messaging handlers (acks, extends,
 	// nacks, non-blocking consumes) execute at once, and commitSem how
 	// many produce commits do. The read loop still spawns a goroutine
@@ -669,15 +674,29 @@ func (s *RPCServer) brokerError(op string, err error) nodewire.Response {
 // a reply that carries several outcomes in one body (see handleAckBatch).
 func (s *RPCServer) brokerErrorStatus(op string, err error) (int, string) {
 	switch {
+	case errors.Is(err, errs.ErrForbidden):
+		return http.StatusForbidden, err.Error()
 	case errors.Is(err, errs.ErrTopicNotFound):
 		return http.StatusNotFound, "topic not found"
 	case errors.Is(err, errs.ErrTopicAlreadyExists):
+		if err != errs.ErrTopicAlreadyExists {
+			return http.StatusConflict, err.Error()
+		}
 		return http.StatusConflict, "topic already exists"
 	case errors.Is(err, errs.ErrHandleMalformed):
 		return http.StatusBadRequest, err.Error()
 	case errors.Is(err, errs.ErrHandleStale):
 		return http.StatusGone, err.Error()
 	case errors.Is(err, errs.ErrAckedAheadFull):
+		return http.StatusServiceUnavailable, err.Error()
+	case errors.Is(err, errs.ErrUnavailable):
+		// Retryable, as the HTTP layer maps it: no leader, a replica
+		// still catching up, or a create the leader refused because
+		// every live member is being decommissioned. The message says
+		// which, so a forwarded request's caller sees it.
+		if s.logger != nil {
+			s.logger.Warn(op+" unavailable", "err", err)
+		}
 		return http.StatusServiceUnavailable, err.Error()
 	case errors.Is(err, errs.ErrInvalidArgument),
 		errors.Is(err, errs.ErrPartitionRequired):
@@ -692,6 +711,7 @@ func (s *RPCServer) brokerErrorStatus(op string, err error) (int, string) {
 		errors.Is(err, errs.ErrFanoutDelayTooLong), // 409, as the HTTP layer maps it
 		errors.Is(err, errs.ErrSchemaVersionConflict),
 		errors.Is(err, errs.ErrSchemaHistoryFull),
+		errors.Is(err, errs.ErrTopicChanged),
 		errors.Is(err, errs.ErrAlreadyExists):
 		return http.StatusConflict, err.Error()
 	case errors.Is(err, errs.ErrNotFound):

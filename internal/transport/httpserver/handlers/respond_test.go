@@ -2,10 +2,13 @@ package handlers
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"testing"
+
+	"github.com/debanganthakuria/narad/internal/errs"
 )
 
 // TestResponseBufferPoolDropsOversizedBuffers checks that a buffer that
@@ -47,5 +50,32 @@ func TestWriteJSONLargePayloadStillServed(t *testing.T) {
 	}
 	if !bytes.Contains(res.Body.Bytes(), []byte(`"blob":"zzz`)) {
 		t.Fatal("large payload body missing")
+	}
+}
+
+// The leader's ownership refusal is a 403 carrying its reason, and a
+// wrapped topic-exists conflict (a name that differs from an existing
+// one only in letter case) says why; the bare sentinel keeps its text.
+// A topic that changed under the request is a 409 that says how.
+func TestBrokerErrorsMapForbiddenAndExplainedConflicts(t *testing.T) {
+	s := newTestSet(&fakeBroker{})
+	cases := []struct {
+		err        error
+		wantStatus int
+		wantBody   string
+	}{
+		{err: fmt.Errorf("refused: %w", errs.ErrForbidden), wantStatus: http.StatusForbidden, wantBody: "refused: forbidden"},
+		{err: errs.ErrTopicAlreadyExists, wantStatus: http.StatusConflict, wantBody: "topic already exists"},
+		{err: fmt.Errorf("%w: \"Orders\" differs only in letter case", errs.ErrTopicAlreadyExists), wantStatus: http.StatusConflict, wantBody: "differs only in letter case"},
+		// A write the leader checked against a topic that was recreated
+		// before it applied.
+		{err: fmt.Errorf("%w: topic \"orders\" was recreated", errs.ErrTopicChanged), wantStatus: http.StatusConflict, wantBody: "was recreated"},
+	}
+	for _, tc := range cases {
+		res := httptest.NewRecorder()
+		s.WriteBrokerError(res, "op", tc.err)
+		if res.Code != tc.wantStatus || !bytes.Contains(res.Body.Bytes(), []byte(tc.wantBody)) {
+			t.Errorf("WriteBrokerError(%v) = %d %s, want %d containing %q", tc.err, res.Code, res.Body.String(), tc.wantStatus, tc.wantBody)
+		}
 	}
 }

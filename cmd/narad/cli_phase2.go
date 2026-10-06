@@ -84,27 +84,81 @@ func newReplayCmd() *cobra.Command {
 }
 
 func partitionRange(c *httpClient, topic string, partition int) (oldest, hwm int64, err error) {
-	resp, err := c.do(http.MethodGet, "/v1/topics/"+url.PathEscape(topic), nil)
+	stats, err := fetchTopicStats(c, topic)
 	if err != nil {
 		return 0, 0, err
 	}
-	defer resp.Body.Close()
-	var info struct {
-		PartitionStats []struct {
-			Index         int   `json:"index"`
-			OldestOffset  int64 `json:"oldest_offset"`
-			HighWatermark int64 `json:"high_watermark"`
-		} `json:"partition_stats"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+	ps, err := stats.partition(topic, partition)
+	if err != nil {
 		return 0, 0, err
 	}
-	for _, ps := range info.PartitionStats {
-		if ps.Index == partition {
-			return ps.OldestOffset, ps.HighWatermark, nil
-		}
+	return ps.OldestOffset, ps.HighWatermark, nil
+}
+
+// partitionStat is one partition_stats entry of a topic GET as the CLI
+// reads it. Since the partial topic GET, a partition whose owner is
+// down is a zero placeholder with Status "owner_unavailable"; its
+// numbers must never be read as the partition's. A server that predates
+// the field sends no status, and never a placeholder.
+type partitionStat struct {
+	Index         int    `json:"index"`
+	OldestOffset  int64  `json:"oldest_offset"`
+	NextOffset    int64  `json:"next_offset"`
+	HighWatermark int64  `json:"high_watermark"`
+	SizeBytes     int64  `json:"size_bytes"`
+	OwnerNode     string `json:"owner_node"`
+	Status        string `json:"status"`
+	OwnerLiveness string `json:"owner_liveness"`
+}
+
+// unavailable reports whether the entry is a placeholder.
+func (p partitionStat) unavailable() bool { return p.Status == "owner_unavailable" }
+
+// unavailableError is the refusal of a command that needs the stats of
+// a placeholder partition.
+func (p partitionStat) unavailableError(topic string) error {
+	owner, liveness := p.OwnerNode, p.OwnerLiveness
+	if owner == "" {
+		owner = "(none)"
 	}
-	return 0, 0, fmt.Errorf("partition %d not in stats (owner down, or index out of range)", partition)
+	if liveness == "" {
+		liveness = "unavailable"
+	}
+	return fmt.Errorf("partition %d of %s is unavailable: its owner %s is %s, so its offsets are not known; retry once the owner is back", p.Index, topic, owner, liveness)
+}
+
+// topicStats is the stats half of a topic GET.
+type topicStats struct {
+	PartitionStats []partitionStat `json:"partition_stats"`
+	Partial        bool            `json:"partial"`
+}
+
+// partition returns the entry for one partition, refusing a placeholder.
+func (s topicStats) partition(topic string, partition int) (partitionStat, error) {
+	for _, ps := range s.PartitionStats {
+		if ps.Index != partition {
+			continue
+		}
+		if ps.unavailable() {
+			return partitionStat{}, ps.unavailableError(topic)
+		}
+		return ps, nil
+	}
+	return partitionStat{}, fmt.Errorf("partition %d not in stats (owner down, or index out of range)", partition)
+}
+
+// fetchTopicStats reads a topic's per-partition stats.
+func fetchTopicStats(c *httpClient, topic string) (topicStats, error) {
+	resp, err := c.do(http.MethodGet, "/v1/topics/"+url.PathEscape(topic), nil)
+	if err != nil {
+		return topicStats{}, err
+	}
+	defer resp.Body.Close()
+	var stats topicStats
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		return topicStats{}, fmt.Errorf("parse topic info: %w", err)
+	}
+	return stats, nil
 }
 
 func newUserCmd() *cobra.Command {
@@ -354,27 +408,25 @@ func newServerReportCmd() *cobra.Command {
 			}
 			fmt.Printf("%-28s %6s %12s %10s %7s  %s\n", bold("TOPIC"), "PARTS", "MESSAGES", "SIZE", "OWNERS", "ROLE")
 			var totalMsgs, totalBytes int64
+			partialTopics := 0
 			for _, t := range page.Topics {
-				iresp, err := c.do(http.MethodGet, "/v1/topics/"+url.PathEscape(t.Name), nil)
+				info, err := fetchTopicStats(c, t.Name)
 				if err != nil {
 					fmt.Printf("%-28s  (stats unavailable: %v)\n", t.Name, err)
 					continue
 				}
-				var info struct {
-					PartitionStats []struct {
-						HighWatermark int64  `json:"high_watermark"`
-						SizeBytes     int64  `json:"size_bytes"`
-						OwnerNode     string `json:"owner_node"`
-					} `json:"partition_stats"`
-				}
-				err = json.NewDecoder(iresp.Body).Decode(&info)
-				iresp.Body.Close()
-				if err != nil {
-					return err
-				}
+				// A partition whose owner is down is a zero placeholder:
+				// it is left out of the totals and the owner count and
+				// counted instead, so a partial topic never reads as a
+				// smaller whole one.
 				var msgs, bytes int64
+				unavailable := 0
 				owners := map[string]struct{}{}
 				for _, ps := range info.PartitionStats {
+					if ps.unavailable() {
+						unavailable++
+						continue
+					}
 					msgs += ps.HighWatermark
 					bytes += ps.SizeBytes
 					if ps.OwnerNode != "" {
@@ -389,9 +441,16 @@ func newServerReportCmd() *cobra.Command {
 				} else if t.Role == "parent" {
 					role = "parent"
 				}
+				if unavailable > 0 {
+					partialTopics++
+					role += "  " + dim(fmt.Sprintf("[%d of %d partitions unavailable]", unavailable, len(info.PartitionStats)))
+				}
 				fmt.Printf("%-28s %6d %12d %10s %7d  %s\n", t.Name, t.Partitions, msgs, humanBytes(bytes), len(owners), role)
 			}
 			fmt.Printf("%-28s %6s %12d %10s\n", dim("total"), "", totalMsgs, humanBytes(totalBytes))
+			if partialTopics > 0 {
+				fmt.Println(dim(fmt.Sprintf("%d topic(s) partial: the totals leave out partitions whose owner is down", partialTopics)))
+			}
 			return nil
 		},
 	}

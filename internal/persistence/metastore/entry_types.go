@@ -13,10 +13,13 @@ package metastore
 // and NewestAppliedEntryType), so a cluster that may already use a type
 // never admits a node that would skip it.
 //
-// The check reads the local replica, so it is the leader's view: a
-// member that rolls back counts with its old report until its next
-// heartbeat is applied, about five seconds. Rolling back after a new
-// type was used is unsupported.
+// The check reads the local replica, so it is the leader's view, and it
+// takes each member's last report however old it is: a member that is
+// down, dead or not, counts with the report it sent before it stopped.
+// So a node stopped to roll it back still counts as this release, and
+// the leader may use a new type while it is down. Rolling back to a
+// release without a type is therefore unsupported once every member has
+// reported one that knows it, whether or not the type has been used.
 
 import (
 	"cmp"
@@ -90,10 +93,10 @@ func (s *Store) entryTypeReports() ([]entryTypeReport, error) {
 // every server in the latest Raft configuration (voters and non-voters)
 // and every member record, dead ones included, reports a release that
 // applies it: a server with no record holds it back until it registers,
-// and a dead member until it is removed. When the answer is false the
-// caller proposes today's entries instead, and the reason names the
-// first member holding the type back and the build it reported, for the
-// caller to log.
+// and a dead member whose last report was older until it is removed.
+// When the answer is false the caller proposes today's entries instead,
+// and the reason names the first member holding the type back and the
+// build it reported, for the caller to log.
 func (s *Store) EveryMemberKnows(entryType uint32) (bool, string) {
 	if entryType <= legacyMaxEntryType {
 		return true, ""

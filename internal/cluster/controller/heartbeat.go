@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
@@ -48,7 +49,13 @@ func (c *Controller) checkHeartbeats(ctx context.Context) {
 		}
 	}
 	for _, m := range c.applyBreaker(t, members, verdict) {
-		if err := c.store.MarkMemberDead(ctx, m.ID); err != nil {
+		// The mark carries the heartbeat it was decided from: one that
+		// committed after this read wins, and the member stays alive.
+		err := c.store.MarkMemberDeadObserved(ctx, m.ID, m.LastHeartbeat)
+		if errors.Is(err, metastore.ErrMemberHeartbeatNewer) {
+			continue
+		}
+		if err != nil {
 			c.logger().Warn("controller: mark member dead failed; retrying next pass", "member", m.ID, "err", err)
 			continue
 		}

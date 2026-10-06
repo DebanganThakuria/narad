@@ -45,7 +45,10 @@ type Broker interface {
 	CreateTopic(ctx context.Context, opts topics.CreateOpts) (topic.Topic, error)
 	IncreaseTopicPartitions(ctx context.Context, name string, newPartitions int) (topic.Topic, error)
 	UpdateTopicRetention(ctx context.Context, name string, retentionMs int64) (topic.Topic, error)
-	UpdateTopicCaps(ctx context.Context, name string, maxInFlightPerPartition, maxAckedAheadPerPartition int64) (topic.Topic, error)
+	// UpdateTopicCaps sets the per-partition caps the call names. A nil
+	// cap keeps the stored value, read under the topic lock on the
+	// leader, so a caller never writes back a value it read earlier.
+	UpdateTopicCaps(ctx context.Context, name string, maxInFlightPerPartition, maxAckedAheadPerPartition *int64) (topic.Topic, error)
 	// UpdateTopicSchema registers a new JSON Schema version for the
 	// topic, enforcing backwards compatibility. Re-registering the
 	// current schema is a no-op. A positive baseVersion makes the
@@ -162,6 +165,42 @@ type CreateGater interface {
 	ArmCreateGate()
 	ReleaseCreateGate()
 }
+
+// TopicIDDeleter is the optional delete surface of a Broker that
+// reports the topic incarnation it removed. Brokers built by New
+// implement it (via the embedded topics.Manager). The HTTP delete and
+// the forwarded-delete RPC assert for it so the purge fan-out names the
+// incarnation the delete actually removed, read under the topic's lock;
+// without it they read the incarnation before the delete, as before.
+// Like CreateGater it stays out of Broker so test fakes of Broker need
+// not implement it.
+type TopicIDDeleter interface {
+	// DeleteTopicID deletes the topic and returns the ID of the
+	// incarnation it removed, also alongside a topics.PurgeError. See
+	// topics.Manager.DeleteTopicID.
+	DeleteTopicID(ctx context.Context, name string) (string, error)
+}
+
+// Compile-time check: the incarnation-reporting delete stays reachable
+// through the facade via the embedded topics.Manager.
+var _ TopicIDDeleter = (*impl)(nil)
+
+// PartitionStatsReader is the optional one-partition describe of a
+// Broker. Brokers built by New implement it (via the embedded
+// topics.Manager). The cluster's per-partition stats RPC asserts for it
+// and falls back to a whole GetTopicDetails without it. Like CreateGater
+// it stays out of Broker so test fakes of Broker need not implement it.
+type PartitionStatsReader interface {
+	// LocalPartitionStats describes one partition as this node sees it
+	// without reading the topic's schema; a partition outside the
+	// topic's range is an invalid-argument error. See
+	// topics.Manager.LocalPartitionStats.
+	LocalPartitionStats(ctx context.Context, name string, partition int) (topic.PartitionStats, error)
+}
+
+// Compile-time check: the one-partition describe stays reachable through
+// the facade via the embedded topics.Manager.
+var _ PartitionStatsReader = (*impl)(nil)
 
 // BatchProducer is the optional batch-produce surface of a Broker.
 // Brokers built by New implement it (via the embedded messaging.Engine).

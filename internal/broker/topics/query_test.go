@@ -3,6 +3,7 @@ package topics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -244,5 +245,119 @@ func TestGetTopicDetails_NoClusterIdentityOwnsEverything(t *testing.T) {
 		if _, ok := manager.logs.Peek(testTopicName, i); ok {
 			t.Fatalf("GetTopicDetails() opened the log for partition %d", i)
 		}
+	}
+}
+
+// schemaCountingMetastore counts schema reads: GetSchema one version at
+// a time, and LatestSchema, which reads the latest version directly (as
+// *metastore.Store does).
+type schemaCountingMetastore struct {
+	*fakeMetastore
+	versionReads int
+	latestReads  int
+}
+
+func (f *schemaCountingMetastore) GetSchema(ctx context.Context, topicName string, version int) ([]byte, error) {
+	f.versionReads++
+	return f.fakeMetastore.GetSchema(ctx, topicName, version)
+}
+
+func (f *schemaCountingMetastore) LatestSchema(_ context.Context, topicName string) (int, []byte, error) {
+	f.latestReads++
+	latest := 0
+	for version := range f.schemas[topicName] {
+		latest = max(latest, version)
+	}
+	if latest == 0 {
+		return 0, nil, nil
+	}
+	return latest, append([]byte(nil), f.schemas[topicName][latest]...), nil
+}
+
+// A describe reports only the latest schema version, so it reads only
+// that one. Master walked the whole history, one read and one copy per
+// version, on every GET and again on every owner the cluster router
+// asked for stats.
+func TestTopicDetailsReadOnlyTheLatestSchema(t *testing.T) {
+	ms := &schemaCountingMetastore{fakeMetastore: newFakeMetastore()}
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 2}
+	ms.schemas[testTopicName] = map[int][]byte{}
+	for version := 1; version <= 100; version++ {
+		ms.schemas[testTopicName][version] = fmt.Appendf(nil, `{"type":"object","title":"v%d"}`, version)
+	}
+	manager := newTestManagerForMetastore(t, ms, nil, nil, "")
+	t.Cleanup(func() { _ = manager.logs.CloseAll() })
+
+	details, err := manager.GetTopicDetails(context.Background(), testTopicName)
+	if err != nil {
+		t.Fatalf("GetTopicDetails: %v", err)
+	}
+	if details.SchemaVersion != 100 || string(details.Schema) != `{"type":"object","title":"v100"}` {
+		t.Fatalf("schema = v%d %s, want v100", details.SchemaVersion, details.Schema)
+	}
+	if ms.versionReads != 0 || ms.latestReads != 1 {
+		t.Fatalf("describe read %d versions one by one and the latest %d times, want 0 and 1", ms.versionReads, ms.latestReads)
+	}
+}
+
+// LocalPartitionStats describes one partition exactly as GetTopicDetails
+// does, open or closed, without reading the topic's schema: it is what
+// each owner serves the cluster's per-partition stats RPC.
+func TestLocalPartitionStatsMatchesDetails(t *testing.T) {
+	ms := &schemaCountingMetastore{fakeMetastore: newFakeMetastore()}
+	ms.topics[testTopicName] = topic.Topic{Name: testTopicName, Partitions: 2}
+	ms.schemas[testTopicName] = map[int][]byte{1: []byte(`{"type":"object"}`)}
+	manager := newTestManagerForMetastore(t, ms, nil, nil, "")
+	t.Cleanup(func() { _ = manager.logs.CloseAll() })
+	ctx := context.Background()
+
+	l, err := manager.logs.Get(testTopicName, 1)
+	if err != nil {
+		t.Fatalf("logs.Get: %v", err)
+	}
+	for i := range 5 {
+		if _, err := l.Append([]byte{byte(i)}); err != nil {
+			t.Fatalf("Append(%d): %v", i, err)
+		}
+	}
+	if err := l.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := l.AdvanceHighWatermark(5); err != nil {
+		t.Fatalf("AdvanceHighWatermark: %v", err)
+	}
+
+	for _, phase := range []string{"open", "closed"} {
+		if phase == "closed" {
+			if err := manager.logs.CloseTopic(testTopicName); err != nil {
+				t.Fatalf("CloseTopic: %v", err)
+			}
+		}
+		details, err := manager.GetTopicDetails(ctx, testTopicName)
+		if err != nil {
+			t.Fatalf("%s: GetTopicDetails: %v", phase, err)
+		}
+		ms.versionReads, ms.latestReads = 0, 0
+		for p := range 2 {
+			got, err := manager.LocalPartitionStats(ctx, testTopicName, p)
+			if err != nil {
+				t.Fatalf("%s: LocalPartitionStats(%d): %v", phase, p, err)
+			}
+			if got != details.Partitions[p] {
+				t.Fatalf("%s: LocalPartitionStats(%d) = %+v, want %+v as the describe reports it", phase, p, got, details.Partitions[p])
+			}
+		}
+		if ms.versionReads != 0 || ms.latestReads != 0 {
+			t.Fatalf("%s: per-partition stats read the schema (%d version reads, %d latest reads)", phase, ms.versionReads, ms.latestReads)
+		}
+		if got := details.Partitions[1]; got.HighWatermark != 5 {
+			t.Fatalf("%s: partition 1 high watermark = %d, want 5", phase, got.HighWatermark)
+		}
+	}
+	if _, err := manager.LocalPartitionStats(ctx, testTopicName, 2); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("LocalPartitionStats(out of range) = %v, want ErrInvalid", err)
+	}
+	if _, err := manager.LocalPartitionStats(ctx, "missing", 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("LocalPartitionStats(missing topic) = %v, want ErrNotFound", err)
 	}
 }

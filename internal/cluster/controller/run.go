@@ -84,6 +84,7 @@ func (c *Controller) runAsLeader(ctx context.Context) {
 	watch := c.newMemberWatch()
 
 	c.reconcileAssignments(ctx)
+	c.pruneOrphanAssignments(ctx)
 	c.checkHeartbeats(ctx)
 	c.reconcileRebalance(ctx)
 	c.reconcileDecommission(ctx)
@@ -93,12 +94,16 @@ func (c *Controller) runAsLeader(ctx context.Context) {
 	watchTicker := time.NewTicker(memberWatchInterval)
 	defer watchTicker.Stop()
 
-	for {
+	for tick := 1; ; {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			c.reconcileAssignments(ctx)
+			if tick%orphanPruneEvery == 0 {
+				c.pruneOrphanAssignments(ctx)
+			}
+			tick++
 			c.checkHeartbeats(ctx)
 			c.reconcileRebalance(ctx)
 			c.reconcileDecommission(ctx)

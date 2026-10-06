@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
@@ -29,11 +30,27 @@ type fakeControllerStore struct {
 	membersVersion     uint64 // RoutingMembersVersion; bump when members change
 	listMembersErr     error
 
-	barriers     int                        // Barrier calls
-	onBarrier    func(*fakeControllerStore) // runs inside a successful Barrier
-	abortLog     []string                   // AbortMove calls, "topic/partition→expected target"
-	abortRefused bool                       // AbortMove fails
-	markedDead   []string                   // MarkMemberDead calls in order
+	barriers          int                        // Barrier calls
+	onBarrier         func(*fakeControllerStore) // runs inside a successful Barrier
+	abortLog          []string                   // AbortMove calls, "topic/partition→expected target"
+	abortRefused      bool                       // AbortMove fails
+	markedDead        []string                   // MarkMemberDead calls in order
+	leaderBarrierErr  error
+	leaderBarriers    int    // LeaderBarrier call count
+	onLeaderBarrier   func() // what the FSM applies once a leader barriers
+	onLockAssignments func() // what lands between a sweep's list and its lock
+	// entryTypesUsable makes the store answer the writes newer than
+	// 3.0.x (insert-only placement, prune) as a cluster whose members
+	// all apply them; false answers metastore.ErrEntryTypeNotYetUsable.
+	entryTypesUsable bool
+	orphans          []metastore.Assignment // OrphanAssignments
+	prunes           int                    // PruneAssignment calls
+	deadMarks        []string               // "id@observed" in call order
+	deadMarkErr      error                  // MarkMemberDeadObserved answers it and marks nothing
+	// staleAssignments is what ListAssignments answers for a topic, once,
+	// instead of the rows on record: a view that missed placements the
+	// state machine has already applied.
+	staleAssignments map[string][]metastore.Assignment
 }
 
 func newFakeControllerStore(memberIDs ...string) *fakeControllerStore {
@@ -75,6 +92,10 @@ func (f *fakeControllerStore) ListAssignments(topicName string) ([]metastore.Ass
 	if err := f.listAssignmentsErr[topicName]; err != nil {
 		return nil, err
 	}
+	if stale, ok := f.staleAssignments[topicName]; ok {
+		delete(f.staleAssignments, topicName)
+		return slices.Clone(stale), nil
+	}
 	var out []metastore.Assignment
 	for p, owner := range f.assignments[topicName] {
 		out = append(out, metastore.Assignment{
@@ -84,7 +105,33 @@ func (f *fakeControllerStore) ListAssignments(topicName string) ([]metastore.Ass
 	return out, nil
 }
 
-func (f *fakeControllerStore) LockAssignments() func() { return func() {} }
+func (f *fakeControllerStore) LockAssignments() func() {
+	if f.onLockAssignments != nil {
+		f.onLockAssignments()
+	}
+	return func() {}
+}
+
+func (f *fakeControllerStore) LeaderBarrier(context.Context) error {
+	f.leaderBarriers++
+	if f.leaderBarrierErr != nil {
+		return f.leaderBarrierErr
+	}
+	if f.onLeaderBarrier != nil {
+		f.onLeaderBarrier()
+		f.onLeaderBarrier = nil
+	}
+	return nil
+}
+
+func (f *fakeControllerStore) GetTopic(_ context.Context, name string) (topic.Topic, error) {
+	for _, t := range f.topics {
+		if t.Name == name {
+			return t, nil
+		}
+	}
+	return topic.Topic{}, metastore.ErrNotFound
+}
 
 func (f *fakeControllerStore) SetAssignmentTarget(_ context.Context, topicName string, partition int, targetID string) error {
 	if f.targets[topicName] == nil {
@@ -115,8 +162,41 @@ func (f *fakeControllerStore) AbortMove(_ context.Context, topicName string, par
 	return nil
 }
 
-func (f *fakeControllerStore) MarkMemberDead(_ context.Context, id string) error {
+func (f *fakeControllerStore) AssignPartitionIfAbsent(ctx context.Context, topicName string, partition int, owner, _ string) error {
+	if !f.entryTypesUsable {
+		return metastore.ErrEntryTypeNotYetUsable
+	}
+	if _, ok := f.assignments[topicName][partition]; ok {
+		return metastore.ErrPartitionAssigned
+	}
+	return f.AssignPartition(ctx, topicName, partition, owner)
+}
+
+func (f *fakeControllerStore) OrphanAssignments() ([]metastore.Assignment, error) {
+	return slices.Clone(f.orphans), nil
+}
+
+func (f *fakeControllerStore) PruneAssignment(_ context.Context, topicName string, partition int) error {
+	f.prunes++
+	if !f.entryTypesUsable {
+		return metastore.ErrEntryTypeNotYetUsable
+	}
+	before := len(f.orphans)
+	f.orphans = slices.DeleteFunc(f.orphans, func(a metastore.Assignment) bool {
+		return a.Topic == topicName && a.Partition == partition
+	})
+	if len(f.orphans) == before {
+		return metastore.ErrNotFound
+	}
+	return nil
+}
+
+func (f *fakeControllerStore) MarkMemberDeadObserved(_ context.Context, id string, observed int64) error {
+	if f.deadMarkErr != nil {
+		return f.deadMarkErr
+	}
 	f.markedDead = append(f.markedDead, id)
+	f.deadMarks = append(f.deadMarks, fmt.Sprintf("%s@%d", id, observed))
 	for i := range f.members {
 		if f.members[i].ID == id {
 			f.members[i].Status = metastore.MemberDead
@@ -294,6 +374,167 @@ func TestReconcileChildWiderThanParent(t *testing.T) {
 	for p := range 2 {
 		if parent[p] == child[p] {
 			t.Fatalf("overlapping partition %d colocated on %q", p, parent[p])
+		}
+	}
+}
+
+// A just-elected leader's FSM may not have applied the placements the
+// previous leader committed, so the sweep must barrier before it reads
+// assignments: on master the sweep saw orders/0 unassigned and replaced
+// the owner the old leader had placed, whose disk may already hold
+// records. A failed barrier skips the pass.
+func TestAssignSweepBarriersBeforeReading(t *testing.T) {
+	store := newFakeControllerStore("narad-0", "narad-1", "narad-2")
+	store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 3}}
+	store.onLeaderBarrier = func() {
+		store.assignments["orders"] = map[int]string{0: "narad-2", 1: "narad-0", 2: "narad-1"}
+	}
+	c := &Controller{store: store, cfg: Config{}.withDefaults()}
+
+	c.reconcileAssignments(context.Background())
+	if len(store.assignedLog) != 0 {
+		t.Fatalf("assigned %v, want none: the previous leader already placed every partition", store.assignedLog)
+	}
+	if got := store.assignments["orders"][0]; got != "narad-2" {
+		t.Fatalf("orders/0 owner = %q, want narad-2 (the previous leader's placement)", got)
+	}
+
+	failing := newFakeControllerStore("narad-0", "narad-1", "narad-2")
+	failing.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 3}}
+	failing.leaderBarrierErr = errors.New("barrier timed out")
+	c = &Controller{store: failing, cfg: Config{}.withDefaults()}
+	c.reconcileAssignments(context.Background())
+	if failing.leaderBarriers == 0 || len(failing.assignedLog) != 0 {
+		t.Fatalf("barriers = %d, assigned %v after a failed barrier, want the pass skipped", failing.leaderBarriers, failing.assignedLog)
+	}
+}
+
+// Once every member applies insert-only placement, a sweep whose view
+// shows a partition without an owner, while the state machine already
+// holds one, leaves that owner in place (its disk may hold records) and
+// still places the partitions that really have none. A plain assignment
+// here replaced orders/0's owner with the round-robin pick.
+func TestAssignSweepNeverReplacesAnOwnerItDidNotSee(t *testing.T) {
+	store := newFakeControllerStore("narad-0", "narad-1", "narad-2")
+	store.entryTypesUsable = true
+	store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 3}}
+	store.assignments["orders"] = map[int]string{0: "narad-2"}
+	store.staleAssignments = map[string][]metastore.Assignment{"orders": nil}
+	c := &Controller{store: store, cfg: Config{}.withDefaults()}
+
+	c.reconcileAssignments(context.Background())
+	if got := store.assignments["orders"][0]; got != "narad-2" {
+		t.Fatalf("orders/0 owner = %q, want narad-2, the owner on record (assigned %v)", got, store.assignedLog)
+	}
+	if got := store.assignments["orders"]; len(got) != 3 || got[1] == "" || got[2] == "" {
+		t.Fatalf("orders assignments = %v, want partitions 1 and 2 placed too", got)
+	}
+	if slices.ContainsFunc(store.assignedLog, func(s string) bool { return strings.HasPrefix(s, "orders/0") }) {
+		t.Fatalf("assigned %v, want no write for orders/0", store.assignedLog)
+	}
+}
+
+// The sweep places new partitions only on members that are not being
+// decommissioned (master placed them round-robin over every live
+// member, draining ones included).
+func TestAssignSweepSkipsDrainingMembers(t *testing.T) {
+	store := newFakeControllerStore("narad-0", "narad-1", "narad-2")
+	store.members[1].Draining = true
+	store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 6}}
+	c := &Controller{store: store, cfg: Config{}.withDefaults()}
+
+	c.reconcileAssignments(context.Background())
+	if len(store.assignments["orders"]) != 6 {
+		t.Fatalf("assigned %v, want all 6 partitions placed", store.assignedLog)
+	}
+	for p, owner := range store.assignments["orders"] {
+		if owner == "narad-1" {
+			t.Fatalf("orders/%d placed on the draining member (all: %v)", p, store.assignedLog)
+		}
+	}
+}
+
+// With every live member draining the sweep places nothing: a draining
+// member is never given new partitions, and the decommission would have
+// nowhere to move them. The partitions wait, and go to the first member
+// that is not draining once one is alive.
+func TestAssignSweepLeavesPartitionsUnassignedWhenAllDraining(t *testing.T) {
+	store := newFakeControllerStore("narad-0", "narad-1")
+	store.members[0].Draining = true
+	store.members[1].Draining = true
+	store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 3}}
+	c := &Controller{store: store, cfg: Config{}.withDefaults()}
+
+	c.reconcileAssignments(context.Background())
+	if len(store.assignedLog) != 0 {
+		t.Fatalf("assigned %v with every live member draining, want none", store.assignedLog)
+	}
+
+	store.members[1].Draining = false
+	c.reconcileAssignments(context.Background())
+	if len(store.assignments["orders"]) != 3 {
+		t.Fatalf("assigned %v once narad-1 stopped draining, want all 3 partitions placed", store.assignedLog)
+	}
+	for p, owner := range store.assignments["orders"] {
+		if owner != "narad-1" {
+			t.Fatalf("orders/%d placed on %q, want narad-1, the only member not draining", p, owner)
+		}
+	}
+}
+
+// A topic deleted between the sweep's topic list and its assignment
+// lock must be skipped (master wrote assignment rows for the deleted
+// topic, which a later same-named topic inherited).
+func TestAssignSweepSkipsTopicDeletedAfterList(t *testing.T) {
+	store := newFakeControllerStore("narad-0", "narad-1", "narad-2")
+	store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 3}}
+	store.onLockAssignments = func() { store.topics = nil }
+	c := &Controller{store: store, cfg: Config{}.withDefaults()}
+
+	c.reconcileAssignments(context.Background())
+	if len(store.assignedLog) != 0 {
+		t.Fatalf("assigned %v for a topic deleted after the list, want none", store.assignedLog)
+	}
+
+	// Recreated under the same name in between: the listed incarnation
+	// is gone, so the sweep leaves the new one to the next pass.
+	store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000001", Partitions: 3}}
+	store.onLockAssignments = func() {
+		store.topics = []topic.Topic{{Name: "orders", ID: "0000000000000002", Partitions: 3}}
+	}
+	c.reconcileAssignments(context.Background())
+	if len(store.assignedLog) != 0 {
+		t.Fatalf("assigned %v for the listed incarnation after a recreate, want none", store.assignedLog)
+	}
+}
+
+// The sweep places partitions by the counts it reads under the
+// assignment lock, not the ones it listed: here the parent was
+// recreated with 6 partitions after the list showed 3, and the child's
+// partitions 3 to 5 must still avoid the parent's same-index owners
+// instead of being placed as if the parent had no partition there.
+func TestAssignSweepUsesRecreatedPartitionCount(t *testing.T) {
+	store := newFakeControllerStore("narad-0", "narad-1", "narad-2")
+	store.topics = []topic.Topic{
+		{Name: "orders", ID: "0000000000000001", Partitions: 3, Role: topic.RoleParent, Children: []string{"replica"}},
+		{Name: "replica", ID: "0000000000000002", Partitions: 6, Parent: "orders", Role: topic.RoleChild},
+	}
+	// The parent's six owners are already on record; the round-robin
+	// owner of each child partition is the parent's same-index owner.
+	store.assignments["orders"] = map[int]string{0: "narad-0", 1: "narad-1", 2: "narad-2", 3: "narad-0", 4: "narad-1", 5: "narad-2"}
+	store.onLockAssignments = func() {
+		store.topics[0] = topic.Topic{Name: "orders", ID: "0000000000000003", Partitions: 6, Role: topic.RoleParent, Children: []string{"replica"}}
+	}
+	c := &Controller{store: store, cfg: Config{}.withDefaults()}
+
+	c.reconcileAssignments(context.Background())
+	child := store.assignments["replica"]
+	if len(child) != 6 {
+		t.Fatalf("child assignments = %v, want all 6 placed", child)
+	}
+	for p := range 6 {
+		if child[p] == store.assignments["orders"][p] {
+			t.Fatalf("replica/%d colocated with orders/%d on %q: the sweep used the listed parent count", p, p, child[p])
 		}
 	}
 }

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -30,13 +32,16 @@ type peerClient interface {
 	Ack(context.Context, string, nodewire.AckRequest) (nodewire.Response, error)
 	ExtendAck(context.Context, string, nodewire.AckRequest) (nodewire.Response, error)
 	Nack(context.Context, string, nodewire.AckRequest) (nodewire.Response, error)
-	CreateTopic(context.Context, string, []byte) (nodewire.Response, error)
-	AlterTopic(context.Context, string, string, []byte) (nodewire.Response, error)
-	DeleteTopic(context.Context, string, string) (nodewire.Response, error)
+	// The forwarded topic writes name the caller (actor, "" for none)
+	// so the leader re-checks that user's rights; see
+	// PeerClient.sendWithActor for the fallback to a 3.0.x leader.
+	CreateTopic(ctx context.Context, addr string, body []byte, actor string) (nodewire.Response, error)
+	AlterTopic(ctx context.Context, addr, topicName string, body []byte, actor string) (nodewire.Response, error)
+	DeleteTopic(ctx context.Context, addr, topicName, actor string) (nodewire.Response, error)
 	GetTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error)
 	JoinCluster(ctx context.Context, addr string, req nodewire.JoinClusterRequest) (nodewire.Response, error)
-	AttachChild(ctx context.Context, addr, parent, child string, delayMs int64) (nodewire.Response, error)
-	DetachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error)
+	AttachChild(ctx context.Context, addr, parent, child string, delayMs int64, actor string) (nodewire.Response, error)
+	DetachChild(ctx context.Context, addr, parent, child, actor string) (nodewire.Response, error)
 	FanoutCursors(ctx context.Context, addr, parent string) ([]topic.FanoutCursorStat, error)
 	PurgeTopic(ctx context.Context, addr, topicName, id string) (nodewire.Response, error)
 	TopicPartitionStats(context.Context, string, string, int) (topic.PartitionStats, error)
@@ -139,12 +144,24 @@ type PeerClient struct {
 	// cursors never opens either. nil sends them on frames.
 	bulk    frameTransport
 	metrics RPCMetrics
+	// logger receives the warning when a leader refuses the caller
+	// field of a forwarded topic write (a 3.0.x leader mid-upgrade); nil
+	// discards it. actorDropWarned rate-limits that warning per leader
+	// address (address -> time.Time of the last warning).
+	logger          *slog.Logger
+	actorDropWarned sync.Map
 }
 
 // SetMetrics wires the RPC metrics hook; nil disables recording. Call
 // before the client is shared across goroutines.
 func (c *PeerClient) SetMetrics(m RPCMetrics) {
 	c.metrics = m
+}
+
+// SetLogger wires the logger for the client's own warnings; nil
+// discards them. Call before the client is shared across goroutines.
+func (c *PeerClient) SetLogger(l *slog.Logger) {
+	c.logger = l
 }
 
 // NewPeerClient constructs a PeerClient. timeout is the transport's default
@@ -260,16 +277,75 @@ func (c *PeerClient) NackWithin(ctx context.Context, addr string, timeout time.D
 	return c.sendWithin(ctx, addr, "nack", laneAck, timeout, payload, err)
 }
 
-// CreateTopic forwards a raw topic create body to the peer at addr.
-func (c *PeerClient) CreateTopic(ctx context.Context, addr string, body []byte) (nodewire.Response, error) {
-	payload, err := nodewire.EncodeTopicBodyRequest(nodewire.OpCreateTopic, nodewire.TopicBodyRequest{Body: body})
-	return c.send(ctx, addr, "create_topic", laneControl, payload, err)
+// CreateTopic forwards a raw topic create body to the peer at addr (the
+// leader), made for the user actor ("" for none).
+func (c *PeerClient) CreateTopic(ctx context.Context, addr string, body []byte, actor string) (nodewire.Response, error) {
+	return c.sendWithActor(ctx, addr, "create_topic", "invalid create topic request: ", actor, func(actor string) ([]byte, error) {
+		return nodewire.EncodeTopicBodyRequest(nodewire.OpCreateTopic, nodewire.TopicBodyRequest{Body: body, Actor: actor})
+	})
 }
 
-// AlterTopic forwards a raw topic alter body to the peer at addr.
-func (c *PeerClient) AlterTopic(ctx context.Context, addr, topicName string, body []byte) (nodewire.Response, error) {
-	payload, err := nodewire.EncodeTopicBodyRequest(nodewire.OpAlterTopic, nodewire.TopicBodyRequest{Topic: topicName, Body: body})
-	return c.send(ctx, addr, "alter_topic", laneControl, payload, err)
+// AlterTopic forwards a raw topic alter body to the peer at addr (the
+// leader), made for the user actor ("" for none).
+func (c *PeerClient) AlterTopic(ctx context.Context, addr, topicName string, body []byte, actor string) (nodewire.Response, error) {
+	return c.sendWithActor(ctx, addr, "alter_topic", "invalid alter topic request: ", actor, func(actor string) ([]byte, error) {
+		return nodewire.EncodeTopicBodyRequest(nodewire.OpAlterTopic, nodewire.TopicBodyRequest{Topic: topicName, Body: body, Actor: actor})
+	})
+}
+
+// actorDropWarnInterval is the least time between two warnings about
+// one leader refusing the caller field.
+const actorDropWarnInterval = time.Minute
+
+// sendWithActor sends a forwarded topic write that names its caller in
+// the optional trailing actor field, so the leader re-checks the
+// caller's rights. A leader that predates the field (3.0.x, during a
+// rolling upgrade) refuses the whole payload at decode, before acting
+// on any of it, with a 400 whose error is refusalPrefix followed by
+// nodewire.TrailingPayloadError; only that exact refusal is resent,
+// once, without the actor, which is the request that leader has always
+// served (checked at the ingress only). Any other answer, a 400 for
+// another reason included, is returned as it is.
+func (c *PeerClient) sendWithActor(ctx context.Context, addr, operation, refusalPrefix, actor string, encode func(actor string) ([]byte, error)) (nodewire.Response, error) {
+	payload, err := encode(actor)
+	res, err := c.send(ctx, addr, operation, laneControl, payload, err)
+	if err != nil || actor == "" || !isActorFieldRefusal(res, refusalPrefix) {
+		return res, err
+	}
+	c.warnActorDropped(addr, operation)
+	payload, err = encode("")
+	return c.send(ctx, addr, operation, laneControl, payload, err)
+}
+
+// isActorFieldRefusal reports whether res is a 3.0.x leader refusing a
+// forwarded topic write for its trailing actor field: 400 with exactly
+// the decode error refusalPrefix + nodewire.TrailingPayloadError.
+func isActorFieldRefusal(res nodewire.Response, refusalPrefix string) bool {
+	if res.Status != http.StatusBadRequest {
+		return false
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(res.Body, &body); err != nil {
+		return false
+	}
+	return body.Error == refusalPrefix+nodewire.TrailingPayloadError
+}
+
+// warnActorDropped logs, at most once a minute per leader address, that
+// a forwarded write went to the leader without its caller.
+func (c *PeerClient) warnActorDropped(addr, operation string) {
+	now := time.Now()
+	if last, ok := c.actorDropWarned.Load(addr); ok && now.Sub(last.(time.Time)) < actorDropWarnInterval {
+		return
+	}
+	c.actorDropWarned.Store(addr, now)
+	if c.logger == nil {
+		return
+	}
+	c.logger.Warn("the leader predates forwarded callers (a rolling upgrade is in progress); the write was resent without the caller and its ownership was checked on this node only",
+		"leader", addr, "op", operation)
 }
 
 // AppliedIndex asks the peer at addr, the leader a control-plane write
@@ -293,9 +369,12 @@ func (c *PeerClient) AppliedIndex(ctx context.Context, addr string) (uint64, err
 	return body.AppliedIndex, nil
 }
 
-// DeleteTopic asks the peer at addr to delete the topic.
-func (c *PeerClient) DeleteTopic(ctx context.Context, addr, topicName string) (nodewire.Response, error) {
-	return c.topicNameRequest(ctx, addr, nodewire.OpDeleteTopic, "delete_topic", topicName)
+// DeleteTopic asks the peer at addr (the leader) to delete the topic,
+// for the user actor ("" for none).
+func (c *PeerClient) DeleteTopic(ctx context.Context, addr, topicName, actor string) (nodewire.Response, error) {
+	return c.sendWithActor(ctx, addr, "delete_topic", "invalid delete topic request: ", actor, func(actor string) ([]byte, error) {
+		return nodewire.EncodeTopicNameRequest(nodewire.OpDeleteTopic, nodewire.TopicNameRequest{Topic: topicName, Actor: actor})
+	})
 }
 
 // GetTopic fetches a topic record from the peer at addr. Used by the
@@ -323,16 +402,20 @@ func (c *PeerClient) PurgeTopic(ctx context.Context, addr, topicName, id string)
 	return c.topicNameRequest(ctx, addr, nodewire.OpPurgeTopic, "purge_topic", topicName)
 }
 
-// AttachChild forwards a fan-out attach to the peer at addr (the leader).
-func (c *PeerClient) AttachChild(ctx context.Context, addr, parent, child string, delayMs int64) (nodewire.Response, error) {
-	payload, err := nodewire.EncodeChildLinkRequest(nodewire.OpAttachChild, nodewire.ChildLinkRequest{Parent: parent, Child: child, DelayMs: delayMs})
-	return c.send(ctx, addr, "attach_child", laneControl, payload, err)
+// AttachChild forwards a fan-out attach to the peer at addr (the
+// leader), for the user actor ("" for none).
+func (c *PeerClient) AttachChild(ctx context.Context, addr, parent, child string, delayMs int64, actor string) (nodewire.Response, error) {
+	return c.sendWithActor(ctx, addr, "attach_child", "invalid attach child request: ", actor, func(actor string) ([]byte, error) {
+		return nodewire.EncodeChildLinkRequest(nodewire.OpAttachChild, nodewire.ChildLinkRequest{Parent: parent, Child: child, DelayMs: delayMs, Actor: actor})
+	})
 }
 
-// DetachChild forwards a fan-out detach to the peer at addr (the leader).
-func (c *PeerClient) DetachChild(ctx context.Context, addr, parent, child string) (nodewire.Response, error) {
-	payload, err := nodewire.EncodeChildLinkRequest(nodewire.OpDetachChild, nodewire.ChildLinkRequest{Parent: parent, Child: child})
-	return c.send(ctx, addr, "detach_child", laneControl, payload, err)
+// DetachChild forwards a fan-out detach to the peer at addr (the
+// leader), for the user actor ("" for none).
+func (c *PeerClient) DetachChild(ctx context.Context, addr, parent, child, actor string) (nodewire.Response, error) {
+	return c.sendWithActor(ctx, addr, "detach_child", "invalid detach child request: ", actor, func(actor string) ([]byte, error) {
+		return nodewire.EncodeChildLinkRequest(nodewire.OpDetachChild, nodewire.ChildLinkRequest{Parent: parent, Child: child, Actor: actor})
+	})
 }
 
 // FanoutCursors fetches the fan-out cursor positions the peer at addr

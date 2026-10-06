@@ -22,15 +22,25 @@ type controllerStore interface {
 	IsLeader() bool
 	LeaderCh() <-chan bool
 	Barrier() error
+	// LeaderBarrier barriers once per leadership term (see
+	// metastore.Store.LeaderBarrier); nil on a follower.
+	LeaderBarrier(ctx context.Context) error
 	ListMembers() ([]metastore.Member, error)
 	RoutingMembersVersion() uint64
 	ListTopics(ctx context.Context, opts metastore.ListOptions) ([]topic.Topic, string, error)
+	GetTopic(ctx context.Context, name string) (topic.Topic, error)
 	ListAssignments(topicName string) ([]metastore.Assignment, error)
 	LockAssignments() (unlock func())
 	AssignPartition(ctx context.Context, topicName string, partition int, ownerID string) error
+	// AssignPartitionIfAbsent is the insert-only placement; it returns
+	// metastore.ErrEntryTypeNotYetUsable while some member does not
+	// apply it, and the controller uses AssignPartition then.
+	AssignPartitionIfAbsent(ctx context.Context, topicName string, partition int, ownerID, expectID string) error
+	OrphanAssignments() ([]metastore.Assignment, error)
+	PruneAssignment(ctx context.Context, topicName string, partition int) error
 	SetAssignmentTarget(ctx context.Context, topicName string, partition int, targetID string) error
 	AbortMove(ctx context.Context, topicName string, partition int, expectedTarget string) error
-	MarkMemberDead(ctx context.Context, podID string) error
+	MarkMemberDeadObserved(ctx context.Context, podID string, observed int64) error
 	Voters() ([]string, error)
 	Nonvoters() ([]string, error)
 	RemoveServer(id string) error
@@ -115,6 +125,9 @@ func (c Config) withDefaults() Config {
 	if c.DeadTargetAbortAfter == 0 {
 		c.DeadTargetAbortAfter = 2 * time.Minute
 	}
+	if c.Logger == nil {
+		c.Logger = slog.Default()
+	}
 	return c
 }
 
@@ -150,6 +163,12 @@ type Controller struct {
 	// dead or departed node, by reason (BlockedMoves); nil when none or
 	// when this node does not lead.
 	blockedMoves atomic.Pointer[map[string]int]
+
+	// orphansLogged holds the orphan assignment rows already logged as
+	// waiting for the prune entry type (orphans.go), so each is logged
+	// once.
+	orphanMu      sync.Mutex
+	orphansLogged map[string]bool
 }
 
 // New creates a Controller. Call Run to start it.

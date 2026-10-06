@@ -30,7 +30,7 @@ type fakeBroker struct {
 	createTopicFn             func(context.Context, brokertopics.CreateOpts) (topic.Topic, error)
 	increaseTopicPartitionsFn func(context.Context, string, int) (topic.Topic, error)
 	updateTopicRetentionFn    func(context.Context, string, int64) (topic.Topic, error)
-	updateTopicCapsFn         func(context.Context, string, int64, int64) (topic.Topic, error)
+	updateTopicCapsFn         func(context.Context, string, *int64, *int64) (topic.Topic, error)
 	updateTopicSchemaFn       func(context.Context, string, []byte, int) (topic.Topic, error)
 	topicSchemaHistoryFn      func(context.Context, string) (topic.SchemaHistory, error)
 	deleteTopicFn             func(context.Context, string) error
@@ -51,6 +51,18 @@ type fakeRouter struct {
 	routeGetTopicFn        func(context.Context, *http.Request, string, topic.Details) (topic.Details, error)
 	routeAttachChildFn     func(context.Context, http.ResponseWriter, *http.Request, string, string, int64) bool
 	routeDetachChildFn     func(context.Context, http.ResponseWriter, *http.Request, string, string) bool
+	syncWithLeaderFn       func(context.Context) error
+	syncs                  int
+}
+
+// SyncWithLeader stands in for the router's catch-up with the leader;
+// nil syncWithLeaderFn succeeds.
+func (f *fakeRouter) SyncWithLeader(ctx context.Context) error {
+	f.syncs++
+	if f.syncWithLeaderFn == nil {
+		return nil
+	}
+	return f.syncWithLeaderFn(ctx)
 }
 
 func (f *fakeRouter) RouteProduce(context.Context, http.ResponseWriter, *http.Request, string, string, []byte) bool {
@@ -149,7 +161,7 @@ func (f *fakeBroker) UpdateTopicRetention(ctx context.Context, name string, rete
 	return f.updateTopicRetentionFn(ctx, name, retentionMs)
 }
 
-func (f *fakeBroker) UpdateTopicCaps(ctx context.Context, name string, maxInFlightPerPartition, maxAckedAheadPerPartition int64) (topic.Topic, error) {
+func (f *fakeBroker) UpdateTopicCaps(ctx context.Context, name string, maxInFlightPerPartition, maxAckedAheadPerPartition *int64) (topic.Topic, error) {
 	return f.updateTopicCapsFn(ctx, name, maxInFlightPerPartition, maxAckedAheadPerPartition)
 }
 
@@ -994,7 +1006,7 @@ func TestAlterHandlerAppliesOperationsInOrder(t *testing.T) {
 			calls = append(calls, "retention")
 			return topic.Topic{Name: "orders", MaxInFlightPerPartition: 5, MaxAckedAheadPerPartition: 6}, nil
 		},
-		updateTopicCapsFn: func(context.Context, string, int64, int64) (topic.Topic, error) {
+		updateTopicCapsFn: func(context.Context, string, *int64, *int64) (topic.Topic, error) {
 			calls = append(calls, "caps")
 			return topic.Topic{Name: "orders", MaxInFlightPerPartition: 1, MaxAckedAheadPerPartition: 2}, nil
 		},
@@ -1122,3 +1134,174 @@ func (f *fakeBroker) RegisterRemoteDemand(context.Context, string, brokermsg.Rem
 func (f *fakeBroker) DropRemoteDemand(string, brokermsg.RemoteDemand) {}
 
 func (*fakeBroker) NoteRemoteClaim(string) {}
+
+// An explicit retention_ms of 0 is documented as keep forever; master
+// handed it to the broker as 0, which means the operator default (12h
+// in the Helm chart), so an archive topic aged out. The broker now
+// receives its keep-forever sentinel, on the leader directly and in the
+// body forwarded to the leader.
+func TestExplicitZeroRetentionMeansKeepForever(t *testing.T) {
+	t.Run("create on the leader", func(t *testing.T) {
+		var got brokertopics.CreateOpts
+		s := newTestSet(&fakeBroker{createTopicFn: func(_ context.Context, opts brokertopics.CreateOpts) (topic.Topic, error) {
+			got = opts
+			return topic.Topic{Name: opts.Name}, nil
+		}})
+		res := httptest.NewRecorder()
+		Create(s).ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":"archive","retention_ms":0}`)))
+		if res.Code != http.StatusCreated || got.RetentionMs != topic.RetentionKeepForever {
+			t.Fatalf("status %d, broker retention %d; want 201 and %d (keep forever)", res.Code, got.RetentionMs, topic.RetentionKeepForever)
+		}
+	})
+	t.Run("create forwarded", func(t *testing.T) {
+		var forwarded map[string]any
+		s := newTestSetWithRouter(&fakeBroker{}, &fakeRouter{routeCreateTopicFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, body []byte) bool {
+			if err := json.Unmarshal(body, &forwarded); err != nil {
+				t.Fatalf("decode forwarded body: %v", err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			return true
+		}})
+		res := httptest.NewRecorder()
+		Create(s).ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":"archive","retention_ms":0}`)))
+		if res.Code != http.StatusCreated || forwarded["retention_ms"] != float64(topic.RetentionKeepForever) {
+			t.Fatalf("status %d, forwarded retention_ms %v; want 201 and %d", res.Code, forwarded["retention_ms"], topic.RetentionKeepForever)
+		}
+	})
+	t.Run("alter on the leader", func(t *testing.T) {
+		var got int64 = 99
+		s := newTestSet(&fakeBroker{updateTopicRetentionFn: func(_ context.Context, name string, retentionMs int64) (topic.Topic, error) {
+			got = retentionMs
+			return topic.Topic{Name: name}, nil
+		}})
+		req := httptest.NewRequest(http.MethodPatch, "/v1/topics/archive", bytes.NewBufferString(`{"retention_ms":0}`))
+		req.SetPathValue("topic", "archive")
+		res := httptest.NewRecorder()
+		Alter(s).ServeHTTP(res, req)
+		if res.Code != http.StatusOK || got != topic.RetentionKeepForever {
+			t.Fatalf("status %d, broker retention %d; want 200 and %d", res.Code, got, topic.RetentionKeepForever)
+		}
+	})
+	t.Run("alter forwarded", func(t *testing.T) {
+		var forwarded map[string]any
+		s := newTestSetWithRouter(&fakeBroker{}, &fakeRouter{routeAlterTopicFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, _ string, body []byte) bool {
+			if err := json.Unmarshal(body, &forwarded); err != nil {
+				t.Fatalf("decode forwarded body: %v", err)
+			}
+			w.WriteHeader(http.StatusOK)
+			return true
+		}})
+		req := httptest.NewRequest(http.MethodPatch, "/v1/topics/archive", bytes.NewBufferString(`{"retention_ms":0,"partitions":6}`))
+		req.SetPathValue("topic", "archive")
+		res := httptest.NewRecorder()
+		Alter(s).ServeHTTP(res, req)
+		if res.Code != http.StatusOK || forwarded["retention_ms"] != float64(topic.RetentionKeepForever) || forwarded["partitions"] != float64(6) {
+			t.Fatalf("status %d, forwarded %v; want 200, retention_ms %d and the other fields kept", res.Code, forwarded, topic.RetentionKeepForever)
+		}
+	})
+}
+
+// Leaving retention_ms out still gives the operator default: the broker
+// receives 0, and the forwarded body carries no keep-forever marker.
+func TestAbsentRetentionUsesTheDefault(t *testing.T) {
+	var got brokertopics.CreateOpts
+	s := newTestSet(&fakeBroker{createTopicFn: func(_ context.Context, opts brokertopics.CreateOpts) (topic.Topic, error) {
+		got = opts
+		return topic.Topic{Name: opts.Name}, nil
+	}})
+	res := httptest.NewRecorder()
+	Create(s).ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":"orders"}`)))
+	if res.Code != http.StatusCreated || got.RetentionMs != 0 {
+		t.Fatalf("status %d, broker retention %d; want 201 and 0 (the default)", res.Code, got.RetentionMs)
+	}
+
+	var forwarded map[string]any
+	s = newTestSetWithRouter(&fakeBroker{}, &fakeRouter{routeCreateTopicFn: func(_ context.Context, w http.ResponseWriter, _ *http.Request, body []byte) bool {
+		if err := json.Unmarshal(body, &forwarded); err != nil {
+			t.Fatalf("decode forwarded body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		return true
+	}})
+	res = httptest.NewRecorder()
+	Create(s).ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":"orders"}`)))
+	if v, ok := forwarded["retention_ms"]; ok && v != float64(0) {
+		t.Fatalf("forwarded retention_ms = %v, want it absent or 0 (the default)", v)
+	}
+}
+
+// A negative retention_ms is a 400 at the ingress, before the broker or
+// the router sees it: -1 is the broker's internal keep-forever marker,
+// not something a client sends.
+func TestNegativeRetentionIsRefused(t *testing.T) {
+	b := &fakeBroker{
+		createTopicFn: func(context.Context, brokertopics.CreateOpts) (topic.Topic, error) {
+			return topic.Topic{}, errors.New("broker reached")
+		},
+		updateTopicRetentionFn: func(context.Context, string, int64) (topic.Topic, error) {
+			return topic.Topic{}, errors.New("broker reached")
+		},
+	}
+	router := &fakeRouter{
+		routeCreateTopicFn: func(context.Context, http.ResponseWriter, *http.Request, []byte) bool {
+			t.Fatal("a negative retention was forwarded")
+			return true
+		},
+		routeAlterTopicFn: func(context.Context, http.ResponseWriter, *http.Request, string, []byte) bool {
+			t.Fatal("a negative retention was forwarded")
+			return true
+		},
+	}
+	s := newTestSetWithRouter(b, router)
+	for _, v := range []string{"-1", "-100"} {
+		res := httptest.NewRecorder()
+		Create(s).ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/v1/topics", bytes.NewBufferString(`{"name":"orders","retention_ms":`+v+`}`)))
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("create with retention_ms %s: status %d, want 400", v, res.Code)
+		}
+		req := httptest.NewRequest(http.MethodPatch, "/v1/topics/orders", bytes.NewBufferString(`{"retention_ms":`+v+`}`))
+		req.SetPathValue("topic", "orders")
+		res = httptest.NewRecorder()
+		Alter(s).ServeHTTP(res, req)
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("alter with retention_ms %s: status %d, want 400", v, res.Code)
+		}
+	}
+}
+
+// A PATCH that sets one cap must not carry the other cap forward from
+// a read of its own. On a just-elected leader whose replica has not yet
+// applied the previous leader's last cap change, or beside a concurrent
+// PATCH of the other cap, that read is stale, and writing it back undid
+// a committed change while both clients got 200. The broker fills the
+// unset cap from the record it reads under the topic lock.
+func TestAlterOneCapKeepsTheOtherCapCommittedBefore(t *testing.T) {
+	stored := topic.Topic{Name: "orders", MaxInFlightPerPartition: 1000, MaxAckedAheadPerPartition: 10}
+	stale := topic.Topic{Name: "orders", MaxInFlightPerPartition: 1000, MaxAckedAheadPerPartition: 1000}
+	s := newTestSet(&fakeBroker{
+		getTopicFn: func(context.Context, string) (topic.Topic, error) { return stale, nil },
+		updateTopicCapsFn: func(_ context.Context, _ string, inFlight, ackedAhead *int64) (topic.Topic, error) {
+			// The broker's side: an unset cap keeps the record's value.
+			if inFlight != nil {
+				stored.MaxInFlightPerPartition = *inFlight
+			}
+			if ackedAhead != nil {
+				stored.MaxAckedAheadPerPartition = *ackedAhead
+			}
+			return stored, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/topics/orders", bytes.NewBufferString(`{"max_in_flight_per_partition":50}`))
+	req.SetPathValue("topic", "orders")
+	res := httptest.NewRecorder()
+	Alter(s).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("Alter() status = %d, want 200 (body %s)", res.Code, res.Body)
+	}
+	if stored.MaxInFlightPerPartition != 50 || stored.MaxAckedAheadPerPartition != 10 {
+		t.Fatalf("caps after the PATCH = in-flight %d, acked-ahead %d; want 50 and the committed 10",
+			stored.MaxInFlightPerPartition, stored.MaxAckedAheadPerPartition)
+	}
+}

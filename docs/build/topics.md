@@ -56,7 +56,7 @@ Before you start: to create a topic you need a `create` grant that matches its n
     The CLI prints the created topic as JSON, with the same fields as the curl response.
 
 - `$NARAD` and `$AUTH` are the base URL and credentials from [Connect and authenticate](connect.md). `$AUTH` needs a `create` grant that matches `orders`.
-- `orders` is the topic name: 1 to 255 letters, digits, `.`, `_` or `-`. A name that is taken gets [`409`](../reference/status-codes.md#status-409).
+- `orders` is the topic name: 1 to 200 letters, digits, `.`, `_` or `-`; a longer name gets [`400`](../reference/status-codes.md#status-400). A name that is taken gets [`409`](../reference/status-codes.md#status-409), and so does a name that differs from an existing topic's only in letter case (`Orders` next to `orders`), because on a case-insensitive filesystem the two would share one directory. Topics an earlier release created with longer names (up to 255 bytes) keep working, but one whose name is over 230 bytes cannot become a [fan-out child](fanout-and-delay.md): the name of its fan-out cursor file would pass the filesystem's 255-byte limit.
 - The user who creates a topic becomes its [owner](../reference/glossary.md#owner), shown in `owner`.
 
 Every field the request accepts is in the [HTTP API reference](../reference/http-api.md#create-topic). The ones worth deciding up front:
@@ -67,7 +67,7 @@ A topic is split into [partitions](../reference/glossary.md#partition), which sp
 
 ### Retention
 
-Narad deletes a message `retention_ms` after it was written, whether or not anyone consumed it. The minimum is one hour, and `0` or no value gives the operator's default: 7 days for the binary, 12 hours for a cluster installed with the Helm chart. A message that is still unacked when retention removes it is never delivered, so size retention for your slowest consumer plus a margin for replay. The [delivery contract](../understand/delivery-contract.md#retention) has the details.
+Narad deletes a message `retention_ms` after it was written, whether or not anyone consumed it. The minimum is one hour. `0` keeps messages forever, and leaving the field out gives the operator's default: 7 days for the binary, 12 hours for a cluster installed with the Helm chart. A negative value gets [`400`](../reference/status-codes.md#status-400). A message that is still unacked when retention removes it is never delivered, so size retention for your slowest consumer plus a margin for replay. The [delivery contract](../understand/delivery-contract.md#retention) has the details.
 
 ### Visibility timeout
 
@@ -196,7 +196,7 @@ What can change after creation:
 
 | Field | Can change | Notes |
 |---|---|---|
-| `retention_ms` | yes | `0` resets it to the operator's default |
+| `retention_ms` | yes | `0` keeps messages forever; to go back to the operator's default, send its value |
 | `max_in_flight_per_partition`, `max_acked_ahead_per_partition` | yes | send one or both; the other keeps its value |
 | `partitions` | raise only | a lower or equal count gets [`400`](../reference/status-codes.md#status-400) |
 | `schema` | yes | registers a new version; see [Evolve a schema](schemas.md#evolve) |

@@ -70,7 +70,7 @@ func TestJoinOnlyNodeAdmittedByLeaderHandler(t *testing.T) {
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	payload, err := nodewire.EncodeJoinClusterRequest(nodewire.JoinClusterRequest{ID: "node-b", ClusterAddr: joinerAddr})
+	payload, err := nodewire.EncodeJoinClusterRequest(nodewire.JoinClusterRequest{ID: "node-b", ClusterAddr: joinerAddr, EntryTypes: metastore.MaxEntryType})
 	if err != nil {
 		t.Fatalf("encode join request: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestJoinRefusesRemovedIDUnlessFresh(t *testing.T) {
 	}
 
 	// The old incarnation asks to rejoin: refused.
-	stale, err := nodewire.EncodeJoinClusterRequest(nodewire.JoinClusterRequest{ID: "node-z", ClusterAddr: "10.0.0.9:7943"})
+	stale, err := nodewire.EncodeJoinClusterRequest(nodewire.JoinClusterRequest{ID: "node-z", ClusterAddr: "10.0.0.9:7943", EntryTypes: metastore.MaxEntryType})
 	if err != nil {
 		t.Fatalf("encode join request: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestJoinRefusesRemovedIDUnlessFresh(t *testing.T) {
 	// A fresh node under the same ID: readmitted, its tombstone cleared,
 	// and staged as a non-voter. Its address is unreachable here, which
 	// costs a non-voter nothing.
-	fresh, err := nodewire.EncodeJoinClusterRequest(nodewire.JoinClusterRequest{ID: "node-z", ClusterAddr: "10.0.0.9:7943", Fresh: true})
+	fresh, err := nodewire.EncodeJoinClusterRequest(nodewire.JoinClusterRequest{ID: "node-z", ClusterAddr: "10.0.0.9:7943", Fresh: true, EntryTypes: metastore.MaxEntryType})
 	if err != nil {
 		t.Fatalf("encode join request: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestUnreachableJoinerWithOneVoterDownKeepsQuorum(t *testing.T) {
 		t.Fatalf("write with one voter down: %v", err)
 	}
 
-	payload, err := nodewire.EncodeJoinClusterRequest(nodewire.JoinClusterRequest{ID: "narad-3", ClusterAddr: freeTCPAddr(t), Fresh: true})
+	payload, err := nodewire.EncodeJoinClusterRequest(nodewire.JoinClusterRequest{ID: "narad-3", ClusterAddr: freeTCPAddr(t), Fresh: true, EntryTypes: metastore.MaxEntryType})
 	if err != nil {
 		t.Fatalf("encode join request: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestJoinerIsStagedAsANonvoter(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = joiner.Close() })
 
-	payload, err := nodewire.EncodeJoinClusterRequest(nodewire.JoinClusterRequest{ID: "node-b", ClusterAddr: joinerAddr, Fresh: true})
+	payload, err := nodewire.EncodeJoinClusterRequest(nodewire.JoinClusterRequest{ID: "node-b", ClusterAddr: joinerAddr, Fresh: true, EntryTypes: metastore.MaxEntryType})
 	if err != nil {
 		t.Fatalf("encode join request: %v", err)
 	}
@@ -509,9 +509,11 @@ func TestJoinRefusesAJoinerOlderThanEveryMember(t *testing.T) {
 	// the leader itself, at MaxEntryType.
 	register("node-a", metastore.MaxEntryType)
 	register("node-b", metastore.MaxEntryType+1)
-	register("node-c", metastore.MaxEntryType+1)
-	if err := leader.MarkMemberDead(ctx, "node-c"); err != nil {
-		t.Fatalf("MarkMemberDead: %v", err)
+	// A dead member counts too. It is recorded dead directly: a dead
+	// mark would use this release's newest entry type, and the last step
+	// below needs a cluster that has used none past the joiner's.
+	if err := leader.RegisterMember(ctx, metastore.Member{ID: "node-c", Addr: "node-c:7942", Status: metastore.MemberDead, Build: "narad next", EntryTypes: metastore.MaxEntryType + 1}); err != nil {
+		t.Fatalf("RegisterMember(node-c): %v", err)
 	}
 
 	res := join(nodewire.JoinClusterRequest{ID: "node-old", ClusterAddr: oldAddr, EntryTypes: older})

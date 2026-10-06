@@ -3,6 +3,7 @@ package metastore
 import (
 	"bytes"
 	"context"
+	"strconv"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -46,11 +47,20 @@ func (s *Store) LatestSchema(_ context.Context, topicName string) (int, []byte, 
 		out    []byte
 	)
 	err := s.fsm.view(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bucketSchemas)
+		// schemaKey's "<topic>:<version>", built once and rewritten in
+		// place, and looked up through one cursor: a key and a lookup
+		// allocated per version were most of a long history's cost, and
+		// a topic describe reads the schema through here on every GET.
+		key := make([]byte, 0, len(topicName)+1+20)
+		key = append(key, topicName...)
+		key = append(key, ':')
+		prefix := len(key)
+		c := tx.Bucket(bucketSchemas).Cursor()
 		var raw []byte
 		for version := 1; ; version++ {
-			v := b.Get(schemaKey(topicName, version))
-			if v == nil {
+			key = strconv.AppendInt(key[:prefix], int64(version), 10)
+			k, v := c.Seek(key)
+			if v == nil || !bytes.Equal(k, key) {
 				break
 			}
 			latest, raw = version, v
@@ -64,4 +74,36 @@ func (s *Store) LatestSchema(_ context.Context, topicName string) (int, []byte, 
 		return 0, nil, err
 	}
 	return latest, out, nil
+}
+
+// SchemaBytes reports, from the local replica, how many bytes the
+// topic's stored schema versions hold together. Topic names cannot
+// contain ':', so the "<topic>:" prefix scan is exact. The topic
+// manager reads it to refuse a schema write that would take a history
+// past its byte budget before proposing it.
+func (s *Store) SchemaBytes(_ context.Context, topicName string) (int64, error) {
+	s.fsm.mu.RLock()
+	defer s.fsm.mu.RUnlock()
+	var total int64
+	err := s.fsm.view(func(tx *bolt.Tx) error {
+		total = topicSchemaBytes(tx, topicName)
+		return nil
+	})
+	return total, err
+}
+
+// ClusterSchemaBytes reports, from the local replica, how many bytes
+// every stored schema version of every topic holds together, fan-out
+// children's copies included. It walks keys only: a value's length is
+// read from its leaf element, so large values' overflow pages are not
+// touched.
+func (s *Store) ClusterSchemaBytes(_ context.Context) (int64, error) {
+	s.fsm.mu.RLock()
+	defer s.fsm.mu.RUnlock()
+	var total int64
+	err := s.fsm.view(func(tx *bolt.Tx) error {
+		total = clusterSchemaBytes(tx)
+		return nil
+	})
+	return total, err
 }

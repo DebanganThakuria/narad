@@ -107,7 +107,7 @@ Ordering was traded for availability. In CAP terms, Narad's data plane is AP and
 
 ## Retention {#retention}
 
-Retention is the one way an unacked message leaves without being delivered. A topic's `retention_ms` (at least 1 hour; when unset, the operator's default: 7 days for the binary, 12 hours for a cluster installed with the Helm chart) is a floor: a message lives at least that long after it was written. It usually lives somewhat longer, because deletion works on whole segments of up to 64 MiB, and it is gone within about twice the retention age of its write.
+Retention is the one way an unacked message leaves without being delivered. A topic's `retention_ms` (at least 1 hour, or `0` to keep messages forever; when unset, the operator's default: 7 days for the binary, 12 hours for a cluster installed with the Helm chart) is a floor: a message lives at least that long after it was written. It usually lives somewhat longer, because deletion works on whole segments of up to 64 MiB, and it is gone within about twice the retention age of its write.
 
 When a consumer falls so far behind that its next message has been deleted, the partition's [committed frontier](../reference/glossary.md#committed-frontier) jumps to the oldest message still retained, and the owner logs `consumer frontier fell behind retention; skipped to oldest retained offset`. A [fan-out child](../reference/glossary.md#fan-out-child) that falls behind its parent's retention skips the lost records too, and counts them in `narad_fanout_child_dropped_messages`. The parent of a [delay child](../reference/glossary.md#delay-child) must keep messages for at least the delay plus one hour, which keeps a healthy delay child clear of this.
 

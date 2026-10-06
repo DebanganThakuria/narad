@@ -13,9 +13,16 @@ package metastore
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 
 	bolt "go.etcd.io/bbolt"
 )
+
+// ErrMemberHeartbeatNewer is the refusal of a dead mark decided from an
+// older heartbeat than the member's last one on record: the member is
+// alive. Benign for the controller, which judges it again next pass.
+var ErrMemberHeartbeatNewer = errors.New("metastore: the member sent a newer heartbeat than the dead mark was decided from")
 
 // memberTombstone is the value stored under bucketRemovedMembers.
 type memberTombstone struct {
@@ -68,4 +75,43 @@ func (f *fsmState) applyReadmitMember(data []byte) error {
 	return f.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketRemovedMembers).Delete([]byte(p.ID))
 	})
+}
+
+// applyMarkMemberDeadIf marks the member dead, exactly as
+// applyMemberDead does, unless the heartbeat on record is newer than the
+// one the decision was made from: a leader whose replica had not applied
+// a heartbeat that committed ahead of its mark judged a live member.
+func (f *fsmState) applyMarkMemberDeadIf(data []byte) error {
+	var p markMemberDeadIfPayload
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	routingChanged := false
+	err := f.update(func(tx *bolt.Tx) error {
+		routingChanged = false
+		b := tx.Bucket(bucketMembers)
+		raw := b.Get([]byte(p.ID))
+		if raw == nil {
+			return ErrNotFound
+		}
+		var m Member
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return err
+		}
+		if m.LastHeartbeat > p.Observed {
+			return fmt.Errorf("%w: member %q heartbeat at %d, after the %d the dead mark was decided from",
+				ErrMemberHeartbeatNewer, p.ID, m.LastHeartbeat, p.Observed)
+		}
+		routingChanged = m.Status != MemberDead
+		m.Status = MemberDead
+		v, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(p.ID), v)
+	})
+	if err == nil && routingChanged {
+		f.versions.bumpRoutingMembers()
+	}
+	return err
 }

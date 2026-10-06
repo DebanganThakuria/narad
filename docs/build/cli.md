@@ -91,7 +91,7 @@ Stop it with Ctrl-C, and it prints how many messages it saw.
 
 Both print payloads as they are: JSON verbatim, other text as text, and binary data as a hex dump with its size. `--raw` prints payloads only, for piping into other tools.
 
-**Unreleased:** in master, not in v3.0.1. A key that is not valid UTF-8 prints in hex, marked `(binary)`.
+**Unreleased:** in master, not in v3.0.1. A key that is not valid UTF-8 prints in hex, marked `(binary)`. While a partition's owner is down, `--peek` refuses to start (unless `--partition` and `--from` give the start), and `narad replay` of that partition fails, both naming the partition and its owner, rather than starting it at offset 0. `narad server report` marks such a topic `[k of n partitions unavailable]` and leaves those partitions out of its totals.
 
 ## Switch clusters with contexts {#contexts}
 

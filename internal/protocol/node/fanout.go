@@ -1,9 +1,14 @@
 package node
 
 // EncodeChildLinkRequest encodes a fan-out attach/detach payload under
-// the given operation.
+// the given operation. Actor is an optional trailing field, written
+// only when set.
 func EncodeChildLinkRequest(op Operation, req ChildLinkRequest) ([]byte, error) {
-	w := opWriter(op, fieldLen(req.Parent)+fieldLen(req.Child)+8)
+	size := fieldLen(req.Parent) + fieldLen(req.Child) + 8
+	if req.Actor != "" {
+		size += fieldLen(req.Actor)
+	}
+	w := opWriter(op, size)
 	if err := w.string(req.Parent); err != nil {
 		return nil, err
 	}
@@ -11,6 +16,11 @@ func EncodeChildLinkRequest(op Operation, req ChildLinkRequest) ([]byte, error) 
 		return nil, err
 	}
 	w.i64(req.DelayMs)
+	if req.Actor != "" {
+		if err := w.string(req.Actor); err != nil {
+			return nil, err
+		}
+	}
 	return w.finish(), nil
 }
 
@@ -33,8 +43,14 @@ func DecodeChildLinkRequest(payload []byte, op Operation) (ChildLinkRequest, err
 	if err != nil {
 		return ChildLinkRequest{}, err
 	}
+	var actor string
+	if r.remaining() > 0 {
+		if actor, err = r.string(); err != nil {
+			return ChildLinkRequest{}, err
+		}
+	}
 	if err := r.done(); err != nil {
 		return ChildLinkRequest{}, err
 	}
-	return ChildLinkRequest{Parent: parent, Child: child, DelayMs: delayMs}, nil
+	return ChildLinkRequest{Parent: parent, Child: child, DelayMs: delayMs, Actor: actor}, nil
 }

@@ -18,7 +18,7 @@ func (rt *Router) RouteAttachChild(ctx context.Context, w http.ResponseWriter, _
 	if memberAddr == "" {
 		return false
 	}
-	res, err := rt.peer.AttachChild(ctx, memberAddr, parent, child, delayMs)
+	res, err := rt.peer.AttachChild(ctx, memberAddr, parent, child, delayMs, forwardActor(ctx))
 	return rt.writeForwardedWrite(ctx, w, memberAddr, res, err)
 }
 
@@ -28,7 +28,7 @@ func (rt *Router) RouteDetachChild(ctx context.Context, w http.ResponseWriter, _
 	if memberAddr == "" {
 		return false
 	}
-	res, err := rt.peer.DetachChild(ctx, memberAddr, parent, child)
+	res, err := rt.peer.DetachChild(ctx, memberAddr, parent, child, forwardActor(ctx))
 	return rt.writeForwardedWrite(ctx, w, memberAddr, res, err)
 }
 

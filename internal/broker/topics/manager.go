@@ -20,6 +20,8 @@ package topics
 import (
 	"context"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/debanganthakuria/narad/internal/broker/runtime"
@@ -83,6 +85,24 @@ type PartitionAssigner interface {
 	AssignNewPartitions(ctx context.Context, topicName string, fromPartition, toPartition int) error
 }
 
+// placementChecker is the assigner capability behind checkPlacement
+// (implemented by *metastore.Store).
+type placementChecker interface {
+	CheckPlacement() error
+}
+
+// checkPlacement refuses, before anything is committed, a create or a
+// partition increase whose new partitions could have no owner because
+// every live member is being decommissioned
+// (metastore.ErrAllMembersDraining, which maps to 503). The partitions
+// are never placed on a draining member instead.
+func (m *Manager) checkPlacement() error {
+	if c, ok := m.assigner.(placementChecker); ok {
+		return c.CheckPlacement()
+	}
+	return nil
+}
+
 // Manager handles every topic-CRUD operation. Constructed once at
 // broker startup; safe for concurrent use.
 type Manager struct {
@@ -114,6 +134,10 @@ type Manager struct {
 	// orphan sweep has finished. See create.go.
 	createGateMu sync.Mutex
 	createGate   chan struct{}
+
+	// schemaBudget bounds the stored schema bytes per topic history and
+	// for the whole cluster (see schema_budget.go).
+	schemaBudget schemaBudgets
 }
 
 // topicLock is a refcounted per-topic-name mutex. Refcounting lets
@@ -131,12 +155,19 @@ type topicLock struct {
 // retention update racing a partition increase could silently shrink
 // the partition count back). It also keeps delete→recreate ordered:
 // the purge finishes before a recreate of the same name can start.
+//
+// The lock is keyed on the lower-cased name, so names that differ only
+// in letter case share one lock: two such creates serialize and the
+// second sees the first (see checkNameFold). Topic names are ASCII
+// ([A-Za-z0-9._-]), so lower-casing is exact case folding. Callers pass
+// the real name.
 func (m *Manager) lockTopicName(name string) (unlock func()) {
+	key := topicLockKey(name)
 	m.topicLocksMu.Lock()
-	l := m.topicLocks[name]
+	l := m.topicLocks[key]
 	if l == nil {
 		l = &topicLock{}
-		m.topicLocks[name] = l
+		m.topicLocks[key] = l
 	}
 	l.refs++
 	m.topicLocksMu.Unlock()
@@ -147,10 +178,66 @@ func (m *Manager) lockTopicName(name string) (unlock func()) {
 		m.topicLocksMu.Lock()
 		l.refs--
 		if l.refs == 0 {
-			delete(m.topicLocks, name)
+			delete(m.topicLocks, key)
 		}
 		m.topicLocksMu.Unlock()
 	}
+}
+
+// topicLockKey is the key of a name's lock: the name with letter case
+// folded.
+func topicLockKey(name string) string {
+	return strings.ToLower(name)
+}
+
+// lockTopicNames takes the name locks of every distinct non-empty name,
+// in the order of their lock keys, so two mutations that lock the same
+// pair (an attach and a create-as-child under the same parent, say)
+// cannot deadlock, and names that share a lock key are locked once. It
+// returns one unlock for all of them.
+func (m *Manager) lockTopicNames(names ...string) (unlock func()) {
+	byKey := make(map[string]string, len(names))
+	keys := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		key := topicLockKey(name)
+		if _, ok := byKey[key]; ok {
+			continue
+		}
+		byKey[key] = name
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	unlocks := make([]func(), 0, len(keys))
+	for _, key := range keys {
+		unlocks = append(unlocks, m.lockTopicName(byKey[key]))
+	}
+	return func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
+	}
+}
+
+// leaderBarrierer is the metastore capability behind the once-per-term
+// leader barrier (implemented by *metastore.Store).
+type leaderBarrierer interface {
+	LeaderBarrier(ctx context.Context) error
+}
+
+// leaderBarrier makes sure, on a just-elected leader, that the local
+// replica has applied everything earlier leaders committed before a
+// mutation reads the record it rewrites. It costs one Raft round trip
+// per leadership term and nothing after. Callers hold the topic's name
+// lock and call it before their first read. A metastore without the
+// capability (tests, embedded use) skips it.
+func (m *Manager) leaderBarrier(ctx context.Context) error {
+	if b, ok := m.metastore.(leaderBarrierer); ok {
+		return b.LeaderBarrier(ctx)
+	}
+	return nil
 }
 
 // NewManager wires a Manager. dataDir is the topic directory root
@@ -179,6 +266,10 @@ func NewManager(
 		logger:     logger,
 		selfID:     selfID,
 		topicLocks: map[string]*topicLock{},
+		schemaBudget: schemaBudgets{
+			topic:   topicSchemaBudgetBytes,
+			cluster: clusterSchemaBudgetBytes,
+		},
 	}
 	if logs != nil {
 		logs.SetTopicRetiredHook(m.dropTopicState)

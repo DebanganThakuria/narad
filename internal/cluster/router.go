@@ -4,6 +4,7 @@ package cluster
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -67,6 +68,11 @@ type Router struct {
 	// overlap (see ack_coalescer.go), and remembers the owners too old to
 	// take a batch.
 	acks ackCoalescer
+
+	// logger receives what the router decides on its own and nobody else
+	// reports, such as members still owing a topic purge. slog.Default
+	// until serve.go wires the process logger with SetLogger.
+	logger *slog.Logger
 }
 
 // defaultMaxConsumeWait is the ceiling applied to a long-poll consume wait
@@ -91,6 +97,7 @@ func NewRouter(store *metastore.Store, selfID string, mgr partition.Manager, clu
 		consumeReprobeInterval:    remoteConsumeReprobeInterval,
 		consumeReprobeMaxInterval: remoteConsumeReprobeMaxInterval,
 		maxConsumeWait:            defaultMaxConsumeWait,
+		logger:                    slog.Default(),
 	}
 	rt.tokens = newTokenRequester(rt, "")
 	return rt
@@ -118,6 +125,14 @@ func (rt *Router) RunTokenKeeper(ctx context.Context) { rt.tokens.Run(ctx) }
 func (rt *Router) SetPeerClient(pc *PeerClient) {
 	if pc != nil {
 		rt.peer = pc
+	}
+}
+
+// SetLogger makes the router log through l. A nil l keeps the current
+// logger. Call before serving.
+func (rt *Router) SetLogger(l *slog.Logger) {
+	if l != nil {
+		rt.logger = l
 	}
 }
 
