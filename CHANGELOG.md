@@ -23,6 +23,7 @@ summarized more briefly than the 1.x and later entries.
 - Batch produce takes up to 1,000 messages (was 100) in a body of up to 16 MiB (was 1 MiB), each message's decoded payload at most 1 MiB, the single-produce cap, so anything a single produce accepts fits in a batch; a larger payload answers `413` `message <i>: message too large`. The body may be `Content-Encoding: zstd` or `gzip`, decoded under the same cap; another encoding answers `415`. Larger batches roll ingress WAL segments more often, so a batch that fails after a roll still delivers its leading messages a little more often; at-least-once holds.
 - A parent with a remote child cannot have its retention lowered below 24 hours (`409`), and a remote child's stub takes no topic change (`409`).
 - A delete or detach that involves a remote child travels to the leader as a remote write, which runs the unshipped check first; every other delete keeps its path, and a leader that finds a remote child the answering node did not know of refuses the plain delete with `409`.
+- The CLI never follows an HTTP redirect: a `3xx` from whatever sits in front of the server is an error naming the `Location`, so no request body (a remote password included) or Basic credentials are sent on to it. Narad itself never redirects its API; point the CLI at the address it answers on.
 - The OpenAPI contract test follows a method called on a variable assigned from a tree function's result, so handlers that build a per-request value with a constructor are checked like the rest.
 
 ### Security
