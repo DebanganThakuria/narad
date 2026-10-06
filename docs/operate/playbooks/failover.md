@@ -19,7 +19,7 @@ Before you start: a remote child from the cluster in use, `a`, to the recovery c
 3. **Choose the fence.**
 
     - If `a`'s disks may come back intact, keep `a`'s replicator user on `b`. When `a` returns, its cursors resume from where they stopped and ship the unshipped tail to `b`.
-    - If `a` may come back as a stale copy, from an old backup or a clone, delete that user on `b` first (`narad --ctx b user rm repl-from-a-7f3k9q`), so nothing `a` sends can reach `b`.
+    - If `a` may come back as a stale copy, from an old backup or a clone, delete that user on `b` first (`narad --ctx b user rm repl-from-a-7f3k9q`), so nothing `a` sends can reach `b`. `a`'s link then never drains: when you [fail back](failback.md#steps), detach it with `--force` to abandon the stale tail.
 
 4. **Mind a split brain.** If `a`'s region is cut off rather than gone, its producers and consumers may still be running. Stop `a`'s consumers by any path you have. If you cannot, the unshipped tail will be processed in both regions once the regions can talk again.
 

@@ -25,6 +25,14 @@ The target of a remote child must not have remote children of its own, and every
 
     `a`'s `orders` now has no remote children.
 
+    **If you fenced `a` by deleting its replicator user on `b`** ([failover step 3](failover.md#steps)), the link cannot drain: it stays in `auth_failed` with lag above 0, `topic wait` exits 2 at once (`stalled: state auth_failed`), and a plain detach answers `409` (unshipped records). That tail is the stale copy the fence keeps away from `b`, so abandon it:
+
+    ```bash
+    narad --ctx a topic detach orders orders-dr --force
+    ```
+
+    The leader's audit line for `remote_child.delete` records `forced=true` and what was abandoned (`abandoned_lag_messages`, `abandoned_dispatch_backlog`).
+
 3. **Clear `a`'s old backlog.** Delete and recreate `a`'s `orders` with the same partitions, retention and schema. Everything in it was either processed on `a` before the failure or is already on `b`; without this step, `a`'s consumers would process its backlog a second time. Narad has no purge, so delete and recreate is the tool. Do it only after step 1: anything produced to `a` after the detach would be lost.
 
 4. **Move the topic back with the offload playbook,** with the roles swapped ([Move a topic to another cluster](offload.md)): stop `b`'s consumers, attach from `b` at its consumer frontier, start `a`'s consumers, move the producers to `a`, prove `b` quiet, and detach.
