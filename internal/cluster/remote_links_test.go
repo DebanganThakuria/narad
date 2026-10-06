@@ -415,7 +415,7 @@ func TestRemoteLinksDeleteRefusedOnTheDispatchBacklog(t *testing.T) {
 	defer cancel()
 	go disp.Run(ctx)
 	rigWait(t, "backlog drained and shipped", 20*time.Second, func() bool {
-		n, _, _ := s.ingress.PendingForTopic("src-orders-id", "orders", 100)
+		n, _, _ := s.ingress.PendingForTopic(context.Background(), "src-orders-id", "orders", 100)
 		return n == 0 && s.cursorOffset(t, 0) == 6
 	})
 	res = s.write(t, nodewire.RemoteSubTopicDelete, map[string]any{"topic": "orders", "expect_remote": true})
@@ -444,13 +444,13 @@ func TestPendingForTopicMatchesByIDThenName(t *testing.T) {
 	if _, err := ing.AcceptProduceWithTopicID(ctx, "other", "x", "", 0, []byte("x")); err != nil {
 		t.Fatal(err)
 	}
-	if n, complete, err := ing.PendingForTopic("src-orders-id", "orders", 100); err != nil || !complete || n != 2 {
+	if n, complete, err := ing.PendingForTopic(context.Background(), "src-orders-id", "orders", 100); err != nil || !complete || n != 2 {
 		t.Fatalf("by ID: %d %v %v, want the matching ID and the legacy record", n, complete, err)
 	}
-	if n, _, _ := ing.PendingForTopic("", "orders", 100); n != 3 {
+	if n, _, _ := ing.PendingForTopic(context.Background(), "", "orders", 100); n != 3 {
 		t.Fatalf("ID-less parent: %d, want every record named orders", n)
 	}
-	if n, complete, _ := ing.PendingForTopic("", "orders", 2); n != 2 || complete {
+	if n, complete, _ := ing.PendingForTopic(context.Background(), "", "orders", 2); n != 2 || complete {
 		t.Fatalf("at the scan limit: %d complete=%v, want an incomplete scan", n, complete)
 	}
 }

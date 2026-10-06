@@ -63,8 +63,8 @@ const (
 	// unshippedCheckEvery is how often the leader starts a new unshipped
 	// check for one parent; a delete inside the window gets 429.
 	unshippedCheckEvery = 10 * time.Second
-	// unshippedScanLimit bounds a member's WAL scan; a backlog past it
-	// counts as unshipped.
+	// unshippedScanLimit bounds the records, of any topic, a member's
+	// WAL scan reads; a backlog past it counts as unshipped.
 	unshippedScanLimit = 1_000_000
 	// unshippedAskTimeout bounds the fan-out of the unshipped query.
 	unshippedAskTimeout = 15 * time.Second
@@ -87,6 +87,14 @@ type RemoteLinks struct {
 	now        func() time.Time
 	checkEvery time.Duration
 	scanLimit  int
+
+	// The member side of the unshipped query (memberScan).
+	scanMu    sync.Mutex
+	scans     map[string]*unshippedScan
+	scanSeq   uint64
+	scanSlots chan struct{}
+	// scanBacklog is the ingress backlog scan, a seam for tests.
+	scanBacklog func(ctx context.Context, topicID, name string, limit int) (uint64, bool, error)
 }
 
 // NewRemoteLinks builds the leader side of remote children.
@@ -95,12 +103,15 @@ func NewRemoteLinks(d RemoteLinksDeps) *RemoteLinks {
 		d.Log = slog.Default()
 	}
 	return &RemoteLinks{
-		d:          d,
-		flights:    map[string]*unshippedFlight{},
-		lastCheck:  map[string]time.Time{},
-		now:        time.Now,
-		checkEvery: unshippedCheckEvery,
-		scanLimit:  unshippedScanLimit,
+		d:           d,
+		flights:     map[string]*unshippedFlight{},
+		lastCheck:   map[string]time.Time{},
+		now:         time.Now,
+		checkEvery:  unshippedCheckEvery,
+		scanLimit:   unshippedScanLimit,
+		scans:       map[string]*unshippedScan{},
+		scanSlots:   make(chan struct{}, maxUnshippedScans),
+		scanBacklog: d.Ingress.PendingForTopic,
 	}
 }
 
@@ -1083,18 +1094,89 @@ func (l *RemoteLinks) collectCursorStats(ctx context.Context, parent string) ([]
 // answer is never reused across checks: a scan that began before a
 // check started can miss a record accepted in between, and the check
 // would then let a delete abandon it. The leader's per-parent single
-// flight and its 10 s pacing bound how often members scan.
-func (l *RemoteLinks) ServeUnshipped(_ context.Context, req nodewire.RemoteCheckRequest) nodewire.Response {
+// flight and its 10 s pacing bound how often a leader asks; on the
+// member every scan reads at most scanLimit records, stops when the
+// leader has stopped waiting for it (unshippedAskTimeout), shares a
+// running scan of the same topic only when it started after the query
+// arrived, and takes one of a few node-wide scan slots. A scan cut
+// short answers complete=false, which counts as unshipped.
+func (l *RemoteLinks) ServeUnshipped(ctx context.Context, req nodewire.RemoteCheckRequest) nodewire.Response {
 	var q unshippedQuery
 	if err := decodeBody(req.Body, &q); err != nil || topic.ValidateName(q.Topic) != nil {
 		return errorResponse(http.StatusBadRequest, "invalid unshipped query")
 	}
-	count, complete, err := l.d.Ingress.PendingForTopic(q.TopicID, q.Topic, l.scanLimit)
-	if err != nil {
-		l.d.Log.Warn("unshipped query: scan the ingress backlog", "topic", q.Topic, "err", err)
+	ctx, cancel := context.WithTimeout(ctx, unshippedAskTimeout)
+	defer cancel()
+	res := l.memberScan(ctx, q)
+	switch {
+	case res.err == nil:
+	case errors.Is(res.err, context.DeadlineExceeded), errors.Is(res.err, context.Canceled):
+		l.d.Log.Warn("unshipped query: the ingress backlog scan did not finish before the leader stopped waiting; answering incomplete",
+			"topic", q.Topic, "counted", res.count, "timeout", unshippedAskTimeout)
+	default:
+		l.d.Log.Warn("unshipped query: scan the ingress backlog", "topic", q.Topic, "err", res.err)
 		return errorResponse(http.StatusServiceUnavailable, "ingress backlog scan failed")
 	}
-	return jsonResponse(http.StatusOK, unshippedAnswer{Node: l.d.SelfID, Count: count, Complete: complete})
+	return jsonResponse(http.StatusOK, unshippedAnswer{Node: l.d.SelfID, Count: res.count, Complete: res.complete})
+}
+
+// maxUnshippedScans bounds the unshipped scans one member runs at once,
+// across every topic.
+const maxUnshippedScans = 2
+
+// unshippedScan is one member's backlog scan of one topic; queries that
+// arrived before it started do not share it.
+type unshippedScan struct {
+	seq      uint64
+	done     chan struct{}
+	count    uint64
+	complete bool
+	err      error
+}
+
+// memberScan runs, or shares, this member's backlog scan of q's topic:
+// one at a time per topic, shared only by queries that arrived before
+// it started, and at most maxUnshippedScans across topics. A query
+// whose ctx ends while it waits answers incomplete with ctx's error.
+func (l *RemoteLinks) memberScan(ctx context.Context, q unshippedQuery) *unshippedScan {
+	key := q.Topic + "/" + q.TopicID
+	l.scanMu.Lock()
+	arrived := l.scanSeq
+	for {
+		sc := l.scans[key]
+		if sc == nil {
+			break
+		}
+		l.scanMu.Unlock()
+		select {
+		case <-sc.done:
+		case <-ctx.Done():
+			return &unshippedScan{err: ctx.Err()}
+		}
+		if sc.seq > arrived {
+			return sc
+		}
+		l.scanMu.Lock()
+	}
+	l.scanSeq++
+	sc := &unshippedScan{seq: l.scanSeq, done: make(chan struct{})}
+	l.scans[key] = sc
+	l.scanMu.Unlock()
+	defer func() {
+		l.scanMu.Lock()
+		delete(l.scans, key)
+		l.scanMu.Unlock()
+		close(sc.done)
+	}()
+	select {
+	case l.scanSlots <- struct{}{}:
+		defer func() { <-l.scanSlots }()
+	case <-ctx.Done():
+		sc.err = ctx.Err()
+		return sc
+	}
+	sc.count, sc.complete, sc.err = l.scanBacklog(ctx, q.TopicID, q.Topic, l.scanLimit)
+	return sc
 }
 
 // linkError maps a write's failure to a status and a fixed message: the

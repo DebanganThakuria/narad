@@ -50,7 +50,7 @@ func drainRig(t *testing.T) *remoteRig {
 	if _, err := s.broker.AcceptProduce(context.Background(), "orders", "k", []byte(`{"late":1}`)); err != nil {
 		t.Fatal(err)
 	}
-	if n, _, _ := s.ingress.PendingForTopic("src-orders-id", "orders", 100); n != 1 {
+	if n, _, _ := s.ingress.PendingForTopic(context.Background(), "src-orders-id", "orders", 100); n != 1 {
 		t.Fatalf("backlog = %d, want the late record", n)
 	}
 	return rg
@@ -67,7 +67,7 @@ func TestRemoteLinksDeleteCountsARecordDispatchedMidCheck(t *testing.T) {
 		disp := NewProduceDispatcher(s.ingress, s.store, "node-self", s.broker, nil, rigLogger(), ProduceDispatcherConfig{PollInterval: 5 * time.Millisecond})
 		go disp.Run(ctx)
 		rigWait(t, "the late record dispatched", 10*time.Second, func() bool {
-			n, _, _ := s.ingress.PendingForTopic("src-orders-id", "orders", 100)
+			n, _, _ := s.ingress.PendingForTopic(context.Background(), "src-orders-id", "orders", 100)
 			return n == 0
 		})
 	}}
@@ -163,7 +163,7 @@ func TestRemoteLinksDeleteNeverSharesACheckThatStartedBeforeIt(t *testing.T) {
 		return ok
 	})
 	rg.target.faults.set("down")
-	if n, _, _ := s.ingress.PendingForTopic("src-orders-id", "orders", 100); n != 0 {
+	if n, _, _ := s.ingress.PendingForTopic(context.Background(), "src-orders-id", "orders", 100); n != 0 {
 		t.Fatalf("backlog = %d before the test, want 0", n)
 	}
 
@@ -203,7 +203,7 @@ func TestRemoteLinksDeleteNeverSharesACheckThatStartedBeforeIt(t *testing.T) {
 		t.Fatal(b.err)
 	}
 	if b.res.Status != http.StatusConflict || !strings.Contains(string(b.res.Body), `"dispatch_backlog"`) {
-		pending, _, _ := s.ingress.PendingForTopic("src-orders-id", "orders", 100)
+		pending, _, _ := s.ingress.PendingForTopic(context.Background(), "src-orders-id", "orders", 100)
 		t.Fatalf("delete B (sent after R's 202): %d %s, parent backlog %d; want 409 counting R", b.res.Status, b.res.Body, pending)
 	}
 }

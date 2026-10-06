@@ -1,9 +1,18 @@
 package ingress
 
-import "errors"
+import (
+	"context"
+	"errors"
+
+	"github.com/debanganthakuria/narad/internal/persistence/wal"
+)
 
 // errPendingLimit stops a PendingForTopic scan at its limit.
 var errPendingLimit = errors.New("ingress: pending scan limit reached")
+
+// pendingCtxEvery is how many records a PendingForTopic scan reads
+// between looks at its context.
+const pendingCtxEvery = 256
 
 // PendingForTopic counts one topic's records in this node's dispatch
 // backlog: the range DispatchBacklog measures, from the stored dispatch
@@ -19,10 +28,12 @@ var errPendingLimit = errors.New("ingress: pending scan limit reached")
 // were stamped, or a topic created before IDs existed). A name match can
 // count a record of an earlier topic of the same name: an over-count.
 //
-// The scan stops at limit records and reports complete=false: a backlog
-// that large counts as unshipped. It runs only on a delete, never on the
-// produce path.
-func (m *Manager) PendingForTopic(topicID, name string, limit int) (count uint64, complete bool, err error) {
+// The scan reads at most limit records of any topic, and stops early
+// when ctx ends; either way it reports complete=false, and a backlog it
+// could not read to the end counts as unshipped. A stop on ctx also
+// returns ctx's error. It runs only on a delete, never on the produce
+// path.
+func (m *Manager) PendingForTopic(ctx context.Context, topicID, name string, limit int) (count uint64, complete bool, err error) {
 	if m == nil || m.log == nil {
 		return 0, true, nil
 	}
@@ -30,13 +41,22 @@ func (m *Manager) PendingForTopic(topicID, name string, limit int) (count uint64
 	if from >= m.durableNext.Load() {
 		return 0, true, nil
 	}
-	err = m.ReplayProduce(from, func(rec ProduceRecord) error {
-		if !pendingMatch(rec, topicID, name) {
-			return nil
+	var read int
+	peek := func(wal.RecordID, wal.Cursor) (bool, error) {
+		if limit > 0 && read >= limit {
+			return false, errPendingLimit
 		}
-		count++
-		if limit > 0 && count >= uint64(limit) {
-			return errPendingLimit
+		if read%pendingCtxEvery == 0 {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+		}
+		read++
+		return false, nil
+	}
+	err = m.ReplayProduceFromCursorPeek(wal.Cursor{Seq: from}, peek, func(rec ProduceRecord, _ wal.Cursor) error {
+		if pendingMatch(rec, topicID, name) {
+			count++
 		}
 		return nil
 	})
