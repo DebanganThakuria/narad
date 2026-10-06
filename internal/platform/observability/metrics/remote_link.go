@@ -67,7 +67,7 @@ func newRemoteLinkMetrics() *RemoteLinkMetrics {
 		}, linkPartition),
 		LastSuccessTimestampSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: Namespace, Subsystem: "fanout", Name: "remote_last_success_timestamp_seconds",
-			Help: "Unix time of the last chunk the remote accepted.",
+			Help: "Unix time of the last chunk the remote accepted from this node's cursors of the link (the newest across its partitions here).",
 		}, link),
 		CheckFailuresTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace, Subsystem: "fanout", Name: "remote_check_failures_total",

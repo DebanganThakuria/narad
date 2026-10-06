@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/debanganthakuria/narad/internal/domain/topic"
 	"github.com/debanganthakuria/narad/internal/persistence/metastore"
+	"github.com/debanganthakuria/narad/internal/platform/observability/metrics"
 )
 
 type remoteSeries struct {
@@ -163,4 +165,37 @@ func TestDeletedRemoteDropsItsSeriesAndSenderState(t *testing.T) {
 		_, wire := gatherRemoteGauge(t, rl.WireBytesTotal, "narad_remote_wire_bytes_total", "b")
 		return !chunk && !wire && rg.src.runner.sender().remoteStateIfAny("b") == nil
 	})
+}
+
+// The link's last-success gauge carries the newest success among this
+// node's cursors of the link: a quiet partition re-publishing an
+// hour-old success never pulls it back while another partition ships.
+// It goes once the node's last cursor of the link stops, so a node the
+// link's partitions moved off exports no frozen timestamp.
+func TestRemoteLastSuccessIsTheNewestOfTheNodesCursors(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg)
+	r := &FanoutRunner{metrics: m, logger: rigLogger()}
+	key := fanoutCursorKey{parent: "orders", child: "orders-to-b", epoch: "e1", remote: true}
+	quietKey, busyKey := key, key
+	quietKey.partition, busyKey.partition = 4, 3
+	quiet, forgetQuiet := r.registerRemoteCursor(quietKey)
+	busy, forgetBusy := r.registerRemoteCursor(busyKey)
+	now := time.Now()
+	quiet.succeeded(now.Add(-time.Hour))
+	busy.succeeded(now)
+	r.publishRemoteState(busy)
+	r.publishRemoteState(quiet)
+	gauge := m.RemoteLink.LastSuccessTimestampSeconds.WithLabelValues("orders", "orders-to-b")
+	if got, want := testutil.ToFloat64(gauge), float64(now.UnixMilli())/1000; got != want {
+		t.Fatalf("last success = %v after the quiet partition published, want the busy one's %v", got, want)
+	}
+	forgetBusy()
+	if n := testutil.CollectAndCount(m.RemoteLink.LastSuccessTimestampSeconds); n != 1 {
+		t.Fatalf("%d last-success series with a cursor of the link still running, want 1", n)
+	}
+	forgetQuiet()
+	if n := testutil.CollectAndCount(m.RemoteLink.LastSuccessTimestampSeconds); n != 0 {
+		t.Fatalf("%d last-success series after the node's last cursor of the link stopped, want 0", n)
+	}
 }

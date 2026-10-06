@@ -220,6 +220,12 @@ type FanoutRunner struct {
 	remoteMu      sync.Mutex
 	remote        *remoteSender
 	remoteCursors map[fanoutCursorKey]*remoteCursor
+
+	// remoteSuccessMu guards remoteSuccess: per link, the newest success
+	// among this node's cursors of it, which the link's last-success
+	// gauge carries.
+	remoteSuccessMu sync.Mutex
+	remoteSuccess   map[remoteLinkLabels]*remoteLinkSuccess
 }
 
 // NewFanoutRunner wires a runner and registers it on store as the

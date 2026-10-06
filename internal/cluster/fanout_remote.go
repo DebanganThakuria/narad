@@ -345,6 +345,7 @@ func (r *FanoutRunner) registerRemoteCursor(key fanoutCursorKey) (*remoteCursor,
 	}
 	r.remoteCursors[key] = c
 	r.remoteMu.Unlock()
+	r.holdLinkSuccess(key)
 	return c, func() {
 		r.remoteMu.Lock()
 		if r.remoteCursors[key] == c {
@@ -353,7 +354,71 @@ func (r *FanoutRunner) registerRemoteCursor(key fanoutCursorKey) (*remoteCursor,
 		r.remoteMu.Unlock()
 		releaseCheck()
 		r.unpublishRemoteState(c)
+		r.releaseLinkSuccess(key)
 	}
+}
+
+// remoteLinkLabels are a link's series labels.
+type remoteLinkLabels struct{ parent, child string }
+
+// remoteLinkSuccess is the newest success among this node's running
+// cursors of one link, and how many of them run.
+type remoteLinkSuccess struct {
+	refs     int
+	newestMs int64
+}
+
+func (r *FanoutRunner) holdLinkSuccess(key fanoutCursorKey) {
+	k := remoteLinkLabels{key.parent, key.child}
+	r.remoteSuccessMu.Lock()
+	defer r.remoteSuccessMu.Unlock()
+	if r.remoteSuccess == nil {
+		r.remoteSuccess = map[remoteLinkLabels]*remoteLinkSuccess{}
+	}
+	ls := r.remoteSuccess[k]
+	if ls == nil {
+		ls = &remoteLinkSuccess{}
+		r.remoteSuccess[k] = ls
+	}
+	ls.refs++
+}
+
+// releaseLinkSuccess lets go of a stopped cursor's share; once the
+// node's last cursor of the link stopped, the link's last-success
+// series goes too, so a node the link's partitions moved off exports
+// no frozen timestamp.
+func (r *FanoutRunner) releaseLinkSuccess(key fanoutCursorKey) {
+	k := remoteLinkLabels{key.parent, key.child}
+	r.remoteSuccessMu.Lock()
+	defer r.remoteSuccessMu.Unlock()
+	ls := r.remoteSuccess[k]
+	if ls == nil {
+		return
+	}
+	if ls.refs--; ls.refs > 0 {
+		return
+	}
+	delete(r.remoteSuccess, k)
+	if rl := r.remoteMetrics(); rl != nil {
+		rl.LastSuccessTimestampSeconds.DeleteLabelValues(key.parent, key.child)
+	}
+}
+
+// noteLinkSuccess sets the link's last-success gauge when ms is newer
+// than every success of the node's cursors of the link so far: a quiet
+// partition re-publishing an old success never pulls it back.
+func (r *FanoutRunner) noteLinkSuccess(rl *metrics.RemoteLinkMetrics, key fanoutCursorKey, ms int64) {
+	if ms <= 0 {
+		return
+	}
+	r.remoteSuccessMu.Lock()
+	defer r.remoteSuccessMu.Unlock()
+	ls := r.remoteSuccess[remoteLinkLabels{key.parent, key.child}]
+	if ls == nil || ms <= ls.newestMs {
+		return
+	}
+	ls.newestMs = ms
+	rl.LastSuccessTimestampSeconds.WithLabelValues(key.parent, key.child).Set(float64(ms) / 1000)
 }
 
 // linkCheck returns the runtime target check of key's link on this
@@ -534,9 +599,7 @@ func (r *FanoutRunner) publishRemoteState(cur *remoteCursor) {
 	} else {
 		rl.RetentionHeadroomSeconds.DeleteLabelValues(key.parent, key.child, part)
 	}
-	if snap.lastSuccessMs > 0 {
-		rl.LastSuccessTimestampSeconds.WithLabelValues(key.parent, key.child).Set(float64(snap.lastSuccessMs) / 1000)
-	}
+	r.noteLinkSuccess(rl, key, snap.lastSuccessMs)
 }
 
 // remoteStallLogGap is how often one cursor may log entering a stall
