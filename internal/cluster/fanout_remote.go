@@ -669,7 +669,8 @@ type laneShip struct {
 	// read by the lag refresher while the lane waits.
 	oldestMs atomic.Int64
 	// lookupState marks a lane state set by a failed remote lookup, and
-	// retryStall a lane that waited out a cursor stall and tries once.
+	// retryStall a lane whose stall wait a change woke early, so it
+	// tries once at once.
 	lookupState bool
 	retryStall  bool
 }
@@ -887,11 +888,14 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 			lane.lookupState = false
 			sh.cur.setLane(lane.idx, "")
 		}
-		// A stall only a change or a retry fixes: wait, then try once
-		// more; the answer sets or clears the stall.
-		if stall := sh.cur.stallState(); stall != "" && !lane.retryStall {
+		// A stall only a change or a retry fixes: wait until its retry is
+		// due (a change wakes the wait early), then try once more; the
+		// answer sets or clears the stall. The due time is the cursor's,
+		// so a slab read again because the budget could not hold it
+		// sends the retry once the re-read's wait is over.
+		if stall, due := sh.cur.stallWait(); stall != "" && due > 0 && !lane.retryStall {
 			release()
-			if !sh.hold(lane, s.stallRetry, nil) || !sh.wait(ctx, s.stallRetry) {
+			if !sh.hold(lane, due, nil) || !sh.wait(ctx, due) {
 				return
 			}
 			lane.retryStall = true
@@ -903,7 +907,12 @@ func (sh *slabShip) runLane(ctx context.Context, lane *laneShip) {
 			if ctx.Err() != nil {
 				return
 			}
-			if !sh.hold(lane, s.stallRetry, nil) || !sh.wait(ctx, s.stallRetry) {
+			if !sh.hold(lane, s.stallRetry, nil) {
+				// The re-read waits stallRetry first; its pass checks again.
+				sh.cur.forceTargetCheck()
+				return
+			}
+			if !sh.wait(ctx, s.stallRetry) {
 				return
 			}
 			// The lane waited (or an admin changed the link, say resumed
@@ -1069,7 +1078,7 @@ func (sh *slabShip) sendChunk(ctx context.Context, lane *laneShip, e *remote.Ent
 		if probe {
 			rs.gate.Released()
 		}
-		sh.cur.setStall(topic.RemoteStateTargetMissing)
+		sh.cur.stallFor(topic.RemoteStateTargetMissing, s.stallRetry)
 		return
 	}
 	rctx, cancel := context.WithTimeout(sh.sendCtx, requestTimeout(e))
@@ -1131,12 +1140,12 @@ func (sh *slabShip) act(ctx context.Context, lane *laneShip, rs *remoteState, e 
 		}
 		sh.cur.succeeded(time.Now())
 		sh.cur.setLane(lane.idx, "")
-		sh.cur.setStall("")
+		sh.cur.clearStall()
 		sh.cur.clearIdle()
 
 	case sink.ActResendPrefix:
 		rs.gate.Succeeded(probe)
-		sh.cur.setStall("")
+		sh.cur.clearStall()
 		i := v.Index
 		switch {
 		case i >= n:
@@ -1149,7 +1158,7 @@ func (sh *slabShip) act(ctx context.Context, lane *laneShip, rs *remoteState, e 
 
 	case sink.ActBisect:
 		rs.gate.Succeeded(probe)
-		sh.cur.setStall("")
+		sh.cur.clearStall()
 		if n == 1 {
 			sh.refuseOne(lane, topic.RemoteStateRejectedRecord)
 		} else {
@@ -1158,13 +1167,13 @@ func (sh *slabShip) act(ctx context.Context, lane *laneShip, rs *remoteState, e 
 
 	case sink.ActBlock:
 		rs.gate.Succeeded(probe)
-		sh.cur.setStall("")
+		sh.cur.clearStall()
 		sh.block(lane, topic.RemoteStateRejectedRecord)
 		sh.cur.forceTargetCheck()
 
 	case sink.ActSplitTooLarge:
 		rs.gate.Succeeded(probe)
-		sh.cur.setStall("")
+		sh.cur.clearStall()
 		switch {
 		case n == 1:
 			sh.block(lane, topic.RemoteStateRecordTooLarge)
@@ -1219,7 +1228,7 @@ func (sh *slabShip) act(ctx context.Context, lane *laneShip, rs *remoteState, e 
 		} else {
 			rs.gate.Succeeded(probe)
 		}
-		sh.cur.setStall(v.State)
+		sh.cur.stallFor(v.State, s.stallRetry)
 		s.r.logger.Warn("remote child stalled", "parent", sh.key.parent, "partition", sh.key.partition,
 			"child", sh.key.child, "remote", rs.name, "state", v.State, "status", v.Status)
 		// The retry re-runs the target check before it sends: a target

@@ -33,6 +33,12 @@ type remoteCursor struct {
 	// cursor in (forbidden, target_missing, remote_missing, ...), ""
 	// when none.
 	stall string
+	// stallDue is when the stall's next retry may go out: one stall
+	// interval after the answer that stalled the cursor, earlier when a
+	// resume asks for one at once. It lives on the cursor, not on a
+	// lane, so a slab read again (the held budget had no room) still
+	// sends its retry once the wait is over.
+	stallDue time.Time
 	// lanes holds each lane's state ("" when it has nothing to report)
 	// and blocked each lane's stuck record.
 	lanes   map[int]string
@@ -85,17 +91,30 @@ func newRemoteCursor(key fanoutCursorKey) *remoteCursor {
 	return &remoteCursor{key: key, lanes: map[int]string{}, blocked: map[int]topic.RemoteBlock{}}
 }
 
-// setStall sets (or, with "", clears) the cursor-wide stall state.
-func (c *remoteCursor) setStall(state string) {
+// clearStall clears the cursor-wide stall: the target answered.
+func (c *remoteCursor) clearStall() {
 	c.mu.Lock()
-	c.stall = state
+	c.stall, c.stallDue = "", time.Time{}
 	c.mu.Unlock()
 }
 
-func (c *remoteCursor) stallState() string {
+// stallFor puts the cursor in a stall whose next retry is due after
+// retry.
+func (c *remoteCursor) stallFor(state string, retry time.Duration) {
+	c.mu.Lock()
+	c.stall, c.stallDue = state, time.Now().Add(retry)
+	c.mu.Unlock()
+}
+
+// stallWait reports the cursor-wide stall and how long until its next
+// retry is due (0 or less: due now).
+func (c *remoteCursor) stallWait() (string, time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.stall
+	if c.stall == "" {
+		return "", 0
+	}
+	return c.stall, time.Until(c.stallDue)
 }
 
 // setLane records one lane's state; "" clears it.
@@ -119,8 +138,14 @@ func (c *remoteCursor) setBlocked(lane int, b *topic.RemoteBlock) {
 	c.mu.Unlock()
 }
 
+// setPaused records whether the link is paused. A resume makes a
+// stall's retry due at once: the admin changed the link, as a change
+// during a stall wait does.
 func (c *remoteCursor) setPaused(paused bool) {
 	c.mu.Lock()
+	if c.paused && !paused {
+		c.stallDue = time.Time{}
+	}
 	c.paused = paused
 	c.mu.Unlock()
 }
