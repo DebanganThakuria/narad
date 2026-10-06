@@ -104,6 +104,10 @@ type linkCheckKey struct {
 type linkCheck struct {
 	// refs counts the registered cursors sharing it (remoteSender.mu).
 	refs int
+	// sinceMs is when this node began checking the link (set once, at
+	// creation): a link with no successful check since then counts as
+	// unverified once the window has passed.
+	sinceMs int64
 
 	// forceCheck makes the next chunk re-run the target check; atomic so
 	// asking for one never waits on a check in flight.
@@ -310,6 +314,7 @@ type remoteCursorSnapshot struct {
 	lagSeconds    float64
 	headroom      *float64
 	verifiedMs    int64
+	checkSinceMs  int64
 }
 
 // snapshot folds the cursor's states into its worst one: the
@@ -336,6 +341,7 @@ func (c *remoteCursor) snapshot() remoteCursorSnapshot {
 		lastSuccessMs: c.lastSuccessMs,
 		lagSeconds:    c.lagSeconds,
 		verifiedMs:    verifiedMs,
+		checkSinceMs:  c.check.sinceMs,
 	}
 	if c.headroom != nil {
 		h := *c.headroom
@@ -357,6 +363,7 @@ func (snap remoteCursorSnapshot) overlay(stat *topic.FanoutCursorStat) {
 	stat.LastSuccessMs = snap.lastSuccessMs
 	stat.LagSeconds = snap.lagSeconds
 	stat.TargetVerifiedAtMs = snap.verifiedMs
+	stat.TargetCheckSinceMs = snap.checkSinceMs
 }
 
 // remoteCursorFor returns the state of the running remote cursor for

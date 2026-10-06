@@ -100,4 +100,8 @@ type FanoutCursorStat struct {
 	AckFrontier *int64 `json:"ack_frontier,omitempty"`
 	// TargetVerifiedAtMs is when the last target check succeeded.
 	TargetVerifiedAtMs int64 `json:"target_verified_at_ms,omitempty"`
+	// TargetCheckSinceMs is when the owner began checking the link's
+	// target: a cursor with no successful check counts as unverified
+	// from then on.
+	TargetCheckSinceMs int64 `json:"target_check_since_ms,omitempty"`
 }

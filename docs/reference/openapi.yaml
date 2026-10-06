@@ -2983,11 +2983,11 @@ components:
               target_verified_at:
                 type: string
                 x-narad-since: unreleased
-                description: A remote child only. The oldest of the cursors' last successful target checks, RFC 3339; `null` before the first.
+                description: A remote child only. The oldest of the cursors' last successful target checks, RFC 3339; `null` while any cursor has had none (a node whose checks keep failing is not hidden behind another node's success).
               unverified:
                 type: boolean
                 x-narad-since: unreleased
-                description: A remote child only. `true` for a running link with no successful target check in the last 10 minutes.
+                description: A remote child only. `true` for a running link with a cursor whose node has had no successful target check in the last 10 minutes (counted from when the node began checking, for a cursor that never had one).
               last_success_at:
                 type: string
                 x-narad-since: unreleased

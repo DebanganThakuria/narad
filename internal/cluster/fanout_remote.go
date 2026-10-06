@@ -450,7 +450,7 @@ func (s *remoteSender) linkCheck(key fanoutCursorKey) (*linkCheck, func()) {
 	}
 	lc := s.checks[k]
 	if lc == nil {
-		lc = &linkCheck{}
+		lc = &linkCheck{sinceMs: time.Now().UnixMilli()}
 		s.checks[k] = lc
 	}
 	lc.refs++

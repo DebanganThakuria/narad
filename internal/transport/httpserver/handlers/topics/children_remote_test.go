@@ -560,3 +560,30 @@ func TestRemoteDetachAndDeleteAuditLinesCarryTheRequestID(t *testing.T) {
 		t.Fatalf("delete audit = %v, want topic.delete with request_id %q", lines, req.RequestID)
 	}
 }
+
+// A partition whose owner has never had a successful target check is
+// the stalest of all: once its owner has checked for longer than the
+// window, the link is unverified and has no target_verified_at, however
+// fresh the other owners' checks are.
+func TestRemoteStatusFlagsAPartitionNeverVerified(t *testing.T) {
+	parent := topic.Topic{Name: "orders", Partitions: 2}
+	stub := topic.Topic{Name: "s", Remote: &topic.RemoteLink{Name: "b", Topic: "orders"}, AttachOffsets: []int64{0, 0}}
+	now := time.Now()
+	fresh := now.Add(-time.Minute).UnixMilli()
+	stat := func(p int, verified, since int64) topic.FanoutCursorStat {
+		return topic.FanoutCursorStat{Child: "s", Partition: p, State: topic.RemoteStateRunning, TargetVerifiedAtMs: verified, TargetCheckSinceMs: since}
+	}
+	st := remoteStatus(parent, stub, []topic.FanoutCursorStat{stat(0, fresh, fresh), stat(1, 0, now.Add(-11*time.Minute).UnixMilli())}, true, true, false, now)
+	if !st.Unverified || st.TargetVerifiedAt != nil {
+		t.Fatalf("one partition never verified in 11 minutes: unverified %v, target_verified_at %v; want unverified and none", st.Unverified, st.TargetVerifiedAt)
+	}
+	// Its first check is still young: not yet flagged.
+	st = remoteStatus(parent, stub, []topic.FanoutCursorStat{stat(0, fresh, fresh), stat(1, 0, now.Add(-time.Minute).UnixMilli())}, true, true, false, now)
+	if st.Unverified || st.TargetVerifiedAt != nil {
+		t.Fatalf("one partition checking for a minute: unverified %v, target_verified_at %v; want neither", st.Unverified, st.TargetVerifiedAt)
+	}
+	st = remoteStatus(parent, stub, []topic.FanoutCursorStat{stat(0, fresh, fresh), stat(1, fresh, fresh)}, true, true, false, now)
+	if st.Unverified || st.TargetVerifiedAt == nil {
+		t.Fatalf("every partition verified: unverified %v, target_verified_at %v", st.Unverified, st.TargetVerifiedAt)
+	}
+}

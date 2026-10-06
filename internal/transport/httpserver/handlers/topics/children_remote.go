@@ -501,8 +501,9 @@ type remoteChildStatus struct {
 	SourceDrained bool               `json:"source_drained"`
 	BlockedAt     *topic.RemoteBlock `json:"blocked_at"`
 	// TargetVerifiedAt is the oldest of the cursors' last successful
-	// target checks; Unverified flags a running link with none in the
-	// last 10 minutes.
+	// target checks, absent while any cursor has none; Unverified flags
+	// a running link with a cursor whose last successful check, or whose
+	// owner's first check when none succeeded, is over 10 minutes old.
 	TargetVerifiedAt *string `json:"target_verified_at"`
 	Unverified       bool    `json:"unverified,omitempty"`
 	LastSuccessAt    *string `json:"last_success_at,omitempty"`
@@ -555,6 +556,7 @@ func remoteStatus(parent, stub topic.Topic, stats []topic.FanoutCursorStat, comp
 		state = topic.RemoteStateUnknown
 	}
 	var verified, lastSuccess int64
+	neverVerified, stale := false, false
 	for p := range parent.Partitions {
 		s, ok := byPart[p]
 		row := remotePartitionRow{Partition: p, StartOffset: remoteStart(stub, p), State: topic.RemoteStateUnknown}
@@ -571,8 +573,17 @@ func remoteStatus(parent, stub topic.Topic, stats []topic.FanoutCursorStat, comp
 				b := *s.BlockedAt
 				st.BlockedAt = &b
 			}
-			if s.TargetVerifiedAtMs > 0 && (verified == 0 || s.TargetVerifiedAtMs < verified) {
+			// A cursor never verified is the stalest of all: it counts
+			// from when its owner began checking, so a node whose checks
+			// keep failing is not hidden behind another node's success.
+			switch {
+			case s.TargetVerifiedAtMs <= 0:
+				neverVerified = true
+			case verified == 0 || s.TargetVerifiedAtMs < verified:
 				verified = s.TargetVerifiedAtMs
+			}
+			if ref := max(s.TargetVerifiedAtMs, s.TargetCheckSinceMs); ref <= 0 || now.Sub(time.UnixMilli(ref)) > unverifiedAfter {
+				stale = true
 			}
 			lastSuccess = max(lastSuccess, s.LastSuccessMs)
 		}
@@ -595,8 +606,10 @@ func remoteStatus(parent, stub topic.Topic, stats []topic.FanoutCursorStat, comp
 		h := float64(parent.RetentionMs)/1000 - st.LagSeconds
 		st.RetentionHeadroomSeconds = &h
 	}
-	st.TargetVerifiedAt = rfc3339Ms(verified)
+	if !neverVerified {
+		st.TargetVerifiedAt = rfc3339Ms(verified)
+	}
 	st.LastSuccessAt = rfc3339Ms(lastSuccess)
-	st.Unverified = state == topic.RemoteStateRunning && (verified == 0 || now.Sub(time.UnixMilli(verified)) > unverifiedAfter)
+	st.Unverified = state == topic.RemoteStateRunning && (stale || (verified == 0 && !neverVerified))
 	return st
 }

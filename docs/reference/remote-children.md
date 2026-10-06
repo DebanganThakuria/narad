@@ -72,7 +72,7 @@ The stub's `remote` object holds `name`, `topic`, `target_id` (the target topic'
 | Records per request | 1,000 to a target on this release, 100 to an older one |
 | Request body | 960 KiB, halved after a timeout down to 64 KiB, doubled back after 20 accepted requests; a single larger record goes alone |
 | Records held in memory across a failure, per node | `remotes.max_held_bytes`, 256 MiB by default; past it a cursor reads its records again later |
-| A link with no successful target check for | 10 minutes is flagged `unverified` |
+| A link with a node that has had no successful target check for | 10 minutes is flagged `unverified` |
 | A stalled cursor retries | every 30 seconds, and at once when the remote changes |
 | Unshipped checks per parent | 1 every 10 seconds |
 | Remote child writes (attach, pause, resume, skip) per node | 60 a minute |

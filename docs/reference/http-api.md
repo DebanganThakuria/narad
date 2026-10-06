@@ -855,8 +855,8 @@ target. The states are listed in
 | `children[].retention_headroom_seconds` (unreleased)<br>number | A remote child only. The parent's retention minus `lag_seconds`, the time left before drop-behind. Absent when the parent keeps messages forever. |
 | `children[].source_drained` (unreleased)<br>boolean | A remote child only. `true` once the parent's consumers have acked past the link's start offset on every partition. |
 | `children[].blocked_at` (unreleased)<br>object | A remote child only. The one record a cursor is stuck on, as `partition`, `offset` and `state` (`rejected_record` or `record_too_large`); `null` when none is. |
-| `children[].target_verified_at` (unreleased)<br>string | A remote child only. The oldest of the cursors' last successful target checks, RFC 3339; `null` before the first. |
-| `children[].unverified` (unreleased)<br>boolean | A remote child only. `true` for a running link with no successful target check in the last 10 minutes. |
+| `children[].target_verified_at` (unreleased)<br>string | A remote child only. The oldest of the cursors' last successful target checks, RFC 3339; `null` while any cursor has had none (a node whose checks keep failing is not hidden behind another node's success). |
+| `children[].unverified` (unreleased)<br>boolean | A remote child only. `true` for a running link with a cursor whose node has had no successful target check in the last 10 minutes (counted from when the node began checking, for a cursor that never had one). |
 | `children[].last_success_at` (unreleased)<br>string | A remote child only. When the remote last accepted a chunk, RFC 3339. |
 | `children[].partitions` (unreleased)<br>array of object | A remote child only, with `partitions=true`. One row per parent partition. |
 | `children[].partitions[].partition`<br>integer | Parent partition. |
