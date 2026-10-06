@@ -152,12 +152,13 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 			// a dropped/skipped range; persist so a restart doesn't
 			// re-count the same loss.
 			if newNext != next {
+				from := next
 				next = newNext
 				if !r.persistCursor(key, partitionDir, next) {
 					return
 				}
 				if dropped > 0 {
-					r.recordDropped(key, dropped)
+					r.recordDropped(ctx, key, dropped, from, next)
 				}
 			}
 			r.recordLag(key, hwm-next)
@@ -191,12 +192,13 @@ func (r *FanoutRunner) runCursor(ctx context.Context, key fanoutCursorKey) {
 			continue
 		}
 
+		from := next
 		next = newNext
 		if !r.persistCursor(key, partitionDir, next) {
 			return
 		}
 		if dropped > 0 {
-			r.recordDropped(key, dropped)
+			r.recordDropped(ctx, key, dropped, from, next)
 		}
 		if r.metrics != nil {
 			r.metrics.FanoutCommittedTotal.WithLabelValues(key.parent, key.child).Add(float64(len(batch)))
@@ -702,9 +704,23 @@ func (r *FanoutRunner) cursorReadError(key fanoutCursorKey, err error) {
 		"parent", key.parent, "partition", key.partition, "child", key.child, "err", err)
 }
 
-func (r *FanoutRunner) recordDropped(key fanoutCursorKey, dropped int64) {
-	r.logger.Warn("fanout: child lost records (drop-behind or unreadable)",
-		"parent", key.parent, "partition", key.partition, "child", key.child, "dropped", dropped)
+// recordDropped counts and logs records a cursor passed without
+// delivering them (aged out of the parent, or unreadable), between the
+// offsets from and to. A remote child's are lost for the other cluster,
+// which has no other copy: that is logged at error level with the remote.
+func (r *FanoutRunner) recordDropped(ctx context.Context, key fanoutCursorKey, dropped, from, to int64) {
+	attrs := []any{"parent", key.parent, "partition", key.partition, "child", key.child,
+		"dropped", dropped, "from_offset", from, "to_offset", to}
+	if key.remote {
+		if r.store != nil {
+			if stub, err := r.store.GetTopic(ctx, key.child); err == nil && stub.Remote != nil {
+				attrs = append(attrs, "remote", stub.Remote.Name)
+			}
+		}
+		r.logger.Error("fanout: remote child lost records the remote never received (drop-behind: they aged out of the parent before the link sent them)", attrs...)
+	} else {
+		r.logger.Warn("fanout: child lost records (drop-behind or unreadable)", attrs...)
+	}
 	if r.metrics != nil {
 		r.metrics.FanoutChildDroppedMessages.WithLabelValues(key.parent, key.child).Add(float64(dropped))
 	}
